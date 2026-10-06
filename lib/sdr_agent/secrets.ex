@@ -1,4 +1,9 @@
 defmodule SdrAgent.Secrets do
+  @moduledoc """
+  AshAuthentication secret resolver: supplies the token signing secret from
+  application config (`:token_signing_secret`, set from the environment in
+  `config/runtime.exs` for production).
+  """
   use AshAuthentication.Secret
 
   def secret_for(

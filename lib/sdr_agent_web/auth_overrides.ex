@@ -1,4 +1,8 @@
 defmodule SdrAgentWeb.AuthOverrides do
+  @moduledoc """
+  AshAuthentication Phoenix UI overrides for the sign-in pages. No overrides
+  are configured yet.
+  """
   use AshAuthentication.Phoenix.Overrides
 
   # configure your UI overrides here
