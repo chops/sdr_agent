@@ -57,7 +57,7 @@ defmodule SdrAgent.MixProject do
        git: "https://github.com/agentjido/jido_action.git",
        ref: "af16008f79e8b76d3f3995935b1366bb2a0d7031",
        override: true},
-      {:jido_signal, "~> 3.0.0-beta.4", override: true},
+      {:jido_signal, "== 3.0.0-beta.4", override: true},
       {:jido_ai,
        git: "https://github.com/agentjido/jido_ai.git",
        ref: "b6fbd846f58f7629a0a68b2209f67848e242bdfe"},

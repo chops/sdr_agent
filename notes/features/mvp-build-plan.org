@@ -70,7 +70,10 @@ network), regression coverage, ADRs current, peer verdict recorded on the PR.
   and Zoi 0.18.10 recorded in ADR-0003. The implementation proves one real
   =Jido.AI.Agent=, one real =Jido.Action= tool call, a deterministic
   =Jido.AI.Test.MockLLM=, and a Zoi-validated structured result committed to
-  AgentServer state. The initial RED test failed its intended assertion with
+  AgentServer state; an invalid structured result is rejected with zero
+  repairs. These =SdrAgent.JidoSpike*= modules are temporary: S6 replaces the
+  MockLLM spike with its =ModelProvider= Fake and removes them. The initial RED
+  test failed its intended assertion with
   no runtime errors; =tdd_verify.sh= then misreported "No tests found" because
   it does not parse Elixir 1.20's =Result: 0/1 passed= summary.
 - Codex app-server is documented as experimental: acceptable for a local demo.
