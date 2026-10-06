@@ -51,7 +51,7 @@ defmodule SdrAgent.MixProject do
       {:credo, "== 1.7.19", only: [:dev, :test], runtime: false},
       {:ash_phoenix, "== 2.3.25"},
       {:ash_postgres, "== 2.13.0"},
-      {:ash, "== 3.32.3"},
+      {:ash, "== 3.34.3"},
       {:usage_rules, "== 1.2.7", only: [:dev]},
       {:igniter, "== 0.8.3", only: [:dev, :test]},
       {:phoenix, "== 1.8.13"},
