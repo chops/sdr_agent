@@ -7,6 +7,8 @@ defmodule SdrAgent.Application do
 
   @impl true
   def start(_type, _args) do
+    SdrAgent.Telemetry.setup()
+
     children = [
       SdrAgentWeb.Telemetry,
       SdrAgent.Repo,

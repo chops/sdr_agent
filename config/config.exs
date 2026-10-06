@@ -21,6 +21,7 @@ config :sdr_agent, Oban,
 # guide for an explanation of each setting:
 # https://hexdocs.pm/ash/backwards-compatibility-config.html
 config :ash,
+  tracer: [OpentelemetryAsh],
   allow_forbidden_field_for_relationships_by_default: true,
   include_embedded_source_by_default?: false,
   show_keysets_for_all_actions?: false,
@@ -119,7 +120,11 @@ config :tailwind,
 # Configure Elixir's Logger
 config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
-  metadata: [:request_id]
+  metadata: [:request_id, :otel_trace_id, :otel_span_id]
+
+config :sdr_agent, otel_capture_content: false
+
+config :opentelemetry, resource: %{service: %{name: "sdr_agent"}}
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
