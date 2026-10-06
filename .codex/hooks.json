@@ -1,0 +1,1 @@
+{"hooks":{"PreToolUse":[{"hooks":[{"command":"/usr/bin/env bash \"$(git rev-parse --show-toplevel)/.codex/hooks/bash-safety.sh\"","statusMessage":"Checking shell command policy","timeout":5,"type":"command"}],"matcher":"Bash"}]}}

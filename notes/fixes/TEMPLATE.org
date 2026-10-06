@@ -1,0 +1,77 @@
+#+TITLE: Fix: [Issue Description]
+#+DATE: YYYY-MM-DD
+
+* Summary
+One sentence describing the bug and fix.
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: yes | no
+Reason: <one line>
+#+END_EXAMPLE
+
+Use the same trigger, table, and peer-review contract as the feature-plan
+template when the fix changes a persisted concept, invariant, relationship,
+ownership boundary, lifecycle transition, or backend action contract.
+
+* Root Cause
+What caused the issue.
+
+* Reproduction
+Steps or a test that reproduces the bug.
+
+* Affected Apps
+- [ ] Core (=my_app=)
+- [ ] Web (=my_app_web=)
+- [ ] Other: ___
+
+* Affected Modules
+- =path/to/file.ex:line= - Brief description of changes
+
+* Fix Steps
+1. Step with specific file and line references
+2. Step with specific file and line references
+3. ...
+
+* Required Tests
+- [ ] Regression test (reproduces bug, passes after fix)
+- [ ] Related edge cases
+
+* Risks & Considerations
+- Risk or edge case to consider
+
+-----
+
+* TDD Tracking
+(Filled during Phase 4a)
+
+| Test            | Location             | Status  | Failure Reason |
+|-----------------+----------------------+---------+----------------|
+| Regression test | test/foo_test.exs:15 | FAILING | Bug reproduced |
+
+*TDD Gate Verification:* [ ] VERIFIED / [ ] NEEDS_REVIEW / [ ] BLOCKED
+
+-----
+
+* Implementation Notes
+(Added during Phase 4b)
+
+* Completion Checklist
+
+** Phase 4
+- [ ] Regression test verified failing (reproduces bug)
+- [ ] TDD gate confirmed
+- [ ] Fix implemented
+- [ ] All tests passing
+- [ ] Compiled with --warnings-as-errors
+- [ ] Domain boundaries respected
+
+** Phase 5 (Verify + Finalize)
+- [ ] Full test suite passes
+- [ ] Moduledocs reviewed for new/modified public modules
+- [ ] Plan document updated with implementation notes
+- [ ] Architecture evaluation reported: _unchanged_ / _diagrams updated_
+
+* Prevention
+How to prevent similar issues in the future.

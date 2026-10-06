@@ -1,0 +1,92 @@
+#+TITLE: Feature: [Name]
+#+DATE: YYYY-MM-DD
+
+* Summary
+One sentence describing what will be implemented.
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: yes | no
+Reason: <one line>
+#+END_EXAMPLE
+
+Required whenever the change introduces/changes a persisted domain concept,
+an Ash resource, a meaningful attribute/invariant, a relationship/cardinality,
+an ownership/authorization boundary, a state transition, or a backend
+action/event contract — see the "Entity Model" section in =AGENTS.md=
+and the =entity-discovery= skill for the full trigger
+list, table column spec, and existing-side delta rule.
+
+If =trigger: yes=, the table goes here:
+
+| Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
+|--------+--------------+---------+-------------+----------------+-------------------------+----------------+-------------------|
+|        |              |         |             |                |                         |                |                   |
+
+Then the soft-stop verdict (only when triggered — see the =entity-discovery=
+skill for the =ap=-only review procedure):
+
+- *Soft-stop verdict:* PASS / NEEDS-REVIEW / BLOCKED / UNREVIEWED
+- *Notes:* [concerns raised and how each was addressed, if not a clean PASS]
+
+If =trigger: no=, the reason line above is sufficient — nothing else needed
+in this section.
+
+* Affected Apps
+- [ ] Core (=my_app=)
+- [ ] Web (=my_app_web=)
+- [ ] Other: ___
+
+* Affected Modules
+- =path/to/file.ex:line= - Brief description of changes
+
+* Implementation Steps
+1. Step with specific file and line references
+2. Step with specific file and line references
+3. ...
+
+* Required Tests
+- [ ] Success scenario
+- [ ] Failure scenario
+- [ ] Authorization allow case
+- [ ] Authorization deny case
+
+* Risks & Considerations
+- Risk or edge case to consider
+
+* Questions (if any)
+- Clarification needed before proceeding
+
+-----
+
+* TDD Tracking
+(Filled during Phase 4a)
+
+| Test         | Location                   | Status  | Failure Reason         |
+|---------------+------------------------------+----------+---------------------------|
+| Example test | test/foo_test.exs:15       | FAILING | Function undefined     |
+
+*TDD Gate Verification:* [ ] VERIFIED / [ ] NEEDS_REVIEW / [ ] BLOCKED
+
+-----
+
+* Implementation Notes
+(Added during Phase 4b)
+
+* Completion Checklist
+
+** Phase 4
+- [ ] All Phase 4a tests verified failing
+- [ ] TDD gate confirmed
+- [ ] All steps implemented
+- [ ] All tests passing
+- [ ] Compiled with --warnings-as-errors
+- [ ] Ash boundaries respected
+
+** Phase 5 (Verify + Finalize)
+- [ ] Full test suite passes
+- [ ] Moduledocs reviewed for new/modified public modules
+- [ ] Plan document updated with implementation notes
+- [ ] Architecture evaluation reported: _unchanged_ / _diagrams updated_
+- [ ] ADR status updated to "Accepted" (if applicable)

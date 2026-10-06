@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@0.0.80"]
+    },
+    "tidewave": {
+      "type": "http",
+      "url": "http://localhost:4120/tidewave/mcp"
+    }
+    
+  }
+}
