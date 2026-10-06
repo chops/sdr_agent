@@ -1,0 +1,8 @@
+# gitleaks findings reviewed and accepted (S0, 2026-10-06).
+# Phoenix/AshAuthentication generator values for LOCAL dev and test only;
+# production secrets come from config/runtime.exs environment variables.
+# Listed by exact fingerprint so any new finding in these files still fails.
+eccbe8fa9b35156206b0387fcc5449c10ad034f4:config/test.exs:generic-api-key:3
+eccbe8fa9b35156206b0387fcc5449c10ad034f4:config/test.exs:generic-api-key:24
+eccbe8fa9b35156206b0387fcc5449c10ad034f4:config/dev.exs:generic-api-key:27
+eccbe8fa9b35156206b0387fcc5449c10ad034f4:config/dev.exs:generic-api-key:57

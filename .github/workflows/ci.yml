@@ -1,0 +1,80 @@
+# CI gate for sdr_agent (ADR-0007). Third-party actions are pinned by full
+# commit SHA; the trailing comment names the release the SHA was taken from.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          extra_nix_config: |
+            extra-substituters = https://devenv.cachix.org
+            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
+
+      - name: Cache Mix and Hex state
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .devenv/state/deps
+            .devenv/state/build
+            .devenv/state/mix
+            .devenv/state/hex
+          key: mix-${{ runner.os }}-${{ hashFiles('mix.lock', 'flake.lock', 'devenv.nix') }}
+          restore-keys: |
+            mix-${{ runner.os }}-
+
+      - name: Build dev shell and fetch dependencies (online)
+        run: |
+          nix develop --impure -c bash -euo pipefail -c '
+            mix deps.get
+            mix deps.compile
+            MIX_ENV=test mix deps.compile
+          '
+
+      - name: Dependency audit (advisory)
+        continue-on-error: true
+        run: nix develop --impure -c mix hex.audit
+
+      - name: Verify with outbound network blocked
+        # A fresh network namespace has only loopback; the gate runs inside it
+        # as the runner user. The runner agent itself stays outside, online.
+        run: |
+          uid="$(id -u)"
+          gid="$(id -g)"
+          sudo env "PATH=$PATH" "HOME=$HOME" "USER=$USER" "RUNNER_TEMP=$RUNNER_TEMP" \
+            unshare --net -- bash -euo pipefail -c '
+              ip link set lo up
+              exec setpriv --reuid="$1" --regid="$2" --init-groups -- \
+                bash .github/scripts/hermetic-verify.sh
+            ' hermetic "$uid" "$gid"
