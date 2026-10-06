@@ -33,7 +33,7 @@ recorded peer verdict. "Deps" are slices that must be merged first.
 
 | Slice | Content                                                                                     | Writer | Deps        |
 |-------+---------------------------------------------------------------------------------------------+--------+-------------|
-| S0    | Charter + ADRs 0002–0006, CI, branch protection, sops skeleton + anchor key, notify-telegram | Claude | —           |
+| S0    | Charter + ADRs 0002–0007, CI, branch protection, sops skeleton + anchor key, notify-telegram | Claude | —           |
 | S1    | Jido v3 spike: pinned deps resolve/compile; agent + action + structured output on fake model | Codex  | —           |
 | S2    | Entity-model delta (all domains incl. audit ledger) + soft-stop review                      | Claude | S0          |
 | S3    | Audit kernel: IDs/context/version snapshot, AuditEvent ledger (sequence, hash chain,        | Claude | S2          |
@@ -65,6 +65,14 @@ network), regression coverage, ADRs current, peer verdict recorded on the PR.
 - Codex app-server is documented as experimental: acceptable for a local demo.
 - Scope is large; slices stay small enough to review in one pass.
 - Hooks fail open; permission prompts are bypassed (ADR-0001).
+- Factory pins of ash 3.32.3, ash_authentication 4.14.2, ash_authentication_phoenix
+  2.17.3, igniter 0.8.3 and usage_rules 1.2.7 have published advisories (several
+  CRITICAL/HIGH in ash_authentication; found in S0 via =mix deps.get=). Bumping pins
+  needs a reviewed ADR + compatibility check (ADR-0001); must land before S5 builds
+  password auth on ash_authentication. CI reports them as an advisory step (ADR-0007).
+- =bin/verify= and =.workflow/project-facts.md= are hash-pinned by the factory receipt
+  (=project-facts.md= despite its =seed_once= "project-owned" lifecycle), so S0 wires
+  script tests through ExUnit (=test/scripts/=) and leaves both files unchanged.
 
 * Questions (if any)
 None open; owner decisions recorded in ADR-0001.
