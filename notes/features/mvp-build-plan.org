@@ -35,7 +35,7 @@ recorded peer verdict. "Deps" are slices that must be merged first.
 |-------+---------------------------------------------------------------------------------------------+--------+-------------|
 | S0    | Charter + ADRs 0002–0007, CI, branch protection, sops skeleton + anchor key, notify-telegram | Claude | —           |
 | S0b   | Dependency security: fixed stable pins, blocking =mix hex.audit= (ADR-0008)                  | Claude | S0          |
-| S1    | Jido v3 spike: pinned deps resolve/compile; agent + action + structured output on fake model | Codex  | —           |
+| S1    | Jido v3 spike: pinned deps resolve/compile; agent + action + structured output on fake model | Codex  | S0b         |
 | S2    | Entity-model delta (all domains incl. audit ledger) + soft-stop review                      | Claude | S0          |
 | S3    | Audit kernel: IDs/context/version snapshot, AuditEvent ledger (sequence, hash chain,        | Claude | S2          |
 |       | canonical serialization), ModelInvocation/ModelPayload/ToolInvocation/Decision              |        |             |
@@ -62,7 +62,17 @@ recorded peer verdict. "Deps" are slices that must be merged first.
 network), regression coverage, ADRs current, peer verdict recorded on the PR.
 
 * Risks & Considerations
-- Jido v3 beta / unpublished jido_ai: S1 decides; fallback per ADR-0003.
+- S1 Jido v3 result (2026-10-06): entity-model trigger =no= (compatibility
+  spike only; no persisted concepts or lifecycle rules). Hex Jido beta.1 plus
+  Jido Action beta.12 was incompatible with pinned Jido AI; Zoi 0.18.11 also
+  removed =Zoi.Types.Default=. Peer consultation
+  =m_1791327080724639250_3bee5fdc= approved the exact =release/v3= Git pins
+  and Zoi 0.18.10 recorded in ADR-0003. The implementation proves one real
+  =Jido.AI.Agent=, one real =Jido.Action= tool call, a deterministic
+  =Jido.AI.Test.MockLLM=, and a Zoi-validated structured result committed to
+  AgentServer state. The initial RED test failed its intended assertion with
+  no runtime errors; =tdd_verify.sh= then misreported "No tests found" because
+  it does not parse Elixir 1.20's =Result: 0/1 passed= summary.
 - Codex app-server is documented as experimental: acceptable for a local demo.
 - Scope is large; slices stay small enough to review in one pass.
 - Hooks fail open; permission prompts are bypassed (ADR-0001).
