@@ -62,8 +62,9 @@ jobs:
             MIX_ENV=test mix deps.compile
           '
 
-      - name: Dependency audit (advisory)
-        continue-on-error: true
+      - name: Dependency audit (blocking, ADR-0008)
+        # Fails on any advisory or retirement not accepted in mix.exs
+        # `hex: [ignore_advisories: ...]`; CRITICAL/HIGH are never accepted.
         run: nix develop --impure -c mix hex.audit
 
       - name: Verify with outbound network blocked
