@@ -1,4 +1,12 @@
 defmodule SdrAgent.Accounts.User do
+  @moduledoc """
+  An operator who signs in to the SDR console.
+
+  Currently an id-only AshAuthentication subject with stored, required tokens
+  and log-out-everywhere. Exposes the default `:read` and `:get_by_subject`
+  (JWT subject lookup); only AshAuthentication interactions are authorized.
+  Password strategy and roles are added in slice S5.
+  """
   use Ash.Resource,
     otp_app: :sdr_agent,
     domain: SdrAgent.Accounts,

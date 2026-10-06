@@ -48,6 +48,7 @@ defmodule SdrAgent.MixProject do
       {:ash_authentication_phoenix, "== 2.17.3"},
       {:ash_authentication, "== 4.14.2"},
       {:sourceror, "~> 1.8", only: [:dev, :test]},
+      {:credo, "== 1.7.19", only: [:dev, :test], runtime: false},
       {:ash_phoenix, "== 2.3.25"},
       {:ash_postgres, "== 2.13.0"},
       {:ash, "== 3.32.3"},

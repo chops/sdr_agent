@@ -1,4 +1,9 @@
 defmodule SdrAgent.Accounts.Token do
+  @moduledoc """
+  AshAuthentication token store (`tokens` table) for `SdrAgent.Accounts.User`:
+  issued and revoked JWTs, used to require token presence and to revoke
+  sessions. Accessed only through AshAuthentication actions.
+  """
   use Ash.Resource,
     otp_app: :sdr_agent,
     domain: SdrAgent.Accounts,
