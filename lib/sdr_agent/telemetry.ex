@@ -3,6 +3,14 @@ defmodule SdrAgent.Telemetry do
 
   @setup_key {__MODULE__, :setup}
 
+  def test_children do
+    if Application.get_env(:sdr_agent, :otel_test_exporter) do
+      [SdrAgent.Telemetry.SpanStore]
+    else
+      []
+    end
+  end
+
   def setup do
     unless :persistent_term.get(@setup_key, false) do
       OpentelemetryBandit.setup()

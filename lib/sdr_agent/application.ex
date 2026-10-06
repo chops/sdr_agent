@@ -9,18 +9,20 @@ defmodule SdrAgent.Application do
   def start(_type, _args) do
     SdrAgent.Telemetry.setup()
 
-    children = [
-      SdrAgentWeb.Telemetry,
-      SdrAgent.Repo,
-      {DNSCluster, query: Application.get_env(:sdr_agent, :dns_cluster_query) || :ignore},
-      {Oban, Application.fetch_env!(:sdr_agent, Oban)},
-      {Phoenix.PubSub, name: SdrAgent.PubSub},
-      # Start a worker by calling: SdrAgent.Worker.start_link(arg)
-      # {SdrAgent.Worker, arg},
-      # Start to serve requests, typically the last entry
-      SdrAgentWeb.Endpoint,
-      {AshAuthentication.Supervisor, [otp_app: :sdr_agent]}
-    ]
+    children =
+      SdrAgent.Telemetry.test_children() ++
+        [
+          SdrAgentWeb.Telemetry,
+          SdrAgent.Repo,
+          {DNSCluster, query: Application.get_env(:sdr_agent, :dns_cluster_query) || :ignore},
+          {Oban, Application.fetch_env!(:sdr_agent, Oban)},
+          {Phoenix.PubSub, name: SdrAgent.PubSub},
+          # Start a worker by calling: SdrAgent.Worker.start_link(arg)
+          # {SdrAgent.Worker, arg},
+          # Start to serve requests, typically the last entry
+          SdrAgentWeb.Endpoint,
+          {AshAuthentication.Supervisor, [otp_app: :sdr_agent]}
+        ]
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
