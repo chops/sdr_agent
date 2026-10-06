@@ -1,0 +1,54 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e8f5e9', 'primaryBorderColor': '#1b5e20'}}}%%
+flowchart LR
+    subgraph External["External"]
+        Browser[Browser/Client]
+        API[External APIs]
+        Tempo[Tempo OTLP HTTP<br/>dev only 127.0.0.1:4318]
+    end
+
+    subgraph Web["Phoenix Web Layer"]
+        Router[Router]
+        Controllers[Controllers]
+        LiveViews[LiveViews]
+        Channels[Channels]
+    end
+
+    subgraph Domain["Domain Layer"]
+        Domains[Ash Domains]
+        Resources[Resources]
+        Actions[Actions]
+        Policies[Policies]
+    end
+
+    subgraph Data["Data Layer"]
+        Postgres[(PostgreSQL)]
+        Cache[(Cache)]
+    end
+
+    subgraph Observability["OpenTelemetry"]
+        Instrumentation[Phoenix / Bandit / Ecto<br/>Oban / Req / Ash]
+        GenAI[gen_ai spans<br/>IDs and hashes by default]
+    end
+
+    Browser --> Router
+    API --> Router
+    Router --> Controllers
+    Router --> LiveViews
+    Router --> Channels
+    Controllers --> Domains
+    LiveViews --> Domains
+    Channels --> Domains
+    Domains --> Resources
+    Resources --> Actions
+    Actions --> Policies
+    Resources --> Postgres
+    Resources -.-> Cache
+    Router -. spans .-> Instrumentation
+    Resources -. spans .-> Instrumentation
+    Actions -. spans .-> GenAI
+    Instrumentation -. OTLP dev only .-> Tempo
+    GenAI -. OTLP dev only .-> Tempo
+
+    %% Project shape: single
+    %% Detected data layers:
+    %% - AshPostgres (PostgreSQL)

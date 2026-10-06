@@ -1,4 +1,11 @@
 import Config
+config :sdr_agent, otel_capture_content: false
+
+config :opentelemetry, :processors,
+  otel_simple_processor: %{exporter: {SdrAgent.Telemetry.InMemoryExporter, []}}
+
+config :sdr_agent, :otel_test_exporter, SdrAgent.Telemetry.InMemoryExporter
+
 config :sdr_agent, Oban, testing: :manual
 config :sdr_agent, token_signing_secret: "x0lKSRtwFS5BaFNguZ0LCt7JYjNRZ4pi"
 config :bcrypt_elixir, log_rounds: 1

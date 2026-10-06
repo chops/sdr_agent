@@ -1,4 +1,14 @@
 import Config
+config :sdr_agent, otel_capture_content: true
+
+config :opentelemetry,
+  span_processor: :batch,
+  traces_exporter: :otlp
+
+config :opentelemetry_exporter,
+  otlp_protocol: :http_protobuf,
+  otlp_endpoint: "http://127.0.0.1:4318"
+
 config :ash, policies: [show_policy_breakdowns?: true]
 
 # Configure your database
@@ -57,7 +67,9 @@ config :sdr_agent, SdrAgentWeb.Endpoint,
 config :sdr_agent, dev_routes: true, token_signing_secret: "uDD9z5OSWFb8GQZiocjaJW9Wpl89ZQ3x"
 
 # Do not include metadata nor timestamps in development logs
-config :logger, :default_formatter, format: "[$level] $message\n"
+config :logger, :default_formatter,
+  format: "[$level] $metadata$message\n",
+  metadata: [:request_id, :otel_trace_id, :otel_span_id]
 
 # Set a higher stacktrace during development. Avoid configuring such
 # in production as building large stacktraces may be expensive.

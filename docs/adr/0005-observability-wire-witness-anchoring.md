@@ -70,6 +70,31 @@ We will use Option 3.
 - OTel is **diagnostic corroboration, not the system of record**. Tests run
   with exporting disabled; exporter loss never affects the ledger.
 
+#### S4 implementation amendment (2026-10-06)
+
+S4 pins `opentelemetry` 1.7.0, `opentelemetry_api` 1.5.0,
+`opentelemetry_exporter` 1.11.0, `opentelemetry_phoenix` 2.0.1,
+`opentelemetry_bandit` 0.3.0, `opentelemetry_ecto` 1.2.0,
+`opentelemetry_oban` 1.2.0, `opentelemetry_req` 1.0.0, and
+`opentelemetry_ash` 0.1.4. Hex package metadata and `mix.lock` checksums are
+the provenance record. The OpenTelemetry packages are Apache-2.0; the Ash
+adapter is MIT.
+
+Only development loads the OTLP exporter and sends OTLP/HTTP to
+`http://127.0.0.1:4318`. Production exports nothing until a later deployment
+decision configures a collector. Tests use a local in-memory exporter and
+never contact a collector, keeping CI hermetic. Phoenix and Bandit are both
+attached deliberately: Phoenix traces framework routing while Bandit traces
+the HTTP server boundary. Req tracing is opt-in through
+`SdrAgent.Telemetry.instrument_req/1`, preventing instrumentation from being
+silently skipped when clients are constructed later.
+
+`SdrAgent.Telemetry.GenAI` emits `gen_ai.*` spans with invocation identifiers
+and SHA-256 content hashes. Prompt and completion bodies are span events only
+when `:sdr_agent, :otel_capture_content` is explicitly true; that switch is
+true only in development and false by default and in tests. S4 adds no audit
+resources or trace columns; S3 owns persisted correlation fields.
+
 ### Wire witness (S12)
 
 - Route Codex app-server's upstream traffic through `llm-otel-proxy`; the
