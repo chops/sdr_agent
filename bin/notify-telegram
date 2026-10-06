@@ -1,0 +1,205 @@
+#!/usr/bin/env elixir
+# Outbound-only Telegram notification for the unattended build (ADR-0006).
+#
+#   bin/notify-telegram KIND MESSAGE     KIND = milestone | checkpoint | stop | info
+#
+# - Calls exactly one Bot API method, sendMessage. Nothing else is reachable.
+# - Token: decrypted into memory with sops from the nix-darwin secrets file.
+# - Chat id: read from SDR_TELEGRAM_RECIPIENT_FILE (default below), never printed.
+# - Prints only `http=<code> ok=<bool>`; logs utc/kind/http/ok/sha256(text) to
+#   .workflow/local/notifications.jsonl (gitignored), never the text itself.
+# - SDR_TELEGRAM_API_BASE may point only at http://127.0.0.1 or localhost (tests).
+#
+# Uses only OTP (:httpc, :ssl) and Elixir's built-in JSON so it runs without Mix.
+
+defmodule NotifyTelegram do
+  @moduledoc false
+
+  @kinds ~w(milestone checkpoint stop info)
+  @allowed_methods ["sendMessage"]
+  @prefix "[sdr_agent · github.com/chops/sdr_agent]"
+  @max_bytes 1024
+  @default_api_base "https://api.telegram.org"
+  @local_hosts ["127.0.0.1", "localhost"]
+  @sops_file "~/src/nix-darwin/secrets/secrets.yaml"
+  @sops_extract ~s(["notifications"]["telegram_bot_token"])
+  @default_recipient_file "~/.local/state/ai-pair/pause-watch-20260911/recipient.json"
+  @redacted "[REDACTED]"
+
+  def main([kind, message]) when kind in @kinds and message != "" do
+    with {:ok, api_base} <- api_base(),
+         {:ok, chat_id} <- recipient(),
+         {:ok, token} <- token(),
+         text = redact("#{@prefix} #{kind} #{message}", token),
+         :ok <- check_size(text) do
+      {http, ok} = call("sendMessage", api_base, token, %{"chat_id" => chat_id, "text" => text})
+      log(kind, http, ok, text)
+      IO.puts("http=#{http} ok=#{ok}")
+      System.halt(if(ok, do: 0, else: 1))
+    else
+      {:error, reason} -> fail(reason, 2)
+    end
+  end
+
+  def main(_args) do
+    IO.puts(:stderr, "usage: bin/notify-telegram milestone|checkpoint|stop|info MESSAGE")
+    System.halt(2)
+  end
+
+  # Allowlist: the only method this script can ever call.
+  defp call(method, api_base, token, payload) when method in @allowed_methods do
+    {:ok, _} = Application.ensure_all_started([:inets, :ssl])
+    url = String.to_charlist("#{api_base}/bot#{token}/#{method}")
+    body = JSON.encode!(Map.put(payload, "link_preview_options", %{"is_disabled" => true}))
+
+    http_opts = [timeout: 15_000, connect_timeout: 10_000, autoredirect: false, ssl: ssl_opts()]
+
+    case :httpc.request(:post, {url, [], ~c"application/json", body}, http_opts,
+           body_format: :binary
+         ) do
+      {:ok, {{_version, code, _phrase}, _headers, resp}} ->
+        {code, code == 200 and telegram_ok?(resp)}
+
+      {:error, _reason} ->
+        # The reason is not printed: it is not needed and must never carry the URL.
+        {0, false}
+    end
+  end
+
+  defp call(method, _api_base, _token, _payload) do
+    fail("refused Telegram method #{inspect(method)}; only sendMessage is allowed", 2)
+  end
+
+  defp telegram_ok?(resp) do
+    case JSON.decode(resp) do
+      {:ok, %{"ok" => true}} -> true
+      _ -> false
+    end
+  end
+
+  defp ssl_opts do
+    [
+      verify: :verify_peer,
+      cacerts: :public_key.cacerts_get(),
+      depth: 4,
+      customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
+    ]
+  end
+
+  defp api_base do
+    case System.get_env("SDR_TELEGRAM_API_BASE") do
+      nil ->
+        {:ok, @default_api_base}
+
+      override ->
+        uri = URI.parse(override)
+
+        if uri.scheme == "http" and uri.host in @local_hosts and uri.path in [nil, "", "/"] and
+             is_nil(uri.userinfo) do
+          {:ok, String.trim_trailing(override, "/")}
+        else
+          {:error, "SDR_TELEGRAM_API_BASE must be http://127.0.0.1 or http://localhost"}
+        end
+    end
+  end
+
+  defp recipient do
+    path = Path.expand(System.get_env("SDR_TELEGRAM_RECIPIENT_FILE") || @default_recipient_file)
+
+    with {:ok, raw} <- read_small(path),
+         {:ok, %{"schema_version" => 1, "chat_id" => chat_id, "bot_username" => bot}}
+         when is_integer(chat_id) and chat_id != 0 and is_binary(bot) <- JSON.decode(raw) do
+      {:ok, chat_id}
+    else
+      _ -> {:error, "recipient file missing or invalid (schema_version 1, chat_id, bot_username)"}
+    end
+  end
+
+  defp read_small(path) do
+    case File.stat(path) do
+      {:ok, %{type: :regular, size: size}} when size <= 4096 -> File.read(path)
+      _ -> {:error, :unreadable}
+    end
+  end
+
+  defp token do
+    args = ["-d", "--extract", @sops_extract, Path.expand(@sops_file)]
+
+    case System.find_executable("sops") do
+      nil ->
+        {:error, "sops not found on PATH"}
+
+      sops ->
+        case System.cmd(sops, args, stderr_to_stdout: false) do
+          {out, 0} ->
+            token = String.trim(out)
+
+            if Regex.match?(~r/\A\d{5,}:[A-Za-z0-9_-]{30,}\z/, token),
+              do: {:ok, token},
+              else: {:error, "decrypted token has an unexpected shape"}
+
+          {_out, _status} ->
+            {:error, "token unavailable (sops failed)"}
+        end
+    end
+  end
+
+  defp patterns do
+    [
+      ~r/-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----/s,
+      ~r/AGE-SECRET-KEY-1[0-9A-Z]+/,
+      ~r/\b\d{5,}:[A-Za-z0-9_-]{30,}/,
+      ~r/\bsk-[A-Za-z0-9_-]{16,}/,
+      ~r/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/,
+      ~r/\bAKIA[0-9A-Z]{16}\b/,
+      ~r/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/,
+      ~r/(?i)\bbearer\s+[A-Za-z0-9._~+\/-]+=*/
+    ]
+  end
+
+  # Redacts the live token, well-known secret formats, and any long mixed-case
+  # alphanumeric run (lowercase hex such as git SHAs is kept).
+  def redact(text, token) do
+    text = String.replace(text, token, @redacted)
+    text = Enum.reduce(patterns(), text, &Regex.replace(&1, &2, @redacted))
+
+    Regex.replace(~r/[A-Za-z0-9+\/_=-]{32,}/, text, fn run ->
+      if run =~ ~r/[a-z]/ and run =~ ~r/[A-Z]/ and run =~ ~r/[0-9]/, do: @redacted, else: run
+    end)
+  end
+
+  defp check_size(text) do
+    if byte_size(text) <= @max_bytes,
+      do: :ok,
+      else: {:error, "message rejected: #{byte_size(text)} bytes exceeds #{@max_bytes}"}
+  end
+
+  defp log(kind, http, ok, text) do
+    root = Path.expand("..", __DIR__)
+    path = System.get_env("SDR_NOTIFY_LOG_FILE") || Path.join(root, ".workflow/local/notifications.jsonl")
+
+    line =
+      JSON.encode!(%{
+        "utc" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+        "kind" => kind,
+        "http" => http,
+        "ok" => ok,
+        "text_sha256" => :crypto.hash(:sha256, text) |> Base.encode16(case: :lower),
+        "bytes" => byte_size(text)
+      })
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(path, line <> "\n", [:append]) do
+      :ok
+    else
+      _ -> IO.puts(:stderr, "warning: notification log not written")
+    end
+  end
+
+  defp fail(reason, status) do
+    IO.puts(:stderr, "notify-telegram: #{reason}")
+    System.halt(status)
+  end
+end
+
+NotifyTelegram.main(System.argv())
