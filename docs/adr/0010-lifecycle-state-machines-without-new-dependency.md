@@ -19,7 +19,9 @@ Approval, DeliveryOperation, WebhookEvent, Operation, Failure, AuditExport and
 AuditSigningKey. Several guard safety invariants: a DeliveryOperation must be
 claimed (`pending → attempting`) by exactly one worker, an `unknown` delivery
 may leave that state only through reconciliation, and an Approval may be
-revoked only while its delivery has not been attempted. Every transition must
+revoked only while its delivery is still `pending` (the claim moves the
+Approval from `granted` to `consumed` in the same transaction; afterwards only
+the delivery itself can be cancelled). Every transition must
 append an AuditEvent in the same transaction (ADR-0009).
 
 `ash_state_machine` (ash-project, Hex) offers a transitions DSL, a
