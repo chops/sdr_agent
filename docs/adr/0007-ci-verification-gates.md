@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-06
 supersedes: null
 ---
@@ -8,9 +8,10 @@ supersedes: null
 
 ## Status
 
-Proposed (2026-10-06, Claude, slice S0). Becomes accepted on Codex's recorded
-approving verdict on the S0 pull request (ADR-0001: agent design ADRs are
-accepted on peer approval; the owner can veto).
+Accepted (2026-10-06) on Codex's approving verdict on the S0 pull request:
+https://github.com/chops/sdr_agent/pull/1#issuecomment-6026736670
+(ADR-0001: agent design ADRs are accepted on peer approval; the owner can veto).
+Proposed earlier the same day by Claude in slice S0.
 
 ## Context
 
