@@ -59,31 +59,51 @@ cross-cutting choices must be fixed once rather than per slice.
    audit chain head is keyed by `tenant_id`. Seeds use fixture-declared UUIDs
    through `seed` create actions that accept `id`, authorized only for the
    seeder actor in `:dev`/`:test`.
-2. **Tenant:** one `tenants` row (singleton constraint). Every tenant-owned
-   table has `tenant_id uuid NOT NULL REFERENCES tenants ON DELETE RESTRICT`,
-   immutable after create and set from the actor by a shared change. Ash
-   multitenancy is not enabled in the MVP; tenant_id is **not** an isolation
-   boundary. Enabling attribute multitenancy later requires a new ADR.
-3. **Time:** all timestamps are `utc_datetime_usec` from `SdrAgent.Clock`
+2. **Tenant:** one `tenants` row (singleton constraint), owned by the
+   lowest domain, `SdrAgent.Audit`, because the audit chain is partitioned by
+   it; every FK to it therefore points downward. Every tenant-owned table has
+   `tenant_id uuid NOT NULL REFERENCES tenants ON DELETE RESTRICT`, immutable
+   after create and set from the actor by a shared change. Deployment-level
+   tables (Tenant, ProvenanceSnapshot, AuditSigningKey) have no tenant_id; in
+   the MVP their audit events append to the singleton tenant's chain. Every
+   unique identity is written out with its full column list (tenant-scoped
+   identities start with `tenant_id`); identities over nullable columns are
+   partial indexes. Ash multitenancy is not enabled in the MVP; tenant_id is
+   **not** an isolation boundary. Enabling attribute multitenancy later
+   requires a new ADR.
+3. **Trace correlation:** every row of every new resource and every
+   AuditEvent carries non-null, non-zero `trace_id` and `span_id` (ADR-0005).
+   The audit kernel opens a span when none is active, and the OTel SDK runs
+   in every environment (exporter may be `none`), so no record class is
+   untraced.
+4. **Time:** all timestamps are `utc_datetime_usec` from `SdrAgent.Clock`
    (injectable; tests use a fixed clock). Resources do not call
    `DateTime.utc_now/0`; every AuditEvent records its `clock_source`.
-4. **Append-only:** resources marked APPEND-ONLY in the S2 table expose only
+5. **Append-only:** resources marked APPEND-ONLY in the S2 table expose only
    create and read actions, and their tables carry a trigger that rejects
    `UPDATE`, `DELETE` and `TRUNCATE`. Terminal-immutable resources
    (ModelInvocation, ToolInvocation, AuditExport) have a trigger that permits
    updates only to listed columns while the row is non-terminal. No resource
    has a destroy action in the MVP; deletion with tombstones is deferred to the
-   data-classification ADR.
-5. **Audit coupling:** every audited action appends its AuditEvent in the same
+   data-classification ADR. Corrections are new rows that point backward
+   (`supersedes_id` = prior row), with one root per subject and each row
+   superseded at most once (partial unique indexes); the current row is the
+   one with no successor.
+6. **Audit coupling:** every audited action appends its AuditEvent in the same
    database transaction through one shared Ash change provided by S3; failure
    to append rolls back the domain write. Each event carries the canonical
-   `record_sha256` of the row after the write.
-6. **Domain layering:** `Audit <- Accounts <- Operations <- Agents <- Sales <-
+   `record_sha256` of the row after the write. Denials of guarded actions are
+   appended by the kernel after the outermost transaction ends (never inside
+   it), straight to the ledger without any domain action, so they neither
+   deadlock on the chain head nor recurse.
+7. **Domain layering:** `Audit <- Accounts <- Operations <- Agents <- Sales <-
    Research <- Outreach`. A higher domain may hold an FK to a lower one; a
    lower domain stores a higher domain's id as a plain uuid and validates it
-   in the orchestrating action. Web, workers and Jido actions call public
-   domain code interfaces with an explicit actor.
-7. **Synthetic-data guard:** in the MVP, account domains, contact emails and
+   in the orchestrating action. When an FK's target table arrives in a later
+   slice, the earlier slice creates a plain nullable uuid column (or omits
+   the column) and the later slice adds the constraint. Web, workers and Jido
+   actions call public domain code interfaces with an explicit actor.
+8. **Synthetic-data guard:** in the MVP, account domains, contact emails and
    sender addresses must be under reserved names (`.test`, `.example`,
    `.invalid`, `example.com/.net/.org`), validated in every environment.
 
