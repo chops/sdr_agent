@@ -12,6 +12,25 @@ defmodule SdrAgent.JidoSpikeTest do
             }} = SdrAgent.JidoSpike.run()
   end
 
+  test "the agent rejects fake-model output that violates the Zoi result schema" do
+    invalid_script = [
+      %{
+        reply:
+          {:tools,
+           [
+             %{
+               id: "score-call",
+               name: "score_lead",
+               arguments: %{score: 42}
+             }
+           ]}
+      },
+      %{reply: {:object, %{answer: "qualified", score: "42"}}}
+    ]
+
+    assert {:error, _reason} = SdrAgent.JidoSpike.run(invalid_script)
+  end
+
   test "the lock retains the reviewed Jido compatibility set" do
     lock = Mix.Dep.Lock.read()
 
