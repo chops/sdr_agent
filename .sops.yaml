@@ -1,0 +1,8 @@
+# sops creation rules for sdr_agent (ADR-0002, ADR-0005).
+# The recipient is the owner's age PUBLIC key, copied from
+# ~/src/nix-darwin/.sops.yaml. Never commit private age keys.
+creation_rules:
+  - path_regex: secrets/sdr_agent\.sops\.yaml$
+    key_groups:
+      - age:
+          - age1s7ywl6tyjgnukkkmypmqcdxtrm2cdrpqusv5upvhfetv3pt2lptsj883jd
