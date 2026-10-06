@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-06
 supersedes: null
 ---
@@ -8,9 +8,10 @@ supersedes: null
 
 ## Status
 
-Proposed (2026-10-06, Claude, slice S0b). Becomes accepted on Codex's recorded
-approving verdict on the S0b pull request (ADR-0001: agent design ADRs are
-accepted on peer approval; the owner can veto). It amends ADR-0007 decision
+Accepted (2026-10-06) on Codex's approving verdict on the S0b pull request:
+https://github.com/chops/sdr_agent/pull/2#issuecomment-6026997407
+(ADR-0001: agent design ADRs are accepted on peer approval; the owner can veto).
+Proposed earlier the same day by Claude in slice S0b. It amends ADR-0007 decision
 step 3 (the audit step stops being advisory); the rest of ADR-0007 stands.
 
 ## Context
