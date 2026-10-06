@@ -1,0 +1,70 @@
+#+TITLE: Feature: SDR Agent MVP — build plan
+#+DATE: 2026-10-06
+
+* Summary
+Build the audit-first SDR agent MVP (golden path demo, local only) as a
+sequence of reviewed slices under ADR-0001's operating charter.
+
+* Golden path (acceptance)
+Executable test plus a short human demo script (=bin/demo run=):
+1. Seed a fictional ICP, campaign, account and contacts (deterministic IDs/time).
+2. Assign a lead (=sdr.lead.assigned=) → ResearchLeadFlow over fixture-backed
+   search/CRM/web providers → ResearchArtifacts + EvidenceClaims.
+3. Qualification (Zoi-validated) with evidence links.
+4. PrepareOutreachFlow → OutreachProposal → Draft + immutable DraftRevision.
+5. Reviewer approves in LiveView (approval bound to recipient + revision hash).
+6. DeliveryOperation outbox → local capture adapter only; receipt recorded.
+7. Signed, deduplicated simulated replies: one interested, one unsubscribe
+   (deterministic suppression, follow-up cancellation).
+8. Audit timeline reconstructs every step from Postgres alone; chain verifies;
+   export bundle verifies; Tempo trace links resolve.
+
+* Entity Model
+#+BEGIN_EXAMPLE
+Entity Model trigger: yes
+Reason: introduces every persisted domain, audit, and operations concept.
+#+END_EXAMPLE
+Delta produced in slice S2 (=notes/features/s2-entity-model.org=) and reviewed
+by Codex via =ap= before any resource is generated.
+
+* Slices
+Writer / reviewer alternate; one writer per slice; merge = PR + green CI +
+recorded peer verdict. "Deps" are slices that must be merged first.
+
+| Slice | Content                                                                                     | Writer | Deps        |
+|-------+---------------------------------------------------------------------------------------------+--------+-------------|
+| S0    | Charter + ADRs 0002–0006, CI, branch protection, sops skeleton + anchor key, notify-telegram | Claude | —           |
+| S1    | Jido v3 spike: pinned deps resolve/compile; agent + action + structured output on fake model | Codex  | —           |
+| S2    | Entity-model delta (all domains incl. audit ledger) + soft-stop review                      | Claude | S0          |
+| S3    | Audit kernel: IDs/context/version snapshot, AuditEvent ledger (sequence, hash chain,        | Claude | S2          |
+|       | canonical serialization), ModelInvocation/ModelPayload/ToolInvocation/Decision              |        |             |
+| S4    | OTel foundation: SDK + OTLP → Tempo, Phoenix/Bandit/Ecto/Oban/Req/Ash spans, gen_ai spans,  | Codex  | S0          |
+|       | trace_id on audit records, logger metadata                                                  |        |             |
+| S5    | Accounts (admin/reviewer, password), Sales, Research resources; seed fixtures               | Claude | S2, S3      |
+| S6    | ModelProvider seam: Fake + CodexAppServer (cached login), Zoi schemas, budgets, preflight   | Codex  | S1, S3, S4  |
+| S7    | SDRAgent, Signals, Actions, ResearchLeadFlow, PrepareOutreachFlow; fixture providers        | Claude | S1, S5, S6  |
+| S8    | Outreach: Draft/Revision/Approval/Suppression/Sequence; DeliveryOperation outbox, capture   | Claude | S5, S7      |
+|       | adapter, reconciliation; Oban queues; compliance defaults                                   |        |             |
+| S9    | Replies: HMAC webhook + dedupe, Reply/ReplyAssessment, unsubscribe, follow-up cancel        | Codex  | S8          |
+| S10   | LiveView: Dashboard, Leads, Lead detail/evidence, Review queue, Runs/Operations, Admin,      | Claude | S8          |
+|       | Audit timeline + payload viewer + chain verify                                              |        |             |
+| S11   | Anchoring + export: signing, GitSink (create anchors repo), OTS sink, export + verifier     | Codex  | S3          |
+| S12   | Wire witness: llm-otel-proxy trace/invocation-ID propagation (nix-darwin), app-server via   | Codex  | S6, S11     |
+|       | proxy, hash reconciliation, e2e test — CHECKPOINT: owner runs =sudo darwin-rebuild switch= |        |             |
+| S13   | Acceptance: golden-path e2e, browser smoke, Postgres-only reconstruction, Oban restart/      | Claude | S9–S12      |
+|       | idempotency, hermetic proof, secret scan, =bin/demo=, README runbook                        |        |             |
+| S14   | SIWC open-source auth (dynamic client registration) — before OSS release, not MVP gate      | Codex  | S6          |
+
+* Definition of done (every slice)
+=bin/verify= green (format, compile --warnings-as-errors, tests), Ash codegen
+=--check=, Credo, Reach advisory, secret scan, hermetic tests (no outbound
+network), regression coverage, ADRs current, peer verdict recorded on the PR.
+
+* Risks & Considerations
+- Jido v3 beta / unpublished jido_ai: S1 decides; fallback per ADR-0003.
+- Codex app-server is documented as experimental: acceptable for a local demo.
+- Scope is large; slices stay small enough to review in one pass.
+- Hooks fail open; permission prompts are bypassed (ADR-0001).
+
+* Questions (if any)
+None open; owner decisions recorded in ADR-0001.
