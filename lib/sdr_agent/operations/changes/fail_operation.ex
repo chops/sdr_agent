@@ -10,12 +10,15 @@ defmodule SdrAgent.Operations.Changes.FailOperation do
   Failure of the AgentRun the operation runs, which carries the run's
   operation id) or its subject is this operation. Anything else (resolved,
   another tenant, another condition) refuses the transition, so a failed
-  Operation always has a live queue entry. Without `failure_id` it opens a
+  Operation always has a live queue entry. The Failure is read `FOR UPDATE`
+  so a concurrent resolution cannot slip between this check and the link. Without `failure_id` it opens a
   Failure from argument `failure` (`class`, `severity`, `message`, optional
   `retryable`, `detail`; string or atom keys, unknown keys ignored) with the
   operation as subject.
   """
   use Ash.Resource.Change
+
+  require Ash.Query
 
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Operations.Attention
@@ -49,8 +52,17 @@ defmodule SdrAgent.Operations.Changes.FailOperation do
     end
   end
 
+  # The Failure is read under FOR UPDATE in the transition's transaction
+  # (lock order Operation → Failure → chain head, as Operation :succeed and
+  # Failure :resolve take them), so a concurrent resolve either commits first
+  # — and is seen here — or waits until this link has committed.
   defp existing(id, operation) do
-    case Ash.get(Failure, id, Kernel.opts(operation.tenant_id)) do
+    Failure
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(operation.tenant_id))
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read_one()
+    |> case do
       {:ok, %Failure{} = failure} ->
         if failure.tenant_id == operation.tenant_id and failure.status in @live and
              owned?(failure, operation),

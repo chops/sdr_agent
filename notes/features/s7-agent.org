@@ -287,6 +287,17 @@ link test now opens its Failure for the operation (behaviour change the
 review requires). GREEN: =bin/verify= *339 passed, 3 excluded*; credo,
 =ash.codegen --check=, =hex.audit= clean.
 
+** S7a review round 2 (Codex, PR #10 comment 6032042505: one change)
+The live-Failure check read the Failure without a row lock, so a concurrent
+resolve could commit between the check and the link. =FailOperation= now
+reads it =FOR UPDATE= inside the transition's transaction (lock order
+Operation → Failure → chain head, as =:succeed= and =:resolve= take them).
+RED (real connections, =sandbox: false=): =concurrency_test.exs= *8/10* —
+an uncommitted resolve let the link commit against the resolved Failure,
+and a free race committed =failure.resolved= before =operation.failed=.
+GREEN: 10/10 on 5 consecutive runs; =bin/verify= *341 passed, 3 excluded*;
+credo, =ash.codegen --check=, =hex.audit=, gitleaks clean.
+
 Follow-up named by the review, not in this PR: S11b's anchoring/OTS
 maintenance jobs still record failures as sink receipts and Oban state;
 wiring them to Operation/Failure is a later S7-owned integration.
