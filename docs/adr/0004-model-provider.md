@@ -193,6 +193,26 @@ that boundary cannot be maintained, use a paid API key instead.
   Invalid output is persisted as failed and never returned as a successful
   result. The deterministic Fake remains the dev/test/CI default.
 
+### S7 amendment (2026-10-07): persisted daily limit and drift attention
+
+- The volatile `SdrAgent.AI.BudgetStore` seam is removed. The 200-per-UTC-day
+  limit is enforced inside `SdrAgent.Agents.reserve_model_invocation/3`'s
+  transaction: after the run counter is reserved, the tenant's audit
+  chain-head row is locked and the tenant's `ModelInvocation`s whose
+  `reserved_at` falls in the current UTC day (`SdrAgent.Clock`) are counted;
+  at the limit the whole reservation rolls back with
+  `{:error, {:budget_exhausted, :daily}}` and no provider is invoked. The
+  chain-head lock is held until commit, so concurrent reservations
+  serialise. Attempts (failed, invalid and unknown calls included) are never
+  refunded, so the aggregate survives restarts and is recomputable from the
+  ledger. `config :sdr_agent, :daily_model_call_limit` may lower the limit,
+  never raise it above 200. The day is the UTC day, as this ADR and the S2
+  entity model state.
+- A Claude CLI failure that means the reviewed launch configuration drifted
+  (missing init attestation, or one naming another model, version, tools,
+  MCP servers or slash commands) fails the invocation and opens a critical
+  `provider_error` operator-attention Failure in the same transaction.
+
 ## Justification
 
 Option 3 is documented for this use, available now, and keeps a migration path

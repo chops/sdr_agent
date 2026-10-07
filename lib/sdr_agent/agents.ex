@@ -15,8 +15,10 @@ defmodule SdrAgent.Agents do
     * runs — `create_run/2`, `start_run/2`, `set_run_phase/3`,
       `succeed_run/2`, `fail_run/3`, `exhaust_run_budget/3`, `cancel_run/2`,
       `retry_run/2`, `reserve_model_call/2`, `get_run/2`;
-    * model calls — `reserve_model_invocation/3` (reserves budget, stores the
-      request Payload and numbers the call, in one transaction),
+    * model calls — `reserve_model_invocation/3` (reserves the run budget,
+      enforces the persisted daily limit, stores the request Payload and
+      numbers the call, in one transaction), `daily_model_call_limit/0`,
+      `daily_model_calls/1`,
       `mark_model_invocation_sent/2`, `complete_model_invocation/3`,
       `fail_model_invocation/3`, `mark_model_invocation_unknown/2` (each
       settles run usage in the same transaction), `list_model_invocations/2`;
@@ -41,6 +43,8 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Audit.Payload
 
   @notifications {__MODULE__, :notifications}
+  # ADR-0004: at most 200 model calls per UTC day; configuration may only lower it.
+  @daily_model_call_limit 200
 
   resources do
     resource SdrAgent.Agents.AgentDefinition
@@ -139,6 +143,15 @@ defmodule SdrAgent.Agents do
   @doc """
   Reserves budget, stores the request body (`attrs.request`) and creates the
   `reserved` invocation numbered by the reservation — one transaction (AGT).
+
+  The ADR-0004 daily limit is enforced here, persisted: after the run
+  counter is reserved (run row lock), the tenant's chain head is locked and
+  the ModelInvocations reserved in the current UTC day are counted; at the
+  limit the whole reservation rolls back with
+  `{:error, {:budget_exhausted, :daily}}` before any provider runs. Every
+  reservation holds the chain-head lock until it commits, so concurrent
+  reservations serialise and cannot both take the last unit. Attempts are
+  never refunded.
   """
   def reserve_model_invocation(run, attrs, opts) do
     actor = Keyword.get(opts, :actor)
@@ -151,6 +164,7 @@ defmodule SdrAgent.Agents do
 
   defp do_reserve_model_invocation(run, attrs, request, actor) do
     with {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
+         :ok <- check_daily_limit(run.tenant_id),
          {:ok, payload} <- store(request, actor) do
       attrs =
         Map.merge(attrs, %{
@@ -163,6 +177,38 @@ defmodule SdrAgent.Agents do
       |> Ash.Changeset.for_create(:reserve, attrs, actor: actor)
       |> Ash.create(return_notifications?: true)
       |> collect()
+    end
+  end
+
+  @doc "The effective daily model-call limit: `min(config, 200)` (ADR-0004)."
+  def daily_model_call_limit do
+    case Application.get_env(:sdr_agent, :daily_model_call_limit) do
+      limit when is_integer(limit) and limit >= 0 ->
+        Elixir.Kernel.min(limit, @daily_model_call_limit)
+
+      _ ->
+        @daily_model_call_limit
+    end
+  end
+
+  @doc "ModelInvocations of `tenant_id` reserved in the current UTC day (`SdrAgent.Clock`)."
+  def daily_model_calls(tenant_id) do
+    today = DateTime.to_date(SdrAgent.Clock.utc_now())
+    from = DateTime.new!(today, ~T[00:00:00.000000], "Etc/UTC")
+    until = DateTime.add(from, 1, :day)
+
+    ModelInvocation
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+    |> Ash.Query.filter(tenant_id == ^tenant_id and reserved_at >= ^from and reserved_at < ^until)
+    |> Ash.count!()
+  end
+
+  # Runs inside the reservation transaction (see reserve_model_invocation/3).
+  defp check_daily_limit(tenant_id) do
+    with {:ok, _head} <- Kernel.lock_head(tenant_id) do
+      if daily_model_calls(tenant_id) < daily_model_call_limit(),
+        do: :ok,
+        else: {:error, {:budget_exhausted, :daily}}
     end
   end
 
