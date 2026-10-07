@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-06
 supersedes: null
 ---
@@ -8,8 +8,12 @@ supersedes: null
 
 ## Status
 
-Proposed (2026-10-06, Claude, slice S2). Acceptance per ADR-0001: the peer's
-recorded approval on the S2 pull request; the owner can veto.
+Accepted (2026-10-06) on Codex's approving verdict on the S2 pull request:
+https://github.com/chops/sdr_agent/pull/5#issuecomment-6027676278
+and the owner-decision delta soft-stop PASS (peer reply
+b1243d3f-a7a8-450e-805e-97363b75e434, round 4). ADR-0001: agent design ADRs are
+accepted on peer approval; the owner can veto. Proposed earlier the same day by
+Claude in slice S2.
 
 ## Context
 
