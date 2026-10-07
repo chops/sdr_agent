@@ -10,7 +10,21 @@ init =
 result =
   ~s({"type":"result","subtype":"success","is_error":false,"result":"{\\"answer\\":\\"qualified\\",\\"score\\":42}","usage":{"input_tokens":12,"output_tokens":3}})
 
+fenced =
+  ~s({"type":"result","subtype":"success","is_error":false,"result":"```json\\n{\\"answer\\":\\"qualified\\",\\"score\\":42}\\n```","usage":{"input_tokens":12,"output_tokens":3}})
+
+prose =
+  ~s({"type":"result","subtype":"success","is_error":false,"result":"Here you go: {\\"answer\\":\\"qualified\\",\\"score\\":42}","usage":{"input_tokens":12,"output_tokens":3}})
+
 case mode do
+  "fenced" ->
+    IO.puts(init)
+    IO.puts(fenced)
+
+  "prose" ->
+    IO.puts(init)
+    IO.puts(prose)
+
   "ready" ->
     IO.puts(init)
     IO.puts(result)

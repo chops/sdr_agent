@@ -30,6 +30,15 @@ defmodule SdrAgent.AI.ClaudeCLITest do
     end
   end
 
+  test "accepts one JSON object wrapped in a Markdown code fence, nothing else" do
+    {:ok, server} = start_server("fenced")
+    assert {:ok, result} = ClaudeCLI.complete(request(), server: server)
+    assert result.output == %{"answer" => "qualified", "score" => 42}
+
+    {:ok, server} = start_server("prose")
+    assert {:error, :missing_structured_output} = ClaudeCLI.complete(request(), server: server)
+  end
+
   test "stderr cannot leak into a successful response" do
     {:ok, server} = start_server("stderr_secret")
     assert {:ok, result} = ClaudeCLI.complete(request(), server: server)
