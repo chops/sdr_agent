@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# The local demo runbook (S13; MVP checklist 4.1). Run inside the devenv
+# shell (direnv) with Postgres up (`devenv up`):
+#
+#   bin/demo reset --yes   drop, create and migrate the demo database
+#   bin/demo seed          seed the fictional demo data set (idempotent)
+#   bin/demo run           start Phoenix on PORT (default 4120)
+#   bin/demo status        database, migrations, server, Oban queues,
+#                          pipeline counts, audit chain verification
+#
+# It refuses anything but the local demo database: MIX_ENV=dev (or unset)
+# whose Repo is sdr_agent_dev on localhost/127.0.0.1:5520, with no
+# DATABASE_URL. `--test` targets a separate throw-away database for this
+# script's own tests: MIX_ENV=test with MIX_TEST_PARTITION suffixed "_demo"
+# (sdr_agent_test<partition>_demo), so it never touches the database a
+# running test suite uses; `run` has no --test mode. No secret is read or
+# printed.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$root"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: bin/demo [--test] reset --yes | seed | run | status
+  reset --yes  drop, create and migrate the demo database (destructive)
+  seed         seed the fictional demo data set (idempotent)
+  run          start Phoenix on PORT (default 4120) after readiness checks
+  status       database, migrations, server, Oban queues, counts, audit chain
+EOF
+  exit 2
+}
+
+refuse() {
+  echo "bin/demo: refusing: $*" >&2
+  exit 2
+}
+
+fail() {
+  echo "bin/demo: $*" >&2
+  exit 1
+}
+
+mode=dev
+yes=0
+cmd=""
+for arg in "$@"; do
+  case "$arg" in
+    --test) mode=test ;;
+    --yes) yes=1 ;;
+    reset | seed | run | status)
+      [ -z "$cmd" ] || usage
+      cmd="$arg"
+      ;;
+    -h | --help) usage ;;
+    *)
+      echo "bin/demo: unknown argument: $arg" >&2
+      usage
+      ;;
+  esac
+done
+[ -n "$cmd" ] || usage
+
+port="${PORT:-4120}"
+case "$port" in
+  '' | *[!0-9]*) refuse "PORT must be a port number" ;;
+esac
+
+# Accepts a TCP connection on 127.0.0.1:$1 (bash /dev/tcp; no lsof needed).
+listening() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+## Environment guard (before any Mix command)
+
+[ -z "${DATABASE_URL:-}" ] ||
+  refuse "DATABASE_URL is set; bin/demo runs only against the local demo database"
+
+if [ "$mode" = dev ]; then
+  [ "${MIX_ENV:-dev}" = dev ] ||
+    refuse "MIX_ENV=${MIX_ENV} is not the demo environment (dev)"
+  export MIX_ENV=dev
+  expected_db=sdr_agent_dev
+else
+  [ "${MIX_ENV:-test}" = test ] ||
+    refuse "--test needs MIX_ENV=test (is ${MIX_ENV})"
+  export MIX_ENV=test
+  export MIX_TEST_PARTITION="${MIX_TEST_PARTITION:-}_demo"
+  expected_db="sdr_agent_test${MIX_TEST_PARTITION}"
+fi
+
+case "$cmd" in
+  reset) [ "$yes" = 1 ] || refuse "reset drops and recreates $expected_db; re-run with --yes" ;;
+  run) [ "$mode" = dev ] || refuse "run starts the dev server; it has no --test mode" ;;
+esac
+
+# The Repo configuration Mix would really use must be the demo database.
+repo_probe='c = SdrAgent.Repo.config(); IO.puts(Enum.join(["SDR_DEMO_REPO", c[:hostname], c[:port], c[:database]], " "))'
+
+check_repo() {
+  local line host db_port database
+  line="$(mix run --no-start -e "$repo_probe" | grep '^SDR_DEMO_REPO ' | tail -n 1)" ||
+    fail "could not read the Repo configuration"
+
+  read -r _ host db_port database <<<"$line"
+
+  case "$host" in
+    localhost | 127.0.0.1) ;;
+    *) refuse "database host ${host:-?} is not local" ;;
+  esac
+  [ "$db_port" = 5520 ] || refuse "database port ${db_port:-?} is not the devenv Postgres port 5520"
+  [ "$database" = "$expected_db" ] ||
+    refuse "database ${database:-?} is not the demo database $expected_db"
+}
+
+server_line() {
+  if [ "$mode" = test ]; then
+    echo "server: n/a (--test)"
+  elif listening "$port"; then
+    echo "server: listening on http://localhost:$port"
+  else
+    echo "server: not listening on $port (bin/demo run)"
+  fi
+}
+
+case "$cmd" in
+  reset)
+    if [ "$mode" = dev ] && listening "$port"; then
+      refuse "a server is listening on $port; stop it before resetting the database"
+    fi
+    check_repo
+    echo "bin/demo: resetting $expected_db"
+    mix ecto.drop --force-drop
+    mix ecto.create
+    mix ecto.migrate
+    echo "bin/demo: $expected_db is empty and migrated; next: bin/demo seed"
+    ;;
+
+  seed)
+    check_repo
+    mix sdr.demo.seed
+    ;;
+
+  status)
+    check_repo
+    echo "SDR demo status: MIX_ENV=$MIX_ENV, database $expected_db on 127.0.0.1:5520"
+    server_line
+    mix sdr.demo.status
+    ;;
+
+  run)
+    if listening "$port"; then
+      refuse "port $port is already in use (lsof -nP -iTCP:$port -sTCP:LISTEN)"
+    fi
+    check_repo
+    mix sdr.demo.status --check || fail "the demo is not ready; see the status above"
+
+    if [ -n "${SDR_AUDIT_ANCHOR_PRIVATE_KEY:-}" ]; then key=present; else key=absent; fi
+    echo "anchoring: sinks ${SDR_ANCHOR_SINKS:-git+ots}, signing key $key" \
+      "(bin/with-secrets SDR_AUDIT_ANCHOR_PRIVATE_KEY -- bin/demo run to anchor)"
+    echo "bin/demo: starting Phoenix on http://localhost:$port"
+    PORT="$port" exec mix phx.server
+    ;;
+esac
