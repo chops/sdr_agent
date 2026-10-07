@@ -376,7 +376,29 @@ directories. Permanent follow-up for nix-darwin, routed separately: activation
 should =install -d= =blobs=, =blobs/witnesses= and =blobs/witness/sha256= as the
 service user.
 
-*** Projection v2 entity delta (writer table; awaiting correlated PASS)
+*** Projection v2 entity delta (writer table)
+Entity soft-stop: PASS. Reviewer Codex, correlated ai-pair answer
+=f04a7e44-57f6-4949-a0df-ac5cb78b9af3= (2026-10-07), replying to
+=m_1791407766614487000_26a6abe9=. Obligations: a reconciled v2 link keeps the
+complete group even when counts are zero; a contract failure becomes
+inferred =evidence_contract_invalid= and never corrects a mismatch; fixed
+=request_fields= order/null semantics; tagged-presence manifest; caps are
+checked before canonicalisation; full RED negatives. Not GREEN, proof 2 or
+enablement.
+
+Manifest (sha256 over =sdr-canonical-json/1=):
+={"version": 2, "request_fields": [...], "fields": {"system"|"thinking"|"output_config"|"context_management": {"present": false} | {"present": true, "value": <JSON value, incl. null>}}, "reminders": [{"block_index", "sha256", "bytes"}], "trailing_system": [{"message_index", "sha256", "bytes"}]}=.
+=request_fields= order is fixed: system, thinking, output_config,
+context_management. For each field, =<f>_present= is listed when the key
+exists and =<f>_null= when its value is JSON null.
+Supported control shapes:
+- =system=: a list of at most 8 text blocks ({type, text[, cache_control: {type: ephemeral}]}), at most 256 KiB of text in total.
+- =thinking=: a map of keys from {type, budget_tokens, display}; type in {adaptive, enabled, disabled}.
+- =output_config=: a map of keys from {effort}; effort a string of at most 16 bytes.
+- =context_management=: a map of keys from {edits}, where edits is a list of at most 16 maps; canonical JSON at most 16 KiB.
+- =max_tokens=: a positive integer.
+- =metadata=: a map of keys from {user_id}. It is never imported or hashed.
+Any other shape is unsupported.
 Codex v2 ruling =540b562a= (direction accepted with conditions; soft-stop NEEDS-REVIEW until this table).
 Entity Model trigger: yes. Reason: new typed keys in the persisted
 WireWitnessLink =evidence= value contract, and a v2 projection claim meaning.
