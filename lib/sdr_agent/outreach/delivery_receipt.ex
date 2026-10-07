@@ -9,12 +9,13 @@ defmodule SdrAgent.Outreach.DeliveryReceipt do
   acceptance; `reconciled` — reconciliation's; `delivered`, `bounced` — S9
   webhooks), `provider`, `provider_message_id`, `rendered_sha256` (= the
   operation's; the full RFC 5322 bytes are a Payload, so "the sent email" is
-  reconstructable from Postgres), `response_sha256`, `received_at`. One
+  reconstructable from Postgres), `response_sha256`, `webhook_event_id`
+  (the provider event of a `delivered` or `bounced` receipt), `received_at`. One
   receipt per operation and kind: recording a kind again returns the stored
   row with no second event (the capture adapter is idempotent on the key).
 
   APPEND-ONLY (trigger). Actors: DLV (`captured`, `accepted`), REC
-  (`reconciled`), WHK (`delivered`, `bounced`, S9). Reads: ADM, REV, AUR,
+  (`reconciled`), WHK (`delivered`, `bounced`). Reads: ADM, REV, AUR,
   DLV, REC, WHK, AUD. Audited: `outreach.delivery.receipt_recorded`.
   """
   use Ash.Resource,
@@ -36,6 +37,7 @@ defmodule SdrAgent.Outreach.DeliveryReceipt do
     references do
       reference :tenant, on_delete: :restrict
       reference :delivery_operation, on_delete: :restrict
+      reference :webhook_event, on_delete: :restrict
     end
 
     check_constraints do
@@ -73,7 +75,7 @@ defmodule SdrAgent.Outreach.DeliveryReceipt do
     defaults [:read]
 
     create :record do
-      description "DLV, REC (WHK in S9): record a receipt; idempotent per operation and kind."
+      description "DLV, REC, WHK: record a receipt; idempotent per operation and kind."
 
       accept [
         :delivery_operation_id,
@@ -82,7 +84,8 @@ defmodule SdrAgent.Outreach.DeliveryReceipt do
         :provider,
         :provider_message_id,
         :rendered_sha256,
-        :response_sha256
+        :response_sha256,
+        :webhook_event_id
       ]
 
       upsert? true
@@ -108,7 +111,7 @@ defmodule SdrAgent.Outreach.DeliveryReceipt do
     end
 
     policy action(:record) do
-      authorize_if {Checks.ActorType, types: [:delivery_worker, :reconciler]}
+      authorize_if {Checks.ActorType, types: [:delivery_worker, :reconciler, :webhook_ingestor]}
     end
 
     policy action_type(:read) do
@@ -166,6 +169,11 @@ defmodule SdrAgent.Outreach.DeliveryReceipt do
 
     belongs_to :delivery_operation, SdrAgent.Outreach.DeliveryOperation do
       allow_nil? false
+      attribute_writable? true
+      public? true
+    end
+
+    belongs_to :webhook_event, SdrAgent.Operations.WebhookEvent do
       attribute_writable? true
       public? true
     end
