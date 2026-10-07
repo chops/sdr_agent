@@ -6,7 +6,8 @@ defmodule SdrAgent.Audit.SQL do
   * `append_only/1` — rejects every `UPDATE`, `DELETE` and `TRUNCATE` on an
     APPEND-ONLY table (row trigger `<table>_guard_row`, statement trigger
     `<table>_guard_truncate`).
-  * `terminal_immutable/3` — for ModelInvocation/ToolInvocation: rejects
+  * `terminal_immutable/4` — for ModelInvocation/ToolInvocation (and S8's
+    Draft, Approval, DeliveryOperation): rejects
     `DELETE`/`TRUNCATE`, any update of a row whose status is terminal, and
     any update that changes a column outside the listed mutable columns.
   """
@@ -25,8 +26,11 @@ defmodule SdrAgent.Audit.SQL do
     triggers(table, function, "#{table}_append_only")
   end
 
-  @doc "Statements for a terminal-immutable table."
-  def terminal_immutable(table, terminal_states, mutable_columns) do
+  @doc """
+  Statements for a terminal-immutable table whose lifecycle column is
+  `state_column` (default `"status"`; DeliveryOperation uses `"state"`).
+  """
+  def terminal_immutable(table, terminal_states, mutable_columns, state_column \\ "status") do
     states = Enum.map_join(terminal_states, ", ", &"'#{&1}'")
     columns = Enum.map_join(mutable_columns, ", ", &"'#{&1}'")
 
@@ -37,7 +41,7 @@ defmodule SdrAgent.Audit.SQL do
         RAISE EXCEPTION '% is append-only: % rejected (invocations cannot be deleted)', TG_TABLE_NAME, TG_OP
           USING ERRCODE = 'restrict_violation';
       END IF;
-      IF OLD.status IN (#{states}) THEN
+      IF OLD.#{state_column} IN (#{states}) THEN
         RAISE EXCEPTION '% row % is terminal: update rejected', TG_TABLE_NAME, OLD.id
           USING ERRCODE = 'restrict_violation';
       END IF;

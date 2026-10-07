@@ -1,0 +1,513 @@
+#+TITLE: Feature: S8 — Outreach (drafts, approval, suppression, outbox delivery)
+#+DATE: 2026-10-07
+
+* Summary
+Build the S8 rows of the reviewed S2 entity model — the =SdrAgent.Outreach=
+domain: Draft, immutable DraftRevision, RevisionCitation, Approval bound to
+recipient + revision hash, Suppression (S8a); DeliveryOperation outbox,
+DeliveryReceipt, SendQuotaDay, the local *capture* delivery adapter (the only
+one), reconciliation, enrollment step advancement in the campaign time zone,
+the delivery/reconciliation/follow-up Oban queues and the compliance defaults
+(S8b) — plus the carried-forward S5/S7 obligations (real SuppressionCheck,
+Draft from the =sdr.draft.completed= hand-off, seeded Suppression, policy
+extension so agent/delivery-created Suppressions stop leads and enrollments).
+
+Split for review (owner brief: > ~2,500 lines): *S8a* = Draft / DraftRevision
+/ RevisionCitation / Approval / Suppression + SuppressionCheck + hand-off
+draft + seed; *S8b* (stacked on S8a) = DeliveryOperation / DeliveryReceipt /
+SendQuotaDay + capture adapter + send gate + workers + reconciliation +
+=advance_step= + time zone database (ADR-0011).
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: yes
+Reason: creates the S8 rows of the reviewed S2 entity model (Outreach domain) and extends the S5 Lead/CampaignEnrollment policies and lifecycle (advance_step, completed) as S2 and S5 assign to S8.
+#+END_EXAMPLE
+
+The reviewed delta is =notes/features/s2-entity-model.org= (soft-stop *PASS*,
+Codex round 4, reply =b1243d3f-a7a8-450e-805e-97363b75e434=; ADR-0009/0010
+accepted). This slice introduces *no new entities, attributes,
+relationships or lifecycles* beyond the S2 rows; they are not repeated here.
+
+- *Soft-stop verdict:* PASS (inherited from S2; this plan is not a delta).
+- *Implementation choices within the S2 contract* (flagged for the PR
+  reviewer; none weakens suppression, approval, idempotency or audit):
+  1. *One draft row, one revision row, one event each.* The Draft's
+     =current_revision_id= FK to =draft_revisions= is =DEFERRABLE INITIALLY
+     DEFERRED= (the revision references the draft and vice versa); the draft
+     create or edit picks the new revision's UUIDv7 in a =before_action=,
+     writes it on the draft, and inserts the revision (+ citations) in an
+     =after_action= of the same transaction. A draft without its current
+     revision cannot commit.
+  2. *Approval binds what the reviewer saw.* =approve/3= takes the
+     =draft_revision_id= and its hex =content_sha256= the reviewer reviewed;
+     anything but the draft's current revision with that exact hash is
+     refused (stale). The recipient email is snapshotted from the *current*
+     Contact row (locked), the contact must be active, the recipient must not
+     be suppressed (email or domain), and the campaign must not be completed
+     or archived (a paused campaign may be approved; the S8b send gate
+     refuses to send while it is paused).
+  3. *Edit-then-approve records.* The approval's audit payload carries
+     =revision_author= (user id or agent run id), =approver_authored_revision=
+     and =diff_hashes= (sha256 hex of =diff_from_ai_baseline= and
+     =diff_from_parent=, or nil) — server-computed arguments, never input.
+  4. *Rejection* is an Approval row with verdict/status =rejected= (reason
+     required) bound to the current revision, written in the same transaction
+     as Draft pending_review → rejected (T).
+  5. *Suppression side effects, lock order.* Before the suppression row (and
+     its event) is written, the matching open leads (email: contact email =
+     value; domain: contact email domain = value), their enrollments, their
+     drafts and granted approvals are locked =FOR UPDATE= (lead → enrollment
+     → draft → approval → chain head, the order every other writer uses), so
+     a concurrent hand-off or approval either commits first and is undone
+     here, or waits and sees the stopped lead. Then, in the same transaction:
+     leads → stopped (=status_reason= "suppressed: <reason>"), enrollments →
+     stopped (=stop_reason= =unsubscribe= for unsubscribe reasons, =bounced=
+     for hard_bounce, =suppressed= otherwise), granted approvals →
+     invalidated (=suppressed=), drafts pending_review/queued → cancelled
+     (S8b also cancels pending/failed_retryable deliveries). Re-creating an
+     existing suppression returns it with no event and no side effects.
+  6. *Policy extension (S5 obligation).* Lead =:stop= and Enrollment =:stop=
+     additionally authorize AGT, DLV, WHK and SEED *only* inside the
+     Suppression create (private marker
+     =SdrAgent.Sales.Checks.SuppressionContext=, set by no public API);
+     Outreach-internal writes (Draft queue/unqueue/reject/cancel, Approval
+     invalidate, revision and citation inserts) carry a second private marker
+     (=SdrAgent.Outreach.Checks.InternalWrite=).
+  7. *Suppression sources in S8.* =:manual= (ADM; =created_by_user_id= =
+     the actor), =:from_reply= (AGT; =unsubscribe_reply= with a
+     =reply_classification= Decision of the agent), =:seed= (SEED, dev/test
+     only; reason =manual=, the ledger records the seeder as source). S9 adds
+     the WHK sources and the =reply_id=/=webhook_event_id= columns. The source
+     rules are DB check constraints where the column exists in S8
+     (=unsubscribe_reply= ⇒ =decision_id=, =hard_bounce= ⇒
+     =delivery_operation_id=) and action rules otherwise.
+  8. *Real SuppressionCheck.* =SdrAgent.SDR.SuppressionCheck.Store= (agent
+     plane, so the behaviour's dependency points downward) asks
+     =Outreach.matching_suppressions/2=; configured in =config.exs=. The S7
+     test asserting "no store exists yet" changes by contract to the store's
+     answer.
+  9. *Draft from the hand-off.* =HandOffProposal= creates the Draft and its
+     agent revision (citations from =output.claims= and
+     =output.personalization=) *in the hand-off transaction*, from
+     =SDR.proposal/2= read inside it, so a committed hand-off always has its
+     draft. A citation must name an accepted EvidenceClaim of the draft's lead
+     whose text is verbatim in the body (re-checked deterministically).
+ 10. *Deferred: redraft.* =request_redraft= and agent revisions of an
+     existing draft need an agent route for =sdr.draft.requested=, which no
+     slice has yet; reviewers edit or reject. Recorded for S9/S10.
+ 11. *Seeded suppression stops lead 04.* The seed writes one =email=
+     Suppression per =Fixtures.suppressed_contact_emails/0=; by S2 its side
+     effect stops Harborline's open lead. The S5 seed assertion "every lead is
+     new" changes by contract to "every lead but the suppressed contact's".
+ 12. *Diffs.* Line diffs (=List.myers_difference/2=) over ="Subject: …\n\n"
+     <> body=; carried-forward citations are the parent's whose text is still
+     verbatim in the new body, dropped ones are listed at the end of
+     =diff_from_parent=.
+ (S8b choices 19–33 are recorded under "S8b findings and choices" below.)
+
+* Affected Apps
+- [X] Core (=sdr_agent=)
+- [ ] Web (=sdr_agent_web=) — none (S10 builds the review UI)
+- [X] Other: migrations + snapshots (=mix ash.codegen=), config
+
+* Affected Modules (S8a)
+- =lib/sdr_agent/outreach.ex= — new domain and public API.
+- =lib/sdr_agent/outreach/{draft,draft_revision,revision_citation,approval,suppression}.ex=,
+  =outreach/changes/*.ex=, =outreach/checks/*.ex=, =outreach/diff.ex=.
+- =lib/sdr_agent/sales/{lead,campaign_enrollment}.ex= — suppression-context
+  stop policy; =sales/checks/suppression_context.ex=.
+- =lib/sdr_agent/sdr/suppression_check/store.ex=,
+  =sdr/actions/hand_off_proposal.ex= (draft in the hand-off transaction).
+- =lib/sdr_agent/demo/{fixtures,seed}.ex= — seeded suppression.
+- =config/config.exs= (domain, suppression check), migration =s8a_outreach=.
+
+* Implementation Steps
+1. Plan (this file); commit.
+2. S8a RED: tests below; record the TDD table (NEEDS_REVIEW expected:
+   =bin/tdd_verify.sh= cannot parse Elixir 1.20's summary).
+3. S8a GREEN: resources, changes, policies, hand-off draft, store, seed,
+   =mix ash.codegen s8a_outreach=; gates; PR S8a.
+4. S8b plan delta, RED, GREEN on a branch stacked on S8a; ADR-0011; PR S8b.
+5. Architecture diagrams (new domain, resources, delivery runtime flow).
+
+* Required Tests (S8a)
+- [ ] Draft: hand-off creates the draft + agent revision + citations in the
+      hand-off transaction (golden path); consistency checks (enrollment,
+      step, campaign, recipient); one open draft per enrollment step;
+      transition table = declared; AGT only.
+- [ ] DraftRevision: append-only trigger; content hash server-side;
+      revision_number = parent + 1; agent ⇒ run + draft_proposal Decision;
+      human ⇒ author + diffs + carried-forward citations; citations must be
+      accepted claims of the lead, verbatim in the body; edit only in
+      pending_review; ADM/REV only, AUR denied and audited.
+- [ ] Approval: approve binds revision id + hash + recipient email +
+      campaign + approver, draft → queued, one live approval per draft;
+      stale revision/hash refused; suppressed / archived contact refused;
+      edit-then-approve by the same user records author and diff hashes;
+      system actors and auditors cannot approve; reject → draft rejected;
+      revoke → draft back to pending_review; a new revision invalidates a
+      granted approval of an older one; binding columns immutable (trigger);
+      transition table.
+- [ ] Suppression: manual (ADM), from_reply (AGT + decision), seed (SEED,
+      dev/test); normalisation and idempotency (no second event);
+      side effects in one transaction (lead stopped, enrollment stopped,
+      approval invalidated, draft cancelled) for email and domain scope;
+      append-only; REV/AUR/DLV cannot create manual suppressions.
+- [ ] SuppressionCheck store: agent gate reports =suppressed= for a
+      suppressed email and domain, =not_suppressed= otherwise.
+- [ ] Denial audit: each guarded Outreach action → Forbidden + exactly one
+      =authz.denied=; every Outreach mutation denied for AUR.
+- [ ] Seed: Harborline suppression seeded, lead 04 stopped, idempotent,
+      deterministic.
+
+* Risks & Considerations
+- Every audited write takes the chain-head lock (ADR-0009); the suppression
+  side effects take their row locks before it (choice 5).
+- The deferrable FK is checked at commit: a bug that skipped the revision
+  insert would fail the commit, not the statement (tested).
+- Shared test database: local runs use =MIX_TEST_PARTITION=_s8=.
+- ADR: none for S8a. S8b adds a dependency (time zone database) → ADR-0011.
+
+* Questions (if any)
+None blocking; choices are flagged for the PR reviewer.
+
+-----
+
+* TDD Tracking
+
+** S8a RED (2026-10-07)
+=MIX_TEST_PARTITION=_s8 mix test test/sdr_agent/outreach
+test/sdr_agent/demo/seed_test.exs test/sdr_agent/sdr/gates_test.exs=:
+*Result: 14/46 passed*. The 14 passing are pre-existing seed and gate
+tests; every failure is the intended missing behaviour.
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| Hand-off draft, citations, propose checks, edits, lifecycle, append-only, deferred FK (8) | test/sdr_agent/outreach/draft_test.exs | FAILING | =SdrAgent.Outreach= / =Draft= undefined |
+| Approval binding, stale refusal, edit-then-approve, actors, suppressed recipient, reject, revoke, immutability (8) | test/sdr_agent/outreach/approval_test.exs | FAILING | =SdrAgent.Outreach= undefined |
+| Suppression create, idempotency, actors, side effects (email/domain), assignment refusal, store, policy marker (7) | test/sdr_agent/outreach/suppression_test.exs | FAILING | =Outreach.suppress/2= undefined; =SuppressionCheck.impl()= is =NoStore= |
+| AUR deny-all, AUR reads, review queue (3) | test/sdr_agent/outreach/policy_test.exs | FAILING | =SdrAgent.Outreach= undefined |
+| Seed: suppressions seeded, lead 04 stopped, idempotent, deterministic (4) | test/sdr_agent/demo/seed_test.exs | FAILING | =Outreach.Suppression= not a resource; lead 04 still =new= |
+| Suppression gate reads the store (1) | test/sdr_agent/sdr/gates_test.exs | FAILING | checker is =NoStore= |
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED —
+same =bin/tdd_verify.sh= Elixir 1.20 summary-parsing defect as S1–S7; the
+failures above are the intended ones (proceeding under ADR-0001, the peer
+reviews RED on the PR).
+
+Plan adjustment before GREEN (scope, no weakening): the AGT
+=unsubscribe_reply= source (choice 7) moves to S9 with the reply
+classification it depends on (an LLM =reply_classification= Decision needs
+S9's ModelInvocation purpose); S8a's sources are =:manual= and =:seed=. The
+agent/delivery stop authority (choice 6) is still built and tested directly.
+
+-----
+
+** S8a GREEN
+=MIX_TEST_PARTITION=_s8 bin/verify= → *398 passed, 4 excluded* (370 before
+S8a + 28 new; the seed and gates tests changed by contract, see choices 8
+and 11). =mix ash.codegen --check= clean after =mix ash.codegen
+s8a_outreach= (migration =20261007142841=), =mix credo= no issues, =mix
+hex.audit= no advisories, gitleaks 8.30.1 over =origin/main..HEAD= and
+=lib/=: no leaks.
+
+** S8b RED (2026-10-07, branch =s8b-delivery= stacked on S8a)
+=MIX_TEST_PARTITION=_s8 mix test= over the eight new S8b files:
+*Result: 0/39 passed* — every failure is the intended missing behaviour.
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| Local time: quiet-hour boundaries, DST next window, quota day, add days, gap/fold, zone validity (7) | test/sdr_agent/sales/local_time_test.exs | FAILING | =SdrAgent.Sales.LocalTime= undefined |
+| Unknown IANA-shaped zone refused (1) | test/sdr_agent/sales/timezone_validation_test.exs | FAILING | =America/Nowhere= accepted (shape-only check) |
+| Outbox at grant, claim/render/capture/accept, idempotent re-run, header injection, step advance across DST, DLV/REC/SCH reads, transition tables, immutability (8) | test/sdr_agent/outreach/delivery_test.exs | FAILING | =Outreach.DeliveryOperation= not a resource; =Sales.advance_enrollment/3= undefined |
+| Quiet hours, daily cap, cap clamp, recipient change, paused campaign, suppression, revoke, cancel_retry (8) | test/sdr_agent/outreach/delivery_gate_test.exs | FAILING | =DeliveryOperation= / =Compliance= undefined |
+| Retry, permanent, bounded retries, unknown after/before capture, crash + sweeper (6) | test/sdr_agent/outreach/reconciliation_test.exs | FAILING | =DeliveryOperation= undefined |
+| Capture-only adapter, no external adapter in any env, single implementation (3) | test/sdr_agent/outreach/no_external_delivery_test.exs | FAILING | =Outreach.Delivery= undefined; prod sets =Swoosh.ApiClient.Req= |
+| Real-connection races: double claim, revoke vs claim, last cap unit (3) | test/sdr_agent/outreach/delivery_race_test.exs | FAILING | relation =delivery_receipts= does not exist |
+| Follow-up due decision + signal, stopped enrollment, early run (3) | test/sdr_agent/sdr/followup_test.exs | FAILING | =DeliveryOperation= undefined |
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED (same
+=tdd_verify.sh= parsing caveat). The real-connection cleanup lists of
+=handoff_race_test.exs= and =concurrency_test.exs= gain the Outreach tables.
+
+-----
+
+* Implementation Notes
+
+** S8a findings and further choices (flagged for review)
+ 13. *Unreachable invalidation dropped.* S2 DraftRevision: "creating a
+     revision … invalidates any granted Approval of an older revision". A
+     granted approval holds its draft in =queued= and a revision can only be
+     added in =pending_review= (revoke returns it), so no granted approval of
+     an older revision can exist when a revision is created; the code path is
+     not built (TDD: no untested scope). The =newer_revision= reason stays in
+     the enum. S8b's send gate re-checks the hash regardless.
+ 14. *Rejected approvals bind too.* A rejection names the reviewed revision
+     and hash like a grant (a stale rejection is refused), so the record says
+     exactly which content was rejected.
+ 15. *Read-time checks are internal.* The changes that check invariants
+     (=DraftConsistency=, =RevisionRules=, =CitationRules=, =BindApproval=,
+     =ApplySuppression=) read with =authorize?: false= inside the action's
+     transaction, as =get_and_lock_for_update= and S5's =RelatedInState= do;
+     nothing they read is returned.
+ 16. *Revision audit payload.* =outreach.revision.created= carries the
+     citations (argument =citations=) so the join rows are covered by the
+     parent's record hash and event (S2 "AE: in parent event");
+     RevisionCitation has no event of its own and is not =__sdr_audited__=.
+ 17. *Terminal-immutable Draft and Approval.* Both reuse
+     =SdrAgent.Audit.SQL.terminal_immutable/3=: terminal rows never change,
+     non-terminal rows change only their lifecycle columns, and neither can be
+     deleted. A test proves the Approval binding columns and a revoked row are
+     frozen.
+ 18. *Domain suppression match* compares the contact email's domain exactly
+     (no parent-domain matching).
+
+** S8a review round 1 (Codex, PR #13 comment 6042168527: CHANGES REQUESTED)
+Choices 1–18 accepted. Dispositions:
+
+1. *MF1 — suppression missed a terminal lead's dependent work: FIXED.*
+   =ApplySuppression= now locks *every* lead of a matching contact (any
+   status) and derives enrollments, drafts and approvals from all of them;
+   only the Lead =:stop= itself is limited to open leads. RED (assertion):
+   email and domain scope with an operator-stopped lead left the enrollment
+   =active=; the real-connection stop-vs-suppress race ended
+   ={stopped, active, queued, granted}=. Atomic rollback is proven by a test
+   trigger that refuses the draft cancel: no suppression, lead, enrollment,
+   draft, approval or event change (this test passed before the fix —
+   regression coverage, not RED).
+2. *MF2 — hand-off Draft FK waited on Contact under the chain head: FIXED.*
+   The hand-off now locks the recipient Contact and its AgentRun =FOR SHARE=
+   (after Lead =FOR UPDATE= and Campaign =FOR SHARE=) before its first gate
+   append. Audit of the new Draft/revision/citation FK parents in that
+   transaction: Lead and Campaign already locked; enrollment, Draft and
+   revision new in it; SequenceStep immutable once its sequence is active
+   (a refused edit holds its lock without appending); Decision,
+   EvidenceClaim and the completed ModelInvocation are append-only or
+   terminal; Contact and AgentRun were the mutable ones — both now locked.
+   RED (real connections, =outreach_race_test.exs=): an operator holding
+   the contact =FOR UPDATE=, then calling =change_email= after the agent
+   entered its hand-off, died with =40P01 deadlock_detected=. GREEN: both
+   finish serially; the run succeeds with one enrollment and one Draft;
+   the chain verifies (4 consecutive runs).
+3. *Important — RED evidence wording: ACCEPTED.* The original S8a RED
+   (=62c1966=) failed through setup (=drafted!/2= called the missing
+   =Outreach.list_records/2=), i.e. undefined-function errors rather than
+   feature assertions. It stays NEEDS_REVIEW for that reason as well as the
+   =tdd_verify.sh= parser defect. The round-1 corrections above have
+   assertion-level RED (=00fbcdf=).
+4. *Important — grant binds the current locked email: ACCEPTED as designed;
+   S10 must show and refresh the recipient at confirmation* (recorded in the
+   S10 hand-off note).
+
+GREEN: =bin/verify= *403 passed, 4 excluded*; credo clean.
+Lock order after this round (S8a): Lead → Enrollment → Draft → Approval
+(suppression); Lead → Campaign → Contact → AgentRun (hand-off); Draft →
+Approval (grant/revoke); every row lock before the first append.
+
+** S8b GREEN
+=MIX_TEST_PARTITION=_s8 bin/verify= → *438 passed, 4 excluded* (398 after
+S8a + 40 new; one S5 assertion changed by contract: the enrollment transition
+table gains ={:complete, [:active], :completed}=, which S5 assigned to S8).
+=mix ash.codegen --check= clean after =mix ash.codegen s8b_delivery=,
+=mix credo= no issues, =mix hex.audit= no advisories (with =tz= 0.28.4),
+gitleaks 8.30.1 over =origin/main..HEAD=: no leaks. The real-connection race
+suite (=delivery_race_test.exs=) passed 5 of 5 consecutive runs.
+
+** S8b findings and choices (flagged for review)
+ 19. *Time zone database (ADR-0011, proposed).* =tz= 0.28.4 (Apache-2.0, IANA
+     2026d compiled in, no network, no new transitive package). All local-time
+     math is in =SdrAgent.Sales.LocalTime=; a DST gap resolves to the first
+     instant after it, a fold to the earlier instant. The S5 zone validation
+     now requires the zone to exist (S5 choice 14 deferred this to S8).
+ 20. *Outbox at the grant.* =Approval :approve= inserts the pending
+     DeliveryOperation (=idempotency_key= ="delivery:" <> approval_id=, the
+     binding copied from the approval) and its =delivery= job in the grant's
+     transaction.
+ 21. *One gate Decision per evaluation.* =send_gate= (deterministic,
+     =outreach.send_gate/1=) records every input (approval status, the three
+     hashes, bound vs current email, contact status, matching suppression ids,
+     enrollment/campaign status, footer version, zone, local time, quiet
+     window, attempt) and outcome =pass=, =defer_quiet_hours=, =defer_quota=
+     or =refuse= (+ reason). The first claim also records =quota_check=
+     (=reserved= / =exhausted=). Decision keys are per evaluation (UUIDv7
+     suffix); the claim itself is idempotent by state under the row lock.
+ 22. *Refusal → cancel.* A refusal cancels the delivery (=last_error.reason=),
+     invalidates a still-granted approval (=content_mismatch= →
+     =newer_revision=, recipient changed/archived → =recipient_changed=,
+     =suppressed=, anything else — enrollment or campaign not active, unknown
+     footer — → =campaign_closed=, the closest S2 reason) and cancels the
+     draft. A *paused* campaign also cancels (S2: "gate fails otherwise →
+     cancelled"); re-approval is the path after a resume.
+ 23. *Lock order (ADR-0009 "every row lock before the first append").*
+     Enrollment → draft → delivery → approval → quota day → chain head, in
+     every writer: the claim (draft, delivery, approval, quota day), the
+     outcome and reconciliation steps (enrollment, draft, delivery), the
+     revoke (=LockDraftFirst=, =CancelPendingDelivery=: draft → delivery →
+     approval), =cancel_retry= (draft → delivery) and the suppression side
+     effects (leads → enrollments → *all* open drafts of those leads in one
+     locked query → their unclaimed deliveries → granted approvals). Found
+     while building S8b: S8a's revoke locked the draft after its first append
+     (fixed on the S8a branch, =bdc94f6=); a suppression that read drafts in
+     review before waiting on a draft lock could miss a draft a concurrent
+     revoke had just returned to review (fixed: one locked query, judged on
+     the locked rows). Both are covered by real-connection races.
+ 24. *Capture adapter, not configurable.* =Delivery.adapter/0= always returns
+     =CaptureAdapter=; there is no adapter config key. The adapter's
+     =captured= receipt is its own durable record (written in its own
+     transaction, as a provider would), which =lookup/2= reads for
+     reconciliation; the provider message id is derived from the idempotency
+     key, so a repeated delivery returns the same id and stores nothing. The
+     only test seam (=:capture_faults=, test-only) can make a capture fail,
+     time out or crash, never reach anything. =config/prod.exs= no longer sets
+     a Swoosh HTTP API client (=api_client: false=); a test reads the
+     dev/test/prod configs and asserts no external adapter or client in any.
+ 25. *Unknown, crash, reconciliation.* An adapter timeout → =unknown= +
+     =reconciliation_required= Failure + a =reconciliation= job. A crash
+     after the hand-off leaves the claim =attempting=; the
+     =StaleDeliverySweeper= cron (every minute) marks claims older than 300 s
+     =unknown=. Reconciliation (REC, =delivery_reconciliation= Decision): a
+     =captured= receipt → =accepted= (receipt =reconciled=, Failure resolved,
+     draft sent, enrollment advanced); none → =failed_retryable= (Failure
+     resolved, retry) or, at max attempts, =failed_permanent= keeping the
+     reconciliation Failure as the attention item (S7 choice 2: one Failure
+     per condition).
+ 26. *Retries.* =max_attempts= 3; backoff 60 s · 2^(attempt−1); the gate
+     re-runs on every retry except the quota (the first claim's unit and date
+     stand); the third retryable failure is permanent. =failed_retryable →
+     failed_permanent= is reached through a new attempt, not directly.
+ 27. *Message.* Deterministic RFC 5322 bytes (=Delivery.Message=, CRLF,
+     fixed header order, =Date= = the request instant (grant), so every
+     attempt renders identical bytes, =Message-ID= from the key,
+     =List-Unsubscribe= + one-click, footer =footer/1=), stored as a Payload
+     (=message/rfc822=) whose sha256 is on the operation and every receipt.
+     Header values are folded to one line (no header injection; tested).
+     Self-review found the first version dated the message at the claim, so
+     a retry re-rendered different bytes; RED: the retry test's new
+     assertion =rendered_sha256= unchanged failed (5/6), GREEN after the
+     fix.
+ 28. *Unsubscribe token.* =HMAC-SHA256(HMAC-SHA256(secret_key_base,
+     "sdr-unsubscribe-key/1"), "sdr-unsubscribe/1|tenant|contact")=,
+     base64url, under the reserved host =sdr.example.test=;
+     =Unsubscribe.verify/3= for S9.
+ 29. *Enrollment advancement.* =Sales.advance_enrollment/3= (DLV, REC, SCH)
+     picks =:advance_step= (position forward only; next due = accepted_at +
+     next step's =delay_days= local days in the campaign zone) or =:complete=
+     (last step → completed). An enrollment no longer active when the
+     acceptance is recorded (e.g. suppressed meanwhile) is left as it is.
+ 30. *Follow-up schedule.* The acceptance inserts one =followup= job at
+     =next_step_due_at= (named by string — Outreach never depends on the
+     agent plane at compile time). =SdrAgent.SDR.FollowupWorker= (SCH)
+     records a deterministic =followup_next_step= Decision (=draft_followup=
+     / =stop=, key per enrollment and step) and emits =sdr.followup.due=.
+     *Deferred to S9:* the agent route that drafts the follow-up (S7 notes
+     assign routes for the declared S9 signals there).
+ 31. *Reads granted.* DLV, REC and SCH read Lead, Contact, Campaign,
+     CampaignEnrollment and SequenceStep (S5 obligation).
+ 32. *Operation rows.* Delivery, reconciliation and follow-up jobs do not
+     create =Operations.Operation= rows; the DeliveryOperation is the
+     operator-visible outbox record and its attention Failures carry the
+     subject. Wiring Operation wrappers for these queues is left to S13 with
+     the other job-level crash recovery.
+ 33. *Queues.* =delivery: 5, reconciliation: 5, followup: 10= (spec §13
+     illustrative values); the sweeper runs on =reconciliation=.
+
+** What S8b, S9 and S10 must know (S8a)
+- *S8b:* the grant (=Outreach.approve/3=) is where the DeliveryOperation and
+  its Oban job are inserted (outbox); =:revoke= must first cancel a pending
+  delivery; Draft gains =queued → sent | failed=; Approval gains =granted →
+  consumed=; the suppression side effects must also cancel pending /
+  failed_retryable deliveries (lock them in =ApplySuppression='s
+  =before_action=, after approvals).
+- *S9:* add the WHK and AGT (=unsubscribe_reply= from a
+  =reply_classification= Decision) suppression actions next to =:manual=;
+  reuse =ApplySuppression= (side effects and lock order) and
+  =NormalizeSuppression=; =Draft :cancel= (=InternalWrite=) is the reply
+  side effect for drafts; =Sales.Checks.SuppressionContext= already admits
+  WHK and AGT.
+- *S10:* review queue =Outreach.list_review_queue/1=; a reviewer edits with
+  =edit_draft/3= and approves/rejects with the revision id + hex hash shown
+  on screen (=approve/3=, =reject/3=), and must show and refresh the
+  recipient email at confirmation (the grant binds the contact's current
+  email under a lock); =revoke/2=; citations per revision
+  (=RevisionCitation= → =EvidenceClaim=) are the "click a sentence → see
+  evidence" links; =diff_from_ai_baseline= is the AI-vs-human diff.
+
+** S8b review round 1 (Codex, PR #14 comment 6042419798: CHANGES REQUESTED)
+ADR-0011 design APPROVED (now =accepted=). Choices 19–22 and 24–33 accepted;
+23 needed the fixes below. The S8a findings (MF1 cascade, MF2 hand-off
+Contact lock) are fixed on #13 and carried into this branch by the rebase;
+the S8b cascade includes unclaimed deliveries of every matching lead's
+drafts. Dispositions:
+
+1. *MF1 — grant waited for the enrollment FK under the chain head: FIXED.*
+   =BindApproval= locks enrollment =FOR SHARE= → draft =FOR UPDATE= →
+   campaign and contact =FOR SHARE= before the first append (an unlocked peek
+   of the draft names them; its references never change), so the outbox
+   row's FKs never wait. RED (real connections): a writer holding the
+   enrollment and then the draft (the suppression order), and a plain
+   grant-vs-suppression race, both ended in =40P01 deadlock_detected=.
+   GREEN: both finish; the grant's approval, delivery and job are atomic; no
+   granted approval is left behind after a suppression.
+2. *MF2 — the gate claimed from stale facts: FIXED.* The gate locks
+   enrollment =FOR SHARE= → draft → delivery → approval → campaign and
+   contact =FOR SHARE= → quota day, and decides only on the locked rows. RED
+   (real connections): an email change, a campaign pause and an enrollment
+   stop, each committed while the gate ran, still let the delivery be
+   claimed and captured. GREEN: each is seen — the delivery is cancelled, no
+   receipt, the approval not consumed, no quota unit spent.
+3. *MF3 — concurrent follow-ups published twice: FIXED.* The FollowupWorker
+   locks the enrollment =FOR UPDATE= and checks due time, state and an
+   earlier decision on the locked row, inside the transaction that records
+   the decision and its signal. RED: two concurrent executions emitted two
+   =sdr.followup.due= events. GREEN: one decision, one signal.
+4. *Important — bytes re-rendered, not frozen: FIXED.* The gate renders
+   before deciding and refuses a retry whose bytes differ from the first
+   attempt's (=rendered_drift=; cancelled, no capture), so a delivery is
+   only ever sent with the bytes of its first claim. RED: with a rotated
+   endpoint secret a retry was accepted with different bytes. The PR text
+   no longer claims more than this.
+5. *Important — RED evidence wording: ACCEPTED.* The original S8b RED
+   (=160f664=) failed through missing modules/resources reached by helper
+   pattern matches, not feature assertions; it stays NEEDS_REVIEW for that
+   reason as well. =9b4df17= and this round's =75f6666= are assertion-level.
+6. *Choice 19 note: FIXED (docs).* =LocalTime.next_wall_time/3= documents
+   that in a fall-back fold it returns the earlier occurrence of the wall
+   time on the next day it applies to, never the second occurrence.
+
+Global lock order after both rounds (choice 23, amended): Lead → Enrollment
+→ Draft → Delivery → Approval → Campaign → Contact → AgentRun → Quota day →
+chain head; every transaction takes its row locks (=FOR UPDATE=, or
+=FOR SHARE= for rows it only reads or references) before its first audit
+append. Writers: suppression (lead → enrollment → draft → delivery →
+approval), hand-off (lead → campaign → contact → run), grant (enrollment →
+draft → campaign → contact), revoke (draft → delivery → approval),
+=cancel_retry= (draft → delivery), gate (enrollment → draft → delivery →
+approval → campaign → contact → quota day), outcome and reconciliation
+(enrollment → draft → delivery), follow-up (enrollment), single-row
+operator writes (their own row).
+
+** What S9, S10 and S13 must know (S8b)
+- *S9:* =DeliveryOperation :mark_delivered= / =:mark_bounced= (WHK) exist
+  and are unwired; a bounce opens a =delivery_failed= Failure and should
+  create a =hard_bounce= Suppression (its =delivery_operation_id= FK exists).
+  A matched reply must cancel the enrollment's =pending= / =failed_retryable=
+  deliveries and =pending_review= drafts (use =ApplySuppression='s lock
+  order; =DeliveryOperation :cancel= and =Draft :cancel= take the
+  =InternalWrite= marker). The unsubscribe link token is
+  =Outreach.Unsubscribe.verify/3=. Add the agent route for
+  =sdr.followup.due= (the FollowupWorker already decides and emits it) and
+  bump the SDRAgent definition version.
+- *S10:* delivery state, =last_error=, =last_decision_id= and the timestamps
+  are on =DeliveryOperation=; receipts and the exact message
+  (=rendered_sha256= → =Audit.read_content/2=) per delivery; =cancel_retry/2=
+  for retryable ones; =Operations.list_attention/1= shows
+  =reconciliation_required= and =delivery_failed= Failures (subject the
+  delivery).
+- *S13:* golden path = approve → =Oban.drain_queue(queue: :delivery)= →
+  =accepted=; Oban restart/idempotency: a re-run job is a no-op by state; a
+  crash after capture is recovered by the sweeper + reconciliation without a
+  second capture (tested). Operation wrappers for the S8 queues (choice 32)
+  are open.
+

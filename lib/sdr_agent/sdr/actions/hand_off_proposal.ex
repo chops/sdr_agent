@@ -6,18 +6,26 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   model output (operator attention) and is never handed off.
 
   A valid one is handed off in *one transaction*: the Lead row is locked
-  `FOR UPDATE` and the Campaign `FOR SHARE` before anything is appended to
-  the audit chain (lock order Lead → Campaign → chain head; a concurrent
-  operator stop or campaign pause either commits first and is seen here, or
-  waits), the deterministic gates (campaign active, recipient not
+  `FOR UPDATE`, the Campaign, the recipient Contact and the AgentRun
+  `FOR SHARE` before anything is appended to the audit chain (lock order
+  Lead → Campaign → Contact → AgentRun → chain head; a concurrent operator
+  stop, campaign pause, contact edit or run cancel either commits first and
+  is seen here, or waits). The Contact and the AgentRun are the mutable
+  parents the new Draft's foreign keys reference: locking them first means
+  the Draft insert never waits for one of them while this transaction holds
+  the chain head (review #13 MF2; the other parents are locked above, new in
+  this transaction, or immutable), the deterministic gates (campaign active, recipient not
   suppressed) and the `enrollment` Decision are recorded against those
   rows, and on `enroll` the CampaignEnrollment, the Lead qualified →
   in_outreach transition and the durable hand-off record — the
   `sdr.draft.completed` signal event naming the run's exact draft,
   validation and enrollment Decisions, ModelInvocation, enrollment and
   sequence step — commit together or not at all. S8 creates the Draft from
-  that record (`SdrAgent.SDR.proposal/2`). A refused enrollment ends the
-  assignment.
+  that record (`SdrAgent.SDR.proposal/2`, read inside the same transaction):
+  the Draft and its agent revision 1 with citations
+  (`SdrAgent.Outreach.propose_draft/2`) commit with the hand-off, so a
+  committed hand-off always has its draft awaiting review. A refused
+  enrollment ends the assignment.
   """
   use SdrAgent.SDR.Action,
     name: "sdr_hand_off_proposal",
@@ -35,6 +43,7 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
 
   alias SdrAgent.Agents
   alias SdrAgent.Audit
+  alias SdrAgent.Outreach
   alias SdrAgent.Repo
   alias SdrAgent.Sales
   alias SdrAgent.SDR.Context
@@ -67,7 +76,8 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   defp hand_off(%{lead_id: lead_id, plan: plan} = params, ctx) do
     with {:ok, lead} <- lock(ctx, Sales.Lead, lead_id, :for_update),
          {:ok, campaign} <- lock(ctx, Sales.Campaign, plan.campaign_id, "FOR SHARE"),
-         {:ok, contact} <- Support.fetch(ctx, Sales.Contact, lead.contact_id),
+         {:ok, contact} <- lock(ctx, Sales.Contact, lead.contact_id, "FOR SHARE"),
+         {:ok, _run} <- lock(ctx, Agents.AgentRun, ctx.run_id, "FOR SHARE"),
          {:ok, campaign_check} <- Support.campaign_gate(ctx, campaign, lead_id, "enroll"),
          {:ok, suppression} <- Support.suppression_gate(ctx, contact, lead_id, "enroll") do
       enroll? =
@@ -137,11 +147,48 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
              personalization_validation_decision_id: params.personalization_check.decision_id,
              enrollment_decision_id: decision.id
            }),
-         {:ok, _event} <- Signals.record(signal, ctx.actor, run: run, parent: ctx.signal_id) do
+         {:ok, _event} <- Signals.record(signal, ctx.actor, run: run, parent: ctx.signal_id),
+         {:ok, proposal} <- SdrAgent.SDR.proposal(ctx.run_id, actor: ctx.actor),
+         {:ok, _draft} <- Outreach.propose_draft(draft_attrs(proposal), actor: ctx.actor) do
       {:ok,
        ctx.agent_state
        |> Map.put(:phase, :review)
        |> Map.put(:proposal_id, draft.decision_id)}
     end
+  end
+
+  # The Draft and its agent revision 1, rebuilt from the committed hand-off
+  # record (`SdrAgent.SDR.proposal/2`, read inside this transaction).
+  defp draft_attrs(%{output: output} = proposal) do
+    claims =
+      for claim <- output.claims,
+          do: %{
+            evidence_claim_id: claim.evidence_id,
+            kind: :claim,
+            text: claim.claim,
+            confidence: claim.confidence
+          }
+
+    personalization =
+      for item <- output.personalization,
+          do: %{evidence_claim_id: item.evidence_id, kind: :personalization, text: item.text}
+
+    %{
+      lead_id: proposal.lead_id,
+      enrollment_id: proposal.enrollment_id,
+      sequence_step_id: proposal.sequence_step_id,
+      campaign_id: proposal.campaign_id,
+      recipient_contact_id: proposal.recipient_contact_id,
+      origin_agent_run_id: proposal.run_id,
+      subject: output.subject,
+      body_text: output.body,
+      angle: output.angle,
+      cta: output.cta,
+      risk_flags: output.risk_flags,
+      decision_id: proposal.decision_id,
+      model_invocation_id: proposal.model_invocation_id,
+      citations:
+        Enum.uniq_by(claims ++ personalization, &{&1.evidence_claim_id, &1.kind, &1.text})
+    }
   end
 end

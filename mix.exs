@@ -93,6 +93,7 @@ defmodule SdrAgent.MixProject do
        compile: false,
        depth: 1},
       {:swoosh, "~> 1.16"},
+      {:tz, "== 0.28.4"},
       {:req, "~> 0.5"},
       {:opentelemetry, "== 1.7.0"},
       {:opentelemetry_api, "== 1.5.0"},
