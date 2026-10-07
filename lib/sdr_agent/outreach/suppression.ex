@@ -22,7 +22,9 @@ defmodule SdrAgent.Outreach.Suppression do
   Actions: `:manual` (ADM; the creator is recorded), `:seed` (SEED,
   dev/test only), `:from_webhook` (WHK, S9: unsubscribe link, unsubscribe
   reply by the deterministic `unsubscribe_rule` Decision, hard bounce,
-  complaint — always naming the WebhookEvent). Reads: ADM, REV, AUR, AGT, DLV, WHK, AUD. Audited:
+  complaint — always naming the WebhookEvent), `:from_classification` (AGT,
+  S9b: an LLM `reply_classification` of `unsubscribe` may only *add* the
+  reply's `unsubscribe_reply` suppression). Reads: ADM, REV, AUR, AGT, DLV, WHK, AUD. Audited:
   `outreach.suppression.created`.
   """
   use Ash.Resource,
@@ -159,6 +161,25 @@ defmodule SdrAgent.Outreach.Suppression do
       change Changes.ApplySuppression
     end
 
+    create :from_classification do
+      description "AGT: ensure the unsubscribe_reply suppression of a reply the model classified as unsubscribe (add-only)."
+      accept [:scope, :value, :decision_id, :reply_id]
+      require_attributes [:decision_id, :reply_id]
+      upsert? true
+      upsert_identity :unique_value
+      upsert_fields []
+      upsert_condition Ash.Expr.expr(false)
+      return_skipped_upsert? true
+      change set_attribute(:reason, :unsubscribe_reply)
+      change Changes.NormalizeSuppression
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change {Changes.CheckSuppressionSource, decision_kind: :reply_classification}
+      change SdrAgent.Research.Changes.MarkExisting
+      change {AppendEvent, @event}
+      change Changes.ApplySuppression
+    end
+
     create :seed do
       description "SEED (dev/test only): a fixture suppression (reason manual) with a fixture id."
       accept [:id, :scope, :value]
@@ -193,6 +214,10 @@ defmodule SdrAgent.Outreach.Suppression do
 
     policy action(:from_webhook) do
       authorize_if {Checks.ActorType, types: [:webhook_ingestor]}
+    end
+
+    policy action(:from_classification) do
+      authorize_if {Checks.ActorType, types: [:agent_runtime]}
     end
 
     policy action_type(:read) do
