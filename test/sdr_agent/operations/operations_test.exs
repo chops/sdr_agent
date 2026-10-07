@@ -170,8 +170,9 @@ defmodule SdrAgent.OperationsTest do
 
     test "an operation failing because of an existing Failure links it instead of a duplicate",
          ctx do
-      existing = failure!(ctx)
       {:ok, running} = Operations.start_operation(operation!(ctx), actor: ctx.agent)
+      # Review (Codex PR #10): only a live Failure of this operation's condition links.
+      existing = failure!(ctx, %{operation_id: running.id})
 
       {:ok, discarded} =
         Operations.fail_operation(running, %{failure_id: existing.id}, actor: ctx.agent)
