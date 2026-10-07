@@ -261,6 +261,15 @@ not refused with =Forbidden=.
 ** S12c — reconciliation/projection/attention/e2e
 Separate Phase 4a/4b gate. Runtime reconciled method allowlist stays empty.
 
+Phase 4a candidate (test-only, stacked on S12b): 26 scenario tests under
+=test/sdr_agent/agents/witness/= fail by =ExUnit.AssertionError= through
+={:error, {:not_implemented, f}}= call helpers (store reader, projection,
+reconciler e2e, workers); the R3 empty-allowlist control passes. Hermetic
+stand-in proxy =test/support/fake_witness_proxy.exs= writes the S12a v1
+layout (raw blobs under =witness/sha256=), and =fake_claude_cli.exs= mode
+=witness= plays shim + proxy for one real facade call. Independent peer RED
+verification required before GREEN.
+
 ** S12d — operator deployment and enablement
 Owner alone deploys nix-darwin. One budgeted synthetic external model call supplies proof; enabling a method is a separate reviewed PR, never an automatic effect of a passing fixture test.
 

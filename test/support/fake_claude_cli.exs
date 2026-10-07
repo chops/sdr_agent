@@ -23,6 +23,95 @@ observed = ~w(SDR_MODEL_INVOCATION_ID SDR_TRACEPARENT CLAUDE_CODE_USE_BEDROCK
               ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_FOUNDRY_BASE_URL)
 
 case mode do
+  "witness" ->
+    # argv: witness <store root> <variant>. Plays shim + S12a proxy for one
+    # call: records the exchange(s) under the propagated invocation id in a
+    # stand-in witness store, then answers like the CLI.
+    unless Code.ensure_loaded?(SdrAgent.Test.FakeWitnessProxy),
+      do: Code.require_file(Path.join(__DIR__, "fake_witness_proxy.exs"))
+
+    alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
+    [_mode, root, variant | _] = System.argv()
+    stdin = IO.read(:stdio, :eof)
+    id = System.get_env("SDR_MODEL_INVOCATION_ID")
+    tp = System.get_env("SDR_TRACEPARENT")
+    answer = ~s({"answer":"qualified","score":42})
+
+    message = fn prompt, text, sse_opts ->
+      [
+        traceparent: tp,
+        request: Proxy.messages_request(prompt),
+        response: Proxy.sse_response(text, sse_opts)
+      ]
+    end
+
+    if id do
+      ok = message.(stdin, answer, [])
+
+      case variant do
+        "none" ->
+          :ok
+
+        "ok" ->
+          Proxy.exchange!(root, id, ok)
+
+        "mismatch" ->
+          Proxy.exchange!(root, id, message.(stdin, ~s({"answer":"disqualified","score":42}), []))
+
+        "prompt_changed" ->
+          Proxy.exchange!(root, id, message.(stdin <> " (edited)", answer, []))
+
+        "tool_use" ->
+          Proxy.exchange!(
+            root,
+            id,
+            message.(stdin, answer, blocks: [{:text, answer}, {:tool_use, nil}])
+          )
+
+        "no_stop" ->
+          Proxy.exchange!(root, id, message.(stdin, answer, stop: false))
+
+        "double" ->
+          Enum.each(1..2, fn _ -> Proxy.exchange!(root, id, ok) end)
+
+        "open" ->
+          Proxy.exchange!(root, id, ok) && Proxy.exchange!(root, id, Keyword.put(ok, :open, true))
+
+        "unknown_route" ->
+          Proxy.exchange!(root, id, ok)
+
+          Proxy.exchange!(root, id,
+            route: "/anthropic/unknown",
+            traceparent: tp,
+            request: "{}",
+            response: "{}"
+          )
+
+        "count_tokens" ->
+          Proxy.exchange!(root, id, ok)
+
+          Proxy.exchange!(root, id,
+            route: "/anthropic/v1/messages/count_tokens",
+            traceparent: tp,
+            request: Proxy.messages_request(stdin),
+            response: ~s({"input_tokens":12})
+          )
+
+        "count_tokens_content" ->
+          Proxy.exchange!(root, id, ok)
+
+          Proxy.exchange!(root, id,
+            route: "/anthropic/v1/messages/count_tokens",
+            traceparent: tp,
+            request: Proxy.messages_request(stdin),
+            response: ~s({"input_tokens":12,"content":[{"type":"text","text":"x"}]})
+          )
+      end
+    end
+
+    IO.puts(init)
+    IO.puts(result)
+
   "env_dump" ->
     # argv: env_dump <dump file> [sleep ms]. Records the observed child env
     # and the wall-clock interval of this launch, then answers normally.
