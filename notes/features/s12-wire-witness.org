@@ -297,6 +297,51 @@ by direct calls; worker tests run the real enqueued =Oban.Job= (Oban's
 =perform_job/3= rejects =:id=); re-drive cap tightened to exactly 4 plus a
 later scan adding no job.
 
+** S12c review round 1 (Codex =013232c0=, CHANGES REQUESTED @225af68)
+Codex's seven regressions were adopted verbatim as RED
+(=test/sdr_agent/agents/witness/review_regressions_test.exs=, commit
+"review RED"). Codex's raw run =/tmp/s12c-225af68-review-regressions-v2.txt=
+shows them failing on the reviewed head. Dispositions:
+1. Mismatch erasure: fixed. A mismatch head is superseded only when a
+   *different, actually evaluated* projection version disagrees. Weaker or
+   unsupported observations carry no projection and keep the mismatch.
+   Tests cover missing, corrupt, incomplete, unknown-version and
+   now-ambiguous observations.
+2. Non-authoritative inventory: fixed. Current heads absent from the inventory
+   get an =inferred= successor (=exchange_missing=). Everything gone → store
+   error downgrade. Version/encoding/completeness gates apply to every
+   exchange, so an unsupported count_tokens extra is unclassified.
+3. Malformed SSE: fixed. A strict sequence is enforced: message_start first,
+   ordered index-matched blocks (start → typed deltas → stop),
+   message_delta, message_stop last and once; only =ping= is allowed.
+   Error, unknown, early, duplicate, missing-stop, wrong-index and bad-delta
+   frames are unsupported.
+4. Scan starvation: fixed. Eligibility is decided over the bounded window
+   (500 rows; the ADR-0004 200/day cap keeps it covering 24 h) before the
+   50-per-pass cap.
+5. Interrupted attempts: fixed with the existing lifecycle only (no entity
+   delta). The worker levels the Operation with Oban's attempt: an
+   unsettled =running= attempt is failed as =attempt_interrupted= (linking the
+   live Failure), then retried. Exceptions are failed and returned. The scan
+   settles a =running= attempt stale for 10 min (fail) and a =failed= one
+   stale for 10 min (cancel, the kind actor's own transition), after which
+   it is re-drivable.
+6. Unaudited enqueue denial: fixed. =enqueue/2= runs through
+   =Audit.Guard=, before argument checks. Subject must be a terminal
+   ClaudeCLI invocation of the actor's tenant; generation must be in 1..4.
+Important items:
+- Store: reads are bounded from the opened file (cap + 1 bytes) with a
+  post-read lstat identity check (device/inode/size/mtime);
+  group/world-writable entries are refused. The trust boundary and the
+  residual (no O_NOFOLLOW in Erlang; the directory listing is read before
+  its cap) are documented in the module.
+- Stale observation: a metadata-only fingerprint (lstat of at most 64
+  entries, no content read) is re-checked under the invocation lock; a
+  changed store makes the pass a no-op (=status: :stale=). This is a
+  bounded deviation from "no file I/O under mutation locks": metadata only.
+- Rebased onto main =b71d2bd=; =bin/verify= 688 passed / 4 excluded;
+  ash.codegen clean.
+
 ** S12d — operator deployment and enablement
 Owner alone deploys nix-darwin. One budgeted synthetic external model call supplies proof; enabling a method is a separate reviewed PR, never an automatic effect of a passing fixture test.
 
