@@ -10,7 +10,8 @@ supersedes: null
 
 Accepted (2026-10-06, owner decision recorded in ADR-0001: "Real model: Codex
 app-server on the owner's ChatGPT plan; deterministic fake model is the
-default"). Details amended by Codex consultations 08, 09 and 15.
+default"). Details amended by Codex consultations 08, 09 and 15, and by the
+S6a implementation approved on 2026-10-06.
 
 ## Context
 
@@ -106,6 +107,35 @@ Constraints on the real provider:
 - The public README states that users bring their own login or API key.
 
 We will not build a `claude -p` subscription adapter.
+
+### S6a implementation amendment
+
+S6a implements the accepted boundary without adding a dependency:
+
+- `SdrAgent.AI.ModelProvider` owns pre-call reservation, a `gen_ai.*` span,
+  provider invocation, mandatory Zoi parsing, and settlement.
+- `SdrAgent.AI.BudgetStore` is the replacement seam for S3. Its S6a
+  implementation is a supervised Agent with volatile 20-per-run and
+  200-per-UTC-day counters. Reservations count attempts and are not refunded;
+  it is safe for deterministic development but not authoritative across
+  restarts, so unattended real-provider use remains blocked on S3 persistence.
+- `CodexAppServer` is one GenServer owning one stdio Port, which makes
+  concurrency 1 executable. It exchanges newline-delimited JSON-RPC, sends
+  `clientInfo.name = "sdr_agent"`, reads `account/read`, `config/read`, and
+  `model/list` before any turn, and fails closed without a cached ChatGPT
+  account or selected model. It never invokes login or reads token files.
+- Provenance is an allowlist: app-server user agent/version, selected model
+  catalog fields, non-secret effective config fields, account mode, and the
+  owner's recorded data-control setting. Raw account/config responses are
+  discarded. Turn request/response records remain available for S3 audit
+  persistence.
+- Threads use `approvalPolicy = "never"` and `sandbox = "read-only"`, expose
+  no dynamic tools, and treat tool or approval requests as provider failures.
+  Structured output is requested with `Zoi.to_json_schema/1` and parsed again
+  locally with `Zoi.parse/2`.
+- The deterministic Fake is the configured default. A hermetic OS-process
+  fake covers the JSONL contract; the real cached-login smoke test is tagged
+  `:external` and excluded from normal test and CI runs.
 
 ## Justification
 

@@ -12,6 +12,7 @@ flowchart LR
     subgraph External["External"]
         Browser[Browser/Client]
         API[External APIs]
+        Codex[Codex app-server<br/>cached ChatGPT login]
         Tempo[Tempo OTLP HTTP<br/>dev only 127.0.0.1:4318]
     end
 
@@ -39,6 +40,14 @@ flowchart LR
         Cache[(Cache)]
     end
 
+    subgraph AI["Structured Model Boundary"]
+        Provider[ModelProvider facade]
+        Budget[Volatile budget guard<br/>20 per run / 200 per UTC day]
+        Validation[Zoi output validation]
+        Adapter[Serialized Codex adapter]
+        Fake[Deterministic Fake<br/>dev/test default]
+    end
+
     subgraph Observability["OpenTelemetry"]
         Instrumentation[Phoenix / Bandit / Ecto<br/>Oban / Req / Ash]
         GenAI[gen_ai spans<br/>IDs and hashes by default]
@@ -61,9 +70,15 @@ flowchart LR
     Verify --> Postgres
     Append -. trace_id / span_id .-> Instrumentation
     Resources -.-> Cache
+    Actions --> Provider
+    Provider --> Budget
+    Provider --> Validation
+    Provider --> Fake
+    Provider --> Adapter
+    Adapter -- JSONL stdio --> Codex
     Router -. spans .-> Instrumentation
     Resources -. spans .-> Instrumentation
-    Actions -. spans .-> GenAI
+    Provider -. spans .-> GenAI
     Instrumentation -. OTLP dev only .-> Tempo
     GenAI -. OTLP dev only .-> Tempo
 
@@ -77,11 +92,13 @@ flowchart LR
 1. **External** - Browsers, mobile apps, API clients
 2. **Web Layer** - Phoenix router, controllers, LiveViews, channels
 3. **Domain Layer** - Ash domains orchestrate business logic
-4. **Data Layer** - Persistence (PostgreSQL, ETS, etc.)
+4. **Model Boundary** - A pre-call budget reservation precedes deterministic
+   Fake or serialized JSONL app-server invocation; every output is Zoi-validated.
+5. **Data Layer** - Persistence (PostgreSQL, ETS, etc.)
 
 ## Manual Additions Needed
 
-- [ ] Specific external API integrations
+- [x] Codex app-server local JSONL integration
 - [ ] Message queues (if any)
 - [ ] Background job processors
 - [ ] PubSub flows for real-time updates

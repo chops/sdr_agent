@@ -129,7 +129,9 @@ config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id, :otel_trace_id, :otel_span_id]
 
-config :sdr_agent, otel_capture_content: false
+config :sdr_agent,
+  model_provider: SdrAgent.AI.ModelProvider.Fake,
+  otel_capture_content: false
 
 config :opentelemetry, resource: %{service: %{name: "sdr_agent"}}
 
