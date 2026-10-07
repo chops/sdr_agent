@@ -252,6 +252,45 @@ Failure transition-table test compared against an unnormalised expected
 list (=[:open, :acknowledged]= vs the sorted actual); the expected table is
 now normalised like the actual — the assertion is unchanged.
 
+** S7a review round 1 (Codex, PR #10 comment 6031802821: CHANGES REQUESTED)
+Choices 1–7 accepted (5: UTC prevails over the brief's Denver wording; the
+ModelBudgetDay deferral is now recorded in the S2 entity model). Must-fix:
+
+1. A failed Operation could link a resolved or unrelated Failure → it now
+   links only a live (open/acknowledged) Failure whose =operation_id= is the
+   operation or whose subject is the operation; AgentRun attention Failures
+   carry the run's =operation_id=. Refusal rolls the transition back.
+2. Every system actor could resolve any Failure → =:resolve= is ADM, REV,
+   the reconciler, and the system actor that opened it, read from the
+   trusted ledger (actor type of its =operations.failure.opened= event).
+3. A successful retry left the Operation's Failure open → =:succeed=
+   resolves the operation's live Failures in the same transaction (rolls
+   back if a resolution fails); unrelated Failures stay open.
+4. Only the attention copy was redacted → AgentRun =failure_reason= and the
+   Lead block =status_reason= pass the redactor before the causing row and
+   its event are written; tested against the row, the Failure, every event's
+   canonical bytes and payload, the payload store and captured debug logs.
+5. CI: gitleaks flagged the redactor tests' fabricated samples → the
+   unmerged history was rewritten (force-with-lease on the S7 branch, as the
+   review allows) so the RED commit builds the samples at run time
+   (=SdrAgent.Test.SecretShapes=); no scanner change and no ignore entry.
+   Rebased onto =main= =935fe47= (S11b); the commit that removed the
+   volatile BudgetStore now is the one that replaces it.
+
+Important: =Stamp= moved to =SdrAgent.Audit.Changes= (Operations no longer
+imports an Agents helper); the failure map selects known string/atom keys
+(unknown keys no longer raise =ArgumentError=).
+
+RED: =test/sdr_agent/operations= *28/37 passed* — the 9 new tests failed on
+the defects above (one of them raising the =ArgumentError=); the existing
+link test now opens its Failure for the operation (behaviour change the
+review requires). GREEN: =bin/verify= *339 passed, 3 excluded*; credo,
+=ash.codegen --check=, =hex.audit= clean.
+
+Follow-up named by the review, not in this PR: S11b's anchoring/OTS
+maintenance jobs still record failures as sink receipts and Oban state;
+wiring them to Operation/Failure is a later S7-owned integration.
+
 -----
 
 * Implementation Notes
