@@ -195,6 +195,16 @@ Budgets still apply: 20 model calls per run and 200 per UTC day.
 - **Anchoring errors in the log.** The anchor key is not set. See
   "Audit verification and export" above.
 
+## Acceptance checks
+
+- `mix test` covers the golden path (LiveViewTest and HTTP smoke),
+  Postgres-only reconstruction, crash recovery, hermetic configuration and
+  the secret scan.
+- Real browser (local only, never against the dev server):
+  `bin/demo --test reset --yes && bin/demo --test seed && bin/demo --test serve`,
+  then `node test/browser/golden_path_smoke.mjs` (Node 22 or later, local
+  Chrome).
+
 ## Development
 
 ```sh
