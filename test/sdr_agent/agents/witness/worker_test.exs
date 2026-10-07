@@ -217,8 +217,11 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
 
       SdrAgent.Clock.freeze(DateTime.add(ctx.start, 22, :minute))
       assert :ok = perform(@scan_worker, %{})
-      assert {:ok, [_, second]} = reconcile_operations(ctx, invocation)
-      assert second.idempotency_key =~ ":2"
+      assert {:ok, [_, _] = ops} = reconcile_operations(ctx, invocation)
+
+      assert Enum.map(ops, &(&1.idempotency_key |> String.split(":") |> List.last())) ==
+               ["1", "2"]
+
       assert length(events_of_type(ctx.tenant, "model.invocation.sent")) == sent
     end
 
@@ -259,6 +262,7 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
     Operation
     |> Ash.Query.for_read(:read, %{}, actor: ctx.rec)
     |> Ash.Query.filter(kind == :reconcile_model and subject_id == ^invocation.id)
+    |> Ash.Query.sort(idempotency_key: :asc, id: :asc)
     |> Ash.read()
   end
 
