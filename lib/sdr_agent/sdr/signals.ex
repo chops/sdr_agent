@@ -24,6 +24,14 @@ defmodule SdrAgent.SDR.Signals do
             sdr.reply.received sdr.followup.due
             sdr.lead.suppressed sdr.campaign.paused)
 
+  @data_keys Map.new(
+               ~w(lead_id campaign_id qualification_id qualified accepted rejected ungrounded
+                  enrollment_id sequence_step_id recipient_contact_id proposal_decision_id
+                  model_invocation_id claims_validation_decision_id
+                  personalization_validation_decision_id enrollment_decision_id),
+               &{&1, String.to_atom(&1)}
+             )
+
   @doc "Every signal type of spec §5."
   def types, do: @types
 
@@ -45,12 +53,25 @@ defmodule SdrAgent.SDR.Signals do
   def dump(%Jido.Signal{} = signal),
     do: %{"id" => signal.id, "type" => signal.type, "data" => stringify(signal.data)}
 
-  @doc "Rebuilds a signal from `dump/1`."
-  def load(%{"id" => id, "type" => type, "data" => data}),
-    do:
-      build(type, Map.new(data, fn {key, value} -> {String.to_existing_atom(key), value} end),
-        id: id
-      )
+  @doc """
+  Rebuilds a signal from `dump/1`: `{:ok, signal}` or `{:error, :invalid_signal}`
+  for any other shape, an unknown type, or a data key outside the S7 signal
+  vocabulary (keys are mapped from an allow-list, never created as atoms).
+  """
+  def load(%{"id" => id, "type" => type, "data" => data})
+      when is_binary(id) and is_binary(type) and is_map(data) do
+    with true <- Enum.all?(Map.keys(data), &Map.has_key?(@data_keys, &1)),
+         {:ok, signal} <-
+           build(type, Map.new(data, fn {key, value} -> {Map.fetch!(@data_keys, key), value} end),
+             id: id
+           ) do
+      {:ok, signal}
+    else
+      _ -> {:error, :invalid_signal}
+    end
+  end
+
+  def load(_dumped), do: {:error, :invalid_signal}
 
   @doc """
   Appends `signal` to the audit chain as `actor`. `opts`: `:run` (the
