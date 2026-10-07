@@ -213,6 +213,25 @@ s8a_outreach= (migration =20261007142841=), =mix credo= no issues, =mix
 hex.audit= no advisories, gitleaks 8.30.1 over =origin/main..HEAD= and
 =lib/=: no leaks.
 
+** S8b RED (2026-10-07, branch =s8b-delivery= stacked on S8a)
+=MIX_TEST_PARTITION=_s8 mix test= over the eight new S8b files:
+*Result: 0/39 passed* — every failure is the intended missing behaviour.
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| Local time: quiet-hour boundaries, DST next window, quota day, add days, gap/fold, zone validity (7) | test/sdr_agent/sales/local_time_test.exs | FAILING | =SdrAgent.Sales.LocalTime= undefined |
+| Unknown IANA-shaped zone refused (1) | test/sdr_agent/sales/timezone_validation_test.exs | FAILING | =America/Nowhere= accepted (shape-only check) |
+| Outbox at grant, claim/render/capture/accept, idempotent re-run, header injection, step advance across DST, DLV/REC/SCH reads, transition tables, immutability (8) | test/sdr_agent/outreach/delivery_test.exs | FAILING | =Outreach.DeliveryOperation= not a resource; =Sales.advance_enrollment/3= undefined |
+| Quiet hours, daily cap, cap clamp, recipient change, paused campaign, suppression, revoke, cancel_retry (8) | test/sdr_agent/outreach/delivery_gate_test.exs | FAILING | =DeliveryOperation= / =Compliance= undefined |
+| Retry, permanent, bounded retries, unknown after/before capture, crash + sweeper (6) | test/sdr_agent/outreach/reconciliation_test.exs | FAILING | =DeliveryOperation= undefined |
+| Capture-only adapter, no external adapter in any env, single implementation (3) | test/sdr_agent/outreach/no_external_delivery_test.exs | FAILING | =Outreach.Delivery= undefined; prod sets =Swoosh.ApiClient.Req= |
+| Real-connection races: double claim, revoke vs claim, last cap unit (3) | test/sdr_agent/outreach/delivery_race_test.exs | FAILING | relation =delivery_receipts= does not exist |
+| Follow-up due decision + signal, stopped enrollment, early run (3) | test/sdr_agent/sdr/followup_test.exs | FAILING | =DeliveryOperation= undefined |
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED (same
+=tdd_verify.sh= parsing caveat). The real-connection cleanup lists of
+=handoff_race_test.exs= and =concurrency_test.exs= gain the Outreach tables.
+
 -----
 
 * Implementation Notes

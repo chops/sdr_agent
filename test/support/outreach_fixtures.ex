@@ -7,6 +7,8 @@ defmodule SdrAgent.OutreachFixtures do
 
   import SdrAgent.SDRCase, only: [assign!: 2, drain!: 0, fixture_lead!: 2]
 
+  require Ash.Query
+
   alias SdrAgent.Accounts
   alias SdrAgent.Demo.Fixtures
   alias SdrAgent.Outreach
@@ -104,9 +106,70 @@ defmodule SdrAgent.OutreachFixtures do
     enrollment
   end
 
+  @doc "Drafts and approves fixture lead `key`; returns the draft, approval and its delivery."
+  def approved!(ctx, key \\ "01") do
+    %{draft: draft} = drafted = drafted!(ctx, key)
+    approval = approve!(ctx, draft, operator!(ctx, :reviewer))
+    Map.merge(drafted, %{approval: approval, delivery: delivery_of!(ctx, approval)})
+  end
+
+  @doc "The DeliveryOperation of an approval (as ADM)."
+  def delivery_of!(ctx, approval) do
+    {:ok, [delivery]} =
+      Outreach.list_records(Outreach.DeliveryOperation,
+        filter: [approval_id: approval.id],
+        actor: ctx.admin
+      )
+
+    delivery
+  end
+
   @doc "A record of `resource` reloaded by id (as ADM)."
   def outreach!(ctx, %resource{id: id}) do
     {:ok, record} = Outreach.fetch(resource, id, actor: ctx.admin)
     record
+  end
+
+  @doc "Receipts of a delivery (as ADM), oldest first."
+  def receipts!(ctx, delivery) do
+    {:ok, receipts} =
+      Outreach.list_records(Outreach.DeliveryReceipt,
+        filter: [delivery_operation_id: delivery.id],
+        actor: ctx.admin
+      )
+
+    receipts
+  end
+
+  @doc "Runs the queued delivery jobs inline (including scheduled ones)."
+  def deliver!, do: Oban.drain_queue(queue: :delivery, with_safety: false, with_scheduled: true)
+
+  @doc "Runs the queued reconciliation jobs inline."
+  def reconcile!,
+    do: Oban.drain_queue(queue: :reconciliation, with_safety: false, with_scheduled: true)
+
+  @doc "Decisions about a subject (as ADM), oldest first."
+  def decisions_about!(ctx, subject_id, kind) do
+    {:ok, decisions} =
+      SdrAgent.Agents.Decision
+      |> Ash.Query.for_read(:read, %{}, actor: ctx.admin)
+      |> Ash.Query.filter(subject_id == ^subject_id and kind == ^kind)
+      |> Ash.Query.sort(decided_at: :asc, id: :asc)
+      |> Ash.read()
+
+    decisions
+  end
+
+  @doc "Sets an application env key for the rest of the test."
+  def put_env!(key, value) do
+    previous = Application.fetch_env(:sdr_agent, key)
+    Application.put_env(:sdr_agent, key, value)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:sdr_agent, key, value)
+        :error -> Application.delete_env(:sdr_agent, key)
+      end
+    end)
   end
 end

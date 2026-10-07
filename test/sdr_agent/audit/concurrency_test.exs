@@ -10,7 +10,8 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
   alias Ecto.Adapters.SQL.Sandbox
   alias SdrAgent.Audit
 
-  @tables ~w(anchor_sink_receipts audit_exports audit_anchors audit_signing_keys
+  @tables ~w(delivery_receipts delivery_operations send_quota_days approvals
+             revision_citations draft_revisions drafts suppressions anchor_sink_receipts audit_exports audit_anchors audit_signing_keys
              audit_accesses audit_events audit_chain_heads retention_markers
              qualification_evidences qualifications evidence_claims research_artifacts
              campaign_enrollments leads campaigns sequence_steps sequences contacts accounts
