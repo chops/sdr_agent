@@ -137,6 +137,16 @@ defmodule SdrAgent.Scripts.DemoTest do
     end
   end
 
+  test "predeliver checks the database, then passes --approve through", ctx do
+    env = stubbed(ctx, [{"STUB_REPO_LINE", "SDR_DEMO_REPO localhost 5520 sdr_agent_dev"}])
+
+    assert {_out, 0} = demo(["predeliver"], env)
+    assert {out, 0} = demo(["predeliver", "--approve"], env)
+    assert out =~ "approving as the Demo Reviewer fixture operator"
+
+    assert [_, "sdr.demo.predeliver", _, "sdr.demo.predeliver --approve"] = mix_calls(ctx)
+  end
+
   describe "reset never drops a database that is in use" do
     @demo_repo "SDR_DEMO_REPO localhost 5520 sdr_agent_dev"
 
@@ -231,7 +241,18 @@ defmodule SdrAgent.Scripts.DemoTest do
     assert {after_refusal, 0} = demo(["--test", "status"], env)
     assert after_refusal =~ "tenant: seeded"
 
-    for output <- [reset, before, seed, status, refused],
+    # predeliver: lead 01 to a draft awaiting review, then (approved as the
+    # demo reviewer) captured — or deferred, when the wall clock is inside
+    # the campaign's quiet hours.
+    assert {drafted, 0} = demo(["--test", "predeliver"], env)
+    assert drafted =~ "stage: awaiting review"
+    assert drafted =~ ~r"draft: /drafts/[0-9a-f-]{36}"
+
+    assert {approved, 0} = demo(["--test", "predeliver", "--approve"], env)
+    assert approved =~ "approving as the Demo Reviewer fixture operator"
+    assert approved =~ ~r/stage: (captured|deferred by the send gate)/
+
+    for output <- [reset, before, seed, status, refused, drafted, approved],
         %{password: password} <- Fixtures.users() do
       refute output =~ password
     end
