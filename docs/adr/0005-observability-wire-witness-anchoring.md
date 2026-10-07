@@ -237,7 +237,9 @@ and queue ruling `c22df84e-c201-4e86-9e17-b44247864bd1`.
   within the same four-generation bound. The scan window is bounded by rows
   (500), not proven by the budget. Terminal invocations are immutable, so
   each row's `updated_at` is set once, but a crash-recovery backlog could
-  exceed the window and is then processed as earlier rows age out.
+  exceed the window. Rows beyond it may then age out of the 24-hour window
+  unprocessed. This is a known limitation to resolve before higher volume,
+  not a promise of eventual processing.
 - **Test scope.** The hermetic end-to-end tests use a fake CLI that writes
   protocol-shaped store files itself. It is a functional fixture pipeline,
   **not** proof of transport or independence. S12a's real shim/proxy checks
