@@ -8,6 +8,7 @@ defmodule SdrAgent.Demo.StatusTest do
 
   alias SdrAgent.Demo.Fixtures
   alias SdrAgent.Demo.Seed
+  alias SdrAgent.Demo.SigningKey
   alias SdrAgent.Demo.Status
 
   test "an empty database is reachable, migrated and reported as not seeded" do
@@ -31,6 +32,7 @@ defmodule SdrAgent.Demo.StatusTest do
 
   test "after the seed: leads by status, empty review and capture, a valid chain" do
     {:ok, _} = Seed.run()
+    {:ok, _} = SigningKey.ensure()
 
     report = Status.report()
     suppressed = length(Fixtures.suppressed_contact_emails())
@@ -56,6 +58,22 @@ defmodule SdrAgent.Demo.StatusTest do
     assert report.tenant == :incomplete
     refute Status.ready?(report)
     assert "tenant: SEED INCOMPLETE (run bin/demo seed)" in Status.format(report)
+  end
+
+  test "without the audit signing key registered the demo is not ready" do
+    {:ok, _} = Seed.run()
+
+    report = Status.report()
+
+    assert report.signing_key == :missing
+    refute Status.ready?(report)
+    assert "signing key: NOT REGISTERED (run bin/demo seed)" in Status.format(report)
+
+    {:ok, _} = SigningKey.ensure()
+    report = Status.report()
+    assert report.signing_key == :registered
+    assert Status.ready?(report)
+    assert "signing key: registered" in Status.format(report)
   end
 
   test "a chain that does not verify is not ready" do

@@ -10,7 +10,9 @@ defmodule Mix.Tasks.Sdr.Demo.Seed do
   Refuses to run outside `MIX_ENV=dev` or `test` before starting the
   application; the domain additionally refuses every seed write unless
   `config :sdr_agent, seeding_allowed?: true` (set only in dev and test).
-  Idempotent: re-running writes nothing.
+  Idempotent: re-running writes nothing. It also registers the pinned
+  audit-anchor public key (`SdrAgent.Demo.SigningKey`, public data only) so
+  anchoring works after a reset.
   """
   use Mix.Task
 
@@ -26,9 +28,19 @@ defmodule Mix.Tasks.Sdr.Demo.Seed do
     case SdrAgent.Demo.Seed.run() do
       {:ok, %{created: created, existing: existing}} ->
         Mix.shell().info("Demo seed: #{created} rows written, #{existing} already present.")
+        signing_key()
 
       {:error, reason} ->
         Mix.raise("Demo seed refused: #{inspect(reason)}")
+    end
+  end
+
+  # S13c: anchoring needs the pinned public key registered (public data only).
+  defp signing_key do
+    case SdrAgent.Demo.SigningKey.ensure() do
+      {:ok, :registered} -> Mix.shell().info("Audit signing key: registered (public key).")
+      {:ok, :already_registered} -> Mix.shell().info("Audit signing key: already registered.")
+      {:error, reason} -> Mix.raise("Audit signing key registration failed: #{inspect(reason)}")
     end
   end
 
