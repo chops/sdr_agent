@@ -63,23 +63,13 @@ defmodule SdrAgent.Outreach.Locks do
   end
 
   @doc """
-  Locks and returns `%{leads, enrollments, drafts, deliveries, approvals}`
-  for `lead_ids` and the open leads of `contact_ids`.
+  Locks and returns `%{leads, enrollments, drafts, deliveries,
+  locked_deliveries, approvals}` for `lead_ids` and every lead of
+  `contact_ids` (optional `delivery_ids` are locked with the deliveries;
+  `deliveries` lists only the unclaimed ones of the drafts).
   """
   def targets(tenant_id, %{lead_ids: lead_ids, contact_ids: contact_ids} = spec) do
-    extra_delivery_ids = Map.get(spec, :delivery_ids, [])
-
-    leads =
-      if lead_ids == [] and contact_ids == [] do
-        []
-      else
-        Lead
-        |> Ash.Query.filter(
-          tenant_id == ^tenant_id and (id in ^lead_ids or contact_id in ^contact_ids)
-        )
-        |> locked()
-      end
-
+    leads = lock_leads(tenant_id, lead_ids, contact_ids)
     lead_ids = Enum.map(leads, & &1.id)
 
     enrollments =
@@ -92,25 +82,8 @@ defmodule SdrAgent.Outreach.Locks do
       lock(Draft, tenant_id, lead_id: [in: lead_ids], status: [in: [:pending_review, :queued]])
 
     queued_ids = for %{status: :queued, id: id} <- drafts, do: id
-
-    locked_deliveries =
-      if queued_ids == [] and extra_delivery_ids == [] do
-        []
-      else
-        DeliveryOperation
-        |> Ash.Query.filter(
-          tenant_id == ^tenant_id and
-            ((draft_id in ^queued_ids and state in [:pending, :failed_retryable]) or
-               id in ^extra_delivery_ids)
-        )
-        |> locked()
-      end
-
-    deliveries =
-      Enum.filter(
-        locked_deliveries,
-        &(&1.draft_id in queued_ids and &1.state in [:pending, :failed_retryable])
-      )
+    locked_deliveries = lock_deliveries(tenant_id, queued_ids, Map.get(spec, :delivery_ids, []))
+    deliveries = Enum.filter(locked_deliveries, &unclaimed_of?(&1, queued_ids))
 
     drafts =
       Enum.filter(drafts, fn draft ->
@@ -132,6 +105,31 @@ defmodule SdrAgent.Outreach.Locks do
       approvals: approvals
     }
   end
+
+  defp lock_leads(_tenant_id, [], []), do: []
+
+  defp lock_leads(tenant_id, lead_ids, contact_ids) do
+    Lead
+    |> Ash.Query.filter(
+      tenant_id == ^tenant_id and (id in ^lead_ids or contact_id in ^contact_ids)
+    )
+    |> locked()
+  end
+
+  defp lock_deliveries(_tenant_id, [], []), do: []
+
+  defp lock_deliveries(tenant_id, queued_ids, extra_ids) do
+    DeliveryOperation
+    |> Ash.Query.filter(
+      tenant_id == ^tenant_id and
+        ((draft_id in ^queued_ids and state in [:pending, :failed_retryable]) or
+           id in ^extra_ids)
+    )
+    |> locked()
+  end
+
+  defp unclaimed_of?(delivery, queued_ids),
+    do: delivery.draft_id in queued_ids and delivery.state in [:pending, :failed_retryable]
 
   defp lock(_resource, _tenant_id, [{_field, [in: []]} | _]), do: []
 

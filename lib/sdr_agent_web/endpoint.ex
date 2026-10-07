@@ -48,10 +48,12 @@ defmodule SdrAgentWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  # S9: webhook requests are read raw (bounded) before any parsing.
+  plug SdrAgentWeb.WebhookIntake
+
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
-    body_reader: {SdrAgentWeb.RawBodyReader, :read_body, []},
     json_decoder: Phoenix.json_library()
 
   plug Plug.MethodOverride

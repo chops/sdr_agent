@@ -294,3 +294,50 @@ is locked first and only by webhook processors. New real-connection race:
 a reply racing a manual suppression of the same contact (both finish, no
 deadlock, delivery cancelled, lead stopped) — 3/3 consecutive runs, with
 the two existing races.
+
+** S9a review round 1 (Codex, PR #15: CHANGES REQUESTED) — dispositions
+RED (=8fbb5ad=, assertion-level except the parser case, which fails with
+the reported =Plug.Parsers.ParseError=): 25/30 over the touched files.
+
+1. *MF1 — event type not authenticated: FIXED.* A valid signature now
+   counts only when the signed bytes name the route's type (body ="type"=
+   = path segment); otherwise the request is stored =invalid= / =rejected=
+   with its =signature_invalid= Failure and cannot pre-claim the event id
+   (identity covers valid events only). Test: a signed =delivered= body
+   posted to =/bounce= and =/complaint= is rejected, no suppression, the
+   delivery stays =accepted=, and the genuine =delivered= event still lands.
+2. *MF2 — processor read Payload content as the kernel: FIXED by removing
+   the read.* The ingest already holds the bytes; the =integration= job
+   carries them (=raw_body=, base64) and the processor checks
+   sha256(bytes) = the event's =raw_body_sha256= under the event lock, then
+   decodes. No Payload content is read by the webhook path at all, no
+   kernel context is manufactured, no Payload policy changes (so no
+   entity-policy delta). Test: the job carries the exact bytes; a tampered
+   carried body fails the event (=validation_error=), writes no Reply, and
+   no access event exists. Payload remains the durable audited record.
+3. *Important — malformed JSON before ingest: FIXED.* =SdrAgentWeb.WebhookIntake=
+   (an endpoint plug before =Plug.Parsers=) reads webhook bodies raw,
+   bounded to 64 KiB; a malformed body is stored and rejected (401); a body
+   over the limit gets 413 and nothing stored (documented: unbounded bodies
+   are not persisted). =RawBodyReader= removed.
+4. *Important — failed retry / transient vs permanent: FIXED (scope noted).*
+   Permanent problems (bytes, payload, unknown message, forged token) →
+   =failed= =validation_error=; any other error rolls back and returns
+   ={:error, _}= so Oban retries (max 3); the last attempt records =failed=
+   with class =crash=. *Not provided:* an operator retry of a =failed= event
+   (=failed → processed= is declared but no API re-drives it) — tracked for
+   S13 with the other worker-recovery work.
+5. *Important — concurrent Message-ID: FIXED.* Reply processing takes a
+   transaction advisory lock on the tenant + Message-ID before the
+   existence check (after the event lock, before any append; only reply
+   processors take it). Real-connection test: two event ids, one
+   Message-ID, processed at once → one Reply, both events =processed=, no
+   Failure (4/4 runs).
+6. *Important — inherited #13/#14 fixes: DONE* by the rebase onto
+   =a1fd23c= (every-lead lock set; amended lock order; see above).
+7. *Important — RED wording: ACCEPTED.* The original S9a RED (=c30755f=,
+   0/30) failed mostly on undefined modules/functions (=Signature=,
+   =WebhookEvent=, =Reply=), a missing table (=replies=) and a missing route
+   (404) — setup-level, not behavioural assertions; it stays NEEDS_REVIEW
+   for that reason as well as the parser defect. This round's RED is
+   assertion-level.

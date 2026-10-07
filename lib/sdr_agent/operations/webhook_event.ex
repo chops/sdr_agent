@@ -166,7 +166,11 @@ defmodule SdrAgent.Operations.WebhookEvent do
     update :mark_failed do
       description "WHK: received → failed, opening a Failure (operator attention)."
       require_atomic? false
-      argument :class, :atom, allow_nil?: false, constraints: [one_of: [:validation_error]]
+
+      argument :class, :atom,
+        allow_nil?: false,
+        constraints: [one_of: [:validation_error, :crash]]
+
       argument :reason, :string, allow_nil?: false
       change get_and_lock_for_update()
 

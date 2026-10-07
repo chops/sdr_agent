@@ -70,6 +70,7 @@ defmodule SdrAgent.Outreach.Webhooks do
          {:ok, tenant_id} <- Kernel.singleton_tenant_id() do
       whk = Actor.system(:webhook_ingestor, tenant_id)
       {verdict, meta} = Signature.verify(headers, raw_body, Clock.utc_now())
+      verdict = bind_type(verdict, raw_body, type)
 
       attrs = %{
         provider: :capture_sim,
@@ -89,21 +90,29 @@ defmodule SdrAgent.Outreach.Webhooks do
     content_type = Map.get(headers, "content-type", "application/octet-stream")
 
     with {:ok, _payload} <- Audit.put_payload(raw_body, cap(content_type), actor: whk) do
-      if verdict == :valid, do: receive_valid(attrs, whk), else: reject(verdict, attrs, whk)
+      if verdict == :valid,
+        do: receive_valid(attrs, raw_body, whk),
+        else: reject(verdict, attrs, whk)
     end
   end
 
-  defp receive_valid(attrs, whk) do
+  defp receive_valid(attrs, raw_body, whk) do
     with {:ok, event} <- create(WebhookEvent, :receive, attrs, whk) do
       if Ash.Resource.get_metadata(event, :sdr_replayed),
         do: %{status: :duplicate, event: event},
-        else: enqueue(event)
+        else: enqueue(event, raw_body)
     end
   end
 
-  defp enqueue(event) do
+  # The job carries the received bytes (the processor never reads Payload
+  # content; the Payload stays the durable, audited record).
+  defp enqueue(event, raw_body) do
     with {:ok, _job} <-
-           %{"webhook_event_id" => event.id, "tenant_id" => event.tenant_id}
+           %{
+             "webhook_event_id" => event.id,
+             "tenant_id" => event.tenant_id,
+             "raw_body" => Base.encode64(raw_body)
+           }
            |> WebhookWorker.new()
            |> Oban.insert(),
          do: %{status: :accepted, event: event}
@@ -115,6 +124,18 @@ defmodule SdrAgent.Outreach.Webhooks do
          do: %{status: :rejected, event: event}
   end
 
+  # The signature covers the bytes, and the bytes must name the route's
+  # event type: a signed event re-posted under another type is not
+  # authenticated for that type (rejected; it cannot pre-claim its id).
+  defp bind_type(:valid, raw_body, type) do
+    case Jason.decode(raw_body) do
+      {:ok, %{"type" => ^type}} -> :valid
+      _ -> :invalid
+    end
+  end
+
+  defp bind_type(verdict, _raw_body, _type), do: verdict
+
   defp external_id(raw_body) do
     case Jason.decode(raw_body) do
       {:ok, %{"id" => id}} when is_binary(id) and byte_size(id) in 1..200 -> id
@@ -124,31 +145,37 @@ defmodule SdrAgent.Outreach.Webhooks do
 
   ## Process
 
-  @doc "WHK: processes the received WebhookEvent `id` once. Returns `:ok`."
-  def process(id, tenant_id) do
+  @doc """
+  WHK: processes the received WebhookEvent `id` once from `raw_body` — the
+  bytes the ingest received and carried in the job (no Payload content is
+  read here; the bytes must hash to the event's `raw_body_sha256`, checked
+  under the event's row lock). Returns `:ok`, or `{:error, reason}` for a
+  transient failure the job should retry. Option `final?: true` (the job's
+  last attempt) records a transient failure as `failed` (class `crash`)
+  instead; a permanent one (bad bytes, payload, message, token) is always
+  `failed` with `validation_error`.
+  """
+  def process(id, tenant_id, raw_body, opts \\ []) do
     whk = Actor.system(:webhook_ingestor, tenant_id)
 
-    case transaction(fn -> process_locked(id, tenant_id, whk) end) do
+    case transaction(fn -> process_locked(id, tenant_id, raw_body, whk) end) do
       {:ok, _} ->
         :ok
 
       {:error, {:invalid, reason}} ->
-        fail(id, tenant_id, reason, whk)
+        fail(id, tenant_id, :validation_error, reason, whk)
 
       {:error, error} ->
-        fail(
-          id,
-          tenant_id,
-          "processing error: #{inspect(error, limit: 3, printable_limit: 200)}",
-          whk
-        )
+        if Keyword.get(opts, :final?, false),
+          do: fail(id, tenant_id, :crash, "processing error: #{describe(error)}", whk),
+          else: {:error, error}
     end
   end
 
-  defp process_locked(id, tenant_id, whk) do
+  defp process_locked(id, tenant_id, raw_body, whk) do
     case lock(WebhookEvent, id, tenant_id) do
       %{processing_status: :received} = event ->
-        with {:ok, data} <- decode(event, tenant_id),
+        with {:ok, data} <- decode(event, raw_body),
              :ok <- apply_event(event.event_type, data, event, whk),
              {:ok, _} <- update(event, :mark_processed, %{}, whk),
              do: :processed
@@ -158,12 +185,12 @@ defmodule SdrAgent.Outreach.Webhooks do
     end
   end
 
-  defp fail(id, tenant_id, reason, whk) do
+  defp fail(id, tenant_id, class, reason, whk) do
     {:ok, _} =
       transaction(fn ->
         case lock(WebhookEvent, id, tenant_id) do
           %{processing_status: :received} = event ->
-            update(event, :mark_failed, %{class: :validation_error, reason: reason}, whk)
+            update(event, :mark_failed, %{class: class, reason: reason}, whk)
 
           _ ->
             :done
@@ -173,17 +200,16 @@ defmodule SdrAgent.Outreach.Webhooks do
     :ok
   end
 
-  defp decode(event, tenant_id) do
-    {:ok, payload} =
-      Audit.Payload
-      |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
-      |> Ash.Query.filter(tenant_id == ^tenant_id and sha256 == ^event.raw_body_sha256)
-      |> Ash.read_one()
+  defp describe(%{__exception__: true} = error), do: error.__struct__ |> inspect() |> cap()
+  defp describe(error), do: error |> inspect(limit: 3, printable_limit: 200) |> cap()
 
-    with {:ok, %{"data" => data}} when is_map(data) <- Jason.decode(payload.content),
+  defp decode(event, raw_body) do
+    with true <- is_binary(raw_body) and :crypto.hash(:sha256, raw_body) == event.raw_body_sha256,
+         {:ok, %{"data" => data}} when is_map(data) <- Jason.decode(raw_body),
          {:ok, data} <- Zoi.parse(schema(event.event_type), data) do
       {:ok, data}
     else
+      false -> {:error, {:invalid, "carried body does not match the event's raw body hash"}}
       _ -> {:error, {:invalid, "payload does not match the #{event.event_type} schema"}}
     end
   end
@@ -223,6 +249,10 @@ defmodule SdrAgent.Outreach.Webhooks do
 
     with :ok <- valid_email(from),
          :ok <- valid_email(normalise(data.to)) do
+      # Distinct events can carry one Message-ID: serialize on it before the
+      # check, so a concurrent duplicate waits and then sees the stored reply.
+      serialize_message(event.tenant_id, data.message_id)
+
       if replied?(data.message_id, event.tenant_id),
         do: :ok,
         else: reply(data, from, match(data, from, event.tenant_id), event, whk)
@@ -378,6 +408,12 @@ defmodule SdrAgent.Outreach.Webhooks do
     |> Ash.Query.sort(accepted_at: :desc, id: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read_one!(authorize?: false)
+  end
+
+  defp serialize_message(tenant_id, message_id) do
+    Ecto.Adapters.SQL.query!(Repo, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+      "sdr-reply-message:#{tenant_id}:#{message_id}"
+    ])
   end
 
   defp replied?(message_id, tenant_id) do

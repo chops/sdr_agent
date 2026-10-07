@@ -23,16 +23,9 @@ defmodule SdrAgentWeb.WebhookController do
     end
   end
 
-  # The bytes cached by SdrAgentWeb.RawBodyReader, or (for a content type
-  # Plug.Parsers passed through) the unread body.
+  # The exact bytes read by SdrAgentWeb.WebhookIntake (always present on
+  # this route; the intake answers 413 above its limit).
   defp raw_body(%{private: %{sdr_raw_body: raw}} = conn), do: {raw, conn}
-
-  defp raw_body(conn) do
-    case read_body(conn, length: 1_000_000) do
-      {:ok, raw, conn} -> {raw, conn}
-      {_more_or_error, _partial, conn} -> {"", conn}
-    end
-  end
 
   defp reply(conn, status, body), do: conn |> put_status(status) |> json(body)
 end

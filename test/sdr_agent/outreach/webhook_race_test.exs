@@ -80,7 +80,7 @@ defmodule SdrAgent.Outreach.WebhookRaceTest do
 
     [processed, attempted] =
       race([
-        fn -> Webhooks.process(event.id, ctx.tenant_id) end,
+        fn -> Webhooks.process(event.id, ctx.tenant_id, body) end,
         fn -> Delivery.attempt(next.id, ctx.tenant_id) end
       ])
 
@@ -116,7 +116,7 @@ defmodule SdrAgent.Outreach.WebhookRaceTest do
 
     [processed, suppressed] =
       race([
-        fn -> Webhooks.process(event.id, ctx.tenant_id) end,
+        fn -> Webhooks.process(event.id, ctx.tenant_id, body) end,
         fn ->
           Outreach.suppress(%{scope: :email, value: to_string(first.recipient_email)},
             actor: ctx.admin
@@ -152,10 +152,12 @@ defmodule SdrAgent.Outreach.WebhookRaceTest do
         {:ok, %{status: :accepted, event: event}} =
           Webhooks.ingest("reply", body, Map.new(signed_headers(body)))
 
-        event
+        {event, body}
       end
 
-    results = race(for e <- events, do: fn -> Webhooks.process(e.id, ctx.tenant_id) end)
+    results =
+      race(for {e, body} <- events, do: fn -> Webhooks.process(e.id, ctx.tenant_id, body) end)
+
     assert Enum.all?(results, &(&1 == :ok)), inspect(results)
 
     {:ok, stored} = Ash.read(WebhookEvent, actor: ctx.admin)
