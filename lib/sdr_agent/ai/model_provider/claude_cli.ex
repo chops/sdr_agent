@@ -4,7 +4,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   Every call launches through `llm-proxy-shim`, requires an init attestation
   with no tools, MCP servers, or slash commands, and pins the `opus` alias to a
-  reviewed resolved model ID. Protocol failures never return process output.
+  reviewed resolved model ID. The result must be exactly one JSON object,
+  optionally wrapped in a single Markdown code fence (as the model sometimes
+  formats longer answers). Protocol failures never return process output.
   Timeouts terminate the complete observed process tree.
   """
 
@@ -180,7 +182,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   defp finish_result(event, init, messages) do
     with result when is_binary(result) <- event["result"],
-         {:ok, output} when is_map(output) <- Jason.decode(result) do
+         {:ok, output} when is_map(output) <- result |> unfence() |> Jason.decode() do
       {:ok,
        %{
          output: output,
@@ -192,6 +194,16 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
        }}
     else
       _ -> {:error, :missing_structured_output}
+    end
+  end
+
+  # The model sometimes wraps its single JSON object in one Markdown code
+  # fence; only that exact shape is unwrapped — any other text around the
+  # object still fails, and Zoi validates the object either way.
+  defp unfence(result) do
+    case Regex.run(~r/\A\s*```(?:json)?\s*\n(.*)\n\s*```\s*\z/s, result, capture: :all_but_first) do
+      [inner] -> inner
+      nil -> result
     end
   end
 
