@@ -18,7 +18,9 @@ defmodule SdrAgent.Operations.Failure do
   open → resolved (T). Resolution requires a note.
 
   Actions: `:open` (system actors), `:acknowledge` (ADM, REV), `:resolve`
-  (ADM, REV, and system actors when the causing condition clears),
+  (ADM, REV, the reconciler, and the system actor that opened it — recorded
+  provenance, `SdrAgent.Operations.Checks.FailureResolver` — when the
+  causing condition clears),
   `:attention` read. Reads: ADM, REV, AUR, AUD and system actors. Every
   write appends an AuditEvent (`operations.failure.*`).
   """
@@ -28,7 +30,7 @@ defmodule SdrAgent.Operations.Failure do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
-  alias SdrAgent.Agents.Changes.Stamp
+  alias SdrAgent.Audit.Changes.Stamp
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Changes.Transition
   alias SdrAgent.Audit.Checks
@@ -160,7 +162,7 @@ defmodule SdrAgent.Operations.Failure do
 
     policy action(:resolve) do
       authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
-      authorize_if {Checks.ActorType, types: @system}
+      authorize_if SdrAgent.Operations.Checks.FailureResolver
     end
 
     policy action_type(:read) do

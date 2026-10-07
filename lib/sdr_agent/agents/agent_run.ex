@@ -9,7 +9,8 @@ defmodule SdrAgent.Agents.AgentRun do
   `operation_id` (the Operations `Operation` running it) and
   `attention_failure_id` (its operator-attention `Failure`), `retry_of_id`,
   `status_reason` (required in failed / budget_exhausted / cancelled),
-  `failure_reason` (redacted detail), `started_at`, `finished_at`.
+  `failure_reason` (detail, passed through the secret redactor before it is
+  written), `started_at`, `finished_at`.
 
   Lifecycle (`transitions/0`): queued → running → succeeded | failed |
   budget_exhausted | cancelled; queued → cancelled. `start` and `succeed`
@@ -36,7 +37,7 @@ defmodule SdrAgent.Agents.AgentRun do
     authorizers: [Ash.Policy.Authorizer]
 
   alias SdrAgent.Agents.Changes.BudgetCounter
-  alias SdrAgent.Agents.Changes.Stamp
+  alias SdrAgent.Audit.Changes.Stamp
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Changes.Transition
   alias SdrAgent.Audit.Checks
@@ -180,6 +181,7 @@ defmodule SdrAgent.Agents.AgentRun do
     update :fail do
       require_atomic? false
       accept [:failure_reason]
+      change {SdrAgent.Operations.Changes.Redact, fields: [:failure_reason]}
 
       argument :status_reason, :atom,
         allow_nil?: false,
@@ -193,7 +195,8 @@ defmodule SdrAgent.Agents.AgentRun do
               class: :run_stopped,
               severity: :critical,
               message: {__MODULE__, :attention_message},
-              field: :attention_failure_id}
+              field: :attention_failure_id,
+              operation_field: :operation_id}
 
       change {Stamp, fields: [:finished_at]}
 
@@ -216,7 +219,8 @@ defmodule SdrAgent.Agents.AgentRun do
               class: :budget_exhausted,
               severity: :critical,
               message: {__MODULE__, :attention_message},
-              field: :attention_failure_id}
+              field: :attention_failure_id,
+              operation_field: :operation_id}
 
       change {Stamp, fields: [:finished_at]}
 
@@ -240,6 +244,7 @@ defmodule SdrAgent.Agents.AgentRun do
               severity: :critical,
               message: {__MODULE__, :attention_message},
               field: :attention_failure_id,
+              operation_field: :operation_id,
               system_only?: true}
 
       change {Stamp, fields: [:finished_at]}
