@@ -6,19 +6,19 @@ defmodule Mix.Tasks.Sdr.Audit.Verify do
   @impl Mix.Task
   def run(argv) do
     {opts, args, invalid} =
-      OptionParser.parse(argv, strict: [public_key: :string, key_id: :string])
+      OptionParser.parse(argv, strict: [public_key: :string, key_id: :string, key_set: :string])
 
     invalid == [] || Mix.raise("invalid options: #{inspect(invalid)}")
     [path] = args
-    key_path = Keyword.get(opts, :public_key, "docs/audit/anchor-signing-key.pub")
-    expected_id = Keyword.get(opts, :key_id, System.get_env("SDR_AUDIT_ANCHOR_KEY_ID"))
-    {:ok, trusted_key} = SdrAgent.Audit.TrustedKey.load(key_path, expected_id)
+    {:ok, trusted_keys} = load_keys(opts)
 
     case SdrAgent.Audit.ExportVerifier.verify(path,
-           trusted_key: trusted_key,
+           trusted_keys: trusted_keys,
            ots_verifier: &verify_ots/2
          ) do
       {:ok, report} ->
+        report.valid? || Mix.raise("verification uncertain: #{inspect(report.issues)}")
+
         Mix.shell().info(
           "valid assurance=#{report.assurance_level} events=#{report.events_checked}"
         )
@@ -28,16 +28,30 @@ defmodule Mix.Tasks.Sdr.Audit.Verify do
     end
   rescue
     MatchError ->
-      Mix.raise("usage: mix sdr.audit.verify [--public-key PATH] [--key-id ID] PATH")
+      Mix.raise(
+        "usage: mix sdr.audit.verify [--key-set MANIFEST | --public-key PATH --key-id ID] PATH"
+      )
+  end
+
+  defp load_keys(opts) do
+    case Keyword.fetch(opts, :public_key) do
+      {:ok, path} ->
+        with {:ok, key} <- SdrAgent.Audit.TrustedKey.load(path, opts[:key_id]), do: {:ok, [key]}
+
+      :error ->
+        SdrAgent.Audit.TrustedKey.load_set(
+          Keyword.get(opts, :key_set, "docs/audit/trusted-keys.json")
+        )
+    end
   end
 
   defp verify_ots(receipt, anchor_hash) do
     with proof when is_binary(proof) <- receipt["proof"],
          {:ok, proof} <- Base.decode64(proof),
          {:ok, hash} <- Base.decode16(anchor_hash, case: :mixed),
-         {:ok, _attestation} <-
+         {:ok, attestation} <-
            SdrAgent.Audit.AnchorSinks.OpenTimestampsSink.verify(proof, hash, []) do
-      true
+      {:ok, attestation}
     else
       _ -> false
     end

@@ -9,15 +9,18 @@ defmodule SdrAgent.Audit.AnchorWorker do
   alias SdrAgent.Audit.Kernel
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: args}) do
+  def perform(%Oban.Job{args: args, attempt: attempt}) do
     with {:ok, tenant_id} <- Kernel.singleton_tenant_id(),
          {:ok, private_key} <- private_key(),
-         {:ok, head} <-
-           SdrAgent.Audit.get_chain_head(actor: SdrAgent.Actor.system(:anchorer, tenant_id)),
          {:ok, latest} <- latest_anchor(tenant_id) do
+      new_events =
+        Anchoring.new_event_count(tenant_id, if(latest, do: latest.to_sequence, else: 0))
+
       cond do
         args["force"] == true -> run_anchor(tenant_id, private_key, :interval)
-        event_due?(head, latest) -> run_anchor(tenant_id, private_key, :event_count)
+        attempt > 1 -> run_anchor(tenant_id, private_key, :interval)
+        new_events == 0 -> :ok
+        event_due?(new_events) -> run_anchor(tenant_id, private_key, :event_count)
         interval_due?(latest) -> run_anchor(tenant_id, private_key, :interval)
         true -> :ok
       end
@@ -54,9 +57,9 @@ defmodule SdrAgent.Audit.AnchorWorker do
     |> Ash.read_one()
   end
 
-  defp event_due?(head, latest) do
+  defp event_due?(new_events) do
     count = Application.get_env(:sdr_agent, :anchor_event_count, 100)
-    head.last_sequence - if(latest, do: latest.to_sequence, else: 0) >= count
+    new_events >= count
   end
 
   defp interval_due?(nil), do: true

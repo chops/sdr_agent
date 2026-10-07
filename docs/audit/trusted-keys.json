@@ -1,0 +1,4 @@
+{
+  "format": "sdr-audit-key-set/1",
+  "keys": ["anchor-signing-key.pub"]
+}

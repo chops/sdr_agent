@@ -68,6 +68,8 @@ defmodule SdrAgent.Audit.AnchorCryptoTest do
   end
 
   test "loads the committed public key as an out-of-band trust root" do
+    assert {:ok, [key]} = TrustedKey.load_set("docs/audit/trusted-keys.json")
+    assert key.status == :active
     assert {:ok, trusted} = TrustedKey.load("docs/audit/anchor-signing-key.pub")
     assert trusted.key_id == "sdr-audit-anchor-ed25519-20261006-d8dd82c7de7d4963"
     assert trusted.status == :active

@@ -131,3 +131,51 @@ provisions the pinned public key without private material.
 Final correction gate: =mix credo= clean; =mix precommit= and =bin/verify=
 both pass with *153 tests, 2 external excluded*; =mix ash.codegen --check=
 passes.
+
+* Second review correction (PR #8, 6396c03)
+Entity-model trigger: no — these fixes enforce existing key lifecycle,
+anchor retry/cadence and evidence-verification invariants; no persisted
+concepts or action contracts are added. Architecture unchanged — no diagram
+update needed. ADR-0005 clarifies executable evidence semantics.
+
+Plan: (1) rotation trust-set + forged backdate regression; (2) confirmed-sink
+retry and idle/event threshold tests; (3) OTS digest/header/Bitcoin evidence
+boundary; (4) immutable retirement, secure output and failure propagation;
+(5) full gates, push, peer re-review. Continues the approved Phase 4b scope.
+
+RED: four assertion failures on the expected missing behavior: pinned key
+set, revocation without trusted time, confirmed-sink retry, conflicting Git
+statement. Existing focused tests remained green. GREEN coverage also adds
+assurance without verifiers, Git/OTS verified evidence, pre/at-revocation time,
+resigned/backdated bundle attack, lead-scope offline verification, symlink
+output refusal, idle intervals, event threshold, and a real upstream detached
+OTS fixture (LGPL-3.0-or-later, provenance/license stored beside it).
+
+The offline CLI documents its Git assurance ceiling rather than pretending
+to verify Git receipts. OTS remains external/opt-in; no Hex/runtime dependency
+was added. Git author time is not accepted as independent revocation proof.
+
+The configured =mix credo= gate is clean and =mix hex.audit= reports no
+advisories/retirements. The optional =bin/static_analysis.sh= reports strict
+Credo alias/readability suggestions (existing baseline plus non-blocking S11
+alias hints);
+compile and format pass; Dialyzer/Sobelow/deps.audit tasks are not configured.
+No exclusions or enforcement settings were changed to hide that baseline.
+
+Self-review added an assertion failure for historical confirmed Git receipts
+raising a post-rotation export's assurance even when its current anchor is not
+published. Export completion and offline assurance now consider only receipts
+bound to the current anchor, while the bundle retains historical receipts for
+revocation verification.
+
+Real-binary evidence: the external wrong-digest test passed with
+=opentimestamps-client 0.7.2= from this flake's pinned nixpkgs input. This
+test needs no Bitcoin node/calendar traffic; full Bitcoin verification stays
+operator-configured and opt-in. The hermetic OTS test also reconstructs the
+exact real detached fixture from a simulated calendar response.
+
+Final local gates: =mix precommit= and =bin/verify= both *161 passed,
+3 external excluded*; =mix ash.codegen --check=, configured =mix credo= and
+=mix hex.audit= pass. The focused audit runner reports *93 passed,
+2 external excluded* in its full output (its legacy summary parser still
+prints zero for Elixir 1.20's =Result:= form). Architecture remains unchanged.

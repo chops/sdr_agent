@@ -55,6 +55,8 @@ defmodule SdrAgent.Audit.AnchoringTest do
     assert anchor.key_id == ctx.key.key_id
     assert anchor.key_status_at_signing == :active
     assert byte_size(anchor.signature) == 64
+    {sha, 0} = System.cmd("git", ["rev-parse", "HEAD"])
+    assert anchor.sdr_agent_git_sha == String.trim(sha)
   end
 
   test "an export with no new events reuses the latest anchor", ctx do
@@ -183,6 +185,16 @@ defmodule SdrAgent.Audit.AnchoringTest do
       |> Ash.read!()
 
     assert Enum.map(receipts, & &1.status) == [:failed, :confirmed]
+
+    assert {:ok, {:existing, _}} =
+             Anchoring.anchor(
+               trigger: :interval,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: sinks
+             )
+
+    assert Agent.get(counter, & &1) == 2
   end
 
   test "forced cadence worker loads the configured key and creates an anchor", ctx do
@@ -201,6 +213,115 @@ defmodule SdrAgent.Audit.AnchoringTest do
              SdrAgent.Audit.AuditAnchor
              |> Ash.Query.for_read(:read, %{}, actor: ctx.anchorer)
              |> Ash.read()
+  end
+
+  test "cadence excludes bookkeeping and idle intervals, but runs for new events", ctx do
+    put_worker_key(ctx.private_key)
+
+    assert {:ok, anchor} =
+             Anchoring.anchor(
+               trigger: :interval,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: []
+             )
+
+    SdrAgent.Clock.freeze(DateTime.add(anchor.inserted_at, 901, :second))
+    {:ok, before} = Audit.list_events(actor: ctx.admin)
+    for _ <- 1..3, do: assert(:ok == AnchorWorker.perform(%Oban.Job{args: %{}}))
+    {:ok, after_idle} = Audit.list_events(actor: ctx.admin)
+    assert length(after_idle) == length(before)
+
+    assert {:ok, _} =
+             Audit.append(%{event_type: "test.new_work", category: :system}, actor: ctx.anchorer)
+
+    assert :ok = AnchorWorker.perform(%Oban.Job{args: %{}})
+
+    anchors =
+      SdrAgent.Audit.AuditAnchor
+      |> Ash.Query.for_read(:read, %{}, actor: ctx.anchorer)
+      |> Ash.Query.sort(anchor_number: :asc)
+      |> Ash.read!()
+
+    assert length(anchors) == 2
+    assert List.last(anchors).trigger == :interval
+  end
+
+  test "event count cadence runs only at its threshold", ctx do
+    put_worker_key(ctx.private_key)
+    old = Application.get_env(:sdr_agent, :anchor_event_count)
+    Application.put_env(:sdr_agent, :anchor_event_count, 2)
+
+    on_exit(fn ->
+      if old,
+        do: Application.put_env(:sdr_agent, :anchor_event_count, old),
+        else: Application.delete_env(:sdr_agent, :anchor_event_count)
+    end)
+
+    assert {:ok, _} =
+             Anchoring.anchor(
+               trigger: :interval,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: []
+             )
+
+    assert {:ok, _} =
+             Audit.append(%{event_type: "test.one", category: :system}, actor: ctx.anchorer)
+
+    assert :ok = AnchorWorker.perform(%Oban.Job{args: %{}})
+
+    anchors =
+      SdrAgent.Audit.AuditAnchor
+      |> Ash.Query.for_read(:read, %{}, actor: ctx.anchorer)
+      |> Ash.read!()
+
+    assert length(anchors) == 1
+
+    assert {:ok, _} =
+             Audit.append(%{event_type: "test.two", category: :system}, actor: ctx.anchorer)
+
+    assert :ok = AnchorWorker.perform(%Oban.Job{args: %{}})
+
+    anchors =
+      SdrAgent.Audit.AuditAnchor
+      |> Ash.Query.for_read(:read, %{}, actor: ctx.anchorer)
+      |> Ash.Query.sort(anchor_number: :asc)
+      |> Ash.read!()
+
+    assert length(anchors) == 2
+    assert List.last(anchors).trigger == :event_count
+  end
+
+  defp put_worker_key(private) do
+    previous = System.get_env("SDR_AUDIT_ANCHOR_PRIVATE_KEY")
+    System.put_env("SDR_AUDIT_ANCHOR_PRIVATE_KEY", Base.encode64(private))
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("SDR_AUDIT_ANCHOR_PRIVATE_KEY", previous),
+        else: System.delete_env("SDR_AUDIT_ANCHOR_PRIVATE_KEY")
+    end)
+  end
+
+  test "Oban retry republishes a failed sink without starting an idle cadence loop", ctx do
+    put_worker_key(ctx.private_key)
+    counter = start_supervised!({Agent, fn -> 0 end})
+    old = Application.get_env(:sdr_agent, :anchor_sinks)
+    Application.put_env(:sdr_agent, :anchor_sinks, [{:file, FailOnceSink, [counter: counter]}])
+
+    on_exit(fn ->
+      if old,
+        do: Application.put_env(:sdr_agent, :anchor_sinks, old),
+        else: Application.delete_env(:sdr_agent, :anchor_sinks)
+    end)
+
+    assert {:error, {:sink_failures, [{:file, :temporary_failure}]}} =
+             AnchorWorker.perform(%Oban.Job{args: %{"force" => true}, attempt: 1})
+
+    assert :ok = AnchorWorker.perform(%Oban.Job{args: %{}, attempt: 2})
+    assert :ok = AnchorWorker.perform(%Oban.Job{args: %{}, attempt: 1})
+    assert Agent.get(counter, & &1) == 2
   end
 
   defp receipts_for(anchor, actor) do

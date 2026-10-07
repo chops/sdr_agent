@@ -26,14 +26,16 @@ defmodule SdrAgent.Audit.Export do
              actor: actor
            ),
          {:ok, export} <- request(scope, actor) do
-      case do_build(export, scope, output, actor, opts) do
-        {:ok, result} ->
-          {:ok, result}
+      finish(do_build(export, scope, output, actor, opts), export, actor)
+    end
+  end
 
-        {:error, reason} = error ->
-          fail(export, reason, actor)
-          error
-      end
+  defp finish({:ok, _} = result, _export, _actor), do: result
+
+  defp finish({:error, reason} = error, export, actor) do
+    case fail(export, reason, actor) do
+      {:ok, _} -> error
+      {:error, failure} -> {:error, {:export_and_terminalization_failed, reason, failure}}
     end
   end
 
@@ -51,7 +53,7 @@ defmodule SdrAgent.Audit.Export do
          {:ok, events} <- select_events(all_events, scope),
          {:ok, payloads} <- collect_payloads(events, actor),
          {:ok, anchors} <- anchors(anchor, actor),
-         {:ok, receipts} <- receipts(anchor, actor),
+         {:ok, receipts} <- receipts(anchors, actor),
          {:ok, key} <- active_key(),
          {:ok, bundle, digest, signature} <-
            bundle(
@@ -111,6 +113,9 @@ defmodule SdrAgent.Audit.Export do
   end
 
   defp complete(export, events, evidence, artifact, actor) do
+    current_anchor_id = List.last(evidence.anchors).id
+    current_receipts = Enum.filter(evidence.receipts, &(&1.anchor_id == current_anchor_id))
+
     attrs = %{
       from_sequence: List.first(events).sequence,
       to_sequence: List.last(events).sequence,
@@ -118,7 +123,7 @@ defmodule SdrAgent.Audit.Export do
       bundle_path: artifact.output,
       signature: artifact.signature,
       key_id: evidence.key.key_id,
-      assurance_level: assurance(evidence.receipts),
+      assurance_level: assurance(current_receipts),
       anchor_ids: Enum.map(evidence.anchors, & &1.id)
     }
 
@@ -288,6 +293,7 @@ defmodule SdrAgent.Audit.Export do
 
   defp receipt_map(receipt) do
     %{
+      anchor_id: receipt.anchor_id,
       sink: receipt.sink,
       status: receipt.status,
       receipt: receipt.receipt,
@@ -295,10 +301,12 @@ defmodule SdrAgent.Audit.Export do
     }
   end
 
-  defp receipts(anchor, actor) do
+  defp receipts(anchors, actor) do
+    ids = Enum.map(anchors, & &1.id)
+
     AnchorSinkReceipt
     |> Ash.Query.for_read(:read, %{}, actor: actor)
-    |> Ash.Query.filter(anchor_id == ^anchor.id)
+    |> Ash.Query.filter(anchor_id in ^ids)
     |> Ash.read()
   end
 
@@ -347,9 +355,11 @@ defmodule SdrAgent.Audit.Export do
 
   defp write_exclusive(path, bytes) do
     with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- File.write(path, bytes, [:binary, :exclusive]),
-         :ok <- File.chmod(path, 0o600) do
-      :ok
+         {:ok, io} <- File.open(path, [:write, :binary, :exclusive]) do
+      result = with :ok <- File.chmod(path, 0o600), do: IO.binwrite(io, bytes)
+      File.close(io)
+      if result != :ok, do: File.rm(path)
+      result
     else
       {:error, :eexist} -> {:error, :already_exists}
       error -> error
@@ -360,9 +370,20 @@ defmodule SdrAgent.Audit.Export do
     root = Path.expand(root)
     path = Path.expand(path, root)
 
-    if path != root and String.starts_with?(path, root <> "/"),
+    if path != root and String.starts_with?(path, root <> "/") and no_symlinks?(path, root),
       do: {:ok, path},
       else: {:error, :output_outside_allowed_root}
+  end
+
+  defp no_symlinks?(root, root), do: true
+
+  defp no_symlinks?(path, root) do
+    case File.lstat(path) do
+      {:ok, %{type: :symlink}} -> false
+      {:ok, _} -> no_symlinks?(Path.dirname(path), root)
+      {:error, :enoent} -> no_symlinks?(Path.dirname(path), root)
+      _ -> false
+    end
   end
 
   defp unwrap_anchor({:existing, anchor}), do: anchor

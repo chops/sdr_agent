@@ -11,6 +11,22 @@ defmodule SdrAgent.Audit.Anchoring do
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Audit.Signing
 
+  for name <- ["HEAD", "packed-refs"] do
+    case System.cmd("git", ["rev-parse", "--git-path", name]) do
+      {path, 0} -> @external_resource Path.expand(String.trim(path))
+      _ -> :ok
+    end
+  end
+
+  case System.cmd("git", ["symbolic-ref", "-q", "HEAD"], stderr_to_stdout: true) do
+    {ref, 0} ->
+      {path, 0} = System.cmd("git", ["rev-parse", "--git-path", String.trim(ref)])
+      @external_resource Path.expand(String.trim(path))
+
+    _ ->
+      :ok
+  end
+
   @sdr_agent_git_sha (case System.cmd("git", ["rev-parse", "HEAD"], stderr_to_stdout: true) do
                         {sha, 0} -> String.trim(sha)
                         _ -> "unknown"
@@ -41,14 +57,18 @@ defmodule SdrAgent.Audit.Anchoring do
     end
   end
 
-  defp no_anchorable_events?(tenant_id, after_sequence) do
+  @doc "Counts new domain/audit work, excluding anchoring's own bookkeeping events."
+  def new_event_count(tenant_id, after_sequence) do
     AuditEvent
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
     |> Ash.Query.filter(tenant_id == ^tenant_id and sequence > ^after_sequence)
     |> Ash.Query.sort(sequence: :asc)
     |> Ash.read!()
-    |> Enum.all?(&String.starts_with?(&1.event_type, "audit.anchor."))
+    |> Enum.count(&(not String.starts_with?(&1.event_type, "audit.anchor.")))
   end
+
+  defp no_anchorable_events?(tenant_id, after_sequence),
+    do: new_event_count(tenant_id, after_sequence) == 0
 
   defp create_anchor(actor, private_key, trigger, opts, head, prior, tenant_id) do
     with {:ok, key} <- active_key(),
@@ -130,12 +150,23 @@ defmodule SdrAgent.Audit.Anchoring do
   defp publish(anchor, actor, sinks) do
     failures =
       Enum.reduce(sinks, [], fn {sink_name, module, sink_opts}, failures ->
-        opts = Keyword.put(sink_opts, :anchor_number, anchor.anchor_number)
-        result = module.publish(sink_payload(sink_name, anchor), opts)
-        handle_publish_result(result, sink_name, anchor, actor, failures)
+        if confirmed_sink?(anchor, sink_name, actor) do
+          failures
+        else
+          opts = Keyword.put(sink_opts, :anchor_number, anchor.anchor_number)
+          result = module.publish(sink_payload(sink_name, anchor), opts)
+          handle_publish_result(result, sink_name, anchor, actor, failures)
+        end
       end)
 
     if failures == [], do: {:ok, anchor}, else: {:error, {:sink_failures, Enum.reverse(failures)}}
+  end
+
+  defp confirmed_sink?(anchor, sink, actor) do
+    SdrAgent.Audit.AnchorSinkReceipt
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(anchor_id == ^anchor.id and sink == ^sink and status == :confirmed)
+    |> Ash.exists?()
   end
 
   defp handle_publish_result({:ok, receipt}, sink_name, anchor, actor, failures) do

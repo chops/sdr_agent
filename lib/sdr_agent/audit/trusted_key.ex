@@ -8,10 +8,47 @@ defmodule SdrAgent.Audit.TrustedKey do
          true <- is_nil(expected_key_id) or key_id == expected_key_id,
          {:ok, public_key} <- decode_public_key(pem),
          {:ok, status, revoked_at} <- lifecycle(pem) do
-      {:ok, %{key_id: key_id, public_key: public_key, status: status, revoked_at: revoked_at}}
+      {:ok,
+       %{
+         key_id: key_id,
+         public_key: public_key,
+         status: status,
+         revoked_at: revoked_at,
+         activated_at: metadata_time(pem, "created_utc"),
+         retired_at: metadata_time(pem, "retired_at")
+       }}
     else
       false -> {:error, :trusted_key_id_mismatch}
       _ -> {:error, :invalid_trusted_key_file}
+    end
+  end
+
+  @doc "Loads an out-of-band manifest of pinned key files, retaining historical keys."
+  def load_set(path) do
+    with {:ok, json} <- File.read(path),
+         {:ok, %{"format" => "sdr-audit-key-set/1", "keys" => files}} <- Jason.decode(json),
+         true <- is_list(files) and files != [] do
+      Enum.reduce_while(files, {:ok, []}, &load_manifest_file(&1, &2, Path.dirname(path)))
+    else
+      _ -> {:error, :invalid_trusted_key_set}
+    end
+  rescue
+    _ -> {:error, :invalid_trusted_key_set}
+  end
+
+  defp load_manifest_file(file, {:ok, keys}, directory) do
+    case load(Path.expand(file, directory)) do
+      {:ok, key} -> {:cont, {:ok, [key | keys]}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp metadata_time(pem, name) do
+    with {:ok, value} <- metadata(pem, name),
+         {:ok, time, 0} <- DateTime.from_iso8601(value) do
+      time
+    else
+      _ -> nil
     end
   end
 
