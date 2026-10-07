@@ -220,6 +220,49 @@ The round-1 fixes and the predeliver ruling were accepted.
    assertion now uses the domain's refusal wording ("does not match the
    current recipient"), which comes from #17's guarded approve.
 
+* S13c — register the anchor signing key on seed (2026-10-07)
+Found in the coordinator's dry run on the owner's dev DB: after =bin/demo
+reset --yes && bin/demo seed= no AuditSigningKey existed, so AnchorWorker
+retried with ={:error, :no_active_signing_key}= until someone ran =mix
+sdr.audit.register_key= by hand.
+
+- Fix: =SdrAgent.Demo.SigningKey.ensure/0= runs in =mix sdr.demo.seed=. It
+  registers the pinned *public* key (=docs/audit/anchor-signing-key.pub=)
+  through the existing =Audit.register_signing_key/2= kernel path. It is
+  idempotent and reads no private material.
+- =Demo.Status= reports =signing key: registered | NOT REGISTERED=, and
+  =ready?= requires it.
+- Entity model trigger: no. The existing action is used and nothing
+  persisted changes.
+- RED 23/28. This was a mixed, missing-interface RED: =SigningKey= was
+  undefined, and the assertions for status readiness and the script's
+  signing-key line also failed. GREEN: bin/verify 699 passed, 4 excluded.
+
+** S13c review round 1 (Codex, #22 at =f4738b5=: CHANGES REQUESTED)
+Codex's three regressions are adopted as RED in =signing_key_test.exs=, plus
+a rotated-row case.
+
+1. *Key id equality was not pin equality.* A row with the pin's id but other
+   public bytes read as registered and ready, and =ensure= succeeded.
+   =SigningKey.state/1= now compares the exact public bytes and the active
+   lifecycle. The result is one of: =:pinned_key_mismatch=;
+   =:pinned_key_inactive= with the status (never reactivated or
+   re-registered); =:another_key_active=; =:registered=; =:absent=.
+   =registered?= and =Status= fail closed: =signing key: INVALID (...)=,
+   not ready.
+2. *Pin lifecycle was ignored.* Only an *active* pin file is registered; a
+   rotated or revoked one gives ={:pin_not_active, status}= and no event.
+   The =SeedingAllowed= guard now runs before anything is read or written
+   (=:demo_not_allowed=), mirroring =Seed.run= and =Predeliver=.
+3. Concurrency is not claimed. Idempotency covers the single-writer demo
+   path; two concurrent calls are refused by the unique identities, and the
+   moduledoc says so.
+
+RED: 2/6. The four failures were mismatch, rotated row, revoked pin and
+disabled demo. GREEN: 6/6. =bin/verify= 703 passed, 4 excluded; credo and
+=ash.codegen --check= clean. No resource, policy or lifecycle contract
+changed: entity-model trigger no.
+
 * Risks & Considerations
 - *Quiet hours at the meetup.* The campaign fixture's quiet hours are 18:00
   to 08:00 America/Denver. An evening demo in Mountain time defers delivery

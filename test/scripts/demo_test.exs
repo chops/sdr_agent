@@ -222,6 +222,7 @@ defmodule SdrAgent.Scripts.DemoTest do
     assert status =~ "server: n/a (--test)"
     assert status =~ "migrations: current"
     assert status =~ "tenant: seeded"
+    assert status =~ "signing key: registered"
     assert status =~ "leads: new #{length(Fixtures.leads()) - suppressed}, stopped #{suppressed}"
     assert status =~ "drafts awaiting review: 0"
     assert status =~ "captured messages: 0"
