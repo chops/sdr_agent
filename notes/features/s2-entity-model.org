@@ -313,8 +313,9 @@ status changes.
   =codex_review=true= → reviewer precedence 1: Codex via correlated =ap=.
 - *Reviewer kind:* peer agent (Codex CLI) through =ap consult --wait=
   (consultation envelope, correlated by =in_reply_to=).
-- *Soft-stop verdict (current):* PENDING — owner-decision delta (round 3)
-  sent; see round 3 below.
+- *Soft-stop verdict (current):* *PASS* (Codex, round 4, 2026-10-07T00:11:12Z)
+  on =b63d79c=, covering the owner-decision delta; round 2 PASS covers the
+  base model.
 - *Round 2 verdict:* *PASS* (Codex, 2026-10-06T23:42:49Z).
 - *Round 2 evidence:* consultation =m_1791330070096516792_8af92c98= (Claude →
   Codex, artifact @ =9882c9f=, file sha256 prefix =bf2128b229174e00=); reply
@@ -343,7 +344,14 @@ status changes.
      sign-in/out token writes stay under the AshAuthentication interaction
      bypass; deny test through the AshAuthentication action added.
   3. Stale "owner decision needed" label on NotificationAttempt — removed.
-- *Round 4:* recorded below once returned.
+- *Round 4:* consultation =m_1791331669472167209_10f6e71e= (artifact @
+  =b63d79c=, sha256 prefix =1393aa84c083955a=); reply
+  =b1243d3f-a7a8-450e-805e-97363b75e434= (Codex, =in_reply_to= the
+  consultation). Verdict: *PASS*, numbered findings: none. Verbatim excerpt:
+  "The guard now has correct Ash all-applicable-policy semantics ... The User
+  contract now consistently denies auditor self-password mutation while
+  retaining sign-in/out and ADM reset". Commits after =b63d79c= change only
+  this soft-stop record.
 - *Round 1 evidence:* consultation =m_1791329593666945875_625718ee=
   (Claude → Codex, artifact @ =d63a3cb=); reply =019a5c18-b000-7000-8000-000000000002=
   (Codex, 2026-10-07T05:36:00Z, =in_reply_to= the consultation), findings file
