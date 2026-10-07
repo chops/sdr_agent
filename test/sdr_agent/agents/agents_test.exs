@@ -455,6 +455,60 @@ defmodule SdrAgent.AgentsTest do
       refute other.id == first.id
     end
 
+    test "an identical replay with an explicit key returns the existing row", ctx do
+      attrs = rule_attrs(ctx, :phase_transition, %{idempotency_key: "phase:explicit"})
+      {:ok, first} = Agents.record_decision(attrs, actor: ctx.agent)
+      {:ok, again} = Agents.record_decision(attrs, actor: ctx.agent)
+
+      assert again.id == first.id
+      assert again.replay_sha256 == first.replay_sha256
+      assert byte_size(first.replay_sha256) == 32
+      assert [_] = events_of_type(ctx.tenant, "agents.decision.recorded")
+    end
+
+    test "reusing a key for a different decision fails with an idempotency conflict", ctx do
+      base = rule_attrs(ctx, :phase_transition, %{idempotency_key: "phase:reused"})
+      {:ok, original} = Agents.record_decision(base, actor: ctx.agent)
+
+      variants = [
+        outcome: %{outcome: "stop"},
+        subject: %{subject_id: Ecto.UUID.generate()},
+        inputs: %{inputs: %{"email" => "other@example.test"}},
+        rule_version: %{rule_version: "2"},
+        rule_id: %{rule_id: "other_rule"},
+        kind: %{kind: :enrollment},
+        outcome_detail: %{outcome_detail: %{"why" => "changed"}},
+        confidence: %{confidence: 0.5},
+        input_refs: %{input_refs: [%{resource: "X", id: "1", record_sha256: hex(digest("x"))}]},
+        mode: %{
+          kind: :qualification,
+          mode: :llm,
+          rule_id: nil,
+          rule_version: nil,
+          model_invocation_id: ctx.invocation.id,
+          output_pointer: "/qualified"
+        }
+      ]
+
+      for {label, change} <- variants do
+        assert {:error, %Ash.Error.Invalid{errors: errors}} =
+                 Agents.record_decision(Map.merge(base, change), actor: ctx.agent),
+               "#{label} must conflict"
+
+        assert Enum.any?(
+                 errors,
+                 &match?(%{__struct__: SdrAgent.Agents.Errors.IdempotencyConflict}, &1)
+               ),
+               "#{label}: #{inspect(errors)}"
+      end
+
+      {:ok, decisions} = Agents.list_decisions(ctx.run.id, actor: ctx.agent)
+      assert [stored] = Enum.filter(decisions, &(&1.idempotency_key == "phase:reused"))
+      assert stored.id == original.id
+      assert stored.outcome == "clear"
+      assert [_] = events_of_type(ctx.tenant, "agents.decision.recorded")
+    end
+
     test "LLM decisions require a resolvable pointer into a valid completed invocation", ctx do
       assert {:error, %Ash.Error.Invalid{}} =
                Agents.record_decision(llm_attrs(ctx, %{output_pointer: "/missing"}),
