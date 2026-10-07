@@ -15,7 +15,8 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
              qualification_evidences qualifications evidence_claims research_artifacts
              campaign_enrollments leads campaigns sequence_steps sequences contacts accounts
              icp_definitions decisions tool_invocations model_invocations agent_runs
-             agent_definitions tokens users payloads provenance_snapshots tenants)
+             failures operations agent_definitions tokens users payloads
+             provenance_snapshots tenants)
 
   @processes 16
   @appends_per_process 5
@@ -78,6 +79,44 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
 
     {:ok, reloaded} = SdrAgent.Agents.get_run(run.id, actor: agent)
     assert reloaded.budget.model_calls_reserved == 3
+
+    aud = struct(SdrAgent.Actor, type: :auditor_cli, tenant_id: tenant.id)
+    assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: aud)
+  end
+
+  test "concurrent reservations across runs never exceed the daily model-call limit" do
+    previous = Application.get_env(:sdr_agent, :daily_model_call_limit)
+    Application.put_env(:sdr_agent, :daily_model_call_limit, 2)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:sdr_agent, :daily_model_call_limit, previous),
+        else: Application.delete_env(:sdr_agent, :daily_model_call_limit)
+    end)
+
+    {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
+    agent = struct(SdrAgent.Actor, type: :agent_runtime, tenant_id: tenant.id)
+    runs = for _ <- 1..8, do: SdrAgent.AgentsFixtures.running_run(tenant).run
+
+    results =
+      runs
+      |> Enum.with_index()
+      |> Enum.map(fn {run, n} ->
+        Task.async(fn ->
+          with_connection(fn ->
+            SdrAgent.Agents.reserve_model_invocation(
+              run,
+              SdrAgent.AgentsFixtures.model_attrs("daily-race-#{n}"),
+              actor: agent
+            )
+          end)
+        end)
+      end)
+      |> Task.await_many(60_000)
+
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 2, inspect(results)
+    assert Enum.count(results, &match?({:error, {:budget_exhausted, :daily}}, &1)) == 6
+    assert SdrAgent.Agents.daily_model_calls(tenant.id) == 2
 
     aud = struct(SdrAgent.Actor, type: :auditor_cli, tenant_id: tenant.id)
     assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: aud)
