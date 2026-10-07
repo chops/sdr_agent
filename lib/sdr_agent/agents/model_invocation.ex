@@ -216,7 +216,7 @@ defmodule SdrAgent.Agents.ModelInvocation do
 
     attribute :provider, :atom do
       allow_nil? false
-      constraints one_of: [:fake, :codex_app_server]
+      constraints one_of: [:fake, :claude_cli, :codex_app_server]
       public? true
     end
 

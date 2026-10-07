@@ -1,15 +1,20 @@
-#+TITLE: Feature: S6a — model-provider seam without persistence
+#+TITLE: Feature: S6a — persisted model-provider seam and ClaudeCLI
 #+DATE: 2026-10-06
 
 * Summary
-Implement the ADR-0004 model-provider boundary before S3 persistence lands:
-deterministic Fake and serialized Codex app-server adapters, Zoi validation,
-OpenTelemetry spans, and replaceable in-memory budget enforcement.
+Implement the ADR-0004 model-provider boundary: deterministic Fake and
+serialized ClaudeCLI adapters, Zoi validation, OpenTelemetry spans, persisted
+S3 invocation lifecycle, and a temporary daily-budget seam.
+
+The detailed plan below preserves the initially approved CodexAppServer scope
+as history. The 2026-10-07 owner-approved ClaudeCLI pivot and final behavior are
+recorded under Implementation Notes and ADR-0004.
 
 * Entity Model
 #+BEGIN_EXAMPLE
 Entity Model trigger: no
-Reason: S6a adds runtime behaviours and volatile counters only; S3 owns the persisted ModelInvocation, payload, Decision, and budget resources.
+Reason: the entity model was reviewed and implemented by S2/S3; S6a consumes
+the existing ModelInvocation lifecycle without changing its relationships.
 #+END_EXAMPLE
 
 * Affected Modules
@@ -71,6 +76,32 @@ Approved by the owner in the S6a assignment on 2026-10-06.
   app-server smoke test excluded by its =:external= tag.
 
 * Implementation Notes
+- 2026-10-07 owner pivot: rebased onto S3 =2f8f015=. ClaudeCLI replaces the
+  real Codex provider; CodexAppServer remains only as a disabled fail-closed
+  module. =ModelProvider= now reserves and settles through
+  =Agents.reserve_model_invocation/3=, =mark_model_invocation_sent/2=,
+  =complete_model_invocation/3=, =fail_model_invocation/3=, and
+  =mark_model_invocation_unknown/2=. The S3 run counter is authoritative for
+  20/run; the volatile seam remains only for 200/day pending a persisted daily
+  aggregate.
+- ClaudeCLI uses =llm-proxy-shim claude -p=, alias =opus= pinned to
+  =claude-opus-5-5= on Claude Code =2.1.291=, per-call
+  no-tools/MCP/slash-command attestation, a private
+  prompt file fed over stdin, sanitized failures, serialized calls, and
+  descendant process-tree termination on timeout. =--json-schema= is forbidden
+  because it injects the =StructuredOutput= tool; Zoi validates JSON locally.
+  Hermetic tests cover success,
+  missing/malformed/drifted init, stderr redaction, timeout cleanup, persisted
+  complete/failed/unknown states, and run-budget enforcement.
+- Pivot verification: =bin/verify= and =mix precommit= pass (127 tests, one
+  external exclusion); the explicitly included real ClaudeCLI smoke passes and
+  attests Claude Code =2.1.291=, =opus= resolving to =claude-opus-5-5=, and
+  empty tools/MCP/slash commands. =mix ash.codegen --check= passes. Strict
+  Credo reports no S6a readability warnings; its remaining design suggestions
+  are the repository baseline. Dialyzer, Sobelow, and =deps.audit= remain
+  unconfigured.
+
+** Superseded pre-pivot implementation notes
 - Implemented the behaviour/facade, deterministic Fake, supervised volatile
   budget store, and serialized Port-owning Codex adapter without new deps.
 - The adapter captures only allowlisted account mode, version, config and model

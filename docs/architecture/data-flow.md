@@ -12,7 +12,7 @@ flowchart LR
     subgraph External["External"]
         Browser[Browser/Client]
         API[External APIs]
-        Codex[Codex app-server<br/>cached ChatGPT login]
+        Claude[Claude CLI<br/>personal local login]
         Tempo[Tempo OTLP HTTP<br/>dev only 127.0.0.1:4318]
     end
 
@@ -42,9 +42,9 @@ flowchart LR
 
     subgraph AI["Structured Model Boundary"]
         Provider[ModelProvider facade]
-        Budget[Volatile budget guard<br/>20 per run / 200 per UTC day]
+        Budget[S3 persisted 20/run<br/>volatile 200/day guard]
         Validation[Zoi output validation]
-        Adapter[Serialized tool-free Codex adapter<br/>empty private cwd]
+        Adapter[Serialized tool-free ClaudeCLI adapter<br/>empty private cwd]
         Fake[Deterministic Fake<br/>dev/test default]
     end
 
@@ -75,7 +75,7 @@ flowchart LR
     Provider --> Validation
     Provider --> Fake
     Provider --> Adapter
-    Adapter -- JSONL stdio --> Codex
+    Adapter -- stream JSON --> Claude
     Router -. spans .-> Instrumentation
     Resources -. spans .-> Instrumentation
     Provider -. spans .-> GenAI
@@ -93,12 +93,12 @@ flowchart LR
 2. **Web Layer** - Phoenix router, controllers, LiveViews, channels
 3. **Domain Layer** - Ash domains orchestrate business logic
 4. **Model Boundary** - A pre-call budget reservation precedes deterministic
-   Fake or serialized JSONL app-server invocation; every output is Zoi-validated.
+   Fake or serialized ClaudeCLI invocation; every output is Zoi-validated.
 5. **Data Layer** - Persistence (PostgreSQL, ETS, etc.)
 
 ## Manual Additions Needed
 
-- [x] Codex app-server local JSONL integration
+- [x] Claude CLI local stream integration
 - [ ] Message queues (if any)
 - [ ] Background job processors
 - [ ] PubSub flows for real-time updates

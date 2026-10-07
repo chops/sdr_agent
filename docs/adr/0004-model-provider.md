@@ -4,14 +4,16 @@ date: 2026-10-06
 supersedes: null
 ---
 
-# ADR-0004: Model Provider Seam — Fake Default, Codex App-Server on the Owner's ChatGPT Login
+# ADR-0004: Model Provider Seam — Fake Default, Claude CLI for Personal Local Use
 
 ## Status
 
 Accepted (2026-10-06, owner decision recorded in ADR-0001: "Real model: Codex
 app-server on the owner's ChatGPT plan; deterministic fake model is the
 default"). Details amended by Codex consultations 08, 09 and 15, and by the
-S6a implementation approved on 2026-10-06.
+S6a implementation approved on 2026-10-06. The owner approved the ClaudeCLI
+pivot on 2026-10-07; the amendment below replaces the earlier CodexAppServer
+runtime decision while retaining it as historical rationale.
 
 ## Context
 
@@ -156,6 +158,40 @@ S6a implements the accepted boundary without adding a dependency:
 - The deterministic Fake is the configured default. A hermetic OS-process
   fake covers the JSONL contract; the real cached-login smoke test is tagged
   `:external` and excluded from normal test and CI runs.
+
+### S6a ClaudeCLI pivot amendment (2026-10-07)
+
+The real provider is now **ClaudeCLI** and the prior CodexAppServer adapter is
+disabled fail-closed. This is a personal, local, single-operator integration
+with the owner's existing Claude login; it is not an SDK, hosted service,
+multi-user feature, or authorization to relay subscription credentials. If
+that boundary cannot be maintained, use a paid API key instead.
+
+- Launch every call as `llm-proxy-shim claude -p` with model alias `opus`,
+  structured JSON output, an empty private cwd, no session persistence, no
+  permission prompting, an empty tool set, strict empty MCP configuration,
+  and slash commands disabled.
+- Pin the reviewed alias resolution to `claude-opus-5-5` on Claude Code
+  `2.1.291`; record both alias and
+  resolved ID on every `ModelInvocation`. Every process must emit a matching
+  init attestation with `tools = []`, `mcp_servers = []`, and
+  `slash_commands = []` before output is accepted. Missing, malformed, or
+  drifted attestations fail closed.
+- Serialize calls through one GenServer. Prompts are mode-0600 files consumed
+  through stdin rather than process arguments. Stderr is discarded, protocol
+  errors are sanitized, and timeouts terminate the observed descendant process
+  tree before returning an unknown outcome.
+- S3 now owns the persisted invocation lifecycle: reserve before launch, mark
+  sent, then complete, fail, or mark unknown through `SdrAgent.Agents`. The
+  persisted run counter enforces 20 calls/run. The replaceable in-memory seam
+  remains only for the 200-per-UTC-day aggregate until that aggregate has a
+  persisted S3 resource; it conservatively counts attempts and resets on VM
+  restart.
+- Do not pass `--json-schema`: Claude CLI implements it by adding a
+  `StructuredOutput` tool, which violates the empty-tools invariant. Request
+  JSON in the prompt and parse every result with Zoi before completion.
+  Invalid output is persisted as failed and never returned as a successful
+  result. The deterministic Fake remains the dev/test/CI default.
 
 ## Justification
 

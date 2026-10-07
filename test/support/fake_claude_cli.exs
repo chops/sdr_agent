@@ -1,0 +1,40 @@
+mode = Enum.at(System.argv(), 0, "ready")
+
+model = if(mode == "model_drift", do: "claude-opus-future", else: "claude-opus-5-5")
+tools = if(mode == "tool_drift", do: ~s(["Read"]), else: "[]")
+version = if(mode == "version_drift", do: "2.1.292", else: "2.1.291")
+
+init =
+  ~s({"type":"system","subtype":"init","model":"#{model}","claude_code_version":"#{version}","tools":#{tools},"mcp_servers":[],"slash_commands":[]})
+
+result =
+  ~s({"type":"result","subtype":"success","is_error":false,"result":"{\\"answer\\":\\"qualified\\",\\"score\\":42}","usage":{"input_tokens":12,"output_tokens":3}})
+
+case mode do
+  "ready" ->
+    IO.puts(init)
+    IO.puts(result)
+
+  "stderr_secret" ->
+    IO.puts(:stderr, "SECRET_DO_NOT_EXPOSE")
+    IO.puts(init)
+    IO.puts(result)
+
+  "missing_init" ->
+    IO.puts(result)
+
+  "malformed" ->
+    IO.puts("not-json SECRET_DO_NOT_EXPOSE")
+
+  "timeout" ->
+    pid_file = Enum.at(System.argv(), 1)
+    sleeper = Port.open({:spawn_executable, System.find_executable("sleep")}, [{:args, ["60"]}])
+    {:os_pid, pid} = Port.info(sleeper, :os_pid)
+    File.write!(pid_file, Integer.to_string(pid))
+    IO.puts(init)
+    Process.sleep(:infinity)
+
+  _drift ->
+    IO.puts(init)
+    IO.puts(result)
+end
