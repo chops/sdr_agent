@@ -106,6 +106,32 @@ defmodule SdrAgentWeb.LiveRefreshTest do
       assert has_element?(view, "[id^='approval-'] [data-status='granted']")
     end
 
+    test "never swaps the recipient under the reviewer; the shown email stays bound",
+         %{conn: conn} = ctx do
+      contact = contact!(ctx, ctx.lead)
+      moved = "avery.moved@brightpath-freight.test"
+      {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/drafts/#{ctx.draft.id}")
+
+      {:ok, _moved} =
+        SdrAgent.Sales.update(contact, :change_email, %{email: moved}, actor: ctx.admin)
+
+      committed(ctx)
+
+      assert has_element?(view, "#newer-revision")
+      assert has_element?(view, "#binding-recipient", to_string(contact.email))
+
+      assert has_element?(
+               view,
+               "#approve-form input[name='approve[recipient_email]'][value='#{contact.email}']"
+             )
+
+      view |> form("#approve-form") |> render_submit()
+
+      assert has_element?(view, "#review-error", "recipient changed")
+      assert approvals!(ctx, ctx.draft) == []
+      assert has_element?(view, "#binding-recipient", moved)
+    end
+
     test "the notice shows the latest revision on request", %{conn: conn} = ctx do
       {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/drafts/#{ctx.draft.id}")
       edit_elsewhere!(ctx)
