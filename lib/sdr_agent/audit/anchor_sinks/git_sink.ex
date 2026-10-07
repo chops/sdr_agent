@@ -1,6 +1,12 @@
 defmodule SdrAgent.Audit.AnchorSinks.GitSink do
   @moduledoc "Publishes a signed statement to the protected private anchor Git repository."
   @behaviour SdrAgent.Audit.AnchorSink
+  @repository "git@github.com:chops/sdr_agent-audit-anchors.git"
+  @git_env [
+    {"GIT_CONFIG_GLOBAL", "/dev/null"},
+    {"GIT_CONFIG_NOSYSTEM", "1"},
+    {"GIT_TERMINAL_PROMPT", "0"}
+  ]
 
   defmodule SystemRunner do
     @moduledoc false
@@ -14,13 +20,18 @@ defmodule SdrAgent.Audit.AnchorSinks.GitSink do
   def publish(statement, opts) do
     runner = Keyword.get(opts, :runner, SystemRunner)
     repository = Keyword.fetch!(opts, :repository)
+    allowed_repository = Keyword.get(opts, :allowed_repository, @repository)
     number = Keyword.fetch!(opts, :anchor_number)
     tmp = Path.join(System.tmp_dir!(), "sdr-git-anchor-#{System.unique_integer([:positive])}")
 
-    if runner == SystemRunner do
-      publish_system(statement, repository, number, tmp)
+    if repository != allowed_repository do
+      {:error, :repository_not_allowed}
     else
-      publish_injected(statement, repository, number, tmp, runner)
+      if runner == SystemRunner do
+        publish_system(statement, repository, number, tmp)
+      else
+        publish_injected(statement, repository, number, tmp, runner)
+      end
     end
   end
 
@@ -60,35 +71,33 @@ defmodule SdrAgent.Audit.AnchorSinks.GitSink do
   end
 
   defp do_publish_system(statement, repository, number, tmp) do
-    with {_, 0} <- System.cmd("git", ["clone", repository, tmp], stderr_to_stdout: true),
+    with {_, 0} <- git(["clone", "--", repository, tmp]),
          path = Path.join(tmp, "anchors/#{String.pad_leading(to_string(number), 12, "0")}.json"),
          :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- File.write(path, statement, [:binary, :exclusive]),
          {_, 0} <-
-           System.cmd("git", ["add", Path.relative_to(path, tmp)],
-             cd: tmp,
-             stderr_to_stdout: true
-           ),
+           git(["add", "--", Path.relative_to(path, tmp)], cd: tmp),
          {_, 0} <-
-           System.cmd(
-             "git",
+           git(
              [
                "-c",
                "user.name=sdr_agent anchorer",
                "-c",
                "user.email=sdr-agent@localhost",
+               "-c",
+               "commit.gpgsign=false",
+               "-c",
+               "core.hooksPath=/dev/null",
                "commit",
                "-m",
                "audit anchor #{number}"
              ],
-             cd: tmp,
-             stderr_to_stdout: true
+             cd: tmp
            ),
          {commit, 0} <-
-           System.cmd("git", ["rev-parse", "HEAD"], cd: tmp, stderr_to_stdout: true),
-         {blob, 0} <- System.cmd("git", ["hash-object", path], cd: tmp, stderr_to_stdout: true),
-         {_, 0} <-
-           System.cmd("git", ["push", "origin", "HEAD:main"], cd: tmp, stderr_to_stdout: true) do
+           git(["rev-parse", "HEAD"], cd: tmp),
+         {blob, 0} <- git(["hash-object", path], cd: tmp),
+         {_, 0} <- git(["push", "origin", "HEAD:main"], cd: tmp) do
       {:ok,
        %{
          status: :confirmed,
@@ -100,5 +109,9 @@ defmodule SdrAgent.Audit.AnchorSinks.GitSink do
       {_output, status} when is_integer(status) -> {:error, {:git_exit, status}}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp git(args, opts \\ []) do
+    System.cmd("git", args, Keyword.merge([stderr_to_stdout: true, env: @git_env], opts))
   end
 end

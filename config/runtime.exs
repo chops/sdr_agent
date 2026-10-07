@@ -41,6 +41,12 @@ if config_env() == :dev do
 end
 
 if config_env() == :prod do
+  config :sdr_agent,
+    anchor_sinks: [
+      {:git, SdrAgent.Audit.AnchorSinks.GitSink,
+       repository: "git@github.com:chops/sdr_agent-audit-anchors.git"}
+    ]
+
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """

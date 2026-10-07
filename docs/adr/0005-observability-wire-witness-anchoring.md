@@ -142,10 +142,25 @@ resources or trace columns; S3 owns persisted correlation fields.
   event range, chain-head hash, prior-anchor hash, canonicalization version,
   application Git SHA, trigger, key id, and signing-time key status.
 - Rotation does not invalidate a historically valid signature. Revocation is
-  reported explicitly and lowers assurance; a signature made at or after the
-  recorded revocation time is invalid.
+  timestamped separately from retirement and is immutable. A signature made
+  before `revoked_at` remains valid with explicit reduced assurance; a
+  signature made at or after `revoked_at` is invalid.
+- Private signing material must derive to the active key's registered public
+  key before any append-only anchor or export is written. Offline verification
+  never treats a bundle-embedded key as a trust root: it requires the pinned
+  public-key file (or an explicitly supplied out-of-band equivalent), matches
+  `key_id`, and applies the same revocation-time rules.
+- Export scope is enforced before payload reads. Only events selected by the
+  requested lead, agent-run, draft or sequence range and content-addressed
+  payloads referenced by those events enter the bundle. Output paths remain
+  beneath the operator-selected root and bundles are mode 0600.
 - OpenTimestamps pending and upgraded proofs are distinct append-only sink
-  receipts. A pending proof never yields `ots_anchored` assurance.
+  receipts. A pending proof never yields `ots_anchored` assurance; an upgraded
+  proof must also pass Bitcoin-attestation verification. Git/OTS receipt status
+  alone never raises offline assurance without a validating verifier.
+- Sink failures are append-only receipts and an empty-range retry republishes
+  the existing anchor. Export failures transition their request to `failed`
+  and remove any partially written bundle.
 
 ## Justification
 

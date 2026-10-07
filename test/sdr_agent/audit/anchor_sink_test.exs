@@ -7,7 +7,10 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
 
   defmodule FakeCalendar do
     def submit(hash, _opts), do: {:ok, "pending:" <> Base.encode16(hash, case: :lower)}
-    def upgrade("pending:" <> digest, _opts), do: {:ok, "complete:" <> digest}
+
+    def upgrade("pending:" <> digest, _hash, _opts),
+      do: {:ok, %{proof: "complete:" <> digest, bitcoin_attested: true}}
+
     def verify("complete:" <> _digest, _hash, _opts), do: {:ok, %{timestamp: 1_700_000_000}}
     def verify(_, _, _), do: {:error, :pending}
   end
@@ -74,6 +77,34 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
     assert receipt.commit_id == String.duplicate("c", 40)
     assert receipt.blob_id == String.duplicate("b", 40)
     refute inspect(receipt) =~ statement
+  end
+
+  test "GitSink production command path commits and pushes to an explicitly allowed repository",
+       %{
+         path: path
+       } do
+    repository = Path.join(path, "anchors.git")
+    {_output, 0} = System.cmd("git", ["init", "--bare", repository], stderr_to_stdout: true)
+
+    assert {:ok, receipt} =
+             GitSink.publish("signed production statement",
+               repository: repository,
+               allowed_repository: repository,
+               anchor_number: 1
+             )
+
+    assert receipt.repository == repository
+    assert receipt.commit_id =~ ~r/\A[0-9a-f]{40}\z/
+    assert receipt.blob_id =~ ~r/\A[0-9a-f]{40}\z/
+    {_output, 0} = System.cmd("git", ["--git-dir", repository, "rev-parse", "main"])
+  end
+
+  test "GitSink rejects repositories outside the configured anchor repository" do
+    assert {:error, :repository_not_allowed} =
+             GitSink.publish("statement",
+               repository: "git@example.invalid/other",
+               anchor_number: 1
+             )
   end
 
   @tag :external

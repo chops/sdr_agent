@@ -2,9 +2,21 @@ defmodule SdrAgent.Audit.Signing do
   @moduledoc "Secret-safe Ed25519 signing and verification using OTP `:crypto`."
 
   @doc "Signs bytes with a raw 32-byte Ed25519 private key."
-  def sign(bytes, private_key) when byte_size(private_key) in [32, 64] do
+  def sign(bytes, private_key) when byte_size(private_key) == 32 do
     :crypto.sign(:eddsa, :none, bytes, [private_key, :ed25519])
   end
+
+  @doc "Derives the raw Ed25519 public key corresponding to a private seed."
+  def public_key(private_key) when byte_size(private_key) == 32 do
+    {public_key, _} = :crypto.generate_key(:eddsa, :ed25519, private_key)
+    public_key
+  end
+
+  @doc "Checks that private signing material corresponds to a pinned public key."
+  def matches?(private_key, public_key) when byte_size(public_key) == 32,
+    do: public_key(private_key) == public_key
+
+  def matches?(_, _), do: false
 
   @doc "Verifies an Ed25519 signature."
   def verify(bytes, signature, public_key)
@@ -31,7 +43,7 @@ defmodule SdrAgent.Audit.Signing do
 
   defp decode_base64(value) do
     with {:ok, decoded} <- Base.decode64(value),
-         true <- byte_size(decoded) in [32, 64] do
+         true <- byte_size(decoded) == 32 do
       {:ok, decoded}
     else
       _ -> invalid_key()

@@ -16,12 +16,25 @@ defmodule SdrAgent.Audit.AnchorSinks.OpenTimestampsSink do
       end
     end
 
-    def upgrade(proof, _opts), do: with_proof(proof, ["upgrade"], &File.read/1)
+    def upgrade(proof, _hash, _opts) do
+      with_proof(proof, ["upgrade"], &verify_upgraded/1)
+    end
 
-    def verify(proof, hash, _opts) do
+    defp verify_upgraded(path) do
+      case System.cmd("ots", ["verify", path], stderr_to_stdout: true) do
+        {_output, 0} ->
+          with {:ok, upgraded} <- File.read(path),
+               do: {:ok, %{proof: upgraded, bitcoin_attested: true}}
+
+        {_output, status} ->
+          {:error, {:ots_verify_exit, status}}
+      end
+    end
+
+    def verify(proof, _hash, _opts) do
       with_proof(
         proof,
-        ["verify", "--digest", Base.encode16(hash, case: :lower)],
+        ["verify"],
         fn _path -> {:ok, %{verified: true}} end
       )
     end
@@ -56,13 +69,15 @@ defmodule SdrAgent.Audit.AnchorSinks.OpenTimestampsSink do
   def upgrade(proof, hash, opts) do
     calendar = Keyword.get(opts, :calendar, Calendar)
 
-    with {:ok, upgraded} <- calendar.upgrade(proof, Keyword.get(opts, :calendar_options, [])) do
+    with {:ok, %{proof: upgraded, bitcoin_attested: true}} <-
+           calendar.upgrade(proof, hash, Keyword.get(opts, :calendar_options, [])) do
       {:ok,
        %{
          status: :confirmed,
          proof: upgraded,
          proof_sha256: :crypto.hash(:sha256, upgraded),
-         anchor_hash: hash
+         anchor_hash: hash,
+         bitcoin_attested: true
        }}
     end
   end
