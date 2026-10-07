@@ -228,21 +228,138 @@ peer reviewing the RED evidence on the PR.
 -----
 
 * Implementation Notes
-(Added during Phase 4b)
+
+GREEN: =MIX_TEST_PARTITION=_s5 bin/verify= → *211 passed* (the 210 RED-phase
+tests plus one real-concurrency test added in 4b, see 10 below), on a test
+database rebuilt from the named migration =20261007032329_s5_domain=.
+=mix ash.codegen --check=, =mix credo= (no issues) and =mix hex.audit= (no
+advisories) clean. No dependency added.
+
+** Public API (for S7–S10)
+- =SdrAgent.Accounts=: =create_user/2=, =seed_user/2=, =change_role/3=,
+  =change_status/3=, =change_password/3=, =set_password/3=, =sign_in/2=,
+  =record_signed_out/1=, =get_user/2=, =list_users/1=.
+- =SdrAgent.Sales=: =create_*/2= and =seed_*/2= per resource,
+  =new_icp_version/3=, =add_sequence_step/3=, =enroll_lead/2=, =update/4= for
+  every update or lifecycle action (=transitions/0= on each resource),
+  =fetch/3=, =list_records/2=, =list_handoff_queue/1=.
+- =SdrAgent.Research=: =record_artifact/2=, =record_claim/2=,
+  =record_qualification/2=, =override_qualification/2=,
+  =current_qualification/2=, =fetch/3=, =list_records/2=.
+- Shared: =SdrAgent.Audit.GuardedCall= (guarded create/update and
+  tenant-scoped reads), =SdrAgent.Audit.Checks.SeedingAllowed=,
+  =SdrAgent.Sales.Synthetic= (reserved-name guard),
+  =SdrAgent.Sales.Checks.QualificationContext= (private write marker).
+- Event names: =user.*=, =auth.sign_in.succeeded|failed=, =auth.signed_out=,
+  =sales.<resource>.<verb>= (e.g. =sales.lead.research_started=),
+  =research.artifact|claim|qualification.recorded=.
+- Seed: =mix sdr.demo.seed= / =SdrAgent.Demo.Seed.run/0=;
+  =SdrAgent.Demo.Fixtures= (ids, designated outcomes,
+  =suppressed_contact_emails/0= for S8).
+
+** Deviations and findings during 4b (each with evidence)
+1. *Password hash hiding.* AshAuthentication refuses a public
+   =hashed_password= ("should have :public? set to false"), and field
+   policies cover only public attributes, so a field policy cannot hide it.
+   =SdrAgent.Accounts.Preparations.HidePasswordHash= deselects it on every
+   read by a human operator (admin included); the kernel, internal re-reads
+   and the AshAuthentication actions still load it. RED assertion changed
+   from =%Ash.ForbiddenField{}= to =%Ash.NotLoaded{}= for operators.
+2. *Wrong current password* is refused by AshAuthentication as
+   =Forbidden= (=AuthenticationFailed=), not =Invalid=; RED expectation
+   corrected (the refusal itself was already asserted).
+3. *Sign-out route.* =GET /sign-out= renders AshAuthentication's
+   confirmation LiveView; the sign-out itself is =DELETE /sign-out=
+   (=mix phx.routes=). Controller test corrected.
+4. *Session revocation on password change.* The log-out-everywhere add-on's
+   global hook is conditioned on =changing(:hashed_password)=, evaluated
+   before =HashPasswordChange= sets the hash, so it never fired (RED test
+   kept the session valid). =change_password= and =set_password= now run
+   =OnPasswordChange= explicitly; the =set_password= test also asserts
+   revocation now.
+5. *Anonymous denials (S3 change).* =SetTenant= added its "actor has no
+   tenant" error while building the changeset, so a tenant-less caller of a
+   guarded action got =Invalid= before authorization and no =authz.denied=
+   was recorded. The error now comes from a =before_action= hook (after
+   policies), so such calls are =Forbidden= and audited.
+6. *S3 suites with real users.* Creating a real operator appends
+   =user.created=. Three S3 assertions were re-baselined without weakening:
+   the bootstrap test reads the head as the auditor CLI (no operator
+   creation), the clean-chain test counts 8 events (genesis, provenance,
+   the admin's =user.created=, five appends), and the forbidden-transition
+   test creates the admin before counting. Concurrency readers use the
+   auditor CLI; the cleanup list covers the new tables.
+7. *Lock syntax.* AshPostgres takes =:for_update= or a string;
+   =:for_share= crashed (=String.upcase/2=), so the string ="FOR SHARE"= is used.
+8. *Domain function names.* =use Ash.Domain= injects deprecated =get/3=
+   and =list/2,3=, so the generic reads are =fetch/3= and =list_records/2=
+   (tests renamed).
+9. *Fixture bug.* =claim_attrs/4= matched the quote against the default
+   content even when the test supplied its own; fixed.
+10. *Last active admin under concurrency.* Locking the target row first and
+    then all admins could deadlock two crossing demotions.
+    =KeepAnActiveAdmin= now locks all active admins (by id) and then the
+    target, replacing the changeset data with the locked row. Added a
+    real-concurrency test (two admins demote each other, three rounds):
+    exactly one succeeds each round, one active admin remains, chain valid.
+11. *Migrations.* Iteration used =mix ash.codegen --dev=; squashing dev
+    migrations needs the shared dev database (Codex's), so the dev migration
+    and dev snapshots (untracked, generated) were deleted and
+    =mix ash.codegen s5_domain= generated the named migration fresh. The dev
+    database was not touched. The users migration adds NOT NULL columns to
+    the existing (empty, id-only) =users= table.
+12. *Exact from-states.* Sales lifecycle actions run non-atomically on the
+    row re-read =FOR UPDATE= (=get_and_lock_for_update= +
+    =Transition locked?: true=), so events record the true previous status
+    and a stale struct cannot move a row that has moved on (tested).
+
+** What S7, S8 and S10 must know
+- *S7:* agent lead transitions need a =decision_id=; =qualified= /
+  =disqualified= happen only via =Research.record_qualification/2= (lead must
+  be =qualifying=); artifacts and claims take the full =content=;
+  =freshness= is computed by the retrieving action; =block= is AGT and S7
+  adds its Failure; S7 emits =sdr.lead.assigned= / =sdr.campaign.paused=
+  signals (S5 records only domain events). Enrollment requires a qualified
+  lead and an active campaign; S7 also records the enrollment Decision and
+  checks suppression.
+- *S8:* add =CampaignEnrollment.advance_step= and =→ completed= with a time
+  zone database (ADR; S5 validates zone names by shape only); grant DLV the
+  reads it needs (Campaign, Contact, Enrollment); suppression side effects
+  must stop leads/enrollments — the S5 policies allow ADM/REV/WHK for
+  =stop=, so suppressions created by AGT or DLV need a marker or a policy
+  extension; seed a Suppression for =Fixtures.suppressed_contact_emails/0=.
+- *S10:* sign-in is password only (no registration/reset); sign-out is
+  =DELETE /sign-out= and records =auth.signed_out=; operators never receive
+  password hashes; AUR sees other users' =display_name= and =role= only;
+  =Sales.list_handoff_queue/1= returns replied leads oldest first — order by
+  ReplyAssessment above Outreach.
+
+** Architecture evaluation
+- New Ash domains: YES (=SdrAgent.Sales=, =SdrAgent.Research=); new
+  resources: YES (12); cross-domain data flow: YES (Research → Sales lead
+  transition; Sales/Research → Agents FKs; all → audit kernel).
+- =docs/architecture/domain-boundaries.{md,mmd}= edited by hand (Sales and
+  Research subgraphs, FKs, layering); =components.{md,mmd}= counts updated.
+  =bin/architecture_diagram.sh= was not rerun because it overwrites S4's
+  manual telemetry edits (S3 finding). Data flow (web → domains → kernel)
+  is unchanged.
 
 * Completion Checklist
 
 ** Phase 4
-- [ ] All Phase 4a tests verified failing
-- [ ] TDD gate confirmed
-- [ ] All steps implemented
-- [ ] All tests passing
-- [ ] Compiled with --warnings-as-errors
-- [ ] Ash boundaries respected
+- [X] All Phase 4a tests verified failing (73/210; NEEDS_REVIEW recorded above)
+- [X] TDD gate confirmed (unattended charter; peer reviews on the PR)
+- [X] All steps implemented
+- [X] All tests passing
+- [X] Compiled with --warnings-as-errors
+- [X] Ash boundaries respected (Sales holds FKs only downward; Research
+      calls Sales only inside its own action; Sales never references Research
+      or Outreach)
 
 ** Phase 5 (Verify + Finalize)
-- [ ] Full test suite passes
-- [ ] Moduledocs reviewed for new/modified public modules
-- [ ] Plan document updated with implementation notes
-- [ ] Architecture evaluation reported
-- [ ] ADR status: no new ADR
+- [X] Full test suite passes (=bin/verify=, 211 tests)
+- [X] =mix ash.codegen --check=, =mix credo=, =mix hex.audit= clean
+- [X] Moduledocs reviewed for new/modified public modules
+- [X] Plan document updated with implementation notes
+- [X] Architecture evaluation reported: _diagrams updated_
+- [X] ADR status: no new ADR (none required; S8 owns the time zone ADR)

@@ -1,6 +1,6 @@
 # Domain Boundaries
 
-Generated: 2026-10-06
+Generated: 2026-10-06 (Sales and Research added by hand in S5, 2026-10-07)
 
 Project shape: single
 
@@ -9,6 +9,22 @@ This diagram shows Ash domains and their resources, representing bounded context
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e1f5fe', 'primaryBorderColor': '#01579b'}}}%%
 graph TB
+    subgraph Research["Research Domain"]
+        ResearchArtifact[ResearchArtifact]
+        EvidenceClaim[EvidenceClaim]
+        Qualification[Qualification]
+        QualificationEvidence[QualificationEvidence]
+    end
+    subgraph Sales["Sales Domain"]
+        IcpDefinition[IcpDefinition]
+        Account[Account]
+        Contact[Contact]
+        Lead[Lead]
+        Campaign[Campaign]
+        Sequence[Sequence]
+        SequenceStep[SequenceStep]
+        CampaignEnrollment[CampaignEnrollment]
+    end
     subgraph Agents["Agents Domain"]
         AgentDefinition[AgentDefinition]
         AgentRun[AgentRun]
@@ -55,9 +71,38 @@ graph TB
     AuditAnchor --> AnchorSinkReceipt
     AuditExport -. anchor ids .-> AuditAnchor
 
+    Account --> Contact
+    Contact --> Lead
+    Account --> Lead
+    IcpDefinition --> Campaign
+    Sequence --> SequenceStep
+    Sequence --> Campaign
+    Campaign --> CampaignEnrollment
+    Lead --> CampaignEnrollment
+    Lead -. last_decision_id FK .-> Decision
+    Lead -. owner_user_id FK .-> User
+    ResearchArtifact --> EvidenceClaim
+    Qualification --> QualificationEvidence
+    EvidenceClaim --> QualificationEvidence
+    ResearchArtifact -. lead_id FK .-> Lead
+    EvidenceClaim -. lead_id FK .-> Lead
+    Qualification -. lead_id / icp FK .-> Lead
+    Qualification -. qualify / disqualify in the same transaction .-> Lead
+    ResearchArtifact -. run / tool invocation FK .-> ToolInvocation
+    EvidenceClaim -. extraction decision FK .-> Decision
+    Qualification -. decision / run FK .-> Decision
+    ResearchArtifact -. content sha256 FK .-> Payload
+    User -. tenant_id FK .-> Tenant
+    Sales -. tenant_id FK .-> Tenant
+    Research -. tenant_id FK .-> Tenant
+    Accounts == "AppendEvent (user.*, auth.*)" ==> Kernel
+    Sales == "AppendEvent (sales.*)" ==> Kernel
+    Research == "AppendEvent (research.*)" ==> Kernel
+
+
     %% Project shape: single
     %% Layering (ADR-0009): Audit <- Accounts <- Operations <- Agents <- Sales <- Research <- Outreach
-    %% Embedded resources are omitted.
+    %% Embedded resources (incl. IcpCriteria, SourceLocation, QualificationCriteria) are omitted.
 ```
 
 ## Notes
