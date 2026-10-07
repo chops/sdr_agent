@@ -12,12 +12,15 @@ config :sdr_agent, Oban,
   notifier: Oban.Notifiers.Postgres,
   # Spec §13: separate, bounded concurrency per queue (S8: delivery,
   # reconciliation, followup; S9: integration — webhook processing — and
-  # agent — reply classification runs).
+  # agent — reply classification runs). `reconciliation` is 1 (S12 C8,
+  # ADR-0005): model wire-witness reconciliation runs serially and delivery
+  # reconciliation, which shares the queue, serialises with it. Lifted only
+  # by a reviewed ADR-0005 amendment.
   queues: [
     default: 10,
     research: 20,
     delivery: 5,
-    reconciliation: 5,
+    reconciliation: 1,
     followup: 10,
     integration: 5,
     agent: 10
@@ -29,7 +32,8 @@ config :sdr_agent, Oban,
      crontab: [
        {"* * * * *", SdrAgent.Audit.AnchorWorker},
        {"*/10 * * * *", SdrAgent.Audit.OtsUpgradeWorker},
-       {"* * * * *", SdrAgent.Outreach.StaleDeliverySweeper}
+       {"* * * * *", SdrAgent.Outreach.StaleDeliverySweeper},
+       {"*/5 * * * *", SdrAgent.Agents.Witness.ScanWorker}
      ]}
   ],
   repo: SdrAgent.Repo
@@ -184,6 +188,13 @@ config :sdr_agent,
 # the endpoint secret at runtime (no key literal anywhere); production reads
 # it from the environment (config/runtime.exs).
 config :sdr_agent, :webhook_hmac, key_id: "derived-1", source: :derived
+
+# S12 wire witness (ADR-0005): inert until the owner points `store_root` at
+# the deployed proxy's blob directory. The reconciled-method allowlist ships
+# EMPTY; only a separate reviewed S12d change may add a method.
+config :sdr_agent, SdrAgent.Agents.Witness,
+  store_root: nil,
+  reconciled_methods: []
 
 config :opentelemetry, resource: %{service: %{name: "sdr_agent"}}
 

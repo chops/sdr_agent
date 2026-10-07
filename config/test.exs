@@ -51,6 +51,13 @@ config :phoenix_live_view,
 config :phoenix,
   sort_verified_routes_query_params: true
 
+# S12c: tests may pass an explicit per-call method allowlist to the
+# reconciler (isolated positive fixtures); never configured elsewhere.
+config :sdr_agent, SdrAgent.Agents.Witness,
+  store_root: nil,
+  reconciled_methods: [],
+  allow_method_override: true
+
 # Demo seed fixtures may be written here (ADR-0009: seed actions are
 # authorized only for the seeder in :dev/:test; absent elsewhere = refused).
 config :sdr_agent, seeding_allowed?: true

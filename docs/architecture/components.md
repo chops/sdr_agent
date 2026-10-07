@@ -73,6 +73,9 @@ graph TB
     ModelProvider -. spans .-> Telemetry
     ClaudeCLIAdapter -- "SDR_MODEL_INVOCATION_ID + SDR_TRACEPARENT (child env only)" --> Claude
     Claude -. "S12a proxy deployed: loopback correlation, stripped upstream" .-> WitnessStore[(Local proxy witness store<br/>owner-only, outside SDR)]
+    Oban -. "cron */5 ScanWorker; queue reconciliation: 1 (shared with delivery)" .-> WitnessReconciler[Agents.Witness reconciler<br/>REC, inert while store_root nil]
+    WitnessReconciler -. "bounded read-only reader" .-> WitnessStore
+    WitnessReconciler --> Domains
     Oban --> AgentWorker
     Oban --> FollowupWorker
     FollowupWorker --> Domains
