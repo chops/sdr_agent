@@ -1,6 +1,6 @@
 # Domain Boundaries
 
-Generated: 2026-10-06 (Sales and Research added by hand in S5, Outreach in S8, Reply and WebhookEvent in S9, 2026-10-07)
+Generated: 2026-10-06 (Sales and Research added by hand in S5, Outreach in S8, Reply, ReplyAssessment and WebhookEvent in S9, 2026-10-07)
 
 Project shape: single
 
@@ -19,6 +19,7 @@ graph TB
         DeliveryReceipt[DeliveryReceipt]
         SendQuotaDay[SendQuotaDay]
         Reply[Reply]
+        ReplyAssessment[ReplyAssessment]
     end
     subgraph Research["Research Domain"]
         ResearchArtifact[ResearchArtifact]
@@ -155,6 +156,8 @@ graph TB
     DeliveryReceipt -. webhook_event_id FK (delivered / bounced) .-> WebhookEvent
     WebhookEvent -. raw body sha256 FK .-> Payload
     WebhookEvent -. failure_id FK (rejected / failed) .-> Failure
+    ReplyAssessment -- "reply_id FK (supersedes lineage)" --> Reply
+    ReplyAssessment -. agent_run / decision / model_invocation FKs (llm reply_classification) .-> Decision
 
 
     %% Project shape: single

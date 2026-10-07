@@ -358,4 +358,63 @@ behaviour.
 
 *TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED (same
 =tdd_verify.sh= parsing caveat).
+<<<<<<< HEAD
 >>>>>>> 3194826 (S9b: failing tests for reply classification, the interested-first hand-off queue and the demo reply helper (RED))
+=======
+
+** S9b GREEN
+=MIX_TEST_PARTITION=_s9 bin/verify= → *480 passed, 4 excluded* (S9a 468 + 12 new; no existing assertion changed). =mix ash.codegen --check=, =mix credo=, =mix hex.audit= clean. =mix
+ash.codegen s9b_reply_assessments= (migration =20261007160142=; its
+"destructive" note is the =down= direction only).
+
+** S9b findings and choices (flagged for review)
+ 21. *Run in the reply transaction.* =SdrAgent.SDR.ReplyIntake= (the S9a
+     seam) registers SDRAgent v2, creates the queued AgentRun (AGT, phase
+     =reply=, budget 2 model / 5 tool calls, =correlation_id= = the
+     WebhookEvent id), inserts its =agent=-queue =ReplyWorker= job and
+     records =sdr.reply.received= on the run — all committed with the Reply.
+     =ReplyWorker= mirrors =AgentWorker= (=max_attempts: 1=, one terminal
+     write) without an Operation row (choice 12).
+ 22. *One model call, one Decision, one row.* =ClassifyReply= →
+     =Model.call(:reply_classification)= (budget Decision about the lead) →
+     LLM =reply_classification= Decision about the Reply (=output_pointer=
+     =/classification=) → =Outreach.record_assessment/2=, whose
+     =AssessmentRules= re-check the Decision (run, reply, invocation,
+     outcome = classification) in the transaction.
+ 23. *Add-only unsubscribe.* An =unsubscribe= classification creates the
+     reply's =unsubscribe_reply= Suppression through the AGT action
+     =:from_classification= (=CheckSuppressionSource= requires an
+     =reply_classification= Decision with outcome =unsubscribe= about that
+     reply) in a =before_action=, i.e. before the assessment's first
+     append; when the rule already suppressed, the existing row is returned
+     with no event.
+ 24. *Hand-off queue.* =Outreach.list_handoff_queue/1= composes
+     =Sales.list_handoff_queue/1= (oldest hand-off first) with each lead's
+     latest matched reply and its current assessment; a stable sort puts
+     =interested= first.
+ 25. *FakeBrain.* =sdr.reply_classification= is keyword rules (unsubscribe
+     → out of office → referral → not now → objection → interested;
+     =unknown= otherwise), so fixtures are deterministic; its output still
+     passes the Zoi schema.
+ 26. *Demo.* =SdrAgent.Demo.Replies= builds signed requests (event id
+     deterministic per kind and delivery, so a repeated demo post is a
+     duplicate) and posts them only to a local host (or an in-process plug
+     in tests); =mix sdr.demo.reply --lead 01 --kind interested|unsubscribe|
+     unsubscribe_link|delivered|bounce [--url http://127.0.0.1:4120]= reads
+     the latest accepted delivery (repo only; Oban queues and plugins off in
+     the task VM) and posts to the running server. Not exercised against the
+     dev database in this slice (the owner's live session owns it).
+ 27. *Deferred:* ReplyAssessment human override (ADM/REV supersede) — S2
+     gives REV no suppression source for an overridden =unsubscribe=; the
+     =sdr.followup.due= and redraft routes (choice 14).
+
+** What S10 and S13 must know (S9b)
+- *S10:* =Outreach.list_handoff_queue(actor:)= → =[%{lead, reply,
+  assessment}]= (interested first); the AgentRun of a classification has
+  =trigger_signal_type= ="sdr.reply.received"=; Decision
+  =reply_classification= links to its ModelInvocation.
+- *S13:* golden path step 7 = =mix sdr.demo.reply= (or
+  =Demo.Replies.post/3= with =plug:=) → drain =integration= → drain
+  =agent=; both demo replies (interested, unsubscribe) are covered by
+  =test/sdr_agent/demo/replies_test.exs=.
+>>>>>>> 0c17446 (S9b: architecture diagrams (classification flow), GREEN evidence and hand-off notes)
