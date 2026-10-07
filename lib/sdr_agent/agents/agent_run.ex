@@ -6,14 +6,19 @@ defmodule SdrAgent.Agents.AgentRun do
   Attributes: `agent_definition_id`, plain `lead_id`/`campaign_id` (Agents
   sits below Sales), trigger signal type/id, `correlation_id`, `phase`,
   `status`, embedded `budget` (`SdrAgent.Agents.AgentRun.Budget`),
-  `operation_id` and `attention_failure_id` (plain uuids until S7 adds
-  their FKs and the operator-attention Failure), `retry_of_id`,
+  `operation_id` (the Operations `Operation` running it) and
+  `attention_failure_id` (its operator-attention `Failure`), `retry_of_id`,
   `status_reason` (required in failed / budget_exhausted / cancelled),
   `failure_reason` (redacted detail), `started_at`, `finished_at`.
 
   Lifecycle (`transitions/0`): queued → running → succeeded | failed |
-  budget_exhausted | cancelled; queued → cancelled. Every transition is an
-  update action whose from-state guard runs inside the SQL `UPDATE`.
+  budget_exhausted | cancelled; queued → cancelled. `start` and `succeed`
+  guard the from-state inside the SQL `UPDATE`; `fail`, `exhaust_budget` and
+  `cancel` run on the row re-read `FOR UPDATE` because they also open the
+  operator-attention Failure (S2): entering failed or budget_exhausted, or
+  cancelled by a system actor, opens a Failure and sets
+  `attention_failure_id` in the same transaction (an operator cancel opens
+  none); an operator `retry` resolves the retried run's Failure.
 
   Counters: `:reserve_model_call` (atomic, refuses at `max_model_calls`),
   `:settle_model_call`, `:record_tool_call` (atomic, refuses at
@@ -35,6 +40,7 @@ defmodule SdrAgent.Agents.AgentRun do
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Changes.Transition
   alias SdrAgent.Audit.Checks
+  alias SdrAgent.Operations.Changes.OpenAttention
 
   @statuses [:queued, :running, :succeeded, :failed, :budget_exhausted, :cancelled]
   @phases [
@@ -78,6 +84,8 @@ defmodule SdrAgent.Agents.AgentRun do
       reference :tenant, on_delete: :restrict
       reference :agent_definition, on_delete: :restrict
       reference :retry_of, on_delete: :restrict
+      reference :operation, on_delete: :restrict
+      reference :attention_failure, on_delete: :restrict
     end
 
     check_constraints do
@@ -133,6 +141,11 @@ defmodule SdrAgent.Agents.AgentRun do
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
 
+      change {SdrAgent.Operations.Changes.ResolveAttention,
+              subject_resource: "SdrAgent.Agents.AgentRun",
+              subject_field: :retry_of_id,
+              note: "retried as run"}
+
       change {AppendEvent,
               event_type: "agents.run.retried",
               category: :domain_change,
@@ -165,6 +178,7 @@ defmodule SdrAgent.Agents.AgentRun do
     end
 
     update :fail do
+      require_atomic? false
       accept [:failure_reason]
 
       argument :status_reason, :atom,
@@ -172,7 +186,15 @@ defmodule SdrAgent.Agents.AgentRun do
         constraints: [one_of: [:invalid_model_output, :provider_error, :crash]]
 
       change set_attribute(:status_reason, arg(:status_reason))
-      change {Transition, from: [:running], to: :failed}
+      change get_and_lock_for_update()
+      change {Transition, from: [:running], to: :failed, locked?: true}
+
+      change {OpenAttention,
+              class: :run_stopped,
+              severity: :critical,
+              message: {__MODULE__, :attention_message},
+              field: :attention_failure_id}
+
       change {Stamp, fields: [:finished_at]}
 
       change {AppendEvent,
@@ -180,12 +202,22 @@ defmodule SdrAgent.Agents.AgentRun do
     end
 
     update :exhaust_budget do
+      require_atomic? false
+
       argument :status_reason, :atom,
         allow_nil?: false,
         constraints: [one_of: [:run_budget_calls, :run_budget_tokens, :daily_budget]]
 
       change set_attribute(:status_reason, arg(:status_reason))
-      change {Transition, from: [:running], to: :budget_exhausted}
+      change get_and_lock_for_update()
+      change {Transition, from: [:running], to: :budget_exhausted, locked?: true}
+
+      change {OpenAttention,
+              class: :budget_exhausted,
+              severity: :critical,
+              message: {__MODULE__, :attention_message},
+              field: :attention_failure_id}
+
       change {Stamp, fields: [:finished_at]}
 
       change {AppendEvent,
@@ -193,12 +225,23 @@ defmodule SdrAgent.Agents.AgentRun do
     end
 
     update :cancel do
+      require_atomic? false
+
       argument :status_reason, :atom,
         default: :cancelled_by_operator,
         constraints: [one_of: [:cancelled_by_operator, :crash, :provider_error]]
 
       change set_attribute(:status_reason, arg(:status_reason))
-      change {Transition, from: [:queued, :running], to: :cancelled}
+      change get_and_lock_for_update()
+      change {Transition, from: [:queued, :running], to: :cancelled, locked?: true}
+
+      change {OpenAttention,
+              class: :run_stopped,
+              severity: :critical,
+              message: {__MODULE__, :attention_message},
+              field: :attention_failure_id,
+              system_only?: true}
+
       change {Stamp, fields: [:finished_at]}
 
       change {AppendEvent,
@@ -307,7 +350,6 @@ defmodule SdrAgent.Agents.AgentRun do
     end
 
     attribute :budget, SdrAgent.Agents.AgentRun.Budget, allow_nil?: false, public?: true
-    attribute :operation_id, :uuid, public?: true
 
     attribute :status_reason, :atom do
       writable? false
@@ -316,7 +358,6 @@ defmodule SdrAgent.Agents.AgentRun do
     end
 
     attribute :failure_reason, :string, public?: true
-    attribute :attention_failure_id, :uuid, writable?: false, public?: true
     attribute :started_at, :utc_datetime_usec, writable?: false, public?: true
     attribute :finished_at, :utc_datetime_usec, writable?: false, public?: true
     attribute :trace_id, :string, allow_nil?: false, public?: true
@@ -354,6 +395,16 @@ defmodule SdrAgent.Agents.AgentRun do
       public? true
     end
 
+    belongs_to :operation, SdrAgent.Operations.Operation do
+      attribute_writable? true
+      public? true
+    end
+
+    belongs_to :attention_failure, SdrAgent.Operations.Failure do
+      attribute_writable? false
+      public? true
+    end
+
     has_many :model_invocations, SdrAgent.Agents.ModelInvocation, public?: true
     has_many :tool_invocations, SdrAgent.Agents.ToolInvocation, public?: true
     has_many :decisions, SdrAgent.Agents.Decision, public?: true
@@ -361,6 +412,17 @@ defmodule SdrAgent.Agents.AgentRun do
 
   @doc "Declared lifecycle transitions `{action, from, to}` (ADR-0010)."
   def transitions, do: @transitions
+
+  @doc "The operator-attention message of a stopping transition (redacted by Failure)."
+  def attention_message(changeset) do
+    to = Ash.Changeset.get_attribute(changeset, :status)
+    reason = Ash.Changeset.get_argument(changeset, :status_reason)
+
+    case Ash.Changeset.get_attribute(changeset, :failure_reason) do
+      nil -> "agent run #{to}: #{reason}"
+      detail -> "agent run #{to}: #{reason}: #{detail}"
+    end
+  end
 
   @doc false
   def __sdr_audited__, do: true

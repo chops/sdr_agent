@@ -82,8 +82,10 @@ defmodule SdrAgent.OperationsTest do
     |> Enum.sort()
   end
 
-  defp declared(resource) do
-    resource.transitions()
+  defp declared(resource), do: normalize(resource.transitions())
+
+  defp normalize(table) do
+    table
     |> Enum.map(fn {name, from, to} -> {name, Enum.sort(from), to} end)
     |> Enum.sort()
   end
@@ -93,7 +95,7 @@ defmodule SdrAgent.OperationsTest do
       assert declared(Operation) == table(Operation)
 
       assert declared(Operation) ==
-               Enum.sort([
+               normalize([
                  {:start, [:enqueued], :running},
                  {:succeed, [:running], :succeeded},
                  {:fail, [:running], :failed},
@@ -225,7 +227,7 @@ defmodule SdrAgent.OperationsTest do
       assert declared(Failure) == table(Failure)
 
       assert declared(Failure) ==
-               Enum.sort([
+               normalize([
                  {:acknowledge, [:open], :acknowledged},
                  {:resolve, [:open, :acknowledged], :resolved}
                ])

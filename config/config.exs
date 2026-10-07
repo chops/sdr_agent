@@ -85,6 +85,7 @@ config :sdr_agent,
   ash_domains: [
     SdrAgent.Audit,
     SdrAgent.Accounts,
+    SdrAgent.Operations,
     SdrAgent.Agents,
     SdrAgent.Sales,
     SdrAgent.Research

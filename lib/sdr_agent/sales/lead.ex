@@ -22,8 +22,11 @@ defmodule SdrAgent.Sales.Lead do
       converted (T) | nurture (T) (ADM, REV). Replied leads are the human
       hand-off queue (`SdrAgent.Sales.list_handoff_queue/1`);
     * any non-terminal state → stopped (T) with a reason (ADM, REV, WHK);
-    * researching, qualifying → blocked (AGT, with a reason; the S7 Failure
-      side effect is added there) → assigned (ADM `:retry`);
+    * researching, qualifying → blocked (AGT, with a reason) → assigned
+      (ADM `:retry`). Blocking opens the operator-attention Failure (subject
+      the lead; class from argument `failure_class`, default `run_stopped`)
+      in the same transaction, and the retry resolves it (S2 "Operator
+      attention");
     * disqualified → assigned (ADM `:reopen`).
 
   Agent transitions require a `decision_id`. Every transition runs on the
@@ -259,9 +262,20 @@ defmodule SdrAgent.Sales.Lead do
       accept [:status_reason]
       require_attributes [:status_reason]
       argument :decision_id, :uuid, allow_nil?: false
+
+      argument :failure_class, :atom,
+        default: :run_stopped,
+        constraints: [one_of: SdrAgent.Operations.Failure.classes()]
+
       change get_and_lock_for_update()
       change {Transition, from: [:researching, :qualifying], to: :blocked, locked?: true}
       change set_attribute(:last_decision_id, arg(:decision_id))
+
+      change {SdrAgent.Operations.Changes.OpenAttention,
+              class: {:arg, :failure_class},
+              severity: :warning,
+              message: {__MODULE__, :blocked_message}}
+
       change {AppendEvent, [event_type: "sales.lead.blocked"] ++ @event}
     end
 
@@ -272,6 +286,8 @@ defmodule SdrAgent.Sales.Lead do
       change {Transition, from: [:blocked], to: :assigned, locked?: true}
       change set_attribute(:status_reason, nil)
       change {Stamp, fields: [:assigned_at]}
+
+      change {SdrAgent.Operations.Changes.ResolveAttention, note: "lead retried by an operator:"}
       change {AppendEvent, [event_type: "sales.lead.retried"] ++ @event}
     end
 
@@ -416,6 +432,10 @@ defmodule SdrAgent.Sales.Lead do
 
   @doc "Declared lifecycle transitions `{action, from, to}` (ADR-0010)."
   def transitions, do: @transitions
+
+  @doc "The operator-attention message of `:block` (redacted by Failure)."
+  def blocked_message(changeset),
+    do: "lead blocked: #{Ash.Changeset.get_attribute(changeset, :status_reason)}"
 
   @doc false
   def __sdr_audited__, do: true
