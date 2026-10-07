@@ -122,6 +122,125 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
     assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: aud)
   end
 
+  describe "linking an Operation to a Failure being resolved concurrently" do
+    setup do
+      {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
+      agent = struct(SdrAgent.Actor, type: :agent_runtime, tenant_id: tenant.id)
+
+      {:ok, operation} =
+        SdrAgent.Operations.create_operation(
+          %{
+            kind: :research_lead,
+            queue: :research,
+            subject_resource: "SdrAgent.Sales.Lead",
+            subject_id: Ecto.UUID.generate(),
+            idempotency_key: "race-#{System.unique_integer([:positive])}",
+            correlation_id: Ecto.UUID.generate(),
+            max_attempts: 1
+          },
+          actor: agent
+        )
+
+      {:ok, operation} = SdrAgent.Operations.start_operation(operation, actor: agent)
+
+      {:ok, failure} =
+        SdrAgent.Operations.open_failure(
+          %{
+            operation_id: operation.id,
+            subject_resource: "SdrAgent.Agents.AgentRun",
+            subject_id: Ecto.UUID.generate(),
+            class: :crash,
+            severity: :critical,
+            message: "run crashed"
+          },
+          actor: agent
+        )
+
+      %{tenant: tenant, agent: agent, operation: operation, failure: failure}
+    end
+
+    test "a resolution committed first makes the link refuse and roll back", ctx do
+      parent = self()
+
+      resolver =
+        Task.async(fn ->
+          with_connection(fn ->
+            Audit.transaction(fn ->
+              {:ok, _} =
+                SdrAgent.Operations.resolve_failure(ctx.failure, %{resolution_note: "cleared"},
+                  actor: ctx.agent
+                )
+
+              send(parent, :resolved_uncommitted)
+              receive do: (:commit -> :ok)
+            end)
+          end)
+        end)
+
+      assert_receive :resolved_uncommitted, 10_000
+
+      linker =
+        Task.async(fn ->
+          with_connection(fn ->
+            SdrAgent.Operations.fail_operation(ctx.operation, %{failure_id: ctx.failure.id},
+              actor: ctx.agent
+            )
+          end)
+        end)
+
+      # Let the link reach its read of the Failure while the resolve is open.
+      Process.sleep(300)
+      send(resolver.pid, :commit)
+      assert {:ok, _} = Task.await(resolver, 30_000)
+
+      assert {:error, %Ash.Error.Invalid{}} = Task.await(linker, 30_000)
+
+      {:ok, operation} = SdrAgent.Operations.get_operation(ctx.operation.id, actor: ctx.agent)
+      assert operation.status == :running
+
+      assert operation_events(
+               ctx.tenant,
+               ~w(operations.operation.failed operations.operation.discarded)
+             ) == []
+    end
+
+    test "a link committed first is followed by the resolution, in that order", ctx do
+      results =
+        race(2, fn
+          1 ->
+            with_connection(fn ->
+              SdrAgent.Operations.fail_operation(ctx.operation, %{failure_id: ctx.failure.id},
+                actor: ctx.agent
+              )
+            end)
+
+          2 ->
+            with_connection(fn ->
+              SdrAgent.Operations.resolve_failure(ctx.failure, %{resolution_note: "cleared"},
+                actor: ctx.agent
+              )
+            end)
+        end)
+
+      case results do
+        [{:ok, discarded}, {:ok, _resolved}] ->
+          assert discarded.last_failure_id == ctx.failure.id
+
+          [failed, resolved] =
+            operation_events(
+              ctx.tenant,
+              ~w(operations.operation.failed operations.failure.resolved)
+            )
+
+          assert failed.event_type == "operations.operation.failed"
+          assert resolved.event_type == "operations.failure.resolved"
+
+        [{:error, %Ash.Error.Invalid{}}, {:ok, _resolved}] ->
+          assert operation_events(ctx.tenant, ~w(operations.operation.failed)) == []
+      end
+    end
+  end
+
   test "concurrent anchor requests serialize to one contiguous range" do
     {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
     anchorer = struct(SdrAgent.Actor, type: :anchorer, tenant_id: tenant.id)
@@ -304,6 +423,12 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
 
   defp record_in_own_connection(attrs, agent) do
     with_connection(fn -> SdrAgent.Agents.record_decision(attrs, actor: agent) end)
+  end
+
+  defp operation_events(tenant, types) do
+    aud = struct(SdrAgent.Actor, type: :auditor_cli, tenant_id: tenant.id)
+    {:ok, events} = Audit.list_events(actor: aud)
+    Enum.filter(events, &(&1.event_type in types))
   end
 
   defp decision_events(tenant) do
