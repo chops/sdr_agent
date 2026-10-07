@@ -245,6 +245,48 @@ hex.audit= no advisories, gitleaks 8.30.1 over =origin/main..HEAD= and
  18. *Domain suppression match* compares the contact email's domain exactly
      (no parent-domain matching).
 
+** S8a review round 1 (Codex, PR #13 comment 6042168527: CHANGES REQUESTED)
+Choices 1–18 accepted. Dispositions:
+
+1. *MF1 — suppression missed a terminal lead's dependent work: FIXED.*
+   =ApplySuppression= now locks *every* lead of a matching contact (any
+   status) and derives enrollments, drafts and approvals from all of them;
+   only the Lead =:stop= itself is limited to open leads. RED (assertion):
+   email and domain scope with an operator-stopped lead left the enrollment
+   =active=; the real-connection stop-vs-suppress race ended
+   ={stopped, active, queued, granted}=. Atomic rollback is proven by a test
+   trigger that refuses the draft cancel: no suppression, lead, enrollment,
+   draft, approval or event change (this test passed before the fix —
+   regression coverage, not RED).
+2. *MF2 — hand-off Draft FK waited on Contact under the chain head: FIXED.*
+   The hand-off now locks the recipient Contact and its AgentRun =FOR SHARE=
+   (after Lead =FOR UPDATE= and Campaign =FOR SHARE=) before its first gate
+   append. Audit of the new Draft/revision/citation FK parents in that
+   transaction: Lead and Campaign already locked; enrollment, Draft and
+   revision new in it; SequenceStep immutable once its sequence is active
+   (a refused edit holds its lock without appending); Decision,
+   EvidenceClaim and the completed ModelInvocation are append-only or
+   terminal; Contact and AgentRun were the mutable ones — both now locked.
+   RED (real connections, =outreach_race_test.exs=): an operator holding
+   the contact =FOR UPDATE=, then calling =change_email= after the agent
+   entered its hand-off, died with =40P01 deadlock_detected=. GREEN: both
+   finish serially; the run succeeds with one enrollment and one Draft;
+   the chain verifies (4 consecutive runs).
+3. *Important — RED evidence wording: ACCEPTED.* The original S8a RED
+   (=62c1966=) failed through setup (=drafted!/2= called the missing
+   =Outreach.list_records/2=), i.e. undefined-function errors rather than
+   feature assertions. It stays NEEDS_REVIEW for that reason as well as the
+   =tdd_verify.sh= parser defect. The round-1 corrections above have
+   assertion-level RED (=00fbcdf=).
+4. *Important — grant binds the current locked email: ACCEPTED as designed;
+   S10 must show and refresh the recipient at confirmation* (recorded in the
+   S10 hand-off note).
+
+GREEN: =bin/verify= *403 passed, 4 excluded*; credo clean.
+Lock order after this round (S8a): Lead → Enrollment → Draft → Approval
+(suppression); Lead → Campaign → Contact → AgentRun (hand-off); Draft →
+Approval (grant/revoke); every row lock before the first append.
+
 ** What S8b, S9 and S10 must know (S8a)
 - *S8b:* the grant (=Outreach.approve/3=) is where the DeliveryOperation and
   its Oban job are inserted (outbox); =:revoke= must first cancel a pending
@@ -260,6 +302,8 @@ hex.audit= no advisories, gitleaks 8.30.1 over =origin/main..HEAD= and
   WHK and AGT.
 - *S10:* review queue =Outreach.list_review_queue/1=; a reviewer edits with
   =edit_draft/3= and approves/rejects with the revision id + hex hash shown
-  on screen (=approve/3=, =reject/3=); =revoke/2=; citations per revision
+  on screen (=approve/3=, =reject/3=), and must show and refresh the
+  recipient email at confirmation (the grant binds the contact's current
+  email under a lock); =revoke/2=; citations per revision
   (=RevisionCitation= → =EvidenceClaim=) are the "click a sentence → see
   evidence" links; =diff_from_ai_baseline= is the AI-vs-human diff.

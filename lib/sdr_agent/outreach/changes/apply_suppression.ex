@@ -7,7 +7,10 @@ defmodule SdrAgent.Outreach.Changes.ApplySuppression do
   cancelled.
 
   Matching contacts: `email` scope — the contact email equals the value;
-  `domain` scope — the contact email's domain equals the value.
+  `domain` scope — the contact email's domain equals the value. The
+  enrollments, drafts and approvals are those of *every* lead of a matching
+  contact, including leads already terminal; only the lead transition is
+  limited to open leads.
 
   Lock order: the rows it will change are locked `FOR UPDATE` in a
   `before_action` hook — leads, then enrollments, drafts and approvals —
@@ -62,7 +65,11 @@ defmodule SdrAgent.Outreach.Changes.ApplySuppression do
     value = changeset |> Ash.Changeset.get_attribute(:value) |> to_string()
     contact_ids = contacts(tenant_id, scope, value)
 
-    leads = lock(Lead, tenant_id, contact_id: contact_ids, status: @open_leads)
+    # Every lead of a matching contact is locked, whatever its status: the
+    # dependent work of a lead that is already terminal (e.g. stopped by an
+    # operator) is still stopped, cancelled and invalidated; only the lead
+    # transition itself is limited to open leads (review #13 MF1).
+    leads = lock(Lead, tenant_id, contact_id: contact_ids, status: Lead.statuses())
     lead_ids = Enum.map(leads, & &1.id)
 
     enrollments =
@@ -124,9 +131,10 @@ defmodule SdrAgent.Outreach.Changes.ApplySuppression do
           targets.enrollments,
           &{&1, :stop, %{stop_reason: stop_reason(reason)}, SuppressionContext}
         ) ++
-        Enum.map(
-          targets.leads,
-          &{&1, :stop, %{status_reason: "suppressed: #{reason}"}, SuppressionContext}
+        for(
+          lead <- targets.leads,
+          lead.status in @open_leads,
+          do: {lead, :stop, %{status_reason: "suppressed: #{reason}"}, SuppressionContext}
         )
 
     Enum.reduce_while(steps, {:ok, suppression}, fn {record, action, attrs, marker}, ok ->

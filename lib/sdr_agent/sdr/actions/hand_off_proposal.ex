@@ -6,10 +6,15 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   model output (operator attention) and is never handed off.
 
   A valid one is handed off in *one transaction*: the Lead row is locked
-  `FOR UPDATE` and the Campaign `FOR SHARE` before anything is appended to
-  the audit chain (lock order Lead → Campaign → chain head; a concurrent
-  operator stop or campaign pause either commits first and is seen here, or
-  waits), the deterministic gates (campaign active, recipient not
+  `FOR UPDATE`, the Campaign, the recipient Contact and the AgentRun
+  `FOR SHARE` before anything is appended to the audit chain (lock order
+  Lead → Campaign → Contact → AgentRun → chain head; a concurrent operator
+  stop, campaign pause, contact edit or run cancel either commits first and
+  is seen here, or waits). The Contact and the AgentRun are the mutable
+  parents the new Draft's foreign keys reference: locking them first means
+  the Draft insert never waits for one of them while this transaction holds
+  the chain head (review #13 MF2; the other parents are locked above, new in
+  this transaction, or immutable), the deterministic gates (campaign active, recipient not
   suppressed) and the `enrollment` Decision are recorded against those
   rows, and on `enroll` the CampaignEnrollment, the Lead qualified →
   in_outreach transition and the durable hand-off record — the
@@ -71,7 +76,8 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   defp hand_off(%{lead_id: lead_id, plan: plan} = params, ctx) do
     with {:ok, lead} <- lock(ctx, Sales.Lead, lead_id, :for_update),
          {:ok, campaign} <- lock(ctx, Sales.Campaign, plan.campaign_id, "FOR SHARE"),
-         {:ok, contact} <- Support.fetch(ctx, Sales.Contact, lead.contact_id),
+         {:ok, contact} <- lock(ctx, Sales.Contact, lead.contact_id, "FOR SHARE"),
+         {:ok, _run} <- lock(ctx, Agents.AgentRun, ctx.run_id, "FOR SHARE"),
          {:ok, campaign_check} <- Support.campaign_gate(ctx, campaign, lead_id, "enroll"),
          {:ok, suppression} <- Support.suppression_gate(ctx, contact, lead_id, "enroll") do
       enroll? =

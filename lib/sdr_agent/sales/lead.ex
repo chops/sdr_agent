@@ -434,6 +434,9 @@ defmodule SdrAgent.Sales.Lead do
       where: expr(status not in [:disqualified, :converted, :nurture, :stopped])
   end
 
+  @doc "Every lead status."
+  def statuses, do: @statuses
+
   @doc "Declared lifecycle transitions `{action, from, to}` (ADR-0010)."
   def transitions, do: @transitions
 
