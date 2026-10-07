@@ -352,7 +352,15 @@ defmodule SdrAgent.Sales.Lead do
       authorize_if {Checks.ActorRole, roles: [:admin, :reviewer, :auditor]}
 
       authorize_if {Checks.ActorType,
-                    types: [:agent_runtime, :webhook_ingestor, :auditor_cli, :seeder]}
+                    types: [
+                      :agent_runtime,
+                      :webhook_ingestor,
+                      :auditor_cli,
+                      :seeder,
+                      :delivery_worker,
+                      :reconciler,
+                      :scheduler
+                    ]}
     end
   end
 

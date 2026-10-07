@@ -1,12 +1,9 @@
 defmodule SdrAgent.Sales.Validations.Timezone do
   @moduledoc """
-  Validates that an attribute is shaped like an IANA time zone name
-  (`Area/Location[/Sublocation]`, or `UTC`/`Etc/UTC`).
-
-  Elixir ships only a UTC time zone database and S5 adds no dependency, so
-  the zone's existence is not checked here; the slice that first evaluates
-  local time (S8: quiet hours, send quota, follow-up dates) adds a time zone
-  database by ADR and tightens this check. Option: `:attribute`.
+  Validates that an attribute is an IANA time zone name: shaped like one
+  (`Area/Location[/Sublocation]`, or `UTC`/`Etc/UTC`) *and* known to the time
+  zone database (`SdrAgent.Sales.LocalTime.valid_zone?/1`, ADR-0011 — S8
+  tightened the S5 shape-only check). Option: `:attribute`.
   """
   use Ash.Resource.Validation
 
@@ -23,7 +20,7 @@ defmodule SdrAgent.Sales.Validations.Timezone do
         :ok
 
       zone when is_binary(zone) ->
-        if Regex.match?(@shape, zone),
+        if Regex.match?(@shape, zone) and SdrAgent.Sales.LocalTime.valid_zone?(zone),
           do: :ok,
           else: {:error, field: opts[:attribute], message: "must be an IANA time zone name"}
     end

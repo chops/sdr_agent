@@ -14,12 +14,14 @@ defmodule SdrAgent.Sales.CampaignEnrollment do
   Lifecycle (`transitions/0`): active ↔ paused (ADM, REV); active, paused →
   replied (T) (WHK), stopped (T) with a `stop_reason` (ADM, REV, WHK; AGT,
   DLV, SEED only as an Outreach Suppression side effect —
-  `SdrAgent.Sales.Checks.SuppressionContext`). The
-  S8 delivery path adds `advance_step` (which computes `next_step_due_at` in
-  the campaign time zone) and its `→ completed (T)` transition, together
-  with the time zone database that computation needs.
+  `SdrAgent.Sales.Checks.SuppressionContext`). After an accepted delivery
+  (DLV, REC, SCH): `:advance_step` moves to the delivered step and computes
+  `next_step_due_at` in the campaign time zone
+  (`SdrAgent.Sales.Changes.AdvanceStep`, `SdrAgent.Sales.LocalTime`); after
+  the last step, `:complete` → completed (T). `SdrAgent.Sales.advance_enrollment/3`
+  picks the right one.
 
-  Reads: ADM, REV, AUR, AGT, WHK, AUD. Every write appends an AuditEvent
+  Reads: ADM, REV, AUR, AGT, WHK, AUD, DLV, REC, SCH. Every write appends an AuditEvent
   (`sales.enrollment.*`).
   """
   use Ash.Resource,
@@ -47,7 +49,8 @@ defmodule SdrAgent.Sales.CampaignEnrollment do
     {:pause, [:active], :paused},
     {:resume, [:paused], :active},
     {:mark_replied, [:active, :paused], :replied},
-    {:stop, [:active, :paused], :stopped}
+    {:stop, [:active, :paused], :stopped},
+    {:complete, [:active], :completed}
   ]
   @event [category: :domain_change, previous: [:status]]
 
@@ -123,6 +126,39 @@ defmodule SdrAgent.Sales.CampaignEnrollment do
       change {AppendEvent, [event_type: "sales.enrollment.replied"] ++ @event}
     end
 
+    update :advance_step do
+      description "DLV, REC, SCH: after an accepted delivery, move to `step_position` and set the next due time."
+      require_atomic? false
+      argument :step_position, :integer, allow_nil?: false, constraints: [min: 1]
+      argument :accepted_at, :utc_datetime_usec, allow_nil?: false
+      change get_and_lock_for_update()
+      change {Changes.RequireState, in: [:active]}
+      change {Changes.AdvanceStep, final?: false}
+
+      change {AppendEvent,
+              event_type: "sales.enrollment.step_advanced",
+              category: :domain_change,
+              arguments: [:step_position, :accepted_at],
+              previous: [:current_step_position]}
+    end
+
+    update :complete do
+      description "DLV, REC, SCH: the last step was accepted: active → completed (T)."
+      require_atomic? false
+      argument :step_position, :integer, allow_nil?: false, constraints: [min: 1]
+      argument :accepted_at, :utc_datetime_usec, allow_nil?: false
+      change get_and_lock_for_update()
+      change {Transition, from: [:active], to: :completed, locked?: true}
+      change {Changes.AdvanceStep, final?: true}
+
+      change {AppendEvent,
+              [
+                event_type: "sales.enrollment.completed",
+                arguments: [:step_position, :accepted_at]
+              ] ++
+                @event}
+    end
+
     update :stop do
       description "ADM, REV, WHK: active or paused → stopped (T), with a stop reason."
       require_atomic? false
@@ -158,10 +194,23 @@ defmodule SdrAgent.Sales.CampaignEnrollment do
       authorize_if {Checks.ActorType, types: [:webhook_ingestor]}
     end
 
+    policy action([:advance_step, :complete]) do
+      authorize_if {Checks.ActorType, types: [:delivery_worker, :reconciler, :scheduler]}
+    end
+
     policy action_type(:read) do
       authorize_if Checks.KernelContext
       authorize_if {Checks.ActorRole, roles: [:admin, :reviewer, :auditor]}
-      authorize_if {Checks.ActorType, types: [:agent_runtime, :webhook_ingestor, :auditor_cli]}
+
+      authorize_if {Checks.ActorType,
+                    types: [
+                      :agent_runtime,
+                      :webhook_ingestor,
+                      :auditor_cli,
+                      :delivery_worker,
+                      :reconciler,
+                      :scheduler
+                    ]}
     end
   end
 
