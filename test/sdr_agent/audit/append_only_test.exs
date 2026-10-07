@@ -6,7 +6,8 @@ defmodule SdrAgent.Audit.AppendOnlyTest do
 
   # S2 "Append-only / immutable resources" created through S11.
   @append_only ~w(tenants payloads audit_events provenance_snapshots audit_accesses
-                  retention_markers decisions audit_anchors anchor_sink_receipts)
+                  retention_markers decisions audit_anchors anchor_sink_receipts
+                  wire_witness_links)
   @terminal_immutable ~w(model_invocations tool_invocations)
   @s11_terminal_immutable ~w(audit_exports)
   @lifecycle_immutable ~w(audit_signing_keys)
@@ -19,7 +20,7 @@ defmodule SdrAgent.Audit.AppendOnlyTest do
           SdrAgent.Repo,
           """
           SELECT tgname FROM pg_trigger
-           WHERE tgrelid = $1::text::regclass AND NOT tgisinternal AND tgenabled = 'O'
+           WHERE tgrelid = to_regclass($1) AND NOT tgisinternal AND tgenabled = 'O'
           """,
           [table]
         )

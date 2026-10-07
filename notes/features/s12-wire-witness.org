@@ -220,7 +220,21 @@ Schedule m_1791387200074167000_45b11cfc accepted: S8 review next, then S12b/c;
 S9 reassigned to Claude, S10 Claude, interleave incoming review requests.
 
 ** S12b — SDR propagation/persistence/scoped access
-Separate Phase 4a/4b gate after S12a contract is reviewed. Tests use MIX_TEST_PARTITION=120 (sdr_agent_test120 on port 5520), never the concurrent S8 database.
+Separate Phase 4a/4b gate after S12a contract is reviewed. Writer handoff
+assigns =MIX_TEST_PARTITION=_s12b= (=sdr_agent_test_s12b= on port 5520) in
+place of partition 120; never the concurrent S8/dev databases.
+
+Phase 4a candidate (test-only commit, Claude writer): 31 new/extended tests
+fail, every one by an =ExUnit.AssertionError= (missing API guards in setup,
+nil child environment, absent table/trigger, kind refused) — no compile
+error, raised exception or crash; the 370 pre-existing tests still pass.
+Regression guards that pass already: serialized CLI (one launch at a time)
+and unchanged init attestation with witness context present. Files:
+=test/sdr_agent/ai/{claude_cli,witness_propagation}_test.exs=,
+=test/sdr_agent/agents/wire_witness_{link,race}_test.exs=,
+=test/sdr_agent/audit/{reconciliation_content,append_only}_test.exs=,
+=test/sdr_agent/operations/operations_test.exs=, =test/support/fake_claude_cli.exs=.
+Independent peer RED verification required before GREEN.
 
 ** S12c — reconciliation/projection/attention/e2e
 Separate Phase 4a/4b gate. Runtime reconciled method allowlist stays empty.

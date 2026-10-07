@@ -16,7 +16,36 @@ fenced =
 prose =
   ~s({"type":"result","subtype":"success","is_error":false,"result":"Here you go: {\\"answer\\":\\"qualified\\",\\"score\\":42}","usage":{"input_tokens":12,"output_tokens":3}})
 
+# Child-environment names the S12b witness tests observe (never values of
+# any other variable, so the dump cannot capture an operator credential).
+observed = ~w(SDR_MODEL_INVOCATION_ID SDR_TRACEPARENT CLAUDE_CODE_USE_BEDROCK
+              CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY ANTHROPIC_BEDROCK_BASE_URL
+              ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_FOUNDRY_BASE_URL)
+
 case mode do
+  "env_dump" ->
+    # argv: env_dump <dump file> [sleep ms]. Records the observed child env
+    # and the wall-clock interval of this launch, then answers normally.
+    dump = Enum.at(System.argv(), 1)
+
+    pause =
+      case Integer.parse(Enum.at(System.argv(), 2, "0")) do
+        {ms, ""} -> ms
+        _ -> 0
+      end
+
+    started = System.os_time(:microsecond)
+    Process.sleep(pause)
+
+    env =
+      Map.new(observed, fn name -> {name, System.get_env(name)} end)
+      |> Map.put("started_us", started)
+      |> Map.put("finished_us", System.os_time(:microsecond))
+
+    File.write!(dump <> "." <> Integer.to_string(started), JSON.encode!(env))
+    IO.puts(init)
+    IO.puts(result)
+
   "fenced" ->
     IO.puts(init)
     IO.puts(fenced)
