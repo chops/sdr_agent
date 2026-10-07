@@ -204,11 +204,37 @@ server may hold 4120.
 - Live refresh is best effort: notifications sent while the relay is
   reconnecting are lost, and views update on navigation.
 
+* S13 part 2 — progress on this branch (2026-10-07)
+- *Golden-path e2e* =test/sdr_agent_web/golden_path_test.exs=: drives the
+  console. The reviewer assigns lead 01 and the research job is drained.
+  Qualification, evidence, the draft and the review queue appear. The
+  approve form carries the displayed revision, hash and recipient email.
+  The delivery is drained, the draft is =sent=, the captured message is
+  read through the audited payload path, and the ledger holds every step in
+  causal order (=sdr.lead.assigned= … =outreach.draft.sent=) with a valid
+  chain. It is an acceptance test over existing behaviour, so it passed on
+  its first run. A mutation check (an out-of-order expected event) fails it,
+  0/1. *S9 slot:* =replies/2= gets the signed interested and unsubscribe
+  replies (=WebhookFixtures=, =:integration= drain, suppression and
+  follow-up cancellation) once this branch carries S9a (main =b26be34=);
+  #19 stays based on s10b-ui until retargeted.
+- *=bin/demo predeliver [--approve]=* (=SdrAgent.Demo.Predeliver=,
+  =mix sdr.demo.predeliver=). It runs lead 01 to a draft awaiting review.
+  With =--approve=, it approves as the *Demo Reviewer fixture operator*:
+  the approval is audited as that operator's, bound to the displayed
+  recipient, and the script says so. The delivery goes to local capture.
+  It goes through domain APIs and the real workers (drained inline, so
+  scheduled jobs are never forced), so the send gate applies and quiet
+  hours defer. It is idempotent; a re-run writes only its sign-in record.
+  It waits (bounded) when a running dev server's Oban takes a job first.
+  RED 0/5 (module undefined), GREEN 5/5 (including the quiet-hours deferral
+  under a frozen clock). The script tests cover pass-through and a real
+  =--test= run.
+
 * S13 part 2 — TODO (after S9 and S12 merge)
-- [ ] Golden-path e2e through =bin/demo= data. Assign, research, qualify,
-      draft, approve, capture, then signed simulated replies (interested and
-      unsubscribe), with suppression and follow-up cancellation. Include the
-      invalid-signature rejection (checklist 4.3).
+- [ ] Golden path: add the S9 replies to =replies/2=, and the
+      invalid-signature rejection (checklist 4.3; S9a's controller test
+      covers it today).
 - [ ] Browser smoke of the golden path on a disposable database (needs a
       dev-like server not bound to =sdr_agent_dev=, or an owner run).
 - [ ] Postgres-only reconstruction: with Jido stopped and Tempo

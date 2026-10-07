@@ -50,12 +50,23 @@ at any time.
 | `bin/demo reset --yes` | Drops, creates and migrates `sdr_agent_dev`. Destructive, so it needs `--yes`, and it refuses while anything is connected to the database (a server on any port, IEx, psql). The drop is never forced. |
 | `bin/demo seed` | Seeds the fictional ICP, campaign, 10 accounts and contacts with leads, 3 operators and one suppression. Idempotent. |
 | `bin/demo run` | Checks that the port is free and the database is reachable, migrated and seeded, then starts Phoenix on `PORT` (default 4120). |
+| `bin/demo predeliver [--approve]` | Runs fixture lead 01 (Brightpath Freight Systems) through research, qualification and drafting, and leaves the draft awaiting review. With `--approve`, it also approves the draft **as the Demo Reviewer fixture operator** (the audit trail records it as that operator's approval, bound to the displayed recipient) and captures the email. Subject to quiet hours. Idempotent. |
 | `bin/demo status` | Shows the database, migrations, server, Oban queues and job counts, leads by status, drafts awaiting review, captured messages and the audit chain verification. |
 
 `bin/demo` refuses to run against anything except the local demo database: it
 needs `MIX_ENV=dev` (or unset), no `DATABASE_URL`, and a Repo of
 `sdr_agent_dev` on `localhost`/`127.0.0.1:5520`. The `--test` flag is for the
 script's own tests only. It uses a separate throw-away database.
+
+### Before an evening demo
+
+The campaign's quiet hours start at 18:00 America/Denver. To show a captured
+email after that, run `bin/demo predeliver --approve` **before 18:00**. It is
+safe while `bin/demo run` is serving, and it prints the lead and draft paths.
+During the demo, walk through lead 01's evidence, the approved draft and its
+captured message. Assign a second qualifying lead (02, 03, 09 or 10) live to
+show the agent working. An approval made inside quiet hours is deferred by
+the send gate, which is itself worth showing.
 
 ### Demo operators
 
