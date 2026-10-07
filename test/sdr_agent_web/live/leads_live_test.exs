@@ -148,6 +148,18 @@ defmodule SdrAgentWeb.LeadsLiveTest do
       assert ref == lead.id
     end
 
+    test "navigating from a lead to a missing one shows nothing of the first",
+         %{conn: conn, lead: lead} do
+      {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/leads/#{lead.id}")
+      assert has_element?(view, "#lead-header")
+
+      render_patch(view, ~p"/leads/#{Ecto.UUID.generate()}")
+
+      assert has_element?(view, "#not-found")
+      refute has_element?(view, "#lead-header")
+      refute has_element?(view, "#research")
+    end
+
     test "an unknown lead shows not found", %{conn: conn} do
       {:ok, view, _html} =
         conn |> sign_in(:reviewer) |> live(~p"/leads/#{Ecto.UUID.generate()}")

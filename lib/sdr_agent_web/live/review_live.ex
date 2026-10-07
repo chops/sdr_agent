@@ -64,13 +64,17 @@ defmodule SdrAgentWeb.ReviewLive do
       end
 
       socket
-      |> assign(loaded?: true, count: length(queue))
+      |> assign(loaded?: true, withheld: nil, count: length(queue))
       |> stream(:review_queue, Enum.map(queue, row), reset: true)
       |> stream(:recent_drafts, Enum.map(recent, row), reset: true)
     else
-      {:error, reason} -> assign(socket, withheld: AuditedView.error_message(reason))
+      {:error, reason} -> withhold(socket, reason)
     end
   end
+
+  # Fail closed on every (re)load: nothing previously shown stays on screen.
+  defp withhold(socket, reason),
+    do: assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
 
   @impl true
   def render(assigns) do

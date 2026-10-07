@@ -57,12 +57,16 @@ defmodule SdrAgentWeb.LeadLive.Index do
         end)
 
       socket
-      |> assign(loaded?: true, count: length(rows))
+      |> assign(loaded?: true, withheld: nil, count: length(rows))
       |> stream(:leads, rows, reset: true)
     else
-      {:error, reason} -> assign(socket, withheld: AuditedView.error_message(reason))
+      {:error, reason} -> withhold(socket, reason)
     end
   end
+
+  # Fail closed on every (re)load: nothing previously shown stays on screen.
+  defp withhold(socket, reason),
+    do: assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
 
   @impl true
   def render(assigns) do

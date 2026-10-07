@@ -49,6 +49,7 @@ defmodule SdrAgentWeb.DashboardLive do
       socket
       |> assign(
         loaded?: true,
+        withheld: nil,
         lead_count: length(leads),
         lead_stages: stages(leads),
         pending_count: length(queue),
@@ -65,7 +66,7 @@ defmodule SdrAgentWeb.DashboardLive do
       )
       |> stream(:attention, attention, reset: true)
     else
-      {:error, reason} -> assign(socket, withheld: AuditedView.error_message(reason))
+      {:error, reason} -> withhold(socket, reason)
     end
   end
 
@@ -87,6 +88,10 @@ defmodule SdrAgentWeb.DashboardLive do
       %{label: label, count: count, pct: round(count * 100 / total)}
     end
   end
+
+  # Fail closed on every (re)load: nothing previously shown stays on screen.
+  defp withhold(socket, reason),
+    do: assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
 
   @impl true
   def render(assigns) do

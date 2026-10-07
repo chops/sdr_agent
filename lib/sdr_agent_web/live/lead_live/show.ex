@@ -79,6 +79,8 @@ defmodule SdrAgentWeb.LeadLive.Show do
            AuditedView.record(scope, "SdrAgent.Sales.Lead", lead.id, "lead detail and evidence") do
       assign(socket,
         loaded?: true,
+        withheld: nil,
+        not_found?: false,
         page_title: ConsoleData.contact_name(contact),
         lead: lead,
         contact: contact,
@@ -93,10 +95,10 @@ defmodule SdrAgentWeb.LeadLive.Show do
       )
     else
       {:error, :not_found} ->
-        assign(socket, not_found?: true, loaded?: false)
+        socket |> withhold(:not_found) |> assign(not_found?: true)
 
       {:error, reason} ->
-        assign(socket, withheld: AuditedView.error_message(reason), loaded?: false)
+        withhold(socket, reason)
     end
   end
 
@@ -193,6 +195,17 @@ defmodule SdrAgentWeb.LeadLive.Show do
       after: codepoints |> Enum.drop(to) |> Enum.join()
     }
   end
+
+  # Fail closed on every (re)load: nothing previously shown stays on screen.
+  defp withhold(socket, :not_found), do: assign(socket, loaded?: false, withheld: nil)
+
+  defp withhold(socket, reason),
+    do:
+      assign(socket,
+        loaded?: false,
+        not_found?: false,
+        withheld: AuditedView.error_message(reason)
+      )
 
   @impl true
   def render(assigns) do

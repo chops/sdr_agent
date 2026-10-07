@@ -52,40 +52,41 @@ defmodule SdrAgentWeb.AuditedView do
     Audit.read_content(sha256, actor: scope.user, purpose: purpose)
   end
 
-  @doc "An operator-facing message for a refused or invalid domain call (never raw internals)."
+  @doc """
+  An operator-facing message for a refused or invalid domain call. Only
+  typed, operator-safe text is shown: authorization refusals, validation
+  messages that name a field, known refusal tags; anything else (framework
+  or database exceptions, arbitrary terms) becomes a generic message — never
+  raw internals.
+  """
   @spec error_message(term()) :: String.t()
   def error_message(%Ash.Error.Forbidden{}),
     do: "Not permitted for your role. The attempt was refused and recorded."
 
   def error_message(%Ash.Error.Invalid{errors: errors}) do
-    errors
-    |> Enum.map(&invalid_message/1)
-    |> Enum.uniq()
-    |> Enum.join("; ")
+    case errors |> Enum.map(&invalid_message/1) |> Enum.reject(&is_nil/1) |> Enum.uniq() do
+      [] -> "The request was refused as invalid."
+      messages -> Enum.join(messages, "; ")
+    end
   end
 
   def error_message(%Ash.Error.Query.NotFound{}), do: "Not found."
-  def error_message({tag, detail}) when is_atom(tag), do: "#{humanize(tag)}: #{humanize(detail)}"
+
+  def error_message({tag, detail}) when is_atom(tag) and is_atom(detail),
+    do: "#{humanize(tag)}: #{humanize(detail)}"
+
+  def error_message({tag, _detail}) when is_atom(tag), do: humanize(tag)
   def error_message(tag) when is_atom(tag), do: humanize(tag)
   def error_message(_other), do: "The request could not be completed."
 
+  defp invalid_message(%Ash.Error.Changes.Required{field: field}) when not is_nil(field),
+    do: "#{humanize(field)} is required"
+
   defp invalid_message(%{field: field, message: message} = error)
-       when is_binary(message) and not is_nil(field),
+       when is_binary(message) and is_atom(field) and not is_nil(field),
        do: "#{humanize(field)} #{interpolate(message, error)}"
 
-  defp invalid_message(%{message: message} = error) when is_binary(message),
-    do: interpolate(message, error)
-
-  defp invalid_message(error) when is_exception(error) do
-    error
-    |> Exception.message()
-    |> String.split("\n")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == "" or &1 == "Bread Crumbs:" or String.starts_with?(&1, "> ")))
-    |> Enum.join(" ")
-  end
-
-  defp invalid_message(_error), do: "invalid input"
+  defp invalid_message(_error), do: nil
 
   defp interpolate(message, error) do
     vars = Map.get(error, :vars) || []
@@ -99,6 +100,4 @@ defmodule SdrAgentWeb.AuditedView do
 
   defp humanize(value) when is_atom(value) or is_binary(value),
     do: value |> to_string() |> String.replace("_", " ")
-
-  defp humanize(value), do: inspect(value)
 end

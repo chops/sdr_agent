@@ -101,6 +101,8 @@ defmodule SdrAgentWeb.DraftLive do
          :ok <- AuditedView.record(scope, "SdrAgent.Outreach.Draft", draft.id, "draft review") do
       assign(socket,
         loaded?: true,
+        withheld: nil,
+        not_found?: false,
         page_title: "Review · #{current.subject}",
         draft: draft,
         revisions: revisions,
@@ -124,8 +126,8 @@ defmodule SdrAgentWeb.DraftLive do
           )
       )
     else
-      {:error, :not_found} -> assign(socket, not_found?: true)
-      {:error, reason} -> assign(socket, withheld: AuditedView.error_message(reason))
+      {:error, :not_found} -> socket |> withhold(:not_found) |> assign(not_found?: true)
+      {:error, reason} -> withhold(socket, reason)
     end
   end
 
@@ -362,6 +364,17 @@ defmodule SdrAgentWeb.DraftLive do
   end
 
   ## Rendering
+
+  # Fail closed on every (re)load: nothing previously shown stays on screen.
+  defp withhold(socket, :not_found), do: assign(socket, loaded?: false, withheld: nil)
+
+  defp withhold(socket, reason),
+    do:
+      assign(socket,
+        loaded?: false,
+        not_found?: false,
+        withheld: AuditedView.error_message(reason)
+      )
 
   @impl true
   def render(assigns) do

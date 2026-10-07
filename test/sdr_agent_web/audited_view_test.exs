@@ -45,4 +45,15 @@ defmodule SdrAgentWeb.AuditedViewTest do
     assert :crypto.hash(:sha256, content) == op.rendered_sha256
     assert [%{access_kind: :payload_view}] = accesses_of(ctx, reviewer)
   end
+
+  test "error messages never echo raw exception internals" do
+    internal = %RuntimeError{message: "ERROR 42P01 relation secret_table does not exist"}
+    message = AuditedView.error_message(Ash.Error.to_error_class(internal))
+    refute message =~ "secret_table"
+
+    refute AuditedView.error_message({:crash, %{pid: self(), internal: "secret_table"}}) =~
+             "secret_table"
+
+    assert AuditedView.error_message(%Ash.Error.Forbidden{}) =~ "Not permitted"
+  end
 end
