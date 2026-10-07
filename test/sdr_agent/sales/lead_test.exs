@@ -104,7 +104,9 @@ defmodule SdrAgent.Sales.LeadTest do
                  {:stop, non_terminal, :stopped},
                  {:block, [:qualifying, :researching], :blocked},
                  {:retry, [:blocked], :assigned},
-                 {:reopen, [:disqualified], :assigned}
+                 {:reopen, [:disqualified], :assigned},
+                 {:disqualify_by_override, [:qualified], :disqualified},
+                 {:requalify_by_override, [:disqualified], :qualified}
                ])
     end
 
