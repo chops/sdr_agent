@@ -25,7 +25,7 @@ defmodule SdrAgent.Clock do
   @spec source() :: :system_utc | :test_fixed
   def source, do: if(frozen(), do: :test_fixed, else: :system_utc)
 
-  @doc "Freezes the clock for this process and its callees (tests only)."
+  @doc "Freezes the clock for this process and its callees (tests and the dev/test demo seed)."
   @spec freeze(DateTime.t()) :: :ok
   def freeze(%DateTime{} = at) do
     {:ok, utc} = DateTime.shift_zone(at, "Etc/UTC")

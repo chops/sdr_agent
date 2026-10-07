@@ -89,6 +89,10 @@ config :phoenix_live_view,
 # Disable swoosh api client as it is only required for production adapters.
 config :swoosh, :api_client, false
 
+# Demo seed fixtures may be written here (ADR-0009: seed actions are
+# authorized only for the seeder in :dev/:test; absent elsewhere = refused).
+config :sdr_agent, seeding_allowed?: true
+
 # <!-- >>> workflow-factory:workflow-project-config >>> -->
 config :sdr_agent, SdrAgent.Repo,
   database: "sdr_agent_dev",

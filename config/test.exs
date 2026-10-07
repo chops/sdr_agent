@@ -51,6 +51,10 @@ config :phoenix_live_view,
 config :phoenix,
   sort_verified_routes_query_params: true
 
+# Demo seed fixtures may be written here (ADR-0009: seed actions are
+# authorized only for the seeder in :dev/:test; absent elsewhere = refused).
+config :sdr_agent, seeding_allowed?: true
+
 # <!-- >>> workflow-factory:workflow-project-config >>> -->
 config :sdr_agent, SdrAgent.Repo,
   database: "sdr_agent_test#{System.get_env("MIX_TEST_PARTITION")}",

@@ -16,7 +16,9 @@ defmodule SdrAgent.Audit.Changes.AppendEvent do
   The event payload carries the action name, the changed attributes
   (after-image; all attributes on create), the listed non-sensitive
   arguments and `record_sha256` — the canonical hash of the full row after
-  the write.
+  the write. Attributes marked `sensitive?` (e.g. a password hash) are left
+  out of the after-image and named under `redacted`; `record_sha256` still
+  covers them.
 
   Options:
 
@@ -28,6 +30,10 @@ defmodule SdrAgent.Audit.Changes.AppendEvent do
     * `:arguments` — action arguments to include in the payload
     * `:version_refs` — `{module, function}` called with the record, returning
       a map merged into the event's `version_refs`
+    * `:previous` — attributes whose value *before* the update is recorded
+      under `previous` (e.g. a lifecycle from-state or an old email). The
+      value comes from the changeset's data, so the action should lock and
+      re-read the row first (`get_and_lock_for_update`) for it to be exact.
   """
   use Ash.Resource.Change
 
@@ -73,6 +79,15 @@ defmodule SdrAgent.Audit.Changes.AppendEvent do
         Map.take(canonical, Map.keys(changeset.attributes) ++ Keyword.keys(changeset.atomics))
       end
 
+    sensitive =
+      resource
+      |> Ash.Resource.Info.attributes()
+      |> Enum.filter(& &1.sensitive?)
+      |> Enum.map(& &1.name)
+
+    redacted = Enum.filter(sensitive, &Map.has_key?(changes, &1))
+    changes = Map.drop(changes, sensitive)
+
     links =
       opts
       |> Keyword.get(:links, [])
@@ -94,12 +109,26 @@ defmodule SdrAgent.Audit.Changes.AppendEvent do
       action: action,
       authorization: %{decision: :authorized, action: "#{inspect(resource)}.#{action}"},
       version_refs: version_refs,
-      payload: %{
-        action: action,
-        changes: changes,
-        arguments: Map.take(changeset.arguments, Keyword.get(opts, :arguments, [])),
-        record_sha256: RecordHash.hex(record)
-      }
+      payload:
+        %{
+          action: action,
+          changes: changes,
+          arguments: Map.take(changeset.arguments, Keyword.get(opts, :arguments, [])),
+          record_sha256: RecordHash.hex(record)
+        }
+        |> put_unless_empty(:redacted, redacted)
+        |> put_unless_empty(:previous, previous(changeset, resource, opts))
     })
   end
+
+  defp previous(%{action_type: :update, data: data}, resource, opts) do
+    opts
+    |> Keyword.get(:previous, [])
+    |> Map.new(&{&1, RecordHash.attribute_value(resource, &1, Map.get(data, &1))})
+  end
+
+  defp previous(_changeset, _resource, _opts), do: %{}
+
+  defp put_unless_empty(payload, _key, empty) when empty == [] or empty == %{}, do: payload
+  defp put_unless_empty(payload, key, value), do: Map.put(payload, key, value)
 end
