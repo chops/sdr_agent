@@ -14,7 +14,10 @@ defmodule SdrAgent.SDR.Schemas do
       `reason`;
     * `outreach_proposal/0` — OutreachProposal: `subject`, `body`, `angle`,
       `cta`, `claims` [{claim, evidence_id, confidence}], `personalization`
-      [{text, evidence_id}], `risk_flags`, `evidence_ids`.
+      [{text, evidence_id}], `risk_flags`, `evidence_ids`;
+    * `reply_classification/0` — ReplyAssessment: `classification`,
+      `sentiment`, `intent`, `suggested_next_action`, `confidence` 0..1,
+      `reason`.
 
   `ref/1` gives the id, version and canonical sha256 recorded on every
   ModelInvocation (ADR-0002).
@@ -85,8 +88,28 @@ defmodule SdrAgent.SDR.Schemas do
     })
   end
 
+  @doc """
+  ReplyAssessment output schema (spec §16; S2 ReplyAssessment): the model
+  classifies — it never drafts a response (owner decision) and never decides
+  suppression (the deterministic rule does).
+  """
+  def reply_classification do
+    object(%{
+      classification:
+        Zoi.enum(
+          ~w(interested objection referral not_now unsubscribe out_of_office irrelevant unknown)
+        ),
+      sentiment: Zoi.enum(~w(positive neutral negative)),
+      intent: Zoi.string() |> Zoi.min(1) |> Zoi.max(500),
+      suggested_next_action: Zoi.enum(~w(hand_off nurture stop escalate none)),
+      confidence: unit(),
+      reason: Zoi.string() |> Zoi.min(1) |> Zoi.max(1000)
+    })
+  end
+
   @doc "The schema for a model purpose."
   def for_purpose(:evidence_extraction), do: evidence_extraction()
+  def for_purpose(:reply_classification), do: reply_classification()
   def for_purpose(:qualification), do: qualification_result()
   def for_purpose(:outreach_proposal), do: outreach_proposal()
 

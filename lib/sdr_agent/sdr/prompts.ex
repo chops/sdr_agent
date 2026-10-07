@@ -49,6 +49,18 @@ defmodule SdrAgent.SDR.Prompts do
     - risk_flags lists anything a reviewer should check (empty if none).
     INPUT:
     {{input}}
+    """,
+    reply_classification: """
+    You classify a prospect's reply to a sales email for the human SDR who
+    owns the conversation. Do not write a response.
+    - classification is one of interested, objection, referral, not_now,
+      unsubscribe, out_of_office, irrelevant, unknown.
+    - sentiment is positive, neutral or negative; intent is one short
+      sentence; suggested_next_action is hand_off, nurture, stop, escalate or
+      none; confidence is between 0 and 1; reason cites the reply's words.
+    - Use only the REPLY below (subject and text).
+    INPUT:
+    {{input}}
     """
   }
 
