@@ -114,6 +114,27 @@ defmodule SdrAgentWeb.WebhookControllerTest do
     assert [_] = events_of_type(ctx.tenant, "webhook.received")
   end
 
+  test "a malformed JSON body is stored and rejected, never a parser crash", ctx do
+    raw = ~s({"id":"evt_bad_json","type":"reply",)
+    conn = post_signed(raw)
+    assert json_response(conn, 401) == %{"error" => "signature_invalid"}
+
+    assert [event] = webhook_events!(ctx)
+    assert {event.signature_verdict, event.processing_status} == {:invalid, :rejected}
+    assert event.raw_body_sha256 == :crypto.hash(:sha256, raw)
+    refute_enqueued(worker: WebhookWorker)
+  end
+
+  test "a body over the intake limit is refused with 413 and nothing stored", ctx do
+    raw =
+      ~s({"id":"evt_big","type":"reply","data":{"text":") <>
+        String.duplicate("a", 70_000) <> ~s("}})
+
+    conn = post_signed(raw)
+    assert conn.status == 413
+    assert webhook_events!(ctx) == []
+  end
+
   test "an unknown event type is not routed and stores nothing", ctx do
     raw = body("evt_ctl_5")
     conn = post_signed(raw, type: "refund")

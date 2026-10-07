@@ -136,6 +136,33 @@ defmodule SdrAgent.Outreach.WebhookRaceTest do
     assert [_reply] = elem(Outreach.list_records(Outreach.Reply, actor: ctx.admin), 1)
   end
 
+  test "one Message-ID under two event ids at once: one reply, both events processed", ctx do
+    %{delivery: op} = delivered!(ctx)
+    msg = "<same-message@prospect.example.test>"
+
+    events =
+      for id <- ["evt_msg_a", "evt_msg_b"] do
+        body =
+          op
+          |> SdrAgent.WebhookFixtures.reply_body("Interested!", id: id)
+          |> Jason.decode!()
+          |> put_in(["data", "message_id"], msg)
+          |> Jason.encode!()
+
+        {:ok, %{status: :accepted, event: event}} =
+          Webhooks.ingest("reply", body, Map.new(signed_headers(body)))
+
+        event
+      end
+
+    results = race(for e <- events, do: fn -> Webhooks.process(e.id, ctx.tenant_id) end)
+    assert Enum.all?(results, &(&1 == :ok)), inspect(results)
+
+    {:ok, stored} = Ash.read(WebhookEvent, actor: ctx.admin)
+    assert Enum.map(stored, & &1.processing_status) == [:processed, :processed]
+    assert [_reply] = elem(Outreach.list_records(Outreach.Reply, actor: ctx.admin), 1)
+  end
+
   # Lead "01" worked by the agent, approved by the admin, delivered.
   defp delivered!(ctx) do
     {:ok, lead} = Sales.fetch(Sales.Lead, Enum.at(Fixtures.leads(), 0).id, actor: ctx.admin)

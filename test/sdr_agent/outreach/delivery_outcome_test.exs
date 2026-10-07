@@ -91,6 +91,27 @@ defmodule SdrAgent.Outreach.DeliveryOutcomeTest do
     assert Enum.filter(suppressions!(ctx), &(&1.reason == :hard_bounce)) == []
   end
 
+  test "a signed delivered event re-routed as bounce or complaint is rejected; nothing suppressed",
+       ctx do
+    %{delivery: op, lead: lead} = delivered!(ctx)
+    body = outcome_body("delivered", op, id: "evt_retyped_1")
+
+    for type <- ["bounce", "complaint"] do
+      assert {:ok, %{status: :rejected, event: event}} = ingest!(type, body)
+      assert {event.signature_verdict, event.processing_status} == {:invalid, :rejected}
+    end
+
+    assert process!() == %{discard: 0, cancelled: 0, success: 0, failure: 0, snoozed: 0}
+    assert outreach!(ctx, op).state == :accepted
+    assert Enum.filter(suppressions!(ctx), &(&1.reason in [:hard_bounce, :complaint])) == []
+    assert reload!(ctx, lead).status == :in_outreach
+
+    # The re-typed attempts did not pre-claim the id: the real event still lands.
+    assert {:ok, %{status: :accepted}} = ingest!("delivered", body)
+    assert %{success: 1} = process!()
+    assert outreach!(ctx, op).state == :delivered
+  end
+
   test "a valid unsubscribe link suppresses the contact deterministically", ctx do
     %{lead: lead} = delivered!(ctx)
     contact = contact!(ctx, lead)

@@ -187,6 +187,30 @@ defmodule SdrAgent.Outreach.ReplyTest do
     assert [_] = events_of_type(ctx.tenant, "outreach.reply.received")
   end
 
+  test "processing carries the received bytes, checked against the event hash; no content read",
+       ctx do
+    %{delivery: op} = delivered!(ctx)
+    body = reply_body(op, "Interested.")
+    assert {:ok, %{status: :accepted, event: event}} = ingest!("reply", body)
+
+    assert [job] = all_enqueued(worker: WebhookWorker)
+    assert job.args["raw_body"] == Base.encode64(body)
+
+    tampered = reply_body(op, "Please unsubscribe me.")
+
+    assert :ok =
+             perform_job(WebhookWorker, %{
+               "webhook_event_id" => event.id,
+               "tenant_id" => ctx.tenant.id,
+               "raw_body" => Base.encode64(tampered)
+             })
+
+    event = webhook!(ctx, event)
+    assert event.processing_status == :failed
+    assert replies!(ctx) == []
+    assert SdrAgent.AuditCase.events(ctx.tenant) |> Enum.filter(&(&1.category == :access)) == []
+  end
+
   test "a payload that fails its shape fails the event with an attention Failure", ctx do
     body = ~s({"id":"evt_bad_1","type":"reply","data":{"text":"no sender"}})
     assert {:ok, %{status: :accepted, event: event}} = ingest!("reply", body)
