@@ -72,7 +72,7 @@ defmodule SdrAgent.Operations.AttentionLifecycleTest do
     run
   end
 
-  defp failure!(ctx, actor, overrides \\ %{}) do
+  defp failure!(_ctx, actor, overrides \\ %{}) do
     {:ok, failure} =
       Operations.open_failure(
         Map.merge(
