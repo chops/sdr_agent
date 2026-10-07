@@ -14,6 +14,10 @@ defmodule SdrAgent.Sales.Lead do
     * new → assigned (ADM, REV) → researching → qualifying (AGT);
     * qualifying → qualified | disqualified (T) — AGT, and only from inside
       the Research Qualification create (`SdrAgent.Sales.Checks.QualificationContext`);
+    * qualified → disqualified (T) and disqualified → qualified — ADM, REV,
+      only from inside a human Qualification override that flips the
+      outcome (`:disqualify_by_override`, `:requalify_by_override`), so the
+      current qualification and the lead never disagree;
     * qualified → in_outreach (AGT) → replied (WHK; sets `handed_off_at`) →
       converted (T) | nurture (T) (ADM, REV). Replied leads are the human
       hand-off queue (`SdrAgent.Sales.list_handoff_queue/1`);
@@ -69,7 +73,9 @@ defmodule SdrAgent.Sales.Lead do
     {:stop, @open, :stopped},
     {:block, [:researching, :qualifying], :blocked},
     {:retry, [:blocked], :assigned},
-    {:reopen, [:disqualified], :assigned}
+    {:reopen, [:disqualified], :assigned},
+    {:disqualify_by_override, [:qualified], :disqualified},
+    {:requalify_by_override, [:disqualified], :qualified}
   ]
   @event [category: :domain_change, previous: [:status], links: [decision_id: :last_decision_id]]
 
@@ -187,6 +193,26 @@ defmodule SdrAgent.Sales.Lead do
       change {AppendEvent, [event_type: "sales.lead.outreach_started"] ++ @event}
     end
 
+    update :disqualify_by_override do
+      description "ADM, REV, inside a human Qualification override only: qualified → disqualified (T)."
+      require_atomic? false
+      accept [:status_reason]
+      change get_and_lock_for_update()
+      change {Transition, from: [:qualified], to: :disqualified, locked?: true}
+      change {Stamp, fields: [:closed_at]}
+      change {AppendEvent, [event_type: "sales.lead.disqualified_by_override"] ++ @event}
+    end
+
+    update :requalify_by_override do
+      description "ADM, REV, inside a human Qualification override only: disqualified → qualified."
+      require_atomic? false
+      accept [:status_reason]
+      change get_and_lock_for_update()
+      change {Transition, from: [:disqualified], to: :qualified, locked?: true}
+      change set_attribute(:closed_at, nil)
+      change {AppendEvent, [event_type: "sales.lead.requalified_by_override"] ++ @event}
+    end
+
     update :mark_replied do
       description "WHK: in_outreach → replied; the lead enters the hand-off queue."
       require_atomic? false
@@ -290,6 +316,11 @@ defmodule SdrAgent.Sales.Lead do
     policy action([:qualify, :disqualify]) do
       forbid_unless SdrAgent.Sales.Checks.QualificationContext
       authorize_if {Checks.ActorType, types: [:agent_runtime]}
+    end
+
+    policy action([:disqualify_by_override, :requalify_by_override]) do
+      forbid_unless SdrAgent.Sales.Checks.QualificationContext
+      authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
     end
 
     policy action(:mark_replied) do

@@ -21,8 +21,11 @@ defmodule SdrAgent.Research.Qualification do
       same run with a completed, valid model invocation; the lead must be
       qualifying and moves to qualified/disqualified in the same transaction;
     * `:override` (ADM, REV) — human override: supersedes the current row,
-      records the acting user and a reason, cites the superseded row's
-      decision, and leaves the lead's status alone.
+      records the acting user and a reason, and cites the superseded row's
+      decision. When it flips the outcome it moves the lead in the same
+      transaction (qualified ↔ disqualified); in any other lead state (e.g.
+      outreach has begun) the override is refused and the operator ends the
+      lead with Sales `:stop` instead.
 
   Audited: `research.qualification.recorded` (with the cited claim ids).
   Reads: ADM, REV, AUR, AGT, AUD.
@@ -116,7 +119,7 @@ defmodule SdrAgent.Research.Qualification do
       change SdrAgent.Audit.Changes.TraceIds
       change {SdrAgent.Audit.Changes.Supersedes, subject: [:tenant_id, :lead_id]}
       change {Changes.QualificationRules, source: :agent}
-      change {Changes.RecordOutcome, transition_lead?: true}
+      change {Changes.RecordOutcome, transition_lead: :agent}
       change {AppendEvent, @event}
     end
 
@@ -129,7 +132,7 @@ defmodule SdrAgent.Research.Qualification do
       change SdrAgent.Audit.Changes.TraceIds
       change {SdrAgent.Audit.Changes.Supersedes, subject: [:tenant_id, :lead_id]}
       change {Changes.QualificationRules, source: :human_override}
-      change {Changes.RecordOutcome, transition_lead?: false}
+      change {Changes.RecordOutcome, transition_lead: :override}
       change {AppendEvent, @event}
     end
   end
