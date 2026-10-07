@@ -1,6 +1,6 @@
 # Domain Boundaries
 
-Generated: 2026-10-06 (Sales and Research added by hand in S5, 2026-10-07)
+Generated: 2026-10-06 (Sales and Research added by hand in S5, Outreach in S8, 2026-10-07)
 
 Project shape: single
 
@@ -9,6 +9,13 @@ This diagram shows Ash domains and their resources, representing bounded context
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e1f5fe', 'primaryBorderColor': '#01579b'}}}%%
 graph TB
+    subgraph Outreach["Outreach Domain (highest layer)"]
+        Draft[Draft]
+        DraftRevision[DraftRevision]
+        RevisionCitation[RevisionCitation]
+        Approval[Approval]
+        Suppression[Suppression]
+    end
     subgraph Research["Research Domain"]
         ResearchArtifact[ResearchArtifact]
         EvidenceClaim[EvidenceClaim]
@@ -111,6 +118,22 @@ graph TB
     Accounts == "AppendEvent (user.*, auth.*)" ==> Kernel
     Sales == "AppendEvent (sales.*)" ==> Kernel
     Research == "AppendEvent (research.*)" ==> Kernel
+    Draft --> DraftRevision
+    DraftRevision --> RevisionCitation
+    Draft -. current_revision_id FK (deferred) .-> DraftRevision
+    Draft --> Approval
+    Approval -. binds revision id + sha256 .-> DraftRevision
+    Approval -. recipient / campaign FK .-> Contact
+    Approval -. approver FK .-> User
+    Draft -. lead / enrollment / step / campaign / recipient FK .-> CampaignEnrollment
+    Draft -. origin_agent_run_id FK .-> AgentRun
+    DraftRevision -. draft_proposal decision FK .-> Decision
+    RevisionCitation -. evidence_claim_id FK .-> EvidenceClaim
+    Suppression -. stops leads / enrollments (same transaction) .-> Lead
+    Suppression -. invalidates approvals, cancels drafts .-> Approval
+    Suppression -. created_by / decision FK .-> User
+    Outreach -. tenant_id FK .-> Tenant
+    Outreach == "AppendEvent (outreach.*)" ==> Kernel
 
 
     %% Project shape: single

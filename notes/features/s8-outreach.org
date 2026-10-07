@@ -205,5 +205,61 @@ agent/delivery stop authority (choice 6) is still built and tested directly.
 
 -----
 
+** S8a GREEN
+=MIX_TEST_PARTITION=_s8 bin/verify= → *398 passed, 4 excluded* (370 before
+S8a + 28 new; the seed and gates tests changed by contract, see choices 8
+and 11). =mix ash.codegen --check= clean after =mix ash.codegen
+s8a_outreach= (migration =20261007142841=), =mix credo= no issues, =mix
+hex.audit= no advisories, gitleaks 8.30.1 over =origin/main..HEAD= and
+=lib/=: no leaks.
+
+-----
+
 * Implementation Notes
-(Added during 4b)
+
+** S8a findings and further choices (flagged for review)
+ 13. *Unreachable invalidation dropped.* S2 DraftRevision: "creating a
+     revision … invalidates any granted Approval of an older revision". A
+     granted approval holds its draft in =queued= and a revision can only be
+     added in =pending_review= (revoke returns it), so no granted approval of
+     an older revision can exist when a revision is created; the code path is
+     not built (TDD: no untested scope). The =newer_revision= reason stays in
+     the enum. S8b's send gate re-checks the hash regardless.
+ 14. *Rejected approvals bind too.* A rejection names the reviewed revision
+     and hash like a grant (a stale rejection is refused), so the record says
+     exactly which content was rejected.
+ 15. *Read-time checks are internal.* The changes that check invariants
+     (=DraftConsistency=, =RevisionRules=, =CitationRules=, =BindApproval=,
+     =ApplySuppression=) read with =authorize?: false= inside the action's
+     transaction, as =get_and_lock_for_update= and S5's =RelatedInState= do;
+     nothing they read is returned.
+ 16. *Revision audit payload.* =outreach.revision.created= carries the
+     citations (argument =citations=) so the join rows are covered by the
+     parent's record hash and event (S2 "AE: in parent event");
+     RevisionCitation has no event of its own and is not =__sdr_audited__=.
+ 17. *Terminal-immutable Draft and Approval.* Both reuse
+     =SdrAgent.Audit.SQL.terminal_immutable/3=: terminal rows never change,
+     non-terminal rows change only their lifecycle columns, and neither can be
+     deleted. A test proves the Approval binding columns and a revoked row are
+     frozen.
+ 18. *Domain suppression match* compares the contact email's domain exactly
+     (no parent-domain matching).
+
+** What S8b, S9 and S10 must know (S8a)
+- *S8b:* the grant (=Outreach.approve/3=) is where the DeliveryOperation and
+  its Oban job are inserted (outbox); =:revoke= must first cancel a pending
+  delivery; Draft gains =queued → sent | failed=; Approval gains =granted →
+  consumed=; the suppression side effects must also cancel pending /
+  failed_retryable deliveries (lock them in =ApplySuppression='s
+  =before_action=, after approvals).
+- *S9:* add the WHK and AGT (=unsubscribe_reply= from a
+  =reply_classification= Decision) suppression actions next to =:manual=;
+  reuse =ApplySuppression= (side effects and lock order) and
+  =NormalizeSuppression=; =Draft :cancel= (=InternalWrite=) is the reply
+  side effect for drafts; =Sales.Checks.SuppressionContext= already admits
+  WHK and AGT.
+- *S10:* review queue =Outreach.list_review_queue/1=; a reviewer edits with
+  =edit_draft/3= and approves/rejects with the revision id + hex hash shown
+  on screen (=approve/3=, =reject/3=); =revoke/2=; citations per revision
+  (=RevisionCitation= → =EvidenceClaim=) are the "click a sentence → see
+  evidence" links; =diff_from_ai_baseline= is the AI-vs-human diff.

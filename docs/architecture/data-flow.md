@@ -53,6 +53,8 @@ flowchart LR
         Runner[Runner: Jido.Agent.cmd per signal<br/>emitted signals -> ledger -> next turn]
         Flows[ResearchLeadFlow / PrepareOutreachFlow<br/>Actions = ToolInvocations + Decisions]
         Fixtures[Fixture CRM / search / web<br/>offline, reserved hosts]
+        HandOff[HandOffProposal: enrollment + lead in_outreach<br/>+ sdr.draft.completed + Outreach Draft/Revision, one txn]
+        SupCheck[SuppressionCheck.Store<br/>reads Outreach suppressions]
     end
 
     subgraph AI["Structured Model Boundary"]
@@ -95,6 +97,10 @@ flowchart LR
     Flows --> Fixtures
     Flows --> Domains
     Flows --> Provider
+    Flows --> HandOff
+    HandOff --> Domains
+    Flows --> SupCheck
+    SupCheck --> Domains
     Runner -- signal events --> Append
     Provider --> Budget
     Provider --> Validation
