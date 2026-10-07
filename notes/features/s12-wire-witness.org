@@ -285,6 +285,18 @@ assertions; 1 passing control. The fake CLI is a hermetic functional fixture
 pipeline, not a transport/independence proof (S12a checks + S12d remain).
 Independent peer RED verification required before GREEN.
 
+Codex RED v2 verdict =0c16f778-779e-428c-9af4-b4254f1426de=: VERIFIED for
+GREEN (40 assertion failures + R3 control; generation-key convention is no
+entity delta). GREEN obligations taken: exactly 4 generations then no
+further job, bounds documented, REC lifecycle/atomicity, shared queue = 1.
+
+Phase 4b GREEN: 41 witness tests pass; full suite 584 passed, 4 external
+excluded; =bin/verify=, =mix ash.codegen --check= (no migration) pass; strict
+Credo clean for S12c files. Post-GREEN test edits: RED call helpers replaced
+by direct calls; worker tests run the real enqueued =Oban.Job= (Oban's
+=perform_job/3= rejects =:id=); re-drive cap tightened to exactly 4 plus a
+later scan adding no job.
+
 ** S12d — operator deployment and enablement
 Owner alone deploys nix-darwin. One budgeted synthetic external model call supplies proof; enabling a method is a separate reviewed PR, never an automatic effect of a passing fixture test.
 
@@ -322,6 +334,18 @@ Owner alone deploys nix-darwin. One budgeted synthetic external model call suppl
   WireWitnessLink in Agents, adapter child-env correlation, conditional
   proxy witness store.
 
+** S12c (Claude writer)
+- =Agents.Witness= (reconcile/enqueue/status/live warnings), =Witness.Store=
+  (bounded read-only reader), =Witness.Projection=
+  (=claude-message-json/1+prompt-builder/1=), =Witness.ReconcileWorker= and
+  =Witness.ScanWorker= (cron */5). =ClaudeCLI.render_prompt/2= is the
+  versioned builder (=prompt-builder/1=, canonical schema JSON) recorded in
+  provenance; =ClaudeCLI.unfence/1= is shared with the projection.
+- =Agents.witness_status/2= answers C1 over current links.
+- Config: =reconciliation: 1= (shared, ADR-0005), =Witness store_root: nil=,
+  =reconciled_methods: []=; test-only =allow_method_override=.
+- Not in scope: S12d real external proof/enablement.
+
 ** Earlier
 No SDR production changes before S12b. S12a proxy/shim production implementation is
 pushed under nix-darwin PR #6, pending its M1 review fix and owner deployment.
@@ -334,7 +358,7 @@ implementation writers must evaluate codegen/diagrams under the existing plan.
 - [ ] S12a RED independently verified, then GREEN tests/package/flake checks and reviewed PR
 - [ ] Owner deployment checkpoint recorded (no agent deploy)
 - [X] S12b RED independently verified, then GREEN policy/lifecycle/propagation tests
-- [ ] S12c RED independently verified, then GREEN hermetic reconciliation/e2e tests
+- [X] S12c RED independently verified, then GREEN hermetic reconciliation/e2e tests
 - [ ] Full gate and Ash codegen/diagrams current after rebase
 - [ ] Real external proof metadata reviewed
 - [ ] Separate S12d enablement PR (empty allowlist preserved until then)
