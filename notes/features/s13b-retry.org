@@ -96,5 +96,67 @@ exist). No migration. The daily model cap and run budgets are unchanged.
   =:retry_window_expired= with nothing written. A job locked by the
   request cannot be pruned until commit.
 
+* Soft-stop v3 (revision for the narrow Codex verdict on =f9dafb0=)
+v2 stands as accepted except for the rows and notes replaced here.
+
+** B2 (replaced): =WebhookEvent :request_retry=, orchestration-only
+| Field | Specification |
+|-------+---------------|
+| Contract | No public arguments are trusted. The action reads =ordinal :: 1..3= and =oban_job_id :: integer= *only* from a private same-transaction context, =SdrAgent.Outreach.Checks.WebhookRetryContext=. B1 sets it *after* its authoritative checks, under the event and job locks, with the values B1 computed. =Ash.Changeset= arguments with those names are ignored. |
+| Policy | Active ADM of the tenant **and** the =WebhookRetryContext= marker, the same pattern as =InternalWrite=, =SuppressionContext= and A2's =RetryContext=. A direct =Ash.Changeset.for_update(:request_retry)= / =Ash.update= call without the marker is =Forbidden= and audited (=guarded=), and appends nothing. With the marker it re-verifies under the held event lock that =ordinal= equals the previous =webhook.retry_requested= count + 1, and that the context's job id is the locked original job. |
+| Effect | =failed → failed= (no column change). Appends =webhook.retry_requested= carrying =ordinal= and =oban_job_id=. B1 then runs =Oban.retry_job/2= and checks the postcondition in the same transaction. A no-op or failed postcondition rolls back the request event too. |
+| Tests (planned) | Direct action as ADM without the marker: refused, audited, no event. With a forged ordinal or job id in arguments: ignored, the context values are used. No original job: =:retry_window_expired=, nothing written. A =retry_job= no-op (job became =available= between check and update, simulated): rollback, no request event. |
+
+** B4 (replaced): =WebhookEvent :record_retry_failed=, consumes exactly the pending ordinal
+| Field | Specification |
+|-------+---------------|
+| Contract | WHK only. =class :: :validation_error \| :crash=, =reason :: string= (redacted). The pending ordinal is *derived* under the event lock (the latest =webhook.retry_requested= ordinal with no later =webhook.retry_failed= or =webhook.processed=). It is never supplied by the caller. |
+| Invariants | Exactly one consume outcome per request ordinal. If no request is pending (a duplicate or resumed job, direct processing of a =failed= event, or a repeat failure), the action is a no-op (=:done=): no event and no extra consume. Success (=:mark_processed=, =failed → processed=) consumes the pending ordinal by being terminal and resolves the event's Failure atomically. The existing Failure stays the single attention entry. |
+
+** A1 additions (recorded)
+- *Active run, retained:* after the one-child check (4), under the Lead
+  lock and before any write, a queued or running AgentRun of the same lead
+  (any trigger) gives =:assignment_active=. This applies to both supported
+  triggers.
+- *Original job association:* the original job must be exactly one row with
+  the expected worker (=SdrAgent.SDR.AgentWorker= for assignment,
+  =SdrAgent.SDR.ReplyWorker= for reply), =tenant_id= equal to the run's,
+  the expected queue (=research= / =agent=), and binding (assignment:
+  =id= equal to the prior Operation's =oban_job_id=; reply: =args.run_id=
+  equal to the prior run). Its dumped signal must equal the durable trigger
+  signal: same id, type and data. Outcomes: zero rows (pruned or missing)
+  gives =:original_job_missing=, which refuses because liveness cannot be
+  proven; more than one gives =:original_job_ambiguous=; a mismatch gives
+  =:original_job_corrupt=. Nothing is written in any of these cases.
+- *New job and Operation binding:* the new job carries the same tenant and
+  the *original lineage's* durable trigger signal (same signal id; no fresh
+  signal event per retry run). For assignment, the new Operation's
+  =oban_job_id= is the new job's id, and A2 verifies that the Operation is
+  bound to no other run and is the one created in this transaction. For
+  reply, the new job's =args.run_id= is the new run's id.
+
+** Existing dependencies (literal notation)
+- Lead: existing dependency: unchanged — relationship/policy/lifecycle
+  impact checked, none found (read and locked only; never re-transitioned).
+- Campaign: existing dependency: unchanged — relationship/policy/lifecycle
+  impact checked, none found (=FOR SHARE= gate only).
+- Reply, ReplyAssessment: existing dependency: unchanged —
+  relationship/policy/lifecycle impact checked, none found (provenance read;
+  =:already_assessed= gate).
+- Approval, Draft, DeliveryOperation: existing dependency: unchanged —
+  relationship/policy/lifecycle impact checked, none found (never touched
+  by a retry; no send permission implied).
+- Failure: existing dependency: unchanged — relationship/policy/lifecycle
+  impact checked, none found. The prior run's attention Failure is
+  pre-locked and resolved by the existing =ResolveAttention= on the retry,
+  and a webhook Failure is resolved by the existing =:mark_processed=. No
+  new Failure class, link or lifecycle.
+- ModelInvocation: existing dependency: unchanged —
+  relationship/policy/lifecycle impact checked, none found (read for the
+  =sent= check; budgets and daily cap unchanged).
+- AgentDefinition, Signals/AuditEvent: existing dependency: unchanged —
+  relationship/policy/lifecycle impact checked, none found (the retry run
+  copies the definition; the signal is read only).
+
 * Status
-Soft-stop v2 is waiting for the Codex verdict. Nothing is implemented.
+Soft-stop v3 is waiting for the Codex verdict. Nothing is implemented.
