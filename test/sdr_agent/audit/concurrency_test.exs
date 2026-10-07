@@ -80,6 +80,79 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
     assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: admin)
   end
 
+  describe "concurrent decisions with one idempotency key" do
+    setup do
+      {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
+      %{run: run, agent: agent} = SdrAgent.AgentsFixtures.running_run(tenant)
+      %{tenant: tenant, run: run, agent: agent}
+    end
+
+    test "identical calls all succeed with one row and one event", ctx do
+      attrs = decision_attrs(ctx.run, "clear")
+
+      results = race(8, fn _ -> record_in_own_connection(attrs, ctx.agent) end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1)), inspect(results)
+      assert results |> Enum.map(fn {:ok, d} -> d.id end) |> Enum.uniq() |> length() == 1
+      assert decision_events(ctx.tenant) == 1
+    end
+
+    test "different decisions: exactly one wins, the rest conflict", ctx do
+      results =
+        race(8, fn n ->
+          record_in_own_connection(decision_attrs(ctx.run, "outcome-#{n}"), ctx.agent)
+        end)
+
+      assert Enum.count(results, &match?({:ok, _}, &1)) == 1, inspect(results)
+
+      conflicts =
+        Enum.count(results, fn
+          {:error, %Ash.Error.Invalid{errors: errors}} ->
+            Enum.any?(
+              errors,
+              &match?(%{__struct__: SdrAgent.Agents.Errors.IdempotencyConflict}, &1)
+            )
+
+          _ ->
+            false
+        end)
+
+      assert conflicts == 7, inspect(results)
+      assert decision_events(ctx.tenant) == 1
+    end
+  end
+
+  defp decision_attrs(run, outcome) do
+    %{
+      agent_run_id: run.id,
+      kind: :phase_transition,
+      mode: :deterministic,
+      rule_id: "phase",
+      rule_version: "1",
+      subject_resource: "SdrAgent.Agents.AgentRun",
+      subject_id: run.id,
+      inputs: %{"from" => "research"},
+      outcome: outcome,
+      idempotency_key: "phase:concurrent"
+    }
+  end
+
+  defp race(n, fun) do
+    1..n
+    |> Enum.map(fn i -> Task.async(fn -> fun.(i) end) end)
+    |> Task.await_many(60_000)
+  end
+
+  defp record_in_own_connection(attrs, agent) do
+    with_connection(fn -> SdrAgent.Agents.record_decision(attrs, actor: agent) end)
+  end
+
+  defp decision_events(tenant) do
+    admin = %SdrAgent.Test.Human{id: Ecto.UUID.generate(), role: :admin, tenant_id: tenant.id}
+    {:ok, events} = Audit.list_events(actor: admin)
+    Enum.count(events, &(&1.event_type == "agents.decision.recorded"))
+  end
+
   defp run_worker(worker, kernel) do
     if rem(worker, 4) == 0 do
       {:error, :abandoned} =
