@@ -248,11 +248,17 @@ authorization); its assertion is unchanged.
      event never silently stays =received=.
  19. *Duplicate message.* A reply whose =Message-ID= is already stored (a
      provider re-send under a new event id) is processed as a no-op.
+ 20. *Agent-plane seam.* Outreach never depends on the agent plane (S8b
+     named the follow-up worker by string for the same reason): a matched
+     reply is handed over through the behaviour
+     =SdrAgent.Outreach.ReplyIntake= (=config :sdr_agent, :reply_intake=,
+     default =SdrAgent.SDR.ReplyIntake=, which records
+     =sdr.reply.received=), called inside the reply transaction.
 
 ** What S9b, S10 and S13 must know (S9a)
 - *S9b:* the matched-reply transaction is where the classification AgentRun
-  and its job belong (=Webhooks.signal/3=); =Signals= already loads
-  =reply_id=.
+  and its job belong (=SdrAgent.SDR.ReplyIntake.received/3=); =Signals=
+  already loads =reply_id=.
 - *S10:* =Outreach.list_records(Outreach.Reply, …)= (match status,
   delivery/lead links), =WebhookEvent= reads (ADM, REV, AUR: verdict,
   processing status, failure), =Operations.list_attention/1= shows

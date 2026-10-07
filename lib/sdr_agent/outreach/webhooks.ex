@@ -19,8 +19,8 @@ defmodule SdrAgent.Outreach.Webhooks do
 
   Event types: `reply` (match → `SdrAgent.Outreach.Reply`, the
   deterministic `unsubscribe_rule` Decision and, when it says so, an
-  `unsubscribe_reply` Suppression; `sdr.reply.received` for a matched
-  reply), `unsubscribe` (the signed footer link: `Unsubscribe.verify/3` →
+  `unsubscribe_reply` Suppression; a matched reply is handed to the agent
+  plane through `SdrAgent.Outreach.ReplyIntake` in the same transaction), `unsubscribe` (the signed footer link: `Unsubscribe.verify/3` →
   `unsubscribe_link` Suppression), `delivered` and `bounce` (accepted →
   delivered | bounced with a receipt; a bounce always suppresses the
   recipient as `hard_bounce`), `complaint` (`complaint` Suppression).
@@ -44,6 +44,7 @@ defmodule SdrAgent.Outreach.Webhooks do
   alias SdrAgent.Outreach.Draft
   alias SdrAgent.Outreach.Locks
   alias SdrAgent.Outreach.Reply
+  alias SdrAgent.Outreach.ReplyIntake
   alias SdrAgent.Outreach.Suppression
   alias SdrAgent.Outreach.Unsubscribe
   alias SdrAgent.Outreach.UnsubscribeRule
@@ -51,7 +52,6 @@ defmodule SdrAgent.Outreach.Webhooks do
   alias SdrAgent.Outreach.WebhookWorker
   alias SdrAgent.Repo
   alias SdrAgent.Sales
-  alias SdrAgent.SDR.Signals
 
   @types Map.new(WebhookEvent.event_types(), &{Atom.to_string(&1), &1})
   @header_allowlist ~w(content-type user-agent x-sdr-key-id x-sdr-timestamp x-sdr-signature)
@@ -333,17 +333,7 @@ defmodule SdrAgent.Outreach.Webhooks do
 
   defp signal(nil, _reply, _whk), do: :ok
 
-  defp signal(match, reply, whk) do
-    with {:ok, signal} <-
-           Signals.build("sdr.reply.received", %{
-             reply_id: reply.id,
-             lead_id: match.lead_id,
-             campaign_id: match.campaign_id,
-             enrollment_id: match.enrollment_id
-           }),
-         {:ok, _event} <- Signals.record(signal, whk),
-         do: :ok
-  end
+  defp signal(match, reply, whk), do: ReplyIntake.impl().received(reply, match, whk)
 
   # In-Reply-To names a delivery (the capture provider id and the Message-ID
   # share one digest) sent to this sender; otherwise the latest delivery

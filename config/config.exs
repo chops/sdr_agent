@@ -163,6 +163,9 @@ config :sdr_agent,
   anchor_sinks: [],
   # S8: the agent's deterministic suppression gate reads the Outreach store.
   suppression_check: SdrAgent.SDR.SuppressionCheck.Store,
+  # S9: a matched reply reaches the agent plane through this seam (Outreach
+  # never depends on the agent plane).
+  reply_intake: SdrAgent.SDR.ReplyIntake,
   # S8 compliance defaults (checklist 1.6): the daily cap (config may only
   # lower it) counts calendar days in this zone; quiet hours, sender and
   # footer are campaign attributes. Delivery is local capture only.
