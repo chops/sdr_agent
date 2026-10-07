@@ -106,10 +106,16 @@ cross-cutting choices must be fixed once rather than per slice.
 8. **Roles and actors:** human roles are `admin`, `reviewer` and `auditor`
    (the read-only auditor role was added by owner decision on 2026-10-06,
    extending ADR-0001's admin and reviewer roles). System actors are
-   `%SdrAgent.Actor{}` structs, never users. An `auditor` user may only read,
-   create AuditExports, and append the AuditAccess records its own views
-   produce. Every resource's first policy forbids all other non-read actions
-   for that role, and every auditor view is audited and fails closed.
+   `%SdrAgent.Actor{}` structs, never users. An `auditor` user may only read
+   (including the read-like generic actions for payload content and chain
+   verification) and create AuditExports; the AuditAccess records its views
+   produce are appended by the audit kernel. It cannot change its own
+   password; an admin sets it. Every resource carries, after any
+   AshAuthentication bypass, a guard policy over non-read actions that
+   authorizes the exempt actions, forbids the auditor role, and ends with
+   `authorize_if always()` so it never blocks other actors (in Ash every
+   applicable policy must pass). Every auditor view is audited and fails
+   closed.
 9. **Synthetic-data guard:** in the MVP, account domains, contact emails and
    sender addresses must be under reserved names (`.test`, `.example`,
    `.invalid`, `example.com/.net/.org`), validated in every environment.
