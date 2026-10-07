@@ -245,6 +245,19 @@ Files: =test/sdr_agent/ai/{claude_cli,witness_propagation}_test.exs=,
 =test/sdr_agent/operations/operations_test.exs=, =test/support/fake_claude_cli.exs=.
 Independent peer RED verification required before GREEN.
 
+Codex RED v2 verdict =7d260168-8df9-4f21-ae4b-781987662bfb=: VERIFIED, Phase
+4b permitted (36 scenario-body failures; the 2 raw-DB negatives stopped at
+the missing root-link fixture and are proven only by GREEN).
+
+Phase 4b GREEN: all 70 targeted tests pass (both raw-DB negatives now
+exercise the unique index, the same-exchange composite FK and the C3 insert
+trigger); full suite 409 passed, 4 external excluded; =bin/verify=,
+=mix ash.codegen --check= pass. After GREEN the RED-only
+={:not_implemented, f}= helpers were replaced by direct calls. One RED
+assumption was wrong and corrected with evidence: anonymous reads are
+filtered to ={:ok, []}= by the project Ash config (as =Audit.list_events/1=),
+not refused with =Forbidden=.
+
 ** S12c — reconciliation/projection/attention/e2e
 Separate Phase 4a/4b gate. Runtime reconciled method allowlist stays empty.
 
@@ -252,7 +265,41 @@ Separate Phase 4a/4b gate. Runtime reconciled method allowlist stays empty.
 Owner alone deploys nix-darwin. One budgeted synthetic external model call supplies proof; enabling a method is a separate reviewed PR, never an automatic effect of a passing fixture test.
 
 * Implementation Notes
-No SDR production changes yet. S12a proxy/shim production implementation is
+** S12b (Claude writer)
+- Propagation: =ModelProvider= adds =request.witness= (reserved invocation id
+  + =GenAI.traceparent/0= of the =gen_ai.*= span, own sampling flag) in the
+  caller process before the serialized GenServer hop. =ClaudeCLI= validates
+  it (shim-identical patterns, =\z= anchors) and passes it only through the
+  Port's ={:env, ...}=; it always unsets =CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY}=
+  and =ANTHROPIC_{BEDROCK,VERTEX,FOUNDRY}_BASE_URL=, and refuses
+  (=:witness_bypass_environment=) when the operator environment enables one.
+  =ANTHROPIC_BASE_URL= remains the shim's own equality guard. Init
+  attestation and concurrency 1 unchanged. Foundry is included as the
+  analogous third-party route.
+- Persistence: =WireWitnessLink= (=wire_witness_links=), evidence allowlist
+  =Agents.WitnessEvidence= (typed values, Redactor-clean free strings,
+  maxima keep any valid map < 4096 B), =Changes.WitnessLineage= (parent
+  invocation re-read in the row tenant and locked =FOR UPDATE=; terminal
+  =:claude_cli= only; per-exchange head; =supersede_reason=; C3). DB: partial
+  unique root/supersedes indexes, same-exchange composite FK, C3 insert
+  trigger, append-only triggers (migration =20261007175954_s12b_wire_witness=).
+  =AppendEvent= gained a backward-compatible =:context_links= option so
+  =agents.witness.linked= carries the parent's =agent_run_id= without a
+  column.
+- Scoped read: =Payload :read_reconciliation_content= + Audit-owned
+  =Checks.ReconciliationScope=; reachable only via
+  =Agents.read_reconciliation_payloads/2= (guarded; authoritative re-read;
+  fixed purpose =wire_witness_reconciliation:<id>=). Existing Payload policy
+  blocks unchanged.
+- Operations: kind =:reconcile_model= (REC), restricted to queue
+  =:reconciliation= via =Operation.kind_queues/0=. Oban queue config/worker
+  are S12c.
+- Diagrams updated by hand (generator would drop curated external links):
+  WireWitnessLink in Agents, adapter child-env correlation, conditional
+  proxy witness store.
+
+** Earlier
+No SDR production changes before S12b. S12a proxy/shim production implementation is
 pushed under nix-darwin PR #6, pending its M1 review fix and owner deployment.
 Both writer branches have upstreams. This docs-only handoff records the
 approved protocol/assurance boundary; it is not approval to enable runtime
@@ -262,7 +309,7 @@ implementation writers must evaluate codegen/diagrams under the existing plan.
 * Completion Checklist
 - [ ] S12a RED independently verified, then GREEN tests/package/flake checks and reviewed PR
 - [ ] Owner deployment checkpoint recorded (no agent deploy)
-- [ ] S12b RED independently verified, then GREEN policy/lifecycle/propagation tests
+- [X] S12b RED independently verified, then GREEN policy/lifecycle/propagation tests
 - [ ] S12c RED independently verified, then GREEN hermetic reconciliation/e2e tests
 - [ ] Full gate and Ash codegen/diagrams current after rebase
 - [ ] Real external proof metadata reviewed

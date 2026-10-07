@@ -13,7 +13,7 @@ graph TB
         App[Application Supervisor]
         Budget[Persisted budgets<br/>20/run + 200/UTC day in Postgres]
         ModelProvider[ModelProvider facade<br/>budget + Zoi validation]
-        ClaudeCLIAdapter[ClaudeCLI adapter<br/>serialized, tool-free GenServer]
+        ClaudeCLIAdapter[ClaudeCLI adapter<br/>serialized, tool-free GenServer<br/>per-call SDR witness env, bypass routes scrubbed]
         Telemetry[Telemetry setup, GenAI and agent spans]
         Oban[Oban: cron, queues default, research,<br/>delivery 5, reconciliation 5, followup 10]
         Cadence[Anchor cadence worker]
@@ -70,7 +70,8 @@ graph TB
     ModelProvider --> Budget
     ModelProvider --> ClaudeCLIAdapter
     ModelProvider -. spans .-> Telemetry
-    ClaudeCLIAdapter --> Claude
+    ClaudeCLIAdapter -- "SDR_MODEL_INVOCATION_ID + SDR_TRACEPARENT (child env only)" --> Claude
+    Claude -. "S12a proxy deployed: loopback correlation, stripped upstream" .-> WitnessStore[(Local proxy witness store<br/>owner-only, outside SDR)]
     Oban --> AgentWorker
     Oban --> FollowupWorker
     FollowupWorker --> Domains
