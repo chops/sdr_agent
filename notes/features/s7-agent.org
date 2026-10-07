@@ -224,7 +224,33 @@ None blocking; the UTC-vs-Denver discrepancy (choice 5) is reported.
 -----
 
 * TDD Tracking
-(Filled during Phase 4a)
+
+** S7a RED (2026-10-07)
+=MIX_TEST_PARTITION=_s7 mix test test/sdr_agent/operations test/sdr_agent/ai
+test/sdr_agent/integrations test/sdr_agent/audit/concurrency_test.exs=:
+*Result: 10/55 passed, 1 excluded*. The 10 passing are the pre-existing
+ClaudeCLI and model-provider tests; every failure is the intended missing
+behaviour.
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| Operation/Failure lifecycles, policies, attention queue, redactor (16) | test/sdr_agent/operations/operations_test.exs | FAILING | =SdrAgent.Operations= / =Redactor= undefined |
+| AgentRun, Lead and drift attention Failures, FKs (11) | test/sdr_agent/operations/attention_test.exs | FAILING | =Operations.list_attention/1= undefined; relation =failures= absent; FK update accepted (no FK) |
+| Persisted daily cap (4) | test/sdr_agent/ai/daily_budget_test.exs | FAILING | call 4 of 3 accepted; =Agents.daily_model_call_limit/0= undefined; volatile store still loaded |
+| Fixture providers (6) | test/sdr_agent/integrations/providers_test.exs | FAILING | =SdrAgent.Integrations.*= undefined |
+| Real-concurrency suite incl. daily race (8) | test/sdr_agent/audit/concurrency_test.exs | FAILING | cleanup: relation =failures= does not exist |
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED —
+same =bin/tdd_verify.sh= Elixir 1.20 summary-parsing defect as S1/S3/S5;
+the failures above are the intended ones (proceeding under ADR-0001, peer
+reviews RED on the PR).
+
+** S7a GREEN
+=bin/verify= *308 passed, 3 excluded*; =mix ash.codegen --check=, =mix
+credo= (no issues), =mix hex.audit= clean. One RED-era test fix: the
+Failure transition-table test compared against an unnormalised expected
+list (=[:open, :acknowledged]= vs the sorted actual); the expected table is
+now normalised like the actual — the assertion is unchanged.
 
 -----
 
