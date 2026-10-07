@@ -10,6 +10,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
        Legacy-only or legacy-overwriting extras are `evidence_contract_invalid`.
        The link action refuses a persisted v2 claim without its complete group.
        Singleton-field validation and v1 evidence stay backward compatible.
+    3. (Writer-found) A v2 mismatch is not erased by a later v1 fallback
+       whose request is outside the v2 grammar (C3).
   """
   use SdrAgent.AuditCase, async: false
 
@@ -157,6 +159,32 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
 
       assert {:ok, %{link_status: :reconciled}} =
                link(invocation, ref, :reconciled, Map.merge(base, group()), ctx)
+    end
+
+    test "a v2 mismatch survives a later request-inapplicable (v1-unsupported) observation",
+         ctx do
+      # Writer-found while preparing v3 RED: the v1 fallback labels its
+      # unsupported result with the v1 projection version, and that must not
+      # count as an evaluated, different projection under C3.
+      {invocation, stdin} = completed_invocation!(ctx, "Synthetic v2 mismatch kept")
+
+      ref =
+        Proxy.exchange!(ctx.root, invocation.id,
+          request: Proxy.cli_request(stdin <> " (edited)"),
+          response: Proxy.sse_response(@answer)
+        )
+
+      assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation)
+
+      Proxy.exchange!(ctx.root, invocation.id,
+        record_id: ref,
+        request: Proxy.cli_request(stdin, top: %{"temperature" => 1}),
+        response: Proxy.sse_response(@answer)
+      )
+
+      result = reconcile(ctx, invocation)
+      assert match?({:ok, %{status: :mismatch}}, result), inspect(result)
+      assert {:ok, :mismatch} = Agents.witness_status(invocation.id, actor: ctx.rec)
     end
 
     test "v1 evidence and singleton fields stay backward compatible", ctx do
