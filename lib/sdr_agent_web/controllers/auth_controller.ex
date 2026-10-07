@@ -1,4 +1,9 @@
 defmodule SdrAgentWeb.AuthController do
+  @moduledoc """
+  AshAuthentication callbacks for password sign-in and sign-out. Sign-in
+  outcomes are audited by `SdrAgent.Accounts.User`'s sign-in action;
+  sign-out records `auth.signed_out` for the signed-in user.
+  """
   use SdrAgentWeb, :controller
   use AshAuthentication.Phoenix.Controller
 
@@ -55,6 +60,14 @@ defmodule SdrAgentWeb.AuthController do
 
   def sign_out(conn, _params) do
     return_to = get_session(conn, :return_to) || ~p"/"
+
+    case conn.assigns[:current_user] do
+      %SdrAgent.Accounts.User{} = user ->
+        {:ok, _event} = SdrAgent.Accounts.record_signed_out(user)
+
+      _ ->
+        :ok
+    end
 
     conn
     |> clear_session(:sdr_agent)
