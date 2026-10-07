@@ -15,7 +15,10 @@ defmodule SdrAgent.Operations.Operation do
   attempts); enqueued, failed → cancelled (T). Entering failed opens a
   Failure in the same transaction — or links the existing Failure of the
   condition that caused it (e.g. the AgentRun's attention Failure), so one
-  condition is one queue entry; discarded keeps that Failure.
+  condition is one queue entry — only a live Failure of this operation's
+  condition may be linked; discarded keeps that Failure; succeeding (e.g.
+  after a bounded retry) resolves the operation's live Failures in the same
+  transaction.
 
   Actors: the system actor that owns the `kind` (`kind_actors/0`) creates and
   transitions it; ADM may retry and cancel; reads for ADM, REV, AUR, AUD and
@@ -27,7 +30,7 @@ defmodule SdrAgent.Operations.Operation do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
-  alias SdrAgent.Agents.Changes.Stamp
+  alias SdrAgent.Audit.Changes.Stamp
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Changes.Transition
   alias SdrAgent.Audit.Checks
@@ -128,6 +131,7 @@ defmodule SdrAgent.Operations.Operation do
       change get_and_lock_for_update()
       change {Transition, from: [:running], to: :succeeded, locked?: true}
       change {Stamp, fields: [:finished_at]}
+      change Changes.ResolveOperationFailures
       change {AppendEvent, [event_type: "operations.operation.succeeded"] ++ @event}
     end
 

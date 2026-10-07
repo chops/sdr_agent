@@ -26,7 +26,7 @@ defmodule SdrAgent.Sales.Lead do
       (ADM `:retry`). Blocking opens the operator-attention Failure (subject
       the lead; class from argument `failure_class`, default `run_stopped`)
       in the same transaction, and the retry resolves it (S2 "Operator
-      attention");
+      attention"); the block reason is redacted before it is written;
     * disqualified → assigned (ADM `:reopen`).
 
   Agent transitions require a `decision_id`. Every transition runs on the
@@ -42,7 +42,7 @@ defmodule SdrAgent.Sales.Lead do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
-  alias SdrAgent.Agents.Changes.Stamp
+  alias SdrAgent.Audit.Changes.Stamp
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Changes.Transition
   alias SdrAgent.Audit.Checks
@@ -267,6 +267,7 @@ defmodule SdrAgent.Sales.Lead do
         default: :run_stopped,
         constraints: [one_of: SdrAgent.Operations.Failure.classes()]
 
+      change {SdrAgent.Operations.Changes.Redact, fields: [:status_reason]}
       change get_and_lock_for_update()
       change {Transition, from: [:researching, :qualifying], to: :blocked, locked?: true}
       change set_attribute(:last_decision_id, arg(:decision_id))

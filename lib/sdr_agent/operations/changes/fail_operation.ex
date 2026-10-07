@@ -1,17 +1,28 @@
 defmodule SdrAgent.Operations.Changes.FailOperation do
   @moduledoc """
   Operation `:fail` change (S2 "Entering failed … opens a Failure in the
-  same transaction (last_failure_id)"): with argument `failure_id` it links
-  that existing Failure of the same tenant (the condition already has its
-  queue entry); otherwise it opens a Failure from argument `failure`
-  (`class`, `severity`, `message`, optional `retryable`, `detail`) with the
-  operation as subject. Runs before the update, inside its transaction.
+  same transaction (last_failure_id)"), run before the update inside its
+  transaction.
+
+  With argument `failure_id` it links an existing Failure only if that
+  Failure is *live* (open or acknowledged) and belongs to this operation's
+  condition — its `operation_id` is this operation (e.g. the attention
+  Failure of the AgentRun the operation runs, which carries the run's
+  operation id) or its subject is this operation. Anything else (resolved,
+  another tenant, another condition) refuses the transition, so a failed
+  Operation always has a live queue entry. Without `failure_id` it opens a
+  Failure from argument `failure` (`class`, `severity`, `message`, optional
+  `retryable`, `detail`; string or atom keys, unknown keys ignored) with the
+  operation as subject.
   """
   use Ash.Resource.Change
 
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Operations.Attention
   alias SdrAgent.Operations.Failure
+
+  @failure_keys [:class, :severity, :message, :retryable, :detail]
+  @live [:open, :acknowledged]
 
   @impl true
   def change(changeset, _opts, context) do
@@ -26,27 +37,42 @@ defmodule SdrAgent.Operations.Changes.FailOperation do
     result =
       case Ash.Changeset.get_argument(changeset, :failure_id) do
         nil -> open(changeset, operation, actor)
-        id -> Ash.get(Failure, id, Kernel.opts(operation.tenant_id))
+        id -> existing(id, operation)
       end
 
     case result do
-      {:ok, %Failure{tenant_id: tenant_id} = failure} when tenant_id == operation.tenant_id ->
+      {:ok, failure} ->
         Ash.Changeset.force_change_attribute(changeset, :last_failure_id, failure.id)
-
-      {:ok, _other} ->
-        Ash.Changeset.add_error(changeset, field: :failure_id, message: "unknown failure")
 
       {:error, error} ->
         Ash.Changeset.add_error(changeset, error)
     end
   end
 
+  defp existing(id, operation) do
+    case Ash.get(Failure, id, Kernel.opts(operation.tenant_id)) do
+      {:ok, %Failure{} = failure} ->
+        if failure.tenant_id == operation.tenant_id and failure.status in @live and
+             owned?(failure, operation),
+           do: {:ok, failure},
+           else: {:error, invalid("must be a live Failure of this operation's condition")}
+
+      _ ->
+        {:error, invalid("unknown failure")}
+    end
+  end
+
+  defp owned?(failure, operation) do
+    failure.operation_id == operation.id or
+      (failure.subject_resource == inspect(operation.__struct__) and
+         failure.subject_id == operation.id)
+  end
+
   defp open(changeset, operation, actor) do
     case Ash.Changeset.get_argument(changeset, :failure) do
       %{} = failure ->
         failure
-        |> Map.new(fn {key, value} -> {to_atom(key), value} end)
-        |> Map.take([:class, :severity, :message, :retryable, :detail])
+        |> known_keys()
         |> Map.merge(%{
           operation_id: operation.id,
           subject_resource: inspect(operation.__struct__),
@@ -55,14 +81,16 @@ defmodule SdrAgent.Operations.Changes.FailOperation do
         |> Attention.open(actor)
 
       _ ->
-        {:error,
-         Ash.Error.Changes.InvalidArgument.exception(
-           field: :failure,
-           message: "failure or failure_id is required"
-         )}
+        {:error, invalid("failure or failure_id is required", :failure)}
     end
   end
 
-  defp to_atom(key) when is_atom(key), do: key
-  defp to_atom(key) when is_binary(key), do: String.to_existing_atom(key)
+  defp known_keys(map) do
+    for key <- @failure_keys, value = fetch(map, key), value != nil, into: %{}, do: {key, value}
+  end
+
+  defp fetch(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
+
+  defp invalid(message, field \\ :failure_id),
+    do: Ash.Error.Changes.InvalidArgument.exception(field: field, message: message)
 end

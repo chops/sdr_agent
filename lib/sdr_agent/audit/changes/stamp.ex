@@ -1,4 +1,4 @@
-defmodule SdrAgent.Agents.Changes.Stamp do
+defmodule SdrAgent.Audit.Changes.Stamp do
   @moduledoc """
   Sets timestamp attributes to `SdrAgent.Clock.utc_now/0` (works in atomic
   updates). Option `:fields` — the attributes to stamp. With

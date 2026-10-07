@@ -14,6 +14,9 @@ defmodule SdrAgent.Operations.Changes.OpenAttention do
     * `:message` — `{module, function}` called with the changeset, returning
       the (unredacted) message; the Failure action redacts it;
     * `:field` — attribute set to the Failure id (e.g. `:attention_failure_id`);
+    * `:operation_field` — record attribute holding the Operation the record
+      belongs to (e.g. AgentRun `:operation_id`), copied to the Failure so the
+      Operation can link this Failure when it fails for the same condition;
     * `:system_only?` — open only when the actor is a system actor (S2:
       "cancelled by a system actor").
   """
@@ -41,7 +44,8 @@ defmodule SdrAgent.Operations.Changes.OpenAttention do
       class: class(changeset, opts[:class]),
       severity: opts[:severity],
       message: apply(module, function, [changeset]),
-      retryable: true
+      retryable: true,
+      operation_id: opts[:operation_field] && Map.get(record, opts[:operation_field])
     }
 
     case Attention.open(attrs, actor) do
