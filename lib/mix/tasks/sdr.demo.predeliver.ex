@@ -12,8 +12,9 @@ defmodule Mix.Tasks.Sdr.Demo.Predeliver do
   (after a human approval: queued, deferred by quiet hours, or captured).
 
   The application starts with Oban's queues and plugins off; the research
-  job runs inline and, if a dev server is running and takes it first, the
-  task waits (bounded) for its outcome. Refuses outside `MIX_ENV=dev` or
+  queue is drained inline (all of it — any other queued assignment runs too,
+  as the server would run it) and, if a dev server is running and takes the
+  job first, the task waits (bounded) for its outcome. Refuses outside `MIX_ENV=dev` or
   `test`, and refuses any option. Prints ids and states only.
   """
   use Mix.Task

@@ -17,14 +17,27 @@ defmodule SdrAgent.Demo.Predeliver do
   bounded, for the outcome). Idempotent: once the draft exists a re-run only
   reports — including the draft's delivery after a human approval.
 
+  Boundaries:
+
+    * Runs only where the demo seed may (`config :sdr_agent,
+      seeding_allowed?: true`, dev and test): elsewhere it returns
+      `{:error, :demo_not_allowed}` before signing anyone in or writing
+      anything.
+    * Operational limitation: Oban cannot drain a single job, so the inline
+      drain runs the whole `research` queue — any other assignment already
+      queued (e.g. made in the console) also runs here, exactly as the
+      server's own queue would run it. Nothing else (delivery, follow-ups)
+      is drained.
+
   Returns `{:ok, %{stage: stage, lead_id, draft_id, delivery}}` with `stage`
   one of `:awaiting_review`, `:queued`, `:deferred` (`delivery.not_before`),
   `:captured`, or `{:error, reason}` (`:not_seeded`,
-  `{:lead_not_ready, status}`, `{:run, status}`, …).
+  `:demo_not_allowed`, `{:lead_not_ready, status}`, `{:run, status}`, …).
   """
 
   alias SdrAgent.Accounts
   alias SdrAgent.Agents
+  alias SdrAgent.Audit.Checks.SeedingAllowed
   alias SdrAgent.Demo.Fixtures
   alias SdrAgent.Outreach
   alias SdrAgent.Sales
@@ -37,12 +50,17 @@ defmodule SdrAgent.Demo.Predeliver do
   def run(opts \\ []) do
     deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :wait_ms, 30_000)
 
-    with {:ok, reviewer} <- reviewer(),
+    with :ok <- allowed(),
+         {:ok, reviewer} <- reviewer(),
          {:ok, lead} <- lead(reviewer),
          {:ok, lead} <- researched(lead, reviewer),
          {:ok, draft} <- await(fn -> draft(lead, reviewer) end, deadline) do
       report(lead, draft, reviewer)
     end
+  end
+
+  defp allowed do
+    if SeedingAllowed.allowed?(), do: :ok, else: {:error, :demo_not_allowed}
   end
 
   defp reviewer do

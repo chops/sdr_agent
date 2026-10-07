@@ -193,6 +193,31 @@ backend-settling wait explicit in the end-to-end script test. =PORT= is now
 taken from a free port in the stubbed tests, because a developer's own
 server may hold 4120.
 
+* Review round 2 (Codex, PR #19 at =2f4b87e=: CHANGES REQUESTED)
+The round-1 fixes and the predeliver ruling were accepted.
+
+1. *MF: refreshes bypassed operator re-validation.* =LiveRefresh= called
+   the loader from =handle_info= with the socket's old scope. #17's
+   =LiveUserAuth= hooks cover events and navigation only, so a demoted
+   operator got data without the auditor's AuditAccess, and a disabled or
+   revoked operator was not signed out. Now =fire/2= runs
+   =LiveUserAuth.revalidate/1= when the reload fires, both at once and on
+   the debounce timer. It loads with the fresh socket, or halts with
+   revalidate's redirect and loads nothing. The Audit timeline (ADM, AUR) is
+   now live-refreshed too; it is the role-restricted case.
+   - RED: 11/17, using Codex's reproduction plus positive debounce and
+     restricted-role cases. GREEN: 17/17, plus the audit view suite.
+   - Access/auth exclusion and the frozen review snapshot are unchanged and
+     still tested.
+2. *Important (a):* =Predeliver.run/1= fails closed with
+   =:demo_not_allowed= unless =seeding_allowed?= (dev/test), before any
+   sign-in or write. RED 4/5, GREEN 5/5.
+3. *Important (b):* the research drain covers the whole queue (Oban cannot
+   drain one job). This is documented as an explicit operational limitation
+   in the module and task docs; delivery and follow-ups are never drained.
+4. *Stack (pending):* carry #17's guarded-approve fix on the next rebase,
+   and update the stale-recipient assertion to the domain's refusal wording.
+
 * Risks & Considerations
 - *Quiet hours at the meetup.* The campaign fixture's quiet hours are 18:00
   to 08:00 America/Denver. An evening demo in Mountain time defers delivery

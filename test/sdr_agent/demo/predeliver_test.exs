@@ -59,4 +59,15 @@ defmodule SdrAgent.Demo.PredeliverUnseededTest do
   test "refuses with :not_seeded" do
     assert Predeliver.run() == {:error, :not_seeded}
   end
+
+  test "fails closed where demo seeding is not allowed, before any sign-in or write" do
+    tenant = bootstrap!()
+    before = length(events(tenant))
+    previous = Application.get_env(:sdr_agent, :seeding_allowed?)
+    Application.put_env(:sdr_agent, :seeding_allowed?, false)
+    on_exit(fn -> Application.put_env(:sdr_agent, :seeding_allowed?, previous) end)
+
+    assert Predeliver.run() == {:error, :demo_not_allowed}
+    assert length(events(tenant)) == before
+  end
 end
