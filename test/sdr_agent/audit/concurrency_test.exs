@@ -11,9 +11,11 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
   alias SdrAgent.Audit
 
   @tables ~w(anchor_sink_receipts audit_exports audit_anchors audit_signing_keys
-             audit_accesses audit_events audit_chain_heads retention_markers decisions
-             tool_invocations model_invocations agent_runs agent_definitions payloads
-             provenance_snapshots tenants)
+             audit_accesses audit_events audit_chain_heads retention_markers
+             qualification_evidences qualifications evidence_claims research_artifacts
+             campaign_enrollments leads campaigns sequence_steps sequences contacts accounts
+             icp_definitions decisions tool_invocations model_invocations agent_runs
+             agent_definitions tokens users payloads provenance_snapshots tenants)
 
   @processes 16
   @appends_per_process 5
@@ -47,14 +49,14 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
     rolled_back = Enum.count(results, &match?({:rolled_back, _}, &1))
     assert rolled_back > 0
 
-    admin = %SdrAgent.Test.Human{id: Ecto.UUID.generate(), role: :admin, tenant_id: tenant.id}
-    {:ok, events} = Audit.list_events(actor: admin)
+    aud = struct(SdrAgent.Actor, type: :auditor_cli, tenant_id: tenant.id)
+    {:ok, events} = Audit.list_events(actor: aud)
     sequences = Enum.map(events, & &1.sequence)
 
     assert sequences == Enum.to_list(1..length(events))
     assert length(events) == 2 + committed
 
-    {:ok, report} = Audit.verify_chain(actor: admin)
+    {:ok, report} = Audit.verify_chain(actor: aud)
     assert report.valid?, inspect(report.issues)
     assert report.last_sequence == 2 + committed
   end
@@ -77,8 +79,8 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
     {:ok, reloaded} = SdrAgent.Agents.get_run(run.id, actor: agent)
     assert reloaded.budget.model_calls_reserved == 3
 
-    admin = %SdrAgent.Test.Human{id: Ecto.UUID.generate(), role: :admin, tenant_id: tenant.id}
-    assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: admin)
+    aud = struct(SdrAgent.Actor, type: :auditor_cli, tenant_id: tenant.id)
+    assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: aud)
   end
 
   test "concurrent anchor requests serialize to one contiguous range" do
@@ -182,8 +184,8 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
   end
 
   defp decision_events(tenant) do
-    admin = %SdrAgent.Test.Human{id: Ecto.UUID.generate(), role: :admin, tenant_id: tenant.id}
-    {:ok, events} = Audit.list_events(actor: admin)
+    aud = struct(SdrAgent.Actor, type: :auditor_cli, tenant_id: tenant.id)
+    {:ok, events} = Audit.list_events(actor: aud)
     Enum.count(events, &(&1.event_type == "agents.decision.recorded"))
   end
 
