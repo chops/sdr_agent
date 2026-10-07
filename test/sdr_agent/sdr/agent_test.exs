@@ -60,4 +60,27 @@ defmodule SdrAgent.SDR.AgentTest do
 
     assert {:error, :unknown_signal_type} = Signals.build("sdr.email.send", %{})
   end
+
+  test "stored signals load back; malformed ones are a typed error, not a crash" do
+    {:ok, signal} = Signals.build("sdr.lead.assigned", %{lead_id: "l-1", campaign_id: "c-1"})
+
+    assert {:ok, %Jido.Signal{id: id, data: %{lead_id: "l-1"}}} =
+             Signals.load(Signals.dump(signal))
+
+    assert id == signal.id
+
+    for dumped <- [
+          %{
+            "id" => signal.id,
+            "type" => "sdr.lead.assigned",
+            "data" => %{"no_such_key_s7_zz" => 1}
+          },
+          %{"id" => signal.id, "type" => "sdr.lead.assigned", "data" => "not a map"},
+          %{"id" => signal.id, "type" => "sdr.email.send", "data" => %{}},
+          %{"type" => "sdr.lead.assigned"},
+          "garbage"
+        ] do
+      assert {:error, :invalid_signal} = Signals.load(dumped), inspect(dumped)
+    end
+  end
 end

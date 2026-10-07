@@ -108,7 +108,9 @@ defmodule SdrAgent.SDR.GoldenPathTest do
       artifact = Map.fetch!(artifacts_by_id, claim.research_artifact_id)
       {:ok, content} = Audit.read_content(artifact.content_sha256, actor: ctx.admin)
       %{char_start: from, char_end: to} = claim.source_location
-      assert String.slice(content, from, to - from) == claim.quote
+      # SourceLocation offsets are code points (S5 choice 12), not graphemes.
+      assert content |> String.codepoints() |> Enum.slice(from, to - from) |> Enum.join() ==
+               claim.quote
     end
 
     # Qualification: agent source, qualified, citing accepted evidence of the lead.
