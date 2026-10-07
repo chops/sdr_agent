@@ -421,7 +421,20 @@ v2 request grammar (projection =claude-message-json/2+prompt-builder/1=, 38 B), 
 Response rules are unchanged from v1. Thinking or redacted_thinking blocks → unsupported.
 Claim: application stdin equals the single non-reminder user text, and the structured output is equal. Additional model context is recorded, but not proven equal or benign. This is not whole-request or effective-conversation equivalence.
 
-*** Projection v3 entity delta (writer table; soft-stop pending)
+*** Projection v3 entity delta (writer table)
+Entity soft-stop: PASS for hermetic planning and RED, with conditions.
+Reviewer Codex, correlated ai-pair answer
+=9343defb-efd8-4e8b-aaf2-db309f92c21f= (2026-10-07), replying to
+=c791ef44-6bdd-46f1-94bc-88b44dccbed3= on table sha256 =10b5a8213428…=.
+Full ruling: =/tmp/sdr-s12d-v3-entity-verdict.md=.
+Resolutions:
+- Q1: ttl ={"1h"}= only.
+- Q2: accepted (see below).
+- LF correction: an LF *inside* the wrapper before its close tag is valid v2
+  content and stays a compatibility positive.
+The PASS does not authorize GREEN without RED verification, deployment,
+an allowlist entry or a real call. The 2/2 budget is spent; the work is
+hermetic only.
 Scope: hermetic only. Codex "bounded direction only" opinion on #24
 (=41c2aedf=, v3 section). No real call, budget, enablement or allowlist entry
 is implied. v1 and v2 definitions, and the proof 1 and 2 records, are
@@ -469,12 +482,15 @@ message's canonical block list (now binding any ttl), and
 =reminder_sha256s= / =reminder_bytes= are still over the complete block text.
 
 | Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
-| WireWitnessLink.evidence (Agents; WitnessEvidence) | Existing value-contract delta; no column/migration | Record the message-level control that v3 admits, beyond what v2 records | New optional key =trailing_output_config=: list of codes from {absent, null, present}, length = =trailing_system_count= (0..2), index = trailing message order. The v3 context group is the v2 group (8 keys) plus this key. New allowed =projection_version= value v3 | Unchanged | =trailing_output_config= only appears with the complete v2 group, and its length equals =trailing_system_count=. Claim boundary (=validate_claim=, any link_status): a v2 projection_version requires exactly the v2 group and no =trailing_output_config=; a v3 projection_version requires the complete 9-key group. The reconciler accepts derived extras only when their keys are exactly that version's group; otherwise the result is =inferred= / =evidence_contract_invalid= with no projection, and it never clears a mismatch. Every admitted context carries =cli_injected_context=. v1 and v2 rows stay valid | REC create only (unchanged) | Q1: ttl set {1h} only, or also {5m}? Q2: should evidence also add an explicit attempted/evaluated label (your "important" note), e.g. =projections_inapplicable= codes from {v2, v3}? Proposed: yes, as an optional key on every evaluated primary, in order, so a v1 fallback shows that v2 and v3 were tried |
+| WireWitnessLink.evidence (Agents; WitnessEvidence) | Existing value-contract delta; no column/migration | Record the message-level control that v3 admits, beyond what v2 records | New optional key =trailing_output_config=: list of codes from {absent, null, present}, length = =trailing_system_count= (0..2), index = trailing message order. The v3 context group is the v2 group (8 keys) plus this key. New allowed =projection_version= value v3 | Unchanged | =trailing_output_config= only appears with the complete v2 group, and its length equals =trailing_system_count=. Claim boundary (=validate_claim=, any link_status): a v2 projection_version requires exactly the v2 group and no =trailing_output_config=; a v3 projection_version requires the complete 9-key group. The reconciler accepts derived extras only when their keys are exactly that version's group; otherwise the result is =inferred= / =evidence_contract_invalid= with no projection, and it never clears a mismatch. Every admitted context carries =cli_injected_context=. v1 and v2 rows stay valid | REC create only (unchanged) | None (Q1, Q2 resolved) |
+| WireWitnessLink.evidence: =projections_inapplicable= (Q2) | Existing value-contract delta; outer diagnostic, *not* a member of any derived context group | Label which request grammars were tried and found inapplicable, so a fallback is never mistaken for a v2/v3 claim | Optional ordered unique list of enum strings from {v2, v3}, length 0..2; the only legal values are =[]=, =["v2"]=, =["v2","v3"]=; absent on old rows | Unchanged | Set only when a primary comparison is attempted: v2 request grammar evaluated → =[]= (even when the response is unsupported or a mismatch); v2 inapplicable and v3 evaluated → =["v2"]=; both inapplicable and v1 evaluated → =["v2","v3"]=. Only *request* inapplicability counts: a v2-admitted request with a thinking or invalid SSE response stays evaluated v2 / =inferred= with its complete 8-key group. It is omitted when no comparison was attempted (gate or blob failures). It cannot be injected through the derived-extras merge | REC create only (unchanged) | None |
 | ModelInvocation / Operation / Payload / Failure / Witness allowlist | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found. The runtime allowlist stays empty; a v3 entry is an exact tuple used only in tests | — | — | — | — | — | — |
 
 Planned RED negatives:
-- LF: CRLF, double LF, space+LF, tab, LF before the close tag only; the
-  reminder digest and byte count include the LF.
+- LF: CRLF, double LF, space+LF, tab or space after the close tag, and a
+  missing or incorrect close tag are refused. An LF inside the wrapper before
+  the close tag stays a positive. The reminder digest and byte count include
+  the admitted LF.
 - TTL: =5m=, 3600, ="1H"=, an extra cache_control key, a ttl without an
   ephemeral type, a ttl on a user block; the trailing digest changes with the ttl.
 - Message-level control: an unknown key (=name=), =output_config= with an
@@ -486,7 +502,12 @@ Planned RED negatives:
   stays labelled v2. The runtime allowlist is empty.
 - Contract: a v3 claim without =trailing_output_config= is refused at the
   action; a v2 claim with it is refused; the derived group is exact.
-- Unchanged: thinking stays unsupported, and stdin stays byte-exact.
+- Unchanged: thinking stays unsupported, and stdin stays byte-exact. A
+  v2-admitted request with an unsupported response stays v2.
+- Q2: the =projections_inapplicable= values for each path; illegal values
+  are refused (unknown, reordered, duplicated or =["v3"]=).
+- Mismatch history is preserved under invalid or unsupported observations,
+  and the runtime allowlist stays empty.
 A diagnostic-only offline re-evaluation of the saved proof-2 blobs (read-only
 store, metadata output, no call) may follow GREEN. It is not enablement.
 
