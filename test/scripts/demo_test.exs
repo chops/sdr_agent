@@ -25,6 +25,7 @@ defmodule SdrAgent.Scripts.DemoTest do
     #!/bin/sh
     echo "$*" >> "#{tmp}/mix-calls"
     if [ "$1" = run ]; then echo "$STUB_REPO_LINE"; fi
+    if [ "$1" = sdr.demo.clients ]; then echo "$STUB_CLIENTS_LINE"; fi
     exit 0
     """)
 
@@ -136,11 +137,65 @@ defmodule SdrAgent.Scripts.DemoTest do
     end
   end
 
+  describe "reset never drops a database that is in use" do
+    @demo_repo "SDR_DEMO_REPO localhost 5520 sdr_agent_dev"
+
+    test "a server on another port still holds connections: refused, nothing dropped", ctx do
+      {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1}, active: false)
+      {:ok, server_port} = :inet.port(socket)
+      on_exit(fn -> :gen_tcp.close(socket) end)
+
+      env =
+        stubbed(ctx, [
+          {"PORT", to_string(server_port + 1)},
+          {"STUB_REPO_LINE", @demo_repo},
+          {"STUB_CLIENTS_LINE", "SDR_DEMO_CLIENTS 3"}
+        ])
+
+      assert {out, 2} = demo(["reset", "--yes"], env)
+      assert out =~ "sdr_agent_dev has 3 other connection(s)"
+      refute Enum.any?(mix_calls(ctx), &String.starts_with?(&1, "ecto.drop"))
+    end
+
+    test "an unreadable connection count fails closed", ctx do
+      env =
+        stubbed(ctx, [
+          {"PORT", free_port()},
+          {"STUB_REPO_LINE", @demo_repo},
+          {"STUB_CLIENTS_LINE", "garbage"}
+        ])
+
+      assert {out, 2} = demo(["reset", "--yes"], env)
+      assert out =~ "could not count the connections to sdr_agent_dev"
+      refute Enum.any?(mix_calls(ctx), &String.starts_with?(&1, "ecto.drop"))
+    end
+
+    test "with no other connection it drops without forcing", ctx do
+      env =
+        stubbed(ctx, [
+          {"PORT", free_port()},
+          {"STUB_REPO_LINE", @demo_repo},
+          {"STUB_CLIENTS_LINE", "SDR_DEMO_CLIENTS 0"}
+        ])
+
+      assert {_out, 0} = demo(["reset", "--yes"], env)
+
+      assert [_repo_check, "sdr.demo.clients", "ecto.drop", "ecto.create", "ecto.migrate"] =
+               mix_calls(ctx)
+    end
+  end
+
   test "--test reset, seed and status against the throw-away demo database" do
     env = [{"MIX_ENV", "test"}, {"DATABASE_URL", nil}]
 
+    database = "sdr_agent_test#{System.get_env("MIX_TEST_PARTITION")}_demo"
+
     assert {out, 2} = demo(["--test", "reset"], env)
     assert out =~ "re-run with --yes"
+
+    # Backends of earlier, already-exited Mix processes leave
+    # pg_stat_activity asynchronously.
+    await_clients(database, 0)
 
     assert {reset, 0} = demo(["--test", "reset", "--yes"], env)
     assert reset =~ "is empty and migrated"
@@ -162,8 +217,53 @@ defmodule SdrAgent.Scripts.DemoTest do
     assert status =~ ~r/audit chain: valid \(\d+ events\)/
     assert status =~ "research"
 
-    for output <- [reset, before, seed, status], %{password: password} <- Fixtures.users() do
+    # A live client of the demo database (as a running server would be):
+    # reset refuses and the seeded data survives.
+    await_clients(database, 0)
+    {:ok, client} = Postgrex.start_link(Keyword.put(repo_connection(), :database, database))
+    Postgrex.query!(client, "SELECT 1", [])
+    await_clients(database, 1)
+
+    assert {refused, 2} = demo(["--test", "reset", "--yes"], env)
+    assert refused =~ "#{database} has 1 other connection(s)"
+    GenServer.stop(client)
+
+    assert {after_refusal, 0} = demo(["--test", "status"], env)
+    assert after_refusal =~ "tenant: seeded"
+
+    for output <- [reset, before, seed, status, refused],
+        %{password: password} <- Fixtures.users() do
       refute output =~ password
+    end
+  end
+
+  defp repo_connection do
+    SdrAgent.Repo.config()
+    |> Keyword.take([:hostname, :port, :username, :password])
+  end
+
+  # A port nothing listens on (a developer's own server may hold 4120).
+  defp free_port do
+    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+    {:ok, port} = :inet.port(socket)
+    :gen_tcp.close(socket)
+    to_string(port)
+  end
+
+  defp await_clients(database, expected, attempts \\ 50) do
+    {:ok, conn} = Postgrex.start_link(Keyword.put(repo_connection(), :database, "postgres"))
+
+    %{rows: [[count]]} =
+      Postgrex.query!(conn, "SELECT count(*) FROM pg_stat_activity WHERE datname = $1", [
+        database
+      ])
+
+    GenServer.stop(conn)
+
+    cond do
+      count == expected -> :ok
+      attempts == 0 -> flunk("#{database} has #{count} connections, expected #{expected}")
+      true -> Process.sleep(100) && await_clients(database, expected, attempts - 1)
     end
   end
 end

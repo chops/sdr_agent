@@ -47,7 +47,7 @@ at any time.
 
 | Command | What it does |
 |---|---|
-| `bin/demo reset --yes` | Drops, creates and migrates `sdr_agent_dev`. Destructive, so it needs `--yes` and refuses while a server is listening. |
+| `bin/demo reset --yes` | Drops, creates and migrates `sdr_agent_dev`. Destructive, so it needs `--yes`, and it refuses while anything is connected to the database (a server on any port, IEx, psql). The drop is never forced. |
 | `bin/demo seed` | Seeds the fictional ICP, campaign, 10 accounts and contacts with leads, 3 operators and one suppression. Idempotent. |
 | `bin/demo run` | Checks that the port is free and the database is reachable, migrated and seeded, then starts Phoenix on `PORT` (default 4120). |
 | `bin/demo status` | Shows the database, migrations, server, Oban queues and job counts, leads by status, drafts awaiting review, captured messages and the audit chain verification. |

@@ -1,7 +1,8 @@
 defmodule SdrAgent.Demo.Status do
   @moduledoc """
   The local demo's health report (`bin/demo status`, `mix sdr.demo.status`;
-  checklist 4.1): database reachable, migrations current, tenant seeded,
+  checklist 4.1): database reachable, migrations current, the fixture data
+  set seeded (every fixture lead and the campaign present),
   Oban queues with their job counts, the pipeline counts an operator
   narrates (leads by status, drafts awaiting review, captured messages) and
   the audit chain verification.
@@ -18,6 +19,7 @@ defmodule SdrAgent.Demo.Status do
   alias SdrAgent.Actor
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Kernel
+  alias SdrAgent.Demo.Fixtures
   alias SdrAgent.Outreach
   alias SdrAgent.Repo
   alias SdrAgent.Sales
@@ -25,7 +27,7 @@ defmodule SdrAgent.Demo.Status do
   @type report :: %{
           database: :reachable | {:unreachable, String.t()},
           migrations: %{applied: non_neg_integer(), pending: [integer()]} | :unknown,
-          tenant: :bootstrapped | :not_bootstrapped | :unknown,
+          tenant: :seeded | :incomplete | :not_bootstrapped | :unavailable | :unknown,
           queues: [%{queue: String.t(), limit: non_neg_integer(), jobs: map()}],
           leads: %{optional(atom()) => non_neg_integer()},
           drafts_pending_review: non_neg_integer() | nil,
@@ -49,10 +51,19 @@ defmodule SdrAgent.Demo.Status do
     end
   end
 
-  @doc "Whether the report shows a demo that can run: reachable, migrated and seeded."
+  @doc """
+  Whether the report shows a demo that can run: database reachable,
+  migrations current, the fixture data set fully seeded, and the audit chain
+  verified valid (an unavailable or failed verification is not ready).
+  """
   @spec ready?(report()) :: boolean()
-  def ready?(%{database: :reachable, migrations: %{pending: []}, tenant: :bootstrapped}),
-    do: true
+  def ready?(%{
+        database: :reachable,
+        migrations: %{pending: []},
+        tenant: :seeded,
+        chain: %{valid?: true}
+      }),
+      do: true
 
   def ready?(_report), do: false
 
@@ -123,6 +134,7 @@ defmodule SdrAgent.Demo.Status do
     opts = [actor: actor]
 
     with {:ok, leads} <- Sales.list_records(Sales.Lead, opts),
+         {:ok, campaigns} <- Sales.list_records(Sales.Campaign, opts),
          {:ok, queue} <- Outreach.list_review_queue(opts),
          {:ok, captured} <-
            Outreach.list_records(
@@ -131,7 +143,7 @@ defmodule SdrAgent.Demo.Status do
            ),
          {:ok, chain} <- Audit.verify_chain(actor: actor) do
       %{
-        tenant: :bootstrapped,
+        tenant: seed_state(leads, campaigns),
         leads: Enum.frequencies_by(leads, & &1.status),
         drafts_pending_review: length(queue),
         captured_messages: length(captured),
@@ -142,8 +154,18 @@ defmodule SdrAgent.Demo.Status do
         }
       }
     else
-      {:error, _reason} -> %{tenant: :bootstrapped}
+      # Counts or verification unavailable: reported, and never ready.
+      {:error, _reason} -> %{tenant: :unavailable}
     end
+  end
+
+  defp seed_state(leads, campaigns) do
+    lead_ids = MapSet.new(leads, & &1.id)
+    campaign? = Enum.any?(campaigns, &(&1.id == Fixtures.campaign().id))
+
+    if campaign? and Enum.all?(Fixtures.leads(), &MapSet.member?(lead_ids, &1.id)),
+      do: :seeded,
+      else: :incomplete
   end
 
   @doc "Formats the report as plain lines for the terminal."
@@ -165,8 +187,10 @@ defmodule SdrAgent.Demo.Status do
   defp migrations_line(%{applied: n, pending: pending}),
     do: "PENDING #{length(pending)} (#{n} applied; run bin/demo reset --yes or mix ecto.migrate)"
 
-  defp tenant(:bootstrapped), do: "seeded"
+  defp tenant(:seeded), do: "seeded"
+  defp tenant(:incomplete), do: "SEED INCOMPLETE (run bin/demo seed)"
   defp tenant(:not_bootstrapped), do: "NOT SEEDED (run bin/demo seed)"
+  defp tenant(:unavailable), do: "UNAVAILABLE (domain reads or chain verification failed)"
   defp tenant(:unknown), do: "unknown"
 
   defp queue_lines([]), do: []

@@ -35,7 +35,7 @@ defmodule SdrAgent.Demo.StatusTest do
     report = Status.report()
     suppressed = length(Fixtures.suppressed_contact_emails())
 
-    assert report.tenant == :bootstrapped
+    assert report.tenant == :seeded
     assert Status.ready?(report)
     assert report.leads == %{new: length(Fixtures.leads()) - suppressed, stopped: suppressed}
     assert report.drafts_pending_review == 0
@@ -46,6 +46,34 @@ defmodule SdrAgent.Demo.StatusTest do
     lines = Status.format(report)
     assert "drafts awaiting review: 0" in lines
     assert "audit chain: valid (#{last} events)" in lines
+  end
+
+  test "a bootstrapped tenant without the fixture data is not ready" do
+    bootstrap!()
+
+    report = Status.report()
+
+    assert report.tenant == :incomplete
+    refute Status.ready?(report)
+    assert "tenant: SEED INCOMPLETE (run bin/demo seed)" in Status.format(report)
+  end
+
+  test "a chain that does not verify is not ready" do
+    {:ok, _} = Seed.run()
+    tamper!("UPDATE audit_events SET payload = '{\"tampered\": true}' WHERE sequence = 2")
+
+    report = Status.report()
+
+    assert report.tenant == :seeded
+    assert %{valid?: false} = report.chain
+    refute Status.ready?(report)
+  end
+
+  test "a report without a chain verification is not ready" do
+    {:ok, _} = Seed.run()
+    report = %{Status.report() | chain: nil}
+
+    refute Status.ready?(report)
   end
 
   test "the formatted report carries no secret: no fixture password appears" do

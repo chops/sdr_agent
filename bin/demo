@@ -2,7 +2,8 @@
 # The local demo runbook (S13; MVP checklist 4.1). Run inside the devenv
 # shell (direnv) with Postgres up (`devenv up`):
 #
-#   bin/demo reset --yes   drop, create and migrate the demo database
+#   bin/demo reset --yes   drop, create and migrate the demo database (only
+#                          when nothing else is connected to it)
 #   bin/demo seed          seed the fictional demo data set (idempotent)
 #   bin/demo run           start Phoenix on PORT (default 4120)
 #   bin/demo status        database, migrations, server, Oban queues,
@@ -129,8 +130,18 @@ case "$cmd" in
       refuse "a server is listening on $port; stop it before resetting the database"
     fi
     check_repo
+    # Any other client of the database — an app server on any port, IEx,
+    # psql — blocks the reset. The drop is not forced, so Postgres itself
+    # refuses if a client connects in between.
+    clients="$(mix sdr.demo.clients | grep '^SDR_DEMO_CLIENTS ' | tail -n 1 | cut -d' ' -f2)" ||
+      clients=""
+    case "$clients" in
+      0) ;;
+      '' | *[!0-9]*) refuse "could not count the connections to $expected_db" ;;
+      *) refuse "$expected_db has $clients other connection(s) (a running server or session); stop them before resetting" ;;
+    esac
     echo "bin/demo: resetting $expected_db"
-    mix ecto.drop --force-drop
+    mix ecto.drop
     mix ecto.create
     mix ecto.migrate
     echo "bin/demo: $expected_db is empty and migrated; next: bin/demo seed"
