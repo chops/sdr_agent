@@ -57,6 +57,17 @@ defmodule SdrAgentWeb.Router do
                   ]
   end
 
+  pipeline :webhook do
+    plug :accepts, ["json"]
+  end
+
+  # S9: the simulated provider webhook — signature-verified, no session.
+  scope "/webhooks", SdrAgentWeb do
+    pipe_through :webhook
+
+    post "/capture_sim/:event_type", WebhookController, :receive
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", SdrAgentWeb do
   #   pipe_through :api
