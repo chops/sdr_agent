@@ -150,6 +150,7 @@ defmodule SdrAgent.Outreach.Approval do
     update :revoke do
       description "ADM, REV: granted → revoked (T); the draft returns to review."
       require_atomic? false
+      change Changes.LockDraftFirst
       change get_and_lock_for_update()
       change {Transition, from: [:granted], to: :revoked, locked?: true}
       change {Stamp, fields: [:revoked_at]}
