@@ -1,0 +1,112 @@
+#+TITLE: Feature: S10 — operator console (Phoenix LiveView)
+#+DATE: 2026-10-07
+
+* Summary
+The operator console over the S5–S8/S11 domains: S10a (golden-path demo
+views — shell, Dashboard, Leads, Lead detail/evidence, Review queue, Draft
+review with approve/reject/edit/revoke and delivery) and S10b (Runs and
+Operations, Admin/provider status, auditor views: timeline, payload viewer,
+chain verify, exports, Tempo trace links).
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: no
+Reason: web layer over existing public domain APIs; no persisted concept,
+attribute, relationship, policy or lifecycle changes (S2: "S10 — no
+resources; writes AuditAccess from the UI" through the existing
+Audit.record_access/5 and Audit.read_content/2).
+#+END_EXAMPLE
+
+* Affected Apps
+- [ ] Core (=sdr_agent=) — none in S10a
+- [X] Web (=sdr_agent_web=)
+
+* Affected Modules (S10a)
+- =lib/sdr_agent_web/router.ex= — =:operator_console= live session
+  (=/=, =/leads=, =/leads/:id=, =/review=, =/drafts/:id=); the generator
+  home page (=PageController=) is replaced by the Dashboard.
+- =lib/sdr_agent_web/live_user_auth.ex= — =on_mount(:operator)=: signed-in
+  user required, assigns =current_scope= (=SdrAgentWeb.Scope=).
+- =lib/sdr_agent_web/scope.ex= — user + role; the role shapes the UI only.
+- =lib/sdr_agent_web/audited_view.ex= — the audited read path (auditor
+  =record_view= AuditAccess before serving, fail closed; payload content
+  only via =Audit.read_content/2=; operator-facing error messages).
+- =lib/sdr_agent_web/console_data.ex= — shared read joins over public domain
+  reads (=fetch/3=, =list_records/2=, =Agents.get_run/2=).
+- =lib/sdr_agent_web/components/ui.ex=, =layouts.ex= — hand-written
+  Tailwind components and the console shell (role-aware navigation,
+  auditor read-only banner); no daisyUI classes in new code.
+- =lib/sdr_agent_web/live/{dashboard_live,review_live,draft_live}.ex=,
+  =live/lead_live/{index,show}.ex=.
+
+* Binding rules applied
+- Web calls public domain APIs only (no Repo, no resource internals, no
+  =Ash.load=); every call passes =actor: current_scope.user=.
+- Data loads in =handle_params= and only on the connected render (the
+  disconnected render is a skeleton), so an auditor's page load records
+  exactly one AuditAccess and nothing is shown before it is recorded.
+- Mutating events always call the domain, never a UI-side role check: an
+  auditor's forged event is refused by =SdrAgent.Audit.Guard= (Forbidden +
+  one =authz.denied=) and shown as an error. Controls are hidden for AUR.
+- Approve/reject send the revision id and hex content hash rendered in the
+  form (hidden inputs); a stale verdict is refused by =BindApproval= and the
+  page shows the error with the now-current revision.
+- Payload content (captured message, research source) only through
+  =Audit.read_content/2= (=payload_view= AuditAccess for every role, fail
+  closed). No secrets are displayed; no external fonts, CDNs or inline
+  scripts were added.
+
+* Required Tests (S10a) — =test/sdr_agent_web/live/=, =audited_view_test.exs=
+- [X] Success: every view renders its data (navigation, dashboard counts and
+      attention, leads list/filter, lead detail, evidence drill-down, review
+      queue, draft render, citation → evidence, edit → diff, approve,
+      reject, revoke, delivery receipts, captured message, cancel retry)
+- [X] Failure: stale approval refused and explained; unknown lead → not
+      found; unrecordable access → served nothing (=AuditedView=)
+- [X] Authorization allow: ADM/REV act through the domain
+- [X] Authorization deny: AUR assign, approve, reject, edit, revoke and
+      cancel-retry events are refused and audited (=authz.denied=); controls
+      hidden
+- [X] Audited read: each auditor view records one AuditAccess naming the
+      records shown; payload views record =payload_view= for REV
+
+-----
+
+* TDD Tracking
+
+RED (S10a, 2026-10-07): =MIX_TEST_PARTITION=_s10 mix test
+test/sdr_agent_web/live= → *0/35 passed*. 26 failed with
+=no route found for GET /…= (=FunctionClauseError= in
+=connect_from_static_token/3=, the console routes did not exist) and 8 with
+=MatchError= on =live/2= for =/= (still the generator =PageController=,
+not a LiveView) — all for the intended missing behaviour, none from setup
+or compilation. =bin/tdd_verify.sh= cannot parse Elixir 1.20's
+=Result: 0/35 passed= summary (known since S1), so the gate is recorded by
+hand: NEEDS_REVIEW (peer reviews RED on the PR).
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED
+
+-----
+
+* Implementation Notes (S10a)
+1. *Stream empty states need ids.* LiveView 1.2 requires an id on every
+   child of a =phx-update="stream"= container, including the
+   =only:block= empty-state row (first GREEN run: 13 failures).
+2. *Empty access target.* An auditor dashboard with no attention and no
+   queue produced =target_ref ""=, which AuditAccess refuses (required) — the
+   page was correctly withheld (fail closed). A list view with no records
+   now records =target_ref "none"=.
+3. *Formatter non-convergence.* =mix format= (Elixir 1.20.4) did not
+   converge on a call whose last positional argument was a multi-line map
+   followed by a keyword; the test binds the map to a variable instead.
+4. *Reviewer reads of users.* A reviewer may read only itself (S5), so
+   approvals show "by you" / "by another operator" instead of names.
+
+* Architecture evaluation
+- New endpoints (console routes) inside the existing web boundary; no new
+  domain, resource, supervision or integration. =components.{md,mmd}=
+  counts updated by hand (controllers 1, LiveViews 2 auth + 5 console, UI
+  components 3); data flow (=LiveViews → Domains → audit kernel=) unchanged.
+- ADR: none required (no new dependency or cross-cutting pattern; the
+  audited read path is the S2/S3 contract).
