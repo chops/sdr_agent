@@ -302,24 +302,118 @@ Follow-up named by the review, not in this PR: S11b's anchoring/OTS
 maintenance jobs still record failures as sink receipts and Oban state;
 wiring them to Operation/Failure is a later S7-owned integration.
 
+** S7b RED (2026-10-07)
+=MIX_TEST_PARTITION=_s7 mix test test/sdr_agent/sdr=: *Result: 0/17
+passed, 1 external excluded*. The demo seed and setup ran; every test
+stopped at the intended missing module (=SdrAgent.SDR=,
+=SdrAgent.SDR.SDRAgent=, =SdrAgent.SDR.Signals=).
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| Agent schema, routes, no send, signal vocabulary (4) | test/sdr_agent/sdr/agent_test.exs | FAILING | =SDRAgent= / =Signals= undefined |
+| Assignment outbox, golden path, disqualified path (3) | test/sdr_agent/sdr/golden_path_test.exs | FAILING | =SdrAgent.SDR.assign_lead/2= undefined |
+| Campaign, suppression, budget, evidence, invalid-output gates (10) | test/sdr_agent/sdr/gates_test.exs | FAILING | =assign_lead/2= / =pause_campaign/2= undefined |
+
+Second RED (found running the =:external= test): Claude CLI answers wrapped
+in one Markdown fence were rejected — =claude_cli_test.exs= 5/6 passed, the
+new test failing on =:missing_structured_output=.
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED — same
+=tdd_verify.sh= parsing caveat; the failures are the intended ones.
+
+** S7b GREEN
+=bin/verify= *325 passed, 4 excluded*; =mix credo= no issues; =mix
+ash.codegen --check= and =mix hex.audit= clean; gitleaks 8.30.1 over
+=origin/main..HEAD=: no leaks. The
+=:external= golden path on the real Claude CLI passed once:
+=mix test test/sdr_agent/sdr/golden_path_test.exs --only external= → *1
+passed* (34.8 s; =claude-opus-5-5= on Claude Code =2.1.291= attested).
+
 -----
 
 * Implementation Notes
-(Added during Phase 4b)
+
+** Further choices made in 4b (flagged for review)
+ 13. *Root JSON Pointer.* The =qualification= and =draft_proposal= LLM
+     Decisions cite the whole parsed output (RFC 6901 pointer =""=). Ash cast
+     =""= to nil, which the llm-mode rule refuses; Decision =output_pointer=
+     now allows the empty string (=allow_empty?: true=). No schema change.
+ 14. *Claude CLI fenced JSON.* Running the =:external= test showed opus
+     wraps longer JSON in a =```json= fence (S6a's own smoke test also fails
+     intermittently on main for this reason). The adapter now unwraps
+     exactly one surrounding fence; any other text still fails and Zoi
+     validates as before.
+ 15. *Oban job outcome.* The worker's job completes once the run's outcome
+     — success, budget exhaustion, invalid output, crash — is recorded in
+     Postgres (run terminal, Operation succeeded or failed→discarded with
+     the run's Failure). Only an unrecorded crash leaves an Operation
+     =running= (S13 crash recovery).
+ 16. *No lead block on model failure.* A run that fails on the model
+     (invalid output, provider error) opens the run's Failure; the lead
+     stays in its phase. =Lead → blocked= is used for the deterministic
+     "no accepted evidence" outcome. An operator path to resume a failed
+     assignment (new run for the same lead) is not in S7 (see S10/S13).
+ 17. *Evidence quality.* =evidence_quality= is an LLM Decision per
+     extracted claim (S2: "evidence_quality per extracted claim"); when the
+     deterministic grounding check fails its outcome is =ungrounded= and no
+     claim is written.
+ 18. *Jido v3 specifics.* Flow steps run in Task processes; the run's
+     OpenTelemetry context travels in the caller context and is re-attached
+     per action (all rows of a run share one trace — asserted). The S1
+     spike and =Jido.AI.Test.MockLLM= were already removed from =lib/= by
+     S6a (=65f94be=); nothing in =lib/= references them.
+
+** What S8, S9 and S10 must know
+- *S8 (Outreach):* consume =sdr.draft.completed= (signal AuditEvent; data
+  =lead_id, campaign_id, enrollment_id, sequence_step_id,
+  recipient_contact_id, proposal_decision_id, model_invocation_id=) or call
+  =SdrAgent.SDR.proposal(run_id, actor:)=, which re-validates the
+  OutreachProposal from Postgres. Create the Draft + agent DraftRevision with
+  =decision_id= = the =draft_proposal= Decision, and RevisionCitations from
+  =output.claims= (kind claim) and =output.personalization= (kind
+  personalization) — every text is verbatim in the body and every
+  =evidence_id= is an accepted EvidenceClaim of the lead (checked
+  deterministically by S7). The lead is already =in_outreach= and enrolled
+  (step position 0). *Configure the real suppression lookup*: =config
+  :sdr_agent, :suppression_check, YourModule= implementing
+  =SdrAgent.SDR.SuppressionCheck= (S7's default =NoStore= suppresses
+  nothing and says so in the Decision inputs); fixture 04 (Harborline) is
+  designated suppressed and currently qualifies and is proposed. Emit
+  =sdr.lead.suppressed= through =SdrAgent.SDR.Signals= when a suppression
+  hits an active run. Delivery stays out of the agent (no send action).
+- *S9 (Replies):* =Signals= already declares =sdr.reply.received=,
+  =sdr.followup.due=, approval and delivery types; add routes on
+  =SDRAgent= (bump its AgentDefinition version: the definition hash covers
+  the action list, prompts and schemas, and registering a changed
+  definition under the same version fails).
+- *S10 (UI):* =Operations.list_attention/1= is the Dashboard/Operations
+  queue (open + acknowledged Failures, newest first; ADM, REV, AUR, AUD);
+  =acknowledge_failure/2=, =resolve_failure/3= (note required) are the
+  operator actions. A run is reconstructable from =AgentRun= →
+  =Decision= / =ModelInvocation= / =ToolInvocation= (=agent_run_id=),
+  =ResearchArtifact= (=tool_invocation_id=) → =EvidenceClaim=
+  (=source_location= offsets in code points) and the =signal= AuditEvents
+  (=agent_run_id=, =causation_id= = signal id, =payload.parent_signal_id=).
+  =SDR.assign_lead/2= (ADM/REV, =campaign_id:=) and =SDR.pause_campaign/2=
+  are the operator entry points.
+- *S13:* crash recovery of an interrupted run (=sent → unknown=, stale
+  =running= run/Operation) and the resume-after-failure path are open.
 
 * Completion Checklist
 
 ** Phase 4
-- [ ] All Phase 4a tests verified failing
-- [ ] TDD gate confirmed
-- [ ] All steps implemented
-- [ ] All tests passing
-- [ ] Compiled with --warnings-as-errors
-- [ ] Ash boundaries respected
+- [X] All Phase 4a tests verified failing (NEEDS_REVIEW: tdd_verify parser)
+- [X] TDD gate confirmed (unattended charter; peer reviews RED on the PRs)
+- [X] All steps implemented
+- [X] All tests passing
+- [X] Compiled with --warnings-as-errors
+- [X] Ash boundaries respected (Operations below Agents/Sales; the agent
+      plane calls domain code interfaces with explicit actors only)
 
 ** Phase 5 (Verify + Finalize)
-- [ ] Full test suite passes
-- [ ] Moduledocs reviewed for new/modified public modules
-- [ ] Plan document updated with implementation notes
-- [ ] Architecture evaluation reported
-- [ ] ADR status updated (ADR-0004 amendment)
+- [X] Full test suite passes (=bin/verify= 325 passed, 4 excluded)
+- [X] Moduledocs reviewed for new/modified public modules
+- [X] Plan document updated with implementation notes
+- [X] Architecture evaluation reported: diagrams updated (S7a Operations
+      domain + budgets; S7b agent plane)
+- [X] ADR status updated (ADR-0004 S7 amendment; no new ADR)
