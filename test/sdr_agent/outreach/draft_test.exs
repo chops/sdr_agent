@@ -33,7 +33,10 @@ defmodule SdrAgent.Outreach.DraftTest do
       assert {rev.agent_run_id, rev.decision_id} == {run.id, proposal.decision_id}
       assert rev.model_invocation_id == proposal.model_invocation_id
       assert {rev.subject, rev.body_text} == {proposal.output.subject, proposal.output.body}
-      assert rev.content_sha256 == Canonical.sha256(%{subject: rev.subject, body_text: rev.body_text})
+
+      assert rev.content_sha256 ==
+               Canonical.sha256(%{subject: rev.subject, body_text: rev.body_text})
+
       assert rev.canonicalization_version == Canonical.version()
 
       citations = citations!(ctx, rev)
@@ -41,7 +44,10 @@ defmodule SdrAgent.Outreach.DraftTest do
 
       for citation <- citations do
         assert String.contains?(rev.body_text, citation.text)
-        {:ok, claim} = Research.fetch(Research.EvidenceClaim, citation.evidence_claim_id, actor: ctx.admin)
+
+        {:ok, claim} =
+          Research.fetch(Research.EvidenceClaim, citation.evidence_claim_id, actor: ctx.admin)
+
         assert {claim.lead_id, claim.quality} == {lead.id, :accepted}
       end
 
@@ -55,7 +61,9 @@ defmodule SdrAgent.Outreach.DraftTest do
       %{run: _run} = assign!(ctx, "05")
       assert %{success: 1} = drain!()
       lead = fixture_lead!(ctx, "05")
-      assert {:ok, []} = Outreach.list_records(Draft, filter: [lead_id: lead.id], actor: ctx.admin)
+
+      assert {:ok, []} =
+               Outreach.list_records(Draft, filter: [lead_id: lead.id], actor: ctx.admin)
     end
 
     test "propose is AGT-only and checks enrollment, step, campaign and recipient", ctx do
@@ -114,7 +122,11 @@ defmodule SdrAgent.Outreach.DraftTest do
                  Map.merge(base, %{
                    body_text: foreign.text,
                    citations: [
-                     %{evidence_claim_id: foreign.evidence_claim_id, kind: :claim, text: foreign.text}
+                     %{
+                       evidence_claim_id: foreign.evidence_claim_id,
+                       kind: :claim,
+                       text: foreign.text
+                     }
                    ]
                  }),
                  actor: ctx.agent
@@ -125,7 +137,9 @@ defmodule SdrAgent.Outreach.DraftTest do
                Outreach.propose_draft(
                  Map.merge(base, %{
                    body_text: "Nothing cited here.",
-                   citations: [%{evidence_claim_id: own.evidence_claim_id, kind: :claim, text: own.text}]
+                   citations: [
+                     %{evidence_claim_id: own.evidence_claim_id, kind: :claim, text: own.text}
+                   ]
                  }),
                  actor: ctx.agent
                )
@@ -147,20 +161,30 @@ defmodule SdrAgent.Outreach.DraftTest do
 
       rev2 = revision!(ctx, edited.current_revision_id)
       assert edited.status == :pending_review
-      assert {rev2.revision_number, rev2.author_type, rev2.author_user_id} == {2, :human, reviewer.id}
+
+      assert {rev2.revision_number, rev2.author_type, rev2.author_user_id} ==
+               {2, :human, reviewer.id}
+
       assert {rev2.parent_revision_id, rev2.ai_baseline_revision_id} == {rev1.id, rev1.id}
-      assert rev2.content_sha256 == Canonical.sha256(%{subject: "A sharper subject", body_text: body})
+
+      assert rev2.content_sha256 ==
+               Canonical.sha256(%{subject: "A sharper subject", body_text: body})
+
       assert rev2.diff_from_parent =~ "-Subject: #{rev1.subject}"
       assert rev2.diff_from_parent =~ "+Subject: A sharper subject"
       assert rev2.diff_from_parent =~ dropped.text
       assert rev2.diff_from_ai_baseline == rev2.diff_from_parent
 
       assert [carried] = citations!(ctx, rev2)
+
       assert {carried.evidence_claim_id, carried.kind, carried.text} ==
                {kept.evidence_claim_id, kept.kind, kept.text}
 
-      {:ok, again} = Outreach.edit_draft(edited, %{subject: "Third", body_text: body}, actor: ctx.admin)
+      {:ok, again} =
+        Outreach.edit_draft(edited, %{subject: "Third", body_text: body}, actor: ctx.admin)
+
       rev3 = revision!(ctx, again.current_revision_id)
+
       assert {rev3.revision_number, rev3.parent_revision_id, rev3.ai_baseline_revision_id} ==
                {3, rev2.id, rev1.id}
 
@@ -190,7 +214,9 @@ defmodule SdrAgent.Outreach.DraftTest do
   describe "lifecycle and immutability" do
     test "the declared transition tables match the actions" do
       assert F.declared(Draft) == F.transition_actions(Draft)
-      assert F.declared(SdrAgent.Outreach.Approval) == F.transition_actions(SdrAgent.Outreach.Approval)
+
+      assert F.declared(SdrAgent.Outreach.Approval) ==
+               F.transition_actions(SdrAgent.Outreach.Approval)
     end
 
     test "revisions, citations and suppressions are append-only", ctx do
@@ -202,7 +228,8 @@ defmodule SdrAgent.Outreach.DraftTest do
             {"suppressions", "value"}
           ] do
         assert {:error, %Postgrex.Error{}} =
-                 raw_error("UPDATE #{table} SET #{column} = 'x'"), table
+                 raw_error("UPDATE #{table} SET #{column} = 'x'"),
+               table
 
         %{rows: rows} =
           Ecto.Adapters.SQL.query!(
@@ -215,7 +242,11 @@ defmodule SdrAgent.Outreach.DraftTest do
       end
 
       assert rev.revision_number == 1
-      refute Enum.any?(Ash.Resource.Info.actions(DraftRevision), &(&1.type in [:update, :destroy]))
+
+      refute Enum.any?(
+               Ash.Resource.Info.actions(DraftRevision),
+               &(&1.type in [:update, :destroy])
+             )
     end
 
     test "a draft cannot commit without its current revision (deferred FK)", ctx do

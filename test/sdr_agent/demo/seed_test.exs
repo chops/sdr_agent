@@ -118,7 +118,9 @@ defmodule SdrAgent.Demo.SeedTest do
              Enum.sort(Fixtures.suppressed_contact_emails())
 
     assert Enum.all?(suppressions, &(&1.scope == :email and &1.reason == :manual))
-    assert Enum.map(suppressions, & &1.id) == Enum.sort(Enum.map(Fixtures.suppressions(), & &1.id))
+
+    assert Enum.map(suppressions, & &1.id) ==
+             Enum.sort(Enum.map(Fixtures.suppressions(), & &1.id))
   end
 
   test "every seeded write is audited as the seeder and the chain verifies" do

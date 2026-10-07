@@ -23,7 +23,9 @@ defmodule SdrAgent.Outreach.SuppressionTest do
     before = length(events_of_type(ctx.tenant, "outreach.suppression.created"))
 
     assert {:ok, suppression} =
-             Outreach.suppress(%{scope: :email, value: "  #{String.upcase(email)} "}, actor: ctx.admin)
+             Outreach.suppress(%{scope: :email, value: "  #{String.upcase(email)} "},
+               actor: ctx.admin
+             )
 
     assert {suppression.scope, to_string(suppression.value)} == {:email, email}
     assert {suppression.reason, suppression.created_by_user_id} == {:manual, ctx.admin.id}
@@ -62,7 +64,8 @@ defmodule SdrAgent.Outreach.SuppressionTest do
     untouched = fixture_lead!(ctx, "02")
     email = to_string(contact!(ctx, lead).email)
 
-    assert {:ok, _suppression} = Outreach.suppress(%{scope: :email, value: email}, actor: ctx.admin)
+    assert {:ok, _suppression} =
+             Outreach.suppress(%{scope: :email, value: email}, actor: ctx.admin)
 
     assert %{status: :stopped, status_reason: "suppressed: manual"} = reload!(ctx, lead)
     assert %{status: :stopped, stop_reason: :suppressed} = enrollment!(ctx, lead)
@@ -82,9 +85,13 @@ defmodule SdrAgent.Outreach.SuppressionTest do
 
   test "a domain suppression covers every contact of the domain", ctx do
     %{draft: draft, lead: lead} = drafted!(ctx)
-    [_, domain] = lead |> then(&contact!(ctx, &1)) |> Map.get(:email) |> to_string() |> String.split("@")
 
-    assert {:ok, %{scope: :domain}} = Outreach.suppress(%{scope: :domain, value: domain}, actor: ctx.admin)
+    [_, domain] =
+      lead |> then(&contact!(ctx, &1)) |> Map.get(:email) |> to_string() |> String.split("@")
+
+    assert {:ok, %{scope: :domain}} =
+             Outreach.suppress(%{scope: :domain, value: domain}, actor: ctx.admin)
+
     assert reload!(ctx, lead).status == :stopped
     assert draft!(ctx, draft).status == :cancelled
   end
@@ -105,7 +112,8 @@ defmodule SdrAgent.Outreach.SuppressionTest do
     assert {:ok, :not_suppressed, %{"store" => "outreach", "suppression_ids" => []}} =
              SuppressionCheck.Store.check("someone@cobalt-dock.test", context)
 
-    {:ok, by_domain} = Outreach.suppress(%{scope: :domain, value: "cobalt-dock.test"}, actor: ctx.admin)
+    {:ok, by_domain} =
+      Outreach.suppress(%{scope: :domain, value: "cobalt-dock.test"}, actor: ctx.admin)
 
     assert {:ok, :suppressed, %{"suppression_ids" => [id]}} =
              SuppressionCheck.Store.check("Someone@Cobalt-Dock.TEST", context)
@@ -116,7 +124,8 @@ defmodule SdrAgent.Outreach.SuppressionTest do
     assert {:ok, :suppressed, _} = SuppressionCheck.Store.check(suppressed_email, context)
   end
 
-  test "agent and delivery actors may stop leads and enrollments only inside a suppression", ctx do
+  test "agent and delivery actors may stop leads and enrollments only inside a suppression",
+       ctx do
     %{lead: lead} = drafted!(ctx)
     enrollment = enrollment!(ctx, lead)
     dlv = SdrAgent.Actor.system(:delivery_worker, ctx.tenant.id)

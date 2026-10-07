@@ -39,12 +39,20 @@ defmodule SdrAgent.Outreach.ApprovalTest do
   test "a stale revision or hash is refused", ctx do
     %{draft: draft, revision: rev1} = drafted!(ctx)
     reviewer = operator!(ctx, :reviewer)
-    {:ok, edited} = Outreach.edit_draft(draft, %{subject: "New", body_text: rev1.body_text}, actor: reviewer)
 
-    assert {:error, %Ash.Error.Invalid{}} = Outreach.approve(edited, approval_input(rev1), actor: reviewer)
+    {:ok, edited} =
+      Outreach.edit_draft(draft, %{subject: "New", body_text: rev1.body_text}, actor: reviewer)
+
+    assert {:error, %Ash.Error.Invalid{}} =
+             Outreach.approve(edited, approval_input(rev1), actor: reviewer)
 
     rev2 = revision!(ctx, edited.current_revision_id)
-    wrong = %{approval_input(rev2) | content_sha256: Base.encode16(rev1.content_sha256, case: :lower)}
+
+    wrong = %{
+      approval_input(rev2)
+      | content_sha256: Base.encode16(rev1.content_sha256, case: :lower)
+    }
+
     assert {:error, %Ash.Error.Invalid{}} = Outreach.approve(edited, wrong, actor: reviewer)
     assert approvals!(ctx, draft) == []
     assert draft!(ctx, draft).status == :pending_review
@@ -53,7 +61,10 @@ defmodule SdrAgent.Outreach.ApprovalTest do
   test "edit-then-approve by the same reviewer is allowed and recorded", ctx do
     %{draft: draft, revision: rev1} = drafted!(ctx)
     reviewer = operator!(ctx, :reviewer)
-    {:ok, edited} = Outreach.edit_draft(draft, %{subject: "Mine", body_text: rev1.body_text}, actor: reviewer)
+
+    {:ok, edited} =
+      Outreach.edit_draft(draft, %{subject: "Mine", body_text: rev1.body_text}, actor: reviewer)
+
     rev2 = revision!(ctx, edited.current_revision_id)
 
     assert {:ok, approval} = Outreach.approve(edited, approval_input(rev2), actor: reviewer)
@@ -75,8 +86,13 @@ defmodule SdrAgent.Outreach.ApprovalTest do
     %{draft: draft, revision: rev} = drafted!(ctx)
     before = denials(ctx)
 
-    for actor <- [ctx.agent, SdrAgent.Actor.system(:delivery_worker, ctx.tenant.id), operator!(ctx, :auditor)] do
-      assert {:error, %Ash.Error.Forbidden{}} = Outreach.approve(draft, approval_input(rev), actor: actor)
+    for actor <- [
+          ctx.agent,
+          SdrAgent.Actor.system(:delivery_worker, ctx.tenant.id),
+          operator!(ctx, :auditor)
+        ] do
+      assert {:error, %Ash.Error.Forbidden{}} =
+               Outreach.approve(draft, approval_input(rev), actor: actor)
     end
 
     assert denials(ctx) == before + 3
@@ -94,10 +110,17 @@ defmodule SdrAgent.Outreach.ApprovalTest do
       INSERT INTO suppressions (id, tenant_id, scope, value, reason, effective_at, trace_id, span_id, inserted_at)
       VALUES (gen_random_uuid(), $1, 'email', $2, 'manual', now(), $3, $4, now())
       """,
-      [Ecto.UUID.dump!(ctx.tenant.id), to_string(contact.email), String.duplicate("a", 32), String.duplicate("b", 16)]
+      [
+        Ecto.UUID.dump!(ctx.tenant.id),
+        to_string(contact.email),
+        String.duplicate("a", 32),
+        String.duplicate("b", 16)
+      ]
     )
 
-    assert {:error, %Ash.Error.Invalid{}} = Outreach.approve(draft, approval_input(rev), actor: ctx.admin)
+    assert {:error, %Ash.Error.Invalid{}} =
+             Outreach.approve(draft, approval_input(rev), actor: ctx.admin)
+
     assert approvals!(ctx, draft) == []
   end
 
@@ -109,9 +132,13 @@ defmodule SdrAgent.Outreach.ApprovalTest do
              Outreach.reject(draft, Map.put(approval_input(rev), :reason, nil), actor: reviewer)
 
     assert {:ok, rejection} =
-             Outreach.reject(draft, Map.put(approval_input(rev), :reason, "off-tone"), actor: reviewer)
+             Outreach.reject(draft, Map.put(approval_input(rev), :reason, "off-tone"),
+               actor: reviewer
+             )
 
-    assert {rejection.verdict, rejection.status, rejection.reason} == {:rejected, :rejected, "off-tone"}
+    assert {rejection.verdict, rejection.status, rejection.reason} ==
+             {:rejected, :rejected, "off-tone"}
+
     assert draft!(ctx, draft).status == :rejected
     assert [_] = events_of_type(ctx.tenant, "outreach.approval.rejected")
   end
@@ -142,7 +169,9 @@ defmodule SdrAgent.Outreach.ApprovalTest do
     id = Ecto.UUID.dump!(approval.id)
 
     assert {:error, %Postgrex.Error{}} =
-             raw_error("UPDATE approvals SET recipient_email = 'x@example.test' WHERE id = $1", [id])
+             raw_error("UPDATE approvals SET recipient_email = 'x@example.test' WHERE id = $1", [
+               id
+             ])
 
     assert {:error, %Postgrex.Error{}} = raw_error("DELETE FROM approvals WHERE id = $1", [id])
 

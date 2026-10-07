@@ -18,9 +18,11 @@ defmodule SdrAgent.Outreach.PolicyTest do
 
     attempts = [
       {"propose_draft", fn -> Outreach.propose_draft(%{lead_id: draft.lead_id}, actor: aur) end},
-      {"edit_draft", fn -> Outreach.edit_draft(draft, %{subject: "x", body_text: "y"}, actor: aur) end},
+      {"edit_draft",
+       fn -> Outreach.edit_draft(draft, %{subject: "x", body_text: "y"}, actor: aur) end},
       {"approve", fn -> Outreach.approve(draft, approval_input(rev), actor: aur) end},
-      {"reject", fn -> Outreach.reject(draft, Map.put(approval_input(rev), :reason, "x"), actor: aur) end},
+      {"reject",
+       fn -> Outreach.reject(draft, Map.put(approval_input(rev), :reason, "x"), actor: aur) end},
       {"revoke", fn -> Outreach.revoke(approval, actor: aur) end},
       {"suppress", fn -> Outreach.suppress(%{scope: :domain, value: "x.test"}, actor: aur) end},
       {"seed_suppression",

@@ -27,7 +27,10 @@ defmodule SdrAgent.OutreachFixtures do
     %{run: run} = assign!(ctx, key)
     %{success: 1} = drain!()
     lead = fixture_lead!(ctx, key)
-    {:ok, [draft]} = Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
+
+    {:ok, [draft]} =
+      Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
+
     %{draft: draft, run: run, lead: lead, revision: revision!(ctx, draft.current_revision_id)}
   end
 
@@ -72,7 +75,12 @@ defmodule SdrAgent.OutreachFixtures do
   @doc "Approves the draft's current revision as `actor`."
   def approve!(ctx, draft, actor) do
     draft = draft!(ctx, draft)
-    {:ok, approval} = Outreach.approve(draft, approval_input(revision!(ctx, draft.current_revision_id)), actor: actor)
+
+    {:ok, approval} =
+      Outreach.approve(draft, approval_input(revision!(ctx, draft.current_revision_id)),
+        actor: actor
+      )
+
     approval
   end
 
