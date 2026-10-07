@@ -402,8 +402,8 @@ defmodule SdrAgent.Outreach.Webhooks do
 
   defp outcome(:bounce, delivery, data, event, whk) do
     email = normalise(delivery.recipient_email)
-    lock_suppression(event.tenant_id, email, [])
-    delivery = lock(DeliveryOperation, delivery.id, event.tenant_id)
+    targets = lock_suppression(event.tenant_id, email, [], [delivery.id])
+    delivery = Enum.find(targets.locked_deliveries, &(&1.id == delivery.id))
 
     with :ok <- bounce(delivery, data, event, whk),
          {:ok, _} <-
@@ -446,7 +446,9 @@ defmodule SdrAgent.Outreach.Webhooks do
 
   defp bounce(_delivery, _data, _event, _whk), do: :ok
 
-  # Outcome writers lock enrollment → draft → delivery (S8 order).
+  # Outcome writers lock enrollment → draft → delivery (S8 order); a bounce
+  # locks the suppression's leads → enrollments → drafts → deliveries (with
+  # the bounced one) → approvals instead, as it suppresses too.
   defp lock_delivery(delivery, tenant_id) do
     _enrollment = lock(Sales.CampaignEnrollment, delivery.enrollment_id, tenant_id)
     _draft = lock(Draft, delivery.draft_id, tenant_id)
@@ -473,10 +475,11 @@ defmodule SdrAgent.Outreach.Webhooks do
 
   ## Shared steps
 
-  defp lock_suppression(tenant_id, email, lead_ids) do
+  defp lock_suppression(tenant_id, email, lead_ids, delivery_ids \\ []) do
     Locks.targets(tenant_id, %{
       lead_ids: lead_ids,
-      contact_ids: Locks.contacts(tenant_id, :email, email)
+      contact_ids: Locks.contacts(tenant_id, :email, email),
+      delivery_ids: delivery_ids
     })
   end
 

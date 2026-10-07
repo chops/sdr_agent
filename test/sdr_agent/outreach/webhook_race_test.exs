@@ -105,6 +105,37 @@ defmodule SdrAgent.Outreach.WebhookRaceTest do
     assert [_reply] = elem(Outreach.list_records(Outreach.Reply, actor: ctx.admin), 1)
   end
 
+  test "a reply racing a manual suppression of the same contact: both finish, no deadlock",
+       ctx do
+    %{delivery: first} = drafted = delivered!(ctx)
+    next = approved_followup!(ctx, drafted)
+    body = reply_body(first, "Thanks, not now.")
+
+    {:ok, %{status: :accepted, event: event}} =
+      Webhooks.ingest("reply", body, Map.new(signed_headers(body)))
+
+    [processed, suppressed] =
+      race([
+        fn -> Webhooks.process(event.id, ctx.tenant_id) end,
+        fn ->
+          Outreach.suppress(%{scope: :email, value: to_string(first.recipient_email)},
+            actor: ctx.admin
+          )
+        end
+      ])
+
+    assert processed == :ok, inspect(processed)
+    assert {:ok, _} = suppressed
+    refute inspect(suppressed) =~ "deadlock"
+
+    {:ok, event} = Ash.get(WebhookEvent, event.id, actor: ctx.admin)
+    assert event.processing_status == :processed
+    assert fetch!(ctx, Outreach.DeliveryOperation, next.id).state == :cancelled
+    lead = fetch_sales!(ctx, Sales.Lead, Enum.at(Fixtures.leads(), 0).id)
+    assert lead.status == :stopped
+    assert [_reply] = elem(Outreach.list_records(Outreach.Reply, actor: ctx.admin), 1)
+  end
+
   # Lead "01" worked by the agent, approved by the admin, delivered.
   defp delivered!(ctx) do
     {:ok, lead} = Sales.fetch(Sales.Lead, Enum.at(Fixtures.leads(), 0).id, actor: ctx.admin)

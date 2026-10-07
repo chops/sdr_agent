@@ -268,3 +268,29 @@ authorization); its assertion is unchanged.
 - *S13:* golden path = deliver → POST a signed reply → =Oban.drain_queue(queue:
   :integration)=; invalid-signature rejection is covered by
   =webhook_controller_test.exs=; reprocessing is a no-op by state.
+
+** Rebase onto S8b review round 1 (=a1fd23c=)
+=s9-replies= rebased onto =origin/s8b-delivery= @ =a1fd23c= (S8a/S8b
+review fixes). One conflict: =ApplySuppression= (S8a MF1 locks *every* lead
+of a matching contact, stops only open ones) vs this slice's extraction of
+its lock body. Resolution: =Outreach.Locks.targets/2= now locks every lead
+of the contacts (any status) plus the explicitly named leads;
+=ApplySuppression= stops only =Locks.open_leads/0= leads — MF1 behaviour,
+its S8a tests unchanged and green.
+
+Amended global lock order (S8 notes): Lead → Enrollment → Draft → Delivery
+→ Approval → Campaign → Contact → AgentRun → Quota day → chain head. S9
+writers: reply processing (event row; leads → enrollments → drafts →
+deliveries → approvals via =Locks.targets/2=; the Reply's FK parents —
+contact, delivery, lead, enrollment — are referenced by its insert, which
+precedes the first append); unsubscribe link and complaint (the same
+suppression targets); delivered (enrollment → draft → delivery, as the S8b
+outcome writer); bounce (suppression targets *with* the bounced delivery in
+the Delivery position — =delivery_ids:= — previously it was locked after the
+approvals). Rows written after the first append (Decision, Suppression,
+DeliveryReceipt, AgentRun, Oban job) reference only rows already locked or
+created in the same transaction, or append-only/kernel rows. The event row
+is locked first and only by webhook processors. New real-connection race:
+a reply racing a manual suppression of the same contact (both finish, no
+deadlock, delivery cancelled, lead stopped) — 3/3 consecutive runs, with
+the two existing races.
