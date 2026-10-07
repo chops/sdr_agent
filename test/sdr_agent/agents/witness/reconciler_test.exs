@@ -356,6 +356,36 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     end
   end
 
+  test "runtime allowlist entries must match provider, attested CLI and projection exactly",
+       ctx do
+    previous = Application.get_env(:sdr_agent, Witness, [])
+    on_exit(fn -> Application.put_env(:sdr_agent, Witness, previous) end)
+
+    exact = %{
+      provider: :claude_cli,
+      cli_version: ClaudeCLI.provenance().provider_version,
+      projection_version: Witness.Projection.version(),
+      method: :propagated_id
+    }
+
+    for {label, entries, expected} <- [
+          {"exact", [exact], :reconciled},
+          {"other CLI", [%{exact | cli_version: "0.0.1"}], :inferred},
+          {"other projection", [%{exact | projection_version: "claude-message-json/9"}],
+           :inferred},
+          {"bare atom in config", [:propagated_id], :inferred}
+        ] do
+      Application.put_env(
+        :sdr_agent,
+        Witness,
+        Keyword.put(previous, :reconciled_methods, entries)
+      )
+
+      invocation = call_model!(ctx, "ok")
+      assert {:ok, %{status: ^expected}} = reconcile(ctx, invocation), label
+    end
+  end
+
   test "outside tests the method allowlist cannot be overridden per call", ctx do
     invocation = call_model!(ctx, "ok")
     previous = Application.get_env(:sdr_agent, Witness, [])

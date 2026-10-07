@@ -28,9 +28,10 @@ defmodule SdrAgent.Agents.Witness do
        whose condition changed or cleared. An unreadable inventory
        downgrades current non-mismatch links with an `inferred` successor.
 
-  A match is `reconciled` only for a method in the runtime allowlist
-  (`reconciled_methods`, shipped empty — R3); otherwise `inferred` with
-  `method_not_enabled`. A per-call `:methods` override is honoured only when
+  A match is `reconciled` only for an exact runtime allowlist entry
+  (`reconciled_methods`: `%{provider:, cli_version:, projection_version:,
+  method:}` — shipped empty, R3; enabled only by the reviewed S12d change);
+  otherwise `inferred` with `method_not_enabled`. A per-call `:methods` override is honoured only when
   `allow_method_override` is configured (test configuration only). The
   model is never called again.
 
@@ -75,7 +76,38 @@ defmodule SdrAgent.Agents.Witness do
   def store_root, do: Keyword.get(config(), :store_root)
 
   @doc "Methods whose matching proof may be labelled reconciled (ships empty)."
-  def reconciled_methods, do: Keyword.get(config(), :reconciled_methods, [])
+  def reconciled_methods do
+    # Runtime entries must be exact proofs; a bare method atom is accepted
+    # only through the test-only per-call override.
+    config() |> Keyword.get(:reconciled_methods, []) |> Enum.filter(&exact_entry?/1)
+  end
+
+  defp exact_entry?(%{
+         provider: provider,
+         cli_version: version,
+         projection_version: projection,
+         method: method
+       }),
+       do: is_atom(provider) and is_binary(version) and is_binary(projection) and is_atom(method)
+
+  defp exact_entry?(_entry), do: false
+
+  # A match is labelled reconciled only for an allowlisted (provider, attested
+  # CLI version, projection version, method) entry — or, under the test-only
+  # override, a bare method atom.
+  defp enabled?(entries, invocation, projection) do
+    Enum.any?(entries, fn
+      @method ->
+        true
+
+      %{provider: provider, cli_version: version, projection_version: version_p, method: @method} ->
+        provider == invocation.provider and version == invocation.provider_version and
+          version_p == projection
+
+      _other ->
+        false
+    end)
+  end
 
   defp config, do: Application.get_env(:sdr_agent, __MODULE__, [])
 
@@ -459,7 +491,7 @@ defmodule SdrAgent.Agents.Witness do
     {status, reasons} =
       case evaluated.status do
         :match ->
-          if @method in methods,
+          if enabled?(methods, invocation, evaluated.projection),
             do: {:reconciled, evaluated.reasons},
             else: {:inferred, ["method_not_enabled" | evaluated.reasons]}
 
