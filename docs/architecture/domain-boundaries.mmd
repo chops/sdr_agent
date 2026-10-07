@@ -23,6 +23,10 @@ graph TB
         ToolInvocation[ToolInvocation]
         Decision[Decision]
     end
+    subgraph Operations["Operations Domain"]
+        Operation[Operation]
+        Failure[Failure]
+    end
     subgraph Accounts["Accounts Domain"]
         User[User]
         Token[Token]
@@ -86,6 +90,15 @@ graph TB
     User -. tenant_id FK .-> Tenant
     Sales -. tenant_id FK .-> Tenant
     Research -. tenant_id FK .-> Tenant
+    Operation --> Failure
+    Operation -. last_failure_id FK .-> Failure
+    AgentRun -. operation_id FK .-> Operation
+    AgentRun -. attention_failure_id FK (same transaction) .-> Failure
+    Lead -. blocked opens Failure (same transaction) .-> Failure
+    Failure -. resolved_by_id FK .-> User
+    Failure -. detail sha256 FK .-> Payload
+    Operations -. tenant_id FK .-> Tenant
+    Operations == "AppendEvent (operations.*)" ==> Kernel
     Accounts == "AppendEvent (user.*, auth.*)" ==> Kernel
     Sales == "AppendEvent (sales.*)" ==> Kernel
     Research == "AppendEvent (research.*)" ==> Kernel

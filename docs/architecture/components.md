@@ -11,7 +11,7 @@ This diagram shows the major components and their relationships.
 graph TB
     subgraph Application["Application"]
         App[Application Supervisor]
-        Budget[Daily BudgetStore<br/>volatile 200/day guard]
+        Budget[Persisted budgets<br/>20/run + 200/UTC day in Postgres]
         ModelProvider[ModelProvider facade<br/>budget + Zoi validation]
         ClaudeCLIAdapter[ClaudeCLI adapter<br/>serialized, tool-free GenServer]
         Telemetry[Telemetry setup and GenAI helper]
@@ -36,8 +36,8 @@ graph TB
     end
 
     subgraph Ash["Ash Framework"]
-        Domains["Domains (5)"]
-        Resources["Resources (47)"]
+        Domains["Domains (6)"]
+        Resources["Resources (49)"]
     end
 
     subgraph External["Local External Process"]
@@ -59,7 +59,6 @@ graph TB
     OTSCLI -. upgrade .-> OTSCalendars
     OTSCLI -. verify .-> Bitcoin
     App --> Endpoint
-    App --> Budget
     App --> Telemetry
     ModelProvider --> Budget
     ModelProvider --> ClaudeCLIAdapter
@@ -86,8 +85,8 @@ graph TB
 | LiveViews | 2 |
 | Channels | 1 |
 | UI Components | 2 |
-| Ash Domains | 5 |
-| Ash Resources | 47 |
+| Ash Domains | 6 |
+| Ash Resources | 49 |
 
 ## Manual Additions Needed
 

@@ -40,7 +40,7 @@ flowchart LR
 
     subgraph AI["Structured Model Boundary"]
         Provider[ModelProvider facade]
-        Budget[S3 persisted 20/run<br/>volatile 200/day guard]
+        Budget[persisted 20/run + 200/UTC day<br/>inside the reservation transaction]
         Validation[Zoi output validation]
         Adapter[Serialized tool-free ClaudeCLI adapter]
     end
