@@ -9,7 +9,8 @@ defmodule SdrAgentWeb.AuditLive do
 
   Every timeline view — for any role — first records a `timeline_view`
   AuditAccess naming the filter (`Audit.record_access/5`); if that fails
-  nothing is served (fail closed).
+  nothing is served (fail closed). New events appear live
+  (`SdrAgentWeb.LiveRefresh`); every refresh is itself a recorded view.
 
   Filters: *lead* — events whose subject is the lead, its runs, research
   artifacts, claims, qualifications, enrollments, drafts, revisions,
@@ -27,6 +28,7 @@ defmodule SdrAgentWeb.AuditLive do
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
+  alias SdrAgentWeb.LiveRefresh
 
   on_mount {SdrAgentWeb.LiveUserAuth, {:roles, [:admin, :auditor]}}
 
@@ -43,7 +45,8 @@ defmodule SdrAgentWeb.AuditLive do
        filter: nil,
        chain_result: nil
      )
-     |> stream(:events, [])}
+     |> stream(:events, [])
+     |> LiveRefresh.attach(&refresh/1)}
   end
 
   @impl true
@@ -59,6 +62,11 @@ defmodule SdrAgentWeb.AuditLive do
     socket = assign(socket, filter: filter)
     {:noreply, if(connected?(socket), do: load(socket), else: socket)}
   end
+
+  # Live refresh (ADR-0012) once the first load ran; each refresh is a new,
+  # recorded timeline view (access events themselves do not trigger one).
+  defp refresh(%{assigns: %{loaded?: true}} = socket), do: load(socket)
+  defp refresh(socket), do: socket
 
   # A 36-character UUID string only (Ecto.UUID.cast/1 also accepts 16 raw bytes).
   defp uuid?(value),

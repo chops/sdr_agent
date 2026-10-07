@@ -101,7 +101,12 @@ We will use Option 3:
   approve/reject binding, and shows a notice that offers the latest
   revision. The domain still refuses a verdict on the old revision as stale.
 - Live refresh is wired on the Dashboard, Leads detail, Review queue, Draft,
-  Runs & operations and Run views.
+  Runs & operations, Run and Audit timeline views.
+- The operator is re-validated when a refresh fires — after any debounce —
+  with `SdrAgentWeb.LiveUserAuth.revalidate/1`, as events and navigation
+  are: the reload runs as the freshly read user, and a disabled, revoked or
+  no-longer-qualifying operator is redirected without loading (review of
+  #19 @2f4b87e). A NOTIFY is never an authorization signal.
 
 ## Justification
 

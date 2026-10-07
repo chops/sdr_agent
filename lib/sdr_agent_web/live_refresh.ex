@@ -15,12 +15,19 @@ defmodule SdrAgentWeb.LiveRefresh do
       access events would loop.
     * The reload runs the view's normal audited read path, so an auditor's
       refreshed view is recorded like any other view of it.
+    * The operator is re-validated **when the reload fires** (also after a
+      debounce), with `SdrAgentWeb.LiveUserAuth.revalidate/1`, exactly as for
+      events and navigation: the reload runs as the freshly read user (a
+      demoted operator reads with its new role, audited if now an auditor);
+      a disabled or revoked operator is signed out, and a role-restricted
+      view redirects, without loading anything.
   """
 
   import Phoenix.Component, only: [assign: 3]
   import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1]
 
   alias SdrAgent.LiveEvents
+  alias SdrAgentWeb.LiveUserAuth
 
   @ignored ["access", "auth"]
   @pending :live_refresh_pending?
@@ -54,15 +61,23 @@ defmodule SdrAgentWeb.LiveRefresh do
     cond do
       not relevant?(event) -> {:halt, socket}
       socket.assigns[@pending] -> {:halt, socket}
-      debounce_ms() == 0 -> {:halt, refresh.(socket)}
+      debounce_ms() == 0 -> {:halt, fire(socket, refresh)}
       true -> {:halt, schedule(socket)}
     end
   end
 
   defp handle_info(:live_refresh, socket, refresh),
-    do: {:halt, socket |> assign(@pending, false) |> refresh.()}
+    do: {:halt, socket |> assign(@pending, false) |> fire(refresh)}
 
   defp handle_info(_message, socket, _refresh), do: {:cont, socket}
+
+  # Re-validate at firing time; load only for a still-valid operator.
+  defp fire(socket, refresh) do
+    case LiveUserAuth.revalidate(socket) do
+      {:ok, socket} -> refresh.(socket)
+      {:error, redirected} -> redirected
+    end
+  end
 
   defp schedule(socket) do
     Process.send_after(self(), :live_refresh, debounce_ms())
