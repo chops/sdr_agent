@@ -26,103 +26,19 @@
     },
     {
       "allow_nil?": false,
-      "default": "nil",
+      "default": "1",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "domain",
-      "type": "citext"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "website_url",
-      "type": "text"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "industry",
-      "type": "text"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "employee_count",
+      "source": "version",
       "type": "bigint"
     },
     {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "geography",
-      "type": "text"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "crm_provider",
-      "type": "text"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "crm_external_id",
-      "type": "text"
-    },
-    {
       "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "source",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "\"active\"",
+      "default": "\"draft\"",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
@@ -131,6 +47,42 @@
       "size": null,
       "source": "status",
       "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "description",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "criteria",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "criteria_sha256",
+      "type": "binary"
     },
     {
       "allow_nil?": false,
@@ -201,7 +153,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "accounts_tenant_id_fkey",
+        "name": "icp_definitions_tenant_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -222,27 +174,43 @@
       ],
       "base_filter": null,
       "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
-      "name": "accounts_trace_ids"
+      "name": "icp_definitions_trace_ids"
     },
     {
       "attribute": [
         "status"
       ],
       "base_filter": null,
-      "check": "status IN ('active', 'archived')",
-      "name": "accounts_status"
+      "check": "status IN ('draft', 'active', 'retired')",
+      "name": "icp_definitions_status"
+    },
+    {
+      "attribute": [
+        "version"
+      ],
+      "base_filter": null,
+      "check": "version >= 1",
+      "name": "icp_definitions_version_positive"
+    },
+    {
+      "attribute": [
+        "criteria_sha256"
+      ],
+      "base_filter": null,
+      "check": "octet_length(criteria_sha256) = 32",
+      "name": "icp_definitions_criteria_sha256_length"
     }
   ],
   "create_table_options": null,
   "custom_indexes": [],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "8A4F01DF8BC2C33E7F179A71C51856062ABE86B6280EA4A4A1D56B826160BE5A",
+  "hash": "C8C7AD68D114E393D012E63A1DA7A7B81E5497F93313033FE870C25543CFEFA2",
   "identities": [
     {
       "all_tenants?": false,
       "base_filter": null,
-      "index_name": "accounts_unique_crm_id_index",
+      "index_name": "icp_definitions_unique_name_version_index",
       "keys": [
         {
           "type": "atom",
@@ -250,32 +218,14 @@
         },
         {
           "type": "atom",
-          "value": "crm_provider"
+          "value": "name"
         },
         {
           "type": "atom",
-          "value": "crm_external_id"
+          "value": "version"
         }
       ],
-      "name": "unique_crm_id",
-      "nils_distinct?": true,
-      "where": "crm_external_id IS NOT NULL"
-    },
-    {
-      "all_tenants?": false,
-      "base_filter": null,
-      "index_name": "accounts_unique_domain_index",
-      "keys": [
-        {
-          "type": "atom",
-          "value": "tenant_id"
-        },
-        {
-          "type": "atom",
-          "value": "domain"
-        }
-      ],
-      "name": "unique_domain",
+      "name": "unique_name_version",
       "nils_distinct?": true,
       "where": null
     }
@@ -287,5 +237,5 @@
   },
   "repo": "Elixir.SdrAgent.Repo",
   "schema": null,
-  "table": "accounts"
+  "table": "icp_definitions"
 }

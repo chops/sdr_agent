@@ -14,6 +14,18 @@
     },
     {
       "allow_nil?": false,
+      "default": "0",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "current_step_position",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": true,
       "default": "nil",
       "generated?": false,
       "precision": null,
@@ -21,12 +33,12 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "name",
-      "type": "text"
+      "source": "next_step_due_at",
+      "type": "utc_datetime_usec"
     },
     {
       "allow_nil?": false,
-      "default": "\"draft\"",
+      "default": "\"active\"",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
@@ -37,76 +49,16 @@
       "type": "text"
     },
     {
-      "allow_nil?": false,
-      "default": "\"Demo SDR\"",
+      "allow_nil?": true,
+      "default": "nil",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "sender_name",
+      "source": "stop_reason",
       "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "\"sdr@example.test\"",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "sender_email",
-      "type": "citext"
-    },
-    {
-      "allow_nil?": false,
-      "default": "\"America/Denver\"",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "timezone",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "fragment(\"'18:00:00'\")",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "quiet_hours_start",
-      "type": "time"
-    },
-    {
-      "allow_nil?": false,
-      "default": "fragment(\"'08:00:00'\")",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "quiet_hours_end",
-      "type": "time"
-    },
-    {
-      "allow_nil?": false,
-      "default": "0",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "autonomy_tier",
-      "type": "bigint"
     },
     {
       "allow_nil?": false,
@@ -117,8 +69,8 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "footer_template_version",
-      "type": "text"
+      "source": "enrolled_at",
+      "type": "utc_datetime_usec"
     },
     {
       "allow_nil?": false,
@@ -189,7 +141,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "campaigns_tenant_id_fkey",
+        "name": "campaign_enrollments_tenant_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -222,20 +174,20 @@
           "global": null,
           "strategy": null
         },
-        "name": "campaigns_icp_definition_id_fkey",
+        "name": "campaign_enrollments_campaign_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
         "schema": "public",
-        "table": "icp_definitions"
+        "table": "campaigns"
       },
       "scale": null,
       "size": null,
-      "source": "icp_definition_id",
+      "source": "campaign_id",
       "type": "uuid"
     },
     {
-      "allow_nil?": true,
+      "allow_nil?": false,
       "default": "nil",
       "generated?": false,
       "precision": null,
@@ -255,16 +207,16 @@
           "global": null,
           "strategy": null
         },
-        "name": "campaigns_sequence_id_fkey",
+        "name": "campaign_enrollments_lead_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
         "schema": "public",
-        "table": "sequences"
+        "table": "leads"
       },
       "scale": null,
       "size": null,
-      "source": "sequence_id",
+      "source": "lead_id",
       "type": "uuid"
     }
   ],
@@ -276,39 +228,50 @@
       ],
       "base_filter": null,
       "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
-      "name": "campaigns_trace_ids"
+      "name": "campaign_enrollments_trace_ids"
     },
     {
       "attribute": [
         "status"
       ],
       "base_filter": null,
-      "check": "status IN ('draft', 'active', 'paused', 'completed', 'archived')",
-      "name": "campaigns_status"
+      "check": "status IN ('active', 'paused', 'replied', 'completed', 'stopped')",
+      "name": "campaign_enrollments_status"
     },
     {
       "attribute": [
-        "autonomy_tier"
+        "stop_reason"
       ],
       "base_filter": null,
-      "check": "autonomy_tier = 0",
-      "name": "campaigns_tier_zero"
-    },
-    {
-      "attribute": [
-        "sequence_id"
-      ],
-      "base_filter": null,
-      "check": "status IN ('draft', 'archived') OR sequence_id IS NOT NULL",
-      "name": "campaigns_sequence_when_live"
+      "check": "status <> 'stopped' OR stop_reason IS NOT NULL",
+      "name": "campaign_enrollments_stop_reason_when_stopped"
     }
   ],
   "create_table_options": null,
   "custom_indexes": [],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "6C2B458AE316B912BBD3CE2D165CEAEB3269AC2F596A65C200588025158D134B",
-  "identities": [],
+  "hash": "454C3D241F9236AAB4D1C52C076044047A10265BF584D34C8ECDC4F1552E142B",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "campaign_enrollments_unique_campaign_lead_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "campaign_id"
+        },
+        {
+          "type": "atom",
+          "value": "lead_id"
+        }
+      ],
+      "name": "unique_campaign_lead",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
   "multitenancy": {
     "attribute": null,
     "global": null,
@@ -316,5 +279,5 @@
   },
   "repo": "Elixir.SdrAgent.Repo",
   "schema": null,
-  "table": "campaigns"
+  "table": "campaign_enrollments"
 }

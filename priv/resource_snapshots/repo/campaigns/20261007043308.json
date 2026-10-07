@@ -26,18 +26,6 @@
     },
     {
       "allow_nil?": false,
-      "default": "1",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "version",
-      "type": "bigint"
-    },
-    {
-      "allow_nil?": false,
       "default": "\"draft\"",
       "generated?": false,
       "precision": null,
@@ -49,28 +37,76 @@
       "type": "text"
     },
     {
-      "allow_nil?": true,
-      "default": "nil",
+      "allow_nil?": false,
+      "default": "\"Demo SDR\"",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "description",
+      "source": "sender_name",
       "type": "text"
     },
     {
       "allow_nil?": false,
-      "default": "nil",
+      "default": "\"sdr@example.test\"",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "criteria",
-      "type": "map"
+      "source": "sender_email",
+      "type": "citext"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"America/Denver\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "timezone",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"'18:00:00'\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "quiet_hours_start",
+      "type": "time"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"'08:00:00'\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "quiet_hours_end",
+      "type": "time"
+    },
+    {
+      "allow_nil?": false,
+      "default": "0",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "autonomy_tier",
+      "type": "bigint"
     },
     {
       "allow_nil?": false,
@@ -81,8 +117,8 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "criteria_sha256",
-      "type": "binary"
+      "source": "footer_template_version",
+      "type": "text"
     },
     {
       "allow_nil?": false,
@@ -153,7 +189,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "icp_definitions_tenant_id_fkey",
+        "name": "campaigns_tenant_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -163,6 +199,72 @@
       "scale": null,
       "size": null,
       "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "campaigns_icp_definition_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "icp_definitions"
+      },
+      "scale": null,
+      "size": null,
+      "source": "icp_definition_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "campaigns_sequence_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "sequences"
+      },
+      "scale": null,
+      "size": null,
+      "source": "sequence_id",
       "type": "uuid"
     }
   ],
@@ -174,62 +276,39 @@
       ],
       "base_filter": null,
       "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
-      "name": "icp_definitions_trace_ids"
+      "name": "campaigns_trace_ids"
     },
     {
       "attribute": [
         "status"
       ],
       "base_filter": null,
-      "check": "status IN ('draft', 'active', 'retired')",
-      "name": "icp_definitions_status"
+      "check": "status IN ('draft', 'active', 'paused', 'completed', 'archived')",
+      "name": "campaigns_status"
     },
     {
       "attribute": [
-        "version"
+        "autonomy_tier"
       ],
       "base_filter": null,
-      "check": "version >= 1",
-      "name": "icp_definitions_version_positive"
+      "check": "autonomy_tier = 0",
+      "name": "campaigns_tier_zero"
     },
     {
       "attribute": [
-        "criteria_sha256"
+        "sequence_id"
       ],
       "base_filter": null,
-      "check": "octet_length(criteria_sha256) = 32",
-      "name": "icp_definitions_criteria_sha256_length"
+      "check": "status IN ('draft', 'archived') OR sequence_id IS NOT NULL",
+      "name": "campaigns_sequence_when_live"
     }
   ],
   "create_table_options": null,
   "custom_indexes": [],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "79017BFA3901DA7F6D3DEA507437DDED2AA65F46E5CB86285366C0236B305080",
-  "identities": [
-    {
-      "all_tenants?": false,
-      "base_filter": null,
-      "index_name": "icp_definitions_unique_name_version_index",
-      "keys": [
-        {
-          "type": "atom",
-          "value": "tenant_id"
-        },
-        {
-          "type": "atom",
-          "value": "name"
-        },
-        {
-          "type": "atom",
-          "value": "version"
-        }
-      ],
-      "name": "unique_name_version",
-      "nils_distinct?": true,
-      "where": null
-    }
-  ],
+  "hash": "DCEAD294C644480BC804FAF7A5CA2286DA80D44BE77C04195FD9870842CD48E1",
+  "identities": [],
   "multitenancy": {
     "attribute": null,
     "global": null,
@@ -237,5 +316,5 @@
   },
   "repo": "Elixir.SdrAgent.Repo",
   "schema": null,
-  "table": "icp_definitions"
+  "table": "campaigns"
 }

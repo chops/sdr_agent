@@ -21,32 +21,68 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "name",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "1",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "version",
+      "source": "position",
       "type": "bigint"
     },
     {
       "allow_nil?": false,
-      "default": "\"draft\"",
+      "default": "nil",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "status",
+      "source": "channel",
       "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "delay_days",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "instructions",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "true",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "requires_approval",
+      "type": "boolean"
+    },
+    {
+      "allow_nil?": false,
+      "default": "true",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "stop_on_reply",
+      "type": "boolean"
     },
     {
       "allow_nil?": false,
@@ -117,7 +153,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "sequences_tenant_id_fkey",
+        "name": "sequence_steps_tenant_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -127,6 +163,39 @@
       "scale": null,
       "size": null,
       "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "sequence_steps_sequence_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "sequences"
+      },
+      "scale": null,
+      "size": null,
+      "source": "sequence_id",
       "type": "uuid"
     }
   ],
@@ -138,50 +207,54 @@
       ],
       "base_filter": null,
       "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
-      "name": "sequences_trace_ids"
+      "name": "sequence_steps_trace_ids"
     },
     {
       "attribute": [
-        "status"
+        "delay_days"
       ],
       "base_filter": null,
-      "check": "status IN ('draft', 'active', 'retired')",
-      "name": "sequences_status"
+      "check": "position <> 1 OR delay_days = 0",
+      "name": "sequence_steps_first_step_immediate"
     },
     {
       "attribute": [
-        "version"
+        "requires_approval"
       ],
       "base_filter": null,
-      "check": "version >= 1",
-      "name": "sequences_version_positive"
+      "check": "requires_approval = true AND stop_on_reply = true",
+      "name": "sequence_steps_tier_zero"
+    },
+    {
+      "attribute": [
+        "channel"
+      ],
+      "base_filter": null,
+      "check": "channel = 'email'",
+      "name": "sequence_steps_channel"
     }
   ],
   "create_table_options": null,
   "custom_indexes": [],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "4429954AA986BA1ADA281D54162FD2D2AC19C1C44785ACBC1315A0D4528795A8",
+  "hash": "9365806F82AED2B4F653806D86DB07CB0EF1FE3871E1C394EA5C6A096F37AC69",
   "identities": [
     {
       "all_tenants?": false,
       "base_filter": null,
-      "index_name": "sequences_unique_name_version_index",
+      "index_name": "sequence_steps_unique_position_index",
       "keys": [
         {
           "type": "atom",
-          "value": "tenant_id"
+          "value": "sequence_id"
         },
         {
           "type": "atom",
-          "value": "name"
-        },
-        {
-          "type": "atom",
-          "value": "version"
+          "value": "position"
         }
       ],
-      "name": "unique_name_version",
+      "name": "unique_position",
       "nils_distinct?": true,
       "where": null
     }
@@ -193,5 +266,5 @@
   },
   "repo": "Elixir.SdrAgent.Repo",
   "schema": null,
-  "table": "sequences"
+  "table": "sequence_steps"
 }
