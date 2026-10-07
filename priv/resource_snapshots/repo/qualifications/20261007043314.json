@@ -21,7 +21,7 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "source_type",
+      "source": "source",
       "type": "text"
     },
     {
@@ -33,8 +33,8 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "provider",
-      "type": "text"
+      "source": "qualified",
+      "type": "boolean"
     },
     {
       "allow_nil?": false,
@@ -45,8 +45,8 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "source_url",
-      "type": "text"
+      "source": "score",
+      "type": "bigint"
     },
     {
       "allow_nil?": false,
@@ -57,92 +57,44 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "retrieved_at",
-      "type": "utc_datetime_usec"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "published_at",
-      "type": "utc_datetime_usec"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "title",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "content_sha256",
-      "type": "binary"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "excerpt",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "trust_level",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "freshness",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "%{}",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "metadata",
+      "source": "criteria",
       "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "confidence",
+      "type": "float"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "reason",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "output_schema_version",
+      "type": "text"
     },
     {
       "allow_nil?": false,
@@ -201,7 +153,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "research_artifacts_tenant_id_fkey",
+        "name": "qualifications_tenant_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -234,7 +186,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "research_artifacts_lead_id_fkey",
+        "name": "qualifications_lead_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -267,7 +219,40 @@
           "global": null,
           "strategy": null
         },
-        "name": "research_artifacts_agent_run_id_fkey",
+        "name": "qualifications_icp_definition_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "icp_definitions"
+      },
+      "scale": null,
+      "size": null,
+      "source": "icp_definition_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "qualifications_agent_run_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -300,16 +285,82 @@
           "global": null,
           "strategy": null
         },
-        "name": "research_artifacts_tool_invocation_id_fkey",
+        "name": "qualifications_decision_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
         "schema": "public",
-        "table": "tool_invocations"
+        "table": "decisions"
       },
       "scale": null,
       "size": null,
-      "source": "tool_invocation_id",
+      "source": "decision_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "qualifications_supersedes_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "qualifications"
+      },
+      "scale": null,
+      "size": null,
+      "source": "supersedes_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "qualifications_created_by_user_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "created_by_user_id",
       "type": "uuid"
     }
   ],
@@ -321,23 +372,31 @@
       ],
       "base_filter": null,
       "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
-      "name": "research_artifacts_trace_ids"
+      "name": "qualifications_trace_ids"
     },
     {
       "attribute": [
-        "excerpt"
+        "score"
       ],
       "base_filter": null,
-      "check": "char_length(excerpt) <= 2000",
-      "name": "research_artifacts_excerpt_length"
+      "check": "score >= 0 AND score <= 100",
+      "name": "qualifications_score_range"
     },
     {
       "attribute": [
-        "content_sha256"
+        "confidence"
       ],
       "base_filter": null,
-      "check": "octet_length(content_sha256) = 32",
-      "name": "research_artifacts_content_sha256_length"
+      "check": "confidence >= 0 AND confidence <= 1",
+      "name": "qualifications_confidence_range"
+    },
+    {
+      "attribute": [
+        "source"
+      ],
+      "base_filter": null,
+      "check": "(source = 'agent' AND agent_run_id IS NOT NULL) OR (source = 'human_override' AND created_by_user_id IS NOT NULL AND supersedes_id IS NOT NULL)",
+      "name": "qualifications_source_provenance"
     }
   ],
   "create_table_options": null,
@@ -346,62 +405,58 @@
     {
       "after_tables": [],
       "code?": false,
-      "down": "DROP FUNCTION research_artifacts_append_only()",
+      "down": "DROP FUNCTION qualifications_append_only()",
       "global?": false,
-      "name": "research_artifacts_guard_function",
-      "up": "CREATE FUNCTION research_artifacts_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+      "name": "qualifications_guard_function",
+      "up": "CREATE FUNCTION qualifications_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
     },
     {
       "after_tables": [],
       "code?": false,
-      "down": "DROP TRIGGER research_artifacts_guard_row ON research_artifacts",
+      "down": "DROP TRIGGER qualifications_guard_row ON qualifications",
       "global?": false,
-      "name": "research_artifacts_guard_row",
-      "up": "CREATE TRIGGER research_artifacts_guard_row BEFORE UPDATE OR DELETE ON research_artifacts FOR EACH ROW EXECUTE FUNCTION research_artifacts_append_only()"
+      "name": "qualifications_guard_row",
+      "up": "CREATE TRIGGER qualifications_guard_row BEFORE UPDATE OR DELETE ON qualifications FOR EACH ROW EXECUTE FUNCTION qualifications_append_only()"
     },
     {
       "after_tables": [],
       "code?": false,
-      "down": "DROP TRIGGER research_artifacts_guard_truncate ON research_artifacts",
+      "down": "DROP TRIGGER qualifications_guard_truncate ON qualifications",
       "global?": false,
-      "name": "research_artifacts_guard_truncate",
-      "up": "CREATE TRIGGER research_artifacts_guard_truncate BEFORE TRUNCATE ON research_artifacts FOR EACH STATEMENT EXECUTE FUNCTION research_artifacts_append_only()"
-    },
-    {
-      "after_tables": [
-        "payloads"
-      ],
-      "code?": false,
-      "down": "ALTER TABLE research_artifacts DROP CONSTRAINT research_artifacts_content_sha256_payload_fkey",
-      "global?": false,
-      "name": "research_artifacts_content_sha256_payload_fkey",
-      "up": "ALTER TABLE research_artifacts ADD CONSTRAINT research_artifacts_content_sha256_payload_fkey FOREIGN KEY (tenant_id, content_sha256) REFERENCES payloads (tenant_id, sha256) ON DELETE RESTRICT"
+      "name": "qualifications_guard_truncate",
+      "up": "CREATE TRIGGER qualifications_guard_truncate BEFORE TRUNCATE ON qualifications FOR EACH STATEMENT EXECUTE FUNCTION qualifications_append_only()"
     }
   ],
   "has_create_action": true,
-  "hash": "B99993CD488ACA2C03A721D133D3910DE4347CD48F7D47B3F5658560F16C4776",
+  "hash": "9E59269E4720A3A2DF08AEEA524D6BD4EE128A1561598304BF997E75088906CF",
   "identities": [
     {
       "all_tenants?": false,
       "base_filter": null,
-      "index_name": "research_artifacts_unique_source_index",
+      "index_name": "qualifications_unique_root_index",
       "keys": [
         {
           "type": "atom",
           "value": "lead_id"
-        },
-        {
-          "type": "atom",
-          "value": "source_url"
-        },
-        {
-          "type": "atom",
-          "value": "content_sha256"
         }
       ],
-      "name": "unique_source",
+      "name": "unique_root",
       "nils_distinct?": true,
-      "where": null
+      "where": "supersedes_id IS NULL"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "qualifications_unique_supersedes_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "supersedes_id"
+        }
+      ],
+      "name": "unique_supersedes",
+      "nils_distinct?": true,
+      "where": "supersedes_id IS NOT NULL"
     }
   ],
   "multitenancy": {
@@ -411,5 +466,5 @@
   },
   "repo": "Elixir.SdrAgent.Repo",
   "schema": null,
-  "table": "research_artifacts"
+  "table": "qualifications"
 }

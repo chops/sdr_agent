@@ -21,6 +21,102 @@
       "references": null,
       "scale": null,
       "size": null,
+      "source": "first_name",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "last_name",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "email",
+      "type": "citext"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "title",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "persona",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "timezone",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "crm_external_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"active\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "status",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
       "source": "trace_id",
       "type": "text"
     },
@@ -54,6 +150,18 @@
       "generated?": false,
       "precision": null,
       "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "updated_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
       "references": {
         "deferrable": false,
         "destination_attribute": "id",
@@ -69,7 +177,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "qualification_evidences_tenant_id_fkey",
+        "name": "contacts_tenant_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -102,49 +210,16 @@
           "global": null,
           "strategy": null
         },
-        "name": "qualification_evidences_qualification_id_fkey",
+        "name": "contacts_account_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
         "schema": "public",
-        "table": "qualifications"
+        "table": "accounts"
       },
       "scale": null,
       "size": null,
-      "source": "qualification_id",
-      "type": "uuid"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": {
-        "deferrable": false,
-        "destination_attribute": "id",
-        "destination_attribute_default": null,
-        "destination_attribute_generated": null,
-        "index?": false,
-        "index_where": null,
-        "match_tenant?": false,
-        "match_type": null,
-        "match_with": null,
-        "multitenancy": {
-          "attribute": null,
-          "global": null,
-          "strategy": null
-        },
-        "name": "qualification_evidences_evidence_claim_id_fkey",
-        "on_delete": "restrict",
-        "on_update": null,
-        "primary_key?": true,
-        "schema": "public",
-        "table": "evidence_claims"
-      },
-      "scale": null,
-      "size": null,
-      "source": "evidence_claim_id",
+      "source": "account_id",
       "type": "uuid"
     }
   ],
@@ -156,55 +231,38 @@
       ],
       "base_filter": null,
       "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
-      "name": "qualification_evidences_trace_ids"
+      "name": "contacts_trace_ids"
+    },
+    {
+      "attribute": [
+        "status"
+      ],
+      "base_filter": null,
+      "check": "status IN ('active', 'archived')",
+      "name": "contacts_status"
     }
   ],
   "create_table_options": null,
   "custom_indexes": [],
-  "custom_statements": [
-    {
-      "after_tables": [],
-      "code?": false,
-      "down": "DROP FUNCTION qualification_evidences_append_only()",
-      "global?": false,
-      "name": "qualification_evidences_guard_function",
-      "up": "CREATE FUNCTION qualification_evidences_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
-    },
-    {
-      "after_tables": [],
-      "code?": false,
-      "down": "DROP TRIGGER qualification_evidences_guard_row ON qualification_evidences",
-      "global?": false,
-      "name": "qualification_evidences_guard_row",
-      "up": "CREATE TRIGGER qualification_evidences_guard_row BEFORE UPDATE OR DELETE ON qualification_evidences FOR EACH ROW EXECUTE FUNCTION qualification_evidences_append_only()"
-    },
-    {
-      "after_tables": [],
-      "code?": false,
-      "down": "DROP TRIGGER qualification_evidences_guard_truncate ON qualification_evidences",
-      "global?": false,
-      "name": "qualification_evidences_guard_truncate",
-      "up": "CREATE TRIGGER qualification_evidences_guard_truncate BEFORE TRUNCATE ON qualification_evidences FOR EACH STATEMENT EXECUTE FUNCTION qualification_evidences_append_only()"
-    }
-  ],
+  "custom_statements": [],
   "has_create_action": true,
-  "hash": "4C8230339ACCC08C3B3FBBA42566056066956CC019D559EC6487C52A7BEDB267",
+  "hash": "807B5D50F7BD1AB4EB40F9FB26F6A345286DE7F43D18A943766B73B7C67679F8",
   "identities": [
     {
       "all_tenants?": false,
       "base_filter": null,
-      "index_name": "qualification_evidences_unique_citation_index",
+      "index_name": "contacts_unique_email_index",
       "keys": [
         {
           "type": "atom",
-          "value": "qualification_id"
+          "value": "tenant_id"
         },
         {
           "type": "atom",
-          "value": "evidence_claim_id"
+          "value": "email"
         }
       ],
-      "name": "unique_citation",
+      "name": "unique_email",
       "nils_distinct?": true,
       "where": null
     }
@@ -216,5 +274,5 @@
   },
   "repo": "Elixir.SdrAgent.Repo",
   "schema": null,
-  "table": "qualification_evidences"
+  "table": "contacts"
 }

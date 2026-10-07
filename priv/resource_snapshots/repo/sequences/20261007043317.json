@@ -2,7 +2,7 @@
   "attributes": [
     {
       "allow_nil?": false,
-      "default": "fragment(\"gen_random_uuid()\")",
+      "default": "fragment(\"uuidv7()\")",
       "generated?": false,
       "precision": null,
       "primary_key?": true,
@@ -21,36 +21,24 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "email",
-      "type": "citext"
+      "source": "name",
+      "type": "text"
     },
     {
       "allow_nil?": false,
-      "default": "nil",
+      "default": "1",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "hashed_password",
-      "type": "text"
+      "source": "version",
+      "type": "bigint"
     },
     {
       "allow_nil?": false,
-      "default": "\"reviewer\"",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "role",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "\"active\"",
+      "default": "\"draft\"",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
@@ -69,7 +57,19 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "display_name",
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
       "type": "text"
     },
     {
@@ -117,7 +117,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "users_tenant_id_fkey",
+        "name": "sequences_tenant_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -134,38 +134,54 @@
   "check_constraints": [
     {
       "attribute": [
-        "role"
+        "trace_id"
       ],
       "base_filter": null,
-      "check": "role IN ('admin', 'reviewer', 'auditor')",
-      "name": "users_role"
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "sequences_trace_ids"
     },
     {
       "attribute": [
         "status"
       ],
       "base_filter": null,
-      "check": "status IN ('active', 'disabled')",
-      "name": "users_status"
+      "check": "status IN ('draft', 'active', 'retired')",
+      "name": "sequences_status"
+    },
+    {
+      "attribute": [
+        "version"
+      ],
+      "base_filter": null,
+      "check": "version >= 1",
+      "name": "sequences_version_positive"
     }
   ],
   "create_table_options": null,
   "custom_indexes": [],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "77B021A9DE92C38A1F0CC33AE1E89D31A4F58A7B3CB36C1704357B284A9617C9",
+  "hash": "21A45FA7AEF0FDC6C7D0AD0A8496D3EF42AC3D71C2727A3EA6F7B17CA10D29AE",
   "identities": [
     {
       "all_tenants?": false,
       "base_filter": null,
-      "index_name": "users_unique_email_index",
+      "index_name": "sequences_unique_name_version_index",
       "keys": [
         {
           "type": "atom",
-          "value": "email"
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "name"
+        },
+        {
+          "type": "atom",
+          "value": "version"
         }
       ],
-      "name": "unique_email",
+      "name": "unique_name_version",
       "nils_distinct?": true,
       "where": null
     }
@@ -177,5 +193,5 @@
   },
   "repo": "Elixir.SdrAgent.Repo",
   "schema": null,
-  "table": "users"
+  "table": "sequences"
 }

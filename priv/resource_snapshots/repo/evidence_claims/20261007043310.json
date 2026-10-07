@@ -21,7 +21,7 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "source",
+      "source": "claim",
       "type": "text"
     },
     {
@@ -33,8 +33,8 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "qualified",
-      "type": "boolean"
+      "source": "quote",
+      "type": "text"
     },
     {
       "allow_nil?": false,
@@ -45,19 +45,7 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "score",
-      "type": "bigint"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "criteria",
+      "source": "source_location",
       "type": "map"
     },
     {
@@ -81,19 +69,7 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "reason",
-      "type": "text"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "output_schema_version",
+      "source": "quality",
       "type": "text"
     },
     {
@@ -153,7 +129,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "qualifications_tenant_id_fkey",
+        "name": "evidence_claims_tenant_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -186,7 +162,40 @@
           "global": null,
           "strategy": null
         },
-        "name": "qualifications_lead_id_fkey",
+        "name": "evidence_claims_research_artifact_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "research_artifacts"
+      },
+      "scale": null,
+      "size": null,
+      "source": "research_artifact_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "evidence_claims_lead_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -219,73 +228,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "qualifications_icp_definition_id_fkey",
-        "on_delete": "restrict",
-        "on_update": null,
-        "primary_key?": true,
-        "schema": "public",
-        "table": "icp_definitions"
-      },
-      "scale": null,
-      "size": null,
-      "source": "icp_definition_id",
-      "type": "uuid"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": {
-        "deferrable": false,
-        "destination_attribute": "id",
-        "destination_attribute_default": null,
-        "destination_attribute_generated": null,
-        "index?": false,
-        "index_where": null,
-        "match_tenant?": false,
-        "match_type": null,
-        "match_with": null,
-        "multitenancy": {
-          "attribute": null,
-          "global": null,
-          "strategy": null
-        },
-        "name": "qualifications_agent_run_id_fkey",
-        "on_delete": "restrict",
-        "on_update": null,
-        "primary_key?": true,
-        "schema": "public",
-        "table": "agent_runs"
-      },
-      "scale": null,
-      "size": null,
-      "source": "agent_run_id",
-      "type": "uuid"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": {
-        "deferrable": false,
-        "destination_attribute": "id",
-        "destination_attribute_default": null,
-        "destination_attribute_generated": null,
-        "index?": false,
-        "index_where": null,
-        "match_tenant?": false,
-        "match_type": null,
-        "match_with": null,
-        "multitenancy": {
-          "attribute": null,
-          "global": null,
-          "strategy": null
-        },
-        "name": "qualifications_decision_id_fkey",
+        "name": "evidence_claims_extraction_decision_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -294,7 +237,7 @@
       },
       "scale": null,
       "size": null,
-      "source": "decision_id",
+      "source": "extraction_decision_id",
       "type": "uuid"
     },
     {
@@ -318,49 +261,16 @@
           "global": null,
           "strategy": null
         },
-        "name": "qualifications_supersedes_id_fkey",
+        "name": "evidence_claims_model_invocation_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
         "schema": "public",
-        "table": "qualifications"
+        "table": "model_invocations"
       },
       "scale": null,
       "size": null,
-      "source": "supersedes_id",
-      "type": "uuid"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": {
-        "deferrable": false,
-        "destination_attribute": "id",
-        "destination_attribute_default": null,
-        "destination_attribute_generated": null,
-        "index?": false,
-        "index_where": null,
-        "match_tenant?": false,
-        "match_type": null,
-        "match_with": null,
-        "multitenancy": {
-          "attribute": null,
-          "global": null,
-          "strategy": null
-        },
-        "name": "qualifications_created_by_user_id_fkey",
-        "on_delete": "restrict",
-        "on_update": null,
-        "primary_key?": true,
-        "schema": "public",
-        "table": "users"
-      },
-      "scale": null,
-      "size": null,
-      "source": "created_by_user_id",
+      "source": "model_invocation_id",
       "type": "uuid"
     }
   ],
@@ -372,15 +282,7 @@
       ],
       "base_filter": null,
       "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
-      "name": "qualifications_trace_ids"
-    },
-    {
-      "attribute": [
-        "score"
-      ],
-      "base_filter": null,
-      "check": "score >= 0 AND score <= 100",
-      "name": "qualifications_score_range"
+      "name": "evidence_claims_trace_ids"
     },
     {
       "attribute": [
@@ -388,15 +290,7 @@
       ],
       "base_filter": null,
       "check": "confidence >= 0 AND confidence <= 1",
-      "name": "qualifications_confidence_range"
-    },
-    {
-      "attribute": [
-        "source"
-      ],
-      "base_filter": null,
-      "check": "(source = 'agent' AND agent_run_id IS NOT NULL) OR (source = 'human_override' AND created_by_user_id IS NOT NULL AND supersedes_id IS NOT NULL)",
-      "name": "qualifications_source_provenance"
+      "name": "evidence_claims_confidence_range"
     }
   ],
   "create_table_options": null,
@@ -405,60 +299,31 @@
     {
       "after_tables": [],
       "code?": false,
-      "down": "DROP FUNCTION qualifications_append_only()",
+      "down": "DROP FUNCTION evidence_claims_append_only()",
       "global?": false,
-      "name": "qualifications_guard_function",
-      "up": "CREATE FUNCTION qualifications_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+      "name": "evidence_claims_guard_function",
+      "up": "CREATE FUNCTION evidence_claims_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
     },
     {
       "after_tables": [],
       "code?": false,
-      "down": "DROP TRIGGER qualifications_guard_row ON qualifications",
+      "down": "DROP TRIGGER evidence_claims_guard_row ON evidence_claims",
       "global?": false,
-      "name": "qualifications_guard_row",
-      "up": "CREATE TRIGGER qualifications_guard_row BEFORE UPDATE OR DELETE ON qualifications FOR EACH ROW EXECUTE FUNCTION qualifications_append_only()"
+      "name": "evidence_claims_guard_row",
+      "up": "CREATE TRIGGER evidence_claims_guard_row BEFORE UPDATE OR DELETE ON evidence_claims FOR EACH ROW EXECUTE FUNCTION evidence_claims_append_only()"
     },
     {
       "after_tables": [],
       "code?": false,
-      "down": "DROP TRIGGER qualifications_guard_truncate ON qualifications",
+      "down": "DROP TRIGGER evidence_claims_guard_truncate ON evidence_claims",
       "global?": false,
-      "name": "qualifications_guard_truncate",
-      "up": "CREATE TRIGGER qualifications_guard_truncate BEFORE TRUNCATE ON qualifications FOR EACH STATEMENT EXECUTE FUNCTION qualifications_append_only()"
+      "name": "evidence_claims_guard_truncate",
+      "up": "CREATE TRIGGER evidence_claims_guard_truncate BEFORE TRUNCATE ON evidence_claims FOR EACH STATEMENT EXECUTE FUNCTION evidence_claims_append_only()"
     }
   ],
   "has_create_action": true,
-  "hash": "E9F1BD6C42743818446D0E2B9C7B64AF0CED95F611B582B4DF0D61782AF27885",
-  "identities": [
-    {
-      "all_tenants?": false,
-      "base_filter": null,
-      "index_name": "qualifications_unique_root_index",
-      "keys": [
-        {
-          "type": "atom",
-          "value": "lead_id"
-        }
-      ],
-      "name": "unique_root",
-      "nils_distinct?": true,
-      "where": "supersedes_id IS NULL"
-    },
-    {
-      "all_tenants?": false,
-      "base_filter": null,
-      "index_name": "qualifications_unique_supersedes_index",
-      "keys": [
-        {
-          "type": "atom",
-          "value": "supersedes_id"
-        }
-      ],
-      "name": "unique_supersedes",
-      "nils_distinct?": true,
-      "where": "supersedes_id IS NOT NULL"
-    }
-  ],
+  "hash": "25459B7087A0AB00D79CB637A27121C5DF400D5281CC8B80B5BE76FD5FC41E69",
+  "identities": [],
   "multitenancy": {
     "attribute": null,
     "global": null,
@@ -466,5 +331,5 @@
   },
   "repo": "Elixir.SdrAgent.Repo",
   "schema": null,
-  "table": "qualifications"
+  "table": "evidence_claims"
 }

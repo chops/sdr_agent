@@ -14,18 +14,6 @@
     },
     {
       "allow_nil?": false,
-      "default": "0",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "current_step_position",
-      "type": "bigint"
-    },
-    {
-      "allow_nil?": true,
       "default": "nil",
       "generated?": false,
       "precision": null,
@@ -33,31 +21,7 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "next_step_due_at",
-      "type": "utc_datetime_usec"
-    },
-    {
-      "allow_nil?": false,
-      "default": "\"active\"",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "status",
-      "type": "text"
-    },
-    {
-      "allow_nil?": true,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "stop_reason",
+      "source": "source_type",
       "type": "text"
     },
     {
@@ -69,8 +33,116 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "enrolled_at",
+      "source": "provider",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "source_url",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "retrieved_at",
       "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "published_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "title",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "content_sha256",
+      "type": "binary"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "excerpt",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trust_level",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "freshness",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "%{}",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "metadata",
+      "type": "map"
     },
     {
       "allow_nil?": false,
@@ -114,18 +186,6 @@
       "generated?": false,
       "precision": null,
       "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "updated_at",
-      "type": "utc_datetime_usec"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
       "references": {
         "deferrable": false,
         "destination_attribute": "id",
@@ -141,7 +201,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "campaign_enrollments_tenant_id_fkey",
+        "name": "research_artifacts_tenant_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -174,16 +234,16 @@
           "global": null,
           "strategy": null
         },
-        "name": "campaign_enrollments_campaign_id_fkey",
+        "name": "research_artifacts_lead_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
         "schema": "public",
-        "table": "campaigns"
+        "table": "leads"
       },
       "scale": null,
       "size": null,
-      "source": "campaign_id",
+      "source": "lead_id",
       "type": "uuid"
     },
     {
@@ -207,16 +267,49 @@
           "global": null,
           "strategy": null
         },
-        "name": "campaign_enrollments_lead_id_fkey",
+        "name": "research_artifacts_agent_run_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
         "schema": "public",
-        "table": "leads"
+        "table": "agent_runs"
       },
       "scale": null,
       "size": null,
-      "source": "lead_id",
+      "source": "agent_run_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "research_artifacts_tool_invocation_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tool_invocations"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tool_invocation_id",
       "type": "uuid"
     }
   ],
@@ -228,46 +321,85 @@
       ],
       "base_filter": null,
       "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
-      "name": "campaign_enrollments_trace_ids"
+      "name": "research_artifacts_trace_ids"
     },
     {
       "attribute": [
-        "status"
+        "excerpt"
       ],
       "base_filter": null,
-      "check": "status IN ('active', 'paused', 'replied', 'completed', 'stopped')",
-      "name": "campaign_enrollments_status"
+      "check": "char_length(excerpt) <= 2000",
+      "name": "research_artifacts_excerpt_length"
     },
     {
       "attribute": [
-        "stop_reason"
+        "content_sha256"
       ],
       "base_filter": null,
-      "check": "status <> 'stopped' OR stop_reason IS NOT NULL",
-      "name": "campaign_enrollments_stop_reason_when_stopped"
+      "check": "octet_length(content_sha256) = 32",
+      "name": "research_artifacts_content_sha256_length"
     }
   ],
   "create_table_options": null,
   "custom_indexes": [],
-  "custom_statements": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION research_artifacts_append_only()",
+      "global?": false,
+      "name": "research_artifacts_guard_function",
+      "up": "CREATE FUNCTION research_artifacts_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER research_artifacts_guard_row ON research_artifacts",
+      "global?": false,
+      "name": "research_artifacts_guard_row",
+      "up": "CREATE TRIGGER research_artifacts_guard_row BEFORE UPDATE OR DELETE ON research_artifacts FOR EACH ROW EXECUTE FUNCTION research_artifacts_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER research_artifacts_guard_truncate ON research_artifacts",
+      "global?": false,
+      "name": "research_artifacts_guard_truncate",
+      "up": "CREATE TRIGGER research_artifacts_guard_truncate BEFORE TRUNCATE ON research_artifacts FOR EACH STATEMENT EXECUTE FUNCTION research_artifacts_append_only()"
+    },
+    {
+      "after_tables": [
+        "payloads"
+      ],
+      "code?": false,
+      "down": "ALTER TABLE research_artifacts DROP CONSTRAINT research_artifacts_content_sha256_payload_fkey",
+      "global?": false,
+      "name": "research_artifacts_content_sha256_payload_fkey",
+      "up": "ALTER TABLE research_artifacts ADD CONSTRAINT research_artifacts_content_sha256_payload_fkey FOREIGN KEY (tenant_id, content_sha256) REFERENCES payloads (tenant_id, sha256) ON DELETE RESTRICT"
+    }
+  ],
   "has_create_action": true,
-  "hash": "FD74379CCC494F426941129657C3DA430C07470EFFE9AA1D153965578B9FFCC2",
+  "hash": "1C23CD22D06060AFFB58597CF88B5721A246E8CDE8DFC7E51D64E8A7783D755A",
   "identities": [
     {
       "all_tenants?": false,
       "base_filter": null,
-      "index_name": "campaign_enrollments_unique_campaign_lead_index",
+      "index_name": "research_artifacts_unique_source_index",
       "keys": [
         {
           "type": "atom",
-          "value": "campaign_id"
+          "value": "lead_id"
         },
         {
           "type": "atom",
-          "value": "lead_id"
+          "value": "source_url"
+        },
+        {
+          "type": "atom",
+          "value": "content_sha256"
         }
       ],
-      "name": "unique_campaign_lead",
+      "name": "unique_source",
       "nils_distinct?": true,
       "where": null
     }
@@ -279,5 +411,5 @@
   },
   "repo": "Elixir.SdrAgent.Repo",
   "schema": null,
-  "table": "campaign_enrollments"
+  "table": "research_artifacts"
 }

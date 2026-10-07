@@ -21,68 +21,68 @@
       "references": null,
       "scale": null,
       "size": null,
-      "source": "position",
-      "type": "bigint"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "channel",
+      "source": "source",
       "type": "text"
     },
     {
       "allow_nil?": false,
-      "default": "nil",
+      "default": "\"new\"",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "delay_days",
-      "type": "bigint"
-    },
-    {
-      "allow_nil?": false,
-      "default": "nil",
-      "generated?": false,
-      "precision": null,
-      "primary_key?": false,
-      "references": null,
-      "scale": null,
-      "size": null,
-      "source": "instructions",
+      "source": "status",
       "type": "text"
     },
     {
-      "allow_nil?": false,
-      "default": "true",
+      "allow_nil?": true,
+      "default": "nil",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "requires_approval",
-      "type": "boolean"
+      "source": "status_reason",
+      "type": "text"
     },
     {
-      "allow_nil?": false,
-      "default": "true",
+      "allow_nil?": true,
+      "default": "nil",
       "generated?": false,
       "precision": null,
       "primary_key?": false,
       "references": null,
       "scale": null,
       "size": null,
-      "source": "stop_on_reply",
-      "type": "boolean"
+      "source": "assigned_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "handed_off_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "closed_at",
+      "type": "utc_datetime_usec"
     },
     {
       "allow_nil?": false,
@@ -153,7 +153,7 @@
           "global": null,
           "strategy": null
         },
-        "name": "sequence_steps_tenant_id_fkey",
+        "name": "leads_tenant_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
@@ -186,16 +186,115 @@
           "global": null,
           "strategy": null
         },
-        "name": "sequence_steps_sequence_id_fkey",
+        "name": "leads_contact_id_fkey",
         "on_delete": "restrict",
         "on_update": null,
         "primary_key?": true,
         "schema": "public",
-        "table": "sequences"
+        "table": "contacts"
       },
       "scale": null,
       "size": null,
-      "source": "sequence_id",
+      "source": "contact_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "leads_account_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "accounts"
+      },
+      "scale": null,
+      "size": null,
+      "source": "account_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "leads_owner_user_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "owner_user_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "leads_last_decision_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "decisions"
+      },
+      "scale": null,
+      "size": null,
+      "source": "last_decision_id",
       "type": "uuid"
     }
   ],
@@ -207,56 +306,48 @@
       ],
       "base_filter": null,
       "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
-      "name": "sequence_steps_trace_ids"
+      "name": "leads_trace_ids"
     },
     {
       "attribute": [
-        "delay_days"
+        "status"
       ],
       "base_filter": null,
-      "check": "position <> 1 OR delay_days = 0",
-      "name": "sequence_steps_first_step_immediate"
+      "check": "status IN ('new', 'assigned', 'researching', 'qualifying', 'qualified', 'disqualified', 'in_outreach', 'replied', 'converted', 'nurture', 'stopped', 'blocked')",
+      "name": "leads_status"
     },
     {
       "attribute": [
-        "requires_approval"
+        "status_reason"
       ],
       "base_filter": null,
-      "check": "requires_approval = true AND stop_on_reply = true",
-      "name": "sequence_steps_tier_zero"
-    },
-    {
-      "attribute": [
-        "channel"
-      ],
-      "base_filter": null,
-      "check": "channel = 'email'",
-      "name": "sequence_steps_channel"
+      "check": "status NOT IN ('stopped', 'blocked') OR status_reason IS NOT NULL",
+      "name": "leads_reason_when_stopped_or_blocked"
     }
   ],
   "create_table_options": null,
   "custom_indexes": [],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "51F064D88F27A2C1B28FB01CC25CDAD98C2C51347DAA118DC67B0B7C14849C84",
+  "hash": "BB95DEB36B1A84E6A6740B2E65BB9927967F3ECF6324EF362B27A9000CDC33B7",
   "identities": [
     {
       "all_tenants?": false,
       "base_filter": null,
-      "index_name": "sequence_steps_unique_position_index",
+      "index_name": "leads_unique_open_lead_index",
       "keys": [
         {
           "type": "atom",
-          "value": "sequence_id"
+          "value": "tenant_id"
         },
         {
           "type": "atom",
-          "value": "position"
+          "value": "contact_id"
         }
       ],
-      "name": "unique_position",
+      "name": "unique_open_lead",
       "nils_distinct?": true,
-      "where": null
+      "where": "status NOT IN ('disqualified', 'converted', 'nurture', 'stopped')"
     }
   ],
   "multitenancy": {
@@ -266,5 +357,5 @@
   },
   "repo": "Elixir.SdrAgent.Repo",
   "schema": null,
-  "table": "sequence_steps"
+  "table": "leads"
 }
