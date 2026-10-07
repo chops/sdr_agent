@@ -12,7 +12,9 @@ defmodule SdrAgent.Sales.CampaignEnrollment do
   checks suppression and records the enrollment Decision.
 
   Lifecycle (`transitions/0`): active ↔ paused (ADM, REV); active, paused →
-  replied (T) (WHK), stopped (T) with a `stop_reason` (ADM, REV, WHK). The
+  replied (T) (WHK), stopped (T) with a `stop_reason` (ADM, REV, WHK; AGT,
+  DLV, SEED only as an Outreach Suppression side effect —
+  `SdrAgent.Sales.Checks.SuppressionContext`). The
   S8 delivery path adds `advance_step` (which computes `next_step_due_at` in
   the campaign time zone) and its `→ completed (T)` transition, together
   with the time zone database that computation needs.
@@ -149,6 +151,7 @@ defmodule SdrAgent.Sales.CampaignEnrollment do
     policy action(:stop) do
       authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
       authorize_if {Checks.ActorType, types: [:webhook_ingestor]}
+      authorize_if SdrAgent.Sales.Checks.SuppressionContext
     end
 
     policy action(:mark_replied) do

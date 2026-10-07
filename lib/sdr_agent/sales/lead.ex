@@ -21,7 +21,9 @@ defmodule SdrAgent.Sales.Lead do
     * qualified → in_outreach (AGT) → replied (WHK; sets `handed_off_at`) →
       converted (T) | nurture (T) (ADM, REV). Replied leads are the human
       hand-off queue (`SdrAgent.Sales.list_handoff_queue/1`);
-    * any non-terminal state → stopped (T) with a reason (ADM, REV, WHK);
+    * any non-terminal state → stopped (T) with a reason (ADM, REV, WHK;
+      AGT, DLV, SEED only as the side effect of an Outreach Suppression
+      create — `SdrAgent.Sales.Checks.SuppressionContext`);
     * researching, qualifying → blocked (AGT, with a reason) → assigned
       (ADM `:retry`). Blocking opens the operator-attention Failure (subject
       the lead; class from argument `failure_class`, default `run_stopped`)
@@ -324,6 +326,7 @@ defmodule SdrAgent.Sales.Lead do
     policy action(:stop) do
       authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
       authorize_if {Checks.ActorType, types: [:webhook_ingestor]}
+      authorize_if SdrAgent.Sales.Checks.SuppressionContext
     end
 
     policy action([:start_research, :start_qualifying, :start_outreach, :block]) do
