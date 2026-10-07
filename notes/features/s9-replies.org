@@ -212,3 +212,53 @@ None blocking; choices are flagged for the PR reviewer.
 =bin/tdd_verify.sh= cannot parse Elixir 1.20's =Result: N/M passed=
 summary (same defect as S1–S8); the failures above are the intended ones
 (proceeding under ADR-0001; the peer reviews RED on the PR).
+
+-----
+
+** S9a GREEN
+=MIX_TEST_PARTITION=_s9 bin/verify= → *468 passed, 4 excluded* (438 after
+S8b + 30 new; no existing assertion changed). =mix ash.codegen --check=
+clean after =mix ash.codegen s9a_replies= (migration =20261007155131=; its
+"destructive" note is the re-created =suppressions_reply_source= check, now
+also requiring =reply_id=), =mix credo= no issues (one nesting finding in
+=Webhooks.receive_valid/2= fixed), =mix hex.audit= no advisories. The
+real-connection race suite (=webhook_race_test.exs=) passed 5 of 5
+consecutive runs. One RED test input was completed (the WHK-only Reply
+check named no =webhook_event_id=, so it failed validation before
+authorization); its assertion is unchanged.
+
+** S9a findings and choices (flagged for review)
+ 15. *Shared lock query.* =ApplySuppression='s lock body moved to
+     =Outreach.Locks.targets/2= unchanged in behaviour (same filters, same
+     order); the reply and webhook paths call it with the matched lead plus
+     the suppression value's contacts, so a suppression created later in the
+     same transaction re-locks only held rows.
+ 16. *Suppression =decision= / =delivery_operation= became writable
+     attributes* (accepted only by the WHK =:from_webhook= action; =:manual=
+     and =:seed= still accept only scope and value).
+     =CheckSuppressionSource= refuses a cited Decision that is not an
+     =unsubscribe_rule= with outcome =unsubscribe= (and, for
+     =unsubscribe_reply=, about the cited reply).
+ 17. *Bounce lock order.* A bounce locks the suppression targets, then the
+     accepted delivery: after acceptance only the webhook ingestor writes a
+     delivery, and every ingestor path takes the same order.
+ 18. *Processing errors.* Anything that rolls the processing transaction
+     back (a refused write) is recorded in a second transaction as
+     =failed= with a =validation_error= Failure naming the error class — the
+     event never silently stays =received=.
+ 19. *Duplicate message.* A reply whose =Message-ID= is already stored (a
+     provider re-send under a new event id) is processed as a no-op.
+
+** What S9b, S10 and S13 must know (S9a)
+- *S9b:* the matched-reply transaction is where the classification AgentRun
+  and its job belong (=Webhooks.signal/3=); =Signals= already loads
+  =reply_id=.
+- *S10:* =Outreach.list_records(Outreach.Reply, …)= (match status,
+  delivery/lead links), =WebhookEvent= reads (ADM, REV, AUR: verdict,
+  processing status, failure), =Operations.list_attention/1= shows
+  =signature_invalid= (warning) and =validation_error= Failures whose
+  subject is the WebhookEvent; delivery =delivered= / =bounced= states and
+  their receipts (=webhook_event_id=).
+- *S13:* golden path = deliver → POST a signed reply → =Oban.drain_queue(queue:
+  :integration)=; invalid-signature rejection is covered by
+  =webhook_controller_test.exs=; reprocessing is a no-op by state.

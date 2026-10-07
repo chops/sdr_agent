@@ -15,7 +15,7 @@ graph TB
         ModelProvider[ModelProvider facade<br/>budget + Zoi validation]
         ClaudeCLIAdapter[ClaudeCLI adapter<br/>serialized, tool-free GenServer]
         Telemetry[Telemetry setup, GenAI and agent spans]
-        Oban[Oban: cron, queues default, research,<br/>delivery 5, reconciliation 5, followup 10]
+        Oban[Oban: cron, queues default, research,<br/>delivery 5, reconciliation 5, followup 10,<br/>integration 5]
         Cadence[Anchor cadence worker]
         UpgradeDispatch[OTS upgrade dispatcher<br/>10-minute bounded batch]
         UpgradeJobs[Per-anchor receipt jobs<br/>unique, 3 attempts]
@@ -77,6 +77,8 @@ graph TB
     Oban --> DeliveryJobs[Outreach DeliveryWorker / ReconcileWorker /<br/>StaleDeliverySweeper -> Delivery gate]
     DeliveryJobs --> Domains
     DeliveryJobs --> Capture[CaptureAdapter<br/>local capture only, no network]
+    Oban --> WebhookWorker[Outreach WebhookWorker<br/>process verified WebhookEvents]
+    WebhookWorker --> Domains
     AgentWorker --> SDRAgent
     SDRAgent --> ModelProvider
     SDRAgent --> Integrations
