@@ -15,9 +15,13 @@ defmodule SdrAgent.Sales.TimezoneValidationTest do
     account = F.account!(tenant)
 
     assert {:error, %Ash.Error.Invalid{}} =
-             Sales.create_contact(F.contact_attrs(account, %{timezone: "America/Nowhere"}), actor: admin)
+             Sales.create_contact(F.contact_attrs(account, %{timezone: "America/Nowhere"}),
+               actor: admin
+             )
 
     assert {:ok, %{timezone: "America/Denver"}} =
-             Sales.create_contact(F.contact_attrs(account, %{timezone: "America/Denver"}), actor: admin)
+             Sales.create_contact(F.contact_attrs(account, %{timezone: "America/Denver"}),
+               actor: admin
+             )
   end
 end

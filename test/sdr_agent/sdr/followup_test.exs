@@ -14,9 +14,11 @@ defmodule SdrAgent.SDR.FollowupTest do
   alias SdrAgent.Clock
   alias SdrAgent.Outreach
 
-  defp followups!, do: Oban.drain_queue(queue: :followup, with_safety: false, with_scheduled: true)
+  defp followups!,
+    do: Oban.drain_queue(queue: :followup, with_safety: false, with_scheduled: true)
 
-  test "at due time an active enrollment gets a draft_followup decision and sdr.followup.due", ctx do
+  test "at due time an active enrollment gets a draft_followup decision and sdr.followup.due",
+       ctx do
     %{lead: lead} = approved!(ctx)
     assert %{success: 1} = deliver!()
     enrollment = enrollment!(ctx, lead)

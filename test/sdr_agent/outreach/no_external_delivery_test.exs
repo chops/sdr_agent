@@ -36,14 +36,18 @@ defmodule SdrAgent.Outreach.NoExternalDeliveryTest do
       mailer = Keyword.get(sdr, SdrAgent.Mailer, [])
 
       assert mailer[:adapter] in [Swoosh.Adapters.Local, Swoosh.Adapters.Test], "#{env} mailer"
-      assert Keyword.get(Keyword.get(config, :swoosh, []), :api_client, false) == false, "#{env} api_client"
+
+      assert Keyword.get(Keyword.get(config, :swoosh, []), :api_client, false) == false,
+             "#{env} api_client"
+
       refute Keyword.has_key?(sdr, :delivery_adapter), "#{env} delivery_adapter"
       refute Keyword.has_key?(sdr, :capture_faults), "#{env} capture_faults"
     end
 
     runtime = File.read!(Path.join(@root, "config/runtime.exs"))
 
-    for line <- String.split(runtime, "\n"), not String.starts_with?(String.trim_leading(line), "#") do
+    for line <- String.split(runtime, "\n"),
+        not String.starts_with?(String.trim_leading(line), "#") do
       refute line =~ ~r/adapter:|api_client|Swoosh\.Adapters\./, "runtime.exs: #{line}"
     end
   end

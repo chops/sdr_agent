@@ -15,7 +15,8 @@ defmodule SdrAgent.Outreach.DeliveryGateTest do
   alias SdrAgent.Outreach
   alias SdrAgent.Sales
 
-  defp gate_outcomes(ctx, op), do: Enum.map(decisions_about!(ctx, op.id, :send_gate), & &1.outcome)
+  defp gate_outcomes(ctx, op),
+    do: Enum.map(decisions_about!(ctx, op.id, :send_gate), & &1.outcome)
 
   test "quiet hours defer the send to 08:00 campaign time, then it goes out", ctx do
     %{delivery: op, approval: approval} = approved!(ctx)
@@ -73,7 +74,11 @@ defmodule SdrAgent.Outreach.DeliveryGateTest do
   test "a changed recipient email cancels the delivery and invalidates the approval", ctx do
     %{delivery: op, approval: approval, draft: draft, lead: lead} = approved!(ctx)
     contact = contact!(ctx, lead)
-    {:ok, _} = Sales.update(contact, :change_email, %{email: "new.person@brightpath-freight.test"}, actor: ctx.admin)
+
+    {:ok, _} =
+      Sales.update(contact, :change_email, %{email: "new.person@brightpath-freight.test"},
+        actor: ctx.admin
+      )
 
     assert %{success: 1} = deliver!()
     cancelled = outreach!(ctx, op)
@@ -81,7 +86,10 @@ defmodule SdrAgent.Outreach.DeliveryGateTest do
     assert gate_outcomes(ctx, op) == ["refuse"]
 
     invalidated = outreach!(ctx, approval)
-    assert {invalidated.status, invalidated.invalidated_reason} == {:invalidated, :recipient_changed}
+
+    assert {invalidated.status, invalidated.invalidated_reason} ==
+             {:invalidated, :recipient_changed}
+
     assert draft!(ctx, draft).status == :cancelled
     assert receipts!(ctx, op) == []
   end
@@ -108,7 +116,8 @@ defmodule SdrAgent.Outreach.DeliveryGateTest do
     assert receipts!(ctx, op) == []
   end
 
-  test "revoke cancels a pending delivery; after the claim only the delivery can be stopped", ctx do
+  test "revoke cancels a pending delivery; after the claim only the delivery can be stopped",
+       ctx do
     %{delivery: op, approval: approval, draft: draft} = approved!(ctx)
     {:ok, revoked} = Outreach.revoke(approval, actor: ctx.admin)
     assert revoked.status == :revoked
@@ -120,7 +129,9 @@ defmodule SdrAgent.Outreach.DeliveryGateTest do
     %{approval: claimed} = approved!(ctx, "02")
     assert %{success: 1} = deliver!()
     assert outreach!(ctx, claimed).status == :consumed
-    assert {:error, %Ash.Error.Invalid{}} = Outreach.revoke(outreach!(ctx, claimed), actor: ctx.admin)
+
+    assert {:error, %Ash.Error.Invalid{}} =
+             Outreach.revoke(outreach!(ctx, claimed), actor: ctx.admin)
   end
 
   test "cancel_retry stops a retryable delivery; auditors and agents are refused", ctx do

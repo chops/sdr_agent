@@ -48,7 +48,12 @@ defmodule SdrAgent.Outreach.DeliveryRaceTest do
   test "two workers claiming one delivery: one claim, one capture", ctx do
     %{delivery: op} = approved!(ctx, 0)
 
-    results = race([fn -> Delivery.attempt(op.id, ctx.tenant_id) end, fn -> Delivery.attempt(op.id, ctx.tenant_id) end])
+    results =
+      race([
+        fn -> Delivery.attempt(op.id, ctx.tenant_id) end,
+        fn -> Delivery.attempt(op.id, ctx.tenant_id) end
+      ])
+
     assert Enum.all?(results, &(&1 == :ok)), inspect(results)
 
     op = reload!(ctx, op)
@@ -80,13 +85,42 @@ defmodule SdrAgent.Outreach.DeliveryRaceTest do
     end
   end
 
+  test "a suppression racing a revoke of the same draft: both finish, no deadlock", ctx do
+    %{delivery: op, approval: approval} = approved!(ctx, 0)
+    {:ok, lead} = Sales.fetch(Sales.Lead, Enum.at(Fixtures.leads(), 0).id, actor: ctx.admin)
+    {:ok, contact} = Sales.fetch(Sales.Contact, lead.contact_id, actor: ctx.admin)
+
+    [revoke, suppress] =
+      race([
+        fn -> Outreach.revoke(approval, actor: ctx.admin) end,
+        fn ->
+          Outreach.suppress(%{scope: :email, value: to_string(contact.email)}, actor: ctx.admin)
+        end
+      ])
+
+    assert {:ok, _} = suppress
+
+    assert match?({:ok, _}, revoke) or match?({:error, %Ash.Error.Invalid{}}, revoke),
+           inspect(revoke)
+
+    refute inspect(revoke) =~ "deadlock"
+
+    assert reload!(ctx, op).state == :cancelled
+    {:ok, draft} = Outreach.fetch(Outreach.Draft, op.draft_id, actor: ctx.admin)
+    assert draft.status == :cancelled
+    {:ok, lead} = Sales.fetch(Sales.Lead, lead.id, actor: ctx.admin)
+    assert lead.status == :stopped
+  end
+
   test "two deliveries for the last unit of the cap: one is sent, one waits", ctx do
     Application.put_env(:sdr_agent, :daily_send_cap, 1)
     on_exit(fn -> Application.delete_env(:sdr_agent, :daily_send_cap) end)
     %{delivery: first} = approved!(ctx, 0)
     %{delivery: second} = approved!(ctx, 1)
 
-    results = race(for op <- [first, second], do: fn -> Delivery.attempt(op.id, ctx.tenant_id) end)
+    results =
+      race(for op <- [first, second], do: fn -> Delivery.attempt(op.id, ctx.tenant_id) end)
+
     assert Enum.all?(results, &(&1 == :ok)), inspect(results)
 
     states = Enum.map([first, second], &reload!(ctx, &1).state) |> Enum.sort()
@@ -99,7 +133,9 @@ defmodule SdrAgent.Outreach.DeliveryRaceTest do
   # agent and approved by the admin.
   defp approved!(ctx, index) do
     {:ok, lead} = Sales.fetch(Sales.Lead, Enum.at(Fixtures.leads(), index).id, actor: ctx.admin)
-    {:ok, %{job: job}} = SDR.assign_lead(lead, campaign_id: Fixtures.campaign().id, actor: ctx.admin)
+
+    {:ok, %{job: job}} =
+      SDR.assign_lead(lead, campaign_id: Fixtures.campaign().id, actor: ctx.admin)
 
     :ok =
       Task.async(fn ->
@@ -111,18 +147,28 @@ defmodule SdrAgent.Outreach.DeliveryRaceTest do
       |> Task.await(60_000)
 
     _ = Sandbox.checkout(SdrAgent.Repo, sandbox: false)
-    {:ok, [draft]} = Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
-    {:ok, revision} = Outreach.fetch(Outreach.DraftRevision, draft.current_revision_id, actor: ctx.admin)
+
+    {:ok, [draft]} =
+      Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
+
+    {:ok, revision} =
+      Outreach.fetch(Outreach.DraftRevision, draft.current_revision_id, actor: ctx.admin)
 
     {:ok, approval} =
       Outreach.approve(
         draft,
-        %{draft_revision_id: revision.id, content_sha256: Base.encode16(revision.content_sha256, case: :lower)},
+        %{
+          draft_revision_id: revision.id,
+          content_sha256: Base.encode16(revision.content_sha256, case: :lower)
+        },
         actor: ctx.admin
       )
 
     {:ok, [op]} =
-      Outreach.list_records(Outreach.DeliveryOperation, filter: [approval_id: approval.id], actor: ctx.admin)
+      Outreach.list_records(Outreach.DeliveryOperation,
+        filter: [approval_id: approval.id],
+        actor: ctx.admin
+      )
 
     %{delivery: op, approval: approval}
   end
@@ -131,20 +177,19 @@ defmodule SdrAgent.Outreach.DeliveryRaceTest do
   defp race(funs) do
     parent = self()
 
-    tasks =
-      Enum.map(funs, fn fun ->
-        Task.async(fn ->
-          with_connection(fn ->
-            send(parent, {:ready, self()})
-            receive do: (:go -> :ok)
-            fun.()
-          end)
-        end)
-      end)
+    tasks = Enum.map(funs, &Task.async(fn -> gated(parent, &1) end))
 
     pids = for _ <- tasks, do: receive(do: ({:ready, pid} -> pid))
     Enum.each(pids, &send(&1, :go))
     Task.await_many(tasks, 60_000)
+  end
+
+  defp gated(parent, fun) do
+    with_connection(fn ->
+      send(parent, {:ready, self()})
+      receive do: (:go -> :ok)
+      fun.()
+    end)
   end
 
   defp reload!(ctx, op) do
@@ -154,14 +199,21 @@ defmodule SdrAgent.Outreach.DeliveryRaceTest do
 
   defp kinds(ctx, op) do
     {:ok, receipts} =
-      Outreach.list_records(Outreach.DeliveryReceipt, filter: [delivery_operation_id: op.id], actor: ctx.admin)
+      Outreach.list_records(Outreach.DeliveryReceipt,
+        filter: [delivery_operation_id: op.id],
+        actor: ctx.admin
+      )
 
     Enum.map(receipts, & &1.kind)
   end
 
   defp passes(ctx, op) do
     {:ok, decisions} = Ash.read(SdrAgent.Agents.Decision, actor: ctx.admin)
-    Enum.count(decisions, &(&1.subject_id == op.id and &1.kind == :send_gate and &1.outcome == "pass"))
+
+    Enum.count(
+      decisions,
+      &(&1.subject_id == op.id and &1.kind == :send_gate and &1.outcome == "pass")
+    )
   end
 
   defp with_connection(fun) do

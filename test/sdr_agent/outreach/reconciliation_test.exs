@@ -39,7 +39,10 @@ defmodule SdrAgent.Outreach.ReconciliationTest do
     assert {failed.state, failed.attempt_count} == {:failed_retryable, 1}
     assert DateTime.compare(failed.not_before, Clock.utc_now()) == :gt
 
-    assert_enqueued(worker: SdrAgent.Outreach.DeliveryWorker, args: %{"delivery_operation_id" => op.id})
+    assert_enqueued(
+      worker: SdrAgent.Outreach.DeliveryWorker,
+      args: %{"delivery_operation_id" => op.id}
+    )
 
     later(600)
     assert %{success: 1} = deliver!()
@@ -88,7 +91,11 @@ defmodule SdrAgent.Outreach.ReconciliationTest do
     assert [failure] = attention_for(ctx, op)
     assert failure.class == :reconciliation_required
 
-    assert_enqueued(worker: SdrAgent.Outreach.ReconcileWorker, args: %{"delivery_operation_id" => op.id})
+    assert_enqueued(
+      worker: SdrAgent.Outreach.ReconcileWorker,
+      args: %{"delivery_operation_id" => op.id}
+    )
+
     assert %{success: 1} = reconcile!()
 
     reconciled = outreach!(ctx, op)
@@ -122,12 +129,14 @@ defmodule SdrAgent.Outreach.ReconciliationTest do
     assert length(captured(ctx, op)) == 1
   end
 
-  test "a crash after the capture leaves the claim; the sweeper hands it to reconciliation", ctx do
+  test "a crash after the capture leaves the claim; the sweeper hands it to reconciliation",
+       ctx do
     CaptureFaults.plan(:after_capture, [:crash])
     %{delivery: op} = approved!(ctx)
 
-    result = deliver!()
-    assert result.failure + result.discard == 1
+    # The worker crashes after the capture committed (drained without Oban's
+    # safety net, the crash reaches the test).
+    assert_raise RuntimeError, ~r/capture fault: crash/, fn -> deliver!() end
     assert outreach!(ctx, op).state == :attempting
 
     # Not stale yet: the sweeper leaves it alone.

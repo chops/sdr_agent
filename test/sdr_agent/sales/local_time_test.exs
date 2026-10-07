@@ -62,17 +62,27 @@ defmodule SdrAgent.Sales.LocalTimeTest do
 
   test "adding local days keeps the local wall time across DST" do
     # 2026-10-30 10:00 MDT + 3 days → 2026-11-02 10:00 MST
-    assert LocalTime.add_days(~U[2026-10-30 16:00:00Z], 3, @zone) == ~U[2026-11-02 17:00:00.000000Z]
+    assert LocalTime.add_days(~U[2026-10-30 16:00:00Z], 3, @zone) ==
+             ~U[2026-11-02 17:00:00.000000Z]
+
     # 2026-03-06 10:00 MST + 3 days → 2026-03-09 10:00 MDT
-    assert LocalTime.add_days(~U[2026-03-06 17:00:00Z], 3, @zone) == ~U[2026-03-09 16:00:00.000000Z]
-    assert LocalTime.add_days(~U[2026-01-06 15:00:00Z], 0, @zone) == ~U[2026-01-06 15:00:00.000000Z]
+    assert LocalTime.add_days(~U[2026-03-06 17:00:00Z], 3, @zone) ==
+             ~U[2026-03-09 16:00:00.000000Z]
+
+    assert LocalTime.add_days(~U[2026-01-06 15:00:00Z], 0, @zone) ==
+             ~U[2026-01-06 15:00:00.000000Z]
   end
 
   test "a wall time in the spring gap resolves to the first instant after it; a folded one to the earlier" do
-    assert LocalTime.to_utc(~D[2026-03-08], ~T[02:30:00], @zone) == ~U[2026-03-08 09:00:00.000000Z]
-    assert LocalTime.to_utc(~D[2026-11-01], ~T[01:30:00], @zone) == ~U[2026-11-01 07:30:00.000000Z]
+    assert LocalTime.to_utc(~D[2026-03-08], ~T[02:30:00], @zone) ==
+             ~U[2026-03-08 09:00:00.000000Z]
+
+    assert LocalTime.to_utc(~D[2026-11-01], ~T[01:30:00], @zone) ==
+             ~U[2026-11-01 07:30:00.000000Z]
+
     # 2026-03-05 02:30 MST + 3 days lands in the gap
-    assert LocalTime.add_days(~U[2026-03-05 09:30:00Z], 3, @zone) == ~U[2026-03-08 09:00:00.000000Z]
+    assert LocalTime.add_days(~U[2026-03-05 09:30:00Z], 3, @zone) ==
+             ~U[2026-03-08 09:00:00.000000Z]
   end
 
   test "zones resolve through the time zone database" do
