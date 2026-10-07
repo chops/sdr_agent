@@ -219,6 +219,7 @@ defmodule SdrAgent.Outreach.ReplyTest do
              |> Ash.Changeset.for_create(
                :receive,
                %{
+                 webhook_event_id: Ecto.UUID.generate(),
                  message_id: "<x@example.test>",
                  from_email: "a@example.test",
                  to_email: "b@example.test",
