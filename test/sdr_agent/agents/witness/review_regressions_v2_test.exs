@@ -58,8 +58,12 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
         {invocation, app, stdin} = projection_inputs("Synthetic review")
         request = Proxy.cli_request(stdin, trailing_content: unquote(Macro.escape(blocks)))
 
-        assert {:unsupported, _} =
-                 Projection.compare_v2(invocation, app, request, Proxy.sse_response(@answer))
+        result =
+          captured(fn ->
+            Projection.compare_v2(invocation, app, request, Proxy.sse_response(@answer))
+          end)
+
+        assert match?({:unsupported, _}, result), inspect(result)
       end
     end
 
@@ -76,7 +80,11 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
             {"message non-object", Proxy.cli_request(stdin, trailing: 0, extra_messages: [42])},
             {"messages not a list", Proxy.cli_request(stdin, top: %{"messages" => %{}})}
           ] do
-        result = Projection.compare_v2(invocation, app, request, Proxy.sse_response(@answer))
+        result =
+          captured(fn ->
+            Projection.compare_v2(invocation, app, request, Proxy.sse_response(@answer))
+          end)
+
         assert match?({:unsupported, _}, result), "#{label}: #{inspect(result)}"
       end
     end
@@ -90,7 +98,7 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
           response: Proxy.sse_response(@answer)
         )
 
-        result = reconcile(ctx, invocation)
+        result = captured(fn -> reconcile(ctx, invocation) end)
         assert match?({:ok, %{status: :inferred}}, result), "#{label}: #{inspect(result)}"
 
         {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
@@ -163,6 +171,14 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
   end
 
   ## Helpers
+
+  # An exception is captured as a value so that the retained assertion (not
+  # the raise) is what fails; this is neither assert_raise nor a success path.
+  defp captured(fun) do
+    fun.()
+  rescue
+    exception -> {:raised, exception.__struct__}
+  end
 
   defp projection_inputs(prompt) do
     app = %{
