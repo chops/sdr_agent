@@ -169,7 +169,7 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
     results =
       race(6, fn n ->
         with_connection(fn ->
-          password = SdrAgent.Accounts.generate_password()
+          password = "boot-password-#{n}-0123456789"
 
           SdrAgent.Accounts.bootstrap_admin(%{
             email: "boot-#{n}@example.test",
