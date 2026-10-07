@@ -88,6 +88,8 @@ defmodule SdrAgent.Outreach.Changes.AssessmentRules do
       same_values?(out, get)
   end
 
+  defp valid_output?(_invocation, _decision, _get), do: false
+
   defp valid_call?(inv, get) do
     inv.agent_run_id == get.(:agent_run_id) and inv.purpose == :reply_classification and
       inv.output_schema_id == "sdr.reply_classification" and
@@ -100,8 +102,6 @@ defmodule SdrAgent.Outreach.Changes.AssessmentRules do
     end) and field(out, :intent) == get.(:intent) and field(out, :reason) == get.(:reason) and
       same_number?(field(out, :confidence), get.(:confidence))
   end
-
-  defp valid_output?(_invocation, _decision, _get), do: false
 
   defp field(map, key), do: Map.get(map, Atom.to_string(key), Map.get(map, key))
 
