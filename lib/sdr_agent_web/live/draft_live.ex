@@ -116,8 +116,8 @@ defmodule SdrAgentWeb.DraftLive do
         step: step,
         approvals: approvals,
         deliveries: deliveries,
-        approve_form: binding_form(current, :approve),
-        reject_form: binding_form(current, :reject),
+        approve_form: binding_form(current, contact, :approve),
+        reject_form: binding_form(current, contact, :reject),
         edit_form:
           to_form(%{"subject" => current.subject, "body_text" => current.body_text},
             as: :revision
@@ -163,10 +163,11 @@ defmodule SdrAgentWeb.DraftLive do
     end
   end
 
-  defp binding_form(revision, name) do
+  defp binding_form(revision, contact, name) do
     to_form(
       %{
         "draft_revision_id" => revision.id,
+        "recipient_email" => to_string(contact.email),
         "content_sha256" => Base.encode16(revision.content_sha256, case: :lower),
         "reason" => ""
       },
@@ -238,15 +239,35 @@ defmodule SdrAgentWeb.DraftLive do
     |> reply("Saved as a new revision.", editing?: false)
   end
 
-  def handle_event("approve", %{"approve" => binding}, socket) do
+  # The grant binds the contact's *current* email under a lock (S8 review),
+  # so the recipient shown on the page is re-read at confirmation: if it
+  # changed since the page was rendered, nothing is approved and the page
+  # shows the new recipient to be confirmed again.
+  def handle_event("approve", %{"approve" => params}, socket) do
+    shown = params["recipient_email"]
+
     binding = %{
-      draft_revision_id: binding["draft_revision_id"],
-      content_sha256: binding["content_sha256"]
+      draft_revision_id: params["draft_revision_id"],
+      content_sha256: params["content_sha256"]
     }
 
-    socket
-    |> act(fn draft, actor -> Outreach.approve(draft, binding, actor: actor) end)
-    |> reply("Approved. The delivery is queued for local capture.")
+    case current_recipient(socket) do
+      {:ok, ^shown} ->
+        socket
+        |> act(fn draft, actor -> Outreach.approve(draft, binding, actor: actor) end)
+        |> reply("Approved for #{shown}. The delivery is queued for local capture.")
+
+      {:ok, current} ->
+        message =
+          "The recipient changed from #{shown || "(none shown)"} to #{current} after this page " <>
+            "was shown (recipient changed) — check it and approve again."
+
+        {:noreply,
+         socket |> load() |> assign(review_error: message) |> put_flash(:error, message)}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, AuditedView.error_message(reason))}
+    end
   end
 
   def handle_event("reject", %{"reject" => params}, socket) do
@@ -287,6 +308,15 @@ defmodule SdrAgentWeb.DraftLive do
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, AuditedView.error_message(reason))}
       _ -> {:noreply, put_flash(socket, :error, "This delivery has no captured message yet.")}
+    end
+  end
+
+  defp current_recipient(socket) do
+    with {:ok, contact} <-
+           Sales.fetch(Sales.Contact, socket.assigns.draft.recipient_contact_id,
+             actor: socket.assigns.current_scope.user
+           ) do
+      {:ok, to_string(contact.email)}
     end
   end
 
@@ -550,7 +580,10 @@ defmodule SdrAgentWeb.DraftLive do
                 <p class="mt-1 text-zinc-600">
                   revision
                   <span id="binding-revision" class="font-semibold text-zinc-900">#{@current.revision_number}</span>
-                  to <span class="font-mono">{to_string(@contact.email)}</span>
+                  to
+                  <span id="binding-recipient" class="font-mono font-semibold text-zinc-900">
+                    {to_string(@contact.email)}
+                  </span>
                 </p>
                 <p class="mt-1.5 text-zinc-500">content sha256</p>
                 <.hash id="binding-hash" value={@current.content_sha256} full />
@@ -563,6 +596,7 @@ defmodule SdrAgentWeb.DraftLive do
                 <.form for={@approve_form} id="approve-form" phx-submit="approve">
                   <.input type="hidden" field={@approve_form[:draft_revision_id]} />
                   <.input type="hidden" field={@approve_form[:content_sha256]} />
+                  <.input type="hidden" field={@approve_form[:recipient_email]} />
                   <.ui_button
                     type="submit"
                     variant="primary"
@@ -677,7 +711,14 @@ defmodule SdrAgentWeb.DraftLive do
                     </.ui_button>
                   </div>
                   <p class="text-xs text-zinc-500">
-                    {approver_label(approval, @current_scope)} ·
+                    to
+                    <span
+                      class="font-mono"
+                      data-recipient={to_string(approval.recipient_email)}
+                    >
+                      {to_string(approval.recipient_email)}
+                    </span>
+                    · {approver_label(approval, @current_scope)} ·
                     <.timestamp at={approval.decided_at} />
                   </p>
                   <p :if={approval.reason} class="text-xs text-zinc-700">“{approval.reason}”</p>

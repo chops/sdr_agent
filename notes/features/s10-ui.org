@@ -100,6 +100,15 @@ hand: NEEDS_REVIEW (peer reviews RED on the PR).
 3. *Formatter non-convergence.* =mix format= (Elixir 1.20.4) did not
    converge on a call whose last positional argument was a multi-line map
    followed by a keyword; the test binds the map to a variable instead.
+5. *Recipient at confirmation (S8 review).* The grant binds the contact's
+   current email under a lock, so the draft page shows the recipient in the
+   binding box, posts the email it showed with the approve form, and re-reads
+   the contact on submit: if the email changed, nothing is approved and the
+   page shows the new recipient to confirm again (=#review-error=,
+   =#binding-recipient=). Each approval lists the recipient it actually bound
+   (=data-recipient=). RED 12/13 (no =#binding-recipient=), then GREEN. The
+   auditor deny test now forges the full rendered form (recipient included),
+   so its attempt still reaches the domain guard and is audited.
 4. *Reviewer reads of users.* A reviewer may read only itself (S5), so
    approvals show "by you" / "by another operator" instead of names.
 

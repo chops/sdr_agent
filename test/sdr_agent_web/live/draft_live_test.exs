@@ -241,9 +241,11 @@ defmodule SdrAgentWeb.DraftLiveTest do
          %{conn: conn} = ctx do
       {:ok, view, _html} = open(conn, :auditor, ctx.draft)
 
+      # The forged event copies the rendered approve form, recipient included.
       binding = %{
         "draft_revision_id" => ctx.revision.id,
-        "content_sha256" => hex(ctx.revision.content_sha256)
+        "content_sha256" => hex(ctx.revision.content_sha256),
+        "recipient_email" => to_string(contact!(ctx, ctx.lead).email)
       }
 
       render_submit(view, "approve", %{"approve" => binding})
