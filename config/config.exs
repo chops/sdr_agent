@@ -76,7 +76,13 @@ config :spark,
 config :sdr_agent,
   ecto_repos: [SdrAgent.Repo],
   generators: [timestamp_type: :utc_datetime],
-  ash_domains: [SdrAgent.Audit, SdrAgent.Accounts, SdrAgent.Agents]
+  ash_domains: [
+    SdrAgent.Audit,
+    SdrAgent.Accounts,
+    SdrAgent.Agents,
+    SdrAgent.Sales,
+    SdrAgent.Research
+  ]
 
 # Configure the endpoint
 config :sdr_agent, SdrAgentWeb.Endpoint,
