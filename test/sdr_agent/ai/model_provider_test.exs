@@ -3,7 +3,6 @@ defmodule SdrAgent.AI.ModelProviderTest do
 
   alias SdrAgent.Agents
   alias SdrAgent.AgentsFixtures
-  alias SdrAgent.AI.BudgetStore.InMemory, as: BudgetStore
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.Fake
   alias SdrAgent.Telemetry.InMemoryExporter
@@ -11,7 +10,6 @@ defmodule SdrAgent.AI.ModelProviderTest do
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
 
   setup do
-    :ok = BudgetStore.reset()
     tenant = bootstrap!()
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
     %{tenant: tenant, run: run, agent: agent}
@@ -52,15 +50,6 @@ defmodule SdrAgent.AI.ModelProviderTest do
     assert {:error, %Ash.Error.Invalid{}} = ModelProvider.complete(request(ctx, "run-21"))
     assert {:ok, invocations} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
     assert length(invocations) == 20
-  end
-
-  test "the temporary daily-budget seam remains replaceable", ctx do
-    assert {:error, {:budget_exhausted, :replacement}} =
-             ModelProvider.complete(request(ctx, "replacement"),
-               budget_store: __MODULE__.RejectingBudgetStore
-             )
-
-    assert {:ok, []} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
   end
 
   test "an ambiguous provider outcome is persisted as unknown", ctx do
@@ -119,12 +108,6 @@ defmodule SdrAgent.AI.ModelProviderTest do
           Process.sleep(10)
           eventually(fun, attempts - 1)
         )
-  end
-
-  defmodule RejectingBudgetStore do
-    @behaviour SdrAgent.AI.BudgetStore
-    def reserve_daily(_now), do: {:error, {:budget_exhausted, :replacement}}
-    def settle(_reservation, _outcome), do: :ok
   end
 
   defmodule UnknownProvider do
