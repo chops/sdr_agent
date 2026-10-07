@@ -378,10 +378,15 @@ suite (=delivery_race_test.exs=) passed 5 of 5 consecutive runs.
      stand); the third retryable failure is permanent. =failed_retryable →
      failed_permanent= is reached through a new attempt, not directly.
  27. *Message.* Deterministic RFC 5322 bytes (=Delivery.Message=, CRLF,
-     fixed header order, =Date= = claim instant, =Message-ID= from the key,
+     fixed header order, =Date= = the request instant (grant), so every
+     attempt renders identical bytes, =Message-ID= from the key,
      =List-Unsubscribe= + one-click, footer =footer/1=), stored as a Payload
      (=message/rfc822=) whose sha256 is on the operation and every receipt.
      Header values are folded to one line (no header injection; tested).
+     Self-review found the first version dated the message at the claim, so
+     a retry re-rendered different bytes; RED: the retry test's new
+     assertion =rendered_sha256= unchanged failed (5/6), GREEN after the
+     fix.
  28. *Unsubscribe token.* =HMAC-SHA256(HMAC-SHA256(secret_key_base,
      "sdr-unsubscribe-key/1"), "sdr-unsubscribe/1|tenant|contact")=,
      base64url, under the reserved host =sdr.example.test=;

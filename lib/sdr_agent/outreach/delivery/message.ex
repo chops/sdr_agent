@@ -5,8 +5,11 @@ defmodule SdrAgent.Outreach.Delivery.Message do
   (footer_template_version), recorded on the DeliveryOperation").
 
   The same inputs always give the same bytes: headers in a fixed order,
-  CRLF line endings, `Date` = the claim instant, `Message-ID` derived from
-  the idempotency key. `From` is the campaign sender (default
+  CRLF line endings, `Date` = the delivery's request instant (the grant),
+  `Message-ID` derived from the idempotency key — so every attempt of one
+  delivery renders identical bytes (the bound revision, recipient and the
+  active campaign's sender and footer cannot change between attempts; the
+  gate refuses otherwise). `From` is the campaign sender (default
   "Demo SDR <sdr@example.test>"), `To` the bound recipient email,
   `List-Unsubscribe` (+ one-click) the contact's deterministic link
   (`SdrAgent.Outreach.Unsubscribe`). Header values are folded to one line

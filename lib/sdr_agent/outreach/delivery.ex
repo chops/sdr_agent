@@ -206,7 +206,7 @@ defmodule SdrAgent.Outreach.Delivery do
         operation: op,
         revision: facts.revision,
         campaign: facts.campaign,
-        at: facts.now
+        at: op.requested_at
       })
 
     with {:ok, quota_date} <- consume(day, op, dlv),
