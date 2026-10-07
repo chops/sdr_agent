@@ -133,6 +133,29 @@ defmodule SdrAgentWeb.DraftLiveTest do
       assert has_element?(view, "#binding-revision", "#2")
     end
 
+    test "the recipient is shown and re-checked at confirmation; a changed email must be confirmed again",
+         %{conn: conn} = ctx do
+      contact = contact!(ctx, ctx.lead)
+      moved = "avery.moved@brightpath-freight.test"
+      {:ok, view, _html} = open(conn, :reviewer, ctx.draft)
+      assert has_element?(view, "#binding-recipient", to_string(contact.email))
+
+      {:ok, _moved} =
+        SdrAgent.Sales.update(contact, :change_email, %{email: moved}, actor: ctx.admin)
+
+      view |> form("#approve-form") |> render_submit()
+
+      assert has_element?(view, "#review-error", "recipient changed")
+      assert has_element?(view, "#binding-recipient", moved)
+      assert approvals!(ctx, ctx.draft) == []
+
+      view |> form("#approve-form") |> render_submit()
+
+      [approval] = approvals!(ctx, ctx.draft)
+      assert to_string(approval.recipient_email) == moved
+      assert has_element?(view, "#approval-#{approval.id} [data-recipient='#{moved}']")
+    end
+
     test "reject requires a reason and records it", %{conn: conn} = ctx do
       {:ok, view, _html} = open(conn, :reviewer, ctx.draft)
 
