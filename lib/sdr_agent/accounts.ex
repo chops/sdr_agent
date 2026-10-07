@@ -12,7 +12,9 @@ defmodule SdrAgent.Accounts do
   `SdrAgent.Audit.Guard`; user creation and role/status changes are
   *guarded actions*, so every refusal of them is audited):
 
-    * `create_user/2` (ADM), `seed_user/2` (SEED, dev/test only);
+    * `create_user/2` (ADM), `seed_user/2` (SEED, dev/test only),
+      `bootstrap_admin/2` (KRN: the first admin of a tenant with no users;
+      `mix sdr.bootstrap_admin`), `generate_password/0`;
     * `change_role/3`, `change_status/3` (ADM);
     * `change_password/3` (ADM, REV — own user, with the current password),
       `set_password/3` (ADM — another user, incl. auditors);
@@ -35,6 +37,24 @@ defmodule SdrAgent.Accounts do
 
   @doc "ADM: creates an operator (`email`, `display_name`, `role`, `password`, `password_confirmation`)."
   def create_user(attrs, opts), do: GuardedCall.create(User, :create_user, attrs, guarded(opts))
+
+  @doc """
+  KRN: creates the first admin (`email`, `display_name`, `password`,
+  `password_confirmation`) of the singleton tenant (or `tenant_id:`). Works in
+  every environment but only while the tenant has no users; audited as
+  `user.created` by the kernel, without the password.
+  """
+  def bootstrap_admin(attrs, opts \\ []) do
+    with {:ok, tenant_id} <- tenant(opts) do
+      User
+      |> Ash.Changeset.for_create(:bootstrap_admin, attrs, Kernel.opts(tenant_id))
+      |> Ash.create()
+    end
+  end
+
+  @doc "A strong random password (24 random bytes, URL-safe Base64, 32 characters)."
+  def generate_password,
+    do: 24 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
 
   @doc "SEED (dev/test only): creates an operator with a fixture `id`."
   def seed_user(attrs, opts), do: GuardedCall.create(User, :seed, attrs, opts)
@@ -85,4 +105,11 @@ defmodule SdrAgent.Accounts do
   def list_users(opts), do: GuardedCall.list(User, opts)
 
   defp guarded(opts), do: Keyword.put(opts, :guarded?, true)
+
+  defp tenant(opts) do
+    case Keyword.get(opts, :tenant_id) do
+      nil -> Kernel.singleton_tenant_id()
+      tenant_id -> {:ok, tenant_id}
+    end
+  end
 end

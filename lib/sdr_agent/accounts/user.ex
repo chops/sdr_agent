@@ -11,7 +11,9 @@ defmodule SdrAgent.Accounts.User do
 
   Authentication: the AshAuthentication password strategy with registration,
   reset, confirmation and sign-in tokens disabled — users are created only
-  by an admin (`:create_user`) or, in dev/test, the seeder (`:seed`). Only
+  by an admin (`:create_user`), by the kernel's first-admin bootstrap
+  (`:bootstrap_admin`, only while the tenant has no users; `mix
+  sdr.bootstrap_admin`) or, in dev/test, the seeder (`:seed`). Only
   active users sign in (`:sign_in_with_password`) or resolve from a session
   (`:get_by_subject`); every sign-in attempt is audited
   (`auth.sign_in.succeeded` / `auth.sign_in.failed`, the latter anonymous
@@ -20,6 +22,8 @@ defmodule SdrAgent.Accounts.User do
   Actions and actors:
 
     * `:create_user` — ADM (guarded); `:seed` — SEED in dev/test only;
+      `:bootstrap_admin` — kernel requests only, any environment, refused
+      once the tenant has a user (tenant row locked);
     * `:change_role`, `:change_status` — ADM (guarded); the last active
       admin can be neither demoted nor disabled; disabling revokes all of the
       user's tokens;
@@ -182,6 +186,24 @@ defmodule SdrAgent.Accounts.User do
       change {AppendEvent, event_type: "user.created", category: :domain_change}
     end
 
+    create :bootstrap_admin do
+      description "KRN (any environment): create the first admin of a tenant that has no users."
+      accept [:email, :display_name]
+
+      argument :password, :string,
+        allow_nil?: false,
+        sensitive?: true,
+        constraints: [min_length: 8]
+
+      argument :password_confirmation, :string, allow_nil?: false, sensitive?: true
+      validate confirm(:password, :password_confirmation)
+      change set_attribute(:role, :admin)
+      change {Password.HashPasswordChange, strategy_name: :password}
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Accounts.Changes.FirstUserOnly
+      change {AppendEvent, event_type: "user.created", category: :domain_change}
+    end
+
     update :change_role do
       description "ADM: change a user's role; the last active admin keeps the admin role."
       require_atomic? false
@@ -267,6 +289,10 @@ defmodule SdrAgent.Accounts.User do
 
     policy action(:seed) do
       authorize_if Checks.SeedingAllowed
+    end
+
+    policy action(:bootstrap_admin) do
+      authorize_if Checks.KernelContext
     end
 
     policy action(:change_password) do
