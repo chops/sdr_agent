@@ -47,6 +47,29 @@ defmodule SdrAgent.Audit.AppendOnlyTest do
     assert message =~ "immutable key material"
   end
 
+  test "revoking a rotated key cannot rewrite its retirement instant" do
+    tenant = bootstrap!()
+    {public, _private} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, key} =
+      SdrAgent.Audit.register_signing_key(%{key_id: "retirement-key", public_key: public},
+        actor: system_actor(:kernel, tenant)
+      )
+
+    admin = human(:admin, tenant)
+    {:ok, rotated} = SdrAgent.Audit.rotate_signing_key(key.id, actor: admin)
+
+    assert {:error, %Postgrex.Error{postgres: %{message: message}}} =
+             raw_error(
+               "UPDATE audit_signing_keys SET status = 'revoked', revoked_at = now(), revocation_reason = 'test', retired_at = retired_at + interval '1 second' WHERE id = $1",
+               [Ecto.UUID.dump!(key.id)]
+             )
+
+    assert message =~ "retirement instant is immutable"
+    {:ok, revoked} = SdrAgent.Audit.revoke_signing_key(key.id, "test revocation", actor: admin)
+    assert revoked.retired_at == rotated.retired_at
+  end
+
   describe "raw SQL against append-only tables" do
     setup do
       tenant = bootstrap!()

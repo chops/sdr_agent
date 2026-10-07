@@ -15,13 +15,6 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
     def verify(_, _, _), do: {:error, :pending}
   end
 
-  defmodule FakeGit do
-    def run(["init", "--bare", _]), do: {:ok, "", 0}
-    def run(["hash-object", "-w", _]), do: {:ok, String.duplicate("b", 40) <> "\n", 0}
-    def run(["commit-tree" | _]), do: {:ok, String.duplicate("c", 40) <> "\n", 0}
-    def run(["push" | _]), do: {:ok, "", 0}
-  end
-
   setup do
     path = Path.join(System.tmp_dir!(), "sdr-anchor-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf(path) end)
@@ -63,19 +56,101 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
              )
   end
 
-  test "GitSink returns commit and blob ids without placing statement bytes in argv" do
+  test "production OTS verification binds the digest of a real detached proof fixture" do
+    proof =
+      "test/fixtures/ots/hello-world.txt.ots.base64"
+      |> File.read!()
+      |> String.replace(~r/\s/, "")
+      |> Base.decode64!()
+
+    <<_header::binary-size(33), hash::binary-size(32), _rest::binary>> = proof
+    <<_::binary-size(65), calendar_response::binary>> = proof
+
+    request = fn "https://a.pool.opentimestamps.org/digest", opts ->
+      assert opts[:body] == hash
+      {:ok, %{status: 200, body: calendar_response}}
+    end
+
+    assert {:ok, ^proof} = OpenTimestampsSink.Calendar.submit(hash, request: request)
+
+    command = fn "ots", ["verify", "-d", digest, path], opts ->
+      assert digest == Base.encode16(hash, case: :lower)
+      assert File.read!(path) == proof
+      assert {"TZ", "UTC"} in opts[:env]
+      {"Success! Bitcoin block 358391 attests existence as of 2015-05-28 UTC", 0}
+    end
+
+    assert {:ok, %{verified: true, timestamp: ~U[2015-05-29 00:00:00Z]}} =
+             OpenTimestampsSink.Calendar.verify(proof, hash, command: command)
+
+    assert {:error, :ots_digest_mismatch} =
+             OpenTimestampsSink.Calendar.verify(
+               proof,
+               :crypto.hash(:sha256, "different anchor"),
+               command: command
+             )
+
+    assert {:error, :bitcoin_attestation_missing} =
+             OpenTimestampsSink.Calendar.verify(
+               proof,
+               hash,
+               command: fn _, _, _ -> {"not a Bitcoin attestation", 0} end
+             )
+  end
+
+  @tag :external
+  test "real ots binary rejects a mismatched digest fixture" do
+    proof =
+      "test/fixtures/ots/hello-world.txt.ots.base64"
+      |> File.read!()
+      |> String.replace(~r/\s/, "")
+      |> Base.decode64!()
+
+    path =
+      Path.join(System.tmp_dir!(), "sdr-wrong-digest-#{System.unique_integer([:positive])}.ots")
+
+    File.write!(path, proof)
+    on_exit(fn -> File.rm(path) end)
+
+    {output, status} =
+      System.cmd("ots", ["verify", "-d", String.duplicate("0", 64), path], stderr_to_stdout: true)
+
+    assert status != 0
+    assert output =~ "Digest provided does not match"
+  end
+
+  test "GitSink returns commit and blob ids without placing statement bytes in argv", %{
+    path: path
+  } do
     statement = "signed statement with private audit details"
+    repository = Path.join(path, "argv.git")
+    {_, 0} = System.cmd("git", ["init", "--bare", repository], stderr_to_stdout: true)
+
+    {_, 0} =
+      System.cmd("git", ["--git-dir", repository, "symbolic-ref", "HEAD", "refs/heads/main"])
+
+    caller = self()
+
+    command = fn "git", args, opts ->
+      send(caller, {:git_argv, args})
+      refute Enum.any?(args, &String.contains?(&1, statement))
+      assert {"GIT_DIR", nil} in opts[:env]
+      System.cmd("git", args, opts)
+    end
 
     assert {:ok, receipt} =
              GitSink.publish(statement,
-               runner: FakeGit,
-               repository: "git@github.com:chops/sdr_agent-audit-anchors.git",
+               command: command,
+               repository: repository,
+               allowed_repository: repository,
                anchor_number: 4
              )
 
     assert receipt.status == :confirmed
-    assert receipt.commit_id == String.duplicate("c", 40)
-    assert receipt.blob_id == String.duplicate("b", 40)
+    assert receipt.commit_id =~ ~r/\A[0-9a-f]{40}\z/
+    assert receipt.blob_id =~ ~r/\A[0-9a-f]{40}\z/
+    assert_received {:git_argv, ["clone", "--", ^repository, _]}
+    assert_received {:git_argv, ["push", "origin", "HEAD:main"]}
     refute inspect(receipt) =~ statement
   end
 
@@ -85,6 +160,9 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
        } do
     repository = Path.join(path, "anchors.git")
     {_output, 0} = System.cmd("git", ["init", "--bare", repository], stderr_to_stdout: true)
+
+    {_, 0} =
+      System.cmd("git", ["--git-dir", repository, "symbolic-ref", "HEAD", "refs/heads/main"])
 
     assert {:ok, receipt} =
              GitSink.publish("signed production statement",
@@ -97,6 +175,23 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
     assert receipt.commit_id =~ ~r/\A[0-9a-f]{40}\z/
     assert receipt.blob_id =~ ~r/\A[0-9a-f]{40}\z/
     {_output, 0} = System.cmd("git", ["--git-dir", repository, "rev-parse", "main"])
+
+    assert {:ok, repeated} =
+             GitSink.publish("signed production statement",
+               repository: repository,
+               allowed_repository: repository,
+               anchor_number: 1
+             )
+
+    assert repeated.commit_id == receipt.commit_id
+    assert repeated.blob_id == receipt.blob_id
+
+    assert {:error, :conflicting_anchor} =
+             GitSink.publish("changed statement",
+               repository: repository,
+               allowed_repository: repository,
+               anchor_number: 1
+             )
   end
 
   test "GitSink rejects repositories outside the configured anchor repository" do

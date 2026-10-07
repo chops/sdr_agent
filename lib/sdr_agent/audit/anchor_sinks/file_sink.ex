@@ -18,7 +18,13 @@ defmodule SdrAgent.Audit.AnchorSinks.FileSink do
         {:ok, %{status: :confirmed, path: path, sha256: :crypto.hash(:sha256, statement)}}
 
       {:error, :eexist} ->
-        {:error, :already_exists}
+        case File.read(path) do
+          {:ok, ^statement} ->
+            {:ok, %{status: :confirmed, path: path, sha256: :crypto.hash(:sha256, statement)}}
+
+          _ ->
+            {:error, :already_exists}
+        end
 
       {:error, reason} ->
         {:error, reason}

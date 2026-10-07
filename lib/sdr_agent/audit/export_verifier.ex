@@ -4,28 +4,30 @@ defmodule SdrAgent.Audit.ExportVerifier do
   alias SdrAgent.Audit.Signing
 
   def verify(path, opts \\ []) do
-    with {:ok, trusted_key} <- trusted_key(opts),
+    with {:ok, keys} <- trusted_keys(opts),
          {:ok, wrapper} <- File.read(path),
          {:ok, %{"payload" => payload64, "signature" => signature64}} <- Jason.decode(wrapper),
          {:ok, payload} <- Base.decode64(payload64),
          {:ok, signature} <- Base.decode64(signature64),
          {:ok, decoded} <- Jason.decode(payload),
+         {:ok, trusted_key} <- lookup_key(keys, decoded["signing_key"]["key_id"]),
          true <- trusted_key_matches?(decoded["signing_key"], trusted_key),
          true <- Signing.verify(payload, signature, trusted_key.public_key),
          true <- valid_chain?(decoded["events"], decoded["chain_index"], decoded["scope"]),
          true <- valid_payloads?(decoded["payloads"] || []),
-         true <- valid_anchor?(decoded["anchor"], decoded["events"], trusted_key.public_key),
+         {:ok, anchor_key} <- lookup_key(keys, decoded["anchor"]["key_id"]),
+         true <- valid_anchor?(decoded["anchor"], decoded["events"], anchor_key.public_key),
          true <-
            valid_anchor_chain?(
              decoded["anchors"] || [decoded["anchor"]],
              decoded["anchor"],
-             trusted_key.public_key
+             keys
            ),
          true <- anchor_head_matches_index?(decoded["anchor"], decoded["chain_index"]),
-         {:ok, revocation} <- valid_at_signing?(decoded["anchor"], trusted_key) do
+         revocation <- lifecycle_report(decoded, keys, opts) do
       {:ok,
        %{
-         valid?: true,
+         valid?: revocation.valid?,
          assurance_level:
            assurance(decoded["sink_receipts"] || [], decoded["anchor"], revocation, opts),
          issues: revocation.issues,
@@ -35,18 +37,28 @@ defmodule SdrAgent.Audit.ExportVerifier do
       {:error, :trusted_key_required} = error -> error
       _ -> {:error, :invalid_bundle}
     end
+  rescue
+    _ -> {:error, :invalid_bundle}
   end
 
-  defp trusted_key(opts) do
-    case Keyword.fetch(opts, :trusted_key) do
-      {:ok, %{key_id: key_id, public_key: public_key} = key}
-      when is_binary(key_id) and byte_size(public_key) == 32 ->
-        {:ok, Map.merge(%{status: :active, revoked_at: nil}, key)}
+  defp trusted_keys(opts) do
+    keys = Keyword.get(opts, :trusted_keys, List.wrap(Keyword.get(opts, :trusted_key)))
 
-      _ ->
-        {:error, :trusted_key_required}
+    if keys != [] and Enum.all?(keys, &valid_key?/1) and
+         length(Enum.uniq_by(keys, & &1.key_id)) == length(keys) do
+      {:ok, Map.new(keys, &{&1.key_id, &1})}
+    else
+      {:error, :trusted_key_required}
     end
   end
+
+  defp valid_key?(%{key_id: id, public_key: public, status: status} = key)
+       when is_binary(id) and byte_size(public) == 32 and status in [:active, :rotated, :revoked],
+       do: status != :revoked or match?(%DateTime{}, key[:revoked_at])
+
+  defp valid_key?(_), do: false
+
+  defp lookup_key(keys, id), do: Map.fetch(keys, id)
 
   defp trusted_key_matches?(embedded, trusted) do
     with %{"key_id" => key_id, "public_key" => encoded} <- embedded,
@@ -97,12 +109,13 @@ defmodule SdrAgent.Audit.ExportVerifier do
     end
   end
 
-  defp valid_anchor_chain?(anchors, current, public_key) when is_list(anchors) do
+  defp valid_anchor_chain?(anchors, current, keys) when is_list(anchors) do
     chain_valid? =
       anchors
       |> Enum.with_index()
       |> Enum.all?(fn {anchor, index} ->
-        valid_anchor?(anchor, [], public_key) and
+        match?({:ok, _}, lookup_key(keys, anchor["key_id"])) and
+          valid_anchor?(anchor, [], keys[anchor["key_id"]].public_key) and
           if index == 0 do
             anchor["anchor_number"] == 1 and is_nil(anchor["prior_anchor_hash"])
           else
@@ -127,19 +140,11 @@ defmodule SdrAgent.Audit.ExportVerifier do
   end
 
   defp assurance(receipts, anchor, revocation, opts) do
-    anchor_hash = anchor["anchor_hash"]
-
     confirmed_git? =
-      Enum.any?(receipts, fn receipt ->
-        receipt["sink"] == "git" and receipt["status"] == "confirmed" and
-          verify_receipt(receipt, anchor_hash, Keyword.get(opts, :git_verifier))
-      end)
+      Enum.any?(receipts, &confirmed_receipt?(&1, "git", anchor, opts[:git_verifier]))
 
     confirmed_ots? =
-      Enum.any?(receipts, fn receipt ->
-        receipt["sink"] == "ots" and receipt["status"] == "confirmed" and
-          verify_receipt(receipt, anchor_hash, Keyword.get(opts, :ots_verifier))
-      end)
+      Enum.any?(receipts, &confirmed_receipt?(&1, "ots", anchor, opts[:ots_verifier]))
 
     cond do
       revocation.assurance == :chain_verified -> :chain_verified
@@ -149,10 +154,20 @@ defmodule SdrAgent.Audit.ExportVerifier do
     end
   end
 
+  defp confirmed_receipt?(receipt, sink, anchor, verifier) do
+    receipt["anchor_id"] == anchor["id"] and receipt["sink"] == sink and
+      receipt["status"] == "confirmed" and
+      verify_receipt(receipt, anchor["anchor_hash"], verifier)
+  end
+
   defp verify_receipt(_receipt, _anchor_hash, nil), do: false
 
   defp verify_receipt(receipt, anchor_hash, verifier),
-    do: verifier.(receipt["receipt"], anchor_hash)
+    do: verified?(verifier.(receipt["receipt"], anchor_hash))
+
+  defp verified?(true), do: true
+  defp verified?({:ok, %{verified: true}}), do: true
+  defp verified?(_), do: false
 
   defp valid_chain?([], _chain_index, _scope), do: false
 
@@ -269,17 +284,48 @@ defmodule SdrAgent.Audit.ExportVerifier do
     end)
   end
 
-  defp valid_at_signing?(_anchor, %{status: status}) when status in [:active, :rotated],
-    do: {:ok, %{assurance: :signed, issues: []}}
+  # Neither inserted_at nor a Git author's commit date is independent time
+  # evidence: a stolen signing key can backdate both. Only a verified Bitcoin
+  # attestation binding this exact statement digest can establish an upper bound.
+  defp lifecycle_report(decoded, keys, opts) do
+    receipts = decoded["sink_receipts"] || []
 
-  defp valid_at_signing?(anchor, %{status: :revoked, revoked_at: %DateTime{} = revoked_at}) do
-    with {:ok, inserted_at, 0} <- DateTime.from_iso8601(anchor["inserted_at"]),
-         true <- DateTime.before?(inserted_at, revoked_at) do
-      {:ok, %{assurance: :chain_verified, issues: [:signing_key_revoked_after_signing]}}
-    else
-      _ -> {:error, :signature_at_or_after_key_revocation}
-    end
+    issues =
+      Enum.flat_map(decoded["anchors"] || [decoded["anchor"]], fn anchor ->
+        revocation_issues(anchor, keys[anchor["key_id"]], receipts, opts)
+      end)
+      |> Enum.uniq()
+
+    %{
+      valid?: :revocation_time_unproven not in issues,
+      assurance: if(issues == [], do: :signed, else: :chain_verified),
+      issues: issues
+    }
   end
 
-  defp valid_at_signing?(_anchor, _trusted_key), do: {:error, :invalid_revocation_metadata}
+  defp revocation_issues(anchor, %{status: :revoked} = key, receipts, opts) do
+    if independently_predates_revocation?(anchor, receipts, key.revoked_at, opts),
+      do: [:signing_key_revoked_after_signing],
+      else: [:revocation_time_unproven]
+  end
+
+  defp revocation_issues(_anchor, _key, _receipts, _opts), do: []
+
+  defp independently_predates_revocation?(anchor, receipts, revoked_at, opts) do
+    verifier = Keyword.get(opts, :ots_verifier)
+
+    is_function(verifier, 2) and
+      Enum.any?(receipts, &predates_revocation?(&1, anchor, revoked_at, verifier))
+  end
+
+  defp predates_revocation?(receipt, anchor, revoked_at, verifier) do
+    with true <- receipt["anchor_id"] == anchor["id"],
+         true <- receipt["sink"] == "ots" and receipt["status"] == "confirmed",
+         {:ok, %{verified: true, timestamp: %DateTime{} = timestamp}} <-
+           verifier.(receipt["receipt"], anchor["anchor_hash"]) do
+      DateTime.before?(timestamp, revoked_at)
+    else
+      _ -> false
+    end
+  end
 end

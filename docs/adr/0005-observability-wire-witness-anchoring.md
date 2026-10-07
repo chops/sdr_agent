@@ -162,6 +162,38 @@ resources or trace columns; S3 owns persisted correlation fields.
   the existing anchor. Export failures transition their request to `failed`
   and remove any partially written bundle.
 
+#### S11 review correction: trust sets, time evidence and retry semantics
+
+- Offline verification uses `docs/audit/trusted-keys.json`, an out-of-band
+  manifest of pinned PEM files with key id, activation, retirement and
+  revocation metadata. Retain historical key files through rotation; each
+  anchor resolves its own signing key. Never source this set from a bundle.
+- The bundle's anchor `inserted_at` is not trusted time. A revoked key's
+  historical anchor needs a verified OTS Bitcoin attestation for its exact
+  digest strictly before `revoked_at`; without it the report is
+  `valid?: false`, `chain_verified`, `revocation_time_unproven`. A Git author
+  or committer date can also be backdated and is not independent time evidence.
+  Even proven historical revoked signatures retain reduced assurance.
+- OTS calendar responses are wrapped in the v1 detached-proof header with
+  OpSHA256 and the submitted anchor digest. Verification uses `ots verify -d
+  DIGEST PROOF`, checks the digest before invoking the CLI, and requires a
+  successful Bitcoin attestation. The CLI reports a UTC day; use the next
+  midnight as a conservative upper bound, never infer a finer timestamp.
+- Confirmed sinks are skipped on retry; identical existing File/Git statements
+  are successful replays and conflicting bytes fail. Cadence excludes anchor
+  bookkeeping and never fires an interval anchor without new work. Explicit
+  retry/export may still republish unconfirmed sinks.
+- `mix sdr.audit.verify` supports `--key-set MANIFEST` and the single-key
+  compatibility option `--public-key PATH`. Its Git assurance ceiling is
+  `signed`: it has no Git fetch verifier. Programmatic callers may provide a
+  verifier that fetches the trusted repository/commit and checks the statement
+  digest; a confirmed receipt alone never raises offline assurance. OTS
+  verification requires the operator's `ots` CLI and Bitcoin node; unavailable
+  evidence cannot raise assurance.
+- Compilation tracks Git HEAD, its branch ref and packed refs, so anchor
+  provenance recompiles after commits in a worktree. Releases retain their
+  compiled build SHA.
+
 ## Justification
 
 The three mechanisms answer different audit questions; none substitutes for
