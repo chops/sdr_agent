@@ -3,7 +3,7 @@ flowchart LR
     subgraph External["External"]
         Browser[Browser/Client]
         API[External APIs]
-        Codex[Codex app-server<br/>cached ChatGPT login]
+        Claude[Claude CLI<br/>personal local login]
         Tempo[Tempo OTLP HTTP<br/>dev only 127.0.0.1:4318]
     end
 
@@ -33,9 +33,9 @@ flowchart LR
 
     subgraph AI["Structured Model Boundary"]
         Provider[ModelProvider facade]
-        Budget[Volatile budget guard<br/>20 per run / 200 per UTC day]
+        Budget[S3 persisted 20/run<br/>volatile 200/day guard]
         Validation[Zoi output validation]
-        Adapter[Serialized tool-free Codex adapter<br/>empty private cwd]
+        Adapter[Serialized tool-free ClaudeCLI adapter<br/>empty private cwd]
         Fake[Deterministic Fake<br/>dev/test default]
     end
 
@@ -66,7 +66,7 @@ flowchart LR
     Provider --> Validation
     Provider --> Fake
     Provider --> Adapter
-    Adapter -- JSONL stdio --> Codex
+    Adapter -- stream JSON --> Claude
     Router -. spans .-> Instrumentation
     Resources -. spans .-> Instrumentation
     Provider -. spans .-> GenAI

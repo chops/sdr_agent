@@ -11,9 +11,9 @@ This diagram shows the major components and their relationships.
 graph TB
     subgraph Application["Application"]
         App[Application Supervisor]
-        Budget[In-memory BudgetStore<br/>supervised Agent]
+        Budget[Daily BudgetStore<br/>volatile 200/day guard]
         ModelProvider[ModelProvider facade<br/>budget + Zoi validation]
-        CodexAdapter[CodexAppServer adapter<br/>serialized, tool-free GenServer]
+        ClaudeCLIAdapter[ClaudeCLI adapter<br/>serialized, tool-free GenServer]
         Telemetry[Telemetry setup and GenAI helper]
     end
 
@@ -36,16 +36,16 @@ graph TB
     end
 
     subgraph External["Local External Process"]
-        Codex[Codex app-server<br/>JSONL over stdio]
+        Claude[Claude CLI<br/>stream JSON via llm-proxy-shim]
     end
 
     App --> Endpoint
     App --> Budget
     App --> Telemetry
     ModelProvider --> Budget
-    ModelProvider --> CodexAdapter
+    ModelProvider --> ClaudeCLIAdapter
     ModelProvider -. spans .-> Telemetry
-    CodexAdapter --> Codex
+    ClaudeCLIAdapter --> Claude
     Endpoint --> Router
     Endpoint --> PubSub
     Router --> Controllers
@@ -72,7 +72,7 @@ graph TB
 
 ## Manual Additions Needed
 
-- [x] S6a budget process and serialized app-server GenServer
+- [x] S6a budget process and serialized ClaudeCLI GenServer
 - [x] S6a supervision tree detail
 - [ ] Background workers (Oban, etc.)
-- [x] Codex app-server local process boundary
+- [x] Claude CLI local process boundary

@@ -11,7 +11,6 @@ defmodule SdrAgent.AI.BudgetStore.InMemory do
 
   @behaviour SdrAgent.AI.BudgetStore
 
-  @run_limit 20
   @day_limit 200
 
   def start_link(opts \\ []) do
@@ -19,29 +18,16 @@ defmodule SdrAgent.AI.BudgetStore.InMemory do
   end
 
   @impl true
-  def reserve(run_id, %DateTime{} = now) when is_binary(run_id) do
+  def reserve_daily(%DateTime{} = now) do
     day = DateTime.to_date(now)
 
     Agent.get_and_update(__MODULE__, fn state ->
-      run_count = Map.get(state.runs, run_id, 0)
       day_count = Map.get(state.days, day, 0)
 
-      cond do
-        run_count >= @run_limit ->
-          {{:error, {:budget_exhausted, :run}}, state}
-
-        day_count >= @day_limit ->
-          {{:error, {:budget_exhausted, :day}}, state}
-
-        true ->
-          reservation = %{run_id: run_id, day: day}
-
-          next = %{
-            runs: Map.put(state.runs, run_id, run_count + 1),
-            days: Map.put(state.days, day, day_count + 1)
-          }
-
-          {{:ok, reservation}, next}
+      if day_count >= @day_limit do
+        {{:error, {:budget_exhausted, :day}}, state}
+      else
+        {{:ok, %{day: day}}, %{state | days: Map.put(state.days, day, day_count + 1)}}
       end
     end)
   end
@@ -52,5 +38,5 @@ defmodule SdrAgent.AI.BudgetStore.InMemory do
   @doc "Resets volatile counters. Intended for deterministic test setup."
   def reset, do: Agent.update(__MODULE__, fn _state -> empty_state() end)
 
-  defp empty_state, do: %{runs: %{}, days: %{}}
+  defp empty_state, do: %{days: %{}}
 end

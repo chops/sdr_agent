@@ -1,6 +1,8 @@
 defmodule SdrAgent.AI.ModelProviderTest do
-  use ExUnit.Case, async: false
+  use SdrAgent.AuditCase, async: false
 
+  alias SdrAgent.Agents
+  alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.BudgetStore.InMemory, as: BudgetStore
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.Fake
@@ -9,62 +11,70 @@ defmodule SdrAgent.AI.ModelProviderTest do
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
 
   setup do
-    assert Code.ensure_loaded?(ModelProvider), "S6a must define the model-provider facade"
-    assert Code.ensure_loaded?(BudgetStore), "S6a must define its volatile budget store"
     :ok = BudgetStore.reset()
-    :ok
+    tenant = bootstrap!()
+    %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
+    %{tenant: tenant, run: run, agent: agent}
   end
 
-  test "Fake is deterministic, is the test default, and returns only validated output" do
+  test "Fake is deterministic and persists the S3 invocation lifecycle", ctx do
     assert Application.fetch_env!(:sdr_agent, :model_provider) == Fake
-
-    request = request("fake-1")
-    assert {:ok, first} = ModelProvider.complete(request)
-    assert {:ok, second} = ModelProvider.complete(%{request | id: "fake-2"})
-    assert first.output == %{answer: "qualified", score: 42}
-    assert second.output == first.output
-    assert first.provider == :fake
+    assert {:ok, result} = ModelProvider.complete(request(ctx, "fake-1"))
+    assert result.output == %{answer: "qualified", score: 42}
+    assert result.invocation.status == :completed
+    assert result.invocation.provider == :fake
+    assert result.invocation.validation_status == :valid
+    assert [_] = events_of_type(ctx.tenant, "model.invocation.reserved")
+    assert [_] = events_of_type(ctx.tenant, "model.invocation.sent")
+    assert [_] = events_of_type(ctx.tenant, "model.invocation.completed")
   end
 
-  test "invalid structured output is rejected by Zoi" do
+  test "invalid structured output is persisted as failed, never completed", ctx do
     assert {:error, {:validation_failed, errors}} =
-             ModelProvider.complete(request("invalid"),
+             ModelProvider.complete(request(ctx, "invalid"),
                provider: Fake,
                provider_options: [output: %{answer: "qualified", score: "42"}]
              )
 
     assert errors != []
+    assert {:ok, [invocation]} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
+    assert invocation.status == :failed
+    assert invocation.validation_status == :invalid
+    assert invocation.error == %{"kind" => "validation_failed"}
+    assert events_of_type(ctx.tenant, "model.invocation.completed") == []
   end
 
-  test "run and daily budgets reject before provider invocation" do
+  test "the persisted run cap rejects call 21 before provider invocation", ctx do
     for index <- 1..20 do
-      assert {:ok, _} = ModelProvider.complete(request("run-#{index}"))
+      assert {:ok, _} = ModelProvider.complete(request(ctx, "run-#{index}"))
     end
 
-    assert {:error, {:budget_exhausted, :run}} =
-             ModelProvider.complete(request("run-21"))
-
-    :ok = BudgetStore.reset()
-
-    for index <- 1..200 do
-      assert {:ok, _} =
-               ModelProvider.complete(%{request("day-#{index}") | run_id: "run-#{index}"})
-    end
-
-    assert {:error, {:budget_exhausted, :day}} =
-             ModelProvider.complete(%{request("day-201") | run_id: "run-201"})
+    assert {:error, %Ash.Error.Invalid{}} = ModelProvider.complete(request(ctx, "run-21"))
+    assert {:ok, invocations} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
+    assert length(invocations) == 20
   end
 
-  test "budget persistence seam is replaceable" do
+  test "the temporary daily-budget seam remains replaceable", ctx do
     assert {:error, {:budget_exhausted, :replacement}} =
-             ModelProvider.complete(request("replacement"),
-               budget_store: SdrAgent.AI.ModelProviderTest.RejectingBudgetStore
+             ModelProvider.complete(request(ctx, "replacement"),
+               budget_store: __MODULE__.RejectingBudgetStore
              )
+
+    assert {:ok, []} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
   end
 
-  test "GenAI SDK span wraps a Fake invocation" do
+  test "an ambiguous provider outcome is persisted as unknown", ctx do
+    assert {:error, :provider_outcome_unknown} =
+             ModelProvider.complete(request(ctx, "unknown"), provider: __MODULE__.UnknownProvider)
+
+    assert {:ok, [invocation]} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
+    assert invocation.status == :unknown
+    assert [_] = events_of_type(ctx.tenant, "model.invocation.unknown")
+  end
+
+  test "GenAI SDK span wraps and correlates a persisted invocation", ctx do
     InMemoryExporter.reset()
-    assert {:ok, _} = ModelProvider.complete(request("span"))
+    assert {:ok, _} = ModelProvider.complete(request(ctx, "span"))
 
     assert eventually(fn ->
              InMemoryExporter.spans()
@@ -72,13 +82,29 @@ defmodule SdrAgent.AI.ModelProviderTest do
            end)
   end
 
-  defp request(id) do
+  defp request(ctx, id) do
+    attrs = AgentsFixtures.model_attrs(id)
+
+    audit =
+      Map.take(attrs, [
+        :purpose,
+        :parameters,
+        :prompt_template_id,
+        :prompt_template_version,
+        :prompt_template_sha256,
+        :output_schema_id,
+        :output_schema_version,
+        :output_schema_sha256
+      ])
+
     %{
       id: id,
-      run_id: "run-1",
+      run: ctx.run,
+      actor: ctx.agent,
       operation: "model.complete",
       prompt: "Qualify the fixture lead",
-      schema: @schema
+      schema: @schema,
+      audit: audit
     }
   end
 
@@ -86,18 +112,26 @@ defmodule SdrAgent.AI.ModelProviderTest do
   defp eventually(_fun, 0), do: false
 
   defp eventually(fun, attempts) do
-    if fun.() do
-      true
-    else
-      Process.sleep(10)
-      eventually(fun, attempts - 1)
-    end
+    if fun.(),
+      do: true,
+      else:
+        (
+          Process.sleep(10)
+          eventually(fun, attempts - 1)
+        )
   end
 
   defmodule RejectingBudgetStore do
     @behaviour SdrAgent.AI.BudgetStore
-
-    def reserve(_run_id, _now), do: {:error, {:budget_exhausted, :replacement}}
+    def reserve_daily(_now), do: {:error, {:budget_exhausted, :replacement}}
     def settle(_reservation, _outcome), do: :ok
+  end
+
+  defmodule UnknownProvider do
+    @behaviour SdrAgent.AI.ModelProvider
+    alias SdrAgent.AI.ModelProvider.Fake
+
+    def prepare(request, opts), do: Fake.prepare(request, opts)
+    def complete(_request, _opts), do: {:unknown, :ambiguous_transport_failure}
   end
 end
