@@ -10,14 +10,17 @@ import Config
 config :sdr_agent, Oban,
   engine: Oban.Engines.Basic,
   notifier: Oban.Notifiers.Postgres,
-  queues: [default: 10, research: 20],
+  # Spec §13: separate, bounded concurrency per queue (S8: delivery,
+  # reconciliation, followup).
+  queues: [default: 10, research: 20, delivery: 5, reconciliation: 5, followup: 10],
   lifeline: [rescue_after: {2, :hours}],
   pruner: [max_age: {1, :day}],
   plugins: [
     {Oban.Plugins.Cron,
      crontab: [
        {"* * * * *", SdrAgent.Audit.AnchorWorker},
-       {"*/10 * * * *", SdrAgent.Audit.OtsUpgradeWorker}
+       {"*/10 * * * *", SdrAgent.Audit.OtsUpgradeWorker},
+       {"* * * * *", SdrAgent.Outreach.StaleDeliverySweeper}
      ]}
   ],
   repo: SdrAgent.Repo
@@ -152,7 +155,12 @@ config :sdr_agent,
   ots_upgrade_batch_size: 25,
   anchor_sinks: [],
   # S8: the agent's deterministic suppression gate reads the Outreach store.
-  suppression_check: SdrAgent.SDR.SuppressionCheck.Store
+  suppression_check: SdrAgent.SDR.SuppressionCheck.Store,
+  # S8 compliance defaults (checklist 1.6): the daily cap (config may only
+  # lower it) counts calendar days in this zone; quiet hours, sender and
+  # footer are campaign attributes. Delivery is local capture only.
+  compliance_timezone: "America/Denver",
+  daily_send_cap: 25
 
 config :opentelemetry, resource: %{service: %{name: "sdr_agent"}}
 

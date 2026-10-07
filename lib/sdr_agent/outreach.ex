@@ -3,8 +3,10 @@ defmodule SdrAgent.Outreach do
   Outreach bounded context (S2): what may be sent, to whom, on whose
   authority — and who must never be contacted.
 
-  Resources (S8a): `Draft`, `DraftRevision`, `RevisionCitation`, `Approval`,
-  `Suppression`. Outreach is the highest domain: it holds FKs to Research
+  Resources: `Draft`, `DraftRevision`, `RevisionCitation`, `Approval`,
+  `Suppression` (S8a); `DeliveryOperation`, `DeliveryReceipt`,
+  `SendQuotaDay` (S8b, the outbox driven by `SdrAgent.Outreach.Delivery`
+  and its workers). Outreach is the highest domain: it holds FKs to Research
   (cited claims), Sales (lead, enrollment, step, campaign, contact), Agents
   (runs, decisions, invocations), Accounts (operators) and Audit (tenant),
   and stops Sales leads/enrollments only as the side effect of a suppression
@@ -13,7 +15,8 @@ defmodule SdrAgent.Outreach do
 
   Public API (every function takes `actor:`; writes run through
   `SdrAgent.Audit.Guard`; the S2 *guarded actions* — draft edit, approval
-  approve/reject/revoke, suppression create — audit every denial):
+  approve/reject/revoke, suppression create, delivery `cancel_retry` — audit
+  every denial):
 
     * drafts — `propose_draft/2` (AGT, the hand-off), `edit_draft/3` (ADM,
       REV), `list_review_queue/1`;
@@ -22,6 +25,8 @@ defmodule SdrAgent.Outreach do
     * suppression — `suppress/2` (ADM, manual), `seed_suppression/2` (SEED,
       dev/test), `matching_suppressions/2` (the email's own and its domain's
       suppressions);
+    * delivery — `cancel_retry/2` (ADM, REV), `record_receipt/2` (DLV, REC;
+      the capture adapter's receipt);
     * reads (tenant-scoped) — `fetch/3`, `list_records/2`.
   """
   use Ash.Domain,
@@ -31,6 +36,7 @@ defmodule SdrAgent.Outreach do
 
   alias SdrAgent.Audit.GuardedCall
   alias SdrAgent.Outreach.Approval
+  alias SdrAgent.Outreach.DeliveryReceipt
   alias SdrAgent.Outreach.Draft
   alias SdrAgent.Outreach.Suppression
 
@@ -40,6 +46,9 @@ defmodule SdrAgent.Outreach do
     resource SdrAgent.Outreach.RevisionCitation
     resource SdrAgent.Outreach.Approval
     resource SdrAgent.Outreach.Suppression
+    resource SdrAgent.Outreach.DeliveryOperation
+    resource SdrAgent.Outreach.DeliveryReceipt
+    resource SdrAgent.Outreach.SendQuotaDay
   end
 
   @doc """
@@ -117,6 +126,20 @@ defmodule SdrAgent.Outreach do
     end)
     |> Ash.read()
   end
+
+  @doc "ADM, REV: stops a delivery waiting for a retry (failed_retryable → cancelled); its draft is cancelled."
+  def cancel_retry(delivery, opts),
+    do: GuardedCall.update(delivery, :cancel_retry, %{}, guarded(opts))
+
+  @doc "DLV, REC: records a delivery receipt; idempotent per delivery and kind."
+  def record_receipt(attrs, opts),
+    do:
+      GuardedCall.create(
+        DeliveryReceipt,
+        :record,
+        attrs,
+        subject(opts, attrs, :delivery_operation_id)
+      )
 
   @doc "Reads one Outreach record of `resource` by id in the actor's tenant."
   def fetch(resource, id, opts), do: GuardedCall.get(resource, id, opts)

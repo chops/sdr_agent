@@ -23,7 +23,9 @@ defmodule SdrAgent.Outreach.Draft do
       action (`SdrAgent.Outreach.Checks.InternalWrite`): pending_review →
       queued (approval granted) → pending_review (approval revoked);
       pending_review → rejected (T) (approval rejected); pending_review,
-      queued → cancelled (T) (suppression; S9 replies).
+      queued → cancelled (T) (suppression, refused or cancelled delivery;
+      S9 replies); queued → sent (T) | failed (T) (delivery accepted /
+      failed permanently).
 
   Terminal rows are immutable and only `status`, `status_reason`,
   `current_revision_id` and `updated_at` may ever change (trigger). Reads:
@@ -48,7 +50,9 @@ defmodule SdrAgent.Outreach.Draft do
     {:queue, [:pending_review], :queued},
     {:unqueue, [:queued], :pending_review},
     {:reject, [:pending_review], :rejected},
-    {:cancel, [:pending_review, :queued], :cancelled}
+    {:cancel, [:pending_review, :queued], :cancelled},
+    {:mark_sent, [:queued], :sent},
+    {:mark_failed, [:queued], :failed}
   ]
   @event [category: :domain_change, previous: [:status]]
 
@@ -184,6 +188,22 @@ defmodule SdrAgent.Outreach.Draft do
       change {Transition, from: [:pending_review, :queued], to: :cancelled, locked?: true}
       change {AppendEvent, [event_type: "outreach.draft.cancelled"] ++ @event}
     end
+
+    update :mark_sent do
+      description "Inside a delivery's acceptance only: queued → sent (T)."
+      require_atomic? false
+      change get_and_lock_for_update()
+      change {Transition, from: [:queued], to: :sent, locked?: true}
+      change {AppendEvent, [event_type: "outreach.draft.sent"] ++ @event}
+    end
+
+    update :mark_failed do
+      description "Inside a delivery's permanent failure only: queued → failed (T)."
+      require_atomic? false
+      change get_and_lock_for_update()
+      change {Transition, from: [:queued], to: :failed, locked?: true}
+      change {AppendEvent, [event_type: "outreach.draft.failed"] ++ @event}
+    end
   end
 
   policies do
@@ -200,7 +220,7 @@ defmodule SdrAgent.Outreach.Draft do
       authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
     end
 
-    policy action([:queue, :unqueue, :reject, :cancel]) do
+    policy action([:queue, :unqueue, :reject, :cancel, :mark_sent, :mark_failed]) do
       authorize_if InternalWrite
     end
 
