@@ -17,24 +17,30 @@ defmodule Mix.Tasks.Sdr.BootstrapAdminTest do
 
   @password "stdin-password-0123456789"
 
+  # Runs the task with `stdin`, returning its result and everything it wrote
+  # to stdout, stderr and the logger (debug level).
   defp run_task(argv, stdin) do
     parent = self()
 
     log =
-      capture_log([level: :debug], fn ->
-        stderr =
-          capture_io(:stderr, fn ->
-            stdout = capture_io(stdin, fn -> send(parent, {:result, run_catching(argv)}) end)
-            send(parent, {:stdout, stdout})
-          end)
+      capture_log([level: :debug], fn -> send(parent, {:io, capture_streams(argv, stdin)}) end)
 
-        send(parent, {:stderr, stderr})
-      end)
+    assert_received {:io, {result, streams}}
+    %{result: result, output: streams <> log}
+  end
 
+  defp capture_streams(argv, stdin) do
+    parent = self()
+    stderr = capture_io(:stderr, fn -> send(parent, {:stdout, capture_stdout(argv, stdin)}) end)
+    assert_received {:stdout, {result, stdout}}
+    {result, stdout <> stderr}
+  end
+
+  defp capture_stdout(argv, stdin) do
+    parent = self()
+    stdout = capture_io(stdin, fn -> send(parent, {:result, run_catching(argv)}) end)
     assert_received {:result, result}
-    assert_received {:stdout, stdout}
-    assert_received {:stderr, stderr}
-    %{result: result, output: stdout <> stderr <> log}
+    {result, stdout}
   end
 
   defp run_catching(argv) do
