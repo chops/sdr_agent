@@ -9,6 +9,10 @@ defmodule SdrAgent.Audit.Changes.AppendEvent do
   rolls back. Works for atomic updates (the hook runs on the row returned by
   the atomic `UPDATE ... RETURNING`).
 
+  A record marked `:sdr_replayed` in its metadata (an identical idempotent
+  replay that wrote nothing, see `SdrAgent.Agents.Changes.Replay`) appends
+  no event.
+
   The event payload carries the action name, the changed attributes
   (after-image; all attributes on create), the listed non-sensitive
   arguments and `record_sha256` — the canonical hash of the full row after
@@ -40,13 +44,22 @@ defmodule SdrAgent.Audit.Changes.AppendEvent do
     actor = context.actor
 
     Ash.Changeset.after_action(changeset, fn changeset, record ->
-      tenant_id = Map.get(record, Keyword.get(opts, :tenant, :tenant_id))
-
-      case Kernel.append(event(changeset, record, opts), actor: actor, tenant_id: tenant_id) do
-        {:ok, _event} -> {:ok, record}
-        {:error, error} -> {:error, error}
+      if Ash.Resource.get_metadata(record, :sdr_replayed) do
+        # An identical idempotent replay wrote nothing; its event already exists.
+        {:ok, record}
+      else
+        append(changeset, record, opts, actor)
       end
     end)
+  end
+
+  defp append(changeset, record, opts, actor) do
+    tenant_id = Map.get(record, Keyword.get(opts, :tenant, :tenant_id))
+
+    case Kernel.append(event(changeset, record, opts), actor: actor, tenant_id: tenant_id) do
+      {:ok, _event} -> {:ok, record}
+      {:error, error} -> {:error, error}
+    end
   end
 
   defp event(changeset, %resource{} = record, opts) do

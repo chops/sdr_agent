@@ -22,7 +22,8 @@ defmodule SdrAgent.Agents do
       settles run usage in the same transaction), `list_model_invocations/2`;
     * tool calls — `start_tool_invocation/3`, `succeed_tool_invocation/3`,
       `fail_tool_invocation/3`, `mark_tool_invocation_unknown/2`;
-    * decisions — `record_decision/2` (idempotent on its key).
+    * decisions — `record_decision/2` (idempotent on its key; conflicting
+      reuse fails), `list_decisions/2`.
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -287,37 +288,22 @@ defmodule SdrAgent.Agents do
 
   @doc """
   Records a decision (each system actor only its own kinds). `attrs.inputs`
-  is the exact input snapshot. An existing decision with the same
-  idempotency key is returned unchanged.
+  is the exact input snapshot. Recording an identical decision again
+  (same idempotency key and replay fingerprint) returns the existing row;
+  reusing the key for a different decision fails with
+  `SdrAgent.Agents.Errors.IdempotencyConflict` inside `Ash.Error.Invalid`.
   """
   def record_decision(attrs, opts) do
-    actor = Keyword.get(opts, :actor)
-
-    guard(Decision, :record, Map.get(attrs, :subject_id), actor, fn ->
-      Decision
-      |> Ash.Changeset.for_create(:record, attrs, actor: actor)
-      |> record(actor)
-    end)
+    create(Decision, :record, attrs, opts, Map.get(attrs, :subject_id))
   end
 
-  defp record(changeset, actor) do
-    with true <- Ash.can?(changeset, actor),
-         {:ok, nil} <- find_decision(changeset, actor) do
-      Ash.create(changeset)
-    else
-      false -> Ash.create(changeset)
-      other -> other
-    end
-  end
-
-  defp find_decision(changeset, actor) do
-    tenant_id = Ash.Changeset.get_attribute(changeset, :tenant_id)
-    key = Ash.Changeset.get_attribute(changeset, :idempotency_key)
-
+  @doc "Decisions of a run, oldest first."
+  def list_decisions(run_id, opts) do
     Decision
-    |> Ash.Query.for_read(:read, %{}, actor: actor)
-    |> Ash.Query.filter(tenant_id == ^tenant_id and idempotency_key == ^key)
-    |> Ash.read_one()
+    |> Ash.Query.for_read(:read, %{}, actor: Keyword.get(opts, :actor))
+    |> Ash.Query.filter(agent_run_id == ^run_id)
+    |> Ash.Query.sort(decided_at: :asc)
+    |> Ash.read()
   end
 
   ## Helpers
