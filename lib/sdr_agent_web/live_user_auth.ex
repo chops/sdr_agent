@@ -62,12 +62,13 @@ defmodule SdrAgentWeb.LiveUserAuth do
   end
 
   # Views shown only to some roles (after `:operator`). This shapes the UI;
-  # the domain still authorizes every read and action.
+  # the domain still authorizes every read and action. The roles are kept so
+  # `revalidate/1` redirects an operator whose role changed while connected.
   def on_mount({:roles, roles}, _params, _session, socket) do
     case socket.assigns[:current_scope] do
       %SdrAgentWeb.Scope{role: role} when is_list(roles) ->
         if role in roles do
-          {:cont, socket}
+          {:cont, assign(socket, :allowed_roles, roles)}
         else
           {:halt,
            socket

@@ -60,7 +60,11 @@ defmodule SdrAgentWeb.AuditLive do
     {:noreply, if(connected?(socket), do: load(socket), else: socket)}
   end
 
-  defp uuid?(value), do: is_binary(value) and match?({:ok, _}, Ecto.UUID.cast(value))
+  # A 36-character UUID string only (Ecto.UUID.cast/1 also accepts 16 raw bytes).
+  defp uuid?(value),
+    do:
+      is_binary(value) and
+        Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/, value)
 
   defp load(socket) do
     scope = socket.assigns.current_scope
@@ -89,6 +93,7 @@ defmodule SdrAgentWeb.AuditLive do
       socket
       |> assign(
         loaded?: true,
+        withheld: nil,
         head: head,
         users: Map.new(users, &{&1.id, &1}),
         options: options,
@@ -98,7 +103,8 @@ defmodule SdrAgentWeb.AuditLive do
       )
       |> stream(:events, shown, reset: true)
     else
-      {:error, reason} -> assign(socket, withheld: AuditedView.error_message(reason))
+      {:error, reason} ->
+        assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
     end
   end
 

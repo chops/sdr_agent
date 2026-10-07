@@ -74,12 +74,17 @@ defmodule SdrAgentWeb.OperationsLive do
         end)
 
       socket
-      |> assign(loaded?: true, counts: %{failures: length(failures), runs: length(runs)})
+      |> assign(
+        loaded?: true,
+        withheld: nil,
+        counts: %{failures: length(failures), runs: length(runs)}
+      )
       |> stream(:failures, failures, reset: true)
       |> stream(:operations, operations, reset: true)
       |> stream(:runs, runs, reset: true)
     else
-      {:error, reason} -> assign(socket, withheld: AuditedView.error_message(reason))
+      {:error, reason} ->
+        assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
     end
   end
 

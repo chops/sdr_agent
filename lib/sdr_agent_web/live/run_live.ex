@@ -45,6 +45,8 @@ defmodule SdrAgentWeb.RunLive do
          :ok <- AuditedView.record(scope, "SdrAgent.Agents.AgentRun", run.id, "agent run view") do
       assign(socket,
         loaded?: true,
+        withheld: nil,
+        not_found?: false,
         page_title: "Run · #{ConsoleData.contact_name(contact)}",
         run: run,
         contact: contact,
@@ -55,8 +57,11 @@ defmodule SdrAgentWeb.RunLive do
         budget: budget(run.budget)
       )
     else
-      {:error, :not_found} -> assign(socket, not_found?: true)
-      {:error, reason} -> assign(socket, withheld: AuditedView.error_message(reason))
+      {:error, :not_found} ->
+        assign(socket, loaded?: false, withheld: nil, not_found?: true)
+
+      {:error, reason} ->
+        assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
     end
   end
 

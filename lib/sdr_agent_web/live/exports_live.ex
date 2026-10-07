@@ -17,6 +17,8 @@ defmodule SdrAgentWeb.ExportsLive do
 
   on_mount {SdrAgentWeb.LiveUserAuth, {:roles, [:admin, :auditor]}}
 
+  @uuid ~r/\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z/
+
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
@@ -27,19 +29,20 @@ defmodule SdrAgentWeb.ExportsLive do
 
   @impl true
   def handle_params(params, _uri, socket) do
+    # Only one known scope flag with a validated UUID reaches the command.
     scope_arg =
-      cond do
-        is_binary(params["lead"]) -> "--lead #{params["lead"]}"
-        is_binary(params["run"]) -> "--run #{params["run"]}"
-        is_binary(params["draft"]) -> "--draft #{params["draft"]}"
-        true -> "--lead LEAD_ID"
-      end
+      Enum.find_value(["lead", "run", "draft"], "--lead LEAD_ID", fn key ->
+        # A 36-character UUID string only (Ecto.UUID.cast/1 would also accept
+        # any 16-byte string as a raw binary UUID).
+        value = params[key]
 
-    socket = assign(socket, scope_arg: sanitize(scope_arg))
+        if is_binary(value) and Regex.match?(@uuid, value),
+          do: "--#{key} #{String.downcase(value)}"
+      end)
+
+    socket = assign(socket, scope_arg: scope_arg)
     {:noreply, if(connected?(socket), do: load(socket), else: socket)}
   end
-
-  defp sanitize(arg), do: String.replace(arg, ~r/[^A-Za-z0-9_\- ]/, "")
 
   defp load(socket) do
     scope = socket.assigns.current_scope
@@ -53,10 +56,11 @@ defmodule SdrAgentWeb.ExportsLive do
              "audit exports list"
            ) do
       socket
-      |> assign(loaded?: true)
+      |> assign(loaded?: true, withheld: nil)
       |> stream(:exports, exports, reset: true)
     else
-      {:error, reason} -> assign(socket, withheld: AuditedView.error_message(reason))
+      {:error, reason} ->
+        assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
     end
   end
 

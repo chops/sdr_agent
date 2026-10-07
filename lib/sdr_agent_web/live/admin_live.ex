@@ -47,6 +47,7 @@ defmodule SdrAgentWeb.AdminLive do
            ) do
       assign(socket,
         loaded?: true,
+        withheld: nil,
         provider: Application.get_env(:sdr_agent, :model_provider),
         integrations: [
           {"CRM", Integrations.crm()},
@@ -62,7 +63,8 @@ defmodule SdrAgentWeb.AdminLive do
         users: users
       )
     else
-      {:error, reason} -> assign(socket, withheld: AuditedView.error_message(reason))
+      {:error, reason} ->
+        assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
     end
   end
 

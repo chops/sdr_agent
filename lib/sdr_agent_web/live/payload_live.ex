@@ -20,7 +20,16 @@ defmodule SdrAgentWeb.PayloadLive do
 
   @impl true
   def handle_params(%{"sha256" => sha256}, _uri, socket) do
-    socket = assign(socket, sha256: String.downcase(sha256))
+    # Every hash starts from nothing: no content of a previous hash survives.
+    socket =
+      assign(socket,
+        sha256: String.downcase(sha256),
+        loaded?: false,
+        withheld: nil,
+        content: nil,
+        bytes: nil
+      )
+
     {:noreply, if(connected?(socket), do: load(socket), else: socket)}
   end
 
@@ -33,9 +42,20 @@ defmodule SdrAgentWeb.PayloadLive do
          true <-
            Base.encode16(:crypto.hash(:sha256, content), case: :lower) == sha ||
              {:error, :content_hash_mismatch} do
-      assign(socket, loaded?: true, content: display(content), bytes: byte_size(content))
+      assign(socket,
+        loaded?: true,
+        withheld: nil,
+        content: display(content),
+        bytes: byte_size(content)
+      )
     else
-      {:error, reason} -> assign(socket, withheld: AuditedView.error_message(reason))
+      {:error, reason} ->
+        assign(socket,
+          loaded?: false,
+          content: nil,
+          bytes: nil,
+          withheld: AuditedView.error_message(reason)
+        )
     end
   end
 
