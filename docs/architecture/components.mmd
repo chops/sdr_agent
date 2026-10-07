@@ -4,7 +4,7 @@ graph TB
         App[Application Supervisor]
         Budget[In-memory BudgetStore<br/>supervised Agent]
         ModelProvider[ModelProvider facade<br/>budget + Zoi validation]
-        CodexAdapter[CodexAppServer adapter<br/>serialized GenServer]
+        CodexAdapter[CodexAppServer adapter<br/>serialized, tool-free GenServer]
         Telemetry[Telemetry setup and GenAI helper]
     end
 
