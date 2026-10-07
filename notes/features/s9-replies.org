@@ -269,6 +269,7 @@ authorization); its assertion is unchanged.
   :integration)=; invalid-signature rejection is covered by
   =webhook_controller_test.exs=; reprocessing is a no-op by state.
 
+<<<<<<< HEAD
 ** Rebase onto S8b review round 1 (=a1fd23c=)
 =s9-replies= rebased onto =origin/s8b-delivery= @ =a1fd23c= (S8a/S8b
 review fixes). One conflict: =ApplySuppression= (S8a MF1 locks *every* lead
@@ -341,3 +342,20 @@ the reported =Plug.Parsers.ParseError=): 25/30 over the touched files.
    (404) — setup-level, not behavioural assertions; it stays NEEDS_REVIEW
    for that reason as well as the parser defect. This round's RED is
    assertion-level.
+=======
+** S9b RED (2026-10-07, branch =s9b-classification= stacked on S9a)
+=MIX_TEST_PARTITION=_s9 mix test test/sdr_agent/outreach/reply_assessment_test.exs
+test/sdr_agent/demo/replies_test.exs=: *Result: 1/12 passed* — the one
+passing test is the negative guard "an unmatched reply is not classified"
+(no classification job exists yet); every failure is the intended missing
+behaviour.
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| v2 route, interested classified + hand-off, interested-first queue, model-added unsubscribe, rule-first unsubscribe, AGT-only (6) | test/sdr_agent/outreach/reply_assessment_test.exs | FAILING | no =sdr.reply.received= route; no =agent= job; =ReplyAssessment= undefined |
+| Unmatched reply not classified (1) | same | PASSING (guard) | nothing is queued yet |
+| Demo interested / unsubscribe / link + delivered / duplicate, task env guard (5) | test/sdr_agent/demo/replies_test.exs | FAILING | =Demo.Replies=, =Mix.Tasks.Sdr.Demo.Reply= undefined |
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED (same
+=tdd_verify.sh= parsing caveat).
+>>>>>>> 3194826 (S9b: failing tests for reply classification, the interested-first hand-off queue and the demo reply helper (RED))
