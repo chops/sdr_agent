@@ -41,7 +41,13 @@ defmodule SdrAgent.Audit.Export do
            bundle(events, payloads, anchor, receipts, key, Keyword.fetch!(opts, :private_key)),
          :ok <- write_exclusive(output, bundle),
          {:ok, completed} <-
-           complete(export, events, anchor, receipts, digest, signature, key, output, actor) do
+           complete(
+             export,
+             events,
+             %{anchor: anchor, receipts: receipts, key: key},
+             %{digest: digest, signature: signature, output: output},
+             actor
+           ) do
       {:ok, %{export: completed, anchor: anchor, path: output}}
     end
   end
@@ -56,16 +62,16 @@ defmodule SdrAgent.Audit.Export do
     AuditExport |> Ash.Changeset.for_create(:request, attrs, actor: actor) |> Ash.create()
   end
 
-  defp complete(export, events, anchor, receipts, digest, signature, key, output, actor) do
+  defp complete(export, events, evidence, artifact, actor) do
     attrs = %{
       from_sequence: List.first(events).sequence,
       to_sequence: List.last(events).sequence,
-      bundle_sha256: digest,
-      bundle_path: output,
-      signature: signature,
-      key_id: key.key_id,
-      assurance_level: assurance(receipts),
-      anchor_ids: [anchor.id]
+      bundle_sha256: artifact.digest,
+      bundle_path: artifact.output,
+      signature: artifact.signature,
+      key_id: evidence.key.key_id,
+      assurance_level: assurance(evidence.receipts),
+      anchor_ids: [evidence.anchor.id]
     }
 
     export |> Ash.Changeset.for_update(:complete, attrs, actor: actor) |> Ash.update()
