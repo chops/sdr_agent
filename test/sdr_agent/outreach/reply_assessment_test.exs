@@ -10,6 +10,8 @@ defmodule SdrAgent.Outreach.ReplyAssessmentTest do
   """
   use SdrAgent.SDRCase, async: false
 
+  require Ash.Query
+
   import SdrAgent.OutreachFixtures
   import SdrAgent.WebhookFixtures
 
@@ -160,6 +162,122 @@ defmodule SdrAgent.Outreach.ReplyAssessmentTest do
 
     assert %{success: 1} = process!()
     refute_enqueued(worker: ReplyWorker)
+  end
+
+  describe "the assessment is bound to the model's validated classification" do
+    setup ctx do
+      %{delivery: op} = delivered!(ctx)
+      reply!(op, "Thanks, this sounds interesting. Could we set up a call next week?")
+      assert %{success: 1} = classify!()
+      [reply] = replies!(ctx)
+      [assessment] = assessments!(ctx)
+      [decision] = decisions_about!(ctx, reply.id, :reply_classification)
+      {:ok, run} = Agents.get_run(assessment.agent_run_id, actor: ctx.agent)
+      %{reply: reply, decision: decision, run: run}
+    end
+
+    defp attrs(ctx, decision, overrides \\ %{}) do
+      Map.merge(
+        %{
+          reply_id: ctx.reply.id,
+          classification: :interested,
+          sentiment: :positive,
+          intent: "Reply classified as interested.",
+          suggested_next_action: :hand_off,
+          confidence: 0.85,
+          reason: "The reply says \"call\".",
+          agent_run_id: decision.agent_run_id,
+          decision_id: decision.id,
+          model_invocation_id: decision.model_invocation_id,
+          supersedes_id: hd(assessments!(ctx)).id
+        },
+        overrides
+      )
+    end
+
+    defp forge!(ctx, overrides) do
+      {:ok, decision} =
+        Agents.record_decision(
+          Map.merge(
+            %{
+              kind: :reply_classification,
+              mode: :llm,
+              agent_run_id: ctx.run.id,
+              subject_resource: "SdrAgent.Outreach.Reply",
+              subject_id: ctx.reply.id,
+              model_invocation_id: ctx.decision.model_invocation_id,
+              output_pointer: "/classification",
+              inputs: %{},
+              outcome: "unsubscribe",
+              idempotency_key: "forged:" <> Ecto.UUID.generate()
+            },
+            overrides
+          ),
+          actor: ctx.agent
+        )
+
+      decision
+    end
+
+    defp refused?(ctx, attrs) do
+      assert {:error, %Ash.Error.Invalid{}} = Outreach.record_assessment(attrs, actor: ctx.agent)
+      assert [_only_the_genuine_one] = assessments!(ctx)
+      assert Enum.filter(suppressions!(ctx), &(&1.reason == :unsubscribe_reply)) == []
+    end
+
+    test "an outcome the model did not produce is refused (forged decision on a real call)",
+         ctx do
+      forged = forge!(ctx, %{})
+
+      refused?(
+        ctx,
+        attrs(ctx, forged, %{classification: :unsubscribe, suggested_next_action: :stop})
+      )
+    end
+
+    test "the genuine decision cannot back a different classification or values", ctx do
+      refused?(ctx, attrs(ctx, ctx.decision, %{classification: :unsubscribe}))
+      refused?(ctx, attrs(ctx, ctx.decision, %{sentiment: :negative}))
+      refused?(ctx, attrs(ctx, ctx.decision, %{confidence: 0.99}))
+    end
+
+    test "a decision citing another run's or purpose's call is refused", ctx do
+      %{run: research_run} = ctx.run |> Map.take([]) |> Map.put(:run, research_run!(ctx))
+
+      [qualification] =
+        invocations!(ctx, research_run) |> Enum.filter(&(&1.purpose == :qualification))
+
+      forged =
+        forge!(ctx, %{
+          model_invocation_id: qualification.id,
+          output_pointer: "/reason",
+          outcome: "interested"
+        })
+
+      refused?(ctx, attrs(ctx, forged))
+    end
+
+    test "a decision about another resource or with another pointer is refused", ctx do
+      wrong_resource =
+        forge!(ctx, %{subject_resource: "SdrAgent.Sales.Lead", outcome: "interested"})
+
+      refused?(ctx, attrs(ctx, wrong_resource))
+
+      wrong_pointer = forge!(ctx, %{output_pointer: "/sentiment", outcome: "interested"})
+      refused?(ctx, attrs(ctx, wrong_pointer))
+    end
+  end
+
+  defp research_run!(ctx) do
+    lead_id = ctx.run.lead_id
+
+    {:ok, runs} =
+      Agents.AgentRun
+      |> Ash.Query.for_read(:read, %{}, actor: ctx.agent)
+      |> Ash.Query.filter(lead_id == ^lead_id and trigger_signal_type == "sdr.lead.assigned")
+      |> Ash.read()
+
+    hd(runs)
   end
 
   test "assessments are written only by the agent", ctx do

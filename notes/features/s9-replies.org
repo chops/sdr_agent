@@ -269,7 +269,6 @@ authorization); its assertion is unchanged.
   :integration)=; invalid-signature rejection is covered by
   =webhook_controller_test.exs=; reprocessing is a no-op by state.
 
-<<<<<<< HEAD
 ** Rebase onto S8b review round 1 (=a1fd23c=)
 =s9-replies= rebased onto =origin/s8b-delivery= @ =a1fd23c= (S8a/S8b
 review fixes). One conflict: =ApplySuppression= (S8a MF1 locks *every* lead
@@ -342,7 +341,6 @@ the reported =Plug.Parsers.ParseError=): 25/30 over the touched files.
    (404) — setup-level, not behavioural assertions; it stays NEEDS_REVIEW
    for that reason as well as the parser defect. This round's RED is
    assertion-level.
-=======
 ** S9b RED (2026-10-07, branch =s9b-classification= stacked on S9a)
 =MIX_TEST_PARTITION=_s9 mix test test/sdr_agent/outreach/reply_assessment_test.exs
 test/sdr_agent/demo/replies_test.exs=: *Result: 1/12 passed* — the one
@@ -358,9 +356,6 @@ behaviour.
 
 *TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED (same
 =tdd_verify.sh= parsing caveat).
-<<<<<<< HEAD
->>>>>>> 3194826 (S9b: failing tests for reply classification, the interested-first hand-off queue and the demo reply helper (RED))
-=======
 
 ** S9b GREEN
 =MIX_TEST_PARTITION=_s9 bin/verify= → *480 passed, 4 excluded* (S9a 468 + 12 new; no existing assertion changed). =mix ash.codegen --check=, =mix credo=, =mix hex.audit= clean. =mix
@@ -417,4 +412,3 @@ ash.codegen s9b_reply_assessments= (migration =20261007160142=; its
   =Demo.Replies.post/3= with =plug:=) → drain =integration= → drain
   =agent=; both demo replies (interested, unsubscribe) are covered by
   =test/sdr_agent/demo/replies_test.exs=.
->>>>>>> 0c17446 (S9b: architecture diagrams (classification flow), GREEN evidence and hand-off notes)

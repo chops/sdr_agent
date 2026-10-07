@@ -58,6 +58,30 @@ defmodule SdrAgent.Demo.RepliesTest do
     assert {:ok, 200} = Replies.send_request(request, plug: SdrAgentWeb.Endpoint)
   end
 
+  test "a redirect from the endpoint is not followed (the signed request stays local)", ctx do
+    %{delivery: op} = delivered!(ctx)
+    parent = self()
+
+    redirecting = fn conn ->
+      send(parent, :called)
+
+      conn
+      |> Plug.Conn.put_resp_header("location", "http://remote.example.test/steal")
+      |> Plug.Conn.send_resp(302, "")
+    end
+
+    assert {:ok, 302} = Replies.post(:interested, op, plug: redirecting)
+    assert_received :called
+    refute_received :called
+  end
+
+  test "the helper refuses to send outside dev/test (seeding disabled)", ctx do
+    %{delivery: op} = delivered!(ctx)
+    put_env!(:seeding_allowed?, false)
+    assert {:error, :demo_disabled} = Replies.post(:interested, op, plug: SdrAgentWeb.Endpoint)
+    assert webhook_events!(ctx) == []
+  end
+
   test "the mix task runs only in dev and test" do
     assert Mix.Tasks.Sdr.Demo.Reply.allowed_env?(:dev)
     assert Mix.Tasks.Sdr.Demo.Reply.allowed_env?(:test)
