@@ -75,6 +75,7 @@ defmodule SdrAgentWeb.LeadLive.Show do
              Keyword.merge(opts, filter: [lead_id: lead.id], sort: [inserted_at: :desc, id: :asc])
            ),
          {:ok, revisions} <- ConsoleData.current_revisions(scope, drafts),
+         {:ok, runs} <- SdrAgent.Agents.list_runs(Keyword.put(opts, :lead_id, id)),
          :ok <-
            AuditedView.record(scope, "SdrAgent.Sales.Lead", lead.id, "lead detail and evidence") do
       assign(socket,
@@ -91,7 +92,8 @@ defmodule SdrAgentWeb.LeadLive.Show do
         claims_by_artifact: Enum.group_by(claims, & &1.research_artifact_id),
         claims: Map.new(claims, &{&1.id, &1}),
         drafts: drafts,
-        revisions: revisions
+        revisions: revisions,
+        runs: runs
       )
     else
       {:error, :not_found} ->
@@ -438,6 +440,34 @@ defmodule SdrAgentWeb.LeadLive.Show do
                   class="max-h-80 overflow-auto whitespace-pre-wrap rounded-lg bg-zinc-950 p-3 font-mono text-[0.72rem] leading-relaxed text-zinc-300"
                 >{@source.before}<mark class="rounded bg-amber-300 px-0.5 text-zinc-950">{@source.quote}</mark>{@source.after}</pre>
               </div>
+            </.card>
+
+            <.card id="lead-runs" title="Agent runs">
+              <:actions :if={@current_scope.role in [:admin, :auditor]}>
+                <.link
+                  id="lead-audit-link"
+                  navigate={~p"/audit?lead=#{@lead.id}"}
+                  class="text-xs font-medium text-teal-700 hover:underline"
+                >
+                  Audit trail →
+                </.link>
+              </:actions>
+              <.empty :if={@runs == []} icon="hero-cpu-chip" title="Not assigned to the agent yet" />
+              <ul class="-my-1 divide-y divide-zinc-100">
+                <li :for={run <- @runs} class="flex items-center justify-between gap-2 py-2">
+                  <.link
+                    navigate={~p"/runs/#{run.id}"}
+                    class="group min-w-0 text-sm text-zinc-800 hover:text-teal-800"
+                  >
+                    <span class="block truncate">{run.trigger_signal_type}</span>
+                    <span class="block text-xs text-zinc-500"><.timestamp at={run.inserted_at} /></span>
+                  </.link>
+                  <span class="flex shrink-0 items-center gap-2">
+                    <.trace_link trace_id={run.trace_id} />
+                    <.badge status={run.status} />
+                  </span>
+                </li>
+              </ul>
             </.card>
 
             <.card id="lead-drafts" title="Drafts">

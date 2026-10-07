@@ -61,6 +61,25 @@ defmodule SdrAgentWeb.LiveUserAuth do
     end
   end
 
+  # Views shown only to some roles (after `:operator`). This shapes the UI;
+  # the domain still authorizes every read and action.
+  def on_mount({:roles, roles}, _params, _session, socket) do
+    case socket.assigns[:current_scope] do
+      %SdrAgentWeb.Scope{role: role} when is_list(roles) ->
+        if role in roles do
+          {:cont, socket}
+        else
+          {:halt,
+           socket
+           |> Phoenix.LiveView.put_flash(:error, "That view is not available for your role.")
+           |> Phoenix.LiveView.redirect(to: ~p"/")}
+        end
+
+      _ ->
+        {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/sign-in")}
+    end
+  end
+
   def on_mount(:live_no_user, _params, _session, socket) do
     if socket.assigns[:current_user] do
       {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/")}

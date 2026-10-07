@@ -33,6 +33,12 @@ defmodule SdrAgentWeb.Router do
       live "/leads/:id", LeadLive.Show, :show
       live "/review", ReviewLive, :index
       live "/drafts/:id", DraftLive, :show
+      live "/operations", OperationsLive, :index
+      live "/runs/:id", RunLive, :show
+      live "/admin", AdminLive, :index
+      live "/audit", AuditLive, :index
+      live "/audit/payloads/:sha256", PayloadLive, :show
+      live "/audit/exports", ExportsLive, :index
     end
   end
 
