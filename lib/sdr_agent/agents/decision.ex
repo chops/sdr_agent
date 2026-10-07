@@ -26,8 +26,9 @@ defmodule SdrAgent.Agents.Decision do
   `kind_actors/0` encodes the S2 rows that name the actor behind each kind
   (AGT for agent reasoning, enrollment, phase and budget decisions; DLV for
   the send gate and its checks; REC reconciliation; WHK the unsubscribe
-  rule; SCH follow-up scheduling; suppression checks by AGT at enrollment
-  and DLV at send). Slices that first emit a kind may tighten it.
+  rule; SCH follow-up scheduling; suppression and campaign-state checks by
+  AGT before it works or enrolls a lead (S7) and by DLV at send). Slices
+  that first emit a kind may tighten it.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -67,7 +68,7 @@ defmodule SdrAgent.Agents.Decision do
     quiet_hours: [:delivery_worker],
     quota_check: [:delivery_worker],
     approval_validation: [:delivery_worker],
-    campaign_state_check: [:delivery_worker],
+    campaign_state_check: [:delivery_worker, :agent_runtime],
     delivery_reconciliation: [:reconciler],
     unsubscribe_rule: [:webhook_ingestor],
     followup_next_step: [:scheduler]
@@ -199,7 +200,11 @@ defmodule SdrAgent.Agents.Decision do
     attribute :inputs_sha256, :binary, allow_nil?: false, writable?: false, public?: true
     attribute :rule_id, :string, public?: true
     attribute :rule_version, :string, public?: true
-    attribute :output_pointer, :string, public?: true, constraints: [trim?: false]
+
+    attribute :output_pointer, :string,
+      public?: true,
+      constraints: [trim?: false, allow_empty?: true]
+
     attribute :outcome, :string, allow_nil?: false, public?: true
     attribute :outcome_detail, :map, allow_nil?: false, default: %{}, public?: true
     attribute :rationale, :string, public?: true

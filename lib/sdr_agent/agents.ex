@@ -14,7 +14,8 @@ defmodule SdrAgent.Agents do
       a different hash is refused), `retire_definition/2`;
     * runs — `create_run/2`, `start_run/2`, `set_run_phase/3`,
       `succeed_run/2`, `fail_run/3`, `exhaust_run_budget/3`, `cancel_run/2`,
-      `retry_run/2`, `reserve_model_call/2`, `get_run/2`;
+      `retry_run/2`, `reserve_model_call/2`, `get_run/2`,
+      `find_run_by_operation/2`;
     * model calls — `reserve_model_invocation/3` (reserves the run budget,
       enforces the persisted daily limit, stores the request Payload and
       numbers the call, in one transaction), `daily_model_call_limit/0`,
@@ -137,6 +138,18 @@ defmodule SdrAgent.Agents do
 
   @doc "Reads one run."
   def get_run(id, opts), do: Ash.get(AgentRun, id, actor: Keyword.get(opts, :actor))
+
+  @doc "The run executing an Operation (`operation_id`)."
+  def find_run_by_operation(operation_id, opts) do
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, actor: Keyword.get(opts, :actor))
+    |> Ash.Query.filter(operation_id == ^operation_id)
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} -> {:error, Ash.Error.Query.NotFound.exception(resource: AgentRun)}
+      other -> other
+    end
+  end
 
   ## Model invocations
 

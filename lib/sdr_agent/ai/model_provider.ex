@@ -43,7 +43,8 @@ defmodule SdrAgent.AI.ModelProvider do
           required(:operation) => String.t(),
           required(:prompt) => String.t(),
           required(:schema) => Zoi.schema(),
-          required(:audit) => map()
+          required(:audit) => map(),
+          optional(:input) => map()
         }
   @type result :: map()
 
