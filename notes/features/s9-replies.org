@@ -1,0 +1,214 @@
+#+TITLE: Feature: S9 — Replies (signed webhook, dedupe, Reply, unsubscribe, delivery outcomes, classification)
+#+DATE: 2026-10-07
+
+* Summary
+Build the S9 rows of the reviewed S2 entity model: a signed, deduplicated
+simulated provider webhook (=capture_sim=) persisted as =WebhookEvent= before
+any effect, processed durably on the =integration= queue into =Reply= rows
+(matched replies stop the sequence in one transaction), deterministic
+unsubscribe (reply rule and signed link) and hard-bounce suppression,
+delivered/bounced delivery outcomes — and (S9b) the agent's
+=ReplyAssessment= classification route, the interested-first hand-off
+queue and a signed demo reply helper.
+
+Split for review (owner brief: ≤ ~2,500 lines): *S9a* (branch
+=s9-replies=, stacked on S8b #14) = webhook, signature, WebhookEvent,
+Reply, side effects, unsubscribe, delivery outcomes; *S9b* (stacked on
+S9a) = ReplyAssessment, =sdr.reply.received= route + SDRAgent v2,
+hand-off queue composition, =mix sdr.demo.reply=.
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: yes
+Reason: creates the S9 rows of the reviewed S2 entity model (WebhookEvent, Reply, ReplyAssessment) and the S9 columns S2 assigns (Suppression reply_id/webhook_event_id, DeliveryReceipt webhook_event_id).
+#+END_EXAMPLE
+
+The reviewed delta is =notes/features/s2-entity-model.org= (soft-stop *PASS*,
+Codex round 4, reply =b1243d3f-a7a8-450e-805e-97363b75e434=; ADR-0009/0010
+accepted). This slice introduces *no entities, attributes, relationships,
+lifecycles or actor grants beyond the S2 rows*; they are not repeated here.
+
+- *Soft-stop verdict:* PASS (inherited from S2; this plan is not a delta).
+- *Implementation choices within the S2 contract* (flagged for the PR
+  reviewer; none weakens suppression, approval, idempotency or audit):
+  1. *Wire format.* =POST /webhooks/capture_sim/:event_type= (event type
+     from the path: =reply=, =unsubscribe=, =bounce=, =delivered=,
+     =complaint=; anything else 404, nothing stored). Headers
+     =x-sdr-timestamp= (unix seconds), =x-sdr-key-id=, =x-sdr-signature=
+     (="v1=" <> hex HMAC-SHA256(key, "<timestamp>.<raw body>")=). The raw
+     bytes are captured by a Plug.Parsers body reader before JSON parsing
+     and verified with =Plug.Crypto.secure_compare/2= (constant time).
+     =external_event_id= is the body's ="id"= (string, ≤ 200 bytes), else
+     ="sha256:" <> hex(body)=.
+  2. *Verdicts* (S2): =missing= (no signature or timestamp header),
+     =stale= (|now − timestamp| > 300 s), =invalid= (unknown key id,
+     malformed or wrong signature, no key configured), =valid=. Every
+     request's raw body is stored as a Payload *before* the WebhookEvent
+     row. Non-valid → row with =processing_status= =rejected= and a
+     =signature_invalid= Failure (warning) in the same transaction, HTTP
+     401, never processed. Valid → upsert on the partial identity (valid
+     events only, so a forged event cannot pre-claim a real id) and the
+     =integration= job in the same transaction, HTTP 202; a duplicate valid
+     event inserts no row and no job, appends =webhook.duplicate_ignored=
+     (subject the original, the duplicate body's sha256), HTTP 200.
+  3. *Key.* =config :sdr_agent, :webhook_hmac, key_id:, source:= —
+     =:derived= in dev/test (HMAC-SHA256 of the endpoint
+     =secret_key_base= with label ="sdr-webhook-key/1"=, as S8b's
+     unsubscribe key: no secret literal anywhere, tests build theirs at
+     runtime), ={:env, "SDR_WEBHOOK_HMAC_KEY"}= in prod (=runtime.exs=;
+     =:derived= is refused in prod; no key → every event =invalid=).
+     =signature_key_id= = ="webhook_hmac:" <> key_id= names the S2
+     IntegrationCredential provider by convention — that resource was not
+     built by S6 and is not created here (no FK in S2). Adding the sops
+     entry + =bin/with-secrets= mapping is an owner action (follow-up).
+  4. *Processing* (=WebhookWorker=, queue =integration=, WHK,
+     =max_attempts= 3): one transaction that locks the event row; only a
+     =received= event is processed (idempotent by state). A payload that
+     fails its Zoi shape or names nothing known → =failed= with a
+     =validation_error= Failure (attention), no retry; a crash rolls back
+     and Oban retries. Success → =processed=.
+  5. *Matching.* =In-Reply-To= =<hex@sdr.example.test>= names the
+     delivery whose =provider_message_id= is ="capture-" <> hex= (S8b
+     derives both from one digest of the idempotency key) and whose
+     =recipient_email= equals =From=; otherwise the most recent
+     accepted/delivered delivery to =From=; otherwise =unmatched= (stored,
+     surfaced, no side effects).
+  6. *Matched reply side effects* (S2, same transaction, independent of
+     classification): enrollment active/paused → =replied=; its
+     =pending=/=failed_retryable= deliveries → =cancelled= with their queued
+     drafts → =cancelled= and still-granted approvals → =invalidated=
+     (=campaign_closed=: S2 has no reply reason; S8 choice 22's closest
+     reason for "enrollment not active"); its =pending_review= drafts →
+     =cancelled=; lead =in_outreach= → =replied= (enters
+     =Sales.list_handoff_queue/1=); =sdr.reply.received= recorded. A
+     delivery already claimed (=attempting=) is in flight and left to its
+     outcome; =advance_enrollment= skips a non-active enrollment.
+     *Follow-ups stop by state:* the scheduled =followup= job records a
+     deterministic =stop= =followup_next_step= Decision (enrollment not
+     active) — the job is not deleted, the Decision is the record.
+  7. *Lock order* (S8 global order, ADR-0009 "every row lock before the
+     first append"): event row, then leads → enrollments → drafts →
+     deliveries → approvals of the reply's lead *and* of every contact with
+     the suppression value (=Outreach.Locks.targets/4=, the query
+     =ApplySuppression= uses), all before the first append, so the
+     suppression created later in the same transaction re-locks only rows
+     it already holds.
+  8. *Unsubscribe rule.* Every reply gets one deterministic
+     =unsubscribe_rule= Decision (WHK, rule ="outreach.unsubscribe_rule"=
+     v1: normalised subject + body against a fixed phrase list; inputs the
+     body sha256 and matched phrases; outcome =unsubscribe= | =none=). A
+     matched =unsubscribe= → Suppression =:from_reply_rule= (WHK, email of
+     the matched delivery's recipient, =unsubscribe_reply=, =decision_id=,
+     =reply_id=, =webhook_event_id=). The model never decides it (S9b's
+     classification may only *add* the same suppression).
+  9. *Unsubscribe link.* =unsubscribe= events carry =contact_id= and
+     =token=; =Unsubscribe.verify/3= (constant time) → an =unsubscribe_rule=
+     Decision (rule ="outreach.unsubscribe_link"=) and Suppression
+     =:from_link= (=unsubscribe_link=, =webhook_event_id=). A bad token
+     → =failed= (=validation_error=), nothing suppressed.
+ 10. *Delivery outcomes.* =delivered= / =bounce= / =complaint= name the
+     =provider_message_id=. Delivered: =mark_delivered= + =delivered=
+     receipt (WHK, =webhook_event_id=) when the delivery is =accepted=,
+     otherwise nothing (idempotent). Bounce: =mark_bounced= (opens its
+     =delivery_failed= Failure) + =bounced= receipt when =accepted=, and in
+     every case a =hard_bounce= Suppression =:from_bounce=
+     (=delivery_operation_id=, =webhook_event_id=). Complaint: =complaint=
+     Suppression =:from_complaint= (same sources).
+ 11. *Suppression source constraints* (S2 "the source matching the reason
+     is required"): =unsubscribe_reply= ⇒ =decision_id= and =reply_id=;
+     =unsubscribe_link= ⇒ =webhook_event_id=; =hard_bounce= ⇒
+     =delivery_operation_id=; =complaint= ⇒ =webhook_event_id=.
+ 12. *No Operation rows* for =integration= jobs (as S8 choice 32): the
+     WebhookEvent (=processing_status=, =failure_id=) is the
+     operator-visible record; S13 owns Operation wrappers.
+ 13. *S9b: classification.* A matched reply's processing transaction also
+     creates the queued AgentRun (AGT, =SDRAgent= v2) and its =agent=-queue
+     job; the route =sdr.reply.received= → =ClassifyReply= makes one model
+     call (=reply_classification= purpose, Zoi schema), records an LLM
+     =reply_classification= Decision and the agent ReplyAssessment
+     (supersedes root); =unsubscribe= ⇒ ensure the Suppression (AGT
+     =:from_classification=, add-only). No response is drafted (owner
+     decision). =Outreach.list_handoff_queue/1= = replied leads with their
+     latest reply and current assessment, interested first, then oldest
+     hand-off. Human override of an assessment is deferred (its
+     unsubscribe ⇒ suppression source needs an S2 decision for REV).
+ 14. *Deferred (scoped follow-up):* the =sdr.followup.due= and
+     =sdr.draft.requested= (redraft) agent routes — drafting a follow-up
+     for an existing enrollment needs a hand-off variant (no new
+     enrollment, next step, lead already =in_outreach=) and an AgentRun
+     created by the FollowupWorker; recorded for a follow-up slice.
+
+* Affected Apps
+- [X] Core (=sdr_agent=)
+- [X] Web (=sdr_agent_web=) — webhook route, controller, raw body reader
+  only (no UI: S10)
+- [X] Other: migration + snapshots (=mix ash.codegen=), config
+
+* Affected Modules (S9a)
+- =lib/sdr_agent/operations/webhook_event.ex= (+ changes) — new resource.
+- =lib/sdr_agent/outreach/reply.ex=, =outreach/webhooks.ex= (ingest +
+  process), =outreach/webhooks/signature.ex=, =outreach/webhook_worker.ex=,
+  =outreach/locks.ex=, =outreach/unsubscribe_rule.ex=,
+  =outreach/changes/apply_reply.ex=.
+- =outreach/suppression.ex= (WHK actions, columns, constraints),
+  =outreach/delivery_receipt.ex= (WHK, =webhook_event_id=),
+  =outreach/changes/apply_suppression.ex= (shared lock query).
+- =lib/sdr_agent_web/{endpoint,router}.ex=,
+  =sdr_agent_web/raw_body_reader.ex=,
+  =sdr_agent_web/controllers/webhook_controller.ex=.
+- =config/{config,runtime}.exs= (queue =integration=, key config).
+
+* Required Tests (S9a)
+- [ ] Signature: valid; wrong key/signature, unknown key id, malformed →
+      invalid; no headers → missing; old/future timestamp → stale.
+- [ ] HTTP: valid → 202, raw bytes in Payload, WebhookEvent =received=,
+      job enqueued; invalid/missing/stale → 401, =rejected=, Failure
+      =signature_invalid=, no job, nothing processed; duplicate → 200, one
+      row, one job, =webhook.duplicate_ignored=; unknown type → 404.
+- [ ] Reply: matched → Reply, enrollment and lead =replied=,
+      =sdr.reply.received=, event =processed=; pending delivery + queued
+      draft + granted approval and an in-review draft of the enrollment
+      cancelled/invalidated; unmatched → stored, no side effects;
+      reprocessing is a no-op; malformed payload → =failed= + Failure.
+- [ ] Unsubscribe: reply rule → Decision + Suppression (lead stopped);
+      ordinary reply → =none=, no suppression; link with valid token →
+      =unsubscribe_link= Suppression; bad token → =failed=, none.
+- [ ] Delivered → =delivered= + receipt; bounce → =bounced= + Failure +
+      =hard_bounce= Suppression; follow-up job after a reply records =stop=.
+- [ ] Policies: WebhookEvent writes WHK only (AUR denied and audited).
+- [ ] Real-connection races: two identical webhooks → one row, one job;
+      a reply racing the delivery claim → no deadlock, either the delivery
+      is cancelled or it completes and the enrollment is not advanced.
+
+* Risks & Considerations
+- The suppression created inside the reply transaction must not take a
+  row lock it does not already hold after the first append (choice 7).
+- Shared test database: local runs use =MIX_TEST_PARTITION=_s9=; the dev
+  database and port 4120 belong to the owner's live session (not touched).
+- ADR: none (no new dependency or boundary; the webhook follows ADR-0002
+  and checklist 4.3).
+
+* Questions (if any)
+None blocking; choices are flagged for the PR reviewer.
+
+-----
+
+* TDD Tracking
+
+** S9a RED (2026-10-07, branch =s9-replies= stacked on S8b)
+=MIX_TEST_PARTITION=_s9 mix test= over the five new S9a files:
+*Result: 0/30 passed* — every failure is the intended missing behaviour.
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| Valid, invalid (body, key, key id, malformed), missing, stale, no key, derived key (6) | test/sdr_agent/outreach/webhook_signature_test.exs | FAILING | =Outreach.Webhooks.Signature= undefined |
+| Valid → 202 + Payload + job; forged, unsigned, stale → 401 + rejected + Failure; no pre-claim; duplicate; unknown type (6) | test/sdr_agent_web/controllers/webhook_controller_test.exs | FAILING | no =/webhooks= route (404); =WebhookEvent= undefined |
+| Matched reply, cancels unsent delivery / review draft, follow-up stop, unsubscribe rule, unmatched, sender fallback, idempotent, bad shape, WHK-only (10) | test/sdr_agent/outreach/reply_test.exs | FAILING | =Signature.current_key!/0=, =Outreach.Reply= undefined |
+| Delivered, bounce, complaint, unknown message, unsubscribe link, forged token (6) | test/sdr_agent/outreach/delivery_outcome_test.exs | FAILING | =Signature.current_key!/0= undefined |
+| Duplicate webhook race, reply vs next-delivery claim race (2) | test/sdr_agent/outreach/webhook_race_test.exs | FAILING | relation =replies= does not exist |
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED —
+=bin/tdd_verify.sh= cannot parse Elixir 1.20's =Result: N/M passed=
+summary (same defect as S1–S8); the failures above are the intended ones
+(proceeding under ADR-0001; the peer reviews RED on the PR).
