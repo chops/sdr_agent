@@ -1,0 +1,220 @@
+#+TITLE: Feature: S5 — accounts, sales and research domain (+ demo seed)
+#+DATE: 2026-10-07
+
+* Summary
+Build exactly the rows whose creating slice is S5 in the reviewed S2 entity
+model: the =Accounts.User= delta (password auth, roles admin/reviewer/auditor,
+status, tenant), the =SdrAgent.Sales= domain (IcpDefinition, Account,
+Contact, Lead, Campaign, Sequence, SequenceStep, CampaignEnrollment), the
+=SdrAgent.Research= domain (ResearchArtifact, EvidenceClaim, Qualification,
+QualificationEvidence), and deterministic demo seed fixtures
+(=mix sdr.demo.seed=, dev/test only). Replace the S3 test stand-in
+=SdrAgent.Test.Human= with real Users and re-run the S3 suites.
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: yes
+Reason: creates the S5 rows of the reviewed S2 entity model (User delta; Sales and Research resources, policies, lifecycles).
+#+END_EXAMPLE
+
+The reviewed delta is =notes/features/s2-entity-model.org= (soft-stop *PASS*,
+Codex round 4, peer reply =b1243d3f-a7a8-450e-805e-97363b75e434=; ADR-0009
+and ADR-0010 accepted). This slice introduces *no new entities, attributes,
+relationships or lifecycles*; the S2 rows are not repeated here.
+
+- *Soft-stop verdict:* PASS (inherited from S2; this plan is not a delta).
+- *Implementation choices within the S2 contract* (flagged for the PR
+  reviewer; none weakens suppression, approval, idempotency or audit):
+  1. *User trace ids.* The trace convention covers "every row of every new
+     resource"; User is an existing resource and its S2 row lists no trace
+     columns, so none are added. It gains =inserted_at=/=updated_at= (time
+     convention for mutable resources).
+  2. *No self-service flows.* Public registration, password reset,
+     confirmation, magic link and remember-me are not configured (no email in
+     the MVP; S2: "public registration disabled", AUR password only via ADM).
+     The router drops the register/reset/confirm/magic-link routes that
+     pointed at non-existent strategies. =sign_in_tokens_enabled? false=, so
+     a browser sign-in runs the password read action exactly once (one audit
+     event per attempt). The generator's unpinned =bcrypt_elixir= line is not
+     added: bcrypt is already a locked, non-optional dependency of
+     ash_authentication.
+  3. *Disabled users.* "Disabled users cannot sign in": the sign-in and
+     session-lookup (=get_by_subject=) reads only match =status = active=,
+     and disabling a user revokes all of its tokens (existing
+     log-out-everywhere add-on), so an open session ends too.
+  4. *First admin.* The S2 "bootstrap task for the first admin" is the
+     seeder (SEED, dev/test only); no separate KRN action is built.
+  5. *Seeder setup transitions.* S2 gives SEED "create" on Sales rows; a demo
+     needs an active ICP, Sequence and Campaign, so SEED may also run their
+     =activate= transitions — only in dev/test (=seeding_allowed?= config,
+     checked by =SdrAgent.Audit.Checks.SeedingAllowed=), audited with actor
+     =seeder=. Impersonating the admin in the ledger was rejected.
+  6. *Sensitive attributes in events.* =AppendEvent= omits attributes marked
+     =sensitive?= (=hashed_password=) from the payload's after-image and lists
+     them under =redacted=; =record_sha256= still covers the full row.
+  7. *From-state in events.* S2 Lead: "AE: every transition (from, to,
+     reason, decision id)". Lead transitions run non-atomically with the row
+     locked (=get_and_lock_for_update=) so the recorded =previous.status= is
+     exact; =Transition= gains a =locked?: true= mode that checks the
+     from-state on the locked row. Contact =change_email= records the old
+     email the same way.
+  8. *Lead → blocked* is authorized for AGT (the S2 policy cell omits it);
+     the Failure side effect arrives with Failure in S7.
+  9. *Lead → qualified/disqualified* runs only inside the Qualification
+     create (a private context marker checked by policy), for agent
+     qualifications of a lead in =qualifying=. A human override records a
+     superseding Qualification but does not move the lead (S2 has no
+     qualified ↔ disqualified transition); operators stop or reopen the lead.
+ 10. *Human-override decision.* Qualification.decision_id is required, and
+     humans never record Decisions; an override therefore carries the
+     superseded row's =decision_id= (set server-side).
+ 11. *Agent qualification provenance.* =source: agent= requires
+     =agent_run_id= equal to the decision's run, an =llm= decision of kind
+     =qualification= whose invocation is =completed= and =valid=.
+ 12. *Grounding check input.* EvidenceClaim and ResearchArtifact creates take
+     the artifact =content= as an argument; the server verifies
+     sha256(content) = the artifact's =content_sha256= (content-addressed),
+     so the check runs against the stored bytes without reading Payload
+     content outside =read_content=. Offsets are Unicode code points,
+     half-open =[char_start, char_end)=; the slice must equal =quote=
+     byte-for-byte.
+ 13. *Artifact URLs.* =source_url= is =fixture://…= or http(s) on a reserved
+     host (the synthetic-data guard). =freshness= is supplied by the
+     retrieving action (S7), which computes it at retrieval.
+ 14. *Timezones (no new dependency).* Elixir ships a UTC-only timezone
+     database, so S5 validates IANA zone names by shape only. CampaignEnrollment
+     =advance_step= ("evaluated in campaign timezone") and its =→ completed=
+     transition are deferred to S8, its only caller (DLV), which also needs a
+     tz database for quiet hours and SendQuotaDay and must add it by ADR.
+ 15. *Hand-off queue.* =Sales.list_handoff_queue/1= returns replied leads
+     (oldest hand-off first). Ordering by ReplyAssessment ("interested
+     first") needs Outreach data, which Sales may not read (layering); S9/S10
+     compose it above Outreach.
+ 16. *Campaign edits and archive.* =update= is allowed only in =draft= (the
+     conservative reading: ICP/sequence/sender are fixed once active);
+     =archive= is from draft, active or paused (completed is terminal).
+ 17. *Enrollment preconditions.* Besides the orchestrating action (S7), the
+     create itself checks lead =qualified= and campaign =active= (both Sales).
+ 18. *Seed outcomes.* Leads are seeded =new=. S2 allows =qualified= /
+     =disqualified= only with a Qualification (agent provenance) and
+     suppression only with an Outreach Suppression row (S8), so the fixtures
+     *designate* outcomes: accounts that fit / miss the ICP (≥ 1 each) and a
+     contact whose Suppression S8 must seed (=SdrAgent.Demo.Fixtures=
+     exposes them). Fabricating agent provenance in the seed was rejected.
+
+* Affected Apps
+- [X] Core (=sdr_agent=)
+- [X] Web (=sdr_agent_web=) — router auth routes, sign-out audit only
+- [X] Other: migrations + snapshots (=mix ash.codegen=), config
+
+* Affected Modules
+- =lib/sdr_agent/accounts.ex=, =lib/sdr_agent/accounts/user.ex= — User delta,
+  password strategy, policies, domain API; =accounts/changes/*=,
+  =accounts/checks/*=, =accounts/preparations/*=.
+- =lib/sdr_agent/sales.ex=, =lib/sdr_agent/sales/*.ex= — new domain, eight
+  resources, embedded IcpCriteria, synthetic guard, changes/validations.
+- =lib/sdr_agent/research.ex=, =lib/sdr_agent/research/*.ex= — new domain,
+  four resources, embedded criteria/source location, grounding changes.
+- =lib/sdr_agent/audit/changes/append_event.ex= (redaction, =previous:=),
+  =audit/changes/transition.ex= (=locked?:=), =audit/checks/seeding_allowed.ex=,
+  =lib/sdr_agent/audit/guarded_call.ex= (shared guarded create/update/action).
+- =lib/sdr_agent/demo/{fixtures,seed}.ex=, =lib/mix/tasks/sdr.demo.seed.ex=.
+- =lib/sdr_agent_web/router.ex=, =controllers/auth_controller.ex=.
+- =config/config.exs= (domains), =config/dev.exs=, =config/test.exs=
+  (=seeding_allowed?=).
+- =test/support/audit_case.ex= (real users), delete =test/support/human.ex=;
+  new =test/support/sales_fixtures.ex=.
+
+* Implementation Steps
+1. Plan (this file); commit.
+2. RED: tests below; record the TDD table (NEEDS_REVIEW expected:
+   =bin/tdd_verify.sh= cannot parse Elixir 1.20's summary).
+3. Accounts: User delta, password strategy, sign-in audit, last-admin guard,
+   domain API; AuditCase real users; S3 suites green with real users.
+4. Sales then Research resources; shared changes; =mix ash.codegen s5_domain=.
+5. Demo fixtures + seed + mix task.
+6. Gates: =bin/verify=, =mix ash.codegen --check=, =mix credo=,
+   =mix hex.audit=; architecture diagrams (two new domains).
+
+* Required Tests
+- [ ] User: ADM =create_user= (hash, role, tenant, event without hash);
+      REV/AUR/system denied (guarded: one =authz.denied= each);
+      registration action absent; unique email.
+- [ ] Roles/status: ADM change role/status (events); last active admin cannot
+      be demoted or disabled; disabled user cannot sign in; disabling revokes
+      tokens.
+- [ ] Passwords: ADM/REV change own (current password required, tokens
+      revoked, event); AUR denied through the AshAuthentication
+      =change_password= action (audited); ADM =set_password= for another user
+      incl. an auditor; REV cannot =set_password=.
+- [ ] Sign-in: success / wrong password / unknown email / disabled user →
+      =auth.sign_in.succeeded= or =auth.sign_in.failed= (anonymous, email
+      sha256 only); controller sign-in and sign-out (=auth.signed_out=).
+- [ ] User reads: self; ADM all; AUR others' display_name/role only; REV
+      not others.
+- [ ] S3 suites re-run with real =Accounts.User= actors (stand-in deleted).
+- [ ] Sales: per resource create/update allow (ADM, SEED in dev/test) and
+      deny (REV, AUR, AGT); synthetic guard on account domain, contact email,
+      sender email; lifecycle transition tables equal declared actions;
+      forbidden transitions rejected; ICP criteria immutable once active and
+      =new_version=; sequence ≥ 1 step to activate, steps only while draft,
+      position 1 delay 0, requires_approval/stop_on_reply true; campaign
+      activation needs active ICP + sequence, pause/resume by REV, Tier 0;
+      contact =change_email= records old/new; lead account = contact account,
+      archived account refused, one open lead per contact, AGT transitions
+      need a decision, events carry from/to; hand-off queue; enrollment
+      preconditions and transitions by role.
+- [ ] Research: artifact stores content in Payload, idempotent on identity
+      (no second event), excerpt substring, URL guard; claim grounding
+      (mismatch refused, content hash checked, lead = artifact lead);
+      qualification lineage (one root, must supersede current), qualified
+      needs an accepted claim, agent provenance rules, lead transitions in the
+      same transaction, human override; QualificationEvidence only via parent.
+- [ ] Append-only triggers on the four Research tables.
+- [ ] Auditor: every S5 mutation denied, each with exactly one
+      =authz.denied=; guard does not block ADM/REV/system actors.
+- [ ] Seed: refuses when seeding is not allowed; idempotent (second run adds
+      no rows or events); deterministic (two runs produce identical rows
+      apart from tenant/trace ids and password hashes); designated outcomes
+      present; chain verifies.
+
+* Risks & Considerations
+- Every audited write takes the chain-head row lock (ADR-0009); seeding ~40
+  rows is serial by design.
+- Field policies on User must not hide fields from the kernel/verifier or
+  AshAuthentication, or record hashes and sign-in break (tested).
+- Lead transitions use row locks (non-atomic); acceptable at MVP volume.
+- Shared test database: local runs use =MIX_TEST_PARTITION=_s5=.
+- ADR: none. No dependency is added; choices 1–18 stay inside ADR-0001/
+  0002/0009/0010. S8 needs a timezone-database ADR (choice 14).
+
+* Questions (if any)
+None blocking; choices 1–18 are flagged for the PR reviewer.
+
+-----
+
+* TDD Tracking
+(Filled during Phase 4a)
+
+-----
+
+* Implementation Notes
+(Added during Phase 4b)
+
+* Completion Checklist
+
+** Phase 4
+- [ ] All Phase 4a tests verified failing
+- [ ] TDD gate confirmed
+- [ ] All steps implemented
+- [ ] All tests passing
+- [ ] Compiled with --warnings-as-errors
+- [ ] Ash boundaries respected
+
+** Phase 5 (Verify + Finalize)
+- [ ] Full test suite passes
+- [ ] Moduledocs reviewed for new/modified public modules
+- [ ] Plan document updated with implementation notes
+- [ ] Architecture evaluation reported
+- [ ] ADR status: no new ADR
