@@ -18,6 +18,13 @@ defmodule SdrAgent.Audit.Payload do
     * `:read_content` — ADM, REV, AUR, AUD: returns the content after
       appending an AuditAccess (`payload_view`) and its event in the same
       transaction (fail closed). A guarded action (denials are audited).
+    * `:read_reconciliation_content` — REC only, and only inside the private
+      scope `SdrAgent.Agents.read_reconciliation_payloads/2` attaches
+      (`SdrAgent.Audit.Checks.ReconciliationScope`): one invocation's
+      request/response hashes in the actor's tenant. Takes no purpose — the
+      recorded purpose is fixed by the scope. Same fail-closed
+      `payload_view` access as `:read_content`, under REC's own identity
+      (S12 supplementary ruling S1–S3).
 
   Append-only (trigger).
   """
@@ -108,6 +115,22 @@ defmodule SdrAgent.Audit.Payload do
         )
       end
     end
+
+    action :read_reconciliation_content, :binary do
+      description "REC: return one scoped invocation payload, recording a payload_view first."
+      transaction? false
+      argument :sha256, :binary, allow_nil?: false
+
+      run fn input, context ->
+        {:ok, scope} = Checks.ReconciliationScope.fetch(input.context)
+
+        SdrAgent.Audit.Kernel.read_content(
+          input.arguments.sha256,
+          Checks.ReconciliationScope.purpose(scope),
+          context.actor
+        )
+      end
+    end
   end
 
   policies do
@@ -132,6 +155,10 @@ defmodule SdrAgent.Audit.Payload do
     policy action(:read_content) do
       authorize_if {Checks.ActorRole, roles: [:admin, :reviewer, :auditor]}
       authorize_if {Checks.ActorType, types: [:auditor_cli]}
+    end
+
+    policy action(:read_reconciliation_content) do
+      authorize_if Checks.ReconciliationScope
     end
 
     policy action_type(:read) do

@@ -26,6 +26,9 @@ defmodule SdrAgent.Audit.Changes.AppendEvent do
     * `:category` (required) — AuditEvent category
     * `:links` — keyword of `event_field: record_field` copied onto the event
       (e.g. `[agent_run_id: :id, correlation_id: :correlation_id]`)
+    * `:context_links` — keyword of `event_field: context_key` copied from
+      the changeset context, for correlation a change derived from a parent
+      row the resource has no column for (e.g. a WireWitnessLink's run id)
     * `:tenant` — record field holding the tenant id (default `:tenant_id`)
     * `:arguments` — action arguments to include in the payload
     * `:version_refs` — `{module, function}` called with the record, returning
@@ -94,6 +97,11 @@ defmodule SdrAgent.Audit.Changes.AppendEvent do
       |> Map.new(fn {event_field, record_field} ->
         {event_field, Map.get(record, record_field)}
       end)
+      |> Map.merge(
+        opts
+        |> Keyword.get(:context_links, [])
+        |> Map.new(fn {event_field, key} -> {event_field, Map.get(changeset.context, key)} end)
+      )
 
     version_refs =
       case Keyword.get(opts, :version_refs) do

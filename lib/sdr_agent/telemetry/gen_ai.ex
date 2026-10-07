@@ -14,6 +14,30 @@ defmodule SdrAgent.Telemetry.GenAI do
     end
   end
 
+  @doc """
+  The W3C `traceparent` (version 00) of the current span, or `nil` when no
+  valid span is active. The sampled flag is the context's own (`00`/`01`);
+  ids are lowercase hex. Read in the calling process: the ClaudeCLI adapter
+  forwards it so the local proxy can parent its witness span (ADR-0005 S12).
+  """
+  @spec traceparent() :: String.t() | nil
+  def traceparent do
+    case :otel_span.hex_span_ctx(OpenTelemetry.Tracer.current_span_ctx()) do
+      %{otel_trace_id: trace_id, otel_span_id: span_id, otel_trace_flags: flags} ->
+        if valid_id?(trace_id, 32) and valid_id?(span_id, 16),
+          do: "00-#{trace_id}-#{span_id}-#{flags}",
+          else: nil
+
+      _ ->
+        nil
+    end
+  end
+
+  defp valid_id?(hex, size) when is_binary(hex),
+    do: byte_size(hex) == size and hex =~ ~r/\A[0-9a-f]+\z/ and hex != String.duplicate("0", size)
+
+  defp valid_id?(_hex, _size), do: false
+
   @doc false
   def telemetry_payload(operation, metadata) do
     {attributes(operation, metadata), content_events(metadata)}

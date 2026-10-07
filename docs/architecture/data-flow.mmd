@@ -110,8 +110,9 @@ flowchart LR
     Runner -- signal events --> Append
     Provider --> Budget
     Provider --> Validation
-    Provider --> Adapter
-    Adapter --> Claude
+    Provider -- "invocation id + gen_ai traceparent" --> Adapter
+    Adapter -- "child env only" --> Claude
+    Claude -. "proxy deployed: correlated exchange" .-> Witness[(Proxy witness store<br/>read by S12c reconciler)]
     Resources -.-> Cache
     LiveViews -.-> Grant
     Grant --> Postgres
