@@ -43,8 +43,9 @@ relationships or lifecycles*; the S2 rows are not repeated here.
      session-lookup (=get_by_subject=) reads only match =status = active=,
      and disabling a user revokes all of its tokens (existing
      log-out-everywhere add-on), so an open session ends too.
-  4. *First admin.* The S2 "bootstrap task for the first admin" is the
-     seeder (SEED, dev/test only); no separate KRN action is built.
+  4. *First admin.* Revised in review round 1 (Codex rejected seeder-only):
+     a kernel-only =:bootstrap_admin= and =mix sdr.bootstrap_admin= create
+     the first admin in any environment, only while the tenant has no users.
   5. *Seeder setup transitions.* S2 gives SEED "create" on Sales rows; a demo
      needs an active ICP, Sequence and Campaign, so SEED may also run their
      =activate= transitions — only in dev/test (=seeding_allowed?= config,
@@ -63,9 +64,10 @@ relationships or lifecycles*; the S2 rows are not repeated here.
      the Failure side effect arrives with Failure in S7.
   9. *Lead → qualified/disqualified* runs only inside the Qualification
      create (a private context marker checked by policy), for agent
-     qualifications of a lead in =qualifying=. A human override records a
-     superseding Qualification but does not move the lead (S2 has no
-     qualified ↔ disqualified transition); operators stop or reopen the lead.
+     qualifications of a lead in =qualifying=. Revised in review round 1:
+     a human override that flips the outcome moves the lead qualified ↔
+     disqualified in the same transaction, and is refused in any other lead
+     state (operators then use =:stop=).
  10. *Human-override decision.* Qualification.decision_id is required, and
      humans never record Decisions; an override therefore carries the
      superseded row's =decision_id= (set server-side).
@@ -255,6 +257,23 @@ reopened lead, the failing-transition case commits) or on the missing
 =:disqualify_by_override= action (6); the Lead transition-table test lacks
 the two new rows (1). Same =tdd_verify.sh= parsing caveat: NEEDS_REVIEW.
 
+GREEN (round 1): =bin/verify= *234 passed* (1 excluded, S6a);
+=ash.codegen --check= (no schema change: the Lead states already existed),
+=credo= and =hex.audit= clean; the concurrency module passed 5 of 5 runs.
+- =Accounts.bootstrap_admin/2= runs as a kernel request (=Kernel.opts=);
+  the action's policy is =KernelContext= only, so the seeder, a kernel actor
+  without the kernel marker, the agent and anonymous callers are Forbidden.
+  =FirstUserOnly= locks the tenant row, then counts users; six concurrent
+  bootstraps → exactly one admin. The password is an action argument only
+  (never an event field; the hash is redacted), the task prints a generated
+  password once via the Mix shell (not Logger), and =--password-stdin= does
+  not echo.
+- The S2 Lead lifecycle gains the two reviewer-required edges
+  (=disqualify_by_override=, =requalify_by_override=), both behind the
+  qualification marker and ADM/REV; the transition-table test lists them.
+  The one RED-era assertion that changed by contract: =User= create actions
+  are now =[:bootstrap_admin, :create_user, :seed]=.
+
 -----
 
 * Implementation Notes
@@ -358,6 +377,8 @@ advisories) clean. No dependency added.
   must stop leads/enrollments — the S5 policies allow ADM/REV/WHK for
   =stop=, so suppressions created by AGT or DLV need a marker or a policy
   extension; seed a Suppression for =Fixtures.suppressed_contact_emails/0=.
+- *Deployment:* the first admin comes from =mix sdr.bootstrap_admin --email
+  …= (any environment, once); every other user from ADM =create_user=.
 - *S10:* sign-in is password only (no registration/reset); sign-out is
   =DELETE /sign-out= and records =auth.signed_out=; operators never receive
   password hashes; AUR sees other users' =display_name= and =role= only;

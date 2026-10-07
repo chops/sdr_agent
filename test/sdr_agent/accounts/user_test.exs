@@ -109,7 +109,8 @@ defmodule SdrAgent.Accounts.UserTest do
         |> Enum.map(& &1.name)
         |> Enum.sort()
 
-      assert creates == [:create_user, :seed]
+      # ADM create, the kernel's first-admin bootstrap, and the dev/test seed.
+      assert creates == [:bootstrap_admin, :create_user, :seed]
       refute Ash.Resource.Info.actions(User) |> Enum.any?(&(&1.type == :destroy))
     end
 
