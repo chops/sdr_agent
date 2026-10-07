@@ -2,14 +2,39 @@ defmodule SdrAgent.AI.ModelProvider do
   @moduledoc """
   Persisted, validated boundary for structured model decisions.
 
-  The facade reserves the daily guard and an S3 `ModelInvocation` before the
-  provider starts, marks the call sent, validates every output with Zoi, and
-  records completion, failure, or an unknown outcome through `SdrAgent.Agents`.
+  The facade reserves an S3 `ModelInvocation` before the provider starts —
+  which also enforces the per-run and the persisted per-UTC-day limits
+  (ADR-0004; `SdrAgent.Agents.reserve_model_invocation/3`) — marks the call
+  sent, validates every output with Zoi, and records completion, failure, or
+  an unknown outcome through `SdrAgent.Agents`. A refused reservation
+  (`{:error, {:budget_exhausted, :daily}}` or the run counter's
+  `Ash.Error.Invalid`) never reaches the provider.
+
+  A provider failure that means the reviewed provider configuration drifted
+  (a Claude CLI init attestation with another model, version, tools, MCP
+  servers or slash commands, or none at all) also opens a critical
+  `provider_error` Failure for operator attention, in the same transaction
+  as the failed invocation.
+
+  Requests may carry an optional `:input` — the structured data the prompt
+  was rendered from — which deterministic providers (the Fake) read instead
+  of parsing the prompt.
   """
 
   alias SdrAgent.Agents
-  alias SdrAgent.AI.BudgetStore.InMemory
+  alias SdrAgent.Audit
+  alias SdrAgent.Operations
+  alias SdrAgent.Repo
   alias SdrAgent.Telemetry.GenAI
+
+  @drift [
+    :missing_init_attestation,
+    :model_attestation_drift,
+    :version_attestation_drift,
+    :tool_attestation_drift,
+    :mcp_attestation_drift,
+    :slash_command_attestation_drift
+  ]
 
   @type request :: %{
           required(:id) => String.t(),
@@ -29,23 +54,16 @@ defmodule SdrAgent.AI.ModelProvider do
   @doc "Completes one structured model request and persists its full lifecycle."
   def complete(request, opts \\ []) when is_map(request) do
     provider = Keyword.get(opts, :provider, Application.fetch_env!(:sdr_agent, :model_provider))
-    daily_store = Keyword.get(opts, :budget_store, InMemory)
     provider_options = Keyword.get(opts, :provider_options, [])
-    now = Keyword.get(opts, :now, DateTime.utc_now())
 
-    with {:ok, daily} <- daily_store.reserve_daily(now),
-         {:ok, provenance} <- provider.prepare(request, provider_options),
+    with {:ok, provenance} <- provider.prepare(request, provider_options),
          {:ok, invocation} <- reserve(request, provenance),
          {:ok, sent} <- Agents.mark_model_invocation_sent(invocation, actor: request.actor) do
       metadata = %{id: request.id, model: provenance.model_id, input: request.prompt}
 
-      outcome =
-        GenAI.with_span(request.operation, metadata, fn ->
-          invoke_validate_and_settle(provider, request, sent, provider_options)
-        end)
-
-      :ok = daily_store.settle(daily, normalize_outcome(outcome))
-      outcome
+      GenAI.with_span(request.operation, metadata, fn ->
+        invoke_validate_and_settle(provider, request, sent, provider_options)
+      end)
     end
   end
 
@@ -120,11 +138,39 @@ defmodule SdrAgent.AI.ModelProvider do
       latency_ms: elapsed(started)
     }
 
-    case Agents.fail_model_invocation(invocation, attrs, actor: actor(invocation)) do
+    actor = actor(invocation)
+
+    Audit.transaction(fn ->
+      with {:ok, failed} <- Agents.fail_model_invocation(invocation, attrs, actor: actor),
+           {:ok, _failure} <- attention(failed, reason, actor) do
+        failed
+      else
+        {:error, error} -> Repo.rollback(error)
+      end
+    end)
+    |> case do
       {:ok, _failed} -> {:error, reason}
       {:error, error} -> {:error, error}
     end
   end
+
+  defp attention(invocation, reason, actor) when reason in @drift do
+    Operations.open_failure(
+      %{
+        subject_resource: inspect(invocation.__struct__),
+        subject_id: invocation.id,
+        class: :provider_error,
+        severity: :critical,
+        message:
+          "model provider #{invocation.provider} attestation failed: #{reason}; " <>
+            "calls stay refused until the reviewed configuration is restored",
+        retryable: false
+      },
+      actor: actor
+    )
+  end
+
+  defp attention(_invocation, _reason, _actor), do: {:ok, :none}
 
   defp mark_unknown(invocation) do
     case Agents.mark_model_invocation_unknown(invocation, actor: actor(invocation)) do
@@ -151,6 +197,4 @@ defmodule SdrAgent.AI.ModelProvider do
 
   defp empty_usage, do: %{input_tokens: 0, output_tokens: 0, plan_calls: 1}
   defp elapsed(started), do: max(System.monotonic_time(:millisecond) - started, 0)
-  defp normalize_outcome({:ok, _result}), do: :ok
-  defp normalize_outcome({:error, reason}), do: {:error, reason}
 end

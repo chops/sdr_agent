@@ -12,7 +12,6 @@ defmodule SdrAgent.Application do
     children =
       SdrAgent.Telemetry.test_children() ++
         [
-          SdrAgent.AI.BudgetStore.InMemory,
           SdrAgentWeb.Telemetry,
           SdrAgent.Repo,
           {DNSCluster, query: Application.get_env(:sdr_agent, :dns_cluster_query) || :ignore},
