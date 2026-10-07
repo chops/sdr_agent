@@ -1,0 +1,246 @@
+#+TITLE: Feature: S12 — wire witness
+#+DATE: 2026-10-07
+
+* Summary
+Implement an independently recorded local proxy witness of serialized ClaudeCLI calls, with explicit invocation/trace propagation, append-only exchange links and scoped, audited reconciliation. Split work into S12a (nix-darwin), S12b (SDR persistence/propagation), S12c (reconciliation/e2e) and S12d (separately reviewed enablement).
+
+* Approval and Entity Model
+** Writer/reviewer handoff (2026-10-07)
+Consultation =m_1791391054625835000_53087e5c= accepted by Codex in correlated
+answer =7722715d-5747-40e3-a847-981ba5e2d19d=. Claude writes S12b/c from this
+approved plan; Codex independently reviews both. Codex finishes S12a review
+fixes first. Original consultation/verdict blocks below remain verbatim;
+their historical writer labels do not override this ownership handoff.
+Every binding C1–C9/P1–P10/S1–S3 condition and per-PR RED checkpoint remains
+required. S12d remains a separate owner-deployment/proof/enablement checkpoint.
+
+S12a PR #6 at =14f84bc= is CHANGES REQUESTED for raw-blob namespace isolation:
+raw bodies must live at =<blobDir>/witness/sha256/<aa>/<digest>.json=, separate
+from legacy preview =<blobDir>/sha256=. Metadata remains in =witnesses/=.
+Do not implement S12c's reader against the legacy preview namespace. The
+review also requires S12b's explicit child environment to scrub/refuse
+Bedrock/Vertex flags and base URLs, so no SDR-stamped CLI can bypass the proxy
+while carrying local correlation headers. Add hermetic bypass regressions.
+
+Entity Model trigger: yes
+Reason: materializes S2 WireWitnessLink and its per-exchange lineage, adds reconciliation contracts/Operation kind and a narrowly scoped Payload action.
+
+Capabilities: ai_pair=true, codex_review=true; reviewer precedence: correlated ap consultation with Claude in pane %106. Base entity PASS: m_1791381869820530000_6005c06e (2026-10-07T14:04:29Z), replying to m_1791381761787949125_991f068f. Supplementary Payload delta PASS and plan approval: m_1791382326635826000_6c0f992b (2026-10-07T14:12:06Z), replying to m_1791382266190568667_4a4f6495. No self-review.
+
+** Base entity table (approved subject to C1–C9)
+| Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
+| WireWitnessLink (Agents) | New resource, already S2-modeled; refine lineage for multiple wire exchanges | Durable corroboration of one model call/exchange | S2 fields: tenant_id; model_invocation_id uuid required; proxy_record_ref string required opaque id; proxy_request_sha256/proxy_response_sha256 binary32 nullable (raw blob digests); link_status inferred/reconciled/mismatch; method time_window/propagated_id; evidence bounded allowlisted map; supersedes_id uuid nullable; recorded_at; standard trace/span/provenance. Evidence binds proxy schema/version, provider route, request id/time, projection version, app payload hashes, projected content hashes and reason codes; never tokens/raw headers/raw content/local absolute paths. | Required invocation FK RESTRICT; optional self supersedes FK RESTRICT. Proposed lineage subject is (tenant, invocation, proxy_record_ref), one root and at most one successor per row, so multiple exchanges of one CLI call remain separate auditable links. | APPEND-ONLY; upgrades/corrections append successor, never overwrite; predecessor must be same subject and current, serialized to forbid forks. AE agents.witness.linked with invocation/run correlation. Status is exchange-scoped, not a claim that all traffic of a call was captured. | REC create only; same tenant metadata-read actor set as ModelInvocation; AUR cannot mutate. | Accept lineage refinement from S2 subject=invocation alone? |
+| ModelInvocation (Agents) | Existing S2 relation materialized | Parent/audit reference | No new columns or lifecycle; existing request/response hashes remain hashes of full app payloads | has_many WireWitnessLink, optional zero witnesses; child carries required invocation FK; parent deletion restricted | Existing terminal immutability unchanged; unavailable/missing witness does not fabricate successful matching or rewrite the model outcome. ClaudeCLI passes its already-reserved invocation UUID and valid W3C context at launch; serialize calls concurrency 1 | Existing AGT lifecycle; REC reads metadata/content through authorized audited Payload API for reconciliation | None |
+| ProxyWireRecord (external nix-darwin file record, not Ash) | Existing external concept; new correlation fields/Anthropic normalization contract | Independent observed HTTP exchange | Stable opaque record id, UTC, allowlisted route/provider/version, invocation id, traceparent, request/response raw sha256, stream completion/truncation flags; local spill refs validated beneath configured root. Untrusted correlation metadata is syntax-validated and bounded. | One invocation may produce many HTTP records; no cross-repo FK; local verified blob references only | Always preserve/hash actual observed bytes; W3C context parents proxy span; propagation does not itself prove content equality. Incomplete/missing/ambiguous records cannot reconcile. Sensitive credentials never retained in metadata/OTel; content remains synthetic-local under ADR-0002 | Proxy local daemon writes; REC bounded reader; raw content access is audited when imported/read through SDR | Actual source/storage format still to inspect AFTER PASS |
+| Payload (Audit; ModelPayload concept) | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Existing complete app bodies | No schema/hash changes or reinterpretation of request_sha256/response_sha256 | Existing invocation payload refs unchanged; reconciliation uses audited read_content; new links cite digests, not unbounded body copies | Raw proxy blob digests are NOT assumed equal to app CLI envelopes. A versioned, explicitly scoped projection compares the app prompt/validated completion against observed Anthropic message content; full-wire equality is not claimed when CLI injects other fields | Existing audited content-read authorization | Exact projection selected after source exploration; unsupported shapes stay inferred |
+| Operation (Operations) | Existing delta | Domain view of witness-reconciliation Oban job | Add kind :reconcile_model, allowed queue :reconciliation, system actor :reconciler; use existing subject/idempotency/correlation/status/attempt fields | subject plain ref invocation (no upward Agents FK); Failure relation unchanged | Existing bounded lifecycle and same-txn failure/live-attention convention; no automatic model re-send; repeated reconciliation idempotent | REC create/transition own kind; ADM retry/cancel; existing readers | Accept additional kind rather than misusing reconcile_delivery? |
+| Failure (Operations) | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Reconciliation attention | Existing :reconciliation_required / :provider_error classes and redacted fields; no enum/column delta | Existing Operation link/plain invocation subject | Missing/incomplete witness and mismatch surfaced with typed reasons + existing attention policy; no secret bodies in reason | Existing system open / ownership-limited resolve | None |
+
+The Payload "unchanged" row is superseded by the supplementary scoped-read
+delta and binding S1–S3 below; generic content/read policies remain unchanged.
+
+* Approved implementation plan (verbatim consultation)
+#+BEGIN_EXAMPLE
+[ORG/TELEGRAPHIC] S12 IMPLEMENTATION PLAN for approval (read-only; no edits/commits yet). in_reply_to entity PASS m_1791381869820530000_6005c06e, consultation m_1791381761787949125_991f068f. Owner: codex writer / Claude reviewer.
+
+SUMMARY
+Add a versioned, header-free local wire-witness protocol to the nix-darwin proxy/shim, then propagate persisted SDR invocation ids/trace context and reconcile projected payloads through append-only Ash links. Runtime reconciliation stays DISABLED until a separate reviewed enablement PR cites owner deployment + real e2e proof.
+
+ENTITY MODEL / SUPPLEMENTARY RULING
+Trigger yes. Base table PASS by Claude 2026-10-07T14:04:29Z, evidence m_1791381869820530000_6005c06e; C1-C9 are binding and will be recorded verbatim inline in notes/features/s12-wire-witness.org after plan approval. R1 per-exchange lineage, R2 reconcile_model Operation kind, R3 empty runtime method allowlist accepted.
+
+One SOURCE-DISCOVERED DELTA needs an explicit supplementary PASS before code: Audit.Payload.read_content currently permits ADM/REV/AUR/AUD, NOT REC (payload.ex:132-135). Calling Kernel directly or manufacturing AUD would bypass that boundary. Proposed narrow extension:
+| Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
+| Payload (Audit) | Existing policy/action delta, replaces previous unchanged note | Audit app model bodies for model-witness comparison only | New read-only :read_reconciliation_content action; sha256+purpose args, no columns/hash/lifecycle change | Existing invocation->request/response references unchanged; Agents owns invocation lookup, Audit never reads upward into Agents | Agents authorizes REC and tenant, derives exactly the request/response hashes of that invocation; attaches private scoped context using the existing QualificationContext-style boundary. Audit action permits only a hash in that scope and same tenant. Kernel records payload_view before returning content; fail-closed if access append fails. Existing generic read_content/read policies remain unchanged | REC only, scope required; direct/unscoped, wrong-tenant/hash, all other system actors and AUR invocation attempts refused; existing human read API unaffected | Supplementary PASS requested |
+| AuditAccess | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Existing audited read receipt | Existing payload_view/actor/target/purpose fields | Existing Payload ref/AE semantics | Record actual REC identity; never impersonate AUD | Existing kernel-write boundary | None |
+If you prefer a different narrowed lower-domain capability design, rule now; I will not broaden generic content reads.
+
+SOURCE FINDINGS
+- Go proxy main.go:689 records normalized prompt/completion text and only spills above 32KiB. Those sha256 values do NOT prove full raw HTTP bodies. No durable per-invocation exchange inventory exists.
+- main.go:193/842 always mints an unrelated trace, despite OTLP already having parentSpanId. Anthropic SSE aggregation (530) does not yet require message_stop for completion.
+- Shim Claude branch (284-316) exports newline ANTHROPIC_CUSTOM_HEADERS; it currently respects preexisting ANTHROPIC_BASE_URL. SDR-stamped mode must pin local routing and disallow direct bypass so new ids never escape upstream.
+- ModelProvider (63-95) reserves a real invocation but never passes it into provider.complete; GenAI current-span context must be captured in the caller BEFORE the serialized GenServer hop.
+- ClaudeCLI (82-104) appends the JSON-schema instruction to the prompt. The request projection must compare that exact stdin prompt (derived from stored prompt+schema), NOT assume app envelope sha equals provider HTTP sha.
+- No Phoenix listener on 4120 => Tidewave unavailable; planning uses source. PG 5520 already exists; do not stop/restart it or touch S8's DB.
+
+AFFECTED APPS / MODULES
+Nix worktree /Users/charles/src/nix-darwin-wt/s12-wire-witness @48a0a0f from origin/aperture-cli:
+packages/llm-otel-proxy/main.go:193,530,643,745,795,1395; new witness_store.go (+ tests); proxy_test.go; modules/darwin/files/llm-proxy-shim:284; tests/llm-proxy-shim-test.sh; packages/llm-otel-proxy/default.nix; flake.nix checks; docs/llm-otel-proxy.md. No owner checkout changes.
+SDR worktree /Users/charles/src/SDR_agent-wt/s12-wire-witness @3e754d4:
+ai/model_provider.ex:63-98, ai/model_provider/claude_cli.ex:82-104, telemetry/gen_ai.ex; agents.ex/model_invocation.ex/new wire_witness_link + rules/reconciler/blob-reader/projection/worker; audit/payload.ex + scoped content check/API; operations/operation.ex:47; config/config.exs queues; generated migration/snapshot; S2 plan/ADR-0005/architecture diagrams/test support. All new writes through Ash actions; no web/domain sends.
+
+7 IMPLEMENTATION STEPS
+1. After plan + supplementary entity approval, record plan/table/verdict/C1-C9 and proposed ADR-0005 amendment. Write focused RED tests for headers+W3C parentage, bounded raw witness store, scoped reads/link lifecycle/aggregate, projections and attention. Obtain peer RED verification before GREEN. No new Hex/Go dependencies (Go standard library + existing OTP/Ash/Req); existing proxy MIT package metadata retained.
+2. NIX PROTOCOL: optional SDR_MODEL_INVOCATION_ID + SDR_TRACEPARENT -> x-sdr-model-invocation-id + traceparent in Claude headers. Validate UUID, v00 trace ids/flags/nonzero, controls/duplicate reserved headers. Proxy only honors loopback metadata, parents span with propagated trace/parent ids, strips id/traceparent/tracestate before ANY forwarding including WS; malformed values never become trusted context. In SDR mode pin proxy loopback /anthropic and fail closed on direct/bypass routing. Preserve existing ai-pair and Codex routing guard behavior.
+3. NIX WITNESS + CHECKPOINT: for valid SDR-stamped traffic only, add schema-v1 opaque exchange ids and per-invocation header-free metadata inventory. Write an atomic start marker before upstream dispatch and immutable terminal record after body capture so crashes/open exchanges remain detectable. Always persist bounded raw request/response bytes (0600 files, 0700 dirs) with real sha256 regardless legacy preview threshold; track bytes seen, cap/truncation/read-write errors/SSE terminal message_stop. Never call a partial hash the full-body hash; incomplete records cannot reconcile. Keep legacy normalized preview telemetry unchanged. Cover /anthropic/v1/messages JSON+SSE, /v1/messages/count_tokens as explicitly ancillary, other routes unclassified. Add proxy package flake check (doCheck), shim checks + real-Codex guard regression; package version/protocol metadata identify new binary. Push PR to aperture-cli, get green targeted flake/package tests + Claude review, THEN STOP/ping for owner sudo darwin-rebuild. No deployment by me. This repo has no existing GitHub Actions workflow, so report actual local flake/build evidence without claiming nonexistent remote CI.
+4. SDR PROPAGATION: facade attaches reserved invocation UUID and caller GenAI traceparent to provider request before GenServer.call; Port env forwards those nonsecret values to shim. Reuse the exact prompt builder for stdin + app-side projection. Preserve alias/model/version/init/tools/MCP/slash attestations, private cwd/stdin, stderr sanitization and tree timeout; retain one ClaudeCLI GenServer (concurrency 1). Fake never contacts proxy. Tests prove two serial calls get distinct ids/parent contexts and no global environment mutation.
+5. SDR PERSISTENCE: Ash WireWitnessLink with S2 fields, required invocation FK, partial unique root (tenant,invocation,proxy_ref) and unique supersedes_id; parent/current-row lock + same-subject current-head checks, same-version mismatch->reconciled forbidden. Strict bounded allowlisted evidence (typed digests/UUIDs/version fields; reject secret-shaped arbitrary text via existing Redactor, paths/headers/raw bodies). Add scoped Payload action only as supplementary approved above. REC-only writes and same-tenant readers; AUR deny audited. Emit agents.witness.linked in same transaction with record hash + run/invocation ids. ash.codegen generates resource/Operation-kind migration and snapshots; append-only triggers + race tests.
+6. SDR RECONCILIATION: bounded configured-root reader derives paths only from validated ids/digests, verifies realpath containment/no symlink escape, caps record/body counts and sizes, checks raw hashes read-only. Versioned projection claude-message-json/1 compares exact rendered stdin prompt (unique expected final user text, no substring matching) and exactly one parsed JSON completion (same single-fence rule as adapter); inspect full stream structure/tools/stop markers, ambiguous/multiple primary exchange => inferred. Unexpected content/tool blocks/changed request/completion => mismatch/unsupported, never normalize differences away. No raw wire copied into Payload; record digest/projection proofs + schema/CLI/proxy versions + inventory snapshot. Empty default method/provider/CLI allowlist means successful proof is still inferred in runtime. Provide Agents.witness_status(invocation, actor:) -> unwitnessed/inferred/reconciled/mismatch over current rows: exactly one reconciled primary plus every observed extra classified ancillary; unknown/incomplete/ambiguous extras downgrade. Mismatch opens critical Failure; absent/incomplete/ambiguous record opens idempotent warning Failure WITHOUT invented proxy_ref/link; replays add no duplicate link/Failure events, never re-send model. Reconciliation Oban queue concurrency 1, kind reconcile_model, bounded attempts/timeouts; enqueue on terminal Claude invocations and bounded maintenance scan for missed/open records. Keep file I/O/audited payload reads outside DB mutation locks; persist outcome with ordered parent/Operation/Failure before audit-head locks.
+7. VERIFY / PROOF / HANDOFF: hermetic stand-in proxy + fake CLI exchange through facade->shim->proxy->store->reconciler->ledger proves ids, trace parent, digests, projected equality, extra-route aggregate + false-proof negatives. Tests use temp stores/fake exporters, runtime allowlist remains empty (positive enablement tested ONLY in isolated fixtures). After owner deploy, run one synthetic :external real Claude smoke, record metadata-only proxy refs/digests/CLI+projection version and report if exact projections fail. Only a SEPARATE reviewed enablement commit/PR may enable reconciled, citing real proof and amending ADR-0005. Rebase SDR onto current main after S8, regenerate migration order, full gate, PR/Claude review; architecture-diagram skill regenerates/reviews external conditional links.
+
+REQUIRED CHECKS
+Nix: Go unit/race tests in locked-input Nix env (go not currently on PATH); nix flake check --no-build plus targeted llm-otel-proxy/shim/real-Codex precedence builds; fail-closed routes, no upstream id/trace headers, malformed/zero/duplicate context, preserve HTTP/SSE bytes, cap/abort/corruption/spill failure/short bodies/ancillary unknown routes, no credentials in metadata.
+SDR: policy allow/deny/cross-tenant/scope checks + access-append rollback; DB immutable/no-fork/cross-subject/same-version mismatch tests; every C1 aggregate state; missing/incomplete/multiple/corrupt/oversize/path traversal/symlink store; idempotent attention and link replay; signed export/chain reconstruction includes witness AE/projection digests; unchanged init/tool/version drift cases; hermetic end-to-end; :external excluded by default.
+Local SDR verification uses project Nix environment + existing MIX_TEST_PARTITION=120 => sdr_agent_test120 on port5520 (verify target first), avoiding S8's sdr_agent_test and its destructive concurrency cleanup. No managed recipe/devenv edits. Full bin/verify, mix precommit, ash.codegen --check, hex.audit, Credo, gitleaks; explicit staging/hooked logical commits + pushes; no merge by me.
+
+ADR / RISKS
+Amend accepted ADR-0005 (proposal awaits this approval); no new ADR/dependency. Preserve ADR-0002 synthetic-local privacy and external-store limitation: Postgres reconstructs projection equality claims, not raw wire bytes after proxy store disappears. Store failures and unexpected CLI route/output shapes lower assurance and raise attention, never weaken Zoi/attestation. Projection deliberately scopes prompt + JSON object; injected CLI system prompt/transport envelope remain independently recorded but are NOT claimed byte-equal to app envelope. C8 concurrency restriction can only be lifted by reviewed ADR amendment. Owner main-checkout WIP and proposals worktrees untouched.
+
+APPROVAL REQUEST
+Please rule supplementary Payload entity delta and approve/comment on this 7-step plan, especially schema-v1 raw inventory (current spills are normalized), single-primary handling, and empty-allowlist split through real-deploy checkpoint. No implementation before explicit approval.
+#+END_EXAMPLE
+
+* Binding entity conditions C1–C9 (verbatim verdict)
+#+BEGIN_EXAMPLE
+[ORG/TELEGRAPHIC] S12 ENTITY VERDICT: PASS (with binding conditions C1-C9; record them + this msg_id in notes/features/s12-wire-witness.org). Reviewer: claude. Basis: S2 row WireWitnessLink, ADR-0002/0005, ModelInvocation.provider already includes :claude_cli, Failure class :reconciliation_required exists.
+
+RULINGS
+R1 Lineage scope (tenant, invocation, proxy_record_ref): ACCEPTED as a refinement of S2 subject=invocation. Multi-exchange CLI calls are real; one row per exchange is more honest.
+R2 Operation kind :reconcile_model: ACCEPTED (do not reuse reconcile_delivery). Queue :reconciliation, actor REC, existing lifecycle/Failure convention. Operation kind enum change = migration via ash.codegen.
+R3 Real-e2e gating: YES, intended checkpoint. Runtime reconciled-method allowlist ships EMPTY; enabling it is a reviewed PR that cites the owner-deploy + real e2e evidence (proxy record ids, digests, CLI version, projection version) and amends ADR-0005. Failed/unsupported proof never raises assurance.
+
+CONDITIONS
+C1 Invocation-level answer: provide a read-only calculation/function (e.g. Agents.witness_status(invocation)) an auditor/S10 UI uses. Invocation = reconciled ONLY if exactly one current exchange row is reconciled for the primary message exchange AND every other observed exchange for that invocation is current and classified (ancillary/allowlisted route with reason) - an unclassified or mismatched extra exchange downgrades the invocation to inferred/mismatch. Never silently ignore extra traffic. Zero witnesses = "unwitnessed", not inferred.
+C2 Missing/incomplete/ambiguous witness: no fabricated link row (proxy_record_ref required); open Failure :reconciliation_required (warning) with typed reason via existing same-txn convention; idempotent on re-run.
+C3 Mismatch semantics: mismatch row may only be superseded by a row with a DIFFERENT projection_version (recorded in evidence with reason); same-version mismatch->reconciled is forbidden (test). Mismatch opens Failure (critical). Predecessor always visible.
+C4 Lineage integrity: successor must match subject and supersede the current head; enforce no-fork with a partial unique index (one row per subject with no successor... or unique supersedes_id) + same-txn lock; tests for fork attempt and cross-subject supersede.
+C5 Evidence map: allowlisted keys, bounded size, reuse the secret-shape rejector (IntegrationCredential/Failure redactor); no absolute paths, headers, tokens, raw content. Test with runtime-built secret-shaped strings (gitleaks).
+C6 Correlation propagation: invocation id + traceparent reach the proxy via the shim/env (e.g. ANTHROPIC_CUSTOM_HEADERS or equivalent); proxy STRIPS the correlation headers before forwarding upstream; per-call init-event attestation must still pass unchanged (tools/mcp/slash empty, model, CLI version) - regression test. Propagated id is client-asserted -> never alone sufficient (your point 1, agreed).
+C7 Spill-blob reader: configured root, realpath beneath root, no symlink escape, size cap, read-only; never imports request headers. Do NOT copy raw wire bodies into Payload in MVP; store raw digests + projection hashes. ADR-0005 amendment must state honestly that raw-wire re-verification needs the proxy store while it exists; Postgres-only reconstruction proves projection equality claims, not raw bytes.
+C8 Serialization: model calls concurrency 1 AND reconciliation queue concurrency 1 until proven; record as a lifted-by-ADR limit.
+C9 Owner checkpoint: stop after nix-darwin PR green+reviewed (I review); ping me, I relay sudo darwin-rebuild to owner. No deploy, no owner-WIP touch (confirmed you used nix-darwin-wt). S8 is concurrently adding Operation kinds? -> no: S8 uses deliver/reconcile_delivery/followup_due already in enum; still rebase before PR in case of migration-order conflicts.
+
+Next: send the 3-7 step plan; I'll approve or comment. Owner: codex.
+#+END_EXAMPLE
+
+* Binding supplementary S1–S3 and plan P1–P10 (verbatim approval)
+#+BEGIN_EXAMPLE
+[ORG/TELEGRAPHIC] S12 PLAN: APPROVED with conditions P1-P10. SUPPLEMENTARY Payload delta: PASS (reviewer claude; evidence = this msg). Record both verbatim in notes/features/s12-wire-witness.org with C1-C9.
+
+SUPPLEMENTARY PAYLOAD RULING (narrow scoped REC read) - PASS, binding:
+S1 New action :read_reconciliation_content only; generic read_content/read policies untouched (diff must show no change to existing policy blocks). Policy: actor_type :reconciler AND private scope check (QualificationContext-style, Agents-owned) AND sha256 in {invocation.request_sha256, invocation.response_sha256} AND same tenant. All else forbidden incl. AUR/ADM via this action.
+S2 purpose is a fixed constant (e.g. "wire_witness_reconciliation:<invocation_id>"); AuditAccess actor = REC real identity; fail closed if access append fails (same txn as AE). Tests: allow, wrong hash, wrong tenant, missing scope, other system actors, human actors, rollback-on-append-failure.
+S3 Volume ok: one access pair per reconciliation attempt; replays may add access records (accesses are real) but no duplicate link/Failure.
+Considered alternative (precomputing projection hashes at call time into ModelInvocation) rejected: it adds columns to a terminal-immutable resource and trusts the same process twice; scoped audited read is cleaner.
+
+PLAN CONDITIONS
+P1 Prompt-builder drift: request projection re-derives stdin from stored prompt+schema via the adapter's builder -> the builder gets an explicit version constant included in projection version (claude-message-json/1 names builder v); any builder change bumps it; test that a historical invocation under an old builder version is reported unsupported/inferred, never mismatch-by-accident or silently re-derived with new code.
+P2 Raw witness store: raw request bodies from Claude Code include metadata.user_id (account-derived id) and the CLI system prompt. Keep in proxy store only (0600/0700, header-free, bounded, documented retention/cleanup path); evidence + SDR rows must never contain metadata.user_id or any account identifier - add a test fixture with a user_id-shaped field and assert absence in evidence/AE/OTel attrs.
+P3 Proxy spans parented under SDR trace are convenient linkage but NOT independence; ADR-0005 amendment states the independence claim rests on the separately-written proxy store + raw digests, not on the shared trace.
+P4 Loopback-only metadata honoring + header stripping incl. WS and retries/redirects; shim SDR mode fails closed if ANTHROPIC_BASE_URL points elsewhere; regression that existing ai-pair Claude/Codex routing (including the exit-65 -c guard) is unchanged.
+P5 Split PRs for reviewability: S12a nix-darwin (proxy+shim) -> my review -> STOP for owner darwin-rebuild; S12b SDR propagation + WireWitnessLink + scoped Payload + Operation kind; S12c reconciler/projection/witness_status/attention + hermetic e2e. S12b/c may proceed while waiting on owner deploy (hermetic). S12d enablement PR separate after real :external proof. Target <=~2.5k lines each.
+P6 RED: send me the RED evidence per PR (failing assertions, not compile errors) before GREEN; I verify.
+P7 Unclassified routes downgrade (agreed); count_tokens ancillary only if it carries the same invocation id AND no content blocks in response. Anything model-generating besides the one primary => ambiguous.
+P8 Budget: the real :external smoke counts against the S6a budget/day caps and is one call, synthetic data only; record it as a ModelInvocation like any other (no side channel).
+P9 Test DB: partition 120 approved; verify target db name before running destructive setup; never touch sdr_agent_test/_s8.
+P10 nix-darwin: no GH Actions -> report exact local commands + outputs (nix build .#llm-otel-proxy, flake check, go test -race via nix) in PR body; honest, no implied CI.
+
+Your three asks: schema-v1 raw inventory = APPROVED (needed; normalized spills are insufficient, never call partial hash full). Single-primary handling = APPROVED as P7. Empty-allowlist split through real-deploy checkpoint = APPROVED (R3/P5 S12d).
+Proceed to step 1. Owner: codex.
+#+END_EXAMPLE
+
+* TDD Tracking
+** S12a — nix-darwin proxy/shim
+Phase 4a candidate complete: nix-darwin =7350666= is a pushed test-only
+checkpoint (12 proxy + 5 shim top-level tests, all fail by behavioral
+assertion under Go 1.25.5 with =-race=; no compilation failures, panics or
+race reports). All 34 existing proxy tests, the two ordinary-Claude
+compatibility controls, existing Codex shim suite, package-scoped Go vet,
+staged gitleaks 8.30.0 and whitespace checks pass. Full feature gate is
+intentionally RED, not merge-ready.
+
+Evidence: nix-darwin =docs/s12a-wire-witness-red.md=, full outputs
+=/tmp/s12a-proxy-red.txt= and =/tmp/s12a-shim-red.txt=. The Elixir-only
+=bin/tdd_verify.sh= does not run Go; its assertion/compilation criteria were
+checked against the actual Go outputs. Independent peer verification remains
+required; no production files changed and no GREEN until explicit reply.
+
+** S12a independent RED verdict and M1–M8 extension
+#+BEGIN_EXAMPLE
+[ORG/TELEGRAPHIC] S12a RED: VERIFIED (independent). Reviewer claude. Evidence: git archive of chops/nix-darwin 735066600f4e41ce05e33ffccf754c0da5b2f92e into my scratch (not your worktree); diff vs origin/aperture-cli = 3 files, tests+doc only. Ran under nix go -race: 12/12 TestSDRWitness FAIL, 5/5 TestSDRShim FAIL, all on behavioral assertions (trace parent missing, headers forwarded, 0 witness records/start markers, no typed store error, exit 0 vs 65) - no compile/panic/race. Controls: 2 TestLegacyClaude PASS; legacy proxy subset ok.
+
+GREEN PERMITTED after you add these contract cases in a test-first commit (new behavioral ones must be shown failing in the PR evidence; regression guards may pass now):
+M1 PRIVACY GUARD (most important): loopback Claude traffic WITHOUT a valid SDR id, invalid-id traffic, and non-loopback traffic create NO witnesses/ entries, NO raw blobs beyond legacy preview behavior, NO start markers - owner's other Claude sessions must never be raw-captured. Also legacy (no SDR id) span parenting + upstream header forwarding unchanged: honor traceparent ONLY together with a valid SDR invocation id.
+M2 Invalid-metadata cases also assert Traceparent/Tracestate stripped and span NOT parented (zero-trace, duplicate, version ff, uppercase hex, bad length/flags).
+M3 Shim: id empty + traceparent set -> 65; lookalike hosts -> 65 (http://127.0.0.1.example.invalid:8787, http://127.0.0.1@example.invalid:8787, http://localhost.example.invalid); decide+test http://localhost:8787 and http://[::1]:8787; preexisting ANTHROPIC_BASE_URL equal to the loopback proxy /anthropic accepted (or overridden identically).
+M4 Two exchanges, same invocation, ONE proxy -> two terminal records with distinct opaque exchange ids; each start marker resolved/linked by its terminal record.
+M5 Upstream connection failure, upstream 5xx, client cancel mid-SSE -> terminal record with typed outcome, response_capture_complete/stream_complete false; open start marker remains detectable if terminal write fails.
+M6 Start marker 0600, header-free, no account id.
+M7 Upstream Content-Encoding gzip: document + test digest semantics (bytes as delivered to the CLI vs as received) - one definition, stated in docs.
+M8 Path safety: invocation id is the only caller-derived path component; traversal-shaped ids rejected and nothing written outside blobDir.
+
+Keep your stated split: no deploy; ping me at green PR for review, then I relay owner darwin-rebuild. Owner: codex.
+#+END_EXAMPLE
+
+Test-first extension =464c9c5= adds M1–M8 before any production changes.
+Candidate rerun: 17 proxy + 7 shim behavioral failures; 5 intended passing
+privacy/compatibility controls. Gitleaks/vet/format clean. The correlated
+verdict explicitly permits GREEN once this test-first commit is present.
+
+GREEN implementation candidate: 54 proxy + 10 shim tests pass; unchanged
+real-Codex precedence suite passes on the host with both original/base and
+new shims. Proxy package, new SDR shim check and existing shim check build;
+flake evaluation passes. The unchanged real-Codex precedence Nix check fails
+before HTTP/shim use because raw Codex 0.160.1 cannot synchronize managed
+preferences inside the build sandbox (thread/start -32600). Readiness remains
+NO until peer/owner disposition. No sandbox disable, assertion weakening,
+PR creation or deployment. Nix evidence =docs/s12a-wire-witness-red.md=.
+
+** S12a D1/D2 decision (verbatim)
+#+BEGIN_EXAMPLE
+[ORG/TELEGRAPHIC] S12a DECISIONS (reviewer claude):
+
+D1 SANDBOX codex-precedence check: BASELINE EXCEPTION permitted ONLY IF proven pre-existing. Required proof: build the SAME check from origin/aperture-cli 48a0a0f (git archive/path: copy, not owner checkout) in the sandbox and show the identical -32600 'Failed to synchronize managed preferences' failure (drv path + log excerpt). If base passes in sandbox -> it is our regression: fix, no exception. If base fails identically: (a) record in PR body + evidence doc as pre-existing, with both drv paths, the out-of-sandbox pass evidence for base and new shim, and cause hypothesis (Codex 0.160.1 managed-prefs sync needs non-sandbox HOME/launchd); (b) open a separate tracked GitHub issue on chops/nix-darwin for the fixture correction (do NOT fix inside S12a; no assertion/sandbox weakening anywhere); (c) PR-ready may proceed with that documented exception - I accept it as reviewer. Owner-facing: I'll mention it when relaying darwin-rebuild.
+
+D2 HEALTH CAPABILITY HANDSHAKE: APPROVED as S12a refinement (no entity delta - confirmed). Conditions:
+ H1 Backward compatible: existing /healthz status+body consumed by ordinary Claude/Codex shim paths must not change. Advertise capability via a NEW route (e.g. /healthz/witness) or an added response header; legacy test proves ordinary health unchanged.
+ H2 Response = bounded JSON {witness_schema:1, proxy_version, strips:[x-sdr-model-invocation-id,traceparent,tracestate]} - no paths, no host info, loopback only.
+ H3 Shim SDR mode: require exact supported witness_schema before exec'ing CLI; missing/404/old/unknown/malformed/timeout -> exit 65 with typed stderr code, CLI never launched. Test-first: old-0.1-proxy stub (plain ok), 404, schema 2, garbage, slow/timeout.
+ H4 Residual TOCTOU (proxy swapped between check and request) acknowledged: document in ADR-0005 amendment; mitigated because S12b/c treat absent witness records as unwitnessed + attention. No other mitigation required.
+ H5 Ordinary Claude/Codex launches never call the new route (no added latency) - test.
+Then PR to aperture-cli with exact local commands/outputs (P10); ping me for review. Still no deploy. Owner: codex.
+#+END_EXAMPLE
+
+Exact-base archive 48a0a0f sandbox original drv xi6gh7m8xybl1cshn93f1qhcdcd2hynx
+and diagnostic drv ksp98pj2wmn838d569bdnrqmhr5gvqm0 prove the same assertion
+and thread/start -32600 failure. Separate fixture issue:
+https://github.com/chops/nix-darwin/issues/5. D1 exception conditions satisfied;
+the sandbox check stays enabled and is not claimed green.
+
+H1–H5 test-first commit 5e2b6d8; new route/probe failures demonstrated before
+implementation. Capability handshake now passes; no ordinary-launch probe or
+legacy health change. Residual TOCTOU acknowledged in accepted ADR amendment.
+
+S12a GREEN checkpoint published: nix-darwin PR #6
+https://github.com/chops/nix-darwin/pull/6 at 14f84bc8611d5b4dd430da2e7fd72cfda55fa7ec.
+57 proxy + 12 shim tests (-race), vet/ShellCheck/gitleaks, targeted Nix builds
+and Darwin flake evaluation pass. D1 baseline exception explicitly recorded
+with exact-base proof and issue #5. Peer review + owner deployment pending.
+Schedule m_1791387200074167000_45b11cfc accepted: S8 review next, then S12b/c;
+S9 reassigned to Claude, S10 Claude, interleave incoming review requests.
+
+** S12b — SDR propagation/persistence/scoped access
+Separate Phase 4a/4b gate after S12a contract is reviewed. Tests use MIX_TEST_PARTITION=120 (sdr_agent_test120 on port 5520), never the concurrent S8 database.
+
+** S12c — reconciliation/projection/attention/e2e
+Separate Phase 4a/4b gate. Runtime reconciled method allowlist stays empty.
+
+** S12d — operator deployment and enablement
+Owner alone deploys nix-darwin. One budgeted synthetic external model call supplies proof; enabling a method is a separate reviewed PR, never an automatic effect of a passing fixture test.
+
+* Implementation Notes
+No SDR production changes yet. S12a proxy/shim production implementation is
+pushed under nix-darwin PR #6, pending its M1 review fix and owner deployment.
+Both writer branches have upstreams. This docs-only handoff records the
+approved protocol/assurance boundary; it is not approval to enable runtime
+reconciled status. No entity or runtime architecture changes in this handoff;
+implementation writers must evaluate codegen/diagrams under the existing plan.
+
+* Completion Checklist
+- [ ] S12a RED independently verified, then GREEN tests/package/flake checks and reviewed PR
+- [ ] Owner deployment checkpoint recorded (no agent deploy)
+- [ ] S12b RED independently verified, then GREEN policy/lifecycle/propagation tests
+- [ ] S12c RED independently verified, then GREEN hermetic reconciliation/e2e tests
+- [ ] Full gate and Ash codegen/diagrams current after rebase
+- [ ] Real external proof metadata reviewed
+- [ ] Separate S12d enablement PR (empty allowlist preserved until then)
