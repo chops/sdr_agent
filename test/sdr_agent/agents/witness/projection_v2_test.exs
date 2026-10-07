@@ -1,7 +1,7 @@
 defmodule SdrAgent.Agents.Witness.ProjectionV2Test do
   @moduledoc """
   S12d projection v2 (`claude-message-json/2+prompt-builder/1`, Codex ruling
-  540b562a, entity delta PASS <id>): the real Claude Code request shape —
+  540b562a, entity delta PASS f04a7e44): the real Claude Code request shape —
   one user message holding exactly one non-reminder text block byte-equal
   to the versioned stdin plus at most four exactly wrapped
   `<system-reminder>` blocks, then at most two text-only system-role
@@ -61,6 +61,8 @@ defmodule SdrAgent.Agents.Witness.ProjectionV2Test do
 
   # A missing S12d interface fails the scenario's own assertion (RED).
   defp call(function, args) do
+    Code.ensure_loaded(Projection)
+
     if function_exported?(Projection, function, length(args)),
       do: apply(Projection, function, args),
       else: {:error, {:not_implemented, function}}
@@ -155,12 +157,147 @@ defmodule SdrAgent.Agents.Witness.ProjectionV2Test do
           {"stream false", request(ctx, top: %{"stream" => false})}
         ] do
       result = compare(ctx, req)
-
-      assert match?({:unsupported, _}, result) or match?({:mismatch, _}, result),
-             "#{label}: #{inspect(result)}"
-
-      refute match?({:match, _}, result), label
+      assert match?({:unsupported, _}, result), "#{label}: #{inspect(result)}"
     end
+  end
+
+  test "declared control and trailing caps: maxima accepted, beyond refused", ctx do
+    block = fn text -> %{"type" => "text", "text" => text} end
+
+    accepted = [
+      {"4 trailing blocks", request(ctx, trailing_content: Enum.map(1..4, &block.("t#{&1}")))},
+      {"32768 trailing bytes",
+       request(ctx, trailing_content: [block.(String.duplicate("t", 32_768))])},
+      {"8 system blocks", request(ctx, top: %{"system" => Enum.map(1..8, &block.("s#{&1}"))})},
+      {"16 edits",
+       request(ctx,
+         top: %{"context_management" => %{"edits" => List.duplicate(%{"type" => "e"}, 16)}}
+       )},
+      {"thinking null", request(ctx, top: %{"thinking" => nil})},
+      {"16-byte effort",
+       request(ctx, top: %{"output_config" => %{"effort" => String.duplicate("e", 16)}})}
+    ]
+
+    for {label, req} <- accepted do
+      result = compare(ctx, req)
+      assert match?({:match, _}, result), "#{label}: #{inspect(result)}"
+    end
+
+    refused = [
+      {"5 trailing blocks", request(ctx, trailing_content: Enum.map(1..5, &block.("t#{&1}")))},
+      {"32769 trailing bytes",
+       request(ctx, trailing_content: [block.(String.duplicate("t", 32_769))])},
+      {"bad trailing cache_control",
+       request(ctx,
+         trailing_content: [Map.put(block.("t"), "cache_control", %{"type" => "persistent"})]
+       )},
+      {"empty trailing message", request(ctx, trailing_content: [])},
+      {"9 system blocks", request(ctx, top: %{"system" => Enum.map(1..9, &block.("s#{&1}"))})},
+      {"system over 256 KiB",
+       request(ctx, top: %{"system" => [block.(String.duplicate("s", 262_145))]})},
+      {"system image block", request(ctx, top: %{"system" => [%{"type" => "image"}]})},
+      {"system as string", request(ctx, top: %{"system" => "plain"})},
+      {"unknown thinking type", request(ctx, top: %{"thinking" => %{"type" => "deep"}})},
+      {"unknown thinking field",
+       request(ctx, top: %{"thinking" => %{"type" => "adaptive", "x" => 1}})},
+      {"unknown output_config field",
+       request(ctx, top: %{"output_config" => %{"verbosity" => "x"}})},
+      {"17-byte effort",
+       request(ctx, top: %{"output_config" => %{"effort" => String.duplicate("e", 17)}})},
+      {"edits not a list", request(ctx, top: %{"context_management" => %{"edits" => %{}}})},
+      {"17 edits",
+       request(ctx,
+         top: %{"context_management" => %{"edits" => List.duplicate(%{"type" => "e"}, 17)}}
+       )},
+      {"context_management over 16 KiB",
+       request(ctx,
+         top: %{
+           "context_management" => %{"edits" => [%{"x" => String.duplicate("c", 16_400)}]}
+         }
+       )},
+      {"max_tokens zero", request(ctx, top: %{"max_tokens" => 0})},
+      {"max_tokens string", request(ctx, top: %{"max_tokens" => "32000"})},
+      {"wrong model", request(ctx, top: %{"model" => "claude-other"})},
+      {"metadata extra key",
+       request(ctx, top: %{"metadata" => %{"user_id" => "x", "other" => 1}})},
+      {"pre-user system message",
+       request(ctx, leading_messages: [%{"role" => "system", "content" => [block.("x")]}])},
+      {"message with extra key",
+       request(ctx,
+         trailing: 0,
+         extra_messages: [%{"role" => "system", "content" => [block.("x")], "name" => "n"}]
+       )}
+    ]
+
+    for {label, req} <- refused do
+      result = compare(ctx, req)
+      assert match?({:unsupported, _}, result), "#{label}: #{inspect(result)}"
+    end
+  end
+
+  test "context digests are exact, ordered, null-vs-absent tagged and exclude metadata", ctx do
+    assert {:match, base} = compare(ctx, request(ctx))
+    extras = base.extras
+
+    # Independently computed: sha256 of the reminder bytes, and of the
+    # canonical (sorted-key, compact) JSON of the trailing block list.
+    assert extras["reminder_sha256s"] == [sha(@reminder)]
+
+    trailing_json =
+      ~s([{"cache_control":{"type":"ephemeral"},"text":"Synthetic trailing context 1","type":"text"}])
+
+    assert extras["trailing_system_sha256s"] == [sha(trailing_json)]
+    assert extras["trailing_system_bytes"] == [byte_size("Synthetic trailing context 1")]
+
+    observed = JSON.decode!(request(ctx))
+
+    manifest = %{
+      "version" => 2,
+      "request_fields" => [
+        "system_present",
+        "thinking_present",
+        "output_config_present",
+        "context_management_present"
+      ],
+      "fields" =>
+        Map.new(~w(system thinking output_config context_management), fn f ->
+          {f, %{"present" => true, "value" => observed[f]}}
+        end),
+      "reminders" => [
+        %{"block_index" => 0, "sha256" => sha(@reminder), "bytes" => byte_size(@reminder)}
+      ],
+      "trailing_system" => [
+        %{
+          "message_index" => 1,
+          "sha256" => sha(trailing_json),
+          "bytes" => byte_size("Synthetic trailing context 1")
+        }
+      ]
+    }
+
+    assert extras["request_extras_sha256"] == sha(canon(manifest))
+
+    # null vs absent: otherwise identical requests
+    assert {:match, null} = compare(ctx, request(ctx, top: %{"thinking" => nil}))
+    assert {:match, absent} = compare(ctx, request(ctx, drop: ["thinking"]))
+    assert "thinking_null" in null.extras["request_fields"]
+    refute "thinking_present" in absent.extras["request_fields"]
+    refute null.extras["request_extras_sha256"] == absent.extras["request_extras_sha256"]
+
+    # position is bound: the same reminder after the stdin
+    assert {:match, moved} =
+             compare(ctx, request(ctx, reminders: [], reminders_after: [@reminder]))
+
+    assert moved.extras["reminder_sha256s"] == extras["reminder_sha256s"]
+    refute moved.extras["request_extras_sha256"] == extras["request_extras_sha256"]
+
+    # metadata (account id) is excluded entirely
+    other = "user_" <> String.duplicate("cd", 32)
+
+    assert {:match, meta} =
+             compare(ctx, request(ctx, top: %{"metadata" => %{"user_id" => other}}))
+
+    assert meta.extras == extras
   end
 
   test "thinking in the response stays unsupported under v2", ctx do
@@ -224,4 +361,17 @@ defmodule SdrAgent.Agents.Witness.ProjectionV2Test do
   end
 
   defp drop_key(json, key), do: json |> JSON.decode!() |> Map.delete(key) |> JSON.encode!()
+
+  defp sha(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+
+  # Independent canonical JSON (sorted keys, compact) for the ASCII fixtures.
+  defp canon(map) when is_map(map) do
+    "{" <>
+      (map
+       |> Enum.sort_by(fn {k, _} -> k end)
+       |> Enum.map_join(",", fn {k, v} -> Jason.encode!(k) <> ":" <> canon(v) end)) <> "}"
+  end
+
+  defp canon(list) when is_list(list), do: "[" <> Enum.map_join(list, ",", &canon/1) <> "]"
+  defp canon(value), do: Jason.encode!(value)
 end

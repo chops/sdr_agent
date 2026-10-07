@@ -415,6 +415,77 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
       end
     end
 
+    test "a zero-context v2 proof keeps the complete eight-key group", ctx do
+      invocation = call_model!(ctx, "cli_shape_zero")
+      assert {:ok, _} = reconcile(ctx, invocation, @test_only_allowlist)
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+
+      for key <- ~w(reminder_count reminder_sha256s reminder_bytes trailing_system_count
+                    trailing_system_sha256s trailing_system_bytes request_extras_sha256
+                    request_fields) do
+        assert Map.has_key?(link.evidence, key), key
+      end
+
+      assert {link.evidence["reminder_count"], link.evidence["trailing_system_count"]} == {0, 0}
+    end
+
+    test "an invalid derived evidence group downgrades and never clears a mismatch", ctx do
+      tamper = fn group -> Map.put(group, "reminder_count", 9) end
+      invocation = call_model!(ctx, "cli_shape")
+
+      result =
+        Witness.reconcile(invocation.id,
+          actor: ctx.rec,
+          store_root: ctx.root,
+          methods: @test_only_allowlist,
+          evidence_tamper: tamper
+        )
+
+      assert match?({:ok, %{status: :inferred}}, result), inspect(result)
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert link.link_status == :inferred
+      assert "evidence_contract_invalid" in link.evidence["reason_codes"]
+      refute Map.has_key?(link.evidence, "reminder_count")
+      assert [failure] = attention(ctx, invocation)
+      assert failure.message =~ "evidence_contract_invalid"
+
+      # An earlier (v1) mismatch is not cleared by an invalid v2 observation.
+      mismatched = call_model!(ctx, "mismatch")
+      assert {:ok, %{status: :mismatch}} = reconcile(ctx, mismatched, @test_only_allowlist)
+      [path] = terminal_record_paths(ctx.root, mismatched)
+      record = path |> File.read!() |> JSON.decode!()
+
+      stdin =
+        blob_path(ctx.root, record["request_sha256"])
+        |> File.read!()
+        |> JSON.decode!()
+        |> get_in(["messages", Access.at(0), "content", Access.at(0), "text"])
+
+      request = Proxy.blob!(ctx.root, Proxy.cli_request(stdin))
+      response = Proxy.blob!(ctx.root, Proxy.sse_response(~s({"answer":"qualified","score":42})))
+
+      rewritten =
+        Map.merge(record, %{
+          "request_sha256" => request,
+          "response_sha256" => response,
+          "request_capture_sha256" => request,
+          "response_capture_sha256" => response
+        })
+
+      File.write!(path, JSON.encode!(rewritten))
+
+      result =
+        Witness.reconcile(mismatched.id,
+          actor: ctx.rec,
+          store_root: ctx.root,
+          methods: @test_only_allowlist,
+          evidence_tamper: tamper
+        )
+
+      assert match?({:ok, %{status: :mismatch}}, result), inspect(result)
+      assert {:ok, :mismatch} = status(mismatched, ctx.rec)
+    end
+
     test "a different sole stdin in the CLI shape is a mismatch with critical attention", ctx do
       invocation = call_model!(ctx, "cli_shape_mismatch")
       assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation, @test_only_allowlist)

@@ -107,6 +107,13 @@ case mode do
             response: Proxy.sse_response(answer)
           )
 
+        "cli_shape_zero" ->
+          Proxy.exchange!(root, id,
+            traceparent: tp,
+            request: Proxy.cli_request(stdin, reminders: [], trailing: 0),
+            response: Proxy.sse_response(answer)
+          )
+
         "cli_shape_mismatch" ->
           Proxy.exchange!(root, id,
             traceparent: tp,

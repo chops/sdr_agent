@@ -89,6 +89,7 @@ defmodule SdrAgent.Test.FakeWitnessProxy do
     user_blocks =
       Enum.map(reminders, &%{"type" => "text", "text" => &1}) ++
         [%{"type" => "text", "text" => stdin}] ++
+        Enum.map(Keyword.get(opts, :reminders_after, []), &%{"type" => "text", "text" => &1}) ++
         Enum.map(Keyword.get(opts, :extra_user_texts, []), &%{"type" => "text", "text" => &1}) ++
         Keyword.get(opts, :user_blocks_extra, [])
 
@@ -101,13 +102,14 @@ defmodule SdrAgent.Test.FakeWitnessProxy do
       for n <- 1..Keyword.get(opts, :trailing, 1)//1 do
         %{
           "role" => "system",
-          "content" => [
-            %{
-              "type" => "text",
-              "text" => "Synthetic trailing context #{n}",
-              "cache_control" => %{"type" => "ephemeral"}
-            }
-          ]
+          "content" =>
+            Keyword.get(opts, :trailing_content, [
+              %{
+                "type" => "text",
+                "text" => "Synthetic trailing context #{n}",
+                "cache_control" => %{"type" => "ephemeral"}
+              }
+            ])
         }
       end
 
@@ -129,14 +131,18 @@ defmodule SdrAgent.Test.FakeWitnessProxy do
       "context_management" => %{"edits" => [%{"type" => "clear_thinking"}]},
       "tools" => Keyword.get(opts, :tools, []),
       "messages" =>
-        [%{"role" => "user", "content" => user_blocks}] ++
+        Keyword.get(opts, :leading_messages, []) ++
+          [%{"role" => "user", "content" => user_blocks}] ++
           trailing ++ Keyword.get(opts, :extra_messages, [])
     }
 
     request =
       if Keyword.get(opts, :tools) == :absent, do: Map.delete(request, "tools"), else: request
 
-    request |> Map.merge(Keyword.get(opts, :top, %{})) |> JSON.encode!()
+    request
+    |> Map.merge(Keyword.get(opts, :top, %{}))
+    |> Map.drop(Keyword.get(opts, :drop, []))
+    |> JSON.encode!()
   end
 
   @doc "An Anthropic SSE response whose single text block is `text`."
