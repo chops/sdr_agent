@@ -241,36 +241,22 @@ defmodule SdrAgentWeb.DraftLive do
     |> reply("Saved as a new revision.", editing?: false)
   end
 
-  # The grant binds the contact's *current* email under a lock (S8 review),
-  # so the recipient shown on the page is re-read at confirmation: if it
-  # changed since the page was rendered, nothing is approved and the page
-  # shows the new recipient to be confirmed again.
+  # The approve form carries the recipient email the page displayed; the
+  # domain compares it to the locked contact (stale → refused, page reloads
+  # with the current recipient). Always called, so every refusal — including
+  # an auditor's forged event — is the domain's and is audited.
   def handle_event("approve", %{"approve" => params}, socket) do
-    shown = params["recipient_email"]
-
     binding = %{
       draft_revision_id: params["draft_revision_id"],
       content_sha256: params["content_sha256"],
-      recipient_email: shown
+      recipient_email: params["recipient_email"]
     }
 
-    case current_recipient(socket) do
-      {:ok, ^shown} ->
-        socket
-        |> act(fn draft, actor -> Outreach.approve(draft, binding, actor: actor) end)
-        |> reply("Approved for #{shown}. The delivery is queued for local capture.")
-
-      {:ok, current} ->
-        message =
-          "The recipient changed from #{shown || "(none shown)"} to #{current} after this page " <>
-            "was shown (recipient changed) — check it and approve again."
-
-        {:noreply,
-         socket |> load() |> assign(review_error: message) |> put_flash(:error, message)}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, AuditedView.error_message(reason))}
-    end
+    socket
+    |> act(fn draft, actor -> Outreach.approve(draft, binding, actor: actor) end)
+    |> reply(
+      "Approved for #{params["recipient_email"]}. The delivery is queued for local capture."
+    )
   end
 
   def handle_event("reject", %{"reject" => params}, socket) do
@@ -311,15 +297,6 @@ defmodule SdrAgentWeb.DraftLive do
     else
       {:error, reason} -> {:noreply, put_flash(socket, :error, AuditedView.error_message(reason))}
       _ -> {:noreply, put_flash(socket, :error, "This delivery has no captured message yet.")}
-    end
-  end
-
-  defp current_recipient(socket) do
-    with {:ok, contact} <-
-           Sales.fetch(Sales.Contact, socket.assigns.draft.recipient_contact_id,
-             actor: socket.assigns.current_scope.user
-           ) do
-      {:ok, to_string(contact.email)}
     end
   end
 

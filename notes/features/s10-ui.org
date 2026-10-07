@@ -127,9 +127,12 @@ hand: NEEDS_REVIEW (peer reviews RED on the PR).
   =m_1791395301801790000_7391018e= (relayed by the coordinator), landing on
   =s10-ui=. Recorded in the S2 Approval row. RED 84/89 (five approvals
   granted that must be refused) → GREEN. The draft page renders the
-  displayed email into the approve form's hidden binding and also re-reads
-  the contact on submit for a clearer message (the domain check under lock
-  is authoritative). Fixture =approval_input/1= binds the email as seen when
+  displayed email into the approve form's hidden binding and always calls
+  the domain; a stale recipient comes back as the domain's refusal and the
+  page reloads with the current recipient. (Re-review 2, Codex @3d4de4c: an
+  earlier UI-side pre-check skipped the domain call, so an auditor's forged
+  approve with a missing/malformed/mismatched email was not audited —
+  removed; RED 12/17 → GREEN, each auditor case denied exactly once.) Fixture =approval_input/1= binds the email as seen when
   built; the race tests use it.
 - *MF2 — stale socket actor.* =on_mount(:operator)= keeps the session token
   and re-validates on every event and navigation (token verifies, stored,
