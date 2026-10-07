@@ -325,7 +325,11 @@ defmodule SdrAgent.SalesFixtures do
 
   @doc "Attributes of a claim quoting `quote` from the fixture content."
   def claim_attrs(artifact, decision, quote, overrides \\ %{}) do
-    start = :binary.match(content(), quote) |> elem(0)
+    start =
+      case :binary.match(Map.get(overrides, :content, content()), quote) do
+        {byte_start, _length} -> byte_start
+        :nomatch -> 0
+      end
 
     Map.merge(
       %{
@@ -410,7 +414,7 @@ defmodule SdrAgent.SalesFixtures do
         actor: system_actor(:agent_runtime, tenant)
       )
 
-    {:ok, lead} = Sales.get(SdrAgent.Sales.Lead, lead.id, actor: human(:admin, tenant))
+    {:ok, lead} = Sales.fetch(SdrAgent.Sales.Lead, lead.id, actor: human(:admin, tenant))
     %{lead: lead, qualification: qualification, claim: claim, run: run}
   end
 

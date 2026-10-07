@@ -202,7 +202,8 @@ defmodule SdrAgent.Accounts.UserTest do
         {:ok, signed_in} = Accounts.sign_in(to_string(user.email), test_password())
         token = signed_in.__metadata__.token
 
-        assert {:error, %Ash.Error.Invalid{}} =
+        # AshAuthentication refuses a wrong current password as an authentication failure.
+        assert {:error, %Ash.Error.Forbidden{}} =
                  Accounts.change_password(
                    user,
                    Map.put(new_password(), :current_password, "wrong-password-0"),
@@ -254,7 +255,9 @@ defmodule SdrAgent.Accounts.UserTest do
     end
 
     test "ADM sets another user's password (incl. an auditor's); REV and self cannot", ctx do
+      {:ok, signed_in} = Accounts.sign_in(to_string(ctx.auditor.email), test_password())
       {:ok, _} = Accounts.set_password(ctx.auditor, new_password(), actor: ctx.admin)
+      refute session_valid?(signed_in.__metadata__.token)
       assert {:ok, _} = Accounts.sign_in(to_string(ctx.auditor.email), @password)
 
       assert {:error, %Ash.Error.Forbidden{}} =
@@ -331,12 +334,17 @@ defmodule SdrAgent.Accounts.UserTest do
       assert other.display_name == ctx.admin.display_name
       assert other.role == :admin
 
-      for field <- [:email, :status, :hashed_password, :tenant_id] do
+      for field <- [:email, :status, :tenant_id] do
         assert %Ash.ForbiddenField{} = Map.get(other, field), "#{field} must be hidden"
       end
 
       own = Enum.find(users, &(&1.id == ctx.auditor.id))
       assert own.email == ctx.auditor.email
+
+      # The hash is a private AshAuthentication attribute: never loaded for operators.
+      assert Enum.all?(users, &match?(%Ash.NotLoaded{}, &1.hashed_password))
+      {:ok, admin_view} = Accounts.list_users(actor: ctx.admin)
+      assert Enum.all?(admin_view, &match?(%Ash.NotLoaded{}, &1.hashed_password))
     end
   end
 end
