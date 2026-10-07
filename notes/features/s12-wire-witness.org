@@ -367,6 +367,58 @@ existing REC lifecycle calls; no entity delta.
 ** S12d — operator deployment and enablement
 Owner alone deploys nix-darwin. One budgeted synthetic external model call supplies proof; enabling a method is a separate reviewed PR, never an automatic effect of a passing fixture test.
 
+*** Deployment blocker found and fixed by the owner (2026-10-07)
+The proxy (0.2.0, running as =charles=, =--blob-dir ~/.local/share/llm-otel-proxy/blobs=)
+could not create =witnesses/= or =witness/sha256=. The cause: =blobs/= was owned
+by root with mode 0755, so every SDR exchange would have been =store_error=. The
+owner ran =chown charles= on =blobs/=, and the proxy now creates its own 0700
+directories. Permanent follow-up for nix-darwin, routed separately: activation
+should =install -d= =blobs=, =blobs/witnesses= and =blobs/witness/sha256= as the
+service user.
+
+*** Real proof call 1 of 2 (=docs/audit/s12d-wire-witness-proof-1.json=, metadata only)
+One synthetic ClaudeCLI call went through the deployed shim and proxy.
+- CLI and model attestation: Claude Code 2.1.291, =claude-opus-5-5=.
+- Witness: invocation =01a11823-f31b-780e-9752-40f64824fcf7= produced exactly one
+  exchange, record =01a11823-f672-7d2e-acdc-e8263376bad4=, on route
+  =/anthropic/v1/messages=. The record is complete: HTTP 200, both captures
+  complete, stream complete.
+- Raw digests: request =3e5097…467d=, response =cd5f5c…5287=.
+- Response projection: EQUAL. The projected and observed digests are both
+  =245eb2…5a55=. The SSE stream had exactly one text block, a ping and
+  message_stop.
+- Request projection: UNSUPPORTED (=request_shape_unsupported=). Result: the link
+  is =inferred= and the status is =inferred= even under the test-only exact
+  allowlist entry.
+- NOT ENABLED.
+
+Structural differences from the =claude-message-json/1= assumptions (from the
+raw blob, structure and hashes only; no content was printed):
+- =messages= has 2 entries:
+  - =[0]= has role =user= and 2 text blocks:
+    - =<system-reminder>…= (558 chars), injected by the CLI;
+    - the exact rendered stdin. Its sha256 equals =projected_request_sha256=.
+  - =[1]= has role =system= and one text block carrying =cache_control=
+    (928 chars). The final message is therefore not =user=.
+- The request also carries:
+  - =thinking: {type: adaptive}=: response thinking blocks are possible on later calls
+  - =tools: []=
+  - =output_config.effort=
+  - =context_management.edits=
+  - 3 =system= blocks
+- =metadata= is present. It stays in the proxy store only.
+Proposal (needs review before any enablement): projection
+=claude-message-json/2+prompt-builder/1=:
+- locate the single =user= message;
+- require exactly one text block byte-equal to stdin;
+- allow other text blocks there only with the =<system-reminder>= prefix,
+  recorded as a reason;
+- allow trailing =system=-role text-only messages;
+- require =tools= to be empty;
+- keep the response rules (thinking stays unsupported).
+Prove it with the remaining real call (budget 1 of 2), then a separate
+enablement PR.
+
 * Implementation Notes
 ** S12b (Claude writer)
 - Propagation: =ModelProvider= adds =request.witness= (reserved invocation id
