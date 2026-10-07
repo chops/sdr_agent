@@ -5,6 +5,7 @@ defmodule SdrAgent.Audit.AnchorSinks.OpenTimestampsSink do
   defmodule Calendar do
     @moduledoc false
     @calendar "https://a.pool.opentimestamps.org/digest"
+    @client_version "0.7.2"
     # DetachedTimestampFile v1 + OpSHA256 (upstream serialization format).
     @header <<0, "OpenTimestamps", 0, 0, "Proof", 0, 0xBF, 0x89, 0xE2, 0xE8, 0x84, 0xE8, 0x92,
               0x94, 1, 8>>
@@ -13,7 +14,16 @@ defmodule SdrAgent.Audit.AnchorSinks.OpenTimestampsSink do
       url = Keyword.get(opts, :url, @calendar)
       request = Keyword.get(opts, :request, &Req.post/2)
 
-      case request.(url, body: hash, headers: [{"content-type", "application/octet-stream"}]) do
+      with :ok <- check_version(opts) do
+        submit_response(
+          request.(url, body: hash, headers: [{"content-type", "application/octet-stream"}]),
+          hash
+        )
+      end
+    end
+
+    defp submit_response(response, hash) do
+      case response do
         {:ok, %{status: status, body: body}} when status in 200..299 and is_binary(body) ->
           {:ok, @header <> hash <> body}
 
@@ -26,7 +36,7 @@ defmodule SdrAgent.Audit.AnchorSinks.OpenTimestampsSink do
     end
 
     def upgrade(proof, hash, opts) do
-      with :ok <- bound_to_hash(proof, hash) do
+      with :ok <- bound_to_hash(proof, hash), :ok <- check_version(opts) do
         with_proof(proof, &upgrade_path(&1, hash, opts))
       end
     end
@@ -38,15 +48,59 @@ defmodule SdrAgent.Audit.AnchorSinks.OpenTimestampsSink do
            {:ok, attestation} <- verify_path(path, hash, opts) do
         {:ok, Map.merge(attestation, %{proof: upgraded, bitcoin_attested: true})}
       else
-        {_output, status} -> {:error, {:ots_upgrade_exit, status}}
+        {output, status} when is_integer(status) -> upgrade_error(output, status)
         error -> error
       end
     end
 
+    defp upgrade_error(output, 1) do
+      transport_warning? =
+        Regex.match?(~r/^(Calendar |Ignoring attestation from calendar )/m, output)
+
+      if String.contains?(output, "Failed! Timestamp not complete") and not transport_warning?,
+        do: {:error, :ots_pending},
+        else: {:error, {:ots_upgrade_exit, 1}}
+    end
+
+    defp upgrade_error(_output, status), do: {:error, {:ots_upgrade_exit, status}}
+
     def verify(proof, hash, opts) do
-      with :ok <- bound_to_hash(proof, hash) do
+      with :ok <- bound_to_hash(proof, hash), :ok <- check_version(opts) do
         with_proof(proof, &verify_path(&1, hash, opts))
       end
+    end
+
+    defp check_version(opts) do
+      case command(["--version"], opts) do
+        {output, 0} ->
+          actual =
+            output
+            |> String.split("\n", trim: true)
+            |> List.last()
+            |> to_string()
+            |> String.trim()
+
+          if actual == "v" <> @client_version,
+            do: :ok,
+            else: {:error, {:ots_client_version_mismatch, @client_version, version_label(actual)}}
+
+        {_output, 127} ->
+          {:error, :audit_tools_nix_missing}
+
+        {_output, status} ->
+          {:error, {:ots_client_version_exit, status}}
+      end
+    rescue
+      error in ErlangError ->
+        if error.original == :enoent,
+          do: {:error, :audit_tools_wrapper_missing},
+          else: {:error, {:ots_client_unavailable, error.original}}
+    end
+
+    defp version_label(actual) do
+      if Regex.match?(~r/\Av\d+\.\d+\.\d+\z/, actual),
+        do: actual,
+        else: "unrecognized version output"
     end
 
     defp bound_to_hash(proof, hash) when byte_size(hash) == 32 do
@@ -81,7 +135,22 @@ defmodule SdrAgent.Audit.AnchorSinks.OpenTimestampsSink do
 
     defp command(args, opts) do
       runner = Keyword.get(opts, :command, &System.cmd/3)
-      runner.("ots", args, stderr_to_stdout: true, env: [{"TZ", "UTC"}])
+
+      wrapper =
+        Keyword.get(
+          opts,
+          :wrapper,
+          Application.get_env(
+            :sdr_agent,
+            :audit_tools_wrapper,
+            Path.expand("bin/with-audit-tools")
+          )
+        )
+
+      runner.(wrapper, ["ots" | args],
+        stderr_to_stdout: true,
+        env: [{"TZ", "UTC"}, {"SDR_AUDIT_ANCHOR_PRIVATE_KEY", nil}]
+      )
     end
 
     defp with_proof(proof, on_success) do

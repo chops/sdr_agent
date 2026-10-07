@@ -7,9 +7,8 @@ proof upgrades, counting-sink idle regression, FileSink identical replay.
 Plan APPROVED by Claude under ADR-0001 charter, reply
 =01a114a4-e5a3-71bd-93a0-647c4fb3541c= to
 =m_1791347682635759083_f9379291=. Proceed to RED only; GREEN requires the TDD
-checkpoint. The first S5 re-review is posted at
-=https://github.com/chops/sdr_agent/pull/9#issuecomment-6030949380=; new S5
-revisions take priority.
+checkpoint. S5 is APPROVED at =78f3635= (PR #9 comment 6031075422), and merged
+as =202a607=; its critical-path review is complete.
 
 * Entity Model
 Entity Model trigger: no — existing AuditAnchor/AnchorSinkReceipt actions,
@@ -68,8 +67,12 @@ is connected. Runtime sink failures must not crash application boot.
 
 * Architecture Evaluation
 No new domain/resource/ownership/supervision boundary. The existing OTS
-integration gains its approved periodic execution within Audit. Evaluate
-the maintained runtime diagrams after GREEN; record any conditional edge.
+integration gains its approved periodic execution within Audit. Runtime
+component/data-flow diagrams now show cron dispatch, unique proof jobs,
+the external CLI, and conditional dev/prod OTS paths. The diagram generator
+loses hand-maintained edges and counts Change/Validation modules as resources;
+the reviewed domain map/counts were preserved while adding the new runtime
+flow to both Mermaid sources and rendered Markdown wrappers.
 
 * TDD Tracking
 RED (2026-10-06, =MIX_TEST_PARTITION=_s11b mix test=, four touched/new audit
@@ -102,3 +105,47 @@ S5 was approved at =78f3635= (PR #9 comment 6031075422) and merged as
 =202a607=. This RED commit is still based on =f56f564=; request permission
 to rebase it onto the merged S5 before GREEN and update the owned remote
 branch with force-with-lease. No production code added.
+
+* GREEN Implementation
+TDD VERIFIED and Phase 4b/rebase permission granted by Claude, reply
+=01a114af-889d-761e-82d5-d6fe3c205351= to
+=m_1791348380337932083_d0b29674=. RED rebased onto S5 (=202a607=) as
+=066cc0c= and pushed with an explicit lease against owned head =b7617fc=.
+
+Implemented defaults/offline overrides, Nix/tool version checks and secret-
+free child env, bounded per-anchor/receipt unique jobs, serialized confirmed
+receipt replay, pending-proof reuse, and failed upgrade evidence. No private
+key is read by the upgrade worker. Worker timeout/backoff and offline-mode
+tests supplement the approved RED cases. A test-helper defect (missing Repo
+in Oban.Testing.all_enqueued) was corrected using its documented options;
+the assertion for exactly two unique jobs was preserved.
+
+The real pinned CLI reports =v0.7.2=. Focused/final gate results pending.
+
+Packaging amendment APPROVED by Claude, reply
+=01a114c2-f102-70bd-b5bc-f9c7baac3e95= to
+=m_1791349649386871083_f7f30357=. The initially approved devenv addition
+failed receipt ownership verification (F6). Restored exact managed bytes;
+project-owned =bin/with-audit-tools= supplies the same pinned tool without
+changing the recipe/receipt/validator/lock. All OTS calls use this wrapper,
+with an explicit public environment allowlist and fail-closed wrapper/Nix/
+version checks. Fake-Nix argv/environment tests and shellcheck pass.
+
+That reply also approved binding each job to its named pending receipt and
+recording =pending_receipt_id= in confirmation metadata. A later-pending-row
+test first failed, then passed after correcting the proof-selection path.
+Real calendar transport warnings remain failures even when the CLI also
+prints "Timestamp not complete"; pure incompleteness stays pending.
+
+Final configured local gates: =mix precommit= and =bin/verify= each
+*292 passed, 3 external excluded*; =mix ash.codegen --check=,
+=mix compile --warnings-as-errors=, configured =mix credo= and
+=mix hex.audit= pass. Shellcheck and bash syntax check pass for the wrapper
+and fake-Nix fixture. The real wrapper/OTS wrong-digest external test passes
+without Bitcoin/calendar traffic. Managed =devenv.nix=, =flake.nix=,
+=flake.lock=, recipe, receipt and validator are unchanged.
+
+Optional strict Credo still reports the repository's existing alias/style
+baseline. Known-arity apply calls used to keep RED assertion-only before the
+worker existed were replaced by direct calls in GREEN. The configured
+non-strict Credo gate remains clean; no enforcement/exclusions were changed.

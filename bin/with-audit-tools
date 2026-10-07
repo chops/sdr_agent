@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Exec-only audit tools from the project-locked nixpkgs (ADR-0005).
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+  printf '%s\n' 'usage: bin/with-audit-tools COMMAND [ARGS...]' >&2
+  exit 64
+fi
+
+if ! command -v nix >/dev/null 2>&1; then
+  printf '%s\n' 'audit tools unavailable: nix is missing' >&2
+  exit 127
+fi
+
+audit_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+audit_env=("PATH=$PATH" "HOME=$HOME" "USER=${USER:-}" "TZ=UTC")
+if [ -n "${TMPDIR:-}" ]; then audit_env+=("TMPDIR=$TMPDIR"); fi
+if [ -n "${NIX_SSL_CERT_FILE:-}" ]; then audit_env+=("NIX_SSL_CERT_FILE=$NIX_SSL_CERT_FILE"); fi
+if [ -n "${SSL_CERT_FILE:-}" ]; then audit_env+=("SSL_CERT_FILE=$SSL_CERT_FILE"); fi
+
+# Only public execution/cache/TLS settings survive. No signing key, model
+# credential, token, or arbitrary application environment reaches the tool.
+exec env -i "${audit_env[@]}" nix shell --no-write-lock-file \
+  --inputs-from "$audit_root" nixpkgs#opentimestamps-client --command "$@"

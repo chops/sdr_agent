@@ -28,3 +28,19 @@ and Git commit times can be backdated. Verified historical signatures retain
 reduced assurance. `ots` displays a UTC day; the verifier uses the following
 midnight as a conservative existence-time upper bound. A same-day revocation
 cannot be resolved from that display precision.
+
+Dev/prod enable Git and OTS. For offline development, set
+`SDR_ANCHOR_SINKS=none`, or `file` to write local statements to
+`SDR_ANCHOR_FILE_DIR` (default `tmp/audit-anchors`). The test environment
+always keeps its sinks empty. The ten-minute proof dispatcher is idle when
+OTS is disabled and cancels already queued OTS jobs without network work.
+
+OTS operations automatically invoke project-owned `bin/with-audit-tools`,
+which obtains `ots` 0.7.2 from the unchanged locked nixpkgs. The application's
+normal devenv/`bin/with-secrets` launch remains in place; do not wrap the
+whole application, because the tool wrapper intentionally clears credentials.
+Set `SDR_AUDIT_TOOLS_WRAPPER` for a deployment with a different wrapper path.
+A missing wrapper/Nix or mismatched binary fails closed on proof attempts, without preventing
+application boot. `ots upgrade`/verification additionally require the
+operator's Bitcoin-node configuration. Incomplete proofs stay pending;
+failed operations retain failed receipts and Oban retry/discard evidence.

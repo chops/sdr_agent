@@ -73,13 +73,25 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
       {:ok, %{status: 200, body: calendar_response}}
     end
 
-    assert {:ok, ^proof} = OpenTimestampsSink.Calendar.submit(hash, request: request)
+    assert {:ok, ^proof} =
+             OpenTimestampsSink.Calendar.submit(hash,
+               request: request,
+               command: fn _wrapper, ["ots", "--version"], _opts -> {"v0.7.2\n", 0} end
+             )
 
-    command = fn "ots", ["verify", "-d", digest, path], opts ->
-      assert digest == Base.encode16(hash, case: :lower)
-      assert File.read!(path) == proof
-      assert {"TZ", "UTC"} in opts[:env]
-      {"Success! Bitcoin block 358391 attests existence as of 2015-05-28 UTC", 0}
+    command = fn wrapper, ["ots" | args], opts ->
+      assert Path.basename(wrapper) == "with-audit-tools"
+
+      case args do
+        ["--version"] ->
+          {"v0.7.2\n", 0}
+
+        ["verify", "-d", digest, path] ->
+          assert digest == Base.encode16(hash, case: :lower)
+          assert File.read!(path) == proof
+          assert {"TZ", "UTC"} in opts[:env]
+          {"Success! Bitcoin block 358391 attests existence as of 2015-05-28 UTC", 0}
+      end
     end
 
     assert {:ok, %{verified: true, timestamp: ~U[2015-05-29 00:00:00Z]}} =
@@ -96,14 +108,18 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
              OpenTimestampsSink.Calendar.verify(
                proof,
                hash,
-               command: fn _, _, _ -> {"not a Bitcoin attestation", 0} end
+               command: fn _wrapper, ["ots" | args], _ ->
+                 if args == ["--version"],
+                   do: {"v0.7.2\n", 0},
+                   else: {"not a Bitcoin attestation", 0}
+               end
              )
   end
 
   test "OTS refuses an unexpected executable version before proof verification" do
     {proof, hash} = ots_fixture()
 
-    command = fn "ots", args, _opts ->
+    command = fn _wrapper, ["ots" | args], _opts ->
       case args do
         ["--version"] ->
           {"v0.7.3\n", 0}
@@ -120,16 +136,25 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
   test "OTS missing executable returns a clear fail-closed error" do
     {proof, hash} = ots_fixture()
 
-    assert {:error, :ots_client_missing} =
+    assert {:error, :audit_tools_wrapper_missing} =
              OpenTimestampsSink.Calendar.verify(proof, hash,
                command: fn _, _, _ -> raise ErlangError, original: :enoent end
+             )
+  end
+
+  test "OTS reports a missing nix dependency without attempting proof verification" do
+    {proof, hash} = ots_fixture()
+
+    assert {:error, :audit_tools_nix_missing} =
+             OpenTimestampsSink.Calendar.verify(proof, hash,
+               command: fn _wrapper, ["ots", "--version"], _opts -> {"nix is missing", 127} end
              )
   end
 
   test "OTS child commands never inherit the private signing key" do
     {proof, hash} = ots_fixture()
 
-    command = fn "ots", args, opts ->
+    command = fn _wrapper, ["ots" | args], opts ->
       assert {"SDR_AUDIT_ANCHOR_PRIVATE_KEY", nil} in opts[:env]
 
       case args do
@@ -156,6 +181,32 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
     {proof, hash}
   end
 
+  test "CLI incompleteness is pending but calendar transport warnings remain failures" do
+    {proof, hash} = ots_fixture()
+
+    command = fn output ->
+      fn _wrapper, ["ots" | args], _opts ->
+        case args do
+          ["--version"] -> {"v0.7.2\n", 0}
+          ["upgrade", _path] -> {output, 1}
+        end
+      end
+    end
+
+    assert {:error, :ots_pending} =
+             OpenTimestampsSink.Calendar.upgrade(proof, hash,
+               command: command.("Failed! Timestamp not complete")
+             )
+
+    assert {:error, {:ots_upgrade_exit, 1}} =
+             OpenTimestampsSink.Calendar.upgrade(proof, hash,
+               command:
+                 command.(
+                   "Calendar https://a.pool.opentimestamps.org: connection refused\nFailed! Timestamp not complete"
+                 )
+             )
+  end
+
   @tag :external
   test "real ots binary rejects a mismatched digest fixture" do
     proof =
@@ -171,7 +222,11 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
     on_exit(fn -> File.rm(path) end)
 
     {output, status} =
-      System.cmd("ots", ["verify", "-d", String.duplicate("0", 64), path], stderr_to_stdout: true)
+      System.cmd(
+        Path.expand("bin/with-audit-tools"),
+        ["ots", "verify", "-d", String.duplicate("0", 64), path],
+        stderr_to_stdout: true
+      )
 
     assert status != 0
     assert output =~ "Digest provided does not match"

@@ -15,6 +15,11 @@ graph TB
         ModelProvider[ModelProvider facade<br/>budget + Zoi validation]
         ClaudeCLIAdapter[ClaudeCLI adapter<br/>serialized, tool-free GenServer]
         Telemetry[Telemetry setup and GenAI helper]
+        Oban[Oban cron]
+        Cadence[Anchor cadence worker]
+        UpgradeDispatch[OTS upgrade dispatcher<br/>10-minute bounded batch]
+        UpgradeJobs[Per-anchor receipt jobs<br/>unique, 3 attempts]
+        Anchoring[Audit.Anchoring]
     end
 
     subgraph Phoenix["Phoenix"]
@@ -37,8 +42,22 @@ graph TB
 
     subgraph External["Local External Process"]
         Claude[Claude CLI<br/>stream JSON via llm-proxy-shim]
+        OTSCLI[OpenTimestamps CLI 0.7.2]
+        OTSCalendars[Public OTS calendars]
+        Bitcoin[Operator-configured Bitcoin node]
     end
 
+    App --> Oban
+    Oban --> Cadence
+    Oban --> UpgradeDispatch
+    UpgradeDispatch --> UpgradeJobs
+    Cadence --> Anchoring
+    UpgradeJobs --> Anchoring
+    Anchoring --> Domains
+    Anchoring -. OTS enabled: digest submission .-> OTSCalendars
+    Anchoring -. OTS enabled: public proof .-> OTSCLI
+    OTSCLI -. upgrade .-> OTSCalendars
+    OTSCLI -. verify .-> Bitcoin
     App --> Endpoint
     App --> Budget
     App --> Telemetry
@@ -74,5 +93,5 @@ graph TB
 
 - [x] S6a budget process and serialized ClaudeCLI GenServer
 - [x] S6a supervision tree detail
-- [ ] Background workers (Oban, etc.)
+- [x] Audit anchor cadence and bounded, unique OTS upgrade jobs
 - [x] Claude CLI local process boundary

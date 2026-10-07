@@ -13,7 +13,13 @@ config :sdr_agent, Oban,
   queues: [default: 10],
   lifeline: [rescue_after: {2, :hours}],
   pruner: [max_age: {1, :day}],
-  plugins: [{Oban.Plugins.Cron, crontab: [{"* * * * *", SdrAgent.Audit.AnchorWorker}]}],
+  plugins: [
+    {Oban.Plugins.Cron,
+     crontab: [
+       {"* * * * *", SdrAgent.Audit.AnchorWorker},
+       {"*/10 * * * *", SdrAgent.Audit.OtsUpgradeWorker}
+     ]}
+  ],
   repo: SdrAgent.Repo
 
 # These enable behaviors that will become the default in the next major
@@ -141,6 +147,7 @@ config :sdr_agent,
   otel_capture_content: false,
   anchor_event_count: 100,
   anchor_interval_seconds: 900,
+  ots_upgrade_batch_size: 25,
   anchor_sinks: []
 
 config :opentelemetry, resource: %{service: %{name: "sdr_agent"}}
