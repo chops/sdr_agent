@@ -6,10 +6,8 @@
 #                          when nothing else is connected to it)
 #   bin/demo seed          seed the fictional demo data set (idempotent)
 #   bin/demo run           start Phoenix on PORT (default 4120)
-#   bin/demo predeliver [--approve]
-#                          run fixture lead 01 to a draft awaiting review;
-#                          --approve approves it as the Demo Reviewer
-#                          fixture operator and captures the email
+#   bin/demo predeliver    run fixture lead 01 to a draft awaiting review
+#                          (never approves: a human approves in the console)
 #   bin/demo status        database, migrations, server, Oban queues,
 #                          pipeline counts, audit chain verification
 #
@@ -27,13 +25,12 @@ cd "$root"
 
 usage() {
   cat >&2 <<'EOF'
-usage: bin/demo [--test] reset --yes | seed | run | status | predeliver [--approve]
+usage: bin/demo [--test] reset --yes | seed | run | status | predeliver
   reset --yes  drop, create and migrate the demo database (destructive)
   seed         seed the fictional demo data set (idempotent)
   run          start Phoenix on PORT (default 4120) after readiness checks
   status       database, migrations, server, Oban queues, counts, audit chain
-  predeliver   run lead 01 to a draft awaiting review; with --approve, approve it
-               as the Demo Reviewer fixture operator and capture the email
+  predeliver   run lead 01 to a draft awaiting review (approve it in the console)
 EOF
   exit 2
 }
@@ -50,13 +47,11 @@ fail() {
 
 mode=dev
 yes=0
-approve=0
 cmd=""
 for arg in "$@"; do
   case "$arg" in
     --test) mode=test ;;
     --yes) yes=1 ;;
-    --approve) approve=1 ;;
     reset | seed | run | status | predeliver)
       [ -z "$cmd" ] || usage
       cmd="$arg"
@@ -162,12 +157,7 @@ case "$cmd" in
 
   predeliver)
     check_repo
-    if [ "$approve" = 1 ]; then
-      echo "bin/demo: approving as the Demo Reviewer fixture operator (recorded in the audit trail)"
-      mix sdr.demo.predeliver --approve
-    else
-      mix sdr.demo.predeliver
-    fi
+    mix sdr.demo.predeliver
     ;;
 
   status)

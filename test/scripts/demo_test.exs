@@ -137,14 +137,15 @@ defmodule SdrAgent.Scripts.DemoTest do
     end
   end
 
-  test "predeliver checks the database, then passes --approve through", ctx do
+  test "predeliver checks the database and never takes an approval flag", ctx do
     env = stubbed(ctx, [{"STUB_REPO_LINE", "SDR_DEMO_REPO localhost 5520 sdr_agent_dev"}])
 
-    assert {_out, 0} = demo(["predeliver"], env)
-    assert {out, 0} = demo(["predeliver", "--approve"], env)
-    assert out =~ "approving as the Demo Reviewer fixture operator"
+    assert {out, 2} = demo(["predeliver", "--approve"], env)
+    assert out =~ "unknown argument: --approve"
+    assert mix_calls(ctx) == []
 
-    assert [_, "sdr.demo.predeliver", _, "sdr.demo.predeliver --approve"] = mix_calls(ctx)
+    assert {_out, 0} = demo(["predeliver"], env)
+    assert [_repo_check, "sdr.demo.predeliver"] = mix_calls(ctx)
   end
 
   describe "reset never drops a database that is in use" do
@@ -241,18 +242,16 @@ defmodule SdrAgent.Scripts.DemoTest do
     assert {after_refusal, 0} = demo(["--test", "status"], env)
     assert after_refusal =~ "tenant: seeded"
 
-    # predeliver: lead 01 to a draft awaiting review, then (approved as the
-    # demo reviewer) captured — or deferred, when the wall clock is inside
-    # the campaign's quiet hours.
+    # predeliver: lead 01 to a draft awaiting review; a re-run only reports.
     assert {drafted, 0} = demo(["--test", "predeliver"], env)
     assert drafted =~ "stage: awaiting review"
-    assert drafted =~ ~r"draft: /drafts/[0-9a-f-]{36}"
+    assert [_, draft_path] = Regex.run(~r"draft: (/drafts/[0-9a-f-]{36})", drafted)
 
-    assert {approved, 0} = demo(["--test", "predeliver", "--approve"], env)
-    assert approved =~ "approving as the Demo Reviewer fixture operator"
-    assert approved =~ ~r/stage: (captured|deferred by the send gate)/
+    assert {again, 0} = demo(["--test", "predeliver"], env)
+    assert again =~ "draft: #{draft_path}"
+    assert again =~ "stage: awaiting review"
 
-    for output <- [reset, before, seed, status, refused, drafted, approved],
+    for output <- [reset, before, seed, status, refused, drafted, again],
         %{password: password} <- Fixtures.users() do
       refute output =~ password
     end

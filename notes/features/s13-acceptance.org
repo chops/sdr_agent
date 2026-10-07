@@ -218,18 +218,22 @@ server may hold 4120.
   replies (=WebhookFixtures=, =:integration= drain, suppression and
   follow-up cancellation) once this branch carries S9a (main =b26be34=);
   #19 stays based on s10b-ui until retargeted.
-- *=bin/demo predeliver [--approve]=* (=SdrAgent.Demo.Predeliver=,
-  =mix sdr.demo.predeliver=). It runs lead 01 to a draft awaiting review.
-  With =--approve=, it approves as the *Demo Reviewer fixture operator*:
-  the approval is audited as that operator's, bound to the displayed
-  recipient, and the script says so. The delivery goes to local capture.
-  It goes through domain APIs and the real workers (drained inline, so
-  scheduled jobs are never forced), so the send gate applies and quiet
-  hours defer. It is idempotent; a re-run writes only its sign-in record.
-  It waits (bounded) when a running dev server's Oban takes a job first.
-  RED 0/5 (module undefined), GREEN 5/5 (including the quiet-hours deferral
-  under a frozen clock). The script tests cover pass-through and a real
-  =--test= run.
+- *=bin/demo predeliver=* (=SdrAgent.Demo.Predeliver=, =mix
+  sdr.demo.predeliver=). It runs lead 01 to a draft awaiting review and
+  prints its =/drafts/…= path. It goes through domain APIs and the real
+  research worker, drained inline, and waits (bounded) when a running dev
+  server's Oban takes the job first. It is idempotent: a re-run only
+  reports the stage, including the delivery after a human approval.
+  *It never approves.* The first version had =--approve= (an approval as
+  the Demo Reviewer fixture operator). The coordinator ruled that removed:
+  a script approving as a fixture reviewer is not a human approval, which
+  contradicts the ADR-0001 Tier 0 invariant even in dev. The owner approves
+  in the console, which also rehearses the demo. Tests: an Approval is never
+  created, whatever options are passed. RED was 19/21 against the
+  =--approve= version (the script approved; =bin/demo= accepted the flag);
+  GREEN is 21/21. Also tested: after a human approval and delivery, a
+  re-run reports =:captured= and writes only its sign-in record, and
+  =bin/demo predeliver --approve= is refused as an unknown argument.
 
 * S13 part 2 — TODO (after S9 and S12 merge)
 - [ ] Golden path: add the S9 replies to =replies/2=, and the
