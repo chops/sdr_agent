@@ -26,7 +26,11 @@ defmodule SdrAgent.Agents do
     * tool calls — `start_tool_invocation/3`, `succeed_tool_invocation/3`,
       `fail_tool_invocation/3`, `mark_tool_invocation_unknown/2`;
     * decisions — `record_decision/2` (idempotent on its key; conflicting
-      reuse fails), `list_decisions/2`.
+      reuse fails), `list_decisions/2`;
+    * wire witness (S12) — `link_wire_witness/2` (REC; append-only
+      per-exchange lineage), `list_wire_witness_links/2`,
+      `current_wire_witness_links/2`, and `read_reconciliation_payloads/2`
+      (REC; the only path to the scoped Payload read).
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -39,7 +43,10 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.Decision
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ToolInvocation
+  alias SdrAgent.Agents.WireWitnessLink
+  alias SdrAgent.Audit.Checks.ReconciliationScope
   alias SdrAgent.Audit.Guard
+  alias SdrAgent.Audit.GuardedCall
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Audit.Payload
 
@@ -53,6 +60,7 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.ModelInvocation
     resource SdrAgent.Agents.ToolInvocation
     resource SdrAgent.Agents.Decision
+    resource SdrAgent.Agents.WireWitnessLink
   end
 
   ## Definitions
@@ -371,6 +379,95 @@ defmodule SdrAgent.Agents do
     |> Ash.Query.filter(agent_run_id == ^run_id)
     |> Ash.Query.sort(decided_at: :asc)
     |> Ash.read()
+  end
+
+  ## Wire witness (S12)
+
+  @doc """
+  Records the link of one witnessed exchange of a terminal ClaudeCLI
+  invocation (REC). `attrs`: `model_invocation_id`, `proxy_record_ref`,
+  optional raw `proxy_request_sha256`/`proxy_response_sha256`,
+  `link_status`, `method`, `evidence`, and `supersedes_id` for a successor
+  of the exchange's current link. See `SdrAgent.Agents.WireWitnessLink`.
+  """
+  def link_wire_witness(attrs, opts) do
+    create(WireWitnessLink, :link, attrs, opts, Map.get(attrs, :model_invocation_id))
+  end
+
+  @doc "Every link (all lineage rows) of an invocation in the actor's tenant, oldest first."
+  def list_wire_witness_links(invocation_id, opts) do
+    invocation_id |> links_query(opts) |> Ash.read()
+  end
+
+  @doc "The current link (no successor) of each exchange of an invocation, oldest first."
+  def current_wire_witness_links(invocation_id, opts) do
+    invocation_id
+    |> links_query(opts)
+    |> Ash.Query.filter(not exists(successors, true))
+    |> Ash.read()
+  end
+
+  defp links_query(invocation_id, opts) do
+    WireWitnessLink
+    |> GuardedCall.read_query(opts)
+    |> Ash.Query.filter(model_invocation_id == ^invocation_id)
+    |> Ash.Query.sort(recorded_at: :asc, id: :asc)
+  end
+
+  @doc """
+  REC: returns `%{request: binary, response: binary | nil}` — the stored
+  application bodies of one invocation, for wire-witness reconciliation
+  (S12 supplementary ruling S1–S3).
+
+  The invocation is re-read by id in the actor's tenant (a passed struct's
+  fields are never trusted); only its own request/response hashes enter the
+  private scope of `SdrAgent.Audit.Payload` `:read_reconciliation_content`,
+  whose recorded purpose is fixed. Each body read appends a `payload_view`
+  AuditAccess under REC's identity first and fails closed. A guarded call:
+  every denial is audited. Callers keep this outside DB mutation locks.
+  """
+  def read_reconciliation_payloads(invocation, opts) do
+    actor = Keyword.get(opts, :actor)
+    id = invocation_id(invocation)
+
+    meta = %{
+      resource: ModelInvocation,
+      action: :read_reconciliation_payloads,
+      guarded?: true,
+      subject_id: id
+    }
+
+    Guard.run(meta, actor, fn ->
+      with {:ok, invocation} <- GuardedCall.get(ModelInvocation, id, actor: actor),
+           scope = reconciliation_scope(invocation),
+           {:ok, request} <- read_scoped(invocation.request_sha256, scope, actor),
+           {:ok, response} <- read_scoped(invocation.response_sha256, scope, actor) do
+        {:ok, %{request: request, response: response}}
+      end
+    end)
+  end
+
+  defp invocation_id(%ModelInvocation{id: id}), do: id
+  defp invocation_id(id) when is_binary(id), do: id
+  defp invocation_id(_invocation), do: nil
+
+  defp reconciliation_scope(invocation) do
+    ReconciliationScope.context(%{
+      tenant_id: invocation.tenant_id,
+      model_invocation_id: invocation.id,
+      sha256s: [invocation.request_sha256, invocation.response_sha256]
+    })
+  end
+
+  defp read_scoped(nil, _scope, _actor), do: {:ok, nil}
+
+  defp read_scoped(sha256, scope, actor) do
+    Payload
+    |> Ash.ActionInput.for_action(:read_reconciliation_content, %{sha256: sha256},
+      actor: actor,
+      context: scope
+    )
+    |> Ash.run_action()
   end
 
   ## Helpers

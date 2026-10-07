@@ -16,9 +16,8 @@ defmodule SdrAgent.Audit.ReconciliationContentTest do
   alias SdrAgent.Agents
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit
+  alias SdrAgent.Audit.Checks.ReconciliationScope
   alias SdrAgent.Audit.Payload
-
-  @scope_check SdrAgent.Audit.Checks.ReconciliationScope
 
   setup do
     tenant = bootstrap!()
@@ -88,8 +87,7 @@ defmodule SdrAgent.Audit.ReconciliationContentTest do
       foreign_rec = system_actor(:reconciler, %{id: Ecto.UUID.generate()})
 
       for target <- [ctx.invocation, ctx.invocation.id] do
-        assert {:error, error} = read_payloads(target, actor: foreign_rec)
-        refute match?({:not_implemented, _}, error)
+        assert {:error, %Ash.Error.Query.NotFound{}} = read_payloads(target, actor: foreign_rec)
       end
 
       assert views(ctx.tenant) == []
@@ -117,8 +115,7 @@ defmodule SdrAgent.Audit.ReconciliationContentTest do
     test "no content is returned when the access record cannot be appended", ctx do
       refuse_access_inserts!()
       before = length(events(ctx.tenant))
-      assert {:error, error} = read_payloads(ctx.invocation, actor: ctx.rec)
-      refute match?({:not_implemented, _}, error)
+      assert {:error, _access_failure} = read_payloads(ctx.invocation, actor: ctx.rec)
       assert length(events(ctx.tenant)) == before
     end
   end
@@ -189,39 +186,27 @@ defmodule SdrAgent.Audit.ReconciliationContentTest do
     end
   end
 
-  ## Calls (a missing S12b interface fails the scenario's own assertion)
+  ## Calls
 
-  defp read_payloads(invocation, opts) do
-    if function_exported?(Agents, :read_reconciliation_payloads, 2),
-      do: apply(Agents, :read_reconciliation_payloads, [invocation, opts]),
-      else: {:error, {:not_implemented, :read_reconciliation_payloads}}
-  end
+  defp read_payloads(invocation, opts), do: Agents.read_reconciliation_payloads(invocation, opts)
 
   # Runs the Payload action directly with an explicit context, as only the
   # Agents path does in production; used to test the policy boundary.
   defp run_scoped(sha256, actor, context) do
-    if Ash.Resource.Info.action(Payload, :read_reconciliation_content) do
-      Payload
-      |> Ash.ActionInput.for_action(:read_reconciliation_content, %{sha256: sha256},
-        actor: actor,
-        context: context
-      )
-      |> Ash.run_action()
-    else
-      {:error, {:not_implemented, :read_reconciliation_content}}
-    end
+    Payload
+    |> Ash.ActionInput.for_action(:read_reconciliation_content, %{sha256: sha256},
+      actor: actor,
+      context: context
+    )
+    |> Ash.run_action()
   end
 
   defp scope(tenant_id, ctx) do
-    scope = %{
+    ReconciliationScope.context(%{
       tenant_id: tenant_id,
       model_invocation_id: ctx.invocation.id,
       sha256s: [ctx.invocation.request_sha256, ctx.invocation.response_sha256]
-    }
-
-    if Code.ensure_loaded?(@scope_check),
-      do: apply(@scope_check, :context, [scope]),
-      else: %{sdr_reconciliation_scope: scope}
+    })
   end
 
   defp refuse_access_inserts! do

@@ -1,0 +1,394 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "proxy_record_ref",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "proxy_request_sha256",
+      "type": "binary"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "proxy_response_sha256",
+      "type": "binary"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "link_status",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "method",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "%{}",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "evidence",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "recorded_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "wire_witness_links_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "wire_witness_links_model_invocation_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "model_invocations"
+      },
+      "scale": null,
+      "size": null,
+      "source": "model_invocation_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "wire_witness_links_supersedes_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "wire_witness_links"
+      },
+      "scale": null,
+      "size": null,
+      "source": "supersedes_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "wire_witness_links_trace_ids"
+    },
+    {
+      "attribute": [
+        "link_status"
+      ],
+      "base_filter": null,
+      "check": "link_status IN ('inferred', 'reconciled', 'mismatch')",
+      "name": "wire_witness_links_link_status"
+    },
+    {
+      "attribute": [
+        "method"
+      ],
+      "base_filter": null,
+      "check": "method IN ('time_window', 'propagated_id')",
+      "name": "wire_witness_links_method"
+    },
+    {
+      "attribute": [
+        "proxy_record_ref"
+      ],
+      "base_filter": null,
+      "check": "proxy_record_ref ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'",
+      "name": "wire_witness_links_record_ref"
+    },
+    {
+      "attribute": [
+        "proxy_request_sha256"
+      ],
+      "base_filter": null,
+      "check": "(proxy_request_sha256 IS NULL OR octet_length(proxy_request_sha256) = 32) AND (proxy_response_sha256 IS NULL OR octet_length(proxy_response_sha256) = 32)",
+      "name": "wire_witness_links_digests"
+    },
+    {
+      "attribute": [
+        "evidence"
+      ],
+      "base_filter": null,
+      "check": "jsonb_typeof(evidence) = 'object' AND octet_length(evidence::text) <= 8192",
+      "name": "wire_witness_links_evidence_object"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION wire_witness_links_append_only()",
+      "global?": false,
+      "name": "wire_witness_links_guard_function",
+      "up": "CREATE FUNCTION wire_witness_links_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER wire_witness_links_guard_row ON wire_witness_links",
+      "global?": false,
+      "name": "wire_witness_links_guard_row",
+      "up": "CREATE TRIGGER wire_witness_links_guard_row BEFORE UPDATE OR DELETE ON wire_witness_links FOR EACH ROW EXECUTE FUNCTION wire_witness_links_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER wire_witness_links_guard_truncate ON wire_witness_links",
+      "global?": false,
+      "name": "wire_witness_links_guard_truncate",
+      "up": "CREATE TRIGGER wire_witness_links_guard_truncate BEFORE TRUNCATE ON wire_witness_links FOR EACH STATEMENT EXECUTE FUNCTION wire_witness_links_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP INDEX wire_witness_links_subject_id_index",
+      "global?": false,
+      "name": "wire_witness_links_subject_index",
+      "up": "CREATE UNIQUE INDEX wire_witness_links_subject_id_index ON wire_witness_links (tenant_id, model_invocation_id, proxy_record_ref, id)"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE wire_witness_links DROP CONSTRAINT wire_witness_links_same_subject_fkey",
+      "global?": false,
+      "name": "wire_witness_links_same_subject_fkey",
+      "up": "ALTER TABLE wire_witness_links ADD CONSTRAINT wire_witness_links_same_subject_fkey FOREIGN KEY (tenant_id, model_invocation_id, proxy_record_ref, supersedes_id) REFERENCES wire_witness_links (tenant_id, model_invocation_id, proxy_record_ref, id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION wire_witness_links_mismatch_lineage()",
+      "global?": false,
+      "name": "wire_witness_links_mismatch_function",
+      "up": "CREATE FUNCTION wire_witness_links_mismatch_lineage() RETURNS trigger LANGUAGE plpgsql AS $$\nDECLARE\n  previous wire_witness_links%ROWTYPE;\nBEGIN\n  IF NEW.supersedes_id IS NULL THEN\n    RETURN NEW;\n  END IF;\n  SELECT * INTO previous FROM wire_witness_links WHERE id = NEW.supersedes_id;\n  IF previous.link_status = 'mismatch' AND\n     (NEW.evidence ->> 'projection_version') IS NOT DISTINCT FROM\n     (previous.evidence ->> 'projection_version') THEN\n    RAISE EXCEPTION 'wire witness mismatch % can only be superseded under a different projection version', previous.id\n      USING ERRCODE = 'check_violation';\n  END IF;\n  RETURN NEW;\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER wire_witness_links_mismatch_lineage ON wire_witness_links",
+      "global?": false,
+      "name": "wire_witness_links_mismatch_trigger",
+      "up": "CREATE TRIGGER wire_witness_links_mismatch_lineage BEFORE INSERT ON wire_witness_links FOR EACH ROW EXECUTE FUNCTION wire_witness_links_mismatch_lineage()"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "7BF34A03BAFB7F5038DFC7D6F04172BF76A715D7E879257B7754C87AF4B1AB1F",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "wire_witness_links_unique_root_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "model_invocation_id"
+        },
+        {
+          "type": "atom",
+          "value": "proxy_record_ref"
+        }
+      ],
+      "name": "unique_root",
+      "nils_distinct?": true,
+      "where": "supersedes_id IS NULL"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "wire_witness_links_unique_supersedes_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "supersedes_id"
+        }
+      ],
+      "name": "unique_supersedes",
+      "nils_distinct?": true,
+      "where": "supersedes_id IS NOT NULL"
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "wire_witness_links"
+}

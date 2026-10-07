@@ -46,14 +46,14 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
       Agents.complete_model_invocation(invocation, AgentsFixtures.completion(), actor: agent)
 
     ref = Ash.UUIDv7.generate()
-    assert {:ok, root} = call(:link_wire_witness, link(invocation, ref, nil), actor: rec)
+    assert {:ok, root} = Agents.link_wire_witness(link(invocation, ref, nil), actor: rec)
 
     results =
       1..@racers
       |> Enum.map(fn _ ->
         Task.async(fn ->
           with_connection(fn ->
-            call(:link_wire_witness, link(invocation, ref, root.id), actor: rec)
+            Agents.link_wire_witness(link(invocation, ref, root.id), actor: rec)
           end)
         end)
       end)
@@ -62,9 +62,9 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
     assert Enum.count(results, &match?({:ok, _}, &1)) == 1
     assert Enum.count(results, &match?({:error, %Ash.Error.Invalid{}}, &1)) == @racers - 1
 
-    {:ok, links} = call(:list_wire_witness_links, invocation.id, actor: rec)
+    {:ok, links} = Agents.list_wire_witness_links(invocation.id, actor: rec)
     assert length(links) == 2
-    assert {:ok, [current]} = call(:current_wire_witness_links, invocation.id, actor: rec)
+    assert {:ok, [current]} = Agents.current_wire_witness_links(invocation.id, actor: rec)
     assert current.supersedes_id == root.id
 
     aud = SdrAgent.Actor.system(:auditor_cli, tenant.id)
@@ -97,13 +97,6 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
       evidence:
         if(supersedes_id, do: Map.put(evidence, "supersede_reason", "race"), else: evidence)
     }
-  end
-
-  # A missing S12b interface fails the scenario's own assertion.
-  defp call(function, arg, opts) do
-    if function_exported?(Agents, function, 2),
-      do: apply(Agents, function, [arg, opts]),
-      else: {:error, {:not_implemented, function}}
   end
 
   defp with_connection(fun) do

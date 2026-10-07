@@ -98,8 +98,9 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
         assert read.id == link.id
       end
 
-      assert {:error, %Ash.Error.Forbidden{}} =
-               list_links(ctx.invocation.id, actor: nil)
+      # Unauthorized reads are filtered to nothing (project Ash config), never leaked.
+      assert {:ok, []} = list_links(ctx.invocation.id, actor: nil)
+      assert {:ok, []} = current_links(ctx.invocation.id, actor: nil)
     end
 
     test "only terminal ClaudeCLI invocations can be linked", ctx do
@@ -398,19 +399,13 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
     end
   end
 
-  ## Calls (S12b interfaces; a missing one fails the scenario's own assertion)
+  ## Calls
 
-  defp link(attrs, opts), do: call(:link_wire_witness, [attrs, opts])
-  defp list_links(invocation_id, opts), do: call(:list_wire_witness_links, [invocation_id, opts])
+  defp link(attrs, opts), do: Agents.link_wire_witness(attrs, opts)
+  defp list_links(invocation_id, opts), do: Agents.list_wire_witness_links(invocation_id, opts)
 
   defp current_links(invocation_id, opts),
-    do: call(:current_wire_witness_links, [invocation_id, opts])
-
-  defp call(function, args) do
-    if function_exported?(Agents, function, length(args)),
-      do: apply(Agents, function, args),
-      else: {:error, {:not_implemented, function}}
-  end
+    do: Agents.current_wire_witness_links(invocation_id, opts)
 
   ## Fixtures
 
