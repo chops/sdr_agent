@@ -6,8 +6,8 @@ defmodule SdrAgent.Scripts.SecretScanTest do
   tool: every tracked file is scanned for unmistakable credential shapes,
   and the sops file must hold only encrypted values. The fabricated
   test shapes (`SdrAgent.Test.SecretShapes`) are assembled at run time, so no
-  tracked line matches. When `gitleaks` is on `PATH` it also runs over the
-  working tree with the reviewed `.gitleaksignore`.
+  tracked line matches. When `gitleaks` is on `PATH` it also scans the
+  committed history (git mode) with the reviewed `.gitleaksignore`.
   """
   use ExUnit.Case, async: true
 
@@ -68,9 +68,11 @@ defmodule SdrAgent.Scripts.SecretScanTest do
 
   @gitleaks System.find_executable("gitleaks")
   @tag skip: is_nil(@gitleaks) && "gitleaks is not on PATH (CI runs it, ADR-0007)"
-  test "gitleaks finds nothing in the working tree" do
+  # Git mode: the committed history, with the reviewed `.gitleaksignore`
+  # fingerprints (directory mode would also scan untracked deps and builds).
+  test "gitleaks finds nothing in the committed history" do
     assert {_out, 0} =
-             System.cmd(@gitleaks, ["dir", ".", "--no-banner", "--redact"],
+             System.cmd(@gitleaks, ["git", ".", "--log-opts=HEAD", "--no-banner", "--redact"],
                stderr_to_stdout: true
              )
   end
