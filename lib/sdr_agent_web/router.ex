@@ -47,33 +47,14 @@ defmodule SdrAgentWeb.Router do
     sign_out_route AuthController, "/sign-out",
       overrides: [SdrAgentWeb.AuthOverrides, AshAuthentication.Phoenix.Overrides.Default]
 
-    # Remove these if you'd like to use your own authentication views
-    sign_in_route register_path: "/register",
-                  reset_path: "/reset",
-                  auth_routes_prefix: "/auth",
+    # Password sign-in only: registration, reset, confirmation and magic
+    # links are not offered (S2 User: operators are created by an admin).
+    sign_in_route auth_routes_prefix: "/auth",
                   on_mount: [{SdrAgentWeb.LiveUserAuth, :live_no_user}],
                   overrides: [
                     SdrAgentWeb.AuthOverrides,
                     AshAuthentication.Phoenix.Overrides.Default
                   ]
-
-    # Remove this if you do not want to use the reset password feature
-    reset_route auth_routes_prefix: "/auth",
-                overrides: [
-                  SdrAgentWeb.AuthOverrides,
-                  AshAuthentication.Phoenix.Overrides.Default
-                ]
-
-    # Remove this if you do not use the confirmation strategy
-    confirm_route SdrAgent.Accounts.User, :confirm_new_user,
-      auth_routes_prefix: "/auth",
-      overrides: [SdrAgentWeb.AuthOverrides, AshAuthentication.Phoenix.Overrides.Default]
-
-    # Remove this if you do not use the magic link strategy.
-    magic_sign_in_route(SdrAgent.Accounts.User, :magic_link,
-      auth_routes_prefix: "/auth",
-      overrides: [SdrAgentWeb.AuthOverrides, AshAuthentication.Phoenix.Overrides.Default]
-    )
   end
 
   # Other scopes may use custom stacks.
