@@ -47,6 +47,14 @@ flowchart LR
         UpgradeJobs[Oban 10-minute dispatch<br/>bounded unique receipt jobs]
     end
 
+    subgraph AgentPlane["Agent plane (Jido v3)"]
+        Assign[SDR.assign_lead<br/>lead + run + Operation + signal + job, one txn]
+        Worker[Oban AgentWorker<br/>queue research, max_attempts 1]
+        Runner[Runner: Jido.Agent.cmd per signal<br/>emitted signals -> ledger -> next turn]
+        Flows[ResearchLeadFlow / PrepareOutreachFlow<br/>Actions = ToolInvocations + Decisions]
+        Fixtures[Fixture CRM / search / web<br/>offline, reserved hosts]
+    end
+
     subgraph AI["Structured Model Boundary"]
         Provider[ModelProvider facade]
         Budget[persisted 20/run + 200/UTC day<br/>inside the reservation transaction]
@@ -78,6 +86,16 @@ flowchart LR
     OTSCLI -. upgrade .-> OTS
     OTSCLI -. verify .-> Bitcoin
     Actions --> Provider
+    Controllers -.-> Assign
+    Assign --> Domains
+    Assign -- Oban.insert same txn --> Postgres
+    Postgres -- job --> Worker
+    Worker --> Runner
+    Runner --> Flows
+    Flows --> Fixtures
+    Flows --> Domains
+    Flows --> Provider
+    Runner -- signal events --> Append
     Provider --> Budget
     Provider --> Validation
     Provider --> Adapter
