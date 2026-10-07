@@ -56,6 +56,31 @@ defmodule SdrAgent.Outreach.ReconciliationTest do
     assert day.consumed == 1
   end
 
+  # Review #14 (important): a retry whose rendered bytes would differ from the
+  # first attempt's (here: a rotated endpoint secret changes the unsubscribe
+  # link) is refused, never sent with different content.
+  test "a retry whose message bytes drifted is refused, not re-rendered", ctx do
+    CaptureFaults.plan(:before_capture, [{:error, {:retryable, :rate_limited}}])
+    %{delivery: op} = approved!(ctx)
+    assert %{success: 1} = deliver!()
+    first = outreach!(ctx, op)
+    assert first.state == :failed_retryable
+
+    endpoint = Application.get_env(:sdr_agent, SdrAgentWeb.Endpoint)
+
+    put_env!(
+      SdrAgentWeb.Endpoint,
+      Keyword.put(endpoint, :secret_key_base, String.duplicate("r", 64))
+    )
+
+    later(600)
+    assert %{success: 1} = deliver!()
+    refused = outreach!(ctx, op)
+    assert {refused.state, refused.last_error["reason"]} == {:cancelled, "rendered_drift"}
+    assert refused.rendered_sha256 == first.rendered_sha256
+    assert captured(ctx, op) == []
+  end
+
   test "a permanent failure ends the delivery, fails the draft and opens attention", ctx do
     CaptureFaults.plan(:before_capture, [{:error, {:permanent, :rejected}}])
     %{delivery: op, draft: draft} = approved!(ctx)
