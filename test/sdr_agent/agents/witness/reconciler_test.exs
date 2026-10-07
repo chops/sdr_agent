@@ -506,6 +506,14 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     try do
       assert {:error, :method_override_forbidden} =
                reconcile(ctx, invocation, @test_only_allowlist)
+
+      # The test-only evidence seam is refused the same way.
+      assert {:error, :method_override_forbidden} =
+               Witness.reconcile(invocation.id,
+                 actor: ctx.rec,
+                 store_root: ctx.root,
+                 evidence_tamper: & &1
+               )
     after
       Application.put_env(:sdr_agent, Witness, previous)
     end
