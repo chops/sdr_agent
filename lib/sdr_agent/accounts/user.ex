@@ -190,10 +190,11 @@ defmodule SdrAgent.Accounts.User do
       description "KRN (any environment): create the first admin of a tenant that has no users."
       accept [:email, :display_name]
 
+      # At least 16 characters (whitespace-only input trims to empty and is refused).
       argument :password, :string,
         allow_nil?: false,
         sensitive?: true,
-        constraints: [min_length: 8]
+        constraints: [min_length: 16]
 
       argument :password_confirmation, :string, allow_nil?: false, sensitive?: true
       validate confirm(:password, :password_confirmation)

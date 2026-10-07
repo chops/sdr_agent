@@ -14,7 +14,7 @@ defmodule SdrAgent.Accounts do
 
     * `create_user/2` (ADM), `seed_user/2` (SEED, dev/test only),
       `bootstrap_admin/2` (KRN: the first admin of a tenant with no users;
-      `mix sdr.bootstrap_admin`), `generate_password/0`;
+      `mix sdr.bootstrap_admin`);
     * `change_role/3`, `change_status/3` (ADM);
     * `change_password/3` (ADM, REV — own user, with the current password),
       `set_password/3` (ADM — another user, incl. auditors);
@@ -39,8 +39,10 @@ defmodule SdrAgent.Accounts do
   def create_user(attrs, opts), do: GuardedCall.create(User, :create_user, attrs, guarded(opts))
 
   @doc """
-  KRN: creates the first admin (`email`, `display_name`, `password`,
-  `password_confirmation`) of the singleton tenant (or `tenant_id:`). Works in
+  KRN: creates the first admin (`email`, `display_name`, `password` of at
+  least 16 characters, `password_confirmation`) of the singleton tenant (or
+  `tenant_id:`). The password is supplied by the operator; nothing here
+  generates, prints or logs one. Works in
   every environment but only while the tenant has no users; audited as
   `user.created` by the kernel, without the password.
   """
@@ -51,10 +53,6 @@ defmodule SdrAgent.Accounts do
       |> Ash.create()
     end
   end
-
-  @doc "A strong random password (24 random bytes, URL-safe Base64, 32 characters)."
-  def generate_password,
-    do: 24 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
 
   @doc "SEED (dev/test only): creates an operator with a fixture `id`."
   def seed_user(attrs, opts), do: GuardedCall.create(User, :seed, attrs, opts)

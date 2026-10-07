@@ -1,29 +1,34 @@
 defmodule Mix.Tasks.Sdr.BootstrapAdmin do
-  @shortdoc "Creates the first admin of an empty deployment (prints a one-time password)"
+  @shortdoc "Creates the first admin of an empty deployment (password on stdin)"
 
   @moduledoc """
   Creates the first operator (role admin) of a deployment whose tenant has
-  no users yet — the S2 first-admin bootstrap, run by the audit kernel:
+  no users yet — the S2 first-admin bootstrap, run by the audit kernel. The
+  password is read from the first line of standard input, which must be
+  supplied without echoing it, e.g.:
 
-      mix sdr.bootstrap_admin --email admin@example.test [--display-name "Ops Admin"]
-      mix sdr.bootstrap_admin --email admin@example.test --password-stdin < secret
+      read -rs ADMIN_PASSWORD
+      printf '%s\\n' "$ADMIN_PASSWORD" | \\
+        mix sdr.bootstrap_admin --email admin@example.test --display-name "Ops Admin" --password-stdin
+      unset ADMIN_PASSWORD
+
+  `--password-stdin` is required: the task never generates, prints or logs a
+  password (ADR-0001: never print, log, commit or transmit secret values),
+  and the password is stored only as a bcrypt hash. It must have at least 16
+  characters; empty and whitespace-only input is refused.
 
   Bootstraps the singleton tenant first if it does not exist
   (`--tenant-slug`, default `sdr`; `--tenant-name`, default `SDR Agent`).
-
-  Without `--password-stdin` a strong random password is generated and
-  printed to this terminal exactly once; it is never logged, never written
-  to an audit event and stored only as a bcrypt hash. Sign in with it and
-  change it. With `--password-stdin` the password is read from the first
-  line of standard input and not echoed. Refuses (exits non-zero) once the
-  tenant has any user; an admin then creates users in the application.
-  Runs in every environment.
+  Every refusal — missing option, weak password, or a tenant that already
+  has users — exits non-zero before anything is created. Runs in every
+  environment; further users are created by an admin in the application.
   """
   use Mix.Task
 
   alias SdrAgent.Accounts
   alias SdrAgent.Audit
 
+  @min_length 16
   @switches [
     email: :string,
     display_name: :string,
@@ -42,12 +47,17 @@ defmodule Mix.Tasks.Sdr.BootstrapAdmin do
 
     email = opts[:email] || Mix.raise("--email is required")
 
-    Mix.Task.run("app.start")
+    unless opts[:password_stdin] do
+      Mix.raise(
+        "--password-stdin is required: pipe the first admin's password (at least " <>
+          "#{@min_length} characters) on standard input without echoing it, e.g. " <>
+          "`read -rs PW; printf '%s\\n' \"$PW\" | mix sdr.bootstrap_admin --email … --password-stdin`"
+      )
+    end
 
-    {password, generated?} =
-      if opts[:password_stdin],
-        do: {read_stdin(), false},
-        else: {Accounts.generate_password(), true}
+    password = read_password()
+
+    Mix.Task.run("app.start")
 
     {:ok, _tenant} =
       Audit.bootstrap(
@@ -65,24 +75,32 @@ defmodule Mix.Tasks.Sdr.BootstrapAdmin do
     case Accounts.bootstrap_admin(attrs) do
       {:ok, admin} ->
         Mix.shell().info("Created the first admin #{email} (#{admin.id}).")
-        if generated?, do: print_once(password)
 
       {:error, error} ->
         Mix.raise("First-admin bootstrap refused: #{Exception.message(error)}")
     end
   end
 
-  defp print_once(password) do
-    Mix.shell().info("""
-    One-time password: #{password}
-    It is shown only now and stored only as a bcrypt hash. Sign in and change it.\
-    """)
-  end
+  # Reads one line; the password itself never appears in any message.
+  defp read_password do
+    line =
+      case IO.read(:stdio, :line) do
+        line when is_binary(line) ->
+          line |> String.trim_trailing("\n") |> String.trim_trailing("\r")
 
-  defp read_stdin do
-    case IO.read(:stdio, :line) do
-      line when is_binary(line) -> String.trim_trailing(line, "\n") |> String.trim_trailing("\r")
-      _eof -> Mix.raise("--password-stdin: no password on standard input")
+        _eof ->
+          ""
+      end
+
+    cond do
+      String.trim(line) == "" ->
+        Mix.raise("refused: the password on standard input is empty")
+
+      String.length(line) < @min_length ->
+        Mix.raise("refused: the password must have at least #{@min_length} characters")
+
+      true ->
+        line
     end
   end
 end
