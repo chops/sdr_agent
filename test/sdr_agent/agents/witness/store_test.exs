@@ -128,6 +128,28 @@ defmodule SdrAgent.Agents.Witness.StoreTest do
     assert {:error, :blob_corrupt} = blob(root, digest)
   end
 
+  test "an over-limit blob and non-regular entries are refused", %{root: root, id: id} do
+    max = call(:max_blob_bytes, [])
+    assert is_integer(max) and max > 0
+    body = String.duplicate("x", max + 1)
+    digest = Proxy.blob!(root, body)
+    path = Path.join([root, "witness", "sha256", binary_part(digest, 0, 2), digest <> ".json"])
+    assert File.stat!(path).size == max + 1
+    assert {:error, :blob_too_large} = blob(root, digest)
+
+    other = :crypto.hash(:sha256, "dir") |> Base.encode16(case: :lower)
+
+    File.mkdir_p!(
+      Path.join([root, "witness", "sha256", binary_part(other, 0, 2), other <> ".json"])
+    )
+
+    assert {:error, :unsafe_path} = blob(root, other)
+
+    dir = Path.join([root, "witnesses", id])
+    File.mkdir_p!(Path.join(dir, Proxy.uuid7() <> ".json"))
+    assert {:error, :unsafe_path} = inventory(root, id)
+  end
+
   defp record(record_id, invocation_id),
     do:
       Proxy.record(record_id, invocation_id,

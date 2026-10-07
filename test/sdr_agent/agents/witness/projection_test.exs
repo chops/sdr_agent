@@ -44,11 +44,16 @@ defmodule SdrAgent.Agents.Witness.ProjectionTest do
     %{app: app, invocation: invocation, stdin: render(@prompt, json_schema)}
   end
 
-  test "the version names the projection and the prompt builder" do
-    assert version() =~ ~r{\Aclaude-message-json/1\+claude-cli-prompt/\d+\z}
+  test "the version names the projection and the prompt builder within S12b bounds" do
+    assert version() == "claude-message-json/1+prompt-builder/1"
+    assert ClaudeCLI.provenance().model_catalog_entry["prompt_builder"] == "prompt-builder/1"
 
-    assert ClaudeCLI.provenance().model_catalog_entry["prompt_builder"] =~
-             ~r{\Aclaude-cli-prompt/\d+\z}
+    # The exact string the reconciler records must pass the accepted S12b
+    # evidence validator unchanged (no truncation, no redactor weakening).
+    assert {:ok, %{"projection_version" => version}} =
+             SdrAgent.Agents.WitnessEvidence.validate(%{"projection_version" => version()})
+
+    assert version == version()
   end
 
   test "the exact rendered prompt and the same JSON completion match", ctx do
@@ -122,7 +127,7 @@ defmodule SdrAgent.Agents.Witness.ProjectionTest do
   test "an invocation under another or no prompt builder is unsupported (P1)", ctx do
     for entry <- [
           Map.delete(ctx.invocation.model_catalog_entry, "prompt_builder"),
-          Map.put(ctx.invocation.model_catalog_entry, "prompt_builder", "claude-cli-prompt/0")
+          Map.put(ctx.invocation.model_catalog_entry, "prompt_builder", "prompt-builder/0")
         ] do
       historical = %{ctx | invocation: %{ctx.invocation | model_catalog_entry: entry}}
 

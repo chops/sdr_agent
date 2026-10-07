@@ -97,6 +97,30 @@ case mode do
             response: ~s({"input_tokens":12})
           )
 
+        "count_tokens_only" ->
+          Proxy.exchange!(root, id,
+            route: "/anthropic/v1/messages/count_tokens",
+            traceparent: tp,
+            request: Proxy.messages_request(stdin),
+            response: ~s({"input_tokens":12})
+          )
+
+        "incomplete" ->
+          Proxy.exchange!(
+            root,
+            id,
+            Keyword.merge(ok, capture_complete: false, outcome: "capture_incomplete")
+          )
+
+        "gzip" ->
+          Proxy.exchange!(root, id, Keyword.put(ok, :content_encoding, "gzip"))
+
+        "proxy_version" ->
+          Proxy.exchange!(root, id, Keyword.put(ok, :extra, %{"proxy_version" => "9.9.9"}))
+
+        "schema2" ->
+          Proxy.exchange!(root, id, Keyword.put(ok, :extra, %{"schema_version" => 2}))
+
         "count_tokens_content" ->
           Proxy.exchange!(root, id, ok)
 

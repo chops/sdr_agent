@@ -261,14 +261,29 @@ not refused with =Forbidden=.
 ** S12c — reconciliation/projection/attention/e2e
 Separate Phase 4a/4b gate. Runtime reconciled method allowlist stays empty.
 
-Phase 4a candidate (test-only, stacked on S12b): 26 scenario tests under
-=test/sdr_agent/agents/witness/= fail by =ExUnit.AssertionError= through
-={:error, {:not_implemented, f}}= call helpers (store reader, projection,
-reconciler e2e, workers); the R3 empty-allowlist control passes. Hermetic
-stand-in proxy =test/support/fake_witness_proxy.exs= writes the S12a v1
-layout (raw blobs under =witness/sha256=), and =fake_claude_cli.exs= mode
-=witness= plays shim + proxy for one real facade call. Independent peer RED
-verification required before GREEN.
+Phase 4a candidate v1 =749426a= (rebased from 94ce45b): Codex
+=20560676-5fdb-425f-9ca3-6e1b98c58188= NEEDS_REVIEW — projection version 41 B
+exceeded the S12b 39 B evidence bound; scan-only scheduling lost late/open
+witnesses; missing false-assurance transitions; blob/rollback/concurrency
+coverage. Queue ruling =c22df84e=: shared =reconciliation= queue at
+concurrency 1 (also serialises S8 delivery reconciliation), recorded in
+ADR-0005 at GREEN; inert =store_root nil= default accepted.
+
+Phase 4a candidate v2 (test-only, on main =ba48946= after S12b merged):
+version =claude-message-json/1+prompt-builder/1= (38 B) with builder
+provenance =prompt-builder/1= and a contract test through
+=WitnessEvidence.validate/1=; bounded re-drive (new generation Operation
+key, >= 10 min after the last pass, capped, only while a live warning
+exists); worker retry/discard truthfulness; reconciled→downgrade on later
+extra or unreadable inventory (successor link, history kept); same-version
+mismatch persists; missing→mismatch escalation resolves the warning;
+conservative gzip/incomplete/unknown proxy/schema/ancillary-only; corrupt,
+missing and oversized blobs through reconcile; per-call method override
+refused outside tests; atomic link+attention rollback; real-concurrency
+duplicate enqueue and missing-witness attention. 40 failures, all
+assertions; 1 passing control. The fake CLI is a hermetic functional fixture
+pipeline, not a transport/independence proof (S12a checks + S12d remain).
+Independent peer RED verification required before GREEN.
 
 ** S12d — operator deployment and enablement
 Owner alone deploys nix-darwin. One budgeted synthetic external model call supplies proof; enabling a method is a separate reviewed PR, never an automatic effect of a passing fixture test.

@@ -1,6 +1,8 @@
 defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   @moduledoc """
-  S12c steps 6–7, hermetic end to end: ModelProvider facade → ClaudeCLI
+  S12c steps 6–7, hermetic functional fixture pipeline (NOT a transport or
+  independence proof — the fake CLI writes protocol-shaped files itself; the
+  real shim/proxy are covered by S12a and the mandatory S12d real proof): ModelProvider facade → ClaudeCLI
   (child env) → fake CLI playing shim + S12a proxy → stand-in witness store
   → reconciler (bounded reader, audited scoped payload read, projection) →
   WireWitnessLinks, attention Failures and `Agents.witness_status/2`.
@@ -16,6 +18,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   unless Code.ensure_loaded?(SdrAgent.Test.FakeWitnessProxy),
     do: Code.require_file("../../../support/fake_witness_proxy.exs", __DIR__)
 
+  alias Ecto.Adapters.SQL
   alias SdrAgent.Agents
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider
@@ -89,7 +92,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     assert {:ok, :reconciled} = status(invocation, ctx.rec)
   end
 
-  test "replays add no links, events or failures, and never re-send the model", ctx do
+  test "replays publish no duplicate link or Failure and never re-send the model", ctx do
     invocation = call_model!(ctx, "mismatch")
     assert {:ok, _} = reconcile(ctx, invocation)
     links = length(elem(Agents.list_wire_witness_links(invocation.id, actor: ctx.rec), 1))
@@ -184,7 +187,170 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     assert report.valid?, inspect(report.issues)
   end
 
+  describe "conservative outcomes (no unsupported proof becomes reconciled)" do
+    test "ancillary-only, incomplete, gzip, unknown proxy or schema stay below reconciled",
+         ctx do
+      for {variant, reason, linked?} <- [
+            {"count_tokens_only", "no_primary_exchange", true},
+            {"incomplete", "capture_incomplete", true},
+            {"gzip", "content_encoding_unsupported", true},
+            {"proxy_version", "proxy_version_unsupported", true},
+            {"schema2", "record_invalid", false}
+          ] do
+        invocation = call_model!(ctx, variant)
+        assert {:ok, summary} = reconcile(ctx, invocation, @test_only_allowlist)
+        assert summary.status in [:inferred, :unwitnessed], variant
+        {:ok, links} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        refute Enum.any?(links, &(&1.link_status == :reconciled)), variant
+        assert links != [] == linked?, variant
+        assert {:ok, status} = status(invocation, ctx.rec)
+        assert status in [:inferred, :unwitnessed], variant
+        assert [failure] = attention(ctx, invocation), variant
+        assert failure.severity == :warning
+        assert failure.message =~ reason, "#{variant}: #{failure.message}"
+      end
+    end
+
+    test "corrupt, missing or oversized raw blobs downgrade and warn", ctx do
+      for {label, damage} <- [
+            {"corrupt", fn path -> File.write!(path, "tampered") end},
+            {"missing", &File.rm!/1},
+            {"oversized", fn path -> File.write!(path, String.duplicate("x", max_blob() + 1)) end}
+          ] do
+        invocation = call_model!(ctx, "ok")
+        [link_path] = response_blob_paths(ctx.root, invocation)
+        damage.(link_path)
+
+        result = reconcile(ctx, invocation, @test_only_allowlist)
+        assert match?({:ok, %{status: :inferred}}, result), "#{label}: #{inspect(result)}"
+
+        assert [failure] = attention(ctx, invocation), label
+        assert failure.message =~ "blob_", "#{label}: #{failure.message}"
+      end
+    end
+  end
+
+  describe "false-assurance transitions (C1–C3)" do
+    test "a later unclassified extra downgrades a reconciled invocation", ctx do
+      invocation = call_model!(ctx, "ok")
+      assert {:ok, %{status: :reconciled}} = reconcile(ctx, invocation, @test_only_allowlist)
+
+      Proxy.exchange!(ctx.root, invocation.id,
+        route: "/anthropic/unknown",
+        request: "{}",
+        response: "{}"
+      )
+
+      assert {:ok, %{status: :inferred}} = reconcile(ctx, invocation, @test_only_allowlist)
+      assert {:ok, :inferred} = status(invocation, ctx.rec)
+      assert [%{severity: :warning}] = attention(ctx, invocation)
+    end
+
+    test "a later unreadable inventory supersedes a reconciled link, keeping history", ctx do
+      invocation = call_model!(ctx, "ok")
+      assert {:ok, %{status: :reconciled}} = reconcile(ctx, invocation, @test_only_allowlist)
+      dir = Path.join([ctx.root, "witnesses", invocation.id])
+      File.write!(Path.join(dir, Proxy.uuid7() <> ".json"), "not json")
+
+      assert {:ok, %{status: :inferred}} = reconcile(ctx, invocation, @test_only_allowlist)
+      assert {:ok, :inferred} = status(invocation, ctx.rec)
+      assert {:ok, all} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert Enum.map(all, & &1.link_status) == [:reconciled, :inferred]
+      assert [current] = elem(Agents.current_wire_witness_links(invocation.id, actor: ctx.rec), 1)
+      assert "record_invalid" in current.evidence["reason_codes"]
+    end
+
+    test "a same-version mismatch stays a mismatch even if a later observation matches", ctx do
+      invocation = call_model!(ctx, "mismatch")
+      assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation, @test_only_allowlist)
+
+      # Rewrite the record so its response now carries the application output.
+      [record_path] = terminal_record_paths(ctx.root, invocation)
+      record = record_path |> File.read!() |> JSON.decode!()
+      good = Proxy.blob!(ctx.root, Proxy.sse_response(~s({"answer":"qualified","score":42})))
+      File.write!(record_path, JSON.encode!(%{record | "response_sha256" => good}))
+
+      assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation, @test_only_allowlist)
+      assert {:ok, :mismatch} = status(invocation, ctx.rec)
+      assert {:ok, [_]} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
+    end
+
+    test "missing then mismatching: the warning is resolved, one critical stays live", ctx do
+      invocation = call_model!(ctx, "none")
+      assert {:ok, %{status: :unwitnessed}} = reconcile(ctx, invocation)
+      assert [%{severity: :warning}] = attention(ctx, invocation)
+
+      Proxy.exchange!(ctx.root, invocation.id,
+        request: Proxy.messages_request("not the rendered prompt"),
+        response: Proxy.sse_response(~s({"answer":"qualified","score":42}))
+      )
+
+      assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation)
+      assert [%{severity: :critical}] = attention(ctx, invocation)
+    end
+  end
+
+  test "outside tests the method allowlist cannot be overridden per call", ctx do
+    invocation = call_model!(ctx, "ok")
+    previous = Application.get_env(:sdr_agent, @witness, [])
+
+    Application.put_env(
+      :sdr_agent,
+      @witness,
+      Keyword.put(previous, :allow_method_override, false)
+    )
+
+    try do
+      assert {:error, :method_override_forbidden} =
+               reconcile(ctx, invocation, @test_only_allowlist)
+    after
+      Application.put_env(:sdr_agent, @witness, previous)
+    end
+
+    assert {:ok, []} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
+  end
+
+  test "links, link events and attention commit together or not at all", ctx do
+    invocation = call_model!(ctx, "mismatch")
+
+    SQL.query!(Repo, """
+    CREATE FUNCTION s12c_refuse_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'failure store unavailable'; END; $$
+    """)
+
+    SQL.query!(
+      Repo,
+      "CREATE TRIGGER s12c_refuse_failure BEFORE INSERT ON failures " <>
+        "FOR EACH ROW EXECUTE FUNCTION s12c_refuse_failure()"
+    )
+
+    assert {:error, error} = reconcile(ctx, invocation)
+    refute match?({:not_implemented, _}, error)
+    assert {:ok, []} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
+    assert events_of_type(ctx.tenant, "agents.witness.linked") == []
+  end
+
   ## Helpers
+
+  defp max_blob do
+    case call(SdrAgent.Agents.Witness.Store, :max_blob_bytes, []) do
+      max when is_integer(max) -> max
+      _ -> 8_388_608
+    end
+  end
+
+  defp terminal_record_paths(root, invocation) do
+    Path.join([root, "witnesses", invocation.id, "*.json"])
+    |> Path.wildcard()
+    |> Enum.reject(&String.ends_with?(&1, ".started.json"))
+  end
+
+  defp response_blob_paths(root, invocation) do
+    for path <- terminal_record_paths(root, invocation) do
+      digest = path |> File.read!() |> JSON.decode!() |> Map.fetch!("response_sha256")
+      Path.join([root, "witness", "sha256", binary_part(digest, 0, 2), digest <> ".json"])
+    end
+  end
 
   defp call_model!(ctx, variant) do
     {:ok, server} =
