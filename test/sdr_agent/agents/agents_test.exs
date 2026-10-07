@@ -142,7 +142,9 @@ defmodule SdrAgent.AgentsTest do
       {:ok, failed} =
         Agents.fail_run(
           run,
-          %{status_reason: :provider_error, failure_reason: "fake provider down"}, actor: agent)
+          %{status_reason: :provider_error, failure_reason: "fake provider down"},
+          actor: agent
+        )
 
       assert failed.status == :failed
       assert failed.status_reason == :provider_error
@@ -446,7 +448,9 @@ defmodule SdrAgent.AgentsTest do
             kind: :evidence_quality,
             output_pointer: "/criteria/industry",
             outcome: "accepted"
-          }), actor: ctx.agent)
+          }),
+          actor: ctx.agent
+        )
 
       refute other.id == first.id
     end
