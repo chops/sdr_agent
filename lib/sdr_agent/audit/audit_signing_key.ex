@@ -45,7 +45,7 @@ defmodule SdrAgent.Audit.AuditSigningKey do
     update :revoke do
       accept [:revocation_reason]
       change {SdrAgent.Audit.Changes.Transition, from: [:active, :rotated], to: :revoked}
-      change set_attribute(:retired_at, &SdrAgent.Clock.utc_now/0)
+      change set_attribute(:revoked_at, &SdrAgent.Clock.utc_now/0)
 
       change {SdrAgent.Audit.Changes.AppendEvent,
               event_type: "audit.signing_key.revoked", category: :anchor}
@@ -92,10 +92,19 @@ defmodule SdrAgent.Audit.AuditSigningKey do
       public?: true
 
     attribute :retired_at, :utc_datetime_usec, public?: true
+    attribute :revoked_at, :utc_datetime_usec, public?: true
     attribute :revocation_reason, :string, public?: true
     attribute :trace_id, :string, allow_nil?: false, public?: true
     attribute :span_id, :string, allow_nil?: false, public?: true
     timestamps type: :utc_datetime_usec
+  end
+
+  relationships do
+    has_many :anchors, SdrAgent.Audit.AuditAnchor do
+      source_attribute :key_id
+      destination_attribute :key_id
+      public? true
+    end
   end
 
   identities do

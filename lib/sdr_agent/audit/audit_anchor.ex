@@ -131,6 +131,13 @@ defmodule SdrAgent.Audit.AuditAnchor do
 
     belongs_to :prior_anchor, __MODULE__, attribute_writable?: true, public?: true
 
+    belongs_to :signing_key, SdrAgent.Audit.AuditSigningKey do
+      source_attribute :key_id
+      destination_attribute :key_id
+      define_attribute? false
+      public? true
+    end
+
     has_many :sink_receipts, SdrAgent.Audit.AnchorSinkReceipt do
       destination_attribute :anchor_id
       public? true

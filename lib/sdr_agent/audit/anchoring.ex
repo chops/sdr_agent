@@ -11,6 +11,11 @@ defmodule SdrAgent.Audit.Anchoring do
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Audit.Signing
 
+  @sdr_agent_git_sha (case System.cmd("git", ["rev-parse", "HEAD"], stderr_to_stdout: true) do
+                        {sha, 0} -> String.trim(sha)
+                        _ -> "unknown"
+                      end)
+
   @doc "Creates the next anchor, or returns the latest one when the range is empty."
   def anchor(opts) do
     actor = Keyword.fetch!(opts, :actor)
@@ -47,6 +52,9 @@ defmodule SdrAgent.Audit.Anchoring do
 
   defp create_anchor(actor, private_key, trigger, opts, head, prior, tenant_id) do
     with {:ok, key} <- active_key(),
+         true <-
+           Signing.matches?(private_key, key.public_key) ||
+             {:error, :private_key_does_not_match_active_key},
          {:ok, git_sha} <- git_sha(opts) do
       attrs = %{
         tenant_id: tenant_id,
@@ -102,37 +110,63 @@ defmodule SdrAgent.Audit.Anchoring do
         {:ok, sha}
 
       :error ->
-        case System.cmd("git", ["rev-parse", "HEAD"], stderr_to_stdout: true) do
-          {sha, 0} -> {:ok, String.trim(sha)}
-          {_output, status} -> {:error, {:git_sha, status}}
-        end
+        if @sdr_agent_git_sha == "unknown",
+          do: {:error, :sdr_agent_git_sha_unavailable},
+          else: {:ok, @sdr_agent_git_sha}
     end
   end
 
-  defp publish({:existing, _} = result, _actor, _sinks), do: {:ok, result}
+  defp publish({:existing, _anchor} = result, _actor, []), do: {:ok, result}
+
+  defp publish({:existing, anchor}, actor, sinks) do
+    case publish(anchor, actor, sinks) do
+      {:ok, _} -> {:ok, {:existing, anchor}}
+      error -> error
+    end
+  end
 
   defp publish(anchor, _actor, []) when is_struct(anchor, AuditAnchor), do: {:ok, anchor}
 
   defp publish(anchor, actor, sinks) do
-    Enum.reduce_while(sinks, {:ok, anchor}, fn {sink_name, module, sink_opts}, _acc ->
-      opts = Keyword.put(sink_opts, :anchor_number, anchor.anchor_number)
+    failures =
+      Enum.reduce(sinks, [], fn {sink_name, module, sink_opts}, failures ->
+        opts = Keyword.put(sink_opts, :anchor_number, anchor.anchor_number)
+        result = module.publish(sink_payload(sink_name, anchor), opts)
+        handle_publish_result(result, sink_name, anchor, actor, failures)
+      end)
 
-      case module.publish(sink_payload(sink_name, anchor), opts) do
-        {:ok, receipt} ->
-          attrs = %{
-            tenant_id: anchor.tenant_id,
-            anchor_id: anchor.id,
-            sink: sink_name,
-            status: receipt.status,
-            receipt: json_safe(receipt)
-          }
+    if failures == [], do: {:ok, anchor}, else: {:error, {:sink_failures, Enum.reverse(failures)}}
+  end
 
-          record_receipt(attrs, actor, anchor)
+  defp handle_publish_result({:ok, receipt}, sink_name, anchor, actor, failures) do
+    attrs = receipt_attrs(anchor, sink_name, receipt.status, json_safe(receipt))
 
-        error ->
-          {:halt, error}
-      end
-    end)
+    case create_receipt(attrs, actor) do
+      {:ok, _} -> failures
+      {:error, reason} -> [{sink_name, {:receipt, reason}} | failures]
+    end
+  end
+
+  defp handle_publish_result({:error, reason}, sink_name, anchor, actor, failures) do
+    attrs = receipt_attrs(anchor, sink_name, :failed, %{error: safe_error(reason)})
+
+    case create_receipt(attrs, actor) do
+      {:ok, _} ->
+        [{sink_name, reason} | failures]
+
+      {:error, receipt_reason} ->
+        [{sink_name, {:sink_and_receipt, reason, receipt_reason}} | failures]
+    end
+  end
+
+  defp receipt_attrs(anchor, sink, status, receipt) do
+    %{
+      tenant_id: anchor.tenant_id,
+      anchor_id: anchor.id,
+      sink: sink,
+      status: status,
+      receipt: receipt
+    }
   end
 
   defp sink_payload(:ots, anchor), do: anchor.anchor_hash
@@ -178,13 +212,10 @@ defmodule SdrAgent.Audit.Anchoring do
 
   defp map_value(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 
-  defp record_receipt(attrs, actor, anchor) do
-    case SdrAgent.Audit.AnchorSinkReceipt
-         |> Ash.Changeset.for_create(:record, attrs, actor: actor)
-         |> Ash.create() do
-      {:ok, _} -> {:cont, {:ok, anchor}}
-      error -> {:halt, error}
-    end
+  defp create_receipt(attrs, actor) do
+    SdrAgent.Audit.AnchorSinkReceipt
+    |> Ash.Changeset.for_create(:record, attrs, actor: actor)
+    |> Ash.create()
   end
 
   @doc "Verifies statement hash, signature and current signing-key semantics; records access first."
@@ -204,16 +235,31 @@ defmodule SdrAgent.Audit.Anchoring do
         AnchorStatement.hash(anchor.statement_bytes) == anchor.anchor_hash and
           Signing.verify(anchor.statement_bytes, anchor.signature, key.public_key)
 
-      issues = if key.status == :revoked, do: [:signing_key_revoked], else: []
+      {revocation_valid?, issues, assurance} = revocation_result(anchor, key)
+      valid? = signature? and revocation_valid?
 
       {:ok,
        %{
-         valid?: signature? and issues == [],
-         issues: issues,
-         assurance_level: if(signature?, do: :signed, else: :chain_verified)
+         valid?: valid?,
+         issues: if(signature?, do: issues, else: [:invalid_signature | issues]),
+         assurance_level: if(valid?, do: assurance, else: :invalid)
        }}
     end
   end
+
+  defp revocation_result(anchor, %{status: :revoked, revoked_at: revoked_at})
+       when not is_nil(revoked_at) do
+    if DateTime.before?(anchor.inserted_at, revoked_at) do
+      {true, [:signing_key_revoked_after_signing], :chain_verified}
+    else
+      {false, [:signature_at_or_after_key_revocation], :chain_verified}
+    end
+  end
+
+  defp revocation_result(_anchor, %{status: :revoked}),
+    do: {false, [:signing_key_revocation_time_missing], :chain_verified}
+
+  defp revocation_result(_anchor, _key), do: {true, [], :signed}
 
   defp key_by_id(key_id) do
     AuditSigningKey
@@ -228,8 +274,16 @@ defmodule SdrAgent.Audit.Anchoring do
 
   defp json_safe(map) do
     Map.new(map, fn
-      {key, value} when is_binary(value) -> {key, Base.encode64(value)}
-      pair -> pair
+      {key, value} when key in [:proof, "proof"] and is_binary(value) ->
+        {key, Base.encode64(value)}
+
+      {key, value} when is_binary(value) ->
+        if String.valid?(value), do: {key, value}, else: {key, Base.encode64(value)}
+
+      pair ->
+        pair
     end)
   end
+
+  defp safe_error(reason), do: inspect(reason, limit: 10, printable_limit: 200)
 end

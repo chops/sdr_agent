@@ -117,3 +117,17 @@ GREEN (2026-10-06): focused S11 + real-connection concurrency suite
 =bin/with-secrets= as a 32-byte Ed25519 key without printing key material.
 The final focused run additionally proves an OTS upgrade appends a confirmed
 receipt while preserving the original pending receipt byte-for-byte.
+
+Review correction (2026-10-06, PR #8): the verifier now requires an
+out-of-band trusted key and recomputes event/payload/statement/anchor-chain
+bindings; private keys are matched to the active public key; immutable
+=revoked_at= implements pre/post-revocation semantics online and offline.
+Exports enforce entity/range scope before payload reads, confine mode-0600
+outputs, and terminalize failures. Sink failures are recorded and retried;
+Git commands are isolated/repository-restricted and the production path is
+covered; OTS confirmation requires a verified Bitcoin attestation. Production
+config enables the protected Git sink and =mix sdr.audit.register_key=
+provisions the pinned public key without private material.
+Final correction gate: =mix credo= clean; =mix precommit= and =bin/verify=
+both pass with *153 tests, 2 external excluded*; =mix ash.codegen --check=
+passes.

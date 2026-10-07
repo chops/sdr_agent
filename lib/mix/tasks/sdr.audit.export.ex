@@ -24,7 +24,7 @@ defmodule Mix.Tasks.Sdr.Audit.Export do
 
     invalid == [] || Mix.raise("invalid options: #{inspect(invalid)}")
     {scope, ref} = scope!(opts)
-    output = Keyword.get(opts, :output, "audit-export-#{scope}-#{ref}.json")
+    output = Keyword.get(opts, :output, "audit-export-#{scope}-#{safe_filename(ref)}.json")
     private_key = private_key!()
     {:ok, tenant_id} = SdrAgent.Audit.Kernel.singleton_tenant_id()
     actor = SdrAgent.Actor.system(:auditor_cli, tenant_id)
@@ -36,7 +36,8 @@ defmodule Mix.Tasks.Sdr.Audit.Export do
            anchor_actor: anchorer,
            private_key: private_key,
            sinks: Application.get_env(:sdr_agent, :anchor_sinks, []),
-           output: output
+           output: output,
+           output_root: File.cwd!()
          ) do
       {:ok, %{export: export}} ->
         Mix.shell().info("wrote #{output} assurance=#{export.assurance_level}")
@@ -64,6 +65,16 @@ defmodule Mix.Tasks.Sdr.Audit.Export do
       key
     else
       _ -> Mix.raise("SDR_AUDIT_ANCHOR_PRIVATE_KEY is missing or invalid; use bin/with-secrets")
+    end
+  end
+
+  defp safe_filename(value) do
+    value
+    |> String.replace(~r/[^a-zA-Z0-9._-]+/, "-")
+    |> String.trim(".-")
+    |> case do
+      "" -> "scope"
+      safe -> safe
     end
   end
 end

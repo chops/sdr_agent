@@ -3,6 +3,7 @@ defmodule SdrAgent.Audit.AnchorCryptoTest do
 
   alias SdrAgent.Audit.AnchorStatement
   alias SdrAgent.Audit.Signing
+  alias SdrAgent.Audit.TrustedKey
 
   test "canonical statement binds the full anchor range and prior anchor" do
     attrs = %{
@@ -64,5 +65,15 @@ defmodule SdrAgent.Audit.AnchorCryptoTest do
       )
 
     assert {:ok, ^private_key} = Signing.decode_private_key(:public_key.pem_encode([entry]))
+  end
+
+  test "loads the committed public key as an out-of-band trust root" do
+    assert {:ok, trusted} = TrustedKey.load("docs/audit/anchor-signing-key.pub")
+    assert trusted.key_id == "sdr-audit-anchor-ed25519-20261006-d8dd82c7de7d4963"
+    assert trusted.status == :active
+    assert byte_size(trusted.public_key) == 32
+
+    assert {:error, :trusted_key_id_mismatch} =
+             TrustedKey.load("docs/audit/anchor-signing-key.pub", "wrong-key")
   end
 end

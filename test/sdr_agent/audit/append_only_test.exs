@@ -9,9 +9,11 @@ defmodule SdrAgent.Audit.AppendOnlyTest do
                   retention_markers decisions audit_anchors anchor_sink_receipts)
   @terminal_immutable ~w(model_invocations tool_invocations)
   @s11_terminal_immutable ~w(audit_exports)
+  @lifecycle_immutable ~w(audit_signing_keys)
 
   test "every append-only table carries its UPDATE/DELETE and TRUNCATE triggers" do
-    for table <- @append_only ++ @terminal_immutable ++ @s11_terminal_immutable do
+    for table <-
+          @append_only ++ @terminal_immutable ++ @s11_terminal_immutable ++ @lifecycle_immutable do
       %{rows: rows} =
         SQL.query!(
           SdrAgent.Repo,
@@ -26,6 +28,23 @@ defmodule SdrAgent.Audit.AppendOnlyTest do
       assert "#{table}_guard_row" in names, "#{table} lacks its row trigger: #{inspect(names)}"
       assert "#{table}_guard_truncate" in names, "#{table} lacks its truncate trigger"
     end
+  end
+
+  test "signing key identity and public material are database-immutable" do
+    tenant = bootstrap!()
+    {public_key, _private_key} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, key} =
+      SdrAgent.Audit.register_signing_key(%{key_id: "immutable-key", public_key: public_key},
+        actor: system_actor(:kernel, tenant)
+      )
+
+    assert {:error, %Postgrex.Error{postgres: %{message: message}}} =
+             raw_error("UPDATE audit_signing_keys SET key_id = 'changed' WHERE id = $1", [
+               Ecto.UUID.dump!(key.id)
+             ])
+
+    assert message =~ "immutable key material"
   end
 
   describe "raw SQL against append-only tables" do
