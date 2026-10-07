@@ -145,11 +145,13 @@ defmodule SdrAgent.Audit.PolicyTest do
 
   describe "ledger access" do
     test "nobody reads the ledger anonymously; REV may read the timeline", ctx do
-      assert {:error, %Ash.Error.Forbidden{}} = Audit.list_events(actor: nil)
+      # Unauthorized reads are filtered to nothing (project Ash config), never leaked.
+      assert {:ok, []} = Audit.list_events(actor: nil)
       assert {:ok, [_ | _]} = Audit.list_events(actor: human(:reviewer, ctx.tenant))
 
-      assert {:error, %Ash.Error.Forbidden{}} =
-               Audit.list_accesses(actor: human(:reviewer, ctx.tenant))
+      {:ok, _} = Audit.verify_chain(actor: human(:admin, ctx.tenant))
+      assert {:ok, [_ | _]} = Audit.list_accesses(actor: ctx.auditor)
+      assert {:ok, []} = Audit.list_accesses(actor: human(:reviewer, ctx.tenant))
     end
 
     test "the ledger exposes no public create, update or destroy", _ctx do
@@ -159,12 +161,20 @@ defmodule SdrAgent.Audit.PolicyTest do
     end
 
     test "appending directly through Ash without kernel context is forbidden", ctx do
-      assert {:error, %Ash.Error.Forbidden{}} =
-               SdrAgent.Audit.AuditEvent
-               |> Ash.Changeset.for_create(:append, %{event_type: "forged"},
-                 actor: human(:admin, ctx.tenant)
-               )
-               |> Ash.create()
+      [genesis | _] = events(ctx.tenant)
+
+      forged =
+        genesis
+        |> Map.take(SdrAgent.Audit.Kernel.hashed_fields() ++ [:event_hash, :canonical_bytes])
+        |> Map.merge(%{id: Ash.UUIDv7.generate(), sequence: 1_000, event_hash: digest("forged")})
+        |> Map.update!(:authorization, &Map.take(&1, [:decision, :action, :policy_version]))
+
+      for actor <- [human(:admin, ctx.tenant), system_actor(:kernel, ctx.tenant)] do
+        assert {:error, %Ash.Error.Forbidden{}} =
+                 SdrAgent.Audit.AuditEvent
+                 |> Ash.Changeset.for_create(:append, forged, actor: actor)
+                 |> Ash.create()
+      end
     end
   end
 

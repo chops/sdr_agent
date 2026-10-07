@@ -58,6 +58,28 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
     assert report.last_sequence == 2 + committed
   end
 
+  test "concurrent model-call reservations never exceed the run budget" do
+    {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
+    agent = struct(SdrAgent.Actor, type: :agent_runtime, tenant_id: tenant.id)
+    %{run: run} = SdrAgent.AgentsFixtures.running_run(tenant, max_model_calls: 3)
+
+    results =
+      1..12
+      |> Enum.map(fn _ ->
+        Task.async(fn -> reserve_in_own_connection(run, agent) end)
+      end)
+      |> Task.await_many(60_000)
+
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 3
+    assert Enum.count(results, &match?({:error, %Ash.Error.Invalid{}}, &1)) == 9
+
+    {:ok, reloaded} = SdrAgent.Agents.get_run(run.id, actor: agent)
+    assert reloaded.budget.model_calls_reserved == 3
+
+    admin = %SdrAgent.Test.Human{id: Ecto.UUID.generate(), role: :admin, tenant_id: tenant.id}
+    assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: admin)
+  end
+
   defp run_worker(worker, kernel) do
     if rem(worker, 4) == 0 do
       {:error, :abandoned} =
@@ -68,12 +90,14 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
 
       {:rolled_back, worker}
     else
-      for _ <- 1..@appends_per_process do
-        {:ok, _} = Audit.transaction(fn -> append_one(worker, kernel) end)
-      end
+      for _ <- 1..@appends_per_process, do: commit_one(worker, kernel)
 
       {:committed, @appends_per_process}
     end
+  end
+
+  defp commit_one(worker, kernel) do
+    {:ok, _} = Audit.transaction(fn -> append_one(worker, kernel) end)
   end
 
   defp append_many(worker, kernel) do
@@ -95,6 +119,10 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
       )
 
     event
+  end
+
+  defp reserve_in_own_connection(run, agent) do
+    with_connection(fn -> SdrAgent.Agents.reserve_model_call(run, actor: agent) end)
   end
 
   defp with_connection(fun) do

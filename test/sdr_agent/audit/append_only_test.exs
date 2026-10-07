@@ -84,7 +84,16 @@ defmodule SdrAgent.Audit.AppendOnlyTest do
       {:ok, invocation} =
         SdrAgent.Agents.reserve_model_invocation(
           run,
-          SdrAgent.AgentsFixtures.model_attrs("mi-ao"), actor: agent)
+          SdrAgent.AgentsFixtures.model_attrs("mi-ao"),
+          actor: agent
+        )
+
+      {:ok, _tool} =
+        SdrAgent.Agents.start_tool_invocation(
+          run,
+          %{action_module: "A", action_version: "1", input: "{}", idempotency_key: "t-ao"},
+          actor: agent
+        )
 
       %{tenant: tenant, invocation: invocation, agent: agent, run: run}
     end
