@@ -386,6 +386,14 @@ defmodule SdrAgentWeb.DraftLive do
             <.link navigate={~p"/leads/#{@draft.lead_id}"} class="ml-1 text-teal-700 hover:underline">
               Lead & evidence →
             </.link>
+            <.link
+              :if={@current_scope.role in [:admin, :auditor]}
+              id="draft-audit-link"
+              navigate={~p"/audit?draft=#{@draft.id}"}
+              class="ml-2 text-teal-700 hover:underline"
+            >
+              Audit trail →
+            </.link>
           </:subtitle>
         </.page_header>
 

@@ -21,7 +21,8 @@ defmodule SdrAgent.Operations do
     * operations — `create_operation/2`, `start_operation/2`,
       `succeed_operation/2`, `fail_operation/3` (opens or links a Failure and
       discards at max attempts, one transaction), `retry_operation/2`,
-      `cancel_operation/2`, `get_operation/2`, `find_operation/2`;
+      `cancel_operation/2`, `get_operation/2`, `find_operation/2`,
+      `list_operations/1`;
     * failures — `open_failure/2` (system actors), `acknowledge_failure/2`
       and `resolve_failure/3` (ADM, REV; system actors resolve with a system
       note), `get_failure/2`;
@@ -90,6 +91,14 @@ defmodule SdrAgent.Operations do
 
   @doc "Reads one operation by id."
   def get_operation(id, opts), do: GuardedCall.get(Operation, id, opts)
+
+  @doc "Operations of the actor's tenant, newest first (S10 Operations view; ADM, REV, AUR, system readers)."
+  def list_operations(opts) do
+    Operation
+    |> GuardedCall.read_query(opts)
+    |> Ash.Query.sort(inserted_at: :desc, id: :desc)
+    |> Ash.read()
+  end
 
   @doc "Finds the operation of an Oban job (`oban_job_id`), or `{:ok, nil}`."
   def find_operation(oban_job_id, opts) do

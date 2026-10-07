@@ -88,6 +88,7 @@ defmodule SdrAgentWeb do
       import SdrAgentWeb.CoreComponents
       # Operator console components (S10)
       import SdrAgentWeb.UI
+      import SdrAgentWeb.Trace, only: [trace_link: 1]
 
       # Common modules used in templates
       alias Phoenix.LiveView.JS

@@ -24,6 +24,7 @@ defmodule SdrAgent.Audit do
     * `record_access/5` — record an audit-data view (S10 timeline views,
       S11 exports) as AuditAccess + AuditEvent in one transaction.
     * reads: `list_events/1`, `list_payloads/1`, `list_accesses/1`,
+      `list_exports/1`,
       `get_chain_head/1`, `get_provenance_snapshot/2`,
       `current_retention_marker/3`; write: `set_retention_marker/2`.
 
@@ -245,6 +246,17 @@ defmodule SdrAgent.Audit do
     |> Ash.read()
   end
 
+  @doc "AuditExport rows of the actor's tenant, newest first (S10 exports view; ADM, AUR, AUD)."
+  def list_exports(opts) do
+    actor = Keyword.get(opts, :actor)
+
+    AuditExport
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.sort(inserted_at: :desc, id: :desc)
+    |> Ash.read()
+  end
+
   @doc "The actor's tenant chain head."
   def get_chain_head(opts) do
     actor = Keyword.get(opts, :actor)
@@ -263,6 +275,8 @@ defmodule SdrAgent.Audit do
   defp tenant_scope(query, %{tenant_id: tenant_id}) when is_binary(tenant_id),
     do: Ash.Query.filter(query, tenant_id == ^tenant_id)
 
+  # An operator without a tenant reads nothing (fail closed).
+  defp tenant_scope(query, %SdrAgent.Accounts.User{}), do: Ash.Query.filter(query, false)
   defp tenant_scope(query, _actor), do: query
 
   defp hex(bin) when is_binary(bin), do: Base.encode16(bin, case: :lower)

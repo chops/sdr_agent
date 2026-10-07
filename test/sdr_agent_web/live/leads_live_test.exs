@@ -135,6 +135,16 @@ defmodule SdrAgentWeb.LeadsLiveTest do
       assert has_element?(view, "#lead-drafts a[href='/drafts/#{ctx.draft.id}']")
     end
 
+    test "links the lead's agent runs and, for admins and auditors, its audit trail",
+         %{conn: conn, lead: lead, run: run} do
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/leads/#{lead.id}")
+      assert has_element?(view, "#lead-runs a[href='/runs/#{run.id}']")
+      assert has_element?(view, "#lead-audit-link[href='/audit?lead=#{lead.id}']")
+
+      {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/leads/#{lead.id}")
+      refute has_element?(view, "#lead-audit-link")
+    end
+
     test "an auditor's detail view is recorded with the lead id",
          %{conn: conn, lead: lead} = ctx do
       auditor = user!(ctx, :auditor)

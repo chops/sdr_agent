@@ -162,7 +162,22 @@ defmodule SdrAgentWeb.Layouts do
         path: "/review",
         icon: "hero-inbox-stack",
         roles: :all
-      }
+      },
+      %{
+        key: :operations,
+        label: "Runs & operations",
+        path: "/operations",
+        icon: "hero-cpu-chip",
+        roles: :all
+      },
+      %{
+        key: :audit,
+        label: "Audit",
+        path: "/audit",
+        icon: "hero-finger-print",
+        roles: [:admin, :auditor]
+      },
+      %{key: :admin, label: "Admin", path: "/admin", icon: "hero-cog-6-tooth", roles: [:admin]}
     ]
     |> Enum.filter(&(&1.roles == :all or role in &1.roles))
   end

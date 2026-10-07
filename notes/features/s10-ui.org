@@ -19,7 +19,7 @@ Audit.record_access/5 and Audit.read_content/2).
 #+END_EXAMPLE
 
 * Affected Apps
-- [ ] Core (=sdr_agent=) — none in S10a
+- [X] Core (=sdr_agent=) — S10b only: four read functions (below)
 - [X] Web (=sdr_agent_web=)
 
 * Affected Modules (S10a)
@@ -156,3 +156,65 @@ hand: NEEDS_REVIEW (peer reviews RED on the PR).
   components 3); data flow (=LiveViews → Domains → audit kernel=) unchanged.
 - ADR: none required (no new dependency or cross-cutting pattern; the
   audited read path is the S2/S3 contract).
+
+* S10b — Runs/Operations, Admin, auditor views
+
+** Affected modules
+- Routes (=:operator_console=): =/operations=, =/runs/:id=, =/admin= (ADM),
+  =/audit= and =/audit/exports= (ADM, AUR), =/audit/payloads/:sha256= (any
+  operator; content via =read_content=). =on_mount({:roles, roles})= in
+  =live_user_auth.ex= sends other roles back to the Dashboard (UI shaping;
+  the domain still authorizes).
+- =live/operations_live.ex= (attention acknowledge/resolve-with-note,
+  operations with cancel, agent runs), =live/run_live.ex= (run
+  reconstruction), =live/admin_live.ex=, =live/audit_live.ex= (timeline,
+  filters, chain verify), =live/payload_live.ex=, =live/exports_live.ex=,
+  =trace.ex= (Tempo links); lead and draft pages link runs and audit trails.
+- Domain read paths added (record here per the S10 brief; no policy or
+  persisted change — each sits behind the resource's existing read policy):
+  =SdrAgent.Agents.list_runs/1= (tenant-scoped, newest first, =lead_id:=),
+  =SdrAgent.Agents.list_tool_invocations/2=,
+  =SdrAgent.Operations.list_operations/1=, =SdrAgent.Audit.list_exports/1=.
+  Allow/deny tests: =test/sdr_agent/console_reads_test.exs=.
+
+** Choices and deviations (each with its reason)
+1. *No operation/run retry button.* =Operations.retry_operation/2= only
+   moves the row =failed → running= and =Agents.retry_run/2= only creates a
+   queued run; nothing re-enqueues the job (S7/S8 notes: resume-after-failure
+   and Operation wrappers are S13). A button would leave a "running"
+   operation with nothing running, so the UI offers *cancel* (ADM; enqueued
+   or failed) and acknowledge/resolve (ADM, REV) only. Wire retry when S13
+   adds the re-enqueue path.
+2. *No IntegrationCredential status.* The resource does not exist (S2 lists
+   it for S6; it was not built). Adding it is an entity-model change, so the
+   Admin view shows the configured provider/integration module names,
+   budgets, delivery adapter, send quota and operators instead — never
+   credentials. Reported for a peer soft-stop if wanted.
+3. *No model-provider preflight call.* No preflight API exists in the
+   domain; attestation drift already opens a =provider_error= attention
+   Failure (shown on Dashboard/Operations). The Admin view states the
+   configured provider only.
+4. *Export trigger is the CLI.* =Audit.Export.build/2= needs the Ed25519
+   anchor private key, which only =bin/with-secrets= provides; the web node
+   never holds it. The exports view lists AuditExport rows and shows the
+   exact command (=bin/with-secrets SDR_AUDIT_ANCHOR_PRIVATE_KEY -- mix
+   sdr.audit.export --lead ID=).
+5. *Timeline access for every role.* The audit timeline records a
+   =timeline_view= AuditAccess for admins as well as auditors (S2: written
+   by the read paths of ADM, REV, AUR, AUD); fail closed. The timeline is
+   filtered in the web layer over =Audit.list_events/1= (newest 300 shown).
+6. *Tempo links* are built only for well-formed trace ids; the Grafana base
+   URL and Tempo datasource uid are configurable
+   (=config :sdr_agent, SdrAgentWeb.Trace, grafana_url:, datasource_uid:=),
+   defaulting to the local stack (=http://localhost:3000=, uid =tempo=,
+   from =nix-darwin/modules/darwin/observability-stack.nix=).
+
+** TDD Tracking (S10b)
+RED (2026-10-07): domain reads =test/sdr_agent/console_reads_test.exs= →
+*0/5* (=UndefinedFunctionError= for each new function); LiveViews
+(=operations_live_test=, =admin_live_test=, =audit_live_test=) → *0/23*
+(21 =no route found=, 2 missing navigation links). =tdd_verify.sh= cannot
+parse the 1.20 summary: NEEDS_REVIEW (recorded by hand).
+
+GREEN: =MIX_TEST_PARTITION=_s10 bin/verify= → *505 passed, 4 excluded*;
+=mix ash.codegen --check=, =mix credo=, =mix hex.audit= clean.
