@@ -5,8 +5,10 @@ defmodule SdrAgent.Operations do
 
   Resources (S7): `Operation` (the domain view of one Oban job) and
   `Failure` (a recorded error with class, severity, retryability and
-  resolution). `IntegrationCredential` (S6) and `WebhookEvent` (S9) join
-  later. Operations sits above Audit and Accounts (FKs to tenants and users)
+  resolution) and `WebhookEvent` (S9: every inbound webhook request, verified
+  and deduplicated before any effect; written only by the webhook ingestor
+  through `SdrAgent.Outreach.Webhooks`). `IntegrationCredential` (S6) is not
+  built yet. Operations sits above Audit and Accounts (FKs to tenants and users)
   and below Agents, Sales, Research and Outreach, which open Failures here in
   the same transaction as the state change that causes them (S2 "Operator
   attention"): AgentRun failed / budget exhausted / system-cancelled, Lead
@@ -41,6 +43,7 @@ defmodule SdrAgent.Operations do
   resources do
     resource SdrAgent.Operations.Operation
     resource SdrAgent.Operations.Failure
+    resource SdrAgent.Operations.WebhookEvent
   end
 
   ## Operations

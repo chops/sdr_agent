@@ -104,6 +104,12 @@ if config_env() == :prod do
 
   config :sdr_agent, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  # S9: the webhook HMAC key is injected by the operator's secret tooling
+  # (never derived in production); without it every webhook is rejected.
+  config :sdr_agent, :webhook_hmac,
+    key_id: System.get_env("SDR_WEBHOOK_HMAC_KEY_ID", "prod-1"),
+    source: {:env, "SDR_WEBHOOK_HMAC_KEY"}
+
   config :sdr_agent, SdrAgentWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [

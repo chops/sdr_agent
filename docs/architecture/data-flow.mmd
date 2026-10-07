@@ -57,6 +57,12 @@ flowchart LR
         Followup[FollowupWorker at next_step_due_at<br/>followup_next_step + sdr.followup.due]
     end
 
+    subgraph Webhook["Signed provider webhook (S9, simulated capture_sim)"]
+        Ingest[WebhookController -> Webhooks.ingest<br/>raw bytes Payload, HMAC verify, dedupe, job, one txn]
+        Process[WebhookWorker queue integration<br/>locks first; Reply / outcome / suppression, one txn]
+        Rule[unsubscribe_rule Decision<br/>deterministic, never the model]
+    end
+
     subgraph AI["Structured Model Boundary"]
         Provider[ModelProvider facade]
         Budget[persisted 20/run + 200/UTC day<br/>inside the reservation transaction]
@@ -119,6 +125,13 @@ flowchart LR
     Gate -- same transaction --> Append
     Outcome -- same transaction --> Append
     Followup -- signal event --> Append
+    Router --> Ingest
+    Ingest -- rejected + signature_invalid Failure --> Postgres
+    Ingest -- integration job same txn --> Postgres
+    Postgres -- integration job --> Process
+    Process --> Rule
+    Process --> Domains
+    Process -- sdr.reply.received + same transaction --> Append
 
     %% Project shape: single
     %% Detected data layers:

@@ -10,7 +10,9 @@ defmodule SdrAgent.SDR.Signals do
 
   S7 routes the assignment, research, qualification, draft, suppression and
   campaign-pause signals (`SdrAgent.SDR.SDRAgent`); approval, delivery,
-  reply and follow-up signals are declared here for S8/S9.
+  reply and follow-up signals are declared here for S8/S9. S9 records
+  `sdr.reply.received` (data `reply_id`, `lead_id`, `campaign_id`,
+  `enrollment_id`) for every matched reply.
   """
 
   alias SdrAgent.Audit
@@ -28,7 +30,7 @@ defmodule SdrAgent.SDR.Signals do
                ~w(lead_id campaign_id qualification_id qualified accepted rejected ungrounded
                   enrollment_id sequence_step_id recipient_contact_id proposal_decision_id
                   model_invocation_id claims_validation_decision_id
-                  personalization_validation_decision_id enrollment_decision_id),
+                  personalization_validation_decision_id enrollment_decision_id reply_id),
                &{&1, String.to_atom(&1)}
              )
 

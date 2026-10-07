@@ -1,6 +1,6 @@
 # Domain Boundaries
 
-Generated: 2026-10-06 (Sales and Research added by hand in S5, Outreach in S8, 2026-10-07)
+Generated: 2026-10-06 (Sales and Research added by hand in S5, Outreach in S8, Reply and WebhookEvent in S9, 2026-10-07)
 
 Project shape: single
 
@@ -18,6 +18,7 @@ graph TB
         DeliveryOperation[DeliveryOperation]
         DeliveryReceipt[DeliveryReceipt]
         SendQuotaDay[SendQuotaDay]
+        Reply[Reply]
     end
     subgraph Research["Research Domain"]
         ResearchArtifact[ResearchArtifact]
@@ -46,6 +47,7 @@ graph TB
     subgraph Operations["Operations Domain"]
         Operation[Operation]
         Failure[Failure]
+        WebhookEvent[WebhookEvent]
     end
     subgraph Accounts["Accounts Domain"]
         User[User]
@@ -150,6 +152,13 @@ graph TB
     DeliveryOperation -. attention_failure_id FK (same transaction) .-> Failure
     DeliveryOperation -. advance_step on acceptance .-> CampaignEnrollment
     Suppression -. delivery_operation_id FK; cancels unclaimed deliveries .-> DeliveryOperation
+    Reply -. webhook_event_id FK (one reply per event) .-> WebhookEvent
+    Reply -. matched: delivery, contact, lead, enrollment FKs .-> DeliveryOperation
+    Reply -. matched: enrollment + lead replied, unsent work cancelled (same transaction) .-> CampaignEnrollment
+    Suppression -. reply_id / webhook_event_id FKs (S9 sources) .-> Reply
+    DeliveryReceipt -. webhook_event_id FK (delivered / bounced) .-> WebhookEvent
+    WebhookEvent -. raw body sha256 FK .-> Payload
+    WebhookEvent -. failure_id FK (rejected / failed) .-> Failure
 
 
     %% Project shape: single
