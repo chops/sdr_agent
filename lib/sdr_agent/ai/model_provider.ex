@@ -19,6 +19,11 @@ defmodule SdrAgent.AI.ModelProvider do
   Requests may carry an optional `:input` — the structured data the prompt
   was rendered from — which deterministic providers (the Fake) read instead
   of parsing the prompt.
+
+  Wire-witness correlation (ADR-0005 S12): before the provider runs, the
+  facade adds `:witness` — the reserved invocation UUID and the W3C
+  `traceparent` of the `gen_ai.*` span, captured in the calling process.
+  ClaudeCLI forwards both to its child only; other providers ignore them.
   """
 
   alias SdrAgent.Agents
@@ -44,7 +49,8 @@ defmodule SdrAgent.AI.ModelProvider do
           required(:prompt) => String.t(),
           required(:schema) => Zoi.schema(),
           required(:audit) => map(),
-          optional(:input) => map()
+          optional(:input) => map(),
+          optional(:witness) => %{model_invocation_id: String.t(), traceparent: String.t() | nil}
         }
   @type result :: map()
 
@@ -63,7 +69,16 @@ defmodule SdrAgent.AI.ModelProvider do
       metadata = %{id: request.id, model: provenance.model_id, input: request.prompt}
 
       GenAI.with_span(request.operation, metadata, fn ->
-        invoke_validate_and_settle(provider, request, sent, provider_options)
+        # Captured here, in the caller's process inside the gen_ai span and
+        # before any serialized provider hop (ADR-0005 S12 amendment).
+        witness = %{model_invocation_id: sent.id, traceparent: GenAI.traceparent()}
+
+        invoke_validate_and_settle(
+          provider,
+          Map.put(request, :witness, witness),
+          sent,
+          provider_options
+        )
       end)
     end
   end
