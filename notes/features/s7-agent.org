@@ -1,0 +1,249 @@
+#+TITLE: Feature: S7 — SDR agent, signals, actions, flows (S7a operations + S7b agent)
+#+DATE: 2026-10-07
+
+* Summary
+Build the S7 rows of the reviewed S2 entity model and the Jido agent plane:
+the =SdrAgent.Operations= domain (=Operation=, =Failure=,
+=Operations.list_attention/1=) with the FKs S3 deferred, the operator-attention
+side effects, a persisted 200-per-UTC-day model-call cap, fixture-backed
+CRM/search/web providers (S7a), and the =SDRAgent= Jido v3 agent with its
+Signals, Actions, =ResearchLeadFlow= and =PrepareOutreachFlow= on the
+ModelProvider seam (S7b). The flow's output is a validated =OutreachProposal=
+handed to S8; Draft creation is S8 (S2 "Not persisted as their own
+entities": the proposal lives in the ModelInvocation's parsed output and its
+=draft_proposal= Decision).
+
+Split for review (owner brief: > ~2,500 lines): *S7a* = Operations +
+providers + budget persistence + attention side effects; *S7b* (based on
+S7a) = agent + signals + actions + flows + Oban worker + golden path.
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: yes
+Reason: creates the S7 rows of the reviewed S2 entity model (Operation, Failure; FKs AgentRun.operation_id / attention_failure_id; operator-attention side effects) and populates Agents/Research rows.
+#+END_EXAMPLE
+
+The reviewed delta is =notes/features/s2-entity-model.org= (soft-stop *PASS*,
+Codex round 4, reply =b1243d3f-a7a8-450e-805e-97363b75e434=; ADR-0009/0010
+accepted). This slice introduces *no new entities, attributes,
+relationships or lifecycles*; the S2 rows are not repeated here.
+
+- *Soft-stop verdict:* PASS (inherited from S2; this plan is not a delta).
+- *Implementation choices within the S2 contract* (flagged for the PR
+  reviewer; none weakens suppression, approval, idempotency or audit):
+  1. *Operation audit.* S2: "AE: create, terminal transitions, operator
+     retry/cancel (not heartbeats)". S7 has no heartbeat writes, so every
+     Operation write (including =start=) is audited and the resource is
+     record-hash verified (=__sdr_audited__=). More audit than required.
+  2. *One Failure per condition.* An Operation that fails because its
+     AgentRun failed links the run's existing attention Failure
+     (=last_failure_id=) instead of opening a duplicate; an Operation failure
+     without one opens its own. =failed → discarded= keeps the same Failure.
+  3. *Lead → blocked.* The =:block= action itself opens the Failure (class
+     from argument =failure_class=, default =run_stopped=; subject the lead)
+     in its transaction, so a blocked lead without a Failure cannot exist
+     (Codex S5 condition on choice 8). ADM =:retry= (blocked → assigned)
+     resolves the lead's open/acknowledged Failures with a system note in the
+     same transaction.
+  4. *AgentRun → failed | budget_exhausted | system-cancelled* opens the
+     Failure and sets =attention_failure_id= in the transition's transaction
+     (classes =run_stopped= / =budget_exhausted=; severity critical for
+     budget). These transitions become row-locked (=require_atomic? false=,
+     =Transition locked?: true=) to set the column; the from-state guard is
+     still checked on the locked row. Operator cancel opens no Failure (S2:
+     "cancelled by a system actor"). =:retry= resolves the retried run's
+     Failure with a system note.
+  5. *Daily model-call cap (ADR-0004: 200 per UTC day).* Replaces the
+     volatile =BudgetStore=: inside =Agents.reserve_model_invocation/3='s
+     transaction, after the run counter is reserved (run row lock, then the
+     chain-head lock its audit append takes), the tenant's ModelInvocations
+     with =reserved_at= in the current UTC day (=SdrAgent.Clock=) are counted;
+     at the limit the whole reservation rolls back with
+     ={:error, {:budget_exhausted, :daily}}=. All reservations serialise on
+     the chain-head lock, which is held until commit, so two runs cannot both
+     take the last unit; lock order (run row → chain head) matches every other
+     audited counter write. Attempts are never refunded (failed and unknown
+     calls count). The S2 =ModelBudgetDay= row is *not* created: the owner
+     brief asks for the count from today's ModelInvocations, which S2 already
+     names as the verifier's recomputation source. Config may only lower the
+     limit (=min(config, 200)=). *Deviation from the brief:* the brief says
+     "America/Denver day per S2"; S2 (=ModelBudgetDay.utc_date=) and ADR-0004
+     both say *UTC day*, and S5 choice 14 defers any timezone database to S8.
+     S7 follows S2/ADR-0004 (UTC) and reports the discrepancy.
+  6. *Claude CLI attestation drift* (=model_attestation_drift=,
+     =version_attestation_drift=, =tool_attestation_drift=,
+     =mcp_attestation_drift=, =slash_command_attestation_drift=,
+     =missing_init_attestation=) fails the ModelInvocation *and* opens a
+     critical =provider_error= Failure (subject the invocation) in the same
+     transaction.
+  7. *Failure message redaction.* No redactor existed;
+     =SdrAgent.Operations.Redactor= replaces secret-shaped substrings
+     (bearer/API-key/JWT/PEM shapes, long hex/base64 runs, =key=value= pairs
+     with secret-looking keys) before insert; the full detail, if any, goes to
+     a Payload (=detail_sha256=) after the same redaction.
+  8. *Decision kind actors (S3 choice 6).* S7 is the first emitter of
+     =campaign_state_check= by the agent (the agent must check campaign state
+     deterministically before working a lead, spec §8): AGT is added to that
+     kind's actors. No other kind changes; the kind stays deterministic-only.
+  9. *Suppression before S8.* The Suppression store is S8. S7 records a
+     deterministic =suppression_check= Decision through the
+     =SdrAgent.SDR.SuppressionCheck= behaviour; the S7 default
+     (=NoStore=) reports =not_suppressed= with =store: none= in the decision
+     inputs. S8 must configure its real implementation; the S8 send gate
+     re-checks suppression regardless, so no message can reach a suppressed
+     recipient through S7.
+ 10. *Agent stops leads only through S2 transitions.* AGT may not =:stop= a
+     lead (S5 policy); =sdr.lead.suppressed= and =sdr.campaign.paused= end the
+     run (phase =stop=) with a deterministic Decision; stopping the lead is
+     the S8 suppression side effect / an operator action.
+ 11. *Oban.* One worker (=SdrAgent.SDR.AgentWorker=, queue =research=) runs
+     an assignment's AgentRun; the assignment, its run, its Operation, the
+     =sdr.lead.assigned= signal event and the Oban job are written in one
+     transaction (outbox). =max_attempts: 1=: agent work is never retried
+     automatically (ADR-0004 "never retries in a loop"; operator =retry=
+     creates a new run). Crash recovery of an interrupted run (=sent →
+     unknown=, stale =running=) is S13's Oban restart/idempotency acceptance.
+ 12. *Jido execution mode.* The agent is evaluated turn by turn with
+     =Jido.Agent.cmd/3= inside the Oban job (=SdrAgent.SDR.Runner=); each
+     emitted =Emit= directive's signal is appended as a =signal= AuditEvent
+     and fed back as the next turn. A live =AgentServer= is not used: Jido
+     documents that directives are not a durable queue, and Oban + Postgres
+     already own durability (spec §12: Jido persistence restores execution
+     state only).
+
+* Affected Apps
+- [X] Core (=sdr_agent=)
+- [ ] Web (=sdr_agent_web=) — none (S10 reads =list_attention/1=)
+- [X] Other: migrations + snapshots (=mix ash.codegen=), config
+
+* Affected Modules
+** S7a
+- =lib/sdr_agent/operations.ex= — new domain: =create_operation/2=,
+  =start_operation/2=, =succeed_operation/2=, =fail_operation/3=,
+  =cancel_operation/2=, =open_failure/2=, =acknowledge_failure/3=,
+  =resolve_failure/3=, =resolve_failures_for/4=, =list_attention/1=.
+- =lib/sdr_agent/operations/{operation,failure,redactor}.ex=,
+  =operations/changes/*.ex=.
+- =lib/sdr_agent/agents/agent_run.ex= — FKs, attention Failure side effects.
+- =lib/sdr_agent/agents.ex= — persisted daily cap in the reservation.
+- =lib/sdr_agent/agents/decision.ex= — AGT may record =campaign_state_check=.
+- =lib/sdr_agent/sales/lead.ex= — =:block= opens / =:retry= resolves Failure.
+- =lib/sdr_agent/ai/model_provider.ex= — drop the volatile store; drift Failure.
+- delete =lib/sdr_agent/ai/budget_store.ex=, =ai/budget_store/in_memory.ex=;
+  =application.ex= child removed.
+- =lib/sdr_agent/integrations/{crm,search_provider,web_fetch}.ex= behaviours;
+  =integrations/{fake_crm,fixture_search,fixture_web,fixtures}.ex=.
+- =config/config.exs= (domain, queues), migration =s7_operations=.
+** S7b
+- =lib/sdr_agent/sdr.ex= — public API: =assign_lead/2=, =pause_campaign/2=,
+  =proposal/2=.
+- =lib/sdr_agent/sdr/agent.ex= (=SdrAgent.SDR.SDRAgent=), =sdr/signals.ex=,
+  =sdr/runner.ex=, =sdr/agent_worker.ex=, =sdr/action.ex= (ToolInvocation +
+  span wrapper), =sdr/model.ex= (budget Decision + ModelProvider call),
+  =sdr/schemas.ex= (Zoi =EvidenceExtraction=, =QualificationResult=,
+  =OutreachProposal=), =sdr/prompts.ex=, =sdr/fake_brain.ex=,
+  =sdr/suppression_check.ex=, =sdr/actions/*.ex=,
+  =sdr/flows/{research_lead_flow,prepare_outreach_flow}.ex=.
+- =lib/sdr_agent/ai/model_provider/fake.ex= — fixture responder by operation.
+- =lib/sdr_agent/telemetry/= — span helpers for signal/action/flow/run.
+
+* Implementation Steps
+1. Plan (this file); commit.
+2. S7a RED: Operations, attention side effects, daily cap, drift Failure,
+   providers. Record TDD table.
+3. S7a GREEN: resources, migration =s7_operations=, side effects, cap,
+   providers; gates; PR S7a.
+4. S7b RED (branch from S7a): signals/agent/actions/flows/runner/worker,
+   golden path, deterministic gates, external ClaudeCLI test.
+5. S7b GREEN; gates; PR S7b (base S7a).
+6. Architecture diagrams (new domain, new resources, new runtime flow).
+
+* Required Tests
+** S7a
+- [ ] Operation: transition table = declared; enqueued → running →
+      succeeded; running → failed (opens Failure, last_failure_id) → discarded;
+      failed → running (retry); cancel from enqueued/failed; forbidden
+      transitions; ADM retry/cancel allowed, REV/AUR denied (AUR audited);
+      unique idempotency key; events.
+- [ ] Failure: open by system actor (message redacted, detail Payload);
+      humans cannot open; ADM/REV acknowledge and resolve (note required);
+      system resolve; AUR denied with one =authz.denied=; transitions table;
+      =list_attention/1= returns open + acknowledged only, for ADM/REV/AUR.
+- [ ] AgentRun: =fail= / =exhaust_budget= / system =cancel= open a Failure
+      and set =attention_failure_id= in one transaction (rollback leaves
+      neither); operator cancel opens none; =retry= resolves it; FKs exist.
+- [ ] Lead =:block= opens its Failure atomically (a failing Failure insert
+      leaves the lead unblocked); =:retry= resolves it.
+- [ ] Daily cap: call 201 of the UTC day is refused before the provider and
+      leaves no invocation; the count spans runs; a new UTC day resets it;
+      config cannot raise it above 200; concurrent reservations at the limit
+      admit exactly one.
+- [ ] Claude CLI drift opens a critical provider_error Failure with the
+      failed invocation.
+- [ ] Providers: FakeCRM / FixtureSearch / FixtureWeb deterministic over the
+      S5 seed, reserved hosts only, unknown → error, CRM writes refused.
+** S7b
+- [ ] Signals: every S7 signal type builds a valid Jido signal; emitting
+      appends a =signal= event (event_type = type, causation_id = signal id).
+- [ ] SDRAgent state schema = the spec §4 working state only; unknown keys
+      rejected; routes cover the S7 signals.
+- [ ] Golden path (Fake, hermetic): seed → =assign_lead= (one transaction:
+      lead assigned, run, Operation, signal event, Oban job) → drain →
+      artifacts + grounded claims → qualification (fixture 01 qualified,
+      fixture 05 disqualified) → OutreachProposal whose claims and
+      personalization cite accepted evidence; reconstructable from Postgres
+      (AgentRun, Decisions, ModelInvocations, ToolInvocations, AuditEvents,
+      payloads); chain verifies.
+- [ ] Deterministic gates never call the model: paused campaign, suppressed
+      contact (test SuppressionCheck), run/daily budget exhaustion (run
+      budget_exhausted + Failure).
+- [ ] ValidateClaims rejects a proposal claim without (or with foreign)
+      evidence; ungrounded extraction quotes are not persisted.
+- [ ] Invalid model output: run failed (invalid_model_output) + Failure,
+      no Qualification.
+- [ ] =:external=: the same flow on ClaudeCLI opus (excluded by default).
+
+* Risks & Considerations
+- All reservations serialise on the chain-head lock (already true of every
+  audited write, ADR-0009).
+- Jido Flow steps run in Task processes: sandbox and =SdrAgent.Clock= follow
+  =$callers=; the OTel context is propagated explicitly through the caller
+  context so all rows of a run share its trace.
+- Jido v3 is a pinned beta (ADR-0003); only documented APIs are used
+  (=Jido.Agent= DSL, =cmd/3=, =Jido.Flow= DSL, =Jido.Action=,
+  =Jido.Agent.Directive.emit/2=, =Jido.Signal.new/1=).
+- Shared test database: local runs use =MIX_TEST_PARTITION=_s7=.
+- ADR: none new. No dependency added. Choices 1–12 stay inside ADR-0001/
+  0002/0003/0004/0009/0010; ADR-0004's S6a note about the volatile store is
+  superseded by choice 5 (amendment paragraph added).
+
+* Questions (if any)
+None blocking; the UTC-vs-Denver discrepancy (choice 5) is reported.
+
+-----
+
+* TDD Tracking
+(Filled during Phase 4a)
+
+-----
+
+* Implementation Notes
+(Added during Phase 4b)
+
+* Completion Checklist
+
+** Phase 4
+- [ ] All Phase 4a tests verified failing
+- [ ] TDD gate confirmed
+- [ ] All steps implemented
+- [ ] All tests passing
+- [ ] Compiled with --warnings-as-errors
+- [ ] Ash boundaries respected
+
+** Phase 5 (Verify + Finalize)
+- [ ] Full test suite passes
+- [ ] Moduledocs reviewed for new/modified public modules
+- [ ] Plan document updated with implementation notes
+- [ ] Architecture evaluation reported
+- [ ] ADR status updated (ADR-0004 amendment)
