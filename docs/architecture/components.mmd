@@ -69,6 +69,8 @@ graph TB
     WitnessReconciler --> Domains
     Oban --> AgentWorker
     Oban --> FollowupWorker
+    Oban --> StaleRunSweeper[SDR StaleRunSweeper<br/>abandoned runs: job not live -> crash + unknown calls]
+    StaleRunSweeper --> Domains
     FollowupWorker --> Domains
     Oban --> DeliveryJobs[Outreach DeliveryWorker / ReconcileWorker /<br/>StaleDeliverySweeper -> Delivery gate]
     DeliveryJobs --> Domains
