@@ -144,8 +144,54 @@ excluded* before the docs commit. See the PR for the final run, plus
 - =mix sdr.demo.status= starts the app with Oban queues and plugins off, so
   asking for the status never runs a job. Verifying the chain records a
   =chain_verify= AuditAccess, as every verification does.
-- The notification payload omits =subject_id= above 64 bytes (an access list
-  of ids), which keeps it well under Postgres' 8000-byte NOTIFY limit.
+- The notification payload is bounded by construction (≤ 512 bytes): ids,
+  and short plain fields only; anything else is =null=, never truncated
+  (review round 1, below).
+
+* Review round 1 (Codex, PR #19 at =5e064b8=: CHANGES REQUESTED)
+ADR-0012 design approved (now accepted, citing the ruling); choices 1–5
+accepted. Fixed test-first:
+
+1. *Reset could force-drop a live database.* It only checked the chosen
+   =PORT=, so a server on another port (README suggests =PORT=4122=) lost its
+   connections to =ecto.drop --force-drop=. Now =mix sdr.demo.clients= counts
+   other =pg_stat_activity= backends of the target database (connecting to
+   the =postgres= maintenance DB), =bin/demo reset= refuses unless it is 0
+   (unreadable → refused) and drops *without* =--force-drop=, so Postgres
+   refuses a client that connects in between. Tests: stubbed server on
+   another port with 3 clients → refused, no drop; garbage count → refused;
+   0 → plain =ecto.drop=; real =--test= client on the demo DB → refused and
+   the seeded data survives.
+2. *Unbounded NOTIFY payload could roll back a valid append.* =event_type=
+   and =subject_resource= were unbounded (only =subject_id= was capped), so an
+   oversized event exceeded the 8000-byte limit and failed its transaction
+   (reproduced at RED: =Postgrex.Error= on the append). =LiveEvents.payload/1=
+   now caps every field and admits only plain ASCII, dropping the rest to
+   =null=. Tests: an oversized multibyte event commits on a real connection,
+   and its notification arrives with =nil= fields; hostile values in every
+   field stay within =max_payload_bytes/0= and contain no content.
+3. Important: the moduledoc states the accepted failure coupling instead of
+   "cannot block". =Demo.Status.ready?= now requires the fixture data set
+   complete (=:seeded= vs =:incomplete=), a valid chain verification, and
+   domain reads that succeeded (=:unavailable= otherwise). Tests: bootstrap
+   only, a tampered chain, a missing verification. The draft page keeps
+   refreshing lifecycle data (status, approvals, deliveries, history; an
+   auditor's refresh is still audited) while the reviewed revision and its
+   binding stay frozen. Test: an approval of the newer revision shows while
+   the binding stays =#1=.
+4. Inherited (owned by #17/#18): recipient binding, stale actor/session
+   validation, tenant scoping and fail-closed reload state. =LiveRefresh=
+   reuses =scope.user=, and NOTIFY is not an auth-invalidation mechanism.
+   The owner-safe browser and golden-path checkpoint stays open before demo
+   acceptance.
+
+RED (round 1): the four touched suites gave 30/41. Failures: =Status= seed
+and chain states, =LiveEvents.payload/1= undefined, the oversized append
+failing with =Postgrex.Error=, the reset safety checks, and the draft
+lifecycle refresh. GREEN: 41/41 after =await_clients= made the
+backend-settling wait explicit in the end-to-end script test. =PORT= is now
+taken from a free port in the stubbed tests, because a developer's own
+server may hold 4120.
 
 * Risks & Considerations
 - *Quiet hours at the meetup.* The campaign fixture's quiet hours are 18:00

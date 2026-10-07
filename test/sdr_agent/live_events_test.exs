@@ -101,6 +101,51 @@ defmodule SdrAgent.LiveEventsTest do
                    5_000
   end
 
+  test "an oversized event still commits; its notification stays bounded and content-free",
+       ctx do
+    huge_type = "test.huge." <> String.duplicate("x", 9_000)
+    huge_resource = String.duplicate("Résumé\"\\", 3_000)
+
+    attrs = %{event("ignored") | event_type: huge_type, subject_resource: huge_resource}
+    {:ok, appended} = Audit.append(attrs, actor: ctx.kernel)
+
+    sequence = appended.sequence
+    assert_receive {:sdr_audit_event, %{sequence: ^sequence} = live}, 5_000
+
+    assert %{event_type: nil, subject_resource: nil, category: "system"} = live
+
+    aud = struct(SdrAgent.Actor, type: :auditor_cli, tenant_id: ctx.tenant.id)
+    {:ok, events} = Audit.list_events(actor: aud)
+    assert Enum.any?(events, &(&1.event_type == huge_type))
+  end
+
+  test "every encoded payload fits the NOTIFY limit, whatever the event fields" do
+    hostile = String.duplicate("\"\\\u0001é😀", 2_000)
+
+    for field <- [:event_type, :subject_resource, :subject_id, :agent_run_id, :category] do
+      event =
+        Map.put(
+          %{
+            tenant_id: Ecto.UUID.generate(),
+            sequence: 123_456_789,
+            event_type: "outreach.draft.created",
+            category: :domain_change,
+            subject_resource: "SdrAgent.Outreach.Draft",
+            subject_id: Ecto.UUID.generate(),
+            agent_run_id: Ecto.UUID.generate()
+          },
+          field,
+          hostile
+        )
+
+      payload = LiveEvents.payload(event)
+      assert byte_size(payload) <= LiveEvents.max_payload_bytes()
+      assert {:ok, decoded} = LiveEvents.event(payload)
+      assert Map.fetch!(decoded, field) == nil
+      refute payload =~ "😀"
+    end
+  end
+
   test "malformed payloads decode to :error" do
     assert LiveEvents.event("not json") == :error
     assert LiveEvents.event(~s({"event_type": "x"})) == :error

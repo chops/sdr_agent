@@ -24,10 +24,10 @@ defmodule SdrAgentWeb.DraftLive do
   recorded with the draft id before it is served.
 
   Live refresh (`SdrAgentWeb.LiveRefresh`) updates approvals, deliveries,
-  receipts and status as they commit, but never swaps the revision under the
-  reviewer: when another revision has become current, the displayed one —
-  and the approve/reject binding to it — stays, and a notice offers to show
-  the latest. A verdict on the displayed revision is then refused as stale by
+  receipts, status and history as they commit, but never swaps the revision
+  under the reviewer: when another revision has become current, the
+  displayed one — and the approve/reject binding to it — stays frozen while
+  lifecycle data keeps refreshing, and a notice offers to show the latest. A verdict on the displayed revision is then refused as stale by
   the domain, exactly as before live refresh.
   """
   use SdrAgentWeb, :live_view
@@ -69,12 +69,28 @@ defmodule SdrAgentWeb.DraftLive do
 
   ## Loading
 
+  # The revision under review and everything bound to it.
+  @frozen [
+    :current,
+    :segments,
+    :citations,
+    :diff,
+    :approve_form,
+    :reject_form,
+    :edit_form,
+    :page_title
+  ]
+
   defp refresh(%{assigns: %{loaded?: true, current: current}} = socket) do
     opts = [actor: socket.assigns.current_scope.user]
 
     case Outreach.fetch(Outreach.Draft, socket.assigns.draft_id, opts) do
       {:ok, %{current_revision_id: id}} when id != current.id ->
-        assign(socket, newer_revision?: true)
+        # Re-read everything (audited for an auditor), then put the reviewed
+        # revision and its binding back: lifecycle data (status, approvals,
+        # deliveries, history) stays live, the content under review does not.
+        frozen = Map.take(socket.assigns, @frozen)
+        socket |> load() |> assign(frozen) |> assign(newer_revision?: true)
 
       _ ->
         load(socket)

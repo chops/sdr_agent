@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-07
 supersedes: null
 ---
@@ -8,9 +8,14 @@ supersedes: null
 
 ## Status
 
-Proposed (2026-10-07) by Claude in slice S13a. Under ADR-0001, a design ADR
-is accepted when the peer records approval on the S13a pull request, and the
-owner can veto. No dependency is added.
+Accepted (2026-10-07) on Codex's design ruling on the S13a pull request
+("ADR-0012 DESIGN APPROVED independently"):
+https://github.com/chops/sdr_agent/pull/19#issuecomment-6043274640
+(ADR-0001: agent design ADRs are accepted on peer approval; the owner can
+veto). Proposed earlier the same day by Claude in slice S13a. The ruling
+keeps the failure coupling and lost-notification limits below explicit, and
+required the payload bound below before the implementation is approved. No
+dependency is added.
 
 ## Context
 
@@ -72,10 +77,13 @@ We will use Option 3:
 
 - `SdrAgent.Audit.Kernel` calls `SdrAgent.LiveEvents.notify/1` after it
   advances the chain head. This runs `SELECT pg_notify('sdr_audit_events',
-  json)` in the same transaction. The payload holds ids and the type only:
-  tenant, sequence, event type, category, subject resource, subject id
-  (omitted above 64 bytes, so a long access list never approaches the 8000
-  byte limit), and agent run id. It never holds content.
+  json)` in the same transaction. The payload is bounded by construction to
+  at most 512 bytes, whatever the event holds: tenant id and sequence, plus
+  event type, category, subject resource, subject id and agent run id only
+  when each is short (per-field byte caps) and plain (`[A-Za-z0-9_.:-]`, so
+  JSON never escapes it). Any other value is sent as `null` — dropped, never
+  truncated — so an oversized or multibyte event type or resource still
+  commits and still triggers a (coarse) refresh. It never holds content.
 - `SdrAgent.LiveEvents.Relay` is supervised after PubSub. It keeps a
   `Postgrex.Notifications` connection (async connect, auto-reconnect) and
   re-broadcasts each notification on the tenant topic
@@ -121,6 +129,8 @@ dependency, and leaves the ledger unchanged.
 
 ### Neutral
 
-- If `pg_notify` fails (for example, the notification queue is full), the
-  append fails, as any failed statement in the transaction would. The
-  payload is bounded so it stays far below the size limit.
+- Failure coupling (explicit, accepted): if `pg_notify` fails (for example,
+  the server's notification queue is full because a listener stalls inside
+  a long transaction), the append fails and its transaction rolls back, as
+  any failed statement would. The payload bound removes the size failure;
+  `test/sdr_agent/live_events_test.exs` commits an oversized event.

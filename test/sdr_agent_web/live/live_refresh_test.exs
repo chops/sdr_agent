@@ -89,6 +89,23 @@ defmodule SdrAgentWeb.LiveRefreshTest do
       refute has_element?(view, "#newer-revision")
     end
 
+    test "with the revision frozen, later lifecycle changes still show", %{conn: conn} = ctx do
+      {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/drafts/#{ctx.draft.id}")
+      edit_elsewhere!(ctx)
+      assert has_element?(view, "#newer-revision")
+
+      latest = draft!(ctx, ctx.draft)
+      approve!(ctx, latest, ctx.admin)
+      committed(ctx)
+
+      assert has_element?(view, "#draft-header [data-status='queued']")
+      assert has_element?(view, "#newer-revision")
+      assert has_element?(view, "#binding-revision", "#1")
+      assert has_element?(view, "#revision-subject", ctx.revision.subject)
+      assert [%{status: :granted}] = approvals!(ctx, ctx.draft)
+      assert has_element?(view, "[id^='approval-'] [data-status='granted']")
+    end
+
     test "the notice shows the latest revision on request", %{conn: conn} = ctx do
       {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/drafts/#{ctx.draft.id}")
       edit_elsewhere!(ctx)
