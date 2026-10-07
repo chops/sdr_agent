@@ -1,0 +1,82 @@
+#+TITLE: Feature: S6a — model-provider seam without persistence
+#+DATE: 2026-10-06
+
+* Summary
+Implement the ADR-0004 model-provider boundary before S3 persistence lands:
+deterministic Fake and serialized Codex app-server adapters, Zoi validation,
+OpenTelemetry spans, and replaceable in-memory budget enforcement.
+
+* Entity Model
+#+BEGIN_EXAMPLE
+Entity Model trigger: no
+Reason: S6a adds runtime behaviours and volatile counters only; S3 owns the persisted ModelInvocation, payload, Decision, and budget resources.
+#+END_EXAMPLE
+
+* Affected Modules
+- =SdrAgent.AI.ModelProvider=: provider behaviour and validated public facade.
+- =SdrAgent.AI.ModelProvider.Fake=: deterministic default provider.
+- =SdrAgent.AI.ModelProvider.CodexAppServer=: serialized app-server adapter.
+- =SdrAgent.AI.ModelProvider.CodexAppServer=: owns the JSONL stdio Port as a
+  serialized GenServer (the planned separate Transport module was unnecessary).
+- =SdrAgent.AI.BudgetStore= and =InMemoryBudgetStore=: replaceable reservation seam.
+- =SdrAgent.Application=: supervise the volatile budget store.
+- environment config: Fake remains the dev/test default; real Codex is opt-in.
+- ADR-0004: record the dependency-free stdio protocol and S3 persistence seam.
+- S1 spike modules/tests: removed after the provider seam replaces them.
+
+* Implementation Steps
+1. Define request/result contracts, the provider behaviour, and facade that reserves a budget unit, emits a =gen_ai.*= span, invokes a provider, validates every output with the request's Zoi schema, and settles the reservation.
+2. Implement a supervised in-memory budget store with 20 calls per run and 200 per UTC day, behind callbacks that S3 can replace with transactional persistence.
+3. Implement deterministic Fake fixtures and configure Fake as the default in development and test.
+4. Implement the Codex adapter and JSONL stdio transport: initialize with =clientInfo.name=sdr_agent=, verify an existing ChatGPT account with =account/read=, select an available model from =model/list=, capture sanitized version/config/catalog provenance, start a no-tool thread/turn, and serialize calls through one GenServer.
+5. Add hermetic tests using a fake app-server OS process plus an =:external= real-server smoke test excluded by default.
+6. Amend ADR-0004, remove the S1 spike, update architecture diagrams for the new external integration/runtime flow, and run the full gate.
+
+* Required Tests
+- [X] Fake is deterministic, is the configured dev/test default, emits a GenAI span, and accepts only Zoi-valid output.
+- [X] Invalid Fake and Codex output returns a validation error without a successful result.
+- [X] The guard rejects call 21 for one run and call 201 for one UTC day before invoking a provider.
+- [X] A custom budget-store implementation can replace the in-memory store.
+- [X] Fake app-server proves initialize/initialized, =account/read=,
+      =config/read=, =model/list= selection, =clientInfo.name=sdr_agent=,
+      structured turn output, sanitized provenance, and sequential calls.
+- [X] Missing cached ChatGPT login and unavailable configured model fail preflight without starting a turn or copying tokens.
+- [X] Real app-server smoke test is tagged =:external= and excluded by default.
+
+* Risks & Considerations
+- Codex app-server is experimental; parse only the documented protocol fields and retain raw JSON-RPC records for future S3 audit persistence.
+- The in-memory budget resets on application restart and is not authoritative; S3 must supply a transactional store before unattended real-model operation.
+- App-server may expose executable tools through host configuration. S6a starts a constrained thread, supplies no dynamic tools, uses =approvalPolicy=never= and a read-only sandbox, and treats any tool/approval request as a provider failure.
+- Config/account responses may contain sensitive fields. Provenance is built from an allowlist; raw account/config responses are neither returned nor logged.
+
+* ADR
+- Required: YES (amend existing accepted ADR-0004).
+- Justification: the provider boundary is already accepted; S6a records its concrete stdio protocol, dependency choice, and temporary persistence seam rather than creating a competing ADR.
+- ADR file: =docs/adr/0004-model-provider.md=.
+
+* Approval
+Approved by the owner in the S6a assignment on 2026-10-06.
+
+* TDD Tracking
+- Phase 4a: RED verified 2026-10-06. The 9 non-external tests under
+  =test/sdr_agent/ai= all fail at the deliberate missing-module assertions;
+  0 runtime errors. =bin/tdd_verify.sh= misreported "No tests found" because
+  its Elixir 1.20 output parser counted 0 tests, but its assertion analysis
+  recorded the expected failures. Evidence: =tmp/ai/tdd_verify/=.
+- Phase 4b: GREEN verified 2026-10-06: 11 focused tests pass, with the real
+  app-server smoke test excluded by its =:external= tag.
+
+* Implementation Notes
+- Implemented the behaviour/facade, deterministic Fake, supervised volatile
+  budget store, and serialized Port-owning Codex adapter without new deps.
+- The adapter captures only allowlisted account mode, version, config and model
+  catalog provenance; raw account/config responses are discarded.
+- Removed the temporary S1 JidoSpike modules/tests after the replacement passed.
+- Architecture evaluation: changed (new supervised budget process and local
+  Codex app-server integration). Regenerated diagrams and restored the S4
+  OpenTelemetry manual relationships before adding the S6a flow.
+- Final verification: =bin/verify= and =mix precommit= pass (38 tests, 1
+  external exclusion); =mix ash.codegen --check= and =mix hex.audit= pass.
+  Strict Credo has no S6a findings and retains four pre-existing design
+  suggestions in unchanged Phoenix/support files; Dialyzer, Sobelow and
+  =deps.audit= are not installed.
