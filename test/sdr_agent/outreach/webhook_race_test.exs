@@ -203,11 +203,8 @@ defmodule SdrAgent.Outreach.WebhookRaceTest do
     delivery_of!(ctx, approval)
   end
 
-  defp approval_binding(revision),
-    do: %{
-      draft_revision_id: revision.id,
-      content_sha256: Base.encode16(revision.content_sha256, case: :lower)
-    }
+  # The reviewed binding, including the recipient email a reviewer sees (#17 MF1).
+  defp approval_binding(revision), do: SdrAgent.OutreachFixtures.approval_input(revision)
 
   defp delivery_of!(ctx, approval) do
     {:ok, [op]} =

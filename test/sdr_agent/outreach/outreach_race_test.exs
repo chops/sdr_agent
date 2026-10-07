@@ -196,11 +196,7 @@ defmodule SdrAgent.Outreach.OutreachRaceTest do
     |> Ash.read_one()
   end
 
-  defp approval_input(revision),
-    do: %{
-      draft_revision_id: revision.id,
-      content_sha256: Base.encode16(revision.content_sha256, case: :lower)
-    }
+  defp approval_input(revision), do: SdrAgent.OutreachFixtures.approval_input(revision)
 
   defp race(funs) do
     parent = self()

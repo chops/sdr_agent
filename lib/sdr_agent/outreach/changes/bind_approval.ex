@@ -10,6 +10,10 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
     * the draft is `pending_review` and its *current* revision is the
       `draft_revision_id` argument with exactly the `content_sha256` (hex)
       argument — otherwise the verdict is stale and refused;
+    * for a grant, the `recipient_email` argument (the email the reviewer
+      saw; required) equals the locked contact's current email ignoring case
+      — otherwise the verdict is stale and nothing is written (review #17
+      MF1); a rejection does not compare it;
     * binding fields are set server-side: `draft_revision_id`,
       `revision_content_sha256`, `recipient_contact_id` and
       `recipient_email` (the contact's current email), `campaign_id`,
@@ -60,7 +64,7 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
 
   defp refusal(changeset, verdict, actor, draft, revision, contact, campaign) do
     review_refusal(changeset, actor, draft, revision) ||
-      if(verdict == :approved, do: grant_refusal(contact, campaign))
+      if(verdict == :approved, do: grant_refusal(changeset, contact, campaign))
   end
 
   # The verdict must be about the draft's current revision, as reviewed.
@@ -89,8 +93,13 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
   end
 
   # A grant also needs a reachable, unsuppressed recipient in an open campaign.
-  defp grant_refusal(contact, campaign) do
+  defp grant_refusal(changeset, contact, campaign) do
+    reviewed = Ash.Changeset.get_argument(changeset, :recipient_email)
+
     cond do
+      not same_email?(reviewed, contact.email) ->
+        {:recipient_email, "does not match the current recipient (stale review)"}
+
       contact.status != :active ->
         {:recipient_contact_id, "the recipient is #{contact.status}"}
 
@@ -104,6 +113,11 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
         nil
     end
   end
+
+  defp same_email?(nil, _current), do: false
+
+  defp same_email?(reviewed, current),
+    do: String.downcase(to_string(reviewed)) == String.downcase(to_string(current))
 
   defp set(changeset, verdict, actor, draft, revision, contact) do
     attrs = %{

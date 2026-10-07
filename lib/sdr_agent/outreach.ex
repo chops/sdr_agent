@@ -23,7 +23,8 @@ defmodule SdrAgent.Outreach do
     * drafts — `propose_draft/2` (AGT, the hand-off), `edit_draft/3` (ADM,
       REV), `list_review_queue/1`;
     * approval — `approve/3`, `reject/3` (ADM, REV; the reviewed
-      `draft_revision_id` and its hex `content_sha256`), `revoke/2`;
+      `draft_revision_id`, its hex `content_sha256` and, for a grant, the
+      reviewed `recipient_email`), `revoke/2`;
     * suppression — `suppress/2` (ADM, manual), `seed_suppression/2` (SEED,
       dev/test), `matching_suppressions/2` (the email's own and its domain's
       suppressions);
@@ -85,13 +86,14 @@ defmodule SdrAgent.Outreach do
 
   @doc """
   ADM, REV: grants `draft`'s current revision. `binding`: the reviewed
-  `draft_revision_id` and its hex `content_sha256`; anything else is stale.
+  `draft_revision_id`, its hex `content_sha256` and the `recipient_email`
+  the reviewer saw (required); anything else is stale.
   """
   def approve(draft, binding, opts) do
     attrs =
       binding
       |> Map.new()
-      |> Map.take([:draft_revision_id, :content_sha256])
+      |> Map.take([:draft_revision_id, :content_sha256, :recipient_email])
       |> Map.put(:draft_id, draft.id)
 
     GuardedCall.create(Approval, :approve, attrs, guarded(opts, draft.id))
@@ -102,7 +104,7 @@ defmodule SdrAgent.Outreach do
     attrs =
       binding
       |> Map.new()
-      |> Map.take([:draft_revision_id, :content_sha256, :reason])
+      |> Map.take([:draft_revision_id, :content_sha256, :recipient_email, :reason])
       |> Map.put(:draft_id, draft.id)
 
     GuardedCall.create(Approval, :reject, attrs, guarded(opts, draft.id))

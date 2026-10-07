@@ -342,11 +342,7 @@ defmodule SdrAgent.Outreach.DeliveryRaceTest do
     %{draft: draft, revision: revision, lead: lead}
   end
 
-  defp approval_input(revision),
-    do: %{
-      draft_revision_id: revision.id,
-      content_sha256: Base.encode16(revision.content_sha256, case: :lower)
-    }
+  defp approval_input(revision), do: SdrAgent.OutreachFixtures.approval_input(revision)
 
   defp lock_row(ctx, resource, id) do
     require Ash.Query

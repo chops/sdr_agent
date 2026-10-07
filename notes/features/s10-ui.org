@@ -1,0 +1,220 @@
+#+TITLE: Feature: S10 — operator console (Phoenix LiveView)
+#+DATE: 2026-10-07
+
+* Summary
+The operator console over the S5–S8/S11 domains: S10a (golden-path demo
+views — shell, Dashboard, Leads, Lead detail/evidence, Review queue, Draft
+review with approve/reject/edit/revoke and delivery) and S10b (Runs and
+Operations, Admin/provider status, auditor views: timeline, payload viewer,
+chain verify, exports, Tempo trace links).
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: no
+Reason: web layer over existing public domain APIs; no persisted concept,
+attribute, relationship, policy or lifecycle changes (S2: "S10 — no
+resources; writes AuditAccess from the UI" through the existing
+Audit.record_access/5 and Audit.read_content/2).
+#+END_EXAMPLE
+
+* Affected Apps
+- [X] Core (=sdr_agent=) — S10b only: four read functions (below)
+- [X] Web (=sdr_agent_web=)
+
+* Affected Modules (S10a)
+- =lib/sdr_agent_web/router.ex= — =:operator_console= live session
+  (=/=, =/leads=, =/leads/:id=, =/review=, =/drafts/:id=); the generator
+  home page (=PageController=) is replaced by the Dashboard.
+- =lib/sdr_agent_web/live_user_auth.ex= — =on_mount(:operator)=: signed-in
+  user required, assigns =current_scope= (=SdrAgentWeb.Scope=).
+- =lib/sdr_agent_web/scope.ex= — user + role; the role shapes the UI only.
+- =lib/sdr_agent_web/audited_view.ex= — the audited read path (auditor
+  =record_view= AuditAccess before serving, fail closed; payload content
+  only via =Audit.read_content/2=; operator-facing error messages).
+- =lib/sdr_agent_web/console_data.ex= — shared read joins over public domain
+  reads (=fetch/3=, =list_records/2=, =Agents.get_run/2=).
+- =lib/sdr_agent_web/components/ui.ex=, =layouts.ex= — hand-written
+  Tailwind components and the console shell (role-aware navigation,
+  auditor read-only banner); no daisyUI classes in new code.
+- =lib/sdr_agent_web/live/{dashboard_live,review_live,draft_live}.ex=,
+  =live/lead_live/{index,show}.ex=.
+
+* Binding rules applied
+- Web calls public domain APIs only (no Repo, no resource internals, no
+  =Ash.load=); every call passes =actor: current_scope.user=.
+- Data loads in =handle_params= and only on the connected render (the
+  disconnected render is a skeleton), so an auditor's page load records
+  exactly one AuditAccess and nothing is shown before it is recorded.
+- Mutating events always call the domain, never a UI-side role check: an
+  auditor's forged event is refused by =SdrAgent.Audit.Guard= (Forbidden +
+  one =authz.denied=) and shown as an error. Controls are hidden for AUR.
+- Approve/reject send the revision id and hex content hash rendered in the
+  form (hidden inputs); a stale verdict is refused by =BindApproval= and the
+  page shows the error with the now-current revision.
+- Payload content (captured message, research source) only through
+  =Audit.read_content/2= (=payload_view= AuditAccess for every role, fail
+  closed). No secrets are displayed; no external fonts, CDNs or inline
+  scripts were added.
+
+* Required Tests (S10a) — =test/sdr_agent_web/live/=, =audited_view_test.exs=
+- [X] Success: every view renders its data (navigation, dashboard counts and
+      attention, leads list/filter, lead detail, evidence drill-down, review
+      queue, draft render, citation → evidence, edit → diff, approve,
+      reject, revoke, delivery receipts, captured message, cancel retry)
+- [X] Failure: stale approval refused and explained; unknown lead → not
+      found; unrecordable access → served nothing (=AuditedView=)
+- [X] Authorization allow: ADM/REV act through the domain
+- [X] Authorization deny: AUR assign, approve, reject, edit, revoke and
+      cancel-retry events are refused and audited (=authz.denied=); controls
+      hidden
+- [X] Audited read: each auditor view records one AuditAccess naming the
+      records shown; payload views record =payload_view= for REV
+
+-----
+
+* TDD Tracking
+
+RED (S10a, 2026-10-07): =MIX_TEST_PARTITION=_s10 mix test
+test/sdr_agent_web/live= → *0/35 passed*. 26 failed with
+=no route found for GET /…= (=FunctionClauseError= in
+=connect_from_static_token/3=, the console routes did not exist) and 8 with
+=MatchError= on =live/2= for =/= (still the generator =PageController=,
+not a LiveView) — all for the intended missing behaviour, none from setup
+or compilation. =bin/tdd_verify.sh= cannot parse Elixir 1.20's
+=Result: 0/35 passed= summary (known since S1), so the gate is recorded by
+hand: NEEDS_REVIEW (peer reviews RED on the PR).
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED
+
+-----
+
+* Implementation Notes (S10a)
+1. *Stream empty states need ids.* LiveView 1.2 requires an id on every
+   child of a =phx-update="stream"= container, including the
+   =only:block= empty-state row (first GREEN run: 13 failures).
+2. *Empty access target.* An auditor dashboard with no attention and no
+   queue produced =target_ref ""=, which AuditAccess refuses (required) — the
+   page was correctly withheld (fail closed). A list view with no records
+   now records =target_ref "none"=.
+3. *Formatter non-convergence.* =mix format= (Elixir 1.20.4) did not
+   converge on a call whose last positional argument was a multi-line map
+   followed by a keyword; the test binds the map to a variable instead.
+5. *Recipient at confirmation (S8 review).* The grant binds the contact's
+   current email under a lock, so the draft page shows the recipient in the
+   binding box, posts the email it showed with the approve form, and re-reads
+   the contact on submit: if the email changed, nothing is approved and the
+   page shows the new recipient to confirm again (=#review-error=,
+   =#binding-recipient=). Each approval lists the recipient it actually bound
+   (=data-recipient=). RED 12/13 (no =#binding-recipient=), then GREEN. The
+   auditor deny test now forges the full rendered form (recipient included),
+   so its attempt still reaches the domain guard and is audited.
+4. *Reviewer reads of users.* A reviewer may read only itself (S5), so
+   approvals show "by you" / "by another operator" instead of names.
+
+* Review round 1 (Codex, PR #17 CHANGES REQUESTED @a5206d2)
+- Rebased onto =s8b-delivery= @a1fd23c (S8 must-fixes).
+- *MF1 — reviewed recipient (action-contract delta).* Entity-model trigger:
+  yes (Approval action contract). Delta: =Approval :approve= takes the
+  =recipient_email= the reviewer saw (=ci_string=, required); =BindApproval=
+  compares it ignoring case to the *locked* =Contact.email= before any
+  grant/outbox append; mismatch, missing, nil, blank → stale, nothing written
+  (no Approval, DeliveryOperation, job or grant event); =:reject= takes it
+  optionally and does not compare; the persisted snapshot stays
+  server-derived from the locked contact; revision/hash checks and auditor
+  denial unchanged; no column, migration, policy or lifecycle change.
+  *Soft-stop verdict: PASS* — Codex, =ap= consultation
+  =m_1791395301801790000_7391018e= (relayed by the coordinator), landing on
+  =s10-ui=. Recorded in the S2 Approval row. RED 84/89 (five approvals
+  granted that must be refused) → GREEN. The draft page renders the
+  displayed email into the approve form's hidden binding and always calls
+  the domain; a stale recipient comes back as the domain's refusal and the
+  page reloads with the current recipient. (Re-review 2, Codex @3d4de4c: an
+  earlier UI-side pre-check skipped the domain call, so an auditor's forged
+  approve with a missing/malformed/mismatched email was not audited —
+  removed; RED 12/17 → GREEN, each auditor case denied exactly once.) Fixture =approval_input/1= binds the email as seen when
+  built; the race tests use it.
+- *MF2 — stale socket actor.* =on_mount(:operator)= keeps the session token
+  and re-validates on every event and navigation (token verifies, stored,
+  not revoked; subject is an active user); the re-read user becomes the
+  actor. RED 1/4 → 4/4 (demotion refused as auditor and audited once;
+  disable and admin password reset redirect to sign-in before any domain
+  call).
+- *Important:* every (re)load fails closed (=loaded?= false, previous
+  content hidden, error flags reset on success); operator-safe error
+  messages only (RED 1 failure: a refusal tuple echoed internal detail).
+- *RED wording:* the original S10a RED (0/35) failed on missing routes and
+  =MatchError= — feature-absence, not assertion-level failures; with the
+  =tdd_verify.sh= parser defect it stays NEEDS_REVIEW. The review-round RED
+  commits above are assertion-level.
+- Deferred, non-blocking: NODE_PATH asset gap (tracked in #19).
+
+* Architecture evaluation
+- New endpoints (console routes) inside the existing web boundary; no new
+  domain, resource, supervision or integration. =components.{md,mmd}=
+  counts updated by hand (controllers 1, LiveViews 2 auth + 5 console, UI
+  components 3); data flow (=LiveViews → Domains → audit kernel=) unchanged.
+- ADR: none required (no new dependency or cross-cutting pattern; the
+  audited read path is the S2/S3 contract).
+
+* S10b — Runs/Operations, Admin, auditor views
+
+** Affected modules
+- Routes (=:operator_console=): =/operations=, =/runs/:id=, =/admin= (ADM),
+  =/audit= and =/audit/exports= (ADM, AUR), =/audit/payloads/:sha256= (any
+  operator; content via =read_content=). =on_mount({:roles, roles})= in
+  =live_user_auth.ex= sends other roles back to the Dashboard (UI shaping;
+  the domain still authorizes).
+- =live/operations_live.ex= (attention acknowledge/resolve-with-note,
+  operations with cancel, agent runs), =live/run_live.ex= (run
+  reconstruction), =live/admin_live.ex=, =live/audit_live.ex= (timeline,
+  filters, chain verify), =live/payload_live.ex=, =live/exports_live.ex=,
+  =trace.ex= (Tempo links); lead and draft pages link runs and audit trails.
+- Domain read paths added (record here per the S10 brief; no policy or
+  persisted change — each sits behind the resource's existing read policy):
+  =SdrAgent.Agents.list_runs/1= (tenant-scoped, newest first, =lead_id:=),
+  =SdrAgent.Agents.list_tool_invocations/2=,
+  =SdrAgent.Operations.list_operations/1=, =SdrAgent.Audit.list_exports/1=.
+  Allow/deny tests: =test/sdr_agent/console_reads_test.exs=.
+
+** Choices and deviations (each with its reason)
+1. *No operation/run retry button.* =Operations.retry_operation/2= only
+   moves the row =failed → running= and =Agents.retry_run/2= only creates a
+   queued run; nothing re-enqueues the job (S7/S8 notes: resume-after-failure
+   and Operation wrappers are S13). A button would leave a "running"
+   operation with nothing running, so the UI offers *cancel* (ADM; enqueued
+   or failed) and acknowledge/resolve (ADM, REV) only. Wire retry when S13
+   adds the re-enqueue path.
+2. *No IntegrationCredential status.* The resource does not exist (S2 lists
+   it for S6; it was not built). Adding it is an entity-model change, so the
+   Admin view shows the configured provider/integration module names,
+   budgets, delivery adapter, send quota and operators instead — never
+   credentials. Reported for a peer soft-stop if wanted.
+3. *No model-provider preflight call.* No preflight API exists in the
+   domain; attestation drift already opens a =provider_error= attention
+   Failure (shown on Dashboard/Operations). The Admin view states the
+   configured provider only.
+4. *Export trigger is the CLI.* =Audit.Export.build/2= needs the Ed25519
+   anchor private key, which only =bin/with-secrets= provides; the web node
+   never holds it. The exports view lists AuditExport rows and shows the
+   exact command (=bin/with-secrets SDR_AUDIT_ANCHOR_PRIVATE_KEY -- mix
+   sdr.audit.export --lead ID=).
+5. *Timeline access for every role.* The audit timeline records a
+   =timeline_view= AuditAccess for admins as well as auditors (S2: written
+   by the read paths of ADM, REV, AUR, AUD); fail closed. The timeline is
+   filtered in the web layer over =Audit.list_events/1= (newest 300 shown).
+6. *Tempo links* are built only for well-formed trace ids; the Grafana base
+   URL and Tempo datasource uid are configurable
+   (=config :sdr_agent, SdrAgentWeb.Trace, grafana_url:, datasource_uid:=),
+   defaulting to the local stack (=http://localhost:3000=, uid =tempo=,
+   from =nix-darwin/modules/darwin/observability-stack.nix=).
+
+** TDD Tracking (S10b)
+RED (2026-10-07): domain reads =test/sdr_agent/console_reads_test.exs= →
+*0/5* (=UndefinedFunctionError= for each new function); LiveViews
+(=operations_live_test=, =admin_live_test=, =audit_live_test=) → *0/23*
+(21 =no route found=, 2 missing navigation links). =tdd_verify.sh= cannot
+parse the 1.20 summary: NEEDS_REVIEW (recorded by hand).
+
+GREEN: =MIX_TEST_PARTITION=_s10 bin/verify= → *505 passed, 4 excluded*;
+=mix ash.codegen --check=, =mix credo=, =mix hex.audit= clean.

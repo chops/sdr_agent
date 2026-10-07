@@ -36,10 +36,10 @@ graph TB
     end
 
     subgraph Web["Web Components"]
-        Controllers["Controllers (2)"]
-        LiveViews["LiveViews (2)"]
+        Controllers["Controllers (1)"]
+        LiveViews["LiveViews (2 auth + 11 console)"]
         Channels["Channels (1)"]
-        UIComponents["UI Components (2)"]
+        UIComponents["UI Components (3)"]
     end
 
     subgraph Ash["Ash Framework"]
@@ -103,10 +103,10 @@ graph TB
 
 | Component | Count |
 |-----------|-------|
-| Controllers | 2 |
-| LiveViews | 2 |
+| Controllers | 1 (auth) |
+| LiveViews | 13 (2 AshAuthentication + 11 S10 console) |
 | Channels | 1 |
-| UI Components | 2 |
+| UI Components | 3 (core, layouts, console UI) |
 | Ash Domains | 7 |
 | Ash Resources | 57 |
 
