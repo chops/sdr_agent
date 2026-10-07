@@ -150,7 +150,7 @@ defmodule SdrAgentWeb.DraftLiveTest do
 
       view |> form("#approve-form") |> render_submit()
 
-      assert has_element?(view, "#review-error", "recipient changed")
+      assert has_element?(view, "#review-error", "does not match the current recipient")
       assert has_element?(view, "#binding-recipient", moved)
       assert approvals!(ctx, ctx.draft) == []
 
@@ -159,6 +159,22 @@ defmodule SdrAgentWeb.DraftLiveTest do
       [approval] = approvals!(ctx, ctx.draft)
       assert to_string(approval.recipient_email) == moved
       assert has_element?(view, "#approval-#{approval.id} [data-recipient='#{moved}']")
+    end
+
+    test "a reviewer's approve with a mismatched recipient is refused by the domain as stale",
+         %{conn: conn} = ctx do
+      {:ok, view, _html} = open(conn, :reviewer, ctx.draft)
+
+      render_submit(view, "approve", %{
+        "approve" => %{
+          "draft_revision_id" => ctx.revision.id,
+          "content_sha256" => hex(ctx.revision.content_sha256),
+          "recipient_email" => "someone.else@brightpath-freight.test"
+        }
+      })
+
+      assert has_element?(view, "#review-error", "stale review")
+      assert approvals!(ctx, ctx.draft) == []
     end
 
     test "reject requires a reason and records it", %{conn: conn} = ctx do
@@ -262,6 +278,35 @@ defmodule SdrAgentWeb.DraftLiveTest do
       draft = draft!(ctx, ctx.draft)
       assert {draft.status, draft.current_revision_id} == {:pending_review, ctx.revision.id}
       assert length(denials_of(ctx, ctx.auditor)) == 3
+    end
+
+    for {label, recipient} <- [
+          {"missing", :missing},
+          {"malformed", "not an email"},
+          {"mismatched", "someone.else@brightpath-freight.test"}
+        ] do
+      test "an auditor's approve with a #{label} recipient reaches the domain and is denied once",
+           %{conn: conn} = ctx do
+        {:ok, view, _html} = open(conn, :auditor, ctx.draft)
+
+        binding = %{
+          "draft_revision_id" => ctx.revision.id,
+          "content_sha256" => hex(ctx.revision.content_sha256)
+        }
+
+        binding =
+          case unquote(recipient) do
+            :missing -> binding
+            email -> Map.put(binding, "recipient_email", email)
+          end
+
+        render_submit(view, "approve", %{"approve" => binding})
+
+        assert has_element?(view, "#flash-error")
+        assert approvals!(ctx, ctx.draft) == []
+        assert draft!(ctx, ctx.draft).status == :pending_review
+        assert [_denied_once] = denials_of(ctx, ctx.auditor)
+      end
     end
 
     test "revoke and cancel-retry events are refused by the domain and audited",
