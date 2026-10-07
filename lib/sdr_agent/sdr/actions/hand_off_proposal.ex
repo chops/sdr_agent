@@ -3,12 +3,20 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   PrepareOutreachFlow step "proposal": the OutreachProposal hand-off to S8.
 
   A proposal that failed deterministic validation fails the run as invalid
-  model output (operator attention) and is never handed off. A valid one is
-  gated again deterministically (campaign active, recipient not suppressed)
-  and recorded as an `enrollment` Decision; enrolling then creates the
-  CampaignEnrollment and moves the lead qualified → in_outreach (citing that
-  Decision), and `sdr.draft.completed` carries the proposal's ids to S8,
-  which creates the Draft and its revision. A refused enrollment ends the
+  model output (operator attention) and is never handed off.
+
+  A valid one is handed off in *one transaction*: the Lead row is locked
+  `FOR UPDATE` and the Campaign `FOR SHARE` before anything is appended to
+  the audit chain (lock order Lead → Campaign → chain head; a concurrent
+  operator stop or campaign pause either commits first and is seen here, or
+  waits), the deterministic gates (campaign active, recipient not
+  suppressed) and the `enrollment` Decision are recorded against those
+  rows, and on `enroll` the CampaignEnrollment, the Lead qualified →
+  in_outreach transition and the durable hand-off record — the
+  `sdr.draft.completed` signal event naming the run's exact draft,
+  validation and enrollment Decisions, ModelInvocation, enrollment and
+  sequence step — commit together or not at all. S8 creates the Draft from
+  that record (`SdrAgent.SDR.proposal/2`). A refused enrollment ends the
   assignment.
   """
   use SdrAgent.SDR.Action,
@@ -23,9 +31,15 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
         plan: Zoi.map()
       })
 
+  require Ash.Query
+
+  alias SdrAgent.Agents
+  alias SdrAgent.Audit
+  alias SdrAgent.Repo
   alias SdrAgent.Sales
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.Model
+  alias SdrAgent.SDR.Signals
   alias SdrAgent.SDR.Support
 
   @impl SdrAgent.SDR.Action
@@ -33,20 +47,12 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
         %{claims_check: %{passed: true}, personalization_check: %{passed: true}} = params,
         ctx
       ) do
-    %{lead_id: lead_id, draft: draft, plan: plan} = params
-
-    with {:ok, %{lead: lead, contact: contact}} <- Support.lead_context(ctx, lead_id),
-         {:ok, campaign} <- Support.fetch(ctx, Sales.Campaign, plan.campaign_id),
-         {:ok, campaign_check} <- Support.campaign_gate(ctx, campaign, lead_id, "enroll"),
-         {:ok, suppression} <- Support.suppression_gate(ctx, contact, lead_id, "enroll") do
-      enroll? =
-        lead.status == :qualified and campaign_check.outcome == "active" and
-          suppression.outcome == "not_suppressed"
-
-      with {:ok, decision} <- enrollment_decision(ctx, lead, campaign_check, suppression, enroll?) do
-        enroll(enroll?, ctx, lead, campaign, draft, plan, decision)
+    Audit.transaction(fn ->
+      case hand_off(params, ctx) do
+        {:ok, state} -> state
+        {:error, error} -> Repo.rollback(error)
       end
-    end
+    end)
   end
 
   def perform(_params, ctx) do
@@ -56,6 +62,34 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
       :invalid_model_output,
       "outreach proposal failed deterministic validation"
     )
+  end
+
+  defp hand_off(%{lead_id: lead_id, plan: plan} = params, ctx) do
+    with {:ok, lead} <- lock(ctx, Sales.Lead, lead_id, :for_update),
+         {:ok, campaign} <- lock(ctx, Sales.Campaign, plan.campaign_id, "FOR SHARE"),
+         {:ok, contact} <- Support.fetch(ctx, Sales.Contact, lead.contact_id),
+         {:ok, campaign_check} <- Support.campaign_gate(ctx, campaign, lead_id, "enroll"),
+         {:ok, suppression} <- Support.suppression_gate(ctx, contact, lead_id, "enroll") do
+      enroll? =
+        lead.status == :qualified and campaign_check.outcome == "active" and
+          suppression.outcome == "not_suppressed"
+
+      with {:ok, decision} <- enrollment_decision(ctx, lead, campaign_check, suppression, enroll?) do
+        enroll(enroll?, ctx, lead, campaign, params, decision)
+      end
+    end
+  end
+
+  defp lock(%Context{} = ctx, resource, id, lock) do
+    resource
+    |> Ash.Query.for_read(:read, %{}, actor: ctx.actor)
+    |> Ash.Query.filter(id == ^id and tenant_id == ^ctx.tenant_id)
+    |> Ash.Query.lock(lock)
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} -> {:error, Ash.Error.Query.NotFound.exception(resource: resource)}
+      other -> other
+    end
   end
 
   defp enrollment_decision(ctx, lead, campaign_check, suppression, enroll?) do
@@ -79,27 +113,35 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
     )
   end
 
-  defp enroll(false, ctx, _lead, _campaign, _draft, _plan, _decision),
+  defp enroll(false, ctx, _lead, _campaign, _params, _decision),
     do: {:ok, %{ctx.agent_state | phase: :stop}}
 
-  defp enroll(true, ctx, lead, campaign, draft, plan, decision) do
+  defp enroll(true, ctx, lead, campaign, params, decision) do
+    %{draft: draft, plan: plan} = params
+
     with {:ok, enrollment} <-
            Sales.enroll_lead(%{campaign_id: campaign.id, lead_id: lead.id}, actor: ctx.actor),
          {:ok, _lead} <-
-           Sales.update(lead, :start_outreach, %{decision_id: decision.id}, actor: ctx.actor) do
+           Sales.update(lead, :start_outreach, %{decision_id: decision.id}, actor: ctx.actor),
+         {:ok, run} <- Agents.get_run(ctx.run_id, actor: ctx.actor),
+         {:ok, signal} <-
+           Signals.build("sdr.draft.completed", %{
+             lead_id: lead.id,
+             campaign_id: campaign.id,
+             enrollment_id: enrollment.id,
+             sequence_step_id: plan.step.id,
+             recipient_contact_id: lead.contact_id,
+             proposal_decision_id: draft.decision_id,
+             model_invocation_id: draft.model_invocation_id,
+             claims_validation_decision_id: params.claims_check.decision_id,
+             personalization_validation_decision_id: params.personalization_check.decision_id,
+             enrollment_decision_id: decision.id
+           }),
+         {:ok, _event} <- Signals.record(signal, ctx.actor, run: run, parent: ctx.signal_id) do
       {:ok,
-       ctx.agent_state |> Map.put(:phase, :review) |> Map.put(:proposal_id, draft.decision_id),
-       [
-         Support.emit("sdr.draft.completed", %{
-           lead_id: lead.id,
-           campaign_id: campaign.id,
-           enrollment_id: enrollment.id,
-           sequence_step_id: plan.step.id,
-           recipient_contact_id: lead.contact_id,
-           proposal_decision_id: draft.decision_id,
-           model_invocation_id: draft.model_invocation_id
-         })
-       ]}
+       ctx.agent_state
+       |> Map.put(:phase, :review)
+       |> Map.put(:proposal_id, draft.decision_id)}
     end
   end
 end

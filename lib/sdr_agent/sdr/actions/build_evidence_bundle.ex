@@ -138,15 +138,20 @@ defmodule SdrAgent.SDR.Actions.BuildEvidenceBundle do
     end
   end
 
-  # Code-point offsets (half-open) of the first verbatim occurrence of quote.
+  # Code-point offsets (half-open) of the first verbatim occurrence of the
+  # quote — code points, not graphemes, as SourceLocation and GroundClaim
+  # define them (S5 choice 12): a combining mark or an emoji ZWJ sequence
+  # is one grapheme but several code points.
   defp locate(content, quote) do
     case :binary.match(content, quote) do
       {byte_start, _byte_length} ->
-        from = content |> binary_part(0, byte_start) |> String.length()
-        {from, from + String.length(quote)}
+        from = content |> binary_part(0, byte_start) |> codepoints()
+        {from, from + codepoints(quote)}
 
       :nomatch ->
         nil
     end
   end
+
+  defp codepoints(text), do: text |> String.codepoints() |> length()
 end

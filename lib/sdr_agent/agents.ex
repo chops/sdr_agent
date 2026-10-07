@@ -15,7 +15,7 @@ defmodule SdrAgent.Agents do
     * runs — `create_run/2`, `start_run/2`, `set_run_phase/3`,
       `succeed_run/2`, `fail_run/3`, `exhaust_run_budget/3`, `cancel_run/2`,
       `retry_run/2`, `reserve_model_call/2`, `get_run/2`,
-      `find_run_by_operation/2`;
+      `find_run_by_operation/2`, `active_runs_for_lead/2`;
     * model calls — `reserve_model_invocation/3` (reserves the run budget,
       enforces the persisted daily limit, stores the request Payload and
       numbers the call, in one transaction), `daily_model_call_limit/0`,
@@ -138,6 +138,14 @@ defmodule SdrAgent.Agents do
 
   @doc "Reads one run."
   def get_run(id, opts), do: Ash.get(AgentRun, id, actor: Keyword.get(opts, :actor))
+
+  @doc "Queued or running runs of a lead (an active assignment)."
+  def active_runs_for_lead(lead_id, opts) do
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, actor: Keyword.get(opts, :actor))
+    |> Ash.Query.filter(lead_id == ^lead_id and status in [:queued, :running])
+    |> Ash.read()
+  end
 
   @doc "The run executing an Operation (`operation_id`)."
   def find_run_by_operation(operation_id, opts) do

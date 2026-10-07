@@ -5,6 +5,11 @@ defmodule SdrAgent.SDR.Actions.ValidateClaims do
   appear verbatim in the body. A claim without evidence (or citing evidence
   of another lead, or not in the body) rejects the proposal. Records a
   `claims_validation` Decision.
+
+  Limits (for the human reviewer): `passed` establishes citation
+  membership and verbatim presence only — not that the cited evidence
+  entails the claim, nor that the free-text body contains no other,
+  uncited assertion. Tier-0 human review remains the check for those.
   """
   use SdrAgent.SDR.Action,
     name: "sdr_validate_claims",

@@ -11,7 +11,8 @@ defmodule SdrAgent.SDR.AgentWorker do
   run succeeds (and its Operation); a run stopped by a budget or invalid
   model output — or one that crashed, which is failed here with reason
   `crash` — fails its Operation, linking the run's attention Failure (one
-  queue entry per condition). Agent work is never retried automatically
+  queue entry per condition). The run's and the Operation's terminal writes
+  are one transaction. Agent work is never retried automatically
   (`max_attempts: 1`; ADR-0004: no retry loops) — an operator retry creates
   a new run. The job completes once the outcome is recorded.
   """
@@ -19,6 +20,7 @@ defmodule SdrAgent.SDR.AgentWorker do
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents
+  alias SdrAgent.Audit
   alias SdrAgent.Operations
   alias SdrAgent.SDR.Runner
   alias SdrAgent.SDR.Signals
@@ -45,7 +47,14 @@ defmodule SdrAgent.SDR.AgentWorker do
     end
   end
 
+  # The run's and the Operation's terminal writes commit together, so a
+  # crash cannot leave a terminal run with a running Operation.
   defp finish(result, run, operation, actor) do
+    {:ok, :ok} = Audit.transaction(fn -> terminalize(result, run, operation, actor) end)
+    :ok
+  end
+
+  defp terminalize(result, run, operation, actor) do
     {:ok, run} = Agents.get_run(run.id, actor: actor)
 
     case {run.status, result} do
