@@ -20,8 +20,13 @@ flowchart LR
         Policies[Policies]
     end
 
+    subgraph AuditKernel["Audit kernel (system of record)"]
+        Append[Append: lock chain head,<br/>sequence+1, sha256 chain]
+        Verify[verify_chain / read_content<br/>recorded as AuditAccess]
+    end
+
     subgraph Data["Data Layer"]
-        Postgres[(PostgreSQL)]
+        Postgres[(PostgreSQL<br/>append-only triggers)]
         Cache[(Cache)]
     end
 
@@ -42,6 +47,10 @@ flowchart LR
     Resources --> Actions
     Actions --> Policies
     Resources --> Postgres
+    Actions -- same transaction --> Append
+    Append --> Postgres
+    Verify --> Postgres
+    Append -. trace_id / span_id .-> Instrumentation
     Resources -.-> Cache
     Router -. spans .-> Instrumentation
     Resources -. spans .-> Instrumentation

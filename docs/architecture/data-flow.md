@@ -12,6 +12,7 @@ flowchart LR
     subgraph External["External"]
         Browser[Browser/Client]
         API[External APIs]
+        Tempo[Tempo OTLP HTTP<br/>dev only 127.0.0.1:4318]
     end
 
     subgraph Web["Phoenix Web Layer"]
@@ -28,9 +29,19 @@ flowchart LR
         Policies[Policies]
     end
 
+    subgraph AuditKernel["Audit kernel (system of record)"]
+        Append[Append: lock chain head,<br/>sequence+1, sha256 chain]
+        Verify[verify_chain / read_content<br/>recorded as AuditAccess]
+    end
+
     subgraph Data["Data Layer"]
-        Postgres[(PostgreSQL)]
+        Postgres[(PostgreSQL<br/>append-only triggers)]
         Cache[(Cache)]
+    end
+
+    subgraph Observability["OpenTelemetry"]
+        Instrumentation[Phoenix / Bandit / Ecto<br/>Oban / Req / Ash]
+        GenAI[gen_ai spans<br/>IDs and hashes by default]
     end
 
     Browser --> Router
@@ -45,7 +56,16 @@ flowchart LR
     Resources --> Actions
     Actions --> Policies
     Resources --> Postgres
+    Actions -- same transaction --> Append
+    Append --> Postgres
+    Verify --> Postgres
+    Append -. trace_id / span_id .-> Instrumentation
     Resources -.-> Cache
+    Router -. spans .-> Instrumentation
+    Resources -. spans .-> Instrumentation
+    Actions -. spans .-> GenAI
+    Instrumentation -. OTLP dev only .-> Tempo
+    GenAI -. OTLP dev only .-> Tempo
 
     %% Project shape: single
     %% Detected data layers:
