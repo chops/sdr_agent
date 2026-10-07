@@ -129,10 +129,32 @@ None blocking; implementation choices 1–7 above are flagged for the PR reviewe
 * TDD Tracking
 (Filled during Phase 4a)
 
+RED run (2026-10-06, =MIX_TEST_PARTITION=_s3 mix test test/sdr_agent/audit
+test/sdr_agent/agents test/sdr_agent/clock_test.exs=): *Result: 0/84 passed*.
+
 | Test | Location | Status | Failure Reason |
 |------+----------+--------+----------------|
+| Canonical JSON v1 (8) | test/sdr_agent/audit/canonical_test.exs | FAILING | =SdrAgent.Audit.Canonical= undefined |
+| Clock (2) | test/sdr_agent/clock_test.exs | FAILING | =SdrAgent.Clock= undefined |
+| Bootstrap, append, chaining, trace, rollback (11) | test/sdr_agent/audit/kernel_test.exs | FAILING | =SdrAgent.Audit.bootstrap/1= undefined |
+| Tamper detection (9) | test/sdr_agent/audit/tamper_test.exs | FAILING | =SdrAgent.Audit.bootstrap/1= undefined |
+| Concurrent appends (1) | test/sdr_agent/audit/concurrency_test.exs | FAILING | relation =audit_accesses= does not exist |
+| Append-only triggers (7) | test/sdr_agent/audit/append_only_test.exs | FAILING | tables/triggers absent; bootstrap undefined |
+| Payload store + read_content (8) | test/sdr_agent/audit/payload_test.exs | FAILING | =SdrAgent.Audit.bootstrap/1= undefined |
+| Auditor/denial policies, verify_chain, retention (12) | test/sdr_agent/audit/policy_test.exs | FAILING | =SdrAgent.Audit.bootstrap/1= undefined |
+| Agents: definitions, runs, invocations, decisions (26) | test/sdr_agent/agents/agents_test.exs | FAILING | =SdrAgent.Audit.bootstrap/1= undefined |
 
-*TDD Gate Verification:* [ ] VERIFIED / [ ] NEEDS_REVIEW / [ ] BLOCKED
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED
+
+Every test fails for the intended missing behaviour (absent modules and
+tables), not on an assertion: the kernel and both domains do not exist yet,
+so no assertion can be reached. One test bug found during RED (=regclass=
+bound as text) was fixed before recording. =bin/tdd_verify.sh= reports "No
+tests found" because it does not parse Elixir 1.20's =Result: 0/N passed=
+summary (same defect noted in S1); its counts (56 runtime errors for the
+first path) agree with the run above. Recorded as NEEDS_REVIEW rather than
+VERIFIED for that reason; proceeding under the unattended charter (ADR-0001)
+with the peer reviewing the RED evidence on the PR.
 
 -----
 
