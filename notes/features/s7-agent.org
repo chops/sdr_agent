@@ -322,7 +322,10 @@ new test failing on =:missing_structured_output=.
 =tdd_verify.sh= parsing caveat; the failures are the intended ones.
 
 ** S7b GREEN
-=bin/verify= *325 passed, 4 excluded*; =mix credo= no issues; =mix
+=bin/verify= *325 passed, 4 excluded* (on the first S7a); after the S7a
+review round and the rebase onto =main= =935fe47=: *357 passed, 4
+excluded* (the worker links the run's attention Failure, which now carries
+the operation id); =mix credo= no issues; =mix
 ash.codegen --check= and =mix hex.audit= clean; gitleaks 8.30.1 over
 =origin/main..HEAD=: no leaks. The
 =:external= golden path on the real Claude CLI passed once:
