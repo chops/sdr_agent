@@ -332,6 +332,42 @@ ash.codegen --check= and =mix hex.audit= clean; gitleaks 8.30.1 over
 =mix test test/sdr_agent/sdr/golden_path_test.exs --only external= → *1
 passed* (34.8 s; =claude-opus-5-5= on Claude Code =2.1.291= attested).
 
+** S7b review round 1 (Codex, PR #12 at =982bf94=: CHANGES REQUESTED)
+Choices 8–18 accepted (9: NoStore only for this no-delivery slice; 15: keep
+the partial-terminalization case for S13 — the worker's run and Operation
+terminal writes are now one transaction anyway). Must-fix:
+
+1. An already-assigned lead skipped caller authorization →
+   =SDR.assign_lead/2= authorizes an active ADM/REV of the lead's tenant for
+   both states at the boundary (auditor attempts refused and audited by the
+   Guard; nil, system and foreign-tenant callers =Forbidden=, nothing
+   written), re-reads the Lead =FOR UPDATE= before any append, refuses an
+   active assignment (=:assignment_active=) and other states
+   (={:lead_not_assignable, status}=), and requires the campaign to exist.
+2. The hand-off was not atomic → =HandOffProposal= locks Lead =FOR UPDATE=
+   and Campaign =FOR SHARE= first (order Lead → Campaign → chain head), then
+   records the gates, the =enrollment= Decision, the enrollment, Lead →
+   in_outreach and the =sdr.draft.completed= hand-off record in one
+   transaction; =SDR.proposal/2= rebuilds the proposal only from that record
+   and checks every id it names (draft, both validations, enrollment
+   Decision, invocation, enrollment, step) against the run.
+3. Offsets counted graphemes → code points, as =SourceLocation=/=GroundClaim=.
+
+Important: =Signals.load/1= validates shape and allow-listed keys
+(={:error, :invalid_signal}=); concurrent assignments serialise on the Lead
+lock. Optional: =ValidateClaims= documents that =passed= proves citation
+membership and verbatim presence, not entailment.
+
+RED: =test/sdr_agent/sdr= *19/28 passed*; the 9 failures were the defects
+above. The real-connection stop-vs-hand-off race (=handoff_race_test.exs=)
+passes before the fix — the chain-head lock already serialises that
+interleaving — and is kept as a regression guard; atomicity is proven by
+the two rollback tests (refused Lead transition, failed hand-off append).
+That race test runs the agent with =sandbox: false= and puts the agent
+task's connection in shared mode so Jido's Flow tasks can use it.
+GREEN: =bin/verify= *370 passed, 4 excluded*; credo, =ash.codegen --check=,
+=hex.audit=, gitleaks clean; =:external= golden path on opus *1 passed*.
+
 -----
 
 * Implementation Notes
@@ -367,11 +403,13 @@ passed* (34.8 s; =claude-opus-5-5= on Claude Code =2.1.291= attested).
      S6a (=65f94be=); nothing in =lib/= references them.
 
 ** What S8, S9 and S10 must know
-- *S8 (Outreach):* consume =sdr.draft.completed= (signal AuditEvent; data
+- *S8 (Outreach):* consume =sdr.draft.completed= — the durable hand-off
+  record, committed with the enrollment and Lead → in_outreach (data
   =lead_id, campaign_id, enrollment_id, sequence_step_id,
-  recipient_contact_id, proposal_decision_id, model_invocation_id=) or call
-  =SdrAgent.SDR.proposal(run_id, actor:)=, which re-validates the
-  OutreachProposal from Postgres. Create the Draft + agent DraftRevision with
+  recipient_contact_id, proposal_decision_id, model_invocation_id,
+  claims_validation_decision_id, personalization_validation_decision_id,
+  enrollment_decision_id=) — or call =SdrAgent.SDR.proposal(run_id, actor:)=,
+  which rebuilds and re-validates the OutreachProposal from that record. Create the Draft + agent DraftRevision with
   =decision_id= = the =draft_proposal= Decision, and RevisionCitations from
   =output.claims= (kind claim) and =output.personalization= (kind
   personalization) — every text is verbatim in the body and every
