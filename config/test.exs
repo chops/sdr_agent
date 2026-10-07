@@ -55,6 +55,9 @@ config :phoenix,
 # authorized only for the seeder in :dev/:test; absent elsewhere = refused).
 config :sdr_agent, seeding_allowed?: true
 
+# Live console refresh reloads at once in tests (no debounce timer).
+config :sdr_agent, SdrAgentWeb.LiveRefresh, debounce_ms: 0
+
 # <!-- >>> workflow-factory:workflow-project-config >>> -->
 config :sdr_agent, SdrAgent.Repo,
   database: "sdr_agent_test#{System.get_env("MIX_TEST_PARTITION")}",

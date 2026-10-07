@@ -21,7 +21,10 @@ defmodule SdrAgent.Audit.Kernel do
        `event_hash = sha256(canonical_bytes)`;
     5. insert the AuditEvent and advance the head (guarded on the expected
        sequence);
-    6. if the provenance snapshot was new, append `system.provenance.recorded`
+    6. queue the event's commit-time notification for live views
+       (`SdrAgent.LiveEvents.notify/1`; delivered only if the transaction
+       commits);
+    7. if the provenance snapshot was new, append `system.provenance.recorded`
        right after.
 
   Every kernel request runs as a `:kernel` `SdrAgent.Actor` with the kernel
@@ -45,6 +48,7 @@ defmodule SdrAgent.Audit.Kernel do
   alias SdrAgent.Audit.Trace
   alias SdrAgent.Audit.Verifier
   alias SdrAgent.Clock
+  alias SdrAgent.LiveEvents
   alias SdrAgent.Repo
 
   @zero_hash <<0::256>>
@@ -300,6 +304,7 @@ defmodule SdrAgent.Audit.Kernel do
          {:ok, snapshot, new?} <- ensure_provenance(tenant_id),
          {:ok, event} <- insert_event(attrs, actor, tenant_id, head, snapshot),
          {:ok, _head} <- advance_head(head, event),
+         :ok <- LiveEvents.notify(event),
          :ok <- record_new_provenance(new?, snapshot, tenant_id) do
       {:ok, event}
     end

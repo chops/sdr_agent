@@ -4,7 +4,8 @@ defmodule SdrAgentWeb.ReviewLive do
   (`SdrAgent.Outreach.list_review_queue/1`, oldest first) with recipient,
   company, the current revision's subject and author, plus the most recent
   decided drafts. Read-only; opening a draft leads to `SdrAgentWeb.DraftLive`.
-  An auditor's view is recorded with the ids of the drafts shown.
+  An auditor's view is recorded with the ids of the drafts shown. New drafts
+  and verdicts appear live (`SdrAgentWeb.LiveRefresh`).
   """
   use SdrAgentWeb, :live_view
 
@@ -12,6 +13,7 @@ defmodule SdrAgentWeb.ReviewLive do
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
+  alias SdrAgentWeb.LiveRefresh
 
   @recent 10
 
@@ -23,7 +25,8 @@ defmodule SdrAgentWeb.ReviewLive do
      |> stream_configure(:review_queue, dom_id: &"review-queue-#{&1.id}")
      |> stream_configure(:recent_drafts, dom_id: &"recent-drafts-#{&1.id}")
      |> stream(:review_queue, [])
-     |> stream(:recent_drafts, [])}
+     |> stream(:recent_drafts, [])
+     |> LiveRefresh.attach(&load/1)}
   end
 
   @impl true

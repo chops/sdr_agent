@@ -17,6 +17,8 @@ defmodule SdrAgent.Application do
           {DNSCluster, query: Application.get_env(:sdr_agent, :dns_cluster_query) || :ignore},
           {Oban, Application.fetch_env!(:sdr_agent, Oban)},
           {Phoenix.PubSub, name: SdrAgent.PubSub},
+          # Relays committed audit events to live operator views (ADR-0012).
+          SdrAgent.LiveEvents.Relay,
           # Start a worker by calling: SdrAgent.Worker.start_link(arg)
           # {SdrAgent.Worker, arg},
           # Start to serve requests, typically the last entry

@@ -13,7 +13,7 @@ defmodule SdrAgentWeb.OperationsLive do
   operation with nothing running. Every action goes to the domain with the
   scope's user; an auditor's forged event is refused and audited, a
   reviewer's cancel is refused by the Operation policy. An auditor's view is
-  recorded before it is served.
+  recorded before it is served. Updates live (`SdrAgentWeb.LiveRefresh`).
   """
   use SdrAgentWeb, :live_view
 
@@ -22,6 +22,7 @@ defmodule SdrAgentWeb.OperationsLive do
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
+  alias SdrAgentWeb.LiveRefresh
   alias SdrAgentWeb.Scope
 
   @run_limit 50
@@ -39,7 +40,8 @@ defmodule SdrAgentWeb.OperationsLive do
      )
      |> stream(:failures, [])
      |> stream(:operations, [])
-     |> stream(:runs, [])}
+     |> stream(:runs, [])
+     |> LiveRefresh.attach(&load/1)}
   end
 
   @impl true

@@ -22,6 +22,13 @@ defmodule SdrAgentWeb.DraftLive do
   domain's: a forged event from an auditor is refused (and audited) by
   `SdrAgent.Audit.Guard` and shown as an error. An auditor's view is
   recorded with the draft id before it is served.
+
+  Live refresh (`SdrAgentWeb.LiveRefresh`) updates approvals, deliveries,
+  receipts and status as they commit, but never swaps the revision under the
+  reviewer: when another revision has become current, the displayed one —
+  and the approve/reject binding to it — stays, and a notice offers to show
+  the latest. A verdict on the displayed revision is then refused as stale by
+  the domain, exactly as before live refresh.
   """
   use SdrAgentWeb, :live_view
 
@@ -30,6 +37,7 @@ defmodule SdrAgentWeb.DraftLive do
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
+  alias SdrAgentWeb.LiveRefresh
   alias SdrAgentWeb.Scope
 
   @impl true
@@ -46,8 +54,10 @@ defmodule SdrAgentWeb.DraftLive do
        cited_artifact: nil,
        editing?: false,
        review_error: nil,
+       newer_revision?: false,
        messages: %{}
-     )}
+     )
+     |> LiveRefresh.attach(&refresh/1)}
   end
 
   @impl true
@@ -58,6 +68,21 @@ defmodule SdrAgentWeb.DraftLive do
   end
 
   ## Loading
+
+  defp refresh(%{assigns: %{loaded?: true, current: current}} = socket) do
+    opts = [actor: socket.assigns.current_scope.user]
+
+    case Outreach.fetch(Outreach.Draft, socket.assigns.draft_id, opts) do
+      {:ok, %{current_revision_id: id}} when id != current.id ->
+        assign(socket, newer_revision?: true)
+
+      _ ->
+        load(socket)
+    end
+  end
+
+  defp refresh(%{assigns: %{draft_id: nil}} = socket), do: socket
+  defp refresh(socket), do: load(socket)
 
   defp load(socket) do
     scope = socket.assigns.current_scope
@@ -103,6 +128,7 @@ defmodule SdrAgentWeb.DraftLive do
         loaded?: true,
         withheld: nil,
         not_found?: false,
+        newer_revision?: false,
         page_title: "Review · #{current.subject}",
         draft: draft,
         revisions: revisions,
@@ -227,6 +253,10 @@ defmodule SdrAgentWeb.DraftLive do
   @impl true
   def handle_event("cite", %{"id" => id}, socket) do
     {:noreply, cite(socket, socket.assigns.citations[id])}
+  end
+
+  def handle_event("show_latest", _params, socket) do
+    {:noreply, socket |> assign(editing?: false) |> cite(nil) |> load()}
   end
 
   def handle_event("toggle_edit", _params, socket) do
@@ -396,6 +426,24 @@ defmodule SdrAgentWeb.DraftLive do
             </.link>
           </:subtitle>
         </.page_header>
+
+        <div
+          :if={@newer_revision?}
+          id="newer-revision"
+          role="status"
+          class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+        >
+          <p class="flex items-start gap-2">
+            <.icon name="hero-arrow-path" class="mt-0.5 size-5 shrink-0" />
+            <span>
+              This draft now has a newer revision than the one shown. A verdict on
+              the revision you are reading will be refused as stale.
+            </span>
+          </p>
+          <.ui_button id="show-latest-revision" size="sm" phx-click="show_latest">
+            Show the latest revision
+          </.ui_button>
+        </div>
 
         <div
           :if={@review_error}
