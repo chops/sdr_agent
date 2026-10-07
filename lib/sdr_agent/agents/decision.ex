@@ -12,9 +12,12 @@ defmodule SdrAgent.Agents.Decision do
   `rationale`, `confidence`, `decided_at`, `idempotency_key` (unique per
   tenant).
 
-  Invariants: see `SdrAgent.Agents.Changes.DecisionRules`. Recording the
-  same decision again (same idempotency key) is a no-op returning the
-  existing row (`SdrAgent.Agents.record_decision/2`).
+  Invariants: see `SdrAgent.Agents.Changes.DecisionRules`. Idempotency
+  (`SdrAgent.Agents.Changes.Replay`): the create is a never-updating upsert
+  on `(tenant_id, idempotency_key)`; recording the same decision again —
+  sequentially or concurrently — returns the existing row with no new
+  event, while reusing the key for a decision with a different
+  `replay_sha256` fails with `SdrAgent.Agents.Errors.IdempotencyConflict`.
 
   Actors: each system actor records only its own kinds (`kind_actors/0`);
   humans never record decisions; reads for any actor. Append-only (no
@@ -31,6 +34,8 @@ defmodule SdrAgent.Agents.Decision do
     domain: SdrAgent.Agents,
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
+
+  require Ash.Expr
 
   alias SdrAgent.Audit.Canonical
 
@@ -130,9 +135,15 @@ defmodule SdrAgent.Agents.Decision do
       ]
 
       argument :inputs, :map, allow_nil?: false
+      upsert? true
+      upsert_identity :unique_idempotency_key
+      upsert_fields []
+      upsert_condition Ash.Expr.expr(false)
+      return_skipped_upsert? true
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Agents.Changes.DecisionRules
       change SdrAgent.Audit.Changes.TraceIds
+      change SdrAgent.Agents.Changes.Replay
 
       change {SdrAgent.Audit.Changes.AppendEvent,
               event_type: "agents.decision.recorded",
@@ -206,6 +217,14 @@ defmodule SdrAgent.Agents.Decision do
     end
 
     attribute :idempotency_key, :string, allow_nil?: false, public?: true
+
+    attribute :replay_sha256, :binary do
+      description "Canonical hash of every decision-defining field (SdrAgent.Agents.Changes.Replay)."
+      allow_nil? false
+      writable? false
+      public? true
+    end
+
     attribute :trace_id, :string, allow_nil?: false, public?: true
     attribute :span_id, :string, allow_nil?: false, public?: true
 

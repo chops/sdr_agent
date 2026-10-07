@@ -37,6 +37,13 @@ config :ash,
   default_string_length_count: :codepoints,
   known_types: [AshPostgres.Timestamptz, AshPostgres.TimestamptzUsec]
 
+# Upserts as INSERT ... ON CONFLICT, not MERGE: on PostgreSQL 17+ AshPostgres
+# would otherwise use MERGE, which raises unique violations when concurrent
+# transactions insert the same key. The insert-if-absent paths (Payload,
+# ProvenanceSnapshot, Decision idempotency) depend on ON CONFLICT semantics;
+# proven by test/sdr_agent/audit/concurrency_test.exs.
+config :ash_postgres, upsert_with_merge?: false
+
 config :spark,
   formatter: [
     remove_parens?: true,

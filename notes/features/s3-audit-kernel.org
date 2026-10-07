@@ -156,6 +156,36 @@ first path) agree with the run above. Recorded as NEEDS_REVIEW rather than
 VERIFIED for that reason; proceeding under the unattended charter (ADR-0001)
 with the peer reviewing the RED evidence on the PR.
 
+** Review round 1 (Codex, PR #7 comment 6029367095: CHANGES REQUESTED)
+Must-fix: =record_decision/2= returned any existing row for a key (unsafe
+with caller-supplied keys) and its check-then-create raced.
+
+RED (=agents_test.exs=, =concurrency_test.exs=): *28/32 passed*. All 4
+failures were the intended defect: a conflicting key reuse returned
+={:ok, old_row}=; =replay_sha256= absent; concurrent identical calls failed
+with unique violations (on =payloads_pkey=, revealing a second defect: on
+PostgreSQL 17+ AshPostgres upserts via =MERGE=, which is not
+concurrency-safe); concurrent conflicting calls produced no
+=IdempotencyConflict=.
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| Identical replay with explicit key | agents_test.exs (Decision) | FAILING | =replay_sha256= missing |
+| Key reuse with 10 different decision fields | agents_test.exs (Decision) | FAILING | old row returned as ={:ok, _}= |
+| 8 concurrent identical calls → 1 row, 1 event | concurrency_test.exs | FAILING | unique violation instead of replay |
+| 8 concurrent different calls → 1 winner, 7 conflicts | concurrency_test.exs | FAILING | no =IdempotencyConflict= |
+
+GREEN: =Decision.replay_sha256= (new attribute: canonical hash of every
+decision-defining field, incl. the canonical inputs hash), a never-updating
+upsert on =(tenant_id, idempotency_key)=, and =SdrAgent.Agents.Changes.Replay=
+(identical → existing row, no event; different →
+=SdrAgent.Agents.Errors.IdempotencyConflict=, nothing written).
+=config :ash_postgres, upsert_with_merge?: false= switches all upserts to
+=INSERT ... ON CONFLICT=; probe with MERGE re-enabled: concurrency module
+2/4 failing on 3 of 3 runs; with ON CONFLICT 4/4 on 5 of 5 runs.
+=bin/verify= 119 passed. Conflicts are not audited: S2's denial contract
+covers authorization denials only, and the refused write rolls back.
+
 -----
 
 * Implementation Notes
