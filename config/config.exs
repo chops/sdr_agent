@@ -88,7 +88,8 @@ config :sdr_agent,
     SdrAgent.Operations,
     SdrAgent.Agents,
     SdrAgent.Sales,
-    SdrAgent.Research
+    SdrAgent.Research,
+    SdrAgent.Outreach
   ]
 
 # Configure the endpoint
@@ -149,7 +150,9 @@ config :sdr_agent,
   anchor_event_count: 100,
   anchor_interval_seconds: 900,
   ots_upgrade_batch_size: 25,
-  anchor_sinks: []
+  anchor_sinks: [],
+  # S8: the agent's deterministic suppression gate reads the Outreach store.
+  suppression_check: SdrAgent.SDR.SuppressionCheck.Store
 
 config :opentelemetry, resource: %{service: %{name: "sdr_agent"}}
 
