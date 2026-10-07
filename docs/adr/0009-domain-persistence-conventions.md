@@ -124,6 +124,23 @@ cross-cutting choices must be fixed once rather than per slice.
    sender addresses must be under reserved names (`.test`, `.example`,
    `.invalid`, `example.com/.net/.org`), validated in every environment.
 
+#### S3 implementation amendment (2026-10-06): upserts use `INSERT ... ON CONFLICT`
+
+All AshPostgres upserts in this project MUST compile to `INSERT ... ON CONFLICT`,
+never `MERGE`: `config :ash_postgres, upsert_with_merge?: false` is a durable
+correctness constraint, not a tuning knob. On PostgreSQL 17+ AshPostgres would
+otherwise emit `MERGE`, which raises unique violations when concurrent
+transactions insert the same key. The insert-if-absent paths depend on
+`ON CONFLICT` semantics: `Payload` (content-addressed dedupe),
+`ProvenanceSnapshot`, and `Decision` idempotency (replay fingerprint
+`replay_sha256`; identical replays return the existing row, conflicting key
+reuse fails with `IdempotencyConflict`). Evidence: with `MERGE` re-enabled the
+concurrency tests in `test/sdr_agent/audit/concurrency_test.exs` failed on every
+run; with `ON CONFLICT` they pass. Removing or flipping this setting, or
+upgrading AshPostgres in a way that changes upsert compilation, requires a
+reviewed amendment to this ADR and a green concurrency suite. Reviewed by Codex
+on PR #7 (https://github.com/chops/sdr_agent/pull/7#issuecomment-6029500570).
+
 ## Justification
 
 UUIDv7 costs nothing (built into the pinned Ash) and gives ordered, local
