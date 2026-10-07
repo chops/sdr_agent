@@ -112,6 +112,40 @@ hand: NEEDS_REVIEW (peer reviews RED on the PR).
 4. *Reviewer reads of users.* A reviewer may read only itself (S5), so
    approvals show "by you" / "by another operator" instead of names.
 
+* Review round 1 (Codex, PR #17 CHANGES REQUESTED @a5206d2)
+- Rebased onto =s8b-delivery= @a1fd23c (S8 must-fixes).
+- *MF1 — reviewed recipient (action-contract delta).* Entity-model trigger:
+  yes (Approval action contract). Delta: =Approval :approve= takes the
+  =recipient_email= the reviewer saw (=ci_string=, required); =BindApproval=
+  compares it ignoring case to the *locked* =Contact.email= before any
+  grant/outbox append; mismatch, missing, nil, blank → stale, nothing written
+  (no Approval, DeliveryOperation, job or grant event); =:reject= takes it
+  optionally and does not compare; the persisted snapshot stays
+  server-derived from the locked contact; revision/hash checks and auditor
+  denial unchanged; no column, migration, policy or lifecycle change.
+  *Soft-stop verdict: PASS* — Codex, =ap= consultation
+  =m_1791395301801790000_7391018e= (relayed by the coordinator), landing on
+  =s10-ui=. Recorded in the S2 Approval row. RED 84/89 (five approvals
+  granted that must be refused) → GREEN. The draft page renders the
+  displayed email into the approve form's hidden binding and also re-reads
+  the contact on submit for a clearer message (the domain check under lock
+  is authoritative). Fixture =approval_input/1= binds the email as seen when
+  built; the race tests use it.
+- *MF2 — stale socket actor.* =on_mount(:operator)= keeps the session token
+  and re-validates on every event and navigation (token verifies, stored,
+  not revoked; subject is an active user); the re-read user becomes the
+  actor. RED 1/4 → 4/4 (demotion refused as auditor and audited once;
+  disable and admin password reset redirect to sign-in before any domain
+  call).
+- *Important:* every (re)load fails closed (=loaded?= false, previous
+  content hidden, error flags reset on success); operator-safe error
+  messages only (RED 1 failure: a refusal tuple echoed internal detail).
+- *RED wording:* the original S10a RED (0/35) failed on missing routes and
+  =MatchError= — feature-absence, not assertion-level failures; with the
+  =tdd_verify.sh= parser defect it stays NEEDS_REVIEW. The review-round RED
+  commits above are assertion-level.
+- Deferred, non-blocking: NODE_PATH asset gap (tracked in #19).
+
 * Architecture evaluation
 - New endpoints (console routes) inside the existing web boundary; no new
   domain, resource, supervision or integration. =components.{md,mmd}=
