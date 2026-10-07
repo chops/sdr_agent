@@ -32,7 +32,9 @@ defmodule SdrAgent.Agents.Witness.ScanWorker do
   terminal transition, and the ADR-0004 cap of 200 reservations per UTC day
   normally keeps a 24-hour window well below 500 rows. A crash-recovery
   backlog (many old `sent` calls marked `unknown` at once) could exceed it;
-  rows beyond the first 500 then wait until earlier rows leave the window.
+  rows beyond the first 500 are then not considered, and may leave the
+  24-hour window unprocessed — an overflow limitation to resolve before
+  higher volume, not a guarantee of eventual processing.
   """
   use Oban.Worker, queue: :reconciliation, max_attempts: 1
 
