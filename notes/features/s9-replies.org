@@ -412,3 +412,40 @@ ash.codegen s9b_reply_assessments= (migration =20261007160142=; its
   =Demo.Replies.post/3= with =plug:=) → drain =integration= → drain
   =agent=; both demo replies (interested, unsubscribe) are covered by
   =test/sdr_agent/demo/replies_test.exs=.
+
+** S9b review round 1 (Codex, PR #16: CHANGES REQUESTED) — dispositions
+RED (assertion-level): 12/18 over the two S9b files — four forged or
+mismatched assessments were *written*, the demo helper followed a redirect
+and sent with seeding disabled.
+
+1. *MF1 — assessment not bound to the model's output: FIXED.*
+   =AssessmentRules= now requires the Decision to be the run's LLM
+   =reply_classification= about the Reply (resource and id) at pointer
+   =/classification=, and reads the cited ModelInvocation through the
+   Agents read policy as the acting agent, tenant-scoped (no SDR import):
+   same run, purpose =reply_classification=, schema
+   =sdr.reply_classification=, =completed= + =valid=, and its parsed output
+   must equal the Decision outcome and every model-derived assessment value
+   (classification, sentiment, intent, next action, confidence, reason).
+   Negative domain tests (all write no assessment and no suppression): a
+   forged =unsubscribe= Decision on the genuine call; the genuine Decision
+   with another classification, sentiment or confidence; a Decision citing
+   the lead's *qualification* call from the research run; a Decision about
+   another resource; another pointer. The genuine unsubscribe paths stay
+   green.
+2. *Important — demo redirect / env: FIXED.* =Demo.Replies= never follows
+   redirects (=redirect: false=; test: a local stand-in answering 302 to a
+   remote host is called once and the 302 returned) and refuses unless
+   =seeding_allowed?= (dev/test only) — =:demo_disabled=, nothing sent.
+3. *Important — worker crash leaves the run running: PARTLY FIXED,
+   remainder tracked for S13.* =ReplyWorker= catches exceptions and exits of
+   the run and records a =crash= failure; a crash of the terminal write
+   itself or of the VM still leaves the run =running= (same as
+   =AgentWorker=) — abandoned-run recovery and forced-crash evidence are
+   S13's worker-recovery work, not claimed here.
+4. *Important — inherited fixes: DONE* (S9a round 1 + rebase onto
+   =a1fd23c=).
+5. *Important — RED wording: ACCEPTED.* The original S9b RED (1/12) failed
+   on a missing route assertion and missing modules/resources (=ReplyWorker=
+   job, =ReplyAssessment=, =Demo.Replies=, the Mix task) — partly
+   setup-level; NEEDS_REVIEW stands. This round's RED is assertion-level.

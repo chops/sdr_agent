@@ -6,7 +6,10 @@ defmodule SdrAgent.SDR.ReplyWorker do
   (`SdrAgent.SDR.ReplyIntake`). Like `SdrAgent.SDR.AgentWorker`, agent work
   is never retried automatically (`max_attempts: 1`; ADR-0004): a run that
   stops (budget, invalid output) or crashes is terminal with its attention
-  Failure, and the run's terminal write happens once. A run that is no
+  Failure, and the run's terminal write happens once; an exception or exit
+  inside the run is caught and recorded as a `crash` failure. (A crash of
+  the terminal write itself, or of the VM, still leaves the run `running`:
+  abandoned-run recovery is S13's, as for `AgentWorker`.) A run that is no
   longer queued (already worked) is left alone. Integration jobs have no
   Operation row (S9 choice 12); the AgentRun is the operator record.
   """
@@ -27,13 +30,23 @@ defmodule SdrAgent.SDR.ReplyWorker do
     with {:ok, %{status: :queued} = run} <- Agents.get_run(run_id, actor: actor),
          {:ok, signal} <- Signals.load(dumped),
          {:ok, run} <- Agents.start_run(run, actor: actor) do
-      result = Runner.run(run, signal, model: model())
+      result = safe_run(run, signal)
       {:ok, :ok} = Audit.transaction(fn -> finish(result, run, actor) end)
       :ok
     else
       {:ok, _not_queued} -> :ok
       error -> error
     end
+  end
+
+  # An exception or exit inside the run becomes a failed run (crash), not a
+  # discarded job with the run left running.
+  defp safe_run(run, signal) do
+    Runner.run(run, signal, model: model())
+  rescue
+    exception -> {:error, exception}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   defp finish(result, run, actor) do

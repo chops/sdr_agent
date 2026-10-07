@@ -58,12 +58,16 @@ defmodule SdrAgent.Demo.Replies do
   @doc """
   Posts `request` to the webhook endpoint. Options: `:base_url` (default
   `http://127.0.0.1:4120`; only a local host is accepted) or `:plug` (an
-  in-process plug, e.g. the Endpoint in tests). Returns `{:ok, status}`.
+  in-process plug, e.g. the Endpoint in tests). Redirects are never
+  followed (the signed request cannot leave the local host). Refused with
+  `{:error, :demo_disabled}` unless `config :sdr_agent, seeding_allowed?:
+  true` (dev and test only). Returns `{:ok, status}`.
   """
   def send_request(%{path: path, body: body, headers: headers}, opts \\ []) do
     base_url = Keyword.get(opts, :base_url, "http://127.0.0.1:4120")
 
-    with :ok <- local!(base_url),
+    with :ok <- demo_allowed(),
+         :ok <- local!(base_url),
          {:ok, response} <-
            Req.post(
              [
@@ -71,6 +75,7 @@ defmodule SdrAgent.Demo.Replies do
                body: body,
                headers: headers,
                retry: false,
+               redirect: false,
                decode_body: false
              ] ++ Keyword.take(opts, [:plug])
            ) do
@@ -103,6 +108,13 @@ defmodule SdrAgent.Demo.Replies do
         {"x-sdr-signature", Signature.sign(key, timestamp, body)}
       ]
     }
+  end
+
+  # Dev/test only (the same switch as the demo seed).
+  defp demo_allowed do
+    if Application.get_env(:sdr_agent, :seeding_allowed?, false),
+      do: :ok,
+      else: {:error, :demo_disabled}
   end
 
   defp local!(base_url) do
