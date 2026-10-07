@@ -103,4 +103,10 @@ defmodule SdrAgent.OutreachFixtures do
 
     enrollment
   end
+
+  @doc "A record of `resource` reloaded by id (as ADM)."
+  def outreach!(ctx, %resource{id: id}) do
+    {:ok, record} = Outreach.fetch(resource, id, actor: ctx.admin)
+    record
+  end
 end

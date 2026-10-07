@@ -83,6 +83,58 @@ defmodule SdrAgent.Outreach.SuppressionTest do
     assert {:ok, %{valid?: true}} = SdrAgent.Audit.verify_chain(actor: ctx.aud)
   end
 
+  # Review #13 MF1: the dependent work of a lead that is already terminal is
+  # still stopped, invalidated and cancelled.
+  for {scope, key} <- [email: "01", domain: "02"] do
+    test "a #{scope} suppression cascades even when the lead was already stopped", ctx do
+      %{draft: draft, lead: lead} = drafted!(ctx, unquote(key))
+      approval = approve!(ctx, draft, operator!(ctx, :reviewer))
+
+      {:ok, stopped} =
+        Sales.update(lead, :stop, %{status_reason: "operator stop"}, actor: ctx.admin)
+
+      email = to_string(contact!(ctx, lead).email)
+
+      value =
+        if unquote(scope) == :email, do: email, else: email |> String.split("@") |> List.last()
+
+      assert {:ok, _} =
+               Outreach.suppress(%{scope: unquote(scope), value: value}, actor: ctx.admin)
+
+      assert %{status: :stopped, status_reason: "operator stop"} = reload!(ctx, stopped)
+      assert %{status: :stopped, stop_reason: :suppressed} = enrollment!(ctx, lead)
+      assert %{status: :cancelled} = draft!(ctx, draft)
+      assert %{status: :invalidated} = outreach!(ctx, approval)
+    end
+  end
+
+  test "a failing side effect rolls the whole suppression back", ctx do
+    %{draft: draft, lead: lead} = drafted!(ctx)
+    approval = approve!(ctx, draft, operator!(ctx, :reviewer))
+    email = to_string(contact!(ctx, lead).email)
+
+    Ecto.Adapters.SQL.query!(Repo, """
+    CREATE FUNCTION test_refuse_cancel() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'refused by test'; END; $$
+    """)
+
+    Ecto.Adapters.SQL.query!(
+      Repo,
+      "CREATE TRIGGER test_refuse_cancel BEFORE UPDATE ON drafts FOR EACH ROW " <>
+        "WHEN (NEW.status = 'cancelled') EXECUTE FUNCTION test_refuse_cancel()"
+    )
+
+    before = length(events(ctx.tenant))
+    assert {:error, _} = Outreach.suppress(%{scope: :email, value: email}, actor: ctx.admin)
+
+    assert {:ok, []} = Outreach.matching_suppressions(email, actor: ctx.admin)
+    assert reload!(ctx, lead).status == :in_outreach
+    assert enrollment!(ctx, lead).status == :active
+    assert draft!(ctx, draft).status == :queued
+    assert outreach!(ctx, approval).status == :granted
+    assert length(events(ctx.tenant)) == before
+  end
+
   test "a domain suppression covers every contact of the domain", ctx do
     %{draft: draft, lead: lead} = drafted!(ctx)
 
