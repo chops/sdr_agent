@@ -49,6 +49,8 @@ defmodule SdrAgent.Outreach.ReconciliationTest do
     done = outreach!(ctx, op)
     assert {done.state, done.attempt_count} == {:accepted, 2}
     assert length(captured(ctx, op)) == 1
+    # Every attempt renders the same bytes.
+    assert done.rendered_sha256 == failed.rendered_sha256
 
     {:ok, [day]} = Outreach.list_records(Outreach.SendQuotaDay, actor: ctx.admin)
     assert day.consumed == 1
