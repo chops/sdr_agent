@@ -57,6 +57,15 @@ flowchart LR
         SupCheck[SuppressionCheck.Store<br/>reads Outreach suppressions]
     end
 
+    subgraph Delivery["Outbox delivery (S8b, local capture only)"]
+        Grant[Approval grant<br/>+ DeliveryOperation + delivery job, one txn]
+        Gate[DeliveryWorker: send_gate Decision<br/>quiet hours, 25/day quota, suppression, binding]
+        Capture[CaptureAdapter<br/>captured receipt, idempotent on key]
+        Outcome[accepted / retryable / permanent / unknown<br/>receipts, draft sent, advance_step]
+        Reconcile[ReconcileWorker + StaleDeliverySweeper<br/>delivery_reconciliation, never blind resend]
+        Followup[FollowupWorker at next_step_due_at<br/>followup_next_step + sdr.followup.due]
+    end
+
     subgraph AI["Structured Model Boundary"]
         Provider[ModelProvider facade]
         Budget[persisted 20/run + 200/UTC day<br/>inside the reservation transaction]
@@ -107,6 +116,17 @@ flowchart LR
     Provider --> Adapter
     Adapter --> Claude
     Resources -.-> Cache
+    LiveViews -.-> Grant
+    Grant --> Postgres
+    Postgres -- delivery job --> Gate
+    Gate --> Capture
+    Capture --> Outcome
+    Outcome -- unknown --> Reconcile
+    Reconcile --> Capture
+    Outcome -- followup job --> Followup
+    Gate -- same transaction --> Append
+    Outcome -- same transaction --> Append
+    Followup -- signal event --> Append
 
     %% Project shape: single
     %% Detected data layers:

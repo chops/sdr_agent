@@ -114,6 +114,8 @@ repository.
 
 ### Neutral
 
-- Campaign time zone names are still validated by shape (S5). A name that
-  does not resolve fails the delivery gate with a recorded Decision instead of
-  sending. Strict validation can use `Tz.TimeZoneDatabase` later.
+- S5 validated campaign and contact time zones by shape only, and left the
+  tightening to the slice that adds a database. S8b now requires the zone to
+  exist (`SdrAgent.Sales.Validations.Timezone` calls
+  `LocalTime.valid_zone?/1`), so no stored zone can fail to resolve at send
+  time.

@@ -105,7 +105,7 @@ relationships or lifecycles* beyond the S2 rows; they are not repeated here.
      <> body=; carried-forward citations are the parent's whose text is still
      verbatim in the new body, dropped ones are listed at the end of
      =diff_from_parent=.
- (S8b choices are recorded in the S8b section below when it is planned.)
+ (S8b choices 19–33 are recorded under "S8b findings and choices" below.)
 
 * Affected Apps
 - [X] Core (=sdr_agent=)
@@ -306,6 +306,108 @@ Lock order after this round (S8a): Lead → Enrollment → Draft → Approval
 (suppression); Lead → Campaign → Contact → AgentRun (hand-off); Draft →
 Approval (grant/revoke); every row lock before the first append.
 
+** S8b GREEN
+=MIX_TEST_PARTITION=_s8 bin/verify= → *438 passed, 4 excluded* (398 after
+S8a + 40 new; one S5 assertion changed by contract: the enrollment transition
+table gains ={:complete, [:active], :completed}=, which S5 assigned to S8).
+=mix ash.codegen --check= clean after =mix ash.codegen s8b_delivery=,
+=mix credo= no issues, =mix hex.audit= no advisories (with =tz= 0.28.4),
+gitleaks 8.30.1 over =origin/main..HEAD=: no leaks. The real-connection race
+suite (=delivery_race_test.exs=) passed 5 of 5 consecutive runs.
+
+** S8b findings and choices (flagged for review)
+ 19. *Time zone database (ADR-0011, proposed).* =tz= 0.28.4 (Apache-2.0, IANA
+     2026d compiled in, no network, no new transitive package). All local-time
+     math is in =SdrAgent.Sales.LocalTime=; a DST gap resolves to the first
+     instant after it, a fold to the earlier instant. The S5 zone validation
+     now requires the zone to exist (S5 choice 14 deferred this to S8).
+ 20. *Outbox at the grant.* =Approval :approve= inserts the pending
+     DeliveryOperation (=idempotency_key= ="delivery:" <> approval_id=, the
+     binding copied from the approval) and its =delivery= job in the grant's
+     transaction.
+ 21. *One gate Decision per evaluation.* =send_gate= (deterministic,
+     =outreach.send_gate/1=) records every input (approval status, the three
+     hashes, bound vs current email, contact status, matching suppression ids,
+     enrollment/campaign status, footer version, zone, local time, quiet
+     window, attempt) and outcome =pass=, =defer_quiet_hours=, =defer_quota=
+     or =refuse= (+ reason). The first claim also records =quota_check=
+     (=reserved= / =exhausted=). Decision keys are per evaluation (UUIDv7
+     suffix); the claim itself is idempotent by state under the row lock.
+ 22. *Refusal → cancel.* A refusal cancels the delivery (=last_error.reason=),
+     invalidates a still-granted approval (=content_mismatch= →
+     =newer_revision=, recipient changed/archived → =recipient_changed=,
+     =suppressed=, anything else — enrollment or campaign not active, unknown
+     footer — → =campaign_closed=, the closest S2 reason) and cancels the
+     draft. A *paused* campaign also cancels (S2: "gate fails otherwise →
+     cancelled"); re-approval is the path after a resume.
+ 23. *Lock order (ADR-0009 "every row lock before the first append").*
+     Enrollment → draft → delivery → approval → quota day → chain head, in
+     every writer: the claim (draft, delivery, approval, quota day), the
+     outcome and reconciliation steps (enrollment, draft, delivery), the
+     revoke (=LockDraftFirst=, =CancelPendingDelivery=: draft → delivery →
+     approval), =cancel_retry= (draft → delivery) and the suppression side
+     effects (leads → enrollments → *all* open drafts of those leads in one
+     locked query → their unclaimed deliveries → granted approvals). Found
+     while building S8b: S8a's revoke locked the draft after its first append
+     (fixed on the S8a branch, =bdc94f6=); a suppression that read drafts in
+     review before waiting on a draft lock could miss a draft a concurrent
+     revoke had just returned to review (fixed: one locked query, judged on
+     the locked rows). Both are covered by real-connection races.
+ 24. *Capture adapter, not configurable.* =Delivery.adapter/0= always returns
+     =CaptureAdapter=; there is no adapter config key. The adapter's
+     =captured= receipt is its own durable record (written in its own
+     transaction, as a provider would), which =lookup/2= reads for
+     reconciliation; the provider message id is derived from the idempotency
+     key, so a repeated delivery returns the same id and stores nothing. The
+     only test seam (=:capture_faults=, test-only) can make a capture fail,
+     time out or crash, never reach anything. =config/prod.exs= no longer sets
+     a Swoosh HTTP API client (=api_client: false=); a test reads the
+     dev/test/prod configs and asserts no external adapter or client in any.
+ 25. *Unknown, crash, reconciliation.* An adapter timeout → =unknown= +
+     =reconciliation_required= Failure + a =reconciliation= job. A crash
+     after the hand-off leaves the claim =attempting=; the
+     =StaleDeliverySweeper= cron (every minute) marks claims older than 300 s
+     =unknown=. Reconciliation (REC, =delivery_reconciliation= Decision): a
+     =captured= receipt → =accepted= (receipt =reconciled=, Failure resolved,
+     draft sent, enrollment advanced); none → =failed_retryable= (Failure
+     resolved, retry) or, at max attempts, =failed_permanent= keeping the
+     reconciliation Failure as the attention item (S7 choice 2: one Failure
+     per condition).
+ 26. *Retries.* =max_attempts= 3; backoff 60 s · 2^(attempt−1); the gate
+     re-runs on every retry except the quota (the first claim's unit and date
+     stand); the third retryable failure is permanent. =failed_retryable →
+     failed_permanent= is reached through a new attempt, not directly.
+ 27. *Message.* Deterministic RFC 5322 bytes (=Delivery.Message=, CRLF,
+     fixed header order, =Date= = claim instant, =Message-ID= from the key,
+     =List-Unsubscribe= + one-click, footer =footer/1=), stored as a Payload
+     (=message/rfc822=) whose sha256 is on the operation and every receipt.
+     Header values are folded to one line (no header injection; tested).
+ 28. *Unsubscribe token.* =HMAC-SHA256(HMAC-SHA256(secret_key_base,
+     "sdr-unsubscribe-key/1"), "sdr-unsubscribe/1|tenant|contact")=,
+     base64url, under the reserved host =sdr.example.test=;
+     =Unsubscribe.verify/3= for S9.
+ 29. *Enrollment advancement.* =Sales.advance_enrollment/3= (DLV, REC, SCH)
+     picks =:advance_step= (position forward only; next due = accepted_at +
+     next step's =delay_days= local days in the campaign zone) or =:complete=
+     (last step → completed). An enrollment no longer active when the
+     acceptance is recorded (e.g. suppressed meanwhile) is left as it is.
+ 30. *Follow-up schedule.* The acceptance inserts one =followup= job at
+     =next_step_due_at= (named by string — Outreach never depends on the
+     agent plane at compile time). =SdrAgent.SDR.FollowupWorker= (SCH)
+     records a deterministic =followup_next_step= Decision (=draft_followup=
+     / =stop=, key per enrollment and step) and emits =sdr.followup.due=.
+     *Deferred to S9:* the agent route that drafts the follow-up (S7 notes
+     assign routes for the declared S9 signals there).
+ 31. *Reads granted.* DLV, REC and SCH read Lead, Contact, Campaign,
+     CampaignEnrollment and SequenceStep (S5 obligation).
+ 32. *Operation rows.* Delivery, reconciliation and follow-up jobs do not
+     create =Operations.Operation= rows; the DeliveryOperation is the
+     operator-visible outbox record and its attention Failures carry the
+     subject. Wiring Operation wrappers for these queues is left to S13 with
+     the other job-level crash recovery.
+ 33. *Queues.* =delivery: 5, reconciliation: 5, followup: 10= (spec §13
+     illustrative values); the sweeper runs on =reconciliation=.
+
 ** What S8b, S9 and S10 must know (S8a)
 - *S8b:* the grant (=Outreach.approve/3=) is where the DeliveryOperation and
   its Oban job are inserted (outbox); =:revoke= must first cancel a pending
@@ -326,3 +428,27 @@ Approval (grant/revoke); every row lock before the first append.
   email under a lock); =revoke/2=; citations per revision
   (=RevisionCitation= → =EvidenceClaim=) are the "click a sentence → see
   evidence" links; =diff_from_ai_baseline= is the AI-vs-human diff.
+
+** What S9, S10 and S13 must know (S8b)
+- *S9:* =DeliveryOperation :mark_delivered= / =:mark_bounced= (WHK) exist
+  and are unwired; a bounce opens a =delivery_failed= Failure and should
+  create a =hard_bounce= Suppression (its =delivery_operation_id= FK exists).
+  A matched reply must cancel the enrollment's =pending= / =failed_retryable=
+  deliveries and =pending_review= drafts (use =ApplySuppression='s lock
+  order; =DeliveryOperation :cancel= and =Draft :cancel= take the
+  =InternalWrite= marker). The unsubscribe link token is
+  =Outreach.Unsubscribe.verify/3=. Add the agent route for
+  =sdr.followup.due= (the FollowupWorker already decides and emits it) and
+  bump the SDRAgent definition version.
+- *S10:* delivery state, =last_error=, =last_decision_id= and the timestamps
+  are on =DeliveryOperation=; receipts and the exact message
+  (=rendered_sha256= → =Audit.read_content/2=) per delivery; =cancel_retry/2=
+  for retryable ones; =Operations.list_attention/1= shows
+  =reconciliation_required= and =delivery_failed= Failures (subject the
+  delivery).
+- *S13:* golden path = approve → =Oban.drain_queue(queue: :delivery)= →
+  =accepted=; Oban restart/idempotency: a re-run job is a no-op by state; a
+  crash after capture is recovered by the sweeper + reconciliation without a
+  second capture (tested). Operation wrappers for the S8 queues (choice 32)
+  are open.
+

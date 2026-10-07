@@ -15,7 +15,7 @@ graph TB
         ModelProvider[ModelProvider facade<br/>budget + Zoi validation]
         ClaudeCLIAdapter[ClaudeCLI adapter<br/>serialized, tool-free GenServer]
         Telemetry[Telemetry setup, GenAI and agent spans]
-        Oban[Oban: cron, queues default + research]
+        Oban[Oban: cron, queues default, research,<br/>delivery 5, reconciliation 5, followup 10]
         Cadence[Anchor cadence worker]
         UpgradeDispatch[OTS upgrade dispatcher<br/>10-minute bounded batch]
         UpgradeJobs[Per-anchor receipt jobs<br/>unique, 3 attempts]
@@ -24,6 +24,7 @@ graph TB
 
     subgraph AgentPlane["Agent plane"]
         AgentWorker[SDR AgentWorker]
+        FollowupWorker[SDR FollowupWorker<br/>followup_next_step + sdr.followup.due]
         SDRAgent[SDRAgent Jido agent<br/>routes -> Actions / Flows]
         Integrations[Fixture CRM / search / web adapters]
     end
@@ -43,7 +44,7 @@ graph TB
 
     subgraph Ash["Ash Framework"]
         Domains["Domains (7)"]
-        Resources["Resources (54)"]
+        Resources["Resources (57)"]
     end
 
     subgraph External["Local External Process"]
@@ -71,6 +72,11 @@ graph TB
     ModelProvider -. spans .-> Telemetry
     ClaudeCLIAdapter --> Claude
     Oban --> AgentWorker
+    Oban --> FollowupWorker
+    FollowupWorker --> Domains
+    Oban --> DeliveryJobs[Outreach DeliveryWorker / ReconcileWorker /<br/>StaleDeliverySweeper -> Delivery gate]
+    DeliveryJobs --> Domains
+    DeliveryJobs --> Capture[CaptureAdapter<br/>local capture only, no network]
     AgentWorker --> SDRAgent
     SDRAgent --> ModelProvider
     SDRAgent --> Integrations
@@ -97,7 +103,7 @@ graph TB
 | Channels | 1 |
 | UI Components | 2 |
 | Ash Domains | 7 |
-| Ash Resources | 54 |
+| Ash Resources | 57 |
 
 ## Manual Additions Needed
 
