@@ -86,6 +86,8 @@ defmodule SdrAgentWeb do
       import Phoenix.HTML
       # Core UI components
       import SdrAgentWeb.CoreComponents
+      # Operator console components (S10)
+      import SdrAgentWeb.UI
 
       # Common modules used in templates
       alias Phoenix.LiveView.JS

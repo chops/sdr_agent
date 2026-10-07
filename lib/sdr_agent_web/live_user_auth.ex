@@ -29,6 +29,18 @@ defmodule SdrAgentWeb.LiveUserAuth do
     end
   end
 
+  # The operator console: a signed-in user is required and becomes the
+  # `current_scope` (`SdrAgentWeb.Scope`) every domain call takes its actor from.
+  def on_mount(:operator, _params, _session, socket) do
+    case socket.assigns[:current_user] do
+      %SdrAgent.Accounts.User{} = user ->
+        {:cont, assign(socket, :current_scope, SdrAgentWeb.Scope.for_user(user))}
+
+      _ ->
+        {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/sign-in")}
+    end
+  end
+
   def on_mount(:live_no_user, _params, _session, socket) do
     if socket.assigns[:current_user] do
       {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/")}
