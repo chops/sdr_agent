@@ -13,11 +13,12 @@ defmodule SdrAgentWeb.GoldenPathTest do
        revision id, content hash and the recipient email *displayed*;
     5. the delivery job runs → local capture → `accepted`, captured receipt,
        the exact message readable through the audited payload path;
-    6. **(S9 slot)** signed simulated replies (interested, unsubscribe) —
-       added in `replies/2` when this branch carries S9a (main `b26be34`):
-       `WebhookFixtures.reply_body/3` + `signed_headers/2` POSTed to the
-       webhook, `Oban.drain_queue(queue: :integration)`, then suppression and
-       follow-up cancellation asserted;
+    6. signed simulated replies through the webhook endpoint, as
+       `mix sdr.demo.reply` sends them (`SdrAgent.Demo.Replies`): an
+       *interested* reply to lead 01 is matched, classified and lands in the
+       hand-off queue; a second lead (02) is drafted, approved by a human
+       and captured, and its *unsubscribe* reply suppresses the recipient
+       and stops the lead (S9);
     7. the audit trail holds every step in causal order and the chain
        verifies.
 
@@ -26,7 +27,10 @@ defmodule SdrAgentWeb.GoldenPathTest do
   """
   use SdrAgentWeb.OperatorCase, async: false
 
+  import SdrAgent.WebhookFixtures, only: [process!: 0, replies!: 1, suppressions!: 1]
+
   alias SdrAgent.Audit
+  alias SdrAgent.Demo.Replies
   alias SdrAgent.Outreach
 
   @golden_events [
@@ -90,8 +94,8 @@ defmodule SdrAgentWeb.GoldenPathTest do
     assert message =~ to_string(contact.email)
     assert message =~ "List-Unsubscribe"
 
-    # 6. S9 slot: signed simulated replies (see the moduledoc).
-    :ok = replies(ctx, delivery)
+    # 6. Signed simulated replies: interested (lead 01), unsubscribe (lead 02).
+    :ok = replies(ctx, lead, delivery)
 
     # 7. Every golden-path step is in the ledger, in causal order; it verifies.
     types = ctx.tenant |> events() |> Enum.map(& &1.event_type)
@@ -99,10 +103,37 @@ defmodule SdrAgentWeb.GoldenPathTest do
     assert {:ok, %{valid?: true, issues: []}} = Audit.verify_chain(actor: ctx.aud)
   end
 
-  # Added with S9a on this branch: signed interested + unsubscribe replies,
-  # dedupe, suppression and follow-up cancellation. Until then the golden
-  # path ends at capture (S13 part-2 TODO in notes/features/s13-acceptance.org).
-  defp replies(_ctx, _delivery), do: :ok
+  defp replies(ctx, lead, delivery) do
+    assert {:ok, 202} = Replies.post(:interested, delivery, plug: SdrAgentWeb.Endpoint)
+    assert %{success: 1} = process!()
+    assert %{success: 1} = Oban.drain_queue(queue: :agent, with_safety: false)
+
+    assert [%{match_status: :matched, lead_id: lead_id}] = replies!(ctx)
+    assert lead_id == lead.id
+
+    assert {:ok, [%{assessment: %{classification: :interested}}]} =
+             Outreach.list_handoff_queue(actor: ctx.admin)
+
+    # A second lead, approved by a human reviewer and captured, unsubscribes.
+    %{run: _} = assign!(ctx, "02")
+    assert %{success: 1} = drain!()
+    second = fixture_lead!(ctx, "02")
+
+    {:ok, [draft]} =
+      Outreach.list_records(Outreach.Draft, filter: [lead_id: second.id], actor: ctx.admin)
+
+    approval = approve!(ctx, draft, user!(ctx, :reviewer))
+    deliver!()
+    unsubscribed = delivery_of!(ctx, approval)
+    assert unsubscribed.state == :accepted
+
+    assert {:ok, 202} = Replies.post(:unsubscribe, unsubscribed, plug: SdrAgentWeb.Endpoint)
+    assert %{success: 1} = process!()
+
+    assert [_] = Enum.filter(suppressions!(ctx), &(&1.reason == :unsubscribe_reply))
+    assert fixture_lead!(ctx, "02").status == :stopped
+    :ok
+  end
 
   defp subsequence?([], _list), do: true
   defp subsequence?(_wanted, []), do: false

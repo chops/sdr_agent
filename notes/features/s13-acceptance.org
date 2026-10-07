@@ -215,8 +215,10 @@ The round-1 fixes and the predeliver ruling were accepted.
 3. *Important (b):* the research drain covers the whole queue (Oban cannot
    drain one job). This is documented as an explicit operational limitation
    in the module and task docs; delivery and follow-ups are never drained.
-4. *Stack (pending):* carry #17's guarded-approve fix on the next rebase,
-   and update the stale-recipient assertion to the domain's refusal wording.
+4. *Stack:* rebased onto main =b71d2bd= (S8, S9, S10a/b, S12b merged;
+   only the S13 commits replayed with =--onto=). The stale-recipient
+   assertion now uses the domain's refusal wording ("does not match the
+   current recipient"), which comes from #17's guarded approve.
 
 * Risks & Considerations
 - *Quiet hours at the meetup.* The campaign fixture's quiet hours are 18:00
@@ -261,9 +263,14 @@ The round-1 fixes and the predeliver ruling were accepted.
   =bin/demo predeliver --approve= is refused as an unknown argument.
 
 * S13 part 2 — TODO (after S9 and S12 merge)
-- [ ] Golden path: add the S9 replies to =replies/2=, and the
-      invalid-signature rejection (checklist 4.3; S9a's controller test
-      covers it today).
+- [X] Golden path: S9 replies in =replies/3= (rebased onto main =b71d2bd=).
+      Signed through =SdrAgent.Demo.Replies= (the =mix sdr.demo.reply=
+      helper). An interested reply to lead 01 is matched, classified and in
+      the hand-off queue. Lead 02 is human-approved and captured, then its
+      unsubscribe reply suppresses (=unsubscribe_reply=) and stops it. A
+      mutation check fails the test (0/1).
+- [ ] Invalid-signature rejection in the golden path (checklist 4.3; S9a's
+      =webhook_controller_test.exs= covers it today).
 - [ ] Browser smoke of the golden path on a disposable database (needs a
       dev-like server not bound to =sdr_agent_dev=, or an owner run).
 - [ ] Postgres-only reconstruction: with Jido stopped and Tempo

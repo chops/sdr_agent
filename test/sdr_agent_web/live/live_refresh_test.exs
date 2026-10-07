@@ -127,7 +127,7 @@ defmodule SdrAgentWeb.LiveRefreshTest do
 
       view |> form("#approve-form") |> render_submit()
 
-      assert has_element?(view, "#review-error", "recipient changed")
+      assert has_element?(view, "#review-error", "does not match the current recipient")
       assert approvals!(ctx, ctx.draft) == []
       assert has_element?(view, "#binding-recipient", moved)
     end

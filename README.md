@@ -115,9 +115,11 @@ be scripted.
    open payloads (`/audit/payloads/:sha256`). Every auditor view is itself
    recorded as an AuditAccess.
 
-Replies (one interested, one unsubscribe) are simulated by signed webhooks.
-That arrives with the S9 slice and is not part of this runbook yet. See
-`notes/features/s13-acceptance.org`.
+Replies are simulated by signed, deduplicated webhooks. After a lead's email
+is captured, `mix sdr.demo.reply` (S9) posts a reply for it to the running server's
+webhook, for example `mix sdr.demo.reply --lead 01 --kind interested` or
+`--kind unsubscribe`. An interested reply lands in the hand-off queue, and an
+unsubscribe suppresses the recipient and stops the lead.
 
 ### Audit verification and export
 
