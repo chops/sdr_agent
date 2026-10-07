@@ -126,19 +126,20 @@ defmodule SdrAgent.Agents.Witness do
     Guard.run(meta, actor, fn ->
       with :ok <- authorize(actor),
            {:ok, methods} <- methods(opts),
-           {:ok, hook} <- test_hook(opts) do
+           {:ok, hook} <- test_hook(opts),
+           {:ok, tamper} <- tamper_hook(opts) do
         root = Keyword.get(opts, :store_root, store_root())
-        do_reconcile(invocation_id, root, methods, actor, hook)
+        do_reconcile(invocation_id, root, methods, actor, {hook, tamper})
       end
     end)
   end
 
   defp do_reconcile(_invocation_id, nil, _methods, _actor, _hook), do: {:ok, %{status: :skipped}}
 
-  defp do_reconcile(invocation_id, root, methods, actor, hook) do
+  defp do_reconcile(invocation_id, root, methods, actor, {hook, tamper}) do
     with {:ok, invocation} <- GuardedCall.get(ModelInvocation, invocation_id, actor: actor),
          :ok <- eligible(invocation),
-         {:ok, observation} <- observe(invocation, root, actor, hook) do
+         {:ok, observation} <- observe(invocation, root, actor, hook, tamper) do
       persist(invocation, observation, methods, actor)
     else
       :skip -> {:ok, %{status: :skipped}}
@@ -169,6 +170,21 @@ defmodule SdrAgent.Agents.Witness do
     end
   end
 
+  # Test-only seam rewriting the derived v2 context group before it is
+  # validated (contract-failure tests); refused unless test overrides are on.
+  defp tamper_hook(opts) do
+    case Keyword.fetch(opts, :evidence_tamper) do
+      :error ->
+        {:ok, & &1}
+
+      {:ok, fun} when is_function(fun, 1) ->
+        if overrides?(), do: {:ok, fun}, else: {:error, :method_override_forbidden}
+
+      {:ok, _other} ->
+        {:error, :invalid_option}
+    end
+  end
+
   defp overrides?, do: Keyword.get(config(), :allow_method_override, false)
 
   defp methods(opts) do
@@ -188,7 +204,7 @@ defmodule SdrAgent.Agents.Witness do
   # The observation identity (record metadata plus the metadata of every raw
   # blob the records name) is captured before any content is read, and is
   # re-checked under the invocation lock (`fresh/2`).
-  defp observe(invocation, root, actor, hook) do
+  defp observe(invocation, root, actor, hook, tamper) do
     records = Store.fingerprint(root, invocation.id)
 
     result =
@@ -197,7 +213,7 @@ defmodule SdrAgent.Agents.Witness do
           digests = blob_digests(exchanges)
           blobs = blob_identities(root, digests)
 
-          with {:ok, observation} <- evaluate(invocation, root, exchanges, actor),
+          with {:ok, observation} <- evaluate(invocation, root, exchanges, actor, tamper),
                do: {:ok, Map.merge(observation, %{digests: digests, blobs: blobs})}
 
         {:error, reason} ->
@@ -221,7 +237,7 @@ defmodule SdrAgent.Agents.Witness do
 
   defp blob_identities(root, digests), do: Enum.map(digests, &Store.blob_identity(root, &1))
 
-  defp evaluate(invocation, root, exchanges, actor) do
+  defp evaluate(invocation, root, exchanges, actor, tamper) do
     primaries =
       Enum.filter(exchanges, &(&1.state == :terminal and &1.record["route"] == @messages))
 
@@ -231,7 +247,7 @@ defmodule SdrAgent.Agents.Witness do
       evaluated =
         Enum.map(exchanges, fn exchange ->
           exchange
-          |> classify(length(primaries), invocation, root, app)
+          |> classify(length(primaries), invocation, root, {app, tamper})
           |> Map.merge(%{exchange: exchange, inventory: inventory})
         end)
 
@@ -277,20 +293,49 @@ defmodule SdrAgent.Agents.Witness do
        when primaries > 1,
        do: result(:inferred, "ambiguous", ["multiple_primary_exchanges"], warn: true)
 
-  defp classify(%{record: %{"route" => @messages} = record}, 1, invocation, root, app),
-    do: primary(record, invocation, root, app)
+  defp classify(%{record: %{"route" => @messages} = record}, 1, invocation, root, {app, tamper}),
+    do: primary(record, invocation, root, app, tamper)
 
   defp classify(_exchange, _primaries, _invocation, _root, _app),
     do: result(:inferred, "unclassified", ["unclassified_exchange"], warn: true)
 
-  defp primary(record, invocation, root, app) do
+  defp primary(record, invocation, root, app, tamper) do
     with nil <- gate(record),
          {:ok, request} <- Store.blob(root, record["request_sha256"]),
          {:ok, response} <- Store.blob(root, record["response_sha256"]) do
-      project(Projection.compare(invocation, app, request, response))
+      v2(invocation, app, {request, response}, tamper)
     else
       reason when is_binary(reason) -> result(:inferred, "primary", [reason], warn: true)
       {:error, reason} -> result(:inferred, "primary", [blob_reason(reason)], warn: true)
+    end
+  end
+
+  # v2 (the observed CLI request shape) first; a request outside its grammar
+  # falls back to v1. The v2 context group is validated as a whole: a
+  # contract failure is a conservative fallback without any projection (so it
+  # never corrects a mismatch), never a proof with dropped fields.
+  defp v2(invocation, app, {request, response}, tamper) do
+    case Projection.compare_v2(invocation, app, request, response) do
+      {:unsupported, _proof} ->
+        project(Projection.compare(invocation, app, request, response))
+
+      {verdict, proof} ->
+        extras = tamper.(proof.extras)
+
+        case WitnessEvidence.validate(extras || %{}) do
+          {:ok, extras} when extras != %{} ->
+            evaluated = project({verdict, proof})
+
+            %{
+              evaluated
+              | projection: Projection.version_v2(),
+                extras: extras,
+                reasons: Enum.uniq(evaluated.reasons ++ proof.reasons)
+            }
+
+          _invalid ->
+            result(:inferred, "primary", ["evidence_contract_invalid"], warn: true)
+        end
     end
   end
 
@@ -340,7 +385,8 @@ defmodule SdrAgent.Agents.Witness do
       reasons: reasons,
       warnings: if(Keyword.get(opts, :warn, false), do: reasons, else: []),
       digests: %{},
-      projection: nil
+      projection: nil,
+      extras: nil
     }
   end
 
@@ -537,12 +583,14 @@ defmodule SdrAgent.Agents.Witness do
       }
       |> Map.merge(evaluated.digests)
 
-    # Untrusted proxy metadata: keep only values the allowlist accepts.
+    # Untrusted proxy metadata: keep only values the allowlist accepts. The
+    # v2 context group was validated as a whole and is merged unfiltered.
     candidate
     |> Enum.filter(fn {key, value} ->
       not is_nil(value) and match?({:ok, _}, WitnessEvidence.validate(%{key => value}))
     end)
     |> Map.new()
+    |> Map.merge(evaluated.extras || %{})
   end
 
   ## Attention (same transaction)
