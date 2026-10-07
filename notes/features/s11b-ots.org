@@ -1,0 +1,104 @@
+#+TITLE: S11b — enabled OpenTimestamps and durable proof upgrades
+#+DATE: 2026-10-06
+
+* Scope and Approval
+Complete PR #8 follow-up: Git+OTS in dev/prod, offline override, scheduled
+proof upgrades, counting-sink idle regression, FileSink identical replay.
+Plan APPROVED by Claude under ADR-0001 charter, reply
+=01a114a4-e5a3-71bd-93a0-647c4fb3541c= to
+=m_1791347682635759083_f9379291=. Proceed to RED only; GREEN requires the TDD
+checkpoint. The first S5 re-review is posted at
+=https://github.com/chops/sdr_agent/pull/9#issuecomment-6030949380=; new S5
+revisions take priority.
+
+* Entity Model
+Entity Model trigger: no — existing AuditAnchor/AnchorSinkReceipt actions,
+policies and immutable lifecycle; no schema, ownership or domain changes.
+Independent reviewer Claude agrees in the plan approval above.
+
+* Implementation Steps
+1. RED tests for runtime sink config and explicit offline overrides; keep
+   test config empty. Invalid override must fail clearly, not enable a sink.
+2. RED tests for OTS executable version/missing checks, expected version
+   0.7.2, separate executable only, no private signing key in child env.
+3. RED tests for a 10-minute scheduler and per-anchor/pending-receipt unique
+   upgrade jobs: bounded batches, retries/backoff, confirmed no-op, exactly
+   one confirmed receipt on replay, incomplete proof pending with no new
+   receipt, real error surfaced/audited. Fake calendar, no network.
+4. RED tests for publication retries skipping pending OTS, counting-failed-
+   sink idle behavior (must fail if interval anchoring is reverted), and
+   FileSink identical statement replay. The last two already work in S11:
+   they are regression coverage, not claimed missing behavior.
+5. Obtain correlated TDD verification; then implement the smallest change.
+   Declare =pkgs.opentimestamps-client= in devenv using unchanged flake.lock
+   nixpkgs, expected CLI version 0.7.2, and amend ADR-0005 tool provenance.
+6. Focused tests, codegen check, precommit/full gate, configured Credo,
+   blocking Hex audit; rebase if main advances; PR + green CI + peer verdict.
+
+* Tool Provenance / ADR
+No new competing ADR: amend accepted ADR-0005 with the approved runtime
+tool declaration. No new Hex dependency or flake lock change. The Nix
+package is opentimestamps-client 0.7.2 from nixpkgs revision
+=e8be7818e19ada32105a8af937a6a473b38167ca= (metadata LGPL-3.0-only; upstream
+license LGPL-3.0-or-later). It is executed through System.cmd, never linked
+or vendored into the Apache-2.0 application. Runtime checks reject a missing
+or differing version. Public hashes/proofs only are sent; strip the private
+signing-key variable from the child environment.
+
+* Required Tests
+- [ ] Dev/prod default Git+OTS; test remains empty; explicit none/file
+  overrides and invalid values.
+- [ ] Missing/differing CLI version fail closed; matching version binds the
+  proof digest, and child environment excludes the signing key.
+- [ ] Scheduler only enqueues unresolved anchors, within the batch bound;
+  repeat dispatch keeps the same per-anchor/receipt job.
+- [ ] Confirmed proof append, replay no-op, incomplete pending/no receipt,
+  failure surfaced with a failed sink receipt; no private key is required
+  to upgrade public proofs.
+- [ ] Publication retry reuses existing pending OTS, no new receipt or call.
+- [ ] Counting-failed-sink proves idle intervals do not republish.
+- [ ] FileSink identical replay succeeds; different bytes refuse.
+
+* Tracked Deferrals
+Optional retired-key offline semantics and bundle-signing-key revocation
+semantics need a separate explicit design; their assurance contracts are not
+changed here. S7 owns the operator-attention Failure/Operation integration;
+S11b preserves failed sink evidence and Oban failure state until that seam
+is connected. Runtime sink failures must not crash application boot.
+
+* Architecture Evaluation
+No new domain/resource/ownership/supervision boundary. The existing OTS
+integration gains its approved periodic execution within Audit. Evaluate
+the maintained runtime diagrams after GREEN; record any conditional edge.
+
+* TDD Tracking
+RED (2026-10-06, =MIX_TEST_PARTITION=_s11b mix test=, four touched/new audit
+modules): *17/29 passed, 12 failed, 2 external excluded*. All failures are
+assertions for the intended missing behavior; no setup, compile or runtime
+errors. Existing regression cases remain green.
+
+| Group | Missing-behavior failures |
+|-------+--------------------------|
+| Dev/prod Git+OTS, offline overrides, cron registration | 4 |
+| Executable missing/version mismatch, secret-free child env | 3 |
+| Upgrade worker happy/replay, pending, failed evidence, bounded unique batch | 4 |
+| Pending OTS publication retry | 1 |
+
+Falsifiability evidence: in a separate =MIX_ENV=test mix run= process,
+loaded an in-memory AnchorWorker with only the idle guard replaced by
+=false -> :ok=, then ran the counting-failed-sink case with =--no-compile=.
+Result: *0/1 passed*, assertion =:ok == perform(...)= received a failed
+republish. No production source/beam file was edited. On the unmodified
+worker the case passes. FileSink identical replay also passes as regression
+coverage already implemented in S11.
+
+=bin/tdd_verify.sh test/sdr_agent/audit/ots_runtime_config_test.exs= reports
+BLOCKED because its legacy parser cannot read =Result: 0/4 passed= and
+reports zero tests. The actual output has four intended assertion failures.
+Evidence: =tmp/ai/tdd_verify/test_output_20261006-224334.txt= and
+=verify_result.md=. Await correlated peer manual verification before GREEN.
+
+S5 was approved at =78f3635= (PR #9 comment 6031075422) and merged as
+=202a607=. This RED commit is still based on =f56f564=; request permission
+to rebase it onto the merged S5 before GREEN and update the owned remote
+branch with force-with-lease. No production code added.

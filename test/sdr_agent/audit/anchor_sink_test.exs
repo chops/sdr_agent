@@ -27,6 +27,8 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
     assert receipt.status == :confirmed
     assert receipt.sha256 == :crypto.hash(:sha256, statement)
     assert File.read!(receipt.path) == statement
+    assert {:ok, replayed} = FileSink.publish(statement, directory: path, anchor_number: 3)
+    assert replayed == receipt
 
     assert {:error, :already_exists} =
              FileSink.publish(statement <> "changed", directory: path, anchor_number: 3)
@@ -96,6 +98,62 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
                hash,
                command: fn _, _, _ -> {"not a Bitcoin attestation", 0} end
              )
+  end
+
+  test "OTS refuses an unexpected executable version before proof verification" do
+    {proof, hash} = ots_fixture()
+
+    command = fn "ots", args, _opts ->
+      case args do
+        ["--version"] ->
+          {"v0.7.3\n", 0}
+
+        ["verify" | _] ->
+          {"Success! Bitcoin block 358391 attests existence as of 2015-05-28 UTC", 0}
+      end
+    end
+
+    assert {:error, {:ots_client_version_mismatch, "0.7.2", "v0.7.3"}} =
+             OpenTimestampsSink.Calendar.verify(proof, hash, command: command)
+  end
+
+  test "OTS missing executable returns a clear fail-closed error" do
+    {proof, hash} = ots_fixture()
+
+    assert {:error, :ots_client_missing} =
+             OpenTimestampsSink.Calendar.verify(proof, hash,
+               command: fn _, _, _ -> raise ErlangError, original: :enoent end
+             )
+  end
+
+  test "OTS child commands never inherit the private signing key" do
+    {proof, hash} = ots_fixture()
+
+    command = fn "ots", args, opts ->
+      assert {"SDR_AUDIT_ANCHOR_PRIVATE_KEY", nil} in opts[:env]
+
+      case args do
+        ["--version"] ->
+          {"v0.7.2\n", 0}
+
+        ["verify" | _] ->
+          {"Success! Bitcoin block 358391 attests existence as of 2015-05-28 UTC", 0}
+      end
+    end
+
+    assert {:ok, %{verified: true}} =
+             OpenTimestampsSink.Calendar.verify(proof, hash, command: command)
+  end
+
+  defp ots_fixture do
+    proof =
+      "test/fixtures/ots/hello-world.txt.ots.base64"
+      |> File.read!()
+      |> String.replace(~r/\s/, "")
+      |> Base.decode64!()
+
+    <<_::binary-size(33), hash::binary-size(32), _::binary>> = proof
+    {proof, hash}
   end
 
   @tag :external

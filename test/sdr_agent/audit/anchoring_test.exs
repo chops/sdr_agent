@@ -24,6 +24,20 @@ defmodule SdrAgent.Audit.AnchoringTest do
     end
   end
 
+  defmodule CountingPendingOts do
+    def publish(hash, opts) do
+      Agent.update(opts[:counter], &(&1 + 1))
+      {:ok, %{status: :pending, proof: "pending:" <> hash}}
+    end
+  end
+
+  defmodule CountingFailedSink do
+    def publish(_statement, opts) do
+      Agent.update(opts[:counter], &(&1 + 1))
+      {:error, :unreachable}
+    end
+  end
+
   setup do
     tenant = bootstrap!()
     anchorer = system_actor(:anchorer, tenant)
@@ -195,6 +209,51 @@ defmodule SdrAgent.Audit.AnchoringTest do
              )
 
     assert Agent.get(counter, & &1) == 2
+  end
+
+  test "publication retry does not resubmit a pending OTS proof", ctx do
+    counter = start_supervised!({Agent, fn -> 0 end})
+    sinks = [{:ots, CountingPendingOts, [counter: counter]}]
+
+    assert {:ok, anchor} =
+             Anchoring.anchor(
+               trigger: :interval,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: sinks
+             )
+
+    assert {:ok, {:existing, _}} =
+             Anchoring.anchor(
+               trigger: :interval,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: sinks
+             )
+
+    assert Agent.get(counter, & &1) == 1
+    assert [%{status: :pending}] = receipts_for(anchor, ctx.anchorer)
+  end
+
+  test "idle cadence never calls a failed counting sink again", ctx do
+    put_worker_key(ctx.private_key)
+    counter = start_supervised!({Agent, fn -> 0 end})
+    sinks = [{:file, CountingFailedSink, [counter: counter]}]
+    old = Application.get_env(:sdr_agent, :anchor_sinks)
+    Application.put_env(:sdr_agent, :anchor_sinks, sinks)
+    on_exit(fn -> Application.put_env(:sdr_agent, :anchor_sinks, old) end)
+
+    assert {:error, {:sink_failures, [{:file, :unreachable}]}} =
+             Anchoring.anchor(
+               trigger: :interval,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: sinks
+             )
+
+    SdrAgent.Clock.freeze(DateTime.add(SdrAgent.Clock.utc_now(), 901, :second))
+    for _ <- 1..3, do: assert(:ok == AnchorWorker.perform(%Oban.Job{args: %{}, attempt: 1}))
+    assert Agent.get(counter, & &1) == 1
   end
 
   test "forced cadence worker loads the configured key and creates an anchor", ctx do
