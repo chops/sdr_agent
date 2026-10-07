@@ -14,12 +14,18 @@ graph TB
         Budget[Persisted budgets<br/>20/run + 200/UTC day in Postgres]
         ModelProvider[ModelProvider facade<br/>budget + Zoi validation]
         ClaudeCLIAdapter[ClaudeCLI adapter<br/>serialized, tool-free GenServer]
-        Telemetry[Telemetry setup and GenAI helper]
-        Oban[Oban cron]
+        Telemetry[Telemetry setup, GenAI and agent spans]
+        Oban[Oban: cron, queues default + research]
         Cadence[Anchor cadence worker]
         UpgradeDispatch[OTS upgrade dispatcher<br/>10-minute bounded batch]
         UpgradeJobs[Per-anchor receipt jobs<br/>unique, 3 attempts]
         Anchoring[Audit.Anchoring]
+    end
+
+    subgraph AgentPlane["Agent plane"]
+        AgentWorker[SDR AgentWorker]
+        SDRAgent[SDRAgent Jido agent<br/>routes -> Actions / Flows]
+        Integrations[Fixture CRM / search / web adapters]
     end
 
     subgraph Phoenix["Phoenix"]
@@ -64,6 +70,11 @@ graph TB
     ModelProvider --> ClaudeCLIAdapter
     ModelProvider -. spans .-> Telemetry
     ClaudeCLIAdapter --> Claude
+    Oban --> AgentWorker
+    AgentWorker --> SDRAgent
+    SDRAgent --> ModelProvider
+    SDRAgent --> Integrations
+    SDRAgent --> Domains
     Endpoint --> Router
     Endpoint --> PubSub
     Router --> Controllers
