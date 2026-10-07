@@ -224,13 +224,22 @@ Separate Phase 4a/4b gate after S12a contract is reviewed. Writer handoff
 assigns =MIX_TEST_PARTITION=_s12b= (=sdr_agent_test_s12b= on port 5520) in
 place of partition 120; never the concurrent S8/dev databases.
 
-Phase 4a candidate (test-only commit, Claude writer): 31 new/extended tests
-fail, every one by an =ExUnit.AssertionError= (missing API guards in setup,
-nil child environment, absent table/trigger, kind refused) — no compile
-error, raised exception or crash; the 370 pre-existing tests still pass.
-Regression guards that pass already: serialized CLI (one launch at a time)
-and unchanged init attestation with witness context present. Files:
-=test/sdr_agent/ai/{claude_cli,witness_propagation}_test.exs=,
+Phase 4a candidate v1 =6cd0f98=: Codex RED review =389218b8-11df-4890-96ae-b1c96b2e1a0b=
+NEEDS_REVIEW (setup-level API guards hid scenarios; privacy assertion hit the
+legitimate AuditEvent.authorization field; oversize fixture tested the
+redactor not the 4096 cap; add cross-tenant/forged-parent/fixed-purpose
+negatives; preserve W3C sampling flags). Design direction accepted.
+
+Phase 4a candidate v2 (test-only): no setup guards — every scenario calls the
+S12b interface through a test-only helper that returns
+={:error, {:not_implemented, f}}= when absent, so each fails at its own
+contract assertion. 38 failures, all =ExUnit.AssertionError=; 371
+pre-existing tests (incl. the new generic-read_content REC regression
+control) pass. Scoped payload reads have no public caller-scope API: only
+=Agents.read_reconciliation_payloads/2= (authoritative same-tenant parent
+re-read) attaches the private scope; policy tests run the action directly.
+Passing regression guards: serialized CLI, unchanged init attestation.
+Files: =test/sdr_agent/ai/{claude_cli,witness_propagation}_test.exs=,
 =test/sdr_agent/agents/wire_witness_{link,race}_test.exs=,
 =test/sdr_agent/audit/{reconciliation_content,append_only}_test.exs=,
 =test/sdr_agent/operations/operations_test.exs=, =test/support/fake_claude_cli.exs=.

@@ -15,9 +15,6 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
   alias SdrAgent.Test.SecretShapes
 
   setup do
-    assert function_exported?(Agents, :link_wire_witness, 2),
-           "S12b: Agents.link_wire_witness/2 is not implemented"
-
     tenant = bootstrap!()
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
 
@@ -34,7 +31,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
     test "REC links a terminal ClaudeCLI invocation; the event carries hash, run and invocation",
          ctx do
       before = length(events(ctx.tenant))
-      assert {:ok, link} = Agents.link_wire_witness(attrs(ctx.invocation), actor: ctx.rec)
+      assert {:ok, link} = link(attrs(ctx.invocation), actor: ctx.rec)
 
       assert link.model_invocation_id == ctx.invocation.id
       assert link.tenant_id == ctx.tenant.id
@@ -69,7 +66,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
           ] do
         assert match?(
                  {:error, %Ash.Error.Forbidden{}},
-                 Agents.link_wire_witness(attrs(ctx.invocation), actor: actor)
+                 link(attrs(ctx.invocation), actor: actor)
                ),
                inspect(actor)
       end
@@ -78,16 +75,16 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
       auditor = human(:auditor, ctx.tenant)
 
       assert {:error, %Ash.Error.Forbidden{}} =
-               Agents.link_wire_witness(attrs(ctx.invocation), actor: auditor)
+               link(attrs(ctx.invocation), actor: auditor)
 
       assert [denied] = events_of_type(ctx.tenant, "authz.denied")
       assert denied.actor_role == :auditor
       assert events_of_type(ctx.tenant, "agents.witness.linked") == []
-      assert {:ok, []} = Agents.list_wire_witness_links(ctx.invocation.id, actor: ctx.rec)
+      assert {:ok, []} = list_links(ctx.invocation.id, actor: ctx.rec)
     end
 
     test "same-tenant metadata readers read links; anonymous callers do not", ctx do
-      assert {:ok, link} = Agents.link_wire_witness(attrs(ctx.invocation), actor: ctx.rec)
+      assert {:ok, link} = link(attrs(ctx.invocation), actor: ctx.rec)
 
       for actor <- [
             ctx.rec,
@@ -97,12 +94,12 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
             human(:reviewer, ctx.tenant),
             human(:auditor, ctx.tenant)
           ] do
-        assert {:ok, [read]} = Agents.list_wire_witness_links(ctx.invocation.id, actor: actor)
+        assert {:ok, [read]} = list_links(ctx.invocation.id, actor: actor)
         assert read.id == link.id
       end
 
       assert {:error, %Ash.Error.Forbidden{}} =
-               Agents.list_wire_witness_links(ctx.invocation.id, actor: nil)
+               list_links(ctx.invocation.id, actor: nil)
     end
 
     test "only terminal ClaudeCLI invocations can be linked", ctx do
@@ -111,7 +108,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
 
       for invocation <- [fake, open] do
         assert {:error, %Ash.Error.Invalid{}} =
-                 Agents.link_wire_witness(attrs(invocation), actor: ctx.rec)
+                 link(attrs(invocation), actor: ctx.rec)
       end
 
       assert events_of_type(ctx.tenant, "agents.witness.linked") == []
@@ -128,7 +125,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
           ] do
         assert match?(
                  {:error, %Ash.Error.Invalid{}},
-                 Agents.link_wire_witness(attrs(ctx.invocation, overrides), actor: ctx.rec)
+                 link(attrs(ctx.invocation, overrides), actor: ctx.rec)
                ),
                inspect(overrides)
       end
@@ -145,30 +142,23 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
         {"raw request header", %{"authorization" => SecretShapes.bearer()}},
         {"header map", %{"headers" => %{"x-api-key" => SecretShapes.provider_key()}}},
         {"raw body", %{"content" => ~s({"messages":[{"role":"user"}]})}},
-        {"account id key", %{"user_id" => "user_" <> String.duplicate("ab", 32)}},
-        {"metadata key", %{"metadata.user_id" => "user_" <> String.duplicate("cd", 32)}},
-        {"account id code", %{"reason_codes" => ["user_" <> String.duplicate("ef", 32)]}},
+        {"account id key", %{"user_id" => account_id()}},
+        {"metadata key", %{"metadata.user_id" => account_id()}},
+        {"account id code", %{"reason_codes" => [account_id()]}},
         {"absolute path", %{"proxy_version" => "/Users/someone/.llm-proxy/blobs"}},
         {"relative path", %{"projection_version" => "../../witness/sha256"}},
         {"unknown route", %{"route" => "/anthropic/v1/messages?beta=true"}},
         {"short digest", %{"app_request_sha256" => String.slice(digest_hex, 0, 63)}},
         {"uppercase digest", %{"app_request_sha256" => String.upcase(digest_hex)}},
-        {"too many codes", %{"reason_codes" => Enum.map(1..17, &"code_#{&1}")}},
         {"non-boolean flag", %{"stream_complete" => "true"}},
         {"bad schema", %{"witness_schema" => "1"}},
-        {"oversized", %{"reason_codes" => List.duplicate(String.duplicate("a", 39), 16)}}
+        {"atom value", %{"outcome" => :complete}}
       ]
 
-      secret_shaped =
-        for sample <- SecretShapes.samples() do
-          {"secret-shaped #{String.slice(sample, 0, 6)}", %{"proxy_version" => sample}}
-        end
-
-      for {label, evidence} <- bad ++ secret_shaped do
+      for {label, evidence} <- bad do
         assert match?(
                  {:error, %Ash.Error.Invalid{}},
-                 Agents.link_wire_witness(
-                   attrs(ctx.invocation, %{evidence: Map.merge(evidence(), evidence)}),
+                 link(attrs(ctx.invocation, %{evidence: Map.merge(evidence(), evidence)}),
                    actor: ctx.rec
                  )
                ),
@@ -176,57 +166,141 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
       end
 
       assert events_of_type(ctx.tenant, "agents.witness.linked") == []
+      assert {:ok, link} = link(attrs(ctx.invocation), actor: ctx.rec)
+      assert Enum.all?(Map.keys(link.evidence), &is_binary/1)
+      assert Map.keys(link.evidence) |> Enum.sort() == evidence() |> Map.keys() |> Enum.sort()
 
-      assert {:ok, link} =
-               Agents.link_wire_witness(attrs(ctx.invocation), actor: ctx.rec)
+      # Nothing a refused attempt carried (header/token/account values) reaches
+      # the evidence or any committed event payload.
+      [event] = events_of_type(ctx.tenant, "agents.witness.linked")
+      assert event.payload["changes"]["evidence"] == link.evidence
+      payloads = inspect(Enum.map(events(ctx.tenant), & &1.payload), limit: :infinity)
 
-      rendered = inspect(events_of_type(ctx.tenant, "agents.witness.linked"), limit: :infinity)
-      refute rendered =~ "user_id"
-      refute rendered =~ "authorization"
-      assert Map.keys(link.evidence) |> Enum.all?(&is_binary/1)
+      for forbidden <- [SecretShapes.bearer(), SecretShapes.provider_key(), account_id()] do
+        refute payloads =~ forbidden
+        refute inspect(link.evidence) =~ forbidden
+      end
+
+      refute Map.has_key?(link.evidence, "user_id")
+      refute Map.has_key?(event.payload["changes"]["evidence"], "authorization")
+    end
+
+    test "secret-shaped values are refused even where they fit a typed pattern", ctx do
+      hex_run = String.duplicate("a", 39)
+      assert hex_run =~ ~r/\A[a-z][a-z0-9_]{0,38}\z/
+
+      cases =
+        [{"hex-run code", %{"reason_codes" => [hex_run]}}] ++
+          for sample <- SecretShapes.samples() do
+            {"secret-shaped #{String.slice(sample, 0, 6)}", %{"proxy_version" => sample}}
+          end
+
+      for {label, evidence} <- cases do
+        assert match?(
+                 {:error, %Ash.Error.Invalid{}},
+                 link(attrs(ctx.invocation, %{evidence: Map.merge(evidence(), evidence)}),
+                   actor: ctx.rec
+                 )
+               ),
+               label
+      end
+
+      assert events_of_type(ctx.tenant, "agents.witness.linked") == []
+    end
+
+    test "typed maxima are accepted and stay inside the 4096-byte canonical bound", ctx do
+      maximal = maximal_evidence()
+      assert byte_size(JSON.encode!(maximal)) <= 4096
+      assert {:ok, link} = link(attrs(ctx.invocation, %{evidence: maximal}), actor: ctx.rec)
+      assert link.evidence == maximal
+
+      beyond = [
+        {"17 codes", %{"reason_codes" => Enum.map(1..17, &"code_#{&1}")}},
+        {"duplicate codes", %{"reason_codes" => ["same_code", "same_code"]}},
+        {"40-char code", %{"supersede_reason" => String.duplicate("z", 40)}},
+        {"33-char proxy version", %{"proxy_version" => String.duplicate("v", 33)}},
+        {"status 600", %{"http_status" => 600}},
+        {"negative byte count", %{"request_bytes_seen" => -1}}
+      ]
+
+      for {label, evidence} <- beyond do
+        assert match?(
+                 {:error, %Ash.Error.Invalid{}},
+                 link(
+                   attrs(ctx.invocation, %{
+                     proxy_record_ref: record_ref(),
+                     evidence: Map.merge(evidence(), evidence)
+                   }),
+                   actor: ctx.rec
+                 )
+               ),
+               label
+      end
+    end
+  end
+
+  describe "tenant boundary" do
+    test "an actor of another tenant cannot link, list or see this tenant's links", ctx do
+      foreign_rec = system_actor(:reconciler, %{id: Ecto.UUID.generate()})
+      assert {:ok, link} = link(attrs(ctx.invocation), actor: ctx.rec)
+
+      assert match?(
+               {:error, %Ash.Error.Invalid{}},
+               link(attrs(ctx.invocation, %{proxy_record_ref: record_ref()}), actor: foreign_rec)
+             )
+
+      assert match?(
+               {:error, %Ash.Error.Invalid{}},
+               link(successor_attrs(link), actor: foreign_rec)
+             )
+
+      assert {:ok, []} = list_links(ctx.invocation.id, actor: foreign_rec)
+      assert {:ok, []} = current_links(ctx.invocation.id, actor: foreign_rec)
+      assert {:ok, [_]} = list_links(ctx.invocation.id, actor: ctx.rec)
+      assert length(events_of_type(ctx.tenant, "agents.witness.linked")) == 1
     end
   end
 
   describe "lineage (R1, C3, C4)" do
     test "each exchange is its own subject; a correction supersedes the current head", ctx do
-      assert {:ok, root} = Agents.link_wire_witness(attrs(ctx.invocation), actor: ctx.rec)
+      assert {:ok, root} = link(attrs(ctx.invocation), actor: ctx.rec)
       other_ref = record_ref()
 
       assert {:ok, other} =
-               Agents.link_wire_witness(attrs(ctx.invocation, %{proxy_record_ref: other_ref}),
+               link(attrs(ctx.invocation, %{proxy_record_ref: other_ref}),
                  actor: ctx.rec
                )
 
       assert {:ok, successor} =
-               Agents.link_wire_witness(successor_attrs(root, %{link_status: :reconciled}),
+               link(successor_attrs(root, %{link_status: :reconciled}),
                  actor: ctx.rec
                )
 
-      assert {:ok, current} = Agents.current_wire_witness_links(ctx.invocation.id, actor: ctx.rec)
+      assert {:ok, current} = current_links(ctx.invocation.id, actor: ctx.rec)
       assert Enum.sort(Enum.map(current, & &1.id)) == Enum.sort([successor.id, other.id])
-      assert {:ok, all} = Agents.list_wire_witness_links(ctx.invocation.id, actor: ctx.rec)
+      assert {:ok, all} = list_links(ctx.invocation.id, actor: ctx.rec)
       assert length(all) == 3
       assert length(events_of_type(ctx.tenant, "agents.witness.linked")) == 3
     end
 
     test "a second root for the same exchange is refused", ctx do
-      assert {:ok, _root} = Agents.link_wire_witness(attrs(ctx.invocation), actor: ctx.rec)
+      assert {:ok, _root} = link(attrs(ctx.invocation), actor: ctx.rec)
 
       assert {:error, %Ash.Error.Invalid{}} =
-               Agents.link_wire_witness(attrs(ctx.invocation), actor: ctx.rec)
+               link(attrs(ctx.invocation), actor: ctx.rec)
     end
 
     test "superseding anything but the current head of the same exchange is refused", ctx do
-      assert {:ok, root} = Agents.link_wire_witness(attrs(ctx.invocation), actor: ctx.rec)
-      assert {:ok, head} = Agents.link_wire_witness(successor_attrs(root), actor: ctx.rec)
+      assert {:ok, root} = link(attrs(ctx.invocation), actor: ctx.rec)
+      assert {:ok, head} = link(successor_attrs(root), actor: ctx.rec)
 
       # fork: a second successor of the (no longer current) root
       assert {:error, %Ash.Error.Invalid{}} =
-               Agents.link_wire_witness(successor_attrs(root), actor: ctx.rec)
+               link(successor_attrs(root), actor: ctx.rec)
 
       # cross-subject: another exchange of the same invocation supersedes this head
       assert {:error, %Ash.Error.Invalid{}} =
-               Agents.link_wire_witness(
+               link(
                  successor_attrs(head, %{proxy_record_ref: record_ref()}),
                  actor: ctx.rec
                )
@@ -235,14 +309,14 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
       other = terminal_invocation!(ctx.run, ctx.agent, :claude_cli, "wwl-2")
 
       assert {:error, %Ash.Error.Invalid{}} =
-               Agents.link_wire_witness(
+               link(
                  successor_attrs(head, %{model_invocation_id: other.id}),
                  actor: ctx.rec
                )
 
       # a successor must state why it supersedes
       assert {:error, %Ash.Error.Invalid{}} =
-               Agents.link_wire_witness(
+               link(
                  successor_attrs(head, %{evidence: evidence()}),
                  actor: ctx.rec
                )
@@ -250,14 +324,14 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
 
     test "a mismatch is superseded only under a different projection version", ctx do
       assert {:ok, mismatch} =
-               Agents.link_wire_witness(attrs(ctx.invocation, %{link_status: :mismatch}),
+               link(attrs(ctx.invocation, %{link_status: :mismatch}),
                  actor: ctx.rec
                )
 
       for status <- [:reconciled, :inferred, :mismatch] do
         assert match?(
                  {:error, %Ash.Error.Invalid{}},
-                 Agents.link_wire_witness(successor_attrs(mismatch, %{link_status: status}),
+                 link(successor_attrs(mismatch, %{link_status: status}),
                    actor: ctx.rec
                  )
                ),
@@ -265,7 +339,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
       end
 
       assert {:ok, corrected} =
-               Agents.link_wire_witness(
+               link(
                  successor_attrs(mismatch, %{
                    link_status: :reconciled,
                    evidence:
@@ -278,14 +352,14 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
                )
 
       assert corrected.supersedes_id == mismatch.id
-      assert {:ok, all} = Agents.list_wire_witness_links(ctx.invocation.id, actor: ctx.rec)
+      assert {:ok, all} = list_links(ctx.invocation.id, actor: ctx.rec)
       assert Enum.any?(all, &(&1.id == mismatch.id and &1.link_status == :mismatch))
     end
   end
 
   describe "database enforcement" do
     setup ctx do
-      assert {:ok, root} = Agents.link_wire_witness(attrs(ctx.invocation), actor: ctx.rec)
+      assert {:ok, root} = link(attrs(ctx.invocation), actor: ctx.rec)
       %{root: root}
     end
 
@@ -301,7 +375,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
     end
 
     test "raw inserts cannot fork, cross subjects or rewrite a same-version mismatch", ctx do
-      assert {:ok, head} = Agents.link_wire_witness(successor_attrs(ctx.root), actor: ctx.rec)
+      assert {:ok, head} = link(successor_attrs(ctx.root), actor: ctx.rec)
 
       # fork of the root (already superseded by head)
       assert {:error, %Postgrex.Error{postgres: %{code: :unique_violation}}} =
@@ -312,7 +386,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
                raw_insert(head, supersedes_id: head.id, proxy_record_ref: record_ref())
 
       assert {:ok, mismatch} =
-               Agents.link_wire_witness(successor_attrs(head, %{link_status: :mismatch}),
+               link(successor_attrs(head, %{link_status: :mismatch}),
                  actor: ctx.rec
                )
 
@@ -324,7 +398,61 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
     end
   end
 
+  ## Calls (S12b interfaces; a missing one fails the scenario's own assertion)
+
+  defp link(attrs, opts), do: call(:link_wire_witness, [attrs, opts])
+  defp list_links(invocation_id, opts), do: call(:list_wire_witness_links, [invocation_id, opts])
+
+  defp current_links(invocation_id, opts),
+    do: call(:current_wire_witness_links, [invocation_id, opts])
+
+  defp call(function, args) do
+    if function_exported?(Agents, function, length(args)),
+      do: apply(Agents, function, args),
+      else: {:error, {:not_implemented, function}}
+  end
+
   ## Fixtures
+
+  # Shaped like Claude Code's account-derived `metadata.user_id`.
+  defp account_id, do: "user_" <> String.duplicate("ab", 32) <> "_account__session_x"
+
+  defp maximal_evidence do
+    digest = fn label -> hex(digest(label)) end
+
+    %{
+      "witness_schema" => 99,
+      "proxy_version" => String.duplicate("v", 32),
+      "cli_version" => "9999.9999.999999",
+      "route" => "/anthropic/v1/messages/count_tokens",
+      "http_method" => "OPTIONS",
+      "http_status" => 599,
+      "outcome" => String.duplicate("o", 39),
+      "started_at" => "2026-10-07T12:00:00.123456Z",
+      "completed_at" => "2026-10-07T12:00:02.123456Z",
+      "request_bytes_seen" => 1_000_000_000_000,
+      "response_bytes_seen" => 1_000_000_000_000,
+      "request_capture_complete" => false,
+      "response_capture_complete" => false,
+      "stream_complete" => false,
+      "traceparent_match" => false,
+      "response_content_encoding" => String.duplicate("g", 16),
+      "classification" => "unclassified",
+      # 39 bytes: projection versions stay below the redactor's 40-char run rule.
+      "projection_version" =>
+        String.duplicate("p", 20) <> "/9999+" <> String.duplicate("b", 8) <> "/9999",
+      "app_request_sha256" => digest.("1"),
+      "app_response_sha256" => digest.("2"),
+      "projected_request_sha256" => digest.("3"),
+      "projected_response_sha256" => digest.("4"),
+      "observed_request_projection_sha256" => digest.("5"),
+      "observed_response_projection_sha256" => digest.("6"),
+      "inventory_sha256" => digest.("7"),
+      "reason_codes" =>
+        Enum.map(1..16, &(String.duplicate("r", 36) <> "_#{rem(&1, 10)}#{div(&1, 10)}")),
+      "supersede_reason" => String.duplicate("s", 39)
+    }
+  end
 
   defp attrs(invocation, overrides \\ %{}) do
     Map.merge(

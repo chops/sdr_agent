@@ -95,6 +95,23 @@ defmodule SdrAgent.AI.ClaudeCLITest do
       assert System.get_env("SDR_TRACEPARENT") == nil
     end
 
+    test "the caller's W3C sampling flag is forwarded as given (00 or 01)", %{dump: dump} do
+      {:ok, server} = start_server("env_dump", [dump])
+      sampled = witness()
+
+      unsampled = %{
+        witness()
+        | traceparent: String.replace_suffix(witness().traceparent, "-01", "-00")
+      }
+
+      assert {:ok, _} = ClaudeCLI.complete(request(sampled), server: server)
+      assert {:ok, _} = ClaudeCLI.complete(request(unsampled), server: server)
+      assert [one, two] = read_dumps(dump)
+      assert one["SDR_TRACEPARENT"] == sampled.traceparent
+      assert two["SDR_TRACEPARENT"] == unsampled.traceparent
+      assert String.ends_with?(two["SDR_TRACEPARENT"], "-00")
+    end
+
     test "two serial calls carry their own distinct ids and contexts", %{dump: dump} do
       {:ok, server} = start_server("env_dump", [dump])
       first = witness()

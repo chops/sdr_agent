@@ -27,9 +27,6 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
   @racers 8
 
   setup do
-    assert function_exported?(Agents, :link_wire_witness, 2),
-           "S12b: Agents.link_wire_witness/2 is not implemented"
-
     :ok = Sandbox.checkout(SdrAgent.Repo, sandbox: false)
     cleanup!()
     on_exit(fn -> with_connection(&cleanup!/0) end)
@@ -49,14 +46,14 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
       Agents.complete_model_invocation(invocation, AgentsFixtures.completion(), actor: agent)
 
     ref = Ash.UUIDv7.generate()
-    assert {:ok, root} = Agents.link_wire_witness(link(invocation, ref, nil), actor: rec)
+    assert {:ok, root} = call(:link_wire_witness, link(invocation, ref, nil), actor: rec)
 
     results =
       1..@racers
       |> Enum.map(fn _ ->
         Task.async(fn ->
           with_connection(fn ->
-            Agents.link_wire_witness(link(invocation, ref, root.id), actor: rec)
+            call(:link_wire_witness, link(invocation, ref, root.id), actor: rec)
           end)
         end)
       end)
@@ -65,9 +62,9 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
     assert Enum.count(results, &match?({:ok, _}, &1)) == 1
     assert Enum.count(results, &match?({:error, %Ash.Error.Invalid{}}, &1)) == @racers - 1
 
-    {:ok, links} = Agents.list_wire_witness_links(invocation.id, actor: rec)
+    {:ok, links} = call(:list_wire_witness_links, invocation.id, actor: rec)
     assert length(links) == 2
-    assert {:ok, [current]} = Agents.current_wire_witness_links(invocation.id, actor: rec)
+    assert {:ok, [current]} = call(:current_wire_witness_links, invocation.id, actor: rec)
     assert current.supersedes_id == root.id
 
     aud = SdrAgent.Actor.system(:auditor_cli, tenant.id)
@@ -102,6 +99,13 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
     }
   end
 
+  # A missing S12b interface fails the scenario's own assertion.
+  defp call(function, arg, opts) do
+    if function_exported?(Agents, function, 2),
+      do: apply(Agents, function, [arg, opts]),
+      else: {:error, {:not_implemented, function}}
+  end
+
   defp with_connection(fun) do
     :ok = Sandbox.checkout(SdrAgent.Repo, sandbox: false)
 
@@ -115,7 +119,15 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
   defp cleanup! do
     SdrAgent.Repo.transaction(fn ->
       SQL.query!(SdrAgent.Repo, "SET LOCAL session_replication_role = replica", [])
-      SQL.query!(SdrAgent.Repo, "TRUNCATE #{Enum.join(@tables, ", ")} CASCADE", [])
+
+      %{rows: rows} =
+        SQL.query!(
+          SdrAgent.Repo,
+          "SELECT t FROM unnest($1::text[]) t WHERE to_regclass(t) IS NOT NULL",
+          [@tables]
+        )
+
+      SQL.query!(SdrAgent.Repo, "TRUNCATE #{Enum.join(List.flatten(rows), ", ")} CASCADE", [])
     end)
   end
 end

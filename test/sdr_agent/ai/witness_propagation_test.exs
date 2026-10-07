@@ -20,6 +20,7 @@ defmodule SdrAgent.AI.WitnessPropagationTest do
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()}, coerce: true)
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
   @traceparent ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-01\z/
+  @unsampled ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-00\z/
 
   setup do
     tenant = bootstrap!()
@@ -69,6 +70,30 @@ defmodule SdrAgent.AI.WitnessPropagationTest do
              ),
              "traceparent #{trace_id}/#{parent_id} is not a gen_ai span of this call"
     end
+  end
+
+  test "a non-sampled caller context is forwarded with its own flags (00)", ctx do
+    trace_id = 16 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+    parent_id = 8 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+
+    remote =
+      :otel_tracer.from_remote_span(
+        String.to_integer(trace_id, 16),
+        String.to_integer(parent_id, 16),
+        0
+      )
+
+    OpenTelemetry.Tracer.set_current_span(remote)
+
+    try do
+      assert {:ok, _} = complete(ctx, "witness-unsampled")
+    after
+      OpenTelemetry.Tracer.set_current_span(:undefined)
+    end
+
+    assert [child] = read_dumps(ctx.dump)
+    assert [_, ^trace_id, span_id] = Regex.run(@unsampled, child["SDR_TRACEPARENT"] || "")
+    assert span_id != parent_id
   end
 
   test "the persisted invocation is unchanged in shape (no new columns or statuses)", ctx do
