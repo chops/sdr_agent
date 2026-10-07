@@ -8,12 +8,36 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   optionally wrapped in a single Markdown code fence (as the model sometimes
   formats longer answers). Protocol failures never return process output.
   Timeouts terminate the complete observed process tree.
+
+  ## Wire-witness correlation (ADR-0005 S12, C6)
+
+  Each request must carry the facade's `:witness` — the reserved invocation
+  UUID (lowercase, RFC 9562 version/variant) and a W3C version-00
+  `traceparent` with non-zero ids and its own `00`/`01` flags. They are
+  validated and passed **only** in this call's child environment as
+  `SDR_MODEL_INVOCATION_ID` / `SDR_TRACEPARENT`, which `llm-proxy-shim`
+  turns into loopback-only correlation headers; the BEAM environment is
+  never modified. Missing or malformed context refuses the call
+  (`:invalid_witness_context`) before any process starts.
+
+  The child environment always unsets the Bedrock/Vertex/Foundry routing
+  variables (`@route_flags`, `@route_urls`), so an SDR-stamped CLI cannot
+  bypass the local proxy. If the operator environment enables one of those
+  routes the call is refused (`:witness_bypass_environment`) instead of
+  silently re-routed. The `:environment` option (a map) replaces the
+  operator environment for that check in hermetic tests.
+
+  One GenServer serialises every call (ADR-0004, C8: concurrency 1).
   """
 
   use GenServer
   @behaviour SdrAgent.AI.ModelProvider
 
   @default_timeout 120_000
+  @route_flags ~w(CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY)
+  @route_urls ~w(ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_FOUNDRY_BASE_URL)
+  @invocation_id ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
+  @traceparent ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-(?:00|01)\z/
   @model_alias "opus"
   @resolved_model "claude-opus-5-5"
   @reviewed_version "2.1.291"
@@ -59,7 +83,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
        command_args: Keyword.get(opts, :command_args, ["claude"]),
        cli_args: Keyword.get(opts, :cli_args, []),
        timeout: Keyword.get(opts, :timeout, @default_timeout),
-       expected_model: Keyword.get(opts, :expected_model, @resolved_model)
+       expected_model: Keyword.get(opts, :expected_model, @resolved_model),
+       environment: Keyword.get(opts, :environment)
      }}
   end
 
@@ -73,6 +98,45 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   defp run(_request, %{command: nil}), do: {:error, :llm_proxy_shim_not_found}
 
   defp run(request, state) do
+    with {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
+         :ok <- refuse_bypass(state.environment || System.get_env()) do
+      launch(
+        request,
+        state,
+        witness_env ++ Enum.map(@route_flags ++ @route_urls, &{~c"#{&1}", false})
+      )
+    end
+  end
+
+  defp witness_env(%{model_invocation_id: id, traceparent: traceparent})
+       when is_binary(id) and is_binary(traceparent) do
+    with true <- Regex.match?(@invocation_id, id),
+         [_, trace_id, span_id] <- Regex.run(@traceparent, traceparent),
+         false <- trace_id == String.duplicate("0", 32) or span_id == String.duplicate("0", 16) do
+      {:ok,
+       [
+         {~c"SDR_MODEL_INVOCATION_ID", String.to_charlist(id)},
+         {~c"SDR_TRACEPARENT", String.to_charlist(traceparent)}
+       ]}
+    else
+      _ -> {:error, :invalid_witness_context}
+    end
+  end
+
+  defp witness_env(_witness), do: {:error, :invalid_witness_context}
+
+  defp refuse_bypass(environment) do
+    enabled? = fn name ->
+      value = environment |> Map.get(name, "") |> String.trim() |> String.downcase()
+      if name in @route_flags, do: value not in ["", "0", "false"], else: value != ""
+    end
+
+    if Enum.any?(@route_flags ++ @route_urls, enabled?),
+      do: {:error, :witness_bypass_environment},
+      else: :ok
+  end
+
+  defp launch(request, state, child_env) do
     workspace = private_workspace!()
     prompt_path = Path.join(workspace, "prompt")
 
@@ -91,6 +155,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         :stderr_to_stdout,
         {:args, shell_args(state, prompt_path)},
         {:cd, workspace},
+        {:env, child_env},
         {:line, 1_048_576}
       ])
 

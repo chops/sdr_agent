@@ -111,6 +111,82 @@ resources or trace columns; S3 owns persisted correlation fields.
 - Owner checkpoint: deploying the proxy change needs `sudo darwin-rebuild
   switch` (ADR-0001).
 
+#### S12 approved protocol and assurance amendment (2026-10-07)
+
+Accepted design under the correlated entity verdict
+`m_1791381869820530000_6005c06e` and plan/supplementary Payload verdict
+`m_1791382326635826000_6c0f992b` (Claude). Their binding C1–C9, S1–S3 and
+P1–P10 conditions are recorded in `notes/features/s12-wire-witness.org`.
+Implementation and deployment remain pending; this amendment does **not**
+enable reconciled assurance.
+
+- The real provider is ClaudeCLI, not the disabled CodexAppServer. A reserved
+  ModelInvocation UUID and caller W3C `traceparent` travel through per-call
+  environment values and the shim's native Claude custom-header channel.
+  The local proxy honors correlation only from loopback, parents its span,
+  and strips the correlation headers before upstream forwarding, including
+  redirects/retries and WebSocket paths. Init/model/version/tool/MCP/slash
+  attestation remains mandatory and unchanged; SDR-stamped calls cannot
+  bypass local proxy routing.
+- Shared traces provide convenient linkage, **not independence**. Independent
+  corroboration rests on the separately written proxy store and raw digests.
+  The existing preview spills contain normalized text, not complete HTTP
+  exchanges. S12 introduces a versioned, header-free exchange inventory,
+  start/final records and bounded raw request/response blobs for SDR calls,
+  with explicit completeness/truncation flags and owner-only permissions.
+  No request headers, account identifiers or raw bodies enter SDR evidence
+  or telemetry metadata. Raw Claude bodies (including CLI system text and
+  account-derived `metadata.user_id`) stay only in the local proxy store;
+  its retention/cleanup and raw-reverification limits must be documented.
+  Raw bodies use `<blobDir>/witness/sha256/<aa>/<digest>.json`, separate from
+  legacy preview `<blobDir>/sha256` and its mtime-based cleanup. Witness
+  retention is reference-aware and owner-managed, never legacy preview GC.
+- WireWitnessLink lineage is per `(tenant, invocation, proxy_record_ref)`.
+  Corrections append successors, with a same-subject current-head guard and
+  database no-fork uniqueness. A same-projection-version mismatch cannot
+  be rewritten as reconciled. Missing/incomplete/ambiguous records raise
+  idempotent warning attention without fabricated links; mismatches raise
+  critical attention. Every observed extra exchange must be classified;
+  only the same-id, non-generating count-tokens response is ancillary.
+- The full application payload digests retain their original meaning.
+  Versioned projections compare the exact rendered stdin prompt (derived
+  from stored prompt and schema using the recorded prompt-builder version)
+  and structured JSON completion against the observed message exchange.
+  A historical unsupported builder stays inferred. Projection equality
+  does not claim whole-wire-byte equality for CLI-injected fields. Raw
+  bodies are not imported into Payload: Postgres reconstruction proves
+  recorded projection-equality claims; raw re-verification requires the
+  proxy store while it exists.
+- Reconciliation uses a new, narrow Payload action: REC identity, same
+  tenant, Agents-owned private scope limited to that invocation's two
+  payload hashes, and fixed purpose. Existing general content/read policies
+  remain untouched. An AuditAccess append must succeed before content is
+  returned; access replays are real accesses, not duplicate witness links.
+- Model calls and the reconciliation queue stay at concurrency one until
+  lifted by a reviewed ADR amendment. Invocation status is `unwitnessed`
+  without records; `reconciled` requires one current reconciled primary
+  exchange and every observed extra classified, with no mismatched or
+  unclassified exchange ignored.
+- Ship the runtime reconciled-method allowlist **empty**. S12a is a separate
+  nix-darwin PR; after review the owner alone runs `sudo darwin-rebuild`.
+  S12b/c remain hermetic and may proceed while deployment is pending. A
+  single budgeted synthetic external call must prove the real transformation.
+  Only a separate reviewed S12d enablement PR may activate a method, citing
+  deployment, record IDs/digests, CLI version and projection version. Failed
+  or unsupported proof never raises assurance.
+
+S12a refinement accepted in `m_1791387015901435000_7691c93f`: the launcher
+validates bounded JSON from the active daemon's loopback-only
+`/healthz/witness` before an SDR CLI launch. Exact schema 1 and the three
+strip declarations are required; old/missing/unknown/malformed/timed-out
+capability refuses with exit 65. Ordinary Claude/Codex never probe this route
+and legacy `/healthz` remains unchanged. The probe is not atomic with the
+model request: a daemon swap between them can still expose an unsupported
+proxy. This residual TOCTOU is acknowledged; S12b/c treat absent records as
+unwitnessed with attention, not reconciled. No additional mitigation or
+assurance is claimed. jq is reused from the existing pinned Nix input for
+strict bounded JSON validation; no new Hex/Go dependency is added.
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),

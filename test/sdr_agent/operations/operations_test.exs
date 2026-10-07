@@ -216,6 +216,33 @@ defmodule SdrAgent.OperationsTest do
                Operations.create_operation(operation_attrs(), actor: ctx.admin)
     end
 
+    test "S12: REC owns reconcile_model on the reconciliation queue only", ctx do
+      rec = system_actor(:reconciler, ctx.tenant)
+
+      reconcile =
+        operation_attrs(%{
+          kind: :reconcile_model,
+          queue: :reconciliation,
+          subject_resource: "SdrAgent.Agents.ModelInvocation"
+        })
+
+      assert {:ok, op} = Operations.create_operation(reconcile, actor: rec)
+      assert {op.kind, op.queue} == {:reconcile_model, :reconciliation}
+
+      for actor <- [ctx.agent, ctx.delivery, ctx.admin] do
+        assert {:error, %Ash.Error.Forbidden{}} =
+                 Operations.create_operation(%{reconcile | idempotency_key: "op-#{F.unique()}"},
+                   actor: actor
+                 )
+      end
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Operations.create_operation(
+                 %{reconcile | idempotency_key: "op-#{F.unique()}", queue: :research},
+                 actor: rec
+               )
+    end
+
     test "the idempotency key is unique per tenant", ctx do
       attrs = operation_attrs()
       {:ok, _} = Operations.create_operation(attrs, actor: ctx.agent)

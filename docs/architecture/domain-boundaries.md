@@ -43,6 +43,7 @@ graph TB
         ModelInvocation[ModelInvocation]
         ToolInvocation[ToolInvocation]
         Decision[Decision]
+        WireWitnessLink[WireWitnessLink<br/>append-only, per-exchange lineage]
     end
     subgraph Operations["Operations Domain"]
         Operation[Operation]
@@ -74,6 +75,9 @@ graph TB
     AgentRun --> Decision
     ModelInvocation --> Decision
     ModelInvocation -. request/response sha256 FK .-> Payload
+    ModelInvocation --> WireWitnessLink
+    WireWitnessLink -. supersedes same exchange .-> WireWitnessLink
+    WireWitnessLink -. REC scoped read_reconciliation_content .-> Payload
     ToolInvocation -. input/output sha256 FK .-> Payload
     Decision -. inputs sha256 FK .-> Payload
     Agents -. tenant_id FK .-> Tenant

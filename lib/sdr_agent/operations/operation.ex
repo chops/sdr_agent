@@ -20,6 +20,9 @@ defmodule SdrAgent.Operations.Operation do
   after a bounded retry) resolves the operation's live Failures in the same
   transaction.
 
+  Kinds listed in `kind_queues/0` run only on their queue (`reconcile_model`
+  → `reconciliation`, S12).
+
   Actors: the system actor that owns the `kind` (`kind_actors/0`) creates and
   transitions it; ADM may retry and cancel; reads for ADM, REV, AUR, AUD and
   system actors. Every write appends an AuditEvent (`operations.operation.*`).
@@ -42,11 +45,15 @@ defmodule SdrAgent.Operations.Operation do
     prepare_outreach: [:agent_runtime],
     deliver: [:delivery_worker],
     reconcile_delivery: [:reconciler],
+    reconcile_model: [:reconciler],
     followup_due: [:scheduler],
     process_webhook: [:webhook_ingestor],
     anchor: [:anchorer],
     export: [:anchorer]
   }
+  # Kinds whose queue is fixed (S12 R2: model-witness reconciliation runs on
+  # the dedicated, concurrency-one reconciliation queue).
+  @kind_queues %{reconcile_model: [:reconciliation]}
   @queues [
     :research,
     :qualification,
@@ -105,6 +112,21 @@ defmodule SdrAgent.Operations.Operation do
         :max_attempts,
         :scheduled_at
       ]
+
+      validate fn changeset, _context ->
+        kind = Ash.Changeset.get_attribute(changeset, :kind)
+        queue = Ash.Changeset.get_attribute(changeset, :queue)
+
+        case Map.fetch(@kind_queues, kind) do
+          {:ok, queues} ->
+            if queue in queues,
+              do: :ok,
+              else: {:error, field: :queue, message: "#{kind} runs only on #{inspect(queues)}"}
+
+          :error ->
+            :ok
+        end
+      end
 
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
@@ -293,6 +315,9 @@ defmodule SdrAgent.Operations.Operation do
 
   @doc "System actor types allowed to create and run each operation kind."
   def kind_actors, do: @kind_actors
+
+  @doc "Kinds restricted to specific queues."
+  def kind_queues, do: @kind_queues
 
   @doc "Declared lifecycle transitions `{action, from, to}` (ADR-0010)."
   def transitions, do: @transitions

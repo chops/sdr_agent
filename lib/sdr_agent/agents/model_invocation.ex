@@ -303,6 +303,7 @@ defmodule SdrAgent.Agents.ModelInvocation do
     end
 
     has_many :decisions, SdrAgent.Agents.Decision, public?: true
+    has_many :wire_witness_links, SdrAgent.Agents.WireWitnessLink, public?: true
   end
 
   identities do
