@@ -275,6 +275,8 @@ defmodule SdrAgent.Audit do
   defp tenant_scope(query, %{tenant_id: tenant_id}) when is_binary(tenant_id),
     do: Ash.Query.filter(query, tenant_id == ^tenant_id)
 
+  # An operator without a tenant reads nothing (fail closed).
+  defp tenant_scope(query, %SdrAgent.Accounts.User{}), do: Ash.Query.filter(query, false)
   defp tenant_scope(query, _actor), do: query
 
   defp hex(bin) when is_binary(bin), do: Base.encode16(bin, case: :lower)

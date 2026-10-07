@@ -145,8 +145,20 @@ defmodule SdrAgent.Agents do
   @doc "Atomically reserves one model call against the run budget (AGT)."
   def reserve_model_call(run, opts), do: update(run, :reserve_model_call, %{}, opts)
 
-  @doc "Reads one run."
-  def get_run(id, opts), do: Ash.get(AgentRun, id, actor: Keyword.get(opts, :actor))
+  @doc "Reads one run of the actor's tenant (not found otherwise)."
+  def get_run(id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} -> {:error, Ash.Error.Query.NotFound.exception(resource: AgentRun)}
+      other -> other
+    end
+  end
 
   @doc """
   Runs of the actor's tenant, newest first (S10 Runs view); `lead_id:`
@@ -283,8 +295,11 @@ defmodule SdrAgent.Agents do
 
   @doc "Invocations of a run, in call order."
   def list_model_invocations(run_id, opts) do
+    actor = Keyword.get(opts, :actor)
+
     ModelInvocation
-    |> Ash.Query.for_read(:read, %{}, actor: Keyword.get(opts, :actor))
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
     |> Ash.Query.filter(agent_run_id == ^run_id)
     |> Ash.Query.sort(sequence_in_run: :asc)
     |> Ash.read()
@@ -292,8 +307,11 @@ defmodule SdrAgent.Agents do
 
   @doc "Tool invocations of a run, in call order (S10 run view)."
   def list_tool_invocations(run_id, opts) do
+    actor = Keyword.get(opts, :actor)
+
     ToolInvocation
-    |> Ash.Query.for_read(:read, %{}, actor: Keyword.get(opts, :actor))
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
     |> Ash.Query.filter(agent_run_id == ^run_id)
     |> Ash.Query.sort(sequence_in_run: :asc)
     |> Ash.read()
@@ -404,8 +422,11 @@ defmodule SdrAgent.Agents do
 
   @doc "Decisions of a run, oldest first."
   def list_decisions(run_id, opts) do
+    actor = Keyword.get(opts, :actor)
+
     Decision
-    |> Ash.Query.for_read(:read, %{}, actor: Keyword.get(opts, :actor))
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
     |> Ash.Query.filter(agent_run_id == ^run_id)
     |> Ash.Query.sort(decided_at: :asc)
     |> Ash.read()
@@ -565,9 +586,12 @@ defmodule SdrAgent.Agents do
 
   defp collect(other), do: other
 
+  # Reads are scoped to the actor's tenant; an operator without a tenant
+  # reads nothing (fail closed). Tenantless system actors (KRN) are unscoped.
   defp tenant_scope(query, %{tenant_id: tenant_id}) when is_binary(tenant_id),
     do: Ash.Query.filter(query, tenant_id == ^tenant_id)
 
+  defp tenant_scope(query, %SdrAgent.Accounts.User{}), do: Ash.Query.filter(query, false)
   defp tenant_scope(query, _actor), do: query
 
   defp guard(resource, action, subject_id, actor, fun) do
