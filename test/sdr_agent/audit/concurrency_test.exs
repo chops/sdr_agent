@@ -163,6 +163,31 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
     assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: aud)
   end
 
+  test "concurrent first-admin bootstraps: exactly one wins" do
+    {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
+
+    results =
+      race(6, fn n ->
+        with_connection(fn ->
+          password = SdrAgent.Accounts.generate_password()
+
+          SdrAgent.Accounts.bootstrap_admin(%{
+            email: "boot-#{n}@example.test",
+            display_name: "Boot #{n}",
+            password: password,
+            password_confirmation: password
+          })
+        end)
+      end)
+
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 1, inspect(results)
+    assert Enum.count(results, &match?({:error, %Ash.Error.Invalid{}}, &1)) == 5
+
+    seeder = struct(SdrAgent.Actor, type: :seeder, tenant_id: tenant.id)
+    {:ok, users} = SdrAgent.Accounts.list_users(actor: seeder)
+    assert [%{role: :admin}] = users
+  end
+
   # Re-promotes whichever of `admins` was demoted, as the remaining admin.
   defp restore_admins(admins, seeder) do
     {:ok, users} = SdrAgent.Accounts.list_users(actor: seeder)

@@ -225,6 +225,36 @@ found" with 18 runtime errors because it does not parse Elixir 1.20's
 NEEDS_REVIEW; proceeding under the unattended charter (ADR-0001) with the
 peer reviewing the RED evidence on the PR.
 
+** Review round 1 (Codex, PR #9 comment 6030590784: CHANGES REQUESTED)
+Choices 1–3, 5–8 and 10–18 accepted (8 conditional on S7 creating the
+Failure atomically with =→ blocked=; 10 conditional on blocker 2; 14 a
+tracked S8 obligation). Two blockers:
+
+1. *Choice 4 rejected:* production had no way to create the first admin.
+   Fix: a kernel-only =User :bootstrap_admin= that succeeds only while the
+   tenant has no users (tenant row locked =FOR UPDATE=, so concurrent
+   bootstraps serialise), audited as =user.created= by the kernel, plus
+   =mix sdr.bootstrap_admin --email … [--display-name …] [--password-stdin]=
+   that prints a generated one-time password once (never logged, never in
+   events) or reads it from stdin. The demo seed stays dev/test-only.
+2. *Choice 9 rejected:* an override could leave the current qualification
+   and the lead's status contradictory. Fix: when an override flips the
+   outcome it moves the lead in the same transaction through two new
+   marker-protected transitions (=disqualify_by_override= qualified →
+   disqualified, =requalify_by_override= disqualified → qualified; ADM/REV
+   only, inside the override); any other lead state refuses the override and
+   names the operator action (=:stop= once outreach has begun, =:reopen=
+   path otherwise). An override that keeps the outcome leaves the lead alone.
+
+RED (=MIX_TEST_PARTITION=_s5 mix test=): *218/234 passed, 16 failed* — all
+intended: =Accounts.generate_password/0=, =Accounts.bootstrap_admin/1= and
+=Mix.Tasks.Sdr.BootstrapAdmin= undefined (9: bootstrap module, mix task,
+concurrency); the override tests fail on their assertions (the lead stays
+qualified after a flip, the override is accepted during outreach and for a
+reopened lead, the failing-transition case commits) or on the missing
+=:disqualify_by_override= action (6); the Lead transition-table test lacks
+the two new rows (1). Same =tdd_verify.sh= parsing caveat: NEEDS_REVIEW.
+
 -----
 
 * Implementation Notes

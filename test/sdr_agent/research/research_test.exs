@@ -320,7 +320,7 @@ defmodule SdrAgent.ResearchTest do
       )
     end
 
-    test "REV overrides the current qualification; the lead does not move", ctx do
+    test "a flip to not qualified disqualifies the lead in the same transaction", ctx do
       {:ok, overridden} = Research.override_qualification(override(ctx), actor: ctx.reviewer)
 
       assert overridden.source == :human_override
@@ -328,11 +328,123 @@ defmodule SdrAgent.ResearchTest do
       assert overridden.supersedes_id == ctx.qualification.id
       assert overridden.decision_id == ctx.qualification.decision_id
       assert overridden.agent_run_id == nil
-      assert lead_status(ctx, ctx.lead) == :qualified
+
+      {:ok, lead} = Sales.fetch(SdrAgent.Sales.Lead, ctx.lead.id, actor: ctx.admin)
+      assert lead.status == :disqualified
+      assert %DateTime{} = lead.closed_at
+
+      assert [event] = events_of_type(ctx.tenant, "sales.lead.disqualified_by_override")
+      assert event.payload["previous"]["status"] == "qualified"
+      assert event.actor_id == ctx.reviewer.id
 
       assert {:ok, current} = Research.current_qualification(ctx.lead.id, actor: ctx.admin)
       assert current.id == overridden.id
       assert length(events_of_type(ctx.tenant, "research.qualification.recorded")) == 2
+      assert {:ok, %{valid?: true}} = SdrAgent.Audit.verify_chain(actor: ctx.admin)
+    end
+
+    test "an override that keeps the outcome leaves the lead alone", ctx do
+      {:ok, _} =
+        Research.override_qualification(override(ctx, %{qualified: true, score: 95}),
+          actor: ctx.reviewer
+        )
+
+      assert lead_status(ctx, ctx.lead) == :qualified
+      assert events_of_type(ctx.tenant, "sales.lead.disqualified_by_override") == []
+    end
+
+    test "a flip to qualified re-qualifies a disqualified lead", ctx do
+      %{lead: lead, qualification: first, claim: claim} = F.qualified_lead!(ctx.tenant, false)
+      assert lead.status == :disqualified
+
+      {:ok, _} =
+        Research.override_qualification(
+          override(%{ctx | lead: lead, qualification: first, claim: claim}, %{
+            qualified: true,
+            score: 80
+          }),
+          actor: ctx.admin
+        )
+
+      {:ok, lead} = Sales.fetch(SdrAgent.Sales.Lead, lead.id, actor: ctx.admin)
+      assert {lead.status, lead.closed_at} == {:qualified, nil}
+      assert [_] = events_of_type(ctx.tenant, "sales.lead.requalified_by_override")
+    end
+
+    test "once outreach has begun an override that flips the outcome is refused", ctx do
+      %{run: run} = F.run!(ctx.tenant)
+
+      {:ok, _} =
+        Sales.update(
+          ctx.lead,
+          :start_outreach,
+          %{decision_id: F.decision!(ctx.tenant, run, ctx.lead, "outreach").id},
+          actor: ctx.agent
+        )
+
+      assert {:error, %Ash.Error.Invalid{} = error} =
+               Research.override_qualification(override(ctx), actor: ctx.reviewer)
+
+      assert Exception.message(error) =~ ":stop"
+      assert lead_status(ctx, ctx.lead) == :in_outreach
+      assert {:ok, current} = Research.current_qualification(ctx.lead.id, actor: ctx.admin)
+      assert current.id == ctx.qualification.id
+      assert length(events_of_type(ctx.tenant, "research.qualification.recorded")) == 1
+    end
+
+    test "re-qualifying by override needs a disqualified lead (a reopened one is refused)",
+         ctx do
+      %{lead: lead, qualification: first, claim: claim} = F.qualified_lead!(ctx.tenant, false)
+      {:ok, reopened} = Sales.update(lead, :reopen, %{}, actor: ctx.admin)
+
+      assert {:error, %Ash.Error.Invalid{} = error} =
+               Research.override_qualification(
+                 override(%{ctx | lead: reopened, qualification: first, claim: claim}, %{
+                   qualified: true
+                 }),
+                 actor: ctx.admin
+               )
+
+      assert Exception.message(error) =~ "disqualified"
+      assert lead_status(ctx, reopened) == :assigned
+    end
+
+    test "a failing lead transition rolls the whole override back", ctx do
+      %{lead: lead, qualification: first, claim: claim} = F.qualified_lead!(ctx.tenant, false)
+
+      # A newer open lead for the same contact: re-qualifying the old one would
+      # break the one-open-lead-per-contact index inside the override transaction.
+      {:ok, _newer} =
+        Sales.create_lead(
+          %{contact_id: lead.contact_id, account_id: lead.account_id, source: :manual},
+          actor: ctx.admin
+        )
+
+      before = length(events(ctx.tenant))
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Research.override_qualification(
+                 override(%{ctx | lead: lead, qualification: first, claim: claim}, %{
+                   qualified: true
+                 }),
+                 actor: ctx.admin
+               )
+
+      assert lead_status(ctx, lead) == :disqualified
+      assert {:ok, current} = Research.current_qualification(lead.id, actor: ctx.admin)
+      assert current.id == first.id
+      assert length(events(ctx.tenant)) == before
+    end
+
+    test "the override lead transitions are not callable on their own", ctx do
+      for {action, actor} <- [
+            {:disqualify_by_override, ctx.reviewer},
+            {:disqualify_by_override, ctx.admin},
+            {:disqualify_by_override, ctx.agent}
+          ] do
+        assert {:error, %Ash.Error.Forbidden{}} =
+                 Sales.update(ctx.lead, action, %{status_reason: "x"}, actor: actor)
+      end
     end
 
     test "an override must supersede the current row, and has a reason", ctx do
