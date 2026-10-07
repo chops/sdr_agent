@@ -25,6 +25,7 @@ defmodule SdrAgent.Demo.Seed do
   alias SdrAgent.Audit.Checks.SeedingAllowed
   alias SdrAgent.Clock
   alias SdrAgent.Demo.Fixtures
+  alias SdrAgent.Outreach
   alias SdrAgent.Sales
 
   @doc "Seeds the demo data set (see the moduledoc)."
@@ -49,7 +50,8 @@ defmodule SdrAgent.Demo.Seed do
         campaign(seeder),
         rows(seeder, Fixtures.accounts(), 100, Sales.Account, &Sales.seed_account/2),
         rows(seeder, Fixtures.contacts(), 200, Sales.Contact, &Sales.seed_contact/2),
-        rows(seeder, Fixtures.leads(), 300, Sales.Lead, &Sales.seed_lead/2)
+        rows(seeder, Fixtures.leads(), 300, Sales.Lead, &Sales.seed_lead/2),
+        suppressions(seeder)
       ]
       |> List.flatten()
 
@@ -113,6 +115,18 @@ defmodule SdrAgent.Demo.Seed do
     for {fixture, n} <- Enum.with_index(fixtures, offset) do
       at(n)
       ensure_sales(seeder, resource, Map.delete(fixture, :expected_outcome), seed_fun)
+    end
+  end
+
+  # S8: written after the leads, so their side effect stops the suppressed
+  # contact's lead, as for any suppression.
+  defp suppressions(seeder) do
+    for {fixture, n} <- Enum.with_index(Fixtures.suppressions(), 400) do
+      at(n)
+
+      ensure(fn -> Outreach.fetch(Outreach.Suppression, fixture.id, actor: seeder) end, fn ->
+        Outreach.seed_suppression(fixture, actor: seeder)
+      end)
     end
   end
 

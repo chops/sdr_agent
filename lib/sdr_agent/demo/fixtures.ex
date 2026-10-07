@@ -13,7 +13,8 @@ defmodule SdrAgent.Demo.Fixtures do
     * `expected_outcome: :qualify` / `:disqualify` — accounts whose fixture
       research (S7) fits or misses the ICP (size, industry or geography);
     * `:suppressed` — the account whose contact (`suppressed_contact_emails/0`)
-      S8 seeds a Suppression for, so the send gate refuses it.
+      gets a seeded Suppression (`suppressions/0`), so its lead is stopped and
+      the suppression and send gates refuse it.
 
   The operator passwords below are demo-only test values for local dev/test
   databases; seeding is refused anywhere else.
@@ -207,5 +208,19 @@ defmodule SdrAgent.Demo.Fixtures do
   def suppressed_contact_emails do
     suppressed = for %{expected_outcome: :suppressed, id: id} <- accounts(), do: id
     for %{account_id: account, email: email} <- contacts(), account in suppressed, do: email
+  end
+
+  # Fixed ids of the seeded suppressions, in `suppressed_contact_emails/0` order.
+  @suppression_ids ["019b8eac-1180-7c11-8e5a-5a77a2e0c404"]
+
+  @doc """
+  The seeded Suppressions (S8): one `email` suppression per
+  `suppressed_contact_emails/0`, reason manual. By S2 their side effect
+  stops the suppressed contact's open lead when the seed writes them.
+  """
+  def suppressions do
+    suppressed_contact_emails()
+    |> Enum.zip(@suppression_ids)
+    |> Enum.map(fn {email, id} -> %{id: id, scope: :email, value: email} end)
   end
 end

@@ -5,12 +5,11 @@ defmodule SdrAgent.SDR.SuppressionCheck do
   orchestrating Jido action, which records a Decision"; spec §8: the model
   never decides legal suppression).
 
-  The Suppression store is S8's. Until it exists the default implementation
-  is `SdrAgent.SDR.SuppressionCheck.NoStore`, which reports
-  `:not_suppressed` and says so in the recorded Decision inputs
-  (`store: "none"`); S8 configures its implementation with
-  `config :sdr_agent, :suppression_check, Module`. The S8 send gate checks
-  suppression again before every send regardless.
+  The configured implementation (`config :sdr_agent, :suppression_check,
+  Module`) is `SdrAgent.SDR.SuppressionCheck.Store`, which reads the S8
+  Outreach store; the fallback `SdrAgent.SDR.SuppressionCheck.NoStore`
+  suppresses nothing and says so in the recorded Decision inputs. The S8
+  send gate checks suppression again before every send regardless.
   """
 
   @callback check(email :: String.t(), context :: map()) ::
