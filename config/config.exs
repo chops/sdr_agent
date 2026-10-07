@@ -129,6 +129,12 @@ config :phoenix_live_view,
 # at the `config/runtime.exs`.
 config :sdr_agent, SdrAgent.Mailer, adapter: Swoosh.Adapters.Local
 
+# Asset builds resolve JS/CSS packages (phoenix, phoenix_html,
+# phoenix_live_view, daisyui, phoenix-colocated) from the Mix deps and build
+# paths. Ask Mix for them: under devenv they live in $MIX_DEPS_PATH and
+# $MIX_BUILD_ROOT, not ./deps and ./_build (S13).
+node_path = [Mix.Project.deps_path(), Mix.Project.build_path()]
+
 # Configure esbuild (the version is required)
 config :esbuild,
   version: "0.25.4",
@@ -136,7 +142,7 @@ config :esbuild,
     args:
       ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
     cd: Path.expand("../assets", __DIR__),
-    env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
+    env: %{"NODE_PATH" => node_path, "MIX_DEPS_PATH" => Mix.Project.deps_path()}
   ]
 
 # Configure tailwind (the version is required)
@@ -148,7 +154,7 @@ config :tailwind,
       --output=priv/static/assets/css/app.css
     ),
     cd: Path.expand("..", __DIR__),
-    env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
+    env: %{"NODE_PATH" => node_path, "MIX_DEPS_PATH" => Mix.Project.deps_path()}
   ]
 
 # Configure Elixir's Logger
