@@ -30,8 +30,9 @@ defmodule SdrAgent.Agents do
       reuse fails), `list_decisions/2`;
     * wire witness (S12) — `link_wire_witness/2` (REC; append-only
       per-exchange lineage), `list_wire_witness_links/2`,
-      `current_wire_witness_links/2`, and `read_reconciliation_payloads/2`
-      (REC; the only path to the scoped Payload read).
+      `current_wire_witness_links/2`, `witness_status/2` (S12c), and
+      `read_reconciliation_payloads/2` (REC; the only path to the scoped
+      Payload read). Reconciliation itself: `SdrAgent.Agents.Witness`.
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -456,6 +457,17 @@ defmodule SdrAgent.Agents do
     |> links_query(opts)
     |> Ash.Query.filter(not exists(successors, true))
     |> Ash.read()
+  end
+
+  @doc """
+  The invocation-level wire-witness answer (S12 C1) over its current links:
+  `{:ok, :unwitnessed | :inferred | :reconciled | :mismatch}`. See
+  `SdrAgent.Agents.Witness.status/1`.
+  """
+  def witness_status(invocation_id, opts) do
+    with {:ok, links} <- current_wire_witness_links(invocation_id, opts) do
+      {:ok, SdrAgent.Agents.Witness.status(links)}
+    end
   end
 
   defp links_query(invocation_id, opts) do

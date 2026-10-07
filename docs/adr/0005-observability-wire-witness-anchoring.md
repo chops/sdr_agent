@@ -187,6 +187,63 @@ unwitnessed with attention, not reconciled. No additional mitigation or
 assurance is claimed. jq is reused from the existing pinned Nix input for
 strict bounded JSON validation; no new Hex/Go dependency is added.
 
+#### S12c reconciliation implementation and queue tradeoff (2026-10-07)
+
+Implemented under Codex RED verification `0c16f778-779e-428c-9af4-b4254f1426de`
+and queue ruling `c22df84e-c201-4e86-9e17-b44247864bd1`.
+
+- **Shared serial queue.** The Oban `reconciliation` queue runs at
+  concurrency **1**. Model wire-witness reconciliation (C8) and S8's
+  delivery reconciliation share it, so delivery reconciliation also
+  serialises. This tradeoff is accepted for serial witness correctness. Only
+  a reviewed amendment to this ADR may raise the limit.
+- **Inert by default.** `SdrAgent.Agents.Witness` reconciles only when
+  `store_root` names the deployed proxy's blob directory; it ships `nil`.
+  The reconciled-method allowlist ships **empty**, so a matching projection
+  is recorded as `inferred` (`method_not_enabled`). A per-call method
+  override exists only under test configuration. Only the separate S12d
+  change, citing real proof, may add a method.
+- **Scheduling and recovery.** A five-minute bounded scan enqueues each
+  terminal ClaudeCLI invocation it finds: at most 50 invocations, updated
+  within the last 24 hours. Each job is REC-owned and runs on the shared
+  queue, as one Oban job plus one `reconcile_model` Operation written in the
+  same transaction and keyed `reconcile_model:<id>:<generation>`. While a
+  warning condition stays live (missing, open, incomplete, ambiguous,
+  unclassified or unsupported), the scan re-drives the invocation at most
+  four generations in total, each at least ten minutes after the previous
+  one finished. Jobs have three attempts of sixty seconds each. Nothing
+  re-sends a model call.
+- **Evidence path.** The store reader is bounded and read-only, and reads
+  raw blobs only from `witness/sha256`. Each record must satisfy the
+  schema-v1 key set and match its own path. Raw digests are re-verified,
+  and no symlink is followed.
+  The projection is `claude-message-json/1+prompt-builder/1`, the ClaudeCLI
+  stdin builder `prompt-builder/1` recorded in provenance; any other builder
+  is unsupported. Links are written in one transaction that locks the
+  invocation first. That transaction keeps at most one live critical
+  condition (mismatch) and one live warning per invocation; an unreadable
+  inventory downgrades current links with successors.
+- **Freshness, a bounded exception to "no file I/O under locks".** Two
+  things are captured before any content is read: the observation identity
+  (`lstat` metadata of at most 64 record entries, plus the blobs those
+  records name). Under the invocation lock, only that metadata is checked
+  again. If it changed, the pass writes nothing and returns
+  `stale_observation`, an error, so the worker retries with a fresh
+  observation. Content reads and audited payload reads remain outside the
+  lock.
+- **Recovery uses Oban's real job state.** Interrupted work is settled only
+  when its Oban job is confirmed dead and the Operation has not changed for
+  ten minutes. A generation that ended discarded or cancelled is re-driven
+  within the same four-generation bound. The scan window is bounded by rows
+  (500), not proven by the budget. Terminal invocations are immutable, so
+  each row's `updated_at` is set once, but a crash-recovery backlog could
+  exceed the window and is then processed as earlier rows age out.
+- **Test scope.** The hermetic end-to-end tests use a fake CLI that writes
+  protocol-shaped store files itself. It is a functional fixture pipeline,
+  **not** proof of transport or independence. S12a's real shim/proxy checks
+  and the mandatory S12d real proof still apply. `traceparent` equality is
+  not claimed, because no expected-context source is persisted.
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),

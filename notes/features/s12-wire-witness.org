@@ -261,6 +261,109 @@ not refused with =Forbidden=.
 ** S12c — reconciliation/projection/attention/e2e
 Separate Phase 4a/4b gate. Runtime reconciled method allowlist stays empty.
 
+Phase 4a candidate v1 =749426a= (rebased from 94ce45b): Codex
+=20560676-5fdb-425f-9ca3-6e1b98c58188= NEEDS_REVIEW — projection version 41 B
+exceeded the S12b 39 B evidence bound; scan-only scheduling lost late/open
+witnesses; missing false-assurance transitions; blob/rollback/concurrency
+coverage. Queue ruling =c22df84e=: shared =reconciliation= queue at
+concurrency 1 (also serialises S8 delivery reconciliation), recorded in
+ADR-0005 at GREEN; inert =store_root nil= default accepted.
+
+Phase 4a candidate v2 (test-only, on main =ba48946= after S12b merged):
+version =claude-message-json/1+prompt-builder/1= (38 B) with builder
+provenance =prompt-builder/1= and a contract test through
+=WitnessEvidence.validate/1=; bounded re-drive (new generation Operation
+key, >= 10 min after the last pass, capped, only while a live warning
+exists); worker retry/discard truthfulness; reconciled→downgrade on later
+extra or unreadable inventory (successor link, history kept); same-version
+mismatch persists; missing→mismatch escalation resolves the warning;
+conservative gzip/incomplete/unknown proxy/schema/ancillary-only; corrupt,
+missing and oversized blobs through reconcile; per-call method override
+refused outside tests; atomic link+attention rollback; real-concurrency
+duplicate enqueue and missing-witness attention. 40 failures, all
+assertions; 1 passing control. The fake CLI is a hermetic functional fixture
+pipeline, not a transport/independence proof (S12a checks + S12d remain).
+Independent peer RED verification required before GREEN.
+
+Codex RED v2 verdict =0c16f778-779e-428c-9af4-b4254f1426de=: VERIFIED for
+GREEN (40 assertion failures + R3 control; generation-key convention is no
+entity delta). GREEN obligations taken: exactly 4 generations then no
+further job, bounds documented, REC lifecycle/atomicity, shared queue = 1.
+
+Phase 4b GREEN: 41 witness tests pass; full suite 584 passed, 4 external
+excluded; =bin/verify=, =mix ash.codegen --check= (no migration) pass; strict
+Credo clean for S12c files. Post-GREEN test edits: RED call helpers replaced
+by direct calls; worker tests run the real enqueued =Oban.Job= (Oban's
+=perform_job/3= rejects =:id=); re-drive cap tightened to exactly 4 plus a
+later scan adding no job.
+
+** S12c review round 1 (Codex =013232c0=, CHANGES REQUESTED @225af68)
+Codex's seven regressions were adopted verbatim as RED
+(=test/sdr_agent/agents/witness/review_regressions_test.exs=, commit
+"review RED"). Codex's raw run =/tmp/s12c-225af68-review-regressions-v2.txt=
+shows them failing on the reviewed head. Dispositions:
+1. Mismatch erasure: fixed. A mismatch head is superseded only when a
+   *different, actually evaluated* projection version disagrees. Weaker or
+   unsupported observations carry no projection and keep the mismatch.
+   Tests cover missing, corrupt, incomplete, unknown-version and
+   now-ambiguous observations.
+2. Non-authoritative inventory: fixed. Current heads absent from the inventory
+   get an =inferred= successor (=exchange_missing=). Everything gone → store
+   error downgrade. Version/encoding/completeness gates apply to every
+   exchange, so an unsupported count_tokens extra is unclassified.
+3. Malformed SSE: fixed. A strict sequence is enforced: message_start first,
+   ordered index-matched blocks (start → typed deltas → stop),
+   message_delta, message_stop last and once; only =ping= is allowed.
+   Error, unknown, early, duplicate, missing-stop, wrong-index and bad-delta
+   frames are unsupported.
+4. Scan starvation: fixed. Eligibility is decided over the bounded window
+   (500 rows; the ADR-0004 200/day cap keeps it covering 24 h) before the
+   50-per-pass cap.
+5. Interrupted attempts: fixed with the existing lifecycle only (no entity
+   delta). The worker levels the Operation with Oban's attempt: an
+   unsettled =running= attempt is failed as =attempt_interrupted= (linking the
+   live Failure), then retried. Exceptions are failed and returned. The scan
+   settles a =running= attempt stale for 10 min (fail) and a =failed= one
+   stale for 10 min (cancel, the kind actor's own transition), after which
+   it is re-drivable.
+6. Unaudited enqueue denial: fixed. =enqueue/2= runs through
+   =Audit.Guard=, before argument checks. Subject must be a terminal
+   ClaudeCLI invocation of the actor's tenant; generation must be in 1..4.
+Important items:
+- Store: reads are bounded from the opened file (cap + 1 bytes) with a
+  post-read lstat identity check (device/inode/size/mtime);
+  group/world-writable entries are refused. The trust boundary and the
+  residual (no O_NOFOLLOW in Erlang; the directory listing is read before
+  its cap) are documented in the module.
+- Stale observation: a metadata-only fingerprint (lstat of at most 64
+  entries, no content read) is re-checked under the invocation lock; a
+  changed store makes the pass a no-op (=status: :stale=). This is a
+  bounded deviation from "no file I/O under mutation locks": metadata only.
+- Rebased onto main =b71d2bd=; =bin/verify= 688 passed / 4 excluded;
+  ash.codegen clean.
+
+** S12c review round 2 (Codex =ebe89448=, CHANGES REQUESTED @f3df718)
+Codex's four new regressions were adopted verbatim (commit "review RED
+round 2"; locally 7/11 passed before the fixes, with the 4 new failing by
+assertion). Dispositions:
+1. Stale success: a changed store under the lock now rolls back with
+   ={:error, :stale_observation}=. The worker fails the attempt and Oban
+   retries with a fresh observation, so it is never completed work.
+2. Blob freshness: the observation identity now includes the =lstat=
+   identity of every blob the records name, captured before content is
+   read and re-checked under the lock (metadata only).
+3. Live jobs and orphans: settling requires the Oban job to be confirmed
+   dead (completed/discarded/cancelled/missing; read-only on the framework
+   table) and the Operation to be unchanged for 10 min. A generation ended
+   discarded/cancelled is re-driven within the 4-generation bound, even
+   without an invocation-level warning. The "becomes re-drivable" test now
+   proves a second generation.
+Important: Store doc no longer claims absolute no-symlink-follow and says
+"path lstat, not fstat". The scan's 500-row window limitation is
+documented (immutable terminal rows; crash-recovery backlog caveat). The
+metadata-only lock re-check is recorded in ADR-0005. All transitions are
+existing REC lifecycle calls; no entity delta.
+
 ** S12d — operator deployment and enablement
 Owner alone deploys nix-darwin. One budgeted synthetic external model call supplies proof; enabling a method is a separate reviewed PR, never an automatic effect of a passing fixture test.
 
@@ -298,6 +401,18 @@ Owner alone deploys nix-darwin. One budgeted synthetic external model call suppl
   WireWitnessLink in Agents, adapter child-env correlation, conditional
   proxy witness store.
 
+** S12c (Claude writer)
+- =Agents.Witness= (reconcile/enqueue/status/live warnings), =Witness.Store=
+  (bounded read-only reader), =Witness.Projection=
+  (=claude-message-json/1+prompt-builder/1=), =Witness.ReconcileWorker= and
+  =Witness.ScanWorker= (cron */5). =ClaudeCLI.render_prompt/2= is the
+  versioned builder (=prompt-builder/1=, canonical schema JSON) recorded in
+  provenance; =ClaudeCLI.unfence/1= is shared with the projection.
+- =Agents.witness_status/2= answers C1 over current links.
+- Config: =reconciliation: 1= (shared, ADR-0005), =Witness store_root: nil=,
+  =reconciled_methods: []=; test-only =allow_method_override=.
+- Not in scope: S12d real external proof/enablement.
+
 ** Earlier
 No SDR production changes before S12b. S12a proxy/shim production implementation is
 pushed under nix-darwin PR #6, pending its M1 review fix and owner deployment.
@@ -310,7 +425,7 @@ implementation writers must evaluate codegen/diagrams under the existing plan.
 - [ ] S12a RED independently verified, then GREEN tests/package/flake checks and reviewed PR
 - [ ] Owner deployment checkpoint recorded (no agent deploy)
 - [X] S12b RED independently verified, then GREEN policy/lifecycle/propagation tests
-- [ ] S12c RED independently verified, then GREEN hermetic reconciliation/e2e tests
+- [X] S12c RED independently verified, then GREEN hermetic reconciliation/e2e tests
 - [ ] Full gate and Ash codegen/diagrams current after rebase
 - [ ] Real external proof metadata reviewed
 - [ ] Separate S12d enablement PR (empty allowlist preserved until then)

@@ -117,6 +117,8 @@ flowchart LR
     Provider -- "invocation id + gen_ai traceparent" --> Adapter
     Adapter -- "child env only" --> Claude
     Claude -. "proxy deployed: correlated exchange" .-> Witness[(Proxy witness store<br/>read by S12c reconciler)]
+    Witness -. "store_root configured: bounded read, raw sha256 re-verified" .-> Reconciler[Witness reconciler<br/>queue reconciliation: 1]
+    Reconciler -- "scoped audited payload read; links + attention, one txn" --> Append
     Resources -.-> Cache
     LiveViews -.-> Grant
     Grant --> Postgres
