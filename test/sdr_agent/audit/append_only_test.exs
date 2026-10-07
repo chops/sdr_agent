@@ -4,13 +4,14 @@ defmodule SdrAgent.Audit.AppendOnlyTest do
 
   alias Ecto.Adapters.SQL
 
-  # S2 "Append-only / immutable resources" for the tables S3 creates.
+  # S2 "Append-only / immutable resources" created through S11.
   @append_only ~w(tenants payloads audit_events provenance_snapshots audit_accesses
-                  retention_markers decisions)
+                  retention_markers decisions audit_anchors anchor_sink_receipts)
   @terminal_immutable ~w(model_invocations tool_invocations)
+  @s11_terminal_immutable ~w(audit_exports)
 
   test "every append-only table carries its UPDATE/DELETE and TRUNCATE triggers" do
-    for table <- @append_only ++ @terminal_immutable do
+    for table <- @append_only ++ @terminal_immutable ++ @s11_terminal_immutable do
       %{rows: rows} =
         SQL.query!(
           SdrAgent.Repo,

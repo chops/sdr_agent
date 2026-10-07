@@ -28,6 +28,10 @@ graph TB
         Payload[Payload]
         AuditAccess[AuditAccess]
         RetentionMarker[RetentionMarker]
+        AuditSigningKey[AuditSigningKey]
+        AuditAnchor[AuditAnchor]
+        AnchorSinkReceipt[AnchorSinkReceipt]
+        AuditExport[AuditExport]
         Kernel{{Audit kernel<br/>append / verify / guard}}
     end
 
@@ -47,10 +51,13 @@ graph TB
     AuditEvent --> ProvenanceSnapshot
     AuditEvent --> Tenant
     AuditChainHead --> Tenant
+    AuditAnchor --> AuditSigningKey
+    AuditAnchor --> AnchorSinkReceipt
+    AuditExport -. anchor ids .-> AuditAnchor
 
     %% Project shape: single
     %% Layering (ADR-0009): Audit <- Accounts <- Operations <- Agents <- Sales <- Research <- Outreach
-    %% Embedded resources (Authorization, Budget, Usage, ExternalRequestRef, InputRef) are omitted.
+    %% Embedded resources are omitted.
 ```
 
 ## Notes

@@ -32,7 +32,7 @@ graph TB
 
     subgraph Ash["Ash Framework"]
         Domains["Domains (3)"]
-        Resources["Resources (12 + 2 auth)"]
+        Resources["Resources (35)"]
     end
 
     subgraph External["Local External Process"]
@@ -67,8 +67,8 @@ graph TB
 | LiveViews | 2 |
 | Channels | 1 |
 | UI Components | 2 |
-| Ash Domains | 1 |
-| Ash Resources | 2 |
+| Ash Domains | 3 |
+| Ash Resources | 35 |
 
 ## Manual Additions Needed
 

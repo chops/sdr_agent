@@ -10,7 +10,8 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
   alias Ecto.Adapters.SQL.Sandbox
   alias SdrAgent.Audit
 
-  @tables ~w(audit_accesses audit_events audit_chain_heads retention_markers decisions
+  @tables ~w(anchor_sink_receipts audit_exports audit_anchors audit_signing_keys
+             audit_accesses audit_events audit_chain_heads retention_markers decisions
              tool_invocations model_invocations agent_runs agent_definitions payloads
              provenance_snapshots tenants)
 
@@ -78,6 +79,39 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
 
     admin = %SdrAgent.Test.Human{id: Ecto.UUID.generate(), role: :admin, tenant_id: tenant.id}
     assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: admin)
+  end
+
+  test "concurrent anchor requests serialize to one contiguous range" do
+    {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
+    anchorer = struct(SdrAgent.Actor, type: :anchorer, tenant_id: tenant.id)
+    kernel = struct(SdrAgent.Actor, type: :kernel, tenant_id: tenant.id)
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, _} =
+      Audit.register_signing_key(%{key_id: "concurrent-key", public_key: public_key},
+        actor: kernel
+      )
+
+    {:ok, _} = Audit.append(%{event_type: "test.anchorable", category: :system}, actor: anchorer)
+
+    results =
+      race(4, fn _ ->
+        with_connection(fn ->
+          SdrAgent.Audit.Anchoring.anchor(
+            trigger: :event_count,
+            actor: anchorer,
+            private_key: private_key,
+            sinks: []
+          )
+        end)
+      end)
+
+    anchors = for {:ok, anchor} <- results, is_struct(anchor), do: anchor
+    reuses = for {:ok, {:existing, anchor}} <- results, do: anchor
+    assert length(anchors) == 1
+    assert length(reuses) == 3
+    assert hd(anchors).from_sequence == 1
+    assert Enum.all?(reuses, &(&1.id == hd(anchors).id))
   end
 
   describe "concurrent decisions with one idempotency key" do

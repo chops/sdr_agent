@@ -131,6 +131,22 @@ resources or trace columns; S3 owns persisted correlation fields.
   holds the decryption key). OpenTimestamps adds a third-party proof that a
   head existed at a time. Exports state which levels apply (ADR-0002).
 
+#### Executable S11 clarifications
+
+- Anchor creation is serialized per tenant on the audit chain-head lock. The
+  genesis range begins at sequence 1; later ranges begin at the preceding
+  anchor's `to_sequence + 1`. Anchor-publication events alone do not force a
+  recursive anchor. An export with no new anchorable event reuses the latest
+  anchor.
+- The signed `sdr-canonical-json/1` statement binds tenant, anchor number,
+  event range, chain-head hash, prior-anchor hash, canonicalization version,
+  application Git SHA, trigger, key id, and signing-time key status.
+- Rotation does not invalidate a historically valid signature. Revocation is
+  reported explicitly and lowers assurance; a signature made at or after the
+  recorded revocation time is invalid.
+- OpenTimestamps pending and upgraded proofs are distinct append-only sink
+  receipts. A pending proof never yields `ots_anchored` assurance.
+
 ## Justification
 
 The three mechanisms answer different audit questions; none substitutes for

@@ -1,0 +1,119 @@
+#+TITLE: Feature: S11 — audit anchoring and signed export
+#+DATE: 2026-10-06
+
+* Summary
+Implement the S11 rows of the reviewed S2 entity model: signed, externally
+published audit-chain anchors; signing-key provenance; signed audit exports;
+and independently verifiable bundles. The implementation follows accepted
+ADR-0002, ADR-0005, ADR-0009 and ADR-0010 without adding a dependency.
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: yes
+Reason: creates persisted anchors, sink receipts, signing-key records and
+terminal audit exports, and adds their public domain actions and lifecycles.
+#+END_EXAMPLE
+
+The source model is =notes/features/s2-entity-model.org=, whose complete table
+received an independent PASS before S3. This table makes the S11 implementation
+delta explicit for a fresh peer soft-stop:
+
+| Entity | Delta in S11 | Attributes / invariants | Relationships / lifecycle | Authorization / audit |
+|--------+--------------+-------------------------+---------------------------+-----------------------|
+| AuditSigningKey | Create the S2 resource and registration/status actions. Private key is never persisted. | Global unique =key_id=; ed25519 public key is exactly 32 bytes; one active key; =active -> rotated/revoked= only; retirement/revocation metadata immutable after transition. | Has many anchors and exports by =key_id=. | KRN registers; ADM rotates/revokes; ADM/AUR/AUD read. Every mutation appends an AuditEvent. |
+| AuditAnchor | Create the append-only signed chain-head statement. | Tenant-scoped unique =anchor_number= and =to_sequence=; contiguous range; head hash matches event at =to_sequence=; prior hash/id bind the anchor chain; canonical statement bytes hash to =anchor_hash=; Ed25519 signature and signing-time key status recorded. | Belongs to signing key and optional prior anchor; has many receipts. No update/delete. | ANC creates; ADM/AUR/AUD read. Creation appends =audit.anchor.created=. |
+| AnchorSinkReceipt | Create append-only publication evidence. | One immutable observation per publication attempt; sink is file/git/ots; status pending/confirmed/failed; Git commit/blob ids and OTS proof payload references are receipts, not mutable anchor columns. | Belongs to anchor. OTS upgrade is a new confirmed receipt referencing the pending proof, never an update. | ANC creates; ADM/AUR/AUD read. Creation appends =audit.anchor.sink_recorded=. |
+| AuditExport | Create terminal-immutable export request/result actions. | Scope =lead/agent_run/draft/sequence_range=; building transitions once to completed or failed; completed carries bundle hash, signature, key id, assurance, anchor ids; terminal rows immutable. | References its export-triggered anchor(s) and signing key by stable ids. | ADM/AUR/AUD create/read. Export first records AuditAccess via =record_access/5=, then triggers anchor; requested/completed/failed writes append events. |
+| AuditAccess | Existing dependency: schema and lifecycle unchanged. | S11 uses existing =access_kind: :export= and fail-closed =record_access/5=. | Existing AuditEvent relationship unchanged. | Export data is not returned/written until access recording succeeds. |
+| AuditEvent / AuditChainHead / Payload | Existing dependency: no entity delta. | Anchor statements bind an observed event range/head; OTS proof bytes and export artifacts use content hashes. | No relationship, policy, or lifecycle change. | Existing verifier and guarded payload access remain authoritative. |
+
+- *Soft-stop verdict:* PASS — Claude, reply
+  =01a11447-6b5a-7c62-9ca4-bdf6cb73bfe4= to consultation
+  =m_1791341531550749208_469bac7d=.
+- *Reviewer obligations:* retain =trigger=, =sdr_agent_git_sha=,
+  =canonicalization_version= and =key_status_at_signing=; keep signing keys as
+  the documented tenant-less exception; serialize per-tenant anchor creation;
+  reuse the latest anchor for an export when no new events exist; test genesis
+  range and concurrent anchoring; rotated keys preserve historical validity,
+  while revoked keys reduce assurance and signatures at/after revocation are
+  invalid. These clarify tests/verification without changing an entity row.
+
+* Scope and Acceptance
+- =SdrAgent.Audit.AnchorSink= behaviour plus deterministic =FileSink=.
+- =GitSink= publishes canonical signed statements to the private protected
+  =chops/sdr_agent-audit-anchors= repository and returns commit/blob evidence.
+- =OpenTimestampsSink= submits only hashes, persists pending proofs and appends
+  upgraded proof receipts. Network coverage is =:external=; default tests use
+  a fake calendar.
+- Ed25519 signing uses OTP =:crypto=. Runtime receives the private key only via
+  =bin/with-secrets= environment mapping; errors and receipts never contain it.
+- An Oban worker anchors after configurable event-count / 15-minute thresholds;
+  every export requests an anchor regardless of cadence.
+- =mix sdr.audit.export= exports lead, agent-run, draft or sequence-range data.
+  The signed bundle includes events, authorized payloads, anchors, receipts and
+  key provenance. A verifier checks chain, hashes, signatures and available Git
+  and OTS evidence and reports the strongest honestly proven assurance level.
+- Every verify/export/read path calls =SdrAgent.Audit.record_access/5= and fails
+  closed if the access row/event cannot be committed.
+
+* Affected Areas
+- Audit domain resources, policies, public APIs, verifier and migrations.
+- Anchor signing, sinks, bundle builder/verifier and Mix tasks.
+- Oban anchoring worker and cadence configuration.
+- Hermetic resource, crypto, sink, export, verifier and worker tests.
+- ADR-0002/0005 clarification and architecture diagram evaluation.
+
+* Implementation Plan
+1. Phase 4a RED: encode resource constraints/transitions/policies; signature and
+   canonical statement vectors; sink contracts; fake Git/calendar behavior;
+   cadence; export/access fail-closed; bundle tamper and assurance cases.
+2. Obtain TDD checkpoint confirmation after tests fail for missing S11 behavior.
+3. Implement resources through Ash actions and generate migrations/snapshots.
+4. Implement signing and sinks; keep command/network boundaries injectable and
+   ensure all errors are secret-safe.
+5. Implement anchoring orchestration and Oban cadence.
+6. Implement export task and offline verifier.
+7. Provision the authorized private GitHub anchor repository, apply branch
+   protection, and verify settings without exposing credentials.
+8. Run focused tests, =mix ash.codegen --check=, =mix precommit=, =bin/verify=,
+   dependency/license/audit gates; rebase onto =origin/main= and rerun CI.
+
+* Risks and Decisions
+- No new library: OTP =:crypto= provides Ed25519; HTTP uses existing Req.
+- Git anchoring is owner-domain evidence, not independent timestamp proof.
+- OTS confirmation is asynchronous; pending evidence must never be reported as
+  OTS-anchored.
+- Anchor publication can partially succeed. The append-only receipt stream
+  preserves each result and supports safe retry without rewriting an anchor.
+- Repository creation/protection is an authorized external side effect. It is
+  performed only after local behavior and command construction are verified.
+- ADR evaluation: amend ADR-0002/0005 only for clarified executable formats or
+  constraints; do not create a competing ADR for their already accepted design.
+
+* TDD Tracking
+RED run (2026-10-06, =MIX_TEST_PARTITION=_s11 mix test= over the four S11
+test modules): *Result: 0/13 passed, 1 external excluded*. All failures are
+the intended missing behavior: undefined S11 modules or missing public Audit
+key APIs. Existing bootstrap/setup completed, so no test failed from database,
+environment, or unrelated application behavior.
+
+| Test group | Count | Intended failure |
+|------------+-------+------------------|
+| Canonical statement + Ed25519 + secret-safe decoding | 3 | AnchorStatement / Signing absent |
+| File, Git and fake OpenTimestamps sinks | 3 | sink modules absent |
+| Anchor creation, concurrency, empty range, key status | 4 | signing-key API / Anchoring absent |
+| Export, access audit, tamper detection | 3 | signing-key API / Export absent |
+
+*TDD Gate Verification:* VERIFIED — Claude reply
+=01a1144b-856d-7b03-9f5f-e5ef311b649b= to consultation
+=m_1791341804567319250_5347c840=; permission granted for Phase 4b. The suggested
+explicit statement assertions for trigger, Git SHA, canonicalization version
+and signing-time key status were added before production code.
+
+GREEN (2026-10-06): focused S11 + real-connection concurrency suite
+=19 passed, 1 external excluded=. Full =bin/verify= result: *141 passed,
+2 external excluded*. The configured private key was decoded through
+=bin/with-secrets= as a 32-byte Ed25519 key without printing key material.
+The final focused run additionally proves an OTS upgrade appends a confirmed
+receipt while preserving the original pending receipt byte-for-byte.

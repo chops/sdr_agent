@@ -38,8 +38,12 @@ defmodule SdrAgent.Audit do
 
   alias SdrAgent.Actor
   alias SdrAgent.Audit.AuditAccess
+  alias SdrAgent.Audit.AuditAnchor
   alias SdrAgent.Audit.AuditChainHead
   alias SdrAgent.Audit.AuditEvent
+  alias SdrAgent.Audit.AuditExport
+  alias SdrAgent.Audit.AuditSigningKey
+  alias SdrAgent.Audit.AnchorSinkReceipt
   alias SdrAgent.Audit.Guard
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Audit.Payload
@@ -55,6 +59,10 @@ defmodule SdrAgent.Audit do
     resource SdrAgent.Audit.ProvenanceSnapshot
     resource SdrAgent.Audit.AuditAccess
     resource SdrAgent.Audit.RetentionMarker
+    resource SdrAgent.Audit.AuditSigningKey
+    resource SdrAgent.Audit.AuditAnchor
+    resource SdrAgent.Audit.AnchorSinkReceipt
+    resource SdrAgent.Audit.AuditExport
   end
 
   @doc "Version of the authorization policy set recorded on every event."
@@ -151,6 +159,36 @@ defmodule SdrAgent.Audit do
   def record_access(kind, target_resource, target_ref, purpose, opts) do
     Kernel.record_access(kind, target_resource, target_ref, purpose, Keyword.get(opts, :actor))
   end
+
+  @doc "Registers public signing-key provenance. Private key material is rejected by the resource API."
+  def register_signing_key(attrs, opts) do
+    AuditSigningKey
+    |> Ash.Changeset.for_create(:register, attrs, Kernel.opts())
+    |> Ash.create(actor: Keyword.get(opts, :actor))
+  end
+
+  @doc "Marks a signing key rotated."
+  def rotate_signing_key(id, opts) do
+    with {:ok, key} <- Ash.get(AuditSigningKey, id, actor: Keyword.get(opts, :actor)) do
+      key
+      |> Ash.Changeset.for_update(:rotate, %{}, actor: Keyword.get(opts, :actor))
+      |> Ash.update()
+    end
+  end
+
+  @doc "Revokes a signing key with an operator-visible reason."
+  def revoke_signing_key(id, reason, opts) do
+    with {:ok, key} <- Ash.get(AuditSigningKey, id, actor: Keyword.get(opts, :actor)) do
+      key
+      |> Ash.Changeset.for_update(:revoke, %{revocation_reason: reason},
+        actor: Keyword.get(opts, :actor)
+      )
+      |> Ash.update()
+    end
+  end
+
+  @doc "S11 resource modules exposed for internal orchestration and audits."
+  def s11_resources, do: [AuditSigningKey, AuditAnchor, AnchorSinkReceipt, AuditExport]
 
   @doc "Sets a retention marker (ADM); corrections must supersede the current marker."
   def set_retention_marker(attrs, opts) do
