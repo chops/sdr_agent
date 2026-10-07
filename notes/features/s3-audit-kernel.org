@@ -159,21 +159,95 @@ with the peer reviewing the RED evidence on the PR.
 -----
 
 * Implementation Notes
-(Added during Phase 4b)
+
+GREEN: =MIX_TEST_PARTITION=_s3 bin/verify= → *115 passed* (30 existing + 85
+S3; the concurrency module gained a second test in 4b, see below).
+
+** Public audit API (for S5–S11)
+- =SdrAgent.Audit.append/2= is the single append entry point; domain actions
+  use the shared change =SdrAgent.Audit.Changes.AppendEvent= (after_action,
+  same transaction; works with atomic updates). Options: =event_type=,
+  =category=, =links= (event field ← record field), =tenant=, =arguments=,
+  =version_refs: {mod, fun}=.
+- Every new resource: =SetTenant= (tenant from actor), =TraceIds= (row
+  trace/span ids), the auditor guard policy, a =trace_id= check constraint,
+  =SdrAgent.Audit.SQL.append_only/1= or =terminal_immutable/3= triggers in
+  =custom_statements=, and =def __sdr_audited__, do: true= when every write is
+  audited (the verifier then checks =record_sha256= of the newest event
+  against the live row).
+- Lifecycles: =SdrAgent.Audit.Changes.Transition= (=from:=, =to:=) +
+  =transitions/0= data + a table test (see =agents_test.exs=).
+- Domain code interfaces wrap calls in =SdrAgent.Audit.Guard.run/3= with
+  =%{resource:, action:, guarded?:, subject_id:}=; guarded calls inside a
+  transaction must use =SdrAgent.Audit.transaction/1= (denials are appended
+  after it ends), any other enclosing transaction raises.
+- Payloads: =Audit.put_payload/3= (system actors), =Audit.read_content/2=
+  (ADM/REV/AUR/AUD; AuditAccess first, fail closed); composite FKs via
+  =SdrAgent.Audit.SQL.payload_fk/2=.
+- =Audit.record_access/5= for S10 views and S11 exports;
+  =Audit.verify_chain/1= returns =%{valid?, issues, last_sequence,
+  events_checked}= (issue types in =SdrAgent.Audit.Verifier=).
+
+** Deviations and findings during 4b (each with evidence)
+1. *Budget counters use a row lock, not an atomic UPDATE.* Ash refuses
+   expression updates of embedded attributes ("Embedded attributes do not
+   support atomic updates with expressions"). The counter actions are
+   =require_atomic? false= and re-read the run =FOR UPDATE= inside the action
+   transaction (the alternative S2 "Risks" names). A real-concurrency test
+   (12 processes, max 3) proves exactly 3 reservations succeed. Lifecycle
+   transitions stay atomic (guard inside the SQL =UPDATE=).
+2. *Unauthorized reads return an empty result, not Forbidden.* The project's
+   Ash config filters statically forbidden reads. Test 6 of
+   =policy_test.exs= was changed from =Forbidden= to ={:ok, []}= on that
+   evidence (no data leaks either way).
+3. *Direct-append test input.* The RED test passed an incomplete attribute
+   set, so Ash reported =Invalid= before authorization; the test now forges a
+   complete event (copied from genesis) and still expects =Forbidden= for an
+   admin and for a kernel actor without kernel context.
+4. *Auditor attempts are refused by the guard before the action runs*, so an
+   invalid AUR attempt is also denied and audited (contract: every AUR
+   mutation is denied and audited); resource policies remain as defence in
+   depth.
+5. *Guarded generic actions run with =transaction? false=.* Ash rolls back an
+   enclosing transaction when an action that opened/joined it fails
+   (=transaction_rollback_on_error?=); the kernel opens or joins the
+   transaction itself instead, so a refused =verify_chain= inside
+   =Audit.transaction/1= does not abort the caller (probe confirmed). S8: a
+   refused *create/update* inside a caller's transaction did not abort it
+   either in the probe, but guarded S8 actions should be re-probed.
+6. *Append-only fixture.* The delete-rejection test hit an empty
+   =tool_invocations= table (row triggers do not fire on zero rows); the
+   setup now creates a tool invocation.
+7. ModelInvocation also emits =model.invocation.sent= (plan choice 5) and
+   AgentRun emits =agents.run.model_call_reserved|model_call_settled|
+   tool_call_recorded= (S2 "AE: all writes").
+8. Ledger-resource notifications are dropped (they have no notifiers);
+   multi-step Agents writes send Ash notifications after commit.
+
+** Architecture evaluation
+- New Ash domains: YES (=SdrAgent.Audit=, =SdrAgent.Agents=); new resources:
+  YES; cross-domain data flow: YES (every domain → audit kernel).
+- Ran =bin/architecture_diagram.sh=; it overwrote S4's manual telemetry
+  enhancements in =components= and =data-flow=, so those were restored and
+  edited by hand (domain counts, audit-kernel flow);
+  =domain-boundaries= rewritten by hand with relationships and layering
+  (embedded resources omitted).
 
 * Completion Checklist
 
 ** Phase 4
-- [ ] All Phase 4a tests verified failing
-- [ ] TDD gate confirmed
-- [ ] All steps implemented
-- [ ] All tests passing
-- [ ] Compiled with --warnings-as-errors
-- [ ] Ash boundaries respected
+- [X] All Phase 4a tests verified failing (0/84; NEEDS_REVIEW recorded above)
+- [X] TDD gate confirmed (unattended charter; peer reviews on the PR)
+- [X] All steps implemented
+- [X] All tests passing
+- [X] Compiled with --warnings-as-errors
+- [X] Ash boundaries respected (Audit holds no FK or call to a higher domain;
+      the verifier resolves audited resources by name at run time)
 
 ** Phase 5 (Verify + Finalize)
-- [ ] Full test suite passes
-- [ ] Moduledocs reviewed for new/modified public modules
-- [ ] Plan document updated with implementation notes
-- [ ] Architecture evaluation reported: _unchanged_ / _diagrams updated_
-- [ ] ADR status updated to "Accepted" (if applicable)
+- [X] Full test suite passes (=bin/verify=, 115 tests)
+- [X] =mix ash.codegen --check=, =mix credo=, =mix hex.audit= clean
+- [X] Moduledocs reviewed for new/modified public modules
+- [X] Plan document updated with implementation notes
+- [X] Architecture evaluation reported: _diagrams updated_
+- [X] ADR status: no new ADR (none required)
