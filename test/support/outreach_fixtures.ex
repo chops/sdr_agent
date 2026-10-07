@@ -67,12 +67,24 @@ defmodule SdrAgent.OutreachFixtures do
     approvals
   end
 
-  @doc "Approval input binding the draft's current revision."
+  @doc """
+  Approval input binding the draft's current revision and the recipient
+  email as a reviewer sees it now (the contact's email, read under kernel
+  context when the input is built — a later email change makes it stale).
+  """
   def approval_input(revision),
     do: %{
       draft_revision_id: revision.id,
-      content_sha256: Base.encode16(revision.content_sha256, case: :lower)
+      content_sha256: Base.encode16(revision.content_sha256, case: :lower),
+      recipient_email: recipient_email(revision)
     }
+
+  defp recipient_email(revision) do
+    opts = SdrAgent.Audit.Kernel.opts(revision.tenant_id)
+    {:ok, draft} = Ash.get(Outreach.Draft, revision.draft_id, opts)
+    {:ok, contact} = Ash.get(SdrAgent.Sales.Contact, draft.recipient_contact_id, opts)
+    to_string(contact.email)
+  end
 
   @doc "Approves the draft's current revision as `actor`."
   def approve!(ctx, draft, actor) do

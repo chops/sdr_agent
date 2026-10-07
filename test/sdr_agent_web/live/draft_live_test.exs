@@ -140,6 +140,11 @@ defmodule SdrAgentWeb.DraftLiveTest do
       {:ok, view, _html} = open(conn, :reviewer, ctx.draft)
       assert has_element?(view, "#binding-recipient", to_string(contact.email))
 
+      assert has_element?(
+               view,
+               "#approve-form input[name='approve[recipient_email]'][value='#{contact.email}']"
+             )
+
       {:ok, _moved} =
         SdrAgent.Sales.update(contact, :change_email, %{email: moved}, actor: ctx.admin)
 
