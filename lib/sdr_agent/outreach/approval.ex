@@ -15,7 +15,9 @@ defmodule SdrAgent.Outreach.Approval do
   a row lock on the draft):
 
     * `:approve` (ADM, REV; guarded) — only for the draft's *current*
-      revision with the exact content hash the reviewer saw, while the draft
+      revision with the exact content hash the reviewer saw, and for the
+      recipient email the reviewer saw (`recipient_email`, required, equal
+      ignoring case to the locked contact's current email), while the draft
       is pending review, for an active, unsuppressed contact of an open
       campaign; the approver may have authored the revision (recorded).
       The grant moves the draft to `queued` and inserts the pending
@@ -120,6 +122,10 @@ defmodule SdrAgent.Outreach.Approval do
       accept [:draft_id]
       argument :draft_revision_id, :uuid, allow_nil?: false
       argument :content_sha256, :string, allow_nil?: false
+
+      # The recipient email the reviewer saw (review #17 MF1); compared to
+      # the locked contact's email by BindApproval. Never a fallback.
+      argument :recipient_email, :ci_string, allow_nil?: false
       argument :revision_author, :map
       argument :diff_hashes, :map
       change SdrAgent.Audit.Changes.SetTenant
@@ -140,6 +146,8 @@ defmodule SdrAgent.Outreach.Approval do
       require_attributes [:reason]
       argument :draft_revision_id, :uuid, allow_nil?: false
       argument :content_sha256, :string, allow_nil?: false
+      # Optional: a rejection authorizes nothing, so it is not compared.
+      argument :recipient_email, :ci_string
       argument :revision_author, :map
       argument :diff_hashes, :map
       change SdrAgent.Audit.Changes.SetTenant

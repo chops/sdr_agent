@@ -250,7 +250,8 @@ defmodule SdrAgentWeb.DraftLive do
 
     binding = %{
       draft_revision_id: params["draft_revision_id"],
-      content_sha256: params["content_sha256"]
+      content_sha256: params["content_sha256"],
+      recipient_email: shown
     }
 
     case current_recipient(socket) do
