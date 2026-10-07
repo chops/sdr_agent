@@ -7,7 +7,8 @@ defmodule SdrAgent.Agents.Witness.ScanWorker do
 
   It considers the terminal `:claude_cli` invocations updated in the last
   24 hours (`SdrAgent.Clock`; at most 500 rows, which the ADR-0004 daily
-  model-call cap of 200 keeps above the real window), oldest first, decides
+  model-call cap normally keeps above the real window — see below), oldest
+  first, decides
   eligibility for all of them, and then enqueues at most 50 per pass, so
   invocations that are settled or not yet eligible never starve later ones:
 
@@ -17,12 +18,21 @@ defmodule SdrAgent.Agents.Witness.ScanWorker do
       warning, its latest Operation is terminal and finished at least ten
       minutes ago, and fewer than `Witness.max_generations/0` exist.
 
-  It also settles interrupted work truthfully, as the kind's own actor: a
-  latest Operation still `running` ten minutes after its last update (its
-  sixty-second job was killed) is failed with an `attempt_interrupted`
-  Failure (and discarded at its attempt limit); one still `failed` ten
-  minutes after its last update has no live job left and is cancelled. Both
-  then become eligible for re-drive.
+  It also settles interrupted work truthfully, as the kind's own actor, only
+  when the Operation's Oban job is confirmed dead (completed, discarded,
+  cancelled or gone) and the Operation has not changed for ten minutes: a
+  `running` one is failed with an `attempt_interrupted` Failure (discarded
+  at its attempt limit) and a remaining `failed` one is cancelled. Live jobs
+  (available, scheduled, retryable, executing) are never touched. A
+  generation that ended discarded or cancelled is re-driven like a live
+  warning, within the same bounds.
+
+  The window is bounded by rows, not proven by the budget: terminal
+  ModelInvocations are immutable, so `updated_at` is set once, at the
+  terminal transition, and the ADR-0004 cap of 200 reservations per UTC day
+  normally keeps a 24-hour window well below 500 rows. A crash-recovery
+  backlog (many old `sent` calls marked `unknown` at once) could exceed it;
+  rows beyond the first 500 then wait until earlier rows leave the window.
   """
   use Oban.Worker, queue: :reconciliation, max_attempts: 1
 
@@ -35,6 +45,7 @@ defmodule SdrAgent.Agents.Witness.ScanWorker do
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Clock
   alias SdrAgent.Operations
+  alias SdrAgent.Repo
 
   @batch 50
   @window_rows 500
@@ -104,38 +115,57 @@ defmodule SdrAgent.Agents.Witness.ScanWorker do
 
   defp next_generation(invocation, [], _now), do: [{invocation, 1}]
 
+  # Re-drive after a bounded interval, at most `max_generations`: when the
+  # latest generation ended without completing (discarded or cancelled —
+  # exhausted or interrupted work), or completed while a warning remains.
   defp next_generation(invocation, operations, now) do
     latest = List.last(operations)
 
     if length(operations) < Witness.max_generations() and redrivable?(latest, now) and
-         Witness.live_warning?(invocation),
+         (latest.status in [:discarded, :cancelled] or Witness.live_warning?(invocation)),
        do: [{invocation, length(operations) + 1}],
        else: []
   end
 
-  # Interrupted work of the latest Operation, settled by its kind's actor.
+  # Interrupted work of the latest Operation, settled by its kind's actor —
+  # only when its Oban job is confirmed dead (completed, discarded, cancelled
+  # or gone); available, scheduled, retryable and executing jobs are live
+  # work and are left alone whatever their age.
   defp settle([], _now, _actor), do: []
 
   defp settle(operations, now, actor) do
     latest = List.last(operations)
 
     settled =
-      cond do
-        latest.status == :running and stale?(latest, now) ->
-          {:ok, failed} =
-            Operations.fail_operation(latest, interrupted(latest), actor: actor)
-
-          failed
-
-        latest.status == :failed and stale?(latest, now) ->
-          {:ok, cancelled} = Operations.cancel_operation(latest, actor: actor)
-          cancelled
-
-        true ->
-          latest
-      end
+      if latest.status in [:running, :failed] and stale?(latest, now) and job_dead?(latest),
+        do: abandon(latest, actor),
+        else: latest
 
     List.replace_at(operations, -1, settled)
+  end
+
+  # running → failed (attempt_interrupted; discarded at its attempt limit),
+  # then a failed Operation whose job is gone → cancelled.
+  defp abandon(%{status: :running} = operation, actor) do
+    {:ok, failed} = Operations.fail_operation(operation, interrupted(operation), actor: actor)
+    abandon(failed, actor)
+  end
+
+  defp abandon(%{status: :failed} = operation, actor) do
+    {:ok, cancelled} = Operations.cancel_operation(operation, actor: actor)
+    cancelled
+  end
+
+  defp abandon(operation, _actor), do: operation
+
+  # Oban's job row is framework-owned (not an Ash resource): read-only state check.
+  defp job_dead?(%{oban_job_id: nil}), do: true
+
+  defp job_dead?(%{oban_job_id: job_id}) do
+    case Repo.get(Oban.Job, job_id) do
+      nil -> true
+      %Oban.Job{state: state} -> state in ["completed", "discarded", "cancelled"]
+    end
   end
 
   defp interrupted(%{last_failure_id: id}) when is_binary(id), do: %{failure_id: id}

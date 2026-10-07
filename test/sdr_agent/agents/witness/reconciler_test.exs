@@ -330,7 +330,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
         Proxy.exchange!(ctx.root, invocation.id, request: "{}", response: "{}")
       end
 
-      assert {:ok, %{status: :stale}} =
+      assert {:error, :stale_observation} =
                Witness.reconcile(invocation.id,
                  actor: ctx.rec,
                  store_root: ctx.root,

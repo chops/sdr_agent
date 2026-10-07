@@ -197,21 +197,29 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
 
     test "a killed attempt is settled by the scan and becomes re-drivable", ctx do
       invocation = claude_invocation!(ctx, "killed-1")
+      sent = length(events_of_type(ctx.tenant, "model.invocation.sent"))
       assert {:ok, operation} = enqueue(invocation, ctx.rec)
-      # Attempt 1 started, then the process was killed by the job timeout.
+      [job] = all_enqueued(worker: @reconcile_worker)
+      # Attempt 1 started, then the process was killed and Oban gave up on it.
       {:ok, _running} = SdrAgent.Operations.start_operation(operation, actor: ctx.rec)
 
+      # Live job: never settled, whatever its age.
       SdrAgent.Clock.freeze(DateTime.add(ctx.start, 11, :minute))
       assert :ok = perform(@scan_worker, %{})
       {:ok, op} = SdrAgent.Operations.get_operation(operation.id, actor: ctx.rec)
-      assert op.status == :failed
-      assert op.attempts == 1
+      assert op.status == :running
+
+      job |> Ecto.Changeset.change(state: "discarded") |> Repo.update!()
+      assert :ok = perform(@scan_worker, %{})
+      {:ok, op} = SdrAgent.Operations.get_operation(operation.id, actor: ctx.rec)
+      assert {op.status, op.attempts} == {:cancelled, 1}
+      assert {:ok, [_]} = reconcile_operations(ctx, invocation)
 
       SdrAgent.Clock.freeze(DateTime.add(ctx.start, 22, :minute))
       assert :ok = perform(@scan_worker, %{})
-      {:ok, op} = SdrAgent.Operations.get_operation(operation.id, actor: ctx.rec)
-      assert op.status == :cancelled
-      assert length(elem(reconcile_operations(ctx, invocation), 1)) == 1
+      assert {:ok, [_, second]} = reconcile_operations(ctx, invocation)
+      assert second.idempotency_key =~ ":2"
+      assert length(events_of_type(ctx.tenant, "model.invocation.sent")) == sent
     end
 
     test "a failing attempt fails its Operation truthfully, retries, then discards", ctx do

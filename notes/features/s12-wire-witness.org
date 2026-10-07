@@ -342,6 +342,28 @@ Important items:
 - Rebased onto main =b71d2bd=; =bin/verify= 688 passed / 4 excluded;
   ash.codegen clean.
 
+** S12c review round 2 (Codex =ebe89448=, CHANGES REQUESTED @f3df718)
+Codex's four new regressions were adopted verbatim (commit "review RED
+round 2"; locally 7/11 passed before the fixes, with the 4 new failing by
+assertion). Dispositions:
+1. Stale success: a changed store under the lock now rolls back with
+   ={:error, :stale_observation}=. The worker fails the attempt and Oban
+   retries with a fresh observation, so it is never completed work.
+2. Blob freshness: the observation identity now includes the =lstat=
+   identity of every blob the records name, captured before content is
+   read and re-checked under the lock (metadata only).
+3. Live jobs and orphans: settling requires the Oban job to be confirmed
+   dead (completed/discarded/cancelled/missing; read-only on the framework
+   table) and the Operation to be unchanged for 10 min. A generation ended
+   discarded/cancelled is re-driven within the 4-generation bound, even
+   without an invocation-level warning. The "becomes re-drivable" test now
+   proves a second generation.
+Important: Store doc no longer claims absolute no-symlink-follow and says
+"path lstat, not fstat". The scan's 500-row window limitation is
+documented (immutable terminal rows; crash-recovery backlog caveat). The
+metadata-only lock re-check is recorded in ADR-0005. All transitions are
+existing REC lifecycle calls; no entity delta.
+
 ** S12d — operator deployment and enablement
 Owner alone deploys nix-darwin. One budgeted synthetic external model call supplies proof; enabling a method is a separate reviewed PR, never an automatic effect of a passing fixture test.
 

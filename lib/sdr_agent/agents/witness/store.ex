@@ -11,8 +11,9 @@ defmodule SdrAgent.Agents.Witness.Store do
 
   Every path is derived only from a validated lowercase invocation UUID,
   validated record names and validated digests. Each component below the
-  root is `lstat`ed and must be a real directory or regular file — no
-  symlink is ever followed. Entry counts, record and blob sizes are capped;
+  root is `lstat`ed and must be a real directory or regular file, so a
+  symlink found by those checks is refused (see the trust boundary below for
+  what the checks cannot exclude). Entry counts, record and blob sizes are capped;
   records must match the strict schema-v1 key set and name their own path;
   blob bytes are re-hashed. The legacy preview namespace `<root>/sha256` is
   never read. Nothing is written, and no request header exists in the store.
@@ -20,8 +21,8 @@ defmodule SdrAgent.Agents.Witness.Store do
   Trust boundary: the store is the owner's proxy directory (0700/0600,
   atomically published by hard link). Group- or world-writable entries are
   refused. Reads are bounded (at most cap + 1 bytes from the opened file)
-  and the path is re-`lstat`ed afterwards: the same device/inode/size/mtime
-  must still be there. Erlang offers no `O_NOFOLLOW`, so a same-user process
+  and the *path* is re-`lstat`ed afterwards (not an `fstat` of the open
+  descriptor): the same device/inode/size/mtime must still be there. Erlang offers no `O_NOFOLLOW`, so a same-user process
   that swaps a component between the checks and the open is outside what
   this reader can exclude (such a process can equally alter the proxy that
   writes the store); a directory listing is read whole before its entry cap
@@ -100,6 +101,21 @@ defmodule SdrAgent.Agents.Witness.Store do
       other -> other
     end
   end
+
+  @doc """
+  Metadata identity of blob `digest` (`{device, inode, size, mtime}` from
+  `lstat`, or the error `blob/2` would return); no content is read.
+  """
+  def blob_identity(root, digest) when is_binary(root) and is_binary(digest) do
+    with true <- Regex.match?(@hex64, digest) || {:error, :invalid_digest},
+         {:ok, dir} <-
+           safe_dir(root, ["witness", "sha256", binary_part(digest, 0, 2)], :blob_missing),
+         {:ok, _path, _size, stat} <- regular(dir, digest <> ".json", :blob_missing) do
+      {:ok, {stat.major_device, stat.inode, stat.size, stat.mtime}}
+    end
+  end
+
+  def blob_identity(_root, _digest), do: {:error, :invalid_digest}
 
   @doc """
   A metadata-only fingerprint of the invocation's inventory (entry names

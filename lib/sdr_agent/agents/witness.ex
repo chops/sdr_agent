@@ -153,24 +153,41 @@ defmodule SdrAgent.Agents.Witness do
 
   ## Observation (no database locks held)
 
+  # The observation identity (record metadata plus the metadata of every raw
+  # blob the records name) is captured before any content is read, and is
+  # re-checked under the invocation lock (`fresh/2`).
   defp observe(invocation, root, actor, hook) do
-    fingerprint = Store.fingerprint(root, invocation.id)
+    records = Store.fingerprint(root, invocation.id)
 
     result =
       case Store.inventory(root, invocation.id) do
         {:ok, %{exchanges: exchanges}} ->
-          evaluate(invocation, root, exchanges, actor)
+          digests = blob_digests(exchanges)
+          blobs = blob_identities(root, digests)
+
+          with {:ok, observation} <- evaluate(invocation, root, exchanges, actor),
+               do: {:ok, Map.merge(observation, %{digests: digests, blobs: blobs})}
 
         {:error, reason} ->
           reason = Atom.to_string(reason)
-          {:ok, %{error: reason, exchanges: [], warnings: [reason]}}
+          {:ok, %{error: reason, exchanges: [], warnings: [reason], digests: [], blobs: []}}
       end
 
     hook.()
 
     with {:ok, observation} <- result,
-         do: {:ok, Map.merge(observation, %{root: root, fingerprint: fingerprint})}
+         do: {:ok, Map.merge(observation, %{root: root, fingerprint: records})}
   end
+
+  defp blob_digests(exchanges) do
+    exchanges
+    |> Enum.flat_map(&[&1.record["request_sha256"], &1.record["response_sha256"]])
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp blob_identities(root, digests), do: Enum.map(digests, &Store.blob_identity(root, &1))
 
   defp evaluate(invocation, root, exchanges, actor) do
     primaries =
@@ -322,17 +339,24 @@ defmodule SdrAgent.Agents.Witness do
            :ok <- attention(invocation, links, observation.warnings, actor) do
         %{status: status(links), links: links, attention: observation.warnings}
       else
-        :stale -> %{status: :stale, links: [], attention: []}
+        # Never completed work: the caller (worker) retries with a fresh
+        # observation; nothing was written.
+        :stale -> Repo.rollback(:stale_observation)
         {:error, error} -> Repo.rollback(error)
       end
     end)
   end
 
   # Under the invocation lock, a metadata-only re-check (lstat of at most 64
-  # entries, no content read) that the store still holds what was observed;
-  # an older observation must not overwrite the outcome of a newer one.
-  defp fresh(invocation, %{root: root, fingerprint: fingerprint}) do
-    if Store.fingerprint(root, invocation.id) == fingerprint, do: :ok, else: :stale
+  # record entries and of the blobs they name, no content read) that the
+  # store still holds what was observed; an older observation must not
+  # overwrite the outcome of a newer one. A changed store returns
+  # `{:error, :stale_observation}` and writes nothing.
+  defp fresh(invocation, %{root: root, fingerprint: fingerprint, digests: digests, blobs: blobs}) do
+    if Store.fingerprint(root, invocation.id) == fingerprint and
+         blob_identities(root, digests) == blobs,
+       do: :ok,
+       else: :stale
   end
 
   defp lock(invocation) do

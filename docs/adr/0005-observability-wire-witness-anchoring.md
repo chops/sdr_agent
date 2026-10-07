@@ -223,6 +223,21 @@ and queue ruling `c22df84e-c201-4e86-9e17-b44247864bd1`.
   invocation first. That transaction keeps at most one live critical
   condition (mismatch) and one live warning per invocation; an unreadable
   inventory downgrades current links with successors.
+- **Freshness, a bounded exception to "no file I/O under locks".** Two
+  things are captured before any content is read: the observation identity
+  (`lstat` metadata of at most 64 record entries, plus the blobs those
+  records name). Under the invocation lock, only that metadata is checked
+  again. If it changed, the pass writes nothing and returns
+  `stale_observation`, an error, so the worker retries with a fresh
+  observation. Content reads and audited payload reads remain outside the
+  lock.
+- **Recovery uses Oban's real job state.** Interrupted work is settled only
+  when its Oban job is confirmed dead and the Operation has not changed for
+  ten minutes. A generation that ended discarded or cancelled is re-driven
+  within the same four-generation bound. The scan window is bounded by rows
+  (500), not proven by the budget. Terminal invocations are immutable, so
+  each row's `updated_at` is set once, but a crash-recovery backlog could
+  exceed the window and is then processed as earlier rows age out.
 - **Test scope.** The hermetic end-to-end tests use a fake CLI that writes
   protocol-shaped store files itself. It is a functional fixture pipeline,
   **not** proof of transport or independence. S12a's real shim/proxy checks
