@@ -11,16 +11,39 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
 
   @behaviour SdrAgent.AI.ModelProvider
 
-  @timeout 30_000
+  @rpc_timeout 5_000
+  @turn_timeout 30_000
+  @interrupt_timeout 2_000
+  @allowed_item_types ["agentMessage", "reasoning", "userMessage"]
+  @disabled_tool_features [
+    "agent_message_board",
+    "apps",
+    "browser_use",
+    "code_mode",
+    "computer_use",
+    "goals",
+    "image_generation",
+    "js_repl",
+    "multi_agent",
+    "plugins",
+    "request_permissions_tool",
+    "shell_tool",
+    "skill_search",
+    "sleep_tool",
+    "standalone_web_search",
+    "tool_suggest",
+    "unified_exec",
+    "view_image"
+  ]
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc "Checks cached-login state and chooses an available catalog model."
-  def preflight(server), do: GenServer.call(server, :preflight, @timeout)
+  def preflight(server), do: GenServer.call(server, :preflight, @rpc_timeout * 5)
 
   @doc "Runs one structured-output turn. Calls are serialized by the adapter process."
   def complete(server, request) when is_pid(server) and is_map(request) do
-    GenServer.call(server, {:complete, request}, @timeout)
+    GenServer.call(server, {:complete, request}, :infinity)
   end
 
   @impl SdrAgent.AI.ModelProvider
@@ -33,12 +56,16 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
   def init(opts) do
     command = Keyword.fetch!(opts, :command)
     args = Keyword.get(opts, :args, ["app-server"])
+    codex_home = opts |> Keyword.fetch!(:codex_home) |> Path.expand()
+    workspace = private_workspace!()
+    env = [{~c"CODEX_HOME", String.to_charlist(codex_home)}]
 
     port =
       Port.open({:spawn_executable, command}, [
         :binary,
         :exit_status,
         {:args, args},
+        {:env, env},
         {:line, 1_048_576}
       ])
 
@@ -48,8 +75,16 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
        next_id: 1,
        model: Keyword.get(opts, :model),
        preflight: nil,
-       buffered: ""
+       buffered: "",
+       turn_timeout: Keyword.get(opts, :turn_timeout, @turn_timeout),
+       workspace: workspace
      }}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    _ = File.rmdir(state.workspace)
+    :ok
   end
 
   @impl true
@@ -69,7 +104,6 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
         output: validated,
         provider: :codex_app_server,
         model: preflight.model,
-        sequence: sequence(thread_id),
         provenance: preflight,
         raw_request: %{thread_start: thread_request, turn_start: turn_request},
         raw_response: %{thread_start: thread_result, turn: turn_result.raw}
@@ -110,8 +144,11 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
         catalog: sanitize_model(model),
         client_name: "sdr_agent",
         config: sanitize_config(config),
-        data_controls: %{improve_model_for_everyone: false, recorded_on: "2026-10-06"},
-        model: model["model"] || model["id"]
+        model: model["model"] || model["id"],
+        owner_attested_data_controls: %{
+          improve_model_for_everyone: false,
+          recorded_on: "2026-10-06"
+        }
       }
 
       {{:ok, preflight}, %{state | preflight: preflight}}
@@ -124,7 +161,8 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
   defp start_thread(state, model) do
     rpc(state, "thread/start", %{
       "approvalPolicy" => "never",
-      "cwd" => File.cwd!(),
+      "config" => tool_free_config(),
+      "cwd" => state.workspace,
       "model" => model,
       "sandbox" => "read-only"
     })
@@ -137,11 +175,14 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
       "threadId" => thread_id
     }
 
-    {raw_request, reply, state} = rpc(state, "turn/start", params)
+    deadline = deadline(state.turn_timeout)
+    {raw_request, reply, state} = rpc(state, "turn/start", params, deadline)
 
     case reply do
       {:ok, started} ->
-        case await_turn(state, thread_id, nil, []) do
+        turn_id = get_in(started, ["turn", "id"])
+
+        case await_turn(state, thread_id, turn_id, deadline, nil, []) do
           {:ok, text, messages, state} ->
             {raw_request, {:ok, %{started: started, text: text, raw: messages}}, state}
 
@@ -154,13 +195,13 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
     end
   end
 
-  defp rpc(state, method, params) do
+  defp rpc(state, method, params, deadline \\ deadline(@rpc_timeout)) do
     id = state.next_id
     request = %{"id" => id, "method" => method, "params" => params}
     :ok = send_json(state.port, request)
     next_state = %{state | next_id: id + 1}
 
-    case await_response(next_state, id, []) do
+    case await_response(next_state, id, deadline, []) do
       {:ok, result, messages, final_state} ->
         {request, {:ok, Map.put(result, "_messages", messages)}, final_state}
 
@@ -169,8 +210,8 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
     end
   end
 
-  defp await_response(state, id, messages) do
-    case receive_message(state) do
+  defp await_response(state, id, deadline, messages) do
+    case receive_message(state, deadline, :app_server_timeout) do
       {:ok, %{"id" => ^id, "result" => result} = message, state} ->
         {:ok, result, Enum.reverse([message | messages]), state}
 
@@ -178,54 +219,113 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
         {:error, {:json_rpc, error}, state}
 
       {:ok, message, state} ->
-        await_response(state, id, [message | messages])
+        await_response(state, id, deadline, [message | messages])
 
       {:error, reason, state} ->
         {:error, reason, state}
     end
   end
 
-  defp await_turn(state, thread_id, text, messages) do
-    case receive_message(state) do
-      {:ok, %{"method" => "item/completed", "params" => params} = message, state} ->
-        item = params["item"] || %{}
+  defp await_turn(state, thread_id, turn_id, deadline, text, messages) do
+    case receive_message(state, deadline, :turn_timeout) do
+      {:ok, %{"method" => method, "params" => params} = message, state}
+      when method in ["item/started", "item/completed"] ->
+        case handle_item(method, params, thread_id, text) do
+          {:error, type} ->
+            state = interrupt_and_drain(state, thread_id, turn_id)
+            {:error, {:forbidden_item, type}, state}
 
-        next_text =
-          if params["threadId"] == thread_id and item["type"] == "agentMessage",
-            do: item["text"],
-            else: text
-
-        await_turn(state, thread_id, next_text, [message | messages])
+          {:ok, next_text} ->
+            await_turn(state, thread_id, turn_id, deadline, next_text, [message | messages])
+        end
 
       {:ok, %{"method" => "turn/completed", "params" => %{"threadId" => ^thread_id}} = message,
        state}
       when is_binary(text) ->
         {:ok, text, Enum.reverse([message | messages]), state}
 
-      {:ok, %{"method" => method}, state}
-      when method in ["item/tool/call", "item/tool/request", "approval/request"] ->
-        {:error, {:forbidden_app_server_request, method}, state}
-
       {:ok, message, state} ->
-        await_turn(state, thread_id, text, [message | messages])
+        await_turn(state, thread_id, turn_id, deadline, text, [message | messages])
+
+      {:error, :turn_timeout, state} ->
+        state = interrupt_and_drain(state, thread_id, turn_id)
+        {:error, :turn_timeout, state}
 
       {:error, reason, state} ->
         {:error, reason, state}
     end
   end
 
-  defp receive_message(state) do
+  defp handle_item(method, params, thread_id, text) do
+    item = params["item"] || %{}
+    type = item["type"] || "missing"
+
+    cond do
+      params["threadId"] == thread_id and type not in @allowed_item_types ->
+        {:error, type}
+
+      method == "item/completed" and params["threadId"] == thread_id and
+          type == "agentMessage" ->
+        {:ok, item["text"]}
+
+      true ->
+        {:ok, text}
+    end
+  end
+
+  defp receive_message(state, deadline, timeout_reason) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
     receive do
       {port, {:data, {:eol, line}}} when port == state.port ->
         decode_line(state.buffered <> line, %{state | buffered: ""})
 
       {port, {:data, {:noeol, fragment}}} when port == state.port ->
-        receive_message(%{state | buffered: state.buffered <> fragment})
+        receive_message(%{state | buffered: state.buffered <> fragment}, deadline, timeout_reason)
 
       {port, {:exit_status, status}} when port == state.port ->
         {:error, {:app_server_exit, status}, state}
     after
-      @timeout -> {:error, :app_server_timeout, state}
+      remaining -> {:error, timeout_reason, state}
+    end
+  end
+
+  defp interrupt_and_drain(state, thread_id, turn_id) do
+    id = state.next_id
+
+    request = %{
+      "id" => id,
+      "method" => "turn/interrupt",
+      "params" => %{"threadId" => thread_id, "turnId" => turn_id}
+    }
+
+    :ok = send_json(state.port, request)
+    deadline = deadline(@interrupt_timeout)
+    drain_interrupt(%{state | next_id: id + 1}, id, thread_id, turn_id, false, false, deadline)
+  end
+
+  defp drain_interrupt(state, _id, _thread_id, _turn_id, true, true, _deadline), do: state
+
+  defp drain_interrupt(state, id, thread_id, turn_id, response?, completed?, deadline) do
+    case receive_message(state, deadline, :interrupt_timeout) do
+      {:ok, %{"id" => ^id}, state} ->
+        drain_interrupt(state, id, thread_id, turn_id, true, completed?, deadline)
+
+      {:ok,
+       %{
+         "method" => "turn/completed",
+         "params" => %{
+           "threadId" => ^thread_id,
+           "turn" => %{"id" => ^turn_id, "status" => "interrupted"}
+         }
+       }, state} ->
+        drain_interrupt(state, id, thread_id, turn_id, response?, true, deadline)
+
+      {:ok, _message, state} ->
+        drain_interrupt(state, id, thread_id, turn_id, response?, completed?, deadline)
+
+      {:error, _reason, state} ->
+        state
     end
   end
 
@@ -296,6 +396,20 @@ defmodule SdrAgent.AI.ModelProvider.CodexAppServer do
     end
   end
 
-  defp sequence("thread-" <> sequence), do: String.to_integer(sequence)
-  defp sequence(_thread_id), do: nil
+  defp tool_free_config do
+    %{
+      "features" => Map.new(@disabled_tool_features, &{&1, false}),
+      "mcp_servers" => %{},
+      "web_search" => "disabled"
+    }
+  end
+
+  defp private_workspace! do
+    path = Path.join(System.tmp_dir!(), "sdr-agent-codex-#{System.unique_integer([:positive])}")
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+    path
+  end
+
+  defp deadline(timeout), do: System.monotonic_time(:millisecond) + timeout
 end

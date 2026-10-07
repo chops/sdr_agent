@@ -124,13 +124,33 @@ S6a implements the accepted boundary without adding a dependency:
   `clientInfo.name = "sdr_agent"`, reads `account/read`, `config/read`, and
   `model/list` before any turn, and fails closed without a cached ChatGPT
   account or selected model. It never invokes login or reads token files.
+- Each adapter is started with an explicit `codex_home`; the Port receives
+  that exact path as `CODEX_HOME` instead of inheriting an ambient login home.
+  The production S12 command is `llm-proxy-shim codex app-server` (with no
+  post-subcommand `-c` flags), so the shim can apply its routing lock and wire
+  witness. Direct `codex app-server` is reserved for an explicitly configured
+  local diagnostic.
 - Provenance is an allowlist: app-server user agent/version, selected model
   catalog fields, non-secret effective config fields, account mode, and the
   owner's recorded data-control setting. Raw account/config responses are
   discarded. Turn request/response records remain available for S3 audit
   persistence.
-- Threads use `approvalPolicy = "never"` and `sandbox = "read-only"`, expose
-  no dynamic tools, and treat tool or approval requests as provider failures.
+- Threads use a new empty mode-0700 temporary working directory,
+  `approvalPolicy = "never"`, and `sandbox = "read-only"`. Their thread config
+  disables shell/unified exec, patch/file tooling, web search, MCP, apps,
+  plugins/skills, browser/computer use, image tools, delegation, and other
+  model-callable feature surfaces. This is required because read-only
+  sandboxing limits writes but does not remove read/exfiltration tools
+  (official app-server protocol documentation:
+  https://developers.openai.com/codex/app-server/).
+- Item streaming is independently fail-closed: only agent messages, reasoning,
+  and user messages are accepted. Command execution, file changes, MCP calls,
+  web search, and unknown future item types interrupt the turn, drain it, and
+  return an error without a result. A monotonic per-turn deadline uses the same
+  interrupt-and-drain path; callers wait for the server-enforced outcome rather
+  than timing out while stale events remain queued.
+- Threads expose no dynamic tools, and treat tool or approval requests as
+  provider failures.
   Structured output is requested with `Zoi.to_json_schema/1` and parsed again
   locally with `Zoi.parse/2`.
 - The deterministic Fake is the configured default. A hermetic OS-process

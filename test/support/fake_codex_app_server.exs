@@ -1,4 +1,5 @@
 mode = Enum.at(System.argv(), 0, "ready")
+expected_codex_home = Enum.at(System.argv(), 1)
 
 respond = fn payload -> IO.puts(Jason.encode!(payload)) end
 
@@ -11,7 +12,7 @@ Stream.transform(IO.stream(:stdio, :line), %{threads: 0}, fn line, state ->
       "initialize" ->
         name = get_in(message, ["params", "clientInfo", "name"])
 
-        if name == "sdr_agent" do
+        if name == "sdr_agent" and System.get_env("CODEX_HOME") == expected_codex_home do
           respond.(%{"id" => id, "result" => %{"userAgent" => "codex-cli/0.test"}})
         else
           respond.(%{"id" => id, "error" => %{"code" => -1, "message" => "wrong client"}})
@@ -65,7 +66,16 @@ Stream.transform(IO.stream(:stdio, :line), %{threads: 0}, fn line, state ->
         state
 
       "thread/start" ->
-        if mode == "thread_error" do
+        params = message["params"]
+        features = get_in(params, ["config", "features"]) || %{}
+
+        secure? =
+          get_in(params, ["config", "mcp_servers"]) == %{} and
+            get_in(params, ["config", "web_search"]) == "disabled" and
+            features != %{} and Enum.all?(features, fn {_key, value} -> value == false end) and
+            File.ls!(params["cwd"]) == []
+
+        if mode == "thread_error" or not secure? do
           respond.(%{"id" => id, "error" => %{"code" => -32_000, "message" => "fixture failure"}})
           state
         else
@@ -79,6 +89,25 @@ Stream.transform(IO.stream(:stdio, :line), %{threads: 0}, fn line, state ->
         sequence = thread_id |> String.split("-") |> List.last() |> String.to_integer()
         respond.(%{"id" => id, "result" => %{"turn" => %{"id" => "turn-#{sequence}"}}})
 
+        forbidden_type =
+          case mode do
+            "command_item" -> "commandExecution"
+            "file_item" -> "fileChange"
+            "unknown_item" -> "futureSecretReader"
+            _ -> nil
+          end
+
+        if forbidden_type do
+          respond.(%{
+            "method" => "item/completed",
+            "params" => %{
+              "threadId" => thread_id,
+              "turnId" => "turn-#{sequence}",
+              "item" => %{"type" => forbidden_type, "secret" => "must-not-commit"}
+            }
+          })
+        end
+
         output =
           if mode == "invalid_output" do
             %{answer: "qualified", score: "not-an-integer"}
@@ -86,22 +115,41 @@ Stream.transform(IO.stream(:stdio, :line), %{threads: 0}, fn line, state ->
             %{answer: "qualified", score: 42}
           end
 
-        respond.(%{
-          "method" => "item/completed",
-          "params" => %{
-            "threadId" => thread_id,
-            "item" => %{
-              "type" => "agentMessage",
-              "text" => Jason.encode!(output)
+        unless mode == "timeout" do
+          respond.(%{
+            "method" => "item/completed",
+            "params" => %{
+              "threadId" => thread_id,
+              "turnId" => "turn-#{sequence}",
+              "item" => %{
+                "type" => "agentMessage",
+                "text" => Jason.encode!(output)
+              }
             }
-          }
-        })
+          })
+
+          respond.(%{
+            "method" => "turn/completed",
+            "params" => %{
+              "threadId" => thread_id,
+              "turn" => %{"id" => "turn-#{sequence}", "status" => "completed"}
+            }
+          })
+        end
+
+        state
+
+      "turn/interrupt" ->
+        respond.(%{"id" => id, "result" => %{}})
 
         respond.(%{
           "method" => "turn/completed",
           "params" => %{
-            "threadId" => thread_id,
-            "turn" => %{"id" => "turn-#{sequence}", "status" => "completed"}
+            "threadId" => get_in(message, ["params", "threadId"]),
+            "turn" => %{
+              "id" => get_in(message, ["params", "turnId"]),
+              "status" => "interrupted"
+            }
           }
         })
 

@@ -36,6 +36,14 @@ defmodule SdrAgent.AI.CodexAppServerTest do
     assert result.model == "fake-codex"
     assert result.raw_request
     assert result.raw_response
+
+    thread_start = result.raw_request.thread_start["params"]
+    assert thread_start["config"]["mcp_servers"] == %{}
+    assert thread_start["config"]["web_search"] == "disabled"
+    assert Enum.all?(thread_start["config"]["features"], fn {_name, enabled?} -> !enabled? end)
+    assert File.ls!(thread_start["cwd"]) == []
+    GenServer.stop(server)
+    refute File.exists?(thread_start["cwd"])
   end
 
   test "calls are serialized through one app-server process" do
@@ -53,8 +61,10 @@ defmodule SdrAgent.AI.CodexAppServerTest do
       end
 
     assert [first, second] = Enum.map(tasks, &Task.await(&1, 2_000))
-    assert {:ok, %{sequence: 1}} = first
-    assert {:ok, %{sequence: 2}} = second
+    assert {:ok, first} = first
+    assert {:ok, second} = second
+    assert get_in(first.raw_response, [:thread_start, "thread", "id"]) == "thread-1"
+    assert get_in(second.raw_response, [:thread_start, "thread", "id"]) == "thread-2"
   end
 
   test "structured output that violates the Zoi schema is rejected" do
@@ -83,6 +93,38 @@ defmodule SdrAgent.AI.CodexAppServerTest do
     assert Process.alive?(server)
   end
 
+  test "built-in and unknown item types fail closed without committing output" do
+    for {mode, type} <- [
+          {"command_item", "commandExecution"},
+          {"file_item", "fileChange"},
+          {"unknown_item", "futureSecretReader"}
+        ] do
+      {:ok, server} = start_server(mode)
+
+      assert {:error, {:forbidden_item, ^type}} =
+               CodexAppServer.complete(server, %{
+                 id: "forbidden-#{mode}",
+                 prompt: "untrusted fixture",
+                 schema: @schema
+               })
+
+      assert Process.alive?(server)
+    end
+  end
+
+  test "turn deadline interrupts and drains before returning" do
+    {:ok, server} = start_server("timeout", turn_timeout: 25)
+
+    assert {:error, :turn_timeout} =
+             CodexAppServer.complete(server, %{
+               id: "timeout",
+               prompt: "fixture",
+               schema: @schema
+             })
+
+    assert Process.alive?(server)
+  end
+
   test "missing cached ChatGPT login fails before starting a turn" do
     {:ok, server} = start_server("logged_out")
     assert {:error, :cached_chatgpt_login_required} = CodexAppServer.preflight(server)
@@ -95,7 +137,12 @@ defmodule SdrAgent.AI.CodexAppServerTest do
 
   @tag :external
   test "real app-server cached-login preflight smoke" do
-    assert {:ok, server} = CodexAppServer.start_link(command: System.find_executable("codex"))
+    assert {:ok, server} =
+             CodexAppServer.start_link(
+               command: System.find_executable("llm-proxy-shim"),
+               args: ["codex", "app-server"],
+               codex_home: System.fetch_env!("CODEX_HOME")
+             )
 
     assert {:ok, %{account_mode: :cached_chatgpt, model: model}} =
              CodexAppServer.preflight(server)
@@ -104,9 +151,15 @@ defmodule SdrAgent.AI.CodexAppServerTest do
   end
 
   defp start_server(mode, extra \\ []) do
+    codex_home = Path.join(System.tmp_dir!(), "sdr-agent-fake-codex-home")
+
     CodexAppServer.start_link(
       Keyword.merge(
-        [command: System.find_executable("mix"), args: ["run", "--no-start", @fake_server, mode]],
+        [
+          command: System.find_executable("mix"),
+          args: ["run", "--no-start", @fake_server, mode, codex_home],
+          codex_home: codex_home
+        ],
         extra
       )
     )

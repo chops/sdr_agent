@@ -48,6 +48,10 @@ Reason: S6a adds runtime behaviours and volatile counters only; S3 owns the pers
 - The in-memory budget resets on application restart and is not authoritative; S3 must supply a transactional store before unattended real-model operation.
 - App-server may expose executable tools through host configuration. S6a starts a constrained thread, supplies no dynamic tools, uses =approvalPolicy=never= and a read-only sandbox, and treats any tool/approval request as a provider failure.
 - Config/account responses may contain sensitive fields. Provenance is built from an allowlist; raw account/config responses are neither returned nor logged.
+- Read-only sandboxing does not remove read-capable built-in tools. Real turns
+  therefore run with all supported tool-bearing config/features disabled, an
+  empty private temporary cwd, and an item-type allowlist that interrupts and
+  drains on command/file/MCP/web/unknown items.
 
 * ADR
 - Required: YES (amend existing accepted ADR-0004).
@@ -80,3 +84,9 @@ Approved by the owner in the S6a assignment on 2026-10-06.
   Strict Credo has no S6a findings and retains four pre-existing design
   suggestions in unchanged Phoenix/support files; Dialyzer, Sobelow and
   =deps.audit= are not installed.
+- Review fix after =92c3e18=: rebased onto S2 main =910ef8e=; added explicit
+  =CODEX_HOME= Port environment, the S12 =llm-proxy-shim codex app-server=
+  launch contract, tool-free thread config, empty temp cwd, fail-closed item
+  allowlisting, and a monotonic per-turn interrupt/drain deadline. Hermetic
+  regressions cover command execution, file change, unknown future item types,
+  exact child =CODEX_HOME=, empty cwd, and timeout cleanup.

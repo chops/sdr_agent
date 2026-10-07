@@ -35,7 +35,7 @@ flowchart LR
         Provider[ModelProvider facade]
         Budget[Volatile budget guard<br/>20 per run / 200 per UTC day]
         Validation[Zoi output validation]
-        Adapter[Serialized Codex adapter]
+        Adapter[Serialized tool-free Codex adapter<br/>empty private cwd]
         Fake[Deterministic Fake<br/>dev/test default]
     end
 
