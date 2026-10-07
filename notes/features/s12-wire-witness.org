@@ -421,6 +421,37 @@ v2 request grammar (projection =claude-message-json/2+prompt-builder/1=, 38 B), 
 Response rules are unchanged from v1. Thinking or redacted_thinking blocks → unsupported.
 Claim: application stdin equals the single non-reminder user text, and the structured output is equal. Additional model context is recorded, but not proven equal or benign. This is not whole-request or effective-conversation equivalence.
 
+*** Real proof call 2 of 2 (=docs/audit/s12d-wire-witness-proof-2.json=, metadata only) — budget exhausted
+The call ran at 16:22 MT, after v2 GREEN (=cd2ebe2=) and a full gate on main =37c69bb=.
+- Witness: invocation =01a11875-f616-77a1-9631-ed3534331720= produced exactly one
+  complete =/v1/messages= exchange, record =01a11875-f85b-7a1d-a579-f286279b182c=
+  (HTTP 200, captures and stream complete).
+- Response projection: EQUAL.
+- v2 grammar: did NOT apply. The reconciler fell back to v1
+  (=request_shape_unsupported=), so the status is =inferred=. NOT ENABLED.
+v2 rules that failed, checked against the raw blob for structure only:
+1. The reminder block ends with =</system-reminder>= followed by a newline,
+   not exactly =</system-reminder>=. It has one open and one close tag.
+2. =cache_control= is ={type: ephemeral, ttl: "1h"}= on the system and
+   trailing blocks. v2 allowed exactly ={type: ephemeral}=.
+3. The trailing =system=-role message carries a message-level
+   =output_config: {effort}= key. v2 allowed only ={role, content}=.
+All other v2 rules held:
+- the top-level keys were in the allowlist;
+- =tools= was =[]=;
+- thinking was ={type: adaptive, display}=;
+- =context_management.edits= held 1 map of 59 B;
+- there were 3 system blocks totalling 3893 B of text;
+- the user message was exactly =[reminder (558 B), stdin (400 B)]=, and the stdin block is byte-equal to the rendered stdin
+  (=projected_request_sha256= = =0b9b…= in proof 1; the same prompt).
+Lesson: the v2 grammar was derived from an incomplete structural read of
+proof 1. That read did not inspect block key values, message-level keys or
+the reminder suffix. No retry was made: both budgeted calls are spent.
+A grammar revision covering points 1–3 (a single trailing newline after the
+close tag; an =ttl= allowlist for cache_control; a message-level
+=output_config= of the same shape as the top-level one) needs Codex review
+and a new owner-approved call before any enablement.
+
 *** Real proof call 1 of 2 (=docs/audit/s12d-wire-witness-proof-1.json=, metadata only)
 One synthetic ClaudeCLI call went through the deployed shim and proxy.
 - CLI and model attestation: Claude Code 2.1.291, =claude-opus-5-5=.
