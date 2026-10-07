@@ -77,8 +77,8 @@ defmodule SdrAgent.Audit.OtsUpgradeWorkerTest do
     anchor = anchor(ctx)
     [pending] = receipts(anchor, ctx.actor)
     assert Code.ensure_loaded?(OtsUpgradeWorker)
-    assert :ok = apply(OtsUpgradeWorker, :perform, [job(anchor, pending)])
-    assert :ok = apply(OtsUpgradeWorker, :perform, [job(anchor, pending)])
+    assert :ok = OtsUpgradeWorker.perform(job(anchor, pending))
+    assert :ok = OtsUpgradeWorker.perform(job(anchor, pending))
     assert Enum.map(receipts(anchor, ctx.actor), & &1.status) == [:pending, :confirmed]
     assert Agent.get(ctx.counter, &elem(&1, 1)) == 1
   end
@@ -88,9 +88,40 @@ defmodule SdrAgent.Audit.OtsUpgradeWorkerTest do
     anchor = anchor(ctx)
     [pending] = receipts(anchor, ctx.actor)
     assert Code.ensure_loaded?(OtsUpgradeWorker)
-    assert :ok = apply(OtsUpgradeWorker, :perform, [job(anchor, pending)])
+    assert :ok = OtsUpgradeWorker.perform(job(anchor, pending))
     assert [%{id: id, status: :pending}] = receipts(anchor, ctx.actor)
     assert id == pending.id
+  end
+
+  test "a queued job upgrades its named receipt even when a later pending row exists", ctx do
+    anchor = anchor(ctx)
+    [pending] = receipts(anchor, ctx.actor)
+
+    {:ok, _later} =
+      AnchorSinkReceipt
+      |> Ash.Changeset.for_create(
+        :record,
+        %{
+          anchor_id: anchor.id,
+          sink: :ots,
+          status: :pending,
+          recorded_at: DateTime.add(pending.recorded_at, 1, :second),
+          receipt: %{proof: Base.encode64("different later proof")}
+        },
+        actor: ctx.actor
+      )
+      |> Ash.create()
+
+    result =
+      try do
+        OtsUpgradeWorker.perform(job(anchor, pending))
+      rescue
+        _ -> :wrong_receipt_used
+      end
+
+    assert result == :ok
+    confirmed = Enum.find(receipts(anchor, ctx.actor), &(&1.status == :confirmed))
+    assert confirmed.receipt["pending_receipt_id"] == pending.id
   end
 
   test "real upgrade errors return failure and preserve append-only failed evidence", ctx do
@@ -98,7 +129,7 @@ defmodule SdrAgent.Audit.OtsUpgradeWorkerTest do
     anchor = anchor(ctx)
     [pending] = receipts(anchor, ctx.actor)
     assert Code.ensure_loaded?(OtsUpgradeWorker)
-    assert {:error, _} = apply(OtsUpgradeWorker, :perform, [job(anchor, pending)])
+    assert {:error, _} = OtsUpgradeWorker.perform(job(anchor, pending))
     assert Enum.map(receipts(anchor, ctx.actor), & &1.status) == [:pending, :failed]
   end
 
@@ -118,12 +149,38 @@ defmodule SdrAgent.Audit.OtsUpgradeWorkerTest do
       anchor(ctx)
     end
 
-    assert :ok = apply(OtsUpgradeWorker, :perform, [%Oban.Job{args: %{}}])
-    assert :ok = apply(OtsUpgradeWorker, :perform, [%Oban.Job{args: %{}}])
-    jobs = Oban.Testing.all_enqueued(worker: OtsUpgradeWorker)
+    assert :ok = OtsUpgradeWorker.perform(%Oban.Job{args: %{}})
+    assert :ok = OtsUpgradeWorker.perform(%Oban.Job{args: %{}})
+    jobs = Oban.Testing.all_enqueued(repo: Repo, worker: OtsUpgradeWorker)
     assert length(jobs) == 2
     assert length(Enum.uniq_by(jobs, & &1.args["anchor_id"])) == 2
     assert Enum.all?(jobs, &is_binary(&1.args["pending_receipt_id"]))
     assert Enum.all?(jobs, &(&1.max_attempts <= 5))
+  end
+
+  test "offline mode prevents both dispatch and queued proof network work", ctx do
+    anchor = anchor(ctx)
+    [pending] = receipts(anchor, ctx.actor)
+    Application.put_env(:sdr_agent, :anchor_sinks, [])
+    assert :ok = OtsUpgradeWorker.perform(%Oban.Job{args: %{}})
+
+    assert {:cancel, :ots_sink_disabled} =
+             OtsUpgradeWorker.perform(job(anchor, pending))
+
+    assert Agent.get(ctx.counter, &elem(&1, 1)) == 0
+    assert [%{status: :pending}] = receipts(anchor, ctx.actor)
+  end
+
+  test "worker retries, backoff and execution are explicitly bounded" do
+    changeset =
+      OtsUpgradeWorker.new(%{
+        anchor_id: Ecto.UUID.generate(),
+        pending_receipt_id: Ecto.UUID.generate()
+      })
+
+    assert Ecto.Changeset.get_field(changeset, :max_attempts) == 3
+    assert OtsUpgradeWorker.backoff(%Oban.Job{attempt: 1}) == 60
+    assert OtsUpgradeWorker.backoff(%Oban.Job{attempt: 20}) == 600
+    assert OtsUpgradeWorker.timeout(%Oban.Job{}) == 60_000
   end
 end

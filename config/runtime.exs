@@ -23,6 +23,10 @@ end
 config :sdr_agent, SdrAgentWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+config :sdr_agent,
+       :audit_tools_wrapper,
+       Path.expand(System.get_env("SDR_AUDIT_TOOLS_WRAPPER", "bin/with-audit-tools"))
+
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :sdr_agent, SdrAgentWeb.Endpoint,
@@ -40,13 +44,33 @@ if config_env() == :dev do
     ]
 end
 
-if config_env() == :prod do
-  config :sdr_agent,
-    anchor_sinks: [
-      {:git, SdrAgent.Audit.AnchorSinks.GitSink,
-       repository: "git@github.com:chops/sdr_agent-audit-anchors.git"}
-    ]
+if config_env() in [:dev, :prod] do
+  sinks =
+    case System.get_env("SDR_ANCHOR_SINKS", "git+ots") do
+      "git+ots" ->
+        [
+          {:git, SdrAgent.Audit.AnchorSinks.GitSink,
+           repository: "git@github.com:chops/sdr_agent-audit-anchors.git"},
+          {:ots, SdrAgent.Audit.AnchorSinks.OpenTimestampsSink, []}
+        ]
 
+      "none" ->
+        []
+
+      "file" ->
+        [
+          {:file, SdrAgent.Audit.AnchorSinks.FileSink,
+           directory: System.get_env("SDR_ANCHOR_FILE_DIR", Path.expand("tmp/audit-anchors"))}
+        ]
+
+      _ ->
+        raise "SDR_ANCHOR_SINKS must be git+ots, file, or none"
+    end
+
+  config :sdr_agent, anchor_sinks: sinks
+end
+
+if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """

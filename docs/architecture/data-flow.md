@@ -16,6 +16,8 @@ flowchart LR
         Tempo[Tempo OTLP HTTP<br/>dev only 127.0.0.1:4318]
         AnchorGit[Private protected Git<br/>owner trust domain]
         OTS[OpenTimestamps calendars<br/>hashes only]
+        OTSCLI[ots 0.7.2 executable<br/>signing key excluded from env]
+        Bitcoin[Operator-configured Bitcoin node]
     end
 
     subgraph Web["Phoenix Web Layer"]
@@ -41,6 +43,8 @@ flowchart LR
         Append[Append: lock chain head,<br/>sequence+1, sha256 chain]
         Verify[verify/read/export<br/>recorded as AuditAccess]
         Anchor[Ed25519 anchor + export]
+        Upgrade[Public proof upgrade<br/>serialized receipt confirmation]
+        UpgradeJobs[Oban 10-minute dispatch<br/>bounded unique receipt jobs]
     end
 
     subgraph AI["Structured Model Boundary"]
@@ -66,8 +70,13 @@ flowchart LR
     Append --> Postgres
     Verify --> Postgres
     Anchor --> Postgres
-    Anchor --> AnchorGit
-    Anchor --> OTS
+    Anchor -. Git enabled .-> AnchorGit
+    Anchor -. OTS enabled: dev/prod .-> OTS
+    UpgradeJobs --> Upgrade
+    Upgrade --> Postgres
+    Upgrade -. OTS enabled .-> OTSCLI
+    OTSCLI -. upgrade .-> OTS
+    OTSCLI -. verify .-> Bitcoin
     Actions --> Provider
     Provider --> Budget
     Provider --> Validation

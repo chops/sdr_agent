@@ -196,6 +196,55 @@ resources or trace columns; S3 owns persisted correlation fields.
 
 ## Justification
 
+### S11b runtime/tool amendment
+
+Approved under ADR-0001 by Claude, consultation reply
+`01a114a4-e5a3-71bd-93a0-647c4fb3541c`, with TDD/implementation permission
+`01a114af-889d-761e-82d5-d6fe3c205351`.
+
+- Dev and prod enable Git plus OpenTimestamps by default. The explicit
+  `SDR_ANCHOR_SINKS=none` or `file` override supports offline operation;
+  test retains empty sinks regardless of the operator environment.
+- `opentimestamps-client` **0.7.2** is provided by the unchanged flake.lock
+  nixpkgs revision `e8be7818e19ada32105a8af937a6a473b38167ca`. Invocation
+  checks `ots --version`, failing closed
+  on missing/different binaries. No Hex source or version changes.
+- This LGPL-3.0 tool (upstream LGPL-3.0-or-later; Nix metadata
+  LGPL-3.0-only) is executed as a separate program through `System.cmd`.
+  It is not linked into or vendored as application code; this use does not
+  change the application's Apache-2.0 license. The audit signing private-key
+  variable is removed from the tool's environment; only public proof/digest
+  data reaches its arguments/files. A Bitcoin node remains operator-configured.
+- Every ten minutes, a bounded dispatcher selects unresolved anchors and
+  inserts unique per-anchor/pending-receipt jobs. Live jobs exclude duplicates
+  without a time-window expiry. Jobs have three attempts, bounded backoff,
+  and a 60-second execution timeout. Offline mode does no dispatch/network work.
+- A confirmed upgrade appends one immutable receipt, serialized under the
+  chain-head lock after external verification; replay reuses the receipt.
+  An incomplete proof remains pending without a new receipt. Real failures
+  append failed sink evidence and surface through Oban retry/discard state;
+  S7 owns the Operations/Failure attention integration.
+- Existing pending OTS submissions are reused during publication retries.
+  No idle interval creates anchors or republishes a failed sink. Optional
+  offline retirement/bundle-key assurance changes remain separately tracked.
+
+Packaging amendment approved by Claude, reply
+`01a114c2-f102-70bd-b5bc-f9c7baac3e95`: all production OTS invocations run
+through configurable `bin/with-audit-tools`. It executes
+`nix shell --no-write-lock-file --inputs-from REPO_ROOT
+nixpkgs#opentimestamps-client --command ...`, preserving literal argv and
+clearing inherited credentials with an explicit public cache/TLS environment
+allowlist. Missing wrapper/Nix or a client version other than 0.7.2 fails
+closed on attempted proof operations. `SDR_AUDIT_TOOLS_WRAPPER` can select the
+deployment's wrapper path; the default is `bin/with-audit-tools` under the
+runtime working directory.
+
+This is an interim workaround for factory defect F6: its receipt treats
+`devenv.nix` (and bin/verify/project-facts) as exact-owned although project
+environment settings are described as project-owned. Managed Nix files,
+the lock, receipt, recipe and validator remain byte-for-byte unchanged.
+No project-factory or proposals changes are part of S11b.
+
 The three mechanisms answer different audit questions; none substitutes for
 the Postgres ledger, and each is labelled with exactly the assurance it
 provides, so no artifact over-claims.

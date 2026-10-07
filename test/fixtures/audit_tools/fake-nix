@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "${SDR_AUDIT_ANCHOR_PRIVATE_KEY:-}${OPENAI_API_KEY:-}${TOKEN_SIGNING_SECRET:-}" ]; then
+  printf '%s\n' 'unexpected credential environment' >&2
+  exit 23
+fi
+printf '<%s>\n' "$@"

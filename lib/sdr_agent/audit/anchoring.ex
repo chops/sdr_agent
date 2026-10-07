@@ -163,9 +163,11 @@ defmodule SdrAgent.Audit.Anchoring do
   end
 
   defp confirmed_sink?(anchor, sink, actor) do
+    statuses = if sink == :ots, do: [:pending, :confirmed], else: [:confirmed]
+
     SdrAgent.Audit.AnchorSinkReceipt
     |> Ash.Query.for_read(:read, %{}, actor: actor)
-    |> Ash.Query.filter(anchor_id == ^anchor.id and sink == ^sink and status == :confirmed)
+    |> Ash.Query.filter(anchor_id == ^anchor.id and sink == ^sink and status in ^statuses)
     |> Ash.exists?()
   end
 
@@ -203,35 +205,80 @@ defmodule SdrAgent.Audit.Anchoring do
   defp sink_payload(:ots, anchor), do: anchor.anchor_hash
   defp sink_payload(_sink, anchor), do: anchor.statement_bytes
 
-  @doc "Upgrades the newest pending OTS proof by appending a confirmed receipt."
+  @doc """
+  Upgrades a pending OTS proof; confirmation is serialized and idempotent.
+  `:pending_receipt_id` selects the job's exact source receipt; omission
+  selects the newest pending receipt. Confirmation records that source id.
+  """
   def upgrade_ots(anchor, opts) do
     actor = Keyword.fetch!(opts, :actor)
-    sink = Keyword.get(opts, :sink, SdrAgent.Audit.AnchorSinks.OpenTimestampsSink)
 
-    with {:ok, receipt} <- pending_ots(anchor, actor),
-         {:ok, proof} <- receipt.receipt |> map_value(:proof) |> Base.decode64(),
-         {:ok, upgraded} <-
-           sink.upgrade(proof, anchor.anchor_hash, Keyword.get(opts, :sink_options, [])) do
-      SdrAgent.Audit.AnchorSinkReceipt
-      |> Ash.Changeset.for_create(
-        :record,
-        %{
-          tenant_id: anchor.tenant_id,
-          anchor_id: anchor.id,
-          sink: :ots,
-          status: :confirmed,
-          receipt: json_safe(upgraded)
-        },
-        actor: actor
-      )
-      |> Ash.create()
+    case confirmed_ots(anchor, actor) do
+      {:ok, nil} -> upgrade_pending_ots(anchor, opts)
+      result -> result
     end
   end
 
-  defp pending_ots(anchor, actor) do
+  defp upgrade_pending_ots(anchor, opts) do
+    actor = Keyword.fetch!(opts, :actor)
+    sink = Keyword.get(opts, :sink, SdrAgent.Audit.AnchorSinks.OpenTimestampsSink)
+
+    with {:ok, receipt} <- pending_ots(anchor, actor, opts[:pending_receipt_id]),
+         {:ok, proof} <- receipt.receipt |> map_value(:proof) |> Base.decode64() do
+      sink.upgrade(proof, anchor.anchor_hash, Keyword.get(opts, :sink_options, []))
+      |> bind_pending_receipt(receipt.id)
+      |> handle_upgrade(anchor, actor)
+    else
+      :error -> upgrade_failure(:invalid_pending_proof, anchor, actor)
+      error -> error
+    end
+  end
+
+  defp bind_pending_receipt({:ok, upgraded}, id),
+    do: {:ok, Map.put(upgraded, :pending_receipt_id, id)}
+
+  defp bind_pending_receipt(result, _id), do: result
+
+  defp handle_upgrade({:ok, upgraded}, anchor, actor) do
+    Kernel.in_transaction(fn -> confirm_upgrade(anchor, actor, upgraded) end)
+  end
+
+  defp handle_upgrade({:error, :ots_pending} = pending, _anchor, _actor), do: pending
+  defp handle_upgrade({:error, reason}, anchor, actor), do: upgrade_failure(reason, anchor, actor)
+
+  defp confirm_upgrade(anchor, actor, upgraded) do
+    with {:ok, _} <- Kernel.lock_head(anchor.tenant_id),
+         {:ok, confirmed} <- confirmed_ots(anchor, actor) do
+      if confirmed,
+        do: {:ok, confirmed},
+        else: create_receipt(receipt_attrs(anchor, :ots, :confirmed, json_safe(upgraded)), actor)
+    end
+  end
+
+  defp upgrade_failure(reason, anchor, actor) do
+    attrs =
+      receipt_attrs(anchor, :ots, :failed, %{operation: "upgrade", error: safe_error(reason)})
+
+    case create_receipt(attrs, actor) do
+      {:ok, _} -> {:error, reason}
+      {:error, failure} -> {:error, {:upgrade_and_receipt_failed, reason, failure}}
+    end
+  end
+
+  defp confirmed_ots(anchor, actor) do
+    SdrAgent.Audit.AnchorSinkReceipt
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(anchor_id == ^anchor.id and sink == :ots and status == :confirmed)
+    |> Ash.Query.sort(recorded_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read_one()
+  end
+
+  defp pending_ots(anchor, actor, pending_id) do
     SdrAgent.Audit.AnchorSinkReceipt
     |> Ash.Query.for_read(:read, %{}, actor: actor)
     |> Ash.Query.filter(anchor_id == ^anchor.id and sink == :ots and status == :pending)
+    |> then(&if(pending_id, do: Ash.Query.filter(&1, id == ^pending_id), else: &1))
     |> Ash.Query.sort(recorded_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read_one()
