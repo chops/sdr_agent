@@ -20,6 +20,7 @@ graph TB
         UpgradeDispatch[OTS upgrade dispatcher<br/>10-minute bounded batch]
         UpgradeJobs[Per-anchor receipt jobs<br/>unique, 3 attempts]
         Anchoring[Audit.Anchoring]
+        Relay[LiveEvents.Relay<br/>LISTEN sdr_audit_events -> PubSub]
     end
 
     subgraph AgentPlane["Agent plane"]
@@ -94,6 +95,10 @@ graph TB
     Controllers --> Domains
     LiveViews --> Domains
     Domains --> Resources
+    App --> Relay
+    Domains -. audit append: pg_notify, delivered at commit .-> Relay
+    Relay -- tenant topic --> PubSub
+    PubSub -. live refresh: re-read via Domains .-> LiveViews
     Telemetry -. instruments .-> Endpoint
     Telemetry -. instruments .-> Domains
     Telemetry -. instruments .-> Resources
@@ -116,3 +121,4 @@ graph TB
 - [x] S6a supervision tree detail
 - [x] Audit anchor cadence and bounded, unique OTS upgrade jobs
 - [x] Claude CLI local process boundary
+- [x] S13 LiveEvents.Relay (commit-time audit notifications -> PubSub -> live console views, ADR-0012)

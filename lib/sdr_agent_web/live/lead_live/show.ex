@@ -11,7 +11,9 @@ defmodule SdrAgentWeb.LeadLive.Show do
   ADM and REV may assign a new lead to the agent (`SdrAgent.SDR.assign_lead/2`
   with the active campaign); any refusal (e.g. an auditor's forged event) is
   the domain's, audited by `SdrAgent.Audit.Guard`, and shown as an error.
-  An auditor's view is recorded with the lead id before it is served.
+  An auditor's view is recorded with the lead id before it is served. The
+  agent's progress (runs, evidence, qualification, drafts) appears live
+  (`SdrAgentWeb.LiveRefresh`).
   """
   use SdrAgentWeb, :live_view
 
@@ -20,6 +22,7 @@ defmodule SdrAgentWeb.LeadLive.Show do
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
+  alias SdrAgentWeb.LiveRefresh
   alias SdrAgentWeb.Scope
 
   @criteria [:company_size, :industry, :geography, :persona, :trigger]
@@ -36,7 +39,8 @@ defmodule SdrAgentWeb.LeadLive.Show do
        claim_id: nil,
        source: nil,
        criteria: @criteria
-     )}
+     )
+     |> LiveRefresh.attach(&refresh/1)}
   end
 
   @impl true
@@ -49,6 +53,9 @@ defmodule SdrAgentWeb.LeadLive.Show do
       true -> {:noreply, socket |> assign(lead_id: id, source: nil) |> load(id) |> select_claim()}
     end
   end
+
+  defp refresh(%{assigns: %{lead_id: nil}} = socket), do: socket
+  defp refresh(socket), do: socket |> load(socket.assigns.lead_id) |> select_claim()
 
   defp load(socket, id) do
     scope = socket.assigns.current_scope

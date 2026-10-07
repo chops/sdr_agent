@@ -22,6 +22,15 @@ defmodule SdrAgentWeb.DraftLive do
   domain's: a forged event from an auditor is refused (and audited) by
   `SdrAgent.Audit.Guard` and shown as an error. An auditor's view is
   recorded with the draft id before it is served.
+
+  Live refresh (`SdrAgentWeb.LiveRefresh`) updates approvals, deliveries,
+  receipts, status and history as they commit, but never swaps the revision
+  or the recipient under the reviewer: when another revision has become
+  current or the recipient's email changed, the displayed revision and
+  recipient — and the approve/reject binding to them — stay frozen while
+  lifecycle data keeps refreshing, and a notice offers to show the latest. A
+  verdict on what is displayed is then refused as stale by the domain,
+  exactly as before live refresh.
   """
   use SdrAgentWeb, :live_view
 
@@ -30,6 +39,7 @@ defmodule SdrAgentWeb.DraftLive do
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
+  alias SdrAgentWeb.LiveRefresh
   alias SdrAgentWeb.Scope
 
   @impl true
@@ -46,8 +56,10 @@ defmodule SdrAgentWeb.DraftLive do
        cited_artifact: nil,
        editing?: false,
        review_error: nil,
+       newer_revision?: false,
        messages: %{}
-     )}
+     )
+     |> LiveRefresh.attach(&refresh/1)}
   end
 
   @impl true
@@ -58,6 +70,43 @@ defmodule SdrAgentWeb.DraftLive do
   end
 
   ## Loading
+
+  # What the reviewer is reading and binding a verdict to: the revision, its
+  # rendering, the recipient shown, and the forms carrying that binding.
+  @frozen [
+    :current,
+    :segments,
+    :citations,
+    :diff,
+    :contact,
+    :approve_form,
+    :reject_form,
+    :edit_form,
+    :page_title
+  ]
+
+  # Re-read everything (audited for an auditor). If the revision or the
+  # recipient email changed, put the reviewed snapshot back: lifecycle data
+  # (status, approvals, deliveries, history) stays live, the content and the
+  # recipient under review do not, and the domain refuses a verdict on them
+  # as stale.
+  defp refresh(%{assigns: %{loaded?: true} = shown} = socket) do
+    fresh = load(socket)
+
+    if fresh.assigns.loaded? and binding_changed?(shown, fresh.assigns) do
+      fresh |> assign(Map.take(shown, @frozen)) |> assign(newer_revision?: true)
+    else
+      fresh
+    end
+  end
+
+  defp refresh(%{assigns: %{draft_id: nil}} = socket), do: socket
+  defp refresh(socket), do: load(socket)
+
+  defp binding_changed?(shown, fresh) do
+    shown.current.id != fresh.current.id or
+      to_string(shown.contact.email) != to_string(fresh.contact.email)
+  end
 
   defp load(socket) do
     scope = socket.assigns.current_scope
@@ -103,6 +152,7 @@ defmodule SdrAgentWeb.DraftLive do
         loaded?: true,
         withheld: nil,
         not_found?: false,
+        newer_revision?: false,
         page_title: "Review · #{current.subject}",
         draft: draft,
         revisions: revisions,
@@ -227,6 +277,10 @@ defmodule SdrAgentWeb.DraftLive do
   @impl true
   def handle_event("cite", %{"id" => id}, socket) do
     {:noreply, cite(socket, socket.assigns.citations[id])}
+  end
+
+  def handle_event("show_latest", _params, socket) do
+    {:noreply, socket |> assign(editing?: false) |> cite(nil) |> load()}
   end
 
   def handle_event("toggle_edit", _params, socket) do
@@ -396,6 +450,24 @@ defmodule SdrAgentWeb.DraftLive do
             </.link>
           </:subtitle>
         </.page_header>
+
+        <div
+          :if={@newer_revision?}
+          id="newer-revision"
+          role="status"
+          class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+        >
+          <p class="flex items-start gap-2">
+            <.icon name="hero-arrow-path" class="mt-0.5 size-5 shrink-0" />
+            <span>
+              This draft's revision or recipient changed after it was shown. A
+              verdict on what you are reading will be refused as stale.
+            </span>
+          </p>
+          <.ui_button id="show-latest-revision" size="sm" phx-click="show_latest">
+            Show the latest
+          </.ui_button>
+        </div>
 
         <div
           :if={@review_error}

@@ -86,6 +86,8 @@ flowchart LR
     Resources --> Postgres
     Actions -- same transaction --> Append
     Append --> Postgres
+    Postgres -. NOTIFY on commit only .-> Relay[LiveEvents.Relay]
+    Relay -. tenant PubSub topic .-> LiveViews
     Verify --> Postgres
     Anchor --> Postgres
     Anchor -. Git enabled .-> AnchorGit

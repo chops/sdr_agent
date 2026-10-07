@@ -1,0 +1,290 @@
+#+TITLE: Feature: S13 — acceptance, demo runbook and live console
+#+DATE: 2026-10-07
+
+* Summary
+S13 closes the MVP (build plan: golden-path e2e, browser smoke, Postgres-only
+reconstruction, Oban restart/idempotency, hermetic proof, secret scan,
+=bin/demo=, README runbook). The owner demos at a meetup on 2026-10-07, which
+is before S9 (replies) and S12 (wire witness) have merged. S13 is therefore
+split:
+
+- *S13a* (this PR, stacked on S10b #18): demo groundwork that does not depend
+  on S9 or S12. It covers the dev port, asset paths, =bin/demo=, live console
+  refresh and the README runbook.
+- *S13b*: operator retry execution plus Operation wrappers (split out, see
+  "Deviations" below).
+- *S13 part 2* (after S9/S12 merge): the acceptance suite (TODO list below).
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: no
+Reason: S13a changes no persisted concept, attribute, relationship, policy,
+lifecycle or action contract. The audit kernel additionally issues a
+commit-time pg_notify (ADR-0012) and writes nothing new. Status reads use
+existing read policies (auditor CLI actor). S13b retry execution WOULD
+trigger: it is split out for that reason.
+#+END_EXAMPLE
+
+* Affected Apps
+- [X] Core (=sdr_agent=): =Demo.Status=, =LiveEvents= + =Relay=, the kernel
+  notify hook, the =mix sdr.demo.status= task
+- [X] Web (=sdr_agent_web=): =LiveRefresh=, six LiveViews
+- [X] Other: =bin/demo=, config, assets, README, ADR-0012, diagrams
+
+* Affected Modules (S13a)
+1. *Port.* =config/runtime.exs=: =PORT= overrides only when it is set. Dev
+   and test keep their config-file ports (4120 and 4002). Prod keeps 4000.
+   The managed =dev.exs= block is unchanged.
+2. *Assets.* =config/config.exs= takes NODE_PATH from
+   =Mix.Project.deps_path/0= and =build_path/0= and adds =MIX_DEPS_PATH=.
+   =assets/vendor/heroicons.js= reads =MIX_DEPS_PATH=. =assets/css/app.css=
+   also scans the devenv deps and build paths, with a test that keeps the
+   toolchain tag in step with =devenv.nix=.
+3. *bin/demo* + =SdrAgent.Demo.Status= + =mix sdr.demo.status=.
+4. *Live refresh* (ADR-0012): =SdrAgent.LiveEvents=, =LiveEvents.Relay=
+   (supervised after PubSub), =Audit.Kernel= (notify after the head
+   advance), =SdrAgentWeb.LiveRefresh=, and the Dashboard, Lead detail,
+   Review, Draft, Operations and Run views.
+5. *README* runbook.
+
+* Deviations (each with its reason)
+1. *Operator retry execution is split to S13b.* Brief item 5 is not built
+   here, for these reasons:
+   - Agent operations run with =max_attempts: 1=. =Operations.fail_operation/3=
+     discards them in the same transaction, so =retry_operation/2=
+     (=failed → running=) never applies to an agent Operation.
+   - =Agents.retry_run/2= creates a queued run with no =operation_id=, and
+     =AgentWorker= finds its run by Operation. Executing a retry therefore
+     needs the =AgentRun :retry= action to accept the new Operation, and
+     possibly =Operation= to admit an operator re-enqueue. Both are
+     action-contract changes, which trigger the entity model and need the
+     independent soft-stop review before implementation.
+   - Delivery already retries automatically: =failed_retryable= is bounded
+     at 3 attempts with backoff. S8 deliberately created no Operation rows
+     for the delivery, reconciliation and follow-up queues (S8 choice 32).
+     Wrapping them is a new persisted lifecycle use, so it falls under the
+     same trigger.
+   The Operations view therefore keeps S10b's behaviour (cancel,
+   acknowledge and resolve; no retry button), and its moduledoc still says
+   why.
+2. *Live refresh uses Postgres NOTIFY, not domain broadcasts* (ADR-0012,
+   proposed). NOTIFY is the only mechanism that is commit-exact on every
+   write path. Run and Operations views are wired as well as the four that
+   were asked for: they are one line each, and the run view is the "watch
+   the agent" moment of the demo.
+3. *The draft page does not live-swap revisions.* Swapping would undermine
+   approval binding (the reviewer could approve content they had not read).
+   A notice and a "Show the latest revision" button are shown instead, and a
+   verdict on the displayed revision stays stale-checked by the domain.
+4. *No live-server check.* A dev-mode server would use =sdr_agent_dev=
+   (forbidden while the owner live-tests), and the test endpoint is
+   =server: false= even under =phx.server=. The server path is covered by
+   =bin/demo='s guard tests and the LiveView tests. The browser smoke is in
+   the part-2 list.
+5. *=bin/demo run= keeps the anchoring defaults* (=git+ots=). It prints the
+   sink mode and whether the signing key is present (never its value). The
+   README documents =SDR_ANCHOR_SINKS=file= for offline use. No default
+   changed.
+
+* Required Tests (S13a)
+- [X] Port: dev 4120 without =PORT=, =PORT= overrides, test keeps 4002
+      (=test/sdr_agent/endpoint_port_config_test.exs=)
+- [X] Assets: tailwind and esbuild NODE_PATH from the Mix paths, the
+      heroicons deps path, app.css devenv paths match =devenv.nix=
+      (=test/sdr_agent/asset_paths_config_test.exs=)
+- [X] =bin/demo= refusals happen before any Mix command: non-dev
+      =MIX_ENV=, =--test= with another env, =DATABASE_URL=, reset without
+      =--yes=, busy port, run in =--test=, unknown command. Repo-config
+      refusals: host, port, database. =--test= end to end (reset, seed,
+      status), with no password in any output (=test/scripts/demo_test.exs=)
+- [X] Status report: empty DB, queues, seeded counts and a valid chain, no
+      secrets, unreachable formatting (=test/sdr_agent/demo/status_test.exs=)
+- [X] Commit-time notifications on real connections: delivered after
+      commit, never on rollback, delayed until the outer commit, long
+      subject omitted, ids and type only (=test/sdr_agent/live_events_test.exs=)
+- [X] Live views: dashboard count, review queue, lead runs and drafts, draft
+      approval by another reviewer, no revision swap (stale verdict still
+      refused), "show latest", auditor refresh recorded, access/auth events
+      ignored, burst coalesced, other tenant ignored
+      (=test/sdr_agent_web/live/live_refresh_test.exs=)
+
+-----
+
+* TDD Tracking
+=bin/tdd_verify.sh= cannot parse Elixir 1.20's =Result: N/M passed= summary
+(known since S1), so each RED below was recorded by hand. Implementation
+files were moved aside (or the wiring stashed) for the RED run.
+
+| Step | RED | Failure reason | GREEN |
+|------+-----+----------------+-------|
+| Port | 1/3 | dev and test got 4000 from runtime.exs | 3/3 |
+| Assets | 0/4 | NODE_PATH =./deps=; heroicons =./deps=; no devenv sources | 4/4 |
+| bin/demo + status | 0/18 | =Demo.Status= undefined; =bin/demo= missing (=:enoent=) | 18/18 |
+| Live refresh | 2/13 | no notification relayed (5 s timeouts); views not refreshed | 14/14 |
+
+(The live-refresh suite gained one test after RED, when the draft case was
+split into "stale verdict" and "show latest". The two that passed at RED
+were the malformed-payload decode and the other-tenant isolation.)
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED
+(the peer reviews RED on the PR).
+
+GREEN gate: =MIX_TEST_PARTITION=_s13 bin/verify= gives *544 passed, 4
+excluded* before the docs commit. See the PR for the final run, plus
+=mix ash.codegen --check=, =mix credo= and =mix hex.audit=.
+
+* Implementation Notes
+- The tailwind =@source= glob (=.devenv/state/deps/*/…=) matched nothing,
+  and =**/*= over-scanned (386 KB of CSS). Only an explicit directory works,
+  so the toolchain tag is spelled out and pinned by a test. The fresh-worktree
+  build is byte-identical to a build that has =./deps=.
+- =bin/demo --test= suffixes =MIX_TEST_PARTITION= with =_demo=, so its reset
+  never drops the database of the suite that runs it.
+- =mix sdr.demo.status= starts the app with Oban queues and plugins off, so
+  asking for the status never runs a job. Verifying the chain records a
+  =chain_verify= AuditAccess, as every verification does.
+- The notification payload is bounded by construction (≤ 512 bytes): ids,
+  and short plain fields only; anything else is =null=, never truncated
+  (review round 1, below).
+
+* Review round 1 (Codex, PR #19 at =5e064b8=: CHANGES REQUESTED)
+ADR-0012 design approved (now accepted, citing the ruling); choices 1–5
+accepted. Fixed test-first:
+
+1. *Reset could force-drop a live database.* It only checked the chosen
+   =PORT=, so a server on another port (README suggests =PORT=4122=) lost its
+   connections to =ecto.drop --force-drop=. Now =mix sdr.demo.clients= counts
+   other =pg_stat_activity= backends of the target database (connecting to
+   the =postgres= maintenance DB), =bin/demo reset= refuses unless it is 0
+   (unreadable → refused) and drops *without* =--force-drop=, so Postgres
+   refuses a client that connects in between. Tests: stubbed server on
+   another port with 3 clients → refused, no drop; garbage count → refused;
+   0 → plain =ecto.drop=; real =--test= client on the demo DB → refused and
+   the seeded data survives.
+2. *Unbounded NOTIFY payload could roll back a valid append.* =event_type=
+   and =subject_resource= were unbounded (only =subject_id= was capped), so an
+   oversized event exceeded the 8000-byte limit and failed its transaction
+   (reproduced at RED: =Postgrex.Error= on the append). =LiveEvents.payload/1=
+   now caps every field and admits only plain ASCII, dropping the rest to
+   =null=. Tests: an oversized multibyte event commits on a real connection,
+   and its notification arrives with =nil= fields; hostile values in every
+   field stay within =max_payload_bytes/0= and contain no content.
+3. Important: the moduledoc states the accepted failure coupling instead of
+   "cannot block". =Demo.Status.ready?= now requires the fixture data set
+   complete (=:seeded= vs =:incomplete=), a valid chain verification, and
+   domain reads that succeeded (=:unavailable= otherwise). Tests: bootstrap
+   only, a tampered chain, a missing verification. The draft page keeps
+   refreshing lifecycle data (status, approvals, deliveries, history; an
+   auditor's refresh is still audited) while the reviewed revision and its
+   binding stay frozen. Test: an approval of the newer revision shows while
+   the binding stays =#1=.
+4. Inherited (owned by #17/#18): recipient binding, stale actor/session
+   validation, tenant scoping and fail-closed reload state. =LiveRefresh=
+   reuses =scope.user=, and NOTIFY is not an auth-invalidation mechanism.
+   The owner-safe browser and golden-path checkpoint stays open before demo
+   acceptance.
+
+RED (round 1): the four touched suites gave 30/41. Failures: =Status= seed
+and chain states, =LiveEvents.payload/1= undefined, the oversized append
+failing with =Postgrex.Error=, the reset safety checks, and the draft
+lifecycle refresh. GREEN: 41/41 after =await_clients= made the
+backend-settling wait explicit in the end-to-end script test. =PORT= is now
+taken from a free port in the stubbed tests, because a developer's own
+server may hold 4120.
+
+* Review round 2 (Codex, PR #19 at =2f4b87e=: CHANGES REQUESTED)
+The round-1 fixes and the predeliver ruling were accepted.
+
+1. *MF: refreshes bypassed operator re-validation.* =LiveRefresh= called
+   the loader from =handle_info= with the socket's old scope. #17's
+   =LiveUserAuth= hooks cover events and navigation only, so a demoted
+   operator got data without the auditor's AuditAccess, and a disabled or
+   revoked operator was not signed out. Now =fire/2= runs
+   =LiveUserAuth.revalidate/1= when the reload fires, both at once and on
+   the debounce timer. It loads with the fresh socket, or halts with
+   revalidate's redirect and loads nothing. The Audit timeline (ADM, AUR) is
+   now live-refreshed too; it is the role-restricted case.
+   - RED: 11/17, using Codex's reproduction plus positive debounce and
+     restricted-role cases. GREEN: 17/17, plus the audit view suite.
+   - Access/auth exclusion and the frozen review snapshot are unchanged and
+     still tested.
+2. *Important (a):* =Predeliver.run/1= fails closed with
+   =:demo_not_allowed= unless =seeding_allowed?= (dev/test), before any
+   sign-in or write. RED 4/5, GREEN 5/5.
+3. *Important (b):* the research drain covers the whole queue (Oban cannot
+   drain one job). This is documented as an explicit operational limitation
+   in the module and task docs; delivery and follow-ups are never drained.
+4. *Stack:* rebased onto main =b71d2bd= (S8, S9, S10a/b, S12b merged;
+   only the S13 commits replayed with =--onto=). The stale-recipient
+   assertion now uses the domain's refusal wording ("does not match the
+   current recipient"), which comes from #17's guarded approve.
+
+* Risks & Considerations
+- *Quiet hours at the meetup.* The campaign fixture's quiet hours are 18:00
+  to 08:00 America/Denver. An evening demo in Mountain time defers delivery
+  until 08:00. The deferral is real behaviour and is recorded, but the
+  "captured message" step will not complete live. Do not change the
+  compliance defaults: present the deferral, or demo during the window.
+- An audit append now also runs =pg_notify=. If it fails (notification queue
+  full), the append fails. This is bounded and documented in ADR-0012.
+- Live refresh is best effort: notifications sent while the relay is
+  reconnecting are lost, and views update on navigation.
+
+* S13 part 2 — progress on this branch (2026-10-07)
+- *Golden-path e2e* =test/sdr_agent_web/golden_path_test.exs=: drives the
+  console. The reviewer assigns lead 01 and the research job is drained.
+  Qualification, evidence, the draft and the review queue appear. The
+  approve form carries the displayed revision, hash and recipient email.
+  The delivery is drained, the draft is =sent=, the captured message is
+  read through the audited payload path, and the ledger holds every step in
+  causal order (=sdr.lead.assigned= … =outreach.draft.sent=) with a valid
+  chain. It is an acceptance test over existing behaviour, so it passed on
+  its first run. A mutation check (an out-of-order expected event) fails it,
+  0/1. *S9 slot:* =replies/2= gets the signed interested and unsubscribe
+  replies (=WebhookFixtures=, =:integration= drain, suppression and
+  follow-up cancellation) once this branch carries S9a (main =b26be34=);
+  #19 stays based on s10b-ui until retargeted.
+- *=bin/demo predeliver=* (=SdrAgent.Demo.Predeliver=, =mix
+  sdr.demo.predeliver=). It runs lead 01 to a draft awaiting review and
+  prints its =/drafts/…= path. It goes through domain APIs and the real
+  research worker, drained inline, and waits (bounded) when a running dev
+  server's Oban takes the job first. It is idempotent: a re-run only
+  reports the stage, including the delivery after a human approval.
+  *It never approves.* The first version had =--approve= (an approval as
+  the Demo Reviewer fixture operator). The coordinator ruled that removed:
+  a script approving as a fixture reviewer is not a human approval, which
+  contradicts the ADR-0001 Tier 0 invariant even in dev. The owner approves
+  in the console, which also rehearses the demo. Tests: an Approval is never
+  created, whatever options are passed. RED was 19/21 against the
+  =--approve= version (the script approved; =bin/demo= accepted the flag);
+  GREEN is 21/21. Also tested: after a human approval and delivery, a
+  re-run reports =:captured= and writes only its sign-in record, and
+  =bin/demo predeliver --approve= is refused as an unknown argument.
+
+* S13 part 2 — TODO (after S9 and S12 merge)
+- [X] Golden path: S9 replies in =replies/3= (rebased onto main =b71d2bd=).
+      Signed through =SdrAgent.Demo.Replies= (the =mix sdr.demo.reply=
+      helper). An interested reply to lead 01 is matched, classified and in
+      the hand-off queue. Lead 02 is human-approved and captured, then its
+      unsubscribe reply suppresses (=unsubscribe_reply=) and stops it. A
+      mutation check fails the test (0/1).
+- [ ] Invalid-signature rejection in the golden path (checklist 4.3; S9a's
+      =webhook_controller_test.exs= covers it today).
+- [ ] Browser smoke of the golden path on a disposable database (needs a
+      dev-like server not bound to =sdr_agent_dev=, or an owner run).
+- [ ] Postgres-only reconstruction: with Jido stopped and Tempo
+      unavailable, reconstruct every step of a captured email. The chain
+      verifies and the anchored head matches (ADR-0002).
+- [ ] Oban restart and idempotency: re-run jobs are no-ops by state. Recover
+      after a crash: stale =running= AgentRun/Operation, =sent → unknown=
+      ModelInvocation (S7 notes), delivery sweeper + reconciliation (S8 notes).
+- [ ] Hermetic proof recorded (the CI namespace already asserts no outbound
+      network; cite the run).
+- [ ] Secret scan over the full history at release; README and receipts
+      contain no secrets.
+- [ ] Measure the chain-head lock under the golden path (S2/S3 risk).
+- [ ] S12 wire-witness link in the runbook once reconciled links exist.
+- [ ] S13b: operator retry execution and Operation wrappers (above), with
+      the entity-model delta and soft-stop review first, then UI retry
+      buttons (admin only, with deny tests).

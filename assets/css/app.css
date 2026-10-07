@@ -3,12 +3,17 @@
 
 @import "tailwindcss" source(none);
 @source "../../deps/ash_authentication_phoenix";
+/* Under devenv, Mix deps and builds live in .devenv/state (MIX_DEPS_PATH,
+   MIX_BUILD_ROOT, keyed by devenv.nix's toolchainTag; a test keeps the tag in
+   step). Paths that do not exist are ignored. */
+@source "../../.devenv/state/deps/elixir-1.20.4-otp-29.0.5/ash_authentication_phoenix";
 @import "phoenix-colocated/sdr_agent/colocated.css";
 @source "../css";
 @source "../js";
 @source "../../lib/sdr_agent_web";
 /* Required for Tailwind to automatically pick up changes in colocated CSS files in dev */
 @source "../../_build/dev/phoenix-colocated/sdr_agent/*/";
+@source "../../.devenv/state/build/elixir-1.20.4-otp-29.0.5/dev/phoenix-colocated/sdr_agent/*/";
 
 /* A Tailwind plugin that makes "hero-#{ICON}" classes available.
    The heroicons installation itself is managed by your mix.exs */

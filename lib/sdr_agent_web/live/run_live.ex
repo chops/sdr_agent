@@ -14,6 +14,7 @@ defmodule SdrAgentWeb.RunLive do
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
+  alias SdrAgentWeb.LiveRefresh
 
   @budget [
     {"Model calls", :model_calls_used, :max_model_calls},
@@ -24,13 +25,24 @@ defmodule SdrAgentWeb.RunLive do
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
-     assign(socket, page_title: "Agent run", loaded?: false, withheld: nil, not_found?: false)}
+     socket
+     |> assign(
+       page_title: "Agent run",
+       loaded?: false,
+       withheld: nil,
+       not_found?: false,
+       run_id: nil
+     )
+     |> LiveRefresh.attach(&refresh/1)}
   end
 
   @impl true
   def handle_params(%{"id" => id}, _uri, socket) do
-    {:noreply, if(connected?(socket), do: load(socket, id), else: socket)}
+    {:noreply, if(connected?(socket), do: socket |> assign(run_id: id) |> load(id), else: socket)}
   end
+
+  defp refresh(%{assigns: %{run_id: nil}} = socket), do: socket
+  defp refresh(socket), do: load(socket, socket.assigns.run_id)
 
   defp load(socket, id) do
     scope = socket.assigns.current_scope

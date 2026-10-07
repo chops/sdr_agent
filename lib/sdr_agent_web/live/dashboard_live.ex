@@ -4,7 +4,8 @@ defmodule SdrAgentWeb.DashboardLive do
   deliveries accepted, open attention), the oldest drafts awaiting review,
   and the operator-attention queue (`SdrAgent.Operations.list_attention/1`:
   open and acknowledged Failures, newest first). Read-only for every role;
-  an auditor's view is recorded first (`SdrAgentWeb.AuditedView`).
+  an auditor's view is recorded first (`SdrAgentWeb.AuditedView`). Updates
+  live as the agent, reviewers and delivery commit (`SdrAgentWeb.LiveRefresh`).
   """
   use SdrAgentWeb, :live_view
 
@@ -13,13 +14,15 @@ defmodule SdrAgentWeb.DashboardLive do
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
+  alias SdrAgentWeb.LiveRefresh
 
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
      socket
      |> assign(page_title: "Dashboard", loaded?: false, withheld: nil)
-     |> stream(:attention, [])}
+     |> stream(:attention, [])
+     |> LiveRefresh.attach(&load/1)}
   end
 
   @impl true
