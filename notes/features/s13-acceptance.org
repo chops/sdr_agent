@@ -220,6 +220,24 @@ The round-1 fixes and the predeliver ruling were accepted.
    assertion now uses the domain's refusal wording ("does not match the
    current recipient"), which comes from #17's guarded approve.
 
+* S13c — register the anchor signing key on seed (2026-10-07)
+Found in the coordinator's dry run on the owner's dev DB: after =bin/demo
+reset --yes && bin/demo seed= no AuditSigningKey existed, so AnchorWorker
+retried with ={:error, :no_active_signing_key}= until someone ran =mix
+sdr.audit.register_key= by hand.
+
+- Fix: =SdrAgent.Demo.SigningKey.ensure/0= runs in =mix sdr.demo.seed=. It
+  registers the pinned *public* key (=docs/audit/anchor-signing-key.pub=)
+  through the existing =Audit.register_signing_key/2= kernel path. It is
+  idempotent and reads no private material.
+- =Demo.Status= reports =signing key: registered | NOT REGISTERED=, and
+  =ready?= requires it.
+- Entity model trigger: no. The existing action is used and nothing
+  persisted changes.
+- RED 23/28: =SigningKey= undefined; status was not readiness-gated; the
+  script end-to-end had no signing-key line. GREEN: bin/verify 699 passed,
+  4 excluded.
+
 * Risks & Considerations
 - *Quiet hours at the meetup.* The campaign fixture's quiet hours are 18:00
   to 08:00 America/Denver. An evening demo in Mountain time defers delivery

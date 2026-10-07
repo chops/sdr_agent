@@ -48,10 +48,10 @@ at any time.
 | Command | What it does |
 |---|---|
 | `bin/demo reset --yes` | Drops, creates and migrates `sdr_agent_dev`. Destructive, so it needs `--yes`, and it refuses while anything is connected to the database (a server on any port, IEx, psql). The drop is never forced. |
-| `bin/demo seed` | Seeds the fictional ICP, campaign, 10 accounts and contacts with leads, 3 operators and one suppression. Idempotent. |
+| `bin/demo seed` | Seeds the fictional ICP, campaign, 10 accounts and contacts with leads, 3 operators and one suppression. It also registers the pinned audit-anchor **public** key (`docs/audit/anchor-signing-key.pub`) so anchoring works after a reset. Idempotent. |
 | `bin/demo run` | Checks that the port is free and the database is reachable, migrated and seeded, then starts Phoenix on `PORT` (default 4120). |
 | `bin/demo predeliver` | Runs fixture lead 01 (Brightpath Freight Systems) through research, qualification and drafting, and prints the `/drafts/…` path of the draft awaiting review. It **never approves**: every outbound message needs a human approval (ADR-0001 Tier 0). Idempotent; a re-run reports the stage (awaiting review, queued, deferred, captured). |
-| `bin/demo status` | Shows the database, migrations, server, Oban queues and job counts, leads by status, drafts awaiting review, captured messages and the audit chain verification. |
+| `bin/demo status` | Shows the database, migrations, server, Oban queues and job counts, leads by status, drafts awaiting review, captured messages, whether the signing key is registered, and the audit chain verification. |
 
 `bin/demo` refuses to run against anything except the local demo database: it
 needs `MIX_ENV=dev` (or unset), no `DATABASE_URL`, and a Repo of

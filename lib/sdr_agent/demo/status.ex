@@ -2,7 +2,8 @@ defmodule SdrAgent.Demo.Status do
   @moduledoc """
   The local demo's health report (`bin/demo status`, `mix sdr.demo.status`;
   checklist 4.1): database reachable, migrations current, the fixture data
-  set seeded (every fixture lead and the campaign present),
+  set seeded (every fixture lead and the campaign present), the pinned
+  audit-anchor public key registered (`SdrAgent.Demo.SigningKey`),
   Oban queues with their job counts, the pipeline counts an operator
   narrates (leads by status, drafts awaiting review, captured messages) and
   the audit chain verification.
@@ -20,6 +21,7 @@ defmodule SdrAgent.Demo.Status do
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Demo.Fixtures
+  alias SdrAgent.Demo.SigningKey
   alias SdrAgent.Outreach
   alias SdrAgent.Repo
   alias SdrAgent.Sales
@@ -32,6 +34,7 @@ defmodule SdrAgent.Demo.Status do
           leads: %{optional(atom()) => non_neg_integer()},
           drafts_pending_review: non_neg_integer() | nil,
           captured_messages: non_neg_integer() | nil,
+          signing_key: :registered | :missing | nil,
           chain:
             %{valid?: boolean(), last_sequence: non_neg_integer(), issues: non_neg_integer()}
             | nil
@@ -53,14 +56,16 @@ defmodule SdrAgent.Demo.Status do
 
   @doc """
   Whether the report shows a demo that can run: database reachable,
-  migrations current, the fixture data set fully seeded, and the audit chain
-  verified valid (an unavailable or failed verification is not ready).
+  migrations current, the fixture data set fully seeded, the audit-anchor
+  signing key registered, and the audit chain verified valid (an
+  unavailable or failed verification is not ready).
   """
   @spec ready?(report()) :: boolean()
   def ready?(%{
         database: :reachable,
         migrations: %{pending: []},
         tenant: :seeded,
+        signing_key: :registered,
         chain: %{valid?: true}
       }),
       do: true
@@ -82,6 +87,7 @@ defmodule SdrAgent.Demo.Status do
       leads: %{},
       drafts_pending_review: nil,
       captured_messages: nil,
+      signing_key: nil,
       chain: nil
     }
   end
@@ -95,6 +101,7 @@ defmodule SdrAgent.Demo.Status do
       leads: %{},
       drafts_pending_review: nil,
       captured_messages: nil,
+      signing_key: nil,
       chain: nil
     }
 
@@ -147,6 +154,7 @@ defmodule SdrAgent.Demo.Status do
         leads: Enum.frequencies_by(leads, & &1.status),
         drafts_pending_review: length(queue),
         captured_messages: length(captured),
+        signing_key: if(SigningKey.registered?(), do: :registered, else: :missing),
         chain: %{
           valid?: chain.valid?,
           last_sequence: chain.last_sequence,
@@ -218,9 +226,13 @@ defmodule SdrAgent.Demo.Status do
       "leads: #{counts(report.leads, "none")}",
       "drafts awaiting review: #{report.drafts_pending_review}",
       "captured messages: #{report.captured_messages}",
+      "signing key: #{signing_key(report.signing_key)}",
       "audit chain: #{chain(report.chain)}"
     ]
   end
+
+  defp signing_key(:registered), do: "registered"
+  defp signing_key(_missing), do: "NOT REGISTERED (run bin/demo seed)"
 
   defp chain(%{valid?: true, last_sequence: n}), do: "valid (#{n} events)"
 
