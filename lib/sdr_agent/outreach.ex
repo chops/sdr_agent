@@ -6,7 +6,9 @@ defmodule SdrAgent.Outreach do
   Resources: `Draft`, `DraftRevision`, `RevisionCitation`, `Approval`,
   `Suppression` (S8a); `DeliveryOperation`, `DeliveryReceipt`,
   `SendQuotaDay` (S8b, the outbox driven by `SdrAgent.Outreach.Delivery`
-  and its workers). Outreach is the highest domain: it holds FKs to Research
+  and its workers); `Reply` (S9, written by the signed provider webhook,
+  `SdrAgent.Outreach.Webhooks`, which also records delivery outcomes and the
+  deterministic unsubscribe, bounce and complaint suppressions). Outreach is the highest domain: it holds FKs to Research
   (cited claims), Sales (lead, enrollment, step, campaign, contact), Agents
   (runs, decisions, invocations), Accounts (operators) and Audit (tenant),
   and stops Sales leads/enrollments only as the side effect of a suppression
@@ -49,6 +51,7 @@ defmodule SdrAgent.Outreach do
     resource SdrAgent.Outreach.DeliveryOperation
     resource SdrAgent.Outreach.DeliveryReceipt
     resource SdrAgent.Outreach.SendQuotaDay
+    resource SdrAgent.Outreach.Reply
   end
 
   @doc """

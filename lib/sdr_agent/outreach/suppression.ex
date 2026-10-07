@@ -7,8 +7,9 @@ defmodule SdrAgent.Outreach.Suppression do
   Attributes: `scope` (`:email` or `:domain`), `value` (normalised: trimmed,
   lowercase; unique per tenant and scope), `reason` (`unsubscribe_link`,
   `unsubscribe_reply`, `hard_bounce`, `complaint`, `manual`), the source
-  matching the reason (`created_by_user_id` for manual, `decision_id`,
-  `delivery_operation_id`; S9 adds the reply and webhook sources),
+  matching the reason (`created_by_user_id` for manual; `decision_id` and
+  `reply_id` for unsubscribe_reply; `webhook_event_id` for unsubscribe_link
+  and complaint; `delivery_operation_id` for hard_bounce — DB checks),
   `effective_at`.
 
   APPEND-ONLY and monotonic: no update, destroy or lift exists. Creating a
@@ -18,8 +19,10 @@ defmodule SdrAgent.Outreach.Suppression do
   contacts' open leads and active/paused enrollments, invalidates their
   granted approvals and cancels their pending-review or queued drafts.
 
-  Actions (S8): `:manual` (ADM; the creator is recorded) and `:seed` (SEED,
-  dev/test only). Reads: ADM, REV, AUR, AGT, DLV, WHK, AUD. Audited:
+  Actions: `:manual` (ADM; the creator is recorded), `:seed` (SEED,
+  dev/test only), `:from_webhook` (WHK, S9: unsubscribe link, unsubscribe
+  reply by the deterministic `unsubscribe_rule` Decision, hard bounce,
+  complaint — always naming the WebhookEvent). Reads: ADM, REV, AUR, AGT, DLV, WHK, AUD. Audited:
   `outreach.suppression.created`.
   """
   use Ash.Resource,
@@ -46,6 +49,8 @@ defmodule SdrAgent.Outreach.Suppression do
       reference :created_by, on_delete: :restrict
       reference :decision, on_delete: :restrict
       reference :delivery_operation, on_delete: :restrict
+      reference :reply, on_delete: :restrict
+      reference :webhook_event, on_delete: :restrict
     end
 
     check_constraints do
@@ -62,10 +67,17 @@ defmodule SdrAgent.Outreach.Suppression do
         check: "value::text = lower(btrim(value::text)) AND value::text <> ''"
 
       check_constraint :decision_id, "suppressions_reply_source",
-        check: "reason <> 'unsubscribe_reply' OR decision_id IS NOT NULL"
+        check:
+          "reason <> 'unsubscribe_reply' OR (decision_id IS NOT NULL AND reply_id IS NOT NULL)"
 
       check_constraint :delivery_operation_id, "suppressions_bounce_source",
         check: "reason <> 'hard_bounce' OR delivery_operation_id IS NOT NULL"
+
+      check_constraint :webhook_event_id, "suppressions_link_source",
+        check: "reason <> 'unsubscribe_link' OR webhook_event_id IS NOT NULL"
+
+      check_constraint :webhook_event_id, "suppressions_complaint_source",
+        check: "reason <> 'complaint' OR webhook_event_id IS NOT NULL"
     end
 
     custom_statements do
@@ -112,6 +124,41 @@ defmodule SdrAgent.Outreach.Suppression do
       change Changes.ApplySuppression
     end
 
+    create :from_webhook do
+      description "WHK: a provider-signalled suppression (unsubscribe link or reply rule, hard bounce, complaint) with its sources."
+
+      accept [
+        :scope,
+        :value,
+        :reason,
+        :decision_id,
+        :reply_id,
+        :webhook_event_id,
+        :delivery_operation_id
+      ]
+
+      validate attribute_in(:reason, [
+                 :unsubscribe_link,
+                 :unsubscribe_reply,
+                 :hard_bounce,
+                 :complaint
+               ])
+
+      validate present(:webhook_event_id)
+      upsert? true
+      upsert_identity :unique_value
+      upsert_fields []
+      upsert_condition Ash.Expr.expr(false)
+      return_skipped_upsert? true
+      change Changes.NormalizeSuppression
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change {Changes.CheckSuppressionSource, decision_kind: :unsubscribe_rule}
+      change SdrAgent.Research.Changes.MarkExisting
+      change {AppendEvent, @event}
+      change Changes.ApplySuppression
+    end
+
     create :seed do
       description "SEED (dev/test only): a fixture suppression (reason manual) with a fixture id."
       accept [:id, :scope, :value]
@@ -142,6 +189,10 @@ defmodule SdrAgent.Outreach.Suppression do
 
     policy action(:seed) do
       authorize_if Checks.SeedingAllowed
+    end
+
+    policy action(:from_webhook) do
+      authorize_if {Checks.ActorType, types: [:webhook_ingestor]}
     end
 
     policy action_type(:read) do
@@ -207,12 +258,22 @@ defmodule SdrAgent.Outreach.Suppression do
     end
 
     belongs_to :decision, SdrAgent.Agents.Decision do
-      attribute_writable? false
+      attribute_writable? true
       public? true
     end
 
     belongs_to :delivery_operation, SdrAgent.Outreach.DeliveryOperation do
-      attribute_writable? false
+      attribute_writable? true
+      public? true
+    end
+
+    belongs_to :reply, SdrAgent.Outreach.Reply do
+      attribute_writable? true
+      public? true
+    end
+
+    belongs_to :webhook_event, SdrAgent.Operations.WebhookEvent do
+      attribute_writable? true
       public? true
     end
   end
