@@ -188,4 +188,109 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsTest do
                raw
              )
   end
+
+  # Round 2 (Codex ebe89448 @f3df718), adopted verbatim.
+
+  test "a stale observation is retried by the real worker instead of succeeding forever", ctx do
+    invocation = invocation!(ctx, "review-stale-worker")
+    {:ok, operation} = Witness.enqueue(invocation.id, actor: ctx.rec)
+    [job] = all_enqueued(worker: SdrAgent.Agents.Witness.ReconcileWorker)
+    handler = "review-stale-#{invocation.id}"
+    marker = Path.join(ctx.root, "review-hook-triggered")
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:sdr_agent, :repo, :query],
+        fn _, _, metadata, _ ->
+          query = String.downcase(metadata.query)
+
+          if String.contains?(query, "model_invocations") and
+               String.contains?(query, "for update") and not File.exists?(marker) do
+            File.write!(marker, "triggered")
+            exchange!(ctx, invocation)
+          end
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+    result = SdrAgent.Agents.Witness.ReconcileWorker.perform(%{job | attempt: 1})
+
+    assert File.exists?(marker),
+           "race hook must have run after observation and at the invocation lock"
+
+    {:ok, settled} = SdrAgent.Operations.get_operation(operation.id, actor: ctx.rec)
+    refute settled.status == :succeeded, inspect(result)
+  end
+
+  test "blob deletion after observation cannot commit an obsolete matching proof", ctx do
+    invocation = invocation!(ctx, "review-stale-blob")
+    ref = exchange!(ctx, invocation)
+    path = Path.join([ctx.root, "witnesses", invocation.id, ref <> ".json"])
+    digest = path |> File.read!() |> Jason.decode!() |> Map.fetch!("response_sha256")
+
+    blob =
+      Path.join([ctx.root, "witness", "sha256", binary_part(digest, 0, 2), digest <> ".json"])
+
+    result =
+      Witness.reconcile(invocation.id,
+        actor: ctx.rec,
+        methods: [:propagated_id],
+        after_observe: fn ->
+          File.rm!(blob)
+          assert {:ok, %{status: :inferred}} = reconcile(ctx, invocation)
+        end
+      )
+
+    refute match?({:ok, %{status: :reconciled}}, result)
+    {:ok, persistent} = Agents.witness_status(invocation.id, actor: ctx.rec)
+    refute persistent == :reconciled
+  end
+
+  test "scan recovery does not cancel a live available Oban retry", ctx do
+    invocation = invocation!(ctx, "review-live-retry")
+    {:ok, operation} = Witness.enqueue(invocation.id, actor: ctx.rec)
+    {:ok, started} = SdrAgent.Operations.start_operation(operation, actor: ctx.rec)
+
+    {:ok, failed} =
+      SdrAgent.Operations.fail_operation(
+        started,
+        %{
+          failure: %{
+            class: :reconciliation_required,
+            severity: :warning,
+            message: "review retry condition",
+            retryable: true
+          }
+        },
+        actor: ctx.rec
+      )
+
+    [job] = all_enqueued(worker: SdrAgent.Agents.Witness.ReconcileWorker)
+    assert job.state == "available"
+    SdrAgent.Clock.freeze(DateTime.add(failed.updated_at, 11, :minute))
+    on_exit(fn -> SdrAgent.Clock.unfreeze() end)
+    assert :ok = ScanWorker.perform(%Oban.Job{})
+    {:ok, current} = SdrAgent.Operations.get_operation(operation.id, actor: ctx.rec)
+    refute current.status == :cancelled
+  end
+
+  test "a truly discarded interrupted job eventually receives a new bounded generation", ctx do
+    invocation = invocation!(ctx, "review-orphan")
+    {:ok, operation} = Witness.enqueue(invocation.id, actor: ctx.rec)
+    {:ok, started} = SdrAgent.Operations.start_operation(operation, actor: ctx.rec)
+    [job] = all_enqueued(worker: SdrAgent.Agents.Witness.ReconcileWorker)
+    # Oban.Job is framework-owned, not an Ash resource; simulate the job being discarded.
+    job |> Ecto.Changeset.change(state: "discarded") |> Repo.update!()
+    on_exit(fn -> SdrAgent.Clock.unfreeze() end)
+
+    for minute <- [11, 22, 33] do
+      SdrAgent.Clock.freeze(DateTime.add(started.updated_at, minute, :minute))
+      assert :ok = ScanWorker.perform(%Oban.Job{})
+    end
+
+    assert {:ok, operations} = Witness.operations(invocation.id, ctx.rec)
+    assert length(operations) == 2
+  end
 end
