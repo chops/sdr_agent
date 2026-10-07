@@ -236,9 +236,9 @@ tracked S8 obligation). Two blockers:
    Fix: a kernel-only =User :bootstrap_admin= that succeeds only while the
    tenant has no users (tenant row locked =FOR UPDATE=, so concurrent
    bootstraps serialise), audited as =user.created= by the kernel, plus
-   =mix sdr.bootstrap_admin --email … [--display-name …] [--password-stdin]=
-   that prints a generated one-time password once (never logged, never in
-   events) or reads it from stdin. The demo seed stays dev/test-only.
+   =mix sdr.bootstrap_admin --email … [--display-name …] --password-stdin=
+   (round 2: the password comes only from non-echoing stdin, see below).
+   The demo seed stays dev/test-only.
 2. *Choice 9 rejected:* an override could leave the current qualification
    and the lead's status contradictory. Fix: when an override flips the
    outcome it moves the lead in the same transaction through two new
@@ -265,14 +265,39 @@ GREEN (round 1): =bin/verify= *234 passed* (1 excluded, S6a);
   without the kernel marker, the agent and anonymous callers are Forbidden.
   =FirstUserOnly= locks the tenant row, then counts users; six concurrent
   bootstraps → exactly one admin. The password is an action argument only
-  (never an event field; the hash is redacted), the task prints a generated
-  password once via the Mix shell (not Logger), and =--password-stdin= does
-  not echo.
+  (never an event field; the hash is redacted). Round 2 removed the
+  generate-and-print path (see below).
 - The S2 Lead lifecycle gains the two reviewer-required edges
   (=disqualify_by_override=, =requalify_by_override=), both behind the
   qualification marker and ADM/REV; the transition-table test lists them.
   The one RED-era assertion that changed by contract: =User= create actions
   are now =[:bootstrap_admin, :create_user, :seed]=.
+
+** Review round 2 (Codex, PR #9 comment 6030949380: one change requested)
+Blockers 1 and 2 judged fixed. Requested: printing a generated password
+violates ADR-0001 ("never print, log, commit, or transmit secret values").
+Also main moved (S11 merged with three migrations).
+
+- *Rebase:* onto =f56f564= (S11). Conflicts only in the concurrency test's
+  cleanup list and test additions (both kept) and in the hand-edited
+  diagrams (both sides kept; counts 5 domains / 47 resources). The
+  =s5_domain= migration and its snapshots were deleted and regenerated with
+  =mix ash.codegen s5_domain= so it sorts after S11's migrations
+  (=20261007043305=); the content is byte-identical after formatting;
+  =mix ash.codegen --check= passes.
+- *Password:* the task now requires =--password-stdin= (missing → refusal
+  that explains how to pipe it without echo); the first line of stdin is the
+  password; empty, whitespace-only and < 16 characters are refused; all
+  refusals happen before the tenant or any user is created; output names the
+  email and id only. =Accounts.generate_password/0= is removed; the
+  =:bootstrap_admin= action itself requires ≥ 16 characters. No interactive
+  prompt is offered (=--password-stdin= alone satisfies the review's
+  either/or and avoids terminal-echo handling).
+- RED: 267/271 passed; the 4 failures were the generator still existing, a
+  missing =--password-stdin= being accepted, and weak passwords being
+  accepted (task and action). Tests assert the password never appears in
+  stdout, stderr, logs (debug level) or event bytes, and that nothing is
+  created on any refusal.
 
 -----
 
@@ -378,7 +403,8 @@ advisories) clean. No dependency added.
   =stop=, so suppressions created by AGT or DLV need a marker or a policy
   extension; seed a Suppression for =Fixtures.suppressed_contact_emails/0=.
 - *Deployment:* the first admin comes from =mix sdr.bootstrap_admin --email
-  …= (any environment, once); every other user from ADM =create_user=.
+  … --password-stdin= (any environment, once; password ≥ 16 characters piped
+  without echo); every other user from ADM =create_user=.
 - *S10:* sign-in is password only (no registration/reset); sign-out is
   =DELETE /sign-out= and records =auth.signed_out=; operators never receive
   password hashes; AUR sees other users' =display_name= and =role= only;
