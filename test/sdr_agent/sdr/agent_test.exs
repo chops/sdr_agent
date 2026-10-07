@@ -39,7 +39,7 @@ defmodule SdrAgent.SDR.AgentTest do
       assert type in routed, type
     end
 
-    targets = SDRAgent.route_targets() |> Enum.map(&inspect/1) |> Enum.join(" ")
+    targets = Enum.map_join(SDRAgent.route_targets(), " ", &inspect/1)
     refute targets =~ ~r/Send|Deliver/i
     refute Code.ensure_loaded?(SdrAgent.SDR.Actions.SendEmail)
   end
