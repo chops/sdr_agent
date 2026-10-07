@@ -38,9 +38,9 @@ defmodule SdrAgent.DomainPolicyTest do
     aur = ctx.auditor
     icp = F.active_icp!(ctx.tenant)
     sequence = F.sequence_with_steps!(ctx.tenant)
-    {:ok, [step | _]} = Sales.list(SdrAgent.Sales.SequenceStep, actor: ctx.admin)
-    {:ok, contact} = Sales.get(SdrAgent.Sales.Contact, ctx.lead.contact_id, actor: ctx.admin)
-    {:ok, account} = Sales.get(SdrAgent.Sales.Account, ctx.lead.account_id, actor: ctx.admin)
+    {:ok, [step | _]} = Sales.list_records(SdrAgent.Sales.SequenceStep, actor: ctx.admin)
+    {:ok, contact} = Sales.fetch(SdrAgent.Sales.Contact, ctx.lead.contact_id, actor: ctx.admin)
+    {:ok, account} = Sales.fetch(SdrAgent.Sales.Account, ctx.lead.account_id, actor: ctx.admin)
     password = %{password: "aur-password-99", password_confirmation: "aur-password-99"}
     tool = F.tool_invocation!(ctx.tenant, ctx.run)
 
@@ -148,7 +148,7 @@ defmodule SdrAgent.DomainPolicyTest do
           SdrAgent.Sales.Campaign,
           SdrAgent.Sales.IcpDefinition
         ] do
-      assert {:ok, [_ | _]} = Sales.list(resource, actor: ctx.auditor), inspect(resource)
+      assert {:ok, [_ | _]} = Sales.list_records(resource, actor: ctx.auditor), inspect(resource)
     end
 
     for resource <- [
@@ -157,15 +157,16 @@ defmodule SdrAgent.DomainPolicyTest do
           SdrAgent.Research.Qualification,
           SdrAgent.Research.QualificationEvidence
         ] do
-      assert {:ok, [_ | _]} = Research.list(resource, actor: ctx.auditor), inspect(resource)
+      assert {:ok, [_ | _]} = Research.list_records(resource, actor: ctx.auditor),
+             inspect(resource)
     end
 
     assert denials(ctx.tenant) == []
   end
 
   test "anonymous callers read nothing", ctx do
-    assert {:ok, []} = Sales.list(SdrAgent.Sales.Lead, actor: nil)
-    assert {:ok, []} = Research.list(SdrAgent.Research.Qualification, actor: nil)
+    assert {:ok, []} = Sales.list_records(SdrAgent.Sales.Lead, actor: nil)
+    assert {:ok, []} = Research.list_records(SdrAgent.Research.Qualification, actor: nil)
     assert {:ok, %{valid?: true}} = SdrAgent.Audit.verify_chain(actor: ctx.admin)
   end
 end

@@ -24,7 +24,7 @@ defmodule SdrAgent.ResearchTest do
   end
 
   defp lead_status(ctx, lead) do
-    {:ok, lead} = Sales.get(SdrAgent.Sales.Lead, lead.id, actor: ctx.admin)
+    {:ok, lead} = Sales.fetch(SdrAgent.Sales.Lead, lead.id, actor: ctx.admin)
     lead.status
   end
 
@@ -151,7 +151,7 @@ defmodule SdrAgent.ResearchTest do
                inspect(bad)
       end
 
-      assert {:ok, []} = Research.list(SdrAgent.Research.EvidenceClaim, actor: ctx.admin)
+      assert {:ok, []} = Research.list_records(SdrAgent.Research.EvidenceClaim, actor: ctx.admin)
       assert events_of_type(ctx.tenant, "research.claim.recorded") == []
     end
 
@@ -215,7 +215,7 @@ defmodule SdrAgent.ResearchTest do
       assert lead_status(ctx, ctx.lead) == :qualified
 
       {:ok, [evidence]} =
-        Research.list(SdrAgent.Research.QualificationEvidence, actor: ctx.admin)
+        Research.list_records(SdrAgent.Research.QualificationEvidence, actor: ctx.admin)
 
       assert {evidence.qualification_id, evidence.evidence_claim_id} ==
                {qualification.id, ctx.claim.id}
@@ -377,13 +377,17 @@ defmodule SdrAgent.ResearchTest do
         Sales.update(
           lead,
           :start_research,
-          %{decision_id: F.decision!(ctx.tenant, run, lead, "r").id}, actor: ctx.agent)
+          %{decision_id: F.decision!(ctx.tenant, run, lead, "r").id},
+          actor: ctx.agent
+        )
 
       {:ok, lead} =
         Sales.update(
           lead,
           :start_qualifying,
-          %{decision_id: F.decision!(ctx.tenant, run, lead, "q").id}, actor: ctx.agent)
+          %{decision_id: F.decision!(ctx.tenant, run, lead, "q").id},
+          actor: ctx.agent
+        )
 
       %{artifact: artifact, run: run} = F.artifact!(ctx.tenant, lead)
       claim = F.claim!(ctx.tenant, artifact, run)

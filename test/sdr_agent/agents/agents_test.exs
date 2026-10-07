@@ -123,12 +123,13 @@ defmodule SdrAgent.AgentsTest do
     test "forbidden transitions are rejected and append nothing", ctx do
       %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
       {:ok, done} = Agents.succeed_run(run, actor: agent)
+      # Created before counting: a real operator's creation appends user.created.
+      admin = human(:admin, ctx.tenant)
       count = length(events(ctx.tenant))
 
       assert {:error, %Ash.Error.Invalid{}} = Agents.start_run(done, actor: agent)
 
-      assert {:error, %Ash.Error.Invalid{}} =
-               Agents.cancel_run(done, actor: human(:admin, ctx.tenant))
+      assert {:error, %Ash.Error.Invalid{}} = Agents.cancel_run(done, actor: admin)
 
       # a stale struct cannot bypass the guard: the from-state check is in the UPDATE
       assert {:error, %Ash.Error.Invalid{}} = Agents.succeed_run(run, actor: agent)

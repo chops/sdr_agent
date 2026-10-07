@@ -101,7 +101,7 @@ defmodule SdrAgent.Sales.CatalogTest do
                  Sales.create_icp_definition(F.icp_attrs(), actor: actor)
 
         assert {:error, %Ash.Error.Forbidden{}} = Sales.update(icp, :retire, %{}, actor: actor)
-        assert {:ok, [_]} = Sales.list(SdrAgent.Sales.IcpDefinition, actor: actor)
+        assert {:ok, [_]} = Sales.list_records(SdrAgent.Sales.IcpDefinition, actor: actor)
       end
     end
   end
@@ -273,7 +273,7 @@ defmodule SdrAgent.Sales.CatalogTest do
                Sales.update(empty, :activate, %{}, actor: ctx.admin)
 
       sequence = F.sequence_with_steps!(ctx.tenant)
-      {:ok, [first | _]} = Sales.list(SdrAgent.Sales.SequenceStep, actor: ctx.admin)
+      {:ok, [first | _]} = Sales.list_records(SdrAgent.Sales.SequenceStep, actor: ctx.admin)
 
       {:ok, first} =
         Sales.update(first, :update, %{instructions: "Edited while draft"}, actor: ctx.admin)
@@ -412,7 +412,7 @@ defmodule SdrAgent.Sales.CatalogTest do
       assert {:ok, %{id: ^id}} =
                Sales.seed_icp_definition(Map.put(F.icp_attrs(), :id, id), actor: ctx.seeder)
 
-      {:ok, icp} = Sales.get(SdrAgent.Sales.IcpDefinition, id, actor: ctx.seeder)
+      {:ok, icp} = Sales.fetch(SdrAgent.Sales.IcpDefinition, id, actor: ctx.seeder)
       assert {:ok, %{status: :active}} = Sales.update(icp, :activate, %{}, actor: ctx.seeder)
 
       assert {:error, %Ash.Error.Forbidden{}} =

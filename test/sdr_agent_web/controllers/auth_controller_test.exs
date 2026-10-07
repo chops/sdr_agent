@@ -38,7 +38,7 @@ defmodule SdrAgentWeb.AuthControllerTest do
 
   test "signing out is recorded for the signed-in user", %{conn: conn} = ctx do
     conn = sign_in(conn, to_string(ctx.reviewer.email), test_password())
-    conn = conn |> recycle() |> get("/sign-out")
+    conn = conn |> recycle() |> delete("/sign-out")
 
     assert redirected_to(conn) == "/"
     assert [event] = events_of_type(ctx.tenant, "auth.signed_out")

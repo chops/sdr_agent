@@ -116,6 +116,65 @@ defmodule SdrAgent.Audit.ConcurrencyTest do
     assert Enum.all?(reuses, &(&1.id == hd(anchors).id))
   end
 
+  test "two admins demoting each other concurrently leave exactly one active admin" do
+    {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
+    seeder = struct(SdrAgent.Actor, type: :seeder, tenant_id: tenant.id)
+
+    [first, second] =
+      for n <- 1..2 do
+        {:ok, admin} =
+          SdrAgent.Accounts.seed_user(
+            %{
+              id: Ecto.UUID.generate(),
+              email: "race-admin-#{n}@example.test",
+              display_name: "Race admin #{n}",
+              role: :admin,
+              password: "race-password-1",
+              password_confirmation: "race-password-1"
+            },
+            actor: seeder
+          )
+
+        admin
+      end
+
+    for _round <- 1..3 do
+      {:ok, _} = restore_admins([first, second], seeder)
+
+      results =
+        [{first, second}, {second, first}]
+        |> Enum.map(fn {actor, target} ->
+          Task.async(fn ->
+            with_connection(fn ->
+              SdrAgent.Accounts.change_role(target, :reviewer, actor: actor)
+            end)
+          end)
+        end)
+        |> Task.await_many(60_000)
+
+      assert Enum.count(results, &match?({:ok, _}, &1)) == 1, inspect(results)
+      assert Enum.count(results, &match?({:error, %Ash.Error.Invalid{}}, &1)) == 1
+
+      {:ok, users} = SdrAgent.Accounts.list_users(actor: seeder)
+      assert Enum.count(users, &(&1.role == :admin and &1.status == :active)) == 1
+    end
+
+    aud = struct(SdrAgent.Actor, type: :auditor_cli, tenant_id: tenant.id)
+    assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: aud)
+  end
+
+  # Re-promotes whichever of `admins` was demoted, as the remaining admin.
+  defp restore_admins(admins, seeder) do
+    {:ok, users} = SdrAgent.Accounts.list_users(actor: seeder)
+    by_id = Map.new(users, &{&1.id, &1})
+    current = Enum.map(admins, &Map.fetch!(by_id, &1.id))
+
+    case Enum.split_with(current, &(&1.role == :admin)) do
+      {[_, _], []} -> {:ok, :both_admins}
+      {[admin], [demoted]} -> SdrAgent.Accounts.change_role(demoted, :admin, actor: admin)
+    end
+  end
+
   describe "concurrent decisions with one idempotency key" do
     setup do
       {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")

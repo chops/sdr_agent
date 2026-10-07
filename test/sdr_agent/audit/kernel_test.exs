@@ -28,7 +28,8 @@ defmodule SdrAgent.Audit.KernelTest do
       assert provenance.provenance_snapshot_id == genesis.provenance_snapshot_id
       assert provenance.subject_id == genesis.provenance_snapshot_id
 
-      {:ok, head} = Audit.get_chain_head(actor: human(:admin, tenant))
+      # Read by the auditor CLI: creating a real operator would append an event.
+      {:ok, head} = Audit.get_chain_head(actor: system_actor(:auditor_cli, tenant))
       assert head.last_sequence == 2
       assert head.last_event_hash == provenance.event_hash
     end
@@ -172,12 +173,14 @@ defmodule SdrAgent.Audit.KernelTest do
     end
 
     test "verifies a clean chain", ctx do
+      admin = human(:admin, ctx.tenant)
       for n <- 1..5, do: {:ok, _} = Audit.append(event("test.n#{n}"), actor: ctx.kernel)
 
-      assert {:ok, report} = Audit.verify_chain(actor: human(:admin, ctx.tenant))
+      assert {:ok, report} = Audit.verify_chain(actor: admin)
       assert report.valid?
       assert report.issues == []
-      assert report.last_sequence == 7
+      # genesis, provenance, the admin's user.created, five appends
+      assert report.last_sequence == 8
     end
   end
 

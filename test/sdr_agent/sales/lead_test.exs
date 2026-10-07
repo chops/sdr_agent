@@ -46,7 +46,7 @@ defmodule SdrAgent.Sales.LeadTest do
                Sales.create_lead(%{lead_attrs(contact) | account_id: other.id}, actor: ctx.admin)
 
       {:ok, account} =
-        Sales.get(SdrAgent.Sales.Account, contact.account_id, actor: ctx.admin)
+        Sales.fetch(SdrAgent.Sales.Account, contact.account_id, actor: ctx.admin)
 
       {:ok, _} = Sales.update(account, :archive, %{}, actor: ctx.admin)
 
