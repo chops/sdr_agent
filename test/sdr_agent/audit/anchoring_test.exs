@@ -1,0 +1,137 @@
+defmodule SdrAgent.Audit.AnchoringTest do
+  use SdrAgent.AuditCase, async: false
+
+  require Ash.Query
+
+  alias SdrAgent.Audit
+  alias SdrAgent.Audit.AnchorSinkReceipt
+  alias SdrAgent.Audit.Anchoring
+
+  defmodule FakeOtsSink do
+    def publish(hash, _opts), do: {:ok, %{status: :pending, proof: "pending:" <> hash}}
+
+    def upgrade("pending:" <> hash, hash, _opts),
+      do: {:ok, %{status: :confirmed, proof: "confirmed:" <> hash}}
+  end
+
+  setup do
+    tenant = bootstrap!()
+    anchorer = system_actor(:anchorer, tenant)
+    admin = human(:admin, tenant)
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, key} =
+      Audit.register_signing_key(
+        %{key_id: "test-ed25519", public_key: public_key, activated_at: SdrAgent.Clock.utc_now()},
+        actor: SdrAgent.Actor.system(:kernel, tenant.id)
+      )
+
+    %{tenant: tenant, anchorer: anchorer, admin: admin, key: key, private_key: private_key}
+  end
+
+  test "genesis anchor covers sequence one through the observed chain head", ctx do
+    assert {:ok, anchor} =
+             Anchoring.anchor(
+               trigger: :interval,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: []
+             )
+
+    assert anchor.anchor_number == 1
+    assert anchor.from_sequence == 1
+    assert anchor.to_sequence >= 1
+    assert anchor.prior_anchor_id == nil
+    assert anchor.key_id == ctx.key.key_id
+    assert anchor.key_status_at_signing == :active
+    assert byte_size(anchor.signature) == 64
+  end
+
+  test "an export with no new events reuses the latest anchor", ctx do
+    assert {:ok, first} =
+             Anchoring.anchor(
+               trigger: :export,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: []
+             )
+
+    assert {:ok, {:existing, second}} =
+             Anchoring.anchor(
+               trigger: :export,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: []
+             )
+
+    assert second.id == first.id
+  end
+
+  test "rotation preserves historical validity; revocation reduces assurance", ctx do
+    assert {:ok, anchor} =
+             Anchoring.anchor(
+               trigger: :interval,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: []
+             )
+
+    assert {:ok, %{valid?: true, assurance_level: :signed}} =
+             Anchoring.verify(anchor, actor: ctx.admin)
+
+    assert {:ok, _} = Audit.rotate_signing_key(ctx.key.id, actor: ctx.admin)
+    assert {:ok, %{valid?: true}} = Anchoring.verify(anchor, actor: ctx.admin)
+
+    # A revoked key invalidates signatures made at/after revocation and lowers
+    # assurance for older signatures with an explicit issue.
+    {:ok, replacement} =
+      Audit.register_signing_key(
+        %{key_id: "replacement", public_key: elem(:crypto.generate_key(:eddsa, :ed25519), 0)},
+        actor: SdrAgent.Actor.system(:kernel, ctx.tenant.id)
+      )
+
+    assert replacement.status == :active
+
+    assert {:ok, _} =
+             Audit.revoke_signing_key(ctx.key.id, "operator revocation", actor: ctx.admin)
+
+    assert {:ok, report} = Anchoring.verify(anchor, actor: ctx.admin)
+    refute report.valid?
+    assert :signing_key_revoked in report.issues
+  end
+
+  test "OTS upgrade appends a confirmed receipt without changing the pending receipt", ctx do
+    assert {:ok, anchor} =
+             Anchoring.anchor(
+               trigger: :interval,
+               actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: [{:ots, FakeOtsSink, []}]
+             )
+
+    [pending] = receipts_for(anchor, ctx.anchorer)
+    assert pending.status == :pending
+    pending_receipt = pending.receipt
+
+    assert {:ok, confirmed} =
+             Anchoring.upgrade_ots(anchor, actor: ctx.anchorer, sink: FakeOtsSink)
+
+    assert confirmed.status == :confirmed
+    assert confirmed.id != pending.id
+
+    assert [persisted_pending, persisted_confirmed] = receipts_for(anchor, ctx.anchorer)
+    assert persisted_pending.id == pending.id
+    assert persisted_pending.receipt == pending_receipt
+    assert persisted_pending.status == :pending
+    assert persisted_confirmed.id == confirmed.id
+    assert persisted_confirmed.status == :confirmed
+  end
+
+  defp receipts_for(anchor, actor) do
+    AnchorSinkReceipt
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(anchor_id == ^anchor.id and sink == :ots)
+    |> Ash.Query.sort(recorded_at: :asc)
+    |> Ash.read!()
+  end
+end
