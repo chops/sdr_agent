@@ -16,6 +16,8 @@ defmodule SdrAgent.Accounts.BootstrapAdminTest do
     %{tenant: bootstrap!()}
   end
 
+  @password "first-admin-password-0123"
+
   defp attrs(password, email \\ "first.admin@example.test") do
     %{
       email: email,
@@ -26,7 +28,7 @@ defmodule SdrAgent.Accounts.BootstrapAdminTest do
   end
 
   test "creates the first admin as the kernel; the password appears in no event or log", ctx do
-    password = Accounts.generate_password()
+    password = @password
 
     log =
       capture_log([level: :debug], fn ->
@@ -51,10 +53,10 @@ defmodule SdrAgent.Accounts.BootstrapAdminTest do
   end
 
   test "refuses once the tenant has any user", ctx do
-    {:ok, _} = Accounts.bootstrap_admin(attrs(Accounts.generate_password()))
+    {:ok, _} = Accounts.bootstrap_admin(attrs(@password))
 
     assert {:error, %Ash.Error.Invalid{}} =
-             Accounts.bootstrap_admin(attrs(Accounts.generate_password(), "second@example.test"))
+             Accounts.bootstrap_admin(attrs(@password <> "-2", "second@example.test"))
 
     assert length(events_of_type(ctx.tenant, "user.created")) == 1
   end
@@ -62,15 +64,14 @@ defmodule SdrAgent.Accounts.BootstrapAdminTest do
   test "refuses when a non-admin user already exists", ctx do
     _reviewer = new_human(:reviewer, ctx.tenant)
 
-    assert {:error, %Ash.Error.Invalid{}} =
-             Accounts.bootstrap_admin(attrs(Accounts.generate_password()))
+    assert {:error, %Ash.Error.Invalid{}} = Accounts.bootstrap_admin(attrs(@password))
 
     {:ok, users} = Accounts.list_users(actor: system_actor(:seeder, ctx.tenant))
     refute Enum.any?(users, &(&1.role == :admin))
   end
 
   test "only a kernel request may run the bootstrap action", ctx do
-    password = Accounts.generate_password()
+    password = @password
 
     for actor <- [
           system_actor(:seeder, ctx.tenant),
@@ -88,9 +89,9 @@ defmodule SdrAgent.Accounts.BootstrapAdminTest do
     assert events_of_type(ctx.tenant, "user.created") == []
   end
 
-  test "generated passwords are long, URL-safe and never repeat" do
-    passwords = for _ <- 1..20, do: Accounts.generate_password()
-    assert length(Enum.uniq(passwords)) == 20
-    assert Enum.all?(passwords, &(String.length(&1) >= 32 and &1 =~ ~r/^[A-Za-z0-9_-]+$/))
+  test "the first admin's password has at least 16 characters", ctx do
+    assert {:error, %Ash.Error.Invalid{}} = Accounts.bootstrap_admin(attrs("fifteen-chars-x"))
+    assert events_of_type(ctx.tenant, "user.created") == []
+    assert {:ok, _} = Accounts.bootstrap_admin(attrs("sixteen-chars-xy"))
   end
 end
