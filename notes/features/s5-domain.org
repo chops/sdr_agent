@@ -197,6 +197,34 @@ None blocking; choices 1–18 are flagged for the PR reviewer.
 * TDD Tracking
 (Filled during Phase 4a)
 
+RED run (2026-10-07, =MIX_TEST_PARTITION=_s5 mix test=): *Result: 73/210
+passed, 137 failed*. The 73 passing are pre-existing tests that touch no
+operator; every failure is the intended missing behaviour.
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| User management, roles, passwords, sign-in audit, reads (18) | test/sdr_agent/accounts/user_test.exs | FAILING | =SdrAgent.Accounts.seed_user/2= undefined (AuditCase real users) |
+| Browser sign-in/out audit, no self-service routes (4) | test/sdr_agent_web/controllers/auth_controller_test.exs | FAILING | =seed_user/2= undefined |
+| ICP, Account, Contact, Sequence/Step, Campaign, seeder (20) | test/sdr_agent/sales/catalog_test.exs | FAILING | =seed_user/2= undefined (then =SdrAgent.Sales= absent) |
+| Lead lifecycle, hand-off queue, enrollment (16) | test/sdr_agent/sales/lead_test.exs | FAILING | =seed_user/2= undefined (then =SdrAgent.Sales= absent) |
+| Artifacts, claims, qualifications, overrides (20) | test/sdr_agent/research/research_test.exs | FAILING | =seed_user/2= undefined (then =SdrAgent.Research= absent) |
+| Research append-only triggers (2) | test/sdr_agent/research/append_only_test.exs | FAILING | relation =research_artifacts= does not exist; =seed_user/2= |
+| AUR deny-all S5 mutations, AUR reads (3) | test/sdr_agent/domain_policy_test.exs | FAILING | =seed_user/2= undefined |
+| Demo seed (8) | test/sdr_agent/demo/seed_test.exs | FAILING | =SdrAgent.Demo.Seed= / =Mix.Tasks.Sdr.Demo.Seed= undefined |
+| S3 suites re-run with real users (42) | test/sdr_agent/audit/{kernel,payload,policy,tamper,append_only}_test.exs, agents/agents_test.exs | FAILING | =seed_user/2= undefined (stand-in removed) |
+| S3 concurrency (4) | test/sdr_agent/audit/concurrency_test.exs | FAILING | cleanup: relation =qualification_evidences= does not exist |
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED
+
+No test fails on an assertion yet: the operators every suite now needs
+(real Users) and the two domains do not exist, so each test stops at the
+first missing function or table — the intended missing behaviour, not a
+setup defect. =bin/tdd_verify.sh test/sdr_agent/accounts= reports "No tests
+found" with 18 runtime errors because it does not parse Elixir 1.20's
+=Result: 0/N passed= summary (same defect as S1 and S3). Recorded as
+NEEDS_REVIEW; proceeding under the unattended charter (ADR-0001) with the
+peer reviewing the RED evidence on the PR.
+
 -----
 
 * Implementation Notes

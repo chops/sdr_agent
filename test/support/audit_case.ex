@@ -1,7 +1,8 @@
 defmodule SdrAgent.AuditCase do
   @moduledoc """
-  Test case for the audit kernel and Agents domain: sandboxed database,
-  actor builders, and raw-SQL helpers that simulate an administrator
+  Test case for the audit kernel and the domains built on it: sandboxed
+  database, actor builders (real `SdrAgent.Accounts.User` operators and
+  system actors), and raw-SQL helpers that simulate an administrator
   bypassing the application (used only to prove tamper detection and
   trigger enforcement).
   """
@@ -31,14 +32,57 @@ defmodule SdrAgent.AuditCase do
   @doc "Builds a system actor of `type` for `tenant`."
   def system_actor(type, tenant), do: struct(SdrAgent.Actor, type: type, tenant_id: tenant.id)
 
-  @doc "Builds a human operator stand-in with `role` for `tenant`."
+  # Test-only password for the operators built below.
+  @password "test-password-1234"
+
+  @doc "The password of every operator built by `human/2` and `new_human/3`."
+  def test_password, do: @password
+
+  @doc """
+  A real operator (`SdrAgent.Accounts.User`) with `role` in `tenant`, created
+  through the seeder on first use and reused for the rest of the test process.
+  Creating it appends a `user.created` event.
+  """
   def human(role, tenant) do
-    %SdrAgent.Test.Human{id: Ecto.UUID.generate(), role: role, tenant_id: tenant.id}
+    key = {__MODULE__, :human, tenant.id, role}
+
+    case Process.get(key) do
+      nil ->
+        user = new_human(role, tenant)
+        Process.put(key, user)
+        user
+
+      user ->
+        user
+    end
   end
 
-  @doc "All audit events of the tenant in sequence order, read as an admin."
+  @doc "Always creates a new operator with `role` (see `human/2`)."
+  def new_human(role, tenant, attrs \\ %{}) do
+    n = System.unique_integer([:positive])
+
+    {:ok, user} =
+      SdrAgent.Accounts.seed_user(
+        Map.merge(
+          %{
+            id: Ecto.UUID.generate(),
+            email: "#{role}-#{n}@example.test",
+            display_name: "Test #{role} #{n}",
+            role: role,
+            password: @password,
+            password_confirmation: @password
+          },
+          attrs
+        ),
+        actor: system_actor(:seeder, tenant)
+      )
+
+    user
+  end
+
+  @doc "All audit events of the tenant in sequence order, read by the auditor CLI."
   def events(tenant) do
-    {:ok, events} = SdrAgent.Audit.list_events(actor: human(:admin, tenant))
+    {:ok, events} = SdrAgent.Audit.list_events(actor: system_actor(:auditor_cli, tenant))
     events
   end
 
