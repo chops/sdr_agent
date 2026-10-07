@@ -341,3 +341,111 @@ the reported =Plug.Parsers.ParseError=): 25/30 over the touched files.
    (404) — setup-level, not behavioural assertions; it stays NEEDS_REVIEW
    for that reason as well as the parser defect. This round's RED is
    assertion-level.
+** S9b RED (2026-10-07, branch =s9b-classification= stacked on S9a)
+=MIX_TEST_PARTITION=_s9 mix test test/sdr_agent/outreach/reply_assessment_test.exs
+test/sdr_agent/demo/replies_test.exs=: *Result: 1/12 passed* — the one
+passing test is the negative guard "an unmatched reply is not classified"
+(no classification job exists yet); every failure is the intended missing
+behaviour.
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| v2 route, interested classified + hand-off, interested-first queue, model-added unsubscribe, rule-first unsubscribe, AGT-only (6) | test/sdr_agent/outreach/reply_assessment_test.exs | FAILING | no =sdr.reply.received= route; no =agent= job; =ReplyAssessment= undefined |
+| Unmatched reply not classified (1) | same | PASSING (guard) | nothing is queued yet |
+| Demo interested / unsubscribe / link + delivered / duplicate, task env guard (5) | test/sdr_agent/demo/replies_test.exs | FAILING | =Demo.Replies=, =Mix.Tasks.Sdr.Demo.Reply= undefined |
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED (same
+=tdd_verify.sh= parsing caveat).
+
+** S9b GREEN
+=MIX_TEST_PARTITION=_s9 bin/verify= → *480 passed, 4 excluded* (S9a 468 + 12 new; no existing assertion changed). =mix ash.codegen --check=, =mix credo=, =mix hex.audit= clean. =mix
+ash.codegen s9b_reply_assessments= (migration =20261007160142=; its
+"destructive" note is the =down= direction only).
+
+** S9b findings and choices (flagged for review)
+ 21. *Run in the reply transaction.* =SdrAgent.SDR.ReplyIntake= (the S9a
+     seam) registers SDRAgent v2, creates the queued AgentRun (AGT, phase
+     =reply=, budget 2 model / 5 tool calls, =correlation_id= = the
+     WebhookEvent id), inserts its =agent=-queue =ReplyWorker= job and
+     records =sdr.reply.received= on the run — all committed with the Reply.
+     =ReplyWorker= mirrors =AgentWorker= (=max_attempts: 1=, one terminal
+     write) without an Operation row (choice 12).
+ 22. *One model call, one Decision, one row.* =ClassifyReply= →
+     =Model.call(:reply_classification)= (budget Decision about the lead) →
+     LLM =reply_classification= Decision about the Reply (=output_pointer=
+     =/classification=) → =Outreach.record_assessment/2=, whose
+     =AssessmentRules= re-check the Decision (run, reply, invocation,
+     outcome = classification) in the transaction.
+ 23. *Add-only unsubscribe.* An =unsubscribe= classification creates the
+     reply's =unsubscribe_reply= Suppression through the AGT action
+     =:from_classification= (=CheckSuppressionSource= requires an
+     =reply_classification= Decision with outcome =unsubscribe= about that
+     reply) in a =before_action=, i.e. before the assessment's first
+     append; when the rule already suppressed, the existing row is returned
+     with no event.
+ 24. *Hand-off queue.* =Outreach.list_handoff_queue/1= composes
+     =Sales.list_handoff_queue/1= (oldest hand-off first) with each lead's
+     latest matched reply and its current assessment; a stable sort puts
+     =interested= first.
+ 25. *FakeBrain.* =sdr.reply_classification= is keyword rules (unsubscribe
+     → out of office → referral → not now → objection → interested;
+     =unknown= otherwise), so fixtures are deterministic; its output still
+     passes the Zoi schema.
+ 26. *Demo.* =SdrAgent.Demo.Replies= builds signed requests (event id
+     deterministic per kind and delivery, so a repeated demo post is a
+     duplicate) and posts them only to a local host (or an in-process plug
+     in tests); =mix sdr.demo.reply --lead 01 --kind interested|unsubscribe|
+     unsubscribe_link|delivered|bounce [--url http://127.0.0.1:4120]= reads
+     the latest accepted delivery (repo only; Oban queues and plugins off in
+     the task VM) and posts to the running server. Not exercised against the
+     dev database in this slice (the owner's live session owns it).
+ 27. *Deferred:* ReplyAssessment human override (ADM/REV supersede) — S2
+     gives REV no suppression source for an overridden =unsubscribe=; the
+     =sdr.followup.due= and redraft routes (choice 14).
+
+** What S10 and S13 must know (S9b)
+- *S10:* =Outreach.list_handoff_queue(actor:)= → =[%{lead, reply,
+  assessment}]= (interested first); the AgentRun of a classification has
+  =trigger_signal_type= ="sdr.reply.received"=; Decision
+  =reply_classification= links to its ModelInvocation.
+- *S13:* golden path step 7 = =mix sdr.demo.reply= (or
+  =Demo.Replies.post/3= with =plug:=) → drain =integration= → drain
+  =agent=; both demo replies (interested, unsubscribe) are covered by
+  =test/sdr_agent/demo/replies_test.exs=.
+
+** S9b review round 1 (Codex, PR #16: CHANGES REQUESTED) — dispositions
+RED (assertion-level): 12/18 over the two S9b files — four forged or
+mismatched assessments were *written*, the demo helper followed a redirect
+and sent with seeding disabled.
+
+1. *MF1 — assessment not bound to the model's output: FIXED.*
+   =AssessmentRules= now requires the Decision to be the run's LLM
+   =reply_classification= about the Reply (resource and id) at pointer
+   =/classification=, and reads the cited ModelInvocation through the
+   Agents read policy as the acting agent, tenant-scoped (no SDR import):
+   same run, purpose =reply_classification=, schema
+   =sdr.reply_classification=, =completed= + =valid=, and its parsed output
+   must equal the Decision outcome and every model-derived assessment value
+   (classification, sentiment, intent, next action, confidence, reason).
+   Negative domain tests (all write no assessment and no suppression): a
+   forged =unsubscribe= Decision on the genuine call; the genuine Decision
+   with another classification, sentiment or confidence; a Decision citing
+   the lead's *qualification* call from the research run; a Decision about
+   another resource; another pointer. The genuine unsubscribe paths stay
+   green.
+2. *Important — demo redirect / env: FIXED.* =Demo.Replies= never follows
+   redirects (=redirect: false=; test: a local stand-in answering 302 to a
+   remote host is called once and the 302 returned) and refuses unless
+   =seeding_allowed?= (dev/test only) — =:demo_disabled=, nothing sent.
+3. *Important — worker crash leaves the run running: PARTLY FIXED,
+   remainder tracked for S13.* =ReplyWorker= catches exceptions and exits of
+   the run and records a =crash= failure; a crash of the terminal write
+   itself or of the VM still leaves the run =running= (same as
+   =AgentWorker=) — abandoned-run recovery and forced-crash evidence are
+   S13's worker-recovery work, not claimed here.
+4. *Important — inherited fixes: DONE* (S9a round 1 + rebase onto
+   =a1fd23c=).
+5. *Important — RED wording: ACCEPTED.* The original S9b RED (1/12) failed
+   on a missing route assertion and missing modules/resources (=ReplyWorker=
+   job, =ReplyAssessment=, =Demo.Replies=, the Mix task) — partly
+   setup-level; NEEDS_REVIEW stands. This round's RED is assertion-level.

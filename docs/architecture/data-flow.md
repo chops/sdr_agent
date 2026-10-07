@@ -70,6 +70,8 @@ flowchart LR
         Ingest[WebhookController -> Webhooks.ingest<br/>raw bytes Payload, HMAC verify, dedupe, job, one txn]
         Process[WebhookWorker queue integration<br/>locks first; Reply / outcome / suppression, one txn]
         Rule[unsubscribe_rule Decision<br/>deterministic, never the model]
+        Intake[ReplyIntake seam: AgentRun + agent job<br/>+ sdr.reply.received, reply txn]
+        Classify[ReplyWorker queue agent -> ClassifyReply<br/>reply_classification + ReplyAssessment, no draft]
     end
 
     subgraph AI["Structured Model Boundary"]
@@ -141,6 +143,11 @@ flowchart LR
     Process --> Rule
     Process --> Domains
     Process -- sdr.reply.received + same transaction --> Append
+    Process --> Intake
+    Intake -- agent job same txn --> Postgres
+    Postgres -- agent job --> Classify
+    Classify --> Provider
+    Classify --> Domains
 
     %% Project shape: single
     %% Detected data layers:

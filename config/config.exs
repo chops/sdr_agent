@@ -11,14 +11,16 @@ config :sdr_agent, Oban,
   engine: Oban.Engines.Basic,
   notifier: Oban.Notifiers.Postgres,
   # Spec §13: separate, bounded concurrency per queue (S8: delivery,
-  # reconciliation, followup; S9: integration — webhook processing).
+  # reconciliation, followup; S9: integration — webhook processing — and
+  # agent — reply classification runs).
   queues: [
     default: 10,
     research: 20,
     delivery: 5,
     reconciliation: 5,
     followup: 10,
-    integration: 5
+    integration: 5,
+    agent: 10
   ],
   lifeline: [rescue_after: {2, :hours}],
   pruner: [max_age: {1, :day}],

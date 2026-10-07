@@ -18,13 +18,18 @@ defmodule SdrAgent.SDR.SDRAgent do
     * `sdr.qualification.requested` → `ScoreLead`
     * `sdr.qualification.completed` → `PlanOutreach`
     * `sdr.draft.requested` → `PrepareOutreachFlow`
+    * `sdr.reply.received` → `ClassifyReply` (v2, S9b: one model call,
+      ReplyAssessment, no drafted response)
     * `sdr.lead.suppressed`, `sdr.campaign.paused` → `HaltAssignment`
 
   `sdr.draft.completed` is the hand-off to S8 and is not routed here. There
   is deliberately no send action (spec §6).
 
   `register/1` records this definition (allowed actions, prompt and schema
-  refs with hashes, model policy) as the `SDRAgent` v1 AgentDefinition.
+  refs with hashes, model policy) as the `SDRAgent` v2 AgentDefinition (v1
+  rows stay as the record of the runs that used them). Not yet routed:
+  `sdr.followup.due` (drafting a follow-up) and redrafts — a scoped
+  follow-up slice.
   """
   use Jido.Agent,
     name: "sdr_agent",
@@ -51,7 +56,7 @@ defmodule SdrAgent.SDR.SDRAgent do
     :reply,
     :stop
   ]
-  @version 1
+  @version 2
 
   agent do
     schema(
@@ -85,6 +90,7 @@ defmodule SdrAgent.SDR.SDRAgent do
     route("sdr.qualification.requested", Actions.ScoreLead)
     route("sdr.qualification.completed", Actions.PlanOutreach)
     route("sdr.draft.requested", Flows.PrepareOutreachFlow)
+    route("sdr.reply.received", Actions.ClassifyReply)
     route("sdr.lead.suppressed", Actions.HaltAssignment)
     route("sdr.campaign.paused", Actions.HaltAssignment)
   end
@@ -106,8 +112,12 @@ defmodule SdrAgent.SDR.SDRAgent do
     Actions.ValidateClaims,
     Actions.ValidatePersonalization,
     Actions.HandOffProposal,
-    Actions.HaltAssignment
+    Actions.HaltAssignment,
+    Actions.ClassifyReply
   ]
+
+  @doc "The registered definition version (bumped whenever routes, actions, prompts or schemas change)."
+  def version, do: @version
 
   @doc "Run phases (as AgentRun.phase)."
   def phases, do: @phases
@@ -131,7 +141,7 @@ defmodule SdrAgent.SDR.SDRAgent do
 
   @doc "The canonical AgentDefinition body (allowed actions, prompts, schemas, model policy)."
   def definition_body do
-    purposes = [:evidence_extraction, :qualification, :outreach_proposal]
+    purposes = [:evidence_extraction, :qualification, :outreach_proposal, :reply_classification]
 
     %{
       "allowed_actions" =>

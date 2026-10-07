@@ -29,6 +29,8 @@ defmodule SdrAgent.Outreach do
       suppressions);
     * delivery — `cancel_retry/2` (ADM, REV), `record_receipt/2` (DLV, REC;
       the capture adapter's receipt);
+    * replies — `record_assessment/2` (AGT), `list_handoff_queue/1`
+      (replied leads, interested first);
     * reads (tenant-scoped) — `fetch/3`, `list_records/2`.
   """
   use Ash.Domain,
@@ -40,7 +42,10 @@ defmodule SdrAgent.Outreach do
   alias SdrAgent.Outreach.Approval
   alias SdrAgent.Outreach.DeliveryReceipt
   alias SdrAgent.Outreach.Draft
+  alias SdrAgent.Outreach.Reply
+  alias SdrAgent.Outreach.ReplyAssessment
   alias SdrAgent.Outreach.Suppression
+  alias SdrAgent.Sales
 
   resources do
     resource SdrAgent.Outreach.Draft
@@ -52,6 +57,7 @@ defmodule SdrAgent.Outreach do
     resource SdrAgent.Outreach.DeliveryReceipt
     resource SdrAgent.Outreach.SendQuotaDay
     resource SdrAgent.Outreach.Reply
+    resource SdrAgent.Outreach.ReplyAssessment
   end
 
   @doc """
@@ -143,6 +149,56 @@ defmodule SdrAgent.Outreach do
         attrs,
         subject(opts, attrs, :delivery_operation_id)
       )
+
+  @doc "AGT: records the agent's ReplyAssessment of a reply (an LLM reply_classification Decision)."
+  def record_assessment(attrs, opts),
+    do: GuardedCall.create(ReplyAssessment, :record, attrs, subject(opts, attrs, :reply_id))
+
+  @doc """
+  The hand-off queue (S5 choice 15, composed above Sales): every replied
+  lead (`Sales.list_handoff_queue/1`) with its latest matched reply and that
+  reply's current assessment, `interested` first, then the oldest hand-off.
+  Returns `{:ok, [%{lead:, reply:, assessment:}]}` (reply or assessment nil
+  until they exist).
+  """
+  def list_handoff_queue(opts) do
+    with {:ok, leads} <- Sales.list_handoff_queue(opts),
+         {:ok, replies} <-
+           list_records(
+             Reply,
+             Keyword.merge(opts,
+               filter: [lead_id: [in: Enum.map(leads, & &1.id)], match_status: :matched],
+               sort: [received_at: :desc, id: :desc]
+             )
+           ),
+         {:ok, assessments} <- current_assessments(Enum.map(replies, & &1.id), opts) do
+      latest = Enum.reduce(Enum.reverse(replies), %{}, &Map.put(&2, &1.lead_id, &1))
+      by_reply = Map.new(assessments, &{&1.reply_id, &1})
+
+      {:ok,
+       leads
+       |> Enum.map(fn lead ->
+         reply = Map.get(latest, lead.id)
+         %{lead: lead, reply: reply, assessment: reply && Map.get(by_reply, reply.id)}
+       end)
+       # Stable: the Sales queue is already oldest hand-off first.
+       |> Enum.sort_by(&(not interested?(&1)))}
+    end
+  end
+
+  defp interested?(%{assessment: %{classification: :interested}}), do: true
+  defp interested?(_entry), do: false
+
+  defp current_assessments([], _opts), do: {:ok, []}
+
+  defp current_assessments(reply_ids, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    ReplyAssessment
+    |> Ash.Query.for_read(:current, %{reply_ids: reply_ids}, actor: actor)
+    |> Ash.Query.filter(tenant_id == ^actor.tenant_id)
+    |> Ash.read()
+  end
 
   @doc "Reads one Outreach record of `resource` by id in the actor's tenant."
   def fetch(resource, id, opts), do: GuardedCall.get(resource, id, opts)

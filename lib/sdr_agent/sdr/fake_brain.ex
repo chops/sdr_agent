@@ -13,7 +13,9 @@ defmodule SdrAgent.SDR.FakeBrain do
     * `sdr.qualification` — evaluates the ICP criteria against the company
       facts and the evidence (a trigger passes when a claim names one).
     * `sdr.outreach_proposal` — a short draft whose claim and
-      personalization sentences are evidence claims copied verbatim.
+      personalization sentences are evidence claims copied verbatim;
+    * `sdr.reply_classification` — keyword rules over the reply text
+      (`@reply_rules`, first match wins), `unknown` otherwise.
   """
 
   @confidence %{
@@ -31,6 +33,7 @@ defmodule SdrAgent.SDR.FakeBrain do
 
   def respond("sdr.qualification", input), do: qualify(input)
   def respond("sdr.outreach_proposal", input), do: propose(input)
+  def respond("sdr.reply_classification", %{reply: reply}), do: classify(reply)
 
   defp claims(%{index: index, source_type: type, content: content}) do
     for sentence <- sentences(type, content) |> Enum.take(4) do
@@ -139,6 +142,46 @@ defmodule SdrAgent.SDR.FakeBrain do
       personalization: [%{text: detail.claim, evidence_id: detail.id}],
       risk_flags: [],
       evidence_ids: Enum.uniq([trigger.id, detail.id])
+    }
+  end
+
+  # {classification, sentiment, next action, keywords}; first match wins.
+  @reply_rules [
+    {"unsubscribe", "negative", "stop",
+     ["unsubscribe", "remove me", "opt out", "do not contact", "stop emailing"]},
+    {"out_of_office", "neutral", "none", ["out of office", "out of the office", "on leave"]},
+    {"referral", "neutral", "hand_off",
+     ["talk to my colleague", "reach out to", "better person"]},
+    {"not_now", "neutral", "nurture",
+     ["not right now", "not now", "next quarter", "maybe later"]},
+    {"objection", "negative", "escalate", ["not interested", "no thanks", "already use"]},
+    {"interested", "positive", "hand_off",
+     ["interested", "let's talk", "call", "demo", "meeting", "sounds good"]}
+  ]
+
+  defp classify(%{subject: subject, text: text}) do
+    haystack = String.downcase("#{subject} #{text}")
+
+    {classification, sentiment, action, keyword} =
+      Enum.find_value(@reply_rules, {"unknown", "neutral", "escalate", nil}, fn
+        {class, sentiment, action, keywords} ->
+          case Enum.find(keywords, &String.contains?(haystack, &1)) do
+            nil -> nil
+            keyword -> {class, sentiment, action, keyword}
+          end
+      end)
+
+    %{
+      classification: classification,
+      sentiment: sentiment,
+      intent: "Reply classified as #{String.replace(classification, "_", " ")}.",
+      suggested_next_action: action,
+      confidence: if(keyword, do: 0.85, else: 0.4),
+      reason:
+        if(keyword,
+          do: "The reply says \"#{keyword}\".",
+          else: "No clear signal in the reply."
+        )
     }
   end
 end
