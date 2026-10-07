@@ -128,6 +128,52 @@ defmodule SdrAgentWeb.AuditLiveTest do
     end
   end
 
+  describe "payload viewer navigation (fail closed per hash)" do
+    setup ctx do
+      %{success: 2} = drain!()
+
+      {:ok, [a, c | _]} =
+        Research.list_records(Research.ResearchArtifact,
+          filter: [lead_id: ctx.one.lead.id],
+          actor: ctx.admin
+        )
+
+      Map.merge(ctx, %{a: hex(a.content_sha256), c: hex(c.content_sha256)})
+    end
+
+    test "A → missing B → invalid → C never shows another hash's content", %{conn: conn} = ctx do
+      missing = String.duplicate("cd", 32)
+      {:ok, view, _html} = conn |> sign_in(:auditor) |> live(~p"/audit/payloads/#{ctx.a}")
+      assert has_element?(view, "#payload-content")
+
+      render_patch(view, ~p"/audit/payloads/#{missing}")
+      refute has_element?(view, "#payload-content")
+      assert has_element?(view, "#withheld")
+      assert has_element?(view, "#payload-sha", missing)
+
+      render_patch(view, ~p"/audit/payloads/not-a-hash")
+      refute has_element?(view, "#payload-content")
+      assert has_element?(view, "#withheld")
+
+      render_patch(view, ~p"/audit/payloads/#{ctx.c}")
+      assert has_element?(view, "#payload-content")
+      refute has_element?(view, "#withheld")
+      assert has_element?(view, "#payload-sha", ctx.c)
+    end
+  end
+
+  describe "role changes while connected" do
+    test "an auditor changed to reviewer is sent away from the audit view on the next event",
+         %{conn: conn} = ctx do
+      auditor = user!(ctx, :auditor)
+      {:ok, view, _html} = conn |> sign_in(:auditor) |> live(~p"/audit")
+      {:ok, _changed} = SdrAgent.Accounts.change_role(auditor, :reviewer, actor: ctx.admin)
+
+      assert {:error, {:redirect, %{to: "/"}}} =
+               view |> element("#verify-chain") |> render_click()
+    end
+  end
+
   describe "exports" do
     test "lists audit exports with the CLI that creates them", %{conn: conn} = ctx do
       {:ok, export} =
@@ -148,6 +194,22 @@ defmodule SdrAgentWeb.AuditLiveTest do
 
       assert has_element?(view, "#exports-#{export.id} [data-status='building']")
       assert has_element?(view, "#export-command", "mix sdr.audit.export")
+    end
+
+    test "the CLI command takes only a validated id, never extra flags", %{conn: conn} = ctx do
+      {:ok, view, _html} =
+        conn
+        |> sign_in(:auditor)
+        |> live("/audit/exports?lead=x%20--output%20%2Ftmp%2Fevil&run=--sequence-range")
+
+      refute has_element?(view, "#export-command", "--output")
+      refute has_element?(view, "#export-command", "--sequence-range")
+      assert has_element?(view, "#export-command", "--lead LEAD_ID")
+
+      {:ok, view, _html} =
+        conn |> sign_in(:auditor) |> live(~p"/audit/exports?lead=#{ctx.one.lead.id}")
+
+      assert has_element?(view, "#export-command", "--lead #{ctx.one.lead.id}")
     end
   end
 end

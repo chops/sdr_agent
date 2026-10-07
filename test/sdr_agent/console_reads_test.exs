@@ -75,4 +75,34 @@ defmodule SdrAgent.ConsoleReadsTest do
 
     refute match?({:ok, [_ | _]}, Audit.list_exports(actor: operator!(ctx, :reviewer)))
   end
+
+  describe "tenant scoping (the tenant table is a DB singleton, so a foreign tenant is an actor of another tenant id)" do
+    setup ctx do
+      reviewer = operator!(ctx, :reviewer)
+
+      Map.merge(ctx, %{
+        foreign: %{reviewer | tenant_id: Ecto.UUID.generate()},
+        tenantless: %{reviewer | tenant_id: nil}
+      })
+    end
+
+    test "an operator of another tenant reads none of the run or its children", ctx do
+      for actor <- [ctx.foreign, ctx.tenantless] do
+        refute match?({:ok, [_ | _]}, Agents.list_runs(actor: actor))
+        refute match?({:ok, %{}}, Agents.get_run(ctx.run.id, actor: actor))
+        refute match?({:ok, [_ | _]}, Agents.list_tool_invocations(ctx.run.id, actor: actor))
+        refute match?({:ok, [_ | _]}, Agents.list_model_invocations(ctx.run.id, actor: actor))
+        refute match?({:ok, [_ | _]}, Agents.list_decisions(ctx.run.id, actor: actor))
+        refute match?({:ok, [_ | _]}, Operations.list_operations(actor: actor))
+        refute match?({:ok, [_ | _]}, Audit.list_exports(actor: actor))
+      end
+    end
+
+    test "the run's own tenant still reads it", ctx do
+      assert {:ok, %{id: id}} = Agents.get_run(ctx.run.id, actor: ctx.admin)
+      assert id == ctx.run.id
+      assert {:ok, [_ | _]} = Agents.list_decisions(ctx.run.id, actor: ctx.admin)
+      assert {:ok, [_ | _]} = Agents.list_model_invocations(ctx.run.id, actor: ctx.admin)
+    end
+  end
 end
