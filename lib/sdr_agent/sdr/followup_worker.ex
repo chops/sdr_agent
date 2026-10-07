@@ -12,7 +12,8 @@ defmodule SdrAgent.SDR.FollowupWorker do
   its contact is not suppressed — then it appends the `sdr.followup.due`
   signal (lead, campaign, enrollment, next step) to the ledger — otherwise
   `stop`. Run before the due time it snoozes; run again for the same step it
-  does nothing (the decision's key is per enrollment and step). Drafting the
+  does nothing (the decision's key is per enrollment and step, checked under
+  a lock on the enrollment row in the same transaction). Drafting the
   follow-up is the agent's (a route on `sdr.followup.due`, added with S9);
   every follow-up still needs human approval (Tier 0).
   """
@@ -34,20 +35,38 @@ defmodule SdrAgent.SDR.FollowupWorker do
         args: %{"enrollment_id" => id, "tenant_id" => tenant_id, "step_position" => position}
       }) do
     sch = Actor.system(:scheduler, tenant_id)
-    {:ok, enrollment} = Sales.fetch(Sales.CampaignEnrollment, id, actor: sch)
     key = "followup:#{id}:#{position}"
 
-    cond do
-      due_later?(enrollment) ->
-        {:snooze, max(DateTime.diff(enrollment.next_step_due_at, Clock.utc_now()), 1)}
+    # One execution at a time per enrollment (review #14 MF3): the row is
+    # locked first, and due time, state and an earlier decision are checked
+    # on the locked row, inside the transaction that records the decision and
+    # its signal — a concurrent or repeated execution publishes nothing.
+    {:ok, result} =
+      Audit.transaction(fn ->
+        enrollment = lock_enrollment(id, sch)
 
-      decided?(key, sch) ->
-        :ok
+        cond do
+          due_later?(enrollment) -> {:snooze, seconds_until(enrollment.next_step_due_at)}
+          decided?(key, sch) -> :ok
+          true -> decide(enrollment, position, key, sch)
+        end
+      end)
 
-      true ->
-        decide(enrollment, position, key, sch)
-    end
+    result
   end
+
+  defp lock_enrollment(id, sch) do
+    {:ok, enrollment} =
+      Sales.CampaignEnrollment
+      |> Ash.Query.for_read(:read, %{}, actor: sch)
+      |> Ash.Query.filter(id == ^id and tenant_id == ^sch.tenant_id)
+      |> Ash.Query.lock(:for_update)
+      |> Ash.read_one()
+
+    enrollment
+  end
+
+  defp seconds_until(due), do: max(DateTime.diff(due, Clock.utc_now()), 1)
 
   defp due_later?(%{next_step_due_at: %DateTime{} = due}),
     do: DateTime.compare(due, Clock.utc_now()) == :gt
@@ -81,17 +100,12 @@ defmodule SdrAgent.SDR.FollowupWorker do
       "next_step_id" => next && next.id
     }
 
-    {:ok, :ok} =
-      Audit.transaction(fn ->
-        with {:ok, _decision} <- record(enrollment, key, inputs, go?, sch),
-             :ok <- signal(go?, lead, enrollment, next, sch) do
-          :ok
-        else
-          {:error, error} -> Repo.rollback(error)
-        end
-      end)
-
-    :ok
+    with {:ok, _decision} <- record(enrollment, key, inputs, go?, sch),
+         :ok <- signal(go?, lead, enrollment, next, sch) do
+      :ok
+    else
+      {:error, error} -> Repo.rollback(error)
+    end
   end
 
   defp record(enrollment, key, inputs, go?, sch) do

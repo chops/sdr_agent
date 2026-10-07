@@ -434,6 +434,60 @@ suite (=delivery_race_test.exs=) passed 5 of 5 consecutive runs.
   (=RevisionCitation= → =EvidenceClaim=) are the "click a sentence → see
   evidence" links; =diff_from_ai_baseline= is the AI-vs-human diff.
 
+** S8b review round 1 (Codex, PR #14 comment 6042419798: CHANGES REQUESTED)
+ADR-0011 design APPROVED (now =accepted=). Choices 19–22 and 24–33 accepted;
+23 needed the fixes below. The S8a findings (MF1 cascade, MF2 hand-off
+Contact lock) are fixed on #13 and carried into this branch by the rebase;
+the S8b cascade includes unclaimed deliveries of every matching lead's
+drafts. Dispositions:
+
+1. *MF1 — grant waited for the enrollment FK under the chain head: FIXED.*
+   =BindApproval= locks enrollment =FOR SHARE= → draft =FOR UPDATE= →
+   campaign and contact =FOR SHARE= before the first append (an unlocked peek
+   of the draft names them; its references never change), so the outbox
+   row's FKs never wait. RED (real connections): a writer holding the
+   enrollment and then the draft (the suppression order), and a plain
+   grant-vs-suppression race, both ended in =40P01 deadlock_detected=.
+   GREEN: both finish; the grant's approval, delivery and job are atomic; no
+   granted approval is left behind after a suppression.
+2. *MF2 — the gate claimed from stale facts: FIXED.* The gate locks
+   enrollment =FOR SHARE= → draft → delivery → approval → campaign and
+   contact =FOR SHARE= → quota day, and decides only on the locked rows. RED
+   (real connections): an email change, a campaign pause and an enrollment
+   stop, each committed while the gate ran, still let the delivery be
+   claimed and captured. GREEN: each is seen — the delivery is cancelled, no
+   receipt, the approval not consumed, no quota unit spent.
+3. *MF3 — concurrent follow-ups published twice: FIXED.* The FollowupWorker
+   locks the enrollment =FOR UPDATE= and checks due time, state and an
+   earlier decision on the locked row, inside the transaction that records
+   the decision and its signal. RED: two concurrent executions emitted two
+   =sdr.followup.due= events. GREEN: one decision, one signal.
+4. *Important — bytes re-rendered, not frozen: FIXED.* The gate renders
+   before deciding and refuses a retry whose bytes differ from the first
+   attempt's (=rendered_drift=; cancelled, no capture), so a delivery is
+   only ever sent with the bytes of its first claim. RED: with a rotated
+   endpoint secret a retry was accepted with different bytes. The PR text
+   no longer claims more than this.
+5. *Important — RED evidence wording: ACCEPTED.* The original S8b RED
+   (=160f664=) failed through missing modules/resources reached by helper
+   pattern matches, not feature assertions; it stays NEEDS_REVIEW for that
+   reason as well. =9b4df17= and this round's =75f6666= are assertion-level.
+6. *Choice 19 note: FIXED (docs).* =LocalTime.next_wall_time/3= documents
+   that in a fall-back fold it returns the earlier occurrence of the wall
+   time on the next day it applies to, never the second occurrence.
+
+Global lock order after both rounds (choice 23, amended): Lead → Enrollment
+→ Draft → Delivery → Approval → Campaign → Contact → AgentRun → Quota day →
+chain head; every transaction takes its row locks (=FOR UPDATE=, or
+=FOR SHARE= for rows it only reads or references) before its first audit
+append. Writers: suppression (lead → enrollment → draft → delivery →
+approval), hand-off (lead → campaign → contact → run), grant (enrollment →
+draft → campaign → contact), revoke (draft → delivery → approval),
+=cancel_retry= (draft → delivery), gate (enrollment → draft → delivery →
+approval → campaign → contact → quota day), outcome and reconciliation
+(enrollment → draft → delivery), follow-up (enrollment), single-row
+operator writes (their own row).
+
 ** What S9, S10 and S13 must know (S8b)
 - *S9:* =DeliveryOperation :mark_delivered= / =:mark_bounced= (WHK) exist
   and are unwired; a bounce opens a =delivery_failed= Failure and should

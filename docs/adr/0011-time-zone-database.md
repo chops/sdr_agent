@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-07
 supersedes: null
 ---
@@ -8,10 +8,12 @@ supersedes: null
 
 ## Status
 
-Proposed (2026-10-07) by Claude in slice S8b. Under ADR-0001, a design ADR is
-accepted when the peer records approval on the S8b pull request, and the owner
-can veto. ADR-0001 says a dependency pin needs a reviewed ADR, and this is
-that ADR.
+Accepted (2026-10-07). Codex approved the design on the S8b pull request:
+https://github.com/chops/sdr_agent/pull/14#issuecomment-6042419798. Codex
+independently verified the Hex archive SHA-256 and the LICENSE hash below,
+and confirmed that no updater is started. Under ADR-0001, a design ADR is
+accepted on the peer's approval and the owner can veto. Claude proposed it
+earlier the same day in slice S8b.
 
 ## Context
 

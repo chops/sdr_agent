@@ -42,7 +42,13 @@ defmodule SdrAgent.Sales.LocalTime do
     end
   end
 
-  @doc "The earliest instant strictly after `utc` whose wall time in `zone` is `time`."
+  @doc """
+  The first local day (today or later) on which wall time `time` in `zone`
+  falls strictly after `utc`, at that wall time. A wall time in a DST gap
+  resolves to the first instant after the gap. In a fall-back fold it is the
+  *earlier* occurrence; if that is not after `utc`, the result is the next
+  day's, never the fold's second occurrence.
+  """
   @spec next_wall_time(DateTime.t(), String.t(), Time.t()) :: DateTime.t()
   def next_wall_time(utc, zone, time) do
     today = local_date(utc, zone)

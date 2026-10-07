@@ -3,7 +3,7 @@ defmodule SdrAgent.Outreach.Delivery do
   The outbox delivery path (spec §14): what the delivery, reconciliation and
   sweeper jobs run. Every step is a transaction that takes its row locks in
   the Outreach lock order — enrollment → draft → delivery → approval →
-  quota day — *before* its first audit append (the chain-head lock), so no
+  campaign → contact → quota day — *before* its first audit append (the chain-head lock), so no
   step ever waits for a row while holding the chain head.
 
     * `attempt/2` (DLV) — the send gate, as one deterministic `send_gate`
@@ -81,22 +81,37 @@ defmodule SdrAgent.Outreach.Delivery do
 
   defp gate(id, tenant_id, dlv) do
     with %{state: state} = peek when state in @claimable <- read(DeliveryOperation, id, tenant_id),
+         enrollment <- lock(Sales.CampaignEnrollment, peek.enrollment_id, tenant_id, "FOR SHARE"),
          _draft <- lock(Draft, peek.draft_id, tenant_id),
          %{state: state} = op when state in @claimable <- lock(DeliveryOperation, id, tenant_id) do
       if op.not_before && DateTime.compare(op.not_before, Clock.utc_now()) == :gt,
         do: {:snooze, max(DateTime.diff(op.not_before, Clock.utc_now()), 1)},
-        else: evaluate(op, tenant_id, dlv)
+        else: evaluate(op, enrollment, tenant_id, dlv)
     else
       _ -> :done
     end
   end
 
-  defp evaluate(op, tenant_id, dlv) do
+  # Every row the verdict depends on is locked before the first append
+  # (review #14 MF2), in the Outreach order enrollment → draft → delivery →
+  # approval → campaign → contact → quota day: a change to any of them either
+  # committed before (and is read here) or waits for this evaluation.
+  defp evaluate(op, enrollment, tenant_id, dlv) do
     approval = lock(Approval, op.approval_id, tenant_id)
+    campaign = lock(Sales.Campaign, op.campaign_id, tenant_id, "FOR SHARE")
+    contact = lock(Sales.Contact, op.recipient_contact_id, tenant_id, "FOR SHARE")
     first? = op.attempt_count == 0
     day = if first?, do: open_day(tenant_id, dlv)
-    facts = facts(op, approval, tenant_id)
-    {verdict, detail} = verdict(approval, facts, day, first?)
+
+    facts =
+      facts(
+        op,
+        approval,
+        %{enrollment: enrollment, campaign: campaign, contact: contact},
+        tenant_id
+      )
+
+    {verdict, detail} = verdict(op, approval, facts, day, first?)
     {:ok, gate} = decide(dlv, op, :send_gate, "outreach.send_gate", verdict, facts.inputs, detail)
 
     case verdict do
@@ -107,19 +122,21 @@ defmodule SdrAgent.Outreach.Delivery do
     end
   end
 
-  # Everything the gate reads (no locks needed: the delivery and approval
-  # rows are locked; these rows are re-checked on every attempt).
-  defp facts(op, approval, tenant_id) do
+  # Everything the gate decides on, from the locked rows (the revision is
+  # immutable). The message is rendered here so a retry whose bytes would
+  # differ from the first attempt's is refused, never sent (review #14).
+  defp facts(op, approval, locked, tenant_id) do
+    %{enrollment: enrollment, campaign: campaign, contact: contact} = locked
     revision = read(DraftRevision, op.draft_revision_id, tenant_id)
-    contact = read(Sales.Contact, op.recipient_contact_id, tenant_id)
-    enrollment = read(Sales.CampaignEnrollment, op.enrollment_id, tenant_id)
-    campaign = read(Sales.Campaign, op.campaign_id, tenant_id)
     email = String.downcase(to_string(contact.email))
     suppressions = suppressions(email, tenant_id)
     now = Clock.utc_now()
+    rendered = render(op, revision, campaign)
 
     %{
       revision: revision,
+      rendered: rendered,
+      rendered_sha256: rendered && :crypto.hash(:sha256, rendered),
       contact: contact,
       campaign: campaign,
       now: now,
@@ -153,8 +170,8 @@ defmodule SdrAgent.Outreach.Delivery do
     }
   end
 
-  defp verdict(approval, facts, day, first?) do
-    case refusal(approval, facts, first?) do
+  defp verdict(op, approval, facts, day, first?) do
+    case refusal(op, approval, facts, first?) do
       nil -> timing(facts, day, first?)
       reason -> {"refuse", %{reason: reason}}
     end
@@ -162,7 +179,7 @@ defmodule SdrAgent.Outreach.Delivery do
 
   # The first failing check, in order, or nil. A first claim needs a granted
   # approval; a retry, the approval this delivery already consumed.
-  defp refusal(approval, facts, first?) do
+  defp refusal(op, approval, facts, first?) do
     i = facts.inputs
     expected = if first?, do: :granted, else: :consumed
 
@@ -175,9 +192,24 @@ defmodule SdrAgent.Outreach.Delivery do
       suppressed: i["suppression_ids"] != [],
       enrollment_inactive: i["enrollment_status"] != "active",
       campaign_inactive: i["campaign_status"] != "active",
-      unsupported_footer: facts.campaign.footer_template_version not in Message.footer_versions()
+      unsupported_footer: facts.campaign.footer_template_version not in Message.footer_versions(),
+      rendered_drift: drifted?(op, facts)
     ]
     |> Enum.find_value(fn {reason, failed?} -> failed? && reason end)
+  end
+
+  defp drifted?(%{rendered_sha256: nil}, _facts), do: false
+  defp drifted?(%{rendered_sha256: sha}, %{rendered_sha256: rendered}), do: sha != rendered
+
+  defp render(op, revision, campaign) do
+    if campaign.footer_template_version in Message.footer_versions() do
+      Message.render(%{
+        operation: op,
+        revision: revision,
+        campaign: campaign,
+        at: op.requested_at
+      })
+    end
   end
 
   defp timing(facts, day, first?) do
@@ -201,13 +233,7 @@ defmodule SdrAgent.Outreach.Delivery do
   end
 
   defp claim(op, approval, facts, day, gate, dlv) do
-    rendered =
-      Message.render(%{
-        operation: op,
-        revision: facts.revision,
-        campaign: facts.campaign,
-        at: op.requested_at
-      })
+    rendered = facts.rendered
 
     with {:ok, quota_date} <- consume(day, op, dlv),
          {:ok, payload} <- Audit.put_payload(rendered, "message/rfc822", actor: dlv),
@@ -599,10 +625,10 @@ defmodule SdrAgent.Outreach.Delivery do
     |> Ash.read_one!(authorize?: false)
   end
 
-  defp lock(resource, id, tenant_id) do
+  defp lock(resource, id, tenant_id, mode \\ :for_update) do
     resource
     |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
-    |> Ash.Query.lock(:for_update)
+    |> Ash.Query.lock(mode)
     |> Ash.read_one!(authorize?: false)
   end
 
