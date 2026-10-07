@@ -24,6 +24,7 @@ defmodule SdrAgent.Audit do
     * `record_access/5` — record an audit-data view (S10 timeline views,
       S11 exports) as AuditAccess + AuditEvent in one transaction.
     * reads: `list_events/1`, `list_payloads/1`, `list_accesses/1`,
+      `list_exports/1`,
       `get_chain_head/1`, `get_provenance_snapshot/2`,
       `current_retention_marker/3`; write: `set_retention_marker/2`.
 
@@ -242,6 +243,17 @@ defmodule SdrAgent.Audit do
     |> Ash.Query.for_read(:read, %{}, actor: actor)
     |> tenant_scope(actor)
     |> Ash.Query.sort(inserted_at: :asc)
+    |> Ash.read()
+  end
+
+  @doc "AuditExport rows of the actor's tenant, newest first (S10 exports view; ADM, AUR, AUD)."
+  def list_exports(opts) do
+    actor = Keyword.get(opts, :actor)
+
+    AuditExport
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.sort(inserted_at: :desc, id: :desc)
     |> Ash.read()
   end
 

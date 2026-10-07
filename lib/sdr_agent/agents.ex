@@ -15,7 +15,7 @@ defmodule SdrAgent.Agents do
     * runs — `create_run/2`, `start_run/2`, `set_run_phase/3`,
       `succeed_run/2`, `fail_run/3`, `exhaust_run_budget/3`, `cancel_run/2`,
       `retry_run/2`, `reserve_model_call/2`, `get_run/2`,
-      `find_run_by_operation/2`, `active_runs_for_lead/2`;
+      `find_run_by_operation/2`, `active_runs_for_lead/2`, `list_runs/1`;
     * model calls — `reserve_model_invocation/3` (reserves the run budget,
       enforces the persisted daily limit, stores the request Payload and
       numbers the call, in one transaction), `daily_model_call_limit/0`,
@@ -23,7 +23,8 @@ defmodule SdrAgent.Agents do
       `mark_model_invocation_sent/2`, `complete_model_invocation/3`,
       `fail_model_invocation/3`, `mark_model_invocation_unknown/2` (each
       settles run usage in the same transaction), `list_model_invocations/2`;
-    * tool calls — `start_tool_invocation/3`, `succeed_tool_invocation/3`,
+    * tool calls — `list_tool_invocations/2`, `start_tool_invocation/3`,
+      `succeed_tool_invocation/3`,
       `fail_tool_invocation/3`, `mark_tool_invocation_unknown/2`;
     * decisions — `record_decision/2` (idempotent on its key; conflicting
       reuse fails), `list_decisions/2`;
@@ -147,6 +148,26 @@ defmodule SdrAgent.Agents do
   @doc "Reads one run."
   def get_run(id, opts), do: Ash.get(AgentRun, id, actor: Keyword.get(opts, :actor))
 
+  @doc """
+  Runs of the actor's tenant, newest first (S10 Runs view); `lead_id:`
+  narrows to one lead. Read policy: any present actor (AgentRun).
+  """
+  def list_runs(opts) do
+    actor = Keyword.get(opts, :actor)
+
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> then(fn query ->
+      case Keyword.get(opts, :lead_id) do
+        nil -> query
+        lead_id -> Ash.Query.filter(query, lead_id == ^lead_id)
+      end
+    end)
+    |> Ash.Query.sort(inserted_at: :desc, id: :desc)
+    |> Ash.read()
+  end
+
   @doc "Queued or running runs of a lead (an active assignment)."
   def active_runs_for_lead(lead_id, opts) do
     AgentRun
@@ -263,6 +284,15 @@ defmodule SdrAgent.Agents do
   @doc "Invocations of a run, in call order."
   def list_model_invocations(run_id, opts) do
     ModelInvocation
+    |> Ash.Query.for_read(:read, %{}, actor: Keyword.get(opts, :actor))
+    |> Ash.Query.filter(agent_run_id == ^run_id)
+    |> Ash.Query.sort(sequence_in_run: :asc)
+    |> Ash.read()
+  end
+
+  @doc "Tool invocations of a run, in call order (S10 run view)."
+  def list_tool_invocations(run_id, opts) do
+    ToolInvocation
     |> Ash.Query.for_read(:read, %{}, actor: Keyword.get(opts, :actor))
     |> Ash.Query.filter(agent_run_id == ^run_id)
     |> Ash.Query.sort(sequence_in_run: :asc)
@@ -534,6 +564,11 @@ defmodule SdrAgent.Agents do
   end
 
   defp collect(other), do: other
+
+  defp tenant_scope(query, %{tenant_id: tenant_id}) when is_binary(tenant_id),
+    do: Ash.Query.filter(query, tenant_id == ^tenant_id)
+
+  defp tenant_scope(query, _actor), do: query
 
   defp guard(resource, action, subject_id, actor, fun) do
     Guard.run(%{resource: resource, action: action, subject_id: subject_id}, actor, fun)
