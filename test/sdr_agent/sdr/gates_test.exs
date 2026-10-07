@@ -93,12 +93,17 @@ defmodule SdrAgent.SDR.GatesTest do
       assert check.outcome == "suppressed"
     end
 
-    test "the S7 default suppression check records that no store exists yet", ctx do
+    test "the suppression check reads the Outreach store (S8)", ctx do
       %{run: run} = assign!(ctx, "01")
       assert %{success: 1} = drain!()
       assert [check | _] = decision(ctx, run!(ctx, run), :suppression_check)
       assert check.outcome == "not_suppressed"
       assert check.rule_id == "sdr.suppression_check"
+
+      {:ok, inputs} = SdrAgent.Audit.read_content(check.inputs_sha256, actor: ctx.admin)
+      inputs = Jason.decode!(inputs)
+      assert inputs["checker"] == inspect(SdrAgent.SDR.SuppressionCheck.Store)
+      assert inputs["detail"]["store"] == "outreach"
     end
 
     test "sdr.lead.suppressed stops a running assignment", ctx do

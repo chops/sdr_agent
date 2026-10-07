@@ -21,7 +21,8 @@ defmodule SdrAgent.Demo.SeedTest do
     SdrAgent.Sales.Campaign,
     SdrAgent.Sales.Account,
     SdrAgent.Sales.Contact,
-    SdrAgent.Sales.Lead
+    SdrAgent.Sales.Lead,
+    SdrAgent.Outreach.Suppression
   ]
 
   # Differ by construction between runs: the tenant is bootstrapped with a
@@ -73,7 +74,14 @@ defmodule SdrAgent.Demo.SeedTest do
     contacts = rows(SdrAgent.Sales.Contact)
     leads = rows(SdrAgent.Sales.Lead)
     assert length(accounts) == 10 and length(contacts) == 10 and length(leads) == 10
-    assert Enum.all?(leads, &(&1.status == :new))
+    # Every lead is new except the suppressed contact's, which its seeded
+    # Suppression stopped (S8: suppression side effects).
+    suppressed = MapSet.new(Fixtures.suppressed_contact_emails())
+    stopped = for c <- contacts, MapSet.member?(suppressed, to_string(c.email)), do: c.id
+    {stopped_leads, new_leads} = Enum.split_with(leads, &(&1.contact_id in stopped))
+    assert Enum.all?(new_leads, &(&1.status == :new))
+    assert [_ | _] = stopped_leads
+    assert Enum.all?(stopped_leads, &(&1.status == :stopped))
     assert Enum.all?(accounts, &String.ends_with?(to_string(&1.domain), ".test"))
 
     assert Enum.all?(
@@ -102,11 +110,22 @@ defmodule SdrAgent.Demo.SeedTest do
     assert Enum.all?(suppressed, &MapSet.member?(contact_emails, &1))
   end
 
+  test "seeds one email Suppression per designated contact (S8)" do
+    {:ok, _} = Seed.run()
+    suppressions = rows(SdrAgent.Outreach.Suppression)
+
+    assert Enum.sort(Enum.map(suppressions, &to_string(&1.value))) ==
+             Enum.sort(Fixtures.suppressed_contact_emails())
+
+    assert Enum.all?(suppressions, &(&1.scope == :email and &1.reason == :manual))
+    assert Enum.map(suppressions, & &1.id) == Enum.sort(Enum.map(Fixtures.suppressions(), & &1.id))
+  end
+
   test "every seeded write is audited as the seeder and the chain verifies" do
     {:ok, _} = Seed.run()
 
     seeded =
-      Enum.filter(events(tenant()), &(&1.event_type =~ ~r/^(user|sales)\./))
+      Enum.filter(events(tenant()), &(&1.event_type =~ ~r/^(user|sales|outreach)\./))
 
     assert length(seeded) > 30
     assert Enum.all?(seeded, &(&1.actor_type == :seeder))

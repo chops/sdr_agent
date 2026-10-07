@@ -176,7 +176,32 @@ None blocking; choices are flagged for the PR reviewer.
 -----
 
 * TDD Tracking
-(Filled during Phase 4a)
+
+** S8a RED (2026-10-07)
+=MIX_TEST_PARTITION=_s8 mix test test/sdr_agent/outreach
+test/sdr_agent/demo/seed_test.exs test/sdr_agent/sdr/gates_test.exs=:
+*Result: 14/46 passed*. The 14 passing are pre-existing seed and gate
+tests; every failure is the intended missing behaviour.
+
+| Test | Location | Status | Failure Reason |
+|------+----------+--------+----------------|
+| Hand-off draft, citations, propose checks, edits, lifecycle, append-only, deferred FK (8) | test/sdr_agent/outreach/draft_test.exs | FAILING | =SdrAgent.Outreach= / =Draft= undefined |
+| Approval binding, stale refusal, edit-then-approve, actors, suppressed recipient, reject, revoke, immutability (8) | test/sdr_agent/outreach/approval_test.exs | FAILING | =SdrAgent.Outreach= undefined |
+| Suppression create, idempotency, actors, side effects (email/domain), assignment refusal, store, policy marker (7) | test/sdr_agent/outreach/suppression_test.exs | FAILING | =Outreach.suppress/2= undefined; =SuppressionCheck.impl()= is =NoStore= |
+| AUR deny-all, AUR reads, review queue (3) | test/sdr_agent/outreach/policy_test.exs | FAILING | =SdrAgent.Outreach= undefined |
+| Seed: suppressions seeded, lead 04 stopped, idempotent, deterministic (4) | test/sdr_agent/demo/seed_test.exs | FAILING | =Outreach.Suppression= not a resource; lead 04 still =new= |
+| Suppression gate reads the store (1) | test/sdr_agent/sdr/gates_test.exs | FAILING | checker is =NoStore= |
+
+*TDD Gate Verification:* [ ] VERIFIED / [X] NEEDS_REVIEW / [ ] BLOCKED —
+same =bin/tdd_verify.sh= Elixir 1.20 summary-parsing defect as S1–S7; the
+failures above are the intended ones (proceeding under ADR-0001, the peer
+reviews RED on the PR).
+
+Plan adjustment before GREEN (scope, no weakening): the AGT
+=unsubscribe_reply= source (choice 7) moves to S9 with the reply
+classification it depends on (an LLM =reply_classification= Decision needs
+S9's ModelInvocation purpose); S8a's sources are =:manual= and =:seed=. The
+agent/delivery stop authority (choice 6) is still built and tested directly.
 
 -----
 
