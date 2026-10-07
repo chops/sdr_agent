@@ -124,6 +124,81 @@ defmodule SdrAgent.Agents.Witness.ProjectionTest do
     end
   end
 
+  test "a malformed or out-of-order event sequence is unsupported, never a match", ctx do
+    request = Proxy.messages_request(ctx.stdin)
+    frames = @answer |> sse() |> String.split("\n\n", trim: true)
+    event = fn data -> "event: x\ndata: #{JSON.encode!(data)}" end
+    join = fn frames -> Enum.join(frames, "\n\n") <> "\n\n" end
+    [start, block_start, delta1, delta2, block_stop, message_delta, stop] = frames
+
+    cases = [
+      {"stop first", [stop | Enum.drop(frames, -1)]},
+      {"duplicate stop", frames ++ [stop]},
+      {"missing block stop", [start, block_start, delta1, delta2, message_delta, stop]},
+      {"wrong-index delta",
+       [
+         start,
+         block_start,
+         event.(%{
+           "type" => "content_block_delta",
+           "index" => 1,
+           "delta" => %{"type" => "text_delta", "text" => @answer}
+         }),
+         block_stop,
+         message_delta,
+         stop
+       ]},
+      {"error frame",
+       [start, event.(%{"type" => "error", "error" => %{}}) | Enum.drop(frames, 1)]},
+      {"unknown frame", [start, event.(%{"type" => "surprise"}) | Enum.drop(frames, 1)]},
+      {"delta without text",
+       [
+         start,
+         block_start,
+         event.(%{
+           "type" => "content_block_delta",
+           "index" => 0,
+           "delta" => %{"type" => "text_delta"}
+         }),
+         block_stop,
+         message_delta,
+         stop
+       ]},
+      {"non-string delta text",
+       [
+         start,
+         block_start,
+         event.(%{
+           "type" => "content_block_delta",
+           "index" => 0,
+           "delta" => %{"type" => "text_delta", "text" => 42}
+         }),
+         block_stop,
+         message_delta,
+         stop
+       ]}
+    ]
+
+    for {label, frames} <- cases do
+      result = compare(ctx, request, join.(frames))
+      assert match?({:unsupported, _}, result), "#{label}: #{inspect(result)}"
+    end
+
+    # Pings between events are allowed deliberately.
+    pinged = [
+      start,
+      event.(%{"type" => "ping"}),
+      block_start,
+      delta1,
+      delta2,
+      block_stop,
+      message_delta,
+      stop
+    ]
+
+    assert {:match, _} = compare(ctx, request, join.(pinged))
+  end
+
   test "an invocation under another or no prompt builder is unsupported (P1)", ctx do
     for entry <- [
           Map.delete(ctx.invocation.model_catalog_entry, "prompt_builder"),

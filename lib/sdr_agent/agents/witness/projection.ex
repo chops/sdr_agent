@@ -191,33 +191,92 @@ defmodule SdrAgent.Agents.Witness.Projection do
     end
   end
 
+  # Validates the complete Anthropic event sequence before any text is
+  # trusted: message_start first; content blocks strictly in index order,
+  # each start → deltas of its own index and type → stop; one message_delta;
+  # message_stop last and once. `ping` is allowed between events; any other
+  # (including `error`) or malformed event refuses the stream.
   defp sse_text(raw) do
     with {:ok, events} <- sse_events(raw) do
-      blocks =
-        events
-        |> Enum.filter(&(&1["type"] == "content_block_start"))
-        |> Enum.map(&get_in(&1, ["content_block", "type"]))
+      events = Enum.reject(events, &(&1["type"] == "ping"))
 
-      cond do
-        not Enum.any?(events, &(&1["type"] == "message_stop")) ->
-          {:unsupported, "response_stream_incomplete"}
-
-        "tool_use" in blocks ->
-          {:mismatch, "response_tool_use"}
-
-        blocks != ["text"] ->
-          {:unsupported, "response_block_unsupported"}
-
-        true ->
-          {:ok,
-           events
-           |> Enum.filter(
-             &match?(%{"type" => "content_block_delta", "delta" => %{"type" => "text_delta"}}, &1)
-           )
-           |> Enum.map_join(&get_in(&1, ["delta", "text"]))}
+      case sequence(events) do
+        {:ok, blocks} -> stream_blocks(blocks)
+        {:error, reason} -> {:unsupported, reason}
       end
     end
   end
+
+  defp stream_blocks(blocks) do
+    types = Enum.map(blocks, & &1.type)
+
+    cond do
+      "tool_use" in types -> {:mismatch, "response_tool_use"}
+      types == ["text"] -> {:ok, hd(blocks).text}
+      true -> {:unsupported, "response_block_unsupported"}
+    end
+  end
+
+  defp sequence([%{"type" => "message_start", "message" => %{}} | rest]), do: blocks(rest, [])
+  defp sequence(_events), do: {:error, "response_stream_invalid"}
+
+  defp blocks(
+         [
+           %{
+             "type" => "content_block_start",
+             "index" => index,
+             "content_block" => %{"type" => type}
+           }
+           | rest
+         ],
+         acc
+       )
+       when index == length(acc) and is_binary(type) do
+    with {:ok, text, rest} <- block_body(rest, index, type, []) do
+      blocks(rest, acc ++ [%{type: type, text: text}])
+    end
+  end
+
+  defp blocks([%{"type" => "message_delta", "delta" => %{}} | rest], acc), do: finish(rest, acc)
+  defp blocks([], _acc), do: {:error, "response_stream_incomplete"}
+  defp blocks(_events, _acc), do: {:error, "response_stream_invalid"}
+
+  defp block_body(
+         [%{"type" => "content_block_stop", "index" => index} | rest],
+         index,
+         _type,
+         parts
+       ),
+       do: {:ok, parts |> Enum.reverse() |> Enum.join(), rest}
+
+  defp block_body(
+         [%{"type" => "content_block_delta", "index" => index, "delta" => delta} | rest],
+         index,
+         type,
+         parts
+       ) do
+    case {type, delta} do
+      {"text", %{"type" => "text_delta", "text" => text}} when is_binary(text) ->
+        block_body(rest, index, type, [text | parts])
+
+      {"tool_use", %{"type" => "input_json_delta", "partial_json" => json}}
+      when is_binary(json) ->
+        block_body(rest, index, type, parts)
+
+      {"thinking", %{"type" => kind}} when kind in ["thinking_delta", "signature_delta"] ->
+        block_body(rest, index, type, parts)
+
+      _ ->
+        {:error, "response_stream_invalid"}
+    end
+  end
+
+  defp block_body([], _index, _type, _parts), do: {:error, "response_stream_incomplete"}
+  defp block_body(_events, _index, _type, _parts), do: {:error, "response_stream_invalid"}
+
+  defp finish([%{"type" => "message_stop"}], acc), do: {:ok, acc}
+  defp finish([], _acc), do: {:error, "response_stream_incomplete"}
+  defp finish(_events, _acc), do: {:error, "response_stream_invalid"}
 
   defp sse_events(raw) when is_binary(raw) do
     frames = raw |> String.split(~r/\r?\n\r?\n/, trim: true)

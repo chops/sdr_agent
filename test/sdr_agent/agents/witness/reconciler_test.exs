@@ -275,6 +275,72 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
       assert {:ok, [_]} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
     end
 
+    test "no weaker or unsupported observation erases a mismatch (C3)", ctx do
+      damages = [
+        {"missing blob",
+         fn record, _path -> File.rm!(blob_path(ctx.root, record["response_sha256"])) end},
+        {"incomplete capture",
+         fn record, path ->
+           File.write!(path, JSON.encode!(%{record | "response_capture_complete" => false}))
+         end},
+        {"unknown proxy version",
+         fn record, path ->
+           File.write!(path, JSON.encode!(%{record | "proxy_version" => "9.9.9"}))
+         end},
+        {"now ambiguous",
+         fn _record, _path ->
+           :ok
+         end},
+        {"corrupt blob",
+         fn record, _path -> File.write!(blob_path(ctx.root, record["response_sha256"]), "x") end}
+      ]
+
+      for {label, damage} <- damages do
+        invocation = call_model!(ctx, "mismatch")
+        assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation, @test_only_allowlist)
+        [path] = terminal_record_paths(ctx.root, invocation)
+        record = path |> File.read!() |> JSON.decode!()
+        damage.(record, path)
+
+        if label == "now ambiguous",
+          do: Proxy.exchange!(ctx.root, invocation.id, request: "{}", response: "{}")
+
+        result = reconcile(ctx, invocation, @test_only_allowlist)
+        assert match?({:ok, %{status: :mismatch}}, result), "#{label}: #{inspect(result)}"
+        assert {:ok, :mismatch} = status(invocation, ctx.rec)
+        {:ok, links} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert Enum.any?(links, &(&1.link_status == :mismatch)), label
+      end
+    end
+
+    test "all records gone after reconciled downgrades to inferred, history kept", ctx do
+      invocation = call_model!(ctx, "ok")
+      assert {:ok, %{status: :reconciled}} = reconcile(ctx, invocation, @test_only_allowlist)
+      File.rm_rf!(Path.join([ctx.root, "witnesses", invocation.id]))
+
+      assert {:ok, %{status: :inferred}} = reconcile(ctx, invocation, @test_only_allowlist)
+      assert {:ok, :inferred} = status(invocation, ctx.rec)
+      assert {:ok, [_, _]} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
+    end
+
+    test "an older observation cannot overwrite a newer store state", ctx do
+      invocation = call_model!(ctx, "none")
+
+      hook = fn ->
+        Proxy.exchange!(ctx.root, invocation.id, request: "{}", response: "{}")
+      end
+
+      assert {:ok, %{status: :stale}} =
+               Witness.reconcile(invocation.id,
+                 actor: ctx.rec,
+                 store_root: ctx.root,
+                 after_observe: hook
+               )
+
+      assert attention(ctx, invocation) == []
+      assert {:ok, []} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
+    end
+
     test "missing then mismatching: the warning is resolved, one critical stays live", ctx do
       invocation = call_model!(ctx, "none")
       assert {:ok, %{status: :unwitnessed}} = reconcile(ctx, invocation)
@@ -333,6 +399,9 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
 
   defp max_blob, do: Witness.Store.max_blob_bytes()
 
+  defp blob_path(root, digest),
+    do: Path.join([root, "witness", "sha256", binary_part(digest, 0, 2), digest <> ".json"])
+
   defp terminal_record_paths(root, invocation) do
     Path.join([root, "witnesses", invocation.id, "*.json"])
     |> Path.wildcard()
@@ -375,7 +444,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
           run: ctx.run,
           actor: ctx.agent,
           operation: "model.complete",
-          prompt: "Qualify the fixture lead #{variant}",
+          prompt: "Qualify the fixture lead #{variant} (#{id})",
           schema: @schema,
           audit: audit
         },

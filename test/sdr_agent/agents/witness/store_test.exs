@@ -129,7 +129,7 @@ defmodule SdrAgent.Agents.Witness.StoreTest do
 
   test "an over-limit blob and non-regular entries are refused", %{root: root, id: id} do
     max = Store.max_blob_bytes()
-    assert is_integer(max) and max > 0
+    assert max > 0
     body = String.duplicate("x", max + 1)
     digest = Proxy.blob!(root, body)
     path = Path.join([root, "witness", "sha256", binary_part(digest, 0, 2), digest <> ".json"])

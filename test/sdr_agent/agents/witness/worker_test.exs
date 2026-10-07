@@ -96,6 +96,35 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
     assert job.args["model_invocation_id"] == claude.id
   end
 
+  test "only terminal ClaudeCLI invocations of the actor's tenant are enqueued", ctx do
+    fake = fake_invocation!(ctx, "enqueue-fake")
+    claude = claude_invocation!(ctx, "enqueue-ok")
+    foreign = system_actor(:reconciler, %{id: Ecto.UUID.generate()})
+
+    for {label, id, actor, opts} <- [
+          {"fake provider", fake.id, ctx.rec, []},
+          {"nonexistent", Ecto.UUID.generate(), ctx.rec, []},
+          {"malformed id", "not-a-uuid", ctx.rec, []},
+          {"foreign tenant", claude.id, foreign, []},
+          {"generation 0", claude.id, ctx.rec, [generation: 0]},
+          {"generation 5", claude.id, ctx.rec, [generation: 5]}
+        ] do
+      result = @witness.enqueue(id, Keyword.merge([actor: actor], opts))
+      assert match?({:error, _}, result), "#{label}: #{inspect(result)}"
+    end
+
+    assert all_enqueued(worker: @reconcile_worker) == []
+
+    auditor = human(:auditor, ctx.tenant)
+
+    for id <- [claude.id, Ecto.UUID.generate(), "not-a-uuid"] do
+      assert {:error, %Ash.Error.Forbidden{}} = @witness.enqueue(id, actor: auditor)
+    end
+
+    assert length(events_of_type(ctx.tenant, "authz.denied")) == 3
+    assert all_enqueued(worker: @reconcile_worker) == []
+  end
+
   describe "bounded recovery (re-drive) of missing or open witnesses" do
     setup ctx do
       root =
@@ -164,6 +193,25 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
       assert :ok = perform(@scan_worker, %{})
       assert length(all_enqueued(worker: @reconcile_worker)) == jobs
       assert [_one_warning] = live_attention(ctx, invocation)
+    end
+
+    test "a killed attempt is settled by the scan and becomes re-drivable", ctx do
+      invocation = claude_invocation!(ctx, "killed-1")
+      assert {:ok, operation} = enqueue(invocation, ctx.rec)
+      # Attempt 1 started, then the process was killed by the job timeout.
+      {:ok, _running} = SdrAgent.Operations.start_operation(operation, actor: ctx.rec)
+
+      SdrAgent.Clock.freeze(DateTime.add(ctx.start, 11, :minute))
+      assert :ok = perform(@scan_worker, %{})
+      {:ok, op} = SdrAgent.Operations.get_operation(operation.id, actor: ctx.rec)
+      assert op.status == :failed
+      assert op.attempts == 1
+
+      SdrAgent.Clock.freeze(DateTime.add(ctx.start, 22, :minute))
+      assert :ok = perform(@scan_worker, %{})
+      {:ok, op} = SdrAgent.Operations.get_operation(operation.id, actor: ctx.rec)
+      assert op.status == :cancelled
+      assert length(elem(reconcile_operations(ctx, invocation), 1)) == 1
     end
 
     test "a failing attempt fails its Operation truthfully, retries, then discards", ctx do

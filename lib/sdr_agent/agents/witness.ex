@@ -67,6 +67,7 @@ defmodule SdrAgent.Agents.Witness do
   @messages "/anthropic/v1/messages"
   @count_tokens "/anthropic/v1/messages/count_tokens"
   @subject "SdrAgent.Agents.ModelInvocation"
+  @max_generations 4
 
   ## Configuration
 
@@ -92,19 +93,20 @@ defmodule SdrAgent.Agents.Witness do
 
     Guard.run(meta, actor, fn ->
       with :ok <- authorize(actor),
-           {:ok, methods} <- methods(opts) do
+           {:ok, methods} <- methods(opts),
+           {:ok, hook} <- test_hook(opts) do
         root = Keyword.get(opts, :store_root, store_root())
-        do_reconcile(invocation_id, root, methods, actor)
+        do_reconcile(invocation_id, root, methods, actor, hook)
       end
     end)
   end
 
-  defp do_reconcile(_invocation_id, nil, _methods, _actor), do: {:ok, %{status: :skipped}}
+  defp do_reconcile(_invocation_id, nil, _methods, _actor, _hook), do: {:ok, %{status: :skipped}}
 
-  defp do_reconcile(invocation_id, root, methods, actor) do
+  defp do_reconcile(invocation_id, root, methods, actor, hook) do
     with {:ok, invocation} <- GuardedCall.get(ModelInvocation, invocation_id, actor: actor),
          :ok <- eligible(invocation),
-         {:ok, observation} <- observe(invocation, root, actor) do
+         {:ok, observation} <- observe(invocation, root, actor, hook) do
       persist(invocation, observation, methods, actor)
     else
       :skip -> {:ok, %{status: :skipped}}
@@ -120,6 +122,23 @@ defmodule SdrAgent.Agents.Witness do
 
   defp authorize(_actor), do: {:error, Ash.Error.Forbidden.exception([])}
 
+  # Test-only hook run after the observation, before persistence (stale
+  # observation tests); refused unless test overrides are configured.
+  defp test_hook(opts) do
+    case Keyword.fetch(opts, :after_observe) do
+      :error ->
+        {:ok, fn -> :ok end}
+
+      {:ok, hook} when is_function(hook, 0) ->
+        if overrides?(), do: {:ok, hook}, else: {:error, :method_override_forbidden}
+
+      {:ok, _other} ->
+        {:error, :invalid_option}
+    end
+  end
+
+  defp overrides?, do: Keyword.get(config(), :allow_method_override, false)
+
   defp methods(opts) do
     case Keyword.fetch(opts, :methods) do
       :error ->
@@ -134,14 +153,23 @@ defmodule SdrAgent.Agents.Witness do
 
   ## Observation (no database locks held)
 
-  defp observe(invocation, root, actor) do
-    case Store.inventory(root, invocation.id) do
-      {:ok, %{exchanges: exchanges}} ->
-        evaluate(invocation, root, exchanges, actor)
+  defp observe(invocation, root, actor, hook) do
+    fingerprint = Store.fingerprint(root, invocation.id)
 
-      {:error, reason} ->
-        {:ok, %{error: Atom.to_string(reason), exchanges: [], warnings: [Atom.to_string(reason)]}}
-    end
+    result =
+      case Store.inventory(root, invocation.id) do
+        {:ok, %{exchanges: exchanges}} ->
+          evaluate(invocation, root, exchanges, actor)
+
+        {:error, reason} ->
+          reason = Atom.to_string(reason)
+          {:ok, %{error: reason, exchanges: [], warnings: [reason]}}
+      end
+
+    hook.()
+
+    with {:ok, observation} <- result,
+         do: {:ok, Map.merge(observation, %{root: root, fingerprint: fingerprint})}
   end
 
   defp evaluate(invocation, root, exchanges, actor) do
@@ -181,14 +209,18 @@ defmodule SdrAgent.Agents.Witness do
          root,
          _app
        ) do
-    with true <- complete?(record),
+    with nil <- gate(record),
          {:ok, body} <- Store.blob(root, record["response_sha256"]),
          {:ok, %{"input_tokens" => tokens} = response} when is_integer(tokens) <-
            Jason.decode(body),
          true <- Map.keys(response) == ["input_tokens"] do
       result(:inferred, "ancillary", [], [])
     else
-      _ -> result(:inferred, "unclassified", ["unclassified_exchange"], warn: true)
+      reason when is_binary(reason) ->
+        result(:inferred, "unclassified", ["unclassified_exchange", reason], warn: true)
+
+      _ ->
+        result(:inferred, "unclassified", ["unclassified_exchange"], warn: true)
     end
   end
 
@@ -203,23 +235,29 @@ defmodule SdrAgent.Agents.Witness do
     do: result(:inferred, "unclassified", ["unclassified_exchange"], warn: true)
 
   defp primary(record, invocation, root, app) do
+    with nil <- gate(record),
+         {:ok, request} <- Store.blob(root, record["request_sha256"]),
+         {:ok, response} <- Store.blob(root, record["response_sha256"]) do
+      project(Projection.compare(invocation, app, request, response))
+    else
+      reason when is_binary(reason) -> result(:inferred, "primary", [reason], warn: true)
+      {:error, reason} -> result(:inferred, "primary", [blob_reason(reason)], warn: true)
+    end
+  end
+
+  defp blob_reason(reason) do
+    reason = Atom.to_string(reason)
+    if String.starts_with?(reason, "blob_"), do: reason, else: "blob_" <> reason
+  end
+
+  # Gates every terminal exchange must pass before it can count: a reviewed
+  # proxy version, no content encoding, a complete capture.
+  defp gate(record) do
     cond do
-      record["proxy_version"] not in @proxy_versions ->
-        result(:inferred, "primary", ["proxy_version_unsupported"], warn: true)
-
-      is_binary(record["response_content_encoding"]) ->
-        result(:inferred, "primary", ["content_encoding_unsupported"], warn: true)
-
-      not complete?(record) ->
-        result(:inferred, "primary", ["capture_incomplete"], warn: true)
-
-      true ->
-        with {:ok, request} <- Store.blob(root, record["request_sha256"]),
-             {:ok, response} <- Store.blob(root, record["response_sha256"]) do
-          project(Projection.compare(invocation, app, request, response))
-        else
-          {:error, reason} -> result(:inferred, "primary", ["blob_#{reason}"], warn: true)
-        end
+      record["proxy_version"] not in @proxy_versions -> "proxy_version_unsupported"
+      is_binary(record["response_content_encoding"]) -> "content_encoding_unsupported"
+      not complete?(record) -> "capture_incomplete"
+      true -> nil
     end
   end
 
@@ -277,15 +315,24 @@ defmodule SdrAgent.Agents.Witness do
   defp persist(invocation, observation, methods, actor) do
     Audit.transaction(fn ->
       with {:ok, _locked} <- lock(invocation),
+           :ok <- fresh(invocation, observation),
            {:ok, current} <- Agents.current_wire_witness_links(invocation.id, actor: actor),
            :ok <- write_links(invocation, observation, current, methods, actor),
            {:ok, links} <- Agents.current_wire_witness_links(invocation.id, actor: actor),
            :ok <- attention(invocation, links, observation.warnings, actor) do
         %{status: status(links), links: links, attention: observation.warnings}
       else
+        :stale -> %{status: :stale, links: [], attention: []}
         {:error, error} -> Repo.rollback(error)
       end
     end)
+  end
+
+  # Under the invocation lock, a metadata-only re-check (lstat of at most 64
+  # entries, no content read) that the store still holds what was observed;
+  # an older observation must not overwrite the outcome of a newer one.
+  defp fresh(invocation, %{root: root, fingerprint: fingerprint}) do
+    if Store.fingerprint(root, invocation.id) == fingerprint, do: :ok, else: :stale
   end
 
   defp lock(invocation) do
@@ -298,48 +345,59 @@ defmodule SdrAgent.Agents.Witness do
 
   defp write_links(invocation, %{error: nil, exchanges: exchanges}, current, methods, actor) do
     heads = Map.new(current, &{&1.proxy_record_ref, &1})
+    observed = MapSet.new(exchanges, & &1.exchange.record_id)
 
-    Enum.reduce_while(exchanges, :ok, fn evaluated, :ok ->
-      desired = desired_link(invocation, evaluated, methods)
+    observed_writes =
+      Enum.map(exchanges, fn evaluated ->
+        desired = desired_link(invocation, evaluated, methods)
+        {Map.get(heads, desired.proxy_record_ref), desired, "reconciliation_rerun"}
+      end)
 
-      case put_link(
-             Map.get(heads, desired.proxy_record_ref),
-             desired,
-             "reconciliation_rerun",
-             actor
-           ) do
+    # An exchange linked before but absent from the current inventory can no
+    # longer support assurance: downgrade it (mismatches are kept).
+    vanished_writes =
+      for head <- current, not MapSet.member?(observed, head.proxy_record_ref) do
+        {head, downgraded(head, "exchange_missing"), "exchange_missing"}
+      end
+
+    put_all(observed_writes ++ vanished_writes, actor)
+  end
+
+  # An unreadable inventory: downgrade every current non-mismatch link.
+  defp write_links(_invocation, %{error: reason}, current, _methods, actor) do
+    current
+    |> Enum.map(&{&1, downgraded(&1, reason), "store_unreadable"})
+    |> put_all(actor)
+  end
+
+  defp put_all(writes, actor) do
+    Enum.reduce_while(writes, :ok, fn {head, desired, reason}, :ok ->
+      case put_link(head, desired, reason, actor) do
         {:ok, _} -> {:cont, :ok}
         {:error, error} -> {:halt, {:error, error}}
       end
     end)
   end
 
-  # An unreadable inventory: downgrade every current non-mismatch link.
-  defp write_links(_invocation, %{error: reason}, current, _methods, actor) do
-    current
-    |> Enum.reject(&(&1.link_status == :mismatch))
-    |> Enum.reduce_while(:ok, fn head, :ok ->
-      desired = %{
-        model_invocation_id: head.model_invocation_id,
-        proxy_record_ref: head.proxy_record_ref,
-        proxy_request_sha256: head.proxy_request_sha256,
-        proxy_response_sha256: head.proxy_response_sha256,
-        link_status: :inferred,
-        method: head.method,
-        evidence:
-          head.evidence
-          |> Map.delete("supersede_reason")
-          |> Map.put(
-            "reason_codes",
-            Enum.take(Enum.uniq([reason | head.evidence["reason_codes"] || []]), 16)
-          )
-      }
+  defp downgraded(head, reason) do
+    evidence =
+      head.evidence
+      |> Map.delete("supersede_reason")
+      |> Map.delete("projection_version")
+      |> Map.put(
+        "reason_codes",
+        Enum.take(Enum.uniq([reason | head.evidence["reason_codes"] || []]), 16)
+      )
 
-      case put_link(head, desired, "store_unreadable", actor) do
-        {:ok, _} -> {:cont, :ok}
-        {:error, error} -> {:halt, {:error, error}}
-      end
-    end)
+    %{
+      model_invocation_id: head.model_invocation_id,
+      proxy_record_ref: head.proxy_record_ref,
+      proxy_request_sha256: head.proxy_request_sha256,
+      proxy_response_sha256: head.proxy_response_sha256,
+      link_status: :inferred,
+      method: head.method,
+      evidence: evidence
+    }
   end
 
   defp put_link(nil, desired, _reason, actor), do: Agents.link_wire_witness(desired, actor: actor)
@@ -349,8 +407,11 @@ defmodule SdrAgent.Agents.Witness do
       same?(head, desired) ->
         {:ok, :unchanged}
 
+      # C3: only an evaluated, different projection may correct a mismatch;
+      # weaker or unsupported observations (no projection) never do.
       head.link_status == :mismatch and
-          head.evidence["projection_version"] == desired.evidence["projection_version"] ->
+          (not is_binary(desired.evidence["projection_version"]) or
+             head.evidence["projection_version"] == desired.evidence["projection_version"]) ->
         {:ok, :mismatch_kept}
 
       true ->
@@ -540,10 +601,22 @@ defmodule SdrAgent.Agents.Witness do
   def enqueue(invocation_id, opts) do
     actor = Keyword.get(opts, :actor)
     generation = Keyword.get(opts, :generation, 1)
+    meta = %{resource: Operation, action: :enqueue_reconcile_model, subject_id: invocation_id}
+
+    # Through the guard, so a refused auditor mutation is audited (S2).
+    Guard.run(meta, actor, fn ->
+      with :ok <- authorize(actor),
+           :ok <- valid_generation(generation),
+           {:ok, invocation} <- reconcilable(invocation_id, actor) do
+        do_enqueue(invocation.id, generation, actor)
+      end
+    end)
+  end
+
+  defp do_enqueue(invocation_id, generation, actor) do
     key = "reconcile_model:#{invocation_id}:#{generation}"
 
-    with :ok <- authorize(actor),
-         {:ok, nil} <- find_operation(key, actor),
+    with {:ok, nil} <- find_operation(key, actor),
          {:error, error} <- insert(invocation_id, generation, key, actor) do
       recover_race(key, actor, error)
     else
@@ -551,6 +624,26 @@ defmodule SdrAgent.Agents.Witness do
       other -> other
     end
   end
+
+  @doc "Maximum reconciliation generations per invocation (initial pass + re-drives)."
+  def max_generations, do: @max_generations
+
+  defp valid_generation(generation)
+       when is_integer(generation) and generation in 1..@max_generations,
+       do: :ok
+
+  defp valid_generation(_generation), do: {:error, :invalid_generation}
+
+  # Only a terminal ClaudeCLI invocation of the actor's tenant is scheduled.
+  defp reconcilable(invocation_id, actor) when is_binary(invocation_id) do
+    with {:ok, invocation} <- GuardedCall.get(ModelInvocation, invocation_id, actor: actor) do
+      if eligible(invocation) == :ok, do: {:ok, invocation}, else: {:error, :not_reconcilable}
+    end
+  rescue
+    _invalid_id -> {:error, :not_reconcilable}
+  end
+
+  defp reconcilable(_invocation_id, _actor), do: {:error, :not_reconcilable}
 
   # A concurrent enqueue won the (tenant, idempotency_key) identity; ours
   # rolled back with its job.

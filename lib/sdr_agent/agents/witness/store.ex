@@ -16,6 +16,16 @@ defmodule SdrAgent.Agents.Witness.Store do
   records must match the strict schema-v1 key set and name their own path;
   blob bytes are re-hashed. The legacy preview namespace `<root>/sha256` is
   never read. Nothing is written, and no request header exists in the store.
+
+  Trust boundary: the store is the owner's proxy directory (0700/0600,
+  atomically published by hard link). Group- or world-writable entries are
+  refused. Reads are bounded (at most cap + 1 bytes from the opened file)
+  and the path is re-`lstat`ed afterwards: the same device/inode/size/mtime
+  must still be there. Erlang offers no `O_NOFOLLOW`, so a same-user process
+  that swaps a component between the checks and the open is outside what
+  this reader can exclude (such a process can equally alter the proxy that
+  writes the store); a directory listing is read whole before its entry cap
+  applies.
   """
 
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
@@ -66,9 +76,9 @@ defmodule SdrAgent.Agents.Witness.Store do
     with true <- Regex.match?(@hex64, digest) || {:error, :invalid_digest},
          {:ok, dir} <-
            safe_dir(root, ["witness", "sha256", binary_part(digest, 0, 2)], :blob_missing),
-         {:ok, path, size} <- regular(dir, digest <> ".json", :blob_missing),
+         {:ok, path, size, stat} <- regular(dir, digest <> ".json", :blob_missing),
          :ok <- if(size <= @max_blob_bytes, do: :ok, else: {:error, :blob_too_large}),
-         {:ok, bytes} <- read(path, :blob_missing) do
+         {:ok, bytes} <- blob_read(path, stat) do
       if :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower) == digest,
         do: {:ok, bytes},
         else: {:error, :blob_corrupt}
@@ -77,42 +87,134 @@ defmodule SdrAgent.Agents.Witness.Store do
 
   def blob(_root, _digest), do: {:error, :invalid_digest}
 
+  defp blob_read(path, stat) do
+    case read(path, stat, @max_blob_bytes, :blob_missing) do
+      {:error, :too_large} -> {:error, :blob_too_large}
+      other -> other
+    end
+  end
+
+  defp record_read(path, stat) do
+    case read(path, stat, @max_record_bytes, :record_invalid) do
+      {:error, :too_large} -> {:error, :record_too_large}
+      other -> other
+    end
+  end
+
+  @doc """
+  A metadata-only fingerprint of the invocation's inventory (entry names
+  with device, inode, size and mtime; no content read), used to detect a
+  store change between observation and persistence. Same errors as
+  `inventory/2`.
+  """
+  def fingerprint(nil, _invocation_id), do: {:error, :store_unconfigured}
+
+  def fingerprint(root, invocation_id) when is_binary(root) do
+    with :ok <- valid_uuid(invocation_id),
+         {:ok, dir} <- safe_dir(root, ["witnesses", invocation_id]),
+         {:ok, names} <- list(dir),
+         {:ok, _entries} <- classify(names) do
+      names
+      |> Enum.sort()
+      |> Enum.map(&entry_identity(dir, &1))
+      |> then(&{:ok, :erlang.phash2(&1, 4_294_967_296)})
+    end
+  end
+
+  defp entry_identity(dir, name) do
+    case File.lstat(Path.join(dir, name)) do
+      {:ok, stat} -> {name, stat.major_device, stat.inode, stat.size, stat.mtime}
+      {:error, reason} -> {name, reason}
+    end
+  end
+
   defp valid_uuid(id) when is_binary(id),
     do: if(Regex.match?(@uuid, id), do: :ok, else: {:error, :invalid_invocation_id})
 
   defp valid_uuid(_id), do: {:error, :invalid_invocation_id}
 
-  # Walks `parts` below `root`, refusing anything that is not a real directory.
+  # Walks `parts` below `root`, refusing anything that is not a real,
+  # owner-controlled directory (no symlink, not group/world-writable).
   defp safe_dir(root, parts, missing \\ :witness_missing) do
     Enum.reduce_while(parts, {:ok, root}, fn part, {:ok, dir} ->
       path = Path.join(dir, part)
 
-      case File.lstat(path) do
-        {:ok, %File.Stat{type: :directory}} -> {:cont, {:ok, path}}
-        {:ok, _other} -> {:halt, {:error, :unsafe_path}}
-        {:error, :enoent} -> {:halt, {:error, missing}}
-        {:error, _reason} -> {:halt, {:error, :unsafe_path}}
+      case dir_check(path, missing) do
+        :ok -> {:cont, {:ok, path}}
+        error -> {:halt, error}
       end
     end)
+  end
+
+  defp dir_check(path, missing) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        if writable_by_others?(stat), do: {:error, :unsafe_path}, else: :ok
+
+      {:ok, _other} ->
+        {:error, :unsafe_path}
+
+      {:error, :enoent} ->
+        {:error, missing}
+
+      {:error, _reason} ->
+        {:error, :unsafe_path}
+    end
   end
 
   defp regular(dir, name, missing) do
     path = Path.join(dir, name)
 
     case File.lstat(path) do
-      {:ok, %File.Stat{type: :regular, size: size}} -> {:ok, path, size}
-      {:ok, _other} -> {:error, :unsafe_path}
-      {:error, :enoent} -> {:error, missing}
-      {:error, _reason} -> {:error, :unsafe_path}
+      {:ok, %File.Stat{type: :regular, size: size} = stat} ->
+        if writable_by_others?(stat), do: {:error, :unsafe_path}, else: {:ok, path, size, stat}
+
+      {:ok, _other} ->
+        {:error, :unsafe_path}
+
+      {:error, :enoent} ->
+        {:error, missing}
+
+      {:error, _reason} ->
+        {:error, :unsafe_path}
     end
   end
 
-  defp read(path, missing) do
-    case File.read(path) do
-      {:ok, bytes} -> {:ok, bytes}
-      {:error, :enoent} -> {:error, missing}
-      {:error, _reason} -> {:error, :unsafe_path}
+  defp writable_by_others?(%File.Stat{mode: mode}), do: Bitwise.band(mode, 0o022) != 0
+
+  # Reads at most `max + 1` bytes from the opened file, then re-`lstat`s the
+  # path: the same regular file (device, inode, size, mtime) must still be
+  # there, so a replacement or growth between check and read is refused.
+  defp read(path, stat, max, missing) do
+    case :file.open(String.to_charlist(path), [:read, :raw, :binary]) do
+      {:ok, fd} ->
+        result = :file.read(fd, max + 1)
+        :file.close(fd)
+        verify_read(result, path, stat, max)
+
+      {:error, :enoent} ->
+        {:error, missing}
+
+      {:error, _reason} ->
+        {:error, :unsafe_path}
     end
+  end
+
+  defp verify_read({:ok, bytes}, path, stat, max) when byte_size(bytes) <= max do
+    with {:ok, %File.Stat{type: :regular} = after_read} <- File.lstat(path),
+         true <- same_file?(stat, after_read) and byte_size(bytes) == stat.size do
+      {:ok, bytes}
+    else
+      _ -> {:error, :unsafe_path}
+    end
+  end
+
+  defp verify_read(:eof, path, stat, max), do: verify_read({:ok, ""}, path, stat, max)
+  defp verify_read({:ok, _bytes}, _path, _stat, _max), do: {:error, :too_large}
+  defp verify_read(_result, _path, _stat, _max), do: {:error, :unsafe_path}
+
+  defp same_file?(a, b) do
+    {a.major_device, a.inode, a.size, a.mtime} == {b.major_device, b.inode, b.size, b.mtime}
   end
 
   defp list(dir) do
@@ -159,9 +261,9 @@ defmodule SdrAgent.Agents.Witness.Store do
   end
 
   defp read_record(dir, name, record_id, invocation_id) do
-    with {:ok, path, size} <- regular(dir, name, :record_invalid),
+    with {:ok, path, size, stat} <- regular(dir, name, :record_invalid),
          :ok <- if(size <= @max_record_bytes, do: :ok, else: {:error, :record_too_large}),
-         {:ok, bytes} <- read(path, :record_invalid),
+         {:ok, bytes} <- record_read(path, stat),
          {:ok, record} when is_map(record) <- decode(bytes),
          :ok <- valid_record(record, record_id, invocation_id) do
       {:ok, record}
