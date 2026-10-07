@@ -11,9 +11,8 @@ defmodule SdrAgent.Agents.Witness.StoreTest do
   unless Code.ensure_loaded?(SdrAgent.Test.FakeWitnessProxy),
     do: Code.require_file("../../../support/fake_witness_proxy.exs", __DIR__)
 
+  alias SdrAgent.Agents.Witness.Store
   alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
-
-  @store SdrAgent.Agents.Witness.Store
 
   setup do
     root = Path.join(System.tmp_dir!(), "sdr-witness-store-#{System.unique_integer([:positive])}")
@@ -129,7 +128,7 @@ defmodule SdrAgent.Agents.Witness.StoreTest do
   end
 
   test "an over-limit blob and non-regular entries are refused", %{root: root, id: id} do
-    max = call(:max_blob_bytes, [])
+    max = Store.max_blob_bytes()
     assert is_integer(max) and max > 0
     body = String.duplicate("x", max + 1)
     digest = Proxy.blob!(root, body)
@@ -166,13 +165,6 @@ defmodule SdrAgent.Agents.Witness.StoreTest do
     |> Enum.sort()
   end
 
-  # A missing S12c interface fails the scenario's own assertion.
-  defp inventory(root, id), do: call(:inventory, [root, id])
-  defp blob(root, digest), do: call(:blob, [root, digest])
-
-  defp call(function, args) do
-    if Code.ensure_loaded?(@store) and function_exported?(@store, function, length(args)),
-      do: apply(@store, function, args),
-      else: {:error, {:not_implemented, function}}
-  end
+  defp inventory(root, id), do: Store.inventory(root, id)
+  defp blob(root, digest), do: Store.blob(root, digest)
 end

@@ -14,10 +14,10 @@ defmodule SdrAgent.Agents.Witness.ProjectionTest do
   unless Code.ensure_loaded?(SdrAgent.Test.FakeWitnessProxy),
     do: Code.require_file("../../../support/fake_witness_proxy.exs", __DIR__)
 
+  alias SdrAgent.Agents.Witness.Projection
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
 
-  @projection SdrAgent.Agents.Witness.Projection
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()}, coerce: true)
   @prompt "Qualify the fixture lead"
   @answer ~s({"answer":"qualified","score":42})
@@ -149,22 +149,9 @@ defmodule SdrAgent.Agents.Witness.ProjectionTest do
     ])
   end
 
-  # A missing S12c interface fails the scenario's own assertion.
   defp compare(ctx, request, response),
-    do: call(@projection, :compare, [ctx.invocation, ctx.app, request, response])
+    do: Projection.compare(ctx.invocation, ctx.app, request, response)
 
-  defp version, do: call(@projection, :version, []) |> then(&if(is_binary(&1), do: &1, else: ""))
-
-  defp render(prompt, schema) do
-    case call(ClaudeCLI, :render_prompt, [prompt, schema]) do
-      text when is_binary(text) -> text
-      _ -> prompt
-    end
-  end
-
-  defp call(module, function, args) do
-    if Code.ensure_loaded?(module) and function_exported?(module, function, length(args)),
-      do: apply(module, function, args),
-      else: {:error, {:not_implemented, function}}
-  end
+  defp version, do: Projection.version()
+  defp render(prompt, schema), do: ClaudeCLI.render_prompt(prompt, schema)
 end

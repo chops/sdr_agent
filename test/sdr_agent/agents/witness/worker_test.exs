@@ -158,7 +158,11 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
       end
 
       assert {:ok, ops} = reconcile_operations(ctx, invocation)
-      assert length(ops) in 2..6
+      assert length(ops) == 4
+      jobs = length(all_enqueued(worker: @reconcile_worker))
+      SdrAgent.Clock.freeze(DateTime.add(ctx.start, 600, :minute))
+      assert :ok = perform(@scan_worker, %{})
+      assert length(all_enqueued(worker: @reconcile_worker)) == jobs
       assert [_one_warning] = live_attention(ctx, invocation)
     end
 
@@ -230,15 +234,20 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
   end
 
   defp enqueue(invocation, actor) do
-    if Code.ensure_loaded?(@witness) and function_exported?(@witness, :enqueue, 2),
-      do: @witness.enqueue(invocation.id, actor: actor),
-      else: {:error, {:not_implemented, :enqueue}}
+    @witness.enqueue(invocation.id, actor: actor)
   end
 
+  # Runs `worker` on the enqueued job `id` (its real Oban.Job, so the worker
+  # finds the Operation written with it) at `attempt`, or on bare `args`.
   defp perform(worker, args, opts \\ []) do
-    if Code.ensure_loaded?(worker),
-      do: perform_job(worker, args, opts),
-      else: {:error, {:not_implemented, worker}}
+    case Keyword.fetch(opts, :id) do
+      {:ok, id} ->
+        job = Repo.get!(Oban.Job, id)
+        worker.perform(%{job | attempt: Keyword.get(opts, :attempt, 1)})
+
+      :error ->
+        perform_job(worker, args, opts)
+    end
   end
 
   defp restore(nil), do: Application.delete_env(:sdr_agent, @witness)

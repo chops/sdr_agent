@@ -20,6 +20,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
 
   alias Ecto.Adapters.SQL
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Witness
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
@@ -27,7 +28,6 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   alias SdrAgent.Telemetry.InMemoryExporter
   alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
 
-  @witness SdrAgent.Agents.Witness
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()}, coerce: true)
   @fake Path.expand("../../../support/fake_claude_cli.exs", __DIR__)
   @test_only_allowlist [:propagated_id]
@@ -49,7 +49,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   end
 
   test "the runtime reconciled-method allowlist ships empty (R3)" do
-    config = Application.get_env(:sdr_agent, @witness, [])
+    config = Application.get_env(:sdr_agent, Witness, [])
     assert Keyword.get(config, :reconciled_methods, []) == []
   end
 
@@ -169,7 +169,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     invocation = call_model!(ctx, "ok")
 
     assert {:ok, %{status: :skipped}} =
-             call(@witness, :reconcile, [invocation.id, [actor: ctx.rec, store_root: nil]])
+             Witness.reconcile(invocation.id, actor: ctx.rec, store_root: nil)
 
     assert attention(ctx) == []
   end
@@ -179,7 +179,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
 
     for actor <- [ctx.agent, human(:admin, ctx.tenant), human(:auditor, ctx.tenant)] do
       assert {:error, %Ash.Error.Forbidden{}} =
-               call(@witness, :reconcile, [invocation.id, [actor: actor, store_root: ctx.root]])
+               Witness.reconcile(invocation.id, actor: actor, store_root: ctx.root)
     end
 
     assert {:ok, _} = reconcile(ctx, invocation)
@@ -292,11 +292,11 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
 
   test "outside tests the method allowlist cannot be overridden per call", ctx do
     invocation = call_model!(ctx, "ok")
-    previous = Application.get_env(:sdr_agent, @witness, [])
+    previous = Application.get_env(:sdr_agent, Witness, [])
 
     Application.put_env(
       :sdr_agent,
-      @witness,
+      Witness,
       Keyword.put(previous, :allow_method_override, false)
     )
 
@@ -304,7 +304,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
       assert {:error, :method_override_forbidden} =
                reconcile(ctx, invocation, @test_only_allowlist)
     after
-      Application.put_env(:sdr_agent, @witness, previous)
+      Application.put_env(:sdr_agent, Witness, previous)
     end
 
     assert {:ok, []} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
@@ -324,20 +324,14 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
         "FOR EACH ROW EXECUTE FUNCTION s12c_refuse_failure()"
     )
 
-    assert {:error, error} = reconcile(ctx, invocation)
-    refute match?({:not_implemented, _}, error)
+    assert {:error, _failure_store_error} = reconcile(ctx, invocation)
     assert {:ok, []} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
     assert events_of_type(ctx.tenant, "agents.witness.linked") == []
   end
 
   ## Helpers
 
-  defp max_blob do
-    case call(SdrAgent.Agents.Witness.Store, :max_blob_bytes, []) do
-      max when is_integer(max) -> max
-      _ -> 8_388_608
-    end
-  end
+  defp max_blob, do: Witness.Store.max_blob_bytes()
 
   defp terminal_record_paths(root, invocation) do
     Path.join([root, "witnesses", invocation.id, "*.json"])
@@ -396,11 +390,10 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   defp reconcile(ctx, invocation, methods \\ nil) do
     opts = [actor: ctx.rec, store_root: ctx.root]
     opts = if methods, do: Keyword.put(opts, :methods, methods), else: opts
-    call(@witness, :reconcile, [invocation.id, opts])
+    Witness.reconcile(invocation.id, opts)
   end
 
-  defp status(invocation, actor),
-    do: call(Agents, :witness_status, [invocation.id, [actor: actor]])
+  defp status(invocation, actor), do: Agents.witness_status(invocation.id, actor: actor)
 
   defp attention(ctx, invocation \\ nil) do
     {:ok, failures} = Operations.list_attention(actor: human(:admin, ctx.tenant))
@@ -409,12 +402,5 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
       failure.class == :reconciliation_required and
         (is_nil(invocation) or failure.subject_id == invocation.id)
     end)
-  end
-
-  # A missing S12c interface fails the scenario's own assertion.
-  defp call(module, function, args) do
-    if Code.ensure_loaded?(module) and function_exported?(module, function, length(args)),
-      do: apply(module, function, args),
-      else: {:error, {:not_implemented, function}}
   end
 end

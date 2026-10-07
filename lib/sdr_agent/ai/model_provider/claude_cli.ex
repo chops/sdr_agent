@@ -41,6 +41,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   @model_alias "opus"
   @resolved_model "claude-opus-5-5"
   @reviewed_version "2.1.291"
+  # Versioned stdin prompt builder (S12 P1): any change to `render_prompt/2`
+  # must bump this, so the wire-witness projection never re-derives a
+  # historical invocation's prompt with different code.
+  @prompt_builder "prompt-builder/1"
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
@@ -53,6 +57,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       model_catalog_entry: %{
         "alias" => @model_alias,
         "resolved_id" => @resolved_model,
+        "prompt_builder" => @prompt_builder,
         "reviewed_launch_config" => %{
           "tools" => [],
           "mcp_servers" => [],
@@ -64,6 +69,32 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       account_mode_ref: "claude:cached-local-login",
       data_control_setting: "personal-local-subscription"
     }
+  end
+
+  @doc "The prompt-builder version recorded in the provenance of every call."
+  def prompt_builder, do: @prompt_builder
+
+  @doc """
+  The exact stdin text of a call (builder `prompt-builder/1`): the prompt,
+  the fixed instruction and the JSON schema in `sdr-canonical-json/1`
+  (sorted keys), so a schema decoded from the stored request re-renders
+  byte-identically.
+  """
+  def render_prompt(prompt, json_schema) when is_binary(prompt) and is_map(json_schema) do
+    prompt <>
+      "\nReturn only one JSON object matching this schema:\n" <>
+      SdrAgent.Audit.Canonical.encode!(json_schema)
+  end
+
+  @doc """
+  Unwraps a result consisting of exactly one Markdown code fence (optionally
+  `json`); any other text is returned unchanged.
+  """
+  def unfence(result) when is_binary(result) do
+    case Regex.run(~r/\A\s*```(?:json)?\s*\n(.*)\n\s*```\s*\z/s, result, capture: :all_but_first) do
+      [inner] -> inner
+      nil -> result
+    end
   end
 
   @impl true
@@ -140,10 +171,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     workspace = private_workspace!()
     prompt_path = Path.join(workspace, "prompt")
 
-    prompt =
-      request.prompt <>
-        "\nReturn only one JSON object matching this schema:\n" <>
-        Jason.encode!(Zoi.to_json_schema(request.schema))
+    prompt = render_prompt(request.prompt, Zoi.to_json_schema(request.schema))
 
     File.write!(prompt_path, prompt, [:binary])
     File.chmod!(prompt_path, 0o600)
@@ -259,16 +287,6 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
        }}
     else
       _ -> {:error, :missing_structured_output}
-    end
-  end
-
-  # The model sometimes wraps its single JSON object in one Markdown code
-  # fence; only that exact shape is unwrapped — any other text around the
-  # object still fails, and Zoi validates the object either way.
-  defp unfence(result) do
-    case Regex.run(~r/\A\s*```(?:json)?\s*\n(.*)\n\s*```\s*\z/s, result, capture: :all_but_first) do
-      [inner] -> inner
-      nil -> result
     end
   end
 

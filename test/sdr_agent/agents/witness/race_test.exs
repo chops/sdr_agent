@@ -13,10 +13,10 @@ defmodule SdrAgent.Agents.Witness.RaceTest do
   alias Ecto.Adapters.SQL
   alias Ecto.Adapters.SQL.Sandbox
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Witness
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit
 
-  @witness SdrAgent.Agents.Witness
   @tables ~w(oban_jobs wire_witness_links anchor_sink_receipts audit_exports audit_anchors
              audit_signing_keys audit_accesses audit_events audit_chain_heads retention_markers
              decisions tool_invocations model_invocations agent_runs failures operations
@@ -52,7 +52,7 @@ defmodule SdrAgent.Agents.Witness.RaceTest do
   end
 
   test "concurrent duplicate enqueues create one job and one Operation", ctx do
-    results = race(8, fn -> call(:enqueue, [ctx.invocation.id, [actor: ctx.rec]]) end)
+    results = race(8, fn -> Witness.enqueue(ctx.invocation.id, actor: ctx.rec) end)
     assert Enum.all?(results, &match?({:ok, _}, &1)), inspect(results)
     assert results |> Enum.map(fn {:ok, op} -> op.id end) |> Enum.uniq() |> length() == 1
 
@@ -65,7 +65,7 @@ defmodule SdrAgent.Agents.Witness.RaceTest do
   test "concurrent reconciliations of a missing witness open one live condition", ctx do
     results =
       race(4, fn ->
-        call(:reconcile, [ctx.invocation.id, [actor: ctx.rec, store_root: ctx.root]])
+        Witness.reconcile(ctx.invocation.id, actor: ctx.rec, store_root: ctx.root)
       end)
 
     assert Enum.all?(results, &match?({:ok, %{status: :unwitnessed}}, &1)), inspect(results)
@@ -83,13 +83,6 @@ defmodule SdrAgent.Agents.Witness.RaceTest do
     1..n
     |> Enum.map(fn _ -> Task.async(fn -> with_connection(fun) end) end)
     |> Task.await_many(60_000)
-  end
-
-  # A missing S12c interface fails the scenario's own assertion.
-  defp call(function, args) do
-    if Code.ensure_loaded?(@witness) and function_exported?(@witness, function, length(args)),
-      do: apply(@witness, function, args),
-      else: {:error, {:not_implemented, function}}
   end
 
   defp with_connection(fun) do
