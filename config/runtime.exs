@@ -20,8 +20,16 @@ if System.get_env("PHX_SERVER") do
   config :sdr_agent, SdrAgentWeb.Endpoint, server: true
 end
 
-config :sdr_agent, SdrAgentWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+# PORT overrides the HTTP port in every environment. Without it, dev and test
+# keep the ports their config files set (dev: the project's Phoenix port 4120,
+# .workflow/project-facts.md) and production listens on 4000.
+case System.get_env("PORT") do
+  nil ->
+    if config_env() == :prod, do: config(:sdr_agent, SdrAgentWeb.Endpoint, http: [port: 4000])
+
+  port ->
+    config :sdr_agent, SdrAgentWeb.Endpoint, http: [port: String.to_integer(port)]
+end
 
 config :sdr_agent,
        :audit_tools_wrapper,
