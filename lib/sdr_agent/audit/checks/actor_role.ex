@@ -3,8 +3,8 @@ defmodule SdrAgent.Audit.Checks.ActorRole do
   Policy check: the actor is a human operator (not an `SdrAgent.Actor`)
   whose `role` is one of `roles`.
 
-  Reads `actor.role` from any map, so it applies unchanged to
-  `SdrAgent.Accounts.User` once S5 adds the role attribute.
+  Reads `actor.role` (`:admin`, `:reviewer`, `:auditor`) from the actor, an
+  `SdrAgent.Accounts.User`.
   """
   use Ash.Policy.SimpleCheck
 

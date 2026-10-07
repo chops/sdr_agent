@@ -8,9 +8,16 @@ defmodule SdrAgent.Audit.Changes.Transition do
   struct or a concurrent writer cannot double-transition; the failure is an
   `Ash.Error.Invalid`.
 
+  With `locked?: true` (for `require_atomic? false` actions that start with
+  `change get_and_lock_for_update()`), the from-state is checked in a
+  `before_action` hook against the row re-read under `FOR UPDATE`, so the
+  check and the recorded from-state (`AppendEvent` `:previous`) are exact
+  even for a stale struct.
+
   Options: `:from` (list of states), `:to` (state), `:attribute` (default
-  `:status`). Each resource declares its transition table as data and a test
-  compares it with the actions that use this change.
+  `:status`), `:locked?` (default false). Each resource declares its
+  transition table as data and a test compares it with the actions that use
+  this change.
   """
   use Ash.Resource.Change
 
@@ -29,6 +36,12 @@ defmodule SdrAgent.Audit.Changes.Transition do
 
   @impl true
   def change(changeset, opts, _context) do
+    if opts[:locked?],
+      do: Ash.Changeset.before_action(changeset, &check(&1, opts)),
+      else: check(changeset, opts)
+  end
+
+  defp check(changeset, opts) do
     attribute = opts[:attribute]
     current = Map.get(changeset.data, attribute)
 
@@ -41,6 +54,12 @@ defmodule SdrAgent.Audit.Changes.Transition do
 
   @impl true
   def atomic(_changeset, opts, _context) do
+    if opts[:locked?],
+      do: {:not_atomic, "locked transitions run on the re-read row"},
+      else: atomic_guard(opts)
+  end
+
+  defp atomic_guard(opts) do
     attribute = opts[:attribute]
     from = opts[:from]
     to = opts[:to]

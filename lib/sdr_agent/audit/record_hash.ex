@@ -4,7 +4,7 @@ defmodule SdrAgent.Audit.RecordHash do
 
   The hash covers every attribute of the resource, encoded with
   `SdrAgent.Audit.Canonical`; binary attributes are written as lowercase
-  hex. Each audit event of an audited write carries this hash of the row
+  hex and case-insensitive strings as their stored text. Each audit event of an audited write carries this hash of the row
   after the write, so the verifier can detect a row edited outside the
   application by recomputing it.
   """
@@ -21,6 +21,15 @@ defmodule SdrAgent.Audit.RecordHash do
     end)
   end
 
+  @doc "Canonical form of one attribute value of `resource` (as in `canonical_map/1`)."
+  @spec attribute_value(module(), atom(), term()) :: term()
+  def attribute_value(resource, name, value) do
+    case Ash.Resource.Info.attribute(resource, name) do
+      nil -> value
+      attribute -> value(attribute.type, value)
+    end
+  end
+
   @doc "SHA-256 of the record's canonical encoding."
   @spec sha256(Ash.Resource.record()) :: binary()
   def sha256(record), do: record |> canonical_map() |> Canonical.sha256()
@@ -30,5 +39,6 @@ defmodule SdrAgent.Audit.RecordHash do
   def hex(record), do: record |> sha256() |> Base.encode16(case: :lower)
 
   defp value(Ash.Type.Binary, bin) when is_binary(bin), do: Base.encode16(bin, case: :lower)
+  defp value(Ash.Type.CiString, %Ash.CiString{} = string), do: to_string(string)
   defp value(_type, value), do: value
 end
