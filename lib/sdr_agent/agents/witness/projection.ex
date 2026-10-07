@@ -445,15 +445,18 @@ defmodule SdrAgent.Agents.Witness.Projection do
         byte_size(text) >= byte_size(@reminder_open) + byte_size(@reminder_close)
 
   defp trailing_messages(messages) do
+    # Shape and cardinality are checked before any sizing, so malformed wire
+    # data is unsupported rather than an exception.
     Enum.reduce_while(Enum.with_index(messages, 1), {:ok, []}, fn {%{"content" => blocks}, index},
                                                                   {:ok, acc} ->
-      bytes =
-        blocks |> Enum.map(&(Map.get(&1, "text") || "")) |> Enum.map(&byte_size/1) |> Enum.sum()
-
-      if length(blocks) in 1..@max_trailing_blocks and Enum.all?(blocks, &system_block?/1) and
-           bytes <= @max_trailing_bytes,
-         do: {:cont, {:ok, acc ++ [{index, blocks, bytes}]}},
-         else: {:halt, {:unsupported, "request_trailing_unsupported"}}
+      with true <- length(blocks) in 1..@max_trailing_blocks,
+           true <- Enum.all?(blocks, &system_block?/1),
+           bytes = blocks |> Enum.map(&byte_size(&1["text"])) |> Enum.sum(),
+           true <- bytes <= @max_trailing_bytes do
+        {:cont, {:ok, acc ++ [{index, blocks, bytes}]}}
+      else
+        _ -> {:halt, {:unsupported, "request_trailing_unsupported"}}
+      end
     end)
   end
 

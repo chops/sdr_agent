@@ -312,8 +312,9 @@ defmodule SdrAgent.Agents.Witness do
 
   # v2 (the observed CLI request shape) first; a request outside its grammar
   # falls back to v1. The v2 context group is validated as a whole: a
-  # contract failure is a conservative fallback without any projection (so it
-  # never corrects a mismatch), never a proof with dropped fields.
+  # contract failure (incomplete, extra or invalid keys) is a conservative
+  # fallback without any projection (so it never corrects a mismatch), never
+  # a proof with dropped fields.
   defp v2(invocation, app, {request, response}, tamper) do
     case Projection.compare_v2(invocation, app, request, response) do
       {:unsupported, _proof} ->
@@ -322,19 +323,18 @@ defmodule SdrAgent.Agents.Witness do
       {verdict, proof} ->
         extras = tamper.(proof.extras)
 
-        case WitnessEvidence.validate(extras || %{}) do
-          {:ok, extras} when extras != %{} ->
-            evaluated = project({verdict, proof})
+        with true <- WitnessEvidence.exact_context_group?(extras),
+             {:ok, extras} <- WitnessEvidence.validate(extras) do
+          evaluated = project({verdict, proof})
 
-            %{
-              evaluated
-              | projection: Projection.version_v2(),
-                extras: extras,
-                reasons: Enum.uniq(evaluated.reasons ++ proof.reasons)
-            }
-
-          _invalid ->
-            result(:inferred, "primary", ["evidence_contract_invalid"], warn: true)
+          %{
+            evaluated
+            | projection: Projection.version_v2(),
+              extras: extras,
+              reasons: Enum.uniq(evaluated.reasons ++ proof.reasons)
+          }
+        else
+          _invalid -> result(:inferred, "primary", ["evidence_contract_invalid"], warn: true)
         end
     end
   end

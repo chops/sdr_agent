@@ -129,8 +129,36 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     end)
   end
 
+  # Projection versions whose evidence is a claim over the CLI context: a
+  # link under one of them must carry the complete context group.
+  @group_versions ["claude-message-json/2+prompt-builder/1"]
+
   @doc "The S12d v2 context-group keys (all present together or none)."
   def context_group, do: @group
+
+  @doc """
+  True when `extras` is exactly the complete context group: every group key
+  and no other key, so a derived group can neither be partial nor overwrite
+  base evidence when merged.
+  """
+  def exact_context_group?(extras) when is_map(extras),
+    do: Enum.sort(Map.keys(extras)) == Enum.sort(@group)
+
+  def exact_context_group?(_extras), do: false
+
+  @doc """
+  Claim-boundary rule for a full link's (normalized) evidence: a
+  `projection_version` that records CLI context requires its complete
+  context group. Other evidence, v1 included, is unaffected.
+  """
+  def validate_claim(%{"projection_version" => version} = evidence)
+      when version in @group_versions do
+    if Enum.all?(@group, &Map.has_key?(evidence, &1)),
+      do: :ok,
+      else: {:error, "#{version} evidence requires its complete context group"}
+  end
+
+  def validate_claim(_evidence), do: :ok
 
   # All-or-none; counts equal their list lengths; field codes are unique,
   # in the fixed order, and `_null` only after its `_present`.
