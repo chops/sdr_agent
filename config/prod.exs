@@ -22,7 +22,10 @@ config :sdr_agent, SdrAgentWeb.Endpoint,
   ]
 
 # Configure Swoosh API Client
-config :swoosh, api_client: Swoosh.ApiClient.Req
+# No HTTP mail client in any environment (ADR-0001: no delivery path that
+# can reach a real recipient; S8 asserts it). Outreach delivers only through
+# the local capture adapter.
+config :swoosh, api_client: false
 
 # Disable Swoosh Local Memory Storage
 config :swoosh, local: false

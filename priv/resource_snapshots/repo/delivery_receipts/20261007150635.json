@@ -1,0 +1,297 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "idempotency_key",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "kind",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "provider",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "provider_message_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "rendered_sha256",
+      "type": "binary"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "response_sha256",
+      "type": "binary"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "received_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "delivery_receipts_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "delivery_receipts_delivery_operation_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "delivery_operations"
+      },
+      "scale": null,
+      "size": null,
+      "source": "delivery_operation_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "delivery_receipts_trace_ids"
+    },
+    {
+      "attribute": [
+        "kind"
+      ],
+      "base_filter": null,
+      "check": "kind IN ('captured', 'accepted', 'delivered', 'bounced', 'reconciled')",
+      "name": "delivery_receipts_kind"
+    },
+    {
+      "attribute": [
+        "provider"
+      ],
+      "base_filter": null,
+      "check": "provider IN ('capture')",
+      "name": "delivery_receipts_capture_only"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION delivery_receipts_append_only()",
+      "global?": false,
+      "name": "delivery_receipts_guard_function",
+      "up": "CREATE FUNCTION delivery_receipts_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER delivery_receipts_guard_row ON delivery_receipts",
+      "global?": false,
+      "name": "delivery_receipts_guard_row",
+      "up": "CREATE TRIGGER delivery_receipts_guard_row BEFORE UPDATE OR DELETE ON delivery_receipts FOR EACH ROW EXECUTE FUNCTION delivery_receipts_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER delivery_receipts_guard_truncate ON delivery_receipts",
+      "global?": false,
+      "name": "delivery_receipts_guard_truncate",
+      "up": "CREATE TRIGGER delivery_receipts_guard_truncate BEFORE TRUNCATE ON delivery_receipts FOR EACH STATEMENT EXECUTE FUNCTION delivery_receipts_append_only()"
+    },
+    {
+      "after_tables": [
+        "payloads"
+      ],
+      "code?": false,
+      "down": "ALTER TABLE delivery_receipts DROP CONSTRAINT delivery_receipts_rendered_sha256_payload_fkey",
+      "global?": false,
+      "name": "delivery_receipts_rendered_sha256_payload_fkey",
+      "up": "ALTER TABLE delivery_receipts ADD CONSTRAINT delivery_receipts_rendered_sha256_payload_fkey FOREIGN KEY (tenant_id, rendered_sha256) REFERENCES payloads (tenant_id, sha256) ON DELETE RESTRICT"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "F67ECD820DC21DB39375DF39B7B45B7AA85D7FA5BAD448EFC625D0063D852DF2",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "delivery_receipts_unique_kind_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "delivery_operation_id"
+        },
+        {
+          "type": "atom",
+          "value": "kind"
+        }
+      ],
+      "name": "unique_kind",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "delivery_receipts"
+}

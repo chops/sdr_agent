@@ -6,6 +6,9 @@ graph TB
         RevisionCitation[RevisionCitation]
         Approval[Approval]
         Suppression[Suppression]
+        DeliveryOperation[DeliveryOperation]
+        DeliveryReceipt[DeliveryReceipt]
+        SendQuotaDay[SendQuotaDay]
     end
     subgraph Research["Research Domain"]
         ResearchArtifact[ResearchArtifact]
@@ -125,6 +128,15 @@ graph TB
     Suppression -. created_by / decision FK .-> User
     Outreach -. tenant_id FK .-> Tenant
     Outreach == "AppendEvent (outreach.*)" ==> Kernel
+    Approval -- "grant inserts outbox row (same transaction)" --> DeliveryOperation
+    DeliveryOperation --> DeliveryReceipt
+    DeliveryOperation -. send_quota_date (first claim) .-> SendQuotaDay
+    DeliveryOperation -. rendered sha256 FK .-> Payload
+    DeliveryReceipt -. rendered sha256 FK .-> Payload
+    DeliveryOperation -. last_decision_id FK (send_gate) .-> Decision
+    DeliveryOperation -. attention_failure_id FK (same transaction) .-> Failure
+    DeliveryOperation -. advance_step on acceptance .-> CampaignEnrollment
+    Suppression -. delivery_operation_id FK; cancels unclaimed deliveries .-> DeliveryOperation
 
 
     %% Project shape: single

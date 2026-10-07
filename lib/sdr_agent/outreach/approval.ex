@@ -18,11 +18,17 @@ defmodule SdrAgent.Outreach.Approval do
       revision with the exact content hash the reviewer saw, while the draft
       is pending review, for an active, unsuppressed contact of an open
       campaign; the approver may have authored the revision (recorded).
-      The grant moves the draft to `queued` in the same transaction;
+      The grant moves the draft to `queued` and inserts the pending
+      DeliveryOperation and its delivery job (outbox) in the same
+      transaction;
     * `:reject` (ADM, REV; guarded) — a rejected verdict with a reason;
       the draft → rejected (T);
-    * `:revoke` (ADM, REV; guarded) — granted → revoked (T); the draft
-      returns to pending review;
+    * `:revoke` (ADM, REV; guarded) — granted → revoked (T), only while its
+      delivery is still pending (the delivery is cancelled first); the draft
+      returns to pending review. After the claim the approval is consumed
+      and only the delivery can be stopped (`cancel_retry`);
+    * `:consume` (DLV) — granted → consumed (T), in the delivery's first
+      claim;
     * `:invalidate` (inside another Outreach action only, e.g. a
       suppression) — granted → invalidated (T) with a reason.
 
@@ -50,6 +56,7 @@ defmodule SdrAgent.Outreach.Approval do
   @statuses [:granted, :consumed, :rejected, :revoked, :invalidated]
   @invalidated_reasons [:newer_revision, :recipient_changed, :suppressed, :campaign_closed]
   @transitions [
+    {:consume, [:granted], :consumed},
     {:revoke, [:granted], :revoked},
     {:invalidate, [:granted], :invalidated}
   ]
@@ -124,6 +131,7 @@ defmodule SdrAgent.Outreach.Approval do
               event_type: "outreach.approval.granted", category: :domain_change, arguments: @bound}
 
       change {Changes.MoveDraft, action: :queue}
+      change Changes.RequestDelivery
     end
 
     create :reject do
@@ -151,12 +159,21 @@ defmodule SdrAgent.Outreach.Approval do
       description "ADM, REV: granted → revoked (T); the draft returns to review."
       require_atomic? false
       change Changes.LockDraftFirst
+      change Changes.CancelPendingDelivery
       change get_and_lock_for_update()
       change {Transition, from: [:granted], to: :revoked, locked?: true}
       change {Stamp, fields: [:revoked_at]}
       change {Changes.ActorUser, field: :revoked_by_id}
       change {AppendEvent, [event_type: "outreach.approval.revoked"] ++ @event}
       change {Changes.MoveDraft, action: :unqueue}
+    end
+
+    update :consume do
+      description "DLV, in the delivery's first claim: granted → consumed (T)."
+      require_atomic? false
+      change get_and_lock_for_update()
+      change {Transition, from: [:granted], to: :consumed, locked?: true}
+      change {AppendEvent, [event_type: "outreach.approval.consumed"] ++ @event}
     end
 
     update :invalidate do
@@ -182,6 +199,10 @@ defmodule SdrAgent.Outreach.Approval do
 
     policy action(:invalidate) do
       authorize_if InternalWrite
+    end
+
+    policy action(:consume) do
+      authorize_if {Checks.ActorType, types: [:delivery_worker]}
     end
 
     policy action_type(:read) do

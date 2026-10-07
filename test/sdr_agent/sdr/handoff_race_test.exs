@@ -23,7 +23,8 @@ defmodule SdrAgent.SDR.HandoffRaceTest do
   alias SdrAgent.SDR.AgentWorker
   alias SdrAgent.SDR.FakeBrain
 
-  @tables ~w(oban_jobs anchor_sink_receipts audit_exports audit_anchors audit_signing_keys
+  @tables ~w(oban_jobs delivery_receipts delivery_operations send_quota_days approvals
+             revision_citations draft_revisions drafts suppressions anchor_sink_receipts audit_exports audit_anchors audit_signing_keys
              audit_accesses audit_events audit_chain_heads retention_markers
              qualification_evidences qualifications evidence_claims research_artifacts
              campaign_enrollments leads campaigns sequence_steps sequences contacts accounts

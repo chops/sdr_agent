@@ -333,7 +333,9 @@ defmodule SdrAgent.Sales.LeadTest do
                  {:pause, [:active], :paused},
                  {:resume, [:paused], :active},
                  {:mark_replied, [:active, :paused], :replied},
-                 {:stop, [:active, :paused], :stopped}
+                 {:stop, [:active, :paused], :stopped},
+                 # S8: the last accepted step completes the enrollment.
+                 {:complete, [:active], :completed}
                ])
     end
 

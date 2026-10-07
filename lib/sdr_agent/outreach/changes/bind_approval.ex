@@ -2,7 +2,9 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
   @moduledoc """
   Approval `:approve` / `:reject`: binds the verdict to exactly what the
   reviewer saw (S2 Approval; S8 choice 2), in a `before_action` hook with the
-  draft locked `FOR UPDATE` (lock order draft → chain head):
+  draft locked `FOR UPDATE` and its enrollment, campaign and contact
+  `FOR SHARE` (lock order enrollment → draft → campaign → contact → chain
+  head):
 
     * the approver is an active operator (the policy admits only ADM/REV);
     * the draft is `pending_review` and its *current* revision is the
@@ -28,6 +30,7 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
   alias SdrAgent.Outreach.DraftRevision
   alias SdrAgent.Outreach.Suppression
   alias SdrAgent.Sales.Campaign
+  alias SdrAgent.Sales.CampaignEnrollment
   alias SdrAgent.Sales.Contact
 
   @impl true
@@ -36,10 +39,18 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
 
   defp bind(changeset, verdict, actor) do
     tenant_id = Ash.Changeset.get_attribute(changeset, :tenant_id)
-    draft = lock(Draft, tenant_id, Ash.Changeset.get_attribute(changeset, :draft_id), :for_update)
+    draft_id = Ash.Changeset.get_attribute(changeset, :draft_id)
+    # Lock order (review #14 MF1): enrollment → draft → campaign → contact,
+    # all before the first append — the grant's outbox row references the
+    # enrollment, campaign and contact, so none of them may be waited for
+    # under the chain head. The draft's references never change, so an
+    # unlocked peek names the rows to lock.
+    peek = read(Draft, draft_id)
+    _enrollment = peek && lock(CampaignEnrollment, tenant_id, peek.enrollment_id, "FOR SHARE")
+    draft = peek && lock(Draft, tenant_id, draft_id, :for_update)
     revision = draft && read(DraftRevision, draft.current_revision_id)
+    campaign = draft && lock(Campaign, tenant_id, draft.campaign_id, "FOR SHARE")
     contact = draft && lock(Contact, tenant_id, draft.recipient_contact_id, "FOR SHARE")
-    campaign = draft && read(Campaign, draft.campaign_id)
 
     case refusal(changeset, verdict, actor, draft, revision, contact, campaign) do
       nil -> set(changeset, verdict, actor, draft, revision, contact)
@@ -142,6 +153,8 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
     |> Ash.Query.lock(lock)
     |> Ash.read_one!(authorize?: false)
   end
+
+  defp read(_resource, nil), do: nil
 
   defp read(resource, id),
     do: resource |> Ash.Query.filter(id == ^id) |> Ash.read_one!(authorize?: false)

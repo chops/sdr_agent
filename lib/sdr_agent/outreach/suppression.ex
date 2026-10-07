@@ -45,6 +45,7 @@ defmodule SdrAgent.Outreach.Suppression do
       reference :tenant, on_delete: :restrict
       reference :created_by, on_delete: :restrict
       reference :decision, on_delete: :restrict
+      reference :delivery_operation, on_delete: :restrict
     end
 
     check_constraints do
@@ -175,8 +176,6 @@ defmodule SdrAgent.Outreach.Suppression do
       public? true
     end
 
-    attribute :delivery_operation_id, :uuid, public?: true
-
     attribute :effective_at, :utc_datetime_usec do
       allow_nil? false
       writable? false
@@ -208,6 +207,11 @@ defmodule SdrAgent.Outreach.Suppression do
     end
 
     belongs_to :decision, SdrAgent.Agents.Decision do
+      attribute_writable? false
+      public? true
+    end
+
+    belongs_to :delivery_operation, SdrAgent.Outreach.DeliveryOperation do
       attribute_writable? false
       public? true
     end

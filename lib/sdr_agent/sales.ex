@@ -21,6 +21,7 @@ defmodule SdrAgent.Sales do
     * seeding (SEED, dev/test only) — `seed_icp_definition/2`,
       `seed_account/2`, `seed_contact/2`, `seed_sequence/2`,
       `seed_sequence_step/2`, `seed_campaign/2`, `seed_lead/2`;
+    * `advance_enrollment/3` (DLV, REC, SCH) — the S8 step advancement;
     * `update/4` — any update or lifecycle action of a Sales record (e.g.
       `update(lead, :start_research, %{decision_id: id}, actor: agt)`); each
       resource's `transitions/0` lists its lifecycle actions;
@@ -105,6 +106,21 @@ defmodule SdrAgent.Sales do
 
   @doc "AGT: enrolls a qualified lead in an active campaign (`campaign_id`, `lead_id`)."
   def enroll_lead(attrs, opts), do: GuardedCall.create(CampaignEnrollment, :enroll, attrs, opts)
+
+  @doc """
+  DLV, REC, SCH: after the message of `step_position` was accepted at
+  `accepted_at`, moves the enrollment to that step and schedules the next
+  one in the campaign time zone (`:advance_step`), or completes it after the
+  last step (`:complete`).
+  """
+  def advance_enrollment(enrollment, %{step_position: position} = attrs, opts) do
+    action =
+      if SdrAgent.Sales.Changes.AdvanceStep.last_step?(enrollment.campaign_id, position),
+        do: :complete,
+        else: :advance_step
+
+    GuardedCall.update(enrollment, action, attrs, opts)
+  end
 
   @doc "Runs update or lifecycle `action` on a Sales `record` with `attrs`."
   def update(record, action, attrs, opts), do: GuardedCall.update(record, action, attrs, opts)

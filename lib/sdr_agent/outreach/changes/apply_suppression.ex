@@ -2,9 +2,11 @@ defmodule SdrAgent.Outreach.Changes.ApplySuppression do
   @moduledoc """
   The same-transaction side effects of a new Suppression (S2): every open
   lead of a matching contact → stopped (`status_reason` "suppressed:
-  <reason>"), its active/paused enrollments → stopped, its granted approvals
-  → invalidated (`suppressed`), its pending-review and queued drafts →
-  cancelled.
+  <reason>"), its active/paused enrollments → stopped, its pending-review
+  drafts → cancelled, and every delivery to the contact that is not yet
+  claimed (pending, or waiting for a retry) → cancelled together with its
+  queued draft and its still-granted approval (→ invalidated, `suppressed`).
+  A delivery already claimed is in flight and is left to its outcome.
 
   Matching contacts: `email` scope — the contact email equals the value;
   `domain` scope — the contact email's domain equals the value. The
@@ -13,9 +15,10 @@ defmodule SdrAgent.Outreach.Changes.ApplySuppression do
   limited to open leads.
 
   Lock order: the rows it will change are locked `FOR UPDATE` in a
-  `before_action` hook — leads, then enrollments, drafts and approvals —
+  `before_action` hook — leads, enrollments, drafts, deliveries, approvals —
   before the suppression row and its audit event are written, i.e. before
-  the chain-head lock, the order every other writer of those rows uses, so a
+  the chain-head lock, the order every other writer of those rows uses
+  (`SdrAgent.Outreach.Delivery`), so a
   concurrent hand-off or approval either commits first (and is undone here)
   or waits and sees the stopped lead. The transitions run as the creating
   actor with the private side-effect markers
@@ -30,6 +33,7 @@ defmodule SdrAgent.Outreach.Changes.ApplySuppression do
 
   alias SdrAgent.Outreach.Approval
   alias SdrAgent.Outreach.Checks.InternalWrite
+  alias SdrAgent.Outreach.DeliveryOperation
   alias SdrAgent.Outreach.Draft
   alias SdrAgent.Sales.CampaignEnrollment
   alias SdrAgent.Sales.Checks.SuppressionContext
@@ -69,19 +73,47 @@ defmodule SdrAgent.Outreach.Changes.ApplySuppression do
     # dependent work of a lead that is already terminal (e.g. stopped by an
     # operator) is still stopped, cancelled and invalidated; only the lead
     # transition itself is limited to open leads (review #13 MF1).
-    leads = lock(Lead, tenant_id, contact_id: contact_ids, status: Lead.statuses())
+    leads = lock(Lead, tenant_id, contact_id: [in: contact_ids], status: [in: Lead.statuses()])
     lead_ids = Enum.map(leads, & &1.id)
 
     enrollments =
-      lock(CampaignEnrollment, tenant_id, lead_id: lead_ids, status: [:active, :paused])
+      lock(CampaignEnrollment, tenant_id,
+        lead_id: [in: lead_ids],
+        status: [in: [:active, :paused]]
+      )
 
-    drafts = lock(Draft, tenant_id, lead_id: lead_ids, status: [:pending_review, :queued])
-    approvals = lock(Approval, tenant_id, draft_id: Enum.map(drafts, & &1.id), status: [:granted])
+    # Every open draft of those leads is locked in one query, then judged on
+    # the locked rows (a revoke or claim that committed meanwhile is seen):
+    # drafts in review are cancelled; a queued draft is cancelled with its
+    # delivery only if that delivery is not yet claimed (pending, or waiting
+    # for a retry) — a claimed one is in flight and is left to its outcome.
+    drafts =
+      lock(Draft, tenant_id, lead_id: [in: lead_ids], status: [in: [:pending_review, :queued]])
+
+    queued_ids = for %{status: :queued, id: id} <- drafts, do: id
+
+    deliveries =
+      lock(DeliveryOperation, tenant_id,
+        draft_id: [in: queued_ids],
+        state: [in: [:pending, :failed_retryable]]
+      )
+
+    drafts =
+      Enum.filter(drafts, fn draft ->
+        draft.status == :pending_review or Enum.any?(deliveries, &(&1.draft_id == draft.id))
+      end)
+
+    approvals =
+      lock(Approval, tenant_id,
+        draft_id: [in: Enum.map(drafts, & &1.id)],
+        status: [in: [:granted]]
+      )
 
     Ash.Changeset.put_context(changeset, :sdr_suppression_targets, %{
       leads: leads,
       enrollments: enrollments,
       drafts: drafts,
+      deliveries: deliveries,
       approvals: approvals
     })
   end
@@ -104,16 +136,26 @@ defmodule SdrAgent.Outreach.Changes.ApplySuppression do
 
   defp ids(query), do: query |> Ash.read!(authorize?: false) |> Enum.map(& &1.id)
 
-  defp lock(_resource, _tenant_id, [{_field, []} | _]), do: []
-
-  defp lock(resource, tenant_id, [{field, values}, {:status, statuses}]) do
-    resource
-    |> Ash.Query.filter(tenant_id == ^tenant_id and status in ^statuses)
-    |> Ash.Query.do_filter([{field, [in: values]}])
-    |> Ash.Query.sort(id: :asc)
-    |> Ash.Query.lock(:for_update)
-    |> Ash.read!(authorize?: false)
+  defp lock(resource, tenant_id, filters) do
+    case query(resource, tenant_id, filters) do
+      nil -> []
+      query -> query |> Ash.Query.lock(:for_update) |> read_all()
+    end
   end
+
+  defp query(resource, tenant_id, [{_field, [in: values]} | _] = filters) do
+    if values == [] do
+      nil
+    else
+      resource
+      |> Ash.Query.filter(tenant_id == ^tenant_id)
+      |> Ash.Query.do_filter(filters)
+      |> Ash.Query.sort(id: :asc)
+    end
+  end
+
+  defp read_all(nil), do: []
+  defp read_all(query), do: Ash.read!(query, authorize?: false)
 
   defp apply_effects(targets, suppression, actor) do
     reason = suppression.reason
@@ -123,6 +165,10 @@ defmodule SdrAgent.Outreach.Changes.ApplySuppression do
         targets.approvals,
         &{&1, :invalidate, %{invalidated_reason: :suppressed}, InternalWrite}
       ) ++
+        Enum.map(
+          targets.deliveries,
+          &{&1, :cancel, %{last_error: %{"reason" => "suppressed"}}, InternalWrite}
+        ) ++
         Enum.map(
           targets.drafts,
           &{&1, :cancel, %{status_reason: "suppressed: #{reason}"}, InternalWrite}

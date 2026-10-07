@@ -127,7 +127,16 @@ defmodule SdrAgent.Sales.Contact do
     policy action_type(:read) do
       authorize_if Checks.KernelContext
       authorize_if {Checks.ActorRole, roles: [:admin, :reviewer, :auditor]}
-      authorize_if {Checks.ActorType, types: [:agent_runtime, :auditor_cli, :seeder]}
+
+      authorize_if {Checks.ActorType,
+                    types: [
+                      :agent_runtime,
+                      :auditor_cli,
+                      :seeder,
+                      :delivery_worker,
+                      :reconciler,
+                      :scheduler
+                    ]}
     end
   end
 
