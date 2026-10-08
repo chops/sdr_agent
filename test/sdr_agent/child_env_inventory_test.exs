@@ -69,6 +69,8 @@ defmodule SdrAgent.ChildEnvInventoryTest do
   defp env_from_child_env?(opts) when is_list(opts) do
     Enum.any?(opts, fn
       {:env, expr} -> calls_child_env?(expr)
+      # [{:env, expr} | rest]: the env literal at the head of a cons.
+      {:|, _, [head, _rest]} -> env_from_child_env?([head])
       {:{}, _, [:env, expr]} -> calls_child_env?(expr)
       _ -> false
     end)

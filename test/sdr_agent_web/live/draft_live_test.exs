@@ -71,6 +71,60 @@ defmodule SdrAgentWeb.DraftLiveTest do
     end
   end
 
+  describe "Q0.2 reviewer notes from the AI (display only)" do
+    defmodule FlaggingBrain do
+      @moduledoc false
+      alias SdrAgent.SDR.FakeBrain
+
+      def respond("sdr.outreach_proposal" = op, input) do
+        op
+        |> FakeBrain.respond(input)
+        |> Map.put(:risk_flags, [
+          "Verify the funding claim before sending.",
+          "<script>alert('x')</script> & check the tone"
+        ])
+      end
+
+      def respond(op, input), do: FakeBrain.respond(op, input)
+    end
+
+    test "the current revision's risk flags are shown, escaped, in a labelled panel",
+         %{conn: conn} = ctx do
+      SdrAgent.SDRCase.assign!(ctx, "01", model: [provider_options: [responder: FlaggingBrain]])
+      %{success: 1} = drain!()
+      lead = fixture_lead!(ctx, "01")
+
+      {:ok, [draft]} =
+        Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
+
+      for role <- [:reviewer, :auditor] do
+        {:ok, view, _html} = open(conn, role, draft)
+
+        assert has_element?(view, "#risk-flags", "Reviewer notes from the AI")
+        assert has_element?(view, "#risk-flags li", "Verify the funding claim before sending.")
+
+        assert has_element?(
+                 view,
+                 "#risk-flags li",
+                 "<script>alert('x')</script> & check the tone"
+               )
+
+        html = view |> element("#risk-flags") |> render()
+        refute html =~ "<script>"
+        assert html =~ "&lt;script&gt;"
+      end
+    end
+
+    test "no panel when the AI raised no flags", %{conn: conn} = ctx do
+      %{draft: draft, revision: revision} = drafted!(ctx)
+      assert revision.risk_flags == []
+
+      {:ok, view, _html} = open(conn, :reviewer, draft)
+      assert has_element?(view, "#revision-subject")
+      refute has_element?(view, "#risk-flags")
+    end
+  end
+
   describe "editing and deciding" do
     setup ctx, do: Map.merge(ctx, drafted!(ctx))
 

@@ -6,6 +6,7 @@ defmodule SdrAgent.Application do
   use Application
 
   alias SdrAgent.Agents.Witness
+  alias SdrAgent.AI.ModelProvider.Runtime, as: ModelProviderRuntime
 
   @impl true
   def start(_type, _args) do
@@ -14,27 +15,34 @@ defmodule SdrAgent.Application do
     Witness.check_configured_root!()
     SdrAgent.Telemetry.setup()
 
-    children =
-      SdrAgent.Telemetry.test_children() ++
-        [
-          SdrAgentWeb.Telemetry,
-          SdrAgent.Repo,
-          {DNSCluster, query: Application.get_env(:sdr_agent, :dns_cluster_query) || :ignore},
-          {Oban, Application.fetch_env!(:sdr_agent, Oban)},
-          {Phoenix.PubSub, name: SdrAgent.PubSub},
-          # Relays committed audit events to live operator views (ADR-0012).
-          SdrAgent.LiveEvents.Relay,
-          # Start a worker by calling: SdrAgent.Worker.start_link(arg)
-          # {SdrAgent.Worker, arg},
-          # Start to serve requests, typically the last entry
-          SdrAgentWeb.Endpoint,
-          {AshAuthentication.Supervisor, [otp_app: :sdr_agent]}
-        ]
-
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: SdrAgent.Supervisor]
-    Supervisor.start_link(children, opts)
+    Supervisor.start_link(children(), opts)
+  end
+
+  @doc false
+  # The supervision tree, in start order. The runtime-selected model
+  # provider (one named ClaudeCLI server when `SDR_MODEL_PROVIDER=claude_cli`,
+  # nothing for the Fake; ADR-0004) starts before Oban, so no agent job can
+  # run before its provider exists.
+  def children do
+    SdrAgent.Telemetry.test_children() ++
+      [
+        SdrAgentWeb.Telemetry,
+        SdrAgent.Repo,
+        {DNSCluster, query: Application.get_env(:sdr_agent, :dns_cluster_query) || :ignore}
+      ] ++
+      ModelProviderRuntime.children() ++
+      [
+        {Oban, Application.fetch_env!(:sdr_agent, Oban)},
+        {Phoenix.PubSub, name: SdrAgent.PubSub},
+        # Relays committed audit events to live operator views (ADR-0012).
+        SdrAgent.LiveEvents.Relay,
+        # Start to serve requests, typically the last entry
+        SdrAgentWeb.Endpoint,
+        {AshAuthentication.Supervisor, [otp_app: :sdr_agent]}
+      ]
   end
 
   # Tell Phoenix to update the endpoint configuration

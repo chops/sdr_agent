@@ -135,6 +135,49 @@ defmodule SdrAgentWeb.LeadsLiveTest do
       assert has_element?(view, "#lead-drafts a[href='/drafts/#{ctx.draft.id}']")
     end
 
+    test "a draft awaiting review is a prominent call to action near the header",
+         %{conn: conn, lead: lead} = ctx do
+      for role <- [:reviewer, :admin] do
+        {:ok, view, _html} = conn |> sign_in(role) |> live(~p"/leads/#{lead.id}")
+
+        assert has_element?(view, "#draft-awaiting-review", "Draft awaiting review")
+
+        assert has_element?(
+                 view,
+                 "#open-pending-draft[href='/drafts/#{ctx.draft.id}']",
+                 "Open draft"
+               )
+
+        # The Drafts card keeps its own link.
+        assert has_element?(view, "#lead-drafts a[href='/drafts/#{ctx.draft.id}']")
+      end
+    end
+
+    test "the auditor's call to action only views the draft (no approve affordance)",
+         %{conn: conn, lead: lead} = ctx do
+      {:ok, view, _html} = conn |> sign_in(:auditor) |> live(~p"/leads/#{lead.id}")
+
+      assert has_element?(view, "#draft-awaiting-review")
+
+      assert has_element?(
+               view,
+               "#open-pending-draft[href='/drafts/#{ctx.draft.id}']",
+               "View draft"
+             )
+
+      refute has_element?(view, "#draft-awaiting-review", "Open draft")
+      refute has_element?(view, "#draft-awaiting-review button")
+      refute has_element?(view, "#draft-awaiting-review", "Approve")
+    end
+
+    test "no call to action once the draft left review", %{conn: conn, lead: lead} = ctx do
+      approve!(ctx, ctx.draft, operator!(ctx, :reviewer))
+      {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/leads/#{lead.id}")
+
+      assert has_element?(view, "#lead-drafts a[href='/drafts/#{ctx.draft.id}']")
+      refute has_element?(view, "#draft-awaiting-review")
+    end
+
     test "links the lead's agent runs and, for admins and auditors, its audit trail",
          %{conn: conn, lead: lead, run: run} do
       {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/leads/#{lead.id}")
@@ -182,6 +225,7 @@ defmodule SdrAgentWeb.LeadsLiveTest do
     test "a reviewer assigns a new lead; the agent run is queued", %{conn: conn} = ctx do
       lead = fixture_lead!(ctx, "01")
       {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/leads/#{lead.id}")
+      refute has_element?(view, "#draft-awaiting-review")
 
       view |> element("#assign-lead") |> render_click()
 

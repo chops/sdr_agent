@@ -56,6 +56,7 @@ graph TB
     end
 
     App --> Oban
+    App -. "SDR_MODEL_PROVIDER=claude_cli (dev only): one named server, started before Oban" .-> ClaudeCLIAdapter
     Oban --> Cadence
     Oban --> UpgradeDispatch
     UpgradeDispatch --> UpgradeJobs
@@ -127,3 +128,4 @@ graph TB
 - [x] Audit anchor cadence and bounded, unique OTS upgrade jobs
 - [x] Claude CLI local process boundary
 - [x] S13 LiveEvents.Relay (commit-time audit notifications -> PubSub -> live console views, ADR-0012)
+- [x] Q0.1 runtime-selected ClaudeCLI server (one named, supervised instance before Oban when `SDR_MODEL_PROVIDER=claude_cli`, dev only; ADR-0004)

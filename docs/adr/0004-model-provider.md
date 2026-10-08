@@ -13,7 +13,8 @@ app-server on the owner's ChatGPT plan; deterministic fake model is the
 default"). Details amended by Codex consultations 08, 09 and 15, and by the
 S6a implementation approved on 2026-10-06. The owner approved the ClaudeCLI
 pivot on 2026-10-07; the amendment below replaces the earlier CodexAppServer
-runtime decision while retaining it as historical rationale.
+runtime decision while retaining it as historical rationale. The Q0.1
+amendment (runtime provider selection) is pending Codex review on its PR.
 
 ## Context
 
@@ -212,6 +213,124 @@ that boundary cannot be maintained, use a paid API key instead.
   (missing init attestation, or one naming another model, version, tools,
   MCP servers or slash commands) fails the invocation and opens a critical
   `provider_error` operator-attention Failure in the same transaction.
+
+### Q0.1 amendment (2026-10-07): runtime provider selection
+
+Found live: `ClaudeCLI.complete/2` required a `:server` option that the
+running application never supplied, so every `claude_cli` agent job raised
+inside the provider and was recorded as `provider_outcome_unknown`. The real
+model had only ever worked from tests that started their own server. The
+selection is now explicit runtime configuration, with no persisted setting,
+resource or policy change:
+
+- `config/runtime.exs` reads `SDR_MODEL_PROVIDER`. Unset or `fake` keeps the
+  deterministic Fake in every environment. `claude_cli` is accepted **only
+  in development**. In `test` it is refused at boot, so tests stay hermetic.
+  In `prod` it is refused at boot because this ADR limits ClaudeCLI to
+  personal, local, single-operator use of the owner's own login; there is
+  no production opt-in. Any other value is refused, never defaulted.
+  `SDR_CLAUDE_CLI_TIMEOUT_MS` (an integer of at least 1000, default
+  240000) sets the per-call, end-to-end timeout.
+- With ClaudeCLI selected, `SdrAgent.AI.ModelProvider.Runtime.children/0`
+  adds exactly one ClaudeCLI GenServer to the application tree, registered
+  as `ClaudeCLI.server/0`. It starts before Oban, so no agent job can run
+  before it. One server keeps concurrency at 1 (C8): the `research` queue's
+  concurrency does not change that, because every call goes through the
+  server.
+- One validated selection serves every model-call path. `AgentWorker`,
+  `ReplyWorker` and the public `ModelProvider.complete/2` all resolve the
+  model through `Runtime.resolve/1`, which injects the named server. The
+  following are refused before any reservation, never downgraded to the
+  Fake:
+  - a ClaudeCLI that is absent (`:provider_not_running`);
+  - one whose admission is closed (`:provider_not_quiescent`, see below);
+  - one whose launcher is missing (`:llm_proxy_shim_not_found`).
+  The check applies to a named server however it is referenced, by name
+  or by pid: the reference is normalised to the registered name before its
+  published health is read. It is in addition to the per-call init
+  attestation, which stays mandatory, and to the server's own admission
+  fence.
+- The workers inject the named server in the same way. For `AgentWorker` this
+  covers both the default provider and one carried by the job. If ClaudeCLI
+  is wanted but its server is not running, no model call or reservation is
+  made. The run fails with `provider_error`, which opens its critical
+  operator-attention Failure; for `AgentWorker` it is linked from the
+  Operation. The job returns `{:error, :provider_not_running}`. A job that
+  names a provider other than `fake` or `claude_cli` is refused the same
+  way, with `{:error, :unknown_model_provider}`. Neither case raises, and
+  neither falls back to the Fake. `ClaudeCLI.complete/2` without `:server`
+  calls the named server, and returns the same typed error when no server
+  is running.
+- Process lifecycle (Codex review of PR #27):
+  - The per-call `timeout` is end to end and counts from `complete/2`,
+    including time spent queued. A request that reaches the front with
+    less than min(1 s, timeout/2) left is refused without launching
+    (`{:error, :provider_queue_timeout}`, recorded as a failed invocation).
+  - A request whose caller died while it was queued is dropped without
+    launching. A caller that dies during its call stops that CLI tree.
+  - A call returns only after its whole process tree (root included) is
+    gone and its workspace has been removed.
+  - Each server has an unlinked `ClaudeCLI.Reaper` that monitors it, and
+    every launch is opened by that reaper: the reaper calls `Port.open/2`,
+    so it owns the OS pid before the CLI can run (there is no hand-off
+    window), and it forwards the port's messages to the server in order.
+    If the server dies, even by `:kill`, the reaper kills the tracked
+    trees and removes their workspaces. The reaper builds the launch
+    environment from the server's allowlist with `SdrAgent.ChildEnv`
+    (ADR-0005 child-process amendment). Its own `ps`, `pgrep` and `kill`
+    children use the same allowlist, so no parent secret reaches them. A killed call is still recorded as
+    unknown and is never resent.
+  - Admission is a lease, held only while proven safe. A named server takes
+    a `:persistent_term` lease (written once per server start, not per
+    call) through its reaper. The reaper erases it only as its cleanup
+    receipt, after every tracked tree is confirmed gone; if a tree cannot
+    be confirmed stopped, the reaper retries and logs an error, and the
+    lease stays held. While another reaper holds the lease, the server
+    refuses every call with `{:error, :provider_not_quiescent}`, and Admin
+    shows the server as blocked:
+    - If that reaper is still cleaning up, the server is admitted once it
+      exits.
+    - If that reaper died without a receipt, admission stays closed until
+      an operator who has checked that no CLI process is left runs
+      `ClaudeCLI.Reaper.release/1`.
+    A tree the server itself cannot confirm stopped after a call also
+    closes admission until the tree is gone. So does a launch whose receipt
+    never arrived, because the reaper died or the handshake outlived the
+    deadline. Such a launch may already be running, so its outcome is
+    unknown (`{:unknown, :reaper_down}` or
+    `{:unknown, :launch_handshake_timeout}`). Admission stays closed until
+    either a late receipt makes the launch known and it is confirmed
+    stopped, or an operator release attests that it is gone.
+    One exception lets a server take over a dead reaper's lease: the
+    server is still alive and affirmatively knows that none of its
+    launches is unknown or unconfirmed (no launch in flight, none whose
+    receipt was lost, none it failed to stop). Otherwise the lease stays
+    with the dead reaper. This keeps concurrency at one across crashes and
+    restarts, and a reaper's exit is never treated as proof of cleanup.
+  - `timeout` must be at least 1000 ms. The deadline is absolute from
+    enqueue: it is checked before dispatch, checked again after the
+    workspace is prepared, and bounds both the launch handshake and the
+    run. A pre-send refusal is an error; an in-flight timeout or a missing
+    launch receipt is unknown.
+  - Limitation: CLI helpers that re-parent away from the root before a
+    kill are not found (the tree is walked with `pgrep -P`).
+- Boot preflight: Claude CLI has no no-call probe for the init attestation.
+  Model, version, tools, MCP servers and slash commands are reported only
+  by a `-p` session, which also sends a model request. So boot spends no
+  model call. It records the attestation as *pending: checked at the first
+  call*, and whether `llm-proxy-shim` was found. Each call then records its
+  init outcome (attested, or drift with the reason) in a protected,
+  in-memory ETS table owned by the server. The table holds no prompt,
+  output or credential, and is not persisted: the ModelInvocation ledger
+  stays the record. Drift still fails the invocation and opens the critical
+  `provider_error` Failure (S7 amendment).
+- The Admin page shows the configured provider and the effective one. The
+  effective provider is none, with the refusal reason, while calls are
+  refused. It also shows the model alias and resolved id, the reviewed CLI
+  version, the server state (running, not running, or blocked), and the
+  last attestation with its time. It shows no secret. It refreshes live (ADR-0012) when an
+  audit event commits. The card only reflects the attestation; the
+  per-call attestation remains what refuses a drifted CLI.
 
 ## Justification
 

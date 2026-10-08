@@ -223,6 +223,59 @@ case mode do
     IO.puts(init)
     IO.puts(result)
 
+  "sdr" ->
+    # Plays a minimal SDR model for the worker tests (Q0.1): the stdin
+    # prompt names the operation; no evidence claims, then a disqualifying
+    # qualification, so a run ends without a draft.
+    stdin = IO.read(:stdio, :eof)
+
+    answer =
+      cond do
+        String.contains?(stdin, "research analyst") ->
+          %{"claims" => []}
+
+        String.contains?(stdin, "You classify a prospect's reply") ->
+          %{
+            "classification" => "interested",
+            "sentiment" => "positive",
+            "intent" => "wants a call next week",
+            "suggested_next_action" => "hand_off",
+            "confidence" => 0.9,
+            "reason" => "asks to set up a call"
+          }
+
+        String.contains?(stdin, "You qualify a sales lead") ->
+          %{
+            "qualified" => false,
+            "score" => 5,
+            "criteria" => %{
+              "company_size" => "unknown",
+              "industry" => "unknown",
+              "geography" => "unknown",
+              "persona" => "unknown",
+              "trigger" => "unknown"
+            },
+            "confidence" => 0.4,
+            "evidence_ids" => [],
+            "reason" => "no evidence was extracted"
+          }
+
+        true ->
+          %{}
+      end
+
+    IO.puts(init)
+
+    IO.puts(
+      JSON.encode!(%{
+        "type" => "result",
+        "subtype" => "success",
+        "is_error" => false,
+        "result" => JSON.encode!(answer),
+        "usage" => %{"input_tokens" => 12, "output_tokens" => 3}
+      })
+    )
+
   "fenced" ->
     IO.puts(init)
     IO.puts(fenced)
@@ -245,6 +298,23 @@ case mode do
 
   "malformed" ->
     IO.puts("not-json SECRET_DO_NOT_EXPOSE")
+
+  "hang" ->
+    # argv: hang <record prefix>. Attests, then never answers. Records this
+    # launch's own OS pid, its sleeping child and its working directory (the
+    # private workspace) in <prefix>.<pid>, for the process-lifecycle tests.
+    prefix = Enum.at(System.argv(), 1)
+    sleeper = Port.open({:spawn_executable, System.find_executable("sleep")}, [{:args, ["60"]}])
+    {:os_pid, child} = Port.info(sleeper, :os_pid)
+    root = String.to_integer(System.pid())
+
+    File.write!(
+      "#{prefix}.#{root}",
+      JSON.encode!(%{"root" => root, "child" => child, "cwd" => File.cwd!()})
+    )
+
+    IO.puts(init)
+    Process.sleep(:infinity)
 
   "timeout" ->
     pid_file = Enum.at(System.argv(), 1)

@@ -27,6 +27,7 @@ defmodule SdrAgent.AI.ModelProvider do
   """
 
   alias SdrAgent.Agents
+  alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Audit
   alias SdrAgent.Operations
   alias SdrAgent.Repo
@@ -58,11 +59,20 @@ defmodule SdrAgent.AI.ModelProvider do
   @callback complete(request(), keyword()) ::
               {:ok, result()} | {:error, term()} | {:unknown, term()}
 
-  @doc "Completes one structured model request and persists its full lifecycle."
+  @doc """
+  Completes one structured model request and persists its full lifecycle.
+  The provider (`:provider`, default: the runtime selection) and its
+  `:provider_options` are resolved by `SdrAgent.AI.ModelProvider.Runtime`
+  first: an absent or unhealthy ClaudeCLI is refused before any
+  reservation.
+  """
   def complete(request, opts \\ []) when is_map(request) do
-    provider = Keyword.get(opts, :provider, Application.fetch_env!(:sdr_agent, :model_provider))
-    provider_options = Keyword.get(opts, :provider_options, [])
+    with {:ok, model} <- Runtime.resolve(Keyword.take(opts, [:provider, :provider_options])) do
+      run(request, model[:provider], Keyword.get(model, :provider_options, []))
+    end
+  end
 
+  defp run(request, provider, provider_options) do
     with {:ok, provenance} <- provider.prepare(request, provider_options),
          {:ok, invocation} <- reserve(request, provenance),
          {:ok, sent} <- Agents.mark_model_invocation_sent(invocation, actor: request.actor) do

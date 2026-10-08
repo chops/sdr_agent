@@ -1,0 +1,242 @@
+#+TITLE: Feature: Q0 — real model at runtime, pending-draft CTA, AI reviewer notes
+#+DATE: 2026-10-07
+
+* Summary
+Q0.1 makes the reviewed ClaudeCLI provider usable in the running app: a
+runtime selection (=SDR_MODEL_PROVIDER=), one supervised named server, worker
+injection with a typed =provider_not_running= refusal, a no-call boot
+preflight and Admin status. Q0.3 adds a "Draft awaiting review" call to
+action on the lead page. Q0.2 (display only) shows a revision's
+=risk_flags= on the draft page.
+
+* Entity Model
+#+BEGIN_EXAMPLE
+Entity Model trigger: no
+Reason: selection is env/config only; no resource, attribute, enum, policy,
+relationship or action contract changes. The refusal reuses the existing
+AgentRun :provider_error status reason and its run_stopped Failure; the
+attestation status is volatile in-memory (ETS) display data, not a record.
+#+END_EXAMPLE
+
+* Affected Apps
+- [X] Core (=sdr_agent=)
+- [X] Web (=sdr_agent_web=)
+
+* Affected Modules
+- =config/runtime.exs= — =SDR_MODEL_PROVIDER= / =SDR_CLAUDE_CLI_TIMEOUT_MS=
+  parsing; claude_cli dev-only, refused in test and prod.
+- =lib/sdr_agent/ai/model_provider/runtime.ex= (new) — =children/0=,
+  =resolve/1=, =status/0=.
+- =lib/sdr_agent/ai/model_provider/claude_cli.ex= — =:name=, =server/0=,
+  =running?/1=, =attestation/1=, default named server, typed
+  =provider_not_running=, boot preflight, per-call attestation record.
+- =lib/sdr_agent/ai/model_provider/claude_cli/reaper.ex= (new, round 2) —
+  crash-safe owner of CLI process trees and workspaces.
+- =lib/sdr_agent/sdr/reply_worker.ex= (round 2) — resolve + refusal path.
+- =lib/sdr_agent/application.ex= — =children/0=; provider before Oban.
+- =lib/sdr_agent/sdr/agent_worker.ex= — resolve + refusal path.
+- =lib/sdr_agent_web/live/admin_live.ex= — provider status card.
+- =lib/sdr_agent_web/live/lead_live/show.ex= — =#draft-awaiting-review= CTA.
+- =lib/sdr_agent_web/live/draft_live.ex= — =#risk-flags= panel.
+- ADR-0004 Q0.1 amendment; README real-model section; components diagram.
+
+* Required Tests
+- [X] Config: unset/fake → Fake (dev/test/prod); claude_cli in dev with
+      default and overridden timeout; refused in prod and test; unknown
+      values and malformed timeouts refused.
+- [X] Supervision: Fake → no child; ClaudeCLI → exactly one named child with
+      configured timeout; it starts before Oban.
+- [X] Resolve: Fake unchanged; ClaudeCLI without server → typed error
+      (default and named provider); with server → named server injected.
+- [X] Worker (default path and job-carried) with ClaudeCLI + fake shim
+      command succeeds end to end through the named server; server missing
+      → ={:error, :provider_not_running}=, run failed =provider_error=, open
+      critical Failure linked from the Operation, no ModelInvocation.
+- [X] Fake default unchanged (no server needed).
+- [X] Named server: concurrency 1 (three concurrent callers serialise);
+      dead pid → typed error; boot pending; first call attested; drift and
+      missing init recorded; missing shim surfaced.
+- [X] Admin: Fake status; ClaudeCLI not running / pending / drift.
+- [X] Lead CTA: reviewer and admin "Open draft"; auditor "View draft" with no
+      approve affordance; gone once approved; absent with no draft; the
+      Drafts card link stays.
+- [X] Draft risk flags: shown escaped to reviewer and auditor; absent when
+      empty.
+
+* Risks & Considerations
+- No no-call attestation probe exists, so drift is detected at the first
+  call (as before), not at boot. Boot only checks the launcher exists.
+- Returning ={:error, :provider_not_running}= discards the Oban job (max
+  attempts 1); the Operation is failed and then discarded with the run's
+  Failure, consistent with the job.
+- The attestation status is per-boot in-memory; the ModelInvocation ledger
+  remains the durable record.
+- Round 2: ReplyWorker resolves the model up front like AgentWorker (no
+  reservation, run =provider_error=, job ={:error, :provider_not_running}=);
+  integrated happy/refusal/drift tests cover it.
+- Round 2 residual (hand-off window) closed in round 3: the reaper opens the
+  port itself. Remaining limitation: descendants that re-parent before a
+  kill are not found (=pgrep -P= walk). A dead reaper's lease stays held
+  (admission closed until =ClaudeCLI.Reaper.release/1=) unless its own,
+  still-running server affirmatively knows that none of its launches is
+  unknown or unconfirmed. The responder module name in job args is still
+  decoded with =Module.safe_concat/1= (pre-existing; raises before the run
+  starts for an unknown module).
+-----
+
+* TDD Tracking
+RED 2026-10-07 on =37c69bb= (partition =_q0=): 29 of 81 focused tests failed
+(6 files: provider_runtime, claude_cli, agent_worker_provider, admin_live,
+leads_live, draft_live), all for the intended missing behaviour —
+undefined =Runtime=, =ClaudeCLI.server/0=, =attestation/0=,
+=Application.children/0=; runtime.exs not raising/selecting; the worker
+returning =:ok= after the =Keyword.fetch!= raise became
+=provider_outcome_unknown= (the live bug, reproduced by the job-carried
+drain test); a dead server pid exiting; missing Admin/CTA/risk-flag
+elements. =bin/tdd_verify.sh= misreported "Cannot proceed / no tests" because
+its parser does not read Elixir 1.20 ExUnit output (known, as in S6a).
+
+One test was corrected during GREEN: the default-path refusal test used
+=perform_job/2=, which builds a job without an id (=find_operation(nil)=
+returned ={:ok, nil}=) — a test defect, not the intended reason. It now calls
+=AgentWorker.perform/1= on the enqueued job; on the old code that returns
+=:ok= (asserted ={:error, :provider_not_running}=), as the job-carried test
+showed.
+
+Classified honestly (from the RED log): 11 assertion failures, 17
+=UndefinedFunctionError= runtime errors for the missing interfaces
+(=Runtime=, =ClaudeCLI.server/0=, =attestation/0=, =Application.children/0=)
+and 1 =exit= (the dead-pid call). So round 1 was *not* a clean
+assertion-only RED: the 18 runtime errors were for the intended missing
+behaviour, but they are errors, not assertions.
+
+*TDD Gate Verification (round 1):* [X] NEEDS_REVIEW — intended missing
+behaviour, but 18 of 29 were runtime errors rather than assertions
+(=tdd_verify.sh= could not classify: Elixir 1.20 parser limitation).
+
+** Round 2 (Codex review of =426d0be=, =/tmp/sdr-pr27-426d0be-review.md=)
+RED on =426d0be= + new tests only: 7 of 43 focused tests failed, *all clean
+assertion failures*, no runtime errors:
+- MF1 killed supervised server: "old CLI root survived the restart".
+- MF2 caller killed while queued: "a model subprocess ran for a caller that
+  died before dispatch" (adapted from Codex's reproducer).
+- MF2 ongoing-call cancellation: "the CLI kept running for a dead caller".
+- MF2 end-to-end deadline: second request returned
+  ={:unknown, :claude_cli_timeout}= (it was launched), expected
+  ={:error, :provider_queue_timeout}=.
+- ReplyWorker refusal: job =success= (reserved, then failed) instead of
+  =discard= with no model call.
+- Unknown job provider: =AgentWorker.perform/1= returned =:ok= (ran on the
+  Fake) instead of ={:error, :unknown_model_provider}=.
+- Admin live refresh: card stayed on the page-load snapshot after a commit
+  broadcast (re-confirmed RED by stashing only the =LiveRefresh.attach=
+  change).
+The "timeout reaps root and workspace" test and the ReplyWorker happy and
+drift tests passed on =426d0be= already (regression coverage, not RED).
+Codex's own reproducer, run against the fix: the restart case passes; its
+queued-caller case cannot find the request because it matches the old
+={:complete, request}= message shape (now ={:complete, request,
+enqueued_at}=); the adapted test in =claude_cli_test.exs= covers it.
+
+*TDD Gate Verification (round 2):* [X] VERIFIED (assertion-only RED)
+
+** Round 3 (Codex re-review of =6c199f3=, =/tmp/sdr-pr27-6c199f3-rereview.md=)
+RED on =6c199f3= + new tests: 6 of 32 claude_cli tests failed, all clean
+assertion failures:
+- MF1 hand-off: Codex's helper-boundary sequence (track -> Port.open ->
+  owner killed before =launched=) — "admission was released while the
+  launched process was live". GREEN changes the ownership API (the reaper
+  now opens the port), so the test now drives =Reaper.open/4= and asserts
+  that the lease's cleanup receipt implies the process is gone.
+- MF2 cleanup failure (injected unkillable =:signal=): server path — second
+  call admitted after an unconfirmed kill; reaper path — replacement
+  admitted while the dead server's tree ran; reaper+server both dead —
+  replacement admitted without a receipt.
+- A reaper lost while idle stopped the server (now: replaced, server stays).
+- Deadline: a 1 ms timeout launched (zero threshold); now timeouts below
+  1000 ms are rejected and expired requests are refused (white-box test).
+
+*TDD Gate Verification (round 3):* [X] VERIFIED (assertion-only RED)
+
+** Round 4 (Codex re-review of =0381b27=, =/tmp/sdr-pr27-0381b27-rereview.md=)
+RED on =0381b27=:
+- Codex's isolated-VM reproducer (=/tmp/sdr_pr27_reaper_launch_receipt_review_test.exs=,
+  AST-instrumented pause after the reaper obtains the OS pid): 1 clean
+  assertion failure — admission =:open= with the launch live, after the
+  reaper died before its receipt.
+- New suite test with a =:on_open= failure-injection seam: on =0381b27= it
+  fails at =assert_receive {:opened, ...}= because the seam did not exist
+  (honest note: seam-missing, not the behavioural assertion; the
+  behavioural RED is Codex's reproducer above).
+- Handshake bounded by the deadline: =ClaudeCLI.complete/2= returned
+  ={:ok, ...}= (waited for the paused receipt past the deadline) instead of
+  ={:unknown, :launch_handshake_timeout}= — clean assertion.
+GREEN: a missing receipt is unknown (={:unknown, :reaper_down}= /
+={:unknown, :launch_handshake_timeout}=), recorded as an unconfirmed launch
+that closes admission and blocks idle takeover; a late receipt makes it
+known (then confirmed stopped); operator =Reaper.release/1= attests it
+gone. Codex's reproducer, with only its =:reaper_down= classification
+updated to the requested =:unknown=, passes.
+
+*TDD Gate Verification (round 4):* [X] VERIFIED (behavioural RED via Codex reproducer; seam test noted)
+
+** Round 5 (quality-plan consult (c), after Codex APPROVED =791dbbc=)
+Main merged in (=d4ba5cd=, merge commit, no history rewrite). RED: 5 of 37
+focused tests failed, all clean assertions — =Runtime.resolve/1= admitted a
+launcher-less / lease-blocked named server; no configured/effective status;
+Admin lacked the effective provider; the public =ModelProvider.complete/2=
+reserved an invocation before ClaudeCLI refused (=provider_not_running=).
+The added "unknown outcome is never re-sent" worker test and the
+"application child restarts after a crash" test passed already (regression
+coverage). GREEN: one health-checked =Runtime.resolve/1= for the workers
+and the public path (refusal before reservation); status/Admin report
+configured vs effective with the refusal.
+
+*TDD Gate Verification (round 5):* [X] VERIFIED (assertion-only RED)
+
+** Round 6 (Codex delta review of =d383837=, =/tmp/sdr-pr27-d383837-delta-review.md=)
+RED: 2 new facade tests failed by assertion ("a known-unhealthy server
+consumed a reservation") — a named launcher-less or lease-blocked server
+addressed by its *pid* skipped the published-health check, so the facade
+reserved before the server refused. (Codex's reproducer: 1/3 pass, 2 clean
+assertions.) GREEN: the reference (name, pid, global/via) is normalised to
+the process's registered name before health is read; only an unnamed
+(test) server publishes no status, its own fence still refusing. Codex's
+reproducer passes 3/3.
+
+*TDD Gate Verification (round 6):* [X] VERIFIED (assertion-only RED)
+
+** Integration with #33 (child-env allowlist, merged to main =157e69d=)
+Merged in =c0736f4= (approved #33 branch) and =9a3daa7= (main). The
+ClaudeCLI launch environment is now an allowlist spec handed to the
+reaper (=Reaper.open/5= takes ={port_opts, {allow, set}}= and opens the
+port with =ChildEnv.port/2=; the route variables are explicit removals in
+=set=); the reaper's =ps=/=pgrep=/=kill= use =ChildEnv.cmd([])=. The launch
+inventory test (from #33) passes; it now also accepts the
+=[{:env, expr} | rest]= literal form the reaper uses. #33's real-child
+canary tests (ClaudeCLI child, cleanup children) pass through the reaper.
+
+-----
+
+* Implementation Notes
+- Prod: no opt-in; =claude_cli= is simply refused (ADR-0004 boundary).
+- The server is registered under its module name; its ETS status table uses
+  the same name (protected: only the server writes, readers never block on
+  a running call).
+
+* Completion Checklist
+
+** Phase 4
+- [X] All Phase 4a tests verified failing
+- [X] TDD gate confirmed
+- [X] All steps implemented
+- [X] All tests passing
+- [X] Compiled with --warnings-as-errors
+- [X] Ash boundaries respected
+
+** Phase 5 (Verify + Finalize)
+- [ ] Full test suite passes
+- [X] Moduledocs reviewed for new/modified public modules
+- [X] Plan document updated with implementation notes
+- [X] Architecture evaluation reported: _diagrams updated_ (components)
+- [ ] ADR status updated to "Accepted" (if applicable) — pending Codex review

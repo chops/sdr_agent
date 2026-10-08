@@ -15,11 +15,22 @@ defmodule SdrAgent.SDR.AgentWorker do
   are one transaction. Agent work is never retried automatically
   (`max_attempts: 1`; ADR-0004: no retry loops) — an operator retry creates
   a new run. The job completes once the outcome is recorded.
+
+  The model options — the runtime-selected provider by default, or one
+  carried by the job — are resolved by `SdrAgent.AI.ModelProvider.Runtime`,
+  which injects the one named ClaudeCLI server. If ClaudeCLI is wanted but
+  that server is not running — or the job names a provider other than
+  `fake` or `claude_cli` — no model call is made: the run fails with
+  `provider_error` (opening its critical attention Failure, linked from the
+  Operation) and the job returns `{:error, :provider_not_running}` (or
+  `{:error, :unknown_model_provider}`) — never a raise, never the Fake
+  instead.
   """
   use Oban.Worker, queue: :research, max_attempts: 1
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents
+  alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Audit
   alias SdrAgent.Operations
   alias SdrAgent.SDR.Runner
@@ -33,7 +44,12 @@ defmodule SdrAgent.SDR.AgentWorker do
   @impl Oban.Worker
   def perform(%Oban.Job{args: args} = job), do: run(job, model: model(args))
 
-  @doc "Executes the job's run with runner options (`:model`)."
+  @doc """
+  Executes the job's run with runner options (`:model`, resolved through
+  `SdrAgent.AI.ModelProvider.Runtime`; default: the configured model).
+  Returns `:ok`, or the refusal (`{:error, :provider_not_running}`,
+  `{:error, :unknown_model_provider}`) once it is recorded.
+  """
   def run(%Oban.Job{id: job_id, args: %{"tenant_id" => tenant_id, "signal" => dumped}}, opts) do
     actor = Actor.system(:agent_runtime, tenant_id)
 
@@ -42,7 +58,12 @@ defmodule SdrAgent.SDR.AgentWorker do
          {:ok, signal} <- Signals.load(dumped),
          {:ok, operation} <- Operations.start_operation(operation, actor: actor),
          {:ok, run} <- Agents.start_run(run, actor: actor) do
-      result = Runner.run(run, signal, opts)
+      result =
+        case opts |> Keyword.get_lazy(:model, &default_model/0) |> resolve() do
+          {:ok, model} -> Runner.run(run, signal, Keyword.put(opts, :model, model))
+          {:refused, _reason} = refused -> refused
+        end
+
       finish(result, run, operation, actor)
     end
   end
@@ -51,7 +72,11 @@ defmodule SdrAgent.SDR.AgentWorker do
   # crash cannot leave a terminal run with a running Operation.
   defp finish(result, run, operation, actor) do
     {:ok, :ok} = Audit.transaction(fn -> terminalize(result, run, operation, actor) end)
-    :ok
+
+    case result do
+      {:refused, reason} -> {:error, reason}
+      _result -> :ok
+    end
   end
 
   defp terminalize(result, run, operation, actor) do
@@ -62,6 +87,16 @@ defmodule SdrAgent.SDR.AgentWorker do
         {:ok, _} = Agents.succeed_run(run, actor: actor)
         {:ok, _} = Operations.succeed_operation(operation, actor: actor)
         :ok
+
+      {:running, {:refused, reason}} ->
+        {:ok, failed} =
+          Agents.fail_run(
+            run,
+            %{status_reason: :provider_error, failure_reason: Runtime.refusal_message(reason)},
+            actor: actor
+          )
+
+        fail_operation(operation, failed, actor)
 
       {:running, {:error, reason}} ->
         {:ok, failed} =
@@ -85,6 +120,8 @@ defmodule SdrAgent.SDR.AgentWorker do
 
   # Fixture responders and provider choice may travel with the job (tests,
   # demo); only the two reviewed providers can be named.
+  # A provider name outside the two reviewed ones is refused, never run on
+  # the Fake.
   defp model(%{"model" => %{} = model}) do
     options =
       case model["responder"] do
@@ -92,13 +129,24 @@ defmodule SdrAgent.SDR.AgentWorker do
         responder -> [responder: Module.safe_concat([responder])]
       end
 
-    [
-      provider: Map.get(@providers, model["provider"], SdrAgent.AI.ModelProvider.Fake),
-      provider_options: options
-    ]
+    case Map.fetch(@providers, model["provider"]) do
+      {:ok, provider} -> [provider: provider, provider_options: options]
+      :error -> {:refused, :unknown_model_provider}
+    end
   end
 
-  defp model(_args),
+  defp model(_args), do: default_model()
+
+  defp resolve({:refused, _reason} = refused), do: refused
+
+  defp resolve(model) do
+    case Runtime.resolve(model) do
+      {:ok, model} -> {:ok, model}
+      {:error, reason} -> {:refused, reason}
+    end
+  end
+
+  defp default_model,
     do: :sdr_agent |> Application.get_env(SdrAgent.SDR, []) |> Keyword.get(:model, [])
 
   defp describe(%{__exception__: true} = exception), do: Exception.message(exception)

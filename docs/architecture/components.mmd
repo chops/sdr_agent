@@ -47,6 +47,7 @@ graph TB
     end
 
     App --> Oban
+    App -. "SDR_MODEL_PROVIDER=claude_cli (dev only): one named server, started before Oban" .-> ClaudeCLIAdapter
     Oban --> Cadence
     Oban --> UpgradeDispatch
     UpgradeDispatch --> UpgradeJobs
