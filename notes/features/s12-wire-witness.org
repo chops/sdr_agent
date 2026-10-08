@@ -920,6 +920,14 @@ Planned RED (Codex's 2 regressions adopted verbatim in substance, plus):
   path;
 - the hash-conflict guard still refuses a different v3 body.
 
+*** Deterministic schema slice: definition v3 RED/GREEN
+- RED =2685140= VERIFIED by Codex (=7261e3cd=).
+- Test-first controls added before GREEN, in =c5b1627=:
+  - R1: an operator retry of a legacy-v2-pinned failed run keeps v2;
+  - R2: the stored-schema hash, read through the REC payload API.
+- GREEN: =SDRAgent= =@version 3= and the moduledoc only. The
+  admission-snapshot meaning is in the ADR-0004 amendment.
+
 *** Deterministic schema slice: RED/GREEN
 - RED =9253ea0= VERIFIED by Codex (=513d153c=).
 - Test-first refinements followed (=52dba60=, =456834b=):

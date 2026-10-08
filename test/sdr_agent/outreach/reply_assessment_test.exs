@@ -1,7 +1,7 @@
 defmodule SdrAgent.Outreach.ReplyAssessmentTest do
   @moduledoc """
   S9b reply classification (spec §16, S2 ReplyAssessment): a matched reply's
-  processing queues an AgentRun of SDRAgent v2 whose `sdr.reply.received`
+  processing queues an AgentRun of SDRAgent v3 whose `sdr.reply.received`
   route makes one Zoi-validated model call and records an LLM
   `reply_classification` Decision and the agent ReplyAssessment. No
   response is drafted (owner decision: classify + hand off); the hand-off

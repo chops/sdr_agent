@@ -390,4 +390,20 @@ byte, and the enabled v3 witness tuple is unaffected. Moving normalisation
 into `render_prompt/2` would require `prompt-builder/2` and a reviewed
 projection and enablement.
 
-Entity PASS: Codex `d24051f1`.
+The schema refs are part of the immutable `SDRAgent` definition body, so
+the agent definition moves to **v3**; the entity PASS is Codex `0b73763d`.
+
+- Existing v1 and v2 definition rows, with their bodies, hashes and
+  statuses, are untouched, and the hash-conflict guard is unchanged.
+- New assignment and reply-intake runs pin v3.
+- Existing and pending runs, and operator retries of them, keep their pinned
+  definition, which is their admission snapshot.
+- Their later model invocations record the schema version actually used
+  (`"2"`) and the hash of the stored schema.
+
+This admission-snapshot reading holds **only** for this
+semantics-preserving normalisation of the `required` order. It does not
+license old runs to acquire different tools, permissions, model policies,
+prompts or schema constraints in a later upgrade.
+
+Entity PASS: Codex `d24051f1` (schema regime) and `0b73763d` (definition v3).
