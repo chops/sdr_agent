@@ -27,6 +27,7 @@ defmodule SdrAgent.AI.ModelProvider do
   """
 
   alias SdrAgent.Agents
+  alias SdrAgent.AI.JsonSchema
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Audit
   alias SdrAgent.Operations
@@ -213,7 +214,7 @@ defmodule SdrAgent.AI.ModelProvider do
       id: request.id,
       operation: request.operation,
       prompt: request.prompt,
-      schema: Zoi.to_json_schema(request.schema)
+      schema: JsonSchema.render(request.schema)
     })
   end
 

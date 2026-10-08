@@ -852,6 +852,19 @@ Planned RED:
   schema keeps its bytes, and the v1/v2/v3 projection digests are
   unchanged.
 
+*** Deterministic schema slice: RED/GREEN
+- RED =9253ea0= VERIFIED by Codex (=513d153c=).
+- Test-first refinements followed (=52dba60=, =456834b=):
+  - the production =SDR.Model= path asserts version "2" and
+    =output_schema_sha256 == Canonical.sha256(stored schema)=, and that the
+    sent stdin is the re-rendering of the stored schema;
+  - malformed or non-list =required= values are not repaired;
+  - fresh-VM children run through =SdrAgent.ChildEnv.cmd([])= (#33).
+- GREEN: =SdrAgent.AI.JsonSchema= (=render/1= and =normalize/1=), used at
+  the three generation sites, with =SDR.Schemas= =@version= "2".
+  =render_prompt/2= is untouched.
+- ADR-0004 amendment added.
+
 * Implementation Notes
 ** S12b (Claude writer)
 - Propagation: =ModelProvider= adds =request.witness= (reserved invocation id
