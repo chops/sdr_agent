@@ -86,6 +86,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   require Logger
 
+  alias SdrAgent.AI.JsonSchema
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
   alias SdrAgent.ChildEnv
   alias SdrAgent.Clock
@@ -481,7 +482,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     create_workspace!(workspace)
     prompt_path = Path.join(workspace, "prompt")
 
-    prompt = render_prompt(request.prompt, Zoi.to_json_schema(request.schema))
+    prompt = render_prompt(request.prompt, JsonSchema.render(request.schema))
 
     File.write!(prompt_path, prompt, [:binary])
     File.chmod!(prompt_path, 0o600)

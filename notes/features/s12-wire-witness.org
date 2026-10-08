@@ -767,10 +767,179 @@ an order that varies across BEAM VM runs, for the same schema.
   =Canonical.encode!=. Add a test that renders the same schema in two
   fresh VMs (or with shuffled field order) and asserts identical bytes and
   sha256.
-- This changes rendered prompts. It needs a =prompt-builder= version bump
-  (=prompt-builder/2=) so that old invocations keep re-deriving with
-  =/1=. Treat it as its own reviewed slice, with an entity/ADR check for
-  the provenance meaning.
+- Superseded (Codex consult =689587a9=): an earlier proposal here asked
+  for a =prompt-builder/2= bump. That is NOT needed, and it would orphan
+  the enabled v3 tuple. =render_prompt/2= stays the pure byte function
+  =prompt <> fixed text <> Canonical(schema)= (=prompt-builder/1=). Only
+  the *generation of new* JSON schemas is normalised; the exact normalised
+  schema is stored and sent; historical stored schemas are never
+  normalised. If normalisation ever moved into =render_prompt/2=, a
+  builder bump plus a reviewed projection and enablement would be required.
+
+*** Deterministic schema slice: entity delta (writer table)
+Entity soft-stop: PASS. Reviewer Codex, =d24051f1= (2026-10-07), replying
+to =48715f91= on =6dc9f97=. Report:
+=/tmp/sdr-schema-determinism-6dc9f97-entity-review.md=.
+Precision points (binding):
+- =render/1= returns the normalised schema *value*. Its bytes are
+  =Canonical.encode!(value)= and its digest is =Canonical.sha256(value)=.
+  The invariant is that the canonical bytes of the decoded stored schema
+  equal the sent schema bytes.
+- Version "2" applies only to new SDR-generated refs and calls and their
+  derived ScoreLead output. Other callers keep their declared version.
+- Traversal follows the dialect that pinned Zoi actually emits: tuple-form
+  =items= lists are traversed with their order kept.
+- Implementation rebases on current main and changes only the generation
+  call; the ClaudeCLI launch safeguards are unchanged.
+- Fresh-VM test children run with a scrubbed environment.
+This PASS is for RED planning only.
+Branch =s12-zoi-schema= (off main). Codex design consult =689587a9= (NEEDS-REVIEW) asked for
+schema-aware normalisation and a persisted provenance/hash-regime delta.
+
+Design:
+- New =SdrAgent.AI.JsonSchema.render/1=: =Zoi.to_json_schema/1=, then
+  =normalize/1=. It is the single generator, used at all three call sites:
+  =Sdr.Schemas.ref/1= (hash), =ModelProvider.request_body/1= (the stored
+  app request) and =ClaudeCLI.launch/3= (stdin). The stored and sent
+  schemas are therefore the same bytes, and the hash is over those bytes.
+- =normalize/1= is schema-aware. It sorts (byte order; no dedupe and no
+  repair) only the =required= keyword of a *schema node*, when it is a
+  list of strings. It recurses only into schema positions:
+  - =properties=, =patternProperties=, =$defs=, =definitions= and
+    =dependentSchemas= (map values);
+  - =additionalProperties=, =unevaluatedProperties=, =items=,
+    =unevaluatedItems=, =contains=, =propertyNames=, =not=, =if=, =then=
+    and =else= (schema values);
+  - =allOf=, =anyOf=, =oneOf= and =prefixItems= (lists of schemas, with
+    their order preserved).
+  =const=, =default=, =enum=, =examples= and every unknown keyword are
+  literal data and are left untouched. List orders other than =required=
+  are kept.
+- Tagging contract: =Sdr.Schemas= =@version= goes from "1" to "2". The
+  value object ={id, version, sha256}= with version "2" means "rendered
+  by =JsonSchema.render/1= (required sets sorted), sha256 =
+  Canonical.sha256 of those bytes". It is recorded, as now, in
+  =ModelInvocation.output_schema_version= / =output_schema_sha256= and
+  =Qualification.output_schema_version=. Version "1" rows keep their
+  original (VM-order) hashes: they are not relabelled or rewritten, and the
+  global =Canonical= version is not bumped.
+- Projection and =render_prompt/2= are unchanged. Old invocations re-derive
+  byte-exactly from their stored schemas; new ones from their normalised
+  stored schemas. The enabled v3 tuple is unaffected, and no call is
+  needed.
+
+| Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
+| Schema ref value object (=Sdr.Schemas.ref/1=) | Existing; version regime delta | Stable cross-VM provenance of the output schema | =id= unchanged; =version= "2"; =sha256= = Canonical.sha256(=JsonSchema.render(schema)=) | Recorded on ModelInvocation and Qualification | For one schema, version "2" gives identical bytes and sha256 in every VM. Version "1" values are historical and never recomputed | Producer: Sdr.Model / ScoreLead (unchanged) | None |
+| ModelInvocation (=output_schema_version=, =output_schema_sha256=, stored request =schema=) | Existing attributes; meaning per version | Provenance and the stored app request | No new column. New rows carry version "2" and the normalised schema in the stored request | Unchanged | The stored request schema bytes equal the sent stdin schema bytes, and its hash equals =output_schema_sha256=, for Sdr.Model calls. Historical rows are untouched (append-only lifecycle unchanged) | Unchanged | Other callers (tests and fixtures) set their own versions; this is unchanged |
+| Qualification (=output_schema_version=) | Existing attribute | Same regime tag | Version "2" for new rows | Unchanged | Unchanged | Unchanged | None |
+| =SdrAgent.AI.JsonSchema= (render function; not persisted) | New module | The single schema generator | =render/1=, =normalize/1= | Used by Schemas, ModelProvider and ClaudeCLI | Pure, deterministic and schema-aware; literals untouched | n/a | None |
+| WireWitnessLink / Projection / =prompt-builder/1= | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | — | — | — | — | — | — |
+
+Planned RED:
+- =JsonSchema.render/1= is identical across 3 fresh VMs (=mix run
+  --no-start=, no model, no DB) for the SDR purpose schemas, and for a
+  shuffled-definition schema (fields given in different orders);
+- nested object =required= is sorted (properties, items, $defs, anyOf
+  branches);
+- literal =default= / =const= / =examples= / =enum= values containing a
+  "required" key are untouched; =enum=, =prefixItems= and =anyOf= order is
+  kept; there is no dedupe;
+- =Schemas.ref/1= reports version "2" and its sha equals
+  Canonical.sha256(=render/1=);
+- an Sdr.Model call stores a request schema whose bytes equal those in the
+  sent stdin and whose hash equals =output_schema_sha256=;
+- historical fixtures are unchanged: =render_prompt/2= with an unsorted
+  schema keeps its bytes, and the v1/v2/v3 projection digests are
+  unchanged.
+
+*** Deterministic schema slice: AgentDefinition version delta
+Entity soft-stop: PASS (entity/planning gate only).
+- Reviewer: Codex, =0b73763d= (2026-10-08T05:09Z), replying to =714cf6fd=
+  on =18e6065=.
+- Trigger: yes. Capabilities: ai_pair=true, codex_review=true.
+Conditions:
+- C1: the new SDRAgent v3 has deterministic schema-v2 refs. Every existing
+  definition row, body, hash and status, and every run reference, stays
+  untouched. The identity, the hash guard, KRN authorization and audit
+  coupling are unchanged.
+- C2: the admission-snapshot reading is accepted ONLY for this
+  semantics-preserving normalisation of =required= order. It is not
+  permission for old runs to silently acquire different tools,
+  permissions, policies, prompts or schema constraints later.
+- C3: existing and pending runs, and operator retries, keep their
+  definition id. Later invocations, and the Qualifications derived from
+  them, record the actual schema-v2 provenance. No relabel, backfill or
+  replay claim.
+- C4: a test starting from an actual legacy-v2-pinned run makes a hermetic
+  post-upgrade =SDR.Model= call.
+- C5: the upgrade, idempotence, assignment, retry and hash-guard tests,
+  plus a new reply-intake run that pins v3. Legacy bodies are registered
+  through domain APIs only.
+"Retire v2 later?" is closed: there is no retirement in this slice.
+Codex GREEN review =90369928= on =9e66fd4= returned CHANGES REQUESTED. The
+schema-v2 refs are embedded in =SDRAgent.definition_body/0=
+(="output_schemas"=), but the immutable definition identity stayed at
+=@version 2=. An existing database with SDRAgent v2 (schema-v1 refs)
+therefore refuses =SDRAgent.register/1= and =SDR.assign_lead/2= ("registered
+with another hash").
+
+The cross-VM nondeterminism already made that conflict possible today, for
+any v2 body registered under the other =required= order.
+
+Plan:
+- Bump =SDRAgent= =@version= from 2 to 3. v3's body carries the schema-v2
+  refs, which are deterministic.
+- =Agents.register_definition/2= is unchanged; the hash-conflict guard is
+  not weakened.
+- The v2 row (body and =definition_sha256=) is kept as it is: no rewrite,
+  no delete, no retire.
+
+Pending-run policy:
+- An existing AgentRun keeps its =agent_definition_id= (v2), and so does
+  a retry (=retry_of= copies the prior definition id). That definition
+  records the admission snapshot, i.e. the schema-v1 refs the run was
+  admitted under.
+- Model invocations made by such a run after the upgrade record their own
+  actual =output_schema_version= "2" / =output_schema_sha256=. Per-invocation
+  provenance stays truthful, and the run's pinned definition is not claimed
+  to have changed.
+- New runs (=assign_lead=, reply intake) register and pin v3.
+
+| Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
+| AgentDefinition (SDRAgent) | Existing; new version row | Immutable identity of the agent body | =version= 3 (new row); =definition= now with schema-v2 refs; =definition_sha256= over it | AgentRun belongs to it (unchanged) | (tenant, name, version) is unique; a body hash conflict is refused (unchanged); v2 stays active and untouched; registration is idempotent | KRN registers (unchanged) | Retire v2 later? Proposed: no, not in this slice; it stays referenced by old runs |
+| AgentRun (=agent_definition_id=) | Existing attribute | Pin a run to its admission definition | No change | New runs pin v3; existing runs and their retries keep v2 | No relabel. Invocation-level schema provenance records the version actually used | Unchanged | None |
+| ModelInvocation / Qualification schema provenance | Existing (per the PASS =d24051f1=) | — | — | — | Unchanged from the approved delta | — | — |
+
+Planned RED (Codex's 2 regressions adopted verbatim in substance, plus):
+- a legacy v2 row (schema-v1 refs) stays byte-identical (body and hash)
+  after =register/1=, which returns v3;
+- =register/1= is idempotent for v3;
+- a new lead assignment pins v3;
+- a retry of a v2 run keeps v2 (pinning). That a new invocation records
+  the schema version actually used is already covered on the =SDR.Model=
+  path;
+- the hash-conflict guard still refuses a different v3 body.
+
+*** Deterministic schema slice: definition v3 RED/GREEN
+- RED =2685140= VERIFIED by Codex (=7261e3cd=).
+- Test-first controls added before GREEN, in =c5b1627=:
+  - R1: an operator retry of a legacy-v2-pinned failed run keeps v2;
+  - R2: the stored-schema hash, read through the REC payload API.
+- GREEN: =SDRAgent= =@version 3= and the moduledoc only. The
+  admission-snapshot meaning is in the ADR-0004 amendment.
+
+*** Deterministic schema slice: RED/GREEN
+- RED =9253ea0= VERIFIED by Codex (=513d153c=).
+- Test-first refinements followed (=52dba60=, =456834b=):
+  - the production =SDR.Model= path asserts version "2" and
+    =output_schema_sha256 == Canonical.sha256(stored schema)=, and that the
+    sent stdin is the re-rendering of the stored schema;
+  - malformed or non-list =required= values are not repaired;
+  - fresh-VM children run through =SdrAgent.ChildEnv.cmd([])= (#33).
+- GREEN: =SdrAgent.AI.JsonSchema= (=render/1= and =normalize/1=), used at
+  the three generation sites, with =SDR.Schemas= =@version= "2".
+  =render_prompt/2= is untouched.
+- ADR-0004 amendment added.
 
 * Implementation Notes
 ** S12b (Claude writer)

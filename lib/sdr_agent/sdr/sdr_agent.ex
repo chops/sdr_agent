@@ -26,8 +26,11 @@ defmodule SdrAgent.SDR.SDRAgent do
   is deliberately no send action (spec §6).
 
   `register/1` records this definition (allowed actions, prompt and schema
-  refs with hashes, model policy) as the `SDRAgent` v2 AgentDefinition (v1
-  rows stay as the record of the runs that used them). Not yet routed:
+  refs with hashes, model policy) as the `SDRAgent` v3 AgentDefinition. v3
+  carries the deterministic schema-v2 refs (`SdrAgent.AI.JsonSchema`). v1 and
+  v2 rows stay untouched as the admission record of the runs that used them;
+  such runs keep their pin, and their later model calls record the schema
+  version actually used. Not yet routed:
   `sdr.followup.due` (drafting a follow-up) and redrafts — a scoped
   follow-up slice.
   """
@@ -56,7 +59,7 @@ defmodule SdrAgent.SDR.SDRAgent do
     :reply,
     :stop
   ]
-  @version 2
+  @version 3
 
   agent do
     schema(

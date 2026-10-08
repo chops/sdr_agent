@@ -23,9 +23,13 @@ defmodule SdrAgent.SDR.Schemas do
   ModelInvocation (ADR-0002).
   """
 
+  alias SdrAgent.AI.JsonSchema
   alias SdrAgent.Audit.Canonical
 
-  @version "1"
+  # "2": rendered by `SdrAgent.AI.JsonSchema.render/1` (required sets sorted),
+  # so the bytes and sha256 are stable across VMs. Rows recorded under "1"
+  # keep their original (VM-order) hashes and are never relabelled.
+  @version "2"
   @verdict ["pass", "fail", "unknown"]
 
   @doc "EvidenceExtraction output schema."
@@ -115,7 +119,7 @@ defmodule SdrAgent.SDR.Schemas do
 
   @doc "`{id, version, sha256}` of a purpose's schema (canonical JSON Schema hash)."
   def ref(purpose) do
-    schema = purpose |> for_purpose() |> Zoi.to_json_schema()
+    schema = purpose |> for_purpose() |> JsonSchema.render()
     %{id: "sdr.#{purpose}", version: @version, sha256: Canonical.sha256(schema)}
   end
 

@@ -1,7 +1,7 @@
 defmodule SdrAgent.Outreach.ReplyAssessmentTest do
   @moduledoc """
   S9b reply classification (spec §16, S2 ReplyAssessment): a matched reply's
-  processing queues an AgentRun of SDRAgent v2 whose `sdr.reply.received`
+  processing queues an AgentRun of SDRAgent v3 whose `sdr.reply.received`
   route makes one Zoi-validated model call and records an LLM
   `reply_classification` Decision and the agent ReplyAssessment. No
   response is drafted (owner decision: classify + hand off); the hand-off
@@ -55,10 +55,11 @@ defmodule SdrAgent.Outreach.ReplyAssessmentTest do
     assessments
   end
 
-  test "SDRAgent v2 routes sdr.reply.received to the classifier", _ctx do
+  test "SDRAgent v3 routes sdr.reply.received to the classifier", _ctx do
     assert "sdr.reply.received" in SDRAgent.routed_signal_types()
     assert SdrAgent.SDR.Actions.ClassifyReply in SDRAgent.route_targets()
-    assert SDRAgent.version() == 2
+    # Schema version 2 refs are a new immutable definition body (#35).
+    assert SDRAgent.version() == 3
   end
 
   test "an interested reply is classified by the agent and handed off", ctx do
@@ -83,7 +84,8 @@ defmodule SdrAgent.Outreach.ReplyAssessmentTest do
              {:succeeded, "sdr.reply.received", lead.id}
 
     {:ok, definition} = Ash.get(Agents.AgentDefinition, run.agent_definition_id, actor: ctx.admin)
-    assert {definition.name, definition.version} == {"SDRAgent", 2}
+    # A new reply-intake run pins the current definition (v3).
+    assert {definition.name, definition.version} == {"SDRAgent", 3}
 
     [decision] = decisions_about!(ctx, reply.id, :reply_classification)
 
