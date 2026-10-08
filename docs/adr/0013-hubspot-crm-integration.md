@@ -177,6 +177,27 @@ out here.
 - Whether notes and tasks accept a custom `hasUniqueValue` property.
 - The exact scope names shown in the scope picker.
 
+## Owner Decisions
+
+Relayed by the coordinator on 2026-10-07.
+
+- **OQ-D (credential): DECIDED 2026-10-07, yes.**
+  - A HubSpot service key (public beta) is the primary credential.
+  - The static-auth private project app token is the fallback.
+  - The secret lives in a separate gitignored sops file
+    (`secrets/hubspot.local.sops.yaml`) that only the owner edits.
+- **OQ-A (lead creation): DECIDED 2026-10-07.**
+  - Leads are auto-created by the proposed rule (§4, `crm_lead_rule`).
+  - Each lead must pass the reserved test-domain guard and the suppression
+    checks.
+  - Leads are never auto-assigned.
+- **OQ-B (field ownership): PENDING.** The owner requested a pros-and-cons
+  explanation from Claude and Codex first.
+- **OQ-C, OQ-E: open, for gate B.**
+
+These answers satisfy the owner gates for H1a (OQ-D) and Lead creation
+(OQ-A). The entity-review gates A1 and A2 are still required.
+
 ## Options Considered
 
 ### Credential

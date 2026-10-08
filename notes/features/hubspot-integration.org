@@ -344,14 +344,36 @@ Per ADR §§1–4 and §8:
   path, and the send gate re-checks the current email.
 - STANDARD portals are refused.
 
+* Owner decisions
+Relayed by the coordinator on 2026-10-07.
+
+- *OQ-D — DECIDED 2026-10-07: YES.*
+  - Use a HubSpot service key (public beta).
+  - Fallback: the static-auth private project app token.
+  - The secret lives in a separate gitignored sops file
+    (=secrets/hubspot.local.sops.yaml=) that only the owner edits.
+  - This satisfies the owner gate on H1a. H1a still needs the Gate A1 PASS.
+- *OQ-A — DECIDED 2026-10-07: auto-create leads by the proposed rule.*
+  - The rule: lifecycle stage subscriber/lead/MQL/SQL; lead status not
+    UNQUALIFIED/CONNECTED/OPEN_DEAL; opt-out known false.
+  - Each lead must also pass the reserved test-domain guard and the
+    suppression checks.
+  - Leads are never auto-assigned.
+  - This satisfies the owner gate on Lead =:create_from_crm=. The row still
+    needs the Gate A2 PASS.
+- *OQ-B — PENDING.* The owner asked Claude and Codex to explain the pros and
+  cons first. The Account/Contact =:sync_update= and =:sync_email= rows stay
+  inert until it is answered.
+- *OQ-C, OQ-E — open, for gate B.*
+
 * Questions for the owner (short list; A-gated items first)
-- *OQ-D (gates H1a)* Is a public-beta service key acceptable, with the
+- *OQ-D (gates H1a) — ANSWERED 2026-10-07 (see Owner decisions)* Is a public-beta service key acceptable, with the
   static-auth app as fallback and the secret in a separate gitignored sops
   file?
-- *OQ-A (gates H1b Lead creation)* Should leads be created automatically
+- *OQ-A (gates H1b Lead creation) — ANSWERED 2026-10-07 (see Owner decisions)* Should leads be created automatically
   from HubSpot by the proposed lifecycle and lead-status rule (never
   auto-assigned), or only by an explicit admin action per contact?
-- *OQ-B (gates H1b updates)* Should HubSpot win for profile fields and email
+- *OQ-B (gates H1b updates) — PENDING: the owner asked for pros and cons first* Should HubSpot win for profile fields and email
   on linked records, with local admin edits of those fields refused?
 - *OQ-C (Gate B)* Should a HubSpot deletion become a permanent local
   suppression, with cross-contact merges resolved by you?
@@ -370,6 +392,7 @@ Not applicable: documentation-only PR.
 ** Phase 5 (Verify + Finalize)
 - [X] =bin/verify-workflow= green
 - [ ] Gate A1 PASS; Gate A2 PASS
-- [ ] Owner answers OQ-D (H1a), OQ-A and OQ-B (H1b), OQ-C and OQ-E (B)
+- [X] Owner answers OQ-D (H1a) and OQ-A (H1b): 2026-10-07
+- [ ] Owner answers OQ-B (H1b; pros and cons requested), OQ-C and OQ-E (B)
 - [ ] Gate B re-submitted and PASS
 - [ ] ADR-0013 accepted
