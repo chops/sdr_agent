@@ -1147,70 +1147,112 @@ None.
    the ignored path.
    - The owner runs the independent owner-only probe at once, or the smoke
      hatch after H1a merges.
-   - **The key must never appear in argv, the environment, stdout or
-     stderr.** This revision replaces an earlier form that expanded the key
-     into curl's argv and printed the full body (Codex owner-safety note
-     `287bde54`). The probe used now works like this:
-     - `sops -d --extract` writes the key to a pipe.
-     - The script reads it with the `read` builtin and passes it to curl as
-       a config file on stdin (`printf` builtin, `--config -`).
-     - curl is restricted to https with no redirects and a timeout, and its
-       body and errors are suppressed.
-     - Only the allowlisted projection `{portalId, accountType}` is printed,
-       or a coded error (`http=<code>`, `transport_error curl_exit=<n>`,
-       `unexpected_shape`, `missing_key`).
-     - The URL override exists only for a `https://127.0.0.1:*` self-test.
-   - The owner saves the script *outside the repository* (for example
-     `~/.local/bin/hubspot-probe.sh`), first runs the canary self-test with
-     a fake key, then runs the real probe:
+   - **The key must never appear in argv, any child's environment, stdout
+     or stderr.** Revision history of this probe:
+     - The first form (`sops exec-env … curl -H …`) expanded the key into
+       curl's argv and printed the full body.
+     - It was replaced in `ac9f1f2` (Codex note `287bde54`).
+     - That replacement was hardened again after Codex round-3 review
+       `1844e715`, which found four gaps: a textual URL check that accepted
+       `https://127.0.0.1:443@offhost.invalid/`, an inherited exported
+       variable surviving `read`, an accountType echo that passed the jq
+       projection, and curlrc influence.
+   - **How the current script works:**
+     - It runs in a cleared environment (`env -i`, `--noprofile --norc`).
+     - It sets `set +a` and creates a fresh unexported variable, verified
+       with `declare -p`.
+     - The key is read from stdin with the `read` builtin and handed to curl
+       as a config on stdin (`printf` builtin, `--config -`).
+     - `--disable` is curl's *first* option, so curlrc files are ignored.
+       curl is also restricted to https and https redirects, no redirects,
+       `--noproxy '*'`, and a timeout, and its body and errors are
+       suppressed.
+     - A body containing the key returns `secret_echo`.
+     - The jq filter allows only the fixed accountType enum and a bounded
+       integer portalId. Anything else returns `unexpected_shape`.
+     - Output is only the projection or a fixed code.
+     - The URL override must match `^https://127\.0\.0\.1:<1-65535>/$`
+       exactly.
+   - **Running it.** The owner saves the script *outside the repository*
+     (for example `~/.local/bin/hubspot-probe.sh`).
 
      ```bash
      #!/usr/bin/env bash
-     # Owner-only H0 probe. Reads the service key from STDIN (never argv, never env),
-     # sends it to curl via a stdin config (-K -), prints only {portalId, accountType}.
-     # Usage: sops -d --extract '["hubspot_service_key"]' secrets/hubspot.local.sops.yaml | bash hubspot-probe.sh
+     # Owner-only H0 probe (read-only). The service key arrives on STDIN only; it is
+     # never placed in argv or in the environment of any child, and never printed.
+     # Run (clean environment, no rc files):
+     #   sops -d --extract '["hubspot_service_key"]' secrets/hubspot.local.sops.yaml \
+     #     | env -i PATH="$PATH" bash --noprofile --norc ~/.local/bin/hubspot-probe.sh
      set -euo pipefail
-     set +x
+     set +x +a                       # no tracing, no allexport
+     unset -v hs_key 2>/dev/null || true
+     declare hs_key=""               # fresh, unexported variable
+     readonly HS_FILTER='if (type == "object")
+         and (.accountType | type == "string")
+         and (.accountType | IN("STANDARD","DEVELOPER_TEST","SANDBOX","APP_DEVELOPER"))
+         and (.portalId | type == "number") and (.portalId == (.portalId | floor))
+         and (.portalId >= 1) and (.portalId <= 999999999999)
+       then {portalId, accountType} else error("shape") end'
+
      url="https://api.hubapi.com/account-info/v3/details"
      if [ -n "${HUBSPOT_PROBE_URL:-}" ]; then
-       case "$HUBSPOT_PROBE_URL" in
-         https://127.0.0.1:*) url="$HUBSPOT_PROBE_URL" ;;   # canary self-test only
-         *) echo "probe: refused_url" >&2; exit 2 ;;
-       esac
+       # self-test only: exactly https://127.0.0.1:<port>/ (no userinfo, no path)
+       if [[ "$HUBSPOT_PROBE_URL" =~ ^https://127\.0\.0\.1:([0-9]{1,5})/$ ]] \
+          && (( 10#${BASH_REMATCH[1]} >= 1 && 10#${BASH_REMATCH[1]} <= 65535 )); then
+         url="$HUBSPOT_PROBE_URL"
+       else
+         echo "probe: refused_url"; exit 2
+       fi
      fi
-     IFS= read -r key || true
-     [ -n "${key:-}" ] || { echo "probe: missing_key"; exit 2; }
+
+     IFS= read -r hs_key || true
+     [[ "$(declare -p hs_key)" == "declare -- hs_key="* ]] || { echo "probe: key_var_exported"; exit 2; }
+     [[ "$hs_key" =~ ^[A-Za-z0-9._-]{16,255}$ ]] || { hs_key=""; echo "probe: missing_or_malformed_key"; exit 2; }
+
      set +e
-     resp="$(printf 'header = "Authorization: Bearer %s"\n' "$key" \
-       | curl --silent --proto '=https' --max-redirs 0 --max-time "${HUBSPOT_PROBE_MAX_TIME:-20}" \
+     resp="$(printf 'header = "Authorization: Bearer %s"\n' "$hs_key" \
+       | curl --disable --silent --proto '=https' --proto-redir '=https' --max-redirs 0 \
+              --noproxy '*' --max-time "${HUBSPOT_PROBE_MAX_TIME:-20}" \
               --config - --write-out '\n%{http_code}' "$url" 2>/dev/null)"
      rc=$?
      set -e
-     unset key
-     if [ "$rc" -ne 0 ]; then echo "probe: transport_error curl_exit=$rc"; exit 1; fi
-     code="${resp##*$'\n'}"
-     json="${resp%$'\n'*}"
-     unset resp
-     if [ "$code" != "200" ]; then echo "probe: http=$code"; exit 1; fi
-     printf '%s' "$json" \
-       | jq -ce '{portalId: (.portalId | numbers), accountType: (.accountType | strings)}' 2>/dev/null \
-       || { echo "probe: unexpected_shape"; exit 1; }
+     if [ "$rc" -ne 0 ]; then hs_key=""; resp=""; echo "probe: transport_error curl_exit=$rc"; exit 1; fi
+     code="${resp##*$'\n'}"; json="${resp%$'\n'*}"; resp=""
+     if [[ "$json" == *"$hs_key"* ]]; then hs_key=""; json=""; echo "probe: secret_echo"; exit 1; fi
+     hs_key=""
+     [[ "$code" =~ ^[0-9]{3}$ ]] || code="???"
+     if [ "$code" != "200" ]; then json=""; echo "probe: http=$code"; exit 1; fi
+     out="$(printf '%s' "$json" | jq -ce "$HS_FILTER" 2>/dev/null)" || { json=""; echo "probe: unexpected_shape"; exit 1; }
+     json=""
+     printf '%s\n' "$out"
      ```
 
      ```bash
-     # 1. canary self-test (fake key, local port, expect "probe: transport_error ...")
-     printf 'pat-na1-CANARY-FAKE\n' | HUBSPOT_PROBE_URL=https://127.0.0.1:48443/ HUBSPOT_PROBE_MAX_TIME=2 bash ~/.local/bin/hubspot-probe.sh
-     # 2. real probe (prints only {"portalId":…,"accountType":…})
-     sops -d --extract '["hubspot_service_key"]' secrets/hubspot.local.sops.yaml | bash ~/.local/bin/hubspot-probe.sh
+     # real probe (prints only {"portalId":…,"accountType":…} or a fixed code)
+     sops -d --extract '["hubspot_service_key"]' secrets/hubspot.local.sops.yaml \
+       | env -i PATH="$PATH" bash --noprofile --norc ~/.local/bin/hubspot-probe.sh
      ```
 
-   - Claude ran the canary self-test on 2026-10-07 with a random fake
-     `pat-na1-CANARY…` value against a local listener that never answers. It
-     made no HubSpot call. While curl was alive, `ps -ww -A -o args` and
-     `ps -ww -E` (environment) were sampled every 100 ms. The fake key did
-     not appear in the process listings, stdout or stderr. The script printed
-     `probe: transport_error curl_exit=28`, and a non-loopback URL override
-     was refused.
+   - **Adversarial self-test** (Claude, 2026-10-07; fake keys only; a
+     loopback TLS test server with a throwaway certificate; no HubSpot
+     call):
+
+     | Case | Result |
+     |---|---|
+     | valid body | projection printed |
+     | key echoed in `accountType` or another field | `secret_echo` |
+     | string portalId | `unexpected_shape` |
+     | hung server | `transport_error curl_exit=28` |
+     | hostile `~/.curlrc` (trace, output, insecure) | ignored; no files written |
+     | `https://127.0.0.1:443@offhost.invalid/`, port 99999, a path, `http`, `127.0.0.1.evil.invalid` | `refused_url` |
+     | malformed or empty key | `missing_or_malformed_key` |
+
+     With curl held open, process argv and environment (`ps -ww`, `ps -E`)
+     were sampled every 100 ms. The stdin key appeared in no process. A
+     parent-exported `hs_key` with `SHELLOPTS=allexport` was *absent from
+     curl's environment*. It remained visible only in the probe shell's own
+     inherited environment, which the documented `env -i` invocation
+     prevents.
    - The owner reports the facts in prose; agents never see the key.
 3. **H1b and H1c** start only after the H0 facts are recorded and the gating
    owner answers are in.
