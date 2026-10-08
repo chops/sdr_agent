@@ -8,6 +8,7 @@ defmodule SdrAgent.SDR do
       In one transaction (outbox): the lead new → assigned, the `SDRAgent`
       AgentDefinition (registered if absent), the Oban job, its Operation,
       the queued AgentRun and the `sdr.lead.assigned` signal event.
+    * `retry_run/2` — active ADM retries a stopped run (S13b);
     * `pause_campaign/2` — ADM/REV pause a campaign and record
       `sdr.campaign.paused` (the agent re-checks campaign state
       deterministically before it works or enrolls a lead).
@@ -46,7 +47,7 @@ defmodule SdrAgent.SDR do
   first (the supplied struct may be stale): `new` is assigned, `assigned`
   is accepted, any other state is `{:error, {:lead_not_assignable, status}}`;
   a lead with a queued or running AgentRun is `{:error, :assignment_active}`
-  (an operator retry of a stopped run is `SdrAgent.Agents.retry_run/2`).
+  (an operator retry of a stopped run is `retry_run/2`).
   The campaign must exist in the tenant.
   """
   def assign_lead(lead, opts) do
@@ -171,6 +172,28 @@ defmodule SdrAgent.SDR do
           "responder" => responder && inspect(responder)
         })
     end
+  end
+
+  @doc """
+  Active ADM: retries a failed, budget-exhausted or cancelled AgentRun by id
+  — the only operator retry path (S13b). In one transaction the new run, its
+  job (and, for an assignment, its Operation) are written, so the work
+  actually executes. Returns `{:ok, %{run, operation, job}}` or
+  `{:error, reason}` with nothing written; any other actor is refused with
+  `Ash.Error.Forbidden` and the attempt is audited (`authz.denied`). See
+  `SdrAgent.SDR.Retry` for the checks and lock order.
+  """
+  def retry_run(run_id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    meta = %{
+      resource: Agents.AgentRun,
+      action: :sdr_retry_run,
+      subject_id: run_id,
+      guarded?: true
+    }
+
+    Guard.run(meta, actor, fn -> SdrAgent.SDR.Retry.run(run_id, actor) end)
   end
 
   @doc "ADM/REV: pauses `campaign` and records `sdr.campaign.paused`, in one transaction."

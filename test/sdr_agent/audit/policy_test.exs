@@ -48,7 +48,7 @@ defmodule SdrAgent.Audit.PolicyTest do
         {"create_run",
          fn -> Agents.create_run(AgentsFixtures.run_attrs(definition), actor: aur) end},
         {"cancel_run", fn -> Agents.cancel_run(ctx.run, actor: aur) end},
-        {"retry_run", fn -> Agents.retry_run(ctx.run, actor: aur) end},
+        {"retry_run", fn -> SdrAgent.SDR.retry_run(ctx.run.id, actor: aur) end},
         {"set_run_phase", fn -> Agents.set_run_phase(ctx.run, :qualify, actor: aur) end},
         {"record_decision",
          fn ->

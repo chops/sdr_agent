@@ -7,10 +7,10 @@ defmodule SdrAgentWeb.OperationsLive do
   failed ones (`cancel_operation/2`; ADM), and the agent runs
   (`Agents.list_runs/1`) linking to `SdrAgentWeb.RunLive`.
 
-  Operation *retry* is deliberately not offered: `retry_operation/2` only
-  moves the row to `running` and no path re-enqueues its job yet (S7/S8
-  notes: resume-after-failure is S13), so a button would leave a running
-  operation with nothing running. Every action goes to the domain with the
+  Operation *retry* is not offered: `retry_operation/2` is an internal
+  execution primitive of the kind actor (S13b). Operator retries are the
+  failed-run retry (`SDR.retry_run/2`) and the failed-webhook retry
+  (`Outreach.retry_webhook/2`), admin only. Every action goes to the domain with the
   scope's user; an auditor's forged event is refused and audited, a
   reviewer's cancel is refused by the Operation policy. An auditor's view is
   recorded before it is served. Updates live (`SdrAgentWeb.LiveRefresh`).

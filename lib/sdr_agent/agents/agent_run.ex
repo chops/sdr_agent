@@ -24,10 +24,12 @@ defmodule SdrAgent.Agents.AgentRun do
   Counters: `:reserve_model_call` (atomic, refuses at `max_model_calls`),
   `:settle_model_call`, `:record_tool_call` (atomic, refuses at
   `max_tool_calls`) — counters only increase. An operator `:retry` creates a
-  new run linked by `retry_of_id`.
+  new run linked by `retry_of_id` (and, for an assignment, bound to its new
+  Operation).
 
   Actors: AGT, SCH create; AGT transitions, phase and counters; ADM, REV
-  cancel and retry (AGT may also cancel); reads for any actor. Every write
+  cancel (AGT may also cancel); retry is active ADM inside
+  `SdrAgent.SDR.retry_run/2` only (S13b); reads for any actor. Every write
   appends an AuditEvent (`agents.run.*`).
   """
   use Ash.Resource,
@@ -136,8 +138,15 @@ defmodule SdrAgent.Agents.AgentRun do
     end
 
     create :retry do
-      description "Operator retry of a failed, budget-exhausted or cancelled run."
+      description """
+      Operator retry of a failed, budget-exhausted or cancelled run — only
+      inside `SdrAgent.SDR.retry_run/2` (S13b). `operation_id`: the new
+      run's Operation, required for an assignment (`sdr.lead.assigned`)
+      retry, absent for a reply-classification retry.
+      """
+
       argument :run_id, :uuid, allow_nil?: false
+      argument :operation_id, :uuid
       change SdrAgent.Agents.Changes.RetryOf
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
@@ -305,8 +314,10 @@ defmodule SdrAgent.Agents.AgentRun do
       authorize_if {Checks.ActorType, types: [:agent_runtime, :scheduler]}
     end
 
+    # S13b: active ADM only, and only inside the retry orchestration.
     policy action(:retry) do
-      authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
+      forbid_unless SdrAgent.Agents.Checks.RetryContext
+      authorize_if {Checks.ActorRole, roles: [:admin]}
     end
 
     policy action(:cancel) do

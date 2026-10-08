@@ -23,9 +23,9 @@ defmodule SdrAgent.Operations.Operation do
   Kinds listed in `kind_queues/0` run only on their queue (`reconcile_model`
   → `reconciliation`, S12).
 
-  Actors: the system actor that owns the `kind` (`kind_actors/0`) creates and
-  transitions it; ADM may retry and cancel; reads for ADM, REV, AUR, AUD and
-  system actors. Every write appends an AuditEvent (`operations.operation.*`).
+  Actors: the system actor that owns the `kind` (`kind_actors/0`) creates,
+  transitions and retries it; ADM may cancel (S13b: there is no operator
+  retry of an Operation); reads for ADM, REV, AUR, AUD and system actors. Every write appends an AuditEvent (`operations.operation.*`).
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -207,7 +207,15 @@ defmodule SdrAgent.Operations.Operation do
       authorize_if OperationKindActor
     end
 
-    policy action([:retry, :cancel]) do
+    # S13b A4: `:retry` is an internal execution primitive of the kind actor
+    # (the S12 witness reconciler); no operator path, since it re-enqueues
+    # nothing. Operator retries are `SDR.retry_run/2` and
+    # `Outreach.retry_webhook/2`. ADM keeps `:cancel`.
+    policy action(:retry) do
+      authorize_if OperationKindActor
+    end
+
+    policy action(:cancel) do
       authorize_if OperationKindActor
       authorize_if {Checks.ActorRole, roles: [:admin]}
     end

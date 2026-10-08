@@ -14,7 +14,8 @@ defmodule SdrAgent.Agents do
       a different hash is refused), `retire_definition/2`;
     * runs — `create_run/2`, `start_run/2`, `set_run_phase/3`,
       `succeed_run/2`, `fail_run/3`, `exhaust_run_budget/3`, `cancel_run/2`,
-      `retry_run/2`, `reserve_model_call/2`, `get_run/2`,
+      `reserve_model_call/2`, `get_run/2` (operator retry is
+      `SdrAgent.SDR.retry_run/2`, S13b),
       `find_run_by_operation/2`, `active_runs_for_lead/2`, `list_runs/1`;
     * model calls — `reserve_model_invocation/3` (reserves the run budget,
       enforces the persisted daily limit, stores the request Payload and
@@ -139,9 +140,6 @@ defmodule SdrAgent.Agents do
 
   @doc "queued | running → cancelled (ADM, REV, AGT)."
   def cancel_run(run, opts), do: update(run, :cancel, Keyword.get(opts, :attrs, %{}), opts)
-
-  @doc "Creates a new run retrying a failed, budget-exhausted or cancelled one (ADM, REV)."
-  def retry_run(run, opts), do: create(AgentRun, :retry, %{run_id: run.id}, opts, run.id)
 
   @doc "Atomically reserves one model call against the run budget (AGT)."
   def reserve_model_call(run, opts), do: update(run, :reserve_model_call, %{}, opts)
