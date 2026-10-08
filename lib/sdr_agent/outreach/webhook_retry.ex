@@ -30,11 +30,9 @@ defmodule SdrAgent.Outreach.WebhookRetry do
   alias SdrAgent.Audit
   alias SdrAgent.Operations.Checks.WebhookRetryContext
   alias SdrAgent.Operations.WebhookEvent
-  alias SdrAgent.Outreach.Webhooks
+  alias SdrAgent.Operations.WebhookRetryLedger, as: Ledger
   alias SdrAgent.Repo
 
-  @worker "SdrAgent.Outreach.WebhookWorker"
-  @limit 3
   @live_states ~w(available scheduled executing retryable)
 
   @doc "Runs the retry for an authorized active admin `actor` (see the moduledoc)."
@@ -82,18 +80,7 @@ defmodule SdrAgent.Outreach.WebhookRetry do
   defp failed(%{signature_verdict: :valid, processing_status: :failed}), do: :ok
   defp failed(_event), do: {:error, :not_failed}
 
-  defp original_job(event) do
-    from(j in Oban.Job,
-      where: j.worker == @worker and fragment("?->>'webhook_event_id' = ?", j.args, ^event.id),
-      lock: "FOR UPDATE"
-    )
-    |> Repo.all()
-    |> case do
-      [job] -> {:ok, job}
-      [] -> {:error, :retry_window_expired}
-      _ -> {:error, :ambiguous_job}
-    end
-  end
+  defp original_job(event), do: Ledger.lock_original_job(event)
 
   defp intact(%{args: args}, event) do
     with true <- args["tenant_id"] == event.tenant_id and args["webhook_event_id"] == event.id,
@@ -109,12 +96,8 @@ defmodule SdrAgent.Outreach.WebhookRetry do
   defp not_live(_job), do: :ok
 
   defp ordinal(event) do
-    requested =
-      event
-      |> Webhooks.retry_ledger()
-      |> Enum.count(&(&1.event_type == "webhook.retry_requested"))
-
-    if requested < @limit, do: {:ok, requested + 1}, else: {:error, :retry_limit_reached}
+    requested = Ledger.requested(event)
+    if requested < Ledger.limit(), do: {:ok, requested + 1}, else: {:error, :retry_limit_reached}
   end
 
   defp request(event, ordinal, job, actor) do

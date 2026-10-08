@@ -176,6 +176,7 @@ defmodule SdrAgent.Operations.WebhookEvent do
         constraints: [one_of: [:validation_error, :crash]]
 
       argument :reason, :string, allow_nil?: false
+      change {Changes.RedactArguments, arguments: [:reason]}
       change get_and_lock_for_update()
 
       change {Transition,
@@ -194,15 +195,16 @@ defmodule SdrAgent.Operations.WebhookEvent do
     update :request_retry do
       description """
       ADM inside `Outreach.retry_webhook/2` only (S13b B2): failed → failed,
-      audits `webhook.retry_requested` with the orchestration's ordinal
-      (1..3) and the re-enqueued job id; caller arguments are ignored.
+      audits `webhook.retry_requested` with the ordinal and job id, both
+      re-verified under the event lock (next ordinal, ≤ 3; the exact,
+      not-live original job); caller arguments are ignored.
       """
 
       require_atomic? false
       argument :ordinal, :integer, constraints: [min: 1, max: 3]
       argument :oban_job_id, :integer
-      change Changes.RetryRequest
       change get_and_lock_for_update()
+      change Changes.RetryRequest
 
       change {Transition,
               from: [:failed], to: :failed, locked?: true, attribute: :processing_status}
@@ -215,8 +217,10 @@ defmodule SdrAgent.Operations.WebhookEvent do
     update :record_retry_failed do
       description """
       WHK (S13b B4): a requested retry failed again. failed → failed;
-      consumes request `ordinal` (`webhook.retry_failed`); the event's
-      existing Failure stays its single attention entry.
+      consumes exactly the pending request, its ordinal read from the ledger
+      under the event lock (a caller ordinal is ignored; none pending: no
+      write); appends `webhook.retry_failed` with the redacted reason. The
+      event's existing Failure stays its single attention entry.
       """
 
       require_atomic? false
@@ -226,8 +230,10 @@ defmodule SdrAgent.Operations.WebhookEvent do
         constraints: [one_of: [:validation_error, :crash]]
 
       argument :reason, :string, allow_nil?: false
-      argument :ordinal, :integer, allow_nil?: false, constraints: [min: 1, max: 3]
+      argument :ordinal, :integer, constraints: [min: 1, max: 3]
+      change {Changes.RedactArguments, arguments: [:reason]}
       change get_and_lock_for_update()
+      change Changes.ConsumeRetryRequest
 
       change {Transition,
               from: [:failed], to: :failed, locked?: true, attribute: :processing_status}

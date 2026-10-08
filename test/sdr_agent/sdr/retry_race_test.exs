@@ -126,6 +126,38 @@ defmodule SdrAgent.SDR.RetryRaceTest do
     assert Enum.count(events, &(&1.event_type == "webhook.retry_requested")) == 1
   end
 
+  test "two concurrent failures of one retry request: exactly one consumes it", ctx do
+    body = SdrAgent.WebhookFixtures.outcome_body("bounce", %{provider_message_id: "capture-0"})
+    assert {:ok, %{event: event}} = SdrAgent.WebhookFixtures.ingest!("bounce", body)
+    assert %{success: 1} = SdrAgent.WebhookFixtures.process!()
+    assert {:ok, %{ordinal: 1}} = SdrAgent.Outreach.retry_webhook(event.id, actor: ctx.admin)
+    whk = Actor.system(:webhook_ingestor, ctx.tenant_id)
+    {:ok, failed} = Ash.get(SdrAgent.Operations.WebhookEvent, event.id, actor: whk)
+
+    results =
+      1..2
+      |> Enum.map(fn _ ->
+        Task.async(fn ->
+          with_connection(fn ->
+            failed
+            |> Ash.Changeset.for_update(
+              :record_retry_failed,
+              %{class: :crash, reason: "concurrent failure"},
+              actor: whk
+            )
+            |> Ash.update()
+          end)
+        end)
+      end)
+      |> Task.await_many(30_000)
+
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 1, inspect(results)
+    assert Enum.count(results, &match?({:error, _}, &1)) == 1, inspect(results)
+
+    {:ok, events} = Ash.read(Audit.AuditEvent, Audit.Kernel.opts(ctx.tenant_id))
+    assert Enum.count(events, &(&1.event_type == "webhook.retry_failed")) == 1
+  end
+
   defp with_connection(fun) do
     :ok = Sandbox.checkout(SdrAgent.Repo, sandbox: false)
 

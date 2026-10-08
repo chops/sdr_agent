@@ -41,6 +41,7 @@ defmodule SdrAgent.Outreach.Webhooks do
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Clock
   alias SdrAgent.Operations.WebhookEvent
+  alias SdrAgent.Operations.WebhookRetryLedger
   alias SdrAgent.Outreach.Changes.NormalizeSuppression
   alias SdrAgent.Outreach.DeliveryOperation
   alias SdrAgent.Outreach.DeliveryReceipt
@@ -220,42 +221,13 @@ defmodule SdrAgent.Outreach.Webhooks do
       nil ->
         :done
 
-      ordinal ->
-        update(
-          event,
-          :record_retry_failed,
-          %{class: class, reason: reason, ordinal: ordinal},
-          whk
-        )
+      _ordinal ->
+        # The action re-derives `ordinal` from the ledger under the lock.
+        update(event, :record_retry_failed, %{class: class, reason: reason}, whk)
     end
   end
 
-  @doc """
-  The ordinal of the event's unconsumed operator retry request — its latest
-  `webhook.retry_requested` with no later `webhook.retry_failed` — or nil
-  (S13b B3). Read under the event's row lock by the processor.
-  """
-  def pending_retry(event) do
-    case retry_ledger(event) do
-      [%{event_type: "webhook.retry_requested"} = latest | _] ->
-        latest.payload["arguments"]["ordinal"]
-
-      _ ->
-        nil
-    end
-  end
-
-  @doc "The event's retry ledger entries, newest first (S13b)."
-  def retry_ledger(event) do
-    Audit.AuditEvent
-    |> Ash.Query.for_read(:read, %{}, Kernel.opts(event.tenant_id))
-    |> Ash.Query.filter(
-      tenant_id == ^event.tenant_id and subject_id == ^event.id and
-        event_type in ["webhook.retry_requested", "webhook.retry_failed"]
-    )
-    |> Ash.Query.sort(sequence: :desc)
-    |> Ash.read!()
-  end
+  defp pending_retry(event), do: WebhookRetryLedger.pending(event)
 
   defp describe(%{__exception__: true} = error), do: error.__struct__ |> inspect() |> cap()
   defp describe(error), do: error |> inspect(limit: 3, printable_limit: 200) |> cap()

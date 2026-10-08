@@ -17,8 +17,10 @@ defmodule SdrAgent.Outreach.WebhookRetryTest do
 
   alias SdrAgent.Actor
   alias SdrAgent.Operations
+  alias SdrAgent.Operations.Checks.WebhookRetryContext
   alias SdrAgent.Operations.WebhookEvent
   alias SdrAgent.Outreach
+  alias SdrAgent.Test.SecretShapes
 
   @worker "SdrAgent.Outreach.WebhookWorker"
 
@@ -185,6 +187,89 @@ defmodule SdrAgent.Outreach.WebhookRetryTest do
 
     assert webhook!(ctx, event).processing_status == :failed
     assert ledger_size(ctx) == before
+  end
+
+  # Review #31 (Codex, adopted): the action-level invariants of B2 and B4
+  # hold even when the action is reached with a forged marker or a caller
+  # ordinal — not only on the orchestration's happy path.
+  describe "action-level contracts" do
+    defp record_failure(ctx, event, ordinal, reason) do
+      event
+      |> Ash.Changeset.for_update(
+        :record_retry_failed,
+        %{class: :crash, ordinal: ordinal, reason: reason},
+        actor: Actor.system(:webhook_ingestor, ctx.tenant.id)
+      )
+      |> Ash.update()
+    end
+
+    test ":request_retry rechecks the ordinal and the exact original job under its locks",
+         ctx do
+      event = invalid_event!(ctx, delivered!(ctx))
+      job = job_of(event)
+
+      for {ordinal, job_id} <- [{3, -1}, {3, job.id}, {1, -1}, {1, job.id + 1_000_000}] do
+        assert {:error, _} =
+                 event
+                 |> Ash.Changeset.for_update(:request_retry, %{},
+                   actor: ctx.admin,
+                   context: WebhookRetryContext.context(ordinal, job_id)
+                 )
+                 |> Ash.update()
+      end
+
+      assert events_of_type(ctx.tenant, "webhook.retry_requested") == []
+      assert job_of(event).state == job.state
+    end
+
+    test ":record_retry_failed without a pending request writes nothing", ctx do
+      event = invalid_event!(ctx, delivered!(ctx))
+
+      assert {:error, _} = record_failure(ctx, event, 2, "synthetic failure")
+      assert events_of_type(ctx.tenant, "webhook.retry_failed") == []
+    end
+
+    test ":record_retry_failed consumes the pending ordinal, never the caller's, once", ctx do
+      event = invalid_event!(ctx, delivered!(ctx))
+      assert {:ok, %{ordinal: 1}} = Outreach.retry_webhook(event.id, actor: ctx.admin)
+
+      assert {:ok, _} = record_failure(ctx, event, 3, "synthetic failure")
+      assert {:error, _} = record_failure(ctx, event, 1, "synthetic failure")
+
+      assert [consume] = events_of_type(ctx.tenant, "webhook.retry_failed")
+      assert consume.payload["arguments"]["ordinal"] == 1
+    end
+
+    test "failure reasons are redacted before they reach the immutable ledger", ctx do
+      canary = SecretShapes.provider_key()
+      assert SdrAgent.Operations.Redactor.redact(canary) != canary
+
+      delivery = delivered!(ctx)
+
+      # webhook.retry_failed …
+      event = invalid_event!(ctx, delivery)
+      assert {:ok, %{ordinal: 1}} = Outreach.retry_webhook(event.id, actor: ctx.admin)
+      assert {:ok, _} = record_failure(ctx, event, 1, "synthetic failure " <> canary)
+
+      # … and webhook.failed (received → failed).
+      assert {:ok, %{status: :accepted, event: fresh}} =
+               ingest!("delivered", outcome_body("delivered", delivery))
+
+      {:ok, _} =
+        fresh
+        |> Ash.Changeset.for_update(
+          :mark_failed,
+          %{class: :crash, reason: "processing error " <> canary},
+          actor: Actor.system(:webhook_ingestor, ctx.tenant.id)
+        )
+        |> Ash.update()
+
+      for type <- ["webhook.failed", "webhook.retry_failed"],
+          appended <- events_of_type(ctx.tenant, type) do
+        refute String.contains?(Jason.encode!(appended.payload), canary),
+               "a credential-shaped value persisted in #{type}"
+      end
+    end
   end
 
   describe "authorization" do

@@ -195,13 +195,52 @@ and direct-action tests still apply.
   events are refused and audited by the domain.
 
 * Deviations
-- B2 says a direct call is "Forbidden and audited". A direct
-  =Ash.update(:request_retry)= (or =Ash.create(:retry)=) is Forbidden but,
-  like every raw Ash call that bypasses the domain functions, not audited:
-  denial audit is the =Guard='s, and there is no domain function for
-  either action. Both orchestration paths audit every refused actor.
+- *Table correction (B2 and A2, ruled acceptable by Codex on #31 only with
+  this explicit correction).* v3 said a direct call to the orchestration-only
+  actions is "Forbidden and audited". The built guarantee is narrower and
+  explicit:
+  - *Public paths:* every public retry path — =SDR.retry_run/2= and
+    =Outreach.retry_webhook/2= — refuses any actor other than an active ADM
+    of the tenant with =Forbidden= and exactly one =authz.denied=, before
+    validation (tests for REV, AUR and system actors).
+  - *Internal raw Ash calls:* a raw =Ash= call to =AgentRun :retry= or
+    =WebhookEvent :request_retry= without the orchestration marker is
+    =Forbidden= but *not audited*. Denial audit lives in the domain =Guard=,
+    and no public wrapper of either raw action exists or may be added.
+  - *Forged marker:* a raw call with a forged marker still meets the
+    action's own invariants (review #31 MF1): the ordinal and the original
+    job are re-verified under the event lock, and nothing is written on a
+    mismatch.
 - The webhook B1 lookup of a malformed (non-uuid) id returns
   ={:error, :not_found}= before the transaction.
+
+* Review round 1 (Codex, #31 at =2f03434=: CHANGES REQUESTED, =ddcfa624=)
+Findings are in =/tmp/sdr-pr31-2f03434-review.md=. Codex accepted the
+resume ruling; the raw-denial deviation is corrected above. Dispositions:
+- *MF1, B2 has no authoritative recheck: fixed.* =Changes.RetryRequest= now
+  runs after the event row lock and verifies the marker against the ledger.
+  The marked ordinal must equal the requests so far + 1 and be ≤ 3. The
+  marked job id must be the event's exact original job, locked =FOR
+  UPDATE= and not live. On a mismatch nothing is written. The ledger and job
+  reads moved to =Operations.WebhookRetryLedger=, which the orchestration,
+  the processor and both actions share.
+- *MF2, B4 consumes nonexistent requests and trusts the caller's ordinal:
+  fixed.* =Changes.ConsumeRetryRequest= derives the pending ordinal from the
+  ledger under the event lock and ignores any caller ordinal. With nothing
+  pending (never requested, or already consumed) it writes nothing. Tests:
+  no request; caller ordinal 3 against pending 1; a second, repeated
+  consumption; and two concurrent failures with real connections, where
+  exactly one consumes.
+- *MF3, unredacted reason in the immutable ledger: fixed.*
+  =Changes.RedactArguments= runs =Operations.Redactor= on =:reason= before
+  any persistence, for =:record_retry_failed= and also for the existing
+  =:mark_failed= (=webhook.failed= had the same gap). A runtime-built
+  =SecretShapes= canary is absent from both events' payloads.
+- *gitleaks history exceptions:* confirmed by Codex as prose false
+  positives; no broader ignore.
+- TDD: reviewer contracts adopted. RED 12/16, failing for the intended
+  reasons; the canary was also found in =webhook.failed=. GREEN 16/16; the
+  race suite is 3/3.
 
 * TDD Tracking
 - A (run retry): =retry_run_test= RED 0/11 with the implementation stashed
