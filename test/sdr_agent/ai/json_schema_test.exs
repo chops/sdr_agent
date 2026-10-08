@@ -16,14 +16,10 @@ defmodule SdrAgent.AI.JsonSchemaTest do
 
   @module SdrAgent.AI.JsonSchema
 
-  # Fresh-VM children follow the child-environment boundary: no credentials,
-  # provider routing or app secrets are inherited.
-  defp scrubbed_env do
-    for {key, _value} <- System.get_env(),
-        key =~ ~r/\A(ANTHROPIC_|CLAUDE_|SDR_|HUBSPOT|AWS_|OPENAI|OTEL_|GITHUB_|GH_)/ or
-          key in ~w(DATABASE_URL SECRET_KEY_BASE TOKEN_SIGNING_SECRET SOPS_AGE_KEY_FILE),
-        do: {key, nil}
-  end
+  # Fresh-VM children follow the reviewed child-environment boundary
+  # (`SdrAgent.ChildEnv`): every inherited name but the base allowlist is
+  # removed, so no credential reaches them.
+  defp scrubbed_env, do: SdrAgent.ChildEnv.cmd([])
 
   defp call(function, args) do
     Code.ensure_loaded(@module)
