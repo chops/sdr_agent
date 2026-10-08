@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<!-- ARTIFACT-START: everything between the markers is also published as the claude.ai artifact -->
+<title>Product Shaping Discussion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: a working session sheet in the same family as the SDLC map. A sticky
+   step index on the left, one numbered section per discussion step on the
+   right, every section ending in a place for the owner to answer. */
+:root {
+  --bg: #f1f4f6;
+  --surface: #ffffff;
+  --sunk: #e7ecef;
+  --ink: #17212b;
+  --muted: #586773;
+  --line: #d3dbe1;
+  --accent: #0d6a80;
+  --accent-soft: #d9ecf1;
+  --gate: #a2610c;
+  --gate-soft: #f6e8d3;
+  --done: #2b7649;
+  --done-soft: #dcefe3;
+  --gap: #a8382c;
+  --gap-soft: #f6dfdb;
+  --p-owner: #6a49be;
+  --p-claude: #b8582a;
+  --p-codex: #2c68a8;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+  --step-3: 2.25rem;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10161b; --surface: #172028; --sunk: #1d2832; --ink: #e3eaef; --muted: #93a3af; --line: #2a3742;
+    --accent: #56b4cc; --accent-soft: #173845; --gate: #e2a54c; --gate-soft: #3a2b16;
+    --done: #63bd88; --done-soft: #183526; --gap: #e57a6c; --gap-soft: #3d1f1b;
+    --p-owner: #a78bf0; --p-claude: #e38a5c; --p-codex: #6aa4e0;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10161b; --surface: #172028; --sunk: #1d2832; --ink: #e3eaef; --muted: #93a3af; --line: #2a3742;
+  --accent: #56b4cc; --accent-soft: #173845; --gate: #e2a54c; --gate-soft: #3a2b16;
+  --done: #63bd88; --done-soft: #183526; --gap: #e57a6c; --gap-soft: #3d1f1b;
+  --p-owner: #a78bf0; --p-claude: #e38a5c; --p-codex: #6aa4e0;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 var(--step-0)/1.55 var(--font-body); -webkit-font-smoothing: antialiased; }
+.page { max-width: 1160px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 72px; display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 40px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: var(--step-3); letter-spacing: -0.01em; }
+h2 { font-size: var(--step-2); }
+h3 { font-size: var(--step-1); }
+p { margin: 0; }
+ul, ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.eyebrow { font: 500 var(--step--1)/1.3 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.lede { max-width: 68ch; color: var(--muted); font-size: var(--step-1); }
+.muted { color: var(--muted); }
+.mono { font-family: var(--font-mono); font-size: var(--step--1); }
+a { color: var(--accent); }
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Step index */
+nav.index { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 20px); align-self: start; display: grid; gap: 4px; }
+nav.index a { display: grid; grid-template-columns: 28px 1fr; gap: 6px; align-items: baseline; padding: 6px 8px; border-radius: var(--radius); text-decoration: none; color: var(--muted); font-size: var(--step--1); transition: background .15s, color .15s; }
+nav.index a b { font: 500 11px/1 var(--font-mono); }
+nav.index a:hover { background: var(--sunk); color: var(--ink); }
+nav.index a.answered { color: var(--ink); }
+nav.index a.answered b::after { content: " ✓"; color: var(--done); }
+nav.index .status { margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); font-size: var(--step--1); display: grid; gap: 8px; }
+
+main { display: grid; gap: 44px; min-width: 0; }
+header { display: grid; gap: 14px; }
+.howto { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: var(--step--1); color: var(--muted); }
+.howto span { display: inline-flex; gap: 6px; align-items: baseline; }
+.howto b { font-family: var(--font-mono); color: var(--ink); font-weight: 500; }
+section { display: grid; gap: 16px; min-width: 0; scroll-margin-top: 20px; }
+.sec-head { display: grid; gap: 6px; }
+.sec-head p { color: var(--muted); max-width: 72ch; }
+
+/* Cards and lists */
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: grid; gap: 10px; min-width: 0; }
+.idea { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; counter-reset: idea; }
+.idea li { list-style: none; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: grid; gap: 4px; align-content: start; }
+.idea li::before { counter-increment: idea; content: counter(idea); font: 500 11px/1 var(--font-mono); color: var(--p-owner); }
+.agree li { padding-left: 2px; }
+.diff { display: grid; gap: 12px; }
+.diff .card h3 { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.views { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.view { border-left: 3px solid var(--line); padding-left: 10px; display: grid; gap: 2px; }
+.view.claude { border-color: var(--p-claude); }
+.view.codex { border-color: var(--p-codex); }
+.view b { font-size: var(--step--1); }
+.verdict { background: var(--accent-soft); border-radius: var(--radius); padding: 8px 12px; font-size: var(--step--1); }
+.verdict b { color: var(--accent); }
+.who { font: 500 11px/1 var(--font-mono); letter-spacing: .04em; text-transform: uppercase; padding: 4px 7px; border-radius: 999px; border: 1px solid currentColor; }
+.who.claude { color: var(--p-claude); } .who.codex { color: var(--p-codex); } .who.owner { color: var(--p-owner); }
+
+/* Method steps */
+.steps { display: grid; gap: 10px; }
+details.step { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+details.step summary { list-style: none; cursor: pointer; padding: 14px 16px; display: grid; grid-template-columns: 34px 1fr auto; gap: 12px; align-items: baseline; }
+details.step summary::-webkit-details-marker { display: none; }
+details.step summary .n { font: 500 var(--step-1)/1 var(--font-mono); color: var(--accent); }
+details.step summary .t { display: grid; gap: 2px; }
+details.step summary .t b { font-family: var(--font-display); font-size: var(--step-1); font-weight: 600; }
+details.step summary .t span { color: var(--muted); font-size: var(--step--1); }
+details.step summary .ph { font: 500 11px/1 var(--font-mono); color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
+details.step[open] summary { border-bottom: 1px solid var(--line); }
+.step-body { padding: 14px 16px 16px; display: grid; gap: 12px; }
+.kv { display: grid; grid-template-columns: 130px 1fr; gap: 6px 14px; }
+.kv dt { color: var(--muted); font-size: var(--step--1); }
+.kv dd { margin: 0; }
+.example { background: var(--sunk); border-radius: var(--radius); padding: 10px 12px; font-size: var(--step--1); }
+.example b { color: var(--ink); }
+
+/* Tables */
+.tscroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: var(--step--1); }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font: 500 11px/1.2 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+td b { font-weight: 600; }
+
+/* Options */
+.options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.option { position: relative; }
+.option .tag { position: absolute; top: 12px; right: 12px; font: 500 10px/1 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; color: var(--done); border: 1px solid currentColor; padding: 4px 6px; border-radius: 999px; background: var(--done-soft); }
+.option h3 { padding-right: 100px; }
+.pc { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: var(--step--1); }
+.pc b { font-size: 11px; font-family: var(--font-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 500; }
+
+/* Answer inputs */
+.answer { display: grid; gap: 8px; border-top: 1px dashed var(--line); padding-top: 12px; }
+.answer label, .answer legend { font-size: var(--step--1); color: var(--p-owner); font-weight: 600; padding: 0; }
+fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 8px; min-width: 0; }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.choices label { color: var(--ink); font-weight: 400; display: inline-flex; gap: 8px; align-items: center; border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 6px 12px; cursor: pointer; transition: border-color .15s, background .15s; }
+.choices label:hover { border-color: var(--p-owner); }
+.choices input { accent-color: var(--p-owner); margin: 0; }
+.choices label:has(input:checked) { border-color: var(--p-owner); background: color-mix(in srgb, var(--p-owner) 12%, var(--surface)); }
+textarea, input[type="text"] { width: 100%; font: 400 var(--step-0)/1.45 var(--font-body); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; }
+textarea { min-height: 72px; resize: vertical; }
+textarea:focus, input[type="text"]:focus { border-color: var(--p-owner); outline: none; }
+
+/* Decisions */
+.decision { display: grid; gap: 10px; }
+.decision h3 { display: flex; gap: 10px; align-items: baseline; }
+.decision h3 .letter { font: 600 var(--step-2)/1 var(--font-mono); color: var(--p-owner); }
+
+/* Walkthrough */
+.walk { display: grid; gap: 14px; }
+.walk .q { display: grid; gap: 6px; }
+.walk .q label { color: var(--ink); font-weight: 600; font-size: var(--step-0); }
+.walk .q p { color: var(--muted); font-size: var(--step--1); }
+
+/* Questions */
+.ask { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+.btn { background: var(--ink); color: var(--bg); border: 0; border-radius: var(--radius); padding: 10px 16px; font-weight: 600; transition: opacity .15s, transform .1s; white-space: nowrap; }
+.btn:hover { opacity: .9; } .btn:active { transform: translateY(1px); }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.btn:disabled { opacity: .5; cursor: default; }
+.qlist { display: grid; gap: 12px; }
+.qitem { display: grid; gap: 10px; }
+.qitem .qtext { font-weight: 600; white-space: pre-wrap; }
+.qmeta { display: flex; gap: 10px; align-items: center; font-size: var(--step--1); color: var(--muted); }
+.pill { font: 500 10px/1 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; padding: 4px 7px; border-radius: 999px; border: 1px solid currentColor; }
+.pill.open { color: var(--gate); background: var(--gate-soft); }
+.pill.answered { color: var(--done); background: var(--done-soft); }
+.reply { border-left: 3px solid var(--line); padding-left: 10px; display: grid; gap: 4px; white-space: pre-wrap; }
+.reply.Claude { border-color: var(--p-claude); }
+.reply.Codex { border-color: var(--p-codex); }
+.empty { color: var(--muted); font-size: var(--step--1); border: 1px dashed var(--line); border-radius: var(--radius); padding: 14px; }
+
+/* Status */
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); flex: none; }
+.dot.ok { background: var(--done); } .dot.warn { background: var(--gap); } .dot.busy { background: var(--gate); }
+.state { display: flex; gap: 8px; align-items: baseline; }
+.warnbox { background: var(--gap-soft); color: var(--gap); border: 1px solid var(--gap); border-radius: var(--radius); padding: 12px 14px; font-weight: 500; }
+.export { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+#export-text { min-height: 180px; font-family: var(--font-mono); font-size: var(--step--1); }
+footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid var(--line); padding-top: 16px; }
+
+@media (max-width: 900px) {
+  .page { grid-template-columns: 1fr; gap: 24px; }
+  nav.index { position: static; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  nav.index .status { grid-column: 1 / -1; }
+  .idea, .options, .views, .pc { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+  .ask { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <nav class="index" aria-label="Steps">
+    <a href="#s1" data-sec="s1"><b>1</b>Your idea</a>
+    <a href="#s2" data-sec="s2"><b>2</b>Where we agree</a>
+    <a href="#s3" data-sec="s3"><b>3</b>Where we differ</a>
+    <a href="#s4" data-sec="s4"><b>4</b>The combined method</a>
+    <a href="#s5" data-sec="s5"><b>5</b>What each piece does</a>
+    <a href="#s6" data-sec="s6"><b>6</b>Tooling</a>
+    <a href="#s7" data-sec="s7"><b>7</b>Your decisions</a>
+    <a href="#s8" data-sec="s8"><b>8</b>Walk one task</a>
+    <a href="#s9" data-sec="s9"><b>9</b>Ask us</a>
+    <div class="status" id="status" role="status">
+      <div class="state"><i class="dot busy" id="status-dot"></i><span id="status-text">Connecting to the shared store…</span></div>
+      <button class="btn ghost" id="jump-export" type="button">Copy everything</button>
+    </div>
+  </nav>
+
+  <main>
+    <header>
+      <div class="eyebrow">SDR Agent · product shaping · discussion 1 · Oct 8, 2026</div>
+      <h1>How should we shape the product before writing code?</h1>
+      <p class="lede">You asked how to agree the product's shape, screens and actions before building anything. This page puts your idea, Claude's view and Codex's view side by side, then asks you to decide and to walk us through one real task.</p>
+      <div class="howto">
+        <span><b>Answer</b> in any purple box. It saves as you type.</span>
+        <span><b>Ask</b> in step 9. Claude or Codex replies on this page.</span>
+        <span><b>Tell Claude</b> "check the shaping page" when you are done.</span>
+      </div>
+      <p class="warnbox" id="warn" hidden></p>
+    </header>
+
+    <section id="s1" aria-labelledby="h1s">
+      <div class="sec-head">
+        <div class="eyebrow">Step 1</div>
+        <h2 id="h1s">Your idea</h2>
+        <p>Your proposed order, in your words, shortened.</p>
+      </div>
+      <ol class="idea">
+        <li><b>Founder outcomes</b><span class="muted">What the founder should be able to do, and the benefits the product delivers.</span></li>
+        <li><b>Architecture</b><span class="muted">Which stack supports that work: Elixir/OTP, Phoenix LiveView, Jido, Oban, Ash.</span></li>
+        <li><b>Roles and interfaces</b><span class="muted">What each piece is responsible for and how it talks to the rest.</span></li>
+        <li><b>Screens</b><span class="muted">Which screens we need, what actions they hold, how they look and feel.</span></li>
+      </ol>
+      <div class="answer">
+        <label for="f-idea-note">Anything to add or correct about how we read your idea?</label>
+        <textarea id="f-idea-note" data-field="idea-note" data-label="Step 1 note on our reading of your idea"></textarea>
+      </div>
+    </section>
+
+    <section id="s2" aria-labelledby="h2s">
+      <div class="sec-head">
+        <div class="eyebrow">Step 2</div>
+        <h2 id="h2s">Where Claude and Codex agree</h2>
+        <p>We wrote our suggestions separately. These points came from both of us.</p>
+      </div>
+      <div class="card">
+        <ul class="agree">
+          <li><b>Start with the founder.</b> What they need to get done and the benefit they get is the right first step.</li>
+          <li><b>Keep the stack.</b> It is chosen and working. Check that it fits; revisit a piece only if a real requirement shows it does not.</li>
+          <li><b>Screens follow the founder's work, not the stack.</b> One screen can use several parts of the system, and a part of the system does not need its own screen.</li>
+          <li><b>Design for failure from the start:</b> errors, stale data, and outcomes we cannot confirm.</li>
+          <li><b>Be explicit about the agent's authority:</b> what it may propose, what the system checks, and what only you decide.</li>
+          <li><b>Structured files in git, shown through a static page.</b> No new backend or planning service.</li>
+          <li><b>Fit it inside the phases already proposed (P1 to P4).</b> A method within the plan, not a second process.</li>
+        </ul>
+        <div class="answer">
+          <label for="f-agree-note">Do you disagree with any of these?</label>
+          <textarea id="f-agree-note" data-field="agree-note" data-label="Step 2 note on the points we agree on"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <section id="s3" aria-labelledby="h3s">
+      <div class="sec-head">
+        <div class="eyebrow">Step 3</div>
+        <h2 id="h3s">Where we differ</h2>
+        <p>Three places where our suggestions were not the same, and what we now recommend.</p>
+      </div>
+      <div class="diff">
+        <div class="card">
+          <h3>When the screens get designed</h3>
+          <div class="views">
+            <div class="view claude"><b>Claude first said</b><span>Design screens last, after mapping each action to the stack.</span></div>
+            <div class="view codex"><b>Codex said</b><span>Sketch screens early and refine them alongside technical feasibility.</span></div>
+          </div>
+          <p class="verdict"><b>Recommendation: Codex's.</b> Screens last would repeat a softer version of the architecture-first mistake the prototype made. Feasibility checks run beside the design work instead of blocking it.</p>
+          <div class="answer"><label for="f-diff1">Your view</label><textarea id="f-diff1" data-field="diff-screens" data-label="Step 3a: when screens get designed"></textarea></div>
+        </div>
+        <div class="card">
+          <h3>What Codex added</h3>
+          <ul>
+            <li><b>Today's workflow.</b> How you do outbound now, so we see what is actually painful.</li>
+            <li><b>A story map</b> instead of loose storyboards: the core tasks in order, the smallest complete slice, and the failure cases.</li>
+            <li><b>A closing traceability check:</b> every must-have tied to a screen, an action, a safe implementation boundary and a test.</li>
+            <li><b>Honest measures.</b> With sending captured only, we cannot claim reply or meeting rates.</li>
+          </ul>
+          <div class="answer"><label for="f-diff2">Your view</label><textarea id="f-diff2" data-field="diff-codex-adds" data-label="Step 3b: what Codex added"></textarea></div>
+        </div>
+        <div class="card">
+          <h3>What Claude added</h3>
+          <ul>
+            <li><b>First run:</b> how a workshop founder gets from installing it to their first draft.</li>
+            <li><b>Coverage warnings</b> in the planning page, such as "an action with no screen" or "a screen with no purpose".</li>
+            <li><b>An event-storming board</b> you can look at, not just a table.</li>
+          </ul>
+          <div class="answer"><label for="f-diff3">Your view</label><textarea id="f-diff3" data-field="diff-claude-adds" data-label="Step 3c: what Claude added"></textarea></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="s4" aria-labelledby="h4s">
+      <div class="sec-head">
+        <div class="eyebrow">Step 4</div>
+        <h2 id="h4s">The combined method</h2>
+        <p>Seven steps, from the founder inward. Open a step to see what it means, an example from this product, and what it produces. Steps 3 to 5 run alongside a technical feasibility check.</p>
+      </div>
+      <div class="steps" id="method"></div>
+    </section>
+
+    <section id="s5" aria-labelledby="h5s">
+      <div class="sec-head">
+        <div class="eyebrow">Step 5</div>
+        <h2 id="h5s">What each piece of the stack does</h2>
+        <p>Your idea asked what each part is responsible for. Here is the current split, from Codex's review, as a starting point for method step 6. It checks the existing stack; it does not add or replace anything.</p>
+      </div>
+      <div class="tscroll">
+        <table>
+          <thead><tr><th>Piece</th><th>Responsible for</th><th>Boundary it must keep</th></tr></thead>
+          <tbody>
+            <tr><td><b>Phoenix LiveView</b></td><td>The screens: navigation, forms, progress and error states</td><td>Calls domain actions as the signed-in person. What the browser holds is never the source of truth.</td></tr>
+            <tr><td><b>Ash</b></td><td>The business vocabulary: rules, permissions, actions, state changes</td><td>The only way to change business data. Neither the UI nor the agent goes around it.</td></tr>
+            <tr><td><b>Jido</b></td><td>The agent: its decisions and steps</td><td>Can only call the domain actions it is allowed. The model gets no tools and no policy power.</td></tr>
+            <tr><td><b>Oban</b></td><td>Background work that must survive a crash or restart</td><td>A retry never repeats an unsafe side effect, such as a second send.</td></tr>
+            <tr><td><b>Elixir / OTP</b></td><td>Keeping everything running and recovering from failures</td><td>Processes exist for runtime reasons, not to mirror screens.</td></tr>
+            <tr><td><b>Postgres and the audit trail</b></td><td>The record of what happened, and evidence that cannot be quietly changed</td><td>Shows what was recorded, within stated limits. It does not prove the world is complete or true.</td></tr>
+            <tr><td><b>Model boundary (Zoi)</b></td><td>Checking the model's structured answers, the provider, and the budget</td><td>Well-formed output is not the same as a good or accurate answer.</td></tr>
+            <tr><td><b>Telemetry and wire witness</b></td><td>Diagnostics, and a cross-check of what actually crossed the network</td><td>Helps recovery and trust. It does not grant permission to do anything.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="answer">
+        <label for="f-stack">Questions or doubts about this split?</label>
+        <textarea id="f-stack" data-field="stack-note" data-label="Step 5 note on the stack responsibilities"></textarea>
+      </div>
+    </section>
+
+    <section id="s6" aria-labelledby="h6s">
+      <div class="sec-head">
+        <div class="eyebrow">Step 6</div>
+        <h2 id="h6s">How to make this structured, durable and shareable</h2>
+        <p>Four ways to hold this work. Both of us recommend the first. The others stay available if a real need appears.</p>
+      </div>
+      <div class="options">
+        <div class="card option">
+          <span class="tag">Recommended</span>
+          <h3>Product workbook in git</h3>
+          <p class="muted">Like the SDLC map: readable text plus structured data in the repository, shown by a static page with a step rail, examples, open choices, your notes, an outcome-to-screen drill-down and coverage warnings. One clickable prototype beside it.</p>
+          <div class="pc"><div><b>For</b><br>Every change is reviewed in a pull request. Works offline. Easy to publish later. No new service.</div><div><b>Against</b><br>Visual design is less fluid than in a design tool.</div></div>
+        </div>
+        <div class="card option">
+          <h3>Design tool (Figma or Penpot)</h3>
+          <p class="muted">For the wireframes and prototype if drawing together on a canvas becomes the main need.</p>
+          <div class="pc"><div><b>For</b><br>Fast visual iteration and comments on the canvas.</div><div><b>Against</b><br>Another account and its privacy terms. Decisions must still be copied into git.</div></div>
+        </div>
+        <div class="card option">
+          <h3>Documentation site (MkDocs, Docusaurus)</h3>
+          <p class="muted">A larger public guide for founders, built from the same files.</p>
+          <div class="pc"><div><b>For</b><br>Polished navigation and search for many pages.</div><div><b>Against</b><br>A build step and new dependencies. Not needed yet.</div></div>
+        </div>
+        <div class="card option">
+          <h3>Planning screens inside the app</h3>
+          <p class="muted">Phoenix LiveView pages with sign-in and saved approvals.</p>
+          <div class="pc"><div><b>For</b><br>Real accounts and multi-person editing.</div><div><b>Against</b><br>Building a second product while the first is undefined.</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <fieldset data-field="tooling-choice" data-label="Step 6 tooling choice">
+          <legend>Which do you want?</legend>
+          <div class="choices">
+            <label><input type="radio" name="tooling" value="Product workbook in git"> Product workbook in git</label>
+            <label><input type="radio" name="tooling" value="Workbook plus a design tool"> Workbook plus a design tool</label>
+            <label><input type="radio" name="tooling" value="Something else"> Something else</label>
+            <label><input type="radio" name="tooling" value="Let's discuss"> Let's discuss</label>
+          </div>
+        </fieldset>
+        <div class="answer"><label for="f-tooling">What would make the planning UI useful to you, or to founders reading it later?</label><textarea id="f-tooling" data-field="tooling-note" data-label="Step 6 note on tooling"></textarea></div>
+      </div>
+    </section>
+
+    <section id="s7" aria-labelledby="h7s">
+      <div class="sec-head">
+        <div class="eyebrow">Step 7</div>
+        <h2 id="h7s">Your decisions</h2>
+        <p>Nothing here is approved until you say so in chat; your choices below tell us which way to go. The gate record captures the actual approval.</p>
+      </div>
+      <div class="card decision">
+        <h3><span class="letter">A</span>Adopt the combined seven-step method inside PR #36's phases P1 to P4?</h3>
+        <p class="muted">If yes, Claude adds it to PR #36 before you approve G0, so the process you approve is the one we follow.</p>
+        <fieldset data-field="decision-a" data-label="Decision A (adopt the combined method)">
+          <legend class="muted" style="font-weight:400">Decision A</legend>
+          <div class="choices">
+            <label><input type="radio" name="dA" value="Yes"> Yes</label>
+            <label><input type="radio" name="dA" value="Yes, with changes"> Yes, with changes</label>
+            <label><input type="radio" name="dA" value="No"> No</label>
+            <label><input type="radio" name="dA" value="Let's discuss"> Let's discuss</label>
+          </div>
+        </fieldset>
+        <textarea id="f-dA" data-field="decision-a-note" data-label="Decision A note" aria-label="Decision A note" placeholder="Changes, conditions or questions"></textarea>
+      </div>
+      <div class="card decision">
+        <h3><span class="letter">B</span>Use the product workbook in git as the planning tool?</h3>
+        <p class="muted">Same question as step 6, as a decision. Choose there or here.</p>
+        <fieldset data-field="decision-b" data-label="Decision B (product workbook)">
+          <legend class="muted" style="font-weight:400">Decision B</legend>
+          <div class="choices">
+            <label><input type="radio" name="dB" value="Yes"> Yes</label>
+            <label><input type="radio" name="dB" value="Yes, plus a design tool"> Yes, plus a design tool</label>
+            <label><input type="radio" name="dB" value="No"> No</label>
+            <label><input type="radio" name="dB" value="Let's discuss"> Let's discuss</label>
+          </div>
+        </fieldset>
+        <textarea id="f-dB" data-field="decision-b-note" data-label="Decision B note" aria-label="Decision B note" placeholder="Changes, conditions or questions"></textarea>
+      </div>
+      <div class="card decision">
+        <h3><span class="letter">C</span>Start with a walkthrough of one founder task?</h3>
+        <p class="muted">Codex's suggestion, and Claude agrees: before designing screens, agree what "done" means for one real task. You can start it right now in step 8.</p>
+        <fieldset data-field="decision-c" data-label="Decision C (start with a task walkthrough)">
+          <legend class="muted" style="font-weight:400">Decision C</legend>
+          <div class="choices">
+            <label><input type="radio" name="dC" value="Yes, on this page"> Yes, on this page</label>
+            <label><input type="radio" name="dC" value="Yes, live in chat"> Yes, live in chat</label>
+            <label><input type="radio" name="dC" value="Not yet"> Not yet</label>
+          </div>
+        </fieldset>
+        <textarea id="f-dC" data-field="decision-c-note" data-label="Decision C note" aria-label="Decision C note" placeholder="Anything else"></textarea>
+      </div>
+    </section>
+
+    <section id="s8" aria-labelledby="h8s">
+      <div class="sec-head">
+        <div class="eyebrow">Step 8</div>
+        <h2 id="h8s">Walk us through one founder task</h2>
+        <p>Pick one task a solo founder would use this product for, then answer as yourself. Short answers are fine. This becomes the seed of the outcome brief and the story map.</p>
+      </div>
+      <div class="card walk">
+        <fieldset data-field="walk-task" data-label="Step 8 chosen task">
+          <legend>Which task?</legend>
+          <div class="choices">
+            <label><input type="radio" name="task" value="Monday: get first emails ready for 10 companies that fit my ideal customer"> Get first emails ready for 10 good-fit companies</label>
+            <label><input type="radio" name="task" value="Someone replied 'interested': respond and book a meeting"> Someone replied "interested"</label>
+            <label><input type="radio" name="task" value="Set up a new campaign for a new customer segment"> Set up a new campaign</label>
+            <label><input type="radio" name="task" value="My own task (described below)"> My own task</label>
+          </div>
+        </fieldset>
+        <div class="q"><label for="f-w0">If you picked your own task, describe it.</label><textarea id="f-w0" data-field="walk-own" data-label="Step 8 own task"></textarea></div>
+        <div class="q"><label for="f-w1">How do you do this today, without the product?</label><p>Tools, steps, how long it takes, what is annoying.</p><textarea id="f-w1" data-field="walk-today" data-label="Step 8 how you do it today"></textarea></div>
+        <div class="q"><label for="f-w2">What does "done" look like?</label><p>The moment you would say "good, that is finished".</p><textarea id="f-w2" data-field="walk-done" data-label="Step 8 what done looks like"></textarea></div>
+        <div class="q"><label for="f-w3">What do you need to see before you trust the result?</label><p>For example: why this company, where a claim came from, who exactly receives it, what it costs.</p><textarea id="f-w3" data-field="walk-trust" data-label="Step 8 what you need to see to trust it"></textarea></div>
+        <div class="q"><label for="f-w4">What should happen when it cannot be finished?</label><p>For example: thin evidence about a company, a bad import, the model budget runs out, a draft you reject twice.</p><textarea id="f-w4" data-field="walk-fail" data-label="Step 8 what happens when it cannot be finished"></textarea></div>
+        <div class="q"><label for="f-w5">What should the agent do on its own, and what must always wait for you?</label><textarea id="f-w5" data-field="walk-authority" data-label="Step 8 agent versus you"></textarea></div>
+      </div>
+    </section>
+
+    <section id="s9" aria-labelledby="h9s">
+      <div class="sec-head">
+        <div class="eyebrow">Step 9</div>
+        <h2 id="h9s">Ask us a question</h2>
+        <p>Ask anything about this page. Then tell Claude in chat to check it. Claude or Codex answers here, and the answer stays on the page.</p>
+      </div>
+      <div class="card">
+        <div class="ask">
+          <div class="answer" style="border:0;padding:0"><label for="f-ask">Your question</label><textarea id="f-ask" placeholder="For example: what is event storming, and would I take part in it?"></textarea></div>
+          <button class="btn" id="ask-btn" type="button">Ask</button>
+        </div>
+        <p class="muted" id="ask-note" style="font-size:var(--step--1)"></p>
+      </div>
+      <div class="qlist" id="qlist"><p class="empty">No questions yet. Questions you ask appear here with their answers.</p></div>
+    </section>
+
+    <section id="export" aria-labelledby="hex">
+      <div class="sec-head">
+        <h2 id="hex">Copy everything</h2>
+        <p>Everything you entered, with our replies, as plain text to paste into chat. Useful if the shared store is not available, or if you prefer chat.</p>
+      </div>
+      <div class="export">
+        <button class="btn" id="copy" type="button">Copy for Claude</button>
+        <button class="btn ghost" id="show" type="button">Show text</button>
+        <span class="muted" id="copy-status" role="status" style="font-size:var(--step--1)"></span>
+      </div>
+      <textarea id="export-text" readonly hidden aria-label="Everything you entered, as text"></textarea>
+    </section>
+
+    <footer>Source: docs/product/shaping/discussion.html in the SDR Agent repository. Your answers here are discussion input, not approvals; Claude commits a summary of them to git once you have reviewed it. The repository is public, so nothing you write here is published there without your say-so.</footer>
+  </main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+
+  // The seven method steps, rendered as expandable rows with a note box each.
+  var METHOD = [
+    { n: 1, title: "Outcomes and today's workflow", tech: "Jobs to be done", phase: "P1",
+      what: "Who the product is for, the job they hire it to do, the benefit they get, how they do it today, and what the product will not do.",
+      example: "A solo founder spends Monday mornings researching ten companies and writing first emails by hand. The job: get credible, specific first emails out without losing a morning.",
+      output: "A one-page outcome brief: user, situation, desired result, benefits we can actually observe, non-goals, assumptions." },
+    { n: 2, title: "Story map", tech: "User story mapping", phase: "P1",
+      what: "The founder's core tasks laid out left to right in the order they happen, with detail underneath. Then a line that marks the smallest complete slice worth building first.",
+      example: "Import leads → pick a campaign → agent researches → review drafts → approve → captured send → handle a reply. Below the line: bulk approve, phone scripts, analytics.",
+      output: "One story map: the backbone of tasks, the first slice, later paths, and representative failure cases." },
+    { n: 3, title: "Who does what, and what happens", tech: "Service blueprint and light event storming", phase: "P2",
+      what: "Swimlanes for you, the agent, the system and outside services, step by step. Then the events that happen, the action that causes each, the rules that apply, and who is allowed to decide.",
+      example: "Event \"draft approved\" is caused by you approving, only after you have seen the exact recipient and evidence. The rule: suppression and quiet hours are checked before capture.",
+      output: "Responsibility swimlanes, the domain vocabulary, key events and rules, and who owns each piece of information." },
+    { n: 4, title: "Screens, actions and states", tech: "Information architecture and a screen/action/state matrix", phase: "P2 draft, P3 final",
+      what: "For each screen: the job it helps with, what it shows and where that comes from, the actions on it and who may take them, and what it looks like when empty, loading, failed, stale or unknown.",
+      example: "Review screen: shows one draft, its recipient and its evidence. Actions: edit, reject with a reason, approve for capture. If the draft changed since you opened it, approve is refused with an explanation.",
+      output: "A screen inventory, a navigation sketch, and the matrix with stable IDs." },
+    { n: 5, title: "Prototype and task test", tech: "Low-fidelity clickable prototype, task-based usability walkthrough, then the design day", phase: "P3",
+      what: "A rough clickable version of the core journey, tried on real tasks without coaching. Then your design day sets colours, type and the look of the key screens.",
+      example: "\"Get first emails ready for ten companies\": can you do it without asking us how? Where did you hesitate?",
+      output: "One core-journey prototype, a short findings log, the visual direction and design tokens." },
+    { n: 6, title: "Technical fit", tech: "Feasibility review, C4-style boundary view, action contracts", phase: "P4 (feasibility notes from step 3 onward)",
+      what: "Map every action and event to the part of the stack that owns it, find the gaps, and write down the contracts: inputs, outcomes, threats and tests. ADRs only where there is a real choice.",
+      example: "\"Approve for capture\" is an Ash action under a policy, called from LiveView; the capture runs as an Oban job that can never send twice.",
+      output: "Stack responsibility table, gap list, entity delta, action contracts, threat model, test and eval plan." },
+    { n: 7, title: "Traceability walkthrough", tech: "Scenario acceptance", phase: "Before G5",
+      what: "Walk every must-have from requirement to screen, action, implementation boundary, test and evidence. Anything that does not trace is cut or fixed.",
+      example: "REQ \"approve one draft\" → review screen → approve action → policy and capture job → acceptance test → evidence in the release record.",
+      output: "A traced baseline that becomes the input to the build plan, not permission to start coding." }
+  ];
+  $("method").innerHTML = METHOD.map(function (m) {
+    return '<details class="step"><summary><span class="n">' + m.n + '</span><span class="t"><b>' + esc(m.title) + "</b><span>" + esc(m.tech) + '</span></span><span class="ph">' + esc(m.phase) + "</span></summary>" +
+      '<div class="step-body"><dl class="kv"><dt>What it means</dt><dd>' + esc(m.what) + "</dd><dt>Output</dt><dd>" + esc(m.output) + "</dd></dl>" +
+      '<p class="example"><b>In this product: </b>' + esc(m.example) + "</p>" +
+      '<div class="answer"><label for="f-m' + m.n + '">Notes on step ' + m.n + '</label><textarea id="f-m' + m.n + '" data-field="method-' + m.n + '" data-label="Step 4, method step ' + m.n + " (" + esc(m.title) + ') note"></textarea></div></div></details>';
+  }).join("");
+
+  // ---------- state and storage ----------
+  var LOCAL = "shaping-discussion-1";
+  var values = {};          // field id -> string value
+  var questions = [];       // [{id, text, askedAt, status, answers:[{by,text,at}]}]
+  var db = null, mode = "connecting";
+  var timers = {}, chains = {};
+
+  function setStatus(kind, text) {
+    $("status-dot").className = "dot " + kind;
+    $("status-text").textContent = text;
+  }
+  function warn(text) { $("warn").textContent = text; $("warn").hidden = !text; }
+
+  function loadLocal() {
+    try { var raw = window.localStorage.getItem(LOCAL); if (raw) { var o = JSON.parse(raw); values = o.values || {}; questions = o.questions || []; } return true; }
+    catch (e) { return false; }
+  }
+  function saveLocal() {
+    try { window.localStorage.setItem(LOCAL, JSON.stringify({ values: values, questions: questions })); return true; }
+    catch (e) { return false; }
+  }
+
+  function fieldEls() { return document.querySelectorAll("[data-field]"); }
+  function applyValue(el, v) {
+    if (el.tagName === "FIELDSET") {
+      el.querySelectorAll("input[type=radio]").forEach(function (r) { r.checked = r.value === v; });
+    } else if (document.activeElement !== el && el.value !== v) {
+      el.value = v || "";
+    }
+  }
+  function applyAll() { fieldEls().forEach(function (el) { applyValue(el, values[el.getAttribute("data-field")] || ""); }); markAnswered(); }
+
+  function markAnswered() {
+    document.querySelectorAll("nav.index a[data-sec]").forEach(function (a) {
+      var sec = $(a.getAttribute("data-sec"));
+      var has = false;
+      sec.querySelectorAll("[data-field]").forEach(function (el) { if ((values[el.getAttribute("data-field")] || "").trim()) has = true; });
+      if (a.getAttribute("data-sec") === "s9" && questions.length) has = true;
+      a.classList.toggle("answered", has);
+    });
+  }
+
+  // One write at a time per document, coalesced per pause in typing.
+  function persist(id) {
+    var v = values[id] || "";
+    if (mode === "db") {
+      setStatus("busy", "Saving…");
+      chains[id] = (chains[id] || Promise.resolve()).then(function () {
+        return db.doc("responses/" + id).set({ field: id, value: v, updatedAt: Date.now() });
+      }).then(function () {
+        setStatus("ok", "Saved. Claude can read your answers.");
+      }, function (e) {
+        setStatus("warn", "Not saved (" + (e && e.code || "error") + "). Use Copy everything before leaving.");
+      });
+    } else {
+      var ok = saveLocal();
+      setStatus(ok ? "busy" : "warn", ok ? "Saved in this browser only. Claude cannot see it; use Copy everything." : "Not saved anywhere. Use Copy everything before leaving.");
+    }
+  }
+  function onChange(id, v) {
+    values[id] = v;
+    markAnswered();
+    clearTimeout(timers[id]);
+    timers[id] = setTimeout(function () { persist(id); }, 700);
+  }
+  document.addEventListener("input", function (e) {
+    var el = e.target.closest && e.target.closest("[data-field]");
+    if (!el) return;
+    if (el.tagName === "FIELDSET") return;
+    onChange(el.getAttribute("data-field"), el.value);
+  });
+  document.addEventListener("change", function (e) {
+    if (e.target.type !== "radio") return;
+    var fs = e.target.closest("fieldset[data-field]"); if (!fs) return;
+    var id = fs.getAttribute("data-field");
+    values[id] = e.target.value; markAnswered(); persist(id);
+  });
+
+  // ---------- questions ----------
+  function fmtTime(t) { try { return new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; } }
+  function renderQuestions() {
+    var list = $("qlist");
+    if (!questions.length) { list.innerHTML = '<p class="empty">No questions yet. Questions you ask appear here with their answers.</p>'; markAnswered(); return; }
+    list.innerHTML = "";
+    questions.slice().sort(function (a, b) { return (b.askedAt || 0) - (a.askedAt || 0); }).forEach(function (q) {
+      var card = document.createElement("div"); card.className = "card qitem";
+      var meta = document.createElement("div"); meta.className = "qmeta";
+      var answered = q.answers && q.answers.length;
+      meta.innerHTML = '<span class="pill ' + (answered ? "answered" : "open") + '">' + (answered ? "Answered" : "Waiting for an answer") + "</span><span>" + esc(fmtTime(q.askedAt)) + "</span>";
+      var text = document.createElement("p"); text.className = "qtext"; text.textContent = q.text;
+      card.appendChild(meta); card.appendChild(text);
+      (q.answers || []).forEach(function (a) {
+        var r = document.createElement("div"); var by = a.by === "Codex" ? "Codex" : "Claude";
+        r.className = "reply " + by;
+        var head = document.createElement("span"); head.className = "who " + by.toLowerCase(); head.textContent = by;
+        var body = document.createElement("span"); body.textContent = a.text;
+        r.appendChild(head); r.appendChild(body); card.appendChild(r);
+      });
+      list.appendChild(card);
+    });
+    markAnswered();
+  }
+  $("ask-btn").addEventListener("click", function () {
+    var text = $("f-ask").value.trim(); if (!text) return;
+    var q = { text: text, askedAt: Date.now(), status: "open", answers: [] };
+    var btn = $("ask-btn"); btn.disabled = true;
+    var done = function (msg) { btn.disabled = false; $("ask-note").textContent = msg; };
+    if (mode === "db") {
+      db.collection("questions").add(q).then(function () {
+        $("f-ask").value = ""; done("Sent. Tell Claude in chat to check the shaping page.");
+      }, function (e) { done("Could not send (" + (e && e.code || "error") + "). Ask in chat instead."); });
+    } else {
+      q.id = "local-" + q.askedAt; questions.push(q); saveLocal(); renderQuestions();
+      $("f-ask").value = ""; done("Kept in this browser only. Claude cannot see it until you copy everything into chat.");
+    }
+  });
+
+  // ---------- export ----------
+  function exportText() {
+    var out = ["Product shaping discussion 1: my answers", ""];
+    fieldEls().forEach(function (el) {
+      var v = (values[el.getAttribute("data-field")] || "").trim();
+      if (v) out.push(el.getAttribute("data-label") + ":", "   " + v.replace(/\n/g, "\n   "), "");
+    });
+    if (questions.length) {
+      out.push("Questions:");
+      questions.forEach(function (q) {
+        out.push("- " + q.text);
+        (q.answers || []).forEach(function (a) { out.push("  " + (a.by || "Reply") + ": " + a.text.replace(/\n/g, "\n    ")); });
+      });
+      out.push("");
+    }
+    if (out.length === 2) out.push("(Nothing entered yet.)");
+    out.push("These answers are discussion input, not approvals.");
+    return out.join("\n");
+  }
+  $("copy").addEventListener("click", function () {
+    var text = exportText(), box = $("export-text");
+    box.value = text;
+    var manual = function (m) { box.hidden = false; $("show").textContent = "Hide text"; box.focus(); box.select(); $("copy-status").textContent = m; };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { $("copy-status").textContent = "Copied. Paste it into chat."; }, function () { manual("Copy was blocked. The text is selected below; copy it by hand."); });
+    } else { manual("The text is selected below; copy it by hand."); }
+  });
+  $("show").addEventListener("click", function () {
+    var box = $("export-text"); box.value = exportText(); box.hidden = !box.hidden;
+    $("show").textContent = box.hidden ? "Show text" : "Hide text";
+  });
+  $("jump-export").addEventListener("click", function () { $("export").scrollIntoView({ behavior: "smooth" }); $("copy").focus(); });
+
+  // ---------- start: render from browser storage, then light up the shared store ----------
+  var localOk = loadLocal();
+  applyAll(); renderQuestions();
+
+  function fallback(reason) {
+    mode = "local";
+    setStatus(localOk ? "busy" : "warn", localOk ? "Saving in this browser only." : "Not saving anywhere.");
+    warn(reason + " Your answers stay in this browser" + (localOk ? "" : " only until you leave") + ". Use Copy everything and paste it into chat so Claude sees them.");
+  }
+
+  var use = window.claude && window.claude.use;
+  if (!use) { fallback("This copy of the page is not connected to the shared store."); return; }
+  window.claude.use("db").then(function (store) {
+    if (!store) { fallback("The shared store is not available here."); return; }
+    db = store; mode = "db"; warn("");
+    setStatus("ok", "Connected. Answers save for Claude to read.");
+    db.collection("responses").onSnapshot(function (snap) {
+      snap.docs.forEach(function (d) {
+        var b = d.data(); if (!b || typeof b.value !== "string") return;
+        if (timers[d.id] && document.activeElement && document.activeElement.getAttribute("data-field") === d.id) return;
+        values[d.id] = b.value;
+      });
+      applyAll();
+    }, function (e) { setStatus("warn", "Lost the connection (" + e.code + "). Use Copy everything."); });
+    db.collection("questions").onSnapshot(function (snap) {
+      questions = snap.docs.map(function (d) {
+        var b = d.data() || {};
+        return { id: d.id, text: String(b.text || ""), askedAt: b.askedAt || 0, status: b.status || "open", answers: Array.isArray(b.answers) ? b.answers.map(function (a) { return { by: String(a.by || ""), text: String(a.text || ""), at: a.at || 0 }; }) : [] };
+      });
+      renderQuestions();
+    }, function (e) { setStatus("warn", "Lost the connection (" + e.code + "). Use Copy everything."); });
+  }, function () { fallback("The shared store could not start."); });
+})();
+</script>
+<!-- ARTIFACT-END -->
+</body>
+</html>
