@@ -90,6 +90,7 @@ users, or lift suppressions.
 | Contact (Sales) | Existing — delta H1b | Importable recipient. | no HubSpot columns | CrmLink | +crm_managed : boolean (as Account). =:import=, =:sync_update=, =:sync_email= (OQ-B decided; decision detail suppression_check = none_under_lock, made by the CRM orchestrator under advisory email/domain keys); same bindings. *OQ-B lock:* while crm_managed, ADM =:update= refuses first_name, last_name, title, and ADM =:change_email= is refused; persona and timezone stay local. The UI shows an "Edit in HubSpot" link (ADR §4). | CRS; reads += CRS; ADM edit refusals. | — |
 | Lead (Sales) | Existing — delta H1b | — | — | — | =:create_from_crm= (crm_lead_rule / create; contact and account bound). OQ-A decided 2026-10-07: auto-create by the rule, with the test-domain and suppression checks, never auto-assigned. CRS has no assign, stop or transition. | CRS; reads += CRS. | OQ-A |
 | CampaignEnrollment (Sales) | Existing — side effect only | — | none | — | Its =:stop= already authorizes =SuppressionContext=; with the delta below it is stopped by a CRS suppression (stop_reason unsubscribe for crm_opt_out). Direct CRS stop denied (tested). | unchanged policy | — |
+| Sales.Synthetic | Existing — delta H1b | Reserved-name guard used by import. | reserved TLDs += localhost (now .test, .example, .invalid, .localhost; plus example.com/.net/.org and any subdomain, already accepted) | — | Applied separately to the company domain and the contact email; the email domain is *not* required to equal the company domain (H0 fact below). The widening is only to an RFC 6761 reserved name; ADR-0009 §9 amendment in H1b. | — | — |
 | Sales.Checks.SuppressionContext | Existing — delta H1b | Side-effect authority. | =@types= += :crm_sync | — | Context-only. CRS gains no direct Lead or Enrollment =:stop=. | — | — |
 | Suppression (Outreach) | Existing — delta H1b | HubSpot opt-out. | reason += crm_opt_out (crm_record_deleted is Gate B); *no* crm_import_record_id (revision 2's is removed); provenance = the existing decision_id, validated | Decision (existing FK) | =:from_crm= (CRS): crm_import_filter / opt_out Decision bound to the contact and email. APPEND-ONLY, monotonic, never lifted. *ApplySuppression delta:* takes =sdr-suppression-email:= or =-domain:= advisory key before =Locks.targets/2=; =stop_reason(:crm_opt_out) = :unsubscribe=. Test: opt-out over an existing active lead and enrollment → both stopped. | CRS :from_crm; reads += CRS. | — |
 | ResearchArtifact (Research) | Existing — delta H1c | HubSpot evidence. | provider += hubspot; source_type += crm_activity; =hubspot://= scheme; metadata watermark {crm_link_id, portal_id, remote_id, high_water_ms, crm_import_record_id} | — | Produced only through =fetch_record(%CrmRef{})= via the Gate (purpose research) after =CRM.research_ref/2= (AGT, one contact, link and watermark fields). crm_activity only for families H0 proved readable; email engagements unsupported in H1. | AGT (unchanged create). | — |
@@ -345,6 +346,22 @@ Per ADR §§1–4 and §8:
 - ADM =:change_email= takes no suppression key. This is a pre-existing human
   path, and the send gate re-checks the current email.
 - STANDARD portals are refused.
+
+* H0 facts (owner-run, recorded 2026-10-07)
+- *Contact emails on =.test= domains are rejected* by HubSpot ("Invalid
+  email"), but =.test= *company* domains are accepted.
+  - The owner's fixture contacts use =first.last@<company-slug>.example.com=
+    (for example =avery.lindqvist@brightpath-freight.example.com=). Company
+    domains stay =<slug>.test=.
+  - Design consequence: the reserved-name rule accepts =example.com/.net/.org=
+    and their subdomains (and =.test=, =.example=, =.invalid=, =.localhost=)
+    for each value independently.
+  - The contact email domain is not required to match the company domain
+    (ADR-0013 §4).
+- *"Number of employees" is an enumeration of ranges on the Contact object*
+  and numeric on the Company object. The import maps only the Company's
+  numeric =numberofemployees= to =Account.employee_count=, and never the
+  contact property.
 
 * Owner decisions
 Relayed by the coordinator on 2026-10-07.

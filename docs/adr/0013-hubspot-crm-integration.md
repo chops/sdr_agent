@@ -741,6 +741,41 @@ the serialized outcome.
   policy already authorizes `SuppressionContext`, so it now admits CRS-made
   suppressions.
 
+**Import record gate: reserved names and field mapping (H0 facts, 2026-10-07).**
+
+- **Reserved-name rule.** It is applied to every imported company domain and
+  contact email, and is never weakened (ADR-0009 §9). A host is accepted only
+  if it is:
+  - under one of the reserved top-level domains `.test`, `.example`,
+    `.invalid` or `.localhost` (RFC 2606/6761); or
+  - `example.com`, `example.net` or `example.org`, **or any subdomain of
+    them**.
+
+  `SdrAgent.Sales.Synthetic` already accepts the subdomains. Adding
+  `.localhost` is an existing-side delta (H1b) and needs an ADR-0009 §9
+  amendment. It widens the rule only to another RFC 6761 reserved name.
+- **No email/company domain match.** The contact email's domain is **not**
+  required to equal the company domain.
+  - H0: HubSpot rejects contact emails on `.test` domains ("Invalid email")
+    but accepts `.test` company domains.
+  - The owner's fixtures therefore use
+    `first.last@<company-slug>.example.com` (for example
+    `avery.lindqvist@brightpath-freight.example.com`) for contacts, with
+    company domains `<slug>.test`.
+  - Each value is checked on its own against the reserved-name rule.
+- **Field mapping.** Nothing outside this table is imported.
+
+  | HubSpot | Local |
+  |---|---|
+  | company `name`, `domain`, `website` (reserved hosts only, else nil), `industry`, `country` | Account `name`, `domain`, `website_url`, `industry`, `geography` |
+  | company `numberofemployees` (**numeric** on the Company object) | Account `employee_count` (integer ≥ 0, else nil) |
+  | contact `firstname`, `lastname`, `email`, `jobtitle`, primary company | Contact `first_name`, `last_name`, `email`, `title`, `account_id` |
+  | contact `lifecyclestage`, `hs_lead_status`, `hubspot_owner_id` | snapshot only (Lead-rule inputs) |
+
+  The Contact object's "Number of employees" property is an **enumeration
+  of ranges** (H0). It is never imported. Employee count comes only from the
+  Company.
+
 **Owner-question gates inside A2.** OQ-A and OQ-B were both answered on
 2026-10-07, so Lead `:create_from_crm`, Account/Contact `:sync_update` and
 Contact `:sync_email` are active, subject to the A2 PASS. The
