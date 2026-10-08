@@ -767,10 +767,74 @@ an order that varies across BEAM VM runs, for the same schema.
   =Canonical.encode!=. Add a test that renders the same schema in two
   fresh VMs (or with shuffled field order) and asserts identical bytes and
   sha256.
-- This changes rendered prompts. It needs a =prompt-builder= version bump
-  (=prompt-builder/2=) so that old invocations keep re-deriving with
-  =/1=. Treat it as its own reviewed slice, with an entity/ADR check for
-  the provenance meaning.
+- Superseded (Codex consult =689587a9=): an earlier proposal here asked
+  for a =prompt-builder/2= bump. That is NOT needed, and it would orphan
+  the enabled v3 tuple. =render_prompt/2= stays the pure byte function
+  =prompt <> fixed text <> Canonical(schema)= (=prompt-builder/1=). Only
+  the *generation of new* JSON schemas is normalised; the exact normalised
+  schema is stored and sent; historical stored schemas are never
+  normalised. If normalisation ever moved into =render_prompt/2=, a
+  builder bump plus a reviewed projection and enablement would be required.
+
+*** Deterministic schema slice: entity delta (writer table; soft-stop pending)
+Branch =s12-zoi-schema= (off main). Codex design consult =689587a9= (NEEDS-REVIEW) asked for
+schema-aware normalisation and a persisted provenance/hash-regime delta.
+
+Design:
+- New =SdrAgent.AI.JsonSchema.render/1=: =Zoi.to_json_schema/1=, then
+  =normalize/1=. It is the single generator, used at all three call sites:
+  =Sdr.Schemas.ref/1= (hash), =ModelProvider.request_body/1= (the stored
+  app request) and =ClaudeCLI.launch/3= (stdin). The stored and sent
+  schemas are therefore the same bytes, and the hash is over those bytes.
+- =normalize/1= is schema-aware. It sorts (byte order; no dedupe and no
+  repair) only the =required= keyword of a *schema node*, when it is a
+  list of strings. It recurses only into schema positions:
+  - =properties=, =patternProperties=, =$defs=, =definitions= and
+    =dependentSchemas= (map values);
+  - =additionalProperties=, =unevaluatedProperties=, =items=,
+    =unevaluatedItems=, =contains=, =propertyNames=, =not=, =if=, =then=
+    and =else= (schema values);
+  - =allOf=, =anyOf=, =oneOf= and =prefixItems= (lists of schemas, with
+    their order preserved).
+  =const=, =default=, =enum=, =examples= and every unknown keyword are
+  literal data and are left untouched. List orders other than =required=
+  are kept.
+- Tagging contract: =Sdr.Schemas= =@version= goes from "1" to "2". The
+  value object ={id, version, sha256}= with version "2" means "rendered
+  by =JsonSchema.render/1= (required sets sorted), sha256 =
+  Canonical.sha256 of those bytes". It is recorded, as now, in
+  =ModelInvocation.output_schema_version= / =output_schema_sha256= and
+  =Qualification.output_schema_version=. Version "1" rows keep their
+  original (VM-order) hashes: they are not relabelled or rewritten, and the
+  global =Canonical= version is not bumped.
+- Projection and =render_prompt/2= are unchanged. Old invocations re-derive
+  byte-exactly from their stored schemas; new ones from their normalised
+  stored schemas. The enabled v3 tuple is unaffected, and no call is
+  needed.
+
+| Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
+| Schema ref value object (=Sdr.Schemas.ref/1=) | Existing; version regime delta | Stable cross-VM provenance of the output schema | =id= unchanged; =version= "2"; =sha256= = Canonical.sha256(=JsonSchema.render(schema)=) | Recorded on ModelInvocation and Qualification | For one schema, version "2" gives identical bytes and sha256 in every VM. Version "1" values are historical and never recomputed | Producer: Sdr.Model / ScoreLead (unchanged) | None |
+| ModelInvocation (=output_schema_version=, =output_schema_sha256=, stored request =schema=) | Existing attributes; meaning per version | Provenance and the stored app request | No new column. New rows carry version "2" and the normalised schema in the stored request | Unchanged | The stored request schema bytes equal the sent stdin schema bytes, and its hash equals =output_schema_sha256=, for Sdr.Model calls. Historical rows are untouched (append-only lifecycle unchanged) | Unchanged | Other callers (tests and fixtures) set their own versions; this is unchanged |
+| Qualification (=output_schema_version=) | Existing attribute | Same regime tag | Version "2" for new rows | Unchanged | Unchanged | Unchanged | None |
+| =SdrAgent.AI.JsonSchema= (render function; not persisted) | New module | The single schema generator | =render/1=, =normalize/1= | Used by Schemas, ModelProvider and ClaudeCLI | Pure, deterministic and schema-aware; literals untouched | n/a | None |
+| WireWitnessLink / Projection / =prompt-builder/1= | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | — | — | — | — | — | — |
+
+Planned RED:
+- =JsonSchema.render/1= is identical across 3 fresh VMs (=mix run
+  --no-start=, no model, no DB) for the SDR purpose schemas, and for a
+  shuffled-definition schema (fields given in different orders);
+- nested object =required= is sorted (properties, items, $defs, anyOf
+  branches);
+- literal =default= / =const= / =examples= / =enum= values containing a
+  "required" key are untouched; =enum=, =prefixItems= and =anyOf= order is
+  kept; there is no dedupe;
+- =Schemas.ref/1= reports version "2" and its sha equals
+  Canonical.sha256(=render/1=);
+- an Sdr.Model call stores a request schema whose bytes equal those in the
+  sent stdin and whose hash equals =output_schema_sha256=;
+- historical fixtures are unchanged: =render_prompt/2= with an unsorted
+  schema keeps its bytes, and the v1/v2/v3 projection digests are
+  unchanged.
 
 * Implementation Notes
 ** S12b (Claude writer)
