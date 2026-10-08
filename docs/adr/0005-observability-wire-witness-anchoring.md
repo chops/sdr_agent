@@ -246,6 +246,30 @@ and queue ruling `c22df84e-c201-4e86-9e17-b44247864bd1`.
   and the mandatory S12d real proof still apply. `traceparent` equality is
   not claimed, because no expected-context source is persisted.
 
+#### S12d status (2026-10-07): real proofs recorded, NOT enabled
+
+Both owner-budgeted synthetic calls were witnessed end to end by the
+deployed proxy 0.2.0, with exactly one complete exchange each, and the
+response projections were equal. Neither proved the request projection.
+
+- The first call showed that v1 cannot read Claude Code 2.1.291's request
+  shape.
+- The second call came after the narrow projection
+  `claude-message-json/2+prompt-builder/1` was added (entity PASS
+  `f04a7e44`). That projection records CLI context as typed evidence and
+  does not claim it equal or benign. The real request still fell outside
+  v2's grammar on three structural points: the reminder's trailing newline,
+  `cache_control.ttl`, and a message-level `output_config`.
+
+The runtime reconciled-method allowlist therefore stays **empty**.
+Allowlist entries must name an exact `(provider, attested CLI version,
+projection version, method)`.
+
+Enablement requires all of the following, in a separate reviewed change:
+a reviewed grammar revision, a new owner-approved real call, and
+independent review of its evidence. Evidence:
+`docs/audit/s12d-wire-witness-proof-{1,2}.json`.
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),

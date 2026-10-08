@@ -73,7 +73,7 @@ defmodule SdrAgent.Agents.Witness.ExternalProofTest do
     entry = %{
       provider: :claude_cli,
       cli_version: invocation.provider_version,
-      projection_version: Projection.version(),
+      projection_version: Projection.version_v2(),
       method: :propagated_id
     }
 
@@ -88,7 +88,7 @@ defmodule SdrAgent.Agents.Witness.ExternalProofTest do
       "attested_cli_version" => invocation.provider_version,
       "model_id" => invocation.model_id,
       "prompt_builder" => invocation.model_catalog_entry["prompt_builder"],
-      "projection_version" => Projection.version(),
+      "projection_version" => Projection.version_v2(),
       "test_only_allowlist_entry" =>
         Map.new(entry, fn {k, v} -> {to_string(k), to_string(v)} end),
       "inventory" => inventory_summary(inventory),
