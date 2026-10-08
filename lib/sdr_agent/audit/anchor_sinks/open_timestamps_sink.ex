@@ -134,7 +134,7 @@ defmodule SdrAgent.Audit.AnchorSinks.OpenTimestampsSink do
     end
 
     defp command(args, opts) do
-      runner = Keyword.get(opts, :command, &System.cmd/3)
+      runner = Keyword.get(opts, :command, &SdrAgent.ChildEnv.system_cmd/3)
 
       wrapper =
         Keyword.get(

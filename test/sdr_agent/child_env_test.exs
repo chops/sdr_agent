@@ -12,6 +12,7 @@ defmodule SdrAgent.ChildEnvTest do
   # Sets process environment variables and PATH.
   use ExUnit.Case, async: false
 
+  alias SdrAgent.Agents.Witness.Store
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.Audit.AnchorSinks.GitSink
   alias SdrAgent.Audit.AnchorSinks.OpenTimestampsSink
@@ -89,6 +90,52 @@ defmodule SdrAgent.ChildEnvTest do
       assert Map.has_key?(env, "SDR_AUDIT_ANCHOR_PRIVATE_KEY")
     end
 
+    test "an overlay never restores a secret-looking name (cmd and port, present or absent)",
+         ctx do
+      absent = "SDR_OVERLAY_#{ctx.suffix}_SECRET"
+      [present | _] = Enum.filter(ctx.canaries, &String.ends_with?(&1, "_TOKEN"))
+
+      for name <- [absent, present, "SDR_AUDIT_ANCHOR_PRIVATE_KEY"] do
+        overlays = [[{name, "synthetic"}], [{name, nil}, {name, "synthetic"}]]
+
+        for overlay <- overlays do
+          refute Enum.any?(
+                   ChildEnv.cmd([], overlay),
+                   &match?({^name, value} when is_binary(value), &1)
+                 ),
+                 "cmd overlay restored a secret-looking name"
+
+          charname = String.to_charlist(name)
+
+          refute Enum.any?(
+                   ChildEnv.port([], overlay),
+                   &match?({^charname, value} when is_list(value), &1)
+                 ),
+                 "port overlay restored a secret-looking name"
+        end
+      end
+
+      assert {"SDR_TRACEPARENT", "00-x"} in ChildEnv.cmd([], [{"SDR_TRACEPARENT", "00-x"}])
+    end
+
+    test "known application secrets are removed even when absent from the snapshot" do
+      env = Map.new(ChildEnv.cmd([]))
+
+      for name <- ~w(SDR_AUDIT_ANCHOR_PRIVATE_KEY SDR_WEBHOOK_HMAC_KEY SECRET_KEY_BASE
+                     TOKEN_SIGNING_SECRET DATABASE_URL) do
+        assert Map.fetch(env, name) == {:ok, nil}, "#{name} is not unconditionally removed"
+      end
+    end
+
+    test "locale and XDG names are an exact set, not whole namespaces", ctx do
+      for name <- ["LC_#{ctx.suffix}", "XDG_#{ctx.suffix}"] do
+        refute ChildEnv.kept?(name, ChildEnv.xdg()), "#{name} passed as part of a namespace"
+      end
+
+      assert ChildEnv.kept?("LC_ALL", [])
+      assert ChildEnv.kept?("XDG_CONFIG_HOME", ChildEnv.xdg())
+    end
+
     test "the port form uses charlists and false for removal", ctx do
       env = Map.new(ChildEnv.port([], [{"SDR_TRACEPARENT", "00-x"}]))
 
@@ -155,6 +202,53 @@ defmodule SdrAgent.ChildEnvTest do
     assert {:error, _} = OpenTimestampsSink.Calendar.verify(proof, hash, wrapper: wrapper)
     assert_clean(names(dump), ctx.canaries)
     assert "TZ" in names(dump)
+  end
+
+  test "ClaudeCLI's process-tree cleanup children (pgrep, kill) see no parent secret", ctx do
+    dump = Path.join(ctx.dir, "cleanup-env")
+    bin = Path.join(ctx.dir, "bin")
+    File.mkdir_p!(bin)
+    fake_tool!(bin, "pgrep", dump, 1)
+    System.put_env("PATH", bin <> ":" <> System.get_env("PATH"))
+
+    {:ok, server} =
+      ClaudeCLI.start_link(
+        command: System.find_executable("elixir"),
+        command_args: [@fake, "malformed"]
+      )
+
+    request = %{
+      id: "child-env-cleanup",
+      operation: "model.complete",
+      prompt: "qualify",
+      schema: Zoi.object(%{answer: Zoi.string()}),
+      witness: %{
+        model_invocation_id: Ash.UUIDv7.generate(),
+        traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+      }
+    }
+
+    assert {:error, :invalid_cli_stream} = ClaudeCLI.complete(request, server: server)
+    assert_clean(names(dump), ctx.canaries)
+  end
+
+  test "the witness store's uid probe sees no parent secret", ctx do
+    dump = Path.join(ctx.dir, "id-env")
+    bin = Path.join(ctx.dir, "bin")
+    File.mkdir_p!(bin)
+    tool = "sdr-fake-id-#{ctx.suffix}"
+
+    File.write!(Path.join(bin, tool), """
+    #!/bin/sh
+    env | cut -d= -f1 >> '#{dump}'
+    echo 4242
+    """)
+
+    File.chmod!(Path.join(bin, tool), 0o755)
+    System.put_env("PATH", bin <> ":" <> System.get_env("PATH"))
+
+    assert Store.effective_uid(tool) == 4242
+    assert_clean(names(dump), ctx.canaries)
   end
 
   test "provenance's git sees no parent secret", ctx do

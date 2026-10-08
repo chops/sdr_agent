@@ -45,9 +45,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   # `SdrAgent.ChildEnv`'s base): proxy routing the shim validates, the
   # Claude Code config/binary location, XDG dirs and TLS roots. Everything
   # else — the anchor signing key included — is removed (security fix).
-  @child_env_allow ~w(XDG_* TERM LLM_OTEL_PROXY_URL LLM_PROXY_SHIM_CLAUDE_BIN
-                      ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR SSL_CERT_FILE
-                      NIX_SSL_CERT_FILE NODE_EXTRA_CA_CERTS)
+  @child_env_allow ChildEnv.xdg() ++
+                     ~w(TERM LLM_OTEL_PROXY_URL LLM_PROXY_SHIM_CLAUDE_BIN
+                        ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR SSL_CERT_FILE
+                        NIX_SSL_CERT_FILE NODE_EXTRA_CA_CERTS)
   @invocation_id ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
   @traceparent ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-(?:00|01)\z/
   @model_alias "opus"
@@ -143,12 +144,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   defp run(request, state) do
     with {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
          :ok <- refuse_bypass(state.environment || System.get_env()) do
-      launch(
-        request,
-        state,
-        ChildEnv.port(@child_env_allow, witness_env) ++
-          Enum.map(@route_flags ++ @route_urls, &{~c"#{&1}", false})
-      )
+      launch(request, state, witness_env)
     end
   end
 
@@ -176,7 +172,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       else: :ok
   end
 
-  defp launch(request, state, child_env) do
+  defp launch(request, state, witness_env) do
     workspace = private_workspace!()
     prompt_path = Path.join(workspace, "prompt")
 
@@ -192,7 +188,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         :stderr_to_stdout,
         {:args, shell_args(state, prompt_path)},
         {:cd, workspace},
-        {:env, child_env},
+        {:env,
+         ChildEnv.port(@child_env_allow, witness_env) ++
+           Enum.map(@route_flags ++ @route_urls, &{~c"#{&1}", false})},
         {:line, 1_048_576}
       ])
 
@@ -320,14 +318,28 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   end
 
   defp signal(pid, signal),
-    do: System.cmd("kill", [signal, Integer.to_string(pid)], stderr_to_stdout: true)
+    do:
+      System.cmd("kill", [signal, Integer.to_string(pid)],
+        stderr_to_stdout: true,
+        env: ChildEnv.cmd([])
+      )
 
   defp alive?(pid),
-    do: match?({_, 0}, System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true))
+    do:
+      match?(
+        {_, 0},
+        System.cmd("kill", ["-0", Integer.to_string(pid)],
+          stderr_to_stdout: true,
+          env: ChildEnv.cmd([])
+        )
+      )
 
   defp descendants(pid) do
     children =
-      case System.cmd("pgrep", ["-P", Integer.to_string(pid)], stderr_to_stdout: true) do
+      case System.cmd("pgrep", ["-P", Integer.to_string(pid)],
+             stderr_to_stdout: true,
+             env: ChildEnv.cmd([])
+           ) do
         {output, 0} -> output |> String.split() |> Enum.map(&String.to_integer/1)
         _ -> []
       end

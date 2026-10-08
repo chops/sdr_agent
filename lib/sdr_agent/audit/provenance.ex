@@ -69,12 +69,18 @@ defmodule SdrAgent.Audit.Provenance do
 
   defp git do
     # No parent secret reaches git (SdrAgent.ChildEnv).
-    opts = [stderr_to_stdout: true, env: SdrAgent.ChildEnv.cmd([])]
-
-    with {sha, 0} <- System.cmd("git", ["rev-parse", "HEAD"], opts),
+    with {sha, 0} <-
+           System.cmd("git", ["rev-parse", "HEAD"],
+             stderr_to_stdout: true,
+             env: SdrAgent.ChildEnv.cmd([])
+           ),
          sha = String.trim(sha),
          true <- sha =~ ~r/\A[0-9a-f]{40}\z/,
-         {status, 0} <- System.cmd("git", ["status", "--porcelain"], opts) do
+         {status, 0} <-
+           System.cmd("git", ["status", "--porcelain"],
+             stderr_to_stdout: true,
+             env: SdrAgent.ChildEnv.cmd([])
+           ) do
       {sha, String.trim(status) != ""}
     else
       _ -> {"unknown", false}

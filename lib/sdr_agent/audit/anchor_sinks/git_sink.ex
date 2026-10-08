@@ -16,7 +16,7 @@ defmodule SdrAgent.Audit.AnchorSinks.GitSink do
 
   @impl true
   def publish(statement, opts) do
-    command = Keyword.get(opts, :command, &System.cmd/3)
+    command = Keyword.get(opts, :command, &ChildEnv.system_cmd/3)
     repository = Keyword.fetch!(opts, :repository)
     allowed_repository = Keyword.get(opts, :allowed_repository, @repository)
     number = Keyword.fetch!(opts, :anchor_number)
