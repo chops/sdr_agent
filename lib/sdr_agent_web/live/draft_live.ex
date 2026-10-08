@@ -18,6 +18,10 @@ defmodule SdrAgentWeb.DraftLive do
       the error is displayed with the now-current revision;
     * revoke → `Outreach.revoke/2`; cancel a retry → `Outreach.cancel_retry/2`.
 
+  The displayed revision's `risk_flags` — what the model asked a reviewer to
+  check — are shown, escaped, as "Reviewer notes from the AI" (Q0.2,
+  display only; approval does not depend on them).
+
   The UI hides these controls from the auditor, but authorization is the
   domain's: a forged event from an auditor is refused (and audited) by
   `SdrAgent.Audit.Guard` and shown as an error. An auditor's view is
@@ -524,6 +528,27 @@ defmodule SdrAgentWeb.DraftLive do
                   <span><span class="mr-1 inline-block h-0.5 w-4 bg-sky-400 align-middle"></span>personalization</span>
                 </p>
               </div>
+
+              <section
+                :if={(@current.risk_flags || []) != []}
+                id="risk-flags"
+                aria-labelledby="risk-flags-title"
+                class="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4"
+              >
+                <h3
+                  id="risk-flags-title"
+                  class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-amber-800"
+                >
+                  <.icon name="hero-flag" class="size-4" /> Reviewer notes from the AI
+                </h3>
+                <p class="mt-1 text-xs text-amber-700">
+                  What the agent flagged for a human to check in revision #{@current.revision_number}.
+                  Advisory only: it does not change what approval binds to.
+                </p>
+                <ul class="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-900">
+                  <li :for={flag <- @current.risk_flags}>{flag}</li>
+                </ul>
+              </section>
 
               <.form
                 :if={@editing?}
