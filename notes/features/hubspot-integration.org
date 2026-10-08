@@ -237,7 +237,7 @@ ruling (ADR §5).
       - OQ-A gates Lead creation and OQ-B gates sync updates, both inert
         until answered. OQ-D gates H1a.
       - Setup order is H1a (hermetic) → H0 (owner probe via the smoke hatch
-        or an owner-only =sops exec-env= curl) → H1b.
+        or an owner-only probe — the exec-env curl form is superseded by the stdin probe script after Codex note 287bde54) → H1b.
       - Activity families are only those proven in H0; email engagements
         are unsupported in H1.
       - Child scrubbing applies to every launcher, with a source-inventory
@@ -283,7 +283,7 @@ Estimates are agent hours (TDD, review rounds, =bin/verify=).
 | Slice | Content | Est. (h) | Deps |
 |-------+---------+----------+------|
 | H1a | A1, hermetic: holder, ChildEnv plus inventory and canary tests, Gate (incarnations, Task deadlines, metering, cleanup), preflight bootstrap and evidence, client, grants, smoke hatch; no remote enablement. The gitignore and sops rule are out of scope (secrets PR). | 16 | A1 PASS (OQ-D answered) |
-| H0 | Owner setup and probe (the owner-only =sops exec-env= curl once the secrets PR merges; the smoke hatch after H1a); facts recorded here (service key in a test account, DEVELOPER_TEST, scope names, readable activity families, =hs_email_optout=, DBV routes, =sdr_write_key= uniqueness, the HubSpot record URL format) | 2 (+1 owner) | secrets PR |
+| H0 | Owner setup and probe (the owner-only stdin probe script of ADR §10, which keeps the key out of argv and env, once the secrets PR merges; the smoke hatch after H1a); facts recorded here (service key in a test account, DEVELOPER_TEST, scope names, readable activity families, =hs_email_optout=, DBV routes, =sdr_write_key= uniqueness, the HubSpot record URL format) | 2 (+1 owner) | secrets PR |
 | H1b | A2 import: CrmLink, watermark, records, runs, binding matrix, lock order and advisory keys, ApplySuppression delta, opt-out, lead auto-create (OQ-A), HubSpot-owned field lock =crm_managed= (OQ-B), UI: "Edit in HubSpot" link and admin "Sync now" | 18 | A2 PASS, H0, H1a |
 | H1c | A2 research via the Gate, =research_ref=, watermark metadata, fencing; only H0-proven families | 7 | H1b |
 | | *Read-only end-to-end* | *~43 h* | |
@@ -311,8 +311,9 @@ Estimates are agent hours (TDD, review rounds, =bin/verify=).
    and =hubspot_portal_id=. Never put the key on a command line or in chat.
 6. *Probe* with one of:
    - =SDR_HUBSPOT_EXTERNAL_SMOKE=1 bin/with-secrets SDR_HUBSPOT_SERVICE_KEY SDR_HUBSPOT_PORTAL_ID -- mix test --include external test/external/hubspot_smoke_test.exs=
-   - the owner-only command in ADR §10, which prints account type and portal
-     id only.
+   - the owner-only stdin probe script in ADR §10. It never puts the key in
+     argv or the environment, and prints only ={portalId, accountType}= or a
+     coded error. Run its fake-key canary self-test first.
 
    Report the facts in prose.
 7. *Run and rotate.* Run with =bin/with-secrets … -- mix phx.server=. Rotate

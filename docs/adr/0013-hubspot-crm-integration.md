@@ -270,8 +270,9 @@ and every CRW grant are Gate B.
 
 **Storage.**
 - The secret lives in the gitignored `secrets/hubspot.local.sops.yaml` with
-  **flat** keys `hubspot_service_key` and `hubspot_portal_id`. Flat keys work
-  with `sops exec-env` for the owner-only H0 probe (§10).
+  **flat** keys `hubspot_service_key` and `hubspot_portal_id`. Flat keys let
+  the owner-only H0 probe read the key with `sops -d --extract` into a pipe
+  (§10). The key is never put in argv or in the environment.
 - `bin/with-secrets` maps them to `SDR_HUBSPOT_SERVICE_KEY` and
   `SDR_HUBSPOT_PORTAL_ID`.
 - The owner adds the values. Agents never ask for, read, print or copy the
@@ -1133,9 +1134,71 @@ None.
    test account and the service key (OQ-D), and writes the flat sops file in
    the ignored path.
    - The owner runs the independent owner-only probe at once, or the smoke
-     hatch after H1a merges:
-     `sops exec-env secrets/hubspot.local.sops.yaml 'curl -sS -H "Authorization: Bearer $hubspot_service_key" https://api.hubapi.com/account-info/v3/details'`.
-     It prints account type and portal id only, for the owner to read.
+     hatch after H1a merges.
+   - **The key must never appear in argv, the environment, stdout or
+     stderr.** This revision replaces an earlier form that expanded the key
+     into curl's argv and printed the full body (Codex owner-safety note
+     `287bde54`). The probe used now works like this:
+     - `sops -d --extract` writes the key to a pipe.
+     - The script reads it with the `read` builtin and passes it to curl as
+       a config file on stdin (`printf` builtin, `--config -`).
+     - curl is restricted to https with no redirects and a timeout, and its
+       body and errors are suppressed.
+     - Only the allowlisted projection `{portalId, accountType}` is printed,
+       or a coded error (`http=<code>`, `transport_error curl_exit=<n>`,
+       `unexpected_shape`, `missing_key`).
+     - The URL override exists only for a `https://127.0.0.1:*` self-test.
+   - The owner saves the script *outside the repository* (for example
+     `~/.local/bin/hubspot-probe.sh`), first runs the canary self-test with
+     a fake key, then runs the real probe:
+
+     ```bash
+     #!/usr/bin/env bash
+     # Owner-only H0 probe. Reads the service key from STDIN (never argv, never env),
+     # sends it to curl via a stdin config (-K -), prints only {portalId, accountType}.
+     # Usage: sops -d --extract '["hubspot_service_key"]' secrets/hubspot.local.sops.yaml | bash hubspot-probe.sh
+     set -euo pipefail
+     set +x
+     url="https://api.hubapi.com/account-info/v3/details"
+     if [ -n "${HUBSPOT_PROBE_URL:-}" ]; then
+       case "$HUBSPOT_PROBE_URL" in
+         https://127.0.0.1:*) url="$HUBSPOT_PROBE_URL" ;;   # canary self-test only
+         *) echo "probe: refused_url" >&2; exit 2 ;;
+       esac
+     fi
+     IFS= read -r key || true
+     [ -n "${key:-}" ] || { echo "probe: missing_key"; exit 2; }
+     set +e
+     resp="$(printf 'header = "Authorization: Bearer %s"\n' "$key" \
+       | curl --silent --proto '=https' --max-redirs 0 --max-time "${HUBSPOT_PROBE_MAX_TIME:-20}" \
+              --config - --write-out '\n%{http_code}' "$url" 2>/dev/null)"
+     rc=$?
+     set -e
+     unset key
+     if [ "$rc" -ne 0 ]; then echo "probe: transport_error curl_exit=$rc"; exit 1; fi
+     code="${resp##*$'\n'}"
+     json="${resp%$'\n'*}"
+     unset resp
+     if [ "$code" != "200" ]; then echo "probe: http=$code"; exit 1; fi
+     printf '%s' "$json" \
+       | jq -ce '{portalId: (.portalId | numbers), accountType: (.accountType | strings)}' 2>/dev/null \
+       || { echo "probe: unexpected_shape"; exit 1; }
+     ```
+
+     ```bash
+     # 1. canary self-test (fake key, local port, expect "probe: transport_error ...")
+     printf 'pat-na1-CANARY-FAKE\n' | HUBSPOT_PROBE_URL=https://127.0.0.1:48443/ HUBSPOT_PROBE_MAX_TIME=2 bash ~/.local/bin/hubspot-probe.sh
+     # 2. real probe (prints only {"portalId":…,"accountType":…})
+     sops -d --extract '["hubspot_service_key"]' secrets/hubspot.local.sops.yaml | bash ~/.local/bin/hubspot-probe.sh
+     ```
+
+   - Claude ran the canary self-test on 2026-10-07 with a random fake
+     `pat-na1-CANARY…` value against a local listener that never answers. It
+     made no HubSpot call. While curl was alive, `ps -ww -A -o args` and
+     `ps -ww -E` (environment) were sampled every 100 ms. The fake key did
+     not appear in the process listings, stdout or stderr. The script printed
+     `probe: transport_error curl_exit=28`, and a non-loopback URL override
+     was refused.
    - The owner reports the facts in prose; agents never see the key.
 3. **H1b and H1c** start only after the H0 facts are recorded and the gating
    owner answers are in.
