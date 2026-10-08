@@ -16,6 +16,7 @@ defmodule SdrAgent.Agents.Witness.RaceTest do
   alias SdrAgent.Agents.Witness
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit
+  alias SdrAgent.Test.WitnessRoot
 
   @tables ~w(oban_jobs wire_witness_links anchor_sink_receipts audit_exports audit_anchors
              audit_signing_keys audit_accesses audit_events audit_chain_heads retention_markers
@@ -26,7 +27,7 @@ defmodule SdrAgent.Agents.Witness.RaceTest do
     :ok = Sandbox.checkout(SdrAgent.Repo, sandbox: false)
     cleanup!()
 
-    root = Path.join(System.tmp_dir!(), "sdr-witness-race-#{System.unique_integer([:positive])}")
+    root = WitnessRoot.mkdir!("race")
     File.mkdir_p!(root)
 
     on_exit(fn ->

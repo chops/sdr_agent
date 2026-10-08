@@ -5,16 +5,20 @@ defmodule SdrAgentWeb.RunLive do
   Decisions, ModelInvocations and ToolInvocations in order, and the signal
   AuditEvents of the run. Request/response/input/output bodies link to the
   payload viewer (audited `read_content`); trace ids link to Grafana Tempo.
-  Read-only; an auditor's view is recorded with the run id first.
+  An admin may retry a stopped run that has no retry yet (`SDR.retry_run/2`,
+  S13b; the new run opens); everything else is read-only. An auditor's view
+  is recorded with the run id first.
   """
   use SdrAgentWeb, :live_view
 
   alias SdrAgent.Agents
   alias SdrAgent.Audit
   alias SdrAgent.Sales
+  alias SdrAgent.SDR
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
   alias SdrAgentWeb.LiveRefresh
+  alias SdrAgentWeb.Scope
 
   @budget [
     {"Model calls", :model_calls_used, :max_model_calls},
@@ -54,6 +58,7 @@ defmodule SdrAgentWeb.RunLive do
          {:ok, tools} <- Agents.list_tool_invocations(run.id, opts),
          {:ok, events} <- Audit.list_events(opts),
          {:ok, contact} <- run_contact(run, opts),
+         {:ok, runs} <- Agents.list_runs(opts),
          :ok <- AuditedView.record(scope, "SdrAgent.Agents.AgentRun", run.id, "agent run view") do
       assign(socket,
         loaded?: true,
@@ -66,7 +71,10 @@ defmodule SdrAgentWeb.RunLive do
         invocations: invocations,
         tools: tools,
         signals: Enum.filter(events, &(&1.agent_run_id == run.id and &1.category == :signal)),
-        budget: budget(run.budget)
+        budget: budget(run.budget),
+        retryable?:
+          run.status in [:failed, :budget_exhausted, :cancelled] and
+            not Enum.any?(runs, &(&1.retry_of_id == run.id))
       )
     else
       {:error, :not_found} ->
@@ -74,6 +82,20 @@ defmodule SdrAgentWeb.RunLive do
 
       {:error, reason} ->
         assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
+    end
+  end
+
+  @impl true
+  def handle_event("retry_run", _params, socket) do
+    case SDR.retry_run(socket.assigns.run.id, actor: socket.assigns.current_scope.user) do
+      {:ok, %{run: run}} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Retry queued: this is the new run.")
+         |> push_navigate(to: ~p"/runs/#{run.id}")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, AuditedView.error_message(reason))}
     end
   end
 
@@ -152,6 +174,16 @@ defmodule SdrAgentWeb.RunLive do
             </span>
             <span :if={@run.failure_reason} class="mt-1 block text-rose-700">{@run.failure_reason}</span>
           </:subtitle>
+          <:actions>
+            <.ui_button
+              :if={Scope.admin?(@current_scope) and @retryable?}
+              id="retry-run"
+              phx-click="retry_run"
+              data-confirm="Start a new run for this lead from the same trigger?"
+            >
+              <.icon name="hero-arrow-path" class="size-4" /> Retry run
+            </.ui_button>
+          </:actions>
         </.page_header>
 
         <div class="grid gap-3 sm:grid-cols-3">

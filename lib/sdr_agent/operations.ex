@@ -28,7 +28,9 @@ defmodule SdrAgent.Operations do
       note), `get_failure/2`;
     * `list_attention/1` — the single operator-attention query: Failures in
       `open` or `acknowledged`, newest first (Dashboard and Operations views;
-      ADM, REV, AUR, AUD).
+      ADM, REV, AUR, AUD);
+    * `list_failed_webhooks/1` — `failed` WebhookEvents, newest first (the
+      operator webhook retry, S13b: `SdrAgent.Outreach.retry_webhook/2`).
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -97,6 +99,15 @@ defmodule SdrAgent.Operations do
     Operation
     |> GuardedCall.read_query(opts)
     |> Ash.Query.sort(inserted_at: :desc, id: :desc)
+    |> Ash.read()
+  end
+
+  @doc "Failed WebhookEvents of the actor's tenant, newest first (S13b; ADM, REV, AUR, AUD)."
+  def list_failed_webhooks(opts) do
+    SdrAgent.Operations.WebhookEvent
+    |> GuardedCall.read_query(opts)
+    |> Ash.Query.filter(processing_status == :failed)
+    |> Ash.Query.sort(received_at: :desc, id: :desc)
     |> Ash.read()
   end
 

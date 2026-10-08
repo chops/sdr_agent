@@ -75,10 +75,41 @@ defmodule SdrAgent.Agents.Witness do
 
   ## Configuration
 
-  @doc "The configured proxy blob directory, or nil (reconciliation inert)."
+  @doc """
+  The configured proxy blob directory, or nil (unset: reconciliation inert).
+  A configured value is returned as is. Every store read revalidates it
+  (`Store.validate_root/1`), so a configured root that fails takes the
+  unreadable-store downgrade path; it is never treated as unset.
+  """
   def store_root, do: Keyword.get(config(), :store_root)
 
-  @doc "Methods whose matching proof may be labelled reconciled (ships empty)."
+  @doc """
+  Boot check (called from `SdrAgent.Application.start/2`): an explicitly
+  configured root that is missing or untrusted refuses to start. The fixed
+  message names only the error code, never the path. Unset is `:ok`.
+  """
+  def check_configured_root! do
+    case store_root() do
+      nil ->
+        :ok
+
+      root ->
+        case Store.validate_root(root) do
+          {:ok, _root} ->
+            :ok
+
+          {:error, code} ->
+            raise "wire witness store root refused at boot (#{code}); " <>
+                    "fix or unset SDR_WITNESS_STORE_ROOT"
+        end
+    end
+  end
+
+  @doc """
+  Exact entries whose matching proof may be labelled reconciled. Dev and prod
+  ship exactly one (S12d enablement, ADR-0005); the test environment
+  configures none.
+  """
   def reconciled_methods do
     # Runtime entries must be exact proofs; a bare method atom is accepted
     # only through the test-only per-call override.

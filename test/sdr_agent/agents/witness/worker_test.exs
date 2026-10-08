@@ -18,6 +18,7 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Operations.Operation
   alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
+  alias SdrAgent.Test.WitnessRoot
 
   @witness SdrAgent.Agents.Witness
   @reconcile_worker SdrAgent.Agents.Witness.ReconcileWorker
@@ -59,7 +60,7 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
 
   test "the worker reconciles and settles its Operation", ctx do
     root =
-      Path.join(System.tmp_dir!(), "sdr-witness-worker-#{System.unique_integer([:positive])}")
+      WitnessRoot.mkdir!("worker")
 
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf!(root) end)
@@ -85,7 +86,7 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
     assert all_enqueued(worker: @reconcile_worker) == []
 
     Application.put_env(:sdr_agent, @witness,
-      store_root: System.tmp_dir!(),
+      store_root: WitnessRoot.mkdir!("scan"),
       reconciled_methods: []
     )
 
@@ -128,7 +129,7 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
   describe "bounded recovery (re-drive) of missing or open witnesses" do
     setup ctx do
       root =
-        Path.join(System.tmp_dir!(), "sdr-witness-redrive-#{System.unique_integer([:positive])}")
+        WitnessRoot.mkdir!("redrive")
 
       File.mkdir_p!(root)
       on_exit(fn -> File.rm_rf!(root) end)

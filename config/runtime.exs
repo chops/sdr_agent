@@ -20,6 +20,17 @@ if System.get_env("PHX_SERVER") do
   config :sdr_agent, SdrAgentWeb.Endpoint, server: true
 end
 
+# S12d wire witness (ADR-0005): opt-in store root for non-test environments.
+# Unset leaves reconciliation inert. The value is used verbatim and validated
+# at boot and on every read (absolute, no symlinks, owned by this user, not
+# group- or world-writable); an invalid value refuses boot.
+if config_env() != :test do
+  case System.get_env("SDR_WITNESS_STORE_ROOT") do
+    nil -> :ok
+    root -> config :sdr_agent, SdrAgent.Agents.Witness, store_root: root
+  end
+end
+
 # PORT overrides the HTTP port in every environment. Without it, dev and test
 # keep the ports their config files set (dev: the project's Phoenix port 4120,
 # .workflow/project-facts.md) and production listens on 4000.

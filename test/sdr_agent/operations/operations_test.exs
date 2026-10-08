@@ -163,6 +163,14 @@ defmodule SdrAgent.OperationsTest do
         )
 
       assert failed.status == :failed
+
+      # S13b A4: an internal execution primitive — no operator may move a
+      # failed Operation to running (nothing would be re-enqueued).
+      for operator <- [ctx.admin, ctx.reviewer] do
+        assert {:error, %Ash.Error.Forbidden{}} =
+                 Operations.retry_operation(failed, actor: operator)
+      end
+
       {:ok, again} = Operations.retry_operation(failed, actor: ctx.agent)
       assert again.status == :running
       assert again.attempts == 2

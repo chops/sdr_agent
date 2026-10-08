@@ -118,20 +118,9 @@ defmodule SdrAgent.Operations.AttentionTest do
       assert events_of_type(ctx.tenant, "agents.run.failed") == []
     end
 
-    test "an operator retry resolves the retried run's Failure", ctx do
-      %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
-      {:ok, failed} = Agents.fail_run(run, %{status_reason: :crash}, actor: agent)
-
-      {:ok, retry} = Agents.retry_run(failed, actor: ctx.admin)
-      assert retry.retry_of_id == failed.id
-      assert attention(ctx) == []
-
-      {:ok, failure} = Operations.get_failure(failed.attention_failure_id, actor: ctx.admin)
-      assert failure.status == :resolved
-      assert failure.resolved_by_type == :user
-      assert failure.resolved_by_id == ctx.admin.id
-      assert failure.resolution_note =~ retry.id
-    end
+    # The operator retry resolving the prior run's Failure (resolver, note)
+    # is covered through SdrAgent.SDR.retry_run/2 in
+    # test/sdr_agent/sdr/retry_run_test.exs (S13b).
   end
 
   describe "Lead → blocked" do
