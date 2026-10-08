@@ -159,4 +159,63 @@ v2 stands as accepted except for the rows and notes replaced here.
   copies the definition; the signal is read only).
 
 * Status
-Soft-stop v3 is waiting for the Codex verdict. Nothing is implemented.
+*Entity review: PASS* — Codex answer =9a400910= to request =a90882f7=,
+on soft-stop v3 at =965b72f=. Codex's conditions: record the PASS here;
+proceed with plan and affected modules, *not* a blanket RED/GREEN approval;
+the budget, lock, authorization and no-send conditions and the concurrency
+and direct-action tests still apply.
+
+* Affected Modules (as built)
+- A1: =SdrAgent.SDR.retry_run/2= (guarded) → new =SdrAgent.SDR.Retry=.
+- A2: =AgentRun :retry= (=operation_id= argument; policy ADM + marker),
+  =SdrAgent.Agents.Checks.RetryContext= (new),
+  =SdrAgent.Agents.Changes.RetryOf= (Operation validation; Forbidden
+  without the marker); =Agents.retry_run/2= removed.
+- A3: unchanged =Operation :create= (key =retry:<prior id>=).
+- A4: =Operation= policy split (=:retry= kind actors only, =:cancel=
+  kind actors + ADM).
+- Resume on retry: =SDR.Actions.AcceptAssignment= and
+  =RequestQualification= do not re-transition a lead already
+  =researching= / =qualifying= (they still record their Decisions). This
+  is the agent-plane side of "the lead state is never reset or
+  re-transitioned": without it a retried assignment crashed on
+  =start_research= (=qualifying → researching= is invalid).
+- B1: =SdrAgent.Outreach.retry_webhook/2= (guarded) → new
+  =SdrAgent.Outreach.WebhookRetry=.
+- B2/B4: =WebhookEvent :request_retry= (ADM + marker),
+  =:record_retry_failed= (WHK), declared transitions, policy split by
+  action; new =Operations.Checks.WebhookRetryContext= and
+  =Operations.Changes.RetryRequest= (overwrites caller arguments from the
+  marker).
+- B3: =Outreach.Webhooks= processor (=runnable?/1=, =pending_retry/1=,
+  =retry_ledger/1=, =retry_failed/4=).
+- C1: =Operations.list_failed_webhooks/1= (new read);
+  =SdrAgentWeb.OperationsLive= (run retry buttons, "Failed webhooks" card
+  with retry), =SdrAgentWeb.RunLive= (=#retry-run=). ADM only; forged
+  events are refused and audited by the domain.
+
+* Deviations
+- B2 says a direct call is "Forbidden and audited". A direct
+  =Ash.update(:request_retry)= (or =Ash.create(:retry)=) is Forbidden but,
+  like every raw Ash call that bypasses the domain functions, not audited:
+  denial audit is the =Guard='s, and there is no domain function for
+  either action. Both orchestration paths audit every refused actor.
+- The webhook B1 lookup of a malformed (non-uuid) id returns
+  ={:error, :not_found}= before the transaction.
+
+* TDD Tracking
+- A (run retry): =retry_run_test= RED 0/11 with the implementation stashed
+  (=retry_run/2= undefined; one setup MatchError fixed in the test), GREEN
+  12/12 after fixing test inputs (suppression args, =create_run= budget
+  args, atom =actor_type=) and two implementation defects (direct =:retry=
+  now Forbidden, not Invalid; the resume above). The reply-run test and the
+  real-connection race were written after the implementation and
+  mutation-checked (a wrong =run_id= in the ReplyWorker job fails it).
+- A4: =operations_test= admin/reviewer deny RED 16/17 → GREEN.
+- B (webhook retry): =webhook_retry_test= RED 0/12 (11 missing interface,
+  1 test bug: =Oban.retry_job= returns =:ok=) → GREEN 12/12. Mutation: with
+  the processor's pending-request gate removed, the duplicate-job test
+  fails (after strengthening it to use an event that would succeed).
+  Webhook race (real connections): 2/2 with the run race.
+- C1: =operations_live_test= RED 9/14 (no buttons, no card) → GREEN 14/14.
+
