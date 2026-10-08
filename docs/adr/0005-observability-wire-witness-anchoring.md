@@ -294,6 +294,12 @@ the context is recorded, not proven equal or benign. v3 is hermetic until a
 new owner-approved real call and a separately reviewed enablement, and the
 runtime allowlist stays empty.
 
+The owner approved up to two more synthetic real calls for the v3 proof on
+2026-10-07. They may be spent one at a time, and only after Codex has
+verified v3 RED and approved v3 GREEN and the #24 fixes. If v3 does not
+match the real shape, the work stops and is reported; the rules are not
+widened ad hoc.
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),

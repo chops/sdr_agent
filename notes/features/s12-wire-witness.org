@@ -486,6 +486,19 @@ message's canonical block list (now binding any ttl), and
 | WireWitnessLink.evidence: =projections_inapplicable= (Q2) | Existing value-contract delta; outer diagnostic, *not* a member of any derived context group | Label which request grammars were tried and found inapplicable, so a fallback is never mistaken for a v2/v3 claim | Optional ordered unique list of enum strings from {v2, v3}, length 0..2; the only legal values are =[]=, =["v2"]=, =["v2","v3"]=; absent on old rows | Unchanged | Set only when a primary comparison is attempted: v2 request grammar evaluated → =[]= (even when the response is unsupported or a mismatch); v2 inapplicable and v3 evaluated → =["v2"]=; both inapplicable and v1 evaluated → =["v2","v3"]=. Only *request* inapplicability counts: a v2-admitted request with a thinking or invalid SSE response stays evaluated v2 / =inferred= with its complete 8-key group. It is omitted when no comparison was attempted (gate or blob failures). It cannot be injected through the derived-extras merge | REC create only (unchanged) | None |
 | ModelInvocation / Operation / Payload / Failure / Witness allowlist | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found. The runtime allowlist stays empty; a v3 entry is an exact tuple used only in tests | — | — | — | — | — | — |
 
+Owner decision (2026-10-07, about 18:15 MT, relayed by the coordinator):
+APPROVED up to 2 more real Claude calls for the S12d v3 proof (calls 3 and
+4). Conditions:
+- synthetic fixture data only, counted against the S6a budgets;
+- run on the writer's own test DB (never =sdr_agent_dev=), with
+  metadata-only evidence;
+- spend them only after Codex has VERIFIED v3 RED, approved v3 GREEN and
+  approved the #24 fixes;
+- one call at a time: analyse proof 3 before spending proof 4;
+- if v3 still does not match the real shape, stop and report. Do not widen
+  the rules ad hoc.
+Enablement remains a separate reviewed change.
+
 Planned RED negatives:
 - LF: CRLF, double LF, space+LF, tab or space after the close tag, and a
   missing or incorrect close tag are refused. An LF inside the wrapper before

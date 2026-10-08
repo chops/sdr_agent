@@ -21,6 +21,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   alias Ecto.Adapters.SQL
   alias SdrAgent.Agents
   alias SdrAgent.Agents.Witness
+  alias SdrAgent.Agents.WitnessEvidence
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
@@ -584,7 +585,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
         assert link.evidence["projection_version"] == @v2_label, variant
         assert link.evidence["projections_inapplicable"] == [], variant
 
-        for key <- SdrAgent.Agents.WitnessEvidence.context_group(),
+        for key <- WitnessEvidence.context_group(),
             do: assert(Map.has_key?(link.evidence, key), "#{variant}: #{key}")
 
         refute Map.has_key?(link.evidence, "trailing_output_config"), variant
