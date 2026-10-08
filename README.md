@@ -1,5 +1,12 @@
 # SdrAgent
 
+🚨 this is going to be a wild ride, so stay tuned! 🚨
+started with a one-shot prompt that ran for 24 hours.
+next i'm going to carve this chunk of rock into a 
+handy dandy production-ready SDR agent that integrates 
+with hubspot. (not accepting PRs for the foreseeable 
+future)
+
 An audit-first SDR (sales development) agent MVP. The model is Jido for
 decisions, Ash for governance, Oban for durable execution, Postgres as the
 system of record, and Phoenix LiveView for operator control. Every step the

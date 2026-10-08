@@ -1,0 +1,79 @@
+{
+  "attested_cli_version": "2.1.291",
+  "current_links": [
+    {
+      "evidence": {
+        "app_request_sha256": "1f8af11d9ebbbccc29dc979d104623744ac50168d4940a9323ea09a2fde59210",
+        "app_response_sha256": "ffb796becf0f7ada567906196f63fbfb946a5f6889870e889c379ed64b0dc4c1",
+        "classification": "primary",
+        "cli_version": "2.1.291",
+        "completed_at": "2026-10-07T22:22:28.62528Z",
+        "http_method": "POST",
+        "http_status": 200,
+        "inventory_sha256": "12063f87f89e4b1600c107224da238e3a0fc8a6a9d57df96bfae04870d9f226c",
+        "observed_response_projection_sha256": "245eb2e2444041f7c30e0673c86eba3bb23174393b89bc036cb7bd4f8bee5a55",
+        "outcome": "complete",
+        "projected_request_sha256": "0b9b2255ae2ae5741486591e633e35d2f3885b93d5877bd95c36a3a37d19ee12",
+        "projected_response_sha256": "245eb2e2444041f7c30e0673c86eba3bb23174393b89bc036cb7bd4f8bee5a55",
+        "projection_version": "claude-message-json/1+prompt-builder/1",
+        "proxy_version": "0.2.0",
+        "reason_codes": [
+          "request_shape_unsupported"
+        ],
+        "request_bytes_seen": 6740,
+        "request_capture_complete": true,
+        "response_bytes_seen": 1693,
+        "response_capture_complete": true,
+        "route": "/anthropic/v1/messages",
+        "started_at": "2026-10-07T22:22:26.907492Z",
+        "stream_complete": true,
+        "witness_schema": 1
+      },
+      "link_status": "inferred",
+      "method": "propagated_id",
+      "proxy_record_ref": "01a11875-f85b-7a1d-a579-f286279b182c",
+      "proxy_request_sha256": "5bd02a6190838077ad0897a226c052b0323c42689337ca419af1a1326d6f8d63",
+      "proxy_response_sha256": "7cc8f5a35a2a5b08120efcf1c4c3be2c9107f077b56461e84e066e14f1f46843"
+    }
+  ],
+  "generated_by": "test/sdr_agent/agents/witness/external_proof_test.exs",
+  "inventory": [
+    {
+      "completed_at": "2026-10-07T22:22:28.62528Z",
+      "http_status": 200,
+      "method": "POST",
+      "outcome": "complete",
+      "proxy_version": "0.2.0",
+      "record_id": "01a11875-f85b-7a1d-a579-f286279b182c",
+      "request_bytes_seen": 6740,
+      "request_capture_complete": true,
+      "request_sha256": "5bd02a6190838077ad0897a226c052b0323c42689337ca419af1a1326d6f8d63",
+      "response_bytes_seen": 1693,
+      "response_capture_complete": true,
+      "response_sha256": "7cc8f5a35a2a5b08120efcf1c4c3be2c9107f077b56461e84e066e14f1f46843",
+      "route": "/anthropic/v1/messages",
+      "schema_version": 1,
+      "started_at": "2026-10-07T22:22:26.907492Z",
+      "state": "terminal",
+      "stream_complete": true
+    }
+  ],
+  "model_id": "claude-opus-5-5",
+  "model_invocation_id": "01a11875-f616-77a1-9631-ed3534331720",
+  "projection_version": "claude-message-json/2+prompt-builder/1",
+  "prompt_builder": "prompt-builder/1",
+  "provider": "claude_cli",
+  "reconcile_result": {
+    "attention": [
+      "request_shape_unsupported"
+    ],
+    "status": "inferred"
+  },
+  "test_only_allowlist_entry": {
+    "cli_version": "2.1.291",
+    "method": "propagated_id",
+    "projection_version": "claude-message-json/2+prompt-builder/1",
+    "provider": "claude_cli"
+  },
+  "witness_status": "inferred"
+}

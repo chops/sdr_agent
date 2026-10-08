@@ -344,7 +344,9 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
                  successor_attrs(mismatch, %{
                    link_status: :reconciled,
                    evidence:
-                     Map.merge(evidence(), %{
+                     evidence()
+                     |> Map.merge(v2_context_group())
+                     |> Map.merge(%{
                        "projection_version" => "claude-message-json/2+prompt-builder/1",
                        "supersede_reason" => "projection_version_changed"
                      })
@@ -513,6 +515,20 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
   end
 
   defp record_ref, do: Ash.UUIDv7.generate()
+
+  # A v2 claim carries its complete context group (Codex #24 verdict 41c2aedf).
+  defp v2_context_group do
+    %{
+      "reminder_count" => 0,
+      "reminder_sha256s" => [],
+      "reminder_bytes" => [],
+      "trailing_system_count" => 0,
+      "trailing_system_sha256s" => [],
+      "trailing_system_bytes" => [],
+      "request_extras_sha256" => String.duplicate("c3", 32),
+      "request_fields" => []
+    }
+  end
 
   defp terminal_invocation!(run, agent, provider, key) do
     invocation = sent_invocation!(run, agent, key, provider)

@@ -391,6 +391,113 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     end
   end
 
+  describe "projection v2 (S12d)" do
+    @v2 "claude-message-json/2+prompt-builder/1"
+
+    test "the real CLI request shape reconciles only under an exact v2 entry", ctx do
+      v2 = %{
+        provider: :claude_cli,
+        cli_version: ClaudeCLI.provenance().provider_version,
+        projection_version: @v2,
+        method: :propagated_id
+      }
+
+      v1 = %{v2 | projection_version: Witness.Projection.version()}
+
+      for {label, entries, expected} <- [
+            {"v1 entry", [v1], :inferred},
+            {"v2 entry", [v2], :reconciled}
+          ] do
+        invocation = call_model!(ctx, "cli_shape")
+        assert {:ok, %{status: ^expected}} = reconcile(ctx, invocation, entries), label
+        {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert link.evidence["projection_version"] == @v2, label
+        assert "cli_injected_context" in link.evidence["reason_codes"], label
+        assert link.evidence["reminder_count"] == 1, label
+        assert link.evidence["trailing_system_count"] == 1, label
+        assert link.evidence["request_extras_sha256"] =~ ~r/\A[0-9a-f]{64}\z/, label
+        refute inspect(link.evidence) =~ Proxy.account_id()
+      end
+    end
+
+    test "a zero-context v2 proof keeps the complete eight-key group", ctx do
+      invocation = call_model!(ctx, "cli_shape_zero")
+      assert {:ok, _} = reconcile(ctx, invocation, @test_only_allowlist)
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+
+      for key <- ~w(reminder_count reminder_sha256s reminder_bytes trailing_system_count
+                    trailing_system_sha256s trailing_system_bytes request_extras_sha256
+                    request_fields) do
+        assert Map.has_key?(link.evidence, key), key
+      end
+
+      assert {link.evidence["reminder_count"], link.evidence["trailing_system_count"]} == {0, 0}
+    end
+
+    test "an invalid derived evidence group downgrades and never clears a mismatch", ctx do
+      tamper = fn group -> Map.put(group, "reminder_count", 9) end
+      invocation = call_model!(ctx, "cli_shape")
+
+      result =
+        Witness.reconcile(invocation.id,
+          actor: ctx.rec,
+          store_root: ctx.root,
+          methods: @test_only_allowlist,
+          evidence_tamper: tamper
+        )
+
+      assert match?({:ok, %{status: :inferred}}, result), inspect(result)
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert link.link_status == :inferred
+      assert "evidence_contract_invalid" in link.evidence["reason_codes"]
+      refute Map.has_key?(link.evidence, "reminder_count")
+      assert [failure] = attention(ctx, invocation)
+      assert failure.message =~ "evidence_contract_invalid"
+
+      # An earlier (v1) mismatch is not cleared by an invalid v2 observation.
+      mismatched = call_model!(ctx, "mismatch")
+      assert {:ok, %{status: :mismatch}} = reconcile(ctx, mismatched, @test_only_allowlist)
+      [path] = terminal_record_paths(ctx.root, mismatched)
+      record = path |> File.read!() |> JSON.decode!()
+
+      stdin =
+        blob_path(ctx.root, record["request_sha256"])
+        |> File.read!()
+        |> JSON.decode!()
+        |> get_in(["messages", Access.at(0), "content", Access.at(0), "text"])
+
+      request = Proxy.blob!(ctx.root, Proxy.cli_request(stdin))
+      response = Proxy.blob!(ctx.root, Proxy.sse_response(~s({"answer":"qualified","score":42})))
+
+      rewritten =
+        Map.merge(record, %{
+          "request_sha256" => request,
+          "response_sha256" => response,
+          "request_capture_sha256" => request,
+          "response_capture_sha256" => response
+        })
+
+      File.write!(path, JSON.encode!(rewritten))
+
+      result =
+        Witness.reconcile(mismatched.id,
+          actor: ctx.rec,
+          store_root: ctx.root,
+          methods: @test_only_allowlist,
+          evidence_tamper: tamper
+        )
+
+      assert match?({:ok, %{status: :mismatch}}, result), inspect(result)
+      assert {:ok, :mismatch} = status(mismatched, ctx.rec)
+    end
+
+    test "a different sole stdin in the CLI shape is a mismatch with critical attention", ctx do
+      invocation = call_model!(ctx, "cli_shape_mismatch")
+      assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation, @test_only_allowlist)
+      assert [%{severity: :critical}] = attention(ctx, invocation)
+    end
+  end
+
   test "outside tests the method allowlist cannot be overridden per call", ctx do
     invocation = call_model!(ctx, "ok")
     previous = Application.get_env(:sdr_agent, Witness, [])
@@ -404,6 +511,14 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     try do
       assert {:error, :method_override_forbidden} =
                reconcile(ctx, invocation, @test_only_allowlist)
+
+      # The test-only evidence seam is refused the same way.
+      assert {:error, :method_override_forbidden} =
+               Witness.reconcile(invocation.id,
+                 actor: ctx.rec,
+                 store_root: ctx.root,
+                 evidence_tamper: & &1
+               )
     after
       Application.put_env(:sdr_agent, Witness, previous)
     end
