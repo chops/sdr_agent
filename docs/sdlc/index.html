@@ -181,6 +181,7 @@ ol.agreements { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 .qs { display: grid; gap: 14px; }
 .q { display: grid; gap: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
 .q .why { color: var(--muted); font-size: var(--step--1); }
+.q.answered { background: var(--done-soft); border-color: var(--done); }
 .export { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .btn { background: var(--ink); color: var(--bg); border: 0; border-radius: var(--radius); padding: 10px 16px; font-weight: 600; transition: transform .1s, opacity .15s; }
 .btn:hover { opacity: .9; } .btn:active { transform: translateY(1px); }
@@ -196,7 +197,6 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
 .disclaimer { font-size: var(--step--1); color: var(--muted); max-width: 75ch; }
 
 /* Gates, constraints, packets */
-.g-weekend { position: absolute; top: 26px; bottom: 8px; background: var(--sunk); opacity: .6; pointer-events: none; }
 .rules { margin: 0; padding-left: 20px; display: grid; gap: 8px; max-width: 80ch; }
 .constraint { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .constraint::before { content: ""; width: 8px; height: 8px; margin-top: 7px; background: var(--gap); border-radius: 1px; }
@@ -325,11 +325,12 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
 
   <section aria-labelledby="h-questions">
     <div class="section-head">
-      <h2 id="h-questions">Open questions for you</h2>
-      <p>Answer here, add notes on any phase above, then copy or download everything and paste it to Claude.</p>
+      <h2 id="h-questions">Your answers and open questions</h2>
+      <p>What you have already decided, then what is still open. Answer here, add notes on any phase above, then copy or download everything and paste it to Claude.</p>
     </div>
     <p class="disclaimer">Notes on this page are feedback, not approvals, and they are not in git. They become part of the record only after you send them to Claude and Claude commits them. You give approvals in chat, and each one is written into a gate record.</p>
     <p class="warn" id="storage-warning" role="alert" hidden></p>
+    <div class="qs" id="answered"></div>
     <div class="qs" id="questions"></div>
     <div class="export">
       <button class="btn" id="copy">Copy notes for Claude</button>
@@ -421,7 +422,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     renderLens(); renderPhase(); renderMatrix();
   });
 
-  // Gantt, with weekends shaded because the plan counts weekdays only.
+  // Gantt in calendar days: the plan runs seven days a week.
   function renderGantt() {
     var all = D.phases.map(function (p) { return [day(p.start), day(p.end)]; });
     var min = Math.min.apply(null, all.map(function (a) { return a[0]; })) - 1;
@@ -429,13 +430,12 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     var span = max - min;
     var x = function (d) { return ((d - min) / span) * 100; };
     var pos = function (d) { return "calc(170px + 12px + (100% - 194px) * " + ((d - min) / span) + ")"; };
-    var ticks = "", shade = "";
+    var ticks = "";
     for (var d = min; d < max; d += 1) {
       var dt = new Date(d * 864e5), wd = dt.getUTCDay();
       if (d > min && (wd === 1 || d === min + 1)) ticks += '<span style="left:' + x(d + 0.5) + '%">' + dt.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) + "</span>";
-      if (wd === 0 || wd === 6) shade += '<div class="g-weekend" style="left:' + pos(d) + ";width:calc((100% - 194px) / " + span + ')"></div>';
     }
-    var html = shade + '<div class="g-axis"><div></div><div class="g-ticks">' + ticks + "</div></div>";
+    var html = '<div class="g-axis"><div></div><div class="g-ticks">' + ticks + "</div></div>";
     D.phases.forEach(function (p) {
       var s = x(day(p.start)), e = x(day(p.end) + 1);
       html += '<div class="g-row' + (state.phase === p.id ? " sel" : "") + '" data-phase="' + p.id + '">' +
@@ -572,7 +572,11 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   $("history").innerHTML = D.history.map(function (h) {
     return "<li><time>" + esc(fmt(h.date)) + "</time><b>" + esc(h.title) + "</b><p>" + esc(h.text) + "</p></li>";
   }).join("");
-  $("questions").innerHTML = D.openQuestions.map(function (q) {
+  $("answered").innerHTML = (D.answeredQuestions || []).map(function (q) {
+    return '<div class="q answered"><b>' + esc(q.id) + ". " + esc(q.q) + '</b><p>' + esc(q.answer) + '</p><p class="why">Decided: ' + esc(q.decision) + "</p></div>";
+  }).join("");
+  if (!D.openQuestions.length) $("questions").innerHTML = '<p class="disclaimer">No open questions right now.</p>';
+  else $("questions").innerHTML = D.openQuestions.map(function (q) {
     return '<div class="q"><label for="q-' + q.id + '"><b>' + esc(q.id) + ". " + esc(q.q) + '</b></label><p class="why">' + esc(q.why) + '</p><textarea id="q-' + q.id + '" data-note="q:' + q.id + '" data-context="' + esc(q.id + ". " + q.q) + '" placeholder="Your answer">' + esc(store.get("q:" + q.id)) + "</textarea>" + staleMarker("q:" + q.id) + "</div>";
   }).join("");
   $("footer").textContent = "Source: docs/sdlc/sdlc-data.js, revision " + D.meta.revision + " (fingerprint " + FP + "), in the SDR Agent repository. Every change to this process is reviewed and committed like code.";

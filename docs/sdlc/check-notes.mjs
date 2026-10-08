@@ -100,20 +100,22 @@ check("notes from an older revision keep their origin and are not exported as cu
   const storage = memoryStorage();
   const old = JSON.parse(JSON.stringify(D));
   old.meta.revision = "2026-10-08.1";
-  old.openQuestions.find((q) => q.id === "Q5").q = "Accept the old twelve-calendar-day plan?";
+  const oq = old.openQuestions[0];
+  const key = "q:" + oq.id;
+  oq.q = "Accept the old twelve-calendar-day plan?";
   const oldOrigin = { revision: old.meta.revision, fingerprint: N.fingerprint(old) };
   const before = N.createStore(() => storage, KEY, oldOrigin);
-  before.set("q:Q5", "Yes to the old twelve-day proposal", "Q5. " + old.openQuestions.find((q) => q.id === "Q5").q);
+  before.set(key, "Yes to the old twelve-day proposal", oq.id + ". " + oq.q);
   const after = N.createStore(() => storage, KEY, ORIGIN);
-  assert.equal(after.isStale("q:Q5"), true);
+  assert.equal(after.isStale(key), true);
   const text = N.exportText(D, after.all(), ORIGIN.fingerprint);
   const [currentPart, olderPart] = text.split("Older notes, not confirmed for revision " + D.meta.revision);
   assert.ok(olderPart, "older notes are listed in their own section");
   assert.ok(!currentPart.includes("twelve-day"), "old feedback is not listed as current");
   assert.ok(olderPart.includes("written against revision 2026-10-08.1"));
   assert.ok(olderPart.includes("Accept the old twelve-calendar-day plan?"), "the wording it answered is kept");
-  after.set("q:Q5", after.get("q:Q5"), "Q5. current");
-  assert.equal(after.isStale("q:Q5"), false, "keeping it for this revision re-stamps it");
+  after.set(key, after.get(key), oq.id + ". current");
+  assert.equal(after.isStale(key), false, "keeping it for this revision re-stamps it");
 });
 
 check("notes in the old v1 format stay as notes of unknown revision", () => {

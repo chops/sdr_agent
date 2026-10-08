@@ -1,10 +1,11 @@
 # From demo to product: the SDR Agent development process
 
-Status: **proposed** (v0.2, data revision 2026-10-08.2). It becomes the
-working process only when the owner accepts it and the charter
-([ADR-0014](../adr/0014-product-phase-charter.md)) at gate G0. Until then
-the unattended-build charter ([ADR-0001](../adr/0001-unattended-build-operating-charter.md))
-still governs.
+Status: **in force** (v1.0, data revision 2026-10-08.4). The owner passed
+gate G0 on 2026-10-08 ([`gates/G0.md`](gates/G0.md)), accepting this process
+and the product-phase charter ([ADR-0014](../adr/0014-product-phase-charter.md)),
+which supersedes the unattended-build charter
+([ADR-0001](../adr/0001-unattended-build-operating-charter.md)) for
+product-phase work.
 
 This folder records how SDR Agent goes from a one-shot prototype to a product
 that could eventually run in production. It is written for two audiences: the
@@ -13,7 +14,7 @@ run a traditional software process with AI agents as the team.
 
 | File | What it is |
 |---|---|
-| [`index.html`](index.html) | Interactive map: phases on a weekday timeline, each phase's activities, packet and gate, who does what, gate rules, constraints, schedule controls, and a notes panel for owner feedback. Open it in a browser from this folder. A private hosted copy for the owner: https://claude.ai/artifact/ScAk7wEuMjD5nPUZdWLKGj |
+| [`index.html`](index.html) | Interactive map: phases on a calendar timeline, each phase's activities, packet and gate, who does what, gate rules, constraints, schedule controls, and a notes panel for owner feedback. Open it in a browser from this folder. A private hosted copy for the owner: https://claude.ai/artifact/ScAk7wEuMjD5nPUZdWLKGj |
 | [`sdlc-data.js`](sdlc-data.js) | The data behind the map: the detailed, versioned record of the process. `meta.revision` changes with every edit. |
 | [`notes.js`](notes.js), [`check-notes.mjs`](check-notes.mjs) | Owner-note handling and its checks (`node docs/sdlc/check-notes.mjs`). |
 | [`gates/`](gates/) | Gate records. A gate has passed only when its record is committed here. |
@@ -26,9 +27,10 @@ stay in [`../adr/`](../adr/).
 ## Why a process now
 
 The prototype was built from a pasted architecture design. That prompt
-described *how* the system should be built (which part of the stack decides,
-enforces rules, runs jobs, stores the record and serves the UI), but not *who* it is for, *what* they need to do, or what the operator
-should see. The agents filled that gap with reasonable guesses, and it showed:
+described *how* the system should be built ("Jido decides. Ash governs. Oban
+executes durably. Postgres remembers. OTP keeps it alive. Phoenix lets humans
+operate it."), but not *who* it is for, *what* they need to do, or what the
+operator should see. The agents filled that gap with reasonable guesses, and it showed:
 a strong audit and approval core, a thin operator experience, and a demo that
 needed a last-minute patch.
 
@@ -48,7 +50,7 @@ machine.
 | **Charles (owner)** | Founder and product owner, design lead, data and publication owner, customer zero, exploratory tester. Approves every gate, ADR, exception and real-model budget. Runs anything on their own machine. |
 | **Claude** | Product manager, designer, tech lead, delivery manager, release and configuration manager, eval golden-set steward, backup and restore procedure, support triage, writer. Reviews anything Codex authors. |
 | **Codex** | Architect, security and QA lead, compliance desk research, adversarial eval set. Reviews anything Claude authors. |
-| **Gap: design partners** | Two or three solo founders to test the prototype. Without them, validation is owner-only and recorded as limited. |
+| **Gap: design partners** | The owner chose one founder conversation they had already had as enough outside validation (D-016). Findings record that limit. |
 | **Gap: legal counsel** | Outreach law (CAN-SPAM in the US, CASL in Canada), privacy and vendor terms. Agents flag risk but give no legal advice. No real prospect is contacted until the owner consults counsel or accepts the risk in writing. |
 
 Agents have no unattended sudo, deployment or credential authority. The full
@@ -61,23 +63,49 @@ separate documents. Stable ids link each requirement to its design, slice,
 test and evidence: **REQ → J/S (journey, screen) → SL (slice) → T/EV (test,
 eval) → EVD (release evidence)**.
 
-Dates count **weekdays only**, unless the owner agrees to weekend work.
+Dates are **calendar days, seven days a week** (D-014), and every date is a
+target. Oct 8 and 9 are the design days. Building starts Saturday Oct 10 with
+one narrow first slice once G1 to G5 have passed **for that slice** (D-020);
+the rest of the must-list is planned in parallel, and every later slice passes
+its own gates.
 
-| Phase | Weekdays (proposed) | Packet | Gate |
+| Phase | Dates (targets) | Packet | Gate |
 |---|---|---|---|
-| P0 Prototype and inception | Oct 6 to 9 | K1 Charter and process | G0 Process agreed |
+| P0 Prototype and inception | Oct 6 to 8, **done** | K1 Charter and process | G0 Process agreed, **passed Oct 8** |
 | P1 Discovery | Oct 8 to 9 | K2 Brief and discovery | G1 Brief approved |
-| P2 Definition | Oct 12 to 13 | K3 Requirements, behaviour and evals | G2 Scope locked |
-| P3 UX design | Oct 12 to 15 (design day proposed Oct 14) | K4 UX prototype and state map | G3 Prototype approved |
-| P4 Technical design | Oct 14 to 16 | K5 Technical plan | G4 Design reviewed |
-| P5 Release planning | Oct 16 | K6 Release plan | G5 Build approved (lifts the feature freeze) |
-| P6 Build | Oct 19 to 28 (8 weekdays, two iterations) | Slice PRs and evidence | G6 Feature complete |
+| P2 Definition | Oct 9 (first slice) to 12 | K3 Requirements, behaviour and evals | G2 Scope locked |
+| P3 UX design | Oct 8 to 9 design days, then to 13 | K4 UX prototype and state map | G3 Prototype approved |
+| P4 Technical design | Oct 9 (first slice) to 13 | K5 Technical plan | G4 Design reviewed |
+| P5 Release planning | Oct 9 (first slice) to 13 | K6 Release plan | G5 Build approved (lifts the feature freeze for that scope) |
+| P6 Build | Oct 10 to 28, first slice first | Slice PRs and evidence | G6 Feature complete |
 | P7 Verify and harden | Oct 29 to 30 | K7 part 1 | G7 Release candidate (Oct 30 target) |
 | P8 Dog-food and release | Oct 30 to Nov 5 | K7 part 2 | G8 Go / no-go |
 | P9 Workshop and learn | Nov 6 to 9 | K7 part 3 | G9 Next horizon agreed |
 
 Phases overlap for drafting only. A phase cannot be approved until its inputs
 are approved, and if an input changes, the work built on it is reviewed again.
+A gate can pass for a named scope, such as the first slice; later scope passes
+the same gate again with its own record.
+
+### The shaping method inside P1 to P5
+
+The owner accepted a seven-step method for shaping the product (D-019):
+
+1. **Outcomes and today's workflow** (P1): the job, the benefit, how the
+   founder does it now.
+2. **Story map** (P1): the core tasks in order, the smallest complete slice,
+   later paths and failure cases.
+3. **Service blueprint and light event storming** (P2): who does what, the
+   events, the rules, and who decides.
+4. **Screen, action and state matrix** (drafted in P2, finished in P3).
+5. **Low-fidelity prototype and task test**, then the visual direction from
+   the design days (P3).
+6. **Technical fit** (P4), with feasibility notes from step 3 on.
+7. **Traceability walkthrough** (before G5): every must traced from
+   requirement to evidence.
+
+The steps add no gates or packets; they are how P1 to P5 produce their
+packets.
 
 Usability, accessibility, security and eval work start early (P2 and P3, and
 build iteration 1), so P7 is a final integrated check, not where problems are
@@ -106,8 +134,8 @@ Rules:
 3. The owner settles disagreements between Claude and Codex, but that does not
    waive an unresolved security blocker. That needs a fix, or a written
    exception with scope and expiry backed by a recorded, independent security review of the exception and its mitigation, with a written disposition of the finding. If that review still finds it blocking, the gate stays blocked. Constraints that cannot be waived cannot be excepted at all.
-4. G0 needs explicit acceptance of ADR-0014. Only explicit approval of G5
-   lifts the feature freeze.
+4. G0 passed with the owner's acceptance of ADR-0014. Only explicit approval
+   of G5 lifts the feature freeze, and only for the scope it names.
 5. Process and hardening work may continue during the freeze, with no new
    authority: no deployments, credentials, real model calls or changes to the
    owner's machine.
@@ -133,18 +161,20 @@ journey. P3 is cosmetic. G7 requires no open P0 or P1.
 
 ## Schedule controls
 
-- Oct 19 to 28 has 8 weekdays, not 12 working days. The build is two
-  iterations of about four weekdays.
+- Seven days a week: Oct 10 to 28 has 19 calendar days. That is available
+  time, not capacity; review, CI, rework and rest come out of it.
 - **Oct 30 is a target, not a commitment,** until G5 approves a plan whose
   build critical path (review, CI, fixes and acceptance of every must slice)
   ends by Oct 28. Oct 29 and 30 are planned verification and release-candidate
-  days (P7), not buffer. There is no free contingency before Oct 30: the Oct 22
-  scope-cut checkpoint is the protection, and question Q5 asks you to choose
-  weekend work or a smaller must-list.
+  days (P7), not buffer. The Oct 22 scope-cut checkpoint is the protection.
 - **WIP limit:** one deep Codex review at a time, at most two slices in flight.
 - **Rework:** plan two review rounds per packet, and two to four for slices
   touching security, data or transactions.
-- **Response time:** the owner reviews a ready packet within one working day.
+- **Owner review windows:** on the design days, short rounds every couple of
+  hours, one set of decisions at a time; during the build, the same day.
+- **Rest and stop-work:** seven-day weeks are not continuous work. Anyone can
+  call a stop for fatigue, a failed gate, a missing decision or a spent
+  budget; the plan slips rather than a gate being skipped.
 - **Scope-cut trigger:** fewer than half of the must slices merged by Oct 22,
   or a critical path past Oct 28, cuts scope to the minimum core journey agreed
   at G2.
@@ -186,8 +216,10 @@ days, Codex reviews fixes, and the owner sets priorities.
   later does not take it back.
 - Never in git: credentials, keys, tokens, prospect or contact data, private
   interview notes, raw chat transcripts.
-- The owner's words are quoted only with consent. So far: the build-first
-  rejection quote (decision D-013).
+- The owner consented to quoting the owner's own words: the original prompt
+  and its slogan, the discovery answers and chat messages (D-013, D-018). That
+  does not cover third-party material, such as a founder's notes, or raw
+  transcripts.
 - Design-partner notes need their consent, stay private, and only sanitized
   findings go in git.
 - Session handoffs and agent working reports stay private unless sanitized.
@@ -225,16 +257,21 @@ commits them. Approvals are given in chat and written into a gate record.
 - **Iteration demo** at the end of each build iteration, live in the app.
 - **Retrospective** at the end of each phase: three lines, in the journal.
 
+## Owner answers at G0
+
+1. Weekends: yes. Design days Oct 8 and 9; work begins Saturday Oct 10
+   (D-014, D-015).
+2. One founder conversation the owner already had is enough (D-016).
+3. Reviews through notes on dedicated pages pasted into chat (D-017).
+4. The owner's words may be quoted (D-018).
+5. Seven days a week (D-014).
+
 ## Open questions for the owner
 
 These are also on the map, with space to answer.
 
-1. Do we work weekends? Which day is the design day (proposed Oct 14)?
-2. Can you recruit two or three solo founders for a 30-minute prototype test
-   around Oct 15?
-3. How do you prefer to review: notes on the interactive pages, a Claude Doc
-   with comments, or GitHub PR comments?
-4. Beyond the build-first quote you chose to keep, may we quote your original
-   prompt, your discovery answers or other chat messages in git?
-5. Weekdays only leave 8 build days (Oct 19 to 28) and no slack before the
-   Oct 30 target. Do you prefer weekend work, or a smaller must-list?
+6. Please share the founder-conversation notes. Was it an interview about how
+   they do outbound today, a reaction to a demo, or watching them use the
+   product?
+7. For planning pages, is the product workbook in git enough, or do you also
+   want a design tool such as Figma or Penpot?

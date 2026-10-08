@@ -10,11 +10,10 @@ looked like from the inside, including the parts that went wrong.
 
 On Oct 6 the owner pasted a detailed architecture design for an AI sales
 development representative (SDR) into a project scaffolding tool. Its core
-rule gave each part of the stack one job: the agent framework makes
-decisions, the domain layer enforces the rules, a job queue runs work
-durably, the database keeps the record, the runtime keeps it alive, and the
-web UI lets people operate it. (The prompt's exact wording stays out of git
-until the owner answers question Q4.)
+rule (quoted with the owner's consent, decision D-018):
+
+> Jido decides. Ash governs. Oban executes durably. Postgres remembers. OTP
+> keeps it alive. Phoenix lets humans operate it.
 
 The design covered the system's layers, its domain objects and how the agent
 should be supervised. It said little about who would use the product or what
@@ -122,6 +121,29 @@ all three agents on their latest releases. Codex needed nothing, the Gemini
 analyst moved to the new agy release in the same conversation, and Codex
 restarted Claude onto the new Claude release from its own pane, because a
 process cannot safely replace itself.
+
+### Gate G0 (Oct 8)
+
+The owner answered the plan's five open questions from the interactive map:
+work seven days a week, hold the design days on Oct 8 and 9, treat one
+founder conversation the owner had already had as enough outside validation,
+review through notes on dedicated pages pasted into chat, and allow quoting
+of the owner's own words.
+
+Meanwhile the owner asked how to shape the product before writing code:
+describe what the founder should be able to do, then the architecture, then
+each piece's role, then the screens. Claude and Codex answered separately.
+Both agreed to start with the founder and keep the existing stack. They
+differed on when to design screens; Codex's view (sketch screens early and
+check feasibility alongside) won. The combined seven-step method went onto an
+interactive discussion page.
+
+The owner then accepted the charter (ADR-0014) and the method, and chose to
+start building on Saturday Oct 10 with one narrow first slice, after that
+slice has passed its own gates. Codex had pointed out that moving the start to
+Monday would be a schedule change, not an interpretation, so the owner chose
+between the two explicitly. The gate record is
+[`gates/G0.md`](gates/G0.md).
 
 ### Retrospective (draft, to be confirmed at G0)
 

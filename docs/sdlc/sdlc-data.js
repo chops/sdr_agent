@@ -10,10 +10,10 @@
 window.SDLC = {
   meta: {
     product: "SDR Agent",
-    version: "v0.3 (proposed, awaiting gate G0)",
-    revision: "2026-10-08.3",
+    version: "v1.0 (G0 passed)",
+    revision: "2026-10-08.4",
     updated: "2026-10-08",
-    workdays: "Monday to Friday. Weekend work only if the owner agrees (question Q1).",
+    workdays: "Seven days a week (your answer to Q1 and Q5). Dates are calendar days and targets, not commitments.",
     milestones: [
       { id: "code-complete", label: "Release candidate target, dog-fooding starts", date: "2026-10-30" },
       { id: "workshop", label: "Solo-founder workshop", date: "2026-11-06" }
@@ -53,7 +53,8 @@ window.SDLC = {
       "A date never passes a gate. Only a committed gate record with your approval does.",
       "Drafting may start from unapproved inputs, but a phase cannot be approved until its inputs are. If an input changes later, the work built on it is revised and reviewed again.",
       "You decide disagreements between Claude and Codex. Your decision does not waive an unresolved security blocker: that needs a fix, or a written exception with scope and expiry backed by a recorded, independent security review of the exception and its mitigation, with a written disposition of the finding. If that review still finds it blocking, the gate stays blocked. Constraints that cannot be waived cannot be excepted at all.",
-      "G0 needs your explicit acceptance of the product-phase charter (ADR-0014). Until then the unattended-build charter (ADR-0001) still governs.",
+      "G0 passed on Oct 8: you accepted the product-phase charter (ADR-0014), which now governs product-phase work in place of the unattended-build charter (ADR-0001).",
+      "A gate can pass for a named scope, such as the first build slice. Later scope passes the same gate again with its own record.",
       "Only explicit approval of G5 lifts the feature freeze.",
       "Process and hardening work may continue during the freeze, but it grants no new authority: no deployments, credentials, real model calls or changes to your machine."
     ]
@@ -88,14 +89,18 @@ window.SDLC = {
 
   schedule: {
     assumptions: [
-      "Dates count weekdays only. The build window, Oct 19 to 28, has 8 weekdays.",
-      "Oct 30 is a target until G5 approves a plan that reaches it. It is not a commitment. Oct 29 and 30 are planned verification days (P7), not buffer, so there is no free contingency: the Oct 22 scope-cut checkpoint and your answer to Q5 are the protection.",
+      "Dates are calendar days, seven days a week (your answers to Q1 and Q5). Every date is a target; only a gate record passes a gate.",
+      "Oct 8 and 9 are design days. Building starts Saturday Oct 10 with one narrow first slice, once G1 to G5 have passed for that slice. The rest of the must-list is planned in parallel, and each later slice passes its own gates.",
+      "The build window, Oct 10 to 28, has 19 calendar days. That is available time, not capacity: review, CI, rework and rest come out of it.",
+      "Oct 30 is a target until G5 approves a plan that reaches it. Oct 29 and 30 are planned verification days (P7), not buffer. The Oct 22 scope-cut checkpoint is the protection.",
       "Your review time and Codex's serial review queue are the critical path, not drafting."
     ],
     controls: [
       { name: "Work in progress", text: "One deep Codex review at a time. At most two build slices in flight." },
       { name: "Rework", text: "Plan for two review rounds per packet, and two to four for slices touching security, data or transactions." },
-      { name: "Response time", text: "You review a ready packet within one working day. Codex reviews in gate order." },
+      { name: "Owner review windows", text: "On the design days, Oct 8 and 9, you review in short rounds every couple of hours. Claude brings one set of decisions at a time, with options side by side. During the build, you review the same day." },
+      { name: "Response time", text: "Codex reviews in gate order, one deep review at a time. Nobody counts the number of drafting agents as review capacity." },
+      { name: "Rest and stop-work", text: "Seven-day weeks do not mean continuous work. Anyone can call a stop for fatigue, a failed gate, a missing decision or a spent budget. The plan slips rather than a gate being skipped." },
       { name: "Scope-cut trigger", text: "If fewer than half of the must slices are merged by Oct 22, or the critical path passes Oct 28, we cut to the minimum core journey listed at G2. No silent slips." },
       { name: "Workshop fallback", text: "Run the workshop on the last approved release tag with the fake model and synthetic data, with a rehearsed walkthrough as backup. Decided before Nov 5, so no last-minute live patch is ever needed." }
     ]
@@ -112,7 +117,7 @@ window.SDLC = {
   publication: [
     "The repository is public. Committing or pushing is publishing, and deleting later does not take it back.",
     "Never in git: credentials, keys, tokens, prospect or contact data, private interview notes, raw chat transcripts.",
-    "Your words are quoted only with your consent. So far you have agreed to the build-first rejection quote (D-013).",
+    "You consented to quoting your own words: the original prompt and its slogan, your discovery answers and chat messages (D-013, D-018). That consent does not cover anything written by others, such as a founder's notes, or raw transcripts.",
     "Design-partner notes need their consent, stay private, and only sanitized findings go in git.",
     "Session handoffs and agent working reports stay private unless sanitized for publication.",
     "When unsure, keep it private and ask."
@@ -143,7 +148,7 @@ window.SDLC = {
 
   phases: [
     {
-      id: "P0", name: "Prototype and inception", start: "2026-10-06", end: "2026-10-09", status: "active",
+      id: "P0", name: "Prototype and inception", start: "2026-10-06", end: "2026-10-08", status: "done",
       goal: "Take stock of what the one-shot build produced and agree how we will work from here.",
       traditional: "A team inheriting a hackathon prototype holds a kickoff: what is real, what is demo-only, who decides what, and how work will flow. The output is a charter and a process everyone signs.",
       ownerTime: "About 1 hour: read the playbook and this map, answer the open questions, accept or reject the charter.",
@@ -154,11 +159,11 @@ window.SDLC = {
         { text: "Review the process; changes requested and made (v0.2).", who: ["codex", "claude"] },
         { text: "Prototype assessment: verified, reported and proposed capabilities, and known debt.", who: ["claude"] },
         { text: "Product-phase charter (ADR-0014) that would supersede the unattended-build mandate.", who: ["claude", "codex"] },
-        { text: "Accept the process and the charter, or send them back.", who: ["owner"] }
+        { text: "Accept the process and the charter (done Oct 8: G0 passed).", who: ["owner"] }
       ],
       packet: {
-        id: "K1", name: "Charter and process", path: "docs/sdlc/, docs/adr/0014-product-phase-charter.md", status: "review", author: "claude", reviewer: "codex",
-        contents: ["Playbook and this map", "Gate-record template", "Decision log", "Journal", "Prototype assessment (to do)", "ADR-0014 product-phase charter (proposed)"]
+        id: "K1", name: "Charter and process", path: "docs/sdlc/, docs/adr/0014-product-phase-charter.md", status: "done", author: "claude", reviewer: "codex",
+        contents: ["Playbook and this map", "Gate-record template", "Decision log", "Journal", "Prototype assessment (not done at G0; folded into the K5 gap analysis)", "ADR-0014 product-phase charter (accepted)", "G0 gate record"]
       },
       gate: {
         id: "G0", name: "Process agreed", approver: "owner",
@@ -171,14 +176,15 @@ window.SDLC = {
       }
     },
     {
-      id: "P1", name: "Discovery", start: "2026-10-08", end: "2026-10-09", status: "next",
+      id: "P1", name: "Discovery", start: "2026-10-08", end: "2026-10-09", status: "active",
       goal: "Agree who the product is for, what problem it solves for them, and what success at the workshop means.",
       traditional: "The PM and a researcher interview target users, study competitors and write a short product brief. Nobody designs or builds until the brief is signed.",
-      ownerTime: "About 1 hour: review the brief packet. The questionnaire is already done.",
+      ownerTime: "Short review rounds on the design days. Share your founder-conversation notes; the questionnaire is already done.",
       activities: [
         { text: "Discovery questionnaire answered (done Oct 7).", who: ["owner"] },
         { text: "Joint review of the answers; four scope decisions taken (done Oct 8).", who: ["claude", "codex", "owner"] },
-        { text: "Persona and jobs-to-be-done for a solo founder doing their own outbound.", who: ["claude"] },
+        { text: "Method step 1, outcomes and today's workflow: the job a solo founder hires this for, the benefit, and how they do outbound today, drawn from your answers and your notes from one founder conversation.", who: ["claude", "owner"] },
+        { text: "Method step 2, story map: the core tasks in order, the smallest complete slice (the candidate first build slice), later paths, and failure cases.", who: ["claude"] },
         { text: "Alternatives scan, timeboxed to two hours: only what the first-touch journey needs from Apollo, Outreach and HubSpot.", who: ["claude"] },
         { text: "Assumptions and risks: what must be true, and how we would find out.", who: ["claude", "codex"] },
         { text: "Brief: promise, user, problem, observable workshop success, non-goals.", who: ["claude"] },
@@ -187,7 +193,7 @@ window.SDLC = {
       ],
       packet: {
         id: "K2", name: "Brief and discovery", path: "docs/product/discovery/, docs/product/brief.md", status: "todo", author: "claude", reviewer: "codex",
-        contents: ["Questionnaire and answers, as far as the publication policy allows", "Joint answer review", "Persona and jobs-to-be-done", "Alternatives scan", "Assumptions and risks", "Brief with observable success measures and non-goals"]
+        contents: ["Questionnaire and your answers (you consented to quoting them, D-018)", "Joint answer review", "Founder-conversation evidence, sanitized and labelled by type", "Outcome brief: job, benefit, today's workflow", "Story map with the first-slice candidate", "Alternatives scan", "Assumptions and risks", "Observable success measures and non-goals"]
       },
       gate: {
         id: "G1", name: "Brief approved", approver: "owner",
@@ -200,12 +206,14 @@ window.SDLC = {
       }
     },
     {
-      id: "P2", name: "Definition", start: "2026-10-12", end: "2026-10-13", status: "planned",
+      id: "P2", name: "Definition", start: "2026-10-09", end: "2026-10-12", status: "planned",
       goal: "Turn the brief into requirements precise enough to design, build and test against.",
       traditional: "The PM writes requirements with acceptance criteria; engineering adds non-functional requirements; an ML team writes the behaviour spec and eval plan; legal reviews data handling.",
-      ownerTime: "About 2 hours: priorities, acceptance criteria and the agent behaviour spec.",
+      ownerTime: "Short rounds on Oct 9 for the first slice, then about 2 hours for the rest of the must-list.",
       activities: [
-        { text: "Requirements with stable REQ ids, ranked must, should and later, each must with acceptance criteria.", who: ["claude"] },
+        { text: "Method step 3, service blueprint and light event storming: swimlanes for you, the agent, the system and outside services, with events, rules and who decides.", who: ["claude", "owner", "codex"] },
+        { text: "Method step 4 (draft), screen, action and state matrix, so requirements are concrete.", who: ["claude"] },
+        { text: "Requirements with stable REQ ids, ranked must, should and later, each must with acceptance criteria. The first slice's requirements are settled first (Oct 9).", who: ["claude"] },
         { text: "Non-functional requirements, with security and accessibility starting here, not at the end.", who: ["claude", "codex"] },
         { text: "Agent behaviour spec: hard limits, voice, evidence rules, failure and recovery behaviour.", who: ["claude"] },
         { text: "Eval plan and synthetic eval sets: golden leads, rubric, prompt-injection set.", who: ["claude", "codex"] },
@@ -229,17 +237,17 @@ window.SDLC = {
       }
     },
     {
-      id: "P3", name: "UX design", start: "2026-10-12", end: "2026-10-15", status: "planned",
+      id: "P3", name: "UX design", start: "2026-10-08", end: "2026-10-13", status: "planned",
       goal: "Decide what the SDR control plane looks like and how an operator moves through it, then prove it with one prototype.",
       traditional: "A designer maps journeys, sketches wireframes, holds critiques, sets the visual language, builds a clickable prototype and tests it with real users before engineering starts.",
-      ownerTime: "One design day (proposed Oct 14), plus about 1 hour for the prototype test.",
+      ownerTime: "The design days, Oct 8 and 9, plus about 1 hour for each later prototype test.",
       activities: [
-        { text: "Journey and state map with J and S ids, drafted from the draft requirements and revised once G2 passes.", who: ["claude"] },
+        { text: "Method step 4 (final), screen, action and state matrix with J and S ids, revised once G2 passes for that scope.", who: ["claude"] },
         { text: "Every screen's empty, loading, error and unknown-outcome states.", who: ["claude"] },
         { text: "Critique: missing states, accessibility, safety of approval actions.", who: ["codex", "owner"] },
-        { text: "Design day: your colours and fonts, two or three directions, pick one.", who: ["owner", "claude"] },
-        { text: "One clickable prototype of the core journey, with visual direction and tokens as appendices.", who: ["claude"] },
-        { text: "Usability test with you, then two or three founders if recruited. Without them, findings are recorded as owner-only.", who: ["owner", "outside", "claude"] },
+        { text: "Method step 5, low-fidelity clickable prototype of the core journey, tested on real tasks.", who: ["claude", "owner"] },
+        { text: "Design days (Oct 8 and 9): your colours and fonts, two or three directions, pick one.", who: ["owner", "claude"] },
+        { text: "Usability: your task walkthrough, plus what your one founder conversation shows. You chose not to recruit more testers; findings record that limit.", who: ["owner", "claude"] },
         { text: "Approve the prototype.", who: ["owner"] }
       ],
       packet: {
@@ -257,11 +265,12 @@ window.SDLC = {
       }
     },
     {
-      id: "P4", name: "Technical design", start: "2026-10-14", end: "2026-10-16", status: "planned",
+      id: "P4", name: "Technical design", start: "2026-10-09", end: "2026-10-13", status: "planned",
       goal: "Work out how to change the existing system to deliver the approved requirements and design safely.",
       traditional: "Engineering writes a design doc against the requirements, records architecture decisions, threat-models new surfaces, and agrees a test strategy before sprint planning.",
       ownerTime: "About 1 hour: accept or reject ADRs and any exception.",
       activities: [
+        { text: "Method step 6, technical fit: map each action and event to its owner in the existing stack, with feasibility notes from step 3 onward.", who: ["claude", "codex"] },
         { text: "Gap analysis: what exists, what changes, what is new, per REQ id.", who: ["claude"] },
         { text: "Technical plan with the entity-model delta inline; separate ADRs only where warranted.", who: ["claude"] },
         { text: "Threat model for new surfaces: live web research, CSV import, optional HubSpot.", who: ["codex"] },
@@ -284,16 +293,17 @@ window.SDLC = {
       }
     },
     {
-      id: "P5", name: "Release planning", start: "2026-10-16", end: "2026-10-16", status: "planned",
+      id: "P5", name: "Release planning", start: "2026-10-09", end: "2026-10-13", status: "planned",
       goal: "Sequence the work into slices that fit the time we really have, and define release readiness before building.",
       traditional: "Sprint zero: break the work into stories, estimate, map dependencies, set milestones, write the definition of done and the release criteria.",
-      ownerTime: "About 1 hour: approve the plan. Only this approval lifts the feature freeze.",
+      ownerTime: "About 1 hour per scope: approve the plan for the first slice by Oct 9, then for the rest. Only this approval lifts the feature freeze, and only for the approved scope.",
       activities: [
         { text: "Slices with SL ids traced to REQ ids, estimates including review rounds, and dependencies.", who: ["claude", "codex"] },
-        { text: "Capacity plan using weekdays, the WIP limit and the review queue.", who: ["claude"] },
+        { text: "Method step 7, traceability walkthrough: every must traced from requirement to screen, action, boundary, test and evidence.", who: ["claude", "codex"] },
+        { text: "Capacity plan using calendar days, the WIP limit, the review queue and rest.", who: ["claude"] },
         { text: "Risk register with owners and triggers.", who: ["claude", "codex"] },
         { text: "Release criteria and readiness checks (see G5).", who: ["codex", "claude"] },
-        { text: "Approve the plan and lift the feature freeze.", who: ["owner"] }
+        { text: "Approve the plan and lift the feature freeze for the approved scope.", who: ["owner"] }
       ],
       packet: {
         id: "K6", name: "Release plan", path: "docs/product/plan/", status: "todo", author: "claude", reviewer: "codex",
@@ -302,7 +312,7 @@ window.SDLC = {
       gate: {
         id: "G5", name: "Build approved", approver: "owner",
         criteria: [
-          "The build critical path (review, CI, fixes and acceptance of every must slice) ends by Oct 28, leaving Oct 29 and 30 for the planned P7 verification and release candidate. If it does not fit, you choose at G5: a smaller must-list, weekend work, or a later release candidate.",
+          "The build critical path (review, CI, fixes and acceptance of every must slice) ends by Oct 28, leaving Oct 29 and 30 for the planned P7 verification and release candidate. If it does not fit, you choose at G5: a smaller must-list or a later release candidate.",
           "Release criteria name the supported OS and tool versions and a fake-model-first install from a clean clone.",
           "Readiness checks are defined: synthetic data only, no-send negative tests, credential, proxy and tool isolation, backup and restore, unknown-outcome recovery, cost and budget limits.",
           "Any real-model evaluation budget is approved separately by you, or is zero.",
@@ -311,15 +321,16 @@ window.SDLC = {
       }
     },
     {
-      id: "P6", name: "Build", start: "2026-10-19", end: "2026-10-28", status: "planned",
-      goal: "Build the approved scope in two short iterations you can see and steer.",
-      traditional: "Sprints with planning, daily stand-ups, code review, a demo to stakeholders and a retrospective. Here, two iterations of about four weekdays, because review is the bottleneck.",
+      id: "P6", name: "Build", start: "2026-10-10", end: "2026-10-28", status: "planned",
+      goal: "Build the approved scope slice by slice, starting with one narrow first slice, in short iterations you can see and steer.",
+      traditional: "Sprints with planning, daily stand-ups, code review, a demo to stakeholders and a retrospective. Here, short iterations of about four days, seven days a week, because review is the bottleneck.",
       ownerTime: "About 30 minutes a day for status and decisions, plus a 30-minute live demo at the end of each iteration.",
       activities: [
         { text: "Per slice: entity check, failing test first, implementation, independent review, merge on exact-head CI.", who: ["claude", "codex"] },
-        { text: "Eval harness and no-send negative tests built in iteration 1, not at the end.", who: ["claude", "codex"] },
+        { text: "First slice from Oct 10, after G1 to G5 pass for it. Later slices start only when their own gates pass.", who: ["claude", "codex"] },
+        { text: "Eval harness and no-send negative tests built in an early iteration, not at the end.", who: ["claude", "codex"] },
         { text: "Daily status: what moved, what is blocked, what needs you.", who: ["claude"] },
-        { text: "Iteration demos (about Oct 22 and Oct 28), live in the app.", who: ["claude", "owner"] },
+        { text: "Iteration demos about every four days, live in the app.", who: ["claude", "owner"] },
         { text: "Scope-cut check on Oct 22.", who: ["claude", "owner"] },
         { text: "Three-line retrospective per iteration.", who: ["claude", "codex", "owner"] }
       ],
@@ -435,7 +446,7 @@ window.SDLC = {
   ],
 
   history: [
-    { date: "2026-10-06", title: "One-shot prompt and scaffold", text: "You pasted an architecture design for an SDR agent, which split the work between the agent framework, the domain layer, a durable job queue, the database, the runtime and the web UI, and asked for a project scaffold." },
+    { date: "2026-10-06", title: "One-shot prompt and scaffold", text: "You pasted an architecture design for an SDR agent built on one rule: \"Jido decides. Ash governs. Oban executes durably. Postgres remembers. OTP keeps it alive. Phoenix lets humans operate it.\" Then you asked for a project scaffold." },
     { date: "2026-10-06", title: "Unattended build charter", text: "You delegated decisions to Claude and Codex under a written mandate with bounded authority and stop conditions (ADR-0001)." },
     { date: "2026-10-07", title: "Provider pivot", text: "The planned real model, Codex app-server on your existing Codex login, could not have its built-in tool surface fully disabled and verified, so it stays disabled. You approved the Claude CLI on your own login instead, locked down to no tools and checked on every call." },
     { date: "2026-10-07", title: "MVP slices merged", text: "Fourteen slices: audit ledger, domain model, agent, outreach, replies, operator UI, signed audit anchors, and a wire witness that can match supported model calls to what crossed the network." },
@@ -443,14 +454,20 @@ window.SDLC = {
     { date: "2026-10-07", title: "Quality push and HubSpot test portal", text: "Real model wired into the app, child-process secret scrub, wire witness switched on for one exact reviewed configuration. A free HubSpot developer portal was filled with synthetic companies." },
     { date: "2026-10-07", title: "Build-first plan rejected", text: "You stopped the next build plan: features, functionality and the operator experience had to be defined first. Feature freeze." },
     { date: "2026-10-08", title: "Discovery answered, scope decided", text: "You answered the discovery questionnaire. Claude and Codex reviewed it; you chose a first-touch copilot, desktop only, captured sends, HubSpot optional." },
-    { date: "2026-10-08", title: "SDLC process proposed", text: "You asked for a traditional product process, worked through together, with durable artifacts in git. Codex requested changes to the first draft; this is the revision." }
+    { date: "2026-10-08", title: "SDLC process proposed", text: "You asked for a traditional product process, worked through together, with durable artifacts in git. Codex requested changes twice, then approved the third revision." },
+    { date: "2026-10-08", title: "Gate G0 passed", text: "You answered the five open questions, accepted the product-phase charter (ADR-0014) and the seven-step shaping method, and chose to start building on Saturday Oct 10 with a narrow first slice." }
+  ],
+
+  answeredQuestions: [
+    { id: "Q1", q: "Do we work weekends? Which day is your design day?", answer: "Yes. The design day starts today (Oct 8) and ends tomorrow (Oct 9); work begins Saturday, Oct 10.", decision: "D-014, D-015" },
+    { id: "Q2", q: "Can you recruit two or three solo founders for a prototype test?", answer: "You have already talked to one other solo founder and have notes. That is enough for this process.", decision: "D-016" },
+    { id: "Q3", q: "How do you want to review?", answer: "Notes on this page, or another dedicated page, pasted into chat.", decision: "D-017" },
+    { id: "Q4", q: "May we quote your original prompt, discovery answers or other chat messages in git?", answer: "Yes.", decision: "D-018" },
+    { id: "Q5", q: "Weekend work, or a smaller must-list?", answer: "We are building seven days a week.", decision: "D-014" }
   ],
 
   openQuestions: [
-    { id: "Q1", q: "Do we work weekends? Which day is your design day (proposed Oct 14)?", why: "The plan counts weekdays only. Weekends would add four build days." },
-    { id: "Q2", q: "Can you recruit two or three solo founders for a 30-minute prototype test around Oct 15?", why: "Without them, the design is validated only by you, and we will say so." },
-    { id: "Q3", q: "How do you want to review: notes on this page pasted into chat, comments on a Claude Doc, or GitHub PR comments?", why: "We should use whatever you will actually use." },
-    { id: "Q4", q: "Beyond the build-first quote you chose to keep, may we quote your original prompt (including its one-line architecture slogan), your discovery answers or other chat messages in git?", why: "The repository is public, so quoting is publishing." },
-    { id: "Q5", q: "Weekdays only leave 8 build days (Oct 19 to 28) and no slack before the Oct 30 target. Do you prefer weekend work, or a smaller must-list?", why: "Every planning day comes out of the build window." }
+    { id: "Q6", q: "Please share your notes from the founder conversation. Was it an interview about how they do outbound today, a reaction to a demo, or watching them use the product?", why: "The notes are evidence for the outcome brief, and we label them by what they can show. They are the founder's material, so only sanitized findings go in git unless the founder agrees otherwise." },
+    { id: "Q7", q: "For planning pages, is the product workbook in git enough, or do you also want a design tool such as Figma or Penpot?", why: "Decision B on the shaping page is still open. Both Claude and Codex recommend the workbook alone for now." }
   ]
 };

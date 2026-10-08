@@ -1,17 +1,18 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-08
-supersedes: 0001 (for product-phase work, only once accepted)
+supersedes: 0001 (for product-phase work)
 ---
 
 # ADR-0014: Product-Phase Operating Charter
 
 ## Status
 
-Proposed (2026-10-08). Drafted by Claude for gate G0 of the SDLC process in
-[`docs/sdlc/`](../sdlc/README.md). It takes effect only when the owner accepts
-it explicitly in chat and the G0 gate record cites that acceptance. Until
-then, [ADR-0001](0001-unattended-build-operating-charter.md) governs.
+Accepted (2026-10-08, by the owner, in chat at about 14:00 America/Denver;
+recorded in [`docs/sdlc/gates/G0.md`](../sdlc/gates/G0.md)). Drafted by Claude
+and reviewed by Codex for gate G0 of the SDLC process in
+[`docs/sdlc/`](../sdlc/README.md). It supersedes
+[ADR-0001](0001-unattended-build-operating-charter.md) for product-phase work.
 
 ## Context
 
@@ -42,7 +43,7 @@ never be waived.
 
 ## Decision
 
-We will use Option 2, once the owner accepts it.
+We use Option 2.
 
 ### Decision rights
 

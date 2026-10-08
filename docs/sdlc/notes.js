@@ -137,7 +137,7 @@
       var n = notes[k];
       if (!n || !String(n.text).trim()) return;
       if (n.revision === D.meta.revision) {
-        current.push(labels[k] + ":", indent(n.text), "");
+        current.push((labels[k] || n.context || k) + ":", indent(n.text), "");
       } else {
         var origin = n.revision ? "revision " + n.revision + (n.fingerprint ? " (fingerprint " + n.fingerprint + ")" : "") : "an unknown revision (saved before revisions were recorded)";
         older.push((n.context || labels[k] || k) + ":", "   [written against " + origin + "]", indent(n.text), "");
