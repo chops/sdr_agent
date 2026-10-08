@@ -1,9 +1,11 @@
 defmodule SdrAgent.Agents.Witness.ExternalProofTest do
   @moduledoc """
-  S12d real proof (plan R3/P5/P8; ADR-0005): ONE budgeted, synthetic
+  S12d real proof (plan R3/P5/P8; ADR-0005): ONE owner-budgeted, synthetic
   ClaudeCLI call through the deployed `llm-proxy-shim` and proxy, recorded
   as a normal ModelInvocation, then reconciled read-only against the real
-  proxy witness store under a test-only exact allowlist entry.
+  proxy witness store under a test-only exact allowlist entry (projection
+  v3). A collector, not an enablement assertion: the evidence names the
+  requested and the actually evaluated projection.
 
   Excluded by default (`:external`). Run explicitly with
   `SDR_WITNESS_PROOF_STORE=<proxy blob dir>` and
@@ -73,7 +75,7 @@ defmodule SdrAgent.Agents.Witness.ExternalProofTest do
     entry = %{
       provider: :claude_cli,
       cli_version: invocation.provider_version,
-      projection_version: Projection.version_v2(),
+      projection_version: Projection.version_v3(),
       method: :propagated_id
     }
 
@@ -88,7 +90,9 @@ defmodule SdrAgent.Agents.Witness.ExternalProofTest do
       "attested_cli_version" => invocation.provider_version,
       "model_id" => invocation.model_id,
       "prompt_builder" => invocation.model_catalog_entry["prompt_builder"],
-      "projection_version" => Projection.version_v2(),
+      # Requested (the test-only entry) versus actually evaluated (per link,
+      # with projections_inapplicable): a fallback is never a v3 claim.
+      "requested_projection_version" => Projection.version_v3(),
       "test_only_allowlist_entry" =>
         Map.new(entry, fn {k, v} -> {to_string(k), to_string(v)} end),
       "inventory" => inventory_summary(inventory),
@@ -102,6 +106,8 @@ defmodule SdrAgent.Agents.Witness.ExternalProofTest do
             "method" => to_string(link.method),
             "proxy_request_sha256" => hex_or_nil(link.proxy_request_sha256),
             "proxy_response_sha256" => hex_or_nil(link.proxy_response_sha256),
+            "evaluated_projection_version" => link.evidence["projection_version"],
+            "projections_inapplicable" => link.evidence["projections_inapplicable"],
             "evidence" => link.evidence
           }
         end)

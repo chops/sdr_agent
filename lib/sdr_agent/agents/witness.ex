@@ -16,12 +16,15 @@ defmodule SdrAgent.Agents.Witness do
        complete `count_tokens` exchange whose response has no content is
        `ancillary`; everything else — unknown routes, open start markers,
        other count_tokens — is `unclassified`. The primary is compared with
-       `SdrAgent.Agents.Witness.Projection`; unsupported proxy versions,
+       `SdrAgent.Agents.Witness.Projection`: request grammar v2, then v3
+       when v2 does not apply to the request, then v1. Its evidence names the
+       evaluated projection and `projections_inapplicable`. Unsupported proxy versions,
        content encodings, incomplete captures and bad blobs never reach a
        comparison;
     3. in one transaction that first locks the invocation row, appends
        `WireWitnessLink`s (only changed observations: a replay is a no-op; a
-       same-version mismatch is never superseded) and keeps operator
+       mismatch is superseded only by an evaluated comparison under a
+       different projection) and keeps operator
        attention current: at most one live critical Failure (mismatch) and
        one live warning (missing, open, ambiguous, unclassified,
        unsupported, unreadable store) per invocation, resolving a warning
@@ -170,7 +173,7 @@ defmodule SdrAgent.Agents.Witness do
     end
   end
 
-  # Test-only seam rewriting the derived v2 context group before it is
+  # Test-only seam rewriting the derived v2/v3 context group before it is
   # validated (contract-failure tests); refused unless test overrides are on.
   defp tamper_hook(opts) do
     case Keyword.fetch(opts, :evidence_tamper) do
@@ -303,39 +306,63 @@ defmodule SdrAgent.Agents.Witness do
     with nil <- gate(record),
          {:ok, request} <- Store.blob(root, record["request_sha256"]),
          {:ok, response} <- Store.blob(root, record["response_sha256"]) do
-      v2(invocation, app, {request, response}, tamper)
+      request_grammars(invocation, app, {request, response}, tamper)
     else
       reason when is_binary(reason) -> result(:inferred, "primary", [reason], warn: true)
       {:error, reason} -> result(:inferred, "primary", [blob_reason(reason)], warn: true)
     end
   end
 
-  # v2 (the observed CLI request shape) first; a request outside its grammar
-  # falls back to v1. The v2 context group is validated as a whole: a
-  # contract failure (incomplete, extra or invalid keys) is a conservative
-  # fallback without any projection (so it never corrects a mismatch), never
-  # a proof with dropped fields.
-  defp v2(invocation, app, {request, response}, tamper) do
-    case Projection.compare_v2(invocation, app, request, response) do
-      {:unsupported, _proof} ->
-        project(Projection.compare(invocation, app, request, response))
+  # Request grammars in order: v2 (the observed CLI shape), then v3 (v2
+  # plus the bounded proof 1/2 relaxations) when v2 is inapplicable to the
+  # *request*, then v1. A request that a grammar admits is evaluated and
+  # labelled under it, even when its response is unsupported.
+  # `projections_inapplicable` records which grammars did not apply. Each
+  # derived context group must be exactly that version's group: a contract
+  # failure (incomplete, extra or invalid keys) is a conservative fallback
+  # without any projection (so it never corrects a mismatch), never a proof
+  # with dropped fields.
+  defp request_grammars(invocation, app, {request, response}, tamper) do
+    grammars = [
+      {"v2", &Projection.compare_v2/4, Projection.version_v2()},
+      {"v3", &Projection.compare_v3/4, Projection.version_v3()}
+    ]
 
-      {verdict, proof} ->
-        extras = tamper.(proof.extras)
+    Enum.reduce_while(grammars, [], fn {label, compare, version}, inapplicable ->
+      case compare.(invocation, app, request, response) do
+        {:unsupported, %{extras: nil}} ->
+          {:cont, inapplicable ++ [label]}
 
-        with true <- WitnessEvidence.exact_context_group?(extras),
-             {:ok, extras} <- WitnessEvidence.validate(extras) do
-          evaluated = project({verdict, proof})
+        evaluated ->
+          {:halt, {inapplicable, cli_projection(evaluated, version, tamper)}}
+      end
+    end)
+    |> case do
+      {inapplicable, evaluated} ->
+        Map.put(evaluated, :inapplicable, inapplicable)
 
-          %{
-            evaluated
-            | projection: Projection.version_v2(),
-              extras: extras,
-              reasons: Enum.uniq(evaluated.reasons ++ proof.reasons)
-          }
-        else
-          _invalid -> result(:inferred, "primary", ["evidence_contract_invalid"], warn: true)
-        end
+      inapplicable ->
+        Projection.compare(invocation, app, request, response)
+        |> project()
+        |> Map.put(:inapplicable, inapplicable)
+    end
+  end
+
+  defp cli_projection({verdict, proof}, version, tamper) do
+    extras = tamper.(proof.extras)
+
+    with true <- WitnessEvidence.exact_context_group?(extras, version),
+         {:ok, extras} <- WitnessEvidence.validate(extras) do
+      evaluated = project({verdict, proof})
+
+      %{
+        evaluated
+        | projection: version,
+          extras: extras,
+          reasons: Enum.uniq(evaluated.reasons ++ proof.reasons)
+      }
+    else
+      _invalid -> result(:inferred, "primary", ["evidence_contract_invalid"], warn: true)
     end
   end
 
@@ -386,7 +413,8 @@ defmodule SdrAgent.Agents.Witness do
       warnings: if(Keyword.get(opts, :warn, false), do: reasons, else: []),
       digests: %{},
       projection: nil,
-      extras: nil
+      extras: nil,
+      inapplicable: nil
     }
   end
 
@@ -586,12 +614,14 @@ defmodule SdrAgent.Agents.Witness do
         "app_request_sha256" => hex(invocation.request_sha256),
         "app_response_sha256" => hex(invocation.response_sha256),
         "inventory_sha256" => evaluated.inventory,
-        "reason_codes" => reasons |> Enum.uniq() |> Enum.take(16)
+        "reason_codes" => reasons |> Enum.uniq() |> Enum.take(16),
+        "projections_inapplicable" => evaluated.inapplicable
       }
       |> Map.merge(evaluated.digests)
 
     # Untrusted proxy metadata: keep only values the allowlist accepts. The
-    # v2 context group was validated as a whole and is merged unfiltered.
+    # v2/v3 context group was validated as a whole (exact keys) and is merged
+    # unfiltered; it cannot overwrite these keys.
     candidate
     |> Enum.filter(fn {key, value} ->
       not is_nil(value) and match?({:ok, _}, WitnessEvidence.validate(%{key => value}))
