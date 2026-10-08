@@ -13,7 +13,9 @@
 // fixture file, never printed), assigns lead 01 and waits — without a reload
 // — for the agent's draft to appear (LiveView socket + live refresh),
 // approves the displayed revision and recipient, waits for the capture and
-// opens the captured message. Exits non-zero on the first failed step.
+// opens the captured message — or, inside the campaign's quiet hours
+// (18:00–08:00 America/Denver), checks the delivery is deferred by the send
+// gate. Exits non-zero on the first failed step.
 // Refuses any base URL that is not loopback.
 
 import { spawn } from "node:child_process";
@@ -85,6 +87,14 @@ async function goto(path) {
 
 const connected = "document.querySelector('[data-phx-main].phx-connected')";
 
+// Inside the demo campaign's quiet hours (18:00–08:00 America/Denver)?
+function quietHours(now = new Date()) {
+  const hour = Number(new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Denver", hour: "numeric", hourCycle: "h23",
+  }).format(now));
+  return hour >= 18 || hour < 8;
+}
+
 async function main() {
   let target;
   for (let i = 0; i < 40 && !target; i++) {
@@ -137,6 +147,14 @@ async function main() {
   await until("recipient displayed", "document.querySelector('#binding-recipient')?.textContent.includes('@')");
   await evaluate("document.querySelector('#approve-form').requestSubmit()");
   await until("draft queued or sent", "document.querySelector('#draft-header [data-status=\"queued\"], #draft-header [data-status=\"sent\"]')");
+  if (quietHours()) {
+    // The campaign's send gate defers inside 18:00–08:00 America/Denver: the
+    // delivery stays pending (not captured) — correct behaviour, not a failure.
+    await until("delivery deferred (quiet hours)", "document.querySelector('[id^=\"delivery-\"] [data-state=\"pending\"]')", 30000);
+    await shot("03-delivery-deferred");
+    console.log("golden path browser smoke: PASS (quiet hours: delivery deferred by the send gate)");
+    return;
+  }
   await until("captured (live)", "document.querySelector('[id^=\"show-message-\"]')", 60000);
   await evaluate("document.querySelector('[id^=\"show-message-\"]').click()");
   await until("captured message shown", "document.body.innerText.includes('List-Unsubscribe')");

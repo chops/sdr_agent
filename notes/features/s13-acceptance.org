@@ -298,6 +298,13 @@ lifecycle or action contract changes.
    - *Run 2026-10-07 17:19 MDT: PASS*, all 11 steps. Screenshots were kept
      outside the repo; the final one shows the draft =sent= with the
      approval notice.
+   - *Run 2026-10-07 18:1x MDT, inside quiet hours.* The first attempt
+     timed out waiting for the capture: the send gate had correctly
+     deferred the delivery to 08:00 MDT (=pending=, =not_before= 14:00Z).
+     The script now checks the deferral inside 18:00–08:00 America/Denver,
+     and a fresh run passes ("delivery deferred by the send gate"). The
+     cleanup race (Chrome still writing its profile) is fixed by waiting for
+     the browser to exit before removing the profile.
 2. *Postgres-only reconstruction* (=test/sdr_agent/reconstruction_test.exs=).
    The golden path runs through an interested reply, then plain SQL rebuilds
    the story: lead, runs, decisions (including =draft_proposal= and a
