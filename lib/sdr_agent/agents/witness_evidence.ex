@@ -72,7 +72,11 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     "trailing_system_sha256s" => {:digests, 2},
     "trailing_system_bytes" => {:sizes, 2, 32_768},
     "request_extras_sha256" => :sha256,
-    "request_fields" => :request_fields
+    "request_fields" => :request_fields,
+    # S12d projection v3 (entity PASS 9343defb): the one v3-only group key,
+    # and the outer diagnostic (never a member of a derived group).
+    "trailing_output_config" => {:enum_list, ~w(absent null present), 2},
+    "projections_inapplicable" => :projections_inapplicable
   }
   @group ~w(reminder_count reminder_sha256s reminder_bytes trailing_system_count
             trailing_system_sha256s trailing_system_bytes request_extras_sha256 request_fields)
@@ -129,33 +133,50 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     end)
   end
 
-  # Projection versions whose evidence is a claim over the CLI context: a
-  # link under one of them must carry the complete context group.
-  @group_versions ["claude-message-json/2+prompt-builder/1"]
+  @v3_key "trailing_output_config"
+
+  # Projection versions whose evidence is a claim over the CLI context, with
+  # the exact context group each one requires.
+  @group_versions %{
+    "claude-message-json/2+prompt-builder/1" => @group,
+    "claude-message-json/3+prompt-builder/1" => @group ++ [@v3_key]
+  }
 
   @doc "The S12d v2 context-group keys (all present together or none)."
   def context_group, do: @group
 
+  @doc "The context group a projection version requires (`nil` when none)."
+  def context_group(version), do: Map.get(@group_versions, version)
+
   @doc """
-  True when `extras` is exactly the complete context group: every group key
-  and no other key, so a derived group can neither be partial nor overwrite
-  base evidence when merged.
+  True when `extras` is exactly `version`'s complete context group: every
+  group key and no other key, so a derived group can neither be partial nor
+  overwrite base (or diagnostic) evidence when merged.
   """
-  def exact_context_group?(extras) when is_map(extras),
-    do: Enum.sort(Map.keys(extras)) == Enum.sort(@group)
+  def exact_context_group?(extras, version) when is_map(extras) do
+    case context_group(version) do
+      nil -> false
+      group -> Enum.sort(Map.keys(extras)) == Enum.sort(group)
+    end
+  end
 
-  def exact_context_group?(_extras), do: false
+  def exact_context_group?(_extras, _version), do: false
 
   @doc """
-  Claim-boundary rule for a full link's (normalized) evidence: a
-  `projection_version` that records CLI context requires its complete
-  context group. Other evidence, v1 included, is unaffected.
+  Claim-boundary rule for a full link's (normalized) evidence, at any link
+  status: a `projection_version` that records CLI context requires exactly
+  its complete context group (v2: the 8 keys and no v3-only key; v3: all 9).
+  Other evidence, v1 included, is unaffected.
   """
   def validate_claim(%{"projection_version" => version} = evidence)
-      when version in @group_versions do
-    if Enum.all?(@group, &Map.has_key?(evidence, &1)),
+      when is_map_key(@group_versions, version) do
+    group = Map.fetch!(@group_versions, version)
+    all = Map.values(@group_versions) |> List.flatten() |> Enum.uniq()
+    present = Enum.filter(all, &Map.has_key?(evidence, &1))
+
+    if Enum.sort(present) == Enum.sort(group),
       do: :ok,
-      else: {:error, "#{version} evidence requires its complete context group"}
+      else: {:error, "#{version} evidence requires exactly its complete context group"}
   end
 
   def validate_claim(_evidence), do: :ok
@@ -166,7 +187,7 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     present = Enum.filter(@group, &Map.has_key?(evidence, &1))
 
     cond do
-      present == [] -> :ok
+      present == [] and not Map.has_key?(evidence, @v3_key) -> :ok
       length(present) != length(@group) -> {:error, "context group is incomplete"}
       not counts_match?(evidence) -> {:error, "context group counts differ from lists"}
       true -> :ok
@@ -177,7 +198,8 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     length(e["reminder_sha256s"]) == e["reminder_count"] and
       length(e["reminder_bytes"]) == e["reminder_count"] and
       length(e["trailing_system_sha256s"]) == e["trailing_system_count"] and
-      length(e["trailing_system_bytes"]) == e["trailing_system_count"]
+      length(e["trailing_system_bytes"]) == e["trailing_system_count"] and
+      (not Map.has_key?(e, @v3_key) or length(e[@v3_key]) == e["trailing_system_count"])
   end
 
   defp validate_size(evidence) do
@@ -196,6 +218,11 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     is_binary(value) and Regex.match?(@timestamp, value) and
       match?({:ok, _datetime, 0}, DateTime.from_iso8601(value))
   end
+
+  defp valid?({:enum_list, values, max}, value),
+    do: is_list(value) and length(value) <= max and Enum.all?(value, &(&1 in values))
+
+  defp valid?(:projections_inapplicable, value), do: value in [[], ["v2"], ["v2", "v3"]]
 
   defp valid?({:digests, max}, value),
     do: is_list(value) and length(value) <= max and Enum.all?(value, &valid?(:sha256, &1))

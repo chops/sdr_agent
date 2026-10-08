@@ -524,6 +524,28 @@ Planned RED negatives:
 A diagnostic-only offline re-evaluation of the saved proof-2 blobs (read-only
 store, metadata output, no call) may follow GREEN. It is not enablement.
 
+*** Projection v3 RED/GREEN (hermetic)
+- RED =114b4f7= VERIFIED by Codex (=28d57c13=): 13 unit and 6 e2e clean
+  assertion failures.
+- GREEN: =compare_v3/4= and =version_v3/0=. The grammar is parameterised
+  (=:v2= / =:v3=).
+- The reconciler evaluates v2, then v3, then v1, using request
+  inapplicability only (=extras: nil=), and labels the result with
+  =projections_inapplicable=.
+- =WitnessEvidence= requires exact claims per version (v2: 8 keys and no v3
+  key; v3: 9 keys) and checks =trailing_output_config= cardinality.
+- The proof harness records both the requested and the evaluated projection.
+Offline diagnostic. It re-evaluated the saved proof-2 blobs: read-only
+store, metadata only, no call, and not enablement.
+- v2 is inapplicable (=request_control_unsupported=).
+- v3 gives =match= with =cli_injected_context=: 1 reminder (558 B), 1
+  trailing message (928 B), =trailing_output_config= =["present"]=, all
+  four control fields present.
+- The reconstructed stdin hash equals the recorded =projected_request_sha256=.
+- Zoi's ="required"= order varies across VM runs, so the diagnostic selects
+  the order that the recorded app request fixed. Production is unaffected
+  because the stored request fixes the order.
+
 *** Real proof call 2 of 2 (=docs/audit/s12d-wire-witness-proof-2.json=, metadata only) — budget exhausted
 The call ran at 16:22 MT, after v2 GREEN (=cd2ebe2=) and a full gate on main =37c69bb=.
 - Witness: invocation =01a11875-f616-77a1-9631-ed3534331720= produced exactly one
