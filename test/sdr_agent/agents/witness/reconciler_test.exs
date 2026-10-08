@@ -817,6 +817,24 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
       assert {:ok, :mismatch} = status(invocation, ctx.rec)
     end
 
+    test "the configured root (no per-call override) is revalidated and downgrades", ctx do
+      Application.put_env(
+        :sdr_agent,
+        Witness,
+        Keyword.put(Application.get_env(:sdr_agent, Witness), :store_root, ctx.root)
+      )
+
+      invocation = call_model!(ctx, "cli_shape_v3")
+      assert {:ok, %{status: :reconciled}} = Witness.reconcile(invocation.id, actor: ctx.rec)
+
+      File.chmod!(ctx.root, 0o777)
+      result = Witness.reconcile(invocation.id, actor: ctx.rec)
+      File.chmod!(ctx.root, 0o700)
+      assert match?({:ok, %{status: :inferred}}, result), inspect(result)
+      {:ok, [head]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert "store_root_untrusted" in head.evidence["reason_codes"]
+    end
+
     test "genuinely unset stays skipped", ctx do
       invocation = call_model!(ctx, "cli_shape_v3")
       assert {:ok, %{status: :skipped}} = Witness.reconcile(invocation.id, actor: ctx.rec)

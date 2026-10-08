@@ -182,6 +182,64 @@ defmodule SdrAgent.Agents.Witness.EnablementTest do
       end
     end
 
+    test "a sticky world-writable (1777) ancestor is refused; there is no sticky exception",
+         ctx do
+      uid = call(:effective_uid, [], Store)
+      sticky = Path.join(ctx.root, "sticky")
+      File.mkdir!(sticky)
+      File.chmod!(sticky, 0o1777)
+      store = Path.join(sticky, "store")
+      File.mkdir!(store)
+      File.chmod!(store, 0o700)
+
+      assert call(:validate_root, [store, uid], Store) == {:error, :store_root_untrusted}
+    end
+
+    test "an unavailable effective UID fails closed (untrusted), never raises", ctx do
+      assert call(:effective_uid, ["/nonexistent/id-command"], Store) == :error
+      assert call(:validate_root, [ctx.root, :error], Store) == {:error, :store_root_untrusted}
+    end
+
+    test "boot wiring: Application.start refuses an untrusted configured root before starting",
+         ctx do
+      link = Path.join(ctx.root, "link")
+      File.ln_s!(ctx.root, link)
+      put_witness(store_root: link)
+
+      result =
+        try do
+          SdrAgent.Application.start(:normal, [])
+        rescue
+          error -> {:raised, Exception.message(error)}
+        end
+
+      assert match?({:raised, "wire witness store root refused at boot" <> _}, result),
+             inspect(result)
+
+      {:raised, message} = result
+      refute message =~ link
+    end
+
+    test "an env-supplied invalid root (dev runtime config) is refused with a fixed code",
+         ctx do
+      System.put_env(@env, ctx.root <> "/../escape")
+      root = witness(runtime(:dev))[:store_root]
+      assert root == ctx.root <> "/../escape"
+      put_witness(store_root: root)
+
+      result =
+        try do
+          call(:check_configured_root!, [], Witness)
+        rescue
+          error -> {:raised, Exception.message(error)}
+        end
+
+      assert result ==
+               {:raised,
+                "wire witness store root refused at boot (store_root_untrusted); " <>
+                  "fix or unset SDR_WITNESS_STORE_ROOT"}
+    end
+
     test "store reads validate the root, including explicit overrides", ctx do
       link = Path.join(ctx.root, "link")
       File.ln_s!(ctx.root, link)
