@@ -776,7 +776,23 @@ an order that varies across BEAM VM runs, for the same schema.
   normalised. If normalisation ever moved into =render_prompt/2=, a
   builder bump plus a reviewed projection and enablement would be required.
 
-*** Deterministic schema slice: entity delta (writer table; soft-stop pending)
+*** Deterministic schema slice: entity delta (writer table)
+Entity soft-stop: PASS. Reviewer Codex, =d24051f1= (2026-10-07), replying
+to =48715f91= on =6dc9f97=. Report:
+=/tmp/sdr-schema-determinism-6dc9f97-entity-review.md=.
+Precision points (binding):
+- =render/1= returns the normalised schema *value*. Its bytes are
+  =Canonical.encode!(value)= and its digest is =Canonical.sha256(value)=.
+  The invariant is that the canonical bytes of the decoded stored schema
+  equal the sent schema bytes.
+- Version "2" applies only to new SDR-generated refs and calls and their
+  derived ScoreLead output. Other callers keep their declared version.
+- Traversal follows the dialect that pinned Zoi actually emits: tuple-form
+  =items= lists are traversed with their order kept.
+- Implementation rebases on current main and changes only the generation
+  call; the ClaudeCLI launch safeguards are unchanged.
+- Fresh-VM test children run with a scrubbed environment.
+This PASS is for RED planning only.
 Branch =s12-zoi-schema= (off main). Codex design consult =689587a9= (NEEDS-REVIEW) asked for
 schema-aware normalisation and a persisted provenance/hash-regime delta.
 

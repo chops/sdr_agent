@@ -27,6 +27,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
+  alias SdrAgent.Audit.Canonical
   alias SdrAgent.Operations
   alias SdrAgent.Telemetry.InMemoryExporter
   alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
@@ -595,6 +596,28 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     assert {:error, _failure_store_error} = reconcile(ctx, invocation)
     assert {:ok, []} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
     assert events_of_type(ctx.tenant, "agents.witness.linked") == []
+  end
+
+  describe "deterministic schema generation (JsonSchema.render/1)" do
+    test "the stored app request schema is the rendered schema and equals the sent stdin",
+         ctx do
+      module = SdrAgent.AI.JsonSchema
+      Code.ensure_loaded(module)
+      assert function_exported?(module, :render, 1), "JsonSchema.render/1 is not implemented"
+
+      invocation = call_model!(ctx, "cli_shape")
+      {:ok, %{request: request}} = Agents.read_reconciliation_payloads(invocation, actor: ctx.rec)
+      stored = request |> JSON.decode!() |> Map.fetch!("schema")
+
+      assert Canonical.encode!(stored) == Canonical.encode!(module.render(@schema))
+
+      # Sent stdin equals the re-rendering of the stored schema.
+      assert {:ok, _} = reconcile(ctx, invocation, [:propagated_id])
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+
+      assert link.evidence["projected_request_sha256"] ==
+               link.evidence["observed_request_projection_sha256"]
+    end
   end
 
   describe "projection v3 (S12d, hermetic)" do
