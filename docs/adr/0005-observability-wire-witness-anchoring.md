@@ -390,6 +390,24 @@ reviewed enablement change.
   provenance recompiles after commits in a worktree. Releases retain their
   compiled build SHA.
 
+#### Child-process environment (security fix, 2026-10-07)
+
+The anchor signing key reaches the BEAM through
+`bin/with-secrets SDR_AUDIT_ANCHOR_PRIVATE_KEY -- ...`, and `System.cmd/3`
+and `Port.open/2` children inherit the whole environment. So every external
+launch takes its environment from `SdrAgent.ChildEnv`. That covers the
+ClaudeCLI port, the GitSink and OpenTimestamps subprocesses, and the git
+calls in provenance and anchoring. Each child receives only:
+
+- a base allowlist (`PATH HOME USER LOGNAME LANG TMPDIR TZ LC_*`);
+- the names its tool needs;
+- the launcher's own values (for example the S12 witness ids).
+
+Every other name is removed. Names that look like secrets (`*_KEY`,
+`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIALS`) are removed even if
+allowlisted. Per-call ClaudeCLI attestation and the Bedrock/Vertex/Foundry
+refusal are unchanged. Real-child canary tests cover each launcher.
+
 ## Justification
 
 ### S11b runtime/tool amendment

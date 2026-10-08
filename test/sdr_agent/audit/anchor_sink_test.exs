@@ -154,8 +154,17 @@ defmodule SdrAgent.Audit.AnchorSinkTest do
   test "OTS child commands never inherit the private signing key" do
     {proof, hash} = ots_fixture()
 
+    # The env is the ChildEnv allowlist: the key is only ever removed, never
+    # passed. (Removal of a key actually present in the parent is proven
+    # with a real child in SdrAgent.ChildEnvTest; this test is async and
+    # does not set process environment.)
     command = fn _wrapper, ["ots" | args], opts ->
-      assert {"SDR_AUDIT_ANCHOR_PRIVATE_KEY", nil} in opts[:env]
+      assert {"TZ", "UTC"} in opts[:env]
+
+      refute Enum.any?(
+               opts[:env],
+               &match?({"SDR_AUDIT_ANCHOR_PRIVATE_KEY", value} when is_binary(value), &1)
+             )
 
       case args do
         ["--version"] ->

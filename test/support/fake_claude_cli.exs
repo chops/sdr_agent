@@ -193,6 +193,13 @@ case mode do
     IO.puts(init)
     IO.puts(result)
 
+  "env_names" ->
+    # argv: env_names <dump file>. Records only the NAMES of the child's
+    # environment (never values), then answers normally.
+    File.write!(Enum.at(System.argv(), 1), JSON.encode!(Map.keys(System.get_env())))
+    IO.puts(init)
+    IO.puts(result)
+
   "env_dump" ->
     # argv: env_dump <dump file> [sleep ms]. Records the observed child env
     # and the wall-clock interval of this launch, then answers normally.

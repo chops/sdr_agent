@@ -147,9 +147,11 @@ defmodule SdrAgent.Audit.AnchorSinks.OpenTimestampsSink do
           )
         )
 
+      # Explicit allowlist (SdrAgent.ChildEnv): TLS roots for nix, UTC; no
+      # signing key or other secret reaches the wrapper or the tool.
       runner.(wrapper, ["ots" | args],
         stderr_to_stdout: true,
-        env: [{"TZ", "UTC"}, {"SDR_AUDIT_ANCHOR_PRIVATE_KEY", nil}]
+        env: SdrAgent.ChildEnv.cmd(~w(NIX_SSL_CERT_FILE SSL_CERT_FILE), [{"TZ", "UTC"}])
       )
     end
 

@@ -20,7 +20,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   never modified. Missing or malformed context refuses the call
   (`:invalid_witness_context`) before any process starts.
 
-  The child environment always unsets the Bedrock/Vertex/Foundry routing
+  The child environment is an explicit allowlist (`SdrAgent.ChildEnv`,
+  `@child_env_allow`): every other parent variable — the audit-anchor
+  signing key and any `*_KEY`/`*_TOKEN`/`*_SECRET` included — is removed.
+  It always unsets the Bedrock/Vertex/Foundry routing
   variables (`@route_flags`, `@route_urls`), so an SDR-stamped CLI cannot
   bypass the local proxy. If the operator environment enables one of those
   routes the call is refused (`:witness_bypass_environment`) instead of
@@ -33,9 +36,18 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   use GenServer
   @behaviour SdrAgent.AI.ModelProvider
 
+  alias SdrAgent.ChildEnv
+
   @default_timeout 120_000
   @route_flags ~w(CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY)
   @route_urls ~w(ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_FOUNDRY_BASE_URL)
+  # The only parent variables the shim and Claude Code receive (besides
+  # `SdrAgent.ChildEnv`'s base): proxy routing the shim validates, the
+  # Claude Code config/binary location, XDG dirs and TLS roots. Everything
+  # else — the anchor signing key included — is removed (security fix).
+  @child_env_allow ~w(XDG_* TERM LLM_OTEL_PROXY_URL LLM_PROXY_SHIM_CLAUDE_BIN
+                      ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR SSL_CERT_FILE
+                      NIX_SSL_CERT_FILE NODE_EXTRA_CA_CERTS)
   @invocation_id ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
   @traceparent ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-(?:00|01)\z/
   @model_alias "opus"
@@ -134,7 +146,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       launch(
         request,
         state,
-        witness_env ++ Enum.map(@route_flags ++ @route_urls, &{~c"#{&1}", false})
+        ChildEnv.port(@child_env_allow, witness_env) ++
+          Enum.map(@route_flags ++ @route_urls, &{~c"#{&1}", false})
       )
     end
   end
@@ -144,11 +157,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     with true <- Regex.match?(@invocation_id, id),
          [_, trace_id, span_id] <- Regex.run(@traceparent, traceparent),
          false <- trace_id == String.duplicate("0", 32) or span_id == String.duplicate("0", 16) do
-      {:ok,
-       [
-         {~c"SDR_MODEL_INVOCATION_ID", String.to_charlist(id)},
-         {~c"SDR_TRACEPARENT", String.to_charlist(traceparent)}
-       ]}
+      {:ok, [{"SDR_MODEL_INVOCATION_ID", id}, {"SDR_TRACEPARENT", traceparent}]}
     else
       _ -> {:error, :invalid_witness_context}
     end
