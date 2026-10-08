@@ -74,13 +74,13 @@ attestation status is volatile in-memory (ETS) display data, not a record.
 - Round 2: ReplyWorker resolves the model up front like AgentWorker (no
   reservation, run =provider_error=, job ={:error, :provider_not_running}=);
   integrated happy/refusal/drift tests cover it.
-- Round 2 residual: a =:kill= between =Port.open/2= and the reaper learning
-  the OS pid leaves the reaper only the workspace (removed, tree not
-  found); descendants that re-parent before a kill are not found (as for
-  the timeout path). The responder module name in job args is still
+- Round 2 residual (hand-off window) closed in round 3: the reaper opens the
+  port itself. Remaining limitation: descendants that re-parent before a
+  kill are not found (=pgrep -P= walk). A reaper that dies abnormally leaves
+  admission closed until an operator runs =ClaudeCLI.Reaper.release/1=
+  (fail-closed by design). The responder module name in job args is still
   decoded with =Module.safe_concat/1= (pre-existing; raises before the run
   starts for an unknown module).
-
 -----
 
 * TDD Tracking
@@ -138,6 +138,24 @@ queued-caller case cannot find the request because it matches the old
 enqueued_at}=); the adapted test in =claude_cli_test.exs= covers it.
 
 *TDD Gate Verification (round 2):* [X] VERIFIED (assertion-only RED)
+
+** Round 3 (Codex re-review of =6c199f3=, =/tmp/sdr-pr27-6c199f3-rereview.md=)
+RED on =6c199f3= + new tests: 6 of 32 claude_cli tests failed, all clean
+assertion failures:
+- MF1 hand-off: Codex's helper-boundary sequence (track -> Port.open ->
+  owner killed before =launched=) — "admission was released while the
+  launched process was live". GREEN changes the ownership API (the reaper
+  now opens the port), so the test now drives =Reaper.open/4= and asserts
+  that the lease's cleanup receipt implies the process is gone.
+- MF2 cleanup failure (injected unkillable =:signal=): server path — second
+  call admitted after an unconfirmed kill; reaper path — replacement
+  admitted while the dead server's tree ran; reaper+server both dead —
+  replacement admitted without a receipt.
+- A reaper lost while idle stopped the server (now: replaced, server stays).
+- Deadline: a 1 ms timeout launched (zero threshold); now timeouts below
+  1000 ms are rejected and expired requests are refused (white-box test).
+
+*TDD Gate Verification (round 3):* [X] VERIFIED (assertion-only RED)
 
 -----
 

@@ -82,6 +82,10 @@ defmodule SdrAgentWeb.AdminLive do
 
   defp server_label(:running), do: "running"
   defp server_label(:not_running), do: "not running"
+
+  defp server_label(:blocked),
+    do: "blocked: earlier CLI work is not confirmed stopped; calls are refused"
+
   defp server_label(:not_applicable), do: "in-process (no server)"
 
   defp attestation_label(%{status: :not_applicable}), do: "not applicable (deterministic)"
@@ -152,7 +156,10 @@ defmodule SdrAgentWeb.AdminLive do
                   data-status={@provider.server}
                   class={[
                     "text-xs font-medium",
-                    if(@provider.server == :not_running, do: "text-rose-700", else: "text-zinc-700")
+                    if(@provider.server in [:not_running, :blocked],
+                      do: "text-rose-700",
+                      else: "text-zinc-700"
+                    )
                   ]}
                 >
                   {server_label(@provider.server)}

@@ -229,8 +229,8 @@ resource or policy change:
   In `prod` it is refused at boot because this ADR limits ClaudeCLI to
   personal, local, single-operator use of the owner's own login; there is
   no production opt-in. Any other value is refused, never defaulted.
-  `SDR_CLAUDE_CLI_TIMEOUT_MS` (a positive integer, default 240000) sets the
-  per-call timeout.
+  `SDR_CLAUDE_CLI_TIMEOUT_MS` (an integer of at least 1000, default
+  240000) sets the per-call, end-to-end timeout.
 - With ClaudeCLI selected, `SdrAgent.AI.ModelProvider.Runtime.children/0`
   adds exactly one ClaudeCLI GenServer to the application tree, registered
   as `ClaudeCLI.server/0`. It starts before Oban, so no agent job can run
@@ -258,12 +258,37 @@ resource or policy change:
     launching. A caller that dies during its call stops that CLI tree.
   - A call returns only after its whole process tree (root included) is
     gone and its workspace has been removed.
-  - Each server has an unlinked `ClaudeCLI.Reaper` that monitors it. If the
-    server dies, even by `:kill`, the reaper kills the tracked trees and
-    removes their workspaces. A restarted named server waits for the old
-    reaper to exit before it accepts calls, so concurrency stays one across
-    restarts. A killed call is still recorded as unknown and is never
-    resent.
+  - Each server has an unlinked `ClaudeCLI.Reaper` that monitors it, and
+    every launch is opened by that reaper: the reaper calls `Port.open/2`,
+    so it owns the OS pid before the CLI can run (there is no hand-off
+    window), and it forwards the port's messages to the server in order.
+    If the server dies, even by `:kill`, the reaper kills the tracked
+    trees and removes their workspaces. A killed call is still recorded as
+    unknown and is never resent.
+  - Admission is a lease, held only while proven safe. A named server takes
+    a `:persistent_term` lease (written once per server start, not per
+    call) through its reaper. The reaper erases it only as its cleanup
+    receipt, after every tracked tree is confirmed gone; if a tree cannot
+    be confirmed stopped, the reaper retries and logs an error, and the
+    lease stays held. While another reaper holds the lease, the server
+    refuses every call with `{:error, :provider_not_quiescent}`, and Admin
+    shows the server as blocked:
+    - If that reaper is still cleaning up, the server is admitted once it
+      exits.
+    - If that reaper died without a receipt, admission stays closed until
+      an operator who has checked that no CLI process is left runs
+      `ClaudeCLI.Reaper.release/1`.
+    A tree the server itself cannot confirm stopped after a call also
+    closes admission until the tree is gone. A reaper lost while the
+    server is idle is replaced, because the server has confirmed its own
+    launches gone. This keeps concurrency at one across crashes and
+    restarts without treating a reaper's exit as proof of cleanup.
+  - `timeout` must be at least 1000 ms. The deadline is absolute from
+    enqueue: it is checked before dispatch, checked again after the
+    workspace is prepared, and bounds the run. A pre-send refusal is an
+    error; an in-flight timeout is unknown.
+  - Limitation: CLI helpers that re-parent away from the root before a
+    kill are not found (the tree is walked with `pgrep -P`).
 - Boot preflight: Claude CLI has no no-call probe for the init attestation.
   Model, version, tools, MCP servers and slash commands are reported only
   by a `-p` session, which also sends a model request. So boot spends no

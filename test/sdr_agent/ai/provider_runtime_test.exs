@@ -97,7 +97,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
 
       System.put_env("SDR_MODEL_PROVIDER", "claude_cli")
 
-      for timeout <- ["0", "-5", "ten", "100ms", ""] do
+      for timeout <- ["0", "-5", "ten", "100ms", "", "999"] do
         System.put_env("SDR_CLAUDE_CLI_TIMEOUT_MS", timeout)
 
         assert_raise RuntimeError, ~r/SDR_CLAUDE_CLI_TIMEOUT_MS/, fn -> selected(:dev) end

@@ -58,9 +58,19 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     * **Quiescent on return.** A call returns only after its process tree is
       gone and its workspace removed (a CLI still running briefly after its
       result is given 2 s to exit, then killed).
-    * **Crash safety.** `SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper` kills
-      tracked trees and removes workspaces if the server dies, even by
-      `:kill`; a restarted named server waits for it before accepting calls.
+    * **Crash safety and admission.** Every launch is opened by the
+      server's `SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper`, which owns the
+      OS pid before the process runs and kills tracked trees (and removes
+      workspaces) if the server dies, even by `:kill`. A named server is
+      admitted only while it holds the reaper lease; a lease still held by
+      a predecessor's reaper (cleanup running, or never confirmed) or a
+      tree of its own it could not confirm stopped makes every call
+      `{:error, :provider_not_quiescent}` until that clears (`admission/1`
+      reports it). A reaper lost while the server is idle is replaced (the
+      server has confirmed its own launches gone).
+    * `:timeout` must be at least 1000 ms (`{:error, {:invalid_timeout, t}}`
+      otherwise); the deadline is absolute from enqueue, so it is checked
+      again before launch and bounds the run.
   """
 
   use GenServer
@@ -85,7 +95,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   @prompt_builder "prompt-builder/1"
   @server __MODULE__
   @min_launch_ms 1_000
+  @min_timeout 1_000
   @exit_grace_ms 2_000
+  @predecessor_wait_ms 3_000
 
   @doc """
   Starts a server. Options: `:name` (registers it and keeps its attestation
@@ -103,6 +115,22 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       pid when is_pid(pid) -> Process.alive?(pid)
       _ -> false
     end
+  end
+
+  @doc """
+  Whether the named `server` admits calls: `%{admission: :open}`,
+  `%{admission: :blocked, reason: reason}` (`:previous_cli_not_quiescent`,
+  `:previous_cleanup_unconfirmed`, `:cli_not_quiescent`), or
+  `%{admission: :not_running}`. Never blocks on a running call.
+  """
+  def admission(server \\ @server) when is_atom(server) do
+    case :ets.lookup(server, :admission) do
+      [{:admission, :open}] -> %{admission: :open}
+      [{:admission, {:blocked, reason}}] -> %{admission: :blocked, reason: reason}
+      [] -> %{admission: :not_running}
+    end
+  rescue
+    ArgumentError -> %{admission: :not_running}
   end
 
   @doc """
@@ -187,25 +215,110 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   @impl true
   def init(opts) do
+    case Keyword.get(opts, :timeout, @default_timeout) do
+      timeout when is_integer(timeout) and timeout >= @min_timeout -> start(opts, timeout)
+      timeout -> {:stop, {:invalid_timeout, timeout}}
+    end
+  end
+
+  defp start(opts, timeout) do
     name = Keyword.get(opts, :name)
-    # A replacement admits no call until its predecessor's CLI work is gone.
-    :ok = name |> Reaper.name() |> Reaper.await_previous()
-    reaper = Reaper.start(Reaper.name(name))
 
     state = %{
-      reaper: reaper,
+      name: name,
+      reaper: nil,
+      reaper_opts: Keyword.get(opts, :reaper, []),
+      blocked: nil,
+      lost_reaper: nil,
+      predecessor: nil,
+      stuck: [],
       command:
         Keyword.get_lazy(opts, :command, fn -> System.find_executable("llm-proxy-shim") end),
       command_args: Keyword.get(opts, :command_args, ["claude"]),
       cli_args: Keyword.get(opts, :cli_args, []),
-      timeout: Keyword.get(opts, :timeout, @default_timeout),
+      timeout: timeout,
       expected_model: Keyword.get(opts, :expected_model, @resolved_model),
       environment: Keyword.get(opts, :environment),
       table: status_table(name)
     }
 
+    state = state |> await_predecessor() |> admit()
     preflight(state)
     {:ok, state}
+  end
+
+  # A predecessor's reaper still cleaning up gets a bounded wait; past it
+  # this server starts closed and opens when that reaper exits.
+  defp await_predecessor(state) do
+    with {:held, holder} <- Reaper.lease(state.name),
+         true <- Process.alive?(holder) do
+      ref = Process.monitor(holder)
+
+      receive do
+        {:DOWN, ^ref, :process, ^holder, _reason} -> state
+      after
+        @predecessor_wait_ms -> %{state | predecessor: {holder, ref}}
+      end
+    else
+      _ -> state
+    end
+  end
+
+  # Takes the reaper lease when nothing of this server is left unconfirmed.
+  defp admit(%{reaper: nil, stuck: []} = state) do
+    opts =
+      if state.lost_reaper,
+        do: Keyword.put(state.reaper_opts, :takeover, state.lost_reaper),
+        else: state.reaper_opts
+
+    case Reaper.start(state.name, opts) do
+      {:ok, reaper} ->
+        sync_admission(%{state | reaper: reaper, blocked: nil, lost_reaper: nil})
+
+      {:blocked, reason} ->
+        if state.blocked != reason,
+          do: Logger.error("ClaudeCLI calls refused: #{reason} (see ClaudeCLI.Reaper)")
+
+        sync_admission(%{state | blocked: reason})
+    end
+  end
+
+  defp admit(state), do: sync_admission(state)
+
+  # A tree this server could not confirm stopped is retried before a call.
+  defp prune_stuck(%{stuck: []} = state), do: state
+
+  defp prune_stuck(state) do
+    stuck = Enum.reject(state.stuck, &stopped?(state, &1))
+    sync_admission(%{state | stuck: stuck})
+  end
+
+  defp stopped?(state, {workspace, os_pid}) do
+    case Reaper.kill_tree(os_pid, state.reaper_opts) do
+      :ok ->
+        File.rm_rf(workspace)
+        if state.reaper, do: Reaper.done(state.reaper, workspace)
+        true
+
+      :timeout ->
+        false
+    end
+  end
+
+  defp admitted?(state), do: not is_nil(state.reaper) and state.stuck == []
+
+  defp sync_admission(%{table: nil} = state), do: state
+
+  defp sync_admission(state) do
+    admission =
+      cond do
+        is_nil(state.reaper) -> {:blocked, state.blocked || :previous_cleanup_unconfirmed}
+        state.stuck != [] -> {:blocked, :cli_not_quiescent}
+        true -> :open
+      end
+
+    :ets.insert(state.table, {:admission, admission})
+    state
   end
 
   # Boot preflight: no model call is spent. The attestation is checked at
@@ -236,39 +349,66 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   @impl true
   def handle_call({:complete, request, enqueued_at}, {caller, _tag}, state) do
-    remaining = state.timeout - (System.monotonic_time(:millisecond) - enqueued_at)
+    state = state |> prune_stuck() |> admit()
+    deadline = enqueued_at + state.timeout
 
     cond do
       # Abandoned while queued: nobody waits for this call, so none starts.
       not Process.alive?(caller) ->
         {:reply, {:error, :caller_down}, state}
 
-      remaining < min(@min_launch_ms, div(state.timeout, 2)) ->
+      not admitted?(state) ->
+        {:reply, {:error, :provider_not_quiescent}, state}
+
+      not launchable?(deadline, state.timeout) ->
         {:reply, {:error, :provider_queue_timeout}, state}
 
       true ->
-        {:reply, run(request, %{state | timeout: remaining}, caller), state}
+        {result, state} = run(request, state, caller, deadline)
+        {:reply, result, state}
     end
   end
 
   @impl true
-  def handle_info({_port, {:data, _data}}, state), do: {:noreply, state}
-  def handle_info({_port, {:exit_status, _status}}, state), do: {:noreply, state}
+  def handle_info({port, {:data, _data}}, state) when is_port(port), do: {:noreply, state}
 
-  def handle_info({:DOWN, _ref, :process, reaper, reason}, %{reaper: reaper} = state),
-    do: {:stop, {:reaper_down, reason}, state}
+  def handle_info({port, {:exit_status, _status}}, state) when is_port(port),
+    do: {:noreply, state}
 
-  defp run(_request, %{command: nil}, _caller), do: {:error, :llm_proxy_shim_not_found}
+  # Lost while idle: every launch of this server is confirmed gone or still
+  # in `stuck`, so a new reaper may take over the dead one's lease.
+  def handle_info({:DOWN, _ref, :process, reaper, _reason}, %{reaper: reaper} = state) do
+    Logger.warning("ClaudeCLI reaper exited; taking over its lease")
+    {:noreply, admit(%{state | reaper: nil, lost_reaper: reaper})}
+  end
 
-  defp run(request, state, caller) do
+  def handle_info({:DOWN, ref, :process, holder, _reason}, %{predecessor: {holder, ref}} = state),
+    do: {:noreply, admit(%{state | predecessor: nil})}
+
+  # After an operator `Reaper.release/1`.
+  def handle_info(:admission_check, state), do: {:noreply, admit(state)}
+
+  # Expired, or too little time left to be worth launching.
+  defp launchable?(deadline, timeout) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+    remaining > 0 and remaining >= min(@min_launch_ms, div(timeout, 2))
+  end
+
+  defp run(_request, %{command: nil} = state, _caller, _deadline),
+    do: {{:error, :llm_proxy_shim_not_found}, state}
+
+  defp run(request, state, caller, deadline) do
     with {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
          :ok <- refuse_bypass(state.environment || System.get_env()) do
       launch(
         request,
         state,
         caller,
+        deadline,
         witness_env ++ Enum.map(@route_flags ++ @route_urls, &{~c"#{&1}", false})
       )
+    else
+      error -> {error, state}
     end
   end
 
@@ -300,9 +440,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       else: :ok
   end
 
-  defp launch(request, state, caller, child_env) do
-    workspace = private_workspace!()
+  defp launch(request, state, caller, deadline, child_env) do
+    workspace = workspace_path()
     Reaper.track(state.reaper, workspace)
+    create_workspace!(workspace)
     prompt_path = Path.join(workspace, "prompt")
 
     prompt = render_prompt(request.prompt, Zoi.to_json_schema(request.schema))
@@ -310,34 +451,50 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     File.write!(prompt_path, prompt, [:binary])
     File.chmod!(prompt_path, 0o600)
 
-    port =
-      Port.open({:spawn_executable, "/bin/sh"}, [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        {:args, shell_args(state, prompt_path)},
-        {:cd, workspace},
-        {:env, child_env},
-        {:line, 1_048_576}
-      ])
+    port_opts = [
+      :binary,
+      :exit_status,
+      :stderr_to_stdout,
+      {:args, shell_args(state, prompt_path)},
+      {:cd, workspace},
+      {:env, child_env},
+      {:line, 1_048_576}
+    ]
 
-    os_pid = port |> Port.info(:os_pid) |> elem(1)
-    Reaper.launched(state.reaper, workspace, os_pid)
-    watch = Process.monitor(caller)
-
-    result =
-      collect(port, os_pid, Map.put(state, :caller, watch), deadline(state.timeout), nil, [])
-
-    Process.demonitor(watch, [:flush])
-    quiesce(port, os_pid)
-    File.rm_rf!(workspace)
-    Reaper.untrack(state.reaper, workspace)
-    result
+    # The absolute deadline is checked again after preparation.
+    with true <- launchable?(deadline, state.timeout) || {:error, :provider_queue_timeout},
+         {:ok, port, os_pid} <-
+           Reaper.open(state.reaper, workspace, {:spawn_executable, "/bin/sh"}, port_opts) do
+      watch = Process.monitor(caller)
+      result = collect(port, os_pid, Map.put(state, :caller, watch), deadline, nil, [])
+      Process.demonitor(watch, [:flush])
+      {result, settle(state, port, os_pid, workspace)}
+    else
+      error ->
+        File.rm_rf(workspace)
+        Reaper.done(state.reaper, workspace)
+        {error, state}
+    end
   end
 
-  # The call returns only once its process tree is gone: a CLI still running
-  # after its result gets a short grace to exit, then its tree is killed.
-  defp quiesce(port, os_pid) do
+  # The call returns only once its process tree is confirmed gone; one that
+  # cannot be confirmed stays tracked and closes admission.
+  defp settle(state, port, os_pid, workspace) do
+    case quiesce(port, os_pid, state.reaper_opts) do
+      :ok ->
+        File.rm_rf!(workspace)
+        Reaper.done(state.reaper, workspace)
+        state
+
+      :timeout ->
+        Logger.error("ClaudeCLI could not confirm a CLI process tree stopped; calls refused")
+        sync_admission(%{state | stuck: [{workspace, os_pid} | state.stuck]})
+    end
+  end
+
+  # A CLI still running after its result gets a short grace to exit, then
+  # its tree is killed.
+  defp quiesce(port, os_pid, opts) do
     if Reaper.alive?(os_pid) do
       receive do
         {^port, {:exit_status, _status}} -> :ok
@@ -345,11 +502,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         @exit_grace_ms -> :ok
       end
 
-      if Reaper.alive?(os_pid), do: Reaper.kill_tree(os_pid)
+      if Reaper.alive?(os_pid), do: Reaper.kill_tree(os_pid, opts), else: :ok
+    else
+      :ok
     end
-
-    if Port.info(port), do: Port.close(port)
-    :ok
   end
 
   defp shell_args(state, prompt_path) do
@@ -395,7 +551,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
               {:error, reason} ->
                 drifted(state, reason)
-                stop_tree(port, os_pid, {:error, reason})
+                stop_tree(os_pid, state, {:error, reason})
             end
 
           {:ok, %{"type" => "result"} = event} when not is_nil(init) ->
@@ -405,14 +561,14 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
             collect(port, os_pid, state, deadline, init, [event | messages])
 
           _ ->
-            stop_tree(port, os_pid, {:error, :invalid_cli_stream})
+            stop_tree(os_pid, state, {:error, :invalid_cli_stream})
         end
 
       {^port, {:data, {:noeol, fragment}}} ->
         if String.trim(fragment) == "" do
           collect(port, os_pid, state, deadline, init, messages)
         else
-          stop_tree(port, os_pid, {:error, :invalid_cli_stream})
+          stop_tree(os_pid, state, {:error, :invalid_cli_stream})
         end
 
       {^port, {:exit_status, status}} ->
@@ -424,9 +580,15 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         end
 
       {:DOWN, ref, :process, _caller, _reason} when ref == state.caller ->
-        stop_tree(port, os_pid, {:unknown, :caller_down})
+        stop_tree(os_pid, state, {:unknown, :caller_down})
+
+      # The reaper (port owner) is gone: stop the tree; the server handles
+      # the loss once this call has settled.
+      {:DOWN, _ref, :process, reaper, _reason} = down when reaper == state.reaper ->
+        send(self(), down)
+        stop_tree(os_pid, state, {:unknown, :reaper_down})
     after
-      remaining -> stop_tree(port, os_pid, {:unknown, :claude_cli_timeout})
+      remaining -> stop_tree(os_pid, state, {:unknown, :claude_cli_timeout})
     end
   end
 
@@ -482,21 +644,19 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   defp usage(_usage), do: %{input_tokens: 0, output_tokens: 0, plan_calls: 1}
 
-  # Kills the whole tree (root included) and waits for it before closing
-  # the port, so nothing outlives the call.
-  defp stop_tree(port, os_pid, result) do
-    Reaper.kill_tree(os_pid)
-    if Port.info(port), do: Port.close(port)
+  # Kills the whole tree (root included); `settle/4` confirms it is gone.
+  defp stop_tree(os_pid, state, result) do
+    Reaper.kill_tree(os_pid, state.reaper_opts)
     result
   end
 
-  defp private_workspace! do
+  defp workspace_path do
     suffix = 16 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
-    path = Path.join(System.tmp_dir!(), "sdr-agent-claude-#{suffix}")
-    File.mkdir!(path)
-    File.chmod!(path, 0o700)
-    path
+    Path.join(System.tmp_dir!(), "sdr-agent-claude-#{suffix}")
   end
 
-  defp deadline(timeout), do: System.monotonic_time(:millisecond) + timeout
+  defp create_workspace!(path) do
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+  end
 end

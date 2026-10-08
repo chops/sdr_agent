@@ -52,8 +52,8 @@ case {config_env(), System.get_env("SDR_MODEL_PROVIDER")} do
   {:dev, "claude_cli"} ->
     timeout =
       case Integer.parse(System.get_env("SDR_CLAUDE_CLI_TIMEOUT_MS", "240000")) do
-        {ms, ""} when ms > 0 -> ms
-        _ -> raise "SDR_CLAUDE_CLI_TIMEOUT_MS must be a positive integer (milliseconds)"
+        {ms, ""} when ms >= 1_000 -> ms
+        _ -> raise "SDR_CLAUDE_CLI_TIMEOUT_MS must be an integer of at least 1000 (milliseconds)"
       end
 
     config :sdr_agent, model_provider: SdrAgent.AI.ModelProvider.ClaudeCLI

@@ -94,7 +94,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
           model_alias: provenance.model_catalog_entry["alias"],
           model_id: provenance.model_id,
           reviewed_version: provenance.provider_version,
-          server: if(ClaudeCLI.running?(ClaudeCLI.server()), do: :running, else: :not_running),
+          server: server_state(),
           attestation: ClaudeCLI.attestation(ClaudeCLI.server())
         }
 
@@ -107,6 +107,16 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
           server: :not_applicable,
           attestation: %{status: :not_applicable}
         }
+    end
+  end
+
+  # :blocked while the named server refuses calls until earlier CLI work is
+  # confirmed stopped (`ClaudeCLI.admission/1`).
+  defp server_state do
+    cond do
+      not ClaudeCLI.running?(ClaudeCLI.server()) -> :not_running
+      ClaudeCLI.admission(ClaudeCLI.server()).admission == :blocked -> :blocked
+      true -> :running
     end
   end
 

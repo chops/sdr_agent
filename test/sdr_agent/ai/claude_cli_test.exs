@@ -2,6 +2,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
   use ExUnit.Case, async: false
 
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
   alias SdrAgent.AI.ModelProvider.CodexAppServer
 
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
@@ -252,6 +253,183 @@ defmodule SdrAgent.AI.ClaudeCLITest do
     end
   end
 
+  describe "Q0.1 re-review: launch ownership and fail-closed cleanup" do
+    setup do
+      prefix =
+        Path.join(System.tmp_dir!(), "sdr-claude-hang-#{System.unique_integer([:positive])}")
+
+      on_exit(fn ->
+        for record <- Path.wildcard(prefix <> ".*") do
+          launch = record |> File.read!() |> JSON.decode!()
+          for pid <- [launch["child"], launch["root"]], os_alive?(pid), do: os_kill(pid)
+          File.rm(record)
+        end
+
+        Reaper.release(ClaudeCLI.server())
+      end)
+
+      %{prefix: prefix}
+    end
+
+    # Codex re-review: the launch handoff must not release admission while
+    # the launched process is live.
+    test "an owner killed right after it opened a launch never releases admission while it runs" do
+      root =
+        Path.join(System.tmp_dir!(), "sdr-reaper-handoff-#{System.unique_integer([:positive])}")
+
+      File.mkdir!(root)
+      parent = self()
+      name = :"sdr_reaper_handoff_#{System.unique_integer([:positive])}"
+
+      # The launch is opened by the reaper itself: its OS pid is owned
+      # before the owner can be killed "between" opening and handing it off.
+      owner =
+        spawn(fn ->
+          {:ok, reaper} = Reaper.start(name)
+          Reaper.track(reaper, root)
+
+          {:ok, _port, pid} =
+            Reaper.open(reaper, root, {:spawn_executable, System.find_executable("sleep")}, [
+              {:args, ["60"]},
+              {:cd, root}
+            ])
+
+          send(parent, {:opened, pid})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:opened, pid}, 5_000
+      on_exit(fn -> if os_alive?(pid), do: os_kill(pid) end)
+
+      Process.exit(owner, :kill)
+      assert eventually(fn -> Reaper.lease(name) == nil end, 500), "no cleanup receipt"
+      refute os_alive?(pid), "admission was released while the launched process was live"
+      refute File.exists?(root)
+    end
+
+    test "a tree that cannot be stopped after a timeout holds admission closed until it is gone",
+         %{prefix: prefix} do
+      {:ok, server} =
+        ClaudeCLI.start_link(hang_opts(prefix, timeout: 1_500, reaper: unkillable()))
+
+      assert {:unknown, :claude_cli_timeout} = ClaudeCLI.complete(request(), server: server)
+      assert [launch] = launches(prefix)
+      assert os_alive?(launch["root"])
+
+      assert {:error, :provider_not_quiescent} = ClaudeCLI.complete(request(), server: server)
+      assert length(launches(prefix)) == 1, "a call was admitted while the old tree ran"
+
+      os_kill(launch["child"])
+      os_kill(launch["root"])
+      assert eventually(fn -> not os_alive?(launch["root"]) end, 250)
+
+      assert {:unknown, :claude_cli_timeout} = ClaudeCLI.complete(request(), server: server)
+      assert length(launches(prefix)) == 2
+    end
+
+    test "a reaper that cannot stop a dead server's tree keeps the replacement closed",
+         %{prefix: prefix} do
+      server =
+        start_supervised!({ClaudeCLI, hang_opts(prefix, timeout: 30_000, reaper: unkillable())})
+
+      caller = Task.async(fn -> catch_exit(ClaudeCLI.complete(request(), [])) end)
+      launch = await_launch!(prefix)
+
+      Process.exit(server, :kill)
+      assert {:killed, _} = Task.await(caller, 10_000)
+      replacement = await_replacement!(server)
+
+      assert {:error, :provider_not_quiescent} = ClaudeCLI.complete(request(), [])
+      assert length(launches(prefix)) == 1
+      assert %{admission: :blocked} = ClaudeCLI.admission()
+
+      os_kill(launch["child"])
+      os_kill(launch["root"])
+
+      assert eventually(fn -> ClaudeCLI.admission() == %{admission: :open} end, 500),
+             "admission stayed closed after the old tree was gone"
+
+      assert Process.alive?(replacement)
+    end
+
+    test "a reaper and server that both die leave admission closed until an operator releases it",
+         %{prefix: prefix} do
+      server = start_supervised!({ClaudeCLI, hang_opts(prefix, timeout: 30_000)})
+      caller = Task.async(fn -> catch_exit(ClaudeCLI.complete(request(), [])) end)
+      launch = await_launch!(prefix)
+      reaper = reaper_of(server, [caller.pid])
+
+      Process.exit(reaper, :kill)
+      Process.exit(server, :kill)
+      Task.await(caller, 10_000)
+      await_replacement!(server)
+
+      assert {:error, :provider_not_quiescent} = ClaudeCLI.complete(request(), [])
+      assert length(launches(prefix)) == 1, "a call was admitted without a cleanup receipt"
+      assert %{admission: :blocked} = ClaudeCLI.admission()
+
+      # The operator confirms the old CLI is gone, then releases.
+      os_kill(launch["child"])
+      os_kill(launch["root"])
+      assert eventually(fn -> not os_alive?(launch["root"]) end, 250)
+      assert :ok = Reaper.release(ClaudeCLI.server())
+
+      assert eventually(fn -> ClaudeCLI.admission() == %{admission: :open} end, 250)
+    end
+
+    test "a reaper lost while the server is idle is replaced without closing admission" do
+      server = start_supervised!({ClaudeCLI, named_opts("ready")})
+      reaper = reaper_of(server)
+
+      Process.exit(reaper, :kill)
+      assert eventually(fn -> reaper_of(server) not in [nil, reaper] end, 250)
+
+      assert {:ok, _} = ClaudeCLI.complete(request(), [])
+      assert Process.alive?(server)
+    end
+
+    test "an already expired deadline is refused unlaunched; a sub-second timeout is rejected",
+         %{prefix: prefix} do
+      assert {:error, {:invalid_timeout, 1}} =
+               GenServer.start(
+                 ClaudeCLI,
+                 prefix |> hang_opts(timeout: 1) |> Keyword.delete(:name)
+               )
+
+      {:ok, server} =
+        prefix |> hang_opts(timeout: 1_000) |> Keyword.delete(:name) |> ClaudeCLI.start_link()
+
+      # White-box: requests enqueued exactly at, and long before, their
+      # deadline (the message complete/2 sends).
+      now = System.monotonic_time(:millisecond)
+
+      for enqueued_at <- [now - 1_000, now - 60_000] do
+        assert {:error, :provider_queue_timeout} =
+                 GenServer.call(server, {:complete, request(), enqueued_at})
+      end
+
+      Process.sleep(300)
+      assert launches(prefix) == []
+    end
+  end
+
+  defp unkillable,
+    do: [signal: fn _pid, _signal -> :ok end, exit_wait_ms: 200, retry_ms: 100]
+
+  # The server monitors its reaper (and, during a call, its caller).
+  defp reaper_of(server, callers \\ []) do
+    case Process.info(server, :monitors) do
+      {:monitors, monitors} ->
+        Enum.find(
+          for({:process, pid} when is_pid(pid) <- monitors, do: pid),
+          &(&1 not in callers)
+        )
+
+      nil ->
+        nil
+    end
+  end
+
   defp hang_opts(prefix, opts) do
     Keyword.merge(
       [
@@ -290,10 +468,24 @@ defmodule SdrAgent.AI.ClaudeCLITest do
     GenServer.whereis(ClaudeCLI.server())
   end
 
+  # A launch's port is owned by the server's reaper (a process it monitors).
   defp launching?(server) do
-    case Process.info(server, :links) do
+    case Process.info(server, :monitors) do
+      {:monitors, monitors} ->
+        Enum.any?(monitors, fn
+          {:process, pid} when is_pid(pid) -> port_linked?(pid)
+          _ -> false
+        end)
+
+      nil ->
+        false
+    end
+  end
+
+  defp port_linked?(pid) do
+    case Process.info(pid, :links) do
       {:links, links} -> Enum.any?(links, &is_port/1)
-      _ -> false
+      nil -> false
     end
   end
 
