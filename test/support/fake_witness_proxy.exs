@@ -74,6 +74,95 @@ defmodule SdrAgent.Test.FakeWitnessProxy do
     })
   end
 
+  @doc """
+  A request shaped like Claude Code 2.1.291's (S12d proof 1, structure
+  only, synthetic text): one user message holding reminder-shaped blocks and
+  the stdin, a trailing system-role message, empty tools and the control
+  fields. Options adjust it for negative cases: `:reminders`,
+  `:extra_user_texts`, `:user_blocks_extra`, `:user_cache_control`,
+  `:trailing` (count), `:extra_messages`, `:tools` (`:absent` to drop),
+  `:top` (merged top-level keys). S12d v3 shapes: `:cache_ttl` (adds a
+  `ttl` to every default `cache_control`), `:cache_control` (replaces every
+  default `cache_control` value), `:trailing_message_extra` and
+  `:user_message_extra` (keys merged into those messages).
+  """
+  def cli_request(stdin, opts \\ []) do
+    reminders = Keyword.get(opts, :reminders, [])
+
+    user_blocks =
+      Enum.map(reminders, &%{"type" => "text", "text" => &1}) ++
+        [%{"type" => "text", "text" => stdin}] ++
+        Enum.map(Keyword.get(opts, :reminders_after, []), &%{"type" => "text", "text" => &1}) ++
+        Enum.map(Keyword.get(opts, :extra_user_texts, []), &%{"type" => "text", "text" => &1}) ++
+        Keyword.get(opts, :user_blocks_extra, [])
+
+    user_blocks =
+      if Keyword.get(opts, :user_cache_control, false),
+        do: Enum.map(user_blocks, &Map.put(&1, "cache_control", %{"type" => "ephemeral"})),
+        else: user_blocks
+
+    cache_control =
+      case {Keyword.fetch(opts, :cache_control), Keyword.fetch(opts, :cache_ttl)} do
+        {{:ok, value}, _} -> value
+        {:error, {:ok, ttl}} -> %{"type" => "ephemeral", "ttl" => ttl}
+        {:error, :error} -> %{"type" => "ephemeral"}
+      end
+
+    trailing =
+      for n <- 1..Keyword.get(opts, :trailing, 1)//1 do
+        Map.merge(
+          %{
+            "role" => "system",
+            "content" =>
+              Keyword.get(opts, :trailing_content, [
+                %{
+                  "type" => "text",
+                  "text" => "Synthetic trailing context #{n}",
+                  "cache_control" => cache_control
+                }
+              ])
+          },
+          Keyword.get(opts, :trailing_message_extra, %{})
+        )
+      end
+
+    request = %{
+      "model" => "claude-opus-5-5",
+      "max_tokens" => 32_000,
+      "stream" => true,
+      "metadata" => %{"user_id" => account_id()},
+      "system" => [
+        %{"type" => "text", "text" => "Synthetic CLI system text"},
+        %{
+          "type" => "text",
+          "text" => "More synthetic system text",
+          "cache_control" => cache_control
+        }
+      ],
+      "thinking" => %{"type" => "adaptive", "display" => "summarized"},
+      "output_config" => %{"effort" => "high"},
+      "context_management" => %{"edits" => [%{"type" => "clear_thinking"}]},
+      "tools" => Keyword.get(opts, :tools, []),
+      "messages" =>
+        Keyword.get(opts, :leading_messages, []) ++
+          [
+            Map.merge(
+              %{"role" => "user", "content" => user_blocks},
+              Keyword.get(opts, :user_message_extra, %{})
+            )
+          ] ++
+          trailing ++ Keyword.get(opts, :extra_messages, [])
+    }
+
+    request =
+      if Keyword.get(opts, :tools) == :absent, do: Map.delete(request, "tools"), else: request
+
+    request
+    |> Map.merge(Keyword.get(opts, :top, %{}))
+    |> Map.drop(Keyword.get(opts, :drop, []))
+    |> JSON.encode!()
+  end
+
   @doc "An Anthropic SSE response whose single text block is `text`."
   def sse_response(text, opts \\ []) do
     blocks = Keyword.get(opts, :blocks, [{:text, text}])

@@ -23,6 +23,14 @@ defmodule SdrAgent.Agents.Witness.Projection do
   digests compare the expected and observed projections (sha256 of the
   prompt text and of the canonical output); whole-wire equality is never
   claimed.
+
+  Versions 2 and 3 (`compare_v2/4`, `compare_v3/4`; ADR-0005 S12d) read the
+  real Claude Code request shape. They record the additional CLI context
+  as a typed evidence group, which is never claimed equal or benign. v3 is
+  v2 plus a reminder that ends with its close tag and one LF,
+  `cache_control` ttl `"1h"`, and a message-level `output_config`. For both
+  versions, `extras: nil` means that the request is outside the grammar, so
+  the version does not apply.
   """
 
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
@@ -304,4 +312,341 @@ defmodule SdrAgent.Agents.Witness.Projection do
   end
 
   defp sha(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+
+  ## Projection v2 (S12d; entity PASS f04a7e44)
+
+  @version_v2 "claude-message-json/2+prompt-builder/1"
+  @top_keys ~w(model max_tokens messages metadata stream system thinking tools context_management output_config)
+  @control_fields ~w(system thinking output_config context_management)
+  @reminder_open "<system-reminder>"
+  @reminder_close "</system-reminder>"
+  @max_reminders 4
+  @max_reminder_bytes 8192
+  @max_trailing 2
+  @max_trailing_blocks 4
+  @max_trailing_bytes 32_768
+
+  # v3 (entity PASS 9343defb): v2 plus exactly three bounded relaxations.
+  @version_v3 "claude-message-json/3+prompt-builder/1"
+  @cache_ttls ["1h"]
+
+  @doc "The v2 projection version (CLI request shape with recorded context)."
+  def version_v2, do: @version_v2
+
+  @doc """
+  The v3 projection version: v2, plus a reminder that ends with its close tag
+  and one LF, `cache_control` ttl `"1h"`, and a message-level `output_config`
+  on trailing system messages.
+  """
+  def version_v3, do: @version_v3
+
+  @doc """
+  v2 comparison. Like `compare/4`, plus `proof.extras` — the typed
+  WitnessEvidence context group (present on every evaluated v2 result).
+  """
+  def compare_v2(invocation, app, raw_request, raw_response),
+    do: compare_cli(:v2, invocation, app, raw_request, raw_response)
+
+  @doc """
+  v3 comparison, with the same result shape as `compare_v2/4`. `proof.extras`
+  is the 9-key v3 group, which adds `trailing_output_config`. `extras: nil`
+  means that the request is outside the grammar, so v3 does not apply.
+  """
+  def compare_v3(invocation, app, raw_request, raw_response),
+    do: compare_cli(:v3, invocation, app, raw_request, raw_response)
+
+  defp compare_cli(grammar, invocation, app, raw_request, raw_response) do
+    builder = Map.get(invocation.model_catalog_entry || %{}, "prompt_builder")
+
+    if builder == ClaudeCLI.prompt_builder() do
+      case compare_request_v2(grammar, invocation, app.request, raw_request) do
+        # Outside the v2 grammar, v2 does not apply at all (whatever the response).
+        {:unsupported, reasons, digests, _extras} ->
+          {:unsupported, %{reasons: reasons, digests: digests, extras: nil}}
+
+        {verdict, reasons, digests, extras} ->
+          response = compare_response(app.response, raw_response)
+          {verdict, proof} = combine({verdict, reasons, digests}, response)
+          {verdict, proof |> Map.put(:extras, extras) |> add_reason(extras)}
+      end
+    else
+      {:unsupported, %{reasons: ["prompt_builder_unsupported"], digests: %{}, extras: nil}}
+    end
+  end
+
+  defp add_reason(proof, %{
+         "reminder_count" => r,
+         "trailing_system_count" => t,
+         "request_fields" => f
+       })
+       when r > 0 or t > 0 or f != [],
+       do: %{proof | reasons: Enum.uniq(proof.reasons ++ ["cli_injected_context"])}
+
+  defp add_reason(proof, _extras), do: proof
+
+  # {verdict, reasons, digests, extras | nil}
+  defp compare_request_v2(grammar, invocation, app_request, raw_request) do
+    with {:ok, %{"prompt" => prompt, "schema" => schema}}
+         when is_binary(prompt) and is_map(schema) <-
+           Jason.decode(app_request),
+         expected = ClaudeCLI.render_prompt(prompt, schema),
+         {:ok, %{} = observed} <- decode_request(raw_request) do
+      digests = %{"projected_request_sha256" => sha(expected)}
+      v2_verdict(v2_grammar(grammar, invocation, observed), expected, digests)
+    else
+      {:error, :request_not_json} -> {:unsupported, ["request_not_json"], %{}, nil}
+      _ -> {:unsupported, ["app_request_unreadable"], %{}, nil}
+    end
+  end
+
+  defp v2_verdict({:ok, text, extras}, expected, digests) do
+    digests = Map.put(digests, "observed_request_projection_sha256", sha(text))
+
+    if text == expected,
+      do: {:match, [], digests, extras},
+      else: {:mismatch, ["request_text_differs"], digests, extras}
+  end
+
+  defp v2_verdict({:unsupported, reason}, _expected, digests),
+    do: {:unsupported, [reason], digests, nil}
+
+  defp v2_grammar(grammar, invocation, request) do
+    with :ok <- check(Enum.all?(Map.keys(request), &(&1 in @top_keys)), "request_key_unsupported"),
+         :ok <- check(request["model"] == invocation.model_id, "request_model_differs"),
+         :ok <- check(request["stream"] == true, "request_shape_unsupported"),
+         :ok <- check(Map.get(request, "tools", :absent) == [], "request_tools_present"),
+         :ok <- check(controls_valid?(request, grammar), "request_control_unsupported"),
+         {:ok, user, trailing} <- split_messages(request["messages"], grammar),
+         {:ok, text, reminders} <- user_blocks(user, grammar),
+         {:ok, trailing} <- trailing_messages(trailing, grammar) do
+      {:ok, text, extras(request, reminders, trailing, grammar)}
+    end
+  end
+
+  defp check(true, _reason), do: :ok
+  defp check(_false, reason), do: {:unsupported, reason}
+
+  defp split_messages([%{"role" => "user", "content" => content} = first | rest], grammar)
+       when is_list(content) and length(rest) <= @max_trailing do
+    if map_size(first) == 2 and Enum.all?(rest, &trailing_message?(&1, grammar)),
+      do: {:ok, content, rest},
+      else: {:unsupported, "request_shape_unsupported"}
+  end
+
+  defp split_messages(_messages, _grammar), do: {:unsupported, "request_shape_unsupported"}
+
+  # Message keys: exactly {role, content}; v3 also admits a message-level
+  # output_config of the top-level shape (absent, null or {effort}).
+  defp trailing_message?(%{"role" => "system", "content" => c} = message, grammar)
+       when is_list(c) do
+    case {map_size(message), grammar} do
+      {2, _} ->
+        true
+
+      {3, :v3} ->
+        Map.has_key?(message, "output_config") and valid_output_config?(message["output_config"])
+
+      _ ->
+        false
+    end
+  end
+
+  defp trailing_message?(_message, _grammar), do: false
+
+  # Exactly one non-reminder text block; reminders exactly wrapped and capped.
+  defp user_blocks(blocks, grammar) do
+    if Enum.all?(
+         blocks,
+         &(match?(%{"type" => "text", "text" => t} when is_binary(t), &1) and map_size(&1) == 2)
+       ) do
+      indexed = Enum.with_index(blocks, fn %{"text" => text}, i -> {i, text} end)
+      {reminders, others} = Enum.split_with(indexed, fn {_i, t} -> reminder?(t, grammar) end)
+
+      cond do
+        length(others) != 1 ->
+          {:unsupported, "request_extra_blocks"}
+
+        length(reminders) > @max_reminders ->
+          {:unsupported, "request_reminders_unsupported"}
+
+        Enum.any?(reminders, fn {_i, t} -> byte_size(t) > @max_reminder_bytes end) ->
+          {:unsupported, "request_reminders_unsupported"}
+
+        true ->
+          {:ok, others |> hd() |> elem(1), reminders}
+      end
+    else
+      {:unsupported, "request_shape_unsupported"}
+    end
+  end
+
+  # v2: ends exactly with the close tag. v3 also admits the close tag plus
+  # exactly one LF (no CRLF, no other whitespace). The recorded digest and
+  # byte count always cover the original complete text.
+  defp reminder?(text, grammar) do
+    minimum = byte_size(@reminder_open) + byte_size(@reminder_close)
+
+    String.starts_with?(text, @reminder_open) and
+      ((String.ends_with?(text, @reminder_close) and byte_size(text) >= minimum) or
+         (grammar == :v3 and String.ends_with?(text, @reminder_close <> "\n") and
+            byte_size(text) >= minimum + 1))
+  end
+
+  defp trailing_messages(messages, grammar) do
+    # Shape and cardinality are checked before any sizing, so malformed wire
+    # data is unsupported rather than an exception.
+    Enum.reduce_while(Enum.with_index(messages, 1), {:ok, []}, fn {%{"content" => blocks} =
+                                                                     message, index},
+                                                                  {:ok, acc} ->
+      with true <- length(blocks) in 1..@max_trailing_blocks,
+           true <- Enum.all?(blocks, &system_block?(&1, grammar)),
+           bytes = blocks |> Enum.map(&byte_size(&1["text"])) |> Enum.sum(),
+           true <- bytes <= @max_trailing_bytes do
+        {:cont, {:ok, acc ++ [{index, blocks, bytes, Map.fetch(message, "output_config")}]}}
+      else
+        _ -> {:halt, {:unsupported, "request_trailing_unsupported"}}
+      end
+    end)
+  end
+
+  defp system_block?(%{"type" => "text", "text" => text} = block, grammar)
+       when is_binary(text) do
+    case Map.drop(block, ["type", "text"]) do
+      empty when map_size(empty) == 0 -> true
+      %{"cache_control" => cc} when map_size(block) == 3 -> cache_control?(cc, grammar)
+      _ -> false
+    end
+  end
+
+  defp system_block?(_block, _grammar), do: false
+
+  # Exactly {type: ephemeral}; v3 also {type: ephemeral, ttl} with a reviewed ttl.
+  defp cache_control?(%{"type" => "ephemeral"} = cc, _grammar) when map_size(cc) == 1, do: true
+
+  defp cache_control?(%{"type" => "ephemeral", "ttl" => ttl} = cc, :v3) when map_size(cc) == 2,
+    do: ttl in @cache_ttls
+
+  defp cache_control?(_cc, _grammar), do: false
+
+  defp controls_valid?(request, grammar) do
+    valid_max_tokens?(Map.get(request, "max_tokens", 1)) and
+      valid_metadata?(Map.get(request, "metadata", %{})) and
+      valid_system?(Map.get(request, "system", []), grammar) and
+      valid_thinking?(Map.get(request, "thinking")) and
+      valid_output_config?(Map.get(request, "output_config", %{})) and
+      valid_context_management?(Map.get(request, "context_management", %{}))
+  end
+
+  defp valid_max_tokens?(n), do: is_integer(n) and n > 0
+  defp valid_metadata?(nil), do: true
+  defp valid_metadata?(m), do: is_map(m) and Enum.all?(Map.keys(m), &(&1 == "user_id"))
+  defp valid_system?(nil, _grammar), do: true
+
+  defp valid_system?(blocks, grammar) when is_list(blocks) do
+    length(blocks) <= 8 and Enum.all?(blocks, &system_block?(&1, grammar)) and
+      blocks |> Enum.map(&byte_size(&1["text"])) |> Enum.sum() <= 262_144
+  end
+
+  defp valid_system?(_blocks, _grammar), do: false
+  defp valid_thinking?(nil), do: true
+
+  defp valid_thinking?(%{} = t),
+    do:
+      Enum.all?(Map.keys(t), &(&1 in ~w(type budget_tokens display))) and
+        Map.get(t, "type") in ["adaptive", "enabled", "disabled"]
+
+  defp valid_thinking?(_), do: false
+  defp valid_output_config?(nil), do: true
+
+  defp valid_output_config?(%{} = o),
+    do:
+      Enum.all?(Map.keys(o), &(&1 == "effort")) and
+        (not Map.has_key?(o, "effort") or
+           (is_binary(o["effort"]) and byte_size(o["effort"]) <= 16))
+
+  defp valid_output_config?(_), do: false
+  defp valid_context_management?(nil), do: true
+
+  defp valid_context_management?(%{} = c) do
+    Enum.all?(Map.keys(c), &(&1 == "edits")) and
+      (not Map.has_key?(c, "edits") or
+         (is_list(c["edits"]) and length(c["edits"]) <= 16 and Enum.all?(c["edits"], &is_map/1))) and
+      byte_size(Canonical.encode!(c)) <= 16_384
+  end
+
+  defp valid_context_management?(_), do: false
+
+  defp extras(request, reminders, trailing, grammar) do
+    fields = request_fields(request)
+
+    reminder_entries =
+      Enum.map(reminders, fn {i, t} ->
+        %{"block_index" => i, "sha256" => sha(t), "bytes" => byte_size(t)}
+      end)
+
+    trailing_entries =
+      Enum.map(trailing, fn {i, blocks, bytes, control} ->
+        entry = %{
+          "message_index" => i,
+          "sha256" => sha(Canonical.encode!(blocks)),
+          "bytes" => bytes
+        }
+
+        if grammar == :v3, do: Map.put(entry, "output_config", tagged(control)), else: entry
+      end)
+
+    manifest = %{
+      "version" => if(grammar == :v3, do: 3, else: 2),
+      "request_fields" => fields,
+      "fields" =>
+        Map.new(@control_fields, fn f ->
+          {f,
+           if(Map.has_key?(request, f),
+             do: %{"present" => true, "value" => request[f]},
+             else: %{"present" => false}
+           )}
+        end),
+      "reminders" => reminder_entries,
+      "trailing_system" => trailing_entries
+    }
+
+    %{
+      "reminder_count" => length(reminder_entries),
+      "reminder_sha256s" => Enum.map(reminder_entries, & &1["sha256"]),
+      "reminder_bytes" => Enum.map(reminder_entries, & &1["bytes"]),
+      "trailing_system_count" => length(trailing_entries),
+      "trailing_system_sha256s" => Enum.map(trailing_entries, & &1["sha256"]),
+      "trailing_system_bytes" => Enum.map(trailing_entries, & &1["bytes"]),
+      "request_extras_sha256" => sha(Canonical.encode!(manifest)),
+      "request_fields" => fields
+    }
+    |> put_v3_controls(trailing, grammar)
+  end
+
+  defp put_v3_controls(extras, trailing, :v3) do
+    codes =
+      Enum.map(trailing, fn
+        {_i, _blocks, _bytes, :error} -> "absent"
+        {_i, _blocks, _bytes, {:ok, nil}} -> "null"
+        {_i, _blocks, _bytes, {:ok, _value}} -> "present"
+      end)
+
+    Map.put(extras, "trailing_output_config", codes)
+  end
+
+  defp put_v3_controls(extras, _trailing, _grammar), do: extras
+
+  # Tagged presence (manifest v3): absent is distinct from JSON null.
+  defp tagged(:error), do: %{"present" => false}
+  defp tagged({:ok, value}), do: %{"present" => true, "value" => value}
+
+  defp request_fields(request) do
+    Enum.flat_map(@control_fields, fn f ->
+      cond do
+        not Map.has_key?(request, f) -> []
+        is_nil(request[f]) -> ["#{f}_present", "#{f}_null"]
+        true -> ["#{f}_present"]
+      end
+    end)
+  end
 end
