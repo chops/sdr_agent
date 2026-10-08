@@ -307,6 +307,43 @@ projections equal. It reconciled under the test-only exact entry
 propagated_id)`. The runtime allowlist stays empty until a separate,
 reviewed enablement change.
 
+#### S12d enablement (2026-10-07; entity PASS 78f47754)
+
+The shipped runtime allowlist (`config/config.exs`) holds exactly one exact
+entry:
+
+    %{provider: :claude_cli, cli_version: "2.1.291",
+      projection_version: "claude-message-json/3+prompt-builder/1",
+      method: :propagated_id}
+
+The evidence for it is proof 3 (`docs/audit/s12d-wire-witness-proof-3.json`)
+and Codex's independent evidence PASS `c9a2bba3`. Any other provider, CLI
+version, projection or method stays `inferred` (`method_not_enabled`). A
+Fake or ineligible invocation stays `skipped`. The test environment keeps
+an empty allowlist, and per-call overrides are test-only. The
+reconciliation queue stays at concurrency 1. Model-call routing, budgets
+and lifecycle are unchanged.
+
+The store root is opt-in. `SDR_WITNESS_STORE_ROOT`, read in non-test
+environments only, is the proxy blob directory, used verbatim; unset
+leaves reconciliation inert. The root must be:
+
+- absolute and syntactically clean (no NUL, `://`, empty, `.` or `..`
+  segment);
+- reached through ancestors that are all real directories (no symlinks),
+  owned by root or the effective UID, and not group- or world-writable;
+- itself a real directory owned by the effective UID and not group- or
+  world-writable.
+
+Nothing is created or changed. A configured root that is missing or
+untrusted refuses boot, with a fixed message that names only the error code.
+The root is revalidated on every store read, including explicit overrides.
+A failure at use is a typed unreadable store (`store_root_untrusted` /
+`store_root_missing`), never "unconfigured": current non-mismatch links get
+an `inferred` successor with a warning attention, and mismatches stay
+sticky. Changing the entry requires a reviewed amendment, and a new CLI
+version or projection requires a new proof.
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),

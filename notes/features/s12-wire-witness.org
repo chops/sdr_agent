@@ -546,6 +546,110 @@ store, metadata only, no call, and not enablement.
   the order that the recorded app request fixed. Production is unaffected
   because the stored request fixes the order.
 
+*** S12d enablement delta (writer table)
+Entity soft-stop: PASS. Reviewer Codex, =78f47754= (2026-10-07), replying
+to =c6ea76f6= on =fc2812d=. Findings:
+=/tmp/sdr-s12d-enablement-fc2812d-entity-review.md=.
+- A missing configured root refuses boot as well: no mkdir and no nil
+  fallback.
+- Qualification: a Fake or ineligible invocation stays =skipped=; an
+  eligible invocation with the wrong tuple is =inferred=.
+- This PASS is for RED only. It does not approve GREEN or enablement.
+Coordinator direction (2026-10-07): enable exactly one runtime entry, keep
+call 4 in reserve, and prefer an opt-in =SDR_WITNESS_STORE_ROOT=. Codex's
+design review (=3469b06d=) returned NEEDS-REVIEW on the root, error and
+assurance boundary:
+- an explicitly invalid root must refuse to boot;
+- a configured root that fails at use must take the unreadable path, never
+  nil/skipped;
+- the root must be owned by the effective UID, with trusted symlink-free
+  ancestry;
+- Entity trigger: yes.
+
+Revised plan:
+1. =config.exs= ships =reconciled_methods: [%{provider: :claude_cli,
+   cli_version: "2.1.291", projection_version:
+   "claude-message-json/3+prompt-builder/1", method: :propagated_id}]=
+   with =store_root: nil=. =test.exs= keeps =[]= and the isolated
+   override. Queue =reconciliation: 1= is unchanged and asserted.
+2. =runtime.exs= (non-test environments only): when
+   =SDR_WITNESS_STORE_ROOT= is set, =store_root= is that value, verbatim.
+   Unset means no key: nil, inert, =skipped=. There is no machine-specific
+   default.
+3. Boot refusal: =SdrAgent.Application.start/2= calls
+   =Witness.check_configured_root!/0=. A non-nil configured root failing
+   =Store.validate_root/1= raises with a fixed message naming only the
+   error code, never the path. This happens before any read.
+4. At use: every Store entry point (=inventory=, =fingerprint=, =blob=,
+   =blob_identity=, via =safe_dir=) validates the root first. This covers
+   both the configured root and explicit =:store_root= overrides. A failure
+   returns ={:error, :store_root_untrusted}= (or =:store_root_missing=).
+   That takes the *existing* unreadable-store path: non-mismatch current
+   links get an =inferred= successor (supersede reason =store_unreadable=,
+   reason code naming the root error) plus a warning attention, in one
+   transaction, and mismatches stay sticky. It is never nil/skipped.
+5. =Store.validate_root/1= (pure checks plus lstat, no writes, no create,
+   no chown):
+   - syntax first: a binary, absolute, no NUL, no =://=, no empty, =.= or
+     =..= segment, no trailing slash;
+   - every ancestor from =/= is lstat'd: a real directory (no symlink),
+     owned by uid 0 or the effective UID, and not group- or world-writable;
+   - the final root is a real directory owned by the effective UID, not
+     group- or world-writable.
+   The effective UID is read once (=id -u=) and cached in =:persistent_term=.
+   No sticky-bit exception. Tests use physical roots under the project's
+   gitignored =tmp/= rather than relaxing the rule, because the macOS
+   =/var= -> =/private/var= alias and Linux =/tmp= (1777) would fail it.
+   The existing below-root, bounded-read, identity and digest checks are
+   unchanged.
+6. The ADR-0005 amendment cites proof 3, Codex =c9a2bba3=, the exact tuple
+   and the env var's semantics.
+
+| Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
+| Witness store root (runtime config value; not persisted) | New config boundary | Select the proxy blob directory that the reconciler reads | =store_root= is nil or an absolute path from =SDR_WITNESS_STORE_ROOT= (non-test) or an explicit test =:store_root= override | Read by the Witness reconciler and ScanWorker only | States: unset → inert/skipped; configured-invalid at boot → boot refused (fixed code); configured but failing at use → typed unreadable (=store_root_untrusted= / =store_root_missing=), downgrade; valid → read-only observation. Owner = effective UID; ancestors owned by root or the effective UID; nothing group- or world-writable; no symlinks; revalidated on every use | Owner (operator) sets the env var. REC reads. Nothing writes to the proxy filesystem | Should a missing root (vs untrusted) also refuse at boot? Proposed: yes |
+| WireWitnessLink (derived assurance) | Existing; behaviour delta only | Assurance never outlives its evidence source | No new attributes; reason codes =store_root_untrusted= and =store_root_missing= | Unchanged | A configured-root failure supersedes current non-mismatch heads with =inferred= (=store_unreadable=), audited (=agents.witness.linked=), with a warning attention; mismatches are kept (C3). A valid root re-evaluates normally. A reconciled claim needs the exact shipped tuple | REC only (unchanged) | None |
+| Reconciled-method allowlist (shipped config constant) | Existing value; first entry | Activate the proved v3 claim for exactly one tuple | One exact map (claude_cli, 2.1.291, v3, propagated_id); test env =[]=; override test-only | Proof 3 evidence; Codex =c9a2bba3= | Any other provider, CLI version, projection or bare atom stays =inferred= (=method_not_enabled=). Changing it needs a reviewed ADR-0005 amendment | Configuration only | None |
+| ModelInvocation / Operation / Failure / queue | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found. Queue concurrency stays 1; no change to model-call routing, budgets or lifecycle | — | — | — | — | — | — |
+
+Planned RED (revising =1508b0c=):
+- the shipped tuple only, with runtime-mode negatives (bare atom, wrong
+  CLI/provider/projection);
+- test env =[]= and no default;
+- non-test env opt-in; an invalid explicit env refused at boot, without the
+  value in the message;
+- the path matrix: relative, dot, dot-dot, NUL, URL, trailing slash, final
+  or ancestor symlink, non-directory, wrong owner (=validate_root/2= takes
+  the expected UID, so a test passes a different one), group- or
+  world-writable final or ancestor;
+- an established reconciled proof whose root is deleted, made unsafe or
+  made unreadable → downgrade with attention;
+- the same failures on a mismatch → mismatch kept;
+- genuine unset → skipped;
+- an explicit override is validated too;
+- the reader writes nothing to the store.
+
+*** S12d enablement RED/GREEN
+- RED =0026ef8= (7 clean assertion failures) was VERIFIED by Codex
+  (=4d4e7802=).
+- Codex then asked for more safety RED before code, added in =b71009b=:
+  - an unavailable effective UID fails closed;
+  - a sticky 1777 ancestor is refused;
+  - the configured root is revalidated without a per-call override;
+  - the real =Application.start= boot wiring;
+  - the fixed-code refusal of an env-supplied root.
+- GREEN:
+  - =Store.validate_root/2=, with the effective UID read once by =id -u=
+    and cached;
+  - every Store entry point revalidates the root through =safe_dir=;
+  - =Witness.check_configured_root!/0=, called from
+    =SdrAgent.Application.start/2=;
+  - =config.exs= ships the one exact entry;
+  - =runtime.exs= adds =SDR_WITNESS_STORE_ROOT= for non-test environments
+    only.
+- Witness test roots are now physical, under the gitignored =tmp/= (via
+  =SdrAgent.Test.WitnessRoot=).
+- Call 4 stays in reserve, as the coordinator decided.
+
 *** Real proof call 3 (owner-approved; =docs/audit/s12d-wire-witness-proof-3.json=, metadata only)
 The call ran at 18:54 MT on =s12d-v3= @ =605d283=, after these gates were
 met: v3 RED VERIFIED (=28d57c13=), v3 GREEN APPROVED (=28b897cb=, PR #28)

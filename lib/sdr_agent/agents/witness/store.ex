@@ -49,8 +49,104 @@ defmodule SdrAgent.Agents.Witness.Store do
   def max_blob_bytes, do: @max_blob_bytes
 
   @doc """
+  Validates a store root (S12d enablement; entity PASS 78f47754). The path
+  is checked before it is used:
+  - syntax: an absolute path with no NUL, no `://`, and no empty, `.` or
+    `..` segment (so no trailing slash);
+  - every ancestor from `/` is lstat'd: a real directory (not a symlink),
+    owned by uid 0 or `uid`, and not group- or world-writable;
+  - the root itself is a real directory owned by `uid`, not group- or
+    world-writable.
+
+  Nothing is created, changed or followed. There is no sticky-bit
+  exception. Returns `{:ok, path}`, `{:error, :store_root_missing}` or
+  `{:error, :store_root_untrusted}`. `uid` defaults to the effective UID;
+  when that is unavailable (`:error`), the root is untrusted (fail closed).
+  """
+  def validate_root(path, uid \\ nil)
+
+  def validate_root(path, uid) when is_binary(path) do
+    case uid || effective_uid() do
+      uid when is_integer(uid) ->
+        with :ok <- root_syntax(path),
+             :ok <- root_chain(path, uid),
+             do: {:ok, path}
+
+      _unavailable ->
+        {:error, :store_root_untrusted}
+    end
+  end
+
+  def validate_root(_path, _uid), do: {:error, :store_root_untrusted}
+
+  @doc """
+  The effective UID of this VM (`id -u`), or `:error` when it cannot be
+  read. Only a successful read is cached.
+  """
+  def effective_uid(command \\ "id") do
+    case :persistent_term.get({__MODULE__, :euid, command}, nil) do
+      nil -> read_uid(command)
+      uid -> uid
+    end
+  end
+
+  defp read_uid(command) do
+    with path when is_binary(path) <- System.find_executable(command),
+         {out, 0} <- System.cmd(path, ["-u"], stderr_to_stdout: true),
+         {uid, ""} when uid >= 0 <- Integer.parse(String.trim(out)) do
+      :persistent_term.put({__MODULE__, :euid, command}, uid)
+      uid
+    else
+      _failure -> :error
+    end
+  rescue
+    _error -> :error
+  end
+
+  defp root_syntax(path) do
+    segments = path |> String.split("/") |> tl()
+
+    if String.starts_with?(path, "/") and segments != [""] and
+         not String.contains?(path, [<<0>>, "://"]) and
+         not Enum.any?(segments, &(&1 in ["", ".", ".."])),
+       do: :ok,
+       else: {:error, :store_root_untrusted}
+  end
+
+  defp root_chain(path, uid) do
+    segments = path |> String.split("/") |> tl()
+    prefixes = ["/" | Enum.scan(segments, "", &(&2 <> "/" <> &1))]
+    root = List.last(prefixes)
+
+    Enum.reduce_while(prefixes, :ok, fn dir, :ok ->
+      owners = if dir == root, do: [uid], else: [0, uid]
+
+      case trusted_dir(dir, owners) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp trusted_dir(dir, owners) do
+    case File.lstat(dir) do
+      {:ok, %File.Stat{type: :directory, uid: owner} = stat} ->
+        if owner in owners and not writable_by_others?(stat),
+          do: :ok,
+          else: {:error, :store_root_untrusted}
+
+      {:error, :enoent} ->
+        {:error, :store_root_missing}
+
+      _other ->
+        {:error, :store_root_untrusted}
+    end
+  end
+
+  @doc """
   The exchanges recorded for `invocation_id`: `{:ok, %{exchanges: [exchange],
   anomalies: []}}`, or `{:error, reason}` with `:store_unconfigured`,
+  `:store_root_missing`, `:store_root_untrusted`,
   `:invalid_invocation_id`, `:witness_missing`, `:unsafe_path`,
   `:too_many_entries`, `:record_invalid` or `:record_too_large`.
   A start marker without a terminal record is an `:open` exchange.
@@ -151,7 +247,13 @@ defmodule SdrAgent.Agents.Witness.Store do
 
   # Walks `parts` below `root`, refusing anything that is not a real,
   # owner-controlled directory (no symlink, not group/world-writable).
+  # Every entry point reaches the store through here: the root itself is
+  # revalidated first (configured or explicit override alike).
   defp safe_dir(root, parts, missing \\ :witness_missing) do
+    with {:ok, root} <- validate_root(root), do: walk(root, parts, missing)
+  end
+
+  defp walk(root, parts, missing) do
     Enum.reduce_while(parts, {:ok, root}, fn part, {:ok, dir} ->
       path = Path.join(dir, part)
 
