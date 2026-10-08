@@ -56,8 +56,8 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   Makes `model`'s provider explicit (default: the selected one) and, for
   ClaudeCLI, injects the named server. Refused (`{:error, reason}`) when
   the ClaudeCLI server it would use is not running, does not admit calls,
-  or found no `llm-proxy-shim` (the last two are known only for a named
-  server).
+  or found no `llm-proxy-shim` — for a named server however it is
+  referenced (name or pid); an unnamed (test) server publishes no status.
   """
   def resolve(model) when is_list(model) do
     model = Keyword.put_new_lazy(model, :provider, &provider/0)
@@ -77,15 +77,35 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
     end
   end
 
+  # Health is read from the server's published status, whatever reference
+  # (name, pid, {:global, _}, {:via, _, _}) addresses it: the reference is
+  # normalised to the process's registered name. Only an unnamed server
+  # (test fixtures; the application's server is always named) publishes no
+  # status; its own admission fence and launch checks still refuse.
   defp healthy(server) do
+    if ClaudeCLI.running?(server),
+      do: server |> GenServer.whereis() |> registered_name() |> published_health(),
+      else: {:error, :provider_not_running}
+  end
+
+  defp published_health(nil), do: :ok
+
+  defp published_health(name) do
     cond do
-      not ClaudeCLI.running?(server) -> {:error, :provider_not_running}
-      not is_atom(server) -> :ok
-      ClaudeCLI.admission(server).admission != :open -> {:error, :provider_not_quiescent}
-      ClaudeCLI.attestation(server)[:command?] == false -> {:error, :llm_proxy_shim_not_found}
+      ClaudeCLI.admission(name).admission != :open -> {:error, :provider_not_quiescent}
+      ClaudeCLI.attestation(name)[:command?] == false -> {:error, :llm_proxy_shim_not_found}
       true -> :ok
     end
   end
+
+  defp registered_name(pid) when is_pid(pid) do
+    case Process.info(pid, :registered_name) do
+      {:registered_name, name} when is_atom(name) -> name
+      _unnamed_or_gone -> nil
+    end
+  end
+
+  defp registered_name(_pid), do: nil
 
   @doc """
   The run `failure_reason` recorded when a worker refuses to run because of

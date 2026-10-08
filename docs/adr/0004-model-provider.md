@@ -245,8 +245,11 @@ resource or policy change:
   - a ClaudeCLI that is absent (`:provider_not_running`);
   - one whose admission is closed (`:provider_not_quiescent`, see below);
   - one whose launcher is missing (`:llm_proxy_shim_not_found`).
-  This health check is in addition to the per-call init attestation, which
-  stays mandatory.
+  The check applies to a named server however it is referenced, by name
+  or by pid: the reference is normalised to the registered name before its
+  published health is read. It is in addition to the per-call init
+  attestation, which stays mandatory, and to the server's own admission
+  fence.
 - The workers inject the named server in the same way. For `AgentWorker` this
   covers both the default provider and one carried by the job. If ClaudeCLI
   is wanted but its server is not running, no model call or reservation is

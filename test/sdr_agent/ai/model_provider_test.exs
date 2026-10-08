@@ -4,6 +4,7 @@ defmodule SdrAgent.AI.ModelProviderTest do
   alias SdrAgent.Agents
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.Fake
   alias SdrAgent.Telemetry.InMemoryExporter
 
@@ -55,7 +56,7 @@ defmodule SdrAgent.AI.ModelProviderTest do
   describe "Q0.1: the public call path resolves the runtime provider" do
     setup do
       previous = Application.fetch_env!(:sdr_agent, :model_provider)
-      Application.put_env(:sdr_agent, :model_provider, SdrAgent.AI.ModelProvider.ClaudeCLI)
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
       on_exit(fn -> Application.put_env(:sdr_agent, :model_provider, previous) end)
     end
 
@@ -65,10 +66,55 @@ defmodule SdrAgent.AI.ModelProviderTest do
 
       assert {:error, :provider_not_running} =
                ModelProvider.complete(request(ctx, "cli-named"),
-                 provider: SdrAgent.AI.ModelProvider.ClaudeCLI
+                 provider: ClaudeCLI
                )
 
       assert {:ok, []} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
+    end
+  end
+
+  describe "Q0.1 delta review: health is checked whatever the server reference" do
+    setup do
+      name = :"sdr_q0_health_#{System.unique_integer([:positive])}"
+      on_exit(fn -> ClaudeCLI.Reaper.release(name) end)
+      %{name: name}
+    end
+
+    defp complete_via(ctx, reference) do
+      ModelProvider.complete(request(ctx, "health-#{inspect(reference)}"),
+        provider: ClaudeCLI,
+        provider_options: [server: reference]
+      )
+    end
+
+    defp assert_no_reservation(ctx) do
+      {:ok, invocations} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
+      assert invocations == [], "a known-unhealthy server consumed a reservation"
+    end
+
+    test "a launcher-less named server is refused before reservation by name and by pid", ctx do
+      pid =
+        start_supervised!({ClaudeCLI, name: ctx.name, command: nil})
+
+      for reference <- [ctx.name, pid] do
+        assert {:error, :llm_proxy_shim_not_found} = complete_via(ctx, reference)
+        assert_no_reservation(ctx)
+      end
+    end
+
+    test "a lease-blocked named server is refused before reservation by name and by pid", ctx do
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
+      :persistent_term.put({ClaudeCLI.Reaper, ctx.name}, {:held, dead})
+
+      pid =
+        start_supervised!({ClaudeCLI, name: ctx.name, command: System.find_executable("elixir")})
+
+      for reference <- [ctx.name, pid] do
+        assert {:error, :provider_not_quiescent} = complete_via(ctx, reference)
+        assert_no_reservation(ctx)
+      end
     end
   end
 

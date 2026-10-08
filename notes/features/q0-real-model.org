@@ -194,6 +194,18 @@ configured vs effective with the refusal.
 
 *TDD Gate Verification (round 5):* [X] VERIFIED (assertion-only RED)
 
+** Round 6 (Codex delta review of =d383837=, =/tmp/sdr-pr27-d383837-delta-review.md=)
+RED: 2 new facade tests failed by assertion ("a known-unhealthy server
+consumed a reservation") — a named launcher-less or lease-blocked server
+addressed by its *pid* skipped the published-health check, so the facade
+reserved before the server refused. (Codex's reproducer: 1/3 pass, 2 clean
+assertions.) GREEN: the reference (name, pid, global/via) is normalised to
+the process's registered name before health is read; only an unnamed
+(test) server publishes no status, its own fence still refusing. Codex's
+reproducer passes 3/3.
+
+*TDD Gate Verification (round 6):* [X] VERIFIED (assertion-only RED)
+
 -----
 
 * Implementation Notes
