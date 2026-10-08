@@ -852,7 +852,30 @@ Planned RED:
   schema keeps its bytes, and the v1/v2/v3 projection digests are
   unchanged.
 
-*** Deterministic schema slice: AgentDefinition version delta (soft-stop pending)
+*** Deterministic schema slice: AgentDefinition version delta
+Entity soft-stop: PASS (entity/planning gate only).
+- Reviewer: Codex, =0b73763d= (2026-10-08T05:09Z), replying to =714cf6fd=
+  on =18e6065=.
+- Trigger: yes. Capabilities: ai_pair=true, codex_review=true.
+Conditions:
+- C1: the new SDRAgent v3 has deterministic schema-v2 refs. Every existing
+  definition row, body, hash and status, and every run reference, stays
+  untouched. The identity, the hash guard, KRN authorization and audit
+  coupling are unchanged.
+- C2: the admission-snapshot reading is accepted ONLY for this
+  semantics-preserving normalisation of =required= order. It is not
+  permission for old runs to silently acquire different tools,
+  permissions, policies, prompts or schema constraints later.
+- C3: existing and pending runs, and operator retries, keep their
+  definition id. Later invocations, and the Qualifications derived from
+  them, record the actual schema-v2 provenance. No relabel, backfill or
+  replay claim.
+- C4: a test starting from an actual legacy-v2-pinned run makes a hermetic
+  post-upgrade =SDR.Model= call.
+- C5: the upgrade, idempotence, assignment, retry and hash-guard tests,
+  plus a new reply-intake run that pins v3. Legacy bodies are registered
+  through domain APIs only.
+"Retire v2 later?" is closed: there is no retirement in this slice.
 Codex GREEN review =90369928= on =9e66fd4= returned CHANGES REQUESTED. The
 schema-v2 refs are embedded in =SDRAgent.definition_body/0=
 (="output_schemas"=), but the immutable definition identity stayed at
