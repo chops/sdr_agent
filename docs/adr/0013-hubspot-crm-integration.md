@@ -8,206 +8,170 @@ supersedes: null
 
 ## Status
 
-Proposed (2026-10-07, Claude). The owner decided on 2026-10-07 to integrate
-with HubSpot. Testing runs against a **free HubSpot developer test account**.
-The app stays a personal, local demo run with the owner's own credentials: no
-hosting and no public webhook endpoint. This ADR is design only. Every slice
-it plans (H1–H3, `notes/features/hubspot-integration.org`) is a separate
-reviewed PR. The first live write to HubSpot also needs an owner checkpoint
-(see "Writeback").
+Proposed (2026-10-07, Claude). Revision 2 addresses Codex entity review
+`4ab68bc3-c1ea-44ff-970d-a063d59f8fdd` (NEEDS-REVIEW on `fa44235`, findings
+1–6 and the important items). The mapping from findings to changes is in
+`notes/features/hubspot-integration.org` under "Soft-stop review".
 
-The entity-model delta is in `notes/features/hubspot-integration.org`. It is
-under Codex entity soft-stop review. This ADR cannot be accepted until that
-review records PASS.
+The owner decided on 2026-10-07 to integrate with HubSpot, tested against a
+**free HubSpot developer test account**. The app stays a personal, local demo
+run with the owner's own credentials: no hosting and no public webhook
+endpoint.
+
+This ADR is design only. Each slice (H0–H3) is a separate reviewed PR. The
+entity delta is split:
+
+- **H1 (read-only)** is submitted for PASS now.
+- **H2/H3 (writes, sync)** are revised here and re-submitted for review
+  before H2a starts.
+
+ADR acceptance requires entity PASS and owner answers to the open questions.
+The first live write is an owner checkpoint.
 
 ## Context
 
 The owner's architecture spec (§17) calls for a CRM anti-corruption layer: a
-`CRM` behaviour (`fetch_contact/1`, `update_contact/2`, `record_activity/1`)
-with `HubSpotAdapter`, `SalesforceAdapter` and `FakeCRMAdapter`, and Req kept
-inside the adapters. Today only `SdrAgent.Integrations.FakeCRM` exists. It is
-read-only fixtures, and its writes return `{:error, :read_only}`. The S2 entity
-model left two rows unbuilt: `IntegrationCredential` (assigned to S6, never
-built) and `CrmActivity` (write-back, DEFERRED).
+`CRM` behaviour with HubSpot, Salesforce and Fake adapters, with Req kept
+inside the adapters. Today only the read-only `SdrAgent.Integrations.FakeCRM`
+exists. The S2 rows `IntegrationCredential` (never built) and `CrmActivity`
+(DEFERRED) are the starting points.
 
-This ADR is bound by these existing decisions:
+This ADR is bound by:
 
 - **ADR-0001 invariants.** Never weaken suppression, approval binding,
-  idempotency or the audit trail. Never enable a delivery path that can reach
-  a real recipient. Never print, log, commit or transmit secret values. Data is
-  synthetic fictional data only. A CRM write is not email delivery. It is still
-  an external side effect, so it gets the same outbox, idempotency and audit
-  discipline as `DeliveryOperation`.
-- **ADR-0002.** Postgres is the system of record. Every import, decision and
-  write must be reconstructable from the ledger. Full content is stored only
-  because the data is synthetic.
-- **ADR-0004.** The model has no tools. Jido is the only action executor. CRM
-  text reaches the model only as prompt data.
-- **ADR-0005.** Req tracing is opt-in. Content stays out of spans outside dev.
-- **ADR-0008.** A new dependency needs a reviewed pin and a blocking audit.
-- **ADR-0009 / ADR-0010.** UUIDv7 keys, the tenant column, append-only
-  triggers, same-transaction audit, the domain layering
-  `Audit <- Accounts <- Operations <- Agents <- Sales <- Research <- Outreach`,
-  explicit transition actions, and the synthetic-data guard (reserved domains
-  only).
+  idempotency or audit. Never enable a delivery path that can reach a real
+  recipient. Never print, log, commit or transmit secrets. Data is synthetic
+  only. A CRM write is not email delivery, but it is an external side effect,
+  so it gets outbox, idempotency and audit discipline.
+- **ADR-0002.** Everything is reconstructable from Postgres.
+- **ADR-0004.** The model has no tools.
+- **ADR-0005.** No content in spans outside dev.
+- **ADR-0008.** No unreviewed dependency.
+- **ADR-0009 / ADR-0010.** Layering, same-transaction audit, append-only
+  triggers, explicit transitions, and the synthetic guard.
 
-### Facts established on 2026-10-07 (each URL was opened)
+### Facts established on 2026-10-07 (each URL was opened; nothing called or created)
 
-**Accounts**
-- Developer test accounts are free. You can have up to 10 per standard
-  account. They include a 90-day trial of many Enterprise features and cannot
-  sync data with other accounts. Marketing email can only go to users added
-  to the test account. To create one: Development → Testing → Test Accounts →
-  *Create developer test account*. A test account "will expire after 90 days if
-  no API calls are made to the account". It can be renewed manually, or by an
-  API call with an OAuth token from an app in the same developer account
+**Developer test accounts**
+- Free, up to 10 per standard account, with a 90-day trial of many Enterprise
+  features. Marketing email goes only to users added to the test account.
+- To create one: Development → Testing → Test Accounts.
+- An account "will expire after 90 days if no API calls are made to the
+  account". API renewal needs an OAuth token from the same developer account
   (https://developers.hubspot.com/docs/getting-started/account-types).
-- The account-information API (`GET /account-info/v3/details`) returns
-  `portalId`, `accountType` (`STANDARD`, `DEVELOPER_TEST`, `SANDBOX`,
-  `APP_DEVELOPER`) and `dataHostingLocation`. The only scope it lists is
-  `oauth` (https://developers.hubspot.com/docs/api-reference/account-account-info-v3/guide).
-  Whether a service key can call it is not documented, so H0 verifies this.
+
+**Account details**
+- `GET /account-info/v3/details` returns `portalId`, `accountType`
+  (`STANDARD`, `DEVELOPER_TEST`, `SANDBOX`, `APP_DEVELOPER`) and
+  `dataHostingLocation`. The only listed scope is `oauth`
+  (https://developers.hubspot.com/docs/api-reference/account-account-info-v3/guide).
 
 **Credentials**
-- **Legacy private apps can no longer be created by new accounts.** Accounts
-  created on or after 2026-09-28 lost the ability on that date. Older accounts
-  lose it on 2026-10-26. The recommended replacement is Service Keys
+- **Legacy private apps** cannot be created by accounts made on or after
+  2026-09-28. Older accounts lose the ability on 2026-10-26. Service Keys are
+  the recommended replacement
   (https://developers.hubspot.com/changelog/legacy-private-app-creation-sunset).
-  v1–v3 endpoints, legacy public apps and legacy private apps reach their
-  enforcement date in September 2027
+- **Legacy apps and v1–v3 endpoints** reach their enforcement date in
+  September 2027
   (https://developers.hubspot.com/changelog/legacy-apis-and-legacy-apps-whats-going-unsupported-and-when).
-  A test account created today is a new account, so it cannot use a legacy
-  private app.
-- **Service keys** are account-level credentials for REST calls only. They
-  support no webhooks and no UI extensions. A super admin or a user with
-  Developer tools access creates one at Development → Keys → Service keys, with
-  granular scopes. The key is sent as `Authorization: Bearer pat-na1-…`. You can
-  rotate with *Rotate and expire now* or *Rotate and expire later* (7-day
-  grace). HubSpot recommends rotating every six months, and the docs mention no
-  automatic expiry. Rate limits match privately distributed apps
-  (https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/account-service-keys).
-  The changelog lists them as public beta since 2026-02-10
-  (https://developers.hubspot.com/changelog/service-keys). The docs do not say
-  whether service keys work in a developer test account, so H0 verifies this.
-- **Static auth.** A static-auth app with `private` distribution is "used for
-  installing in a single account at a time". OAuth is required for multiple
-  accounts
+- **Service keys**
+  (https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/account-service-keys):
+  - REST only: no webhooks and no UI extensions.
+  - Granular scopes.
+  - Sent as `Authorization: Bearer pat-na1-…`.
+  - Rotation is *expire now* or *expire later* (7-day grace). HubSpot
+    recommends rotating every six months, and there is no automatic expiry.
+  - Rate limits match privately distributed apps.
+  - Public beta since 2026-02-10
+    (https://developers.hubspot.com/changelog/service-keys).
+- **Static auth.** Static-auth apps with `private` distribution install into
+  one account at a time
   (https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/overview).
-- **OAuth.** OAuth access tokens last 30 minutes (`expires_in: 1800`) and are
-  refreshed with a client secret. The flow needs a redirect URI that HubSpot
-  calls with `code`, and https is required in production
+- **OAuth.** Access tokens last 30 minutes and are refreshed with a client
+  secret through a redirect flow
   (https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/oauth/oauth-quickstart-guide).
-- **Legacy private app tokens** have no built-in expiry. They rotate with a
-  7-day grace option, and HubSpot recommends rotating every six months
+- **Legacy private app tokens** never expire and rotate with a 7-day grace
   (https://developers.hubspot.com/docs/apps/legacy-apps/private-apps/overview).
 
 **API versioning**
-- Date-based versioning (DBV) puts the version in the path:
-  `/crm/objects/2026-03/contacts`
+- Date-based versions go in the path, e.g. `/crm/objects/2026-03/contacts`
   (https://developers.hubspot.com/docs/api-reference/2026-03/overview).
-- GA versions ship in March and September. Each is supported for 18 months.
-  HubSpot recommends pinning the version in one place
+- Versions ship every March and September, and each is supported for 18
+  months. Pin the version in one place
   (https://developers.hubspot.com/blog/a-developers-guide-to-hubspots-date-based-api-versioning).
-- The "latest" reference pages already use `/2026-09/` paths.
-- From the 2026-09 GA release, admin-configured validation rules are enforced
-  on every CRM write path
+- The "latest" pages use `/2026-09/`.
+- From 2026-09, admin validation rules apply to all CRM writes
   (https://developers.hubspot.com/docs/api-reference/latest/crm/associations/overview).
 
 **Search**
-- Endpoint: `POST /crm/objects/2026-09/{object}/search`.
-- Limits: 5 requests per second per account; at most 200 results per page; a
-  hard cap of 10,000 results per query; up to 5 filterGroups × 6 filters
-  (18 total); one sort rule.
-- Pagination uses an integer `after`. New or updated objects can take "a few
-  moments" to appear in results, and archived objects never appear.
+- `POST /crm/objects/2026-09/{object}/search`.
+- Limits: 5 requests/s per account, 200 results per page, a hard cap of
+  10,000 results per query, 5×6 filters (18 total), one sort.
+- `after` is an integer. Indexing lags "a few moments", and archived records
+  are excluded.
 - The last-modified property is `lastmodifieddate` on contacts and
   `hs_lastmodifieddate` on companies.
 - Notes, emails and tasks are searchable
   (https://developers.hubspot.com/docs/api-reference/latest/crm/search-the-crm).
-- The *Last modified date* changes for any property update, including hidden
-  internal ones and newly logged activity
+- *Last modified date* changes on any update, including logged activity
   (https://knowledge.hubspot.com/properties/hubspots-default-contact-properties).
-  The app's own writeback therefore bumps the cursor property.
+  This means our own writes bump it.
 
-**Rate limits** (privately distributed apps and legacy private apps)
-- Free/Starter: 100 requests per 10 seconds per app, and 250,000 per day per
-  account. The daily count resets at midnight in the account's time zone.
+**Rate limits and errors**
+- Free/Starter: 100 requests per 10 s per app, and 250,000 per day per
+  account (resetting at midnight in the account's time zone).
 - A 429 response carries `policyName` (`DAILY` or `TEN_SECONDLY_ROLLING`).
-- Response headers `X-HubSpot-RateLimit-Max`, `-Remaining` and
-  `-Interval-Milliseconds` are returned, but not on search responses. Errors
-  should stay under 5% of daily requests
+- Rate-limit headers are returned, but not on search responses. Errors
+  should stay under 5% of requests
   (https://developers.hubspot.com/docs/developer-tooling/platform/usage-guidelines).
-
-**Errors**
 - The error body has `status`, `message`, `errors[]`, `category` and
-  `correlationId`. Treat every field as optional.
-- 423 means the record is locked; wait at least 2 s.
-- 477 means a migration is in progress; Retry-After is given in seconds.
-- 502, 503, 504 and 524 mean pause, then retry.
-- Batch creates can return 207 with per-input `objectWriteTraceId`.
-- Retry-After on 429 is documented only for workflows (in milliseconds), not
-  for API clients
+  `correlationId`, all optional.
+- 423 means locked for 2 s. 477 means a migration is in progress (Retry-After
+  in seconds). 502/503/504/524 mean pause, then retry.
+- Batch creates support a 207 response with `objectWriteTraceId`. Retry-After
+  on 429 is documented only for workflows
   (https://developers.hubspot.com/docs/api-reference/error-handling).
 
 **Engagements**
-- **Notes** are created with `POST …/notes`. `hs_timestamp` is required, and
-  `hs_note_body` holds up to 65,536 characters. The note-to-contact
-  association type is `202`. Listed scopes: `crm.objects.contacts.read` and
-  `.write`. Deleted notes go to the recycle bin
-  (https://developers.hubspot.com/docs/api-reference/legacy/crm/activities/notes/guide).
-- **Emails** are logged with `POST …/emails`. Fields:
-  - `hs_email_direction` (`EMAIL`, `INCOMING_EMAIL`, `FORWARDED_EMAIL`)
-  - `hs_email_status` (`BOUNCED`, `FAILED`, `SCHEDULED`, `SENDING`, `SENT`)
-  - `hs_email_headers`
-  - email-to-contact association type `198`
-
-  Scopes: contacts read/write and `sales-email-read`. The API logs a timeline
-  record. The page does not say whether HubSpot ever sends anything for it
-  (https://developers.hubspot.com/docs/api-reference/legacy/crm/activities/emails/guide).
-- **Tasks** use `POST /crm/objects/2026-09/tasks`. `hs_timestamp` is the due
-  date. Other fields are `hs_task_subject`, `hs_task_body`, `hs_task_status`,
-  `hs_task_priority`, `hs_task_type` and `hubspot_owner_id`. The
-  task-to-contact association type is `204`. Listed scopes: contacts
+- **Notes:** `hs_timestamp` is required; `hs_note_body` holds up to 65,536
+  characters; association to contact is `202`; scopes are contacts
   read/write
+  (https://developers.hubspot.com/docs/api-reference/legacy/crm/activities/notes/guide).
+- **Emails:** fields `hs_email_direction` and `hs_email_status` (`SENT`, …);
+  association `198`; needs `sales-email-read`
+  (https://developers.hubspot.com/docs/api-reference/legacy/crm/activities/emails/guide).
+- **Tasks:** `POST /crm/objects/2026-09/tasks`; `hs_timestamp` is the due
+  date; association `204`; contact scopes
   (https://developers.hubspot.com/docs/api-reference/latest/crm/activities/tasks/guide).
-- **Scopes.** The legacy scopes reference lists no note or task scope.
-  `sales-email-read` is needed to read email engagement content. Custom
-  timeline events need the `timeline` scope
+- Custom timeline events need the `timeline` scope or a public app
   (https://developers.hubspot.com/docs/apps/legacy-apps/authentication/scopes).
-  The legacy private-app page says custom timeline events need a public app.
 
-**Properties and subscriptions**
-- `hasUniqueValue` custom properties allow at most 10 per object and can be
-  used as `idProperty`. The docs do not say whether activity objects support
-  custom properties
+**Properties**
+- `hasUniqueValue` properties allow at most 10 per object and are
+  addressable through `idProperty`. The docs do not say whether activity
+  objects support them
   (https://developers.hubspot.com/docs/api-reference/latest/crm/properties/guide).
-- Communication preferences are at
-  `/communication-preferences/2026-09/statuses/{subscriberIdString}`.
-  `subscriberIdString` is the contact's email address. The endpoints are:
-  - `GET …?channel=EMAIL`
-  - `POST …/unsubscribe-all`
-  - `GET …/unsubscribe-all`
 
-  Single-contact scopes are `subscriptions-status-read` and `-write`. Batch
-  scopes need Marketing Hub Enterprise. Legal basis fields are required for
-  status updates when data-privacy settings are on
+**Communication preferences**
+- Endpoints live at `/communication-preferences/2026-09/statuses/{email}…`,
+  including `unsubscribe-all` GET and POST.
+- Single-contact scopes are `subscriptions-status-read` and `-write`. Batch
+  scopes need Marketing Hub Enterprise
   (https://developers.hubspot.com/docs/api-reference/latest/communication-preferences/guide).
-  The legacy scopes page names these scopes `communication_preferences.*`, so
-  H0 records which names the service-key scope picker shows.
 
-**Webhooks** need a publicly reachable HTTPS endpoint. They cannot be
-authenticated with a service key, which rules them out here.
+**Webhooks** need public HTTPS and cannot use a service key, which rules them
+out here.
 
-**Not verified on an opened HubSpot page** (from search summaries only; H0
-verifies each one):
-
-- The contact property `hs_email_optout` is the internal name of
-  *Unsubscribed from all email* and is read-only.
-- `lifecyclestage` can only move forward unless it is first cleared.
-- `hs_lead_status` takes the uppercase values `NEW`, `OPEN`, `IN_PROGRESS`,
-  `OPEN_DEAL`, `UNQUALIFIED`, `ATTEMPTED_TO_CONTACT`, `CONNECTED` and
-  `BAD_TIMING`.
-- New accounts are seeded with two sample contacts on a real company domain.
+**Unverified (search summaries only; H0 must establish each one):**
+- `hs_email_optout` is the read-only internal name of *Unsubscribed from all
+  email*.
+- `lifecyclestage` only moves forward.
+- The `hs_lead_status` internal values.
+- New portals are seeded with two sample contacts on a real company domain.
+- Whether a service key can call account details.
+- Whether service keys work in developer test accounts.
+- Whether notes and tasks accept a custom `hasUniqueValue` property.
+- The exact scope names shown in the scope picker.
 
 ## Options Considered
 
@@ -215,510 +179,614 @@ verifies each one):
 
 | Option | Verdict |
 |---|---|
-| **A. Legacy private app token** | Rejected. A test account created now cannot create one (2026-09-28 cutoff), and legacy private apps reach enforcement in September 2027. |
-| **B. Service key** (Development → Keys → Service keys), stored in a gitignored project-local sops file, reaching the server through `bin/with-secrets` | **Chosen.** Account-level and scoped. No app, no CLI, no backend. Rotation has a 7-day grace. It is a static bearer token, which fits `bin/with-secrets`. Webhooks are not supported, but we do not need them. Risk: public beta, and availability in developer test accounts is undocumented. |
-| **C. Static-auth, privately distributed project app** (`hs project create --distribution private --auth static`) | **Fallback if H0 finds B unavailable in the test account.** It also yields a static bearer token, so the same adapter, secret path and policies apply. Costs: HubSpot CLI and project setup (owner side), and scope changes need a reinstall. |
-| **D. OAuth app** with a `127.0.0.1` callback | Rejected for now. It needs a redirect endpoint and a client secret, and it stores and rotates 30-minute access tokens plus a long-lived refresh token. That is more secret material and more code for one single-user account. It does have one capability the others lack: renewing the test account by API (account-types page). Revisit only if the owner wants unattended renewal. |
+| A. Legacy private app | Rejected: cannot be created by a new account; end of support September 2027. |
+| **B. Service key** | **Chosen.** Account-scoped, granular scopes, 7-day-grace rotation, static bearer token. Public beta, and test-account support is unverified (H0). |
+| C. Static-auth private project app | **Fallback** if B is unavailable. Same static token, same secret path; needs the owner to set up the HubSpot CLI. |
+| D. OAuth app (`127.0.0.1` callback) | Rejected: a redirect endpoint, client secret and refresh token are more secret material for one account. Its only unique benefit is renewing the test account by API. |
 
 ### Change detection
 
-- **Webhooks.** Rejected. They need a public HTTPS endpoint (the app has none
-  by owner decision), and service keys cannot authenticate them.
-- **Polling with an Oban cron and `lastmodifieddate` cursors.** **Chosen.** It
-  is pull-only and needs no inbound network. Every result is persisted with
-  its cursor before effects.
+- **Webhooks:** rejected. No public endpoint, and service keys cannot
+  authenticate them.
+- **Polling with typed cursors plus a daily full fingerprint scan:**
+  **chosen.**
 
-### Logging the captured send in HubSpot
+### Logging the captured send
 
-- **Email engagement (`hs_email_status: SENT`).** Rejected for now. In this
-  app nothing is sent: the capture adapter is the only delivery path (ADR-0001).
-  Logging `SENT` would put a false statement into a system of record. It also
-  needs `sales-email-read`, a sensitive scope.
-- **Custom timeline event.** Rejected. It needs a public app.
-- **Note.** **Chosen.** The note body states plainly that the message was
-  approved and *captured locally, not delivered*. It carries the approval and
-  revision hashes and a machine marker.
+- **Email engagement `SENT`:** rejected. Nothing is delivered in this app,
+  and it needs `sales-email-read`.
+- **Timeline event:** rejected. Needs a public app.
+- **Note:** **chosen.** It says "captured locally, not delivered".
 
-### Idempotency of HubSpot writes
+### Idempotency of HubSpot creates (revised per finding 1)
 
-- **`hasUniqueValue` custom property plus `idProperty` upsert.** Rejected for
-  engagements. The docs do not say whether activities support custom
-  properties, and it would need `crm.schemas.*.write`, a broader scope.
-- **Search before create, by a marker.** Rejected as the primary mechanism.
-  Search is eventually consistent, and filtering on note bodies is
-  undocumented.
-- **Local outbox plus marker plus reconciliation.** **Chosen.** Each write is
-  a `CrmWriteOperation` with a unique idempotency key, claimed by exactly one
-  worker. The request carries a deterministic marker and `hs_timestamp`. An
-  unknown outcome is resolved by reading the contact's associated notes or
-  tasks and matching the marker, or by reading the property or subscription
-  state back. It is never resolved by resending blindly.
+HubSpot documents no idempotency key for note or task creates. A local unique
+key with one claimant prevents concurrent dispatch, but it cannot prevent a
+duplicate remote create after an ambiguous response.
 
-### Placement
-
-- **Put the CRM code inside Sales/Outreach.** Rejected. Import creates Sales
-  and Outreach rows (Suppressions), and writeback reads Outreach events. Either
-  placement would need upward calls.
-- **New top domain `SdrAgent.CRM`.** **Chosen.** It sits above Outreach in the
-  layering, so it may FK and call every lower domain. Lower domains store CRM
-  ids only as plain uuids.
+| Option | Verdict |
+|---|---|
+| Retry after N absent searches | **Rejected** (finding 1). Absence in an eventually consistent index is not evidence that the create did not apply. |
+| **Provider-enforced unique marker property** `sdr_write_key` (`hasUniqueValue: true`) on notes and tasks, created by the owner in HubSpot settings (no schema scope for the app) | **Preferred, if H0 proves notes and tasks support it.** A repeated create with the same value is rejected by HubSpot. That is an authoritative idempotency guarantee, so a retry is safe and the outcome is readable by `idProperty` lookup. |
+| **No automatic retry of uncertain creates** | **Required otherwise.** An `unknown` create stays `unknown` until there is an authoritative strong match (`succeeded`), authoritative non-application evidence, or a guarded human decision. |
 
 ## Decision
 
-### 1. Credential and secret handling
+### 1. Credential, secret containment, preflight (finding 6)
 
-- **The secret lives in its own gitignored sops file,**
-  `secrets/hubspot.local.sops.yaml`, encrypted to the owner's age recipient
-  through a new `.sops.yaml` creation rule. It is not added to the tracked
-  `secrets/sdr_agent.sops.yaml`. A third-party credential stays out of git
-  history even encrypted, so revoking it needs no history rewrite. It also
-  avoids cross-worktree conflicts on the shared file.
-  - Keys: `hubspot.service_key` (secret) and `hubspot.portal_id` (the
-    allowlisted account; not secret, but owner-local).
-  - The owner adds the values. Agents never ask for, read, print or copy the
-    key.
-- **`bin/with-secrets` gains two mapped names,** `SDR_HUBSPOT_SERVICE_KEY` and
-  `SDR_HUBSPOT_PORTAL_ID`, each with its file and extract path. Run the server
-  as
-  `bin/with-secrets SDR_HUBSPOT_SERVICE_KEY SDR_HUBSPOT_PORTAL_ID -- mix phx.server`.
-- **The key is read from the environment at request time** by the adapter.
-  It never enters `Application` env, so it never reaches the redacted
-  `ProvenanceSnapshot` config hash. It is never stored in Postgres, never a
-  Req default option, never logged, and never put in a span, a Failure or an
-  AuditEvent.
-- **`IntegrationCredential` (S2 row, finally built in H1a) holds the
-  reference only.** Provider `hubspot`; `credential_kind: sops_path`;
-  `reference: "secrets/hubspot.local.sops.yaml#hubspot.service_key"`.
-  - Status (`unverified`/`verified`/`missing`/`revoked`) is set by preflight.
-  - `non_secret_fingerprint` = `"portal:<portalId>/<dataHostingLocation>"`.
-    No part or hash of the key is stored.
-  - `write_mode` is the persisted kill switch (§5).
-- **Preflight, run at boot and before every sync or write batch, fails
-  closed.** It requires all of the following:
-  - the key is present and non-empty;
-  - the account details call returns `accountType == "DEVELOPER_TEST"`;
-  - `portalId` equals `SDR_HUBSPOT_PORTAL_ID`;
-  - a read-only probe succeeds.
+**Storage.**
+- The secret lives in a gitignored `secrets/hubspot.local.sops.yaml` (new
+  `.sops.yaml` rule), with keys `hubspot.service_key` and `hubspot.portal_id`.
+  The owner adds the values. Agents never ask for, read, print or copy the
+  key.
+- `bin/with-secrets` maps `SDR_HUBSPOT_SERVICE_KEY` and
+  `SDR_HUBSPOT_PORTAL_ID`.
 
-  A `STANDARD` account is refused in this ADR's scope: a real portal would
-  contain real people. A 401 or 403 marks the credential `missing` and opens a
-  critical Failure. Polling then stops; it never retries in a loop. If the
-  service key cannot call account details, H0 records that, and the fallback
-  check is a documented read the key can make plus the portal-id allowlist
-  alone. Choosing that fallback needs a reviewed amendment.
-- **The redactor gains an explicit HubSpot key shape:**
-  `pat-` + region (`na1`, `eu1`, …) + UUID-like body. The existing long-run
-  rules already catch most of it.
-- **Minimal scopes, added per slice**:
+**Read once at boot, then removed from the environment.**
+- A supervised `SdrAgent.Integrations.HubSpot.CredentialHolder` reads both
+  variables at boot and keeps them in its process state.
+  - The process is marked `Process.flag(:sensitive, true)` and implements
+    `format_status/1` redaction, so the key does not appear in crash reports
+    or tracing.
+  - It then **calls `System.delete_env/1` on both HubSpot names**, so no
+    child process spawned later inherits them. The audit-anchor key is not
+    deleted, because `AnchorWorker` reads it from the environment at run
+    time.
+  - The key never enters `Application` env, Postgres, Req defaults, logs,
+    spans, Failures, AuditEvents or Payloads.
+- **Every child launch scrubs these names as well.** The child launchers are
+  ClaudeCLI's `Port.open`, the `git`/`ots` `System.cmd` calls in provenance,
+  anchoring and sinks, and any later one. Each passes `{name, false}` for
+  every name in `SdrAgent.ChildEnv.secret_names/0`. This is defence in depth,
+  because Erlang's `:env` option *adds to* the inherited environment rather
+  than replacing it.
+- A canary test runs each launcher against `/usr/bin/env` and asserts that
+  no mapped name or value appears.
+- *Pre-existing gap:* when the server runs under `bin/with-secrets`, the
+  audit-anchor key is inherited today by the ClaudeCLI and `git` children.
+  Only the OTS sink already unsets it. H1a's scrub list covers every mapped
+  name, which closes this gap.
 
-  | Slice | Scopes | Why |
-  |---|---|---|
-  | H1 | `crm.objects.contacts.read`, `crm.objects.companies.read` | Import and research. Notes and tasks are read under contact scopes per the docs; H0 confirms with the 403 response. |
-  | H1 (opt-out check) | `subscriptions-status-read` | Only if `hs_email_optout` is not reliable (H0). |
-  | H2 | `crm.objects.contacts.write`, `subscriptions-status-write` | Notes, tasks, `hs_lead_status`, unsubscribe-all. |
-  | never in this ADR | deals, owners, schemas/properties write, lists, `sales-email-read`, timeline, batch subscription scopes, any `.sensitive`/`.highly_sensitive` | Not needed. Tasks reuse the contact's existing `hubspot_owner_id` value, so no owners scope is needed. |
+**Rotation needs a restart**, because the key is read once.
+- The owner rotates with *expire later*, updates the sops file, and restarts
+  the server within the 7-day grace.
+- A key revoked in HubSpot surfaces as a 401. That marks the credential
+  `missing` and opens a critical Failure, and all HubSpot I/O stops.
 
-  Exact scope names come from the scope picker during H0 and are recorded in
-  the H0 notes.
+**`IntegrationCredential`** (S2 row, built in H1a) holds a reference only.
+- Provider `hubspot`; `credential_kind: sops_path`.
+- Fingerprint: `portal:<id>/<dataHostingLocation>`. No key material is kept.
+- `credential_epoch` is incremented by every reference, portal, revoke or
+  status change.
+- `verified_until`.
+- `write_mode` (`off`/`dry_run`/`live`, H2).
 
-### 2. HTTP client (`SdrAgent.Integrations.HubSpot.Client`, Req only, no new dependency)
+**Preflight is strict and fails closed.**
+- `:record_preflight` (CRS) takes only the id of the `CrmApiCall` row for the
+  account-details request. The action reads that call's stored response
+  through a scoped content read and derives the result itself. No caller
+  supplies a "verified" flag.
+- `verified` requires both:
+  - `accountType == "DEVELOPER_TEST"`;
+  - `portalId == SDR_HUBSPOT_PORTAL_ID`.
+- Validity lasts at most 1 h, bound to the current epoch. Every HubSpot
+  request checks epoch and validity before I/O.
+- No portal-id-only substitute exists. If neither credential type B nor C can
+  prove `DEVELOPER_TEST`, the integration stays disabled.
+- `STANDARD` portals are refused until the ADR-0002 data-classification ADR
+  exists.
 
-- **Base URL and API version.** Base URL is `https://api.hubapi.com`. One
-  module attribute pins the DBV version (`"2026-09"`), and every path is built
-  from it. No `/v3/` paths are used, except account-info if no dated
-  equivalent works (H0).
-- **Request rules:**
-  - `redirect: false`. A 3xx is an error, never followed.
-  - Before each request, the host must be exactly `api.hubapi.com` and the
-    scheme `https`; otherwise the request is refused before Req runs.
-  - `retry: false`. Oban owns all retries, so every attempt is counted,
-    audited and bounded.
-  - Explicit connect and receive timeouts.
-  - Authorization goes through `auth: {:bearer, key}` per request.
-- **Telemetry.** Instrumented through `SdrAgent.Telemetry.instrument_req/1`.
-  Spans record method, templated route (e.g.
-  `/communication-preferences/{v}/statuses/{subscriber}`) and status, never
-  the raw path, because subscription endpoints carry the contact's email in
-  the path. Bodies are never put in spans, and response bodies go to Payload
-  only.
-- **Errors are mapped to a closed set:**
+**Scopes (minimal, added per slice):**
 
-  | HTTP result | Mapped to |
-  |---|---|
-  | 401 | `:unauthorized` |
-  | 403 | `:forbidden`, keeping `category` and any required-scope hint, redacted |
-  | 404 | `:not_found` |
-  | 409 or validation error | `:conflict` / `:invalid` (permanent) |
-  | 423 | `:locked` (retry ≥ 2 s) |
-  | 429 | `:rate_limited` with `policyName` (`DAILY` → pause until the account's midnight; ten-secondly → back off ≥ 10 s) |
-  | 477 | `:migrating` (honour Retry-After seconds, capped) |
-  | 5xx, 52x | `:transient` |
-  | timeout or closed connection *after the request was sent* | `:unknown` |
-- **Self-imposed budget, well below Free tier limits.** All HubSpot traffic
-  runs on a new Oban queue `crm` at concurrency 1.
-  - Pacing: at most 5 requests/s overall and 2 search requests/s.
-  - The `X-HubSpot-RateLimit-Remaining` header is honoured.
-  - A persisted daily cap (default 5,000 requests per UTC day, configurable
-    only downward) is counted from `CrmSyncRun.request_count` plus
-    `CrmWriteOperation` attempts, under a row lock, the same way as the
-    ADR-0004 model budget.
-  - When exhausted, the run stops with a recorded reason and a warning
-    Failure.
+| Slice | Scopes |
+|---|---|
+| H1 | `crm.objects.contacts.read`, `crm.objects.companies.read`; plus `subscriptions-status-read` only if H0 shows `hs_email_optout` is unreliable |
+| H2 | `crm.objects.contacts.write`, `subscriptions-status-write` |
 
-### 3. Data flow (a): IMPORT, HubSpot → Accounts/Contacts/Leads
+Never granted: deals, owners, schemas write, lists, `sales-email-read`,
+timeline, batch scopes or sensitive scopes. The `sdr_write_key` property, if
+used, is created by the owner in the UI.
 
-**Trigger.** Run on demand with `mix sdr.crm.import [--dry-run]` or the Admin
-button, or by the H3 cron. Actor: new system actor `:crm_sync` (CRS).
+**Echo containment.**
+- Before any response body or error text is persisted (Payload, Failure, UI)
+  or summarized, it is scanned for the exact key bytes held by the holder and
+  for the redactor's secret shapes, including the new `pat-<region>-…` shape.
+- An exact-key echo withholds the body: a placeholder Payload
+  `{"withheld":"secret_echo"}` is stored and a critical Failure is opened.
+- Spans never carry bodies.
 
-**Fetching.** Companies and contacts come from search with explicit property
-lists (§ mapping). Each contact's company comes from its associations. The
-default contact-to-company type `279` is used, with primary company label `1`
-if present.
+### 2. One gate, metered on every request (finding 3)
 
-**Per-record gate.** Each remote record passes a deterministic Decision
-(`crm_import_filter`, rule-versioned) in this order:
+**The gate.** *Every* HubSpot request goes through one supervised
+`SdrAgent.Integrations.HubSpot.Gate`, whatever its caller:
 
-1. **Synthetic-data guard (not weakened).**
-   - The company `domain` and the contact `email` must be under a reserved
-     name (ADR-0009 §9). Records that fail are skipped: their properties are
-     not stored, and the skip records only the remote id and the reason.
-   - This rejects HubSpot's seeded sample contacts and anything real.
+- preflight;
+- import and poll pages;
+- archived and full scans;
+- the research call `GetCRMHistory`, which runs synchronously on the
+  `research` queue;
+- subscription reads;
+- writes;
+- reconciliation lookups;
+- the external smoke test.
+
+**Pacing.**
+- Concurrency 1 across the node. The app is single-node; a multi-node
+  deployment would need a new ADR.
+- At least 200 ms between requests and at least 500 ms between searches.
+- `X-HubSpot-RateLimit-Remaining` is honoured.
+- Each caller sets a bounded queue deadline (default 30 s). If it expires,
+  the call returns `:gate_timeout` **before** any reservation or request.
+
+**Reservation before I/O.** For each attempt the gate:
+1. In a short committed transaction, increments `CrmRequestDay(tenant,
+   portal, utc_date = reservation day)` with an atomic conditional
+   `reserved < cap`. The default cap is 5,000 per UTC day; config may lower
+   it, never raise it. In the same transaction it inserts a `CrmApiCall` row
+   (`reserved`) carrying the purpose, templated route, caller reference and
+   the credential epoch.
+2. Releases all database locks, then performs the HTTP call. No database or
+   chain lock is ever held across remote I/O.
+3. In a second short transaction, records the outcome on the `CrmApiCall`.
+   The state becomes `completed` with status, or `failed_before_send`, or
+   `unknown`.
+
+**Attribution and no refunds.**
+- A request is attributed to the UTC day it was reserved, even if the
+  response arrives after midnight.
+- Reservations are never refunded. Uncertain and failed attempts count.
+
+**Crash safety.**
+- A `CrmApiCall` left `reserved` or `sent` past its deadline is marked
+  `unknown` by the CRM sweeper (REC), opening an attention item.
+- The sweeper never resends.
+
+**Cap and limit handling.**
+- An exhausted cap ends the caller's work with `request_budget` and a warning
+  Failure.
+- A 429 `DAILY` pauses all HubSpot I/O until the account's midnight.
+- A ten-secondly 429 backs off for at least 10 s.
+- Run counters no longer count requests. `CrmApiCall` is the single source,
+  and the verifier recomputes `CrmRequestDay` from it.
+
+**The HTTP client** sits inside the gate and uses Req only:
+- Base `https://api.hubapi.com`, host and scheme checked before every
+  request.
+- DBV pinned to `2026-09` in one attribute.
+- `redirect: false`, `retry: false` (the gate and Oban own retries), explicit
+  timeouts.
+- Telemetry is emitted by the gate itself, not by `OpentelemetryReq`'s
+  automatic URL attributes. It records method, templated route
+  (`…/statuses/{subscriber}`), status and the `CrmApiCall` id, and never the
+  raw path, query, headers or body.
+- A test asserts that no span attribute contains an email, the key, or
+  `authorization`.
+
+**Error classes:**
+
+| Response | Class |
+|---|---|
+| 401 | `unauthorized` |
+| 403 | `forbidden` (redacted scope hint) |
+| 404 | `not_found` |
+| 400/409/validation | `invalid` |
+| 423 | `locked` |
+| 429 | `rate_limited{policy}` |
+| 477 | `migrating{retry_after_s}` |
+| 5xx/52x | `server_error` |
+| connect failure before any request bytes | `failed_before_send` |
+| timeout or closed connection after send | `unknown` |
+
+For writes, how each class is treated depends on whether the operation is
+idempotent (§5).
+
+### 3. Identity: links, merges, fingerprints, binding (finding 2)
+
+**HubSpot identity lives only in `CrmLink`** (CRM domain). It is append-only,
+with supersedes lineage, and maps a local subject (Account or Contact) to
+`(provider, portal_id, object_type, remote_id :: bigint)`.
+
+- Link states are `active`, `alias` (a merged-away remote id now served by a
+  winner), `conflict`, `remote_archived` and `retired` (old portal).
+- A change is a new row superseding the current one. A row is never edited.
+- Account and Contact keep their existing `crm_*` columns for FakeCRM only,
+  and no HubSpot identity is written into Sales columns. This removes the
+  previous "immutable column vs merge re-point" contradiction.
+- Every derived record pins the *specific link row* it used:
+  `CrmWriteOperation.crm_link_id` and `ResearchArtifact.metadata.crm_link_id`.
+  History stays pinned when a link is superseded.
+
+**Merge rules**
+
+| Case | Result |
+|---|---|
+| Loser and winner map to the same local contact, or only one maps | A new `alias` row for the loser and a current `active` row for the winner. |
+| They map to different local contacts | Both links → `conflict` (no automatic local merge), a warning Failure, and writeback and research for both are frozen until an ADM resolution (an H3 guarded action). |
+
+**Portal replacement.** A new allowlisted portal id creates new links; old
+ones are never matched. ADM `retire_portal` (guarded) supersedes the old
+portal's links with `retired` and cancels their pending writes.
+
+**Qualified research identity**
+- The `CRM` behaviour gains `fetch_record(%CrmRef{provider, portal_id,
+  object_type, remote_id})`. `fetch_contact/1` is kept for FakeCRM. A HubSpot
+  `fetch_contact/1` call with a bare id is refused.
+- `GetCRMHistory` resolves the contact's *current active* `CrmLink`. The
+  adapter refuses `{:error, :portal_mismatch}` unless the ref's portal is the
+  verified portal and the epoch is current. An old portal's id therefore can
+  never fetch a new portal's record.
+- Each artifact records a version watermark in metadata: link id, portal,
+  remote id, remote `lastmodifieddate` and the current `CrmImportRecord` id.
+
+**Semantic fingerprint and high-water mark**
+- `semantic_sha256` is computed over the canonical form of:
+  - mapped properties;
+  - remote state;
+  - `merged_into`;
+  - sorted `hs_merged_object_ids`;
+  - the primary-company association remote id.
+- Per remote subject, `CrmImportRecord` keeps a high-water mark of
+  `(remote_modified_ms, fetched_at)`.
+- A fetched version with an *older* `remote_modified_ms` than the current
+  record's is `stale_ignored`: counted, never applied, never written.
+- A version with an equal timestamp and a different fingerprint is applied
+  only if fetched later (recorded as a tie).
+- An unchanged fingerprint writes nothing.
+- An out-of-order read can therefore never revert email, profile or link
+  state.
+
+**Binding checks inside each direct action, not only in orchestration**
+- Each CRS action on a lower-domain row validates, inside the action, a
+  `crm_import_filter` Decision. Decisions live in the lower Agents domain, so
+  no upward dependency is created. The actions are Account/Contact
+  `:import`/`:sync_update`/`:sync_email`, Lead `:create_from_crm`, and
+  Suppression `:from_crm`.
+- The Decision must match:
+  - same tenant;
+  - actor type CRS;
+  - kind;
+  - an `allow` (or `opt_out`) outcome;
+  - a subject ref equal to the provider, portal and remote id passed as
+    arguments;
+  - for Contact writes, the target local subject id;
+  - `outcome_detail.semantic_sha256` equal to the fingerprint of the values
+    being written.
+- A mismatch is refused, and the denial is audited.
+
+### 4. IMPORT and RESEARCH (H1)
+
+**Per-record gate.** Each fetched record passes, in this order:
+1. **Synthetic guard** on company domain and contact email (ADR-0009 §9, not
+   weakened).
 2. **Required fields.**
-   - Company: `name` and `domain`.
-   - Contact: `email`, `firstname` and `lastname`, plus an imported company.
-3. **Archived or merged records** are handled as in §6.
-4. **Opt-out.**
-   - `hs_email_optout == true` → create a `Suppression` (scope email, new
-     reason `crm_opt_out`) in the same transaction as the contact import.
-   - If the property is absent, treat the state as **unknown** and check
-     `GET …/statuses/{email}/unsubscribe-all` before any Lead is created.
-   - Unknown state blocks Lead creation. It does not suppress.
+3. **Opt-out.** `hs_email_optout == true` → Suppression `crm_opt_out` in the
+   same transaction. If the value is absent, the state is unknown: it is
+   checked with `GET …/unsubscribe-all` through the gate. Unknown blocks
+   Lead creation.
+4. **Link resolution:** existing link, email adoption of an unlinked local
+   contact, or a conflict.
 
-**Upserts.**
-- The remote identity is `(crm_provider: :hubspot, crm_portal_id,
-  crm_external_id)`.
-- Matching runs first by remote identity, then for contacts by email:
-  - An unlinked local contact with the same email is *adopted*, recorded in
-    the Decision.
-  - A contact linked to a different remote id is a conflict: skipped, with a
-    warning Failure.
-- New rows are created through new `:import` create actions
-  (`source: :crm`).
-- Existing rows are updated through `:sync_update`, which changes
-  HubSpot-owned fields only. An email change goes through the existing
-  `:change_email` semantics: the event records old and new, and the S8 send
-  gate already invalidates approvals bound to the old address.
+**Filtering before persistence.**
+- Raw search pages are never persisted. Filtering happens in memory before
+  anything is written.
+- A skipped record stores only its remote id and reason, never its
+  properties. This applies equally to dry-run reports, provenance and
+  Payloads.
+- The dry-run report holds counts, plus remote ids and reasons for skips,
+  plus the mapped synthetic values of would-import records.
 
-**Snapshots.**
-- Every imported remote version is stored as an append-only
-  `CrmImportRecord`. Its canonical properties go to Payload, along with
-  `remote_modified_at`, `properties_sha256`, the run, the outcome and the
-  local subject.
-- If `properties_sha256` matches the current snapshot, the record is
-  `unchanged`: no domain write and no new snapshot, only a run counter. This
-  absorbs the cursor bumps caused by our own writeback notes.
+**Field mapping.** Unchanged from revision 1.
+- Company → Account: `name`, `domain`, `website` (reserved hosts only),
+  `industry`, `numberofemployees`, `country`.
+- Contact → Contact: `firstname`, `lastname`, `email`, `jobtitle`, and the
+  primary company.
+- Lifecycle stage, lead status and owner id are kept in the snapshot only.
 
-**Field mapping** (HubSpot → local). Anything not listed is not imported:
+**Suppression guards**
+- **Email change from HubSpot on a suppressed contact** (email or domain
+  scope): refused. The link → `conflict` and a warning Failure is opened. The
+  local email and the suppression both stay.
+- **Adoption** of a local contact under a suppression keeps that suppression.
+- **Restoring an archived record in HubSpot** does not lift
+  `crm_record_deleted` (H3).
+- **Sync can never move a contact's link or email in a way that drops an
+  existing suppression.**
 
-| HubSpot company | Account |
-|---|---|
-| `name` | `name` |
-| `domain` | `domain` (normalized; reserved-name guard) |
-| `website` | `website_url` (must also be reserved/synthetic host, else nil) |
-| `industry` | `industry` |
-| `numberofemployees` | `employee_count` (integer ≥ 0, else nil) |
-| `country` | `geography` |
-| `hs_object_id` | `crm_external_id`; `crm_portal_id` = portalId |
+**Leads.** `:create_from_crm` follows the owner-confirmed rule (OQ-A) and is
+never auto-assigned.
 
-| HubSpot contact | Contact |
-|---|---|
-| `firstname`, `lastname`, `email`, `jobtitle` | `first_name`, `last_name`, `email`, `title` |
-| primary company association | `account_id` |
-| `hs_object_id` | `crm_external_id`; `crm_portal_id` = portalId |
-| `hs_email_optout` | Suppression (`crm_opt_out`), never a Contact column |
-| `lifecyclestage`, `hs_lead_status`, `hubspot_owner_id` | snapshot only (inputs to the Lead rule and to task ownership) |
+**Research**
+- `crm_record` (structured properties): `trust_level: :medium`.
+- `crm_activity`: the last 20 notes and tasks plus email metadata (no
+  bodies), `trust_level: :unverified`.
+- Both use the non-fetchable `hubspot://<portal>/<type>/<id>` URI.
+- Prompt templates get a version bump and render every source inside a
+  delimited data block marked as data and never instructions. There are
+  still no model tools, grounded quotes are required, and Tier-0 approval
+  still applies.
+- Notes carrying our `sdr_write_key` or body marker are excluded from
+  evidence.
 
-**Lead rule** (deterministic Decision `crm_lead_rule`, open question OQ-3).
-- A `Lead` (`source: :crm`, status `new`) is created only when all of these
-  hold:
-  - `lifecyclestage` ∈ {`subscriber`, `lead`, `marketingqualifiedlead`,
-    `salesqualifiedlead`};
-  - `hs_lead_status` ∉ {`UNQUALIFIED`, `CONNECTED`, `OPEN_DEAL`};
-  - the opt-out state is known and not opted out;
-  - the contact has no open Lead.
-- Leads are **never auto-assigned**. Assignment to the agent stays the
-  existing explicit operator action.
+### 5. WRITEBACK (H2; to be re-submitted before H2a; findings 1, 5)
 
-**Consent.** Only local Suppression counts at the send gate.
-- HubSpot opt-out → local Suppression. This adds and never removes.
-- A HubSpot re-subscribe never lifts a local suppression, which is monotonic
-  (S2).
-- Legal-basis fields are never written from this app.
+**Planner (CRS)**
+- Reads the audit ledger through a narrow `AuditEvent :crm_feed` read (§7).
+  The feed filter is an allowlist of source event types; `crm.*`,
+  `operations.*` and `audit.*` events are excluded.
+- For each relevant event it creates a `CrmWriteOperation`.
+- **Target-scoped key:**
+  `crm:v1:<portal>:<kind>:<target_remote_id>:<source_resource>:<source_id>`.
+  - `request_sha256` is computed over the immutable request meaning: kind,
+    target, canonical body, `hs_timestamp`, marker.
+  - Re-planning the same key with the same hash is a no-op.
+  - The same key with a different hash fails with `IdempotencyConflict`,
+    never a silent no-op.
+  - A different portal or target is a different key. Old operations are
+    never retargeted.
+- **No idle churn.**
+  - The ledger cursor is advanced only in a transaction that also inserts at
+    least one operation.
+  - Scanning past irrelevant events moves the scan position, held in the job
+    arguments, with no database write.
+  - A "high-water" cursor update is written only when 1,000 or more events
+    have been skipped since the last one. That update is not AE'd and is a
+    derived position the verifier recomputes.
+  - Idle cycles write nothing. A test runs N idle cycles and asserts zero new
+    AuditEvents and rows.
+- Suppressions with reason `crm_opt_out` *or* `crm_record_deleted` never
+  produce an `unsubscribe_all` write (no echo).
 
-### 4. Data flow (b): RESEARCH, HubSpot as an evidence source
+**Operation kinds**
 
-**Adapter.** `SdrAgent.Integrations.HubSpotCRM` implements
-`SdrAgent.Integrations.CRM`. `fetch_contact(crm_external_id)` returns the
-contact and company properties (the mapped allowlist, not every property) and
-the last 20 associated notes and tasks, ordered by `hs_timestamp`.
-Email engagements contribute subject, direction and timestamp only;
-bodies need `sales-email-read`, which is excluded.
-
-**Two artifacts per call.**
-- `crm_record`: structured properties, `trust_level: :medium`.
-- New `crm_activity`: engagement free text, `trust_level: :unverified`.
-- Both use the new provider `:hubspot` and the non-fetchable URI
-  `hubspot://<portalId>/<objectType>/<id>`. The ResearchArtifact reserved-host
-  rule is extended by exactly this scheme, never by `app.hubspot.com`.
-
-**`GetPreviousInteractions`** (spec §6) is the `crm_activity` half. It may be a
-separate action or the same `GetCRMHistory` call; that is an implementation
-choice in H1c.
-
-**Prompt injection.** CRM free text is untrusted data. The same rule applies to
-web text.
-- Prompt templates get a version bump. Every source is rendered inside a
-  delimited, labelled data block, with a fixed instruction that text inside
-  sources is data and never instructions.
-- The model still has no tools (ADR-0004).
-- Claims must be verbatim, grounded quotes (S5 EvidenceClaim check).
-- Every draft still needs human approval bound to a revision (Tier 0).
-- Our own writeback notes are recognized by marker and **excluded** from
-  evidence, so the agent never cites its own output.
-- Activity text is capped per artifact (stored in full in Payload; the excerpt
-  is ≤ 2,000 chars as today).
-
-### 5. Data flow (c): WRITEBACK through an outbox
-
-**Planner (CRS, `crm` queue, cron).** The planner reads the **audit ledger**
-after a `CrmSyncCursor` positioned on `sequence`. The chain is gap-free and
-ordered, so this is a durable, replayable change feed, and Outreach needs no
-code change and no upward call. For each relevant committed event, it inserts
-one `CrmWriteOperation` with idempotency key `crm:<kind>:<source_row_id>`
-(unique). In the same transaction it advances the cursor and enqueues the Oban
-job. Replays are no-ops.
-
-| Source event | CRM write (`kind`) | Content |
+| Kind | Idempotent remote effect? | Notes |
 |---|---|---|
-| `outreach.delivery.*` reaching `accepted` (capture receipt) | `log_note` on the contact | "SDR demo: email approved by <role> and **captured locally, not delivered**", subject, approval id, revision `content_sha256`, rendered sha256, marker. The message body is not copied; the revision hash points to it. |
-| `outreach.reply.received` (matched) | `update_lead_status` → `CONNECTED` | property PATCH |
-| `outreach.reply.assessed` with `classification: interested` (current assessment) | `create_task` (hand-off) | `hs_task_subject` "Interested reply — hand-off", `hs_task_type: TODO`, `hs_task_priority: HIGH`, `hs_task_status: NOT_STARTED`, `hs_timestamp` = assessed_at + 1 business day, `hubspot_owner_id` copied from the snapshot if present; body = classification, reason excerpt, marker |
-| `outreach.suppression.created` with reason ≠ `crm_opt_out` | `unsubscribe_all` (channel EMAIL) | no legal-basis fields |
-| `sales.lead.*` → `disqualified` | `update_lead_status` → `UNQUALIFIED` | property PATCH |
+| `log_note` (capture) | No | "captured locally, not delivered" note |
+| `create_task` (interested hand-off) | No | Task notifications reach portal users; a duplicate is an external effect, not harmless |
+| `update_lead_status` (`CONNECTED` on reply, `UNQUALIFIED` on disqualify) | Yes | Set-to-value |
+| `unsubscribe_all` | Yes | |
 
-- `lifecyclestage` is never written. It is forward-only and owned by humans
-  (OQ-4).
-- A write is planned only for contacts with a current HubSpot link. Fixture
-  and manual contacts are skipped and nothing is recorded.
+**Claim gate.** `pending → attempting` runs CRW's `crm_writeback_gate`
+Decision inside the claim transaction. The claim:
+- locks the operation row FOR UPDATE;
+- sets `claimed_by_job_id` and `lease_expires_at`;
+- records `credential_epoch`.
 
-**Gate.** Every claim (`pending → attempting`) runs one deterministic
-`crm_writeback_gate` Decision. It requires:
-- effective mode `live`;
-- credential `verified` with the portal allowlisted;
-- the target link is current and not archived or merged;
-- for non-unsubscribe writes, the contact is not locally suppressed (an
-  unsubscribe always passes);
-- the daily request budget is available.
+The Decision requires:
+- **Mode:** effective mode `live`, which is the minimum of a config ceiling
+  (default `:off`; `:off` in test; refused at boot in prod), an env flag, and
+  the persisted `write_mode`. Only ADM changes `write_mode`, and the change
+  is a guarded action.
+- **Credential:** verified, in its validity window, on the same epoch, with
+  the allowlisted portal.
+- **Link:** the pinned `crm_link_id` is still the current active row for the
+  target (not superseded, conflict, retired or archived).
+- **Source still valid:**
+  - the delivery is still accepted;
+  - the ReplyAssessment is still the current, non-superseded assessment and
+    is `interested`;
+  - the matched reply still exists;
+  - the lead is still disqualified;
+  - the suppression still exists.
+- **Contact:** the contact's email equals the email pinned at planning.
+- **Suppression:** for every kind except `unsubscribe_all`, no local
+  suppression (email or domain). This is the *only* check an unsubscribe
+  bypasses. Portal, credential, mode, budget, link and identity checks still
+  apply.
+- **Age:** less than 7 days since planning (otherwise cancelled as `stale`).
 
-**Modes and kill switch.** Effective mode = the minimum of:
-1. the config ceiling `config :sdr_agent, :hubspot, writeback: :off | :dry_run | :live`,
-   which defaults to `:off` in every environment, is `:off` in test and is
-   refused at boot in prod;
-2. `SDR_HUBSPOT_WRITEBACK=live` in the environment;
-3. the persisted `IntegrationCredential.write_mode`. Only ADM changes it. The
-   change is AE'd and listed in the Denial-audit contract as a guarded action.
+Mode `off` leaves the operation pending. Mode `dry_run` ends it at
+`skipped_dry_run` with no HTTP.
 
-Behaviour per effective mode:
-- `off`: operations stay `pending`, paused not cancelled, and planning
-  continues so nothing is lost.
-- `dry_run`: the exact request is built and stored in Payload, and the
-  operation ends `skipped_dry_run` with **no HTTP**.
-- `live`: the request is sent.
+**Dispatch and outcomes**
+- The worker reads its request Payload through the scoped read (§7) and
+  sends it through the gate. The gate first re-checks that the epoch is
+  unchanged and that the lease is held by this job. If either check fails,
+  the operation is released to `pending` with no request sent.
+- Outcome mapping:
 
-Lowering the mode takes effect at the next claim. Flipping `write_mode` to
-`off` is the global kill switch: one action, no restart.
+| Result | Idempotent kinds | Non-idempotent creates |
+|---|---|---|
+| 2xx | `succeeded` | `succeeded` |
+| `failed_before_send`, 429, 423, 477 | `failed_retryable`, bounded to 3 | `failed_retryable`, bounded to 3. These are rejections before processing or before any send. |
+| 400/401/403/404/409 | `failed_permanent` + Failure | `failed_permanent` + Failure |
+| 5xx/52x or `unknown` | Retryable after a read-back reconciliation | **`unknown`** + `reconciliation_required` Failure |
 
-**Execution and outcomes.**
-- **Request recording.**
-  - Stored in Payload *before* the call: request method, templated route,
-    body and marker.
-  - Stored after: the response body. HubSpot responses carry no credentials,
-    but error text still passes the redactor before it reaches a Failure.
-  - Remote id: `remote_result_id`, the note or task id.
-- **Outcome mapping:**
-  - 2xx → `succeeded`.
-  - `:transient`, `:locked`, `:rate_limited` or `:migrating` →
-    `failed_retryable` with `not_before`, bounded `max_attempts` (3).
-  - `:invalid`, `:conflict`, `:forbidden` or `:not_found` →
-    `failed_permanent`, which opens a Failure (attention).
-  - `:unknown` → `unknown`, which opens a `reconciliation_required` Failure.
-- **Reconciliation of `unknown`** (REC actor, `crm` queue, deterministic
-  `crm_write_reconciliation` Decision):
+- The result transition is a conditional update requiring
+  `state = attempting AND claimed_by_job_id = mine`.
+- A late result whose lease was lost is stored as a `late_observation`
+  Payload on the operation, not as a transition. REC then uses it as
+  authoritative evidence.
 
-  | Write | How it is reconciled |
-  |---|---|
-  | `log_note`, `create_task` | Read the contact's associated notes or tasks and batch-read them for the marker. Found → `succeeded` with that id. Not found after 3 checks spread over ≥ 15 min (search and association lag) → `failed_retryable`, as a recorded decision, never a blind resend. A duplicate note would be benign and identifiable by marker and `hs_timestamp`. |
-  | `update_lead_status` | Read the property back. |
-  | `unsubscribe_all` | `GET …/unsubscribe-all`. |
+**Reconciliation of `unknown` (REC, `crm_write_reconciliation` Decision)**
+- **With `sdr_write_key`:** look up by `GET …/{notes|tasks}/{key}?idProperty=sdr_write_key`.
+  - Found with a strong match → `succeeded`.
+  - Authoritative 404 → `failed_retryable`. The retry is safe because HubSpot
+    enforces uniqueness.
+- **Without it:** read the contact's associated notes or tasks plus batch
+  reads.
+  - Exactly one **strong match** → `succeeded`.
+  - Two or more → stays `unknown` and the Failure is raised to critical
+    (ambiguous).
+  - Zero matches → **stays `unknown`**. A negative search is not evidence of
+    non-application.
+- **A strong match requires all of these:**
+  - same portal;
+  - the expected association to `target_remote_id`;
+  - the same object kind;
+  - the full marker (64-hex sha256 of the key, in `sdr_write_key` or the
+    body footer);
+  - equal `hs_timestamp`;
+  - a canonical body hash equal to the request's.
+- **Human-guarded exits** (ADM; the reason is recorded and the denial
+  audited):
+  - `resolve_unknown_as_absent`: the operator has checked the HubSpot UI;
+    → `failed_retryable`, which then needs another claim.
+  - `abandon_unknown` → `abandoned` (T).
+- Idempotent kinds reconcile by read-back: the property value or the
+  unsubscribe-all status.
+- Tests cover:
+  - delayed visibility;
+  - a lost response after a successful create;
+  - an ambiguous duplicate;
+  - a 5xx after send;
+  - a late result after lease loss.
 
-  Resolving the operation resolves its Failure.
-- **Audit.** Every transition is AE'd (`crm.write.*`). The Operations view
-  lists the operations with state, mode, remote id and last error.
+**Stale attempts.**
+- The CRM sweeper (REC, `crm` queue, every minute) moves `attempting` rows
+  past `lease_expires_at` to `unknown` (`stale_attempt`) with attention.
+- It never resends. The original job, if it is still running, loses its
+  conditional transition.
 
 **Reach.**
-- **What HubSpot does with these writes.**
-  - Notes, tasks, lead status and unsubscribe-all do not email a contact.
-  - A task may notify its HubSpot *owner* (a portal user), which is the owner
-    themself.
-  - Marketing email in a test account can only reach users added to it
-    (account-types page).
-  - So no write can reach a real recipient.
-- **What the owner must not do.** The owner must not configure HubSpot
-  workflows that email contacts on property changes. This is recorded in the
-  setup steps.
-- **First live write is an owner checkpoint.** The first enablement of `live`
-  is a separate reviewed PR that cites H0 evidence, followed by the owner
-  setting `SDR_HUBSPOT_WRITEBACK=live` and ADM flipping `write_mode`. This is
-  the same pattern as S12d.
+- Notes, tasks, lead status and unsubscribe-all do not email contacts. Task
+  notifications reach portal users (the owner).
+- The owner must not configure HubSpot workflows that email on property
+  changes.
+- The first `live` enablement is a reviewed PR followed by the owner
+  checkpoint.
 
-### 6. Data flow (d): SYNC by polling
+### 6. SYNC (H3; to be re-submitted before H3)
 
-**Cadence.** An Oban cron runs every 15 minutes (configurable 5–60 minutes),
-only when the credential is `verified`. A full import runs only on demand.
+**Typed cursors (important item).**
+- A position is `(remote_modified_ms :: bigint, remote_id :: bigint)`,
+  ordered numerically. The search `GT`/`GTE` filters use the same typed
+  values.
+- Each page runs in its own transaction. The cursor advances only with a
+  committed page, and only monotonically.
+- If a query nears 10,000 results, a new query starts at the last typed
+  position, filtered on `hs_object_id GT` within an equal timestamp.
 
-**Cursors.** There is one `CrmSyncCursor` per `(portal, object_type, stream)`.
-`object_type` is `company` or `contact`. `stream` is `modified`,
-`archived_scan` or `ledger` (planner).
+**Completeness.**
+- The 10-minute overlap window handles normal indexing lag but is *not* a
+  completeness proof.
+- A daily `full_scan` (by `hs_object_id` ascending, no time filter) compares
+  semantic fingerprints. A test portal is small, so this is bounded. Any
+  record missed by a late index is caught within 24 h.
+- Tests cover late, stale and equal-timestamp records, and crash recovery
+  after an incomplete page.
 
-**Each `modified` run**
-1. Search with `lastmodifieddate` (contacts) or `hs_lastmodifieddate`
-   (companies) `GTE cursor − 10 min` (an overlap window for search lag),
-   sorted ascending by that property, with `limit 200`, paging by `after`.
-2. Process each page in its own transaction (snapshots, upserts, decisions).
-3. Advance the cursor to the page's maximum modified timestamp and
-   `hs_object_id`, so the cursor never decreases.
-4. If a query nears 10,000 results, start a new query at the last
-   `(timestamp, id)` seen, splitting on `hs_object_id GT` when many records
-   share one timestamp.
-5. Re-reads inside the overlap are absorbed by `properties_sha256`.
+**Runs.**
+- `CrmSyncRun` is terminal-immutable and its Oban job runs with
+  `max_attempts: 1`.
+- The CRM sweeper marks a crashed run `failed` (`crash`) after its lease
+  expires.
+- Recovery is always a **new run** starting from the persisted cursor
+  (cursor continuity). ADM may start one through the subject action
+  `CRM.start_sync_run/2`, which creates the run, its Operation and its job.
+  There is no generic Operation `:retry` row flip for CRM kinds (the S13b
+  contract).
 
-**Conflict rules (who wins)**
+**Deletions and merges.**
+- An `archived_scan` creates an archived `CrmImportRecord`, a link →
+  `remote_archived`, an archived Contact, and a `crm_record_deleted`
+  Suppression (OQ-C).
+- Merges follow §3.
 
-| Data | Owner | Rule |
-|---|---|---|
-| Company/contact identity and profile fields (mapped allowlist) | HubSpot | Import overwrites local values for linked rows. A local edit to a linked row is overwritten at next sync (local admin edits of linked rows are refused in H3, OQ-5). |
-| Contact email | HubSpot | Applied via change_email semantics. Approvals bound to the old email are invalidated at the send gate. |
-| Lead lifecycle, qualification, drafts, approvals, deliveries, replies | Local | HubSpot never changes them. HubSpot `hs_lead_status` is written by us and read only as a Lead-rule input at creation. |
-| Suppression / opt-out | Union, most restrictive wins | An opt-out on either side ends contact. Neither side's re-subscribe lifts a local Suppression. |
-| Records whose local copy is unlinked (fixture/manual) | Local | Never touched by sync, except email adoption, which is a recorded Decision. |
+**Conflict rules.**
+- HubSpot owns mapped profile fields.
+- Local owns lead lifecycle, qualification, drafts, approvals, deliveries and
+  replies.
+- For suppression, the most restrictive state wins and is never lifted.
+- ADM edits of HubSpot-owned fields on linked rows are refused (OQ-B).
 
-**Deletions and merges**
-- **`archived_scan`** lists archived contacts and companies with
-  `archived=true` on each run. A test portal is small, so this is bounded and
-  is the only way to see deletions, because search excludes archived records.
-- **A newly archived contact** gets a snapshot (`remote_state: archived`), its
-  local Contact is archived, and a Suppression with new reason
-  `crm_record_deleted` is created (OQ-6). The existing tested suppression side
-  effects then stop enrollments, cancel pending deliveries and drafts,
-  invalidate approvals and stop leads. If the record is later restored in
-  HubSpot, it is not re-activated automatically.
-- **A newly archived company** archives its Account (no new leads). Its
-  contacts are handled per contact.
-- **Merges.** The winner's `hs_merged_object_ids` re-point the loser's
-  identity to the winner (snapshot `remote_state: merged`,
-  `merged_into_remote_id`). No second Contact is created. If loser and winner
-  map to different local contacts, the record is skipped with a warning
-  Failure.
-- **Test-portal expiry.** If the portal expires (90 days without API calls,
-  or deleted), preflight fails (`missing`), polling stops and a critical
-  Failure is opened. Local rows are kept. A new portal has a new `portalId`,
-  so its records never collide with the old ones.
+### 7. Grants (finding 4)
 
-### 7. Tests (hermetic by default)
+New actors: CRS (`:crm_sync`) and CRW (`:crm_writer`). REC is existing.
+Every grant below is narrow and has allow and deny tests. There is no broad
+Payload read, no Kernel-context bypass and no `authorize?: false`.
 
-**Hermetic suite.**
-- Req is configured in `:test` with `plug: {Req.Test, SdrAgent.Integrations.HubSpot.Client}`.
-  Each test stubs with `Req.Test.stub/2` against hand-written, synthetic JSON
-  fixtures (reserved domains, invented ids) under
-  `test/support/fixtures/hubspot/`. No recorded real responses are used.
-- A guard test proves that in `:test` the client refuses to run without the
-  plug, and that a non-`api.hubapi.com` host, a redirect or `http://` is
-  refused.
+| Resource | Delta |
+|---|---|
+| **Payload** | `:store` += CRS, CRW. `:read_crm_content`, a new generic action: CRW reads only its claimed operation's `request_sha256`; REC reads only that operation's request, response and `late_observation` hashes; CRS reads only one `CrmApiCall`'s response hash (preflight). Scope `SdrAgent.Audit.Checks.CrmContentScope`, built by the CRM domain from the authoritative row and attached as private context, mirroring `ReconciliationScope`. Fixed purposes: `crm_dispatch`, `crm_reconciliation`, `crm_preflight`. Fail-closed AuditAccess (`payload_view`) before content. Guarded. |
+| **AuditAccess** | No schema change. Three new fixed purpose values written only by the kernel's read path. |
+| **AuditEvent** | New read action `:crm_feed`, CRS only: event-type allowlist, `sequence > given`, `limit ≤ 500`, and fields `id, sequence, event_type, subject_resource, subject_id, occurred_at` only (no payload). It reads metadata, not content, so no AuditAccess is appended. This deviation is recorded: appending one would create events the feed would then read. |
+| **Failure** | `@system` (`:open`) += `:crm_sync`, `:crm_writer`. `:resolve` is unchanged: REC, plus the opener resolved from the ledger by `FailureResolver`, which therefore also covers CRS and CRW for Failures they opened. |
+| **Reads** | Account, Contact, Lead: += CRS, CRW. Suppression: += CRS, CRW. DeliveryOperation, DeliveryReceipt, Reply, ReplyAssessment: += CRS (planning), CRW (gate re-check). Decision: unchanged (`actor_present`). Operation: += CRS, CRW. IntegrationCredential: field-scoped. |
+| **IntegrationCredential fields** | ADM: all fields. REV, AUR: provider, status, `write_mode`, `last_verified_at`. CRS, CRW, REC: status, `write_mode`, `credential_epoch`, `verified_until`, fingerprint. |
+| **Writes** | Account, Contact: `:import`, `:sync_update`, `:archive` (CRS). Contact `:sync_email`, refused when suppressed (CRS). Lead `:create_from_crm` (CRS). Suppression `:from_crm` (CRS; reasons `crm_opt_out`, `crm_record_deleted`). Decision kinds `crm_import_filter` and `crm_lead_rule` (CRS), `crm_writeback_gate` (CRW), `crm_write_reconciliation` (REC). Operation kinds `crm_*` on queue `crm`, with no ADM `:retry` for them. |
+| **Guarded actions** (denial-audit contract) | `set_write_mode`, `retire_portal`, `resolve_link_conflict`, `resolve_unknown_as_absent`, `abandon_unknown`, ADM cancel of a write operation, `:read_crm_content`. |
 
-**Coverage required per slice.**
-- Synthetic-guard skips, including the sample-contact shape.
-- Opt-out → Suppression, and the unknown opt-out state.
-- Adoption and conflict.
-- Cursor monotonicity, overlap, and the 10k split.
-- Archived and merge handling.
-- Every write state, including `unknown` → reconciled (found and not found).
-- Each mode (`off`, `dry_run`, `live`) and the kill switch.
-- 429 `DAILY` and ten-secondly handling.
-- The daily budget.
-- Secret non-appearance: key absent from logs, Failures, AuditEvents,
-  Payloads and spans, asserted with a canary value.
-- Policy allow and deny for CRS, REC, ADM and AUR.
-- Prompt-fencing render of untrusted activity text.
+### 8. Lock order (finding 5)
 
-**Smoke test.** One `:external` read-only smoke test
-(`test/external/hubspot_smoke_test.exs`, excluded by `test_helper.exs`) is run
-manually as
-`bin/with-secrets SDR_HUBSPOT_SERVICE_KEY SDR_HUBSPOT_PORTAL_ID -- mix test --only external test/external/hubspot_smoke_test.exs`.
-It checks account details (`DEVELOPER_TEST`, portal allowlist) and one
-contact search page, and it never writes. CI never runs it.
+Every CRM transaction pre-locks, before its first audited write, in this
+fixed order:
 
-### 8. Dependencies
+1. `IntegrationCredential`
+2. `CrmSyncCursor`
+3. `CrmLink` current rows (ascending id)
+4. Account
+5. Contact
+6. Lead(s)
+7. `CrmWriteOperation`
 
-**None.** Req 0.7.5 (includes `Req.Test`), Plug, Oban and Ash are already
-locked. HubSpot's Elixir SDK does not exist officially, and none is adopted.
+Suppression creation then follows its existing S8 lock order. The audit
+chain head is taken by the first append, so it is always last.
+
+`CrmRequestDay` and `CrmApiCall` writes are their own short transactions,
+never nested in the above, and never held across I/O.
+
+**Residual window, accepted.** A note, task or status write already claimed
+can still be sent if a Suppression commits between claim and HTTP. These
+writes do not contact the person, and an unsubscribe is unaffected.
+
+### 9. Tests and external smoke (important item)
+
+- **Hermetic suite.** Tests use `Req.Test` stubs with hand-written synthetic
+  fixtures only.
+- **Refusals.** The client refuses to run in `:test` without the stub.
+- **Smoke test.** The only escape hatch is
+  `HubSpot.Client.live_smoke!/0`. It works only when all of these hold:
+  - `MIX_ENV=test`;
+  - `SDR_HUBSPOT_EXTERNAL_SMOKE=1`;
+  - `ExUnit.configuration()[:include]` contains `:external`;
+  - `CI` is unset.
+
+  In that mode the gate allows only `GET account-details` and one `POST
+  contacts/search` page. Every other route is refused.
+- **CI guard.** A test fails CI if `SDR_HUBSPOT_EXTERNAL_SMOKE` is set there.
+
+### 10. Dependencies
+
+None. Req 0.7.5 (includes `Req.Test`), Plug, Oban and Ash are already locked.
 
 ## Justification
 
-- **Service key.** It is the credential HubSpot now recommends for exactly
-  this case: one account, system-to-system, no webhooks. It is also the only
-  static-token option a newly created test account can still create without a
-  CLI project. A static bearer token in a gitignored sops file, passed through
-  `bin/with-secrets` and read per request, keeps secret handling identical to
-  the existing anchor key.
-- **Polling.** It respects the "no public endpoint" decision. With an
-  overlap window and hash-deduplicated snapshots, it is correct under
-  HubSpot's eventual consistency.
-- **Ledger-driven outbox writes.** Each external write is idempotent,
-  auditable and reconcilable without touching Outreach code or inverting the
-  domain layering.
-- **Fail-closed preflight.** Requiring a `DEVELOPER_TEST` account and the
-  allowlisted portal keeps "synthetic data only" executable rather than a
-  promise.
+- **Service key.** It is HubSpot's recommended single-account, REST-only
+  credential, and the only static option a new test account can still
+  create without a CLI project.
+- **Secret containment.** Reading the key once and removing it from the
+  environment makes the "never transmit secrets" invariant hold for child
+  processes too.
+- **Single gate.** Metering every request in one place makes the request
+  budget and serialization provable rather than per-queue.
+- **Append-only links with pinned rows.** Merges, portal changes and history
+  are expressible without mutating identity.
+- **Non-idempotent creates stay `unknown`** without authoritative evidence,
+  which keeps the no-blind-resend invariant.
 
 ## Consequences
 
 ### Positive
 
-- The spec §17 anti-corruption layer gets its first real adapter. FakeCRM
-  stays the default for tests, CI and `bin/demo`.
-- Every imported value has a snapshot, a Decision and an AuditEvent, and
-  every write has an outbox row, so HubSpot activity is reconstructable from
-  Postgres alone (ADR-0002).
-- The kill switch and dry-run mode make writeback observable before any byte
-  leaves the machine.
+- Every imported value, API request and write is reconstructable from
+  Postgres.
+- Writeback can be observed in dry-run mode before any byte leaves the
+  machine.
+- The audit-anchor key also gains child-environment containment.
 
 ### Negative
 
-- Service keys are in public beta, and their availability in developer test
-  accounts is undocumented. Fallback C costs owner setup time.
-- Polling adds up to 15 minutes of latency and uses daily request budget.
-  Deletions are seen only through the archived scan.
-- Note-based logging is less structured in HubSpot than an Email engagement.
-- Marker reconciliation can, in a rare `unknown` + "not found" case, produce
-  one duplicate note or task. That is recorded and harmless.
-- The test portal expires after 90 days without API calls, and its content is
-  lost. Local data survives, under a new portal id after re-setup.
-- DBV `2026-09` is supported for 18 months. A version bump is a reviewed
-  change.
+- Service keys are in beta, and several H0 facts are unverified.
+- An `unknown` create without the unique marker property needs a human
+  decision.
+- Rotating the key needs a restart.
+- Polling latency is up to 15 minutes, with a 24-hour completeness bound.
+- The gate is a deliberate single-node bottleneck.
+- The test portal expires after 90 idle days.
 
 ### Neutral
 
-- New top domain `SdrAgent.CRM` above Outreach. The layering becomes
-  `… <- Outreach <- CRM`.
-- Real HubSpot portals (`STANDARD`) remain out of scope until the ADR-0002
-  data-classification ADR exists.
+- New top domain `SdrAgent.CRM`; the layering becomes
+  `… <- Outreach <- CRM`. ADR-0009 §7 needs an amendment when this ADR is
+  accepted.
+- `STANDARD` portals stay out of scope.
