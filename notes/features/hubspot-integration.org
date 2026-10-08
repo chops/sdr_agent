@@ -36,7 +36,8 @@ Reason: new top domain SdrAgent.CRM (A1: CrmApiCall, CrmRequestDay; A2: CrmLink,
   live access is limited to the owner-run smoke hatch.
 - *A2, H1b and H1c (submitted for verdict):* identity, observation
   watermark, binding matrix, import lock order, opt-out side effects and
-  research. Rows marked OQ-A or OQ-B stay inert until the owner answers.
+  research. OQ-A and OQ-B were answered on 2026-10-07, so every A2 row is
+  active subject to the A2 PASS.
 - *B, H2 and H3 (NOT submitted):* writes and sync. No B grant is implied by
   an A PASS.
 
@@ -67,7 +68,7 @@ users, or lift suppressions.
 
 | Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
 |--------+--------------+---------+------------+---------------+----------------------+--------------+----------------|
-| IntegrationCredential (Operations) | Existing S2 row, never built — built in H1a | Reference, verification state and epoch for HubSpot; never the secret. | S2 attributes (provider, credential_kind, reference, status, last_verified_at, verified_by_type, non_secret_fingerprint; identity unique (tenant_id, provider)); provider += hubspot; status one_of [unverified, verified, missing, expired, revoked, restart_required]; +allowlisted_portal_id : string, required for hubspot; +credential_epoch : integer ≥ 1; +verified_until : utc_datetime_usec, nullable; +last_evidence_sequence : bigint, default 0 | none (plain refs) | The epoch increments *only* on: KRN =:begin_boot_epoch= (every boot), ADM =update_reference= / =set_allowlisted_portal=, and =revoke=; preflight outcomes do not increment it. =:record_preflight= (CRS) takes only an AuditEvent id. Through =AuditEvent :preflight_evidence= it validates: event type =crm.api_call.finished=; actor_type crm_sync; same tenant; this credential id; current epoch; purpose preflight; the exact account-details route; http 200; not withheld; finished ≤ 5 min ago; sequence > last_evidence_sequence. It then reads the named response hash through =PreflightEvidenceScope= and derives the status: verified only if accountType DEVELOPER_TEST and portalId = allowlisted_portal_id (verified_until = now + 1 h); anything else → missing plus a critical Failure; last_evidence_sequence always advances. A holder portal ≠ allowlisted → restart_required. revoked or restart_required: nothing admitted, preflight included. AE: all writes. | KRN register, begin_boot_epoch; CRS record_preflight; ADM request_preflight, update_reference, set_allowlisted_portal, revoke (all guarded). Field reads: ADM all; REV, AUR provider, status, last_verified_at; CRS, AGT, REC status, epoch, verified_until, allowlisted_portal_id. | OQ-D |
+| IntegrationCredential (Operations) | Existing S2 row, never built — built in H1a | Reference, verification state and epoch for HubSpot; never the secret. | S2 attributes (provider, credential_kind, reference, status, last_verified_at, verified_by_type, non_secret_fingerprint; identity unique (tenant_id, provider)); provider += hubspot; status one_of [unverified, verified, missing, expired, revoked, restart_required]; +allowlisted_portal_id : string, required for hubspot; +credential_epoch : integer ≥ 1; +verified_until : utc_datetime_usec, nullable; +last_evidence_sequence : bigint, default 0; +ui_domain : string, nullable (non-secret; set by =:record_preflight= from the evidence =uiDomain=; used only for the "Edit in HubSpot" link) | none (plain refs) | The epoch increments *only* on: KRN =:begin_boot_epoch= (every boot), ADM =update_reference= / =set_allowlisted_portal=, and =revoke=; preflight outcomes do not increment it. =:record_preflight= (CRS) takes only an AuditEvent id. Through =AuditEvent :preflight_evidence= it validates: event type =crm.api_call.finished=; actor_type crm_sync; same tenant; this credential id; current epoch; purpose preflight; the exact account-details route; http 200; not withheld; finished ≤ 5 min ago; sequence > last_evidence_sequence. It then reads the named response hash through =PreflightEvidenceScope= and derives the status: verified only if accountType DEVELOPER_TEST and portalId = allowlisted_portal_id (verified_until = now + 1 h); anything else → missing plus a critical Failure; last_evidence_sequence always advances. A holder portal ≠ allowlisted → restart_required. revoked or restart_required: nothing admitted, preflight included. AE: all writes. | KRN register, begin_boot_epoch; CRS record_preflight; ADM request_preflight, update_reference, set_allowlisted_portal, revoke (all guarded). Field reads: ADM all; REV, AUR provider, status, last_verified_at; CRS, AGT, REC status, epoch, verified_until, allowlisted_portal_id. | OQ-D |
 | CrmApiCall (CRM) | New — H1a | One metered HubSpot HTTP attempt, from any path. | purpose [preflight, import, poll, full_scan, archived_scan, subscription_read, research, smoke] (+ write, reconcile in Gate B); actor_type, actor_id : required (the caller); credential_id, credential_epoch : required; portal_id; method; route_template (from the fixed purpose → route table; never a raw path); caller_resource, caller_id; utc_date (reservation day); gate_incarnation : uuid, required; state [reserved, sent, completed, failed_before_send, unknown]; http_status, error_class, response_sha256 (preflight only in A1), withheld : boolean; reserved_at, sent_at, finished_at; queue_deadline_at, http_deadline_at | belongs_to CrmRequestDay; → Payload | Terminal-immutable. reserved → sent (committed *before* the transport Task starts) → completed (T) / unknown (T); reserved/sent → failed_before_send (T). Every outcome write is conditional on state ∈ {reserved, sent} AND gate_incarnation = the writer's incarnation; terminal rows are never overwritten. At Gate init, REC marks other incarnations' reserved/sent rows unknown (incarnation_lost) and the Gate admits only after that commits (fail-closed). The transport Task is linked to the Gate and killed at http_deadline_at. A queued caller that dies or passes its deadline was never reserved. No lock is held across I/O. AE: crm.api_call.reserved and crm.api_call.finished (the evidence event; fields per ADR §2; no URL, body, email or headers). | =:reserve= / =:finish= under the caller's actor, authorized by the (actor → purpose → routes) table (CRS: preflight, import, scans, subscription_read; AGT: research); REC =:cleanup_incarnation=; reads: ADM, AUR, AUD, REC, CRS (own runs). | — |
 | CrmRequestDay (CRM) | New — H1a | Atomic per-UTC-day request cap. | portal_id, utc_date; identity unique (tenant_id, portal_id, utc_date); cap 1..5000 (config may only lower it); reserved ≥ 0, ≤ cap | has_many CrmApiCall | Conditional increment (reserved < cap) in the same short transaction as the CrmApiCall reserve, committed before I/O; never released; at the cap → request_budget with no I/O. Derived counter: no AE; the verifier recomputes it from CrmApiCall. | Inside =:reserve= only; reads ADM, AUR, AUD. | — |
 | AuditEvent (Audit) | Existing — delta H1a | Preflight evidence lookup. | none | none | New read action =:preflight_evidence=: CRS only, one event by id, event_type =crm.api_call.finished= only, fixed metadata fields (no payload beyond the listed evidence keys). | CRS | — |
@@ -77,17 +78,17 @@ users, or lift suppressions.
 | Operation (Operations) | Existing — delta H1a | Preflight job view. | kind += crm_preflight; queue += crm (kind pinned to crm) | unchanged | No ADM =:retry= for crm kinds (S13b); recovery is =request_preflight=. | kind_actors crm_preflight → CRS; reads += CRS | — |
 | (code, not persisted) CredentialHolder, ChildEnv, Gate | New — H1a | Secret containment and the single admission point. | — | — | The holder is the first supervised child; it reads the key, then =System.delete_env/1= for the HubSpot names; sensitive process with redacted status; holder loss → :unavailable, Gate closed, critical Failure (restart required). All child launches go through =ChildEnv= (source-inventory test plus an env canary test for every launcher kind on the rebased base). | — | — |
 
-** Gate A2 — H1b and H1c entity table (submitted for verdict; OQ-gated rows inert until answered)
+** Gate A2 — H1b and H1c entity table (submitted for verdict; OQ-A and OQ-B answered 2026-10-07)
 
 | Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
 |--------+--------------+---------+------------+---------------+----------------------+--------------+----------------|
 | CrmLink (CRM) | New — H1b | Sole holder of HubSpot identity: local Account/Contact ↔ remote record. | provider [hubspot]; portal_id; object_type [company, contact]; remote_id : bigint; account_id / contact_id (exactly one); link_state [active, alias, conflict, remote_archived, retired]; alias_of_remote_id : bigint, nullable; decision_id : required; supersedes_id : uuid, nullable | Account / Contact (Sales FK RESTRICT); Decision (Agents FK); self | APPEND-ONLY, *immutable strategy* (S2 lineage; no mutable current column): partial unique (tenant_id, provider, portal_id, object_type, remote_id) WHERE supersedes_id IS NULL; unique (supersedes_id); current = no successor. "At most one current active link per local subject per portal" is enforced by sorted advisory xact locks =crm-link-remote:…= and =crm-link-local:<subject>= plus a check under the lock (race tests: first link, two remotes → one local, concurrent same remote). AE: crm.link.recorded. | CRS create; reads CRS, ADM, REV, AUR, AUD; AGT via =research_ref= only; conflict resolution and retire are Gate B. | — |
 | CrmRemoteWatermark (CRM) | New — H1b | Durable per-remote-subject observation high-water mark. | provider, portal_id, object_type, remote_id : bigint; identity unique (tenant_id, provider, portal_id, object_type, remote_id); high_water_ms : bigint; high_water_observation_sha256; applied_observation_sha256, nullable; equal_version_conflict : boolean; conflict_digests → Payload, nullable; conflict_runs : integer; observed_at | none | *Mutable head* (not append-only): conditional monotonic update. ms < high → stale_ignored (no write); ms > high → advance and clear the conflict, then apply only if the digest ≠ applied; equal ms and digest → nothing; equal ms with a different digest → conflict flag, never applied, warning Failure after 3 runs. Guarantee: an observation with ms ≤ high_water_ms never changes domain state. Tests: (100,A)→(200,A)→(150,B) ignored; (200,A)→(200,B) conflict. AE: crm.watermark.advanced / conflict. | CRS; reads CRS, AGT (research_ref), ADM, AUR, AUD. | — |
 | CrmImportRecord (CRM) | New — H1b | Append-only snapshot of each *applied* observation. | sync_run_id; provider, portal_id, object_type, remote_id : bigint; remote_modified_ms : bigint; fetched_at; remote_state [active, archived, merged]; merged_into_remote_id : bigint, nullable; observation_sha256 (= the Payload key of the exact canonical snapshot bytes per ADR §4; mapped synthetic values only); outcome [created, updated, adopted, archived, merged, conflict]; decision_id; crm_link_id; supersedes_id | CrmSyncRun, CrmLink, Decision; → Payload | APPEND-ONLY lineage per remote subject; written only when the watermark rule says apply, in the same transaction. Skipped or non-synthetic records persist nothing but run counters, remote ids and reasons. | CRS create; reads CRS, ADM, REV, AUR, AUD. | — |
-| CrmSyncRun (CRM) | New — H1b | One import or scan run. | kind [full_import, incremental, archived_scan, full_scan]; mode [dry_run, apply]; portal_id; status [running, succeeded, failed, budget_exhausted, cancelled]; counters {pages, fetched, created, updated, unchanged, stale_ignored, equal_version_conflicts, adopted, skipped_non_synthetic, skipped_missing_fields, skipped_conflict, suppressions_created, leads_created, lead_candidates, pending_owner_decision, archived, merged}; status_reason; report_sha256 (dry run: counts, remote ids and reasons, and mapped synthetic values only); operation_id; attention_failure_id; owner_token : uuid, required; lease_expires_at; partial unique (tenant_id, portal_id, kind) WHERE status = running; no request counter (CrmApiCall is the only count); dry run writes no domain rows, links, records, watermarks or suppressions | Operation, Failure | Terminal-immutable. Every page and finish transaction locks the run row and requires status running AND owner_token = mine AND lease_expires_at > now, then writes the page atomically and renews the lease; otherwise it aborts with no write. REC: running past the lease → failed (crash), under the lock. Replacement only after the old run is terminal (unique running), continuing from persisted watermarks. Tests: a late page vs lease expiry vs a replacement. | CRS; REC crash; ADM start_sync_run, cancel; reads ADM, REV, AUR, AUD. | — |
-| Account (Sales) | Existing — delta H1b | Importable company. | no HubSpot columns | CrmLink | =:import= (allow_create) and =:sync_update= (allow_update; *OQ-B gated*) bound per the ADR §4 matrix: same tenant, CRS, kind, outcome, object type company, subject ref, local target id, effect_sha256 computed by the action, observation in input_refs. Synthetic guard unchanged. Negatives: wrong Account, wrong type, wrong kind or outcome, digest, observation, tenant, actor. | CRS; reads += CRS. | OQ-B |
-| Contact (Sales) | Existing — delta H1b | Importable recipient. | no HubSpot columns | CrmLink | =:import=, =:sync_update= (OQ-B), =:sync_email= (OQ-B; decision detail suppression_check = none_under_lock, made by the CRM orchestrator under advisory email/domain keys); same bindings. | CRS; reads += CRS. | OQ-B |
-| Lead (Sales) | Existing — delta H1b | — | — | — | =:create_from_crm= (crm_lead_rule / create; contact and account bound) — *OQ-A gated; inert until answered* (H1b reports lead_candidates only). CRS has no assign, stop or transition. | CRS; reads += CRS. | OQ-A |
+| CrmSyncRun (CRM) | New — H1b | One import or scan run. | kind [full_import, incremental, archived_scan, full_scan]; mode [dry_run, apply]; portal_id; status [running, succeeded, failed, budget_exhausted, cancelled]; counters {pages, fetched, created, updated, unchanged, stale_ignored, equal_version_conflicts, adopted, skipped_non_synthetic, skipped_missing_fields, skipped_conflict, suppressions_created, leads_created, archived, merged}; status_reason; report_sha256 (dry run: counts, remote ids and reasons, and mapped synthetic values only); operation_id; attention_failure_id; owner_token : uuid, required; lease_expires_at; partial unique (tenant_id, portal_id, kind) WHERE status = running; no request counter (CrmApiCall is the only count); dry run writes no domain rows, links, records, watermarks or suppressions | Operation, Failure | Terminal-immutable. Every page and finish transaction locks the run row and requires status running AND owner_token = mine AND lease_expires_at > now, then writes the page atomically and renews the lease; otherwise it aborts with no write. REC: running past the lease → failed (crash), under the lock. Replacement only after the old run is terminal (unique running), continuing from persisted watermarks. Tests: a late page vs lease expiry vs a replacement. | CRS; REC crash; ADM =start_sync_run= (the "Sync now" button; guarded; metered via the Gate; refused while a run of the kind is running, the credential is unverified, or the cap is exhausted), cancel; reads ADM, REV, AUR, AUD. | — |
+| Account (Sales) | Existing — delta H1b | Importable company. | no HubSpot columns | CrmLink | +crm_managed : boolean, default false (set only by CRS =:import= / =:mark_crm_managed= under a bound Decision; cleared only in Gate B). =:import= (allow_create) and =:sync_update= (allow_update; OQ-B decided) bound per the ADR §4 matrix: same tenant, CRS, kind, outcome, object type company, subject ref, local target id, effect_sha256 computed by the action, observation in input_refs. Synthetic guard unchanged. Negatives: wrong Account, wrong type, wrong kind or outcome, digest, observation, tenant, actor. *OQ-B lock:* ADM =:update= refuses mapped fields (name, domain, website_url, industry, employee_count, geography) while crm_managed. | CRS; reads += CRS; ADM edit refusals. | Owner to confirm Account fields (the owner named contact fields) |
+| Contact (Sales) | Existing — delta H1b | Importable recipient. | no HubSpot columns | CrmLink | +crm_managed : boolean (as Account). =:import=, =:sync_update=, =:sync_email= (OQ-B decided; decision detail suppression_check = none_under_lock, made by the CRM orchestrator under advisory email/domain keys); same bindings. *OQ-B lock:* while crm_managed, ADM =:update= refuses first_name, last_name, title, and ADM =:change_email= is refused; persona and timezone stay local. The UI shows an "Edit in HubSpot" link (ADR §4). | CRS; reads += CRS; ADM edit refusals. | — |
+| Lead (Sales) | Existing — delta H1b | — | — | — | =:create_from_crm= (crm_lead_rule / create; contact and account bound). OQ-A decided 2026-10-07: auto-create by the rule, with the test-domain and suppression checks, never auto-assigned. CRS has no assign, stop or transition. | CRS; reads += CRS. | OQ-A |
 | CampaignEnrollment (Sales) | Existing — side effect only | — | none | — | Its =:stop= already authorizes =SuppressionContext=; with the delta below it is stopped by a CRS suppression (stop_reason unsubscribe for crm_opt_out). Direct CRS stop denied (tested). | unchanged policy | — |
 | Sales.Checks.SuppressionContext | Existing — delta H1b | Side-effect authority. | =@types= += :crm_sync | — | Context-only. CRS gains no direct Lead or Enrollment =:stop=. | — | — |
 | Suppression (Outreach) | Existing — delta H1b | HubSpot opt-out. | reason += crm_opt_out (crm_record_deleted is Gate B); *no* crm_import_record_id (revision 2's is removed); provenance = the existing decision_id, validated | Decision (existing FK) | =:from_crm= (CRS): crm_import_filter / opt_out Decision bound to the contact and email. APPEND-ONLY, monotonic, never lifted. *ApplySuppression delta:* takes =sdr-suppression-email:= or =-domain:= advisory key before =Locks.targets/2=; =stop_reason(:crm_opt_out) = :unsubscribe=. Test: opt-out over an existing active lead and enrollment → both stopped. | CRS :from_crm; reads += CRS. | — |
@@ -261,7 +262,7 @@ ruling (ADR §5).
   - =operations/integration_credential.ex=
   - =audit/{payload,audit_event}.ex=, =audit/checks/preflight_evidence_scope.ex=
   - =operations/{failure,operation,redactor}.ex=, =actor.ex=, =application.ex=
-  - =bin/with-secrets=, =.sops.yaml=, =.gitignore=, =config=
+  - =bin/with-secrets=, =config= (the =.gitignore= and =.sops.yaml= rule land in the coordinator's separate secrets PR)
   - =test/external/hubspot_smoke_test.exs=
 - *A2:*
   - =crm/{crm_link,crm_remote_watermark,crm_import_record,crm_sync_run}.ex=
@@ -272,6 +273,7 @@ ruling (ADR §5).
   - =integrations/{crm,hubspot_crm}.ex=
   - =sdr/{actions/get_crm_history,prompts}.ex=
   - =mix sdr.crm.{import,seed_csv}=
+  - =lib/sdr_agent_web/live/= contact and account detail ("Edit in HubSpot" link; HubSpot-owned fields read-only with explanation) and the admin page ("Sync now")
 - *B:* =crm/{crm_write_operation,crm_sync_cursor}.ex=, planner, write and reconcile workers, =audit/checks/crm_content_scope.ex=, =AuditEvent :crm_feed=.
 
 * Implementation Steps: sliced build plan
@@ -279,19 +281,19 @@ Estimates are agent hours (TDD, review rounds, =bin/verify=).
 
 | Slice | Content | Est. (h) | Deps |
 |-------+---------+----------+------|
-| H1a | A1, hermetic: holder, ChildEnv plus inventory and canary tests, Gate (incarnations, Task deadlines, metering, cleanup), preflight bootstrap and evidence, client, grants, smoke hatch; no remote enablement | 16 | A1 PASS, OQ-D |
-| H0 | Owner setup and probe (smoke hatch or an owner-only =sops exec-env= curl); facts recorded here (service key in a test account, DEVELOPER_TEST, scope names, readable activity families, =hs_email_optout=, DBV routes, =sdr_write_key= uniqueness) | 2 (+1 owner) | H1a |
-| H1b | A2 import: CrmLink, watermark, records, runs, binding matrix, lock order and advisory keys, ApplySuppression delta, opt-out; OQ-A and OQ-B gated rows inert until answered | 15 | A2 PASS, H0 |
+| H1a | A1, hermetic: holder, ChildEnv plus inventory and canary tests, Gate (incarnations, Task deadlines, metering, cleanup), preflight bootstrap and evidence, client, grants, smoke hatch; no remote enablement. The gitignore and sops rule are out of scope (secrets PR). | 16 | A1 PASS (OQ-D answered) |
+| H0 | Owner setup and probe (the owner-only =sops exec-env= curl once the secrets PR merges; the smoke hatch after H1a); facts recorded here (service key in a test account, DEVELOPER_TEST, scope names, readable activity families, =hs_email_optout=, DBV routes, =sdr_write_key= uniqueness, the HubSpot record URL format) | 2 (+1 owner) | secrets PR |
+| H1b | A2 import: CrmLink, watermark, records, runs, binding matrix, lock order and advisory keys, ApplySuppression delta, opt-out, lead auto-create (OQ-A), HubSpot-owned field lock =crm_managed= (OQ-B), UI: "Edit in HubSpot" link and admin "Sync now" | 18 | A2 PASS, H0, H1a |
 | H1c | A2 research via the Gate, =research_ref=, watermark metadata, fencing; only H0-proven families | 7 | H1b |
-| | *Read-only end-to-end* | *~40 h* | |
+| | *Read-only end-to-end* | *~43 h* | |
 | B-review | Re-submit Gate B with owner answers | 1 | H1b |
 | H2a | Dry-run outbox and planner | 10 | B PASS |
 | H2b | Live executor (ceiling off) | 12 | H2a |
 | H2c | Enablement plus owner checkpoint | 2 | H2b |
 | H3 | Sync | 12 | B PASS, H1b |
-| | *Total* | *~77 h* (+1 owner) | |
+| | *Total* | *~80 h* (+1 owner) | |
 
-* Owner setup steps (H0, after H1a merges; agents never handle the key)
+* Owner setup steps (H0, after the coordinator's secrets PR merges; agents never handle the key)
 1. *Create the test account.* Development → Testing → Test Accounts →
    Create developer test account (=sdr-agent-test=).
 2. *Keep it synthetic.* Use reserved domains and emails only. No workflows
@@ -304,7 +306,7 @@ Estimates are agent hours (TDD, review rounds, =bin/verify=).
    create a unique-value single-line text property =sdr_write_key= on Notes
    and on Tasks. Report whether HubSpot allows it.
 5. *Store the values.* Run =sops secrets/hubspot.local.sops.yaml= (the path
-   is gitignored after H1a) and enter the flat keys =hubspot_service_key=
+   is gitignored once the secrets PR merges) and enter the flat keys =hubspot_service_key=
    and =hubspot_portal_id=. Never put the key on a command line or in chat.
 6. *Probe* with one of:
    - =SDR_HUBSPOT_EXTERNAL_SMOKE=1 bin/with-secrets SDR_HUBSPOT_SERVICE_KEY SDR_HUBSPOT_PORTAL_ID -- mix test --include external test/external/hubspot_smoke_test.exs=
@@ -361,9 +363,19 @@ Relayed by the coordinator on 2026-10-07.
   - Leads are never auto-assigned.
   - This satisfies the owner gate on Lead =:create_from_crm=. The row still
     needs the Gate A2 PASS.
-- *OQ-B — PENDING.* The owner asked Claude and Codex to explain the pros and
-  cons first. The Account/Contact =:sync_update= and =:sync_email= rows stay
-  inert until it is answered.
+- *OQ-B — DECIDED 2026-10-07: Option 1.*
+  - HubSpot wins for the profile fields of linked contacts: first and last
+    name, title and email. Local admin edits of those fields are refused,
+    enforced by the =crm_managed= marker.
+  - The app owns lead lifecycle, approvals and deliveries.
+  - The same rule is applied to the mapped fields of linked Accounts. The
+    owner named contact fields, so this is *to confirm*.
+  - Plan additions: an "Edit in HubSpot" link on linked contacts and
+    accounts, and an admin "Sync now" action (=CRM.start_sync_run/2=, guarded,
+    metered through the Gate), both in H1b.
+- *Scope note 2026-10-07:* the coordinator lands the =.gitignore= entry and
+  the =.sops.yaml= creation rule for =secrets/hubspot.local.sops.yaml= as a
+  separate small PR, which is removed from H1a's scope.
 - *OQ-C, OQ-E — open, for gate B.*
 
 * Questions for the owner (short list; A-gated items first)
@@ -373,7 +385,7 @@ Relayed by the coordinator on 2026-10-07.
 - *OQ-A (gates H1b Lead creation) — ANSWERED 2026-10-07 (see Owner decisions)* Should leads be created automatically
   from HubSpot by the proposed lifecycle and lead-status rule (never
   auto-assigned), or only by an explicit admin action per contact?
-- *OQ-B (gates H1b updates) — PENDING: the owner asked for pros and cons first* Should HubSpot win for profile fields and email
+- *OQ-B (gates H1b updates) — ANSWERED 2026-10-07: Option 1 (see Owner decisions); confirm that Account mapped fields follow the same rule* Should HubSpot win for profile fields and email
   on linked records, with local admin edits of those fields refused?
 - *OQ-C (Gate B)* Should a HubSpot deletion become a permanent local
   suppression, with cross-contact merges resolved by you?
@@ -393,6 +405,7 @@ Not applicable: documentation-only PR.
 - [X] =bin/verify-workflow= green
 - [ ] Gate A1 PASS; Gate A2 PASS
 - [X] Owner answers OQ-D (H1a) and OQ-A (H1b): 2026-10-07
-- [ ] Owner answers OQ-B (H1b; pros and cons requested), OQ-C and OQ-E (B)
+- [X] Owner answer OQ-B (H1b): 2026-10-07, Option 1
+- [ ] Owner confirms Account mapped fields under OQ-B; owner answers OQ-C and OQ-E (B)
 - [ ] Gate B re-submitted and PASS
 - [ ] ADR-0013 accepted

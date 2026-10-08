@@ -191,12 +191,27 @@ Relayed by the coordinator on 2026-10-07.
   - Each lead must pass the reserved test-domain guard and the suppression
     checks.
   - Leads are never auto-assigned.
-- **OQ-B (field ownership): PENDING.** The owner requested a pros-and-cons
-  explanation from Claude and Codex first.
+- **OQ-B (field ownership): DECIDED 2026-10-07, Option 1.**
+  - HubSpot wins for the profile fields of linked contacts: name
+    (first and last), title and email.
+  - Local admin edits of those fields are refused.
+  - The app owns lead lifecycle, approvals and deliveries.
+  - The owner named contact fields. The same Option-1 rule is applied to the
+    mapped fields of linked Accounts; this is flagged for owner confirmation
+    in the notes.
+  - The owner asked for two UI affordances in the plan: an **"Edit in
+    HubSpot"** link on linked contacts, and an admin **"Sync now"** action
+    metered through the Gate (§4).
 - **OQ-C, OQ-E: open, for gate B.**
 
-These answers satisfy the owner gates for H1a (OQ-D) and Lead creation
-(OQ-A). The entity-review gates A1 and A2 are still required.
+These answers satisfy every owner gate on A1 and A2: OQ-D gates H1a, and
+OQ-A and OQ-B gate H1b. The entity-review gates A1 and A2 are still
+required.
+
+**Scope note (2026-10-07).** The coordinator is landing the `.gitignore`
+entry and the `.sops.yaml` creation rule for
+`secrets/hubspot.local.sops.yaml` as a small separate PR, so the owner can
+store the key early. That work is no longer part of H1a.
 
 ## Options Considered
 
@@ -245,7 +260,7 @@ The design is reviewed in three gates. Each gate's rows are listed in
 | Gate | Slices | Content | Also needs |
 |---|---|---|---|
 | **A1** | H1a | credential holder, child-env containment, Gate (ownership, metering), preflight bootstrap, Req client, and the grants for exactly these paths | entity PASS; owner answer OQ-D |
-| **A2** | H1b, H1c | import, links, watermark, action bindings, opt-out suppression, research | entity PASS; owner answers OQ-A and OQ-B for the rows they gate (§4) |
+| **A2** | H1b, H1c | import, links, watermark, action bindings, opt-out suppression, research | entity PASS (owner answers OQ-A and OQ-B given 2026-10-07) |
 | **B** | H2, H3 | writes and sync | re-submitted later; not covered by any A PASS |
 
 **No grant listed under B is implied by an A1 or A2 PASS.** The CRW actor
@@ -726,12 +741,61 @@ the serialized outcome.
   policy already authorizes `SuppressionContext`, so it now admits CRS-made
   suppressions.
 
-**Owner-question gates inside A2**
+**Owner-question gates inside A2.** OQ-A and OQ-B were both answered on
+2026-10-07, so Lead `:create_from_crm`, Account/Contact `:sync_update` and
+Contact `:sync_email` are active, subject to the A2 PASS. The
+`pending_owner_decision` counter is dropped.
 
-| Row | Gate | Until answered |
-|---|---|---|
-| Lead `:create_from_crm` | OQ-A | H1b creates no Leads and reports `lead_candidates` in the run report |
-| Account/Contact `:sync_update`, Contact `:sync_email` | OQ-B | H1b creates and adopts only. Changes to already-linked rows are counted (`pending_owner_decision`), not applied, and the watermark still advances |
+**HubSpot-owned field lock (OQ-B, Option 1).** Sales cannot read the higher
+CRM `CrmLink`, so ownership is carried downward by a marker on the row.
+
+- **Marker.** Account and Contact gain `crm_managed : boolean` (default
+  false).
+  - It is set to true only by CRS `:import`, or by the link-adoption write
+    (`:mark_crm_managed`), each bound by the same `crm_import_filter`
+    Decision contract.
+  - It is cleared only by Gate B link retirement or conflict resolution.
+  - It is an ownership flag, not identity. HubSpot ids stay in `CrmLink`.
+- **What is refused.** While `crm_managed` is true:
+  - Contact ADM `:update` refuses changes to `first_name`, `last_name` and
+    `title`.
+  - Contact ADM `:change_email` is refused.
+  - Account ADM `:update` refuses changes to the mapped fields `name`,
+    `domain`, `website_url`, `industry`, `employee_count` and `geography`.
+
+  These refusals are validations in the action ("owned by HubSpot; edit in
+  HubSpot"), and the error names the field. Local-only fields (Contact
+  `persona`, `timezone`) and lifecycle actions such as `:archive` stay with
+  ADM. Lead, approval and delivery flows are untouched.
+- **Tests.** For each field: refused on a CRM-managed row, allowed on an
+  unmanaged row. CRS sync still applies. The flag cannot be set or cleared by
+  ADM, AGT or by direct writes.
+
+**UI affordances (H1b, operator plane).**
+
+- **"Edit in HubSpot" link** on contact and account detail pages for rows
+  with a current `active` link on the verified portal. It is hidden
+  otherwise, including for `conflict`, `retired` or unverified links.
+  - The link is built server-side from the link's `portal_id` and
+    `remote_id`, plus a non-secret `ui_domain` recorded on
+    `IntegrationCredential` by `:record_preflight` from the account-details
+    evidence (`uiDomain`), for example
+    `https://<ui_domain>/contacts/<portal>/record/0-1/<id>` (company `0-2`).
+    The exact path format is confirmed in H0.
+  - It is a plain human navigation (`target="_blank" rel="noopener
+    noreferrer"`). The app never fetches it, and it is not a research source
+    (artifacts keep `hubspot://`).
+  - It is shown to ADM, REV and AUR. AUR page views are already audited.
+- **Admin "Sync now"**: an ADM button that calls the guarded subject action
+  `CRM.start_sync_run/2` (kind `incremental`, mode `apply`). In one
+  transaction this creates the run, its Operation and its Oban job.
+  - Every request goes through the Gate, so it is serialized and metered
+    against the daily cap.
+  - It is refused, with a visible reason, when a run of that kind is already
+    running (unique running run), when the credential is not `verified`, or
+    when the day's cap is exhausted.
+  - It never bypasses preflight or the budget, and progress shows in the
+    Operations view. A denial for a non-ADM caller is audited.
 
 **Research (H1c).**
 - `fetch_record(%CrmRef{})` goes through the Gate, so it is serialized and
@@ -960,7 +1024,7 @@ as attention. It is not a hard 24-hour guarantee.
 - Local owns lead lifecycle, qualification, drafts, approvals, deliveries and
   replies.
 - For suppression, the most restrictive state wins and is never lifted.
-- ADM edits of HubSpot-owned fields on linked rows are refused (OQ-B).
+- ADM edits of HubSpot-owned fields on linked rows are refused (OQ-B decided 2026-10-07; enforced in H1b through `crm_managed`, §4).
 
 ### 7. Grants
 
@@ -982,7 +1046,9 @@ as attention. It is not a hard 24-hour guarantee.
 | Resource | Delta |
 |---|---|
 | `CrmLink`, `CrmImportRecord`, `CrmRemoteWatermark`, `CrmSyncRun` | CRS create/advance as specified. CRS reads (lookup, high-water). AGT scoped `research_ref` read. ADM, REV, AUR, AUD metadata reads. |
-| Account, Contact, Lead, Suppression | The actions in the binding matrix (CRS). Reads += CRS. |
+| Account, Contact, Lead, Suppression | The actions in the binding matrix (CRS). Reads += CRS. Account and Contact `crm_managed` set by CRS only, plus the ADM edit refusals (OQ-B). |
+| `CRM.start_sync_run/2` ("Sync now") | ADM, guarded (denial audited); metered via the Gate. |
+| `IntegrationCredential.ui_domain` | Written by `:record_preflight` from evidence. Readable by ADM, REV, AUR for the "Edit in HubSpot" link. |
 | `SuppressionContext` | `@types` += `:crm_sync`. |
 | CampaignEnrollment | Policy unchanged; covered through `SuppressionContext`. |
 | `ApplySuppression` | Advisory key before `Locks.targets`; `stop_reason(:crm_opt_out) = :unsubscribe`. |
@@ -1017,15 +1083,19 @@ None.
 
 ### 10. Setup ordering (owner-run; no agent handles the key)
 
-1. **H1a ships hermetic only.** It adds the `.gitignore` entry, the
-   `.sops.yaml` rule, the `bin/with-secrets` mapping, the holder, `ChildEnv`,
-   the Gate, preflight and the smoke hatch. Its live transport is reachable
-   only through the smoke hatch, and there is no remote enablement.
-2. **H0** (after H1a merges). The owner creates the test account and the
-   service key (OQ-D), and writes the flat sops file *inside the now-ignored
-   path*.
-   - The owner runs either the smoke hatch, or the independent owner-only
-     probe:
+0. **Secrets PR (coordinator, separate and small).** It adds the
+   `.gitignore` entry and the `.sops.yaml` creation rule for
+   `secrets/hubspot.local.sops.yaml`. Once it merges, the owner can store
+   the key.
+1. **H1a ships hermetic only.** It adds the `bin/with-secrets` mapping, the
+   holder, `ChildEnv`, the Gate, preflight and the smoke hatch. Its live
+   transport is reachable only through the smoke hatch, and there is no
+   remote enablement.
+2. **H0** (after the secrets PR; independent of H1a). The owner creates the
+   test account and the service key (OQ-D), and writes the flat sops file in
+   the ignored path.
+   - The owner runs the independent owner-only probe at once, or the smoke
+     hatch after H1a merges:
      `sops exec-env secrets/hubspot.local.sops.yaml 'curl -sS -H "Authorization: Bearer $hubspot_service_key" https://api.hubapi.com/account-info/v3/details'`.
      It prints account type and portal id only, for the owner to read.
    - The owner reports the facts in prose; agents never see the key.
