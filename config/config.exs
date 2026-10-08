@@ -195,7 +195,8 @@ config :sdr_agent, :webhook_hmac, key_id: "derived-1", source: :derived
 # refuses boot. The reconciled-method allowlist holds exactly ONE exact entry,
 # enabled by the reviewed S12d change on the strength of proof 3
 # (docs/audit/s12d-wire-witness-proof-3.json, Codex evidence PASS c9a2bba3).
-# Any other provider, CLI version, projection or method stays `inferred`.
+# An eligible ClaudeCLI invocation under any other CLI version, projection or
+# method stays `inferred`; Fake or ineligible invocations stay `skipped`.
 # Changing it requires a reviewed ADR-0005 amendment.
 config :sdr_agent, SdrAgent.Agents.Witness,
   store_root: nil,

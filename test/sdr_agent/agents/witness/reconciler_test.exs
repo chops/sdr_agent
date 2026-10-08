@@ -9,9 +9,11 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
 
   C1 invocation aggregate, C2 missing/incomplete/ambiguous attention without
   fabricated links, C3 mismatch attention, P2 no account id in SDR records,
-  P7 count_tokens classification, idempotent replays, and R3: the runtime
-  reconciled-method allowlist is empty, so a perfect proof stays `inferred`;
-  `reconciled` appears only under an explicit, isolated test allowlist.
+  P7 count_tokens classification, idempotent replays, and R3. Dev and prod
+  ship exactly one exact entry (S12d enablement). The test environment's
+  allowlist is empty, so a perfect proof stays `inferred` there; `reconciled`
+  appears only under an explicit, isolated test allowlist or the shipped
+  entry.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -616,7 +618,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
       end
     end
 
-    test "the runtime allowlist is empty: a perfect v3 proof stays inferred", ctx do
+    test "the test env allowlist is empty: a perfect v3 proof stays inferred", ctx do
       invocation = call_model!(ctx, "cli_shape_v3")
       result = reconcile(ctx, invocation)
       assert match?({:ok, %{status: :inferred}}, result), inspect(result)

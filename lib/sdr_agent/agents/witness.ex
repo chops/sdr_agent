@@ -105,7 +105,11 @@ defmodule SdrAgent.Agents.Witness do
     end
   end
 
-  @doc "Methods whose matching proof may be labelled reconciled (ships empty)."
+  @doc """
+  Exact entries whose matching proof may be labelled reconciled. Dev and prod
+  ship exactly one (S12d enablement, ADR-0005); the test environment
+  configures none.
+  """
   def reconciled_methods do
     # Runtime entries must be exact proofs; a bare method atom is accepted
     # only through the test-only per-call override.
