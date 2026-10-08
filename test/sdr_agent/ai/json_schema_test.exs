@@ -133,6 +133,20 @@ defmodule SdrAgent.AI.JsonSchemaTest do
     assert n["additionalProperties"]["required"] == ["m", "n"]
   end
 
+  test "malformed or non-list required values are left as they are (no repair)" do
+    for required <- [["b", 1, "a"], ["b", nil], "a", %{"a" => true}, nil, 3, true] do
+      schema = %{"type" => "object", "required" => required, "items" => true}
+      n = call(:normalize, [schema])
+      assert is_map(n), inspect(n)
+      assert n["required"] == required, inspect(required)
+      assert n["items"] == true
+    end
+
+    # Boolean schemas in schema positions stay as they are.
+    schema = %{"additionalProperties" => false, "properties" => %{"a" => true}, "not" => false}
+    assert call(:normalize, [schema]) == schema
+  end
+
   test "literal data and other arrays are untouched" do
     literal = %{"required" => ["b", "a"]}
 
