@@ -237,8 +237,17 @@ resource or policy change:
   before it. One server keeps concurrency at 1 (C8): the `research` queue's
   concurrency does not change that, because every call goes through the
   server.
-- `AgentWorker` and `ReplyWorker` resolve the run's model through
-  `Runtime.resolve/1` and inject the named server. For `AgentWorker` this
+- One validated selection serves every model-call path. `AgentWorker`,
+  `ReplyWorker` and the public `ModelProvider.complete/2` all resolve the
+  model through `Runtime.resolve/1`, which injects the named server. The
+  following are refused before any reservation, never downgraded to the
+  Fake:
+  - a ClaudeCLI that is absent (`:provider_not_running`);
+  - one whose admission is closed (`:provider_not_quiescent`, see below);
+  - one whose launcher is missing (`:llm_proxy_shim_not_found`).
+  This health check is in addition to the per-call init attestation, which
+  stays mandatory.
+- The workers inject the named server in the same way. For `AgentWorker` this
   covers both the default provider and one carried by the job. If ClaudeCLI
   is wanted but its server is not running, no model call or reservation is
   made. The run fails with `provider_error`, which opens its critical
@@ -309,9 +318,11 @@ resource or policy change:
   output or credential, and is not persisted: the ModelInvocation ledger
   stays the record. Drift still fails the invocation and opens the critical
   `provider_error` Failure (S7 amendment).
-- The Admin page shows the active provider, the model alias and resolved
-  id, the reviewed CLI version, whether the server is running, and the last
-  attestation. It shows no secret. It refreshes live (ADR-0012) when an
+- The Admin page shows the configured provider and the effective one. The
+  effective provider is none, with the refusal reason, while calls are
+  refused. It also shows the model alias and resolved id, the reviewed CLI
+  version, the server state (running, not running, or blocked), and the
+  last attestation with its time. It shows no secret. It refreshes live (ADR-0012) when an
   audit event commits. The card only reflects the attestation; the
   per-call attestation remains what refuses a drifted CLI.
 

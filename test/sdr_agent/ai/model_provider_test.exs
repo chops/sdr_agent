@@ -52,6 +52,26 @@ defmodule SdrAgent.AI.ModelProviderTest do
     assert length(invocations) == 20
   end
 
+  describe "Q0.1: the public call path resolves the runtime provider" do
+    setup do
+      previous = Application.fetch_env!(:sdr_agent, :model_provider)
+      Application.put_env(:sdr_agent, :model_provider, SdrAgent.AI.ModelProvider.ClaudeCLI)
+      on_exit(fn -> Application.put_env(:sdr_agent, :model_provider, previous) end)
+    end
+
+    test "ClaudeCLI selected without its server is refused before any reservation", ctx do
+      assert {:error, :provider_not_running} = ModelProvider.complete(request(ctx, "cli-absent"))
+      assert {:ok, []} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
+
+      assert {:error, :provider_not_running} =
+               ModelProvider.complete(request(ctx, "cli-named"),
+                 provider: SdrAgent.AI.ModelProvider.ClaudeCLI
+               )
+
+      assert {:ok, []} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
+    end
+  end
+
   test "an ambiguous provider outcome is persisted as unknown", ctx do
     assert {:error, :provider_outcome_unknown} =
              ModelProvider.complete(request(ctx, "unknown"), provider: __MODULE__.UnknownProvider)

@@ -180,6 +180,20 @@ updated to the requested =:unknown=, passes.
 
 *TDD Gate Verification (round 4):* [X] VERIFIED (behavioural RED via Codex reproducer; seam test noted)
 
+** Round 5 (quality-plan consult (c), after Codex APPROVED =791dbbc=)
+Main merged in (=d4ba5cd=, merge commit, no history rewrite). RED: 5 of 37
+focused tests failed, all clean assertions — =Runtime.resolve/1= admitted a
+launcher-less / lease-blocked named server; no configured/effective status;
+Admin lacked the effective provider; the public =ModelProvider.complete/2=
+reserved an invocation before ClaudeCLI refused (=provider_not_running=).
+The added "unknown outcome is never re-sent" worker test and the
+"application child restarts after a crash" test passed already (regression
+coverage). GREEN: one health-checked =Runtime.resolve/1= for the workers
+and the public path (refusal before reservation); status/Admin report
+configured vs effective with the refusal.
+
+*TDD Gate Verification (round 5):* [X] VERIFIED (assertion-only RED)
+
 -----
 
 * Implementation Notes

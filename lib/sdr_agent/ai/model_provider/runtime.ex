@@ -16,12 +16,18 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       (concurrency 1, ADR-0004 / ADR-0005 C8).
     * `resolve/1` — a run's model options (`:provider`,
       `:provider_options`) with the provider made explicit and, for
-      ClaudeCLI, the named server injected. When that server is not running
-      the result is `{:error, :provider_not_running}`: never a raise and
-      never a silent fallback to the Fake.
-    * `status/0` — what the Admin page shows: provider, model alias and
-      resolved id, reviewed CLI version, server state and the last init
-      attestation. No secret is read.
+      ClaudeCLI, the named server injected — the one validated selection
+      used by `SdrAgent.SDR.AgentWorker`, `SdrAgent.SDR.ReplyWorker` and
+      the public `SdrAgent.AI.ModelProvider.complete/2`. An absent or
+      unhealthy ClaudeCLI is a typed refusal before any reservation:
+      `{:error, :provider_not_running}`, `:provider_not_quiescent`
+      (admission closed) or `:llm_proxy_shim_not_found` — never a raise and
+      never a silent fallback to the Fake. Per-call init attestation stays
+      mandatory; this health check is in addition to it.
+    * `status/0` — what the Admin page shows: the configured and the
+      effective provider (nil, with the refusal, when calls are refused),
+      model alias and resolved id, reviewed CLI version, server state and
+      the last init attestation with its time. No secret is read.
   """
 
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
@@ -48,8 +54,10 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
   @doc """
   Makes `model`'s provider explicit (default: the selected one) and, for
-  ClaudeCLI, injects the named server; `{:error, :provider_not_running}`
-  when the ClaudeCLI server it would use is not running.
+  ClaudeCLI, injects the named server. Refused (`{:error, reason}`) when
+  the ClaudeCLI server it would use is not running, does not admit calls,
+  or found no `llm-proxy-shim` (the last two are known only for a named
+  server).
   """
   def resolve(model) when is_list(model) do
     model = Keyword.put_new_lazy(model, :provider, &provider/0)
@@ -61,19 +69,29 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
           |> Keyword.get(:provider_options, [])
           |> Keyword.put_new(:server, ClaudeCLI.server())
 
-        if ClaudeCLI.running?(options[:server]),
-          do: {:ok, Keyword.put(model, :provider_options, options)},
-          else: {:error, :provider_not_running}
+        with :ok <- healthy(options[:server]),
+             do: {:ok, Keyword.put(model, :provider_options, options)}
 
       _other ->
         {:ok, model}
     end
   end
 
+  defp healthy(server) do
+    cond do
+      not ClaudeCLI.running?(server) -> {:error, :provider_not_running}
+      not is_atom(server) -> :ok
+      ClaudeCLI.admission(server).admission != :open -> {:error, :provider_not_quiescent}
+      ClaudeCLI.attestation(server)[:command?] == false -> {:error, :llm_proxy_shim_not_found}
+      true -> :ok
+    end
+  end
+
   @doc """
   The run `failure_reason` recorded when a worker refuses to run because of
-  `reason` (`:provider_not_running` or `:unknown_model_provider`); no model
-  call was made.
+  `reason` (`:provider_not_running`, `:provider_not_quiescent`,
+  `:llm_proxy_shim_not_found` or `:unknown_model_provider`); no model call
+  was made.
   """
   def refusal_message(:provider_not_running),
     do:
@@ -83,9 +101,33 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   def refusal_message(:unknown_model_provider),
     do: "unknown model provider named by the job (fake or claude_cli); no model call was made"
 
+  def refusal_message(:provider_not_quiescent),
+    do:
+      "model provider claude_cli refuses calls until earlier CLI work is confirmed stopped " <>
+        "(see Admin); no model call was made"
+
+  def refusal_message(:llm_proxy_shim_not_found),
+    do: "model provider claude_cli found no llm-proxy-shim on PATH; no model call was made"
+
   @doc "The selected provider's status for operators (no secrets)."
   def status do
-    case provider() do
+    configured = provider()
+
+    {effective, refusal} =
+      case resolve([]) do
+        {:ok, model} -> {model[:provider], nil}
+        {:error, reason} -> {nil, reason}
+      end
+
+    Map.merge(details(configured), %{
+      configured: configured,
+      effective: effective,
+      refusal: refusal
+    })
+  end
+
+  defp details(configured) do
+    case configured do
       ClaudeCLI ->
         provenance = ClaudeCLI.provenance()
 

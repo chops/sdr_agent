@@ -166,6 +166,66 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
     end
   end
 
+  describe "Q0.1 consult: health-checked resolution and the app's supervised child" do
+    test "a blocked or launcher-less named server is refused, never downgraded" do
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+
+      start_supervised!(
+        {ClaudeCLI, name: ClaudeCLI.server(), command: nil, command_args: ["claude"]},
+        id: :shimless
+      )
+
+      assert {:error, :llm_proxy_shim_not_found} = Runtime.resolve([])
+      stop_supervised!(:shimless)
+      # Its reaper releases the lease as its cleanup receipt.
+      assert eventually(fn -> ClaudeCLI.Reaper.lease(ClaudeCLI.server()) == nil end)
+
+      # A lease still held by a dead reaper (cleanup never confirmed).
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _}
+      :persistent_term.put({ClaudeCLI.Reaper, ClaudeCLI.server()}, {:held, dead})
+      on_exit(fn -> ClaudeCLI.Reaper.release(ClaudeCLI.server()) end)
+
+      start_named!("ready")
+      assert {:error, :provider_not_quiescent} = Runtime.resolve([])
+      assert {:error, :provider_not_quiescent} = Runtime.resolve(provider: ClaudeCLI)
+    end
+
+    test "status reports the configured and the effective provider" do
+      Application.put_env(:sdr_agent, :model_provider, Fake)
+      assert %{configured: Fake, effective: Fake} = Runtime.status()
+
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+
+      assert %{configured: ClaudeCLI, effective: nil, refusal: :provider_not_running} =
+               Runtime.status()
+
+      start_named!("ready")
+      assert %{configured: ClaudeCLI, effective: ClaudeCLI, refusal: nil} = Runtime.status()
+    end
+
+    test "the application's child restarts after a crash, admitting calls again" do
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+      Application.put_env(:sdr_agent, ClaudeCLI, timeout: 90_000)
+      [child] = Runtime.children()
+      server = start_supervised!(child)
+
+      assert %{admission: :open} = ClaudeCLI.admission()
+      Process.exit(server, :kill)
+
+      assert eventually(fn ->
+               case GenServer.whereis(ClaudeCLI.server()) do
+                 pid when is_pid(pid) -> pid != server
+                 _ -> false
+               end
+             end)
+
+      assert eventually(fn -> ClaudeCLI.admission() == %{admission: :open} end)
+      assert %{status: :pending} = ClaudeCLI.attestation()
+    end
+  end
+
   describe "status (Admin)" do
     test "the Fake reports its fixture model and no attestation" do
       Application.put_env(:sdr_agent, :model_provider, Fake)
@@ -195,6 +255,18 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
                server: :running,
                attestation: %{status: :pending}
              } = Runtime.status()
+    end
+  end
+
+  defp eventually(fun, attempts \\ 200)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
     end
   end
 

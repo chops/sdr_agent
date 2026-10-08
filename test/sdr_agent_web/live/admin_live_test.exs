@@ -28,6 +28,7 @@ defmodule SdrAgentWeb.AdminLiveTest do
       {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
 
       assert has_element?(view, "#model-provider", "Fake")
+      assert has_element?(view, "#effective-provider[data-effective='Fake']")
       assert has_element?(view, "#model-id", "fake-qualifier")
       assert has_element?(view, "#model-attestation[data-status='not_applicable']")
     end
@@ -39,6 +40,13 @@ defmodule SdrAgentWeb.AdminLiveTest do
 
       {:ok, view, _html} = live(admin, ~p"/admin")
       assert has_element?(view, "#model-provider", "ClaudeCLI")
+
+      assert has_element?(
+               view,
+               "#effective-provider[data-effective='none']",
+               "provider_not_running"
+             )
+
       assert has_element?(view, "#provider-server[data-status='not_running']")
       assert has_element?(view, "#model-attestation[data-status='not_running']")
 
@@ -54,6 +62,7 @@ defmodule SdrAgentWeb.AdminLiveTest do
       assert has_element?(view, "#model-id", "claude-opus-5-5")
       assert has_element?(view, "#reviewed-cli-version", "2.1.291")
       assert has_element?(view, "#provider-server[data-status='running']")
+      assert has_element?(view, "#effective-provider[data-effective='ClaudeCLI']")
       assert has_element?(view, "#model-attestation[data-status='pending']", "first call")
 
       assert {:error, :model_attestation_drift} =

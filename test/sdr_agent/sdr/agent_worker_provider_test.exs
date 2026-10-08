@@ -97,6 +97,42 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
     end
   end
 
+  test "an unknown model outcome fails the run once and is never re-sent", ctx do
+    prefix = Path.join(System.tmp_dir!(), "sdr-claude-hang-#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      for record <- Path.wildcard(prefix <> ".*") do
+        launch = record |> File.read!() |> JSON.decode!()
+
+        for pid <- [launch["child"], launch["root"]],
+            do: System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+
+        File.rm(record)
+      end
+    end)
+
+    start_supervised!(
+      {ClaudeCLI,
+       name: ClaudeCLI.server(),
+       command: System.find_executable("elixir"),
+       command_args: [@fake, "hang", prefix],
+       timeout: 1_500}
+    )
+
+    %{run: run} = assign!(ctx, "01", model: [provider: ClaudeCLI])
+    assert %{success: 1} = drain!()
+
+    run = run!(ctx, run)
+    assert {run.status, run.status_reason} == {:failed, :provider_error}
+    assert [invocation] = invocations!(ctx, run)
+    assert invocation.status == :unknown
+
+    # Nothing is retried or re-sent: no job is left, no second launch.
+    assert %{success: 0, failure: 0, discard: 0} = drain!()
+    assert [_one] = invocations!(ctx, run)
+    assert length(Path.wildcard(prefix <> ".*")) == 1
+  end
+
   test "a job naming an unknown provider is refused, never run on the Fake", ctx do
     %{run: run, operation: operation} = assign!(ctx, "01", model: [provider: ClaudeCLI])
     [job] = all_enqueued(worker: AgentWorker)

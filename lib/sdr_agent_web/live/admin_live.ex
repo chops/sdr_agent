@@ -1,7 +1,9 @@
 defmodule SdrAgentWeb.AdminLive do
   @moduledoc """
   Admin / provider status (S10b; ADM only): the runtime-selected model
-  provider (`SdrAgent.AI.ModelProvider.Runtime.status/0`, Q0.1: model alias
+  provider (`SdrAgent.AI.ModelProvider.Runtime.status/0`, Q0.1: configured
+  and effective provider — none, with the refusal, while calls are refused —
+  model alias
   and resolved id, reviewed CLI version, whether its supervised server runs
   and the last init attestation — refreshed live, like the other console
   views (`SdrAgentWeb.LiveRefresh`), whenever an audit event commits, so a
@@ -132,8 +134,25 @@ defmodule SdrAgentWeb.AdminLive do
         <div class="grid gap-6 lg:grid-cols-3">
           <.card title="Model provider">
             <dl class="divide-y divide-zinc-100">
-              <.field label="Provider">
-                <span id="model-provider" class="font-medium">{short(@provider.provider)}</span>
+              <.field label="Configured">
+                <span id="model-provider" class="font-medium">{short(@provider.configured)}</span>
+              </.field>
+              <.field label="Effective">
+                <span
+                  id="effective-provider"
+                  data-effective={
+                    if @provider.effective, do: short(@provider.effective), else: "none"
+                  }
+                  class={[
+                    "text-xs font-medium",
+                    if(@provider.effective, do: "text-emerald-700", else: "text-rose-700")
+                  ]}
+                >
+                  <span :if={@provider.effective}>{short(@provider.effective)}</span>
+                  <span :if={is_nil(@provider.effective)}>
+                    none: calls refused ({@provider.refusal})
+                  </span>
+                </span>
               </.field>
               <.field label="Module">
                 <span class="break-all font-mono text-xs">{inspect(@provider.provider)}</span>
