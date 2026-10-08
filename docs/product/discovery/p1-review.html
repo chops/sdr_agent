@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<!-- ARTIFACT-START: everything between the markers is also published as the claude.ai artifact -->
+<title>SDR Agent Discovery Packet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: the discovery packet as a review sheet in the SDLC map's family.
+   A sticky section index, then the brief, the story map as a backbone grid,
+   failures, the first-slice choice and the owner's decisions. Every item can
+   carry a note. */
+:root {
+  --bg: #f1f4f6;
+  --surface: #ffffff;
+  --sunk: #e7ecef;
+  --ink: #17212b;
+  --muted: #586773;
+  --line: #d3dbe1;
+  --accent: #0d6a80;
+  --accent-soft: #d9ecf1;
+  --gate: #a2610c;
+  --gate-soft: #f6e8d3;
+  --done: #2b7649;
+  --done-soft: #dcefe3;
+  --gap: #a8382c;
+  --gap-soft: #f6dfdb;
+  --p-owner: #6a49be;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+  --step-3: 2.25rem;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10161b; --surface: #172028; --sunk: #1d2832; --ink: #e3eaef; --muted: #93a3af; --line: #2a3742;
+    --accent: #56b4cc; --accent-soft: #173845; --gate: #e2a54c; --gate-soft: #3a2b16;
+    --done: #63bd88; --done-soft: #183526; --gap: #e57a6c; --gap-soft: #3d1f1b; --p-owner: #a78bf0;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10161b; --surface: #172028; --sunk: #1d2832; --ink: #e3eaef; --muted: #93a3af; --line: #2a3742;
+  --accent: #56b4cc; --accent-soft: #173845; --gate: #e2a54c; --gate-soft: #3a2b16;
+  --done: #63bd88; --done-soft: #183526; --gap: #e57a6c; --gap-soft: #3d1f1b; --p-owner: #a78bf0;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 var(--step-0)/1.55 var(--font-body); -webkit-font-smoothing: antialiased; }
+.page { max-width: 1180px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 72px; display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 36px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: var(--step-3); letter-spacing: -0.01em; }
+h2 { font-size: var(--step-2); }
+h3 { font-size: var(--step-1); }
+p { margin: 0; }
+.eyebrow { font: 500 var(--step--1)/1.3 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.lede { max-width: 70ch; color: var(--muted); font-size: var(--step-1); }
+.muted { color: var(--muted); }
+.mono { font-family: var(--font-mono); font-size: var(--step--1); }
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+nav.index { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 20px); align-self: start; display: grid; gap: 2px; }
+nav.index a { padding: 6px 8px; border-radius: var(--radius); text-decoration: none; color: var(--muted); font-size: var(--step--1); transition: background .15s, color .15s; }
+nav.index a:hover { background: var(--sunk); color: var(--ink); }
+nav.index .save { margin-top: 12px; font-size: var(--step--1); padding: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); display: grid; gap: 8px; }
+
+main { display: grid; gap: 44px; min-width: 0; }
+header { display: grid; gap: 12px; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 24px; font-size: var(--step--1); color: var(--muted); }
+.facts b { color: var(--ink); font-weight: 600; }
+.disclaimer { font-size: var(--step--1); color: var(--muted); max-width: 80ch; }
+.warn { background: var(--gap-soft); color: var(--gap); border: 1px solid var(--gap); padding: 12px 14px; border-radius: var(--radius); font-weight: 500; }
+section { display: grid; gap: 14px; min-width: 0; scroll-margin-top: 20px; }
+.sec-head { display: grid; gap: 6px; }
+.sec-head p { color: var(--muted); max-width: 74ch; }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: grid; gap: 10px; min-width: 0; }
+.promise { font-family: var(--font-display); font-size: var(--step-2); line-height: 1.25; text-wrap: balance; }
+.kv { display: grid; grid-template-columns: 110px 1fr; gap: 8px 14px; }
+.kv dt { color: var(--muted); font-size: var(--step--1); }
+.kv dd { margin: 0; }
+
+.items { display: grid; gap: 8px; }
+.item { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; gap: 4px 14px; align-items: start; }
+.item .id { font: 500 var(--step--1)/1.4 var(--font-mono); color: var(--accent); }
+.item .body { display: grid; gap: 2px; min-width: 0; }
+.item .body b { font-weight: 600; }
+.item .body span { color: var(--muted); font-size: var(--step--1); }
+.item .note-wrap { grid-column: 2 / -1; }
+.addnote { background: none; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; padding: 3px 9px; color: var(--muted); white-space: nowrap; transition: border-color .15s, color .15s; }
+.addnote:hover, .addnote.has { border-color: var(--p-owner); color: var(--p-owner); }
+
+/* Story map */
+.map-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); padding: 12px; }
+.map { display: grid; grid-template-columns: repeat(9, minmax(150px, 1fr)); gap: 8px; min-width: 1380px; }
+.col { display: grid; gap: 6px; align-content: start; }
+.col .head { background: var(--ink); color: var(--bg); border-radius: var(--radius); padding: 8px 10px; display: grid; gap: 2px; }
+.col .head b { font: 500 11px/1 var(--font-mono); opacity: .8; }
+.col .head span { font-family: var(--font-display); font-weight: 600; }
+.task { border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: var(--radius); padding: 7px 9px; font-size: var(--step--1); background: var(--surface); }
+.task.built { border-left-color: var(--done); }
+.task.partial { border-left-color: var(--gate); }
+.task.new { border-left-color: var(--accent); background: var(--accent-soft); }
+.task.design { border-left-color: var(--muted); border-style: dashed; }
+.task.slice { outline: 2px solid var(--p-owner); outline-offset: 1px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: var(--step--1); color: var(--muted); }
+.legend span { display: inline-flex; gap: 6px; align-items: center; }
+.sw { width: 14px; height: 12px; border-radius: 2px; border: 1px solid var(--line); border-left-width: 4px; display: inline-block; }
+.across { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Tables */
+.tscroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: var(--step--1); }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 11px/1.2 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+td.id { font-family: var(--font-mono); color: var(--accent); white-space: nowrap; }
+
+/* Slices */
+.slices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.slice { position: relative; }
+.slice .tag { position: absolute; top: 12px; right: 12px; font: 500 10px/1 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; color: var(--done); border: 1px solid currentColor; background: var(--done-soft); padding: 4px 6px; border-radius: 999px; }
+.slice h3 { padding-right: 110px; }
+.slice dl { display: grid; gap: 6px; margin: 0; font-size: var(--step--1); }
+.slice dt { font: 500 11px/1 var(--font-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.slice dd { margin: 0 0 4px; }
+
+/* Answers */
+.answer { display: grid; gap: 8px; }
+.answer label, legend { font-size: var(--step--1); color: var(--p-owner); font-weight: 600; padding: 0; }
+fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 8px; min-width: 0; }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.choices label { color: var(--ink); font-weight: 400; font-size: var(--step-0); display: inline-flex; gap: 8px; align-items: center; border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 6px 12px; cursor: pointer; transition: border-color .15s, background .15s; }
+.choices label:hover { border-color: var(--p-owner); }
+.choices input { accent-color: var(--p-owner); margin: 0; }
+.choices label:has(input:checked) { border-color: var(--p-owner); background: color-mix(in srgb, var(--p-owner) 12%, var(--surface)); }
+textarea { width: 100%; min-height: 64px; resize: vertical; font: 400 var(--step-0)/1.45 var(--font-body); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; }
+textarea:focus { border-color: var(--p-owner); outline: none; }
+.stale { display: block; font-size: var(--step--1); color: var(--gate); }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
+.decisions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.export { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.btn { background: var(--ink); color: var(--bg); border: 0; border-radius: var(--radius); padding: 10px 16px; font-weight: 600; transition: opacity .15s, transform .1s; }
+.btn:hover { opacity: .9; } .btn:active { transform: translateY(1px); }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.saved { color: var(--done); } .unsaved { color: var(--gap); }
+#export-text { min-height: 180px; font-family: var(--font-mono); font-size: var(--step--1); }
+.err { background: var(--gap-soft); color: var(--gap); padding: 14px; border-radius: var(--radius); }
+footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid var(--line); padding-top: 16px; }
+
+@media (max-width: 960px) {
+  .page { grid-template-columns: 1fr; gap: 24px; }
+  nav.index { position: static; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  nav.index .save { grid-column: 1 / -1; }
+  .slices, .decisions { grid-template-columns: 1fr; }
+}
+@media (max-width: 560px) {
+  .item { grid-template-columns: 1fr; }
+  .item .note-wrap { grid-column: 1; }
+  .kv { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <nav class="index" aria-label="Sections">
+    <a href="#promise">The promise</a>
+    <a href="#outcomes">Outcomes</a>
+    <a href="#nongoals">Non-goals</a>
+    <a href="#assumptions">Assumptions</a>
+    <a href="#founder">Founder notes</a>
+    <a href="#map">Story map</a>
+    <a href="#failures">Failure cases</a>
+    <a href="#slice">First build slice</a>
+    <a href="#decide">Your decisions</a>
+    <a href="#ask">Questions</a>
+    <div class="save"><span id="save-state">Checking browser storage…</span><button class="btn ghost" type="button" id="jump">Copy notes for Claude</button></div>
+  </nav>
+
+  <main>
+    <header>
+      <div class="eyebrow">SDR Agent · phase P1 discovery · for gate G1</div>
+      <h1>Discovery packet</h1>
+      <p class="lede">The outcome brief, the story map and the first build slice, for you to review today. Add a note to anything, answer the questions, then copy your notes into chat.</p>
+      <div class="facts" id="facts"></div>
+      <p class="disclaimer">Notes on this page are feedback, not approvals, and they are not in git. They become part of the record when you paste them into chat and Claude commits a summary. Approvals are given in chat and written into a gate record.</p>
+      <p class="warn" id="storage-warning" role="alert" hidden></p>
+    </header>
+
+    <section id="promise" aria-labelledby="h-promise">
+      <div class="sec-head"><div class="eyebrow">Method step 1 · outcome brief</div><h2 id="h-promise">The promise</h2></div>
+      <div class="card">
+        <p class="promise" id="one-liner"></p>
+        <dl class="kv" id="who"></dl>
+        <div class="answer"><label for="f-promise">Your note on the promise, the user and the job</label><textarea id="f-promise" data-note="promise" data-context="The promise, user, situation and job"></textarea></div>
+      </div>
+    </section>
+
+    <section id="outcomes" aria-labelledby="h-out">
+      <div class="sec-head"><h2 id="h-out">Outcomes</h2><p>Each one can be observed in the workshop release. Delivery is captured, not sent, so none of them claims replies, meetings or pipeline.</p></div>
+      <div class="items" id="outcome-list"></div>
+    </section>
+
+    <section id="nongoals" aria-labelledby="h-ng">
+      <div class="sec-head"><h2 id="h-ng">Not in the workshop release</h2><p>From your answers, but deliberately left out. Each needs its own decision to come back. Add a note if one must not wait.</p></div>
+      <div class="items" id="ng-list"></div>
+    </section>
+
+    <section id="assumptions" aria-labelledby="h-as">
+      <div class="sec-head"><h2 id="h-as">Assumptions to check</h2><p>What we believe without evidence yet, and how we will find out.</p></div>
+      <div class="items" id="as-list"></div>
+    </section>
+
+    <section id="founder" aria-labelledby="h-founder">
+      <div class="sec-head"><h2 id="h-founder">Your notes from the founder conversation</h2><p>The brief's "today's workflow" section is empty until these arrive; we will not invent it. Paste what matters: how they do outbound today, what is slow or painful, what they would need to trust a drafted email. Leave out anything they would not want published, since a summary goes into the public repository.</p></div>
+      <div class="card">
+        <fieldset id="f-evtype" data-choice="founder:type" data-context="Founder conversation: kind of evidence">
+          <legend>What kind of evidence is it?</legend>
+          <div class="choices">
+            <label><input type="radio" name="evtype" value="Interview (they described their work)"> Interview</label>
+            <label><input type="radio" name="evtype" value="Reaction to a demo"> Reaction to a demo</label>
+            <label><input type="radio" name="evtype" value="I watched them do the task"> I watched them do the task</label>
+            <label><input type="radio" name="evtype" value="A mix"> A mix</label>
+          </div>
+        </fieldset>
+        <div class="answer"><label for="f-founder">Founder notes</label><textarea id="f-founder" data-note="founder:notes" data-context="Founder conversation notes" style="min-height:140px"></textarea></div>
+      </div>
+    </section>
+
+    <section id="map" aria-labelledby="h-map">
+      <div class="sec-head"><div class="eyebrow">Method step 2 · story map</div><h2 id="h-map">Story map</h2><p>The founder's work from left to right. Each task shows what the prototype already has. Choosing a first slice below outlines its tasks in purple.</p></div>
+      <div class="legend">
+        <span><i class="sw" style="border-left-color:var(--done)"></i>Built</span>
+        <span><i class="sw" style="border-left-color:var(--gate)"></i>Partial: domain exists, no screen</span>
+        <span><i class="sw" style="border-left-color:var(--accent);background:var(--accent-soft)"></i>New</span>
+        <span><i class="sw" style="border-style:dashed"></i>Design only</span>
+      </div>
+      <div class="map-scroll"><div class="map" id="map-grid"></div></div>
+      <div class="card"><b>Across all steps</b><div class="across" id="across"></div></div>
+      <div class="items" id="journey-notes"></div>
+    </section>
+
+    <section id="failures" aria-labelledby="h-fail">
+      <div class="sec-head"><h2 id="h-fail">Failure cases the design must handle</h2><p>Many operator screens exist because something failed or is uncertain. Is anything missing, or wrong?</p></div>
+      <div class="items" id="fail-list"></div>
+    </section>
+
+    <section id="slice" aria-labelledby="h-slice">
+      <div class="sec-head"><h2 id="h-slice">First build slice for Saturday</h2><p>Building starts Saturday with one narrow slice, after gates G1 to G5 pass for it. Three candidates; we recommend A.</p></div>
+      <div class="slices" id="slices"></div>
+      <div class="card">
+        <fieldset id="f-slice" data-choice="choice:slice" data-context="First build slice choice">
+          <legend>Which slice for Saturday?</legend>
+          <div class="choices">
+            <label><input type="radio" name="slice" value="A. Operator shell and home"> A. Operator shell and home</label>
+            <label><input type="radio" name="slice" value="B. Review workspace"> B. Review workspace</label>
+            <label><input type="radio" name="slice" value="C. CSV import"> C. CSV import</label>
+            <label><input type="radio" name="slice" value="Something else (see note)"> Something else</label>
+          </div>
+        </fieldset>
+        <div class="answer"><label for="f-slice-note">Why, or what you would change</label><textarea id="f-slice-note" data-note="slice:note" data-context="First build slice note"></textarea></div>
+      </div>
+    </section>
+
+    <section id="decide" aria-labelledby="h-dec">
+      <div class="sec-head"><h2 id="h-dec">Your decisions</h2><p>These tell us which way to go. Gate G1 itself is approved in chat and recorded.</p></div>
+      <div class="decisions">
+        <div class="card">
+          <fieldset id="f-brief" data-choice="choice:brief" data-context="Outcome brief verdict">
+            <legend>The outcome brief</legend>
+            <div class="choices">
+              <label><input type="radio" name="brief" value="Approve"> Approve</label>
+              <label><input type="radio" name="brief" value="Approve with the changes in my notes"> With changes</label>
+              <label><input type="radio" name="brief" value="Needs another round"> Another round</label>
+            </div>
+          </fieldset>
+        </div>
+        <div class="card">
+          <fieldset id="f-story" data-choice="choice:story" data-context="Story map verdict">
+            <legend>The story map</legend>
+            <div class="choices">
+              <label><input type="radio" name="story" value="Approve"> Approve</label>
+              <label><input type="radio" name="story" value="Approve with the changes in my notes"> With changes</label>
+              <label><input type="radio" name="story" value="Needs another round"> Another round</label>
+            </div>
+          </fieldset>
+        </div>
+      </div>
+    </section>
+
+    <section id="ask" aria-labelledby="h-ask">
+      <div class="sec-head"><h2 id="h-ask">Questions</h2><p>Ours for you first, then a box for yours. We answer yours in chat.</p></div>
+      <div class="items" id="pq-list"></div>
+      <div class="card"><div class="answer"><label for="f-ask">Your questions for Claude and Codex</label><textarea id="f-ask" data-note="ask" data-context="Questions for Claude and Codex"></textarea></div></div>
+    </section>
+
+    <section id="export" aria-labelledby="h-exp">
+      <div class="sec-head"><h2 id="h-exp">Send your notes</h2><p>Copies every note and choice, stamped with this page's revision, ready to paste into chat.</p></div>
+      <div class="export">
+        <button class="btn" id="copy" type="button">Copy notes for Claude</button>
+        <button class="btn ghost" id="download" type="button" hidden>Download notes</button>
+        <button class="btn ghost" id="show" type="button">Show text</button>
+        <span class="muted" id="copy-status" role="status"></span>
+      </div>
+      <textarea id="export-text" readonly hidden aria-label="Your notes as text"></textarea>
+    </section>
+
+    <footer id="footer"></footer>
+  </main>
+</div>
+
+<script src="p1-data.js"></script>
+<script src="notes.js"></script>
+<script>
+(function () {
+  "use strict";
+  var P = window.P1, N = window.SDLCNotes;
+  var $ = function (id) { return document.getElementById(id); };
+  if (!P || !N) {
+    document.querySelector("main").insertAdjacentHTML("afterbegin", '<p class="err">The page data did not load. Open this page from docs/product/discovery so p1-data.js and notes.js sit next to it.</p>');
+    return;
+  }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  var FP = N.fingerprint(P);
+  var store = N.createStore(function () { return window.localStorage; }, "sdr-p1-review-v1", { revision: P.meta.revision, fingerprint: FP });
+  var dirty = false;
+  var order = [];   // [key, label] in page order, for the export
+
+  function reg(key, label) { if (!order.some(function (o) { return o[0] === key; })) order.push([key, label]); }
+  function staleMarker(k) {
+    if (!store.isStale(k)) return "";
+    var n = store.entry(k);
+    return '<span class="stale" data-stale="' + esc(k) + '">Written against ' + (n.revision ? "revision " + esc(n.revision) : "an earlier version of this page") + '. Edit it, or <button type="button" class="linkbtn" data-confirm="' + esc(k) + '">keep it for this revision</button>.</span>';
+  }
+  function noteBox(key, context) {
+    reg(key, context);
+    var v = store.get(key);
+    return '<div class="note-wrap"' + (v ? "" : " hidden") + ' data-wrap="' + esc(key) + '"><textarea data-note="' + esc(key) + '" data-context="' + esc(context) + '" aria-label="Note on ' + esc(context) + '">' + esc(v) + "</textarea>" + staleMarker(key) + "</div>";
+  }
+  function noteButton(key) { return '<button type="button" class="addnote' + (store.get(key) ? " has" : "") + '" data-open="' + esc(key) + '">' + (store.get(key) ? "Your note" : "Add note") + "</button>"; }
+  function item(id, title, sub, key, context) {
+    return '<div class="item"><span class="id">' + esc(id) + '</span><div class="body"><b>' + esc(title) + "</b>" + (sub ? "<span>" + sub + "</span>" : "") + "</div>" + noteButton(key) + noteBox(key, context) + "</div>";
+  }
+
+  // Header and promise
+  $("facts").innerHTML = "<span><b>Revision</b> " + esc(P.meta.revision) + " · fingerprint " + FP + "</span><span><b>Gate</b> " + esc(P.meta.gate) + "</span><span><b>Text of record</b> " + P.meta.sources.map(function (s) { return '<span class="mono">' + esc(s) + "</span>"; }).join(", ") + "</span>";
+  $("one-liner").textContent = P.oneLiner;
+  $("who").innerHTML = P.who.map(function (w) { return "<dt>" + esc(w.k) + "</dt><dd>" + esc(w.v) + "</dd>"; }).join("");
+  reg("promise", "The promise, user, situation and job");
+
+  $("outcome-list").innerHTML = P.outcomes.map(function (o) { return item(o.id, o.t + ": " + o.d, "Observed by: " + esc(o.o), "note:" + o.id, o.id + " " + o.t); }).join("");
+  $("ng-list").innerHTML = P.nonGoals.map(function (n) { return item(n.id, n.t, esc(n.why), "note:" + n.id, n.id + " " + n.t); }).join("");
+  $("as-list").innerHTML = P.assumptions.map(function (a) { return item(a.id, a.t, "How we find out: " + esc(a.check), "note:" + a.id, a.id + " " + a.t); }).join("");
+  reg("founder:type", "Founder conversation: kind of evidence");
+  reg("founder:notes", "Founder conversation notes");
+
+  // Story map
+  var SLICE_TASKS = {
+    "A": { "Home and action queue": 1, "Check the model (real or fake)": 1, "Counts: leads, drafts, approvals, captures": 1 },
+    "B": { "Review queue": 1, "One draft: recipient, revision, citations, risks": 1, "Edit (new revision)": 1, "Approve, bound to recipient and revision": 1, "Reject with a reason": 1, "Keyboard-driven queue": 1 },
+    "C": { "Upload a CSV with preview and checks": 1, "Show duplicates and suppressed contacts": 1 }
+  };
+  function sliceKey() { var v = store.get("choice:slice"); return v ? v.charAt(0) : ""; }
+  function renderMap() {
+    var marks = SLICE_TASKS[sliceKey()] || {};
+    $("map-grid").innerHTML = P.journey.map(function (j) {
+      return '<div class="col"><div class="head"><b>' + esc(j.id) + "</b><span>" + esc(j.t) + "</span></div>" +
+        j.tasks.map(function (t) { return '<div class="task ' + t[1] + (marks[t[0]] ? " slice" : "") + '">' + esc(t[0]) + "</div>"; }).join("") + "</div>";
+    }).join("");
+    $("across").innerHTML = P.acrossJourney.map(function (t) { return '<span class="task ' + t[1] + (marks[t[0]] ? " slice" : "") + '">' + esc(t[0]) + "</span>"; }).join("");
+  }
+  renderMap();
+  $("journey-notes").innerHTML = P.journey.map(function (j) { return item(j.id, j.t, esc(j.tasks.map(function (t) { return t[0]; }).join(" · ")), "note:" + j.id, j.id + " " + j.t); }).join("");
+  $("fail-list").innerHTML = P.failures.map(function (f) { return item(f.id, f.t + " (" + f.where + ")", "You should see: " + esc(f.see), "note:" + f.id, f.id + " " + f.t); }).join("") +
+    item("F-new", "A failure case we missed", "", "note:F-new", "Missing failure cases");
+
+  // Slices
+  $("slices").innerHTML = P.slices.map(function (s) {
+    return '<div class="card slice">' + (s.rec ? '<span class="tag">Recommended</span>' : "") + "<h3>" + esc(s.id + ". " + s.t) + "</h3><dl><dt>What it is</dt><dd>" + esc(s.what) + "</dd><dt>What changes underneath</dt><dd>" + esc(s.under) + "</dd><dt>Value</dt><dd>" + esc(s.value) + "</dd><dt>Risk</dt><dd>" + esc(s.risk) + "</dd></dl></div>";
+  }).join("");
+  reg("choice:slice", "First build slice choice"); reg("slice:note", "First build slice note");
+  reg("choice:brief", "Outcome brief verdict"); reg("choice:story", "Story map verdict");
+  $("pq-list").innerHTML = P.questions.map(function (q) {
+    reg("pq:" + q.id, q.id + ". " + q.q);
+    return '<div class="item"><span class="id">' + esc(q.id) + '</span><div class="body"><b>' + esc(q.q) + '</b></div><span></span><div class="note-wrap"><textarea data-note="pq:' + q.id + '" data-context="' + esc(q.id + ". " + q.q) + '" aria-label="Your answer to ' + esc(q.id) + '">' + esc(store.get("pq:" + q.id)) + "</textarea>" + staleMarker("pq:" + q.id) + "</div></div>";
+  }).join("");
+  reg("ask", "Questions for Claude and Codex");
+
+  // Fill the static fields from storage
+  ["promise", "founder:notes", "slice:note", "ask"].forEach(function (k) {
+    var el = document.querySelector('[data-note="' + k + '"]');
+    if (el) { el.value = store.get(k); el.insertAdjacentHTML("afterend", staleMarker(k)); }
+  });
+  document.querySelectorAll("fieldset[data-choice]").forEach(function (fs) {
+    var v = store.get(fs.getAttribute("data-choice"));
+    fs.querySelectorAll("input[type=radio]").forEach(function (r) { r.checked = r.value === v; });
+  });
+
+  // Save state, always visible
+  function renderSave() {
+    var warn = N.storageWarning(store);
+    $("storage-warning").textContent = warn; $("storage-warning").hidden = !warn;
+    var s = $("save-state");
+    s.textContent = store.available ? "Notes saved in this browser only." + (dirty ? " Not yet copied to Claude." : "") : "Notes are not being saved. Copy them before you leave.";
+    s.className = store.available ? "saved" : "unsaved";
+  }
+  function clearStale(k) { var m = document.querySelector('[data-stale="' + k + '"]'); if (m) m.remove(); }
+
+  document.addEventListener("input", function (e) {
+    var k = e.target.getAttribute && e.target.getAttribute("data-note"); if (!k) return;
+    store.set(k, e.target.value, e.target.getAttribute("data-context"));
+    clearStale(k); dirty = true; renderSave();
+    var b = document.querySelector('[data-open="' + k + '"]');
+    if (b) { b.classList.toggle("has", !!e.target.value); b.textContent = e.target.value ? "Your note" : "Add note"; }
+  });
+  document.addEventListener("change", function (e) {
+    if (e.target.type !== "radio") return;
+    var fs = e.target.closest("fieldset[data-choice]"); if (!fs) return;
+    var k = fs.getAttribute("data-choice");
+    store.set(k, e.target.value, fs.getAttribute("data-context"));
+    dirty = true; renderSave();
+    if (k === "choice:slice") renderMap();
+  });
+  document.addEventListener("click", function (e) {
+    var open = e.target.closest && e.target.closest("button[data-open]");
+    if (open) {
+      var w = document.querySelector('[data-wrap="' + open.getAttribute("data-open") + '"]');
+      if (w) { w.hidden = !w.hidden; if (!w.hidden) w.querySelector("textarea").focus(); }
+      return;
+    }
+    var keep = e.target.closest && e.target.closest("button[data-confirm]");
+    if (keep) {
+      var k = keep.getAttribute("data-confirm"), el = document.querySelector('[data-note="' + k + '"]');
+      store.set(k, store.get(k), el ? el.getAttribute("data-context") : null);
+      clearStale(k); dirty = true; renderSave();
+    }
+  });
+
+  // Export: current notes in page order, then notes written against an
+  // earlier revision, then any unreadable saved data.
+  function exportText() {
+    var all = store.all(), cur = [], old = [];
+    var keys = order.map(function (o) { return o[0]; }).concat(Object.keys(all).filter(function (k) { return !order.some(function (o) { return o[0] === k; }); }));
+    keys.forEach(function (k) {
+      var n = all[k]; if (!n || !String(n.text).trim()) return;
+      var label = (order.filter(function (o) { return o[0] === k; })[0] || [k, n.context || k])[1];
+      var body = "   " + String(n.text).trim().replace(/\n/g, "\n   ");
+      if (n.revision === P.meta.revision) cur.push(label + ":", body, "");
+      else old.push((n.context || label) + ":", "   [written against " + (n.revision ? "revision " + n.revision : "an unknown revision") + "]", body, "");
+    });
+    var out = ["SDR Agent discovery packet notes", "Exported from revision " + P.meta.revision + " (fingerprint " + FP + ", a quick change check, not a security hash)", "These notes are feedback, not approvals.", ""];
+    out = out.concat(cur);
+    if (old.length) out = out.concat(["Older notes, not confirmed for revision " + P.meta.revision + ":", ""], old);
+    if (store.unreadable) out.push("Saved data this browser could not read (raw):", "   " + store.unreadable, "");
+    if (!cur.length && !old.length && !store.unreadable) out.push("(No notes yet.)");
+    return out.join("\n");
+  }
+  function exported(msg) { dirty = false; $("copy-status").textContent = msg; renderSave(); }
+  $("copy").addEventListener("click", function () {
+    var text = exportText(), box = $("export-text"); box.value = text;
+    var manual = function (m) { box.hidden = false; $("show").textContent = "Hide text"; box.focus(); box.select(); $("copy-status").textContent = m; };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { exported("Copied. Paste it into your chat with Claude."); }, function () { manual("Copy was blocked. The text is selected below; copy it by hand."); });
+    } else { manual("The text is selected below; copy it by hand."); }
+  });
+  $("show").addEventListener("click", function () { var box = $("export-text"); box.value = exportText(); box.hidden = !box.hidden; $("show").textContent = box.hidden ? "Show text" : "Hide text"; });
+  $("jump").addEventListener("click", function () { $("export").scrollIntoView({ behavior: "smooth" }); $("copy").focus(); });
+  var framed = true; try { framed = window.self !== window.top; } catch (e) { framed = true; }
+  if (!framed) {
+    $("download").hidden = false;
+    $("download").addEventListener("click", function () {
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([exportText()], { type: "text/plain" }));
+      a.download = "p1-notes-" + P.meta.revision + "-" + FP + ".txt";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+      exported("Downloaded. Send the file or its text to Claude.");
+    });
+  }
+  $("footer").textContent = "Source: docs/product/discovery/p1-review.html and p1-data.js (revision " + P.meta.revision + "). The Markdown files in docs/product/ are the text of record.";
+  renderSave();
+})();
+</script>
+<!-- ARTIFACT-END -->
+</body>
+</html>

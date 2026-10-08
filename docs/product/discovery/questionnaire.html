@@ -1,0 +1,285 @@
+<!-- Archived source of the discovery questionnaire as published on 2026-10-07 (claude.ai artifact 95WxuyMbvADh5ZiMGJPQm1). It is an artifact body, not a standalone document: opened from git it renders without the shared answer store. The owner answered in chat instead; see answers.md. -->
+<title>SDR Agent Discovery</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700&family=Public+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+/* Layout: a single reading column with a sticky progress rail; each question is a card of selectable chips plus a notes field. */
+:root {
+  --bg: #f5f6f4;
+  --surface: #ffffff;
+  --ink: #17201f;
+  --muted: #5b6765;
+  --line: #d9dfdd;
+  --accent: #0d6e66;
+  --accent-soft: #e0f0ed;
+  --flag: #a3570d;
+  --flag-soft: #fbeedd;
+  --display: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --body: "Public Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111716; --surface: #19211f; --ink: #e6ecea; --muted: #9aa8a5; --line: #2c3735;
+    --accent: #4fc2b6; --accent-soft: #173a36; --flag: #f0a35a; --flag-soft: #3a2a17; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111716; --surface: #19211f; --ink: #e6ecea; --muted: #9aa8a5; --line: #2c3735;
+  --accent: #4fc2b6; --accent-soft: #173a36; --flag: #f0a35a; --flag-soft: #3a2a17; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--body); padding-inline: 16px; padding-block: 0 64px; }
+.wrap { max-width: 760px; margin: 0 auto; }
+header.top { padding-block: 40px 20px; display: grid; gap: 10px; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h1 { font: 700 clamp(28px, 5vw, 38px)/1.1 var(--display); margin: 0; text-wrap: balance; }
+.lede { color: var(--muted); max-width: 62ch; margin: 0; }
+.rail { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); padding-block: 12px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+.progress { flex: 1 1 220px; display: grid; gap: 6px; min-width: 0; }
+.bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s ease; }
+.count { font: 500 12px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.save { font: 500 12px var(--mono); padding: 4px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.save.warn { background: var(--flag-soft); color: var(--flag); }
+nav.sections { display: flex; flex-wrap: wrap; gap: 6px; padding-block: 14px 4px; }
+nav.sections a { font-size: 13px; color: var(--muted); text-decoration: none; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; }
+nav.sections a:hover, nav.sections a:focus-visible { color: var(--ink); border-color: var(--accent); outline: none; }
+section.group { padding-block: 28px 0; display: grid; gap: 14px; }
+section.group > h2 { font: 700 21px/1.2 var(--display); margin: 0; display: flex; gap: 10px; align-items: baseline; }
+section.group > h2 .n { font: 500 12px var(--mono); color: var(--muted); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 12px; min-width: 0; }
+.card.start { border-color: var(--flag); box-shadow: inset 4px 0 0 var(--flag); }
+.qhead { display: grid; gap: 4px; }
+.qhead .tag { justify-self: start; font: 500 11px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--flag); background: var(--flag-soft); padding: 2px 8px; border-radius: 4px; }
+.qhead label.q, .qhead .q { font: 600 16px/1.35 var(--body); }
+.qhead .hint { font-size: 13.5px; color: var(--muted); }
+.kind { font: 500 11px var(--mono); color: var(--muted); }
+.opts { display: flex; flex-wrap: wrap; gap: 8px; }
+.opt { position: relative; }
+.opt input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.opt span { display: inline-block; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 14px; line-height: 1.3; background: var(--bg); transition: border-color .12s, background .12s; }
+.opt input:hover + span { border-color: var(--accent); }
+.opt input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.opt input:checked + span { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); font-weight: 600; }
+textarea { width: 100%; min-height: 64px; resize: vertical; font: 14px/1.5 var(--body); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+.done { margin-top: 36px; display: grid; gap: 12px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+button { font: 600 14px var(--body); padding: 10px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--surface); cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.note { font-size: 13.5px; color: var(--muted); }
+#fallback { width: 100%; min-height: 160px; font: 12px/1.5 var(--mono); }
+@media (prefers-reduced-motion: reduce) { .bar > i, .opt span { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">Discovery · before any more building</div>
+    <h1>What should the SDR agent be?</h1>
+    <p class="lede">Answer what you can; skip anything you're unsure of. The three marked <strong>Start here</strong> matter most. Answers save as you go, and Claude reads them directly to draft the product brief and the control-plane prototype.</p>
+  </header>
+
+  <div class="rail" role="status" aria-live="polite">
+    <div class="progress">
+      <div class="bar" aria-hidden="true"><i id="bar"></i></div>
+      <div class="count" id="count">0 of 0 answered</div>
+    </div>
+    <div class="save" id="save">Connecting…</div>
+  </div>
+
+  <nav class="sections" id="nav" aria-label="Sections"></nav>
+  <form id="form" novalidate></form>
+
+  <div class="done">
+    <div class="actions">
+      <button type="button" id="finish">I'm done for now</button>
+      <button type="button" class="ghost" id="copy">Copy my answers</button>
+    </div>
+    <p class="note" id="doneNote">"I'm done for now" tells Claude your answers are ready to read. You can come back and change them anytime.</p>
+    <textarea id="fallback" hidden readonly aria-label="Your answers as text"></textarea>
+  </div>
+</div>
+
+<script>
+const SECTIONS = [
+  { id: "who", title: "Who it's for and why", qs: [
+    { id: "primary_user", type: "one", start: true, q: "Who is the product mainly for?", hint: "This decides almost everything about the control plane.",
+      opts: ["Me, as a solo founder or operator doing my own outbound", "An SDR on a sales team", "A sales manager supervising SDRs and agents", "An agency running outbound for clients", "Both solo users and teams"] },
+    { id: "team_size", type: "one", q: "If teams use it, how big?", opts: ["Just me", "2–10 reps", "10–50 reps", "50+ reps", "Not sure yet"] },
+    { id: "jobs", type: "many", q: "Which jobs should it do for the user?", opts: ["Find and qualify leads", "Research accounts", "Write first-touch emails", "Run follow-up sequences", "Handle replies", "Book meetings", "Keep the CRM up to date", "Report on results"] },
+    { id: "success", type: "many", q: "How will you know it's working?", opts: ["Meetings booked", "Positive reply rate", "Hours saved per rep per week", "Cost per meeting", "Pipeline value created", "Number of accounts reached"] },
+    { id: "different", type: "many", q: "What should make it different from other tools?", opts: ["Full audit trail and transparency", "A human approves every message", "Every claim backed by evidence", "Compliance built in", "Runs privately or locally", "Price", "Quality of writing"] },
+    { id: "competitors", type: "many", q: "Which tools have you used, or should we benchmark against?", opts: ["Apollo", "Outreach", "Salesloft", "HubSpot sequences / Breeze agents", "Clay", "11x", "Regie.ai", "Instantly / Smartlead", "None"] },
+  ]},
+  { id: "scope", title: "Scope", qs: [
+    { id: "channels", type: "many", start: true, q: "Which outreach channels are in scope?", hint: "Email is all that exists today.",
+      opts: ["Email", "LinkedIn messages", "LinkedIn connection requests", "Phone (call scripts and tasks)", "SMS"] },
+    { id: "interested_reply", type: "one", start: true, q: "When a prospect replies \"interested\", what should happen?", hint: "Today it classifies the reply and hands off to a human.",
+      opts: ["Hand off to a human (today's behaviour)", "Draft a reply for a human to approve", "Send a calendar link automatically", "Draft a reply with proposed times, for approval"] },
+    { id: "meetings", type: "one", q: "Meeting booking?", opts: ["Out of scope", "A calendar link inside emails", "Built-in scheduling with Google or Outlook calendars"] },
+    { id: "lead_sources", type: "many", q: "Where do leads come from?", opts: ["HubSpot", "CSV upload", "Typed in by hand", "An enrichment provider (Apollo, ZoomInfo, Clearbit)", "The agent finds them from an ideal-customer profile"] },
+    { id: "autonomy", type: "one", q: "Long term, how much should send without a human approving?", opts: ["Nothing: every message approved, always", "First touch approved, follow-ups automatic", "Approve a campaign's template once, then automatic", "Mostly automatic with spot checks"] },
+    { id: "non_goals", type: "text", q: "Anything it should explicitly NOT do?" },
+  ]},
+  { id: "ux", title: "Operator experience", qs: [
+    { id: "daily_loop", type: "one", q: "What does an operator's day look like?", opts: ["Review a batch of drafts in one sitting", "Handle drafts one by one as they arrive", "A manager reviews, an SDR edits", "Mostly hands-off; only act on alerts"] },
+    { id: "home", type: "many", q: "What should the home screen show first?", opts: ["Drafts waiting for approval", "Replies that need action", "Campaign results", "What the agent is doing right now", "Problems needing attention", "Meetings booked today"] },
+    { id: "approval_ux", type: "many", q: "How should reviewing and approving feel?", opts: ["Draft side by side with its evidence", "Edit inline with AI suggestions", "Approve similar drafts in bulk", "Keyboard-driven queue (j/k, a to approve)", "A short reason required when rejecting"] },
+    { id: "roles", type: "many", q: "Which roles need their own view?", opts: ["SDR / reviewer", "Sales manager", "Admin", "Auditor / compliance", "Account executive who receives hand-offs"] },
+    { id: "notify", type: "many", q: "How should the app get an operator's attention?", opts: ["In the app only", "Daily email digest", "Slack", "Telegram", "Desktop notifications"] },
+    { id: "devices", type: "one", q: "Devices?", opts: ["Desktop only", "Desktop, plus reviewing on a phone"] },
+    { id: "style", type: "one", q: "What should it feel like visually?", opts: ["Dense and keyboard-first (like Linear or Superhuman)", "Friendly and spacious (like HubSpot)", "Minimal and quiet", "No preference"] },
+  ]},
+  { id: "agent", title: "Agent behaviour and quality", qs: [
+    { id: "voice", type: "many", q: "What voice should emails have?", opts: ["Concise and direct", "Warm and conversational", "Formal", "Match my own writing samples", "Set per campaign from brand guidelines"] },
+    { id: "personalization", type: "one", q: "How deep should personalization go?", opts: ["Light: one relevant fact", "Medium: two or three cited facts", "Deep: account-level research and a tailored angle"] },
+    { id: "quality", type: "many", q: "How should we measure draft quality?", opts: ["How much reviewers edit", "Approval rate", "Reply rate", "Regular fact-check audits", "Tone and brand checks"] },
+    { id: "learning", type: "one", q: "Should the agent learn from reviewers' edits?", opts: ["Yes, adapt per campaign automatically", "Yes, but only changes I approve", "No"] },
+    { id: "cost", type: "one", q: "Model cost per lead?", opts: ["Keep it as cheap as possible", "Balanced", "Quality first"] },
+  ]},
+  { id: "data", title: "Data, compliance and where it runs", qs: [
+    { id: "deploy", type: "one", q: "Where should it run?", opts: ["Stay a personal local app", "A small hosted setup for a few users", "Multi-customer SaaS eventually"] },
+    { id: "regions", type: "many", q: "Which regions' prospects?", opts: ["United States", "Canada", "EU / UK", "Other"] },
+    { id: "retention", type: "one", q: "How long should data be kept?", opts: ["Everything, forever (audit-first)", "Keep the audit trail; delete message content after a set time", "Per-region rules"] },
+    { id: "real_people", type: "one", q: "When should it hold real people's data?", opts: ["Not until it's a production product", "After the HubSpot integration works", "Soon"] },
+  ]},
+  { id: "biz", title: "Business", qs: [
+    { id: "goal", type: "one", q: "What's the goal for this product?", opts: ["A personal tool", "An open-source project", "A commercial product", "Undecided"] },
+    { id: "pricing", type: "one", q: "If commercial, how would it be priced?", opts: ["Not relevant", "Per seat", "Per meeting booked", "Usage-based", "Undecided"] },
+    { id: "deadline", type: "text", q: "Any deadline or milestone we should plan around?" },
+    { id: "anything_else", type: "text", q: "Anything else Claude and Codex should know?" },
+  ]},
+];
+const ALL = SECTIONS.flatMap(s => s.qs);
+let state = {};          // { qid: { pick: string | string[], note: string } }
+let db = null, saveTimer = null;
+
+const el = (tag, attrs = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) k === "class" ? n.className = v : n.setAttribute(k, v);
+  for (const c of kids) n.append(c);
+  return n;
+};
+
+function render() {
+  const form = document.getElementById("form"), nav = document.getElementById("nav");
+  let qn = 0;
+  SECTIONS.forEach(s => {
+    nav.append(el("a", { href: "#" + s.id }, s.title));
+    const sec = el("section", { class: "group", id: s.id });
+    sec.append(el("h2", {}, s.title, el("span", { class: "n" }, `${s.qs.length} questions`)));
+    s.qs.forEach(q => {
+      qn++;
+      const card = el("div", { class: "card" + (q.start ? " start" : ""), id: "card-" + q.id });
+      const head = el("div", { class: "qhead" });
+      if (q.start) head.append(el("span", { class: "tag" }, "Start here"));
+      head.append(el(q.type === "text" ? "label" : "div", { class: "q", id: "lbl-" + q.id, ...(q.type === "text" ? { for: "note-" + q.id } : {}) }, `${qn}. ${q.q}`));
+      if (q.hint) head.append(el("div", { class: "hint" }, q.hint));
+      if (q.type !== "text") head.append(el("div", { class: "kind" }, q.type === "one" ? "Pick one" : "Pick any"));
+      card.append(head);
+      if (q.type !== "text") {
+        const opts = el("div", { class: "opts", role: q.type === "one" ? "radiogroup" : "group", "aria-labelledby": "lbl-" + q.id });
+        q.opts.forEach((o, i) => {
+          const id = `${q.id}-${i}`;
+          const input = el("input", { type: q.type === "one" ? "radio" : "checkbox", name: q.id, id, value: o });
+          input.addEventListener("change", () => onPick(q));
+          opts.append(el("label", { class: "opt", for: id }, input, el("span", {}, o)));
+        });
+        card.append(opts);
+      }
+      const ta = el("textarea", { id: "note-" + q.id, placeholder: q.type === "text" ? "Your answer" : "Other, or anything to add (optional)", "aria-label": q.type === "text" ? q.q : "Notes for: " + q.q });
+      ta.addEventListener("input", () => { (state[q.id] ||= {}).note = ta.value; changed(); });
+      card.append(ta);
+      sec.append(card);
+    });
+    form.append(sec);
+  });
+}
+
+function onPick(q) {
+  const picked = [...document.querySelectorAll(`input[name="${q.id}"]:checked`)].map(i => i.value);
+  (state[q.id] ||= {}).pick = q.type === "one" ? (picked[0] || "") : picked;
+  changed();
+}
+
+function fill() {
+  ALL.forEach(q => {
+    const a = state[q.id]; if (!a) return;
+    const picks = Array.isArray(a.pick) ? a.pick : (a.pick ? [a.pick] : []);
+    document.querySelectorAll(`input[name="${q.id}"]`).forEach(i => { i.checked = picks.includes(i.value); });
+    const ta = document.getElementById("note-" + q.id); if (ta && typeof a.note === "string") ta.value = a.note;
+  });
+  progress();
+}
+
+function answered(q) {
+  const a = state[q.id]; if (!a) return false;
+  const hasPick = Array.isArray(a.pick) ? a.pick.length > 0 : !!a.pick;
+  return hasPick || !!(a.note && a.note.trim());
+}
+function progress() {
+  const n = ALL.filter(answered).length;
+  document.getElementById("bar").style.width = (100 * n / ALL.length) + "%";
+  document.getElementById("count").textContent = `${n} of ${ALL.length} answered`;
+}
+function setSave(text, warn) { const s = document.getElementById("save"); s.textContent = text; s.classList.toggle("warn", !!warn); }
+
+function changed() {
+  progress();
+  try { localStorage.setItem("sdr-discovery", JSON.stringify(state)); } catch (_) {}
+  if (!db) { setSave("Saved in this browser only", true); return; }
+  setSave("Saving…");
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 600);
+}
+async function save(extra = {}) {
+  if (!db) return false;
+  try {
+    await db.doc("discovery/answers").set({ answers: state, updatedAt: new Date().toISOString(), ...extra });
+    setSave("Saved · " + new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+    return true;
+  } catch (e) {
+    setSave(e && e.code === "unavailable" ? "Retrying…" : "Couldn't save — copy your answers below", true);
+    if (e && e.code === "unavailable") { setTimeout(save, 1500 + Math.random() * 1000); }
+    return false;
+  }
+}
+
+function asText() {
+  return SECTIONS.map(s => `## ${s.title}\n` + s.qs.map(q => {
+    const a = state[q.id] || {};
+    const pick = Array.isArray(a.pick) ? a.pick.join("; ") : (a.pick || "");
+    return `- ${q.q}\n  ${pick || "(no pick)"}${a.note ? `\n  Note: ${a.note}` : ""}`;
+  }).join("\n")).join("\n\n");
+}
+
+document.getElementById("copy").addEventListener("click", async () => {
+  const text = asText(), fb = document.getElementById("fallback");
+  try { await navigator.clipboard.writeText(text); document.getElementById("doneNote").textContent = "Copied. Paste it into your chat with Claude."; }
+  catch (_) { fb.hidden = false; fb.value = text; fb.focus(); fb.select(); document.getElementById("doneNote").textContent = "Select all and copy this text, then paste it to Claude."; }
+});
+document.getElementById("finish").addEventListener("click", async () => {
+  const note = document.getElementById("doneNote");
+  if (!db) { note.textContent = "Can't reach the shared store from this view, so Claude can't read it directly. Use \"Copy my answers\" and paste them into the chat."; return; }
+  clearTimeout(saveTimer);
+  const ok = await save({ submittedAt: new Date().toISOString() });
+  note.textContent = ok ? `Done. Tell Claude "answers ready". ${ALL.filter(answered).length} of ${ALL.length} answered.` : "Couldn't save just now. Try again, or copy your answers instead.";
+});
+
+render();
+try { const local = JSON.parse(localStorage.getItem("sdr-discovery") || "null"); if (local) { state = local; } } catch (_) {}
+fill();
+
+(async () => {
+  db = window.claude && window.claude.use ? await window.claude.use("db") : null;
+  if (!db) { setSave("Saved in this browser only", true); return; }
+  try {
+    const snap = await db.doc("discovery/answers").get();
+    if (snap.exists && snap.data().answers) { state = { ...state, ...snap.data().answers }; fill(); }
+    setSave(snap.exists ? "Saved" : "Ready");
+  } catch (e) { setSave("Couldn't load saved answers", true); }
+})();
+</script>
