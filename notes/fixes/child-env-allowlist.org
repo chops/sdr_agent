@@ -1,0 +1,113 @@
+#+TITLE: Fix: child processes inherited the audit-anchor signing key
+#+DATE: 2026-10-07
+
+* Summary
+Under =bin/with-secrets SDR_AUDIT_ANCHOR_PRIVATE_KEY -- bin/demo run= every
+external process the app launched (ClaudeCLI port, anchoring Git and
+OpenTimestamps subprocesses, provenance =git=) inherited the full BEAM
+environment, signing key included; every launcher now passes an explicit
+environment allowlist (=SdrAgent.ChildEnv=).
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: no
+Reason: process-launch environment only; no persisted concept, resource,
+policy, lifecycle or action contract changes.
+#+END_EXAMPLE
+
+* Root Cause
+=System.cmd/3= and =Port.open/2= children inherit the parent environment
+except for the names explicitly overridden. Launchers only added or removed
+a few names (ClaudeCLI: witness ids and Bedrock/Vertex/Foundry routes; OTS:
+the key by name; Git: Git-local variables), so every other secret
+(=*_KEY=, =*_TOKEN=, =*_SECRET=) passed through, and the ClaudeCLI and Git
+children received the anchor key itself.
+
+* Reproduction
+=test/sdr_agent/child_env_test.exs=: runtime-built canary names
+(=SDR_AUDIT_ANCHOR_PRIVATE_KEY=, =SDR_CANARY_<rand>_KEY/_TOKEN/_SECRET/_UNLISTED=)
+are set in the parent; a real child of each launcher records only the
+NAMES of its environment.
+
+* Affected Apps
+- [X] Core (=sdr_agent=)
+
+* Affected Modules
+- =lib/sdr_agent/child_env.ex= (new) — allowlist builder for =System.cmd/3=
+  and =Port.open/2=; base =PATH HOME USER LOGNAME LANG TMPDIR TZ LC_*=;
+  secret-looking names removed even if allowlisted.
+- =lib/sdr_agent/ai/model_provider/claude_cli.ex= — port env =
+  allowlist (=XDG_* TERM LLM_OTEL_PROXY_URL LLM_PROXY_SHIM_CLAUDE_BIN
+  ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR SSL_CERT_FILE NIX_SSL_CERT_FILE
+  NODE_EXTRA_CA_CERTS=) + witness ids; route-variable unsets kept.
+- =lib/sdr_agent/audit/anchor_sinks/git_sink.ex= — both git launches
+  (=SSH_AUTH_SOCK SSH_AGENT_PID GIT_SSH GIT_SSH_COMMAND= + TLS roots).
+- =lib/sdr_agent/audit/anchor_sinks/open_timestamps_sink.ex= — wrapper env
+  (TLS roots, =TZ=UTC=).
+- =lib/sdr_agent/audit/provenance.ex=, =lib/sdr_agent/audit/anchoring.ex=
+  (compile-time git) — base allowlist.
+
+* Required Tests
+- [X] Regression: canaries absent in the ClaudeCLI, GitSink, OTS-wrapper and
+      provenance children; =PATH= present; witness ids present (ClaudeCLI);
+      =TZ= present (OTS).
+- [X] ChildEnv unit: allowlist, base, sets, secret names removed even when
+      allowlisted, port form.
+- [X] Existing S12b witness/route-scrub and Bedrock/Vertex refusal tests
+      unchanged and passing; per-call attestation unchanged.
+
+* Risks & Considerations
+- The ClaudeCLI allowlist is derived from =llm-proxy-shim='s variables and
+  Claude Code's needs; it was not exercised against the real CLI (no
+  real-call budget). If the owner's Claude Code needs another non-secret
+  variable, the real smoke (=:external=) will show it; add it to
+  =@child_env_allow= after review. Credentials passed by environment (e.g.
+  a token variable) are deliberately removed (ADR-0004: cached local login).
+- =GIT_SSH_COMMAND= is passed through as operator configuration.
+
+-----
+
+* TDD Tracking
+RED on =origin/main= =16d8d35= (partition =_sec=): 7/7 failed — the 4
+launcher tests by assertion ("SDR_AUDIT_ANCHOR_PRIVATE_KEY reached the
+child" / a =*_KEY= canary reached the OTS wrapper); the 3 =ChildEnv= unit
+tests by =UndefinedFunctionError= (new module). The GitSink test first
+failed on a fixture defect (the fake =git= exited 1 for =rev-parse=,
+MatchError before any launch); fixed in the fixture, then it failed by
+assertion as intended.
+
+The existing async =AnchorSinkTest= "OTS child commands never inherit the
+private signing key" asserted an unconditional ={KEY, nil}= entry, which the
+allowlist only emits when the key is in the parent environment; that test
+cannot set process environment (async). It now asserts the key is never
+passed with a value and =TZ=UTC= is set; the removal of a present key is
+proven by the real-child test.
+
+*TDD Gate Verification:* [X] VERIFIED (launcher REDs by assertion; new-module REDs noted)
+
+** Round 2 (Codex security review of =9ab751d=, =/tmp/sdr-pr33-9ab751d-security-review.md=)
+Main merged in (merge commit; brings #31 S13b and #32 S12d enablement with
+the witness store's =id -u= probe). RED, 6 of 14 (all assertions except the
+new =xdg/0= function, an =UndefinedFunctionError=):
+- S1: ClaudeCLI's cleanup =pgrep=/=kill= children and the witness store's
+  =id= probe inherited the parent canaries; the static launch inventory
+  listed 9 unwired launches (incl. =&System.cmd/3= default runners).
+- S2: a =set= overlay restored a secret-looking name's value (cmd/port).
+- Known application secrets were not removed when absent from the snapshot.
+GREEN: every =System.cmd=/=Port.open= in =lib/= carries an inline
+=ChildEnv= env (inventory test, AST-based, with a self-test of the forms it
+guards); default runners are =ChildEnv.system_cmd/3= (refuses a child
+without =:env=); overlays cannot give secret or secret-looking names a
+value; =SDR_AUDIT_ANCHOR_PRIVATE_KEY SDR_WEBHOOK_HMAC_KEY SECRET_KEY_BASE
+TOKEN_SIGNING_SECRET DATABASE_URL= are removed unconditionally; =LC_*= and
+=XDG_*= are exact name sets. Codex's reproducer passes 2/2 (fake path only
+adjusted).
+
+Scope (documented in the moduledoc): overrides are built against a
+snapshot of names; the application adds no environment variable at
+runtime. #27's reaper =ps=/=pgrep=/=kill= are not on this base; the
+inventory test will fail #27 until they are wired when it merges main.
+
+* Prevention
+Every new external launch must take its =:env= from =SdrAgent.ChildEnv=.

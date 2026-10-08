@@ -12,22 +12,32 @@ defmodule SdrAgent.Audit.Anchoring do
   alias SdrAgent.Audit.Signing
 
   for name <- ["HEAD", "packed-refs"] do
-    case System.cmd("git", ["rev-parse", "--git-path", name]) do
+    case System.cmd("git", ["rev-parse", "--git-path", name], env: SdrAgent.ChildEnv.cmd([])) do
       {path, 0} -> @external_resource Path.expand(String.trim(path))
       _ -> :ok
     end
   end
 
-  case System.cmd("git", ["symbolic-ref", "-q", "HEAD"], stderr_to_stdout: true) do
+  case System.cmd("git", ["symbolic-ref", "-q", "HEAD"],
+         stderr_to_stdout: true,
+         env: SdrAgent.ChildEnv.cmd([])
+       ) do
     {ref, 0} ->
-      {path, 0} = System.cmd("git", ["rev-parse", "--git-path", String.trim(ref)])
+      {path, 0} =
+        System.cmd("git", ["rev-parse", "--git-path", String.trim(ref)],
+          env: SdrAgent.ChildEnv.cmd([])
+        )
+
       @external_resource Path.expand(String.trim(path))
 
     _ ->
       :ok
   end
 
-  @sdr_agent_git_sha (case System.cmd("git", ["rev-parse", "HEAD"], stderr_to_stdout: true) do
+  @sdr_agent_git_sha (case System.cmd("git", ["rev-parse", "HEAD"],
+                             stderr_to_stdout: true,
+                             env: SdrAgent.ChildEnv.cmd([])
+                           ) do
                         {sha, 0} -> String.trim(sha)
                         _ -> "unknown"
                       end)
