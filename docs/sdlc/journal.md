@@ -107,10 +107,20 @@ separate documents). This folder is the revision.
 The owner's terminal misbehaved and the machine had to restart mid-phase.
 Before it did, Claude and Codex each wrote a private handoff: exact session
 ids, how to resume each one, what a reboot would wipe, and the next action.
-Codex checked Claude's handoff and found seven errors, which Claude fixed. Files that lived only in
-temporary folders were copied somewhere durable first, leaving out anything
-that held login tokens. After the restart, work picked up from those
-handoffs.
+Codex checked Claude's handoff and found seven errors, which Claude fixed.
+Files that lived only in temporary folders were copied somewhere durable
+first, leaving out anything that held login tokens.
+
+After the restart, Claude reopened its exact conversation. The pair launcher
+started a fresh Codex rather than the old one, so Claude closed it and
+relaunched Codex into its exact previous session, which also picked up the
+newer installed Codex release. One slip on the way: Codex's startup update
+prompt accepted "Update now" by mistake; the install failed harmlessly
+because the Nix store is read-only. Later that morning the owner asked for
+all three agents on their latest releases. Codex needed nothing, the Gemini
+analyst moved to the new agy release in the same conversation, and Codex
+restarted Claude onto the new Claude release from its own pane, because a
+process cannot safely replace itself.
 
 ### Retrospective (draft, to be confirmed at G0)
 
