@@ -6,7 +6,10 @@ defmodule SdrAgentWeb.LeadLive.Show do
   EvidenceClaims; selecting a claim (`?claim=`) shows its quote and source,
   and the full source content is fetched only through the audited payload
   read (`SdrAgent.Audit.read_content/2`) with the quoted span highlighted —
-  and the lead's drafts.
+  and the lead's drafts. When a draft is `pending_review` (the newest, if
+  several), a call to action under the header links to it (Q0.3): "Open
+  draft" for ADM and REV, "View draft" for an auditor. It is only a link;
+  approval stays on the draft page and its revision binding.
 
   ADM and REV may assign a new lead to the agent (`SdrAgent.SDR.assign_lead/2`
   with the active campaign); any refusal (e.g. an auditor's forged event) is
@@ -99,6 +102,7 @@ defmodule SdrAgentWeb.LeadLive.Show do
         claims_by_artifact: Enum.group_by(claims, & &1.research_artifact_id),
         claims: Map.new(claims, &{&1.id, &1}),
         drafts: drafts,
+        pending_draft: Enum.find(drafts, &(&1.status == :pending_review)),
         revisions: revisions,
         runs: runs
       )
@@ -262,6 +266,34 @@ defmodule SdrAgentWeb.LeadLive.Show do
             </.ui_button>
           </:actions>
         </.page_header>
+
+        <div
+          :if={@pending_draft}
+          id="draft-awaiting-review"
+          class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 shadow-sm"
+        >
+          <div class="flex min-w-0 items-center gap-3">
+            <span class="flex size-9 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+              <.icon name="hero-envelope-open" class="size-5" />
+            </span>
+            <div class="min-w-0">
+              <p class="text-sm font-semibold text-amber-900">Draft awaiting review</p>
+              <p class="truncate text-xs text-amber-800">
+                {(@revisions[@pending_draft.current_revision_id] &&
+                    @revisions[@pending_draft.current_revision_id].subject) ||
+                  "The agent handed off a draft for human review."}
+              </p>
+            </div>
+          </div>
+          <.link
+            id="open-pending-draft"
+            navigate={~p"/drafts/#{@pending_draft.id}"}
+            class="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-600"
+          >
+            {if Scope.reviewer?(@current_scope), do: "Open draft", else: "View draft"}
+            <.icon name="hero-arrow-right" class="size-4" />
+          </.link>
+        </div>
 
         <div class="grid gap-6 lg:grid-cols-3">
           <div class="space-y-6 lg:col-span-2">
