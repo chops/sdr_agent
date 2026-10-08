@@ -41,6 +41,7 @@ defmodule SdrAgent.Agents do
   require Ash.Query
 
   alias Ash.Error.Changes.InvalidAttribute
+  alias Ash.Error.Query.NotFound
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.Decision
@@ -154,7 +155,7 @@ defmodule SdrAgent.Agents do
     |> Ash.Query.filter(id == ^id)
     |> Ash.read_one()
     |> case do
-      {:ok, nil} -> {:error, Ash.Error.Query.NotFound.exception(resource: AgentRun)}
+      {:ok, nil} -> {:error, NotFound.exception(resource: AgentRun)}
       other -> other
     end
   end
@@ -194,7 +195,7 @@ defmodule SdrAgent.Agents do
     |> Ash.Query.filter(operation_id == ^operation_id)
     |> Ash.read_one()
     |> case do
-      {:ok, nil} -> {:error, Ash.Error.Query.NotFound.exception(resource: AgentRun)}
+      {:ok, nil} -> {:error, NotFound.exception(resource: AgentRun)}
       other -> other
     end
   end
@@ -325,11 +326,27 @@ defmodule SdrAgent.Agents do
     end)
   end
 
+  # The run is locked before the first append (ADR-0009): settlement writes
+  # invocation → chain → run, and the stale-run sweeper locks run →
+  # invocations (review #25); both now take the run row first.
   defp do_finish_model_invocation(invocation, action, attrs, response, actor) do
-    with {:ok, attrs} <- put_body(attrs, :response_sha256, response, actor),
+    with {:ok, _run} <- lock_run(invocation.agent_run_id, actor),
+         {:ok, attrs} <- put_body(attrs, :response_sha256, response, actor),
          {:ok, done} <- do_update(invocation, action, attrs, actor),
          {:ok, _run} <- settle(done, actor) do
       {:ok, done}
+    end
+  end
+
+  defp lock_run(run_id, actor) do
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(id == ^run_id)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} -> {:error, NotFound.exception(resource: AgentRun)}
+      other -> other
     end
   end
 
@@ -417,6 +434,21 @@ defmodule SdrAgent.Agents do
   """
   def record_decision(attrs, opts) do
     create(Decision, :record, attrs, opts, Map.get(attrs, :subject_id))
+  end
+
+  @doc "One Decision by id, within the actor's tenant (e.g. a delivery's send gate, S13)."
+  def get_decision(id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    Decision
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} -> {:error, NotFound.exception(resource: Decision)}
+      other -> other
+    end
   end
 
   @doc "Decisions of a run, oldest first."
