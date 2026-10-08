@@ -159,6 +159,49 @@ case mode do
     IO.puts(init)
     IO.puts(result)
 
+  "sdr" ->
+    # Plays a minimal SDR model for the worker tests (Q0.1): the stdin
+    # prompt names the operation; no evidence claims, then a disqualifying
+    # qualification, so a run ends without a draft.
+    stdin = IO.read(:stdio, :eof)
+
+    answer =
+      cond do
+        String.contains?(stdin, "research analyst") ->
+          %{"claims" => []}
+
+        String.contains?(stdin, "You qualify a sales lead") ->
+          %{
+            "qualified" => false,
+            "score" => 5,
+            "criteria" => %{
+              "company_size" => "unknown",
+              "industry" => "unknown",
+              "geography" => "unknown",
+              "persona" => "unknown",
+              "trigger" => "unknown"
+            },
+            "confidence" => 0.4,
+            "evidence_ids" => [],
+            "reason" => "no evidence was extracted"
+          }
+
+        true ->
+          %{}
+      end
+
+    IO.puts(init)
+
+    IO.puts(
+      JSON.encode!(%{
+        "type" => "result",
+        "subtype" => "success",
+        "is_error" => false,
+        "result" => JSON.encode!(answer),
+        "usage" => %{"input_tokens" => 12, "output_tokens" => 3}
+      })
+    )
+
   "fenced" ->
     IO.puts(init)
     IO.puts(fenced)

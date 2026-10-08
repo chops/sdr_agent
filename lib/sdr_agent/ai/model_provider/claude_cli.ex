@@ -28,10 +28,30 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   operator environment for that check in hermetic tests.
 
   One GenServer serialises every call (ADR-0004, C8: concurrency 1).
+
+  ## The supervised server (Q0.1)
+
+  When `SDR_MODEL_PROVIDER=claude_cli` selects this provider
+  (`SdrAgent.AI.ModelProvider.Runtime`), the application starts exactly one
+  instance registered as `server/0`. `complete/2` without `:server` calls
+  that instance; a server that is not running is `{:error,
+  :provider_not_running}`, never an exit. Claude CLI has no no-call probe
+  for the init attestation (model, version, tools, MCP servers and slash
+  commands are reported only by a session that also sends a model
+  request), so boot records the attestation as `:pending` — checked at
+  the first call — together with whether `llm-proxy-shim` was found. Every
+  call then records its init outcome (`:attested`, or `:drift` with the
+  reason) in a protected ETS table named after the server, which
+  `attestation/1` reads without waiting behind a running call. It holds no
+  prompt, output or credential.
   """
 
   use GenServer
   @behaviour SdrAgent.AI.ModelProvider
+
+  require Logger
+
+  alias SdrAgent.Clock
 
   @default_timeout 120_000
   @route_flags ~w(CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY)
@@ -45,8 +65,39 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   # must bump this, so the wire-witness projection never re-derives a
   # historical invocation's prompt with different code.
   @prompt_builder "prompt-builder/1"
+  @server __MODULE__
 
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+  @doc """
+  Starts a server. Options: `:name` (registers it and keeps its attestation
+  status readable by name), `:command`, `:command_args`, `:cli_args`,
+  `:timeout` (ms), `:expected_model`, `:environment`.
+  """
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
+
+  @doc "The registered name of the application's one supervised server."
+  def server, do: @server
+
+  @doc "Whether `server` (a name or pid) is a live process on this node."
+  def running?(server) do
+    case GenServer.whereis(server) do
+      pid when is_pid(pid) -> Process.alive?(pid)
+      _ -> false
+    end
+  end
+
+  @doc """
+  The last init attestation of the named `server`: `%{status: :pending |
+  :attested | :drift, reason, model, version, at, command?}`, or
+  `%{status: :not_running}`. Never blocks on a running call.
+  """
+  def attestation(server \\ @server) when is_atom(server) do
+    case :ets.lookup(server, :attestation) do
+      [{:attestation, attestation}] -> attestation
+      [] -> %{status: :not_running}
+    end
+  rescue
+    ArgumentError -> %{status: :not_running}
+  end
 
   @doc "Returns the reviewed provider provenance recorded before a call."
   def provenance do
@@ -102,21 +153,54 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   @impl true
   def complete(request, opts) do
-    server = Keyword.fetch!(opts, :server)
-    GenServer.call(server, {:complete, request}, :infinity)
+    server = Keyword.get(opts, :server, @server)
+
+    if running?(server),
+      do: GenServer.call(server, {:complete, request}, :infinity),
+      else: {:error, :provider_not_running}
   end
 
   @impl true
   def init(opts) do
-    {:ok,
-     %{
-       command: Keyword.get(opts, :command, System.find_executable("llm-proxy-shim")),
-       command_args: Keyword.get(opts, :command_args, ["claude"]),
-       cli_args: Keyword.get(opts, :cli_args, []),
-       timeout: Keyword.get(opts, :timeout, @default_timeout),
-       expected_model: Keyword.get(opts, :expected_model, @resolved_model),
-       environment: Keyword.get(opts, :environment)
-     }}
+    state = %{
+      command:
+        Keyword.get_lazy(opts, :command, fn -> System.find_executable("llm-proxy-shim") end),
+      command_args: Keyword.get(opts, :command_args, ["claude"]),
+      cli_args: Keyword.get(opts, :cli_args, []),
+      timeout: Keyword.get(opts, :timeout, @default_timeout),
+      expected_model: Keyword.get(opts, :expected_model, @resolved_model),
+      environment: Keyword.get(opts, :environment),
+      table: status_table(Keyword.get(opts, :name))
+    }
+
+    preflight(state)
+    {:ok, state}
+  end
+
+  # Boot preflight: no model call is spent. The attestation is checked at
+  # the first call; only the launcher's presence is known now.
+  defp preflight(%{table: nil}), do: :ok
+
+  defp preflight(state) do
+    if is_nil(state.command),
+      do: Logger.warning("ClaudeCLI selected but llm-proxy-shim was not found on PATH")
+
+    note(state, %{status: :pending, reason: nil, model: nil, version: nil})
+  end
+
+  defp status_table(name) when is_atom(name) and not is_nil(name),
+    do: :ets.new(name, [:named_table, :protected, :set, read_concurrency: true])
+
+  defp status_table(_name), do: nil
+
+  defp note(%{table: nil}, _attestation), do: :ok
+
+  defp note(state, attestation) do
+    attestation =
+      Map.merge(attestation, %{at: Clock.utc_now(), command?: not is_nil(state.command)})
+
+    :ets.insert(state.table, {:attestation, attestation})
+    :ok
   end
 
   @impl true
@@ -188,7 +272,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       ])
 
     os_pid = port |> Port.info(:os_pid) |> elem(1)
-    result = collect(port, os_pid, state.expected_model, deadline(state.timeout), nil, [])
+    result = collect(port, os_pid, state, deadline(state.timeout), nil, [])
     File.rm_rf!(workspace)
     result
   end
@@ -222,23 +306,28 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     ["-c", script, "sdr-agent-claude", prompt_path, state.command | fixed]
   end
 
-  defp collect(port, os_pid, expected_model, deadline, init, messages) do
+  defp collect(port, os_pid, state, deadline, init, messages) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^port, {:data, {:eol, line}}} ->
         case Jason.decode(line) do
           {:ok, %{"type" => "system", "subtype" => "init"} = event} ->
-            case attest(event, expected_model) do
-              :ok -> collect(port, os_pid, expected_model, deadline, event, [event | messages])
-              {:error, reason} -> stop_tree(port, os_pid, {:error, reason})
+            case attest(event, state.expected_model) do
+              :ok ->
+                attested(state, event)
+                collect(port, os_pid, state, deadline, event, [event | messages])
+
+              {:error, reason} ->
+                drifted(state, reason)
+                stop_tree(port, os_pid, {:error, reason})
             end
 
           {:ok, %{"type" => "result"} = event} when not is_nil(init) ->
             finish_result(event, init, Enum.reverse([event | messages]))
 
           {:ok, event} when is_map(event) ->
-            collect(port, os_pid, expected_model, deadline, init, [event | messages])
+            collect(port, os_pid, state, deadline, init, [event | messages])
 
           _ ->
             stop_tree(port, os_pid, {:error, :invalid_cli_stream})
@@ -246,19 +335,34 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
       {^port, {:data, {:noeol, fragment}}} ->
         if String.trim(fragment) == "" do
-          collect(port, os_pid, expected_model, deadline, init, messages)
+          collect(port, os_pid, state, deadline, init, messages)
         else
           stop_tree(port, os_pid, {:error, :invalid_cli_stream})
         end
 
       {^port, {:exit_status, status}} ->
-        if init,
-          do: {:error, {:claude_cli_exit, status}},
-          else: {:error, :missing_init_attestation}
+        if init do
+          {:error, {:claude_cli_exit, status}}
+        else
+          drifted(state, :missing_init_attestation)
+          {:error, :missing_init_attestation}
+        end
     after
       remaining -> stop_tree(port, os_pid, {:unknown, :claude_cli_timeout})
     end
   end
+
+  defp attested(state, event) do
+    note(state, %{
+      status: :attested,
+      reason: nil,
+      model: event["model"],
+      version: event["claude_code_version"]
+    })
+  end
+
+  defp drifted(state, reason),
+    do: note(state, %{status: :drift, reason: reason, model: nil, version: nil})
 
   defp attest(event, expected_model) do
     cond do

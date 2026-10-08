@@ -1,0 +1,121 @@
+#+TITLE: Feature: Q0 — real model at runtime, pending-draft CTA, AI reviewer notes
+#+DATE: 2026-10-07
+
+* Summary
+Q0.1 makes the reviewed ClaudeCLI provider usable in the running app: a
+runtime selection (=SDR_MODEL_PROVIDER=), one supervised named server, worker
+injection with a typed =provider_not_running= refusal, a no-call boot
+preflight and Admin status. Q0.3 adds a "Draft awaiting review" call to
+action on the lead page. Q0.2 (display only) shows a revision's
+=risk_flags= on the draft page.
+
+* Entity Model
+#+BEGIN_EXAMPLE
+Entity Model trigger: no
+Reason: selection is env/config only; no resource, attribute, enum, policy,
+relationship or action contract changes. The refusal reuses the existing
+AgentRun :provider_error status reason and its run_stopped Failure; the
+attestation status is volatile in-memory (ETS) display data, not a record.
+#+END_EXAMPLE
+
+* Affected Apps
+- [X] Core (=sdr_agent=)
+- [X] Web (=sdr_agent_web=)
+
+* Affected Modules
+- =config/runtime.exs= — =SDR_MODEL_PROVIDER= / =SDR_CLAUDE_CLI_TIMEOUT_MS=
+  parsing; claude_cli dev-only, refused in test and prod.
+- =lib/sdr_agent/ai/model_provider/runtime.ex= (new) — =children/0=,
+  =resolve/1=, =status/0=.
+- =lib/sdr_agent/ai/model_provider/claude_cli.ex= — =:name=, =server/0=,
+  =running?/1=, =attestation/1=, default named server, typed
+  =provider_not_running=, boot preflight, per-call attestation record.
+- =lib/sdr_agent/application.ex= — =children/0=; provider before Oban.
+- =lib/sdr_agent/sdr/agent_worker.ex= — resolve + refusal path.
+- =lib/sdr_agent_web/live/admin_live.ex= — provider status card.
+- =lib/sdr_agent_web/live/lead_live/show.ex= — =#draft-awaiting-review= CTA.
+- =lib/sdr_agent_web/live/draft_live.ex= — =#risk-flags= panel.
+- ADR-0004 Q0.1 amendment; README real-model section; components diagram.
+
+* Required Tests
+- [X] Config: unset/fake → Fake (dev/test/prod); claude_cli in dev with
+      default and overridden timeout; refused in prod and test; unknown
+      values and malformed timeouts refused.
+- [X] Supervision: Fake → no child; ClaudeCLI → exactly one named child with
+      configured timeout; it starts before Oban.
+- [X] Resolve: Fake unchanged; ClaudeCLI without server → typed error
+      (default and named provider); with server → named server injected.
+- [X] Worker (default path and job-carried) with ClaudeCLI + fake shim
+      command succeeds end to end through the named server; server missing
+      → ={:error, :provider_not_running}=, run failed =provider_error=, open
+      critical Failure linked from the Operation, no ModelInvocation.
+- [X] Fake default unchanged (no server needed).
+- [X] Named server: concurrency 1 (three concurrent callers serialise);
+      dead pid → typed error; boot pending; first call attested; drift and
+      missing init recorded; missing shim surfaced.
+- [X] Admin: Fake status; ClaudeCLI not running / pending / drift.
+- [X] Lead CTA: reviewer and admin "Open draft"; auditor "View draft" with no
+      approve affordance; gone once approved; absent with no draft; the
+      Drafts card link stays.
+- [X] Draft risk flags: shown escaped to reviewer and auditor; absent when
+      empty.
+
+* Risks & Considerations
+- No no-call attestation probe exists, so drift is detected at the first
+  call (as before), not at boot. Boot only checks the launcher exists.
+- Returning ={:error, :provider_not_running}= discards the Oban job (max
+  attempts 1); the Operation is failed and then discarded with the run's
+  Failure, consistent with the job.
+- The attestation status is per-boot in-memory; the ModelInvocation ledger
+  remains the durable record.
+- ReplyWorker is not changed; it reaches the named server through
+  =ClaudeCLI.complete/2='s default and fails closed with the typed error
+  (reserved invocation failed, run =provider_error=) when it is absent.
+
+-----
+
+* TDD Tracking
+RED 2026-10-07 on =37c69bb= (partition =_q0=): 29 of 81 focused tests failed
+(6 files: provider_runtime, claude_cli, agent_worker_provider, admin_live,
+leads_live, draft_live), all for the intended missing behaviour —
+undefined =Runtime=, =ClaudeCLI.server/0=, =attestation/0=,
+=Application.children/0=; runtime.exs not raising/selecting; the worker
+returning =:ok= after the =Keyword.fetch!= raise became
+=provider_outcome_unknown= (the live bug, reproduced by the job-carried
+drain test); a dead server pid exiting; missing Admin/CTA/risk-flag
+elements. =bin/tdd_verify.sh= misreported "Cannot proceed / no tests" because
+its parser does not read Elixir 1.20 ExUnit output (known, as in S6a).
+
+One test was corrected during GREEN: the default-path refusal test used
+=perform_job/2=, which builds a job without an id (=find_operation(nil)=
+returned ={:ok, nil}=) — a test defect, not the intended reason. It now calls
+=AgentWorker.perform/1= on the enqueued job; on the old code that returns
+=:ok= (asserted ={:error, :provider_not_running}=), as the job-carried test
+showed.
+
+*TDD Gate Verification:* [X] VERIFIED (manual; tool parser limitation noted)
+
+-----
+
+* Implementation Notes
+- Prod: no opt-in; =claude_cli= is simply refused (ADR-0004 boundary).
+- The server is registered under its module name; its ETS status table uses
+  the same name (protected: only the server writes, readers never block on
+  a running call).
+
+* Completion Checklist
+
+** Phase 4
+- [X] All Phase 4a tests verified failing
+- [X] TDD gate confirmed
+- [X] All steps implemented
+- [X] All tests passing
+- [X] Compiled with --warnings-as-errors
+- [X] Ash boundaries respected
+
+** Phase 5 (Verify + Finalize)
+- [ ] Full test suite passes
+- [X] Moduledocs reviewed for new/modified public modules
+- [X] Plan document updated with implementation notes
+- [X] Architecture evaluation reported: _diagrams updated_ (components)
+- [ ] ADR status updated to "Accepted" (if applicable) — pending Codex review

@@ -13,7 +13,8 @@ app-server on the owner's ChatGPT plan; deterministic fake model is the
 default"). Details amended by Codex consultations 08, 09 and 15, and by the
 S6a implementation approved on 2026-10-06. The owner approved the ClaudeCLI
 pivot on 2026-10-07; the amendment below replaces the earlier CodexAppServer
-runtime decision while retaining it as historical rationale.
+runtime decision while retaining it as historical rationale. The Q0.1
+amendment (runtime provider selection) is pending Codex review on its PR.
 
 ## Context
 
@@ -212,6 +213,53 @@ that boundary cannot be maintained, use a paid API key instead.
   (missing init attestation, or one naming another model, version, tools,
   MCP servers or slash commands) fails the invocation and opens a critical
   `provider_error` operator-attention Failure in the same transaction.
+
+### Q0.1 amendment (2026-10-07): runtime provider selection
+
+Found live: `ClaudeCLI.complete/2` required a `:server` option that the
+running application never supplied, so every `claude_cli` agent job raised
+inside the provider and was recorded as `provider_outcome_unknown`. The real
+model had only ever worked from tests that started their own server. The
+selection is now explicit runtime configuration, with no persisted setting,
+resource or policy change:
+
+- `config/runtime.exs` reads `SDR_MODEL_PROVIDER`. Unset or `fake` keeps the
+  deterministic Fake in every environment. `claude_cli` is accepted **only
+  in development**. In `test` it is refused at boot, so tests stay hermetic.
+  In `prod` it is refused at boot because this ADR limits ClaudeCLI to
+  personal, local, single-operator use of the owner's own login; there is
+  no production opt-in. Any other value is refused, never defaulted.
+  `SDR_CLAUDE_CLI_TIMEOUT_MS` (a positive integer, default 240000) sets the
+  per-call timeout.
+- With ClaudeCLI selected, `SdrAgent.AI.ModelProvider.Runtime.children/0`
+  adds exactly one ClaudeCLI GenServer to the application tree, registered
+  as `ClaudeCLI.server/0`. It starts before Oban, so no agent job can run
+  before it. One server keeps concurrency at 1 (C8): the `research` queue's
+  concurrency does not change that, because every call goes through the
+  server.
+- `AgentWorker` resolves the run's model through `Runtime.resolve/1`, for
+  both the default provider and one carried by the job, and injects the
+  named server. If ClaudeCLI is wanted but its server is not running, no
+  model call or reservation is made. The run fails with `provider_error`,
+  which opens its critical operator-attention Failure, linked from the
+  Operation. The job returns `{:error, :provider_not_running}`. It never
+  raises and never falls back to the Fake. `ClaudeCLI.complete/2` without
+  `:server` calls the named server, and returns the same typed error when
+  no server is running, so `ReplyWorker` (which uses the configured
+  provider) fails closed in the same way.
+- Boot preflight: Claude CLI has no no-call probe for the init attestation.
+  Model, version, tools, MCP servers and slash commands are reported only
+  by a `-p` session, which also sends a model request. So boot spends no
+  model call. It records the attestation as *pending: checked at the first
+  call*, and whether `llm-proxy-shim` was found. Each call then records its
+  init outcome (attested, or drift with the reason) in a protected,
+  in-memory ETS table owned by the server. The table holds no prompt,
+  output or credential, and is not persisted: the ModelInvocation ledger
+  stays the record. Drift still fails the invocation and opens the critical
+  `provider_error` Failure (S7 amendment).
+- The Admin page shows the active provider, the model alias and resolved
+  id, the reviewed CLI version, whether the server is running, and the last
+  attestation. It shows no secret.
 
 ## Justification
 

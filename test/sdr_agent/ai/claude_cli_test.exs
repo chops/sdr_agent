@@ -61,6 +61,96 @@ defmodule SdrAgent.AI.ClaudeCLITest do
     File.rm(pid_file)
   end
 
+  describe "Q0.1 the named, supervised server" do
+    test "without :server the call goes to the named server; absent, it is a typed error" do
+      refute GenServer.whereis(ClaudeCLI.server())
+      assert {:error, :provider_not_running} = ClaudeCLI.complete(request(), [])
+
+      start_supervised!({ClaudeCLI, named_opts("ready")})
+      assert {:ok, result} = ClaudeCLI.complete(request(), [])
+      assert result.model == "claude-opus-5-5"
+    end
+
+    test "a dead server pid is a typed error, not an exit" do
+      {:ok, server} = start_server("ready")
+      GenServer.stop(server)
+      assert {:error, :provider_not_running} = ClaudeCLI.complete(request(), server: server)
+    end
+
+    test "boot records a pending attestation (no no-call probe); the first call attests" do
+      start_supervised!({ClaudeCLI, named_opts("ready")})
+
+      assert %{status: :pending, command?: true} = ClaudeCLI.attestation()
+
+      assert {:ok, _} = ClaudeCLI.complete(request(), [])
+
+      assert %{
+               status: :attested,
+               model: "claude-opus-5-5",
+               version: "2.1.291",
+               reason: nil,
+               at: %DateTime{}
+             } = ClaudeCLI.attestation()
+    end
+
+    test "drift and a missing init are recorded as the last attestation" do
+      for {mode, reason} <- [
+            {"model_drift", :model_attestation_drift},
+            {"tool_drift", :tool_attestation_drift},
+            {"missing_init", :missing_init_attestation}
+          ] do
+        start_supervised!({ClaudeCLI, named_opts(mode)}, id: mode)
+        assert {:error, ^reason} = ClaudeCLI.complete(request(), [])
+        assert %{status: :drift, reason: ^reason, at: %DateTime{}} = ClaudeCLI.attestation()
+        stop_supervised!(mode)
+      end
+    end
+
+    test "a missing llm-proxy-shim is surfaced at boot" do
+      start_supervised!(
+        {ClaudeCLI, name: ClaudeCLI.server(), command: nil, command_args: ["claude"]}
+      )
+
+      assert %{status: :pending, command?: false} = ClaudeCLI.attestation()
+      assert {:error, :llm_proxy_shim_not_found} = ClaudeCLI.complete(request(), [])
+    end
+
+    test "no server, no attestation" do
+      assert %{status: :not_running} = ClaudeCLI.attestation()
+    end
+
+    test "concurrent callers of the named server are serialized (concurrency 1)" do
+      dump = Path.join(System.tmp_dir!(), "sdr-claude-env-#{System.unique_integer([:positive])}")
+      on_exit(fn -> dump |> dumps() |> Enum.each(&File.rm/1) end)
+
+      start_supervised!(
+        {ClaudeCLI,
+         name: ClaudeCLI.server(),
+         command: System.find_executable("elixir"),
+         command_args: [@fake, "env_dump", dump, "300"]}
+      )
+
+      [witness(), witness(), witness()]
+      |> Enum.map(fn witness ->
+        Task.async(fn -> ClaudeCLI.complete(request(witness), []) end)
+      end)
+      |> Task.await_many(30_000)
+      |> Enum.each(&assert({:ok, _} = &1))
+
+      assert [one, two, three] = read_dumps(dump)
+      assert one["finished_us"] <= two["started_us"], "CLI launches overlapped"
+      assert two["finished_us"] <= three["started_us"], "CLI launches overlapped"
+    end
+  end
+
+  defp named_opts(mode) do
+    [
+      name: ClaudeCLI.server(),
+      command: System.find_executable("elixir"),
+      command_args: [@fake, mode]
+    ]
+  end
+
   test "Codex app-server is retained fail-closed" do
     assert {:error, :codex_app_server_disabled} = CodexAppServer.prepare(request(), [])
     assert {:error, :codex_app_server_disabled} = CodexAppServer.complete(request(), [])

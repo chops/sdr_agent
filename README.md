@@ -165,13 +165,21 @@ completion content as span events (synthetic data only, per ADR-0005).
 The `ClaudeCLI` provider (ADR-0004) calls Claude Code through
 `llm-proxy-shim`, using **your own** local Claude Code login. It is for a
 personal local demo only: never hosted, shared or multi-user traffic. To use
-it, start the server with `iex -S mix phx.server` and, before you assign a
-lead, run:
+it, start the development server with the provider selected:
 
-```elixir
-Application.put_env(:sdr_agent, SdrAgent.SDR,
-  model: [provider: SdrAgent.AI.ModelProvider.ClaudeCLI])
+```sh
+SDR_MODEL_PROVIDER=claude_cli mix phx.server
 ```
+
+This starts one supervised ClaudeCLI server (one call at a time). The Admin
+page shows the provider, the model (`opus` → `claude-opus-5-5`), the
+reviewed Claude Code version and the last init attestation. The attestation
+is checked at the first call, because the CLI cannot report it without one.
+`SDR_CLAUDE_CLI_TIMEOUT_MS` sets the per-call timeout (default 240000). The
+value is accepted in development only: the test suite and production
+refuse to boot with it. If a run needs ClaudeCLI while its server is not
+running, the run fails with an attention item; it never falls back to the
+fake model.
 
 Budgets still apply: 20 model calls per run and 200 per UTC day.
 

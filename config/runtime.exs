@@ -35,6 +35,47 @@ config :sdr_agent,
        :audit_tools_wrapper,
        Path.expand(System.get_env("SDR_AUDIT_TOOLS_WRAPPER", "bin/with-audit-tools"))
 
+# Model provider (ADR-0004 runtime-selection amendment, Q0.1). Unset or
+# `fake` keeps the deterministic Fake. `claude_cli` selects the ClaudeCLI
+# provider on the owner's own local Claude login and starts one supervised,
+# named ClaudeCLI server (concurrency 1). It is allowed in development only:
+# tests stay hermetic, and production is refused because ADR-0004 limits
+# ClaudeCLI to personal, local, single-operator use. Every other value is
+# refused rather than defaulted.
+case {config_env(), System.get_env("SDR_MODEL_PROVIDER")} do
+  {_env, nil} ->
+    :ok
+
+  {_env, "fake"} ->
+    config :sdr_agent, model_provider: SdrAgent.AI.ModelProvider.Fake
+
+  {:dev, "claude_cli"} ->
+    timeout =
+      case Integer.parse(System.get_env("SDR_CLAUDE_CLI_TIMEOUT_MS", "240000")) do
+        {ms, ""} when ms > 0 -> ms
+        _ -> raise "SDR_CLAUDE_CLI_TIMEOUT_MS must be a positive integer (milliseconds)"
+      end
+
+    config :sdr_agent, model_provider: SdrAgent.AI.ModelProvider.ClaudeCLI
+    config :sdr_agent, SdrAgent.AI.ModelProvider.ClaudeCLI, timeout: timeout
+
+  {:prod, "claude_cli"} ->
+    raise """
+    SDR_MODEL_PROVIDER=claude_cli is refused in prod: ADR-0004 limits ClaudeCLI \
+    to personal, local, single-operator use of the owner's own Claude login \
+    (development only). Use the fake provider, or a reviewed API-key provider.
+    """
+
+  {:test, "claude_cli"} ->
+    raise """
+    SDR_MODEL_PROVIDER=claude_cli is refused in test: tests stay hermetic \
+    (ADR-0004). Unset SDR_MODEL_PROVIDER; the real-CLI smoke tests are tagged :external.
+    """
+
+  {_env, _other} ->
+    raise "SDR_MODEL_PROVIDER must be fake or claude_cli"
+end
+
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :sdr_agent, SdrAgentWeb.Endpoint,

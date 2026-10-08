@@ -1,7 +1,10 @@
 defmodule SdrAgentWeb.AdminLive do
   @moduledoc """
-  Admin / provider status (S10b; ADM only): the configured model provider
-  and integration adapters (module names only — never credentials), the
+  Admin / provider status (S10b; ADM only): the runtime-selected model
+  provider (`SdrAgent.AI.ModelProvider.Runtime.status/0`, Q0.1: model alias
+  and resolved id, reviewed CLI version, whether its supervised server runs
+  and the last init attestation) and integration adapters (module names
+  only — never credentials), the
   daily model-call budget (`Agents.daily_model_calls/1` against
   `Agents.daily_model_call_limit/0`) and per-run limits, delivery (local
   capture only) with today's send quota (`SendQuotaDay`) and the compliance
@@ -17,6 +20,7 @@ defmodule SdrAgentWeb.AdminLive do
 
   alias SdrAgent.Accounts
   alias SdrAgent.Agents
+  alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Integrations
   alias SdrAgent.Outreach
   alias SdrAgent.Outreach.Compliance
@@ -48,7 +52,7 @@ defmodule SdrAgentWeb.AdminLive do
       assign(socket,
         loaded?: true,
         withheld: nil,
-        provider: Application.get_env(:sdr_agent, :model_provider),
+        provider: Runtime.status(),
         integrations: [
           {"CRM", Integrations.crm()},
           {"Search", Integrations.search()},
@@ -67,6 +71,26 @@ defmodule SdrAgentWeb.AdminLive do
         assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
     end
   end
+
+  defp server_label(:running), do: "running"
+  defp server_label(:not_running), do: "not running"
+  defp server_label(:not_applicable), do: "in-process (no server)"
+
+  defp attestation_label(%{status: :not_applicable}), do: "not applicable (deterministic)"
+  defp attestation_label(%{status: :not_running}), do: "none (server not running)"
+
+  defp attestation_label(%{status: :pending} = attestation),
+    do: "pending: checked at the first call" <> launcher_note(attestation)
+
+  defp attestation_label(%{status: :attested} = attestation),
+    do: "attested #{attestation.model} on Claude Code #{attestation.version}"
+
+  defp attestation_label(%{status: :drift} = attestation),
+    do:
+      "drift: #{attestation.reason}; calls are refused until the reviewed configuration is restored"
+
+  defp launcher_note(%{command?: false}), do: " (llm-proxy-shim not found)"
+  defp launcher_note(_attestation), do: ""
 
   defp short(nil), do: "not configured"
   defp short(module) when is_atom(module), do: module |> Module.split() |> List.last()
@@ -97,15 +121,58 @@ defmodule SdrAgentWeb.AdminLive do
           <.card title="Model provider">
             <dl class="divide-y divide-zinc-100">
               <.field label="Provider">
-                <span id="model-provider" class="font-medium">{short(@provider)}</span>
+                <span id="model-provider" class="font-medium">{short(@provider.provider)}</span>
               </.field>
               <.field label="Module">
-                <span class="break-all font-mono text-xs">{inspect(@provider)}</span>
+                <span class="break-all font-mono text-xs">{inspect(@provider.provider)}</span>
+              </.field>
+              <.field label="Model">
+                <span class="font-mono text-xs">
+                  <span :if={@provider.model_alias} id="model-alias">{@provider.model_alias}</span>
+                  <span :if={@provider.model_alias} class="text-zinc-400">→</span>
+                  <span id="model-id">{@provider.model_id || "—"}</span>
+                </span>
+              </.field>
+              <.field :if={@provider.reviewed_version} label="Reviewed CLI">
+                <span id="reviewed-cli-version" class="font-mono text-xs">
+                  Claude Code {@provider.reviewed_version}
+                </span>
+              </.field>
+              <.field label="Server">
+                <span
+                  id="provider-server"
+                  data-status={@provider.server}
+                  class={[
+                    "text-xs font-medium",
+                    if(@provider.server == :not_running, do: "text-rose-700", else: "text-zinc-700")
+                  ]}
+                >
+                  {server_label(@provider.server)}
+                </span>
+              </.field>
+              <.field label="Last attestation">
+                <span
+                  id="model-attestation"
+                  data-status={@provider.attestation.status}
+                  class={[
+                    "text-xs",
+                    if(@provider.attestation.status == :drift,
+                      do: "font-medium text-rose-700",
+                      else: "text-zinc-700"
+                    )
+                  ]}
+                >
+                  {attestation_label(@provider.attestation)}
+                  <span :if={@provider.attestation[:at]} class="block text-zinc-400">
+                    <.timestamp at={@provider.attestation.at} />
+                  </span>
+                </span>
               </.field>
             </dl>
             <p class="mt-3 text-xs text-zinc-500">
-              The deterministic fake is the default for tests and the demo (ADR-0004). Attestation
-              drift on a real provider opens an attention failure.
+              The deterministic fake is the default; <code>SDR_MODEL_PROVIDER=claude_cli</code>
+              selects ClaudeCLI in development only (ADR-0004). Attestation drift on a real
+              provider opens a critical attention failure.
             </p>
           </.card>
 
