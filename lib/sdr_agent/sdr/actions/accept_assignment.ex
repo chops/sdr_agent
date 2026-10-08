@@ -6,6 +6,11 @@ defmodule SdrAgent.SDR.Actions.AcceptAssignment do
   Decision. Proceeding moves the lead assigned → researching (citing that
   Decision) and emits `sdr.research.requested`; otherwise the assignment
   stops (phase `stop`) without any model call.
+
+  A retried run (S13b, `SdrAgent.SDR.retry_run/2`) replays the assignment on
+  a lead its failed predecessor already moved on: a lead already
+  `researching` or `qualifying` is resumed — the Decision is still recorded
+  (with the lead's status as an input) but the lead is not re-transitioned.
   """
   use SdrAgent.SDR.Action,
     name: "sdr_accept_assignment",
@@ -48,12 +53,19 @@ defmodule SdrAgent.SDR.Actions.AcceptAssignment do
   end
 
   defp transition("research", lead, decision, state, ctx) do
-    with {:ok, _lead} <-
-           Sales.update(lead, :start_research, %{decision_id: decision.id}, actor: ctx.actor) do
+    with {:ok, _lead} <- start_research(lead, decision, ctx) do
       {:ok, %{state | phase: :research},
        [Support.emit("sdr.research.requested", %{lead_id: lead.id})]}
     end
   end
 
   defp transition("stop", _lead, _decision, state, _ctx), do: {:ok, %{state | phase: :stop}}
+
+  # Resuming a retried run: the lead already left `assigned`.
+  defp start_research(%{status: status} = lead, _decision, _ctx)
+       when status in [:researching, :qualifying],
+       do: {:ok, lead}
+
+  defp start_research(lead, decision, ctx),
+    do: Sales.update(lead, :start_research, %{decision_id: decision.id}, actor: ctx.actor)
 end

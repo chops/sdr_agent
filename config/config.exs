@@ -33,7 +33,9 @@ config :sdr_agent, Oban,
        {"* * * * *", SdrAgent.Audit.AnchorWorker},
        {"*/10 * * * *", SdrAgent.Audit.OtsUpgradeWorker},
        {"* * * * *", SdrAgent.Outreach.StaleDeliverySweeper},
-       {"*/5 * * * *", SdrAgent.Agents.Witness.ScanWorker}
+       {"*/5 * * * *", SdrAgent.Agents.Witness.ScanWorker},
+       # S13: recovers agent runs abandoned by a crash (job no longer live).
+       {"*/5 * * * *", SdrAgent.SDR.StaleRunSweeper}
      ]}
   ],
   repo: SdrAgent.Repo
@@ -189,12 +191,25 @@ config :sdr_agent,
 # it from the environment (config/runtime.exs).
 config :sdr_agent, :webhook_hmac, key_id: "derived-1", source: :derived
 
-# S12 wire witness (ADR-0005): inert until the owner points `store_root` at
-# the deployed proxy's blob directory. The reconciled-method allowlist ships
-# EMPTY; only a separate reviewed S12d change may add a method.
+# S12 wire witness (ADR-0005). `store_root` is nil (inert) unless the owner
+# sets SDR_WITNESS_STORE_ROOT (config/runtime.exs, non-test envs) to the
+# deployed proxy's blob directory; an untrusted or missing configured root
+# refuses boot. The reconciled-method allowlist holds exactly ONE exact entry,
+# enabled by the reviewed S12d change on the strength of proof 3
+# (docs/audit/s12d-wire-witness-proof-3.json, Codex evidence PASS c9a2bba3).
+# An eligible ClaudeCLI invocation under any other CLI version, projection or
+# method stays `inferred`; Fake or ineligible invocations stay `skipped`.
+# Changing it requires a reviewed ADR-0005 amendment.
 config :sdr_agent, SdrAgent.Agents.Witness,
   store_root: nil,
-  reconciled_methods: []
+  reconciled_methods: [
+    %{
+      provider: :claude_cli,
+      cli_version: "2.1.291",
+      projection_version: "claude-message-json/3+prompt-builder/1",
+      method: :propagated_id
+    }
+  ]
 
 config :opentelemetry, resource: %{service: %{name: "sdr_agent"}}
 

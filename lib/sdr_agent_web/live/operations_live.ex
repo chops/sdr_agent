@@ -5,12 +5,15 @@ defmodule SdrAgentWeb.OperationsLive do
   (`acknowledge_failure/2`, `resolve_failure/3`; ADM, REV), the durable
   operations (`Operations.list_operations/1`) with cancel for enqueued or
   failed ones (`cancel_operation/2`; ADM), and the agent runs
-  (`Agents.list_runs/1`) linking to `SdrAgentWeb.RunLive`.
+  (`Agents.list_runs/1`) linking to `SdrAgentWeb.RunLive`, with a retry for
+  stopped runs (`SDR.retry_run/2`), and the failed webhook events
+  (`Operations.list_failed_webhooks/1`) with a retry
+  (`Outreach.retry_webhook/2`) — both ADM only (S13b).
 
-  Operation *retry* is deliberately not offered: `retry_operation/2` only
-  moves the row to `running` and no path re-enqueues its job yet (S7/S8
-  notes: resume-after-failure is S13), so a button would leave a running
-  operation with nothing running. Every action goes to the domain with the
+  Operation *retry* is not offered: `retry_operation/2` is an internal
+  execution primitive of the kind actor (S13b). Operator retries are the
+  failed-run retry (`SDR.retry_run/2`) and the failed-webhook retry
+  (`Outreach.retry_webhook/2`), admin only. Every action goes to the domain with the
   scope's user; an auditor's forged event is refused and audited, a
   reviewer's cancel is refused by the Operation policy. An auditor's view is
   recorded before it is served. Updates live (`SdrAgentWeb.LiveRefresh`).
@@ -19,7 +22,9 @@ defmodule SdrAgentWeb.OperationsLive do
 
   alias SdrAgent.Agents
   alias SdrAgent.Operations
+  alias SdrAgent.Outreach
   alias SdrAgent.Sales
+  alias SdrAgent.SDR
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
   alias SdrAgentWeb.LiveRefresh
@@ -41,6 +46,8 @@ defmodule SdrAgentWeb.OperationsLive do
      |> stream(:failures, [])
      |> stream(:operations, [])
      |> stream(:runs, [])
+     |> stream_configure(:webhooks, dom_id: &"failed-webhooks-#{&1.id}")
+     |> stream(:webhooks, [])
      |> LiveRefresh.attach(&load/1)}
   end
 
@@ -56,6 +63,7 @@ defmodule SdrAgentWeb.OperationsLive do
     with {:ok, failures} <- Operations.list_attention(opts),
          {:ok, operations} <- Operations.list_operations(opts),
          {:ok, runs} <- Agents.list_runs(opts),
+         {:ok, webhooks} <- Operations.list_failed_webhooks(opts),
          {:ok, leads} <- ConsoleData.index(scope, Sales.Lead),
          {:ok, contacts} <- ConsoleData.index(scope, Sales.Contact),
          operations = Enum.take(operations, @operation_limit),
@@ -64,7 +72,7 @@ defmodule SdrAgentWeb.OperationsLive do
            AuditedView.record(
              scope,
              "Operations",
-             Enum.map(failures ++ operations ++ runs, & &1.id),
+             Enum.map(failures ++ operations ++ runs ++ webhooks, & &1.id),
              "runs and operations view"
            ) do
       failures = Enum.map(failures, &Map.put(&1, :path, ConsoleData.subject_path(scope, &1)))
@@ -72,7 +80,10 @@ defmodule SdrAgentWeb.OperationsLive do
       runs =
         Enum.map(runs, fn run ->
           lead = run.lead_id && leads[run.lead_id]
-          Map.put(run, :contact, lead && contacts[lead.contact_id])
+
+          run
+          |> Map.put(:contact, lead && contacts[lead.contact_id])
+          |> Map.put(:retried?, Enum.any?(runs, &(&1.retry_of_id == run.id)))
         end)
 
       socket
@@ -84,6 +95,7 @@ defmodule SdrAgentWeb.OperationsLive do
       |> stream(:failures, failures, reset: true)
       |> stream(:operations, operations, reset: true)
       |> stream(:runs, runs, reset: true)
+      |> stream(:webhooks, webhooks, reset: true)
     else
       {:error, reason} ->
         assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
@@ -117,6 +129,21 @@ defmodule SdrAgentWeb.OperationsLive do
       Operations.cancel_operation(operation, actor: actor)
     end)
     |> reply(socket, "Operation cancelled.")
+  end
+
+  def handle_event("retry_run", %{"id" => id}, socket) do
+    SDR.retry_run(id, actor: socket.assigns.current_scope.user)
+    |> reply(socket, "Retry queued: a new run will start shortly.")
+  end
+
+  def handle_event("retry_webhook", %{"id" => id}, socket) do
+    case Outreach.retry_webhook(id, actor: socket.assigns.current_scope.user) do
+      {:ok, %{ordinal: ordinal}} = ok ->
+        reply(ok, socket, "Webhook retry #{ordinal} of 3 queued.")
+
+      error ->
+        reply(error, socket, nil)
+    end
   end
 
   defp with_record(_socket, {:ok, record}, fun), do: fun.(record)
@@ -229,10 +256,14 @@ defmodule SdrAgentWeb.OperationsLive do
               <li id="runs-empty" class="hidden py-6 text-center text-sm text-zinc-500 only:block">
                 No agent runs yet — assign a lead.
               </li>
-              <li :for={{dom_id, run} <- @streams.runs} id={dom_id} class="py-2.5">
+              <li
+                :for={{dom_id, run} <- @streams.runs}
+                id={dom_id}
+                class="flex items-center gap-2 py-2.5"
+              >
                 <.link
                   navigate={~p"/runs/#{run.id}"}
-                  class="group flex items-center justify-between gap-3"
+                  class="group flex min-w-0 flex-1 items-center justify-between gap-3"
                 >
                   <span class="min-w-0">
                     <span class="block truncate text-sm font-medium text-zinc-900 group-hover:text-teal-800">
@@ -245,6 +276,56 @@ defmodule SdrAgentWeb.OperationsLive do
                   </span>
                   <.badge status={run.status} />
                 </.link>
+                <.ui_button
+                  :if={Scope.admin?(@current_scope) and retryable?(run)}
+                  id={"retry-run-#{run.id}"}
+                  size="sm"
+                  phx-click="retry_run"
+                  phx-value-id={run.id}
+                  data-confirm="Start a new run for this lead from the same trigger?"
+                >
+                  <.icon name="hero-arrow-path" class="size-4" /> Retry
+                </.ui_button>
+              </li>
+            </ul>
+          </.card>
+
+          <.card id="failed-webhooks-card" title="Failed webhooks">
+            <:subtitle>
+              Provider events that could not be applied. A retry re-runs the original job (at most 3).
+            </:subtitle>
+            <ul id="failed-webhooks" phx-update="stream" class="-my-2 divide-y divide-zinc-100">
+              <li
+                id="failed-webhooks-empty"
+                class="hidden py-6 text-center text-sm text-zinc-500 only:block"
+              >
+                No failed webhook events.
+              </li>
+              <li :for={{dom_id, event} <- @streams.webhooks} id={dom_id} class="py-2.5">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <p class="truncate text-sm font-medium text-zinc-900">
+                      {humanize(event.event_type)}
+                      <span class="font-normal text-zinc-500">· {event.external_event_id}</span>
+                    </p>
+                    <p class="truncate text-xs text-zinc-500">
+                      received <.timestamp at={event.received_at} />
+                    </p>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <.badge status={event.processing_status} />
+                    <.ui_button
+                      :if={Scope.admin?(@current_scope)}
+                      id={"retry-webhook-#{event.id}"}
+                      size="sm"
+                      phx-click="retry_webhook"
+                      phx-value-id={event.id}
+                      data-confirm="Re-run this webhook event's original job?"
+                    >
+                      <.icon name="hero-arrow-path" class="size-4" /> Retry
+                    </.ui_button>
+                  </div>
+                </div>
               </li>
             </ul>
           </.card>
@@ -293,4 +374,7 @@ defmodule SdrAgentWeb.OperationsLive do
     </Layouts.app>
     """
   end
+
+  defp retryable?(run),
+    do: run.status in [:failed, :budget_exhausted, :cancelled] and not run.retried?
 end

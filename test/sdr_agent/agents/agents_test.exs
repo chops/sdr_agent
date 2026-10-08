@@ -158,7 +158,7 @@ defmodule SdrAgent.AgentsTest do
       assert exhausted.status == :budget_exhausted
     end
 
-    test "operators cancel and retry; retry creates a new linked run", ctx do
+    test "operators cancel; the :retry action has no direct path (S13b)", ctx do
       %{run: run} = AgentsFixtures.running_run(ctx.tenant)
       reviewer = human(:reviewer, ctx.tenant)
 
@@ -166,14 +166,10 @@ defmodule SdrAgent.AgentsTest do
       assert cancelled.status == :cancelled
       assert cancelled.status_reason == :cancelled_by_operator
 
-      {:ok, retry} = Agents.retry_run(cancelled, actor: human(:admin, ctx.tenant))
-      assert retry.retry_of_id == run.id
-      assert retry.status == :queued
-      assert retry.budget.model_calls_reserved == 0
-      assert retry.agent_definition_id == run.agent_definition_id
-
-      %{run: live} = AgentsFixtures.running_run(ctx.tenant)
-      assert {:error, %Ash.Error.Invalid{}} = Agents.retry_run(live, actor: reviewer)
+      # The operator retry is SdrAgent.SDR.retry_run/2 (its own tests); a
+      # direct :retry is Forbidden even for an admin.
+      assert {:error, %Ash.Error.Forbidden{}} =
+               direct_retry(cancelled, human(:admin, ctx.tenant))
     end
 
     test "operators cannot drive agent transitions; agents cannot retry", ctx do
@@ -186,7 +182,7 @@ defmodule SdrAgent.AgentsTest do
                Agents.set_run_phase(run, :plan, actor: human(:reviewer, ctx.tenant))
 
       {:ok, failed} = Agents.fail_run(run, %{status_reason: :crash}, actor: agent)
-      assert {:error, %Ash.Error.Forbidden{}} = Agents.retry_run(failed, actor: agent)
+      assert {:error, %Ash.Error.Forbidden{}} = direct_retry(failed, agent)
     end
 
     test "SCH may create runs; DLV may not", ctx do
@@ -598,6 +594,12 @@ defmodule SdrAgent.AgentsTest do
                &(&1.type in [:update, :destroy])
              )
     end
+  end
+
+  defp direct_retry(run, actor) do
+    Agents.AgentRun
+    |> Ash.Changeset.for_create(:retry, %{run_id: run.id}, actor: actor)
+    |> Ash.create()
   end
 
   defp tool_attrs(key),

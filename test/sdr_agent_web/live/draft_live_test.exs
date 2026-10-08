@@ -289,6 +289,39 @@ defmodule SdrAgentWeb.DraftLiveTest do
       assert ref == hex(op.rendered_sha256)
     end
 
+    test "a deferred delivery shows the send gate's outcome and its not-before time",
+         %{conn: conn} = ctx do
+      %{draft: draft, delivery: op} = approved!(ctx)
+      # 2026-01-06 19:00 MST: inside the campaign's quiet hours.
+      SdrAgent.Clock.freeze(~U[2026-01-07 02:00:00.000000Z])
+      assert %{success: 1} = deliver!()
+
+      {:ok, view, _html} = open(conn, :reviewer, draft)
+
+      assert has_element?(view, "#delivery-#{op.id} [data-state='pending']")
+
+      assert has_element?(
+               view,
+               "#delivery-gate-#{op.id}[data-outcome='defer_quiet_hours']"
+             )
+
+      assert has_element?(
+               view,
+               "#delivery-not-before-#{op.id}[data-at='2026-01-07T15:00:00.000000Z']"
+             )
+
+      refute has_element?(view, "#show-message-#{op.id}")
+    end
+
+    test "a delivery before the send gate ran shows no gate outcome", %{conn: conn} = ctx do
+      %{draft: draft, delivery: op} = approved!(ctx)
+      {:ok, view, _html} = open(conn, :reviewer, draft)
+
+      assert has_element?(view, "#delivery-#{op.id} [data-state='pending']")
+      refute has_element?(view, "#delivery-gate-#{op.id}")
+      refute has_element?(view, "#delivery-not-before-#{op.id}")
+    end
+
     test "a delivery waiting for a retry can be cancelled", %{conn: conn} = ctx do
       start_supervised!(CaptureFaults)
       put_env!(:capture_faults, CaptureFaults)

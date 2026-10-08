@@ -148,6 +148,32 @@ defmodule SdrAgent.Scripts.DemoTest do
     assert [_repo_check, "sdr.demo.predeliver"] = mix_calls(ctx)
   end
 
+  test "serve is the --test smoke server only, on a free port", ctx do
+    assert {out, 2} = demo(["serve"], stubbed(ctx))
+    assert out =~ "serve is the --test smoke server"
+    assert mix_calls(ctx) == []
+
+    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1}, active: false)
+    {:ok, port} = :inet.port(socket)
+    on_exit(fn -> :gen_tcp.close(socket) end)
+
+    assert {busy, 2} = demo(["--test", "serve"], stubbed(ctx, [{"PORT", to_string(port)}]))
+    assert busy =~ "port #{port} is already in use"
+    assert mix_calls(ctx) == []
+
+    line = "SDR_DEMO_REPO localhost 5520 sdr_agent_test_demo"
+
+    env =
+      stubbed(ctx, [
+        {"PORT", free_port()},
+        {"MIX_TEST_PARTITION", nil},
+        {"STUB_REPO_LINE", line}
+      ])
+
+    assert {_out, 0} = demo(["--test", "serve"], env)
+    assert [_repo_check, "sdr.demo.serve"] = mix_calls(ctx)
+  end
+
   describe "reset never drops a database that is in use" do
     @demo_repo "SDR_DEMO_REPO localhost 5520 sdr_agent_dev"
 

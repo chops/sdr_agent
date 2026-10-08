@@ -15,6 +15,7 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsTest do
   alias SdrAgent.Agents.Witness.ScanWorker
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
+  alias SdrAgent.Test.WitnessRoot
 
   unless Code.ensure_loaded?(Proxy),
     do: Code.require_file("../../../support/fake_witness_proxy.exs", __DIR__)
@@ -28,7 +29,7 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsTest do
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant, max_model_calls: 100)
 
     root =
-      Path.join(System.tmp_dir!(), "sdr-witness-review-#{System.unique_integer([:positive])}")
+      WitnessRoot.mkdir!("review")
 
     File.mkdir_p!(root)
     previous = Application.get_env(:sdr_agent, Witness)

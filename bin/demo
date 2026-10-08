@@ -6,6 +6,8 @@
 #                          when nothing else is connected to it)
 #   bin/demo seed          seed the fictional demo data set (idempotent)
 #   bin/demo run           start Phoenix on PORT (default 4120)
+#   bin/demo --test serve  serve the console from the throw-away test
+#                          database on PORT (default 4122) for a browser smoke
 #   bin/demo predeliver    run fixture lead 01 to a draft awaiting review
 #                          (never approves: a human approves in the console)
 #   bin/demo status        database, migrations, server, Oban queues,
@@ -25,12 +27,13 @@ cd "$root"
 
 usage() {
   cat >&2 <<'EOF'
-usage: bin/demo [--test] reset --yes | seed | run | status | predeliver
+usage: bin/demo [--test] reset --yes | seed | run | status | predeliver | --test serve
   reset --yes  drop, create and migrate the demo database (destructive)
   seed         seed the fictional demo data set (idempotent)
   run          start Phoenix on PORT (default 4120) after readiness checks
   status       database, migrations, server, Oban queues, counts, audit chain
   predeliver   run lead 01 to a draft awaiting review (approve it in the console)
+  --test serve serve the console from the throw-away test database (PORT, default 4122)
 EOF
   exit 2
 }
@@ -52,7 +55,7 @@ for arg in "$@"; do
   case "$arg" in
     --test) mode=test ;;
     --yes) yes=1 ;;
-    reset | seed | run | status | predeliver)
+    reset | seed | run | status | predeliver | serve)
       [ -z "$cmd" ] || usage
       cmd="$arg"
       ;;
@@ -65,7 +68,7 @@ for arg in "$@"; do
 done
 [ -n "$cmd" ] || usage
 
-port="${PORT:-4120}"
+if [ "$cmd" = serve ]; then port="${PORT:-4122}"; else port="${PORT:-4120}"; fi
 case "$port" in
   '' | *[!0-9]*) refuse "PORT must be a port number" ;;
 esac
@@ -96,6 +99,7 @@ fi
 case "$cmd" in
   reset) [ "$yes" = 1 ] || refuse "reset drops and recreates $expected_db; re-run with --yes" ;;
   run) [ "$mode" = dev ] || refuse "run starts the dev server; it has no --test mode" ;;
+  serve) [ "$mode" = test ] || refuse "serve is the --test smoke server; the dev server is bin/demo run" ;;
 esac
 
 # The Repo configuration Mix would really use must be the demo database.
@@ -165,6 +169,14 @@ case "$cmd" in
     echo "SDR demo status: MIX_ENV=$MIX_ENV, database $expected_db on 127.0.0.1:5520"
     server_line
     mix sdr.demo.status
+    ;;
+
+  serve)
+    if listening "$port"; then
+      refuse "port $port is already in use (lsof -nP -iTCP:$port -sTCP:LISTEN)"
+    fi
+    check_repo
+    PORT="$port" exec mix sdr.demo.serve
     ;;
 
   run)

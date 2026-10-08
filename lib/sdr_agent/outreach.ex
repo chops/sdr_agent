@@ -32,6 +32,8 @@ defmodule SdrAgent.Outreach do
       the capture adapter's receipt);
     * replies — `record_assessment/2` (AGT), `list_handoff_queue/1`
       (replied leads, interested first);
+    * webhooks — `retry_webhook/2` (active ADM, guarded; S13b): re-enqueues
+      a failed WebhookEvent's original job, at most 3 times;
     * reads (tenant-scoped) — `fetch/3`, `list_records/2`.
   """
   use Ash.Domain,
@@ -200,6 +202,30 @@ defmodule SdrAgent.Outreach do
     |> Ash.Query.for_read(:current, %{reply_ids: reply_ids}, actor: actor)
     |> Ash.Query.filter(tenant_id == ^actor.tenant_id)
     |> Ash.read()
+  end
+
+  @doc """
+  Active ADM: retries the failed WebhookEvent `event_id` — re-enqueues its
+  exact original job, audited with the request's ordinal (1..3). Returns
+  `{:ok, %{event_id, ordinal}}` or a typed error (`:not_failed`,
+  `:retry_pending`, `:retry_limit_reached`, `:retry_window_expired`,
+  `:ambiguous_job`, `:job_corrupt`, `:retry_noop`) with nothing written; any
+  other actor gets `Ash.Error.Forbidden` and one `authz.denied` (S13b B1,
+  `SdrAgent.Outreach.WebhookRetry`).
+  """
+  def retry_webhook(event_id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    meta = %{
+      resource: SdrAgent.Operations.WebhookEvent,
+      action: :retry_webhook,
+      subject_id: event_id,
+      guarded?: true
+    }
+
+    SdrAgent.Audit.Guard.run(meta, actor, fn ->
+      SdrAgent.Outreach.WebhookRetry.run(event_id, actor)
+    end)
   end
 
   @doc "Reads one Outreach record of `resource` by id in the actor's tenant."

@@ -5,10 +5,14 @@ defmodule SdrAgent.Application do
 
   use Application
 
+  alias SdrAgent.Agents.Witness
   alias SdrAgent.AI.ModelProvider.Runtime, as: ModelProviderRuntime
 
   @impl true
   def start(_type, _args) do
+    # S12d: an explicitly configured but untrusted or missing witness store
+    # root refuses to boot, before anything starts or reads (ADR-0005).
+    Witness.check_configured_root!()
     SdrAgent.Telemetry.setup()
 
     # See https://elixir.hexdocs.pm/Supervisor.html
