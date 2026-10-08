@@ -628,6 +628,28 @@ Planned RED (revising =1508b0c=):
 - an explicit override is validated too;
 - the reader writes nothing to the store.
 
+*** S12d enablement RED/GREEN
+- RED =0026ef8= (7 clean assertion failures) was VERIFIED by Codex
+  (=4d4e7802=).
+- Codex then asked for more safety RED before code, added in =b71009b=:
+  - an unavailable effective UID fails closed;
+  - a sticky 1777 ancestor is refused;
+  - the configured root is revalidated without a per-call override;
+  - the real =Application.start= boot wiring;
+  - the fixed-code refusal of an env-supplied root.
+- GREEN:
+  - =Store.validate_root/2=, with the effective UID read once by =id -u=
+    and cached;
+  - every Store entry point revalidates the root through =safe_dir=;
+  - =Witness.check_configured_root!/0=, called from
+    =SdrAgent.Application.start/2=;
+  - =config.exs= ships the one exact entry;
+  - =runtime.exs= adds =SDR_WITNESS_STORE_ROOT= for non-test environments
+    only.
+- Witness test roots are now physical, under the gitignored =tmp/= (via
+  =SdrAgent.Test.WitnessRoot=).
+- Call 4 stays in reserve, as the coordinator decided.
+
 *** Real proof call 3 (owner-approved; =docs/audit/s12d-wire-witness-proof-3.json=, metadata only)
 The call ran at 18:54 MT on =s12d-v3= @ =605d283=, after these gates were
 met: v3 RED VERIFIED (=28d57c13=), v3 GREEN APPROVED (=28b897cb=, PR #28)
