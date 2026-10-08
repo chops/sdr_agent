@@ -34,3 +34,6 @@ devenv.local.nix
 
 # Local-only workflow state (notification log, etc.); never committed
 /.workflow/local/
+
+# HubSpot credential file (ADR-0013): encrypted with sops, but local-only
+/secrets/hubspot.local.sops.yaml

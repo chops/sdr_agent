@@ -6,3 +6,9 @@ creation_rules:
     key_groups:
       - age:
           - age1s7ywl6tyjgnukkkmypmqcdxtrm2cdrpqusv5upvhfetv3pt2lptsj883jd
+  # HubSpot service key + portal id (ADR-0013, owner decision OQ-D). Local-only:
+  # this encrypted file is gitignored; only the owner edits it.
+  - path_regex: secrets/hubspot\.local\.sops\.yaml$
+    key_groups:
+      - age:
+          - age1s7ywl6tyjgnukkkmypmqcdxtrm2cdrpqusv5upvhfetv3pt2lptsj883jd
