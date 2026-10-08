@@ -118,11 +118,18 @@ defmodule SdrAgent.SDR.SchemaDefinitionUpgradeTest do
 
     assert invocation.output_schema_version == "2"
 
-    assert invocation.output_schema_sha256 ==
+    # The recorded hash is that of the schema actually stored for this call
+    # (read through the authorized REC payload API).
+    rec = system_actor(:reconciler, ctx.tenant)
+    {:ok, %{request: request}} = Agents.read_reconciliation_payloads(invocation, actor: rec)
+    stored = request |> JSON.decode!() |> Map.fetch!("schema")
+    assert invocation.output_schema_sha256 == Canonical.sha256(stored)
+
+    assert Canonical.encode!(stored) ==
              :reply_classification
              |> Schemas.for_purpose()
              |> JsonSchema.render()
-             |> Canonical.sha256()
+             |> Canonical.encode!()
 
     # The run keeps its admission definition; the v2 row is unchanged.
     {:ok, reread_run} = Agents.get_run(run.id, actor: ctx.agent)
@@ -131,6 +138,67 @@ defmodule SdrAgent.SDR.SchemaDefinitionUpgradeTest do
 
     assert {reread.definition, reread.definition_sha256} ==
              {legacy.definition, legacy.definition_sha256}
+  end
+
+  defmodule InvalidQualification do
+    @moduledoc "Test responder: an invalid qualification score fails the run."
+    alias SdrAgent.SDR.FakeBrain
+
+    def respond("sdr.qualification" = op, input),
+      do: %{FakeBrain.respond(op, input) | score: "high"}
+
+    def respond(op, input), do: FakeBrain.respond(op, input)
+  end
+
+  test "an operator retry of a legacy-v2-pinned failed run keeps v2 while v3 is current", ctx do
+    legacy = register_legacy!(ctx)
+    lead = fixture_lead!(ctx, "01")
+
+    assigned =
+      SdrAgent.SDR.assign_lead(lead,
+        campaign_id: ctx.campaign_id,
+        actor: ctx.admin,
+        model: [provider_options: [responder: InvalidQualification]]
+      )
+
+    assert match?({:ok, _}, assigned), inspect(assigned)
+    assert %{success: 1} = drain!()
+
+    [failed] =
+      Agents.AgentRun |> Ash.read!(actor: ctx.agent) |> Enum.filter(&(&1.lead_id == lead.id))
+
+    assert failed.status == :failed
+    refute failed.agent_definition_id == legacy.id
+
+    # A failed run pinned to legacy v2 on the same lead, trigger and
+    # Operation, built through domain actions only.
+    {:ok, legacy_run} =
+      Agents.create_run(
+        %{
+          agent_definition_id: legacy.id,
+          lead_id: failed.lead_id,
+          campaign_id: failed.campaign_id,
+          trigger_signal_type: failed.trigger_signal_type,
+          trigger_signal_id: failed.trigger_signal_id,
+          correlation_id: failed.correlation_id,
+          phase: failed.phase,
+          operation_id: failed.operation_id,
+          max_model_calls: 5,
+          max_tool_calls: 10
+        },
+        actor: ctx.agent
+      )
+
+    {:ok, legacy_run} = Agents.start_run(legacy_run, actor: ctx.agent)
+
+    {:ok, legacy_run} =
+      Agents.fail_run(legacy_run, %{status_reason: :invalid_model_output}, actor: ctx.agent)
+
+    result = SdrAgent.SDR.retry_run(legacy_run.id, actor: ctx.admin)
+    assert match?({:ok, %{run: _}}, result), inspect(result)
+    {:ok, %{run: child}} = result
+    assert child.retry_of_id == legacy_run.id
+    assert child.agent_definition_id == legacy.id
   end
 
   test "the hash-conflict guard still refuses a different body under an existing version",
