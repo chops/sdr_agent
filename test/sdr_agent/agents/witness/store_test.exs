@@ -13,9 +13,10 @@ defmodule SdrAgent.Agents.Witness.StoreTest do
 
   alias SdrAgent.Agents.Witness.Store
   alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
+  alias SdrAgent.Test.WitnessRoot
 
   setup do
-    root = Path.join(System.tmp_dir!(), "sdr-witness-store-#{System.unique_integer([:positive])}")
+    root = WitnessRoot.mkdir!("store")
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf!(root) end)
     %{root: root, id: Proxy.uuid7()}

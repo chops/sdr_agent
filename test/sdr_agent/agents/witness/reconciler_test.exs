@@ -28,6 +28,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   alias SdrAgent.Operations
   alias SdrAgent.Telemetry.InMemoryExporter
   alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
+  alias SdrAgent.Test.WitnessRoot
 
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()}, coerce: true)
   @fake Path.expand("../../../support/fake_claude_cli.exs", __DIR__)
@@ -36,7 +37,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   setup do
     tenant = bootstrap!()
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
-    root = Path.join(System.tmp_dir!(), "sdr-witness-e2e-#{System.unique_integer([:positive])}")
+    root = WitnessRoot.mkdir!("e2e")
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf!(root) end)
 
@@ -730,6 +731,95 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
         projection_version: projection,
         method: :propagated_id
       }
+    end
+  end
+
+  describe "enablement runtime mode (shipped entry, overrides off)" do
+    setup do
+      previous = Application.get_env(:sdr_agent, Witness)
+
+      Application.put_env(:sdr_agent, Witness,
+        store_root: nil,
+        reconciled_methods: [@shipped_entry],
+        allow_method_override: false
+      )
+
+      on_exit(fn -> Application.put_env(:sdr_agent, Witness, previous) end)
+    end
+
+    test "only the exact v3 tuple reconciles; per-call overrides are refused", ctx do
+      for {variant, expected} <- [
+            {"cli_shape_v3", :reconciled},
+            {"cli_shape", :inferred},
+            {"ok", :inferred}
+          ] do
+        invocation = call_model!(ctx, variant)
+        result = reconcile(ctx, invocation)
+        assert match?({:ok, %{status: ^expected}}, result), "#{variant}: #{inspect(result)}"
+      end
+
+      invocation = call_model!(ctx, "cli_shape_v3")
+
+      for methods <- [[:propagated_id], [@shipped_entry]] do
+        assert {:error, :method_override_forbidden} = reconcile(ctx, invocation, methods)
+      end
+    end
+
+    test "a reconciled proof is downgraded when its configured root becomes untrusted or missing",
+         ctx do
+      invocation = call_model!(ctx, "cli_shape_v3")
+      assert {:ok, %{status: :reconciled}} = reconcile(ctx, invocation)
+
+      link = ctx.root <> "-link"
+      File.ln_s!(ctx.root, link)
+      on_exit(fn -> File.rm(link) end)
+
+      File.chmod!(ctx.root, 0o777)
+      result = reconcile(ctx, invocation)
+      File.chmod!(ctx.root, 0o700)
+      assert match?({:ok, %{status: :inferred}}, result), "untrusted: #{inspect(result)}"
+      {:ok, [head]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert "store_root_untrusted" in head.evidence["reason_codes"]
+      assert [warning] = attention(ctx, invocation)
+      assert warning.message =~ "store_root_untrusted"
+
+      # A trusted root re-evaluates normally.
+      assert {:ok, %{status: :reconciled}} = reconcile(ctx, invocation)
+
+      # A symlinked override is untrusted too.
+      result = Witness.reconcile(invocation.id, actor: ctx.rec, store_root: link)
+      assert match?({:ok, %{status: :inferred}}, result), "symlink: #{inspect(result)}"
+
+      assert {:ok, %{status: :reconciled}} = reconcile(ctx, invocation)
+      moved = ctx.root <> "-moved"
+      File.rename!(ctx.root, moved)
+      result = reconcile(ctx, invocation)
+      File.rename!(moved, ctx.root)
+      assert match?({:ok, %{status: :inferred}}, result), "missing: #{inspect(result)}"
+      {:ok, [head]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert "store_root_missing" in head.evidence["reason_codes"]
+    end
+
+    test "a mismatch stays a mismatch when its root becomes untrusted or missing", ctx do
+      invocation = call_model!(ctx, "cli_shape_v3_mismatch")
+      assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation)
+
+      File.chmod!(ctx.root, 0o777)
+      result = reconcile(ctx, invocation)
+      File.chmod!(ctx.root, 0o700)
+      assert match?({:ok, %{status: :mismatch}}, result), inspect(result)
+
+      moved = ctx.root <> "-moved"
+      File.rename!(ctx.root, moved)
+      result = reconcile(ctx, invocation)
+      File.rename!(moved, ctx.root)
+      assert match?({:ok, %{status: :mismatch}}, result), inspect(result)
+      assert {:ok, :mismatch} = status(invocation, ctx.rec)
+    end
+
+    test "genuinely unset stays skipped", ctx do
+      invocation = call_model!(ctx, "cli_shape_v3")
+      assert {:ok, %{status: :skipped}} = Witness.reconcile(invocation.id, actor: ctx.rec)
     end
   end
 

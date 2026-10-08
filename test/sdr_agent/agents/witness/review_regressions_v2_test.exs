@@ -25,6 +25,7 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
+  alias SdrAgent.Test.WitnessRoot
 
   @version "claude-message-json/2+prompt-builder/1"
   @schema %{"type" => "object"}
@@ -47,7 +48,7 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
   setup do
     tenant = bootstrap!()
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant, max_model_calls: 100)
-    root = Path.join(System.tmp_dir!(), "sdr-v2-review-#{System.unique_integer([:positive])}")
+    root = WitnessRoot.mkdir!("v2-review")
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf!(root) end)
 

@@ -8,15 +8,21 @@ defmodule SdrAgent.Agents.Witness.EnablementTest do
   end-to-end "exactly this tuple reconciles" check is in `ReconcilerTest` (R3).
 
   The reconciliation queue stays at concurrency 1. The witness store stays
-  unconfigured by default. It is opt-in through `SDR_WITNESS_STORE_ROOT`
-  (non-test environments), and it is validated on every use: the path must
-  be absolute, have no dot segments, have no symlink component, and end in
-  a directory. Otherwise reconciliation stays inert.
+  unconfigured by default (unset means inert: skipped). It is opt-in through
+  `SDR_WITNESS_STORE_ROOT` in non-test environments. An explicitly
+  configured invalid root refuses boot, with a fixed message.
+
+  Every store read revalidates the root, including explicit overrides. The
+  root must be absolute and syntactically clean, every ancestor must be a
+  non-symlink directory owned by root or the effective UID and not group-
+  or world-writable, and the root itself must be owned by the effective
+  UID. A failure is a typed unreadable store, never "unconfigured".
   """
   use ExUnit.Case, async: false
 
   alias SdrAgent.Agents.Witness
   alias SdrAgent.Agents.Witness.Store
+  alias SdrAgent.Test.WitnessRoot
 
   @entry %{
     provider: :claude_cli,
@@ -35,8 +41,7 @@ defmodule SdrAgent.Agents.Witness.EnablementTest do
 
     config = Application.get_env(:sdr_agent, Witness)
 
-    root = Path.join(System.tmp_dir!(), "sdr-enable-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(Path.join(root, "store"))
+    root = WitnessRoot.mkdir!("enable")
 
     on_exit(fn ->
       Enum.each(previous, fn {key, value} ->
@@ -47,8 +52,7 @@ defmodule SdrAgent.Agents.Witness.EnablementTest do
       File.rm_rf!(root)
     end)
 
-    # realpath of the temp dir (macOS /var -> /private/var is a symlink).
-    %{root: real(root)}
+    %{root: root}
   end
 
   defp shipped(env), do: Config.Reader.read!("config/config.exs", env: env, target: :host)
@@ -84,55 +88,117 @@ defmodule SdrAgent.Agents.Witness.EnablementTest do
     end
   end
 
-  describe "store root (opt-in, validated on use)" do
-    test "SDR_WITNESS_STORE_ROOT configures dev; test stays unconfigured; unset is absent", ctx do
-      store = Path.join(ctx.root, "store")
-      System.put_env(@env, store)
-      assert witness(runtime(:dev))[:store_root] == store
+  describe "store root (opt-in; boot refusal; validated on use)" do
+    test "SDR_WITNESS_STORE_ROOT configures non-test envs verbatim; test and unset stay nil",
+         ctx do
+      System.put_env(@env, ctx.root)
+      assert witness(runtime(:dev))[:store_root] == ctx.root
       assert witness(runtime(:test))[:store_root] == nil
 
       System.delete_env(@env)
       assert witness(runtime(:dev))[:store_root] == nil
     end
 
-    test "only an absolute, symlink-free directory path is accepted", ctx do
-      store = Path.join(ctx.root, "store")
+    test "validate_root/2: only an absolute, trusted, symlink-free directory", ctx do
+      uid = call(:effective_uid, [], Store)
+      assert is_integer(uid)
+      assert call(:validate_root, [ctx.root, uid], Store) == {:ok, ctx.root}
+
       file = Path.join(ctx.root, "file")
       File.write!(file, "")
+      sub = Path.join(ctx.root, "sub")
+      File.mkdir!(sub)
+      File.chmod!(sub, 0o700)
       link = Path.join(ctx.root, "link")
-      File.ln_s!(store, link)
-      File.mkdir_p!(Path.join(store, "sub"))
+      File.ln_s!(sub, link)
+      File.mkdir!(Path.join(sub, "inner"))
+      File.chmod!(Path.join(sub, "inner"), 0o700)
 
-      assert call(:validate_root, [store], Store) == {:ok, store}
+      group_writable = Path.join(ctx.root, "gw")
+      File.mkdir!(group_writable)
+      File.chmod!(group_writable, 0o770)
 
-      for {label, path} <- [
-            {"relative", "tmp/store"},
-            {"dot segment", Path.join(store, "./sub")},
-            {"dot-dot segment", Path.join(store, "sub/..")},
-            {"symlink leaf", link},
-            {"symlink component", Path.join(link, "sub")},
-            {"regular file", file},
-            {"missing", Path.join(ctx.root, "missing")},
-            {"empty", ""},
-            {"not a string", nil}
+      open_parent = Path.join(ctx.root, "open")
+      File.mkdir!(open_parent)
+      File.chmod!(open_parent, 0o777)
+      under_open = Path.join(open_parent, "store")
+      File.mkdir!(under_open)
+      File.chmod!(under_open, 0o700)
+
+      for {label, path, expected_uid} <- [
+            {"relative", "tmp/witness-roots", uid},
+            {"dot segment", ctx.root <> "/./sub", uid},
+            {"dot-dot segment", ctx.root <> "/sub/..", uid},
+            {"empty segment", ctx.root <> "//sub", uid},
+            {"trailing slash", sub <> "/", uid},
+            {"NUL", ctx.root <> <<0>>, uid},
+            {"URL", "file://" <> ctx.root, uid},
+            {"symlink leaf", link, uid},
+            {"symlink ancestor", Path.join(link, "inner"), uid},
+            {"regular file", file, uid},
+            {"missing", Path.join(ctx.root, "missing"), uid},
+            {"group-writable root", group_writable, uid},
+            {"world-writable ancestor", under_open, uid},
+            {"wrong owner", sub, uid + 1},
+            {"empty", "", uid},
+            {"not a string", nil, uid}
           ] do
-        assert match?({:error, _}, call(:validate_root, [path], Store)), label
+        result = call(:validate_root, [path, expected_uid], Store)
+        assert match?({:error, _}, result), "#{label}: #{inspect(result)}"
+      end
+
+      assert call(:validate_root, [sub, uid], Store) == {:ok, sub}
+    end
+
+    test "an explicitly configured invalid root refuses boot without naming it", ctx do
+      link = Path.join(ctx.root, "link")
+      File.ln_s!(ctx.root, link)
+
+      for {root, outcome} <- [
+            {nil, :ok},
+            {ctx.root, :ok},
+            {link, :raise},
+            {"relative", :raise},
+            {Path.join(ctx.root, "missing"), :raise}
+          ] do
+        put_witness(store_root: root)
+
+        case outcome do
+          :ok ->
+            assert call(:check_configured_root!, [], Witness) == :ok, inspect(root)
+
+          :raise ->
+            result =
+              try do
+                call(:check_configured_root!, [], Witness)
+              rescue
+                error -> {:raised, Exception.message(error)}
+              end
+
+            assert match?({:raised, _}, result), inspect(result)
+            {:raised, message} = result
+            refute message =~ to_string(root)
+        end
       end
     end
 
-    test "an invalid configured root leaves reconciliation inert (nil)", ctx do
-      store = Path.join(ctx.root, "store")
+    test "store reads validate the root, including explicit overrides", ctx do
       link = Path.join(ctx.root, "link")
-      File.ln_s!(store, link)
+      File.ln_s!(ctx.root, link)
+      invocation = Ash.UUIDv7.generate()
 
-      for {path, expected} <- [{store, store}, {link, nil}, {"relative/path", nil}, {nil, nil}] do
-        Application.put_env(
-          :sdr_agent,
-          Witness,
-          Keyword.put(Application.get_env(:sdr_agent, Witness), :store_root, path)
-        )
+      for {label, root} <- [{"symlinked root", link}, {"relative root", "tmp/witness-roots"}] do
+        for {fun, args} <- [
+              {:inventory, [root, invocation]},
+              {:fingerprint, [root, invocation]},
+              {:blob, [root, String.duplicate("a", 64)]},
+              {:blob_identity, [root, String.duplicate("a", 64)]}
+            ] do
+          result = apply(Store, fun, args)
 
-        assert Witness.store_root() == expected, inspect(path)
+          assert result in [{:error, :store_root_untrusted}, {:error, :store_root_missing}],
+                 "#{label} #{fun}: #{inspect(result)}"
+        end
       end
     end
   end
@@ -148,20 +214,11 @@ defmodule SdrAgent.Agents.Witness.EnablementTest do
       else: {:error, {:not_implemented, function}}
   end
 
-  defp real(path) do
-    path
-    |> Path.split()
-    |> Enum.reduce("/", fn
-      "/", acc ->
-        acc
-
-      part, acc ->
-        next = Path.join(acc, part)
-
-        case File.read_link(next) do
-          {:ok, target} -> Path.expand(target, acc) |> real()
-          {:error, _} -> next
-        end
-    end)
+  defp put_witness(overrides) do
+    Application.put_env(
+      :sdr_agent,
+      Witness,
+      Keyword.merge(Application.get_env(:sdr_agent, Witness, []), overrides)
+    )
   end
 end

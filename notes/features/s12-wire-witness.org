@@ -546,7 +546,15 @@ store, metadata only, no call, and not enablement.
   the order that the recorded app request fixed. Production is unaffected
   because the stored request fixes the order.
 
-*** S12d enablement delta (writer table; soft-stop pending)
+*** S12d enablement delta (writer table)
+Entity soft-stop: PASS. Reviewer Codex, =78f47754= (2026-10-07), replying
+to =c6ea76f6= on =fc2812d=. Findings:
+=/tmp/sdr-s12d-enablement-fc2812d-entity-review.md=.
+- A missing configured root refuses boot as well: no mkdir and no nil
+  fallback.
+- Qualification: a Fake or ineligible invocation stays =skipped=; an
+  eligible invocation with the wrong tuple is =inferred=.
+- This PASS is for RED only. It does not approve GREEN or enablement.
 Coordinator direction (2026-10-07): enable exactly one runtime entry, keep
 call 4 in reserve, and prefer an opt-in =SDR_WITNESS_STORE_ROOT=. Codex's
 design review (=3469b06d=) returned NEEDS-REVIEW on the root, error and
