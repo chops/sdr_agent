@@ -4,7 +4,9 @@ defmodule SdrAgent.Agents.Changes.WitnessLineage do
   checked inside the action transaction:
 
     1. `evidence` is normalized and validated by
-       `SdrAgent.Agents.WitnessEvidence` (C5); raw digests are 32 bytes.
+       `SdrAgent.Agents.WitnessEvidence` (C5); a projection version that
+       records CLI context (v2) requires its complete context group
+       (`WitnessEvidence.validate_claim/1`); raw digests are 32 bytes.
     2. The parent ModelInvocation is re-read **in the row's tenant** and
        locked `FOR UPDATE`, serialising every link write of one invocation
        (lock order: invocation row, then the audit chain head). It must be a
@@ -40,8 +42,11 @@ defmodule SdrAgent.Agents.Changes.WitnessLineage do
   end
 
   defp validate_evidence(changeset) do
-    case WitnessEvidence.validate(Ash.Changeset.get_attribute(changeset, :evidence)) do
-      {:ok, evidence} -> Ash.Changeset.force_change_attribute(changeset, :evidence, evidence)
+    with {:ok, evidence} <-
+           WitnessEvidence.validate(Ash.Changeset.get_attribute(changeset, :evidence)),
+         :ok <- WitnessEvidence.validate_claim(evidence) do
+      Ash.Changeset.force_change_attribute(changeset, :evidence, evidence)
+    else
       {:error, message} -> Ash.Changeset.add_error(changeset, field: :evidence, message: message)
     end
   end

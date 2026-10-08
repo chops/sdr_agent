@@ -97,6 +97,30 @@ case mode do
             response: ~s({"input_tokens":12})
           )
 
+        "cli_shape" ->
+          Proxy.exchange!(root, id,
+            traceparent: tp,
+            request:
+              Proxy.cli_request(stdin,
+                reminders: ["<system-reminder>\nSynthetic date.\n</system-reminder>"]
+              ),
+            response: Proxy.sse_response(answer)
+          )
+
+        "cli_shape_zero" ->
+          Proxy.exchange!(root, id,
+            traceparent: tp,
+            request: Proxy.cli_request(stdin, reminders: [], trailing: 0),
+            response: Proxy.sse_response(answer)
+          )
+
+        "cli_shape_mismatch" ->
+          Proxy.exchange!(root, id,
+            traceparent: tp,
+            request: Proxy.cli_request(stdin <> " (edited)", reminders: []),
+            response: Proxy.sse_response(answer)
+          )
+
         "count_tokens_only" ->
           Proxy.exchange!(root, id,
             route: "/anthropic/v1/messages/count_tokens",

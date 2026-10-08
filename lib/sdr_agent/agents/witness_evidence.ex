@@ -63,8 +63,23 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     "observed_response_projection_sha256" => :sha256,
     "inventory_sha256" => :sha256,
     "reason_codes" => {:codes, 16},
-    "supersede_reason" => {:text, @code}
+    "supersede_reason" => {:text, @code},
+    # S12d projection v2 context group (entity PASS f04a7e44)
+    "reminder_count" => {:integer, 0, 4},
+    "reminder_sha256s" => {:digests, 4},
+    "reminder_bytes" => {:sizes, 4, 8192},
+    "trailing_system_count" => {:integer, 0, 2},
+    "trailing_system_sha256s" => {:digests, 2},
+    "trailing_system_bytes" => {:sizes, 2, 32_768},
+    "request_extras_sha256" => :sha256,
+    "request_fields" => :request_fields
   }
+  @group ~w(reminder_count reminder_sha256s reminder_bytes trailing_system_count
+            trailing_system_sha256s trailing_system_bytes request_extras_sha256 request_fields)
+  @field_codes Enum.flat_map(
+                 ~w(system thinking output_config context_management),
+                 &["#{&1}_present", "#{&1}_null"]
+               )
 
   @doc "The allowlisted keys and their types."
   def allowed, do: @allowed
@@ -80,6 +95,7 @@ defmodule SdrAgent.Agents.WitnessEvidence do
   def validate(evidence) when is_map(evidence) do
     with {:ok, normalized} <- normalize_keys(evidence),
          :ok <- validate_values(normalized),
+         :ok <- validate_group(normalized),
          :ok <- validate_size(normalized) do
       {:ok, normalized}
     end
@@ -113,6 +129,57 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     end)
   end
 
+  # Projection versions whose evidence is a claim over the CLI context: a
+  # link under one of them must carry the complete context group.
+  @group_versions ["claude-message-json/2+prompt-builder/1"]
+
+  @doc "The S12d v2 context-group keys (all present together or none)."
+  def context_group, do: @group
+
+  @doc """
+  True when `extras` is exactly the complete context group: every group key
+  and no other key, so a derived group can neither be partial nor overwrite
+  base evidence when merged.
+  """
+  def exact_context_group?(extras) when is_map(extras),
+    do: Enum.sort(Map.keys(extras)) == Enum.sort(@group)
+
+  def exact_context_group?(_extras), do: false
+
+  @doc """
+  Claim-boundary rule for a full link's (normalized) evidence: a
+  `projection_version` that records CLI context requires its complete
+  context group. Other evidence, v1 included, is unaffected.
+  """
+  def validate_claim(%{"projection_version" => version} = evidence)
+      when version in @group_versions do
+    if Enum.all?(@group, &Map.has_key?(evidence, &1)),
+      do: :ok,
+      else: {:error, "#{version} evidence requires its complete context group"}
+  end
+
+  def validate_claim(_evidence), do: :ok
+
+  # All-or-none; counts equal their list lengths; field codes are unique,
+  # in the fixed order, and `_null` only after its `_present`.
+  defp validate_group(evidence) do
+    present = Enum.filter(@group, &Map.has_key?(evidence, &1))
+
+    cond do
+      present == [] -> :ok
+      length(present) != length(@group) -> {:error, "context group is incomplete"}
+      not counts_match?(evidence) -> {:error, "context group counts differ from lists"}
+      true -> :ok
+    end
+  end
+
+  defp counts_match?(e) do
+    length(e["reminder_sha256s"]) == e["reminder_count"] and
+      length(e["reminder_bytes"]) == e["reminder_count"] and
+      length(e["trailing_system_sha256s"]) == e["trailing_system_count"] and
+      length(e["trailing_system_bytes"]) == e["trailing_system_count"]
+  end
+
   defp validate_size(evidence) do
     if byte_size(Jason.encode!(evidence)) <= @max_bytes,
       do: :ok,
@@ -128,6 +195,23 @@ defmodule SdrAgent.Agents.WitnessEvidence do
   defp valid?(:timestamp, value) do
     is_binary(value) and Regex.match?(@timestamp, value) and
       match?({:ok, _datetime, 0}, DateTime.from_iso8601(value))
+  end
+
+  defp valid?({:digests, max}, value),
+    do: is_list(value) and length(value) <= max and Enum.all?(value, &valid?(:sha256, &1))
+
+  defp valid?({:sizes, max, cap}, value),
+    do:
+      is_list(value) and length(value) <= max and
+        Enum.all?(value, &(is_integer(&1) and &1 in 0..cap))
+
+  defp valid?(:request_fields, value) do
+    is_list(value) and Enum.all?(value, &(&1 in @field_codes)) and
+      value == Enum.filter(@field_codes, &(&1 in value)) and
+      Enum.all?(value, fn code ->
+        not String.ends_with?(code, "_null") or
+          String.replace_suffix(code, "_null", "_present") in value
+      end)
   end
 
   defp valid?({:codes, max}, value) do
