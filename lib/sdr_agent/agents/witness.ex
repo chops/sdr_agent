@@ -502,17 +502,22 @@ defmodule SdrAgent.Agents.Witness do
     }
   end
 
-  defp put_link(nil, desired, _reason, actor), do: Agents.link_wire_witness(desired, actor: actor)
+  defp put_link(nil, desired, _reason, actor),
+    do: desired |> Map.delete(:compared?) |> Agents.link_wire_witness(actor: actor)
 
   defp put_link(head, desired, reason, actor) do
+    {compared?, desired} = Map.pop(desired, :compared?, false)
+
     cond do
       same?(head, desired) ->
         {:ok, :unchanged}
 
-      # C3: only an evaluated, different projection may correct a mismatch;
-      # weaker or unsupported observations (no projection) never do.
+      # C3: only an evaluated comparison (match or mismatch) under a
+      # different projection may correct a mismatch; weaker or unsupported
+      # observations never do, whatever projection label they carry (a v1
+      # fallback labels its unsupported result v1).
       head.link_status == :mismatch and
-          (not is_binary(desired.evidence["projection_version"]) or
+          (not compared? or not is_binary(desired.evidence["projection_version"]) or
              head.evidence["projection_version"] == desired.evidence["projection_version"]) ->
         {:ok, :mismatch_kept}
 
@@ -552,7 +557,9 @@ defmodule SdrAgent.Agents.Witness do
       proxy_response_sha256: decode_hex(record["response_sha256"]),
       link_status: status,
       method: @method,
-      evidence: evidence(invocation, evaluated, record, reasons)
+      evidence: evidence(invocation, evaluated, record, reasons),
+      # Internal (popped before the action): an evaluated comparison.
+      compared?: evaluated.status in [:match, :mismatch]
     }
   end
 
