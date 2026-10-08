@@ -8,7 +8,57 @@ defmodule SdrAgentWeb.OperationsLiveTest do
   """
   use SdrAgentWeb.OperatorCase, async: false
 
+  import Ecto.Query, only: [from: 2]
+
+  alias SdrAgent.Agents
   alias SdrAgent.Operations
+  alias SdrAgent.SDR.FakeBrain
+
+  defmodule InvalidQualification do
+    @moduledoc "Test responder: an invalid qualification score fails the run."
+    def respond("sdr.qualification" = op, input),
+      do: %{FakeBrain.respond(op, input) | score: "high"}
+
+    def respond(op, input), do: FakeBrain.respond(op, input)
+  end
+
+  defp failed_run!(ctx) do
+    %{run: run} =
+      SdrAgent.SDRCase.assign!(ctx, "01",
+        model: [provider_options: [responder: InvalidQualification]]
+      )
+
+    %{success: 1} = drain!()
+    {:ok, failed} = Agents.get_run(run.id, actor: ctx.agent)
+    assert failed.status == :failed
+    failed
+  end
+
+  defp children(ctx, run) do
+    {:ok, runs} = Agents.list_runs(actor: ctx.admin)
+    Enum.filter(runs, &(&1.retry_of_id == run.id))
+  end
+
+  # A bounce for an unknown message fails validation: a failed event.
+  defp failed_webhook!(ctx) do
+    body =
+      SdrAgent.WebhookFixtures.outcome_body("bounce", %{provider_message_id: "capture-0"})
+
+    {:ok, %{status: :accepted, event: event}} = SdrAgent.WebhookFixtures.ingest!("bounce", body)
+    %{success: 1} = SdrAgent.WebhookFixtures.process!()
+    {:ok, failed} = Ash.get(Operations.WebhookEvent, event.id, actor: ctx.admin)
+    assert failed.processing_status == :failed
+    failed
+  end
+
+  defp webhook_job_state(event) do
+    SdrAgent.Repo.one!(
+      from(j in Oban.Job,
+        where: fragment("?->>'webhook_event_id' = ?", j.args, ^event.id),
+        select: j.state
+      )
+    )
+  end
 
   defp open_failure!(ctx) do
     lead = fixture_lead!(ctx, "02")
@@ -115,6 +165,82 @@ defmodule SdrAgentWeb.OperationsLiveTest do
 
       assert [%{access_kind: :record_view, target_resource: "Operations"}] =
                accesses_of(ctx, auditor)
+    end
+  end
+
+  describe "operator retry (S13b, admin only)" do
+    test "an admin retries a failed run from the runs list", %{conn: conn} = ctx do
+      failed = failed_run!(ctx)
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/operations")
+
+      view |> element("#retry-run-#{failed.id}") |> render_click()
+
+      assert has_element?(view, "#flash-info", "Retry queued")
+      assert [child] = children(ctx, failed)
+      assert child.status == :queued
+      assert has_element?(view, "#runs-#{child.id}")
+      refute has_element?(view, "#retry-run-#{failed.id}")
+    end
+
+    test "a second click is refused with the reason", %{conn: conn} = ctx do
+      failed = failed_run!(ctx)
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/operations")
+      view |> element("#retry-run-#{failed.id}") |> render_click()
+
+      render_click(view, "retry_run", %{"id" => failed.id})
+      assert has_element?(view, "#flash-error", "already retried")
+      assert length(children(ctx, failed)) == 1
+    end
+
+    test "reviewers and auditors are not offered retries; forged events are refused and audited",
+         %{conn: conn} = ctx do
+      failed = failed_run!(ctx)
+      event = failed_webhook!(ctx)
+
+      for role <- [:reviewer, :auditor] do
+        user = user!(ctx, role)
+        {:ok, view, _html} = conn |> sign_in(role) |> live(~p"/operations")
+
+        refute has_element?(view, "#retry-run-#{failed.id}")
+        refute has_element?(view, "#retry-webhook-#{event.id}")
+        assert has_element?(view, "#failed-webhooks-#{event.id}")
+
+        render_click(view, "retry_run", %{"id" => failed.id})
+        render_click(view, "retry_webhook", %{"id" => event.id})
+
+        assert has_element?(view, "#flash-error")
+        assert length(denials_of(ctx, user)) == 2
+      end
+
+      assert children(ctx, failed) == []
+      assert webhook_job_state(event) == "completed"
+    end
+
+    test "an admin retries a failed webhook event", %{conn: conn} = ctx do
+      event = failed_webhook!(ctx)
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/operations")
+
+      assert has_element?(view, "#failed-webhooks-#{event.id}", "bounce")
+      view |> element("#retry-webhook-#{event.id}") |> render_click()
+
+      assert has_element?(view, "#flash-info", "Webhook retry 1 of 3 queued")
+      assert webhook_job_state(event) == "available"
+
+      render_click(view, "retry_webhook", %{"id" => event.id})
+      assert has_element?(view, "#flash-error", "retry pending")
+    end
+
+    test "the run page offers the retry to an admin only", %{conn: conn} = ctx do
+      failed = failed_run!(ctx)
+
+      {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/runs/#{failed.id}")
+      refute has_element?(view, "#retry-run")
+
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/runs/#{failed.id}")
+      view |> element("#retry-run") |> render_click()
+
+      assert [child] = children(ctx, failed)
+      assert_redirect(view, ~p"/runs/#{child.id}")
     end
   end
 

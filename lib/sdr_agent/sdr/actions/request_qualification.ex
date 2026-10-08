@@ -6,6 +6,9 @@ defmodule SdrAgent.SDR.Actions.RequestQualification do
   without usable evidence the lead is blocked (which opens its
   operator-attention Failure in the same transaction) and the assignment
   stops.
+
+  A retried run resuming a lead already `qualifying` records the Decision
+  but does not re-transition the lead (see `AcceptAssignment`).
   """
   use SdrAgent.SDR.Action,
     name: "sdr_request_qualification",
@@ -35,8 +38,7 @@ defmodule SdrAgent.SDR.Actions.RequestQualification do
   end
 
   defp transition("qualify", lead, decision, ctx) do
-    with {:ok, _lead} <-
-           Sales.update(lead, :start_qualifying, %{decision_id: decision.id}, actor: ctx.actor) do
+    with {:ok, _lead} <- start_qualifying(lead, decision, ctx) do
       {:ok, %{ctx.agent_state | phase: :qualify},
        [Support.emit("sdr.qualification.requested", %{lead_id: lead.id})]}
     end
@@ -53,4 +55,9 @@ defmodule SdrAgent.SDR.Actions.RequestQualification do
       {:ok, %{ctx.agent_state | phase: :stop}}
     end
   end
+
+  defp start_qualifying(%{status: :qualifying} = lead, _decision, _ctx), do: {:ok, lead}
+
+  defp start_qualifying(lead, decision, ctx),
+    do: Sales.update(lead, :start_qualifying, %{decision_id: decision.id}, actor: ctx.actor)
 end
