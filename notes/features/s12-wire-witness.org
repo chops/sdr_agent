@@ -852,6 +852,51 @@ Planned RED:
   schema keeps its bytes, and the v1/v2/v3 projection digests are
   unchanged.
 
+*** Deterministic schema slice: AgentDefinition version delta (soft-stop pending)
+Codex GREEN review =90369928= on =9e66fd4= returned CHANGES REQUESTED. The
+schema-v2 refs are embedded in =SDRAgent.definition_body/0=
+(="output_schemas"=), but the immutable definition identity stayed at
+=@version 2=. An existing database with SDRAgent v2 (schema-v1 refs)
+therefore refuses =SDRAgent.register/1= and =SDR.assign_lead/2= ("registered
+with another hash").
+
+The cross-VM nondeterminism already made that conflict possible today, for
+any v2 body registered under the other =required= order.
+
+Plan:
+- Bump =SDRAgent= =@version= from 2 to 3. v3's body carries the schema-v2
+  refs, which are deterministic.
+- =Agents.register_definition/2= is unchanged; the hash-conflict guard is
+  not weakened.
+- The v2 row (body and =definition_sha256=) is kept as it is: no rewrite,
+  no delete, no retire.
+
+Pending-run policy:
+- An existing AgentRun keeps its =agent_definition_id= (v2), and so does
+  a retry (=retry_of= copies the prior definition id). That definition
+  records the admission snapshot, i.e. the schema-v1 refs the run was
+  admitted under.
+- Model invocations made by such a run after the upgrade record their own
+  actual =output_schema_version= "2" / =output_schema_sha256=. Per-invocation
+  provenance stays truthful, and the run's pinned definition is not claimed
+  to have changed.
+- New runs (=assign_lead=, reply intake) register and pin v3.
+
+| Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
+| AgentDefinition (SDRAgent) | Existing; new version row | Immutable identity of the agent body | =version= 3 (new row); =definition= now with schema-v2 refs; =definition_sha256= over it | AgentRun belongs to it (unchanged) | (tenant, name, version) is unique; a body hash conflict is refused (unchanged); v2 stays active and untouched; registration is idempotent | KRN registers (unchanged) | Retire v2 later? Proposed: no, not in this slice; it stays referenced by old runs |
+| AgentRun (=agent_definition_id=) | Existing attribute | Pin a run to its admission definition | No change | New runs pin v3; existing runs and their retries keep v2 | No relabel. Invocation-level schema provenance records the version actually used | Unchanged | None |
+| ModelInvocation / Qualification schema provenance | Existing (per the PASS =d24051f1=) | — | — | — | Unchanged from the approved delta | — | — |
+
+Planned RED (Codex's 2 regressions adopted verbatim in substance, plus):
+- a legacy v2 row (schema-v1 refs) stays byte-identical (body and hash)
+  after =register/1=, which returns v3;
+- =register/1= is idempotent for v3;
+- a new lead assignment pins v3;
+- a retry of a v2 run keeps v2 (pinning). That a new invocation records
+  the schema version actually used is already covered on the =SDR.Model=
+  path;
+- the hash-conflict guard still refuses a different v3 body.
+
 *** Deterministic schema slice: RED/GREEN
 - RED =9253ea0= VERIFIED by Codex (=513d153c=).
 - Test-first refinements followed (=52dba60=, =456834b=):
