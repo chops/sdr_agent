@@ -12,11 +12,18 @@ defmodule SdrAgent.SDR.ReplyWorker do
   abandoned-run recovery is S13's, as for `AgentWorker`.) A run that is no
   longer queued (already worked) is left alone. Integration jobs have no
   Operation row (S9 choice 12); the AgentRun is the operator record.
+
+  The model is resolved by `SdrAgent.AI.ModelProvider.Runtime` (the named
+  ClaudeCLI server injected when ClaudeCLI is selected). If that server is
+  not running, no model call or reservation is made: the run fails with
+  `provider_error` (its critical attention Failure) and the job returns
+  `{:error, :provider_not_running}` — never the Fake instead.
   """
   use Oban.Worker, queue: :agent, max_attempts: 1
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents
+  alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Audit
   alias SdrAgent.SDR.Runner
   alias SdrAgent.SDR.Signals
@@ -30,9 +37,18 @@ defmodule SdrAgent.SDR.ReplyWorker do
     with {:ok, %{status: :queued} = run} <- Agents.get_run(run_id, actor: actor),
          {:ok, signal} <- Signals.load(dumped),
          {:ok, run} <- Agents.start_run(run, actor: actor) do
-      result = safe_run(run, signal)
+      result =
+        case Runtime.resolve(model()) do
+          {:ok, model} -> safe_run(run, signal, model)
+          {:error, reason} -> {:refused, reason}
+        end
+
       {:ok, :ok} = Audit.transaction(fn -> finish(result, run, actor) end)
-      :ok
+
+      case result do
+        {:refused, reason} -> {:error, reason}
+        _result -> :ok
+      end
     else
       {:ok, _not_queued} -> :ok
       error -> error
@@ -41,8 +57,8 @@ defmodule SdrAgent.SDR.ReplyWorker do
 
   # An exception or exit inside the run becomes a failed run (crash), not a
   # discarded job with the run left running.
-  defp safe_run(run, signal) do
-    Runner.run(run, signal, model: model())
+  defp safe_run(run, signal, model) do
+    Runner.run(run, signal, model: model)
   rescue
     exception -> {:error, exception}
   catch
@@ -55,6 +71,16 @@ defmodule SdrAgent.SDR.ReplyWorker do
     case {run.status, result} do
       {:running, {:ok, _agent}} ->
         {:ok, _} = Agents.succeed_run(run, actor: actor)
+        :ok
+
+      {:running, {:refused, reason}} ->
+        {:ok, _} =
+          Agents.fail_run(
+            run,
+            %{status_reason: :provider_error, failure_reason: Runtime.refusal_message(reason)},
+            actor: actor
+          )
+
         :ok
 
       {:running, {:error, reason}} ->

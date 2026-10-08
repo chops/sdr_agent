@@ -97,6 +97,24 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
     end
   end
 
+  test "a job naming an unknown provider is refused, never run on the Fake", ctx do
+    %{run: run, operation: operation} = assign!(ctx, "01", model: [provider: ClaudeCLI])
+    [job] = all_enqueued(worker: AgentWorker)
+    job = %{job | args: put_in(job.args, ["model", "provider"], "codex_app_server")}
+
+    assert {:error, :unknown_model_provider} = AgentWorker.perform(job)
+
+    run = run!(ctx, run)
+    assert {run.status, run.status_reason} == {:failed, :provider_error}
+    assert run.failure_reason =~ "unknown model provider"
+    assert invocations!(ctx, run) == []
+
+    assert {:ok, %{last_failure_id: failure_id}} =
+             Operations.get_operation(operation.id, actor: ctx.admin)
+
+    assert failure_id == run.attention_failure_id
+  end
+
   test "the Fake default is unchanged and needs no server", ctx do
     assert Application.fetch_env!(:sdr_agent, :model_provider) == Fake
     refute GenServer.whereis(ClaudeCLI.server())

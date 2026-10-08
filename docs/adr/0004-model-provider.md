@@ -237,16 +237,33 @@ resource or policy change:
   before it. One server keeps concurrency at 1 (C8): the `research` queue's
   concurrency does not change that, because every call goes through the
   server.
-- `AgentWorker` resolves the run's model through `Runtime.resolve/1`, for
-  both the default provider and one carried by the job, and injects the
-  named server. If ClaudeCLI is wanted but its server is not running, no
-  model call or reservation is made. The run fails with `provider_error`,
-  which opens its critical operator-attention Failure, linked from the
-  Operation. The job returns `{:error, :provider_not_running}`. It never
-  raises and never falls back to the Fake. `ClaudeCLI.complete/2` without
-  `:server` calls the named server, and returns the same typed error when
-  no server is running, so `ReplyWorker` (which uses the configured
-  provider) fails closed in the same way.
+- `AgentWorker` and `ReplyWorker` resolve the run's model through
+  `Runtime.resolve/1` and inject the named server. For `AgentWorker` this
+  covers both the default provider and one carried by the job. If ClaudeCLI
+  is wanted but its server is not running, no model call or reservation is
+  made. The run fails with `provider_error`, which opens its critical
+  operator-attention Failure; for `AgentWorker` it is linked from the
+  Operation. The job returns `{:error, :provider_not_running}`. A job that
+  names a provider other than `fake` or `claude_cli` is refused the same
+  way, with `{:error, :unknown_model_provider}`. Neither case raises, and
+  neither falls back to the Fake. `ClaudeCLI.complete/2` without `:server`
+  calls the named server, and returns the same typed error when no server
+  is running.
+- Process lifecycle (Codex review of PR #27):
+  - The per-call `timeout` is end to end and counts from `complete/2`,
+    including time spent queued. A request that reaches the front with
+    less than min(1 s, timeout/2) left is refused without launching
+    (`{:error, :provider_queue_timeout}`, recorded as a failed invocation).
+  - A request whose caller died while it was queued is dropped without
+    launching. A caller that dies during its call stops that CLI tree.
+  - A call returns only after its whole process tree (root included) is
+    gone and its workspace has been removed.
+  - Each server has an unlinked `ClaudeCLI.Reaper` that monitors it. If the
+    server dies, even by `:kill`, the reaper kills the tracked trees and
+    removes their workspaces. A restarted named server waits for the old
+    reaper to exit before it accepts calls, so concurrency stays one across
+    restarts. A killed call is still recorded as unknown and is never
+    resent.
 - Boot preflight: Claude CLI has no no-call probe for the init attestation.
   Model, version, tools, MCP servers and slash commands are reported only
   by a `-p` session, which also sends a model request. So boot spends no
@@ -259,7 +276,9 @@ resource or policy change:
   `provider_error` Failure (S7 amendment).
 - The Admin page shows the active provider, the model alias and resolved
   id, the reviewed CLI version, whether the server is running, and the last
-  attestation. It shows no secret.
+  attestation. It shows no secret. It refreshes live (ADR-0012) when an
+  audit event commits. The card only reflects the attestation; the
+  per-call attestation remains what refuses a drifted CLI.
 
 ## Justification
 

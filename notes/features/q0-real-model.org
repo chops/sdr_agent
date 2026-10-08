@@ -30,6 +30,9 @@ attestation status is volatile in-memory (ETS) display data, not a record.
 - =lib/sdr_agent/ai/model_provider/claude_cli.ex= — =:name=, =server/0=,
   =running?/1=, =attestation/1=, default named server, typed
   =provider_not_running=, boot preflight, per-call attestation record.
+- =lib/sdr_agent/ai/model_provider/claude_cli/reaper.ex= (new, round 2) —
+  crash-safe owner of CLI process trees and workspaces.
+- =lib/sdr_agent/sdr/reply_worker.ex= (round 2) — resolve + refusal path.
 - =lib/sdr_agent/application.ex= — =children/0=; provider before Oban.
 - =lib/sdr_agent/sdr/agent_worker.ex= — resolve + refusal path.
 - =lib/sdr_agent_web/live/admin_live.ex= — provider status card.
@@ -68,9 +71,15 @@ attestation status is volatile in-memory (ETS) display data, not a record.
   Failure, consistent with the job.
 - The attestation status is per-boot in-memory; the ModelInvocation ledger
   remains the durable record.
-- ReplyWorker is not changed; it reaches the named server through
-  =ClaudeCLI.complete/2='s default and fails closed with the typed error
-  (reserved invocation failed, run =provider_error=) when it is absent.
+- Round 2: ReplyWorker resolves the model up front like AgentWorker (no
+  reservation, run =provider_error=, job ={:error, :provider_not_running}=);
+  integrated happy/refusal/drift tests cover it.
+- Round 2 residual: a =:kill= between =Port.open/2= and the reaper learning
+  the OS pid leaves the reaper only the workspace (removed, tree not
+  found); descendants that re-parent before a kill are not found (as for
+  the timeout path). The responder module name in job args is still
+  decoded with =Module.safe_concat/1= (pre-existing; raises before the run
+  starts for an unknown module).
 
 -----
 
@@ -93,7 +102,42 @@ returned ={:ok, nil}=) — a test defect, not the intended reason. It now calls
 =:ok= (asserted ={:error, :provider_not_running}=), as the job-carried test
 showed.
 
-*TDD Gate Verification:* [X] VERIFIED (manual; tool parser limitation noted)
+Classified honestly (from the RED log): 11 assertion failures, 17
+=UndefinedFunctionError= runtime errors for the missing interfaces
+(=Runtime=, =ClaudeCLI.server/0=, =attestation/0=, =Application.children/0=)
+and 1 =exit= (the dead-pid call). So round 1 was *not* a clean
+assertion-only RED: the 18 runtime errors were for the intended missing
+behaviour, but they are errors, not assertions.
+
+*TDD Gate Verification (round 1):* [X] NEEDS_REVIEW — intended missing
+behaviour, but 18 of 29 were runtime errors rather than assertions
+(=tdd_verify.sh= could not classify: Elixir 1.20 parser limitation).
+
+** Round 2 (Codex review of =426d0be=, =/tmp/sdr-pr27-426d0be-review.md=)
+RED on =426d0be= + new tests only: 7 of 43 focused tests failed, *all clean
+assertion failures*, no runtime errors:
+- MF1 killed supervised server: "old CLI root survived the restart".
+- MF2 caller killed while queued: "a model subprocess ran for a caller that
+  died before dispatch" (adapted from Codex's reproducer).
+- MF2 ongoing-call cancellation: "the CLI kept running for a dead caller".
+- MF2 end-to-end deadline: second request returned
+  ={:unknown, :claude_cli_timeout}= (it was launched), expected
+  ={:error, :provider_queue_timeout}=.
+- ReplyWorker refusal: job =success= (reserved, then failed) instead of
+  =discard= with no model call.
+- Unknown job provider: =AgentWorker.perform/1= returned =:ok= (ran on the
+  Fake) instead of ={:error, :unknown_model_provider}=.
+- Admin live refresh: card stayed on the page-load snapshot after a commit
+  broadcast (re-confirmed RED by stashing only the =LiveRefresh.attach=
+  change).
+The "timeout reaps root and workspace" test and the ReplyWorker happy and
+drift tests passed on =426d0be= already (regression coverage, not RED).
+Codex's own reproducer, run against the fix: the restart case passes; its
+queued-caller case cannot find the request because it matches the old
+={:complete, request}= message shape (now ={:complete, request,
+enqueued_at}=); the adapted test in =claude_cli_test.exs= covers it.
+
+*TDD Gate Verification (round 2):* [X] VERIFIED (assertion-only RED)
 
 -----
 

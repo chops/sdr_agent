@@ -44,6 +44,23 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   reason) in a protected ETS table named after the server, which
   `attestation/1` reads without waiting behind a running call. It holds no
   prompt, output or credential.
+
+  ## Process lifecycle (Q0.1 review)
+
+    * **End-to-end deadline.** `:timeout` counts from `complete/2`, queue
+      wait included. A request reaching the front with less than
+      `min(1 s, timeout / 2)` left is refused unlaunched with
+      `{:error, :provider_queue_timeout}`; a launched one gets only the time
+      left before its tree is killed (`{:unknown, :claude_cli_timeout}`).
+    * **Abandoned callers.** A request whose caller died while it was
+      queued is dropped unlaunched; a caller that dies during its call
+      stops that CLI tree (`{:unknown, :caller_down}`, nobody receives it).
+    * **Quiescent on return.** A call returns only after its process tree is
+      gone and its workspace removed (a CLI still running briefly after its
+      result is given 2 s to exit, then killed).
+    * **Crash safety.** `SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper` kills
+      tracked trees and removes workspaces if the server dies, even by
+      `:kill`; a restarted named server waits for it before accepting calls.
   """
 
   use GenServer
@@ -51,6 +68,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   require Logger
 
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
   alias SdrAgent.Clock
 
   @default_timeout 120_000
@@ -66,6 +84,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   # historical invocation's prompt with different code.
   @prompt_builder "prompt-builder/1"
   @server __MODULE__
+  @min_launch_ms 1_000
+  @exit_grace_ms 2_000
 
   @doc """
   Starts a server. Options: `:name` (registers it and keeps its attestation
@@ -156,13 +176,24 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     server = Keyword.get(opts, :server, @server)
 
     if running?(server),
-      do: GenServer.call(server, {:complete, request}, :infinity),
+      do:
+        GenServer.call(
+          server,
+          {:complete, request, System.monotonic_time(:millisecond)},
+          :infinity
+        ),
       else: {:error, :provider_not_running}
   end
 
   @impl true
   def init(opts) do
+    name = Keyword.get(opts, :name)
+    # A replacement admits no call until its predecessor's CLI work is gone.
+    :ok = name |> Reaper.name() |> Reaper.await_previous()
+    reaper = Reaper.start(Reaper.name(name))
+
     state = %{
+      reaper: reaper,
       command:
         Keyword.get_lazy(opts, :command, fn -> System.find_executable("llm-proxy-shim") end),
       command_args: Keyword.get(opts, :command_args, ["claude"]),
@@ -170,7 +201,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       timeout: Keyword.get(opts, :timeout, @default_timeout),
       expected_model: Keyword.get(opts, :expected_model, @resolved_model),
       environment: Keyword.get(opts, :environment),
-      table: status_table(Keyword.get(opts, :name))
+      table: status_table(name)
     }
 
     preflight(state)
@@ -204,20 +235,38 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   end
 
   @impl true
-  def handle_call({:complete, request}, _from, state), do: {:reply, run(request, state), state}
+  def handle_call({:complete, request, enqueued_at}, {caller, _tag}, state) do
+    remaining = state.timeout - (System.monotonic_time(:millisecond) - enqueued_at)
+
+    cond do
+      # Abandoned while queued: nobody waits for this call, so none starts.
+      not Process.alive?(caller) ->
+        {:reply, {:error, :caller_down}, state}
+
+      remaining < min(@min_launch_ms, div(state.timeout, 2)) ->
+        {:reply, {:error, :provider_queue_timeout}, state}
+
+      true ->
+        {:reply, run(request, %{state | timeout: remaining}, caller), state}
+    end
+  end
 
   @impl true
   def handle_info({_port, {:data, _data}}, state), do: {:noreply, state}
   def handle_info({_port, {:exit_status, _status}}, state), do: {:noreply, state}
 
-  defp run(_request, %{command: nil}), do: {:error, :llm_proxy_shim_not_found}
+  def handle_info({:DOWN, _ref, :process, reaper, reason}, %{reaper: reaper} = state),
+    do: {:stop, {:reaper_down, reason}, state}
 
-  defp run(request, state) do
+  defp run(_request, %{command: nil}, _caller), do: {:error, :llm_proxy_shim_not_found}
+
+  defp run(request, state, caller) do
     with {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
          :ok <- refuse_bypass(state.environment || System.get_env()) do
       launch(
         request,
         state,
+        caller,
         witness_env ++ Enum.map(@route_flags ++ @route_urls, &{~c"#{&1}", false})
       )
     end
@@ -251,8 +300,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       else: :ok
   end
 
-  defp launch(request, state, child_env) do
+  defp launch(request, state, caller, child_env) do
     workspace = private_workspace!()
+    Reaper.track(state.reaper, workspace)
     prompt_path = Path.join(workspace, "prompt")
 
     prompt = render_prompt(request.prompt, Zoi.to_json_schema(request.schema))
@@ -272,9 +322,34 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       ])
 
     os_pid = port |> Port.info(:os_pid) |> elem(1)
-    result = collect(port, os_pid, state, deadline(state.timeout), nil, [])
+    Reaper.launched(state.reaper, workspace, os_pid)
+    watch = Process.monitor(caller)
+
+    result =
+      collect(port, os_pid, Map.put(state, :caller, watch), deadline(state.timeout), nil, [])
+
+    Process.demonitor(watch, [:flush])
+    quiesce(port, os_pid)
     File.rm_rf!(workspace)
+    Reaper.untrack(state.reaper, workspace)
     result
+  end
+
+  # The call returns only once its process tree is gone: a CLI still running
+  # after its result gets a short grace to exit, then its tree is killed.
+  defp quiesce(port, os_pid) do
+    if Reaper.alive?(os_pid) do
+      receive do
+        {^port, {:exit_status, _status}} -> :ok
+      after
+        @exit_grace_ms -> :ok
+      end
+
+      if Reaper.alive?(os_pid), do: Reaper.kill_tree(os_pid)
+    end
+
+    if Port.info(port), do: Port.close(port)
+    :ok
   end
 
   defp shell_args(state, prompt_path) do
@@ -347,6 +422,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
           drifted(state, :missing_init_attestation)
           {:error, :missing_init_attestation}
         end
+
+      {:DOWN, ref, :process, _caller, _reason} when ref == state.caller ->
+        stop_tree(port, os_pid, {:unknown, :caller_down})
     after
       remaining -> stop_tree(port, os_pid, {:unknown, :claude_cli_timeout})
     end
@@ -404,30 +482,12 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   defp usage(_usage), do: %{input_tokens: 0, output_tokens: 0, plan_calls: 1}
 
+  # Kills the whole tree (root included) and waits for it before closing
+  # the port, so nothing outlives the call.
   defp stop_tree(port, os_pid, result) do
-    children = descendants(os_pid) |> Enum.reverse()
-    Enum.each(children, &signal(&1, "-TERM"))
-    Process.sleep(20)
-    Enum.filter(children, &alive?/1) |> Enum.each(&signal(&1, "-KILL"))
-
+    Reaper.kill_tree(os_pid)
     if Port.info(port), do: Port.close(port)
     result
-  end
-
-  defp signal(pid, signal),
-    do: System.cmd("kill", [signal, Integer.to_string(pid)], stderr_to_stdout: true)
-
-  defp alive?(pid),
-    do: match?({_, 0}, System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true))
-
-  defp descendants(pid) do
-    children =
-      case System.cmd("pgrep", ["-P", Integer.to_string(pid)], stderr_to_stdout: true) do
-        {output, 0} -> output |> String.split() |> Enum.map(&String.to_integer/1)
-        _ -> []
-      end
-
-    children ++ Enum.flat_map(children, &descendants/1)
   end
 
   defp private_workspace! do

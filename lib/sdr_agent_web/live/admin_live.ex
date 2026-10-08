@@ -3,7 +3,11 @@ defmodule SdrAgentWeb.AdminLive do
   Admin / provider status (S10b; ADM only): the runtime-selected model
   provider (`SdrAgent.AI.ModelProvider.Runtime.status/0`, Q0.1: model alias
   and resolved id, reviewed CLI version, whether its supervised server runs
-  and the last init attestation) and integration adapters (module names
+  and the last init attestation — refreshed live, like the other console
+  views (`SdrAgentWeb.LiveRefresh`), whenever an audit event commits, so a
+  first call's attestation or drift shows without a revisit; the card only
+  reflects it, the per-call attestation is what refuses a drifted CLI) and
+  integration adapters (module names
   only — never credentials), the
   daily model-call budget (`Agents.daily_model_calls/1` against
   `Agents.daily_model_call_limit/0`) and per-run limits, delivery (local
@@ -26,12 +30,16 @@ defmodule SdrAgentWeb.AdminLive do
   alias SdrAgent.Outreach.Compliance
   alias SdrAgent.Outreach.Delivery
   alias SdrAgentWeb.AuditedView
+  alias SdrAgentWeb.LiveRefresh
 
   on_mount {SdrAgentWeb.LiveUserAuth, {:roles, [:admin]}}
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, assign(socket, page_title: "Admin", loaded?: false, withheld: nil)}
+    {:ok,
+     socket
+     |> assign(page_title: "Admin", loaded?: false, withheld: nil)
+     |> LiveRefresh.attach(&load/1)}
   end
 
   @impl true

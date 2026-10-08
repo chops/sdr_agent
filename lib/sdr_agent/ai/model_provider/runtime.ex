@@ -70,6 +70,19 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
     end
   end
 
+  @doc """
+  The run `failure_reason` recorded when a worker refuses to run because of
+  `reason` (`:provider_not_running` or `:unknown_model_provider`); no model
+  call was made.
+  """
+  def refusal_message(:provider_not_running),
+    do:
+      "model provider claude_cli is not running: no supervised ClaudeCLI server " <>
+        "(select it with SDR_MODEL_PROVIDER=claude_cli); no model call was made"
+
+  def refusal_message(:unknown_model_provider),
+    do: "unknown model provider named by the job (fake or claude_cli); no model call was made"
+
   @doc "The selected provider's status for operators (no secrets)."
   def status do
     case provider() do

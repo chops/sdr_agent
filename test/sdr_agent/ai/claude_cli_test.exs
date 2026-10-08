@@ -143,6 +143,180 @@ defmodule SdrAgent.AI.ClaudeCLITest do
     end
   end
 
+  describe "Q0.1 review: CLI process lifecycle (crash, caller, deadline)" do
+    setup do
+      prefix =
+        Path.join(System.tmp_dir!(), "sdr-claude-hang-#{System.unique_integer([:positive])}")
+
+      on_exit(fn ->
+        for record <- Path.wildcard(prefix <> ".*") do
+          launch = record |> File.read!() |> JSON.decode!()
+          # Only the exact synthetic PIDs this test's fixture recorded.
+          for pid <- [launch["child"], launch["root"]], os_alive?(pid), do: os_kill(pid)
+          File.rm(record)
+        end
+      end)
+
+      %{prefix: prefix}
+    end
+
+    test "a killed supervised server's CLI tree and workspace are reaped before its replacement starts",
+         %{prefix: prefix} do
+      server = start_supervised!({ClaudeCLI, hang_opts(prefix, timeout: 30_000)})
+      caller = Task.async(fn -> catch_exit(ClaudeCLI.complete(request(), [])) end)
+      launch = await_launch!(prefix)
+
+      Process.exit(server, :kill)
+      assert {:killed, _} = Task.await(caller, 10_000)
+
+      replacement = await_replacement!(server)
+      # init has returned: the replacement admits no call before the old tree is gone.
+      _ = :sys.get_state(replacement)
+
+      refute os_alive?(launch["root"]), "old CLI root survived the restart"
+      refute os_alive?(launch["child"]), "old CLI child survived the restart"
+      refute File.exists?(launch["cwd"]), "old private workspace survived the restart"
+    end
+
+    test "a timeout reaps the CLI root as well as its descendants, and the workspace",
+         %{prefix: prefix} do
+      {:ok, server} = ClaudeCLI.start_link(hang_opts(prefix, timeout: 1_500))
+
+      assert {:unknown, :claude_cli_timeout} = ClaudeCLI.complete(request(), server: server)
+      assert [launch] = launches(prefix)
+
+      assert eventually(fn -> not os_alive?(launch["root"]) end), "CLI root survived its timeout"
+      assert eventually(fn -> not os_alive?(launch["child"]) end)
+      refute File.exists?(launch["cwd"])
+    end
+
+    test "a caller killed while queued never launches its model request" do
+      root =
+        Path.join(System.tmp_dir!(), "sdr-claude-queue-#{System.unique_integer([:positive])}")
+
+      File.mkdir!(root)
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      {:ok, server} =
+        ClaudeCLI.start_link(
+          command: System.find_executable("elixir"),
+          command_args: [@fake, "env_dump", Path.join(root, "call"), "700"],
+          timeout: 10_000
+        )
+
+      first = Task.async(fn -> ClaudeCLI.complete(request(), server: server) end)
+      assert eventually(fn -> launching?(server) end, 250)
+
+      second = Task.async(fn -> ClaudeCLI.complete(request(), server: server) end)
+      Process.unlink(second.pid)
+      assert eventually(fn -> queued?(server, second.pid) end, 250)
+
+      Process.exit(second.pid, :kill)
+      assert {:ok, _} = Task.await(first, 10_000)
+      # Synchronises behind anything still queued on the server (no call).
+      _ = :sys.get_state(server, 10_000)
+
+      assert length(File.ls!(root)) == 1,
+             "a model subprocess ran for a caller that died before dispatch"
+    end
+
+    test "a caller that dies during its call stops the CLI tree; the server stays up",
+         %{prefix: prefix} do
+      {:ok, server} = ClaudeCLI.start_link(hang_opts(prefix, timeout: 30_000))
+      caller = spawn(fn -> ClaudeCLI.complete(request(), server: server) end)
+      launch = await_launch!(prefix)
+
+      Process.exit(caller, :kill)
+
+      assert eventually(fn -> not os_alive?(launch["root"]) end, 250),
+             "the CLI kept running for a dead caller"
+
+      assert eventually(fn -> not os_alive?(launch["child"]) end, 250)
+      assert Process.alive?(server)
+      assert eventually(fn -> not launching?(server) end, 250)
+    end
+
+    test "the timeout is end to end: a request whose deadline passes in the queue is refused unlaunched",
+         %{prefix: prefix} do
+      {:ok, server} = ClaudeCLI.start_link(hang_opts(prefix, timeout: 2_000))
+
+      first = Task.async(fn -> ClaudeCLI.complete(request(), server: server) end)
+      assert eventually(fn -> launching?(server) end, 250)
+      # Queued behind a call that uses its whole budget, this one has
+      # (almost) none left when it reaches the front.
+      second = Task.async(fn -> ClaudeCLI.complete(request(), server: server) end)
+
+      assert {:unknown, :claude_cli_timeout} = Task.await(first, 10_000)
+      assert {:error, :provider_queue_timeout} = Task.await(second, 10_000)
+      assert length(launches(prefix)) == 1, "the expired request was launched"
+    end
+  end
+
+  defp hang_opts(prefix, opts) do
+    Keyword.merge(
+      [
+        name: ClaudeCLI.server(),
+        command: System.find_executable("elixir"),
+        command_args: [@fake, "hang", prefix]
+      ],
+      opts
+    )
+  end
+
+  defp launches(prefix),
+    do:
+      prefix
+      |> Kernel.<>(".*")
+      |> Path.wildcard()
+      |> Enum.map(&(&1 |> File.read!() |> JSON.decode!()))
+
+  defp await_launch!(prefix) do
+    assert eventually(fn -> launches(prefix) != [] end, 500), "the CLI never launched"
+    [launch | _] = launches(prefix)
+    launch
+  end
+
+  defp await_replacement!(old) do
+    assert eventually(
+             fn ->
+               case GenServer.whereis(ClaudeCLI.server()) do
+                 pid when is_pid(pid) -> pid != old
+                 _ -> false
+               end
+             end,
+             500
+           )
+
+    GenServer.whereis(ClaudeCLI.server())
+  end
+
+  defp launching?(server) do
+    case Process.info(server, :links) do
+      {:links, links} -> Enum.any?(links, &is_port/1)
+      _ -> false
+    end
+  end
+
+  defp queued?(server, pid) do
+    {:messages, messages} = Process.info(server, :messages)
+
+    Enum.any?(messages, fn
+      {:"$gen_call", {^pid, _tag}, _request} -> true
+      _ -> false
+    end)
+  end
+
+  # A process counts as alive unless it is gone or a zombie.
+  defp os_alive?(pid) do
+    case System.cmd("ps", ["-o", "stat=", "-p", Integer.to_string(pid)], stderr_to_stdout: true) do
+      {stat, 0} -> String.trim(stat) != "" and not String.starts_with?(String.trim(stat), "Z")
+      _ -> false
+    end
+  end
+
+  defp os_kill(pid),
+    do: System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+
   defp named_opts(mode) do
     [
       name: ClaudeCLI.server(),

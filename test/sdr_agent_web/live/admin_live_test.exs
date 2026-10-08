@@ -79,6 +79,43 @@ defmodule SdrAgentWeb.AdminLiveTest do
     end
   end
 
+  test "the provider card refreshes when a call commits (attestation drift is seen live)",
+       %{conn: conn} = ctx do
+    start_supervised!(
+      {SdrAgent.AI.ModelProvider.ClaudeCLI,
+       name: SdrAgent.AI.ModelProvider.ClaudeCLI.server(),
+       command: System.find_executable("elixir"),
+       command_args: [Path.expand("../../support/fake_claude_cli.exs", __DIR__), "model_drift"]}
+    )
+
+    {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
+    assert has_element?(view, "#model-attestation[data-status='not_applicable']")
+
+    put_env!(:model_provider, SdrAgent.AI.ModelProvider.ClaudeCLI)
+    assign!(ctx, "01")
+    drain!()
+
+    # The sandbox never commits: deliver what LiveEvents.Relay sends after a
+    # commit (as in SdrAgentWeb.LiveRefreshTest).
+    SdrAgent.LiveEvents.broadcast(%{
+      tenant_id: ctx.tenant.id,
+      sequence: 0,
+      event_type: "test.committed",
+      category: "domain_change",
+      subject_resource: nil,
+      subject_id: nil,
+      agent_run_id: nil
+    })
+
+    assert has_element?(view, "#model-provider", "ClaudeCLI")
+
+    assert has_element?(
+             view,
+             "#model-attestation[data-status='drift']",
+             "model_attestation_drift"
+           )
+  end
+
   test "no credential or password material is rendered", %{conn: conn} do
     {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
     html = render(view)

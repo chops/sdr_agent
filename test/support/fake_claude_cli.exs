@@ -170,6 +170,16 @@ case mode do
         String.contains?(stdin, "research analyst") ->
           %{"claims" => []}
 
+        String.contains?(stdin, "You classify a prospect's reply") ->
+          %{
+            "classification" => "interested",
+            "sentiment" => "positive",
+            "intent" => "wants a call next week",
+            "suggested_next_action" => "hand_off",
+            "confidence" => 0.9,
+            "reason" => "asks to set up a call"
+          }
+
         String.contains?(stdin, "You qualify a sales lead") ->
           %{
             "qualified" => false,
@@ -224,6 +234,23 @@ case mode do
 
   "malformed" ->
     IO.puts("not-json SECRET_DO_NOT_EXPOSE")
+
+  "hang" ->
+    # argv: hang <record prefix>. Attests, then never answers. Records this
+    # launch's own OS pid, its sleeping child and its working directory (the
+    # private workspace) in <prefix>.<pid>, for the process-lifecycle tests.
+    prefix = Enum.at(System.argv(), 1)
+    sleeper = Port.open({:spawn_executable, System.find_executable("sleep")}, [{:args, ["60"]}])
+    {:os_pid, child} = Port.info(sleeper, :os_pid)
+    root = String.to_integer(System.pid())
+
+    File.write!(
+      "#{prefix}.#{root}",
+      JSON.encode!(%{"root" => root, "child" => child, "cwd" => File.cwd!()})
+    )
+
+    IO.puts(init)
+    Process.sleep(:infinity)
 
   "timeout" ->
     pid_file = Enum.at(System.argv(), 1)
