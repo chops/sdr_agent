@@ -300,6 +300,13 @@ verified v3 RED and approved v3 GREEN and the #24 fixes. If v3 does not
 match the real shape, the work stops and is reported; the rules are not
 widened ad hoc.
 
+Proof 3 (2026-10-07, `docs/audit/s12d-wire-witness-proof-3.json`) was one
+complete witnessed exchange, evaluated under v3 with the stdin and response
+projections equal. It reconciled under the test-only exact entry
+`(claude_cli, 2.1.291, claude-message-json/3+prompt-builder/1,
+propagated_id)`. The runtime allowlist stays empty until a separate,
+reviewed enablement change.
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),
