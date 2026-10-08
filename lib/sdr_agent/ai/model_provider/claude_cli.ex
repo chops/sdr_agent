@@ -20,7 +20,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   never modified. Missing or malformed context refuses the call
   (`:invalid_witness_context`) before any process starts.
 
-  The child environment always unsets the Bedrock/Vertex/Foundry routing
+  The child environment is an explicit allowlist (`SdrAgent.ChildEnv`,
+  `@child_env_allow`): every other parent variable — the audit-anchor
+  signing key and any `*_KEY`/`*_TOKEN`/`*_SECRET` included — is removed.
+  It always unsets the Bedrock/Vertex/Foundry routing
   variables (`@route_flags`, `@route_urls`), so an SDR-stamped CLI cannot
   bypass the local proxy. If the operator environment enables one of those
   routes the call is refused (`:witness_bypass_environment`) instead of
@@ -84,11 +87,20 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   require Logger
 
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
+  alias SdrAgent.ChildEnv
   alias SdrAgent.Clock
 
   @default_timeout 120_000
   @route_flags ~w(CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY)
   @route_urls ~w(ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_FOUNDRY_BASE_URL)
+  # The only parent variables the shim and Claude Code receive (besides
+  # `SdrAgent.ChildEnv`'s base): proxy routing the shim validates, the
+  # Claude Code config/binary location, XDG dirs and TLS roots. Everything
+  # else — the anchor signing key included — is removed (security fix).
+  @child_env_allow ChildEnv.xdg() ++
+                     ~w(TERM LLM_OTEL_PROXY_URL LLM_PROXY_SHIM_CLAUDE_BIN
+                        ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR SSL_CERT_FILE
+                        NIX_SSL_CERT_FILE NODE_EXTRA_CA_CERTS)
   @invocation_id ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
   @traceparent ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-(?:00|01)\z/
   @model_alias "opus"
@@ -433,13 +445,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   defp run(request, state, caller, deadline) do
     with {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
          :ok <- refuse_bypass(state.environment || System.get_env()) do
-      launch(
-        request,
-        state,
-        caller,
-        deadline,
-        witness_env ++ Enum.map(@route_flags ++ @route_urls, &{~c"#{&1}", false})
-      )
+      launch(request, state, caller, deadline, witness_env)
     else
       error -> {error, state}
     end
@@ -450,11 +456,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     with true <- Regex.match?(@invocation_id, id),
          [_, trace_id, span_id] <- Regex.run(@traceparent, traceparent),
          false <- trace_id == String.duplicate("0", 32) or span_id == String.duplicate("0", 16) do
-      {:ok,
-       [
-         {~c"SDR_MODEL_INVOCATION_ID", String.to_charlist(id)},
-         {~c"SDR_TRACEPARENT", String.to_charlist(traceparent)}
-       ]}
+      {:ok, [{"SDR_MODEL_INVOCATION_ID", id}, {"SDR_TRACEPARENT", traceparent}]}
     else
       _ -> {:error, :invalid_witness_context}
     end
@@ -473,7 +475,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       else: :ok
   end
 
-  defp launch(request, state, caller, deadline, child_env) do
+  defp launch(request, state, caller, deadline, witness_env) do
     workspace = workspace_path()
     Reaper.track(state.reaper, workspace)
     create_workspace!(workspace)
@@ -484,13 +486,18 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     File.write!(prompt_path, prompt, [:binary])
     File.chmod!(prompt_path, 0o600)
 
+    # The reaper opens the port with the child environment it builds from
+    # this allowlist and these values (SdrAgent.ChildEnv): no parent secret
+    # reaches the CLI; the Bedrock/Vertex/Foundry routes are removed.
+    child_env =
+      {@child_env_allow, witness_env ++ Enum.map(@route_flags ++ @route_urls, &{&1, nil})}
+
     port_opts = [
       :binary,
       :exit_status,
       :stderr_to_stdout,
       {:args, shell_args(state, prompt_path)},
       {:cd, workspace},
-      {:env, child_env},
       {:line, 1_048_576}
     ]
 
@@ -502,7 +509,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
              state.reaper,
              workspace,
              {:spawn_executable, "/bin/sh"},
-             port_opts,
+             {port_opts, child_env},
              deadline
            ) do
       watch = Process.monitor(caller)

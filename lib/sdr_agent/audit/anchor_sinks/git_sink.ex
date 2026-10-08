@@ -1,7 +1,13 @@
 defmodule SdrAgent.Audit.AnchorSinks.GitSink do
   @moduledoc "Publishes a signed statement to the protected private anchor Git repository."
   @behaviour SdrAgent.Audit.AnchorSink
+
+  alias SdrAgent.ChildEnv
+
   @repository "git@github.com:chops/sdr_agent-audit-anchors.git"
+  # SSH agent/command and TLS roots for the push; nothing else of the
+  # parent environment (SdrAgent.ChildEnv).
+  @git_allow ~w(SSH_AUTH_SOCK SSH_AGENT_PID GIT_SSH GIT_SSH_COMMAND SSL_CERT_FILE NIX_SSL_CERT_FILE)
   @git_env [
     {"GIT_CONFIG_GLOBAL", "/dev/null"},
     {"GIT_CONFIG_NOSYSTEM", "1"},
@@ -10,7 +16,7 @@ defmodule SdrAgent.Audit.AnchorSinks.GitSink do
 
   @impl true
   def publish(statement, opts) do
-    command = Keyword.get(opts, :command, &System.cmd/3)
+    command = Keyword.get(opts, :command, &ChildEnv.system_cmd/3)
     repository = Keyword.fetch!(opts, :repository)
     allowed_repository = Keyword.get(opts, :allowed_repository, @repository)
     number = Keyword.fetch!(opts, :anchor_number)
@@ -103,14 +109,21 @@ defmodule SdrAgent.Audit.AnchorSinks.GitSink do
   end
 
   defp git(args, opts, command) do
-    # Hooks export local Git variables; none may escape into the scratch clone.
-    {names, 0} = System.cmd("git", ["rev-parse", "--local-env-vars"])
+    # Only an explicit allowlist reaches Git (no anchor signing key or other
+    # secret; SdrAgent.ChildEnv). Hooks export local Git variables; none may
+    # escape into the scratch clone either.
+    {names, 0} =
+      System.cmd("git", ["rev-parse", "--local-env-vars"], env: ChildEnv.cmd(@git_allow))
+
     clean_env = names |> String.split("\n", trim: true) |> Enum.map(&{&1, nil})
 
     command.(
       "git",
       args,
-      Keyword.merge([stderr_to_stdout: true, env: clean_env ++ @git_env], opts)
+      Keyword.merge(
+        [stderr_to_stdout: true, env: clean_env ++ ChildEnv.cmd(@git_allow, @git_env)],
+        opts
+      )
     )
   end
 end

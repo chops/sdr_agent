@@ -293,7 +293,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
               reaper,
               root,
               {:spawn_executable, System.find_executable("sleep")},
-              [{:args, ["60"]}, {:cd, root}],
+              {[{:args, ["60"]}, {:cd, root}], {[], []}},
               System.monotonic_time(:millisecond) + 5_000
             )
 

@@ -92,7 +92,8 @@ defmodule SdrAgent.Agents.Witness.Store do
 
   defp read_uid(command) do
     with path when is_binary(path) <- System.find_executable(command),
-         {out, 0} <- System.cmd(path, ["-u"], stderr_to_stdout: true),
+         {out, 0} <-
+           System.cmd(path, ["-u"], stderr_to_stdout: true, env: SdrAgent.ChildEnv.cmd([])),
          {uid, ""} when uid >= 0 <- Integer.parse(String.trim(out)) do
       :persistent_term.put({__MODULE__, :euid, command}, uid)
       uid

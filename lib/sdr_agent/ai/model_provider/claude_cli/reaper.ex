@@ -55,6 +55,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
 
   require Logger
 
+  alias SdrAgent.ChildEnv
+
   @exit_wait_ms 2_000
   @retry_ms 1_000
 
@@ -104,7 +106,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   def track(reaper, workspace), do: send(reaper, {:track, workspace})
 
   @doc """
-  Opens the launch's port in the reaper (`Port.open(spawn, port_opts)`), so
+  Opens the launch's port in the reaper — `Port.open(spawn, port_opts)` with
+  the child environment `SdrAgent.ChildEnv.port(allow, set)` from
+  `{port_opts, {allow, set}}` — so
   its OS pid is owned before the process can do anything. Waits for the
   receipt until `deadline` (monotonic ms). Returns `{:ok, port, os_pid}`
   (port messages are then forwarded to the caller); `{:error,
@@ -113,9 +117,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   died before its receipt) or `{:pending, ref}` (no receipt by the
   deadline; a late `{ref, reply}` may still arrive).
   """
-  def open(reaper, workspace, spawn, port_opts, deadline) do
+  def open(reaper, workspace, spawn, {port_opts, {allow, set}}, deadline) do
     ref = Process.monitor(reaper)
-    send(reaper, {:open, ref, workspace, spawn, port_opts})
+    send(reaper, {:open, ref, workspace, spawn, {port_opts, {allow, set}}})
 
     receive do
       {^ref, reply} ->
@@ -151,7 +155,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
 
   @doc "Whether OS process `pid` is running (a zombie counts as gone)."
   def alive?(pid) do
-    case System.cmd("ps", ["-o", "stat=", "-p", Integer.to_string(pid)], stderr_to_stdout: true) do
+    case System.cmd("ps", ["-o", "stat=", "-p", Integer.to_string(pid)],
+           stderr_to_stdout: true,
+           env: ChildEnv.cmd([])
+         ) do
       {stat, 0} -> String.trim(stat) != "" and not String.starts_with?(String.trim(stat), "Z")
       _ -> false
     end
@@ -202,8 +209,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
     end
   end
 
-  defp open_port(state, workspace, spawn, port_opts) do
-    port = Port.open(spawn, port_opts)
+  defp open_port(state, workspace, spawn, {port_opts, {allow, set}}) do
+    port = Port.open(spawn, [{:env, ChildEnv.port(allow, set)} | port_opts])
     {:os_pid, os_pid} = Port.info(port, :os_pid)
     state = put_in(state.launches[workspace], {port, os_pid})
     if hook = state.opts[:on_open], do: hook.(os_pid)
@@ -276,11 +283,18 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   end
 
   defp signal(pid, signal),
-    do: System.cmd("kill", [signal, Integer.to_string(pid)], stderr_to_stdout: true)
+    do:
+      System.cmd("kill", [signal, Integer.to_string(pid)],
+        stderr_to_stdout: true,
+        env: ChildEnv.cmd([])
+      )
 
   defp descendants(pid) do
     children =
-      case System.cmd("pgrep", ["-P", Integer.to_string(pid)], stderr_to_stdout: true) do
+      case System.cmd("pgrep", ["-P", Integer.to_string(pid)],
+             stderr_to_stdout: true,
+             env: ChildEnv.cmd([])
+           ) do
         {output, 0} -> output |> String.split() |> Enum.map(&String.to_integer/1)
         _ -> []
       end
