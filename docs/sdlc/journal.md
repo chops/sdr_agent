@@ -31,18 +31,27 @@ test-first by one agent and reviewed by the other before it merged.
 
 Notable turns:
 
-- **Provider pivot.** The planned model login was not available, so the real
-  model became the Claude CLI running on the owner's own subscription, locked
-  down to no tools, no plugins and a per-call check that it really had none
-  ([ADR-0004](../adr/0004-model-provider.md)).
+- **Provider pivot (Oct 7).** The first real model was Codex app-server on the
+  owner's existing Codex login. Its built-in tool surface could not be fully
+  disabled and verified, so that adapter was left disabled behind a
+  fail-closed check. The owner approved the Claude CLI on their own login
+  instead, locked down to no tools, no plugins and a per-call check that it
+  really had none ([ADR-0004](../adr/0004-model-provider.md)).
 - **Audit first.** Every agent decision, model call and human approval goes
-  into a hash-chained ledger, anchored with signatures and timestamps, so an
-  outsider can verify that nothing was changed afterwards.
-- **Wire witness.** The owner chose to delay the demo until each model call
-  could also be matched against what actually crossed the network.
+  into a hash-chained ledger, anchored with signatures and timestamps. If you
+  trust the signing key and the timestamp evidence, later changes to recorded
+  events can be detected. That does not prove the records are complete or
+  true.
+- **Wire witness.** The owner chose to delay the demo until model calls could
+  be matched against what actually crossed the network. A match needs the one
+  reviewed CLI version and request shape; any other call stays marked
+  "inferred". Choosing to wait for this capability is not proof that every
+  demo call was reconciled.
 
-By Oct 8: 34 merged pull requests, about 280 commits and close to a
-thousand automated tests.
+Snapshot at `main` `438f6a2` on Oct 8: 34 merged pull requests, about 280
+commits and close to a thousand automated tests. Those numbers show how much
+was built and tested. They do not show that the product is validated with
+users, or that two agents equal a team of human specialists.
 
 ### The demo
 
@@ -56,11 +65,13 @@ properly through the normal review process the same night.
 
 The owner asked for the highest quality product possible. The agents hardened
 what existed: real model wiring, a strict allowlist for the environment of
-every child process, and the wire witness switched on. A free HubSpot developer
+every child process, and the wire witness switched on for one exact reviewed
+configuration. A free HubSpot developer
 portal was filled with synthetic companies and contacts for a future CRM
 integration.
 
-Then the agents proposed a plan to keep building. The owner rejected it:
+Then the agents proposed a plan to keep building. The owner rejected it (quoted
+with the owner's consent, decision D-013):
 
 > I want to nail down the features and functionality of this product before
 > beginning production work. And I also want to determine what the UI/UX
@@ -85,8 +96,21 @@ owner chose:
   leads arrive.
 
 On Oct 8 the owner asked for a traditional software process, worked through by
-the three of us together, with every artifact committed to git. This folder is
-the result.
+the three of us together, with durable artifacts committed to git. Claude
+drafted it; Codex requested changes (unrecorded gate approvals, factual
+errors in this journal and the decision log, owner notes that could be lost
+silently, a schedule that counted weekends as working days, and too many
+separate documents). This folder is the revision.
+
+### A machine restart (Oct 8)
+
+The owner's terminal misbehaved and the machine had to restart mid-phase.
+Before it did, Claude and Codex each wrote a private handoff: exact session
+ids, how to resume each one, what a reboot would wipe, and the next action.
+Codex checked Claude's handoff and found seven errors, which Claude fixed. Files that lived only in
+temporary folders were copied somewhere durable first, leaving out anything
+that held login tokens. After the restart, work picked up from those
+handoffs.
 
 ### Retrospective (draft, to be confirmed at G0)
 

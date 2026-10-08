@@ -189,6 +189,25 @@ ol.agreements { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 #export-text { min-height: 160px; font-family: var(--font-mono); font-size: var(--step--1); }
 .err { background: var(--gap-soft); color: var(--gap); padding: 14px; border-radius: var(--radius); }
 footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid var(--line); padding-top: 16px; }
+.warn { background: var(--gap-soft); color: var(--gap); border: 1px solid var(--gap); padding: 12px 14px; border-radius: var(--radius); font-weight: 500; }
+.saved { font-size: var(--step--1); color: var(--done); }
+.disclaimer { font-size: var(--step--1); color: var(--muted); max-width: 75ch; }
+
+/* Gates, constraints, packets */
+.g-weekend { position: absolute; top: 26px; bottom: 8px; background: var(--sunk); opacity: .6; pointer-events: none; }
+.rules { margin: 0; padding-left: 20px; display: grid; gap: 8px; max-width: 80ch; }
+.constraint { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.constraint::before { content: ""; width: 8px; height: 8px; margin-top: 7px; background: var(--gap); border-radius: 1px; }
+.sev { display: grid; grid-template-columns: 40px 1fr; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.sev b { font-family: var(--font-mono); font-size: var(--step--1); }
+.chain { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.chain .link { border: 1px solid var(--line); background: var(--surface); border-radius: var(--radius); padding: 6px 10px; display: grid; gap: 2px; }
+.chain .link b { font-family: var(--font-mono); font-size: var(--step--1); }
+.chain .link span { color: var(--muted); font-size: 11px; }
+.chain .arrow { color: var(--muted); }
+.packet-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: var(--step--1); color: var(--muted); }
+.control { display: grid; gap: 2px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.control b { font-weight: 600; }
 
 @media (max-width: 860px) {
   .phase-cols, .two { grid-template-columns: 1fr; }
@@ -239,10 +258,49 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     <ol class="flow" id="flow"></ol>
   </section>
 
+  <section aria-labelledby="h-gates">
+    <div class="section-head">
+      <h2 id="h-gates">How a gate passes</h2>
+      <p>Every gate gets a written record in <span class="mono" id="gate-path"></span>. Without one, the gate has not passed, whatever the date.</p>
+    </div>
+    <div class="two">
+      <div><h3>What a gate record holds</h3><ol class="rules" id="gate-fields"></ol></div>
+      <div><h3>Rules</h3><ol class="rules" id="gate-rules"></ol></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-constraints">
+    <div class="section-head">
+      <h2 id="h-constraints">Constraints that cannot be waived</h2>
+      <p>These stay in force at every gate unless you accept an ADR that changes them. A gate decision or an exception cannot set them aside.</p>
+    </div>
+    <div class="two">
+      <div id="constraints"></div>
+      <div><h3>Bug severity</h3><div id="severities"></div></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-packets">
+    <div class="section-head">
+      <h2 id="h-packets">Packets and traceability</h2>
+      <p>Work is reviewed and approved as seven packets, not dozens of separate documents. Stable ids link each requirement to its design, slice, test and evidence.</p>
+    </div>
+    <div class="chain" id="chain"></div>
+    <div class="matrix-scroll"><table id="packets"></table></div>
+  </section>
+
+  <section aria-labelledby="h-schedule">
+    <h2 id="h-schedule">Schedule controls and change control</h2>
+    <div class="two">
+      <div><h3>Assumptions</h3><ul class="rules" id="sched-assumptions"></ul><h3>Controls</h3><div id="sched-controls"></div></div>
+      <div><h3>After scope is locked (G2)</h3><ol class="rules" id="change-control"></ol><h3>Publication</h3><ul class="rules" id="publication"></ul></div>
+    </div>
+  </section>
+
   <section aria-labelledby="h-team">
     <div class="section-head">
       <h2 id="h-team">The team</h2>
-      <p>Roles a traditional product team would staff, and who covers each one here. Red rows are gaps we cannot fill with agents.</p>
+      <p>Roles a traditional product team would staff, who covers each one here, and who is accountable. Red rows are gaps we cannot fill with agents.</p>
     </div>
     <div class="matrix-scroll"><table id="team"></table></div>
   </section>
@@ -266,14 +324,18 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   <section aria-labelledby="h-questions">
     <div class="section-head">
       <h2 id="h-questions">Open questions for you</h2>
-      <p>Answer here, add notes on any phase above, then copy everything and paste it to Claude. Notes stay in this browser until you do.</p>
+      <p>Answer here, add notes on any phase above, then copy or download everything and paste it to Claude.</p>
     </div>
+    <p class="disclaimer">Notes on this page are feedback, not approvals, and they are not in git. They become part of the record only after you send them to Claude and Claude commits them. You give approvals in chat, and each one is written into a gate record.</p>
+    <p class="warn" id="storage-warning" role="alert" hidden></p>
     <div class="qs" id="questions"></div>
     <div class="export">
       <button class="btn" id="copy">Copy notes for Claude</button>
+      <button class="btn ghost" id="download" hidden>Download notes</button>
       <button class="btn ghost" id="show">Show text</button>
       <span class="status-msg" id="copy-status" role="status"></span>
     </div>
+    <p class="saved" id="save-state"></p>
     <textarea id="export-text" readonly hidden aria-label="Notes for Claude"></textarea>
   </section>
 
@@ -281,29 +343,42 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
 </div>
 
 <script src="sdlc-data.js"></script>
+<script src="notes.js"></script>
 <script>
 (function () {
   "use strict";
-  var D = window.SDLC;
+  var D = window.SDLC, N = window.SDLCNotes;
   var $ = function (id) { return document.getElementById(id); };
-  if (!D) {
-    $("phase").innerHTML = '<p class="err">The process data did not load. Open this page from the docs/sdlc folder so sdlc-data.js sits next to it.</p>';
+  if (!D || !N) {
+    $("phase").innerHTML = '<p class="err">The process data did not load. Open this page from the docs/sdlc folder so sdlc-data.js and notes.js sit next to it.</p>';
     return;
   }
   var PEOPLE = ["owner", "claude", "codex", "outside"];
   var STORE = "sdlc-map-notes-v1";
-  var state = { phase: null, lens: "all", notes: {} };
-  try { state.notes = JSON.parse(localStorage.getItem(STORE) || "{}") || {}; } catch (e) { state.notes = {}; }
-  try { state.lens = localStorage.getItem(STORE + ":lens") || "all"; } catch (e) {}
+  var FP = N.fingerprint(D);
+  var store = N.createStore(function () { return window.localStorage; }, STORE);
+  var state = { phase: null, lens: "all", dirty: false };
+  try { state.lens = window.localStorage.getItem(STORE + ":lens") || "all"; } catch (e) {}
 
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
   function day(s) { var p = s.split("-"); return Date.UTC(+p[0], +p[1] - 1, +p[2]) / 864e5; }
   function fmt(s) { var d = new Date(day(s) * 864e5); return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }); }
   function todayDay() { var n = new Date(); return Date.UTC(n.getFullYear(), n.getMonth(), n.getDate()) / 864e5; }
-  function saveNotes() { try { localStorage.setItem(STORE, JSON.stringify(state.notes)); } catch (e) {} }
   function chip(id) { var p = D.people[id]; return '<span class="chip"><i class="dot ' + id + '"></i>' + esc(p ? p.label : id) + "</span>"; }
   function pill(status, text) { return '<span class="pill ' + status + '">' + esc(text || status) + "</span>"; }
+  function list(items) { return items.map(function (t) { return "<li>" + esc(t) + "</li>"; }).join(""); }
   var STATUS_TEXT = { done: "Done", active: "In progress", next: "Next", planned: "Planned", draft: "Draft", review: "In review", todo: "To do" };
+
+  // Notes persistence status, always visible.
+  function renderSaveState() {
+    var warn = N.storageWarning(store);
+    $("storage-warning").textContent = warn;
+    $("storage-warning").hidden = !warn;
+    $("save-state").textContent = store.available
+      ? "Saved in this browser only. " + (state.dirty ? "Changed since you last copied or downloaded them." : "")
+      : "Not saved anywhere yet.";
+    $("save-state").className = store.available ? "saved" : "status-msg";
+  }
 
   // Header facts
   (function () {
@@ -316,7 +391,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
       var rel = n > 1 ? "in " + n + " days" : n === 1 ? "tomorrow" : n === 0 ? "today" : -n + " days ago";
       html += '<div class="fact"><b>' + esc(fmt(m.date)) + " · " + rel + "</b><span>" + esc(m.label) + "</span></div>";
     });
-    html += '<div class="fact"><b>' + esc(D.meta.version) + "</b><span>Updated " + esc(fmt(D.meta.updated)) + "</span></div>";
+    html += '<div class="fact"><b>' + esc(D.meta.version) + "</b><span>Revision " + esc(D.meta.revision) + " · fingerprint " + FP + "</span></div>";
     $("facts").innerHTML = html;
   })();
 
@@ -331,23 +406,25 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   $("lens").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-lens]"); if (!b) return;
     state.lens = b.getAttribute("data-lens");
-    try { localStorage.setItem(STORE + ":lens", state.lens); } catch (err) {}
+    try { window.localStorage.setItem(STORE + ":lens", state.lens); } catch (err) {}
     renderLens(); renderPhase(); renderMatrix();
   });
 
-  // Gantt
+  // Gantt, with weekends shaded because the plan counts weekdays only.
   function renderGantt() {
     var all = D.phases.map(function (p) { return [day(p.start), day(p.end)]; });
     var min = Math.min.apply(null, all.map(function (a) { return a[0]; })) - 1;
     var max = Math.max.apply(null, all.map(function (a) { return a[1]; })) + 2;
     var span = max - min;
     var x = function (d) { return ((d - min) / span) * 100; };
-    var ticks = "";
-    for (var d = min + 1; d < max; d += 1) {
-      var dt = new Date(d * 864e5);
-      if (dt.getUTCDay() === 1 || d === min + 1) ticks += '<span style="left:' + x(d + 0.5) + '%">' + dt.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) + "</span>";
+    var pos = function (d) { return "calc(170px + 12px + (100% - 194px) * " + ((d - min) / span) + ")"; };
+    var ticks = "", shade = "";
+    for (var d = min; d < max; d += 1) {
+      var dt = new Date(d * 864e5), wd = dt.getUTCDay();
+      if (d > min && (wd === 1 || d === min + 1)) ticks += '<span style="left:' + x(d + 0.5) + '%">' + dt.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) + "</span>";
+      if (wd === 0 || wd === 6) shade += '<div class="g-weekend" style="left:' + pos(d) + ";width:calc((100% - 194px) / " + span + ')"></div>';
     }
-    var html = '<div class="g-axis"><div></div><div class="g-ticks">' + ticks + "</div></div>";
+    var html = shade + '<div class="g-axis"><div></div><div class="g-ticks">' + ticks + "</div></div>";
     D.phases.forEach(function (p) {
       var s = x(day(p.start)), e = x(day(p.end) + 1);
       html += '<div class="g-row' + (state.phase === p.id ? " sel" : "") + '" data-phase="' + p.id + '">' +
@@ -359,7 +436,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     var t = todayDay();
     if (t >= min && t <= max) lines.push({ d: t, label: "Today", cls: "today" });
     var overlay = lines.map(function (l) {
-      return '<div class="g-line ' + l.cls + '" style="left:calc(170px + 12px + (100% - 194px) * ' + ((l.d + 0.5 - min) / span) + ')"><i>' + esc(l.label) + "</i></div>";
+      return '<div class="g-line ' + l.cls + '" style="left:' + pos(l.d + 0.5) + '"><i>' + esc(l.label) + "</i></div>";
     }).join("");
     $("gantt").innerHTML = html + overlay;
   }
@@ -382,12 +459,13 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     var acts = p.activities.map(function (a) {
       return '<li class="' + (involves(a) ? "" : "dim") + '"><span>' + esc(a.text) + '</span><span class="who">' + a.who.map(chip).join("") + "</span></li>";
     }).join("");
-    var arts = p.artifacts.map(function (a) {
-      var dim = state.lens !== "all" && a.by !== state.lens ? "dim" : "";
-      return '<li class="' + dim + '"><div class="art"><span>' + esc(a.name) + "</span>" + pill(a.status, STATUS_TEXT[a.status]) + '</div><span class="mono">' + esc(a.path) + "</span></li>";
-    }).join("");
-    var crit = p.gate.criteria.map(function (c) { return "<li>" + esc(c) + "</li>"; }).join("");
-    var note = state.notes["phase:" + p.id] || "";
+    var k = p.packet;
+    var kDim = state.lens !== "all" && k.author !== state.lens && k.reviewer !== state.lens ? " dim" : "";
+    var packet = '<li class="' + kDim + '"><div class="art"><span><b class="mono">' + esc(k.id) + "</b> " + esc(k.name) + "</span>" + pill(k.status, STATUS_TEXT[k.status]) + "</div>" +
+      '<span class="packet-meta">Author ' + chip(k.author) + " Reviewer " + chip(k.reviewer) + "</span>" +
+      '<span class="mono">' + esc(k.path) + "</span></li>" +
+      k.contents.map(function (c) { return '<li class="' + kDim + '"><span>' + esc(c) + "</span></li>"; }).join("");
+    var crit = list(p.gate.criteria);
     $("phase").innerHTML =
       '<div class="phase">' +
         '<div class="phase-head">' +
@@ -399,15 +477,17 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
         "</div>" +
         '<div class="phase-cols">' +
           "<div><h3>Activities</h3><ul class=\"list\">" + acts + "</ul></div>" +
-          "<div><h3>Artifacts</h3><ul class=\"list\">" + arts + "</ul></div>" +
-          '<div><div class="gatebox"><h3>' + esc(p.gate.id + " · " + p.gate.name) + "</h3><p class=\"owner-time\">Approved by " + esc(D.people[p.gate.approver].label) + ". Passes when:</p><ul>" + crit + "</ul></div>" +
-          '<label class="note" for="note-' + p.id + '">Your notes on ' + esc(p.id) + '<textarea id="note-' + p.id + '" data-note="phase:' + p.id + '" placeholder="What is missing, wrong or unclear in this phase?">' + esc(note) + "</textarea></label></div>" +
+          "<div><h3>Packet</h3><ul class=\"list\">" + packet + "</ul></div>" +
+          '<div><div class="gatebox"><h3>' + esc(p.gate.id + " · " + p.gate.name) + "</h3><p class=\"owner-time\">Approved by " + esc(D.people[p.gate.approver].label) + ", recorded in a gate record. Passes when:</p><ul>" + crit + "</ul></div>" +
+          '<label class="note" for="note-' + p.id + '">Your notes on ' + esc(p.id) + '<textarea id="note-' + p.id + '" data-note="phase:' + p.id + '" placeholder="What is missing, wrong or unclear in this phase?">' + esc(store.get("phase:" + p.id)) + "</textarea></label></div>" +
         "</div>" +
       "</div>";
   }
   document.addEventListener("input", function (e) {
     var k = e.target.getAttribute && e.target.getAttribute("data-note"); if (!k) return;
-    state.notes[k] = e.target.value; saveNotes();
+    store.set(k, e.target.value);
+    state.dirty = true;
+    renderSaveState();
   });
 
   // Matrix
@@ -433,46 +513,77 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   $("flow").innerHTML = D.flow.map(function (f) {
     return "<li><h3>" + esc(f.step) + '</h3><span class="who">' + f.who.map(chip).join("") + "</span><p>" + esc(f.text) + "</p></li>";
   }).join("");
-  $("team").innerHTML = "<thead><tr><th>Traditional role</th><th>What they do</th><th>Who covers it here</th><th>Notes</th></tr></thead><tbody>" +
+  $("gate-path").textContent = D.gateRecord.path;
+  $("gate-fields").innerHTML = list(D.gateRecord.fields);
+  $("gate-rules").innerHTML = list(D.gateRecord.rules);
+  $("constraints").innerHTML = D.constraints.map(function (c) { return '<div class="constraint"><span>' + esc(c) + "</span></div>"; }).join("");
+  $("severities").innerHTML = D.severities.map(function (s) { return '<div class="sev"><b>' + esc(s.id) + "</b><span>" + esc(s.text) + "</span></div>"; }).join("");
+  $("chain").innerHTML = D.traceability.map(function (t, i) {
+    return (i ? '<span class="arrow" aria-hidden="true">→</span>' : "") + '<span class="link"><b>' + esc(t.id) + "</b><span>" + esc(t.name) + " · " + esc(t.where) + "</span></span>";
+  }).join("");
+  (function () {
+    var seen = {}, rows = [];
+    D.phases.forEach(function (p) {
+      var k = p.packet;
+      if (seen[k.id]) { seen[k.id].phases.push(p.id); return; }
+      seen[k.id] = { k: k, phases: [p.id] }; rows.push(seen[k.id]);
+    });
+    $("packets").innerHTML = "<thead><tr><th>Packet</th><th>Phases</th><th>Author / reviewer</th><th>Where</th><th>Status</th></tr></thead><tbody>" +
+      rows.map(function (r) {
+        return '<tr class="clickable" data-phase="' + r.phases[0] + '"><td><b class="mono">' + esc(r.k.id) + "</b> " + esc(r.k.name.replace(/ \(part \d.*\)$/, "")) + '</td><td class="mono">' + esc(r.phases.join(", ")) + '</td><td><span class="who">' + chip(r.k.author) + chip(r.k.reviewer) + '</span></td><td class="mono">' + esc(r.k.path) + "</td><td>" + pill(r.k.status, STATUS_TEXT[r.k.status]) + "</td></tr>";
+      }).join("") + "</tbody>";
+  })();
+  $("packets").addEventListener("click", function (e) {
+    var r = e.target.closest("tr[data-phase]"); if (r) selectPhase(r.getAttribute("data-phase"), true);
+  });
+  $("sched-assumptions").innerHTML = list(D.schedule.assumptions);
+  $("sched-controls").innerHTML = D.schedule.controls.map(function (c) { return '<div class="control"><b>' + esc(c.name) + "</b><span>" + esc(c.text) + "</span></div>"; }).join("");
+  $("change-control").innerHTML = list(D.changeControl);
+  $("publication").innerHTML = list(D.publication);
+  $("team").innerHTML = "<thead><tr><th>Traditional role</th><th>What they do</th><th>Who covers it here</th><th>Accountable</th><th>Notes</th></tr></thead><tbody>" +
     D.roles.map(function (r) {
-      return '<tr class="' + (r.gap ? "gaprow" : "") + '"><td><b>' + esc(r.role) + "</b>" + (r.gap ? " " + pill("gap", "Gap") : "") + "</td><td>" + esc(r.does) + '</td><td><span class="who">' + r.playedBy.map(chip).join("") + "</span></td><td>" + esc(r.note || "") + "</td></tr>";
+      return '<tr class="' + (r.gap ? "gaprow" : "") + '"><td><b>' + esc(r.role) + "</b>" + (r.gap ? " " + pill("gap", "Gap") : "") + "</td><td>" + esc(r.does) + '</td><td><span class="who">' + r.playedBy.map(chip).join("") + '</span></td><td><span class="who">' + chip(r.accountable || "owner") + "</span></td><td>" + esc(r.note || "") + "</td></tr>";
     }).join("") + "</tbody>";
   $("rituals").innerHTML = D.rituals.map(function (r) {
     return '<div class="ritual"><b>' + esc(r.name) + "</b><span>" + esc(r.when) + "</span><p>" + esc(r.text) + "</p></div>";
   }).join("");
-  $("agreements").innerHTML = D.agreements.map(function (a) { return "<li>" + esc(a) + "</li>"; }).join("");
+  $("agreements").innerHTML = list(D.agreements);
   $("history").innerHTML = D.history.map(function (h) {
     return "<li><time>" + esc(fmt(h.date)) + "</time><b>" + esc(h.title) + "</b><p>" + esc(h.text) + "</p></li>";
   }).join("");
   $("questions").innerHTML = D.openQuestions.map(function (q) {
-    var v = state.notes["q:" + q.id] || "";
-    return '<div class="q"><label for="q-' + q.id + '"><b>' + esc(q.id) + ". " + esc(q.q) + '</b></label><p class="why">' + esc(q.why) + '</p><textarea id="q-' + q.id + '" data-note="q:' + q.id + '" placeholder="Your answer">' + esc(v) + "</textarea></div>";
+    return '<div class="q"><label for="q-' + q.id + '"><b>' + esc(q.id) + ". " + esc(q.q) + '</b></label><p class="why">' + esc(q.why) + '</p><textarea id="q-' + q.id + '" data-note="q:' + q.id + '" placeholder="Your answer">' + esc(store.get("q:" + q.id)) + "</textarea></div>";
   }).join("");
+  $("footer").textContent = "Source: docs/sdlc/sdlc-data.js, revision " + D.meta.revision + " (fingerprint " + FP + "), in the SDR Agent repository. Every change to this process is reviewed and committed like code.";
 
-  // Export
-  function exportText() {
-    var out = ["SDLC map notes (" + D.meta.version + ", data updated " + D.meta.updated + ")", ""];
-    D.openQuestions.forEach(function (q) {
-      var v = (state.notes["q:" + q.id] || "").trim();
-      if (v) out.push(q.id + ". " + q.q, "   " + v.replace(/\n/g, "\n   "), "");
-    });
-    D.phases.forEach(function (p) {
-      var v = (state.notes["phase:" + p.id] || "").trim();
-      if (v) out.push(p.id + " " + p.name + ":", "   " + v.replace(/\n/g, "\n   "), "");
-    });
-    if (out.length === 2) out.push("(No notes yet.)");
-    return out.join("\n");
-  }
+  // Export: copy works everywhere; download only when opened directly from the
+  // repository, because the hosted viewer blocks page-started downloads.
+  function exportText() { return N.exportText(D, store.all(), FP); }
+  function exported(msg) { state.dirty = false; $("copy-status").textContent = msg; renderSaveState(); }
   $("copy").addEventListener("click", function () {
     var text = exportText(), box = $("export-text");
     box.value = text;
-    var done = function (msg) { $("copy-status").textContent = msg; };
+    var manual = function (msg) { box.hidden = false; $("show").textContent = "Hide text"; box.focus(); box.select(); $("copy-status").textContent = msg; };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () { done("Copied. Paste it into your chat with Claude."); }, function () {
-        box.hidden = false; box.focus(); box.select(); done("Copy was blocked. The text is selected below; copy it by hand.");
+      navigator.clipboard.writeText(text).then(function () { exported("Copied. Paste it into your chat with Claude."); }, function () {
+        manual("Copy was blocked. The text is selected below; copy it by hand.");
       });
-    } else { box.hidden = false; box.focus(); box.select(); done("The text is selected below; copy it by hand."); }
+    } else { manual("The text is selected below; copy it by hand."); }
   });
+  var framed = true;
+  try { framed = window.self !== window.top; } catch (e) { framed = true; }
+  if (!framed) {
+    $("download").hidden = false;
+    $("download").addEventListener("click", function () {
+      var blob = new Blob([exportText()], { type: "text/plain" });
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "sdlc-notes-" + D.meta.revision + "-" + FP + ".txt";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+      exported("Downloaded. Send the file or its text to Claude.");
+    });
+  }
   $("show").addEventListener("click", function () {
     var box = $("export-text"); box.value = exportText(); box.hidden = !box.hidden;
     $("show").textContent = box.hidden ? "Show text" : "Hide text";
@@ -483,7 +594,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   var first = D.phases.filter(function (p) { return p.id === hash; })[0] ||
               D.phases.filter(function (p) { return p.status === "active"; })[0] || D.phases[0];
   state.phase = first.id;
-  renderLens(); renderGantt(); renderPhase(); renderMatrix();
+  renderLens(); renderGantt(); renderPhase(); renderMatrix(); renderSaveState();
 })();
 </script>
 <!-- ARTIFACT-END -->
