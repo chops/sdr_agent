@@ -34,6 +34,7 @@ defmodule SdrAgentWeb.DraftLive do
   """
   use SdrAgentWeb, :live_view
 
+  alias SdrAgent.Agents
   alias SdrAgent.Outreach
   alias SdrAgent.Research
   alias SdrAgent.Sales
@@ -206,12 +207,27 @@ defmodule SdrAgentWeb.DraftLive do
   end
 
   defp with_receipts(delivery, {:ok, acc}, opts) do
-    case Outreach.list_records(
-           Outreach.DeliveryReceipt,
-           Keyword.put(opts, :filter, delivery_operation_id: delivery.id)
-         ) do
-      {:ok, receipts} -> {:cont, {:ok, acc ++ [Map.put(delivery, :receipts, receipts)]}}
+    with {:ok, receipts} <-
+           Outreach.list_records(
+             Outreach.DeliveryReceipt,
+             Keyword.put(opts, :filter, delivery_operation_id: delivery.id)
+           ),
+         {:ok, gate} <- gate(delivery, opts) do
+      {:cont, {:ok, acc ++ [Map.merge(delivery, %{receipts: receipts, gate: gate})]}}
+    else
       error -> {:halt, error}
+    end
+  end
+
+  # The delivery's latest send-gate Decision (e.g. `defer_quiet_hours`), if
+  # the gate has run.
+  defp gate(%{last_decision_id: nil}, _opts), do: {:ok, nil}
+
+  defp gate(%{last_decision_id: id}, opts) do
+    case Agents.get_decision(id, opts) do
+      {:ok, %{kind: :send_gate} = decision} -> {:ok, decision}
+      {:ok, _other_kind} -> {:ok, nil}
+      error -> error
     end
   end
 
@@ -616,6 +632,23 @@ defmodule SdrAgentWeb.DraftLive do
                     <.hash value={delivery.revision_content_sha256} />
                   </.field>
                   <.field label="Rendered hash"><.hash value={delivery.rendered_sha256} /></.field>
+                  <.field :if={delivery.gate} label="Send gate">
+                    <span
+                      id={"delivery-gate-#{delivery.id}"}
+                      data-outcome={delivery.gate.outcome}
+                      class="font-mono text-xs"
+                    >
+                      {delivery.gate.outcome}
+                    </span>
+                  </.field>
+                  <.field :if={delivery.not_before} label="Not before">
+                    <span
+                      id={"delivery-not-before-#{delivery.id}"}
+                      data-at={DateTime.to_iso8601(delivery.not_before)}
+                    >
+                      <.timestamp at={delivery.not_before} />
+                    </span>
+                  </.field>
                 </dl>
                 <p
                   :if={delivery.last_error}

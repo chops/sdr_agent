@@ -19,7 +19,16 @@ defmodule SdrAgent.ReconstructionTest do
       after-image hash (`record_sha256`) of that subject equals the hash of
       the row as stored now — the database has not drifted from the chain;
     * the binding facts agree (approval ↔ revision ↔ delivery ↔ receipt ↔
-      reply), the ledger orders the steps causally, and the chain verifies.
+      reply), the ledger orders the steps causally, and the chain verifies;
+    * the chain head that covers the whole story is bound to a signed anchor
+      (ADR-0005) that verifies, from its stored bytes, under a public key
+      the auditor pinned out of band — a key the database merely lists is
+      not trusted.
+
+  Precisely: the story is *extracted* with plain SQL; the application is
+  used only for hashing a row as the verifier does (`RecordHash`, which
+  loads the row through Ash with the kernel context), for the chain
+  verifier and, in setup, to write the anchor.
   """
   use SdrAgent.SDRCase, async: false
 
@@ -27,6 +36,7 @@ defmodule SdrAgent.ReconstructionTest do
   import SdrAgent.WebhookFixtures, only: [process!: 0]
 
   alias Ecto.Adapters.SQL
+  alias SdrAgent.Audit.Anchoring
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Audit.RecordHash
   alias SdrAgent.Demo.Replies
@@ -127,6 +137,85 @@ defmodule SdrAgent.ReconstructionTest do
     assert %{valid?: true, issues: []} = SdrAgent.Audit.Verifier.verify(ctx.tenant.id, head)
   end
 
+  describe "the anchored head" do
+    setup ctx do
+      {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+
+      {:ok, _key} =
+        SdrAgent.Audit.register_signing_key(
+          %{
+            key_id: "reconstruction-ed25519",
+            public_key: public_key,
+            activated_at: SdrAgent.Clock.utc_now()
+          },
+          actor: system_actor(:kernel, ctx.tenant)
+        )
+
+      {:ok, _anchor} =
+        Anchoring.anchor(
+          trigger: :interval,
+          actor: system_actor(:anchorer, ctx.tenant),
+          private_key: private_key,
+          sdr_agent_git_sha: "reconstruction-test"
+        )
+
+      %{pinned_key: public_key}
+    end
+
+    test "the story is covered by a signed anchor that verifies under the pinned key", ctx do
+      story = reconstruct(ctx.delivery_id)
+      anchor = latest_anchor!(ctx.tenant.id)
+
+      # The anchor's own bytes: hash, signature under the *pinned* key, and
+      # the database's key row agrees with the pin.
+      assert :crypto.hash(:sha256, anchor.statement) == anchor.anchor_hash
+
+      assert :crypto.verify(:eddsa, :none, anchor.statement, anchor.signature, [
+               ctx.pinned_key,
+               :ed25519
+             ])
+
+      assert scalar_bin("SELECT public_key FROM audit_signing_keys WHERE key_id = $1", [
+               anchor.key_id
+             ]) ==
+               ctx.pinned_key
+
+      # The statement names the chain head as stored, and covers the story's
+      # last step (the reply assessment).
+      statement = Jason.decode!(anchor.statement)
+      assert statement["event_range"]["to"] == anchor.to_sequence
+      assert statement["tenant_id"] == ctx.tenant.id
+
+      head =
+        scalar_bin(
+          "SELECT event_hash FROM audit_events WHERE tenant_id = $1 AND sequence = $2",
+          [uuid(ctx.tenant.id), anchor.to_sequence]
+        )
+
+      assert statement["head_event_hash"] == Base.encode16(head, case: :lower)
+
+      [assessment] = story["reply_assessments"]
+      assert last_sequence(assessment["id"]) <= anchor.to_sequence
+
+      # The chain up to that head verifies.
+      {:ok, chain_head} = Kernel.lock_head(ctx.tenant.id)
+      assert %{valid?: true} = SdrAgent.Audit.Verifier.verify(ctx.tenant.id, chain_head)
+    end
+
+    test "a key the database lists but the auditor did not pin is not trusted", ctx do
+      anchor = latest_anchor!(ctx.tenant.id)
+      {other_key, _} = :crypto.generate_key(:eddsa, :ed25519)
+
+      refute :crypto.verify(:eddsa, :none, anchor.statement, anchor.signature, [
+               other_key,
+               :ed25519
+             ])
+
+      tampered = anchor.statement <> " "
+      refute :crypto.verify(:eddsa, :none, tampered, anchor.signature, [ctx.pinned_key, :ed25519])
+    end
+  end
+
   test "a story row edited behind the application no longer matches the ledger", ctx do
     tamper!(
       "UPDATE delivery_operations SET recipient_email = 'someone.else@example.test' WHERE id = $1",
@@ -140,7 +229,7 @@ defmodule SdrAgent.ReconstructionTest do
              current_hash(SdrAgent.Outreach.DeliveryOperation, delivery["id"], ctx.tenant.id)
   end
 
-  ## Plain-SQL reconstruction (no application reads)
+  ## Plain-SQL story extraction
 
   defp reconstruct(delivery_id) do
     [delivery] = rows("SELECT * FROM delivery_operations WHERE id = $1", [uuid(delivery_id)])
@@ -215,6 +304,38 @@ defmodule SdrAgent.ReconstructionTest do
 
     assert :crypto.hash(:sha256, content) == sha, "payload #{hex} does not hash to its address"
     content
+  end
+
+  defp latest_anchor!(tenant_id) do
+    %{rows: [[statement, signature, anchor_hash, to_sequence, key_id]]} =
+      SQL.query!(
+        Repo,
+        "SELECT statement_bytes, signature, anchor_hash, to_sequence, key_id " <>
+          "FROM audit_anchors WHERE tenant_id = $1 ORDER BY anchor_number DESC LIMIT 1",
+        [uuid(tenant_id)]
+      )
+
+    %{
+      statement: statement,
+      signature: signature,
+      anchor_hash: anchor_hash,
+      to_sequence: to_sequence,
+      key_id: key_id
+    }
+  end
+
+  defp scalar_bin(sql, params) do
+    %{rows: [[value]]} = SQL.query!(Repo, sql, params)
+    value
+  end
+
+  defp last_sequence(subject_id) do
+    %{rows: [[sequence]]} =
+      SQL.query!(Repo, "SELECT max(sequence) FROM audit_events WHERE subject_id = $1", [
+        subject_id
+      ])
+
+    sequence
   end
 
   defp ledger_hash(subject_id) do

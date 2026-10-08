@@ -346,8 +346,9 @@ lifecycle or action contract changes.
      sk-live/OpenAI, GitHub, AWS, Slack, Telegram), with a self-check on the
      fabricated =SecretShapes=;
    - the sops file holds only =ENC[AES256_GCM,…]= values;
-   - =gitleaks dir= when gitleaks is on PATH (skipped otherwise; CI runs
-     gitleaks over the history).
+   - =gitleaks git --log-opts=HEAD= when gitleaks is on PATH (skipped
+     otherwise, and the run then is *not* a full secret-scan proof; CI's
+     gitleaks step over the history stays required).
 
 ** TDD Tracking (S13d)
 - Stale-run recovery: RED 0/4. The kill harness worked; the failures were
@@ -361,6 +362,69 @@ lifecycle or action contract changes.
   scanner self-check matches the fabricated shapes.
 - =bin/demo --test serve= script tests: refused in dev, refused on a busy
   port, passes through on the =_demo= database.
+
+
+** S13d review round 1 (Codex, #25 at =429cac5=: CHANGES REQUESTED, 348279fd)
+Findings: =/tmp/sdr-s13d-429cac5-review.md=. Dispositions:
+- *MF1, sweeper fails live work after a stale observation: fixed.* The
+  first job-state read is now only an unlocked prefilter. Recovery, in its
+  transaction, locks run → Operation → the Oban job row(s) → all =sent=
+  invocations (one statement), then re-checks the run is =running= and
+  stale and the job is not =available | scheduled | executing |
+  retryable=; a live job is a no-op (=:job_live=), never a crash. Oban's
+  own transitions of that job wait on the row lock. A lookup error, or an
+  Operation with no bound job, is skipped and never read as a missing job.
+  Regression: the reviewer's barrier repro, adopted for all four live
+  states, plus an unbound-job test.
+- *MF2, browser approval not confined to a disposable instance: fixed.*
+  =mix sdr.demo.serve= refuses 4120 and writes a fresh nonce to
+  =tmp/smoke/attestation-<port>.json= (0600); =SdrAgentWeb.SmokeAttestation=
+  (compiled into the endpoint only by =config/test.exs=, answering only
+  when the launcher set a nonce) serves it with the Repo's actual database.
+  Before any browser starts or request is sent, the script refuses 4120,
+  a missing file, a non-attesting instance, a nonce mismatch and a
+  non-=_demo= database (exit 2/3). Tests drive the real script against a
+  real loopback listener of the endpoint and assert no request but the
+  attestation GET and no audit event (=smoke_attestation_test.exs=; skipped
+  with that reason where Node >= 22 is absent).
+- *Quiet-hours PASS from pending alone: fixed.* The draft page now shows
+  the delivery's send-gate outcome (=delivery-gate-<id>=, =data-outcome=)
+  and =not_before= (=delivery-not-before-<id>=, =data-at=). The script
+  requires =defer_quiet_hours=, a future not-before, still pending and no
+  capture or receipt; a plain pending delivery times out (fails).
+  LiveViewTest covers the deferred display and its absence before the gate.
+- *Recovery/settlement lock order: fixed.* Settlement
+  (=Agents.finish_model_invocation=) now locks the run first, so it takes
+  run → invocation → chain like the sweeper. Tests capture the SQL in
+  order: in recovery every table's first lock precedes the first chain-head
+  access and the =sent= invocations are pre-locked together; in settlement
+  the run lock precedes the first append. This is an ordering proof, not an
+  exercised deadlock.
+- *Reconstruction only local-chain: fixed.* A describe block registers an
+  ephemeral Ed25519 key (the auditor's out-of-band pin), anchors, then from
+  plain SQL checks the statement hash, the signature under the *pinned* key
+  (the key row must equal the pin), the statement's head hash against the
+  stored event at =to_sequence=, and that the story's last step is covered.
+  A non-pinned key and a tampered statement are refused. The moduledoc now
+  says precisely: SQL extraction plus the verifier's hashing (=RecordHash=
+  loads rows via Ash with the kernel context).
+- *gitleaks skip qualification: kept* (see item 5 above).
+- Real-browser run 2026-10-07 18:53 MDT (quiet hours) against
+  =bin/demo --test serve= on 4122 (=sdr_agent_test_s13_demo=, freshly reset
+  and seeded): attested, then all steps through "send gate recorded
+  defer_quiet_hours", "not-before is in the future", "still pending,
+  nothing captured" — PASS. Server stopped afterwards; 4122 free.
+  Full =bin/verify= with gitleaks on PATH: 797 passed, 5 excluded; credo
+  clean; =ash.codegen --check= clean.
+- Entity model: no trigger. =Agents.get_decision/2= is a read over the
+  existing Decision policy; the attestation plug is test-build only; the
+  settlement change is lock order only.
+- TDD: recovery RED 4/10 (four live-state races and both lock-order tests
+  failing for the intended reasons) → GREEN 11/11 (with the unbound-job
+  test, mutation-checked); draft gate display RED 18/19 → GREEN 19/19;
+  script refusals RED 3/8 against the previous script → GREEN 8/8; the
+  anchored reconstruction tests are acceptance tests over existing
+  behaviour (passed on first run).
 
 * Risks & Considerations
 - *Quiet hours at the meetup.* The campaign fixture's quiet hours are 18:00

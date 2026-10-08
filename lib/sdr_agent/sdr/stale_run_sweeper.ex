@@ -14,9 +14,13 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   one-attempt agent job — or gone). A run whose job is still live is never
   touched.
 
-  Recovery, per run, in one transaction (the run and its Operation are
-  locked `FOR UPDATE` before the first append, ADR-0009), as the agent
-  runtime through existing actions only:
+  Recovery, per run, in one transaction, as the agent runtime through
+  existing actions only. The run, its Operation, its Oban job row and all
+  its `sent` invocations are locked `FOR UPDATE` before the first append
+  (ADR-0009), and the run's staleness and the job's liveness are decided
+  again under those locks (the first, unlocked observation is only a
+  prefilter; a job made live meanwhile is left alone, review #25). A lookup
+  error is never read as a missing job: the run is skipped.
 
     1. every `sent` ModelInvocation of the run → `unknown` (never re-sent;
        it still counts against the budgets);
@@ -39,6 +43,7 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   alias SdrAgent.Actor
   alias SdrAgent.Agents
   alias SdrAgent.Agents.AgentRun
+  alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Clock
@@ -70,14 +75,15 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
 
     with {:ok, runs} <- Agents.list_runs(actor: actor) do
       runs
-      |> Enum.filter(&(&1.status == :running and stale?(&1, cutoff)))
-      |> Enum.reject(&job_live?({&1, actor}))
-      |> each_ok(&recovered(recover(&1, actor)))
+      |> Enum.filter(
+        &(&1.status == :running and stale?(&1, cutoff) and maybe_abandoned?(&1, actor))
+      )
+      |> each_ok(&recovered(recover(&1, cutoff, actor)))
     end
   end
 
-  # A run that stopped running meanwhile was handled by its own worker.
-  defp recovered({:error, :not_running}), do: :ok
+  # Skips: the run stopped, became fresh, or its job is live under the lock.
+  defp recovered({:error, skip}) when skip in [:not_running, :job_live], do: :ok
   defp recovered({:ok, _}), do: :ok
   defp recovered(error), do: error
 
@@ -96,41 +102,69 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
 
   defp stale?(_run, _cutoff), do: false
 
-  defp job_live?({run, actor}), do: job_state(run, actor) in @live_states
-
-  # Assignment runs: the job of their Operation. Reply runs (no Operation):
-  # the ReplyWorker job naming the run.
-  defp job_state(%{operation_id: operation_id}, actor) when is_binary(operation_id) do
-    case Operations.get_operation(operation_id, actor: actor) do
-      {:ok, %{oban_job_id: job_id}} when is_integer(job_id) ->
-        Repo.one(from(j in Oban.Job, where: j.id == ^job_id, select: j.state))
-
-      _ ->
-        nil
+  # Unlocked prefilter only (saves a transaction per live run); recovery
+  # decides again under its locks. A lookup error is not a missing job: the
+  # run is skipped.
+  defp maybe_abandoned?(run, actor) do
+    case job_state(run, actor, nil) do
+      {:ok, state} -> state not in @live_states
+      {:error, _} -> false
     end
   end
 
-  defp job_state(%{id: run_id}, _actor) do
-    Repo.one(
-      from(j in Oban.Job,
-        where:
-          j.worker == "SdrAgent.SDR.ReplyWorker" and
-            fragment("?->>'run_id' = ?", j.args, ^run_id),
-        order_by: [desc: j.id],
-        limit: 1,
-        select: j.state
-      )
-    )
+  # Assignment runs: the job of their Operation (`oban_job_id`). Reply runs
+  # (no Operation): the ReplyWorker jobs naming the run. `{:ok, "missing"}`
+  # only when the bound job row is gone; with `lock`, the rows are locked.
+  defp job_state(%{operation_id: operation_id}, actor, lock) when is_binary(operation_id) do
+    case Operations.get_operation(operation_id, actor: actor) do
+      {:ok, %{oban_job_id: job_id}} when is_integer(job_id) ->
+        from(j in Oban.Job, where: j.id == ^job_id, select: j.state)
+        |> locking(lock)
+        |> Repo.all()
+        |> states()
+
+      {:ok, _unbound} ->
+        {:error, :job_unbound}
+
+      error ->
+        error
+    end
   end
 
-  defp recover(run, actor) do
-    state = job_state(run, actor) || "missing"
+  defp job_state(%{id: run_id}, _actor, lock) do
+    from(j in Oban.Job,
+      where:
+        j.worker == "SdrAgent.SDR.ReplyWorker" and
+          fragment("?->>'run_id' = ?", j.args, ^run_id),
+      order_by: [asc: j.id],
+      select: j.state
+    )
+    |> locking(lock)
+    |> Repo.all()
+    |> states()
+  end
 
+  defp locking(query, nil), do: query
+  defp locking(query, :for_update), do: from(j in query, lock: "FOR UPDATE")
+
+  defp states([]), do: {:ok, "missing"}
+
+  defp states(states),
+    do: {:ok, Enum.find(states, List.last(states), &(&1 in @live_states))}
+
+  # One transaction; every row it writes is locked before the first append
+  # (ADR-0009): run → Operation → job → all `sent` invocations. Staleness
+  # and job liveness are decided again under those locks; Oban's own job
+  # transitions (lifeline, staging, `retry_job`) wait on the job row lock.
+  defp recover(run, cutoff, actor) do
     Audit.transaction(fn ->
       with {:ok, run} <- lock(AgentRun, run.id, actor),
-           :ok <- running(run),
+           :ok <- abandoned(run, cutoff),
            {:ok, operation} <- lock_operation(run, actor),
-           :ok <- unknown_invocations(run, actor),
+           {:ok, state} <- job_state(run, actor, :for_update),
+           :ok <- not_live(state),
+           {:ok, sent} <- lock_sent_invocations(run, actor),
+           :ok <- each_ok(sent, &mark_unknown(&1, actor)),
            {:ok, failed} <-
              Agents.fail_run(
                run,
@@ -149,8 +183,13 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
     end)
   end
 
-  defp running(%{status: :running}), do: :ok
-  defp running(_run), do: {:error, :not_running}
+  defp abandoned(%{status: :running} = run, cutoff),
+    do: if(stale?(run, cutoff), do: :ok, else: {:error, :not_running})
+
+  defp abandoned(_run, _cutoff), do: {:error, :not_running}
+
+  defp not_live(state) when state in @live_states, do: {:error, :job_live}
+  defp not_live(_state), do: :ok
 
   defp lock(resource, id, actor) do
     resource
@@ -167,12 +206,13 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   defp lock_operation(%{operation_id: nil}, _actor), do: {:ok, nil}
   defp lock_operation(%{operation_id: id}, actor), do: lock(Operation, id, actor)
 
-  defp unknown_invocations(run, actor) do
-    with {:ok, invocations} <- Agents.list_model_invocations(run.id, actor: actor) do
-      invocations
-      |> Enum.filter(&(&1.status == :sent))
-      |> each_ok(&mark_unknown(&1, actor))
-    end
+  defp lock_sent_invocations(run, actor) do
+    ModelInvocation
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(agent_run_id == ^run.id and status == :sent)
+    |> Ash.Query.sort(sequence_in_run: :asc)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read()
   end
 
   defp mark_unknown(invocation, actor) do

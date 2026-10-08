@@ -15,6 +15,11 @@ defmodule Mix.Tasks.Sdr.Demo.Serve do
   pool of 5 connections instead of the SQL sandbox, and Oban runs its queues (research, delivery, …) so
   the agent and the capture adapter work as in dev; cron plugins stay off.
   The model is the fake one, delivery is capture-only. Runs until stopped.
+
+  Refuses the dev port 4120. At start it writes a fresh nonce to
+  `tmp/smoke/attestation-<port>.json` (mode 0600) and serves it at
+  `GET /__smoke/attestation` (`SdrAgentWeb.SmokeAttestation`): the browser
+  smoke script attaches only to a server that proves it is this one.
   """
   use Mix.Task
 
@@ -30,6 +35,7 @@ defmodule Mix.Tasks.Sdr.Demo.Serve do
       Mix.raise("mix sdr.demo.serve needs the throw-away _demo database (is #{database})")
 
     port = String.to_integer(System.get_env("PORT", "4122"))
+    port != 4120 || Mix.raise("mix sdr.demo.serve refuses the dev port 4120")
     endpoint = Application.get_env(:sdr_agent, SdrAgentWeb.Endpoint, [])
 
     Application.put_env(
@@ -63,8 +69,22 @@ defmodule Mix.Tasks.Sdr.Demo.Serve do
     )
 
     Application.put_env(:sdr_agent, SdrAgentWeb.LiveRefresh, debounce_ms: 250)
+    attest!(port, database)
     Mix.Task.run("app.start")
     Mix.shell().info("smoke console on http://127.0.0.1:#{port} (database #{database})")
     Process.sleep(:infinity)
+  end
+
+  # The launcher-owned handshake the browser smoke checks (see the moduledoc).
+  defp attest!(port, database) do
+    nonce = 32 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+    Application.put_env(:sdr_agent, SdrAgentWeb.SmokeAttestation, %{nonce: nonce})
+
+    dir = Path.join(File.cwd!(), "tmp/smoke")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "attestation-#{port}.json")
+    File.write!(path, "")
+    File.chmod!(path, 0o600)
+    File.write!(path, Jason.encode!(%{nonce: nonce, port: port, database: database}))
   end
 end

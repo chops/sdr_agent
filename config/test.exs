@@ -7,6 +7,10 @@ config :opentelemetry, :processors,
 config :sdr_agent, :otel_test_exporter, SdrAgent.Telemetry.InMemoryExporter
 
 config :sdr_agent, Oban, testing: :manual
+
+# S13: the browser smoke attestation endpoint (`SdrAgentWeb.SmokeAttestation`)
+# exists only in test builds; it answers only under `mix sdr.demo.serve`.
+config :sdr_agent, :smoke_attestation_plug, true
 config :sdr_agent, token_signing_secret: "x0lKSRtwFS5BaFNguZ0LCt7JYjNRZ4pi"
 config :bcrypt_elixir, log_rounds: 1
 config :ash, policies: [show_policy_breakdowns?: true], disable_async?: true
