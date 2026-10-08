@@ -49,9 +49,57 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     }
   end
 
-  test "the runtime reconciled-method allowlist ships empty (R3)" do
+  # S12d enablement (proof 3, Codex evidence PASS c9a2bba3): dev/prod ship
+  # exactly one exact entry; the test env stays empty (hermetic default).
+  @shipped_entry %{
+    provider: :claude_cli,
+    cli_version: "2.1.291",
+    projection_version: "claude-message-json/3+prompt-builder/1",
+    method: :propagated_id
+  }
+
+  test "the runtime allowlist ships exactly the one exact v3 entry (R3)" do
+    for env <- [:dev, :prod] do
+      shipped =
+        Config.Reader.read!("config/config.exs", env: env, target: :host)
+        |> Keyword.fetch!(:sdr_agent)
+        |> Keyword.fetch!(Witness)
+
+      assert Keyword.fetch!(shipped, :reconciled_methods) == [@shipped_entry], inspect(env)
+    end
+
     config = Application.get_env(:sdr_agent, Witness, [])
     assert Keyword.get(config, :reconciled_methods, []) == []
+  end
+
+  test "under the shipped entry only the exact v3 tuple reconciles; all else stays inferred",
+       ctx do
+    for {variant, expected, projection} <- [
+          {"cli_shape_v3", :reconciled, "claude-message-json/3+prompt-builder/1"},
+          {"cli_shape", :inferred, "claude-message-json/2+prompt-builder/1"},
+          {"ok", :inferred, "claude-message-json/1+prompt-builder/1"}
+        ] do
+      invocation = call_model!(ctx, variant)
+      result = reconcile(ctx, invocation, [@shipped_entry])
+      assert match?({:ok, %{status: ^expected}}, result), "#{variant}: #{inspect(result)}"
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert link.evidence["projection_version"] == projection, variant
+
+      if expected == :inferred,
+        do: assert("method_not_enabled" in link.evidence["reason_codes"], variant)
+    end
+
+    # The same v3 proof under the entry with any other field stays inferred.
+    for {label, entry} <- [
+          {"other CLI version", %{@shipped_entry | cli_version: "2.1.292"}},
+          {"other provider", %{@shipped_entry | provider: :fake}},
+          {"v2 projection",
+           %{@shipped_entry | projection_version: "claude-message-json/2+prompt-builder/1"}}
+        ] do
+      invocation = call_model!(ctx, "cli_shape_v3")
+      result = reconcile(ctx, invocation, [entry])
+      assert match?({:ok, %{status: :inferred}}, result), "#{label}: #{inspect(result)}"
+    end
   end
 
   test "a perfect proof stays inferred at runtime; links carry digests, not content", ctx do
