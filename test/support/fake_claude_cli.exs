@@ -107,6 +107,39 @@ case mode do
             response: Proxy.sse_response(answer)
           )
 
+        # The structure of real proofs 1 and 2 (synthetic text only): a
+        # reminder ending in its close tag + one LF, cache_control ttl 1h,
+        # and a message-level output_config on the trailing system message.
+        "cli_shape_v3" ->
+          Proxy.exchange!(root, id,
+            traceparent: tp,
+            request:
+              Proxy.cli_request(stdin,
+                reminders: ["<system-reminder>\nSynthetic date.\n</system-reminder>\n"],
+                cache_ttl: "1h",
+                trailing_message_extra: %{"output_config" => %{"effort" => "high"}}
+              ),
+            response: Proxy.sse_response(answer)
+          )
+
+        "cli_shape_v3_mismatch" ->
+          Proxy.exchange!(root, id,
+            traceparent: tp,
+            request:
+              Proxy.cli_request(stdin <> " (edited)",
+                cache_ttl: "1h",
+                trailing_message_extra: %{"output_config" => %{"effort" => "high"}}
+              ),
+            response: Proxy.sse_response(answer)
+          )
+
+        "cli_shape_thinking" ->
+          Proxy.exchange!(root, id,
+            traceparent: tp,
+            request: Proxy.cli_request(stdin),
+            response: Proxy.sse_response(answer, blocks: [{:thinking, nil}, {:text, answer}])
+          )
+
         "cli_shape_zero" ->
           Proxy.exchange!(root, id,
             traceparent: tp,

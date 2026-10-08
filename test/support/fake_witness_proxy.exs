@@ -81,7 +81,10 @@ defmodule SdrAgent.Test.FakeWitnessProxy do
   fields. Options adjust it for negative cases: `:reminders`,
   `:extra_user_texts`, `:user_blocks_extra`, `:user_cache_control`,
   `:trailing` (count), `:extra_messages`, `:tools` (`:absent` to drop),
-  `:top` (merged top-level keys).
+  `:top` (merged top-level keys). S12d v3 shapes: `:cache_ttl` (adds a
+  `ttl` to every default `cache_control`), `:cache_control` (replaces every
+  default `cache_control` value), `:trailing_message_extra` and
+  `:user_message_extra` (keys merged into those messages).
   """
   def cli_request(stdin, opts \\ []) do
     reminders = Keyword.get(opts, :reminders, [])
@@ -98,19 +101,29 @@ defmodule SdrAgent.Test.FakeWitnessProxy do
         do: Enum.map(user_blocks, &Map.put(&1, "cache_control", %{"type" => "ephemeral"})),
         else: user_blocks
 
+    cache_control =
+      case {Keyword.fetch(opts, :cache_control), Keyword.fetch(opts, :cache_ttl)} do
+        {{:ok, value}, _} -> value
+        {:error, {:ok, ttl}} -> %{"type" => "ephemeral", "ttl" => ttl}
+        {:error, :error} -> %{"type" => "ephemeral"}
+      end
+
     trailing =
       for n <- 1..Keyword.get(opts, :trailing, 1)//1 do
-        %{
-          "role" => "system",
-          "content" =>
-            Keyword.get(opts, :trailing_content, [
-              %{
-                "type" => "text",
-                "text" => "Synthetic trailing context #{n}",
-                "cache_control" => %{"type" => "ephemeral"}
-              }
-            ])
-        }
+        Map.merge(
+          %{
+            "role" => "system",
+            "content" =>
+              Keyword.get(opts, :trailing_content, [
+                %{
+                  "type" => "text",
+                  "text" => "Synthetic trailing context #{n}",
+                  "cache_control" => cache_control
+                }
+              ])
+          },
+          Keyword.get(opts, :trailing_message_extra, %{})
+        )
       end
 
     request = %{
@@ -123,7 +136,7 @@ defmodule SdrAgent.Test.FakeWitnessProxy do
         %{
           "type" => "text",
           "text" => "More synthetic system text",
-          "cache_control" => %{"type" => "ephemeral"}
+          "cache_control" => cache_control
         }
       ],
       "thinking" => %{"type" => "adaptive", "display" => "summarized"},
@@ -132,7 +145,12 @@ defmodule SdrAgent.Test.FakeWitnessProxy do
       "tools" => Keyword.get(opts, :tools, []),
       "messages" =>
         Keyword.get(opts, :leading_messages, []) ++
-          [%{"role" => "user", "content" => user_blocks}] ++
+          [
+            Map.merge(
+              %{"role" => "user", "content" => user_blocks},
+              Keyword.get(opts, :user_message_extra, %{})
+            )
+          ] ++
           trailing ++ Keyword.get(opts, :extra_messages, [])
     }
 
