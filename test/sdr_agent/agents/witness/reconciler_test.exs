@@ -34,6 +34,11 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   @test_only_allowlist [:propagated_id]
 
   setup do
+    # Spans are global to the test VM: start from this test's own, so the
+    # "no account id in telemetry" render below stays bounded as the suite
+    # grows (S13d: the acceptance suites add many spans; an unbounded
+    # inspect of every span timed out in CI).
+    InMemoryExporter.reset()
     tenant = bootstrap!()
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
     root = Path.join(System.tmp_dir!(), "sdr-witness-e2e-#{System.unique_integer([:positive])}")

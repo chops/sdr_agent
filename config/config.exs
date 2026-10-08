@@ -33,7 +33,9 @@ config :sdr_agent, Oban,
        {"* * * * *", SdrAgent.Audit.AnchorWorker},
        {"*/10 * * * *", SdrAgent.Audit.OtsUpgradeWorker},
        {"* * * * *", SdrAgent.Outreach.StaleDeliverySweeper},
-       {"*/5 * * * *", SdrAgent.Agents.Witness.ScanWorker}
+       {"*/5 * * * *", SdrAgent.Agents.Witness.ScanWorker},
+       # S13: recovers agent runs abandoned by a crash (job no longer live).
+       {"*/5 * * * *", SdrAgent.SDR.StaleRunSweeper}
      ]}
   ],
   repo: SdrAgent.Repo
