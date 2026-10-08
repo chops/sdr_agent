@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<!-- ARTIFACT-START: everything between the markers is also published as the claude.ai artifact -->
+<title>SDR Agent SDLC Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: an engineering process sheet. A dated Gantt of phases and gates on top,
+   the selected phase's work order below, then team, cadence and history. */
+:root {
+  --bg: #f1f4f6;
+  --surface: #ffffff;
+  --sunk: #e7ecef;
+  --ink: #17212b;
+  --muted: #586773;
+  --line: #d3dbe1;
+  --accent: #0d6a80;
+  --accent-soft: #d9ecf1;
+  --gate: #a2610c;
+  --gate-soft: #f6e8d3;
+  --done: #2b7649;
+  --done-soft: #dcefe3;
+  --gap: #a8382c;
+  --gap-soft: #f6dfdb;
+  --p-owner: #6a49be;
+  --p-claude: #b8582a;
+  --p-codex: #2c68a8;
+  --p-outside: #64737f;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+  --step-3: 2.25rem;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10161b; --surface: #172028; --sunk: #1d2832; --ink: #e3eaef; --muted: #93a3af; --line: #2a3742;
+    --accent: #56b4cc; --accent-soft: #173845; --gate: #e2a54c; --gate-soft: #3a2b16;
+    --done: #63bd88; --done-soft: #183526; --gap: #e57a6c; --gap-soft: #3d1f1b;
+    --p-owner: #a78bf0; --p-claude: #e38a5c; --p-codex: #6aa4e0; --p-outside: #9aa8b3;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10161b; --surface: #172028; --sunk: #1d2832; --ink: #e3eaef; --muted: #93a3af; --line: #2a3742;
+  --accent: #56b4cc; --accent-soft: #173845; --gate: #e2a54c; --gate-soft: #3a2b16;
+  --done: #63bd88; --done-soft: #183526; --gap: #e57a6c; --gap-soft: #3d1f1b;
+  --p-owner: #a78bf0; --p-claude: #e38a5c; --p-codex: #6aa4e0; --p-outside: #9aa8b3;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 var(--step-0)/1.55 var(--font-body); -webkit-font-smoothing: antialiased; }
+.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 64px; display: grid; gap: 40px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: var(--step-3); letter-spacing: -0.01em; }
+h2 { font-size: var(--step-2); }
+h3 { font-size: var(--step-1); }
+p { margin: 0; }
+.eyebrow { font: 500 var(--step--1)/1.3 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.lede { max-width: 66ch; color: var(--muted); font-size: var(--step-1); }
+.mono { font-family: var(--font-mono); font-size: var(--step--1); }
+section { display: grid; gap: 16px; min-width: 0; }
+.section-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+.section-head p { color: var(--muted); max-width: 70ch; }
+a { color: var(--accent); }
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Header */
+header { display: grid; gap: 14px; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px 28px; font-variant-numeric: tabular-nums; }
+.fact { display: grid; gap: 2px; }
+.fact b { font: 600 var(--step-1)/1.2 var(--font-display); }
+.fact span { color: var(--muted); font-size: var(--step--1); }
+
+/* Role lens */
+.lens { display: flex; flex-wrap: wrap; gap: 6px; }
+.lens button { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 5px 12px; font-size: var(--step--1); display: inline-flex; align-items: center; gap: 6px; transition: background .15s, border-color .15s; }
+.lens button:hover { border-color: var(--accent); }
+.lens button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.owner { background: var(--p-owner); } .dot.claude { background: var(--p-claude); }
+.dot.codex { background: var(--p-codex); } .dot.outside { background: var(--p-outside); }
+
+/* Gantt */
+.gantt-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.gantt { min-width: 720px; position: relative; padding: 8px 12px 12px; }
+.g-axis { display: grid; grid-template-columns: 170px 1fr; font: 400 11px/1 var(--font-mono); color: var(--muted); height: 26px; align-items: end; }
+.g-ticks { position: relative; height: 100%; }
+.g-ticks span { position: absolute; bottom: 4px; transform: translateX(-50%); white-space: nowrap; }
+.g-row { display: grid; grid-template-columns: 170px 1fr; align-items: center; min-height: 34px; border-top: 1px solid var(--line); }
+.g-row button.g-label { text-align: left; background: none; border: 0; padding: 6px 8px 6px 0; display: flex; gap: 8px; align-items: baseline; font-size: var(--step--1); }
+.g-row button.g-label b { font: 500 11px/1 var(--font-mono); color: var(--muted); }
+.g-row.sel button.g-label { font-weight: 600; }
+.g-track { position: relative; height: 34px; }
+.g-bar { position: absolute; top: 9px; height: 16px; border-radius: 3px; background: var(--sunk); border: 1px solid var(--line); cursor: pointer; padding: 0; }
+.g-bar.done { background: var(--done-soft); border-color: var(--done); }
+.g-bar.active { background: var(--accent); border-color: var(--accent); }
+.g-bar.next { background: var(--accent-soft); border-color: var(--accent); }
+.g-row.sel .g-bar { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink); }
+.g-gate { position: absolute; top: 11px; width: 12px; height: 12px; background: var(--gate); transform: translateX(-50%) rotate(45deg); border-radius: 2px; pointer-events: none; }
+.g-line { position: absolute; top: 26px; bottom: 8px; width: 0; border-left: 1px dashed var(--muted); pointer-events: none; }
+.g-line.today { border-left: 2px solid var(--gap); }
+.g-line i { position: absolute; top: -20px; left: 4px; font: 500 10px/1 var(--font-mono); color: var(--muted); white-space: nowrap; font-style: normal; }
+.g-line.today i { color: var(--gap); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: var(--step--1); color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 18px; height: 10px; border-radius: 2px; border: 1px solid var(--line); display: inline-block; }
+
+/* Phase detail */
+.phase { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; display: grid; gap: 20px; }
+.phase-head { display: grid; gap: 8px; }
+.phase-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.pill { font: 500 11px/1 var(--font-mono); letter-spacing: .04em; text-transform: uppercase; padding: 5px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+.pill.done { color: var(--done); background: var(--done-soft); }
+.pill.active, .pill.review { color: var(--accent); background: var(--accent-soft); }
+.pill.next, .pill.draft { color: var(--accent); }
+.pill.planned, .pill.todo { color: var(--muted); }
+.pill.gap { color: var(--gap); background: var(--gap-soft); }
+.trad { border-left: 3px solid var(--line); padding-left: 12px; color: var(--muted); max-width: 75ch; }
+.trad b { color: var(--ink); font-weight: 600; }
+.phase-cols { display: grid; grid-template-columns: 1.25fr 1fr 1fr; gap: 24px; }
+.phase-cols > div { min-width: 0; display: grid; gap: 10px; align-content: start; }
+.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.list li { display: grid; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid var(--line); transition: opacity .15s; }
+.list li:last-child { border-bottom: 0; }
+.list li.dim { opacity: .3; }
+.who { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px 2px 6px; }
+.art { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.art .mono { color: var(--muted); word-break: break-all; }
+.gatebox { background: var(--gate-soft); border: 1px solid var(--gate); border-radius: var(--radius); padding: 14px; display: grid; gap: 10px; }
+.gatebox h3 { display: flex; align-items: center; gap: 8px; }
+.gatebox h3::before { content: ""; width: 10px; height: 10px; background: var(--gate); transform: rotate(45deg); border-radius: 2px; flex: none; }
+.gatebox ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+.owner-time { font-size: var(--step--1); color: var(--muted); }
+.owner-time b { color: var(--p-owner); font-weight: 600; }
+textarea { width: 100%; min-height: 76px; resize: vertical; font: 400 var(--step-0)/1.45 var(--font-body); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; }
+textarea:focus { border-color: var(--accent); outline: none; }
+label.note { display: grid; gap: 6px; font-size: var(--step--1); color: var(--muted); }
+
+/* Matrix */
+.matrix-scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: var(--step--1); }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 11px/1.2 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+td.num { font-variant-numeric: tabular-nums; text-align: center; }
+.heat { display: inline-block; min-width: 28px; padding: 2px 6px; border-radius: 4px; text-align: center; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--sunk); }
+tr.gaprow td:first-child { box-shadow: inset 3px 0 0 var(--gap); }
+
+/* Flow */
+.flow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; counter-reset: step; }
+.flow li { list-style: none; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; display: grid; gap: 8px; align-content: start; position: relative; }
+.flow li::before { counter-increment: step; content: counter(step); font: 500 11px/1 var(--font-mono); color: var(--muted); }
+.flow ol { margin: 0; padding: 0; display: contents; }
+
+/* Two-column notes */
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.two > div { min-width: 0; display: grid; gap: 10px; align-content: start; }
+.ritual { display: grid; gap: 2px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.ritual span { color: var(--muted); font-size: var(--step--1); }
+ol.agreements { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+
+/* History */
+.hist { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; border-left: 2px solid var(--line); margin-left: 6px; }
+.hist li { position: relative; padding: 0 0 18px 20px; display: grid; gap: 2px; max-width: 75ch; }
+.hist li::before { content: ""; position: absolute; left: -7px; top: 6px; width: 12px; height: 12px; border-radius: 50%; background: var(--surface); border: 2px solid var(--accent); }
+.hist time { font: 500 var(--step--1)/1.3 var(--font-mono); color: var(--muted); }
+
+/* Questions and export */
+.qs { display: grid; gap: 14px; }
+.q { display: grid; gap: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+.q .why { color: var(--muted); font-size: var(--step--1); }
+.export { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.btn { background: var(--ink); color: var(--bg); border: 0; border-radius: var(--radius); padding: 10px 16px; font-weight: 600; transition: transform .1s, opacity .15s; }
+.btn:hover { opacity: .9; } .btn:active { transform: translateY(1px); }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.status-msg { font-size: var(--step--1); color: var(--muted); }
+#export-text { min-height: 160px; font-family: var(--font-mono); font-size: var(--step--1); }
+.err { background: var(--gap-soft); color: var(--gap); padding: 14px; border-radius: var(--radius); }
+footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid var(--line); padding-top: 16px; }
+
+@media (max-width: 860px) {
+  .phase-cols, .two { grid-template-columns: 1fr; }
+  .flow { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow" id="eyebrow">SDR Agent · product development process</div>
+    <h1>From demo to product</h1>
+    <p class="lede">How a founder and two AI agents run a traditional software process: who plays which role, what each phase produces, and which gate you approve before the next one starts. Click a phase to see its work, or pick a person to see what they do.</p>
+    <div class="facts" id="facts"></div>
+  </header>
+
+  <section aria-labelledby="h-timeline">
+    <div class="section-head">
+      <h2 id="h-timeline">Phases and gates</h2>
+      <div class="lens" role="group" aria-label="Show work for" id="lens"></div>
+    </div>
+    <div class="gantt-scroll"><div class="gantt" id="gantt"></div></div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--done-soft);border-color:var(--done)"></i>Done</span>
+      <span><i class="sw" style="background:var(--accent);border-color:var(--accent)"></i>In progress</span>
+      <span><i class="sw" style="background:var(--accent-soft);border-color:var(--accent)"></i>Next</span>
+      <span><i class="sw" style="background:var(--sunk)"></i>Planned</span>
+      <span><i class="sw" style="background:var(--gate);transform:rotate(45deg);width:10px;height:10px;border:0"></i>Gate you approve</span>
+    </div>
+  </section>
+
+  <section aria-live="polite" id="phase"></section>
+
+  <section aria-labelledby="h-matrix">
+    <div class="section-head">
+      <h2 id="h-matrix">Who is busy when</h2>
+      <p>Number of activities each person takes part in, by phase. Click a row to open that phase.</p>
+    </div>
+    <div class="matrix-scroll"><table id="matrix"></table></div>
+  </section>
+
+  <section aria-labelledby="h-flow">
+    <div class="section-head">
+      <h2 id="h-flow">How every artifact moves</h2>
+      <p>The same five steps for a brief, a wireframe, an ADR or a pull request.</p>
+    </div>
+    <ol class="flow" id="flow"></ol>
+  </section>
+
+  <section aria-labelledby="h-team">
+    <div class="section-head">
+      <h2 id="h-team">The team</h2>
+      <p>Roles a traditional product team would staff, and who covers each one here. Red rows are gaps we cannot fill with agents.</p>
+    </div>
+    <div class="matrix-scroll"><table id="team"></table></div>
+  </section>
+
+  <section aria-labelledby="h-cadence">
+    <h2 id="h-cadence">Cadence and working agreements</h2>
+    <div class="two">
+      <div><h3>Rituals</h3><div id="rituals"></div></div>
+      <div><h3>Agreements</h3><ol class="agreements" id="agreements"></ol></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-history">
+    <div class="section-head">
+      <h2 id="h-history">How we got here</h2>
+      <p>The prototype phase, from a pasted prompt to a live demo. The full story is in the project journal.</p>
+    </div>
+    <ul class="hist" id="history"></ul>
+  </section>
+
+  <section aria-labelledby="h-questions">
+    <div class="section-head">
+      <h2 id="h-questions">Open questions for you</h2>
+      <p>Answer here, add notes on any phase above, then copy everything and paste it to Claude. Notes stay in this browser until you do.</p>
+    </div>
+    <div class="qs" id="questions"></div>
+    <div class="export">
+      <button class="btn" id="copy">Copy notes for Claude</button>
+      <button class="btn ghost" id="show">Show text</button>
+      <span class="status-msg" id="copy-status" role="status"></span>
+    </div>
+    <textarea id="export-text" readonly hidden aria-label="Notes for Claude"></textarea>
+  </section>
+
+  <footer id="footer">Source: docs/sdlc/sdlc-data.js in the SDR Agent repository. Every change to this process is reviewed and committed like code.</footer>
+</div>
+
+<script src="sdlc-data.js"></script>
+<script>
+(function () {
+  "use strict";
+  var D = window.SDLC;
+  var $ = function (id) { return document.getElementById(id); };
+  if (!D) {
+    $("phase").innerHTML = '<p class="err">The process data did not load. Open this page from the docs/sdlc folder so sdlc-data.js sits next to it.</p>';
+    return;
+  }
+  var PEOPLE = ["owner", "claude", "codex", "outside"];
+  var STORE = "sdlc-map-notes-v1";
+  var state = { phase: null, lens: "all", notes: {} };
+  try { state.notes = JSON.parse(localStorage.getItem(STORE) || "{}") || {}; } catch (e) { state.notes = {}; }
+  try { state.lens = localStorage.getItem(STORE + ":lens") || "all"; } catch (e) {}
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function day(s) { var p = s.split("-"); return Date.UTC(+p[0], +p[1] - 1, +p[2]) / 864e5; }
+  function fmt(s) { var d = new Date(day(s) * 864e5); return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }); }
+  function todayDay() { var n = new Date(); return Date.UTC(n.getFullYear(), n.getMonth(), n.getDate()) / 864e5; }
+  function saveNotes() { try { localStorage.setItem(STORE, JSON.stringify(state.notes)); } catch (e) {} }
+  function chip(id) { var p = D.people[id]; return '<span class="chip"><i class="dot ' + id + '"></i>' + esc(p ? p.label : id) + "</span>"; }
+  function pill(status, text) { return '<span class="pill ' + status + '">' + esc(text || status) + "</span>"; }
+  var STATUS_TEXT = { done: "Done", active: "In progress", next: "Next", planned: "Planned", draft: "Draft", review: "In review", todo: "To do" };
+
+  // Header facts
+  (function () {
+    var t = todayDay();
+    var active = D.phases.filter(function (p) { return p.status === "active"; })[0] || D.phases[0];
+    var html = '<div class="fact"><b>' + esc(active.id + " " + active.name) + '</b><span>Current phase</span></div>';
+    html += '<div class="fact"><b>' + esc(active.gate.id + " " + active.gate.name) + '</b><span>Next gate</span></div>';
+    D.meta.milestones.forEach(function (m) {
+      var n = day(m.date) - t;
+      var rel = n > 1 ? "in " + n + " days" : n === 1 ? "tomorrow" : n === 0 ? "today" : -n + " days ago";
+      html += '<div class="fact"><b>' + esc(fmt(m.date)) + " · " + rel + "</b><span>" + esc(m.label) + "</span></div>";
+    });
+    html += '<div class="fact"><b>' + esc(D.meta.version) + "</b><span>Updated " + esc(fmt(D.meta.updated)) + "</span></div>";
+    $("facts").innerHTML = html;
+  })();
+
+  // Role lens
+  function renderLens() {
+    var opts = [["all", "Everyone"]].concat(PEOPLE.map(function (id) { return [id, D.people[id].label]; }));
+    $("lens").innerHTML = opts.map(function (o) {
+      var dot = o[0] === "all" ? "" : '<i class="dot ' + o[0] + '"></i>';
+      return '<button type="button" data-lens="' + o[0] + '" aria-pressed="' + (state.lens === o[0]) + '">' + dot + esc(o[1]) + "</button>";
+    }).join("");
+  }
+  $("lens").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-lens]"); if (!b) return;
+    state.lens = b.getAttribute("data-lens");
+    try { localStorage.setItem(STORE + ":lens", state.lens); } catch (err) {}
+    renderLens(); renderPhase(); renderMatrix();
+  });
+
+  // Gantt
+  function renderGantt() {
+    var all = D.phases.map(function (p) { return [day(p.start), day(p.end)]; });
+    var min = Math.min.apply(null, all.map(function (a) { return a[0]; })) - 1;
+    var max = Math.max.apply(null, all.map(function (a) { return a[1]; })) + 2;
+    var span = max - min;
+    var x = function (d) { return ((d - min) / span) * 100; };
+    var ticks = "";
+    for (var d = min + 1; d < max; d += 1) {
+      var dt = new Date(d * 864e5);
+      if (dt.getUTCDay() === 1 || d === min + 1) ticks += '<span style="left:' + x(d + 0.5) + '%">' + dt.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) + "</span>";
+    }
+    var html = '<div class="g-axis"><div></div><div class="g-ticks">' + ticks + "</div></div>";
+    D.phases.forEach(function (p) {
+      var s = x(day(p.start)), e = x(day(p.end) + 1);
+      html += '<div class="g-row' + (state.phase === p.id ? " sel" : "") + '" data-phase="' + p.id + '">' +
+        '<button type="button" class="g-label" data-phase="' + p.id + '"><b>' + p.id + "</b>" + esc(p.name) + "</button>" +
+        '<div class="g-track"><button type="button" class="g-bar ' + p.status + '" data-phase="' + p.id + '" style="left:' + s + "%;width:" + (e - s) + '%" aria-label="' + esc(p.name + ", " + fmt(p.start) + " to " + fmt(p.end) + ", " + STATUS_TEXT[p.status]) + '"></button>' +
+        '<span class="g-gate" style="left:' + e + '%" title="' + esc(p.gate.id) + '"></span></div></div>';
+    });
+    var lines = D.meta.milestones.map(function (m) { return { d: day(m.date), label: m.label.split(",")[0], cls: "" }; });
+    var t = todayDay();
+    if (t >= min && t <= max) lines.push({ d: t, label: "Today", cls: "today" });
+    var overlay = lines.map(function (l) {
+      return '<div class="g-line ' + l.cls + '" style="left:calc(170px + 12px + (100% - 194px) * ' + ((l.d + 0.5 - min) / span) + ')"><i>' + esc(l.label) + "</i></div>";
+    }).join("");
+    $("gantt").innerHTML = html + overlay;
+  }
+  $("gantt").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-phase]"); if (!b) return;
+    selectPhase(b.getAttribute("data-phase"), true);
+  });
+
+  function selectPhase(id, scroll) {
+    state.phase = id;
+    renderGantt(); renderPhase();
+    if (scroll) $("phase").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // Phase detail
+  function involves(a) { return state.lens === "all" || a.who.indexOf(state.lens) !== -1; }
+  function renderPhase() {
+    var p = D.phases.filter(function (q) { return q.id === state.phase; })[0];
+    if (!p) return;
+    var acts = p.activities.map(function (a) {
+      return '<li class="' + (involves(a) ? "" : "dim") + '"><span>' + esc(a.text) + '</span><span class="who">' + a.who.map(chip).join("") + "</span></li>";
+    }).join("");
+    var arts = p.artifacts.map(function (a) {
+      var dim = state.lens !== "all" && a.by !== state.lens ? "dim" : "";
+      return '<li class="' + dim + '"><div class="art"><span>' + esc(a.name) + "</span>" + pill(a.status, STATUS_TEXT[a.status]) + '</div><span class="mono">' + esc(a.path) + "</span></li>";
+    }).join("");
+    var crit = p.gate.criteria.map(function (c) { return "<li>" + esc(c) + "</li>"; }).join("");
+    var note = state.notes["phase:" + p.id] || "";
+    $("phase").innerHTML =
+      '<div class="phase">' +
+        '<div class="phase-head">' +
+          '<div class="eyebrow">' + esc(p.id) + " · " + esc(fmt(p.start)) + (p.end !== p.start ? " to " + esc(fmt(p.end)) : "") + "</div>" +
+          '<div class="phase-title"><h2>' + esc(p.name) + "</h2>" + pill(p.status, STATUS_TEXT[p.status]) + "</div>" +
+          '<p class="lede">' + esc(p.goal) + "</p>" +
+          '<p class="trad"><b>On a traditional team: </b>' + esc(p.traditional) + "</p>" +
+          '<p class="owner-time"><b>Your time: </b>' + esc(p.ownerTime) + "</p>" +
+        "</div>" +
+        '<div class="phase-cols">' +
+          "<div><h3>Activities</h3><ul class=\"list\">" + acts + "</ul></div>" +
+          "<div><h3>Artifacts</h3><ul class=\"list\">" + arts + "</ul></div>" +
+          '<div><div class="gatebox"><h3>' + esc(p.gate.id + " · " + p.gate.name) + "</h3><p class=\"owner-time\">Approved by " + esc(D.people[p.gate.approver].label) + ". Passes when:</p><ul>" + crit + "</ul></div>" +
+          '<label class="note" for="note-' + p.id + '">Your notes on ' + esc(p.id) + '<textarea id="note-' + p.id + '" data-note="phase:' + p.id + '" placeholder="What is missing, wrong or unclear in this phase?">' + esc(note) + "</textarea></label></div>" +
+        "</div>" +
+      "</div>";
+  }
+  document.addEventListener("input", function (e) {
+    var k = e.target.getAttribute && e.target.getAttribute("data-note"); if (!k) return;
+    state.notes[k] = e.target.value; saveNotes();
+  });
+
+  // Matrix
+  function renderMatrix() {
+    var head = "<thead><tr><th>Phase</th>" + PEOPLE.map(function (id) { return '<th style="text-align:center">' + chip(id) + "</th>"; }).join("") + "</tr></thead>";
+    var body = D.phases.map(function (p) {
+      var cells = PEOPLE.map(function (id) {
+        var n = p.activities.filter(function (a) { return a.who.indexOf(id) !== -1; }).length;
+        var on = state.lens === "all" || state.lens === id;
+        var alpha = n ? Math.min(0.15 + n * 0.12, 0.85) : 0;
+        var style = n && on ? "background:color-mix(in srgb, var(--p-" + id + ") " + Math.round(alpha * 100) + "%, transparent);" + (alpha > 0.5 ? "color:var(--surface);" : "") : "color:var(--muted)";
+        return '<td class="num"><span class="heat" style="' + style + '">' + (n || "·") + "</span></td>";
+      }).join("");
+      return '<tr class="clickable" data-phase="' + p.id + '"><td><span class="mono">' + p.id + "</span> " + esc(p.name) + "</td>" + cells + "</tr>";
+    }).join("");
+    $("matrix").innerHTML = head + "<tbody>" + body + "</tbody>";
+  }
+  $("matrix").addEventListener("click", function (e) {
+    var r = e.target.closest("tr[data-phase]"); if (r) selectPhase(r.getAttribute("data-phase"), true);
+  });
+
+  // Static sections
+  $("flow").innerHTML = D.flow.map(function (f) {
+    return "<li><h3>" + esc(f.step) + '</h3><span class="who">' + f.who.map(chip).join("") + "</span><p>" + esc(f.text) + "</p></li>";
+  }).join("");
+  $("team").innerHTML = "<thead><tr><th>Traditional role</th><th>What they do</th><th>Who covers it here</th><th>Notes</th></tr></thead><tbody>" +
+    D.roles.map(function (r) {
+      return '<tr class="' + (r.gap ? "gaprow" : "") + '"><td><b>' + esc(r.role) + "</b>" + (r.gap ? " " + pill("gap", "Gap") : "") + "</td><td>" + esc(r.does) + '</td><td><span class="who">' + r.playedBy.map(chip).join("") + "</span></td><td>" + esc(r.note || "") + "</td></tr>";
+    }).join("") + "</tbody>";
+  $("rituals").innerHTML = D.rituals.map(function (r) {
+    return '<div class="ritual"><b>' + esc(r.name) + "</b><span>" + esc(r.when) + "</span><p>" + esc(r.text) + "</p></div>";
+  }).join("");
+  $("agreements").innerHTML = D.agreements.map(function (a) { return "<li>" + esc(a) + "</li>"; }).join("");
+  $("history").innerHTML = D.history.map(function (h) {
+    return "<li><time>" + esc(fmt(h.date)) + "</time><b>" + esc(h.title) + "</b><p>" + esc(h.text) + "</p></li>";
+  }).join("");
+  $("questions").innerHTML = D.openQuestions.map(function (q) {
+    var v = state.notes["q:" + q.id] || "";
+    return '<div class="q"><label for="q-' + q.id + '"><b>' + esc(q.id) + ". " + esc(q.q) + '</b></label><p class="why">' + esc(q.why) + '</p><textarea id="q-' + q.id + '" data-note="q:' + q.id + '" placeholder="Your answer">' + esc(v) + "</textarea></div>";
+  }).join("");
+
+  // Export
+  function exportText() {
+    var out = ["SDLC map notes (" + D.meta.version + ", data updated " + D.meta.updated + ")", ""];
+    D.openQuestions.forEach(function (q) {
+      var v = (state.notes["q:" + q.id] || "").trim();
+      if (v) out.push(q.id + ". " + q.q, "   " + v.replace(/\n/g, "\n   "), "");
+    });
+    D.phases.forEach(function (p) {
+      var v = (state.notes["phase:" + p.id] || "").trim();
+      if (v) out.push(p.id + " " + p.name + ":", "   " + v.replace(/\n/g, "\n   "), "");
+    });
+    if (out.length === 2) out.push("(No notes yet.)");
+    return out.join("\n");
+  }
+  $("copy").addEventListener("click", function () {
+    var text = exportText(), box = $("export-text");
+    box.value = text;
+    var done = function (msg) { $("copy-status").textContent = msg; };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done("Copied. Paste it into your chat with Claude."); }, function () {
+        box.hidden = false; box.focus(); box.select(); done("Copy was blocked. The text is selected below; copy it by hand.");
+      });
+    } else { box.hidden = false; box.focus(); box.select(); done("The text is selected below; copy it by hand."); }
+  });
+  $("show").addEventListener("click", function () {
+    var box = $("export-text"); box.value = exportText(); box.hidden = !box.hidden;
+    $("show").textContent = box.hidden ? "Show text" : "Hide text";
+  });
+
+  // Initial state: the active phase, or a phase named in the link (#P3).
+  var hash = (location.hash || "").replace("#", "").toUpperCase();
+  var first = D.phases.filter(function (p) { return p.id === hash; })[0] ||
+              D.phases.filter(function (p) { return p.status === "active"; })[0] || D.phases[0];
+  state.phase = first.id;
+  renderLens(); renderGantt(); renderPhase(); renderMatrix();
+})();
+</script>
+<!-- ARTIFACT-END -->
+</body>
+</html>
