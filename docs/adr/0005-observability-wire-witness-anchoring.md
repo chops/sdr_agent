@@ -270,6 +270,43 @@ a reviewed grammar revision, a new owner-approved real call, and
 independent review of its evidence. Evidence:
 `docs/audit/s12d-wire-witness-proof-{1,2}.json`.
 
+#### S12d projection v3 (hermetic; entity PASS 2026-10-07)
+
+`claude-message-json/3+prompt-builder/1` is v2 with three bounded
+relaxations, taken from the structure of proofs 1 and 2:
+
+- a reminder may end with its close tag plus exactly one LF, and its digest
+  and byte count cover the original bytes;
+- `cache_control` may carry `ttl: "1h"`, and only that value;
+- a trailing system message may carry a message-level `output_config` of
+  the top-level shape.
+
+Its manifest is version 3. It tags each trailing message's `output_config`,
+and its context group adds `trailing_output_config`, giving 9 keys. The
+evaluation order is v2, then v3, then v1: a request that v2 admits is
+always evaluated and labelled v2.
+
+The outer diagnostic `projections_inapplicable` (`[]`, `["v2"]` or
+`["v2","v3"]`) records which request grammars were inapplicable.
+
+The claim is unchanged: the stdin and the structured output are equal, and
+the context is recorded, not proven equal or benign. v3 is hermetic until a
+new owner-approved real call and a separately reviewed enablement, and the
+runtime allowlist stays empty.
+
+The owner approved up to two more synthetic real calls for the v3 proof on
+2026-10-07. They may be spent one at a time, and only after Codex has
+verified v3 RED and approved v3 GREEN and the #24 fixes. If v3 does not
+match the real shape, the work stops and is reported; the rules are not
+widened ad hoc.
+
+Proof 3 (2026-10-07, `docs/audit/s12d-wire-witness-proof-3.json`) was one
+complete witnessed exchange, evaluated under v3 with the stdin and response
+projections equal. It reconciled under the test-only exact entry
+`(claude_cli, 2.1.291, claude-message-json/3+prompt-builder/1,
+propagated_id)`. The runtime allowlist stays empty until a separate,
+reviewed enablement change.
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),

@@ -21,6 +21,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   alias Ecto.Adapters.SQL
   alias SdrAgent.Agents
   alias SdrAgent.Agents.Witness
+  alias SdrAgent.Agents.WitnessEvidence
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
@@ -538,6 +539,150 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     assert {:error, _failure_store_error} = reconcile(ctx, invocation)
     assert {:ok, []} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
     assert events_of_type(ctx.tenant, "agents.witness.linked") == []
+  end
+
+  describe "projection v3 (S12d, hermetic)" do
+    @v3 "claude-message-json/3+prompt-builder/1"
+    @v2_label "claude-message-json/2+prompt-builder/1"
+
+    test "the proof-shaped request reconciles only under an exact v3 entry", ctx do
+      v3 = entry(@v3)
+
+      for {label, entries, expected} <- [
+            {"v1 entry", [entry(Witness.Projection.version())], :inferred},
+            {"v2 entry", [entry(@v2_label)], :inferred},
+            {"v3 entry, other CLI version", [%{v3 | cli_version: "0.0.0"}], :inferred},
+            {"v3 entry", [v3], :reconciled}
+          ] do
+        invocation = call_model!(ctx, "cli_shape_v3")
+        result = reconcile(ctx, invocation, entries)
+        assert match?({:ok, %{status: ^expected}}, result), "#{label}: #{inspect(result)}"
+        {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert link.evidence["projection_version"] == @v3, label
+        assert link.evidence["projections_inapplicable"] == ["v2"], label
+        assert link.evidence["trailing_output_config"] == ["present"], label
+        assert link.evidence["reminder_count"] == 1, label
+        assert "cli_injected_context" in link.evidence["reason_codes"], label
+        refute inspect(link.evidence) =~ Proxy.account_id()
+      end
+    end
+
+    test "the runtime allowlist is empty: a perfect v3 proof stays inferred", ctx do
+      invocation = call_model!(ctx, "cli_shape_v3")
+      result = reconcile(ctx, invocation)
+      assert match?({:ok, %{status: :inferred}}, result), inspect(result)
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert link.evidence["projection_version"] == @v3
+      assert "method_not_enabled" in link.evidence["reason_codes"]
+    end
+
+    test "a v2-admitted request stays labelled v2, even with an unsupported response", ctx do
+      for {variant, expected} <- [{"cli_shape", :reconciled}, {"cli_shape_thinking", :inferred}] do
+        invocation = call_model!(ctx, variant)
+        result = reconcile(ctx, invocation, [entry(@v2_label), entry(@v3)])
+        assert match?({:ok, %{status: ^expected}}, result), "#{variant}: #{inspect(result)}"
+        {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert link.evidence["projection_version"] == @v2_label, variant
+        assert link.evidence["projections_inapplicable"] == [], variant
+
+        for key <- WitnessEvidence.context_group(),
+            do: assert(Map.has_key?(link.evidence, key), "#{variant}: #{key}")
+
+        refute Map.has_key?(link.evidence, "trailing_output_config"), variant
+      end
+    end
+
+    test "a request outside v2 and v3 falls back to v1, labelled [v2, v3]", ctx do
+      invocation = call_model!(ctx, "ok")
+      assert {:ok, %{status: :inferred}} = reconcile(ctx, invocation, [entry(@v3)])
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert link.evidence["projection_version"] == Witness.Projection.version()
+      assert link.evidence["projections_inapplicable"] == ["v2", "v3"]
+      refute Map.has_key?(link.evidence, "reminder_count")
+    end
+
+    test "an inexact derived v3 group is evidence_contract_invalid", ctx do
+      for {label, tamper} <- [
+            {"v3 key missing", &Map.delete(&1, "trailing_output_config")},
+            {"diagnostic injected", &Map.put(&1, "projections_inapplicable", [])},
+            {"legacy key injected", &Map.put(&1, "outcome", "complete")},
+            {"cardinality broken", &Map.put(&1, "trailing_output_config", [])}
+          ] do
+        invocation = call_model!(ctx, "cli_shape_v3")
+
+        result =
+          Witness.reconcile(invocation.id,
+            actor: ctx.rec,
+            store_root: ctx.root,
+            methods: [entry(@v3)],
+            evidence_tamper: tamper
+          )
+
+        assert match?({:ok, %{status: :inferred}}, result), "#{label}: #{inspect(result)}"
+        {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert "evidence_contract_invalid" in link.evidence["reason_codes"], label
+        refute link.evidence["projection_version"] == @v3, label
+      end
+    end
+
+    test "a v3 mismatch survives later invalid or unsupported observations", ctx do
+      invocation = call_model!(ctx, "cli_shape_v3_mismatch")
+      assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation, [entry(@v3)])
+      [path] = terminal_record_paths(ctx.root, invocation)
+      record = path |> File.read!() |> JSON.decode!()
+
+      stdin =
+        blob_path(ctx.root, record["request_sha256"])
+        |> File.read!()
+        |> JSON.decode!()
+        |> get_in(["messages", Access.at(0), "content", Access.at(0), "text"])
+        |> String.replace_suffix(" (edited)", "")
+
+      v3_opts = [
+        cache_ttl: "1h",
+        trailing_message_extra: %{"output_config" => %{"effort" => "x"}}
+      ]
+
+      for {label, request, opts} <- [
+            {"invalid v3 group", Proxy.cli_request(stdin, v3_opts),
+             [evidence_tamper: &Map.delete(&1, "trailing_output_config")]},
+            {"outside v2 and v3",
+             Proxy.cli_request(stdin, Keyword.put(v3_opts, :cache_ttl, "5m")), []}
+          ] do
+        request = Proxy.blob!(ctx.root, request)
+
+        response =
+          Proxy.blob!(ctx.root, Proxy.sse_response(~s({"answer":"qualified","score":42})))
+
+        rewritten =
+          Map.merge(record, %{
+            "request_sha256" => request,
+            "response_sha256" => response,
+            "request_capture_sha256" => request,
+            "response_capture_sha256" => response
+          })
+
+        File.write!(path, JSON.encode!(rewritten))
+
+        result =
+          Witness.reconcile(
+            invocation.id,
+            [actor: ctx.rec, store_root: ctx.root, methods: [entry(@v3)]] ++ opts
+          )
+
+        assert match?({:ok, %{status: :mismatch}}, result), "#{label}: #{inspect(result)}"
+        assert {:ok, :mismatch} = status(invocation, ctx.rec)
+      end
+    end
+
+    defp entry(projection) do
+      %{
+        provider: :claude_cli,
+        cli_version: ClaudeCLI.provenance().provider_version,
+        projection_version: projection,
+        method: :propagated_id
+      }
+    end
   end
 
   ## Helpers

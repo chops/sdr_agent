@@ -421,6 +421,156 @@ v2 request grammar (projection =claude-message-json/2+prompt-builder/1=, 38 B), 
 Response rules are unchanged from v1. Thinking or redacted_thinking blocks → unsupported.
 Claim: application stdin equals the single non-reminder user text, and the structured output is equal. Additional model context is recorded, but not proven equal or benign. This is not whole-request or effective-conversation equivalence.
 
+*** Projection v3 entity delta (writer table)
+Entity soft-stop: PASS for hermetic planning and RED, with conditions.
+Reviewer Codex, correlated ai-pair answer
+=9343defb-efd8-4e8b-aaf2-db309f92c21f= (2026-10-07), replying to
+=c791ef44-6bdd-46f1-94bc-88b44dccbed3= on table sha256 =10b5a8213428…=.
+Full ruling: =/tmp/sdr-s12d-v3-entity-verdict.md=.
+Resolutions:
+- Q1: ttl ={"1h"}= only.
+- Q2: accepted (see below).
+- LF correction: an LF *inside* the wrapper before its close tag is valid v2
+  content and stays a compatibility positive.
+The PASS does not authorize GREEN without RED verification, deployment,
+an allowlist entry or a real call. The 2/2 budget is spent; the work is
+hermetic only.
+Scope: hermetic only. Codex "bounded direction only" opinion on #24
+(=41c2aedf=, v3 section). No real call, budget, enablement or allowlist entry
+is implied. v1 and v2 definitions, and the proof 1 and 2 records, are
+unchanged.
+Facts from proofs 1 and 2 (structure only; synthetic fixtures never copy real
+CLI context or account metadata):
+(a) a reminder block ends with =</system-reminder>= plus one LF;
+(b) =cache_control= is ={type: ephemeral, ttl: "1h"}= on system and trailing blocks;
+(c) the trailing system message carries a message-level =output_config: {effort}=.
+Entity Model trigger: yes. Reason: a new projection claim meaning, a new
+manifest version, and one new typed evidence key in the persisted
+WireWitnessLink =evidence= contract. There is no column and no migration.
+
+Projection =claude-message-json/3+prompt-builder/1= (38 B). Order of
+evaluation: v2, then v3 when v2 is inapplicable, then v1. A request that v2
+admits is still evaluated and labelled v2. The v3 grammar is v2 with exactly
+three relaxations:
+1. Reminder recognition: the text begins with =<system-reminder>= and ends
+   with =</system-reminder>= or =</system-reminder>\n= (exactly one LF).
+   Refused: CRLF, two or more LFs, other trailing whitespace, and a missing
+   close tag. A reminder's sha256 and byte count are computed over the
+   *original complete bytes*, LF included, with no stripping. Stdin equality
+   stays byte-exact.
+2. =cache_control= (system and trailing blocks only; user blocks still refuse
+   it): keys exactly ={type}= or ={type, ttl}=, with type = =ephemeral= and
+   ttl in the reviewed set {="1h"="} (observed). =5m=, numbers, other strings
+   and extra keys are refused. The block hashes are over canonical JSON that
+   includes the ttl, so nothing is normalised.
+3. Trailing system message keys are exactly ={role, content}= or ={role,
+   content, output_config}=. =output_config= uses the top-level validator
+   (absent, null, or a map of keys from {effort} with effort a string of at
+   most 16 B). Any other message-level key is refused, and =output_config= on
+   the user message is refused.
+Everything else is identical to v2: top-level allowlist, model/stream/tools,
+the stdin rule, caps checked before canonicalisation, metadata never
+imported, response rules, and thinking unsupported. The claim is unchanged:
+stdin and output are equal; context is recorded, not proven equal or benign.
+
+v3 manifest (sha256 over =sdr-canonical-json/1=, the root
+=request_extras_sha256=): the v2 manifest with ="version": 3=, and each
+=trailing_system= entry gains ="output_config": {"present": false} |
+{"present": true, "value": <JSON value, incl. null>}=. Existing key meanings
+are not redefined: =trailing_system_sha256s= is still sha256 of the
+message's canonical block list (now binding any ttl), and
+=reminder_sha256s= / =reminder_bytes= are still over the complete block text.
+
+| Entity | New/Existing | Purpose | Attributes | Relationships | Invariants/Lifecycle | Policy/Actor | Open Questions |
+| WireWitnessLink.evidence (Agents; WitnessEvidence) | Existing value-contract delta; no column/migration | Record the message-level control that v3 admits, beyond what v2 records | New optional key =trailing_output_config=: list of codes from {absent, null, present}, length = =trailing_system_count= (0..2), index = trailing message order. The v3 context group is the v2 group (8 keys) plus this key. New allowed =projection_version= value v3 | Unchanged | =trailing_output_config= only appears with the complete v2 group, and its length equals =trailing_system_count=. Claim boundary (=validate_claim=, any link_status): a v2 projection_version requires exactly the v2 group and no =trailing_output_config=; a v3 projection_version requires the complete 9-key group. The reconciler accepts derived extras only when their keys are exactly that version's group; otherwise the result is =inferred= / =evidence_contract_invalid= with no projection, and it never clears a mismatch. Every admitted context carries =cli_injected_context=. v1 and v2 rows stay valid | REC create only (unchanged) | None (Q1, Q2 resolved) |
+| WireWitnessLink.evidence: =projections_inapplicable= (Q2) | Existing value-contract delta; outer diagnostic, *not* a member of any derived context group | Label which request grammars were tried and found inapplicable, so a fallback is never mistaken for a v2/v3 claim | Optional ordered unique list of enum strings from {v2, v3}, length 0..2; the only legal values are =[]=, =["v2"]=, =["v2","v3"]=; absent on old rows | Unchanged | Set only when a primary comparison is attempted: v2 request grammar evaluated → =[]= (even when the response is unsupported or a mismatch); v2 inapplicable and v3 evaluated → =["v2"]=; both inapplicable and v1 evaluated → =["v2","v3"]=. Only *request* inapplicability counts: a v2-admitted request with a thinking or invalid SSE response stays evaluated v2 / =inferred= with its complete 8-key group. It is omitted when no comparison was attempted (gate or blob failures). It cannot be injected through the derived-extras merge | REC create only (unchanged) | None |
+| ModelInvocation / Operation / Payload / Failure / Witness allowlist | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found. The runtime allowlist stays empty; a v3 entry is an exact tuple used only in tests | — | — | — | — | — | — |
+
+Owner decision (2026-10-07, about 18:15 MT, relayed by the coordinator):
+APPROVED up to 2 more real Claude calls for the S12d v3 proof (calls 3 and
+4). Conditions:
+- synthetic fixture data only, counted against the S6a budgets;
+- run on the writer's own test DB (never =sdr_agent_dev=), with
+  metadata-only evidence;
+- spend them only after Codex has VERIFIED v3 RED, approved v3 GREEN and
+  approved the #24 fixes;
+- one call at a time: analyse proof 3 before spending proof 4;
+- if v3 still does not match the real shape, stop and report. Do not widen
+  the rules ad hoc.
+Enablement remains a separate reviewed change.
+
+Planned RED negatives:
+- LF: CRLF, double LF, space+LF, tab or space after the close tag, and a
+  missing or incorrect close tag are refused. An LF inside the wrapper before
+  the close tag stays a positive. The reminder digest and byte count include
+  the admitted LF.
+- TTL: =5m=, 3600, ="1H"=, an extra cache_control key, a ttl without an
+  ephemeral type, a ttl on a user block; the trailing digest changes with the ttl.
+- Message-level control: an unknown key (=name=), =output_config= with an
+  unknown field, a 17 B effort, =output_config= on the user message; absent,
+  null and present are distinguished in =trailing_output_config= and in the
+  root hash.
+- Capability: a proof-2-shaped synthetic request reconciles only under an
+  exact v3 test entry (the v2 entry stays inferred). A v2-admitted request
+  stays labelled v2. The runtime allowlist is empty.
+- Contract: a v3 claim without =trailing_output_config= is refused at the
+  action; a v2 claim with it is refused; the derived group is exact.
+- Unchanged: thinking stays unsupported, and stdin stays byte-exact. A
+  v2-admitted request with an unsupported response stays v2.
+- Q2: the =projections_inapplicable= values for each path; illegal values
+  are refused (unknown, reordered, duplicated or =["v3"]=).
+- Mismatch history is preserved under invalid or unsupported observations,
+  and the runtime allowlist stays empty.
+A diagnostic-only offline re-evaluation of the saved proof-2 blobs (read-only
+store, metadata output, no call) may follow GREEN. It is not enablement.
+
+*** Projection v3 RED/GREEN (hermetic)
+- RED =114b4f7= VERIFIED by Codex (=28d57c13=): 13 unit and 6 e2e clean
+  assertion failures.
+- GREEN: =compare_v3/4= and =version_v3/0=. The grammar is parameterised
+  (=:v2= / =:v3=).
+- The reconciler evaluates v2, then v3, then v1, using request
+  inapplicability only (=extras: nil=), and labels the result with
+  =projections_inapplicable=.
+- =WitnessEvidence= requires exact claims per version (v2: 8 keys and no v3
+  key; v3: 9 keys) and checks =trailing_output_config= cardinality.
+- The proof harness records both the requested and the evaluated projection.
+Offline diagnostic. It re-evaluated the saved proof-2 blobs: read-only
+store, metadata only, no call, and not enablement.
+- v2 is inapplicable (=request_control_unsupported=).
+- v3 gives =match= with =cli_injected_context=: 1 reminder (558 B), 1
+  trailing message (928 B), =trailing_output_config= =["present"]=, all
+  four control fields present.
+- The reconstructed stdin hash equals the recorded =projected_request_sha256=.
+- Zoi's ="required"= order varies across VM runs, so the diagnostic selects
+  the order that the recorded app request fixed. Production is unaffected
+  because the stored request fixes the order.
+
+*** Real proof call 3 (owner-approved; =docs/audit/s12d-wire-witness-proof-3.json=, metadata only)
+The call ran at 18:54 MT on =s12d-v3= @ =605d283=, after these gates were
+met: v3 RED VERIFIED (=28d57c13=), v3 GREEN APPROVED (=28b897cb=, PR #28)
+and #24 APPROVED (=ee67612d=). The CLI was 2.1.291 and the proxy 0.2.0
+(=/healthz/witness= schema 1).
+- Invocation: =01a11901-043e-775c-a682-9340a2420637=.
+- Exchange: exactly one complete =/v1/messages= exchange, record
+  =01a11901-066c-7f76-8a28-b6e0b77226a7= (HTTP 200, captures and stream
+  complete).
+- Requested projection v3; evaluated projection v3, with
+  =projections_inapplicable= =["v2"]=.
+- Stdin projection: EQUAL. Response projection: EQUAL.
+- Reason =cli_injected_context=:
+  - 1 reminder (558 B);
+  - 1 trailing system message (928 B), with =trailing_output_config=
+    =["present"]=;
+  - all four control fields present.
+- Status: =reconciled=, but only under the test-only exact entry
+  (claude_cli, 2.1.291, v3, propagated_id).
+- The runtime allowlist is still EMPTY.
+- Call 4 (owner-approved) was NOT spent: proof 3 is conclusive for this
+  tuple.
+Enablement is a separate reviewed PR. It needs independent review of this
+evidence and the coordinator's go-ahead.
+
 *** Real proof call 2 of 2 (=docs/audit/s12d-wire-witness-proof-2.json=, metadata only) — budget exhausted
 The call ran at 16:22 MT, after v2 GREEN (=cd2ebe2=) and a full gate on main =37c69bb=.
 - Witness: invocation =01a11875-f616-77a1-9631-ed3534331720= produced exactly one
@@ -494,6 +644,29 @@ Proposal (needs review before any enablement): projection
 - keep the response rules (thinking stays unsupported).
 Prove it with the remaining real call (budget 1 of 2), then a separate
 enablement PR.
+
+* Follow-ups
+** Zoi =to_json_schema= nondeterministic ="required"= order (found 2026-10-07; owner: coordinator to assign)
+=Zoi.to_json_schema/1= emits the ="required"= array of an object schema in
+an order that varies across BEAM VM runs, for the same schema.
+- Observed: =["score","answer"]= in one run and =["answer","score"]= in
+  another. This is probably atom-keyed map iteration order.
+- Effect: =ClaudeCLI.render_prompt/2= canonicalises object keys but not
+  array order. So the rendered stdin, and any =output_schema_sha256= /
+  =prompt_template_sha256= derived from the rendered schema, can differ
+  between processes for an unchanged schema. That undermines audit
+  provenance stability across VMs.
+- Not a witness defect: the stored application request fixes the order
+  that was actually sent, and the projection re-renders from it.
+- Proposal: canonicalise at schema render, by sorting ="required"= (a set
+  under JSON Schema semantics) and any other set-valued arrays before
+  =Canonical.encode!=. Add a test that renders the same schema in two
+  fresh VMs (or with shuffled field order) and asserts identical bytes and
+  sha256.
+- This changes rendered prompts. It needs a =prompt-builder= version bump
+  (=prompt-builder/2=) so that old invocations keep re-deriving with
+  =/1=. Treat it as its own reviewed slice, with an entity/ADR check for
+  the provenance meaning.
 
 * Implementation Notes
 ** S12b (Claude writer)
