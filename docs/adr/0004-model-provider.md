@@ -275,7 +275,10 @@ resource or policy change:
     so it owns the OS pid before the CLI can run (there is no hand-off
     window), and it forwards the port's messages to the server in order.
     If the server dies, even by `:kill`, the reaper kills the tracked
-    trees and removes their workspaces. A killed call is still recorded as
+    trees and removes their workspaces. The reaper builds the launch
+    environment from the server's allowlist with `SdrAgent.ChildEnv`
+    (ADR-0005 child-process amendment). Its own `ps`, `pgrep` and `kill`
+    children use the same allowlist, so no parent secret reaches them. A killed call is still recorded as
     unknown and is never resent.
   - Admission is a lease, held only while proven safe. A named server takes
     a `:persistent_term` lease (written once per server start, not per

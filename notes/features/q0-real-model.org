@@ -206,6 +206,16 @@ reproducer passes 3/3.
 
 *TDD Gate Verification (round 6):* [X] VERIFIED (assertion-only RED)
 
+** Integration with #33 (child-env allowlist, merged to main =157e69d=)
+Merged in =c0736f4= (approved #33 branch) and =9a3daa7= (main). The
+ClaudeCLI launch environment is now an allowlist spec handed to the
+reaper (=Reaper.open/5= takes ={port_opts, {allow, set}}= and opens the
+port with =ChildEnv.port/2=; the route variables are explicit removals in
+=set=); the reaper's =ps=/=pgrep=/=kill= use =ChildEnv.cmd([])=. The launch
+inventory test (from #33) passes; it now also accepts the
+=[{:env, expr} | rest]= literal form the reaper uses. #33's real-child
+canary tests (ClaudeCLI child, cleanup children) pass through the reaper.
+
 -----
 
 * Implementation Notes
