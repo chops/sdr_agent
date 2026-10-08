@@ -6,6 +6,9 @@ eccbe8fa9b35156206b0387fcc5449c10ad034f4:config/test.exs:generic-api-key:3
 eccbe8fa9b35156206b0387fcc5449c10ad034f4:config/test.exs:generic-api-key:24
 eccbe8fa9b35156206b0387fcc5449c10ad034f4:config/dev.exs:generic-api-key:27
 eccbe8fa9b35156206b0387fcc5449c10ad034f4:config/dev.exs:generic-api-key:57
-# S13b plan notes (2026-10-07): the prose "API docs and the =OperationsLive="
-# matched generic-api-key; not a credential (reworded since); reviewed.
+# S13b plan notes (2026-10-07): a prose phrase about the application
+# programming interface docs next to a LiveView module name matched the
+# generic rule; not a credential (reworded since); reviewed. The second entry
+# is an earlier version of this comment that quoted that phrase.
 f9dafb094aa03f97078a1a85d357bad91f27c90b:notes/features/s13b-retry.org:generic-api-key:62
+7bef2d593c41a0c5ccecad1b413793eccb72b2dd:.gitleaksignore:generic-api-key:9
