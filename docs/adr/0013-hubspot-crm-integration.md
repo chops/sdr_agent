@@ -172,10 +172,22 @@ out here.
 - `lifecyclestage` only moves forward.
 - The `hs_lead_status` internal values.
 - New portals are seeded with two sample contacts on a real company domain.
-- Whether a service key can call account details.
-- Whether service keys work in developer test accounts.
-- Whether notes and tasks accept a custom `hasUniqueValue` property.
-- The exact scope names shown in the scope picker.
+  *Resolved by H0 (2026-10-07): yes, on `hubspot.com`, excluded by the
+  reserved-domain rule.*
+- Whether a service key can call account details. *Resolved by H0: yes;
+  `accountType` is `DEVELOPER_TEST`.*
+- Whether service keys work in developer test accounts. *Resolved by H0: yes,
+  with contacts and companies read scopes.*
+- Whether notes and tasks accept a custom `hasUniqueValue` property. *Still
+  open.*
+- The exact scope names shown in the scope picker. *Still open for notes,
+  tasks and subscriptions.*
+
+H0 also established that a v3 contact read with `associations=companies`
+returns each company id once per association type, so the import
+deduplicates. It also recorded the value formats for `industry` (enum
+internal values), `numberofemployees` (numeric) and `lifecyclestage`
+(`lead`). Details are in the notes, under "H0 facts".
 
 ## Owner Decisions
 

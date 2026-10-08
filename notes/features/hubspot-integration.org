@@ -372,6 +372,49 @@ Per ADR §§1–4 and §8:
   and numeric on the Company object. The import maps only the Company's
   numeric =numberofemployees= to =Account.employee_count=, and never the
   contact property.
+- *Read-only probe results (2026-10-07).* The owner ran the probe script;
+  the key never appeared in argv, the environment or the output.
+  1. *A service key works in a developer test account* with scopes
+     =crm.objects.contacts.read= and =crm.objects.companies.read=. This
+     resolves the OQ-D beta-availability concern, so fallback C is not
+     needed.
+  2. *=GET /account-info/v3/details= returns =accountType= "DEVELOPER_TEST"*
+     with =portalId= =247632126= (not secret). The service key can call it,
+     so the strict preflight (§2: DEVELOPER_TEST plus portal allowlist) works
+     as designed.
+  3. *The account holds HubSpot's 2 seeded sample contacts* (Brian Halligan,
+     Maria Johnson) on =hubspot.com=, linked to a "HubSpot" company
+     (=hubspot.com=). The reserved-domain rule excludes all three, so they
+     are skipped and nothing about them is stored.
+  4. *v3 contact reads with =associations=companies= return each company id
+     twice*, once per association type (for example primary and unlabeled).
+     The import must deduplicate association ids by remote id and pick the
+     primary company from the type, not the occurrence count.
+  5. *Value formats.*
+     - =industry= comes back as enum internal values (for example
+       =LOGISTICS_AND_SUPPLY_CHAIN=, =COMPUTER_SOFTWARE=, =RETAIL=). The
+       import stores the internal value as returned.
+     - =numberofemployees= is numeric on companies.
+     - =lifecyclestage= reads as ="lead"= (lowercase internal value), which
+       matches the OQ-A rule's internal names.
+- *H0 unknowns.*
+
+  | Unknown | Status |
+  |---------+--------|
+  | Service key in a developer test account | resolved (fact 1) |
+  | Service key can call account details | resolved (fact 2) |
+  | DEVELOPER_TEST shown | resolved (fact 2) |
+  | Sample contacts seeded on a real domain | resolved (fact 3) |
+  | Association shape | resolved (fact 4) |
+  | Industry, employee and lifecycle value formats | resolved (fact 5) |
+  | Scope names for notes, tasks and subscriptions | *open* |
+  | =sdr_write_key= uniqueness on notes and tasks | *open* |
+  | Readable activity families | *open* |
+  | =hs_email_optout= presence | *open* |
+  | =hs_lead_status= internal values | *open* |
+  | =lifecyclestage= forward-only | *open* |
+  | DBV =2026-09= routes | *open* (the probe used =/v3/=) |
+  | HubSpot record URL format | *open* |
 
 * Owner decisions
 Relayed by the coordinator on 2026-10-07.
