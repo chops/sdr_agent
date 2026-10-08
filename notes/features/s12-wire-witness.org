@@ -620,6 +620,29 @@ Proposal (needs review before any enablement): projection
 Prove it with the remaining real call (budget 1 of 2), then a separate
 enablement PR.
 
+* Follow-ups
+** Zoi =to_json_schema= nondeterministic ="required"= order (found 2026-10-07; owner: coordinator to assign)
+=Zoi.to_json_schema/1= emits the ="required"= array of an object schema in
+an order that varies across BEAM VM runs, for the same schema.
+- Observed: =["score","answer"]= in one run and =["answer","score"]= in
+  another. This is probably atom-keyed map iteration order.
+- Effect: =ClaudeCLI.render_prompt/2= canonicalises object keys but not
+  array order. So the rendered stdin, and any =output_schema_sha256= /
+  =prompt_template_sha256= derived from the rendered schema, can differ
+  between processes for an unchanged schema. That undermines audit
+  provenance stability across VMs.
+- Not a witness defect: the stored application request fixes the order
+  that was actually sent, and the projection re-renders from it.
+- Proposal: canonicalise at schema render, by sorting ="required"= (a set
+  under JSON Schema semantics) and any other set-valued arrays before
+  =Canonical.encode!=. Add a test that renders the same schema in two
+  fresh VMs (or with shuffled field order) and asserts identical bytes and
+  sha256.
+- This changes rendered prompts. It needs a =prompt-builder= version bump
+  (=prompt-builder/2=) so that old invocations keep re-deriving with
+  =/1=. Treat it as its own reviewed slice, with an entity/ADR check for
+  the provenance meaning.
+
 * Implementation Notes
 ** S12b (Claude writer)
 - Propagation: =ModelProvider= adds =request.witness= (reserved invocation id
