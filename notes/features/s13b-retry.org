@@ -1,0 +1,260 @@
+#+TITLE: Feature: S13b — operator retry that actually re-runs work
+#+DATE: 2026-10-07
+
+* Summary
+S10b and S13a left operator retry inert. =Operations.retry_operation/2=
+only flips an Operation =failed → running=, and =Agents.retry_run/2= only
+creates a queued AgentRun. Nothing re-enqueues the work. A failed
+WebhookEvent can reach =processed= in the lifecycle, but no operator path
+leads there.
+
+S13b makes operator retry execute the work, idempotently, with bounded
+attempts and audit:
+- failed, budget-exhausted or cancelled *agent runs*, both assignment
+  (research) and reply-classification runs;
+- *failed webhook events*.
+
+It also adds admin-only UI retry buttons, with deny tests.
+
+* Entity Model
+#+BEGIN_EXAMPLE
+Entity Model trigger: yes
+Reason: changes backend action contracts (AgentRun :retry accepts an Operation; a new
+WebhookEvent :request_retry action; Operation :retry actor narrowing) and adds invariants
+(one retry per run, bounded retry chains, bounded webhook retries). No new entity, attribute
+or migration is proposed.
+#+END_EXAMPLE
+
+** Soft-stop table (submitted to Codex before any implementation)
+
+| # | Entity / action | Change | Invariants (enforced where) | Actors | Audit |
+|---+-----------------+--------+-----------------------------+--------+-------|
+| 1 | =AgentRun :retry= (create) | New optional argument =operation_id=, set as the new run's =operation_id=. Required when the prior run's trigger is =sdr.lead.assigned= (=AgentWorker= finds a run by its Operation); absent for reply runs (=ReplyWorker= gets =run_id= in its job). | Prior run must be =failed=, =budget_exhausted= or =cancelled= (existing). *At most one retry per run*: refused (=:already_retried=) if any run has =retry_of_id= = prior, checked with the prior run locked =FOR UPDATE=. Also guaranteed by the Operation identity (row 3) for assignment runs. *Bounded chain*: the =retry_of_id= depth from the original run is at most 3 (config may only lower it), else =:retry_limit_reached=. The given Operation must be =enqueued=, kind =research_lead=, in the same tenant, with subject the run's lead. | ADM only at the orchestration API (row 2). The resource policy stays ADM, REV, so as not to widen or narrow it silently; flagged for your ruling. | =agents.run.retried= (existing; payload gains =operation_id=). The prior run's attention Failure is resolved (existing). |
+| 2 | =SDR.retry_run/2= (new orchestration API, agent plane) | One transaction (outbox, like =assign_lead/2=). Lock the prior run, then the Lead =FOR UPDATE=. Refuse if the lead has an active run (=:assignment_active=). *Assignment run*: rebuild the trigger signal from its durable =signal= AuditEvent (same signal id); insert the =AgentWorker= job; create the Operation (row 3); call =AgentRun :retry= with =operation_id=. *Reply run*: =AgentRun :retry=, then a =ReplyWorker= job with the new =run_id=. | Idempotent: a second call for the same prior run returns =:already_retried=, with nothing written. The lead is not re-transitioned (a failed run leaves the lead in its phase; S7 choice 16). Crash between commit and job pick-up is covered by the outbox; the job and rows commit together. | ADM (=Forbidden= plus one =authz.denied= for REV, AUR and system actors; the guard audits). | Row 1 events, plus =operations.operation.created=. |
+| 3 | =Operation :create= | No contract change. The retry Operation uses an idempotency key of the form retry:PRIOR-RUN-ID (existing per-tenant unique identity) and the prior run's =correlation_id=. | DB-level one-retry guarantee for assignment runs (unique identity). | AGT (existing kind actor). | Existing. |
+| 4 | =Operation :retry= (=failed → running=) | *Narrow the policy*: remove ADM, so only the kind's system actor can use it. Operator retry goes through the subject (rows 2 and 5) and never reopens an Operation row. Reason: an operator flip leaves a =running= Operation with nothing running, and agent Operations never reach =failed= anyway (=max_attempts= 1 → =discarded=). | No ADM path to =running= without work. | Kind actors only. | Existing. |
+| 5 | =WebhookEvent :request_retry= (new update action) | ADM, on a =failed= event: no state change (=failed → failed=; only the audit append). =Outreach.retry_webhook/2= then re-runs the event's *original* Oban job (=Oban.retry_job/1=; the job args carry the received bytes, so Payload content is still never read — S9 MF). The processor additionally accepts =failed= (it currently processes only =received=). =failed → processed= is an existing transition and resolves the Failure. | Event must be =failed=. Its original job must still exist; after Oban's prune (1 day) the result is =:retry_window_expired= and nothing is written. *Bounded*: at most 3 operator retries per event (counted from =webhook.retry_requested= events under the event row lock). Idempotent while a retry is pending: refused (=:retry_pending=) if the job is already =available= or =executing=. | ADM (REV, AUR and system actors refused and audited). | New =webhook.retry_requested= (job id, attempt n of 3). |
+| 6 | UI | Retry buttons. Runs: on the Operations runs list and the run page, for =failed=, =budget_exhausted= and =cancelled=. Webhooks: on failed webhook events (a small list in Operations). Shown only to ADM. Every event goes to the domain. | A forged REV or AUR event is refused by the domain and audited. | — | — |
+
+No new entity, attribute, migration or lifecycle state. Rows 1, 4 and 5 are
+contract or policy changes, and rows 1, 2 and 5 add invariants.
+
+** Questions for the soft-stop
+1. Row 1 or 4 policy: narrow =AgentRun :retry= to ADM in the resource too
+   (one source of truth), or keep REV there and gate only the orchestration?
+2. Row 1 bound: 3 retries per original run. Acceptable?
+3. Row 5: is re-running the original Oban job (args hold the bytes) right,
+   rather than reading Payload content for a fresh job?
+
+* Soft-stop v2 (revision for Codex verdict on =2d5f948=: NEEDS-REVIEW)
+The v1 table above is superseded by this one. Rulings adopted: Q1 active ADM
+only, at the resource and at orchestration; Q2 at most 3 retries after the
+original (depth 0..3, at most 4 runs), configuration may only lower or
+disable; Q3 the original job's bytes, with atomic request and job control.
+
+** A. Agent-run retry
+
+| # | Entity / action | Contract (typed) | Invariants and where they are enforced | Actor / Audit |
+|---+-----------------+------------------+----------------------------------------+---------------|
+| A1 | =SDR.retry_run(run_id, actor:)= (new, agent plane; the *only* operator retry path) | =run_id :: uuid=. Returns ={:ok, %{run, operation \| nil, job}}= or a typed error, with nothing written on error. | Order of checks, all before any write: (1) Guard (=guarded?: true=): the actor must be an *active ADM of the run's tenant*. REV, AUR, system, foreign-tenant or nil actors get =Forbidden= with exactly one =authz.denied= before any validation, and nothing is queued or written. (2) Authorized read of the prior run gives its lead. (3) *Locks, in this order:* Lead =FOR UPDATE= → Campaign =FOR SHARE= → prior AgentRun =FOR UPDATE= (authoritative re-read) → prior Operation =FOR UPDATE= (if any) → prior attention Failure =FOR UPDATE= (if any) → original Oban job row =FOR UPDATE= → chain head (first append). This is consistent with assignment (Lead → … → chain) and =HandOffProposal= (Lead → Campaign → Contact → Run). (4) *One child per prior run*, checked first: =:already_retried=. (5) Prior status ∈ {failed, budget_exhausted, cancelled}, else =:not_retryable=. (6) Depth: walk =retry_of_id= at most 4 steps, same tenant, cycle-safe; depth ≥ 3 gives =:retry_limit_reached=. Configuration may only lower the limit; 0 disables. (7) *Old work stopped:* the original job (assignment: the Operation's =oban_job_id=; reply: the =ReplyWorker= job with =run_id=) must not be live (=available=, =scheduled=, =executing=, =retryable=), else =:prior_work_live=. No ModelInvocation of the prior run may be =sent=, else =:prior_model_call_unsettled= (=StaleRunSweeper= makes it =unknown=). (8) *Supported triggers:* =sdr.lead.assigned= and =sdr.reply.received=; anything else gives =:unsupported_trigger=. (9) *Provenance:* the trigger is re-read from its durable =signal= AuditEvent (=trigger_signal_id=, same tenant). It must name the run's lead and campaign (assignment) or a matched Reply of the run's lead with no ReplyAssessment yet (reply). Otherwise =:trigger_signal_missing=, =:already_assessed=. (10) *Domain gates:* lead not =stopped=, =disqualified=, =converted= or =nurture=; for assignment it must be in =assigned=, =researching= or =qualifying=; campaign =active=. Otherwise =:lead_not_retryable= or =:campaign_not_active=. The lead state is never reset or re-transitioned. *Writes* (one =Audit.transaction=; any failure rolls back every job, run, Operation and Failure write): assignment: =AgentWorker= job (same tenant and signal dump) + Operation (A3) + =AgentRun :retry= (A2); reply: =AgentRun :retry= + =ReplyWorker= job (=run_id= of the new run). | ADM. Audit: =operations.operation.created=, =agents.run.retried= (payload: =retry_of_id=, =operation_id=, depth), the prior Failure resolved (existing =ResolveAttention=, Failure pre-locked). |
+| A2 | =AgentRun :retry= (create) | Arguments: =run_id :: uuid= (existing); new =operation_id :: uuid \| nil=, required for an assignment retry and absent for a reply retry. Sets the existing =operation_id= FK (=belongs_to Operation=, nullable; cardinality unchanged: an Operation runs at most one AgentRun). | Policy *narrowed* to *active ADM of the tenant* **and** a private orchestration marker (=SdrAgent.SDR.Checks.RetryContext=, set only by A1, the same pattern as =InternalWrite= / =SuppressionContext=). There is no public direct path: =Agents.retry_run/2= is removed, its callers move to A1, and its tests change by contract. The change validates that the Operation is =enqueued=, of kind =research_lead= and queue =research=, in the same tenant, with subject the run's lead, and bound to no other run. Fresh counters; budget limits copied, never raised. The persisted daily model cap is unchanged. No Approval, Draft or send permission is touched or implied. Original terminal rows stay immutable. | ADM + marker. =agents.run.retried=. |
+| A3 | =Operation :create= | Unchanged contract. | an idempotency key of the form retry:PRIOR-RUN-ID (existing per-tenant unique identity) is the database backstop for one child per assignment. | AGT (existing kind actor). Existing event. |
+| A4 | =Operation :retry= (=failed → running=) | *Narrowed:* ADM removed, kind actors only (an internal execution primitive). Its only caller is the S12 witness =ReconcileWorker= (=reconciler=). | Affected kinds and operator paths: =research_lead= and =prepare_outreach= (=max_attempts= 1, so never =failed=; operator path A1); =reconcile_model= (bounded worker retries by =reconciler=; no operator retry, unchanged); =deliver=, =reconcile_delivery=, =followup_due=, =process_webhook=, =anchor=, =export= (no Operation rows today; operator paths are =Outreach.cancel_retry/2= for deliveries and B1 for webhooks). ADM =:cancel= is *kept*. No inert =running= row can be made by an operator. | Kind actors. S2 entity model, domain docs and the OperationsLive moduledoc updated. |
+
+** B. Webhook retry
+
+| # | Entity / action | Contract (typed) | Invariants and where they are enforced | Actor / Audit |
+|---+-----------------+------------------+----------------------------------------+---------------|
+| B1 | =Outreach.retry_webhook(event_id, actor:)= (new) | =event_id :: uuid=. Returns ={:ok, %{event_id, ordinal}}= (metadata only; the job bytes never leave the server), or a typed error with nothing written. | Guard =guarded?: true= (active ADM of the tenant; others refused and audited once, before validation). One =Audit.transaction=. *Locks:* WebhookEvent =FOR UPDATE= → the exact original job (=SELECT … FROM oban_jobs WHERE worker = 'SdrAgent.Outreach.WebhookWorker' AND args->>'webhook_event_id' = $1 FOR UPDATE=) → chain head. Checks: verdict =valid=; status =failed= (=received=, =processed= and =rejected= never rerun: =:not_failed=). Exactly one original job: zero is =:retry_window_expired= (pruned), more than one is =:ambiguous_job=. Job args =tenant_id= and =webhook_event_id= match. The carried =raw_body= decodes and hashes to =raw_body_sha256=, else =:job_corrupt=. Job state ∉ {available, scheduled, executing, retryable} (=:retry_pending=). Ordinal = previous =webhook.retry_requested= events for the event + 1, and must be ≤ 3, else =:retry_limit_reached=. Then B2 (audit), then =Oban.retry_job/2= in the same transaction. *Postcondition under the lock:* the job is =available= with =max_attempts > attempt=, else roll back (=:retry_noop=). Oban 2.24 returns =:ok= for a no-op and raises =max_attempts= to =GREATEST(max, attempt + 1)= without resetting =attempt=: the operator ordinal (1..3) is distinct from Oban's attempt number. | ADM. |
+| B2 | =WebhookEvent :request_retry= (new update action) | No arguments; computed =ordinal :: 1..3=, =oban_job_id :: integer=. | =failed → failed= (no column change; =Transition= guard =from: [:failed]=). Appends =webhook.retry_requested= (ordinal, job id). | *Policy split by action:* =:request_retry= active ADM only; =:receive=, =:reject=, =:mark_processed=, =:mark_failed= and =:record_retry_failed= WHK only. There is no broad ADM write. |
+| B3 | Processor (=Webhooks.process/4=) | Unchanged signature. | A =failed= event is processed only when its latest ledger entry among {=webhook.retry_requested=, =webhook.retry_failed=} is an *unconsumed* =retry_requested=. This is checked under the event lock, so a resumed or duplicate job cannot exceed the operator's bounded requests (otherwise =:done=, no-op). The bytes are still hash-checked under the lock. *Success:* =:mark_processed= (=failed → processed=, existing) resolves the event's Failure atomically. *Failure again:* new action B4; the event stays =failed=; no new Failure. | WHK. |
+| B4 | =WebhookEvent :record_retry_failed= (new update action) | =class :: :validation_error \| :crash=, =reason :: string= (redacted). | =failed → failed=; consumes the pending request; appends =webhook.retry_failed= (ordinal, class, redacted reason). The existing Failure stays the single attention entry (no duplicate condition; its message is not rewritten). | WHK only. |
+
+** C. UI
+| # | Change | Notes |
+|---+--------+-------|
+| C1 | Retry buttons: Operations runs list and run page (=failed=, =budget_exhausted=, =cancelled=); a failed-webhook list with retry. Shown to ADM only. | Every click goes to A1 or B1 with =actor: scope.user= after the session revalidation hook (#17). A hidden button is not authorization: forged REV and AUR events are refused and audited by the domain (deny tests). Errors are shown as operator-facing messages; job bytes are never rendered. |
+
+** Unchanged (explicit)
+Lead, Campaign, Reply, ReplyAssessment, Approval, Draft, DeliveryOperation,
+Failure and ModelInvocation are unchanged (no attribute, policy or lifecycle
+change). AgentRun has no new attribute (=retry_of_id= and =operation_id=
+exist). No migration. The daily model cap and run budgets are unchanged.
+
+** Concurrency cases (tests planned)
+- Two ADM retries of the same run race: the prior-run lock serialises them.
+  The second sees the child and returns =:already_retried=; the Operation
+  identity is the backstop.
+- A retry races a late, cancelled-but-in-flight worker: =:prior_work_live=
+  while its job is live, and =:prior_model_call_unsettled= while a call is
+  =sent=.
+- A retry races an assignment or hand-off on the same lead: the Lead lock
+  serialises them; then the active-run check applies.
+- Two ADM webhook retries race: the event lock serialises them, and the
+  second sees the job =available= and returns =:retry_pending=.
+- The Oban pruner deletes the job before a request: zero rows, so
+  =:retry_window_expired= with nothing written. A job locked by the
+  request cannot be pruned until commit.
+
+* Soft-stop v3 (revision for the narrow Codex verdict on =f9dafb0=)
+v2 stands as accepted except for the rows and notes replaced here.
+
+** B2 (replaced): =WebhookEvent :request_retry=, orchestration-only
+| Field | Specification |
+|-------+---------------|
+| Contract | No public arguments are trusted. The action reads =ordinal :: 1..3= and =oban_job_id :: integer= *only* from a private same-transaction context, =SdrAgent.Outreach.Checks.WebhookRetryContext=. B1 sets it *after* its authoritative checks, under the event and job locks, with the values B1 computed. =Ash.Changeset= arguments with those names are ignored. |
+| Policy | Active ADM of the tenant **and** the =WebhookRetryContext= marker, the same pattern as =InternalWrite=, =SuppressionContext= and A2's =RetryContext=. A direct =Ash.Changeset.for_update(:request_retry)= / =Ash.update= call without the marker is =Forbidden= and audited (=guarded=), and appends nothing. With the marker it re-verifies under the held event lock that =ordinal= equals the previous =webhook.retry_requested= count + 1, and that the context's job id is the locked original job. |
+| Effect | =failed → failed= (no column change). Appends =webhook.retry_requested= carrying =ordinal= and =oban_job_id=. B1 then runs =Oban.retry_job/2= and checks the postcondition in the same transaction. A no-op or failed postcondition rolls back the request event too. |
+| Tests (planned) | Direct action as ADM without the marker: refused, audited, no event. With a forged ordinal or job id in arguments: ignored, the context values are used. No original job: =:retry_window_expired=, nothing written. A =retry_job= no-op (job became =available= between check and update, simulated): rollback, no request event. |
+
+** B4 (replaced): =WebhookEvent :record_retry_failed=, consumes exactly the pending ordinal
+| Field | Specification |
+|-------+---------------|
+| Contract | WHK only. =class :: :validation_error \| :crash=, =reason :: string= (redacted). The pending ordinal is *derived* under the event lock (the latest =webhook.retry_requested= ordinal with no later =webhook.retry_failed= or =webhook.processed=). It is never supplied by the caller. |
+| Invariants | Exactly one consume outcome per request ordinal. If no request is pending (a duplicate or resumed job, direct processing of a =failed= event, or a repeat failure), the action is a no-op (=:done=): no event and no extra consume. Success (=:mark_processed=, =failed → processed=) consumes the pending ordinal by being terminal and resolves the event's Failure atomically. The existing Failure stays the single attention entry. |
+
+** A1 additions (recorded)
+- *Active run, retained:* after the one-child check (4), under the Lead
+  lock and before any write, a queued or running AgentRun of the same lead
+  (any trigger) gives =:assignment_active=. This applies to both supported
+  triggers.
+- *Original job association:* the original job must be exactly one row with
+  the expected worker (=SdrAgent.SDR.AgentWorker= for assignment,
+  =SdrAgent.SDR.ReplyWorker= for reply), =tenant_id= equal to the run's,
+  the expected queue (=research= / =agent=), and binding (assignment:
+  =id= equal to the prior Operation's =oban_job_id=; reply: =args.run_id=
+  equal to the prior run). Its dumped signal must equal the durable trigger
+  signal: same id, type and data. Outcomes: zero rows (pruned or missing)
+  gives =:original_job_missing=, which refuses because liveness cannot be
+  proven; more than one gives =:original_job_ambiguous=; a mismatch gives
+  =:original_job_corrupt=. Nothing is written in any of these cases.
+- *New job and Operation binding:* the new job carries the same tenant and
+  the *original lineage's* durable trigger signal (same signal id; no fresh
+  signal event per retry run). For assignment, the new Operation's
+  =oban_job_id= is the new job's id, and A2 verifies that the Operation is
+  bound to no other run and is the one created in this transaction. For
+  reply, the new job's =args.run_id= is the new run's id.
+
+** Existing dependencies (literal notation)
+- Lead: existing dependency: unchanged — relationship/policy/lifecycle
+  impact checked, none found (read and locked only; never re-transitioned).
+- Campaign: existing dependency: unchanged — relationship/policy/lifecycle
+  impact checked, none found (=FOR SHARE= gate only).
+- Reply, ReplyAssessment: existing dependency: unchanged —
+  relationship/policy/lifecycle impact checked, none found (provenance read;
+  =:already_assessed= gate).
+- Approval, Draft, DeliveryOperation: existing dependency: unchanged —
+  relationship/policy/lifecycle impact checked, none found (never touched
+  by a retry; no send permission implied).
+- Failure: existing dependency: unchanged — relationship/policy/lifecycle
+  impact checked, none found. The prior run's attention Failure is
+  pre-locked and resolved by the existing =ResolveAttention= on the retry,
+  and a webhook Failure is resolved by the existing =:mark_processed=. No
+  new Failure class, link or lifecycle.
+- ModelInvocation: existing dependency: unchanged —
+  relationship/policy/lifecycle impact checked, none found (read for the
+  =sent= check; budgets and daily cap unchanged).
+- AgentDefinition, Signals/AuditEvent: existing dependency: unchanged —
+  relationship/policy/lifecycle impact checked, none found (the retry run
+  copies the definition; the signal is read only).
+
+* Status
+*Entity review: PASS* — Codex answer =9a400910= to request =a90882f7=,
+on soft-stop v3 at =965b72f=. Codex's conditions: record the PASS here;
+proceed with plan and affected modules, *not* a blanket RED/GREEN approval;
+the budget, lock, authorization and no-send conditions and the concurrency
+and direct-action tests still apply.
+
+* Affected Modules (as built)
+- A1: =SdrAgent.SDR.retry_run/2= (guarded) → new =SdrAgent.SDR.Retry=.
+- A2: =AgentRun :retry= (=operation_id= argument; policy ADM + marker),
+  =SdrAgent.Agents.Checks.RetryContext= (new),
+  =SdrAgent.Agents.Changes.RetryOf= (Operation validation; Forbidden
+  without the marker); =Agents.retry_run/2= removed.
+- A3: unchanged =Operation :create= (key =retry:<prior id>=).
+- A4: =Operation= policy split (=:retry= kind actors only, =:cancel=
+  kind actors + ADM).
+- Resume on retry: =SDR.Actions.AcceptAssignment= and
+  =RequestQualification= do not re-transition a lead already
+  =researching= / =qualifying= (they still record their Decisions). This
+  is the agent-plane side of "the lead state is never reset or
+  re-transitioned": without it a retried assignment crashed on
+  =start_research= (=qualifying → researching= is invalid).
+- B1: =SdrAgent.Outreach.retry_webhook/2= (guarded) → new
+  =SdrAgent.Outreach.WebhookRetry=.
+- B2/B4: =WebhookEvent :request_retry= (ADM + marker),
+  =:record_retry_failed= (WHK), declared transitions, policy split by
+  action; new =Operations.Checks.WebhookRetryContext= and
+  =Operations.Changes.RetryRequest= (overwrites caller arguments from the
+  marker).
+- B3: =Outreach.Webhooks= processor (=runnable?/1=, =pending_retry/1=,
+  =retry_ledger/1=, =retry_failed/4=).
+- C1: =Operations.list_failed_webhooks/1= (new read);
+  =SdrAgentWeb.OperationsLive= (run retry buttons, "Failed webhooks" card
+  with retry), =SdrAgentWeb.RunLive= (=#retry-run=). ADM only; forged
+  events are refused and audited by the domain.
+
+* Deviations
+- *Table correction (B2 and A2, ruled acceptable by Codex on #31 only with
+  this explicit correction).* v3 said a direct call to the orchestration-only
+  actions is "Forbidden and audited". The built guarantee is narrower and
+  explicit:
+  - *Public paths:* every public retry path — =SDR.retry_run/2= and
+    =Outreach.retry_webhook/2= — refuses any actor other than an active ADM
+    of the tenant with =Forbidden= and exactly one =authz.denied=, before
+    validation (tests for REV, AUR and system actors).
+  - *Internal raw Ash calls:* a raw =Ash= call to =AgentRun :retry= or
+    =WebhookEvent :request_retry= without the orchestration marker is
+    =Forbidden= but *not audited*. Denial audit lives in the domain =Guard=,
+    and no public wrapper of either raw action exists or may be added.
+  - *Forged marker:* a raw call with a forged marker still meets the
+    action's own invariants (review #31 MF1): the ordinal and the original
+    job are re-verified under the event lock, and nothing is written on a
+    mismatch.
+- The webhook B1 lookup of a malformed (non-uuid) id returns
+  ={:error, :not_found}= before the transaction.
+
+* Review round 1 (Codex, #31 at =2f03434=: CHANGES REQUESTED, =ddcfa624=)
+Findings are in =/tmp/sdr-pr31-2f03434-review.md=. Codex accepted the
+resume ruling; the raw-denial deviation is corrected above. Dispositions:
+- *MF1, B2 has no authoritative recheck: fixed.* =Changes.RetryRequest= now
+  runs after the event row lock and verifies the marker against the ledger.
+  The marked ordinal must equal the requests so far + 1 and be ≤ 3. The
+  marked job id must be the event's exact original job, locked =FOR
+  UPDATE= and not live. On a mismatch nothing is written. The ledger and job
+  reads moved to =Operations.WebhookRetryLedger=, which the orchestration,
+  the processor and both actions share.
+- *MF2, B4 consumes nonexistent requests and trusts the caller's ordinal:
+  fixed.* =Changes.ConsumeRetryRequest= derives the pending ordinal from the
+  ledger under the event lock and ignores any caller ordinal. With nothing
+  pending (never requested, or already consumed) it writes nothing. Tests:
+  no request; caller ordinal 3 against pending 1; a second, repeated
+  consumption; and two concurrent failures with real connections, where
+  exactly one consumes.
+- *MF3, unredacted reason in the immutable ledger: fixed.*
+  =Changes.RedactArguments= runs =Operations.Redactor= on =:reason= before
+  any persistence, for =:record_retry_failed= and also for the existing
+  =:mark_failed= (=webhook.failed= had the same gap). A runtime-built
+  =SecretShapes= canary is absent from both events' payloads.
+- *gitleaks history exceptions:* confirmed by Codex as prose false
+  positives; no broader ignore.
+- TDD: reviewer contracts adopted. RED 12/16, failing for the intended
+  reasons; the canary was also found in =webhook.failed=. GREEN 16/16; the
+  race suite is 3/3.
+
+* TDD Tracking
+- A (run retry): =retry_run_test= RED 0/11 with the implementation stashed
+  (=retry_run/2= undefined; one setup MatchError fixed in the test), GREEN
+  12/12 after fixing test inputs (suppression args, =create_run= budget
+  args, atom =actor_type=) and two implementation defects (direct =:retry=
+  now Forbidden, not Invalid; the resume above). The reply-run test and the
+  real-connection race were written after the implementation and
+  mutation-checked (a wrong =run_id= in the ReplyWorker job fails it).
+- A4: =operations_test= admin/reviewer deny RED 16/17 → GREEN.
+- B (webhook retry): =webhook_retry_test= RED 0/12 (11 missing interface,
+  1 test bug: =Oban.retry_job= returns =:ok=) → GREEN 12/12. Mutation: with
+  the processor's pending-request gate removed, the duplicate-job test
+  fails (after strengthening it to use an event that would succeed).
+  Webhook race (real connections): 2/2 with the run race.
+- C1: =operations_live_test= RED 9/14 (no buttons, no card) → GREEN 14/14.
+

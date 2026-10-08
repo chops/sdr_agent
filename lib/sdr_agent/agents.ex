@@ -14,7 +14,8 @@ defmodule SdrAgent.Agents do
       a different hash is refused), `retire_definition/2`;
     * runs — `create_run/2`, `start_run/2`, `set_run_phase/3`,
       `succeed_run/2`, `fail_run/3`, `exhaust_run_budget/3`, `cancel_run/2`,
-      `retry_run/2`, `reserve_model_call/2`, `get_run/2`,
+      `reserve_model_call/2`, `get_run/2` (operator retry is
+      `SdrAgent.SDR.retry_run/2`, S13b),
       `find_run_by_operation/2`, `active_runs_for_lead/2`, `list_runs/1`;
     * model calls — `reserve_model_invocation/3` (reserves the run budget,
       enforces the persisted daily limit, stores the request Payload and
@@ -40,6 +41,7 @@ defmodule SdrAgent.Agents do
   require Ash.Query
 
   alias Ash.Error.Changes.InvalidAttribute
+  alias Ash.Error.Query.NotFound
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.Decision
@@ -140,9 +142,6 @@ defmodule SdrAgent.Agents do
   @doc "queued | running → cancelled (ADM, REV, AGT)."
   def cancel_run(run, opts), do: update(run, :cancel, Keyword.get(opts, :attrs, %{}), opts)
 
-  @doc "Creates a new run retrying a failed, budget-exhausted or cancelled one (ADM, REV)."
-  def retry_run(run, opts), do: create(AgentRun, :retry, %{run_id: run.id}, opts, run.id)
-
   @doc "Atomically reserves one model call against the run budget (AGT)."
   def reserve_model_call(run, opts), do: update(run, :reserve_model_call, %{}, opts)
 
@@ -156,7 +155,7 @@ defmodule SdrAgent.Agents do
     |> Ash.Query.filter(id == ^id)
     |> Ash.read_one()
     |> case do
-      {:ok, nil} -> {:error, Ash.Error.Query.NotFound.exception(resource: AgentRun)}
+      {:ok, nil} -> {:error, NotFound.exception(resource: AgentRun)}
       other -> other
     end
   end
@@ -196,7 +195,7 @@ defmodule SdrAgent.Agents do
     |> Ash.Query.filter(operation_id == ^operation_id)
     |> Ash.read_one()
     |> case do
-      {:ok, nil} -> {:error, Ash.Error.Query.NotFound.exception(resource: AgentRun)}
+      {:ok, nil} -> {:error, NotFound.exception(resource: AgentRun)}
       other -> other
     end
   end
@@ -327,11 +326,27 @@ defmodule SdrAgent.Agents do
     end)
   end
 
+  # The run is locked before the first append (ADR-0009): settlement writes
+  # invocation → chain → run, and the stale-run sweeper locks run →
+  # invocations (review #25); both now take the run row first.
   defp do_finish_model_invocation(invocation, action, attrs, response, actor) do
-    with {:ok, attrs} <- put_body(attrs, :response_sha256, response, actor),
+    with {:ok, _run} <- lock_run(invocation.agent_run_id, actor),
+         {:ok, attrs} <- put_body(attrs, :response_sha256, response, actor),
          {:ok, done} <- do_update(invocation, action, attrs, actor),
          {:ok, _run} <- settle(done, actor) do
       {:ok, done}
+    end
+  end
+
+  defp lock_run(run_id, actor) do
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(id == ^run_id)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} -> {:error, NotFound.exception(resource: AgentRun)}
+      other -> other
     end
   end
 
@@ -419,6 +434,21 @@ defmodule SdrAgent.Agents do
   """
   def record_decision(attrs, opts) do
     create(Decision, :record, attrs, opts, Map.get(attrs, :subject_id))
+  end
+
+  @doc "One Decision by id, within the actor's tenant (e.g. a delivery's send gate, S13)."
+  def get_decision(id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    Decision
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} -> {:error, NotFound.exception(resource: Decision)}
+      other -> other
+    end
   end
 
   @doc "Decisions of a run, oldest first."

@@ -48,6 +48,11 @@ defmodule SdrAgentWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  # S13 browser smoke attestation: test config only (see the module).
+  if Application.compile_env(:sdr_agent, :smoke_attestation_plug, false) do
+    plug SdrAgentWeb.SmokeAttestation
+  end
+
   # S9: webhook requests are read raw (bounded) before any parsing.
   plug SdrAgentWeb.WebhookIntake
 
