@@ -348,16 +348,25 @@ Per ADR §§1–4 and §8:
 - STANDARD portals are refused.
 
 * H0 facts (owner-run, recorded 2026-10-07)
-- *Contact emails on =.test= domains are rejected* by HubSpot ("Invalid
-  email"), but =.test= *company* domains are accepted.
-  - The owner's fixture contacts use =first.last@<company-slug>.example.com=
-    (for example =avery.lindqvist@brightpath-freight.example.com=). Company
-    domains stay =<slug>.test=.
-  - Design consequence: the reserved-name rule accepts =example.com/.net/.org=
-    and their subdomains (and =.test=, =.example=, =.invalid=, =.localhost=)
-    for each value independently.
-  - The contact email domain is not required to match the company domain
-    (ADR-0013 §4).
+- *HubSpot rejects =.test= for both contact emails and company domains.*
+  Emails get "Invalid email" and domains get "Invalid domain".
+  - Correction, 2026-10-07: an earlier note said =.test= company domains
+    were accepted. That import had been cancelled before the domain error
+    appeared.
+  - The owner's fixtures now use =<slug>.example.com= for company domains
+    and =first.last@<slug>.example.com= for contact emails. Example: company
+    =brightpath-freight.example.com=, contact
+    =avery.lindqvist@brightpath-freight.example.com=.
+  - The data is imported as two single-object files, companies first, then
+    contacts. The contact→company link relies on HubSpot's domain-based
+    auto-association, which the import reads as the primary company
+    association.
+  - Design consequence: subdomains of =example.com/.net/.org= are the
+    practical reserved choice for HubSpot data. The import rule still
+    accepts every reserved name (=.test=, =.example=, =.invalid=,
+    =.localhost=, and =example.com/.net/.org= and their subdomains) for each
+    value independently. The contact email's domain is not required to match
+    the company domain (ADR-0013 §4).
 - *"Number of employees" is an enumeration of ranges on the Contact object*
   and numeric on the Company object. The import maps only the Company's
   numeric =numberofemployees= to =Account.employee_count=, and never the

@@ -756,12 +756,15 @@ the serialized outcome.
   amendment. It widens the rule only to another RFC 6761 reserved name.
 - **No email/company domain match.** The contact email's domain is **not**
   required to equal the company domain.
-  - H0: HubSpot rejects contact emails on `.test` domains ("Invalid email")
-    but accepts `.test` company domains.
-  - The owner's fixtures therefore use
-    `first.last@<company-slug>.example.com` (for example
-    `avery.lindqvist@brightpath-freight.example.com`) for contacts, with
-    company domains `<slug>.test`.
+  - H0 (corrected 2026-10-07): HubSpot rejects `.test` for both contact
+    emails ("Invalid email") and company domains ("Invalid domain").
+  - The owner's fixtures use `<slug>.example.com` for company domains and
+    `first.last@<slug>.example.com` for contacts. Example: company
+    `brightpath-freight.example.com`, contact
+    `avery.lindqvist@brightpath-freight.example.com`.
+  - Companies are imported before contacts, relying on HubSpot's
+    domain-based auto-association. Subdomains of `example.com/.net/.org`
+    are therefore the practical reserved choice.
   - Each value is checked on its own against the reserved-name rule.
 - **Field mapping.** Nothing outside this table is imported.
 
