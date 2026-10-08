@@ -35,7 +35,7 @@ need a fix or an exception below.
 
 ## Exceptions
 
-| Exception | Scope | Expiry | Security reviewer saw it |
+| Exception | Scope | Expiry | Independent security review and disposition (link) |
 |---|---|---|---|
 
 ## Owner approval

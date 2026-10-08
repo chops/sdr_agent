@@ -26,9 +26,8 @@ stay in [`../adr/`](../adr/).
 ## Why a process now
 
 The prototype was built from a pasted architecture design. That prompt
-described *how* the system should be built (Jido decides, Ash governs, Oban
-executes, Postgres remembers, OTP keeps it alive, Phoenix lets humans operate
-it), but not *who* it is for, *what* they need to do, or what the operator
+described *how* the system should be built (which part of the stack decides,
+enforces rules, runs jobs, stores the record and serves the UI), but not *who* it is for, *what* they need to do, or what the operator
 should see. The agents filled that gap with reasonable guesses, and it showed:
 a strong audit and approval core, a thin operator experience, and a demo that
 needed a last-minute patch.
@@ -102,10 +101,11 @@ Rules:
 
 1. A date never passes a gate.
 2. Material changes after review go back to the reviewer. Pull requests merge
-   only on green CI for their exact commit.
+   only on green CI for their exact commit. A recorded context-only range-diff
+   can carry a prior approving review forward, never the CI result.
 3. The owner settles disagreements between Claude and Codex, but that does not
    waive an unresolved security blocker. That needs a fix, or a written
-   exception with scope and expiry that the security reviewer has seen.
+   exception with scope and expiry backed by a recorded, independent security review of the exception and its mitigation, with a written disposition of the finding. If that review still finds it blocking, the gate stays blocked. Constraints that cannot be waived cannot be excepted at all.
 4. G0 needs explicit acceptance of ADR-0014. Only explicit approval of G5
    lifts the feature freeze.
 5. Process and hardening work may continue during the freeze, with no new
@@ -133,11 +133,14 @@ journey. P3 is cosmetic. G7 requires no open P0 or P1.
 
 ## Schedule controls
 
-- Oct 16 to 27 has 8 weekdays, not 12 working days. The build is two
+- Oct 19 to 28 has 8 weekdays, not 12 working days. The build is two
   iterations of about four weekdays.
 - **Oct 30 is a target, not a commitment,** until G5 approves a plan whose
-  critical path (review, CI, fixes, acceptance and release candidate) ends by
-  Oct 28.
+  build critical path (review, CI, fixes and acceptance of every must slice)
+  ends by Oct 28. Oct 29 and 30 are planned verification and release-candidate
+  days (P7), not buffer. There is no free contingency before Oct 30: the Oct 22
+  scope-cut checkpoint is the protection, and question Q5 asks you to choose
+  weekend work or a smaller must-list.
 - **WIP limit:** one deep Codex review at a time, at most two slices in flight.
 - **Rework:** plan two review rounds per packet, and two to four for slices
   touching security, data or transactions.

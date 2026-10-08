@@ -50,12 +50,12 @@ We will use Option 2, once the owner accepts it.
 |---|---|---|
 | Gate approval (G0 to G9) | Owner only | Given in chat, recorded in a committed gate record. Dates never pass a gate. |
 | ADR acceptance | Owner only | Agents propose; Codex or Claude reviews. |
-| Exceptions to a gate criterion | Owner only | Written, with scope and expiry. A security exception also needs the security reviewer to have seen it. |
+| Exceptions to a gate criterion | Owner only | Written, with scope and expiry. A security exception also needs a recorded, independent security review of the exception and its mitigation, with a written disposition of the finding. If that review still finds it blocking, the gate stays blocked. Constraints that cannot be waived cannot be excepted at all. |
 | Real model calls | Owner only | Budget is per approval and is currently zero. |
 | Publication of owner words, design-partner material or anything private | Owner only | See the publication policy in `docs/sdlc/`. |
 | Running anything on the owner's machine with elevated rights, deployment, credentials | Owner only | Agents prepare commands; the owner runs them. |
 | Drafting packets, reviewing, tests, docs | Claude and Codex | Author and reviewer are never the same agent. |
-| Merging a reviewed PR | Claude (coordinator) | Only with the reviewer's verdict on that exact commit and green CI for it, or a recorded range-diff note when the delta is context-only. |
+| Merging a reviewed PR | Claude (coordinator) | Only with green CI on that exact commit and an approving review of that exact commit. A recorded range-diff showing a context-only delta can carry a prior approving review forward to a new commit. It never replaces green CI on the new commit. |
 
 ### Non-waivable constraints
 

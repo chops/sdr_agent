@@ -10,8 +10,8 @@
 window.SDLC = {
   meta: {
     product: "SDR Agent",
-    version: "v0.2 (proposed, awaiting gate G0)",
-    revision: "2026-10-08.2",
+    version: "v0.3 (proposed, awaiting gate G0)",
+    revision: "2026-10-08.3",
     updated: "2026-10-08",
     workdays: "Monday to Friday. Weekend work only if the owner agrees (question Q1).",
     milestones: [
@@ -52,7 +52,7 @@ window.SDLC = {
     rules: [
       "A date never passes a gate. Only a committed gate record with your approval does.",
       "Drafting may start from unapproved inputs, but a phase cannot be approved until its inputs are. If an input changes later, the work built on it is revised and reviewed again.",
-      "You decide disagreements between Claude and Codex. Your decision does not waive an unresolved security blocker: that needs a fix, or a written exception with scope and expiry that the security reviewer has seen.",
+      "You decide disagreements between Claude and Codex. Your decision does not waive an unresolved security blocker: that needs a fix, or a written exception with scope and expiry backed by a recorded, independent security review of the exception and its mitigation, with a written disposition of the finding. If that review still finds it blocking, the gate stays blocked. Constraints that cannot be waived cannot be excepted at all.",
       "G0 needs your explicit acceptance of the product-phase charter (ADR-0014). Until then the unattended-build charter (ADR-0001) still governs.",
       "Only explicit approval of G5 lifts the feature freeze.",
       "Process and hardening work may continue during the freeze, but it grants no new authority: no deployments, credentials, real model calls or changes to your machine."
@@ -88,8 +88,8 @@ window.SDLC = {
 
   schedule: {
     assumptions: [
-      "Dates count weekdays only. Oct 16 to 27 has 8 weekdays, not 12 working days.",
-      "Oct 30 is a target until G5 approves a plan that reaches it. It is not a commitment.",
+      "Dates count weekdays only. The build window, Oct 19 to 28, has 8 weekdays.",
+      "Oct 30 is a target until G5 approves a plan that reaches it. It is not a commitment. Oct 29 and 30 are planned verification days (P7), not buffer, so there is no free contingency: the Oct 22 scope-cut checkpoint and your answer to Q5 are the protection.",
       "Your review time and Codex's serial review queue are the critical path, not drafting."
     ],
     controls: [
@@ -302,7 +302,7 @@ window.SDLC = {
       gate: {
         id: "G5", name: "Build approved", approver: "owner",
         criteria: [
-          "The critical path, including review, CI, fixes, acceptance and the release candidate, ends by Oct 28.",
+          "The build critical path (review, CI, fixes and acceptance of every must slice) ends by Oct 28, leaving Oct 29 and 30 for the planned P7 verification and release candidate. If it does not fit, you choose at G5: a smaller must-list, weekend work, or a later release candidate.",
           "Release criteria name the supported OS and tool versions and a fake-model-first install from a clean clone.",
           "Readiness checks are defined: synthetic data only, no-send negative tests, credential, proxy and tool isolation, backup and restore, unknown-outcome recovery, cost and budget limits.",
           "Any real-model evaluation budget is approved separately by you, or is zero.",
@@ -435,7 +435,7 @@ window.SDLC = {
   ],
 
   history: [
-    { date: "2026-10-06", title: "One-shot prompt and scaffold", text: "You pasted an architecture design for an SDR agent (Jido decides, Ash governs, Oban executes durably, Postgres remembers, OTP keeps it alive, Phoenix lets humans operate it) and asked for a project scaffold." },
+    { date: "2026-10-06", title: "One-shot prompt and scaffold", text: "You pasted an architecture design for an SDR agent, which split the work between the agent framework, the domain layer, a durable job queue, the database, the runtime and the web UI, and asked for a project scaffold." },
     { date: "2026-10-06", title: "Unattended build charter", text: "You delegated decisions to Claude and Codex under a written mandate with bounded authority and stop conditions (ADR-0001)." },
     { date: "2026-10-07", title: "Provider pivot", text: "The planned real model, Codex app-server on your existing Codex login, could not have its built-in tool surface fully disabled and verified, so it stays disabled. You approved the Claude CLI on your own login instead, locked down to no tools and checked on every call." },
     { date: "2026-10-07", title: "MVP slices merged", text: "Fourteen slices: audit ledger, domain model, agent, outreach, replies, operator UI, signed audit anchors, and a wire witness that can match supported model calls to what crossed the network." },
@@ -450,7 +450,7 @@ window.SDLC = {
     { id: "Q1", q: "Do we work weekends? Which day is your design day (proposed Oct 14)?", why: "The plan counts weekdays only. Weekends would add four build days." },
     { id: "Q2", q: "Can you recruit two or three solo founders for a 30-minute prototype test around Oct 15?", why: "Without them, the design is validated only by you, and we will say so." },
     { id: "Q3", q: "How do you want to review: notes on this page pasted into chat, comments on a Claude Doc, or GitHub PR comments?", why: "We should use whatever you will actually use." },
-    { id: "Q4", q: "Beyond the build-first quote you chose to keep, may we quote your original prompt, your discovery answers or other chat messages in git?", why: "The repository is public, so quoting is publishing." },
+    { id: "Q4", q: "Beyond the build-first quote you chose to keep, may we quote your original prompt (including its one-line architecture slogan), your discovery answers or other chat messages in git?", why: "The repository is public, so quoting is publishing." },
     { id: "Q5", q: "Weekdays only leave 8 build days (Oct 19 to 28) and no slack before the Oct 30 target. Do you prefer weekend work, or a smaller must-list?", why: "Every planning day comes out of the build window." }
   ]
 };

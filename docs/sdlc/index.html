@@ -191,6 +191,8 @@ ol.agreements { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid var(--line); padding-top: 16px; }
 .warn { background: var(--gap-soft); color: var(--gap); border: 1px solid var(--gap); padding: 12px 14px; border-radius: var(--radius); font-weight: 500; }
 .saved { font-size: var(--step--1); color: var(--done); }
+.stale { display: block; font-size: var(--step--1); color: var(--gate); }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
 .disclaimer { font-size: var(--step--1); color: var(--muted); max-width: 75ch; }
 
 /* Gates, constraints, packets */
@@ -356,7 +358,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   var PEOPLE = ["owner", "claude", "codex", "outside"];
   var STORE = "sdlc-map-notes-v1";
   var FP = N.fingerprint(D);
-  var store = N.createStore(function () { return window.localStorage; }, STORE);
+  var store = N.createStore(function () { return window.localStorage; }, STORE, { revision: D.meta.revision, fingerprint: FP });
   var state = { phase: null, lens: "all", dirty: false };
   try { state.lens = window.localStorage.getItem(STORE + ":lens") || "all"; } catch (e) {}
 
@@ -368,6 +370,15 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   function pill(status, text) { return '<span class="pill ' + status + '">' + esc(text || status) + "</span>"; }
   function list(items) { return items.map(function (t) { return "<li>" + esc(t) + "</li>"; }).join(""); }
   var STATUS_TEXT = { done: "Done", active: "In progress", next: "Next", planned: "Planned", draft: "Draft", review: "In review", todo: "To do" };
+
+  // A note written against another data revision is shown with a marker until
+  // the owner edits it or keeps it for this revision.
+  function staleMarker(k) {
+    if (!store.isStale(k)) return "";
+    var n = store.entry(k);
+    var origin = n.revision ? "revision " + esc(n.revision) : "an earlier version of this page";
+    return '<span class="stale" data-stale="' + k + '">Written against ' + origin + '. Edit it, or <button type="button" class="linkbtn" data-confirm="' + k + '">keep it for this revision</button>.</span>';
+  }
 
   // Notes persistence status, always visible.
   function renderSaveState() {
@@ -479,13 +490,23 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
           "<div><h3>Activities</h3><ul class=\"list\">" + acts + "</ul></div>" +
           "<div><h3>Packet</h3><ul class=\"list\">" + packet + "</ul></div>" +
           '<div><div class="gatebox"><h3>' + esc(p.gate.id + " · " + p.gate.name) + "</h3><p class=\"owner-time\">Approved by " + esc(D.people[p.gate.approver].label) + ", recorded in a gate record. Passes when:</p><ul>" + crit + "</ul></div>" +
-          '<label class="note" for="note-' + p.id + '">Your notes on ' + esc(p.id) + '<textarea id="note-' + p.id + '" data-note="phase:' + p.id + '" placeholder="What is missing, wrong or unclear in this phase?">' + esc(store.get("phase:" + p.id)) + "</textarea></label></div>" +
+          '<label class="note" for="note-' + p.id + '">Your notes on ' + esc(p.id) + '<textarea id="note-' + p.id + '" data-note="phase:' + p.id + '" data-context="' + esc(p.id + " " + p.name) + '" placeholder="What is missing, wrong or unclear in this phase?">' + esc(store.get("phase:" + p.id)) + "</textarea>" + staleMarker("phase:" + p.id) + "</label></div>" +
         "</div>" +
       "</div>";
   }
   document.addEventListener("input", function (e) {
     var k = e.target.getAttribute && e.target.getAttribute("data-note"); if (!k) return;
-    store.set(k, e.target.value);
+    store.set(k, e.target.value, e.target.getAttribute("data-context"));
+    var mark = document.querySelector('[data-stale="' + k + '"]'); if (mark) mark.remove();
+    state.dirty = true;
+    renderSaveState();
+  });
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest && e.target.closest("button[data-confirm]"); if (!b) return;
+    var k = b.getAttribute("data-confirm");
+    var field = document.querySelector('[data-note="' + k + '"]');
+    store.set(k, store.get(k), field ? field.getAttribute("data-context") : null);
+    var mark = document.querySelector('[data-stale="' + k + '"]'); if (mark) mark.remove();
     state.dirty = true;
     renderSaveState();
   });
@@ -552,13 +573,13 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     return "<li><time>" + esc(fmt(h.date)) + "</time><b>" + esc(h.title) + "</b><p>" + esc(h.text) + "</p></li>";
   }).join("");
   $("questions").innerHTML = D.openQuestions.map(function (q) {
-    return '<div class="q"><label for="q-' + q.id + '"><b>' + esc(q.id) + ". " + esc(q.q) + '</b></label><p class="why">' + esc(q.why) + '</p><textarea id="q-' + q.id + '" data-note="q:' + q.id + '" placeholder="Your answer">' + esc(store.get("q:" + q.id)) + "</textarea></div>";
+    return '<div class="q"><label for="q-' + q.id + '"><b>' + esc(q.id) + ". " + esc(q.q) + '</b></label><p class="why">' + esc(q.why) + '</p><textarea id="q-' + q.id + '" data-note="q:' + q.id + '" data-context="' + esc(q.id + ". " + q.q) + '" placeholder="Your answer">' + esc(store.get("q:" + q.id)) + "</textarea>" + staleMarker("q:" + q.id) + "</div>";
   }).join("");
   $("footer").textContent = "Source: docs/sdlc/sdlc-data.js, revision " + D.meta.revision + " (fingerprint " + FP + "), in the SDR Agent repository. Every change to this process is reviewed and committed like code.";
 
   // Export: copy works everywhere; download only when opened directly from the
   // repository, because the hosted viewer blocks page-started downloads.
-  function exportText() { return N.exportText(D, store.all(), FP); }
+  function exportText() { return N.exportText(D, store.all(), FP, store.unreadable); }
   function exported(msg) { state.dirty = false; $("copy-status").textContent = msg; renderSaveState(); }
   $("copy").addEventListener("click", function () {
     var text = exportText(), box = $("export-text");
