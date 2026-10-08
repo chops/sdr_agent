@@ -15,7 +15,10 @@ defmodule SdrAgent.Outreach.Webhooks do
       is decoded, validated (Zoi) and applied in one transaction, then
       marked `processed`; a payload that does not validate or names nothing
       known marks it `failed` with a `validation_error` Failure (operator
-      attention). Reprocessing is a no-op.
+      attention). Reprocessing is a no-op — except a `failed` event with an
+      unconsumed operator retry request (S13b, `Outreach.retry_webhook/2`):
+      success marks it `processed` (resolving its Failure), another failure
+      consumes the request (`:record_retry_failed`, no new Failure).
 
   Event types: `reply` (match → `SdrAgent.Outreach.Reply`, the
   deterministic `unsubscribe_rule` Decision and, when it says so, an
@@ -172,18 +175,25 @@ defmodule SdrAgent.Outreach.Webhooks do
     end
   end
 
+  # A `received` event, or a `failed` one with an unconsumed operator retry
+  # request (S13b B3), is processed; anything else is a no-op — so a resumed
+  # or duplicate job never exceeds the operator's bounded requests.
   defp process_locked(id, tenant_id, raw_body, whk) do
-    case lock(WebhookEvent, id, tenant_id) do
-      %{processing_status: :received} = event ->
-        with {:ok, data} <- decode(event, raw_body),
-             :ok <- apply_event(event.event_type, data, event, whk),
-             {:ok, _} <- update(event, :mark_processed, %{}, whk),
-             do: :processed
+    event = lock(WebhookEvent, id, tenant_id)
 
-      _ ->
-        :done
+    if runnable?(event) do
+      with {:ok, data} <- decode(event, raw_body),
+           :ok <- apply_event(event.event_type, data, event, whk),
+           {:ok, _} <- update(event, :mark_processed, %{}, whk),
+           do: :processed
+    else
+      :done
     end
   end
+
+  defp runnable?(%{processing_status: :received}), do: true
+  defp runnable?(%{processing_status: :failed} = event), do: pending_retry(event) != nil
+  defp runnable?(_event), do: false
 
   defp fail(id, tenant_id, class, reason, whk) do
     {:ok, _} =
@@ -192,12 +202,59 @@ defmodule SdrAgent.Outreach.Webhooks do
           %{processing_status: :received} = event ->
             update(event, :mark_failed, %{class: class, reason: reason}, whk)
 
+          %{processing_status: :failed} = event ->
+            retry_failed(event, class, reason, whk)
+
           _ ->
             :done
         end
       end)
 
     :ok
+  end
+
+  # B4: the requested retry failed again — consume exactly the pending
+  # request; with none pending, nothing (no duplicate Failure).
+  defp retry_failed(event, class, reason, whk) do
+    case pending_retry(event) do
+      nil ->
+        :done
+
+      ordinal ->
+        update(
+          event,
+          :record_retry_failed,
+          %{class: class, reason: reason, ordinal: ordinal},
+          whk
+        )
+    end
+  end
+
+  @doc """
+  The ordinal of the event's unconsumed operator retry request — its latest
+  `webhook.retry_requested` with no later `webhook.retry_failed` — or nil
+  (S13b B3). Read under the event's row lock by the processor.
+  """
+  def pending_retry(event) do
+    case retry_ledger(event) do
+      [%{event_type: "webhook.retry_requested"} = latest | _] ->
+        latest.payload["arguments"]["ordinal"]
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc "The event's retry ledger entries, newest first (S13b)."
+  def retry_ledger(event) do
+    Audit.AuditEvent
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(event.tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^event.tenant_id and subject_id == ^event.id and
+        event_type in ["webhook.retry_requested", "webhook.retry_failed"]
+    )
+    |> Ash.Query.sort(sequence: :desc)
+    |> Ash.read!()
   end
 
   defp describe(%{__exception__: true} = error), do: error.__struct__ |> inspect() |> cap()

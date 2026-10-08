@@ -4,6 +4,8 @@ defmodule SdrAgent.SDR.RetryRaceTest do
   two operators retry the same failed run at once. The locks (Lead → … →
   prior run `FOR UPDATE`) serialize them: exactly one new run, Operation and
   job; the other caller gets `:already_retried` (S13b soft-stop v3, A1).
+  Likewise two webhook retries of one failed event: the event lock
+  serializes them and the second sees the job queued (`:retry_pending`, B1).
   Committed rows are removed afterwards with triggers disabled.
   """
   use ExUnit.Case, async: false
@@ -98,6 +100,30 @@ defmodule SdrAgent.SDR.RetryRaceTest do
 
     aud = Actor.system(:auditor_cli, ctx.tenant_id)
     assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: aud)
+  end
+
+  test "two concurrent webhook retries of one failed event: exactly one wins", ctx do
+    body = SdrAgent.WebhookFixtures.outcome_body("bounce", %{provider_message_id: "capture-0"})
+
+    assert {:ok, %{status: :accepted, event: event}} =
+             SdrAgent.WebhookFixtures.ingest!("bounce", body)
+
+    assert %{success: 1} = SdrAgent.WebhookFixtures.process!()
+
+    results =
+      1..2
+      |> Enum.map(fn _ ->
+        Task.async(fn ->
+          with_connection(fn -> SdrAgent.Outreach.retry_webhook(event.id, actor: ctx.admin) end)
+        end)
+      end)
+      |> Task.await_many(30_000)
+
+    assert Enum.count(results, &match?({:ok, %{ordinal: 1}}, &1)) == 1, inspect(results)
+    assert Enum.count(results, &(&1 == {:error, :retry_pending})) == 1, inspect(results)
+
+    {:ok, events} = Ash.read(Audit.AuditEvent, Audit.Kernel.opts(ctx.tenant_id))
+    assert Enum.count(events, &(&1.event_type == "webhook.retry_requested")) == 1
   end
 
   defp with_connection(fun) do

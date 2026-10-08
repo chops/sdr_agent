@@ -23,9 +23,11 @@ defmodule SdrAgent.Operations.WebhookEvent do
   never change, other rows change only their lifecycle columns, nothing is
   deleted (trigger).
 
-  Writes: WHK only. Reads: ADM, REV, AUR, AUD, WHK. Audited:
+  Writes: WHK only, except `:request_retry` (ADM inside the retry
+  orchestration). Reads: ADM, REV, AUR, AUD, WHK. Audited:
   `webhook.received` (with the verdict), `webhook.processed`,
-  `webhook.failed`, `webhook.duplicate_ignored`.
+  `webhook.failed`, `webhook.duplicate_ignored`, `webhook.retry_requested`,
+  `webhook.retry_failed`.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -46,7 +48,9 @@ defmodule SdrAgent.Operations.WebhookEvent do
   @statuses [:received, :processed, :failed, :rejected]
   @transitions [
     {:mark_processed, [:received, :failed], :processed},
-    {:mark_failed, [:received], :failed}
+    {:mark_failed, [:received], :failed},
+    {:request_retry, [:failed], :failed},
+    {:record_retry_failed, [:failed], :failed}
   ]
   @accepted [
     :provider,
@@ -186,6 +190,52 @@ defmodule SdrAgent.Operations.WebhookEvent do
       change {AppendEvent,
               [event_type: "webhook.failed", arguments: [:class, :reason]] ++ @lifecycle}
     end
+
+    update :request_retry do
+      description """
+      ADM inside `Outreach.retry_webhook/2` only (S13b B2): failed → failed,
+      audits `webhook.retry_requested` with the orchestration's ordinal
+      (1..3) and the re-enqueued job id; caller arguments are ignored.
+      """
+
+      require_atomic? false
+      argument :ordinal, :integer, constraints: [min: 1, max: 3]
+      argument :oban_job_id, :integer
+      change Changes.RetryRequest
+      change get_and_lock_for_update()
+
+      change {Transition,
+              from: [:failed], to: :failed, locked?: true, attribute: :processing_status}
+
+      change {AppendEvent,
+              [event_type: "webhook.retry_requested", arguments: [:ordinal, :oban_job_id]] ++
+                @lifecycle}
+    end
+
+    update :record_retry_failed do
+      description """
+      WHK (S13b B4): a requested retry failed again. failed → failed;
+      consumes request `ordinal` (`webhook.retry_failed`); the event's
+      existing Failure stays its single attention entry.
+      """
+
+      require_atomic? false
+
+      argument :class, :atom,
+        allow_nil?: false,
+        constraints: [one_of: [:validation_error, :crash]]
+
+      argument :reason, :string, allow_nil?: false
+      argument :ordinal, :integer, allow_nil?: false, constraints: [min: 1, max: 3]
+      change get_and_lock_for_update()
+
+      change {Transition,
+              from: [:failed], to: :failed, locked?: true, attribute: :processing_status}
+
+      change {AppendEvent,
+              [event_type: "webhook.retry_failed", arguments: [:ordinal, :class, :reason]] ++
+                @lifecycle}
+    end
   end
 
   policies do
@@ -194,8 +244,15 @@ defmodule SdrAgent.Operations.WebhookEvent do
       authorize_if always()
     end
 
-    policy action_type([:create, :update]) do
+    # S13b: split by action. The processor's actions are WHK only; the
+    # operator's retry request is ADM inside the orchestration only.
+    policy action([:receive, :reject, :mark_processed, :mark_failed, :record_retry_failed]) do
       authorize_if {Checks.ActorType, types: [:webhook_ingestor]}
+    end
+
+    policy action(:request_retry) do
+      forbid_unless SdrAgent.Operations.Checks.WebhookRetryContext
+      authorize_if {Checks.ActorRole, roles: [:admin]}
     end
 
     policy action_type(:read) do
