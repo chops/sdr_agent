@@ -289,10 +289,13 @@ defmodule SdrAgent.AI.ClaudeCLITest do
           Reaper.track(reaper, root)
 
           {:ok, _port, pid} =
-            Reaper.open(reaper, root, {:spawn_executable, System.find_executable("sleep")}, [
-              {:args, ["60"]},
-              {:cd, root}
-            ])
+            Reaper.open(
+              reaper,
+              root,
+              {:spawn_executable, System.find_executable("sleep")},
+              [{:args, ["60"]}, {:cd, root}],
+              System.monotonic_time(:millisecond) + 5_000
+            )
 
           send(parent, {:opened, pid})
           Process.sleep(:infinity)
@@ -377,6 +380,52 @@ defmodule SdrAgent.AI.ClaudeCLITest do
       assert eventually(fn -> ClaudeCLI.admission() == %{admission: :open} end, 250)
     end
 
+    test "a reaper that dies before its launch receipt leaves the launch unknown and admission closed",
+         %{prefix: prefix} do
+      server =
+        start_supervised!({ClaudeCLI, hang_opts(prefix, timeout: 30_000, reaper: paused_open())})
+
+      caller = Task.async(fn -> ClaudeCLI.complete(request(), []) end)
+      assert_receive {:opened, reaper, os_pid}, 5_000
+
+      Process.exit(reaper, :kill)
+      assert {:unknown, :reaper_down} = Task.await(caller, 10_000)
+      _ = :sys.get_state(server)
+
+      assert %{admission: :blocked} = ClaudeCLI.admission()
+      assert {:error, :provider_not_quiescent} = ClaudeCLI.complete(request(), [])
+
+      assert Reaper.lease(ClaudeCLI.server()) == {:held, reaper},
+             "the dead reaper's lease was taken over"
+
+      # The operator confirms the launch is gone, then releases.
+      if os_alive?(os_pid), do: os_kill(os_pid)
+      for launch <- launches(prefix), os_alive?(launch["child"]), do: os_kill(launch["child"])
+      assert :ok = Reaper.release(ClaudeCLI.server())
+      assert eventually(fn -> ClaudeCLI.admission() == %{admission: :open} end, 250)
+    end
+
+    test "a launch handshake that outlives the deadline is unknown until its receipt arrives" do
+      start_supervised!(
+        {ClaudeCLI, named_opts("ready") ++ [timeout: 2_000, reaper: paused_open()]}
+      )
+
+      assert {:unknown, :launch_handshake_timeout} = ClaudeCLI.complete(request(), [])
+      assert_receive {:opened, reaper, _os_pid}, 5_000
+      assert %{admission: :blocked} = ClaudeCLI.admission()
+      assert {:error, :provider_not_quiescent} = ClaudeCLI.complete(request(), [])
+
+      # The receipt arrives late: the launch is then known and can be confirmed.
+      :persistent_term.erase({__MODULE__, :pause_open})
+      send(reaper, :continue)
+
+      assert eventually(
+               fn -> match?({:ok, _}, ClaudeCLI.complete(request(), [])) end,
+               300
+             ),
+             "a launch confirmed stopped kept admission closed"
+    end
+
     test "a reaper lost while the server is idle is replaced without closing admission" do
       server = start_supervised!({ClaudeCLI, named_opts("ready")})
       reaper = reaper_of(server)
@@ -411,6 +460,23 @@ defmodule SdrAgent.AI.ClaudeCLITest do
       Process.sleep(300)
       assert launches(prefix) == []
     end
+  end
+
+  # Failure injection: the reaper pauses after obtaining the OS pid and
+  # before replying, while {__MODULE__, :pause_open} is set.
+  defp paused_open do
+    test = self()
+    :persistent_term.put({__MODULE__, :pause_open}, true)
+    on_exit(fn -> :persistent_term.erase({__MODULE__, :pause_open}) end)
+
+    [
+      on_open: fn os_pid ->
+        if :persistent_term.get({__MODULE__, :pause_open}, false) do
+          send(test, {:opened, self(), os_pid})
+          receive do: (:continue -> :ok)
+        end
+      end
+    ]
   end
 
   defp unkillable,

@@ -33,10 +33,14 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   (`{:error, :provider_not_quiescent}`):
 
     * held by a live reaper (still cleaning up) — admitted once it exits;
-    * held by a dead reaper — its cleanup was never confirmed (the reaper
-      died abnormally), so admission stays closed until an operator who has
-      checked that no `claude` process of the previous server is left runs
+    * held by a dead reaper — its cleanup was never confirmed, so
+      admission stays closed until an operator who has checked that no
+      `claude` process of the previous server is left runs
       `SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper.release(SdrAgent.AI.ModelProvider.ClaudeCLI)`.
+      The one exception: the reaper's own server, still alive, takes the
+      lease over when it affirmatively knows that none of its launches is
+      unknown or unconfirmed (no launch in flight, none whose receipt was
+      lost, none it failed to stop).
 
   Unnamed servers (tests) have no lease, only the reaper.
 
@@ -45,7 +49,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
 
   Options (`:reaper` of the server; failure injection for tests):
   `:signal` (`fn os_pid, "-TERM" | "-KILL" -> any end`), `:exit_wait_ms`
-  (default 2000), `:retry_ms` (default 1000).
+  (default 2000), `:retry_ms` (default 1000), `:on_open` (`fn os_pid -> any
+  end`, run after a launch is recorded and before its receipt is sent).
   """
 
   require Logger
@@ -100,10 +105,15 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
 
   @doc """
   Opens the launch's port in the reaper (`Port.open(spawn, port_opts)`), so
-  its OS pid is owned before the process can do anything. Returns `{:ok,
-  port, os_pid}`; port messages are forwarded to the caller.
+  its OS pid is owned before the process can do anything. Waits for the
+  receipt until `deadline` (monotonic ms). Returns `{:ok, port, os_pid}`
+  (port messages are then forwarded to the caller); `{:error,
+  {:launch_failed, reason}}` when nothing was launched; or an unknown
+  outcome — the process may exist — `{:unknown, :reaper_down}` (the reaper
+  died before its receipt) or `{:pending, ref}` (no receipt by the
+  deadline; a late `{ref, reply}` may still arrive).
   """
-  def open(reaper, workspace, spawn, port_opts) do
+  def open(reaper, workspace, spawn, port_opts, deadline) do
     ref = Process.monitor(reaper)
     send(reaper, {:open, ref, workspace, spawn, port_opts})
 
@@ -113,7 +123,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
         reply
 
       {:DOWN, ^ref, :process, ^reaper, _reason} ->
-        {:error, :reaper_down}
+        {:unknown, :reaper_down}
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) ->
+        Process.demonitor(ref, [:flush])
+        {:pending, ref}
     end
   end
 
@@ -191,7 +205,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   defp open_port(state, workspace, spawn, port_opts) do
     port = Port.open(spawn, port_opts)
     {:os_pid, os_pid} = Port.info(port, :os_pid)
-    {{:ok, port, os_pid}, put_in(state.launches[workspace], {port, os_pid})}
+    state = put_in(state.launches[workspace], {port, os_pid})
+    if hook = state.opts[:on_open], do: hook.(os_pid)
+    {{:ok, port, os_pid}, state}
   rescue
     error -> {{:error, {:launch_failed, Exception.message(error)}}, state}
   end

@@ -66,8 +66,13 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       a predecessor's reaper (cleanup running, or never confirmed) or a
       tree of its own it could not confirm stopped makes every call
       `{:error, :provider_not_quiescent}` until that clears (`admission/1`
-      reports it). A reaper lost while the server is idle is replaced (the
-      server has confirmed its own launches gone).
+      reports it). A launch whose receipt never arrived (reaper died, or
+      the handshake outlived the deadline) is an unknown outcome
+      (`{:unknown, :reaper_down}` / `{:unknown, :launch_handshake_timeout}`)
+      and also closes admission: until a late receipt makes it known and
+      it is confirmed stopped, or an operator `Reaper.release/1` attests it
+      is gone. A reaper lost while the server is idle is replaced only when
+      no launch is unknown or unconfirmed.
     * `:timeout` must be at least 1000 ms (`{:error, {:invalid_timeout, t}}`
       otherwise); the deadline is absolute from enqueue, so it is checked
       again before launch and bounds the run.
@@ -232,6 +237,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       lost_reaper: nil,
       predecessor: nil,
       stuck: [],
+      unconfirmed: %{},
       command:
         Keyword.get_lazy(opts, :command, fn -> System.find_executable("llm-proxy-shim") end),
       command_args: Keyword.get(opts, :command_args, ["claude"]),
@@ -264,8 +270,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     end
   end
 
-  # Takes the reaper lease when nothing of this server is left unconfirmed.
-  defp admit(%{reaper: nil, stuck: []} = state) do
+  # Takes the reaper lease only when nothing of this server is unknown or
+  # unconfirmed.
+  defp admit(%{reaper: nil, stuck: [], unconfirmed: unconfirmed} = state)
+       when map_size(unconfirmed) == 0 do
     opts =
       if state.lost_reaper,
         do: Keyword.put(state.reaper_opts, :takeover, state.lost_reaper),
@@ -305,7 +313,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     end
   end
 
-  defp admitted?(state), do: not is_nil(state.reaper) and state.stuck == []
+  defp admitted?(state),
+    do: not is_nil(state.reaper) and state.stuck == [] and map_size(state.unconfirmed) == 0
 
   defp sync_admission(%{table: nil} = state), do: state
 
@@ -313,7 +322,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     admission =
       cond do
         is_nil(state.reaper) -> {:blocked, state.blocked || :previous_cleanup_unconfirmed}
-        state.stuck != [] -> {:blocked, :cli_not_quiescent}
+        state.stuck != [] or map_size(state.unconfirmed) > 0 -> {:blocked, :cli_not_quiescent}
         true -> :open
       end
 
@@ -385,8 +394,32 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   def handle_info({:DOWN, ref, :process, holder, _reason}, %{predecessor: {holder, ref}} = state),
     do: {:noreply, admit(%{state | predecessor: nil})}
 
-  # After an operator `Reaper.release/1`.
-  def handle_info(:admission_check, state), do: {:noreply, admit(state)}
+  # A late launch receipt: the launch is now known, so it can be confirmed
+  # stopped (or, if it failed, it never ran).
+  def handle_info({ref, reply}, state) when is_map_key(state.unconfirmed, ref) do
+    {workspace, unconfirmed} = Map.pop(state.unconfirmed, ref)
+    state = %{state | unconfirmed: unconfirmed}
+
+    state =
+      case reply do
+        {:ok, _port, os_pid} ->
+          prune_stuck(%{state | stuck: [{workspace, os_pid} | state.stuck]})
+
+        {:error, _reason} ->
+          File.rm_rf(workspace)
+          if state.reaper, do: Reaper.done(state.reaper, workspace)
+          state
+      end
+
+    {:noreply, admit(state)}
+  end
+
+  # After an operator `Reaper.release/1`: the operator attests that no CLI
+  # of this server is left, including launches whose outcome is unknown.
+  def handle_info(:admission_check, state) do
+    Enum.each(state.unconfirmed, fn {_key, workspace} -> File.rm_rf(workspace) end)
+    {:noreply, admit(%{state | unconfirmed: %{}})}
+  end
 
   # Expired, or too little time left to be worth launching.
   defp launchable?(deadline, timeout) do
@@ -461,20 +494,41 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       {:line, 1_048_576}
     ]
 
-    # The absolute deadline is checked again after preparation.
+    # The absolute deadline is checked again after preparation and bounds
+    # the launch handshake.
     with true <- launchable?(deadline, state.timeout) || {:error, :provider_queue_timeout},
          {:ok, port, os_pid} <-
-           Reaper.open(state.reaper, workspace, {:spawn_executable, "/bin/sh"}, port_opts) do
+           Reaper.open(
+             state.reaper,
+             workspace,
+             {:spawn_executable, "/bin/sh"},
+             port_opts,
+             deadline
+           ) do
       watch = Process.monitor(caller)
       result = collect(port, os_pid, Map.put(state, :caller, watch), deadline, nil, [])
       Process.demonitor(watch, [:flush])
       {result, settle(state, port, os_pid, workspace)}
     else
+      {:pending, ref} ->
+        unknown(state, ref, workspace, :launch_handshake_timeout)
+
+      {:unknown, :reaper_down} ->
+        unknown(state, make_ref(), workspace, :reaper_down)
+
       error ->
         File.rm_rf(workspace)
         Reaper.done(state.reaper, workspace)
         {error, state}
     end
+  end
+
+  # No launch receipt: the CLI may be running (and may have sent its
+  # request), so the outcome is unknown and admission closes on it.
+  defp unknown(state, key, workspace, reason) do
+    Logger.error("ClaudeCLI launch outcome unknown (#{reason}); calls refused until confirmed")
+    state = sync_admission(%{state | unconfirmed: Map.put(state.unconfirmed, key, workspace)})
+    {{:unknown, reason}, state}
   end
 
   # The call returns only once its process tree is confirmed gone; one that

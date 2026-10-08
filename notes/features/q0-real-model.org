@@ -76,9 +76,10 @@ attestation status is volatile in-memory (ETS) display data, not a record.
   integrated happy/refusal/drift tests cover it.
 - Round 2 residual (hand-off window) closed in round 3: the reaper opens the
   port itself. Remaining limitation: descendants that re-parent before a
-  kill are not found (=pgrep -P= walk). A reaper that dies abnormally leaves
-  admission closed until an operator runs =ClaudeCLI.Reaper.release/1=
-  (fail-closed by design). The responder module name in job args is still
+  kill are not found (=pgrep -P= walk). A dead reaper's lease stays held
+  (admission closed until =ClaudeCLI.Reaper.release/1=) unless its own,
+  still-running server affirmatively knows that none of its launches is
+  unknown or unconfirmed. The responder module name in job args is still
   decoded with =Module.safe_concat/1= (pre-existing; raises before the run
   starts for an unknown module).
 -----
@@ -156,6 +157,28 @@ assertion failures:
   1000 ms are rejected and expired requests are refused (white-box test).
 
 *TDD Gate Verification (round 3):* [X] VERIFIED (assertion-only RED)
+
+** Round 4 (Codex re-review of =0381b27=, =/tmp/sdr-pr27-0381b27-rereview.md=)
+RED on =0381b27=:
+- Codex's isolated-VM reproducer (=/tmp/sdr_pr27_reaper_launch_receipt_review_test.exs=,
+  AST-instrumented pause after the reaper obtains the OS pid): 1 clean
+  assertion failure — admission =:open= with the launch live, after the
+  reaper died before its receipt.
+- New suite test with a =:on_open= failure-injection seam: on =0381b27= it
+  fails at =assert_receive {:opened, ...}= because the seam did not exist
+  (honest note: seam-missing, not the behavioural assertion; the
+  behavioural RED is Codex's reproducer above).
+- Handshake bounded by the deadline: =ClaudeCLI.complete/2= returned
+  ={:ok, ...}= (waited for the paused receipt past the deadline) instead of
+  ={:unknown, :launch_handshake_timeout}= — clean assertion.
+GREEN: a missing receipt is unknown (={:unknown, :reaper_down}= /
+={:unknown, :launch_handshake_timeout}=), recorded as an unconfirmed launch
+that closes admission and blocks idle takeover; a late receipt makes it
+known (then confirmed stopped); operator =Reaper.release/1= attests it
+gone. Codex's reproducer, with only its =:reaper_down= classification
+updated to the requested =:unknown=, passes.
+
+*TDD Gate Verification (round 4):* [X] VERIFIED (behavioural RED via Codex reproducer; seam test noted)
 
 -----
 

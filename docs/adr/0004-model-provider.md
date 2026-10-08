@@ -279,14 +279,24 @@ resource or policy change:
       an operator who has checked that no CLI process is left runs
       `ClaudeCLI.Reaper.release/1`.
     A tree the server itself cannot confirm stopped after a call also
-    closes admission until the tree is gone. A reaper lost while the
-    server is idle is replaced, because the server has confirmed its own
-    launches gone. This keeps concurrency at one across crashes and
-    restarts without treating a reaper's exit as proof of cleanup.
+    closes admission until the tree is gone. So does a launch whose receipt
+    never arrived, because the reaper died or the handshake outlived the
+    deadline. Such a launch may already be running, so its outcome is
+    unknown (`{:unknown, :reaper_down}` or
+    `{:unknown, :launch_handshake_timeout}`). Admission stays closed until
+    either a late receipt makes the launch known and it is confirmed
+    stopped, or an operator release attests that it is gone.
+    One exception lets a server take over a dead reaper's lease: the
+    server is still alive and affirmatively knows that none of its
+    launches is unknown or unconfirmed (no launch in flight, none whose
+    receipt was lost, none it failed to stop). Otherwise the lease stays
+    with the dead reaper. This keeps concurrency at one across crashes and
+    restarts, and a reaper's exit is never treated as proof of cleanup.
   - `timeout` must be at least 1000 ms. The deadline is absolute from
     enqueue: it is checked before dispatch, checked again after the
-    workspace is prepared, and bounds the run. A pre-send refusal is an
-    error; an in-flight timeout is unknown.
+    workspace is prepared, and bounds both the launch handshake and the
+    run. A pre-send refusal is an error; an in-flight timeout or a missing
+    launch receipt is unknown.
   - Limitation: CLI helpers that re-parent away from the root before a
     kill are not found (the tree is walked with `pgrep -P`).
 - Boot preflight: Claude CLI has no no-call probe for the init attestation.
