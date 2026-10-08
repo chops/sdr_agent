@@ -546,6 +546,31 @@ store, metadata only, no call, and not enablement.
   the order that the recorded app request fixed. Production is unaffected
   because the stored request fixes the order.
 
+*** Real proof call 3 (owner-approved; =docs/audit/s12d-wire-witness-proof-3.json=, metadata only)
+The call ran at 18:54 MT on =s12d-v3= @ =605d283=, after these gates were
+met: v3 RED VERIFIED (=28d57c13=), v3 GREEN APPROVED (=28b897cb=, PR #28)
+and #24 APPROVED (=ee67612d=). The CLI was 2.1.291 and the proxy 0.2.0
+(=/healthz/witness= schema 1).
+- Invocation: =01a11901-043e-775c-a682-9340a2420637=.
+- Exchange: exactly one complete =/v1/messages= exchange, record
+  =01a11901-066c-7f76-8a28-b6e0b77226a7= (HTTP 200, captures and stream
+  complete).
+- Requested projection v3; evaluated projection v3, with
+  =projections_inapplicable= =["v2"]=.
+- Stdin projection: EQUAL. Response projection: EQUAL.
+- Reason =cli_injected_context=:
+  - 1 reminder (558 B);
+  - 1 trailing system message (928 B), with =trailing_output_config=
+    =["present"]=;
+  - all four control fields present.
+- Status: =reconciled=, but only under the test-only exact entry
+  (claude_cli, 2.1.291, v3, propagated_id).
+- The runtime allowlist is still EMPTY.
+- Call 4 (owner-approved) was NOT spent: proof 3 is conclusive for this
+  tuple.
+Enablement is a separate reviewed PR. It needs independent review of this
+evidence and the coordinator's go-ahead.
+
 *** Real proof call 2 of 2 (=docs/audit/s12d-wire-witness-proof-2.json=, metadata only) — budget exhausted
 The call ran at 16:22 MT, after v2 GREEN (=cd2ebe2=) and a full gate on main =37c69bb=.
 - Witness: invocation =01a11875-f616-77a1-9631-ed3534331720= produced exactly one
