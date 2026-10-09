@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<!-- ARTIFACT-START: everything between the markers is also published as the claude.ai artifact -->
+<title>SDR Agent Prep Docs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: an engineering manager's review binder. A dark masthead with the
+   gate rail, then six tabbed folders (one per document group), each listing
+   its documents with status, branch and links, and a per-document reading
+   mark. Filters and search sit in a sticky bar. */
+:root {
+  --paper: #eef1f5;
+  --card: #ffffff;
+  --ink: #121725;
+  --ink-2: #3c4558;
+  --muted: #6a7487;
+  --rule: #d6dce6;
+  --mast: #10162a;
+  --mast-ink: #eef1f8;
+  --mast-muted: #9aa6c2;
+  --signal: #ffcf33;
+  --signal-ink: #1d1600;
+  --ok: #1f8a57;
+  --ok-soft: #dcf2e6;
+  --warn: #b5620a;
+  --warn-soft: #fbecd9;
+  --info: #2f5fd0;
+  --info-soft: #e2eafc;
+  --t1: #2f5fd0; --t2: #7a4fd6; --t3: #c2459a; --t4: #d9822b; --t5: #1b9a8a; --t6: #b59a00;
+  --display: "Bricolage Grotesque", "Avenir Next", "Helvetica Neue", sans-serif;
+  --body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --r: 14px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0b1020; --card: #141b30; --ink: #eaf0fb; --ink-2: #c3cce0; --muted: #8b97b3; --rule: #263150;
+    --mast: #060a17; --mast-ink: #eef1f8; --mast-muted: #8f9bbb; --signal: #ffd54a; --signal-ink: #1d1600;
+    --ok: #4cc58a; --ok-soft: #12321f; --warn: #f0a24c; --warn-soft: #3a2611; --info: #7ea2ff; --info-soft: #172449;
+    --t1: #7ea2ff; --t2: #a98bff; --t3: #f07ac6; --t4: #f3a65c; --t5: #44cbb8; --t6: #e6cb3a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0b1020; --card: #141b30; --ink: #eaf0fb; --ink-2: #c3cce0; --muted: #8b97b3; --rule: #263150;
+  --mast: #060a17; --mast-ink: #eef1f8; --mast-muted: #8f9bbb; --signal: #ffd54a; --signal-ink: #1d1600;
+  --ok: #4cc58a; --ok-soft: #12321f; --warn: #f0a24c; --warn-soft: #3a2611; --info: #7ea2ff; --info-soft: #172449;
+  --t1: #7ea2ff; --t2: #a98bff; --t3: #f07ac6; --t4: #f3a65c; --t5: #44cbb8; --t6: #e6cb3a;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--paper); color: var(--ink); font: 400 15px/1.55 var(--body); -webkit-font-smoothing: antialiased; }
+a { color: inherit; }
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 3px solid var(--signal); outline-offset: 2px; border-radius: 6px; }
+
+/* Masthead */
+.mast { background: var(--mast); color: var(--mast-ink); position: relative; overflow: hidden; }
+.mast::before { content: ""; position: absolute; inset: 0; background:
+  radial-gradient(700px 300px at 85% -10%, color-mix(in srgb, var(--t2) 38%, transparent), transparent 70%),
+  radial-gradient(600px 260px at 10% 120%, color-mix(in srgb, var(--t1) 30%, transparent), transparent 70%);
+  pointer-events: none; }
+.mast-in { position: relative; max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 30px; display: grid; gap: 22px; }
+.kicker { font: 500 12px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--mast-muted); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.kicker .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 0 4px color-mix(in srgb, var(--signal) 25%, transparent); }
+h1 { font: 800 clamp(40px, 7vw, 84px)/.95 var(--display); letter-spacing: -0.035em; margin: 0; text-wrap: balance; }
+h1 em { font-style: normal; color: var(--signal); }
+.lede { max-width: 62ch; color: var(--mast-muted); font-size: 17px; margin: 0; }
+.stats { display: flex; flex-wrap: wrap; gap: 10px; }
+.stat { border: 1px solid color-mix(in srgb, var(--mast-ink) 16%, transparent); border-radius: 999px; padding: 8px 14px; display: flex; gap: 8px; align-items: baseline; font-size: 13px; color: var(--mast-muted); }
+.stat b { font: 700 18px/1 var(--display); color: var(--mast-ink); font-variant-numeric: tabular-nums; }
+
+/* Gate rail */
+.rail { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 6px; }
+.gate { display: grid; gap: 6px; }
+.gate .bar { height: 6px; border-radius: 6px; background: color-mix(in srgb, var(--mast-ink) 14%, transparent); }
+.gate.done .bar { background: var(--ok); }
+.gate.now .bar { background: var(--signal); box-shadow: 0 0 12px color-mix(in srgb, var(--signal) 60%, transparent); }
+.gate span { font: 500 11px/1.2 var(--mono); color: var(--mast-muted); }
+.gate.now span, .gate.done span { color: var(--mast-ink); }
+.gate small { font: 400 11px/1.25 var(--body); color: var(--mast-muted); }
+
+/* Sticky tools */
+.tools { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: color-mix(in srgb, var(--paper) 88%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--rule); }
+.tools-in { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 12px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.search { flex: 1 1 220px; min-width: 0; display: flex; align-items: center; gap: 8px; background: var(--card); border: 1px solid var(--rule); border-radius: 999px; padding: 8px 14px; }
+.search input { border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; width: 100%; min-width: 0; }
+.search svg { flex: none; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--rule); background: var(--card); border-radius: 999px; padding: 7px 12px; font-size: 13px; transition: background .15s, border-color .15s, transform .1s; }
+.chip:hover { border-color: var(--ink-2); }
+.chip:active { transform: scale(.97); }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.progress { font: 500 12px/1 var(--mono); color: var(--muted); white-space: nowrap; }
+
+/* Folders */
+main { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 80px; display: grid; gap: 22px; }
+.note { background: var(--warn-soft); color: var(--warn); border-radius: var(--r); padding: 14px 18px; font-size: 14px; display: flex; gap: 12px; align-items: flex-start; }
+.note b { color: var(--ink); }
+.folders { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+.folder { position: relative; background: var(--card); border: 1px solid var(--rule); border-radius: var(--r); padding: 26px 22px 18px; display: grid; gap: 14px; align-content: start; transition: transform .2s ease, box-shadow .2s ease; min-width: 0; }
+.folder:hover { transform: translateY(-2px); box-shadow: 0 16px 40px -24px color-mix(in srgb, var(--ink) 55%, transparent); }
+.folder::before { content: ""; position: absolute; left: 22px; top: -1px; width: 86px; height: 6px; border-radius: 0 0 6px 6px; background: var(--tab); }
+.folder.hide { display: none; }
+.fhead { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: start; }
+.num { font: 800 44px/0.85 var(--display); color: var(--tab); letter-spacing: -0.04em; font-variant-numeric: tabular-nums; }
+.ftitle { display: grid; gap: 4px; min-width: 0; }
+.ftitle h2 { font: 700 22px/1.15 var(--display); margin: 0; letter-spacing: -0.01em; text-wrap: balance; }
+.ftitle p { margin: 0; color: var(--ink-2); font-size: 14px; }
+.where { font: 500 12px/1.3 var(--mono); color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.where code { font: inherit; background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 2px 6px; color: var(--ink-2); }
+.pill { font: 500 11px/1 var(--mono); letter-spacing: .05em; text-transform: uppercase; padding: 6px 9px; border-radius: 999px; white-space: nowrap; }
+.pill.merged { background: var(--ok-soft); color: var(--ok); }
+.pill.draft { background: var(--info-soft); color: var(--info); }
+.pill.open { background: var(--warn-soft); color: var(--warn); }
+
+.docs { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.doc { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 10px 10px; margin-inline: -10px; border-radius: 10px; transition: background .15s; }
+.doc:hover { background: var(--paper); }
+.doc.hide { display: none; }
+.doc .kind { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: color-mix(in srgb, var(--tab) 14%, var(--card)); color: var(--tab); }
+.doc .txt { display: grid; gap: 1px; min-width: 0; }
+.doc .txt b { font-weight: 600; font-size: 14.5px; }
+.doc .txt span { color: var(--muted); font-size: 13px; }
+.doc .flag { font: 500 11px/1 var(--mono); color: var(--warn); }
+.acts { display: flex; gap: 6px; align-items: center; }
+.btn { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; font-size: 13px; font-weight: 500; border-radius: 999px; padding: 7px 12px; border: 1px solid var(--rule); background: var(--card); white-space: nowrap; transition: background .15s, border-color .15s, color .15s; }
+.btn:hover { border-color: var(--ink); }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.primary:hover { background: var(--tab); border-color: var(--tab); color: var(--card); }
+.mark { width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid var(--rule); background: var(--card); display: grid; place-items: center; color: transparent; transition: all .15s; }
+.mark:hover { border-color: var(--ink-2); }
+.mark[data-state="read"] { background: var(--ok); border-color: var(--ok); color: var(--card); }
+.mark[data-state="question"] { background: var(--signal); border-color: var(--signal); color: var(--signal-ink); }
+
+.empty { text-align: center; color: var(--muted); padding: 40px 0; display: none; }
+footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--rule); padding-top: 18px; display: grid; gap: 6px; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.legend span { display: inline-flex; gap: 6px; align-items: center; }
+.legend i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; border: 1.5px solid var(--rule); }
+
+@media (max-width: 880px) {
+  .folders { grid-template-columns: 1fr; }
+  .rail { grid-template-columns: repeat(5, minmax(0, 1fr)); row-gap: 14px; }
+}
+@media (max-width: 560px) {
+  .doc { grid-template-columns: auto 1fr; }
+  .acts { grid-column: 1 / -1; padding-left: 44px; flex-wrap: wrap; }
+  .fhead { grid-template-columns: auto 1fr; }
+  .fhead .pill { grid-column: 2; justify-self: start; }
+  .num { font-size: 36px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } .folder:hover { transform: none; } }
+</style>
+</head>
+<body>
+<header class="mast">
+  <div class="mast-in">
+    <div class="kicker"><i class="dot"></i>SDR Agent · prep docs for engineering review · Oct 8, 2026</div>
+    <h1>Everything we've planned, <em>in one place.</em></h1>
+    <p class="lede">Six groups of documents, from the process we agreed to the plans for the first slice. Each one links to its live page and its source in git. Mark what you have read, or flag what you have questions about.</p>
+    <div class="stats" id="stats"></div>
+    <div class="rail" id="rail" aria-label="Gate progress"></div>
+  </div>
+</header>
+
+<div class="tools">
+  <div class="tools-in">
+    <label class="search" for="q">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" type="search" placeholder="Search documents" autocomplete="off">
+    </label>
+    <div class="chips" role="group" aria-label="Filter" id="chips"></div>
+    <span class="progress" id="progress"></span>
+  </div>
+</div>
+
+<main>
+  <p class="note"><span aria-hidden="true">●</span><span><b>Where things stand:</b> gate G0 passed and the process is merged. Everything else is a draft for your review. Nothing past G0 is approved, no application code has been written, and build days are not being planned until you finish reviewing.</span></p>
+  <div class="folders" id="folders"></div>
+  <p class="empty" id="empty">No documents match. Clear the search or pick another filter.</p>
+  <footer>
+    <div class="legend">
+      <span><i></i>Not read</span>
+      <span><i style="background:var(--ok);border-color:var(--ok)"></i>Read</span>
+      <span><i style="background:var(--signal);border-color:var(--signal)"></i>Have questions</span>
+      <span>Click the circle to cycle. Marks stay in this browser only.</span>
+    </div>
+    <span>Live pages on claude.ai are private to you. GitHub links are public because the repository is public. Source: docs/product/hub.html on branch owner-decisions.</span>
+  </footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var GH = "https://github.com/chops/sdr_agent/blob/";
+  var GATES = [
+    { id: "G0", name: "Process agreed", state: "done" },
+    { id: "G1", name: "Brief approved", state: "now" },
+    { id: "G2", name: "Scope locked" }, { id: "G3", name: "Prototype approved" },
+    { id: "G4", name: "Design reviewed" }, { id: "G5", name: "Build approved" },
+    { id: "G6", name: "Feature complete" }, { id: "G7", name: "Release candidate" },
+    { id: "G8", name: "Go / no-go" }, { id: "G9", name: "Next horizon" }
+  ];
+  var GROUPS = [
+    { n: "01", tab: "--t1", title: "SDLC process", desc: "How we work: phases, gates, roles, rules, the decision log and the story so far.",
+      status: "merged", statusText: "Merged", branch: "main", sha: "98fb96e",
+      docs: [
+        { k: "page", t: "Interactive SDLC map", d: "Phases, gates, who does what, schedule and controls", page: "https://claude.ai/artifact/ScAk7wEuMjD5nPUZdWLKGj" },
+        { k: "file", t: "Playbook", d: "The written process", gh: "main/docs/sdlc/README.md" },
+        { k: "file", t: "Decision log", d: "Every owner decision, D-001 onward", gh: "main/docs/sdlc/decisions.md" },
+        { k: "file", t: "Project journal", d: "From one-shot prompt to now, missteps included", gh: "main/docs/sdlc/journal.md" },
+        { k: "file", t: "G0 gate record", d: "What you approved, against which commit", gh: "main/docs/sdlc/gates/G0.md" }
+      ] },
+    { n: "02", tab: "--t2", title: "Charter", desc: "Who decides what, the constraints that cannot be waived, and how gates pass.",
+      status: "merged", statusText: "Accepted", branch: "main", sha: "98fb96e",
+      docs: [
+        { k: "file", t: "ADR-0014: product-phase charter", d: "Replaces the unattended-build mandate", gh: "main/docs/adr/0014-product-phase-charter.md" }
+      ] },
+    { n: "03", tab: "--t3", title: "Shaping discussion", desc: "How to shape the product before code: your idea, Claude's and Codex's views, and your notes.",
+      status: "draft", statusText: "Discussion", branch: "product-shaping", sha: "a726e9c",
+      docs: [
+        { k: "page", t: "Shaping discussion page", d: "Includes the notes you already wrote", page: "https://claude.ai/artifact/VPxyAcKfDwaVedSkmcrqWu" },
+        { k: "file", t: "Page source", d: "The discussion page in git", gh: "product-shaping/docs/product/shaping/discussion.html" }
+      ] },
+    { n: "04", tab: "--t4", title: "Discovery packet (P1)", desc: "The outcome brief, story map, first-slice options and domain language, updated for your shaping notes.",
+      status: "draft", statusText: "Codex approved for G1", branch: "p1-discovery", sha: "2a02f6d",
+      docs: [
+        { k: "page", t: "Discovery review page", d: "Brief, story map and slice options with notes", page: "https://claude.ai/artifact/RdkibwG4nrjQWAceXivSNF" },
+        { k: "file", t: "Outcome brief", d: "Promise, outcomes, non-goals, assumptions, domain language", gh: "p1-discovery/docs/product/brief.md" },
+        { k: "file", t: "Story map", d: "The founder's tasks in order, failure cases, release lines", gh: "p1-discovery/docs/product/story-map.md" },
+        { k: "file", t: "First-slice options", d: "A, B and C with trade-offs", gh: "p1-discovery/docs/product/first-slice.md" },
+        { k: "file", t: "Your discovery answers", d: "Verbatim, from Oct 7", gh: "p1-discovery/docs/product/discovery/answers.md" },
+        { k: "file", t: "Joint review", d: "Claude's and Codex's review of your answers", gh: "p1-discovery/docs/product/discovery/review.md" }
+      ] },
+    { n: "05", tab: "--t5", title: "Slice A plan", desc: "The read-only Home screen: requirements, screens, what exists, prototype, technical fit and build plan.",
+      status: "open", statusText: "Open findings", branch: "slice-a-plan", sha: "ed2cbc0",
+      docs: [
+        { k: "page", t: "Clickable prototype", d: "Role, state and provider switches", page: "https://claude.ai/artifact/KpUYa7ieWDBCLuJ2PJURBX" },
+        { k: "file", t: "Requirements", d: "REQ-A-1 to 18 with pass/fail tests", gh: "slice-a-plan/docs/product/slice-a/requirements.md" },
+        { k: "file", t: "Screen/action/state matrix", d: "Every screen, action and state", gh: "slice-a-plan/docs/product/slice-a/screen-matrix.md" },
+        { k: "file", t: "What exists vs what's new", d: "Reads used, deltas and the data-model check", gh: "slice-a-plan/docs/product/slice-a/baseline-delta.md" },
+        { k: "file", t: "Technical fit (G4 draft)", d: "Design, threats and 37 planned tests", gh: "slice-a-plan/docs/product/slice-a/tech-fit.md", flag: "Codex: changes requested, revision on hold" },
+        { k: "file", t: "Build plan (G5 draft)", d: "Ordered slices and evidence", gh: "slice-a-plan/docs/product/slice-a/build-plan.md", flag: "Codex: changes requested; build days not being planned yet" }
+      ] },
+    { n: "06", tab: "--t6", title: "Owner decisions", desc: "One page replacing the scattered questions: your feature list, eight decision cards and the task script.",
+      status: "draft", statusText: "Waiting on you", branch: "owner-decisions", sha: "e90f340",
+      docs: [
+        { k: "page", t: "Decisions page", d: "Saves as you type; Claude reads it directly", page: "https://claude.ai/artifact/CFjkoAnWbjncPksPRVmPe1" },
+        { k: "file", t: "Page source", d: "The decisions page in git", gh: "owner-decisions/docs/product/decisions/index.html" }
+      ] }
+  ];
+
+  var ICON = {
+    page: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18"/><circle cx="7" cy="6.5" r=".6" fill="currentColor"/></svg>',
+    file: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>',
+    check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true"><path d="m5 12 5 5 9-10"/></svg>',
+    q: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true"><path d="M9 9a3 3 0 1 1 4 2.8c-.7.3-1 .9-1 1.7V14M12 18h.01"/></svg>',
+    out: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8"/></svg>'
+  };
+
+  var KEY = "sdr-prep-hub-marks-v1";
+  var marks = {};
+  try { marks = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { marks = {}; }
+  function saveMarks() { try { localStorage.setItem(KEY, JSON.stringify(marks)); } catch (e) {} }
+  var state = { q: "", f: "all" };
+  var $ = function (id) { return document.getElementById(id); };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function docId(g, d) { return g.n + ":" + d.t; }
+
+  // Stats and rail
+  var total = GROUPS.reduce(function (a, g) { return a + g.docs.length; }, 0);
+  var pages = GROUPS.reduce(function (a, g) { return a + g.docs.filter(function (d) { return d.k === "page"; }).length; }, 0);
+  $("stats").innerHTML = [
+    ["6", "document groups"], [String(total), "documents"], [String(pages), "live pages"], ["G0", "passed"], ["G1", "next, waiting on you"]
+  ].map(function (s) { return '<span class="stat"><b>' + s[0] + "</b>" + s[1] + "</span>"; }).join("");
+  $("rail").innerHTML = GATES.map(function (g) {
+    return '<div class="gate ' + (g.state || "") + '"><div class="bar"></div><span>' + g.id + "</span><small>" + esc(g.name) + "</small></div>";
+  }).join("");
+
+  // Filters
+  var FILTERS = [["all", "All"], ["page", "Live pages"], ["file", "Files in git"], ["open", "Open findings"], ["unread", "Not read yet"], ["question", "My questions"]];
+  $("chips").innerHTML = FILTERS.map(function (f) { return '<button type="button" class="chip" data-f="' + f[0] + '" aria-pressed="' + (f[0] === "all") + '">' + f[1] + "</button>"; }).join("");
+  $("chips").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-f]"); if (!b) return;
+    state.f = b.getAttribute("data-f");
+    document.querySelectorAll("#chips .chip").forEach(function (c) { c.setAttribute("aria-pressed", String(c === b)); });
+    apply();
+  });
+  $("q").addEventListener("input", function (e) { state.q = e.target.value.trim().toLowerCase(); apply(); });
+
+  // Folders
+  $("folders").innerHTML = GROUPS.map(function (g) {
+    var docs = g.docs.map(function (d) {
+      var id = docId(g, d);
+      var links = "";
+      if (d.page) links += '<a class="btn primary" href="' + esc(d.page) + '" target="_blank" rel="noopener">Open page ' + ICON.out + "</a>";
+      if (d.gh) links += '<a class="btn" href="' + esc(GH + d.gh) + '" target="_blank" rel="noopener">GitHub ' + ICON.out + "</a>";
+      var hay = (g.title + " " + d.t + " " + d.d + " " + (d.flag || "") + " " + g.branch).toLowerCase();
+      return '<li class="doc" data-id="' + esc(id) + '" data-kind="' + d.k + '" data-open="' + (d.flag ? "1" : (g.status === "open" ? "1" : "0")) + '" data-hay="' + esc(hay) + '">' +
+        '<span class="kind">' + ICON[d.k] + "</span>" +
+        '<span class="txt"><b>' + esc(d.t) + "</b><span>" + esc(d.d) + "</span>" + (d.flag ? '<span class="flag">' + esc(d.flag) + "</span>" : "") + "</span>" +
+        '<span class="acts">' + links + '<button type="button" class="mark" aria-label="Mark ' + esc(d.t) + '" data-mark="' + esc(id) + '"></button></span></li>';
+    }).join("");
+    return '<section class="folder" style="--tab: var(' + g.tab + ')" data-group="' + g.n + '">' +
+      '<div class="fhead"><span class="num">' + g.n + '</span><div class="ftitle"><h2>' + esc(g.title) + "</h2><p>" + esc(g.desc) + "</p></div>" +
+      '<span class="pill ' + g.status + '">' + esc(g.statusText) + "</span></div>" +
+      '<div class="where"><span>branch</span><code>' + esc(g.branch) + "</code><span>commit</span><code>" + esc(g.sha) + "</code></div>" +
+      '<ul class="docs">' + docs + "</ul></section>";
+  }).join("");
+
+  var CYCLE = { "": "read", read: "question", question: "" };
+  function paintMark(btn) {
+    var s = marks[btn.getAttribute("data-mark")] || "";
+    btn.setAttribute("data-state", s);
+    btn.innerHTML = s === "read" ? ICON.check : s === "question" ? ICON.q : "";
+    btn.title = s === "read" ? "Read. Click to flag a question." : s === "question" ? "Has questions. Click to clear." : "Mark as read";
+  }
+  document.querySelectorAll("[data-mark]").forEach(paintMark);
+  $("folders").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-mark]"); if (!b) return;
+    var id = b.getAttribute("data-mark");
+    marks[id] = CYCLE[marks[id] || ""];
+    if (!marks[id]) delete marks[id];
+    saveMarks(); paintMark(b); apply();
+  });
+
+  function apply() {
+    var shown = 0;
+    document.querySelectorAll(".folder").forEach(function (f) {
+      var any = false;
+      f.querySelectorAll(".doc").forEach(function (li) {
+        var id = li.getAttribute("data-id"), m = marks[id] || "";
+        var okQ = !state.q || li.getAttribute("data-hay").indexOf(state.q) !== -1;
+        var okF = state.f === "all" ||
+          (state.f === "page" && li.getAttribute("data-kind") === "page") ||
+          (state.f === "file" && li.getAttribute("data-kind") === "file") ||
+          (state.f === "open" && li.getAttribute("data-open") === "1") ||
+          (state.f === "unread" && m !== "read") ||
+          (state.f === "question" && m === "question");
+        var ok = okQ && okF;
+        li.classList.toggle("hide", !ok);
+        if (ok) { any = true; shown++; }
+      });
+      f.classList.toggle("hide", !any);
+    });
+    $("empty").style.display = shown ? "none" : "block";
+    var read = Object.keys(marks).filter(function (k) { return marks[k] === "read"; }).length;
+    var qs = Object.keys(marks).filter(function (k) { return marks[k] === "question"; }).length;
+    $("progress").textContent = read + " of " + total + " read" + (qs ? " · " + qs + " with questions" : "");
+  }
+  apply();
+})();
+</script>
+<!-- ARTIFACT-END -->
+</body>
+</html>
