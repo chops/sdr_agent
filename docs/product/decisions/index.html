@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<!-- ARTIFACT-START: everything between the markers is also published as the claude.ai artifact -->
+<title>SDR Agent Owner Decisions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: one decision desk in the SDLC-map family. A sticky index on the left,
+   then the owner's feature list, eight decision cards (one home per question),
+   the slice A task script and a question thread. Every input saves itself. */
+:root {
+  --bg: #f1f4f6;
+  --surface: #ffffff;
+  --sunk: #e7ecef;
+  --ink: #17212b;
+  --muted: #586773;
+  --line: #d3dbe1;
+  --accent: #0d6a80;
+  --accent-soft: #d9ecf1;
+  --gate: #a2610c;
+  --gate-soft: #f6e8d3;
+  --done: #2b7649;
+  --done-soft: #dcefe3;
+  --gap: #a8382c;
+  --gap-soft: #f6dfdb;
+  --p-owner: #6a49be;
+  --p-claude: #b8582a;
+  --p-codex: #2c68a8;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+  --step-3: 2.25rem;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10161b; --surface: #172028; --sunk: #1d2832; --ink: #e3eaef; --muted: #93a3af; --line: #2a3742;
+    --accent: #56b4cc; --accent-soft: #173845; --gate: #e2a54c; --gate-soft: #3a2b16;
+    --done: #63bd88; --done-soft: #183526; --gap: #e57a6c; --gap-soft: #3d1f1b;
+    --p-owner: #a78bf0; --p-claude: #e38a5c; --p-codex: #6aa4e0;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10161b; --surface: #172028; --sunk: #1d2832; --ink: #e3eaef; --muted: #93a3af; --line: #2a3742;
+  --accent: #56b4cc; --accent-soft: #173845; --gate: #e2a54c; --gate-soft: #3a2b16;
+  --done: #63bd88; --done-soft: #183526; --gap: #e57a6c; --gap-soft: #3d1f1b;
+  --p-owner: #a78bf0; --p-claude: #e38a5c; --p-codex: #6aa4e0;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 var(--step-0)/1.55 var(--font-body); -webkit-font-smoothing: antialiased; }
+.page { max-width: 1160px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 72px; display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 40px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: var(--step-3); letter-spacing: -0.01em; }
+h2 { font-size: var(--step-2); }
+h3 { font-size: var(--step-1); }
+p { margin: 0; }
+ul, ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.eyebrow { font: 500 var(--step--1)/1.3 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.lede { max-width: 70ch; color: var(--muted); font-size: var(--step-1); }
+.muted { color: var(--muted); }
+.mono { font-family: var(--font-mono); font-size: var(--step--1); }
+a { color: var(--accent); }
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+nav.index { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 20px); align-self: start; display: grid; gap: 4px; }
+nav.index a { display: grid; grid-template-columns: 30px 1fr; gap: 6px; align-items: baseline; padding: 6px 8px; border-radius: var(--radius); text-decoration: none; color: var(--muted); font-size: var(--step--1); transition: background .15s, color .15s; }
+nav.index a b { font: 500 11px/1 var(--font-mono); }
+nav.index a:hover { background: var(--sunk); color: var(--ink); }
+nav.index a.answered { color: var(--ink); }
+nav.index a.answered b::after { content: " ✓"; color: var(--done); }
+nav.index .status { margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); font-size: var(--step--1); display: grid; gap: 8px; }
+
+main { display: grid; gap: 44px; min-width: 0; }
+header { display: grid; gap: 14px; }
+section { display: grid; gap: 16px; min-width: 0; scroll-margin-top: 20px; }
+.sec-head { display: grid; gap: 6px; }
+.sec-head p { color: var(--muted); max-width: 74ch; }
+.links { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: var(--step--1); }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; display: grid; gap: 12px; min-width: 0; }
+.dcard { border-left: 4px solid var(--p-owner); }
+.dhead { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; align-items: baseline; }
+.dhead .cid { font: 600 var(--step-2)/1 var(--font-mono); color: var(--p-owner); grid-row: span 2; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 10px; font-size: var(--step--1); color: var(--muted); align-items: center; }
+.chip { font: 500 11px/1 var(--font-mono); padding: 4px 7px; border-radius: 999px; border: 1px solid var(--line); background: var(--sunk); color: var(--muted); }
+.chip.gate { color: var(--gate); border-color: var(--gate); background: var(--gate-soft); }
+.rec { background: var(--accent-soft); border-radius: var(--radius); padding: 8px 12px; font-size: var(--step--1); }
+.rec b { color: var(--accent); }
+.note { font-size: var(--step--1); color: var(--muted); }
+
+fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 8px; min-width: 0; }
+legend, .qlabel { font-size: var(--step-0); font-weight: 600; padding: 0; color: var(--ink); }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.choices label { display: inline-flex; gap: 8px; align-items: center; border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 6px 12px; cursor: pointer; transition: border-color .15s, background .15s; font-size: var(--step--1); }
+.choices label:hover { border-color: var(--p-owner); }
+.choices input { accent-color: var(--p-owner); margin: 0; }
+.choices label:has(input:checked) { border-color: var(--p-owner); background: color-mix(in srgb, var(--p-owner) 12%, var(--surface)); }
+.field { display: grid; gap: 6px; }
+textarea, input[type="text"], select { width: 100%; font: 400 var(--step-0)/1.45 var(--font-body); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 9px 10px; }
+textarea { min-height: 70px; resize: vertical; }
+textarea:focus, input[type="text"]:focus, select:focus { border-color: var(--p-owner); outline: none; }
+
+.rows { overflow-x: auto; }
+.rows table { border-collapse: collapse; width: 100%; min-width: 560px; }
+.rows th { text-align: left; font: 500 11px/1.2 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); padding: 4px 6px; }
+.rows td { padding: 4px 6px; vertical-align: top; }
+.rows td.n { font: 500 var(--step--1)/2.4 var(--font-mono); color: var(--muted); width: 28px; }
+.btn { background: var(--ink); color: var(--bg); border: 0; border-radius: var(--radius); padding: 10px 16px; font-weight: 600; transition: opacity .15s, transform .1s; white-space: nowrap; }
+.btn:hover { opacity: .9; } .btn:active { transform: translateY(1px); }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.btn.small { padding: 6px 12px; font-size: var(--step--1); }
+.btn:disabled { opacity: .5; cursor: default; }
+
+.decided { display: grid; gap: 0; }
+.decided div { display: grid; grid-template-columns: 110px 1fr; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: var(--step--1); }
+.decided div:last-child { border-bottom: 0; }
+.decided time { font-family: var(--font-mono); color: var(--muted); }
+
+.cond { display: grid; gap: 16px; }
+.cond.collapsed > .card { display: none; }
+.cond-note { border: 1px dashed var(--line); border-radius: var(--radius); padding: 12px 14px; font-size: var(--step--1); color: var(--muted); }
+
+.task { display: grid; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.task:last-child { border-bottom: 0; padding-bottom: 0; }
+.task b { font-weight: 600; }
+
+.ask { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+.qlist { display: grid; gap: 12px; }
+.qtext { font-weight: 600; white-space: pre-wrap; }
+.qmeta { display: flex; gap: 10px; align-items: center; font-size: var(--step--1); color: var(--muted); }
+.pill { font: 500 10px/1 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; padding: 4px 7px; border-radius: 999px; border: 1px solid currentColor; }
+.pill.open { color: var(--gate); background: var(--gate-soft); }
+.pill.answered { color: var(--done); background: var(--done-soft); }
+.reply { border-left: 3px solid var(--line); padding-left: 10px; display: grid; gap: 4px; white-space: pre-wrap; }
+.reply.Claude { border-color: var(--p-claude); }
+.reply.Codex { border-color: var(--p-codex); }
+.who { font: 500 11px/1 var(--font-mono); letter-spacing: .04em; text-transform: uppercase; }
+.who.claude { color: var(--p-claude); } .who.codex { color: var(--p-codex); }
+.empty { color: var(--muted); font-size: var(--step--1); border: 1px dashed var(--line); border-radius: var(--radius); padding: 14px; }
+
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); flex: none; }
+.dot.ok { background: var(--done); } .dot.warn { background: var(--gap); } .dot.busy { background: var(--gate); }
+.state { display: flex; gap: 8px; align-items: baseline; }
+.warnbox { background: var(--gap-soft); color: var(--gap); border: 1px solid var(--gap); border-radius: var(--radius); padding: 12px 14px; font-weight: 500; }
+.export { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+#export-text { min-height: 200px; font-family: var(--font-mono); font-size: var(--step--1); }
+footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid var(--line); padding-top: 16px; }
+
+@media (max-width: 900px) {
+  .page { grid-template-columns: 1fr; gap: 24px; }
+  nav.index { position: static; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  nav.index .status { grid-column: 1 / -1; }
+  .decided div { grid-template-columns: 1fr; gap: 2px; }
+}
+@media (max-width: 520px) { .ask { grid-template-columns: 1fr; } .dhead { grid-template-columns: 1fr; } .dhead .cid { grid-row: auto; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } html { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <nav class="index" aria-label="Sections">
+    <a href="#how" data-sec="how"><b>0</b>How this works</a>
+    <a href="#done" data-sec="done"><b>✔</b>Already decided</a>
+    <a href="#features" data-sec="features"><b>F</b>Your features</a>
+    <a href="#c1" data-sec="c1"><b>C1</b>Evidence</a>
+    <a href="#c2" data-sec="c2"><b>C2</b>Product direction</a>
+    <a href="#c3" data-sec="c3"><b>C3</b>First scope</a>
+    <a href="#c4" data-sec="c4"><b>C4</b>Home's job</a>
+    <a href="#c5" data-sec="c5"><b>C5</b>Slice A scope</a>
+    <a href="#c6" data-sec="c6"><b>C6</b>Failure rule</a>
+    <a href="#c7" data-sec="c7"><b>C7</b>Visuals</a>
+    <a href="#c8" data-sec="c8"><b>C8</b>Wording</a>
+    <a href="#later" data-sec="later"><b>L</b>Later, optional</a>
+    <a href="#task" data-sec="task"><b>T</b>Task test</a>
+    <a href="#ask" data-sec="ask"><b>Q</b>Ask us</a>
+    <div class="status" role="status">
+      <div class="state"><i class="dot busy" id="status-dot"></i><span id="status-text">Connecting to the shared store…</span></div>
+      <button class="btn ghost small" id="jump-export" type="button">Copy everything</button>
+    </div>
+  </nav>
+
+  <main>
+    <header>
+      <div class="eyebrow">SDR Agent · owner decisions · revision <span id="rev"></span></div>
+      <h1>Your open decisions, in one place</h1>
+      <p class="lede">The same questions had started to appear on several pages. Each one now has one home here. Start with your feature list, then the cards in order. Cards C4 to C8 only apply if you pick slice A.</p>
+      <p class="warnbox" id="warn" hidden></p>
+    </header>
+
+    <section id="how" aria-labelledby="h-how">
+      <div class="sec-head"><div class="eyebrow">0</div><h2 id="h-how">How this works</h2>
+        <p>Everything you type saves as you go. Claude can read it directly, so you don't need to paste it. When you are done, or have asked something, tell Claude "check the decisions page". Your answers are input, not approvals: each gate is still approved by you in chat and written into a gate record.</p>
+      </div>
+      <div class="card">
+        <b>The pages these questions came from</b>
+        <div class="links">
+          <a href="https://claude.ai/artifact/RdkibwG4nrjQWAceXivSNF" target="_blank" rel="noopener">Discovery packet (brief, story map, slices)</a>
+          <a href="https://claude.ai/artifact/KpUYa7ieWDBCLuJ2PJURBX" target="_blank" rel="noopener">Slice A home prototype</a>
+          <a href="https://claude.ai/artifact/ScAk7wEuMjD5nPUZdWLKGj" target="_blank" rel="noopener">SDLC map</a>
+          <a href="https://claude.ai/artifact/VPxyAcKfDwaVedSkmcrqWu" target="_blank" rel="noopener">Shaping discussion</a>
+        </div>
+        <p class="note">Each card lists the old question IDs it replaces, and the gate it feeds. If you already answered one of those old questions somewhere else, you can just say so in the card.</p>
+      </div>
+    </section>
+
+    <section id="done" aria-labelledby="h-done">
+      <div class="sec-head"><div class="eyebrow">Already decided</div><h2 id="h-done">You don't need to answer these again</h2></div>
+      <div class="card decided">
+        <div><time>Oct 8</time><span><b>Scope (D-010):</b> a first-touch copilot for solo founders; desktop only; emails captured, never sent; HubSpot optional.</span></div>
+        <div><time>Oct 8</time><span><b>Keep your build-first quote</b> in the public journal (D-013).</span></div>
+        <div><time>Oct 8 13:30</time><span><b>Schedule:</b> seven days a week; design days Oct 8 and 9; work begins Saturday Oct 10 (D-014, D-015).</span></div>
+        <div><time>Oct 8 13:30</time><span><b>Validation:</b> one founder conversation is enough (D-016). <b>Review:</b> notes on a page, pasted into chat (D-017). <b>Quoting</b> your own words is allowed (D-018).</span></div>
+        <div><time>Oct 8 14:00</time><span><b>Gate G0 passed:</b> you accepted the charter (ADR-0014) and the seven-step shaping method; building starts Saturday with one narrow slice, after its own G1 to G5 (D-019, D-020).</span></div>
+        <div><time>Oct 8 13:15–13:32</time><span><b>From the shaping page:</b> agree with the shared points; screens designed early, as Codex suggested; describe the product with domain-driven design too; you already know the MVP and post-MVP features; no attendee install, the workshop is a live demo plus the documented build story with its missteps.</span></div>
+      </div>
+    </section>
+
+    <section id="features" aria-labelledby="h-feat">
+      <div class="sec-head"><div class="eyebrow">F · primary input for G1 and G2</div><h2 id="h-feat">Your MVP and post-MVP features</h2>
+        <p>You said you already know what the MVP should do and which premium features could follow. List them here in your own words. This list becomes the starting point for the must-list; our draft brief and story map are checked against it, not the other way round. Rough is fine.</p>
+      </div>
+      <div class="card">
+        <b>MVP features (for the Nov 6 workshop release)</b>
+        <div class="rows" data-rows="features-mvp" data-label="MVP features" data-cols='[{"k":"feature","h":"Feature"},{"k":"why","h":"Why it matters"},{"k":"priority","h":"Must or should","options":["","Must","Should"]}]' data-min="5"></div>
+        <button class="btn ghost small" type="button" data-add-row="features-mvp">Add a row</button>
+      </div>
+      <div class="card">
+        <b>Premium features after the MVP</b>
+        <div class="rows" data-rows="features-post" data-label="Post-MVP premium features" data-cols='[{"k":"feature","h":"Feature"},{"k":"why","h":"Why someone would pay for it"}]' data-min="3"></div>
+        <button class="btn ghost small" type="button" data-add-row="features-post">Add a row</button>
+      </div>
+      <div class="card field">
+        <label class="qlabel" for="f-features-note">Anything else about the feature set: order, must-not-cut items, things you are unsure about</label>
+        <textarea id="f-features-note" data-field="features-note" data-label="Feature notes"></textarea>
+      </div>
+    </section>
+
+    <section id="c1" aria-labelledby="h-c1">
+      <div class="card dcard">
+        <div class="dhead"><span class="cid">C1</span><h2 id="h-c1">Evidence: the founder conversation</h2>
+          <div class="meta"><span class="chip gate">Feeds G1</span><span>Replaces: SDLC map Q6 · discovery PQ-6 · founder fields on the discovery page</span></div></div>
+        <p>Share a short summary of your conversation with the other founder and what kind of evidence it is. Or describe your own outbound routine and accept that outside-user evidence is limited for this first scope. Since your feature list is the main input, this only supports or challenges it.</p>
+        <p class="rec"><b>Our suggestion:</b> a few lines of summary if you have them handy, leaving out anything personal about the founder (a summary goes into the public repository). If not, choose your own routine and the evidence limit; that is honest and fine for slice A.</p>
+        <fieldset data-field="c1-route" data-label="C1 evidence route">
+          <legend>Which do you want to do?</legend>
+          <div class="choices">
+            <label><input type="radio" name="c1r" value="Paste a summary of the founder conversation"> Paste a summary of the founder conversation</label>
+            <label><input type="radio" name="c1r" value="Use my own routine and accept the evidence limit"> Use my own routine and accept the evidence limit</label>
+            <label><input type="radio" name="c1r" value="Both"> Both</label>
+          </div>
+        </fieldset>
+        <fieldset data-field="c1-kind" data-label="C1 kind of founder evidence">
+          <legend>If you share the founder notes: what kind of evidence is it?</legend>
+          <div class="choices">
+            <label><input type="radio" name="c1k" value="Interview (they described their work)"> Interview</label>
+            <label><input type="radio" name="c1k" value="Reaction to a demo"> Reaction to a demo</label>
+            <label><input type="radio" name="c1k" value="I watched them do the task"> I watched them do the task</label>
+            <label><input type="radio" name="c1k" value="A mix"> A mix</label>
+          </div>
+        </fieldset>
+        <div class="field"><label class="qlabel" for="f-c1-notes">Founder conversation summary</label><p class="note">How they do outbound today, what is slow or painful, what they would need to trust a drafted email. Only what they would be happy to see published.</p><textarea id="f-c1-notes" data-field="c1-notes" data-label="C1 founder conversation summary" style="min-height:120px"></textarea></div>
+        <div class="field"><label class="qlabel" for="f-c1-own">Your own routine today</label><p class="note">Tools, steps, how long a batch of first emails takes you, what annoys you.</p><textarea id="f-c1-own" data-field="c1-own" data-label="C1 owner's own routine"></textarea></div>
+      </div>
+    </section>
+
+    <section id="c2" aria-labelledby="h-c2">
+      <div class="card dcard">
+        <div class="dhead"><span class="cid">C2</span><h2 id="h-c2">Product direction: the brief and story map</h2>
+          <div class="meta"><span class="chip gate">Feeds G1</span><span>Replaces: discovery PQ-1, PQ-2, PQ-3 and the brief and story map verdicts</span></div></div>
+        <p>Does the <a href="https://claude.ai/artifact/RdkibwG4nrjQWAceXivSNF" target="_blank" rel="noopener">discovery packet</a> describe what you want founders to hear on Nov 6? It has been updated for your shaping notes: no attendee install, the build story as a deliverable (OUT-8), your feature list as the main input, and a domain-language section.</p>
+        <fieldset data-field="c2-brief" data-label="C2 brief verdict">
+          <legend>The outcome brief</legend>
+          <div class="choices">
+            <label><input type="radio" name="c2b" value="Approve"> Approve</label>
+            <label><input type="radio" name="c2b" value="Approve with the changes below"> Approve with the changes below</label>
+            <label><input type="radio" name="c2b" value="Needs another round"> Needs another round</label>
+          </div>
+        </fieldset>
+        <fieldset data-field="c2-story" data-label="C2 story map verdict">
+          <legend>The story map</legend>
+          <div class="choices">
+            <label><input type="radio" name="c2s" value="Approve"> Approve</label>
+            <label><input type="radio" name="c2s" value="Approve with the changes below"> Approve with the changes below</label>
+            <label><input type="radio" name="c2s" value="Needs another round"> Needs another round</label>
+          </div>
+        </fieldset>
+        <div class="field"><label class="qlabel" for="f-c2-promise">Is the one-sentence promise right? If not, how would you say it?</label><textarea id="f-c2-promise" data-field="c2-promise" data-label="C2 promise (PQ-1)"></textarea></div>
+        <div class="field"><label class="qlabel" for="f-c2-outcome">Which outcome matters most to you? Any to cut or add?</label><textarea id="f-c2-outcome" data-field="c2-outcomes" data-label="C2 outcomes (PQ-2)"></textarea></div>
+        <div class="field"><label class="qlabel" for="f-c2-ng">Any "not in the workshop" item you won't leave out?</label><textarea id="f-c2-ng" data-field="c2-nongoals" data-label="C2 non-goals to keep (PQ-3)"></textarea></div>
+        <div class="field"><label class="qlabel" for="f-c2-changes">Other changes to the brief or story map</label><textarea id="f-c2-changes" data-field="c2-changes" data-label="C2 other changes"></textarea></div>
+      </div>
+    </section>
+
+    <section id="c3" aria-labelledby="h-c3">
+      <div class="card dcard">
+        <div class="dhead"><span class="cid">C3</span><h2 id="h-c3">First scope: which slice on Saturday?</h2>
+          <div class="meta"><span class="chip gate">Names the scope for G2 to G5</span><span>Replaces: discovery first-slice choice · slice A OQ-1</span></div></div>
+        <p>Choosing a slice names what we plan and test next. It is not permission to build; that is G5.</p>
+        <p class="rec"><b>Our suggestion: A</b>, the operator shell and home screen. It changes no business rules or data, everything after it lives inside it, and its plan has already passed Codex's review for G2 and G3. It is a starter, not a full journey.</p>
+        <fieldset data-field="c3-slice" data-label="C3 first slice">
+          <legend>Your choice</legend>
+          <div class="choices">
+            <label><input type="radio" name="c3" value="A. Operator shell and home"> A. Operator shell and home</label>
+            <label><input type="radio" name="c3" value="B. Review workspace"> B. Review workspace</label>
+            <label><input type="radio" name="c3" value="C. Intake (CSV or add-by-hand)"> C. Intake (CSV or add-by-hand)</label>
+            <label><input type="radio" name="c3" value="Something else (see note)"> Something else</label>
+          </div>
+        </fieldset>
+        <div class="field"><label class="qlabel" for="f-c3-note">Why, or what you would change</label><textarea id="f-c3-note" data-field="c3-note" data-label="C3 note"></textarea></div>
+      </div>
+    </section>
+
+    <div class="cond" id="slice-a-cards">
+      <p class="cond-note" id="cond-note" hidden>Cards C4 to C8 apply only to slice A. They are hidden because you picked another slice; pick A in C3 to see them again. Anything you entered is kept.</p>
+
+      <section id="c4" class="card dcard" aria-labelledby="h-c4">
+        <div class="dhead"><span class="cid">C4</span><h2 id="h-c4">If slice A: the home screen's job</h2>
+          <div class="meta"><span class="chip gate">Feeds G2</span><span>Replaces: discovery PQ-4 · slice A OQ-4</span></div></div>
+        <div class="field"><label class="qlabel" for="f-c4-first">When you open the app, what should you notice first?</label><textarea id="f-c4-first" data-field="c4-first" data-label="C4 what to notice first"></textarea></div>
+        <div class="field"><label class="qlabel" for="f-c4-reach">And which existing page should you be able to reach from there in one click?</label><textarea id="f-c4-reach" data-field="c4-reach" data-label="C4 page to reach"></textarea></div>
+      </section>
+
+      <section id="c5" class="card dcard" aria-labelledby="h-c5">
+        <div class="dhead"><span class="cid">C5</span><h2 id="h-c5">If slice A: what it covers</h2>
+          <div class="meta"><span class="chip gate">Feeds G2</span><span>Replaces: slice A OQ-2, OQ-3, OQ-7, OQ-10</span></div></div>
+        <p>Slice A is read-only: 18 requirements, ranked must or should, with no new write, retry or budget actions. Three things are deliberately left out. Saying you want one of them back is fine; it becomes new, separately reviewed work.</p>
+        <fieldset data-field="c5-accept" data-label="C5 slice A requirements and ranking">
+          <legend>The requirement set and its must/should ranking (agent activity, model card and pipeline are "should")</legend>
+          <div class="choices">
+            <label><input type="radio" name="c5a" value="Accept"> Accept</label>
+            <label><input type="radio" name="c5a" value="Accept with the changes below"> Accept with the changes below</label>
+            <label><input type="radio" name="c5a" value="Let's discuss"> Let's discuss</label>
+          </div>
+        </fieldset>
+        <fieldset data-field="c5-budget" data-label="C5 model and budget visibility (OQ-2)">
+          <legend>Model and budget on the home screen: admins only?</legend>
+          <div class="choices">
+            <label><input type="radio" name="c5b" value="Admins only"> Admins only (recommended)</label>
+            <label><input type="radio" name="c5b" value="Show to reviewers too (new reviewed work)"> Show to reviewers too (new work)</label>
+          </div>
+        </fieldset>
+        <fieldset data-field="c5-unknown" data-label="C5 unknown model calls (OQ-3)">
+          <legend>Model calls with an unknown outcome: is seeing them per run enough?</legend>
+          <div class="choices">
+            <label><input type="radio" name="c5u" value="Per run is enough"> Per run is enough (recommended)</label>
+            <label><input type="radio" name="c5u" value="I need a count on home (new work)"> I need a count on home (new work)</label>
+          </div>
+        </fieldset>
+        <fieldset data-field="c5-reconcile" data-label="C5 manual reconciliation (OQ-10)">
+          <legend>A button to settle an unknown delivery by hand? (Today a background job settles them; no screen does.)</legend>
+          <div class="choices">
+            <label><input type="radio" name="c5r" value="Not needed now"> Not needed now (recommended)</label>
+            <label><input type="radio" name="c5r" value="Later, as its own gated feature"> Later, as its own gated feature</label>
+            <label><input type="radio" name="c5r" value="Needed for the workshop"> Needed for the workshop</label>
+          </div>
+        </fieldset>
+        <div class="field"><label class="qlabel" for="f-c5-changes">Changes</label><textarea id="f-c5-changes" data-field="c5-changes" data-label="C5 changes"></textarea></div>
+      </section>
+
+      <section id="c6" class="card dcard" aria-labelledby="h-c6">
+        <div class="dhead"><span class="cid">C6</span><h2 id="h-c6">If slice A: when a read fails</h2>
+          <div class="meta"><span class="chip gate">Feeds G2</span><span>Replaces: slice A OQ-8</span></div></div>
+        <p>If a permission check or the audit record fails, the whole home screen is always withheld. The question is only about the admin's model-status card failing for a technical reason.</p>
+        <fieldset data-field="c6-policy" data-label="C6 read-failure rule (OQ-8)">
+          <legend>When only the model-status read fails</legend>
+          <div class="choices">
+            <label><input type="radio" name="c6" value="Only that card shows Model status unavailable"> Only that card shows "Model status unavailable" (recommended)</label>
+            <label><input type="radio" name="c6" value="Withhold the whole home screen"> Withhold the whole home screen</label>
+          </div>
+        </fieldset>
+        <div class="field"><label class="qlabel" for="f-c6-note">Note</label><textarea id="f-c6-note" data-field="c6-note" data-label="C6 note"></textarea></div>
+      </section>
+
+      <section id="c7" class="card dcard" aria-labelledby="h-c7">
+        <div class="dhead"><span class="cid">C7</span><h2 id="h-c7">If slice A: the visual treatment</h2>
+          <div class="meta"><span class="chip gate">Feeds G3</span><span>Replaces: discovery PQ-5 · slice A OQ-6</span></div></div>
+        <p>Either way, you still click through the prototype as a task test (section T) before G3.</p>
+        <fieldset data-field="c7-visual" data-label="C7 visual treatment (PQ-5, OQ-6)">
+          <legend>If the visual direction from the design days isn't settled by Friday night</legend>
+          <div class="choices">
+            <label><input type="radio" name="c7" value="Provisional styling is fine for slice A"> Provisional styling is fine for slice A</label>
+            <label><input type="radio" name="c7" value="Wait for the visual direction"> Wait for the visual direction</label>
+          </div>
+        </fieldset>
+        <div class="field"><label class="qlabel" for="f-c7-direction">Colours, fonts or references you already have in mind</label><textarea id="f-c7-direction" data-field="c7-direction" data-label="C7 visual direction notes"></textarea></div>
+      </section>
+
+      <section id="c8" class="card dcard" aria-labelledby="h-c8">
+        <div class="dhead"><span class="cid">C8</span><h2 id="h-c8">If slice A: two labels</h2>
+          <div class="meta"><span class="chip gate">Feeds G3</span><span>Replaces: slice A OQ-5, OQ-9</span></div></div>
+        <fieldset data-field="c8-home" data-label="C8 navigation label (OQ-5)">
+          <legend>Navigation label for the start page</legend>
+          <div class="choices">
+            <label><input type="radio" name="c8h" value="Home"> Home</label>
+            <label><input type="radio" name="c8h" value="Dashboard"> Dashboard</label>
+          </div>
+        </fieldset>
+        <fieldset data-field="c8-outbox" data-label="C8 delivery card label (OQ-9)">
+          <legend>The delivery card (nothing is actually sent)</legend>
+          <div class="choices">
+            <label><input type="radio" name="c8o" value="Captured emails (outbox)"> Captured emails (outbox)</label>
+            <label><input type="radio" name="c8o" value="Outbox"> Outbox</label>
+            <label><input type="radio" name="c8o" value="Something else (see note)"> Something else</label>
+          </div>
+        </fieldset>
+        <div class="field"><label class="qlabel" for="f-c8-note">Note</label><textarea id="f-c8-note" data-field="c8-note" data-label="C8 note"></textarea></div>
+      </section>
+    </div>
+
+    <section id="later" aria-labelledby="h-later">
+      <div class="sec-head"><div class="eyebrow">L · optional now</div><h2 id="h-later">Later, but answer if you like</h2><p>Neither is needed for slice A. Each has one home here.</p></div>
+      <div class="card">
+        <fieldset data-field="l-tooling" data-label="Planning tool (SDLC Q7, shaping decision B)">
+          <legend>Planning pages: the git workbook alone, or add a design tool? <span class="muted" style="font-weight:400">(replaces SDLC Q7 and shaping decision B)</span></legend>
+          <div class="choices">
+            <label><input type="radio" name="lt" value="Workbook pages in git are enough"> Workbook pages in git are enough (recommended)</label>
+            <label><input type="radio" name="lt" value="Add a design tool such as Figma or Penpot"> Add a design tool (Figma, Penpot)</label>
+          </div>
+        </fieldset>
+        <fieldset data-field="l-intake" data-label="Workshop intake path (PQ-7)">
+          <legend>For the workshop's core journey, how do leads come in? <span class="muted" style="font-weight:400">(replaces PQ-7; decided at that slice's G2)</span></legend>
+          <div class="choices">
+            <label><input type="radio" name="li" value="CSV upload"> CSV upload</label>
+            <label><input type="radio" name="li" value="Add by hand"> Add by hand</label>
+            <label><input type="radio" name="li" value="Not sure yet"> Not sure yet</label>
+          </div>
+        </fieldset>
+        <div class="field"><label class="qlabel" for="f-l-journey">The smallest journey the workshop must show, from leads in to a captured email</label><textarea id="f-l-journey" data-field="l-journey" data-label="Smallest workshop journey"></textarea></div>
+      </div>
+    </section>
+
+    <section id="task" aria-labelledby="h-task">
+      <div class="sec-head"><div class="eyebrow">T · evidence for G3 (slice A)</div><h2 id="h-task">Task test: the slice A prototype</h2>
+        <p>Open the <a href="https://claude.ai/artifact/KpUYa7ieWDBCLuJ2PJURBX" target="_blank" rel="noopener">home prototype</a> and try each task without help. Record how it went. This is evidence for G3; the G3 approval itself is still given in chat.</p>
+      </div>
+      <div class="card" id="tasks"></div>
+    </section>
+
+    <section id="ask" aria-labelledby="h-ask">
+      <div class="sec-head"><div class="eyebrow">Q</div><h2 id="h-ask">Ask us a question</h2><p>Ask anything about these decisions, then tell Claude to check the decisions page. Claude or Codex answers here.</p></div>
+      <div class="card">
+        <div class="ask">
+          <div class="field"><label class="qlabel" for="f-ask">Your question</label><textarea id="f-ask" placeholder="For example: what would showing the budget to reviewers involve?"></textarea></div>
+          <button class="btn" id="ask-btn" type="button">Ask</button>
+        </div>
+        <p class="note" id="ask-note"></p>
+      </div>
+      <div class="qlist" id="qlist"><p class="empty">No questions yet. Questions you ask appear here with their answers.</p></div>
+    </section>
+
+    <section id="export" aria-labelledby="h-exp">
+      <div class="sec-head"><h2 id="h-exp">Copy everything</h2><p>All your answers and our replies as plain text, stamped with this page's revision. Use it if the shared store is unavailable, or if you prefer chat.</p></div>
+      <div class="export">
+        <button class="btn" id="copy" type="button">Copy for Claude</button>
+        <button class="btn ghost" id="show" type="button">Show text</button>
+        <span class="note" id="copy-status" role="status"></span>
+      </div>
+      <textarea id="export-text" readonly hidden aria-label="Everything you entered, as text"></textarea>
+    </section>
+
+    <footer>Source: docs/product/decisions/index.html in the SDR Agent repository. Your answers are input, not approvals. Claude commits a summary of them to git after you have seen it; the repository is public, so private material stays out unless you say otherwise.</footer>
+  </main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var REVISION = "2026-10-08.1";
+  var $ = function (id) { return document.getElementById(id); };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  $("rev").textContent = REVISION;
+
+  var TASKS = [
+    { id: "t1", t: "As admin, normal state: find the draft you would review first and open it." },
+    { id: "t2", t: "Find an email whose outcome is unknown and get to where you can inspect it." },
+    { id: "t3", t: "Switch the model state to \"Status read failed\". What do you understand has happened, and what would you do?" },
+    { id: "t4", t: "Switch the role to Auditor. Is anything shown that an auditor should not see, or missing that they need?" },
+    { id: "t5", t: "Try the empty and stale states. Is it clear what is going on and what to do next?" }
+  ];
+  $("tasks").innerHTML = TASKS.map(function (k, i) {
+    return '<div class="task"><b>' + (i + 1) + ". " + esc(k.t) + '</b>' +
+      '<fieldset data-field="task-' + k.id + '" data-label="Task ' + (i + 1) + ' result"><legend class="note" style="font-weight:400">How did it go?</legend><div class="choices">' +
+      ["Did it without help", "Did it, but hesitated", "Could not do it"].map(function (v) { return '<label><input type="radio" name="tr-' + k.id + '" value="' + esc(v) + '"> ' + esc(v) + "</label>"; }).join("") +
+      '</div></fieldset><textarea data-field="task-' + k.id + '-note" data-label="Task ' + (i + 1) + ' note" aria-label="Task ' + (i + 1) + ' note" placeholder="What you noticed"></textarea></div>';
+  }).join("");
+
+  // ---------- state ----------
+  var LOCAL = "sdr-owner-decisions-v1";
+  var values = {};
+  var questions = [];
+  var db = null, mode = "connecting";
+  var timers = {}, chains = {};
+
+  function setStatus(kind, text) { $("status-dot").className = "dot " + kind; $("status-text").textContent = text; }
+  function warn(text) { $("warn").textContent = text; $("warn").hidden = !text; }
+  function loadLocal() {
+    try { var raw = window.localStorage.getItem(LOCAL); if (raw) { var o = JSON.parse(raw); values = o.values || {}; questions = o.questions || []; } return true; }
+    catch (e) { return false; }
+  }
+  function saveLocal() {
+    try { window.localStorage.setItem(LOCAL, JSON.stringify({ revision: REVISION, values: values, questions: questions })); return true; }
+    catch (e) { return false; }
+  }
+
+  // ---------- feature rows: stored as a JSON string in one field ----------
+  function parseRows(v) { try { var r = JSON.parse(v || "[]"); return Array.isArray(r) ? r : []; } catch (e) { return []; } }
+  function rowHosts() { return document.querySelectorAll("[data-rows]"); }
+  function renderRows(host) {
+    var key = host.getAttribute("data-rows");
+    var cols = JSON.parse(host.getAttribute("data-cols"));
+    var min = +host.getAttribute("data-min") || 3;
+    var rows = parseRows(values[key]);
+    while (rows.length < min) rows.push({});
+    var table = document.createElement("table");
+    var head = document.createElement("tr");
+    head.appendChild(document.createElement("th"));
+    cols.forEach(function (c) { var th = document.createElement("th"); th.textContent = c.h; head.appendChild(th); });
+    var thead = document.createElement("thead"); thead.appendChild(head); table.appendChild(thead);
+    var body = document.createElement("tbody");
+    rows.forEach(function (r, i) {
+      var tr = document.createElement("tr");
+      var n = document.createElement("td"); n.className = "n"; n.textContent = String(i + 1); tr.appendChild(n);
+      cols.forEach(function (c) {
+        var td = document.createElement("td");
+        var input;
+        if (c.options) {
+          input = document.createElement("select");
+          c.options.forEach(function (o) { var op = document.createElement("option"); op.value = o; op.textContent = o || "Choose"; input.appendChild(op); });
+        } else { input = document.createElement("input"); input.type = "text"; }
+        input.value = r[c.k] || "";
+        input.setAttribute("aria-label", c.h + " " + (i + 1));
+        input.dataset.rowKey = key; input.dataset.rowIndex = String(i); input.dataset.rowCol = c.k;
+        td.appendChild(input); tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    host.textContent = "";
+    host.appendChild(table);
+  }
+  function rowsChanged(el) {
+    var key = el.dataset.rowKey, i = +el.dataset.rowIndex, col = el.dataset.rowCol;
+    var host = document.querySelector('[data-rows="' + key + '"]');
+    var rows = parseRows(values[key]);
+    var count = host.querySelectorAll("tbody tr").length;
+    while (rows.length < count) rows.push({});
+    rows[i] = rows[i] || {};
+    rows[i][col] = el.value;
+    onChange(key, JSON.stringify(rows));
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest && e.target.closest("[data-add-row]"); if (!b) return;
+    var key = b.getAttribute("data-add-row");
+    var host = document.querySelector('[data-rows="' + key + '"]');
+    var rows = parseRows(values[key]);
+    var count = host.querySelectorAll("tbody tr").length;
+    while (rows.length < count) rows.push({});
+    rows.push({});
+    values[key] = JSON.stringify(rows);
+    renderRows(host);
+  });
+
+  // ---------- plain fields ----------
+  function fieldEls() { return document.querySelectorAll("[data-field]"); }
+  function applyValue(el, v) {
+    if (el.tagName === "FIELDSET") el.querySelectorAll("input[type=radio]").forEach(function (r) { r.checked = r.value === v; });
+    else if (document.activeElement !== el && el.value !== v) el.value = v || "";
+  }
+  function applyAll() {
+    fieldEls().forEach(function (el) { applyValue(el, values[el.getAttribute("data-field")] || ""); });
+    rowHosts().forEach(function (h) { if (!h.contains(document.activeElement)) renderRows(h); });
+    sliceGate(); markAnswered();
+  }
+
+  // C4 to C8 apply only when slice A is chosen (or nothing is chosen yet).
+  function sliceGate() {
+    var v = values["c3-slice"] || "";
+    var other = v && v.charAt(0) !== "A";
+    $("slice-a-cards").classList.toggle("collapsed", !!other);
+    $("cond-note").hidden = !other;
+  }
+
+  function hasValue(key) {
+    var v = values[key] || "";
+    if (v.charAt(0) === "[") return parseRows(v).some(function (r) { return Object.keys(r).some(function (k) { return String(r[k] || "").trim(); }); });
+    return !!v.trim();
+  }
+  function markAnswered() {
+    document.querySelectorAll("nav.index a[data-sec]").forEach(function (a) {
+      var sec = $(a.getAttribute("data-sec")); if (!sec) return;
+      var has = false;
+      sec.querySelectorAll("[data-field]").forEach(function (el) { if (hasValue(el.getAttribute("data-field"))) has = true; });
+      sec.querySelectorAll("[data-rows]").forEach(function (el) { if (hasValue(el.getAttribute("data-rows"))) has = true; });
+      if (a.getAttribute("data-sec") === "ask" && questions.length) has = true;
+      a.classList.toggle("answered", has);
+    });
+  }
+
+  function persist(id) {
+    var v = values[id] || "";
+    if (mode === "db") {
+      setStatus("busy", "Saving…");
+      chains[id] = (chains[id] || Promise.resolve()).then(function () {
+        return db.doc("responses/" + id).set({ field: id, value: v, updatedAt: Date.now(), revision: REVISION });
+      }).then(function () { setStatus("ok", "Saved. Claude can read your answers."); },
+        function (e) { setStatus("warn", "Not saved (" + (e && e.code || "error") + "). Use Copy everything before leaving."); });
+    } else {
+      var ok = saveLocal();
+      setStatus(ok ? "busy" : "warn", ok ? "Saved in this browser only. Claude cannot see it; use Copy everything." : "Not saved anywhere. Use Copy everything before leaving.");
+    }
+  }
+  function onChange(id, v) {
+    values[id] = v; markAnswered();
+    clearTimeout(timers[id]);
+    timers[id] = setTimeout(function () { timers[id] = null; persist(id); }, 700);
+  }
+  document.addEventListener("input", function (e) {
+    var t = e.target;
+    if (t.dataset && t.dataset.rowKey) { rowsChanged(t); return; }
+    var el = t.closest && t.closest("[data-field]");
+    if (!el || el.tagName === "FIELDSET") return;
+    onChange(el.getAttribute("data-field"), el.value);
+  });
+  document.addEventListener("change", function (e) {
+    var t = e.target;
+    if (t.dataset && t.dataset.rowKey && t.tagName === "SELECT") { rowsChanged(t); return; }
+    if (t.type !== "radio") return;
+    var fs = t.closest("fieldset[data-field]"); if (!fs) return;
+    var id = fs.getAttribute("data-field");
+    values[id] = t.value; sliceGate(); markAnswered(); persist(id);
+  });
+
+  // ---------- questions ----------
+  function fmtTime(t) { try { return new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; } }
+  function renderQuestions() {
+    var list = $("qlist");
+    if (!questions.length) { list.innerHTML = '<p class="empty">No questions yet. Questions you ask appear here with their answers.</p>'; markAnswered(); return; }
+    list.textContent = "";
+    questions.slice().sort(function (a, b) { return (b.askedAt || 0) - (a.askedAt || 0); }).forEach(function (q) {
+      var card = document.createElement("div"); card.className = "card";
+      var meta = document.createElement("div"); meta.className = "qmeta";
+      var answered = q.answers && q.answers.length;
+      var pill = document.createElement("span"); pill.className = "pill " + (answered ? "answered" : "open"); pill.textContent = answered ? "Answered" : "Waiting for an answer";
+      var when = document.createElement("span"); when.textContent = fmtTime(q.askedAt);
+      meta.appendChild(pill); meta.appendChild(when);
+      var text = document.createElement("p"); text.className = "qtext"; text.textContent = q.text;
+      card.appendChild(meta); card.appendChild(text);
+      (q.answers || []).forEach(function (a) {
+        var by = a.by === "Codex" ? "Codex" : "Claude";
+        var r = document.createElement("div"); r.className = "reply " + by;
+        var head = document.createElement("span"); head.className = "who " + by.toLowerCase(); head.textContent = by;
+        var body = document.createElement("span"); body.textContent = a.text;
+        r.appendChild(head); r.appendChild(body); card.appendChild(r);
+      });
+      list.appendChild(card);
+    });
+    markAnswered();
+  }
+  $("ask-btn").addEventListener("click", function () {
+    var text = $("f-ask").value.trim(); if (!text) return;
+    var q = { text: text, askedAt: Date.now(), status: "open", answers: [], revision: REVISION };
+    var btn = $("ask-btn"); btn.disabled = true;
+    var done = function (msg) { btn.disabled = false; $("ask-note").textContent = msg; };
+    if (mode === "db") {
+      db.collection("questions").add(q).then(function () { $("f-ask").value = ""; done("Sent. Tell Claude in chat to check the decisions page."); },
+        function (e) { done("Could not send (" + (e && e.code || "error") + "). Ask in chat instead."); });
+    } else {
+      q.id = "local-" + q.askedAt; questions.push(q); saveLocal(); renderQuestions();
+      $("f-ask").value = ""; done("Kept in this browser only. Claude cannot see it until you copy everything into chat.");
+    }
+  });
+
+  // ---------- export ----------
+  function exportText() {
+    var out = ["SDR Agent owner decisions (page revision " + REVISION + ")", "These answers are input, not approvals. Gates are approved in chat and recorded.", ""];
+    rowHosts().forEach(function (h) {
+      var key = h.getAttribute("data-rows"), cols = JSON.parse(h.getAttribute("data-cols"));
+      var rows = parseRows(values[key]).filter(function (r) { return cols.some(function (c) { return String(r[c.k] || "").trim(); }); });
+      if (rows.length) {
+        out.push(h.getAttribute("data-label") + ":");
+        rows.forEach(function (r) { out.push("  - " + cols.map(function (c) { return c.h + ": " + String(r[c.k] || "").trim(); }).join(" | ")); });
+        out.push("");
+      }
+    });
+    fieldEls().forEach(function (el) {
+      var v = (values[el.getAttribute("data-field")] || "").trim();
+      if (v) out.push(el.getAttribute("data-label") + ":", "   " + v.replace(/\n/g, "\n   "), "");
+    });
+    if (questions.length) {
+      out.push("Questions:");
+      questions.forEach(function (q) {
+        out.push("- " + q.text);
+        (q.answers || []).forEach(function (a) { out.push("  " + (a.by || "Reply") + ": " + String(a.text).replace(/\n/g, "\n    ")); });
+      });
+      out.push("");
+    }
+    if (out.length === 3) out.push("(Nothing entered yet.)");
+    return out.join("\n");
+  }
+  $("copy").addEventListener("click", function () {
+    var text = exportText(), box = $("export-text");
+    box.value = text;
+    var manual = function (m) { box.hidden = false; $("show").textContent = "Hide text"; box.focus(); box.select(); $("copy-status").textContent = m; };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { $("copy-status").textContent = "Copied. Paste it into chat."; }, function () { manual("Copy was blocked. The text is selected below; copy it by hand."); });
+    } else { manual("The text is selected below; copy it by hand."); }
+  });
+  $("show").addEventListener("click", function () {
+    var box = $("export-text"); box.value = exportText(); box.hidden = !box.hidden;
+    $("show").textContent = box.hidden ? "Show text" : "Hide text";
+  });
+  $("jump-export").addEventListener("click", function () { $("export").scrollIntoView({ block: "start" }); $("copy").focus(); });
+
+  // ---------- start: render from browser storage, then light up the shared store ----------
+  var localOk = loadLocal();
+  applyAll(); renderQuestions();
+
+  function fallback(reason) {
+    mode = "local";
+    setStatus(localOk ? "busy" : "warn", localOk ? "Saving in this browser only." : "Not saving anywhere.");
+    warn(reason + " Your answers stay in this browser" + (localOk ? "" : " only until you leave") + ". Use Copy everything and paste it into chat so Claude sees them.");
+  }
+  if (!window.claude || !window.claude.use) { fallback("This copy of the page is not connected to the shared store."); return; }
+  window.claude.use("db").then(function (store) {
+    if (!store) { fallback("The shared store is not available here."); return; }
+    db = store; mode = "db"; warn("");
+    setStatus("ok", "Connected. Answers save for Claude to read.");
+    db.collection("responses").onSnapshot(function (snap) {
+      snap.docs.forEach(function (d) {
+        var b = d.data(); if (!b || typeof b.value !== "string") return;
+        if (timers[d.id]) return; // a local edit to this field is still waiting to save
+        values[d.id] = b.value;
+      });
+      applyAll();
+    }, function (e) { setStatus("warn", "Lost the connection (" + e.code + "). Use Copy everything."); });
+    db.collection("questions").onSnapshot(function (snap) {
+      questions = snap.docs.map(function (d) {
+        var b = d.data() || {};
+        return { id: d.id, text: String(b.text || ""), askedAt: b.askedAt || 0, status: b.status || "open",
+          answers: Array.isArray(b.answers) ? b.answers.map(function (a) { return { by: String(a.by || ""), text: String(a.text || ""), at: a.at || 0 }; }) : [] };
+      });
+      renderQuestions();
+    }, function (e) { setStatus("warn", "Lost the connection (" + e.code + "). Use Copy everything."); });
+  }, function () { fallback("The shared store could not start."); });
+})();
+</script>
+<!-- ARTIFACT-END -->
+</body>
+</html>
