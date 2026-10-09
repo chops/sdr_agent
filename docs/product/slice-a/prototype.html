@@ -28,6 +28,7 @@
   --bad: #a8382c;
   --bad-soft: #f6dfdb;
   --owner: #6a49be;
+  --on-owner: #ffffff;
   --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
   --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
@@ -37,14 +38,14 @@
   :root:not([data-theme="light"]) {
     --bg: #10161b; --surface: #172028; --sunk: #1d2832; --ink: #e3eaef; --muted: #93a3af; --line: #2a3742;
     --accent: #56b4cc; --accent-soft: #173845; --warn: #e2a54c; --warn-soft: #3a2b16;
-    --ok: #63bd88; --ok-soft: #183526; --bad: #e57a6c; --bad-soft: #3d1f1b; --owner: #a78bf0;
+    --ok: #63bd88; --ok-soft: #183526; --bad: #e57a6c; --bad-soft: #3d1f1b; --owner: #a78bf0; --on-owner: #10161b;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #10161b; --surface: #172028; --sunk: #1d2832; --ink: #e3eaef; --muted: #93a3af; --line: #2a3742;
   --accent: #56b4cc; --accent-soft: #173845; --warn: #e2a54c; --warn-soft: #3a2b16;
-  --ok: #63bd88; --ok-soft: #183526; --bad: #e57a6c; --bad-soft: #3d1f1b; --owner: #a78bf0;
+  --ok: #63bd88; --ok-soft: #183526; --bad: #e57a6c; --bad-soft: #3d1f1b; --owner: #a78bf0; --on-owner: #10161b;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -66,7 +67,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .seg { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .seg span { font-size: 13px; color: var(--muted); margin-right: 4px; }
 .seg button { border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 3px 10px; font-size: 13px; }
-.seg button[aria-pressed="true"] { background: var(--owner); border-color: var(--owner); color: #fff; }
+.seg button[aria-pressed="true"] { background: var(--owner); border-color: var(--owner); color: var(--on-owner); }
 .banner-proto { font-size: 13px; color: var(--muted); }
 
 /* Mock app frame */
@@ -147,7 +148,7 @@ footer { font-size: 12px; color: var(--muted); }
   <header style="display:grid;gap:8px">
     <div class="eyebrow">SDR Agent · slice A · low-fidelity prototype · proposed, pending your slice choice</div>
     <h1>Operator shell and home</h1>
-    <p class="muted" style="max-width:72ch">A clickable wireframe of slice A: the navigation shell and a read-only home that answers "what needs me now?". All data is <b>example data</b>, invented for this prototype. Styling uses <b>provisional tokens</b>; the design days set the real look. Use the controls to see each role and state, click through to the pages it links, and leave notes at the bottom.</p>
+    <p class="muted" style="max-width:72ch">A clickable wireframe of slice A: the navigation shell and a read-only home that answers "what needs me now?". All data is <b>example data</b>, invented for this prototype. Styling uses <b>provisional tokens</b>; the design days set the real look. Use the controls to see each role and state, move the clock past a deferral time, click through to the pages it links, and leave notes at the bottom.</p>
   </header>
 
   <div class="controls" role="group" aria-label="Prototype controls">
@@ -155,6 +156,7 @@ footer { font-size: 12px; color: var(--muted); }
     <div class="seg" id="ctl-role"><span>Role</span></div>
     <div class="seg" id="ctl-state"><span>State</span></div>
     <div class="seg" id="ctl-provider"><span>Model</span></div>
+    <div class="seg" id="ctl-clock"><span>Clock</span></div>
   </div>
 
   <div class="frame">
@@ -186,23 +188,27 @@ footer { font-size: 12px; color: var(--muted); }
   <footer id="footer"></footer>
 </div>
 
+<script src="prototype-logic.js"></script>
 <script src="notes.js"></script>
 <script>
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
-  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  var P = window.SliceAProto;
+  if (!P) { $("app-main").innerHTML = '<p class="withheld">prototype-logic.js did not load. Open this page from docs/product/slice-a/ so it sits next to it.</p>'; return; }
+  var esc = P.esc;
 
   // Prototype data for the notes export (notes.js expects openQuestions and phases).
   var D = {
-    meta: { revision: "2026-10-08.1", version: "slice A prototype v0.1 (proposed)" },
+    meta: { revision: "2026-10-08.2", version: "slice A prototype v0.2 (proposed, revised for Codex review of 40f76d4)" },
     openQuestions: [
       { id: "OQ-1", q: "Is slice A your choice for Saturday?" },
       { id: "OQ-2", q: "Model and budget on home for admins only, or also reviewers and auditors (new exposure, own review)?" },
       { id: "OQ-3", q: "Do you need a home-level count of model calls with unknown outcome (new domain work), or is per-run enough?" },
       { id: "OQ-4", q: "What is the single most important thing home must show when you open the app?" },
       { id: "OQ-5", q: "Rename Dashboard to Home in the navigation?" },
-      { id: "OQ-6", q: "Ship with provisional styling if the visual direction is not settled by Friday night?" }
+      { id: "OQ-6", q: "Ship with provisional styling if the visual direction is not settled by Friday night?" },
+      { id: "OQ-7", q: "Do you agree with the must and should ranking of the slice A requirements?" }
     ],
     phases: [
       { id: "SCR-A-1", name: "Navigation shell" },
@@ -211,42 +217,16 @@ footer { font-size: 12px; color: var(--muted); }
     ]
   };
 
-  // EXAMPLE DATA. Invented companies and people; no real records.
-  var EX = {
-    drafts: [
-      { id: "d1", subject: "Your Q3 hiring post and onboarding time", to: "Avery Lin, Quillmark (example)", age: "2 days" },
-      { id: "d2", subject: "Kestrel's new EU region", to: "Sam Ortiz, Kestrel Labs (example)", age: "1 day" },
-      { id: "d3", subject: "Northgate's support backlog", to: "Riya Patel, Northgate (example)", age: "5 hours" }
-    ],
-    replies: [
-      { id: "l7", company: "Brightpath (example)", label: "interested", when: "40 minutes ago" },
-      { id: "l9", company: "Cobalt Works (example)", label: null, when: "3 hours ago" }
-    ],
-    problems: [
-      { id: "f1", severity: "critical", cls: "Delivery outcome unknown", msg: "Capture for Ferngrove (example) did not confirm after a restart.", when: "08:01", subject: "Delivery operation" }
-    ],
-    runs: { active: 1, latest: [
-      { id: "r12", lead: "Quillmark (example)", status: "running", note: "drafting" },
-      { id: "r11", lead: "Ferngrove (example)", status: "budget_exhausted", note: "Stopped: daily model budget reached" },
-      { id: "r10", lead: "Kestrel Labs (example)", status: "succeeded", note: "draft proposed" }
-    ], stopped24h: 1 },
-    sends: { accepted: 4, inflight: 1, deferred: 3, deferredUntil: "08:00", unknown: 1, failed: 0 },
-    pipeline: [
-      { label: "New", n: 6 }, { label: "Researching", n: 2 }, { label: "Qualified", n: 3 },
-      { label: "In outreach", n: 5 }, { label: "Replied", n: 2 }, { label: "Closed", n: 1 }, { label: "Blocked", n: 1 }
-    ],
-    budget: { used: 37, limit: 200, sendCap: 25 }
-  };
-
   var NAV = [
-    { key: "home", label: "Home", path: "/", roles: "all" },
-    { key: "leads", label: "Leads", path: "/leads", roles: "all" },
-    { key: "review", label: "Review queue", path: "/review", roles: "all", count: true },
-    { key: "operations", label: "Runs & operations", path: "/operations", roles: "all" },
-    { key: "audit", label: "Audit", path: "/audit", roles: ["admin", "auditor"] },
-    { key: "admin", label: "Admin", path: "/admin", roles: ["admin"] }
+    { key: "home", label: "Home", roles: "all" },
+    { key: "leads", label: "Leads", roles: "all" },
+    { key: "review", label: "Review queue", roles: "all", count: true },
+    { key: "operations", label: "Runs & operations", roles: "all" },
+    { key: "audit", label: "Audit", roles: ["admin", "auditor"] },
+    { key: "admin", label: "Admin", roles: ["admin"] }
   ];
-  var state = { role: "admin", view: "normal", provider: "fake", page: { key: "home" } };
+  var state = { role: "admin", view: "normal", provider: "fake", now: 7 * 60 + 58, page: { key: "home" } };
+  var refs = [];
 
   function seg(id, name, options) {
     var el = $(id);
@@ -258,108 +238,57 @@ footer { font-size: 12px; color: var(--muted); }
     });
   }
   seg("ctl-role", "role", [["admin", "Admin (you)"], ["reviewer", "Reviewer"], ["auditor", "Auditor"]]);
-  seg("ctl-state", "view", [["normal", "Normal"], ["empty", "Empty"], ["loading", "Loading"], ["error", "Error"], ["stale", "Stale"]]);
+  seg("ctl-state", "view", [["normal", "Normal"], ["empty", "Empty"], ["loading", "Loading"], ["error", "Error"], ["refused", "Refused on refresh"], ["stale", "Stale"]]);
   seg("ctl-provider", "provider", [["fake", "Fake model"], ["real", "Real model"], ["refusing", "Real, refusing"]]);
+  seg("ctl-clock", "now", [[7 * 60 + 58, "07:58"], [8 * 60 + 5, "08:05"]]);
 
   function allowed(item) { return item.roles === "all" || item.roles.indexOf(state.role) !== -1; }
   function go(page) { state.page = page; render(); $("app-main").focus(); }
 
   function renderNav() {
-    $("nav").innerHTML = "";
+    var nav = $("nav"); nav.textContent = "";
     NAV.filter(allowed).forEach(function (item) {
       var b = document.createElement("button"); b.type = "button";
-      var c = item.count && state.view === "normal" ? '<span class="count" aria-label="' + EX.drafts.length + ' waiting">' + EX.drafts.length + "</span>" : "";
-      b.innerHTML = "<span>" + esc(item.label) + "</span>" + c;
+      var label = document.createElement("span"); label.textContent = item.label; b.appendChild(label);
+      if (item.count && state.view === "normal") {
+        var c = document.createElement("span"); c.className = "count"; c.textContent = String(P.EX.drafts.length);
+        c.setAttribute("aria-label", P.EX.drafts.length + " waiting"); b.appendChild(c);
+      }
       if (state.page.key === item.key) b.setAttribute("aria-current", "page");
       b.addEventListener("click", function () { go({ key: item.key }); });
-      $("nav").appendChild(b);
+      nav.appendChild(b);
     });
-    $("who").innerHTML = "Signed in as <b>Charles</b> · " + esc(state.role) + '<br><a href="#" onclick="return false">Sign out</a>';
-  }
-
-  function card(title, req, body, id) {
-    return '<section class="card"' + (id ? ' id="' + id + '"' : "") + '><div class="card-head"><h3>' + title + '</h3><span class="req">' + req + "</span></div>" + body + "</section>";
-  }
-  function itemBtn(page, main, sub) { return '<li><button type="button" data-page=\'' + JSON.stringify(page) + "'><b>" + main + "</b><span>" + sub + "</span></button></li>"; }
-
-  function homeHtml() {
-    var empty = state.view === "empty";
-    var drafts = empty ? [] : EX.drafts, replies = empty ? [] : EX.replies, problems = empty ? [] : EX.problems;
-    var h = "";
-    if (state.view === "stale") h += '<p class="stale" role="status">Connection lost: numbers may be out of date. Reconnecting…</p>';
-    h += '<div class="card-head"><div><div class="eyebrow">Home</div><h2>What needs you now</h2></div><span class="updated">Updated 08:05:12' + (state.view === "stale" ? " (stale)" : "") + "</span></div>";
-    if (!drafts.length && !replies.length && !problems.length) {
-      h += '<p class="allclear">Nothing needs you right now.</p>';
-    } else {
-      h += '<div class="summary">' +
-        '<button class="sum" type="button" data-page=\'{"key":"review"}\'><b>' + drafts.length + "</b><span>drafts to review</span></button>" +
-        '<button class="sum" type="button" data-jump="sec-replies"><b>' + replies.length + "</b><span>replies to handle</span></button>" +
-        '<button class="sum" type="button" data-jump="sec-problems"><b>' + problems.length + "</b><span>open problems</span></button></div>";
-    }
-    var dl = drafts.length ? '<ul class="list">' + drafts.map(function (d) { return itemBtn({ key: "draft", id: d.id, title: d.subject }, esc(d.subject), "to " + esc(d.to) + " · waiting " + esc(d.age)); }).join("") + '</ul><button class="linkbtn" type="button" data-page=\'{"key":"review"}\'>See all ' + drafts.length + " in the review queue</button>" : '<p class="empty">Nothing waiting. Every proposed draft has a verdict.</p>';
-    var rl = replies.length ? '<ul class="list">' + replies.map(function (r) {
-      var lab = r.label ? '<span class="tag ok">' + esc(r.label) + "</span>" : '<span class="tag warn">not assessed yet</span>';
-      return itemBtn({ key: "lead", id: r.id, title: r.company }, lab + esc(r.company), "replied " + esc(r.when));
-    }).join("") + "</ul>" : '<p class="empty">No replies to handle.</p>';
-    var pl = problems.length ? '<ul class="list">' + problems.map(function (f) {
-      return itemBtn({ key: "subject", id: f.id, title: f.subject }, '<span class="tag ' + (f.severity === "critical" ? "crit" : "warn") + '">' + esc(f.severity) + "</span>" + esc(f.cls), esc(f.msg) + " · " + esc(f.when) + " · open subject");
-    }).join("") + '</ul><p class="note">Acknowledge and resolve on Runs &amp; operations.</p>' : '<p class="empty">No open problems.</p>';
-    h += '<div class="grid2">' + card("Drafts awaiting review", "REQ-A-3", dl) + card("Replies to handle", "REQ-A-4", rl, "sec-replies") + "</div>";
-    h += card("Problems", "REQ-A-5", pl, "sec-problems");
-    var runs = empty ? '<p class="empty">No runs yet.</p>' :
-      '<dl class="kv"><dt>Queued or running</dt><dd>' + EX.runs.active + "</dd><dt>Stopped in the last 24 hours</dt><dd>" + EX.runs.stopped24h + '</dd></dl><ul class="list">' + EX.runs.latest.map(function (r) {
-        var t = r.status === "succeeded" ? "ok" : r.status === "running" ? "unk" : "warn";
-        return itemBtn({ key: "run", id: r.id, title: r.lead }, '<span class="tag ' + t + '">' + esc(r.status.replace("_", " ")) + "</span>" + esc(r.lead), esc(r.note));
-      }).join("") + "</ul>";
-    var s = EX.sends;
-    var sends = empty ? '<p class="empty">No captured sends yet.</p>' :
-      '<dl class="kv"><dt>Captured (accepted or delivered)</dt><dd>' + s.accepted + "</dd><dt>In flight</dt><dd>" + s.inflight + "</dd><dt>Deferred until " + s.deferredUntil + "</dt><dd>" + s.deferred + '</dd><dt>Outcome unknown</dt><dd class="unknown">' + s.unknown + "</dd><dt>Failed permanently</dt><dd>" + s.failed + '</dd></dl><p class="note">Local capture only: nothing is sent to a real inbox. Unknown outcomes are resolved on Runs &amp; operations, never re-sent blindly.</p>';
-    h += '<div class="grid2">' + card("Agent activity", "REQ-A-6", runs) + card("Captured sends", "REQ-A-7", sends) + "</div>";
-    if (state.role === "admin") {
-      var prov = state.provider === "fake" ? '<span class="tag ok">fake</span>Fake model: no AI calls leave this machine.' :
-        state.provider === "real" ? '<span class="tag warn">real</span>Real model (Claude CLI on your login). Draft content goes to the model provider.' :
-        '<span class="tag crit">refusing</span>Real model is refusing calls: earlier CLI work is not confirmed stopped. No model call was made.';
-      var m = '<p>' + prov + '</p><dl class="kv"><dt>Model calls today (UTC)</dt><dd>' + (empty ? 0 : EX.budget.used) + " of " + EX.budget.limit + "</dd><dt>Daily send cap</dt><dd>" + EX.budget.sendCap + '</dd></dl><button class="linkbtn" type="button" data-page=\'{"key":"admin"}\'>Open Admin</button><p class="note">Admins only. Changing the model or budget happens on Admin, not here.</p>';
-      h += card("Model and budget", "REQ-A-8", m);
-    }
-    var total = EX.pipeline.reduce(function (a, p) { return a + p.n; }, 0);
-    var colors = ["var(--line)", "var(--accent)", "var(--ok)", "var(--owner)", "var(--warn)", "var(--muted)", "var(--bad)"];
-    var pipe = empty ? '<p class="empty">No leads yet. Bring some in from the intake (a later slice) or the demo seed.</p>' :
-      '<div class="pipe" aria-hidden="true">' + EX.pipeline.map(function (p, i) { return p.n ? '<i style="width:' + (p.n * 100 / total) + "%;background:" + colors[i] + '"></i>' : ""; }).join("") + '</div><div class="legend">' + EX.pipeline.map(function (p) { return "<span>" + esc(p.label) + " <b>" + p.n + "</b></span>"; }).join("") + '</div><p class="note">Fictional demo accounts.</p>';
-    h += card("Lead pipeline", "REQ-A-9", pipe);
-    return h;
-  }
-
-  var PAGES = {
-    leads: ["Leads", "/leads"], review: ["Review queue", "/review"], operations: ["Runs & operations", "/operations"],
-    audit: ["Audit", "/audit"], admin: ["Admin", "/admin"], draft: ["Draft", "/drafts/:id"], lead: ["Lead", "/leads/:id"],
-    run: ["Run", "/runs/:id"], subject: ["Failure subject", "subject path"]
-  };
-  function placeholderHtml(p) {
-    var meta = PAGES[p.key];
-    return '<div class="placeholder"><div class="eyebrow">Existing page · unchanged in slice A</div><h2>' + esc(meta[0]) + (p.title ? ": " + esc(p.title) : "") + '</h2><p class="muted">In the real app this opens <span class="mono">' + esc(meta[1]) + "</span>, which already exists. Any action you take there (approve, resolve, retry) belongs to that page and its own rules; slice A adds none.</p><p><button class=\"linkbtn\" type=\"button\" data-page='{\"key\":\"home\"}'>Back to Home</button></p></div>";
+    $("who").innerHTML = "Signed in as <b>Charles</b> · " + esc(state.role) + '<br><a href="#" onclick="return false">Sign out</a> <span class="note">(existing sign-in action, not a domain write)</span>';
   }
 
   function render() {
-    if (!NAV.filter(allowed).some(function (n) { return n.key === state.page.key; }) && ["audit", "admin"].indexOf(state.page.key) !== -1) state.page = { key: "home" };
+    if (["audit", "admin"].indexOf(state.page.key) !== -1 && !NAV.filter(allowed).some(function (n) { return n.key === state.page.key; })) state.page = { key: "home" };
     renderNav();
-    var main = $("app-main"), url;
+    var main = $("app-main"), out, url;
     if (state.page.key === "home") {
       url = "/";
-      if (state.view === "loading") main.innerHTML = '<div class="skeleton" role="status"><p>Loading what needs you…</p><div class="bar"></div><div class="bar"></div><div class="bar"></div></div>';
-      else if (state.view === "error") main.innerHTML = '<div class="withheld" role="alert"><h2>This view could not be served</h2><p>You are not allowed to see some of this data, or it could not be read. Nothing is shown rather than an incomplete picture.</p></div>';
-      else main.innerHTML = homeHtml() + (state.role === "auditor" ? '<p class="note">As an auditor, this view was recorded in the audit trail before it was shown (REQ-A-12).</p>' : "");
+      if (state.view === "loading") out = { html: '<div class="skeleton" role="status"><p>Loading what needs you…</p><div class="bar"></div><div class="bar"></div><div class="bar"></div></div>', refs: [] };
+      else if (state.view === "error" || state.view === "refused") out = P.renderWithheld(state);
+      else {
+        out = P.renderHome(state);
+        if (state.role === "auditor") out.html += '<p class="note">As an auditor, this view was recorded in the audit trail before it was shown (REQ-A-12).</p>';
+      }
     } else {
-      url = (PAGES[state.page.key] || ["", "/"])[1];
-      main.innerHTML = placeholderHtml(state.page);
+      url = (P.PAGES[state.page.key] || ["", "/"])[1];
+      out = P.renderPlaceholder(state.page);
     }
+    refs = out.refs;
+    main.innerHTML = out.html;
     $("url").textContent = "localhost:4120" + url;
   }
 
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   document.addEventListener("click", function (e) {
-    var b = e.target.closest && e.target.closest("[data-page],[data-jump]"); if (!b || !$("app-main").contains(b) && !b.closest(".nav")) return;
-    if (b.hasAttribute("data-jump")) { var t = $(b.getAttribute("data-jump")); if (t) t.scrollIntoView({ behavior: "smooth", block: "start" }); return; }
-    go(JSON.parse(b.getAttribute("data-page")));
+    var b = e.target.closest && e.target.closest("[data-page-ref],[data-jump]");
+    if (!b || !$("app-main").contains(b)) return;
+    if (b.hasAttribute("data-jump")) { var t = $(b.getAttribute("data-jump")); if (t) t.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" }); return; }
+    var page = refs[Number(b.getAttribute("data-page-ref"))];
+    if (page) go(page);
   });
 
   // ---------- notes (shared notes.js semantics: revision-stamped, visible not-saved state) ----------
@@ -402,7 +331,7 @@ footer { font-size: 12px; color: var(--muted); }
     else manual("The text is selected below; copy it by hand.");
   });
   $("show").addEventListener("click", function () { var box = $("export-text"); box.value = exportText(); box.hidden = !box.hidden; $("show").textContent = box.hidden ? "Show text" : "Hide text"; });
-  $("footer").textContent = "Source: docs/product/slice-a/prototype.html (revision " + D.meta.revision + ", fingerprint " + FP + "). Requirements: requirements.md; matrix: screen-matrix.md; data sources: baseline-delta.md. Example data only.";
+  $("footer").textContent = "Source: docs/product/slice-a/prototype.html and prototype-logic.js (revision " + D.meta.revision + ", fingerprint " + FP + "). Requirements: requirements.md; matrix: screen-matrix.md; data sources: baseline-delta.md. Example data only.";
   warnState();
   render();
 })();

@@ -1,6 +1,6 @@
 // Copied from docs/sdlc/notes.js at 98fb96e (reviewed by Codex in PR #36); the
 // logic below these three comment lines is identical to that file, and
-// docs/product/discovery/check-p1.mjs fails if it drifts. Change the original first.
+// docs/product/slice-a/check-prototype.mjs fails if it drifts. Change the original first.
 // Owner notes for the interactive SDLC map: browser storage, a visible
 // "not saved" state, and an export that says which data revision each note
 // was written against. Kept separate from index.html so
