@@ -78,6 +78,12 @@ header { display: grid; gap: 12px; }
 .facts { display: flex; flex-wrap: wrap; gap: 6px 24px; font-size: var(--step--1); color: var(--muted); }
 .facts b { color: var(--ink); font-weight: 600; }
 .disclaimer { font-size: var(--step--1); color: var(--muted); max-width: 80ch; }
+.banner { background: var(--accent-soft); border: 1px solid var(--accent); border-radius: var(--radius); padding: 12px 14px; display: grid; gap: 4px; }
+.banner a { font-weight: 600; }
+.ddd-table { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.ddd-table table { border-collapse: collapse; width: 100%; font-size: var(--step--1); }
+.ddd-table th, .ddd-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.ddd-table th { color: var(--muted); font-weight: 500; }
 .warn { background: var(--gap-soft); color: var(--gap); border: 1px solid var(--gap); padding: 12px 14px; border-radius: var(--radius); font-weight: 500; }
 section { display: grid; gap: 14px; min-width: 0; scroll-margin-top: 20px; }
 .sec-head { display: grid; gap: 6px; }
@@ -178,7 +184,8 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     <a href="#outcomes">Outcomes</a>
     <a href="#nongoals">Non-goals</a>
     <a href="#assumptions">Assumptions</a>
-    <a href="#founder">Founder notes</a>
+    <a href="#founder">Feature vision and founder notes</a>
+    <a href="#ddd">Domain language</a>
     <a href="#map">Story map</a>
     <a href="#failures">Failure cases</a>
     <a href="#slice">First build slice</a>
@@ -195,6 +202,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
       <div class="facts" id="facts"></div>
       <p class="disclaimer">Notes on this page are feedback, not approvals, and they are not in git. They become part of the record when you paste them into chat and Claude commits a summary. Approvals are given in chat and written into a gate record.</p>
       <p class="warn" id="storage-warning" role="alert" hidden></p>
+      <div class="banner" id="decision-banner"><b>Your open decisions now live on one page.</b><span>The brief and story map verdicts, the first slice, founder evidence, PQ-1 to PQ-7 and your MVP feature list are asked once on <a id="decision-link" href="#" target="_blank" rel="noopener">the owner decisions page</a>. Notes here are still welcome.</span></div>
     </header>
 
     <section id="promise" aria-labelledby="h-promise">
@@ -222,7 +230,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     </section>
 
     <section id="founder" aria-labelledby="h-founder">
-      <div class="sec-head"><h2 id="h-founder">Your notes from the founder conversation</h2><p>The brief's "today's workflow" section is empty until these arrive; we will not invent it. Paste what matters: how they do outbound today, what is slow or painful, what they would need to trust a drafted email. Leave out anything they would not want published, since a summary goes into the public repository.</p></div>
+      <div class="sec-head"><h2 id="h-founder">Your feature vision, and the founder conversation</h2><p id="feature-vision"></p><p>Founder evidence supports your list; it does not generate it. The brief's "today's workflow" section is empty until these notes arrive; we will not invent it. Paste what matters: how they do outbound today, what is slow or painful, what they would need to trust a drafted email. Leave out anything they would not want published, since a summary goes into the public repository.</p></div>
       <div class="card">
         <fieldset id="f-evtype" data-choice="founder:type" data-context="Founder conversation: kind of evidence">
           <legend>What kind of evidence is it?</legend>
@@ -236,6 +244,13 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
         </fieldset>
         <div class="answer"><label for="f-founder">Founder notes</label><textarea id="f-founder" data-note="founder:notes" data-context="Founder conversation notes" style="min-height:140px"></textarea></div>
       </div>
+    </section>
+
+    <section id="ddd" aria-labelledby="h-ddd">
+      <div class="sec-head"><div class="eyebrow">Domain-driven design</div><h2 id="h-ddd">Domain language</h2><p>You suggested describing the product with domain-driven design. The code already does: each Ash domain is a bounded context with its own rules and vocabulary. P2's event storming uses these contexts and words.</p></div>
+      <div class="ddd-table"><table><thead><tr><th>ID</th><th>Bounded context</th><th>Responsible for</th><th>Main resources</th></tr></thead><tbody id="ddd-contexts"></tbody></table></div>
+      <div class="ddd-table"><table><thead><tr><th>Term</th><th>Meaning everywhere: screens, docs and code</th></tr></thead><tbody id="ddd-glossary"></tbody></table></div>
+      <div class="card"><div class="answer"><label for="f-ddd">Your note on the contexts or the vocabulary</label><textarea id="f-ddd" data-note="ddd" data-context="Domain language: bounded contexts and glossary"></textarea></div></div>
     </section>
 
     <section id="map" aria-labelledby="h-map">
@@ -378,6 +393,13 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   $("ng-list").innerHTML = P.nonGoals.map(function (n) { return item(n.id, n.t, esc(n.why), "note:" + n.id, n.id + " " + n.t); }).join("");
   $("as-list").innerHTML = P.assumptions.map(function (a) { return item(a.id, a.t, "How we find out: " + esc(a.check), "note:" + a.id, a.id + " " + a.t); }).join("");
   reg("founder:type", "Founder conversation: kind of evidence");
+  $("feature-vision").textContent = P.featureVision || "";
+  if (P.meta.decisionPage) { var dl = $("decision-link"); if (dl) dl.href = P.meta.decisionPage; }
+  if (P.ddd) {
+    $("ddd-contexts").innerHTML = P.ddd.contexts.map(function (c) { return '<tr><td class="mono">' + esc(c.id) + "</td><td><b>" + esc(c.t) + "</b></td><td>" + esc(c.d) + "</td><td>" + esc(c.r) + "</td></tr>"; }).join("");
+    $("ddd-glossary").innerHTML = P.ddd.glossary.map(function (g) { return "<tr><td><b>" + esc(g[0]) + "</b></td><td>" + esc(g[1]) + "</td></tr>"; }).join("");
+  }
+  reg("ddd", "Domain language: bounded contexts and glossary");
   reg("founder:notes", "Founder conversation notes");
 
   // Story map
@@ -413,7 +435,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   reg("ask", "Questions for Claude and Codex");
 
   // Fill the static fields from storage
-  ["promise", "founder:notes", "slice:note", "ask"].forEach(function (k) {
+  ["promise", "founder:notes", "ddd", "slice:note", "ask"].forEach(function (k) {
     var el = document.querySelector('[data-note="' + k + '"]');
     if (el) { el.value = store.get(k); el.insertAdjacentHTML("afterend", staleMarker(k)); }
   });

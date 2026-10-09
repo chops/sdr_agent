@@ -1,11 +1,16 @@
 # Outcome brief: SDR Agent workshop release
 
-- **Status:** draft for gate G1, revised 2026-10-08 after Codex review of
-  `8e08d0a`.
+- **Status:** draft for gate G1. Revised 2026-10-08 after Codex review of
+  `8e08d0a`, then again after the owner's notes on the shaping discussion
+  page (2026-10-08, 13:15 to 13:32 MDT).
 - **Method step:** 1, outcomes and today's workflow.
 - **Sources:** [owner answers](discovery/answers.md),
-  [review and scope decisions](discovery/review.md), and the founder-interview
-  notes, which are **still pending** (see "Today's workflow").
+  [review and scope decisions](discovery/review.md), the owner's shaping-page
+  notes (quoted below with permission, decision D-018), and the
+  founder-interview notes, which are **still pending** (see "Today's
+  workflow").
+- **Where to answer:** open owner decisions for this packet now live on one
+  page, the owner decisions page (`docs/product/decisions/index.html`).
 
 ## In one sentence
 
@@ -17,10 +22,14 @@ personally approved, with a full record of how each one was made.
 
 - **User:** a solo founder or operator doing their own outbound. No team.
   Today that is the owner.
-- **Workshop (Nov 6):** the owner demonstrates the product to solo founders.
-  Attendees may optionally install and run it themselves in **fake-model mode
-  on synthetic data**. Whether attendees may use a real model on their own
-  login is a separate decision that has not been made (see OUT-7 and NG-15).
+- **Workshop (Nov 6):** the owner gives a **live demo**, then walks the room
+  through the **documented process of building it**, including the missteps.
+  Attendees do not install or run it for the workshop (NG-16). The open-source
+  repository and its build record are the evidence they take away (OUT-8).
+  In the owner's words: "the workshop will show a live demo and then follow up
+  the demo with the process we're going through to build this agent ... we
+  need to document all of the steps (and missteps) we take to get from here
+  and now to demo day."
 - **Situation:** they have a product and an idea of who should buy it. They
   have a handful of target companies, from a spreadsheet, a CRM or memory, and
   limited hours for outreach that has to sound like them and be accurate.
@@ -42,7 +51,8 @@ thresholds are set at G2 and in the eval plan, not here.
 | OUT-4 | **Sounds like them.** Drafts follow the campaign's brand guidelines and the founder's writing samples. | A tone and grounding rubric applied to sampled drafts, plus observed review tasks. Approval rate and edit size are **indicators only**: they fall when drafts improve but also when review gets careless, and they rise for legitimate corrections. |
 | OUT-5 | **Knows what happened.** The founder can see what the agent did, what it used and what failed, and recover without guessing. | Home shows the action queue, provider (real or fake), budget and unknown outcomes; every failure has a next step. "What it used" means recorded model calls and tokens, not a dollar figure: the subscription CLI gives no reliable per-draft price. |
 | OUT-6 | **Handles "interested".** An interested reply produces a drafted response with the founder's booking link, for approval. | In acceptance, a **simulated, signed test reply** classified as interested gets a draft within one run, and the draft never asserts specific free times. Captured delivery produces no real replies. Today's prototype only classifies and hands off, so this is new work. |
-| OUT-7 | **Runs locally, described honestly.** The app and its data live on the founder's machine. | A fresh install from the guide reaches a first approved draft in **fake-model mode on synthetic data**. With real inference turned on, permitted draft content is sent to an external model provider through the proxy: local does not mean no data leaves the machine. A real-model run on an attendee's own login is **not** a release criterion (NG-15). |
+| OUT-7 | **Runs locally, described honestly.** The app and its data live on the founder's machine. | A fresh install from the repository's guide, on a clean machine, reaches a first approved draft in **fake-model mode on synthetic data**; this is for readers of the open-source repository, not a workshop step (NG-16). With real inference turned on, permitted draft content is sent to an external model provider through the proxy: local does not mean no data leaves the machine. A real-model run on anyone else's login is **not** a release criterion (NG-15). |
+| OUT-8 | **The build story is documented.** Founders can follow how the product went from a one-shot demo to a working release, including what went wrong. | The public repository holds, for every phase up to demo day: the project journal with a retrospective per phase, the decision log, a gate record per gate, the review findings and how each was handled, and an honest list of missteps. Checked at G8 against the phases actually run; nothing is rewritten after the fact. |
 
 ## Non-goals for this release
 
@@ -66,8 +76,23 @@ its own decision to come back.
 | NG-13 | Per-campaign model cost tiers and personalization-depth settings | Later; one sensible default for the workshop |
 | NG-14 | Attendees loading their own prospect lists | Release constraint: synthetic or owner-provided test data only. Every intake path admits only reserved synthetic or owner test contacts. |
 | NG-15 | Attendees using a real model on their own login, as a release promise | ADR-0004 covers only the owner's personal local use. Other people's use needs a reviewed provider, terms and budget decision first. |
+| NG-16 | Attendees installing or running it for the workshop | Owner decision (shaping page, 2026-10-08): the workshop is a live demo plus the build story. An install guide still exists for readers of the open-source repository (OUT-7). |
 
-## Today's workflow
+## Primary input: the owner's feature vision
+
+The owner already knows what the MVP should do and which premium features
+could follow it. In the owner's words: "instead of relying on claude and
+codex to suggest features and functionalities based on \"today's workflow\",
+i have a pretty good idea of what i want the MVP to do, as well as what
+premium features we could release post-MVP."
+
+So the must-list starts from the owner's feature list, captured on the owner
+decisions page ("Your MVP and post-MVP features"). The outcomes, story map and
+failure cases above are our draft for the owner to check against that list,
+not a substitute for it. Founder evidence (next section) supports or
+challenges the list; it does not generate it.
+
+## Today's workflow (supporting evidence)
 
 **Pending.** The owner has notes from a conversation with one other solo
 founder. Until those notes are in, this section has no evidence and invents
@@ -102,8 +127,55 @@ The reviewer does not manufacture confidence either way.
 | AS-3 | Reviewing one draft at a time is acceptable for 10 to 20 drafts. | Prototype timing with the owner |
 | AS-4 | Brand guidelines plus pasted writing samples are enough to set the voice. | Tone and grounding rubric on the owner's own campaign, with approval rate and edit size as indicators |
 | AS-5 | One intake path (CSV upload or add-by-hand) plus the synthetic seed covers the workshop. | Owner choice at G2; founder notes |
-| AS-6 | Workshop founders are satisfied by the owner's demo plus an optional fake-model install on synthetic data. | Install guide dry run; sign-up questions; workshop feedback |
+| AS-6 | *Superseded 2026-10-08 by AS-8 (owner: no attendee install).* Workshop founders are satisfied by the owner's demo plus an optional fake-model install on synthetic data. | Not checked; kept for history |
 | AS-7 | Captured (not sent) emails are still a convincing demo. | Owner judgment at G8; workshop feedback |
+| AS-8 | A live demo plus the documented build story, including missteps, is what workshop founders value most. | Owner judgment at G8; workshop feedback; which parts of the build record attendees open afterwards |
+
+## Domain language (domain-driven design)
+
+The owner suggested describing the product with domain-driven design methods
+as well. The code already follows them: each Ash domain is a bounded context
+with its own resources, rules and vocabulary, and dependencies point one way
+(see [domain boundaries](../architecture/domain-boundaries.md)). P2's event
+storming (method step 3) uses these contexts and this vocabulary, and adds
+the events and commands between them.
+
+### Bounded contexts
+
+| ID | Context (Ash domain) | What it is responsible for | Main resources |
+|---|---|---|---|
+| BC-1 | Sales (`SdrAgent.Sales`) | Who is targeted, against which profile, through which program | IcpDefinition, Account, Contact, Lead, Campaign, Sequence, SequenceStep, CampaignEnrollment |
+| BC-2 | Research (`SdrAgent.Research`) | The evidence gathered about a lead and the qualification resting on it | ResearchArtifact, EvidenceClaim, Qualification, QualificationEvidence |
+| BC-3 | Outreach (`SdrAgent.Outreach`) | What may be sent, to whom, on whose authority, and who must never be contacted | Draft, DraftRevision, RevisionCitation, Approval, Suppression, DeliveryOperation, DeliveryReceipt, SendQuotaDay, Reply, ReplyAssessment |
+| BC-4 | Agents (`SdrAgent.Agents`) | Agent provenance: which agent ran, which model calls and decisions it made | AgentDefinition, AgentRun, ModelInvocation, ToolInvocation, Decision, WireWitnessLink |
+| BC-5 | Operations (`SdrAgent.Operations`) | Durable background work as operators see it, and failures that need a human | Operation, Failure, WebhookEvent |
+| BC-6 | Accounts (`SdrAgent.Accounts`) | Operator identity, sign-in and roles | User, Token |
+| BC-7 | Audit (`SdrAgent.Audit`) | The system of record: hash-chained events, payloads, anchors, exports and audited access | AuditEvent, Payload, AuditAccess, AuditAnchor, AuditExport and supporting resources |
+
+### Glossary seed (ubiquitous language)
+
+Words the product, the screens and the code should use the same way. P2
+extends this list; a screen label that disagrees with it is a defect.
+
+| Term | Meaning | Context |
+|---|---|---|
+| Lead | A target contact at a target account, in the pipeline | Sales |
+| Campaign | A program with an ICP, voice, sender, time zone and quiet hours | Sales |
+| Enrollment | A lead's place in a campaign | Sales |
+| Evidence claim | A fact found during research, with its source | Research |
+| Draft / revision | A first email; every edit makes a new revision | Outreach |
+| Citation | The link from a sentence in a draft to its evidence | Outreach |
+| Approval | The owner's consent to capture one exact revision for one exact recipient | Outreach |
+| Suppression | A rule that a contact must never be contacted | Outreach |
+| Delivery (outbox entry) | One approved email on its way to capture; never sent to a real person | Outreach |
+| Capture | Storing the exact email the app would have sent, instead of sending it | Outreach |
+| Reply / assessment | An inbound reply and the agent's classification of it | Outreach |
+| Handoff | An interested or unclear reply passed to the owner | Outreach |
+| Agent run | One piece of agent work on a lead, with its model calls and decisions | Agents |
+| Model invocation | One call to the model, with its attested provider and outcome | Agents |
+| Unknown outcome | A step whose result could not be confirmed; resolved by reconciliation, never by a blind retry | Outreach, Agents |
+| Failure | Something that needs a human, shown as attention on the operations screen | Operations |
+| Audit event | An append-only record of a change, in a hash chain | Audit |
 
 ## What this brief does not decide
 

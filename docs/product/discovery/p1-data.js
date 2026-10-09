@@ -6,7 +6,8 @@
 window.P1 = {
   meta: {
     title: "Discovery packet (P1)",
-    revision: "2026-10-08.2",
+    revision: "2026-10-08.3",
+    decisionPage: "https://claude.ai/artifact/CFjkoAnWbjncPksPRVmPe1",
     gate: "G1 Brief approved",
     sources: ["docs/product/brief.md", "docs/product/story-map.md", "docs/product/first-slice.md", "docs/product/discovery/answers.md", "docs/product/discovery/review.md"]
   },
@@ -15,7 +16,7 @@ window.P1 = {
 
   who: [
     { k: "User", v: "A solo founder or operator doing their own outbound. No team. Today that is you." },
-    { k: "Workshop", v: "On Nov 6 you demonstrate it to solo founders. Attendees may optionally run it themselves in fake-model mode on synthetic data. Real-model use on their own login is a separate decision, not yet made (NG-15)." },
+    { k: "Workshop", v: "On Nov 6 you give a live demo, then walk founders through the documented process of building it, missteps included. Attendees do not install or run it for the workshop (NG-16). The open-source repository and its build record are what they take away (OUT-8)." },
     { k: "Situation", v: "They have a product, an idea of who should buy it, a handful of target companies, and limited hours for outreach that must sound like them and be accurate." },
     { k: "Job", v: "\"When I sit down to do outbound, help me go from a list of companies to first emails I would actually send, quickly, without inventing facts or losing control of what goes out.\"" }
   ],
@@ -27,7 +28,8 @@ window.P1 = {
     { id: "OUT-4", t: "Sounds like them", d: "Drafts follow the campaign's brand guidelines and the founder's writing samples.", o: "A tone and grounding rubric on sampled drafts plus observed review tasks. Approval rate and edit size are indicators only: they fall with better drafts but also with careless review, and rise for legitimate corrections." },
     { id: "OUT-5", t: "Knows what happened", d: "The founder sees what the agent did, what it used and what failed, and can recover without guessing.", o: "Home shows action queue, real or fake model, budget and unknown outcomes; every failure has a next step. Usage means recorded model calls and tokens, not dollars." },
     { id: "OUT-6", t: "Handles \"interested\"", d: "An interested reply produces a drafted response with the founder's booking link, for approval.", o: "In acceptance, a simulated, signed test reply classified as interested gets a draft within one run that never asserts specific free times. New work: today the prototype classifies and hands off only." },
-    { id: "OUT-7", t: "Runs locally, described honestly", d: "The app and its data live on the founder's machine. With real inference on, permitted draft content goes to an external model provider through the proxy: local does not mean no data leaves.", o: "A fresh install from the guide reaches a first approved draft in fake-model mode on synthetic data. A real-model run on an attendee's own login is not a release criterion (NG-15)." }
+    { id: "OUT-7", t: "Runs locally, described honestly", d: "The app and its data live on the founder's machine. With real inference on, permitted draft content goes to an external model provider through the proxy: local does not mean no data leaves.", o: "A fresh install from the repository guide, on a clean machine, reaches a first approved draft in fake-model mode on synthetic data. This is for readers of the open-source repository, not a workshop step (NG-16). A real-model run on anyone else's login is not a release criterion (NG-15)." },
+    { id: "OUT-8", t: "The build story is documented", d: "Founders can follow how the product went from a one-shot demo to a working release, including what went wrong.", o: "The public repository holds, for every phase up to demo day, the journal with a retrospective per phase, the decision log, a gate record per gate, review findings and how each was handled, and an honest list of missteps. Checked at G8; nothing rewritten after the fact." }
   ],
 
   nonGoals: [
@@ -45,7 +47,8 @@ window.P1 = {
     { id: "NG-12", t: "Multi-customer hosting", why: "Local personal app; design stays tenancy-ready." },
     { id: "NG-13", t: "Per-campaign model cost tiers and personalization depth settings", why: "One sensible default for the workshop." },
     { id: "NG-14", t: "Attendees loading their own prospect lists", why: "Release constraint: synthetic or owner-provided test data only. Every intake path admits only reserved synthetic or owner test contacts." },
-    { id: "NG-15", t: "Attendees using a real model on their own login, as a release promise", why: "ADR-0004 covers only your personal local use. Other people's use needs a reviewed provider, terms and budget decision first." }
+    { id: "NG-15", t: "Attendees using a real model on their own login, as a release promise", why: "ADR-0004 covers only your personal local use. Other people's use needs a reviewed provider, terms and budget decision first." },
+    { id: "NG-16", t: "Attendees installing or running it for the workshop", why: "Your decision (shaping page, Oct 8): the workshop is a live demo plus the build story. An install guide still exists for readers of the open-source repository (OUT-7)." }
   ],
 
   assumptions: [
@@ -54,8 +57,9 @@ window.P1 = {
     { id: "AS-3", t: "Reviewing one draft at a time is fine for 10 to 20 drafts.", check: "Prototype timing with you" },
     { id: "AS-4", t: "Brand guidelines plus pasted writing samples are enough to set the voice.", check: "Tone and grounding rubric on your own campaign, with approval rate and edit size as indicators" },
     { id: "AS-5", t: "One intake path (CSV upload or add-by-hand) plus the synthetic seed covers the workshop.", check: "Your choice at G2; founder notes" },
-    { id: "AS-6", t: "Workshop founders are satisfied by your demo plus an optional fake-model install on synthetic data.", check: "Install guide dry run; sign-up questions; workshop feedback" },
-    { id: "AS-7", t: "Captured (not sent) emails still make a convincing demo.", check: "Your judgment at G8; workshop feedback" }
+    { id: "AS-6", t: "Superseded Oct 8 by AS-8 (no attendee install): workshop founders are satisfied by your demo plus an optional fake-model install.", check: "Not checked; kept for history" },
+    { id: "AS-7", t: "Captured (not sent) emails still make a convincing demo.", check: "Your judgment at G8; workshop feedback" },
+    { id: "AS-8", t: "A live demo plus the documented build story, missteps included, is what workshop founders value most.", check: "Your judgment at G8; workshop feedback; which parts of the build record attendees open afterwards" }
   ],
 
   // status: built | partial | new | design (HubSpot design only)
@@ -105,6 +109,38 @@ window.P1 = {
       value: "The workshop core needs one intake path. This turns fixtures into a usable input → draft → review → capture journey. Not for attendees' real prospect lists.",
       risk: "Higher. Needs an entity delta with independent PASS, a threat model and import tests. Too much to close by Friday night alongside the design days." }
   ],
+
+  // Your own feature vision is the primary input (shaping page, Oct 8); founder
+  // evidence supports it. Captured on the owner decisions page, section F.
+  featureVision: "You already know what the MVP should do and which premium features could follow. In your words: \"i have a pretty good idea of what i want the MVP to do, as well as what premium features we could release post-MVP.\" The must-list starts from your list on the owner decisions page; this packet is our draft to check against it.",
+
+  // Domain-driven design: the Ash domains are the bounded contexts.
+  ddd: {
+    contexts: [
+      { id: "BC-1", t: "Sales", d: "Who is targeted, against which profile, through which program", r: "IcpDefinition, Account, Contact, Lead, Campaign, Sequence, SequenceStep, CampaignEnrollment" },
+      { id: "BC-2", t: "Research", d: "The evidence gathered about a lead and the qualification resting on it", r: "ResearchArtifact, EvidenceClaim, Qualification, QualificationEvidence" },
+      { id: "BC-3", t: "Outreach", d: "What may be sent, to whom, on whose authority, and who must never be contacted", r: "Draft, DraftRevision, RevisionCitation, Approval, Suppression, DeliveryOperation, DeliveryReceipt, SendQuotaDay, Reply, ReplyAssessment" },
+      { id: "BC-4", t: "Agents", d: "Agent provenance: which agent ran, its model calls and decisions", r: "AgentDefinition, AgentRun, ModelInvocation, ToolInvocation, Decision, WireWitnessLink" },
+      { id: "BC-5", t: "Operations", d: "Durable background work as you see it, and failures that need a human", r: "Operation, Failure, WebhookEvent" },
+      { id: "BC-6", t: "Accounts", d: "Operator identity, sign-in and roles", r: "User, Token" },
+      { id: "BC-7", t: "Audit", d: "The system of record: hash-chained events, payloads, anchors, exports and audited access", r: "AuditEvent, Payload, AuditAccess, AuditAnchor, AuditExport and supporting resources" }
+    ],
+    glossary: [
+      ["Lead", "A target contact at a target account, in the pipeline"],
+      ["Campaign", "A program with an ICP, voice, sender, time zone and quiet hours"],
+      ["Evidence claim", "A fact found during research, with its source"],
+      ["Draft / revision", "A first email; every edit makes a new revision"],
+      ["Citation", "The link from a sentence in a draft to its evidence"],
+      ["Approval", "Your consent to capture one exact revision for one exact recipient"],
+      ["Suppression", "A rule that a contact must never be contacted"],
+      ["Delivery (outbox entry)", "One approved email on its way to capture; never sent to a real person"],
+      ["Capture", "Storing the exact email the app would have sent, instead of sending it"],
+      ["Handoff", "An interested or unclear reply passed to you"],
+      ["Agent run", "One piece of agent work on a lead, with its model calls and decisions"],
+      ["Unknown outcome", "A step whose result could not be confirmed; resolved by reconciliation, never a blind retry"],
+      ["Failure", "Something that needs a human, shown on the operations screen"]
+    ]
+  },
 
   questions: [
     { id: "PQ-1", q: "Does the one-sentence promise say what you want founders to hear on Nov 6?" },

@@ -1,7 +1,9 @@
 # Story map: SDR Agent workshop release
 
 - **Status:** draft for gate G1, revised 2026-10-08 after Codex review of
-  `8e08d0a`.
+  `8e08d0a` and the owner's shaping-page notes. The owner's own MVP feature
+  list (owner decisions page) is the primary input; this map is our draft to
+  check against it.
 - **Method step:** 2, user story mapping.
 - **Built on:** the [outcome brief](brief.md) (OUT and NG IDs) and the current
   prototype.
@@ -23,7 +25,7 @@ step are the tasks, marked by what the prototype already has:
 
 ### J-1 Set up
 
-- **Install, create the admin, sign in:** built (`mix sdr.bootstrap_admin`); install guide new.
+- **Install, create the admin, sign in:** built (`mix sdr.bootstrap_admin`); install guide new, for readers of the open-source repository. Workshop attendees do not install it (NG-16).
 - **Check the model:** partial. The admin page shows whether it is fake or real Claude, but there is no guided check.
 - **Sender identity, campaign time zone and quiet hours:** partial. The
   fields exist on the campaign in the domain; there is no setup screen.
@@ -114,7 +116,10 @@ minimum; the must-list is set at G2 and sized at G5):
 - J-7 captured send with recovery;
 - J-8 interested-reply draft with the booking link;
 - J-9 basic results;
-- home and action queue.
+- home and action queue;
+- the documented build story (OUT-8): journal, decision log, gate records,
+  review findings and missteps, kept current phase by phase. This is a
+  workshop deliverable in its own right, not an afterthought.
 
 **Later** (see NG IDs in the brief): bulk approve, AI edit suggestions, learning
 from edits, phone channel, external alerts, ICP lead discovery, HubSpot

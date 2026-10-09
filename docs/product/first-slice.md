@@ -141,8 +141,12 @@
 
 ## Questions for the owner
 
-1. A, B or C for Saturday, or a combination you prefer?
+These are now asked once, on the owner decisions page
+(`docs/product/decisions/index.html`):
+
+1. A, B or C for Saturday, or a combination you prefer? (card C3; also
+   slice A's OQ-1)
 2. Is it acceptable for A to ship with provisional design tokens if the visual
-   direction is not settled by Friday night?
+   direction is not settled by Friday night? (card C7; aliases PQ-5, OQ-6)
 3. For the home screen: what is the single most important thing it must show
-   when you open the app?
+   when you open the app? (card C4; aliases PQ-4, OQ-4)
