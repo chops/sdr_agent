@@ -135,25 +135,55 @@ or a new joined read. **Excluded**: slice A shows "deferred until <time>".
    out without a read; the role-restricted card disappears after demotion.
 4. **Audit:** for an auditor, exactly one `record_view` per load and per
    event-driven reload, before rendering, with REQ-A-12's references; empty
-   home records `"none"`; no access from the minute tick; no reload loop;
-   nothing served when the record fails.
-5. **Error paths:** a refused or failing read, including a raise from the
-   status function or the count, withholds the page or the card with an
-   operator-safe message; no value from an earlier load and no raw internals
-   remain.
+   home records `"none"`; no access from an ordinary minute tick; exactly one
+   access for the UTC rollover reload; no reload loop; nothing served when the
+   record fails.
+5. **Error paths** (one policy, REQ-A-10, proposed as OQ-8): any refused or
+   failing read withholds the **whole home** with an operator-safe message,
+   except one case: for an admin, a non-authorization raise or error from
+   `Runtime.status/0` or `Agents.daily_model_calls/1` degrades **only the
+   model card** to "Model status unavailable" while every other section
+   renders. Tests cover: that exception; an authorization refusal of the same
+   reads (whole home withheld); a role change before reload (whole home
+   withheld or card absent, never stale card data); an audit-write failure for
+   an auditor (nothing served); and a provider that is refusing calls (a
+   normal status, not the degraded card). In every case no value from an
+   earlier load and no raw internals remain.
 6. **Delivery buckets and clock:** the REQ-A-7 table and REQ-A-17 cases as
    unit tests on the bucketing and window functions (future and due
    `not_before`, nil, mixed deadlines, `failed_retryable` deferral, bounced,
-   cancelled, expiry without an event, UTC rollover reload once).
+   cancelled, expiry without an event, UTC rollover reload once). The clock
+   and zone are injected; the UTC day is authoritative (00:00 UTC is 18:00
+   MDT now and 17:00 MST after Nov 1). Tick tests cover: an ordinary tick does
+   no reads and no writes; the rollover tick and a coincident event reload
+   coalesce into one reload; a disconnect across 00:00 UTC ends in exactly one
+   reload on reconnect, showing the new day.
 7. **LiveView tests:** each role's visible cards; empty, error, refused on
-   refresh, stale, unknown delivery and its recovery link, failure without a
-   subject page; no write controls present; nav filtering.
+   refresh, stale, unknown delivery and its "Inspect … on Runs & operations"
+   link, failure without a subject page; no write controls present; no copy
+   promising manual reconciliation; nav filtering.
 8. **Load:** measure REQ-A-15 with its worst-case fixtures (including 200
    attention failures, 100 hand-off leads with replies and 50 drafts
    pending), and count the per-item fetches against the read budget.
 9. **Accessibility:** REQ-A-14 checks 1 to 6, with measured contrast pairs.
 10. **Entity trigger:** the recorded "trigger: no" above still holds; D-A-2,
     D-A-3 and D-A-4 stay excluded.
+
+Prototype toggles prove none of checks 1 to 5 or 8: they show the intended
+screens, not authorization, audit behaviour or load time. Those need the
+backend and LiveView tests above.
+
+## Gaps recorded, not in slice A
+
+- **G-A-1 Manual delivery reconciliation.** No screen reconciles an unknown
+  delivery today: `OperationsLive` handles acknowledge and resolve Failure,
+  cancel operation, retry run and retry webhook only, and `DraftLive` has no
+  such handler. Reconciliation runs in the background as REC through
+  `ReconcileWorker.perform/1` and `Delivery.reconcile/2`, using the capture
+  adapter's record and a recorded Decision. `Operations.resolve_failure/3`
+  changes only the Failure. A human-triggered control would be a new domain
+  action with its own entity delta, independent review and gate; it is
+  **trigger: yes** and outside slice A. Owner question OQ-10.
 
 ## Frozen while slice A is built
 

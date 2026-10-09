@@ -131,7 +131,7 @@
   };
   var PLACEHOLDER = {
     admin: "Admin is read-only. It shows the model provider, the daily budget and send cap, integrations and operators. It has no settings, approve or retry controls. The model provider and budget are set in the app's reviewed launch configuration, which only you change, outside the app.",
-    operations: "Runs & operations is where failures are acknowledged and resolved and unknown outcomes are reconciled, under that page's own rules.",
+    operations: "Runs & operations shows runs, attention items (Failures) and operations. Under that page's own rules you can acknowledge or resolve a Failure, cancel an operation, retry a run or retry a webhook. It has no control that reconciles a delivery: an unknown delivery outcome is settled automatically in the background by the reconciler, which checks the capture service's record, records a Decision and never re-sends blindly. Acknowledging or resolving a Failure does not reconcile a delivery and does not establish whether it was captured. Auditors can look here but take no action.",
     draft: "The draft page is where review, edit and approval already live, under their own rules.",
     review: "The review queue lists every draft waiting for a verdict.",
     audit: "The audit timeline is read-only, and an auditor's view of it is recorded.",
@@ -146,7 +146,8 @@
       '</h3><span class="req">' + req + "</span></div>" + body + "</section>";
   }
 
-  // Renders the home for `state` = { role, view, provider, now }. Returns the
+  // Renders the home for `state` = { role, view, provider, now }; provider is
+  // fake | real | refusing (valid statuses) or readfailed (the status read failed). Returns the
   // markup and the destinations its links point at.
   function renderHome(state) {
     var refs = [];
@@ -202,24 +203,29 @@
 
     var sends;
     if (!deliveries.length) {
-      sends = '<p class="empty">No captured sends yet.</p>';
+      sends = '<p class="empty">No captured emails yet.</p>';
     } else {
       sends = '<dl class="kv">' + BUCKETS.map(function (bk) {
         var n = b.counts[bk.key];
         var label = bk.key === "deferred" && n ? "Deferred: next due " + hhmm(b.nextDue) + (b.lastDue !== b.nextDue ? ", last " + hhmm(b.lastDue) : "") : bk.label;
         return "<dt>" + label + "</dt><dd" + (bk.key === "unknown" ? ' class="unknown"' : "") + ">" + n + "</dd>";
       }).join("") + "<dt>Total</dt><dd>" + b.total + "</dd></dl>";
-      if (b.counts.unknown) sends += "<button class=\"linkbtn\" type=\"button\"" + ref({ key: "operations", title: "unknown delivery outcomes" }) + ">Reconcile " + b.counts.unknown + " unknown outcome" + (b.counts.unknown === 1 ? "" : "s") + " on Runs &amp; operations</button>";
+      if (b.counts.unknown) sends += "<button class=\"linkbtn\" type=\"button\"" + ref({ key: "operations", title: "unknown delivery outcomes" }) + ">Inspect " + b.counts.unknown + " unknown outcome" + (b.counts.unknown === 1 ? "" : "s") + " and related attention on Runs &amp; operations</button>";
       sends += '<p class="note">A deferral that reaches its time is due, not sent: it still has to pass the send gate, which can defer it again or cancel it.</p>';
     }
-    sends += '<p class="note">Local capture only: nothing is sent to a real inbox. Unknown outcomes are reconciled, never re-sent blindly.</p>';
-    h += '<div class="grid2">' + card("Agent activity", "REQ-A-6", rs) + card("Captured sends", "REQ-A-7", sends) + "</div>";
+    sends += '<p class="note">Local capture only: nothing is sent to a real inbox. An unknown outcome stays unknown until the background reconciler settles it from the capture service\'s record. It is never re-sent blindly, and resolving its attention item does not settle it.</p>';
+    h += '<div class="grid2">' + card("Agent activity", "REQ-A-6", rs) + card("Captured emails (outbox)", "REQ-A-7", sends) + "</div>";
 
-    if (state.role === "admin") {
+    if (state.role === "admin" && state.provider === "readfailed") {
+      // REQ-A-8 degraded card (proposed, OQ-8): a non-authorization failure of the
+      // admin-only status reads degrades only this card, and no earlier value survives.
+      h += card("Model and budget", "REQ-A-8", '<p><span class="tag unk">unavailable</span>Model status unavailable. The status could not be read just now, so no earlier value is shown. The rest of this page loaded normally.</p>' +
+        "<button class=\"linkbtn\" type=\"button\"" + ref({ key: "admin" }) + ">See the full status on Admin</button><p class=\"note\">Only this card degrades, and only when an admin's status read fails for a reason other than permission. A permission refusal, a role change or an audit failure withholds the whole page instead.</p>");
+    } else if (state.role === "admin") {
       var prov = state.provider === "fake" ? '<span class="tag ok">fake</span>Configured: fake model. In effect: fake model. No AI calls leave this machine.' :
         state.provider === "real" ? '<span class="tag warn">real</span>Configured: Claude CLI. In effect: Claude CLI on your login. Draft content goes to the model provider.' :
         '<span class="tag crit">refusing</span>Configured: Claude CLI. In effect: none. Calls are refused because earlier CLI work is not confirmed stopped. No model call was made.';
-      var m = "<p>" + prov + '</p><dl class="kv"><dt>Model calls reserved today (UTC day, resets 18:00 MDT)</dt><dd>' + (empty ? 0 : EX.budget.reserved) + " of " + EX.budget.limit +
+      var m = "<p>" + prov + '</p><dl class="kv"><dt>Model calls reserved today (UTC day: resets at 00:00 UTC, 18:00 MDT now, 17:00 MST from Nov 1)</dt><dd>' + (empty ? 0 : EX.budget.reserved) + " of " + EX.budget.limit +
         "</dd><dt>Daily send cap</dt><dd>" + EX.budget.sendCap + "</dd></dl><button class=\"linkbtn\" type=\"button\"" + ref({ key: "admin" }) +
         ">See the full status on Admin</button><p class=\"note\">Admins only. Status only: nothing here or on Admin changes the model or the budget. They are set in the app's launch configuration, which only you change.</p>";
       h += card("Model and budget", "REQ-A-8", m);
@@ -242,7 +248,7 @@
       (state.view === "refused" ? "A refresh was refused after the page had loaded. Everything shown before has been removed rather than left out of date." :
         "You are not allowed to see some of this data, or it could not be read. Nothing is shown rather than an incomplete picture.") +
       '</p><p><button class="linkbtn" type="button"' + ref({ key: "home" }) + '>Try again</button> · <button class="linkbtn" type="button"' + ref({ key: "operations" }) +
-      ">Open Runs &amp; operations</button> (it applies its own access rules)</p></div>";
+      ">Open Runs &amp; operations</button> (it applies its own access rules)</p><p class=\"note\">In this prototype, Try again keeps the simulated cause, so the page stays withheld. Change the State control to see a successful load.</p></div>";
     return { html: html, refs: refs };
   }
 

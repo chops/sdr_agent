@@ -137,9 +137,12 @@ home.
   moves from 07:58 to 08:05 with no new event, **then** the "stopped in the
   24 hours before" count drops by one.
 
-### REQ-A-7 Captured sends, honestly labelled (must)
-Every delivery operation falls in exactly **one** bucket, decided by its
-`state` and `not_before` at the check time `now` (REQ-A-17):
+### REQ-A-7 Captured emails (outbox), honestly labelled (must)
+The card is labelled **"Captured emails (outbox)"** (provisional wording,
+OQ-9), never "sends": capture is the only delivery provider, so nothing
+reaches a real inbox. Every delivery operation falls in exactly **one**
+bucket, decided by its `state` and `not_before` at the check time `now`
+(REQ-A-17):
 
 | Bucket | Rule |
 |---|---|
@@ -176,6 +179,9 @@ real inbox." Unknown is always its own bucket and links to recovery
 - **Given** a `pending` delivery with no `not_before`, **then** it is Queued.
 - **Given** a cancelled and a bounced delivery, **then** each is counted in
   its own bucket and the total equals the number of delivery operations.
+- **Given** a delivery in `unknown`, **then** it stays under Outcome unknown
+  until the background reconciler commits an outcome; acknowledging or
+  resolving its attention item (Failure) does not move it.
 - The reason for a deferral (quiet hours or daily cap) is not shown in slice
   A (baseline-delta D-A-5).
 
@@ -201,9 +207,18 @@ launch configuration, which only the owner changes, outside the app.
   actorless read is invoked (backend test, not CSS).
 - **Given** an admin demoted to reviewer, **when** the next reload fires,
   **then** the card disappears and the actorless reads are not invoked.
-- **Given** `Runtime.status/0` or the count raises or returns an error,
-  **then** the card shows "Model status unavailable" with no raw internals and
-  no value from a previous load.
+- **Given** an admin, **when** `Runtime.status/0` or the daily count raises
+  or returns an error for a reason other than authorization, **then** only
+  this card shows "Model status unavailable", with no raw internals and no
+  value from a previous load, and the rest of home renders normally. This is
+  the one degraded-card exception to REQ-A-10 (proposed; owner to confirm,
+  OQ-8).
+- **Given** the real provider is configured and refusing calls, **then** the
+  card shows that refusal as its status. A refusing provider is a valid
+  status, not a failed read, and never shows "Model status unavailable".
+- **Given** the status read is refused because of authorization, or the
+  operator's role changed, or the audit write for an auditor view fails,
+  **then** the whole home is withheld (REQ-A-10), not just the card.
 
 ### REQ-A-9 Pipeline by stage (should)
 Lead counts by stage group, as on today's dashboard.
@@ -217,7 +232,11 @@ Home has designed states:
 - **Error:** if any read is refused or fails, the whole home is withheld with
   an operator-safe message, and nothing previously shown stays on screen
   (fail closed, as today). The message offers "Try again" (reload) and a link
-  to Runs & operations, which applies its own access rules.
+  to Runs & operations, which applies its own access rules. **One narrow
+  exception** (proposed, OQ-8): for an admin, a non-authorization failure of
+  the two model-status reads degrades only the model card (REQ-A-8).
+  Authorization refusals, a changed role or a failed audit write always
+  withhold the whole home.
 - **Refused on refresh:** if a reload is refused after data was shown, the
   same withheld state replaces everything.
 - **Empty:** each section has its own empty message; the capture-only label
@@ -231,6 +250,9 @@ Home has designed states:
 
 - **Given** the domain refuses one read for the signed-in operator, **then**
   no section is shown and the withheld message appears.
+- **Given** an admin whose model-status read fails for a non-authorization
+  reason while every other read succeeds, **then** every other section is
+  shown and only the model card says "Model status unavailable" (REQ-A-8).
 - **Given** home has loaded and the next reload is refused, **then** no value
   from the earlier load remains on screen.
 - **Given** the socket disconnects, **then** the stale banner appears within
@@ -329,8 +351,8 @@ reads would be new contracts (D-A-2) and are out of slice A.
 *Traces:* OUT-5, OUT-7.
 
 ### REQ-A-16 Honest labels (must)
-Seeded data keeps its "fictional demo accounts" hint; captured sends say
-"local capture only"; the fake model is named as fake; in every state.
+Seeded data keeps its "fictional demo accounts" hint; the captured emails
+(outbox) card says "local capture only"; the fake model is named as fake; in every state.
 *Traces:* OUT-7, NG-14.
 
 ### REQ-A-17 Times and freshness (must)
@@ -339,37 +361,69 @@ checked**:
 
 - It shows "Data as of <time> <zone>" (last load or reload) and "times
   checked at <time>".
-- Once a minute while connected, it re-checks clock-derived values against
-  the current time **from the rows already loaded, without new reads**:
-  delivery buckets (REQ-A-7) and the 24-hour stopped-run window (REQ-A-6).
-- The model-call count is per **UTC day** (it resets at 18:00 MDT). When the
-  UTC date changes while the page is open, the home runs one normal reload
-  (the same path as an event-driven reload, with revalidation). At most one
-  such reload per UTC day.
+- Once a minute while connected, an **ordinary (non-rollover) tick**
+  re-checks clock-derived values against the current time **from the rows
+  already loaded, with no reads and no writes**: delivery buckets (REQ-A-7)
+  and the 24-hour stopped-run window (REQ-A-6).
+- The model-call count is per **UTC day**, which is authoritative. It resets
+  at 00:00 UTC: 18:00 MDT today, 17:00 MST after Nov 1 (the workshop on Nov 6
+  is in MST). The view takes its clock and zone by injection so tests can
+  cross the boundary.
+- When the UTC date changes while the page is open, the **rollover tick**
+  runs one normal reload, the same revalidated path as an event-driven reload,
+  including exactly one audited access record for an auditor (REQ-A-12). At
+  most one such reload per UTC day. If an event-driven reload is due at the
+  same moment, the two coalesce into one.
 - Event-driven reloads (REQ-A-11) are unchanged; the minute tick never
   replaces them.
+- On disconnect the stale banner shows (REQ-A-10) and ticks pause. On
+  reconnect the view does one fresh reload; if the UTC date changed while
+  disconnected, that reload is the rollover reload, not an extra one.
 
 *Traces:* OUT-5, F-9, F-13. *Source:* display change (view-level timer).
 
 - **Given** a deferral until 08:00, data read at 07:58 and no event, **when**
   the check time passes 08:00, **then** it moves to Queued or Retry due
   within a minute, and "data as of" still says 07:58.
-- **Given** the page is open across 18:00 MDT, **then** exactly one reload
-  runs and the reserved-call count shows the new UTC day.
-- **Given** the minute tick, **then** no read or audit write happens.
+- **Given** the page is open across 00:00 UTC (18:00 MDT now), **then**
+  exactly one reload runs and the reserved-call count shows the new UTC day;
+  for an auditor, exactly one audited access is recorded for it.
+- **Given** an ordinary (non-rollover) minute tick, **then** no read and no
+  audit write happens.
+- **Given** an event-driven reload and the rollover fall in the same tick,
+  **then** one reload runs.
+- **Given** the socket is disconnected across 00:00 UTC, **when** it
+  reconnects, **then** one reload runs and it shows the new UTC day.
 
 ### REQ-A-18 Recovery navigation (must)
-Home offers read-only paths to recovery, never recovery itself:
+Home offers read-only paths to inspect problems, never recovery itself:
 
-- The "Outcome unknown" count, when above zero, has a link "Reconcile N
-  unknown outcome(s) on Runs & operations" to `/operations`.
+- The "Outcome unknown" count, when above zero, has a link "Inspect N
+  unknown outcome(s) and related attention on Runs & operations" to
+  `/operations`.
+- No screen reconciles a delivery by hand. An unknown delivery outcome is
+  settled automatically in the background by the reconciler
+  (`ReconcileWorker` running `Delivery.reconcile/2`), which checks the
+  capture service's record, records a Decision and never re-sends blindly.
+  The outcome stays unknown until the reconciler commits it.
+- Runs & operations can acknowledge or resolve a Failure (the attention
+  item), cancel an operation, retry a run or retry a webhook, under its own
+  rules. Acknowledging or resolving a Failure does not reconcile a delivery
+  and does not establish whether it was captured or failed. Home never says
+  otherwise.
 - A failure whose subject has no console page links to `/operations`.
 - The withheld state links to Runs & operations (REQ-A-10).
+- An auditor following these links gains no authority to act; the
+  destination applies its own access rules.
 
 *Traces:* OUT-5, F-9, F-13.
 
-- **Given** one unknown delivery, **then** home shows a link to
-  `/operations` next to the count, and following it opens Runs & operations.
+- **Given** one unknown delivery, **then** home shows "Inspect 1 unknown
+  outcome and related attention on Runs & operations" next to the count, and
+  following it opens Runs & operations.
+- **Given** any home, withheld or linked-page text, **then** none of it
+  promises that a person can reconcile a delivery (checked by
+  `check-prototype.mjs` for the prototype, and by a copy test at G4).
 - **Given** a failure with no subject page, **then** its row opens
   `/operations`.
 
@@ -381,6 +435,8 @@ Home offers read-only paths to recovery, never recovery itself:
 - Provider and budget for reviewers and auditors (D-A-4).
 - Why a delivery was deferred (D-A-5).
 - Aggregate count reads (D-A-2).
+- A human-triggered delivery reconciliation control (gap G-A-1, OQ-10). It
+  does not exist today and would be a new, separately gated domain action.
 - Visual direction beyond provisional tokens, unless the design days settle it
   (owner's choice, PQ-5).
 - Intake, research, drafting, reply drafting, metrics (later slices).
@@ -401,3 +457,13 @@ Home offers read-only paths to recovery, never recovery itself:
 - **OQ-6** Ship with provisional styling if the visual direction is not
   settled by Friday night (PQ-5)?
 - **OQ-7** Do you agree with the must and should ranking above?
+- **OQ-8** Read-failure policy (proposed): if an admin's model-status read
+  fails for a non-permission reason, only the model card says "Model status
+  unavailable" and the rest of home still shows. Any permission refusal, role
+  change or audit failure withholds the whole home. Agree, or should every
+  read failure withhold the whole home?
+- **OQ-9** Wording: call the delivery card "Captured emails (outbox)" rather
+  than "sends", since nothing is actually sent? Or "Outbox" alone?
+- **OQ-10** Do you need a button to reconcile an unknown delivery by hand?
+  Today the background reconciler does it on its own. A manual control would
+  be new domain work with its own review (gap G-A-1), not part of slice A.

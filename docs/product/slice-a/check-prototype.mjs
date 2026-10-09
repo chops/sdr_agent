@@ -71,7 +71,7 @@ function destination(btn, refs) {
 const STATES = [];
 for (const role of ["admin", "reviewer", "auditor"])
   for (const view of ["normal", "empty", "stale"])
-    for (const provider of ["fake", "real", "refusing"])
+    for (const provider of ["fake", "real", "refusing", "readfailed"])
       for (const now of [at(7, 58), at(8, 5)]) STATES.push({ role, view, provider, now });
 
 const checks = [];
@@ -147,9 +147,38 @@ check("the 24-hour stopped-run window follows finished_at and the clock", () => 
 check("unknown outcomes link to Runs & operations; a failure without a subject page falls back there", () => {
   const r = P.renderHome({ role: "reviewer", view: "normal", provider: "fake", now: at(8, 5) });
   const pages = buttons(r.html).map((b) => [b.text, destination(b, r.refs)]);
-  assert.ok(pages.some(([t, p]) => p && p.key === "operations" && /Reconcile 1 unknown outcome/.test(t)));
+  assert.ok(pages.some(([t, p]) => p && p.key === "operations" && /Inspect 1 unknown outcome and related attention on Runs/.test(t)));
   assert.ok(pages.some(([t, p]) => p && p.key === "operations" && /no page for its subject/.test(t)));
   assert.ok(pages.some(([, p]) => p && p.key === "subject"));
+});
+
+// No screen in the app reconciles a delivery by hand: the background reconciler
+// does. Copy may send people to Runs & operations to inspect, never promise
+// that they can reconcile there (Codex re-review of 26741f5, MF1).
+const PROMISES_MANUAL_RECONCILE = [/\bReconcile\b/, /\breconciled\b[^.]*\b(on|at|in) (Runs|this page|the page)/i, /\bwhere\b[^.]*\breconciled\b/i, /\bcan reconcile\b/i];
+check("no copy promises a manual delivery reconciliation", () => {
+  const texts = [];
+  for (const s of STATES) texts.push(P.renderHome(s).html);
+  for (const view of ["error", "refused"]) texts.push(P.renderWithheld({ role: "auditor", view, provider: "fake", now: at(8, 5) }).html);
+  for (const key of ["home", "leads", "review", "operations", "audit", "admin", "draft", "lead", "run", "subject"]) texts.push(P.renderPlaceholder({ key }).html);
+  texts.push(read("prototype.html"));
+  for (const t of texts) for (const re of PROMISES_MANUAL_RECONCILE) assert.ok(!re.test(t), "copy promises manual reconciliation: " + re + " in …" + (t.match(re) || [""])[0]);
+  const ops = P.renderPlaceholder({ key: "operations" }).html;
+  assert.match(ops, /has no control that reconciles a delivery/);
+  assert.match(ops, /does not reconcile a delivery/);
+  assert.match(ops, /Auditors can look here but take no action/);
+});
+
+check("a failed admin status read degrades only the model card, with no earlier value", () => {
+  const a = P.renderHome({ role: "admin", view: "normal", provider: "readfailed", now: at(8, 5) });
+  assert.match(a.html, /Model status unavailable/);
+  assert.ok(!/Configured:/.test(a.html), "no provider value survives a failed read");
+  assert.ok(!new RegExp(" of " + P.EX.budget.limit).test(a.html), "no budget value survives a failed read");
+  for (const card of ["Captured emails \\(outbox\\)", "Lead pipeline", "Agent activity", "Problems"]) assert.match(a.html, new RegExp(card), card + " still renders");
+  const refusing = P.renderHome({ role: "admin", view: "normal", provider: "refusing", now: at(8, 5) });
+  assert.ok(!/Model status unavailable/.test(refusing.html), "a refusing provider is a valid status, not a failed read");
+  const r = P.renderHome({ role: "reviewer", view: "normal", provider: "readfailed", now: at(8, 5) });
+  assert.ok(!/Model and budget|Model status unavailable/.test(r.html), "non-admins never see the model card");
 });
 
 check("the model card is admin-only and never claims Admin changes settings", () => {
@@ -183,7 +212,7 @@ check("slice-a notes.js logic matches docs/sdlc/notes.js", () => {
 
 check("the page wires the logic, notes and controls", () => {
   const html = read("prototype.html");
-  for (const s of ['src="prototype-logic.js"', 'src="notes.js"', 'id="ctl-clock"', '"refused"', "data-page-ref", "prefers-reduced-motion: reduce)\").matches", "--on-owner"]) {
+  for (const s of ['src="prototype-logic.js"', 'src="notes.js"', 'id="ctl-clock"', '"refused"', '"readfailed"', "data-page-ref", "prefers-reduced-motion: reduce)\").matches", "--on-owner"]) {
     assert.ok(html.includes(s), "prototype.html is missing " + s);
   }
   assert.ok(!/data-page='/.test(html), "no JSON in single-quoted data-page attributes");

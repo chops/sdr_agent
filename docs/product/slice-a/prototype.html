@@ -200,7 +200,7 @@ footer { font-size: 12px; color: var(--muted); }
 
   // Prototype data for the notes export (notes.js expects openQuestions and phases).
   var D = {
-    meta: { revision: "2026-10-08.2", version: "slice A prototype v0.2 (proposed, revised for Codex review of 40f76d4)" },
+    meta: { revision: "2026-10-08.3", version: "slice A prototype v0.3 (proposed, revised for Codex re-check of 26741f5)" },
     openQuestions: [
       { id: "OQ-1", q: "Is slice A your choice for Saturday?" },
       { id: "OQ-2", q: "Model and budget on home for admins only, or also reviewers and auditors (new exposure, own review)?" },
@@ -208,7 +208,10 @@ footer { font-size: 12px; color: var(--muted); }
       { id: "OQ-4", q: "What is the single most important thing home must show when you open the app?" },
       { id: "OQ-5", q: "Rename Dashboard to Home in the navigation?" },
       { id: "OQ-6", q: "Ship with provisional styling if the visual direction is not settled by Friday night?" },
-      { id: "OQ-7", q: "Do you agree with the must and should ranking of the slice A requirements?" }
+      { id: "OQ-7", q: "Do you agree with the must and should ranking of the slice A requirements?" },
+      { id: "OQ-8", q: "If an admin's model-status read fails for a non-permission reason, should only the model card say \"Model status unavailable\" while the rest of home shows (proposed), or should the whole home be withheld? Try the Model control's \"Status read failed\"." },
+      { id: "OQ-9", q: "Call the delivery card \"Captured emails (outbox)\" instead of \"sends\", since nothing is actually sent? Or just \"Outbox\"?" },
+      { id: "OQ-10", q: "Do you need a button to reconcile an unknown delivery by hand? Today the background reconciler settles it on its own; a manual control would be new work with its own review, not part of slice A." }
     ],
     phases: [
       { id: "SCR-A-1", name: "Navigation shell" },
@@ -239,7 +242,7 @@ footer { font-size: 12px; color: var(--muted); }
   }
   seg("ctl-role", "role", [["admin", "Admin (you)"], ["reviewer", "Reviewer"], ["auditor", "Auditor"]]);
   seg("ctl-state", "view", [["normal", "Normal"], ["empty", "Empty"], ["loading", "Loading"], ["error", "Error"], ["refused", "Refused on refresh"], ["stale", "Stale"]]);
-  seg("ctl-provider", "provider", [["fake", "Fake model"], ["real", "Real model"], ["refusing", "Real, refusing"]]);
+  seg("ctl-provider", "provider", [["fake", "Fake model"], ["real", "Real model"], ["refusing", "Real, refusing"], ["readfailed", "Status read failed"]]);
   seg("ctl-clock", "now", [[7 * 60 + 58, "07:58"], [8 * 60 + 5, "08:05"]]);
 
   function allowed(item) { return item.roles === "all" || item.roles.indexOf(state.role) !== -1; }
@@ -258,7 +261,7 @@ footer { font-size: 12px; color: var(--muted); }
       b.addEventListener("click", function () { go({ key: item.key }); });
       nav.appendChild(b);
     });
-    $("who").innerHTML = "Signed in as <b>Charles</b> · " + esc(state.role) + '<br><a href="#" onclick="return false">Sign out</a> <span class="note">(existing sign-in action, not a domain write)</span>';
+    $("who").innerHTML = "Signed in as <b>Charles</b> · " + esc(state.role) + '<br><a href="#" onclick="return false">Sign out</a> <span class="note">(existing sign-out/authentication action, not a domain write; does nothing in this prototype)</span>';
   }
 
   function render() {
