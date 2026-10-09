@@ -1,6 +1,6 @@
-// Copied unchanged from docs/sdlc/notes.js at 0134036 (reviewed by Codex in PR #36),
-// so this page can be opened from its own folder and published as an artifact.
-// Change the original first and re-copy; do not edit this copy alone.
+// Copied from docs/sdlc/notes.js at 98fb96e (reviewed by Codex in PR #36); the
+// logic below these three comment lines is identical to that file, and
+// docs/product/discovery/check-p1.mjs fails if it drifts. Change the original first.
 // Owner notes for the interactive SDLC map: browser storage, a visible
 // "not saved" state, and an export that says which data revision each note
 // was written against. Kept separate from index.html so
@@ -140,7 +140,7 @@
       var n = notes[k];
       if (!n || !String(n.text).trim()) return;
       if (n.revision === D.meta.revision) {
-        current.push(labels[k] + ":", indent(n.text), "");
+        current.push((labels[k] || n.context || k) + ":", indent(n.text), "");
       } else {
         var origin = n.revision ? "revision " + n.revision + (n.fingerprint ? " (fingerprint " + n.fingerprint + ")" : "") : "an unknown revision (saved before revisions were recorded)";
         older.push((n.context || labels[k] || k) + ":", "   [written against " + origin + "]", indent(n.text), "");

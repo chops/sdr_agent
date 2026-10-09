@@ -1,6 +1,7 @@
 # First build slice: candidates for Saturday, Oct 10
 
-- **Status:** proposal for the owner, written 2026-10-08. Nothing here is
+- **Status:** proposal for the owner, revised 2026-10-08 after Codex review
+  of `8e08d0a`. Nothing here is
   approved. Building starts only after gates G1 to G5 pass for the chosen slice
   (owner decision, Oct 8: build starts Saturday with a narrow first slice).
 - **Built on:** [brief](brief.md) and [story map](story-map.md).
@@ -19,7 +20,7 @@
 
 ## Candidates
 
-### A. Operator shell and home (recommended)
+### A. Operator shell and home: a read-only triage starter (recommended)
 
 - **What it is:**
   - the new app frame: layout, navigation between the screens, and the visual
@@ -35,20 +36,31 @@
   - `Agents.list_runs/1`;
   - `AI.ModelProvider.Runtime.status/0`.
 - **Value:** every later screen lives inside this frame. The home screen
-  answers "what do I do now?", which the founder needs first.
-- **Risk:** low for the domain. The main risk is the visual direction not
-  being settled by Friday; then the frame ships with provisional design
-  tokens that are swapped later.
+  answers "what do I do now?". Its success on its own is narrow: the founder
+  finds the right draft or problem and gets to the existing safe action for
+  it. It does **not** deliver OUT-1 (list to approved drafts); that needs an
+  intake path and the rest of the journey.
+- **Risk:** low for the domain, but only if the boundary holds: reads only,
+  no new write, retry or budget actions. If the visual direction is not
+  settled by Friday, shipping with provisional design tokens is **your
+  choice** (PQ-5), not an automatic fallback, and it does not skip G3.
 - **Evidence needed:**
   - **G2:** requirements and acceptance criteria for the home screen and
-    navigation, including the empty, loading, error and unknown states.
+    navigation, naming exactly which counters, budget and status are shown,
+    where each comes from, and what each role sees; the empty, loading,
+    error, stale and unknown states; and an explicit exclusion of new write,
+    retry or budget actions.
   - **G3:** home and navigation in the clickable prototype, walked through by
     the owner without help.
   - **G4:**
-    - confirm there is no entity or domain change, so no entity delta;
-    - a short threat note (reads stay under existing policies, no new data
-      shown to roles that cannot see it today);
-    - a LiveView test plan.
+    - evaluate the entity-delta trigger: if the home needs a new public read
+      contract, calculation or policy, it gets an independent review; "no
+      entity delta" is claimed only if the boundary really holds;
+    - a short threat note: the signed-in actor is passed to every read, views
+      are audited where required, refresh fails closed, no payload is newly
+      exposed to a role that cannot see it today;
+    - a LiveView test plan, including the empty, error, stale and unknown
+      states.
   - **G5:** the slice plan, CI, rollback (revert the UI), and the next slice
     named.
 
@@ -62,8 +74,9 @@
 - **Story map:** J-6 (and part of J-5).
 - **What changes underneath:** the screens only. It uses the existing
   `edit_draft`, `approve/3` and `reject/3` with their binding to the exact
-  recipient and revision. It may need one new read: the next and previous
-  draft in the queue.
+  recipient and revision. It may need one new read (next and previous draft
+  in the queue); that triggers an entity-delta evaluation and, if it applies,
+  an independent review.
 - **Value:** the trust moment of the whole product (OUT-2, OUT-3). It shows
   off the evidence and the approval binding.
 - **Risk:** medium. It is the security-sensitive screen: the approval must
@@ -81,18 +94,25 @@
       approves without a visible confirmation of the target.
   - **G5:** as for A.
 
-### C. CSV import
+### C. CSV import (or the add-by-hand intake, whichever you choose at G2)
 
 - **What it is:** upload a CSV, preview it, validate it, check for duplicates
-  and suppressed contacts, then create accounts, contacts and leads.
+  and suppressed contacts, then create accounts, contacts and leads. Only
+  reserved synthetic or owner test contacts are admitted (NG-14).
 - **Story map:** J-2, with F-1 and F-2.
 - **What changes underneath:** a new way for data to enter:
   - an import action;
   - row-level validation;
   - where each row came from;
   - duplicate rules;
-  - handling of personal data in uploaded files.
-- **Value:** needed for the workshop: founders must bring their own lists.
+  - handling of personal data in uploaded files;
+  - duplicate, idempotency and partial-failure behaviour;
+  - bounded upload size, and the threat from website URLs in rows;
+  - what stays in the append-only audit trail.
+- **Value:** the workshop core needs one intake path, and this is one of the
+  two candidates. It is what turns the app from fixtures into a usable
+  input → draft → review → capture journey. It is **not** for attendees'
+  real prospect lists.
 - **Risk:** higher. This is a new data path, so it needs an entity delta with
   an independent PASS, a threat model (spreadsheet formula injection, file
   size, personal data in the audit trail) and import tests. Too much to close
@@ -101,13 +121,15 @@
 
 ## Recommendation
 
-1. **Saturday: A, the operator shell and home.** It changes no business rules
-   or data, it frames everything after it, and it turns the design days
-   straight into something you can use.
-2. **Next: B, the review workspace,** as soon as its own G2 to G5 evidence is
-   ready, likely Sunday or Monday.
-3. **Then C, CSV import,** after its entity delta and threat model are
-   reviewed.
+1. **Saturday: A, if you want triage and navigation first.** It changes no
+   business rules or data and frames everything after it. It is a starter,
+   not a complete journey.
+2. **After that, slices are chosen one at a time** with their own G2 to G5.
+   We suggest prioritising whatever unlocks a usable input → draft → review
+   → capture journey, which most likely means your chosen intake path (C)
+   before review polish (B).
+3. No dates are claimed for later slices yet. They come from the G5 capacity
+   review, not from this proposal.
 
 ## What stays frozen, whichever you pick
 

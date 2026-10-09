@@ -84,7 +84,7 @@ against each other or against the product's safety rules:
 | Workshop promise | **First-touch copilot** for solo founders |
 | Phone | **Desktop only** for this release. Screens may be responsive, but no remote access. |
 | Delivery | **Captured only.** No self-send and no charter amendment. |
-| HubSpot | **Optional, gated add-on.** CSV and manual entry are the core lead sources. |
+| HubSpot | **Optional, gated add-on.** CSV and manual entry were named as the core lead sources. Neither exists in the prototype today (only a synthetic seed); the workshop core picks one at G2, with the seed as fallback. |
 
 ## How this feeds the next steps
 

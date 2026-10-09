@@ -145,6 +145,7 @@ fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 8px; min-width:
 textarea { width: 100%; min-height: 64px; resize: vertical; font: 400 var(--step-0)/1.45 var(--font-body); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; }
 textarea:focus { border-color: var(--p-owner); outline: none; }
 .stale { display: block; font-size: var(--step--1); color: var(--gate); }
+.stale-slot { display: block; }
 .linkbtn { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
 .decisions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .export { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
@@ -231,6 +232,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
             <label><input type="radio" name="evtype" value="I watched them do the task"> I watched them do the task</label>
             <label><input type="radio" name="evtype" value="A mix"> A mix</label>
           </div>
+          <span class="stale-slot" id="stale-founder:type"></span>
         </fieldset>
         <div class="answer"><label for="f-founder">Founder notes</label><textarea id="f-founder" data-note="founder:notes" data-context="Founder conversation notes" style="min-height:140px"></textarea></div>
       </div>
@@ -266,6 +268,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
             <label><input type="radio" name="slice" value="C. CSV import"> C. CSV import</label>
             <label><input type="radio" name="slice" value="Something else (see note)"> Something else</label>
           </div>
+          <span class="stale-slot" id="stale-choice:slice"></span>
         </fieldset>
         <div class="answer"><label for="f-slice-note">Why, or what you would change</label><textarea id="f-slice-note" data-note="slice:note" data-context="First build slice note"></textarea></div>
       </div>
@@ -282,6 +285,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
               <label><input type="radio" name="brief" value="Approve with the changes in my notes"> With changes</label>
               <label><input type="radio" name="brief" value="Needs another round"> Another round</label>
             </div>
+          <span class="stale-slot" id="stale-choice:brief"></span>
           </fieldset>
         </div>
         <div class="card">
@@ -292,6 +296,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
               <label><input type="radio" name="story" value="Approve with the changes in my notes"> With changes</label>
               <label><input type="radio" name="story" value="Needs another round"> Another round</label>
             </div>
+          <span class="stale-slot" id="stale-choice:story"></span>
           </fieldset>
         </div>
       </div>
@@ -341,6 +346,18 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     var n = store.entry(k);
     return '<span class="stale" data-stale="' + esc(k) + '">Written against ' + (n.revision ? "revision " + esc(n.revision) : "an earlier version of this page") + '. Edit it, or <button type="button" class="linkbtn" data-confirm="' + esc(k) + '">keep it for this revision</button>.</span>';
   }
+  // A choice made against another revision is not shown as selected; it is
+  // named in a marker with a button to keep it for this revision.
+  function choiceStaleMarker(k) {
+    var n = store.entry(k);
+    return '<span class="stale" data-stale="' + esc(k) + '">Earlier you chose \u201c' + esc(n.text) + '\u201d on ' + (n.revision ? "revision " + esc(n.revision) : "an earlier version of this page") + '. Choose again, or <button type="button" class="linkbtn" data-confirm-choice="' + esc(k) + '">keep it for this revision</button>.</span>';
+  }
+  function renderChoice(fs) {
+    var k = fs.getAttribute("data-choice"), v = store.get(k), stale = store.isStale(k);
+    fs.querySelectorAll("input[type=radio]").forEach(function (r) { r.checked = !stale && r.value === v; });
+    var slot = $("stale-" + k);
+    if (slot) slot.innerHTML = stale && v ? choiceStaleMarker(k) : "";
+  }
   function noteBox(key, context) {
     reg(key, context);
     var v = store.get(key);
@@ -369,7 +386,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     "B": { "Review queue": 1, "One draft: recipient, revision, citations, risks": 1, "Edit (new revision)": 1, "Approve, bound to recipient and revision": 1, "Reject with a reason": 1, "Keyboard-driven queue": 1 },
     "C": { "Upload a CSV with preview and checks": 1, "Show duplicates and suppressed contacts": 1 }
   };
-  function sliceKey() { var v = store.get("choice:slice"); return v ? v.charAt(0) : ""; }
+  function sliceKey() { var v = store.get("choice:slice"); return v && !store.isStale("choice:slice") ? v.charAt(0) : ""; }
   function renderMap() {
     var marks = SLICE_TASKS[sliceKey()] || {};
     $("map-grid").innerHTML = P.journey.map(function (j) {
@@ -400,10 +417,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     var el = document.querySelector('[data-note="' + k + '"]');
     if (el) { el.value = store.get(k); el.insertAdjacentHTML("afterend", staleMarker(k)); }
   });
-  document.querySelectorAll("fieldset[data-choice]").forEach(function (fs) {
-    var v = store.get(fs.getAttribute("data-choice"));
-    fs.querySelectorAll("input[type=radio]").forEach(function (r) { r.checked = r.value === v; });
-  });
+  document.querySelectorAll("fieldset[data-choice]").forEach(renderChoice);
 
   // Save state, always visible
   function renderSave() {
@@ -427,6 +441,7 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     var fs = e.target.closest("fieldset[data-choice]"); if (!fs) return;
     var k = fs.getAttribute("data-choice");
     store.set(k, e.target.value, fs.getAttribute("data-context"));
+    renderChoice(fs);
     dirty = true; renderSave();
     if (k === "choice:slice") renderMap();
   });
@@ -435,6 +450,16 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     if (open) {
       var w = document.querySelector('[data-wrap="' + open.getAttribute("data-open") + '"]');
       if (w) { w.hidden = !w.hidden; if (!w.hidden) w.querySelector("textarea").focus(); }
+      return;
+    }
+    var keepChoice = e.target.closest && e.target.closest("button[data-confirm-choice]");
+    if (keepChoice) {
+      var ck = keepChoice.getAttribute("data-confirm-choice");
+      var cfs = document.querySelector('fieldset[data-choice="' + ck + '"]');
+      store.set(ck, store.get(ck), cfs ? cfs.getAttribute("data-context") : null);
+      if (cfs) renderChoice(cfs);
+      dirty = true; renderSave();
+      if (ck === "choice:slice") renderMap();
       return;
     }
     var keep = e.target.closest && e.target.closest("button[data-confirm]");
