@@ -136,15 +136,20 @@ or team page), do not ignore it:
 
 - return it as a **contact candidate**: the value, which field it is, the
   source number, the exact quote, and the source's date or retrieval date;
-- the application stores it on the contact record with that provenance,
-  labelled "found during research";
+- candidates live in a **separate, protected lane**, apart from the research
+  facts and angles, never mixed into them;
+- the application stores each candidate alongside the contact record with that
+  provenance, labelled "found during research";
+- a candidate is **never** promoted automatically into the contact's primary
+  email or phone, and **never** overwrites an existing CRM field. Promotion is
+  an explicit action by the owner or an operator;
 - it is **never** used as a fact, an angle or a talking point in the email.
 
 The owner's own contact-sourcing algorithm stays the primary way contact
 details are found. Both kinds are kept and labelled with where they came
 from. Only business contact details count; a personal address or number is
-never collected. **Fixed** (eval and review; candidate storage and labels:
-planned check)
+never collected. **Fixed** (eval and review; separate lane, no automatic
+promotion and labels: planned check)
 
 ## Thin, stale or conflicting evidence
 
@@ -210,7 +215,8 @@ block. It cannot approve a draft or bypass qualification or suppression.
 
 The budget is **adjustable**: a global default in Settings, which each
 campaign can raise or lower, always within the application's hard caps. A
-per-lead override (a "research this lead more" action) is post-MVP.
+per-lead override (a "research this lead more" action) is undecided: a
+post-MVP candidate.
 
 *Editable* defaults per lead, for the research stage only:
 
@@ -282,5 +288,5 @@ budget stop is labelled thin; it is never presented as complete.
 | Codex important | Technical detail was lost in the merge | Added the technical appendix: IDs, offering revision refs, same-lead and same-run source scope, resolvable references, code-computed quote offsets, bounded strings, non-executable next question |
 | Codex important | "About 24,000" was not a real cap; output was unbounded | Proposed caps: 4,000 characters per source, 24,000 in total, 2,500 output tokens; research stage only; retries, repairs and later stages share the approved budgets |
 | Codex optional | Republished self-reports looked independent; CRM history input was dropped | A company's own claim stays reported however often it is republished; prior contact context restored as an input |
-| Owner (Oct 10) | A published business email or phone on a contact page should not be ignored | New "Contact details found during research": captured as a contact candidate with source and date, stored on the contact record with provenance, never used in the email; the owner's algorithm stays primary |
-| Owner (Oct 10) | The research budget should be adjustable | Global default in Settings plus per-campaign override within hard caps; per-lead override is post-MVP |
+| Owner (Oct 10), with Codex's addendum | A published business email or phone on a contact page should not be ignored | New "Contact details found during research": captured as a contact candidate with source and date, kept in a separate protected lane apart from facts and angles, stored alongside the contact record with provenance, never auto-promoted to the primary email or phone and never overwriting a CRM field (promotion is an explicit owner or operator action), never used in the email; the owner's algorithm stays primary |
+| Owner (Oct 10), with Codex's addendum | The research budget should be adjustable | Global default in Settings plus per-campaign override within hard caps; per-lead override undecided (post-MVP candidate) |
