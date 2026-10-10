@@ -179,10 +179,11 @@ CI" with no text parsing that could fail open.
 - The factory receipt still records igniter 0.8.3 / usage_rules 1.2.7 as the
   generator versions. That is history and stays unchanged.
 
-## Amendment (proposed 2026-10-10): EEF-CVE-2026-101028
+## Amendment (2026-10-10): EEF-CVE-2026-101028
 
-**Status: proposed.** In force when the owner accepts it; until then this
-branch is unmerged and CI on other changes stays red on the audit step.
+**Status: accepted** by the owner in the private Claude session chat on
+2026-10-10 ("accept the amendment."), after Codex's independent approval of
+369ea97 (reply 12cf8940; exact-head CI 38075894593 green).
 
 ### Advisory
 
