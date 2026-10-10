@@ -189,6 +189,9 @@ textarea:focus, input[type="text"]:focus { border-color: var(--p-owner); outline
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); flex: none; }
 .dot.ok { background: var(--done); } .dot.warn { background: var(--gap); } .dot.busy { background: var(--gate); }
 .state { display: flex; gap: 8px; align-items: baseline; }
+.closed { background: var(--done-soft); color: var(--ink); border: 1px solid var(--done); border-radius: var(--radius); padding: 14px 16px; display: grid; gap: 6px; }
+.closed b { color: var(--done); font-family: var(--font-mono); font-size: var(--step--1); letter-spacing: .06em; text-transform: uppercase; }
+.closed a { color: var(--accent); }
 .warnbox { background: var(--gap-soft); color: var(--gap); border: 1px solid var(--gap); border-radius: var(--radius); padding: 12px 14px; font-weight: 500; }
 .export { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 #export-text { min-height: 180px; font-family: var(--font-mono); font-size: var(--step--1); }
@@ -227,13 +230,13 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
 
   <main>
     <header>
-      <div class="eyebrow">SDR Agent · product shaping · discussion 1 · Oct 8, 2026</div>
+      <div class="eyebrow">SDR Agent · product shaping · discussion 1 · Oct 8, 2026 · closed Oct 10, 2026</div>
       <h1>How should we shape the product before writing code?</h1>
       <p class="lede">You asked how to agree the product's shape, screens and actions before building anything. This page puts your idea, Claude's view and Codex's view side by side, then asks you to decide and to walk us through one real task.</p>
-      <div class="howto">
-        <span><b>Answer</b> in any purple box. It saves as you type.</span>
-        <span><b>Ask</b> in step 9. Claude or Codex replies on this page.</span>
-        <span><b>Tell Claude</b> "check the shaping page" when you are done.</span>
+      <div class="closed" role="note">
+        <b>Closed</b>
+        <span>This discussion closed on Oct 10, 2026. Your answers here are recorded. New questions or notes go on the <a href="https://claude.ai/artifact/CFjkoAnWbjncPksPRVmPe1" target="_blank" rel="noopener">decisions page</a>.</span>
+        <span>Everything you wrote is still shown below, read-only, and is also in <span class="mono">docs/product/shaping/answers.md</span> with where each answer went. All prep documents are listed in the <a href="https://claude.ai/artifact/6JgKQJxJxnX2Lcqjvnmesy" target="_blank" rel="noopener">prep docs hub</a>.</span>
       </div>
       <p class="warnbox" id="warn" hidden></p>
     </header>
@@ -474,12 +477,12 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
       <div class="sec-head">
         <div class="eyebrow">Step 9</div>
         <h2 id="h9s">Ask us a question</h2>
-        <p>Ask anything about this page. Then tell Claude in chat to check it. Claude or Codex answers here, and the answer stays on the page.</p>
+        <p>This page is closed, so new questions go on the <a href="https://claude.ai/artifact/CFjkoAnWbjncPksPRVmPe1" target="_blank" rel="noopener">decisions page</a>. Questions asked here stay listed with their answers.</p>
       </div>
       <div class="card">
         <div class="ask">
-          <div class="answer" style="border:0;padding:0"><label for="f-ask">Your question</label><textarea id="f-ask" placeholder="For example: what is event storming, and would I take part in it?"></textarea></div>
-          <button class="btn" id="ask-btn" type="button">Ask</button>
+          <div class="answer" style="border:0;padding:0"><label for="f-ask">Your question</label><textarea id="f-ask" disabled placeholder="Closed: ask on the decisions page. For example: what is event storming, and would I take part in it?"></textarea></div>
+          <button class="btn" id="ask-btn" type="button" disabled>Ask</button>
         </div>
         <p class="muted" id="ask-note" style="font-size:var(--step--1)"></p>
       </div>
@@ -564,10 +567,6 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     try { var raw = window.localStorage.getItem(LOCAL); if (raw) { var o = JSON.parse(raw); values = o.values || {}; questions = o.questions || []; } return true; }
     catch (e) { return false; }
   }
-  function saveLocal() {
-    try { window.localStorage.setItem(LOCAL, JSON.stringify({ values: values, questions: questions })); return true; }
-    catch (e) { return false; }
-  }
 
   function fieldEls() { return document.querySelectorAll("[data-field]"); }
   function applyValue(el, v) {
@@ -589,41 +588,21 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     });
   }
 
-  // One write at a time per document, coalesced per pause in typing.
-  function persist(id) {
-    var v = values[id] || "";
-    if (mode === "db") {
-      setStatus("busy", "Saving…");
-      chains[id] = (chains[id] || Promise.resolve()).then(function () {
-        return db.doc("responses/" + id).set({ field: id, value: v, updatedAt: Date.now() });
-      }).then(function () {
-        setStatus("ok", "Saved. Claude can read your answers.");
-      }, function (e) {
-        setStatus("warn", "Not saved (" + (e && e.code || "error") + "). Use Copy everything before leaving.");
-      });
-    } else {
-      var ok = saveLocal();
-      setStatus(ok ? "busy" : "warn", ok ? "Saved in this browser only. Claude cannot see it; use Copy everything." : "Not saved anywhere. Use Copy everything before leaving.");
-    }
+  // The discussion closed on Oct 10, 2026: the page is read-only. It shows the
+  // answers stored in the shared store and never writes to it or to browser
+  // storage.
+  function lockInputs() {
+    fieldEls().forEach(function (el) {
+      if (el.tagName === "FIELDSET") {
+        el.querySelectorAll("input").forEach(function (r) { r.disabled = true; });
+      } else {
+        el.readOnly = true;
+        el.setAttribute("aria-readonly", "true");
+      }
+    });
+    $("f-ask").disabled = true;
+    $("ask-btn").disabled = true;
   }
-  function onChange(id, v) {
-    values[id] = v;
-    markAnswered();
-    clearTimeout(timers[id]);
-    timers[id] = setTimeout(function () { persist(id); }, 700);
-  }
-  document.addEventListener("input", function (e) {
-    var el = e.target.closest && e.target.closest("[data-field]");
-    if (!el) return;
-    if (el.tagName === "FIELDSET") return;
-    onChange(el.getAttribute("data-field"), el.value);
-  });
-  document.addEventListener("change", function (e) {
-    if (e.target.type !== "radio") return;
-    var fs = e.target.closest("fieldset[data-field]"); if (!fs) return;
-    var id = fs.getAttribute("data-field");
-    values[id] = e.target.value; markAnswered(); persist(id);
-  });
 
   // ---------- questions ----------
   function fmtTime(t) { try { return new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; } }
@@ -649,21 +628,6 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
     });
     markAnswered();
   }
-  $("ask-btn").addEventListener("click", function () {
-    var text = $("f-ask").value.trim(); if (!text) return;
-    var q = { text: text, askedAt: Date.now(), status: "open", answers: [] };
-    var btn = $("ask-btn"); btn.disabled = true;
-    var done = function (msg) { btn.disabled = false; $("ask-note").textContent = msg; };
-    if (mode === "db") {
-      db.collection("questions").add(q).then(function () {
-        $("f-ask").value = ""; done("Sent. Tell Claude in chat to check the shaping page.");
-      }, function (e) { done("Could not send (" + (e && e.code || "error") + "). Ask in chat instead."); });
-    } else {
-      q.id = "local-" + q.askedAt; questions.push(q); saveLocal(); renderQuestions();
-      $("f-ask").value = ""; done("Kept in this browser only. Claude cannot see it until you copy everything into chat.");
-    }
-  });
-
   // ---------- export ----------
   function exportText() {
     var out = ["Product shaping discussion 1: my answers", ""];
@@ -698,13 +662,14 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   $("jump-export").addEventListener("click", function () { $("export").scrollIntoView({ behavior: "smooth" }); $("copy").focus(); });
 
   // ---------- start: render from browser storage, then light up the shared store ----------
-  var localOk = loadLocal();
+  loadLocal();
+  lockInputs();
   applyAll(); renderQuestions();
 
   function fallback(reason) {
     mode = "local";
-    setStatus(localOk ? "busy" : "warn", localOk ? "Saving in this browser only." : "Not saving anywhere.");
-    warn(reason + " Your answers stay in this browser" + (localOk ? "" : " only until you leave") + ". Use Copy everything and paste it into chat so Claude sees them.");
+    setStatus("busy", "Closed and read-only.");
+    warn(reason + " The recorded answers are in docs/product/shaping/answers.md in the repository.");
   }
 
   var use = window.claude && window.claude.use;
@@ -712,22 +677,21 @@ footer { color: var(--muted); font-size: var(--step--1); border-top: 1px solid v
   window.claude.use("db").then(function (store) {
     if (!store) { fallback("The shared store is not available here."); return; }
     db = store; mode = "db"; warn("");
-    setStatus("ok", "Connected. Answers save for Claude to read.");
+    setStatus("ok", "Closed Oct 10. Read-only; showing your saved answers.");
     db.collection("responses").onSnapshot(function (snap) {
       snap.docs.forEach(function (d) {
         var b = d.data(); if (!b || typeof b.value !== "string") return;
-        if (timers[d.id] && document.activeElement && document.activeElement.getAttribute("data-field") === d.id) return;
         values[d.id] = b.value;
       });
       applyAll();
-    }, function (e) { setStatus("warn", "Lost the connection (" + e.code + "). Use Copy everything."); });
+    }, function (e) { setStatus("warn", "Lost the connection (" + e.code + "). The recorded answers are in docs/product/shaping/answers.md."); });
     db.collection("questions").onSnapshot(function (snap) {
       questions = snap.docs.map(function (d) {
         var b = d.data() || {};
         return { id: d.id, text: String(b.text || ""), askedAt: b.askedAt || 0, status: b.status || "open", answers: Array.isArray(b.answers) ? b.answers.map(function (a) { return { by: String(a.by || ""), text: String(a.text || ""), at: a.at || 0 }; }) : [] };
       });
       renderQuestions();
-    }, function (e) { setStatus("warn", "Lost the connection (" + e.code + "). Use Copy everything."); });
+    }, function (e) { setStatus("warn", "Lost the connection (" + e.code + "). The recorded answers are in docs/product/shaping/answers.md."); });
   }, function () { fallback("The shared store could not start."); });
 })();
 </script>
