@@ -119,6 +119,7 @@ main { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 2
 .pill.merged { background: var(--ok-soft); color: var(--ok); }
 .pill.draft { background: var(--info-soft); color: var(--info); }
 .pill.open { background: var(--warn-soft); color: var(--warn); }
+.pill.closed { background: var(--paper); color: var(--muted); border: 1px solid var(--rule); }
 
 .docs { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 .doc { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 10px 10px; margin-inline: -10px; border-radius: 10px; transition: background .15s; }
@@ -221,12 +222,14 @@ footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--rule)
     { n: "02", tab: "--t2", title: "Charter", desc: "Who decides what, the constraints that cannot be waived, and how gates pass.",
       status: "merged", statusText: "Accepted", branch: "main", sha: "98fb96e",
       docs: [
-        { k: "file", t: "ADR-0014: product-phase charter", d: "Replaces the unattended-build mandate", gh: "main/docs/adr/0014-product-phase-charter.md" }
+        { k: "file", t: "ADR-0014: product-phase charter", d: "Replaces the unattended-build mandate", gh: "main/docs/adr/0014-product-phase-charter.md" },
+        { k: "file", t: "Amendment 1: delegated authority (draft PR #37)", d: "Docs-only merges, agent CLI bumps, a small proof-only call budget", url: "https://github.com/chops/sdr_agent/pull/37", flag: "Proposed, awaiting Codex review and owner acceptance" }
       ] },
-    { n: "03", tab: "--t3", title: "Shaping discussion", desc: "How to shape the product before code: your idea, Claude's and Codex's views, and your notes.",
-      status: "draft", statusText: "Discussion", branch: "product-shaping", sha: "a726e9c",
+    { n: "03", tab: "--t3", title: "Shaping discussion", desc: "How to shape the product before code: your idea, Claude's and Codex's views, and your notes. Closed on Oct 10; new notes go on the decisions page.",
+      status: "closed", statusText: "Closed", branch: "product-shaping", sha: "344372c",
       docs: [
-        { k: "page", t: "Shaping discussion page", d: "Includes the notes you already wrote", page: "https://claude.ai/artifact/VPxyAcKfDwaVedSkmcrqWu" },
+        { k: "page", t: "Shaping discussion page", d: "Read-only; shows your saved notes and question", page: "https://claude.ai/artifact/VPxyAcKfDwaVedSkmcrqWu" },
+        { k: "file", t: "Your shaping answers", d: "Verbatim, with where each one went", gh: "product-shaping/docs/product/shaping/answers.md" },
         { k: "file", t: "Page source", d: "The discussion page in git", gh: "product-shaping/docs/product/shaping/discussion.html" }
       ] },
     { n: "04", tab: "--t4", title: "Discovery packet (P1)", desc: "The outcome brief, story map, first-slice options and domain language, updated for your shaping notes.",
@@ -301,7 +304,7 @@ footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--rule)
       var id = docId(g, d);
       var links = "";
       if (d.page) links += '<a class="btn primary" href="' + esc(d.page) + '" target="_blank" rel="noopener">Open page ' + ICON.out + "</a>";
-      if (d.gh) links += '<a class="btn" href="' + esc(GH + d.gh) + '" target="_blank" rel="noopener">GitHub ' + ICON.out + "</a>";
+      if (d.gh || d.url) links += '<a class="btn" href="' + esc(d.url || GH + d.gh) + '" target="_blank" rel="noopener">GitHub ' + ICON.out + "</a>";
       var hay = (g.title + " " + d.t + " " + d.d + " " + (d.flag || "") + " " + g.branch).toLowerCase();
       return '<li class="doc" data-id="' + esc(id) + '" data-kind="' + d.k + '" data-open="' + (d.flag ? "1" : (g.status === "open" ? "1" : "0")) + '" data-hay="' + esc(hay) + '">' +
         '<span class="kind">' + ICON[d.k] + "</span>" +
