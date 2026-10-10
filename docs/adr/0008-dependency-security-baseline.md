@@ -178,3 +178,54 @@ CI" with no text parsing that could fail open.
   `mix usage_rules.sync` next runs, which is not part of this change.
 - The factory receipt still records igniter 0.8.3 / usage_rules 1.2.7 as the
   generator versions. That is history and stays unchanged.
+
+## Amendment (2026-10-10): EEF-CVE-2026-101028
+
+**Status: accepted** by the owner in the private Claude session chat on
+2026-10-10 ("accept the amendment."), after Codex's independent approval of
+369ea97 (reply 12cf8940; exact-head CI 38075894593 green).
+
+### Advisory
+
+- **EEF-CVE-2026-101028** (MEDIUM), aka CVE-2026-101028, GHSA-xj24-8f5c-pp5p.
+- `Ash.count/2`, `Ash.exists/2` and `Ash.aggregate/3` applied only the root
+  resource's read policy. Filters and sorts that cross a relationship (for
+  example `comments.body`, or an aggregate over one) skipped the related
+  resource's read policy, so a caller who controls such a filter could infer
+  hidden related rows.
+- Affected: `ash` 2.6.0 to 3.34.5. Fixed in **3.34.6** (2026-10-09).
+- Found by the blocking `mix hex.audit` step on CI run 38074932795 (PR #37),
+  as rule 4 of the policy above intends.
+
+### Exposure in this project
+
+Every call to an affected function in `lib/` filters only on attributes of
+the root resource, with values fixed in server code. None crosses a
+relationship, none sorts, none takes caller-supplied filter input
+(`filter_input`/`sort_input`), and no resource defines aggregates:
+
+| Call site | Function | Filter |
+|---|---|---|
+| `lib/sdr_agent/agents.ex:265` | `Ash.count!` | `tenant_id`, `reserved_at` on ModelInvocation |
+| `lib/sdr_agent/sales/changes/require_steps.ex:19` | `Ash.count!(authorize?: false)` | `sequence_id` (attribute) on SequenceStep |
+| `lib/sdr_agent/sdr/followup_worker.ex:80` | `Ash.exists?` | `idempotency_key`, `tenant_id` on Decision |
+| `lib/sdr_agent/audit/anchoring.ex:181` | `Ash.exists?` | `anchor_id` (attribute), `sink`, `status` on AnchorSinkReceipt |
+| `lib/sdr_agent/accounts/changes/first_user_only.ex:53` | `Ash.count!` | `tenant_id` on the user resource |
+| `lib/sdr_agent/outreach/webhooks.ex:451` | `Ash.exists?(authorize?: false)` | `tenant_id`, `message_id` on Reply |
+
+So the vulnerable path is not reachable today. We bump anyway rather than
+ignore the advisory: a fix exists, the change is a patch release, and future
+slices (for example counts on the home screen) could add relationship
+filters.
+
+### Decision
+
+Pin `ash` to `== 3.34.6`. The lock changes only the `ash` entry; no other
+package moves (`mix deps.update ash` also offered `decimal` 3.1.1 to 3.1.2,
+which is not required and was reverted). No `ignore_advisories` entry.
+
+Changes between 3.34.3 and 3.34.6, from the upstream changelog: the security
+fix; operator type-casting and embedded-resource equality fixes; notification
+return shapes normalized; a field-policy related-filter fix; temporal
+(`as_of`) write fixes; an opt-out for `run` compile-time dependencies. None
+changes a behaviour this project relies on; the full gate below is the check.
