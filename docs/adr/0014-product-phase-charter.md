@@ -210,5 +210,6 @@ only (1): real data never means a real message is sent.
   REQUESTED on a552e15 was addressed); reply 01a130fa.
 - Rule 5 clarified 2026-10-12. The owner's words: "i do not forbid
   screenshots showing names and emails. private citation screenshots are OK,
-  they just don't get shared outside of my machine". This clarification is
-  pending its own Codex review and the owner's acceptance of the wording.
+  they just don't get shared outside of my machine". The owner accepted
+  this wording on 2026-10-12 ("accept PR #129") after Codex's independent
+  approval of 83649ff.
