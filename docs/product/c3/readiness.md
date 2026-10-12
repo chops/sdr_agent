@@ -1,18 +1,22 @@
 # C3 readiness packet: lead admission
 
-Status: **draft for independent entity review and owner G5.** C3-01 (#55),
-Claude author → Codex reviewer. Nothing here authorizes C3-02 (#56) or C3-03
-(#57) code, a migration, a model call or real data. Implementation starts
-only after (1) Codex records an entity-model verdict of PASS on section 3 and
-(2) the owner approves a scoped C3 G5. The R0 G5 does not cover C3.
+Status: **round 2 draft for independent entity review and owner G5.** C3-01
+(#55), Claude author → Codex reviewer; draft PR #141. Round 1 at 5987410 was
+NEEDS-REVIEW (section 13); this revision answers every item. Nothing here
+authorizes C3-02 (#56) or C3-03 (#57) code, a migration, a model call or real
+data. Implementation starts only after (1) Codex records an entity-model
+verdict of PASS on sections 3-7, (2) the owner accepts the proposed ADR-0009
+identity-key amendment, and (3) the owner approves a scoped C3 G5. The R0 G5
+does not cover C3.
 
 Sources: build plan v3 (D-097) §3 contract C3, §9, §9a
 ([`owner-decisions`](https://github.com/chops/sdr_agent/blob/owner-decisions/docs/product/build-plan.md));
 backlog draft C3-01..03, B1-03, B2-04, B5-04, B6-01..03, C8-02;
 decisions D-048, D-049, D-052, D-056, D-059, D-060, D-066, D-084, D-095,
 D-101, D-104; ADR-0014 amendment 2 (constraint 7, accepted 2026-10-12);
-ADR-0009 (persistence and audit conventions), ADR-0010 (lifecycles). Code
-facts are from `main` at 182bde6.
+ADR-0009 (persistence and audit conventions, plus the proposed identity-key
+amendment in this PR), ADR-0010 (lifecycles). Code facts are from `main` at
+182bde6.
 
 All examples are synthetic (reserved domains, invented names).
 
@@ -24,12 +28,14 @@ reaches a draft without research and qualification.
 
 In scope:
 
-- C3-01: this packet (entity delta, action contracts, lock order, tests).
-- C3-02: `SdrAgent.SDR.admit_lead/2`, the single admission action for the five
-  source kinds, with dedupe, provenance and the one-active-target invariant.
-- C3-03: `SdrAgent.SDR.hand_off_referral/2`, which closes the original lead as
-  `referred`, keeps its history and admits the referred person at the same
-  company.
+- C3-01: this packet and the proposed ADR-0009 amendment.
+- C3-02: `SdrAgent.SDR.admit_lead/2` for `manual`, `csv`, `hubspot` and
+  `agent_found`; the shared identity keys (`SdrAgent.Audit.IdentityKeys`) and
+  their adoption by every writer of an email, domain or open-lead identity,
+  including Suppression and the webhook paths; parameter-free query logging.
+- C3-03: `SdrAgent.SDR.hand_off_referral/2`, the only `referral` entry point.
+  It closes the original lead as `referred`, keeps its history and admits the
+  referred person at the same company.
 
 Non-goals (owned elsewhere, each with its own review):
 
@@ -38,10 +44,9 @@ Non-goals (owned elsewhere, each with its own review):
   re-sync and remote opt-out (C8), contact candidates and their confirmation
   (B2-05..07), reply capture and classification (B5-02). They call C3 with a
   validated input; C3 does not parse files or call providers.
-- Account-only discovery and target lists (B2-03). C3 admits people, not
-  account lists.
-- The real-data guard policy itself (C5-04). C3 calls the existing guard and
-  adds no bypass.
+- Account-only discovery and target lists (B2-03).
+- The real-data switch and guard policy (C5-04). C3 calls them at two points
+  (section 7) and adds no bypass.
 - Changing a lead's person or company after admission; merging accounts or
   contacts; multi-stakeholder outreach (D-059: post-MVP).
 - Drafting the referral email (B5-04). C3 provides the referrer link only.
@@ -50,346 +55,431 @@ Non-goals (owned elsewhere, each with its own review):
 
 | ID | Requirement |
 |---|---|
-| C3-R1 | Every lead created after C3-02 has exactly one admission record naming its source kind: `manual`, `csv`, `hubspot`, `agent_found` or `referral`. No other path creates a lead (seed fixtures in dev/test excepted). |
-| C3-R2 | Provenance answers who, what and when without copying personal data: the requesting human, the source kind, an opaque id-only source reference (for example an import id and row number), the campaign, the time, and a hash of the normalized input. It never contains a name, email or free text. |
-| C3-R3 | The same source reference submitted twice with the same input returns the stored result and writes nothing new (no second lead, run or event). The same reference with different input is refused. |
-| C3-R4 | Dedupe uses the normalized company domain and the normalized person email. A duplicate never creates a second account, contact or open lead; the outcome is recorded with the matched lead and shown to the caller. |
-| C3-R5 | A company has at most one open (active outbound) lead at a time, enforced by the database. Closed leads stay as history. A second person at a company with an open lead is recorded as `active_target_exists`, except through the referral handover. |
-| C3-R6 | An admitted lead gets its research run queued in the same transaction. It can reach `qualified` only through a recorded qualification after research, and a draft only from `in_outreach`. No source, flag or role skips research or qualification (D-049, D-052). |
-| C3-R7 | A suppressed email, email domain or company domain is never admitted. The attempt is recorded as `suppressed`; no account, contact or lead is created for it. |
+| C3-R1 | Every lead created after C3-02 has exactly one admission record whose source kind is `manual`, `csv`, `hubspot`, `agent_found` or `referral`, and that record says `admitted` for that lead's tenant, company, person and source. No other path creates a lead; the only exception is the dev/test `:seed` action with source `fixture`. Existing leads keep their stored values. |
+| C3-R2 | Provenance answers who, what and when without copying personal data: the requesting human, the source kind, an id-only source reference, the campaign, the time, and the sha256 of the normalized input (section 5.2). It never contains a name, email or free text. |
+| C3-R3 | Submitting the same source reference again with the same normalized input returns the stored result and writes nothing, even if the campaign, the original lead or suppressions changed since. Only authorization, input validity and the live real-data guard can refuse a replay. The same reference with different input is refused. |
+| C3-R4 | Dedupe uses the canonical company domain (old and new account rows alike) and the normalized email. A duplicate never creates a second account, contact or open lead; the outcome is recorded with the matched lead. |
+| C3-R5 | A company has at most one open (active outbound) lead at a time, enforced by the database. Closed leads stay as history. A second person at a company with an open lead is recorded as `active_target_exists`; only the referral handover replaces the open lead. |
+| C3-R6 | An admitted lead gets its research run queued in the same transaction. It reaches `qualified` only through a recorded qualification after research, and a draft only from `in_outreach`. No source, flag or role skips research or qualification (D-049, D-052). |
+| C3-R7 | A suppressed email, email domain or company domain is never admitted, including when the suppression and the admission run at the same time: they serialize on shared identity keys, and in either commit order the person ends with no open lead. A suppressed attempt is recorded as `suppressed` with no account, contact or lead created for it. |
 | C3-R8 | Only an active human admin admits, from any source. Reviewers, auditors and every system actor are refused, and the refusal is audited. The agent proposes people (B2); a human confirms them. |
-| C3-R9 | A referral handover is one transaction: the original lead becomes `referred` (terminal, kept in history), its open enrollment, drafts, unclaimed deliveries and granted approvals are closed, and the referred person is admitted as the company's active lead with a link to the original lead for drafting. If the referred person cannot be admitted, nothing about the original changes. |
-| C3-R10 | Real company and person data is accepted only under constraint 7 as amended: with the real-data switch off, a non-reserved domain or email is refused before any lookup or write, and the refusal does not echo the value. Admission, provenance and errors put no personal values in logs, trace attributes, telemetry or public evidence. |
-| C3-R11 | Concurrent admissions for the same company, person or source reference serialize: exactly one wins and the others get a deterministic recorded outcome or a typed retryable conflict, never a deadlock by design and never a partial write. |
+| C3-R9 | Referral has one entry point. The handover is one transaction: the original lead becomes `referred` (terminal, kept), its open enrollment, drafts, unclaimed deliveries and granted approvals are closed, and the referred person is admitted at the same company with a link to the original. If the referred person cannot be admitted, only the observation is recorded and the original is untouched. `admit_lead` refuses `referral`. |
+| C3-R10 | Real data only under amended constraint 7: the live real-data guard is checked before any read and again after all locks, just before the first write. A refusal writes nothing and does not echo the value. Executable tests show that no name, email or domain from an admission reaches logs (at debug, with query logging on), span attributes or events (with dev content capture on), or error terms, for valid, invalid, conflicting, suppressed and replayed input. |
+| C3-R11 | Concurrent admissions, suppressions, direct account/contact writes, reopen/override and referral serialize on the identity keys before any shared row lock. Exactly one order wins; the others get a recorded outcome or a typed retryable conflict. No unique-index wait or deadlock occurs after the chain head by design, shown by tests on independent database connections. |
 
 ## 3. Entity model (soft-stop)
 
 Entity Model trigger: **yes**.
-Reason: new persisted admission record, changed Lead source enum, statuses,
-identities and actions, a new account-level invariant, a new terminal state
-and cross-domain referral effects on enrollments, drafts and approvals.
+Reason: new persisted admission record; changed Lead source enum, statuses,
+identities, triggers and actions; new account-level invariant and canonical
+domain key; new terminal state and referral effects on enrollments, drafts
+and approvals; a new cross-cutting lock contract on Suppression, webhooks,
+Account, Contact and Qualification writers.
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| Sales.LeadAdmission | New | One immutable record per admission request and its outcome: the provenance and dedupe history of every source observation | `id : uuid_v7`; `tenant_id : uuid, required`; `source_kind : atom, required, one_of [:manual, :csv, :hubspot, :agent_found, :referral]`; `source_ref : string, required, ≤ 120, per-kind grammar of ids only` (`manual:<uuid>` client request id; `csv:<import uuid>:<row ≥ 1>`; `hubspot:<portal digits>:<object digits>`; `agent_found:<run uuid>:<candidate uuid>`; `referral:<original lead uuid>:<reply or outcome uuid>`; DB check by regex, so no name or address fits); `input_version : int, required, = 1`; `input_sha256 : string, required, 64 lowercase hex` (canonical JSON of the normalized input); `outcome : atom, required, one_of [:admitted, :duplicate_open_lead, :active_target_exists, :previously_worked, :contact_at_other_account, :contact_archived, :account_archived, :suppressed]`; `suppression_scope : atom, nullable, one_of [:email, :domain]`; `readmit : boolean, required, default false`; `account_created`, `contact_created : boolean, required, default false`; `inserted_at`; `trace_id`, `span_id` | belongs_to Tenant (required, restrict); belongs_to User `requested_by` (required, restrict); belongs_to Campaign (required, restrict); belongs_to Account (optional, restrict); belongs_to Contact (optional, restrict); belongs_to Lead `matched_lead` (optional, restrict); belongs_to AgentRun (optional, restrict); belongs_to Lead `referral_from_lead` (optional, restrict); has_one Lead (via `Lead.admission_id`, unique). Identity unique `(tenant_id, source_kind, source_ref)`. No FK to Outreach (Sales sits below Outreach); a suppressed outcome records only the scope, and the never-lifted suppression row is found by value | Append-only (`Audit.SQL.append_only`); no update or destroy. DB checks: `matched_lead_id` not null iff outcome in (`duplicate_open_lead`, `active_target_exists`); `suppression_scope` not null iff outcome = `suppressed`; `agent_run_id` not null iff kind = `agent_found`; `referral_from_lead_id` not null iff kind = `referral`; `readmit` only for `manual` and `referral`; `account_created`/`contact_created` true only when outcome = `admitted`; `account_id`/`contact_id` not null when admitted. Deferred constraint trigger (`DEFERRABLE INITIALLY DEFERRED`, checked at commit): an `admitted` row is referenced by exactly one lead. Replay of the identity with the same `input_sha256` returns the stored row marked `:sdr_replayed` (no event, no side effect); a different hash is refused `:source_ref_conflict` | `:record` (create): active human admin, only inside the admission orchestrator (`Sales.Checks.AdmissionContext` marker, as `QualificationContext`); every other actor and any call without the marker forbidden; auditor refusal audited by Guard. Reads: ADM, REV, AUD roles; `agent_runtime` (referrer lookup for drafting), `auditor_cli`, kernel. Audited `sales.admission.recorded` | OQ-1, OQ-2 change which outcome applies, not the shape |
-| Sales.Lead | Existing (delta) | The person being worked; now always admitted | `source`: enum becomes `[:manual, :csv, :hubspot, :agent_found, :referral, :fixture, :crm]`; `:fixture` only via `:seed`; `:crm` legacy rows only (no action writes it after C3-02; existing rows never relabelled). Add `admission_id : uuid, nullable, unique where not null`; DB check: `admission_id IS NOT NULL OR source IN ('fixture','crm','manual')`, so the four new kinds always carry an admission; `:create` requires `admission_id`, so a new manual lead always has one too, and only legacy manual rows keep null (test-pinned). Add `referred_from_lead_id : uuid, nullable, unique where not null`; check: not null iff `source = 'referral'`. Status adds `:referred` (terminal) | belongs_to LeadAdmission (restrict); belongs_to Lead `referred_from` (restrict) via composite FK `(referred_from_lead_id, tenant_id, account_id)` → `leads (id, tenant_id, account_id)` (new unique index on that triple), so the successor is at the same company. New identity `one_open_per_account [:tenant_id, :account_id] where status not in (disqualified, converted, nurture, stopped, referred)`, partial unique index. Existing `unique_open_lead` (per contact) kept, its `where` gains `referred` | Open = new, assigned, researching, qualifying, qualified, in_outreach, replied, blocked (same set as `Outreach.Locks.open_leads/0`, pinned by a test). New transition `{:refer, [:in_outreach, :replied], :referred}`: stamps `closed_at`, `status_reason = "referred"`, event `sales.lead.referred` (previous status, successor admission id). `referred` is terminal: no reopen, override or stop. `:create` now accepts `admission_id`, `referred_from_lead_id` and only the five source kinds. `:reopen` and `:requalify_by_override` make a closed lead open again; the account identity refuses them while another lead at the company is open, mapped to a typed field error (`account_id: "company has an active lead"`). Unchanged: `new → assigned → researching → qualifying → qualified/disqualified`, qualification-only `qualify`/`disqualify`, `in_outreach` only from `qualified` | `:create`: `forbid_unless AdmissionContext`, then active human admin (was ADM without marker). `:refer`: `forbid_unless ReferralContext` (new private marker set only by the handover), then active human admin. All other policies unchanged | none |
-| Sales.Account | Existing (delta) | Company identity used for dedupe and the active-target slot | `source`: enum becomes `[:manual, :csv, :hubspot, :agent_found, :referral, :fixture, :crm]` (the kind of the admission that created it; existing values kept). `NormalizeDomain` also strips one trailing `.` and one leading `www.` label (trim and lowercase already); a URL, port or path is still refused, not parsed; subdomains stay distinct; non-ASCII is refused (callers send punycode) | new inverse has_many LeadAdmission (read only). has_many Lead now carries the account-level identity above (at most one open lead per account) | Migration pre-check: if any two existing accounts in a tenant collide after the new normalization, or any account has two open leads, the migration aborts with counts and changes nothing; resolution is an explicit admin action, never automatic. Admission locks the row `FOR SHARE` (blocks a concurrent archive). `:archive` unchanged; archived accounts get no new leads (existing `LeadAccount`) | `:create` policy unchanged (ADM); admission calls it inside the admission transaction. Direct `create_account` stays for admin use; it creates no lead | none |
-| Sales.Contact | Existing (relationship delta only) | Person identity used for dedupe | — | new inverse has_many LeadAdmission (read only); account is immutable after create (unchanged, relied on for the account-level identity) | Admission normalizes the email (trim, lowercase) before calling `:create`; no dot or plus folding. Admission never overwrites an existing contact's fields (D-008 field ownership; C8 owns CRM updates). Locked `FOR SHARE` by admission (blocks archive and `:change_email`) | unchanged (ADM create) | none |
-| Sales.CampaignEnrollment | Existing (delta, C3-03) | Stop the original lead's sequence on referral | `stop_reason` adds `:referred` | unchanged | `:stop` from active/paused with `:referred` only inside the handover | `:stop` policy adds `authorize_if ReferralContext` (same pattern as `SuppressionContext`) | none |
-| Outreach.Approval | Existing (delta, C3-03) | Invalidate granted approvals of the original lead's open drafts | `invalidated_reason` adds `:lead_referred` (enum and DB check) | unchanged | `granted → invalidated` via the existing `:invalidate` (InternalWrite) | unchanged; called from the new Outreach-owned closer below | none |
-| Outreach.Draft / DeliveryOperation | Existing (behaviour delta, C3-03) | Cancel the original lead's open work | no schema change; `status_reason "referred"`, delivery `last_error %{"reason" => "lead_referred"}` | unchanged | Same effects and selection as `ApplySuppression` for one lead: pending-review and unclaimed queued drafts cancelled; pending/failed_retryable deliveries cancelled; a claimed delivery is left to its outcome (capture only). Run by a new Outreach-owned function (`SdrAgent.Outreach.Referral.close_open_work/3`) that sets `InternalWrite`, so Sales still never calls Outreach and SDR never sets an Outreach marker | unchanged | none |
-| Outreach.Suppression | Existing | Do-not-contact facts admission must honor | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | — | none |
-| Research.Qualification / EvidenceClaim | Existing | Mandatory qualification after research | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | — | none |
-| Agents.AgentRun | Existing | Queued research run; agent_found provenance | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (admission uses `usage_origin :assignment`, the handover `:referral`, both existing D-104 buckets) | — | none |
-| Sales.Campaign | Existing | Program the admitted lead is assigned to | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | — | none |
-| Accounts.User / Audit.Tenant / Actor | Existing | Requester identity and tenant | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (no new role or system actor type) | — | none |
+| Sales.LeadAdmission | New | One immutable record per new admission request and its outcome: provenance and dedupe history | `id : uuid_v7`; `tenant_id : uuid, required`; `source_kind : atom, required, one_of [:manual, :csv, :hubspot, :agent_found, :referral]`; `source_ref : string, required, ≤ 120`, per-kind grammar of ids only, DB-checked by regex: `manual:<uuid>`, `csv:<uuid>:<row ≥ 1>`, `hubspot:<digits>:<digits>`, `agent_found:<run uuid>:<candidate uuid>`, `referral:<original lead uuid>:<reply or outcome uuid>` (lowercase hex uuids); `input_version : int, required, = 1`; `input_sha256 : string, required, 64 lowercase hex` (section 5.2); `outcome : atom, required, one_of [:admitted, :duplicate_open_lead, :active_target_exists, :previously_worked, :contact_at_other_account, :contact_archived, :account_archived, :suppressed]`; `suppression_scope : atom, nullable, one_of [:email, :domain]`; `readmit : boolean, required, default false`; `account_created`, `contact_created : boolean, required, default false`; `inserted_at`; `trace_id`, `span_id` | Composite FKs (all restrict; target unique indexes added where absent): `(requested_by_user_id, tenant_id)` → users `(id, tenant_id)`, required; `(campaign_id, tenant_id)` → campaigns `(id, tenant_id)`, required; `(account_id, tenant_id)` → accounts `(id, tenant_id)`; `(contact_id, tenant_id)` → contacts `(id, tenant_id)` and `(contact_id, account_id, tenant_id)` → contacts `(id, account_id, tenant_id)` (checked when both set, MATCH SIMPLE); `(matched_lead_id, tenant_id, account_id)` → leads `(id, tenant_id, account_id)`; `(agent_run_id, tenant_id)` → agent_runs `(id, tenant_id)`; `(referral_from_lead_id, tenant_id)` → leads `(id, tenant_id)`. Unique `(id, tenant_id, account_id, contact_id)` as target of the Lead binding FK. has_one Lead (via `Lead.admission_id`, unique). Identity unique `(tenant_id, source_kind, source_ref)`. No FK to Outreach (ADR-0009 layering); a suppressed outcome records the scope only | Append-only (`Audit.SQL.append_only`). DB checks: `matched_lead_id` not null iff outcome in (`duplicate_open_lead`, `active_target_exists`); `suppression_scope` not null iff outcome = `suppressed`; `agent_run_id` not null iff kind = `agent_found`; `referral_from_lead_id` not null iff kind = `referral`; `readmit` only for `manual` and `referral`; `account_created`/`contact_created` only when outcome = `admitted`; `account_id` and `contact_id` not null when admitted; `account_id` null when outcome = `contact_at_other_account` (the contact's own account is not this company); source_ref's embedded run or original id equals `agent_run_id` / `referral_from_lead_id` (SQL `split_part`). Deferred constraint trigger (`DEFERRABLE INITIALLY DEFERRED`): an `admitted` row is referenced by exactly one lead at commit. Values the DB cannot check are validated in the action under lock before insert (section 5.3) | `:record` (create): active human admin, only inside the admission orchestrator (`Sales.Checks.AdmissionContext` marker, like `QualificationContext`); everything else forbidden, auditor refusal audited by Guard. Reads: ADM, REV, AUD roles; `agent_runtime` (referrer lookup for drafting); `auditor_cli`; kernel. Audited `sales.admission.recorded` | OQ-1, OQ-2 change which outcome applies, not the shape |
+| Sales.Lead | Existing (delta) | The person being worked; now always admitted | `source` enum becomes `[:manual, :csv, :hubspot, :agent_found, :referral, :fixture, :crm]`. Add `admission_id : uuid, nullable, unique where not null`; `referred_from_lead_id : uuid, nullable, unique where not null`. Status adds `:referred` (terminal) | Composite FK `(admission_id, tenant_id, account_id, contact_id)` → lead_admissions `(id, tenant_id, account_id, contact_id)` (restrict); composite FK `(referred_from_lead_id, tenant_id, account_id)` → leads `(id, tenant_id, account_id)` (restrict; new unique index on that triple), so the successor is at the same company; composite FK `(contact_id, account_id, tenant_id)` → contacts `(id, account_id, tenant_id)`. New identity `one_open_per_account [:tenant_id, :account_id] where status not in (disqualified, converted, nurture, stopped, referred)`, partial unique index; existing `unique_open_lead` (per contact) kept, its `where` gains `referred` | **Cutover (BEFORE INSERT trigger `leads_admission_binding`):** a new row needs `admission_id`, except `source = 'fixture'` (seed; the action is dev/test-gated); `source = 'crm'` can no longer be inserted; with `admission_id`, the referenced admission must have outcome `admitted`, `source_kind = NEW.source` and `referral_from_lead_id IS NOT DISTINCT FROM NEW.referred_from_lead_id`. **BEFORE UPDATE trigger:** `source`, `admission_id`, `referred_from_lead_id`, `account_id`, `contact_id` are immutable. Existing rows (`manual`, `crm`, `fixture` with null admission) are never updated or relabelled; a new `manual` row without an admission is impossible. Open = new, assigned, researching, qualifying, qualified, in_outreach, replied, blocked (same set as `Outreach.Locks.open_leads/0`, pinned by a test). New transition `{:refer, [:in_outreach, :replied], :referred}`: stamps `closed_at`, `status_reason = "referred"`, event `sales.lead.referred` (previous status, successor admission id). `referred` is terminal: no reopen, override or stop. `:reopen` and `:requalify_by_override` take the company key first (section 6) and are refused with a typed field error while another lead at the company is open | `:create`: `forbid_unless AdmissionContext`, then active human admin. `:refer`: `forbid_unless ReferralContext` (new marker set only by the handover), then active human admin. Other policies unchanged | none |
+| Sales.Account | Existing (delta) | Company identity for dedupe and the active-target slot | `source` enum adds `:csv, :hubspot, :agent_found, :referral` (kind of the admission that created it). New IMMUTABLE SQL function `sdr_canonical_domain(text)` = strip one leading `www.` from `rtrim(lower(btrim(x)), '.')`, mirrored by `Sales.Domain.canonical/1` (equivalence test). New unique expression index `(tenant_id, sdr_canonical_domain(domain))` and an Ash calculation `canonical_domain` used for every lookup. `NormalizeDomain` stores the canonical form on new or changed rows; URL, port, path and non-ASCII still refused; subdomains stay distinct | new inverse has_many LeadAdmission (read only); has_many Lead under the account identity above | **No existing row is rewritten:** old rows keep their stored `domain` and record hashes; dedupe finds them through the canonical expression (an old `www.orbit.example.org` row matches new input `orbit.example.org`). The migration builds the expression index; if two existing accounts collide, or an account already has two open leads, it aborts with counts and changes nothing; the owner resolves explicitly. `:create`, `:seed` and `:update` take the domain key first (section 6). Locked `FOR SHARE` by admission (blocks archive) | `:create` policy unchanged (ADM); admission calls it inside its transaction | none |
+| Sales.Contact | Existing (delta) | Person identity for dedupe | — (email already ci-unique per tenant) | new inverse has_many LeadAdmission (read only); account immutable after create (unchanged, relied on); new unique `(id, tenant_id)` and `(id, account_id, tenant_id)` as composite FK targets | `:create`, `:seed` and `:change_email` take the email key of the new value first (section 6). Admission normalizes the email (trim, lowercase) and never overwrites an existing contact's fields (D-008; C8 owns CRM updates). Locked `FOR SHARE` by admission (blocks archive and `:change_email`) | unchanged (ADM) | none |
+| Outreach.Suppression | Existing (lock-order and match delta) | Do-not-contact facts admission must honor | — | — | Every create action (`:manual`, `:seed`, `:from_webhook`, `:from_classification`) first acquires the identity key of its value (`email:<value>` or `domain:<value>`) through `IdentityKeys`, before `ApplySuppression` locks its targets; an embedding transaction (webhooks) must already hold it from its single key pass. Domain-scope matching is **strengthened**: contacts whose email domain equals the value (unchanged) **or** whose account's canonical domain equals it. Append-only, monotonic, never lifted (unchanged) | unchanged | none (strengthening only; flagged in risks) |
+| Outreach.Webhooks (action contract) | Existing (lock-order delta) | Webhook paths that create suppressions | — | — | After locking its own WebhookEvent row (outside the identity lock domain), each path takes one key pass before any shared row lock: reply = `{reply-message, matched recipient email}` (the match is read unlocked first; the existing string key moves into the namespace); unsubscribe, bounce, complaint = `{email}` | unchanged | none |
+| Research.Qualification | Existing (lock-order delta) | Human override that can reopen a lead | — | — | `:override` first acquires the company key of its lead (lead → account read unlocked), then proceeds; after `RecordOutcome` locks the lead, the account's canonical domain is re-checked and a change returns `:conflict`. `:record` (agent) is unchanged: it never opens a closed lead | unchanged | none |
+| Sales.CampaignEnrollment | Existing (delta, C3-03) | Stop the original lead's sequence on referral | `stop_reason` adds `:referred` | unchanged | `:stop` from active/paused with `:referred` only inside the handover | `:stop` adds `authorize_if ReferralContext` | none |
+| Outreach.Approval | Existing (delta, C3-03) | Invalidate granted approvals of the original's open drafts | `invalidated_reason` adds `:lead_referred` (enum and DB check) | unchanged | `granted → invalidated` via existing `:invalidate` (InternalWrite) | unchanged; called from the Outreach-owned closer | none |
+| Outreach.Draft / DeliveryOperation | Existing (behaviour delta, C3-03) | Cancel the original's open work | no schema change; `status_reason "referred"`, delivery `last_error %{"reason" => "lead_referred"}` | unchanged | Same selection and effects as `ApplySuppression` for one lead, run by a new Outreach-owned `SdrAgent.Outreach.Referral.close_open_work/3` that sets `InternalWrite`; a claimed delivery is left to its outcome (capture only) | unchanged | none |
+| Agents.AgentDefinition | Existing | Definition used by the reused assign path | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (admission registers it in a separate committed transaction first, section 6) | — | none |
+| Agents.AgentRun | Existing | Queued research run; agent_found provenance | — | new unique `(id, tenant_id)` as composite FK target | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (origins `:assignment` and `:referral` exist, D-104) | — | none |
+| Research.EvidenceClaim, Sales.Campaign, Accounts.User, Audit.Tenant, Actor | Existing | Qualification evidence, program, requester, tenant | — | campaigns and users gain unique `(id, tenant_id)` as composite FK targets | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (no new role or system actor) | — | none |
 
 Configured reviewer: Codex via ai-pair (`ai_pair=true`, `codex_review=true`).
-Verdict: **UNREVIEWED** (section 13).
+Verdict: round 1 NEEDS-REVIEW; round 2 pending (section 13).
 
 ## 4. Action contracts
 
+Both actions live in SDR (as `assign_lead/2`), run inside `Audit.Guard.run`
+and one `Audit.transaction`, and return closed reasons, never Ash error
+structs (which can carry changeset values).
+
 ### 4.1 `SdrAgent.SDR.admit_lead(input, actor:)` (C3-02)
 
-Lives in SDR (as `assign_lead/2`) because it spans Sales and Outreach reads.
-Wrapped in `Audit.Guard.run` and one `Audit.transaction`.
-
-Input (validated before any lock): `source_kind`, `source_ref`,
+Input: `source_kind` (manual, csv, hubspot, agent_found), `source_ref`,
 `campaign_id`, `company` (`domain` required; `name` required when new;
 optional `website_url`, `industry`, `employee_count`, `geography`),
 `person` (`email` required; `first_name`, `last_name` required when new;
 optional `title`, `timezone`), `agent_run_id` (agent_found only), `readmit`
-(manual and referral only). Missing email is refused; B2/B5 turn it into a
-confirmation task, never a placeholder address.
+(manual only). Missing email is refused; B2/B5 turn it into a confirmation
+task, never a placeholder address.
 
-Decision order (first match wins; the outcome is recorded unless it is an
-error):
-
-| Step | Condition | Result | Writes |
+| Step | Check | Result | Writes |
 |---|---|---|---|
-| 1 | actor not an active admin of the tenant (re-read) | `{:error, :forbidden}` | Guard denial audit only |
-| 2 | invalid input, grammar or real-data guard refusal | `{:error, {:invalid, fields}}` / `:real_data_disabled` | nothing |
-| 3 | campaign missing or not `active` | `{:error, :campaign_not_active}` | nothing |
-| 4 | same `source_ref`, same hash | stored result, `replayed?: true` | nothing |
-| 5 | same `source_ref`, different hash | `{:error, :source_ref_conflict}` | nothing |
-| 6 | suppression on the email, the email's domain or the company domain | `suppressed` | admission row |
-| 7 | email belongs to a contact at another account | `contact_at_other_account` | admission row |
-| 8 | contact archived / account archived | `contact_archived` / `account_archived` | admission row |
-| 9 | contact has an open lead | `duplicate_open_lead` (matched) | admission row |
-| 10 | account has an open lead for another person | `active_target_exists` (matched) | admission row |
-| 11 | contact has only closed leads and not (`readmit` and kind in manual, referral) | `previously_worked` | admission row |
-| 12 | otherwise | `admitted` | account and contact if new, admission row, lead `new`, then assign → `assigned` with a queued research run |
+| 1 | actor struct not an admin of the tenant | `:forbidden` | Guard denial audit |
+| 2 | `source_kind = referral` | `:use_referral_handover` | nothing |
+| 3 | input invalid, grammar, embedded ids mismatch; normalize (5.2) | `{:invalid, [field]}` | nothing |
+| 4 | live real-data guard on domain and email (C5) | `:real_data_disabled` | nothing |
+| 5 | key pass (section 6); requester re-read `FOR SHARE`: active admin | `:forbidden` | Guard denial audit |
+| 6 | same ref exists: same hash → stored result; different → refuse | replay / `:source_ref_conflict` | nothing |
+| 7 | campaign missing or not `active` | `:campaign_not_active` | nothing |
+| 8 | agent run missing, other tenant, or origin not `:discovery` | `{:invalid, [:agent_run_id]}` | nothing |
+| 9 | locks (section 6), then live real-data guard again on resolved values | `:real_data_disabled` | nothing |
+| 10 | suppression on email, email domain or company domain | `suppressed` | admission row |
+| 11 | email belongs to a contact at another account | `contact_at_other_account` | admission row |
+| 12 | contact archived / account archived | `contact_archived` / `account_archived` | admission row |
+| 13 | contact has an open lead | `duplicate_open_lead` | admission row |
+| 14 | company has an open lead for another person | `active_target_exists` | admission row |
+| 15 | contact has only closed leads and not (`readmit` and manual) | `previously_worked` | admission row |
+| 16 | otherwise | `admitted` | account and contact if new, admission row, lead `new`, assign → `assigned`, queued run (`usage_origin :assignment`) |
 
-Returns `{:ok, %{admission, outcome, lead, run, replayed?}}` (`lead`/`run` nil
-unless admitted). Errors are closed atoms or field lists without values. A
-unique violation raised by a concurrent direct `create_account` or
-`create_contact` outside admission rolls the whole transaction back and
-returns `{:error, :conflict}`; a retry is safe (C3-R3).
-
-Agent-found admissions also require `agent_run_id` to be a run of the tenant
-with `usage_origin :discovery`, and the run id in `source_ref` to equal it.
+Replay (step 6) is refused only by steps 1-5. A replay returns the stored
+admission and the lead's current status; it writes nothing even if the
+campaign was paused, the lead moved on or a suppression appeared since
+(the suppression has already acted on the lead through `ApplySuppression`).
+Returns `{:ok, %{admission, outcome, lead, run, replayed?}}` or
+`{:error, reason}`. Readmit never overrides steps 10-14.
 
 ### 4.2 `SdrAgent.SDR.hand_off_referral(input, actor:)` (C3-03)
 
-Input: `original_lead_id`, `source_ref` (`referral:<original>:<reply or
-outcome id>`), `campaign_id`, `person` (as above), optional `readmit`.
-Company is always the original lead's account (same-company only, D-095).
+Input: `original_lead_id`, `source_ref` (`referral:<original>:<event>`),
+`campaign_id`, `person` (as above), optional `readmit`. Company is always the
+original lead's account (same-company only, D-095); no company input exists.
 
-Extra refusals before any write (`{:error, reason}`, nothing written):
-`:original_not_referable` (not `in_outreach` or `replied`, or not in the
-tenant), `:original_run_active` (a queued or running run on the original),
-`:self_referral` (same contact or same email). Then steps 4-12 above apply
-with one difference at step 10: the open lead at the account is the original,
-so the handover proceeds. If the outcome is anything but `admitted`, only the
-admission row is written and the original is untouched (C3-R9); the owner
-decides what to do with it.
+Steps 1, 3, 4 as above (step 3 also requires the original id in
+`source_ref` to equal `original_lead_id`, else `{:invalid,
+[:source_ref]}`). Keys come from the original's account (read unlocked
+before the pass, re-checked after locks; a change returns `:conflict`) plus
+the referred email. Then step 5, then replay (step 6), **then** the mutable
+preconditions for a new request: original in the tenant and `in_outreach` or
+`replied` (`:original_not_referable`), no queued or running run on it
+(`:original_run_active`), not the same contact or email
+(`:self_referral`), campaign active. These refusals write nothing. Then
+steps 9-16, except that at step 14 the open lead is the original, so the
+handover proceeds.
 
-On `admitted`, in one transaction (all locks already held, section 6):
-contact (if new) → admission row (`referral_from_lead_id` = original) →
-original `:refer` (its event links that admission) → enrollments stopped
-(`:referred`) → `Outreach.Referral.close_open_work/3` → lead (`source
-:referral`, `referred_from_lead_id` = original; the original is already
-closed, so the account index admits it) → assign with `usage_origin
-:referral`.
-The referrer for drafting is the original lead's contact, read through
-`referred_from_lead_id`; no name is copied.
+If the outcome is not `admitted`, only the admission row is written (kind
+`referral`, `referral_from_lead_id` = original); the original is untouched
+and the owner decides. On `admitted`, in this order, all locks already held:
+contact (if new) → admission row → original `:refer` (event links the
+admission) → enrollments stopped `:referred` →
+`Outreach.Referral.close_open_work/3` → lead (`source :referral`,
+`referred_from_lead_id` = original; the original is closed, so the account
+index accepts it) → assign with `usage_origin :referral`. The referrer for
+drafting is read through `referred_from_lead_id`; no name is copied.
 
-## 5. Dedupe identity rules
+## 5. Identity, input hash and agreement
 
-| Identity | Normalization | Store | Notes |
+### 5.1 Dedupe identities
+
+| Identity | Normalization | Enforced by | Notes |
 |---|---|---|---|
-| Company | trim, lowercase, strip one trailing `.`, strip one leading `www.`; host of ≥ 2 labels, no scheme, port or path | `accounts (tenant_id, domain)` unique (existing) | `eu.orbit.example.org` and `orbit.example.org` are different companies; no public-suffix guessing. Name is never a key |
-| Person | trim, lowercase whole address | `contacts (tenant_id, email)` unique, ci (existing) | no provider-specific folding; email domain need not equal the company domain |
-| Source observation | exact `source_ref` | `lead_admissions (tenant_id, source_kind, source_ref)` unique (new) | idempotency, not identity of a person |
-| Active target | — | `leads (tenant_id, account_id)` partial unique over open statuses (new) | the C3-R5 invariant |
-| CRM ids | — | existing `accounts.crm_external_id` identity | C3 writes none; C8 owns HubSpot identity and mapping |
+| Company | `Sales.Domain.canonical/1` = SQL `sdr_canonical_domain`: trim, lowercase, strip one trailing `.`, strip one leading `www.`; host of ≥ 2 ASCII labels, no scheme, port or path | expression unique index `(tenant_id, sdr_canonical_domain(domain))` (new) plus existing `(tenant_id, domain)` | old rows found by the expression, never rewritten; subdomains distinct; name never a key |
+| Person | trim, lowercase whole address | `contacts (tenant_id, email)` unique, ci (existing) | no provider folding; email domain need not equal the company |
+| Source observation | exact `source_ref` | `lead_admissions (tenant_id, source_kind, source_ref)` (new) | idempotency, not identity |
+| Active target | — | `leads (tenant_id, account_id)` partial unique over open statuses (new) | C3-R5 |
+| CRM ids | — | existing `accounts.crm_external_id` identity | C3 writes none; C8 owns |
 
-Per source, the same rules apply; only the provenance differs:
+Per source, same rules: manual repeat → `duplicate_open_lead`; CSV second
+row or second import → `duplicate_open_lead` (same import row resubmitted →
+replay); HubSpot object already admitted → `duplicate_open_lead` (C8 links the
+CRM id under its own delta); agent-found person at a targeted company →
+`active_target_exists` (B2-04); referred person open elsewhere →
+`contact_at_other_account` or `duplicate_open_lead`, original unchanged.
 
-| Source | Typical duplicate | Recorded outcome |
-|---|---|---|
-| manual | founder adds a person already being worked | `duplicate_open_lead`; form shows the existing lead |
-| csv | the same person on two rows or two imports | first row admitted; later rows `duplicate_open_lead` (or a replay if the same import row is resubmitted) |
-| hubspot | object already admitted from CSV or by hand | `duplicate_open_lead`; C8 links the CRM id under its own delta |
-| agent_found | candidate at a company that already has a target | `active_target_exists` (B2-04) |
-| referral | referred person already open elsewhere in the tenant | `contact_at_other_account` or `duplicate_open_lead`; original unchanged |
+### 5.2 Input hash, version 1
 
-## 6. Lock order and concurrency
+`input_sha256 = lowercase hex sha256(SdrAgent.Audit.Canonical.encode(doc))`
+(`sdr-canonical-json/1`). `doc` always has every key below; absent values
+are `null`.
 
-Rule (ADR-0009): every row lock before the first audit append. Admission and
-the handover never take `FOR UPDATE` or `FOR NO KEY UPDATE` on campaigns,
-accounts, contacts or users, only `FOR SHARE`/`FOR KEY SHARE`, so existing
-writers that lock those rows first can never wait on them in a cycle.
+| Key | Type after normalization |
+|---|---|
+| `v` | string `"c3-admission-input/1"` |
+| `tenant_id`, `campaign_id` | lowercase hyphenated uuid string |
+| `source_kind` | string |
+| `source_ref` | string, exactly as stored |
+| `readmit` | boolean, default `false` |
+| `agent_run_id`, `original_lead_id` | uuid string or null |
+| `company` | object: `domain` (canonical; `null` for referral, where the company is derived), `name`, `website_url`, `industry`, `employee_count` (integer ≥ 0 or null), `geography` |
+| `person` | object: `email` (normalized), `first_name`, `last_name`, `title`, `timezone` |
 
-Order (both actions):
+Normalization order: (1) reject non-UTF-8; (2) Unicode NFC; (3) trim; (4)
+collapse internal whitespace runs to one space in `name`, `first_name`,
+`last_name`, `title`, `industry`, `geography`; (5) empty string → null; (6)
+domain canonical, email trimmed and lowercased; `website_url` trimmed only;
+`timezone` as given (validated IANA name); (7) uuids lowercased.
 
-1. **Admission keys** (transaction advisory locks,
-   `pg_advisory_xact_lock(hashtextextended(key, 0))`, precedent in
-   `Outreach.Webhooks`): `admission-ref:<tenant>:<kind>:<ref>`,
-   `admission-domain:<tenant>:<domain>`, `admission-email:<tenant>:<email>`,
-   and `admission-domain:<tenant>:<email domain>` when it differs. All keys of
-   a transaction are taken in ascending 64-bit key order, before any row
-   lock. A multi-row transaction (a B6 batch) collects every row's keys first
-   and takes them in one sorted pass. For the handover, the domain is read
-   unlocked from the original's account, then re-checked after step 4; a
-   change returns `:conflict`.
-2. Requesting user `FOR SHARE` (the authorization re-read; a concurrent
-   demotion or disable waits for commit).
-3. Campaign `FOR SHARE` (must be `active`).
-4. Agent run `FOR KEY SHARE` (agent_found only), before any lead lock, so a
-   worker holding the run and wanting a lead never waits on us.
-5. Account by domain `FOR SHARE`, contact by email `FOR SHARE` (each if it
-   exists).
-6. Every lead of the account, one query ordered by id: `FOR SHARE` for
-   admission, `FOR UPDATE` for the handover. This makes `:reopen` and
-   `:requalify_by_override` (which lock their lead before the head) serialize
-   with admission instead of meeting it at the unique-index slot after the
-   head. Bounded: one open lead per company plus its history.
+Excluded: requester, outcome, resolved account/contact/lead ids, timestamps,
+trace ids. The requester is stored on the row; a replay by another admin
+writes nothing. The hash depends only on submitted values, so it is the same
+before and after surrounding rows change. A new version string is required
+to change any rule; stored hashes are never recomputed.
+
+### 5.3 Agreement between stored relationships and the input
+
+Checked by the database (composite FKs and triggers, section 3): tenant of
+requester, campaign, account, contact, matched lead, agent run and original;
+contact at the stored account; matched lead at the stored company; lead bound
+to an `admitted` admission of the same tenant, company, person, kind and
+referrer; successor at the original's company.
+
+Checked in the action under lock before the admission insert (tests for each):
+stored `campaign_id`, `agent_run_id`, `referral_from_lead_id` equal the
+hashed values; a stored account's canonical domain equals the hashed
+`company.domain` (or, for referral, is the original's account); a stored
+contact's email equals the hashed email; the agent run is `:discovery`; the
+outcome matches the decision table for the locked facts.
+
+## 6. Identity keys, lock order and concurrency
+
+The shared key contract is proposed as an ADR-0009 amendment (in this PR,
+pending owner acceptance) so no implementer invents a second namespace or
+order. Summary:
+
+- **Keys.** `SdrAgent.Audit.IdentityKeys`. Kinds: `email`, `domain`,
+  `admission-ref`, `reply-message`. Lock id = first 8 bytes of
+  `sha256("sdr-identity-key/1\0" <> kind <> "\0" <> tenant_id <> "\0" <>
+  normalized value)` as a signed 64-bit integer, computed in Elixir and sent
+  as an integer parameter (`SELECT pg_advisory_xact_lock($1::bigint)`), so no
+  email or domain is ever a query parameter.
+- **One pass.** A transaction acquires all its keys once: deduplicated by
+  lock id, ascending signed order, before any row lock in the identity lock
+  domain (users, campaigns, agent_runs, accounts, contacts, leads,
+  qualifications of those leads, enrollments, drafts, deliveries, approvals,
+  agent definitions, the chain head). A later call must ask only for keys
+  already held; asking for a new key raises `IdentityKeys.LateAcquisition`
+  (held keys read from `pg_locks` for the backend). Rows outside the domain
+  (the transaction's own WebhookEvent) may be locked before the pass.
+- **Collisions** only serialize unrelated work; never correctness.
+- **Writers that take keys:** admission and referral (ref, company domain,
+  email, email domain); Suppression creates (value); webhook paths (one pass,
+  section 3); Account `:create`/`:seed`/`:update` (new canonical domain);
+  Contact `:create`/`:seed`/`:change_email` (new email); Lead `:reopen` and
+  Qualification `:override` (company domain of the lead). Inside admission
+  these nested actions find their keys already held.
+
+Admission order (both actions):
+
+0. Before the transaction: `SDRAgent.register/1` in its own committed
+   transaction (idempotent), so the in-transaction registration in the
+   reused assign path finds a committed row and never waits on a unique
+   index after the head.
+1. No locks: actor shape, input validation and normalization, preflight
+   real-data guard; unlocked reads to derive keys (referral: original →
+   account).
+2. Key pass.
+3. Requester `FOR SHARE` (authorization re-read). Replay lookup (no lock;
+   serialized by the ref key).
+4. Campaign `FOR SHARE`; agent run `FOR KEY SHARE` (agent_found).
+5. Account by canonical domain `FOR SHARE`; contact by email `FOR SHARE`.
+6. Open leads of the account `FOR SHARE` (`FOR UPDATE` for the handover).
+   At most one row by the account index, so this is bounded by construction;
+   closed history is read without locks, because the only way back to open
+   (`:reopen`, Qualification `:override`) needs the same company key.
 7. Handover only: `Outreach.Locks.targets(tenant, %{lead_ids: [original],
-   contact_ids: []})` — the original (already held), its active/paused
-   enrollments, open drafts, unclaimed deliveries, granted approvals, each
-   `FOR UPDATE` by id, the existing Outreach order.
-8. Reads without locks: replay lookup (serialized by the ref key),
-   suppressions (append-only, never lifted), active runs of the original
-   (no new run can be created for it while step 6 holds it).
-9. Chain head `FOR UPDATE` at the first append; then all writes.
+   contact_ids: []})` — enrollments, open drafts, unclaimed deliveries,
+   granted approvals, each `FOR UPDATE` by id (existing Outreach order).
+8. Live real-data guard on the resolved domain and email; suppression read
+   (append-only; any concurrent suppression of these values is serialized
+   by the keys).
+9. Chain head `FOR UPDATE` at the first append; then the writes.
 
-Implicit locks taken by inserts (foreign-key checks take `FOR KEY SHARE` on
-the referenced row):
+Implicit foreign-key key-share checks during the writes (contact 3,
+admission up to 8, lead 6, assign path about 5) each target a row created by
+this transaction or already held in an equal or stronger mode, except the
+tenant row, which no writer locks. **Unique-index waits after the head**
+are excluded per index: account domain (both indexes) and contact email:
+every writer holds the key; admission ref: key; leads per account and per
+contact: every writer that can make a lead open holds the company key;
+agent definition: pre-registered in step 0; Operation idempotency key and
+signal id: fresh per assignment. Tests prove this on independent
+connections (section 9).
 
-| Insert | Referenced rows (implicit `FOR KEY SHARE`) | Already held? |
-|---|---|---|
-| Account (new) | tenant | tenant: no writer locks tenant rows (to verify in C3-02 RED) |
-| Contact (new) | tenant, account | account: own new row or step 5 |
-| LeadAdmission | tenant, user, campaign, account, contact, matched lead or referral original, agent run | steps 2-6 (stronger or equal modes) |
-| Lead | tenant, contact, account, admission, referred_from (composite) | own rows or steps 5-6; `LeadAccount` re-locks the account `FOR SHARE` (held) |
-| Assign path (reused from `SDR.assign_lead/2`) | lead (own), campaign (step 3), agent definition, Operation, Oban job | inherited order; the definition lookup is unchanged from today |
+**Suppression and admission, both commit orders** (C3-R7):
 
-Count for the largest case (handover admitting a new person at the
-original's company): up to 4 advisory keys; up to 10 explicit row-lock
-statements (user, campaign, account, contact if it exists, account leads,
-then the 5 `Outreach.Locks` queries); 1 chain head; about 18 implicit
-key-share checks (contact 2, admission 6, lead 5, assign path about 5). Each
-targets a row this transaction created or already holds in an equal or
-stronger mode, except tenant and agent definition rows, which no writer
-locks exclusively today (to confirm in C3-02 RED).
+- Suppression first: admission waits at its key pass; its step 8 read then
+  sees the suppression → `suppressed`, nothing else created.
+- Admission first: the suppression waits at its key; after admission
+  commits, `ApplySuppression`'s contact lookup (a later statement snapshot)
+  sees the new contact, by email, email domain or (strengthened) company
+  domain, and in the same transaction stops the new lead and its work.
 
 Cycle check against existing writers:
 
 | Writer | Its order | Why no cycle |
 |---|---|---|
-| `BindApproval` | enrollment SHARE → draft UPDATE → campaign SHARE → contact SHARE → head | our campaign/contact locks are SHARE (compatible); we wait on its enrollment, it never waits on us |
-| `ApplySuppression` | leads → enrollments → drafts → deliveries → approvals → head | same suffix order as step 6-7; it never requests our prefix locks |
-| `Outreach.Webhooks` | message advisory key → Locks superset → head | does not take admission keys; same suffix order |
-| Account/Contact `:archive`, `:change_email` | row UPDATE → head | blocks on our SHARE while holding nothing we need |
-| User role/status change | active admins UPDATE → head | blocks on our SHARE while holding nothing we need |
-| Campaign transitions | campaign UPDATE → (enrollments) → head | campaign first, as we do |
-| Lead `:reopen`, `:requalify_by_override`, agent transitions | lead UPDATE → head | either they wait at the lead (holding nothing we need) or we wait at step 6 before the head |
-| `SDR.assign_lead/2`, `retry_run/2` | lead UPDATE → head → inserts | lead-first, as step 6 |
+| Suppression create (`ApplySuppression`) | key → leads → enrollments → drafts → deliveries → approvals → head | keys first in both; same Outreach suffix |
+| `Outreach.Webhooks` | own event row → key pass → Locks superset → head | event row outside the domain and never wanted by a key holder |
+| Classification (`AssessmentRules`) | key (in Suppression create) → targets → head | no domain row lock precedes `ensure_suppression` in its transaction (to confirm in RED; the module already requires its locks before the first append) |
+| `BindApproval` | enrollment SHARE → draft UPDATE → campaign SHARE → contact SHARE → head | takes no key; our campaign/contact locks are SHARE; we may wait on its enrollment, it never waits on us |
+| Account/Contact writes | key → row UPDATE → head | key first |
+| Lead `:reopen`, Qualification `:override` | key → lead UPDATE → head | key first; agent transitions take no key and only lock their lead |
+| User role/status, campaign transitions | row UPDATE → head (no key) | they block on our SHARE while holding nothing we need |
+| `SDR.assign_lead/2`, `retry_run/2` | lead UPDATE → head (no key) | lead-first as step 6; while the handover holds the original `FOR UPDATE`, an assignment of it waits and then fails its state check |
 
-Known residual (for review): a suppression whose contact lookup runs before
-an admission commits, while the admission's suppression read runs before the
-suppression commits, can leave a new open lead for a suppressed address. No
-contact can follow: `AcceptAssignment`'s deterministic suppression gate runs
-before any research or model call, and enrollment and the send gate check
-again. The lead then holds the company slot until an operator stops it.
-Closing this fully would need `Suppression` creates to take the same email or
-domain key first, which changes the reviewed suppression and webhook lock
-order; this packet does not propose that.
+## 7. Real-data guard and privacy
 
-## 7. Real-data guard and public surfaces
-
-- Admission validates the domain and email with the existing guard
-  (`Sales.Validations.Reserved` today, C5-04's policy once merged) **before**
-  any key, read or write. A refusal writes nothing, so a real value is never
-  stored while the switch is off.
-- With the switch off, C5-04 also stops processing of already persisted real
-  leads; admission adds no path around it (the queued run is refused by that
-  gate, an attention Failure follows, the lead never advances).
-- Provenance holds ids and a hash, never values. Error messages name fields,
-  not values. Admission adds no log line or span attribute containing a name,
-  email or domain; tests assert it. Contact rows and their audit after-images
-  hold personal data locally only, the accepted limitation of amendment 2.
-- Every fixture, test, doc and screenshot for C3 uses reserved domains.
+- **Guard.** Checked at step 4 before any read, key or write, and at step 8
+  after all locks on the resolved values (an adopted account or contact does
+  not run create validations, so the second check is explicit). Both read
+  the switch live through C5's API; C3 caches nothing. Until C5-04 merges,
+  the existing reserved-name guard is the policy. With the switch off, C5-04
+  also stops processing of persisted real leads; the queued run is refused
+  there, never bypassed.
+- **Query logging.** Ecto's default `:debug` query log includes parameters,
+  so a contact insert logs its email in dev today. C3-02 depends on a
+  parameter-free Repo log: Repo `log: false` and a telemetry handler that
+  logs source, parameterized SQL text and timing only, in every environment.
+  If C5-04 has not shipped this control when C3-02 starts, C3-02 adds it
+  (shared module, C5-04 reuses it); real data stays off until C5-04 merges
+  either way. Advisory keys use integer ids (section 6), never strings.
+- **Errors and spans.** Closed reasons and field names only; no value, no Ash
+  error struct, no changeset in any returned error, log line or span
+  attribute. Span attributes are ids, kind and outcome.
+- **Executable proof** (section 9): canary tests at Logger `:debug` with the
+  dev query logging handler on and `otel_capture_content: true`, capturing
+  log output and exported spans, on valid, invalid, conflicting, suppressed
+  and replayed input, for both actions.
+- **Local storage.** Contact rows and their audit after-images hold personal
+  data locally only (amendment 2's accepted limitation). Provenance holds ids
+  and a hash. Every C3 fixture, doc and screenshot uses reserved domains.
 
 ## 8. Events
 
 | Event | When | Content |
 |---|---|---|
-| `sales.admission.recorded` (new) | every new admission row, any outcome | after-image: kind, ref, outcome, ids, hash; no personal fields |
-| `sales.account.created`, `sales.contact.created`, `sales.lead.created` (existing) | admitted path | lead after-image now includes `source`, `admission_id`, `referred_from_lead_id` |
-| `sales.lead.assigned`, `sdr.lead.assigned`, run/Operation events (existing) | admitted path | unchanged; run `usage_origin` gives the D-104 bucket |
+| `sales.admission.recorded` (new) | every new admission row | after-image: kind, ref, outcome, ids, hash; no personal fields |
+| `sales.account.created`, `sales.contact.created`, `sales.lead.created` (existing) | admitted path | lead after-image now has `source`, `admission_id`, `referred_from_lead_id` |
+| `sales.lead.assigned`, `sdr.lead.assigned`, run/Operation events (existing) | admitted path | unchanged; `usage_origin` gives the D-104 bucket |
 | `sales.lead.referred` (new) | handover | previous status; successor admission id |
-| `sales.enrollment.stopped`, `outreach.draft.cancelled`, `outreach.delivery.cancelled`, `outreach.approval.invalidated` (existing) | handover | new reason values `referred` / `lead_referred` |
+| `sales.enrollment.stopped`, `outreach.draft.cancelled`, `outreach.delivery.cancelled`, `outreach.approval.invalidated` (existing) | handover | reasons `referred` / `lead_referred` |
 | `authz.denied` (existing) | refused actor | via Guard |
 
-A replay appends nothing.
+A replay or a refused request appends nothing (except Guard denials).
 
 ## 9. Test plan (RED first, synthetic only)
 
-C3-02 (`test/sdr_agent/sdr/admission_test.exs`, `test/sdr_agent/sales/lead_admission_test.exs`):
+Race tests use **independent PostgreSQL connections** with committed data on
+an isolated test partition (the pattern of
+`test/sdr_agent/audit/concurrency_test.exs`), two or three processes and
+explicit barriers at test-only hook points (after the key pass, after the
+lock phase, before the first append). A monitor connection reads
+`pg_stat_activity`/`pg_locks` to prove where a waiter blocks: on an
+`advisory` lock, never on a `transactionid` (unique-index or row) wait while
+the other side holds the chain head. Each race runs in both commit orders.
 
-- Each of the five kinds admits a new person at a new company: one account,
-  contact, admission, lead; lead ends `assigned` with one queued run
-  (`usage_origin :assignment`); stored rows and events asserted.
-- Policy: active admin allowed; reviewer, auditor (audited), disabled admin, a
-  stale admin struct demoted in the DB, every system actor denied; direct
+C3-02:
+
+- Each of the four kinds admits a new person at a new company: one account,
+  contact, admission, lead; lead `assigned` with one queued run; stored rows
+  and events asserted.
+- Policy: active admin allowed; reviewer, auditor (audited), disabled admin,
+  a stale admin struct demoted in the DB, every system actor denied; direct
   `Lead :create` and `LeadAdmission :record` without the marker denied.
-- Every outcome row of the decision table, per source where it differs; no
-  account/contact created for suppressed (email, email domain, company
-  domain), other-account, archived outcomes.
-- Normalization: `WWW.Orbit.Example.org.` and `orbit.example.org` dedupe;
-  `eu.orbit.example.org` does not; URL input refused; email case and
-  whitespace dedupe.
-- Idempotency: replay returns the stored row with no new row, run or event;
-  same ref, different input refused; concurrent same-ref submissions produce
-  one admission.
-- `source_ref` grammar: each kind's valid form; a ref containing `@`, spaces
-  or letters outside hex refused by the action and by the DB check.
-- Invariant: two concurrent admissions of different people at one company →
-  one `admitted`, one `active_target_exists`; direct insert of a second open
-  lead at an account fails at the index; `:reopen` and
-  `:requalify_by_override` refused with the typed error while another lead is
-  open; closed leads do not block.
-- No skip: an admitted lead cannot `qualify`, `start_outreach`, enroll or get
-  a draft without research and a recorded qualification (each attempt
-  refused), for every source kind.
-- `readmit`: allowed for manual, refused for csv/hubspot/agent_found; a
-  re-admitted contact gets a new lead and keeps the old one.
+- Every decision-table outcome; no account/contact created for suppressed
+  (email, email domain, company domain), other-account and archived outcomes.
+- `admit_lead` with `source_kind :referral` refused, nothing written.
+- Replay: identical replay writes nothing after the campaign is paused, the
+  lead moved on, or a suppression appeared; replay refused only for a
+  non-admin actor, invalid input or a guard refusal; same ref with different
+  input refused; hash stable across surrounding-row changes; hash vectors
+  for nulls, whitespace, NFC and case.
+- Agreement: wrong-tenant campaign, run, account, contact and matched lead;
+  a lead pointing at a non-admitted admission, another kind, another company
+  or person; a run not `:discovery`; ref/run id mismatch — each refused by the
+  action and, where modeled, by the database directly.
+- Cutover: inserting a `manual` lead without admission, a `crm` lead, or
+  changing `admission_id`/`source` fails at the trigger; a `fixture` seed
+  still works in test; legacy rows untouched; migration aborts on synthetic
+  colliding domains and on two open leads at one account.
+- Canonical domain: an existing `www.orbit.example.org` account (inserted in
+  its stored form) dedupes with `orbit.example.org`; `eu.orbit.example.org`
+  does not; Elixir and SQL canonical functions agree on a corpus; old row's
+  `record_sha256` unchanged.
+- Invariant: second open lead at an account fails at the index; `:reopen`
+  and override refused with the typed error while another lead is open.
+- No skip: an admitted lead cannot qualify, start outreach, enroll or get a
+  draft without research and a recorded qualification, per kind.
+- `readmit`: manual only; never overrides suppression, archived identities
+  or the open-lead rule; the re-admitted contact gets a new lead, old kept.
 - Deferred trigger: an `admitted` row without a lead fails at commit.
-- Real data: a non-reserved domain or email is refused with nothing written;
-  the value is absent from the error, logs and captured spans.
-- Migration: collision pre-check aborts on synthetic colliding data; legacy
-  `crm`/`fixture`/`manual` rows untouched; `Outreach.Locks.open_leads/0`
-  equals the Lead open set.
+- Key contract: `LateAcquisition` raised for a new key after the pass; lock
+  ids sent as integers.
+- Races (independent connections, both orders): two admissions at one
+  company; admission vs suppression of the email, the email domain and the
+  company domain (person absent before; person existing); admission vs direct
+  `create_account` and `create_contact`; admission vs `:reopen` and
+  Qualification override; admission vs contended agent-definition
+  registration; same-ref double submit; each with the waiter shown blocked
+  on an advisory lock.
+- Privacy canaries: unique synthetic name, email and domain values absent
+  from captured logs, spans and returned errors for valid, invalid,
+  conflicting, suppressed and replayed input, with debug logging, query
+  logging and content capture on.
 
-C3-03 (`test/sdr_agent/sdr/referral_handover_test.exs`):
+C3-03:
 
-- Handover from `in_outreach` and from `replied`: original `referred` with
-  `closed_at`; enrollment stopped `:referred`; pending and unclaimed queued
-  drafts cancelled; unclaimed deliveries cancelled; granted approvals
-  invalidated `:lead_referred`; claimed delivery untouched; new lead
-  `assigned` with `usage_origin :referral` and `referred_from_lead_id`.
-- Refusals with nothing written: original in any other state, active run on
-  the original, self-referral, cross-tenant ids, non-admin actors.
-- Referred person suppressed, at another company or already worked: admission
-  row recorded, original unchanged.
-- Duplicate handover (same ref) replays; a second handover from the now
-  `referred` original refused; `referred` cannot be reopened, overridden or
-  stopped.
-- Races: handover vs approval of the original's draft, vs suppression of the
-  original, vs a concurrent admission at the same company; each ends in one
-  consistent order with the one-open-lead invariant held.
-- Composite FK: a `referred_from_lead_id` at another account is rejected by
-  the DB.
+- Handover from `in_outreach` and `replied`: original `referred`; enrollment
+  stopped; drafts, unclaimed deliveries cancelled; approvals invalidated;
+  claimed delivery untouched; new lead `assigned` with `usage_origin
+  :referral` and `referred_from_lead_id`.
+- Refusals with nothing written: original in another state or tenant, active
+  run, self-referral, ref naming another original, non-admin.
+- Non-admitted referral (suppressed, other company, worked): admission row
+  only, original unchanged.
+- Replay after the handover (original now `referred`) returns the stored
+  result; a new request on the `referred` original is refused.
+- Races (independent connections, both orders): handover vs approval of the
+  original's draft, vs suppression of the original's or the referred email,
+  vs a concurrent admission at the company.
+- Composite FK: a successor at another account rejected by the database.
+- Privacy canaries as in C3-02.
 
 Gate: `bin/verify` and `mix credo` on an isolated test partition; never the
-owner's demo database; no model calls (Fake provider only).
+owner's demo database; Fake provider only, no model calls.
 
 ## 10. Affected modules and proposed slices
 
 No code changes in C3-01. Names are proposals.
 
-**C3-02** (after PASS and G5):
+**C3-02** (after PASS, ADR amendment acceptance and G5):
 
-- New: `lib/sdr_agent/sales/lead_admission.ex`,
+- New: `lib/sdr_agent/audit/identity_keys.ex`,
+  `lib/sdr_agent/audit/changes/identity_key_lock.ex`,
+  `lib/sdr_agent/sales/lead_admission.ex`, `lib/sdr_agent/sales/domain.ex`,
   `lib/sdr_agent/sales/checks/admission_context.ex`,
-  `lib/sdr_agent/sdr/admission.ex`; migration (table, identities, checks,
-  append-only and deferred triggers, `leads` index and columns, account
-  pre-check).
-- Changed: `lib/sdr_agent/sales/lead.ex` (source enum, `admission_id`,
-  identity, `:create` policy), `lib/sdr_agent/sales/account.ex` (source
-  enum), `lib/sdr_agent/sales/changes/normalize_domain.ex`,
-  `lib/sdr_agent/sales.ex` (admission reads), `lib/sdr_agent/sdr.ex`
-  (`admit_lead/2`; extract the assign body so admission reuses it inside its
-  transaction), `test/support/sales_fixtures.ex` (leads through admission),
-  `lib/sdr_agent/demo/fixtures.ex` if a seed shares an account.
-- Diagrams: regenerate the Sales domain diagram (new resource) and the
-  data-flow diagram (new public admission flow).
+  `lib/sdr_agent/sdr/admission.ex`, parameter-free Repo log handler (unless
+  C5-04 shipped it); migration (table, identities, composite FK targets,
+  checks, append-only, deferred and lead triggers, canonical function and
+  index, pre-checks).
+- Changed: `sales/lead.ex`, `sales/account.ex`, `sales/contact.ex`,
+  `sales/changes/normalize_domain.ex`, `outreach/suppression.ex`,
+  `outreach/locks.ex` (domain match), `outreach/webhooks.ex` (key pass),
+  `research/qualification.ex` (override key), `sales.ex`, `sdr.ex`
+  (`admit_lead/2`; extract the assign body for reuse), `config/*.exs` (Repo
+  log), `test/support/sales_fixtures.ex`, `lib/sdr_agent/demo/fixtures.ex` if
+  a seed shares an account.
+- Diagrams: regenerate the Sales domain diagram and the data-flow diagram.
 
-**C3-03** (after C3-02 merges):
+**C3-03** (after C3-02 merges): `lead.ex` (`:referred`, `:refer`,
+`referred_from_lead_id`, composite FK), `campaign_enrollment.ex`,
+`outreach/approval.ex`, `sdr.ex` (`hand_off_referral/2`); new
+`sales/checks/referral_context.ex`, `outreach/referral.ex`.
 
-- Changed: `lead.ex` (`:referred`, `:refer`, `referred_from_lead_id`,
-  composite FK), `campaign_enrollment.ex` (`:referred`, ReferralContext),
-  `outreach/approval.ex` (`:lead_referred`), `sdr.ex`
-  (`hand_off_referral/2`).
-- New: `lib/sdr_agent/sales/checks/referral_context.ex`,
-  `lib/sdr_agent/outreach/referral.ex`.
-
-ADR: not required. The admission record and invariants follow ADR-0009 and
-ADR-0010 inside the Sales domain; the advisory-key pattern already exists in
-`Outreach.Webhooks`; the one-target rule is an owner decision (D-095). The
-reviewer may ask for one if the key pattern is judged cross-cutting.
+ADR: the identity-key namespace and order spanning Sales, Research and
+Outreach is a cross-cutting contract, proposed as the ADR-0009 "C3
+amendment" in this PR (pending owner acceptance). The rest follows ADR-0009
+and ADR-0010.
 
 ## 11. Risks
 
 | Risk | Mitigation |
 |---|---|
-| Existing tests and demo seeds create two open leads at one account | C3-02 updates fixtures to admit through the new path; assertions are not weakened |
-| Migration meets colliding domains or two open leads in the owner's dev data | pre-check aborts with counts; the owner chooses, nothing is merged automatically |
-| Suppression race residual (section 6) | downstream deterministic gates; recorded for review |
-| B6 batch transactions take many keys | sorted single pass; B6 chooses batch size and partial-commit policy under its own review |
-| B1 needs a campaign for manual add | admission requires `campaign_id` (existing assign contract); B1 chooses the default campaign in its packet |
+| The key contract touches reviewed Suppression, webhook and override paths | every changed path gets a both-orders race test; Outreach suffix order unchanged; ADR amendment reviewed |
+| Strengthened domain suppression stops more leads than today (contacts whose company domain is suppressed but whose email domain differs) | strengthening only; called out for the owner at G5; synthetic tests |
+| Existing tests and seeds create two open leads at one account | fixtures admit through the new path; assertions not weakened |
+| Migration meets collisions in the owner's dev data | pre-checks abort with counts; nothing merged automatically |
+| Parameter-free logging reduces dev debugging detail | SQL text and timing stay; values never logged |
+| B6 batches take many keys | one sorted pass per transaction; B6 sets batch size under its own review |
+| B1 needs a campaign for manual add | admission requires `campaign_id`; B1 chooses the default in its packet |
 
 ## 12. Questions for the owner (G5)
 
@@ -400,28 +490,50 @@ reviewer may ask for one if the key pattern is judged cross-cutting.
   this person again" confirmation. A suppressed person is never re-admitted
   either way. Alternative: every source may re-admit.
 - **OQ-2 Companies already in a relationship.** A company whose last lead
-  ended converted or nurture. Proposal: same rule as OQ-1 for the company:
-  automatic sources skip it ("company in relationship", a new outcome),
-  manual add allowed. Alternative: treat it like any company with no open
-  lead (only the open-lead rule applies). This packet models the
-  alternative until you answer; the proposal adds one outcome value.
-- **OQ-3 Referral to another company.** "Talk to my colleague at our parent
-  company." Proposal: not a handover. The original stays as it is; you can
-  add the person by hand at the other company and note the reply. The
-  referral handover stays same-company only (D-095). Alternative: a
-  cross-company handover that closes the original as referred too.
+  ended converted or nurture. Proposal: automatic sources skip it ("company
+  in relationship", a new outcome), manual add allowed. Alternative: treat it
+  like any company with no open lead. This packet models the alternative
+  until you answer; the proposal adds one outcome value and needs a narrow
+  re-review.
+- **OQ-3 Referral to another company.** Proposal: not a handover. The
+  original stays as it is; you can add the person by hand at the other
+  company and note the reply. The handover stays same-company only (D-095).
+  Alternative: a cross-company handover that closes the original as
+  referred too.
 
 ## 13. Gate record (to fill)
 
 - Entity-model reviewer: Codex via ai-pair (capabilities `ai_pair=true`,
   `codex_review=true`).
-  - Verdict: **UNREVIEWED.** Not yet submitted; correlation id, reply id and
-    report hash to be recorded here. UNREVIEWED blocks C3-02/C3-03.
+  - Round 1 at 5987410: **NEEDS-REVIEW** (consultation
+    m_1791845331000024185_00d7c797; private report
+    `~/.local/state/sdr-agent/handoff-20261008/tmp/codex-c3-01-5987410-entity-review.md`,
+    sha256 2c7c5698…). Six items:
+    1. close the suppression-vs-admission race with shared serialization;
+    2. replay before mutable preconditions (referral, campaign);
+    3. one referral entry point;
+    4. exact input hash and relationship agreement;
+    5. canonical lookup over old rows and the legacy-null cutover;
+    6. executable privacy and true-connection race proof.
+    Plus: document the shared key order as an ADR-0009 amendment.
+  - Revised in this commit: shared identity keys adopted by Suppression,
+    webhooks, Account/Contact writers, reopen and override, with both commit
+    orders (sections 3, 6) and the proposed ADR-0009 C3 amendment (item 1);
+    replay at step 6 before campaign, original, run and suppression checks
+    (section 4) (item 2); `admit_lead` refuses `referral`, the handover derives
+    the company and checks the ref's original id (item 3); hash v1 table,
+    normalization order, exclusions, composite FKs and action checks (section
+    5) (item 4); canonical expression index without rewriting rows, insert and
+    update triggers for the cutover (section 3) (item 5); integer lock ids,
+    parameter-free query logging, live guard recheck, canary tests,
+    independent-connection race tests with wait proof, bounded lead locking
+    (sections 6, 7, 9) (item 6).
+  - Round 2: pending.
+- ADR-0009 C3 amendment: proposed, pending Codex review and owner acceptance.
 - Owner G5 (scoped C3): pending; answers to OQ-1..OQ-3 recorded here.
-- C3-01 docs verification: docs-only change; no code, migration or test
-  changed.
+- C3-01 verification: docs-only change; no code, migration or test changed.
 
-## 14. Next authorized scope (when PASS and G5)
+## 14. Next authorized scope (when PASS, ADR acceptance and G5)
 
 Implement C3-02 then C3-03 as reviewed PRs (Claude authors, Codex reviews,
 exact-head CI), adjusted by the owner's answers. No real data until C5-04

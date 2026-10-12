@@ -141,6 +141,58 @@ upgrading AshPostgres in a way that changes upsert compilation, requires a
 reviewed amendment to this ADR and a green concurrency suite. Reviewed by Codex
 on PR #7 (https://github.com/chops/sdr_agent/pull/7#issuecomment-6029500570).
 
+#### C3 amendment (2026-10-12): shared identity keys and their order
+
+**Status: PROPOSED, pending Codex review and owner acceptance.** Not in force
+until accepted; no code depends on it yet. Source: C3 readiness packet
+(`docs/product/c3/readiness.md`, sections 5-7), Codex C3-01 entity review
+round 1 (NEEDS-REVIEW at 5987410).
+
+Lead admission, suppression and the webhook paths write the same identities
+(a person's email, a company domain, the one open lead per company). Row
+locks alone cannot serialize them, because the rows may not exist yet and
+unique-index waits after the chain head can deadlock. One namespace and one
+order cover every writer:
+
+1. **Namespace.** `SdrAgent.Audit.IdentityKeys` is the only way to take a
+   transaction advisory lock in this project. Kinds: `email`, `domain`,
+   `admission-ref`, `reply-message`. A value is normalized per kind first
+   (email trimmed and lowercased; domain canonical as `sdr_canonical_domain`).
+   Lock id = the first 8 bytes of
+   `sha256("sdr-identity-key/1\0" <> kind <> "\0" <> tenant_id <> "\0" <> value)`
+   read as a signed 64-bit integer. It is computed in Elixir and sent as an
+   integer parameter (`pg_advisory_xact_lock($1::bigint)`), so no personal
+   value is ever a query parameter or log entry. The existing webhook
+   Message-ID key (`hashtextextended`) moves into this namespace.
+2. **One pass, sorted.** A transaction takes all its keys in a single call:
+   lock ids deduplicated, then acquired in ascending signed order. A later
+   call in the same transaction may ask only for keys it already holds;
+   asking for a new one raises `IdentityKeys.LateAcquisition` (held keys
+   read from `pg_locks` for the backend).
+3. **Before shared row locks.** The pass comes before any row lock in the
+   identity lock domain: users, campaigns, agent runs, agent definitions,
+   accounts, contacts, leads and their qualifications, enrollments, drafts,
+   deliveries, approvals, and the chain head. A transaction may first lock
+   only rows no key holder ever waits for (today: the WebhookEvent it is
+   processing).
+4. **Who takes keys.** Admission and referral handover (source ref, company
+   domain, email, email domain); every Suppression create (its value);
+   webhook reply, unsubscribe, bounce and complaint paths (one pass with the
+   Message-ID key where used); Account create/seed/update (new canonical
+   domain); Contact create/seed/change_email (new email); Lead `:reopen` and
+   Qualification `:override` (the lead's company domain). An action nested in
+   a transaction that already holds its key finds it held.
+5. **Collisions.** Two values with the same lock id only serialize unrelated
+   work. Correctness never depends on distinct ids.
+6. **Unchanged.** Every existing row-lock order (Outreach leads → enrollments
+   → drafts → deliveries → approvals, approval binding, grant admission) and
+   the rule that every row lock precedes the first append stay as they are;
+   keys are a prefix, not a reordering.
+
+Changing a kind, the id derivation, the order or the lock domain needs a
+further reviewed amendment and a green concurrency suite (independent
+connections, both commit orders, waits shown on advisory locks).
+
 ## Justification
 
 UUIDv7 costs nothing (built into the pinned Ash) and gives ordered, local
