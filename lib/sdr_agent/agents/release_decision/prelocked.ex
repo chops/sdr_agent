@@ -15,11 +15,26 @@ defmodule SdrAgent.Agents.ReleaseDecision.Prelocked do
   Failure id), and the PostgreSQL transaction id it was established in. It
   is registered in the calling process only for the duration of `run/2`:
   the registration is removed when `run/2` returns or raises, and a
-  rollback, commit or process exit ends its transaction, so no reference
-  outlives the locks it vouches for. `verify/1` accepts it only in that
-  process and transaction, while registered, and when every binding equals
-  the registered one. A hand-built struct, a tampered copy, a leaked or
-  stale context, or one used in another process is refused.
+  rollback, commit or process exit ends its transaction. `verify/1` accepts
+  it only in that process and transaction, while registered, when every
+  binding equals the registered one, and while its database marker is set.
+  A hand-built struct, a tampered copy, a leaked or stale context, or one
+  used in another process is refused.
+
+  **Savepoints (code review MF1).** A `ROLLBACK TO SAVEPOINT` keeps the
+  transaction id and the process registration but releases every lock
+  taken after that savepoint. So `run/2` also sets a transaction-local
+  marker, `set_config('<marker>', '1', true)`, with a name unique to the
+  context, and `verify/1` requires `current_setting('<marker>', true) =
+  '1'`. PostgreSQL reverts a transaction-local setting when the
+  subtransaction that set it is rolled back. The marker is set after every
+  vouched lock is held, so a rollback that could release one of those
+  locks targets a savepoint older than the marker and clears it; a rollback
+  to a savepoint created after `run/2` began cannot release a lock taken
+  before that savepoint, and the context stays valid. A rollback to a
+  savepoint between the locks and `run/2` also clears the marker: refused,
+  conservatively. The marker is not a capability against server code that
+  sets it itself (a trusted in-process convention).
 
   This is a trusted in-process convention (like the kernel marker): it
   proves nothing against arbitrary server code, and no Boolean or
@@ -36,7 +51,8 @@ defmodule SdrAgent.Agents.ReleaseDecision.Prelocked do
     :model_invocation_id,
     :wire_witness_link_id,
     :receipt_id,
-    :xact_id
+    :xact_id,
+    :marker
   ]
 
   @registry {__MODULE__, :registry}
@@ -53,13 +69,17 @@ defmodule SdrAgent.Agents.ReleaseDecision.Prelocked do
   def run(%{tenant_id: tenant_id, model_invocation_id: invocation_id} = bindings, fun)
       when is_binary(tenant_id) and is_binary(invocation_id) and is_function(fun, 1) do
     if Repo.in_transaction?() do
+      marker = "sdr_prelocked.c" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+      Repo.query!("SELECT set_config($1, '1', true)", [marker])
+
       context = %__MODULE__{
         ref: make_ref(),
         tenant_id: tenant_id,
         model_invocation_id: invocation_id,
         wire_witness_link_id: Map.get(bindings, :wire_witness_link_id),
         receipt_id: Map.get(bindings, :receipt_id),
-        xact_id: xact_id()
+        xact_id: transaction_state(marker) |> elem(0),
+        marker: marker
       }
 
       register(context)
@@ -84,7 +104,7 @@ defmodule SdrAgent.Agents.ReleaseDecision.Prelocked do
     with %__MODULE__{} = registered <- Map.get(registry(), ref),
          true <- registered == context,
          true <- Repo.in_transaction?(),
-         true <- xact_id() == registered.xact_id do
+         true <- transaction_state(registered.marker) == {registered.xact_id, "1"} do
       {:ok, registered}
     else
       _ -> {:error, :prelocked_context_refused}
@@ -93,9 +113,15 @@ defmodule SdrAgent.Agents.ReleaseDecision.Prelocked do
 
   def verify(_context), do: {:error, :prelocked_context_refused}
 
-  defp xact_id do
-    %{rows: [[id]]} = Repo.query!("SELECT pg_current_xact_id()::text", [])
-    id
+  # The current transaction id and the context's marker, in one query (no
+  # lock clause). A missing marker reads as nil or "".
+  defp transaction_state(marker) do
+    %{rows: [[id, value]]} =
+      Repo.query!("SELECT pg_current_xact_id()::text, current_setting($1, true)", [marker])
+
+    {id, value}
+  rescue
+    _aborted -> {nil, nil}
   end
 
   defp registry, do: Process.get(@registry, %{})
