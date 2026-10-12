@@ -19,7 +19,14 @@ defmodule SdrAgent.CalibrationConsole.Secrets do
       restart.
     * **Refused.** A directory or file that is a symlink, is not owned by
       this user (the effective UID, `id -u`), or is readable or writable by
-      group or others; a malformed file.
+      group or others; a malformed file (anything but exactly one
+      `secret_key_base=` and one `token_signing_secret=` line, each at least
+      64 bytes of base64).
+
+  Only the `calibration` directory and the file are checked. Their
+  ancestors (`~`, `~/.local`, `~/.local/state`, `~/.local/state/sdr-agent`)
+  are trusted as the user's own home: whoever controls them controls the
+  user's account already.
 
   No value is ever printed, logged, put on a command line or included in an
   error; errors name only the path and the reason.
@@ -172,18 +179,23 @@ defmodule SdrAgent.CalibrationConsole.Secrets do
     end
   end
 
+  # Exactly one `key=value` line per key and nothing else.
   defp parse(body) do
+    lines = String.split(body, "\n", trim: true)
+    names = Enum.map(@keys, &Atom.to_string/1)
+
     pairs =
-      for line <- String.split(body, "\n", trim: true),
+      for line <- lines,
           [key, value] <- [String.split(line, "=", parts: 2)],
-          into: %{},
-          do: {key, value}
+          key in names,
+          do: {String.to_existing_atom(key), value}
 
-    values = for key <- @keys, do: {key, Map.get(pairs, Atom.to_string(key))}
+    secrets = Map.new(pairs)
 
-    if map_size(pairs) == length(@keys) and Enum.all?(values, &strong?(elem(&1, 1))),
-      do: {:ok, Map.new(values)},
-      else: :malformed
+    if length(lines) == length(@keys) and map_size(secrets) == length(@keys) and
+         Enum.all?(Map.values(secrets), &strong?/1),
+       do: {:ok, secrets},
+       else: :malformed
   end
 
   defp strong?(value) when is_binary(value) do

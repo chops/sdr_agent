@@ -132,5 +132,15 @@ defmodule SdrAgent.CalibrationConsole.SecretsTest do
       File.write!(ctx.path, "secret_key_base=short\n")
       assert refused!(ctx) =~ "is malformed"
     end
+
+    test "a duplicated key or an unknown line", ctx do
+      good = File.read!(ctx.path)
+      [first | _] = String.split(good, "\n", trim: true)
+
+      for body <- [good <> first <> "\n", good <> "junk\n", good <> "other_key=x\n"] do
+        File.write!(ctx.path, body)
+        assert refused!(ctx) =~ "is malformed"
+      end
+    end
   end
 end
