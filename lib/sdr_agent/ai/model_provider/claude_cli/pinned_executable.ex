@@ -132,11 +132,12 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable do
         with :ok <- shape(path), do: {:error, :unsupported_platform}
 
       %{executable: executable, store: store} ->
-        with :ok <- shape(path, store) do
-          if path == executable, do: :ok, else: {:error, :not_the_pinned_path}
-        end
+        with :ok <- shape(path, store), do: pinned_path(path, executable)
     end
   end
+
+  defp pinned_path(path, path), do: :ok
+  defp pinned_path(_path, _executable), do: {:error, :not_the_pinned_path}
 
   @doc """
   The path rule alone. `store` is the store root; it is `/nix/store` except
