@@ -7,7 +7,8 @@ defmodule SdrAgent.SDR do
     * `assign_lead/2` — ADM/REV assign a lead to the agent for a campaign.
       In one transaction (outbox): the lead new → assigned, the `SDRAgent`
       AgentDefinition (registered if absent), the Oban job, its Operation,
-      the queued AgentRun and the `sdr.lead.assigned` signal event.
+      the queued AgentRun (usage origin `:assignment`, C9) and the
+      `sdr.lead.assigned` signal event.
     * `retry_run/2` — active ADM retries a stopped run (S13b);
     * `pause_campaign/2` — ADM/REV pause a campaign and record
       `sdr.campaign.paused` (the agent re-checks campaign state
@@ -109,6 +110,7 @@ defmodule SdrAgent.SDR do
                trigger_signal_id: signal.id,
                correlation_id: correlation_id,
                phase: :discover,
+               usage_origin: :assignment,
                operation_id: operation.id,
                max_model_calls: min(Keyword.get(opts, :max_model_calls, 20), 20),
                max_tool_calls: Keyword.get(opts, :max_tool_calls, 60)

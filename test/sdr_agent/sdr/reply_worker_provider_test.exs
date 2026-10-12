@@ -20,6 +20,12 @@ defmodule SdrAgent.SDR.ReplyWorkerProviderTest do
 
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
+  # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+  setup ctx do
+    SdrAgent.AgentsFixtures.grant!(ctx.tenant, %{}, ctx.admin)
+    :ok
+  end
+
   # The outreach is drafted and delivered on the Fake; only the reply's
   # classification runs with ClaudeCLI selected.
   setup ctx do

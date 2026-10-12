@@ -16,6 +16,8 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
 
   setup do
     tenant = bootstrap!()
+    # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+    AgentsFixtures.grant!(tenant)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
 
     %{
@@ -540,7 +542,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
   end
 
   defp sent_invocation!(run, agent, key, provider \\ :claude_cli) do
-    attrs = AgentsFixtures.model_attrs(key) |> Map.put(:provider, provider)
+    attrs = AgentsFixtures.model_attrs(key) |> AgentsFixtures.with_provider(provider)
     {:ok, invocation} = Agents.reserve_model_invocation(run, attrs, actor: agent)
     {:ok, sent} = Agents.mark_model_invocation_sent(invocation, actor: agent)
     sent
