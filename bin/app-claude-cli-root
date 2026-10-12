@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Builds the app's pinned Claude CLI (flake output app-claude-cli, ADR-0004
-# R0 amendment item 1) and keeps it alive with Nix GC roots under .gcroots/:
+# Builds the app's pinned Claude CLI (nix/app-claude-cli-package.nix, on the
+# nixpkgs locked in flake.lock; ADR-0004 R0 amendment item 1) and keeps it
+# alive with Nix GC roots under .gcroots/:
 #   app-claude-cli-current   the build the app launches now
 #   app-claude-cli-previous  the build before it, kept for rollback
 # The previous root moves only when the store path changes. Prints the
@@ -29,7 +30,7 @@ mkdir -p "$dir"
 
 # Built straight into its own GC root, so the new build is never
 # collectable between the build and the rotation below.
-nix build --out-link "$staged" "$root#app-claude-cli"
+nix build --out-link "$staged" -f "$root/nix/app-claude-cli-package.nix"
 out="$(readlink "$staged")"
 
 case "$out" in

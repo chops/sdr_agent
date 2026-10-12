@@ -173,11 +173,12 @@ The `ClaudeCLI` provider (ADR-0004) calls Claude Code through
 `llm-proxy-shim`, using **your own** local Claude Code login. It is for a
 personal local demo only: never hosted, shared or multi-user traffic.
 
-The app runs its own pinned Claude Code build (the flake package
-`app-claude-cli`), never `claude` from `PATH`, so updating your own Claude
-Code does not change what the app runs. Build it, which also keeps it and the
-previous build alive with GC roots under `.gcroots/`, then start the
-development server with the provider selected and the printed path:
+The app runs its own pinned Claude Code build (`nix/app-claude-cli.nix`,
+on the nixpkgs locked in `flake.lock`), never `claude` from `PATH`, so
+updating your own Claude Code does not change what the app runs. Build it,
+which also keeps it and the previous build alive with GC roots under
+`.gcroots/`, then start the development server with the provider selected
+and the printed path:
 
 ```sh
 bin/app-claude-cli-root   # prints /nix/store/...-app-claude-cli-<version>/bin/claude-code
