@@ -79,14 +79,34 @@ defmodule SdrAgentWeb.AuditedView do
   def error_message(tag) when is_atom(tag), do: humanize(tag)
   def error_message(_other), do: "The request could not be completed."
 
-  defp invalid_message(%Ash.Error.Changes.Required{field: field}) when not is_nil(field),
-    do: "#{humanize(field)} is required"
+  @doc """
+  The field-naming validation errors of an `Ash.Error.Invalid` as
+  `[{field, message}]` (the message without the field name), for showing
+  next to a form's inputs: the same operator-safe subset `error_message/1`
+  shows. Any other error gives `[]`.
+  """
+  @spec field_errors(term()) :: [{atom(), String.t()}]
+  def field_errors(%Ash.Error.Invalid{errors: errors}) do
+    errors |> Enum.map(&field_error/1) |> Enum.reject(&is_nil/1) |> Enum.uniq()
+  end
 
-  defp invalid_message(%{field: field, message: message} = error)
+  def field_errors(_error), do: []
+
+  defp invalid_message(error) do
+    case field_error(error) do
+      {field, message} -> "#{humanize(field)} #{message}"
+      nil -> nil
+    end
+  end
+
+  defp field_error(%Ash.Error.Changes.Required{field: field}) when not is_nil(field),
+    do: {field, "is required"}
+
+  defp field_error(%{field: field, message: message} = error)
        when is_binary(message) and is_atom(field) and not is_nil(field),
-       do: "#{humanize(field)} #{interpolate(message, error)}"
+       do: {field, interpolate(message, error)}
 
-  defp invalid_message(_error), do: nil
+  defp field_error(_error), do: nil
 
   defp interpolate(message, error) do
     vars = Map.get(error, :vars) || []
