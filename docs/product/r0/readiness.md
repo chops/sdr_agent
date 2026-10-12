@@ -331,6 +331,12 @@ revisit story).
   resolution race, take the clock after the locks, and record the delta
   here. Revised in this commit; awaiting re-review. The round-3 PASS does
   not cover this delta.
+  - C9 PR-B stop-action delta (AgentRun `:grant_exhausted`/`:grant_unavailable`,
+    receipt arguments, Failure refusal provenance and historical-cause link,
+    Operation resolution-race outcome, admission instant as `reserved_at`):
+    NEEDS-REVIEW at e73e132 (Codex re-review of PR #132), then **PASS** at
+    b6ee298 (Codex via ai-pair, report sha256 bc9dcf73). The PASS does not
+    cover launch admission, profiles/switch or R0-07 entities.
 - Owner G5: **approved.** Words: "approve R0 G5" (with "(b) with the
   calibration exception"); 2026-10-12, America/Denver; private Claude
   session chat. Gate record: `docs/sdlc/gates/G5-R0.md`.
