@@ -96,3 +96,91 @@ constraints that protect real people and secrets are explicit.
 **Risks:** the owner's review time becomes the critical path. The SDLC
 schedule controls (WIP limit, scope-cut trigger, workshop fallback) manage
 this.
+
+## Amendment 2 (proposed 2026-10-12): real companies and people for the owner's demo (constraint 7)
+
+**Status: PROPOSED.** Not in force until the owner explicitly accepts it in
+chat and the acceptance is recorded here. Until then constraint 7 stays as
+written and the app's synthetic-data guard stays as it is. Decisions:
+walkthrough rows F1 to F1d (D-032 to D-034, D-038 to D-047) and 22 (D-101).
+Independent of the still-open Amendment 1 (PR #37).
+
+### Why
+
+The owner decided that the agent must find and work real companies and real
+people for the Nov 6 demo ("i want the SDR agent finding real people for the
+demo. otherwise this product is useless."), approved the data flow in build
+plan §9a, and accepted its limitations. Constraint 7 as written forbids
+that.
+
+### Constraint 7, as amended
+
+> 7. Synthetic or owner-provided test data in tests, CI, fixtures and every
+> public artifact. Real companies and people may be processed only by the
+> owner's own local instance, for the owner's personal demo use, with the
+> real-data switch on, under the rules of Amendment 2. No real person's data
+> in git, GitHub, public artifacts, chat transcripts shared outside the
+> owner's machine, or telemetry content.
+
+Constraints 1 to 6 are unchanged. In particular delivery stays captured
+only (1): real data never means a real message is sent.
+
+### Rules
+
+1. **Switch, off by default.** Real data is accepted only when the app's
+   real-data switch is on. It is refused at boot in `test`, never set in CI,
+   and off unless the owner turns it on for the local instance. With it off,
+   the existing reserved-domain guard applies unchanged.
+2. **Guard policy (contract C5, story C5-04).** With the switch on, the guard
+   allows non-reserved domains for accounts, contacts and research sources;
+   everything else the guard protects stays as it is unless C5's reviewed
+   contract changes it. Allow and deny tests cover both modes.
+3. **Approved flow (build plan §9a).**
+   - Search queries go to Brave and Exa; company web pages are fetched
+     directly.
+   - Full fetched content is stored as local audit payloads.
+   - Research text and prospect fields go to Anthropic through the Claude CLI
+     on the owner's subscription.
+   - Raw model traffic is kept in the private local witness store.
+   - The owner's attended LinkedIn flow and the owner's own contact-finding
+     algorithm are sources once their B2 contracts are reviewed.
+   - Paid enrichment providers are out (F1c).
+4. **Telemetry.** OpenTelemetry content capture is off whenever the switch is
+   on.
+5. **Public surfaces.** Issues, pull requests, docs, fixtures, screenshots and
+   evidence that leave the owner's machine stay synthetic. The owner masks or
+   stops recording when real names or addresses would appear (walkthrough F1c).
+   Screenshots of real people's data are not taken by the agents.
+6. **Minimal fields.** Collect the standard CRM fields needed to qualify and
+   reach a person (F1c); no sensitive categories. Contact details published
+   on a source are kept as candidates with their citation and never
+   auto-promoted (F4, F3b).
+
+### Retention and deletion (simple rules, D-046)
+
+- Real data lives only on the owner's machine: the local database and the
+  private witness store. Agents do not copy it elsewhere.
+- Someone who asks not to be contacted is suppressed at once. Outreach to
+  them stops, and suppression is never lifted by the agent.
+- There is no deletion feature in the MVP. The audit trail, payloads and
+  witness are append-only, so a person's data cannot be erased record by
+  record. This is the accepted limitation in item 7.
+- Review point: by 2026-12-06 (30 days after the workshop) the owner decides
+  whether to keep the local real-data database or wipe it. Wiping means
+  dropping the database and the witness store, done by the owner. Any
+  backups of the owner's machine are the owner's to manage.
+- Before any decision to productize: an erasable personal-data store, legal
+  review and redaction are required first. All three are deferred today
+  (F1c).
+
+### Accepted limitations (owner decisions)
+
+7. Real personal data persists in the append-only audit trail, payloads and
+   witness blobs and cannot be erased in the MVP. There is no legal review
+   now. Provider-terms compliance rests on the owner's understanding (D-101).
+   This is a personal, non-commercial demo.
+
+### Acceptance (to fill)
+
+- Owner words, time (America/Denver), where:
+- Independent review: Codex, commit and verdict:
