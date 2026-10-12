@@ -55,6 +55,7 @@ defmodule SdrAgentWeb.AdminLiveTest do
          name: SdrAgent.AI.ModelProvider.ClaudeCLI.server(),
          command: System.find_executable("elixir"),
          test_launcher: true,
+         launch_admission: &SdrAgent.Test.LaunchAdmission.admitted/3,
          command_args: [@fake, "model_drift"]}
       )
 
@@ -141,6 +142,7 @@ defmodule SdrAgentWeb.AdminLiveTest do
        name: SdrAgent.AI.ModelProvider.ClaudeCLI.server(),
        command: System.find_executable("elixir"),
        test_launcher: true,
+       launch_admission: &SdrAgent.Test.LaunchAdmission.admitted/3,
        command_args: [Path.expand("../../support/fake_claude_cli.exs", __DIR__), "model_drift"]}
     )
 
