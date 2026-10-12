@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Builds the app's pinned Claude CLI (flake output app-claude-cli, ADR-0004
+# R0 amendment item 1) and keeps it alive with Nix GC roots under .gcroots/:
+#   app-claude-cli-current   the build the app launches now
+#   app-claude-cli-previous  the build before it, kept for rollback
+# The previous root moves only when the store path changes. Prints the
+# absolute binary path to use as SDR_CLAUDE_CLI_BIN. Never runs the CLI.
+set -euo pipefail
+
+if [ "$#" -ne 0 ]; then
+  printf '%s\n' 'usage: bin/app-claude-cli-root' >&2
+  exit 64
+fi
+
+for tool in nix nix-store; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf '%s\n' "app-claude-cli-root: $tool is missing" >&2
+    exit 127
+  fi
+done
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+dir="$root/.gcroots"
+current="$dir/app-claude-cli-current"
+previous="$dir/app-claude-cli-previous"
+staged="$dir/app-claude-cli-staged"
+
+mkdir -p "$dir"
+
+# Built straight into its own GC root, so the new build is never
+# collectable between the build and the rotation below.
+nix build --out-link "$staged" "$root#app-claude-cli"
+out="$(readlink "$staged")"
+
+case "$out" in
+  /nix/store/*) ;;
+  *)
+    printf '%s\n' "app-claude-cli-root: build is not a store path: $out" >&2
+    exit 1
+    ;;
+esac
+
+bin="$out/bin/claude-code"
+if [ ! -f "$bin" ] || [ -L "$bin" ] || [ ! -x "$bin" ]; then
+  printf '%s\n' "app-claude-cli-root: no executable claude-code in $out" >&2
+  exit 1
+fi
+
+if [ -L "$current" ]; then
+  old="$(readlink "$current")"
+  if [ "$old" != "$out" ]; then
+    if nix-store --check-validity "$old" 2>/dev/null; then
+      nix-store --add-root "$previous" --realise "$old" >/dev/null
+    else
+      printf '%s\n' "app-claude-cli-root: previous build $old is gone; no rollback root kept" >&2
+    fi
+  fi
+fi
+
+nix-store --add-root "$current" --realise "$out" >/dev/null
+rm -f "$staged"
+
+printf '%s\n' "$bin"

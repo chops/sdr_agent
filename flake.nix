@@ -17,9 +17,20 @@
       forEachSystem = nixpkgs.lib.genAttrs systems;
     in
     {
-      packages = forEachSystem (system: {
-        devenv-up = inputs.self.devShells.${system}.default.config.procfileScript;
-      });
+      packages = forEachSystem (system:
+        let
+          # The app's own pinned Claude CLI (ADR-0004 R0 amendment, item 1).
+          # Its unfree licence is allowed for this one package only; every
+          # other package keeps the default (unfree refused).
+          appCliPkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfreePredicate = pkg: nixpkgs.lib.getName pkg == "app-claude-cli";
+          };
+        in
+        {
+          devenv-up = inputs.self.devShells.${system}.default.config.procfileScript;
+          app-claude-cli = appCliPkgs.callPackage ./nix/app-claude-cli.nix { };
+        });
 
       devShells = forEachSystem (system:
         let
