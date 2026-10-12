@@ -18,13 +18,13 @@ readiness packets (requirements, entity delta, G5), not approvals.
 | Sprint | Lane 1 (Claude) | Lane 2 (Codex) |
 |---|---|---|
 | S1 Oct 12-14 | C9-01..06 grant enforcement + owner grant form; R0-01..06 + C2-01..02 model runtime, profiles, switch, proof; C3-01..03 lead admission; B1-01 requirements/prototype; B1-02 real-data rule change; C5-01 search secrets file | C1-01..03 inbox contract; H1-01 Home journey prototype |
-| S2 Oct 15-17 | C4-01 settings; C5-02..04 Brave/Exa, safe fetch, real-data guard; B1-03..07 one real prospect end to end; B2-01 mockups; B2-02 algorithm walkthrough | H1-02..04 Home inbox, review in place, failure re-run; C6-01..03 channels contract; B3-01 channel prototype |
+| S2 Oct 15-17 | B4-00 stop/pause/advance rules (C6 input); C4-01 settings; C5-02..04 Brave/Exa, safe fetch, real-data guard; B1-03..07 one real prospect end to end; B2-01 mockups; B2-02 algorithm walkthrough | H1-02..04 Home inbox, review in place, failure re-run; B5-00 reply/outcome effects (C6 input); C6-01..03 channels contract; B3-01 channel prototype |
 | S3 Oct 18-20 | B2-03..06 account discovery, active target, people, attended LinkedIn | B3-02..04 LinkedIn message, call notes, outcome logging; B5-01..02 replies; B6-01 intake policy; C8-01..03 HubSpot import contract |
 | S4 Oct 21-23 | B2-07..08 contact candidates, acceptance (core four done); B4-01..03 sequences, follow-up drafting, research refresh | B5-03..05 interested reply, referral, OOO; B6-02..04 CSV + HubSpot import; C7-01..03 CRM outbox; B7-01; B8-01 |
 | S5 Oct 24-26 | B4-04..06 mixed channels, due rows, acceptance | B7-02..04 notes, creates, suppression; B8-02..04 editors, limits, results |
 | S6 Oct 27-29 | Protected: integration, acceptance, recovery, rehearsal | same |
 
-Story count: lane 1 43, lane 2 37, total 80.
+Story count: lane 1 44, lane 2 38, total 82.
 
 ## Reconciliation decisions
 
@@ -38,7 +38,7 @@ Story count: lane 1 43, lane 2 37, total 80.
    B5 reply/referral/OOO rows, B7 sync-preview and unknown-write rows. Home is
    not complete until its producers land.
 3. Cross-lane joins: C1-01 needs C2-01/C9-01 producer specs and B1-01; B1-06
-   needs C1-03 + H1-03; H1-04 needs C2-02 + C9-03; C6-01 needs C3-02 + C4-01;
+   needs C1-03 + H1-03; H1-04 needs C2-02 + C9-03 + C9-05 (owner form link); C6-01 needs C3-02 + C4-01 + B4-00 + B5-00 (S2 decision stories, so C6 does not wait for the S3/S4 B4/B5 requirements);
    B4-01 needs C6-01; B4-05 needs B5-05; B5-04 needs C3-03; B6-01/C8-02 need
    C3-02; B8-03 needs C9-05.
 4. **Owner question:** model calls for researching imported leads (B6),
@@ -119,6 +119,7 @@ Story count: lane 1 43, lane 2 37, total 80.
 
 | ID | Story | Depends | Acceptance | Evidence |
 |---|---|---|---|---|
+| B4-00 | Stop/pause/advance rules for sequences (S2, input to C6) | C3-01 | Reviewed decision record: which owner-reported sends and outcomes advance, pause or stop an enrollment; how a reply, suppression or referral handover ends it. Builds nothing | Codex review; feeds C6-01/C6-03 |
 | B4-01 | Requirements + default sequence | C6 | 3-5 touches over 2-3 weeks, mixed channels | Owner sign-off; G5 |
 | B4-02 | Follow-up drafting | B4-01 | `sdr.followup.due` routed; fresh angle; stop-on-reply preserved | tests |
 | B4-03 | Research refresh per touch | B4-02, C5 | Bounded, budgeted refresh feeds the angle | tests |
@@ -162,6 +163,7 @@ Story count: lane 1 43, lane 2 37, total 80.
 
 | ID | Title / target sprint | Author / reviewer | Depends | Acceptance behavior | Gate/entity evidence | Tests/proof |
 |---|---|---|---|---|---|---|
+| B5-00 | Agree reply and outcome effects for C6 — S2 | Codex / Claude | C3-01; B4-00 | Reviewed decision record: how each reply class and call outcome (interested, referral, OOO, unsubscribe, not interested, wrong person) maps to enrollment and target effects, consistent with B4-00. Builds nothing; B5 build stays S3-S4 | Independent verdict; feeds C6-01/C6-03 | Decision examples only; no product calls. |
 | B5-01 | Approve manual-reply and handoff journeys — S3 | Codex / Claude | C1; C3 referral contract; C4 booking input; C6 channel/outcome semantics | Prototype covers interested, ambiguous/sensitive, referral, unsubscribe and OOO paths. Manual input is owner-reported; no new live mailbox/LinkedIn integration is assumed. Review/override permissions and suppression effects are explicit. | P-B5 lifecycle/action/actor delta, independent PASS, owner task acceptance and scoped G5; accepted D-025/D-095 preserved. | Example classification/referral/OOO scripts, forged channel/subject cases, source-injection risks; no product calls. |
 | B5-02 | Record and classify an owner-entered reply — S3-S4 | Codex / Claude | B5-01 approved; C1; C6; R0/C9; existing reply actions | Owner pastes/logs a reply to the selected contact/touch; provenance says manual. Classification, human override and governed stop/suppression effects are recorded without treating reply text as instructions. | P-B5 approved ingestion/classification scope + V; no masquerading as a signed remote webhook. | Eight-label fixtures, duplicate reply, wrong subject/channel, unsubscribe, override allow/deny, injection and invalid model result; granted B5 quality checks if needed. |
 | B5-03 | Propose an interested reply for human approval — S4 | Codex / Claude | B5-02; C4; C1 approval action; R0/C9 | Interested reply retains classification/handoff and adds a draft using the owner's booking link. No calendar/time invention; unclear/sensitive context goes to the owner without a draft. Edit requires fresh exact-recipient/revision approval; result is captured only. | P-B5 proposed-reply backend/schema delta PASS + V; guide/source provenance bound. | Interested/not-interested/ambiguous/sensitive/refusal cases, bad/missing link, stale edit/approval, suppression, prompt injection; synthetic signed-reply regression and bounded granted evidence. |
