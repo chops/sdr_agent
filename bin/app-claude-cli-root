@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# Builds the app's pinned Claude CLI (nix/app-claude-cli-package.nix, on the
+# nixpkgs locked in flake.lock; ADR-0004 R0 amendment item 1) and keeps it
+# alive with Nix GC roots under .gcroots/:
+#   app-claude-cli-current   the build the app launches now
+#   app-claude-cli-previous  the build before it, kept for rollback
+# Prints the absolute binary path to use as SDR_CLAUDE_CLI_BIN. Never runs
+# the CLI and never collects garbage.
+#
+# The build must be exactly the store path recorded for this platform in
+# nix/app-claude-cli.identity (the app also checks its sha256 at boot).
+#
+# Order (serialized by a lock directory; macOS has no flock):
+#   1. build into a unique staging root (never shared between callers);
+#   2. if it is current's target already: drop the staging root, done;
+#   3. otherwise keep previous's old target under a unique backup root,
+#      then previous := current's target, then current := the build, each
+#      registered with `nix-store --add-root` (root links are never
+#      renamed: gcroots/auto points at the link path);
+#   4. drop the staging and backup roots.
+# Any failure leaves current untouched and exits non-zero; if current could
+# not be registered, previous is restored from the backup root (which is
+# kept if that restore fails), so no rollback build is ever left unrooted.
+#
+# APP_CLAUDE_CLI_ROOT_LOCK_WAIT (seconds, default 900) bounds the wait for
+# another caller. A live owner's lock is never taken; a dead owner's lock
+# is recovered under a recovery ticket (see below).
+set -euo pipefail
+
+if [ "$#" -ne 0 ]; then
+  printf '%s\n' 'usage: bin/app-claude-cli-root' >&2
+  exit 64
+fi
+
+die() {
+  printf 'app-claude-cli-root: %s\n' "$*" >&2
+  exit 1
+}
+
+for tool in nix nix-store; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    printf '%s\n' "app-claude-cli-root: $tool is missing" >&2
+    exit 127
+  }
+done
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+identity="$root/nix/app-claude-cli.identity"
+dir="$root/.gcroots"
+current="$dir/app-claude-cli-current"
+previous="$dir/app-claude-cli-previous"
+lock="$dir/app-claude-cli.lock"
+lock_wait="${APP_CLAUDE_CLI_ROOT_LOCK_WAIT:-900}"
+
+case "$(uname -m)" in
+  arm64 | aarch64) cpu=aarch64 ;;
+  x86_64 | amd64) cpu=x86_64 ;;
+  *) die "unsupported CPU $(uname -m)" ;;
+esac
+case "$(uname -s)" in
+  Darwin) os=darwin ;;
+  Linux) os=linux ;;
+  *) die "unsupported OS $(uname -s)" ;;
+esac
+system="$cpu-$os"
+
+expected=""
+while read -r rec_system rec_path _rec_sha; do
+  case "$rec_system" in '' | '#'*) continue ;; esac
+  if [ "$rec_system" = "$system" ]; then expected="$rec_path"; fi
+done <"$identity"
+[ -n "$expected" ] || die "no reviewed pin for $system in nix/app-claude-cli.identity"
+
+mkdir -p "$dir"
+
+owned=0
+ticket_owned=0
+staging=""
+backup=""
+keep_backup=0
+cleanup() {
+  if [ -n "$staging" ]; then rm -f "$staging"; fi
+  if [ -n "$backup" ] && [ "$keep_backup" = 0 ]; then rm -f "$backup"; fi
+  if [ "$owned" = 1 ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$lock"
+  fi
+  if [ "$ticket_owned" = 1 ] && [ "$(cat "$lock.recovering/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$lock.recovering"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# The lock is a directory holding its owner's pid. A live owner's lock is
+# never taken, however old: the caller waits, then fails. A lock whose
+# recorded owner is dead (killed before its exit trap ran) is recovered,
+# but only under the recovery ticket ($lock.recovering, also an atomic
+# mkdir), so two recoverers can never remove a lock that one of them has
+# just re-acquired: only ticket holders remove another caller's lock, the
+# dead owner cannot, and the ticket holder re-checks before removing. A
+# lock or ticket without a pid (its creator is between mkdir and writing
+# it) is waited for. A ticket left by a dead recoverer is not removed
+# automatically: the caller fails and names it.
+recover_dead_lock() {
+  local seen="$1" ticket="$lock.recovering" ticket_holder
+  if ! mkdir "$ticket" 2>/dev/null; then
+    ticket_holder="$(cat "$ticket/pid" 2>/dev/null || true)"
+    if [ -n "$ticket_holder" ] && ! kill -0 "$ticket_holder" 2>/dev/null; then
+      die "a lock recovery by pid $ticket_holder did not finish; remove $ticket after checking it is gone"
+    fi
+    return 0
+  fi
+  ticket_owned=1
+  echo "$$" >"$ticket/pid"
+  if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$seen" ] && ! kill -0 "$seen" 2>/dev/null; then
+    rm -rf "$lock"
+    printf '%s\n' "app-claude-cli-root: recovered the lock of dead pid $seen" >&2
+  fi
+  rm -rf "$ticket"
+  ticket_owned=0
+}
+
+waited=0
+until mkdir "$lock" 2>/dev/null; do
+  holder="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+    recover_dead_lock "$holder"
+    [ -d "$lock" ] || continue
+  fi
+  [ "$waited" -lt "$lock_wait" ] ||
+    die "another bin/app-claude-cli-root${holder:+ (pid $holder)} holds $lock"
+  sleep 1
+  waited=$((waited + 1))
+done
+owned=1
+echo "$$" >"$lock/pid"
+
+# 1. A staging root of our own: the build is never collectable before it
+#    is registered below, and no other caller can remove it.
+staging="$dir/app-claude-cli-staging.$$.$RANDOM"
+nix build --out-link "$staging" -f "$root/nix/app-claude-cli-package.nix" ||
+  die "nix build of nix/app-claude-cli-package.nix failed"
+out="$(readlink "$staging")" || die "the build left no staging root"
+
+[ "$out" = "$expected" ] ||
+  die "built $out, but nix/app-claude-cli.identity records $expected for $system"
+
+bin="$out/bin/claude-code"
+if [ ! -f "$bin" ] || [ -L "$bin" ] || [ ! -x "$bin" ]; then
+  die "no executable claude-code in $out"
+fi
+
+old=""
+if [ -L "$current" ]; then old="$(readlink "$current")"; fi
+
+# 2. Same pin: nothing to rotate.
+if [ "$old" = "$out" ]; then
+  printf '%s\n' "$bin"
+  exit 0
+fi
+
+# 3. previous := current's target, then current := the build. The old
+#    rollback build stays rooted throughout: first under a backup root of
+#    our own, removed only once current is registered or previous has been
+#    restored from it (it is kept if the restore fails or the run is
+#    interrupted).
+old_previous=""
+if [ -L "$previous" ]; then old_previous="$(readlink "$previous")"; fi
+
+if [ -n "$old_previous" ] && [ "$old_previous" != "$old" ] &&
+  nix-store --check-validity "$old_previous" 2>/dev/null; then
+  backup="$dir/app-claude-cli-backup.$$.$RANDOM"
+  nix-store --add-root "$backup" --realise "$old_previous" >/dev/null || {
+    backup=""
+    die "could not register a backup root for the rollback build; nothing changed"
+  }
+  # Kept by default: an interrupt (INT/TERM) or any unexpected exit before
+  # publication or restoration completes leaves the rollback build rooted.
+  keep_backup=1
+fi
+
+if [ -n "$old" ]; then
+  if nix-store --check-validity "$old" 2>/dev/null; then
+    if ! nix-store --add-root "$previous" --realise "$old" >/dev/null; then
+      # previous still names the old rollback build, so the backup can go.
+      if [ "$(readlink "$previous" 2>/dev/null || true)" = "$old_previous" ]; then keep_backup=0; fi
+      die "could not register the rollback root; current is unchanged"
+    fi
+  else
+    printf '%s\n' "app-claude-cli-root: previous build $old is gone; no rollback root kept" >&2
+  fi
+fi
+
+if ! nix-store --add-root "$current" --realise "$out" >/dev/null; then
+  if [ -n "$old_previous" ] && [ "$old_previous" != "$(readlink "$previous" 2>/dev/null || true)" ]; then
+    if nix-store --add-root "$previous" --realise "$old_previous" >/dev/null 2>&1; then
+      keep_backup=0
+    else
+      printf '%s\n' "app-claude-cli-root: could not restore the previous rollback root;" \
+        "${backup:-no backup root} still keeps $old_previous alive" >&2
+    fi
+  fi
+  die "could not register the current root; current is unchanged"
+fi
+keep_backup=0
+
+# 4. The staging root, and the backup root once current is registered or
+#    previous restored, are dropped by the exit trap. A backup root left by
+#    an interrupted run keeps its build alive; remove it by hand when done.
+printf '%s\n' "$bin"

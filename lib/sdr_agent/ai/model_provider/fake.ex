@@ -20,6 +20,7 @@ defmodule SdrAgent.AI.ModelProvider.Fake do
     {:ok,
      %{
        provider: :fake,
+       profile_id: :fake,
        provider_version: "0.0.0",
        model_id: "fake-qualifier",
        model_catalog_entry: %{"id" => "fake-qualifier"},

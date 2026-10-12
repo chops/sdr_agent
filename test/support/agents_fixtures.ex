@@ -1,7 +1,7 @@
 defmodule SdrAgent.AgentsFixtures do
   @moduledoc "Builders for Agents-domain rows created through the domain API."
 
-  import SdrAgent.AuditCase, only: [system_actor: 2, digest: 1]
+  import SdrAgent.AuditCase, only: [system_actor: 2, digest: 1, human: 2]
 
   @doc "Registers a definition and starts a run for it; returns the rows and the agent actor."
   def running_run(tenant, opts \\ []) do
@@ -43,6 +43,7 @@ defmodule SdrAgent.AgentsFixtures do
       trigger_signal_id: "sig-#{System.unique_integer([:positive])}",
       correlation_id: Ecto.UUID.generate(),
       phase: :research,
+      usage_origin: Keyword.get(opts, :usage_origin, :assignment),
       max_tool_calls: Keyword.get(opts, :max_tool_calls, 10),
       max_model_calls: Keyword.get(opts, :max_model_calls, 20)
     }
@@ -80,5 +81,58 @@ defmodule SdrAgent.AgentsFixtures do
       usage: %{input_tokens: 120, output_tokens: 30, plan_calls: 1},
       latency_ms: 42
     }
+  end
+
+  @doc """
+  `attrs` reserved under `provider`, with that provider's model profile
+  (C9): `:claude_cli_opus` for ClaudeCLI (reserving it needs an eligible
+  grant, `grant!/2`); the Fake records `:fake` itself.
+  """
+  def with_provider(attrs, :claude_cli),
+    do: Map.merge(attrs, %{provider: :claude_cli, profile_id: :claude_cli_opus})
+
+  def with_provider(attrs, provider), do: Map.put(attrs, :provider, provider)
+
+  @doc """
+  Attributes for a ClaudeCLI (real-provider) reservation: `model_attrs/1`
+  with the reviewed ClaudeCLI provenance. Reserving it needs an eligible
+  grant (`grant!/2`).
+  """
+  def claude_attrs(idempotency_key) do
+    idempotency_key
+    |> model_attrs()
+    |> Map.merge(SdrAgent.AI.ModelProvider.ClaudeCLI.provenance())
+  end
+
+  @doc """
+  Creates, as the tenant's admin, an active real-model call grant (C9) wide
+  enough for synthetic ClaudeCLI tests: both profiles, a window around any
+  frozen test clock, and one allocation funding every usage bucket.
+  `overrides` replace grant terms (including `:allocations`); `admin` (an
+  active admin `SdrAgent.Accounts.User`) defaults to a new test admin.
+  """
+  def grant!(tenant, overrides \\ %{}, admin \\ nil) do
+    attrs =
+      Map.merge(
+        %{
+          name: "G-TEST",
+          purpose: "Synthetic test calls",
+          profile_ids: [:claude_cli_opus, :claude_cli_sonnet],
+          total_attempts: 1_000,
+          starts_at: ~U[2000-01-01 00:00:00.000000Z],
+          expires_at: ~U[2100-01-01 00:00:00.000000Z],
+          allocations: [
+            %{
+              key: :daily_use,
+              applies_to: SdrAgent.Agents.ModelCallAllocation.buckets(),
+              attempts: 1_000
+            }
+          ]
+        },
+        Map.new(overrides)
+      )
+
+    {:ok, grant} = SdrAgent.Agents.create_grant(attrs, actor: admin || human(:admin, tenant))
+    grant
   end
 end

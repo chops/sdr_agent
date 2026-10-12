@@ -19,11 +19,18 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
 
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
+  # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+  setup ctx do
+    SdrAgent.AgentsFixtures.grant!(ctx.tenant, %{}, ctx.admin)
+    :ok
+  end
+
   defp start_named! do
     start_supervised!(
       {ClaudeCLI,
        name: ClaudeCLI.server(),
        command: System.find_executable("elixir"),
+       test_launcher: true,
        command_args: [@fake, "sdr"]}
     )
   end
@@ -115,6 +122,7 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
       {ClaudeCLI,
        name: ClaudeCLI.server(),
        command: System.find_executable("elixir"),
+       test_launcher: true,
        command_args: [@fake, "hang", prefix],
        timeout: 1_500}
     )

@@ -37,3 +37,9 @@ devenv.local.nix
 
 # HubSpot credential file (ADR-0013): encrypted with sops, but local-only
 /secrets/hubspot.local.sops.yaml
+
+# Nix GC roots for the app's pinned Claude CLI (bin/app-claude-cli-root) and
+# nix build result links: machine-local, never committed
+/.gcroots/
+/result
+/result-*

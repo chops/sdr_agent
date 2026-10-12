@@ -40,7 +40,7 @@ graph TB
     end
 
     subgraph External["Local External Process"]
-        Claude[Claude CLI<br/>stream JSON via llm-proxy-shim]
+        Claude[App-pinned Claude CLI<br/>Nix store path SDR_CLAUDE_CLI_BIN<br/>stream JSON via llm-proxy-shim]
         OTSCLI[OpenTimestamps CLI 0.7.2]
         OTSCalendars[Public OTS calendars]
         Bitcoin[Operator-configured Bitcoin node]
