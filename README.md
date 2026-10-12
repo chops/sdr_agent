@@ -243,6 +243,13 @@ other than 5520), any `MIX_ENV` but `test`, any `PORT` but 4124 and any
 model provider but the fake. It listens on 127.0.0.1:4124 only, creates the
 database if it is absent and runs pending migrations, and has no reset, drop
 or seed command. Every page except sign-in and `/admin` answers 404 there.
+`serve` refuses until the assets are built (`mix assets.build`).
+
+It never uses the checked-in test session and token secrets. Its own are
+generated on first use into `~/.local/state/sdr-agent/calibration/secrets`
+(directory 0700, file 0600) and reused afterwards; it refuses to run if that
+file or directory is a symlink, not yours, or readable by group or others.
+Never commit or share that file.
 
 ## Troubleshooting
 
