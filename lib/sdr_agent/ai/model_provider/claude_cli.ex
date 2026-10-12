@@ -73,8 +73,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   the first call — together with whether `llm-proxy-shim` was found. Every
   call then records its init outcome (`:attested`, or `:drift` with the
   reason) in a protected ETS table named after the server, which
-  `attestation/1` reads without waiting behind a running call. It holds no
-  prompt, output or credential.
+  `attestation/1` reads without waiting behind a running call. Every
+  server, named or not, also publishes its admission and attestation in
+  its own process dictionary, so `admission/1` and `attestation/1` given
+  a pid (and `Runtime.resolve/1`) check an unnamed server the same way.
+  Neither holds a prompt, output or credential.
 
   ## Process lifecycle (Q0.1 review)
 
@@ -177,20 +180,34 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   end
 
   @doc """
-  Whether the named `server` admits calls: `%{admission: :open}`,
-  `%{admission: :blocked, reason: reason}` (`:previous_cli_not_quiescent`,
+  Whether `server` admits calls: `%{admission: :open}`, `%{admission:
+  :blocked, reason: reason}` (`:previous_cli_not_quiescent`,
   `:previous_cleanup_unconfirmed`, `:cli_not_quiescent`), or
-  `%{admission: :not_running}`. Never blocks on a running call.
+  `%{admission: :not_running}`. `server` is a registered name (read from
+  its status table) or the pid of any server, named or not (read from the
+  status it publishes in its own process dictionary). Never blocks on a
+  running call.
   """
-  def admission(server \\ @server) when is_atom(server) do
+  def admission(server \\ @server)
+
+  def admission(server) when is_atom(server) do
     case :ets.lookup(server, :admission) do
-      [{:admission, :open}] -> %{admission: :open}
-      [{:admission, {:blocked, reason}}] -> %{admission: :blocked, reason: reason}
+      [{:admission, admission}] -> admission_view(admission)
       [] -> %{admission: :not_running}
     end
   rescue
     ArgumentError -> %{admission: :not_running}
   end
+
+  def admission(server) when is_pid(server) do
+    case published(server, :admission) do
+      nil -> %{admission: :not_running}
+      admission -> admission_view(admission)
+    end
+  end
+
+  defp admission_view(:open), do: %{admission: :open}
+  defp admission_view({:blocked, reason}), do: %{admission: :blocked, reason: reason}
 
   @doc """
   The last init attestation of the named `server`: `%{status: :pending |
@@ -199,15 +216,39 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   nil; `executable?` whether it passed the pinned-CLI check when recorded,
   nil without one; `test_launcher?` true only for a test build's injected
   launcher),
-  or `%{status: :not_running}`. Never blocks on a running call.
+  or `%{status: :not_running}`. `server` is a registered name or any
+  server's pid, as for `admission/1`. Never blocks on a running call.
   """
-  def attestation(server \\ @server) when is_atom(server) do
+  def attestation(server \\ @server)
+
+  def attestation(server) when is_atom(server) do
     case :ets.lookup(server, :attestation) do
       [{:attestation, attestation}] -> attestation
       [] -> %{status: :not_running}
     end
   rescue
     ArgumentError -> %{status: :not_running}
+  end
+
+  def attestation(server) when is_pid(server),
+    do: published(server, :attestation) || %{status: :not_running}
+
+  # Every server, named or not, publishes its admission and attestation in
+  # its own process dictionary; another process reads one key of it
+  # without waiting behind a running call. It holds no prompt, output or
+  # credential.
+  defp published(pid, key) do
+    case Process.info(pid, {:dictionary, {__MODULE__, key}}) do
+      {{:dictionary, _key}, :undefined} -> nil
+      {{:dictionary, _key}, value} -> value
+      nil -> nil
+    end
+  end
+
+  defp publish(state, key, value) do
+    Process.put({__MODULE__, key}, value)
+    if state.table, do: :ets.insert(state.table, {key, value})
+    :ok
   end
 
   @doc "Returns the reviewed provider provenance recorded before a call."
@@ -376,8 +417,6 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   defp admitted?(state),
     do: not is_nil(state.reaper) and state.stuck == [] and map_size(state.unconfirmed) == 0
 
-  defp sync_admission(%{table: nil} = state), do: state
-
   defp sync_admission(state) do
     admission =
       cond do
@@ -386,14 +425,12 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         true -> :open
       end
 
-    :ets.insert(state.table, {:admission, admission})
+    publish(state, :admission, admission)
     state
   end
 
   # Boot preflight: no model call is spent. The attestation is checked at
   # the first call; only the launcher's presence is known now.
-  defp preflight(%{table: nil}), do: :ok
-
   defp preflight(state) do
     if is_nil(state.command),
       do: Logger.warning("ClaudeCLI selected but llm-proxy-shim was not found on PATH")
@@ -414,8 +451,6 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   defp status_table(_name), do: nil
 
-  defp note(%{table: nil}, _attestation), do: :ok
-
   defp note(state, attestation) do
     attestation =
       Map.merge(attestation, %{
@@ -426,8 +461,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         test_launcher?: state.test_launcher
       })
 
-    :ets.insert(state.table, {:attestation, attestation})
-    :ok
+    publish(state, :attestation, attestation)
   end
 
   @impl true

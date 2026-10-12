@@ -63,8 +63,8 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   Makes `model`'s provider explicit (default: the selected one) and, for
   ClaudeCLI, injects the named server. Refused (`{:error, reason}`) when
   the ClaudeCLI server it would use is not running, does not admit calls,
-  or found no `llm-proxy-shim` — for a named server however it is
-  referenced (name or pid); an unnamed (test) server publishes no status.
+  found no `llm-proxy-shim`, has no acceptable pin, or is staged — for a
+  named or unnamed server, however it is referenced (name or pid).
   """
   def resolve(model) when is_list(model) do
     model = Keyword.put_new_lazy(model, :provider, &provider/0)
@@ -85,24 +85,30 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   end
 
   # Health is read from the server's published status, whatever reference
-  # (name, pid, {:global, _}, {:via, _, _}) addresses it: the reference is
-  # normalised to the process's registered name. Only an unnamed server
-  # (test fixtures; the application's server is always named) publishes no
-  # status; its own admission fence and launch checks still refuse.
+  # (name, pid, {:global, _}, {:via, _, _}) addresses it: a registered
+  # server by its name, an unnamed one by its pid (the status it publishes
+  # in its process dictionary). The same admission, launcher, pin and
+  # staging checks apply to both; a process that publishes no ClaudeCLI
+  # status is refused.
   defp healthy(server) do
-    if ClaudeCLI.running?(server),
-      do: server |> GenServer.whereis() |> registered_name() |> published_health(),
-      else: {:error, :provider_not_running}
+    if ClaudeCLI.running?(server) do
+      pid = GenServer.whereis(server)
+      published_health(registered_name(pid) || pid)
+    else
+      {:error, :provider_not_running}
+    end
   end
 
-  defp published_health(nil), do: :ok
+  defp published_health(server) do
+    admission = ClaudeCLI.admission(server).admission
+    attestation = ClaudeCLI.attestation(server)
 
-  defp published_health(name) do
     cond do
-      ClaudeCLI.admission(name).admission != :open -> {:error, :provider_not_quiescent}
-      ClaudeCLI.attestation(name)[:command?] == false -> {:error, :llm_proxy_shim_not_found}
-      not pinned_cli_present?(ClaudeCLI.attestation(name)) -> {:error, :pinned_cli_unavailable}
-      not ClaudeCLI.attestation(name)[:test_launcher?] -> {:error, :real_model_staged}
+      admission == :not_running -> {:error, :provider_not_running}
+      admission != :open -> {:error, :provider_not_quiescent}
+      attestation[:command?] == false -> {:error, :llm_proxy_shim_not_found}
+      not pinned_cli_present?(attestation) -> {:error, :pinned_cli_unavailable}
+      not attestation[:test_launcher?] -> {:error, :real_model_staged}
       true -> :ok
     end
   end
