@@ -2,9 +2,9 @@ defmodule SdrAgent.Agents.Changes.RetryOf do
   @moduledoc """
   Builds an operator retry (S2 AgentRun: "the operator retry creates a new
   run (retry_of_id), never a loop"; S13b): copies the definition, subject,
-  trigger, correlation, phase and budget limits (never raised) of a
-  terminal run in `failed`, `budget_exhausted` or `cancelled`, with fresh
-  counters.
+  trigger, correlation, phase, usage origin (C9) and budget limits (never
+  raised) of a terminal run in `failed`, `budget_exhausted` or `cancelled`,
+  with fresh counters.
 
   `operation_id` binds the new run to the Operation created for it in the
   same transaction (assignment retries): it must be `enqueued`, of kind
@@ -73,6 +73,7 @@ defmodule SdrAgent.Agents.Changes.RetryOf do
       trigger_signal_id: prior.trigger_signal_id,
       correlation_id: prior.correlation_id,
       phase: prior.phase,
+      usage_origin: prior.usage_origin,
       budget: %{
         max_model_calls: prior.budget.max_model_calls,
         max_tool_calls: prior.budget.max_tool_calls,

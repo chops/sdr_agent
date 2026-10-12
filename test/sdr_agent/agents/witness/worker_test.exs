@@ -26,6 +26,8 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
 
   setup do
     tenant = bootstrap!()
+    # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+    AgentsFixtures.grant!(tenant)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
     previous = Application.get_env(:sdr_agent, @witness)
     on_exit(fn -> restore(previous) end)
@@ -284,7 +286,7 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
   defp fake_invocation!(ctx, key), do: invocation!(ctx, key, :fake)
 
   defp invocation!(ctx, key, provider) do
-    attrs = AgentsFixtures.model_attrs(key) |> Map.put(:provider, provider)
+    attrs = AgentsFixtures.model_attrs(key) |> AgentsFixtures.with_provider(provider)
     {:ok, invocation} = Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
     {:ok, invocation} = Agents.mark_model_invocation_sent(invocation, actor: ctx.agent)
 

@@ -3,8 +3,8 @@ defmodule SdrAgent.SDR.ReplyIntake do
   Agent-plane implementation of `SdrAgent.Outreach.ReplyIntake`, run inside
   the matched reply's transaction (outbox): registers (or reuses) the
   `SDRAgent` definition, creates the queued AgentRun that will classify the
-  reply (AGT; lead and campaign of the match; a small budget — one model
-  call), inserts its `agent`-queue job (`SdrAgent.SDR.ReplyWorker`) and
+  reply (AGT; lead and campaign of the match; usage origin `:reply`, C9; a
+  small budget — one model call), inserts its `agent`-queue job (`SdrAgent.SDR.ReplyWorker`) and
   records the `sdr.reply.received` signal (data `reply_id`, `lead_id`,
   `campaign_id`, `enrollment_id`; actor the webhook ingestor) on that run.
   """
@@ -38,6 +38,7 @@ defmodule SdrAgent.SDR.ReplyIntake do
                trigger_signal_id: signal.id,
                correlation_id: reply.webhook_event_id,
                phase: :reply,
+               usage_origin: :reply,
                max_model_calls: 2,
                max_tool_calls: 5
              },

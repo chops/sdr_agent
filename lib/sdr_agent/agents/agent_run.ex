@@ -8,6 +8,9 @@ defmodule SdrAgent.Agents.AgentRun do
   `status`, embedded `budget` (`SdrAgent.Agents.AgentRun.Budget`),
   `operation_id` (the Operations `Operation` running it) and
   `attention_failure_id` (its operator-attention `Failure`), `retry_of_id`,
+  `usage_origin` (C9: where the run started — `SdrAgent.Agents.UsageBucket`;
+  set by the server code of the entry point at `:create`, immutable, copied
+  by `:retry`; null only for runs created before R0),
   `status_reason` (required in failed / budget_exhausted / cancelled),
   `failure_reason` (detail, passed through the secret redactor before it is
   written), `started_at`, `finished_at`.
@@ -19,7 +22,13 @@ defmodule SdrAgent.Agents.AgentRun do
   operator-attention Failure (S2): entering failed or budget_exhausted, or
   cancelled by a system actor, opens a Failure and sets
   `attention_failure_id` in the same transaction (an operator cancel opens
-  none); an operator `retry` resolves the retried run's Failure.
+  none); an operator `retry` resolves the retried run's Failure. A run
+  stopped by a refused real-model reservation (C9: `:fail` with
+  `:grant_unavailable`, `:exhaust_budget` with `:grant_exhausted`, each with
+  the refusal receipt's `refusal_failure_id` and `refusal_request_id`)
+  opens none and links that exact deduplicated Failure instead, even if an
+  admin has resolved it meanwhile; the stop event records both arguments
+  (`SdrAgent.Agents.Changes.LinkRefusalAttention`).
 
   Counters: `:reserve_model_call` (atomic, refuses at `max_model_calls`),
   `:settle_model_call`, `:record_tool_call` (atomic, refuses at
@@ -65,11 +74,15 @@ defmodule SdrAgent.Agents.AgentRun do
     :run_budget_calls,
     :run_budget_tokens,
     :daily_budget,
+    :grant_exhausted,
+    :grant_unavailable,
     :invalid_model_output,
     :provider_error,
     :crash,
     :cancelled_by_operator
   ]
+  # C9: stop reasons of a refused real-model reservation (its Failure is linked).
+  @refused [:grant_exhausted, :grant_unavailable]
   @transitions [
     {:start, [:queued], :running},
     {:succeed, [:running], :succeeded},
@@ -121,6 +134,15 @@ defmodule SdrAgent.Agents.AgentRun do
       argument :max_model_calls, :integer, default: 20, constraints: [min: 0]
       argument :max_tool_calls, :integer, allow_nil?: false, constraints: [min: 0]
       argument :max_tokens, :integer, default: 100_000, constraints: [min: 0]
+
+      # C9: chosen by the server code of the entry point that creates the run
+      # (`SdrAgent.SDR.assign_lead/2` → :assignment, reply intake → :reply),
+      # never by job args or model output; immutable afterwards.
+      argument :usage_origin, :atom,
+        allow_nil?: false,
+        constraints: [one_of: SdrAgent.Agents.UsageBucket.origins()]
+
+      change set_attribute(:usage_origin, arg(:usage_origin))
 
       change fn changeset, _context ->
         Ash.Changeset.force_change_attribute(changeset, :budget, %{
@@ -194,7 +216,20 @@ defmodule SdrAgent.Agents.AgentRun do
 
       argument :status_reason, :atom,
         allow_nil?: false,
-        constraints: [one_of: [:invalid_model_output, :provider_error, :crash]]
+        constraints: [
+          one_of: [:invalid_model_output, :provider_error, :crash, :grant_unavailable]
+        ]
+
+      # C9: the refusal receipt — its exact Failure and request id (required
+      # with, and only with, :grant_unavailable); linked instead of a new one.
+      argument :refusal_failure_id, :uuid
+      argument :refusal_request_id, :string
+
+      validate present([:refusal_failure_id, :refusal_request_id]),
+        where: [argument_in(:status_reason, @refused)]
+
+      validate absent([:refusal_failure_id, :refusal_request_id]),
+        where: [negate(argument_in(:status_reason, @refused))]
 
       change set_attribute(:status_reason, arg(:status_reason))
       change get_and_lock_for_update()
@@ -205,12 +240,18 @@ defmodule SdrAgent.Agents.AgentRun do
               severity: :critical,
               message: {__MODULE__, :attention_message},
               field: :attention_failure_id,
-              operation_field: :operation_id}
+              operation_field: :operation_id},
+             where: [absent(:refusal_failure_id)]
+
+      change SdrAgent.Agents.Changes.LinkRefusalAttention, where: [present(:refusal_failure_id)]
 
       change {Stamp, fields: [:finished_at]}
 
       change {AppendEvent,
-              event_type: "agents.run.failed", category: :domain_change, links: @links}
+              event_type: "agents.run.failed",
+              category: :domain_change,
+              links: @links,
+              arguments: [:refusal_failure_id, :refusal_request_id]}
     end
 
     update :exhaust_budget do
@@ -218,7 +259,20 @@ defmodule SdrAgent.Agents.AgentRun do
 
       argument :status_reason, :atom,
         allow_nil?: false,
-        constraints: [one_of: [:run_budget_calls, :run_budget_tokens, :daily_budget]]
+        constraints: [
+          one_of: [:run_budget_calls, :run_budget_tokens, :daily_budget, :grant_exhausted]
+        ]
+
+      # C9: the refusal receipt — its exact Failure and request id (required
+      # with, and only with, :grant_exhausted); linked instead of a new one.
+      argument :refusal_failure_id, :uuid
+      argument :refusal_request_id, :string
+
+      validate present([:refusal_failure_id, :refusal_request_id]),
+        where: [argument_in(:status_reason, @refused)]
+
+      validate absent([:refusal_failure_id, :refusal_request_id]),
+        where: [negate(argument_in(:status_reason, @refused))]
 
       change set_attribute(:status_reason, arg(:status_reason))
       change get_and_lock_for_update()
@@ -229,12 +283,18 @@ defmodule SdrAgent.Agents.AgentRun do
               severity: :critical,
               message: {__MODULE__, :attention_message},
               field: :attention_failure_id,
-              operation_field: :operation_id}
+              operation_field: :operation_id},
+             where: [absent(:refusal_failure_id)]
+
+      change SdrAgent.Agents.Changes.LinkRefusalAttention, where: [present(:refusal_failure_id)]
 
       change {Stamp, fields: [:finished_at]}
 
       change {AppendEvent,
-              event_type: "agents.run.budget_exhausted", category: :domain_change, links: @links}
+              event_type: "agents.run.budget_exhausted",
+              category: :domain_change,
+              links: @links,
+              arguments: [:refusal_failure_id, :refusal_request_id]}
     end
 
     update :cancel do
@@ -366,6 +426,14 @@ defmodule SdrAgent.Agents.AgentRun do
     end
 
     attribute :budget, SdrAgent.Agents.AgentRun.Budget, allow_nil?: false, public?: true
+
+    # C9: where the run started (`SdrAgent.Agents.UsageBucket`); null only
+    # for runs created before R0. Set at :create, copied by :retry.
+    attribute :usage_origin, :atom do
+      writable? false
+      constraints one_of: SdrAgent.Agents.UsageBucket.origins()
+      public? true
+    end
 
     attribute :status_reason, :atom do
       writable? false

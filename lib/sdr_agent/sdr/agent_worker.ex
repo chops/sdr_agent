@@ -28,6 +28,8 @@ defmodule SdrAgent.SDR.AgentWorker do
   """
   use Oban.Worker, queue: :research, max_attempts: 1
 
+  require Ash.Query
+
   alias SdrAgent.Actor
   alias SdrAgent.Agents
   alias SdrAgent.AI.ModelProvider.Runtime
@@ -36,6 +38,8 @@ defmodule SdrAgent.SDR.AgentWorker do
   alias SdrAgent.SDR.Runner
   alias SdrAgent.SDR.Signals
 
+  # C9 stop reasons of a refused real-model reservation (see fail_operation/3).
+  @refused [:grant_exhausted, :grant_unavailable]
   @providers %{
     "fake" => SdrAgent.AI.ModelProvider.Fake,
     "claude_cli" => SdrAgent.AI.ModelProvider.ClaudeCLI
@@ -111,11 +115,86 @@ defmodule SdrAgent.SDR.AgentWorker do
     end
   end
 
-  defp fail_operation(operation, run, actor) do
+  @doc """
+  Fails the Operation of a stopped `run`, linking the run's attention
+  Failure (one queue entry per condition).
+
+  C9 resolution race: a run stopped by a refused reservation
+  (`:grant_exhausted`, `:grant_unavailable`) links the refusal's Failure
+  even if an admin resolved it before the stop. An Operation may link only a
+  live Failure, so when that Failure is no longer live the Operation fails
+  with its own new `budget_exhausted` Failure (subject the Operation,
+  naming the resolved refusal): the run keeps the refusal as its cause, the
+  failed Operation keeps a live queue entry, and nothing is recorded as a
+  crash. The Operation, then the Failure are locked before the choice (lock
+  order Operation → Failure → chain head, as `Operation :fail` takes them).
+  """
+  def fail_operation(operation, %{status_reason: reason} = run, actor)
+      when reason in @refused do
+    # The locks must hold from the liveness check to the Operation change,
+    # so this always runs in one transaction (joining the caller's, if any).
+    {:ok, :ok} =
+      Audit.transaction(fn ->
+        {:ok, operation} = lock_operation(operation, actor)
+
+        attrs =
+          if live_failure?(run.attention_failure_id, actor),
+            do: %{failure_id: run.attention_failure_id},
+            else: %{failure: resolved_refusal_failure(run)}
+
+        {:ok, _} = Operations.fail_operation(operation, attrs, actor: actor)
+        :ok
+      end)
+
+    :ok
+  end
+
+  def fail_operation(operation, run, actor) do
     {:ok, _} =
       Operations.fail_operation(operation, %{failure_id: run.attention_failure_id}, actor: actor)
 
     :ok
+  end
+
+  defp lock_operation(operation, actor) do
+    Operations.Operation
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(id == ^operation.id)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read_one()
+  end
+
+  # Read FOR UPDATE, so a resolution cannot slip between this check and the
+  # Operation's link of the same Failure.
+  defp live_failure?(id, actor) do
+    Operations.Failure
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read_one()
+    |> case do
+      {:ok, %{status: status}} ->
+        status in [:open, :acknowledged]
+
+      # A missing row or a read error is not a human resolution: fail loudly
+      # rather than open a Failure that claims the cause was resolved.
+      {:ok, nil} ->
+        raise "refusal Failure #{id} not found for its run"
+
+      {:error, error} ->
+        raise "could not read refusal Failure #{id}: #{Exception.message(error)}"
+    end
+  end
+
+  defp resolved_refusal_failure(run) do
+    %{
+      class: :budget_exhausted,
+      severity: :critical,
+      retryable: false,
+      message:
+        "agent run #{run.status}: #{run.status_reason}; its model call reservation " <>
+          "refusal (Failure #{run.attention_failure_id}) was resolved before the run stopped"
+    }
   end
 
   # Fixture responders and provider choice may travel with the job (tests,
