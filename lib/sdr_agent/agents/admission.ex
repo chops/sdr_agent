@@ -194,6 +194,110 @@ defmodule SdrAgent.Agents.Admission do
     opened? and open?
   end
 
+  ## Launch admission (C9-03)
+
+  @doc """
+  Launch admission's share locks (`SdrAgent.Agents.admit_launch/3`): with
+  the run and invocation rows locked and before the chain head, locks the
+  grant and then the allocation the invocation was charged to `FOR SHARE`
+  (the reservation's order), so no grant editor commits a change to them
+  until the launch commits, and the launch waits for an editor that holds
+  them. A row without a charge (generation 1) locks nothing.
+  """
+  def lock_charge(invocation) do
+    for {resource, id} <- [
+          {ModelCallGrant, invocation.grant_id},
+          {ModelCallAllocation, invocation.allocation_id}
+        ],
+        not is_nil(id) do
+      resource
+      |> Ash.Query.filter(id == ^id)
+      |> Ash.Query.lock("FOR SHARE")
+      |> Ash.read!(authorize?: false)
+    end
+
+    :ok
+  end
+
+  @doc """
+  The complete non-room launch predicate for the owned, `:reserved`
+  ClaudeCLI `invocation` of the locked `run` at `now` (read under the chain
+  head), with the server's `effective_profile`. Room is not re-checked: the
+  attempt was charged at reservation. Returns `:ok` or `{:error, reason,
+  check}`:
+
+    * `:legacy_invocation_without_grant` (`:legacy_generation`) — a row
+      written before R0 (generation 1);
+    * `:profile_mismatch_at_launch` (`:profile_mismatch`) — reserved under
+      another profile than the server runs;
+    * `:grant_ineligible_at_launch` with the failed check: `:grant_missing`,
+      `:grant_revoked`, `:grant_not_started`, `:grant_expired`,
+      `:profile_not_in_grant`, `:allocation_not_in_grant`,
+      `:allocation_profile_restricted`, `:bucket_not_applicable` or
+      `:allocation_unavailable`.
+  """
+  def launch_check(run, invocation, effective_profile, now) do
+    cond do
+      invocation.ledger_generation != 2 ->
+        {:error, :legacy_invocation_without_grant, :legacy_generation}
+
+      invocation.profile_id != effective_profile ->
+        {:error, :profile_mismatch_at_launch, :profile_mismatch}
+
+      true ->
+        with {:ok, grant} <- launch_grant(invocation, run.tenant_id, now),
+             :ok <- launch_allocation(invocation, grant, run, now) do
+          :ok
+        else
+          {:error, check} -> {:error, :grant_ineligible_at_launch, check}
+        end
+    end
+  end
+
+  defp launch_grant(invocation, tenant_id, now) do
+    grant = charged(ModelCallGrant, invocation.grant_id, tenant_id)
+
+    cond do
+      is_nil(grant) -> {:error, :grant_missing}
+      grant.status != :active -> {:error, :grant_revoked}
+      DateTime.compare(grant.starts_at, now) == :gt -> {:error, :grant_not_started}
+      DateTime.compare(now, grant.expires_at) != :lt -> {:error, :grant_expired}
+      invocation.profile_id not in grant.profile_ids -> {:error, :profile_not_in_grant}
+      true -> {:ok, grant}
+    end
+  end
+
+  defp launch_allocation(invocation, grant, run, now) do
+    allocation = charged(ModelCallAllocation, invocation.allocation_id, run.tenant_id)
+    bucket = UsageBucket.bucket(run.usage_origin, invocation.purpose)
+
+    cond do
+      is_nil(allocation) or allocation.grant_id != grant.id ->
+        {:error, :allocation_not_in_grant}
+
+      allocation.profile_id not in [nil, invocation.profile_id] ->
+        {:error, :allocation_profile_restricted}
+
+      is_nil(bucket) or bucket not in allocation.applies_to ->
+        {:error, :bucket_not_applicable}
+
+      not available?(allocation, now) ->
+        {:error, :allocation_unavailable}
+
+      true ->
+        :ok
+    end
+  end
+
+  # A fresh read of the charged row in the run's tenant (nil otherwise).
+  defp charged(_resource, nil, _tenant_id), do: nil
+
+  defp charged(resource, id, tenant_id) do
+    resource
+    |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
+    |> Ash.read_one!(authorize?: false)
+  end
+
   defp origin(%Refusal{usage_origin: nil} = refusal),
     do: {:error, %{refusal | reason: :no_usage_origin}}
 

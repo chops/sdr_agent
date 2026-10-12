@@ -4,6 +4,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
   alias SdrAgent.AI.ModelProvider.CodexAppServer
+  alias SdrAgent.Test.LaunchAdmission
   alias SdrAgent.Test.PinnedCLI
 
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
@@ -130,6 +131,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
          name: ClaudeCLI.server(),
          command: System.find_executable("elixir"),
          test_launcher: true,
+         launch_admission: &LaunchAdmission.admitted/3,
          command_args: [@fake, "env_dump", dump, "300"]}
       )
 
@@ -206,6 +208,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
         ClaudeCLI.start_link(
           command: System.find_executable("elixir"),
           test_launcher: true,
+          launch_admission: &LaunchAdmission.admitted/3,
           command_args: [@fake, "env_dump", Path.join(root, "call"), "700"],
           timeout: 10_000
         )
@@ -507,6 +510,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
         name: ClaudeCLI.server(),
         command: System.find_executable("elixir"),
         test_launcher: true,
+        launch_admission: &LaunchAdmission.admitted/3,
         command_args: [@fake, "hang", prefix]
       ],
       opts
@@ -586,6 +590,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
       name: ClaudeCLI.server(),
       command: System.find_executable("elixir"),
       test_launcher: true,
+      launch_admission: &LaunchAdmission.admitted/3,
       command_args: [@fake, mode]
     ]
   end
@@ -806,6 +811,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
                  ClaudeCLI.start_link(
                    command: System.find_executable("elixir"),
                    test_launcher: true,
+                   launch_admission: &LaunchAdmission.admitted/3,
                    command_args: [@fake, "ready"],
                    profile: profile
                  ),
@@ -818,6 +824,96 @@ defmodule SdrAgent.AI.ClaudeCLITest do
         start_server("ready", [], profile: :claude_cli_opus, expected_model: "claude-opus-future")
 
       assert {:ok, %{model: "claude-opus-5-5"}} = ClaudeCLI.complete(request(), server: server)
+    end
+  end
+
+  describe "C9-03 launch admission (once per dispatch, just before the port opens)" do
+    setup do
+      dump =
+        Path.join(System.tmp_dir!(), "sdr-claude-admit-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> dump |> dumps() |> Enum.each(&File.rm/1) end)
+      %{dump: dump}
+    end
+
+    test "each dispatch is admitted once with its invocation id, profile and caller actor",
+         %{dump: dump} do
+      actor = %SdrAgent.Actor{type: :agent_runtime, tenant_id: Ecto.UUID.generate()}
+
+      for profile <- [:claude_cli_opus, :claude_cli_sonnet] do
+        {:ok, server} =
+          start_server("env_dump", [dump],
+            profile: profile,
+            launch_admission: LaunchAdmission.recording(self())
+          )
+
+        witness = witness()
+
+        assert {:ok, _} =
+                 ClaudeCLI.complete(Map.put(request(witness), :actor, actor), server: server)
+
+        id = witness.model_invocation_id
+        assert_received {:launch_admission, ^id, ^profile, [actor: ^actor]}
+        refute_received {:launch_admission, _, _, _}
+      end
+
+      assert length(read_dumps(dump)) == 2
+    end
+
+    test "a refused admission launches nothing and returns the refusal", %{dump: dump} do
+      for reason <- [:grant_ineligible_at_launch, :invocation_not_reserved] do
+        {:ok, server} =
+          start_server("env_dump", [dump],
+            launch_admission: LaunchAdmission.recording(self(), {:error, reason})
+          )
+
+        assert {:error, ^reason} = ClaudeCLI.complete(request(), server: server)
+        assert_received {:launch_admission, _, :claude_cli_opus, _}
+      end
+
+      assert read_dumps(dump) == []
+    end
+
+    test "an admission that raises launches nothing", %{dump: dump} do
+      {:ok, server} =
+        start_server("env_dump", [dump],
+          launch_admission: fn _id, _profile, _opts -> raise "db" end
+        )
+
+      assert {:error, :launch_admission_failed} = ClaudeCLI.complete(request(), server: server)
+      assert Process.alive?(server)
+      assert read_dumps(dump) == []
+    end
+
+    test "invalid witness context and expired requests are never admitted" do
+      {:ok, server} =
+        start_server("ready", [], launch_admission: LaunchAdmission.recording(self()))
+
+      assert {:error, :invalid_witness_context} = ClaudeCLI.complete(request(nil), server: server)
+
+      now = System.monotonic_time(:millisecond)
+
+      assert {:error, :provider_queue_timeout} =
+               GenServer.call(server, {:complete, request(), now - 200_000})
+
+      refute_received {:launch_admission, _, _, _}
+    end
+
+    test "outside a test launcher the admission seam is ignored (the real launcher is staged)" do
+      dir = Path.join(System.tmp_dir!(), "sdr-claude-seam-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      counter = PinnedCLI.stub_shim!(dir)
+
+      {:ok, server} =
+        ClaudeCLI.start_link(
+          executable: PinnedCLI.inject_identity!(),
+          launch_admission: LaunchAdmission.recording(self())
+        )
+
+      assert {:error, :real_model_staged} = ClaudeCLI.complete(request(), server: server)
+      refute_received {:launch_admission, _, _, _}
+      assert PinnedCLI.launches(counter) == 0
     end
   end
 
@@ -1000,6 +1096,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
         [
           command: System.find_executable("elixir"),
           test_launcher: true,
+          launch_admission: &LaunchAdmission.admitted/3,
           command_args: [@fake, mode | extra_args]
         ],
         opts

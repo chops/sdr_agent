@@ -58,6 +58,7 @@ defmodule SdrAgent.AI.ClaudeCLIShimIntegrationTest do
       ClaudeCLI.start_link(
         command: @shim,
         test_launcher: true,
+        launch_admission: &SdrAgent.Test.LaunchAdmission.admitted/3,
         executable: ctx.stand_in,
         environment: %{}
       )

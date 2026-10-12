@@ -23,7 +23,9 @@ defmodule SdrAgent.Agents do
       request Payload and numbers the call, in one transaction; a refusal
       is then recorded on its own), `daily_model_call_limit/0`,
       `daily_model_calls/1`,
-      `mark_model_invocation_sent/2`, `complete_model_invocation/3`,
+      `mark_model_invocation_sent/2` (the Fake's sent boundary),
+      `admit_launch/3` (C9-03: a ClaudeCLI call's launch admission and sent
+      boundary), `get_model_invocation/2`, `complete_model_invocation/3`,
       `fail_model_invocation/3`, `mark_model_invocation_unknown/2` (each
       settles run usage in the same transaction), `list_model_invocations/2`;
     * tool calls — `list_tool_invocations/2`, `start_tool_invocation/3`,
@@ -47,6 +49,7 @@ defmodule SdrAgent.Agents do
     otp_app: :sdr_agent
 
   require Ash.Query
+  require Logger
 
   alias Ash.Error.Changes.InvalidAttribute
   alias Ash.Error.Query.NotFound
@@ -425,9 +428,232 @@ defmodule SdrAgent.Agents do
     end
   end
 
-  @doc "reserved → sent (AGT)."
+  @doc """
+  reserved → sent (AGT). The Fake's sent boundary; a ClaudeCLI call is sent
+  only by `admit_launch/3`.
+  """
   def mark_model_invocation_sent(invocation, opts),
     do: update(invocation, :mark_sent, %{}, opts)
+
+  @doc """
+  AGT: admits the reserved ClaudeCLI invocation `invocation_id` for launch
+  under the model server's `effective_profile`, just before the server
+  opens the port (C9-03; R0 readiness packet, "Changed backend action
+  contracts"). The only sent boundary of a ClaudeCLI call.
+
+  One guarded transaction, as `agent_runtime` of a tenant (any other actor
+  is `Ash.Error.Forbidden`, audited as `authz.denied`). Lock order: the run
+  row, then the invocation row (`FOR UPDATE`, both re-read in the actor's
+  tenant), then the charged grant and allocation `FOR SHARE`
+  (`Admission.lock_charge/1`, the reservation's order), then the chain head
+  explicitly; only then is `now` read and are the terms read. Grant
+  editors lock grant → allocations → head and never a run or invocation, so
+  either an edit commits first (the launch is refused) or the launch does
+  (it proceeds; a later revocation does not stop a launched call).
+
+    * **Identity and state refusals** change nothing and return `{:error,
+      reason}`: `:invocation_not_found` (missing, malformed or another
+      tenant's id), `:invocation_not_claude_cli`, `:invocation_not_reserved`
+      (a replayed sent, in-flight or terminal row). Each is then recorded
+      as a `model.launch.refused` event of the actor's tenant only.
+    * **Eligibility refusals** of an owned, reserved row
+      (`Admission.launch_check/4`: generation, profile, grant status and
+      window, grant profiles, allocation grant, profile restriction, usage
+      bucket, availability — never room, which was charged at
+      reservation) move it reserved → failed (never sent) and open a
+      critical `provider_error` Failure about the invocation, committed
+      together; `{:error, :legacy_invocation_without_grant |
+      :profile_mismatch_at_launch | :grant_ineligible_at_launch}`.
+    * **Success** marks it sent: `{:ok, invocation}`.
+  """
+  def admit_launch(invocation_id, effective_profile, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    meta = %{
+      resource: ModelInvocation,
+      action: :admit_launch,
+      guarded?: true,
+      subject_id: uuid(invocation_id)
+    }
+
+    Guard.run(meta, actor, fn -> launch(invocation_id, effective_profile, actor) end)
+  end
+
+  defp launch(id, profile, %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor)
+       when is_binary(tenant) do
+    case audit_transact(fn -> launch_locked(id, profile, actor) end) do
+      {:ok, {:sent, sent}} ->
+        {:ok, sent}
+
+      {:ok, {:refused, reason}} ->
+        {:error, reason}
+
+      {:error, {:launch_refused, reason, own_id}} ->
+        record_launch_refusal(reason, own_id, id, profile, actor)
+        {:error, reason}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  defp launch(_id, _profile, _actor), do: {:error, Ash.Error.Forbidden.exception([])}
+
+  defp launch_locked(id, profile, actor) do
+    with {:ok, target} <- launch_target(id, actor),
+         {:ok, run} <- lock_tenant_run(target.agent_run_id, actor),
+         {:ok, invocation} <- lock_invocation(target.id, actor),
+         :ok <- launch_state(invocation),
+         :ok <- Admission.lock_charge(invocation),
+         {:ok, _head} <- Kernel.lock_head(actor.tenant_id) do
+      # The launch instant is read only once every lock is held.
+      run
+      |> Admission.launch_check(invocation, profile, SdrAgent.Clock.utc_now())
+      |> admit_or_refuse(invocation, profile, actor)
+    end
+  end
+
+  defp admit_or_refuse(:ok, invocation, _profile, actor) do
+    with {:ok, sent} <- do_update(invocation, :mark_sent, %{}, actor), do: {:ok, {:sent, sent}}
+  end
+
+  defp admit_or_refuse({:error, reason, check}, invocation, profile, actor),
+    do: refuse_launch(invocation, reason, check, profile, actor)
+
+  # An unlocked read only to find the run to lock first; the row is re-read
+  # under its own lock.
+  defp launch_target(id, actor) do
+    case uuid(id) do
+      nil -> launch_refused(:invocation_not_found)
+      id -> id |> tenant_invocation(actor) |> Ash.read_one() |> found()
+    end
+  end
+
+  defp lock_invocation(id, actor) do
+    id
+    |> tenant_invocation(actor)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read_one()
+    |> found()
+  end
+
+  defp tenant_invocation(id, actor) do
+    ModelInvocation
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id == ^id)
+  end
+
+  defp lock_tenant_run(run_id, actor) do
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id == ^run_id)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read_one()
+    |> found()
+  end
+
+  defp found({:ok, nil}), do: launch_refused(:invocation_not_found)
+  defp found(other), do: other
+
+  defp launch_state(%{provider: :claude_cli, status: :reserved}), do: :ok
+
+  defp launch_state(%{provider: :claude_cli} = invocation),
+    do: launch_refused(:invocation_not_reserved, invocation.id)
+
+  defp launch_state(invocation), do: launch_refused(:invocation_not_claude_cli, invocation.id)
+
+  defp launch_refused(reason, own_id \\ nil), do: {:error, {:launch_refused, reason, own_id}}
+
+  defp refuse_launch(invocation, reason, check, profile, actor) do
+    error = %{
+      "kind" => "launch_refused",
+      "reason" => Atom.to_string(reason),
+      "check" => Atom.to_string(check)
+    }
+
+    failure = %{
+      subject_resource: inspect(ModelInvocation),
+      subject_id: invocation.id,
+      class: :provider_error,
+      severity: :critical,
+      retryable: false,
+      message:
+        "model call refused at launch: #{reason} (#{check}); the reserved call was failed " <>
+          "and never sent",
+      detail:
+        SdrAgent.Audit.Canonical.encode!(%{
+          "kind" => "model_launch_refused",
+          "reason" => Atom.to_string(reason),
+          "check" => Atom.to_string(check),
+          "model_invocation_id" => invocation.id,
+          "grant_id" => invocation.grant_id,
+          "reserved_profile" => profile_name(invocation.profile_id),
+          "effective_profile" => profile_name(profile)
+        })
+    }
+
+    with {:ok, _failed} <- do_update(invocation, :fail, %{error: error}, actor),
+         {:ok, _failure} <- SdrAgent.Operations.open_failure(failure, actor: actor) do
+      {:ok, {:refused, reason}}
+    end
+  end
+
+  # Metadata only, in the actor's own tenant; the refusal itself changed
+  # nothing, so a tenant without an audit chain records nothing.
+  defp record_launch_refusal(reason, own_id, attempted, profile, actor) do
+    event = %{
+      event_type: "model.launch.refused",
+      category: :model,
+      subject_resource: inspect(ModelInvocation),
+      subject_id: uuid(attempted),
+      action: "admit_launch",
+      model_invocation_id: own_id,
+      payload: %{"reason" => Atom.to_string(reason), "effective_profile" => profile_name(profile)}
+    }
+
+    case SdrAgent.Audit.append(event, actor: actor) do
+      {:ok, _event} ->
+        :ok
+
+      {:error, error} ->
+        Logger.warning("model.launch.refused (#{reason}) was not audited: #{inspect(error)}")
+    end
+  end
+
+  defp profile_name(profile) when is_atom(profile) and not is_nil(profile),
+    do: Atom.to_string(profile)
+
+  defp profile_name(_profile), do: nil
+
+  defp uuid(id) when is_binary(id) do
+    case Ecto.UUID.cast(id) do
+      {:ok, uuid} -> uuid
+      :error -> nil
+    end
+  end
+
+  defp uuid(_id), do: nil
+
+  @doc "One model invocation of the actor's tenant, read fresh (not found otherwise)."
+  def get_model_invocation(id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    case uuid(id) do
+      nil ->
+        {:error, NotFound.exception(resource: ModelInvocation)}
+
+      id ->
+        id
+        |> tenant_invocation(actor)
+        |> Ash.read_one()
+        |> case do
+          {:ok, nil} -> {:error, NotFound.exception(resource: ModelInvocation)}
+          other -> other
+        end
+    end
+  end
 
   @doc "sent → completed, storing the verbatim `response` and settling usage (AGT)."
   def complete_model_invocation(invocation, attrs, opts) do
@@ -927,6 +1153,29 @@ defmodule SdrAgent.Agents do
   defp current_operator(actor), do: actor
 
   defp load_grant(grant), do: Ash.load(grant, :allocations, authorize?: false)
+
+  # As `transact/1`, inside `SdrAgent.Audit.transaction/1` (guarded calls may
+  # run in it): `fun` returns `{:ok, value}` to commit or `{:error, error}`
+  # to roll back.
+  defp audit_transact(fun) do
+    Process.put(@notifications, [])
+
+    result =
+      SdrAgent.Audit.transaction(fn ->
+        case fun.() do
+          {:ok, value} -> value
+          {:error, error} -> Repo.rollback(error)
+        end
+      end)
+
+    notifications = Process.delete(@notifications) || []
+    if match?({:ok, _}, result), do: Ash.Notifier.notify(notifications)
+
+    case result do
+      {:error, %Ash.Changeset{errors: errors}} -> {:error, Ash.Error.to_error_class(errors)}
+      other -> other
+    end
+  end
 
   defp transact(fun) do
     Process.put(@notifications, [])

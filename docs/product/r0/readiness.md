@@ -123,6 +123,22 @@ admission, launch admission, the facade's sent boundary).
     and hold it until the sent or failed transition commits. The event
     append's own after-action lock is too late to order the eligibility
     read.
+  - **As implemented (C9-03).** Between the invocation row and the chain
+    head, the charged grant and then its allocation are locked `FOR SHARE`
+    (the reservation's order, `Admission.lock_charge/1`); `now` is read
+    after the head. An editor holding the grant therefore commits first and
+    is seen (launch refused); an admission holding the share locks commits
+    first (launch proceeds) and the editor waits for it. Identity and state
+    refusals roll back and are then recorded as a `model.launch.refused`
+    event of the actor's tenant (reason `invocation_not_found`,
+    `invocation_not_claude_cli` or `invocation_not_reserved`); a non
+    `agent_runtime` actor is `Forbidden`, audited as `authz.denied`.
+    Eligibility refusals record the failed check (`grant_revoked`,
+    `grant_expired`, `grant_not_started`, `profile_not_in_grant`,
+    `allocation_not_in_grant`, `allocation_profile_restricted`,
+    `bucket_not_applicable`, `allocation_unavailable`, `profile_mismatch`,
+    `legacy_generation`) on the failed row and the Failure detail; the
+    Failure's subject is the invocation.
   - **Identity and state refusals (no mutation).** It refuses if the
     invocation is missing, belongs to another tenant, is not `reserved` (a
     replay of a sent, in-flight or terminal row), or is not `claude_cli`.
@@ -171,15 +187,17 @@ admission, launch admission, the facade's sent boundary).
   runtime. Agent CLIs are untouched.
 - **Lock order summary.** Reservation: run → candidate grants `FOR SHARE`
   → their allocations `FOR SHARE` → chain head (explicit), then the clock.
-  Launch admission: run → invocation → chain head (explicit, before grant
-  reads). Grant and allocation edits: grant row → its allocations → chain
-  head. Switch request: setting row → chain head. Refusal reporting: the
+  Launch admission: run → invocation → its grant `FOR SHARE` → its
+  allocation `FOR SHARE` → chain head (explicit, before the term reads; as
+  implemented in C9-03). Grant and allocation edits: grant row → its
+  allocations → chain head. Switch request: setting row → chain head. Refusal reporting: the
   run's Operation `FOR SHARE` → chain head (explicit, before the dedupe
   check). Run stop on a refusal: run → refusal Failure `FOR UPDATE` → chain
   head. Operation failure: Operation → Failure `FOR UPDATE` → chain head.
-  Launch admission never locks grant rows; it reads committed terms under
-  the chain head. Mutators never take run or invocation locks after the
-  chain head. No cycles.
+  Launch admission takes only share locks on grant rows, in the editors'
+  order and before the head, and reads the terms under the chain head.
+  Mutators never take run or invocation locks after the chain head. No
+  cycles.
 
 ## 3. Out of scope
 
