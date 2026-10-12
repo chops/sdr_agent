@@ -308,10 +308,17 @@ case mode do
     {:os_pid, child} = Port.info(sleeper, :os_pid)
     root = String.to_integer(System.pid())
 
+    # Write then rename, so a reader polling <prefix>.* never sees a partial
+    # record (the temporary <prefix>-partial-<pid> does not match that wildcard).
+    record = "#{prefix}.#{root}"
+    partial = "#{prefix}-partial-#{root}"
+
     File.write!(
-      "#{prefix}.#{root}",
+      partial,
       JSON.encode!(%{"root" => root, "child" => child, "cwd" => File.cwd!()})
     )
+
+    File.rename!(partial, record)
 
     IO.puts(init)
     Process.sleep(:infinity)
