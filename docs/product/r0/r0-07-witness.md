@@ -211,7 +211,112 @@ Calibration uses the accepted isolated harness, so no ADR change is needed:
   missing, revoked, expired or exhausted; never released.
 - **Gate:** `bin/verify`, credo and codegen check.
 
-## 5. Gate record
+## 5. Slice A deltas (round 5)
+
+Slice A is the exact allowlist, `ModelResultRelease` and the
+`parsed_output` read gate (draft PR #139, code at 0116281). Its ten
+deviations from the round-4 PASS went to Codex. The verdict was
+**NEEDS-REVIEW** (report sha256 165c1840, on submission sha256 f18bfe62).
+This section records those decisions and models the four contracts the
+verdict left open: (a) to (d). It also covers item 7 and the G2/G3 notes.
+Nothing here is implemented until Codex records a PASS on it.
+
+**Slice A is a staged foundation, not the full gate.**
+- Ordinary real calls stay refused (`:real_model_staged`).
+- Slice C must land before enablement. It owns the facade's in-process
+  return, typed stopping and recovery, and finalization.
+- The current `:crash` stop of a fake-CLI generation-2 run (its unreleased
+  output is refused at the Decision) is temporary staging behaviour. It is
+  not the accepted final classification.
+- Real calibration waits for the reviewed harness (slice D) and the
+  owner's G-R0.
+
+### 5.1 Decisions on the slice A deviations
+
+| Item | Codex decision | Recorded boundary |
+|---|---|---|
+| 1. Integrity read of gated output | Accept, narrow | Contract (b) below. |
+| 2. Kernel reads of releases | Accept | Kernel reads are tenant-scoped metadata and integrity reads only. The kernel gets no ordinary output-read bypass: a plain kernel read of `parsed_output` stays masked. |
+| 3. `:released` needs the whole invocation reconciled | Accept | Defensive tightening: any unknown, unclassified or ambiguous current evidence blocks the **first** release. A historical release is never revoked or rewritten when later evidence changes. |
+| 4. A supplied link must be current | Accept, for a first decision | **Identical replay** (same disposition, reason, link and `evidence_sha256`) returns the existing immutable row and appends no event. This holds even if its link has since been superseded: a past decision is never relitigated. A new or conflicting decision still validates binding and currentness, and a conflict fails with `ReleaseConflict`. |
+| 5. Projection and method come from the link | Accept | They are copied from the evaluated, immutable link. The caller can never choose them. |
+| 6. Proof runs are never released; a missing calibration context is Invalid | Accept | **Forbidden vs Invalid:** a wrong principal (anyone but AGT; an auditor's attempt is audited) is `Forbidden`. An authorized AGT whose calibration preconditions fail (context missing or for another profile, not a proof run, no evidence) gets `Invalid`, with no release and no event. A `:proof` origin alone authorizes nothing. |
+| 7. Model and profile evidence keys omitted | Needs revision | Keep the ADR-0005 keys; the delta is below. |
+| 8. Bare-atom test override | Accept, for hermetic legacy fixtures only | Contract (c) below: the calibration harness uses exact six-key overrides. |
+| 9. Minimal `CalibrationContext` in slice A | Accept, as a staged foundation only | Contract (c) below. |
+| 10. Locked rows passed from finalization | Accept the direction | Contract (d) below. |
+
+### 5.2 Entity deltas
+
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|---|---|---|---|---|---|---|---|
+| (a) AuditEvent payload of a gated ModelInvocation write (`AppendEvent`) | Existing (delta) | Keep unreleased model output out of the audit ledger, while the ledger stays verifiable | No new columns. Payload gains `output_commitment`: `{version: "sdr-output-commitment/1", canonicalization: "sdr-canonical-json/1", fields, validation_status, output_schema_id, output_schema_version}`. In `changes` (and in `previous` and `arguments`, if one ever lists such a field), each **output-bearing field** F is replaced by `F_sha256`. | Subject: the ModelInvocation, as today | **Scope:** every event whose stored subject row is generation 2 **and** `claude_cli`: reserved, sent, completed, failed (including invalid-output writes) and unknown. Gated-ness is read from the row's own metadata (`ledger_generation`, `provider`).<br>**Output-bearing fields:** `parsed_output`, `validation_errors` (its messages render the invalid value) and `refusal` (model-authored text).<br>**Commitment:** `F_sha256` is the lowercase hex SHA-256 of `Canonical.encode!(value)` under `sdr-canonical-json/1`. A nil value gives JSON `null` (no value stored), never the hash of `"null"`. `[]` and `%{}` are values and are hashed.<br>**What stays as is:** `record_sha256` is still over the full stored row, read through the integrity read (b). The verifier recomputes it unchanged. Schema refs and `validation_status` stay in plaintext. No plaintext copy may enter `changes`, `previous`, `arguments`, `redacted`, canonical event bytes or validation diagnostics.<br>**Unchanged:** generation-1 and Fake events; events already written (never re-encoded, `canonical_bytes` immutable); other resources' after-images (Decision and ReplyAssessment are written only from a released output).<br>A commitment proves equality with a value held elsewhere. It never reconstructs quarantined content offline. | Unchanged: kernel append only | Raw Payload and wire evidence stay readable only through the existing authorized, audited seams (`read_content`, `read_reconciliation_payloads`), never as a business-read fallback. |
+| ModelInvocation output-bearing fields | Existing (delta) | Close the copy of output in the diagnostic fields | — | — | The `parsed_output` field policy (section 2 delta) extends to `validation_errors` and `refusal` on generation-2 ClaudeCLI rows, with the same readers (released-output read, REC, AUD, integrity read, scoped calibration read). `released_output/2` returns `parsed_output` only. | Field policy | none |
+| (b) Integrity reader (`Kernel.integrity_opts/1`, `Audit.Checks.IntegrityRead`) | New | Hash and verify the stored row without exposing withheld fields | Query context: the kernel marker **plus** the private integrity marker | — | **Who matches:** only a `:kernel` `SdrAgent.Actor` carrying both markers. A plain `Kernel.opts/1` read never matches, so kernel business reads stay masked.<br>**Callers:** exactly two seams — `AppendEvent` (re-reading a policy-masked record to hash the stored row) and `Audit.Verifier` (`record_sha256` check). An architecture test pins this caller set.<br>**What it emits:** nothing in plaintext. The caller gets the original masked record. Event payloads carry commitments (a). Verifier reports name issue types and ids only.<br>**Trust:** a trusted in-process convention, like `KernelContext`. It is not an unforgeable capability against arbitrary server code. | Kernel only | none |
+| (c) CalibrationContext (`Agents.Checks.CalibrationContext`) | New (test-seam builds only; staged foundation) | Scope the calibration latch and read to one proof invocation | Marker: `{profile_id, model_invocation_id}` | — | **Builds:** the builder and its acceptance (`match?`, `profile/1`, the field-policy check) exist only with `:claude_cli_test_seams`. In every other build they answer "absent", even for a forged marker.<br>**Builder:** `context(profile_id, model_invocation_id)` refuses anything but a reviewed real profile (`ModelProfiles.real?/1`).<br>**Scope:** it authorizes the `:calibration` latch, and the calibration read of the output-bearing fields, only for the named invocation. That invocation must be generation 2, `claude_cli`, of that profile, and belong to a `:proof` run. It never covers every generation-2 row merely because a marker is present.<br>**Never launch authority:** the marker is no input to admission or `admit_launch`.<br>**Deferred to the harness (slice D):** G-R0 binding, the fixed server-owned prompt and schema, the REQ-07-7 order and real-call authority. | AGT only | none |
+| Calibration witness override (item 8) | Existing (delta) | No inexact tuple in a spending path | — | — | `Witness.exact_overrides/1` accepts only exact six-key entries. It refuses a bare atom, a partial map or an extra key (`{:error, :inexact_override}`). The calibration harness must pass its candidate tuple through it.<br>The bare-atom per-call override stays for hermetic legacy fixtures only. Being a test build is never spend authority, and there is no production or config override. | Test seams only | none |
+| (d) Prelocked decision context (`Agents.ReleaseDecision.Prelocked`) | New (private, transaction-scoped) | Let finalization decide the release without any fresh lock request after the chain head | Private struct: `{ref, tenant_id, model_invocation_id, wire_witness_link_id, receipt_id, xact_id}` | Binds one invocation, its optional link and the reconcile receipt (the selected gate cause's Failure id) | **Who establishes it:** only the owning finalizer, inside its open `Audit.transaction`, after it has taken every dependent lock (section 2, step 3, sub-steps 1–5) and **before** the head. Establishing records `pg_current_xact_id()` and registers `ref` in the calling process for that transaction.<br>**Accepted only when:** the call is in the same process and transaction (same `xact_id`), `ref` is registered, and tenant, invocation and link equal the changeset's. Then decide reads its parents **without** a lock clause. Its FK checks find the rows already held.<br>**Refused:** a context outside its transaction, after the transaction, mismatched, forged (no registered `ref`) or a hand-built struct, with no write.<br>**No bypass:** there is no Boolean option, and no row or struct argument proves locks.<br>**Standalone decide** (no context) always locks invocation then link `FOR SHARE` before the head, then appends. It never silently takes the no-lock path. | AGT; finalizer (slice C) and run recovery | **Split:** slice A adds the context type, the decide-side checks and the standalone order. Slice C adds the finalizer half, which establishes the context, and the whole-finalization regression. |
+| WireWitnessLink evidence (item 7) | Existing (delta) | Profile-exact evidence, as ADR-0005 R0 item 1 requires | Evidence allowlist gains `model_id` (text, at most 39 bytes, redactor-clean) and `profile_id` (one of the real profile ids) | — | **Generation 2:** new links of a generation-2 parent carry both keys, validated equal to the invocation's `model_id` and `profile_id` (`WitnessLineage`). `:released` re-checks that equality.<br>**Generation 1:** keeps the legacy construction. Its links carry neither key and `profile_id` is refused, so there is no churn, mutation or backfill of existing links. A successor appears only through normal reconciliation lineage when the observation changes. | REC, as today | none |
+
+### 5.3 Notes
+
+- **G2, trusted code.** Field masking constrains reads that go through Ash
+  authorization. It does not constrain arbitrary trusted server code: a
+  code-level `Ash.Query.filter`, direct Repo access and similar trusted
+  in-process code are outside it, like any trusted code. External and
+  input-annotated filtering, sorting and aggregates over the output-bearing
+  fields are denied, and are tested. Every business consumer reads only
+  through `released_output/2`.
+- **G3, existing rows.**
+  - A generation-2 ClaudeCLI output without a release defaults to withheld.
+    There is no automatic release, backfill or history rewrite.
+  - The premise "no real generation-2 rows exist" needs an owner metadata
+    inventory before enablement, not reviewer reads of live data.
+  - Any plaintext audit copies that do exist need an explicit owner
+    handling decision. The prospective payload change (a) does not erase
+    history.
+
+### 5.4 Test plan for these deltas (RED first, synthetic)
+
+- **(a) Canary:**
+  - A unique canary string is placed only in an unreleased generation-2
+    output: valid completed, invalid completed (diagnostics) and failed
+    validation.
+  - It is absent from every AuditEvent `payload` and `canonical_bytes`, the
+    audit export bundle, and the generic, list and kernel reads of all
+    three fields.
+  - `record_sha256` matches the full stored row, `verify_chain` is valid and
+    the export verifies.
+  - The commitment equals `sha256(Canonical.encode!(value))`, and nil gives
+    `null`.
+  - Generation-1 and Fake events keep plaintext after-images.
+- **(b):**
+  - A plain kernel read is masked; only the double-marked kernel read
+    matches.
+  - Verifier issues carry no field values.
+  - The caller-set test fails if a third module calls `integrity_opts/1`.
+- **(c):**
+  - The builder refuses `:fake` and unknown profiles.
+  - The context reads and latches only its named proof invocation; another
+    generation-2 row under the same marker stays masked and refused.
+  - `exact_overrides/1` refuses bare atoms, partial maps and extra keys.
+- **(d):**
+  - Forged, mismatched (tenant, invocation, link), outside-transaction and
+    stale contexts are each refused, with no row and no event.
+  - Standalone decide's query order: lock requests (`FOR SHARE`, then the
+    head `FOR UPDATE`) and no lock request after the head, captured from
+    Repo telemetry.
+  - The prelocked path issues no lock clause at all.
+  - Slice C adds the whole-finalization order regression.
+- **Item 7:** a generation-2 link without the keys, or with values that
+  differ from the invocation's, is refused; a generation-1 link is refused
+  with `profile_id`; re-reconciling a generation-1 invocation writes no
+  successor.
+- **G2:** `filter_input`, `sort_input` and an aggregate over each
+  output-bearing field are denied (no row is selected and no value is
+  derived).
+
+## 6. Gate record
 
 - Round 1 at e720fda: **NEEDS-REVIEW** (Codex, consultation
   m_1791836476976826333_a0ee4344, report sha256 9b3302fe). Five required
@@ -227,3 +332,8 @@ Calibration uses the accepted isolated harness, so no ADR change is needed:
   m_1791838639608778250_18c04dfc, answer m_1791839074000000000_r007pass,
   report sha256 fbd9375e). Entity/action PASS only: not implementation
   approval, RED verification, calibration-call or deploy authority.
+- Round 5 (slice A deviations, code at 0116281): **NEEDS-REVIEW** (Codex,
+  report sha256 165c1840, on submission sha256 f18bfe62). Items 1–6 and
+  8–10 accepted with boundaries; item 7 revised (keep the ADR-0005
+  evidence keys). Open contracts (a)–(d) are modelled in section 5 for
+  recheck.
