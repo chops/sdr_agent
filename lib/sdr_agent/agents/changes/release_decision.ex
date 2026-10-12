@@ -11,6 +11,10 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
        re-read **in the release's tenant** and locked `FOR SHARE`, then the
        link, when given, `FOR SHARE`. Link writes lock the invocation
        `FOR UPDATE`, so no successor can appear while the decision holds it.
+       Under a verified `SdrAgent.Agents.ReleaseDecision.Prelocked` context
+       (its finalizer already holds those locks; every binding, the receipt
+       included, matches) they are read with no lock clause; a refused
+       context writes nothing.
        When the invocation already has a release, nothing else is checked:
        the upsert returns that row and step 4 compares it.
     3. Per disposition:
@@ -43,10 +47,12 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   alias SdrAgent.Agents.Errors.ReleaseConflict
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ReleaseDecision.Prelocked
   alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.Agents.Witness
   alias SdrAgent.Agents.WitnessEvidence
   alias SdrAgent.Audit.Kernel
+  alias SdrAgent.Operations.Failure
 
   @terminal [:completed, :failed, :unknown]
   @fingerprint [:disposition, :reason, :wire_witness_link_id, :evidence_sha256]
@@ -97,9 +103,11 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   defp decide(changeset) do
     get = &Ash.Changeset.get_attribute(changeset, &1)
     tenant_id = get.(:tenant_id)
+    ids = {tenant_id, get.(:model_invocation_id), get.(:wire_witness_link_id)}
 
-    with {:ok, invocation} <- lock(ModelInvocation, get.(:model_invocation_id), tenant_id),
-         {:ok, link} <- lock_link(get.(:wire_witness_link_id), tenant_id) do
+    with {:ok, mode} <- lock_mode(changeset.context, ids),
+         {:ok, invocation} <- fetch(ModelInvocation, get.(:model_invocation_id), tenant_id, mode),
+         {:ok, link} <- fetch_link(get.(:wire_witness_link_id), tenant_id, mode) do
       changeset =
         Ash.Changeset.set_context(changeset, %{
           model_result_release_agent_run_id: invocation.agent_run_id
@@ -120,6 +128,41 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
     end
   end
 
+  # Standalone decide locks its parents `FOR SHARE` before the head. Under a
+  # verified prelocked context (contract (d)) the finalizer already holds
+  # them, so no lock clause is requested; any other `:sdr_prelocked` value
+  # is refused, never treated as standalone.
+  defp lock_mode(%{sdr_prelocked: context}, {tenant_id, invocation_id, link_id}) do
+    with {:ok, registered} <- Prelocked.verify(context),
+         true <-
+           {registered.tenant_id, registered.model_invocation_id, registered.wire_witness_link_id} ==
+             {tenant_id, invocation_id, link_id},
+         :ok <- check_receipt(registered) do
+      {:ok, :prelocked}
+    else
+      _ -> {:error, :model_invocation_id, "the prelocked decision context is refused"}
+    end
+  end
+
+  defp lock_mode(_context, _ids), do: {:ok, "FOR SHARE"}
+
+  # The receipt, when bound, is this invocation's reconciliation cause.
+  defp check_receipt(%Prelocked{receipt_id: nil}), do: :ok
+
+  defp check_receipt(%Prelocked{receipt_id: id} = registered) when is_binary(id) do
+    Failure
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(registered.tenant_id))
+    |> Ash.Query.filter(
+      id == ^id and tenant_id == ^registered.tenant_id and class == :reconciliation_required and
+        subject_resource == "SdrAgent.Agents.ModelInvocation" and
+        subject_id == ^registered.model_invocation_id
+    )
+    |> Ash.exists?()
+    |> if(do: :ok, else: :error)
+  end
+
+  defp check_receipt(_registered), do: :error
+
   # The link's evaluated projection and method, copied onto the release.
   defp provenance(changeset, %WireWitnessLink{} = link) do
     changeset
@@ -132,11 +175,11 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
 
   defp provenance(changeset, nil), do: changeset
 
-  defp lock(resource, id, tenant_id) when is_binary(id) do
+  defp fetch(resource, id, tenant_id, mode) when is_binary(id) do
     resource
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
     |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
-    |> Ash.Query.lock("FOR SHARE")
+    |> then(&if(mode == :prelocked, do: &1, else: Ash.Query.lock(&1, mode)))
     |> Ash.read_one()
     |> case do
       {:ok, %^resource{} = row} -> {:ok, row}
@@ -144,13 +187,13 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
     end
   end
 
-  defp lock(_resource, _id, _tenant_id),
+  defp fetch(_resource, _id, _tenant_id, _mode),
     do: {:error, :model_invocation_id, "is not a model invocation of this tenant"}
 
-  defp lock_link(nil, _tenant_id), do: {:ok, nil}
+  defp fetch_link(nil, _tenant_id, _mode), do: {:ok, nil}
 
-  defp lock_link(id, tenant_id) do
-    case lock(WireWitnessLink, id, tenant_id) do
+  defp fetch_link(id, tenant_id, mode) do
+    case fetch(WireWitnessLink, id, tenant_id, mode) do
       {:ok, link} ->
         {:ok, link}
 

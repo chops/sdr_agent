@@ -963,7 +963,9 @@ defmodule SdrAgent.Agents do
   AGT: decides the one immutable release of a model output. `attrs`:
   `model_invocation_id`, `disposition`, `reason`, optional
   `wire_witness_link_id` and (calibration latches only) `evidence_sha256`;
-  `context:` carries the test-seam calibration context. An identical replay
+  `context:` carries the test-seam calibration context; `prelocked:` the
+  finalizer's verified `SdrAgent.Agents.ReleaseDecision.Prelocked` context
+  (no fresh lock requests; refused unless it matches). An identical replay
   returns the existing release; a conflicting one fails with
   `SdrAgent.Agents.Errors.ReleaseConflict`. See
   `SdrAgent.Agents.ModelResultRelease`.
@@ -974,12 +976,20 @@ defmodule SdrAgent.Agents do
 
     guard(ModelResultRelease, :decide, Map.get(attrs, :model_invocation_id), actor, fn ->
       ModelResultRelease
-      |> Ash.Changeset.for_create(:decide, attrs,
-        actor: actor,
-        context: Keyword.get(opts, :context, %{})
-      )
+      |> Ash.Changeset.for_create(:decide, attrs, actor: actor, context: decide_context(opts))
       |> Ash.create()
     end)
+  end
+
+  # `prelocked:` (the finalizer's `ReleaseDecision.Prelocked`, R0-07 round 5
+  # contract (d)) travels under its own key and is verified by the change.
+  defp decide_context(opts) do
+    context = Keyword.get(opts, :context, %{})
+
+    case Keyword.fetch(opts, :prelocked) do
+      {:ok, prelocked} -> Map.put(context, :sdr_prelocked, prelocked)
+      :error -> context
+    end
   end
 
   @doc "The release of an invocation in the actor's tenant: `{:ok, release | nil}`."
