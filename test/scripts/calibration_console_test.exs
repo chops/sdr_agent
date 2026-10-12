@@ -324,9 +324,74 @@ defmodule SdrAgent.Scripts.CalibrationConsoleTest do
     end
   end
 
+  describe "the real console's per-machine secrets (temporary HOME, no database)" do
+    setup do
+      home =
+        Path.join(System.tmp_dir!(), "calibration-home-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(home)
+      on_exit(fn -> File.rm_rf!(home) end)
+      {physical, 0} = System.cmd("pwd", ["-P"], cd: home)
+      %{home: String.trim(physical)}
+    end
+
+    defp real_check(home) do
+      env = [
+        {"HOME", home},
+        {"MIX_ENV", nil},
+        {"PORT", nil},
+        {"DATABASE_URL", nil},
+        {"SDR_MODEL_PROVIDER", nil},
+        {"SDR_CLAUDE_CLI_BIN", nil}
+      ]
+
+      System.cmd(@script, ["check"], env: env, stderr_to_stdout: true)
+    end
+
+    test "are created 0600 in a 0700 directory, never printed, and reused", %{home: home} do
+      dir = Path.join(home, ".local/state/sdr-agent/calibration")
+      path = Path.join(dir, "secrets")
+
+      assert {out, 0} = real_check(home)
+      assert out =~ "database sdr_agent_calibration"
+      assert Bitwise.band(File.lstat!(dir).mode, 0o777) == 0o700
+      assert Bitwise.band(File.lstat!(path).mode, 0o777) == 0o600
+
+      body = File.read!(path)
+
+      values =
+        for line <- String.split(body, "\n", trim: true),
+            do: line |> String.split("=", parts: 2) |> List.last()
+
+      assert length(values) == 2
+      for value <- values, do: refute(out =~ value)
+
+      assert {again, 0} = real_check(home)
+      assert File.read!(path) == body
+      for value <- values, do: refute(again =~ value)
+    end
+
+    test "a group-readable secrets file is refused", %{home: home} do
+      path = Path.join(home, ".local/state/sdr-agent/calibration/secrets")
+      assert {_out, 0} = real_check(home)
+      File.chmod!(path, 0o640)
+      assert {out, status} = real_check(home)
+      assert status != 0
+      assert out =~ "readable or writable by group or others"
+    end
+  end
+
   describe "the real check (configuration only, no database)" do
     test "serves sdr_agent_calibration on 127.0.0.1:4124 with the Fake, whatever the partition and PORT" do
+      # A temporary HOME: the check creates the per-machine secrets file.
+      home =
+        Path.join(System.tmp_dir!(), "calibration-home-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(home)
+      on_exit(fn -> File.rm_rf!(home) end)
+
       env = [
+        {"HOME", home},
         {"MIX_ENV", "test"},
         {"MIX_TEST_PARTITION", "_r07d_probe"},
         {"PORT", "4120"},

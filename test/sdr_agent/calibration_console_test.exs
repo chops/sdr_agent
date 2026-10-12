@@ -13,6 +13,11 @@ defmodule SdrAgent.CalibrationConsoleTest do
   alias SdrAgent.AI.ModelProvider.Fake
   alias SdrAgent.CalibrationConsole
 
+  @secrets %{
+    secret_key_base: Base.encode64(:binary.copy(<<1>>, 64)),
+    token_signing_secret: Base.encode64(:binary.copy(<<2>>, 64))
+  }
+
   defp base(overrides \\ %{}) do
     Map.merge(
       %{
@@ -29,7 +34,8 @@ defmodule SdrAgent.CalibrationConsoleTest do
           pool_size: 20
         ],
         endpoint: [http: [ip: {127, 0, 0, 1}, port: 4002], server: false, secret_key_base: "k"],
-        oban: [testing: :manual, queues: [research: 1]]
+        oban: [testing: :manual, queues: [research: 1]],
+        secrets: @secrets
       },
       overrides
     )
@@ -75,6 +81,18 @@ defmodule SdrAgent.CalibrationConsoleTest do
       assert plan.oban[:testing] == :manual
     end
 
+    test "with the per-machine secrets, never the checked-in test ones" do
+      assert {:ok, plan} = CalibrationConsole.plan(base())
+      assert plan.endpoint[:secret_key_base] == @secrets.secret_key_base
+      assert plan.token_signing_secret == @secrets.token_signing_secret
+
+      refute plan.endpoint[:secret_key_base] ==
+               Application.fetch_env!(:sdr_agent, SdrAgentWeb.Endpoint)[:secret_key_base]
+
+      refute plan.token_signing_secret ==
+               Application.fetch_env!(:sdr_agent, :token_signing_secret)
+    end
+
     test "described by one plan line" do
       assert {:ok, plan} = CalibrationConsole.plan(base())
 
@@ -112,6 +130,27 @@ defmodule SdrAgent.CalibrationConsoleTest do
       repo = Keyword.put(base().repo, :port, 5432)
       assert {:error, reason} = CalibrationConsole.plan(base(%{repo: repo}))
       assert reason =~ "database port 5432 is not the devenv Postgres port 5520"
+    end
+
+    test "missing secrets, or the checked-in test secrets" do
+      assert {:error, reason} = CalibrationConsole.plan(Map.delete(base(), :secrets))
+      assert reason =~ "no per-machine secrets"
+
+      checked_in = %{
+        secret_key_base:
+          Application.fetch_env!(:sdr_agent, SdrAgentWeb.Endpoint)[:secret_key_base],
+        token_signing_secret: Application.fetch_env!(:sdr_agent, :token_signing_secret)
+      }
+
+      for secrets <- [
+            checked_in,
+            %{@secrets | secret_key_base: checked_in.secret_key_base},
+            %{@secrets | token_signing_secret: checked_in.token_signing_secret}
+          ] do
+        assert {:error, reason} = CalibrationConsole.plan(base(%{secrets: secrets}))
+        assert reason =~ "the checked-in test secrets"
+        refute reason =~ checked_in.secret_key_base
+      end
     end
 
     test "any model provider but the Fake (the ClaudeCLI server would start)" do
