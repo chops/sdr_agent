@@ -22,7 +22,12 @@ defmodule SdrAgent.Agents.AgentRun do
   operator-attention Failure (S2): entering failed or budget_exhausted, or
   cancelled by a system actor, opens a Failure and sets
   `attention_failure_id` in the same transaction (an operator cancel opens
-  none); an operator `retry` resolves the retried run's Failure.
+  none); an operator `retry` resolves the retried run's Failure. A run
+  stopped by a refused real-model reservation (C9: `:fail` with
+  `:grant_unavailable`, `:exhaust_budget` with `:grant_exhausted`, each with
+  argument `refusal_failure_id`) opens none and links the refusal's own
+  deduplicated Failure instead
+  (`SdrAgent.Agents.Changes.LinkRefusalAttention`).
 
   Counters: `:reserve_model_call` (atomic, refuses at `max_model_calls`),
   `:settle_model_call`, `:record_tool_call` (atomic, refuses at
@@ -68,11 +73,15 @@ defmodule SdrAgent.Agents.AgentRun do
     :run_budget_calls,
     :run_budget_tokens,
     :daily_budget,
+    :grant_exhausted,
+    :grant_unavailable,
     :invalid_model_output,
     :provider_error,
     :crash,
     :cancelled_by_operator
   ]
+  # C9: stop reasons of a refused real-model reservation (its Failure is linked).
+  @refused [:grant_exhausted, :grant_unavailable]
   @transitions [
     {:start, [:queued], :running},
     {:succeed, [:running], :succeeded},
@@ -206,7 +215,17 @@ defmodule SdrAgent.Agents.AgentRun do
 
       argument :status_reason, :atom,
         allow_nil?: false,
-        constraints: [one_of: [:invalid_model_output, :provider_error, :crash]]
+        constraints: [
+          one_of: [:invalid_model_output, :provider_error, :crash, :grant_unavailable]
+        ]
+
+      # C9: a refused real-model reservation's own Failure (required with,
+      # and only with, :grant_unavailable); linked instead of a new one.
+      argument :refusal_failure_id, :uuid
+      validate present(:refusal_failure_id), where: [argument_in(:status_reason, @refused)]
+
+      validate absent(:refusal_failure_id),
+        where: [negate(argument_in(:status_reason, @refused))]
 
       change set_attribute(:status_reason, arg(:status_reason))
       change get_and_lock_for_update()
@@ -217,7 +236,10 @@ defmodule SdrAgent.Agents.AgentRun do
               severity: :critical,
               message: {__MODULE__, :attention_message},
               field: :attention_failure_id,
-              operation_field: :operation_id}
+              operation_field: :operation_id},
+             where: [absent(:refusal_failure_id)]
+
+      change SdrAgent.Agents.Changes.LinkRefusalAttention, where: [present(:refusal_failure_id)]
 
       change {Stamp, fields: [:finished_at]}
 
@@ -230,7 +252,17 @@ defmodule SdrAgent.Agents.AgentRun do
 
       argument :status_reason, :atom,
         allow_nil?: false,
-        constraints: [one_of: [:run_budget_calls, :run_budget_tokens, :daily_budget]]
+        constraints: [
+          one_of: [:run_budget_calls, :run_budget_tokens, :daily_budget, :grant_exhausted]
+        ]
+
+      # C9: a refused real-model reservation's own Failure (required with,
+      # and only with, :grant_exhausted); linked instead of a new one.
+      argument :refusal_failure_id, :uuid
+      validate present(:refusal_failure_id), where: [argument_in(:status_reason, @refused)]
+
+      validate absent(:refusal_failure_id),
+        where: [negate(argument_in(:status_reason, @refused))]
 
       change set_attribute(:status_reason, arg(:status_reason))
       change get_and_lock_for_update()
@@ -241,7 +273,10 @@ defmodule SdrAgent.Agents.AgentRun do
               severity: :critical,
               message: {__MODULE__, :attention_message},
               field: :attention_failure_id,
-              operation_field: :operation_id}
+              operation_field: :operation_id},
+             where: [absent(:refusal_failure_id)]
+
+      change SdrAgent.Agents.Changes.LinkRefusalAttention, where: [present(:refusal_failure_id)]
 
       change {Stamp, fields: [:finished_at]}
 

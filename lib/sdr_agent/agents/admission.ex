@@ -315,6 +315,25 @@ defmodule SdrAgent.Agents.Admission do
     :ok
   end
 
+  @doc "The newest live refusal Failure of `run` (see `SdrAgent.Agents.reservation_refusal_failure/2`)."
+  def refusal_failure(run, actor) do
+    Failure
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(
+      tenant_id == ^run.tenant_id and class == :budget_exhausted and
+        subject_resource == ^@run_resource and subject_id == ^run.id and
+        status in [:open, :acknowledged]
+    )
+    |> Ash.Query.sort(occurred_at: :desc, id: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read_one()
+    |> case do
+      {:ok, %Failure{} = failure} -> {:ok, failure}
+      {:ok, nil} -> {:error, Ash.Error.Query.NotFound.exception(resource: Failure)}
+      error -> error
+    end
+  end
+
   @doc "The detail reason recorded for a refusal reason (R0 packet, Operations.Failure)."
   def reason_name({:budget_exhausted, :grant}), do: "grant_exhausted"
   def reason_name({:budget_exhausted, :grant_day}), do: "grant_day_exhausted"

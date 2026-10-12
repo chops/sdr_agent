@@ -11,10 +11,14 @@ defmodule SdrAgent.SDR.Model do
   call is not made; the reservation inside the provider enforces the same
   limits atomically. Invalid output fails the run with
   `invalid_model_output`, a provider error with `provider_error` — Postgres
-  records the outcome; the caller receives `{:error, {:halt, reason}}`.
+  records the outcome; the caller receives `{:error, {:halt, reason}}`. A
+  refused real-model reservation (C9) stops the run `budget_exhausted` with
+  `:grant_exhausted` for a grant cap, or `failed` with `:grant_unavailable`
+  otherwise, linking the refusal's own Failure (one attention item).
   """
 
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Admission
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.Prompts
@@ -22,6 +26,15 @@ defmodule SdrAgent.SDR.Model do
 
   @rule "sdr.budget_gate"
   @rule_version "1"
+  # C9 reservation refusals (`SdrAgent.Agents.Admission`): a grant cap stops
+  # the run budget_exhausted (:grant_exhausted); no grant, allocation or
+  # usage origin fails it (:grant_unavailable).
+  @grant_caps [
+    {:budget_exhausted, :grant},
+    {:budget_exhausted, :grant_day},
+    {:budget_exhausted, :allocation}
+  ]
+  @grant_unavailable [:no_eligible_grant, :no_allocation, :ambiguous_allocation, :no_usage_origin]
 
   @doc """
   Calls the model for `purpose` with structured `input`; returns
@@ -117,6 +130,12 @@ defmodule SdrAgent.SDR.Model do
   defp settle({:error, {:budget_exhausted, :daily}}, ctx, run),
     do: halt_budget(ctx, run, :daily_budget)
 
+  defp settle({:error, reason}, ctx, run) when reason in @grant_caps,
+    do: halt_refused(ctx, run, reason, :grant_exhausted)
+
+  defp settle({:error, reason}, ctx, run) when reason in @grant_unavailable,
+    do: halt_refused(ctx, run, reason, :grant_unavailable)
+
   defp settle({:error, %Ash.Error.Invalid{}}, ctx, run),
     do: halt_budget(ctx, run, :run_budget_calls)
 
@@ -125,6 +144,36 @@ defmodule SdrAgent.SDR.Model do
 
   defp settle({:error, reason}, ctx, run),
     do: halt_fail(ctx, run, :provider_error, "model provider error: #{safe(reason)}")
+
+  # C9: a refused real-model reservation already committed its own
+  # deduplicated Failure; the run (and through it its Operation) links that
+  # one instead of opening a second attention item.
+  defp halt_refused(ctx, run, refusal, reason) do
+    with {:ok, failure} <- Agents.reservation_refusal_failure(run, actor: ctx.actor),
+         {:ok, _run} <- stop_refused(ctx, run, refusal, reason, failure.id) do
+      {:error, {:halt, reason}}
+    end
+  end
+
+  defp stop_refused(ctx, run, _refusal, :grant_exhausted, failure_id) do
+    Agents.exhaust_run_budget(
+      run,
+      %{status_reason: :grant_exhausted, refusal_failure_id: failure_id},
+      actor: ctx.actor
+    )
+  end
+
+  defp stop_refused(ctx, run, refusal, :grant_unavailable, failure_id) do
+    Agents.fail_run(
+      run,
+      %{
+        status_reason: :grant_unavailable,
+        refusal_failure_id: failure_id,
+        failure_reason: "model call reservation refused: #{Admission.reason_name(refusal)}"
+      },
+      actor: ctx.actor
+    )
+  end
 
   defp halt_budget(ctx, run, reason) do
     with {:ok, _run} <- Agents.exhaust_run_budget(run, %{status_reason: reason}, actor: ctx.actor) do

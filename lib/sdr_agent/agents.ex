@@ -384,6 +384,16 @@ defmodule SdrAgent.Agents do
   defp invalid_input(field, message),
     do: Ash.Error.to_error_class(InvalidAttribute.exception(field: field, message: message))
 
+  @doc """
+  The live (open or acknowledged) Failure a refused reservation of `run`
+  opened or reused (C9), newest first: a `budget_exhausted` Failure whose
+  subject is the run. A run that is still running has no other such Failure
+  (its own stop opens one only when it leaves `running`).
+  """
+  def reservation_refusal_failure(run, opts) do
+    Admission.refusal_failure(run, Keyword.get(opts, :actor))
+  end
+
   @doc "The effective daily model-call limit: `min(config, 200)` (ADR-0004)."
   def daily_model_call_limit do
     case Application.get_env(:sdr_agent, :daily_model_call_limit) do
