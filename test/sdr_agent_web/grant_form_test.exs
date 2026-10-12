@@ -329,5 +329,54 @@ defmodule SdrAgentWeb.GrantFormTest do
       assert GrantForm.denver(~U[2026-11-02 19:00:00Z]) == "Nov 2, 2026 12:00 MST"
       assert GrantForm.utc(~U[2026-11-02 19:00:00Z]) == "Nov 2, 2026 19:00 UTC"
     end
+
+    test "shows seconds and microseconds when present, so distinct instants never look equal" do
+      assert GrantForm.utc(~U[2026-10-31 12:00:59Z]) == "Oct 31, 2026 12:00:59 UTC"
+      assert GrantForm.utc(~U[2026-10-31 12:00:00.000000Z]) == "Oct 31, 2026 12:00 UTC"
+
+      assert GrantForm.utc(~U[2026-10-31 12:00:00.123456Z]) ==
+               "Oct 31, 2026 12:00:00.123456 UTC"
+
+      assert GrantForm.denver(~U[2026-10-31 18:00:59Z]) == "Oct 31, 2026 12:00:59 MDT"
+      refute GrantForm.utc(~U[2026-10-31 12:00:00Z]) == GrantForm.utc(~U[2026-10-31 12:00:59Z])
+    end
+  end
+
+  describe "normalize/1 (Codex review of af2733b)" do
+    test "keeps only the form's shape: known keys, string or string-list values, map rows" do
+      raw = %{
+        "name" => "G",
+        "total_attempts" => %{"x" => 1},
+        "profile_ids" => ["claude_cli_opus", 7, %{}],
+        "colour" => "blue",
+        "allocations" => %{
+          "0" => "x",
+          "1" => %{"key" => "b1", "colour" => "blue", "attempts" => ["2"], "applies_to" => "b1"},
+          "two" => %{"key" => "b2"}
+        }
+      }
+
+      params = GrantForm.normalize(raw)
+
+      assert params["name"] == "G"
+      assert params["total_attempts"] == ""
+      assert params["profile_ids"] == ["claude_cli_opus"]
+      refute Map.has_key?(params, "colour")
+      assert Map.keys(params["allocations"]) == ["1"]
+
+      assert params["allocations"]["1"] == %{
+               "key" => "b1",
+               "profile_id" => "",
+               "applies_to" => [],
+               "attempts" => "",
+               "available_from" => "",
+               "available_until" => ""
+             }
+    end
+
+    test "a non-map allocations value or payload becomes an empty form" do
+      assert GrantForm.normalize(%{"allocations" => "x"})["allocations"] == %{}
+      assert GrantForm.normalize("x") == GrantForm.new_params()
+    end
   end
 end

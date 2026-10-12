@@ -123,7 +123,7 @@ defmodule SdrAgentWeb.AdminLive do
     {:noreply, assign(socket, budget: new_budget(:create, nil), confirm: nil)}
   end
 
-  def handle_event("edit_grant", %{"id" => id}, socket) do
+  def handle_event("edit_grant", %{"id" => id}, socket) when is_binary(id) do
     case Agents.get_grant(id, actor: actor(socket)) do
       {:ok, %{status: :active} = grant} ->
         {:noreply, assign(socket, budget: new_budget(:edit, grant), confirm: nil)}
@@ -143,7 +143,7 @@ defmodule SdrAgentWeb.AdminLive do
   def handle_event("cancel_grant", _params, socket), do: {:noreply, assign(socket, budget: nil)}
 
   def handle_event("change_grant", %{"grant" => params}, socket),
-    do: update_budget(socket, &%{&1 | params: params})
+    do: update_budget(socket, &%{&1 | params: GrantForm.normalize(params)})
 
   def handle_event("add_allocation", _params, socket),
     do: update_budget(socket, &%{&1 | params: GrantForm.add_allocation(&1.params)})
@@ -157,7 +157,7 @@ defmodule SdrAgentWeb.AdminLive do
   end
 
   def handle_event("review_grant", %{"grant" => params}, socket),
-    do: update_budget(socket, &review(&1, params))
+    do: update_budget(socket, &review(&1, GrantForm.normalize(params)))
 
   def handle_event("back_to_edit", _params, socket),
     do: update_budget(socket, &%{&1 | step: :edit})

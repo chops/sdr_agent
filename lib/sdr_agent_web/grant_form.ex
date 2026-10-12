@@ -70,6 +70,42 @@ defmodule SdrAgentWeb.GrantForm do
     }
   end
 
+  @grant_text ~w(name purpose total_attempts per_utc_day_attempts starts_at expires_at)
+  @row_text ~w(key profile_id attempts available_from available_until)
+
+  @doc """
+  The form's params with the form's own shape, whatever an event carried:
+  known keys only, text fields as strings (anything else as ""), checkbox
+  groups as lists of strings, and allocation rows only as maps under
+  non-negative integer indexes. Everything the page stores or renders goes
+  through it, so a malformed event is refused inline, never a crash.
+  """
+  def normalize(params) when is_map(params) do
+    @grant_text
+    |> Map.new(&{&1, text_param(params[&1])})
+    |> Map.put("profile_ids", list_param(params["profile_ids"]))
+    |> Map.put("allocations", rows_param(params["allocations"]))
+  end
+
+  def normalize(_params), do: new_params()
+
+  defp rows_param(rows) when is_map(rows) do
+    for {index, row} <- rows, is_map(row), index_of(index) >= 0, into: %{} do
+      {index,
+       @row_text
+       |> Map.new(&{&1, text_param(row[&1])})
+       |> Map.put("applies_to", list_param(row["applies_to"]))}
+    end
+  end
+
+  defp rows_param(_rows), do: %{}
+
+  defp text_param(value) when is_binary(value), do: value
+  defp text_param(_value), do: ""
+
+  defp list_param(values) when is_list(values), do: Enum.filter(values, &is_binary/1)
+  defp list_param(_values), do: []
+
   @doc "Params showing `grant`'s current terms (times as Denver wall times); rows are indexed 0..n-1."
   def params_for(%ModelCallGrant{} = grant) do
     allocations =
@@ -508,11 +544,24 @@ defmodule SdrAgentWeb.GrantForm do
   def denver(nil), do: "—"
 
   def denver(%DateTime{} = utc),
-    do: utc |> DateTime.shift_zone!(@zone, @db) |> Calendar.strftime("%b %-d, %Y %H:%M %Z")
+    do: utc |> DateTime.shift_zone!(@zone, @db) |> Calendar.strftime(label_format(utc, "%Z"))
 
   @doc "`utc` in UTC (\"Nov 2, 2026 19:00 UTC\")."
   def utc(nil), do: "—"
-  def utc(%DateTime{} = utc), do: Calendar.strftime(utc, "%b %-d, %Y %H:%M UTC")
+  def utc(%DateTime{} = utc), do: Calendar.strftime(utc, label_format(utc, "UTC"))
+
+  # Seconds and microseconds are shown when present: parsing accepts them,
+  # so two distinct instants must never read the same on review.
+  defp label_format(%DateTime{second: second, microsecond: {usec, _precision}}, zone) do
+    clock =
+      cond do
+        usec != 0 -> "%H:%M:%S." <> String.pad_leading(Integer.to_string(usec), 6, "0")
+        second != 0 -> "%H:%M:%S"
+        true -> "%H:%M"
+      end
+
+    "%b %-d, %Y #{clock} #{zone}"
+  end
 
   defp int_param(nil), do: ""
   defp int_param(n) when is_integer(n), do: Integer.to_string(n)

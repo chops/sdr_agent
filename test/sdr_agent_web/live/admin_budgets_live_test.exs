@@ -348,6 +348,58 @@ defmodule SdrAgentWeb.AdminBudgetsLiveTest do
     end
   end
 
+  describe "review precision and malformed events (Codex review of af2733b)" do
+    test "a seconds-only window change shows distinct old and new values", %{conn: conn} = ctx do
+      grant = create!(ctx)
+      view = admin_view(conn)
+      view |> element("#edit-grant-#{grant.id}") |> render_click()
+
+      view
+      |> form("#grant-form", grant: %{"expires_at" => "2026-10-18T23:59:30"})
+      |> render_submit()
+
+      assert has_element?(view, "#review-changes", "Oct 18, 2026 23:59 MDT")
+      assert has_element?(view, "#review-changes", "Oct 18, 2026 23:59:30 MDT")
+      assert has_element?(view, "#review-changes", "Oct 19, 2026 05:59:30 UTC")
+    end
+
+    test "malformed change and review payloads neither crash the page nor write",
+         %{conn: conn} = ctx do
+      view = conn |> admin_view() |> open_create()
+
+      render_change(view, "change_grant", %{"grant" => "x"})
+      render_submit(view, "review_grant", %{"grant" => "x"})
+      render_submit(view, "review_grant", %{"grant" => %{"allocations" => "x"}})
+      render_submit(view, "review_grant", %{})
+
+      bad_rows = %{
+        "0" => "x",
+        "1" => %{"key" => "b1", "colour" => "blue", "attempts" => %{"a" => 1}},
+        "two" => ["y"]
+      }
+
+      render_change(view, "change_grant", %{"grant" => g_r0_params(%{"allocations" => bad_rows})})
+      assert has_element?(view, "#allocation-row-1")
+      refute has_element?(view, "#allocation-row-0")
+
+      render_submit(view, "review_grant", %{
+        "grant" => g_r0_params(%{"allocations" => bad_rows, "name" => %{"x" => "y"}})
+      })
+
+      refute has_element?(view, "#grant-review")
+      assert has_element?(view, "#grant-form", "attempts is required")
+      assert has_element?(view, "#grant-form", "is required")
+
+      render_click(view, "edit_grant", %{"id" => "not-a-uuid"})
+      render_click(view, "edit_grant", %{"id" => %{"x" => 1}})
+      render_click(view, "remove_allocation", %{"index" => %{"x" => 1}})
+
+      assert has_element?(view, "#model-call-budgets")
+      assert grants!(ctx) == []
+      assert events_of_type(ctx.tenant, "model.grant.created") == []
+    end
+  end
+
   describe "revoke and release" do
     test "revoke asks for confirmation in the page and is terminal", %{conn: conn} = ctx do
       grant = create!(ctx)
