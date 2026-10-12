@@ -102,6 +102,37 @@ defmodule SdrAgent.CalibrationConsoleTest do
     end
   end
 
+  describe "check_assets/1: serve refuses dead pages" do
+    setup do
+      dir =
+        Path.join(System.tmp_dir!(), "calibration-static-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      %{dir: dir}
+    end
+
+    test "refuses when the LiveView bundle or the stylesheet is missing", %{dir: dir} do
+      assert {:error, reason} = CalibrationConsole.check_assets(dir)
+      assert reason =~ "assets/js/app.js is missing"
+      assert reason =~ "mix assets.build"
+
+      File.mkdir_p!(Path.join(dir, "assets/js"))
+      File.write!(Path.join(dir, "assets/js/app.js"), "")
+      assert {:error, reason} = CalibrationConsole.check_assets(dir)
+      assert reason =~ "assets/css/app.css is missing"
+    end
+
+    test "accepts built assets", %{dir: dir} do
+      for file <- ["assets/js/app.js", "assets/css/app.css"] do
+        File.mkdir_p!(Path.dirname(Path.join(dir, file)))
+        File.write!(Path.join(dir, file), "x")
+      end
+
+      assert CalibrationConsole.check_assets(dir) == :ok
+    end
+  end
+
   describe "plan/1 refuses" do
     test "any build but the test-seam build" do
       for env <- [:dev, :prod] do
