@@ -102,5 +102,24 @@ Logs: /tmp/codex-h1-precommit.log, /tmp/codex-h1-verify.log,
 logs and Ash notification warnings do not represent failing tests; no
 assertion or protection was weakened.
 
-Independent exact-head review, owner task walk and ADR-0015 decision remain
-pending; no runtime implementation authorized here.
+Independent review: Claude APPROVE exact 8bcd1cc (PR #142), answer
+m_1791848935000021056_09ca501d replying to
+m_1791848865137463708_a377a2ae. Four non-blocking notes recorded:
+- Resolve-with-note and resolved-Failure/live-Operation states are not in
+  these four mockups. Contract walk Q4 is deferred to H1-02; this walk cannot
+  establish acceptance of that action or those states.
+- The draft revision number is in technical details, not the primary view.
+  Do not expect the owner to name a revision in the walkthrough.
+- Empty wording differs from C1's agreed "No drafts or failures need your
+  attention in this view." Reconcile presentation copy after the walk;
+  no backend/count/empty contract changes are authorized by this wording.
+- Evidence limitation: Claude reports earlier framing named "approve for
+  capture", "earlier yes doesn't count", and "part of the inbox didn't
+  load", and Q1 asked who/which version/what happens next. This mildly
+  primed the owner before these mockups. Record later answers as prompted
+  walkthrough evidence, not an unprimed usability trial. Claude switches
+  to the neutral script above from here.
+
+Owner task walk and ADR-0015 decision remain pending; no runtime
+implementation authorized here. These notes-only additions change none
+of the reviewed HTML states.
