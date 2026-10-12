@@ -81,14 +81,20 @@ all its dependent rows **before** its first audited write.
 2. **Reconcile** (`Witness.reconcile/2`, REC, with `gate:`). Observation holds
    no locks. Its persist step locks the Operation `FOR SHARE`, then the
    invocation `FOR UPDATE`, then the head, then writes links and, if needed,
-   the gate cause with `operation_id`. Then it commits. The facade waits for
-   this, bounded, with no lock of its own held.
+   the gate cause with `operation_id`. Then it commits. It returns a receipt
+   naming the link it evaluated and the gate cause it opened or found (its
+   Failure id). The facade waits for this, bounded, with no lock of its own
+   held.
 3. **Finalize** in one transaction, in this order:
    1. run `FOR UPDATE`;
    2. the run's Operation `FOR SHARE`;
    3. invocation `FOR SHARE`;
    4. the current primary link `FOR SHARE`, re-validated;
-   5. the live gate cause (if any) `FOR UPDATE`;
+   5. the **exact selected gate cause** `FOR UPDATE`, live or already
+      resolved. It is identified by the receipt that reconcile returns to
+      the facade (its Failure id) and carried into finalization, never by a
+      live or newest lookup. A cause created later in this transaction,
+      under the head, is already owned by it;
    6. the chain head, explicitly;
    7. then, all under the head with every dependent row already locked: the
       dedupe check and insert of a timeout or interrupted cause (its FKs find
@@ -118,8 +124,23 @@ the cause with a note. It is shown as a Home row through C1.
 
 Calibration uses the accepted isolated harness, so no ADR change is needed:
 
-- **The calibration instance.** It is the throw-away test database, served
-  with `bin/demo --test serve` for the owner's admin form.
+- **The calibration instance.** It is a dedicated, persistent database,
+  `sdr_agent_calibration`, served for the owner's admin form by a new
+  reviewed entry point, `bin/calibration-console`. That entry point is part
+  of R0-07's implementation and review. It does not reuse `bin/demo` or
+  `Mix.Tasks.Sdr.Demo.Serve`, whose guards correctly accept only the
+  `sdr_agent_test…_demo` smoke database. It:
+  - runs the test-seam build against exactly that database (refusing any
+    other);
+  - listens on loopback only, on its own port 4124, which is not the demo
+    port 4120 or the smoke port 4122;
+  - has no reset, drop or seed path except a one-time create-if-absent with
+    migrations;
+  - starts no model server, makes no model call, and offers only the admin
+    sign-in and budget pages.
+  
+  The owner bootstraps their own admin account in it with the existing
+  first-admin bootstrap.
 - **The owner's grant.** The owner signs in to that instance and creates the
   **single authoritative G-R0** there through the reviewed admin form: four
   attempts, two `:proof` per profile, expiry 2026-10-19 05:59 UTC. No other
@@ -130,8 +151,8 @@ Calibration uses the accepted isolated harness, so no ADR change is needed:
   - `bin/demo --test reset` and ordinary test setup refuse to drop or reset
     it, and it is never auto-created by tests.
   - It lives until the owner decides otherwise, after promotion and review.
-  - "Throw-away" does not apply to it, because it holds the real-call
-    ledger and the G-R0 grant.
+  - It is not a throw-away database: it holds the real-call ledger and the
+    G-R0 grant.
 - **Running the harness.** The owner then runs the external calibration
   harness (an owner-run command, one profile at a time). It binds to that
   G-R0 and refuses if the grant is missing, revoked, expired or exhausted.
@@ -178,7 +199,12 @@ Calibration uses the accepted isolated harness, so no ADR change is needed:
   - mismatch, missing, timeout and unreadable → withheld, the exact run stop
     and one cause, attempt still charged, no new call;
   - no lock held during the wait (a concurrent reservation proceeds);
-  - resolution race.
+  - resolution race, including a cause resolved before finalization: it is
+    locked before the head, the run stops on it, no crash is recorded, and a
+    held-lock regression covers it.
+- **Calibration console:** `bin/calibration-console` refuses any database
+  but `sdr_agent_calibration`, binds loopback 4124, has no reset or drop
+  path, and starts no model server.
 - **Crash:** completed with no release → the sweeper writes
   `:gate_interrupted`, stops the run, and no model call follows.
 - **Calibration harness (test seams):** binds to the single G-R0; refuses
@@ -193,4 +219,8 @@ Calibration uses the accepted isolated harness, so no ADR change is needed:
 - Round 2 at bf8d70a: **NEEDS-REVIEW**, narrowed: implicit audit and FK
   lock order; mismatch cause ownership bridge; calibration evidence for
   failed attempts; partition lifetime; backfill attention.
-- Round 3: this revision. Verdict _pending_.
+- Round 3 at b3cb745: **NEEDS-REVIEW**, two narrow items: lock the exact
+  selected cause before the head even when it is resolved, carried by the
+  reconcile receipt; and the calibration console cannot reuse the
+  `bin/demo` smoke serve.
+- Round 4: this revision. Verdict _pending_.
