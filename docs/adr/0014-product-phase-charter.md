@@ -97,11 +97,12 @@ constraints that protect real people and secrets are explicit.
 schedule controls (WIP limit, scope-cut trigger, workshop fallback) manage
 this.
 
-## Amendment 2 (proposed 2026-10-12): real companies and people for the owner's demo (constraint 7)
+## Amendment 2 (2026-10-12): real companies and people for the owner's demo (constraint 7)
 
-**Status: PROPOSED.** Not in force until the owner explicitly accepts it in
-chat and the acceptance is recorded here. Until then constraint 7 stays as
-written and the app's synthetic-data guard stays as it is. Decisions:
+**Status: ACCEPTED** by the owner on 2026-10-12 (see Acceptance below).
+Constraint 7 now reads as amended here. The app's synthetic-data guard
+changes only through contract C5 (story C5-04); until that merges the guard
+stays as it is. Decisions:
 walkthrough rows F1 to F1d (D-032 to D-034, D-038 to D-047) and 22 (D-101).
 Independent of the still-open Amendment 1 (PR #37).
 
@@ -196,5 +197,7 @@ only (1): real data never means a real message is sent.
 
 ### Acceptance (to fill)
 
-- Owner words, time (America/Denver), where:
-- Independent review: Codex, commit and verdict:
+- Owner words: "i accept PR #125"; 2026-10-12 (America/Denver), in the
+  private Claude session chat.
+- Independent review: Codex APPROVE of exact head 8a401f1 (after CHANGES
+  REQUESTED on a552e15 was addressed); reply 01a130fa.
