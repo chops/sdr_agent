@@ -240,7 +240,7 @@ commit and green CI on it):
 
 **What we learned:**
 
-- **Review is the real limit**, as planned: about a dozen review rounds in
+- **Review is the real limit**, as planned: about twenty review rounds in
   one day.
 - **Reviews found real defects:** deadlocks, bypasses, a clock race, and
   a lock theft that Codex reproduced with its own test. None was cosmetic.
