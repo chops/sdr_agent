@@ -134,11 +134,18 @@ only (1): real data never means a real message is sent.
 2. **Guard policy (contract C5, story C5-04).** With the switch on, the guard
    allows non-reserved domains for accounts, contacts and research sources;
    everything else the guard protects stays as it is unless C5's reviewed
-   contract changes it. Allow and deny tests cover both modes.
+   contract changes it. With the switch off, already persisted real leads
+   are not processed (no research, drafting or model calls), not only new
+   ones refused at ingestion. Allow and deny tests cover both modes, and
+   tests show personal content cannot reach logs, trace attributes, events
+   or public evidence through any path, not only GenAI content capture.
 3. **Approved flow (build plan §9a).**
    - Search queries go to Brave and Exa; company web pages are fetched
      directly.
-   - Full fetched content is stored as local audit payloads.
+   - Full fetched content is stored as local audit payloads, where the
+     provider's terms permit it. If a provider permits only bounded
+     snippets, local storage is bounded too, not only the model input
+     (build plan §9a).
    - Research text and prospect fields go to Anthropic through the Claude CLI
      on the owner's subscription.
    - Raw model traffic is kept in the private local witness store.
@@ -158,8 +165,13 @@ only (1): real data never means a real message is sent.
 
 ### Retention and deletion (simple rules, D-046)
 
-- Real data lives only on the owner's machine: the local database and the
-  private witness store. Agents do not copy it elsewhere.
+- App-held copies stay in the owner's local database and private witness
+  store (and any private local artifact the owner explicitly approves).
+  The processing transfers in rule 3 do leave the machine: query terms go to
+  Brave and Exa, and research text and prospect fields go to Anthropic.
+  Provider-side retention follows each provider's terms and the owner's
+  account settings, and a local wipe does not erase it. Agents make no
+  additional copies.
 - Someone who asks not to be contacted is suppressed at once. Outreach to
   them stops, and suppression is never lifted by the agent.
 - There is no deletion feature in the MVP. The audit trail, payloads and
@@ -167,7 +179,9 @@ only (1): real data never means a real message is sent.
   record. This is the accepted limitation in item 7.
 - Review point: by 2026-12-06 (30 days after the workshop) the owner decides
   whether to keep the local real-data database or wipe it. Wiping means
-  dropping the database and the witness store, done by the owner. Any
+  dropping the database and the witness store, done by the owner. This is
+  the owner's decision point, not authority for agents to delete anything,
+  and it does not erase provider-side copies or backups. Any
   backups of the owner's machine are the owner's to manage.
 - Before any decision to productize: an erasable personal-data store, legal
   review and redaction are required first. All three are deferred today
