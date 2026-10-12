@@ -244,6 +244,35 @@ defmodule SdrAgent.Agents.ModelResultReleaseTest do
       assert id == mismatch.id
     end
 
+    test "a withheld decision with a link copies the link's projection and method (MF2)", ctx do
+      mismatch = AgentsFixtures.reconciled_link!(ctx.invocation, ctx.rec, link_status: :mismatch)
+      attrs = withheld(ctx.invocation, :witness_mismatch, mismatch)
+
+      assert {:ok, release} = decide(attrs, actor: ctx.agent)
+      assert release.wire_witness_link_id == mismatch.id
+      assert release.projection_version == mismatch.evidence["projection_version"]
+      assert release.method == mismatch.method
+      assert release.projection_version == AgentsFixtures.release_projection()
+
+      [event] = events_of_type(ctx.tenant, "model.result.withheld")
+      assert event.payload["changes"]["projection_version"] == release.projection_version
+      assert event.payload["changes"]["method"] == "propagated_id"
+
+      # An identical replay returns the same row and appends no event.
+      assert {:ok, again} = decide(attrs, actor: ctx.agent)
+      assert again.id == release.id
+
+      assert {again.projection_version, again.method} ==
+               {release.projection_version, release.method}
+
+      assert length(events_of_type(ctx.tenant, "model.result.withheld")) == 1
+
+      # Without a link, both stay nil.
+      other = new_invocation(ctx, "rel-nolink")
+      assert {:ok, bare} = decide(withheld(other, :witness_timeout), actor: ctx.agent)
+      assert {bare.projection_version, bare.method} == {nil, nil}
+    end
+
     test "released and withheld need a completed generation-2 ClaudeCLI invocation", ctx do
       fake =
         "rel-fake"
@@ -519,6 +548,22 @@ defmodule SdrAgent.Agents.ModelResultReleaseTest do
       assert latch.evidence_sha256 == hex(digest("calibration evidence"))
       assert [event] = events_of_type(ctx.tenant, "model.result.calibration")
       assert event.agent_run_id == ctx.proof.id
+    end
+
+    test "a calibration latch with a link copies its projection and method (MF2)", ctx do
+      link = AgentsFixtures.reconciled_link!(ctx.calibration, ctx.rec, link_status: :inferred)
+      attrs = calibration(ctx.calibration, wire_witness_link_id: link.id)
+      opts = [actor: ctx.agent, context: cal_context(ctx.calibration)]
+
+      assert {:ok, latch} = decide(attrs, opts)
+      assert latch.wire_witness_link_id == link.id
+
+      assert {latch.projection_version, latch.method} ==
+               {AgentsFixtures.release_projection(), :propagated_id}
+
+      assert {:ok, again} = decide(attrs, opts)
+      assert again.id == latch.id
+      assert length(events_of_type(ctx.tenant, "model.result.calibration")) == 1
     end
 
     test "a calibration latch is refused without the context, evidence, proof run or profile",

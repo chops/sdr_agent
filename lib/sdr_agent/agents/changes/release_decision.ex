@@ -17,15 +17,15 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
        context writes nothing.
        When the invocation already has a release, nothing else is checked:
        the upsert returns that row and step 4 compares it.
-    3. Per disposition:
+    3. Per disposition (any validated link's projection and method are
+       copied onto the release, whatever the disposition):
        * `:released` / `:withheld`: a completed generation-2 ClaudeCLI
          invocation of a non-`:proof` run; `:released` also needs a `:valid`
          output and a link that is this invocation's current, reconciled
          primary link, leaving the invocation `reconciled`, whose evidence
          names the invocation's CLI version, model, profile (round 5 item 7)
          and application digests, and
-         whose exact tuple is on the shipped allowlist. Its projection and
-         method are copied onto the release;
+         whose exact tuple is on the shipped allowlist;
        * `:calibration`: `SdrAgent.Agents.Checks.CalibrationContext` bound
          to this invocation and its profile, a generation-2 ClaudeCLI
          invocation of a `:proof` run in any terminal status;
@@ -118,10 +118,13 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
         :exists ->
           provenance(changeset, link)
 
+        # Every disposition with a validated link records the link's
+        # evaluated projection and method (item 5, code review MF2).
         :none ->
           changeset
           |> check_disposition(get.(:disposition), invocation, link)
           |> check_link(invocation, link)
+          |> provenance(link)
       end
     else
       {:error, field, message} -> invalid(changeset, field, message)
@@ -282,7 +285,7 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
         invalid(changeset, :wire_witness_link_id, "the invocation is not reconciled")
 
       true ->
-        provenance(changeset, link)
+        changeset
     end
   end
 
