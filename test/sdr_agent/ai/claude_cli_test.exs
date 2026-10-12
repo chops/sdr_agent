@@ -156,6 +156,8 @@ defmodule SdrAgent.AI.ClaudeCLITest do
           for pid <- [launch["child"], launch["root"]], os_alive?(pid), do: os_kill(pid)
           File.rm(record)
         end
+
+        for partial <- Path.wildcard(prefix <> "-partial-*"), do: File.rm(partial)
       end)
 
       %{prefix: prefix}
