@@ -1,0 +1,74 @@
+#+title: H1-01 founder-facing Home mockups
+#+date: 2026-10-12
+
+* Scope and approval
+Four local static design states of one Home design: normal draft/problem,
+changed draft/recipient, partial source load, and complete empty initial view.
+Synthetic examples only; no scripts, requests, database, real actions or
+application implementation. Owner task acceptance and ADR-0015 acceptance
+remain pending. Runtime H1/C1-02 work has no authority from these mockups.
+
+Approved priority/scope: m_1791846341000022677_9a4523b8, replying to
+codex-h1-mockups-view-20261012. H1 now; preempt only for slice A exact-head
+code review. C4 recheck then C3 stay queued behind that work.
+
+* Entity and architecture evaluation
+Entity Model trigger: no
+Reason: static fictional presentation of the already independently reviewed
+C1 projection/action contracts; no backend action, authority, stored value,
+resource, lifecycle, filter/count API or runtime behavior changes.
+No ADR required: no architecture decision; existing ADR-0015 stays proposed.
+Architecture unchanged — no diagram update needed.
+
+* Owner walk findings (verbatim, not accepted usability evidence)
+On ADR-0015:
+#+begin_quote
+shouldn't we also generate several mock-ups so i can see what the proposed home looks like? why or why not?
+#+end_quote
+On the five contract-walk questions:
+#+begin_quote
+i'm not sure how to answer these questions. walk me through this.
+#+end_quote
+Source: m_1791845298000019481_6d8f190e. Interpretation: the contract
+prototype did not let the owner judge founder-facing Home. Do not infer
+owner acceptance, a correct answer, or failure by the owner.
+
+* Files and steps
+1. docs/product/h1/normal.html: founder wording, urgent problem before draft;
+   fragment-linked synthetic inspection/action previews. Publish this first.
+2. docs/product/h1/stale.html: changed draft/recipient; old approval refuses,
+   fresh review required; no silently retargeted decision.
+3. docs/product/h1/partial.html: successful draft source plus visible failed
+   problem source; no fabricated problem, count or all-clear.
+4. docs/product/h1/empty.html: honest complete empty view of initial drafts
+   and problems only, not global MVP coverage.
+5. Validate CSP, no script/remote/form/mutation paths, local/fragment links,
+   unique ids, desktop/mobile layout and keyboard-visible focus; request
+   independent exact-head review, then owner walk.
+
+* Verification and limits
+Static design documents change no executable application behavior: no
+runtime behavior RED/GREEN gate is claimed. Use structural checks and
+isolated-browser rendering/click/keyboard checks; ordinary full repository
+gate before the final PR. No new dependency or generator required.
+Technical internals live only in optional details. No total-pending count
+or global empty promise. Disabled research retry does not grant spend.
+Only fictional data may be captured in browser screenshots.
+
+* Neutral walk script
+First explain only: "These are fictional examples. Nothing you click will
+change data or send an email. Imagine these arrived while you were away."
+Then ask, without a suggested answer:
+- Normal: "What do you think needs you here? What would you do first?"
+- Draft detail: "What would happen if you chose this action?"
+- Changed: "What do you think happened? What would you do next?"
+- Partial: "What can you tell from this screen, and what can't you tell?"
+- Empty: "What does this screen tell you about your work?"
+Clarify unfamiliar task wording if asked, but do not teach the desired
+answer. Record first interpretation, actions, confusing labels and requests
+before discussing internals. Rejection/confusion is useful evidence.
+
+* Progress
+Plan recorded; mockups and verification in progress. First normal preview
+target: 30–45 minutes focused; four-state first pass: 90–120 minutes focused.
+Only slice A code review may preempt; report interruption and revised ETA.
