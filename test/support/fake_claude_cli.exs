@@ -20,7 +20,7 @@ prose =
 # any other variable, so the dump cannot capture an operator credential).
 observed = ~w(SDR_MODEL_INVOCATION_ID SDR_TRACEPARENT CLAUDE_CODE_USE_BEDROCK
               CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY ANTHROPIC_BEDROCK_BASE_URL
-              ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_FOUNDRY_BASE_URL)
+              ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_FOUNDRY_BASE_URL LLM_PROXY_SHIM_CLAUDE_BIN)
 
 case mode do
   "witness" ->
@@ -192,6 +192,20 @@ case mode do
 
     IO.puts(init)
     IO.puts(result)
+
+  "pinned" ->
+    # argv: pinned <expected path>. Plays llm-proxy-shim for R0-02: it
+    # answers only when the launch named exactly the expected pinned CLI in
+    # LLM_PROXY_SHIM_CLAUDE_BIN; otherwise it exits without an init event,
+    # so the call fails closed (missing_init_attestation).
+    expected = Enum.at(System.argv(), 1)
+
+    if is_binary(expected) and System.get_env("LLM_PROXY_SHIM_CLAUDE_BIN") == expected do
+      IO.puts(init)
+      IO.puts(result)
+    else
+      System.halt(3)
+    end
 
   "env_names" ->
     # argv: env_names <dump file>. Records only the NAMES of the child's

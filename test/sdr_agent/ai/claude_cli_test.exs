@@ -4,6 +4,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
   alias SdrAgent.AI.ModelProvider.CodexAppServer
+  alias SdrAgent.Test.PinnedCLI
 
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
@@ -128,6 +129,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
         {ClaudeCLI,
          name: ClaudeCLI.server(),
          command: System.find_executable("elixir"),
+         test_launcher: true,
          command_args: [@fake, "env_dump", dump, "300"]}
       )
 
@@ -203,6 +205,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
       {:ok, server} =
         ClaudeCLI.start_link(
           command: System.find_executable("elixir"),
+          test_launcher: true,
           command_args: [@fake, "env_dump", Path.join(root, "call"), "700"],
           timeout: 10_000
         )
@@ -503,6 +506,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
       [
         name: ClaudeCLI.server(),
         command: System.find_executable("elixir"),
+        test_launcher: true,
         command_args: [@fake, "hang", prefix]
       ],
       opts
@@ -581,6 +585,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
     [
       name: ClaudeCLI.server(),
       command: System.find_executable("elixir"),
+      test_launcher: true,
       command_args: [@fake, mode]
     ]
   end
@@ -590,12 +595,124 @@ defmodule SdrAgent.AI.ClaudeCLITest do
     assert {:error, :codex_app_server_disabled} = CodexAppServer.complete(request(), [])
   end
 
-  @tag :external
-  @tag timeout: 180_000
-  test "real Claude CLI smoke attests the resolved opus model and no capabilities" do
+  # R0-02: this used to be an :external smoke that spent a real model call
+  # through `start_link([])`: the real shim with no pin, so the shim fell back
+  # to its default `claude-code` on PATH. That configuration now never
+  # launches. Real calls are staged until R0-03, C9 and R0-07; the budgeted
+  # calibration calls belong to the reviewed R0-07 harness, not this suite.
+  test "the former real-smoke configuration (real shim, no pin) never launches" do
+    dir = Path.join(System.tmp_dir!(), "sdr-claude-smoke-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+    counter = PinnedCLI.stub_shim!(dir)
+
     {:ok, server} = ClaudeCLI.start_link([])
-    assert {:ok, result} = ClaudeCLI.complete(request(), server: server)
-    assert result.model == "claude-opus-5-5"
+    assert {:error, :pinned_cli_unavailable} = ClaudeCLI.complete(request(), server: server)
+
+    {:ok, server} = ClaudeCLI.start_link(executable: PinnedCLI.inject_identity!())
+    assert {:error, :real_model_staged} = ClaudeCLI.complete(request(), server: server)
+
+    assert PinnedCLI.launches(counter) == 0
+  end
+
+  describe "R0-02 the app's pinned CLI (ADR-0004 R0 amendment, item 1)" do
+    setup do
+      dump = Path.join(System.tmp_dir!(), "sdr-claude-pin-#{System.unique_integer([:positive])}")
+      previous = System.get_env("LLM_PROXY_SHIM_CLAUDE_BIN")
+
+      on_exit(fn ->
+        dump |> dumps() |> Enum.each(&File.rm/1)
+
+        if previous,
+          do: System.put_env("LLM_PROXY_SHIM_CLAUDE_BIN", previous),
+          else: System.delete_env("LLM_PROXY_SHIM_CLAUDE_BIN")
+      end)
+
+      %{dump: dump, bin: PinnedCLI.inject_identity!()}
+    end
+
+    test "the launch names the pinned CLI to the shim, only in the child", ctx do
+      System.delete_env("LLM_PROXY_SHIM_CLAUDE_BIN")
+      {:ok, server} = start_server("pinned", [ctx.bin], executable: ctx.bin)
+
+      assert {:ok, result} = ClaudeCLI.complete(request(), server: server)
+      assert result.output == %{"answer" => "qualified", "score" => 42}
+      assert System.get_env("LLM_PROXY_SHIM_CLAUDE_BIN") == nil
+    end
+
+    test "the configured path wins over any parent LLM_PROXY_SHIM_CLAUDE_BIN", ctx do
+      System.put_env("LLM_PROXY_SHIM_CLAUDE_BIN", "/usr/local/bin/claude")
+      {:ok, server} = start_server("env_dump", [ctx.dump], executable: ctx.bin)
+
+      assert {:ok, _} = ClaudeCLI.complete(request(), server: server)
+      assert [child] = read_dumps(ctx.dump)
+      assert child["LLM_PROXY_SHIM_CLAUDE_BIN"] == ctx.bin
+    end
+
+    test "without a configured pinned CLI the parent's value never reaches the shim", ctx do
+      System.put_env("LLM_PROXY_SHIM_CLAUDE_BIN", "/usr/local/bin/claude")
+      {:ok, server} = start_server("env_dump", [ctx.dump])
+
+      assert {:ok, _} = ClaudeCLI.complete(request(), server: server)
+      assert [child] = read_dumps(ctx.dump)
+      assert child["LLM_PROXY_SHIM_CLAUDE_BIN"] == nil
+    end
+
+    test "a shim that is not handed the pinned path fails closed", ctx do
+      {:ok, server} = start_server("pinned", [ctx.bin])
+      assert {:error, :missing_init_attestation} = ClaudeCLI.complete(request(), server: server)
+    end
+
+    test "a missing or invalid pinned CLI is refused unlaunched, never PATH", ctx do
+      for executable <- [
+            PinnedCLI.missing_store_path(),
+            "claude-code",
+            "/bin/sh",
+            ctx.bin <> "/",
+            Path.join(Path.dirname(ctx.bin), "elixirc")
+          ] do
+        {:ok, server} = start_server("env_dump", [ctx.dump], executable: executable)
+
+        assert {:error, :pinned_cli_unavailable} =
+                 ClaudeCLI.complete(request(), server: server),
+               executable
+      end
+
+      assert read_dumps(ctx.dump) == []
+    end
+
+    test "the named server publishes the pinned path it launches (no CLI run at boot)", ctx do
+      start_supervised!({ClaudeCLI, Keyword.put(named_opts("ready"), :executable, ctx.bin)})
+      bin = ctx.bin
+      assert %{status: :pending, executable: ^bin, executable?: true} = ClaudeCLI.attestation()
+      assert read_dumps(ctx.dump) == []
+    end
+
+    test "a named server whose pinned CLI is missing publishes it as unavailable" do
+      missing = PinnedCLI.missing_store_path()
+      start_supervised!({ClaudeCLI, Keyword.put(named_opts("ready"), :executable, missing)})
+
+      assert %{status: :pending, executable: ^missing, executable?: false} =
+               ClaudeCLI.attestation()
+
+      assert {:error, :pinned_cli_unavailable} = ClaudeCLI.complete(request(), [])
+    end
+
+    test "nothing in lib/ outside the ClaudeCLI launch reads or sets the shim's CLI variable" do
+      readers =
+        "lib/**/*.ex"
+        |> Path.wildcard()
+        |> Enum.filter(&(File.read!(&1) =~ "LLM_PROXY_SHIM_CLAUDE_BIN"))
+
+      assert readers == ["lib/sdr_agent/ai/model_provider/claude_cli.ex"]
+
+      configs =
+        "config/*.exs"
+        |> Path.wildcard()
+        |> Enum.filter(&(File.read!(&1) =~ "SDR_CLAUDE_CLI_BIN"))
+
+      assert configs == ["config/runtime.exs"]
+    end
   end
 
   describe "S12b witness propagation (child environment only)" do
@@ -776,6 +893,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
       Keyword.merge(
         [
           command: System.find_executable("elixir"),
+          test_launcher: true,
           command_args: [@fake, mode | extra_args]
         ],
         opts

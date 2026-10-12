@@ -21,8 +21,10 @@ defmodule SdrAgent.Audit.ReconciliationContentTest do
 
   setup do
     tenant = bootstrap!()
+    # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+    AgentsFixtures.grant!(tenant)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
-    attrs = AgentsFixtures.model_attrs("rec-read") |> Map.put(:provider, :claude_cli)
+    attrs = AgentsFixtures.model_attrs("rec-read") |> AgentsFixtures.with_provider(:claude_cli)
     {:ok, invocation} = Agents.reserve_model_invocation(run, attrs, actor: agent)
     {:ok, invocation} = Agents.mark_model_invocation_sent(invocation, actor: agent)
 

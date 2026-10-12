@@ -26,6 +26,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsTest do
 
   setup do
     tenant = bootstrap!()
+    # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+    AgentsFixtures.grant!(tenant)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant, max_model_calls: 100)
 
     root =
@@ -53,6 +55,7 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsTest do
       AgentsFixtures.model_attrs(key)
       |> Map.merge(%{
         provider: :claude_cli,
+        profile_id: :claude_cli_opus,
         model_id: "claude-opus-5-5",
         model_catalog_entry: ClaudeCLI.provenance().model_catalog_entry,
         request:

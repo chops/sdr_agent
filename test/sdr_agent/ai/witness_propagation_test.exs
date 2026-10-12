@@ -24,12 +24,15 @@ defmodule SdrAgent.AI.WitnessPropagationTest do
 
   setup do
     tenant = bootstrap!()
+    # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+    AgentsFixtures.grant!(tenant)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
     dump = Path.join(System.tmp_dir!(), "sdr-facade-env-#{System.unique_integer([:positive])}")
 
     {:ok, server} =
       ClaudeCLI.start_link(
         command: System.find_executable("elixir"),
+        test_launcher: true,
         command_args: [@fake, "env_dump", dump]
       )
 
