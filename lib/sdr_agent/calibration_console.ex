@@ -1,0 +1,238 @@
+defmodule SdrAgent.CalibrationConsole do
+  @moduledoc """
+  The configuration of the R0-07 calibration console (readiness packet §3),
+  served by `bin/calibration-console` through `mix sdr.calibration.console`.
+
+  The console is the test-seam build (`MIX_ENV=test`, `:claude_cli_test_seams`)
+  serving the fixed, persistent `sdr_agent_calibration` database, so the
+  owner can bootstrap their admin account, sign in and create the single
+  G-R0 grant on `/admin`. It is not the demo smoke server (`bin/demo --test
+  serve`, `sdr_agent_test…_demo`) and shares nothing with it.
+
+  `plan/1` derives the only configuration it serves with from the build's
+  own configuration, or refuses:
+
+    * **Database.** Always `sdr_agent_calibration` (`database/0`): the test
+      config's `sdr_agent_test<partition>` name is replaced, never used. A
+      Repo `:url` (it would override the name), a non-local host or a port
+      other than the devenv Postgres 5520 is refused. The SQL sandbox pool
+      is replaced by an ordinary pool of 5 connections.
+    * **Listener.** Always loopback `127.0.0.1:4124` (`bind/0`): whatever
+      `PORT` or address the configuration names is replaced; `:https` is
+      dropped.
+    * **No model server.** Only the deterministic Fake provider is accepted,
+      so `SdrAgent.AI.ModelProvider.Runtime.children/0` starts no ClaudeCLI
+      server, and Oban stays in `testing: :manual` (jobs are never
+      executed), so no agent run can start.
+
+  `apply!/2` puts the plan into the application environment (for this VM
+  only), `ensure_storage!/0` creates the database if it is absent and runs
+  pending migrations — there is no drop, reset or seed — and
+  `verify_started!/0` re-checks, after start, that the Repo serves the fixed
+  database and no ClaudeCLI server is running.
+  """
+
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI
+  alias SdrAgent.AI.ModelProvider.Fake
+  alias SdrAgent.AI.ModelProvider.Runtime
+
+  @database "sdr_agent_calibration"
+  @ip {127, 0, 0, 1}
+  @port 4124
+  @db_port 5520
+  @local_hosts ["localhost", "127.0.0.1"]
+
+  @typedoc "What `plan/1` reads: the build's environment and configuration."
+  @type config :: %{
+          mix_env: atom(),
+          test_seams?: boolean(),
+          model_provider: module(),
+          repo: keyword(),
+          endpoint: keyword(),
+          oban: keyword()
+        }
+
+  @typedoc "The configuration the console serves with."
+  @type plan :: %{
+          repo: keyword(),
+          endpoint: keyword(),
+          oban: keyword(),
+          model_provider: module(),
+          model_server: :none
+        }
+
+  @doc "The only database the console serves."
+  def database, do: @database
+
+  @doc "The only address and port the console listens on."
+  def bind, do: {@ip, @port}
+
+  @doc "The build's current configuration, as `plan/1` reads it."
+  @spec current(atom()) :: config()
+  def current(mix_env) do
+    %{
+      mix_env: mix_env,
+      test_seams?: Application.get_env(:sdr_agent, :claude_cli_test_seams, false) == true,
+      model_provider: Application.get_env(:sdr_agent, :model_provider),
+      repo: Application.get_env(:sdr_agent, SdrAgent.Repo, []),
+      endpoint: Application.get_env(:sdr_agent, SdrAgentWeb.Endpoint, []),
+      oban: Application.get_env(:sdr_agent, Oban, [])
+    }
+  end
+
+  @doc "The console's configuration derived from `config`, or the refusal."
+  @spec plan(config()) :: {:ok, plan()} | {:error, String.t()}
+  def plan(config) do
+    with :ok <- check_build(config),
+         :ok <- check_repo(config.repo),
+         :ok <- check_provider(config.model_provider) do
+      {:ok,
+       %{
+         repo: repo(config.repo),
+         endpoint: endpoint(config.endpoint),
+         oban: Keyword.put(config.oban, :testing, :manual),
+         model_provider: Fake,
+         model_server: :none
+       }}
+    end
+  end
+
+  defp check_build(%{mix_env: :test, test_seams?: true}), do: :ok
+
+  defp check_build(%{mix_env: env}) do
+    {:error,
+     "the calibration console runs only the test-seam build (MIX_ENV=test) with " <>
+       ":claude_cli_test_seams; this is MIX_ENV=#{env}"}
+  end
+
+  defp check_repo(repo) do
+    host = repo[:hostname]
+    port = repo[:port]
+
+    cond do
+      repo[:url] not in [nil, ""] ->
+        {:error,
+         "a Repo :url is configured; the calibration console serves only #{@database} " <>
+           "on the local devenv Postgres"}
+
+      host not in @local_hosts ->
+        {:error, "database host #{host || "?"} is not local"}
+
+      port != @db_port ->
+        {:error, "database port #{port || "?"} is not the devenv Postgres port #{@db_port}"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp check_provider(Fake), do: :ok
+
+  defp check_provider(other) do
+    {:error,
+     "the calibration console starts no model server: the model provider must be the " <>
+       "Fake (is #{inspect(other)}); unset SDR_MODEL_PROVIDER"}
+  end
+
+  defp repo(repo) do
+    repo
+    |> Keyword.delete(:url)
+    |> Keyword.merge(database: @database, pool: DBConnection.ConnectionPool, pool_size: 5)
+  end
+
+  defp endpoint(endpoint) do
+    endpoint
+    |> Keyword.delete(:https)
+    |> Keyword.merge(
+      server: true,
+      http: [ip: @ip, port: @port],
+      url: [host: "127.0.0.1", port: @port],
+      check_origin: ["//127.0.0.1:#{@port}", "//localhost:#{@port}"]
+    )
+  end
+
+  @doc """
+  The plan as one line, checked by `bin/calibration-console` before it
+  serves: database, database host and port, bind address and port, model
+  provider and model server.
+  """
+  @spec plan_line(plan()) :: String.t()
+  def plan_line(plan) do
+    {a, b, c, d} = plan.endpoint[:http][:ip]
+
+    Enum.join(
+      [
+        "SDR_CALIBRATION_CONSOLE",
+        plan.repo[:database],
+        plan.repo[:hostname],
+        plan.repo[:port],
+        "#{a}.#{b}.#{c}.#{d}",
+        plan.endpoint[:http][:port],
+        inspect(plan.model_provider),
+        plan.model_server
+      ],
+      " "
+    )
+  end
+
+  @doc """
+  Puts `plan` into this VM's application environment, before the app
+  starts. `serve: true` also activates `SdrAgentWeb.CalibrationConsole`
+  (sign-in and `/admin` only); otherwise the endpoint does not listen.
+  """
+  @spec apply!(plan(), keyword()) :: :ok
+  def apply!(plan, opts) do
+    serve? = Keyword.fetch!(opts, :serve)
+
+    Application.put_env(:sdr_agent, SdrAgent.Repo, plan.repo)
+    Application.put_env(:sdr_agent, Oban, plan.oban)
+    Application.put_env(:sdr_agent, :model_provider, plan.model_provider)
+
+    Application.put_env(
+      :sdr_agent,
+      SdrAgentWeb.Endpoint,
+      Keyword.put(plan.endpoint, :server, serve?)
+    )
+
+    if serve?, do: Application.put_env(:sdr_agent, SdrAgentWeb.CalibrationConsole, active: true)
+
+    verify_applied!()
+  end
+
+  defp verify_applied! do
+    database = Keyword.fetch!(SdrAgent.Repo.config(), :database)
+    database == @database || raise "the Repo would serve #{database}, not #{@database}"
+    Runtime.children() == [] || raise "the model provider would start a model server"
+    :ok
+  end
+
+  @doc """
+  Creates `sdr_agent_calibration` if it does not exist and runs pending
+  migrations. Never drops, resets or seeds it. Run after `apply!/2` and
+  before the app starts.
+  """
+  @spec ensure_storage!() :: :ok
+  def ensure_storage! do
+    verify_applied!()
+    config = SdrAgent.Repo.config()
+
+    case SdrAgent.Repo.__adapter__().storage_up(config) do
+      :ok -> :ok
+      {:error, :already_up} -> :ok
+      {:error, reason} -> raise "could not create #{@database}: #{inspect(reason)}"
+    end
+
+    {:ok, _, _} =
+      Ecto.Migrator.with_repo(SdrAgent.Repo, &Ecto.Migrator.run(&1, :up, all: true))
+
+    :ok
+  end
+
+  @doc "After start: the Repo serves `sdr_agent_calibration` and no ClaudeCLI server runs."
+  @spec verify_started!() :: :ok
+  def verify_started! do
+    verify_applied!()
+    ClaudeCLI.running?(ClaudeCLI.server()) && raise "a ClaudeCLI model server is running"
+    :ok
+  end
+end
