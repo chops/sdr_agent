@@ -182,6 +182,7 @@ defmodule SdrAgent.SDR.SchemaDefinitionUpgradeTest do
           trigger_signal_id: failed.trigger_signal_id,
           correlation_id: failed.correlation_id,
           phase: failed.phase,
+          usage_origin: failed.usage_origin,
           operation_id: failed.operation_id,
           max_model_calls: 5,
           max_tool_calls: 10

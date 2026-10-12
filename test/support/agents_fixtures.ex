@@ -43,6 +43,7 @@ defmodule SdrAgent.AgentsFixtures do
       trigger_signal_id: "sig-#{System.unique_integer([:positive])}",
       correlation_id: Ecto.UUID.generate(),
       phase: :research,
+      usage_origin: Keyword.get(opts, :usage_origin, :assignment),
       max_tool_calls: Keyword.get(opts, :max_tool_calls, 10),
       max_model_calls: Keyword.get(opts, :max_model_calls, 20)
     }

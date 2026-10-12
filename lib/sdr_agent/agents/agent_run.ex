@@ -8,6 +8,9 @@ defmodule SdrAgent.Agents.AgentRun do
   `status`, embedded `budget` (`SdrAgent.Agents.AgentRun.Budget`),
   `operation_id` (the Operations `Operation` running it) and
   `attention_failure_id` (its operator-attention `Failure`), `retry_of_id`,
+  `usage_origin` (C9: where the run started — `SdrAgent.Agents.UsageBucket`;
+  set by the server code of the entry point at `:create`, immutable, copied
+  by `:retry`; null only for runs created before R0),
   `status_reason` (required in failed / budget_exhausted / cancelled),
   `failure_reason` (detail, passed through the secret redactor before it is
   written), `started_at`, `finished_at`.
@@ -121,6 +124,15 @@ defmodule SdrAgent.Agents.AgentRun do
       argument :max_model_calls, :integer, default: 20, constraints: [min: 0]
       argument :max_tool_calls, :integer, allow_nil?: false, constraints: [min: 0]
       argument :max_tokens, :integer, default: 100_000, constraints: [min: 0]
+
+      # C9: chosen by the server code of the entry point that creates the run
+      # (`SdrAgent.SDR.assign_lead/2` → :assignment, reply intake → :reply),
+      # never by job args or model output; immutable afterwards.
+      argument :usage_origin, :atom,
+        allow_nil?: false,
+        constraints: [one_of: SdrAgent.Agents.UsageBucket.origins()]
+
+      change set_attribute(:usage_origin, arg(:usage_origin))
 
       change fn changeset, _context ->
         Ash.Changeset.force_change_attribute(changeset, :budget, %{
@@ -366,6 +378,14 @@ defmodule SdrAgent.Agents.AgentRun do
     end
 
     attribute :budget, SdrAgent.Agents.AgentRun.Budget, allow_nil?: false, public?: true
+
+    # C9: where the run started (`SdrAgent.Agents.UsageBucket`); null only
+    # for runs created before R0. Set at :create, copied by :retry.
+    attribute :usage_origin, :atom do
+      writable? false
+      constraints one_of: SdrAgent.Agents.UsageBucket.origins()
+      public? true
+    end
 
     attribute :status_reason, :atom do
       writable? false
