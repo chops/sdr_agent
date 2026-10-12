@@ -129,15 +129,19 @@ defmodule SdrAgent.Agents.Witness do
     config() |> Keyword.get(:reconciled_methods, []) |> Enum.filter(&exact_entry?/1)
   end
 
-  defp exact_entry?(entry) when is_map(entry) and not is_struct(entry) do
-    Enum.sort(Map.keys(entry)) == @entry_keys and is_atom(entry.provider) and
-      not is_nil(entry.provider) and is_binary(entry.cli_version) and
-      is_atom(entry.profile_id) and
-      is_binary(entry.model_id) and is_binary(entry.projection_version) and
-      is_atom(entry.method) and not is_nil(entry.method)
-  end
+  defp exact_entry?(entry) when is_map(entry) and not is_struct(entry),
+    do: Enum.sort(Map.keys(entry)) == @entry_keys and typed_entry?(entry)
 
   defp exact_entry?(_entry), do: false
+
+  # `profile_id` may be nil (generation 1); every other value is required.
+  defp typed_entry?(%{provider: provider, method: method} = entry)
+       when is_atom(provider) and not is_nil(provider) and is_atom(method) and not is_nil(method),
+       do:
+         is_binary(entry.cli_version) and is_atom(entry.profile_id) and
+           is_binary(entry.model_id) and is_binary(entry.projection_version)
+
+  defp typed_entry?(_entry), do: false
 
   @doc """
   True when the shipped allowlist (`reconciled_methods/0`) holds an exact
