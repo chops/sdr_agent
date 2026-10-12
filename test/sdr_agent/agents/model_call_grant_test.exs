@@ -93,7 +93,8 @@ defmodule SdrAgent.Agents.ModelCallGrantTest do
           ]
         })
 
-      assert {:error, %Invalid{}} = Agents.create_grant(attrs, actor: ctx.admin)
+      assert {:error, %Invalid{} = error} = Agents.create_grant(attrs, actor: ctx.admin)
+      assert Exception.message(error) =~ "allocations total 5, above the grant total of 4"
       assert {:ok, []} = Agents.list_grants(actor: ctx.admin)
       assert events_of_type(ctx.tenant, "model.grant.created") == []
     end
@@ -176,10 +177,12 @@ defmodule SdrAgent.Agents.ModelCallGrantTest do
           actor: ctx.admin
         )
 
-      assert {:error, %Invalid{}} =
+      assert {:error, %Invalid{} = error} =
                Agents.update_grant_terms(grant, %{expected_revision: 1, total_attempts: 7},
                  actor: ctx.admin
                )
+
+      assert Exception.message(error) =~ "is stale: the grant is at revision 2"
     end
 
     test "edits that would push allocations above the total are refused atomically", ctx do
