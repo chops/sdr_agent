@@ -11,6 +11,12 @@ defmodule SdrAgent.Scripts.AppClaudeCLIRootTest do
   the root (failing on request for one root), and `--check-validity` tests
   that the path exists. The temporary `nix/app-claude-cli.identity` records
   the expected stand-in for every platform.
+
+  Locking: a live owner's lock is never taken, however old; a dead owner's
+  lock is recovered once, under the recovery ticket, even by simultaneous
+  recoverers. Rotation: the old rollback build stays rooted by a backup
+  root until current is registered or previous is restored (the stub
+  records which backup roots exist when current is registered).
   """
   # Spawns shell processes; each test owns its temporary root.
   use ExUnit.Case, async: true
@@ -50,7 +56,18 @@ defmodule SdrAgent.Scripts.AppClaudeCLIRootTest do
     case "$1" in
       --check-validity) [ -e "$2" ]; exit $? ;;
       --add-root)
-        [ -n "${STUB_FAIL:-}" ] && [ "$(basename "$2")" = "$STUB_FAIL" ] && exit 1
+        name="$(basename "$2")"
+        n="$(grep -cx "$name" '#{root}/root-counts' 2>/dev/null)"
+        n=$(( ${n:-0} + 1 ))
+        echo "$name" >> '#{root}/root-counts'
+        # Which backup roots exist (and what they keep) when current is registered.
+        if [ "$name" = app-claude-cli-current ]; then
+          for b in "$(dirname "$2")"/app-claude-cli-backup.*; do
+            [ -L "$b" ] && echo "backup-at-current $(readlink "$b")" >> '#{root}/calls'
+          done
+        fi
+        case "$name" in "${STUB_FAIL:-none}" | "${STUB_FAIL:-none}".*) exit 1 ;; esac
+        [ "${STUB_FAIL_NTH:-}" = "$name:$n" ] && exit 1
         ln -sfn "$4" "$2"
         echo "$4"
         exit 0
@@ -143,10 +160,35 @@ defmodule SdrAgent.Scripts.AppClaudeCLIRootTest do
       assert leftovers(ctx) == []
     end
 
-    test "registering current (the rollback root is restored)", ctx do
+    test "registering current (the rollback root is restored from its backup)", ctx do
       assert {out, status} = run(ctx, ctx.b, [{"STUB_FAIL", "app-claude-cli-current"}])
       assert status != 0
       assert out =~ "could not register the current root; current is unchanged"
+      assert {target(ctx, "current"), target(ctx, "previous")} == {ctx.a, ctx.p0}
+      # The old rollback build was rooted by a backup while previous was overwritten.
+      assert "backup-at-current #{ctx.p0}" in calls(ctx)
+      assert leftovers(ctx) == []
+    end
+
+    test "registering current, then restoring previous, keeps the backup root", ctx do
+      env = [
+        {"STUB_FAIL", "app-claude-cli-current"},
+        {"STUB_FAIL_NTH", "app-claude-cli-previous:2"}
+      ]
+
+      assert {out, status} = run(ctx, ctx.b, env)
+      assert status != 0
+      assert out =~ "could not restore the previous rollback root"
+      assert target(ctx, "current") == ctx.a
+      assert [backup] = leftovers(ctx)
+      assert backup =~ ~r/\Aapp-claude-cli-backup\./
+      assert target_of(ctx, backup) == ctx.p0
+    end
+
+    test "registering the backup root", ctx do
+      assert {out, status} = run(ctx, ctx.b, [{"STUB_FAIL", "app-claude-cli-backup"}])
+      assert status != 0
+      assert out =~ "could not register a backup root for the rollback build; nothing changed"
       assert {target(ctx, "current"), target(ctx, "previous")} == {ctx.a, ctx.p0}
       assert leftovers(ctx) == []
     end
@@ -159,6 +201,26 @@ defmodule SdrAgent.Scripts.AppClaudeCLIRootTest do
       assert calls(ctx) == []
       assert target(ctx, "current") == ctx.a
     end
+  end
+
+  test "a changed pin keeps the old rollback build rooted until current is registered", ctx do
+    a = build!(ctx, "a")
+    b = build!(ctx, "b")
+    p0 = build!(ctx, "p0")
+    pin!(ctx, b)
+    link!(ctx, "current", a)
+    link!(ctx, "previous", p0)
+
+    assert {_out, 0} = run(ctx, b)
+    assert {target(ctx, "current"), target(ctx, "previous")} == {b, a}
+
+    roots =
+      calls(ctx) |> Enum.filter(&String.contains?(&1, "--add-root")) |> Enum.map(&root_name/1)
+
+    assert [backup, "app-claude-cli-previous", "app-claude-cli-current"] = roots
+    assert backup =~ ~r/\Aapp-claude-cli-backup\./
+    assert "backup-at-current #{p0}" in calls(ctx)
+    assert leftovers(ctx) == []
   end
 
   test "concurrent callers are serialized by the lock", ctx do
@@ -176,7 +238,7 @@ defmodule SdrAgent.Scripts.AppClaudeCLIRootTest do
     assert leftovers(ctx) == []
   end
 
-  test "a lock held by a live process times out; one left by a dead process is taken over",
+  test "a lock held by a live process times out; one left by a dead process is recovered",
        ctx do
     a = build!(ctx, "a")
     pin!(ctx, a)
@@ -186,20 +248,97 @@ defmodule SdrAgent.Scripts.AppClaudeCLIRootTest do
 
     assert {out, status} = run(ctx, a, [{"APP_CLAUDE_CLI_ROOT_LOCK_WAIT", "1"}])
     assert status != 0
-    assert out =~ "another bin/app-claude-cli-root holds"
+    assert out =~ "another bin/app-claude-cli-root (pid #{System.pid()}) holds"
     assert target(ctx, "current") == nil
     assert File.read!(Path.join(lock, "pid")) == System.pid()
 
-    {dead, 0} = System.cmd("sh", ["-c", "sh -c 'echo $$' "])
-    File.write!(Path.join(lock, "pid"), String.trim(dead))
+    File.write!(Path.join(lock, "pid"), dead_pid())
 
     assert {out, 0} = run(ctx, a)
-    assert out =~ "took over a stale lock"
+    assert out =~ "recovered the lock of dead pid"
     assert target(ctx, "current") == a
     assert leftovers(ctx) == []
   end
 
+  test "review regression: an aged lock owned by a live process is not stolen", ctx do
+    a = build!(ctx, "aged-live")
+    pin!(ctx, a)
+    lock = Path.join(ctx.gcroots, "app-claude-cli.lock")
+    File.mkdir_p!(lock)
+    File.write!(Path.join(lock, "pid"), System.pid())
+    File.touch!(lock, {{2000, 1, 1}, {0, 0, 0}})
+
+    {out, status} = run(ctx, a, [{"APP_CLAUDE_CLI_ROOT_LOCK_WAIT", "0"}])
+
+    assert status != 0, "a live owner's lock was stolen: #{out}"
+    assert target(ctx, "current") == nil
+    assert File.read!(Path.join(lock, "pid")) == System.pid()
+  end
+
+  test "simultaneous recoverers of a dead owner's lock recover it once and serialize", ctx do
+    a = build!(ctx, "a")
+    pin!(ctx, a)
+    lock = Path.join(ctx.gcroots, "app-claude-cli.lock")
+    File.mkdir_p!(lock)
+    File.write!(Path.join(lock, "pid"), dead_pid())
+
+    results =
+      1..4
+      |> Enum.map(fn _ -> Task.async(fn -> run(ctx, a, [{"STUB_BUILD_SLEEP", "1"}]) end) end)
+      |> Task.await_many(60_000)
+
+    for result <- results, do: assert({_, 0} = result)
+
+    recoveries =
+      results |> Enum.map_join(&elem(&1, 0)) |> String.split("recovered the lock")
+
+    assert length(recoveries) == 2, "the dead lock was recovered more than once"
+    refute File.exists?(Path.join(ctx.root, "overlaps")), "two builds overlapped"
+    assert target(ctx, "current") == a
+    assert leftovers(ctx) == []
+  end
+
+  test "a recovery ticket is never stolen: live waits, dead fails closed", ctx do
+    a = build!(ctx, "a")
+    pin!(ctx, a)
+    lock = Path.join(ctx.gcroots, "app-claude-cli.lock")
+    ticket = lock <> ".recovering"
+    File.mkdir_p!(lock)
+    File.write!(Path.join(lock, "pid"), dead_pid())
+    File.mkdir_p!(ticket)
+    File.write!(Path.join(ticket, "pid"), System.pid())
+
+    assert {out, status} = run(ctx, a, [{"APP_CLAUDE_CLI_ROOT_LOCK_WAIT", "1"}])
+    assert status != 0
+    assert out =~ "holds #{lock}"
+    assert File.read!(Path.join(ticket, "pid")) == System.pid()
+
+    stuck = dead_pid()
+    File.write!(Path.join(ticket, "pid"), stuck)
+    assert {out, status} = run(ctx, a)
+    assert status != 0
+    assert out =~ "a lock recovery by pid #{stuck} did not finish; remove #{ticket}"
+    assert File.dir?(lock) and File.dir?(ticket)
+    assert target(ctx, "current") == nil
+  end
+
   ## Helpers
+
+  # The pid of a process that has already exited.
+  defp dead_pid do
+    {pid, 0} = System.cmd("sh", ["-c", "sh -c 'echo $$'"])
+    String.trim(pid)
+  end
+
+  defp root_name(call) do
+    [_, path] = Regex.run(~r/--add-root (\S+)/, call)
+    Path.basename(path)
+  end
+
+  defp target_of(ctx, name) do
+    {:ok, target} = File.read_link(Path.join(ctx.gcroots, name))
+    target
+  end
 
   defp stub!(root, name, body) do
     path = Path.join([root, "stubs", name])
@@ -255,7 +394,7 @@ defmodule SdrAgent.Scripts.AppClaudeCLIRootTest do
         {"STUB_FAIL", nil},
         {"STUB_BUILD_SLEEP", nil},
         {"APP_CLAUDE_CLI_ROOT_LOCK_WAIT", nil},
-        {"APP_CLAUDE_CLI_ROOT_LOCK_STALE", nil}
+        {"STUB_FAIL_NTH", nil}
       ] ++ extra
 
     System.cmd(Path.join(ctx.root, "bin/app-claude-cli-root"), [],
