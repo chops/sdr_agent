@@ -71,36 +71,132 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
     end
   end
 
-  defp final_state(changeset, _mode, stored) do
+  defp final_state(changeset, mode, stored) do
     requested = Ash.Changeset.get_argument(changeset, :allocations) || []
 
-    Enum.reduce_while(requested, {:ok, [], stored}, fn request, {:ok, writes, final} ->
-      request = Map.new(request)
-      key = request[:key]
-      profile_id = request[:profile_id]
+    with {:ok, requests} <- normalize_all(requested, mode),
+         :ok <- unique_pairs(requests) do
+      plan_requests(requests, Enum.map(stored, &candidate/1), stored)
+    end
+  end
 
-      case Enum.find(final, &same?(&1, key, profile_id)) do
-        nil ->
-          new =
-            Map.merge(%{key: key, profile_id: profile_id}, Map.take(request, @allocation_terms))
+  # Plans against plain candidate maps; each request names a distinct pair,
+  # so every stored row gets at most one governed write.
+  defp plan_requests(requests, candidates, stored) do
+    {writes, final} =
+      Enum.reduce(requests, {[], candidates}, fn request, {writes, final} ->
+        key = request.key
+        profile_id = request[:profile_id]
 
-          {:cont, {:ok, [{:create, new} | writes], final ++ [new]}}
+        case Enum.find(stored, &same?(&1, key, profile_id)) do
+          nil ->
+            new =
+              Map.merge(%{key: key, profile_id: profile_id}, Map.take(request, @allocation_terms))
 
-        %ModelCallAllocation{} = allocation ->
-          changes = Map.take(request, @allocation_terms)
-          updated = Map.merge(allocation, changes)
-          final = Enum.map(final, &if(&1 == allocation, do: updated, else: &1))
-          {:cont, {:ok, [{:update, allocation, changes} | writes], final}}
+            {[{:create, new} | writes], final ++ [new]}
 
-        %{} ->
-          {:halt, {:error, :allocations, "lists the same key and profile twice"}}
+          %ModelCallAllocation{} = allocation ->
+            changes = Map.take(request, @allocation_terms)
+
+            final =
+              Enum.map(final, fn candidate ->
+                if same?(candidate, key, profile_id),
+                  do: Map.merge(candidate, changes),
+                  else: candidate
+              end)
+
+            {[{:update, allocation, changes} | writes], final}
+        end
+      end)
+
+    {:ok, Enum.reverse(writes), final}
+  end
+
+  defp candidate(%ModelCallAllocation{} = allocation),
+    do: Map.take(allocation, [:key, :profile_id | @allocation_terms])
+
+  defp unique_pairs(requests) do
+    pairs = Enum.map(requests, &{&1.key, &1[:profile_id]})
+
+    if length(Enum.uniq(pairs)) == length(pairs),
+      do: :ok,
+      else: {:error, :allocations, "lists the same key and profile more than once"}
+  end
+
+  # Every requested allocation is cast and constrained with the allocation
+  # resource's own attribute types before it is matched or summed, so the
+  # plan and the writes use the same normalized values.
+  @fields [:key, :profile_id | @allocation_terms]
+
+  defp normalize_all(requested, mode) do
+    Enum.reduce_while(requested, {:ok, []}, fn request, {:ok, acc} ->
+      case normalize(request, mode) do
+        {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
+        {:error, message} -> {:halt, {:error, :allocations, message}}
       end
     end)
     |> case do
-      {:ok, writes, final} -> {:ok, Enum.reverse(writes), final}
+      {:ok, normalized} -> {:ok, Enum.reverse(normalized)}
       error -> error
     end
   end
+
+  defp normalize(request, mode) when is_map(request) do
+    with {:ok, fields} <- known_fields(request) do
+      Enum.reduce_while(@fields, {:ok, %{}}, fn field, {:ok, acc} ->
+        case Map.fetch(fields, field) do
+          :error -> {:cont, {:ok, acc}}
+          {:ok, value} -> cast_field(field, value, acc)
+        end
+      end)
+      |> require_fields(mode)
+    end
+  end
+
+  defp normalize(_request, _mode), do: {:error, "each allocation must be a map"}
+
+  defp known_fields(request) do
+    Enum.reduce_while(request, {:ok, %{}}, fn {name, value}, {:ok, acc} ->
+      case field_name(name) do
+        nil -> {:halt, {:error, "unknown allocation field #{inspect(name)}"}}
+        field -> {:cont, {:ok, Map.put(acc, field, value)}}
+      end
+    end)
+  end
+
+  defp field_name(name) when is_atom(name), do: if(name in @fields, do: name)
+
+  defp field_name(name) when is_binary(name),
+    do: Enum.find(@fields, &(Atom.to_string(&1) == name))
+
+  defp field_name(_name), do: nil
+
+  defp cast_field(field, value, acc) do
+    attribute = Ash.Resource.Info.attribute(ModelCallAllocation, field)
+
+    with {:ok, cast} <- Ash.Type.cast_input(attribute.type, value, attribute.constraints),
+         {:ok, cast} <- constrain(attribute, cast) do
+      {:cont, {:ok, Map.put(acc, field, cast)}}
+    else
+      _ -> {:halt, {:error, "allocation #{field} is invalid"}}
+    end
+  end
+
+  defp constrain(_attribute, nil), do: {:ok, nil}
+
+  defp constrain(attribute, value),
+    do: Ash.Type.apply_constraints(attribute.type, value, attribute.constraints)
+
+  defp require_fields({:ok, normalized}, mode) do
+    required = if mode == :create, do: [:key, :applies_to, :attempts], else: [:key]
+
+    case Enum.find(required, &is_nil(Map.get(normalized, &1))) do
+      nil -> {:ok, normalized}
+      field -> {:error, "allocation #{field} is required"}
+    end
+  end
+
+  defp require_fields(error, _mode), do: error
 
   defp validate(changeset, final) do
     total = Ash.Changeset.get_attribute(changeset, :total_attempts)

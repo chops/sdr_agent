@@ -432,4 +432,91 @@ defmodule SdrAgent.Agents.ModelCallGrantTest do
                )
     end
   end
+
+  describe "bundle inputs (Codex re-review of 40db6a7)" do
+    test "allocation inputs are cast with the resource types (string keys, numeric strings)",
+         ctx do
+      grant = create!(ctx)
+
+      attrs = %{
+        expected_revision: 1,
+        allocations: [%{"key" => "proof", "profile_id" => "claude_cli_opus", "attempts" => "1"}]
+      }
+
+      assert {:ok, updated} = Agents.update_grant_terms(grant, attrs, actor: ctx.admin)
+      opus = Enum.find(updated.allocations, &(&1.profile_id == :claude_cli_opus))
+      assert opus.attempts == 1
+    end
+
+    test "malformed allocation inputs are refused with nothing written", ctx do
+      grant = create!(ctx)
+      before = length(events(ctx.tenant))
+
+      bad = [
+        [%{key: :proof, profile_id: :claude_cli_opus, attempts: "x"}],
+        [%{key: :proof, profile_id: :claude_cli_opus, attempts: -1}],
+        [%{key: :proof, profile_id: :claude_cli_opus, colour: "blue"}],
+        [%{key: :nonsense, attempts: 1, applies_to: [:b1]}],
+        [%{key: :b2, applies_to: [:b2]}],
+        [:not_a_map]
+      ]
+
+      for allocations <- bad do
+        attrs = %{expected_revision: 1, allocations: allocations}
+
+        assert {:error, %Invalid{}} = Agents.update_grant_terms(grant, attrs, actor: ctx.admin),
+               "expected refusal for #{inspect(allocations)}"
+      end
+
+      {:ok, [unchanged]} = Agents.list_grants(actor: ctx.admin)
+      assert unchanged.revision == 1
+      assert length(events(ctx.tenant)) == before
+    end
+
+    test "a pair listed twice is refused, whichever order and whether or not it exists", ctx do
+      grant = create!(ctx)
+      before = length(events(ctx.tenant))
+
+      for allocations <- [
+            [
+              %{key: :proof, profile_id: :claude_cli_opus, attempts: 1},
+              %{key: :proof, profile_id: :claude_cli_opus, attempts: 2}
+            ],
+            [
+              %{key: :proof, profile_id: :claude_cli_opus, attempts: 2},
+              %{key: :proof, profile_id: :claude_cli_opus, attempts: 1}
+            ],
+            [
+              %{key: :b1, applies_to: [:b1], attempts: 1},
+              %{key: :b1, applies_to: [:b1], attempts: 1}
+            ]
+          ] do
+        attrs = %{expected_revision: 1, allocations: allocations}
+        assert {:error, %Invalid{}} = Agents.update_grant_terms(grant, attrs, actor: ctx.admin)
+      end
+
+      {:ok, [unchanged]} = Agents.list_grants(actor: ctx.admin)
+      assert unchanged.revision == 1
+      assert unchanged.allocations |> Enum.map(& &1.attempts) |> Enum.sort() == [2, 2]
+      assert length(events(ctx.tenant)) == before
+    end
+
+    test "an allocation update records the exact previous grant revision", ctx do
+      grant = create!(ctx)
+
+      {:ok, _} =
+        Agents.update_grant_terms(
+          grant,
+          %{
+            expected_revision: 1,
+            allocations: [%{key: :proof, profile_id: :claude_cli_opus, attempts: 1}]
+          },
+          actor: ctx.admin
+        )
+
+      [changed] = events_of_type(ctx.tenant, "model.grant.allocation_changed")
+      assert changed.payload["previous"]["grant_revision"] == 1
+      assert changed.payload["previous"]["attempts"] == 2
+    end
+  end
 end
