@@ -12,7 +12,7 @@ Accepted (2026-10-06, owner decision recorded in ADR-0001: "OpenTelemetry as a
 first-class concern, model-content spans and an independent wire witness both
 in the MVP, and audit-chain anchoring to a private Git repository plus
 OpenTimestamps"). Details amended by Codex consultations 11 and 13. The R0
-amendment in the wire witness section (2026-10-12) is proposed.
+amendment in the wire witness section (2026-10-12) is accepted.
 
 ## Context
 
@@ -345,10 +345,12 @@ an `inferred` successor with a warning attention, and mismatches stay
 sticky. Changing the entry requires a reviewed amendment, and a new CLI
 version or projection requires a new proof.
 
-#### R0 amendment (proposed 2026-10-12): profile-exact tuples, calibration, per-invocation result gate
+#### R0 amendment (2026-10-12): profile-exact tuples, calibration, per-invocation result gate
 
-**Status: PROPOSED.** In force only after Codex review and the owner's
-explicit acceptance. The result gate and tuple promotion also need an
+**Status: ACCEPTED.** The owner accepted this amendment on 2026-10-12
+(America/Denver), in the private Claude session chat, with the words
+"accept PR #128". This followed Codex's independent approval of 48de82c
+(reply 01a13152). The result gate and tuple promotion still need an
 independent entity/action PASS (story R0-07) before they are implemented.
 
 **Context.**
