@@ -131,14 +131,21 @@ defmodule SdrAgent.SDR.AgentWorker do
   """
   def fail_operation(operation, %{status_reason: reason} = run, actor)
       when reason in @refused do
-    {:ok, operation} = lock_operation(operation, actor)
+    # The locks must hold from the liveness check to the Operation change,
+    # so this always runs in one transaction (joining the caller's, if any).
+    {:ok, :ok} =
+      Audit.transaction(fn ->
+        {:ok, operation} = lock_operation(operation, actor)
 
-    attrs =
-      if live_failure?(run.attention_failure_id, actor),
-        do: %{failure_id: run.attention_failure_id},
-        else: %{failure: resolved_refusal_failure(run)}
+        attrs =
+          if live_failure?(run.attention_failure_id, actor),
+            do: %{failure_id: run.attention_failure_id},
+            else: %{failure: resolved_refusal_failure(run)}
 
-    {:ok, _} = Operations.fail_operation(operation, attrs, actor: actor)
+        {:ok, _} = Operations.fail_operation(operation, attrs, actor: actor)
+        :ok
+      end)
+
     :ok
   end
 
@@ -166,8 +173,16 @@ defmodule SdrAgent.SDR.AgentWorker do
     |> Ash.Query.lock(:for_update)
     |> Ash.read_one()
     |> case do
-      {:ok, %{status: status}} -> status in [:open, :acknowledged]
-      _ -> false
+      {:ok, %{status: status}} ->
+        status in [:open, :acknowledged]
+
+      # A missing row or a read error is not a human resolution: fail loudly
+      # rather than open a Failure that claims the cause was resolved.
+      {:ok, nil} ->
+        raise "refusal Failure #{id} not found for its run"
+
+      {:error, error} ->
+        raise "could not read refusal Failure #{id}: #{Exception.message(error)}"
     end
   end
 

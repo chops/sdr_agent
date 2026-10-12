@@ -8,8 +8,10 @@ defmodule SdrAgent.AI.ModelProvider do
   sent, validates every output with Zoi, and records completion, failure, or
   an unknown outcome through `SdrAgent.Agents`. A refused reservation
   (`{:error, {:budget_exhausted, :daily}}`, the run counter's
-  `Ash.Error.Invalid`, or for ClaudeCLI a C9 grant refusal such as
-  `{:error, :no_eligible_grant}`, recorded as an operator-attention Failure)
+  `Ash.Error.Invalid`, or for ClaudeCLI a C9 grant refusal returned as
+  `{:error, %SdrAgent.Agents.Admission.Refused{reason: :no_eligible_grant,
+  failure_id: ..., event_id: ..., agent_run_id: ..., request_id: ...}}`,
+  whose operator-attention Failure is already committed)
   never reaches the provider. The provider's `prepare/2` provenance carries
   the call's `profile_id`.
 
