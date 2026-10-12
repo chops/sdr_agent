@@ -3,13 +3,25 @@ defmodule SdrAgent.Agents.Admission do
   Reservation-time admission of real-model calls against owner-created
   grants (C9-02/03; R0 readiness packet "Changed backend action contracts").
 
-  `admit/3` runs inside `SdrAgent.Agents.reserve_model_invocation/3`'s
-  transaction for a ClaudeCLI call, after the run row lock and the explicit
-  chain-head lock, and before the request payload and the invocation are
-  written. It reads committed grant terms without locking grant rows (grant
-  mutators lock their row, then the chain head, so an edit either committed
-  before this read or waits for the reservation to commit). It selects the
-  one allocation that may fund the call:
+  It runs inside `SdrAgent.Agents.reserve_model_invocation/3`'s transaction
+  for a ClaudeCLI call, in this lock order (the grant editors' order is
+  grant `FOR UPDATE` → its allocations `FOR UPDATE` → chain head):
+
+    1. the run row (`FOR UPDATE`);
+    2. `lock_candidates/3`: the candidate grants — the run's tenant,
+       `:active`, listing the call's profile — read under MVCC and then
+       locked `FOR SHARE` by id, then all their allocations `FOR SHARE` by
+       id. A reservation therefore never waits for a grant or allocation row
+       while it holds the chain head, and no editor can commit a change to a
+       candidate (or add an allocation to it) until the reservation ends;
+       the invocation's FK checks (`FOR KEY SHARE`) find the rows already
+       held;
+    3. the chain head, explicitly;
+    4. `admit/4`: eligibility and room from fresh reads of the locked
+       candidates under the head (a grant committed after step 2 is not a
+       candidate: the reservation is ordered before it).
+
+  It selects the one allocation that may fund the call:
 
     * the run has a `usage_origin`, which with the call's purpose gives the
       trusted usage bucket (`SdrAgent.Agents.UsageBucket`);
@@ -38,6 +50,7 @@ defmodule SdrAgent.Agents.Admission do
   require Ash.Query
 
   alias SdrAgent.Actor
+  alias SdrAgent.Agents.ModelCallAllocation
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.UsageBucket
@@ -74,11 +87,44 @@ defmodule SdrAgent.Agents.Admission do
   end
 
   @doc """
-  Admits a ClaudeCLI call of `profile_id` with `purpose` in the locked,
-  freshly read `run`. Returns `{:ok, %{grant_id:, allocation_id:}}` or
-  `{:error, %Refusal{}}`. Callers hold the run row and chain-head locks.
+  Step 2 of the lock order (see the moduledoc): with the run row locked and
+  before the chain head, locks the run tenant's candidate grants for
+  `profile_id` and all their allocations `FOR SHARE`, grants then
+  allocations, each by id. Returns `{:ok, grant_ids}` (possibly empty).
   """
-  def admit(run, call, now) do
+  def lock_candidates(run, profile_id, _now) do
+    ids =
+      ModelCallGrant
+      |> Ash.Query.filter(tenant_id == ^run.tenant_id and status == :active)
+      |> Ash.Query.select([:id, :profile_ids])
+      |> Ash.read!(authorize?: false)
+      |> Enum.filter(&(profile_id in &1.profile_ids))
+      |> Enum.map(& &1.id)
+
+    locked =
+      ModelCallGrant
+      |> Ash.Query.filter(id in ^ids)
+      |> Ash.Query.sort(id: :asc)
+      |> Ash.Query.lock("FOR SHARE")
+      |> Ash.read!(authorize?: false)
+      |> Enum.map(& &1.id)
+
+    ModelCallAllocation
+    |> Ash.Query.filter(grant_id in ^locked)
+    |> Ash.Query.sort(id: :asc)
+    |> Ash.Query.lock("FOR SHARE")
+    |> Ash.read!(authorize?: false)
+
+    {:ok, locked}
+  end
+
+  @doc """
+  Step 4: admits a ClaudeCLI call of `profile_id` with `purpose` in the
+  locked, freshly read `run`, among the share-locked `candidate_ids`.
+  Returns `{:ok, %{grant_id:, allocation_id:}}` or `{:error, %Refusal{}}`.
+  Callers hold the run row, candidate and chain-head locks.
+  """
+  def admit(run, call, now, candidate_ids) do
     purpose = Map.get(call, :purpose)
     profile_id = Map.get(call, :profile_id)
 
@@ -96,7 +142,7 @@ defmodule SdrAgent.Agents.Admission do
     }
 
     with :ok <- origin(refusal),
-         {:ok, grants} <- eligible_grants(refusal, now),
+         {:ok, grants} <- eligible_grants(refusal, candidate_ids, now),
          {:ok, grant, allocation} <- one_allocation(refusal, grants, now),
          :ok <- room(%{refusal | grant_id: grant.id, allocation_id: allocation.id}, grant, now) do
       {:ok, %{grant_id: grant.id, allocation_id: allocation.id}}
@@ -137,11 +183,11 @@ defmodule SdrAgent.Agents.Admission do
 
   defp origin(_refusal), do: :ok
 
-  defp eligible_grants(refusal, now) do
+  defp eligible_grants(refusal, candidate_ids, now) do
     ModelCallGrant
     |> Ash.Query.filter(
-      tenant_id == ^refusal.tenant_id and status == :active and starts_at <= ^now and
-        expires_at > ^now
+      id in ^candidate_ids and tenant_id == ^refusal.tenant_id and status == :active and
+        starts_at <= ^now and expires_at > ^now
     )
     |> Ash.Query.load(:allocations)
     |> Ash.Query.sort(id: :asc)
@@ -227,7 +273,9 @@ defmodule SdrAgent.Agents.Admission do
 
   @doc """
   Commits `refusal` in its own guarded transaction as `agent_runtime`: the
-  chain head is locked first, then an unresolved (open or acknowledged)
+  run's Operation (if any) is locked `FOR SHARE` first, as Operation
+  lifecycle writers lock it before the head, then the chain head, then an
+  unresolved (open or acknowledged)
   `budget_exhausted` Failure of the same run with the same detail — the
   dedupe key `(reason, grant or none, run)`, stored as the Failure's
   redacted detail and matched by its `detail_sha256` — is reused, or a new
@@ -241,7 +289,8 @@ defmodule SdrAgent.Agents.Admission do
     detail = detail(refusal)
 
     Audit.transaction(fn ->
-      with {:ok, _head} <- Kernel.lock_head(refusal.tenant_id),
+      with :ok <- lock_operation(refusal),
+           {:ok, _head} <- Kernel.lock_head(refusal.tenant_id),
            {:ok, failure, deduplicated?} <- failure(refusal, detail, agent),
            {:ok, _event} <- Audit.append(event(refusal, failure, deduplicated?), actor: agent) do
         failure
@@ -249,6 +298,21 @@ defmodule SdrAgent.Agents.Admission do
         {:error, error} -> Repo.rollback(error)
       end
     end)
+  end
+
+  # Operation lifecycle writers lock the Operation FOR UPDATE, then the chain
+  # head; the Failure's operation FK (FOR KEY SHARE) would otherwise wait for
+  # them while this transaction holds the head. Taken first, it orders the
+  # refusal before or after the writer.
+  defp lock_operation(%Refusal{operation_id: nil}), do: :ok
+
+  defp lock_operation(%Refusal{operation_id: id}) do
+    SdrAgent.Operations.Operation
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.Query.lock("FOR SHARE")
+    |> Ash.read!(authorize?: false)
+
+    :ok
   end
 
   @doc "The detail reason recorded for a refusal reason (R0 packet, Operations.Failure)."

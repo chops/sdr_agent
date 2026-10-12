@@ -19,7 +19,10 @@ defmodule SdrAgent.Agents.ModelInvocation do
   ClaudeCLI call the `grant_id`/`allocation_id` it was charged to at
   reservation (`SdrAgent.Agents.Admission`). All four are written only by
   `:reserve` and are immutable afterwards (outside the trigger's mutable
-  set). A check constraint makes every generation-2 ClaudeCLI row carry
+  set). `:reserve` accepts no grant, allocation or generation: a ClaudeCLI
+  reservation is refused unless `SdrAgent.Agents` attached the admitted
+  charge (`SdrAgent.Agents.Checks.AdmissionContext`), and any other provider
+  is refused if one is attached (`SdrAgent.Agents.Changes.AdmissionCharge`). A check constraint makes every generation-2 ClaudeCLI row carry
   profile, grant and allocation; composite FKs keep the allocation within
   its grant, and the grant within the invocation's tenant.
 
@@ -168,12 +171,11 @@ defmodule SdrAgent.Agents.ModelInvocation do
         :output_schema_sha256,
         :request_sha256,
         :idempotency_key,
-        :profile_id,
-        :grant_id,
-        :allocation_id
+        :profile_id
       ]
 
       validate SdrAgent.Agents.Validations.InvocationProfile
+      change SdrAgent.Agents.Changes.AdmissionCharge
       change set_attribute(:ledger_generation, 2)
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
@@ -365,13 +367,14 @@ defmodule SdrAgent.Agents.ModelInvocation do
       public? true
     end
 
+    # C9: set only from the admission context (AdmissionCharge), never input.
     belongs_to :grant, SdrAgent.Agents.ModelCallGrant do
-      attribute_writable? true
+      attribute_writable? false
       public? true
     end
 
     belongs_to :allocation, SdrAgent.Agents.ModelCallAllocation do
-      attribute_writable? true
+      attribute_writable? false
       public? true
     end
 

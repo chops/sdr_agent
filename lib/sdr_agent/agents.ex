@@ -49,6 +49,7 @@ defmodule SdrAgent.Agents do
   alias Ash.Error.Changes.InvalidAttribute
   alias Ash.Error.Query.NotFound
   alias SdrAgent.Agents.Admission
+  alias SdrAgent.Agents.Checks.AdmissionContext
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.Decision
@@ -218,17 +219,22 @@ defmodule SdrAgent.Agents do
   `reserved` invocation numbered by the reservation — one transaction (AGT).
 
   C9: a ClaudeCLI reservation (with its reviewed `profile_id`) is admitted
-  in the same transaction, after the run row and chain-head locks, against
-  the tenant's grants (`SdrAgent.Agents.Admission`): the one eligible
-  allocation is written on the row with `ledger_generation` 2. A refusal
+  in the same transaction against the tenant's grants
+  (`SdrAgent.Agents.Admission`), in the lock order run → candidate grants
+  (`FOR SHARE`) → their allocations (`FOR SHARE`) → chain head, so it never
+  waits for a grant or allocation row while holding the head: the one
+  eligible allocation is written on the row with `ledger_generation` 2,
+  passed to `:reserve` only through `AdmissionContext`. A refusal
   (`:no_usage_origin`, `:no_eligible_grant`, `:no_allocation`,
   `:ambiguous_allocation`, `{:budget_exhausted, :grant | :grant_day |
   :allocation}`) rolls the whole reservation back — no payload, invocation
   or counter change — and is then committed in its own transaction as one
   deduplicated `budget_exhausted` Failure and a `model.reservation.refused`
-  event before `{:error, reason}` is returned. Caller-supplied `grant_id`,
-  `allocation_id` and `ledger_generation` are ignored. A Fake reservation
-  records `profile_id: :fake` and needs no grant.
+  event before `{:error, reason}` is returned. Inputs may be atom- or
+  string-keyed (not both for one field); caller-supplied `grant_id`,
+  `allocation_id` and `ledger_generation` are dropped, and `provider`,
+  `profile_id` and `purpose` are cast before the path is chosen. A Fake
+  reservation records `profile_id: :fake` and needs no grant.
 
   The ADR-0004 daily limit is enforced here, persisted: after the run
   counter is reserved (run row lock), the tenant's chain head is locked and
@@ -241,14 +247,9 @@ defmodule SdrAgent.Agents do
   """
   def reserve_model_invocation(run, attrs, opts) do
     actor = Keyword.get(opts, :actor)
-    {request, attrs} = Map.pop(Map.new(attrs), :request)
-    # Only admission charges a grant: callers never choose one.
-    attrs = Map.drop(attrs, [:grant_id, :allocation_id, :ledger_generation])
 
     ModelInvocation
-    |> guard(:reserve, run.id, actor, fn ->
-      transact(fn -> do_reserve_model_invocation(run, attrs, request, actor) end)
-    end)
+    |> guard(:reserve, run.id, actor, fn -> reserve_normalized(run, attrs, actor) end)
     |> case do
       # The reservation rolled back; the refusal is committed on its own.
       {:error, %Admission.Refusal{} = refusal} ->
@@ -259,11 +260,53 @@ defmodule SdrAgent.Agents do
     end
   end
 
-  defp do_reserve_model_invocation(run, attrs, request, actor) do
-    with {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
+  defp reserve_normalized(run, attrs, actor) do
+    with {:ok, attrs} <- normalize_reserve(attrs) do
+      {request, attrs} = Map.pop(attrs, :request)
+      transact(fn -> do_reserve_model_invocation(run, attrs, request, actor) end)
+    end
+  end
+
+  # A ClaudeCLI call with a reviewed real profile goes through admission
+  # (lock order: run → candidate grants → their allocations → chain head; see
+  # `SdrAgent.Agents.Admission`); the admitted charge reaches :reserve only
+  # through `AdmissionContext`. Any other call keeps the S6 order (run →
+  # chain head); the Fake records its own profile, and any other profile is
+  # left to the :reserve validation to refuse.
+  defp do_reserve_model_invocation(run, %{provider: :claude_cli} = attrs, request, actor) do
+    if Map.get(attrs, :profile_id) in ModelCallGrant.real_profiles(),
+      do: reserve_admitted(run, attrs, request, actor),
+      else: reserve(run, attrs, request, actor, %{})
+  end
+
+  defp do_reserve_model_invocation(run, %{provider: :fake} = attrs, request, actor),
+    do: reserve(run, Map.put(attrs, :profile_id, :fake), request, actor, %{})
+
+  defp do_reserve_model_invocation(run, attrs, request, actor),
+    do: reserve(run, attrs, request, actor, %{})
+
+  defp reserve_admitted(run, attrs, request, actor) do
+    now = SdrAgent.Clock.utc_now()
+
+    with {:ok, locked} <- lock_run(run.id, actor),
+         {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id, now),
+         {:ok, _head} <- Kernel.lock_head(locked.tenant_id),
+         {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
          :ok <- check_daily_limit(run.tenant_id),
-         {:ok, attrs} <- admit(run, attrs, actor),
-         {:ok, payload} <- store(request, actor) do
+         {:ok, charge} <- Admission.admit(locked, attrs, now, candidates) do
+      create_reserved(run, attrs, request, actor, AdmissionContext.context(charge))
+    end
+  end
+
+  defp reserve(run, attrs, request, actor, context) do
+    with {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
+         :ok <- check_daily_limit(run.tenant_id) do
+      create_reserved(run, attrs, request, actor, context)
+    end
+  end
+
+  defp create_reserved(run, attrs, request, actor, context) do
+    with {:ok, payload} <- store(request, actor) do
       attrs =
         Map.merge(attrs, %{
           agent_run_id: run.id,
@@ -272,32 +315,74 @@ defmodule SdrAgent.Agents do
         })
 
       ModelInvocation
-      |> Ash.Changeset.for_create(:reserve, attrs, actor: actor)
+      |> Ash.Changeset.for_create(:reserve, attrs, actor: actor, context: context)
       |> Ash.create(return_notifications?: true)
       |> collect()
     end
   end
 
-  # C9: a ClaudeCLI call with a reviewed real profile is charged to one
-  # allocation (`SdrAgent.Agents.Admission`), read from the run row as now
-  # locked, with the chain head already held (check_daily_limit). The Fake
-  # records its profile and needs no grant; any other profile is left to the
-  # :reserve validation to refuse.
-  defp admit(run, %{provider: :claude_cli} = attrs, actor) do
-    if Map.get(attrs, :profile_id) in ModelCallGrant.real_profiles() do
-      with {:ok, run} <- lock_run(run.id, actor),
-           {:ok, charge} <- Admission.admit(run, attrs, SdrAgent.Clock.utc_now()) do
-        {:ok, Map.merge(attrs, charge)}
-      end
-    else
-      {:ok, attrs}
+  # Reservation inputs are normalised before dispatch, so the admission path
+  # is chosen on cast values: keys may be atoms or strings (never both for one
+  # field), the governed charge fields are dropped in either form, and
+  # `provider`, `profile_id` and `purpose` are cast with their attribute types.
+  @charge_fields [:grant_id, :allocation_id, :ledger_generation]
+  @dispatch_fields [:provider, :profile_id, :purpose]
+
+  defp normalize_reserve(attrs) do
+    attrs = Map.new(attrs)
+
+    with :ok <- distinct_keys(attrs) do
+      attrs
+      |> Map.drop(@charge_fields ++ Enum.map(@charge_fields, &Atom.to_string/1))
+      |> cast_fields([:request | @dispatch_fields])
     end
   end
 
-  defp admit(_run, %{provider: :fake} = attrs, _actor),
-    do: {:ok, Map.put(attrs, :profile_id, :fake)}
+  defp cast_fields(attrs, []), do: {:ok, attrs}
 
-  defp admit(_run, attrs, _actor), do: {:ok, attrs}
+  defp cast_fields(attrs, [field | fields]) do
+    with {:ok, attrs} <- cast_field(field, attrs), do: cast_fields(attrs, fields)
+  end
+
+  defp distinct_keys(attrs) do
+    duplicate =
+      Enum.find(Map.keys(attrs), fn
+        key when is_binary(key) -> Map.has_key?(attrs, existing_atom(key))
+        _key -> false
+      end)
+
+    if duplicate, do: {:error, invalid_input(duplicate, "is given twice")}, else: :ok
+  end
+
+  defp existing_atom(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp cast_field(field, attrs) do
+    {value, attrs} = Map.pop(attrs, Atom.to_string(field), Map.get(attrs, field))
+
+    case {field, value} do
+      {_field, nil} -> {:ok, Map.delete(attrs, field)}
+      {:request, request} -> {:ok, Map.put(attrs, :request, request)}
+      {field, value} -> cast_attribute(field, value, attrs)
+    end
+  end
+
+  defp cast_attribute(field, value, attrs) do
+    %{type: type, constraints: constraints} = Ash.Resource.Info.attribute(ModelInvocation, field)
+
+    with {:ok, cast} when not is_nil(cast) <- Ash.Type.cast_input(type, value, constraints),
+         {:ok, cast} <- Ash.Type.apply_constraints(type, cast, constraints) do
+      {:ok, Map.put(attrs, field, cast)}
+    else
+      _ -> {:error, invalid_input(field, "is invalid")}
+    end
+  end
+
+  defp invalid_input(field, message),
+    do: Ash.Error.to_error_class(InvalidAttribute.exception(field: field, message: message))
 
   @doc "The effective daily model-call limit: `min(config, 200)` (ADR-0004)."
   def daily_model_call_limit do

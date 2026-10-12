@@ -14,6 +14,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
   require Ash.Query
 
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Checks.AdmissionContext
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider
@@ -183,6 +184,123 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       assert consumed(grant) == 1
       assert reload_run(run).budget.model_calls_reserved == 1
       assert refusal_failures(ctx) == []
+    end
+  end
+
+  describe "the resource boundary (direct :reserve)" do
+    test "a ClaudeCLI reservation outside admission is refused, forged ids or not", ctx do
+      revoked = grant!(ctx, %{name: "G-REVOKED"})
+      {:ok, _} = Agents.revoke_grant(revoked, %{expected_revision: 1}, actor: ctx.admin)
+      [allocation] = revoked.allocations
+      run = run!(ctx)
+
+      assert {:error, %Ash.Error.Forbidden{}} =
+               direct(direct_attrs(run, "direct-1", %{}), run.agent)
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               direct(
+                 direct_attrs(run, "direct-2", %{
+                   grant_id: revoked.id,
+                   allocation_id: allocation.id
+                 }),
+                 run.agent
+               )
+
+      assert {:error, _} =
+               direct(
+                 direct_attrs(run, "direct-3", %{
+                   "provider" => "claude_cli",
+                   "grant_id" => revoked.id,
+                   "allocation_id" => allocation.id
+                 })
+                 |> Map.delete(:provider),
+                 run.agent
+               )
+
+      assert Enum.all?(invocations(run), &(&1.provider == :fake))
+      assert consumed(revoked) == 0
+    end
+
+    test "the Fake reserves directly, but never with a charge", ctx do
+      grant = grant!(ctx)
+      run = run!(ctx)
+      fake = %{provider: :fake, profile_id: :fake}
+
+      assert {:ok, invocation} = direct(direct_attrs(run, "fake-direct", fake), run.agent)
+      assert {invocation.grant_id, invocation.ledger_generation} == {nil, 2}
+
+      charge =
+        AdmissionContext.context(%{grant_id: grant.id, allocation_id: hd(grant.allocations).id})
+
+      assert {:error, %Ash.Error.Forbidden{}} =
+               direct(direct_attrs(run, "fake-charged", fake), run.agent, charge)
+
+      assert consumed(grant) == 0
+    end
+  end
+
+  describe "input representations" do
+    test "string keys and values are cast and admitted; forged charges are dropped", ctx do
+      grant = grant!(ctx)
+      revoked = grant!(ctx, %{name: "G-REVOKED"})
+      {:ok, _} = Agents.revoke_grant(revoked, %{expected_revision: 1}, actor: ctx.admin)
+      run = run!(ctx)
+
+      forged =
+        "string-1"
+        |> attrs(%{
+          provider: "claude_cli",
+          profile_id: "claude_cli_opus",
+          purpose: "qualification"
+        })
+        |> stringify()
+        |> Map.merge(%{"grant_id" => revoked.id, "allocation_id" => hd(revoked.allocations).id})
+
+      assert {:ok, invocation} =
+               Agents.reserve_model_invocation(run.run, forged, actor: run.agent)
+
+      assert {invocation.provider, invocation.profile_id} == {:claude_cli, :claude_cli_opus}
+      assert invocation.grant_id == grant.id
+      assert invocation.allocation_id == hd(grant.allocations).id
+
+      atom_keys = attrs("string-2", %{provider: "claude_cli", grant_id: revoked.id})
+      assert {:ok, second} = Agents.reserve_model_invocation(run.run, atom_keys, actor: run.agent)
+      assert second.grant_id == grant.id
+      assert consumed(revoked) == 0
+    end
+
+    test "string inputs without an eligible grant are refused, never inserted", ctx do
+      revoked = grant!(ctx)
+      {:ok, _} = Agents.revoke_grant(revoked, %{expected_revision: 1}, actor: ctx.admin)
+      run = run!(ctx)
+
+      forged =
+        "string-refused"
+        |> attrs(%{provider: "claude_cli", profile_id: "claude_cli_opus"})
+        |> stringify()
+        |> Map.merge(%{"grant_id" => revoked.id, "allocation_id" => hd(revoked.allocations).id})
+
+      assert {:error, :no_eligible_grant} =
+               Agents.reserve_model_invocation(run.run, forged, actor: run.agent)
+
+      assert invocations(run) == []
+    end
+
+    test "a field given twice or an unknown provider is invalid before any write", ctx do
+      grant!(ctx)
+      run = run!(ctx)
+      before = length(events(ctx.tenant))
+
+      twice = Map.put(attrs("twice"), "provider", "fake")
+      unknown = attrs("unknown", %{provider: "openai"})
+
+      for input <- [twice, unknown] do
+        assert {:error, %Ash.Error.Invalid{}} =
+                 Agents.reserve_model_invocation(run.run, input, actor: run.agent)
+      end
+
+      assert invocations(run) == []
+      assert length(events(ctx.tenant)) == before
     end
   end
 
@@ -542,6 +660,26 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
                ])
     end
 
+    test "the grant must belong to the invocation's tenant", ctx do
+      grant = grant!(ctx)
+      run = run!(ctx)
+      {:ok, invocation} = reserve(run, "tenant-template")
+
+      # Move the grant to another tenant id behind the application's back.
+      tamper!("UPDATE model_call_grants SET tenant_id = $1 WHERE id = $2", [
+        Ecto.UUID.dump!(Ecto.UUID.generate()),
+        Ecto.UUID.dump!(grant.id)
+      ])
+
+      assert {:error,
+              %Postgrex.Error{
+                postgres: %{
+                  code: :foreign_key_violation,
+                  constraint: "model_invocations_grant_tenant_fkey"
+                }
+              }} = insert_copy(invocation, "status = 'reserved'")
+    end
+
     test "the new columns cannot change after reserve", ctx do
       grant = grant!(ctx)
 
@@ -580,6 +718,32 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       end
     end
   end
+
+  # A stored request payload and a free sequence, as a direct caller would need.
+  defp direct_attrs(run, key, overrides) do
+    {:ok, fake} =
+      Agents.reserve_model_invocation(run.run, AgentsFixtures.model_attrs("seed-#{key}"),
+        actor: run.agent
+      )
+
+    key
+    |> AgentsFixtures.claude_attrs()
+    |> Map.drop([:request])
+    |> Map.merge(%{
+      agent_run_id: run.run.id,
+      sequence_in_run: 100 + System.unique_integer([:positive]),
+      request_sha256: fake.request_sha256
+    })
+    |> Map.merge(overrides)
+  end
+
+  defp direct(attrs, actor, context \\ %{}) do
+    ModelInvocation
+    |> Ash.Changeset.for_create(:reserve, attrs, actor: actor, context: context)
+    |> Ash.create()
+  end
+
+  defp stringify(map), do: Map.new(map, fn {key, value} -> {Atom.to_string(key), value} end)
 
   # Simulates a run created before R0 (the migration leaves usage_origin null).
   defp legacy_run!(run) do
