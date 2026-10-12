@@ -715,6 +715,112 @@ defmodule SdrAgent.AI.ClaudeCLITest do
     end
   end
 
+  describe "R0-03 closed profiles (ADR-0004 R0 amendment, item 2)" do
+    setup do
+      dump = Path.join(System.tmp_dir!(), "sdr-claude-prof-#{System.unique_integer([:positive])}")
+      on_exit(fn -> dump |> dumps() |> Enum.each(&File.rm/1) end)
+      %{dump: dump}
+    end
+
+    test "each real profile launches its own --model alias and attests its resolved model",
+         %{dump: dump} do
+      for {profile, model_alias, resolved} <- [
+            {:claude_cli_opus, "opus", "claude-opus-5-5"},
+            {:claude_cli_sonnet, "sonnet", "claude-sonnet-5-5"}
+          ] do
+        {:ok, server} = start_server("env_dump", [dump], profile: profile)
+
+        assert ClaudeCLI.profile(server) == profile
+        assert {:ok, result} = ClaudeCLI.complete(request(), server: server)
+        assert result.model == resolved
+        assert result.provenance.profile_id == profile
+        assert result.provenance.model_id == resolved
+        assert result.provenance.provider_version == "2.1.291"
+
+        assert %{"alias" => ^model_alias, "resolved_id" => ^resolved} =
+                 result.provenance.model_catalog_entry
+
+        assert %{status: :attested, model: ^resolved, version: "2.1.291"} =
+                 ClaudeCLI.attestation(server)
+
+        GenServer.stop(server)
+      end
+
+      assert ["opus", "sonnet"] == dump |> read_dumps() |> Enum.map(& &1["model_arg"])
+    end
+
+    test "without :profile the server runs the default Opus profile", %{dump: dump} do
+      {:ok, server} = start_server("env_dump", [dump])
+      assert ClaudeCLI.profile(server) == :claude_cli_opus
+      assert {:ok, result} = ClaudeCLI.complete(request(), server: server)
+      assert result.provenance.profile_id == :claude_cli_opus
+      assert [%{"model_arg" => "opus"}] = read_dumps(dump)
+    end
+
+    test "prepare records the provenance of the server's profile, before any call" do
+      {:ok, sonnet} = start_server("ready", [], profile: :claude_cli_sonnet)
+
+      assert {:ok, provenance} = ClaudeCLI.prepare(request(), server: sonnet)
+
+      assert %{
+               provider: :claude_cli,
+               profile_id: :claude_cli_sonnet,
+               model_id: "claude-sonnet-5-5",
+               provider_version: "2.1.291",
+               model_catalog_entry: %{"alias" => "sonnet", "resolved_id" => "claude-sonnet-5-5"}
+             } = provenance
+
+      assert provenance == ClaudeCLI.provenance(:claude_cli_sonnet)
+
+      start_supervised!({ClaudeCLI, named_opts("ready") ++ [profile: :claude_cli_sonnet]})
+      assert {:ok, %{profile_id: :claude_cli_sonnet}} = ClaudeCLI.prepare(request(), [])
+
+      GenServer.stop(sonnet)
+      assert {:error, :provider_not_running} = ClaudeCLI.prepare(request(), server: sonnet)
+    end
+
+    test "a Sonnet launch that attests another model or CLI version fails closed" do
+      for {mode, reason} <- [
+            {"as_opus", :model_attestation_drift},
+            {"model_drift", :model_attestation_drift},
+            {"version_drift", :version_attestation_drift},
+            {"tool_drift", :tool_attestation_drift}
+          ] do
+        {:ok, server} = start_server(mode, [], profile: :claude_cli_sonnet)
+        assert {:error, ^reason} = ClaudeCLI.complete(request(), server: server), mode
+        assert %{status: :drift, reason: ^reason} = ClaudeCLI.attestation(server)
+      end
+    end
+
+    test "an Opus launch whose alias resolves to Sonnet fails closed" do
+      {:ok, server} = start_server("as_sonnet", [], profile: :claude_cli_opus)
+      assert {:error, :model_attestation_drift} = ClaudeCLI.complete(request(), server: server)
+      assert %{status: :drift, reason: :model_attestation_drift} = ClaudeCLI.attestation(server)
+    end
+
+    test "an unknown, Fake or free-text profile is refused at start" do
+      Process.flag(:trap_exit, true)
+
+      for profile <- [:fake, :claude_cli_haiku, "claude_cli_opus", "opus", "claude-opus-5-5", nil] do
+        assert {:error, {:invalid_profile, ^profile}} =
+                 ClaudeCLI.start_link(
+                   command: System.find_executable("elixir"),
+                   test_launcher: true,
+                   command_args: [@fake, "ready"],
+                   profile: profile
+                 ),
+               inspect(profile)
+      end
+    end
+
+    test "the reviewed model is not configurable around the profile" do
+      {:ok, server} =
+        start_server("ready", [], profile: :claude_cli_opus, expected_model: "claude-opus-future")
+
+      assert {:ok, %{model: "claude-opus-5-5"}} = ClaudeCLI.complete(request(), server: server)
+    end
+  end
+
   describe "S12b witness propagation (child environment only)" do
     setup do
       dump = Path.join(System.tmp_dir!(), "sdr-claude-env-#{System.unique_integer([:positive])}")

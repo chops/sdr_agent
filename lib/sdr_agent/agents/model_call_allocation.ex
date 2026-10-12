@@ -138,7 +138,7 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
 
     attribute :profile_id, :atom do
       public? true
-      constraints one_of: SdrAgent.Agents.ModelCallGrant.real_profiles()
+      constraints one_of: SdrAgent.AI.ModelProfiles.real_ids()
     end
 
     attribute :attempts, :integer, allow_nil?: false, public?: true, constraints: [min: 1]

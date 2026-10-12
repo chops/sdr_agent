@@ -204,6 +204,21 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       assert opts[:name] == ClaudeCLI.server()
     end
 
+    test "R0-03: the app's server is started with the desired profile (default Opus)" do
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+      Application.put_env(:sdr_agent, ClaudeCLI, timeout: 90_000)
+
+      assert Runtime.desired_profile() == :claude_cli_opus
+      assert [{ClaudeCLI, opts}] = Runtime.children()
+      assert opts[:profile] == :claude_cli_opus
+
+      # The profile is not an environment knob: only the (C2) persisted
+      # setting may choose another reviewed profile.
+      Application.put_env(:sdr_agent, ClaudeCLI, profile: :claude_cli_sonnet)
+      assert [{ClaudeCLI, opts}] = Runtime.children()
+      assert opts[:profile] == :claude_cli_opus
+    end
+
     test "the provider server starts before Oban, so no job can run before it exists" do
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
       children = SdrAgent.Application.children()
@@ -374,6 +389,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
 
       assert %{
                provider: Fake,
+               profile_id: :fake,
                model_id: "fake-qualifier",
                model_alias: nil,
                reviewed_version: nil,
@@ -391,11 +407,24 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
 
       assert %{
                provider: ClaudeCLI,
+               profile_id: :claude_cli_opus,
                model_alias: "opus",
                model_id: "claude-opus-5-5",
                reviewed_version: "2.1.291",
                server: :running,
                attestation: %{status: :pending}
+             } = Runtime.status()
+    end
+
+    test "R0-03: ClaudeCLI reports the running server's profile" do
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+      start_named!("ready", profile: :claude_cli_sonnet)
+
+      assert %{
+               profile_id: :claude_cli_sonnet,
+               model_alias: "sonnet",
+               model_id: "claude-sonnet-5-5",
+               reviewed_version: "2.1.291"
              } = Runtime.status()
     end
 
