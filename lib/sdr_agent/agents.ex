@@ -33,7 +33,11 @@ defmodule SdrAgent.Agents do
       per-exchange lineage), `list_wire_witness_links/2`,
       `current_wire_witness_links/2`, `witness_status/2` (S12c), and
       `read_reconciliation_payloads/2` (REC; the only path to the scoped
-      Payload read). Reconciliation itself: `SdrAgent.Agents.Witness`.
+      Payload read). Reconciliation itself: `SdrAgent.Agents.Witness`;
+    * real-model call grants (C9) — `create_grant/2`,
+      `update_grant_terms/3`, `revoke_grant/3`, `release_allocation/3`
+      (each an active human admin only, in one transaction, refusing a stale
+      `expected_revision`), `list_grants/1`, `get_grant/2`.
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -45,6 +49,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.Decision
+  alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
@@ -53,6 +58,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Audit.GuardedCall
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Audit.Payload
+  alias SdrAgent.Repo
 
   @notifications {__MODULE__, :notifications}
   # ADR-0004: at most 200 model calls per UTC day; configuration may only lower it.
@@ -65,6 +71,8 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.ToolInvocation
     resource SdrAgent.Agents.Decision
     resource SdrAgent.Agents.WireWitnessLink
+    resource SdrAgent.Agents.ModelCallGrant
+    resource SdrAgent.Agents.ModelCallAllocation
   end
 
   ## Definitions
@@ -609,6 +617,119 @@ defmodule SdrAgent.Agents do
 
   # Multi-step writes run in one transaction; Ash notifications produced
   # inside it are sent only after it commits.
+
+  # --- real-model call grants (C9) -------------------------------------
+
+  @doc """
+  ADM: creates a grant and its `allocations` (a list of maps with `:key`,
+  `:applies_to`, `:attempts` and optional `:profile_id`, `:available_from`,
+  `:available_until`) as one validated bundle. Returns the grant with its
+  allocations loaded.
+  """
+  def create_grant(attrs, opts) do
+    grant_transaction(opts, fn opts ->
+      GuardedCall.create(ModelCallGrant, :create, Map.new(attrs), opts)
+    end)
+  end
+
+  @doc """
+  ADM: changes a grant's terms (any of `name`, `purpose`, `profile_ids`,
+  `total_attempts`, `per_utc_day_attempts`, `starts_at`, `expires_at`) and
+  its `allocations`, matched by `{key, profile_id}` (a match is updated, a
+  new pair is created, none is deleted), validated as one final state.
+  Requires `expected_revision`.
+  """
+  def update_grant_terms(%ModelCallGrant{} = grant, attrs, opts) do
+    grant_transaction(opts, fn opts ->
+      GuardedCall.update(grant, :update_terms, Map.new(attrs), opts)
+    end)
+  end
+
+  @doc "ADM: revokes a grant (terminal). Requires `expected_revision`."
+  def revoke_grant(%ModelCallGrant{} = grant, attrs, opts) do
+    grant_transaction(opts, fn opts ->
+      GuardedCall.update(grant, :revoke, Map.take(Map.new(attrs), [:expected_revision]), opts)
+    end)
+  end
+
+  @doc """
+  ADM: releases the allocation `key` (with optional `profile_id`) for use
+  before its `available_from`. Requires the grant's `expected_revision`.
+  """
+  def release_allocation(%ModelCallGrant{} = grant, attrs, opts) do
+    attrs = Map.take(Map.new(attrs), [:expected_revision, :key, :profile_id])
+
+    grant_transaction(opts, fn opts ->
+      GuardedCall.update(grant, :release_allocation, attrs, opts)
+    end)
+  end
+
+  @doc "ADM, AUD, AGT: the tenant's grants with allocations, oldest first."
+  def list_grants(opts) do
+    actor = Keyword.get(opts, :actor)
+
+    ModelCallGrant
+    |> tenant_scope(actor)
+    |> Ash.Query.sort(inserted_at: :asc, id: :asc)
+    |> Ash.Query.load(:allocations)
+    |> Ash.read(actor: actor)
+  end
+
+  @doc "ADM, AUD, AGT: one grant with allocations."
+  def get_grant(id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    ModelCallGrant
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.Query.load(:allocations)
+    |> Ash.read_one(actor: actor)
+    |> case do
+      {:ok, nil} -> {:error, NotFound.exception(resource: ModelCallGrant)}
+      other -> other
+    end
+  end
+
+  # One guarded transaction per grant change. A human actor is re-read
+  # first, so the change and its audit events carry the operator's current
+  # role (the CurrentAdmin check re-reads it again). A failing Ash action may
+  # roll the transaction back itself with its changeset; either way the
+  # caller gets an Ash error class.
+  defp grant_transaction(opts, fun) do
+    opts =
+      opts |> Keyword.update(:actor, nil, &current_operator/1) |> Keyword.put(:guarded?, true)
+
+    fn ->
+      case fun.(opts) do
+        {:ok, grant} -> unwrap_load(grant)
+        {:error, error} -> Repo.rollback(error)
+      end
+    end
+    |> SdrAgent.Audit.transaction()
+    |> case do
+      {:ok, value} -> {:ok, value}
+      {:error, error} -> {:error, Ash.Error.to_error_class(error)}
+    end
+  end
+
+  defp unwrap_load(grant) do
+    case load_grant(grant) do
+      {:ok, grant} -> grant
+      {:error, error} -> Repo.rollback(error)
+    end
+  end
+
+  defp current_operator(%SdrAgent.Accounts.User{id: id} = user) do
+    case Ash.get(SdrAgent.Accounts.User, id, authorize?: false) do
+      {:ok, fresh} -> fresh
+      _ -> user
+    end
+  end
+
+  defp current_operator(actor), do: actor
+
+  defp load_grant(grant), do: Ash.load(grant, :allocations, authorize?: false)
+
   defp transact(fun) do
     Process.put(@notifications, [])
     result = Kernel.in_transaction(fun)
