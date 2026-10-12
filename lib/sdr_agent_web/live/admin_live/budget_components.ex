@@ -285,6 +285,8 @@ defmodule SdrAgentWeb.AdminLive.BudgetComponents do
       assign(assigns,
         params: assigns.budget.params,
         rows: GrantForm.allocation_rows(assigns.budget.params),
+        originals:
+          if(assigns.budget.grant, do: GrantForm.originals(assigns.budget.grant), else: %{}),
         input: @input,
         check: @check
       )
@@ -400,6 +402,7 @@ defmodule SdrAgentWeb.AdminLive.BudgetComponents do
             name="grant[starts_at]"
             label="Starts (America/Denver)"
             value={@params["starts_at"]}
+            original={@originals[{:grant, :starts_at}]}
             errors={errors_for(@budget, :starts_at)}
             class={@input}
           />
@@ -408,6 +411,7 @@ defmodule SdrAgentWeb.AdminLive.BudgetComponents do
             name="grant[expires_at]"
             label="Expires (America/Denver)"
             value={@params["expires_at"]}
+            original={@originals[{:grant, :expires_at}]}
             errors={errors_for(@budget, :expires_at)}
             class={@input}
           />
@@ -434,6 +438,7 @@ defmodule SdrAgentWeb.AdminLive.BudgetComponents do
               row={row}
               locked?={MapSet.member?(@budget.locked, index)}
               errors={errors_for(@budget, {:allocation, index})}
+              originals={@originals}
               input={@input}
               check={@check}
             />
@@ -457,11 +462,12 @@ defmodule SdrAgentWeb.AdminLive.BudgetComponents do
   attr :name, :string, required: true
   attr :label, :string, required: true
   attr :value, :string, default: ""
+  attr :original, :any, default: nil, doc: "the stored instant on an edit (kept while untouched)"
   attr :errors, :list, default: []
   attr :class, :string, required: true
 
   defp wall_time(assigns) do
-    assigns = assign(assigns, :preview, GrantForm.preview(assigns.value))
+    assigns = assign(assigns, :preview, GrantForm.preview(assigns.value, assigns.original))
 
     ~H"""
     <div>
@@ -495,6 +501,7 @@ defmodule SdrAgentWeb.AdminLive.BudgetComponents do
   attr :row, :map, required: true
   attr :locked?, :boolean, default: false
   attr :errors, :list, default: []
+  attr :originals, :map, default: %{}
   attr :input, :string, required: true
   attr :check, :string, required: true
 
@@ -574,6 +581,7 @@ defmodule SdrAgentWeb.AdminLive.BudgetComponents do
           name={"#{@prefix}[available_from]"}
           label="Available from (optional)"
           value={@row["available_from"]}
+          original={GrantForm.row_original(@originals, @row, :available_from)}
           class={@input}
         />
         <.wall_time
@@ -581,6 +589,7 @@ defmodule SdrAgentWeb.AdminLive.BudgetComponents do
           name={"#{@prefix}[available_until]"}
           label="Available until (optional)"
           value={@row["available_until"]}
+          original={GrantForm.row_original(@originals, @row, :available_until)}
           class={@input}
         />
       </div>

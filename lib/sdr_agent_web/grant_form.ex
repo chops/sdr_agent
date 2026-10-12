@@ -156,32 +156,70 @@ defmodule SdrAgentWeb.GrantForm do
   ## Parsing
 
   @doc """
+  The stored instants of `grant` an edit form shows, keyed `{:grant, field}`
+  and `{:allocation, key, profile_id, field}`, for `parse/2`. A Denver wall
+  time does not name one instant (the fall-back hour occurs twice) and the
+  form shows no microseconds, so an untouched time field must keep the
+  stored instant rather than be parsed again.
+  """
+  def originals(%ModelCallGrant{} = grant) do
+    grant_times = Enum.map([:starts_at, :expires_at], &{{:grant, &1}, Map.get(grant, &1)})
+
+    allocation_times =
+      for allocation <- grant.allocations, field <- [:available_from, :available_until] do
+        {{:allocation, allocation.key, allocation.profile_id, field}, Map.get(allocation, field)}
+      end
+
+    (grant_times ++ allocation_times)
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  @doc """
+  The stored instant (from `originals/1`) behind an allocation row's
+  `field`, matched by the row's key and profile; nil for a new row.
+  """
+  def row_original(originals, row, field) do
+    with {:ok, key} when not is_nil(key) <- choice(row["key"], keys()),
+         {:ok, profile_id} <- choice(row["profile_id"], profiles()) do
+      Map.get(originals, {:allocation, key, profile_id, field})
+    else
+      _unknown -> nil
+    end
+  end
+
+  @doc """
   Parses form params into grant terms: `{:ok, terms}` (with `:allocations`,
   each carrying its row `:index`, and `:notes` for the review step) or
   `{:error, errors}`, a map from field (or `{:allocation, index}`) to
-  messages.
+  messages. With an edit's `originals` (`originals/1`), a time field whose
+  value is still exactly what the form showed for its stored instant keeps
+  that instant (to the microsecond, in either half of the fall-back hour);
+  only a changed time is parsed.
   """
-  def parse(params) when is_map(params) do
+  def parse(params, originals \\ %{}) when is_map(params) do
     acc =
       params
-      |> grant_results()
+      |> grant_results(originals)
       |> Enum.reduce(%{terms: %{}, errors: %{}, notes: []}, &put_result/2)
-      |> parse_allocations(Map.get(params, "allocations") || %{})
+      |> parse_allocations(Map.get(params, "allocations") || %{}, originals)
 
     if acc.errors == %{},
       do: {:ok, Map.put(acc.terms, :notes, Enum.reverse(acc.notes))},
       else: {:error, acc.errors}
   end
 
-  defp grant_results(params) do
+  defp grant_results(params, originals) do
     [
       name: required(text(params["name"])),
       purpose: required(text(params["purpose"])),
       profile_ids: choices(params["profile_ids"], profiles(), "includes an unknown profile"),
       total_attempts: required(integer(params["total_attempts"])),
       per_utc_day_attempts: integer(params["per_utc_day_attempts"]),
-      starts_at: required(wall_time(params["starts_at"], "Starts")),
-      expires_at: required(wall_time(params["expires_at"], "Expires"))
+      starts_at:
+        required(wall_time(params["starts_at"], "Starts", originals[{:grant, :starts_at}])),
+      expires_at:
+        required(wall_time(params["expires_at"], "Expires", originals[{:grant, :expires_at}]))
     ]
   end
 
@@ -200,30 +238,43 @@ defmodule SdrAgentWeb.GrantForm do
         &Map.update(&1, field, [message], fn list -> list ++ [message] end)
       )
 
-  defp parse_allocations(acc, rows) when is_map(rows) do
+  defp parse_allocations(acc, rows, originals) when is_map(rows) do
     rows
     |> Enum.sort_by(fn {index, _row} -> index_of(index) end)
-    |> Enum.reduce(Map.put(acc, :allocations, []), &parse_allocation/2)
+    |> Enum.reduce(Map.put(acc, :allocations, []), &parse_allocation(&1, &2, originals))
     |> finish_allocations()
   end
 
-  defp parse_allocations(acc, _rows), do: add_error(acc, :allocations, "must be a list of rows")
+  defp parse_allocations(acc, _rows, _originals),
+    do: add_error(acc, :allocations, "must be a list of rows")
 
-  defp parse_allocation({index, row}, acc) when is_map(row) do
+  defp parse_allocation({index, row}, acc, originals) when is_map(row) do
+    original = &row_original(originals, row, &1)
+
     results = [
       key: required(choice(row["key"], keys())),
       profile_id: choice(row["profile_id"], profiles()),
       applies_to: choices(row["applies_to"], buckets(), "includes an unknown bucket"),
       attempts: required(integer(row["attempts"])),
-      available_from: wall_time(row["available_from"], "Allocation available from"),
-      available_until: wall_time(row["available_until"], "Allocation available until")
+      available_from:
+        wall_time(
+          row["available_from"],
+          "Allocation available from",
+          original.(:available_from)
+        ),
+      available_until:
+        wall_time(
+          row["available_until"],
+          "Allocation available until",
+          original.(:available_until)
+        )
     ]
 
     acc = %{acc | allocations: [%{index: index} | acc.allocations]}
     Enum.reduce(results, acc, &put_allocation_result(&1, &2, index))
   end
 
-  defp parse_allocation({index, _row}, acc),
+  defp parse_allocation({index, _row}, acc, _originals),
     do: add_error(acc, {:allocation, index}, "is not an allocation row")
 
   defp put_allocation_result({field, {:ok, value}}, acc, _index),
@@ -310,15 +361,25 @@ defmodule SdrAgentWeb.GrantForm do
   defp choices(nil, _allowed, _message), do: {:ok, []}
   defp choices(_values, _allowed, message), do: {:error, message}
 
-  defp wall_time(value, label) when is_binary(value) do
+  # An untouched field (still the text shown for its stored instant) keeps
+  # that instant; anything else is parsed as a Denver wall time.
+  defp wall_time(value, label, original) when is_binary(value) do
     case String.trim(value) do
-      "" -> {:ok, nil}
-      text -> text |> naive() |> resolve(label)
+      "" ->
+        {:ok, nil}
+
+      text ->
+        if untouched?(text, original), do: {:ok, original}, else: parse_wall_time(text, label)
     end
   end
 
-  defp wall_time(nil, _label), do: {:ok, nil}
-  defp wall_time(_value, _label), do: {:error, "must be a date and time"}
+  defp wall_time(nil, _label, _original), do: {:ok, nil}
+  defp wall_time(_value, _label, _original), do: {:error, "must be a date and time"}
+
+  defp untouched?(_text, nil), do: false
+  defp untouched?(text, %DateTime{} = original), do: text == local_param(original)
+
+  defp parse_wall_time(text, label), do: text |> naive() |> resolve(label)
 
   # A datetime-local value: "YYYY-MM-DDTHH:MM" (seconds optional).
   defp naive(text) do
@@ -430,9 +491,13 @@ defmodule SdrAgentWeb.GrantForm do
 
   ## Display
 
-  @doc "The UTC instant a Denver wall-time input names, for a live hint; nil when blank or invalid."
-  def preview(value) do
-    case wall_time(value, "") do
+  @doc """
+  The UTC instant a Denver wall-time input names, for a live hint; nil when
+  blank or invalid. With the field's stored `original`, an untouched value
+  previews that instant (as `parse/2` keeps it).
+  """
+  def preview(value, original \\ nil) do
+    case wall_time(value, "", original) do
       {:ok, %DateTime{} = instant} -> utc(instant)
       {:ok, %DateTime{} = instant, _note} -> utc(instant) <> " (the earlier of two)"
       _blank_or_invalid -> nil

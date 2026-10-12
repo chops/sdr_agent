@@ -227,6 +227,102 @@ defmodule SdrAgentWeb.GrantFormTest do
     end
   end
 
+  describe "edit keeps untouched stored instants (Codex review of PR #134)" do
+    @later_fold ~U[2026-11-01 08:30:00.000000Z]
+
+    defp fold_grant do
+      %ModelCallGrant{
+        id: "g2",
+        name: "G-FOLD",
+        purpose: "Fold",
+        status: :active,
+        profile_ids: [:claude_cli_opus],
+        total_attempts: 4,
+        per_utc_day_attempts: nil,
+        starts_at: ~U[2026-10-12 06:00:00.123456Z],
+        expires_at: @later_fold,
+        revision: 5,
+        allocations: [
+          %ModelCallAllocation{
+            key: :b1,
+            profile_id: nil,
+            applies_to: [:b1],
+            attempts: 2,
+            available_from: ~U[2026-10-13 07:15:30.654321Z],
+            available_until: @later_fold
+          }
+        ]
+      }
+    end
+
+    test "an unchanged form is no change, whatever the stored instants" do
+      grant = fold_grant()
+      params = GrantForm.params_for(grant)
+      assert params["expires_at"] == "2026-11-01T01:30"
+
+      {:ok, terms} = GrantForm.parse(params, GrantForm.originals(grant))
+      assert terms.expires_at == @later_fold
+      assert terms.starts_at == grant.starts_at
+      assert terms.notes == []
+
+      changes = GrantForm.changes(grant, terms)
+      assert changes == %{terms: [], allocations: []}
+      assert GrantForm.update_attrs(grant, changes) == %{expected_revision: 5}
+    end
+
+    test "changing one term sends only that term" do
+      grant = fold_grant()
+      params = grant |> GrantForm.params_for() |> Map.put("total_attempts", "6")
+
+      {:ok, terms} = GrantForm.parse(params, GrantForm.originals(grant))
+      [allocation] = terms.allocations
+      assert allocation.available_until == @later_fold
+      assert allocation.available_from == ~U[2026-10-13 07:15:30.654321Z]
+
+      assert GrantForm.update_attrs(grant, GrantForm.changes(grant, terms)) ==
+               %{expected_revision: 5, total_attempts: 6}
+    end
+
+    test "a changed wall time is parsed (fold: the earlier instant, noted)" do
+      grant = fold_grant()
+      params = grant |> GrantForm.params_for() |> Map.put("expires_at", "2026-11-01T01:45")
+
+      {:ok, terms} = GrantForm.parse(params, GrantForm.originals(grant))
+      assert terms.expires_at == ~U[2026-11-01 07:45:00.000000Z]
+      assert [_note] = terms.notes
+    end
+
+    test "an original applies only to its own allocation" do
+      grant = fold_grant()
+
+      params =
+        grant
+        |> GrantForm.params_for()
+        |> put_in(["allocations", "1"], %{
+          "key" => "b2",
+          "profile_id" => "",
+          "applies_to" => ["b2"],
+          "attempts" => "1",
+          "available_from" => "",
+          "available_until" => "2026-11-01T01:30"
+        })
+
+      {:ok, terms} = GrantForm.parse(params, GrantForm.originals(grant))
+      b2 = Enum.find(terms.allocations, &(&1.key == :b2))
+      # A new row is parsed: the earlier instant, with its note.
+      assert b2.available_until == ~U[2026-11-01 07:30:00.000000Z]
+      assert [_note] = terms.notes
+    end
+
+    test "preview shows the stored instant for an untouched value" do
+      grant = fold_grant()
+      original = grant.expires_at
+
+      assert GrantForm.preview("2026-11-01T01:30", original) == "Nov 1, 2026 08:30 UTC"
+      assert GrantForm.preview("2026-11-01T01:30") =~ "07:30 UTC (the earlier of two)"
+    end
+  end
+
   describe "display" do
     test "shows Denver with its zone abbreviation and UTC" do
       assert GrantForm.denver(~U[2026-10-31 18:00:00Z]) == "Oct 31, 2026 12:00 MDT"

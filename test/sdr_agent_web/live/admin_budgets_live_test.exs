@@ -255,6 +255,99 @@ defmodule SdrAgentWeb.AdminBudgetsLiveTest do
     end
   end
 
+  describe "edit keeps untouched stored instants (Codex review of PR #134)" do
+    # 01:30 on Nov 1 2026 happens twice in Denver; 08:30 UTC is the later (MST) one.
+    @later_fold ~U[2026-11-01 08:30:00.000000Z]
+    @with_usec ~U[2026-10-12 06:00:00.123456Z]
+
+    defp fold_grant!(ctx) do
+      create!(
+        ctx,
+        g_r0_attrs(%{
+          starts_at: @with_usec,
+          expires_at: @later_fold,
+          total_attempts: 6,
+          allocations: [
+            %{
+              key: :b1,
+              applies_to: [:b1],
+              attempts: 2,
+              available_from: ~U[2026-10-13 07:15:30.654321Z],
+              available_until: @later_fold
+            }
+          ]
+        })
+      )
+    end
+
+    defp open_edit(conn, grant) do
+      view = admin_view(conn)
+      view |> element("#edit-grant-#{grant.id}") |> render_click()
+      view
+    end
+
+    test "only the changed term is saved; fold and microsecond instants are kept exactly",
+         %{conn: conn} = ctx do
+      grant = fold_grant!(ctx)
+      view = open_edit(conn, grant)
+
+      # Submit what the form rendered, changing only the total.
+      view |> form("#grant-form", grant: %{"total_attempts" => "7"}) |> render_submit()
+
+      assert has_element?(view, "#review-changes", "total attempts")
+      refute has_element?(view, "#review-changes", "expires at")
+      refute has_element?(view, "#review-changes", "starts at")
+      assert has_element?(view, "#review-allocations", "No change to the allocations")
+
+      view |> element("#confirm-grant") |> render_click()
+
+      assert [updated] = grants!(ctx)
+      assert updated.revision == 2
+      assert updated.total_attempts == 7
+      assert updated.expires_at == @later_fold
+      assert updated.starts_at == @with_usec
+
+      [allocation] = updated.allocations
+      assert allocation.available_until == @later_fold
+      assert allocation.available_from == ~U[2026-10-13 07:15:30.654321Z]
+      assert events_of_type(ctx.tenant, "model.grant.allocation_changed") == []
+    end
+
+    test "an unchanged form round-trips to no change at all", %{conn: conn} = ctx do
+      grant = fold_grant!(ctx)
+      view = open_edit(conn, grant)
+
+      view |> form("#grant-form") |> render_submit()
+
+      refute has_element?(view, "#grant-review")
+      assert has_element?(view, "#grant-form", "Nothing to change")
+    end
+
+    test "an unchanged fold time previews its stored instant", %{conn: conn} = ctx do
+      grant = fold_grant!(ctx)
+      view = open_edit(conn, grant)
+
+      assert has_element?(view, "#grant-expires-at-utc", "Nov 1, 2026 08:30 UTC")
+      refute has_element?(view, "#grant-expires-at-utc", "earlier of two")
+    end
+
+    test "a changed time is parsed with the earlier-instant rule and noted",
+         %{conn: conn} = ctx do
+      grant = fold_grant!(ctx)
+      view = open_edit(conn, grant)
+
+      view
+      |> form("#grant-form", grant: %{"expires_at" => "2026-11-01T01:45"})
+      |> render_submit()
+
+      assert has_element?(view, "#review-changes", "expires at")
+      assert has_element?(view, "#review-notes", "occurs twice")
+
+      view |> element("#confirm-grant") |> render_click()
+      assert [%{expires_at: ~U[2026-11-01 07:45:00.000000Z]}] = grants!(ctx)
+    end
+  end
+
   describe "revoke and release" do
     test "revoke asks for confirmation in the page and is terminal", %{conn: conn} = ctx do
       grant = create!(ctx)

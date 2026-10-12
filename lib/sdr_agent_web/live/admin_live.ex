@@ -253,7 +253,7 @@ defmodule SdrAgentWeb.AdminLive do
   defp review(budget, params) do
     budget = %{budget | params: params, error: nil, stale: nil}
 
-    with {:ok, terms} <- GrantForm.parse(params),
+    with {:ok, terms} <- GrantForm.parse(params, originals(budget)),
          {:ok, changes} <- changes_for(budget, terms) do
       %{budget | step: :review, terms: terms, changes: changes, errors: %{}}
     else
@@ -269,6 +269,10 @@ defmodule SdrAgentWeb.AdminLive do
         }
     end
   end
+
+  # An edit keeps the stored instant of every time field the admin did not touch.
+  defp originals(%{mode: :edit, grant: grant}), do: GrantForm.originals(grant)
+  defp originals(_budget), do: %{}
 
   defp changes_for(%{mode: :create}, _terms), do: {:ok, nil}
 
