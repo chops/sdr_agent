@@ -8,9 +8,12 @@ defmodule SdrAgent.Outreach.Changes.AssessmentRules do
   call (schema `sdr.reply_classification`) in the same tenant; and its
   parsed output equals the Decision's outcome and every model-derived
   value of the assessment (classification, sentiment, intent, suggested
-  next action, confidence, reason). A forged Decision on a real call, a
-  call of another run or purpose, or caller-supplied values the model did
-  not produce are refused — nothing is written.
+  next action, confidence, reason). That output is read only through the
+  released-output read (`SdrAgent.Agents.ReleasedOutput`, R0-07): a
+  generation-2 ClaudeCLI output without a `:released` release is refused
+  with `SdrAgent.Agents.Errors.ResultNotReleased`. A forged Decision on a
+  real call, a call of another run or purpose, or caller-supplied values
+  the model did not produce are refused — nothing is written.
 
   A classification of `unsubscribe` then ensures the recipient's
   `unsubscribe_reply` Suppression (S2 "classification unsubscribe ⇒ ensure a
@@ -26,7 +29,9 @@ defmodule SdrAgent.Outreach.Changes.AssessmentRules do
   require Ash.Query
 
   alias SdrAgent.Agents.Decision
+  alias SdrAgent.Agents.Errors.ResultNotReleased
   alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ReleasedOutput
   alias SdrAgent.Outreach.DeliveryOperation
   alias SdrAgent.Outreach.Reply
   alias SdrAgent.Outreach.Suppression
@@ -38,15 +43,25 @@ defmodule SdrAgent.Outreach.Changes.AssessmentRules do
       tenant_id = get.(:tenant_id)
       decision = read(Decision, get.(:decision_id), tenant_id)
       invocation = invocation(get.(:model_invocation_id), tenant_id, context.actor)
+      output = output(invocation, context.actor)
 
       cond do
+        output == {:error, :result_not_released} ->
+          Ash.Changeset.add_error(
+            changeset,
+            ResultNotReleased.exception(
+              field: :model_invocation_id,
+              model_invocation_id: invocation.id
+            )
+          )
+
         not valid_decision?(decision, get) ->
           Ash.Changeset.add_error(changeset,
             field: :decision_id,
             message: "must be the run's llm reply_classification decision about this reply"
           )
 
-        not valid_output?(invocation, decision, get) ->
+        not valid_output?(invocation, output, decision, get) ->
           Ash.Changeset.add_error(changeset,
             field: :model_invocation_id,
             message:
@@ -81,14 +96,17 @@ defmodule SdrAgent.Outreach.Changes.AssessmentRules do
   # classification purpose and schema, completed with a validated output —
   # and that output *is* the decision's outcome and every model-derived value
   # of the assessment (nothing is trusted from the caller's attributes).
-  defp valid_output?(%ModelInvocation{} = inv, %Decision{} = decision, get) do
-    out = inv.parsed_output || %{}
-
+  defp valid_output?(%ModelInvocation{} = inv, {:ok, out}, %Decision{} = decision, get)
+       when is_map(out) do
     valid_call?(inv, get) and field(out, :classification) == decision.outcome and
       same_values?(out, get)
   end
 
-  defp valid_output?(_invocation, _decision, _get), do: false
+  defp valid_output?(_invocation, _output, _decision, _get), do: false
+
+  # The model output through the released-output read (R0-07).
+  defp output(%ModelInvocation{} = inv, actor), do: ReleasedOutput.fetch(inv, actor)
+  defp output(_invocation, _actor), do: {:error, :not_found}
 
   defp valid_call?(inv, get) do
     inv.agent_run_id == get.(:agent_run_id) and inv.purpose == :reply_classification and

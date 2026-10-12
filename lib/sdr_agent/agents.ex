@@ -38,7 +38,8 @@ defmodule SdrAgent.Agents do
       Payload read). Reconciliation itself: `SdrAgent.Agents.Witness`;
     * result release (R0-07) — `decide_result_release/2` (AGT; the one
       immutable `ModelResultRelease` of an invocation), `get_result_release/2`,
-      `list_result_releases/1`;
+      `list_result_releases/1`, and `released_output/2`, the only business
+      read of a generation-2 ClaudeCLI output (`SdrAgent.Agents.ReleasedOutput`);
     * real-model call grants (C9) — `create_grant/2`,
       `update_grant_terms/3`, `revoke_grant/3`, `release_allocation/3`
       (each an active human admin only, in one transaction, refusing a stale
@@ -61,6 +62,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ReleasedOutput
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.AI.ModelProfiles
@@ -765,6 +767,16 @@ defmodule SdrAgent.Agents do
     |> Ash.Query.sort(decided_at: :asc, id: :asc)
     |> Ash.read()
   end
+
+  @doc """
+  The business read of one invocation's model output (R0-07 REQ-07-5):
+  `{:ok, output}` for a generation-2 ClaudeCLI invocation only when it has a
+  `:released` release, and for a generation-1 or Fake invocation as stored;
+  otherwise `{:error, :result_not_released}` (`{:error, :not_found}` outside
+  the actor's tenant). See `SdrAgent.Agents.ReleasedOutput`.
+  """
+  def released_output(invocation, opts),
+    do: ReleasedOutput.fetch(invocation, Keyword.get(opts, :actor))
 
   ## Helpers
 

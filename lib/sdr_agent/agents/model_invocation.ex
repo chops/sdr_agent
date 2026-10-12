@@ -36,8 +36,18 @@ defmodule SdrAgent.Agents.ModelInvocation do
   any actor (metadata only — content via `SdrAgent.Audit.read_content/2`).
   Audited: `model.invocation.reserved | sent | completed | failed | unknown`.
 
-  An `(id, tenant_id)` unique key is the target of the
-  `SdrAgent.Agents.ModelResultRelease` composite FK (R0-07).
+  Read gate (R0-07 REQ-07-5; entity PASS at 1da747a): for a generation-2
+  ClaudeCLI row, `parsed_output` is readable only by the released-output
+  read (`SdrAgent.Agents.released_output/2`, marked by
+  `SdrAgent.Agents.Checks.ReleasedOutputRead` and requiring a `:released`
+  `SdrAgent.Agents.ModelResultRelease`), by the witness evidence seam (REC
+  and AUD), by the audit kernel's integrity read (chain verification and
+  event hashing, `SdrAgent.Audit.Checks.IntegrityRead`) and under the test-seam
+  `SdrAgent.Agents.Checks.CalibrationContext`. Every other read — generic
+  Ash reads, domain list and detail APIs, kernel-context reads, admins and
+  AGT — returns `%Ash.ForbiddenField{}`, released or not. Generation-1 and
+  Fake rows are unchanged. An `(id, tenant_id)` unique key is the target of
+  the release's composite FK.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -157,6 +167,23 @@ defmodule SdrAgent.Agents.ModelInvocation do
 
         after_tables ["model_call_allocations"]
       end
+    end
+  end
+
+  field_policies do
+    # R0-07: the output of a generation-2 ClaudeCLI call is a business read
+    # only once released, and then only through the released-output read.
+    field_policy :parsed_output do
+      authorize_if expr(ledger_generation != 2 or provider != :claude_cli)
+      authorize_if {Checks.ActorType, types: [:reconciler, :auditor_cli]}
+      authorize_if SdrAgent.Audit.Checks.IntegrityRead
+      authorize_if SdrAgent.Agents.Checks.CalibrationContext
+      forbid_unless SdrAgent.Agents.Checks.ReleasedOutputRead
+      authorize_if expr(exists(result_release, disposition == :released))
+    end
+
+    field_policy :* do
+      authorize_if always()
     end
   end
 

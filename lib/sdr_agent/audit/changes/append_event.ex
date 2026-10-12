@@ -9,6 +9,10 @@ defmodule SdrAgent.Audit.Changes.AppendEvent do
   rolls back. Works for atomic updates (the hook runs on the row returned by
   the atomic `UPDATE ... RETURNING`).
 
+  The event hashes the row as stored: a record carrying a field withheld by
+  a field policy is re-read through `SdrAgent.Audit.Kernel.integrity_opts/1`
+  first (the caller still receives the masked record).
+
   A record marked `:sdr_replayed` in its metadata (an identical idempotent
   replay that wrote nothing, see `SdrAgent.Agents.Changes.Replay`) appends
   no event.
@@ -65,10 +69,22 @@ defmodule SdrAgent.Audit.Changes.AppendEvent do
   defp append(changeset, record, opts, actor) do
     tenant_id = Map.get(record, Keyword.get(opts, :tenant, :tenant_id))
 
-    case Kernel.append(event(changeset, record, opts), actor: actor, tenant_id: tenant_id) do
-      {:ok, _event} -> {:ok, record}
-      {:error, error} -> {:error, error}
+    with {:ok, stored} <- stored(record, tenant_id),
+         {:ok, _event} <-
+           Kernel.append(event(changeset, stored, opts), actor: actor, tenant_id: tenant_id) do
+      {:ok, record}
     end
+  end
+
+  # The event describes the row as stored. A record whose field a field
+  # policy withheld from the actor (`%Ash.ForbiddenField{}`, e.g. R0-07's
+  # `ModelInvocation.parsed_output` on an atomic update) is re-read in this
+  # transaction through the kernel's integrity read; the caller still gets
+  # the masked record.
+  defp stored(%resource{id: id} = record, tenant_id) do
+    if Enum.any?(Map.values(record), &match?(%Ash.ForbiddenField{}, &1)),
+      do: Ash.get(resource, id, Kernel.integrity_opts(tenant_id)),
+      else: {:ok, record}
   end
 
   defp event(changeset, %resource{} = record, opts) do
