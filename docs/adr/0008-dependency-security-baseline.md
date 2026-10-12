@@ -230,10 +230,11 @@ return shapes normalized; a field-policy related-filter fix; temporal
 (`as_of`) write fixes; an opt-out for `run` compile-time dependencies. None
 changes a behaviour this project relies on; the full gate below is the check.
 
-## Amendment (proposed 2026-10-12): EEF-CVE-2026-97853
+## Amendment (2026-10-12): EEF-CVE-2026-97853
 
-**Status: proposed.** In force when the owner accepts it; until then this
-branch is unmerged and CI on other changes stays red on the audit step.
+**Status: accepted** by the owner in the private Claude session chat on
+2026-10-12 ("accept PR #40"), after Codex's independent approval of
+233a91e (reply 01a12e51; exact-head CI 38202840312 green).
 
 ### Advisory
 
