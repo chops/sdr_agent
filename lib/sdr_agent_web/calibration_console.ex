@@ -13,7 +13,14 @@ defmodule SdrAgentWeb.CalibrationConsole do
       request is answered 404 before the router;
     * as the operator console's last `on_mount` hook, a live navigation to
       any console view other than `SdrAgentWeb.AdminLive` is redirected to
-      `/admin`, so no other page is reachable over the socket either.
+      `/admin`, so no other page is reachable over the socket either; a
+      signed-in operator who is not an admin is sent to `/sign-out`;
+    * the endpoint's session cookie is `_sdr_agent_calibration_key`
+      (`session_key/0`), not the app's `_sdr_agent_key`: browsers scope
+      cookies by host, not port, so the console on localhost:4124 and the
+      app on localhost:4120 would otherwise overwrite each other's sessions.
+      `SdrAgentWeb.Endpoint.session_options/0` applies it to HTTP requests
+      and the LiveView socket alike.
 
   It only narrows what is served; authentication and the domain's policies
   still decide everything on the pages it lets through.
@@ -21,6 +28,11 @@ defmodule SdrAgentWeb.CalibrationConsole do
   @behaviour Plug
 
   import Plug.Conn
+
+  @session_key "_sdr_agent_calibration_key"
+
+  @doc "The console's own session cookie name."
+  def session_key, do: @session_key
 
   @doc "Whether this VM serves the calibration console."
   def active? do
@@ -63,10 +75,24 @@ defmodule SdrAgentWeb.CalibrationConsole do
   `SdrAgentWeb.AdminLive` mounts; any other view is redirected to `/admin`.
   """
   def on_mount(:admin_only, _params, _session, socket) do
-    if active?() and socket.view != SdrAgentWeb.AdminLive do
-      {:halt, Phoenix.LiveView.redirect(socket, to: "/admin")}
-    else
-      {:cont, socket}
+    cond do
+      not active?() ->
+        {:cont, socket}
+
+      # A signed-in non-admin would be sent to "/" by AdminLive's role hook,
+      # which this console sends back to /admin: a redirect loop. Sign-out
+      # is the only page left for them here.
+      not match?(%SdrAgentWeb.Scope{role: :admin}, socket.assigns[:current_scope]) ->
+        {:halt,
+         socket
+         |> Phoenix.LiveView.put_flash(:error, "The calibration console is for the admin only.")
+         |> Phoenix.LiveView.redirect(to: "/sign-out")}
+
+      socket.view != SdrAgentWeb.AdminLive ->
+        {:halt, Phoenix.LiveView.redirect(socket, to: "/admin")}
+
+      true ->
+        {:cont, socket}
     end
   end
 end
