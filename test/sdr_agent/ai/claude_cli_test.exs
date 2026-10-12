@@ -874,6 +874,46 @@ defmodule SdrAgent.AI.ClaudeCLITest do
       assert read_dumps(dump) == []
     end
 
+    test "a caller that dies while its admission waits never launches (Codex MF3)",
+         %{dump: dump} do
+      test = self()
+
+      # Admits (as a committed `sent` would), but only once released: the
+      # caller dies during this blocking wait.
+      held = fn _id, _profile, _opts ->
+        send(test, {:admitting, self()})
+        receive do: (:release -> {:ok, :admitted})
+      end
+
+      {:ok, server} =
+        start_server("env_dump", [dump],
+          launch_admission: held,
+          reaper: [on_open: fn os_pid -> send(test, {:port_opened, os_pid}) end]
+        )
+
+      caller = spawn(fn -> ClaudeCLI.complete(request(), server: server) end)
+      assert_receive {:admitting, ^server}, 5_000
+
+      ref = Process.monitor(caller)
+      Process.exit(caller, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^caller, :killed}
+      send(server, :release)
+
+      # Synchronises behind the dispatch; then the server takes another call.
+      _ = :sys.get_state(server, 10_000)
+      assert Process.alive?(server)
+
+      refute_received {:port_opened, _os_pid},
+                      "a port opened for a caller that died during admission"
+
+      assert read_dumps(dump) == []
+      assert ClaudeCLI.admission(server) == %{admission: :open}
+
+      {:ok, server} = start_server("env_dump", [dump])
+      assert {:ok, _} = ClaudeCLI.complete(request(), server: server)
+      assert length(read_dumps(dump)) == 1
+    end
+
     test "an admission that raises launches nothing", %{dump: dump} do
       {:ok, server} =
         start_server("env_dump", [dump],

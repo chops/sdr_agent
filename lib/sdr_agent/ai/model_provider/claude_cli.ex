@@ -70,8 +70,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   `:grant_ineligible_at_launch`, `:profile_mismatch_at_launch`,
   `:invocation_not_reserved`) launches nothing and is returned as is, and
   an admission that fails unexpectedly is `{:error,
-  :launch_admission_failed}`. The deadline is checked again after
-  admission. After admission a deterministic spawn failure is a known
+  :launch_admission_failed}`. The caller is monitored before admission; a
+  caller that died while admission waited for its locks is never launched
+  for (`{:error, :caller_down}`; an already committed `sent` stays sent and
+  is recovered as unknown by the stale-run sweeper). The deadline is
+  checked again after admission. After admission a deterministic spawn failure is a known
   failure; an uncertain spawn or receipt is unknown, as below.
 
   **Test builds only**, a `:launch_admission` start option (a 3-arity
@@ -762,22 +765,34 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       {:line, 1_048_576}
     ]
 
-    # The absolute deadline is checked again after preparation and after
-    # launch admission (C9-03), and bounds the launch handshake.
+    # The caller is monitored before launch admission, whose lock wait may
+    # outlive it (C9-03, Codex MF3), and through the call.
+    watch = Process.monitor(caller)
+
+    try do
+      open_and_collect(state, request, deadline, workspace, {port_opts, child_env}, watch)
+    after
+      Process.demonitor(watch, [:flush])
+    end
+  end
+
+  # The absolute deadline is checked again after preparation and after
+  # launch admission (C9-03), and bounds the launch handshake. A caller that
+  # died during admission is never launched for.
+  defp open_and_collect(state, request, deadline, workspace, spawn_opts, watch) do
     with true <- launchable?(deadline, state.timeout) || {:error, :provider_queue_timeout},
          :ok <- admit_launch(state, request),
+         :ok <- caller_alive(watch),
          true <- launchable?(deadline, state.timeout) || {:error, :provider_queue_timeout},
          {:ok, port, os_pid} <-
            Reaper.open(
              state.reaper,
              workspace,
              {:spawn_executable, "/bin/sh"},
-             {port_opts, child_env},
+             spawn_opts,
              deadline
            ) do
-      watch = Process.monitor(caller)
       result = collect(port, os_pid, Map.put(state, :caller, watch), deadline, nil, [])
-      Process.demonitor(watch, [:flush])
       {result, settle(state, port, os_pid, workspace)}
     else
       {:pending, ref} ->
@@ -790,6 +805,20 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         File.rm_rf(workspace)
         Reaper.done(state.reaper, workspace)
         {error, state}
+    end
+  end
+
+  # After admission committed `sent`, a dead caller's call is not launched:
+  # the row stays `sent` (admission is history, never reset to reserved) and,
+  # with nobody left to settle it, is recovered by the existing crash path
+  # (`SdrAgent.SDR.StaleRunSweeper`: sent → unknown, never re-sent).
+  defp caller_alive(watch) do
+    receive do
+      {:DOWN, ^watch, :process, _caller, _reason} ->
+        Logger.warning("ClaudeCLI caller exited during launch admission; nothing was launched")
+        {:error, :caller_down}
+    after
+      0 -> :ok
     end
   end
 
