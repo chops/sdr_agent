@@ -266,6 +266,67 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
     end
   end
 
+  describe "a run stopped while its call was queued" do
+    # Each stop the run lifecycle allows from running (AgentRun.transitions/0).
+    defp stop!(ctx, run, :cancelled), do: Agents.cancel_run(run, actor: ctx.admin)
+    defp stop!(_ctx, run, :succeeded), do: Agents.succeed_run(run, actor: run_agent(run))
+
+    defp stop!(_ctx, run, :failed),
+      do:
+        Agents.fail_run(run, %{status_reason: :crash, failure_reason: "stopped"},
+          actor: run_agent(run)
+        )
+
+    defp stop!(_ctx, run, :budget_exhausted),
+      do:
+        Agents.exhaust_run_budget(run, %{status_reason: :run_budget_tokens},
+          actor: run_agent(run)
+        )
+
+    defp run_agent(run), do: system_actor(:agent_runtime, %{id: run.tenant_id})
+
+    test "is refused at launch, failed and never sent, with no launch Failure", ctx do
+      for status <- [:cancelled, :succeeded, :failed, :budget_exhausted] do
+        %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
+        invocation = reserve!(%{ctx | run: run, agent: agent}, "stopped-#{status}")
+        {:ok, stopped} = stop!(ctx, run, status)
+        assert stopped.status == status
+
+        assert {:error, :run_not_running_at_launch} =
+                 Agents.admit_launch(invocation.id, :claude_cli_opus, actor: agent)
+
+        refused = stored(invocation.id)
+        assert {refused.status, refused.sent_at} == {:failed, nil}
+
+        assert refused.error == %{
+                 "kind" => "launch_refused",
+                 "reason" => "run_not_running_at_launch",
+                 "check" => Atom.to_string(status)
+               }
+
+        # The run's own stop is its cause; launch admission adds no Failure.
+        assert ctx |> launch_failures() |> Enum.filter(&(&1.subject_id == invocation.id)) == []
+
+        {:ok, after_refusal} = Agents.get_run(run.id, actor: agent)
+        assert after_refusal.status == status
+        assert after_refusal.attention_failure_id == stopped.attention_failure_id
+        assert after_refusal.budget.model_calls_used == stopped.budget.model_calls_used
+
+        refute Enum.any?(
+                 events_of_type(ctx.tenant, "model.invocation.sent"),
+                 &(&1.model_invocation_id == invocation.id)
+               )
+      end
+    end
+
+    test "a running run's call still launches", ctx do
+      invocation = reserve!(ctx, "still-running")
+      assert {:ok, run} = Agents.get_run(ctx.run.id, actor: ctx.agent)
+      assert run.status == :running
+      assert {:ok, %{status: :sent}} = admit(ctx, invocation.id)
+    end
+  end
+
   describe "identity and state refusals change nothing" do
     test "a replayed sent id is refused; the row is untouched", ctx do
       invocation = reserve!(ctx, "replay")

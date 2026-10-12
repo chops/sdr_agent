@@ -226,6 +226,11 @@ defmodule SdrAgent.Agents.Admission do
   attempt was charged at reservation. Returns `:ok` or `{:error, reason,
   check}`:
 
+    * `:run_not_running_at_launch` (the run's status) — the run was stopped
+      (succeeded, failed, budget_exhausted or cancelled) while its call was
+      queued: only a `:running` run reserves and settles model calls
+      (`SdrAgent.Agents.Changes.BudgetCounter`), so no other status may
+      launch one;
     * `:legacy_invocation_without_grant` (`:legacy_generation`) — a row
       written before R0 (generation 1);
     * `:profile_mismatch_at_launch` (`:profile_mismatch`) — reserved under
@@ -238,6 +243,9 @@ defmodule SdrAgent.Agents.Admission do
   """
   def launch_check(run, invocation, effective_profile, now) do
     cond do
+      run.status != :running ->
+        {:error, :run_not_running_at_launch, run.status}
+
       invocation.ledger_generation != 2 ->
         {:error, :legacy_invocation_without_grant, :legacy_generation}
 

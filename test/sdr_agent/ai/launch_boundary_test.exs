@@ -117,6 +117,33 @@ defmodule SdrAgent.AI.LaunchBoundaryTest do
              ]
     end
 
+    test "a call queued behind a running one is refused at launch after its run stopped",
+         ctx do
+      server = server!(["env_dump", ctx.dump, "1500"])
+      other = AgentsFixtures.running_run(ctx.tenant)
+
+      first = Task.async(fn -> complete(ctx, "running", provider_options: [server: server]) end)
+      await_status!(ctx, "running", :sent)
+
+      queued_ctx = %{ctx | run: other.run, agent: other.agent}
+
+      second =
+        Task.async(fn -> complete(queued_ctx, "stopped", provider_options: [server: server]) end)
+
+      await_reserved!(ctx, "stopped")
+      assert eventually(fn -> queued?(server, second.pid) end)
+
+      {:ok, _} = Agents.cancel_run(other.run, actor: ctx.admin)
+
+      assert {:ok, %{invocation: %{status: :completed}}} = Task.await(first, 20_000)
+      assert {:error, :run_not_running_at_launch} = Task.await(second, 20_000)
+
+      refused = invocation!(ctx, "stopped")
+      assert {refused.status, refused.sent_at} == {:failed, nil}
+      assert launch_failures(ctx, refused.id) == []
+      assert length(dumps(ctx.dump)) == 1
+    end
+
     test "a call queued behind a running one is refused at launch after a revocation", ctx do
       server = server!(["env_dump", ctx.dump, "1500"])
 

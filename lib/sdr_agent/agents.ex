@@ -457,13 +457,15 @@ defmodule SdrAgent.Agents do
       (a replayed sent, in-flight or terminal row). Each is then recorded
       as a `model.launch.refused` event of the actor's tenant only.
     * **Eligibility refusals** of an owned, reserved row
-      (`Admission.launch_check/4`: generation, profile, grant status and
-      window, grant profiles, allocation grant, profile restriction, usage
-      bucket, availability — never room, which was charged at
-      reservation) move it reserved → failed (never sent) and open a
-      critical `provider_error` Failure about the invocation, committed
-      together; `{:error, :legacy_invocation_without_grant |
-      :profile_mismatch_at_launch | :grant_ineligible_at_launch}`.
+      (`Admission.launch_check/4`: the locked run still `:running`,
+      generation, profile, grant status and window, grant profiles,
+      allocation grant, profile restriction, usage bucket, availability —
+      never room, which was charged at reservation) move it reserved →
+      failed (never sent) and open a critical `provider_error` Failure about
+      the invocation, committed together; `{:error,
+      :run_not_running_at_launch | :legacy_invocation_without_grant |
+      :profile_mismatch_at_launch | :grant_ineligible_at_launch}`. A stopped
+      run's refusal opens no Failure: the stop is already its cause.
     * **Success** marks it sent: `{:ok, invocation}`.
   """
   def admit_launch(invocation_id, effective_profile, opts) do
@@ -595,10 +597,18 @@ defmodule SdrAgent.Agents do
     }
 
     with {:ok, _failed} <- do_update(invocation, :fail, %{error: error}, actor),
-         {:ok, _failure} <- SdrAgent.Operations.open_failure(failure, actor: actor) do
+         {:ok, _failure} <- launch_attention(reason, failure, actor) do
       {:ok, {:refused, reason}}
     end
   end
+
+  # A run stopped while its call was queued already has its own cause (its
+  # stop's Failure, or an operator's cancel or a success, which need none):
+  # the refused call is failed, but no second attention item is opened.
+  defp launch_attention(:run_not_running_at_launch, _failure, _actor), do: {:ok, :none}
+
+  defp launch_attention(_reason, failure, actor),
+    do: SdrAgent.Operations.open_failure(failure, actor: actor)
 
   # Metadata only, in the actor's own tenant; the refusal itself changed
   # nothing, so a tenant without an audit chain records nothing.

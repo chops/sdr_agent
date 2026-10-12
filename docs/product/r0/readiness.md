@@ -133,6 +133,12 @@ admission, launch admission, the facade's sent boundary).
     event of the actor's tenant (reason `invocation_not_found`,
     `invocation_not_claude_cli` or `invocation_not_reserved`); a non
     `agent_runtime` actor is `Forbidden`, audited as `authz.denied`.
+    The locked run must still be `running` (the only status that reserves
+    and settles model calls); a run stopped while its call was queued
+    (`succeeded`, `failed`, `budget_exhausted`, `cancelled`) is refused as
+    `run_not_running_at_launch` (check = the run status): the call is
+    failed and never sent, and no launch Failure is opened, because the
+    stop already has its own cause.
     Eligibility refusals record the failed check (`grant_revoked`,
     `grant_expired`, `grant_not_started`, `profile_not_in_grant`,
     `allocation_not_in_grant`, `allocation_profile_restricted`,

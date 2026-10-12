@@ -36,7 +36,14 @@ defmodule SdrAgent.Agents.LaunchAdmissionRaceTest do
     {:ok, invocation} =
       Agents.reserve_model_invocation(run, AgentsFixtures.claude_attrs("race"), actor: agent)
 
-    %{tenant: tenant, admin: admin, grant: grant, agent: agent, invocation: invocation}
+    %{
+      tenant: tenant,
+      admin: admin,
+      grant: grant,
+      run: run,
+      agent: agent,
+      invocation: invocation
+    }
   end
 
   test "a revocation holding the grant while a launch is admitted: the revocation wins", ctx do
@@ -105,6 +112,72 @@ defmodule SdrAgent.Agents.LaunchAdmissionRaceTest do
     assert {:ok, _} = Task.await(head, 30_000)
     assert {:ok, %{status: :sent}} = Task.await(launch, 30_000)
     assert {:ok, %{status: :revoked}} = Task.await(revoke, 30_000)
+
+    stored = Ash.get!(ModelInvocation, ctx.invocation.id, authorize?: false)
+    assert stored.status == :sent
+    assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: auditor(ctx))
+  end
+
+  test "a run stop holding the run while a launch is admitted: the stop wins", ctx do
+    parent = self()
+
+    stopper =
+      Task.async(fn ->
+        with_connection(fn ->
+          Audit.transaction(fn ->
+            lock!("SELECT id FROM agent_runs WHERE id = $1 FOR UPDATE", ctx.run.id)
+            send(parent, :run_locked)
+            receive do: (:go -> :ok)
+            {:ok, cancelled} = Agents.cancel_run(ctx.run, actor: ctx.admin)
+            cancelled
+          end)
+        end)
+      end)
+
+    assert_receive :run_locked, 10_000
+    launch = Task.async(fn -> admit(ctx) end)
+    await_lock_waiters(1)
+    send(stopper.pid, :go)
+
+    assert {:ok, %{status: :cancelled}} = Task.await(stopper, 30_000)
+    assert {:error, :run_not_running_at_launch} = Task.await(launch, 30_000)
+
+    stored = Ash.get!(ModelInvocation, ctx.invocation.id, authorize?: false)
+    assert {stored.status, stored.sent_at} == {:failed, nil}
+    assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: auditor(ctx))
+  end
+
+  test "a launch holding the run while a stop runs: the launch wins", ctx do
+    parent = self()
+
+    # Holds the chain head so the launch stops after its run and share locks.
+    head =
+      Task.async(fn ->
+        with_connection(fn ->
+          SdrAgent.Repo.transaction(fn ->
+            {:ok, _} = Audit.Kernel.lock_head(ctx.tenant.id)
+            send(parent, :head_held)
+            receive do: (:go -> :ok)
+          end)
+        end)
+      end)
+
+    assert_receive :head_held, 10_000
+    launch = Task.async(fn -> admit(ctx) end)
+    await_lock_waiters(1)
+
+    stop =
+      Task.async(fn ->
+        with_connection(fn -> Agents.cancel_run(ctx.run, actor: ctx.admin) end)
+      end)
+
+    # The stop waits for the launch's run lock.
+    await_lock_waiters(2)
+    send(head.pid, :go)
+
+    assert {:ok, _} = Task.await(head, 30_000)
+    assert {:ok, %{status: :sent}} = Task.await(launch, 30_000)
+    assert {:ok, %{status: :cancelled}} = Task.await(stop, 30_000)
 
     stored = Ash.get!(ModelInvocation, ctx.invocation.id, authorize?: false)
     assert stored.status == :sent
