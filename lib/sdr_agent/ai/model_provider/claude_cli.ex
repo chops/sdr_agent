@@ -58,6 +58,32 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   profile is published like the admission (`profile/1`), so `prepare/2`
   reads it without waiting behind a running call.
 
+  ## Launch admission and the sent boundary (C9-03)
+
+  The facade leaves a ClaudeCLI call `reserved` and hands the server its
+  reserved invocation id (the `:witness` id). The server admits each
+  dispatch exactly once — after dequeue, the admission, deadline and
+  witness checks and workspace preparation, and just before it asks the
+  Reaper to open the port — by calling `SdrAgent.Agents.admit_launch/3`
+  with that id, its own profile id and the request's `:actor`. Only an
+  admitted call (now `sent`) launches; a refusal (`{:error, reason}`, e.g.
+  `:grant_ineligible_at_launch`, `:profile_mismatch_at_launch`,
+  `:invocation_not_reserved`) launches nothing and is returned as is, and
+  an admission that fails unexpectedly is `{:error,
+  :launch_admission_failed}`. The caller is monitored before admission; a
+  caller that died while admission waited for its locks is never launched
+  for (`{:error, :caller_down}`; an already committed `sent` stays sent,
+  and the stale-run sweeper marks it unknown only while its run is still
+  running and abandoned — a terminal run's `sent` row is a tracked open
+  case, R0 readiness packet). The deadline is
+  checked again after admission. After admission a deterministic spawn failure is a known
+  failure; an uncertain spawn or receipt is unknown, as below.
+
+  **Test builds only**, a `:launch_admission` start option (a 3-arity
+  function standing in for `Agents.admit_launch/3`) is honoured together
+  with `test_launcher: true`, for adapter tests that have no reserved
+  invocation; every other build and launcher uses `Agents.admit_launch/3`.
+
   ## Staged: no ordinary real call yet (R0-02)
 
   Until the profile registry (R0-03), owner call grants (C9) and the
@@ -131,6 +157,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   require Logger
 
+  alias SdrAgent.Agents
   alias SdrAgent.AI.JsonSchema
   alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
@@ -429,6 +456,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       cli_args: Keyword.get(opts, :cli_args, []),
       executable: Keyword.get(opts, :executable),
       test_launcher: test_launcher?(opts),
+      launch_admission: launch_admission(opts),
       timeout: timeout,
       environment: Keyword.get(opts, :environment),
       table: status_table(name)
@@ -656,8 +684,34 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   if @test_seams do
     defp test_launcher?(opts),
       do: Keyword.has_key?(opts, :command) and Keyword.get(opts, :test_launcher) == true
+
+    defp launch_admission(opts) do
+      case Keyword.get(opts, :launch_admission) do
+        admit when is_function(admit, 3) -> if test_launcher?(opts), do: admit, else: &admit/3
+        _ -> &admit/3
+      end
+    end
   else
     defp test_launcher?(_opts), do: false
+    defp launch_admission(_opts), do: &admit/3
+  end
+
+  defp admit(invocation_id, profile, opts), do: Agents.admit_launch(invocation_id, profile, opts)
+
+  # C9-03: the launch's sent boundary, once per dispatch.
+  defp admit_launch(state, request) do
+    id = request.witness.model_invocation_id
+
+    case state.launch_admission.(id, state.profile.id, actor: Map.get(request, :actor)) do
+      {:ok, _sent} -> :ok
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      {:error, %Ash.Error.Forbidden{}} -> {:error, :launch_not_admitted}
+      _other -> {:error, :launch_admission_failed}
+    end
+  rescue
+    _exception -> {:error, :launch_admission_failed}
+  catch
+    _kind, _reason -> {:error, :launch_admission_failed}
   end
 
   defp witness_env(%{model_invocation_id: id, traceparent: traceparent})
@@ -713,20 +767,34 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       {:line, 1_048_576}
     ]
 
-    # The absolute deadline is checked again after preparation and bounds
-    # the launch handshake.
+    # The caller is monitored before launch admission, whose lock wait may
+    # outlive it (C9-03, Codex MF3), and through the call.
+    watch = Process.monitor(caller)
+
+    try do
+      open_and_collect(state, request, deadline, workspace, {port_opts, child_env}, watch)
+    after
+      Process.demonitor(watch, [:flush])
+    end
+  end
+
+  # The absolute deadline is checked again after preparation and after
+  # launch admission (C9-03), and bounds the launch handshake. A caller that
+  # died during admission is never launched for.
+  defp open_and_collect(state, request, deadline, workspace, spawn_opts, watch) do
     with true <- launchable?(deadline, state.timeout) || {:error, :provider_queue_timeout},
+         :ok <- admit_launch(state, request),
+         :ok <- caller_alive(watch),
+         true <- launchable?(deadline, state.timeout) || {:error, :provider_queue_timeout},
          {:ok, port, os_pid} <-
            Reaper.open(
              state.reaper,
              workspace,
              {:spawn_executable, "/bin/sh"},
-             {port_opts, child_env},
+             spawn_opts,
              deadline
            ) do
-      watch = Process.monitor(caller)
       result = collect(port, os_pid, Map.put(state, :caller, watch), deadline, nil, [])
-      Process.demonitor(watch, [:flush])
       {result, settle(state, port, os_pid, workspace)}
     else
       {:pending, ref} ->
@@ -739,6 +807,22 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         File.rm_rf(workspace)
         Reaper.done(state.reaper, workspace)
         {error, state}
+    end
+  end
+
+  # After admission committed `sent`, a dead caller's call is not launched:
+  # the row stays `sent` (admission is history, never reset to reserved).
+  # With nobody left to settle it, the existing crash path recovers it while
+  # its run is still running and abandoned (`SdrAgent.SDR.StaleRunSweeper`:
+  # sent → unknown, never re-sent); a terminal run's `sent` row is a tracked
+  # open case (R0 readiness packet).
+  defp caller_alive(watch) do
+    receive do
+      {:DOWN, ^watch, :process, _caller, _reason} ->
+        Logger.warning("ClaudeCLI caller exited during launch admission; nothing was launched")
+        {:error, :caller_down}
+    after
+      0 -> :ok
     end
   end
 
