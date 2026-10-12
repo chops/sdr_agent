@@ -18,7 +18,8 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
          invocation of a non-`:proof` run; `:released` also needs a `:valid`
          output and a link that is this invocation's current, reconciled
          primary link, leaving the invocation `reconciled`, whose evidence
-         names the invocation's CLI version and application digests, and
+         names the invocation's CLI version, model, profile (round 5 item 7)
+         and application digests, and
          whose exact tuple is on the shipped allowlist. Its projection and
          method are copied onto the release;
        * `:calibration`: `SdrAgent.Agents.Checks.CalibrationContext` for the
@@ -44,6 +45,7 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.Agents.Witness
+  alias SdrAgent.Agents.WitnessEvidence
   alias SdrAgent.Audit.Kernel
 
   @terminal [:completed, :failed, :unknown]
@@ -271,7 +273,9 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   end
 
   defp same_identity?(invocation, evidence) do
-    evidence["cli_version"] == invocation.provider_version and
+    WitnessEvidence.check_identity(invocation, evidence) == :ok and
+      map_size(WitnessEvidence.identity(invocation)) == 2 and
+      evidence["cli_version"] == invocation.provider_version and
       evidence["app_request_sha256"] == hex(invocation.request_sha256) and
       evidence["app_response_sha256"] == hex(invocation.response_sha256)
   end

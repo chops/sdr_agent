@@ -201,8 +201,18 @@ defmodule SdrAgent.AgentsFixtures do
       "app_response_sha256" => hex.(invocation.response_sha256),
       "reason_codes" => []
     }
+    |> Map.merge(identity_evidence(invocation))
     |> Map.reject(fn {_key, value} -> is_nil(value) end)
   end
+
+  # R0-07 item 7: a gated parent's evidence names its model and profile.
+  defp identity_evidence(%{ledger_generation: 2, provider: :claude_cli} = invocation),
+    do: %{
+      "model_id" => invocation.model_id,
+      "profile_id" => Atom.to_string(invocation.profile_id)
+    }
+
+  defp identity_evidence(_invocation), do: %{}
 
   @doc """
   Creates, as the tenant's admin, an active real-model call grant (C9) wide

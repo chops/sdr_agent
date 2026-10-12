@@ -6,7 +6,10 @@ defmodule SdrAgent.Agents.Changes.WitnessLineage do
     1. `evidence` is normalized and validated by
        `SdrAgent.Agents.WitnessEvidence` (C5); a projection version that
        records CLI context (v2) requires its complete context group
-       (`WitnessEvidence.validate_claim/1`); raw digests are 32 bytes.
+       (`WitnessEvidence.validate_claim/1`); raw digests are 32 bytes; a
+       gated (generation-2 ClaudeCLI) parent's link names its `model_id`
+       and `profile_id`, a generation-1 parent's never its `profile_id`
+       (`WitnessEvidence.check_identity/2`, R0-07 item 7).
     2. The parent ModelInvocation is re-read **in the row's tenant** and
        locked `FOR UPDATE`, serialising every link write of one invocation
        (lock order: invocation row, then the audit chain head). It must be a
@@ -76,9 +79,15 @@ defmodule SdrAgent.Agents.Changes.WitnessLineage do
         invalid(changeset, :model_invocation_id, "must be terminal before it is linked")
 
       invocation ->
-        changeset
-        |> Ash.Changeset.set_context(%{wire_witness_agent_run_id: invocation.agent_run_id})
-        |> check_lineage(tenant_id, get)
+        case WitnessEvidence.check_identity(invocation, get.(:evidence) || %{}) do
+          :ok ->
+            changeset
+            |> Ash.Changeset.set_context(%{wire_witness_agent_run_id: invocation.agent_run_id})
+            |> check_lineage(tenant_id, get)
+
+          {:error, message} ->
+            invalid(changeset, :evidence, message)
+        end
     end
   end
 

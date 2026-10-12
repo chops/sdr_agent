@@ -282,7 +282,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
         proxy_record_ref: ref,
         link_status: status,
         method: :propagated_id,
-        evidence: evidence
+        # R0-07 item 7: a gated parent's link names its model and profile.
+        evidence: Map.merge(SdrAgent.Agents.WitnessEvidence.identity(invocation), evidence)
       },
       actor: ctx.rec
     )

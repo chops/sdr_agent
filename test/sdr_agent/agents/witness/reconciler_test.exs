@@ -118,6 +118,22 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     end
   end
 
+  test "R0-07 item 7: gated evidence names the model and profile; generation 1 stays legacy",
+       ctx do
+    gated = call_model!(ctx, "cli_shape_v3")
+    assert {:ok, _} = reconcile(ctx, gated, @test_only_allowlist)
+    {:ok, [link]} = Agents.current_wire_witness_links(gated.id, actor: ctx.rec)
+    assert link.evidence["model_id"] == "claude-opus-5-5"
+    assert link.evidence["profile_id"] == "claude_cli_opus"
+
+    legacy = ctx |> call_model!("cli_shape_v3") |> legacy!()
+    assert {:ok, _} = reconcile(ctx, legacy, [@shipped_entry])
+    assert {:ok, _} = reconcile(ctx, legacy, [@shipped_entry])
+    {:ok, [legacy_link]} = Agents.list_wire_witness_links(legacy.id, actor: ctx.rec)
+    refute Map.has_key?(legacy_link.evidence, "model_id")
+    refute Map.has_key?(legacy_link.evidence, "profile_id")
+  end
+
   test "R0-07: a generation-2 row reconciles only under its own profile's exact entry", ctx do
     opus = %{@shipped_entry | profile_id: :claude_cli_opus}
     sonnet = %{@shipped_entry | profile_id: :claude_cli_sonnet, model_id: "claude-sonnet-5-5"}

@@ -144,6 +144,22 @@ defmodule SdrAgent.Agents.Witness do
   defp typed_entry?(_entry), do: false
 
   @doc """
+  The exact per-call override for the calibration harness (R0-07 item 8):
+  `{:ok, entries}` when `entries` is a non-empty list of exact six-key
+  entries, otherwise `{:error, :inexact_override}` — a bare method atom, a
+  partial map, the pre-R0 four-key shape or an extra key is refused. Being
+  a test build is never spend authority; the bare-atom override remains for
+  hermetic legacy fixtures only.
+  """
+  def exact_overrides([_ | _] = entries) do
+    if Enum.all?(entries, &exact_entry?/1),
+      do: {:ok, entries},
+      else: {:error, :inexact_override}
+  end
+
+  def exact_overrides(_entries), do: {:error, :inexact_override}
+
+  @doc """
   True when the shipped allowlist (`reconciled_methods/0`) holds an exact
   entry for `invocation`'s recorded identity (provider, CLI version,
   profile, model, ledger generation) together with the evaluated
@@ -677,6 +693,8 @@ defmodule SdrAgent.Agents.Witness do
         "projections_inapplicable" => evaluated.inapplicable
       }
       |> Map.merge(evaluated.digests)
+      # R0-07 item 7: a gated parent's identity; generation 1 stays legacy.
+      |> Map.merge(WitnessEvidence.identity(invocation))
 
     # Untrusted proxy metadata: keep only values the allowlist accepts. The
     # v2/v3 context group was validated as a whole (exact keys) and is merged

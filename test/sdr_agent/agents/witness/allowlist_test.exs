@@ -141,6 +141,27 @@ defmodule SdrAgent.Agents.Witness.AllowlistTest do
     end
   end
 
+  describe "exact overrides for the calibration harness (item 8)" do
+    test "exact_overrides/1 accepts only exact six-key entries" do
+      assert {:ok, [@opus_entry]} = call(:exact_overrides, [[@opus_entry]])
+
+      assert {:ok, [@gen1_entry, @sonnet_entry]} =
+               call(:exact_overrides, [[@gen1_entry, @sonnet_entry]])
+
+      for {label, entries} <- [
+            {"bare atom", [:propagated_id]},
+            {"bare atom beside an exact entry", [@opus_entry, :propagated_id]},
+            {"partial map", [Map.delete(@opus_entry, :model_id)]},
+            {"pre-R0 four-key shape", [Map.drop(@opus_entry, [:profile_id, :model_id])]},
+            {"extra key", [Map.put(@opus_entry, :stage, :calibration)]},
+            {"empty", []},
+            {"not a list", @opus_entry}
+          ] do
+        assert {:error, :inexact_override} = call(:exact_overrides, [entries]), label
+      end
+    end
+  end
+
   describe "shipped allowlist" do
     test "dev and prod ship exactly the generation-1 2.1.291 entry; no calibration stage" do
       for env <- [:dev, :prod] do
