@@ -12,7 +12,9 @@ Accepted (2026-10-06, owner decision recorded in ADR-0001: "OpenTelemetry as a
 first-class concern, model-content spans and an independent wire witness both
 in the MVP, and audit-chain anchoring to a private Git repository plus
 OpenTimestamps"). Details amended by Codex consultations 11 and 13. The R0
-amendment in the wire witness section (2026-10-12) is accepted.
+amendment in the wire witness section (2026-10-12) is accepted. The C4
+SQL-logging amendment in the OpenTelemetry section (2026-10-12) is
+**proposed, pending owner acceptance**.
 
 ## Context
 
@@ -95,6 +97,116 @@ and SHA-256 content hashes. Prompt and completion bodies are span events only
 when `:sdr_agent, :otel_capture_content` is explicitly true; that switch is
 true only in development and false by default and in tests. S4 adds no audit
 resources or trace columns; S3 owns persisted correlation fields.
+
+#### C4 amendment (2026-10-12): parameter-free SQL logging
+
+**Status: PROPOSED, pending owner acceptance.** Drafted by Claude for
+contract C4 (`docs/product/c4/readiness.md`, sections 3.6 and 7). Codex's
+round-2 entity review of that packet (PASS at a15cf8b, qualification 4)
+requires an explicit observability decision on this point before C4
+implementation is approved; the entity PASS is not acceptance of this
+amendment. Nothing here is in force until the owner accepts it.
+
+**Context.**
+
+- **Ecto logs query parameters.** `SdrAgent.Repo` has no `log:` setting,
+  so Ecto's default logger writes every query and its bound parameters at
+  `:debug`. Development logs at `:debug` (`config/dev.exs` sets no level);
+  tests log at `:warning`, production at `:info`.
+- **What the parameters now carry.** C4 stores the owner's business text
+  (offering profile, writing guide, research brief guidance, booking
+  link) and must not copy it outside its row and the authorized model
+  payload seam. With the real-data switch (ADR-0014 amendment 2, C5-04),
+  queries also carry real company and person fields. Both reach the dev
+  log through query parameters.
+- **The owner's instance runs in development.** `config/runtime.exs`
+  refuses `SDR_MODEL_PROVIDER=claude_cli` in production, so the owner's
+  local instance with real data is a dev build. A production-only control
+  does not protect it.
+- **Error paths copy values too.** PostgreSQL constraint errors carry a
+  `DETAIL` such as "Failing row contains (…)" or "Key (…)=(…) already
+  exists", which Postgrex puts in the exception message. `config/dev.exs`
+  also sets `show_sensitive_data_on_connection_error: true`.
+- **OpenTelemetry Ecto spans** (`opentelemetry_ecto` 1.2.0) record
+  `db.statement` only when configured; `SdrAgent.Telemetry` calls
+  `OpentelemetryEcto.setup/1` without options, so the statement is
+  disabled today. Nothing tests that.
+
+**Options considered.**
+
+1. **Keep Ecto's default logging (status quo).**
+   - Pros: full debugging detail; no code.
+   - Cons: settings text and real prospect data in dev logs at every
+     query; contradicts C4-R12 and ADR-0014 amendment 2 rule 2 (personal
+     content must not reach logs through any path).
+2. **Global parameter-free query logging, all environments
+   (recommended).** `SdrAgent.Repo` sets `log: false`; a telemetry handler
+   (`SdrAgent.Repo.QueryLog`) on `[:sdr_agent, :repo, :query]` logs an
+   allowlist of metadata only.
+   - Pros: one control for every table, present and future, so a new
+     table cannot leak by default; covers settings and real data alike;
+     testable with a canary.
+   - Cons: developers lose parameter values and SQL text when debugging;
+     a query must be reproduced in a test or `psql` to see its values.
+3. **Per-query or per-table redaction.** Keep Ecto logging and redact
+   chosen parameters (custom Ecto types whose inspected form is masked, or
+   a handler that filters by `source`).
+   - Pros: keeps detail for harmless tables.
+   - Cons: fails open: every new table or column with sensitive content
+     needs its own marking; Ecto logs dumped values, so Ash `sensitive?`
+     does not reach the log; an allowlist of tables drifts as resources
+     are added.
+4. **Disable Repo logging only in production (or only when the real-data
+   switch is on).**
+   - Pros: dev keeps full detail on synthetic data.
+   - Cons: does not protect the owner's instance, which runs in dev; a
+     switch-scoped rule leaves settings text (present with the switch off)
+     unprotected and makes logging depend on runtime state that tests must
+     cover in both modes.
+5. **Raise the dev log level to `:info`.**
+   - Pros: one line of config.
+   - Cons: hides every other debug log; trivially reverted per session; not
+     a reviewed control and has no test.
+
+**Decision (proposed).** Option 2.
+
+- **Allowed metadata** (all of it, nothing else): repo, `source` (table
+  name), command (`select`, `insert`, `update`, `delete`, other), query,
+  queue, decode and total time, result row count, the outcome (`ok` or
+  `error`), and for an error the exception module, the PostgreSQL error
+  code and the constraint name. A short sha256 prefix of the SQL text may
+  be logged for grouping.
+- **Never logged:** bound parameters, SQL text (it can hold inlined
+  literals), the exception message or `inspect` of the exception, the
+  PostgreSQL `DETAIL` or `HINT`, or any value embedded in an error.
+- **Error-path controls.** Constraint errors are mapped to typed domain
+  errors by constraint name, never by echoing the message. Dev sets
+  `show_sensitive_data_on_connection_error: false`. Other code that logs a
+  raised `Postgrex.Error` or `Ecto` exception logs its module and code
+  only.
+- **Telemetry.** `OpentelemetryEcto.setup/1` keeps `db_statement:
+  :disabled`, written explicitly, with a test.
+- **Scope.** Every environment, so tests exercise the same handler. The
+  PostgreSQL server's own log (`devenv`) is outside the app; whether to set
+  `log_error_verbosity = terse` there is a separate project-configuration
+  choice, not part of this amendment.
+- **Tests.** A canary test at Logger `:debug` writes and reads rows holding
+  a canary string (valid insert, a constraint violation, a unique
+  violation) and asserts the canary is absent from captured logs and
+  spans; a test asserts the handler is attached and Ecto's default logger
+  is not; a test asserts `db.statement` is absent from Ecto spans.
+
+**Consequences.**
+
+- Positive: settings text and real prospect data stay out of SQL logs and
+  query spans everywhere, by default, for every table.
+- Negative: less detail when debugging queries in dev; reproducing a query
+  needs a test or `psql`.
+- Neutral: query timing and outcome stay visible, so slow queries and
+  errors are still diagnosable; the audit ledger is unaffected.
+
+**Acceptance (to fill).** Owner words, date and context; Codex review of
+the exact text.
 
 ### Wire witness (S12)
 

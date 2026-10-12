@@ -1,13 +1,13 @@
 # C4 readiness packet: minimal run settings and per-run snapshot
 
-Status: **draft, revision 2, for independent entity re-review (Codex) and
-owner acceptance.** C4-01, Claude author → Codex reviewer. Nothing here
-authorizes code, a migration, a UI change or a model call. Implementation
-starts only after (1) Codex records an entity-model verdict of PASS on
-section 3 and (2) the owner accepts the scope and answers the questions in
-section 9. Entity PASS and owner answers are separate gates; neither
-implies the other. Revision 2 answers Codex's round-1 NEEDS-REVIEW
-(section 10).
+Status: **entity PASS (Codex, round 2, at a15cf8b); awaiting the owner.**
+C4-01, Claude author → Codex reviewer. Nothing here authorizes code, a
+migration, a UI change or a model call. Implementation approval still
+needs (1) the owner's acceptance of the scope and answers to the
+questions in section 9, and (2) the owner's acceptance of the proposed
+ADR-0005 C4 amendment on SQL logging (section 7). Entity PASS, owner
+answers and ADR acceptance are separate gates; none implies another. The
+implementation obligations Codex attached to the PASS are in section 11.
 
 Sources (precedence): owner decisions D-050 to D-053, D-057, D-061, D-062,
 D-064, D-065, D-069, D-101, D-102 (`docs/sdlc/decisions.md`); approved
@@ -241,7 +241,7 @@ copy is prevented by an executable control, each with a canary test
 | AuditEvent payloads | content attributes and `note` are `sensitive?: true`, so `AppendEvent` omits them (named under `redacted`); `record_sha256` still covers the full row. `settings.revision.created` carries kind, number, `supersedes_id`, `content_sha256`. `settings.snapshot.created` carries snapshot id, per-kind source, revision id, version and content hash, limits, `snapshot_sha256`. No event carries settings text. |
 | Ash errors and inspect output | `sensitive?` values are redacted by Ash in errors and `inspect`; validation messages never interpolate the value. |
 | LiveView event logging | `SettingsLive` uses `log: false`; form params live under the key `settings_content`, added to `config :phoenix, :filter_parameters` (with `password`). |
-| SQL logging | Ecto logs query parameters at debug (dev). `SdrAgent.Repo` sets `log: false` and attaches `SdrAgent.Repo.QueryLog`, a telemetry handler that logs source, command and timing, never parameters, in every environment. This also covers prospect data under the real-data switch. |
+| SQL logging | Ecto logs query parameters at debug (dev). `SdrAgent.Repo` sets `log: false` and attaches `SdrAgent.Repo.QueryLog`, a telemetry handler that logs allowlisted metadata only (never parameters, SQL text, exception messages or error values), in every environment. This also covers prospect data under the real-data switch. Proposed as the ADR-0005 C4 amendment, pending owner acceptance (section 7). |
 | GenAI telemetry | settings-bearing requests use `content_capture: :off` (3.2 row Telemetry.GenAI); no content span events even with dev capture on. |
 | Failure messages, application logs | consumers name the setting kind and reason only; no code path formats settings text into a message. |
 
@@ -294,7 +294,8 @@ lowercase hex sha256.
   input and again before persisting a draft; record the booking-link
   revision id on the draft so the capture gate can re-check it. The
   capture re-check lands with the first consumer that puts a link in a
-  draft (B1-05 or B5-03).
+  draft (B1-05 or B5-03), under its own entity delta (section 6); C4-01
+  does not add a Draft attribute.
 - **`AgentRun :create`** (changed). Builds the snapshot itself (section 4),
   refuses `{:settings_incomplete, kinds}`, freezes budget limits from the
   snapshot, records `settings_snapshot_id` in `agents.run.created`.
@@ -570,6 +571,11 @@ Slices, each a reviewed PR with exact-head CI:
 - Consumer fence: B1-04 and B1-05 start building only after C4-01a
   merges; their prompts read `run_settings/2`, `allowance/2` and
   `booking_link_for_use/1`.
+- **Not in C4-01:** recording the booking-link revision on a draft and the
+  capture-time re-check (section 3.8) add an attribute and a gate to the
+  Outreach draft. That is a separate entity delta, submitted by B1-05 or
+  B5-03 for its own independent review before it is implemented; C4's
+  PASS does not cover it.
 
 ## 7. Architecture decisions
 
@@ -586,7 +592,11 @@ dependency or domain":
   whether that reviewed pattern covers this use or an ADR-0009 note is
   needed.
 - **Parameter-free SQL logging** in every environment changes debugging
-  for all queries; an ADR-0005 (observability) note may be needed.
+  for all queries. Codex requires an explicit decision before
+  implementation approval. Drafted as the proposed "C4 amendment
+  (2026-10-12): parameter-free SQL logging" in
+  `docs/adr/0005-observability-wire-witness-anchoring.md` (OpenTelemetry
+  section), pending owner acceptance.
 - **Placement in Agents**: within the accepted domain and ADR-0009
   conventions (append-only trigger, supersedes chain, tenant column,
   layering). A separate `Settings` domain would be an ADR-0009 §7
@@ -680,8 +690,80 @@ These are the owner's decisions; this packet does not answer them.
   Owner and architecture notes: §8 no longer implies the bounds can merge
   before the owner answers; section 7 lists the conventions for explicit
   Phase 3 ADR evaluation.
-- Round 2: **UNREVIEWED** (pending Codex re-review of this revision). This
-  blocks implementation.
+- Round 2 at a15cf8b: **PASS**. Reviewer Codex via ai-pair; answer
+  `codex-c4-round2-pass`, in reply to `m_1791846449000004412_b8827755`;
+  2026-10-12. Report:
+  `/Users/charles/.local/state/sdr-agent/handoff-20261008/tmp/codex-c4-01-a15cf8b-entity-pass.md`
+  (private, outside git; sha256
+  `43c8d75a6d9c1bfd4a732e46056f544e023ae8e8e8030add875879cfff534542`).
+  The PASS is a docs/entity review only: not implementation, RED
+  verification, owner acceptance, ADR acceptance, merge, deployment or
+  spend authority. It carries seven implementation obligations
+  (section 11). Once the owner answers OQ-1..OQ-7, only a changed entity,
+  authority or lifecycle contract goes back for recheck.
+- ADR-0005 C4 amendment (parameter-free SQL logging): proposed, pending
+  owner acceptance; required before implementation approval.
 - Owner acceptance of scope and answers to OQ-1..OQ-7: pending.
 - Not authorized by this packet: code, migrations, UI, real data, model
   calls.
+
+## 11. Implementation obligations (Codex round-2 PASS qualifications)
+
+Copied from the round-2 report. Each is binding on the C4-01a and C4-01b
+implementation and its review.
+
+1. **Relational rules.** Preserve every rule stated here, including each
+   source-slot check and the wrong-kind, wrong-hash and wrong-tenant
+   database negative tests. A fallback constraint trigger must implement
+   the same binding and immutability semantics; if it changes them, return
+   for entity review. Generated kind columns are database-derived and never
+   caller-writable attributes.
+2. **Cutover at the database boundary,** not only in `:create`: no new
+   null snapshot; no attaching to a historical null, replacing or
+   detaching. Existing null runs stay readable and can transition;
+   settings-dependent use and retry refuse without an orphan Operation,
+   job, snapshot or attention resolution. The privileged database owner is
+   the usual trusted administrator boundary, not an application backfill
+   path.
+3. **Privacy QA** covers valid and invalid content, debug logs,
+   content-enabled dev telemetry and event parameters. The SQL handler
+   logs allowlisted metadata only: never parameters, exception inspection,
+   raw SQL containing literals or embedded error values. Content
+   suppression applies to span attributes and events and cannot be undone
+   by a provider or request option. The authorized model payload, witness
+   and settings UI seams are preserved and described as allowed copies.
+4. **Architecture decisions before implementation approval.** The
+   all-environment replacement of Ecto parameter logging is decided
+   explicitly (the proposed ADR-0005 C4 amendment, with the tradeoff,
+   allowed metadata, error-path controls and tests). The durable retention
+   of released defaults and the head-first snapshot convention are
+   recorded in the Phase 3 architecture evaluation (section 7), relying on
+   existing accepted decisions only where they actually cover the choice.
+   Entity PASS is not ADR acceptance. The resource diagram is regenerated
+   in C4-01a.
+5. **Locks.** The compatibility assessment is settings-only (editor `FOR
+   NO KEY UPDATE` versus snapshot FK `FOR KEY SHARE`). Keep the current
+   read, the locked-predecessor check and the fresh latest-number lookup
+   after rollback. Whole-flow tests account for the actual FK, user,
+   definition, Operation, job and implicit audit locks; whole-flow
+   correctness is not inferred from the local argument. Races use
+   independent real PostgreSQL connections and bounded barriers, never a
+   shared sandbox.
+6. **Limits.** Guarded counters enforce current code bounds, including on
+   direct domain calls and retries. Snapshots stay immutable; creation-time
+   limits are reported separately from the current allowance. Token
+   enforcement stops the next call, with one-call overshoot as stated.
+   Research limits whose consumers are not built stay labelled not
+   enforced. Proof and reply origins are exempt only from missing business
+   content, never from budget, provider or proof authority.
+7. **Booking link.** The use-time guard and no-substitution are the
+   default pending OQ-7. The draft binding and capture re-check in
+   section 3.8 are a consumer prerequisite, not approval of a new Draft
+   attribute: B1-05 or B5-03 submits that entity delta before implementing
+   it, with switch-off tests at model input, draft persistence and
+   capture. C4 alone does not authorize emitting real URLs. The owner's
+   answer to OQ-7 may require a narrow recheck of this boundary.
+
+Owner answers to OQ-1..OQ-7 are not assumed by this PASS. Built-in
+defaults stay synthetic and unpublished as owner content until the
+publication decision (OQ-5).
