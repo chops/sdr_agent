@@ -86,6 +86,21 @@ defmodule SdrAgentWeb.AdminLiveTest do
                "model_attestation_drift"
              )
     end
+
+    test "R0-02: ClaudeCLI shows the pinned CLI path it launches, without running it",
+         %{conn: conn} do
+      bin = SdrAgent.Test.PinnedCLI.store_path!()
+      put_env!(:model_provider, SdrAgent.AI.ModelProvider.ClaudeCLI)
+      put_env!(SdrAgent.AI.ModelProvider.ClaudeCLI, executable: bin)
+
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
+      assert has_element?(view, "#pinned-cli-path", bin)
+    end
+
+    test "R0-02: the Fake shows no pinned CLI", %{conn: conn} do
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
+      refute has_element?(view, "#pinned-cli-path")
+    end
   end
 
   test "the provider card refreshes when a call commits (attestation drift is seen live)",

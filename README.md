@@ -171,16 +171,27 @@ completion content as span events (synthetic data only, per ADR-0005).
 
 The `ClaudeCLI` provider (ADR-0004) calls Claude Code through
 `llm-proxy-shim`, using **your own** local Claude Code login. It is for a
-personal local demo only: never hosted, shared or multi-user traffic. To use
-it, start the development server with the provider selected:
+personal local demo only: never hosted, shared or multi-user traffic.
+
+The app runs its own pinned Claude Code build (the flake package
+`app-claude-cli`), never `claude` from `PATH`, so updating your own Claude
+Code does not change what the app runs. Build it, which also keeps it and the
+previous build alive with GC roots under `.gcroots/`, then start the
+development server with the provider selected and the printed path:
 
 ```sh
-SDR_MODEL_PROVIDER=claude_cli mix phx.server
+bin/app-claude-cli-root   # prints /nix/store/...-app-claude-cli-<version>/bin/claude-code
+SDR_MODEL_PROVIDER=claude_cli SDR_CLAUDE_CLI_BIN=/nix/store/...-app-claude-cli-<version>/bin/claude-code mix phx.server
 ```
+
+`SDR_CLAUDE_CLI_BIN` must be the absolute path of an executable inside
+`/nix/store`; unset or anything else refuses boot. If the build is later
+removed, calls are refused until you rebuild it; there is no fallback.
 
 This starts one supervised ClaudeCLI server (one call at a time). The Admin
 page shows the provider, the model (`opus` → `claude-opus-5-5`), the
-reviewed Claude Code version and the last init attestation. The attestation
+reviewed Claude Code version, the pinned CLI path and the last init
+attestation. The attestation
 is checked at the first call, because the CLI cannot report it without one.
 `SDR_CLAUDE_CLI_TIMEOUT_MS` sets the per-call timeout (default 240000). The
 value is accepted in development only: the test suite and production

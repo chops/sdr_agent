@@ -67,8 +67,38 @@ case {config_env(), System.get_env("SDR_MODEL_PROVIDER")} do
         _ -> raise "SDR_CLAUDE_CLI_TIMEOUT_MS must be an integer of at least 1000 (milliseconds)"
       end
 
+    # R0-02 (ADR-0004 R0 amendment, item 1): the app launches only its own
+    # pinned CLI, by absolute /nix/store path, handed to llm-proxy-shim as
+    # LLM_PROXY_SHIM_CLAUDE_BIN for that launch. Unset or invalid refuses
+    # boot; there is no fallback to `claude` on PATH or to the Fake.
+    executable =
+      case System.get_env("SDR_CLAUDE_CLI_BIN") do
+        nil ->
+          raise """
+          SDR_MODEL_PROVIDER=claude_cli requires SDR_CLAUDE_CLI_BIN: the absolute \
+          /nix/store path of the app's pinned Claude CLI (print it with \
+          bin/app-claude-cli-root). The app never runs claude from PATH (ADR-0004).
+          """
+
+        path ->
+          case SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable.check(path) do
+            :ok ->
+              path
+
+            {:error, reason} ->
+              raise """
+              SDR_CLAUDE_CLI_BIN refused (#{reason}): it must be the absolute path of \
+              an existing executable inside /nix/store, the app's pinned Claude CLI \
+              (print it with bin/app-claude-cli-root). There is no PATH fallback (ADR-0004).
+              """
+          end
+      end
+
     config :sdr_agent, model_provider: SdrAgent.AI.ModelProvider.ClaudeCLI
-    config :sdr_agent, SdrAgent.AI.ModelProvider.ClaudeCLI, timeout: timeout
+
+    config :sdr_agent, SdrAgent.AI.ModelProvider.ClaudeCLI,
+      timeout: timeout,
+      executable: executable
 
   {:prod, "claude_cli"} ->
     raise """

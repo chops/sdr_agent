@@ -30,6 +30,22 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   silently re-routed. The `:environment` option (a map) replaces the
   operator environment for that check in hermetic tests.
 
+  ## The app's pinned CLI (R0-02, ADR-0004 R0 amendment item 1)
+
+  The `:executable` option is the absolute `/nix/store` path of the app's
+  own pinned Claude CLI (`SDR_CLAUDE_CLI_BIN`, passed by
+  `SdrAgent.AI.ModelProvider.Runtime.children/0`). Each launch hands it to
+  `llm-proxy-shim` as `LLM_PROXY_SHIM_CLAUDE_BIN` in that call's child
+  environment only; the parent's value of that name is never inherited
+  (without `:executable` it is removed), and the BEAM environment is never
+  modified. The path is re-checked before every launch
+  (`SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable`): a missing or
+  invalid build is `{:error, :pinned_cli_unavailable}` before any process
+  starts, never a fallback to `claude` on `PATH`. Boot runs no CLI; the
+  attestation status publishes the path and whether it passes the check.
+  Without `:executable` (hermetic tests with a fake launcher) no pinned
+  path is named to the shim.
+
   One GenServer serialises every call (ADR-0004, C8: concurrency 1).
 
   ## The supervised server (Q0.1)
@@ -87,6 +103,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   require Logger
 
   alias SdrAgent.AI.JsonSchema
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
   alias SdrAgent.ChildEnv
   alias SdrAgent.Clock
@@ -96,12 +113,14 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   @route_urls ~w(ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_FOUNDRY_BASE_URL)
   # The only parent variables the shim and Claude Code receive (besides
   # `SdrAgent.ChildEnv`'s base): proxy routing the shim validates, the
-  # Claude Code config/binary location, XDG dirs and TLS roots. Everything
-  # else — the anchor signing key included — is removed (security fix).
+  # Claude Code config location, XDG dirs and TLS roots. Everything else —
+  # the anchor signing key included — is removed (security fix). The CLI
+  # binary the shim runs (`@shim_cli_bin`) is never inherited: each launch
+  # sets it to the pinned `:executable`, or removes it (R0-02).
   @child_env_allow ChildEnv.xdg() ++
-                     ~w(TERM LLM_OTEL_PROXY_URL LLM_PROXY_SHIM_CLAUDE_BIN
-                        ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR SSL_CERT_FILE
-                        NIX_SSL_CERT_FILE NODE_EXTRA_CA_CERTS)
+                     ~w(TERM LLM_OTEL_PROXY_URL ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR
+                        SSL_CERT_FILE NIX_SSL_CERT_FILE NODE_EXTRA_CA_CERTS)
+  @shim_cli_bin "LLM_PROXY_SHIM_CLAUDE_BIN"
   @invocation_id ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
   @traceparent ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-(?:00|01)\z/
   @model_alias "opus"
@@ -120,9 +139,17 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   @doc """
   Starts a server. Options: `:name` (registers it and keeps its attestation
   status readable by name), `:command`, `:command_args`, `:cli_args`,
-  `:timeout` (ms), `:expected_model`, `:environment`.
+  `:timeout` (ms), `:expected_model`, `:environment`, `:executable` (the
+  app's pinned CLI, absolute `/nix/store` path).
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
+
+  @doc """
+  The reviewed names a CLI launch inherits from the parent environment, on
+  top of `SdrAgent.ChildEnv`'s base. `LLM_PROXY_SHIM_CLAUDE_BIN` is not one
+  of them: only the launch itself sets it, to the pinned `:executable`.
+  """
+  def child_env_allow, do: @child_env_allow
 
   @doc "The registered name of the application's one supervised server."
   def server, do: @server
@@ -153,8 +180,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   @doc """
   The last init attestation of the named `server`: `%{status: :pending |
-  :attested | :drift, reason, model, version, at, command?}`, or
-  `%{status: :not_running}`. Never blocks on a running call.
+  :attested | :drift, reason, model, version, at, command?, executable,
+  executable?}` (`executable` is the pinned CLI path or nil; `executable?`
+  whether it passed the pinned-CLI check when recorded, nil without one),
+  or `%{status: :not_running}`. Never blocks on a running call.
   """
   def attestation(server \\ @server) when is_atom(server) do
     case :ets.lookup(server, :attestation) do
@@ -255,6 +284,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         Keyword.get_lazy(opts, :command, fn -> System.find_executable("llm-proxy-shim") end),
       command_args: Keyword.get(opts, :command_args, ["claude"]),
       cli_args: Keyword.get(opts, :cli_args, []),
+      executable: Keyword.get(opts, :executable),
       timeout: timeout,
       expected_model: Keyword.get(opts, :expected_model, @resolved_model),
       environment: Keyword.get(opts, :environment),
@@ -351,6 +381,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     if is_nil(state.command),
       do: Logger.warning("ClaudeCLI selected but llm-proxy-shim was not found on PATH")
 
+    with path when is_binary(path) <- state.executable,
+         {:error, reason} <- PinnedExecutable.check(path),
+         do: Logger.error("ClaudeCLI pinned CLI unavailable (#{reason}); calls refused")
+
     note(state, %{status: :pending, reason: nil, model: nil, version: nil})
   end
 
@@ -363,7 +397,12 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   defp note(state, attestation) do
     attestation =
-      Map.merge(attestation, %{at: Clock.utc_now(), command?: not is_nil(state.command)})
+      Map.merge(attestation, %{
+        at: Clock.utc_now(),
+        command?: not is_nil(state.command),
+        executable: state.executable,
+        executable?: pinned?(state.executable)
+      })
 
     :ets.insert(state.table, {:attestation, attestation})
     :ok
@@ -444,13 +483,28 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     do: {{:error, :llm_proxy_shim_not_found}, state}
 
   defp run(request, state, caller, deadline) do
-    with {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
+    with :ok <- pinned(state.executable),
+         {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
          :ok <- refuse_bypass(state.environment || System.get_env()) do
       launch(request, state, caller, deadline, witness_env)
     else
       error -> {error, state}
     end
   end
+
+  # No pinned CLI configured (hermetic fake launchers) names none to the
+  # shim; a configured one must still pass the rule at launch.
+  defp pinned(nil), do: :ok
+
+  defp pinned(path) do
+    case PinnedExecutable.check(path) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :pinned_cli_unavailable}
+    end
+  end
+
+  defp pinned?(nil), do: nil
+  defp pinned?(path), do: pinned(path) == :ok
 
   defp witness_env(%{model_invocation_id: id, traceparent: traceparent})
        when is_binary(id) and is_binary(traceparent) do
@@ -489,9 +543,12 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
     # The reaper opens the port with the child environment it builds from
     # this allowlist and these values (SdrAgent.ChildEnv): no parent secret
-    # reaches the CLI; the Bedrock/Vertex/Foundry routes are removed.
+    # reaches the CLI; the Bedrock/Vertex/Foundry routes are removed; the
+    # shim is told the pinned CLI (or none: the name is removed).
     child_env =
-      {@child_env_allow, witness_env ++ Enum.map(@route_flags ++ @route_urls, &{&1, nil})}
+      {@child_env_allow,
+       [{@shim_cli_bin, state.executable} | witness_env] ++
+         Enum.map(@route_flags ++ @route_urls, &{&1, nil})}
 
     port_opts = [
       :binary,

@@ -11,7 +11,8 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
     * `children/0` — the supervision children: exactly one
       `SdrAgent.AI.ModelProvider.ClaudeCLI` server, registered as
-      `ClaudeCLI.server/0`, with the configured `:timeout`, when ClaudeCLI
+      `ClaudeCLI.server/0`, with the configured `:timeout` and the app's
+      pinned CLI `:executable` (`SDR_CLAUDE_CLI_BIN`, R0-02), when ClaudeCLI
       is selected; none for the Fake. One server serialises every call
       (concurrency 1, ADR-0004 / ADR-0005 C8).
     * `resolve/1` — a run's model options (`:provider`,
@@ -21,16 +22,20 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       the public `SdrAgent.AI.ModelProvider.complete/2`. An absent or
       unhealthy ClaudeCLI is a typed refusal before any reservation:
       `{:error, :provider_not_running}`, `:provider_not_quiescent`
-      (admission closed) or `:llm_proxy_shim_not_found` — never a raise and
-      never a silent fallback to the Fake. Per-call init attestation stays
+      (admission closed), `:llm_proxy_shim_not_found` or
+      `:pinned_cli_unavailable` (its pinned CLI build is missing or fails the
+      pinned-CLI rule) — never a raise and never a silent fallback to the
+      Fake or to `claude` on `PATH`. Per-call init attestation stays
       mandatory; this health check is in addition to it.
     * `status/0` — what the Admin page shows: the configured and the
       effective provider (nil, with the refusal, when calls are refused),
-      model alias and resolved id, reviewed CLI version, server state and
-      the last init attestation with its time. No secret is read.
+      model alias and resolved id, reviewed CLI version, the configured
+      pinned CLI path (`cli_executable`), server state and the last init
+      attestation with its time. No secret is read and no CLI is run.
   """
 
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
 
   @doc "The selected provider module (`config :sdr_agent, :model_provider`)."
   def provider, do: Application.fetch_env!(:sdr_agent, :model_provider)
@@ -42,7 +47,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
         options =
           :sdr_agent
           |> Application.get_env(ClaudeCLI, [])
-          |> Keyword.take([:timeout])
+          |> Keyword.take([:timeout, :executable])
           |> Keyword.put(:name, ClaudeCLI.server())
 
         [{ClaudeCLI, options}]
@@ -94,9 +99,17 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
     cond do
       ClaudeCLI.admission(name).admission != :open -> {:error, :provider_not_quiescent}
       ClaudeCLI.attestation(name)[:command?] == false -> {:error, :llm_proxy_shim_not_found}
+      not pinned_cli_present?(ClaudeCLI.attestation(name)) -> {:error, :pinned_cli_unavailable}
       true -> :ok
     end
   end
+
+  # Re-checked on every resolution (file metadata only), so a pinned build
+  # collected after boot is refused before any reservation.
+  defp pinned_cli_present?(%{executable: path}) when is_binary(path),
+    do: PinnedExecutable.check(path) == :ok
+
+  defp pinned_cli_present?(_attestation), do: true
 
   defp registered_name(pid) when is_pid(pid) do
     case Process.info(pid, :registered_name) do
@@ -110,8 +123,8 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   @doc """
   The run `failure_reason` recorded when a worker refuses to run because of
   `reason` (`:provider_not_running`, `:provider_not_quiescent`,
-  `:llm_proxy_shim_not_found` or `:unknown_model_provider`); no model call
-  was made.
+  `:llm_proxy_shim_not_found`, `:pinned_cli_unavailable` or
+  `:unknown_model_provider`); no model call was made.
   """
   def refusal_message(:provider_not_running),
     do:
@@ -128,6 +141,11 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
   def refusal_message(:llm_proxy_shim_not_found),
     do: "model provider claude_cli found no llm-proxy-shim on PATH; no model call was made"
+
+  def refusal_message(:pinned_cli_unavailable),
+    do:
+      "model provider claude_cli refuses calls: the app's pinned Claude CLI build is missing " <>
+        "or fails the pinned-CLI check (rebuild it with bin/app-claude-cli-root); no model call was made"
 
   @doc "The selected provider's status for operators (no secrets)."
   def status do
@@ -156,6 +174,8 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
           model_alias: provenance.model_catalog_entry["alias"],
           model_id: provenance.model_id,
           reviewed_version: provenance.provider_version,
+          cli_executable:
+            :sdr_agent |> Application.get_env(ClaudeCLI, []) |> Keyword.get(:executable),
           server: server_state(),
           attestation: ClaudeCLI.attestation(ClaudeCLI.server())
         }
@@ -166,6 +186,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
           model_alias: nil,
           model_id: model_id(module),
           reviewed_version: nil,
+          cli_executable: nil,
           server: :not_applicable,
           attestation: %{status: :not_applicable}
         }

@@ -6,6 +6,13 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
   (personal-local boundary) — and the selected ClaudeCLI runs as exactly
   one supervised, named server that callers are resolved to. A missing
   server is a typed error, never a raise or a silent fallback to Fake.
+
+  R0-02 (ADR-0004 R0 amendment, item 1): with ClaudeCLI selected,
+  `SDR_CLAUDE_CLI_BIN` must name the app's pinned CLI (an absolute path to
+  an executable inside /nix/store); unset or invalid refuses boot, never
+  falling back to `claude` on `PATH`. The app's server is started with it,
+  and a configured binary that has gone missing refuses calls before any
+  reservation.
   """
   # Reads and sets the process environment and the application env.
   use ExUnit.Case, async: false
@@ -13,10 +20,11 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.Fake
   alias SdrAgent.AI.ModelProvider.Runtime
+  alias SdrAgent.Test.PinnedCLI
 
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
-  @env ~w(SDR_MODEL_PROVIDER SDR_CLAUDE_CLI_TIMEOUT_MS DATABASE_URL SECRET_KEY_BASE
-          TOKEN_SIGNING_SECRET)
+  @env ~w(SDR_MODEL_PROVIDER SDR_CLAUDE_CLI_TIMEOUT_MS SDR_CLAUDE_CLI_BIN DATABASE_URL
+          SECRET_KEY_BASE TOKEN_SIGNING_SECRET)
 
   setup do
     previous_env = Map.new(@env, &{&1, System.get_env(&1)})
@@ -25,6 +33,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
 
     System.delete_env("SDR_MODEL_PROVIDER")
     System.delete_env("SDR_CLAUDE_CLI_TIMEOUT_MS")
+    System.delete_env("SDR_CLAUDE_CLI_BIN")
     System.put_env("DATABASE_URL", "ecto://postgres:postgres@localhost/sdr_config_test")
     System.put_env("SECRET_KEY_BASE", String.duplicate("test-only-key-", 8))
     System.put_env("TOKEN_SIGNING_SECRET", "test-only-token-secret")
@@ -60,12 +69,58 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       for env <- [:dev, :test, :prod], do: assert({Fake, nil} = selected(env))
     end
 
-    test "claude_cli is allowed in development with a configured timeout" do
+    test "claude_cli is allowed in development with a configured timeout and pinned CLI" do
+      bin = PinnedCLI.store_path!()
       System.put_env("SDR_MODEL_PROVIDER", "claude_cli")
-      assert {ClaudeCLI, [timeout: 240_000]} = selected(:dev)
+      System.put_env("SDR_CLAUDE_CLI_BIN", bin)
+      assert {ClaudeCLI, [timeout: 240_000, executable: ^bin]} = selected(:dev)
 
       System.put_env("SDR_CLAUDE_CLI_TIMEOUT_MS", "90000")
-      assert {ClaudeCLI, [timeout: 90_000]} = selected(:dev)
+      assert {ClaudeCLI, [timeout: 90_000, executable: ^bin]} = selected(:dev)
+    end
+
+    test "R0-02: claude_cli without SDR_CLAUDE_CLI_BIN refuses to boot (no PATH fallback)" do
+      System.put_env("SDR_MODEL_PROVIDER", "claude_cli")
+
+      assert_raise RuntimeError, ~r/SDR_CLAUDE_CLI_BIN.*pinned.*bin\/app-claude-cli-root/s, fn ->
+        selected(:dev)
+      end
+    end
+
+    test "R0-02: SDR_CLAUDE_CLI_BIN must be an existing executable inside /nix/store" do
+      System.put_env("SDR_MODEL_PROVIDER", "claude_cli")
+
+      for {value, reason} <- [
+            {"", "not_a_path"},
+            {"bin/claude-code", "not_absolute"},
+            {"claude-code", "not_absolute"},
+            {"/nix/store/../../bin/sh", "not_canonical"},
+            {"/bin/sh", "not_in_nix_store"},
+            {Path.expand("../../support/fake_claude_cli.exs", __DIR__), "not_in_nix_store"},
+            {PinnedCLI.missing_store_path(), "missing"}
+          ] do
+        System.put_env("SDR_CLAUDE_CLI_BIN", value)
+
+        message =
+          try do
+            selected(:dev)
+            nil
+          rescue
+            error in RuntimeError -> Exception.message(error)
+          end
+
+        assert message, "#{inspect(value)} was accepted"
+        assert message =~ "SDR_CLAUDE_CLI_BIN refused (#{reason})", inspect(value)
+        assert message =~ "/nix/store"
+      end
+    end
+
+    test "R0-02: SDR_CLAUDE_CLI_BIN is ignored unless claude_cli is selected" do
+      System.put_env("SDR_CLAUDE_CLI_BIN", "relative/never-checked")
+      for env <- [:dev, :test, :prod], do: assert({Fake, nil} = selected(env))
+
+      System.put_env("SDR_MODEL_PROVIDER", "fake")
+      for env <- [:dev, :test, :prod], do: assert({Fake, nil} = selected(env))
     end
 
     test "claude_cli refuses to boot in prod (ADR-0004 personal-local boundary)" do
@@ -96,6 +151,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       end
 
       System.put_env("SDR_MODEL_PROVIDER", "claude_cli")
+      System.put_env("SDR_CLAUDE_CLI_BIN", PinnedCLI.store_path!())
 
       for timeout <- ["0", "-5", "ten", "100ms", "", "999"] do
         System.put_env("SDR_CLAUDE_CLI_TIMEOUT_MS", timeout)
@@ -118,6 +174,16 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       assert [{ClaudeCLI, opts}] = Runtime.children()
       assert opts[:name] == ClaudeCLI.server()
       assert opts[:timeout] == 90_000
+    end
+
+    test "R0-02: the app's server is started with the configured pinned CLI" do
+      bin = PinnedCLI.store_path!()
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+      Application.put_env(:sdr_agent, ClaudeCLI, timeout: 90_000, executable: bin)
+
+      assert [{ClaudeCLI, opts}] = Runtime.children()
+      assert opts[:executable] == bin
+      assert opts[:name] == ClaudeCLI.server()
     end
 
     test "the provider server starts before Oban, so no job can run before it exists" do
@@ -192,6 +258,17 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       assert {:error, :provider_not_quiescent} = Runtime.resolve(provider: ClaudeCLI)
     end
 
+    test "R0-02: a configured pinned CLI that is missing is refused before any reservation" do
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+      start_named!("ready", executable: PinnedCLI.missing_store_path())
+
+      assert {:error, :pinned_cli_unavailable} = Runtime.resolve([])
+      assert {:error, :pinned_cli_unavailable} = Runtime.resolve(provider: ClaudeCLI)
+      assert Runtime.refusal_message(:pinned_cli_unavailable) =~ "no model call was made"
+
+      assert %{effective: nil, refusal: :pinned_cli_unavailable} = Runtime.status()
+    end
+
     test "status reports the configured and the effective provider" do
       Application.put_env(:sdr_agent, :model_provider, Fake)
       assert %{configured: Fake, effective: Fake} = Runtime.status()
@@ -256,6 +333,20 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
                attestation: %{status: :pending}
              } = Runtime.status()
     end
+
+    test "R0-02: ClaudeCLI reports the pinned CLI path it launches (no CLI is run)" do
+      bin = PinnedCLI.store_path!()
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+      Application.put_env(:sdr_agent, ClaudeCLI, executable: bin)
+
+      assert %{cli_executable: ^bin} = Runtime.status()
+
+      Application.put_env(:sdr_agent, ClaudeCLI, [])
+      assert %{cli_executable: nil} = Runtime.status()
+
+      Application.put_env(:sdr_agent, :model_provider, Fake)
+      assert %{cli_executable: nil} = Runtime.status()
+    end
   end
 
   defp eventually(fun, attempts \\ 200)
@@ -270,12 +361,17 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
     end
   end
 
-  defp start_named!(mode) do
+  defp start_named!(mode, opts \\ []) do
     start_supervised!(
       {ClaudeCLI,
-       name: ClaudeCLI.server(),
-       command: System.find_executable("elixir"),
-       command_args: [@fake, mode]}
+       Keyword.merge(
+         [
+           name: ClaudeCLI.server(),
+           command: System.find_executable("elixir"),
+           command_args: [@fake, mode]
+         ],
+         opts
+       )}
     )
   end
 end

@@ -4,7 +4,8 @@ defmodule SdrAgentWeb.AdminLive do
   provider (`SdrAgent.AI.ModelProvider.Runtime.status/0`, Q0.1: configured
   and effective provider — none, with the refusal, while calls are refused —
   model alias
-  and resolved id, reviewed CLI version, whether its supervised server runs
+  and resolved id, reviewed CLI version, the app's pinned CLI path (R0-02;
+  shown, never run), whether its supervised server runs
   and the last init attestation — refreshed live, like the other console
   views (`SdrAgentWeb.LiveRefresh`), whenever an audit event commits, so a
   first call's attestation or drift shows without a revisit; the card only
@@ -167,6 +168,11 @@ defmodule SdrAgentWeb.AdminLive do
               <.field :if={@provider.reviewed_version} label="Reviewed CLI">
                 <span id="reviewed-cli-version" class="font-mono text-xs">
                   Claude Code {@provider.reviewed_version}
+                </span>
+              </.field>
+              <.field :if={@provider.cli_executable} label="Pinned CLI">
+                <span id="pinned-cli-path" class="break-all font-mono text-xs">
+                  {@provider.cli_executable}
                 </span>
               </.field>
               <.field label="Server">

@@ -174,6 +174,51 @@ defmodule SdrAgent.ChildEnvTest do
     assert "SDR_TRACEPARENT" in names
   end
 
+  test "R0-02: the shim's CLI variable is set only by the launch, never inherited", ctx do
+    previous = System.get_env("LLM_PROXY_SHIM_CLAUDE_BIN")
+    System.put_env("LLM_PROXY_SHIM_CLAUDE_BIN", "/usr/local/bin/claude")
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("LLM_PROXY_SHIM_CLAUDE_BIN", previous),
+        else: System.delete_env("LLM_PROXY_SHIM_CLAUDE_BIN")
+    end)
+
+    refute ChildEnv.kept?("LLM_PROXY_SHIM_CLAUDE_BIN", ClaudeCLI.child_env_allow())
+
+    for {label, opts, expected?} <- [
+          {"unconfigured", [], false},
+          {"pinned", [executable: SdrAgent.Test.PinnedCLI.store_path!()], true}
+        ] do
+      dump = Path.join(ctx.dir, "claude-env-#{label}.json")
+
+      {:ok, server} =
+        ClaudeCLI.start_link(
+          [command: System.find_executable("elixir"), command_args: [@fake, "env_names", dump]] ++
+            opts
+        )
+
+      assert {:ok, _} = ClaudeCLI.complete(claude_request(), server: server)
+      names = dump |> File.read!() |> JSON.decode!()
+
+      assert_clean(names, ctx.canaries)
+      assert "LLM_PROXY_SHIM_CLAUDE_BIN" in names == expected?, label
+    end
+  end
+
+  defp claude_request do
+    %{
+      id: "child-env",
+      operation: "model.complete",
+      prompt: "qualify",
+      schema: Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()}),
+      witness: %{
+        model_invocation_id: Ash.UUIDv7.generate(),
+        traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+      }
+    }
+  end
+
   test "the anchoring Git subprocesses see no parent secret", ctx do
     dump = Path.join(ctx.dir, "git-env")
     bin = Path.join(ctx.dir, "bin")
