@@ -214,6 +214,12 @@ are acceptance scenarios, not implemented screens or actual actions.
 | Over page cap | 53 authorized pending source items | Return the stable first 50 plus a cursor; next page has the remainder. No skipped fetched candidates, unauthorized counts or unbounded body loads. |
 | Resolved refusal, live Operation | Original run cause F3 is resolved; Operation has live F4 naming F3 | Show F4 once, not F3 as pending and not a collapsed “fixed” lead. Inspection explains historical cause versus remaining operator attention. |
 
+Open the [synthetic task prototype](task-prototype.html) locally for the
+fragment-linked walkthrough below. It has no scripts, network access,
+database or real actions. R3/H3/T3 are symbolic labels, not API-valid values.
+The prototype only presents the already modeled contract: no entity/action
+delta or runtime behavior is added by this static markup.
+
 Owner task walk (no model calls):
 
 1. From Fresh draft D1, identify the recipient, revision and why approval is
@@ -224,9 +230,10 @@ Owner task walk (no model calls):
 4. Distinguish Resolved failure from Resolved refusal/live Operation.
 5. Describe One producer failed versus a complete empty initial inbox.
 
-Record the owner's answers/changes with no coaching. H1-01 supplies the
-interactive desktop prototype and accessibility/keyboard task check; this
-contract does not claim that prototype or owner acceptance is already done.
+Record the owner's answers/changes with no coaching. This clickable contract
+example is not an accepted H1 visual design; H1-01 supplies the fuller desktop
+prototype and accessibility/keyboard task check. Neither owner acceptance nor
+a passed usability test is claimed here.
 
 ## Affected boundaries and proposed implementation slices
 
