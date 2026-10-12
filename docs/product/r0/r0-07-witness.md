@@ -400,6 +400,42 @@ touch is implemented until Codex records a PASS on this section.
   regression; the ordinary `:fail` still locks.
 - **G7:** recovery; a competing release; bounded failure.
 
+### 6.4 Round 7: two narrow cases and implementation bounds
+
+Codex's round-6 recheck at f31d61a was **NEEDS-REVIEW, two narrow
+clarifications** (report sha256 2ee51092, reply to
+m_1791848756000001078_e5faee73). G3, G4 and G5 are otherwise resolved, and
+the G1, G2 and G6 bounds stand.
+
+| Row | Entity / action | Delta | Invariants / lifecycle | Actor / locks | Tests (RED first) |
+|---|---|---|---|---|---|
+| R7-1 | ModelResultRelease `:decide` replay with `gate_cause_id` | `gate_cause_id` joins the replay identity. Its stored value is read from the existing release's immutable `model.result.withheld` event (`payload.arguments.gate_cause_id`). There is no new column. | **Identical replay:** the same disposition, reason, link and evidence **and** the same `gate_cause_id`, or both absent. It returns the existing row and appends no event.<br>**Typed conflict:** any other `gate_cause_id` — different, absent to present, or present to absent — is refused with `ReleaseConflict`, carrying the existing release id and its bound `existing_cause_id`.<br>Never an apparent success for a different receipt, and never a replacement binding.<br>**Concurrency:** concurrent decides with different causes serialise on the unique index; the loser gets the typed conflict. A finalizer that gets the conflict follows G7: it rereads the release and its authoritative receipt, and never claims its own. | AGT; finalizer and run recovery | Identical replay with no extra event; a different cause conflicts; absent to present and present to absent conflict; concurrent decides with different causes (true connection): exactly one row and one event, the loser conflicts. |
+| R7-2 | G7 recovery, and G5's R2/R3 with an unusable mismatch cause | **G7 uses G5's selection.** `:witness_mismatch` with its critical cause whenever a current mismatch is known; `:gate_interrupted` only when none is. | **The critical cause for a known mismatch:**<br>• a correctly bound one (`operation_id` equal to the run's Operation; or, for a run without an Operation, bindable through the withheld event per G1) is locked before the head and used;<br>• if no live critical exists for the invocation, the recovery opens one, bound under the head with every FK target already locked (no duplicate, since none is live);<br>• if a live critical exists but is not usable for this run (another Operation, or a scan-opened critical without `operation_id` on a run that has an Operation), the recovery fails closed. It writes no release, no stop and no new cause. It returns `{:error, :mismatch_cause_unbound}` and no business output, leaving the recoverable state (run running, invocation completed, no release). That existing critical remains the owner's attention. Once the owner resolves it, the next recovery pass opens a bound critical (none is live) and completes.<br>The mismatch is never downgraded, and no receipt provenance is forged.<br>**If a recovery cannot commit for any other reason**, it returns no output and the state stays sweepable. One attempt only, never recursive. | AGT; finalization lock order | Bounded recovery tests: no live critical, so one is opened and bound and the run stops on the mismatch; an unusable scan or foreign critical gives the refusal, with nothing written and the run still running; after the owner resolves it, recovery completes; a run without an Operation binds the existing critical through the event. |
+
+**Implementation bounds** (Codex, no further entity change):
+- **G3:** the locked execution guard skips both pending running rows and
+  terminal-without-release generation-2 rows. "Not gate-owned" never means
+  writable by the scan. Race tests distinguish the gate's reconcile commit
+  (still unreleased, so deferred) from the finalizer's commit (a release
+  exists, so backfill is allowed). The unlocked run read claims no atomicity
+  against cancellation; later ownership and finalization checks are
+  authoritative.
+- **G4:** a protected cause counts at its actual severity. A protected
+  mismatch is critical and is not duplicated when the mismatch recurs. A
+  resolved historical cause stays resolved, and an unchanged observation
+  never recreates the same warning under a new id. A distinct later
+  mismatch's attention is still allowed. Note status codes and the typed
+  classification are a pinned, bounded code set; no raw string or output
+  enters a cause message or event argument.
+- **R1:** observation stays outside every row and head lock. Recovery
+  rechecks job liveness and run state under its locks; the abandoned
+  prefilter is never authority to fail a newly live job. R3 changes no
+  terminal run or Operation.
+- **G6 and G7:** G6 uses the rollback-aware marker from #139, and
+  finalization holds every dependent row and FK target before the head;
+  ordinary `:fail` keeps its locks. G7 is one fresh recovery transaction,
+  never recursive, and an already committed release stays authoritative.
+
 ## 7. Gate record
 
 - Round 1 at e720fda: **NEEDS-REVIEW** (Codex, consultation
@@ -441,3 +477,7 @@ touch is implemented until Codex records a PASS on this section.
   narrow** (Codex, reply to m_1791847186000021427_a461941f, report sha256
   ce1420a2). Gaps 1, 2, 6 and 7 accepted with bounds; gaps 3, 4 and 5
   revised in section 6 for recheck.
+- Round 6 recheck at f31d61a: **NEEDS-REVIEW, two narrow clarifications**
+  (Codex, reply to m_1791848756000001078_e5faee73, report sha256 2ee51092).
+  The replay semantics for `gate_cause_id` and G7's mismatch precedence are
+  recorded as R7-1 and R7-2 in section 6.4, with the implementation bounds.
