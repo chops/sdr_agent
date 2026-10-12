@@ -399,7 +399,23 @@ independent entity/action PASS (story R0-07) before they are implemented.
    - **When the grammar does not fit.** If a captured exchange falls outside
      the grammar, the work stops and is reported; the rules are not widened
      ad hoc. Further attempts need a new owner grant.
-3. **Per-invocation result gate.**
+3. **Admission before any spend.**
+   - **Refusal before reservation.** An ordinary (non-calibration) real
+     `claude_cli` call is refused, with nothing reserved, charged or sent,
+     when either:
+     - its exact tuple (provider, pinned CLI version, profile, resolved
+       model, current prompt builder's projection, method) is not on the
+       shipped allowlist; or
+     - the result gate is not active.
+   - **Launch re-check.** The same check is repeated at launch admission
+     (ADR-0004 R0 amendment, `admit_launch/2`). An invocation whose tuple
+     is no longer promoted, or whose gate is no longer active, is refused at
+     launch, and is never sent.
+   - **Calibration stays confined.** The calibration exception applies only
+     inside the reviewed external proof harness, with its test-only exact
+     overrides. There is no caller, job or runtime flag that lets an
+     ordinary call bypass this admission.
+4. **Per-invocation result gate.**
    - **Which calls.** It applies to every R0-generation `claude_cli`
      invocation outside calibration.
    - **Mechanism.** After the response is validated and stored, the facade
@@ -418,14 +434,26 @@ independent entity/action PASS (story R0-07) before they are implemented.
    - **Later reconciliation.** A later scan may upgrade the link, but it
      never releases a withheld result to the original run. A re-run is an
      explicit, budget-counted operator action.
-   - **Enforcement.** The release state is persisted on the invocation, so
-     no other path (replay, retry, reads of the parsed output) can use an
-     unreleased result. Its attributes and actions are in R0-07's entity
-     delta.
-4. **Fail-closed store.** A real `claude_cli` call is refused before
+   - **Release evidence.** The release decision is a **separate, immutable
+     release record** for the invocation: released, or withheld with its
+     reason. It is written once, after the invocation's terminal outcome.
+   - **The invocation itself is untouched.** The terminal invocation and its
+     outcome are never updated; terminal rows stay immutable (ADR-0009).
+   - **No bypass.** Every business read of a model output (the facade's
+     return, replay, retry, decisions) requires a released record. The
+     witness's own evidence and reconciliation reads stay available while a
+     business output is withheld.
+   - **Detail in R0-07.** The release record's attributes, actions and
+     read gating are specified in R0-07's entity delta.
+   - **No locks held while waiting.** No run, chain-head or database lock is
+     held while waiting for the capture to appear.
+   - **What the allowlist compares.** It compares the invocation's recorded
+     identity (provider, CLI version, profile, model) together with the
+     projection and method actually evaluated for the exchange.
+5. **Fail-closed store.** A real `claude_cli` call is refused before
    reservation when the witness store root is not configured or not
    trusted. It is no longer allowed to run with reconciliation inert.
-5. **Unchanged.**
+6. **Unchanged.**
    - The claim stays the same: the stdin and the structured output are
      equal, and the CLI-added context is recorded, not proven equal or
      benign. "Reconciled" does not mean the research is factually right.
@@ -440,8 +468,12 @@ independent entity/action PASS (story R0-07) before they are implemented.
 
 - No ordinary real call's output is used unless its own wire record
   matches.
-- Each call is slower by the time reconciliation takes. Calls stay one at a
-  time (D-069), so nothing queues behind another call's reconciliation.
+- Each call is slower by the time reconciliation takes.
+- Calls to the CLI stay one at a time (D-069). The facade's wait for its
+  own reconciliation adds latency to that call's run. Whether later calls
+  wait behind it depends on where the wait sits relative to the serialized
+  CLI server; R0-07 places it after the server has released the call, and
+  measures the result.
 - Every CLI bump or new profile costs a projection review, calibration
   calls and an enablement change.
 
