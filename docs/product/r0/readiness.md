@@ -143,8 +143,11 @@ admission, launch admission, the facade's sent boundary).
     it after admission, before the Reaper handoff: a caller that died while
     admission waited for its locks is never launched for. If admission had
     already committed `sent`, the row stays `sent` (never reset to
-    `reserved`) and the existing crash path recovers it
-    (`StaleRunSweeper`: sent → unknown, never re-sent).
+    `reserved`). The existing crash path recovers it only while its run is
+    still `running` and abandoned (`StaleRunSweeper`: sent → unknown, never
+    re-sent). A `sent` row of an already terminal run is not recovered
+    (settling it also needs a running run); this is tracked below as an
+    enablement prerequisite.
     Eligibility refusals record the failed check (`grant_revoked`,
     `grant_expired`, `grant_not_started`, `profile_not_in_grant`,
     `allocation_not_in_grant`, `allocation_profile_restricted`,
@@ -211,20 +214,36 @@ admission, launch admission, the facade's sent boundary).
   Mutators never take run or invocation locks after the chain head. No
   cycles.
 
-### C9-03 recovery delta: abandoned reserved invocations (proposed; NEEDS entity review)
+### C9-03 recovery delta: abandoned reserved invocations
 
-Status: **proposed, not implemented.** Codex PR #136 review (REQUEST_CHANGES
-at 543846b, must-fix 2). Moving the ClaudeCLI queue wait from `sent` to
+Status: **entity PASS; implemented in C9-03** (`SDR.StaleRunSweeper`).
+- Reviewer: Codex via ai-pair, 2026-10-12. Answer correlation
+  m_1791841877000009253_7afb24e6 → codex-pr136-10e7eba-answer. Report:
+  `~/.local/state/sdr-agent/handoff-20261008/tmp/codex-pr136-10e7eba-rereview.md`
+  (entity verdict PASS at 10e7eba; code verdict then REQUEST_CHANGES until
+  this was implemented and tested).
+- Answers to the open questions:
+  1. Both (a) and (b) are in scope. Case (b) covers explicitly terminal
+     runs only; queued and live runs are left alone.
+  2. The strict `reserved_at < now − stale_after_seconds` cutoff is
+     acceptable as a grace period. Age is not the proof.
+  3. The proof is the locked terminal run plus the locked, freshly re-read
+     `reserved` state, together with the atomic sent-before-spawn contract.
+     Status and age are re-checked under the locks; rows exactly at the
+     cutoff and recent rows are untouched.
+- The PASS covers this reserved-only delta, not tuple promotion,
+  calibration, deployment or real-call enablement.
+
+Origin: Codex PR #136 review (REQUEST_CHANGES at 543846b, must-fix 2). Moving the ClaudeCLI queue wait from `sent` to
 `reserved` lets a reservation outlive its caller: a facade caller killed
 while its call is queued never settles it, the server drops the dead
 caller's request unlaunched, and crash recovery (`SDR.StaleRunSweeper`)
 selects only `sent` rows, so the row stays `reserved` forever, even after
-its run is failed. This delta makes such rows terminal. It needs an
-independent entity/action verdict before code.
+its run is failed. This delta makes such rows terminal.
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| ModelInvocation | Existing (lifecycle delta) | Close reservations proven abandoned and unlaunched | no new attributes; `error` = `%{"kind" => "abandoned_before_launch", "reason" => "run_abandoned" \| "run_stopped"}`; `sent_at` stays nil; `profile_id`, `grant_id`, `allocation_id`, `ledger_generation` unchanged | unchanged (still charged to its grant and allocation) | **Proof of "abandoned, unlaunched".** A row is `reserved` when read under its own `FOR UPDATE` lock, taken after its run's `FOR UPDATE` lock. It was never launched: `sent` is committed by launch admission before any port opens, and admission needs the run lock and a `running` run (MF1). It can never launch later: either (a) the same transaction proves the run abandoned and fails it (stale and its Oban job not live, decided again under the run, Operation and job locks, exactly as today), so later admissions see a non-running run and are refused; or (b) the run is already terminal (MF1: never launchable again) and the row was reserved before the stale cutoff (`reserved_at` < now − `stale_after_seconds`), which leaves time for a live facade to settle it itself. **Transition:** reserved → failed through the existing `:fail` action (`Agents.fail_model_invocation/3`), never `unknown` (the call provably never ran) and never back to `sent`. **No refund, no invented use:** the charged attempt is kept (grant and allocation consumption counts the row by `grant_id` / `allocation_id`, which stay); `model_calls_reserved` stays; `model_calls_used` and tokens are not settled, because `sent_at` is nil. **Idempotent:** only `reserved` rows are selected, so a failed row is never touched again; a recovered run is `failed`, so later sweeps skip it. **Never sweeps live work:** case (a) only for runs whose job is not live under its lock; case (b) only for terminal runs, whose rows launch admission already refuses. A live facade that later reaches admission gets `invocation_not_reserved`, and its re-read returns the failure without another write. | `agent_runtime` (as the sweeper today); the existing `:fail` action and policy; no new action | (1) Is case (b) in scope, or only (a)? (2) Is the stale cutoff on `reserved_at` the right guard for (b)? |
+| ModelInvocation | Existing (lifecycle delta) | Close reservations proven abandoned and unlaunched | no new attributes; `error` = `%{"kind" => "abandoned_before_launch", "reason" => "run_abandoned" \| "run_stopped"}`; `sent_at` stays nil; `profile_id`, `grant_id`, `allocation_id`, `ledger_generation` unchanged | unchanged (still charged to its grant and allocation) | **Proof of "abandoned, unlaunched".** A row is `reserved` when read under its own `FOR UPDATE` lock, taken after its run's `FOR UPDATE` lock. It was never launched: `sent` is committed by launch admission before any port opens, and admission needs the run lock and a `running` run (MF1). It can never launch later: either (a) the same transaction proves the run abandoned and fails it (stale and its Oban job not live, decided again under the run, Operation and job locks, exactly as today), so later admissions see a non-running run and are refused; or (b) the run is already terminal (MF1: never launchable again) and the row was reserved before the stale cutoff (`reserved_at` < now − `stale_after_seconds`), which leaves time for a live facade to settle it itself. **Transition:** reserved → failed through the existing `:fail` action (`Agents.fail_model_invocation/3`), never `unknown` (the call provably never ran) and never back to `sent`. **No refund, no invented use:** the charged attempt is kept (grant and allocation consumption counts the row by `grant_id` / `allocation_id`, which stay); `model_calls_reserved` stays; `model_calls_used` and tokens are not settled, because `sent_at` is nil. **Idempotent:** only `reserved` rows are selected, so a failed row is never touched again; a recovered run is `failed`, so later sweeps skip it. **Never sweeps live work:** case (a) only for runs whose job is not live under its lock; case (b) only for terminal runs, whose rows launch admission already refuses. A live facade that later reaches admission gets `invocation_not_reserved`, and its re-read returns the failure without another write. | `agent_runtime` (as the sweeper today); the existing `:fail` action and policy; no new action | Answered (see the status above): (a) and (b) both in scope; the cutoff is a grace period |
 | AgentRun | Existing (behaviour only) | — | none | unchanged | Case (a): unchanged; the run is failed `:crash`, opening its one attention Failure as today. Case (b): the run is not written. | unchanged | none |
 | Operations.Failure | Existing (behaviour only) | — | none | unchanged | No Failure for a recovered reservation: case (a) has the run's crash Failure; case (b)'s run stop is already its cause. | unchanged | none |
 
@@ -233,7 +252,7 @@ independent entity/action verdict before code.
 - Case (b), one transaction per run: run `FOR UPDATE` → its `reserved` invocations older than the cutoff, `FOR UPDATE` → appends.
 - Both take the run first, as launch admission does (run → invocation → grant `FOR SHARE` → allocation `FOR SHARE` → head), so a recovery and a launch are serialized on the run row. No grant or allocation lock is taken (the `:fail` update does not change their key columns). No cycles.
 
-**Tests (when approved).**
+**Tests** (`test/sdr_agent/sdr/reserved_recovery_test.exs`, real-connection orderings in `test/sdr_agent/agents/launch_admission_race_test.exs`).
 - Regression: a facade caller killed while its call is queued leaves a `reserved` row.
 - After recovery, case (a) leaves the run `failed` and the row `failed` with `sent_at` nil; consumption is unchanged.
 - Idempotent re-sweep.
@@ -247,7 +266,8 @@ independent entity/action verdict before code.
 | Item | Source | Status | Required before |
 |---|---|---|---|
 | **Launch refusal opens two live Failures.** `Agents.admit_launch/3` opens a `provider_error` Failure about the invocation. Then `SDR.Model` treats the refusal as a generic provider error, and `AgentRun :fail` opens a second run-stopped Failure for the same cause. Fix: follow the reservation refusal's exact-cause pattern. Admission returns a receipt (reason, Failure, event, run, request id), and the run stop (and its Operation) links that exact Failure instead of opening one. This needs a reviewed AgentRun/Operation action delta, plus a worker/Operation attention test through the full SDR path. Never look up "the newest" Failure, and never take an Operation lock after the chain head. | Codex PR #136 review, important | Open. Not tiny (new AgentRun stop arguments and link provenance), so not in C9-03. | Real-call enablement (R0-07 promotion / lifting `:real_model_staged`) |
-| Abandoned reserved invocations (the delta above) | Codex PR #136 review, must-fix 2 | Proposed, awaiting entity review | Merge of #136 |
+| Abandoned reserved invocations (the delta above) | Codex PR #136 review, must-fix 2 | Entity PASS; implemented | Merge of #136 |
+| **`sent` rows of an already terminal run stay `sent`.** The sweeper recovers `sent` rows only for runs that are still `running` and abandoned. Settling a `sent` row also needs a running run (BudgetCounter). So a `sent` row whose run became terminal first (e.g. a dead caller after admission committed, then the run was stopped) is never settled or marked `unknown`. It is distinct from the reserved delta: a `sent` row is not proven unlaunched and must never be failed as such. It needs its own reviewed delta and tests. | Codex PR #136 re-review (10e7eba), important | Open, not implemented | Real-call enablement (lifting `:real_model_staged`) |
 
 ## 3. Out of scope
 

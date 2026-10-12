@@ -19,6 +19,8 @@ defmodule SdrAgent.Agents.LaunchAdmissionRaceTest do
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit
   alias SdrAgent.AuditCase
+  alias SdrAgent.Clock
+  alias SdrAgent.SDR.StaleRunSweeper
 
   @tables ~w(audit_accesses audit_events audit_chain_heads model_invocations
              model_call_allocations model_call_grants agent_runs failures operations
@@ -196,6 +198,72 @@ defmodule SdrAgent.Agents.LaunchAdmissionRaceTest do
     {:ok, events} = Audit.list_events(actor: auditor(ctx))
     assert Enum.count(events, &(&1.event_type == "model.invocation.sent")) == 1
     assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: auditor(ctx))
+  end
+
+  describe "reserved recovery racing a launch (C9-03 case (a))" do
+    setup ctx do
+      Clock.freeze(
+        DateTime.add(Clock.utc_now(), StaleRunSweeper.stale_after_seconds() + 60, :second)
+      )
+
+      on_exit(&Clock.unfreeze/0)
+      ctx
+    end
+
+    test "recovery first: the row is failed unlaunched and the launch is refused", ctx do
+      parent = self()
+      head = Task.async(fn -> with_connection(fn -> hold_head(ctx, parent) end) end)
+      assert_receive :head_held, 10_000
+
+      sweep =
+        Task.async(fn -> with_connection(fn -> StaleRunSweeper.sweep(ctx.tenant.id) end) end)
+
+      await_lock_waiters(1)
+      launch = Task.async(fn -> admit(ctx) end)
+      await_lock_waiters(2)
+      send(head.pid, :go)
+
+      assert {:ok, _} = Task.await(head, 30_000)
+      assert :ok = Task.await(sweep, 30_000)
+      assert {:error, :invocation_not_reserved} = Task.await(launch, 30_000)
+
+      stored = Ash.get!(ModelInvocation, ctx.invocation.id, authorize?: false)
+      assert {stored.status, stored.sent_at} == {:failed, nil}
+      assert stored.error["kind"] == "abandoned_before_launch"
+      assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: auditor(ctx))
+    end
+
+    test "launch first: the call is sent, and recovery marks it unknown, not failed", ctx do
+      parent = self()
+      head = Task.async(fn -> with_connection(fn -> hold_head(ctx, parent) end) end)
+      assert_receive :head_held, 10_000
+
+      launch = Task.async(fn -> admit(ctx) end)
+      await_lock_waiters(1)
+
+      sweep =
+        Task.async(fn -> with_connection(fn -> StaleRunSweeper.sweep(ctx.tenant.id) end) end)
+
+      await_lock_waiters(2)
+      send(head.pid, :go)
+
+      assert {:ok, _} = Task.await(head, 30_000)
+      assert {:ok, %{status: :sent}} = Task.await(launch, 30_000)
+      assert :ok = Task.await(sweep, 30_000)
+
+      stored = Ash.get!(ModelInvocation, ctx.invocation.id, authorize?: false)
+      assert stored.status == :unknown
+      assert stored.sent_at != nil
+      assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: auditor(ctx))
+    end
+  end
+
+  defp hold_head(ctx, parent) do
+    SdrAgent.Repo.transaction(fn ->
+      {:ok, _} = Audit.Kernel.lock_head(ctx.tenant.id)
+      send(parent, :head_held)
+      receive do: (:go -> :ok)
+    end)
   end
 
   defp admit(ctx) do

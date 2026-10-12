@@ -72,8 +72,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   an admission that fails unexpectedly is `{:error,
   :launch_admission_failed}`. The caller is monitored before admission; a
   caller that died while admission waited for its locks is never launched
-  for (`{:error, :caller_down}`; an already committed `sent` stays sent and
-  is recovered as unknown by the stale-run sweeper). The deadline is
+  for (`{:error, :caller_down}`; an already committed `sent` stays sent,
+  and the stale-run sweeper marks it unknown only while its run is still
+  running and abandoned — a terminal run's `sent` row is a tracked open
+  case, R0 readiness packet). The deadline is
   checked again after admission. After admission a deterministic spawn failure is a known
   failure; an uncertain spawn or receipt is unknown, as below.
 
@@ -809,9 +811,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   end
 
   # After admission committed `sent`, a dead caller's call is not launched:
-  # the row stays `sent` (admission is history, never reset to reserved) and,
-  # with nobody left to settle it, is recovered by the existing crash path
-  # (`SdrAgent.SDR.StaleRunSweeper`: sent → unknown, never re-sent).
+  # the row stays `sent` (admission is history, never reset to reserved).
+  # With nobody left to settle it, the existing crash path recovers it while
+  # its run is still running and abandoned (`SdrAgent.SDR.StaleRunSweeper`:
+  # sent → unknown, never re-sent); a terminal run's `sent` row is a tracked
+  # open case (R0 readiness packet).
   defp caller_alive(watch) do
     receive do
       {:DOWN, ^watch, :process, _caller, _reason} ->
