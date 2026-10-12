@@ -118,6 +118,8 @@ defmodule SdrAgentWeb.AdminLiveTest do
     assert has_element?(view, "#model-attestation[data-status='not_applicable']")
 
     put_env!(:model_provider, SdrAgent.AI.ModelProvider.ClaudeCLI)
+    # C9: the real-model call is charged to a grant.
+    SdrAgent.AgentsFixtures.grant!(ctx.tenant, %{}, ctx.admin)
     assign!(ctx, "01")
     drain!()
 

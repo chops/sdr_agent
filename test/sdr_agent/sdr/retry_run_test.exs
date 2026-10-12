@@ -86,6 +86,8 @@ defmodule SdrAgent.SDR.RetryRunTest do
                {:queued, prior.id, operation.id}
 
       assert {run.trigger_signal_id, run.lead_id} == {prior.trigger_signal_id, prior.lead_id}
+      # C9: the server-set usage origin of the assignment is copied, never re-chosen.
+      assert {prior.usage_origin, run.usage_origin} == {:assignment, :assignment}
 
       assert {operation.status, operation.kind, operation.oban_job_id} ==
                {:enqueued, :research_lead, job.id}
@@ -150,6 +152,7 @@ defmodule SdrAgent.SDR.RetryRunTest do
             campaign_id: prior.campaign_id,
             trigger_signal_type: "sdr.lead.assigned",
             trigger_signal_id: Ecto.UUID.generate(),
+            usage_origin: :assignment,
             correlation_id: Ecto.UUID.generate(),
             phase: :discover,
             max_model_calls: 5,
@@ -202,6 +205,8 @@ defmodule SdrAgent.SDR.RetryRunTest do
 
       assert {run.retry_of_id, run.operation_id, run.trigger_signal_id} ==
                {prior.id, nil, prior.trigger_signal_id}
+
+      assert {prior.usage_origin, run.usage_origin} == {:reply, :reply}
 
       assert {job.worker, job.queue, job.args["run_id"]} ==
                {"SdrAgent.SDR.ReplyWorker", "agent", run.id}

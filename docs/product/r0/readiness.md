@@ -45,14 +45,15 @@ admission, launch admission, the facade's sent boundary).
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
 | ModelProfile (code registry, not persisted) | New | The closed set of reviewed model configurations | `id : atom` one of `:fake`, `:claude_cli_opus`, `:claude_cli_sonnet`; `adapter`; `cli_alias`; `resolved_model`; `cli_version`; `witness_disposition : :reconciled \| :captured_inferred` | Referenced by id from ModelInvocation, ModelProfileSetting, ModelProfileSwitch, ModelCallGrant, ModelCallAllocation | Changes only by reviewed code. `:fake` is never grant-checked and never a desired real profile. | n/a (code) | OQ-3 |
-| ModelInvocation | Existing (delta) | Ledger row per model attempt | add `ledger_generation : int, not nil, default 1` (migration leaves every existing row at 1; R0 reservations write 2); add `profile_id : atom, nullable`; add `grant_id : uuid, nullable`; add `allocation_id : uuid, nullable`. All four written only by `:reserve` and immutable afterwards (excluded from the terminal-immutable trigger's mutable set and guarded by a new column-immutability check for non-terminal rows). | belongs_to ModelCallGrant (optional, restrict); belongs_to ModelCallAllocation (optional, restrict); composite FK `(allocation_id, grant_id)` → allocation `(id, grant_id)` so the allocation belongs to the recorded grant; grant, allocation, run and invocation share `tenant_id` (validated in `:reserve` and by composite FKs on `(grant_id, tenant_id)`) | Check constraint (applies to every insert and update, so it is a cutover predicate, not NOT VALID): `ledger_generation = 1 OR provider <> 'claude_cli' OR (profile_id, grant_id, allocation_id all not null)`. Generation-1 rows keep every existing transition (reserved/sent → failed/unknown/completed); a generation-1 `claude_cli` row is refused at launch (`legacy_invocation_without_grant`) and failed, never launched. **Sent boundary (changed):** for `claude_cli` the facade no longer marks sent before the provider call; the row stays `reserved` through queueing and becomes `sent` only inside `admit_launch/2` (below). Fake keeps today's order. | Unchanged: lifecycle actions by `agent_runtime`; reads by any present actor | none |
-| AgentRun | Existing (delta) | Agent run with per-run budget | add `usage_origin : atom, nullable` (null only for runs created before R0), one of `:assignment, :referral, :reply, :followup, :discovery, :channel, :proof` | unchanged | Set at `:create` by trusted server code from the entry point (never from job args a caller can forge, never from model output); immutable; `:retry` copies it. A real reservation for a run with null `usage_origin` is refused (`no_usage_origin`), fail-closed. | Unchanged (`agent_runtime` / `scheduler` create; admin retry) | none |
+| ModelInvocation | Existing (delta) | Ledger row per model attempt | add `ledger_generation : int, not nil, default 1` (migration leaves every existing row at 1; R0 reservations write 2); add `profile_id : atom, nullable`; add `grant_id : uuid, nullable`; add `allocation_id : uuid, nullable`. All four written only by `:reserve` and immutable afterwards (excluded from the terminal-immutable trigger's mutable set and guarded by a new column-immutability check for non-terminal rows). `:reserve` accepts no grant, allocation or generation: the admitted charge reaches it only through the trusted admission context set by `Agents` after admission, and a cast `claude_cli` reservation without it (or any other provider with it) is refused. For an admitted call `reserved_at` is the admission instant (read after every reservation lock is held, see contracts), not the attribute default. | belongs_to ModelCallGrant (optional, restrict); belongs_to ModelCallAllocation (optional, restrict); composite FK `(allocation_id, grant_id)` → allocation `(id, grant_id)` so the allocation belongs to the recorded grant; grant, allocation, run and invocation share `tenant_id` (validated in `:reserve` and by composite FKs on `(grant_id, tenant_id)`) | Check constraint (applies to every insert and update, so it is a cutover predicate, not NOT VALID): `ledger_generation = 1 OR provider <> 'claude_cli' OR (profile_id, grant_id, allocation_id all not null)`. Generation-1 rows keep every existing transition (reserved/sent → failed/unknown/completed); a generation-1 `claude_cli` row is refused at launch (`legacy_invocation_without_grant`) and failed, never launched. **Sent boundary (changed):** for `claude_cli` the facade no longer marks sent before the provider call; the row stays `reserved` through queueing and becomes `sent` only inside `admit_launch/2` (below). Fake keeps today's order. | Unchanged: lifecycle actions by `agent_runtime`; reads by any present actor | none |
+| AgentRun | Existing (delta) | Agent run with per-run budget | add `usage_origin : atom, nullable` (null only for runs created before R0), one of `:assignment, :referral, :reply, :followup, :discovery, :channel, :proof`. `status_reason` gains `:grant_exhausted` and `:grant_unavailable`. `:fail` and `:exhaust_budget` gain arguments `refusal_failure_id : uuid` and `refusal_request_id : string` (the refusal receipt), required with, and refused without, those two reasons. | `attention_failure_id` may now reference the reservation refusal's Failure (existing relationship, new source) | `usage_origin`: set at `:create` by trusted server code from the entry point (never from job args a caller can forge, never from model output); immutable; `:retry` copies it. A real reservation for a run with null `usage_origin` is refused (`no_usage_origin`), fail-closed. **Stop on a refused reservation:** a grant cap (`grant_exhausted`, `grant_day_exhausted`, `allocation_exhausted`) → `:exhaust_budget`, `budget_exhausted` / `:grant_exhausted`; `no_eligible_grant`, `no_allocation`, `ambiguous_allocation`, `no_usage_origin` → `:fail`, `failed` / `:grant_unavailable` (`failure_reason` names the exact reason). Neither opens a Failure: the run links the receipt's exact Failure as `attention_failure_id`, read `FOR UPDATE` after the run row, and only if it is this refusal's: same tenant, class `budget_exhausted`, subject this run, `operation_id` = the run's Operation (or none), and named with the same request id by a `model.reservation.refused` event of this run whose recorded reason is of the stop reason's category. The stop event records both arguments. **Resolution race:** the link does not require the Failure to be live; if an admin resolved the refusal before the stop, the run still stops with the grant reason and records that Failure as its cause (no new Failure, no `crash`). | Unchanged (`agent_runtime` / `scheduler` create; `agent_runtime` stops; admin retry) | none |
 | ModelCallGrant | New | An owner-granted budget of real-model attempts | `id : uuid_v7`; `tenant_id`; `name : string, not nil` (e.g. "G-R0"); `purpose : string, not nil`; `status : :active \| :revoked, default :active`; `profile_ids : {:array, atom}, not nil, non-empty, non-fake registry ids`; `total_attempts : int > 0`; `per_utc_day_attempts : int > 0, nullable` (null: only the global 200/day applies); `starts_at`, `expires_at : utc_datetime, not nil, expires_at > starts_at`; `revision : int ≥ 1`; `created_by_id`, `updated_by_id`; timestamps | belongs_to Tenant; has_many ModelCallAllocation; has_many ModelInvocation; belongs_to User (created_by, updated_by) | Consumed = count of ModelInvocations with this `grant_id` (derived, never stored, never refunded). Invariant: sum of its allocations' `attempts` ≤ `total_attempts` (checked on every terms edit under the grant row lock). Revocation is terminal. Edits carry `expected_revision` and are refused if stale. Lowering a total, day limit or allocation below what is consumed is allowed; it only stops new reservations. | `create`, `update_terms`, `revoke`: human admin only (active persisted `Accounts.User`, role re-read in the action); every system actor forbidden. Each action is guarded and appends `model.grant.created \| terms_changed \| revoked` with previous values and revision. Reads: admin, auditor, `agent_runtime`. | OQ-2 |
 | ModelCallAllocation | New | One spendable slice of a grant | `id`; `tenant_id`; `grant_id`; `key : atom, not nil` (`:b1`..`:b5`, `:proof`, `:rehearsal`, `:daily_use`, `:workshop`); `applies_to : {:array, atom}, not nil` (usage buckets it may fund); `profile_id : atom, nullable` (restricts to one profile, e.g. G-R0's two per profile); `attempts : int > 0`; `available_from`, `available_until : utc_datetime, nullable`; `released_at : utc_datetime, nullable`; `grant_revision : int ≥ 1, not nil` (added in implementation, PR #130: the grant revision that last wrote this allocation; set only by the grant's own action) | belongs_to ModelCallGrant (not nil, restrict); identity unique on `[grant_id, key, profile_id]`; unique `(id, grant_id)` for the invocation composite FK | The **workshop reserve is an ordinary allocation** (`key :workshop`, `available_from` = workshop day start), so there is one balance and no double counting. Available at t iff (`released_at` set or `available_from` null or t ≥ `available_from`) and (`available_until` null or t < `available_until`). Consumed = invocations with this `allocation_id`. Owner "release" sets `released_at` (early availability); owner "redistribute" is a terms edit moving attempts between allocations within the grant total; history is never rewritten because consumption is derived from immutable invocation rows. Never borrows from another allocation. | Created and changed only through its grant's own actions (`create`, `update_terms`, `release_allocation`), which lock the grant row, then its allocations, validate the complete final state and set the `GrantContext` marker; a direct allocation action is refused by policy before any lock (PR #130). Audited `model.grant.allocation_created \| allocation_changed`, `model.allocation.released`, each carrying `grant_revision` | none |
 | ModelProfileSetting | New (singleton per tenant) | The persisted desired real profile | `tenant_id` (unique); `desired_profile_id : atom, not nil, default :claude_cli_opus`, non-fake registry id; `revision : int ≥ 1` | belongs_to Tenant (unique) | Changes only when a switch completes. On boot the model server starts with `desired_profile_id`. | Read: admin, auditor, `agent_runtime`. No direct write action. | none |
 | ModelProfileSwitch | New | One requested profile change and its outcome | `id`; `tenant_id`; `from_profile_id`, `to_profile_id : atom, not nil, different`; `status : :pending \| :completed \| :failed \| :blocked`; `requested_by_id`; `requested_at`; `finished_at : nullable`; `failure_reason : string, nullable`; `server_generation : int` (the server start the switch belongs to) | belongs_to Tenant; belongs_to User (requester) | pending → completed (new server passed no-call preflight; setting.desired := to, revision +1, same transaction); pending → failed (activation failed and old work confirmed clean; old profile keeps running; desired unchanged); pending → blocked (unconfirmed work or Reaper lease held; admission closed); blocked → completed or failed after an admin action. At boot a still-pending switch is set failed (`interrupted_by_restart`), or blocked if the Reaper lease shows unconfirmed work; the server starts with `desired_profile_id`. Completion/failure actions are idempotent on `(id, server_generation)` and refuse a stale generation. At most one pending or blocked switch per tenant (partial unique identity). `request` refused if setting revision is stale or `to` = current desired. | `request`, `resolve_blocked`: human admin (resolve reuses the Reaper release attestation that no CLI process is left). `complete` / `fail` / `block`: system actor `model_runtime` only. All append `model.profile.switch_*`. | none |
 | Actor | Existing (delta) | System actor types | add type `:model_runtime` | n/a | Authorized only for ModelProfileSwitch `complete` / `fail` / `block`. No invocation, grant, allocation or setting write authority. `admit_launch/2` runs as `agent_runtime`, like `mark_sent` today. | n/a | none |
-| Operations.Failure | Existing (delta) | Operator attention items | no new attributes; new `detail.reason` values: class `budget_exhausted`: `no_eligible_grant`, `no_allocation`, `ambiguous_allocation`, `grant_exhausted`, `allocation_exhausted`, `grant_day_exhausted`, `no_usage_origin`; class `provider_error`: `grant_ineligible_at_launch`, `profile_mismatch_at_launch`, `legacy_invocation_without_grant`, `profile_switch_blocked` | unchanged | Reservation refusal: opened in its **own** committed transaction after the reservation transaction rolls back (see contracts). Deduplicated atomically: that transaction takes the chain-head lock before checking for an open Failure with the same `(class, reason, grant or none, run)` key, so concurrent and sequential repeats add no second item. Launch refusal: opened in the same transaction that fails the invocation. | `:open` by `agent_runtime` (existing system-actor permission) | none |
+| Operations.Failure | Existing (delta) | Operator attention items | no new attributes; new `detail.reason` values: class `budget_exhausted`: `no_eligible_grant`, `no_allocation`, `ambiguous_allocation`, `grant_exhausted`, `allocation_exhausted`, `grant_day_exhausted`, `no_usage_origin`; class `provider_error`: `grant_ineligible_at_launch`, `profile_mismatch_at_launch`, `legacy_invocation_without_grant`, `profile_switch_blocked` | unchanged | Reservation refusal: opened in its **own** committed transaction after the reservation transaction rolls back (see contracts). Deduplicated atomically: that transaction takes the chain-head lock before checking for an open Failure with the same `(class, reason, grant or none, run)` key, so concurrent and sequential repeats add no second item. Launch refusal: opened in the same transaction that fails the invocation. **Provenance and binding (PR-B):** the refusal Failure has subject = the run, `operation_id` = the run's Operation, and its detail is the dedupe key; its immutable `model.reservation.refused` event (run, request id as `idempotency_key`, `failure_id`, exact `reason`) is the provenance a run stop checks. The caller receives the exact receipt `{:error, %Refused{reason, failure_id, event_id, agent_run_id, request_id}}`; nothing looks up "the newest" Failure. A resolved refusal Failure is never reused by dedupe (a later refusal opens a new one) but may still be linked as the cause of the run it stopped. | `:open` by `agent_runtime` (existing system-actor permission) | none |
+| Operations.Operation | Existing (behaviour delta) | Durable background work | — | unchanged | Unchanged invariant: a failed Operation links only a **live** Failure of its condition (or opens its own). For a run stopped by a refused reservation, the worker locks the Operation, then the run's linked refusal Failure (`FOR UPDATE`, order Operation → Failure → head) and links it while it is live. **Resolution race outcome:** if an admin resolved it first, the Operation fails opening its own `budget_exhausted` Failure (subject the Operation, naming the resolved refusal), so the failed Operation keeps a live queue entry; the run keeps the refusal as its cause and nothing is recorded as a crash. | Unchanged (kind actor) | none |
 | Tenant | Existing | Singleton tenant | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | — | — |
 | Accounts.User | Existing | Human operators | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (new resources reference it as creator/updater/requester only; role values and role-change rules unchanged) | — | OQ-2 |
 
@@ -67,12 +68,27 @@ admission, launch admission, the facade's sent boundary).
   `:followup` → `:b4`; `:discovery` → `:b2`; `:channel` → `:b3`; `:proof` →
   `:proof`. Callers cannot supply a bucket.
 - **`Agents.reserve_model_invocation/3`** (for `provider: :claude_cli`).
-  - **Locks and selection.** Inside the existing transaction and lock order
-    (run row, then chain head), and before the payload and row are written,
-    it selects the eligible allocation: its grant is active, `starts_at ≤ t <
-    expires_at`, the profile is in the grant's `profile_ids` and matches the
-    allocation's `profile_id` if set, the bucket is in `applies_to`, and the
-    allocation is available at t.
+  - **Locks and selection (as implemented, PR-B).** In one transaction:
+    1. the run row `FOR UPDATE`;
+    2. the candidate grants (run's tenant, `active`, profile in
+       `profile_ids`), read under MVCC and then locked `FOR SHARE` by id;
+    3. all their allocations `FOR SHARE` by id;
+    4. the chain head, explicitly; only then is the admission instant t read
+       from the clock;
+    5. the run counter and daily limit (for t's UTC day), then the eligibility
+       and room of the locked candidates from fresh reads, then the payload
+       and the row, with `reserved_at` = t.
+
+    The share locks match the editors' order (grant `FOR UPDATE` → its
+    allocations `FOR UPDATE` → head): a reservation never waits for a grant or
+    allocation row (including the invocation FKs' `FOR KEY SHARE`) while it
+    holds the head, and no editor commits a change to a candidate during the
+    reservation. A grant committed after step 2 is not a candidate (the
+    reservation is ordered before it). Eligibility: the grant is active,
+    `starts_at ≤ t < expires_at`, the profile is in the grant's `profile_ids`
+    and matches the allocation's `profile_id` if set, the bucket is in
+    `applies_to`, and the allocation is available at t. The Fake keeps run →
+    head.
   - **Room check.** Grant consumed < total, grant today's (UTC, by
     `reserved_at`) consumed < day limit, and allocation consumed < attempts.
   - **Allocation choice.** Exactly one allocation must match. Zero matches
@@ -82,10 +98,17 @@ admission, launch admission, the facade's sent boundary).
     buckets; `:daily_use` Oct 30-Nov 5; `:workshop` from Nov 6 or on
     release).
   - **Refusal path.** The transaction returns the error and rolls back, so
-    there is no payload, no invocation and no counter change. The caller then
-    opens the deduplicated Failure and appends `model.reservation.refused`
-    in a separate guarded transaction as `agent_runtime`, and returns
-    `{:error, reason}`.
+    there is no payload, no invocation and no counter change. The caller then,
+    in a separate guarded transaction as `agent_runtime`, locks the run's
+    Operation `FOR SHARE` (Operation lifecycle writers take Operation `FOR
+    UPDATE` → head), then the chain head, opens or reuses the deduplicated
+    Failure and appends `model.reservation.refused`, and returns the exact
+    receipt `{:error, %Refused{reason, failure_id, event_id, agent_run_id,
+    request_id}}`.
+  - **Run stop (PR-B).** `SDR.Model` stops the run from the receipt (see the
+    AgentRun row): `:grant_exhausted` or `:grant_unavailable`, linking that
+    exact Failure; the worker then fails the Operation (see the Operation
+    row for the resolution race).
   - **Duplicates.** A duplicate `idempotency_key` still fails on the
     existing identity, so a request never consumes twice.
 - **`Agents.admit_launch(invocation_id, effective_profile)`** (new, actor
@@ -146,13 +169,17 @@ admission, launch admission, the facade's sent boundary).
   start option replacing the hard-coded alias, model and version constants,
   and an `:executable` option (absolute pinned path) used only by the app's
   runtime. Agent CLIs are untouched.
-- **Lock order summary.** Reservation: run → chain head (explicit, before
-  grant reads). Launch admission: run → invocation → chain head (explicit,
-  before grant reads). Grant and allocation edits: grant row → chain head.
-  Switch request: setting row → chain head. Refusal reporting: chain head
-  (explicit, before the dedupe check). Admission and reservation never lock
-  grant rows; they read committed terms under the chain head. Mutators never
-  take run or invocation locks after the chain head. No cycles.
+- **Lock order summary.** Reservation: run → candidate grants `FOR SHARE`
+  → their allocations `FOR SHARE` → chain head (explicit), then the clock.
+  Launch admission: run → invocation → chain head (explicit, before grant
+  reads). Grant and allocation edits: grant row → its allocations → chain
+  head. Switch request: setting row → chain head. Refusal reporting: the
+  run's Operation `FOR SHARE` → chain head (explicit, before the dedupe
+  check). Run stop on a refusal: run → refusal Failure `FOR UPDATE` → chain
+  head. Operation failure: Operation → Failure `FOR UPDATE` → chain head.
+  Launch admission never locks grant rows; it reads committed terms under
+  the chain head. Mutators never take run or invocation locks after the
+  chain head. No cycles.
 
 ## 3. Out of scope
 
@@ -297,6 +324,19 @@ revisit story).
     designated-owner variant (OQ-2 alternative) would need a new delta and
     re-review. OQ-3 and OQ-4 are owner scope decisions. The PASS is not
     implementation, proof-call or deploy authority.
+- C9 PR-B stop-action delta (AgentRun status reasons, stop arguments,
+  causal link; Failure and Operation rows above): Codex at e73e132
+  **NEEDS-REVIEW** (private re-review report of PR #132, 2026-10-12): bind
+  the exact refusal (request, reason category, Operation), define the human
+  resolution race, take the clock after the locks, and record the delta
+  here. Revised in this commit; awaiting re-review. The round-3 PASS does
+  not cover this delta.
+  - C9 PR-B stop-action delta (AgentRun `:grant_exhausted`/`:grant_unavailable`,
+    receipt arguments, Failure refusal provenance and historical-cause link,
+    Operation resolution-race outcome, admission instant as `reserved_at`):
+    NEEDS-REVIEW at e73e132 (Codex re-review of PR #132), then **PASS** at
+    b6ee298 (Codex via ai-pair, report sha256 bc9dcf73). The PASS does not
+    cover launch admission, profiles/switch or R0-07 entities.
 - Owner G5: **approved.** Words: "approve R0 G5" (with "(b) with the
   calibration exception"); 2026-10-12, America/Denver; private Claude
   session chat. Gate record: `docs/sdlc/gates/G5-R0.md`.

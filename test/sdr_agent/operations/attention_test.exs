@@ -191,6 +191,7 @@ defmodule SdrAgent.Operations.AttentionTest do
 
   describe "Claude CLI attestation drift" do
     test "a drifted attestation fails the invocation and opens a critical Failure", ctx do
+      AgentsFixtures.grant!(ctx.tenant)
       %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
 
       {:ok, server} =

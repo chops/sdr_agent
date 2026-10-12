@@ -13,6 +13,19 @@ defmodule SdrAgent.Agents.ModelInvocation do
   `validation_status`/`validation_errors`, `refusal`, `error`, `usage`,
   `latency_ms` and the status timestamps.
 
+  Real-model ledger (C9; R0 readiness packet): `ledger_generation` (1 for
+  every row written before R0, 2 for every row `:reserve` writes),
+  `profile_id` (the model profile; `:fake` for the Fake), and for a
+  ClaudeCLI call the `grant_id`/`allocation_id` it was charged to at
+  reservation (`SdrAgent.Agents.Admission`). All four are written only by
+  `:reserve` and are immutable afterwards (outside the trigger's mutable
+  set). `:reserve` accepts no grant, allocation or generation: a ClaudeCLI
+  reservation is refused unless `SdrAgent.Agents` attached the admitted
+  charge (`SdrAgent.Agents.Checks.AdmissionContext`), and any other provider
+  is refused if one is attached (`SdrAgent.Agents.Changes.AdmissionCharge`). A check constraint makes every generation-2 ClaudeCLI row carry
+  profile, grant and allocation; composite FKs keep the allocation within
+  its grant, and the grant within the invocation's tenant.
+
   Lifecycle (`transitions/0`): reserved → sent → completed | failed;
   reserved → failed; sent → unknown (crash recovery; never re-sent).
   Terminal-immutable: a trigger rejects updates of terminal rows and any
@@ -35,6 +48,8 @@ defmodule SdrAgent.Agents.ModelInvocation do
   alias SdrAgent.Audit.Checks
 
   @statuses [:reserved, :sent, :completed, :failed, :unknown]
+  # The model profile ids (until the R0-03 registry exists).
+  @profiles [:fake | SdrAgent.Agents.ModelCallGrant.real_profiles()]
   @terminal [:completed, :failed, :unknown]
   @mutable [
     :status,
@@ -70,6 +85,8 @@ defmodule SdrAgent.Agents.ModelInvocation do
     references do
       reference :tenant, on_delete: :restrict
       reference :agent_run, on_delete: :restrict
+      reference :grant, on_delete: :restrict
+      reference :allocation, on_delete: :restrict
     end
 
     check_constraints do
@@ -78,6 +95,13 @@ defmodule SdrAgent.Agents.ModelInvocation do
 
       check_constraint :status, "model_invocations_status",
         check: SdrAgent.Audit.SQL.one_of("status", @statuses)
+
+      # C9 cutover predicate: applies to every insert and update; rows
+      # written before R0 are generation 1 and keep every transition.
+      check_constraint :grant_id, "model_invocations_real_call_charged",
+        check:
+          "ledger_generation = 1 OR provider <> 'claude_cli' OR " <>
+            "(profile_id IS NOT NULL AND grant_id IS NOT NULL AND allocation_id IS NOT NULL)"
     end
 
     custom_statements do
@@ -97,6 +121,29 @@ defmodule SdrAgent.Agents.ModelInvocation do
           down down_sql
           after_tables ["payloads"]
         end
+      end
+
+      # C9: the allocation belongs to the recorded grant, and the grant to
+      # the invocation's tenant (targets: the grants' and allocations'
+      # composite unique keys).
+      statement :model_invocations_grant_tenant_fkey do
+        up "ALTER TABLE model_invocations ADD CONSTRAINT model_invocations_grant_tenant_fkey " <>
+             "FOREIGN KEY (grant_id, tenant_id) REFERENCES model_call_grants (id, tenant_id) " <>
+             "ON DELETE RESTRICT"
+
+        down "ALTER TABLE model_invocations DROP CONSTRAINT model_invocations_grant_tenant_fkey"
+        after_tables ["model_call_grants"]
+      end
+
+      statement :model_invocations_allocation_grant_fkey do
+        up "ALTER TABLE model_invocations ADD CONSTRAINT model_invocations_allocation_grant_fkey " <>
+             "FOREIGN KEY (allocation_id, grant_id) " <>
+             "REFERENCES model_call_allocations (id, grant_id) ON DELETE RESTRICT"
+
+        down "ALTER TABLE model_invocations DROP CONSTRAINT " <>
+               "model_invocations_allocation_grant_fkey"
+
+        after_tables ["model_call_allocations"]
       end
     end
   end
@@ -123,9 +170,13 @@ defmodule SdrAgent.Agents.ModelInvocation do
         :output_schema_version,
         :output_schema_sha256,
         :request_sha256,
-        :idempotency_key
+        :idempotency_key,
+        :profile_id
       ]
 
+      validate SdrAgent.Agents.Validations.InvocationProfile
+      change SdrAgent.Agents.Changes.AdmissionCharge
+      change set_attribute(:ledger_generation, 2)
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, [event_type: "model.invocation.reserved"] ++ @event}
@@ -268,6 +319,20 @@ defmodule SdrAgent.Agents.ModelInvocation do
       public? true
     end
 
+    # C9: 1 for rows written before R0; :reserve writes 2.
+    attribute :ledger_generation, :integer do
+      allow_nil? false
+      writable? false
+      default 1
+      constraints min: 1, max: 2
+      public? true
+    end
+
+    attribute :profile_id, :atom do
+      constraints one_of: @profiles
+      public? true
+    end
+
     attribute :sent_at, :utc_datetime_usec, writable?: false, public?: true
     attribute :completed_at, :utc_datetime_usec, writable?: false, public?: true
     attribute :idempotency_key, :string, allow_nil?: false, public?: true
@@ -299,6 +364,17 @@ defmodule SdrAgent.Agents.ModelInvocation do
     belongs_to :agent_run, SdrAgent.Agents.AgentRun do
       allow_nil? false
       attribute_writable? true
+      public? true
+    end
+
+    # C9: set only from the admission context (AdmissionCharge), never input.
+    belongs_to :grant, SdrAgent.Agents.ModelCallGrant do
+      attribute_writable? false
+      public? true
+    end
+
+    belongs_to :allocation, SdrAgent.Agents.ModelCallAllocation do
+      attribute_writable? false
       public? true
     end
 

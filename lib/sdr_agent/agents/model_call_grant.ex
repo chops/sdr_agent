@@ -77,6 +77,14 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       check_constraint :profile_ids, "model_call_grants_profiles",
         check: "cardinality(profile_ids) > 0"
     end
+
+    custom_statements do
+      # Target of the ModelInvocation (grant_id, tenant_id) composite FK (C9).
+      statement :model_call_grants_id_tenant_key do
+        up "ALTER TABLE model_call_grants ADD CONSTRAINT model_call_grants_id_tenant_key UNIQUE (id, tenant_id)"
+        down "ALTER TABLE model_call_grants DROP CONSTRAINT model_call_grants_id_tenant_key"
+      end
+    end
   end
 
   actions do

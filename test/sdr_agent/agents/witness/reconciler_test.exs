@@ -44,6 +44,8 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     # inspect of every span timed out in CI).
     InMemoryExporter.reset()
     tenant = bootstrap!()
+    # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+    AgentsFixtures.grant!(tenant)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
     root = WitnessRoot.mkdir!("e2e")
     File.mkdir_p!(root)

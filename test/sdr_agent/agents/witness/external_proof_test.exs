@@ -33,6 +33,8 @@ defmodule SdrAgent.Agents.Witness.ExternalProofTest do
     out = System.fetch_env!("SDR_WITNESS_PROOF_OUT")
 
     tenant = bootstrap!()
+    # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+    AgentsFixtures.grant!(tenant)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
     rec = system_actor(:reconciler, tenant)
     {:ok, server} = ClaudeCLI.start_link([])
