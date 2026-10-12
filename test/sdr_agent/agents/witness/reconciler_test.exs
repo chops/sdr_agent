@@ -65,6 +65,8 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   @shipped_entry %{
     provider: :claude_cli,
     cli_version: "2.1.291",
+    profile_id: nil,
+    model_id: "claude-opus-5-5",
     projection_version: "claude-message-json/3+prompt-builder/1",
     method: :propagated_id
   }
@@ -90,7 +92,8 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
           {"cli_shape", :inferred, "claude-message-json/2+prompt-builder/1"},
           {"ok", :inferred, "claude-message-json/1+prompt-builder/1"}
         ] do
-      invocation = call_model!(ctx, variant)
+      # The shipped entry is the generation-1 entry (R0-07): profile-nil rows only.
+      invocation = ctx |> call_model!(variant) |> legacy!()
       result = reconcile(ctx, invocation, [@shipped_entry])
       assert match?({:ok, %{status: ^expected}}, result), "#{variant}: #{inspect(result)}"
       {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
@@ -104,12 +107,36 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     for {label, entry} <- [
           {"other CLI version", %{@shipped_entry | cli_version: "2.1.292"}},
           {"other provider", %{@shipped_entry | provider: :fake}},
+          {"other model", %{@shipped_entry | model_id: "claude-sonnet-5-5"}},
+          {"a profiled entry", %{@shipped_entry | profile_id: :claude_cli_opus}},
           {"v2 projection",
            %{@shipped_entry | projection_version: "claude-message-json/2+prompt-builder/1"}}
         ] do
-      invocation = call_model!(ctx, "cli_shape_v3")
+      invocation = ctx |> call_model!("cli_shape_v3") |> legacy!()
       result = reconcile(ctx, invocation, [entry])
       assert match?({:ok, %{status: :inferred}}, result), "#{label}: #{inspect(result)}"
+    end
+  end
+
+  test "R0-07: a generation-2 row reconciles only under its own profile's exact entry", ctx do
+    opus = %{@shipped_entry | profile_id: :claude_cli_opus}
+    sonnet = %{@shipped_entry | profile_id: :claude_cli_sonnet, model_id: "claude-sonnet-5-5"}
+
+    for {label, entries, expected} <- [
+          {"the generation-1 entry", [@shipped_entry], :inferred},
+          {"the Sonnet entry", [sonnet], :inferred},
+          {"the Opus entry", [opus], :reconciled}
+        ] do
+      invocation = call_model!(ctx, "cli_shape_v3")
+      assert invocation.ledger_generation == 2
+      assert invocation.profile_id == :claude_cli_opus
+      result = reconcile(ctx, invocation, entries)
+      assert match?({:ok, %{status: ^expected}}, result), "#{label}: #{inspect(result)}"
+
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+
+      if expected == :inferred,
+        do: assert("method_not_enabled" in link.evidence["reason_codes"], label)
     end
   end
 
@@ -424,6 +451,8 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     exact = %{
       provider: :claude_cli,
       cli_version: ClaudeCLI.provenance().provider_version,
+      profile_id: ClaudeCLI.provenance().profile_id,
+      model_id: ClaudeCLI.provenance().model_id,
       projection_version: Witness.Projection.version(),
       method: :propagated_id
     }
@@ -431,6 +460,9 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     for {label, entries, expected} <- [
           {"exact", [exact], :reconciled},
           {"other CLI", [%{exact | cli_version: "0.0.1"}], :inferred},
+          {"other profile", [%{exact | profile_id: :claude_cli_sonnet}], :inferred},
+          {"other model", [%{exact | model_id: "claude-sonnet-5-5"}], :inferred},
+          {"pre-R0 four-key shape", [Map.drop(exact, [:profile_id, :model_id])], :inferred},
           {"other projection", [%{exact | projection_version: "claude-message-json/9"}],
            :inferred},
           {"bare atom in config", [:propagated_id], :inferred}
@@ -453,6 +485,8 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
       v2 = %{
         provider: :claude_cli,
         cli_version: ClaudeCLI.provenance().provider_version,
+        profile_id: ClaudeCLI.provenance().profile_id,
+        model_id: ClaudeCLI.provenance().model_id,
         projection_version: @v2,
         method: :propagated_id
       }
@@ -760,6 +794,8 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
       %{
         provider: :claude_cli,
         cli_version: ClaudeCLI.provenance().provider_version,
+        profile_id: ClaudeCLI.provenance().profile_id,
+        model_id: ClaudeCLI.provenance().model_id,
         projection_version: projection,
         method: :propagated_id
       }
@@ -785,12 +821,14 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
             {"cli_shape", :inferred},
             {"ok", :inferred}
           ] do
-        invocation = call_model!(ctx, variant)
+        invocation = ctx |> call_model!(variant) |> legacy!()
         result = reconcile(ctx, invocation)
         assert match?({:ok, %{status: ^expected}}, result), "#{variant}: #{inspect(result)}"
       end
 
+      # A generation-2 row never matches the shipped generation-1 entry.
       invocation = call_model!(ctx, "cli_shape_v3")
+      assert {:ok, %{status: :inferred}} = reconcile(ctx, invocation)
 
       for methods <- [[:propagated_id], [@shipped_entry]] do
         assert {:error, :method_override_forbidden} = reconcile(ctx, invocation, methods)
@@ -799,7 +837,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
 
     test "a reconciled proof is downgraded when its configured root becomes untrusted or missing",
          ctx do
-      invocation = call_model!(ctx, "cli_shape_v3")
+      invocation = ctx |> call_model!("cli_shape_v3") |> legacy!()
       assert {:ok, %{status: :reconciled}} = reconcile(ctx, invocation)
 
       link = ctx.root <> "-link"
@@ -856,7 +894,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
         Keyword.put(Application.get_env(:sdr_agent, Witness), :store_root, ctx.root)
       )
 
-      invocation = call_model!(ctx, "cli_shape_v3")
+      invocation = ctx |> call_model!("cli_shape_v3") |> legacy!()
       assert {:ok, %{status: :reconciled}} = Witness.reconcile(invocation.id, actor: ctx.rec)
 
       File.chmod!(ctx.root, 0o777)
@@ -933,6 +971,18 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
 
     GenServer.stop(server)
     result.invocation
+  end
+
+  # Simulates an invocation written before R0 (generation 1, no profile or
+  # grant), as the shipped generation-1 entry requires (R0-07).
+  defp legacy!(invocation) do
+    tamper!(
+      "UPDATE model_invocations SET ledger_generation = 1, profile_id = NULL, grant_id = NULL, " <>
+        "allocation_id = NULL WHERE id = $1",
+      [Ecto.UUID.dump!(invocation.id)]
+    )
+
+    %{invocation | ledger_generation: 1, profile_id: nil, grant_id: nil, allocation_id: nil}
   end
 
   defp reconcile(ctx, invocation, methods \\ nil) do

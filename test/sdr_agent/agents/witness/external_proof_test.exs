@@ -77,6 +77,8 @@ defmodule SdrAgent.Agents.Witness.ExternalProofTest do
     entry = %{
       provider: :claude_cli,
       cli_version: invocation.provider_version,
+      profile_id: invocation.profile_id,
+      model_id: invocation.model_id,
       projection_version: Projection.version_v3(),
       method: :propagated_id
     }

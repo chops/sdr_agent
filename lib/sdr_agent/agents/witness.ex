@@ -32,11 +32,18 @@ defmodule SdrAgent.Agents.Witness do
        downgrades current non-mismatch links with an `inferred` successor.
 
   A match is `reconciled` only for an exact runtime allowlist entry
-  (`reconciled_methods`: `%{provider:, cli_version:, projection_version:,
-  method:}` — shipped empty, R3; enabled only by the reviewed S12d change);
-  otherwise `inferred` with `method_not_enabled`. A per-call `:methods` override is honoured only when
-  `allow_method_override` is configured (test configuration only). The
-  model is never called again.
+  (`reconciled_methods`; R0-07 REQ-07-1, ADR-0005 R0 amendment item 1):
+  exactly `%{provider:, cli_version:, profile_id:, model_id:,
+  projection_version:, method:}` and no other key, compared with the
+  invocation's recorded identity and the projection and method evaluated for
+  the exchange (`allowlisted?/3`). `profile_id: nil` names generation-1 rows
+  only (written before R0, without a profile); a profiled entry matches only
+  generation-2 rows of that profile, so a Sonnet call never matches an Opus
+  entry. Only reviewed `config/*.exs` changes define entries; there is no
+  stage key. Anything else is `inferred` with `method_not_enabled`. A
+  per-call `:methods` override (a bare method atom or exact entries) is
+  honoured only when `allow_method_override` is configured (test
+  configuration only). The model is never called again.
 
   `status/1` (used by `SdrAgent.Agents.witness_status/2`) is the C1
   invocation answer over current links. `enqueue/2` writes a
@@ -105,10 +112,16 @@ defmodule SdrAgent.Agents.Witness do
     end
   end
 
+  @entry_keys [:cli_version, :method, :model_id, :profile_id, :projection_version, :provider]
+
   @doc """
-  Exact entries whose matching proof may be labelled reconciled. Dev and prod
-  ship exactly one (S12d enablement, ADR-0005); the test environment
-  configures none.
+  Exact entries whose matching proof may be labelled reconciled (R0-07
+  REQ-07-1): maps with exactly the six keys `provider`, `cli_version`,
+  `profile_id` (nil only for generation 1), `model_id`,
+  `projection_version` and `method`, each of its type; any other shape —
+  the pre-R0 four-key entry, an extra key such as a stage — is dropped. Dev
+  and prod ship exactly the generation-1 2.1.291 entry; the test
+  environment configures none.
   """
   def reconciled_methods do
     # Runtime entries must be exact proofs; a bare method atom is accepted
@@ -116,31 +129,42 @@ defmodule SdrAgent.Agents.Witness do
     config() |> Keyword.get(:reconciled_methods, []) |> Enum.filter(&exact_entry?/1)
   end
 
-  defp exact_entry?(%{
-         provider: provider,
-         cli_version: version,
-         projection_version: projection,
-         method: method
-       }),
-       do: is_atom(provider) and is_binary(version) and is_binary(projection) and is_atom(method)
+  defp exact_entry?(entry) when is_map(entry) and not is_struct(entry) do
+    Enum.sort(Map.keys(entry)) == @entry_keys and is_atom(entry.provider) and
+      not is_nil(entry.provider) and is_binary(entry.cli_version) and
+      is_atom(entry.profile_id) and
+      is_binary(entry.model_id) and is_binary(entry.projection_version) and
+      is_atom(entry.method) and not is_nil(entry.method)
+  end
 
   defp exact_entry?(_entry), do: false
 
-  # A match is labelled reconciled only for an allowlisted (provider, attested
-  # CLI version, projection version, method) entry — or, under the test-only
-  # override, a bare method atom.
+  @doc """
+  True when the shipped allowlist (`reconciled_methods/0`) holds an exact
+  entry for `invocation`'s recorded identity (provider, CLI version,
+  profile, model, ledger generation) together with the evaluated
+  `projection_version` and `method`. Never consults a test override.
+  """
+  def allowlisted?(invocation, projection_version, method),
+    do:
+      Enum.any?(reconciled_methods(), &entry_matches?(&1, invocation, projection_version, method))
+
+  # A match is labelled reconciled only for an exact allowlisted entry — or,
+  # under the test-only override, a bare method atom.
   defp enabled?(entries, invocation, projection) do
     Enum.any?(entries, fn
-      @method ->
-        true
-
-      %{provider: provider, cli_version: version, projection_version: version_p, method: @method} ->
-        provider == invocation.provider and version == invocation.provider_version and
-          version_p == projection
-
-      _other ->
-        false
+      @method -> true
+      entry -> exact_entry?(entry) and entry_matches?(entry, invocation, projection, @method)
     end)
+  end
+
+  # Every key is compared. A nil profile names generation-1 rows only; a
+  # profiled entry, generation-2 rows of that profile only.
+  defp entry_matches?(entry, invocation, projection, method) do
+    entry.provider == invocation.provider and entry.cli_version == invocation.provider_version and
+      entry.profile_id == invocation.profile_id and entry.model_id == invocation.model_id and
+      entry.projection_version == projection and entry.method == method and
+      invocation.ledger_generation == if(is_nil(entry.profile_id), do: 1, else: 2)
   end
 
   defp config, do: Application.get_env(:sdr_agent, __MODULE__, [])

@@ -262,6 +262,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
     %{
       provider: :claude_cli,
       cli_version: invocation.provider_version,
+      profile_id: invocation.profile_id,
+      model_id: invocation.model_id,
       projection_version: @version,
       method: :propagated_id
     }

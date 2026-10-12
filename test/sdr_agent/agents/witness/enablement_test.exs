@@ -27,6 +27,8 @@ defmodule SdrAgent.Agents.Witness.EnablementTest do
   @entry %{
     provider: :claude_cli,
     cli_version: "2.1.291",
+    profile_id: nil,
+    model_id: "claude-opus-5-5",
     projection_version: "claude-message-json/3+prompt-builder/1",
     method: :propagated_id
   }
