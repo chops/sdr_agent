@@ -17,6 +17,7 @@ defmodule SdrAgent.Repo.Migrations.C9ModelCallGrants do
       add :available_from, :utc_datetime_usec
       add :available_until, :utc_datetime_usec
       add :released_at, :utc_datetime_usec
+      add :grant_revision, :bigint, null: false
       add :trace_id, :text, null: false
       add :span_id, :text, null: false
       add :inserted_at, :utc_datetime_usec, null: false

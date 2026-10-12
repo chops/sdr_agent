@@ -10,17 +10,19 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
   early release). The workshop reserve is an ordinary allocation with an
   `available_from`, so there is one balance and nothing is counted twice.
 
-  Invariants (`SdrAgent.Agents.Changes.GrantInvariants`, checked with the
-  grant row locked): the grant is active, `profile_id` is one of the grant's
-  `profile_ids`, and all allocations of a grant sum to at most its
-  `total_attempts`. Unique per `[grant_id, key, profile_id]`, with a missing
+  Invariants (`SdrAgent.Agents.Changes.GrantBundle`, checked on the
+  complete final state with the grant row locked): the grant is active,
+  `profile_id` is one of the grant's `profile_ids`, and all allocations of a
+  grant sum to at most its `total_attempts`. `grant_revision` records the
+  grant revision that last wrote the allocation. Unique per `[grant_id, key, profile_id]`, with a missing
   `profile_id` counted as equal.
 
-  Actions: `:create`, `:update_terms`, `:release`; only an active human
-  admin (`SdrAgent.Agents.Checks.CurrentAdmin`), through
-  `SdrAgent.Agents`, which also bumps the grant's revision. Reads as the
-  grant. Audited: `model.grant.allocation_created | allocation_changed |
-  allocation_released`.
+  Actions: `:create`, `:update_terms`, `:release`; only from the grant's own
+  action (`SdrAgent.Agents.Checks.GrantContext`) and as an active human
+  admin (`SdrAgent.Agents.Checks.CurrentAdmin`); a direct call is refused
+  before any lock. Reads as the grant. Audited:
+  `model.grant.allocation_created | allocation_changed`,
+  `model.allocation.released`, each carrying `grant_revision`.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -28,7 +30,7 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
-  alias SdrAgent.Agents.Changes.GrantInvariants
+  alias SdrAgent.Agents.Checks.GrantContext
   alias SdrAgent.Agents.Checks.CurrentAdmin
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Checks
@@ -67,36 +69,38 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
     defaults [:read]
 
     create :create do
-      accept [:grant_id, :key, :profile_id | @terms]
+      accept [:grant_id, :grant_revision, :key, :profile_id | @terms]
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
-      change {GrantInvariants, on: :allocation}
       change {AppendEvent, [event_type: "model.grant.allocation_created"] ++ @event}
     end
 
     update :update_terms do
       require_atomic? false
-      accept @terms
-      change get_and_lock_for_update()
-      change {GrantInvariants, on: :allocation}
+      accept [:grant_revision | @terms]
 
       change {AppendEvent,
-              [event_type: "model.grant.allocation_changed", previous: @terms] ++ @event}
+              [event_type: "model.grant.allocation_changed", previous: [:grant_revision | @terms]] ++
+                @event}
     end
 
     update :release do
       require_atomic? false
-      accept []
-      change get_and_lock_for_update()
-      change {GrantInvariants, on: :allocation}
+      accept [:grant_revision]
       change set_attribute(:released_at, &SdrAgent.Clock.utc_now/0)
 
       change {AppendEvent,
-              [event_type: "model.grant.allocation_released", previous: [:released_at]] ++ @event}
+              [event_type: "model.allocation.released", previous: [:grant_revision, :released_at]] ++
+                @event}
     end
   end
 
   policies do
+    # Both must pass: written only by the grant's own action, as a current admin.
+    policy action_type([:create, :update, :destroy, :action]) do
+      authorize_if GrantContext
+    end
+
     policy action_type([:create, :update, :destroy, :action]) do
       authorize_if CurrentAdmin
     end
@@ -132,6 +136,14 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
     attribute :available_from, :utc_datetime_usec, public?: true
     attribute :available_until, :utc_datetime_usec, public?: true
     attribute :released_at, :utc_datetime_usec, writable?: false, public?: true
+
+    attribute :grant_revision, :integer do
+      description "The grant revision that last wrote this allocation."
+      allow_nil? false
+      public? true
+      constraints min: 1
+    end
+
     attribute :trace_id, :string, allow_nil?: false, public?: true
     attribute :span_id, :string, allow_nil?: false, public?: true
 

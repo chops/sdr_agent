@@ -108,6 +108,18 @@
       "references": null,
       "scale": null,
       "size": null,
+      "source": "grant_revision",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
       "source": "trace_id",
       "type": "text"
     },
@@ -253,7 +265,7 @@
   "custom_indexes": [],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "7CC29A1EC416026B40BF3BE0C68486BFA24B468834C673C1BDF6B4F62654B9A1",
+  "hash": "5057A7FD63F03E2FBE8182962843B7C83633F2832EFF7F9148B658800FE0FF9A",
   "identities": [
     {
       "all_tenants?": false,

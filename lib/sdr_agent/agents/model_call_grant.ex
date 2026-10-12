@@ -14,12 +14,17 @@ defmodule SdrAgent.Agents.ModelCallGrant do
   is never stored or refunded (C9-02). Lowering a limit below what is
   consumed is allowed; it only stops new reservations.
 
-  Actions: `:create`, `:update_terms` and `:touch` (both refuse a stale
-  `expected_revision` and bump `revision`), `:revoke` (terminal). Every write
+  Actions: `:create` (with its `allocations`), `:update_terms` (terms and
+  allocation changes as one bundle), `:release_allocation` and `:revoke`
+  (terminal). The last three refuse a stale `expected_revision` and bump
+  `revision`. Allocation rows are written only by these actions
+  (`SdrAgent.Agents.Changes.GrantBundle`), which lock the grant row first,
+  then its allocations, and validate the complete final state. Every write
   requires an active human admin, re-read at the time of the action
   (`SdrAgent.Agents.Checks.CurrentAdmin`); every system actor is refused.
   Reads: admin, auditor, `agent_runtime`, kernel.
-  Audited: `model.grant.created | terms_changed | revoked`.
+  Audited: `model.grant.created | terms_changed | allocation_released |
+  revoked`, each with the previous revision.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -27,7 +32,7 @@ defmodule SdrAgent.Agents.ModelCallGrant do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
-  alias SdrAgent.Agents.Changes.GrantInvariants
+  alias SdrAgent.Agents.Changes.GrantBundle
   alias SdrAgent.Agents.Changes.GrantRevision
   alias SdrAgent.Agents.Checks.CurrentAdmin
   alias SdrAgent.Audit.Changes.AppendEvent
@@ -79,10 +84,12 @@ defmodule SdrAgent.Agents.ModelCallGrant do
 
     create :create do
       accept @terms
+      argument :allocations, {:array, :map}, default: []
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change relate_actor(:created_by)
       change relate_actor(:updated_by)
+      change {GrantBundle, mode: :create}
       change {AppendEvent, [event_type: "model.grant.created"] ++ @event}
     end
 
@@ -90,25 +97,31 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       require_atomic? false
       accept @terms
       argument :expected_revision, :integer, allow_nil?: false
+      argument :allocations, {:array, :map}, default: []
       change get_and_lock_for_update()
       change {RequireState, in: [:active]}
       change GrantRevision
-      change GrantInvariants
+      change {GrantBundle, mode: :update}
       change relate_actor(:updated_by)
 
       change {AppendEvent,
               [event_type: "model.grant.terms_changed", previous: [:revision | @terms]] ++ @event}
     end
 
-    update :touch do
-      description "Bumps the revision for an allocation-only change (audited by the allocation)."
+    update :release_allocation do
       require_atomic? false
       accept []
       argument :expected_revision, :integer, allow_nil?: false
+      argument :key, :atom, allow_nil?: false
+      argument :profile_id, :atom
       change get_and_lock_for_update()
       change {RequireState, in: [:active]}
       change GrantRevision
+      change {GrantBundle, mode: :release}
       change relate_actor(:updated_by)
+
+      change {AppendEvent,
+              [event_type: "model.grant.allocation_released", previous: [:revision]] ++ @event}
     end
 
     update :revoke do

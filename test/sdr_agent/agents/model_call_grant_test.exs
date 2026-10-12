@@ -287,4 +287,149 @@ defmodule SdrAgent.Agents.ModelCallGrantTest do
       assert {:ok, []} = Agents.list_grants(actor: human(:reviewer, ctx.tenant))
     end
   end
+
+  describe "bundle and boundary (Codex review of 7b5ed9a)" do
+    test "allocation actions cannot be called directly, even by an admin", ctx do
+      grant = create!(ctx)
+      [allocation | _] = grant.allocations
+
+      assert {:error, %Forbidden{}} =
+               SdrAgent.Agents.ModelCallAllocation
+               |> Ash.Changeset.for_create(
+                 :create,
+                 %{
+                   grant_id: grant.id,
+                   grant_revision: 1,
+                   key: :b1,
+                   applies_to: [:b1],
+                   attempts: 1
+                 },
+                 actor: ctx.admin
+               )
+               |> Ash.create()
+
+      for {action, attrs} <- [
+            update_terms: %{attempts: 1, grant_revision: 1},
+            release: %{grant_revision: 1}
+          ] do
+        assert {:error, %Forbidden{}} =
+                 allocation
+                 |> Ash.Changeset.for_update(action, attrs, actor: ctx.admin)
+                 |> Ash.update()
+      end
+
+      {:ok, [unchanged]} = Agents.list_grants(actor: ctx.admin)
+      assert unchanged.revision == 1
+      assert Enum.all?(unchanged.allocations, &is_nil(&1.released_at))
+    end
+
+    test "a valid combined edit succeeds whatever order its parts are listed in", ctx do
+      for order <- [
+            [{:claude_cli_opus, 3}, {:claude_cli_sonnet, 1}],
+            [{:claude_cli_sonnet, 1}, {:claude_cli_opus, 3}]
+          ] do
+        grant = create!(ctx, g_r0(%{name: "G-#{System.unique_integer([:positive])}"}))
+
+        allocations =
+          for {profile, n} <- order, do: %{key: :proof, profile_id: profile, attempts: n}
+
+        attrs = %{expected_revision: 1, allocations: allocations}
+        assert {:ok, updated} = Agents.update_grant_terms(grant, attrs, actor: ctx.admin)
+
+        assert updated.allocations |> Enum.map(&{&1.profile_id, &1.attempts}) |> Enum.sort() ==
+                 [{:claude_cli_opus, 3}, {:claude_cli_sonnet, 1}]
+      end
+    end
+
+    test "lowering the total together with the allocations is checked on the final state", ctx do
+      grant = create!(ctx)
+
+      assert {:ok, updated} =
+               Agents.update_grant_terms(
+                 grant,
+                 %{
+                   expected_revision: 1,
+                   total_attempts: 3,
+                   allocations: [%{key: :proof, profile_id: :claude_cli_opus, attempts: 1}]
+                 },
+                 actor: ctx.admin
+               )
+
+      assert updated.total_attempts == 3
+
+      assert {:error, %Invalid{}} =
+               Agents.update_grant_terms(
+                 updated,
+                 %{
+                   expected_revision: 2,
+                   profile_ids: [:claude_cli_opus],
+                   allocations: [%{key: :proof, profile_id: :claude_cli_opus, attempts: 1}]
+                 },
+                 actor: ctx.admin
+               )
+
+      {:ok, [after_refusal]} = Agents.list_grants(actor: ctx.admin)
+      assert after_refusal.revision == 2
+      assert after_refusal.profile_ids == [:claude_cli_opus, :claude_cli_sonnet]
+    end
+
+    test "every grant-row change is audited with its previous revision; allocations carry the grant revision",
+         ctx do
+      grant = create!(ctx, g_r0(%{total_attempts: 6}))
+
+      {:ok, grant} =
+        Agents.update_grant_terms(
+          grant,
+          %{expected_revision: 1, allocations: [%{key: :b1, applies_to: [:b1], attempts: 2}]},
+          actor: ctx.admin
+        )
+
+      {:ok, grant} =
+        Agents.release_allocation(grant, %{expected_revision: 2, key: :b1}, actor: ctx.admin)
+
+      assert grant.revision == 3
+      b1 = Enum.find(grant.allocations, &(&1.key == :b1))
+      assert b1.grant_revision == 3
+
+      [terms] = events_of_type(ctx.tenant, "model.grant.terms_changed")
+      assert terms.payload["previous"]["revision"] == 1
+      [released] = events_of_type(ctx.tenant, "model.grant.allocation_released")
+      assert released.payload["previous"]["revision"] == 2
+      [allocation_released] = events_of_type(ctx.tenant, "model.allocation.released")
+      assert allocation_released.payload["previous"]["grant_revision"] == 2
+      assert length(events_of_type(ctx.tenant, "model.grant.allocation_created")) == 3
+    end
+
+    test "events record the operator's current role, not a stale struct's", ctx do
+      promoted = new_human(:reviewer, ctx.tenant)
+      {:ok, _} = Accounts.change_role(promoted, :admin, actor: ctx.admin)
+
+      assert {:ok, _} = Agents.create_grant(g_r0(), actor: promoted)
+      [event] = events_of_type(ctx.tenant, "model.grant.created")
+      assert event.actor_role == :admin
+    end
+
+    test "release refuses an unknown or already released allocation", ctx do
+      grant = create!(ctx)
+
+      assert {:error, %Invalid{}} =
+               Agents.release_allocation(grant, %{expected_revision: 1, key: :b2},
+                 actor: ctx.admin
+               )
+
+      {:ok, grant} =
+        Agents.release_allocation(
+          grant,
+          %{expected_revision: 1, key: :proof, profile_id: :claude_cli_opus},
+          actor: ctx.admin
+        )
+
+      assert {:error, %Invalid{}} =
+               Agents.release_allocation(
+                 grant,
+                 %{expected_revision: 2, key: :proof, profile_id: :claude_cli_opus},
+                 actor: ctx.admin
+               )
+    end
+  end
 end
