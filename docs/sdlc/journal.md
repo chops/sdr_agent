@@ -145,7 +145,7 @@ Monday would be a schedule change, not an interpretation, so the owner chose
 between the two explicitly. The gate record is
 [`gates/G0.md`](gates/G0.md).
 
-### Retrospective (draft, to be confirmed at G0)
+### Retrospective (approved by the owner as written, D-027)
 
 - **Worked:** a written mandate, small slices, test-first work and mandatory
   peer review produced a robust core (audit trail, approval binding, durable
@@ -155,3 +155,110 @@ between the two explicitly. The gate record is
   should see, so the UI was thin and the demo needed a patch.
 - **Change:** define the user, requirements and design before building more,
   and keep the owner in the loop at every gate instead of only at checkpoints.
+
+## Phase 1: the build (from Oct 12, 2026)
+
+### Planning (Oct 11)
+
+The owner walked the prep documents item by item and asked Claude and Codex
+for a build plan that reaches a working MVP on time. Codex reviewed the plan
+three times before the owner approved it (D-097). The rest of the day went
+to the backlog and the money:
+
+- **Backlog.** 82 stories across ten epics and nine shared contracts went into
+  GitHub Issues, with a milestone per three-day sprint and a project board.
+- **Budgets.** The owner granted two real-model budgets: four calibration
+  calls and 200 demo calls. Both are usable only after the code that
+  enforces them is merged.
+- **Billing.** Included subscription usage only.
+- **Real data.** The owner approved a data flow that lets the app work with
+  real companies and people.
+
+### Sprint 1, day 1 (Mon Oct 12), mid-day checkpoint
+
+**Goals for the day:**
+
+- retire the riskiest R0 unknown (can the app run its own pinned CLI?);
+- get the first budget-check code into review;
+- draft the witness rule change;
+- get the R0 readiness packet through review and G5.
+
+**Done and merged** (each with Codex's independent approval of the exact
+commit and green CI on it):
+
+- **ADR-0004 R0 amendment** (PR #39). The owner accepted it: an app-owned
+  pinned CLI, closed Opus and Sonnet profiles, an audited switch, and
+  owner-only call budgets.
+- **ADR-0014 amendment 2** (PR #125). Constraint 7 now allows real companies
+  and people in the owner's local instance only, behind an off-by-default
+  switch, with simple retention rules.
+- **ADR-0005 R0 amendment** (PR #128). The owner chose "accurate out of the
+  gate":
+  - four calibration calls in isolation;
+  - a call refused before it spends anything unless its exact model setup is
+    approved;
+  - each result used only after its own wire record matches.
+- **The R0 readiness packet and gate record G5-R0** (PR #124). Its
+  data-model design took three review rounds and fixed seven real defects.
+  The owner answered the open questions: any human admin may change budgets,
+  there is no Telegram in the app, and there are no inferred calls.
+- **Budget records** (PR #130), after three review rounds. Only a current
+  human admin can change a budget, each change is one validated bundle, and
+  every row change is audited.
+- **The app's own pinned Claude CLI 2.1.294** (PR #131), after four review
+  rounds. It is bound to one reviewed artifact by store path and checksum,
+  never runs `claude` from `PATH`, and refuses every real call until the
+  profile and witness work lands. GC-root rotation is safe across concurrent
+  runs and interrupts.
+- **Security fix** (PR #40): `decimal` 3.1.2 for an advisory that did not
+  reach our code.
+- **Test fix** (PR #123): a flaky test fixed at its cause.
+
+**In review at this checkpoint:**
+
+- **The queue-time budget check** (PR #132), after three review rounds:
+  - the check is enforced by the record itself;
+  - a lock order that cannot deadlock against budget edits;
+  - one clock reading taken after the locks;
+  - a refused run linked to the exact alert its refusal created.
+- **Docs:** this journal and the decision log (PR #127), and the screenshot
+  wording (PR #129).
+
+**How the work was done:**
+
+- **Pilot.** The owner approved a pilot of reviewer-side helper subagents
+  (D-111). Codex used one or two read-only helpers on the larger reviews; one
+  of their suggestions was wrong and was rejected after checking.
+- **Subagents.** Claude used subagents for two of its stories, under its own
+  review before Codex's.
+
+**Not done yet:**
+
+- Codex's Home inbox contract draft (C1-01) did not start: review work
+  displaced it. It moves to day 2, alongside the Opus and Sonnet profiles
+  (R0-03).
+
+**What we learned:**
+
+- **Review is the real limit**, as planned: about twenty review rounds in
+  one day.
+- **Reviews found real defects:** deadlocks, bypasses, a clock race, and
+  a lock theft that Codex reproduced with its own test. None was cosmetic.
+- **The local gate differed from CI.** Our local gate did not run Credo, and
+  that cost a re-approval round. Claude now runs it before every push.
+- **Pronouns.** Some log entries used "he" for the owner, whose pronouns
+  were never stated; the wording is now neutral.
+
+## Missteps
+
+Things that went wrong, kept here on the owner's request (D-027). Each row
+says what happened, why, what it cost and what changed.
+
+| What happened | Why | Cost | What changed |
+|---|---|---|---|
+| **Oct 7: the demo ran on an unreviewed patch.** Real-model wiring and the agent's risk flags were not finished in time, so they ran on a local patch nobody had reviewed. | The engine was built before the operator experience was defined, and the work did not fit the time before the meetup. | The live demo used unreviewed code. The patch was reverted after the demo and the work rebuilt through normal review the same night. | Feature freeze and the product-phase process: define and gate work before building it (D-009, D-019). |
+| **Oct 8 to 10: owner input on the shaping page went unread for over a day.** Notes written on the shaping discussion page, including the framing that the founder's tasks differ from the SDR's, were found only during the walkthrough. | The page was not checked for new owner input. | The framing arrived late, and the P1 story map, built around the founder doing SDR work, had to be rebuilt. | The framing was adopted (D-029), P1 rebuilt around it (D-031), and the page closed read-only with its answers in git (D-030). |
+| **Found Oct 10: an agent CLI update broke the app's real-model path.** Updating the agents moved the system Claude CLI from 2.1.291 to 2.1.294. | The refresh did not account for the app's version pin; the app used the same system CLI as the agents. | App real-model calls failed closed (`version_attestation_drift`), so no output was accepted without a matching attestation, but the real-model path was unusable and the witness configuration no longer applied. | R0: an app-only pinned Claude CLI runtime, decoupled from the agents' CLIs (D-087; ADR-0004 R0 amendment, PR #39). Agent CLI bumps are covered by the proposed ADR-0014 amendment 1 (D-028). |
+| **Oct 11: Claude misread the R0 terms as API-first.** The owner asked for a connector for "my AI model of choice", naming several providers; Claude read it as switching to paid API keys, and Codex's first R0 memo was also API-first. | The terms listed API providers; the owner's intent (keep the subscription CLI as the tested path and make later swaps easy) was not checked before reshaping began. | An owner correction and a second reshaping round; Codex's API-first memo was replaced. | R0 is the pinned Claude CLI on the owner's subscription plus a clean provider seam, with no API-key adapter in R0 (D-087). |
+| **Oct 12: a flaky ClaudeCLI test turned CI red on PR #39.** A lifecycle test read the fake CLI's launch record while it was still being written (985 of 986 tests passed). | The test fake wrote its launch record in place, not atomically, and the test polls for it. | A red CI run and a separate test-only PR before merging. | PR #123: the fake writes a partial file and renames it, and test cleanup removes leftovers. No production code changed and no assertion was weakened. |
+| **Oct 12: local checks passed while CI failed.** A Codex-approved budget PR would have failed CI on Credo (nesting depth). | The local gate (`bin/verify`) does not run Credo; CI does. | One extra review round on PRs #130 and #131. | Claude runs `mix credo` before every push. |
