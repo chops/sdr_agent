@@ -48,8 +48,8 @@ defmodule SdrAgent.Agents.ModelInvocation do
   alias SdrAgent.Audit.Checks
 
   @statuses [:reserved, :sent, :completed, :failed, :unknown]
-  # The model profile ids (until the R0-03 registry exists).
-  @profiles [:fake | SdrAgent.Agents.ModelCallGrant.real_profiles()]
+  # The model profile ids (R0-03 registry, `SdrAgent.AI.ModelProfiles`).
+  @profiles SdrAgent.AI.ModelProfiles.ids()
   @terminal [:completed, :failed, :unknown]
   @mutable [
     :status,

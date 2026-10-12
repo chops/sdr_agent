@@ -2,13 +2,13 @@ defmodule SdrAgent.Agents.Validations.InvocationProfile do
   @moduledoc """
   `ModelInvocation :reserve` (C9): the recorded model profile matches the
   provider — `:fake` for the Fake, a reviewed real profile
-  (`SdrAgent.Agents.ModelCallGrant.real_profiles/0`) for ClaudeCLI, none
+  (`SdrAgent.AI.ModelProfiles.real_ids/0`) for ClaudeCLI, none
   for any other provider — and only a ClaudeCLI call carries a grant and
   allocation.
   """
   use Ash.Resource.Validation
 
-  alias SdrAgent.Agents.ModelCallGrant
+  alias SdrAgent.AI.ModelProfiles
 
   @impl true
   def validate(changeset, _opts, _context) do
@@ -27,6 +27,6 @@ defmodule SdrAgent.Agents.Validations.InvocationProfile do
   end
 
   defp profile_matches?(:fake, profile), do: profile == :fake
-  defp profile_matches?(:claude_cli, profile), do: profile in ModelCallGrant.real_profiles()
+  defp profile_matches?(:claude_cli, profile), do: ModelProfiles.real?(profile)
   defp profile_matches?(_provider, profile), do: is_nil(profile)
 end
