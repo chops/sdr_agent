@@ -157,7 +157,7 @@ order cover every writer:
 1. **Namespace.** `SdrAgent.Audit.IdentityKeys` is the only way to take a
    transaction advisory lock in this project. Kinds: `email`, `domain`,
    `admission-ref`, `reply-message`. A value is normalized per kind first
-   (email trimmed and lowercased; domain canonical as `sdr_canonical_domain`).
+   (email trimmed and lowercased; domain canonical as `sdr_canonical_domain`: exactly one trailing dot and one leading `www.` stripped, malformed hosts rejected first).
    Lock id = the first 8 bytes of
    `sha256("sdr-identity-key/1\0" <> kind <> "\0" <> tenant_id <> "\0" <> value)`
    read as a signed 64-bit integer. It is computed in Elixir and sent as an
@@ -167,8 +167,14 @@ order cover every writer:
 2. **One pass, sorted.** A transaction takes all its keys in a single call:
    lock ids deduplicated, then acquired in ascending signed order. A later
    call in the same transaction may ask only for keys it already holds;
-   asking for a new one raises `IdentityKeys.LateAcquisition` (held keys
-   read from `pg_locks` for the backend).
+   asking for a new one raises `IdentityKeys.LateAcquisition`. Held keys are
+   read from `pg_locks` for the backend (the authority); a transaction-local
+   marker (`set_config('sdr.identity_pass', …, true)`) records that a pass
+   was made, even an empty one, and is reverted together with the keys by a
+   rollback to a savepoint. The pass is an outer-transaction contract: the
+   transaction's entry point (including seed, bootstrap and batch
+   transactions) takes the whole set; nested actions only find keys held.
+   No key is held while a model call waits.
 3. **Before shared row locks.** The pass comes before any row lock in the
    identity lock domain: users, campaigns, agent runs, agent definitions,
    accounts, contacts, leads and their qualifications, enrollments, drafts,
@@ -188,6 +194,10 @@ order cover every writer:
    → drafts → deliveries → approvals, approval binding, grant admission) and
    the rule that every row lock precedes the first append stay as they are;
    keys are a prefix, not a reordering.
+
+7. **Cutover.** The namespace and every writer in item 4 ship in one
+   release with their migration; no deployment mixes the old webhook key and
+   this namespace.
 
 Changing a kind, the id derivation, the order or the lock domain needs a
 further reviewed amendment and a green concurrency suite (independent
