@@ -1,6 +1,6 @@
-# C1: Home inbox contract — entity draft
+# C1 Home inbox contract and readiness
 
-Status: **draft for independent entity/action review**. C1-01 (#85), Codex
+Status: **draft for full contract review and scoped owner acceptance**. C1-01 (#85), Codex
 author → Claude reviewer. No C1 code, new database table, UI mutation or
 model call is authorized by this draft. The owner must approve scoped G5
 before C1-02/03 implementation; H1 has its own owner task/prototype gate.
@@ -46,14 +46,243 @@ persisted Task resource is presumed.
 | Accounts.User / authenticated session / Tenant | Existing | Scope and revocable authorization | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found; C1 consumes the current authenticated scope/session and rechecks it, never introduces a role or membership. | Existing role/session/domain policies | none |
 
 Configured reviewer: ai-pair (ai_pair=true, codex_review=true), Claude.
-Verdict: **UNREVIEWED**. Table review request to be staged with this artifact.
-This is a soft-stop: no affected-module or C1-02/03 implementation plan is
-approved until an independent PASS. Owner scope approval is separate.
+Verdict: **PASS** by Claude at `354c590`, consultation
+`m_1791836746489647500_488f78d2`, answer
+`m_1791836856639537000_6cbd35cf` (2026-10-12 20:27:36 UTC). Review report
+sha256 `818854327931d8638b9d6eb642c21e1f2a0d3a4860464c6d062aad9981df5bef`.
+The seven full-contract requirements are addressed below. This PASS permits
+affected-module planning, not C1-02/03 code or owner G5. Refined contracts
+below still require Claude's full review and B1/H1 producer-consumer agreement.
 
-## Next artifact work (docs only)
+## Observable requirements
 
-After entity PASS, finish the requirements, producer/action matrix, concrete
-synthetic fresh/stale/resolved/unauthorized/error examples, owner task walk,
-acceptance tests, affected boundaries and ADR/diagram evaluation. Request
-Claude's full contract review and the owner's scoped acceptance. No scheduled
-build-day estimate, real model call or unapproved producer implementation.
+| ID | Behavior |
+|---|---|
+| C1-R1 | An authorized founder sees only committed pending tasks in the declared inbox coverage. Initial coverage is email draft review and live Failure attention, not every future MVP task. |
+| C1-R2 | The same source condition has the same item identity across refresh and edit; its freshness token changes when relevant facts change. Acknowledged Failures remain pending. |
+| C1-R3 | Every row explains why it needs a human and offers only fixed, currently permitted actions. Blocked recovery explains its guard; it never becomes an enabled retry merely because Failure.retryable is true. |
+| C1-R4 | Approval submits the displayed draft_revision_id, content_sha256 and recipient_email. The producer checks them again under its existing approval locks. Capture never means a message reached a real inbox. |
+| C1-R5 | All mutations revalidate scope, current actor/session, source, freshness and source action rules. A stale or double submission never approves another revision, overwrites another edit or creates a second run/capture. |
+| C1-R6 | Storage reads and metadata joins are bounded. More work, producer failures and withholding are visible; an error is never reported as an empty inbox. |
+| C1-R7 | List summaries contain no draft body, research/model output, diagnostic stderr or Payload content. Detail and evidence retain source authorization and audited reads. |
+| C1-R8 | Item resolution follows committed source state. A failed action leaves the item visible; after success the UI re-lists. No optimistic deletion or independent task lifecycle. |
+| C1-R9 | Each future producer adds a reviewed row/action contract and tests before registration. Registration is closed reviewed code, not a plugin or caller/model-selected module. |
+
+## Initial producers and actions
+
+| Producer | Pending membership | Summary and context | Permitted next steps | Resolution |
+|---|---|---|---|---|
+| outreach_drafts | Outreach's review_queue read, exposed today as Outreach.list_review_queue/1: Draft.status = pending_review, current revision exists. Only email until C6/B3 adds channels. | Draft id, displayed recipient, revision number/id/hash, current subject, typed risk/blocked labels. Metadata only; no body/citation payload is loaded for the list. | Inspect; edit; approve for capture; reject with reason. Admin/reviewer only for mutations, under source policy. Auditor gets authorized read/inspect only. | Approved → queued, rejected → rejected, cancelled → cancelled: disappear from pending list. Editing stays pending with a new revision/token. A revoked approval returning the draft to pending_review returns the same stable item. |
+| operations_failures | Operations' attention read, exposed today as Operations.list_attention/1: status open or acknowledged. | Failure id, severity/class, redacted bounded message, occurred_at, typed source ref and allowed next step. No detail Payload/model/process output is loaded. | Inspect; acknowledge when open; resolve with required note. Admin/reviewer under Operations policy. Retry an eligible AgentRun only through SDR.retry_run/2, active admin only, after the reviewed safety joins are available. Grant repair is an admin navigation action, not a model/agent grant mutation. | Acknowledge changes token, not membership. Resolved disappears. Retrying follows the source contract's resolution of the original cause and creation of a new run; no task is silently marked fixed just because a new job was queued. |
+
+Missing revision or required context is **producer_error**, not a fabricated
+reviewable row. A denied detail read cannot leave an actionable old row on
+screen. A provider/grant refusal appears through its existing Failure, not a
+new parallel task. A resolved historical refusal cause is not shown, but its
+distinct live Operation Failure is.
+
+An unknown Failure subject string never selects a resource/module or URL;
+inspect the authorized Failure itself instead of inventing a source action.
+Auditor views preserve the existing AuditAccess convention, recording only
+the bounded source ids actually shown. Do not record hidden ids or claim an
+unperformed content access; guarded mutation and denial auditing remain with
+the source actions.
+
+### Command binding and outcomes
+
+Commands carry `item_id`, a fixed `action_id`, the displayed freshness token,
+and only that action's validated arguments. Actor and tenant come from the
+current authenticated scope, never the command. Unknown fields, producers,
+actions and cross-source pairs are rejected, not dynamically dispatched.
+
+| Command | Required source binding and arguments | Authoritative call |
+|---|---|---|
+| approve_capture | draft_revision_id, lowercase hex content_sha256, reviewer-seen recipient_email; channel email | Outreach.approve/3 → BindApproval. Never infer recipient or substitute the newest revision for an old command. |
+| reject_draft | draft_revision_id, content_sha256, nonempty reason; displayed recipient/channel stay in the freshness check | Outreach.reject/3. Current domain rejection does not compare recipient; C1 must not claim otherwise. |
+| edit_draft | displayed current revision, token and validated subject/body/optional angle/CTA | Outreach.edit_draft/3, **only after** a producer-owned freshness check held in the same transaction as the edit. A separate unlocked read then write is insufficient. |
+| acknowledge_failure | exact Failure id and displayed token | Operations.acknowledge_failure/2; source lock/state rules apply. |
+| resolve_failure | exact Failure id/token and nonempty resolution_note | Operations.resolve_failure/3; never manufacture a note or resolve merely to clear Home. |
+| retry_run | validated target run id, source Failure ref/token, explicit human confirmation | SDR.retry_run/2 plus reviewed current cleanup/provider/witness/grant admission guards. No generic retry by Failure class or subject string. |
+
+The source adapter owns the transaction for compare-and-mutate, acquires its
+established dependent-row locks before the audit head, recomputes freshness
+while those facts are protected, and invokes the guarded domain action with
+the current actor. Approval keeps enrollment → draft → campaign → contact →
+head. Failure writes keep Failure → head; run retry keeps its reviewed source
+order. No generic gateway head lock is taken before entering a producer.
+If a source action cannot meet this compare-and-mutate contract, that action
+stays blocked as `guard_not_available` until a reviewed source adapter/delta
+exists. Do not extend action arguments or lock rules silently in C1 code.
+
+Success is `{:ok, %{outcome: :applied | :already_resolved, refresh?: true}}`.
+An existing producer's successful identical replay may return already_resolved;
+otherwise repeated commands return a typed stale outcome. Error reasons are
+closed: `:stale`, `:forbidden`, `:not_found`, `:blocked`, `:invalid_input`,
+`:producer_error`. Stale results name a safe change category (revision,
+recipient, lifecycle, recovery_guard), not hidden source content. Cross-tenant
+and unauthorized references do not reveal existence or alternate recipients.
+Guarded denials remain audited. No error response publishes a raw exception,
+stacktrace, command line or model payload.
+
+### Freshness inputs
+
+Version 1 hashes a canonical, server-owned tuple including contract version,
+authenticated tenant, producer, kind, source id and channel, then:
+
+- **Draft:** pending status, current revision id and stored content hash,
+  recipient contact id and exact displayed email, contact status, campaign
+  lifecycle and the producer's applicable suppression/approval guard facts.
+- **Failure:** status, acknowledgment/resolution timestamps, class/severity,
+  subject and Operation refs, retryable flag, and applicable recovery guard
+  facts (run status/retry state, cleanup confirmation, effective provider and
+  reviewed admission eligibility). No payload or body is hashed by loading it.
+
+`observed_at` is the read time and is not hashed: time passing alone does not
+invalidate an item. Time-dependent eligibility is rechecked at execution;
+crossing a grant/window boundary can block a command even with a matching
+token. Token comparison is not authorization and never replaces current
+source rules. Capabilities whose required facts cannot be read are blocked,
+not guessed. Edit keeps item identity but changes the revision/token; source
+state transitions and recipient changes invalidate the displayed command.
+
+### Blocked reasons
+
+Fixed reason codes cover `actor_not_permitted`, `recipient_suppressed`,
+`recipient_inactive`, `campaign_closed`, `real_data_disabled`, `model_staged`,
+`tuple_not_promoted`, `grant_unavailable`, `grant_exhausted`, `witness_withheld`,
+`cleanup_unconfirmed`, `unknown_outcome`, `guard_not_available` and
+`producer_unavailable`. Their plain-language labels are display copy, not
+permission or routing. Scope them to the affected action: a blocked retry
+does not necessarily block inspection or acknowledgment. Safe rejection or
+resolution is not automatically denied merely because generating another
+draft is blocked. An unreleased model result is never surfaced as business
+detail while reporting the witness block.
+
+## Page bounds, ordering and truthful empty states
+
+Proposed fixed default and hard maximum: **50 items per page** (caller may
+request 1..50). Each initial producer queries at most **51 candidates** after
+source authorization and the cursor predicate: 50 plus one lookahead. The
+two-producer first scope therefore reads at most 102 source candidates.
+Metadata joins are by those bounded ids, selecting only required fields.
+Never list every Draft, Contact, Account, run, Payload or past revision and
+then take 50. Existing unbounded domain readers need bounded domain-owned
+successors before C1-02 uses them; a limit ignored by the current API is not
+a valid bound.
+
+Stable ordering: critical Failures first; all remaining initial items second.
+Within either group, oldest source timestamp first, then producer id, then
+source id. Draft uses inserted_at; Failure uses occurred_at. Read-time
+observed_at does not affect order. There is no total-count scan.
+
+One opaque keyset cursor records the last **returned** sort key, contract/
+producer-set version, authorized tenant/actor scope and fixed filters. Each
+producer applies that global continuation before its query limit; consuming
+all fetched candidates would skip items not returned in the merged page.
+Reject malformed/cross-scope/version-mismatched cursors. New items can appear
+on a fresh first-page load; pagination is not a frozen snapshot of changing
+work. Freshness checks protect actions independently of paging.
+
+Read success returns items, next_cursor, observed_at, completeness and typed
+producer errors/withheld reasons. A partial page can show authorized successful
+rows but prominently reports the missing producer. Returned errors and raised
+failures use the same truthful state. Losing actor/session authorization clears
+old rows/actions immediately. Refresh failure cannot keep old buttons enabled.
+
+Empty copy for initial coverage: **“No drafts or failures need your attention
+in this view.”** Only on the first page, with complete successful reads and
+no next_cursor. **“Nothing needs your attention”** is reserved for H1 after
+all required founder-task producers are registered and successfully read.
+An empty later page means “No more items”; a partial/error/withheld page never
+claims empty success. Auditor/read-limited coverage never claims the owner's
+whole queue is empty.
+
+## Synthetic contract examples and owner task walk
+
+All names and addresses below are fictional reserved-domain examples. These
+are acceptance scenarios, not implemented screens or actual actions.
+
+| Example | What the owner sees | Expected behavior |
+|---|---|---|
+| Fresh draft D1 | Draft D1, revision R3, hash H3, recipient sam@orbit.example.org, email, “About developer onboarding”; Review/Edit/Approve for capture/Reject | Approve command carries R3 + H3 + that exact email + token T3. Producer checks source state and captures only through the existing outbox; it does not send real email. |
+| Edited while reviewing | D1 was R3/T3; another edit committed R4/T4 | Approve or edit with T3 returns stale/revision. No approval, capture or overwrite. Refresh shows R4; a fresh decision is required. |
+| Recipient changed | Same D1/R3, contact email now changed to pat@orbit.example.org | Old sam binding returns stale/recipient, not approval for pat. Owner must review the newly displayed recipient. |
+| Resolved failure | Failure F1 was open; another operator resolved it | A stale acknowledge/resolve command cannot recreate it. Refresh removes F1; the immutable historical cause remains in source records. |
+| Read-only actor | Auditor can inspect D1/F1 through permitted reads | No enabled mutation. Forged approve/retry fails source policy and is audited; no new rows. |
+| Grant/cleanup block | Failure F2 needs recovery; grant exhausted or prior process cleanup unconfirmed | Explain the exact block. Admin may inspect grant status, but no enabled rerun until current safeguards pass. No agent edits a grant. |
+| One producer failed | Draft query succeeded with D1; Failure query failed | Show D1 with a visible partial-read warning; never “nothing needs you.” A failed producer has no fabricated row or safe-to-click stale action. |
+| Over page cap | 53 authorized pending source items | Return the stable first 50 plus a cursor; next page has the remainder. No skipped fetched candidates, unauthorized counts or unbounded body loads. |
+| Resolved refusal, live Operation | Original run cause F3 is resolved; Operation has live F4 naming F3 | Show F4 once, not F3 as pending and not a collapsed “fixed” lead. Inspection explains historical cause versus remaining operator attention. |
+
+Owner task walk (no model calls):
+
+1. From Fresh draft D1, identify the recipient, revision and why approval is
+   required; choose approve, edit or reject and explain what capture means.
+2. Encounter Edited while reviewing; explain what changed and why the old
+   approval cannot stand. Repeat with Recipient changed.
+3. Investigate F2; identify what blocks retry and what only an admin can do.
+4. Distinguish Resolved failure from Resolved refusal/live Operation.
+5. Describe One producer failed versus a complete empty initial inbox.
+
+Record the owner's answers/changes with no coaching. H1-01 supplies the
+interactive desktop prototype and accessibility/keyboard task check; this
+contract does not claim that prototype or owner acceptance is already done.
+
+## Affected boundaries and proposed implementation slices
+
+Entity PASS now permits this planning. **No files below are changed in this
+docs PR.** Names are proposed, not claims that C1 is implemented.
+
+- `SdrAgent.Inbox` / Item / Page / Command: a stateless application facade
+  over fixed producers; no Ash domain/resources, supervisor or Task table.
+- Outreach and Operations: bounded actor-scoped source reads and typed
+  producer compare-and-mutate adapters. Source modules own queries/locks and
+  source actions; the web layer does not query Repo or mutate resources.
+- SDR/Agents and the merged C2/C9/R0-07 contracts: existing guarded recovery
+  and no-call status/admission reads. Until a required guard is available,
+  rerun stays blocked. C1 does not build model/profile/budget controls.
+- Future H1 LiveViews: consume the contract, keep data loading out of mount,
+  clear stale capability state on failures and refresh after committed writes.
+
+Steps after contract review, owner ADR acceptance and scoped G5:
+
+1. C1-02 RED: bounded source/list tests for authorization, ordering, cursors,
+   projection fields, truncation, empty/partial/returned/raised errors.
+2. C1-02 GREEN: smallest stateless projection and bounded domain adapters;
+   no new producer or persistence beyond reviewed scope.
+3. C1-03 RED: exact approval binding, stale edit/recipient/state, double-submit,
+   demotion/session revocation, suppression and recovery guards.
+4. C1-03 GREEN: fixed command routing and producer-owned compare-and-mutate;
+   guarded domain actions, no generic dynamic dispatch.
+5. H1/B1 integrate only after the contract merges; run the owner task script,
+   source regressions, full gate, security review and applicable diagrams.
+
+Required negative tests include cross-tenant/forged source refs, arbitrary
+action/resource strings, unknown producers, bad/cross-scope cursors, withheld
+model output, real-data off, closed grants, cleanup ambiguity and a resolved
+historical cause with a distinct live Operation condition. Assert stored rows
+and audit events, not only returned tuples. Every producer extension needs
+its own bounded-read and mutation-negative tests before registration.
+
+## Architecture decisions and readiness
+
+ADR required: **yes**, [ADR-0015](../../adr/0015-home-inbox-projection-and-command-boundary.md)
+proposes the durable shared read/command boundary and compares it with a
+persisted task mirror and UI-owned composition. It adds no dependency and
+preserves existing domain ownership; status **proposed**, owner acceptance
+required before code. Implementation should update the component/data-flow
+diagrams for the new public runtime path; no actual runtime changed in this
+docs proposal, so current diagrams are not rewritten to pretend it exists.
+
+| Readiness item | Status |
+|---|---|
+| Entity/action soft-stop | PASS at 354c590; full-contract refinements awaiting independent review |
+| B1 producer / H1 consumer agreement | Pending Claude confirmation of bindings, atomic edit adapter and page contract |
+| Owner task walk / interactive H1 prototype | Pending; no usability acceptance inferred |
+| ADR-0015 owner acceptance | Pending |
+| Scoped C1 G5 | Pending; existing R0 G5 does not cover C1 code |
+| C1-01 docs verification | In progress: diff/structure/links plus unchanged-code full gate; no model-call budget |
+
+This contract draft does not complete C1-02/03 or H1, expand spend authority,
+add channels, change suppression, bypass the release gate, or authorize
+processing real leads while the real-data switch is off.
