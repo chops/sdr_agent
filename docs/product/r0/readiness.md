@@ -252,10 +252,14 @@ owner questions (OQ-4, OQ-3), not silent cuts.
 - **OQ-4 Telegram for budget exhaustion.** The plan said the app pings you.
   Proposal: the app opens a Home attention item; Claude and Codex, while
   working, see it and ping you through `bin/notify-telegram`. Limitation: if
-  neither agent is running, no ping is sent, though in that case nothing is
-  spending budget unless you are using the app yourself. Alternative: the
-  app sends the ping itself (a reviewed outbound integration that needs the
-  bot token at runtime; more scope).
+  neither agent is running, no ping is sent. Background jobs can still spend
+  budget then (follow-ups and reply processing, once B4 and B5 schedule real
+  calls), and an exhaustion would wait until you open Home or an agent next
+  looks. In R0 itself only runs you or the agents start make real calls.
+  Proposal: accept this for R0, and add a story to revisit an app-side ping
+  before B4 schedules real follow-ups. Alternative: the app sends the ping
+  itself now (a reviewed outbound integration that needs the bot token at
+  runtime; more scope).
 
 ## 7. Gate record (to fill)
 
@@ -276,7 +280,12 @@ owner questions (OQ-4, OQ-3), not silent cuts.
     2. the full non-room re-check;
     3. replayed or foreign ids must not mutate the row.
   - Revised in this commit, together with atomic refusal dedupe.
-  - Round 3 verdict: _pending_.
+  - Round 3 at dc01a65: **PASS** (consultation
+    m_1791823520931364917_90effde5, reply 01a13103; private report sha256
+    074d794b). The PASS covers the modeled human-admin authority. A
+    designated-owner variant (OQ-2 alternative) would need a new delta and
+    re-review. OQ-3 and OQ-4 are owner scope decisions. The PASS is not
+    implementation, proof-call or deploy authority.
 - Owner G5: _pending_ (words, time, where).
 
 ## 8. Next authorized scope (when G5 passes)
