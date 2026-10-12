@@ -223,6 +223,27 @@ never falls back to the fake model.
 
 Budgets still apply: 20 model calls per run and 200 per UTC day.
 
+### Calibration console (R0-07, owner only)
+
+`bin/calibration-console` serves the test-seam build from its own fixed,
+persistent database, `sdr_agent_calibration`, so the owner can create the
+single G-R0 calibration grant there (R0-07 readiness packet, section 3). It
+is not the demo and makes no model call:
+
+```sh
+bin/calibration-console check     # the plan: database, listener, provider; starts nothing
+read -rs PW; printf '%s\n' "$PW" | \
+  bin/calibration-console bootstrap-admin --email you@example.test --display-name You --password-stdin
+unset PW
+bin/calibration-console serve     # http://127.0.0.1:4124: sign-in and /admin only
+```
+
+It refuses any other database (a `DATABASE_URL`, a non-local host, a port
+other than 5520), any `MIX_ENV` but `test`, any `PORT` but 4124 and any
+model provider but the fake. It listens on 127.0.0.1:4124 only, creates the
+database if it is absent and runs pending migrations, and has no reset, drop
+or seed command. Every page except sign-in and `/admin` answers 404 there.
+
 ## Troubleshooting
 
 - **`bin/demo run` says the port is in use.** Run
