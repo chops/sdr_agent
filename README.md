@@ -173,12 +173,26 @@ The `ClaudeCLI` provider (ADR-0004) calls Claude Code through
 `llm-proxy-shim`, using **your own** local Claude Code login. It is for a
 personal local demo only: never hosted, shared or multi-user traffic.
 
+**Status (R0-02): the pin can be built and inspected now; ordinary real
+model use is not available yet.** Every real call is refused before any
+reservation or launch (`real_model_staged`) until the reviewed model
+profiles, owner call grants and witness work land (stories R0-03, C9 and
+R0-07). Development, tests and the demo use the deterministic fake.
+
 The app runs its own pinned Claude Code build (`nix/app-claude-cli.nix`,
 on the nixpkgs locked in `flake.lock`), never `claude` from `PATH`, so
-updating your own Claude Code does not change what the app runs. Build it,
-which also keeps it and the previous build alive with GC roots under
-`.gcroots/`, then start the development server with the provider selected
-and the printed path:
+updating your own Claude Code does not change what the app runs. The
+reviewed build is recorded per platform in `nix/app-claude-cli.identity`
+(store path and sha256 of `bin/claude-code`; only `aarch64-darwin` today).
+Build it, which also keeps it and the previous build alive with GC roots
+under `.gcroots/`, and inspect it:
+
+```sh
+bin/app-claude-cli-root   # prints /nix/store/...-app-claude-cli-<version>/bin/claude-code
+```
+
+Selecting the provider boots the app with the pinned CLI configured, shown
+on the Admin page, while calls stay refused:
 
 ```sh
 SDR_MODEL_PROVIDER=claude_cli bin/demo run
@@ -192,20 +206,20 @@ by hand:
 SDR_MODEL_PROVIDER=claude_cli SDR_CLAUDE_CLI_BIN="$(bin/app-claude-cli-root)" mix phx.server
 ```
 
-`SDR_CLAUDE_CLI_BIN` must be the absolute path of an executable inside
-`/nix/store`; unset or anything else refuses boot. If the build is later
-removed, calls are refused until you rebuild it; there is no fallback.
+`SDR_CLAUDE_CLI_BIN` must be exactly the recorded store path for this
+platform, with the recorded sha256 (checked once at boot); unset or
+anything else refuses boot. If the build is later removed, the app refuses
+calls until you rebuild it; there is no fallback to another CLI or to the
+fake.
 
 This starts one supervised ClaudeCLI server (one call at a time). The Admin
 page shows the provider, the model (`opus` → `claude-opus-5-5`), the
-reviewed Claude Code version, the pinned CLI path and the last init
-attestation. The attestation
-is checked at the first call, because the CLI cannot report it without one.
-`SDR_CLAUDE_CLI_TIMEOUT_MS` sets the per-call timeout (default 240000). The
-value is accepted in development only: the test suite and production
-refuse to boot with it. If a run needs ClaudeCLI while its server is not
-running, the run fails with an attention item; it never falls back to the
-fake model.
+reviewed Claude Code version, the pinned CLI path, the refusal reason and
+the last init attestation. `SDR_CLAUDE_CLI_TIMEOUT_MS` sets the per-call
+timeout (default 240000). The provider is accepted in development only:
+the test suite and production refuse to boot with it. If a run needs
+ClaudeCLI while it refuses calls, the run fails with an attention item; it
+never falls back to the fake model.
 
 Budgets still apply: 20 model calls per run and 200 per UTC day.
 

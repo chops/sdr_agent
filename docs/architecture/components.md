@@ -129,4 +129,4 @@ graph TB
 - [x] Claude CLI local process boundary
 - [x] S13 LiveEvents.Relay (commit-time audit notifications -> PubSub -> live console views, ADR-0012)
 - [x] Q0.1 runtime-selected ClaudeCLI server (one named, supervised instance before Oban when `SDR_MODEL_PROVIDER=claude_cli`, dev only; ADR-0004)
-- [x] R0-02 app-pinned Claude CLI (`nix/app-claude-cli-package.nix` on the locked nixpkgs, absolute `/nix/store` path in `SDR_CLAUDE_CLI_BIN`, handed to the shim per launch as `LLM_PROXY_SHIM_CLAUDE_BIN`; never `claude` from `PATH`; ADR-0004 R0)
+- [x] R0-02 app-pinned Claude CLI (`nix/app-claude-cli-package.nix` on the locked nixpkgs, exact reviewed store path and sha256 from `nix/app-claude-cli.identity` in `SDR_CLAUDE_CLI_BIN`, handed to the shim per launch as `LLM_PROXY_SHIM_CLAUDE_BIN`; never `claude` from `PATH`; real calls staged (`real_model_staged`) until R0-03, C9 and R0-07; ADR-0004 R0)
