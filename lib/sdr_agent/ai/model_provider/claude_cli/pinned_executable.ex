@@ -4,7 +4,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable do
   item 1; story R0-02).
 
   The app launches the Claude CLI only from its content-addressed build in
-  the Nix store (`packages.<system>.app-claude-cli`, kept alive by
+  the Nix store (`nix/app-claude-cli-package.nix`, kept alive by
   `bin/app-claude-cli-root`), by absolute path, and never resolves `claude`
   from `PATH`. `check/1` accepts a path only when it is:
 
