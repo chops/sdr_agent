@@ -98,6 +98,36 @@ defmodule SdrAgentWeb.AdminLiveTest do
       assert has_element?(view, "#pinned-cli-path", bin)
     end
 
+    test "R0-05: the Fake shows its profile as configured and effective, with no refusal",
+         %{conn: conn} do
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
+
+      assert has_element?(view, "#configured-profile[data-profile='fake']", "fake")
+      assert has_element?(view, "#effective-profile[data-profile='fake']", "fake")
+      refute has_element?(view, "#provider-refusal")
+    end
+
+    test "R0-05: a refused ClaudeCLI shows its profile, no effective profile and the reason",
+         %{conn: conn} do
+      bin = SdrAgent.Test.PinnedCLI.store_path!()
+      put_env!(:model_provider, SdrAgent.AI.ModelProvider.ClaudeCLI)
+      put_env!(SdrAgent.AI.ModelProvider.ClaudeCLI, executable: bin)
+
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
+
+      assert has_element?(view, "#configured-profile[data-profile='claude_cli_opus']")
+      assert has_element?(view, "#effective-profile[data-profile='none']")
+
+      assert has_element?(
+               view,
+               "#provider-refusal[data-refusal='provider_not_running']",
+               "no supervised ClaudeCLI server"
+             )
+
+      assert has_element?(view, "#pinned-cli-path", bin)
+      assert has_element?(view, "#pinned-cli-version", "Claude Code 2.1.291")
+    end
+
     test "R0-02: the Fake shows no pinned CLI", %{conn: conn} do
       {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
       refute has_element?(view, "#pinned-cli-path")

@@ -39,7 +39,9 @@ defmodule SdrAgent.Agents do
     * real-model call grants (C9) — `create_grant/2`,
       `update_grant_terms/3`, `revoke_grant/3`, `release_allocation/3`
       (each an active human admin only, in one transaction, refusing a stale
-      `expected_revision`), `list_grants/1`, `get_grant/2`.
+      `expected_revision`), `list_grants/1`, `get_grant/2`, and
+      `grant_usage/2` (the attempts consumed, derived from the charged
+      ModelInvocations).
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -57,6 +59,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
+  alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.Audit.Checks.ReconciliationScope
   alias SdrAgent.Audit.Guard
   alias SdrAgent.Audit.GuardedCall
@@ -275,7 +278,7 @@ defmodule SdrAgent.Agents do
   # chain head); the Fake records its own profile, and any other profile is
   # left to the :reserve validation to refuse.
   defp do_reserve_model_invocation(run, %{provider: :claude_cli} = attrs, request, actor) do
-    if Map.get(attrs, :profile_id) in ModelCallGrant.real_profiles(),
+    if ModelProfiles.real?(Map.get(attrs, :profile_id)),
       do: reserve_admitted(run, attrs, request, actor),
       else: reserve(run, attrs, request, actor, %{})
   end
@@ -828,6 +831,61 @@ defmodule SdrAgent.Agents do
       {:ok, nil} -> {:error, NotFound.exception(resource: ModelCallGrant)}
       other -> other
     end
+  end
+
+  @doc """
+  ADM, AUD, AGT: the attempts consumed by the grants `grant_ids` that the
+  actor can read — `{:ok, %{grant_id => %{consumed:, today:, allocations:
+  %{allocation_id => consumed}}}}`. Consumption is derived from the
+  ModelInvocations charged to the grant and allocation at reservation
+  (C9-02; never stored, never refunded); `today` counts the current UTC day
+  by `reserved_at` (`SdrAgent.Clock`), as the per-day limit does. Grants the
+  actor cannot read (another tenant, or a reviewer) are absent.
+  """
+  def grant_usage([], _opts), do: {:ok, %{}}
+
+  def grant_usage(grant_ids, opts) when is_list(grant_ids) do
+    actor = Keyword.get(opts, :actor)
+
+    with {:ok, grants} <- readable_grants(grant_ids, actor),
+         {:ok, charged} <- charged_invocations(Enum.map(grants, & &1.id), actor) do
+      today = DateTime.to_date(SdrAgent.Clock.utc_now())
+      by_grant = Enum.group_by(charged, & &1.grant_id)
+
+      {:ok,
+       Map.new(grants, fn grant ->
+         {grant.id, usage(grant, Map.get(by_grant, grant.id, []), today)}
+       end)}
+    end
+  end
+
+  defp readable_grants(grant_ids, actor) do
+    ModelCallGrant
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id in ^grant_ids)
+    |> Ash.Query.load(:allocations)
+    |> Ash.read(actor: actor)
+  end
+
+  defp charged_invocations([], _actor), do: {:ok, []}
+
+  defp charged_invocations(grant_ids, actor) do
+    ModelInvocation
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(grant_id in ^grant_ids)
+    |> Ash.Query.select([:grant_id, :allocation_id, :reserved_at])
+    |> Ash.read()
+  end
+
+  defp usage(grant, charged, today) do
+    counts = Enum.frequencies_by(charged, & &1.allocation_id)
+
+    %{
+      consumed: length(charged),
+      today: Enum.count(charged, &(DateTime.to_date(&1.reserved_at) == today)),
+      allocations: Map.new(grant.allocations, &{&1.id, Map.get(counts, &1.id, 0)})
+    }
   end
 
   # One guarded transaction per grant change. A human actor is re-read
