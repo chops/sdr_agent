@@ -1,6 +1,6 @@
 # R0-07 readiness packet: profile-exact witness tuples, calibration, per-invocation result gate
 
-Status: **draft for independent entity review (round 2).** It implements the
+Status: **entity-model PASS (Codex, round 4 at 1da747a).** It implements the
 accepted ADR-0005 R0 amendment (PR #128, owner D-108) within G5-R0's scope.
 Nothing here is implemented until Codex records an entity-model **PASS** on
 section 2. No real model call happens until a tuple is promoted, and
@@ -138,7 +138,7 @@ Calibration uses the accepted isolated harness, so no ADR change is needed:
     migrations;
   - starts no model server, makes no model call, and offers only the admin
     sign-in and budget pages.
-  
+
   The owner bootstraps their own admin account in it with the existing
   first-admin bootstrap.
 - **The owner's grant.** The owner signs in to that instance and creates the
@@ -223,4 +223,7 @@ Calibration uses the accepted isolated harness, so no ADR change is needed:
   selected cause before the head even when it is resolved, carried by the
   reconcile receipt; and the calibration console cannot reuse the
   `bin/demo` smoke serve.
-- Round 4: this revision. Verdict _pending_.
+- Round 4 at 1da747a: **PASS** (Codex, consultation
+  m_1791838639608778250_18c04dfc, answer m_1791839074000000000_r007pass,
+  report sha256 fbd9375e). Entity/action PASS only: not implementation
+  approval, RED verification, calibration-call or deploy authority.
