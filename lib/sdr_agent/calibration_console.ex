@@ -20,6 +20,11 @@ defmodule SdrAgent.CalibrationConsole do
     * **Listener.** Always loopback `127.0.0.1:4124` (`bind/0`): whatever
       `PORT` or address the configuration names is replaced; `:https` is
       dropped.
+    * **Secrets.** The endpoint `secret_key_base` and the token signing
+      secret are the per-machine values of
+      `SdrAgent.CalibrationConsole.Secrets` (a 0600 file outside the
+      repository), never the build's checked-in test values, which are
+      public: a plan without them, or with a checked-in value, is refused.
     * **No model server.** Only the deterministic Fake provider is accepted,
       so `SdrAgent.AI.ModelProvider.Runtime.children/0` starts no ClaudeCLI
       server, and Oban stays in `testing: :manual` (jobs are never
@@ -44,19 +49,22 @@ defmodule SdrAgent.CalibrationConsole do
 
   @typedoc "What `plan/1` reads: the build's environment and configuration."
   @type config :: %{
-          mix_env: atom(),
-          test_seams?: boolean(),
-          model_provider: module(),
-          repo: keyword(),
-          endpoint: keyword(),
-          oban: keyword()
+          required(:mix_env) => atom(),
+          required(:test_seams?) => boolean(),
+          required(:model_provider) => module(),
+          required(:repo) => keyword(),
+          required(:endpoint) => keyword(),
+          required(:oban) => keyword(),
+          optional(:token_signing_secret) => String.t() | nil,
+          optional(:secrets) => SdrAgent.CalibrationConsole.Secrets.t()
         }
 
-  @typedoc "The configuration the console serves with."
+  @typedoc "The configuration the console serves with (it holds the secrets: never print it)."
   @type plan :: %{
           repo: keyword(),
           endpoint: keyword(),
           oban: keyword(),
+          token_signing_secret: String.t(),
           model_provider: module(),
           model_server: :none
         }
@@ -76,7 +84,8 @@ defmodule SdrAgent.CalibrationConsole do
       model_provider: Application.get_env(:sdr_agent, :model_provider),
       repo: Application.get_env(:sdr_agent, SdrAgent.Repo, []),
       endpoint: Application.get_env(:sdr_agent, SdrAgentWeb.Endpoint, []),
-      oban: Application.get_env(:sdr_agent, Oban, [])
+      oban: Application.get_env(:sdr_agent, Oban, []),
+      token_signing_secret: Application.get_env(:sdr_agent, :token_signing_secret)
     }
   end
 
@@ -85,11 +94,14 @@ defmodule SdrAgent.CalibrationConsole do
   def plan(config) do
     with :ok <- check_build(config),
          :ok <- check_repo(config.repo),
-         :ok <- check_provider(config.model_provider) do
+         :ok <- check_provider(config.model_provider),
+         {:ok, secrets} <- check_secrets(config) do
       {:ok,
        %{
          repo: repo(config.repo),
-         endpoint: endpoint(config.endpoint),
+         endpoint:
+           Keyword.put(endpoint(config.endpoint), :secret_key_base, secrets.secret_key_base),
+         token_signing_secret: secrets.token_signing_secret,
          oban: Keyword.put(config.oban, :testing, :manual),
          model_provider: Fake,
          model_server: :none
@@ -132,6 +144,36 @@ defmodule SdrAgent.CalibrationConsole do
     {:error,
      "the calibration console starts no model server: the model provider must be the " <>
        "Fake (is #{inspect(other)}); unset SDR_MODEL_PROVIDER"}
+  end
+
+  # The build's own (checked-in, public) values, as configured and as this
+  # VM's application environment holds them before `apply!/2`.
+  defp check_secrets(%{secrets: %{secret_key_base: base, token_signing_secret: token}} = config)
+       when is_binary(base) and is_binary(token) do
+    checked_in =
+      Enum.reject(
+        [
+          config.endpoint[:secret_key_base],
+          Map.get(config, :token_signing_secret),
+          Application.get_env(:sdr_agent, SdrAgentWeb.Endpoint, [])[:secret_key_base],
+          Application.get_env(:sdr_agent, :token_signing_secret)
+        ],
+        &is_nil/1
+      )
+
+    if base in checked_in or token in checked_in do
+      {:error,
+       "the calibration console never serves with the checked-in test secrets; " <>
+         "check #{SdrAgent.CalibrationConsole.Secrets.default_path()}"}
+    else
+      {:ok, %{secret_key_base: base, token_signing_secret: token}}
+    end
+  end
+
+  defp check_secrets(_config) do
+    {:error,
+     "the calibration console has no per-machine secrets " <>
+       "(#{SdrAgent.CalibrationConsole.Secrets.default_path()})"}
   end
 
   defp repo(repo) do
@@ -187,6 +229,7 @@ defmodule SdrAgent.CalibrationConsole do
     Application.put_env(:sdr_agent, SdrAgent.Repo, plan.repo)
     Application.put_env(:sdr_agent, Oban, plan.oban)
     Application.put_env(:sdr_agent, :model_provider, plan.model_provider)
+    Application.put_env(:sdr_agent, :token_signing_secret, plan.token_signing_secret)
 
     Application.put_env(
       :sdr_agent,
@@ -195,6 +238,12 @@ defmodule SdrAgent.CalibrationConsole do
     )
 
     if serve?, do: Application.put_env(:sdr_agent, SdrAgentWeb.CalibrationConsole, active: true)
+
+    endpoint = Application.get_env(:sdr_agent, SdrAgentWeb.Endpoint, [])
+
+    (endpoint[:secret_key_base] == plan.endpoint[:secret_key_base] and
+       Application.get_env(:sdr_agent, :token_signing_secret) == plan.token_signing_secret) ||
+      raise "the console's secrets were not applied"
 
     verify_applied!()
   end
@@ -226,6 +275,28 @@ defmodule SdrAgent.CalibrationConsole do
       Ecto.Migrator.with_repo(SdrAgent.Repo, &Ecto.Migrator.run(&1, :up, all: true))
 
     :ok
+  end
+
+  @doc """
+  `serve` refuses to start without the built LiveView bundle and stylesheet
+  in `static_dir` (default: this app's `priv/static`): the sign-in and admin
+  pages are LiveViews and would render but never respond. Nothing is built
+  here; the owner runs `mix assets.build`.
+  """
+  @spec check_assets(Path.t()) :: :ok | {:error, String.t()}
+  def check_assets(static_dir \\ Application.app_dir(:sdr_agent, "priv/static")) do
+    case Enum.reject(
+           ["assets/js/app.js", "assets/css/app.css"],
+           &File.regular?(Path.join(static_dir, &1))
+         ) do
+      [] ->
+        :ok
+
+      [missing | _] ->
+        {:error,
+         "#{Path.join(static_dir, missing)} is missing: the console's pages would not respond; " <>
+           "build the assets first (mix assets.build)"}
+    end
   end
 
   @doc "After start: the Repo serves `sdr_agent_calibration` and no ClaudeCLI server runs."

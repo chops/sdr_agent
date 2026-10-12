@@ -117,11 +117,6 @@ case "$cmd" in
     exec mix sdr.calibration.console bootstrap-admin "$@"
     ;;
   serve)
-    # The sign-in and admin pages are LiveViews: without the built bundle
-    # they render but do not respond. A warning only; nothing is built here.
-    [ -f priv/static/assets/js/app.js ] ||
-      echo "bin/calibration-console: warning: priv/static/assets/js/app.js is missing;" \
-        "build the assets first (mix assets.build)" >&2
     echo "bin/calibration-console: serving $database on http://$bind_ip:$bind_port (sign-in and /admin only)"
     exec mix sdr.calibration.console serve
     ;;
