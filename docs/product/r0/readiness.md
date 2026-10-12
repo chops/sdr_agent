@@ -20,7 +20,7 @@ Stories in scope: R0-02..R0-06, C2-01..C2-02, C9-01..C9-06
 |---|---|
 | REQ-R0-1 | The app launches the Claude CLI only from its own pinned build, by absolute path. Updating the system or agent CLI does not change what the app runs. If the pinned build is missing, real calls are refused with a typed reason; there is no fallback to the system CLI or to the Fake. The active pinned build and the previous one (for rollback) are each kept alive by their own Nix GC root. |
 | REQ-R0-2 | Two reviewed profiles exist: `claude_cli_opus` (alias `opus`, resolved `claude-opus-5-5`) and `claude_cli_sonnet` (alias `sonnet`, resolved `claude-sonnet-5-5`), both on the one pinned CLI version. No other model can be selected; there is no free-text model input. |
-| REQ-R0-3 | Every new model invocation records its profile, grant and allocation. Rows written before R0 keep their original values and are never relabelled, and their legal lifecycle transitions keep working. |
+| REQ-R0-3 | Every new real-model invocation records its profile, grant and allocation (Fake invocations record their profile only). Rows written before R0 keep their original values and are never relabelled, and their legal lifecycle transitions keep working. |
 | REQ-R0-4 | The admin page shows the desired profile, the effective (running) profile, any pending or blocked switch with its reason, the pinned CLI version and the last attestation, without making a model call. |
 | REQ-R0-5 | An admin can switch profiles on the admin page, with a confirmation step. The switch is recorded in the audit trail. The app does not restart; only the model server does. Switching makes no model call: the new server passes a no-call preflight (pinned binary present, version reported), and the model itself is attested on its first real call. |
 | REQ-R0-6 | During a switch, no new call is admitted. Calls already reserved or queued under the old profile finish or are refused, within a bounded wait. A call never launches under a profile other than the one it was reserved for. |
@@ -48,7 +48,7 @@ admission, launch admission, the facade's sent boundary).
 | ModelProfileSetting | New (singleton per tenant) | The persisted desired real profile | `tenant_id` (unique); `desired_profile_id : atom, not nil, default :claude_cli_opus`, non-fake registry id; `revision : int ≥ 1` | belongs_to Tenant (unique) | Changes only when a switch completes. On boot the model server starts with `desired_profile_id`. | Read: admin, auditor, `agent_runtime`. No direct write action. | none |
 | ModelProfileSwitch | New | One requested profile change and its outcome | `id`; `tenant_id`; `from_profile_id`, `to_profile_id : atom, not nil, different`; `status : :pending \| :completed \| :failed \| :blocked`; `requested_by_id`; `requested_at`; `finished_at : nullable`; `failure_reason : string, nullable`; `server_generation : int` (the server start the switch belongs to) | belongs_to Tenant; belongs_to User (requester) | pending → completed (new server passed no-call preflight; setting.desired := to, revision +1, same transaction); pending → failed (activation failed and old work confirmed clean; old profile keeps running; desired unchanged); pending → blocked (unconfirmed work or Reaper lease held; admission closed); blocked → completed or failed after an admin action. At boot a still-pending switch is set failed (`interrupted_by_restart`), or blocked if the Reaper lease shows unconfirmed work; the server starts with `desired_profile_id`. Completion/failure actions are idempotent on `(id, server_generation)` and refuse a stale generation. At most one pending or blocked switch per tenant (partial unique identity). `request` refused if setting revision is stale or `to` = current desired. | `request`, `resolve_blocked`: human admin (resolve reuses the Reaper release attestation that no CLI process is left). `complete` / `fail` / `block`: system actor `model_runtime` only. All append `model.profile.switch_*`. | none |
 | Actor | Existing (delta) | System actor types | add type `:model_runtime` | n/a | Authorized only for ModelProfileSwitch `complete` / `fail` / `block`. No invocation, grant, allocation or setting write authority. `admit_launch/2` runs as `agent_runtime`, like `mark_sent` today. | n/a | none |
-| Operations.Failure | Existing (delta) | Operator attention items | no new attributes; new `detail.reason` values: class `budget_exhausted`: `no_eligible_grant`, `no_allocation`, `ambiguous_allocation`, `grant_exhausted`, `allocation_exhausted`, `grant_day_exhausted`, `no_usage_origin`; class `provider_error`: `grant_ineligible_at_launch`, `profile_mismatch_at_launch`, `legacy_invocation_without_grant`, `profile_switch_blocked` | unchanged | Reservation refusal: opened in its **own** committed transaction after the reservation transaction rolls back (see contracts), deduplicated so a repeat of the same reason for the same grant and run while one is open adds no second item. Launch refusal: opened in the same transaction that fails the invocation. | `:open` by `agent_runtime` (existing system-actor permission) | none |
+| Operations.Failure | Existing (delta) | Operator attention items | no new attributes; new `detail.reason` values: class `budget_exhausted`: `no_eligible_grant`, `no_allocation`, `ambiguous_allocation`, `grant_exhausted`, `allocation_exhausted`, `grant_day_exhausted`, `no_usage_origin`; class `provider_error`: `grant_ineligible_at_launch`, `profile_mismatch_at_launch`, `legacy_invocation_without_grant`, `profile_switch_blocked` | unchanged | Reservation refusal: opened in its **own** committed transaction after the reservation transaction rolls back (see contracts). Deduplicated atomically: that transaction takes the chain-head lock before checking for an open Failure with the same `(class, reason, grant or none, run)` key, so concurrent and sequential repeats add no second item. Launch refusal: opened in the same transaction that fails the invocation. | `:open` by `agent_runtime` (existing system-actor permission) | none |
 | Tenant | Existing | Singleton tenant | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | — | — |
 | Accounts.User | Existing | Human operators | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (new resources reference it as creator/updater/requester only; role values and role-change rules unchanged) | — | OQ-2 |
 
@@ -91,24 +91,46 @@ admission, launch admission, the facade's sent boundary).
     the Reaper to open the port.
   - **Transaction.** One transaction: lock the run row, then the invocation
     row; re-read both fresh and tenant-scoped; then take the chain-head lock
-    through the event append.
-  - **Refusal conditions.** It refuses if the invocation is missing, belongs
-    to another tenant, is not `reserved` (this blocks replay of a terminal or
-    already sent row), is generation 1, or is not `claude_cli`. It also
-    refuses if its `profile_id` ≠ the effective profile.
-  - **Grant terms re-check.** Grant not revoked; t < `expires_at`; profile
-    still in `profile_ids`; allocation still in the grant and available. Room
-    is not re-checked: the attempt was already charged at reservation. So a
-    lowered cap never strands the last reserved slot, and a revocation or
-    expiry does stop it.
-  - **Outcome.** On success it marks the invocation `sent` and commits. On
-    refusal it fails the invocation (never sent) and opens the Failure in the
-    same committed transaction, then returns `{:error, reason}`.
-  - **Linearization.** Grant revocation and terms edits also append under
-    the chain-head lock, so either the edit commits first (launch refused) or
-    admission commits first (launch proceeds; revocation does not kill a
-    launched call). Admission never moves an invocation to another grant or
-    profile.
+    **explicitly** (`Kernel.lock_head/1`, as the reservation's daily check
+    already does) **before** reading any grant, allocation or switch state,
+    and hold it until the sent or failed transition commits. The event
+    append's own after-action lock is too late to order the eligibility
+    read.
+  - **Identity and state refusals (no mutation).** It refuses if the
+    invocation is missing, belongs to another tenant, is not `reserved` (a
+    replay of a sent, in-flight or terminal row), or is not `claude_cli`.
+    Such a refusal changes nothing on that invocation or any other row. A
+    sent call keeps running and settling normally. The refusal is returned
+    as `{:error, reason}` and logged as `authz.denied` or a refusal event
+    for the current tenant only.
+  - **Eligibility refusals (owned reserved row).** Only for an invocation
+    that is owned, tenant-matched and currently `reserved`, it re-checks the
+    **complete non-room predicate** against current terms:
+    - generation 2;
+    - `profile_id` = the effective profile;
+    - grant `active` (not revoked), with `starts_at ≤ t < expires_at`;
+    - `profile_id` still in the grant's `profile_ids`;
+    - the allocation still belongs to that grant and tenant;
+    - the allocation's `profile_id` restriction, if any, still matches;
+    - the trusted usage bucket is still in the allocation's `applies_to`;
+    - the allocation is available at t (window and release).
+
+    If any check fails, it moves that invocation to `failed` (never sent) and
+    opens the Failure in the same committed transaction, then returns
+    `{:error, reason}`.
+  - **Room is grandfathered.** Room (grant total, grant day limit,
+    allocation attempts) is not re-checked, because the attempt was already
+    charged at reservation. A lowered cap never strands an already reserved
+    call, including the last slot. Every other edit (revocation, expiry, a
+    later start, a profile or bucket restriction, a closed window) does stop
+    it.
+  - **Success.** It marks the invocation `sent` and commits.
+  - **Linearization.** Grant, allocation and setting mutators lock their own
+    row, then take the chain head; they never lock a run or invocation
+    afterwards. Because admission reads terms only while holding the chain
+    head, either an edit commits first (launch refused) or admission commits
+    first (launch proceeds; a later revocation does not kill a launched
+    call). Admission never moves an invocation to another grant or profile.
   - **After admission.** A deterministic spawn failure before any process
     exists becomes `failed`. An uncertain spawn or receipt becomes `unknown`,
     with admission closed and no relaunch, as today.
@@ -120,10 +142,13 @@ admission, launch admission, the facade's sent boundary).
   start option replacing the hard-coded alias, model and version constants,
   and an `:executable` option (absolute pinned path) used only by the app's
   runtime. Agent CLIs are untouched.
-- **Lock order summary.** Reservation: run → chain head. Launch admission:
-  run → invocation → chain head. Grant edits: grant row → chain head (the
-  reservation never locks grant rows; it reads committed terms under the
-  chain head). Switch request: setting row → chain head. No cycles.
+- **Lock order summary.** Reservation: run → chain head (explicit, before
+  grant reads). Launch admission: run → invocation → chain head (explicit,
+  before grant reads). Grant and allocation edits: grant row → chain head.
+  Switch request: setting row → chain head. Refusal reporting: chain head
+  (explicit, before the dedupe check). Admission and reservation never lock
+  grant rows; they read committed terms under the chain head. Mutators never
+  take run or invocation locks after the chain head. No cycles.
 
 ## 3. Out of scope
 
@@ -165,10 +190,17 @@ owner questions (OQ-4, OQ-3), not silent cuts.
   - A refusal leaves no payload, invocation or counter change, and leaves a
     persisted Failure and event (assert the stored rows, not only the
     returned tuple).
-  - A repeated refusal is deduplicated.
+  - Concurrent and sequential repeated refusals produce one Failure.
 - **Launch admission.**
-  - Queued call after expiry, revocation, profile removal or allocation
-    window close is refused, failed and never sent, with a Failure.
+  - Queued call after expiry, revocation, profile removal, a later grant
+    `starts_at`, an allocation profile restriction, removal of its bucket
+    from `applies_to`, or an allocation window close is refused, failed and
+    never sent, with a Failure.
+  - A revocation that commits after admission locked the run and invocation
+    but before it read the terms is seen (launch refused).
+  - Replay of a sent id while its process is running: refused, the row and
+    the process are untouched and it settles normally. Terminal, foreign
+    and missing ids: refused, with unchanged rows asserted.
   - Queued call after a lowered cap still launches (already charged).
   - Last-slot launch succeeds.
   - Replayed or terminal id refused; forged and cross-tenant ids refused.
@@ -238,7 +270,13 @@ owner questions (OQ-4, OQ-3), not silent cuts.
   - Revised in this commit: generation cutover predicate, the reserve as an
     ordinary allocation, the moved sent boundary with `admit_launch/2`, and a
     separate refusal transaction.
-  - Round 2 verdict: _pending_.
+  - Round 2 at 8cf4fed: **BLOCKED** (consultation
+    m_1791823182209851208_8ec00bce, reply 01a130ff). Three narrow items:
+    1. an explicit chain-head lock before the eligibility reads;
+    2. the full non-room re-check;
+    3. replayed or foreign ids must not mutate the row.
+  - Revised in this commit, together with atomic refusal dedupe.
+  - Round 3 verdict: _pending_.
 - Owner G5: _pending_ (words, time, where).
 
 ## 8. Next authorized scope (when G5 passes)
