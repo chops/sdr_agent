@@ -157,8 +157,15 @@ only (1): real data never means a real message is sent.
    on.
 5. **Public surfaces.** Issues, pull requests, docs, fixtures, screenshots and
    evidence that leave the owner's machine stay synthetic. The owner masks or
-   stops recording when real names or addresses would appear (walkthrough F1c).
-   Screenshots of real people's data are not taken by the agents.
+   stops recording when real names or addresses would appear in anything
+   shared (walkthrough F1c).
+   - **Citation screenshots.** Private citation screenshots are allowed,
+     including names and emails (for example from the attended LinkedIn
+     flow). They are stored only on the owner's machine (the local database
+     or private evidence store) and are never shared outside it (D-110,
+     walkthrough row 28).
+   - **Agents.** Agents never attach, paste or publish a screenshot of real
+     people's data anywhere.
 6. **Minimal fields.** Collect the standard CRM fields needed to qualify and
    reach a person (F1c); no sensitive categories. Contact details published
    on a source are kept as candidates with their citation and never
@@ -201,3 +208,8 @@ only (1): real data never means a real message is sent.
   private Claude session chat.
 - Independent review: Codex APPROVE of exact head 8a401f1 (after CHANGES
   REQUESTED on a552e15 was addressed); reply 01a130fa.
+- Rule 5 clarified 2026-10-12. The owner's words: "i do not forbid
+  screenshots showing names and emails. private citation screenshots are OK,
+  they just don't get shared outside of my machine". The owner accepted
+  this wording on 2026-10-12 ("accept PR #129") after Codex's independent
+  approval of 83649ff.
