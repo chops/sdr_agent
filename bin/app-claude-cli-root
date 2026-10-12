@@ -162,21 +162,30 @@ fi
 # 3. previous := current's target, then current := the build. The old
 #    rollback build stays rooted throughout: first under a backup root of
 #    our own, removed only once current is registered or previous has been
-#    restored from it (it is kept if the restore fails).
+#    restored from it (it is kept if the restore fails or the run is
+#    interrupted).
 old_previous=""
 if [ -L "$previous" ]; then old_previous="$(readlink "$previous")"; fi
 
 if [ -n "$old_previous" ] && [ "$old_previous" != "$old" ] &&
   nix-store --check-validity "$old_previous" 2>/dev/null; then
   backup="$dir/app-claude-cli-backup.$$.$RANDOM"
-  nix-store --add-root "$backup" --realise "$old_previous" >/dev/null ||
+  nix-store --add-root "$backup" --realise "$old_previous" >/dev/null || {
+    backup=""
     die "could not register a backup root for the rollback build; nothing changed"
+  }
+  # Kept by default: an interrupt (INT/TERM) or any unexpected exit before
+  # publication or restoration completes leaves the rollback build rooted.
+  keep_backup=1
 fi
 
 if [ -n "$old" ]; then
   if nix-store --check-validity "$old" 2>/dev/null; then
-    nix-store --add-root "$previous" --realise "$old" >/dev/null ||
+    if ! nix-store --add-root "$previous" --realise "$old" >/dev/null; then
+      # previous still names the old rollback build, so the backup can go.
+      if [ "$(readlink "$previous" 2>/dev/null || true)" = "$old_previous" ]; then keep_backup=0; fi
       die "could not register the rollback root; current is unchanged"
+    fi
   else
     printf '%s\n' "app-claude-cli-root: previous build $old is gone; no rollback root kept" >&2
   fi
@@ -184,14 +193,18 @@ fi
 
 if ! nix-store --add-root "$current" --realise "$out" >/dev/null; then
   if [ -n "$old_previous" ] && [ "$old_previous" != "$(readlink "$previous" 2>/dev/null || true)" ]; then
-    if ! nix-store --add-root "$previous" --realise "$old_previous" >/dev/null 2>&1; then
-      keep_backup=1
+    if nix-store --add-root "$previous" --realise "$old_previous" >/dev/null 2>&1; then
+      keep_backup=0
+    else
       printf '%s\n' "app-claude-cli-root: could not restore the previous rollback root;" \
         "${backup:-no backup root} still keeps $old_previous alive" >&2
     fi
   fi
   die "could not register the current root; current is unchanged"
 fi
+keep_backup=0
 
-# 4. The staging and backup roots are dropped by the exit trap.
+# 4. The staging root, and the backup root once current is registered or
+#    previous restored, are dropped by the exit trap. A backup root left by
+#    an interrupted run keeps its build alive; remove it by hand when done.
 printf '%s\n' "$bin"

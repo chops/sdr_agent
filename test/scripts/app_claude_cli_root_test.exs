@@ -322,6 +322,48 @@ defmodule SdrAgent.Scripts.AppClaudeCLIRootTest do
     assert target(ctx, "current") == nil
   end
 
+  test "an interrupt before current is registered keeps the old rollback build rooted (Codex probe)",
+       ctx do
+    a = build!(ctx, "interrupt-a")
+    b = build!(ctx, "interrupt-b")
+    p0 = build!(ctx, "interrupt-p0")
+    pin!(ctx, b)
+    link!(ctx, "current", a)
+    link!(ctx, "previous", p0)
+
+    stub!(ctx.root, "nix-store", """
+    #!/bin/sh
+    case "$1" in
+      --check-validity) [ -e "$2" ]; exit $? ;;
+      --add-root)
+        if [ "$(basename "$2")" = app-claude-cli-current ]; then
+          kill -TERM "$PPID"
+          exit 1
+        fi
+        ln -sfn "$4" "$2"
+        exit 0
+        ;;
+    esac
+    exit 2
+    """)
+
+    {out, status} = run(ctx, b)
+    assert status != 0, out
+    assert target(ctx, "current") == a
+    roots = File.ls!(ctx.gcroots)
+
+    targets =
+      Enum.flat_map(roots, fn name ->
+        case File.read_link(Path.join(ctx.gcroots, name)) do
+          {:ok, target} -> [target]
+          _ -> []
+        end
+      end)
+
+    assert p0 in targets,
+           "old rollback lost its last root after SIGTERM; targets=#{inspect(targets)}"
+  end
+
   ## Helpers
 
   # The pid of a process that has already exited.
