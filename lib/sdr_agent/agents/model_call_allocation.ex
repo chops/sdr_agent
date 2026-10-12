@@ -188,4 +188,7 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
 
   @doc "Usage buckets an allocation may fund (D-104 mapping, C9-02)."
   def buckets, do: @buckets
+
+  @doc "The allocation keys: the usage buckets and the contexts (rehearsal, daily use, workshop)."
+  def keys, do: @keys
 end

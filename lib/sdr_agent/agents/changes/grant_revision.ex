@@ -19,7 +19,8 @@ defmodule SdrAgent.Agents.Changes.GrantRevision do
         Ash.Changeset.add_error(changeset,
           field: :expected_revision,
           message: "is stale: the grant is at revision %{current}",
-          vars: [current: current]
+          # Ash keeps the whole keyword as the message vars.
+          current: current
         )
       end
     end)

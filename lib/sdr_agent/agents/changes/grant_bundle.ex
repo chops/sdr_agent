@@ -209,7 +209,9 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
         Ash.Changeset.add_error(changeset,
           field: :allocations,
           message: "allocations total %{sum}, above the grant total of %{total}",
-          vars: [sum: sum, total: total]
+          # Ash keeps the whole keyword as the message vars.
+          sum: sum,
+          total: total
         )
 
       Enum.any?(final, &(not is_nil(Map.get(&1, :profile_id)) and &1.profile_id not in profiles)) ->
