@@ -151,6 +151,7 @@ defmodule SdrAgent.ChildEnvTest do
       ClaudeCLI.start_link(
         command: System.find_executable("elixir"),
         test_launcher: true,
+        launch_admission: &SdrAgent.Test.LaunchAdmission.admitted/3,
         command_args: [@fake, "env_names", dump]
       )
 
@@ -198,6 +199,7 @@ defmodule SdrAgent.ChildEnvTest do
           [
             command: System.find_executable("elixir"),
             test_launcher: true,
+            launch_admission: &SdrAgent.Test.LaunchAdmission.admitted/3,
             command_args: [@fake, "env_names", dump]
           ] ++
             opts
@@ -265,6 +267,7 @@ defmodule SdrAgent.ChildEnvTest do
       ClaudeCLI.start_link(
         command: System.find_executable("elixir"),
         test_launcher: true,
+        launch_admission: &SdrAgent.Test.LaunchAdmission.admitted/3,
         command_args: [@fake, "malformed"]
       )
 

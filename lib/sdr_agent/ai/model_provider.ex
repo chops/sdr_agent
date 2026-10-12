@@ -4,9 +4,22 @@ defmodule SdrAgent.AI.ModelProvider do
 
   The facade reserves an S3 `ModelInvocation` before the provider starts —
   which also enforces the per-run and the persisted per-UTC-day limits
-  (ADR-0004; `SdrAgent.Agents.reserve_model_invocation/3`) — marks the call
-  sent, validates every output with Zoi, and records completion, failure, or
-  an unknown outcome through `SdrAgent.Agents`. A refused reservation
+  (ADR-0004; `SdrAgent.Agents.reserve_model_invocation/3`) — validates every
+  output with Zoi, and records completion, failure, or an unknown outcome
+  through `SdrAgent.Agents`.
+
+  The sent boundary (C9-03): for the Fake (and any in-process provider) the
+  facade marks the call sent before the provider runs, as before. For
+  ClaudeCLI it does not: it hands the provider the reserved invocation id
+  (`:witness`), the row stays `reserved` while the call is queued, and the
+  ClaudeCLI server marks it sent through `SdrAgent.Agents.admit_launch/3`
+  just before it opens the port. The facade then re-reads the row before
+  settling: a sent row settles as before (completed, failed, or unknown); a
+  row the server's launch admission already failed is returned as that
+  refusal without another write; a row still `reserved` was never launched
+  (sent always precedes the port), so it is failed — never sent — whatever
+  the provider answered (a result without launch admission is
+  `{:error, :launch_not_admitted}`). A refused reservation
   (`{:error, {:budget_exhausted, :daily}}`, the run counter's
   `Ash.Error.Invalid`, or for ClaudeCLI a C9 grant refusal returned as
   `{:error, %SdrAgent.Agents.Admission.Refused{reason: :no_eligible_grant,
@@ -81,23 +94,30 @@ defmodule SdrAgent.AI.ModelProvider do
   defp run(request, provider, provider_options) do
     with {:ok, provenance} <- provider.prepare(request, provider_options),
          {:ok, invocation} <- reserve(request, provenance),
-         {:ok, sent} <- Agents.mark_model_invocation_sent(invocation, actor: request.actor) do
+         {:ok, invocation} <- before_call(invocation, request) do
       metadata = %{id: request.id, model: provenance.model_id, input: request.prompt}
 
       GenAI.with_span(request.operation, metadata, fn ->
         # Captured here, in the caller's process inside the gen_ai span and
-        # before any serialized provider hop (ADR-0005 S12 amendment).
-        witness = %{model_invocation_id: sent.id, traceparent: GenAI.traceparent()}
+        # before any serialized provider hop (ADR-0005 S12 amendment). For
+        # ClaudeCLI it also names the reserved invocation the server admits.
+        witness = %{model_invocation_id: invocation.id, traceparent: GenAI.traceparent()}
 
         invoke_validate_and_settle(
           provider,
           Map.put(request, :witness, witness),
-          sent,
+          invocation,
           provider_options
         )
       end)
     end
   end
+
+  # C9-03: a ClaudeCLI call is sent only by the server's launch admission.
+  defp before_call(%{provider: :claude_cli} = invocation, _request), do: {:ok, invocation}
+
+  defp before_call(invocation, request),
+    do: Agents.mark_model_invocation_sent(invocation, actor: request.actor)
 
   defp reserve(request, provenance) do
     attrs =
@@ -111,13 +131,44 @@ defmodule SdrAgent.AI.ModelProvider do
 
   defp invoke_validate_and_settle(provider, request, invocation, provider_options) do
     started = System.monotonic_time(:millisecond)
+    outcome = provider_call(provider, request, provider_options)
 
-    case provider_call(provider, request, provider_options) do
+    with {:ok, invocation} <- current(invocation) do
+      settle(outcome, request, invocation, started)
+    end
+  end
+
+  # ClaudeCLI's row may have been sent or failed by the server's launch
+  # admission meanwhile: it is re-read before settling. The Fake's is sent.
+  defp current(%{provider: :claude_cli} = invocation),
+    do: Agents.get_model_invocation(invocation.id, actor: actor(invocation))
+
+  defp current(invocation), do: {:ok, invocation}
+
+  defp settle(outcome, request, %{status: :sent} = invocation, started) do
+    case outcome do
       {:ok, result} -> settle_result(request, invocation, result, started)
       {:error, reason} -> fail(invocation, reason, started)
       {:unknown, _reason} -> mark_unknown(invocation)
     end
   end
+
+  # Never launched: the server sends before it opens the port.
+  defp settle(outcome, _request, %{status: :reserved} = invocation, started) do
+    reason =
+      case outcome do
+        {:ok, _result} -> :launch_not_admitted
+        {:error, reason} -> reason
+        {:unknown, reason} -> reason
+      end
+
+    fail(invocation, reason, started)
+  end
+
+  # Already terminal — failed by launch admission (with its Failure), or
+  # settled by crash recovery meanwhile: nothing more is written.
+  defp settle({:error, reason}, _request, _terminal, _started), do: {:error, reason}
+  defp settle(_outcome, _request, _terminal, _started), do: {:error, :invocation_already_settled}
 
   defp provider_call(provider, request, provider_options) do
     provider.complete(request, provider_options)
