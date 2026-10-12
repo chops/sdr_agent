@@ -84,32 +84,31 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
   # so every stored row gets at most one governed write.
   defp plan_requests(requests, candidates, stored) do
     {writes, final} =
-      Enum.reduce(requests, {[], candidates}, fn request, {writes, final} ->
-        key = request.key
-        profile_id = request[:profile_id]
-
-        case Enum.find(stored, &same?(&1, key, profile_id)) do
-          nil ->
-            new =
-              Map.merge(%{key: key, profile_id: profile_id}, Map.take(request, @allocation_terms))
-
-            {[{:create, new} | writes], final ++ [new]}
-
-          %ModelCallAllocation{} = allocation ->
-            changes = Map.take(request, @allocation_terms)
-
-            final =
-              Enum.map(final, fn candidate ->
-                if same?(candidate, key, profile_id),
-                  do: Map.merge(candidate, changes),
-                  else: candidate
-              end)
-
-            {[{:update, allocation, changes} | writes], final}
-        end
-      end)
+      Enum.reduce(requests, {[], candidates}, &plan_request(&1, &2, stored))
 
     {:ok, Enum.reverse(writes), final}
+  end
+
+  defp plan_request(request, {writes, final}, stored) do
+    key = request.key
+    profile_id = request[:profile_id]
+    changes = Map.take(request, @allocation_terms)
+
+    case Enum.find(stored, &same?(&1, key, profile_id)) do
+      nil ->
+        new = Map.merge(%{key: key, profile_id: profile_id}, changes)
+        {[{:create, new} | writes], final ++ [new]}
+
+      %ModelCallAllocation{} = allocation ->
+        {[{:update, allocation, changes} | writes],
+         merge_candidate(final, key, profile_id, changes)}
+    end
+  end
+
+  defp merge_candidate(final, key, profile_id, changes) do
+    Enum.map(final, fn candidate ->
+      if same?(candidate, key, profile_id), do: Map.merge(candidate, changes), else: candidate
+    end)
   end
 
   defp candidate(%ModelCallAllocation{} = allocation),
@@ -143,17 +142,19 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
 
   defp normalize(request, mode) when is_map(request) do
     with {:ok, fields} <- known_fields(request) do
-      Enum.reduce_while(@fields, {:ok, %{}}, fn field, {:ok, acc} ->
-        case Map.fetch(fields, field) do
-          :error -> {:cont, {:ok, acc}}
-          {:ok, value} -> cast_field(field, value, acc)
-        end
-      end)
+      fields
+      |> cast_fields()
       |> require_fields(mode)
     end
   end
 
   defp normalize(_request, _mode), do: {:error, "each allocation must be a map"}
+
+  defp cast_fields(fields) do
+    Enum.reduce_while(fields, {:ok, %{}}, fn {field, value}, {:ok, acc} ->
+      cast_field(field, value, acc)
+    end)
+  end
 
   defp known_fields(request) do
     Enum.reduce_while(request, {:ok, %{}}, fn {name, value}, {:ok, acc} ->
