@@ -15,6 +15,37 @@ defmodule SdrAgent.AgentsFixtures do
     %{run: run, agent: agent, definition: definition}
   end
 
+  @doc """
+  Like `running_run/2`, but the run owns a running `research_lead`
+  Operation (as an assignment run does), so a result-gate cause can carry
+  its `operation_id` (R0-07 slice C). Returns `%{run, agent, operation}`.
+  """
+  def operated_run(tenant, opts \\ []) do
+    agent = system_actor(:agent_runtime, tenant)
+    definition = definition!(tenant)
+    key = "gate-run:#{System.unique_integer([:positive])}"
+
+    {:ok, operation} =
+      SdrAgent.Operations.create_operation(
+        %{
+          kind: :research_lead,
+          queue: :research,
+          subject_resource: "SdrAgent.Sales.Lead",
+          subject_id: Ecto.UUID.generate(),
+          idempotency_key: key,
+          correlation_id: Ecto.UUID.generate(),
+          max_attempts: 1
+        },
+        actor: agent
+      )
+
+    {:ok, operation} = SdrAgent.Operations.start_operation(operation, actor: agent)
+    attrs = definition |> run_attrs(opts) |> Map.put(:operation_id, operation.id)
+    {:ok, run} = SdrAgent.Agents.create_run(attrs, actor: agent)
+    {:ok, run} = SdrAgent.Agents.start_run(run, actor: agent)
+    %{run: run, agent: agent, operation: operation, definition: definition}
+  end
+
   @doc "Registers (or returns) the fixture agent definition."
   def definition!(tenant) do
     {:ok, definition} =
