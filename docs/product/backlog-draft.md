@@ -57,7 +57,7 @@ Story count: lane 1 44, lane 2 38, total 82.
 
 | ID | Story | Depends | Acceptance | Evidence |
 |---|---|---|---|---|
-| C9-01 | Grant entity delta | — | Delta covers grant fields (purpose, profiles, total, per-UTC-day, allocations, expiry, reserve), transfers, owner-only edit, lifecycle | Entity PASS (Codex) |
+| C9-01 | Grant entity delta | — | Delta covers grant fields (purpose, profiles, total, per-UTC-day, allocations, expiry, reserve), owner-only changes (no agent transfers, D-099), lifecycle | Entity PASS (Codex) |
 | C9-02 | Grant admission at reserve time | C9-01 | Grant+run+day checked in one transaction, existing lock order; duplicate idempotency never consumes twice; typed refusal | allow/deny + concurrency tests |
 | C9-03 | Launch-time eligibility | C9-02 | Reserved call that became ineligible (expiry, revocation, profile change) is refused at launch, never run under another grant/profile | tests incl. queued call across expiry |
 | C9-04 | Allocations and workshop reserve | C9-02 | Per-use allocations enforced; no agent or system changes to grant terms (D-099); reserve usable only on workshop day or after owner release; survives restart | tests |
