@@ -1,6 +1,9 @@
 # R0 readiness packet: model runtime, profiles, switch, call grants
 
-Status: **draft for independent review and owner G5.** Nothing here starts
+Status: **G5 approved by the owner on 2026-10-12** (section 7), with the
+owner's answers in section 6. Original status line kept below for history.
+
+Status (draft): **for independent review and owner G5.** Nothing here starts
 implementation until (1) Codex records an entity-model verdict of PASS on the
 table below, and (2) the owner approves G5 for the scope in "Next authorized
 scope". Real-model budget stays 0 until C9 is merged and the owner has created
@@ -28,7 +31,8 @@ Stories in scope: R0-02..R0-06, C2-01..C2-02, C9-01..C9-06
 | REQ-R0-8 | Every real-model attempt is charged to exactly one allocation of one owner-created grant when it is reserved, and admitted again just before launch. Attempts count whatever their outcome and are never refunded. With no eligible grant and allocation, no real call is made and nothing is charged. Fake calls need no grant. |
 | REQ-R0-9 | Only a human admin (an active, persisted user with the admin role, re-read at the time of the action) creates or edits a grant or its allocations, revokes it, or releases a held allocation early, through an admin form with a confirmation step; each change is audited with the previous values and revision. No system or agent actor can change a grant. |
 | REQ-R0-10 | When a reservation is refused (no eligible grant, allocation or day room) or a reserved call is refused at launch, the refusal is committed durably as an operator-attention item and an audit event, even though the reservation itself is rolled back. |
-| REQ-R0-11 | Proof: two synthetic attempts per profile succeed through the app with per-call attestation and raw wire-witness capture, and the owner switches Opus → Sonnet → Opus in the app. (Witness reconciliation for the new pairs: owner question OQ-3.) |
+| REQ-R0-11 | Calibration and proof (OQ-3 = (b)): the four G-R0 attempts (two per profile) are **calibration** calls under an owner-accepted exception: synthetic input, an isolated test database with test-only exact overrides, never a business flow, results quarantined as unreviewed evidence and never presented as reconciled. Codex independently reviews the captured exchanges against candidate projections built hermetically beforehand; only then is each exact tuple (pinned CLI version, profile, resolved model, prompt builder, method) promoted to reconciled. The owner then switches Opus → Sonnet → Opus in the app. If calibration needs more than four attempts (for example, a changed wire grammar), that is a new owner grant request; nothing is spent silently. |
+| REQ-R0-12 | Per-invocation result gate (OQ-3 = (b)): once a tuple is promoted, the result of every ordinary real call may be used downstream (validation, decisions, drafts) only after **that** invocation reconciles with the witness. Mismatch, missing capture or reconciliation timeout fails closed. The evidence and the charged attempt are kept, and no new call is made automatically. A tuple that is not promoted cannot make ordinary real calls. Reconciled proves the wire projection, not the factual accuracy of research. |
 
 ## 2. Entity model
 
@@ -155,8 +159,10 @@ admission, launch admission, the facade's sent boundary).
 API-key providers (Anthropic API, OpenAI, Gemini, OpenRouter); concurrent
 model calls (D-069); a grant editor beyond the admin form (B8 reuses it
 later); real prospect data (needs the constraint-7 amendment, PR #125).
-App-side Telegram sending and witness reconciliation for the new pairs are
-owner questions (OQ-4, OQ-3), not silent cuts.
+App-side Telegram: none (OQ-4, owner decision). The witness work for the
+new tuples is in scope (OQ-3 = (b)), requires an ADR-0005 amendment and its
+own entity/action review before that part is implemented, and is tracked as
+story R0-07.
 
 ## 4. Test plan (RED first, synthetic only)
 
@@ -232,6 +238,11 @@ owner questions (OQ-4, OQ-3), not silent cuts.
 
 ## 6. Questions for the owner (G5)
 
+**Owner answers (2026-10-12):** OQ-2 "(a)"; OQ-3 "(b) with the calibration
+exception", after Claude's and Codex's explanation of the bootstrap
+constraint and the per-invocation gate; OQ-4 "no telegram in the app" (no
+revisit story).
+
 - **OQ-1 (resolved by mapping).** Calls are charged by where the run
   started plus what the call does, using the mapping you approved (D-104).
   Rehearsal, daily-use and workshop budgets apply by date window, which you
@@ -286,11 +297,24 @@ owner questions (OQ-4, OQ-3), not silent cuts.
     designated-owner variant (OQ-2 alternative) would need a new delta and
     re-review. OQ-3 and OQ-4 are owner scope decisions. The PASS is not
     implementation, proof-call or deploy authority.
-- Owner G5: _pending_ (words, time, where).
+- Owner G5: **approved.** Words: "approve R0 G5" (with "(b) with the
+  calibration exception"); 2026-10-12, America/Denver; private Claude
+  session chat. Gate record: `docs/sdlc/gates/G5-R0.md`.
 
 ## 8. Next authorized scope (when G5 passes)
 
 Implement R0-02..R0-06, C2-01..C2-02 and C9-01..C9-06 as reviewed PRs
 (Claude authors, Codex reviews, exact-head CI), as adjusted by the owner's
-answers to OQ-2..OQ-4. The four proof attempts (R0-06) run only after C9 is
-merged and the owner has created G-R0 in the admin form. Nothing else.
+answers: human-admin grant authority (OQ-2 a), no app-side Telegram (OQ-4;
+C9-06 = Failure item only), and the witness tuple work R0-07 (OQ-3 b).
+Preconditions inside this scope:
+- **R0-07.** Its implementation (result gate, tuple promotion) starts only
+  after an ADR-0005 amendment is accepted by the owner and its entity/action
+  delta has an independent PASS. Hermetic candidate projections may be
+  drafted before then.
+- **Calibration.** The four calibration attempts run only after C9 is merged,
+  the owner has created G-R0 in the admin form, and the isolated calibration
+  setup is reviewed.
+- **No ordinary real calls** until a tuple is promoted.
+
+Nothing else.
