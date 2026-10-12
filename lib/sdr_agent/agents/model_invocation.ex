@@ -35,6 +35,9 @@ defmodule SdrAgent.Agents.ModelInvocation do
   AGT creates and transitions only (through `SdrAgent.Agents`); reads for
   any actor (metadata only — content via `SdrAgent.Audit.read_content/2`).
   Audited: `model.invocation.reserved | sent | completed | failed | unknown`.
+
+  An `(id, tenant_id)` unique key is the target of the
+  `SdrAgent.Agents.ModelResultRelease` composite FK (R0-07).
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -133,6 +136,15 @@ defmodule SdrAgent.Agents.ModelInvocation do
 
         down "ALTER TABLE model_invocations DROP CONSTRAINT model_invocations_grant_tenant_fkey"
         after_tables ["model_call_grants"]
+      end
+
+      # Target of the ModelResultRelease (model_invocation_id, tenant_id)
+      # composite FK (R0-07).
+      statement :model_invocations_id_tenant_key do
+        up "ALTER TABLE model_invocations ADD CONSTRAINT model_invocations_id_tenant_key " <>
+             "UNIQUE (id, tenant_id)"
+
+        down "ALTER TABLE model_invocations DROP CONSTRAINT model_invocations_id_tenant_key"
       end
 
       statement :model_invocations_allocation_grant_fkey do
@@ -380,6 +392,7 @@ defmodule SdrAgent.Agents.ModelInvocation do
 
     has_many :decisions, SdrAgent.Agents.Decision, public?: true
     has_many :wire_witness_links, SdrAgent.Agents.WireWitnessLink, public?: true
+    has_one :result_release, SdrAgent.Agents.ModelResultRelease, public?: true
   end
 
   identities do

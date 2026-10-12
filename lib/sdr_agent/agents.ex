@@ -36,6 +36,9 @@ defmodule SdrAgent.Agents do
       `current_wire_witness_links/2`, `witness_status/2` (S12c), and
       `read_reconciliation_payloads/2` (REC; the only path to the scoped
       Payload read). Reconciliation itself: `SdrAgent.Agents.Witness`;
+    * result release (R0-07) — `decide_result_release/2` (AGT; the one
+      immutable `ModelResultRelease` of an invocation), `get_result_release/2`,
+      `list_result_releases/1`;
     * real-model call grants (C9) — `create_grant/2`,
       `update_grant_terms/3`, `revoke_grant/3`, `release_allocation/3`
       (each an active human admin only, in one transaction, refusing a stale
@@ -57,6 +60,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.Decision
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.AI.ModelProfiles
@@ -80,6 +84,7 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.WireWitnessLink
     resource SdrAgent.Agents.ModelCallGrant
     resource SdrAgent.Agents.ModelCallAllocation
+    resource SdrAgent.Agents.ModelResultRelease
   end
 
   ## Definitions
@@ -712,6 +717,53 @@ defmodule SdrAgent.Agents do
       context: scope
     )
     |> Ash.run_action()
+  end
+
+  ## Result release (R0-07)
+
+  @doc """
+  AGT: decides the one immutable release of a model output. `attrs`:
+  `model_invocation_id`, `disposition`, `reason`, optional
+  `wire_witness_link_id` and (calibration latches only) `evidence_sha256`;
+  `context:` carries the test-seam calibration context. An identical replay
+  returns the existing release; a conflicting one fails with
+  `SdrAgent.Agents.Errors.ReleaseConflict`. See
+  `SdrAgent.Agents.ModelResultRelease`.
+  """
+  def decide_result_release(attrs, opts) do
+    actor = Keyword.get(opts, :actor)
+    attrs = Map.new(attrs)
+
+    guard(ModelResultRelease, :decide, Map.get(attrs, :model_invocation_id), actor, fn ->
+      ModelResultRelease
+      |> Ash.Changeset.for_create(:decide, attrs,
+        actor: actor,
+        context: Keyword.get(opts, :context, %{})
+      )
+      |> Ash.create()
+    end)
+  end
+
+  @doc "The release of an invocation in the actor's tenant: `{:ok, release | nil}`."
+  def get_result_release(invocation_id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    ModelResultRelease
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(model_invocation_id == ^invocation_id)
+    |> Ash.read_one()
+  end
+
+  @doc "The releases of the actor's tenant, oldest decision first."
+  def list_result_releases(opts) do
+    actor = Keyword.get(opts, :actor)
+
+    ModelResultRelease
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.sort(decided_at: :asc, id: :asc)
+    |> Ash.read()
   end
 
   ## Helpers
