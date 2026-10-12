@@ -24,6 +24,7 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
       {ClaudeCLI,
        name: ClaudeCLI.server(),
        command: System.find_executable("elixir"),
+       test_launcher: true,
        command_args: [@fake, "sdr"]}
     )
   end
@@ -115,6 +116,7 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
       {ClaudeCLI,
        name: ClaudeCLI.server(),
        command: System.find_executable("elixir"),
+       test_launcher: true,
        command_args: [@fake, "hang", prefix],
        timeout: 1_500}
     )

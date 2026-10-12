@@ -8,11 +8,12 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
   server is a typed error, never a raise or a silent fallback to Fake.
 
   R0-02 (ADR-0004 R0 amendment, item 1): with ClaudeCLI selected,
-  `SDR_CLAUDE_CLI_BIN` must name the app's pinned CLI (an absolute path to
-  an executable inside /nix/store); unset or invalid refuses boot, never
-  falling back to `claude` on `PATH`. The app's server is started with it,
-  and a configured binary that has gone missing refuses calls before any
-  reservation.
+  `SDR_CLAUDE_CLI_BIN` must be exactly the reviewed pinned CLI of
+  `nix/app-claude-cli.identity` (path and sha256); unset or anything else
+  refuses boot, never falling back to `claude` on `PATH`. The app's server
+  is started with it; a pin that is absent or has gone missing refuses
+  calls before any reservation, and every ordinary real call is staged
+  (`:real_model_staged`, zero launches) until R0-03, C9 and R0-07 land.
   """
   # Reads and sets the process environment and the application env.
   use ExUnit.Case, async: false
@@ -54,6 +55,18 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
     :ok
   end
 
+  # The boot refusal message for SDR_CLAUDE_CLI_BIN=value (flunks if accepted).
+  defp boot_refusal(value) do
+    System.put_env("SDR_CLAUDE_CLI_BIN", value)
+
+    try do
+      selected(:dev)
+      flunk("#{inspect(value)} was accepted")
+    rescue
+      error in RuntimeError -> Exception.message(error)
+    end
+  end
+
   defp selected(env) do
     base = Config.Reader.read!("config/config.exs", env: env, target: :host)
     runtime = Config.Reader.read!("config/runtime.exs", env: env, target: :host)
@@ -70,7 +83,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
     end
 
     test "claude_cli is allowed in development with a configured timeout and pinned CLI" do
-      bin = PinnedCLI.store_path!()
+      bin = PinnedCLI.inject_identity!()
       System.put_env("SDR_MODEL_PROVIDER", "claude_cli")
       System.put_env("SDR_CLAUDE_CLI_BIN", bin)
       assert {ClaudeCLI, [timeout: 240_000, executable: ^bin]} = selected(:dev)
@@ -87,10 +100,12 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       end
     end
 
-    test "R0-02: SDR_CLAUDE_CLI_BIN must be an existing executable inside /nix/store" do
+    test "R0-02: SDR_CLAUDE_CLI_BIN must be exactly the reviewed pinned artifact" do
       System.put_env("SDR_MODEL_PROVIDER", "claude_cli")
+      elixir = PinnedCLI.inject_identity!()
 
       for {value, reason} <- [
+            {Path.join(Path.dirname(elixir), "elixirc"), "not_the_pinned_path"},
             {"", "not_a_path"},
             {"bin/claude-code", "not_absolute"},
             {"claude-code", "not_absolute"},
@@ -99,20 +114,23 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
             {Path.expand("../../support/fake_claude_cli.exs", __DIR__), "not_in_nix_store"},
             {PinnedCLI.missing_store_path(), "missing"}
           ] do
-        System.put_env("SDR_CLAUDE_CLI_BIN", value)
-
-        message =
-          try do
-            selected(:dev)
-            nil
-          rescue
-            error in RuntimeError -> Exception.message(error)
-          end
-
-        assert message, "#{inspect(value)} was accepted"
-        assert message =~ "SDR_CLAUDE_CLI_BIN refused (#{reason})", inspect(value)
-        assert message =~ "/nix/store"
+        assert boot_refusal(value) =~ "SDR_CLAUDE_CLI_BIN refused (#{reason})", inspect(value)
       end
+    end
+
+    test "R0-02: the pinned path with other content (sha256) refuses boot" do
+      System.put_env("SDR_MODEL_PROVIDER", "claude_cli")
+      elixir = PinnedCLI.inject_identity!(nil, sha256: String.duplicate("0", 64))
+
+      assert boot_refusal(elixir) =~ "SDR_CLAUDE_CLI_BIN refused (hash_mismatch)"
+    end
+
+    test "R0-02: against the shipped identity record, the dev shell's Elixir refuses boot" do
+      System.put_env("SDR_MODEL_PROVIDER", "claude_cli")
+      Application.delete_env(:sdr_agent, ClaudeCLI.PinnedExecutable)
+
+      assert boot_refusal(PinnedCLI.store_path!()) =~
+               ~r/SDR_CLAUDE_CLI_BIN refused \((not_the_pinned_path|unsupported_platform)\)/
     end
 
     test "R0-02: SDR_CLAUDE_CLI_BIN is ignored unless claude_cli is selected" do
@@ -151,7 +169,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       end
 
       System.put_env("SDR_MODEL_PROVIDER", "claude_cli")
-      System.put_env("SDR_CLAUDE_CLI_BIN", PinnedCLI.store_path!())
+      System.put_env("SDR_CLAUDE_CLI_BIN", PinnedCLI.inject_identity!())
 
       for timeout <- ["0", "-5", "ten", "100ms", "", "999"] do
         System.put_env("SDR_CLAUDE_CLI_TIMEOUT_MS", timeout)
@@ -269,6 +287,53 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       assert %{effective: nil, refusal: :pinned_cli_unavailable} = Runtime.status()
     end
 
+    test "R0-02: the real launcher without a pin is refused before any reservation" do
+      dir = tmp_dir!()
+      counter = PinnedCLI.stub_shim!(dir)
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+      start_supervised!({ClaudeCLI, name: ClaudeCLI.server()})
+
+      assert {:error, :pinned_cli_unavailable} = Runtime.resolve([])
+      assert {:error, :pinned_cli_unavailable} = ClaudeCLI.complete(request(), [])
+      assert PinnedCLI.launches(counter) == 0
+    end
+
+    test "R0-02: the real launcher with the reviewed pin is staged: refused, zero launches" do
+      dir = tmp_dir!()
+      counter = PinnedCLI.stub_shim!(dir)
+      bin = PinnedCLI.inject_identity!()
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+      Application.put_env(:sdr_agent, ClaudeCLI, executable: bin)
+      [child] = Runtime.children()
+      start_supervised!(child)
+
+      assert %{executable: ^bin, executable?: true, test_launcher?: false} =
+               ClaudeCLI.attestation()
+
+      assert {:error, :real_model_staged} = Runtime.resolve([])
+      assert {:error, :real_model_staged} = Runtime.resolve(provider: ClaudeCLI)
+      assert {:error, :real_model_staged} = ClaudeCLI.complete(request(), [])
+      assert %{effective: nil, refusal: :real_model_staged} = Runtime.status()
+      assert Runtime.refusal_message(:real_model_staged) =~ "no model call was made"
+      assert PinnedCLI.launches(counter) == 0
+    end
+
+    test "R0-02: test_launcher is honoured only with an explicitly injected :command" do
+      dir = tmp_dir!()
+      counter = PinnedCLI.stub_shim!(dir)
+      bin = PinnedCLI.inject_identity!()
+      Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
+
+      start_supervised!(
+        {ClaudeCLI, name: ClaudeCLI.server(), executable: bin, test_launcher: true}
+      )
+
+      assert %{test_launcher?: false} = ClaudeCLI.attestation()
+      assert {:error, :real_model_staged} = Runtime.resolve([])
+      assert {:error, :real_model_staged} = ClaudeCLI.complete(request(), [])
+      assert PinnedCLI.launches(counter) == 0
+    end
+
     test "status reports the configured and the effective provider" do
       Application.put_env(:sdr_agent, :model_provider, Fake)
       assert %{configured: Fake, effective: Fake} = Runtime.status()
@@ -361,6 +426,26 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
     end
   end
 
+  defp tmp_dir! do
+    dir = Path.join(System.tmp_dir!(), "sdr-runtime-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+    dir
+  end
+
+  defp request do
+    %{
+      id: "runtime-staged",
+      operation: "model.complete",
+      prompt: "qualify",
+      schema: Zoi.object(%{answer: Zoi.string()}),
+      witness: %{
+        model_invocation_id: Ash.UUIDv7.generate(),
+        traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+      }
+    }
+  end
+
   defp start_named!(mode, opts \\ []) do
     start_supervised!(
       {ClaudeCLI,
@@ -368,6 +453,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
          [
            name: ClaudeCLI.server(),
            command: System.find_executable("elixir"),
+           test_launcher: true,
            command_args: [@fake, mode]
          ],
          opts

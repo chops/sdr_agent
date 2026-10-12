@@ -32,19 +32,31 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   ## The app's pinned CLI (R0-02, ADR-0004 R0 amendment item 1)
 
-  The `:executable` option is the absolute `/nix/store` path of the app's
-  own pinned Claude CLI (`SDR_CLAUDE_CLI_BIN`, passed by
-  `SdrAgent.AI.ModelProvider.Runtime.children/0`). Each launch hands it to
-  `llm-proxy-shim` as `LLM_PROXY_SHIM_CLAUDE_BIN` in that call's child
-  environment only; the parent's value of that name is never inherited
-  (without `:executable` it is removed), and the BEAM environment is never
-  modified. The path is re-checked before every launch
-  (`SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable`): a missing or
-  invalid build is `{:error, :pinned_cli_unavailable}` before any process
-  starts, never a fallback to `claude` on `PATH`. Boot runs no CLI; the
-  attestation status publishes the path and whether it passes the check.
-  Without `:executable` (hermetic tests with a fake launcher) no pinned
-  path is named to the shim.
+  The `:executable` option is the app's own pinned Claude CLI
+  (`SDR_CLAUDE_CLI_BIN`, verified against `nix/app-claude-cli.identity` at
+  boot and passed by `SdrAgent.AI.ModelProvider.Runtime.children/0`). Each
+  launch hands it to `llm-proxy-shim` as `LLM_PROXY_SHIM_CLAUDE_BIN` in
+  that call's child environment only; the parent's value of that name is
+  never inherited, and the BEAM environment is never modified. Before
+  every launch the path is re-checked
+  (`SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable.check/1`: the
+  exact recorded path, still a sound store file). A missing pin or one that
+  fails the check is `{:error, :pinned_cli_unavailable}` before any process
+  starts: the shim never falls back to its default `claude-code` on `PATH`.
+
+  ## Staged: no ordinary real call yet (R0-02)
+
+  Until the profile registry (R0-03), owner call grants (C9) and the
+  witness tuple work (R0-07) land, every launch through the real launcher
+  is refused before any process starts with `{:error, :real_model_staged}`
+  (after the pin check), and `Runtime.resolve/1` refuses it before any
+  reservation. Nothing configurable from the environment lifts this.
+
+  **Test launchers.** Only in a test build (`:claude_cli_test_seams`,
+  config/test.exs) does `test_launcher: true` mark an explicitly injected
+  `:command` (a hermetic fake, or the real shim aimed at a harmless
+  stand-in) that may run without `:executable` and past the staged gate.
+  Other builds ignore the option.
 
   One GenServer serialises every call (ADR-0004, C8: concurrency 1).
 
@@ -121,6 +133,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
                      ~w(TERM LLM_OTEL_PROXY_URL ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR
                         SSL_CERT_FILE NIX_SSL_CERT_FILE NODE_EXTRA_CA_CERTS)
   @shim_cli_bin "LLM_PROXY_SHIM_CLAUDE_BIN"
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
   @invocation_id ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
   @traceparent ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-(?:00|01)\z/
   @model_alias "opus"
@@ -140,7 +153,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   Starts a server. Options: `:name` (registers it and keeps its attestation
   status readable by name), `:command`, `:command_args`, `:cli_args`,
   `:timeout` (ms), `:expected_model`, `:environment`, `:executable` (the
-  app's pinned CLI, absolute `/nix/store` path).
+  app's pinned CLI, absolute `/nix/store` path), `:test_launcher` (test
+  builds only).
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
 
@@ -181,8 +195,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   @doc """
   The last init attestation of the named `server`: `%{status: :pending |
   :attested | :drift, reason, model, version, at, command?, executable,
-  executable?}` (`executable` is the pinned CLI path or nil; `executable?`
-  whether it passed the pinned-CLI check when recorded, nil without one),
+  executable?, test_launcher?}` (`executable` is the pinned CLI path or
+  nil; `executable?` whether it passed the pinned-CLI check when recorded,
+  nil without one; `test_launcher?` true only for a test build's injected
+  launcher),
   or `%{status: :not_running}`. Never blocks on a running call.
   """
   def attestation(server \\ @server) when is_atom(server) do
@@ -285,6 +301,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       command_args: Keyword.get(opts, :command_args, ["claude"]),
       cli_args: Keyword.get(opts, :cli_args, []),
       executable: Keyword.get(opts, :executable),
+      test_launcher: test_launcher?(opts),
       timeout: timeout,
       expected_model: Keyword.get(opts, :expected_model, @resolved_model),
       environment: Keyword.get(opts, :environment),
@@ -381,9 +398,13 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     if is_nil(state.command),
       do: Logger.warning("ClaudeCLI selected but llm-proxy-shim was not found on PATH")
 
-    with path when is_binary(path) <- state.executable,
-         {:error, reason} <- PinnedExecutable.check(path),
-         do: Logger.error("ClaudeCLI pinned CLI unavailable (#{reason}); calls refused")
+    case pinned(state) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("ClaudeCLI pinned CLI unavailable (#{reason}); calls refused")
+    end
 
     note(state, %{status: :pending, reason: nil, model: nil, version: nil})
   end
@@ -401,7 +422,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         at: Clock.utc_now(),
         command?: not is_nil(state.command),
         executable: state.executable,
-        executable?: pinned?(state.executable)
+        executable?: if(state.executable, do: pinned(state) == :ok),
+        test_launcher?: state.test_launcher
       })
 
     :ets.insert(state.table, {:attestation, attestation})
@@ -483,7 +505,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     do: {{:error, :llm_proxy_shim_not_found}, state}
 
   defp run(request, state, caller, deadline) do
-    with :ok <- pinned(state.executable),
+    with :ok <- pinned_launch(state),
+         :ok <- staged(state),
          {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
          :ok <- refuse_bypass(state.environment || System.get_env()) do
       launch(request, state, caller, deadline, witness_env)
@@ -492,19 +515,30 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     end
   end
 
-  # No pinned CLI configured (hermetic fake launchers) names none to the
-  # shim; a configured one must still pass the rule at launch.
-  defp pinned(nil), do: :ok
+  # Only a test build's injected launcher may run without a pin; a
+  # configured pin must still pass the check at launch.
+  defp pinned(%{executable: nil, test_launcher: true}), do: :ok
+  defp pinned(%{executable: nil}), do: {:error, :no_pinned_cli}
+  defp pinned(%{executable: path}), do: PinnedExecutable.check(path)
 
-  defp pinned(path) do
-    case PinnedExecutable.check(path) do
+  defp pinned_launch(state) do
+    case pinned(state) do
       :ok -> :ok
       {:error, _reason} -> {:error, :pinned_cli_unavailable}
     end
   end
 
-  defp pinned?(nil), do: nil
-  defp pinned?(path), do: pinned(path) == :ok
+  # R0-02 staging: the real launcher spends no call until R0-03, C9 and
+  # R0-07 land; only a test build's injected launcher runs.
+  defp staged(%{test_launcher: true}), do: :ok
+  defp staged(_state), do: {:error, :real_model_staged}
+
+  if @test_seams do
+    defp test_launcher?(opts),
+      do: Keyword.has_key?(opts, :command) and Keyword.get(opts, :test_launcher) == true
+  else
+    defp test_launcher?(_opts), do: false
+  end
 
   defp witness_env(%{model_invocation_id: id, traceparent: traceparent})
        when is_binary(id) and is_binary(traceparent) do

@@ -196,6 +196,7 @@ defmodule SdrAgent.Operations.AttentionTest do
       {:ok, server} =
         ClaudeCLI.start_link(
           command: System.find_executable("elixir"),
+          test_launcher: true,
           command_args: [@fake_cli, "version_drift"]
         )
 

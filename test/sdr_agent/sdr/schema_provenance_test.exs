@@ -28,6 +28,7 @@ defmodule SdrAgent.SDR.SchemaProvenanceTest do
     {:ok, server} =
       ClaudeCLI.start_link(
         command: System.find_executable("elixir"),
+        test_launcher: true,
         command_args: [@fake, "witness", root, "ok"]
       )
 

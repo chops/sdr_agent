@@ -69,8 +69,12 @@ case {config_env(), System.get_env("SDR_MODEL_PROVIDER")} do
 
     # R0-02 (ADR-0004 R0 amendment, item 1): the app launches only its own
     # pinned CLI, by absolute /nix/store path, handed to llm-proxy-shim as
-    # LLM_PROXY_SHIM_CLAUDE_BIN for that launch. Unset or invalid refuses
-    # boot; there is no fallback to `claude` on PATH or to the Fake.
+    # LLM_PROXY_SHIM_CLAUDE_BIN for that launch. The path must be exactly the
+    # reviewed build in nix/app-claude-cli.identity for this platform, and
+    # its sha256 must match (hashed once, here). Unset or anything else
+    # refuses boot; there is no fallback to `claude` on PATH or to the Fake.
+    # Ordinary real calls stay refused (:real_model_staged) until R0-03, C9
+    # and R0-07 land.
     executable =
       case System.get_env("SDR_CLAUDE_CLI_BIN") do
         nil ->
@@ -81,15 +85,16 @@ case {config_env(), System.get_env("SDR_MODEL_PROVIDER")} do
           """
 
         path ->
-          case SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable.check(path) do
+          case SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable.verify(path) do
             :ok ->
               path
 
             {:error, reason} ->
               raise """
-              SDR_CLAUDE_CLI_BIN refused (#{reason}): it must be the absolute path of \
-              an existing executable inside /nix/store, the app's pinned Claude CLI \
-              (print it with bin/app-claude-cli-root). There is no PATH fallback (ADR-0004).
+              SDR_CLAUDE_CLI_BIN refused (#{reason}): it must be exactly the app's pinned \
+              Claude CLI recorded in nix/app-claude-cli.identity for this platform, an \
+              executable inside /nix/store with the recorded sha256 (print it with \
+              bin/app-claude-cli-root). There is no PATH fallback (ADR-0004).
               """
           end
       end

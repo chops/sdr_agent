@@ -150,6 +150,7 @@ defmodule SdrAgent.ChildEnvTest do
     {:ok, server} =
       ClaudeCLI.start_link(
         command: System.find_executable("elixir"),
+        test_launcher: true,
         command_args: [@fake, "env_names", dump]
       )
 
@@ -188,13 +189,17 @@ defmodule SdrAgent.ChildEnvTest do
 
     for {label, opts, expected?} <- [
           {"unconfigured", [], false},
-          {"pinned", [executable: SdrAgent.Test.PinnedCLI.store_path!()], true}
+          {"pinned", [executable: SdrAgent.Test.PinnedCLI.inject_identity!()], true}
         ] do
       dump = Path.join(ctx.dir, "claude-env-#{label}.json")
 
       {:ok, server} =
         ClaudeCLI.start_link(
-          [command: System.find_executable("elixir"), command_args: [@fake, "env_names", dump]] ++
+          [
+            command: System.find_executable("elixir"),
+            test_launcher: true,
+            command_args: [@fake, "env_names", dump]
+          ] ++
             opts
         )
 
@@ -259,6 +264,7 @@ defmodule SdrAgent.ChildEnvTest do
     {:ok, server} =
       ClaudeCLI.start_link(
         command: System.find_executable("elixir"),
+        test_launcher: true,
         command_args: [@fake, "malformed"]
       )
 

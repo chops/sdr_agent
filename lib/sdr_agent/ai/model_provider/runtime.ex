@@ -23,9 +23,11 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       unhealthy ClaudeCLI is a typed refusal before any reservation:
       `{:error, :provider_not_running}`, `:provider_not_quiescent`
       (admission closed), `:llm_proxy_shim_not_found` or
-      `:pinned_cli_unavailable` (its pinned CLI build is missing or fails the
-      pinned-CLI rule) — never a raise and never a silent fallback to the
-      Fake or to `claude` on `PATH`. Per-call init attestation stays
+      `:pinned_cli_unavailable` (no pin, or the pinned build is missing or
+      is not the reviewed identity) or `:real_model_staged` (R0-02 staging:
+      no ordinary real call until R0-03, C9 and R0-07 land; only a test
+      build's injected launcher passes) — never a raise and never a silent
+      fallback to the Fake or to `claude` on `PATH`. Per-call init attestation stays
       mandatory; this health check is in addition to it.
     * `status/0` — what the Admin page shows: the configured and the
       effective provider (nil, with the refusal, when calls are refused),
@@ -100,16 +102,18 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       ClaudeCLI.admission(name).admission != :open -> {:error, :provider_not_quiescent}
       ClaudeCLI.attestation(name)[:command?] == false -> {:error, :llm_proxy_shim_not_found}
       not pinned_cli_present?(ClaudeCLI.attestation(name)) -> {:error, :pinned_cli_unavailable}
+      not ClaudeCLI.attestation(name)[:test_launcher?] -> {:error, :real_model_staged}
       true -> :ok
     end
   end
 
   # Re-checked on every resolution (file metadata only), so a pinned build
-  # collected after boot is refused before any reservation.
+  # collected after boot is refused before any reservation. Without a pin
+  # only a test build's injected launcher passes.
   defp pinned_cli_present?(%{executable: path}) when is_binary(path),
     do: PinnedExecutable.check(path) == :ok
 
-  defp pinned_cli_present?(_attestation), do: true
+  defp pinned_cli_present?(attestation), do: attestation[:test_launcher?] == true
 
   defp registered_name(pid) when is_pid(pid) do
     case Process.info(pid, :registered_name) do
@@ -123,8 +127,9 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   @doc """
   The run `failure_reason` recorded when a worker refuses to run because of
   `reason` (`:provider_not_running`, `:provider_not_quiescent`,
-  `:llm_proxy_shim_not_found`, `:pinned_cli_unavailable` or
-  `:unknown_model_provider`); no model call was made.
+  `:llm_proxy_shim_not_found`, `:pinned_cli_unavailable`,
+  `:real_model_staged` or `:unknown_model_provider`); no model call was
+  made.
   """
   def refusal_message(:provider_not_running),
     do:
@@ -142,10 +147,16 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   def refusal_message(:llm_proxy_shim_not_found),
     do: "model provider claude_cli found no llm-proxy-shim on PATH; no model call was made"
 
+  def refusal_message(:real_model_staged),
+    do:
+      "model provider claude_cli is staged: real model calls stay unavailable until the " <>
+        "reviewed profiles, owner call grants and witness work land (R0-03, C9, R0-07); " <>
+        "no model call was made"
+
   def refusal_message(:pinned_cli_unavailable),
     do:
-      "model provider claude_cli refuses calls: the app's pinned Claude CLI build is missing " <>
-        "or fails the pinned-CLI check (rebuild it with bin/app-claude-cli-root); no model call was made"
+      "model provider claude_cli refuses calls: the app's pinned Claude CLI is not configured, " <>
+        "missing or not the reviewed build (bin/app-claude-cli-root); no model call was made"
 
   @doc "The selected provider's status for operators (no secrets)."
   def status do

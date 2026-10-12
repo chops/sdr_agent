@@ -895,6 +895,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     {:ok, server} =
       ClaudeCLI.start_link(
         command: System.find_executable("elixir"),
+        test_launcher: true,
         command_args: [@fake, "witness", ctx.root, variant]
       )
 

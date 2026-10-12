@@ -102,6 +102,35 @@ defmodule SdrAgent.AI.ModelProviderTest do
       end
     end
 
+    test "R0-02: the staged real launcher is refused before reservation, with zero launches",
+         ctx do
+      dir = Path.join(System.tmp_dir!(), "sdr-staged-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      counter = SdrAgent.Test.PinnedCLI.stub_shim!(dir)
+
+      for {executable, reason} <- [
+            {SdrAgent.Test.PinnedCLI.inject_identity!(), :real_model_staged},
+            {nil, :pinned_cli_unavailable}
+          ] do
+        pid =
+          start_supervised!({ClaudeCLI, name: ctx.name, executable: executable}, id: reason)
+
+        for reference <- [ctx.name, pid] do
+          assert {:error, ^reason} = complete_via(ctx, reference)
+          assert_no_reservation(ctx)
+        end
+
+        stop_supervised!(reason)
+        # Its reaper releases the lease as its cleanup receipt.
+        assert Enum.find_value(1..200, fn _ ->
+                 ClaudeCLI.Reaper.lease(ctx.name) == nil || (Process.sleep(10) && nil)
+               end)
+      end
+
+      assert SdrAgent.Test.PinnedCLI.launches(counter) == 0
+    end
+
     test "a lease-blocked named server is refused before reservation by name and by pid", ctx do
       dead = spawn(fn -> :ok end)
       ref = Process.monitor(dead)
@@ -109,7 +138,10 @@ defmodule SdrAgent.AI.ModelProviderTest do
       :persistent_term.put({ClaudeCLI.Reaper, ctx.name}, {:held, dead})
 
       pid =
-        start_supervised!({ClaudeCLI, name: ctx.name, command: System.find_executable("elixir")})
+        start_supervised!(
+          {ClaudeCLI,
+           name: ctx.name, command: System.find_executable("elixir"), test_launcher: true}
+        )
 
       for reference <- [ctx.name, pid] do
         assert {:error, :provider_not_quiescent} = complete_via(ctx, reference)

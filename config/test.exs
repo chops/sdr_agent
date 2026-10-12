@@ -11,6 +11,11 @@ config :sdr_agent, Oban, testing: :manual
 # S13: the browser smoke attestation endpoint (`SdrAgentWeb.SmokeAttestation`)
 # exists only in test builds; it answers only under `mix sdr.demo.serve`.
 config :sdr_agent, :smoke_attestation_plug, true
+# R0-02: compiles the ClaudeCLI test seams in (test builds only): an
+# injected pinned-CLI identity and `test_launcher: true` fake launchers that
+# may run without a pin and past the staged real-model gate. Dev and prod
+# builds contain neither.
+config :sdr_agent, :claude_cli_test_seams, true
 config :sdr_agent, token_signing_secret: "x0lKSRtwFS5BaFNguZ0LCt7JYjNRZ4pi"
 config :bcrypt_elixir, log_rounds: 1
 config :ash, policies: [show_policy_breakdowns?: true], disable_async?: true
