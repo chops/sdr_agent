@@ -61,7 +61,7 @@ Story count: lane 1 44, lane 2 38, total 82.
 | C9-02 | Grant admission at reserve time | C9-01 | Grant+run+day checked in one transaction, existing lock order; duplicate idempotency never consumes twice; typed refusal | allow/deny + concurrency tests |
 | C9-03 | Launch-time eligibility | C9-02 | Reserved call that became ineligible (expiry, revocation, profile change) is refused at launch, never run under another grant/profile | tests incl. queued call across expiry |
 | C9-04 | Allocations and workshop reserve | C9-02 | Per-use allocations enforced; no agent or system changes to grant terms (D-099); reserve usable only on workshop day or after owner release; survives restart | tests |
-| C9-05 | Owner-only grant editor | C9-01 | Owner-only form creates, edits, revokes grants and releases the reserve with audited confirmation; other roles and agents denied server-side; revisioned terms; queued calls re-checked (C9-03) | policy allow/deny + LiveView tests; owner creates G-R0, G-DEMO himself |
+| C9-05 | Owner-only grant editor | C9-01 | Owner-only form creates, edits, revokes grants and releases the reserve with audited confirmation; other roles and agents denied server-side; revisioned terms; queued calls re-checked (C9-03) | policy allow/deny + LiveView tests; the owner personally creates G-R0 and G-DEMO |
 | C9-06 | Exhaustion signal | C9-02 | Exhausted/ineligible → Failure (inbox row once C1 lands) + metadata-only Telegram | tests |
 
 ### R0 Model runtime (S1)
@@ -92,7 +92,7 @@ Story count: lane 1 44, lane 2 38, total 82.
 | B1-01 | Requirements, prototype, G5 packet | plan | Founder flow: add → research → draft on Home → approve → captured | Owner G5 |
 | B1-02 | Constraint-7 amendment + retention rules | — | ADR drafted, Codex-reviewed; short retention/deletion rules | Owner accepts |
 | C4-01 | Minimal run settings | entity PASS | Offering, booking link, writing guide, default brief, operational limits; admin-only forms; per-run snapshot | Entity PASS; tests; owner fills in |
-| C5-01 | Search secret mapping | — | Local gitignored sops file + with-secrets entries for Brave and Exa; owner copies keys himself | secret-scan + with-secrets tests |
+| C5-01 | Search secret mapping | — | Local gitignored sops file + with-secrets entries for Brave and Exa; the owner copies the keys personally | secret-scan + with-secrets tests |
 | C5-02 | Brave + Exa adapters | C5-01, Owner limits | Req adapters behind SearchProvider; quota counter per provider billing window incl. pagination/retries/content fetches; Exa dollar cap | tests with fakes |
 | C5-03 | Real safe fetch | — | Real WebFetch adapter with existing safety rules (host checks, size, timeouts) | tests |
 | C5-04 | Real-data guard + telemetry | B1-02 | Guard policy matches amendment (allow/deny); OTel content capture off whenever real data is on; §9a recording | tests |
