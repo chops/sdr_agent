@@ -59,9 +59,10 @@ defmodule SdrAgentWeb.CalibrationConsoleTest do
     end
 
     test "a live navigation from /admin to another view is sent back", %{conn: conn} do
-      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
+      admin = sign_in(conn, :admin)
 
       for path <- [~p"/", ~p"/leads", ~p"/operations", ~p"/audit"] do
+        {:ok, view, _html} = live(admin, ~p"/admin")
         assert {:error, {:redirect, %{to: "/admin"}}} = live_redirect(view, to: path)
       end
     end

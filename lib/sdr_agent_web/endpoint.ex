@@ -53,6 +53,12 @@ defmodule SdrAgentWeb.Endpoint do
     plug SdrAgentWeb.SmokeAttestation
   end
 
+  # R0-07 calibration console page allowlist: test builds only, inert unless
+  # `mix sdr.calibration.console serve` activated it (see the module).
+  if Mix.env() == :test do
+    plug SdrAgentWeb.CalibrationConsole
+  end
+
   # S9: webhook requests are read raw (bounded) before any parsing.
   plug SdrAgentWeb.WebhookIntake
 
