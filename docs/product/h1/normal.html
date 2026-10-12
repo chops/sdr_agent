@@ -28,7 +28,7 @@
   <div class="main">
     <header class="topbar"><span>Workspace <span aria-hidden="true">/</span> Home</span><div class="profile"><span class="profile-name">Alex Morgan</span><span class="avatar" aria-hidden="true">AM</span></div></header>
     <main class="content" id="inbox">
-      <div class="preview" id="preview-note"><span><strong>Design preview</strong> · Fictional examples. No live actions.</span><nav class="state-nav" aria-label="Preview states"><span aria-current="page">Inbox</span><span class="waiting" aria-disabled="true">Changed draft</span><span class="waiting" aria-disabled="true">Partial load</span><span class="waiting" aria-disabled="true">Empty</span></nav></div>
+      <div class="preview" id="preview-note"><span><strong>Design preview</strong> · Fictional examples. No live actions.</span><nav class="state-nav" aria-label="Preview states"><a href="normal.html" aria-current="page">Inbox</a><a href="stale.html">Changed draft</a><a href="partial.html">Partial load</a><a href="empty.html">Empty</a></nav></div>
       <header class="hero"><div><p class="eyebrow">Your workspace</p><h1>What needs you</h1><p class="subtitle">Review an email, or help research get moving again.<br>Nothing here sends a real message.</p></div><a class="button" href="#refresh-preview">Refresh view <span aria-hidden="true">↻</span></a></header>
       <div class="list-heading"><strong>Waiting for your attention</strong><span>Most urgent first</span></div>
       <div class="tasks">
@@ -49,7 +49,7 @@
           <details class="technical"><summary>Technical details</summary><p>Sample email draft, revision 3. Approval is tied to this exact revision, its content and the displayed recipient. The app would fetch the body and citations only when you open the authorized detail.</p></details>
         </article>
       </div>
-      <p class="scope"><span class="dot" aria-hidden="true"></span>This preview includes email drafts and agent problems. Other kinds of work are not represented yet.</p>
+      <p class="scope"><span class="dot" aria-hidden="true"></span>This preview includes email drafts and reported problems. Other kinds of work are not represented yet.</p>
       <section class="detail-panel" id="draft-review" tabindex="-1" aria-labelledby="email-title">
         <div class="detail-heading"><div><p class="eyebrow">Email review · fictional example</p><h2 id="email-title">Email to Maya Chen</h2></div><a class="button quiet" href="#inbox">Back to inbox ↑</a></div>
         <p>maya@orbit.example.org · Orbit Tools</p>
@@ -65,7 +65,7 @@
       <section class="detail-panel" id="seen-preview" tabindex="-1" aria-labelledby="seen-title"><p class="eyebrow">Simulated action · nothing changed</p><h2 id="seen-title">Seen, but still needs attention</h2><p>In the app, the problem would stay on Home until it is resolved. Marking it seen would not add budget, restart research or confirm that earlier work is stopped.</p><a class="button" href="#inbox">Back to inbox ↑</a></section>
       <section class="detail-panel" id="budget-preview" tabindex="-1" aria-labelledby="budget-title"><p class="eyebrow">Simulated navigation · nothing changed</p><h2 id="budget-title">Budgets are managed on the admin page</h2><p>This would open the reviewed budget editor. Only an active human admin could confirm a change there. Opening it would not raise a budget or automatically retry research.</p><a class="button" href="#inbox">Back to inbox ↑</a></section>
       <section class="detail-panel" id="refresh-preview" tabindex="-1" aria-labelledby="refresh-title"><p class="eyebrow">Simulated action · nothing loaded</p><h2 id="refresh-title">This would refresh the view</h2><p>The application would read the latest permitted pending work. This file does not make requests, change state, or connect to the app.</p><a class="button" href="#inbox">Back to inbox ↑</a></section>
-      <footer class="footer">H1-01 design exploration, not an accepted screen or a working app. All people, companies, email addresses and times are fictional. Navigation uses local fragments only. The other preview states are still being prepared.</footer>
+      <footer class="footer">H1-01 design exploration, not an accepted screen or a working app. All people, companies, email addresses and times are fictional. Links open local preview pages or illustrative detail panels; they never change app data.</footer>
     </main>
   </div>
 </div>

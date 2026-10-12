@@ -69,6 +69,19 @@ answer. Record first interpretation, actions, confusing labels and requests
 before discussing internals. Rejection/confusion is useful evidence.
 
 * Progress
-Plan recorded; mockups and verification in progress. First normal preview
-target: 30–45 minutes focused; four-state first pass: 90–120 minutes focused.
-Only slice A code review may preempt; report interruption and revised ETA.
+Normal preview published at 723d343; all four states now authored.
+Desktop (1440px) and real mobile emulation (390px) inspected visually for
+each state: no horizontal overflow. CSP, no scripts/forms/remote resources,
+unique IDs and valid fragment targets checked for all four. All illustrative
+detail links reveal their matching panel; normal and changed review details
+take focus on click. Keyboard Tab has a visible focus outline. Technical
+details start closed; normal retry is disabled with its explanation.
+Browser network inventories contain only the local file document, and no
+console warning/error was reported. This is design QA, not owner acceptance
+or application end-to-end evidence.
+
+Preempted for slice A #139@5ae6549 exact-head code review, completed with
+REQUEST_CHANGES and two independently reproduced defects (PR comment
+6134590502). Mockup verification then resumed. Repository full gate and
+independent exact-head review pending. Owner task walk and ADR-0015 decision
+remain pending; no runtime implementation authorized here.
