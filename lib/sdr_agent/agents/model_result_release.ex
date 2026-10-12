@@ -16,7 +16,8 @@ defmodule SdrAgent.Agents.ModelResultRelease do
     * `:released` ↔ `:reconciled`, with a link that is this invocation's
       current, reconciled primary link at decision time, leaving the
       invocation `reconciled` (`SdrAgent.Agents.Witness.status/1`), whose
-      evidence names the invocation's CLI version and application digests,
+      evidence names the invocation's CLI version, model, profile and
+      application digests,
       and whose exact tuple is on the shipped allowlist
       (`SdrAgent.Agents.Witness.allowlisted?/3`); the output is `:valid`;
     * `:withheld` ↔ `:witness_mismatch | :witness_missing | :witness_timeout

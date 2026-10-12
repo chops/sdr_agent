@@ -124,17 +124,35 @@ defmodule SdrAgent.Agents.ResultReadGateTest do
       assert is_binary(request)
     end
 
-    test "is readable under the test-seam calibration context only (as AGT)", ctx do
-      context = SdrAgent.Agents.Checks.CalibrationContext.context(:claude_cli_opus)
+    test "the calibration context reads only its own proof invocation (as AGT)", ctx do
+      %{run: proof, agent: agent} = AgentsFixtures.running_run(ctx.tenant, usage_origin: :proof)
+      calibration = AgentsFixtures.claude_completed!(proof, agent, "gate-cal")
 
-      {:ok, row} = Ash.get(ModelInvocation, ctx.invocation.id, actor: ctx.agent, context: context)
-      assert row.parsed_output == @output
+      context =
+        SdrAgent.Agents.Checks.CalibrationContext.context(:claude_cli_opus, calibration.id)
+
+      read = fn invocation, actor ->
+        {:ok, row} = Ash.get(ModelInvocation, invocation.id, actor: actor, context: context)
+        row
+      end
+
+      assert read.(calibration, ctx.agent).parsed_output == @output
+
+      # Another gated row under the same marker stays masked.
+      assert_withheld(read.(ctx.invocation, ctx.agent), "other invocation")
+
+      # A context naming a business-run invocation reads nothing.
+      business =
+        SdrAgent.Agents.Checks.CalibrationContext.context(:claude_cli_opus, ctx.invocation.id)
+
+      {:ok, row} =
+        Ash.get(ModelInvocation, ctx.invocation.id, actor: ctx.agent, context: business)
+
+      assert_withheld(row, "business invocation")
 
       # The marker does nothing for any other actor.
-      for actor <- [human(:admin, ctx.tenant), system_actor(:delivery_worker, ctx.tenant)] do
-        {:ok, row} = Ash.get(ModelInvocation, ctx.invocation.id, actor: actor, context: context)
-        assert_withheld(row, inspect(actor))
-      end
+      for actor <- [human(:admin, ctx.tenant), system_actor(:delivery_worker, ctx.tenant)],
+          do: assert_withheld(read.(calibration, actor), inspect(actor))
     end
 
     test "released_output/2 refuses it with :result_not_released", ctx do
@@ -179,6 +197,94 @@ defmodule SdrAgent.Agents.ResultReadGateTest do
       for actor <- [stranger, nil] do
         assert {:error, _} = Agents.released_output(ctx.invocation, actor: actor), inspect(actor)
       end
+    end
+  end
+
+  describe "input queries over the output-bearing fields (G2)" do
+    setup ctx do
+      a = AgentsFixtures.claude_completed!(ctx.run, ctx.agent, "gate-g2-a", g2_completion("aaa"))
+      z = AgentsFixtures.claude_completed!(ctx.run, ctx.agent, "gate-g2-z", g2_completion("zzz"))
+      %{g2: [a.id, z.id]}
+    end
+
+    defp g2_completion(tag),
+      do: Map.put(AgentsFixtures.completion(), :refusal, "refusal #{tag}")
+
+    defp g2_query(ctx, actor) do
+      ModelInvocation
+      |> Ash.Query.for_read(:read, %{}, actor: actor)
+      |> Ash.Query.filter(id in ^ctx.g2)
+    end
+
+    test "input filters derive nothing from an unreleased field", ctx do
+      for input <- [
+            %{refusal: %{eq: "refusal aaa"}},
+            %{refusal: %{is_nil: false}},
+            %{parsed_output: %{is_nil: false}},
+            %{validation_errors: %{is_nil: false}}
+          ] do
+        assert {:ok, []} =
+                 ctx |> g2_query(ctx.agent) |> Ash.Query.filter_input(input) |> Ash.read(),
+               inspect(input)
+      end
+
+      # The witness seam still filters on the stored value.
+      assert {:ok, [_]} =
+               ctx
+               |> g2_query(ctx.rec)
+               |> Ash.Query.filter_input(%{refusal: %{eq: "refusal aaa"}})
+               |> Ash.read()
+    end
+
+    test "input sorts derive no order from an unreleased field", ctx do
+      ids = fn sort ->
+        {:ok, rows} =
+          ctx
+          |> g2_query(ctx.agent)
+          |> Ash.Query.sort_input(sort)
+          |> Ash.Query.sort(id: :asc)
+          |> Ash.read()
+
+        Enum.map(rows, & &1.id)
+      end
+
+      assert ids.("refusal") == ids.("-refusal")
+    end
+
+    # Ash applies field policies to filters and sorts, but by design never to
+    # the field of an ad-hoc aggregate (`Ash.aggregate/3` in trusted code,
+    # the G2 limit). So no aggregate or calculation a caller can load may
+    # reach the output-bearing fields, and no application code may run a
+    # field aggregate.
+    test "no declared aggregate or calculation reaches an output-bearing field" do
+      fields = ModelInvocation.output_fields()
+
+      resources =
+        :sdr_agent
+        |> Application.get_env(:ash_domains, [])
+        |> Enum.flat_map(&Ash.Domain.Info.resources/1)
+
+      for resource <- resources, aggregate <- Ash.Resource.Info.aggregates(resource) do
+        destination = Ash.Resource.Info.related(resource, aggregate.relationship_path)
+
+        refute destination == ModelInvocation and aggregate.field in fields,
+               "#{inspect(resource)}.#{aggregate.name}"
+      end
+
+      assert Ash.Resource.Info.aggregates(ModelInvocation) == []
+      assert Ash.Resource.Info.calculations(ModelInvocation) == []
+    end
+
+    test "no application code runs a field aggregate" do
+      offenders =
+        "lib/**/*.ex"
+        |> Path.wildcard()
+        |> Enum.filter(
+          &(File.read!(&1) =~
+              ~r/Ash\.(aggregate|max|min|sum|avg|list|first)\(|Query\.aggregate\(/)
+        )
+
+      assert offenders == []
     end
   end
 

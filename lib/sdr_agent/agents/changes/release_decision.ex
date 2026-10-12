@@ -22,9 +22,9 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
          and application digests, and
          whose exact tuple is on the shipped allowlist. Its projection and
          method are copied onto the release;
-       * `:calibration`: `SdrAgent.Agents.Checks.CalibrationContext` for the
-         invocation's profile, a generation-2 ClaudeCLI invocation of a
-         `:proof` run in any terminal status;
+       * `:calibration`: `SdrAgent.Agents.Checks.CalibrationContext` bound
+         to this invocation and its profile, a generation-2 ClaudeCLI
+         invocation of a `:proof` run in any terminal status;
        * any given link must be this invocation's current link.
     4. After the upsert: a fresh row passes; an existing row with the same
        disposition, reason, link and evidence is an identical replay
@@ -193,9 +193,12 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
 
   defp check_disposition(changeset, :calibration, invocation, _link) do
     cond do
-      CalibrationContext.profile(changeset.context) != invocation.profile_id or
-          is_nil(invocation.profile_id) ->
-        invalid(changeset, :disposition, "a calibration latch needs the calibration context")
+      CalibrationContext.scope(changeset.context) != {invocation.profile_id, invocation.id} ->
+        invalid(
+          changeset,
+          :disposition,
+          "a calibration latch needs the calibration context of this invocation"
+        )
 
       not gated?(invocation) or invocation.status not in @terminal ->
         invalid(

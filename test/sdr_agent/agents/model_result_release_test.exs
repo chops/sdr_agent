@@ -505,11 +505,15 @@ defmodule SdrAgent.Agents.ModelResultReleaseTest do
       )
     end
 
-    defp cal_context(profile \\ :claude_cli_opus), do: CalibrationContext.context(profile)
+    defp cal_context(invocation, profile \\ :claude_cli_opus),
+      do: CalibrationContext.context(profile, invocation.id)
 
     test "under CalibrationContext a terminal proof invocation gets its latch", ctx do
       assert {:ok, latch} =
-               decide(calibration(ctx.calibration), actor: ctx.agent, context: cal_context())
+               decide(calibration(ctx.calibration),
+                 actor: ctx.agent,
+                 context: cal_context(ctx.calibration)
+               )
 
       assert {latch.disposition, latch.reason} == {:calibration, :calibration}
       assert latch.evidence_sha256 == hex(digest("calibration evidence"))
@@ -526,12 +530,14 @@ defmodule SdrAgent.Agents.ModelResultReleaseTest do
             {"forged context", calibration(ctx.calibration),
              [context: %{calibration: %{profile_id: :claude_cli_opus}}]},
             {"no evidence", calibration(ctx.calibration, evidence_sha256: nil),
-             [context: cal_context()]},
+             [context: cal_context(ctx.calibration)]},
             {"bad evidence digest", calibration(ctx.calibration, evidence_sha256: "XYZ"),
-             [context: cal_context()]},
+             [context: cal_context(ctx.calibration)]},
             {"other profile", calibration(ctx.calibration),
-             [context: cal_context(:claude_cli_sonnet)]},
-            {"business run", calibration(business), [context: cal_context()]}
+             [context: cal_context(ctx.calibration, :claude_cli_sonnet)]},
+            {"context for another invocation", calibration(ctx.calibration),
+             [context: cal_context(business)]},
+            {"business run", calibration(business), [context: cal_context(business)]}
           ] do
         result = decide(attrs, [actor: ctx.agent] ++ opts)
 
@@ -541,6 +547,14 @@ defmodule SdrAgent.Agents.ModelResultReleaseTest do
       end
 
       assert releases(ctx) == []
+    end
+
+    test "the builder accepts only a reviewed real profile", ctx do
+      for profile <- [:fake, :claude_cli_haiku, nil, "claude_cli_opus"] do
+        assert_raise ArgumentError, fn ->
+          CalibrationContext.context(profile, ctx.calibration.id)
+        end
+      end
     end
 
     test "a calibration invocation is never released or withheld", ctx do
