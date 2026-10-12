@@ -63,6 +63,15 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
         check:
           "available_from IS NULL OR available_until IS NULL OR available_until > available_from"
     end
+
+    custom_statements do
+      # Target of the ModelInvocation (allocation_id, grant_id) composite FK (C9).
+      statement :model_call_allocations_id_grant_key do
+        up "ALTER TABLE model_call_allocations ADD CONSTRAINT model_call_allocations_id_grant_key UNIQUE (id, grant_id)"
+
+        down "ALTER TABLE model_call_allocations DROP CONSTRAINT model_call_allocations_id_grant_key"
+      end
+    end
   end
 
   actions do

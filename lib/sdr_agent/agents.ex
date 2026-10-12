@@ -18,8 +18,10 @@ defmodule SdrAgent.Agents do
       `SdrAgent.SDR.retry_run/2`, S13b),
       `find_run_by_operation/2`, `active_runs_for_lead/2`, `list_runs/1`;
     * model calls — `reserve_model_invocation/3` (reserves the run budget,
-      enforces the persisted daily limit, stores the request Payload and
-      numbers the call, in one transaction), `daily_model_call_limit/0`,
+      enforces the persisted daily limit, admits a real-model call against
+      the owner's grants (C9, `SdrAgent.Agents.Admission`), stores the
+      request Payload and numbers the call, in one transaction; a refusal
+      is then recorded on its own), `daily_model_call_limit/0`,
       `daily_model_calls/1`,
       `mark_model_invocation_sent/2`, `complete_model_invocation/3`,
       `fail_model_invocation/3`, `mark_model_invocation_unknown/2` (each
@@ -46,6 +48,7 @@ defmodule SdrAgent.Agents do
 
   alias Ash.Error.Changes.InvalidAttribute
   alias Ash.Error.Query.NotFound
+  alias SdrAgent.Agents.Admission
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.Decision
@@ -214,6 +217,19 @@ defmodule SdrAgent.Agents do
   Reserves budget, stores the request body (`attrs.request`) and creates the
   `reserved` invocation numbered by the reservation — one transaction (AGT).
 
+  C9: a ClaudeCLI reservation (with its reviewed `profile_id`) is admitted
+  in the same transaction, after the run row and chain-head locks, against
+  the tenant's grants (`SdrAgent.Agents.Admission`): the one eligible
+  allocation is written on the row with `ledger_generation` 2. A refusal
+  (`:no_usage_origin`, `:no_eligible_grant`, `:no_allocation`,
+  `:ambiguous_allocation`, `{:budget_exhausted, :grant | :grant_day |
+  :allocation}`) rolls the whole reservation back — no payload, invocation
+  or counter change — and is then committed in its own transaction as one
+  deduplicated `budget_exhausted` Failure and a `model.reservation.refused`
+  event before `{:error, reason}` is returned. Caller-supplied `grant_id`,
+  `allocation_id` and `ledger_generation` are ignored. A Fake reservation
+  records `profile_id: :fake` and needs no grant.
+
   The ADR-0004 daily limit is enforced here, persisted: after the run
   counter is reserved (run row lock), the tenant's chain head is locked and
   the ModelInvocations reserved in the current UTC day are counted; at the
@@ -226,15 +242,27 @@ defmodule SdrAgent.Agents do
   def reserve_model_invocation(run, attrs, opts) do
     actor = Keyword.get(opts, :actor)
     {request, attrs} = Map.pop(Map.new(attrs), :request)
+    # Only admission charges a grant: callers never choose one.
+    attrs = Map.drop(attrs, [:grant_id, :allocation_id, :ledger_generation])
 
-    guard(ModelInvocation, :reserve, run.id, actor, fn ->
+    ModelInvocation
+    |> guard(:reserve, run.id, actor, fn ->
       transact(fn -> do_reserve_model_invocation(run, attrs, request, actor) end)
     end)
+    |> case do
+      # The reservation rolled back; the refusal is committed on its own.
+      {:error, %Admission.Refusal{} = refusal} ->
+        with {:ok, _failure} <- Admission.record_refusal(refusal), do: {:error, refusal.reason}
+
+      result ->
+        result
+    end
   end
 
   defp do_reserve_model_invocation(run, attrs, request, actor) do
     with {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
          :ok <- check_daily_limit(run.tenant_id),
+         {:ok, attrs} <- admit(run, attrs, actor),
          {:ok, payload} <- store(request, actor) do
       attrs =
         Map.merge(attrs, %{
@@ -249,6 +277,27 @@ defmodule SdrAgent.Agents do
       |> collect()
     end
   end
+
+  # C9: a ClaudeCLI call with a reviewed real profile is charged to one
+  # allocation (`SdrAgent.Agents.Admission`), read from the run row as now
+  # locked, with the chain head already held (check_daily_limit). The Fake
+  # records its profile and needs no grant; any other profile is left to the
+  # :reserve validation to refuse.
+  defp admit(run, %{provider: :claude_cli} = attrs, actor) do
+    if Map.get(attrs, :profile_id) in ModelCallGrant.real_profiles() do
+      with {:ok, run} <- lock_run(run.id, actor),
+           {:ok, charge} <- Admission.admit(run, attrs, SdrAgent.Clock.utc_now()) do
+        {:ok, Map.merge(attrs, charge)}
+      end
+    else
+      {:ok, attrs}
+    end
+  end
+
+  defp admit(_run, %{provider: :fake} = attrs, _actor),
+    do: {:ok, Map.put(attrs, :profile_id, :fake)}
+
+  defp admit(_run, attrs, _actor), do: {:ok, attrs}
 
   @doc "The effective daily model-call limit: `min(config, 200)` (ADR-0004)."
   def daily_model_call_limit do

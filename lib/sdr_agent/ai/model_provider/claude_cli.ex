@@ -142,6 +142,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   @model_alias "opus"
   @resolved_model "claude-opus-5-5"
   @reviewed_version "2.1.291"
+  # The model profile of `@model_alias` (C9; the R0-03 registry replaces it).
+  @profile_id :claude_cli_opus
   # Versioned stdin prompt builder (S12 P1): any change to `render_prompt/2`
   # must bump this, so the wire-witness projection never re-derives a
   # historical invocation's prompt with different code.
@@ -251,10 +253,16 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     :ok
   end
 
-  @doc "Returns the reviewed provider provenance recorded before a call."
+  @doc """
+  Returns the reviewed provider provenance recorded before a call. Its
+  `profile_id` (C9) is the model profile the call is reserved and charged
+  under: the one hard-coded model maps to `:claude_cli_opus` until R0-03
+  passes the profile in as a start option.
+  """
   def provenance do
     %{
       provider: :claude_cli,
+      profile_id: @profile_id,
       provider_version: @reviewed_version,
       model_id: @resolved_model,
       model_catalog_entry: %{

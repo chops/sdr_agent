@@ -35,10 +35,12 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
 
   test "concurrent supersedes of one head: exactly one commits, no fork" do
     {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
+    # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+    AgentsFixtures.grant!(tenant)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
     rec = SdrAgent.Actor.system(:reconciler, tenant.id)
 
-    attrs = AgentsFixtures.model_attrs("race-1") |> Map.put(:provider, :claude_cli)
+    attrs = AgentsFixtures.model_attrs("race-1") |> AgentsFixtures.with_provider(:claude_cli)
     {:ok, invocation} = Agents.reserve_model_invocation(run, attrs, actor: agent)
     {:ok, invocation} = Agents.mark_model_invocation_sent(invocation, actor: agent)
 

@@ -21,6 +21,12 @@ defmodule SdrAgent.SDR.SchemaProvenanceTest do
 
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
+  # C9: real-model (ClaudeCLI) reservations are charged to a grant.
+  setup ctx do
+    SdrAgent.AgentsFixtures.grant!(ctx.tenant, %{}, ctx.admin)
+    :ok
+  end
+
   test "SDR.Model records version 2 and the hash of the stored (and sent) schema", ctx do
     root = WitnessRoot.mkdir!("sdr-schema")
     on_exit(fn -> File.rm_rf!(root) end)
