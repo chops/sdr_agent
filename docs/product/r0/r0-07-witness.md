@@ -338,7 +338,69 @@ Nothing here is implemented until Codex records a PASS on it.
   the structural guards hold, and a test documents both behaviours: the
   default leaks, `authorize_fields?: true` withholds (see 5.3).
 
-## 6. Gate record
+## 6. Slice C deltas (round 6)
+
+Slice C is the per-invocation result gate in the facade, the worker and run
+recovery (section 2, "Commit and lock boundaries"). Before writing code
+against them, the pre-code gap review found seven contracts the packet left
+open. Codex's ruling was **NEEDS-REVIEW, narrow** (report sha256 ce1420a2,
+reply to m_1791847186000021427_a461941f):
+- accepted, with bounds: 1, 2, 6 and 7;
+- revised: 3, 4 and 5.
+
+This section records the ruling and the revised rows. Nothing that gaps 1–5
+touch is implemented until Codex records a PASS on this section.
+
+**Already built at 6897808 (outside gaps 1–5):**
+- `Witness.reconcile/2`'s `gate:` option and receipt;
+- the bounded, no-lock wait (`ResultGate.await/3`).
+
+**Unchanged:**
+- observation and the capture wait stay outside every lock;
+- the 120-second hard ceiling and shorter configured values stand;
+- no new model attempt, override or re-call is made.
+
+### 6.1 Decisions
+
+| Gap | Codex decision | Recorded contract |
+|---|---|---|
+| 1. Runs without an Operation (reply runs) | Accept: the cause is bound by the release event | Row G1 below. |
+| 2. Outcomes for which reconcile opens no cause | Accept fail-closed cause creation, with truthful semantics | Row G2 below. |
+| 3. The scan racing the gate | Revise: a scheduling-only skip is not enough | Revised row G3 below. |
+| 4. The gate cause's lifetime under witness attention | Revise: an `operation_id` is not provenance | Revised row G4 below. |
+| 5. Run recovery (`:gate_interrupted`) | Revise: one recovery selection rule, with no duplicate attention | Revised row G5 below. |
+| 6. A lock-free run stop under the head | Accept, under the corrected verified Prelocked context only | Row G6 below. |
+| 7. A decide refused inside the finalizer | Accept one bounded recovery attempt in a fresh transaction | Row G7 below. |
+
+### 6.2 Entity and action rows
+
+| Row | Entity / action | Delta | Invariants / lifecycle | Actor / locks | Tests (RED first) |
+|---|---|---|---|---|---|
+| G1 | ModelResultRelease `:decide` and its `model.result.withheld` event; AgentRun `:fail` gate stop | `:decide` gains an argument `gate_cause_id` (uuid, optional), recorded in the event payload's `arguments`. It is accepted only under a verified Prelocked context whose `receipt_id` equals it, and only for `:withheld`. | **With an Operation:** the stop's validator requires the cause's `operation_id` to equal the run's Operation exactly, as before.<br>**Without an Operation** (the run's `operation_id` is nil): the validator requires a `model.result.withheld` event of a withheld release for an invocation of this run whose recorded `gate_cause_id` is this Failure. It also requires the Failure's tenant, its subject (that invocation), its class (`reconciliation_required`), that the reason category matches, and that the run has no Operation.<br>No other null-Operation Failure can become a gate cause.<br>**Both branches:** the exact receipt cause is locked before the head, live or resolved; the #132 resolution-race semantics are kept. | AGT; the finalizer and run recovery | Forged or foreign `gate_cause_id`; null-Operation cause without the event; a resolved cause; both branches. |
+| G2 | Gate outcome → withheld reason and cause | When the receipt names no usable cause, the finalizer opens one, deduplicated, under the head. Its FKs find the invocation and the Operation already locked. | **Reasons:**<br>• a mismatch dominates: `:witness_mismatch`, with reconcile's critical cause;<br>• the store disappeared or is unconfigured after spend: `:store_unreadable` (before spend it remains an admission refusal, slice B);<br>• the bound passed while the capture was still pending: `:witness_timeout`;<br>• any other non-reconciled outcome (inferred, `method_not_enabled`, ambiguous, unclassified, unsupported): `:witness_missing`. This reason means **no usable exact witness**, not that a file is absent.<br>**Typed classification:** the actual one is recorded as metadata only, in the cause message and as the event argument `gate_classification`, a reason code. No content is recorded.<br>**Dedupe:** at most one live gate-opened cause per (invocation, reason). Its exact id is returned as the receipt for the stop.<br>No method override and no re-call. | AGT; under the head, every FK target already locked | One test per reason; mismatch dominance; the typed classification recorded; no duplicate cause on replay. |
+| G3 (revised) | Scan ownership (`ScanWorker` and `Witness.reconcile/2` without `gate:`) | **Gate-owned** means a generation-2 ClaudeCLI invocation that is completed, has no ModelResultRelease, and whose run is `running`. | **Scheduling:** the scan does not schedule gate-owned invocations.<br>**Execution:** the reconciler rechecks ownership at its locked persistence boundary. That is after the invocation `FOR UPDATE` lock, reading the release and the run status without a lock clause. If the invocation is gate-owned, it returns `{:ok, %{status: :deferred_to_gate}}` and writes no link and no attention. This covers a queued job or a direct background call that outlives the prefilter.<br>**Why it holds:** the gate's own reconcile holds the invocation `FOR UPDATE`, and finalization holds it `FOR SHARE` while it writes the release and the stop. So the scan's persist step waits for either to commit, then sees their outcome.<br>**Unchanged:** generation-1 rows and backfill of released or withheld rows.<br>**Terminal run without a release** (for example, an operator cancelled during the wait) is not gate-owned. It is recovered by run recovery (G5, case R3), never by the scan. | REC; invocation `FOR UPDATE`, then plain reads | True-connection held-lock race: the gate holds the invocation while a scan reconcile runs; once it commits, the scan has written no link and no attention. A queued scan job running after the gate commits is backfill. Generation 1 is unchanged. |
+| G4 (revised) | The gate cause's lifetime under witness attention (`Witness.attention`) | **Protected cause:** exactly the Failure named as `gate_cause_id` by a `model.result.withheld` event of the invocation's release. This includes null-Operation runs. Having an `operation_id` protects nothing by itself. | **Before the release:** the invocation is gate-owned (G3), so no scan touches its attention. The gate's own polls may supersede their own earlier pending items until the receipt is taken.<br>**After the release:**<br>• the scan never resolves the protected cause;<br>• it counts as the invocation's live warning, so no duplicate warning is opened;<br>• a later mismatch still opens its own critical (mismatch dominates, witness attention).<br>**Resolved causes:** an already-resolved cause stays resolved. The scan cannot resurrect it or alter the historical stop.<br>**Note:** a metadata-only audit event, `agents.witness.gate_evidence_changed`, appended by the kernel inside the scan's persist transaction:<br>• links: `model_invocation_id`, `agent_run_id`;<br>• payload: `release_id`, `cause_failure_id`, `previous_status`, `current_status` (C1 witness status codes) and the current link ids;<br>• emitted only when the invocation's C1 status differs from the last such note's `current_status` for that release (or from the release's decision status when there is none). Repeated scans therefore do not repeat it.<br>No content and no hidden copy of the model output. | REC; scan persist | Protected warning not resolved by a changed condition; no duplicate warning; mismatch critical still opens; a resolved cause is not reopened; the note is emitted once per status change and carries no content. |
+| G5 (revised) | Run recovery (`StaleRunSweeper`) for a completed generation-2 invocation with no release | One selection rule, with no scan-semantic reconcile and no duplicate attention. | **Nothing persisted** means the invocation has no WireWitnessLink, no `reconciliation_required` Failure with this invocation as subject (live or resolved), and no release.<br>**R1, abandoned running run, nothing persisted:** recovery runs `Witness.reconcile/2` with `gate:` (the run's Operation, or nil), then selects:<br>• a mismatch: `:witness_mismatch` with reconcile's critical cause; known mismatch evidence is never turned into an innocuous warning;<br>• otherwise: `:gate_interrupted` with reconcile's cause, if it opened one, else a deduplicated interrupted warning opened under the head.<br>**R2, abandoned running run with links or a cause:** no reconcile. A current mismatch link gives `:witness_mismatch` with that invocation's critical cause; otherwise `:gate_interrupted` with the existing gate-capable warning of this invocation (G1 provenance), else a new deduplicated interrupted warning.<br>**R3, terminal run with a completed generation-2 invocation and no release:** the same selection, and a withheld release only; no run stop and no Operation change.<br>**R1 and R2 stop the run** (`:witness_mismatch` or `:witness_unreconciled`) through finalization, with the gate's lock order and Prelocked, then fail the Operation by the worker's rule.<br>**Always:**<br>• completed-without-release output stays withheld;<br>• no model call is made;<br>• this replaces the original single sentence "writes a withheld release with reason `:gate_interrupted`" for the mismatch case. | AGT; finalization lock order | Bounded true-connection tests: crash before reconcile (R1), crash after reconcile (R2), finalizer wins (recovery sees the release or a stopped run and skips), recovery wins (the late finalizer sees the release, G7), and R3. |
+| G6 | AgentRun `:fail` gate stop, lock-free re-read | Under a verified Prelocked context whose invocation belongs to this run and whose receipt is the selected cause, the gate stop re-reads the run and that Failure **without** lock clauses. The finalizer already holds both, before the head. | **Ordinary `:fail` keeps its locks.** No caller Boolean, row-shaped object or generic `context:` skips them.<br>**Marker consumer contract:** the Prelocked marker (MF1 savepoint fix) must still be set, and the bindings and receipt must match.<br>**Implicit FK locks** of the stop's writes count, and find their targets already held. | AGT; finalizer only | The whole-finalization SQL order regression (no lock clause after the head except the head itself); the savepoint-lifetime regression from #139; the ordinary `:fail` still locks. |
+| G7 | A decide refused inside the finalizer | The original transaction is fully rolled back first (Ash rolls it back with the changeset). Then **one** recovery attempt runs in a fresh transaction. | **Order:** the recovery reacquires every dependent lock in the finalization order and rereads the immutable release first.<br>**If a release now exists** (a competing finalizer committed one), it is respected. It is never overwritten, and no second cause is made.<br>**If no release exists:** it writes withheld `:gate_interrupted` plus the typed run stop, selecting the cause by G5's rule.<br>**Bounds:** no recursive or unbounded recovery. If the recovery is refused or the database fails, no business output is returned and the run remains recoverable by the sweeper. An unreleased output never becomes success or a gratuitous `:crash`. | AGT | A refused decide leads to the recovery; a competing committed release is respected; a second failure returns no output and leaves the run sweepable. |
+
+### 6.3 Test plan additions (RED first, synthetic, no real calls)
+
+- **G1:** forged or foreign `gate_cause_id`; a null-Operation cause without
+  its event; a resolved cause; both branches (with and without an
+  Operation).
+- **G2:** one test per reason; mismatch dominance; the typed classification
+  recorded; dedupe.
+- **G3:** the held-lock race (true connection); a queued job after commit;
+  generation 1 unchanged.
+- **G4:** the protected cause is not resolved and not duplicated; a mismatch
+  still opens; the note is emitted once per status change.
+- **G5:** R1, R2 and R3; finalizer wins and recovery wins.
+- **G6:** the whole-finalization SQL order regression; the savepoint
+  regression; the ordinary `:fail` still locks.
+- **G7:** recovery; a competing release; bounded failure.
+
+## 7. Gate record
 
 - Round 1 at e720fda: **NEEDS-REVIEW** (Codex, consultation
   m_1791836476976826333_a0ee4344, report sha256 9b3302fe). Five required
@@ -374,3 +436,8 @@ Nothing here is implemented until Codex records a PASS on it.
   - **Remaining gates before real calls:** the owner metadata inventory
     and history handling, full slice C, the reviewed calibration harness
     and the owner's grants.
+- Round 6 (slice C pre-code gaps, proposal
+  `claude-r0-07c-gaps-20261012.md`, base #139 at 5ae6549): **NEEDS-REVIEW,
+  narrow** (Codex, reply to m_1791847186000021427_a461941f, report sha256
+  ce1420a2). Gaps 1, 2, 6 and 7 accepted with bounds; gaps 3, 4 and 5
+  revised in section 6 for recheck.
