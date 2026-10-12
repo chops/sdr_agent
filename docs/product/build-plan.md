@@ -24,7 +24,7 @@ v2 → v3 (Codex v2 review):
 | MF2 data flow | §9a: the actual storage and processing flow, stated truthfully; real-content telemetry capture off. |
 | MF3 entity trigger | §3: full trigger; per-contract yes/no evaluation. |
 | MF4 schedule | §3/§4: C3 implemented and merged in S1; C4 first PR of S2 with an explicit consumer fence. |
-| I1-I4 | C2 rollback guarded; C9 atomic admission, launch-time eligibility, transfer and reserve rules; workshop-day expiry; provider billing windows; 35% allowance measured at S1 review. |
+| I1-I4 | C2 rollback guarded; C9 atomic admission, launch-time eligibility, reserve rules (transfers later withdrawn, D-099); workshop-day expiry; provider billing windows; 35% allowance measured at S1 review. |
 
 v1 → v2:
 
@@ -225,11 +225,13 @@ amendment is accepted. Allocations:
 | Owner daily use + rehearsal 2 (Oct 30-Nov 5) | 35 |
 | Workshop reserve (Nov 6, held unless the owner releases it) | 30 |
 
-Transfers: agents may move at most 10 attempts cumulatively per grant between
-development rows, each transfer recorded in the grant ledger with a reason and
-reported the same day; never into or out of the reserve. The reserve is usable
-only on the workshop day, or earlier only when the owner releases it.
-Enforcement of totals, allocations, transfers, reserve and expiry: C9 at
+Grant changes (superseded by row 22, D-099): only the owner changes a grant
+(terms, allocations, reserve release, revocation), through the audited
+owner-only form in the app; agents may ask for a change but never make one.
+The earlier "agents may move up to 10 attempts" rule is withdrawn. Automatic
+usage accounting (counting attempts against a grant) is not a grant change.
+The reserve is usable only on the workshop day, or earlier only when the owner
+releases it. Enforcement of totals, allocations, reserve and expiry: C9 at
 admission and at launch, plus a daily ledger report.
 
 **G-SRC (Brave, Exa).** The owner states each plan's request and dollar
