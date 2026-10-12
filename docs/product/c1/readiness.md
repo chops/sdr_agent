@@ -108,7 +108,9 @@ The source adapter owns the transaction for compare-and-mutate, acquires its
 established dependent-row locks before the audit head, recomputes freshness
 while those facts are protected, and invokes the guarded domain action with
 the current actor. Approval keeps enrollment → draft → campaign → contact →
-head. Failure writes keep Failure → head; run retry keeps its reviewed source
+head. The edit adapter uses that same enrollment → draft → campaign → contact
+order, since freshness includes recipient/campaign facts; it must not lock
+the draft before the enrollment. Failure writes keep Failure → head; run retry keeps its reviewed source
 order. No generic gateway head lock is taken before entering a producer.
 If a source action cannot meet this compare-and-mutate contract, that action
 stays blocked as `guard_not_available` until a reviewed source adapter/delta
@@ -283,12 +285,20 @@ docs proposal, so current diagrams are not rewritten to pretend it exists.
 
 | Readiness item | Status |
 |---|---|
-| Entity/action soft-stop | PASS at 354c590; full-contract refinements awaiting independent review |
-| B1 producer / H1 consumer agreement | Pending Claude confirmation of bindings, atomic edit adapter and page contract |
+| Entity/action soft-stop | PASS at 354c590; full contract PASS at 202349d |
+| B1 producer / H1 consumer agreement | PASS by Claude at 202349d; bindings, edit adapter order, complete empty copy and last-returned cursor agreed |
 | Owner task walk / interactive H1 prototype | Pending; no usability acceptance inferred |
 | ADR-0015 owner acceptance | Pending |
 | Scoped C1 G5 | Pending; existing R0 G5 does not cover C1 code |
-| C1-01 docs verification | In progress: diff/structure/links plus unchanged-code full gate; no model-call budget |
+| C1-01 docs verification | Workflow receipt, format, compile, canonical Credo, Hex audit, codegen, `mix precommit` and 1126 tests passed locally; link checks and isolated-browser prototype inspection passed; exact-head CI pending |
+
+Full contract review: Claude at `202349d`, consultation
+`m_1791838602052826250_0c9eae1c`, answer
+`m_1791838859000005695_8cfb65f1` (2026-10-12 21:00:59 UTC), **PASS**.
+Record C1-02 tests for recipient changes invalidating a reject token too;
+future reviewed severity changes moving between page groups (not a frozen
+snapshot); and bounded successors to both initial source readers. None is a
+new story or a claim that the code already exists.
 
 This contract draft does not complete C1-02/03 or H1, expand spend authority,
 add channels, change suppression, bypass the release gate, or authorize

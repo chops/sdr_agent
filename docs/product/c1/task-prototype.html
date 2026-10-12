@@ -22,6 +22,7 @@
     .card { display: flex; flex-direction: column; }
     .badge { display: inline-block; width: fit-content; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 99px; background: #e7f2ed; color: #176b58; margin-bottom: 16px; }
     .badge.warning { background: #fff1d9; color: #83510b; }
+    .badge.critical { background: #ffe9e5; color: #8b3026; }
     dl { margin: 8px 0 20px; }
     dt { font-size: 12px; font-weight: 650; color: var(--muted); margin-top: 12px; }
     dd { margin: 2px 0; overflow-wrap: anywhere; }
@@ -58,6 +59,23 @@
     Nothing is approved, edited, captured, sent, retried or stored. No scripts, external assets, network requests or model calls.
   </aside>
   <div class="cards" id="tasks">
+    <article class="card" aria-labelledby="failure-title">
+      <span class="badge critical">Critical failure attention · open</span>
+      <h2 id="failure-title">Research needs recovery</h2>
+      <p>The model-call allocation is exhausted. The previous process cleanup is also unconfirmed.</p>
+      <dl>
+        <dt>Source</dt><dd>Failure F2 · AgentRun A2</dd>
+        <dt>Why rerun is blocked</dt><dd><code>grant_exhausted</code>, <code>cleanup_unconfirmed</code></dd>
+        <dt>Your role in this scenario</dt><dd>Active admin · freshness TF2</dd>
+      </dl>
+      <div class="actions" aria-label="Failure actions">
+        <a class="action" href="#investigate">Investigate</a>
+        <a class="action" href="#acknowledge">Acknowledge</a>
+        <a class="action" href="#resolve">Resolve with note</a>
+        <button type="button" disabled aria-describedby="retry-limit">Rerun</button>
+      </div>
+      <small id="retry-limit">Inspection does not grant spend. Recovery must pass the current source safeguards.</small>
+    </article>
     <article class="card" aria-labelledby="draft-title">
       <span class="badge">Draft review · pending_review</span>
       <h2 id="draft-title">About developer onboarding</h2>
@@ -76,23 +94,6 @@
       <details><summary>What if the revision or recipient changed?</summary>
         <p>Use the same displayed R3/H3/sam binding in the <a href="#stale">stale-command scenario</a>. The server must not substitute newer source values.</p>
       </details>
-    </article>
-    <article class="card" aria-labelledby="failure-title">
-      <span class="badge warning">Failure attention · open</span>
-      <h2 id="failure-title">Research needs recovery</h2>
-      <p>The model-call allocation is exhausted. The previous process cleanup is also unconfirmed.</p>
-      <dl>
-        <dt>Source</dt><dd>Failure F2 · AgentRun A2</dd>
-        <dt>Why rerun is blocked</dt><dd><code>grant_exhausted</code>, <code>cleanup_unconfirmed</code></dd>
-        <dt>Your role in this scenario</dt><dd>Active admin · token TF2</dd>
-      </dl>
-      <div class="actions" aria-label="Failure actions">
-        <a class="action" href="#investigate">Investigate</a>
-        <a class="action" href="#acknowledge">Acknowledge</a>
-        <a class="action" href="#resolve">Resolve with note</a>
-        <button type="button" disabled aria-describedby="retry-limit">Rerun</button>
-      </div>
-      <small id="retry-limit">Inspection does not grant spend. Recovery must pass the current source safeguards.</small>
     </article>
   </div>
   <section class="notice" aria-labelledby="walk-title">
