@@ -4,8 +4,25 @@
 # alive with Nix GC roots under .gcroots/:
 #   app-claude-cli-current   the build the app launches now
 #   app-claude-cli-previous  the build before it, kept for rollback
-# The previous root moves only when the store path changes. Prints the
-# absolute binary path to use as SDR_CLAUDE_CLI_BIN. Never runs the CLI.
+# Prints the absolute binary path to use as SDR_CLAUDE_CLI_BIN. Never runs
+# the CLI and never collects garbage.
+#
+# The build must be exactly the store path recorded for this platform in
+# nix/app-claude-cli.identity (the app also checks its sha256 at boot).
+#
+# Order (serialized by a lock directory; macOS has no flock):
+#   1. build into a unique staging root (never shared between callers);
+#   2. if it is current's target already: drop the staging root, done;
+#   3. otherwise previous := current's target, then current := the build,
+#      each registered with `nix-store --add-root` (root links are never
+#      renamed: gcroots/auto points at the link path);
+#   4. drop the staging root.
+# Any failure leaves current untouched (previous is restored if current
+# could not be registered) and exits non-zero.
+#
+# APP_CLAUDE_CLI_ROOT_LOCK_WAIT (seconds, default 900) bounds the wait for
+# another caller; a lock whose owner process is gone, or older than
+# APP_CLAUDE_CLI_ROOT_LOCK_STALE (seconds, default 3600), is taken over.
 set -euo pipefail
 
 if [ "$#" -ne 0 ]; then
@@ -13,52 +30,137 @@ if [ "$#" -ne 0 ]; then
   exit 64
 fi
 
+die() {
+  printf 'app-claude-cli-root: %s\n' "$*" >&2
+  exit 1
+}
+
 for tool in nix nix-store; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
+  command -v "$tool" >/dev/null 2>&1 || {
     printf '%s\n' "app-claude-cli-root: $tool is missing" >&2
     exit 127
-  fi
+  }
 done
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+identity="$root/nix/app-claude-cli.identity"
 dir="$root/.gcroots"
 current="$dir/app-claude-cli-current"
 previous="$dir/app-claude-cli-previous"
-staged="$dir/app-claude-cli-staged"
+lock="$dir/app-claude-cli.lock"
+lock_wait="${APP_CLAUDE_CLI_ROOT_LOCK_WAIT:-900}"
+lock_stale="${APP_CLAUDE_CLI_ROOT_LOCK_STALE:-3600}"
+
+case "$(uname -m)" in
+  arm64 | aarch64) cpu=aarch64 ;;
+  x86_64 | amd64) cpu=x86_64 ;;
+  *) die "unsupported CPU $(uname -m)" ;;
+esac
+case "$(uname -s)" in
+  Darwin) os=darwin ;;
+  Linux) os=linux ;;
+  *) die "unsupported OS $(uname -s)" ;;
+esac
+system="$cpu-$os"
+
+expected=""
+while read -r rec_system rec_path _rec_sha; do
+  case "$rec_system" in '' | '#'*) continue ;; esac
+  if [ "$rec_system" = "$system" ]; then expected="$rec_path"; fi
+done <"$identity"
+[ -n "$expected" ] || die "no reviewed pin for $system in nix/app-claude-cli.identity"
 
 mkdir -p "$dir"
 
-# Built straight into its own GC root, so the new build is never
-# collectable between the build and the rotation below.
-nix build --out-link "$staged" -f "$root/nix/app-claude-cli-package.nix"
-out="$(readlink "$staged")"
+owned=0
+staging=""
+cleanup() {
+  if [ -n "$staging" ]; then rm -f "$staging"; fi
+  if [ "$owned" = 1 ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$lock"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
-case "$out" in
-  /nix/store/*) ;;
-  *)
-    printf '%s\n' "app-claude-cli-root: build is not a store path: $out" >&2
-    exit 1
-    ;;
-esac
+lock_age() {
+  local now mtime
+  now="$(date +%s)"
+  mtime="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo "$now")"
+  echo $((now - mtime))
+}
+
+# A stale lock is moved aside atomically and removed only if it is still
+# the one judged stale; a live lock grabbed in a race is put back.
+take_over() {
+  local seen="$1" aside="$lock.stale.$$.$RANDOM"
+  mv "$lock" "$aside" 2>/dev/null || return 0
+  if [ "$(cat "$aside/pid" 2>/dev/null || true)" = "$seen" ]; then
+    printf '%s\n' "app-claude-cli-root: took over a stale lock${seen:+ (pid $seen)}" >&2
+    rm -rf "$aside"
+  else
+    mv "$aside" "$lock" 2>/dev/null || true
+  fi
+}
+
+waited=0
+until mkdir "$lock" 2>/dev/null; do
+  holder="$(cat "$lock/pid" 2>/dev/null || true)"
+  if { [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; } || [ "$(lock_age)" -ge "$lock_stale" ]; then
+    take_over "$holder"
+    continue
+  fi
+  [ "$waited" -lt "$lock_wait" ] || die "another bin/app-claude-cli-root holds $lock"
+  sleep 1
+  waited=$((waited + 1))
+done
+owned=1
+echo "$$" >"$lock/pid"
+
+# 1. A staging root of our own: the build is never collectable before it
+#    is registered below, and no other caller can remove it.
+staging="$dir/app-claude-cli-staging.$$.$RANDOM"
+nix build --out-link "$staging" -f "$root/nix/app-claude-cli-package.nix" ||
+  die "nix build of nix/app-claude-cli-package.nix failed"
+out="$(readlink "$staging")" || die "the build left no staging root"
+
+[ "$out" = "$expected" ] ||
+  die "built $out, but nix/app-claude-cli.identity records $expected for $system"
 
 bin="$out/bin/claude-code"
 if [ ! -f "$bin" ] || [ -L "$bin" ] || [ ! -x "$bin" ]; then
-  printf '%s\n' "app-claude-cli-root: no executable claude-code in $out" >&2
-  exit 1
+  die "no executable claude-code in $out"
 fi
 
-if [ -L "$current" ]; then
-  old="$(readlink "$current")"
-  if [ "$old" != "$out" ]; then
-    if nix-store --check-validity "$old" 2>/dev/null; then
-      nix-store --add-root "$previous" --realise "$old" >/dev/null
-    else
-      printf '%s\n' "app-claude-cli-root: previous build $old is gone; no rollback root kept" >&2
-    fi
+old=""
+if [ -L "$current" ]; then old="$(readlink "$current")"; fi
+
+# 2. Same pin: nothing to rotate.
+if [ "$old" = "$out" ]; then
+  printf '%s\n' "$bin"
+  exit 0
+fi
+
+# 3. previous := current's target, then current := the build.
+old_previous=""
+if [ -L "$previous" ]; then old_previous="$(readlink "$previous")"; fi
+
+if [ -n "$old" ]; then
+  if nix-store --check-validity "$old" 2>/dev/null; then
+    nix-store --add-root "$previous" --realise "$old" >/dev/null ||
+      die "could not register the rollback root; current is unchanged"
+  else
+    printf '%s\n' "app-claude-cli-root: previous build $old is gone; no rollback root kept" >&2
   fi
 fi
 
-nix-store --add-root "$current" --realise "$out" >/dev/null
-rm -f "$staged"
+if ! nix-store --add-root "$current" --realise "$out" >/dev/null; then
+  if [ -n "$old_previous" ] && [ "$old_previous" != "$(readlink "$previous" 2>/dev/null || true)" ]; then
+    nix-store --add-root "$previous" --realise "$old_previous" >/dev/null 2>&1 ||
+      printf '%s\n' "app-claude-cli-root: could not restore the previous rollback root" >&2
+  fi
+  die "could not register the current root; current is unchanged"
+fi
 
+# 4. The staging root is dropped by the exit trap.
 printf '%s\n' "$bin"

@@ -197,7 +197,8 @@ case "$cmd" in
       export SDR_CLAUDE_CLI_BIN
     fi
     if [ "${SDR_MODEL_PROVIDER:-}" = "claude_cli" ]; then
-      echo "model: claude_cli via pinned CLI $SDR_CLAUDE_CLI_BIN"
+      echo "model: claude_cli via pinned CLI $SDR_CLAUDE_CLI_BIN" \
+        "(real model calls stay staged until R0-03, C9 and R0-07)"
     fi
 
     echo "bin/demo: starting Phoenix on http://localhost:$port"
