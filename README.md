@@ -181,8 +181,15 @@ which also keeps it and the previous build alive with GC roots under
 and the printed path:
 
 ```sh
-bin/app-claude-cli-root   # prints /nix/store/...-app-claude-cli-<version>/bin/claude-code
-SDR_MODEL_PROVIDER=claude_cli SDR_CLAUDE_CLI_BIN=/nix/store/...-app-claude-cli-<version>/bin/claude-code mix phx.server
+SDR_MODEL_PROVIDER=claude_cli bin/demo run
+```
+
+`bin/demo run` builds (or finds) the pinned CLI with `bin/app-claude-cli-root`
+and sets `SDR_CLAUDE_CLI_BIN` for you. Starting Phoenix directly needs it set
+by hand:
+
+```sh
+SDR_MODEL_PROVIDER=claude_cli SDR_CLAUDE_CLI_BIN="$(bin/app-claude-cli-root)" mix phx.server
 ```
 
 `SDR_CLAUDE_CLI_BIN` must be the absolute path of an executable inside

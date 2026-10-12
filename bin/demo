@@ -189,6 +189,17 @@ case "$cmd" in
     if [ -n "${SDR_AUDIT_ANCHOR_PRIVATE_KEY:-}" ]; then key=present; else key=absent; fi
     echo "anchoring: sinks ${SDR_ANCHOR_SINKS:-git+ots}, signing key $key" \
       "(bin/with-secrets SDR_AUDIT_ANCHOR_PRIVATE_KEY -- bin/demo run to anchor)"
+    # The real model runs only from the app's pinned CLI (ADR-0004 R0, R0-02).
+    # Resolve it here so the owner never has to set SDR_CLAUDE_CLI_BIN by hand.
+    if [ "${SDR_MODEL_PROVIDER:-}" = "claude_cli" ] && [ -z "${SDR_CLAUDE_CLI_BIN:-}" ]; then
+      SDR_CLAUDE_CLI_BIN="$(bin/app-claude-cli-root)" ||
+        fail "could not build or locate the app's pinned Claude CLI (bin/app-claude-cli-root)"
+      export SDR_CLAUDE_CLI_BIN
+    fi
+    if [ "${SDR_MODEL_PROVIDER:-}" = "claude_cli" ]; then
+      echo "model: claude_cli via pinned CLI $SDR_CLAUDE_CLI_BIN"
+    fi
+
     echo "bin/demo: starting Phoenix on http://localhost:$port"
     PORT="$port" exec mix phx.server
     ;;
