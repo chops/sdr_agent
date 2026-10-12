@@ -82,6 +82,25 @@ or application end-to-end evidence.
 
 Preempted for slice A #139@5ae6549 exact-head code review, completed with
 REQUEST_CHANGES and two independently reproduced defects (PR comment
-6134590502). Mockup verification then resumed. Repository full gate and
-independent exact-head review pending. Owner task walk and ADR-0015 decision
-remain pending; no runtime implementation authorized here.
+6134590502). Mockup verification then resumed. Self-review removed the
+collapsed-row approval shortcut in normal/partial: approval is offered only
+in the email detail where the body is shown. The revised links/mobile layout
+were checked again.
+
+Repository verification (isolated reviewer partition, ERL_FLAGS=+S 2:2):
+- mix precommit: 1,335 passed, 1 skipped, 4 external tests excluded.
+- bin/verify: workflow receipt, format and warnings-as-errors compilation
+  passed; 1,335 passed, 1 skipped, 4 external tests excluded.
+- mix credo (canonical default priority): clean.
+- mix ash.codegen --check: clean; no persistence changes.
+- mix hex.audit: no retired or security advisory packages.
+- Sobelow: SKIP, not installed on this branch; Dialyzer not enabled.
+- git diff --check: clean. No application or dependency changes.
+Logs: /tmp/codex-h1-precommit.log, /tmp/codex-h1-verify.log,
+/tmp/codex-h1-readiness.log, /tmp/codex-h1-codegen.log,
+/tmp/codex-h1-hex-audit.log. Existing expected fake-provider failure-path
+logs and Ash notification warnings do not represent failing tests; no
+assertion or protection was weakened.
+
+Independent exact-head review, owner task walk and ADR-0015 decision remain
+pending; no runtime implementation authorized here.
