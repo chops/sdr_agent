@@ -16,8 +16,8 @@ pivot on 2026-10-07; the amendment below replaces the earlier CodexAppServer
 runtime decision while retaining it as historical rationale. The Q0.1
 amendment (runtime provider selection) is pending Codex review on its PR.
 The R0 amendment (2026-10-12, at the end of the Decision section) is
-**proposed**: it is in force only after Codex review and the owner's explicit
-acceptance.
+**accepted**: owner acceptance in the private Claude session chat on
+2026-10-12 ("accept PR #39"), after Codex's independent approval of 6f2fab2.
 
 ### Current policy (summary, 2026-10-12)
 
@@ -34,7 +34,7 @@ historical. What applies today:
 - The CodexAppServer adapter is disabled fail-closed.
 - Every call has no tools, no MCP servers and no slash commands, attested per
   call, and is serialized (one call at a time).
-- Proposed in R0: an app-owned pinned CLI, closed reviewed model profiles
+- Accepted for R0 (being built): an app-owned pinned CLI, closed reviewed model profiles
   (Opus and Sonnet), an audited in-app switch, and owner-granted call budgets.
 
 ## Context
@@ -359,7 +359,7 @@ resource or policy change:
   audit event commits. The card only reflects the attestation; the
   per-call attestation remains what refuses a drifted CLI.
 
-### R0 amendment (2026-10-12, proposed): app-owned CLI runtime, closed model profiles, audited switch, call grants
+### R0 amendment (2026-10-12, accepted): app-owned CLI runtime, closed model profiles, audited switch, call grants
 
 **Context.** On 2026-10-08 the agents' own Claude CLI was updated system-wide
 to 2.1.294. The app resolves `claude` from the same system installation and
