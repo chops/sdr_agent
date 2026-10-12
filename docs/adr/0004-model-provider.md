@@ -15,6 +15,27 @@ S6a implementation approved on 2026-10-06. The owner approved the ClaudeCLI
 pivot on 2026-10-07; the amendment below replaces the earlier CodexAppServer
 runtime decision while retaining it as historical rationale. The Q0.1
 amendment (runtime provider selection) is pending Codex review on its PR.
+The R0 amendment (2026-10-12, at the end of the Decision section) is
+**proposed**: it is in force only after Codex review and the owner's explicit
+acceptance.
+
+### Current policy (summary, 2026-10-12)
+
+The sections below are kept in the order they were decided, so early text is
+historical. What applies today:
+
+- The deterministic Fake is the default for development, tests, CI and the
+  demo seed. A real model is used only in the owner's own local demo.
+- The real provider is the Claude CLI on the owner's own Claude subscription,
+  for personal, local, single-operator use only. This is the owner's accepted
+  terms risk, not vendor approval or permission for anyone else. Nobody else
+  may use the owner's login; another user needs their own provider and terms
+  decision (Option 1, a paid API key, is the clean route).
+- The CodexAppServer adapter is disabled fail-closed.
+- Every call has no tools, no MCP servers and no slash commands, attested per
+  call, and is serialized (one call at a time).
+- Proposed in R0: an app-owned pinned CLI, closed reviewed model profiles
+  (Opus and Sonnet), an audited in-app switch, and owner-granted call budgets.
 
 ## Context
 
@@ -110,6 +131,12 @@ Constraints on the real provider:
 - The public README states that users bring their own login or API key.
 
 We will not build a `claude -p` subscription adapter.
+
+> **Superseded (2026-10-07).** This was the original decision, made on terms
+> and on non-bare mode loading host configuration. The owner approved the
+> ClaudeCLI pivot below for personal local use; hardening and per-call
+> attestation reduce the configuration risk and are re-reviewed on every CLI
+> upgrade. The original reasoning is kept as history.
 
 ### S6a implementation amendment
 
@@ -331,6 +358,140 @@ resource or policy change:
   last attestation with its time. It shows no secret. It refreshes live (ADR-0012) when an
   audit event commits. The card only reflects the attestation; the
   per-call attestation remains what refuses a drifted CLI.
+
+### R0 amendment (2026-10-12, proposed): app-owned CLI runtime, closed model profiles, audited switch, call grants
+
+**Context.** On 2026-10-08 the agents' own Claude CLI was updated system-wide
+to 2.1.294. The app resolves `claude` from the same system installation and
+is pinned to the reviewed 2.1.291, so every real-model call now fails closed
+on attestation drift. The agent CLIs will update again before the Nov 6
+workshop. The owner decided (walkthrough rows 14-19c, 14-19d, 21b, 22;
+D-087, D-088, D-096, D-098, D-099):
+
+- keep the Claude CLI on the owner's subscription as the tested path;
+- make the model layer flexible enough to add other models and providers
+  later, without redesign;
+- switch models from the admin page without restarting the app;
+- launch with two reviewed profiles, Opus and Sonnet, each proven with its own
+  budgeted synthetic calls;
+- included subscription usage only (paid extra usage kept off by the owner);
+- every real call admitted against an owner-created budget grant that only
+  the owner can change.
+
+**Decision.**
+
+1. **App-owned CLI runtime.**
+   - The app launches the Claude CLI from an app-owned, content-addressed
+     installation pinned in this repository: a Nix store path built from a
+     pinned source and hash. It passes the absolute path to `llm-proxy-shim`
+     and never resolves `claude` from `PATH`. System and agent CLI updates
+     therefore cannot change the app's CLI.
+   - Allowing the CLI's unfree licence is scoped to that one package.
+   - Changing the pin (version, source or hash) is a reviewed pull request.
+     It records the candidate version's evidence (release, and that the flags
+     and init attestation fields it relies on are unchanged or adapted),
+     updates the reviewed version in the profile registry, and handles witness
+     disposition (item 6). This amendment authorizes the mechanism; each bump
+     still needs its own review.
+   - If the pinned build is missing, or the shim cannot launch it by absolute
+     path, ClaudeCLI is refused with a typed error. It never falls back to the
+     system CLI or to the Fake. A wrapper, if the shim needs one, is reviewed
+     code that also never uses `PATH`.
+   - The per-call init attestation stays mandatory: expected model and CLI
+     version, empty tools, empty MCP servers, empty slash commands.
+
+2. **Closed profile registry.**
+   - Model profiles are reviewed entries in code: profile id, adapter, CLI
+     alias, resolved model id, reviewed CLI version and witness disposition.
+   - Initial profiles, both on the one pinned CLI version:
+     - `claude_cli_opus`: alias `opus`, resolved `claude-opus-5-5`;
+     - `claude_cli_sonnet`: alias `sonnet`, resolved `claude-sonnet-5-5`.
+   - Adding a profile is a reviewed code change plus its own proof. There is
+     no free-text model, no user-supplied alias and no runtime-loaded plugin.
+   - Each ModelInvocation also records its profile id, alongside the existing
+     alias, resolved id and CLI version fields.
+   - The Fake stays the default. `SDR_MODEL_PROVIDER` semantics are unchanged:
+     `claude_cli` is accepted only in development.
+
+3. **Active profile and in-app switch.**
+   - **Persisted setting.** A persisted desired profile (default
+     `claude_cli_opus`), distinct from the effective profile of the running
+     server.
+   - **Admin view.** The Admin page shows desired, effective, pending and
+     blocked (with reason). Rendering it makes no model call.
+   - **Who and how.** The switch is an admin-only action with audited
+     confirmation. It restarts only the supervised ClaudeCLI server, not the
+     application.
+   - **Fencing and draining.** The switch fences new admission. It waits, for
+     a bounded time, for prepared, reserved, queued and in-flight calls under
+     the old profile to finish or be refused. Abandoned prepared callers are
+     drained or refused.
+   - **Reaper lease.** The switch never releases a Reaper lease whose cleanup
+     is unconfirmed.
+   - **Profile frozen per call.** Each invocation freezes its expected profile
+     at reservation. Its launch is refused if the effective profile differs.
+   - **Failed activation.** The previous profile is restored only when the
+     candidate's work is confirmed clean. Otherwise the provider is shown
+     blocked, with the reason, until an admin acts. Restoring never starts a
+     process over unconfirmed work.
+   - **Restart.** A restart restores the persisted desired profile.
+   - **History.** Old invocations keep their original provenance and are
+     never relabelled.
+   - **No fallback.** There is no silent fallback between profiles or to the
+     Fake.
+   - **Review first.** The entity delta for this setting and action needs an
+     independent PASS before implementation.
+
+4. **Provider seam.**
+   - `SdrAgent.AI.ModelProvider` stays the single facade. The adapter contract
+     is documented: prepare and complete; outcomes success, known failure or
+     unknown; the reserve, sent and record lifecycle; attestation or an
+     equivalent check of the launched configuration.
+   - A test-only adapter proves that a new provider plugs in without changing
+     callers.
+   - API-key providers (Anthropic API, OpenAI, Gemini, OpenRouter) are future
+     adapters. Each needs its own amendment covering terms, data handling and
+     credentials. None is part of R0.
+
+5. **Call grants.**
+   - Every real-model attempt is admitted against an owner-created grant, in
+     addition to the 20-per-run and 200-per-UTC-day limits. A grant has a
+     purpose, profiles, a total, a per-UTC-day limit, allocations, an expiry
+     and a reserve.
+   - Admission is checked in the same reservation transaction, under the
+     existing lock order, and checked again at launch. Attempts count
+     whatever their outcome and are never refunded.
+   - Only the owner creates or changes a grant, through an audited admin form.
+     Agents never change a grant. With no eligible grant, no real call is
+     made.
+   - Fake calls need no grant.
+   - The app's counters cover only this app. The owner's other Claude
+     sessions share the same plan, and the owner keeps paid extra usage
+     disabled.
+
+6. **Wire witness.**
+   - The S12d enabled tuple (CLI 2.1.291, `opus`, `prompt-builder/1`) does
+     not carry over to a new CLI version or profile.
+   - Each (profile, CLI version, prompt builder) tuple needs its own reviewed
+     projection and enablement under ADR-0005 before its calls can be
+     reconciled. Until then, the witness labels those calls inferred.
+   - The profile proof attempts are made with the witness capturing, and
+     their reconciliation evidence is recorded per profile.
+
+7. **Terms boundary (unchanged).** Personal, local, single-operator use of the
+   owner's own login. The boundary does not extend to other users,
+   deployments or hosted use.
+
+**Consequences.**
+
+- Agent CLI updates no longer break the app. The app's CLI changes only
+  through a reviewed bump.
+- The owner can choose Opus or Sonnet at run time, and every call records
+  which one ran.
+- Each new model or provider costs a reviewed profile or adapter plus its own
+  proof. Each CLI bump costs a pin review and a witness disposition.
+- The Nix store path ties the real-model path to this machine's Nix setup,
+  which is acceptable for personal, local use.
 
 ## Justification
 
