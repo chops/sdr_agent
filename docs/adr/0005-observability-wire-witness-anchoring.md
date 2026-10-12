@@ -11,7 +11,8 @@ supersedes: null
 Accepted (2026-10-06, owner decision recorded in ADR-0001: "OpenTelemetry as a
 first-class concern, model-content spans and an independent wire witness both
 in the MVP, and audit-chain anchoring to a private Git repository plus
-OpenTimestamps"). Details amended by Codex consultations 11 and 13.
+OpenTimestamps"). Details amended by Codex consultations 11 and 13. The R0
+amendment in the wire witness section (2026-10-12) is proposed.
 
 ## Context
 
@@ -343,6 +344,106 @@ A failure at use is a typed unreadable store (`store_root_untrusted` /
 an `inferred` successor with a warning attention, and mismatches stay
 sticky. Changing the entry requires a reviewed amendment, and a new CLI
 version or projection requires a new proof.
+
+#### R0 amendment (proposed 2026-10-12): profile-exact tuples, calibration, per-invocation result gate
+
+**Status: PROPOSED.** In force only after Codex review and the owner's
+explicit acceptance. The result gate and tuple promotion also need an
+independent entity/action PASS (story R0-07) before they are implemented.
+
+**Context.**
+
+- **The owner's decision (D-108, G5-R0):** "we should be accurate out of the
+  gate and not infer anything we don't have to".
+- **What R0 changes.** The app moves to its own pinned Claude CLI 2.1.294
+  and adds a second profile, Sonnet (ADR-0004 R0 amendment).
+- **The allowlist** names `(provider, cli_version, projection_version,
+  method)` only. It has no model or profile, so a Sonnet call on an enabled
+  CLI version would not be distinguished from an Opus call.
+- **Reconciliation is asynchronous.**
+  - It runs from a five-minute scan on a concurrency-1 queue shared with
+    delivery reconciliation.
+  - A completed call's output is returned to its caller, and used, before
+    any reconciliation.
+  - A missing exchange, a timeout or an unconfigured store leaves the call
+    `unwitnessed` or `inferred`, and the run continues.
+
+**Decision.**
+
+1. **Profile-exact tuples.**
+   - An allowlist entry names exactly `(provider, cli_version, profile_id,
+     model_id, projection_version, method)`. `projection_version` keeps its
+     prompt-builder suffix.
+   - `enabled?` compares every field with the invocation's recorded values.
+   - The existing `2.1.291` entry becomes `profile_id: nil, model_id:
+     "claude-opus-5-5"`, matching only pre-R0 rows, which carry no profile.
+     It applies to those historical rows only.
+   - The evidence-key allowlist gains `model_id` and `profile_id`.
+2. **Calibration (the bootstrap exception the owner accepted).**
+   - **Hermetic work first.** Candidate projections for (2.1.294,
+     `claude_cli_opus`, `claude-opus-5-5`) and (2.1.294, `claude_cli_sonnet`,
+     `claude-sonnet-5-5`) are built and reviewed hermetically first. v3 may
+     already fit; if not, a reviewed grammar revision is made.
+   - **The calibration calls.** The four G-R0 attempts are calibration
+     calls:
+     - run through the external proof harness, with synthetic input, in an
+       isolated test database and witness store;
+     - under test-only exact overrides, one at a time;
+     - never part of a business flow.
+   - **Quarantine.** Their evidence is recorded as **unreviewed calibration
+     evidence** (`docs/audit/r0-calibration-*.json`, synthetic content only)
+     and is never presented as reconciled.
+   - **Promotion.** Codex reviews each captured exchange independently. Only
+     after an evidence PASS does a separate reviewed enablement change add
+     that exact tuple to the shipped allowlist.
+   - **When the grammar does not fit.** If a captured exchange falls outside
+     the grammar, the work stops and is reported; the rules are not widened
+     ad hoc. Further attempts need a new owner grant.
+3. **Per-invocation result gate.**
+   - **Which calls.** It applies to every R0-generation `claude_cli`
+     invocation outside calibration.
+   - **Mechanism.** After the response is validated and stored, the facade
+     reconciles **that** invocation at once, in-process, with the same
+     reconciliation code. It does not wait for the scan. The wait is
+     bounded, and configuration may only shorten it.
+   - **Release.** Only a `reconciled` result is released to the caller.
+   - **A mismatch** withholds the result. The run fails with
+     `witness_mismatch`, and a critical attention item opens.
+   - **A missing exchange, a timeout, an unreadable store or a tuple that is
+     not enabled** also withholds the result. The run fails with
+     `witness_unreconciled`, and a warning item opens.
+   - **On every failure.** The invocation keeps its ledger outcome and
+     charged attempt, the evidence is kept, and no new call is made
+     automatically.
+   - **Later reconciliation.** A later scan may upgrade the link, but it
+     never releases a withheld result to the original run. A re-run is an
+     explicit, budget-counted operator action.
+   - **Enforcement.** The release state is persisted on the invocation, so
+     no other path (replay, retry, reads of the parsed output) can use an
+     unreleased result. Its attributes and actions are in R0-07's entity
+     delta.
+4. **Fail-closed store.** A real `claude_cli` call is refused before
+   reservation when the witness store root is not configured or not
+   trusted. It is no longer allowed to run with reconciliation inert.
+5. **Unchanged.**
+   - The claim stays the same: the stdin and the structured output are
+     equal, and the CLI-added context is recorded, not proven equal or
+     benign. "Reconciled" does not mean the research is factually right.
+   - Fake calls stay `skipped`.
+   - The test environment keeps an empty allowlist, and overrides stay
+     test-only.
+   - The scan stays as a backfill.
+   - Changing an entry needs a reviewed amendment. A new CLI version,
+     profile or projection needs a new owner-granted proof.
+
+**Consequences.**
+
+- No ordinary real call's output is used unless its own wire record
+  matches.
+- Each call is slower by the time reconciliation takes. Calls stay one at a
+  time (D-069), so nothing queues behind another call's reconciliation.
+- Every CLI bump or new profile costs a projection review, calibration
+  calls and an enablement change.
 
 ### Anchoring (S11)
 
