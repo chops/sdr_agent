@@ -229,3 +229,36 @@ fix; operator type-casting and embedded-resource equality fixes; notification
 return shapes normalized; a field-policy related-filter fix; temporal
 (`as_of`) write fixes; an opt-out for `run` compile-time dependencies. None
 changes a behaviour this project relies on; the full gate below is the check.
+
+## Amendment (2026-10-12): EEF-CVE-2026-97853
+
+**Status: accepted** by the owner in the private Claude session chat on
+2026-10-12 ("accept PR #40"), after Codex's independent approval of
+233a91e (reply 01a12e51; exact-head CI 38202840312 green).
+
+### Advisory
+
+- **EEF-CVE-2026-97853** (MEDIUM), aka CVE-2026-97853, GHSA-6c27-994x-c52f.
+- `Decimal.round/2,3` builds the result for the requested number of decimal
+  places before applying context precision, so a large caller-supplied
+  `places` value allocates memory in proportion to it (denial of service).
+- Affected: `decimal` 0.1.0 to 3.1.1. Fixed in **3.1.2**.
+- Found by the blocking `mix hex.audit` step on CI run 38202020126 (PR #39),
+  as rule 4 of the policy above intends.
+
+### Exposure in this project
+
+`decimal` is a transitive dependency (through Ash and Postgrex). Nothing in
+`lib/` calls `Decimal.round`; the app's only `round` calls are
+`Kernel.round/1` and `Float.round/2` on percentages. The only dependency
+call site is Ash's `round/2` query expression
+(`ash/lib/ash/query/function/round.ex`), which no resource or query in this
+project uses. So the vulnerable path is not reachable today. We bump anyway
+rather than ignore the advisory: a fix exists and it is a patch release.
+
+### Decision
+
+Lock `decimal` at **3.1.2**. Only the `decimal` entry in `mix.lock`
+changes; `mix.exs` is unchanged (`mix deps.update decimal` alone offered the
+3.2.0 minor release, which is not required, so the patch release was
+selected). No `ignore_advisories` entry.
