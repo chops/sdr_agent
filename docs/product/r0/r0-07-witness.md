@@ -263,10 +263,21 @@ Nothing here is implemented until Codex records a PASS on it.
 - **G2, trusted code.** Field masking constrains reads that go through Ash
   authorization. It does not constrain arbitrary trusted server code: a
   code-level `Ash.Query.filter`, direct Repo access and similar trusted
-  in-process code are outside it, like any trusted code. External and
-  input-annotated filtering, sorting and aggregates over the output-bearing
-  fields are denied, and are tested. Every business consumer reads only
-  through `released_output/2`.
+  in-process code are outside it, like any trusted code. Input-annotated
+  filters and sorts over the output-bearing fields are denied, and are
+  tested. Every business consumer reads only through `released_output/2`.
+  - **Aggregates are a trusted-code limit, not a denial (code review
+    important 1).** Ash never applies field policies to the field an ad-hoc
+    aggregate reads unless the call passes `authorize_fields?: true`. A
+    default `Ash.aggregate(query, {name, :max, field: :refusal})` as AGT
+    returns the unreleased value; with `authorize?: true, authorize_fields?:
+    true` it returns nil. Slice A exposes no aggregate surface, so this is
+    accepted for the staged foundation. Two structural guards are tested: no
+    resource declares an aggregate or calculation reaching the
+    output-bearing fields, and no application code runs a field aggregate.
+    A test also documents the default and authorized aggregate behaviours.
+    Before any aggregate surface over these fields is exposed, it must pass
+    `authorize_fields?: true` and add protected-field regression tests.
 - **G3, existing rows.**
   - A generation-2 ClaudeCLI output without a release defaults to withheld.
     There is no automatic release, backfill or history rewrite.
@@ -322,9 +333,10 @@ Nothing here is implemented until Codex records a PASS on it.
   differ from the invocation's, is refused; a generation-1 link is refused
   with `profile_id`; re-reconciling a generation-1 invocation writes no
   successor.
-- **G2:** `filter_input`, `sort_input` and an aggregate over each
-  output-bearing field are denied (no row is selected and no value is
-  derived).
+- **G2:** `filter_input` and `sort_input` over the output-bearing fields
+  are denied (no row is selected, no order is derived). For aggregates,
+  the structural guards hold, and a test documents both behaviours: the
+  default leaks, `authorize_fields?: true` withholds (see 5.3).
 
 ## 6. Gate record
 

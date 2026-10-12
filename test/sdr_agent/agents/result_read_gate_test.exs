@@ -256,6 +256,28 @@ defmodule SdrAgent.Agents.ResultReadGateTest do
     # the G2 limit). So no aggregate or calculation a caller can load may
     # reach the output-bearing fields, and no application code may run a
     # field aggregate.
+    # Documents the trusted-code limit (Codex code review, important 1): a
+    # default ad-hoc aggregate returns the unreleased value; only
+    # `authorize_fields?: true` applies the field policy. Any aggregate
+    # surface exposed later must use it and add protected-field regressions.
+    test "an ad-hoc aggregate leaks by default; authorize_fields?: true withholds", ctx do
+      query = g2_query(ctx, ctx.agent)
+      max = {:out, :max, field: :refusal}
+
+      assert {:ok, %{out: "refusal zzz"}} = Ash.aggregate(query, max, actor: ctx.agent)
+
+      assert {:ok, %{out: nil}} =
+               Ash.aggregate(query, max,
+                 actor: ctx.agent,
+                 authorize?: true,
+                 authorize_fields?: true
+               )
+
+      # The ordinary read of the same rows stays masked.
+      {:ok, rows} = Ash.read(query)
+      assert Enum.all?(rows, &match?(%Ash.ForbiddenField{}, &1.refusal))
+    end
+
     test "no declared aggregate or calculation reaches an output-bearing field" do
       fields = ModelInvocation.output_fields()
 
