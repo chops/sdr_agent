@@ -31,6 +31,8 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       mandatory; this health check is in addition to it.
     * `status/0` — what the Admin page shows: the configured and the
       effective provider (nil, with the refusal, when calls are refused),
+      the configured provider's model profile (`profile_id`, from its
+      provenance: `:fake` or `:claude_cli_opus` until the R0-03 registry),
       model alias and resolved id, reviewed CLI version, the configured
       pinned CLI path (`cli_executable`), server state and the last init
       attestation with its time. No secret is read and no CLI is run.
@@ -188,6 +190,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
         %{
           provider: ClaudeCLI,
+          profile_id: provenance.profile_id,
           model_alias: provenance.model_catalog_entry["alias"],
           model_id: provenance.model_id,
           reviewed_version: provenance.provider_version,
@@ -198,10 +201,13 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
         }
 
       module ->
+        provenance = provenance(module)
+
         %{
           provider: module,
+          profile_id: provenance[:profile_id],
           model_alias: nil,
-          model_id: model_id(module),
+          model_id: provenance[:model_id],
           reviewed_version: nil,
           cli_executable: nil,
           server: :not_applicable,
@@ -221,10 +227,10 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   end
 
   # In-process providers record their fixed provenance without a request.
-  defp model_id(module) do
+  defp provenance(module) do
     case module.prepare(%{}, []) do
-      {:ok, %{model_id: model_id}} -> model_id
-      _refused -> nil
+      {:ok, %{} = provenance} -> provenance
+      _refused -> %{}
     end
   end
 end

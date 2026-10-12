@@ -334,17 +334,28 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       assert PinnedCLI.launches(counter) == 0
     end
 
-    test "status reports the configured and the effective provider" do
+    test "status reports the configured and the effective provider and the model profile" do
       Application.put_env(:sdr_agent, :model_provider, Fake)
-      assert %{configured: Fake, effective: Fake} = Runtime.status()
+      assert %{configured: Fake, effective: Fake, profile_id: :fake} = Runtime.status()
 
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
 
-      assert %{configured: ClaudeCLI, effective: nil, refusal: :provider_not_running} =
-               Runtime.status()
+      assert %{
+               configured: ClaudeCLI,
+               effective: nil,
+               refusal: :provider_not_running,
+               profile_id: :claude_cli_opus
+             } = Runtime.status()
 
       start_named!("ready")
-      assert %{configured: ClaudeCLI, effective: ClaudeCLI, refusal: nil} = Runtime.status()
+
+      assert %{
+               configured: ClaudeCLI,
+               effective: ClaudeCLI,
+               refusal: nil,
+               profile_id: :claude_cli_opus
+             } =
+               Runtime.status()
     end
 
     test "the application's child restarts after a crash, admitting calls again" do

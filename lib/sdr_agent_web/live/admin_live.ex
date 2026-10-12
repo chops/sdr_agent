@@ -3,7 +3,8 @@ defmodule SdrAgentWeb.AdminLive do
   Admin / provider status (S10b; ADM only): the runtime-selected model
   provider (`SdrAgent.AI.ModelProvider.Runtime.status/0`, Q0.1: configured
   and effective provider — none, with the refusal, while calls are refused —
-  model alias
+  the configured and effective model profile and the refusal's reason in
+  words (R0-05; read-only, no model call, no switch: that is C2), model alias
   and resolved id, reviewed CLI version, the app's pinned CLI path (R0-02;
   shown, never run), whether its supervised server runs
   and the last init attestation — refreshed live, like the other console
@@ -381,6 +382,11 @@ defmodule SdrAgentWeb.AdminLive do
   defp launcher_note(%{command?: false}), do: " (llm-proxy-shim not found)"
   defp launcher_note(_attestation), do: ""
 
+  # One server serves the configured provider, so the effective profile is
+  # the configured one while calls are admitted, and none while refused.
+  defp effective_profile(%{effective: nil}), do: "none"
+  defp effective_profile(provider), do: provider.profile_id || "none"
+
   defp short(nil), do: "not configured"
   defp short(module) when is_atom(module), do: module |> Module.split() |> List.last()
 
@@ -429,6 +435,36 @@ defmodule SdrAgentWeb.AdminLive do
                   </span>
                 </span>
               </.field>
+              <.field :if={@provider.refusal} label="Refused because">
+                <span
+                  id="provider-refusal"
+                  data-refusal={@provider.refusal}
+                  class="block max-w-xs text-xs text-rose-700"
+                >
+                  {Runtime.refusal_message(@provider.refusal)}
+                </span>
+              </.field>
+              <.field label="Configured profile">
+                <span
+                  id="configured-profile"
+                  data-profile={@provider.profile_id || "none"}
+                  class="font-mono text-xs"
+                >
+                  {@provider.profile_id || "none"}
+                </span>
+              </.field>
+              <.field label="Effective profile">
+                <span
+                  id="effective-profile"
+                  data-profile={effective_profile(@provider)}
+                  class={[
+                    "font-mono text-xs",
+                    if(@provider.effective, do: "text-emerald-700", else: "text-rose-700")
+                  ]}
+                >
+                  {effective_profile(@provider)}
+                </span>
+              </.field>
               <.field label="Module">
                 <span class="break-all font-mono text-xs">{inspect(@provider.provider)}</span>
               </.field>
@@ -447,6 +483,13 @@ defmodule SdrAgentWeb.AdminLive do
               <.field :if={@provider.cli_executable} label="Pinned CLI">
                 <span id="pinned-cli-path" class="break-all font-mono text-xs">
                   {@provider.cli_executable}
+                </span>
+                <span
+                  :if={@provider.reviewed_version}
+                  id="pinned-cli-version"
+                  class="block text-xs text-zinc-500"
+                >
+                  Claude Code {@provider.reviewed_version} (the reviewed build)
                 </span>
               </.field>
               <.field label="Server">
