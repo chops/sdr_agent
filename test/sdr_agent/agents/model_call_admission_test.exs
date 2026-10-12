@@ -14,6 +14,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
   require Ash.Query
 
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Admission.Refused
   alias SdrAgent.Agents.Checks.AdmissionContext
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.AgentsFixtures
@@ -230,7 +231,11 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       assert {invocation.grant_id, invocation.ledger_generation} == {nil, 2}
 
       charge =
-        AdmissionContext.context(%{grant_id: grant.id, allocation_id: hd(grant.allocations).id})
+        AdmissionContext.context(%{
+          grant_id: grant.id,
+          allocation_id: hd(grant.allocations).id,
+          reserved_at: Clock.utc_now()
+        })
 
       assert {:error, %Ash.Error.Forbidden{}} =
                direct(direct_attrs(run, "fake-charged", fake), run.agent, charge)
@@ -280,7 +285,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
         |> stringify()
         |> Map.merge(%{"grant_id" => revoked.id, "allocation_id" => hd(revoked.allocations).id})
 
-      assert {:error, :no_eligible_grant} =
+      assert {:error, %Refused{reason: :no_eligible_grant}} =
                Agents.reserve_model_invocation(run.run, forged, actor: run.agent)
 
       assert invocations(run) == []
@@ -310,13 +315,13 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       run = run!(ctx)
 
       Clock.freeze(DateTime.add(@starts, -1, :microsecond))
-      assert {:error, :no_eligible_grant} = reserve(run, "early")
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(run, "early")
       Clock.freeze(@starts)
       assert {:ok, _} = reserve(run, "at-start")
       Clock.freeze(DateTime.add(@expires, -1, :microsecond))
       assert {:ok, _} = reserve(run, "last-moment")
       Clock.freeze(@expires)
-      assert {:error, :no_eligible_grant} = reserve(run, "expired")
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(run, "expired")
     end
 
     test "a revoked grant admits nothing", ctx do
@@ -324,14 +329,14 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       {:ok, _} = Agents.revoke_grant(grant, %{expected_revision: 1}, actor: ctx.admin)
       run = run!(ctx)
 
-      assert {:error, :no_eligible_grant} = reserve(run, "revoked")
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(run, "revoked")
     end
 
     test "a profile outside the grant's profiles admits nothing", ctx do
       grant!(ctx, %{profile_ids: [:claude_cli_sonnet]})
       run = run!(ctx)
 
-      assert {:error, :no_eligible_grant} = reserve(run, "opus")
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(run, "opus")
       assert {:ok, _} = reserve(run, "sonnet", %{profile_id: :claude_cli_sonnet})
     end
 
@@ -342,7 +347,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
 
       run = run!(ctx)
 
-      assert {:error, :no_allocation} = reserve(run, "opus")
+      assert {:error, %Refused{reason: :no_allocation}} = reserve(run, "opus")
       assert {:ok, _} = reserve(run, "sonnet", %{profile_id: :claude_cli_sonnet})
     end
 
@@ -350,7 +355,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       grant!(ctx)
       run = run!(ctx, :reply)
 
-      assert {:error, :no_allocation} = reserve(run, "reply")
+      assert {:error, %Refused{reason: :no_allocation}} = reserve(run, "reply")
     end
 
     test "the workshop reserve is unavailable before its time and available after release",
@@ -366,7 +371,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
 
       run = run!(ctx)
 
-      assert {:error, :no_allocation} = reserve(run, "before")
+      assert {:error, %Refused{reason: :no_allocation}} = reserve(run, "before")
 
       {:ok, _} =
         Agents.release_allocation(grant, %{expected_revision: 1, key: :workshop},
@@ -395,11 +400,11 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       run = run!(ctx)
 
       Clock.freeze(DateTime.add(from, -1, :microsecond))
-      assert {:error, :no_allocation} = reserve(run, "w-early")
+      assert {:error, %Refused{reason: :no_allocation}} = reserve(run, "w-early")
       Clock.freeze(from)
       assert {:ok, _} = reserve(run, "w-open")
       Clock.freeze(until)
-      assert {:error, :no_allocation} = reserve(run, "w-closed")
+      assert {:error, %Refused{reason: :no_allocation}} = reserve(run, "w-closed")
     end
 
     test "two matching allocations are ambiguous", ctx do
@@ -412,7 +417,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
 
       run = run!(ctx)
 
-      assert {:error, :ambiguous_allocation} = reserve(run, "ambiguous")
+      assert {:error, %Refused{reason: :ambiguous_allocation}} = reserve(run, "ambiguous")
     end
 
     test "allocations of two grants matching at once are ambiguous", ctx do
@@ -420,7 +425,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       grant!(ctx, %{name: "G-SECOND"})
       run = run!(ctx)
 
-      assert {:error, :ambiguous_allocation} = reserve(run, "two-grants")
+      assert {:error, %Refused{reason: :ambiguous_allocation}} = reserve(run, "two-grants")
     end
 
     test "a run without a usage origin (created before R0) is refused", ctx do
@@ -428,7 +433,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       run = run!(ctx)
       legacy_run!(run.run)
 
-      assert {:error, :no_usage_origin} = reserve(run, "legacy-run")
+      assert {:error, %Refused{reason: :no_usage_origin}} = reserve(run, "legacy-run")
       assert invocations(run) == []
     end
 
@@ -451,7 +456,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       run = run!(ctx)
 
       assert {:ok, _} = reserve(run, "a-1")
-      assert {:error, {:budget_exhausted, :allocation}} = reserve(run, "a-2")
+      assert {:error, %Refused{reason: {:budget_exhausted, :allocation}}} = reserve(run, "a-2")
       assert consumed(grant) == 1
     end
 
@@ -483,7 +488,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
           actor: ctx.admin
         )
 
-      assert {:error, {:budget_exhausted, :grant}} = reserve(reply, "g-3")
+      assert {:error, %Refused{reason: {:budget_exhausted, :grant}}} = reserve(reply, "g-3")
     end
 
     test "the grant's UTC day limit, renewed at midnight UTC", ctx do
@@ -493,7 +498,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       Clock.freeze(~U[2026-10-20 23:59:59.999999Z])
       assert {:ok, _} = reserve(run, "day-1")
       assert {:ok, _} = reserve(run, "day-2")
-      assert {:error, {:budget_exhausted, :grant_day}} = reserve(run, "day-3")
+      assert {:error, %Refused{reason: {:budget_exhausted, :grant_day}}} = reserve(run, "day-3")
 
       Clock.freeze(~U[2026-10-21 00:00:00.000000Z])
       assert {:ok, _} = reserve(run, "day-4")
@@ -505,7 +510,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       run = run!(ctx)
       before = reload_run(run).budget
 
-      assert {:error, :no_eligible_grant} = reserve(run, "refused-1")
+      assert {:error, %Refused{reason: :no_eligible_grant} = refused} = reserve(run, "refused-1")
 
       assert invocations(run) == []
       assert reload_run(run).budget == before
@@ -528,13 +533,17 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       assert event.payload["profile_id"] == "claude_cli_opus"
       assert event.payload["bucket"] == "b1"
       refute Map.has_key?(event.payload, "request")
+
+      # The caller gets the exact receipt of this refusal.
+      assert {refused.failure_id, refused.event_id} == {failure.id, event.id}
+      assert {refused.agent_run_id, refused.request_id} == {run.run.id, "refused-1"}
     end
 
     test "a repeated refusal adds no second Failure", ctx do
       run = run!(ctx)
 
-      assert {:error, :no_eligible_grant} = reserve(run, "again-1")
-      assert {:error, :no_eligible_grant} = reserve(run, "again-2")
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(run, "again-1")
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(run, "again-2")
 
       assert [failure] = refusal_failures(ctx)
       events = events_of_type(ctx.tenant, "model.reservation.refused")
@@ -549,18 +558,20 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       other_run = run!(ctx)
 
       assert {:ok, _} = reserve(run, "r-1")
-      assert {:error, {:budget_exhausted, :allocation}} = reserve(run, "r-2")
-      assert {:error, {:budget_exhausted, :allocation}} = reserve(other_run, "r-3")
+      assert {:error, %Refused{reason: {:budget_exhausted, :allocation}}} = reserve(run, "r-2")
+
+      assert {:error, %Refused{reason: {:budget_exhausted, :allocation}}} =
+               reserve(other_run, "r-3")
 
       {:ok, _} = Agents.revoke_grant(grant, %{expected_revision: 1}, actor: ctx.admin)
-      assert {:error, :no_eligible_grant} = reserve(run, "r-4")
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(run, "r-4")
 
       assert length(refusal_failures(ctx)) == 3
     end
 
     test "a resolved refusal Failure is not reused", ctx do
       run = run!(ctx)
-      assert {:error, :no_eligible_grant} = reserve(run, "res-1")
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(run, "res-1")
       [failure] = refusal_failures(ctx)
 
       {:ok, _} =
@@ -568,14 +579,14 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
           actor: ctx.admin
         )
 
-      assert {:error, :no_eligible_grant} = reserve(run, "res-2")
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(run, "res-2")
       assert length(refusal_failures(ctx)) == 2
     end
 
     test "the facade refuses before the provider runs", ctx do
       run = run!(ctx)
 
-      assert {:error, :no_eligible_grant} =
+      assert {:error, %Refused{reason: :no_eligible_grant}} =
                ModelProvider.complete(request(run, "facade-refused"),
                  provider: __MODULE__.MustNotRun
                )
@@ -596,6 +607,99 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       assert result.invocation.status == :completed
       assert result.invocation.grant_id == grant.id
       assert result.invocation.profile_id == :claude_cli_opus
+    end
+  end
+
+  describe "a run stopped by a refusal" do
+    # Two different refusal conditions of one run: no grant, then a spent grant.
+    defp two_refusals!(ctx) do
+      run = run!(ctx)
+      {:error, %Refused{} = unavailable} = reserve(run, "cond-1")
+
+      grant!(ctx, %{total_attempts: 1, allocations: [%{key: :b1, applies_to: [:b1], attempts: 1}]})
+
+      {:ok, _} = reserve(run!(ctx), "spend")
+      {:error, %Refused{reason: {:budget_exhausted, :grant}} = cap} = reserve(run, "cond-2")
+      assert unavailable.failure_id != cap.failure_id
+      %{run: run, unavailable: unavailable, cap: cap}
+    end
+
+    defp receipt(refused),
+      do: %{refusal_failure_id: refused.failure_id, refusal_request_id: refused.request_id}
+
+    test "links exactly the receipt's Failure, never another refusal of the run", ctx do
+      %{run: run, unavailable: unavailable, cap: cap} = two_refusals!(ctx)
+      before = length(refusal_failures(ctx))
+
+      # The cap receipt cannot stop the run as unavailable, nor pair with the other request.
+      assert {:error, %Ash.Error.Invalid{}} =
+               Agents.fail_run(
+                 run.run,
+                 Map.put(receipt(cap), :status_reason, :grant_unavailable),
+                 actor: run.agent
+               )
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Agents.exhaust_run_budget(
+                 run.run,
+                 %{
+                   status_reason: :grant_exhausted,
+                   refusal_failure_id: cap.failure_id,
+                   refusal_request_id: unavailable.request_id
+                 },
+                 actor: run.agent
+               )
+
+      assert {:ok, stopped} =
+               Agents.exhaust_run_budget(
+                 run.run,
+                 Map.put(receipt(cap), :status_reason, :grant_exhausted),
+                 actor: run.agent
+               )
+
+      assert {stopped.status, stopped.status_reason} == {:budget_exhausted, :grant_exhausted}
+      assert stopped.attention_failure_id == cap.failure_id
+      assert length(refusal_failures(ctx)) == before
+
+      assert [event] = events_of_type(ctx.tenant, "agents.run.budget_exhausted")
+      assert event.payload["arguments"]["refusal_failure_id"] == cap.failure_id
+      assert event.payload["arguments"]["refusal_request_id"] == "cond-2"
+    end
+
+    test "a same-run budget Failure without refusal provenance is refused", ctx do
+      %{run: run, unavailable: unavailable} = two_refusals!(ctx)
+
+      {:ok, impostor} =
+        SdrAgent.Operations.open_failure(
+          %{
+            subject_resource: "SdrAgent.Agents.AgentRun",
+            subject_id: run.run.id,
+            class: :budget_exhausted,
+            severity: :critical,
+            message: "model call reservation refused: no_eligible_grant"
+          },
+          actor: run.agent
+        )
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Agents.fail_run(
+                 run.run,
+                 %{
+                   status_reason: :grant_unavailable,
+                   refusal_failure_id: impostor.id,
+                   refusal_request_id: unavailable.request_id
+                 },
+                 actor: run.agent
+               )
+
+      assert {:ok, stopped} =
+               Agents.fail_run(
+                 run.run,
+                 Map.put(receipt(unavailable), :status_reason, :grant_unavailable),
+                 actor: run.agent
+               )
+
+      assert stopped.attention_failure_id == unavailable.failure_id
     end
   end
 

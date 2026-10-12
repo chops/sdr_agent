@@ -8,7 +8,7 @@ defmodule SdrAgent.Agents.Admission do
   grant `FOR UPDATE` → its allocations `FOR UPDATE` → chain head):
 
     1. the run row (`FOR UPDATE`);
-    2. `lock_candidates/3`: the candidate grants — the run's tenant,
+    2. `lock_candidates/2`: the candidate grants — the run's tenant,
        `:active`, listing the call's profile — read under MVCC and then
        locked `FOR SHARE` by id, then all their allocations `FOR SHARE` by
        id. A reservation therefore never waits for a grant or allocation row
@@ -16,10 +16,14 @@ defmodule SdrAgent.Agents.Admission do
        candidate (or add an allocation to it) until the reservation ends;
        the invocation's FK checks (`FOR KEY SHARE`) find the rows already
        held;
-    3. the chain head, explicitly;
-    4. `admit/4`: eligibility and room from fresh reads of the locked
-       candidates under the head (a grant committed after step 2 is not a
-       candidate: the reservation is ordered before it).
+    3. the chain head, explicitly; only now is the admission instant `now`
+       read from `SdrAgent.Clock`, so time spent waiting for any lock counts;
+    4. `admit/4`: eligibility, windows and room (the grant's UTC day is the
+       day of `now`) from fresh reads of the locked candidates under the
+       head (a grant committed after step 2 is not a candidate: the
+       reservation is ordered before it). The same `now` is written as the
+       invocation's `reserved_at`, so the recorded charge, its quota day and
+       the eligibility windows share one instant.
 
   It selects the one allocation that may fund the call:
 
@@ -86,13 +90,25 @@ defmodule SdrAgent.Agents.Admission do
     ]
   end
 
+  defmodule Refused do
+    @moduledoc """
+    The receipt of a committed reservation refusal, returned to the caller as
+    `{:error, %Refused{}}`: the refusal `reason`, the exact (deduplicated)
+    Failure recorded for it, the `model.reservation.refused` event, the run
+    and the refused request's idempotency key. A run stopped by the refusal
+    links exactly this Failure (`SdrAgent.Agents.Changes.LinkRefusalAttention`).
+    """
+    @enforce_keys [:reason, :failure_id, :event_id, :agent_run_id]
+    defstruct [:reason, :failure_id, :event_id, :agent_run_id, :request_id]
+  end
+
   @doc """
   Step 2 of the lock order (see the moduledoc): with the run row locked and
   before the chain head, locks the run tenant's candidate grants for
   `profile_id` and all their allocations `FOR SHARE`, grants then
   allocations, each by id. Returns `{:ok, grant_ids}` (possibly empty).
   """
-  def lock_candidates(run, profile_id, _now) do
+  def lock_candidates(run, profile_id) do
     ids =
       ModelCallGrant
       |> Ash.Query.filter(tenant_id == ^run.tenant_id and status == :active)
@@ -282,7 +298,8 @@ defmodule SdrAgent.Agents.Admission do
   critical one is opened; then `model.reservation.refused` is appended
   (reason, bucket, profile, grant/allocation, failure id and whether it
   was deduplicated). Concurrent and repeated refusals therefore open one
-  Failure. Returns `{:ok, failure}` or `{:error, error}`.
+  Failure. Returns `{:ok, %Refused{}}` — the exact receipt of this refusal
+  — or `{:error, error}`.
   """
   def record_refusal(%Refusal{} = refusal) do
     agent = Actor.system(:agent_runtime, refusal.tenant_id)
@@ -292,8 +309,14 @@ defmodule SdrAgent.Agents.Admission do
       with :ok <- lock_operation(refusal),
            {:ok, _head} <- Kernel.lock_head(refusal.tenant_id),
            {:ok, failure, deduplicated?} <- failure(refusal, detail, agent),
-           {:ok, _event} <- Audit.append(event(refusal, failure, deduplicated?), actor: agent) do
-        failure
+           {:ok, event} <- Audit.append(event(refusal, failure, deduplicated?), actor: agent) do
+        %Refused{
+          reason: refusal.reason,
+          failure_id: failure.id,
+          event_id: event.id,
+          agent_run_id: refusal.agent_run_id,
+          request_id: refusal.idempotency_key
+        }
       else
         {:error, error} -> Repo.rollback(error)
       end
@@ -313,25 +336,6 @@ defmodule SdrAgent.Agents.Admission do
     |> Ash.read!(authorize?: false)
 
     :ok
-  end
-
-  @doc "The newest live refusal Failure of `run` (see `SdrAgent.Agents.reservation_refusal_failure/2`)."
-  def refusal_failure(run, actor) do
-    Failure
-    |> Ash.Query.for_read(:read, %{}, actor: actor)
-    |> Ash.Query.filter(
-      tenant_id == ^run.tenant_id and class == :budget_exhausted and
-        subject_resource == ^@run_resource and subject_id == ^run.id and
-        status in [:open, :acknowledged]
-    )
-    |> Ash.Query.sort(occurred_at: :desc, id: :desc)
-    |> Ash.Query.limit(1)
-    |> Ash.read_one()
-    |> case do
-      {:ok, %Failure{} = failure} -> {:ok, failure}
-      {:ok, nil} -> {:error, Ash.Error.Query.NotFound.exception(resource: Failure)}
-      error -> error
-    end
   end
 
   @doc "The detail reason recorded for a refusal reason (R0 packet, Operations.Failure)."

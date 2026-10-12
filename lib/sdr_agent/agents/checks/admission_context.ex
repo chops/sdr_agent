@@ -3,7 +3,8 @@ defmodule SdrAgent.Agents.Checks.AdmissionContext do
   Marker and charge for `ModelInvocation :reserve` (C9): a real-model
   (ClaudeCLI) reservation is created only by
   `SdrAgent.Agents.reserve_model_invocation/3`, which sets this context —
-  the admitted `%{grant_id:, allocation_id:}` — only after
+  the admitted `%{grant_id:, allocation_id:, reserved_at:}` (the admission
+  instant, read after every reservation lock is held) — only after
   `SdrAgent.Agents.Admission.admit/4` selected and checked the allocation
   inside the reservation transaction. No other code sets it, so a direct
   `:reserve` of a ClaudeCLI call is refused
@@ -14,12 +15,16 @@ defmodule SdrAgent.Agents.Checks.AdmissionContext do
   @marker :sdr_agent_model_admission
 
   @doc "The context map carrying an admitted charge."
-  def context(%{grant_id: grant_id, allocation_id: allocation_id})
+  def context(%{grant_id: grant_id, allocation_id: allocation_id, reserved_at: %DateTime{} = at})
       when is_binary(grant_id) and is_binary(allocation_id),
-      do: %{@marker => %{grant_id: grant_id, allocation_id: allocation_id}}
+      do: %{@marker => %{grant_id: grant_id, allocation_id: allocation_id, reserved_at: at}}
 
   @doc "The admitted charge in a changeset context, or `nil`."
-  def charge(%{@marker => %{grant_id: grant_id, allocation_id: allocation_id} = charge})
+  def charge(%{
+        @marker =>
+          %{grant_id: grant_id, allocation_id: allocation_id, reserved_at: %DateTime{}} =
+            charge
+      })
       when is_binary(grant_id) and is_binary(allocation_id),
       do: charge
 

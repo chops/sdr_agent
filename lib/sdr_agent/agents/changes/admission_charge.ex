@@ -6,7 +6,8 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
   action accepts neither). On the cast `provider`:
 
     * `:claude_cli` — refused (Forbidden) unless the context carries an
-      admitted charge, which is then force-set on the row;
+      admitted charge, which is then force-set on the row together with its
+      admission instant as `reserved_at` (never the attribute default);
     * any other provider — refused (Forbidden) if a charge is present.
   """
   use Ash.Resource.Change
@@ -19,10 +20,11 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
     provider = Ash.Changeset.get_attribute(changeset, :provider)
 
     case {provider, AdmissionContext.charge(changeset.context)} do
-      {:claude_cli, %{grant_id: grant_id, allocation_id: allocation_id}} ->
+      {:claude_cli, %{grant_id: grant_id, allocation_id: allocation_id, reserved_at: at}} ->
         Ash.Changeset.force_change_attributes(changeset, %{
           grant_id: grant_id,
-          allocation_id: allocation_id
+          allocation_id: allocation_id,
+          reserved_at: at
         })
 
       {:claude_cli, _missing} ->

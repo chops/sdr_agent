@@ -12,9 +12,14 @@ defmodule SdrAgent.SDR.GrantRefusalWorkerTest do
 
   import SdrAgent.OutreachFixtures, only: [put_env!: 2]
 
+  alias SdrAgent.Agents.Admission.Refused
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
+  alias SdrAgent.Audit
   alias SdrAgent.Operations
+  alias SdrAgent.SDR
+  alias SdrAgent.SDR.AgentWorker
+  alias SdrAgent.SDR.Context
 
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
@@ -122,5 +127,59 @@ defmodule SdrAgent.SDR.GrantRefusalWorkerTest do
              )
 
     assert run!(ctx, run).status == :running
+  end
+
+  test "a refusal resolved by an admin before the run stops: one deterministic outcome", ctx do
+    %{run: run, operation: operation} = assign!(ctx, "01")
+    {:ok, operation} = Operations.start_operation(operation, actor: ctx.agent)
+    {:ok, run} = SdrAgent.Agents.start_run(run, actor: ctx.agent)
+
+    assert {:error, %Refused{reason: :no_eligible_grant} = refused} =
+             SdrAgent.Agents.reserve_model_invocation(run, AgentsFixtures.claude_attrs("race"),
+               actor: ctx.agent
+             )
+
+    {:ok, refusal} = Operations.get_failure(refused.failure_id, actor: ctx.admin)
+
+    {:ok, _} =
+      Operations.resolve_failure(refusal, %{resolution_note: "grant on its way"},
+        actor: ctx.admin
+      )
+
+    before = attention!(ctx)
+
+    model_ctx = %Context{
+      actor: ctx.agent,
+      tenant_id: ctx.tenant.id,
+      run_id: run.id,
+      correlation_id: run.correlation_id
+    }
+
+    # The stop SDR.Model makes, then the Operation write AgentWorker makes.
+    assert {:ok, stopped} = SDR.Model.stop_refused(model_ctx, run, refused)
+
+    {:ok, :ok} =
+      Audit.transaction(fn -> AgentWorker.fail_operation(operation, stopped, ctx.agent) end)
+
+    stopped = run!(ctx, stopped)
+    assert {stopped.status, stopped.status_reason} == {:failed, :grant_unavailable}
+    assert stopped.attention_failure_id == refused.failure_id
+
+    assert {:ok, %{status: :resolved}} =
+             Operations.get_failure(refused.failure_id, actor: ctx.admin)
+
+    # The failed Operation keeps a live queue entry of its own; nothing is a crash.
+    assert [own] = attention!(ctx) -- before
+
+    assert {own.subject_resource, own.subject_id} ==
+             {"SdrAgent.Operations.Operation", operation.id}
+
+    assert own.class == :budget_exhausted
+    assert own.message =~ refused.failure_id
+    {:ok, operation} = Operations.get_operation(operation.id, actor: ctx.admin)
+    assert operation.status in [:failed, :discarded]
+    assert operation.last_failure_id == own.id
+    assert events_of_type(ctx.tenant, "agents.run.failed") |> length() == 1
+    refute Enum.any?(attention!(ctx), &(&1.class == :run_stopped))
   end
 end

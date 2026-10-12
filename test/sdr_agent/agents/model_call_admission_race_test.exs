@@ -17,9 +17,11 @@ defmodule SdrAgent.Agents.ModelCallAdmissionRaceTest do
   alias Ecto.Adapters.SQL
   alias Ecto.Adapters.SQL.Sandbox
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Admission.Refused
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit
   alias SdrAgent.AuditCase
+  alias SdrAgent.Clock
   alias SdrAgent.Operations
   alias SdrAgent.Operations.Failure
 
@@ -60,7 +62,10 @@ defmodule SdrAgent.Agents.ModelCallAdmissionRaceTest do
 
     assert Enum.count(results, &match?({:ok, _}, &1)) == 1, inspect(results)
 
-    assert Enum.count(results, &(&1 == {:error, {:budget_exhausted, :grant}})) == 5,
+    assert Enum.count(
+             results,
+             &match?({:error, %Refused{reason: {:budget_exhausted, :grant}}}, &1)
+           ) == 5,
            inspect(results)
 
     charged =
@@ -88,7 +93,8 @@ defmodule SdrAgent.Agents.ModelCallAdmissionRaceTest do
       end)
       |> Task.await_many(60_000)
 
-    assert Enum.all?(results, &(&1 == {:error, :no_eligible_grant})), inspect(results)
+    assert Enum.all?(results, &match?({:error, %Refused{reason: :no_eligible_grant}}, &1)),
+           inspect(results)
 
     failures =
       Failure
@@ -128,7 +134,7 @@ defmodule SdrAgent.Agents.ModelCallAdmissionRaceTest do
       send(editor.pid, :go)
 
       assert {:ok, %{status: :revoked}} = Task.await(editor, 30_000)
-      assert Task.await(reservation, 30_000) == {:error, :no_eligible_grant}
+      assert {:error, %Refused{reason: :no_eligible_grant}} = Task.await(reservation, 30_000)
       assert charged(grant) == 0
       assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: auditor(ctx))
     end
@@ -198,11 +204,111 @@ defmodule SdrAgent.Agents.ModelCallAdmissionRaceTest do
       send(writer.pid, :go)
 
       assert {:ok, %{status: :running}} = Task.await(writer, 30_000)
-      assert Task.await(reservation, 30_000) == {:error, :no_eligible_grant}
+      assert {:error, %Refused{reason: :no_eligible_grant}} = Task.await(reservation, 30_000)
 
       assert [failure] = refusal_failures(ctx, run)
       assert failure.operation_id == run.operation_id
       assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: auditor(ctx))
+    end
+  end
+
+  describe "the admission instant is read after every lock" do
+    setup do
+      on_exit(&Clock.unfreeze/0)
+    end
+
+    # Holds the chain head while the clock moves; the reservation (a task of
+    # this process, so it reads this process's frozen clock) waits for it.
+    defp reserve_while_time_moves(ctx, run, agent, key, from, to) do
+      Clock.freeze(from)
+      parent = self()
+
+      head = Task.async(fn -> with_connection(fn -> hold_head(ctx, parent) end) end)
+      assert_receive :head_held, 10_000
+      reservation = Task.async(fn -> reserve(run, agent, key) end)
+      await_lock_waiters(1)
+      Clock.freeze(to)
+      send(head.pid, :go)
+      {:ok, _} = Task.await(head, 30_000)
+      Task.await(reservation, 30_000)
+    end
+
+    defp unchanged!(run, agent, key) do
+      {:ok, reloaded} = Agents.get_run(run.id, actor: agent)
+      assert reloaded.budget.model_calls_reserved == 0
+      {:ok, []} = Agents.list_model_invocations(run.id, actor: agent)
+
+      {:ok, payloads} = Audit.list_payloads(actor: auditor_cli(agent))
+      request = Map.fetch!(AgentsFixtures.claude_attrs(key), :request)
+      refute Enum.any?(payloads, &(&1.sha256 == :crypto.hash(:sha256, request)))
+    end
+
+    test "a call that starts before expires_at but is admitted after it is refused", ctx do
+      expires = ~U[2026-10-20 12:00:00.000000Z]
+      Clock.freeze(~U[2026-10-20 11:00:00.000000Z])
+
+      grant =
+        AgentsFixtures.grant!(ctx.tenant, %{
+          starts_at: ~U[2026-10-12 00:00:00.000000Z],
+          expires_at: expires
+        })
+
+      %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
+      from = DateTime.add(expires, -1, :second)
+
+      assert {:error, %Refused{reason: :no_eligible_grant}} =
+               reserve_while_time_moves(ctx, run, agent, "expiring", from, expires)
+
+      assert charged(grant) == 0
+      unchanged!(run, agent, "expiring")
+    end
+
+    test "an allocation window that closes while the call waits refuses it", ctx do
+      until = ~U[2026-10-20 12:00:00.000000Z]
+      Clock.freeze(~U[2026-10-20 11:00:00.000000Z])
+
+      grant =
+        AgentsFixtures.grant!(ctx.tenant, %{
+          allocations: [
+            %{key: :rehearsal, applies_to: [:b1], attempts: 5, available_until: until}
+          ]
+        })
+
+      %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
+      from = DateTime.add(until, -1, :second)
+
+      assert {:error, %Refused{reason: :no_allocation}} =
+               reserve_while_time_moves(ctx, run, agent, "closing", from, until)
+
+      assert charged(grant) == 0
+      unchanged!(run, agent, "closing")
+    end
+
+    test "across UTC midnight the day cap is counted for the day recorded on the row", ctx do
+      Clock.freeze(~U[2026-10-20 23:59:58.000000Z])
+      grant = AgentsFixtures.grant!(ctx.tenant, %{per_utc_day_attempts: 1})
+      %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
+      assert {:ok, first} = reserve_here(run, agent, "day-1")
+      assert first.reserved_at == ~U[2026-10-20 23:59:58.000000Z]
+
+      admitted_at = ~U[2026-10-21 00:00:00.500000Z]
+
+      assert {:ok, second} =
+               reserve_while_time_moves(
+                 ctx,
+                 run,
+                 agent,
+                 "day-2",
+                 ~U[2026-10-20 23:59:59.500000Z],
+                 admitted_at
+               )
+
+      assert second.reserved_at == admitted_at
+      assert charged(grant) == 2
+
+      # The next call that day is over the day cap of the day it is recorded in.
+      assert {:error, %Refused{reason: {:budget_exhausted, :grant_day}}} =
+               reserve_here(run, agent, "day-2-again")
     end
   end
 
@@ -211,6 +317,19 @@ defmodule SdrAgent.Agents.ModelCallAdmissionRaceTest do
       Agents.reserve_model_invocation(run, AgentsFixtures.claude_attrs(key), actor: agent)
     end)
   end
+
+  # Holds the tenant's chain head until told to go.
+  defp hold_head(ctx, parent) do
+    SdrAgent.Repo.transaction(fn ->
+      {:ok, _} = Audit.Kernel.lock_head(ctx.tenant.id)
+      send(parent, :head_held)
+      receive do: (:go -> :ok)
+    end)
+  end
+
+  # On this test process's own (already checked out) connection.
+  defp reserve_here(run, agent, key),
+    do: Agents.reserve_model_invocation(run, AgentsFixtures.claude_attrs(key), actor: agent)
 
   defp charged(grant) do
     Agents.ModelInvocation
@@ -276,6 +395,9 @@ defmodule SdrAgent.Agents.ModelCallAdmissionRaceTest do
     Process.sleep(25)
     await_lock_waiters(count, attempts - 1)
   end
+
+  defp auditor_cli(agent),
+    do: struct(SdrAgent.Actor, type: :auditor_cli, tenant_id: agent.tenant_id)
 
   defp auditor(ctx), do: struct(SdrAgent.Actor, type: :auditor_cli, tenant_id: ctx.tenant.id)
 

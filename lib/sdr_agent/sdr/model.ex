@@ -19,6 +19,7 @@ defmodule SdrAgent.SDR.Model do
 
   alias SdrAgent.Agents
   alias SdrAgent.Agents.Admission
+  alias SdrAgent.Agents.Admission.Refused
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.Prompts
@@ -130,11 +131,10 @@ defmodule SdrAgent.SDR.Model do
   defp settle({:error, {:budget_exhausted, :daily}}, ctx, run),
     do: halt_budget(ctx, run, :daily_budget)
 
-  defp settle({:error, reason}, ctx, run) when reason in @grant_caps,
-    do: halt_refused(ctx, run, reason, :grant_exhausted)
-
-  defp settle({:error, reason}, ctx, run) when reason in @grant_unavailable,
-    do: halt_refused(ctx, run, reason, :grant_unavailable)
+  defp settle({:error, %Refused{} = refused}, ctx, run) do
+    with {:ok, _run} <- stop_refused(ctx, run, refused),
+         do: {:error, {:halt, stop_reason(refused)}}
+  end
 
   defp settle({:error, %Ash.Error.Invalid{}}, ctx, run),
     do: halt_budget(ctx, run, :run_budget_calls)
@@ -145,35 +145,41 @@ defmodule SdrAgent.SDR.Model do
   defp settle({:error, reason}, ctx, run),
     do: halt_fail(ctx, run, :provider_error, "model provider error: #{safe(reason)}")
 
-  # C9: a refused real-model reservation already committed its own
-  # deduplicated Failure; the run (and through it its Operation) links that
-  # one instead of opening a second attention item.
-  defp halt_refused(ctx, run, refusal, reason) do
-    with {:ok, failure} <- Agents.reservation_refusal_failure(run, actor: ctx.actor),
-         {:ok, _run} <- stop_refused(ctx, run, refusal, reason, failure.id) do
-      {:error, {:halt, reason}}
+  @doc """
+  C9: stops the run for a committed reservation refusal, linking the
+  receipt's exact Failure as its cause (no second attention item): a grant
+  cap (`{:budget_exhausted, :grant | :grant_day | :allocation}`) →
+  `budget_exhausted` with `:grant_exhausted`; no eligible grant, no or an
+  ambiguous allocation, or no usage origin → `failed` with
+  `:grant_unavailable`. The link holds even if an admin resolved the Failure
+  meanwhile.
+  """
+  def stop_refused(%Context{} = ctx, run, %Refused{} = refused) do
+    link = %{refusal_failure_id: refused.failure_id, refusal_request_id: refused.request_id}
+
+    case stop_reason(refused) do
+      :grant_exhausted ->
+        Agents.exhaust_run_budget(run, Map.put(link, :status_reason, :grant_exhausted),
+          actor: ctx.actor
+        )
+
+      :grant_unavailable ->
+        Agents.fail_run(
+          run,
+          Map.merge(link, %{
+            status_reason: :grant_unavailable,
+            failure_reason:
+              "model call reservation refused: #{Admission.reason_name(refused.reason)}"
+          }),
+          actor: ctx.actor
+        )
     end
   end
 
-  defp stop_refused(ctx, run, _refusal, :grant_exhausted, failure_id) do
-    Agents.exhaust_run_budget(
-      run,
-      %{status_reason: :grant_exhausted, refusal_failure_id: failure_id},
-      actor: ctx.actor
-    )
-  end
+  defp stop_reason(%Refused{reason: reason}) when reason in @grant_caps, do: :grant_exhausted
 
-  defp stop_refused(ctx, run, refusal, :grant_unavailable, failure_id) do
-    Agents.fail_run(
-      run,
-      %{
-        status_reason: :grant_unavailable,
-        refusal_failure_id: failure_id,
-        failure_reason: "model call reservation refused: #{Admission.reason_name(refusal)}"
-      },
-      actor: ctx.actor
-    )
-  end
+  defp stop_reason(%Refused{reason: reason}) when reason in @grant_unavailable,
+    do: :grant_unavailable
 
   defp halt_budget(ctx, run, reason) do
     with {:ok, _run} <- Agents.exhaust_run_budget(run, %{status_reason: reason}, actor: ctx.actor) do

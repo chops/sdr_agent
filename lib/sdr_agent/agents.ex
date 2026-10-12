@@ -230,7 +230,8 @@ defmodule SdrAgent.Agents do
   :allocation}`) rolls the whole reservation back — no payload, invocation
   or counter change — and is then committed in its own transaction as one
   deduplicated `budget_exhausted` Failure and a `model.reservation.refused`
-  event before `{:error, reason}` is returned. Inputs may be atom- or
+  event before `{:error, %Admission.Refused{reason: reason}}` — the exact
+  receipt: reason, Failure, event, run and request id — is returned. Inputs may be atom- or
   string-keyed (not both for one field); caller-supplied `grant_id`,
   `allocation_id` and `ledger_generation` are dropped, and `provider`,
   `profile_id` and `purpose` are cast before the path is chosen. A Fake
@@ -253,7 +254,7 @@ defmodule SdrAgent.Agents do
     |> case do
       # The reservation rolled back; the refusal is committed on its own.
       {:error, %Admission.Refusal{} = refusal} ->
-        with {:ok, _failure} <- Admission.record_refusal(refusal), do: {:error, refusal.reason}
+        with {:ok, refused} <- Admission.record_refusal(refusal), do: {:error, refused}
 
       result ->
         result
@@ -285,16 +286,18 @@ defmodule SdrAgent.Agents do
   defp do_reserve_model_invocation(run, attrs, request, actor),
     do: reserve(run, attrs, request, actor, %{})
 
+  # The admission instant is read only once every lock is held, and is used
+  # for the daily limit, eligibility, the grant's UTC day and `reserved_at`.
   defp reserve_admitted(run, attrs, request, actor) do
-    now = SdrAgent.Clock.utc_now()
-
     with {:ok, locked} <- lock_run(run.id, actor),
-         {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id, now),
+         {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id),
          {:ok, _head} <- Kernel.lock_head(locked.tenant_id),
+         now = SdrAgent.Clock.utc_now(),
          {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
-         :ok <- check_daily_limit(run.tenant_id),
+         :ok <- check_daily_limit(run.tenant_id, now),
          {:ok, charge} <- Admission.admit(locked, attrs, now, candidates) do
-      create_reserved(run, attrs, request, actor, AdmissionContext.context(charge))
+      context = AdmissionContext.context(Map.put(charge, :reserved_at, now))
+      create_reserved(run, attrs, request, actor, context)
     end
   end
 
@@ -384,16 +387,6 @@ defmodule SdrAgent.Agents do
   defp invalid_input(field, message),
     do: Ash.Error.to_error_class(InvalidAttribute.exception(field: field, message: message))
 
-  @doc """
-  The live (open or acknowledged) Failure a refused reservation of `run`
-  opened or reused (C9), newest first: a `budget_exhausted` Failure whose
-  subject is the run. A run that is still running has no other such Failure
-  (its own stop opens one only when it leaves `running`).
-  """
-  def reservation_refusal_failure(run, opts) do
-    Admission.refusal_failure(run, Keyword.get(opts, :actor))
-  end
-
   @doc "The effective daily model-call limit: `min(config, 200)` (ADR-0004)."
   def daily_model_call_limit do
     case Application.get_env(:sdr_agent, :daily_model_call_limit) do
@@ -405,9 +398,12 @@ defmodule SdrAgent.Agents do
     end
   end
 
-  @doc "ModelInvocations of `tenant_id` reserved in the current UTC day (`SdrAgent.Clock`)."
-  def daily_model_calls(tenant_id) do
-    today = DateTime.to_date(SdrAgent.Clock.utc_now())
+  @doc """
+  ModelInvocations of `tenant_id` reserved in the UTC day of `at` (default:
+  now, `SdrAgent.Clock`).
+  """
+  def daily_model_calls(tenant_id, at \\ SdrAgent.Clock.utc_now()) do
+    today = DateTime.to_date(at)
     from = DateTime.new!(today, ~T[00:00:00.000000], "Etc/UTC")
     until = DateTime.add(from, 1, :day)
 
@@ -418,9 +414,9 @@ defmodule SdrAgent.Agents do
   end
 
   # Runs inside the reservation transaction (see reserve_model_invocation/3).
-  defp check_daily_limit(tenant_id) do
+  defp check_daily_limit(tenant_id, at \\ SdrAgent.Clock.utc_now()) do
     with {:ok, _head} <- Kernel.lock_head(tenant_id) do
-      if daily_model_calls(tenant_id) < daily_model_call_limit(),
+      if daily_model_calls(tenant_id, at) < daily_model_call_limit(),
         do: :ok,
         else: {:error, {:budget_exhausted, :daily}}
     end
