@@ -11,10 +11,11 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
     * `children/0` — the supervision children: exactly one
       `SdrAgent.AI.ModelProvider.ClaudeCLI` server, registered as
-      `ClaudeCLI.server/0`, with the configured `:timeout` and the app's
-      pinned CLI `:executable` (`SDR_CLAUDE_CLI_BIN`, R0-02), when ClaudeCLI
-      is selected; none for the Fake. One server serialises every call
-      (concurrency 1, ADR-0004 / ADR-0005 C8).
+      `ClaudeCLI.server/0`, with the configured `:timeout`, the app's
+      pinned CLI `:executable` (`SDR_CLAUDE_CLI_BIN`, R0-02) and the
+      `desired_profile/0` (R0-03), when ClaudeCLI is selected; none for the
+      Fake. One server serialises every call (concurrency 1, ADR-0004 /
+      ADR-0005 C8).
     * `resolve/1` — a run's model options (`:provider`,
       `:provider_options`) with the provider made explicit and, for
       ClaudeCLI, the named server injected — the one validated selection
@@ -31,18 +32,30 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       mandatory; this health check is in addition to it.
     * `status/0` — what the Admin page shows: the configured and the
       effective provider (nil, with the refusal, when calls are refused),
-      the configured provider's model profile (`profile_id`, from its
-      provenance: `:fake` or `:claude_cli_opus` until the R0-03 registry),
       model alias and resolved id, reviewed CLI version, the configured
       pinned CLI path (`cli_executable`), server state and the last init
-      attestation with its time. No secret is read and no CLI is run.
+      attestation with its time, and the `profile_id` those model fields
+      belong to (the running server's, else the desired one). No secret is
+      read and no CLI is run.
   """
 
+  alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
 
   @doc "The selected provider module (`config :sdr_agent, :model_provider`)."
   def provider, do: Application.fetch_env!(:sdr_agent, :model_provider)
+
+  @doc """
+  The real profile the app's ClaudeCLI server is started with (R0-03).
+
+  C2 seam: until the persisted `ModelProfileSetting` exists (C2-01), this is
+  the registry's default, `:claude_cli_opus`; C2 replaces it with the
+  tenant's persisted desired profile. It is deliberately not read from the
+  application environment: only the audited in-app switch may choose
+  another reviewed profile.
+  """
+  def desired_profile, do: ModelProfiles.default_real()
 
   @doc "Supervision children for the selected provider."
   def children do
@@ -53,6 +66,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
           |> Application.get_env(ClaudeCLI, [])
           |> Keyword.take([:timeout, :executable])
           |> Keyword.put(:name, ClaudeCLI.server())
+          |> Keyword.put(:profile, desired_profile())
 
         [{ClaudeCLI, options}]
 
@@ -186,11 +200,12 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   defp details(configured) do
     case configured do
       ClaudeCLI ->
-        provenance = ClaudeCLI.provenance()
+        profile = ClaudeCLI.profile(ClaudeCLI.server()) || desired_profile()
+        provenance = ClaudeCLI.provenance(profile)
 
         %{
           provider: ClaudeCLI,
-          profile_id: provenance.profile_id,
+          profile_id: profile,
           model_alias: provenance.model_catalog_entry["alias"],
           model_id: provenance.model_id,
           reviewed_version: provenance.provider_version,
@@ -201,13 +216,13 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
         }
 
       module ->
-        provenance = provenance(module)
+        prepared = prepared(module)
 
         %{
           provider: module,
-          profile_id: provenance[:profile_id],
+          profile_id: prepared[:profile_id],
           model_alias: nil,
-          model_id: provenance[:model_id],
+          model_id: prepared[:model_id],
           reviewed_version: nil,
           cli_executable: nil,
           server: :not_applicable,
@@ -227,9 +242,9 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   end
 
   # In-process providers record their fixed provenance without a request.
-  defp provenance(module) do
+  defp prepared(module) do
     case module.prepare(%{}, []) do
-      {:ok, %{} = provenance} -> provenance
+      {:ok, provenance} when is_map(provenance) -> provenance
       _refused -> %{}
     end
   end

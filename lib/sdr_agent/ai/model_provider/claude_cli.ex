@@ -3,8 +3,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   Serialized, tool-free structured-output adapter for the local Claude CLI.
 
   Every call launches through `llm-proxy-shim`, requires an init attestation
-  with no tools, MCP servers, or slash commands, and pins the `opus` alias to a
-  reviewed resolved model ID. The result must be exactly one JSON object,
+  with no tools, MCP servers, or slash commands, and pins its profile's CLI
+  alias to that profile's reviewed resolved model ID and CLI version. The
+  result must be exactly one JSON object,
   optionally wrapped in a single Markdown code fence (as the model sometimes
   formats longer answers). Protocol failures never return process output.
   Timeouts terminate the complete observed process tree.
@@ -43,6 +44,19 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   exact recorded path, still a sound store file). A missing pin or one that
   fails the check is `{:error, :pinned_cli_unavailable}` before any process
   starts: the shim never falls back to its default `claude-code` on `PATH`.
+
+  ## The model profile (R0-03, ADR-0004 R0 amendment item 2)
+
+  Each server runs exactly one reviewed profile of
+  `SdrAgent.AI.ModelProfiles`, given by the `:profile` start option
+  (default `:claude_cli_opus`): `--model` is the profile's `cli_alias`,
+  the init attestation must report its `resolved_model` and `cli_version`,
+  and the provenance of every call (`prepare/2`, `provenance/1`) records its
+  `profile_id`, alias, resolved id and version. An unknown profile, the
+  Fake's, or anything that is not an exact registry id is refused at start
+  (`{:invalid_profile, profile}`); there is no free-text model option. The
+  profile is published like the admission (`profile/1`), so `prepare/2`
+  reads it without waiting behind a running call.
 
   ## Staged: no ordinary real call yet (R0-02)
 
@@ -118,6 +132,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   require Logger
 
   alias SdrAgent.AI.JsonSchema
+  alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
   alias SdrAgent.ChildEnv
@@ -139,11 +154,6 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
   @invocation_id ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
   @traceparent ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-(?:00|01)\z/
-  @model_alias "opus"
-  @resolved_model "claude-opus-5-5"
-  @reviewed_version "2.1.291"
-  # The model profile of `@model_alias` (C9; the R0-03 registry replaces it).
-  @profile_id :claude_cli_opus
   # Versioned stdin prompt builder (S12 P1): any change to `render_prompt/2`
   # must bump this, so the wire-witness projection never re-derives a
   # historical invocation's prompt with different code.
@@ -156,10 +166,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   @doc """
   Starts a server. Options: `:name` (registers it and keeps its attestation
-  status readable by name), `:command`, `:command_args`, `:cli_args`,
-  `:timeout` (ms), `:expected_model`, `:environment`, `:executable` (the
-  app's pinned CLI, absolute `/nix/store` path), `:test_launcher` (test
-  builds only).
+  status readable by name), `:profile` (a real `SdrAgent.AI.ModelProfiles`
+  id, default `:claude_cli_opus`), `:command`, `:command_args`,
+  `:cli_args`, `:timeout` (ms), `:environment`, `:executable` (the app's
+  pinned CLI, absolute `/nix/store` path), `:test_launcher` (test builds
+  only).
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
 
@@ -208,6 +219,28 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     end
   end
 
+  @doc """
+  The profile id `server` (a registered name or any server's pid, as for
+  `admission/1`) runs, or nil when it is not running. Never blocks on a
+  running call.
+  """
+  def profile(server \\ @server)
+
+  def profile(server) when is_atom(server) do
+    case :ets.lookup(server, :profile) do
+      [{:profile, profile}] -> profile
+      [] -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  def profile(server) when is_pid(server) do
+    if Process.alive?(server), do: published(server, :profile)
+  end
+
+  def profile(_server), do: nil
+
   defp admission_view(:open), do: %{admission: :open}
   defp admission_view({:blocked, reason}), do: %{admission: :blocked, reason: reason}
 
@@ -254,20 +287,24 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   end
 
   @doc """
-  Returns the reviewed provider provenance recorded before a call. Its
-  `profile_id` (C9) is the model profile the call is reserved and charged
-  under: the one hard-coded model maps to `:claude_cli_opus` until R0-03
-  passes the profile in as a start option.
+  Returns the reviewed provider provenance recorded before a call of the
+  real profile `profile` (a `SdrAgent.AI.ModelProfiles` id or profile;
+  default `:claude_cli_opus`): its `profile_id` (C9) — the profile the call
+  is reserved and charged under — and its alias, resolved model id and
+  reviewed CLI version. Raises for anything that is not a ClaudeCLI
+  profile.
   """
-  def provenance do
+  def provenance(profile \\ ModelProfiles.default_real())
+
+  def provenance(%ModelProfiles.Profile{adapter: __MODULE__} = profile) do
     %{
       provider: :claude_cli,
-      profile_id: @profile_id,
-      provider_version: @reviewed_version,
-      model_id: @resolved_model,
+      profile_id: profile.id,
+      provider_version: profile.cli_version,
+      model_id: profile.resolved_model,
       model_catalog_entry: %{
-        "alias" => @model_alias,
-        "resolved_id" => @resolved_model,
+        "alias" => profile.cli_alias,
+        "resolved_id" => profile.resolved_model,
         "prompt_builder" => @prompt_builder,
         "reviewed_launch_config" => %{
           "tools" => [],
@@ -280,6 +317,21 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       account_mode_ref: "claude:cached-local-login",
       data_control_setting: "personal-local-subscription"
     }
+  end
+
+  def provenance(profile) do
+    case cli_profile(profile) do
+      {:ok, profile} -> provenance(profile)
+      :error -> raise ArgumentError, "not a ClaudeCLI profile: #{inspect(profile)}"
+    end
+  end
+
+  # Exactly the id of a registry profile run by this adapter.
+  defp cli_profile(id) do
+    case ModelProfiles.fetch_real(id) do
+      {:ok, %ModelProfiles.Profile{adapter: __MODULE__} = profile} -> {:ok, profile}
+      _ -> :error
+    end
   end
 
   @doc "The prompt-builder version recorded in the provenance of every call."
@@ -308,8 +360,18 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     end
   end
 
+  @doc """
+  The provenance of the call under the profile of the server it will run on
+  (`:server`, default `server/0`), read from the server's published status;
+  `{:error, :provider_not_running}` when that server is not running.
+  """
   @impl true
-  def prepare(_request, _opts), do: {:ok, provenance()}
+  def prepare(_request, opts) do
+    case opts |> Keyword.get(:server, @server) |> profile() do
+      nil -> {:error, :provider_not_running}
+      profile -> {:ok, provenance(profile)}
+    end
+  end
 
   @impl true
   def complete(request, opts) do
@@ -327,17 +389,33 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   @impl true
   def init(opts) do
-    case Keyword.get(opts, :timeout, @default_timeout) do
-      timeout when is_integer(timeout) and timeout >= @min_timeout -> start(opts, timeout)
-      timeout -> {:stop, {:invalid_timeout, timeout}}
+    profile = Keyword.get(opts, :profile, ModelProfiles.default_real())
+
+    with {:ok, profile} <- start_profile(profile) do
+      case Keyword.get(opts, :timeout, @default_timeout) do
+        timeout when is_integer(timeout) and timeout >= @min_timeout ->
+          start(opts, profile, timeout)
+
+        timeout ->
+          {:stop, {:invalid_timeout, timeout}}
+      end
     end
   end
 
-  defp start(opts, timeout) do
+  # Only an exact registry id of a real ClaudeCLI profile starts a server.
+  defp start_profile(id) do
+    case ModelProfiles.fetch_real(id) do
+      {:ok, %ModelProfiles.Profile{adapter: __MODULE__} = profile} -> {:ok, profile}
+      _ -> {:stop, {:invalid_profile, id}}
+    end
+  end
+
+  defp start(opts, profile, timeout) do
     name = Keyword.get(opts, :name)
 
     state = %{
       name: name,
+      profile: profile,
       reaper: nil,
       reaper_opts: Keyword.get(opts, :reaper, []),
       blocked: nil,
@@ -352,11 +430,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       executable: Keyword.get(opts, :executable),
       test_launcher: test_launcher?(opts),
       timeout: timeout,
-      expected_model: Keyword.get(opts, :expected_model, @resolved_model),
       environment: Keyword.get(opts, :environment),
       table: status_table(name)
     }
 
+    publish(state, :profile, profile.id)
     state = state |> await_predecessor() |> admit()
     preflight(state)
     {:ok, state}
@@ -714,7 +792,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
           "--safe-mode",
           "--restricted",
           "--model",
-          @model_alias,
+          state.profile.cli_alias,
           "--tools",
           "",
           "--disable-slash-commands",
@@ -739,7 +817,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       {^port, {:data, {:eol, line}}} ->
         case Jason.decode(line) do
           {:ok, %{"type" => "system", "subtype" => "init"} = event} ->
-            case attest(event, state.expected_model) do
+            case attest(event, state.profile) do
               :ok ->
                 attested(state, event)
                 collect(port, os_pid, state, deadline, event, [event | messages])
@@ -750,7 +828,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
             end
 
           {:ok, %{"type" => "result"} = event} when not is_nil(init) ->
-            finish_result(event, init, Enum.reverse([event | messages]))
+            finish_result(event, init, Enum.reverse([event | messages]), state.profile)
 
           {:ok, event} when is_map(event) ->
             collect(port, os_pid, state, deadline, init, [event | messages])
@@ -799,10 +877,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   defp drifted(state, reason),
     do: note(state, %{status: :drift, reason: reason, model: nil, version: nil})
 
-  defp attest(event, expected_model) do
+  defp attest(event, profile) do
     cond do
-      event["model"] != expected_model -> {:error, :model_attestation_drift}
-      event["claude_code_version"] != @reviewed_version -> {:error, :version_attestation_drift}
+      event["model"] != profile.resolved_model -> {:error, :model_attestation_drift}
+      event["claude_code_version"] != profile.cli_version -> {:error, :version_attestation_drift}
       event["tools"] != [] -> {:error, :tool_attestation_drift}
       event["mcp_servers"] != [] -> {:error, :mcp_attestation_drift}
       event["slash_commands"] != [] -> {:error, :slash_command_attestation_drift}
@@ -810,9 +888,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     end
   end
 
-  defp finish_result(%{"is_error" => true}, _init, _messages), do: {:error, :claude_cli_error}
+  defp finish_result(%{"is_error" => true}, _init, _messages, _profile),
+    do: {:error, :claude_cli_error}
 
-  defp finish_result(event, init, messages) do
+  defp finish_result(event, init, messages, profile) do
     with result when is_binary(result) <- event["result"],
          {:ok, output} when is_map(output) <- result |> unfence() |> Jason.decode() do
       {:ok,
@@ -820,7 +899,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
          output: output,
          provider: :claude_cli,
          model: init["model"],
-         provenance: provenance(),
+         provenance: provenance(profile),
          raw_response: Jason.encode!(messages),
          usage: usage(event["usage"])
        }}

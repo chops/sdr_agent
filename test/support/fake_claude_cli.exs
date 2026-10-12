@@ -1,6 +1,25 @@
 mode = Enum.at(System.argv(), 0, "ready")
 
-model = if(mode == "model_drift", do: "claude-opus-future", else: "claude-opus-5-5")
+# The model the launch asked for (`--model <alias>`, R0-03), resolved like
+# the reviewed aliases; `as_opus` / `as_sonnet` play a CLI whose alias
+# resolved to that model whatever was asked (alias drift), `model_drift` an
+# unreviewed model.
+model_arg =
+  case Enum.drop_while(System.argv(), &(&1 != "--model")) do
+    ["--model", model_alias | _] -> model_alias
+    _ -> nil
+  end
+
+model =
+  cond do
+    mode == "model_drift" -> "claude-opus-future"
+    mode == "as_opus" -> "claude-opus-5-5"
+    mode == "as_sonnet" -> "claude-sonnet-5-5"
+    model_arg == "opus" -> "claude-opus-5-5"
+    model_arg == "sonnet" -> "claude-sonnet-5-5"
+    true -> "claude-unreviewed"
+  end
+
 tools = if(mode == "tool_drift", do: ~s(["Read"]), else: "[]")
 version = if(mode == "version_drift", do: "2.1.292", else: "2.1.291")
 
@@ -231,6 +250,7 @@ case mode do
     env =
       Map.new(observed, fn name -> {name, System.get_env(name)} end)
       |> Map.put("started_us", started)
+      |> Map.put("model_arg", model_arg)
       |> Map.put("finished_us", System.os_time(:microsecond))
 
     File.write!(dump <> "." <> Integer.to_string(started), JSON.encode!(env))

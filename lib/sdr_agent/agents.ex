@@ -59,6 +59,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
+  alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.Audit.Checks.ReconciliationScope
   alias SdrAgent.Audit.Guard
   alias SdrAgent.Audit.GuardedCall
@@ -277,7 +278,7 @@ defmodule SdrAgent.Agents do
   # chain head); the Fake records its own profile, and any other profile is
   # left to the :reserve validation to refuse.
   defp do_reserve_model_invocation(run, %{provider: :claude_cli} = attrs, request, actor) do
-    if Map.get(attrs, :profile_id) in ModelCallGrant.real_profiles(),
+    if ModelProfiles.real?(Map.get(attrs, :profile_id)),
       do: reserve_admitted(run, attrs, request, actor),
       else: reserve(run, attrs, request, actor, %{})
   end
