@@ -33,7 +33,11 @@ defmodule SdrAgent.Agents do
       per-exchange lineage), `list_wire_witness_links/2`,
       `current_wire_witness_links/2`, `witness_status/2` (S12c), and
       `read_reconciliation_payloads/2` (REC; the only path to the scoped
-      Payload read). Reconciliation itself: `SdrAgent.Agents.Witness`.
+      Payload read). Reconciliation itself: `SdrAgent.Agents.Witness`;
+    * real-model call grants (C9) — `create_grant/2`,
+      `update_grant_terms/3`, `revoke_grant/3`, `release_allocation/3`
+      (each an active human admin only, in one transaction, refusing a stale
+      `expected_revision`), `list_grants/1`, `get_grant/2`.
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -45,6 +49,8 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.Decision
+  alias SdrAgent.Agents.ModelCallAllocation
+  alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
@@ -53,6 +59,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Audit.GuardedCall
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Audit.Payload
+  alias SdrAgent.Repo
 
   @notifications {__MODULE__, :notifications}
   # ADR-0004: at most 200 model calls per UTC day; configuration may only lower it.
@@ -65,6 +72,8 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.ToolInvocation
     resource SdrAgent.Agents.Decision
     resource SdrAgent.Agents.WireWitnessLink
+    resource SdrAgent.Agents.ModelCallGrant
+    resource SdrAgent.Agents.ModelCallAllocation
   end
 
   ## Definitions
@@ -609,6 +618,180 @@ defmodule SdrAgent.Agents do
 
   # Multi-step writes run in one transaction; Ash notifications produced
   # inside it are sent only after it commits.
+
+  # --- real-model call grants (C9) -------------------------------------
+
+  @grant_terms [
+    :name,
+    :purpose,
+    :profile_ids,
+    :total_attempts,
+    :per_utc_day_attempts,
+    :starts_at,
+    :expires_at
+  ]
+  @allocation_terms [:applies_to, :attempts, :available_from, :available_until]
+
+  @doc """
+  ADM: creates a grant and its `allocations` (a list of maps with `:key`,
+  `:applies_to`, `:attempts` and optional `:profile_id`, `:available_from`,
+  `:available_until`) in one transaction. Returns the grant with its
+  allocations loaded.
+  """
+  def create_grant(attrs, opts) do
+    {allocations, attrs} = Map.pop(Map.new(attrs), :allocations, [])
+    opts = Keyword.put(opts, :guarded?, true)
+
+    grant_transaction(fn ->
+      with {:ok, grant} <- GuardedCall.create(ModelCallGrant, :create, attrs, opts),
+           :ok <- each_ok(allocations, &create_allocation(grant, &1, opts)) do
+        load_grant(grant)
+      end
+    end)
+  end
+
+  @doc """
+  ADM: changes a grant's terms (any of `#{inspect(@grant_terms)}`) and its
+  `allocations`, matched by `{key, profile_id}`: a match is updated, a new
+  pair is created, and an allocation not mentioned is left unchanged (none
+  is deleted). Requires `expected_revision`.
+  """
+  def update_grant_terms(%ModelCallGrant{} = grant, attrs, opts) do
+    attrs = Map.new(attrs)
+    {allocations, attrs} = Map.pop(attrs, :allocations, [])
+    opts = Keyword.put(opts, :guarded?, true)
+    terms = Map.take(attrs, [:expected_revision | @grant_terms])
+
+    grant_transaction(fn ->
+      with {:ok, grant} <- GuardedCall.update(grant, :update_terms, terms, opts),
+           {:ok, existing} <- grant_allocations(grant),
+           # Each allocation change re-checks the totals with the grant row
+           # locked, against the terms just written in this transaction.
+           :ok <- each_ok(allocations, &upsert_allocation(grant, existing, &1, opts)) do
+        load_grant(grant)
+      end
+    end)
+  end
+
+  @doc "ADM: revokes a grant (terminal). Requires `expected_revision`."
+  def revoke_grant(%ModelCallGrant{} = grant, attrs, opts) do
+    opts = Keyword.put(opts, :guarded?, true)
+
+    grant_transaction(fn ->
+      with {:ok, grant} <-
+             GuardedCall.update(
+               grant,
+               :revoke,
+               Map.take(Map.new(attrs), [:expected_revision]),
+               opts
+             ) do
+        load_grant(grant)
+      end
+    end)
+  end
+
+  @doc """
+  ADM: releases the allocation `key` (with optional `profile_id`) for use
+  before its `available_from`. Requires the grant's `expected_revision`.
+  """
+  def release_allocation(%ModelCallGrant{} = grant, attrs, opts) do
+    attrs = Map.new(attrs)
+    opts = Keyword.put(opts, :guarded?, true)
+
+    grant_transaction(fn ->
+      with {:ok, grant} <-
+             GuardedCall.update(grant, :touch, Map.take(attrs, [:expected_revision]), opts),
+           {:ok, existing} <- grant_allocations(grant),
+           {:ok, allocation} <- find_allocation(existing, attrs[:key], attrs[:profile_id]),
+           {:ok, _} <- GuardedCall.update(allocation, :release, %{}, opts) do
+        load_grant(grant)
+      end
+    end)
+  end
+
+  @doc "ADM, AUD, AGT: the tenant's grants with allocations, oldest first."
+  def list_grants(opts) do
+    actor = Keyword.get(opts, :actor)
+
+    ModelCallGrant
+    |> tenant_scope(actor)
+    |> Ash.Query.sort(inserted_at: :asc, id: :asc)
+    |> Ash.Query.load(:allocations)
+    |> Ash.read(actor: actor)
+  end
+
+  @doc "ADM, AUD, AGT: one grant with allocations."
+  def get_grant(id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    ModelCallGrant
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.Query.load(:allocations)
+    |> Ash.read_one(actor: actor)
+    |> case do
+      {:ok, nil} -> {:error, NotFound.exception(resource: ModelCallGrant)}
+      other -> other
+    end
+  end
+
+  # A failing Ash action inside the transaction may roll it back itself
+  # with its changeset; either way the caller gets an Ash error class.
+  defp grant_transaction(fun) do
+    fn ->
+      case fun.() do
+        {:ok, value} -> value
+        {:error, error} -> Repo.rollback(error)
+      end
+    end
+    |> SdrAgent.Audit.transaction()
+    |> case do
+      {:ok, value} -> {:ok, value}
+      {:error, error} -> {:error, Ash.Error.to_error_class(error)}
+    end
+  end
+
+  defp create_allocation(grant, attrs, opts) do
+    attrs = attrs |> Map.new() |> Map.put(:grant_id, grant.id)
+    GuardedCall.create(ModelCallAllocation, :create, attrs, opts)
+  end
+
+  defp upsert_allocation(grant, existing, attrs, opts) do
+    attrs = Map.new(attrs)
+
+    case Enum.find(existing, &(&1.key == attrs[:key] and &1.profile_id == attrs[:profile_id])) do
+      nil ->
+        create_allocation(grant, attrs, opts)
+
+      allocation ->
+        GuardedCall.update(allocation, :update_terms, Map.take(attrs, @allocation_terms), opts)
+    end
+  end
+
+  defp find_allocation(existing, key, profile_id) do
+    case Enum.find(existing, &(&1.key == key and &1.profile_id == profile_id)) do
+      nil -> {:error, NotFound.exception(resource: ModelCallAllocation)}
+      allocation -> {:ok, allocation}
+    end
+  end
+
+  defp grant_allocations(grant) do
+    ModelCallAllocation
+    |> Ash.Query.filter(grant_id == ^grant.id)
+    |> Ash.read(authorize?: false)
+  end
+
+  defp load_grant(grant), do: Ash.load(grant, :allocations, authorize?: false)
+
+  defp each_ok(items, fun) do
+    Enum.reduce_while(items, :ok, fn item, :ok ->
+      case fun.(item) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
   defp transact(fun) do
     Process.put(@notifications, [])
     result = Kernel.in_transaction(fun)
