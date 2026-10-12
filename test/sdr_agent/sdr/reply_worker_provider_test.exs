@@ -44,6 +44,7 @@ defmodule SdrAgent.SDR.ReplyWorkerProviderTest do
       {ClaudeCLI,
        name: ClaudeCLI.server(),
        command: System.find_executable("elixir"),
+       test_launcher: true,
        command_args: [@fake, mode]}
     )
   end
