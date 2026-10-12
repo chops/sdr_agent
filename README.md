@@ -231,7 +231,7 @@ single G-R0 calibration grant there (R0-07 readiness packet, section 3). It
 is not the demo and makes no model call:
 
 ```sh
-bin/calibration-console check     # the plan: database, listener, provider; starts nothing
+bin/calibration-console check     # the plan: database, listener, provider; no server, no database
 read -rs PW; printf '%s\n' "$PW" | \
   bin/calibration-console bootstrap-admin --email you@example.test --display-name You --password-stdin
 unset PW
@@ -247,9 +247,12 @@ or seed command. Every page except sign-in and `/admin` answers 404 there.
 
 It never uses the checked-in test session and token secrets. Its own are
 generated on first use into `~/.local/state/sdr-agent/calibration/secrets`
-(directory 0700, file 0600) and reused afterwards; it refuses to run if that
-file or directory is a symlink, not yours, or readable by group or others.
-Never commit or share that file.
+(directory 0700, file 0600) by whichever command runs first, `check`
+included, and reused afterwards; it refuses to run if that file or
+directory is a symlink, not yours, or readable by group or others. Never
+commit or share that file. The console's session cookie is its own
+(`_sdr_agent_calibration_key`), so signing in on 127.0.0.1:4124 does not
+sign you out of the app on port 4120 in the same browser, or the reverse.
 
 ## Troubleshooting
 

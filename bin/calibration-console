@@ -3,7 +3,9 @@
 # devenv shell (direnv) with Postgres up (`devenv up`):
 #
 #   bin/calibration-console check            print the plan the console would
-#                                            serve with; starts nothing
+#                                            serve with; starts no server and
+#                                            touches no database, but creates
+#                                            the secrets file on first use
 #   bin/calibration-console bootstrap-admin --email E --display-name N --password-stdin
 #                                            the first-admin bootstrap, in the
 #                                            calibration database (password on
@@ -16,7 +18,11 @@
 # (localhost:5520). The database is created if absent and migrated; there is
 # no reset, drop or seed path. It listens only on 127.0.0.1:4124 (never the
 # dev port 4120 or the smoke port 4122) and starts no model server: the model
-# provider is the Fake, and no pinned CLI path is passed on. It is not the
+# provider is the Fake, and no pinned CLI path is passed on. Its session
+# and token signing secrets are its own, never the checked-in test values:
+# every command creates them on first use in
+# ~/.local/state/sdr-agent/calibration/secrets (0700 directory, 0600 file)
+# and never prints them. It is not the
 # demo runbook and shares nothing with its smoke server. No secret is read
 # or printed.
 set -euo pipefail
@@ -25,6 +31,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$root"
 
 database=sdr_agent_calibration
+secrets_file="${HOME:-~}/.local/state/sdr-agent/calibration/secrets"
 bind_ip=127.0.0.1
 bind_port=4124
 db_port=5520
@@ -32,9 +39,12 @@ db_port=5520
 usage() {
   cat >&2 <<'EOF'
 usage: bin/calibration-console check | serve | bootstrap-admin ARGS
-  check            print the console's plan (database, listener, provider); start nothing
+  check            print the console's plan (database, listener, provider); starts no
+                   server and touches no database
   serve            serve sign-in and /admin from sdr_agent_calibration on http://127.0.0.1:4124
   bootstrap-admin  create the first admin there: --email E --display-name N --password-stdin
+Every command, check included, creates the console's own session and token secrets
+on first use in ~/.local/state/sdr-agent/calibration/secrets (0600; never printed).
 EOF
   exit 2
 }
@@ -112,6 +122,8 @@ case "$cmd" in
   check)
     echo "bin/calibration-console: database $database on $plan_host:$plan_db_port," \
       "http://$bind_ip:$bind_port, provider Fake, no model server"
+    echo "bin/calibration-console: secrets $secrets_file (created on first use, by check too;" \
+      "values never printed)"
     ;;
   bootstrap-admin)
     exec mix sdr.calibration.console bootstrap-admin "$@"

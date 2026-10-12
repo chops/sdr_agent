@@ -6,7 +6,7 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   `bin/calibration-console`, which checks the environment and this task's
   plan first:
 
-      bin/calibration-console check            # print the plan; start nothing
+      bin/calibration-console check            # print the plan; no server, no database
       read -rs PW; printf '%s\\n' "$PW" | \\
         bin/calibration-console bootstrap-admin --email … --display-name … --password-stdin
       bin/calibration-console serve            # http://127.0.0.1:4124
@@ -23,7 +23,9 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   (`SdrAgent.CalibrationConsole.Secrets`) and never printed; the checked-in
   test secrets are never used.
 
-    * `check` — prints the plan line and exits; reads configuration only.
+    * `check` — prints the plan line and exits. It starts no server and
+      touches no database, but like every command it creates the secrets
+      file on first use.
     * `bootstrap-admin ARGS` — the first-admin bootstrap
       (`mix sdr.bootstrap_admin ARGS`) in `sdr_agent_calibration`; the
       endpoint does not listen.
@@ -40,6 +42,11 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   def run(["check"]) do
     plan = plan!()
     Mix.shell().info(CalibrationConsole.plan_line(plan))
+
+    Mix.shell().info(
+      "calibration console secrets: #{Secrets.default_path()} " <>
+        "(created on first use, by check too; values never printed)"
+    )
   end
 
   def run(["bootstrap-admin" | args]) do

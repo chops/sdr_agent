@@ -159,7 +159,8 @@ defmodule SdrAgent.Scripts.CalibrationConsoleTest do
     end
 
     test "check prints the plan and starts nothing", ctx do
-      assert {out, 0} = console(["check"], stubbed(ctx))
+      assert {out, 0} = console(["check"], stubbed(ctx, [{"HOME", ctx.tmp}]))
+      assert out =~ "secrets #{ctx.tmp}/.local/state/sdr-agent/calibration/secrets"
       assert out =~ "database sdr_agent_calibration on localhost:5520"
       assert out =~ "http://127.0.0.1:4124"
       assert mix_calls(ctx) == ["sdr.calibration.console check"]
@@ -269,6 +270,12 @@ defmodule SdrAgent.Scripts.CalibrationConsoleTest do
       end
     end
 
+    test "the usage discloses that check and serve initialize the secrets file", ctx do
+      assert {out, 2} = console(["--help"], stubbed(ctx))
+      assert out =~ "~/.local/state/sdr-agent/calibration/secrets"
+      assert out =~ "creates"
+    end
+
     test "no command, or extra arguments to serve, is refused", ctx do
       assert {_out, 2} = console([], stubbed(ctx))
       assert {_out, 2} = console(["serve", "--yes"], stubbed(ctx))
@@ -354,6 +361,8 @@ defmodule SdrAgent.Scripts.CalibrationConsoleTest do
 
       assert {out, 0} = real_check(home)
       assert out =~ "database sdr_agent_calibration"
+      # check discloses that it initializes the secrets file (path only).
+      assert out =~ "secrets #{path} (created on first use"
       assert Bitwise.band(File.lstat!(dir).mode, 0o777) == 0o700
       assert Bitwise.band(File.lstat!(path).mode, 0o777) == 0o600
 
