@@ -369,6 +369,47 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
     end
   end
 
+  describe "code review (Codex, 32af7f8)" do
+    test "under a latch a missing file is never recreated, even from identical bytes", ctx do
+      {:ok, published} = publish(ctx, ctx.document)
+
+      {:ok, _} =
+        Agents.finish_calibration(ctx.invocation, %{sha256: published.sha256}, actor: ctx.agent)
+
+      File.rm!(published.path)
+
+      assert {:error, :calibration_evidence_conflict} = publish(ctx, ctx.document)
+      refute File.exists?(published.path)
+      assert Path.wildcard(Path.join(ctx.dir, ".*")) |> Enum.reject(&dot?/1) == []
+    end
+
+    test "timestamps are canonical UTC timestamps, never other text", ctx do
+      for bad <- [
+            "raw-output-canary-not-a-timestamp",
+            "2026-10-13",
+            "2026-10-13T06:00:00Z",
+            "2026-10-13T06:00:00.000000+01:00",
+            "2026-13-40T06:00:00.000000Z"
+          ] do
+        assert {:error, :evidence_schema} = publish(ctx, %{ctx.document | observed_at: bad}),
+               bad
+      end
+
+      assert Path.wildcard(Path.join(ctx.dir, "*")) == []
+
+      assert {:ok, _} =
+               publish(ctx, %{ctx.document | observed_at: "2026-10-13T06:00:00.000000Z"})
+    end
+
+    test "an existing file with a non-timestamp observed_at is a conflict", ctx do
+      {:ok, published} = publish(ctx, ctx.document)
+      ctx = Map.put(ctx, :published, published)
+
+      assert {:error, :calibration_evidence_conflict} =
+               rewrite_and_validate(ctx, &Map.put(&1, :observed_at, "raw-text"))
+    end
+  end
+
   # A proof invocation reserved with the calibration input's own references
   # (or, `refs: :generic`, an ordinary prompt's), completed with a synthetic
   # parsed answer or failed after it was sent.

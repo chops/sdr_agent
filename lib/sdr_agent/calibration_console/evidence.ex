@@ -44,7 +44,11 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
       invalidates the historical reference;
     * when a `:calibration` latch exists, its `evidence_sha256` equal to
       this file's hash: a changed, replaced or missing file under a latch is
-      a conflict, and the original bytes replay unchanged.
+      a conflict, and the original bytes replay unchanged. A new file is
+      created only while the invocation has no release at all, so a missing
+      file under a latch is never recreated, even from identical bytes;
+    * every timestamp a canonical UTC timestamp (six fraction digits and
+      `Z`), never other text.
 
   **Durability (limited).** The temporary file is written and synced before
   it is made 0600 and linked, so a process crash leaves either no final
@@ -100,6 +104,7 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
     @required ~w(invocation_status validation_status reserved_at observed_at)
     @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
     @sha256 ~r/\A[0-9a-f]{64}\z/
+    @timestamp ~r/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\z/
     @conflict {:error, :calibration_evidence_conflict}
 
     @type result ::
@@ -132,7 +137,7 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
            {:ok, decoded} <- canonical(bytes),
            :ok <- named(path, target),
            sha = hex(:crypto.hash(:sha256, bytes)),
-           :ok <- consistent(decoded, target, opts, sha) do
+           :ok <- consistent(decoded, target, opts, {:existing, sha}) do
         {:ok, %{path: path, sha256: sha, bytes: bytes}}
       else
         _ -> @conflict
@@ -144,7 +149,9 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
     defp create(dir, path, decoded, target, opts) do
       bytes = Canonical.encode!(decoded)
 
-      case consistent(decoded, target, opts, hex(:crypto.hash(:sha256, bytes))) do
+      # Initial creation only: an existing latch means the frozen file is
+      # missing, and a missing file is never recreated (even identically).
+      case consistent(decoded, target, opts, {:create, hex(:crypto.hash(:sha256, bytes))}) do
         :ok -> link_new(dir, path, bytes, target, opts)
         _inconsistent -> @conflict
       end
@@ -293,9 +300,24 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
         &(ref?(&1["prompt"]) and ref?(&1["output_schema"]) and links?(&1["links"])),
         &Enum.all?(~w(inventory_sha256 output_sha256), fn key -> nullable_sha?(&1[key]) end),
         &Enum.all?(@nullable, fn key -> nullable_string?(&1[key]) end),
-        &Enum.all?(@required, fn key -> is_binary(&1[key]) end)
+        &Enum.all?(@required, fn key -> is_binary(&1[key]) end),
+        &Enum.all?(~w(reserved_at observed_at), fn key -> timestamp?(&1[key]) end),
+        &Enum.all?(~w(sent_at completed_at), fn key -> is_nil(&1[key]) or timestamp?(&1[key]) end)
       ]
     end
+
+    # A canonical UTC timestamp (`sdr-canonical-json/1`: six fraction digits
+    # and `Z`) that round-trips exactly; never other text.
+    defp timestamp?(value) when is_binary(value) do
+      with true <- value =~ @timestamp,
+           {:ok, datetime, 0} <- DateTime.from_iso8601(value) do
+        Canonical.normalize(datetime) == value
+      else
+        _ -> false
+      end
+    end
+
+    defp timestamp?(_value), do: false
 
     defp uuid?(value), do: is_binary(value) and value =~ @uuid
     defp sha?(value), do: is_binary(value) and value =~ @sha256
@@ -334,8 +356,9 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
 
     ## Consistency with the target and its rows
 
-    # `sha` is the SHA-256 of the file's (or the new file's) bytes.
-    defp consistent(doc, target, opts, sha) do
+    # `{:existing, sha}` for a file on disk, `{:create, sha}` for a new one;
+    # `sha` is the SHA-256 of its bytes.
+    defp consistent(doc, target, opts, commitment) do
       target = Map.update!(target, :profile_id, &to_string/1)
 
       with true <- target(doc) == target,
@@ -347,7 +370,7 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
            true <- attested?(doc),
            {:ok, links} <- links(doc["links"], invocation),
            true <- evaluated?(doc, links),
-           :ok <- latch(invocation, sha) do
+           :ok <- latch(invocation, commitment) do
         :ok
       else
         _ -> :error
@@ -385,9 +408,10 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
       end)
     end
 
-    # An existing calibration latch commits this file's hash; any other
-    # release, or another hash, is a conflict.
-    defp latch(invocation, sha) do
+    # An existing file must be the one an existing calibration latch commits
+    # (or there is no latch yet); a new file may be created only while there
+    # is no release at all. Anything else is a conflict.
+    defp latch(invocation, {mode, sha}) do
       ModelResultRelease
       |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
       |> Ash.Query.filter(
@@ -396,7 +420,7 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
       |> Ash.read_one()
       |> case do
         {:ok, nil} -> :ok
-        {:ok, %{disposition: :calibration, evidence_sha256: ^sha}} -> :ok
+        {:ok, %{disposition: :calibration, evidence_sha256: ^sha}} when mode == :existing -> :ok
         _other -> :error
       end
     end
