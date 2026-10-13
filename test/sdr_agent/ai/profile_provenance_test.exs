@@ -39,7 +39,7 @@ defmodule SdrAgent.AI.ProfileProvenanceTest do
       assert invocation.status == :completed
       assert invocation.profile_id == profile
       assert invocation.model_id == resolved
-      assert invocation.provider_version == "2.1.291"
+      assert invocation.provider_version == "2.1.294"
       assert invocation.model_catalog_entry["alias"] == model_alias
       assert invocation.model_catalog_entry["resolved_id"] == resolved
       GenServer.stop(server)
