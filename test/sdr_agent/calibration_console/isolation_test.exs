@@ -67,20 +67,28 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
     assert Code.ensure_loaded?(Isolation),
            "SdrAgent.CalibrationConsole.Isolation is not defined"
 
-    %{observer: fn event -> send(parent, {:isolation, event}) end}
+    # The observer also records the root's start identity at spawn time, so
+    # a test can tell a real launched root from a made-up pid.
+    observer = fn {:spawned, os_pid} = event ->
+      send(parent, {:isolation, event, ProcessProbe.start_identity(os_pid)})
+    end
+
+    %{observer: observer}
   end
 
   describe "preflight/1" do
     test "a held target in its own process group passes and leaves nothing running", ctx do
       assert :ok = Isolation.preflight(observer: ctx.observer)
-      assert_received {:isolation, {:spawned, os_pid}}
+
+      assert_received {:isolation, {:spawned, os_pid}, spawned_identity}
+      assert match?({:ok, _}, spawned_identity), "no real root was launched"
       assert gone?(os_pid), "the held target #{os_pid} is still running"
     end
 
     test "a target that exits at once is no isolation proof", ctx do
       result = Isolation.preflight(target: "printf ready", observer: ctx.observer)
       assert result == {:error, :calibration_isolation_unavailable}
-      assert_received {:isolation, {:spawned, os_pid}}
+      assert_received {:isolation, {:spawned, os_pid}, _identity}
       assert gone?(os_pid)
     end
 
@@ -89,7 +97,7 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
         Isolation.preflight(target: "IFS= read -r _", ready_ms: 200, observer: ctx.observer)
 
       assert result == {:error, :calibration_isolation_unavailable}
-      assert_received {:isolation, {:spawned, os_pid}}
+      assert_received {:isolation, {:spawned, os_pid}, _identity}
       assert gone?(os_pid), "an unready target must still be stopped"
     end
 
@@ -98,7 +106,7 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
 
       result = Isolation.preflight(probe: GroupProbe, observer: ctx.observer)
       assert result == {:error, :calibration_isolation_unavailable}
-      assert_received {:isolation, {:spawned, os_pid}}
+      assert_received {:isolation, {:spawned, os_pid}, _identity}
       assert gone?(os_pid)
     end
 
@@ -107,7 +115,7 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
 
       result = Isolation.preflight(probe: GroupProbe, observer: ctx.observer)
       assert result == {:error, :calibration_isolation_unavailable}
-      assert_received {:isolation, {:spawned, os_pid}}
+      assert_received {:isolation, {:spawned, os_pid}, _identity}
       assert gone?(os_pid)
     end
 
@@ -118,7 +126,7 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
 
       result = Isolation.preflight(probe: GroupProbe, observer: ctx.observer)
       assert result == {:error, :calibration_isolation_unavailable}
-      assert_received {:isolation, {:spawned, os_pid}}
+      assert_received {:isolation, {:spawned, os_pid}, _identity}
       assert gone?(os_pid), "the real target is still stopped"
     end
 
@@ -126,7 +134,7 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
       before_ports = length(Port.list())
       assert :ok = Isolation.preflight(observer: ctx.observer)
       assert length(Port.list()) == before_ports
-      assert_received {:isolation, {:spawned, _os_pid}}
+      assert_received {:isolation, {:spawned, _os_pid}, {:ok, _identity}}
     end
 
     test "the preflight takes no named reaper lease" do
