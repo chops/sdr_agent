@@ -51,9 +51,9 @@ defmodule SdrAgent.Agents.Witness do
   otherwise). The persist step then locks the Operation `FOR SHARE` before
   the invocation `FOR UPDATE` and the chain head, every Failure it opens
   carries `operation_id`, and the result carries a `receipt: %{status,
-  link_id, cause_id}` — the single current primary link evaluated and the
-  live gate cause opened or found (critical for a mismatch, else the
-  warning). An unconfigured store under `gate:` is `:skipped` with an empty
+  link_id, cause_id, codes}` — the single current primary link evaluated,
+  the live gate cause opened or found (critical for a mismatch, else the
+  warning), and the bounded observation and link reason codes. An unconfigured store under `gate:` is `:skipped` with an empty
   receipt. Without `gate:` (the scan) nothing changes.
 
   `status/1` (used by `SdrAgent.Agents.witness_status/2`) is the C1
@@ -248,7 +248,7 @@ defmodule SdrAgent.Agents.Witness do
   defp skipped(nil), do: %{status: :skipped}
 
   defp skipped(_gate),
-    do: %{status: :skipped, receipt: %{status: :skipped, link_id: nil, cause_id: nil}}
+    do: %{status: :skipped, receipt: %{status: :skipped, link_id: nil, cause_id: nil, codes: []}}
 
   ## The result gate's reconcile (R0-07 slice C)
 
@@ -290,7 +290,7 @@ defmodule SdrAgent.Agents.Witness do
   # The receipt: the primary link the gate evaluated (the single current
   # primary, if any) and the live gate cause it opened or found — the
   # critical item for a mismatch, else the warning.
-  defp receipt(links, status, live) do
+  defp receipt(links, status, live, codes) do
     link_id =
       case Enum.filter(links, &(&1.evidence["classification"] == "primary")) do
         [primary] -> primary.id
@@ -299,7 +299,21 @@ defmodule SdrAgent.Agents.Witness do
 
     severity = if status == :mismatch, do: :critical, else: :warning
     cause = Enum.find(live, &(&1.severity == severity))
-    %{status: status, link_id: link_id, cause_id: cause && cause.id}
+    # `codes`: the observation's bounded warning codes, and the evaluated
+    # primary link's reason codes (metadata only) for the typed
+    # classification of a withheld outcome (R0-07 slice C, G2).
+    link_codes =
+      case Enum.find(links, &(&1.id == link_id)) do
+        nil -> []
+        link -> link.evidence["reason_codes"] || []
+      end
+
+    %{
+      status: status,
+      link_id: link_id,
+      cause_id: cause && cause.id,
+      codes: Enum.uniq(codes ++ link_codes)
+    }
   end
 
   defp eligible(%{provider: :claude_cli, status: status}) when status in @terminal, do: :ok
@@ -639,8 +653,11 @@ defmodule SdrAgent.Agents.Witness do
 
   defp with_receipt(result, _gate, invocation) do
     case live_failures(invocation) do
-      {:ok, live} -> Map.put(result, :receipt, receipt(result.links, result.status, live))
-      {:error, error} -> Repo.rollback(error)
+      {:ok, live} ->
+        Map.put(result, :receipt, receipt(result.links, result.status, live, result.attention))
+
+      {:error, error} ->
+        Repo.rollback(error)
     end
   end
 
