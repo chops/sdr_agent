@@ -57,6 +57,17 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   end`, run after a launch is recorded and before its receipt is sent),
   `:os_pid` (`fn port -> {:os_pid, pid} | nil end`, replacing the pid
   lookup of an opened port).
+
+  Stop guard (`:identity`, opt-in; used by the calibration console's
+  isolation preflight, R0-07 E4c-1a, Codex 01a135b6): `fn os_pid ->
+  {:ok, identity} | :absent | :error end`. The identity is read when a
+  launch opens and re-read before the reaper would signal it: only the
+  same identity is stopped; an absent or changed one is already gone and
+  is never signalled (its port is closed, its workspace removed); an
+  unreadable one (at open or now) is never signalled either: its port is
+  closed, its workspace removed, and the reaper exits as for an
+  unidentified launch (without its cleanup receipt). Without the option
+  every behaviour above is unchanged.
   """
 
   require Logger
@@ -238,7 +249,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   defp opened(state, workspace, port) do
     case os_pid(state.opts, port) do
       {:os_pid, os_pid} ->
-        state = put_in(state.launches[workspace], {port, os_pid})
+        state = put_in(state.launches[workspace], launch(state.opts, port, os_pid))
 
         case after_open(state.opts[:on_open], os_pid) do
           :ok -> {{:ok, port, os_pid}, state}
@@ -252,6 +263,24 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
         {{:unknown, :post_spawn_failure},
          put_in(state.launches[workspace], {:unidentified, port})}
     end
+  end
+
+  # With the opt-in stop guard the identity read at open is kept with it.
+  defp launch(opts, port, os_pid) do
+    case Keyword.get(opts, :identity) do
+      nil -> {port, os_pid}
+      read -> {port, os_pid, guarded_identity(read, os_pid)}
+    end
+  end
+
+  defp guarded_identity(read, os_pid) do
+    case read.(os_pid) do
+      {:ok, identity} when is_binary(identity) and identity != "" -> {:ok, identity}
+      :absent -> :absent
+      _other -> :error
+    end
+  rescue
+    _error -> :error
   end
 
   defp os_pid(opts, port) do
@@ -275,7 +304,17 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   # then.
   defp reap(state) do
     {unidentified, identified} = Enum.split_with(state.launches, &unidentified?/1)
-    remaining = Enum.reject(identified, &stop(&1, state.opts))
+    results = Enum.map(identified, &{&1, stop(&1, state.opts)})
+    remaining = for {launch, false} <- results, do: launch
+
+    # A guarded launch that cannot be verified: never signalled; handled
+    # as unidentified (exit without the cleanup receipt).
+    unidentified =
+      unidentified ++
+        for(
+          {{workspace, {port, _, _}}, :unverifiable} <- results,
+          do: {workspace, {:unidentified, port}}
+        )
 
     cond do
       remaining != [] ->
@@ -313,6 +352,24 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
     true
   end
 
+  defp stop({workspace, {port, os_pid, spawned}}, opts) do
+    case {spawned, guarded_identity(Keyword.fetch!(opts, :identity), os_pid)} do
+      {{:ok, same}, {:ok, same}} ->
+        stop({workspace, {port, os_pid}}, opts)
+
+      {_spawned, :absent} ->
+        gone(port, workspace)
+
+      {{:ok, _spawned}, {:ok, _reused}} ->
+        gone(port, workspace)
+
+      _unverifiable ->
+        close(port)
+        File.rm_rf(workspace)
+        :unverifiable
+    end
+  end
+
   defp stop({workspace, {port, os_pid}}, opts) do
     if kill_tree(os_pid, opts) == :ok do
       close(port)
@@ -323,7 +380,16 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
     end
   end
 
+  # A launch already gone: its port closed and workspace removed, never
+  # signalled.
+  defp gone(port, workspace) do
+    close(port)
+    File.rm_rf(workspace)
+    true
+  end
+
   defp close_launch({:unidentified, port}), do: close(port)
+  defp close_launch({port, _os_pid, _identity}), do: close(port)
   defp close_launch({port, _os_pid}), do: close(port)
   defp close_launch(nil), do: :ok
 

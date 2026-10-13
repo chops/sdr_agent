@@ -159,11 +159,12 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
 
   # The root no longer its spawned process and its group observed empty.
   defp gone(os_pid, spawned, probe) do
+    # A missing or unreadable spawn identity proves nothing about reuse.
     root_gone =
-      case identity(probe, os_pid) do
-        :absent -> true
-        {:ok, current} -> {:ok, current} != spawned
-        :error -> false
+      case {identity(probe, os_pid), spawned} do
+        {:absent, _spawned} -> true
+        {{:ok, current}, {:ok, at_spawn}} -> current != at_spawn
+        _unknown -> false
       end
 
     if root_gone and observe(fn -> probe.group_members(os_pid) end) == {:ok, []},
@@ -171,13 +172,25 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
       else: :unconfirmed
   end
 
-  # A probe that may block is observed in a task that is killed on timeout.
+  # A probe that may block runs in an unlinked, monitored process that is
+  # killed on timeout; a crash, exit or throw there is unconfirmed.
   defp bounded(fun, wait) do
-    task = Task.async(fun)
+    caller = self()
+    ref = make_ref()
+    {pid, monitor} = spawn_monitor(fn -> send(caller, {ref, fun.()}) end)
 
-    case Task.yield(task, wait) || Task.shutdown(task, :brutal_kill) do
-      {:ok, result} -> result
-      _timeout_or_crash -> :unconfirmed
+    receive do
+      {^ref, result} ->
+        Process.demonitor(monitor, [:flush])
+        result
+
+      {:DOWN, ^monitor, :process, ^pid, _reason} ->
+        :unconfirmed
+    after
+      wait ->
+        Process.exit(pid, :kill)
+        Process.demonitor(monitor, [:flush])
+        :unconfirmed
     end
   end
 
@@ -197,7 +210,9 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
   defp helper_run(seams, probe, caller, ref) do
     with {:ok, workspace} <- workspace() do
       seams.observer.({:workspace, workspace})
-      {:ok, reaper} = Reaper.start(nil)
+      # Every cleanup actor obeys the root signal authority: the reaper's
+      # fallback re-reads the root's identity before any signal.
+      {:ok, reaper} = Reaper.start(nil, identity: &identity(probe, &1))
       send(caller, {ref, {:reaper, reaper}})
       seams.observer.({:reaper, reaper})
       Reaper.track(reaper, workspace)
@@ -255,8 +270,12 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
 
     case stopped(os_pid, spawned, probe, reaper, workspace) do
       :ok ->
-        File.rmdir(workspace)
-        if verified == :ok, do: :ok, else: @unavailable
+        # A workspace that cannot be removed is reported, not ignored.
+        cond do
+          File.rmdir(workspace) != :ok -> @unconfirmed
+          verified == :ok -> :ok
+          true -> @unavailable
+        end
 
       :unconfirmed ->
         @unconfirmed

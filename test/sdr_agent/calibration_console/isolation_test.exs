@@ -548,8 +548,7 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
         assert_receive {:isolation, {:spawned, os_pid}, {:ok, spawned}}, 5_000
 
         try do
-          if unquote(mode) == :timeout,
-            do: assert(result == {:error, :calibration_isolation_cleanup_unconfirmed})
+          assert_mode_result(unquote(mode), result)
 
           # Past the fallback: the root was never signalled.
           Process.sleep(1_500)
@@ -562,6 +561,13 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
   end
 
   ## Fixtures
+
+  # A timed-out preflight reports its cleanup as unconfirmed; a cancelled
+  # caller has no result.
+  defp assert_mode_result(:timeout, result),
+    do: assert(result == {:error, :calibration_isolation_cleanup_unconfirmed})
+
+  defp assert_mode_result(:cancelled, :cancelled), do: :ok
 
   defp run_mode(:timeout, opts), do: Isolation.preflight(opts)
 

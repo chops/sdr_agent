@@ -1242,7 +1242,22 @@ ownership and signal lifecycle). Narrow delta to E4c-1 only.
   - unreadable → never signalled, cleanup unconfirmed.
 
   Once the root is confirmed gone its tracking is released, so no reaper
-  fallback re-signals a stopped or reused pid. Group members are only
+  fallback re-signals a stopped or reused pid.
+- **Fallback actor (Codex 01a135b6).** The same authority binds every
+  cleanup actor. The helper's reaper is started with the opt-in
+  `Reaper` stop guard (`identity:`), which keeps the identity read at
+  open and re-reads it before any signal, on timeout, helper or observer
+  crash and caller death alike:
+  - the same identity → its tree is stopped;
+  - absent or changed → already gone: its port is closed and its
+    workspace removed, never signalled;
+  - unreadable (at open or now) → never signalled: port closed, workspace
+    removed, and the reaper exits without a cleanup receipt (as for an
+    unidentified launch). The caller's bounded physical check then
+    reports cleanup-unconfirmed.
+
+  A missing or unreadable spawn identity never proves reuse. ClaudeCLI's
+  reaper does not use the guard, so its behaviour is unchanged. Group members are only
   observed, never signalled: age is no ownership. A member that stays is
   cleanup-unconfirmed (conservative hard conflict; automated orphan-member
   stopping is out of scope).
