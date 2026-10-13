@@ -102,6 +102,28 @@ defmodule SdrAgent.Agents.ResultGate do
 
   defp config, do: Application.get_env(:sdr_agent, __MODULE__, [])
 
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+
+  # Test-seam builds only (`:claude_cli_test_seams`, config/test.exs): a
+  # `before_gate: fun/1` in this module's Application env runs on the
+  # completed invocation before the gate step, so end-to-end worker tests
+  # can stage a competing decision or a pre-existing cause. Compiled out of
+  # every other build.
+  if @test_seams do
+    defp before_gate(invocation) do
+      case Keyword.get(config(), :before_gate) do
+        fun when is_function(fun, 1) ->
+          fun.(invocation)
+          :ok
+
+        _none ->
+          :ok
+      end
+    end
+  else
+    defp before_gate(_invocation), do: :ok
+  end
+
   @doc """
   Waits, bounded and holding no lock, for the gate reconcile of
   `invocation` under `gate` (`%{run_id, operation_id}`). `opts` are passed
@@ -174,6 +196,8 @@ defmodule SdrAgent.Agents.ResultGate do
   @spec gate(struct(), map(), keyword()) ::
           {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
   def gate(invocation, gate, opts \\ []) do
+    :ok = before_gate(invocation)
+
     with {kind, _receipt} = outcome when kind in [:ok, :timeout] <- await(invocation, gate, opts) do
       case finalize(invocation, gate, outcome, opts) do
         {:error, reason} when reason in @final -> {:error, reason}
@@ -185,7 +209,8 @@ defmodule SdrAgent.Agents.ResultGate do
 
   @doc """
   Whether `run` holds an unreleased output: a completed generation-2
-  ClaudeCLI invocation with no `ModelResultRelease` (REQ-07-5/6). The
+  ClaudeCLI invocation with no `:released` `ModelResultRelease` — none yet,
+  or withheld (REQ-07-5/6; review MF5). The
   workers never turn such a run into a success or a `:crash`; it is left
   for the gate or for run recovery (`SdrAgent.SDR.StaleRunSweeper`). A read
   error counts as unreleased (fail closed).
@@ -198,14 +223,19 @@ defmodule SdrAgent.Agents.ResultGate do
     end
   end
 
-  @doc "The run's completed generation-2 ClaudeCLI invocations with no release, in call order."
+  @doc """
+  The run's completed generation-2 ClaudeCLI invocations with no `:released`
+  release, in call order: undecided ones, and withheld ones whose run has
+  not been stopped yet (review MF5). The callers ask only about running runs.
+  """
   @spec unreleased_invocations(struct()) :: {:ok, [struct()]} | {:error, term()}
   def unreleased_invocations(%AgentRun{id: run_id, tenant_id: tenant_id}) do
     ModelInvocation
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
     |> Ash.Query.filter(
       tenant_id == ^tenant_id and agent_run_id == ^run_id and provider == :claude_cli and
-        ledger_generation == 2 and status == :completed and not exists(result_release, true)
+        ledger_generation == 2 and status == :completed and
+        not exists(result_release, disposition == :released)
     )
     |> Ash.Query.sort(sequence_in_run: :asc)
     |> Ash.read()
@@ -489,6 +519,19 @@ defmodule SdrAgent.Agents.ResultGate do
   # A run no longer running (e.g. cancelled during the wait): the release
   # only; no stop.
   defp stop(run, _release, _cause, _plan, _actor, _prelocked), do: {:ok, run}
+
+  @doc false
+  # Review MF5: stops a still-running run on an existing withheld release's
+  # original bound cause, under Prelocked (the cause, and the release's
+  # link, already locked before the head by the caller).
+  def stop_on_release(run, release, invocation, link, cause, actor) do
+    Prelocked.run(bindings(invocation, link, cause), fn prelocked ->
+      case stop(run, release, cause, %{reason: release.reason}, actor, prelocked) do
+        {:ok, stopped} -> {:withheld, release, stopped}
+        {:error, error} -> Repo.rollback(error)
+      end
+    end)
+  end
 
   defp stop_reason(:witness_mismatch), do: :witness_mismatch
   defp stop_reason(_reason), do: :witness_unreconciled

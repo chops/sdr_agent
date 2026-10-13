@@ -11,16 +11,25 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
 
   One transaction in the finalization lock order:
 
-    1. the run `FOR UPDATE`, then its Operation `FOR SHARE`;
-    2. the invocation `FOR SHARE`;
-    3. its current links `FOR SHARE`;
-    4. the selected cause's candidates `FOR UPDATE`;
-    5. the chain head;
-    6. then the release is re-read.
+    1. the run `FOR UPDATE`, then its Operation `FOR SHARE` (then the
+       caller's `guard:`);
+    2. the invocation `FOR SHARE`, and the immutable release is read
+       **before any replacement selection**;
+    3. with no release: its current links `FOR SHARE`, the selected cause's
+       candidates `FOR UPDATE`, the chain head, and the release read again
+       (a release committed meanwhile is left for the next pass,
+       `{:error, :release_raced}`, nothing written);
+    4. with a withheld release and a still-running run: its link `FOR
+       SHARE` and its original bound cause `FOR UPDATE`, then the head.
 
-  **An existing release is authoritative.** A release committed by a
-  competing finalizer is returned as it is: never overwritten, no second
-  cause, no run stop.
+  **An existing release is authoritative.** It is never overwritten and no
+  new receipt or cause is made. A `:released` one returns its output. A
+  withheld one of a run no longer running is returned as it is (R3 stays
+  untouched). A withheld one whose run is still running stops the run on
+  the release's original bound cause (review MF5). If that binding is
+  unavailable (no bound cause, or an unreadable event), recovery fails
+  closed with `{:error, :binding_unavailable}`: nothing is written, no
+  output is returned, and the run is left as it is.
 
   **Otherwise (row G5's selection):**
 
@@ -47,6 +56,7 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ReleaseDecision.Binding
   alias SdrAgent.Agents.ReleasedOutput
   alias SdrAgent.Agents.ResultGate
   alias SdrAgent.Agents.WireWitnessLink
@@ -77,6 +87,9 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
     end
   end
 
+  # The immutable decision is read first, before any replacement selection
+  # (review, G7): the run, its Operation and the invocation are held, so a
+  # release found here is authoritative.
   defp locked(invocation, gate, guard, actor) do
     tenant_id = invocation.tenant_id
 
@@ -86,35 +99,64 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
          :ok <- guard.(run),
          {:ok, invocation} <-
            ResultGate.lock(ModelInvocation, invocation.id, tenant_id, "FOR SHARE"),
-         {:ok, links} <- lock_current_links(invocation),
-         {:ok, plan, cause} <- select(links, invocation, run),
-         {:ok, _head} <- Kernel.lock_head(tenant_id),
          {:ok, release} <- existing_release(invocation) do
-      decide(release, plan, {invocation, run, primary(links), cause}, actor)
+      decide(release, {invocation, run}, actor)
     else
       {:error, error} -> Repo.rollback(error)
     end
   end
 
-  defp decide(nil, plan, {invocation, run, link, cause}, actor),
-    do: ResultGate.under_head(plan, invocation, run, link, cause, actor)
+  # No release: G5's selection, then the head; a release committed
+  # meanwhile by a competing decider (found under the head) leaves the
+  # state for the next pass, with nothing written.
+  defp decide(nil, {invocation, run}, actor) do
+    with {:ok, links} <- lock_current_links(invocation),
+         {:ok, plan, cause} <- select(links, invocation, run),
+         {:ok, _head} <- Kernel.lock_head(invocation.tenant_id),
+         {:ok, nil} <- existing_release(invocation) do
+      ResultGate.under_head(plan, invocation, run, primary(links), cause, actor)
+    else
+      {:ok, %ModelResultRelease{}} -> Repo.rollback(:release_raced)
+      {:error, error} -> Repo.rollback(error)
+    end
+  end
 
   # A competing finalizer's committed release (G7): respected as it is.
-  defp decide(%ModelResultRelease{disposition: :released} = release, _plan, held, actor) do
-    {invocation, _run, _link, _cause} = held
-
+  defp decide(%ModelResultRelease{disposition: :released} = release, {invocation, _run}, actor) do
     case ReleasedOutput.fetch(invocation.id, actor) do
       {:ok, output} -> {:released, release, output}
       {:error, error} -> Repo.rollback(error)
     end
   end
 
-  defp decide(%ModelResultRelease{disposition: :withheld} = release, _plan, held, _actor) do
-    {_invocation, run, _link, _cause} = held
-    {:withheld, release, run}
+  # Review MF5: a withheld release of a run no longer running is final; a
+  # still-running run is stopped on the release's original bound cause
+  # (and link), both locked before the head. No new receipt or release.
+  defp decide(%ModelResultRelease{disposition: :withheld} = release, {_invocation, run}, _actor)
+       when run.status != :running,
+       do: {:withheld, release, run}
+
+  defp decide(%ModelResultRelease{disposition: :withheld} = release, {invocation, run}, actor) do
+    tenant_id = invocation.tenant_id
+
+    with {:ok, cause_id} when is_binary(cause_id) <- Binding.bound_cause(release),
+         {:ok, link} <- lock_release_link(release, tenant_id),
+         {:ok, cause} <- ResultGate.lock(Failure, cause_id, tenant_id, "FOR UPDATE"),
+         {:ok, _head} <- Kernel.lock_head(tenant_id) do
+      ResultGate.stop_on_release(run, release, invocation, link, cause, actor)
+    else
+      {:ok, nil} -> Repo.rollback(:binding_unavailable)
+      {:error, :binding_unavailable} -> Repo.rollback(:binding_unavailable)
+      {:error, error} -> Repo.rollback(error)
+    end
   end
 
-  defp decide(_calibration, _plan, _held, _actor), do: Repo.rollback(:not_gated)
+  defp decide(_calibration, _held, _actor), do: Repo.rollback(:not_gated)
+
+  defp lock_release_link(%{wire_witness_link_id: nil}, _tenant_id), do: {:ok, nil}
+
+  defp lock_release_link(%{wire_witness_link_id: id}, tenant_id),
+    do: ResultGate.lock(WireWitnessLink, id, tenant_id, "FOR SHARE")
 
   defp lock_current_links(invocation) do
     WireWitnessLink
@@ -178,8 +220,8 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
     |> Ash.read()
   end
 
-  # Under the head every decider has committed or waits, so this plain read
-  # is authoritative.
+  # Plain read (immutable rows): first with the run and invocation held, and
+  # again under the head, where every decider has committed or waits.
   defp existing_release(invocation) do
     ModelResultRelease
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))

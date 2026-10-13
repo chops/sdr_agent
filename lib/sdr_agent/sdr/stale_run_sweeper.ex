@@ -100,6 +100,7 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   alias SdrAgent.Agents
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.Agents.ResultGate
   alias SdrAgent.Agents.ResultGate.Recovery
   alias SdrAgent.Agents.WireWitnessLink
@@ -185,8 +186,17 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   # (case (b): the run is not terminal under its lock).
   # A known mismatch without a usable critical cause stays the owner's
   # attention (row R7-2); a later pass completes once it is resolved.
+  # A withheld release without a readable bound cause, or a release that
+  # raced recovery, is left as it is (fail closed; review MF5).
   defp recovered({:error, skip})
-       when skip in [:not_running, :job_live, :not_terminal, :mismatch_cause_unbound],
+       when skip in [
+              :not_running,
+              :job_live,
+              :not_terminal,
+              :mismatch_cause_unbound,
+              :binding_unavailable,
+              :release_raced
+            ],
        do: :ok
 
   # A stale observation is retried by the next pass.
@@ -390,9 +400,15 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   end
 
   # No link, no reconciliation_required Failure on it (live or resolved),
-  # no release (the caller selected an unreleased invocation).
+  # no release (a withheld one goes to recovery, review MF5).
   defp nothing_persisted?(invocation) do
     opts = Kernel.opts(invocation.tenant_id)
+
+    released? =
+      ModelResultRelease
+      |> Ash.Query.for_read(:read, %{}, opts)
+      |> Ash.Query.filter(model_invocation_id == ^invocation.id)
+      |> Ash.exists?()
 
     links? =
       WireWitnessLink
@@ -409,7 +425,7 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
       )
       |> Ash.exists?()
 
-    not links? and not causes?
+    not released? and not links? and not causes?
   end
 
   # R3 prefilter (unlocked): completed generation-2 invocations with no

@@ -8,7 +8,8 @@ defmodule SdrAgent.SDR.GateOperationTest do
       cause when it is still live, otherwise the Operation's own Failure
       naming the resolved cause; never a generic provider-error fallback;
     * `ResultGate.unreleased?/1` — a run with a completed generation-2
-      ClaudeCLI invocation that has no release holds an unreleased output,
+      ClaudeCLI invocation that has no `:released` release (none, or
+      withheld; review MF5) holds an unreleased output,
       which the workers never turn into a success or a `:crash`.
   """
   use SdrAgent.AuditCase, async: false
@@ -153,8 +154,10 @@ defmodule SdrAgent.SDR.GateOperationTest do
       invocation = AgentsFixtures.claude_completed!(ctx.run, ctx.agent, "unreleased-1")
       assert ResultGate.unreleased?(ctx.run)
 
+      # Review MF5: a withheld output is still no business output; the
+      # running run stays the gate's until it is stopped.
       withhold!(ctx, invocation, cause!(ctx, invocation, :warning), :witness_missing)
-      refute ResultGate.unreleased?(ctx.run)
+      assert ResultGate.unreleased?(ctx.run)
     end
   end
 end

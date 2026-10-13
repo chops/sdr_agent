@@ -258,14 +258,44 @@ defmodule SdrAgent.Agents.ResultGateRecoveryTest do
   end
 
   describe "an existing release is authoritative (G7)" do
-    test "recovery returns the competing release; nothing else is written", ctx do
+    # Review MF5: a competing withheld release with a still-running run
+    # stops the run on that release's original bound cause, with no new
+    # release or cause.
+    test "the competing release stops the run on its bound cause; nothing new", ctx do
       {invocation, receipt} = reconciled(ctx, "none")
       competing = competing_withheld!(ctx, invocation, failure!(ctx, receipt.cause_id))
       before = length(attention(ctx))
 
       assert {:withheld, release, run} = Recovery.run(invocation, gate(ctx))
       assert release.id == competing.id
-      assert run.status == :running
+      assert {run.status, run.status_reason} == {:failed, :witness_unreconciled}
+      assert run.attention_failure_id == receipt.cause_id
+      assert [_one] = releases(ctx)
+      assert length(attention(ctx)) == before
+    end
+
+    # Review (important): the immutable decision is read before any
+    # replacement selection, so changed or unusable current evidence cannot
+    # refuse it.
+    test "an existing release is read before replacement evidence is selected", ctx do
+      {invocation, receipt} = reconciled(ctx, "cli_shape_v3_mismatch")
+      resolve!(ctx, receipt.cause_id)
+      stray_critical!(ctx, invocation, nil)
+      cause = GateFixtures.cause!(invocation, operation_id: ctx.run.operation_id)
+      competing = competing_withheld!(ctx, invocation, cause)
+
+      assert {:withheld, release, run} = Recovery.run(invocation, gate(ctx))
+      assert release.id == competing.id
+      assert {run.status_reason, run.attention_failure_id} == {:witness_unreconciled, cause.id}
+    end
+
+    test "a cause-less existing release fails closed; the run stays recoverable", ctx do
+      {invocation, _receipt} = reconciled(ctx, "none")
+      GateFixtures.decided!(invocation)
+      before = length(attention(ctx))
+
+      assert {:error, :binding_unavailable} = Recovery.run(invocation, gate(ctx))
+      assert run!(ctx).status == :running
       assert [_one] = releases(ctx)
       assert length(attention(ctx)) == before
     end

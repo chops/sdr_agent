@@ -21,10 +21,14 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
   import SdrAgent.OutreachFixtures, only: [put_env!: 2]
 
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.ResultGate
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.Fake
+  alias SdrAgent.Clock
+  alias SdrAgent.GateFixtures
   alias SdrAgent.Operations
   alias SdrAgent.SDR.AgentWorker
+  alias SdrAgent.SDR.StaleRunSweeper
 
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
@@ -55,7 +59,7 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
 
   # A trusted stand-in witness store with the exact v3 Opus tuple enabled;
   # the fake CLI records a matching capture of every call under it.
-  defp witnessed! do
+  defp witnessed!(variant \\ "cli_shape_v3") do
     root = SdrAgent.Test.WitnessRoot.mkdir!("worker")
     previous = Application.get_env(:sdr_agent, SdrAgent.Agents.Witness, [])
 
@@ -70,7 +74,22 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
       File.rm_rf!(root)
     end)
 
-    start_named!([root])
+    start_named!([root, variant])
+  end
+
+  # Test-seam builds only: runs `fun` on the completed invocation before the
+  # gate step (`SdrAgent.Agents.ResultGate`).
+  defp before_gate!(fun) do
+    previous = Application.get_env(:sdr_agent, ResultGate, [])
+    Application.put_env(:sdr_agent, ResultGate, Keyword.put(previous, :before_gate, fun))
+    on_exit(fn -> Application.put_env(:sdr_agent, ResultGate, previous) end)
+  end
+
+  defp refute_crash(ctx) do
+    refute Enum.any?(
+             events_of_type(ctx.tenant, "agents.run.failed"),
+             &(&1.payload["changes"]["status_reason"] == "crash")
+           )
   end
 
   defp release!(ctx, invocation) do
@@ -145,6 +164,68 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
       assert operation.status in [:failed, :discarded]
       assert operation.last_failure_id == cause.id
       refute Enum.any?(decisions!(ctx, run), &(&1.model_invocation_id == invocation.id))
+    end
+
+    # Review MF5: a competitor decided withheld first (bound cause, run
+    # still running); the run stops on that cause, never as a crash.
+    test "a competitor's withheld release stops the run on its bound cause", ctx do
+      witnessed!()
+      parent = self()
+
+      before_gate!(fn invocation ->
+        {:ok, run} = Agents.get_run(invocation.agent_run_id, actor: ctx.agent)
+        cause = GateFixtures.cause!(invocation, operation_id: run.operation_id)
+        GateFixtures.withhold!(invocation, ctx.agent, cause)
+        send(parent, {:competing, cause.id})
+      end)
+
+      %{run: run, operation: operation} = assign!(ctx, "01")
+      assert %{success: 1} = drain!()
+      assert_received {:competing, cause_id}
+
+      stopped = run!(ctx, run)
+      assert {stopped.status, stopped.status_reason} == {:failed, :witness_unreconciled}
+      assert stopped.attention_failure_id == cause_id
+      assert [_one] = invocations!(ctx, run)
+      {:ok, operation} = Operations.get_operation(operation.id, actor: ctx.admin)
+      assert operation.last_failure_id == cause_id
+      refute_crash(ctx)
+    end
+
+    # Interpretation 1 (accepted): a gate that cannot commit returns no
+    # output; the run is neither a success nor a crash and is recovered later.
+    test "a gate that cannot commit: no output, no success or crash; recovered later", ctx do
+      witnessed!("cli_shape_v3_mismatch")
+      parent = self()
+
+      # A pre-existing scan critical without the run's Operation: the gate's
+      # mismatch has no usable cause (row R7-2).
+      before_gate!(fn invocation ->
+        send(parent, {:stray, GateFixtures.cause!(invocation, severity: :critical)})
+      end)
+
+      %{run: run, operation: operation} = assign!(ctx, "01")
+      assert %{success: 1} = drain!()
+      assert_received {:stray, stray}
+
+      assert run!(ctx, run).status == :running
+      assert [invocation] = invocations!(ctx, run)
+      assert {:ok, nil} = Agents.get_result_release(invocation.id, actor: ctx.agent)
+      assert {:ok, %{status: :running}} = Operations.get_operation(operation.id, actor: ctx.admin)
+      refute_crash(ctx)
+
+      {:ok, _} = Operations.resolve_failure(stray, %{resolution_note: "seen"}, actor: ctx.admin)
+      started = run!(ctx, run).started_at
+      Clock.freeze(DateTime.add(started, StaleRunSweeper.stale_after_seconds() + 1, :second))
+      assert :ok = StaleRunSweeper.sweep(ctx.tenant.id)
+
+      run = run!(ctx, run)
+      assert {run.status, run.status_reason} == {:failed, :witness_mismatch}
+      refute run.attention_failure_id == stray.id
+      assert release!(ctx, invocation).reason == :witness_mismatch
+      {:ok, operation} = Operations.get_operation(operation.id, actor: ctx.admin)
+      assert operation.last_failure_id == run.attention_failure_id
+      refute_crash(ctx)
     end
 
     test "with the server missing the run fails with provider_not_running", ctx do
