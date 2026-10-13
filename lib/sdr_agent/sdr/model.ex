@@ -209,7 +209,7 @@ defmodule SdrAgent.SDR.Model do
             status_reason: :model_not_admitted,
             failure_reason:
               "model call not admitted (#{refused.stage}): " <>
-                "#{Admission.reason_name(refused.reason)} (#{refused.check})"
+                "#{Admission.reason_name(refused.reason)} (#{Admission.check_label(refused.check)})"
           }),
           actor: ctx.actor
         )

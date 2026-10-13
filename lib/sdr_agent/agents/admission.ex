@@ -544,7 +544,7 @@ defmodule SdrAgent.Agents.Admission do
 
   defp message(refusal) do
     if admission_reason?(refusal.reason) do
-      "model call not admitted: #{reason_name(refusal.reason)} (#{refusal.check}) " <>
+      "model call not admitted: #{reason_name(refusal.reason)} (#{check_label(refusal.check)}) " <>
         "(profile #{refusal.profile_id}); no real call is made until the result gate, " <>
         "the witness store and the promoted tuple admit it"
     else
@@ -594,4 +594,20 @@ defmodule SdrAgent.Agents.Admission do
 
   defp name(nil), do: nil
   defp name(atom) when is_atom(atom), do: Atom.to_string(atom)
+  defp name(check), do: check_name(check)
+
+  @doc """
+  The metadata-only name of a refusal `check`: the atom's name, or
+  `"check:id"` for a check that names the blocking row (row B4').
+  """
+  def check_name(check) when is_atom(check), do: Atom.to_string(check)
+  def check_name({check, id}) when is_atom(check) and is_binary(id), do: "#{check}:#{id}"
+
+  @doc """
+  The human label of a refusal `check` for a Failure message: its name
+  without any row id (the id stays in the detail and event, where it is
+  structured metadata rather than prose).
+  """
+  def check_label({check, _id}) when is_atom(check), do: Atom.to_string(check)
+  def check_label(check), do: check_name(check)
 end

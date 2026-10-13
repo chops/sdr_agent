@@ -663,7 +663,7 @@ defmodule SdrAgent.Agents do
     error = %{
       "kind" => "launch_refused",
       "reason" => Atom.to_string(reason),
-      "check" => Atom.to_string(check)
+      "check" => Admission.check_name(check)
     }
 
     failure = %{
@@ -674,13 +674,13 @@ defmodule SdrAgent.Agents do
       severity: :critical,
       retryable: false,
       message:
-        "model call refused at launch: #{reason} (#{check}); the reserved call was failed " <>
+        "model call refused at launch: #{reason} (#{Admission.check_label(check)}); the reserved call was failed " <>
           "and never sent",
       detail:
         SdrAgent.Audit.Canonical.encode!(%{
           "kind" => "model_launch_refused",
           "reason" => Atom.to_string(reason),
-          "check" => Atom.to_string(check),
+          "check" => Admission.check_name(check),
           "model_invocation_id" => invocation.id,
           "grant_id" => invocation.grant_id,
           "reserved_profile" => profile_name(invocation.profile_id),
@@ -715,7 +715,7 @@ defmodule SdrAgent.Agents do
       idempotency_key: invocation.idempotency_key,
       payload: %{
         "reason" => Atom.to_string(reason),
-        "check" => Atom.to_string(check),
+        "check" => Admission.check_name(check),
         "effective_profile" => profile_name(profile),
         "reserved_profile" => profile_name(invocation.profile_id)
       }

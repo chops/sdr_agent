@@ -197,7 +197,7 @@ defmodule SdrAgent.Agents.LaunchGateTest do
       second = force_reserve!(ctx, run, "cal-second", marker)
 
       refused = assert_launch_refused(ctx, run, second, :calibration_evidence_pending)
-      assert refused.check == :predecessor_unlatched
+      assert refused.check == {:predecessor_unlatched, first.id}
     end
   end
 

@@ -264,7 +264,15 @@ defmodule SdrAgent.Agents.Admission.Gate do
           tenant_id == ^tenant_id and ledger_generation == 2 and provider == :claude_cli and
             agent_run.usage_origin == :proof
         )
-        |> Ash.Query.select([:id, :agent_run_id, :tenant_id])
+        |> Ash.Query.select([
+          :id,
+          :agent_run_id,
+          :tenant_id,
+          :profile_id,
+          :provider_version,
+          :model_id
+        ])
+        |> Ash.Query.sort(id: :asc)
         |> Ash.read!(authorize?: false)
         |> Enum.reject(&(&1.id == self_id))
 
@@ -283,12 +291,32 @@ defmodule SdrAgent.Agents.Admission.Gate do
           :ok
 
         unlatched ->
-          check =
-            if Enum.any?(unlatched, &(not match?({:ok, _entry}, recorded_tuple(&1)))),
-              do: :predecessor_authority_invalid,
-              else: :predecessor_unlatched
+          {:error, :calibration_evidence_pending, blocking(unlatched)}
+      end
+    end
 
-          {:error, :calibration_evidence_pending, check}
+    # The metadata-only diagnostic names the first blocking predecessor
+    # (review, B4'): one whose recorded authority is missing, malformed or
+    # not bound to its own stored identity is `predecessor_authority_invalid`
+    # (owner recovery identifies the row by this id); otherwise the first
+    # unlatched one is `predecessor_unlatched`. The barrier stays closed
+    # either way.
+    defp blocking(unlatched) do
+      case Enum.find(unlatched, &(not bound_authority?(&1))) do
+        nil -> {:predecessor_unlatched, hd(unlatched).id}
+        invalid -> {:predecessor_authority_invalid, invalid.id}
+      end
+    end
+
+    defp bound_authority?(predecessor) do
+      case recorded_tuple(predecessor) do
+        {:ok, entry} ->
+          entry.profile_id == predecessor.profile_id and
+            entry.cli_version == predecessor.provider_version and
+            entry.model_id == predecessor.model_id
+
+        _missing_or_malformed ->
+          false
       end
     end
   end

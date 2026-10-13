@@ -390,7 +390,7 @@ defmodule SdrAgent.Agents.AdmissionGateTest do
           calibration: marker()
         )
 
-      assert refused.check == :predecessor_unlatched
+      assert refused.check == {:predecessor_unlatched, first.invocation.id}
       latch!(first)
       assert %{invocation: _} = calibration!(ctx, "next-2")
     end
@@ -409,14 +409,14 @@ defmodule SdrAgent.Agents.AdmissionGateTest do
     end
 
     test "tied and rolled-back clocks do not hide a predecessor", ctx do
-      calibration!(ctx, "tie-1")
+      tie = calibration!(ctx, "tie-1")
       # The same instant, then an instant before the predecessor's.
       refused =
         assert_refused(ctx, run!(ctx, :proof), "tie-2", :calibration_evidence_pending, %{},
           calibration: marker()
         )
 
-      assert refused.check == :predecessor_unlatched
+      assert refused.check == {:predecessor_unlatched, tie.invocation.id}
       Clock.freeze(DateTime.add(@now, -3600, :second))
 
       assert {:error, %Refused{reason: :calibration_evidence_pending}} =
@@ -449,7 +449,7 @@ defmodule SdrAgent.Agents.AdmissionGateTest do
         })
 
       # A row written before slice B: its reservation event names no tuple.
-      {:ok, _legacy} =
+      {:ok, legacy} =
         ModelInvocation
         |> Ash.Changeset.for_create(:reserve, legacy, actor: run.agent, context: context)
         |> Ash.create()
@@ -459,9 +459,67 @@ defmodule SdrAgent.Agents.AdmissionGateTest do
           calibration: marker()
         )
 
-      assert refused.check == :predecessor_authority_invalid
+      assert refused.check == {:predecessor_authority_invalid, legacy.id}
       [failure] = Enum.filter(admission_failures(ctx), &(&1.id == refused.failure_id))
-      assert failure.message =~ "predecessor_authority_invalid"
+      assert failure.message =~ "(predecessor_authority_invalid)"
+      # The blocking row's id is structured metadata on the refusal event
+      # (and the Failure's dedupe detail), not prose.
+      {:ok, event} =
+        Ash.get(SdrAgent.Audit.AuditEvent, refused.event_id,
+          actor: SdrAgent.Actor.system(:kernel, nil),
+          authorize?: false
+        )
+
+      assert event.payload["check"] == "predecessor_authority_invalid:#{legacy.id}"
+    end
+
+    # Review (B4'): a recorded tuple that decodes but names another profile
+    # than its own row is invalid authority, not merely unlatched.
+    test "a predecessor whose tuple names another profile is invalid authority", ctx do
+      run = run!(ctx, :proof)
+
+      context =
+        AdmissionContext.context(%{
+          grant_id: ctx.grant.id,
+          allocation_id: proof_allocation(ctx),
+          reserved_at: @now,
+          calibration_tuple:
+            SdrAgent.Agents.Admission.Gate.tuple_record(
+              AdmissionFixtures.entry(:claude_cli_sonnet)
+            )
+        })
+
+      {:ok, fake} =
+        Agents.reserve_model_invocation(run.run, AgentsFixtures.model_attrs("seed-foreign"),
+          actor: run.agent
+        )
+
+      foreign =
+        "foreign-proof"
+        |> AgentsFixtures.claude_attrs()
+        |> Map.drop([:request])
+        |> Map.merge(%{
+          agent_run_id: run.run.id,
+          sequence_in_run: 2,
+          request_sha256: fake.request_sha256
+        })
+
+      {:ok, foreign} =
+        ModelInvocation
+        |> Ash.Changeset.for_create(:reserve, foreign, actor: run.agent, context: context)
+        |> Ash.create()
+
+      refused =
+        assert_refused(
+          ctx,
+          run!(ctx, :proof),
+          "after-foreign",
+          :calibration_evidence_pending,
+          %{},
+          calibration: marker()
+        )
+
+      assert refused.check == {:predecessor_authority_invalid, foreign.id}
     end
 
     test "an exhausted proof allocation stops the run :grant_exhausted", ctx do
