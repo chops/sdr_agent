@@ -65,6 +65,12 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
         :block ->
           Process.sleep(:infinity)
 
+        # Blocks, and from then on the root reads as `identity` (so only a
+        # fallback cleanup can act on it).
+        {:block_then, identity} ->
+          Agent.update(__MODULE__, &%{&1 | identity: identity})
+          Process.sleep(:infinity)
+
         :raise ->
           raise "synthetic probe failure"
 
@@ -507,7 +513,70 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
     end
   end
 
+  describe "code review (Codex 01a135b6, 8435dcf)" do
+    # Every cleanup actor obeys the root signal authority: after a timeout
+    # or a caller's death the reaper's fallback never signals a root whose
+    # identity changed or cannot be read.
+    for {label, identity} <- [
+          reused: {:fixed, {:ok, "Mon Jan  1 00:00:00 2001"}},
+          unreadable: {:fixed, {:error, :ps_failed}}
+        ],
+        mode <- [:timeout, :cancelled] do
+      test "a #{label} root is never signalled by the #{mode} fallback", ctx do
+        GroupProbe.put({:block_then, unquote(Macro.escape(identity))})
+        parent = self()
+
+        observer = fn
+          {:spawned, os_pid} = event ->
+            {:ok, spawned} = ProcessProbe.start_identity(os_pid)
+            send(parent, {:isolation, event, {:ok, spawned}})
+
+          event ->
+            ctx.observer.(event)
+        end
+
+        opts = [
+          target: "printf ready; exec /bin/sleep 30",
+          probe: GroupProbe,
+          ready_ms: 300,
+          bound_ms: 700,
+          reaper_ms: 3_000,
+          observer: observer
+        ]
+
+        result = run_mode(unquote(mode), opts)
+        assert_receive {:isolation, {:spawned, os_pid}, {:ok, spawned}}, 5_000
+
+        try do
+          if unquote(mode) == :timeout,
+            do: assert(result == {:error, :calibration_isolation_cleanup_unconfirmed})
+
+          # Past the fallback: the root was never signalled.
+          Process.sleep(1_500)
+          assert ProcessProbe.start_identity(os_pid) == {:ok, spawned}, "the root was signalled"
+        after
+          stop_group!(os_pid)
+        end
+      end
+    end
+  end
+
   ## Fixtures
+
+  defp run_mode(:timeout, opts), do: Isolation.preflight(opts)
+
+  defp run_mode(:cancelled, opts) do
+    test = self()
+    task = Task.async(fn -> Isolation.preflight(opts) end)
+    assert_receive {:isolation, {:helper, helper}}, 5_000
+    # The launch exists before the caller is cancelled.
+    Process.sleep(500)
+    Task.shutdown(task, :brutal_kill)
+    send(test, :cancelled)
+    ref = Process.monitor(helper)
+    assert_receive {:DOWN, ^ref, :process, ^helper, _}, 5_000
+    :cancelled
+  end
 
   # Bounded wait for `check` to hold.
   defp await(check, deadline \\ System.monotonic_time(:millisecond) + 5_000) do
