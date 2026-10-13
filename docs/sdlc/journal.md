@@ -362,10 +362,12 @@ No real model call has been made; the budget for them is still zero.
   Each became a test before its fix.
 - **"Passed" has to mean each step passed.** See the misstep below.
 
-### Sprint 1, day 2 (Tue Oct 13), end of day (16:00 MDT)
+### Sprint 1, day 2 (Tue Oct 13), afternoon checkpoint (as of 15:30 MDT)
 
 The afternoon finished the budget binding and the staging exemption, and
-got the console's last part designed and half built. Everything is still on
+got the console's last part designed. Of its four pieces, the launch
+receipt (d3a) is approved, the reserved-call wrapper (d3b) is in review, and
+`calibrate` (d3c) and `calibrate-recover` (d3d) are not yet built. Everything is still on
 the `r0-07e-harness` branch (draft PR #146). Nothing from it merged to
 `main` today; the morning journal entry (#148) did.
 
@@ -386,17 +388,20 @@ covers that piece only, not a merge, a real call or any spend):
   - after the reservation, its run and its stored request are re-checked
     under the launch locks.
 
-  Every other call stays blocked as today. A request the server would
-  reject never uses up the entry.
+  Every other call stays blocked as today. A request refused by the
+  checks before the entry is used (wrong server, input, claims or witness)
+  leaves the entry untouched; a refusal at launch admission comes after the
+  entry is used, and the entry stays used up.
 - **The launch receipt** (d3a, the first part of the console commands).
   After the CLI starts, the server reports the process it launched, or
   says it could not prove it. The check is bounded by the call's deadline,
   cannot crash the server, and cannot outlive it.
 
-**In review at the end of the day:**
+**In review at this checkpoint:**
 
 - **The reserved-call wrapper** (d3b): the console's way to settle its own
   call through the existing settlement code, after re-checking the target.
+  Codex has requested changes once (a request-shape check); not approved.
 
 **Designed, not yet built:** `calibrate` and `calibrate-recover` (d3c and
 d3d). Codex passed their design after three rounds.
@@ -418,9 +423,10 @@ No real model call has been made; the budget for them is still zero.
 
   Each was found by a short probe and became a test first.
 - **A negative test has to observe the negative directly.** The wrapper's
-  "never calls the model" tests first only checked side effects. A probe
-  that called the model and then refused still passed them. They now trace
-  the server and require zero calls.
+  "never calls the provider" tests first only checked side effects. A probe
+  that called the staged provider and then returned invalid still passed
+  them; no real model was involved. They now trace the server and require
+  zero provider calls.
 
 ## Missteps
 
