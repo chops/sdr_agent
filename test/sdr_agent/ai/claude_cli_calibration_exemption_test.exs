@@ -33,7 +33,7 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     defp notify(pid) do
       case :persistent_term.get({__MODULE__, :test}, nil) do
         nil -> :ok
-        test -> send(test, {:probing, pid})
+        test -> send(test, {:probing, pid, self()})
       end
     end
 
@@ -61,6 +61,7 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
         :root_not_in_group -> {:ok, [pgid + 1]}
         :member_not_a_pid -> {:ok, [pgid, "x"]}
         :slow_group -> Process.sleep(2_200) && {:ok, [pgid]}
+        :hung_group -> Process.sleep(:infinity)
         :group_not_a_list -> {:ok, :members}
         _other -> {:ok, [pgid]}
       end
@@ -554,7 +555,7 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
       ref = issue!(server, invocation, run, %{command_pid: caller})
       send(caller, {:go, request(invocation, run, agent, ref)})
-      assert_receive {:probing, os_pid}, 10_000
+      assert_receive {:probing, os_pid, _probe}, 10_000
 
       started = System.monotonic_time(:millisecond)
       Process.exit(caller, :kill)
@@ -569,6 +570,46 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
       # The command died, so the registry removed its entry (8.2 step 7).
       {Authority, key} = ref
       assert :ets.lookup(Authority.table(), key) == []
+    end
+
+    # Codex d3a@cbe1e0f: the probe's lifetime is bound to the provider and
+    # to its own budget, so a hung probe never outlives a dead provider.
+    for mode <- [:hung, :hung_group] do
+      test "a #{mode} probe dies with its provider; no late receipt", ctx do
+        ProbeStub.mode(unquote(mode))
+        ProbeStub.watch(self())
+        Application.put_env(:sdr_agent, :calibration_launch_probe, ProbeStub)
+        server = server!(ctx, command: ctx.slow_cli, timeout: 10_000)
+        %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+        test = self()
+
+        caller =
+          spawn(fn ->
+            receive do
+              {:go, request} ->
+                try do
+                  send(test, {:result, admitting(fn -> complete(server, request) end)})
+                catch
+                  :exit, _provider_gone -> :ok
+                end
+            end
+          end)
+
+        ref = issue!(server, invocation, run, %{command_pid: caller})
+        request = request(invocation, run, agent, ref)
+        {_command, receipt_ref} = request.calibration.observer
+        send(caller, {:go, request})
+        assert_receive {:probing, os_pid, probe}, 10_000
+        on_exit(fn -> Process.exit(probe, :kill) end)
+
+        Process.exit(server, :kill)
+
+        assert eventually(fn -> not Process.alive?(probe) end, 1_000),
+               "the probe outlived its provider"
+
+        assert eventually(fn -> not Reaper.alive?(os_pid) end, 10_000)
+        assert receipts(receipt_ref) == []
+      end
     end
 
     # A refusal before Reaper.open is the reachable no-launch case:

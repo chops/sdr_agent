@@ -42,8 +42,12 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     root_pid:, reason:}}` with no launch fields. It never signals or cleans
     anything up.
 
-    The probe runs in a monitored, unlinked helper process (its exit or
-    kill never reaches the server), bounded by the call's own `deadline`
+    The probe runs in a worker linked to a guard process. The guard is not
+    linked to the server (a probe's exit or kill never reaches it); it
+    monitors the server and kills the worker when the server dies or when
+    its own copy of the bound passes, so a hung probe never outlives its
+    provider. The server monitors the guard and is bounded by the call's
+    own `deadline`
     (monotonic ms) and a 2 s probe budget, and by the caller: a
     probe still running at the bound is killed and reported unverified
     (`:probe_timeout`, or `:caller_down` when the caller died meanwhile;
@@ -142,13 +146,15 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
 
     @probe_budget_ms 2_000
 
-    # Not linked (Codex d3a@0a47a27): a probe that exits or is killed is
-    # only its own DOWN, never the server's exit.
+    # The guard (Codex d3a@0a47a27, cbe1e0f): unlinked from the server, so
+    # a probe's exit or kill is only the guard's DOWN; linked to its worker,
+    # so killing the guard kills the probe; it monitors the server and
+    # enforces the bound itself, so neither outlives a dead server.
     defp bounded_proof(os_pid, deadline, watch) do
       server = self()
       tag = make_ref()
-      {helper, monitor} = spawn_monitor(fn -> send(server, {tag, proof(os_pid)}) end)
       until = min(deadline, System.monotonic_time(:millisecond) + @probe_budget_ms)
+      {helper, monitor} = spawn_monitor(fn -> guard(server, tag, os_pid, until) end)
 
       case await_proof(tag, monitor, watch, until) do
         {:done, result} ->
@@ -180,7 +186,25 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
       end
     end
 
-    # Kills the helper, then discards its DOWN and any late result.
+    defp guard(server, tag, os_pid, until) do
+      owner = Process.monitor(server)
+      guard = self()
+      worker = spawn_link(fn -> send(guard, {tag, proof(os_pid)}) end)
+
+      receive do
+        {^tag, result} ->
+          send(server, {tag, result})
+
+        {:DOWN, ^owner, :process, ^server, _reason} ->
+          Process.exit(worker, :kill)
+      after
+        max(until - System.monotonic_time(:millisecond), 0) ->
+          Process.exit(worker, :kill)
+      end
+    end
+
+    # Kills the guard (and with it its worker), then discards its DOWN and
+    # any late result.
     defp stop_helper(helper, monitor, tag) do
       Process.exit(helper, :kill)
 
