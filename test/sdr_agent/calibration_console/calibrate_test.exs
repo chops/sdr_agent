@@ -10,6 +10,12 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   synthetic pinned executable. Every assertion reads the record on disk,
   the committed rows and the evidence directory, never only the command's
   return value.
+
+  **Time-bound:** the private server the command starts reads the real
+  clock in its own process (`Clock.freeze/1` does not reach it), and G-R0's
+  window is code-owned, ending 2026-10-19 05:59 UTC. These tests can
+  therefore pass only before that instant; a renewed G-R0 window must move
+  them with it.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -74,7 +80,10 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   require Ash.Query
 
   alias SdrAgent.AdmissionFixtures
+  alias SdrAgent.Agents
+  alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
+  alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.AgentsFixtures
@@ -99,7 +108,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     start_supervised!(Authority)
     %{root: store} = AdmissionFixtures.admit_tuples!()
     tenant = bootstrap!()
-    if Map.get(tags, :grant, true), do: g_r0!(tenant)
+    grant = if Map.get(tags, :grant, true), do: g_r0!(tenant)
 
     previous = Application.get_env(:sdr_agent, :calibration_launch_probe)
     Application.put_env(:sdr_agent, :calibration_launch_probe, LaunchProbe)
@@ -130,7 +139,8 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
       ran: ran,
       root: root,
       evidence: evidence,
-      tmp: tmp
+      tmp: tmp,
+      grant: grant
     }
 
     # After every fixture: a missing command fails as an assertion.
@@ -261,13 +271,15 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   ## Rows 9 and 11: the normal path
 
   describe "rows 9 and 11: the normal path" do
-    test "an uncaptured call finishes: missing, evidence latched, run latched, released", ctx do
+    # No capture keeps the bounded await pending to its deadline, so the
+    # genuine receipt is a timeout (Codex babd986 part 3a review).
+    test "an uncaptured call finishes: timeout, evidence latched, run latched, released", ctx do
       unrelated = make_ref()
       send(self(), {:unrelated, unrelated})
 
       assert {:ok, summary} = run(ctx)
       assert summary.record == :released
-      assert summary.outcome == "missing"
+      assert summary.outcome == "timeout"
       assert released?(ctx)
 
       invocation = invocation!(summary.invocation_id)
@@ -290,7 +302,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
 
       invocation = invocation!(summary.invocation_id)
       document = assert_latched(ctx, invocation, summary)
-      assert [%{id: link_id}] = document["links"]
+      assert [%{"id" => link_id}] = document["links"]
       assert document["evaluated_projection_version"] == @v3
       assert document["evaluated_method"] == "propagated_id"
       assert is_binary(link_id)
@@ -468,25 +480,515 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     assert LaunchRecord.recover(ctx.root, probe: ProcessProbe) == {:error, :owner_alive}
   end
 
+  ## 8.14.9: the option contract, the tenant and the wiring
+
+  describe "8.14.9: options" do
+    for {name, change} <- [
+          unknown_key: {:put, :extra, 1},
+          missing_required: {:delete, :record},
+          duplicate_key: {:duplicate, :root},
+          relative_root: {:put, :root, "relative/launch"},
+          relative_evidence: {:put, :evidence_dir, "evidence"},
+          confirm_wrong_arity: {:put, :confirm, {:function, 2}},
+          probe_not_a_module: {:put, :probe, "ProcessProbe"},
+          server_not_a_list: {:put, :server, %{}},
+          isolation_not_a_list: {:put, :isolation, nil},
+          record_not_a_list: {:put, :record, :none},
+          tenant_not_an_id: {:put, :tenant, 42},
+          tenant_not_a_uuid: {:put, :tenant, "console"},
+          hook_wrong_arity: {:put, :hook, {:function, 1}},
+          hook_not_a_function: {:put, :hook, :before_call}
+        ] do
+      test "#{name} is refused before anything", ctx do
+        before = {counts(ctx), length(events_of_type(ctx.tenant, "agents.definition.registered"))}
+
+        assert {:stop, :calibration_options_invalid, %{record: :none}} =
+                 run_with(ctx, unquote(Macro.escape(change)))
+
+        assert {counts(ctx), length(events_of_type(ctx.tenant, "agents.definition.registered"))} ==
+                 before
+
+        refute File.exists?(Path.join(ctx.root, "run.lock"))
+        refute_received {:confirm, _prompt}
+      end
+    end
+
+    test "an unknown tenant id refuses before the definition or the claim", ctx do
+      assert {:stop, :calibration_tenant_unavailable, %{record: :none}} =
+               run(ctx, tenant: Ash.UUIDv7.generate())
+
+      assert events_of_type(ctx.tenant, "agents.definition.registered") == []
+      refute File.exists?(Path.join(ctx.root, "run.lock"))
+    end
+
+    test "the :console selector resolves the singleton tenant", ctx do
+      assert {:stop, :calibration_not_confirmed, %{record: :released}} =
+               run(ctx, tenant: :console, confirm: confirm("no"))
+
+      assert [_registered] = events_of_type(ctx.tenant, "agents.definition.registered")
+    end
+
+    test "command/1 is pure and names exactly console_opts/1" do
+      assert function_exported?(Calibrate, :command, 1), "Calibrate.command/1 is not defined"
+
+      assert function_exported?(Calibrate, :console_opts, 1),
+             "Calibrate.console_opts/1 is not defined"
+
+      assert Calibrate.command(["claude_cli_opus"]) ==
+               {:run, :claude_cli_opus, Calibrate.console_opts(:claude_cli_opus)}
+
+      assert Calibrate.command(["claude_cli_sonnet"]) ==
+               {:run, :claude_cli_sonnet, Calibrate.console_opts(:claude_cli_sonnet)}
+
+      for argv <- [[], ["fake"], ["claude_cli_opus", "extra"], ["CLAUDE_CLI_OPUS"], ["unknown"]],
+          do: assert(Calibrate.command(argv) == {:error, :usage}, inspect(argv))
+
+      opts = Calibrate.console_opts(:claude_cli_opus)
+
+      assert Keyword.keys(opts) |> Enum.sort() ==
+               Enum.sort([
+                 :tenant,
+                 :root,
+                 :evidence_dir,
+                 :confirm,
+                 :probe,
+                 :server,
+                 :isolation,
+                 :record
+               ])
+
+      assert Keyword.get(opts, :tenant) == :console
+      assert Keyword.get(opts, :probe) == ProcessProbe
+      assert {opts[:server], opts[:isolation], opts[:record]} == {[], [], []}
+      assert is_function(opts[:confirm], 1)
+      assert Path.type(opts[:root]) == :absolute
+      assert Path.type(opts[:evidence_dir]) == :absolute
+      refute Keyword.has_key?(opts, :hook)
+    end
+  end
+
+  ## 8.14.9: the fixed definition
+
+  describe "8.14.9: the definition" do
+    test "registered once as the tenant's kernel actor; a repeat writes no event", ctx do
+      for _ <- 1..2 do
+        assert {:stop, :calibration_not_confirmed, %{record: :released}} =
+                 run(ctx, confirm: confirm("no"))
+      end
+
+      assert [event] = events_of_type(ctx.tenant, "agents.definition.registered")
+      assert event.actor_type == :kernel
+      definition = console_definition!(ctx)
+
+      assert {definition.module, definition.status} ==
+               {"SdrAgent.CalibrationConsole.Calibrate", :active}
+
+      assert definition.definition == fixed_definition_body()
+    end
+
+    for variant <- [:other_body, :other_module, :retired] do
+      test "a #{variant} definition is a conflict before the claim", ctx do
+        prepare_definition!(ctx, unquote(variant))
+        before = counts(ctx)
+
+        assert {:stop, :calibration_definition_conflict, %{record: :none}} = run(ctx)
+        assert counts(ctx) == before
+        refute File.exists?(Path.join(ctx.root, "run.lock"))
+      end
+    end
+  end
+
+  ## 8.14.9: the proof run
+
+  test "the proof run carries exactly the 8.14.9 attributes", ctx do
+    assert {:ok, summary} = run(ctx)
+    run = run_of(summary.invocation_id)
+
+    assert run.agent_definition_id == console_definition!(ctx).id
+
+    assert {run.usage_origin, run.operation_id, run.lead_id, run.campaign_id} ==
+             {:proof, nil, nil, nil}
+
+    assert run.trigger_signal_type == "calibration.console"
+    assert run.trigger_signal_id == reserved_claim(ctx, summary.invocation_id)
+
+    assert {run.phase, run.max_model_calls, run.max_tool_calls, run.max_tokens} ==
+             {:research, 1, 0, 100_000}
+
+    assert is_binary(run.correlation_id)
+  end
+
+  describe "8.14.9: run creation failures (row 5)" do
+    test "a failed creation: no run, aborted, released", ctx do
+      fail_events!(ctx, ["agents.run.created"])
+      before = counts(ctx)
+
+      assert {:stop, :calibration_run_unavailable, %{record: :released}} = run(ctx)
+      assert counts(ctx) == before
+    end
+
+    test "a failed start: the queued run is cancelled, then released", ctx do
+      fail_events!(ctx, ["agents.run.started"])
+
+      assert {:stop, :calibration_run_unavailable, %{record: :released}} = run(ctx)
+      assert [%AgentRun{status: :cancelled}] = proof_runs(ctx)
+      assert count(ModelInvocation, ctx.tenant) == 0
+    end
+
+    test "a failed start whose cancel also fails keeps the claim", ctx do
+      fail_events!(ctx, ["agents.run.started", "agents.run.cancelled"])
+
+      assert {:stop, :calibration_run_stop_failed, summary} = run(ctx)
+      assert summary.record == {:kept, "claimed"}
+      assert {:ok, %{state: "claimed"}} = LaunchRecord.read(ctx.root)
+    end
+  end
+
+  ## 8.14.9: the ordering hook
+
+  describe "8.14.9: the hook" do
+    test "called once per closed phase, in order, in the command, outside a transaction, ids only",
+         ctx do
+      test = self()
+
+      hook = fn phase, context ->
+        send(test, {:hook, phase, context, self(), SdrAgent.Repo.in_transaction?()})
+        {:error, :ignored}
+      end
+
+      assert {:ok, summary} = run(ctx, hook: hook)
+
+      assert_received {:hook, :before_issue, first, ^test, false}
+      assert_received {:hook, :before_call, second, ^test, false}
+      refute_received {:hook, _phase, _context, _pid, _tx}
+
+      for context <- [first, second] do
+        assert context == %{
+                 invocation_id: summary.invocation_id,
+                 run_id: run_of(summary.invocation_id).id,
+                 tenant_id: ctx.tenant.id
+               }
+      end
+    end
+
+    test "a raising hook is a conservative stop; the record is kept", ctx do
+      hook = fn
+        :before_issue, _context -> raise "synthetic hook failure"
+        _phase, _context -> :ok
+      end
+
+      assert {:stop, :calibration_hook_failed, summary} = run(ctx, hook: hook)
+      assert summary.record == {:kept, "launch_pending"}
+
+      assert %ModelInvocation{status: :reserved, sent_at: nil} =
+               invocation!(summary.invocation_id)
+
+      assert launches(ctx) == 0
+      assert File.ls!(ctx.evidence) == []
+    end
+  end
+
+  ## Row 4: a typed reservation refusal
+
+  describe "row 4: a reservation %Refused{}" do
+    setup ctx do
+      spend_opus_allocation!(ctx)
+      :ok
+    end
+
+    test "the run is stopped with that receipt, then aborted and released", ctx do
+      before = MapSet.new(all_failures(ctx), & &1.id)
+
+      assert {:stop, :calibration_reservation_refused, %{record: :released}} = run(ctx)
+
+      assert [run] =
+               Enum.filter(proof_runs(ctx), &(&1.trigger_signal_type == "calibration.console"))
+
+      assert {run.status, run.status_reason} == {:budget_exhausted, :grant_exhausted}
+      assert [failure] = Enum.reject(all_failures(ctx), &MapSet.member?(before, &1.id))
+      assert run.refusal_failure_id == failure.id
+      assert launches(ctx) == 0
+    end
+
+    test "4b: a failed run stop keeps the claim (never a released running run)", ctx do
+      fail_events!(ctx, ["agents.run.budget_exhausted"])
+
+      assert {:stop, :calibration_run_stop_failed, summary} = run(ctx)
+      assert summary.record == {:kept, "claimed"}
+      assert {:ok, %{state: "claimed"}} = LaunchRecord.read(ctx.root)
+    end
+  end
+
+  ## Row 5: reserve fails without a typed refusal
+
+  test "row 5: a failed reservation append: no invocation, the run cancelled, released", ctx do
+    fail_events!(ctx, ["model.invocation.reserved"])
+
+    assert {:stop, :calibration_reservation_failed, %{record: :released}} = run(ctx)
+    assert count(ModelInvocation, ctx.tenant) == 0
+    assert [%AgentRun{status: :cancelled}] = proof_runs(ctx)
+    assert launches(ctx) == 0
+  end
+
+  ## Row 7: Authority.issue fails
+
+  test "row 7: Authority unavailable: unlaunched recovery, evidence, latch, released", ctx do
+    hook = fn
+      :before_issue, _context -> :ok = stop_supervised(Authority)
+      _phase, _context -> :ok
+    end
+
+    assert {:stop, :calibration_authority_unavailable, summary} = run(ctx, hook: hook)
+    assert summary.record == :released
+    assert summary.outcome == "launch_failed"
+    invocation = invocation!(summary.invocation_id)
+    assert {invocation.status, invocation.sent_at} == {:failed, nil}
+    assert_unlaunched_latched(ctx, invocation, summary)
+    assert launches(ctx) == 0
+  end
+
+  ## Row 8: sent_at nil after the call
+
+  describe "row 8: unlaunched after the call" do
+    test "an actual launch refusal: stop_refused before E1, then evidence, latch, release", ctx do
+      hook = fn
+        :before_call, _context -> revoke_g_r0!(ctx)
+        _phase, _context -> :ok
+      end
+
+      assert {:stop, :calibration_launch_refused, summary} = run(ctx, hook: hook)
+      assert summary.record == :released
+      assert summary.outcome == "launch_failed"
+
+      invocation = invocation!(summary.invocation_id)
+      assert {invocation.status, invocation.sent_at} == {:failed, nil}
+      run = run_of(invocation.id)
+      # The refusal's own stop holds; E1 never turns it into a success.
+      assert run.status == :failed
+      assert is_binary(run.refusal_failure_id)
+      assert [_one] = Enum.filter(all_failures(ctx), &(&1.id == run.refusal_failure_id))
+      assert_unlaunched_latched(ctx, invocation, summary, run_status: :failed)
+      assert launches(ctx) == 0
+    end
+
+    test "a failed refusal stop keeps launch_pending: no evidence, no latch", ctx do
+      hook = fn
+        :before_call, _context ->
+          revoke_g_r0!(ctx)
+          fail_events!(ctx, ["agents.run.failed"])
+
+        _phase, _context ->
+          :ok
+      end
+
+      assert {:stop, :calibration_run_stop_failed, summary} = run(ctx, hook: hook)
+      assert summary.record == {:kept, "launch_pending"}
+      assert File.ls!(ctx.evidence) == []
+      assert releases(invocation!(summary.invocation_id)) == []
+    end
+
+    test "a pre-launch pin loss leaves it reserved: unlaunched recovery, evidence, latch", ctx do
+      hook = fn
+        :before_call, _context -> File.rm!(ctx.executable)
+        _phase, _context -> :ok
+      end
+
+      assert {:stop, :pinned_cli_unavailable, summary} = run(ctx, hook: hook)
+      assert summary.record == :released
+      assert summary.outcome == "launch_failed"
+      invocation = invocation!(summary.invocation_id)
+      assert {invocation.status, invocation.sent_at} == {:failed, nil}
+      assert_unlaunched_latched(ctx, invocation, summary)
+      assert launches(ctx) == 0
+    end
+  end
+
   ## Fixtures
 
   defp run(ctx, overrides \\ []) do
+    opts = Keyword.merge(base_opts(ctx), overrides)
+    AdmissionFixtures.admitting(fn -> Calibrate.run(@profile, opts) end)
+  end
+
+  defp base_opts(ctx),
+    do: [
+      tenant: ctx.tenant.id,
+      root: ctx.root,
+      evidence_dir: ctx.evidence,
+      confirm: confirm(@typed),
+      probe: ConsoleProbe,
+      server: server(ctx, ctx.cli),
+      isolation: [],
+      record: []
+    ]
+
+  # A run with one option changed, removed or duplicated.
+  defp run_with(ctx, change) do
+    opts = base_opts(ctx)
+
     opts =
-      Keyword.merge(
-        [
-          tenant: ctx.tenant.id,
-          root: ctx.root,
-          evidence_dir: ctx.evidence,
-          confirm: confirm(@typed),
-          probe: ConsoleProbe,
-          server: server(ctx, ctx.cli),
-          isolation: [],
-          record: []
-        ],
-        overrides
-      )
+      case change do
+        {:put, key, value} -> Keyword.put(opts, key, materialize(value))
+        {:delete, key} -> Keyword.delete(opts, key)
+        {:duplicate, key} -> opts ++ [{key, Keyword.fetch!(opts, key)}]
+      end
 
     AdmissionFixtures.admitting(fn -> Calibrate.run(@profile, opts) end)
+  end
+
+  # Functions cannot be escaped into generated tests: `{:function, arity}`
+  # names one of that arity.
+  defp materialize({:function, 1}), do: fn _a -> :ok end
+  defp materialize({:function, 2}), do: fn _a, _b -> "x" end
+  defp materialize(value), do: value
+
+  defp fixed_definition_body,
+    do: %{
+      "allowed_actions" => [],
+      "model_policy" => %{"provider" => "claude_cli", "max_model_calls_per_run" => 1}
+    }
+
+  defp console_definition!(ctx) do
+    AgentDefinition
+    |> Ash.Query.filter(
+      tenant_id == ^ctx.tenant.id and name == "CalibrationConsole" and version == 1
+    )
+    |> Ash.read_one!(authorize?: false)
+  end
+
+  defp prepare_definition!(ctx, variant) do
+    kernel = system_actor(:kernel, ctx.tenant)
+
+    attrs = %{
+      name: "CalibrationConsole",
+      version: 1,
+      module: "SdrAgent.CalibrationConsole.Calibrate",
+      definition: fixed_definition_body()
+    }
+
+    attrs =
+      case variant do
+        :other_body -> %{attrs | definition: %{"allowed_actions" => [], "model_policy" => %{}}}
+        :other_module -> %{attrs | module: "SdrAgent.SomethingElse"}
+        :retired -> attrs
+      end
+
+    {:ok, definition} = Agents.register_definition(attrs, actor: kernel)
+    if variant == :retired, do: {:ok, _} = Agents.retire_definition(definition, actor: kernel)
+  end
+
+  # Spends both attempts of G-R0's opus allocation through real proof
+  # reservations, each settled and latched, so preflight still selects the
+  # grant and the console's own reservation is refused.
+  defp spend_opus_allocation!(ctx) do
+    for _ <- 1..2 do
+      %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant, usage_origin: :proof)
+
+      {:ok, binding} =
+        Agents.select_calibration_grant(ctx.tenant.id, @profile, actor: agent)
+
+      marker =
+        CalibrationAdmission.context(@profile, AdmissionFixtures.entry(@profile, @v3),
+          claim: Ash.UUIDv7.generate(),
+          binding: binding
+        )
+
+      prompt = Prompt.prompt_ref()
+      schema = Prompt.schema_ref()
+
+      attrs =
+        "spend-#{System.unique_integer([:positive])}"
+        |> AgentsFixtures.claude_attrs()
+        |> Map.merge(%{
+          prompt_template_id: prompt.id,
+          prompt_template_version: prompt.version,
+          prompt_template_sha256: prompt.sha256,
+          output_schema_id: schema.id,
+          output_schema_version: schema.version,
+          output_schema_sha256: schema.sha256
+        })
+
+      {:ok, reserved} =
+        AdmissionFixtures.admitting(fn ->
+          Agents.reserve_model_invocation(run, attrs, actor: agent, calibration: marker)
+        end)
+
+      # Settled and latched, so the predecessor barrier (B4') stays clear.
+      {:ok, failed} =
+        Agents.fail_model_invocation(reserved, %{error: %{"kind" => "provider_error"}},
+          actor: agent
+        )
+
+      {:ok, _latched} =
+        Agents.finish_calibration(failed, %{sha256: String.duplicate("0", 64)}, actor: agent)
+    end
+  end
+
+  defp revoke_g_r0!(ctx) do
+    {:ok, _revoked} =
+      Agents.revoke_grant(ctx.grant, %{expected_revision: ctx.grant.revision},
+        actor: human(:admin, ctx.tenant)
+      )
+  end
+
+  # Test-only fault: inserting any of `event_types` raises, inside the
+  # test's sandbox transaction (rolled back with it).
+  defp fail_events!(_ctx, event_types) do
+    name = "sdr_test_fail_#{System.unique_integer([:positive])}"
+    types = Enum.map_join(event_types, ", ", &"'#{&1}'")
+
+    Ecto.Adapters.SQL.query!(
+      SdrAgent.Repo,
+      "CREATE FUNCTION #{name}() RETURNS trigger LANGUAGE plpgsql AS " <>
+        "$$ BEGIN RAISE EXCEPTION 'injected event failure'; END $$",
+      []
+    )
+
+    Ecto.Adapters.SQL.query!(
+      SdrAgent.Repo,
+      "CREATE TRIGGER #{name} BEFORE INSERT ON audit_events FOR EACH ROW " <>
+        "WHEN (NEW.event_type IN (#{types})) EXECUTE FUNCTION #{name}()",
+      []
+    )
+  end
+
+  defp proof_runs(ctx) do
+    AgentRun
+    |> Ash.Query.filter(tenant_id == ^ctx.tenant.id and usage_origin == :proof)
+    |> Ash.read!(authorize?: false)
+    |> Enum.filter(&(&1.trigger_signal_type == "calibration.console"))
+  end
+
+  defp all_failures(ctx), do: Ash.read!(Failure, SdrAgent.Audit.Kernel.opts(ctx.tenant.id))
+
+  # The unlaunched document (launch_failed, no evaluation or attestation)
+  # is published, validated and latched; the run keeps `run_status`.
+  defp assert_unlaunched_latched(ctx, invocation, summary, opts \\ []) do
+    agent = system_actor(:agent_runtime, ctx.tenant)
+    %{path: path, sha256: sha} = summary.evidence
+
+    target = %{
+      invocation_id: invocation.id,
+      run_id: invocation.agent_run_id,
+      tenant_id: ctx.tenant.id,
+      profile_id: @profile
+    }
+
+    assert {:ok, _validated} = Evidence.validate(path, target, actor: agent)
+    document = path |> File.read!() |> Jason.decode!()
+    assert document["outcome"] == "launch_failed"
+    assert document["links"] == []
+    assert {document["attested_cli_version"], document["attested_model_id"]} == {nil, nil}
+
+    assert [%ModelResultRelease{disposition: :calibration, evidence_sha256: ^sha}] =
+             releases(invocation)
+
+    run = run_of(invocation.id)
+
+    case Keyword.get(opts, :run_status) do
+      nil -> assert {run.status, run.status_reason} == {:succeeded, :calibration_latched}
+      status -> assert run.status == status
+    end
   end
 
   defp server(ctx, command),
@@ -555,17 +1057,15 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     path
   end
 
-  # Creates the tenant's one G-R0 grant, valid around the real clock (the
-  # private server reads it in its own process).
+  # Creates the tenant's one G-R0 grant in its fixed shape (its expiry is
+  # code-owned, `Admission.g_r0?/2`).
   defp g_r0!(tenant) do
-    now = DateTime.utc_now()
-
     AgentsFixtures.grant!(tenant, %{
       name: "G-R0",
       profile_ids: [:claude_cli_opus, :claude_cli_sonnet],
       total_attempts: 4,
-      starts_at: DateTime.add(now, -1, :day),
-      expires_at: DateTime.add(now, 5, :day),
+      starts_at: ~U[2026-10-12 00:00:00.000000Z],
+      expires_at: ~U[2026-10-19 05:59:00.000000Z],
       allocations: [
         %{key: :proof, applies_to: [:proof], attempts: 2, profile_id: :claude_cli_opus},
         %{key: :proof, applies_to: [:proof], attempts: 2, profile_id: :claude_cli_sonnet}

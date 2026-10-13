@@ -2230,7 +2230,11 @@ method, attestation and inventory fields are nil.
   was asked for: an inline entity row for the definition registration and
   its eligibility, and a trigger reason that names the definition and
   proof-run setup. Both are added below.
-- The hook and the setup need PASS before any test uses them.
+- **Round 3** at babd986: **entity/action PASS** (Codex 7c5efadf, report
+  sha256 98d100fc). The 8.14.9 orchestration contract and its joins are
+  approved, so the scoped hook and setup RED may proceed. Exact RED
+  verification comes before GREEN. This is not integrated, merge, spend or
+  promotion approval.
 
 **Entity Model trigger: yes.** Three changes:
 - a new orchestration option contract: `Calibrate.run/2` and its options,
