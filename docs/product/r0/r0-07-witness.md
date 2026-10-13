@@ -1163,12 +1163,19 @@ It builds on 8.2, 8.3, 8.4, R11-1 with the E4a/E4b deltas, R11-2 (E1),
 R11-3 (E2) and R11-4 (E3). It grants no real-call, calibration, dependency
 or spend authority. The real-model budget stays 0.
 
+#### Round 3 (Codex 01a1351e at 61dda1c): R2-1 to R2-3 resolved below
+
+Codex accepted conservative owner-conflict stops. Where no automatic step
+can be proven safe, the command stops with `:calibration_owner_conflict`,
+changes nothing, and prints what the owner must check. The owner's way out
+is the explicit orphan recovery in E4c-2b, never a silent takeover.
+
 #### E4c-1 Isolation: the Port child already leads its own group (MF1)
 
 **Finding.** Codex's probe showed that a Perl `setsid` wrapper fails with
 EPERM inside a Port. Re-checked through the same `Port.open` +
-`ChildEnv.port` shape: the `/bin/sh` child is already a process-group (and
-session) leader. Its pid equals its pgid, which differs from the VM's
+`ChildEnv.port` shape: the `/bin/sh` child is already a process-group leader. Its pid equals its
+pgid, which differs from the VM's
 group. Its parent is the ERTS child-setup helper, and a forked descendant
 inherits the group (`claude-r007e-e4c-port-group.exs` sha256
 b1f927830552feab78fd3a9a4db411fe4836d804be4c6ffce4fb0775bf90262d, metadata
@@ -1185,11 +1192,22 @@ only, no CLI).
   the outcome is post-spawn uncertainty: the tree is stopped through the
   reaper, the outcome is unknown, and the record stays `launch_pending`.
   It is never a known no-spawn.
-- **Preflight launches no CLI.** It runs the same check against a
-  synthetic `/bin/sh -c 'exit 0'` launched through the private server's
-  reaper launch shape, before any reservation. A failure is
-  `:calibration_isolation_unavailable`. This is a capability check of the
-  OS behaviour, not a version or hash pin.
+- **Preflight launches no CLI (R2-1).** An immediately exiting target
+  races the check: in Codex's five runs the root was already a zombie with
+  an empty group. So the synthetic target holds until released, through
+  the same `Reaper.start/track/open` + `ChildEnv` shape:
+  1. The target is `/bin/sh -c 'printf ready; IFS= read -r _'`.
+  2. The harness waits (bounded) for `ready`.
+  3. It then requires its own group (the root's identity, and
+     `group_members(root)` containing the root), then closes the port (EOF
+     on stdin).
+  4. It confirms the tree gone through the reaper and an observed empty
+     group, all before any reservation.
+
+  A timeout, error, or unconfirmed cleanup is
+  `:calibration_isolation_unavailable`. Tests distinguish supported
+  isolation from a target that merely exited early. This is a capability
+  check, not a version or hash pin.
 - **Scope.** This is the observed process-group scope (E4b delta). A
   descendant that changes its group escapes (OQ-E3).
 
@@ -1200,7 +1218,7 @@ only, no CLI).
 | From | To | When | Launch fields |
 |---|---|---|---|
 | `claimed` | `aborted` | Preflight or reservation refused, or crash before `launch_pending`, with no `sent` invocation of this claim | Null |
-| `launch_pending` | `aborted` | The invocation is unlaunched: still `reserved`, or `failed` with `abandoned_before_launch` and `sent_at` nil | Null |
+| `launch_pending` | `aborted` | The invocation is unlaunched: still `reserved`, or `failed` with `sent_at` nil for any recorded reason (including a launch-admission refusal such as `:calibration_grant_mismatch`, whose reason is kept) | Null |
 | `launch_pending` | `recovered` | `sent` without a root receipt, after an owner attestation (E4c-4) and the database transition to `unknown` or terminal | Null |
 | `launched` | `finished` | After the cleanup receipt (E4c-3) | Kept |
 | `launched` | `recovered` | Recovery after quiescence (E4c-3/4) | Kept |
@@ -1209,14 +1227,34 @@ only, no CLI).
   released. Release removes the ticket (if any) and then the lock, every
   removal checked. A recovery's ticket is ended by that same release, never
   before the final state is written.
-- **Unreadable records.** An unreadable record never advances. Its
-  recovery writes no state into it. It is finalized only by
-  `release_recovered/3`, which needs:
-  - the verified ticket;
-  - an audited attestation bound to the record's fingerprint (E4c-4);
-  - completion of the database transition.
+- **Re-checks on release.** A final state is not itself quiescence. Release
+  re-checks the evidence bound to the state:
+  - `aborted` — no launch can have happened.
+  - `finished` (launch fields kept) — the R11-1 quiescence of its root and
+    group again: live work refuses.
+  - `recovered` — its `attestation_id` (a new nullable schema-3 field) must
+    be this ticket's audited attestation (E4c-4), or, with launch fields,
+    the quiescence again.
 
-  The release then removes the unreadable record, the ticket and the lock.
+  A crash after the final state and before release therefore replays the
+  release with the same checks.
+- **Partial removal.** Removals are not atomic. A failed removal
+  mid-release stops with `:calibration_owner_conflict`, with no further
+  deletion. The remnant then reads as unreadable or blocked and keeps
+  admission closed. It never resumes automatically.
+- **Unreadable or missing records (R2-2).** These are unbindable: no
+  `instance_id` is inferred from unsafe bytes. Recovery under the lock
+  stops with `:calibration_owner_conflict`. The owner resolves it through
+  the orphan recovery (E4c-2b).
+- **Pre-`sent` refusal.** A launch-admission refusal before any `sent`
+  write leaves the row `failed` with its own reason and `sent_at` nil. It
+  is finalized as unlaunched (`aborted`), without overwriting the reason.
+  A known no-spawn receipt recorded after `sent` (`launch_failed`,
+  `provider_queue_timeout`) is still a `sent` row. It follows the `sent`
+  recovery (attestation) and is never `aborted`.
+- **Stuck provider.** A stuck provider may leave `launch_pending` (spawned,
+  but `launched` not written) or `launched`. Both keep the lock and recover
+  as below.
 - **Durable claim binding.** The reservation event records the claim
   (`calibration_claim: %{instance_id}`, next to `calibration_binding`), so a
   crash between reserve and `launch_pending` still associates the claim
@@ -1225,8 +1263,34 @@ only, no CLI).
     reservation event carries this record's `instance_id`.
   - If the record carries an `invocation_id` (from `launch_pending` on),
     the two must be equal.
-  - Zero, several, or a mismatch refuses: `:calibration_target_ambiguous`.
+  - Several matches, or a mismatch, refuses:
+    `:calibration_target_ambiguous`.
+  - **Zero matches** is allowed only for a `claimed` record with no named
+    target: no reservation event in the tenant carries the claim, so no
+    invocation and no `sent` work exists, and the record goes to `aborted`
+    and is released. Every other zero-match case is
+    `:calibration_target_ambiguous`.
   - Provenance is never fabricated.
+
+#### E4c-2b Orphan recovery: the owner's explicit way out
+
+`calibrate-recover <invocation_id> --orphan` covers a target with no usable
+lock record: the record is unreadable or missing, or the lock was resolved
+by hand.
+- **Conditions.** It needs no `run.lock` present. It takes a fresh claim
+  (single flight); the old one is never adopted. The named invocation must
+  be the console's own kind: a generation-2 real-profile ClaudeCLI proof
+  invocation with no Operation, exactly one original reservation event,
+  and not latched.
+- **Confirmation.** The owner types the invocation id and `STOPPED` after
+  the printed checks. The audited attestation (E4c-4) binds the invocation,
+  the record binding `"orphan"`, the fresh claim's `instance_id` and the
+  observation `"no record"`.
+- **Then.** E4c-5 runs, and the fresh claim goes to `aborted` and is
+  released. A `reserved` target fails unlaunched without an attestation; a
+  `sent` target needs it.
+- **Scope.** This is the only path that resolves an unbindable claim, and
+  it is always owner-attested.
 - **Crash windows.**
 
 | Crash after | Record | Database | Recovery |
@@ -1285,13 +1349,24 @@ only, no CLI).
   - its audit event exists with an identical payload;
   - the current observation still matches the attested one (record
     binding, state, ids) and shows no live work.
-- **Crash in either direction.**
-  - Event without a file: the console re-reads the event by its id and
-    writes the file under the same ticket.
+- **No cross-process resume (R2-3).** A ticket has no recovery-owner
+  identity, so a recovering process that dies leaves an abandoned ticket.
+  Any later `recover` meets `:recovery_in_progress`, which is an owner
+  conflict, and the ticket is never adopted or erased by a later process.
+  So an attestation is completed only by the live process that took it:
+  - Event committed but the file not written: that same process writes the
+    file using the id it holds. If it dies, the owner conflict stands and
+    the orphan recovery (E4c-2b) is the way out.
   - A file without an event: the attestation is ignored.
-  - A new ticket after a crash needs a new confirmation, and so a new
-    attestation. The old event stays historical.
+  - A replay never generates a second id or event for the same
+    confirmation.
   - Nothing is lost or duplicated.
+- **Expected state change.** The attestation authorizes exactly one
+  transition: its attested record state and binding → `recovered`, by the
+  same process and ticket. `recovered` records the `attestation_id`, so the
+  release can check it (E4c-2). Any other change refuses, and no second
+  confirmation is needed for its own transition. This covers a changed
+  instance, owner, root, group or claim, or live work.
 - **Record field.** The schema-2 `owner_attested_at` record field is
   superseded: new writes keep it null, and `attest_stopped` on the record
   is removed in favour of this artifact.
@@ -1361,12 +1436,23 @@ checks, and authority revocation, stay as in 8.2.
 
 | Entity | New or existing | Delta | Invariants | Actor and locks |
 |---|---|---|---|---|
-| LaunchRecord | Existing | Schema 3: `aborted` and `recovered`; nullable launch fields per state; `release_recovered/3`; record-level `attest_stopped` removed; `owner_attested_at` always null | Only `aborted`, `finished` and `recovered` release; unreadable records never advance; every finalization needs the cleanup receipt | File artifact |
+| LaunchRecord | Existing | Schema 3: `aborted` and `recovered`; nullable launch fields per state; nullable `attestation_id` (set by `recovered`); record-level `attest_stopped` removed; `owner_attested_at` always null | Only `aborted`, `finished` and `recovered` release, re-checking their bound evidence; unreadable records never advance and are an owner conflict; a partial removal is an owner conflict | File artifact |
 | Recovery attestation (`attestation.json` in the ticket) | New artifact | The E4c-4 identity | Trusted only with its matching event, its ticket and an unchanged observation | File artifact |
 | AuditEvent `calibration.owner_attested` | Existing resource, new event type | Immutable metadata payload | Deduplicated by `attestation_id`; appended in the recovery transaction | Kernel append |
 | ModelInvocation `:reserve` event | Existing | New argument `calibration_claim` (`instance_id`) | Recorded only from the console's claim; never caller-fabricated | Existing reservation order |
 | `Agents.recover_calibration/3` | New domain action | E4c-5 | `sent` never unlaunched; no model call or grant | Run → invocation → head |
-| Console `calibrate` and `calibrate-recover` | Existing task | E4c-6 sequence; isolation preflight | Single flight; explicit target; typed confirmation | Owner at the terminal |
+| Console `calibrate` and `calibrate-recover` (with `--orphan`) | Existing task | E4c-6 sequence; held-target isolation preflight; orphan recovery (E4c-2b) | Single flight; explicit target; typed confirmation; owner-conflict stop where unproven | Owner at the terminal |
+
+**RED cases added by round 3:**
+- isolation: a held target versus one that exits early;
+- zero-target abort;
+- a pre-`sent` refusal kept as aborted;
+- a crash after the final state, before release;
+- a partial removal;
+- an unreadable record → owner conflict → orphan recovery;
+- event without a file in a new process → owner conflict;
+- competing recoverers on one ticket;
+- the attestation's own expected transition.
 
 #### Open question for the owner
 
