@@ -143,6 +143,27 @@ defmodule SdrAgent.CalibrationConsole.AuthorityTest do
     assert consume_in(ctx.server, ref, claims(ctx.binding)) == {:error, :real_model_staged}
   end
 
+  # Code review (Codex 01a13618, 28a3f60): the server is the actual
+  # caller of the registry, never a pid named in the request.
+  test "a raw call naming the bound server from another process is refused", ctx do
+    {:ok, ref} = Authority.issue(ctx.binding)
+    good = claims(ctx.binding)
+
+    for message <- [
+          {:consume, ref, good, ctx.server},
+          {:consume, ref, good},
+          {:consume, ref, Map.put(good, :server, ctx.server)},
+          :unexpected
+        ] do
+      assert GenServer.call(Authority, message) == {:error, :real_model_staged},
+             inspect(message)
+    end
+
+    assert entries() == 1
+    # The real server can still consume it.
+    assert consume_in(ctx.server, ref, good) == :ok
+  end
+
   test "the registry table is protected: only its owner writes it", _ctx do
     table = Authority.table()
     assert :ets.info(table, :protection) == :protected
