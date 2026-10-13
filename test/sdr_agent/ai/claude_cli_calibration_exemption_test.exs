@@ -623,7 +623,8 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
   describe "d3b: ModelProvider.calibration_call/3" do
     setup ctx do
-      %{cli: cli!(ctx, "d3b-cli", 0)}
+      ran = Path.join(Path.dirname(ctx.tripwire), "d3b-cli-ran")
+      %{cli: cli!(ctx, "d3b-cli", 0, ran), ran: ran}
     end
 
     test "a valid reserved target is called and settled through the facade's helper", ctx do
@@ -665,11 +666,16 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
         %{server: server, ref: ref, request: request, id: id, before: before} =
           call_target(ctx, unquote(variant))
 
+        # Direct evidence: every message the private server receives is
+        # traced, and the CLI leaves a marker if it ever runs.
+        :erlang.trace(server, true, [:receive])
         result = admitting(fn -> calibration_call(request, id, server: server) end)
+        :erlang.trace(server, false, [:receive])
 
         assert result == {:error, :calibration_call_invalid}, inspect(result)
-        refute consumed?(ref), "the provider was called"
-        refute File.exists?(ctx.records.tripped), "a process was launched"
+        assert provider_calls(server) == 0, "the provider was called"
+        refute File.exists?(ctx.ran), "the CLI was launched"
+        refute consumed?(ref), "the entry was consumed"
         assert snapshot(id) == before, "the target was written"
       end
     end
@@ -1086,8 +1092,9 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
   # d3a: a CLI stand-in run directly as the command (no shim): it reads the
   # prompt and answers; `delay` seconds keep it alive to be probed.
-  defp cli!(ctx, name, delay) do
+  defp cli!(ctx, name, delay, marker \\ nil) do
     path = Path.join(Path.dirname(ctx.tripwire), name)
+    touch = if marker, do: "touch '#{marker}'\n", else: ""
 
     init =
       ~s({"type":"system","subtype":"init","model":"claude-opus-5-5","claude_code_version":"#{ClaudeCLI.provenance().provider_version}","tools":[],"mcp_servers":[],"slash_commands":[]})
@@ -1097,7 +1104,7 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
     File.write!(path, """
     #!/bin/sh
-    cat > /dev/null
+    #{touch}cat > /dev/null
     sleep #{delay}
     printf '%s\\n' '#{init}'
     printf '%s\\n' '#{result}'
@@ -1121,6 +1128,19 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     if function_exported?(ModelProvider, :calibration_call, 3),
       do: apply(ModelProvider, :calibration_call, [request, id, opts]),
       else: {:error, :calibration_call_undefined}
+  end
+
+  # Drains the trace of `server` and counts the provider calls it received.
+  defp provider_calls(server) do
+    receive do
+      {:trace, ^server, :receive, {:"$gen_call", _from, {:complete, _request, _at}}} ->
+        1 + provider_calls(server)
+
+      {:trace, ^server, :receive, _other} ->
+        provider_calls(server)
+    after
+      100 -> 0
+    end
   end
 
   defp snapshot(id) do
