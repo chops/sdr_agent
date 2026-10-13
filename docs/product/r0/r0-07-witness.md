@@ -895,6 +895,16 @@ rules and `calibrate` orchestration are E4c.
   lock is written or removed.
 - **Writes.** A record write is an atomic replace. A failure is
   `:launch_record_write_failed`; the previous record and the lock stay.
+  The private-path checks come first, so a non-0700 lock is
+  `:launch_record_unsafe` before any write is attempted. Tests fail the
+  replace step itself through a test-only `replace:` option (the final
+  rename). It runs only after every safety check, so it is never a bypass.
+- **Owner attestation.** The typed STOPPED fallback applies only to an
+  unreadable record, whose owner is unknown. It never applies to an owner
+  observed alive or to a failed observation. E4c must have the owner verify
+  that both the previous console and its CLI work are stopped, and must
+  append the owner-attested audit event. The in-process helper is not
+  itself human authorization.
 - **Probe.** `self_pid/0` returns `{:ok, pid}` or `{:error, reason}`;
   `start_identity/1` returns `{:ok, identity}`, `:absent` or
   `{:error, reason}`; `session_members/1` returns `{:ok, pids}` or
@@ -1325,3 +1335,6 @@ writer of `status_reason :calibration_latched`.
   on-disk replacement and stale cleanup, probe uncertainty, private paths,
   typed write failure and wrongly shaped records. RED revised; staged
   contract recorded under R11-1.
+- E4a RED at 3c495f6: **NEEDS-REVIEW, one correction** (Codex, ad1bc5e0):
+  the 0500 case is `:launch_record_unsafe`; the write failure is a
+  separate replace-step fault. The other groups were accepted.

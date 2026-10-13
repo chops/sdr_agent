@@ -433,15 +433,14 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       File.chmod!(ctx.root, 0o700)
     end
 
-    test "a record write failure is typed and leaves the lock and record", ctx do
+    test "a non-0700 lock is unsafe before any write", ctx do
       {:ok, claimed} = LaunchRecord.claim(ctx.root, ctx.opts)
       lock = Path.join(ctx.root, "run.lock")
       before = File.read!(Path.join(lock, "record.json"))
-
       File.chmod!(lock, 0o500)
 
       try do
-        assert {:error, :launch_record_write_failed} =
+        assert {:error, :launch_record_unsafe} =
                  LaunchRecord.advance(ctx.root, claimed, :launch_pending, %{
                    invocation_id: Ash.UUIDv7.generate()
                  })
@@ -450,7 +449,28 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       end
 
       assert File.read!(Path.join(lock, "record.json")) == before
+    end
+
+    # The test-only `:replace` seam fails the atomic replace itself, after
+    # every private-path check has passed.
+    test "a record replace failure is typed and leaves the lock and record", ctx do
+      {:ok, claimed} = LaunchRecord.claim(ctx.root, ctx.opts)
+      lock = Path.join(ctx.root, "run.lock")
+      before = File.read!(Path.join(lock, "record.json"))
+      failing = ctx.opts ++ [replace: fn _temp, _final -> {:error, :eio} end]
+
+      assert {:error, :launch_record_write_failed} =
+               LaunchRecord.advance(
+                 ctx.root,
+                 claimed,
+                 :launch_pending,
+                 %{invocation_id: Ash.UUIDv7.generate()},
+                 failing
+               )
+
+      assert File.read!(Path.join(lock, "record.json")) == before
       assert Path.wildcard(Path.join(lock, ".*")) |> Enum.reject(&dot?/1) == []
+      assert {:ok, %{state: "claimed"}} = LaunchRecord.read(ctx.root)
     end
 
     test "a stale finished record never releases a successor's lock", ctx do
@@ -505,11 +525,18 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     end
 
     test "claimed and finished records have nothing outstanding", ctx do
-      assert :quiescent =
-               LaunchRecord.quiescence(%{launched_record() | state: "claimed"}, ctx.opts)
+      {:ok, claimed} = LaunchRecord.claim(ctx.root, ctx.opts)
+      assert :quiescent = LaunchRecord.quiescence(claimed, ctx.opts)
+      assert {:ok, ^claimed} = LaunchRecord.read(ctx.root)
 
-      assert :quiescent =
-               LaunchRecord.quiescence(%{launched_record() | state: "finished"}, ctx.opts)
+      {:ok, pending} =
+        LaunchRecord.advance(ctx.root, claimed, :launch_pending, %{
+          invocation_id: Ash.UUIDv7.generate()
+        })
+
+      {:ok, launched} = LaunchRecord.advance(ctx.root, pending, :launched, launched_attrs())
+      {:ok, finished} = LaunchRecord.advance(ctx.root, launched, :finished, %{})
+      assert :quiescent = LaunchRecord.quiescence(finished, ctx.opts)
     end
   end
 
