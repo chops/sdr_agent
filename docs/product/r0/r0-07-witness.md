@@ -1505,6 +1505,215 @@ launched CLI stopped (a descendant could escape by changing group), or
 require your typed `STOPPED` for every launched recovery? OQ-E4 (Perl
 launcher) is withdrawn: no wrapper is needed.
 
+### 8.13 d1b staged delta: the staging exemption dispatch (proposed)
+
+**Status:** proposed for entity re-review. The first d1b note was
+**NEEDS-REVIEW** (Codex 01a13677; reviewed note sha256 c7e2ef5a). No RED
+work starts until this delta passes.
+
+**Entity Model trigger: yes.** No table is added, but three things change:
+- a backend action contract (`Agents.admit_launch/3`, ClaudeCLI dispatch);
+- an authorization boundary (the staging exemption);
+- the conditions for the persisted `sent` and `failed` transitions.
+
+This refines 8.2 steps 4–7 and the 8.7 rows for `CalibrationAuthority` and
+ClaudeCLI `staged/1`.
+
+#### 8.13.1 Flow
+
+Everything below runs only in test-seam builds (compile-time branch). In
+any other build, `request.calibration` is ignored and `staged/1` is
+unchanged.
+
+**A. In the server process (`staged/1`), after the pin check and before
+any process or workspace exists.** Every failure here returns
+`{:error, :real_model_staged}`.
+
+1. **Test launchers** (`test_launcher: true`) are unchanged.
+2. **Private server.** The server was started without any `:name` option
+   (local, `{:global, _}` or `{:via, _, _}`), recorded at `init/1` and
+   immutable for the server's life. It also has no locally registered name.
+   - So the Runtime's supervised server, and every other named server, stays
+     staged even with a valid entry.
+   - The registered binding (server pid) remains the main protection
+     (8.11). This gate adds a second check.
+3. **Closed calibration value.** `request.calibration` must be exactly
+   `%{authority:, run_id:, tenant_id:, instance:}`:
+   - `authority` has the registry's opaque reference shape;
+   - `run_id` and `tenant_id` are UUIDs;
+   - `instance` is the registry's 32-hex VM instance;
+   - `request.actor` is the `agent_runtime` actor of `tenant_id`.
+
+   An absent, malformed or extra-keyed value is refused here.
+4. **Fixed, server-owned input.**
+   - `request.prompt` must equal `Prompt.render/0` byte for byte.
+   - `Canonical.encode!(JsonSchema.render(request.schema))` must equal
+     `Canonical.encode!(Prompt.json_schema())`.
+
+   A registered hash cannot enable a custom prompt or schema, because the
+   comparison is against the code-owned definitions and not against the
+   entry. This check runs before consumption, so a mismatch leaves the
+   entry unconsumed.
+5. **Claims.** Each claim comes from what the server observes, except the
+   three that are carried and therefore asserted:
+
+   | Claim | Source |
+   |---|---|
+   | `caller` | the `handle_call` `from` pid |
+   | `invocation_id` | `request.witness.model_invocation_id`, the id that admission and the shim use |
+   | `profile_id` | `state.profile.id` |
+   | `prompt_sha256` | SHA-256 of the actual `request.prompt` bytes (equal to `Prompt.prompt_ref().sha256` after step 4) |
+   | `schema_sha256` | `Canonical.sha256(JsonSchema.render(request.schema))` (equal to `Prompt.schema_ref().sha256`) |
+   | `run_id`, `tenant_id`, `instance` | `request.calibration`; checked against the entry here and against the locked rows in C |
+
+6. **One consume.** The server calls `Authority.consume(ref, claims)`
+   inside a `catch :exit` boundary.
+   - Only `:ok` proceeds. The entry is then consumed for good: no later
+     failure re-arms it, and the server never revokes it. Revocation stays
+     with the registry monitors and the console (8.2 step 7).
+   - A registry that is absent, dead, restarting or timing out fails closed
+     before any process launch.
+   - A consumed or forged reference and any mismatched claim are also
+     refused.
+
+**B. Unchanged after the consume.** Witness environment, bypass refusal,
+deadline and caller checks, the pinned executable and real shim, workspace,
+reaper, and init attestation. Then exactly one real call:
+`Agents.admit_launch(id, profile, actor: request.actor, calibration_launch:
+expected)`.
+
+- `expected` is
+  `%{run_id:, tenant_id:, request_sha256:, prompt_ref:, schema_ref:}`. Its
+  parts:
+  - `run_id` and `tenant_id`: the consumed claims;
+  - `request_sha256`: SHA-256 of `ModelProvider.request_body(request)`;
+  - `prompt_ref` and `schema_ref`: `Prompt.prompt_ref/0` and
+    `Prompt.schema_ref/0`.
+- **Only ClaudeCLI passes the option**, and only after `:ok` from
+  `consume`. No start option, configuration or request field sets it.
+- **It can only add refusals, in every build.** Without it, launch admission
+  is unchanged. There is no alternative admission callback for a real
+  server.
+
+**C. Under the existing launch locks.** The lock order stays run → Operation
+→ invocation → grant/allocation `FOR SHARE` → head. These are plain
+comparisons of rows already locked or read. There is no new lock, no file
+or probe I/O, and no read of payload content.
+
+7. **Target identity**, after the invocation lock and before
+   `launch_check`.
+   - The rule: `invocation.agent_run_id == expected.run_id` and
+     `invocation.tenant_id == expected.tenant_id == actor.tenant_id`.
+   - Otherwise the call is refused `:calibration_target_mismatch` through
+     the existing identity path (`launch_refused/2` with no owned id).
+   - Effect of that path: the transaction rolls back, no row changes, and
+     one metadata-only `model.launch.refused` event names the attempted id.
+   - So a claimed run that differs from the invocation's real run marks
+     nothing sent and fails nothing.
+   - A tenant mismatch is already `:invocation_not_found` under the actor's
+     tenant scope.
+8. **Exemption scope**, in `Admission.launch_check`. It runs after the
+   profile-mismatch check and before `Gate.admit_launch/3`, as part of B5
+   step 3. A refusal goes to the targeted invocation through the existing
+   receipt: reason `:calibration_not_authorized`, row `failed`, `sent_at`
+   nil, charge unchanged, one Failure (`provider_error`, run subject), one
+   `model.launch.refused` event, and the run stopped `:model_not_admitted`.
+
+   | Check | Refused when |
+   |---|---|
+   | `:exemption_scope` | `run.usage_origin != :proof` or `run.operation_id` is not nil |
+   | `:exemption_input` | the invocation's `prompt_template_{id,version,sha256}` or `output_schema_{id,version,sha256}` differ from `expected.prompt_ref` / `expected.schema_ref` |
+   | `:exemption_request` | `invocation.request_sha256 != expected.request_sha256` |
+9. **Then the existing checks**:
+   - `Gate.admit_launch/3`: strict original calibration tuple, predecessor
+     barrier, gate, store and promotion (B4, B4');
+   - `launch_binding` in required mode: `{:ok, nil}` becomes
+     `:calibration_grant_mismatch` / `:binding_unrecorded`, and a
+     changed or malformed binding refuses as in d2b;
+   - the grant terms.
+
+   Only when all pass is the row marked `sent`.
+
+#### 8.13.2 Commitments (four distinct hashes, never equated)
+
+| Commitment | Over | Recorded / checked |
+|---|---|---|
+| `prompt_ref.sha256` | the raw fixed prompt text (`Prompt.render/0`) | Invocation `prompt_template_sha256`; authority entry `prompt_sha256` |
+| `schema_ref.sha256` | the canonical rendered JSON Schema | Invocation `output_schema_sha256`; authority entry `schema_sha256` |
+| request SHA-256 | `ModelProvider.request_body(request)`: Jason over `id`, `operation`, `prompt`, `schema`. It becomes public, with the serialization unchanged, and d3 reserves with this body | Invocation `request_sha256`; checked in C8 |
+| stdin bytes | `ClaudeCLI.render_prompt(prompt, json_schema)`: the text plus the canonical schema instruction, written to the prompt file | Not separately committed in d1b. It is fixed by the A4 input; RED proves the prompt file holds exactly these bytes. d3 evidence may record its SHA-256 |
+
+The VM instance (the registry's 32-hex value, `Authority.instance/0`) and
+the persistent launch-record claim `instance_id` (a UUID, E4c-c1) are
+distinct. d1b compares only the VM instance.
+
+#### 8.13.3 Entity delta
+
+| Entity | New / existing | Delta | Invariants / lifecycle | Actor / locks |
+|---|---|---|---|---|
+| ClaudeCLI dispatch (`complete/2`, `staged/1`) | Existing | Closed optional `request.calibration`, compile-time seam; private-server gate; fixed-input gate; observed claim sources; one `consume` with fail-closed exits | Every A failure is `:real_model_staged` before any process starts. A consumed entry is never re-armed. Pin, shim, deadline, caller, reaping, attestation and schema checks are unchanged | Server process; no DB access before admission |
+| ClaudeCLI server state | Existing | `named?` captured from start options at `init/1` | Immutable for the server's life; any name denies the exemption | `init/1` |
+| `CalibrationAuthority` (d1a, d157a30) | Existing | Consumed by `staged/1`; no API change and no new issuer | Consumed before launch; revocation unchanged (registry monitors, console); registry unavailable means staged | Registry process |
+| `ModelProvider.request_body/1` | Existing (private) | Made public; serialization unchanged | The one serialization behind `request_sha256` for d3's stored request and the server's expectation | Pure |
+| ModelInvocation `:admit_launch` (`Agents.admit_launch/3`) | Existing action | Refusal-only option `calibration_launch:` with expected run, tenant, request SHA and prompt/schema refs | C7 identity mismatch: rollback, no mutation, identity event. C8/C9: the targeted invocation's existing receipt. `sent` only when every check passes. Charge unchanged | Existing launch lock order; plain comparisons only |
+| `Admission.launch_check` | Existing | New step C8 before `Gate.admit_launch/3`; `launch_binding` required mode | Precedence: run → legacy → profile → exemption → gate → binding → terms | Under the head; no new lock |
+| Failure / refusal contract | Existing | Reasons reused (`Gate.reasons/0` unchanged): `:calibration_not_authorized` with new checks `:exemption_scope`, `:exemption_input`, `:exemption_request`; `:calibration_grant_mismatch` / `:binding_unrecorded`. New identity refusal reason `:calibration_target_mismatch` (non-receipt path, beside `:invocation_not_found`) | Same receipt validator and category (8.11) | Existing |
+| AgentRun | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | `usage_origin` and `operation_id` are read under the existing run lock. A C8/C9 refusal stops the run through the existing receipt (`:model_not_admitted`) | Existing run lock |
+
+**ADR and diagram evaluation.**
+- **ADR:** within ADR-0005's R0 calibration isolation (8.2). There is no
+  new provider, no new dependency and no broader bypass, so no new ADR.
+- **Diagram:** the exemption is an in-process conditional path inside the
+  existing ClaudeCLI server boundary. It adds no app boundary, endpoint,
+  supervision or integration, so there is no regeneration. This is recorded
+  for the integrated review.
+
+**Never exempted:**
+- `Runtime.resolve/1` for the real CLI, by any name or pid;
+- any named server;
+- any build without test seams;
+- a missing or unavailable registry;
+- a call without a consumed entry;
+- a non-`:proof` or operated run;
+- non-fixed input;
+- an unbound invocation.
+
+#### 8.13.4 RED plan
+
+Hermetic. The positive route uses the real shim and a pinned stand-in
+executable via `PinnedCLI.inject_identity!/2`, with no `test_launcher:` and
+no admission callback. If the shim is unavailable, the positive test fails;
+it is never skipped and claimed.
+
+1. **Positive.** A private server with a matching entry launches the call
+   and marks it `sent`. The stand-in's prompt file bytes equal
+   `ClaudeCLI.render_prompt(Prompt.render(), Prompt.json_schema())`, and the
+   entry is consumed.
+2. **A-stage refusals.** Each is `:real_model_staged`, with no workspace or
+   process (no `Port.open`), and the entry left unconsumed:
+   - a named server: the Runtime name, another local name, `:global`, `:via`;
+   - a missing, malformed or extra-keyed calibration value;
+   - a custom prompt or schema whose hashes the issuer registered;
+   - each mismatched claim: caller, another server, invocation, run, tenant,
+     profile and instance;
+   - a forged reference.
+3. **Registry failures.** A dead or absent registry gives staged with no
+   process. A consumed entry replayed gives staged.
+4. **C7 identity.** The entry and request name run R2 while the invocation
+   belongs to R1: refused `:calibration_target_mismatch`, both runs'
+   invocations unchanged, one identity event, and the entry stays consumed.
+5. **C8 owned-target refusals.** Ordinary runs, operated runs, and an
+   invocation reserved with another prompt or schema ref or another
+   request body each get the exact receipt: row failed, `sent_at` nil,
+   charge unchanged, one Failure and one event. The entry stays consumed.
+6. **C9.** An unbound proof invocation with a valid entry is refused
+   `:calibration_grant_mismatch` / `:binding_unrecorded`.
+7. **Unchanged behaviour.** The admission option is absent on every
+   non-exempt path. Existing pin, budget, deadline, caller, reaping,
+   attestation and schema tests pass unchanged.
+8. **Non-seam dev-VM proof.** `request.calibration` is ignored, the call is
+   staged, and the Authority module is absent.
+
 ### 8.11 Obligations accepted in round 11
 
 - **Authority:** consumption happens atomically through the registry owner
@@ -1842,4 +2051,5 @@ launcher) is withdrawn: no wrapper is needed.
     malformed recorded binding at launch; well-shaped grant, allocation and
     profile mismatches); additions **PASS / VERIFIED RED** at 9a58223
     (01a1365c); code **scoped APPROVE** at b39b62d (01a13674).
-  - d1b staging exemption: design note sent for review before RED.
+  - d1b staging exemption: first note **NEEDS-REVIEW** (01a13677);
+    revised as the inline delta 8.13, awaiting entity re-review.
