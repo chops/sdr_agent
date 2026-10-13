@@ -252,8 +252,19 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
         |> Enum.map(fn _ -> Task.async(fn -> LaunchRecord.recover(ctx.root, ctx.opts) end) end)
         |> Enum.map(&Task.await(&1, 10_000))
 
+      # Exactly one claim; every contender is refused. One that meets the
+      # winner's directory before it is made 0700 sees it unsafe (the
+      # reviewed fail-closed visibility qualification, Codex 9badd2cf).
       assert [{:ok, _}] = Enum.filter(results, &match?({:ok, _}, &1))
-      assert Enum.count(results, &(&1 == {:error, :recovery_in_progress})) == 3
+
+      refusals = Enum.reject(results, &match?({:ok, _}, &1))
+      assert length(refusals) == 3
+
+      assert Enum.all?(
+               refusals,
+               &(&1 in [{:error, :recovery_in_progress}, {:error, :launch_record_unsafe}])
+             ),
+             inspect(refusals)
     end
 
     test "a record replaced on disk under the recoverer is refused and kept", ctx do
@@ -552,6 +563,45 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
         })
 
       %{pending: pending}
+    end
+
+    test "an empty partial ticket is never replaced", ctx do
+      FakeProbe.put(&%{&1 | identities: %{}})
+      partial = Path.join(ctx.root, "run.lock/recover")
+      parent = self()
+
+      # Codex's interleaving (9badd2cf): an empty private partial ticket is
+      # already at `recover` when the claim is made. The claim is the
+      # exclusive mkdir itself, so no precheck can be raced, and no file
+      # write of this recoverer may run (the callback reports one).
+      replace = fn temp, final ->
+        send(parent, {:partial_inode, :file_write_ran})
+        File.rename(temp, final)
+      end
+
+      File.mkdir!(partial)
+      File.chmod!(partial, 0o700)
+      inode = File.stat!(partial).inode
+
+      assert {:error, :recovery_in_progress} =
+               LaunchRecord.recover(ctx.root, ctx.opts ++ [replace: replace])
+
+      refute_received {:partial_inode, _}
+      assert File.stat!(partial).inode == inode
+      refute File.exists?(Path.join(partial, "ticket"))
+      assert {:error, :recovery_in_progress} = LaunchRecord.recover(ctx.root, ctx.opts)
+      assert File.dir?(partial)
+    end
+
+    test "a raising write is a typed failure, never a crash", ctx do
+      raising = ctx.opts ++ [replace: fn _temp, _final -> raise "synthetic" end]
+      before = File.read!(Path.join(ctx.root, "run.lock/record.json"))
+
+      assert {:error, :launch_record_write_failed} =
+               LaunchRecord.advance(ctx.root, ctx.pending, :launched, launched_attrs(), raising)
+
+      assert File.read!(Path.join(ctx.root, "run.lock/record.json")) == before
+      assert Path.wildcard(Path.join(ctx.root, "run.lock/.*")) |> Enum.reject(&dot?/1) == []
     end
 
     test "a malformed root or session answer never establishes quiescence", ctx do

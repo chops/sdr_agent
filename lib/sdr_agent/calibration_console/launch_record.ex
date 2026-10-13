@@ -44,8 +44,11 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   `owner_verified_stopped: "STOPPED"`. It then claims `run.lock/recover`
   by `mkdir` and writes a ticket id into it; an existing ticket, even a
   partial or abandoned one, is `:recovery_in_progress` and is never taken
-  over (it appears only complete: it is built privately and renamed into
-  place). `verify_recovery/3` re-reads the ticket (`:recovery_changed`) and
+  over: the claim is the exclusive `mkdir` itself, so an existing
+  directory, even an empty one, is never replaced. A contender that meets
+  the new directory before it is made 0700 is refused as
+  `:launch_record_unsafe` (fail-closed). `verify_recovery/3` re-reads the
+  ticket (`:recovery_changed`) and
   the record (`:record_changed`); `end_recovery/3` removes only its own,
   complete ticket.
 
@@ -322,31 +325,29 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
     end
   end
 
-  # The ticket is built in a private temporary directory and renamed into
-  # place, so `recover` only ever appears complete (0700, with its 0600
-  # ticket). The rename fails if another recoverer's ticket is there.
+  # The claim is the kernel-exclusive `mkdir` of `recover` itself: an
+  # existing directory, even an empty partial one, is never replaced. The
+  # directory is then made 0700 and its ticket written; a contender that
+  # meets it before the chmod sees it unsafe and is refused (fail-closed).
   defp create_ticket(dir, env) do
     ticket = Ash.UUIDv7.generate()
 
-    temp =
-      Path.join(
-        Path.dirname(dir),
-        ".tmp-recover-" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
-      )
+    case File.mkdir(dir) do
+      :ok -> fill_ticket(dir, ticket, env)
+      {:error, :eexist} -> {:error, :recovery_in_progress}
+      {:error, _reason} -> {:error, :launch_record_write_failed}
+    end
+  end
 
-    with :ok <- File.mkdir(temp),
-         :ok <- File.chmod(temp, 0o700),
-         :ok <- write_file(temp, "ticket", ticket, env),
-         :ok <- File.rename(temp, dir) do
+  defp fill_ticket(dir, ticket, env) do
+    with :ok <- File.chmod(dir, 0o700),
+         :ok <- write_file(dir, "ticket", ticket, env) do
       {:ok, ticket}
     else
-      _failed_or_taken ->
-        File.rm(Path.join(temp, "ticket"))
-        File.rmdir(temp)
-
-        if File.dir?(dir),
-          do: {:error, :recovery_in_progress},
-          else: {:error, :launch_record_write_failed}
+      _failed ->
+        # Our own, still ticketless directory: removed only if empty.
+        File.rmdir(dir)
+        {:error, :launch_record_write_failed}
     end
   end
 
@@ -509,6 +510,8 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
            :ok <- File.chmod(temp, 0o600) do
         env.replace.(temp, Path.join(dir, name))
       end
+    rescue
+      _error -> {:error, :write_raised}
     after
       File.rm(temp)
     end

@@ -935,8 +935,12 @@ rules and `calibrate` orchestration are E4c.
     entry before it deletes anything.
   - Cleanup failures are `:launch_record_write_failed`.
   - The recovery directory and ticket are private on every operation and
-    owned by this user (uid parity with Evidence). A ticket is built
-    privately and renamed into place.
+    owned by this user (uid parity with Evidence).
+  - The ticket claim is the exclusive `mkdir` of `recover`, then chmod 0700
+    and the ticket file (Codex 9badd2cf). A directory rename would replace
+    an empty partial ticket, so it is not used. A contender that meets the
+    directory before its chmod is refused as `:launch_record_unsafe`; this
+    is the accepted fail-closed visibility qualification.
   - `replace:` and `owner_uid:` are honoured only in test-seam builds;
     Codex's dev-VM probe confirms the callback is not called there.
   - `owner_attested_at` must be a canonical timestamp.
