@@ -2312,6 +2312,48 @@ keeps its existing B1/R11-2 run stop:
 A pre-launch failure that leaves the row `reserved` takes
 `recover_calibration(:unlaunched)` as in the matrix.
 
+**Conflict to resolve.** The 8.13 entity row for AgentRun (PASS b77426a)
+says that d3 adds no separate refusal stop and that admission never stops
+the run. The rule above, from the 8.14.9 consultation, stops a run refused
+at launch before E1. The recheck should confirm which one holds. These
+tests follow the rule above.
+
+##### The proof run (attributes previously unstated)
+
+Item 3 of 8.2 says only "a `:proof` AgentRun". `calibrate` creates it
+after preflight and before the reservation, through the existing
+`Agents.create_run/2` then `start_run/2` as the tenant's `agent_runtime`.
+Its attributes:
+
+| Attribute | Value |
+|---|---|
+| `agent_definition_id` | the code-owned definition (below) |
+| `usage_origin` | `:proof` |
+| `operation_id`, `lead_id`, `campaign_id` | nil |
+| `trigger_signal_type` | `"calibration.console"` |
+| `trigger_signal_id` | the launch record's `instance_id` (the claim), binding the run to its single flight |
+| `correlation_id` | a fresh UUID |
+| `phase` | `:research`, the existing initial phase |
+| `max_model_calls` | 1 |
+| `max_tool_calls` | 0 |
+
+**The code-owned definition:** `name: "CalibrationConsole"`,
+`version: 1`, `module: "SdrAgent.CalibrationConsole.Calibrate"`,
+`definition: %{"allowed_actions" => [], "model_policy" => %{"provider" =>
+"claude_cli", "max_model_calls_per_run" => 1}}`.
+- It is registered through the existing idempotent
+  `Agents.register_definition/2`: the same name, version and hash returns
+  the existing row; a different hash refuses, which is
+  `{:stop, :calibration_definition_conflict, _}` before the claim.
+- **Open question for the recheck: the actor.** Registering needs the
+  tenant's `:kernel` actor, the existing fixture and seed actor. The
+  console could register the definition as `:kernel` in preflight, or
+  require it to exist already (an owner bootstrap step) and refuse
+  otherwise. The tests follow whichever is chosen.
+
+A failed run creation or start is row 5: no invocation. The run, if one
+was created, is cancelled; then `aborted` and `release`.
+
 #### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 
 **d3a — the launch receipt:**
