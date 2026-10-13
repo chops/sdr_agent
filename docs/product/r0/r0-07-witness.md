@@ -640,6 +640,25 @@ enablement or spend.
     and its residual risk.
   - Docs-only ruling: no implementation, RED, merge, calibration,
     enablement or spend approval.
-- Round 9 (B4' and B5' in 6.4): awaiting Codex's recheck. No slice B code
-  exists. Slice B will be rebased onto slice C (`r0-07c-result-gate`) before
-  implementation, and this section renumbered after slice C's section 6.
+- Round 9 recheck at 3600fcf: **PASS** (Codex, reply to
+  m_1791851284000031985_a333f656, report
+  `~/.local/state/sdr-agent/handoff-20261008/tmp/codex-r007b-3600fcf-round9-pass.md`,
+  sha256 5920c6b3). Entity/action PASS only: no RED, code, merge,
+  calibration, enablement or spend approval. Slice B is stacked on slice C.
+  - **Retained:** B1–B3's obligations (6.3).
+  - **Malformed authority fails closed:** exactly one original tenant-, run-
+    and invocation-scoped reservation event is resolved. A missing,
+    duplicate or malformed sequence or tuple is not authority, and never
+    silently excludes a real predecessor. `predecessor_authority_invalid`
+    stays a metadata-only diagnostic under `:calibration_evidence_pending`.
+  - **At launch:** the stored tuple is revalidated against the immutable
+    invocation and the current reviewed profile. A latch clears the
+    predecessor barrier, never a corrupt invocation's own launch authority.
+  - **Store trust is observation-time trust only:** the residual is
+    surfaced to the owner before enablement.
+  - **Tests:** helper configuration is restored only after all child,
+    server and worker activity is drained.
+  - **Still required before any real call:** slice D's fixed prompt and
+    schema, the G-R0 binding, owner-run recovery and real-call authority,
+    code review, calibration evidence review, separate enablement and the
+    owner's grants.
