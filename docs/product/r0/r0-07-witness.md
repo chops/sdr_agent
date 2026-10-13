@@ -1832,5 +1832,12 @@ launcher) is withdrawn: no wrapper is needed.
 - Remaining slice E order (Codex 01a135f7): d1a authority registry, d2
   G-R0 binding (d2a selection and reservation, d2b launch), d1b staging
   exemption, d3 orchestration. d1a RED **PASS / VERIFIED RED** at ddf7dde
-  (01a13607); GREEN at 28a3f60 (full suite 1864/1864), awaiting review.
-  d2a RED at 65259c2, awaiting verification.
+  (01a13607); code **scoped APPROVE** at d157a30 (01a1362b) after 28a3f60
+  (bind the actual caller).
+  - d2a G-R0 selection and reservation binding: RED **PASS / VERIFIED RED**
+    at f69828d (01a1362e); GREEN d00471b; code **scoped APPROVE** at
+    2368ee0 (01a13657) after the requested allocation's window was added
+    to selection (01a1364c).
+  - d2b launch binding: RED at 74a9691 **NEEDS-REVIEW** (01a13652:
+    malformed recorded binding at launch; well-shaped grant, allocation and
+    profile mismatches); additions at 9a58223, awaiting re-verification.
