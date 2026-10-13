@@ -91,7 +91,10 @@ defmodule SdrAgent.Agents.Witness.GateReconcileTest do
   end
 
   test "without gate: (the scan) the cause carries no Operation and there is no receipt", ctx do
-    invocation = GateFixtures.call_model!(ctx, "cli_shape_v3_mismatch")
+    # Row G3: the scan writes only for a decided generation-2 row.
+    invocation =
+      ctx |> GateFixtures.call_model!("cli_shape_v3_mismatch") |> GateFixtures.decided!()
+
     assert {:ok, result} = reconcile(ctx, invocation)
     refute Map.has_key?(result, :receipt)
     assert [%{operation_id: nil}] = causes(ctx, invocation)

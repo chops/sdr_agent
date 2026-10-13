@@ -70,6 +70,7 @@ defmodule SdrAgent.Agents.Witness do
   alias SdrAgent.Agents
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.Agents.Witness.Projection
   alias SdrAgent.Agents.Witness.ReconcileWorker
   alias SdrAgent.Agents.Witness.Store
@@ -607,6 +608,7 @@ defmodule SdrAgent.Agents.Witness do
     Audit.transaction(fn ->
       with :ok <- lock_gate_operation(gate, invocation.tenant_id),
            {:ok, _locked} <- lock(invocation),
+           :ok <- scan_may_write(gate, invocation),
            :ok <- fresh(invocation, observation),
            {:ok, current} <- Agents.current_wire_witness_links(invocation.id, actor: actor),
            :ok <- write_links(invocation, observation, current, methods, actor),
@@ -618,10 +620,48 @@ defmodule SdrAgent.Agents.Witness do
         # Never completed work: the caller (worker) retries with a fresh
         # observation; nothing was written.
         :stale -> Repo.rollback(:stale_observation)
+        :deferred -> %{status: :deferred_to_gate}
         {:error, error} -> Repo.rollback(error)
       end
     end)
   end
+
+  # Row G3 (R0-07 slice C), rechecked under the invocation FOR UPDATE lock
+  # (plain read, no lock clause): without `gate:`, a completed generation-2
+  # ClaudeCLI invocation with no ModelResultRelease is the gate's (running
+  # run) or run recovery's (terminal run) — never the scan's. Nothing is
+  # written. The gate's reconcile holds this lock and finalization holds the
+  # invocation FOR SHARE while it writes the release, so this read sees the
+  # committed outcome of either.
+  defp scan_may_write(nil, invocation),
+    do: if(gate_owned?(invocation), do: :deferred, else: :ok)
+
+  defp scan_may_write(_gate, _invocation), do: :ok
+
+  @doc """
+  Whether `invocation` is owned by the result gate or run recovery (row G3):
+  a completed generation-2 ClaudeCLI invocation with no `ModelResultRelease`.
+  A read error counts as owned (the scan then writes nothing).
+  """
+  @spec gate_owned?(struct()) :: boolean()
+  def gate_owned?(
+        %ModelInvocation{provider: :claude_cli, ledger_generation: 2, status: :completed} =
+          invocation
+      ) do
+    decided? =
+      ModelResultRelease
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+      |> Ash.Query.filter(
+        tenant_id == ^invocation.tenant_id and model_invocation_id == ^invocation.id
+      )
+      |> Ash.exists?()
+
+    not decided?
+  rescue
+    _error -> true
+  end
+
+  def gate_owned?(_invocation), do: false
 
   # Under the invocation lock, a metadata-only re-check (lstat of at most 64
   # record entries and of the blobs they name, no content read) that the

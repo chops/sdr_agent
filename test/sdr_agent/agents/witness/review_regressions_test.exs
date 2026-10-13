@@ -73,7 +73,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsTest do
       })
 
     {:ok, invocation} = Agents.complete_model_invocation(invocation, completion, actor: ctx.agent)
-    invocation
+    # Row G3: the scan backfills only a decided generation-2 row.
+    SdrAgent.GateFixtures.decided!(invocation)
   end
 
   defp exchange!(ctx, invocation, answer \\ @answer) do

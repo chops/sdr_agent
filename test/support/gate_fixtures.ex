@@ -7,9 +7,17 @@ defmodule SdrAgent.GateFixtures do
   model call is made.
   """
 
+  require Ash.Query
+
+  alias SdrAgent.Agents
+  alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ReleaseDecision.Prelocked
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
+  alias SdrAgent.Audit
+  alias SdrAgent.Audit.Kernel
+  alias SdrAgent.Operations
 
   @fake Path.expand("fake_claude_cli.exs", __DIR__)
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()}, coerce: true)
@@ -62,6 +70,93 @@ defmodule SdrAgent.GateFixtures do
 
     GenServer.stop(server)
     result.invocation
+  end
+
+  @doc """
+  Opens, as REC, a `reconciliation_required` gate cause for `invocation`
+  (`severity`, default `:warning`; `operation_id` when given).
+  """
+  def cause!(invocation, opts \\ []) do
+    attrs = %{
+      subject_resource: "SdrAgent.Agents.ModelInvocation",
+      subject_id: invocation.id,
+      class: :reconciliation_required,
+      severity: Keyword.get(opts, :severity, :warning),
+      message: "wire witness gate fixture #{System.unique_integer([:positive])}: needs review",
+      retryable: false
+    }
+
+    attrs =
+      case Keyword.get(opts, :operation_id) do
+        nil -> attrs
+        id -> Map.put(attrs, :operation_id, id)
+      end
+
+    rec = SdrAgent.Actor.system(:reconciler, invocation.tenant_id)
+    {:ok, failure} = Operations.open_failure(attrs, actor: rec)
+    failure
+  end
+
+  @doc """
+  A finalizer stand-in's committed withheld release of `invocation` bound
+  to `cause` (`reason`, default `:witness_missing`), decided as `agent`
+  under Prelocked; no run stop.
+  """
+  def withhold!(invocation, agent, cause, reason \\ :witness_missing) do
+    tenant_id = invocation.tenant_id
+
+    {:ok, release} =
+      Audit.transaction(fn ->
+        {:ok, %{}} =
+          ModelInvocation
+          |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+          |> Ash.Query.filter(id == ^invocation.id)
+          |> Ash.Query.lock("FOR SHARE")
+          |> Ash.read_one()
+
+        {:ok, _} = Kernel.lock_head(tenant_id)
+
+        bindings = %{
+          tenant_id: tenant_id,
+          model_invocation_id: invocation.id,
+          wire_witness_link_id: nil,
+          receipt_id: cause.id
+        }
+
+        Prelocked.run(bindings, fn prelocked ->
+          attrs = %{
+            model_invocation_id: invocation.id,
+            disposition: :withheld,
+            reason: reason,
+            gate_cause_id: cause.id,
+            gate_classification: if(reason == :witness_mismatch, do: :mismatch, else: :inferred)
+          }
+
+          {:ok, release} = Agents.decide_result_release(attrs, actor: agent, prelocked: prelocked)
+          release
+        end)
+      end)
+
+    release
+  end
+
+  @doc """
+  Records the gate's decision for `invocation` — a withheld release that
+  binds no cause, decided as the agent runtime — so the scan may backfill
+  it (row G3: an undecided generation-2 row is the gate's). Returns the
+  invocation.
+  """
+  def decided!(invocation) do
+    agent = SdrAgent.Actor.system(:agent_runtime, invocation.tenant_id)
+
+    attrs = %{
+      model_invocation_id: invocation.id,
+      disposition: :withheld,
+      reason: :witness_missing
+    }
+
+    {:ok, _release} = Agents.decide_result_release(attrs, actor: agent)
+    invocation
   end
 
   @doc "A fresh, trusted stand-in witness store root (removed on test exit by the caller)."

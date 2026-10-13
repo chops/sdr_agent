@@ -49,6 +49,9 @@ defmodule SdrAgent.Agents.Witness.RaceTest do
     {:ok, invocation} =
       Agents.complete_model_invocation(invocation, AgentsFixtures.completion(), actor: agent)
 
+    # Row G3: the scan backfills only a decided generation-2 row.
+    invocation = SdrAgent.GateFixtures.decided!(invocation)
+
     %{
       tenant: tenant,
       invocation: invocation,

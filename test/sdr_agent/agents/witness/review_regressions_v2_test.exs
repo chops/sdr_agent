@@ -248,7 +248,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
       })
 
     {:ok, invocation} = Agents.complete_model_invocation(invocation, completion, actor: ctx.agent)
-    {invocation, ClaudeCLI.render_prompt(prompt, @schema)}
+    # Row G3: the scan backfills only a decided generation-2 row.
+    {SdrAgent.GateFixtures.decided!(invocation), ClaudeCLI.render_prompt(prompt, @schema)}
   end
 
   defp exchange!(ctx, invocation, stdin) do
