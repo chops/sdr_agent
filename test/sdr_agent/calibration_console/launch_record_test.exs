@@ -141,15 +141,14 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       decoded = ctx.root |> Path.join("run.lock/record.json") |> File.read!() |> Jason.decode!()
 
       assert Enum.sort(Map.keys(decoded)) ==
-               Enum.sort(
-                 ~w(schema instance_id owner_pid owner_identity generation state
-                            invocation_id root_pid root_identity process_group_id owner_attested_at)
-               )
+               Enum.sort(~w(schema instance_id owner_pid owner_identity generation state
+                            invocation_id root_pid root_identity process_group_id owner_attested_at
+                            attestation_id))
     end
 
     test "release after finished removes the lock; before finished it is refused", ctx do
       {:ok, claimed} = LaunchRecord.claim(ctx.root, ctx.opts)
-      assert {:error, :not_finished} = LaunchRecord.release(ctx.root, claimed)
+      assert {:error, :not_finished} = LaunchRecord.release(ctx.root, claimed, ctx.opts)
 
       {:ok, pending} =
         LaunchRecord.advance(ctx.root, claimed, :launch_pending, %{
@@ -158,7 +157,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
 
       launched = launched!(ctx.root, pending)
       finished = finished!(ctx.root, launched)
-      assert :ok = LaunchRecord.release(ctx.root, finished)
+      assert :ok = LaunchRecord.release(ctx.root, finished, ctx.opts)
       refute File.exists?(Path.join(ctx.root, "run.lock"))
       assert {:ok, :none} = LaunchRecord.read(ctx.root)
     end
@@ -205,7 +204,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
 
       shaped = fn change ->
         %{
-          "schema" => "r0-calibration-launch-record/2",
+          "schema" => "r0-calibration-launch-record/3",
           "instance_id" => Ash.UUIDv7.generate(),
           "owner_pid" => 4242,
           "owner_identity" => "Mon 10:00 owner",
@@ -215,18 +214,44 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
           "root_pid" => nil,
           "root_identity" => nil,
           "process_group_id" => nil,
-          "owner_attested_at" => nil
+          "owner_attested_at" => nil,
+          "attestation_id" => nil
         }
         |> Map.merge(change)
         |> Jason.encode!()
       end
+
+      # Positive control: the well-formed schema-3 base reads as a record,
+      # so every case below fails for its own change.
+      write_private!(Path.join(lock, "record.json"), shaped.(%{}))
+      assert {:ok, %{state: "claimed"} = base} = LaunchRecord.read(ctx.root)
+      refute Map.has_key?(base, :unreadable)
 
       for bytes <- [
             ~s({"state":"cla),
             ~s({"state":"claimed"}),
             "null",
             "not json",
-            shaped.(%{"schema" => "r0-calibration-launch-record/3"}),
+            shaped.(%{"schema" => "r0-calibration-launch-record/2"}),
+            shaped.(%{"schema" => "r0-calibration-launch-record/4"}),
+            # Schema-3 nullable fields, pinned per state (E4c bound 3).
+            shaped.(%{"attestation_id" => Ash.UUIDv7.generate()}),
+            shaped.(%{"state" => "aborted", "root_pid" => 9001}),
+            shaped.(%{
+              "state" => "aborted",
+              "invocation_id" => Ash.UUIDv7.generate(),
+              "attestation_id" => Ash.UUIDv7.generate()
+            }),
+            shaped.(%{"state" => "recovered", "invocation_id" => Ash.UUIDv7.generate()}),
+            shaped.(%{"state" => "recovered", "attestation_id" => Ash.UUIDv7.generate()}),
+            shaped.(%{
+              "state" => "launched",
+              "invocation_id" => Ash.UUIDv7.generate(),
+              "root_pid" => 9001,
+              "root_identity" => "Mon 10:01 cli",
+              "process_group_id" => 9001,
+              "attestation_id" => Ash.UUIDv7.generate()
+            }),
             shaped.(%{"state" => "released"}),
             shaped.(%{"owner_pid" => "4242"}),
             shaped.(%{"owner_identity" => 7}),
@@ -349,15 +374,18 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       refute File.exists?(Path.join(ctx.root, "run.lock/recover"))
     end
 
-    test "proceeds only with the owner's typed attestation", ctx do
+    # Superseded by E4c round 4 (Codex 01a13526): an unreadable record is a
+    # hard owner conflict; no typed attestation unlocks its recovery.
+    test "is refused even with a typed attestation", ctx do
       File.mkdir!(Path.join(ctx.root, "run.lock"))
       File.chmod!(Path.join(ctx.root, "run.lock"), 0o700)
 
-      assert {:error, :confirmation_mismatch} =
-               LaunchRecord.recover(ctx.root, ctx.opts ++ [owner_verified_stopped: "yes"])
+      for typed <- ["yes", "STOPPED"] do
+        assert {:error, :owner_unknown} =
+                 LaunchRecord.recover(ctx.root, ctx.opts ++ [owner_verified_stopped: typed])
+      end
 
-      assert {:ok, %{record: %{unreadable: true}}} =
-               LaunchRecord.recover(ctx.root, ctx.opts ++ [owner_verified_stopped: "STOPPED"])
+      refute File.exists?(Path.join(ctx.root, "run.lock/recover"))
     end
   end
 
@@ -429,7 +457,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       File.rm!(record)
       File.ln_s!(copy, record)
       assert {:error, :launch_record_unsafe} = LaunchRecord.read(ctx.root)
-      assert {:error, :launch_record_unsafe} = LaunchRecord.release(ctx.root, claimed)
+      assert {:error, :launch_record_unsafe} = LaunchRecord.release(ctx.root, claimed, ctx.opts)
       assert File.exists?(copy)
 
       # run.lock as a symlink to a private directory
@@ -517,10 +545,10 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
 
     test "a stale finished record never releases a successor's lock", ctx do
       finished = finished_record!(ctx)
-      assert :ok = LaunchRecord.release(ctx.root, finished)
+      assert :ok = LaunchRecord.release(ctx.root, finished, ctx.opts)
       {:ok, _successor} = LaunchRecord.claim(ctx.root, ctx.opts)
 
-      assert {:error, :record_changed} = LaunchRecord.release(ctx.root, finished)
+      assert {:error, :record_changed} = LaunchRecord.release(ctx.root, finished, ctx.opts)
       assert File.exists?(Path.join(ctx.root, "run.lock/record.json"))
     end
   end
@@ -539,12 +567,8 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       assert :owner_verification_required =
                LaunchRecord.quiescence(%{state: "launch_pending", unreadable: true}, ctx.opts)
 
-      assert {:error, :confirmation_mismatch} =
-               LaunchRecord.attest_stopped(ctx.root, pending, "yes")
-
-      assert {:ok, attested} = LaunchRecord.attest_stopped(ctx.root, pending, "STOPPED")
-      assert is_binary(attested.owner_attested_at)
-      assert :quiescent = LaunchRecord.quiescence(attested, ctx.opts)
+      # The record-level attestation is superseded by the ticket's
+      # attestation artifact (E4c-4, launch_record_v3_test.exs).
     end
 
     test "launched: a dead root with a live process in its session is not quiescent", ctx do
@@ -700,17 +724,19 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
 
       FakeProbe.put(&%{&1 | identities: %{}})
       {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
-      assert {:error, :recovery_in_progress} = LaunchRecord.release(ctx.root, finished)
+      assert {:error, :recovery_in_progress} = LaunchRecord.release(ctx.root, finished, ctx.opts)
       assert File.read(path) == {:ok, bytes}
       :ok = LaunchRecord.end_recovery(ctx.root, recovery)
+      # The owner's own release (schema 3: without a handle, owner only).
+      FakeProbe.put(&put_in(&1.identities[4242], "Mon 10:00 owner"))
 
       stray = Path.join(ctx.root, "run.lock/stray")
       write_private!(stray, "x")
-      assert {:error, :launch_record_unsafe} = LaunchRecord.release(ctx.root, finished)
+      assert {:error, :launch_record_unsafe} = LaunchRecord.release(ctx.root, finished, ctx.opts)
       assert File.read(path) == {:ok, bytes}
       File.rm!(stray)
 
-      assert :ok = LaunchRecord.release(ctx.root, finished)
+      assert :ok = LaunchRecord.release(ctx.root, finished, ctx.opts)
     end
 
     test "a failed ticket removal is a typed failure and the ticket stays", ctx do
@@ -776,20 +802,21 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       end
     end
 
-    test "an unreadable record that changes under its recoverer is refused", ctx do
+    # Superseded by E4c round 4: an unreadable record, whatever its bytes,
+    # is never recovered, so it cannot change under a recoverer.
+    test "an unreadable record is never recovered, whatever its bytes", ctx do
       path = Path.join(ctx.root, "run.lock/record.json")
-      write_private!(path, "corrupt one")
 
-      {:ok, recovery} =
-        LaunchRecord.recover(ctx.root, ctx.opts ++ [owner_verified_stopped: "STOPPED"])
+      for bytes <- ["corrupt one", "corrupt two"] do
+        write_private!(path, bytes)
 
-      assert :ok = LaunchRecord.verify_recovery(ctx.root, recovery)
-
-      write_private!(path, "corrupt two")
-      assert {:error, :record_changed} = LaunchRecord.verify_recovery(ctx.root, recovery)
+        assert {:error, :owner_unknown} =
+                 LaunchRecord.recover(ctx.root, ctx.opts ++ [owner_verified_stopped: "STOPPED"])
+      end
 
       File.rm!(path)
-      assert {:error, :record_changed} = LaunchRecord.verify_recovery(ctx.root, recovery)
+      assert {:error, :owner_unknown} = LaunchRecord.recover(ctx.root, ctx.opts)
+      refute File.exists?(Path.join(ctx.root, "run.lock/recover"))
     end
   end
 
@@ -826,7 +853,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     record
     |> Map.take(
       ~w(schema instance_id owner_pid owner_identity generation state invocation_id root_pid
-         root_identity process_group_id owner_attested_at)a
+         root_identity process_group_id owner_attested_at attestation_id)a
     )
     |> Map.new(fn {k, v} -> {Atom.to_string(k), v} end)
   end
