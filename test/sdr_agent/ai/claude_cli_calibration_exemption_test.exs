@@ -1154,16 +1154,29 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
       else: {:error, :calibration_call_undefined}
   end
 
-  # Drains the trace of `server` and counts the provider calls it received.
+  # Counts the provider calls `server` received: tracing is stopped, every
+  # trace message is acknowledged as delivered (bounded), then drained.
   defp provider_calls(server) do
+    delivered = :erlang.trace_delivered(server)
+
+    receive do
+      {:trace_delivered, ^server, ^delivered} -> :ok
+    after
+      5_000 -> flunk("the trace of the private server was not acknowledged")
+    end
+
+    count_calls(server)
+  end
+
+  defp count_calls(server) do
     receive do
       {:trace, ^server, :receive, {:"$gen_call", _from, {:complete, _request, _at}}} ->
-        1 + provider_calls(server)
+        1 + count_calls(server)
 
       {:trace, ^server, :receive, _other} ->
-        provider_calls(server)
+        count_calls(server)
     after
-      100 -> 0
+      0 -> 0
     end
   end
 
