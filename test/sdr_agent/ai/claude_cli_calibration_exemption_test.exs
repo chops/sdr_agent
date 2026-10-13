@@ -725,11 +725,20 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
           :other_request,
           :other_prompt_ref,
           :malformed_request,
-          :fabricated_id
+          :fabricated_id,
+          :terminal_row,
+          :no_actor,
+          :human_actor,
+          :unrenderable_schema,
+          :other_schema_ref,
+          :legacy_generation
         ] do
       test "#{variant} is :calibration_call_invalid with no provider call or write", ctx do
         %{server: server, ref: ref, request: request, id: id, before: before} =
           call_target(ctx, unquote(variant))
+
+        events = length(events(ctx.tenant))
+        invocations = invocation_count()
 
         # Direct evidence: every message the private server receives is
         # traced, and the CLI leaves a marker if it ever runs.
@@ -742,6 +751,8 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
         refute File.exists?(ctx.ran), "the CLI was launched"
         refute consumed?(ref), "the entry was consumed"
         assert snapshot(id) == before, "the target was written"
+        assert length(events(ctx.tenant)) == events, "an audit event was written"
+        assert invocation_count() == invocations, "another invocation was reserved"
       end
     end
 
@@ -1221,6 +1232,9 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     end
   end
 
+  defp invocation_count,
+    do: ModelInvocation |> Ash.read!(authorize?: false) |> length()
+
   defp snapshot(id) do
     case Ash.get(ModelInvocation, id, authorize?: false) do
       {:ok, row} -> {row.status, row.sent_at, row.updated_at}
@@ -1252,6 +1266,8 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     {invocation, _request} = reserve!(run, agent, marker(ctx, agent))
     %{invocation: invocation, run: run, agent: agent}
   end
+
+  defp target_for(ctx, :other_schema_ref), do: proof!(ctx, %{output_schema_version: "2"})
 
   defp target_for(ctx, :other_prompt_ref),
     do: proof!(ctx, %{prompt_template_sha256: :crypto.hash(:sha256, "another prompt")})
@@ -1301,6 +1317,36 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     do: {Map.drop(request, [:prompt, :schema]), invocation.id}
 
   defp wrong(_ctx, :fabricated_id, request, _invocation), do: {request, Ash.UUIDv7.generate()}
+
+  # A terminal row: launched, then settled unknown.
+  defp wrong(_ctx, :terminal_row, request, invocation) do
+    {:ok, sent} =
+      admitting(fn ->
+        Agents.admit_launch(invocation.id, :claude_cli_opus, actor: request.actor)
+      end)
+
+    {:ok, _unknown} = Agents.mark_model_invocation_unknown(sent, actor: request.actor)
+    {request, invocation.id}
+  end
+
+  defp wrong(_ctx, :no_actor, request, invocation), do: {%{request | actor: nil}, invocation.id}
+
+  defp wrong(ctx, :human_actor, request, invocation),
+    do: {%{request | actor: human(:admin, ctx.tenant)}, invocation.id}
+
+  defp wrong(_ctx, :unrenderable_schema, request, invocation),
+    do: {%{request | schema: :not_a_schema}, invocation.id}
+
+  # A row written before R0 (generation 1): not creatable through the
+  # domain, so the fixture rewrites the column as a database administrator.
+  defp wrong(_ctx, :legacy_generation, request, invocation) do
+    %{num_rows: 1} =
+      tamper!("UPDATE model_invocations SET ledger_generation = 1 WHERE id = $1", [
+        Ecto.UUID.dump!(invocation.id)
+      ])
+
+    {request, invocation.id}
+  end
 
   defp wrong(_ctx, _variant, request, invocation), do: {request, invocation.id}
 
