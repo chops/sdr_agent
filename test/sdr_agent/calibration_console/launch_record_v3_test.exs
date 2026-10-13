@@ -719,7 +719,237 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordV3Test do
     end
   end
 
+  describe "code review (Codex 01a1354a, 38ce6e3)" do
+    # MF1: the writer enforces the reader's closed schema before any write.
+    test "an attestation with an extra or missing field is refused before any write", ctx do
+      pending!(ctx)
+      owner_gone()
+      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      {:ok, attestation} = LaunchRecord.new_attestation(recovery)
+      dir = Path.join(ctx.root, "run.lock/recover")
+
+      for wrong <- [
+            Map.put(attestation, :unexpected_text, "SYNTHETIC_CANARY_E4CA"),
+            Map.delete(attestation, :confirmed_at),
+            %{attestation | observation: Map.put(attestation.observation, :extra, 1)},
+            %{attestation | observation: Map.delete(attestation.observation, :root_pid)},
+            %{attestation | observation: nil}
+          ] do
+        assert LaunchRecord.write_attestation(ctx.root, recovery, wrong, ctx.opts) ==
+                 {:error, :attestation_mismatch},
+               inspect(wrong)
+
+        assert File.ls!(dir) == ["ticket"]
+      end
+
+      # Positive control: the closed document round-trips.
+      assert {:ok, ^attestation} =
+               LaunchRecord.write_attestation(ctx.root, recovery, attestation, ctx.opts)
+
+      assert {:ok, ^attestation} = LaunchRecord.read_attestation(ctx.root, recovery, ctx.opts)
+    end
+
+    # MF2: a handle is bound to its record's immutable target.
+    test "a stale handle never recovers or releases a replaced target", ctx do
+      for change <- [
+            %{"invocation_id" => Ash.UUIDv7.generate()},
+            %{"root_pid" => 9101},
+            %{"process_group_id" => 9101},
+            %{"root_identity" => "Mon 10:02 another cli"}
+          ] do
+        sub = sub_root!(ctx, String.to_atom("target-" <> hd(Map.keys(change))))
+        launched = launched!(sub, pending!(sub))
+        owner_gone()
+        {:ok, recovery} = LaunchRecord.recover(sub.root, sub.opts)
+        handle = sub.opts ++ [recovery: recovery]
+        changed = replace_record!(sub.root, change)
+        before = lock_files(sub.root)
+
+        assert LaunchRecord.advance(sub.root, changed, :recovered, %{attestation_id: nil}, handle) ==
+                 {:error, :record_changed},
+               inspect(change)
+
+        {:ok, attestation} = LaunchRecord.new_attestation(recovery)
+
+        assert LaunchRecord.write_attestation(sub.root, recovery, attestation, sub.opts) ==
+                 {:error, :record_changed},
+               inspect(change)
+
+        assert lock_files(sub.root) == before
+
+        # A finalized record replaced under the handle is never released.
+        replace_record!(sub.root, Map.new(launched, fn {k, v} -> {Atom.to_string(k), v} end))
+
+        {:ok, recovered} =
+          LaunchRecord.advance(sub.root, launched, :recovered, %{attestation_id: nil}, handle)
+
+        changed = replace_record!(sub.root, change)
+        before = lock_files(sub.root)
+
+        assert LaunchRecord.release(sub.root, changed, handle) == {:error, :record_changed},
+               inspect(change)
+
+        assert lock_files(sub.root) == before
+        assert recovered.state == "recovered"
+        owner_back()
+      end
+    end
+
+    test "a stale handle never writes or reads an attestation for a replaced target", ctx do
+      pending!(ctx)
+      owner_gone()
+      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      {:ok, attestation} = LaunchRecord.new_attestation(recovery)
+      changed = replace_record!(ctx.root, %{"invocation_id" => Ash.UUIDv7.generate()})
+      rebound = %{attestation | invocation_id: changed.invocation_id}
+
+      assert {:error, :record_changed} =
+               LaunchRecord.write_attestation(ctx.root, recovery, rebound, ctx.opts)
+
+      refute File.exists?(Path.join(ctx.root, "run.lock/recover/attestation.json"))
+
+      assert {:error, :record_changed} =
+               LaunchRecord.read_attestation(ctx.root, recovery, ctx.opts)
+    end
+
+    # MF3: the immutable artifact is published create-only.
+    test "a competing different attestation is never replaced", ctx do
+      pending!(ctx)
+      owner_gone()
+      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      {:ok, first} = LaunchRecord.new_attestation(recovery)
+      {:ok, second} = LaunchRecord.new_attestation(recovery)
+
+      # The competing writer publishes between the absence check and the
+      # first writer's own publication (the test-only `publish:` seam).
+      publish = fn temp, final ->
+        assert {:ok, ^second} =
+                 LaunchRecord.write_attestation(ctx.root, recovery, second, ctx.opts)
+
+        File.ln(temp, final)
+      end
+
+      assert {:error, :attestation_conflict} =
+               LaunchRecord.write_attestation(
+                 ctx.root,
+                 recovery,
+                 first,
+                 ctx.opts ++ [publish: publish]
+               )
+
+      assert {:ok, ^second} = LaunchRecord.read_attestation(ctx.root, recovery, ctx.opts)
+      assert temps(ctx.root) == []
+    end
+
+    test "a competing identical attestation is reused", ctx do
+      pending!(ctx)
+      owner_gone()
+      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      {:ok, attestation} = LaunchRecord.new_attestation(recovery)
+
+      publish = fn temp, final ->
+        assert {:ok, ^attestation} =
+                 LaunchRecord.write_attestation(ctx.root, recovery, attestation, ctx.opts)
+
+        File.ln(temp, final)
+      end
+
+      assert {:ok, ^attestation} =
+               LaunchRecord.write_attestation(
+                 ctx.root,
+                 recovery,
+                 attestation,
+                 ctx.opts ++ [publish: publish]
+               )
+
+      assert temps(ctx.root) == []
+    end
+
+    test "a dangling symlink at the attestation name is unsafe and kept", ctx do
+      pending!(ctx)
+      owner_gone()
+      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      {:ok, attestation} = LaunchRecord.new_attestation(recovery)
+      final = Path.join(ctx.root, "run.lock/recover/attestation.json")
+      File.ln_s!(Path.join(ctx.root, "nowhere"), final)
+
+      assert {:error, :launch_record_unsafe} =
+               LaunchRecord.write_attestation(ctx.root, recovery, attestation, ctx.opts)
+
+      assert {:ok, %File.Stat{type: :symlink}} = File.lstat(final)
+      assert temps(ctx.root) == []
+    end
+
+    test "a failed publication leaves no attestation and no temporary file", ctx do
+      pending!(ctx)
+      owner_gone()
+      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      {:ok, attestation} = LaunchRecord.new_attestation(recovery)
+
+      assert {:error, :launch_record_write_failed} =
+               LaunchRecord.write_attestation(
+                 ctx.root,
+                 recovery,
+                 attestation,
+                 ctx.opts ++ [publish: fn _temp, _final -> {:error, :eio} end]
+               )
+
+      assert File.ls!(Path.join(ctx.root, "run.lock/recover")) == ["ticket"]
+    end
+
+    # Important notes: malformed handles and a missing probe are typed.
+    test "a malformed handle is a typed refusal, never a crash", ctx do
+      pending = pending!(ctx)
+
+      for handle <- [%{}, %{record: nil, ticket: "x"}, :nope] do
+        calls = [
+          new: fn -> LaunchRecord.new_attestation(handle) end,
+          write: fn -> LaunchRecord.write_attestation(ctx.root, handle, %{}, ctx.opts) end,
+          read: fn -> LaunchRecord.read_attestation(ctx.root, handle, ctx.opts) end,
+          abort: fn ->
+            LaunchRecord.advance(ctx.root, pending, :aborted, %{}, ctx.opts ++ [recovery: handle])
+          end
+        ]
+
+        for {name, call} <- calls do
+          result = typed(call)
+
+          assert match?({:error, reason} when is_atom(reason), result),
+                 inspect({name, handle, result})
+        end
+      end
+    end
+
+    test "a missing probe is unavailable, never permission", ctx do
+      {:ok, aborted} = abort!(ctx, pending!(ctx))
+
+      assert typed(fn -> LaunchRecord.release(ctx.root, aborted, []) end) ==
+               {:error, :probe_unavailable}
+
+      assert disk(ctx.root)["state"] == "aborted"
+    end
+  end
+
   ## Fixtures
+
+  # Rewrites the record on disk with `change` (a still well-formed record).
+  defp replace_record!(root, change) do
+    replaced = root |> disk() |> Map.merge(change)
+    write_private!(record_path(root), Jason.encode!(replaced))
+    {:ok, record} = LaunchRecord.read(root)
+    refute Map.has_key?(record, :unreadable), inspect(replaced)
+    record
+  end
+
+  # A raise is returned as a value, so a crash fails as an assertion.
+  defp typed(call) do
+    call.()
+  rescue
+    error -> {:raised, error.__struct__}
+  end
+
+  defp temps(root),
+    do: Path.wildcard(Path.join(root, "run.lock/**/.tmp-*"), match_dot: true)
 
   defp pending!(ctx) do
     {:ok, claimed} = LaunchRecord.claim(ctx.root, ctx.opts)
