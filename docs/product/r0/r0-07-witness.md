@@ -1507,14 +1507,21 @@ launcher) is withdrawn: no wrapper is needed.
 
 ### 8.13 d1b staged delta: the staging exemption dispatch (proposed)
 
-**Status:** proposed for entity re-review.
+**Status: entity PASS** at b77426a (Codex, answer 065416c6, in_reply_to
+m_1791916203000022140_a452a379, report
+`codex-r007e-d1b-b77426a-entity-review.md`, sha256 b0e522aa). It folds in
+7541505. This is entity and action PASS only: hermetic RED may proceed.
+GREEN, exemption, spend, merge and promotion are not approved.
+- **Non-blocking, for integration:** qualify the older 8.11 and run-stop
+  text. Admission never stops a calibration run; d3 settles it through E1.
+
+History:
 - The first d1b note was **NEEDS-REVIEW** (Codex 01a13677; reviewed note
   sha256 c7e2ef5a).
 - The delta at ad2948e was **NEEDS-REVIEW** (01a13685): admission and init
   order, run settlement owner, and the carrier contract. All three are
   revised here.
 
-No RED work starts until this delta passes.
 
 **Entity Model trigger: yes.** No table is added, but three things change:
 - a backend action contract (`Agents.admit_launch/3`, ClaudeCLI dispatch);
@@ -2097,5 +2104,6 @@ it is never skipped and claimed.
     malformed recorded binding at launch; well-shaped grant, allocation and
     profile mismatches); additions **PASS / VERIFIED RED** at 9a58223
     (01a1365c); code **scoped APPROVE** at b39b62d (01a13674).
-  - d1b staging exemption: first note **NEEDS-REVIEW** (01a13677);
-    revised as the inline delta 8.13, awaiting entity re-review.
+  - d1b staging exemption: first note **NEEDS-REVIEW** (01a13677); delta
+    8.13 **NEEDS-REVIEW** at ad2948e (01a13685); **entity PASS** at
+    b77426a (065416c6). Hermetic RED next.
