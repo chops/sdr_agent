@@ -436,6 +436,92 @@ the G1, G2 and G6 bounds stand.
   ordinary `:fail` keeps its locks. G7 is one fresh recovery transaction,
   never recursive, and an already committed release stays authoritative.
 
+## 6. Slice B deltas (round 8, proposed)
+
+Slice B is admission before spend (REQ-07-2, REQ-07-3, REQ-07-7, and the
+Admission row of section 2). A pre-code read of `main` at 553b568 found five
+contracts the packet leaves open. Each row below gives a recommended default
+and the alternatives, for Codex to rule on. Nothing in this section is
+implemented until Codex records a PASS on it.
+
+**Stacking.** Slice B is **stacked on slice C**.
+- Its branch is rebased onto `r0-07c-result-gate` once section 6 of that
+  branch passes, the PR targets that branch, and it merges after slice C.
+- The gate mode (B3) lives in slice C's `ResultGate`.
+- Both slices add AgentRun stop reasons. Neither needs a migration
+  (`status_reason` has no database check constraint), so the rebase stays
+  mechanical.
+- Once stacked, this section follows slice C's section 6 and is renumbered.
+
+**Unchanged:**
+- `:real_model_staged` still refuses every ordinary real call before
+  admission. Slice B is testable beneath it only with the existing test
+  seams (`test_launcher: true`, the Fake CLI). It enables no real call.
+- The #132 reservation-refusal path (rollback, then a separate transaction
+  that records the Failure and the event).
+- The #136 identity and state refusals, and `run_not_running_at_launch`.
+
+**Code facts at 553b568** (they motivate B1):
+- `admit_launch/3` fails the reserved row and opens a `provider_error`
+  Failure whose subject is the invocation. It then returns
+  `{:error, atom}`, with no event.
+- ClaudeCLI's `admit_launch/2` passes on only atom reasons.
+- The facade re-reads the row, finds it terminal and returns the error.
+- `SDR.Model` treats that error as a generic provider error, and AgentRun
+  `:fail` opens a second Failure. This is the tracked prerequisite "Launch
+  refusal opens two live Failures" in the readiness packet.
+- In the test environment, `reconciled_methods` is `[]` and `store_root` is
+  nil. The 29 test files that reserve generation-2 calls are all
+  `async: false`.
+- `Store.validate_root/1` makes one `lstat` per ancestor of the root and, on
+  its first call, runs `id -u` as a subprocess.
+
+### 6.1 Entity and action rows
+
+| Row | Entity / action | Delta | Invariants / lifecycle | Actor / locks | Alternatives |
+|---|---|---|---|---|---|
+| B1 (Q1) | Launch refusal receipt: `Agents.admit_launch/3`, `Admission.Refused`, ClaudeCLI `admit_launch/2`, the `ModelProvider` facade, `SDR.Model.stop_refused/3`, `LinkRefusalAttention`, `AgentWorker.fail_operation/3` | **Lock order** (changed): run `FOR UPDATE` → the run's Operation `FOR SHARE` (if any) → invocation `FOR UPDATE` → grant `FOR SHARE` → allocation `FOR SHARE` → head. Taking the Operation before the head lets the launch Failure's FK find it already locked; no Operation lock is taken after the head.<br>**Refusal, recorded inside the launch transaction.** This covers every refusal of an owned `reserved` row, except `run_not_running_at_launch` (the eligibility checks, `legacy_invocation_without_grant`, `profile_mismatch_at_launch` and the five reasons of B5). In order, under the head:<br>1. fail the invocation, as today;<br>2. open **one** critical `provider_error` Failure. Its subject is **the run** (it was the invocation) and its `operation_id` is the run's Operation. Its detail names `model_invocation_id`, the reason and the check;<br>3. append `model.launch.refused`, with `agent_run_id`, `model_invocation_id`, `idempotency_key` set to the invocation's `idempotency_key` (the reserved request's id, the same as `SDR.Model`'s request id), and a payload of the reason, the check and `failure_id`.<br>Then it commits and returns `{:error, %Refused{reason, failure_id, event_id, agent_run_id, request_id}}`. `Refused` gains `stage: :reservation \| :launch`.<br>**The receipt's path:**<br>• ClaudeCLI `admit_launch/2` passes `%Refused{}` through unchanged. It holds metadata only.<br>• The server replies with it.<br>• The facade re-reads the row, finds it `failed`, and its existing terminal clause returns the error **with no write and no Failure**.<br>• `SDR.Model` stops the run from the receipt (`:fail`, `:model_not_admitted`). | **One Failure:** the row leaves `reserved` exactly once, under its own lock, so no dedupe is needed.<br>**The validator** (`LinkRefusalAttention`) checks three categories, each keyed by event type and reason set:<br>• reservation budget: #132, unchanged;<br>• reservation admission: `model.reservation.refused`, class `provider_error`, one of the five B5 reasons;<br>• launch: `model.launch.refused`, class `provider_error`, a launch reason, and the event's `model_invocation_id` an invocation of this run.<br>Every category also requires the Failure's tenant, its subject (the run), `operation_id` equal to the run's Operation (or none), and the event's `idempotency_key` and `failure_id`.<br>**Identity-refusal events** carry no `failure_id`, so they can never validate as a cause.<br>**AgentRun:** `:model_not_admitted` is a reason of `:fail` only (status `failed`). It requires the receipt arguments and is refused without them.<br>**Worker:** `:model_not_admitted` joins `@refused`. In the resolution race, the worker's own Failure naming the resolved cause has class `provider_error`.<br>**This closes the tracked prerequisite** "Launch refusal opens two live Failures"; its readiness row is marked closed when this is implemented. | AGT. Lock order: run → Operation → invocation → charge → head. It matches finalization (run → Operation → invocation, section 2 step 3) and the sweeper (run → Operation → job → invocations). Operation writers (Operation `FOR UPDATE` → Failure → head) never lock a run. | **Stop mapping (recommended):** every launch receipt stops the run as `:model_not_admitted`, with the cause in the event's reason and check. Alternative: grant-term launch refusals (`grant_ineligible_at_launch`) stop as `:grant_unavailable`, and only profile, legacy and B5 reasons as `:model_not_admitted`.<br>**Not recommended: rollback, then a separate transaction (the #132 style).** It leaves the row `reserved` between the two transactions, where the facade or the sweeper could fail it with a second Failure. It also needs a re-check that the row is still `reserved`, and a second lock pass. |
+| B2 (Q2) | The pre-call tuple predicate (`Witness.promoted?/2`, new; called by admission) | The predicate holds for (profile, identity) when **some exact shipped entry** (`reconciled_methods/0`, never a test override) has all of these:<br>• `provider: :claude_cli`;<br>• `cli_version` = the profile's `cli_version`;<br>• `profile_id` = the profile;<br>• `model_id` = the profile's `resolved_model`;<br>• `method: :propagated_id`;<br>• a `projection_version` ending in `"+" <> ClaudeCLI.prompt_builder()` that is one of the versions `Witness` evaluates (v1, v2 or v3).<br>At reservation it checks the call's profile. At launch it checks the invocation's recorded `provider_version`, `model_id` and `profile_id`, after `profile_mismatch_at_launch` has passed. | **Fail-closed:** the test environment's allowlist is empty, so every call is refused by default.<br>**Slice C enforces the exact evaluated projection:** an exchange evaluated under a projection outside the allowlist is `method_not_enabled`, so it is withheld as `:witness_missing` (G2).<br>Admission therefore never admits a tuple that the gate could release under an unlisted projection. | Code only | Not recommended:<br>• a pinned `Projection.current/0` (the grammar is chosen from the observed request after the call, so a pinned value would be guessed);<br>• a five-key match that ignores the projection (weaker: any projection would admit). |
+| B3 (Q3) | The result-gate mode (slice C's `SdrAgent.Agents.ResultGate`, stacked) | `@mode Application.compile_env(:sdr_agent, [ResultGate, :mode], :enforced)`, with `mode/0` and `active?/0` (true only for `:enforced`).<br>No `config/*.exs` file sets it. Any other value makes `active?/0` false, and every generation-2 real call is then refused `:result_gate_inactive`. | **Fail closed:** the mode can only refuse, never admit.<br>**A structural test** asserts that no config file sets the key and that the test build compiles `:enforced`.<br>**Testing `:result_gate_inactive`:**<br>• the refusal is a pure step, `Admission.gate_check/1`, unit-tested with an inactive gate;<br>• an integration test uses a refuse-only seam, compiled only with `:claude_cli_test_seams`, read from Application env so that it also reaches the ClaudeCLI server process, and restored on exit. It can set `active?/0` to false, never to true. | Code only | Not recommended:<br>• a recompiled `MIX_ENV` just for this test (costly);<br>• defining the mode in slice B (`ResultGate` would collide with slice C). |
+| B4 (Q4) | Calibration admission authority (`Agents.Checks.CalibrationAdmission`, new; test-seam builds only) | **A separate marker**, `{profile_id, entry}`, passed to `reserve_model_invocation/3` as option `calibration:`.<br>• Its builder and acceptance are compiled only with `:claude_cli_test_seams`; in any other build the marker is absent.<br>• Slice D's harness is its only non-test caller.<br>• `CalibrationContext` is unchanged: it scopes the latch and the read, and it is never an admission input (contract (c)).<br>**It is accepted only when:**<br>• the run's `usage_origin` is `:proof`;<br>• `Witness.exact_overrides([entry])` passes;<br>• `entry.profile_id` is the call's profile;<br>• the entry satisfies B2's predicate for that profile, in place of the shipped allowlist.<br>**At launch** (ClaudeCLI passes no marker), authority is re-derived from durable state: the admitted entry is recorded as the argument `calibration_tuple` of the invocation's immutable `model.invocation.reserved` event. | **Refusals:**<br>• a `:proof` run without a valid marker, a marker on any other run, or an entry that fails the checks above: `:calibration_not_authorized`. So a forged `:proof` run is refused;<br>• **REQ-07-7 (durable):** under the head, every earlier ModelInvocation of a `:proof` run in the tenant, of any status, must have a `ModelResultRelease :calibration` with a non-null `evidence_sha256`. A `reserved` or `sent` one, or a terminal one with no latch, refuses `:calibration_evidence_pending`. At launch, "earlier" excludes the invocation itself. The head serialises concurrent calibration reservations.<br>**Allocation exhaustion** stays #132's `{:budget_exhausted, :allocation}` and stops the run `:exhaust_budget` / `:grant_exhausted`, not `:model_not_admitted`.<br>**Deferred to slice D:** G-R0 binding, and the fixed prompt and schema. | AGT; under the head, plain reads only | Alternatives:<br>• the harness passes the marker through the server request to `admit_launch` (a caller input at launch);<br>• slice B refuses every `:proof` run `:calibration_not_authorized` and leaves `:calibration_evidence_pending` to slice D (then REQ-07-7 has no test in B). |
+| B5 (Q5) | Check order and store trust in admission | **Reservation**, after run → candidates → head and `now`:<br>1. the run counter and the daily limit (unchanged; no receipt);<br>2. `:no_usage_origin` (unchanged);<br>3. for `:proof` runs only: `:calibration_not_authorized`, then `:calibration_evidence_pending`;<br>4. `:result_gate_inactive`;<br>5. `:witness_store_untrusted`;<br>6. `:tuple_not_promoted` (for an authorized calibration call, against its entry);<br>7. the existing grant, allocation and room checks.<br>**Launch:** the identity and state refusals → `run_not_running_at_launch` → legacy → profile mismatch → steps 3–6 → the grant terms.<br>**Store trust:**<br>• before the first lock, `Store.validate_root(Witness.store_root())` runs the full filesystem check, plus the `id -u` read the first time;<br>• under the head, a pure check with no I/O: the root is still the one validated before the locks, and that check passed. Otherwise the call is refused `:witness_store_untrusted` (unset, untrusted or changed). The same applies at launch, before the run lock.<br>**This refines section 2's "after the existing locks":** the filesystem check moves before the locks, and only the pure re-check runs under them. | **Why the gate checks come before the grant checks:** they mean "this build or configuration may not spend", which no grant can fix. Reporting them first names the cause the owner can act on.<br>**Store changes after the check:** a filesystem change after the pre-lock check is caught after spend as slice C's `:store_unreadable` (G2).<br>**Tests:** no process-scoped config exists. Launch admission runs in the ClaudeCLI server process, so a process-dictionary override would not reach it. All 29 affected files are already `async: false`, so a shared helper costs no parallelism: `AdmissionFixtures.admit_tuples!/1` writes exact entries into `reconciled_methods` and a trusted temporary `store_root`, then restores both on exit (it extends `put_allowlist!/1`). It changes configuration and is not a caller input, so no ordinary-call admission seam exists (ADR-0005 R0 item 3). A structural test asserts that admission never reads `allow_method_override` or a per-call `methods:`. | AGT. No filesystem I/O or subprocess under the run or head locks. | Store trust, not recommended:<br>• a boot-time trusted flag (it misses changes after boot until after spend);<br>• `lstat` under the locks (filesystem I/O and a possible subprocess while holding the run and head locks).<br>Order alternative: the grant checks first, then steps 3–6. |
+
+### 6.2 Test plan (RED first, synthetic, no real calls)
+
+- **Before reservation:** each of the five reasons, with no invocation,
+  payload or counter change. The run stops `:model_not_admitted` with
+  exactly one Failure, linked by the receipt. The worker fails the
+  Operation on that cause, and the resolution race is covered.
+- **At launch:** each reason that applies at launch. The row is `failed`
+  and never `sent`, with one Failure (subject the run) and one
+  `model.launch.refused` event. The facade writes nothing more, and
+  `SDR.Model` stops the run `:model_not_admitted`.
+  - A regression test covers the two-Failure prerequisite.
+  - A real-connection race test covers the new Operation lock against an
+    Operation writer and against the sweeper.
+- **Validator:** a forged or foreign `refusal_failure_id`; an
+  identity-refusal event; a Failure from another run or Operation; and a
+  category mismatch are each refused.
+- **Calibration:**
+  - A forged `:proof` run without the marker is refused, and a marker on a
+    non-proof run is refused.
+  - An inexact or foreign-profile entry is refused.
+  - Evidence pending is refused for a `reserved` predecessor, a `sent` one
+    and a terminal one without a latch. With every predecessor latched, the
+    call is admitted.
+  - Allocation exhaustion stops the run `:grant_exhausted`.
+- **Tuples:** B2's predicate holds only for an exact profile and model. A
+  Sonnet call never matches an Opus entry. A projection with a different
+  prompt builder is refused.
+- **Gate mode:** the structural test, the pure inactive branch and the
+  refuse-only seam.
+- **Store:** unset, untrusted and changed-after-validation roots are each
+  refused. Repo telemetry shows the filesystem check runs before the run
+  lock, and no store read runs while the locks are held.
+- **An admitted tuple still proceeds**, under the test seams and the Fake
+  CLI.
+- **Gate:** `bin/verify`, credo and the codegen check.
+
 ## 7. Gate record
 
 - Round 1 at e720fda: **NEEDS-REVIEW** (Codex, consultation
@@ -518,3 +604,6 @@ the G1, G2 and G6 bounds stand.
      They are not proof until independently verified. The RED, GREEN and
      code-review gates continue for the affected implementation; this PASS
      is not retrospective approval of local code.
+- Round 8 (slice B admission, proposed in section 6, base 553b568):
+  awaiting Codex's ruling on B1–B5. No slice B code exists. When stacked on
+  slice C, the section is renumbered after slice C's section 6.
