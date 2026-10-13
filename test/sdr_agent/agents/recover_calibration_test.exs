@@ -408,7 +408,9 @@ defmodule SdrAgent.Agents.RecoverCalibrationTest do
             %{state: "launch_pending", root_pid: nil, process_group_id: nil},
             %{state: "launched", root_pid: nil, process_group_id: nil},
             %{state: "launched", root_pid: 9001, process_group_id: nil},
-            %{state: "launched", root_pid: nil, process_group_id: 9001}
+            %{state: "launched", root_pid: nil, process_group_id: 9001},
+            # The launched root leads its own group (E4c-1).
+            %{state: "launched", root_pid: 9001, process_group_id: 9002}
           ] do
         assert recover(sent, {:quiescent, observation}, agent) ==
                  {:error, :calibration_not_recoverable},
@@ -426,7 +428,8 @@ defmodule SdrAgent.Agents.RecoverCalibrationTest do
             %{state: "launch_pending", root_pid: 9001, process_group_id: nil},
             %{state: "launch_pending", root_pid: nil, process_group_id: 9001},
             %{state: "launched", root_pid: nil, process_group_id: nil},
-            %{state: "launched", root_pid: 9001, process_group_id: nil}
+            %{state: "launched", root_pid: 9001, process_group_id: nil},
+            %{state: "launched", root_pid: 9001, process_group_id: 9002}
           ] do
         attestation = %{attestation(sent, claim) | observation: observation}
 
