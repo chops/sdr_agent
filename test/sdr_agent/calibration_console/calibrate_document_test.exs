@@ -5,10 +5,11 @@ defmodule SdrAgent.CalibrationConsole.CalibrateDocumentTest do
 
   `Calibrate.document/1` is pure: it takes snapshots the command gathered
   outside any database lock (the fresh invocation and run, the recorded
-  tuple, the `Outcome.classify/1` result, the receipt's own link, the
-  parsed output read through the scoped calibration read, and the
-  observation time) and returns the `r0-calibration-evidence/1` document,
-  or `{:error, :evidence_input_invalid}`.
+  tuple, the await result and the receipt's own link, the server
+  attestation, the parsed output read through the scoped calibration read,
+  and the observation time), classifies them itself (`Outcome.classify/1`)
+  and returns the `r0-calibration-evidence/1` document, or `{:error,
+  :evidence_input_invalid}`.
 
     * Digests are lowercase hex: each link's `evidence_sha256`, the output
       commitment and the prompt and schema references; `inventory_sha256`
@@ -30,7 +31,6 @@ defmodule SdrAgent.CalibrationConsole.CalibrateDocumentTest do
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.CalibrationConsole.Calibrate
   alias SdrAgent.CalibrationConsole.Evidence
-  alias SdrAgent.CalibrationConsole.Outcome
   alias SdrAgent.CalibrationConsole.Prompt
 
   @moduletag :tmp_dir
@@ -70,7 +70,9 @@ defmodule SdrAgent.CalibrationConsole.CalibrateDocumentTest do
 
   test "a completed call's document is published and validated, and replays frozen", ctx do
     link = AgentsFixtures.reconciled_link!(ctx.invocation, ctx.rec, evidence: v3_evidence())
-    {:ok, document} = Calibrate.document(snapshot(ctx, link, {:ok, receipt(:reconciled, link)}))
+
+    assert {:ok, document} =
+             Calibrate.document(snapshot(ctx, link, {:ok, receipt(:reconciled, link)}))
 
     assert document.outcome == "match"
 
@@ -100,13 +102,18 @@ defmodule SdrAgent.CalibrationConsole.CalibrateDocumentTest do
 
     assert {:ok, %{path: path, sha256: sha}} = Evidence.publish(ctx.dir, document, opts(ctx))
     assert {:ok, _validated} = Evidence.validate(path, target(ctx), opts(ctx))
-    refute File.read!(path) =~ @canary
-    assert {:ok, %{sha256: ^sha}} = Evidence.publish(ctx.dir, document, opts(ctx))
+    bytes = File.read!(path)
+    refute bytes =~ @canary
+
+    # A later observation never replaces the frozen file.
+    later = %{document | observed_at: DateTime.add(document.observed_at, 60)}
+    assert {:ok, %{sha256: ^sha, bytes: ^bytes}} = Evidence.publish(ctx.dir, later, opts(ctx))
+    assert File.read!(path) == bytes
   end
 
   test "without the receipt's own link: no links, no inventory, no evaluation", ctx do
     gate = {:ok, %{status: :unwitnessed, link_id: nil, cause_id: nil, codes: ["witness_missing"]}}
-    {:ok, document} = Calibrate.document(snapshot(ctx, nil, gate))
+    assert {:ok, document} = Calibrate.document(snapshot(ctx, nil, gate))
 
     assert {document.outcome, document.links, document.inventory_sha256} == {"missing", [], nil}
     assert {document.evaluated_projection_version, document.evaluated_method} == {nil, nil}
@@ -117,7 +124,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateDocumentTest do
   test "an unread blob: unreadable, nil projection, the link's method and valid init", ctx do
     link = blob_link!(ctx)
     gate = {:ok, %{receipt(:inferred, link) | codes: ["blob_missing"]}}
-    {:ok, document} = Calibrate.document(snapshot(ctx, link, gate))
+    assert {:ok, document} = Calibrate.document(snapshot(ctx, link, gate))
 
     assert document.outcome == "unreadable"
     assert document.evaluated_projection_version == nil
@@ -152,7 +159,10 @@ defmodule SdrAgent.CalibrationConsole.CalibrateDocumentTest do
 
   test "no output, prompt, response or error text enters the document", ctx do
     link = AgentsFixtures.reconciled_link!(ctx.invocation, ctx.rec, evidence: v3_evidence())
-    {:ok, document} = Calibrate.document(snapshot(ctx, link, {:ok, receipt(:reconciled, link)}))
+
+    assert {:ok, document} =
+             Calibrate.document(snapshot(ctx, link, {:ok, receipt(:reconciled, link)}))
+
     encoded = Canonical.encode!(document)
 
     for text <- [@canary, Prompt.render(), Jason.encode!(@output)] do
@@ -162,7 +172,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateDocumentTest do
 
   @tag call: :unlaunched
   test "an unlaunched call: launch_failed, no evaluation, no output", ctx do
-    {:ok, document} = Calibrate.document(snapshot(ctx, nil, nil))
+    assert {:ok, document} = Calibrate.document(snapshot(ctx, nil, nil))
 
     assert document.outcome == "launch_failed"
     assert {document.links, document.inventory_sha256, document.output_sha256} == {[], nil, nil}

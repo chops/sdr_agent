@@ -20,8 +20,11 @@ defmodule SdrAgent.CalibrationConsole.Outcome do
        observed: a drifted or missing attestation, or one naming another
        model or CLI version.
     3. `timeout` — the bounded observation timed out.
-    4. `unreadable` — the store was unconfigured (`:skipped`) or unreadable
-       (a `store_*` code).
+    4. `unreadable` — the store was unconfigured (`:skipped`) or could not
+       be read: a `store_*` or `blob_*` code, or an inventory read failure
+       (`unsafe_path`, `record_invalid`, `record_too_large`,
+       `too_many_entries`, `invalid_invocation_id`). No capture
+       (`witness_missing`) is not unreadable (packet 8.14.8 E3 delta).
     5. From the receipt and its link: `ambiguous` (several or unclassified
        exchanges), `unsupported`, `mismatch` (the invocation, or its link,
        mismatched), `missing` (no usable link), `projection_differs` (the
@@ -41,6 +44,8 @@ defmodule SdrAgent.CalibrationConsole.Outcome do
   @values ~w(match mismatch projection_differs not_enabled unsupported ambiguous missing
              timeout unreadable init_drift launch_failed)
   @no_spawn ["launch_failed", "provider_queue_timeout"]
+  @read_failures ~w(unsafe_path record_invalid record_too_large too_many_entries
+                    invalid_invocation_id)
   @ambiguous ["multiple_primary_exchanges", "unclassified_exchange"]
   @unsupported ~w(proxy_version_unsupported content_encoding_unsupported evidence_contract_invalid)
 
@@ -100,7 +105,12 @@ defmodule SdrAgent.CalibrationConsole.Outcome do
   defp init(_missing_or_drifted, _candidate), do: :drift
 
   defp unreadable?({:ok, %{status: :skipped}}), do: true
-  defp unreadable?({_kind, receipt}), do: Enum.any?(codes(receipt), &(&1 =~ ~r/\Astore_/))
+  # Packet 8.14.8 (E3 delta): a failed store read, whether of the store
+  # root, an inventory record or a stored blob, is unreadable; no capture
+  # (`witness_missing`) is not.
+  defp unreadable?({_kind, receipt}), do: Enum.any?(codes(receipt), &read_failure?/1)
+
+  defp read_failure?(code), do: code =~ ~r/\A(store_|blob_)/ or code in @read_failures
 
   defp receipt({_kind, receipt}), do: receipt
 
