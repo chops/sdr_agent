@@ -520,10 +520,40 @@ the G1, G2 and G6 bounds stand.
      is not retrospective approval of local code.
 - Code review of PR #143 at 747aa13: **REQUEST_CHANGES** (Codex, correlation
   m_1791853566000026538_97041005, report sha256 6598690b). Five must-fix
-  items (MF1–MF5) were fixed RED-first in 13d0036, 9c41438, 3a7cd7f,
-  c5878b1 and 43adc8d.
+  items (MF1–MF5) were fixed in 13d0036, 9c41438, 3a7cd7f, c5878b1 and
+  43adc8d.
+  - **Test order not verified.** The authoring subagent was stopped by an
+    account usage limit before it reported per-commit RED, so test-first
+    order for these five commits is unrecorded. The evidence is
+    reconstructed behaviour only: Codex's four probes fail at 747aa13 and
+    pass at ef38a7e (Claude reran them at ef38a7e on partition `_r07c`).
+    This is not a claim that the tests were written before the code.
   - Rulings on the author's interpretations: 1, 3, 5, 6, 7 and 8 accepted;
     4 accepted except for MF3/MF4; 2 rejected (MF1: the durable
     gate-stop/running-Operation state is now self-healed).
   - Ruling 5 is reflected in row G2 above: the classification is in the
     event only.
+- Code re-review round 2 of PR #143 at ef38a7e: **REQUEST_CHANGES, narrow**
+  (Codex, correlation m_1791860081000011839_e80c0a99, report sha256
+  3a03ed8c). MF1–MF5 resolved. One remaining G7 race: recovery read no
+  release, waited for the head, and a standalone decider committed a
+  release meanwhile; recovery returned `:release_raced`, and the sweep then
+  recorded `:crash`. Also: the "RED-first" claim above was corrected.
+  - **Narrow delta G7' (for independent review).** When the release
+    re-read under the head finds a release committed meanwhile, recovery
+    rolls back to a savepoint taken before its selection (writing nothing
+    and releasing the link, cause and head locks taken after it, while
+    keeping the run, Operation and invocation locks) and then decides that
+    immutable winner exactly as one found first: a `:released` one returns
+    its output; a bound withheld one of a running run stops the run on its
+    original cause (link `FOR SHARE`, cause `FOR UPDATE`, then the head). No
+    lock strength changes, no row lock after the head, no new release,
+    receipt or cause, and no recursion (a found release never reaches the
+    selection again). `{:error, :release_raced}` no longer exists, and the
+    sweeper's skip for it is removed.
+  - **Tests:** a true-connection late-winner test for a `:released` and for
+    a bound withheld winner (RED: both returned `{:error, :release_raced}`;
+    GREEN after the change), and Codex's G7 probe passes. The worker
+    boundary is covered because recovery now returns the winner, so the
+    facade never halts with `:result_not_released` for it; there is no
+    separate end-to-end worker test for this race.
