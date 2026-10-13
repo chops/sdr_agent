@@ -10,8 +10,10 @@ defmodule SdrAgent.Agents.Changes.CalibrationLatch do
   is the `:calibration` latch of that invocation, an invocation of this
   run. The finish already holds the run `FOR UPDATE` and the invocation
   `FOR SHARE` before the chain head, so the run row, the release and the
-  invocation are re-read with no lock clause. Anything else is refused:
-  the action is never reachable without its latch.
+  invocation are re-read with no lock clause. It also enforces the finish's
+  own invariants: a `:proof` run with no Operation, and its own terminal
+  generation-2 ClaudeCLI invocation. Anything else is refused: the action
+  is never reachable without its latch, and never weaker than the finish.
   """
   use Ash.Resource.Change
 
@@ -22,13 +24,17 @@ defmodule SdrAgent.Agents.Changes.CalibrationLatch do
   alias SdrAgent.Agents.ReleaseDecision.Prelocked
   alias SdrAgent.Audit.Kernel
 
+  @terminal [:completed, :failed, :unknown]
+
   @impl true
   def change(changeset, _opts, context) do
     Ash.Changeset.before_action(changeset, fn changeset ->
+      # The stored row, never the caller's struct, is what is checked.
       with true <- changeset.valid?,
-           :ok <- latched(changeset),
-           {:ok, run} <- reread(changeset, context) do
-        %{changeset | data: run}
+           {:ok, run} <- reread(changeset, context),
+           changeset = %{changeset | data: run},
+           :ok <- latched(changeset) do
+        changeset
       else
         false -> changeset
         {:error, error} -> Ash.Changeset.add_error(changeset, error)
@@ -53,7 +59,7 @@ defmodule SdrAgent.Agents.Changes.CalibrationLatch do
            release.disposition == :calibration and
              release.model_invocation_id == registered.model_invocation_id,
          {:ok, invocation} <- read(ModelInvocation, release.model_invocation_id, run),
-         true <- invocation.agent_run_id == run.id do
+         true <- finishable?(run, invocation) do
       :ok
     else
       _ ->
@@ -63,6 +69,16 @@ defmodule SdrAgent.Agents.Changes.CalibrationLatch do
            message: "must be the calibration latch of this run's invocation"
          )}
     end
+  end
+
+  # The finish's own invariants, enforced here too so the action is never
+  # weaker than `SdrAgent.Agents.finish_calibration/3` (code review of
+  # 930ef2a): a `:proof` run with no Operation, and its own terminal
+  # generation-2 ClaudeCLI invocation.
+  defp finishable?(run, invocation) do
+    invocation.agent_run_id == run.id and run.usage_origin == :proof and
+      is_nil(run.operation_id) and invocation.ledger_generation == 2 and
+      invocation.provider == :claude_cli and invocation.status in @terminal
   end
 
   defp read(resource, id, run) when is_binary(id) do

@@ -24,6 +24,7 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
 
   alias SdrAgent.AdmissionFixtures
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.CalibrationConsole.Evidence
@@ -330,7 +331,7 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
           run,
           attrs("ev-#{System.unique_integer([:positive])}", refs),
           actor: agent,
-          calibration: AdmissionFixtures.calibration()
+          calibration: CalibrationAdmission.context(:claude_cli_opus, candidate())
         )
       end)
 
@@ -379,7 +380,7 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
   # literal v3 tuple; a completed call commits to its parsed output, a
   # failed one has no output, no observed init and no evaluation.
   defp document(invocation, run, links, call) do
-    entry = AdmissionFixtures.entry(:claude_cli_opus, @v3)
+    entry = candidate()
     stamp = &(&1 && Base.encode16(&1, case: :lower))
     ref = &%{id: &1.id, version: &1.version, sha256: stamp.(&1.sha256)}
     completed? = call == :completed
@@ -410,6 +411,10 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
       observed_at: ~U[2026-10-13 06:00:00.000000Z]
     }
   end
+
+  # The literal v3 candidate: the calibration marker the call is reserved
+  # under, the document's candidate and the link's evaluated projection.
+  defp candidate, do: AdmissionFixtures.entry(:claude_cli_opus, @v3)
 
   defp link_ref(link), do: %{id: link.id, evidence_sha256: link_sha(link)}
 

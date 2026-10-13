@@ -1129,7 +1129,9 @@ defmodule SdrAgent.Agents do
   def finish_calibration(invocation, evidence, opts) do
     actor = Keyword.get(opts, :actor)
 
-    guard(AgentRun, :finish_calibration, Map.get(invocation, :id), actor, fn ->
+    subject_id = with %{id: id} <- invocation, do: id, else: (_ -> nil)
+
+    guard(AgentRun, :finish_calibration, subject_id, actor, fn ->
       CalibrationFinish.run(invocation, evidence, actor)
     end)
   end

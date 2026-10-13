@@ -24,7 +24,13 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
 
   alias SdrAgent.AdmissionFixtures
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.AgentRun
+  alias SdrAgent.Agents.Checks.CalibrationContext
+  alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ReleaseDecision.Prelocked
+  alias SdrAgent.Agents.ResultGate
   alias SdrAgent.AgentsFixtures
+  alias SdrAgent.Audit
   alias SdrAgent.GateFixtures
 
   setup do
@@ -230,6 +236,64 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
     end
   end
 
+  describe "code review (Codex, 930ef2a)" do
+    test "a malformed public target is a shape refusal, not a crash", ctx do
+      %{agent: agent} = proof_run(ctx)
+
+      for target <- [nil, %{}, "not an invocation"] do
+        assert {:error, :calibration_not_finishable} =
+                 finish(target, %{sha256: sha("nil")}, actor: agent),
+               inspect(target)
+      end
+    end
+
+    # Legitimate registered locks and latch, not a forged context: the
+    # resource action itself refuses operated proof history.
+    test "the :finish_calibration action refuses a run with an Operation", ctx do
+      %{run: run, agent: agent} = AgentsFixtures.operated_run(ctx.tenant, usage_origin: :proof)
+      invocation = proof_invocation!(run, agent, :failed)
+
+      {:ok, latch} =
+        Agents.decide_result_release(
+          %{
+            model_invocation_id: invocation.id,
+            disposition: :calibration,
+            reason: :calibration,
+            evidence_sha256: sha("direct")
+          },
+          actor: agent,
+          context: CalibrationContext.context(invocation.profile_id, invocation.id)
+        )
+
+      result =
+        Audit.transaction(fn ->
+          {:ok, locked} = ResultGate.lock(AgentRun, run.id, ctx.tenant.id, "FOR UPDATE")
+
+          {:ok, _} =
+            ResultGate.lock(ModelInvocation, invocation.id, ctx.tenant.id, "FOR SHARE")
+
+          {:ok, _} = Audit.Kernel.lock_head(ctx.tenant.id)
+
+          Prelocked.run(
+            %{tenant_id: ctx.tenant.id, model_invocation_id: invocation.id},
+            fn prelocked ->
+              locked
+              |> Ash.Changeset.for_update(:finish_calibration, %{release_id: latch.id},
+                actor: agent,
+                context: %{sdr_prelocked: prelocked}
+              )
+              |> Ash.update()
+            end
+          )
+        end)
+
+      # Refused on the latch check (the transaction is rolled back).
+      assert {:error, %Ash.Changeset{errors: errors}} = result
+      assert [%Ash.Error.Changes.InvalidArgument{field: :release_id}] = errors
+      assert {:ok, %{status: :running}} = Agents.get_run(run.id, actor: agent)
+    end
+  end
+
   describe "only the guarded finish writes :calibration_latched" do
     setup ctx, do: proof_run(ctx)
 
@@ -261,7 +325,7 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
     end
 
     test ":finish_calibration is not callable directly without its invocation", ctx do
-      assert Ash.Resource.Info.action(SdrAgent.Agents.AgentRun, :finish_calibration),
+      assert Ash.Resource.Info.action(AgentRun, :finish_calibration),
              "AgentRun :finish_calibration is not defined"
 
       assert {:error, _} =
