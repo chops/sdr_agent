@@ -545,54 +545,274 @@ enablement or spend.
 | B4' | Calibration predecessors for `:calibration_evidence_pending` (REQ-07-7) | **Scope (predecessor set):** the real calibration invocations of the tenant's ledger (the isolated calibration database). These are ModelInvocations with `ledger_generation` 2, `provider: :claude_cli`, and a run whose `usage_origin` is `:proof`, of any status and any profile.<br>**Excluded:** Fake rows and non-proof rows are never predecessors. They cannot receive a `:calibration` latch (slice A requires generation 2 ClaudeCLI), so they never wait for one.<br>**The rule:** every predecessor needs a `ModelResultRelease :calibration` with a non-null `evidence_sha256`. Otherwise the call is refused `:calibration_evidence_pending`. A `reserved`, `sent`, `failed`, `unknown` or invalid-completed predecessor blocks until its accepted terminal latch exists.<br>**"Earlier" is the serialised durable order:** the per-tenant audit chain `sequence` of each row's `model.invocation.reserved` event, appended under the chain head. It is never a wall-clock comparison, which could skip tied or rolled-back timestamps.<br>• **At reservation:** the new row does not exist yet. Every in-scope row read under the head is earlier, because the head serialises reservations and the read runs after the head is acquired, so every reservation committed before it is visible.<br>• **At launch:** the predecessors are the in-scope rows whose reserve-event `sequence` is lower than this invocation's. Exactly this invocation is excluded, by id, and never any other unfinished row. A later in-scope row cannot exist while this one is unlatched, because its own reservation would have been refused; a later row that does exist anyway (a defect) also blocks. | **Real history with malformed authority** stays fail-closed and is never silently skipped. An in-scope row whose `model.invocation.reserved` event has no valid `calibration_tuple` (absent, malformed or another profile's; for example a row written before slice B, or a defect) is still a predecessor. It blocks like any unlatched row.<br>**The refusal Failure's detail** names `predecessor_authority_invalid` and the predecessor's id (metadata only), so the owner sees why.<br>**Its only recovery** is the owner's explicit history handling: the owner-run harness records that row's `:calibration` latch (empty or partial capture, attempt kept charged) through slice D's reviewed recovery command. There is no automatic latch and no skip.<br>**Unchanged:** allocation exhaustion keeps the #132 budget receipt and category (`:exhaust_budget`, `:grant_exhausted`). | AGT; under the head, plain reads of ModelInvocation, AgentRun, ModelResultRelease and the reserve events | **Clocks:** tied `reserved_at` values, and a clock rolled back between two reservations: the order follows `sequence`.<br>**Profiles:** an unlatched predecessor of another profile blocks.<br>**Concurrency:** two concurrent calibration reservations on true connections: exactly one is admitted, and the other is refused pending.<br>**Fake rows:** a preceding Fake proof row does not block.<br>**Malformed history:** an in-scope row missing its authority blocks with `predecessor_authority_invalid` in the detail; after its latch, the next call is admitted.<br>**At launch:** the invocation excludes only itself, and an earlier unfinished row still blocks.<br>**Allocation exhaustion** stops the run `:grant_exhausted`. |
 | B5' | Witness store trust at admission: what is proven, and the residual risk | **Before the locks**, at reservation and again at launch: `Store.validate_root(Witness.store_root())` runs in full (ancestor `lstat` chain, ownership and mode; the effective UID is read and cached here, never under a lock). The result is `{root, observed_at}`.<br>**Under the head**, a pure check with no I/O: the configured `store_root` still equals the validated `root`. If it changed or became unset, the call is refused `:witness_store_untrusted`.<br>**What the in-lock check proves:** the configured root is the one that was trusted **at the pre-lock observation**. It does **not** prove that the path's permissions, ownership, inode or symlink status are unchanged at the admission instant. | **Residual risk (stated, not hidden):** there is an unavoidable race between validation and use. A same-path filesystem change after the pre-lock probe is not refused before spend at that step.<br>**Where it is caught:**<br>• the launch's fresh pre-lock probe, which runs later and closer to spend, when the change precedes it;<br>• otherwise slice C's validated store read (every store read revalidates the root), which withholds the output as `:store_unreadable` before any release.<br>**Consequence:** a charged attempt can be withheld after spend, and no output is ever released from an untrusted store.<br>This corrects the claim in 7.2 that every root changed after validation is refused: that holds only for a changed configured root.<br>**Owner disclosure:** this residual is added to the remaining gates before real calls, and is shown to the owner before enablement.<br>**fd or inode re-check (not proposed):** re-checking `(dev, inode)` under the lock is filesystem I/O under the run and head locks, and it would still leave a race after the locks are released. | AGT. No filesystem I/O and no subprocess under any row lock or the head. | **Config root changed:** while admission waits on a held run lock, the configured root is switched (or unset) after the pre-lock probe. The call is refused `:witness_store_untrusted`, with no invocation, payload or counter change.<br>**Same path, filesystem changed:** after the pre-lock probe, while admission waits on a held lock, the root becomes group-writable.<br>• Reservation proceeds (the documented limit).<br>• A change made before the launch probe is refused at launch as `:witness_store_untrusted`, with the row failed and never sent.<br>• A change made after the launch probe is withheld by slice C as `:store_unreadable`, with no release and the attempt charged.<br>**No I/O under locks:** telemetry around `validate_root` and the effective-UID read, ordered against Repo lock queries, shows no store or subprocess call between the first row lock and commit. |
 
-## 8. Calibration harness (slice E, round 10, proposed)
+## 8. Calibration harness (slice E, round 11, proposed)
 
-Status: **proposed for entity review.** Nothing here is implemented, and
-this section grants no real-call, calibration, enablement or spend
-authority. It refines section 3 ("Running the harness", "Evidence", "When
-an attempt is still running") and the slice B obligations that name slice
-D's fixed prompt and schema, the G-R0 binding, owner-run recovery and
-real-call authority. Entity Model trigger: **yes** (a new owner-run action
-that makes real calls, a staging exemption, an evidence artifact, and a
-recovery action).
+Status: **proposed for entity re-review** (round 10 at a608ead was
+NEEDS-REVIEW; this revision answers R10-1 to R10-5). Nothing here is
+implemented. It grants no real-call, calibration, enablement, publication
+or spend authority. Entity Model trigger: **yes** — an owner-run action
+that makes one real call, a staging exemption, a grant binding, an evidence
+artifact and an owner recovery action.
+
+**Prerequisite (R0-08, PR #147):** the reviewed profile version equals the
+pin (2.1.294). The harness additionally refuses, before any reservation,
+when `ModelProfiles.cli_version/0` differs from the pin identity's version
+or `PinnedExecutable.verify/0` fails. That check is offline; it does not
+validate runtime model resolution.
+
+**Spend disclosure (shown to the owner before each confirmation):** the
+per-call init attestation (model id, CLI 2.1.294, empty tools, MCP servers
+and slash commands) kills the CLI on a mismatch, but the prompt is given to
+the CLI at launch, so traffic may already have left. Every reserved attempt
+stays charged, including drift, invalid, failed and unknown outcomes. None
+is retried automatically. An observed model id is never adopted
+automatically.
 
 ### 8.1 Requirements
 
 | ID | Requirement |
 |---|---|
-| E-R1 | **Owner-run and attended only.** The only entry point is `bin/calibration-console calibrate <profile>` (and `calibrate-recover <profile>`), run by the owner in a terminal, one profile per run, one attempt per run. It types back a confirmation (`CALIBRATE opus`) before any reservation. No agent, job, schedule, web page or API starts it. |
-| E-R2 | **Same fixed instance.** It runs inside the console's VM rules: the test-seam build, the exact `sdr_agent_calibration` database on localhost:5520, the per-machine secrets, no `DATABASE_URL`, no reset path. The web listener is not started for `calibrate`. |
-| E-R3 | **The one staging exemption.** `:real_model_staged` is lifted only for the single invocation this command reserves: a test-seam-only, process-scoped exemption bound to that invocation id, valid only in the calibration console VM, only for a `:proof` run, only under the calibration admission marker, and only with the pinned CLI (`SDR_CLAUDE_CLI_BIN` verified by `PinnedExecutable`). Every other call in every build stays staged. |
-| E-R4 | **G-R0 binding.** Admission charges the attempt to the single active grant in this database whose terms are G-R0's: profiles `claude_cli_opus` and `claude_cli_sonnet`, total 4, a `:proof` allocation per profile of 2, expiry 2026-10-19 05:59 UTC. Zero or several matching grants refuse before reservation. Missing, revoked, expired or exhausted refuse through the existing admission refusals. Agents never create or edit the grant. |
-| E-R5 | **Fixed synthetic prompt and schema.** A versioned, code-owned prompt (`calibration-prompt/1`: a fictional company and question, no real names, emails or data) and a fixed output schema (`calibration-output/1`). Their hashes go into the evidence. The prompt cannot be supplied or edited at run time. |
-| E-R6 | **Candidate tuple.** The calibration marker's entry is the profile's current reviewed identity (CLI version, resolved model) with `method: :propagated_id` and each supported projection version as a candidate. Admission (B1–B5, B4') refuses anything else. |
-| E-R7 | **Never released.** The result is decided `:calibration` (latch with `evidence_sha256`) whatever the outcome: completed, invalid output, failed or unknown. It is never `:released` and never read for business use. The attempt stays charged. |
-| E-R8 | **Evidence.** `docs/audit/r0-calibration-<profile>-<n>.json`, metadata only, modelled on the S12d proof files: tuple, invocation and run ids, attested CLI version, timings, witness links and their evidence hashes, classification, reason codes, prompt and schema version hashes, output validation status and its hash. No prompt text, response text, parsed output or credentials. Written atomically before the latch; the latch's `evidence_sha256` is the file's sha256. |
-| E-R9 | **Ordering and recovery.** The B4' predecessor barrier holds: an unlatched earlier proof invocation blocks. `calibrate-recover <profile>` (owner-run) makes a still `reserved` or `sent` calibration invocation terminal through the existing sweeper rules (reserved → failed unlaunched; sent → unknown, never re-sent), then writes its evidence and latch. It makes no model call. |
-| E-R10 | **Promotion is separate.** Codex reviews the evidence files. On PASS, a separate reviewed config PR adds the exact tuple to the shipped allowlist. The harness never promotes anything. |
+| E-R1 | **Owner-run, attended, one call per confirmation.** `bin/calibration-console calibrate <profile>` makes at most one reservation and one launch per run, after the owner types `CALIBRATE <profile>`. Nothing schedules, batches or repeats it; a second profile needs a second command. No agent, job, web page or API can start it. |
+| E-R2 | **Same fixed instance.** The console's rules hold: test-seam build, exactly `sdr_agent_calibration` on localhost:5520, per-machine secrets, no `DATABASE_URL`, no reset path. `calibrate` starts no web listener, no Oban queues and no ordinary model server; `serve` stays Fake with no model server. |
+| E-R3 | **One sealed staging exemption (R10-1).** Exactly one staging check changes, for exactly one call (8.2). Everything else on the real path stays mandatory and unchanged. |
+| E-R4 | **Exact G-R0 binding (R10-2).** The attempt is charged to one selected grant and allocation, revalidated under the existing lock order at reservation and again at launch, with no fallback to any other budget (8.3). |
+| E-R5 | **Fixed synthetic input.** Code-owned `calibration-prompt/1` (fictional company and question; no real names, emails or data) and `calibration-output/1` schema. Their SHA-256 commitments are bound into the exemption and the evidence. Neither can be supplied or edited at run time. |
+| E-R6 | **One candidate, evaluated once (R10-5).** One exact six-key candidate entry per call; one bounded, no-model reconciliation of that call's captured exchange; the actual evaluated projection and method are recorded separately from the candidate (8.6). Projection candidates never mean extra calls. |
+| E-R7 | **Never released.** The release is `:calibration` with `evidence_sha256`, whatever the outcome. `:calibration` means "evidence latched", not "qualified for promotion". The output is never `:released` or read for business use. |
+| E-R8 | **Deterministic, create-only evidence (R10-4)** (8.5). |
+| E-R9 | **Targeted, quiescent recovery (R10-3)** (8.4). |
+| E-R10 | **Promotion is separate.** Codex reviews the evidence. A separate reviewed config PR adds a tuple; the harness never edits the allowlist or any grant. |
 
-### 8.2 Entity delta
+### 8.2 The staging exemption and dispatch (R10-1)
 
-| Entity | New / existing | Delta | Invariants / lifecycle | Actor / locks | Tests (RED first) |
-|---|---|---|---|---|---|
-| `Mix.Tasks.Sdr.Calibration.Console` `calibrate`, `calibrate-recover` | Existing task, new subcommands | Two owner-run commands with the console's guards; no web listener; typed confirmation | One profile and one attempt per run; refuses without the exact confirmation, a missing pin, an untrusted store, or a missing or ambiguous G-R0 | Owner at the terminal; the run and calls act as `agent_runtime` in the calibration tenant | Wrong DB/env/port refusals reused; missing confirmation; missing pin; no G-R0; two G-R0-shaped grants; non-proof profile names |
-| Calibration staging exemption | New (test-seam only) | A private, process-scoped exemption naming one invocation id, established only by `calibrate` after reservation | Absent in non-test-seam builds; never a config flag; ends with the command; any other invocation, process or run stays `:real_model_staged` | ClaudeCLI checks it at launch under the existing admission | A second invocation in the same VM is still staged; a forged exemption is refused; a non-console VM ignores it |
-| AgentRun (`:proof` origin) | Existing | Created by `calibrate` for one call | Stops terminal after the latch; never retried automatically | `agent_runtime` | Run stops; no second call |
-| ModelInvocation | Existing | Reserved under the calibration marker (B4), launched once | Charged; never released; `:calibration` latch only | Existing reservation/launch lock orders | One reservation, one launch, one latch per command |
-| ModelResultRelease `:calibration` | Existing (slice A) | Decided by the harness with `evidence_sha256` of the written file | Immutable; identical replay returns it; never `:released` | Existing decide locks under `CalibrationContext` (scoped to this profile and invocation) | Latch for completed, invalid, failed and unknown outcomes; replay; no business read |
-| Calibration evidence file | New artifact | `docs/audit/r0-calibration-<profile>-<n>.json`, metadata only | Written atomically before the latch; never overwritten (`<n>` increments); contains no content | Owner's machine; committed to git through a reviewed PR | Canary prompt and response text absent from the file; hash equals latch; no overwrite |
+Today `Runtime.resolve/1` refuses the real server before any reservation,
+and ClaudeCLI's `staged/1` refuses later, in the **server** process. The
+console starts no model server. So `calibrate` uses its own orchestration;
+it does not go through `Runtime`, `SDR.Model` or a worker:
 
-### 8.3 Open questions for the owner
+1. **Preflight** (no locks, no writes): pin verified and equal to the
+   profile's version; witness store trusted; G-R0 selected (8.3);
+   predecessor barrier clear (B4'); single-flight lock acquired (8.4);
+   owner confirmation.
+2. **Private server.** `calibrate` starts an **unnamed** ClaudeCLI server
+   linked to the command process, with the real pinned executable, the real
+   proxy shim and its own reaper. It is never registered under the
+   Runtime's name, so no other caller can reach it. It is started without
+   `test_launcher:` and without any injectable launch-admission or
+   pin-identity option. Those test seams stay for hermetic tests only and
+   are never real-call authority.
+3. **Proof run and reservation.** A `:proof` AgentRun, then
+   `Agents.reserve_model_invocation/3` with the calibration marker (B4) and
+   the grant binding (8.3). This commits the charge.
+4. **Sealed authority.** `CalibrationAuthority.issue/1` (test-seam builds
+   only) registers an entry, under an unguessable key in a protected ETS
+   table owned by the authority registry, binding: invocation id, run id,
+   tenant id, profile id, the command's pid, the private server's pid, the
+   prompt and schema commitments, and the console instance id (a value
+   generated at VM start and verified against the console's guard state).
+   It returns only an opaque reference.
+5. **Call.** The command calls the private server with that reference. In
+   `staged/1` the server looks up the reference and requires: an
+   unconsumed entry; caller pid equals the bound command pid; `self()`
+   equals the bound server pid; the request's invocation, run, tenant and
+   profile equal the bound ones; the prompt and schema hashes match; and the
+   console instance id matches. On success the entry is marked consumed
+   **before** the launch. Any mismatch keeps `:real_model_staged`.
+6. **Unchanged after the exemption:** pin identity and hash, proxy health
+   and routing, init attestation (model, version, tools, MCP, slash),
+   deadline, process-tree reaping, real `Agents.admit_launch/3` (all slice
+   B launch checks), and output schema validation and settlement.
+7. **Revocation.** The registry monitors the command pid and the server
+   pid. The entry is removed on terminal return, on error, or when either
+   dies. A consumed entry can never be used again.
 
-- **OQ-E1:** the evidence files are synthetic and metadata-only, like the
-  S12d proof files already in `docs/audit/`. Commit them to the public
-  repo (proposed), or keep them private?
-- **OQ-E2:** run all four attempts in one sitting (about 10 minutes), or
-  one profile per day?
+**Threat model (stated honestly):** this is a trusted in-process boundary.
+It stops other callers, workers, second invocations, second servers and
+replays in the same VM. It does not protect against arbitrary code run by
+the owner inside the console VM.
 
-### 8.4 Gate record
+**Never exempted:** ordinary `Runtime` calls, any build without test seams,
+any VM other than the calibration console, any call without the marker, any
+non-`:proof` run, any second invocation.
 
-- Round 10 (harness, proposed): **UNREVIEWED**, pending Codex (recorded in section 9).
+### 8.3 G-R0 binding (R10-2)
+
+**Selection** (preflight, read-only): exactly one grant in the tenant with
+status `:active`, `profile_ids == [:claude_cli_opus, :claude_cli_sonnet]`,
+`total_attempts == 4`, `expires_at == 2026-10-19 05:59:00Z`, and exactly
+two unreleased spendable allocations, both `key: :proof`,
+`applies_to: [:proof]`, `attempts: 2`, one per profile (`profile_id`
+set). Existing start, window, per-day and release terms still apply. Zero
+or several matches refuse with `:calibration_grant_unavailable` before any
+reservation.
+
+**Binding value** `%{grant_id, grant_revision, allocation_id, profile_id}`
+travels with the calibration marker into the reservation. It is recorded on
+the reservation event (`calibration_binding` argument, next to
+`calibration_tuple`).
+
+**At reservation** (existing order: run → candidate grants `FOR SHARE` →
+allocations `FOR SHARE` → head): the candidate set is restricted to the
+bound grant; under its share lock the grant's `revision` must equal
+`grant_revision`, its terms must still match the selection shape, and the
+charged allocation must be exactly `allocation_id`. Otherwise
+`:calibration_grant_mismatch`, recorded through the existing refusal
+receipt (one Failure, `model.reservation.refused`).
+
+**At launch** (existing order: run → Operation `FOR SHARE` → invocation →
+grant `FOR SHARE` → allocation `FOR SHARE` → head): the invocation's
+`grant_id` and `allocation_id` must equal the recorded binding and the
+grant's revision must still equal `grant_revision`; otherwise the launch is
+refused (`:calibration_grant_mismatch`, B1's one-Failure launch receipt).
+An amendment or revocation between reservation and launch therefore
+refuses the call; there is no fallback to any other budget.
+
+**No lock spans the CLI call, capture or file I/O.** Agents never create or
+edit the grant.
+
+### 8.4 Recovery (R10-3)
+
+**Single flight across processes.** Every `calibrate` and
+`calibrate-recover` holds the console lock `~/.local/state/sdr-agent/
+calibration/run.lock` (a directory created atomically, mode 0700, holding
+the command's OS pid, start time and, once launched, the CLI tree's root
+OS pid recorded through the reaper). A live holder blocks any other
+command. A dead holder's lock is taken over only by `calibrate-recover`,
+and only after quiescence is proven.
+
+**Quiescence.** The target is quiescent only when no live process holds the
+lock and every recorded CLI tree pid is gone (or a zombie), checked with
+the reaper's `alive?/1`. An unconfirmed tree keeps the target blocked
+(`:calibration_not_quiescent`); a missing Oban job or wall-clock age never
+counts as proof.
+
+**Targeting.** `calibrate-recover <invocation_id>` names one exact
+invocation. It must be a generation-2 ClaudeCLI invocation of a `:proof`
+run in this tenant with exactly one original `model.invocation.reserved`
+event. The owner confirms the printed id, profile and status. It never
+synthesizes a reservation event, resets counters, or skips a predecessor.
+Malformed historical authority is reported, not repaired.
+
+**No grant needed.** Recovery makes no model call and spends nothing, so it
+does not require an active G-R0. The original charge is kept.
+
+**Transitions** (owner action `:recover_calibration`, actor
+`agent_runtime` on the owner's confirmation; locks: run `FOR UPDATE` →
+Operation `FOR SHARE` (none for proof runs) → invocation `FOR UPDATE` →
+head):
+
+| Invocation status | Action |
+|---|---|
+| `reserved` | → `failed`, `sent_at` nil, error kind `abandoned_before_launch` (never re-sent) |
+| `sent` | → `unknown` (never re-sent) |
+| `completed`, `failed`, `unknown` (including invalid output) with no evidence or latch | finish: evidence (8.5), latch, run stop |
+| latched, run still running | run stop only |
+
+**Run terminal states:** a proof run ends `:succeeded` with the new
+`status_reason :calibration_latched` once its latch commits, whatever the
+model outcome (the outcome is in the evidence). It opens no attention
+Failure for a model-level failure. If the latch cannot commit, the run
+stays running for `calibrate-recover`. Proof rows never go through slice
+C's ordinary gate (it rejects proof dispositions by design).
+
+### 8.5 Evidence artifact (R10-4)
+
+- **Identity:** one file per invocation, named deterministically:
+  `r0-calibration-<profile>-<invocation_id>.json`. No ordinal.
+- **Location:** owner-local `~/.local/state/sdr-agent/calibration/evidence/`
+  (directory 0700, files 0600, symlinks refused, ownership checked).
+  Copying to the public repo happens only if the owner accepts OQ-E1, by a
+  reviewed PR.
+- **Content:** a frozen snapshot in closed schema `r0-calibration-evidence/1`,
+  canonicalized with `sdr-canonical-json/1`, built only from committed rows
+  (8.6).
+- **Order:** (1) the terminal invocation commits; (2) the snapshot is read
+  with no locks held; (3) the file is published create-only: a temp file in
+  the same directory, `fsync`, then `link(2)` to the final name, which fails
+  if the name exists; (4) the `:calibration` latch is decided with
+  `evidence_sha256` = SHA-256 of the file bytes; (5) the run stop. Steps 4
+  and 5 are one transaction in the existing decide/stop lock order. File I/O
+  never happens under a row or head lock.
+- **Replay and conflicts:** an existing file is reused only if its bytes
+  equal the freshly computed snapshot (or, when a latch exists, its hash
+  equals the latch's `evidence_sha256`). A different file, a symlink, a
+  missing file under an existing latch, or a conflicting latch fails closed
+  (`:calibration_evidence_conflict`) for the owner. A concurrent loser
+  converges on the same file and latch; it never writes a second file or
+  release.
+
+### 8.6 Candidate and evidence contract (R10-5)
+
+- **Candidate:** the single exact six-key entry admitted by B4:
+  `{claude_cli, <pinned version>, <profile>, <profile's resolved model>,
+  <current prompt-builder projection>, propagated_id}`.
+- **Evaluation:** after the call, one bounded reconciliation of its
+  captured exchange with `methods: [candidate]` and the gate's receipt.
+  It makes no model call and writes no allowlist entry.
+- **Recorded separately:** the candidate; the **actual** evaluated
+  projection version and method; the equality outcome, one of
+  `match`, `projection_differs`, `not_enabled`, `unsupported`, `ambiguous`,
+  `timeout`, `unreadable` or `version_drift`; the link ids, inventory and
+  receipt references, and the application and proxy hashes; the attested
+  CLI version and model id. An inferred-only result is never presented as
+  proof.
+- **Closed schema fields:** schema version, canonicalization version,
+  invocation id, run id, tenant id, profile, candidate, evaluated
+  projection and method, outcome, link ids with their evidence hashes,
+  inventory hash, prompt and schema commitments, attested version and model
+  id, invocation status, output validation status and the output's SHA-256
+  commitment, and timestamps. **No** prompt text, response text, parsed
+  output, raw refusal or validation-error text, unknown attestation text,
+  stdout or stderr, or credentials.
+- **Sources:** the committed invocation row, its witness links and their
+  evidence, the release, and the code-owned prompt and schema versions.
+- **Canaries:** tests put a unique canary in the prompt, the response, a
+  refusal, a validation error, stderr and an unknown attestation field, and
+  prove it is absent from the file, logs, terminal output and audit
+  payloads. Access to the quarantined output uses only the existing scoped
+  and audited seams.
+
+### 8.7 Entity delta
+
+| Entity | New / existing | Delta | Invariants / lifecycle | Actor / locks |
+|---|---|---|---|---|
+| Console task `calibrate`, `calibrate-recover` | Existing task, new subcommands | One call per confirmation; explicit recover target | Console guards; single-flight lock; no listener, jobs or ordinary server | Owner at the terminal; calls as `agent_runtime` |
+| `CalibrationAuthority` (test-seam only) | New | Sealed one-shot registry entry bound per 8.2 | Consumed before launch; revoked on return, error or death; absent in non-test-seam builds | In-VM registry; checked in the server process |
+| ClaudeCLI `staged/1` | Existing | Admits only a matching, unconsumed authority | Every other check unchanged | Server process |
+| ModelInvocation `:reserve` | Existing | New argument `calibration_binding` recorded on the reservation event | Immutable; one original event | Existing reservation order |
+| Admission (reserve and launch) | Existing | Candidate set restricted to the bound grant; revision and allocation equality; new reason `:calibration_grant_mismatch` | Existing one-Failure receipts | Existing orders (8.3) |
+| ModelCallGrant / ModelCallAllocation | Existing | Read for binding; revision compared | Unchanged schema; agents never write | Existing share locks |
+| AgentRun | Existing | New `status_reason :calibration_latched` for `:succeeded` proof runs | Proof run terminal after its latch | Existing stop locks |
+| Owner recovery action | New | `:recover_calibration` with the transitions in 8.4 | Quiescence and single-flight required; no model call; no grant needed | 8.4 lock order |
+| ModelResultRelease `:calibration` | Existing (slice A) | `evidence_sha256` from the published file | Immutable; replay identical; never `:released` | Existing decide locks under `CalibrationContext` |
+| Evidence file | New artifact | Deterministic, create-only (8.5) | Never overwritten; closed schema (8.6) | Owner-local; no locks held |
+
+### 8.8 Test plan (RED first, hermetic; no real call)
+
+- **Exemption:** an issued authority admits only its own call; replay after
+  consumption; another caller pid, another invocation, profile or server; a
+  dead command or server; forged and malformed references; a non-console
+  VM and a build without test seams all stay `:real_model_staged`.
+  Ordinary `Runtime` calls stay staged.
+- **Binding:** an amendment or revocation under a held lock, before
+  reservation and before launch; an unrelated eligible grant; ambiguity;
+  both per-profile caps.
+- **Recovery:** a live command; an unconfirmed tree; a missing launch
+  receipt; crashes after the file, after the latch and before the run stop;
+  an expired grant (recovery still finishes); a foreign target; no model
+  launch.
+- **Evidence:** create-only collision; concurrent recovery; disk or write
+  failure; a mutated or missing file; exact replay; the canaries in 8.6.
+- **Preflight:** a pin and profile version mismatch refuses before
+  reservation.
+
+### 8.9 Open questions for the owner
+
+- **OQ-E1:** keep the evidence files private and local (recommended until
+  you decide), or also commit them to the public repo through a reviewed PR?
+- **OQ-E2:** one profile and one attempt per command, with the evidence
+  reviewed before the next. You may still do all four in one sitting; the
+  harness never runs them automatically. Is that acceptable?
 
 ## 9. Gate record
 
@@ -773,3 +993,9 @@ recovery action).
     yet.
 - Round 10 (calibration harness, section 8, proposed at this commit):
   **UNREVIEWED**, pending Codex entity review.
+- Round 10 at a608ead: **NEEDS-REVIEW** (Codex, reply
+  m_1791867540000000400_35aef1e3, report sha256 a5981a50). Five contracts
+  (exemption scope and dispatch, grant binding, targeted quiescent
+  recovery, artifact identity and replay, candidate and evidence contract)
+  plus the pin/profile version alignment (now R0-08, PR #147).
+- Round 11 (section 8 revised): **UNREVIEWED**, pending Codex recheck.
