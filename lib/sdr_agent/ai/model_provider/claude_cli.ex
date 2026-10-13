@@ -665,9 +665,12 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   defp run(request, state, caller, deadline) do
     with :ok <- pinned_launch(state),
-         :ok <- staged(state),
+         {:ok, expected} <- staged(state, request, caller),
          {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
          :ok <- refuse_bypass(state.environment || System.get_env()) do
+      # Only the exemption sets the launch expectation; a caller's own
+      # value is always replaced.
+      request = Map.put(request, :calibration_launch, expected)
       launch(request, state, caller, deadline, witness_env)
     else
       error -> {error, state}
@@ -688,9 +691,19 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   end
 
   # R0-02 staging: the real launcher spends no call until R0-03, C9 and
-  # R0-07 land; only a test build's injected launcher runs.
-  defp staged(%{test_launcher: true}), do: :ok
-  defp staged(_state), do: {:error, :real_model_staged}
+  # R0-07 land; only a test build's injected launcher runs, or (test-seam
+  # builds, R0-07 packet 8.13) one exempted calibration call of a private
+  # server, which returns its launch expectation.
+  defp staged(%{test_launcher: true}, _request, _caller), do: {:ok, nil}
+
+  if @test_seams do
+    alias SdrAgent.AI.ModelProvider.ClaudeCLI.CalibrationExemption
+
+    defp staged(state, %{calibration: _} = request, caller),
+      do: CalibrationExemption.check(state, request, caller)
+  end
+
+  defp staged(_state, _request, _caller), do: {:error, :real_model_staged}
 
   if @test_seams do
     defp test_launcher?(opts),
@@ -713,7 +726,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   defp admit_launch(state, request) do
     id = request.witness.model_invocation_id
 
-    case state.launch_admission.(id, state.profile.id, actor: Map.get(request, :actor)) do
+    opts = [actor: Map.get(request, :actor)] ++ launch_expectation(request)
+
+    case state.launch_admission.(id, state.profile.id, opts) do
       {:ok, _sent} -> :ok
       # R0-07 slice B (row B1): the committed launch refusal's typed receipt
       # (metadata only) reaches the caller unchanged.
@@ -727,6 +742,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   catch
     _kind, _reason -> {:error, :launch_admission_failed}
   end
+
+  defp launch_expectation(%{calibration_launch: %{} = expected}),
+    do: [calibration_launch: expected]
+
+  defp launch_expectation(_request), do: []
 
   defp witness_env(%{model_invocation_id: id, traceparent: traceparent})
        when is_binary(id) and is_binary(traceparent) do

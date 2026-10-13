@@ -265,7 +265,13 @@ defmodule SdrAgent.AI.ModelProvider do
   defp actor(invocation),
     do: %SdrAgent.Actor{type: :agent_runtime, tenant_id: invocation.tenant_id}
 
-  defp request_body(request) do
+  @doc """
+  The stored request body of `request`: JSON of its `id`, `operation`,
+  `prompt` and rendered output `schema`. Its SHA-256 is the invocation's
+  `request_sha256`; the calibration console stores its request with this
+  same serialization (R0-07 packet 8.13).
+  """
+  def request_body(request) do
     Jason.encode!(%{
       id: request.id,
       operation: request.operation,

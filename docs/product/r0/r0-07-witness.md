@@ -2109,4 +2109,5 @@ and runs everywhere.
     (01a1365c); code **scoped APPROVE** at b39b62d (01a13674).
   - d1b staging exemption: first note **NEEDS-REVIEW** (01a13677); delta
     8.13 **NEEDS-REVIEW** at ad2948e (01a13685); **entity PASS** at
-    b77426a (065416c6). Hermetic RED next.
+    b77426a (065416c6). RED **PASS / VERIFIED RED** at eacfcb0 (11c5b5b1;
+    positive shim test executed locally). GREEN in review.

@@ -405,6 +405,12 @@ defmodule SdrAgent.Agents.Admission do
       written before R0 (generation 1);
     * `:profile_mismatch_at_launch` (`:profile_mismatch`) — reserved under
       another profile than the server runs;
+    * only for an exempted calibration call (`expected`, see
+      `calibration_launch/1`; packet 8.13 C8): `:calibration_not_authorized`
+      with `:exemption_scope` (not a `:proof` run, or the run has an
+      Operation), `:exemption_input` (the invocation's prompt or output
+      schema reference is not the expected one) or `:exemption_request`
+      (its stored request is not the expected one);
     * the R0-07 slice B admission gate (`Gate.admit_launch/3`, with the
       store observation `store` taken before the launch's locks):
       `:calibration_not_authorized`, `:calibration_evidence_pending`,
@@ -413,14 +419,16 @@ defmodule SdrAgent.Agents.Admission do
     * `:calibration_grant_mismatch` (`:binding_changed` or
       `:binding_unrecorded`) — a G-R0 binding recorded at reservation no
       longer matches the charge, the profile or the grant's revision, or
-      the recorded binding is malformed (packet 8.3);
+      the recorded binding is malformed (packet 8.3); with `expected`, a
+      recorded binding is required (`:binding_unrecorded` when there is
+      none);
     * `:grant_ineligible_at_launch` with the failed check: `:grant_missing`,
       `:grant_revoked`, `:grant_not_started`, `:grant_expired`,
       `:profile_not_in_grant`, `:allocation_not_in_grant`,
       `:allocation_profile_restricted`, `:bucket_not_applicable` or
       `:allocation_unavailable`.
   """
-  def launch_check(run, invocation, effective_profile, now, store) do
+  def launch_check(run, invocation, effective_profile, now, store, expected \\ nil) do
     cond do
       run.status != :running ->
         {:error, :run_not_running_at_launch, run.status}
@@ -432,10 +440,73 @@ defmodule SdrAgent.Agents.Admission do
         {:error, :profile_mismatch_at_launch, :profile_mismatch}
 
       true ->
-        with :ok <- Gate.admit_launch(run, invocation, store),
-             :ok <- launch_binding(invocation, run.tenant_id),
+        with :ok <- exemption(run, invocation, expected),
+             :ok <- Gate.admit_launch(run, invocation, store),
+             :ok <- launch_binding(invocation, run.tenant_id, not is_nil(expected)),
              do: launch_terms(run, invocation, now)
     end
+  end
+
+  @doc """
+  The `calibration_launch:` option of `Agents.admit_launch/3` (packet 8.13):
+  `nil` when it is absent (ordinary launch behaviour), the expectation when
+  it is exactly `%{run_id:, tenant_id:, request_sha256:, prompt_ref:,
+  schema_ref:}` (lowercase UUID strings, a 32-byte request SHA-256, and
+  references of exactly `%{id:, version:, sha256:}` with a 32-byte
+  SHA-256), and `:invalid` for any other present value, an explicit `nil`
+  included. It can only add refusals.
+  """
+  def calibration_launch(opts) do
+    case Keyword.fetch(opts, :calibration_launch) do
+      :error -> nil
+      {:ok, value} -> if expectation?(value), do: value, else: :invalid
+    end
+  end
+
+  @expectation_keys [:prompt_ref, :request_sha256, :run_id, :schema_ref, :tenant_id]
+  @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+  defp expectation?(%{} = expected) do
+    Enum.sort(Map.keys(expected)) == @expectation_keys and uuid?(expected.run_id) and
+      uuid?(expected.tenant_id) and sha256?(expected.request_sha256) and
+      ref?(expected.prompt_ref) and ref?(expected.schema_ref)
+  end
+
+  defp expectation?(_value), do: false
+
+  defp ref?(%{id: id, version: version, sha256: sha256} = ref),
+    do: map_size(ref) == 3 and is_binary(id) and is_binary(version) and sha256?(sha256)
+
+  defp ref?(_ref), do: false
+
+  defp uuid?(value), do: is_binary(value) and value =~ @uuid
+  defp sha256?(value), do: is_binary(value) and byte_size(value) == 32
+
+  # Packet 8.13 C8: an exempted calibration call launches only a proof run's
+  # own call (no Operation) with the code-owned input it was reserved with.
+  defp exemption(_run, _invocation, nil), do: :ok
+
+  defp exemption(run, invocation, expected) do
+    cond do
+      run.usage_origin != :proof or not is_nil(run.operation_id) ->
+        {:error, :calibration_not_authorized, :exemption_scope}
+
+      not fixed_input?(invocation, expected) ->
+        {:error, :calibration_not_authorized, :exemption_input}
+
+      invocation.request_sha256 != expected.request_sha256 ->
+        {:error, :calibration_not_authorized, :exemption_request}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp fixed_input?(invocation, %{prompt_ref: prompt, schema_ref: schema}) do
+    {invocation.prompt_template_id, invocation.prompt_template_version,
+     invocation.prompt_template_sha256} == {prompt.id, prompt.version, prompt.sha256} and
+      {invocation.output_schema_id, invocation.output_schema_version,
+       invocation.output_schema_sha256} == {schema.id, schema.version, schema.sha256}
   end
 
   # The G-R0 binding recorded at reservation (packet 8.3 "At launch"): the
@@ -443,10 +514,12 @@ defmodule SdrAgent.Agents.Admission do
   # its share lock) is still at the bound revision. An amendment or
   # revocation refuses, a malformed recorded binding is never read as a
   # legacy absence, and there is no fallback to another budget.
-  defp launch_binding(invocation, tenant_id) do
+  defp launch_binding(invocation, tenant_id, required?) do
     case Gate.recorded_binding(invocation) do
       {:ok, nil} ->
-        :ok
+        if required?,
+          do: {:error, :calibration_grant_mismatch, :binding_unrecorded},
+          else: :ok
 
       {:ok, binding} ->
         if bound?(invocation, binding, charged(ModelCallGrant, invocation.grant_id, tenant_id)),
