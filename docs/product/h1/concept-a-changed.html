@@ -13,7 +13,7 @@
       --line:#e5e8ed;--line-2:#eef0f3;
       --accent:#0f6b4e;--accent-hover:#0b563e;--accent-ink:#fff;--accent-tint:#e5f3ec;--accent-line:#bfe0cf;
       --red:#b42318;--red-tint:#fdecea;--red-line:#f5c6c0;
-      --amber:#94570a;--amber-tint:#fdf3e1;--amber-line:#efd29b;
+      --amber:#94570a;--amber-tint:#fdf3e1;--amber-line:#efd29b;--del-ink:#9b2318;--del-tint:#fde4e1;--ins-ink:#0f5c3c;--ins-tint:#d9f2e3;
       --mark:#fff3c4;--mark-ink:#5a4300;
       --shadow-sm:0 1px 2px rgb(20 26 36/.05);
       --shadow:0 1px 2px rgb(20 26 36/.04),0 4px 14px rgb(20 26 36/.05);
@@ -29,7 +29,7 @@
         --line:#272d36;--line-2:#20252d;
         --accent:#3fbf8f;--accent-hover:#5ccfa2;--accent-ink:#06261a;--accent-tint:#13302a;--accent-line:#22513f;
         --red:#ff8a7d;--red-tint:#3a1d1b;--red-line:#5a2c28;
-        --amber:#f0b45a;--amber-tint:#33281a;--amber-line:#5c4521;
+        --amber:#f0b45a;--amber-tint:#33281a;--amber-line:#5c4521;--del-ink:#ffb4ab;--del-tint:#401f1c;--ins-ink:#9de4bf;--ins-tint:#16392a;
         --mark:#3b3420;--mark-ink:#f5e2a6;
         --shadow-sm:0 1px 2px rgb(0 0 0/.3);
         --shadow:0 1px 2px rgb(0 0 0/.3),0 6px 18px rgb(0 0 0/.25);
@@ -313,6 +313,42 @@
       .strip{flex-wrap:wrap;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:var(--r);background:var(--surface)}
       .empty{padding:44px 20px 48px}
     }
+
+    /* Changed-state: what changed */
+    .reason{display:flex;flex-direction:column;align-items:flex-start;gap:4px;min-width:0}
+    .chg-sum{font-size:12px;line-height:1.4;color:var(--muted)}
+    .d-body{position:relative}
+    .seg-input{position:absolute;top:0;left:0;width:1px;height:1px;margin:0;opacity:0}
+    .seg{display:inline-flex;gap:2px;margin:0 0 16px;padding:2px;border:1px solid var(--line);border-radius:8px;background:var(--sunk)}
+    .seg label{padding:5px 14px;border-radius:6px;color:var(--muted);font-size:13px;font-weight:600;cursor:pointer;transition:background .15s,color .15s}
+    .seg label:hover{color:var(--ink)}
+    .seg-email:checked ~ .seg .l-email,.seg-diff:checked ~ .seg .l-diff{background:var(--surface);color:var(--ink);box-shadow:var(--shadow-sm)}
+    .seg-email:focus-visible ~ .seg .l-email,.seg-diff:focus-visible ~ .seg .l-diff{outline:2px solid var(--focus);outline-offset:2px}
+    .pane-diff{display:none}
+    .seg-diff:checked ~ .pane-email{display:none}
+    .seg-diff:checked ~ .pane-diff{display:block}
+    .cmp{margin:0 0 16px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r);background:var(--sunk);font-size:13px;color:var(--ink-2)}
+    .cmp p{margin:0}
+    .cmp .ver{display:inline-block;padding:0 6px;border-radius:5px;border:1px solid var(--line);background:var(--surface);font-size:12px;font-weight:650;color:var(--ink);font-variant-numeric:tabular-nums}
+    .cmp .sub{margin-top:3px;font-size:12px;color:var(--amber);font-weight:600}
+    .chg-h{margin:16px 0 6px;font-size:12px;font-weight:600;color:var(--faint)}
+    .chg-line{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:13.5px;overflow-wrap:anywhere}
+    .chg-line .to{color:var(--faint)}
+    del,ins{padding:1px 3px;border-radius:3px;text-decoration-thickness:1.5px}
+    del{background:var(--del-tint);color:var(--del-ink);text-decoration-line:line-through}
+    ins{background:var(--ins-tint);color:var(--ins-ink);text-decoration-line:underline;text-underline-offset:3px}
+    .redline{padding:14px 16px;border:1px solid var(--line);border-radius:var(--r);background:var(--raised);font-size:14px;line-height:1.7}
+    .redline p{margin:0 0 10px}.redline p:last-child{margin:0}
+    .redline .same{color:var(--faint)}
+    .cite.gone{background:var(--del-tint);border-color:transparent;color:var(--del-ink)}
+    .cite.gone span{text-decoration:line-through}
+    .cite.new{background:var(--ins-tint);border-color:transparent;color:var(--ins-ink)}
+    .cite.same{opacity:.75}
+    .cite i{display:grid;place-items:center;width:18px;height:18px;font-style:normal;font-size:12px;font-weight:700}
+    .prov{margin:6px 0 0;padding:0;list-style:none;display:grid;gap:5px;font-size:12.5px;color:var(--muted)}
+    .prov li{display:flex;align-items:center;gap:8px}
+    .prov .ver{display:inline-block;min-width:26px;padding:0 5px;border-radius:5px;border:1px solid var(--line);background:var(--sunk);font-size:11.5px;font-weight:650;text-align:center;color:var(--ink-2)}
+    .note-muted{margin:16px 0 0;font-size:12px;color:var(--faint)}
     @media (prefers-reduced-motion:reduce){
       *,*::before,*::after{transition-duration:0s!important;transition-delay:0s!important;animation:none!important}
       a.tile:hover{transform:none}
@@ -380,7 +416,7 @@
             <li class="row changed">
               <div class="person"><span class="av t4" aria-hidden="true">JP</span><span class="who"><span class="name">Jules Pineda</span><span class="title">Developer Advocate</span></span></div>
               <div class="co"><span class="mono m-orbit" aria-hidden="true">O</span><span>Orbit Tools</span></div>
-              <div class="reason"><span class="tag amber"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5.5h10l-3-3M13.5 10.5h-10l3 3"/></svg><span><strong>Updated</strong> · new recipient</span></span></div>
+              <div class="reason"><span class="tag amber"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5.5h10l-3-3M13.5 10.5h-10l3 3"/></svg><span><strong>Updated</strong></span></span><span class="chg-sum">Recipient changed · subject edited · 2&nbsp;sentences&nbsp;changed</span></div>
               <div class="fresh"><span class="dot amber" aria-hidden="true"></span>Changed just now</div>
               <div class="act"><a class="btn primary" href="#review-jules">Review updated email<span class="sr"> for Jules Pineda</span></a></div>
             </li>
@@ -435,8 +471,12 @@
       <a class="close" href="#top" aria-label="Close review"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></a>
     </div>
     <div class="d-body">
+      <input class="seg-input seg-email" type="radio" name="jules-view" id="jules-v-email" checked>
+      <input class="seg-input seg-diff" type="radio" name="jules-view" id="jules-v-diff">
+      <div class="seg"><label class="l-email" for="jules-v-email">Email</label><label class="l-diff" for="jules-v-diff">What changed</label></div>
+      <div class="pane-email">
       <p class="d-note"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5.5h10l-3-3M13.5 10.5h-10l3 3"/></svg>Updated version · recipient was Maya Chen</p>
-      <dl class="fields"><dt>To</dt><dd><strong>Jules Pineda</strong> &lt;jules@orbit.example.org&gt;</dd><dt>Subject</dt><dd><strong>Right person for developer onboarding?</strong></dd></dl>
+      <dl class="fields"><dt>To</dt><dd><strong>Jules Pineda</strong> &lt;jules@orbit.example.org&gt;</dd><dt>Subject</dt><dd><strong>Who owns Orbit’s getting-started tutorials?</strong></dd></dl>
       <div class="letter">
         <p>Hi Jules,</p>
         <p>I was reading <mark>Orbit’s new onboarding guides for developers<sup>1</sup></mark> and saw <mark>you maintain the getting-started tutorials<sup>2</sup></mark>. Are you the right person to talk to about getting new developers productive faster?</p>
@@ -447,7 +487,37 @@
         <span class="cite"><b>1</b><span>Orbit developer docs · Onboarding</span></span>
         <span class="cite"><b>2</b><span>Orbit tutorials · Jules as author</span></span>
       </div>
-      <details class="info"><summary><span aria-hidden="true">ⓘ</span> About this approval</summary><p>This is a new decision for the updated version and recipient. Your earlier approval did not carry over.</p></details>
+      </div>
+      <div class="pane-diff">
+        <div class="cmp">
+          <p>Compared with the version you last opened <span class="ver">v3</span> <span aria-hidden="true">→</span><span class="sr"> to </span> current <span class="ver">v5</span></p>
+          <p class="sub">2 edits since you opened it</p>
+        </div>
+        <h3 class="chg-h">Recipient</h3>
+        <div class="chg-line"><del><span class="sr">removed: </span>Maya Chen &lt;maya@orbit.example.org&gt;</del><span class="to" aria-hidden="true">→</span><ins><span class="sr">added: </span>Jules Pineda &lt;jules@orbit.example.org&gt;</ins></div>
+        <h3 class="chg-h">Subject</h3>
+        <div class="chg-line"><del><span class="sr">removed: </span>Right person for developer onboarding?</del><span class="to" aria-hidden="true">→</span><ins><span class="sr">added: </span>Who owns Orbit’s getting-started tutorials?</ins></div>
+        <h3 class="chg-h">Email</h3>
+        <div class="redline">
+          <p>Hi <del><span class="sr">removed: </span>Maya</del><ins><span class="sr">added: </span>Jules</ins>,</p>
+          <p>I was reading Orbit’s new onboarding guides for developers and <del><span class="sr">removed: </span>noticed your team owns that experience</del><ins><span class="sr">added: </span>saw you maintain the getting-started tutorials</ins>. Are you the right person to talk to about getting new developers productive faster?</p>
+          <p class="same">At Example Widgets we build onboarding tooling for developer platforms. Happy to share a two-minute overview — or point me to whoever owns this.</p>
+          <p class="same">Thanks,<br>Alex</p>
+        </div>
+        <h3 class="chg-h">Sources</h3>
+        <div class="cites">
+          <span class="cite same"><b>1</b><span>Orbit developer docs · Onboarding</span></span>
+          <span class="cite gone"><i aria-hidden="true">−</i><span><span class="sr">Removed source: </span>Orbit team page · Maya’s role</span></span>
+          <span class="cite new"><i aria-hidden="true">+</i><span><span class="sr">Added source: </span>Orbit tutorials · Jules as author</span></span>
+        </div>
+        <h3 class="chg-h">History</h3>
+        <ul class="prov">
+          <li><span class="ver">v4</span>Recipient changed by agent · 6 min ago</li>
+          <li><span class="ver">v5</span>Redrafted by agent · 4 min ago</li>
+        </ul>
+        <p class="note-muted">If a comparison isn’t available, the full current email is shown.</p>
+      </div>
+      <details class="info"><summary><span aria-hidden="true">ⓘ</span> About this approval</summary><p>Approve &amp; capture applies to the current email (v5) for Jules Pineda only. Viewing what changed never approves anything.</p></details>
     </div>
     <div class="d-foot">
       <div class="approve"><a class="btn primary lg" href="#captured">Approve &amp; capture</a><small>Captured locally — not sent</small></div>
