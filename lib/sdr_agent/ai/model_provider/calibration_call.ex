@@ -20,6 +20,12 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
         is the invocation's `request_sha256`, and the invocation's prompt
         and output schema references are the code-owned ones.
 
+    The request's shape is checked first: a non-empty string `id`,
+    `operation` and `prompt`, a run with a string `id`, and an actor struct
+    — the fields the facade's span and settlement consume after the check
+    (Codex d3b@c869b90: a committed body can carry another shape and still
+    match its stored SHA-256).
+
     It returns `{:ok, invocation, provenance}` or `:invalid`; a malformed
     request or an exception is `:invalid`, never a crash.
     """
@@ -35,6 +41,7 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     def target(request, invocation_id, provider_options) do
       with %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor
            when is_binary(tenant) <- request.actor,
+           true <- shape?(request),
            true <- fixed_input?(request),
            {:ok, provenance} <- ClaudeCLI.prepare(request, provider_options),
            {:ok, invocation} <- Agents.get_model_invocation(invocation_id, actor: actor),
@@ -49,6 +56,12 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     rescue
       _malformed -> :invalid
     end
+
+    defp shape?(%{id: id, operation: operation, prompt: prompt, run: %{id: run_id}}) do
+      Enum.all?([id, operation, prompt, run_id], &(is_binary(&1) and &1 != ""))
+    end
+
+    defp shape?(_request), do: false
 
     defp fixed_input?(request) do
       request.prompt === Prompt.render() and

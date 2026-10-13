@@ -731,7 +731,9 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
           :human_actor,
           :unrenderable_schema,
           :other_schema_ref,
-          :legacy_generation
+          :legacy_generation,
+          :numeric_operation,
+          :numeric_id
         ] do
       test "#{variant} is :calibration_call_invalid with no provider call or write", ctx do
         %{server: server, ref: ref, request: request, id: id, before: before} =
@@ -904,9 +906,9 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     )
   end
 
-  defp reserve!(run, agent, marker, overrides \\ %{}) do
+  defp reserve!(run, agent, marker, overrides \\ %{}, request_overrides \\ %{}) do
     key = "d1b-#{System.unique_integer([:positive])}"
-    request = base_request(key)
+    request = key |> base_request() |> Map.merge(request_overrides)
     prompt = Prompt.prompt_ref()
     schema = Prompt.schema_ref()
 
@@ -1247,9 +1249,13 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
   defp call_target(ctx, variant) do
     profile = if variant == :other_profile, do: :claude_cli_sonnet, else: :claude_cli_opus
     server = server!(ctx, command: ctx.cli, profile: profile)
-    %{invocation: invocation, run: run, agent: agent} = target_for(ctx, variant)
+    target = target_for(ctx, variant)
+    %{invocation: invocation, run: run, agent: agent} = target
     ref = issue!(server, invocation, run, %{profile_id: profile})
-    request = call_request(invocation, run, agent, ref)
+
+    request =
+      invocation |> call_request(run, agent, ref) |> Map.merge(Map.get(target, :shape, %{}))
+
     {request, id} = wrong(ctx, variant, request, invocation)
     %{server: server, ref: ref, request: request, id: id, before: snapshot(id)}
   end
@@ -1268,6 +1274,15 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
   end
 
   defp target_for(ctx, :other_schema_ref), do: proof!(ctx, %{output_schema_version: "2"})
+
+  # Codex d3b@c869b90: a malformed request shape committed through the
+  # domain, so its stored request SHA-256 matches the request exactly.
+  defp target_for(ctx, variant) when variant in [:numeric_operation, :numeric_id] do
+    %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant, usage_origin: :proof)
+    shape = if variant == :numeric_operation, do: %{operation: 123}, else: %{id: 123}
+    {invocation, _request} = reserve!(run, agent, marker(ctx, agent), %{}, shape)
+    %{invocation: invocation, run: run, agent: agent, shape: shape}
+  end
 
   defp target_for(ctx, :other_prompt_ref),
     do: proof!(ctx, %{prompt_template_sha256: :crypto.hash(:sha256, "another prompt")})
