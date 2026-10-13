@@ -1,8 +1,10 @@
 # C1 Home inbox contract and readiness
 
-Status: **draft for full contract review and scoped owner acceptance**. C1-01 (#85), Codex
+Status: **exact-total amendment draft for full review and amended-text acceptance**. C1-01 (#85), Codex
 author → Claude reviewer. No C1 code, new database table, UI mutation or
-model call is authorized by this draft. The owner must approve scoped G5
+model call is authorized by this draft. Owner acceptance of the architecture
+with exact totals is recorded below; amended text still needs review and
+acceptance. The owner must approve scoped G5
 before C1-02/03 implementation; H1 has its own owner task/prototype gate.
 
 ## Summary and scope
@@ -26,6 +28,11 @@ producers must add a reviewed row/action contract; no free-text producer or
 arbitrary module/action dispatch. Provider status and grant balances belong
 on Status/Admin, not in the task list. An actual provider/grant refusal is
 a task through its committed live Failure; showing it never spends a call.
+
+Home's three selected count tiles use exact authorized section totals:
+pending email drafts, live Failures, and committed local captures this week.
+Capture history is count-only, not an additional task producer or a general
+analytics dashboard. Row paging remains capped; totals do not use the cursor.
 
 ## Entity model (soft-stop)
 
@@ -54,6 +61,30 @@ The seven full-contract requirements are addressed below. This PASS permits
 affected-module planning, not C1-02/03 code or owner G5. Refined contracts
 below still require Claude's full review and B1/H1 producer-consumer agreement.
 
+### Exact-total amendment: entity/action delta
+
+Entity Model trigger: **yes**. Reason: new derived aggregate result and
+domain read contracts, changed page/error semantics and auditor aggregate
+access; no schema, persisted counter, new role, dependency or Task resource.
+
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|---|---|---|---|---|---|---|---|
+| SectionTotal (derived value object) | New | Exact authorized metric independent of visible rows | closed `metric : pending_email_drafts / live_failures / local_captures_this_week`; `status : ready / unavailable`; nonnegative integer `value` only ready, null unavailable; UTC `observed_at`; scope/filter fingerprint; optional UTC week bounds and timezone; bounded unavailable reason `forbidden / timeout / producer_error / withheld` | One explicitly registered source-owned count read; belongs to ephemeral Home/Page result. No counted ids or bodies returned | Exact whole authorized metric, no cursor/LIMIT/estimate/50+ substitution. A refresh error removes an old number; successful zero differs from unavailable. No independent lifecycle, cache/counter or action authority | Current active authenticated actor/session/tenant and source read policies, never kernel/bypass count | none; proposed constants and week semantics require amended-text acceptance |
+| InboxPage / ProducerReadResult | Existing delta | Separate bounded list work from exact counts | per-section SectionTotal and separate list/count result states; completeness includes unavailable required sources | Draft+Failure row registry unchanged; capture history is a separate count-only source | 50 shown rows remains a cap, not the total. Source list/count failure makes its number unavailable; fresh authorized rows and healthy siblings may remain usable, but no stale capability is preserved. Counts exact at recorded observations, not one global snapshot. All-clear still needs complete successful coverage | Existing actor/session/tenant rules; losing scope clears rows and numbers | none |
+| Outreach.Draft count read | Existing read-contract delta | Ready-for-outreach total | distinct authorized email Draft ids in the same pending_review/current-revision membership as list | Source-owned aggregate; no revision/body/model-output loading | Count drafts, not distinct people. Invalid required source context is producer_error, not silent success. Pagination excluded | Same current Draft read policy and permitted view/real-data scope as rows | no new mutation or source-policy shortcut |
+| Operations.Failure count read | Existing read-contract delta | Needs-attention total | distinct authorized Failure ids, status open or acknowledged | Same attention membership | Acknowledged remains counted; resolved historical cause excluded, distinct live Operation cause included. No grouping/deduplication on Lead | Existing Failure read policy/scope | none |
+| Outreach.DeliveryOperation count-only read | Existing read-contract delta | Captured-this-week history | provider capture; committed accepted_at within server-computed week; one logical operation | Existing acceptance metadata; no new task/relationship/mutation | Never count unknown/uncommitted acceptance, attempts or files. Historical accepted_at is not erased by later lifecycle state. Local capture is not external delivery | Existing DeliveryOperation metadata read policy/scope | Monday 00:00 America/Denver to next Monday, half-open UTC bounds; no new user timezone field |
+| AuditAccess aggregate Home view | Existing read-contract delta | Preserve auditor-view audit without a hot-path head lock for ordinary users | existing record_view and bounded aggregate view ref/scope/metric/window coverage; no new field/enum | At most one coalesced audit per auditor refresh, retaining bounded actually-shown row refs; no counted-member enumeration | All reads finish/cancel and release connections before a separate short bounded AA+AE transaction. Audit failure withholds the auditor view/numbers. Admin/reviewer counts have no AuditAccess/head lock | Existing record_access policy; only auditor-role Home refresh needs this audit | Exact target-ref format must fit existing constraints or return for explicit review before code |
+| User/session/Tenant, DraftRevision, DeliveryReceipt | Existing dependency | Current authorization and integrity | unchanged | unchanged | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Existing policies | none |
+
+Configured reviewer: ai-pair (ai_pair=true, codex_review=true), Claude.
+Delta verdict: **PASS**, answer `m_1791862258000010202_eafd672b`,
+2026-10-13 03:30:58 UTC, replying to
+`m_1791862244899940459_b5524726`. First round
+`m_1791862035000012543_aa02e046` required removing per-count hot-path audit;
+auditor-only coalescing and post-read bounded append resolve it. This PASS
+permits affected-boundary planning, not full-text/owner acceptance or code.
+
 ## Observable requirements
 
 | ID | Behavior |
@@ -63,10 +94,12 @@ below still require Claude's full review and B1/H1 producer-consumer agreement.
 | C1-R3 | Every row explains why it needs a human and offers only fixed, currently permitted actions. Blocked recovery explains its guard; it never becomes an enabled retry merely because Failure.retryable is true. |
 | C1-R4 | Approval submits the displayed draft_revision_id, content_sha256 and recipient_email. The producer checks them again under its existing approval locks. Capture never means a message reached a real inbox. |
 | C1-R5 | All mutations revalidate scope, current actor/session, source, freshness and source action rules. A stale or double submission never approves another revision, overwrites another edit or creates a second run/capture. |
-| C1-R6 | Storage reads and metadata joins are bounded. More work, producer failures and withholding are visible; an error is never reported as an empty inbox. |
+| C1-R6 | List candidates/metadata joins remain row-bounded; exact aggregates are scalar/time-bounded, not fixed-scan-work bounded. More work, producer failures and withholding are visible; an error is never reported as an empty inbox. |
 | C1-R7 | List summaries contain no draft body, research/model output, diagnostic stderr or Payload content. Detail and evidence retain source authorization and audited reads. |
 | C1-R8 | Item resolution follows committed source state. A failed action leaves the item visible; after success the UI re-lists. No optimistic deletion or independent task lifecycle. |
 | C1-R9 | Each future producer adds a reviewed row/action contract and tests before registration. Registration is closed reviewed code, not a plugin or caller/model-selected module. |
+| C1-R10 | Each Home tile shows its exact authorized metric independently of paging, or unavailable without a number. No shown-row/50+/estimate/stale-number substitute; successful zero requires complete successful source reads. |
+| C1-R11 | Ordinary authorized metadata count queries take no head/domain row lock. Auditor view audit is coalesced at most once per refresh after count work releases connections; bounded append failure withholds that view/numbers. Existing guarded denial auditing is not suppressed. |
 
 ## Initial producers and actions
 
@@ -175,7 +208,8 @@ a valid bound.
 Stable ordering: critical Failures first; all remaining initial items second.
 Within either group, oldest source timestamp first, then producer id, then
 source id. Draft uses inserted_at; Failure uses occurred_at. Read-time
-observed_at does not affect order. There is no total-count scan.
+observed_at does not affect order. Exact scalar count queries are separate
+from row paging and do not alter its limits or continuation.
 
 One opaque keyset cursor records the last **returned** sort key, contract/
 producer-set version, authorized tenant/actor scope and fixed filters. Each
@@ -199,6 +233,74 @@ An empty later page means “No more items”; a partial/error/withheld page nev
 claims empty success. Auditor/read-limited coverage never claims the owner's
 whole queue is empty.
 
+### Exact totals, authorization, errors and performance
+
+One closed domain-owned aggregate statement per count metric per refresh
+(three initially), not one query per shown row. The count uses full source
+membership, fixed view filters and **the same current authorization/real-data
+scope as rows**, with no pagination cursor or row LIMIT. Never load all rows
+into Elixir and filter/count there. If source policy or required source
+integrity cannot be enforced in the aggregate, return producer_error/withheld,
+not an unauthorized total or a silently reduced successful count. Actor and
+tenant are server-owned; no client-selected resource, SQL predicate or module.
+Scope fingerprints use nonsensitive server-owned identity/filter references,
+not credentials or session tokens. Metadata-only integrity predicates must
+not silently hide malformed pending rows behind a reduced successful count.
+
+| Metric | Exact unit and predicate | Not counted |
+|---|---|---|
+| pending_email_drafts | One currently reviewable authorized email Draft, pending_review with required current revision/context, matching list membership | Other channels/states, unauthorized/withheld scope; not distinct people or per-campaign dedupe |
+| live_failures | One authorized Failure, open or acknowledged, matching attention membership | Resolved historical causes; never collapse different live conditions by Lead |
+| local_captures_this_week | One authorized capture-provider DeliveryOperation with committed accepted_at in `[week_start_utc, next_week_start_utc)` | Unknown/uncommitted acceptance, retries/attempts/files; never imply external delivery |
+
+The history window is computed by the server from the refresh's reference
+instant: Monday 00:00 America/Denver to next Monday 00:00, converted to UTC.
+Returned timezone and boundaries make DST and week rollover explicit;
+do not use a fixed 168-hour UTC subtraction or add a persisted user timezone.
+The pending badge may sum successful pending metric values, not history;
+if either required pending source is unavailable it has no numeric total.
+
+Each total has its own observed_at/scope fingerprint. Separate row/count
+observations may differ when work changes; do not clamp a legitimate total
+to the page length or promise an atomic global snapshot. Counts never govern
+actions or generate a cursor. Scope/version/filter mismatch discards the
+result. A source's list or count error, denial, withholding or timeout makes
+its total unavailable and clears any prior number; healthy fresh rows may
+still be shown if their own authorization/freshness reads succeeded. A count
+failure alone does not grant or revoke an otherwise valid source command.
+Raised and returned errors have the same sanitized outcome; no SQL, raw
+exception, diagnostic body or hidden ids escape. A successful exact zero is
+not an error fallback. Initial empty copy also requires both pending totals
+ready at zero and the existing complete-first-page/no-cursor condition.
+History does not add pending membership, but a required history read failure
+keeps the whole Home refresh partial, not an all-clear.
+
+**Performance proposal (not code):** one scalar aggregate result per metric;
+hard 2500 ms per-count end-to-end deadline including authorization/pool wait;
+database statement_timeout at most 2000 ms and the remaining deadline.
+Both ceilings can only be lowered; invalid/zero config cannot disable them.
+Cancel/roll back on deadline and release the connection; no orphan query or
+automatic count retry. Exact COUNT can scan many eligible/index entries:
+fixed scan cardinality/O(1) cost is not promised. Required tenant/filter
+indexes and large synthetic cardinality/foreign-tenant query-plan tests must
+support the deadline. On failure show unavailable, never a capped/estimated
+number. This does not claim an overall page-refresh latency independent of
+source/audit work.
+
+Admin/reviewer count/list metadata reads do not append per-count AuditAccess
+or introduce a head lock for successful authorized reads. Existing guarded
+denial auditing remains separate and is not suppressed. Auditor Home reads
+preserve their existing view-audit
+convention: at most one coalesced record_view per refresh, with a bounded
+aggregate ref identifying authorized scope/metric/window plus the bounded
+source ids actually shown. Never enumerate ids merely counted or claim a
+body read. Every count finishes/cancels and releases its read connection
+outside head/domain row locks before the separate short AA+AE append; the
+append has its own hard 2500 ms ceiling. Its failure withholds the auditor
+view/numbers. Exact target-ref format must fit existing record_access/5
+constraints or be independently reviewed as a delta before code. An old
+auditor view's audit is not reused to authorize a new scope or refresh.
+
 ## Synthetic contract examples and owner task walk
 
 All names and addresses below are fictional reserved-domain examples. These
@@ -213,7 +315,9 @@ are acceptance scenarios, not implemented screens or actual actions.
 | Read-only actor | Auditor can inspect D1/F1 through permitted reads | No enabled mutation. Forged approve/retry fails source policy and is audited; no new rows. |
 | Grant/cleanup block | Failure F2 needs recovery; grant exhausted or prior process cleanup unconfirmed | Explain the exact block. Admin may inspect grant status, but no enabled rerun until current safeguards pass. No agent edits a grant. |
 | One producer failed | Draft query succeeded with D1; Failure query failed | Show D1 with a visible partial-read warning; never “nothing needs you.” A failed producer has no fabricated row or safe-to-click stale action. |
-| Over page cap | 53 authorized pending source items | Return the stable first 50 plus a cursor; next page has the remainder. No skipped fetched candidates, unauthorized counts or unbounded body loads. |
+| Over page cap | 53 authorized pending source items | Tile shows exact 53 while list shows stable first 50 plus cursor; next page has remainder with total still independent of cursor. No skipped candidates, hidden counts or body loads. |
+| Count failed, list succeeded | Fresh authorized drafts shown; draft aggregate timed out | Draft total unavailable (no old number/0/50+); fresh rows remain, refresh partial. Healthy Failure metric remains available. |
+| Complete pending empty, historical captures | Both pending sources/metrics succeeded at zero; capture history succeeded at 12 | Scoped pending empty copy may appear; 12 is history, never pending membership or proof of external delivery. |
 | Resolved refusal, live Operation | Original run cause F3 is resolved; Operation has live F4 naming F3 | Show F4 once, not F3 as pending and not a collapsed “fixed” lead. Inspection explains historical cause versus remaining operator attention. |
 
 Open the [synthetic task prototype](task-prototype.html) locally for the
@@ -239,12 +343,13 @@ a passed usability test is claimed here.
 
 ## Affected boundaries and proposed implementation slices
 
-Entity PASS now permits this planning. **No files below are changed in this
+Initial and exact-total entity PASS now permit this planning. **No files below are changed in this
 docs PR.** Names are proposed, not claims that C1 is implemented.
 
-- `SdrAgent.Inbox` / Item / Page / Command: a stateless application facade
+- `SdrAgent.Inbox` / Item / Page / Command / SectionTotal: a stateless application facade
   over fixed producers; no Ash domain/resources, supervisor or Task table.
-- Outreach and Operations: bounded actor-scoped source reads and typed
+- Outreach and Operations: bounded actor-scoped source reads, three authorized
+  scalar count readers (including count-only capture history), and typed
   producer compare-and-mutate adapters. Source modules own queries/locks and
   source actions; the web layer does not query Repo or mutate resources.
 - SDR/Agents and the merged C2/C9/R0-07 contracts: existing guarded recovery
@@ -256,7 +361,7 @@ docs PR.** Names are proposed, not claims that C1 is implemented.
 Steps after contract review, owner ADR acceptance and scoped G5:
 
 1. C1-02 RED: bounded source/list tests for authorization, ordering, cursors,
-   projection fields, truncation, empty/partial/returned/raised errors.
+   projection fields, truncation, exact counts and empty/partial/returned/raised errors.
 2. C1-02 GREEN: smallest stateless projection and bounded domain adapters;
    no new producer or persistence beyond reviewed scope.
 3. C1-03 RED: exact approval binding, stale edit/recipient/state, double-submit,
@@ -273,24 +378,40 @@ historical cause with a distinct live Operation condition. Assert stored rows
 and audit events, not only returned tuples. Every producer extension needs
 its own bounded-read and mutation-negative tests before registration.
 
+Exact-total RED obligations: >50 and later-page totals; same membership and
+actor/tenant/role filters as lists; acknowledged/resolved/live-Operation
+Failures; count-only history logical idempotent acceptance, unknown outcomes,
+week boundary/DST and no history-as-pending badge. Returned/raised/timeout
+count and list failures clear numbers, never fake zero; scope revocation
+clears old rows/counts. Prove scalar-only SQL/result selection and no body,
+Payload or member-id loads; one aggregate per metric; large synthetic/foreign
+tenant EXPLAIN and end-to-end pool/held-lock/statement timeout with query
+cancellation/no orphan. Held-head tests prove non-auditor refresh takes no
+head lock and counts proceed while a writer holds it; auditor count work
+also finishes outside it, then one bounded append fails closed. Prove bounded
+actually-shown audit refs, no counted-id enumeration, and no additional
+per-metric AuditAccess. No real-model calls are needed for any of these.
+
 ## Architecture decisions and readiness
 
 ADR required: **yes**, [ADR-0015](../../adr/0015-home-inbox-projection-and-command-boundary.md)
 proposes the durable shared read/command boundary and compares it with a
 persisted task mirror and UI-owned composition. It adds no dependency and
-preserves existing domain ownership; status **proposed**, owner acceptance
-required before code. Implementation should update the component/data-flow
+preserves existing domain ownership. Owner accepted the architecture with
+exact totals; the amended text's status stays **proposed** until independent
+full review and owner acceptance, and scoped C1 G5 is still required before
+code. Implementation should update the component/data-flow
 diagrams for the new public runtime path; no actual runtime changed in this
 docs proposal, so current diagrams are not rewritten to pretend it exists.
 
 | Readiness item | Status |
 |---|---|
-| Entity/action soft-stop | PASS at 354c590; full contract PASS at 202349d |
-| B1 producer / H1 consumer agreement | PASS by Claude at 202349d; bindings, edit adapter order, complete empty copy and last-returned cursor agreed |
-| Owner task walk / interactive H1 prototype | Pending; no usability acceptance inferred |
-| ADR-0015 owner acceptance | Pending |
+| Entity/action soft-stop | Base PASS at 354c590; base full contract PASS at 202349d; exact-total delta PASS via eafd672b (03:30:58 UTC), full amended contract review pending |
+| B1 producer / H1 consumer agreement | Base PASS by Claude at 202349d; amended count/row/audit agreement pending full review |
+| Owner task walk / interactive H1 prototype | A selected with collapsible nav; diff-view and phone layout explicitly confirmed at 0b740d8; prompted walkthrough, not an unprimed usability trial or C1 code gate |
+| ADR-0015 owner acceptance | Architecture accepted with exact-total direction; amended wording review and owner acceptance pending |
 | Scoped C1 G5 | Pending; existing R0 G5 does not cover C1 code |
-| C1-01 docs verification | Workflow receipt, format, compile, canonical Credo, Hex audit, codegen, `mix precommit` and 1126 tests passed locally; link checks and isolated-browser prototype inspection passed; exact-head CI pending |
+| C1-01 docs verification | Base d6ed725: workflow receipt, format, compile, canonical Credo, Hex audit, codegen, `mix precommit` and 1126 tests passed locally; base prototype link/browser checks passed. Exact-total amendment verification/review is recorded separately; no implemented-count or new runtime test claim. |
 
 Full contract review: Claude at `202349d`, consultation
 `m_1791838602052826250_0c9eae1c`, answer
@@ -299,6 +420,13 @@ Record C1-02 tests for recipient changes invalidating a reject token too;
 future reviewed severity changes moving between page groups (not a frozen
 snapshot); and bounded successors to both initial source readers. None is a
 new story or a claim that the code already exists.
+
+Owner decision record: `m_1791861397000025639_2dad34b9` routed the verbatim
+acceptance and clarification recorded in ADR-0015 amendment 1. On the chosen
+Home prototype the owner said “yes, that's what i had in mind” for the diff
+view (`m_1791860394000027513_96d010c7`) and “yes, that's the right behavior
+on phones” for the compact <=760px layout
+(`m_1791860524000028222_a65cab21`). These answers do not replace scoped G5.
 
 This contract draft does not complete C1-02/03 or H1, expand spend authority,
 add channels, change suppression, bypass the release gate, or authorize
