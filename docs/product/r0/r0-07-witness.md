@@ -1772,17 +1772,22 @@ and runs everywhere.
 
 ### 8.14 d3 staged delta: console orchestration (proposed)
 
-**Status:** proposed for entity re-review. Round 1 at edf023d was
-**NEEDS-REVIEW** (Codex 92ae3ded, report sha256 456b55dc). Its answers:
-- **Q1:** a bounded, correlated observer;
-- **Q2:** shared settlement through a narrow seam-only ClaudeCLI calibration
-  wrapper.
+**Status:** proposed for entity re-review. No RED work starts before it
+passes.
+- **Round 1** at edf023d: **NEEDS-REVIEW** (Codex 92ae3ded, report sha256
+  456b55dc). Q1: a bounded, correlated observer. Q2: shared settlement
+  through a narrow seam-only ClaudeCLI calibration wrapper.
+- **Round 2** at 7246478: **NEEDS-REVIEW** (87fc001c, report sha256
+  86fcb2e4), with two blockers:
+  - **a durable preflight conflict:** fixed by deferring zero-target
+    recovery (8.14.5);
+  - **an observer DOWN is not a file-IO barrier:** fixed by making the
+    command the single writer, with no observer process (8.14.2).
 
-This revision addresses must_fix 1–4 and the completeness notes. No RED
-work starts before it passes.
+This revision also takes the five clarifications.
 
 **Entity Model trigger: yes.** It adds:
-- a launch receipt relationship (server → observer);
+- a launch receipt relationship (server → command);
 - a seam-only reserved-call entry;
 - orchestrated lifecycle and authorization for `calibrate` and
   `calibrate-recover`;
@@ -1816,33 +1821,45 @@ d3c and d3d consume only the verified d3a and d3b contracts.
   terminal; typed confirmations are read through an injected IO function.
 - **Steps.** These are the E4c-6 steps. Every branch is in the matrix
   (8.14.4).
+- **One durable writer.** The command process is the only writer of the
+  launch record in `calibrate`. No other process issues a record or file
+  operation for it, so no delegated file IO can outlive a writer
+  (Codex 87fc001c).
 
-#### 8.14.2 d3a: the launch receipt (server → observer)
+#### 8.14.2 d3a: the launch receipt (server → command)
 
 **Request.** The d1b closed `request.calibration` gains exactly one key,
-`observer: {pid, ref}` (a local pid and a reference). A missing or
-malformed value is `:real_model_staged` before the consume. It is not an
-Authority claim, and `Authority` is unchanged.
+`observer: {pid, ref}` (a local pid and a reference). `Calibrate` always
+sets the pid to the command itself. A missing or malformed value is
+`:real_model_staged` before the consume. It is not an Authority claim, and
+`Authority` is unchanged.
 
 **Per-launch proof (server process, exempted call only).**
 1. It runs after `Reaper.open` returns `{:ok, port, os_pid}`, so after
    `sent`, and before output collection.
 2. `CalibrationExemption` reads, through `ProcessProbe`:
-   - `start_identity(os_pid)`, which must be `{:ok, non_empty}`;
-   - `group_members(os_pid)`, which must be `{:ok, members}` with `os_pid in
-     members` (the root leads its own group: E4c-1).
+   - `start_identity(os_pid)`, which must be `{:ok, identity}` with a
+     non-empty binary;
+   - `group_members(os_pid)`, which must be `{:ok, members}`, a list of
+     positive integers with `os_pid` in it (the root leads its own group:
+     E4c-1).
+
+   Any other typed result, or a raise, means the launch is not verified.
 3. It sends exactly one message, best-effort and without waiting:
    - **all proven:** `{:calibration_launched, ref, %{invocation_id:, server:
      self(), root_pid: os_pid, root_identity:, process_group_id: os_pid}}`;
-   - **otherwise** (identity `:absent`, `:error`, empty or malformed;
-     group read failed; root not in its group; or a probe raise):
-     `{:calibration_launch_unverified, ref, %{invocation_id:, server:,
-     root_pid: os_pid, reason:}}`. No launch fields are manufactured.
+   - **otherwise:** `{:calibration_launch_unverified, ref, %{invocation_id:,
+     server:, root_pid: os_pid, reason:}}`. No launch fields are
+     manufactured.
 4. `{:unknown, …}` or `{:pending, …}` from `Reaper.open` sends no message.
 
 **Fast exit.** A CLI that exits before the probe yields `unverified`, never
-a guaranteed happy path. That is post-spawn uncertainty: the record stays
-`launch_pending`.
+a guaranteed happy path.
+- An unverified or missing receipt never produces a `launched` record or a
+  claim of successful physical cleanup, even when the facade has settled
+  the row terminal.
+- Such output stays calibration-quarantined: calibration output is never
+  `:released`, E-R7.
 
 **Cleanup is unchanged.** The private server's reaper is started exactly as
 today, with no `identity:` guard. ClaudeCLI's `stop_tree`, `quiesce` and
@@ -1850,37 +1867,30 @@ today, with no `identity:` guard. ClaudeCLI's `stop_tree`, `quiesce` and
 ordinary real calls. d3 promises no identity-bound signalling. The
 identity is observation only, used by the record and by later quiescence.
 
-**Ordinary calls:** no observer and no message.
+**Ordinary calls:** no message.
 
-**Evidence:** no new field. Evidence v1 is unchanged (the round-1
-`root_gone_at_verification` is dropped).
+**Evidence:** no new field; Evidence v1 is unchanged.
 
-**The observer** (`Calibrate`, one per `calibrate`):
-- **Start.** It is started with `spawn_monitor` by the command before the
-  call, and monitors the command.
-- **Accepts** exactly one message with its own `ref`, the expected
-  `invocation_id` and the expected private server pid. Stale, foreign or
-  duplicate messages are ignored.
-- **On a verified receipt,** it writes `LaunchRecord.advance(:launched,
-  root_pid, root_identity, process_group_id)` once.
-- **It never writes `aborted`, `finished` or `recovered`,** and never
-  releases.
-- **Bounded lifetime:** it exits by itself at the server's call deadline
-  plus 5 s, or when the command dies, in both cases without writing.
+**Receipt delivery: no observer process, one writer.**
+1. The server sends the receipt from its own process, inside the same
+   `handle_call` that later replies to the command. Erlang preserves
+   message order between one sender and one receiver, so any receipt is
+   in the command's mailbox before the call's reply. (`GenServer.call`
+   receives selectively on its own reference, so the receipt waits.)
+2. After the call returns, the command takes the receipt with a selective,
+   non-blocking `receive`. It matches its `ref`, the expected
+   `invocation_id` and the private server pid; stale or foreign messages
+   are ignored and flushed.
+3. A verified receipt: the command writes `LaunchRecord.advance(:launched,
+   …)`, and then step 8 follows.
+4. Unverified or none: the record stays `launch_pending` (matrix row 10).
 
-**Join (writer exclusion).** After the call returns:
-1. The command sends `{:join, ref}` and waits at most 5 s for the reply.
-2. Then it kills the observer, if it is still alive, and waits for its
-   `DOWN` (the `DOWN` is guaranteed).
-3. Only after `DOWN` does the command re-read `record.json` (atomic rename,
-   so it is whole or old) and treat it as authoritative.
+There is no concurrent writer, so there is no join and no delegated-IO race.
 
-No observer write can follow `DOWN`. There is no retry: the command makes
-one call, and at most one CLI launch happens.
-
-**Server or observer death:**
-- no receipt means the record stays `launch_pending`;
-- an observer that died after its write is visible in the re-read record.
+**Crash during the call.** The record stays `launch_pending`, and recovery
+is attended (8.14.5). Until OQ-E3 is accepted, a `launched` recovery also
+needs the attestation, so writing `launched` mid-call would gain nothing
+in R0. One call, at most one CLI launch, no retry.
 
 #### 8.14.3 d3b: the seam-only reserved-call wrapper
 
@@ -1899,13 +1909,18 @@ is never derived from row fields). All of these must hold:
 - generation 2;
 - `profile_id` equals the private server's published profile
   (`ClaudeCLI.prepare/2`);
-- `agent_run_id == request.run.id`, and that run is the actor tenant's
-  running `:proof` run;
+- `agent_run_id == request.run.id`. The run is re-read under the same actor
+  and must be the actor tenant's `:running` `:proof` run with
+  `operation_id` nil. `request.run`'s status, tenant and usage fields are
+  never trusted;
 - `request_sha256 == sha256(ModelProvider.request_body(request))`;
 - the prompt and schema refs equal `Prompt.prompt_ref/schema_ref`.
 
 Anything else is `{:error, :calibration_call_invalid}`: no provider call, no
 witness, no target write.
+- A malformed request (missing keys, a raise while rendering or hashing)
+  is also `:calibration_call_invalid`, never a crash.
+- d1b's strict witness check before the consume stays in the server.
 
 **Then the facade's shared helper.** Inside `GenAI.with_span`, in the
 calling process, the witness (`model_invocation_id`, `traceparent`) is
@@ -1928,11 +1943,11 @@ Every post-call decision reads the fresh committed row (`status`,
 | 1 | claim | any error | refuse; nothing created | none |
 | 2 | preflight | pin, store, G-R0 or isolation unavailable; or the owner declines or mistypes `CALIBRATE <profile>` | `advance(:aborted)`, then `release` | released |
 | 3 | preflight | `Isolation.preflight` gives `:calibration_isolation_cleanup_unconfirmed` | **hard owner conflict**: no reservation, no release (E4c-1a) | `claimed`, kept |
-| 4 | reserve | a typed `%Refused{}` (no invocation; the proof run exists) | `SDR.Model.stop_refused/3` with that receipt (the existing guarded run stop and receipt link), then `aborted`, then `release` | released |
+| 4 | reserve | a typed `%Refused{}` (no invocation; the proof run exists) | `SDR.Model.stop_refused/3` with that receipt (the existing guarded run stop and receipt link). Its result is checked: on success, `aborted` then `release`; if the stop fails, hard stop (never a released running run) | released, or `claimed` kept |
 | 5 | reserve | any other error (no invocation) | `Agents.cancel_run/2` (existing action), then `aborted`, then `release`. If the run stop itself fails: hard stop | released, or `claimed` kept |
 | 6 | `launch_pending` write | fails | hard stop. The reservation event's claim binds the target for recovery | `claimed`, kept |
 | 7 | `Authority.issue` | fails (the row is still `reserved`) | `recover_calibration(:unlaunched)`, then evidence (failed), then `finish_calibration`, then `aborted`, then `release`. Any step failing keeps the record | released, or `launch_pending` kept |
-| 8 | after the call | `sent_at` nil (`reserved`, or `failed` by the facade or an admission refusal; the reason is kept) | join the observer; a `launched` record here is a conflict (hard stop). Otherwise a `reserved` row gets `recover_calibration(:unlaunched)`, then evidence, `finish_calibration`, `aborted`, `release` | released, or `launch_pending` kept |
+| 8 | after the call | `sent_at` nil (`reserved`, or `failed` by the facade or an admission refusal; the reason is kept) | a verified receipt or a `launched` record here is a conflict (hard stop). Otherwise a `reserved` row gets `recover_calibration(:unlaunched)`, then evidence, `finish_calibration`, `aborted`, `release` | released, or `launch_pending` kept |
 | 9 | after the call | `sent_at` set and the record is `launched` | the normal path (10–13) | → `finished` |
 | 10 | after the call | `sent_at` set and the record is `launch_pending` (unverified or no receipt), **including a deterministic no-spawn after `sent`** | stop. Sent history is never aborted; recovery is attended (8.14.5) | `launch_pending`, kept |
 | 11 | normal | `ClaudeCLI.admission(server) == %{admission: :open}` **and** `LaunchRecord.quiescence(record, probe:) == :quiescent` (root absent or reused, group observed empty: E4c-3) | E3 reconcile, then `Outcome.classify`, then evidence, then `finish_calibration`, then `advance(:finished)`, then `release` | released |
@@ -1941,6 +1956,9 @@ Every post-call decision reads the fresh committed row (`status`,
 
 `Authority.revoke/1` and the private server's shutdown run in an `after` on
 every path.
+- They never mask a retained conflict and never imply that cleanup
+  succeeded; the command reports the original stop.
+- Teardown makes no model call.
 
 #### 8.14.5 d3d: `calibrate-recover <invocation_id> [--owner-verified-stopped]`
 
@@ -1955,8 +1973,19 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
      ticket; otherwise it is an owner conflict.
    - A final record is never advanced again.
 3. **Target by the claim** (E4c-2). Otherwise
-   `:calibration_target_ambiguous`. A `claimed` record with zero matches is
-   aborted and released.
+   `:calibration_target_ambiguous`.
+   - **Zero-target `claimed` records (narrowing E4c-2):** in R0, recovery of
+     a `claimed` record with zero reservation matches is a hard owner
+     conflict. It never aborts or releases. The reason: a `claimed` record
+     with no reservation is durably indistinguishable from one left by an
+     unconfirmed isolation cleanup (matrix row 3) or by a crash between the
+     preflight spawn and its result. The absence of a reservation is not
+     the absence of preflight OS work.
+   - **Its resolution** is the owner's, outside R0 (the deferred
+     orphan/repair boundary). No lock deletion is authorized here.
+   - A live `calibrate` still aborts and releases its own `claimed` record
+     on the matrix row 2, 4 and 5 paths, because it knows its preflight
+     result.
 4. **Confirm.** The console prints the invocation, profile, status and
    record state. The owner types `RECOVER <invocation_id>`.
 5. **Decide:**
@@ -1974,9 +2003,13 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
      false` is changed only by a reviewed PR after that acceptance. Until
      then there is no automatic `{:quiescent, …}` recovery.
    - **Observed live work refuses:** a live root or group members refuse
-     `:calibration_not_quiescent` even with the flag and `STOPPED`. A probe
-     error is never absence. Pending sent history is never inferred from a
-     group observation or a status alone.
+     `:calibration_not_quiescent` even with the flag and `STOPPED`.
+     - Live work is observed **before** the attestation event and any
+       database transition.
+     - A probe error is never absence. Its fallback is only what the
+       reviewed bound owner-attestation rules (E4c-4) permit.
+     - Pending sent history is never inferred from a group observation or
+       a status alone.
 6. **Finish.** Evidence: an existing latched file is validated and reused
    unchanged, and a changed or missing file under a latch is a conflict.
    Then `finish_calibration`, then `advance(:recovered | :aborted)`, then
@@ -1988,25 +2021,25 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 | Entity | New / existing | Delta | Invariants / lifecycle | Actor / locks |
 |---|---|---|---|---|
 | ClaudeCLI exemption request (8.13 A) | Existing | Closed key `observer: {pid, ref}` | Malformed is staged before the consume | Server |
-| Launch receipt (message) | New relationship | One correlated message after `Reaper.open`: verified (identity plus group) or unverified | After `sent` only; never manufactured; ordinary calls have none; no cleanup authority | Server → observer |
-| Observer process | New (console, seam-only) | Accepts one correlated receipt; writes only `launched` | Bounded life; dies with the command; joined or killed before any later record write | Console VM |
+| Launch receipt (message) | New relationship | One correlated message after `Reaper.open`, sent from the server's `handle_call` before its reply: verified (typed identity plus a positive-pid group containing the root) or unverified | After `sent` only; never manufactured; ordinary calls have none; no cleanup authority; read by the command after the call | Server → command |
+| Launch record writer (`calibrate`) | Existing artifact | The command is the single writer, with no observer process | No concurrent or delegated record IO | Command |
 | Private server reaper and ClaudeCLI cleanup | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | No `identity:` guard; cleanup as for ordinary calls; identity is observation only | Server |
 | `ModelProvider.calibration_call/3` | New entry (seam-only) | Authoritative target checks, then the shared helper | No provider call or write on refusal; ordinary `complete/2` unchanged | Calling process |
 | AgentRun (`:proof`, no invocation) | Existing | Stopped by `SDR.Model.stop_refused/3` with the reservation receipt, or `cancel_run/2` without one | Never left running by `calibrate`; E1 settles runs with an invocation | Existing run actions |
-| Console `calibrate`, `calibrate-recover` | Existing task, new subcommands | 8.14.4 and 8.14.5 | Single flight; typed confirmations; hard stops kept; one launch, no retry | Owner; `agent_runtime` |
+| Console `calibrate`, `calibrate-recover` | Existing task, new subcommands | 8.14.4 and 8.14.5; zero-target `claimed` recovery is a hard conflict in R0 (narrows E4c-2) | Single flight; typed confirmations; hard stops kept; one launch, no retry | Owner; `agent_runtime` |
 | LaunchRecord, Authority, `recover_calibration`, `finish_calibration`, Evidence v1, Outcome, Isolation | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Used as approved | As approved |
 
 **ADR and diagram.**
 - **ADR:** the accepted basis is ADR-0005. The pending E4c-7 amendment adds
-  the launch receipt, the observer, the wrapper and the OQ-E3 gate for the
+  the launch receipt, the single-writer rule, the wrapper and the OQ-E3 gate for the
   owner.
-- **Diagram:** the console → private server → observer flow is evaluated at
+- **Diagram:** the console → private server → command receipt flow is evaluated at
   the integrated review.
 
 #### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 
 **d3a — the launch receipt:**
-- a verified receipt reaches its observer;
+- a verified receipt reaches the command before the call's reply;
 - with the probe stubbed, each of these gives `unverified` with no launch
   fields: fast exit (identity `:absent`), identity `:error` or empty,
   group read error, root not in its group, a probe raise;
@@ -2023,7 +2056,11 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 - the Fake and ordinary `complete/2` tests unchanged.
 
 **d3c — `calibrate`:** one case per matrix row 1–13, plus:
-- observer join and kill (a late receipt after join is never written);
+- the receipt is read only after the call, and stale or foreign receipts
+  are ignored;
+- no record write by any process other than the command;
+- a failed run stop on row 4 retains the claim;
+- `revoke` and shutdown do not mask a retained conflict;
 - command death;
 - one launch, no retry.
 
@@ -2035,6 +2072,11 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 - a probe error;
 - OQ-E3 unaccepted (no automatic quiescence);
 - final-record release replay;
+- a zero-target `claimed` record after an unconfirmed isolation cleanup
+  and command death, recovered by another process: a hard conflict, with no
+  release and no second calibration;
+- a crash between the preflight spawn and its result: the same;
+- live work observed before any attestation event or database write;
 - a `recovered` record in another process (owner conflict);
 - partial removal;
 - an abandoned ticket;
@@ -2386,5 +2428,6 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
     positive shim test executed locally). Code **scoped APPROVE** at
     7059727 (2dc068a3) after 21eb641 (witness validated before consume,
     41dca95e).
-  - d3 orchestration: delta 8.14 **NEEDS-REVIEW** at edf023d (92ae3ded);
-    revised as sub-slices d3a–d3d, awaiting entity recheck.
+  - d3 orchestration: delta 8.14 **NEEDS-REVIEW** at edf023d (92ae3ded)
+    and 7246478 (87fc001c); revised (single writer, zero-target deferral),
+    awaiting entity recheck.
