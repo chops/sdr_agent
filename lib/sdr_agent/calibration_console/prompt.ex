@@ -40,6 +40,17 @@ defmodule SdrAgent.CalibrationConsole.Prompt do
   def schema_ref,
     do: %{id: "calibration.output", version: @version, sha256: Canonical.sha256(json_schema())}
 
+  @doc """
+  Every code-owned prompt commitment a calibration may have been reserved
+  with, current and historical (today only version 1). Frozen evidence is
+  checked against this set and its own reservation, never against the
+  latest definition alone, so a later version never invalidates it.
+  """
+  def prompt_refs, do: [prompt_ref()]
+
+  @doc "Every code-owned output schema commitment, current and historical (see `prompt_refs/0`)."
+  def schema_refs, do: [schema_ref()]
+
   @doc "The fixed prompt text."
   def render, do: @text
 

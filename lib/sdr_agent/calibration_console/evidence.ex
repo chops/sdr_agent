@@ -20,21 +20,45 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
   publish never replaces or recomputes it; it validates the existing file
   and returns its exact bytes and hash.
 
-  `validate/3` recomputes nothing. It requires a regular file (not a
+  `validate/3` recomputes nothing. It requires the directory to be safe as
+  above (checked again on every validation), a regular file (not a
   symlink), mode 0600, owned by this user, with the deterministic name, in
   canonical form and the closed schema, naming the target's invocation,
-  run, tenant and profile; prompt and schema commitments equal to the
-  code-owned ones (`SdrAgent.CalibrationConsole.Prompt`) and to the
-  invocation's immutable reservation; the invocation's recorded status,
-  validation status and timestamps; an output commitment equal to the
-  SHA-256 of the canonical parsed output (null without one); and every link
-  it names existing, belonging to the invocation and carrying the evidence
-  hash it recorded (`Canonical.sha256(link.evidence)`). Links are immutable,
-  so a later successor never invalidates the historical reference.
+  run, tenant and profile, and:
+
+    * prompt and schema commitments among the code-owned definitions
+      (`SdrAgent.CalibrationConsole.Prompt.prompt_refs/0`, current and
+      historical) and equal to the invocation's immutable reservation;
+    * the candidate exactly the tuple recorded by the invocation's original
+      reservation event (`SdrAgent.Agents.Admission.Gate.recorded_tuple/1`,
+      pinned to that time's versions);
+    * attested values that are the candidate's CLI version and model as a
+      pair, or both null; never other text;
+    * the invocation's recorded status, validation status and timestamps,
+      and an output commitment equal to the SHA-256 of the canonical parsed
+      output (null without one);
+    * every link it names existing, belonging to the invocation and carrying
+      the evidence hash it recorded (`Canonical.sha256(link.evidence)`), and
+      the evaluated projection and method of one of those links (both null
+      without links). Links are immutable, so a later successor never
+      invalidates the historical reference;
+    * when a `:calibration` latch exists, its `evidence_sha256` equal to
+      this file's hash: a changed, replaced or missing file under a latch is
+      a conflict, and the original bytes replay unchanged.
+
+  **Durability (limited).** The temporary file is written and synced before
+  it is made 0600 and linked, so a process crash leaves either no final
+  name or the complete file. The directory entry itself is not synced (the
+  runtime has no directory fsync), so a power loss may lose a just-created
+  name; the latch is decided only after `publish/3` returns, and a missing
+  file under an existing latch is a conflict for the owner, never
+  recreated.
 
   Errors: `:evidence_schema` (a document outside the closed schema, or an
   identifier that is not a plain id), `:evidence_dir_unsafe`, and
-  `:calibration_evidence_conflict` for anything else. No file I/O happens
+  `:calibration_evidence_conflict` for anything else, including a failed
+  write, sync, chmod or link (never raised; nothing is published). No file
+  I/O happens
   under a database lock, and nothing is logged. The row checks use the
   test-seam calibration read; outside test-seam builds every publish and
   validation is a conflict.
@@ -52,7 +76,9 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
     require Ash.Query
 
     alias SdrAgent.Agents.Checks.CalibrationContext
+    alias SdrAgent.Agents.Admission.Gate
     alias SdrAgent.Agents.ModelInvocation
+    alias SdrAgent.Agents.ModelResultRelease
     alias SdrAgent.Agents.WireWitnessLink
 
     alias SdrAgent.AI.ModelProfiles
@@ -101,11 +127,13 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
     @doc "Validates the evidence file at `path` for `target` (see the moduledoc)."
     @spec validate(Path.t(), map(), keyword()) :: result()
     def validate(path, target, opts) do
-      with {:ok, bytes} <- private_file(path),
+      with :ok <- safe_dir(Path.dirname(path)),
+           {:ok, bytes} <- private_file(path),
            {:ok, decoded} <- canonical(bytes),
            :ok <- named(path, target),
-           :ok <- consistent(decoded, target, opts) do
-        {:ok, %{path: path, sha256: hex(:crypto.hash(:sha256, bytes)), bytes: bytes}}
+           sha = hex(:crypto.hash(:sha256, bytes)),
+           :ok <- consistent(decoded, target, opts, sha) do
+        {:ok, %{path: path, sha256: sha, bytes: bytes}}
       else
         _ -> @conflict
       end
@@ -114,8 +142,10 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
     ## Publishing
 
     defp create(dir, path, decoded, target, opts) do
-      case consistent(decoded, target, opts) do
-        :ok -> link_new(dir, path, Canonical.encode!(decoded), target, opts)
+      bytes = Canonical.encode!(decoded)
+
+      case consistent(decoded, target, opts, hex(:crypto.hash(:sha256, bytes))) do
+        :ok -> link_new(dir, path, bytes, target, opts)
         _inconsistent -> @conflict
       end
     end
@@ -127,29 +157,35 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
         Path.join(dir, ".tmp-" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower))
 
       try do
-        :ok = write_synced(temp, bytes)
-
-        case File.ln(temp, path) do
-          :ok -> {:ok, %{path: path, sha256: hex(:crypto.hash(:sha256, bytes)), bytes: bytes}}
+        with :ok <- write_synced(temp, bytes),
+             :ok <- File.ln(temp, path) do
+          {:ok, %{path: path, sha256: hex(:crypto.hash(:sha256, bytes)), bytes: bytes}}
+        else
           {:error, :eexist} -> validate(path, target, opts)
-          {:error, _reason} -> @conflict
+          _write_or_link_failed -> @conflict
         end
       after
         File.rm(temp)
       end
     end
 
+    # `:ok`, or the failure of any step (never raised; the caller removes the
+    # temporary file and publishes nothing).
     defp write_synced(temp, bytes) do
-      {:ok, file} = :file.open(temp, [:write, :exclusive, :binary, :raw])
+      case :file.open(temp, [:write, :exclusive, :binary, :raw]) do
+        {:ok, file} ->
+          result =
+            try do
+              with :ok <- :file.write(file, bytes), do: :file.sync(file)
+            after
+              :file.close(file)
+            end
 
-      try do
-        :ok = :file.write(file, bytes)
-        :ok = :file.sync(file)
-      after
-        :file.close(file)
+          with :ok <- result, do: File.chmod(temp, 0o600)
+
+        {:error, _reason} = error ->
+          error
       end
-
-      File.chmod(temp, 0o600)
     end
 
     # The directory is 0700 and this user's; neither it nor an ancestor is a
@@ -159,7 +195,8 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
 
       with true <- no_symlink?(expanded),
            {:ok, %File.Stat{type: :directory, mode: mode, uid: uid}} <- File.lstat(expanded),
-           true <- (mode &&& 0o777) == 0o700 and uid == uid() do
+           {:ok, me} <- uid(),
+           true <- (mode &&& 0o777) == 0o700 and uid == me do
         :ok
       else
         _ -> {:error, :evidence_dir_unsafe}
@@ -173,8 +210,8 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
       |> Enum.all?(&match?({:ok, %File.Stat{type: :directory}}, File.lstat(&1)))
     end
 
-    # This process's effective uid: the owner of a file it has just created
-    # (no external command is launched).
+    # `{:ok, uid}` of this process: the owner of a file it has just created
+    # (no external command is launched), or `:error`.
     defp uid do
       probe =
         Path.join(
@@ -182,22 +219,31 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
           ".sdr-uid-" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
         )
 
-      {:ok, file} = :file.open(probe, [:write, :exclusive, :raw])
-      :file.close(file)
+      case :file.open(probe, [:write, :exclusive, :raw]) do
+        {:ok, file} ->
+          :file.close(file)
+          probe_owner(probe)
 
-      try do
-        {:ok, %File.Stat{uid: uid}} = File.lstat(probe)
-        uid
-      after
-        File.rm(probe)
+        _cannot_create ->
+          :error
       end
+    end
+
+    defp probe_owner(probe) do
+      case File.lstat(probe) do
+        {:ok, %File.Stat{uid: uid}} -> {:ok, uid}
+        _ -> :error
+      end
+    after
+      File.rm(probe)
     end
 
     ## The file
 
     defp private_file(path) do
       with {:ok, %File.Stat{type: :regular, mode: mode, uid: uid}} <- File.lstat(path),
-           true <- (mode &&& 0o777) == 0o600 and uid == uid(),
+           {:ok, me} <- uid(),
+           true <- (mode &&& 0o777) == 0o600 and uid == me,
            {:ok, bytes} <- File.read(path) do
         {:ok, bytes}
       else
@@ -288,18 +334,70 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
 
     ## Consistency with the target and its rows
 
-    defp consistent(doc, target, opts) do
+    # `sha` is the SHA-256 of the file's (or the new file's) bytes.
+    defp consistent(doc, target, opts, sha) do
       target = Map.update!(target, :profile_id, &to_string/1)
 
       with true <- target(doc) == target,
-           true <- doc["prompt"] == ref(Prompt.prompt_ref()),
-           true <- doc["output_schema"] == ref(Prompt.schema_ref()),
+           true <- doc["prompt"] in Enum.map(Prompt.prompt_refs(), &ref/1),
+           true <- doc["output_schema"] in Enum.map(Prompt.schema_refs(), &ref/1),
            {:ok, invocation} <- invocation(target, Keyword.get(opts, :actor)),
            true <- recorded?(doc, invocation, target),
-           true <- Enum.all?(doc["links"], &linked?(&1, invocation)) do
+           true <- candidate?(doc, invocation),
+           true <- attested?(doc),
+           {:ok, links} <- links(doc["links"], invocation),
+           true <- evaluated?(doc, links),
+           :ok <- latch(invocation, sha) do
         :ok
       else
         _ -> :error
+      end
+    end
+
+    # The candidate is exactly the tuple admission recorded on the
+    # invocation's original reservation event (pinned to the versions of
+    # that time, never today's profile).
+    defp candidate?(doc, invocation) do
+      case Gate.recorded_tuple(invocation) do
+        {:ok, entry} -> doc["candidate"] == Gate.tuple_record(entry)
+        _none_or_invalid -> false
+      end
+    end
+
+    # Observed init values: the candidate's own CLI version and model as a
+    # pair, or both null (no valid init); never other text.
+    defp attested?(%{"attested_cli_version" => nil, "attested_model_id" => nil}), do: true
+
+    defp attested?(%{"candidate" => candidate} = doc) do
+      doc["attested_cli_version"] == candidate["cli_version"] and
+        doc["attested_model_id"] == candidate["model_id"]
+    end
+
+    # The evaluated projection and method are one named link's, or both
+    # null without links.
+    defp evaluated?(%{"evaluated_projection_version" => nil, "evaluated_method" => nil}, []),
+      do: true
+
+    defp evaluated?(doc, links) do
+      Enum.any?(links, fn link ->
+        {doc["evaluated_projection_version"], doc["evaluated_method"]} ==
+          {link.evidence["projection_version"], to_string(link.method)}
+      end)
+    end
+
+    # An existing calibration latch commits this file's hash; any other
+    # release, or another hash, is a conflict.
+    defp latch(invocation, sha) do
+      ModelResultRelease
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+      |> Ash.Query.filter(
+        model_invocation_id == ^invocation.id and tenant_id == ^invocation.tenant_id
+      )
+      |> Ash.read_one()
+      |> case do
+        {:ok, nil} -> :ok
+        {:ok, %{disposition: :calibration, evidence_sha256: ^sha}} -> :ok
+        _other -> :error
       end
     end
 
@@ -338,10 +436,23 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
     defp output_commitment(output) when is_map(output), do: hex(Canonical.sha256(output))
     defp output_commitment(_forbidden_or_other), do: :unreadable
 
-    defp linked?(%{"id" => id, "evidence_sha256" => sha}, invocation) do
-      case link(id, invocation) do
-        {:ok, link} -> hex(Canonical.sha256(link.evidence)) == sha
-        _ -> false
+    # The named links, each of this invocation with the evidence hash it
+    # recorded: `{:ok, rows}` or `:error`.
+    defp links(refs, invocation) do
+      Enum.reduce_while(refs, {:ok, []}, fn ref, {:ok, acc} ->
+        case recorded_link(ref, invocation) do
+          {:ok, row} -> {:cont, {:ok, [row | acc]}}
+          :error -> {:halt, :error}
+        end
+      end)
+    end
+
+    defp recorded_link(%{"id" => id, "evidence_sha256" => sha}, invocation) do
+      with {:ok, row} <- link(id, invocation),
+           true <- hex(Canonical.sha256(row.evidence)) == sha do
+        {:ok, row}
+      else
+        _missing_foreign_or_changed -> :error
       end
     end
 

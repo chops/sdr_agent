@@ -333,7 +333,14 @@ defmodule SdrAgent.Agents.Admission.Gate do
     end
   end
 
-  defp recorded_tuple(%{id: id, agent_run_id: run_id, tenant_id: tenant_id}) do
+  @doc """
+  The calibration tuple recorded by the one original `model.invocation.reserved`
+  event of `invocation` (its `id`, `agent_run_id` and `tenant_id`):
+  `{:ok, entry}`, nil when it records none, or `:invalid` when the event is
+  missing, duplicated or its tuple malformed. Also used by the calibration
+  evidence file (R0-07 slice E, R11-3) to bind its candidate.
+  """
+  def recorded_tuple(%{id: id, agent_run_id: run_id, tenant_id: tenant_id}) do
     AuditEvent
     |> Ash.Query.filter(
       tenant_id == ^tenant_id and event_type == "model.invocation.reserved" and

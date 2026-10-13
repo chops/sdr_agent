@@ -992,7 +992,7 @@ writer of `status_reason :calibration_latched`.
 |---|---|
 | `match` | a primary link is `reconciled` under the candidate |
 | `mismatch` | the same projection and method, but the payload hashes differ (link `mismatch`) |
-| `projection_differs` | the evaluated projection is not the candidate's |
+| `projection_differs` | the evaluated projection or method is not the candidate's (both actual values recorded; accepted in Codex's E3 review) |
 | `not_enabled` | the evaluated tuple equals the candidate but the link is inferred with `method_not_enabled` |
 | `unsupported` | the request or response shape is unsupported |
 | `ambiguous` | several or unclassified exchanges |

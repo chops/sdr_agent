@@ -255,6 +255,120 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
     end
   end
 
+  describe "code review (Codex, 661e19d)" do
+    test "validate refuses a file under a directory that lost privacy", ctx do
+      {:ok, published} = publish(ctx, ctx.document)
+      File.chmod!(ctx.dir, 0o755)
+      assert {:error, :calibration_evidence_conflict} = validate(ctx, published.path)
+    end
+
+    test "validate refuses a file reached through a symlinked ancestor", ctx do
+      {:ok, published} = publish(ctx, ctx.document)
+      real = Path.dirname(ctx.dir)
+      alias_dir = real <> "-valias"
+      File.rm(alias_dir)
+      on_exit(fn -> File.rm(alias_dir) end)
+      File.ln_s!(real, alias_dir)
+
+      via_alias = Path.join([alias_dir, "evidence", Path.basename(published.path)])
+      assert {:error, :calibration_evidence_conflict} = validate(ctx, via_alias)
+    end
+
+    test "the candidate is the invocation's admitted tuple, never other text", ctx do
+      for {key, value} <- [
+            model_id: "untrusted-model-canary",
+            profile_id: "claude_cli_sonnet",
+            model_id: "claude-sonnet-5-5",
+            projection_version: "claude-message-json/1+prompt-builder/1",
+            cli_version: "2.1.291",
+            method: "time_window"
+          ] do
+        bad = put_in(ctx.document, [:candidate, key], value)
+        assert {:error, _} = publish(ctx, bad), inspect(key)
+      end
+
+      assert Path.wildcard(Path.join(ctx.dir, "*")) == []
+      {:ok, published} = publish(ctx, ctx.document)
+      ctx = Map.put(ctx, :published, published)
+
+      assert {:error, :calibration_evidence_conflict} =
+               rewrite_and_validate(ctx, &put_in(&1, [:candidate, :model_id], "untrusted"))
+    end
+
+    test "observed attestation is the candidate's init pair or null, never other text", ctx do
+      for bad <- [
+            %{ctx.document | attested_model_id: "untrusted-init-canary"},
+            %{ctx.document | attested_cli_version: "2.1.291"},
+            %{ctx.document | attested_model_id: nil},
+            %{ctx.document | attested_cli_version: nil}
+          ] do
+        assert {:error, _} = publish(ctx, bad)
+      end
+
+      nulls = %{ctx.document | attested_model_id: nil, attested_cli_version: nil}
+      assert {:ok, _} = publish(ctx, %{nulls | outcome: "init_drift"})
+    end
+
+    test "the evaluated tuple is a named link's, or null without links", ctx do
+      for bad <- [
+            %{ctx.document | evaluated_projection_version: "untrusted-projection"},
+            %{ctx.document | evaluated_method: "untrusted-method"},
+            %{ctx.document | evaluated_projection_version: nil},
+            %{ctx.document | links: []}
+          ] do
+        assert {:error, _} = publish(ctx, bad)
+      end
+
+      assert Path.wildcard(Path.join(ctx.dir, "*")) == []
+    end
+
+    test "under a latch, a changed or replaced file conflicts; the original replays", ctx do
+      {:ok, published} = publish(ctx, ctx.document)
+
+      {:ok, %{release: latch}} =
+        Agents.finish_calibration(ctx.invocation, %{sha256: published.sha256}, actor: ctx.agent)
+
+      assert latch.evidence_sha256 == published.sha256
+      assert {:ok, %{sha256: sha}} = validate(ctx, published.path)
+      assert sha == published.sha256
+
+      changed = Map.put(ctx.document, :observed_at, DateTime.add(ctx.document.observed_at, 60))
+      File.write!(published.path, Canonical.encode!(changed))
+      assert {:error, :calibration_evidence_conflict} = validate(ctx, published.path)
+
+      File.rm!(published.path)
+      assert {:error, :calibration_evidence_conflict} = validate(ctx, published.path)
+      assert {:error, :calibration_evidence_conflict} = publish(ctx, changed)
+    end
+
+    test "a write refusal is a returned error, not an exception, and publishes nothing", ctx do
+      me = self()
+      handler = "evidence-write-fault-#{System.unique_integer([:positive])}"
+
+      # After the row checks, before the temporary file: the directory
+      # becomes unwritable.
+      :telemetry.attach(
+        handler,
+        [:sdr_agent, :repo, :query],
+        fn _event, _measurements, meta, _config ->
+          if self() == me and is_binary(meta.query) and meta.query =~ "wire_witness_links",
+            do: File.chmod!(ctx.dir, 0o500)
+        end,
+        nil
+      )
+
+      try do
+        assert {:error, :calibration_evidence_conflict} = publish(ctx, ctx.document)
+      after
+        :telemetry.detach(handler)
+        File.chmod!(ctx.dir, 0o700)
+      end
+
+      assert Path.wildcard(Path.join(ctx.dir, "*")) == []
+      assert Path.wildcard(Path.join(ctx.dir, ".*")) |> Enum.reject(&dot?/1) == []
+    end
+  end
+
   # A proof invocation reserved with the calibration input's own references
   # (or, `refs: :generic`, an ordinary prompt's), completed with a synthetic
   # parsed answer or failed after it was sent.
