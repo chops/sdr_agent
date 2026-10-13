@@ -121,11 +121,85 @@ defmodule SdrAgent.Agents.CalibrationClaimTest do
     %{run: run, agent: agent} = proof_run(ctx)
     {:ok, invocation} = reserve(run, agent, calibration: marker(claim: Ash.UUIDv7.generate()))
 
-    assert Gate.recorded_claim(%{invocation | id: Ash.UUIDv7.generate()}) ==
-             {:error, :claim_unrecorded}
+    # A plain identifier map of an invocation with no reservation event.
+    missing = %{
+      id: Ash.UUIDv7.generate(),
+      agent_run_id: invocation.agent_run_id,
+      tenant_id: invocation.tenant_id
+    }
+
+    assert Gate.recorded_claim(missing) == {:error, :claim_unrecorded}
+    assert Gate.recorded_claim(%{}) == {:error, :claim_unrecorded}
+  end
+
+  # GREEN-time verification (Codex 01a1359a notes): explicit nil and empty
+  # claims, and duplicated or malformed recorded provenance.
+  test "an explicit nil claim is claimless; an empty one is invalid", ctx do
+    %{run: run, agent: agent} = proof_run(ctx)
+    assert {:ok, invocation} = reserve(run, agent, calibration: marker(claim: nil))
+    assert Gate.recorded_claim(invocation) == {:ok, nil}
+
+    assert_raise ArgumentError, fn -> marker(claim: "") end
+
+    %{run: run, agent: agent} = proof_run(ctx)
+
+    forged = %{
+      sdr_calibration_admission: %{profile_id: :claude_cli_opus, entry: entry(), claim: ""}
+    }
+
+    result = reserve(run, agent, calibration: forged)
+    assert inspect(result) =~ "calibration_not_authorized", inspect(result)
+  end
+
+  test "duplicated or malformed recorded provenance is unrecorded", ctx do
+    %{run: run, agent: agent} = proof_run(ctx)
+    claim = Ash.UUIDv7.generate()
+    {:ok, invocation} = reserve(run, agent, calibration: marker(claim: claim))
+    [original] = reserved_events(ctx, invocation)
+
+    # A second event in the exact original scope makes the provenance
+    # ambiguous (a kernel append: test fixture only).
+    {:ok, _duplicate} = append_reserved(agent, invocation.id, invocation, original.payload)
+    assert Gate.recorded_claim(invocation) == {:error, :claim_unrecorded}
+
+    # A claim without a valid admitted tuple next to it, and malformed
+    # claims, each on a fresh identifier's only event.
+    for arguments <- [
+          %{"calibration_claim" => %{"instance_id" => claim}, "calibration_tuple" => nil},
+          %{"calibration_claim" => %{"instance_id" => "nope"}},
+          %{"calibration_claim" => %{"instance_id" => claim, "extra" => 1}}
+        ] do
+      id = Ash.UUIDv7.generate()
+      {:ok, _event} = append_reserved(agent, id, invocation, %{"arguments" => arguments})
+
+      provenance = %{
+        id: id,
+        agent_run_id: invocation.agent_run_id,
+        tenant_id: invocation.tenant_id
+      }
+
+      assert Gate.recorded_claim(provenance) == {:error, :claim_unrecorded}, inspect(arguments)
+    end
   end
 
   ## Fixtures
+
+  defp append_reserved(agent, id, invocation, payload) do
+    SdrAgent.Audit.Kernel.append(
+      %{
+        event_type: "model.invocation.reserved",
+        category: :model,
+        subject_resource: "SdrAgent.Agents.ModelInvocation",
+        subject_id: id,
+        action: "reserve",
+        model_invocation_id: id,
+        agent_run_id: invocation.agent_run_id,
+        payload: payload
+      },
+      actor: agent,
+      tenant_id: invocation.tenant_id
+    )
+  end
 
   defp proof_run(ctx), do: AgentsFixtures.running_run(ctx.tenant, usage_origin: :proof)
 

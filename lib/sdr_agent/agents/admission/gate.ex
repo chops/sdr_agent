@@ -340,7 +340,50 @@ defmodule SdrAgent.Agents.Admission.Gate do
   missing, duplicated or its tuple malformed. Also used by the calibration
   evidence file (R0-07 slice E, R11-3) to bind its candidate.
   """
-  def recorded_tuple(%{id: id, agent_run_id: run_id, tenant_id: tenant_id}) do
+  def recorded_tuple(invocation) do
+    case original_reservation(invocation) do
+      {:ok, event} -> decode(get_in(event.payload, ["arguments", "calibration_tuple"]))
+      :error -> :invalid
+    end
+  end
+
+  @doc """
+  The console's launch-record claim recorded by the same one original
+  `model.invocation.reserved` event (R0-07 E4c-2): `{:ok, %{instance_id:
+  id}}`, `{:ok, nil}` when it records none, or `{:error, :claim_unrecorded}`
+  when the event is missing or duplicated, the claim is malformed, or a
+  claim is recorded without a valid admitted calibration tuple next to it
+  (a claim alone is no authority).
+  """
+  def recorded_claim(invocation) do
+    with {:ok, event} <- original_reservation(invocation),
+         arguments = Map.get(event.payload, "arguments") || %{},
+         {:ok, claim} <- decode_claim(arguments["calibration_claim"]),
+         :ok <- with_tuple(claim, decode(arguments["calibration_tuple"])) do
+      {:ok, claim}
+    else
+      _missing_duplicate_or_malformed -> {:error, :claim_unrecorded}
+    end
+  end
+
+  defp with_tuple(nil, _tuple), do: :ok
+  defp with_tuple(_claim, {:ok, _entry}), do: :ok
+  defp with_tuple(_claim, _missing_or_invalid), do: :error
+
+  # The one original `model.invocation.reserved` event of an invocation,
+  # in its exact tenant, run and subject scope; `:error` when missing or
+  # duplicated.
+  defp original_reservation(%{id: id, agent_run_id: run_id, tenant_id: tenant_id})
+       when is_binary(id) and is_binary(run_id) and is_binary(tenant_id) do
+    case reservation_events(id, run_id, tenant_id) do
+      [event] -> {:ok, event}
+      _missing_or_duplicate -> :error
+    end
+  end
+
+  defp original_reservation(_invocation), do: :error
+
+  defp reservation_events(id, run_id, tenant_id) do
     AuditEvent
     |> Ash.Query.filter(
       tenant_id == ^tenant_id and event_type == "model.invocation.reserved" and
@@ -348,11 +391,17 @@ defmodule SdrAgent.Agents.Admission.Gate do
         model_invocation_id == ^id and agent_run_id == ^run_id
     )
     |> Ash.read!(Kernel.opts(tenant_id))
-    |> case do
-      [event] -> decode(get_in(event.payload, ["arguments", "calibration_tuple"]))
-      _missing_or_duplicate -> :invalid
-    end
   end
+
+  @claim_uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+  defp decode_claim(nil), do: {:ok, nil}
+
+  defp decode_claim(%{"instance_id" => id} = claim) when map_size(claim) == 1 and is_binary(id) do
+    if id =~ @claim_uuid, do: {:ok, %{instance_id: id}}, else: :error
+  end
+
+  defp decode_claim(_malformed), do: :error
 
   defp decode(nil), do: nil
 

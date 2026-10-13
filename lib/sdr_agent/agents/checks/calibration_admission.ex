@@ -32,25 +32,63 @@ defmodule SdrAgent.Agents.Checks.CalibrationAdmission do
   """
   def scope(term), do: if(@test_seams, do: marked(term))
 
+  @doc """
+  The console's launch-record claim (`instance_id`) the marker `term`
+  carries (R0-07 E4c-2), or nil: no marker, no claim, or a marker that is
+  not valid (which `scope/1` refuses). Always nil outside test-seam builds.
+  """
+  def claim(term) do
+    with true <- @test_seams,
+         {_profile_id, _entry} <- marked(term),
+         %{@marker => %{claim: claim}} <- term do
+      claim
+    else
+      _ -> nil
+    end
+  end
+
+  @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
   defp marked(nil), do: nil
 
-  defp marked(%{@marker => %{profile_id: profile_id, entry: entry}}) when is_atom(profile_id) do
-    if ModelProfiles.real?(profile_id), do: {profile_id, entry}, else: :invalid
+  defp marked(%{@marker => %{profile_id: profile_id, entry: entry} = marker})
+       when is_atom(profile_id) do
+    if ModelProfiles.real?(profile_id) and claim?(Map.get(marker, :claim, nil)),
+      do: {profile_id, entry},
+      else: :invalid
   end
 
   defp marked(_malformed), do: :invalid
+
+  # A claim is absent or a launch-record instance id; anything else makes
+  # the whole marker invalid (never a claimless reservation).
+  defp claim?(nil), do: true
+  defp claim?(claim), do: is_binary(claim) and claim =~ @uuid
 
   if @test_seams do
     @doc """
     Test-seam builds only: the calibration admission marker for one
     calibration call of the reviewed real profile `profile_id` under the
-    candidate `entry`. Raises `ArgumentError` for anything but a real
-    profile id.
+    candidate `entry`, with the console's launch-record `claim:` (an
+    instance id) when given. Raises `ArgumentError` for anything but a real
+    profile id or a well-formed claim.
     """
-    def context(profile_id, entry) do
-      if ModelProfiles.real?(profile_id),
-        do: %{@marker => %{profile_id: profile_id, entry: entry}},
-        else: raise(ArgumentError, "not a reviewed real profile: #{inspect(profile_id)}")
+    def context(profile_id, entry, opts \\ []) do
+      claim = Keyword.get(opts, :claim)
+
+      cond do
+        not ModelProfiles.real?(profile_id) ->
+          raise ArgumentError, "not a reviewed real profile: #{inspect(profile_id)}"
+
+        not claim?(claim) ->
+          raise ArgumentError, "not a launch-record claim: #{inspect(claim)}"
+
+        is_nil(claim) ->
+          %{@marker => %{profile_id: profile_id, entry: entry}}
+
+        true ->
+          %{@marker => %{profile_id: profile_id, entry: entry, claim: claim}}
+      end
     end
   end
 end

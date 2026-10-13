@@ -153,7 +153,7 @@ defmodule SdrAgent.Agents.Admission do
   locked, freshly read `run`, among the share-locked `candidate_ids`.
   `gate` carries the admission gate's inputs taken before any lock
   (`%{store: Gate.observe_store(), calibration: authority}`). Returns
-  `{:ok, %{grant_id:, allocation_id:, calibration_tuple:}}` or
+  `{:ok, %{grant_id:, allocation_id:, calibration_tuple:, calibration_claim:}}` or
   `{:error, %Refusal{}}`. Callers hold the run row, candidate and
   chain-head locks.
   """
@@ -179,9 +179,21 @@ defmodule SdrAgent.Agents.Admission do
          {:ok, grants} <- eligible_grants(refusal, candidate_ids, now),
          {:ok, grant, allocation} <- one_allocation(refusal, grants, now),
          :ok <- room(%{refusal | grant_id: grant.id, allocation_id: allocation.id}, grant, now) do
-      {:ok, %{grant_id: grant.id, allocation_id: allocation.id, calibration_tuple: tuple}}
+      {:ok,
+       %{
+         grant_id: grant.id,
+         allocation_id: allocation.id,
+         calibration_tuple: tuple,
+         calibration_claim: claim_record(tuple, gate)
+       }}
     end
   end
+
+  # The console's claim is recorded only next to an admitted calibration
+  # tuple (R0-07 E4c-2), never on its own.
+  defp claim_record(nil, _gate), do: nil
+  defp claim_record(_tuple, %{claim: claim}) when is_binary(claim), do: %{"instance_id" => claim}
+  defp claim_record(_tuple, _gate), do: nil
 
   defp admission_gate(refusal, run, gate) do
     case Gate.admit_reservation(run, refusal.profile_id, gate.store, gate.calibration) do

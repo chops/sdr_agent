@@ -227,6 +227,10 @@ defmodule SdrAgent.Agents.ModelInvocation do
       # recorded on the reservation event for launch admission.
       argument :calibration_tuple, :map
 
+      # R0-07 E4c-2: the calibration console's launch-record claim
+      # (`%{"instance_id" => uuid}`), set only from the admitted charge.
+      argument :calibration_claim, :map
+
       validate SdrAgent.Agents.Validations.InvocationProfile
       change SdrAgent.Agents.Changes.AdmissionCharge
       change set_attribute(:ledger_generation, 2)
@@ -234,7 +238,10 @@ defmodule SdrAgent.Agents.ModelInvocation do
       change SdrAgent.Audit.Changes.TraceIds
 
       change {AppendEvent,
-              [event_type: "model.invocation.reserved", arguments: [:calibration_tuple]] ++ @event}
+              [
+                event_type: "model.invocation.reserved",
+                arguments: [:calibration_tuple, :calibration_claim]
+              ] ++ @event}
     end
 
     update :mark_sent do

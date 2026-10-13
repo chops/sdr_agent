@@ -288,7 +288,8 @@ defmodule SdrAgent.Agents do
   def reserve_model_invocation(run, attrs, opts) do
     actor = Keyword.get(opts, :actor)
 
-    calibration = CalibrationAdmission.scope(Keyword.get(opts, :calibration))
+    marker = Keyword.get(opts, :calibration)
+    calibration = {CalibrationAdmission.scope(marker), CalibrationAdmission.claim(marker)}
 
     ModelInvocation
     |> guard(:reserve, run.id, actor, fn -> reserve_normalized(run, attrs, actor, calibration) end)
@@ -316,10 +317,12 @@ defmodule SdrAgent.Agents do
     end
   end
 
-  defp gate_inputs(%{provider: :claude_cli} = attrs, calibration, run, actor) do
+  # `claim` is the console's launch-record claim carried by the same marker
+  # (R0-07 E4c-2): recorded only with an admitted calibration tuple.
+  defp gate_inputs(%{provider: :claude_cli} = attrs, {calibration, claim}, run, actor) do
     if ModelProfiles.real?(Map.get(attrs, :profile_id)) do
       store = if may_reserve?(run, actor), do: Gate.observe_store(), else: :unobserved
-      %{store: store, calibration: calibration}
+      %{store: store, calibration: calibration, claim: claim}
     end
   end
 
