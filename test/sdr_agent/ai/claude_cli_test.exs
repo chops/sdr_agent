@@ -26,6 +26,8 @@ defmodule SdrAgent.AI.ClaudeCLITest do
           {"malformed", :invalid_cli_stream},
           {"model_drift", :model_attestation_drift},
           {"version_drift", :version_attestation_drift},
+          # R0-08: the previously reviewed 2.1.291 is now drift, not attested.
+          {"old_version", :version_attestation_drift},
           {"tool_drift", :tool_attestation_drift}
         ] do
       {:ok, server} = start_server(mode)
