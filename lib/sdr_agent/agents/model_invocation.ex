@@ -35,6 +35,24 @@ defmodule SdrAgent.Agents.ModelInvocation do
   AGT creates and transitions only (through `SdrAgent.Agents`); reads for
   any actor (metadata only — content via `SdrAgent.Audit.read_content/2`).
   Audited: `model.invocation.reserved | sent | completed | failed | unknown`.
+
+  Read gate (R0-07 REQ-07-5; entity PASS at 1da747a; round 5 PASS at
+  dc8cae7): for a generation-2 ClaudeCLI row, the output-bearing fields
+  (`output_fields/0`: `parsed_output`, `validation_errors`, `refusal`) are
+  readable only by the released-output
+  read (`SdrAgent.Agents.released_output/2`, marked by
+  `SdrAgent.Agents.Checks.ReleasedOutputRead` and requiring a `:released`
+  `SdrAgent.Agents.ModelResultRelease`), by the witness evidence seam (REC
+  and AUD), by the audit kernel's integrity read (chain verification and
+  event hashing, `SdrAgent.Audit.Checks.IntegrityRead`) and, as AGT, for
+  the one proof invocation bound by the test-seam
+  `SdrAgent.Agents.Checks.CalibrationContext`
+  (`SdrAgent.Agents.Checks.CalibrationRead`). Its audit events carry
+  commitments instead (`__sdr_output_commitment__/1`). Every other read — generic
+  Ash reads, domain list and detail APIs, kernel-context reads, admins and
+  AGT — returns `%Ash.ForbiddenField{}`, released or not. Generation-1 and
+  Fake rows are unchanged. An `(id, tenant_id)` unique key is the target of
+  the release's composite FK.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -48,6 +66,8 @@ defmodule SdrAgent.Agents.ModelInvocation do
   alias SdrAgent.Audit.Checks
 
   @statuses [:reserved, :sent, :completed, :failed, :unknown]
+  # R0-07: the model-authored (output-bearing) fields of a gated row.
+  @output_fields [:parsed_output, :validation_errors, :refusal]
   # The model profile ids (R0-03 registry, `SdrAgent.AI.ModelProfiles`).
   @profiles SdrAgent.AI.ModelProfiles.ids()
   @terminal [:completed, :failed, :unknown]
@@ -135,6 +155,15 @@ defmodule SdrAgent.Agents.ModelInvocation do
         after_tables ["model_call_grants"]
       end
 
+      # Target of the ModelResultRelease (model_invocation_id, tenant_id)
+      # composite FK (R0-07).
+      statement :model_invocations_id_tenant_key do
+        up "ALTER TABLE model_invocations ADD CONSTRAINT model_invocations_id_tenant_key " <>
+             "UNIQUE (id, tenant_id)"
+
+        down "ALTER TABLE model_invocations DROP CONSTRAINT model_invocations_id_tenant_key"
+      end
+
       statement :model_invocations_allocation_grant_fkey do
         up "ALTER TABLE model_invocations ADD CONSTRAINT model_invocations_allocation_grant_fkey " <>
              "FOREIGN KEY (allocation_id, grant_id) " <>
@@ -145,6 +174,25 @@ defmodule SdrAgent.Agents.ModelInvocation do
 
         after_tables ["model_call_allocations"]
       end
+    end
+  end
+
+  field_policies do
+    # R0-07: the output of a generation-2 ClaudeCLI call is a business read
+    # only once released, and then only through the released-output read.
+    # Round 5: the diagnostics `validation_errors` and `refusal` are copies
+    # of model-authored output and share the boundary.
+    field_policy @output_fields do
+      authorize_if expr(ledger_generation != 2 or provider != :claude_cli)
+      authorize_if {Checks.ActorType, types: [:reconciler, :auditor_cli]}
+      authorize_if SdrAgent.Audit.Checks.IntegrityRead
+      authorize_if SdrAgent.Agents.Checks.CalibrationRead
+      forbid_unless SdrAgent.Agents.Checks.ReleasedOutputRead
+      authorize_if expr(exists(result_release, disposition == :released))
+    end
+
+    field_policy :* do
+      authorize_if always()
     end
   end
 
@@ -380,11 +428,38 @@ defmodule SdrAgent.Agents.ModelInvocation do
 
     has_many :decisions, SdrAgent.Agents.Decision, public?: true
     has_many :wire_witness_links, SdrAgent.Agents.WireWitnessLink, public?: true
+    has_one :result_release, SdrAgent.Agents.ModelResultRelease, public?: true
   end
 
   identities do
     identity :unique_sequence_in_run, [:agent_run_id, :sequence_in_run]
     identity :unique_idempotency_key, [:tenant_id, :idempotency_key]
+  end
+
+  @doc """
+  R0-07 round 5: the output-bearing fields of a gated (generation-2
+  ClaudeCLI) row — withheld by the field policy, and replaced by
+  `sdr-output-commitment/1` commitments in its audit events
+  (`SdrAgent.Audit.Changes.AppendEvent`).
+  """
+  def output_fields, do: @output_fields
+
+  @doc "Whether `invocation` is gated: generation 2 and `claude_cli`."
+  def gated?(%{ledger_generation: 2, provider: :claude_cli}), do: true
+  def gated?(_invocation), do: false
+
+  @doc false
+  # AppendEvent's output-commitment hook: `{fields, metadata}` for a gated
+  # row, nil otherwise.
+  def __sdr_output_commitment__(invocation) do
+    if gated?(invocation) do
+      {@output_fields,
+       %{
+         validation_status: invocation.validation_status,
+         output_schema_id: invocation.output_schema_id,
+         output_schema_version: invocation.output_schema_version
+       }}
+    end
   end
 
   @doc "Declared lifecycle transitions `{action, from, to}` (ADR-0010)."

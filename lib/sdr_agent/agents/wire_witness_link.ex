@@ -26,7 +26,9 @@ defmodule SdrAgent.Agents.WireWitnessLink do
   for C3 and the append-only triggers.
 
   Only terminal `:claude_cli` invocations can be linked. Writes: `:link`, REC
-  only (through `SdrAgent.Agents.link_wire_witness/2`); reads: any actor
+  only (through `SdrAgent.Agents.link_wire_witness/2`); an `(id,
+  model_invocation_id)` unique key is the target of the
+  `SdrAgent.Agents.ModelResultRelease` composite FK (R0-07); reads: any actor
   that may read ModelInvocation metadata, scoped to its tenant by the
   domain functions. Audited: `agents.witness.linked` (invocation and run
   correlation, `record_sha256`) in the same transaction.
@@ -92,6 +94,17 @@ defmodule SdrAgent.Agents.WireWitnessLink do
           up up_sql
           down down_sql
         end
+      end
+
+      # Target of the ModelResultRelease (wire_witness_link_id,
+      # model_invocation_id) composite FK (R0-07): a release's link is its
+      # own invocation's.
+      statement :wire_witness_links_id_invocation_key do
+        up "ALTER TABLE wire_witness_links ADD CONSTRAINT wire_witness_links_id_invocation_key " <>
+             "UNIQUE (id, model_invocation_id)"
+
+        down "ALTER TABLE wire_witness_links DROP CONSTRAINT " <>
+               "wire_witness_links_id_invocation_key"
       end
     end
   end

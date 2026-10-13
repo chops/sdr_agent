@@ -2,7 +2,9 @@ defmodule SdrAgent.SDR.ReplyWorkerProviderTest do
   @moduledoc """
   Q0.1 review: reply classification (`SdrAgent.SDR.ReplyWorker`) on the
   runtime-selected ClaudeCLI. Through the one named server (backed by the
-  hermetic fake CLI) a matched reply is classified and handed off; with the
+  hermetic fake CLI) a matched reply's classification call completes, but
+  its unreleased generation-2 output is withheld from the run (R0-07 slice
+  A; released by the slice C gate step); with the
   server missing the run fails `provider_error` with its critical Failure
   and no model call (no reservation), the job returning `{:error,
   :provider_not_running}`; a drifted attestation fails the invocation and
@@ -57,20 +59,32 @@ defmodule SdrAgent.SDR.ReplyWorkerProviderTest do
 
   defp classify!, do: Oban.drain_queue(queue: :agent, with_safety: false)
 
-  test "a reply is classified through the named server", ctx do
+  # R0-07 slice A (REQ-07-5): a completed generation-2 ClaudeCLI output with
+  # no `:released` ModelResultRelease is no business output. Nothing in this
+  # slice writes a release (the facade gate step is R0-07 slice C), so the
+  # run cannot record its LLM decision on the output and fails closed:
+  # nothing is classified and the charged call is kept.
+  test "a reply classified through the named server is withheld until released", ctx do
     start_named!("sdr")
     assert %{success: 1} = classify!()
 
     run = run!(ctx, ctx.reply_run)
-    assert run.status == :succeeded, inspect({run.status_reason, run.failure_reason})
+    assert run.status == :failed, inspect({run.status_reason, run.failure_reason})
 
     assert [invocation] = invocations!(ctx, run)
 
     assert {invocation.provider, invocation.model_id, invocation.purpose, invocation.status} ==
              {:claude_cli, "claude-opus-5-5", :reply_classification, :completed}
 
-    {:ok, [assessment]} = Outreach.list_records(Outreach.ReplyAssessment, actor: ctx.admin)
-    assert {assessment.classification, assessment.source} == {:interested, :agent}
+    assert invocation.ledger_generation == 2
+    assert {:ok, nil} = Agents.get_result_release(invocation.id, actor: ctx.agent)
+
+    assert {:error, :result_not_released} =
+             Agents.released_output(invocation, actor: ctx.agent)
+
+    {:ok, decisions} = Agents.list_decisions(run.id, actor: ctx.agent)
+    refute Enum.any?(decisions, &(&1.model_invocation_id == invocation.id))
+    assert {:ok, []} = Outreach.list_records(Outreach.ReplyAssessment, actor: ctx.admin)
   end
 
   test "with the server missing the run fails provider_not_running, no model call", ctx do

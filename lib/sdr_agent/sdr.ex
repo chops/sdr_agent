@@ -225,7 +225,9 @@ defmodule SdrAgent.SDR do
   campaign, and the campaign sequence's step. Returns `%{run_id, lead_id,
   campaign_id, enrollment_id, sequence_step_id, recipient_contact_id,
   decision_id, model_invocation_id, output}` — `output` being the
-  Zoi-validated OutreachProposal.
+  Zoi-validated OutreachProposal, read through the released-output read
+  (`SdrAgent.Agents.released_output/2`): a generation-2 ClaudeCLI output
+  without a `:released` release is `{:error, :result_not_released}` (R0-07).
   """
   def proposal(run_id, opts) do
     actor = Keyword.fetch!(opts, :actor)
@@ -254,7 +256,8 @@ defmodule SdrAgent.SDR do
          {:ok, invocation} <-
            Ash.get(Agents.ModelInvocation, draft.model_invocation_id, actor: actor),
          true <- invocation.agent_run_id == run.id,
-         {:ok, output} <- Zoi.parse(Schemas.outreach_proposal(), invocation.parsed_output),
+         {:ok, released} <- Agents.released_output(invocation, actor: actor),
+         {:ok, output} <- Zoi.parse(Schemas.outreach_proposal(), released),
          {:ok, lead} <- Sales.fetch(Sales.Lead, run.lead_id, actor: actor),
          {:ok, campaign} <- Sales.fetch(Sales.Campaign, run.campaign_id, actor: actor),
          {:ok, enrollment} <-
@@ -275,6 +278,8 @@ defmodule SdrAgent.SDR do
          output: output
        }}
     else
+      # R0-07: an unreleased generation-2 ClaudeCLI output is never replayed.
+      {:error, :result_not_released} -> {:error, :result_not_released}
       _ -> {:error, :no_proposal}
     end
   end
