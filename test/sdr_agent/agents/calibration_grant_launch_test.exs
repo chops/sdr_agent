@@ -12,11 +12,21 @@ defmodule SdrAgent.Agents.CalibrationGrantLaunchTest do
   `:calibration_grant_mismatch` through B1's one-Failure launch receipt,
   never falling back to another budget. An invocation without a recorded
   binding launches as before.
+
+  The recorded binding itself is checked at launch, not only its revision:
+  a malformed recorded binding beside a valid calibration tuple refuses
+  (`:binding_unrecorded`), never treated as a legacy absence, and a
+  well-shaped binding naming another grant, allocation or profile refuses
+  (`:binding_changed`) (Codex 01a13652). Such history cannot be created
+  through the domain, so those cases rewrite only the binding inside the
+  original reservation event's payload with `AuditCase.tamper!/2`
+  (triggers disabled, as a database administrator would).
   """
   use SdrAgent.AuditCase, async: false
 
   alias SdrAgent.AdmissionFixtures
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Admission.Gate
   alias SdrAgent.Agents.Admission.Refused
   alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.Agents.ModelInvocation
@@ -56,7 +66,7 @@ defmodule SdrAgent.Agents.CalibrationGrantLaunchTest do
         actor: human(:admin, ctx.tenant)
       )
 
-    assert_launch_mismatch(ctx, run, invocation, agent)
+    assert_launch_mismatch(ctx, run, invocation, agent, :binding_changed)
   end
 
   test "a grant revoked after reservation refuses the launch", ctx do
@@ -67,7 +77,33 @@ defmodule SdrAgent.Agents.CalibrationGrantLaunchTest do
         actor: human(:admin, ctx.tenant)
       )
 
-    assert_launch_mismatch(ctx, run, invocation, agent)
+    assert_launch_mismatch(ctx, run, invocation, agent, :binding_changed)
+  end
+
+  for form <- [:missing_key, :extra_key, :not_a_map] do
+    test "a malformed recorded binding (#{form}) beside a valid tuple refuses", ctx do
+      %{invocation: invocation, agent: agent, run: run} = bound!(ctx)
+      rebind!(ctx, invocation, &malformed(&1, unquote(form)))
+
+      # The tuple gate still passes: only the binding is malformed.
+      assert {:ok, %{}} = Gate.recorded_tuple(invocation)
+      assert Gate.recorded_binding(invocation) == {:error, :binding_unrecorded}
+
+      assert_launch_mismatch(ctx, run, invocation, agent, :binding_unrecorded)
+    end
+  end
+
+  for field <- [:grant_id, :allocation_id, :profile_id] do
+    test "a well-shaped binding naming another #{field} refuses", ctx do
+      %{invocation: invocation, agent: agent, run: run} = bound!(ctx)
+      rebind!(ctx, invocation, &other(&1, unquote(field), ctx))
+
+      # Well-shaped, at the unchanged revision: only #{field} differs.
+      assert {:ok, %{grant_revision: revision}} = Gate.recorded_binding(invocation)
+      assert revision == ctx.grant.revision
+
+      assert_launch_mismatch(ctx, run, invocation, agent, :binding_changed)
+    end
   end
 
   test "an invocation without a recorded binding launches as before", ctx do
@@ -113,7 +149,47 @@ defmodule SdrAgent.Agents.CalibrationGrantLaunchTest do
     end)
   end
 
-  defp assert_launch_mismatch(ctx, run, invocation, agent) do
+  # Rewrites `arguments.calibration_binding` of the invocation's one
+  # original reservation event (fixture only; triggers disabled).
+  defp rebind!(ctx, invocation, change) do
+    [event] =
+      Enum.filter(
+        events_of_type(ctx.tenant, "model.invocation.reserved"),
+        &(&1.model_invocation_id == invocation.id)
+      )
+
+    stored = event.payload["arguments"]["calibration_binding"]
+    assert is_map(stored)
+
+    %{num_rows: 1} =
+      tamper!(
+        """
+        UPDATE audit_events
+           SET payload = jsonb_set(payload, '{arguments,calibration_binding}', $2::jsonb)
+         WHERE tenant_id = $1 AND id = $3
+        """,
+        [Ecto.UUID.dump!(ctx.tenant.id), change.(stored), Ecto.UUID.dump!(event.id)]
+      )
+
+    :ok
+  end
+
+  defp malformed(stored, :missing_key), do: Map.delete(stored, "allocation_id")
+  defp malformed(stored, :extra_key), do: Map.put(stored, "extra", 1)
+  defp malformed(_stored, :not_a_map), do: "binding"
+
+  defp other(stored, :grant_id, _ctx), do: %{stored | "grant_id" => Ash.UUIDv7.generate()}
+
+  # The other profile's real allocation in the same grant.
+  defp other(stored, :allocation_id, ctx) do
+    %{allocations: allocations} = Ash.load!(ctx.grant, :allocations, authorize?: false)
+    [sonnet] = Enum.filter(allocations, &(&1.profile_id == :claude_cli_sonnet))
+    %{stored | "allocation_id" => sonnet.id}
+  end
+
+  defp other(stored, :profile_id, _ctx), do: %{stored | "profile_id" => "claude_cli_sonnet"}
+
+  defp assert_launch_mismatch(ctx, run, invocation, agent, check) do
     before = failures(ctx)
     result = launch(invocation, agent)
 
@@ -124,6 +200,16 @@ defmodule SdrAgent.Agents.CalibrationGrantLaunchTest do
            inspect(result)
 
     {:error, refused} = result
+    assert refused.check == check
+
+    assert [%{id: event_id}] =
+             Enum.filter(
+               events_of_type(ctx.tenant, "model.launch.refused"),
+               &(&1.model_invocation_id == invocation.id)
+             )
+
+    assert event_id == refused.event_id
+
     row = Ash.get!(ModelInvocation, invocation.id, authorize?: false)
     assert {row.status, row.sent_at} == {:failed, nil}
     assert row.error["reason"] == "calibration_grant_mismatch"
