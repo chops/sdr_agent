@@ -1576,11 +1576,16 @@ any process or workspace exists.** Every failure here returns
    - A consumed or forged reference and any mismatched claim are also
      refused.
 
-**B. Unchanged after the consume.** Witness environment, bypass refusal,
-deadline and caller checks, the pinned executable and real shim, workspace,
-reaper, and init attestation. Then exactly one real call:
-`Agents.admit_launch(id, profile, actor: request.actor, calibration_launch:
-expected)`.
+**B. Unchanged after the consume, in the existing order.**
+1. Witness environment, bypass refusal, deadline and caller checks, the
+   pinned executable and the real shim, and the workspace.
+2. Exactly one real admission:
+   `Agents.admit_launch(id, profile, actor: request.actor,
+   calibration_launch: expected)`.
+3. Only after `{:ok, sent}` (the row is marked `sent`) does the reaper open
+   the port.
+4. Then the init attestation, deadline, reaping and output-schema
+   validation run as today.
 
 - `expected` is
   `%{run_id:, tenant_id:, request_sha256:, prompt_ref:, schema_ref:}`. Its
@@ -1616,8 +1621,9 @@ or probe I/O, and no read of payload content.
    profile-mismatch check and before `Gate.admit_launch/3`, as part of B5
    step 3. A refusal goes to the targeted invocation through the existing
    receipt: reason `:calibration_not_authorized`, row `failed`, `sent_at`
-   nil, charge unchanged, one Failure (`provider_error`, run subject), one
-   `model.launch.refused` event, and the run stopped `:model_not_admitted`.
+   nil, charge unchanged, one Failure (`provider_error`, run subject) and one
+   `model.launch.refused` event. `admit_launch` fails only the invocation and
+   returns the receipt; it does not stop the run.
 
    | Check | Refused when |
    |---|---|
@@ -1658,7 +1664,7 @@ distinct. d1b compares only the VM instance.
 | ModelInvocation `:admit_launch` (`Agents.admit_launch/3`) | Existing action | Refusal-only option `calibration_launch:` with expected run, tenant, request SHA and prompt/schema refs | C7 identity mismatch: rollback, no mutation, identity event. C8/C9: the targeted invocation's existing receipt. `sent` only when every check passes. Charge unchanged | Existing launch lock order; plain comparisons only |
 | `Admission.launch_check` | Existing | New step C8 before `Gate.admit_launch/3`; `launch_binding` required mode | Precedence: run → legacy → profile → exemption → gate → binding → terms | Under the head; no new lock |
 | Failure / refusal contract | Existing | Reasons reused (`Gate.reasons/0` unchanged): `:calibration_not_authorized` with new checks `:exemption_scope`, `:exemption_input`, `:exemption_request`; `:calibration_grant_mismatch` / `:binding_unrecorded`. New identity refusal reason `:calibration_target_mismatch` (non-receipt path, beside `:invocation_not_found`) | Same receipt validator and category (8.11) | Existing |
-| AgentRun | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | `usage_origin` and `operation_id` are read under the existing run lock. A C8/C9 refusal stops the run through the existing receipt (`:model_not_admitted`) | Existing run lock |
+| AgentRun | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | `usage_origin` and `operation_id` are read under the existing run lock. d1b never transitions the run: a refused launch fails only the invocation. Calibration does not go through `SDR.Model`, so settling the proof run belongs to d3. The console latches the failed attempt's evidence and calls `finish_calibration` (E1), which moves the running proof run to its terminal state. For a non-`:proof` target, d1b makes no run transition | Existing run lock |
 
 **ADR and diagram evaluation.**
 - **ADR:** within ADR-0005's R0 calibration isolation (8.2). There is no
