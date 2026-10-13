@@ -39,8 +39,18 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     before the call's reply: `{:calibration_launched, ref, %{invocation_id:,
     server:, root_pid:, root_identity:, process_group_id:}}`, or
     `{:calibration_launch_unverified, ref, %{invocation_id:, server:,
-    root_pid:, reason:}}` with no launch fields. It never waits and never
-    signals or cleans anything up.
+    root_pid:, reason:}}` with no launch fields. It never signals or cleans
+    anything up.
+
+    The probe runs in a monitored task, bounded by the call's own `deadline`
+    (monotonic ms) and a 2 s probe budget, and by the caller: a
+    probe still running at the bound is killed and reported unverified
+    (`:probe_timeout`, or `:caller_down` when the caller died meanwhile;
+    a crashed probe is `:probe_failed`). A late probe result is discarded.
+    It returns what the server does next: `:ok` to collect the output,
+    `:expired` when the deadline has passed (queued output is never
+    collected as a late success) or `:caller_down` (the caller's `DOWN`
+    was consumed here).
     """
 
     alias SdrAgent.AI.JsonSchema
@@ -91,12 +101,22 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     defp observer?({pid, ref}) when is_pid(pid) and is_reference(ref), do: node(pid) == node()
     defp observer?(_observer), do: false
 
-    @doc "Sends the launch receipt for `os_pid` (see the moduledoc): `:ok`."
-    def receipt(%{calibration: %{observer: {pid, ref}}, witness: witness}, os_pid) do
+    @doc """
+    Sends the launch receipt for `os_pid` (see the moduledoc), bounded by
+    `deadline` and the caller monitor `watch`: `:ok`, `:expired` or
+    `:caller_down`.
+    """
+    def receipt(
+          %{calibration: %{observer: {pid, ref}}, witness: witness},
+          os_pid,
+          deadline,
+          watch
+        ) do
       base = %{invocation_id: witness.model_invocation_id, server: self()}
+      {proof, next} = bounded_proof(os_pid, deadline, watch)
 
       message =
-        case proof(os_pid) do
+        case proof do
           {:ok, identity} ->
             {:calibration_launched, ref,
              Map.merge(base, %{
@@ -111,7 +131,48 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
         end
 
       send(pid, message)
-      :ok
+
+      cond do
+        next == :caller_down -> :caller_down
+        System.monotonic_time(:millisecond) >= deadline -> :expired
+        true -> :ok
+      end
+    end
+
+    @probe_budget_ms 2_000
+
+    defp bounded_proof(os_pid, deadline, watch) do
+      task = Task.async(fn -> proof(os_pid) end)
+      until = min(deadline, System.monotonic_time(:millisecond) + @probe_budget_ms)
+
+      case await_proof(task, watch, until) do
+        {:done, result} ->
+          {result, :ok}
+
+        :caller_down ->
+          Task.shutdown(task, :brutal_kill)
+          {{:error, :caller_down}, :caller_down}
+
+        :timeout ->
+          Task.shutdown(task, :brutal_kill)
+          {{:error, :probe_timeout}, :ok}
+      end
+    end
+
+    defp await_proof(%Task{ref: task_ref}, watch, until) do
+      receive do
+        {^task_ref, result} ->
+          Process.demonitor(task_ref, [:flush])
+          {:done, result}
+
+        {:DOWN, ^task_ref, :process, _task, _reason} ->
+          {:done, {:error, :probe_failed}}
+
+        {:DOWN, ^watch, :process, _caller, _reason} ->
+          :caller_down
+      after
+        max(until - System.monotonic_time(:millisecond), 0) -> :timeout
+      end
     end
 
     defp proof(os_pid) do

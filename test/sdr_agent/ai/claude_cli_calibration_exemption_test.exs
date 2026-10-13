@@ -26,24 +26,39 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     @moduledoc "d3a: a ProcessProbe stand-in whose answers are set per test."
 
     def mode(mode), do: :persistent_term.put({__MODULE__, :mode}, mode)
+
+    # Tells the test which root is being probed, when it asked to know.
+    def watch(test), do: :persistent_term.put({__MODULE__, :test}, test)
+
+    defp notify(pid) do
+      case :persistent_term.get({__MODULE__, :test}, nil) do
+        nil -> :ok
+        test -> send(test, {:probing, pid})
+      end
+    end
+
     defp mode, do: :persistent_term.get({__MODULE__, :mode})
 
     def start_identity(pid) do
-      case mode() do
-        :identity_absent -> :absent
-        :identity_error -> {:error, :ps_failed}
-        :identity_empty -> {:ok, ""}
-        :identity_not_binary -> {:ok, 123}
-        :probe_raises -> raise "probe failure"
-        _other -> {:ok, "Tue Oct 13 12:00:00 2026 #{pid}"}
-      end
+      notify(pid)
+      identity(mode(), pid)
     end
+
+    defp identity(:identity_absent, _pid), do: :absent
+    defp identity(:identity_error, _pid), do: {:error, :ps_failed}
+    defp identity(:identity_empty, _pid), do: {:ok, ""}
+    defp identity(:identity_not_binary, _pid), do: {:ok, 123}
+    defp identity(:probe_raises, _pid), do: raise("probe failure")
+    defp identity(:slow, _pid), do: Process.sleep(2_200) && {:error, :ps_failed}
+    defp identity(:hung, _pid), do: Process.sleep(:infinity)
+    defp identity(_mode, pid), do: {:ok, "Tue Oct 13 12:00:00 2026 #{pid}"}
 
     def group_members(pgid) do
       case mode() do
         :group_error -> {:error, :ps_failed}
         :root_not_in_group -> {:ok, [pgid + 1]}
         :member_not_a_pid -> {:ok, [pgid, "x"]}
+        :slow_group -> Process.sleep(2_200) && {:ok, [pgid]}
         :group_not_a_list -> {:ok, :members}
         _other -> {:ok, [pgid]}
       end
@@ -60,6 +75,7 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
   alias SdrAgent.AI.JsonSchema
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.CalibrationConsole.Authority
   alias SdrAgent.CalibrationConsole.Prompt
@@ -381,6 +397,7 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
         end
 
         :persistent_term.erase({ProbeStub, :mode})
+        :persistent_term.erase({ProbeStub, :test})
       end)
 
       %{cli: cli!(ctx, "cli", 0), slow_cli: cli!(ctx, "slow-cli", 1)}
@@ -433,6 +450,101 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
         assert {receipt.invocation_id, receipt.server} == {invocation.id, server}
         assert is_integer(receipt.root_pid) and receipt.root_pid > 0
       end
+    end
+
+    # Codex d3a@3b82624: the proof is bounded by the call's own deadline; a
+    # slow probe never stretches the call or reports a late success.
+    test "a slow probe is bounded by the call deadline and is unverified", ctx do
+      ProbeStub.mode(:slow)
+      Application.put_env(:sdr_agent, :calibration_launch_probe, ProbeStub)
+      server = server!(ctx, command: ctx.slow_cli, timeout: 1_000)
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+      ref = issue!(server, invocation, run)
+      request = request(invocation, run, agent, ref)
+      {_command, receipt_ref} = request.calibration.observer
+
+      started = System.monotonic_time(:millisecond)
+      result = admitting(fn -> complete(server, request) end)
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      assert result == {:unknown, :claude_cli_timeout}, inspect(result)
+      assert elapsed < 1_800, "the proof exceeded the call deadline: #{elapsed} ms"
+
+      assert [{:calibration_launch_unverified, %{reason: :probe_timeout}}] =
+               receipts(receipt_ref)
+    end
+
+    test "a slow group read is bounded by the call deadline and is unverified", ctx do
+      ProbeStub.mode(:slow_group)
+      Application.put_env(:sdr_agent, :calibration_launch_probe, ProbeStub)
+      server = server!(ctx, command: ctx.slow_cli, timeout: 1_000)
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+      ref = issue!(server, invocation, run)
+      request = request(invocation, run, agent, ref)
+      {_command, receipt_ref} = request.calibration.observer
+
+      started = System.monotonic_time(:millisecond)
+      result = admitting(fn -> complete(server, request) end)
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      assert result == {:unknown, :claude_cli_timeout}, inspect(result)
+      assert elapsed < 1_800, "the proof exceeded the call deadline: #{elapsed} ms"
+
+      assert [{:calibration_launch_unverified, %{reason: :probe_timeout}}] =
+               receipts(receipt_ref)
+    end
+
+    # The CLI answers at once, so its output is queued while the probe runs
+    # past the deadline: the expired call is a timeout, never a late success.
+    test "queued output after an expired proof is a timeout, not a late success", ctx do
+      ProbeStub.mode(:slow)
+      Application.put_env(:sdr_agent, :calibration_launch_probe, ProbeStub)
+      server = server!(ctx, command: ctx.cli, timeout: 1_000)
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+      ref = issue!(server, invocation, run)
+      request = request(invocation, run, agent, ref)
+      {_command, receipt_ref} = request.calibration.observer
+
+      result = admitting(fn -> complete(server, request) end)
+
+      assert result == {:unknown, :claude_cli_timeout}, inspect(result)
+      assert [{:calibration_launch_unverified, _receipt}] = receipts(receipt_ref)
+      assert ClaudeCLI.admission(server) == %{admission: :open}
+    end
+
+    test "a caller lost while probing stops the launch without waiting out the probe", ctx do
+      ProbeStub.mode(:hung)
+      ProbeStub.watch(self())
+      Application.put_env(:sdr_agent, :calibration_launch_probe, ProbeStub)
+      server = server!(ctx, command: ctx.slow_cli, timeout: 30_000)
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+      test = self()
+
+      caller =
+        spawn(fn ->
+          receive do
+            {:go, request} ->
+              send(test, {:result, admitting(fn -> complete(server, request) end)})
+          end
+        end)
+
+      ref = issue!(server, invocation, run, %{command_pid: caller})
+      send(caller, {:go, request(invocation, run, agent, ref)})
+      assert_receive {:probing, os_pid}, 10_000
+
+      started = System.monotonic_time(:millisecond)
+      Process.exit(caller, :kill)
+
+      # The launched tree is stopped by the existing caller-down path well
+      # before the 30 s call deadline, and the server admits again.
+      assert eventually(fn -> not Reaper.alive?(os_pid) end, 10_000),
+             "the launched tree survived the lost caller"
+
+      assert System.monotonic_time(:millisecond) - started < 10_000
+      assert eventually(fn -> ClaudeCLI.admission(server) == %{admission: :open} end, 5_000)
+      # The command died, so the registry removed its entry (8.2 step 7).
+      {Authority, key} = ref
+      assert :ets.lookup(Authority.table(), key) == []
     end
 
     # A refusal before Reaper.open is the reachable no-launch case:
@@ -1093,6 +1205,14 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
   defp wrong(_ctx, :fabricated_id, request, _invocation), do: {request, Ash.UUIDv7.generate()}
 
   defp wrong(_ctx, _variant, request, invocation), do: {request, invocation.id}
+
+  defp eventually(check, within) do
+    until = System.monotonic_time(:millisecond) + within
+
+    Stream.repeatedly(fn -> check.() || (Process.sleep(25) && false) end)
+    |> Enum.find(fn ok -> ok or System.monotonic_time(:millisecond) > until end)
+    |> Kernel.==(true)
+  end
 
   # Every queued receipt message carrying `ref`, in order, drained.
   defp receipts(ref) do

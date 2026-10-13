@@ -749,16 +749,25 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     _kind, _reason -> {:error, :launch_admission_failed}
   end
 
-  # Packet 8.14.2 (d3a): an exempted call's launch receipt, sent from this
-  # process before the call's reply.
+  # After the port opened. Test-seam builds, packet 8.14.2 (d3a): an
+  # exempted call first sends its launch receipt from this process, before
+  # the call's reply; an expired call is then a timeout and a lost caller
+  # stops the tree, both through the existing stop path, so queued output
+  # is never collected as a late success.
   if @test_seams do
     alias SdrAgent.AI.ModelProvider.ClaudeCLI.CalibrationExemption
 
-    defp launch_receipt(%{calibration_launch: %{}} = request, os_pid),
-      do: CalibrationExemption.receipt(request, os_pid)
+    defp launched(port, os_pid, state, deadline, %{calibration_launch: %{}} = request) do
+      case CalibrationExemption.receipt(request, os_pid, deadline, state.caller) do
+        :ok -> collect(port, os_pid, state, deadline, nil, [])
+        :expired -> stop_tree(os_pid, state, {:unknown, :claude_cli_timeout})
+        :caller_down -> stop_tree(os_pid, state, {:unknown, :caller_down})
+      end
+    end
   end
 
-  defp launch_receipt(_request, _os_pid), do: :ok
+  defp launched(port, os_pid, state, deadline, _request),
+    do: collect(port, os_pid, state, deadline, nil, [])
 
   defp launch_expectation(%{calibration_launch: %{} = expected}),
     do: [calibration_launch: expected]
@@ -845,8 +854,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
              spawn_opts,
              deadline
            ) do
-      launch_receipt(request, os_pid)
-      result = collect(port, os_pid, Map.put(state, :caller, watch), deadline, nil, [])
+      result = launched(port, os_pid, Map.put(state, :caller, watch), deadline, request)
+
       {result, settle(state, port, os_pid, workspace)}
     else
       {:pending, ref} ->
