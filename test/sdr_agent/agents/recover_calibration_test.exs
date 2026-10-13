@@ -30,6 +30,9 @@ defmodule SdrAgent.Agents.RecoverCalibrationTest do
   alias SdrAgent.Agents
   alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.AgentsFixtures
+  alias SdrAgent.Audit
+  alias SdrAgent.GateFixtures
+  alias SdrAgent.Operations.Failure
 
   setup do
     tenant = bootstrap!()
@@ -203,7 +206,222 @@ defmodule SdrAgent.Agents.RecoverCalibrationTest do
     end
   end
 
+  # Codex 01a135d9 (RED review at e9962bc).
+  describe "atomicity and locks" do
+    for event_type <- ["calibration.owner_attested", "model.invocation.unknown"] do
+      test "a failed #{event_type} append rolls everything back", ctx do
+        %{invocation: sent, agent: agent, claim: claim, run: run} = claimed!(ctx, :sent)
+        before = snapshot(ctx, sent, run, agent)
+        fail_event!(unquote(event_type))
+
+        result = recover(sent, {:attested, attestation(sent, claim)}, agent)
+        assert match?({:error, _}, result), inspect(result)
+        assert snapshot(ctx, sent, run, agent) == before
+      end
+    end
+
+    test "run FOR UPDATE, invocation FOR UPDATE, then the head; no row lock after it", ctx do
+      %{invocation: sent, agent: agent, claim: claim} = claimed!(ctx, :sent)
+
+      {result, sql} =
+        GateFixtures.capture(fn ->
+          recover(sent, {:attested, attestation(sent, claim)}, agent)
+        end)
+
+      assert {:ok, _} = result
+      at = &GateFixtures.index(sql, fn q -> GateFixtures.locks?(q, &1, &2) end)
+      run_lock = at.("agent_runs", "FOR UPDATE")
+      invocation_lock = at.("model_invocations", "FOR UPDATE")
+      head = at.("audit_chain_heads", "FOR UPDATE")
+
+      assert run_lock && invocation_lock && head, inspect(sql)
+      assert run_lock < invocation_lock and invocation_lock < head
+
+      after_head =
+        sql
+        |> Enum.drop(head + 1)
+        |> Enum.filter(&GateFixtures.lock?/1)
+        |> Enum.reject(&GateFixtures.locks?(&1, "audit_chain_heads", "FOR UPDATE"))
+
+      assert after_head == [], inspect(after_head)
+    end
+
+    test "a quiescent replay on a recovered invocation writes nothing", ctx do
+      %{invocation: sent, agent: agent, run: run} = claimed!(ctx, :sent)
+      observation = %{state: "launched", root_pid: 9001, process_group_id: 9001}
+      {:ok, %{invocation: unknown}} = recover(sent, {:quiescent, observation}, agent)
+      before = snapshot(ctx, unknown, run, agent)
+
+      assert {:ok, _} = recover(unknown, {:quiescent, observation}, agent)
+      assert snapshot(ctx, unknown, run, agent) == before
+    end
+
+    test "a successful recovery keeps the charge, stops no run and opens no Failure", ctx do
+      %{invocation: sent, agent: agent, claim: claim, run: run} = claimed!(ctx, :sent)
+      failures = failure_count(ctx)
+
+      {:ok, %{invocation: unknown}} = recover(sent, {:attested, attestation(sent, claim)}, agent)
+      assert {unknown.grant_id, unknown.allocation_id} == {sent.grant_id, sent.allocation_id}
+      assert {:ok, stored_run} = Agents.get_run(run.id, actor: agent)
+      assert stored_run.status == :running
+      assert failure_count(ctx) == failures
+    end
+  end
+
+  describe "scope boundaries" do
+    test "a proof run with an Operation is not recoverable", ctx do
+      %{run: run, agent: agent} = AgentsFixtures.operated_run(ctx.tenant, usage_origin: :proof)
+      claim = Ash.UUIDv7.generate()
+
+      {:ok, reserved} =
+        AdmissionFixtures.admitting(fn ->
+          Agents.reserve_model_invocation(run, attrs(),
+            actor: agent,
+            calibration: claim_marker(claim)
+          )
+        end)
+
+      assert_unrecoverable(ctx, reserved, run, agent, :unlaunched)
+    end
+
+    test "a proof run's fake-provider invocation is not recoverable", ctx do
+      %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant, usage_origin: :proof)
+
+      {:ok, fake} =
+        Agents.reserve_model_invocation(run, AgentsFixtures.model_attrs("fake"), actor: agent)
+
+      assert_unrecoverable(ctx, fake, run, agent, :unlaunched)
+    end
+
+    # Generation-1 and fake-profile ClaudeCLI rows cannot be built through
+    # the domain (every reservation is generation 2 with a real profile).
+    # Eligibility is read from the stored row: forged caller fields neither
+    # grant nor deny it.
+    test "eligibility is read from the stored row, never from caller fields", ctx do
+      %{invocation: reserved, agent: agent} = claimed!(ctx, :reserved)
+      forged = %{reserved | ledger_generation: 1, profile_id: :fake, provider: :fake}
+
+      assert {:ok, %{invocation: failed}} = recover(forged, :unlaunched, agent)
+      assert failed.status == :failed
+    end
+
+    test "every other principal is refused; only a human auditor's denial is audited", ctx do
+      %{invocation: reserved, run: run, agent: agent} = claimed!(ctx, :reserved)
+
+      # Built first: creating a human actor's user is itself audited.
+      actors = [
+        nil,
+        human(:admin, ctx.tenant),
+        human(:reviewer, ctx.tenant),
+        system_actor(:reconciler, ctx.tenant),
+        system_actor(:auditor_cli, ctx.tenant),
+        struct(SdrAgent.Actor, type: :agent_runtime, tenant_id: Ash.UUIDv7.generate())
+      ]
+
+      auditor = human(:auditor, ctx.tenant)
+      before = snapshot(ctx, reserved, run, agent)
+
+      for actor <- actors do
+        assert {:error, %Ash.Error.Forbidden{}} = recover(reserved, :unlaunched, actor),
+               inspect(actor)
+      end
+
+      assert events_of_type(ctx.tenant, "authz.denied") == []
+      assert snapshot(ctx, reserved, run, agent) == before
+
+      assert {:error, %Ash.Error.Forbidden{}} = recover(reserved, :unlaunched, auditor)
+      assert [%{actor_role: :auditor}] = events_of_type(ctx.tenant, "authz.denied")
+    end
+
+    test "a quiescent decision needs a meaningful launched observation", ctx do
+      %{invocation: sent, agent: agent, run: run} = claimed!(ctx, :sent)
+      before = snapshot(ctx, sent, run, agent)
+
+      for observation <- [
+            true,
+            %{},
+            %{state: "launched", root_pid: 9001},
+            %{state: "launched", root_pid: 0, process_group_id: 9001},
+            %{state: "finished", root_pid: 9001, process_group_id: 9001},
+            %{state: "launched", root_pid: 9001, process_group_id: 9001, extra: 1}
+          ] do
+        assert recover(sent, {:quiescent, observation}, agent) ==
+                 {:error, :calibration_not_recoverable},
+               inspect(observation)
+      end
+
+      assert snapshot(ctx, sent, run, agent) == before
+    end
+  end
+
+  describe "attestation identity" do
+    # The id identifies the attestation in the tenant's chain: reusing it
+    # for another invocation is a conflict, never a second event.
+    test "an attestation id reused for another invocation is a conflict", ctx do
+      %{invocation: first, agent: agent, claim: claim} = claimed!(ctx, :sent)
+      attestation = attestation(first, claim)
+      {:ok, %{invocation: unknown}} = recover(first, {:attested, attestation}, agent)
+
+      # The first proof invocation is latched so another can be reserved
+      # (B4'); then the second reuses the id with its own valid bindings.
+      {:ok, _} = Agents.finish_calibration(unknown, %{sha256: sha("first")}, actor: agent)
+      %{invocation: second, claim: second_claim, run: run} = claimed!(ctx, :sent)
+      before = snapshot(ctx, second, run, agent)
+
+      reused = %{attestation(second, second_claim) | attestation_id: attestation.attestation_id}
+      assert recover(second, {:attested, reused}, agent) == {:error, :attestation_conflict}
+      assert snapshot(ctx, second, run, agent) == before
+      assert length(events_of_type(ctx.tenant, "calibration.owner_attested")) == 1
+    end
+  end
+
   ## Fixtures
+
+  defp claim_marker(claim),
+    do: CalibrationAdmission.context(:claude_cli_opus, AdmissionFixtures.entry(), claim: claim)
+
+  # Everything a refused or rolled-back recovery must leave unchanged.
+  defp snapshot(ctx, invocation, run, agent) do
+    stored = reload(invocation, agent)
+    {:ok, stored_run} = Agents.get_run(run.id, actor: agent)
+
+    %{
+      invocation: Map.take(stored, [:status, :error, :grant_id, :allocation_id, :sent_at]),
+      run: Map.take(stored_run, [:status, :status_reason]),
+      events: length(events(ctx.tenant)),
+      failures: failure_count(ctx)
+    }
+  end
+
+  defp assert_unrecoverable(ctx, invocation, run, agent, decision) do
+    before = snapshot(ctx, invocation, run, agent)
+    assert recover(invocation, decision, agent) == {:error, :calibration_not_recoverable}
+    assert snapshot(ctx, invocation, run, agent) == before
+  end
+
+  defp failure_count(ctx), do: length(Ash.read!(Failure, Audit.Kernel.opts(ctx.tenant.id)))
+
+  # Test-only fault: an insert of an `event_type` audit event raises, inside
+  # the test's sandbox transaction (the trigger is rolled back with it).
+  defp fail_event!(event_type) do
+    Ecto.Adapters.SQL.query!(
+      SdrAgent.Repo,
+      """
+      CREATE FUNCTION sdr_test_fail_recovery_event() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected event failure'; END $$
+      """,
+      []
+    )
+
+    Ecto.Adapters.SQL.query!(
+      SdrAgent.Repo,
+      "CREATE TRIGGER fail_recovery_event BEFORE INSERT ON audit_events FOR EACH ROW " <>
+        "WHEN (NEW.event_type = '#{event_type}') EXECUTE FUNCTION sdr_test_fail_recovery_event()",
+      []
+    )
+  end
+
+  defp sha(label), do: :crypto.hash(:sha256, label) |> Base.encode16(case: :lower)
 
   # A proof-run calibration invocation reserved under a console claim and
   # advanced to `state`.
