@@ -165,6 +165,37 @@ defmodule SdrAgent.Agents.CalibrationGrantBindingTest do
       assert select(ctx, :claude_cli_opus) == {:error, :calibration_grant_unavailable}
     end
 
+    # Codex d2a@d00471b: the requested allocation's existing window terms
+    # (Admission.available?/2) apply at selection; the other profile's
+    # window does not decide this profile's selection.
+    test "the requested allocation's window: not yet open or closed is unavailable", ctx do
+      opens = ~U[2026-10-16 00:00:00.000000Z]
+      closes = ~U[2026-10-17 00:00:00.000000Z]
+
+      g_r0!(ctx, %{
+        allocations: [
+          Map.merge(proof(:claude_cli_opus, 2), %{available_from: opens, available_until: closes}),
+          proof(:claude_cli_sonnet, 2)
+        ]
+      })
+
+      before = length(events(ctx.tenant))
+
+      assert select(ctx, :claude_cli_opus) == {:error, :calibration_grant_unavailable}
+      assert {:ok, %{profile_id: :claude_cli_sonnet}} = select(ctx, :claude_cli_sonnet)
+
+      # At its opening (inclusive) it is selectable.
+      Clock.freeze(opens)
+      assert {:ok, %{profile_id: :claude_cli_opus}} = select(ctx, :claude_cli_opus)
+
+      # At its close (exclusive) it is not.
+      Clock.freeze(closes)
+      assert select(ctx, :claude_cli_opus) == {:error, :calibration_grant_unavailable}
+
+      # Selection is read-only.
+      assert length(events(ctx.tenant)) == before
+    end
+
     test "an otherwise valid revoked grant is unavailable", ctx do
       grant = g_r0!(ctx)
 

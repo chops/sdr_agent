@@ -158,7 +158,8 @@ defmodule SdrAgent.Agents.Admission do
   The G-R0 binding for `profile_id` in `tenant_id` at `now` (packet 8.3,
   read-only preflight): `{:ok, %{grant_id:, grant_revision:,
   allocation_id:, profile_id:}}` when exactly one grant of the tenant has
-  the G-R0 shape; `{:error, :calibration_grant_unavailable}` otherwise.
+  the G-R0 shape and that profile's allocation is available at `now`
+  (`available?/2`); `{:error, :calibration_grant_unavailable}` otherwise.
   """
   def calibration_grant(tenant_id, profile_id, now) do
     ModelCallGrant
@@ -167,25 +168,33 @@ defmodule SdrAgent.Agents.Admission do
     |> Ash.read!(authorize?: false)
     |> Enum.filter(&g_r0?(&1, now))
     |> case do
-      [grant] -> grant_binding(grant, profile_id)
+      [grant] -> grant_binding(grant, profile_id, now)
       _none_or_several -> {:error, :calibration_grant_unavailable}
     end
   end
 
-  defp grant_binding(grant, profile_id) do
+  # The requested profile's allocation must also be inside its existing
+  # window at `now` (`available?/2`, packet 8.3 "existing ... window terms").
+  defp grant_binding(grant, profile_id, now) do
     case Enum.filter(grant.allocations, &(&1.profile_id == profile_id)) do
       [allocation] ->
-        {:ok,
-         %{
-           grant_id: grant.id,
-           grant_revision: grant.revision,
-           allocation_id: allocation.id,
-           profile_id: profile_id
-         }}
+        if available?(allocation, now), do: binding(grant, allocation), else: unavailable()
 
       _ ->
-        {:error, :calibration_grant_unavailable}
+        unavailable()
     end
+  end
+
+  defp unavailable, do: {:error, :calibration_grant_unavailable}
+
+  defp binding(grant, allocation) do
+    {:ok,
+     %{
+       grant_id: grant.id,
+       grant_revision: grant.revision,
+       allocation_id: allocation.id,
+       profile_id: allocation.profile_id
+     }}
   end
 
   @doc "Whether `grant` (allocations loaded) has the G-R0 shape at `now`."
