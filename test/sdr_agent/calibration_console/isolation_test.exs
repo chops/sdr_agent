@@ -333,21 +333,20 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
       assert await(fn -> gone?(os_pid) end)
     end
 
-    # MF3: a same-group child left behind by an exiting root is stopped,
-    # and tracking is kept until the cleanup is confirmed.
-    test "a same-group child of an exiting root is stopped", ctx do
+    # MF3, as revised by Codex 01a13590: a same-group child left behind by
+    # an exiting root is never signalled on age alone; it is reported as an
+    # unconfirmed cleanup (a hard conflict), never as stopped.
+    test "a same-group child of an exiting root is an unconfirmed cleanup", ctx do
       result =
         Isolation.preflight(
           target: "/bin/sleep 20 & printf ready; exit 0",
           observer: ctx.observer
         )
 
-      assert result == {:error, :calibration_isolation_unavailable}
       assert_received {:isolation, {:spawned, os_pid}, _identity}
 
       try do
-        assert ProcessProbe.group_members(os_pid) == {:ok, []},
-               "a same-group child is still running"
+        assert result == {:error, :calibration_isolation_cleanup_unconfirmed}
       after
         stop_group!(os_pid)
       end
@@ -443,11 +442,14 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
       test = self()
 
       observer = fn
-        {:reaper, reaper} = event ->
-          send(test, {:isolation, event})
-          # Suspended by the test process, not the helper, so it stays
-          # suspended when the helper is killed.
-          send(test, {:suspend, reaper})
+        {:reaper, reaper} ->
+          send(test, {:reaper, reaper})
+
+        {:spawned, _os_pid} = event ->
+          ctx.observer.(event)
+          # After the launch: the test process suspends the reaper (not the
+          # helper, so it stays suspended when the helper is killed).
+          send(test, :suspend_now)
           Process.sleep(200)
 
         event ->
@@ -465,7 +467,8 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
           )
         end)
 
-      assert_receive {:suspend, reaper}, 5_000
+      assert_receive {:reaper, reaper}, 5_000
+      assert_receive :suspend_now, 5_000
       :erlang.suspend_process(reaper)
 
       try do

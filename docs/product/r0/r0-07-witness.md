@@ -1222,6 +1222,48 @@ only, no CLI).
 - **Scope.** This is the observed process-group scope (E4b delta). A
   descendant that changes its group escapes (OQ-E3).
 
+#### E4c-1a Preflight cleanup delta (code review, Codex 01a13570 and 01a13590)
+
+Entity Model trigger: yes (a new result code and a changed cleanup
+ownership and signal lifecycle). Narrow delta to E4c-1 only.
+
+- **Result codes.** `preflight/1` returns `:ok`,
+  `:calibration_isolation_unavailable` (no isolation proof, and the
+  synthetic tree is confirmed gone) or the new
+  `:calibration_isolation_cleanup_unconfirmed` (whatever was launched could
+  not be confirmed gone).
+- **Owned workspace.** The helper's unnamed reaper tracks only a private
+  0700 directory the preflight created exclusively (random name, exclusive
+  `mkdir`, absolute path). It is removed only after a confirmed cleanup.
+- **Signal authority.** The root's start identity is read at spawn and
+  re-read just before its one stop:
+  - still the same → its tree is stopped (`Reaper.kill_tree/1`);
+  - absent or another process → already gone, never signalled;
+  - unreadable → never signalled, cleanup unconfirmed.
+
+  Once the root is confirmed gone its tracking is released, so no reaper
+  fallback re-signals a stopped or reused pid. Group members are only
+  observed, never signalled: age is no ownership. A member that stays is
+  cleanup-unconfirmed (conservative hard conflict; automated orphan-member
+  stopping is out of scope).
+- **Bounds.** The caller waits `ready_ms + bound_ms` for the helper. On
+  timeout or helper death the helper is killed. The caller then waits at
+  most `reaper_ms` for its reaper and checks physically, within `check_ms`,
+  that the root is gone and the group empty. A reaper's exit is no
+  cleanup receipt. Anything less, and any pending or unknown launch
+  receipt, is cleanup-unconfirmed. A watchdog kills the helper if the
+  caller dies. Total bound: `ready_ms + bound_ms + reaper_ms + check_ms`.
+- **Console behaviour.**
+  - `:calibration_isolation_unavailable` happens before any reservation:
+    the claim is aborted and released, nothing is retried automatically.
+  - `:calibration_isolation_cleanup_unconfirmed` is a hard owner conflict:
+    the lock is retained (the record is not aborted or released), no
+    reservation is made, nothing is retried, and the console reports the
+    synthetic root pid and group for the owner to check. No model call or
+    spend is involved.
+- **Limits kept.** One-second start-identity resolution; a descendant that
+  changes its group escapes (OQ-E3).
+
 #### E4c-2 Lifecycle: abort, recovered finalization, durable claim binding (MF2)
 
 **States.** States are added to the launch record, which becomes schema 3:

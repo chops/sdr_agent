@@ -23,19 +23,26 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
   tracked until the cleanup is confirmed, and only then is it forgotten
   and the empty directory removed.
 
-  **Cleanup.** The root's tree is stopped through `Reaper.kill_tree/1`,
-  then the root's group is observed until empty. A member left behind by
-  an exiting root (re-parented, still in the group) is stopped only after
-  its own start identity is re-read and shows it started no earlier than
-  the root (whose identity was read at spawn), while the root pid is absent
-  or still the root: never a blind signal to an unverified group or a
-  reused pid. A tree that cannot be confirmed gone within the bound is
-  `{:error, :calibration_isolation_cleanup_unconfirmed}`, never "stopped".
+  **Cleanup** (conservative; Codex 01a13590). The root's start identity is
+  read at spawn and re-read just before its one stop. If it still matches,
+  the root's tree is stopped through `Reaper.kill_tree/1`; if the pid is
+  absent or reads as another process, the root is already gone and is
+  never signalled. Once the root is confirmed gone its tracking is
+  released, so no reaper fallback re-signals a stopped or reused pid. The
+  root's group is then only observed until empty: a member left behind is
+  never signalled (age is no ownership). A root that cannot be verified, a
+  member that stays, or a group that cannot be observed is `{:error,
+  :calibration_isolation_cleanup_unconfirmed}`, never "stopped": for the
+  console a hard owner conflict (packet 8.12, E4c-1 cleanup delta).
 
-  **Bounds.** The caller waits at most `ready_ms + bound_ms`. On timeout,
-  or when the caller itself dies (a watchdog process), the helper is
-  killed, so its reaper stops the tracked tree and removes the directory;
-  the caller then waits (bounded) for that reaper to finish.
+  **Bounds.** The caller waits at most `ready_ms + bound_ms` for the
+  helper. On timeout, or when the helper dies, the helper is killed so its
+  reaper stops the tracked tree; the caller waits at most `reaper_ms` for
+  that reaper and then checks physically, within `check_ms`, that the root
+  is gone and its group empty (a reaper's exit is no cleanup receipt).
+  Anything less is cleanup-unconfirmed. When the caller itself dies, a
+  watchdog kills the helper so its reaper still cleans up. The total bound
+  is `ready_ms + bound_ms + reaper_ms + check_ms`.
 
   Any other timeout, probe error, early exit or crash is `{:error,
   :calibration_isolation_unavailable}`. This is the observed process-group
@@ -43,10 +50,11 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
 
   `probe:` names the OS probe (default
   `SdrAgent.CalibrationConsole.ProcessProbe`). Only test-seam builds honour
-  `target:` (the shell script), `ready_ms:`, `bound_ms:` and `observer:`
-  (`fn event -> any end`, called with `{:helper, pid}`, `{:workspace,
-  path}` and `{:spawned, os_pid}`); other builds always use the held target
-  and the default bounds.
+  `target:` (the shell script), `ready_ms:`, `bound_ms:`, `reaper_ms:`,
+  `check_ms:` and `observer:` (`fn event -> any end`, called with
+  `{:helper, pid}`, `{:workspace, path}`, `{:reaper, pid}` and `{:spawned,
+  os_pid}`); other builds always use the held target and the default
+  bounds.
   """
 
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
@@ -58,10 +66,10 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
   @bound_ms 15_000
   @gone_ms 4_000
   @reaper_ms 10_000
+  @check_ms 3_000
   @poll_ms 20
   @hold_ms 100
   @port_opts [:binary, :exit_status]
-  @months ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
   @unavailable {:error, :calibration_isolation_unavailable}
   @unconfirmed {:error, :calibration_isolation_cleanup_unconfirmed}
 
@@ -81,13 +89,9 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
     spawn(fn -> watchdog(caller, helper) end)
     seams.observer.({:helper, helper})
 
-    await(
-      ref,
-      helper,
-      monitor,
-      System.monotonic_time(:millisecond) + seams.ready_ms + seams.bound_ms,
-      nil
-    )
+    deadline = System.monotonic_time(:millisecond) + seams.ready_ms + seams.bound_ms
+
+    await(ref, helper, monitor, deadline, %{reaper: nil, spawned: nil, seams: seams, probe: probe})
   end
 
   @doc "`:ok` when `os_pid` is a live root leading its own group; else unavailable."
@@ -102,40 +106,78 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
 
   ## The caller side
 
-  defp await(ref, helper, monitor, deadline, reaper) do
+  defp await(ref, helper, monitor, deadline, known) do
     wait = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^ref, {:reaper, pid}} ->
-        await(ref, helper, monitor, deadline, pid)
+        await(ref, helper, monitor, deadline, %{known | reaper: pid})
+
+      {^ref, {:spawned, os_pid, identity}} ->
+        await(ref, helper, monitor, deadline, %{known | spawned: {os_pid, identity}})
 
       {^ref, result} ->
         Process.demonitor(monitor, [:flush])
         result
 
       {:DOWN, ^monitor, :process, ^helper, _reason} ->
-        reaped(reaper)
-        @unavailable
+        settle(known)
     after
       wait ->
         # Out of time: the helper's reaper stops the tracked tree.
         Process.demonitor(monitor, [:flush])
         Process.exit(helper, :kill)
-        reaped(reaper)
-        @unavailable
+        settle(known)
     end
   end
 
-  # Waits (bounded) for the helper's reaper to finish its cleanup.
-  defp reaped(nil), do: :ok
+  # After the helper is gone: no reaper means nothing was launched; else
+  # the reaper must finish and the root and group must be seen gone.
+  defp settle(%{reaper: nil}), do: @unavailable
 
-  defp reaped(reaper) do
+  defp settle(%{reaper: reaper, spawned: spawned, seams: seams, probe: probe}) do
+    with :ok <- reaped(reaper, seams.reaper_ms),
+         {os_pid, identity} <- spawned,
+         :ok <- bounded(fn -> gone(os_pid, identity, probe) end, seams.check_ms) do
+      @unavailable
+    else
+      _unconfirmed -> @unconfirmed
+    end
+  end
+
+  defp reaped(reaper, wait) do
     ref = Process.monitor(reaper)
 
     receive do
       {:DOWN, ^ref, :process, ^reaper, _reason} -> :ok
     after
-      @reaper_ms -> Process.demonitor(ref, [:flush])
+      wait ->
+        Process.demonitor(ref, [:flush])
+        :unconfirmed
+    end
+  end
+
+  # The root no longer its spawned process and its group observed empty.
+  defp gone(os_pid, spawned, probe) do
+    root_gone =
+      case identity(probe, os_pid) do
+        :absent -> true
+        {:ok, current} -> {:ok, current} != spawned
+        :error -> false
+      end
+
+    if root_gone and observe(fn -> probe.group_members(os_pid) end) == {:ok, []},
+      do: :ok,
+      else: :unconfirmed
+  end
+
+  # A probe that may block is observed in a task that is killed on timeout.
+  defp bounded(fun, wait) do
+    task = Task.async(fun)
+
+    case Task.yield(task, wait) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      _timeout_or_crash -> :unconfirmed
     end
   end
 
@@ -157,8 +199,9 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
       seams.observer.({:workspace, workspace})
       {:ok, reaper} = Reaper.start(nil)
       send(caller, {ref, {:reaper, reaper}})
+      seams.observer.({:reaper, reaper})
       Reaper.track(reaper, workspace)
-      launch(reaper, workspace, seams, probe)
+      launch(reaper, workspace, seams, probe, {caller, ref})
     end
   end
 
@@ -176,7 +219,7 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
     end
   end
 
-  defp launch(reaper, workspace, seams, probe) do
+  defp launch(reaper, workspace, seams, probe, {caller, ref}) do
     deadline = System.monotonic_time(:millisecond) + seams.ready_ms
     spawn = {:spawn_executable, "/bin/sh"}
 
@@ -185,11 +228,17 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
         # The root's identity while it is certainly ours (before any exit
         # can be observed): it bounds which group members may be stopped.
         spawned = identity(probe, os_pid)
+        send(caller, {ref, {:spawned, os_pid, spawned}})
         seams.observer.({:spawned, os_pid})
         held(reaper, workspace, port, os_pid, spawned, deadline, probe)
 
-      _not_opened_or_unknown ->
+      # Only a failed `Port.open` is a known no-spawn; a pending or unknown
+      # receipt may be a launch.
+      {:error, {:launch_failed, _reason}} ->
         @unavailable
+
+      _pending_or_unknown ->
+        @unconfirmed
     end
   end
 
@@ -204,9 +253,8 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
     # EOF on stdin; the launch stays tracked until the cleanup is confirmed.
     close(port)
 
-    case stopped(os_pid, spawned, probe) do
+    case stopped(os_pid, spawned, probe, reaper, workspace) do
       :ok ->
-        Reaper.done(reaper, workspace)
         File.rmdir(workspace)
         if verified == :ok, do: :ok, else: @unavailable
 
@@ -251,50 +299,55 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
 
   ## Cleanup
 
-  defp stopped(os_pid, spawned, probe) do
-    case Reaper.kill_tree(os_pid) do
-      :ok -> empty_group(os_pid, spawned, probe, System.monotonic_time(:millisecond) + @gone_ms)
-      _timeout -> :unconfirmed
+  # The root is signalled once, only while it still reads as the process
+  # spawned; once it is confirmed gone its tracking is released (no reaper
+  # fallback re-signals it). The group is then only observed.
+  defp stopped(os_pid, spawned, probe, reaper, workspace) do
+    case root_stop(os_pid, spawned, probe) do
+      :gone ->
+        Reaper.done(reaper, workspace)
+        empty_group(os_pid, probe, System.monotonic_time(:millisecond) + @gone_ms)
+
+      :alive ->
+        # Still verified ours: the reaper keeps it tracked and retries.
+        :unconfirmed
+
+      :unverifiable ->
+        # Neither provably ours nor provably gone: never signalled, by the
+        # preflight or a reaper fallback.
+        Reaper.done(reaper, workspace)
+        :unconfirmed
     end
   end
 
-  # Observed until empty; a verified left-behind member is stopped.
-  defp empty_group(os_pid, spawned, probe, deadline) do
-    case observe(fn -> probe.group_members(os_pid) end) do
-      {:ok, []} ->
+  defp root_stop(os_pid, {:ok, spawned}, probe) do
+    case identity(probe, os_pid) do
+      {:ok, ^spawned} -> if Reaper.kill_tree(os_pid) == :ok, do: :gone, else: :alive
+      :absent -> :gone
+      {:ok, _reused} -> :gone
+      :error -> :unverifiable
+    end
+  end
+
+  defp root_stop(os_pid, :absent, probe) do
+    if identity(probe, os_pid) == :absent, do: :gone, else: :unverifiable
+  end
+
+  defp root_stop(_os_pid, _spawned, _probe), do: :unverifiable
+
+  defp empty_group(os_pid, probe, deadline) do
+    cond do
+      observe(fn -> probe.group_members(os_pid) end) == {:ok, []} ->
         :ok
 
-      {:ok, members} when is_list(members) ->
-        Enum.each(members, &stop_member(&1, os_pid, spawned, probe))
-        retry(os_pid, spawned, probe, deadline)
+      System.monotonic_time(:millisecond) >= deadline ->
+        :unconfirmed
 
-      _unavailable ->
-        retry(os_pid, spawned, probe, deadline)
+      true ->
+        Process.sleep(@poll_ms)
+        empty_group(os_pid, probe, deadline)
     end
   end
-
-  defp retry(os_pid, spawned, probe, deadline) do
-    if System.monotonic_time(:millisecond) >= deadline do
-      :unconfirmed
-    else
-      Process.sleep(@poll_ms)
-      empty_group(os_pid, spawned, probe, deadline)
-    end
-  end
-
-  # Only with the root's spawn identity known, the root pid absent or still
-  # the root, and the member's own identity re-read and no earlier than it.
-  defp stop_member(member, os_pid, {:ok, root}, probe) when is_integer(member) and member > 0 do
-    with {:ok, root_start} <- instant(root),
-         true <- identity(probe, os_pid) in [:absent, {:ok, root}],
-         {:ok, own} <- identity(probe, member),
-         {:ok, own_start} <- instant(own),
-         true <- own_start >= root_start do
-      Reaper.kill_tree(member)
-    end
-  end
-
-  defp stop_member(_member, _os_pid, _spawned, _probe), do: :skipped
 
   ## Observations
 
@@ -327,47 +380,27 @@ defmodule SdrAgent.CalibrationConsole.Isolation do
     _error -> :error
   end
 
-  # `lstart` in the C locale (`Tue Oct 13 13:00:00 2026`) as a comparable
-  # tuple; anything else is not an instant.
-  defp instant(identity) do
-    with [_day, month, date, time, year] <- String.split(identity),
-         month when is_integer(month) <- month_number(month),
-         [hour, minute, second] <- String.split(time, ":"),
-         {:ok, at} <-
-           NaiveDateTime.new(
-             String.to_integer(year),
-             month,
-             String.to_integer(date),
-             String.to_integer(hour),
-             String.to_integer(minute),
-             String.to_integer(second)
-           ) do
-      {:ok, NaiveDateTime.to_erl(at)}
-    else
-      _ -> :error
-    end
-  rescue
-    ArgumentError -> :error
-  end
-
-  defp month_number(name) do
-    case Enum.find_index(@months, &(&1 == name)) do
-      nil -> nil
-      index -> index + 1
-    end
-  end
-
   if @test_seams do
     defp seams(opts) do
       %{
         target: Keyword.get(opts, :target, @target),
         ready_ms: Keyword.get(opts, :ready_ms, @ready_ms),
         bound_ms: Keyword.get(opts, :bound_ms, @bound_ms),
+        reaper_ms: Keyword.get(opts, :reaper_ms, @reaper_ms),
+        check_ms: Keyword.get(opts, :check_ms, @check_ms),
         observer: Keyword.get(opts, :observer, fn _event -> :ok end)
       }
     end
   else
-    defp seams(_opts),
-      do: %{target: @target, ready_ms: @ready_ms, bound_ms: @bound_ms, observer: fn _ -> :ok end}
+    defp seams(_opts) do
+      %{
+        target: @target,
+        ready_ms: @ready_ms,
+        bound_ms: @bound_ms,
+        reaper_ms: @reaper_ms,
+        check_ms: @check_ms,
+        observer: fn _ -> :ok end
+      }
+    end
   end
 end
