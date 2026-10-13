@@ -64,10 +64,25 @@ defmodule SdrAgent.Agents.ResultGate do
   alias SdrAgent.Operations.Operation
   alias SdrAgent.Repo
 
+  # Slice B row B3 (accepted): the compiled gate mode, set by no config
+  # file; anything but :enforced makes the gate inactive (refuse only).
+  @mode Application.compile_env(:sdr_agent, [__MODULE__, :mode], :enforced)
   @max_wait_ms 120_000
   @default_poll_ms 1_000
   # Observation warnings that mean the capture may still arrive.
   @pending ["witness_missing", "no_primary_exchange", "exchange_open", "capture_incomplete"]
+
+  @doc "The compiled result-gate mode (`:enforced` in every build; row B3)."
+  @spec mode() :: atom()
+  def mode, do: @mode
+
+  @doc """
+  Whether the result gate is active: true only for the compiled
+  `:enforced` mode. Slice B's admission refuses every generation-2 real
+  call while it is not (row B3); nothing can make an inactive gate active.
+  """
+  @spec active?() :: boolean()
+  def active?, do: @mode == :enforced
 
   @doc "The effective wait bound: `min(config, 120_000)` ms; invalid config is ignored."
   @spec wait_ms() :: pos_integer()
