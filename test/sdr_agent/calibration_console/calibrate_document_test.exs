@@ -184,6 +184,111 @@ defmodule SdrAgent.CalibrationConsole.CalibrateDocumentTest do
     assert {:ok, _validated} = Evidence.validate(path, target(ctx), opts(ctx))
   end
 
+  # Codex d3c@55ab53b MF1: only a genuine observation builds a document.
+  # A sent call needs the await's own `{:ok | :timeout, receipt}`; a nil
+  # gate is only the unlaunched path, which never invents a receipt.
+  describe "observation hard stops" do
+    test "a sent call without an await result", ctx do
+      input = %{snapshot(ctx, nil, nil) | attestation: attestation(ctx.invocation)}
+      assert_refused(ctx, input)
+    end
+
+    for {name, gate} <- [
+          error_tagged:
+            {:error,
+             %{status: :skipped, link_id: nil, cause_id: nil, codes: ["store_unreadable"]}},
+          unknown_tag:
+            {:unknown, %{status: :unwitnessed, link_id: nil, cause_id: nil, codes: []}},
+          receipt_not_a_map: {:ok, :unwitnessed},
+          status_not_an_atom:
+            {:ok, %{status: "unwitnessed", link_id: nil, cause_id: nil, codes: []}},
+          codes_not_a_list:
+            {:ok, %{status: :unwitnessed, link_id: nil, cause_id: nil, codes: "x"}},
+          code_not_a_string:
+            {:ok, %{status: :unwitnessed, link_id: nil, cause_id: nil, codes: [1]}},
+          missing_keys: {:ok, %{status: :unwitnessed}},
+          bare_tuple: {:ok, %{status: :unwitnessed, link_id: nil, cause_id: nil, codes: []}, :x}
+        ] do
+      test "a #{name} observation", ctx do
+        assert_refused(ctx, snapshot(ctx, nil, unquote(Macro.escape(gate))))
+      end
+    end
+
+    @tag call: :unlaunched
+    test "an unlaunched call with an observation", ctx do
+      gate = {:ok, %{status: :unwitnessed, link_id: nil, cause_id: nil, codes: []}}
+      assert_refused(ctx, snapshot(ctx, nil, gate))
+    end
+
+    @tag call: :unlaunched
+    test "an unlaunched call never records an attestation it was handed", ctx do
+      input = %{snapshot(ctx, nil, nil) | attestation: attestation(ctx.invocation)}
+      assert {:ok, document} = Calibrate.document(input)
+      assert document.outcome == "launch_failed"
+      assert {document.attested_cli_version, document.attested_model_id} == {nil, nil}
+    end
+  end
+
+  # Codex d3c@55ab53b MF2: a malformed snapshot is the typed hard stop at
+  # the pure builder's boundary, never an exception.
+  describe "malformed snapshot hard stops" do
+    for variant <- [
+          :empty_tuple,
+          :tuple_extra_key,
+          :tuple_value_not_a_string,
+          :nil_invocation,
+          :invocation_id_not_a_string,
+          :invalid_time,
+          :sent_at_not_a_time,
+          :unsupported_output,
+          :output_not_a_map,
+          :observed_at_not_utc,
+          :run_not_a_map,
+          :not_a_map
+        ] do
+      test "#{variant}", ctx do
+        gate =
+          {:ok, %{status: :unwitnessed, link_id: nil, cause_id: nil, codes: ["witness_missing"]}}
+
+        assert_refused(ctx, malformed(snapshot(ctx, nil, gate), unquote(variant)))
+      end
+    end
+  end
+
+  defp assert_refused(ctx, input) do
+    result =
+      try do
+        Calibrate.document(input)
+      rescue
+        exception -> {:raised, exception.__struct__}
+      end
+
+    assert result == {:error, :evidence_input_invalid}
+    assert File.ls!(ctx.dir) == []
+  end
+
+  defp malformed(input, :empty_tuple), do: %{input | tuple: %{}}
+  defp malformed(input, :tuple_extra_key), do: put_in(input.tuple[:extra], "x")
+  defp malformed(input, :tuple_value_not_a_string), do: put_in(input.tuple.cli_version, 2)
+  defp malformed(input, :nil_invocation), do: %{input | invocation: nil}
+  defp malformed(input, :invocation_id_not_a_string), do: put_in(input.invocation.id, 42)
+
+  defp malformed(input, :invalid_time),
+    do: %{
+      input
+      | invocation: Map.put(Map.from_struct(input.invocation), :reserved_at, "not a time")
+    }
+
+  defp malformed(input, :sent_at_not_a_time), do: put_in(input.invocation.sent_at, "yesterday")
+  defp malformed(input, :unsupported_output), do: %{input | output: %URI{path: "unsupported"}}
+  defp malformed(input, :output_not_a_map), do: %{input | output: [1, 2]}
+
+  defp malformed(input, :observed_at_not_utc),
+    do: %{input | observed_at: %{@observed | time_zone: "America/Denver", zone_abbr: "MDT"}}
+
+  defp malformed(input, :run_not_a_map), do: %{input | run: "run"}
+  defp malformed(_input, :not_a_map), do: [:snapshot]
+
   ## Fixtures
 
   # The snapshots `calibrate` gathers (outside any lock) before building the
