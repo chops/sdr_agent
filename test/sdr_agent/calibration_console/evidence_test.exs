@@ -301,6 +301,9 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
     test "a directory under a symlinked ancestor is unsafe", ctx do
       real = Path.dirname(ctx.dir)
       alias_dir = real <> "-alias"
+      # Beside the per-test tmp dir, so removed explicitly.
+      File.rm(alias_dir)
+      on_exit(fn -> File.rm(alias_dir) end)
       File.ln_s!(real, alias_dir)
 
       assert {:error, :evidence_dir_unsafe} =
