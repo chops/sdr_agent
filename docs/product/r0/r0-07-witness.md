@@ -2224,11 +2224,34 @@ method, attestation and inventory fields are nil.
   7f113425). Three items: rule on the refusal-stop conflict; pin the
   definition registration and its eligibility; close the option contract,
   including how the console tenant is resolved. This revision takes all
-  three. The hook and the setup need PASS before any test uses them.
+  three.
+- **Round 2** at 4c09e40: **NEEDS-REVIEW** (Codex 0819a0bc, report sha256
+  86e17d7f). All three items are resolved. One documentation completion
+  was asked for: an inline entity row for the definition registration and
+  its eligibility, and a trigger reason that names the definition and
+  proof-run setup. Both are added below.
+- The hook and the setup need PASS before any test uses them.
 
-**Entity Model trigger: yes.** A new orchestration option contract:
-`Calibrate.run/2` and its options, including `hook:`. No domain resource,
-action, policy, lock order or event changes.
+**Entity Model trigger: yes.** Three changes:
+- a new orchestration option contract: `Calibrate.run/2` and its options,
+  including `hook:`;
+- a new fixed, code-owned use of a persisted AgentDefinition, with its
+  eligibility checks;
+- the console's proof AgentRun setup, with its attributes.
+
+No new resource, column or action, and no policy, lock-order or event
+change.
+
+| Entity | New / existing | Purpose | Attributes | Relationships | Invariants / lifecycle | Policy / actor | Open questions |
+|---|---|---|---|---|---|---|---|
+| AgentDefinition (`CalibrationConsole` v1) | Existing resource; new fixed code-owned definition use | Bind each proof run to the reviewed console definition | The fixed name, version, module and body below; the canonical definition hash; status must be active; the existing identity `(tenant_id, name, version)` | One tenant; many AgentRuns; each proof run has one required definition; the existing foreign key and delete behavior are unchanged | Registered once before the claim through the existing action and its `agents.definition.registered` event. A matching replay reuses the unchanged row and writes no event. The command verifies tenant, name, version, module, body, hash and active status. A mismatch or a retired row is a conflict; a database or authorization failure is unavailable. No overwrite, no unretire, no version bump, no fallback | The same resolved tenant's kernel actor registers it; `agent_runtime` does run creation, the call, stops and the finish; no policy change | None |
+| AgentRun (console `:proof` run) | Existing resource; new setup by `calibrate` | The run that one calibration call is charged to | The attributes table below | Its one definition above; no Operation; one invocation at most (`max_model_calls` 1) | Created and started after preflight. A start failure is cancelled before `aborted`. Stopped by `stop_refused/3` on a refusal, settled by E1 otherwise (8.14.6) | `agent_runtime` of the resolved tenant | None |
+| `Calibrate.run/2` options | New orchestration contract | Closed inputs of the command | The key table below | — | Validated before any read or write | The command process | None |
+
+The kernel actor also does the initial read-only tenant resolution
+(`:console`). Row 1's "nothing is created" refers to the claim and the
+domain rows that follow it. The startup definition registration and its
+one audit event (first run only) come before the claim.
 
 ##### The command
 
