@@ -953,6 +953,29 @@ writer of `status_reason :calibration_latched`.
   successor link, then recovery reuses the original bytes; replay under a
   later evaluator version; a foreign or tampered file fails closed.
 
+- **Staged E2 contract** (accepted in Codex's RED review at 02ff5d0,
+  report `codex-r007e-e123-02ff5d0-red-review.md` sha256
+  53c6f7e968690ebf33dda907729ff95f6d810856086733a0cac648cadf19f4f9):
+  - The fixed input is `calibration.prompt` version 1 and
+    `calibration.output` version 1 (`SdrAgent.CalibrationConsole.Prompt`).
+    The schema is `{answer: string, confidence: number in [0, 1]}`. The
+    prompt commitment is the SHA-256 of the rendered text; the schema
+    commitment is the SHA-256 of the canonical rendered JSON Schema.
+  - `Evidence.publish(dir, document, actor:)` is create-only and returns
+    `{:ok, %{path, sha256, bytes}}`. An existing file is validated and
+    returned unchanged, but never legitimizes a different target. Errors:
+    `:evidence_dir_unsafe`, `:evidence_schema`,
+    `:calibration_evidence_conflict`.
+  - `Evidence.validate(path, %{invocation_id, run_id, tenant_id,
+    profile_id}, actor:)`. A link's recorded hash is
+    `Canonical.sha256(link.evidence)`.
+  - The document's prompt and schema commitments must equal both the
+    code-owned ones and the invocation's immutable reservation.
+  - `output_sha256` commits to the canonical parsed output (null without
+    one), never to the raw response.
+  - The candidate is the literal v3 tuple.
+  - No filesystem I/O under database locks.
+
 #### R11-4: the candidate and the outcome
 
 - **Candidate:** the literal registry id
@@ -1228,3 +1251,11 @@ writer of `status_reason :calibration_latched`.
   not crashes; split the reserved and sent cases (B4' barrier); add event
   rollback, auditor denial audit, failed-run and invalid-output coverage.
   Staged contract accepted (R11-2 above). Revised RED pending recheck.
+- E1–E3 revised RED at 02ff5d0: **E1 PASS / VERIFIED RED; Prompt PASS /
+  VERIFIED RED** (GREEN permitted for those only); **Evidence and Outcome
+  NEEDS-REVIEW** (Codex, note bc09faea): Evidence fixtures (calibration
+  reservation refs, v3 candidate, parsed-output commitment, path and
+  canary cases); Outcome receipt/link exactness, whole-invocation
+  negatives, init and Sonnet cases, known no-spawn versus unknown.
+- Prompt GREEN at 42b9122; E1 GREEN at 930ef2a. Evidence and Outcome RED
+  revised; pending recheck.

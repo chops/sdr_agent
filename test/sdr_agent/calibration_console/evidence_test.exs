@@ -31,10 +31,15 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
 
   @moduletag :tmp_dir
 
-  setup %{tmp_dir: tmp} do
+  @v3 "claude-message-json/3+prompt-builder/1"
+  # A unique marker in the model's output: it must never reach the file or
+  # a log line.
+  @canary "canary-5d1f0c2e"
+  @output %{"answer" => "blue #{@canary}", "confidence" => 0.9}
+
+  setup %{tmp_dir: tmp} = tags do
     # A missing module fails as an assertion, never as a crash.
     assert Code.ensure_loaded?(Prompt), "SdrAgent.CalibrationConsole.Prompt is not defined"
-    assert Code.ensure_loaded?(Evidence), "SdrAgent.CalibrationConsole.Evidence is not defined"
 
     tenant = bootstrap!()
 
@@ -48,11 +53,18 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
 
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant, usage_origin: :proof)
     rec = system_actor(:reconciler, tenant)
-    invocation = completed_proof!(run, agent)
-    link = AgentsFixtures.reconciled_link!(invocation, rec)
+    invocation = proof!(run, agent, Map.get(tags, :call, :completed), Map.get(tags, :refs))
+
+    link =
+      AgentsFixtures.reconciled_link!(invocation, rec, evidence: v3_evidence())
+
     dir = Path.join(tmp, "evidence")
     File.mkdir_p!(dir)
     File.chmod!(dir, 0o700)
+
+    # After every fixture has been built: a missing Evidence fails as an
+    # assertion here, never as a crash.
+    assert Code.ensure_loaded?(Evidence), "SdrAgent.CalibrationConsole.Evidence is not defined"
 
     %{
       tenant: tenant,
@@ -62,7 +74,7 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
       invocation: invocation,
       link: link,
       dir: dir,
-      document: document(invocation, run, [link])
+      document: document(invocation, run, [link], Map.get(tags, :call, :completed))
     }
   end
 
@@ -223,8 +235,8 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
 
   test "the document carries no output, prompt or error text", ctx do
     {:ok, %{bytes: bytes}} = publish(ctx, ctx.document)
-    refute bytes =~ "qualified"
-    refute bytes =~ "criteria"
+    refute bytes =~ @canary
+    refute bytes =~ "blue"
     refute bytes =~ Prompt.render()
 
     for key <- ~w(release_id disposition evidence_sha256 parsed_output response prompt_text) do
@@ -232,31 +244,145 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
     end
   end
 
-  defp completed_proof!(run, agent) do
+  # A proof invocation reserved with the calibration input's own references
+  # (or, `refs: :generic`, an ordinary prompt's), completed with a synthetic
+  # parsed answer or failed after it was sent.
+  describe "input and output commitments" do
+    @tag refs: :generic
+    test "a document whose prompt commitments the reservation does not carry", ctx do
+      assert {:error, :calibration_evidence_conflict} = publish(ctx, ctx.document)
+      assert Path.wildcard(Path.join(ctx.dir, "*")) == []
+    end
+
+    test "a wrong output commitment is a conflict", ctx do
+      {:ok, published} = publish(ctx, ctx.document)
+      ctx = Map.put(ctx, :published, published)
+      other = hex(Canonical.sha256(%{"answer" => "green", "confidence" => 0.9}))
+
+      assert {:error, :calibration_evidence_conflict} =
+               rewrite_and_validate(ctx, &Map.put(&1, :output_sha256, other))
+    end
+  end
+
+  describe "a failed call" do
+    @describetag call: :failed
+
+    test "no output, no observed init, no evaluation: published and valid", ctx do
+      assert {:ok, %{path: path, sha256: sha}} = publish(ctx, ctx.document)
+      assert {:ok, %{sha256: ^sha}} = validate(ctx, path)
+
+      decoded = path |> File.read!() |> Jason.decode!()
+
+      for key <- ~w(output_sha256 attested_cli_version attested_model_id
+                    evaluated_projection_version evaluated_method) do
+        assert Map.fetch!(decoded, key) == nil, key
+      end
+    end
+
+    test "an output commitment for a call without output is a conflict", ctx do
+      bad = %{ctx.document | output_sha256: hex(Canonical.sha256(@output))}
+      assert {:error, :calibration_evidence_conflict} = publish(ctx, bad)
+      assert Path.wildcard(Path.join(ctx.dir, "*")) == []
+    end
+  end
+
+  describe "paths" do
+    test "a directory under a symlinked ancestor is unsafe", ctx do
+      real = Path.dirname(ctx.dir)
+      alias_dir = real <> "-alias"
+      File.ln_s!(real, alias_dir)
+
+      assert {:error, :evidence_dir_unsafe} =
+               Evidence.publish(Path.join(alias_dir, "evidence"), ctx.document, opts(ctx))
+
+      assert Path.wildcard(Path.join(ctx.dir, "*")) == []
+    end
+
+    test "identifiers that would leave the directory are refused", ctx do
+      for bad <- [
+            %{ctx.document | invocation_id: "../../escape"},
+            %{ctx.document | profile_id: "claude_cli_opus/../escape"}
+          ] do
+        assert {:error, :evidence_schema} = publish(ctx, bad)
+      end
+
+      root = ctx.dir |> Path.dirname() |> Path.dirname()
+      assert Path.wildcard(Path.join(root, "**/*escape*")) == []
+    end
+  end
+
+  test "no output text reaches a log line, on success or refusal", ctx do
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {:ok, published} = publish(ctx, ctx.document)
+        File.chmod!(published.path, 0o644)
+        {:error, _} = validate(ctx, published.path)
+        {:error, _} = publish(ctx, Map.put(ctx.document, :extra, @canary))
+      end)
+
+    refute log =~ @canary
+  end
+
+  defp proof!(run, agent, call, refs) do
     {:ok, reserved} =
       AdmissionFixtures.admitting(fn ->
         Agents.reserve_model_invocation(
           run,
-          AgentsFixtures.claude_attrs("ev-#{System.unique_integer([:positive])}"),
+          attrs("ev-#{System.unique_integer([:positive])}", refs),
           actor: agent,
           calibration: AdmissionFixtures.calibration()
         )
       end)
 
     {:ok, sent} = Agents.mark_model_invocation_sent(reserved, actor: agent)
+    settle(sent, agent, call)
+  end
 
-    {:ok, done} =
-      Agents.complete_model_invocation(sent, AgentsFixtures.completion(), actor: agent)
+  defp attrs(key, :generic), do: AgentsFixtures.claude_attrs(key)
 
+  defp attrs(key, _calibration) do
+    prompt = Prompt.prompt_ref()
+    schema = Prompt.schema_ref()
+
+    key
+    |> AgentsFixtures.claude_attrs()
+    |> Map.merge(%{
+      prompt_template_id: prompt.id,
+      prompt_template_version: prompt.version,
+      prompt_template_sha256: prompt.sha256,
+      output_schema_id: schema.id,
+      output_schema_version: schema.version,
+      output_schema_sha256: schema.sha256
+    })
+  end
+
+  defp settle(sent, agent, :completed) do
+    completion = %{
+      AgentsFixtures.completion()
+      | response: Jason.encode!(@output),
+        parsed_output: @output
+    }
+
+    {:ok, done} = Agents.complete_model_invocation(sent, completion, actor: agent)
     done
   end
 
+  defp settle(sent, agent, :failed) do
+    {:ok, failed} =
+      Agents.fail_model_invocation(sent, %{error: %{"kind" => "provider_error"}}, actor: agent)
+
+    failed
+  end
+
   # A closed-schema document for `invocation` (the console builds it from
-  # committed rows, row R11-4; here it is literal).
-  defp document(invocation, run, links) do
-    entry = AdmissionFixtures.entry()
+  # committed rows, row R11-4; here it is literal). The candidate is the
+  # literal v3 tuple; a completed call commits to its parsed output, a
+  # failed one has no output, no observed init and no evaluation.
+  defp document(invocation, run, links, call) do
+    entry = AdmissionFixtures.entry(:claude_cli_opus, @v3)
     stamp = &(&1 && Base.encode16(&1, case: :lower))
     ref = &%{id: &1.id, version: &1.version, sha256: stamp.(&1.sha256)}
+    completed? = call == :completed
 
     %{
       schema: "r0-calibration-evidence/1",
@@ -266,22 +392,40 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
       tenant_id: invocation.tenant_id,
       profile_id: "claude_cli_opus",
       candidate: Map.new(entry, fn {k, v} -> {k, to_string(v)} end),
-      evaluated_projection_version: entry.projection_version,
-      evaluated_method: "propagated_id",
-      outcome: "match",
-      links: Enum.map(links, &%{id: &1.id, evidence_sha256: link_sha(&1)}),
+      evaluated_projection_version: if(completed?, do: @v3),
+      evaluated_method: if(completed?, do: "propagated_id"),
+      outcome: if(completed?, do: "match", else: "missing"),
+      links: if(completed?, do: Enum.map(links, &link_ref/1), else: []),
       inventory_sha256: nil,
       prompt: ref.(Prompt.prompt_ref()),
       output_schema: ref.(Prompt.schema_ref()),
-      attested_cli_version: invocation.provider_version,
-      attested_model_id: invocation.model_id,
+      attested_cli_version: if(completed?, do: invocation.provider_version),
+      attested_model_id: if(completed?, do: invocation.model_id),
       invocation_status: to_string(invocation.status),
       validation_status: to_string(invocation.validation_status),
-      output_sha256: stamp.(invocation.response_sha256),
+      output_sha256: if(completed?, do: hex(Canonical.sha256(@output))),
       reserved_at: invocation.reserved_at,
       sent_at: invocation.sent_at,
       completed_at: invocation.completed_at,
       observed_at: ~U[2026-10-13 06:00:00.000000Z]
+    }
+  end
+
+  defp link_ref(link), do: %{id: link.id, evidence_sha256: link_sha(link)}
+
+  # A v3 claim carries its complete context group (WitnessEvidence).
+  defp v3_evidence do
+    %{
+      "projection_version" => @v3,
+      "reminder_count" => 0,
+      "reminder_sha256s" => [],
+      "reminder_bytes" => [],
+      "trailing_system_count" => 0,
+      "trailing_system_sha256s" => [],
+      "trailing_system_bytes" => [],
+      "request_extras_sha256" => String.duplicate("c3", 32),
+      "request_fields" => [],
+      "trailing_output_config" => []
     }
   end
 
