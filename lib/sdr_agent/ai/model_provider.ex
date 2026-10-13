@@ -280,6 +280,46 @@ defmodule SdrAgent.AI.ModelProvider do
     })
   end
 
+  if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
+    alias SdrAgent.AI.ModelProvider.CalibrationCall
+    alias SdrAgent.AI.ModelProvider.ClaudeCLI
+
+    @doc """
+    Test-seam builds only (R0-07 packet 8.14.3, d3b): calls an invocation the
+    calibration console already reserved, through the private ClaudeCLI
+    server `opts[:server]`, and settles it exactly as `complete/2` does.
+
+    The target is checked first (`CalibrationCall.target/3`): anything
+    invalid is `{:error, :calibration_call_invalid}` with no provider call,
+    no witness and no write. Then, as in `complete/2`, the witness is
+    captured in this process inside the `gen_ai` span and the shared
+    provider call, re-read and settlement run unchanged (`sent` only by the
+    server's launch admission).
+    """
+    def calibration_call(request, invocation_id, opts) do
+      provider_options = Keyword.take(opts, [:server])
+
+      case CalibrationCall.target(request, invocation_id, provider_options) do
+        {:ok, invocation, provenance} ->
+          metadata = %{id: request.id, model: provenance.model_id, input: request.prompt}
+
+          GenAI.with_span(request.operation, metadata, fn ->
+            witness = %{model_invocation_id: invocation.id, traceparent: GenAI.traceparent()}
+
+            invoke_validate_and_settle(
+              ClaudeCLI,
+              Map.put(request, :witness, witness),
+              invocation,
+              provider_options
+            )
+          end)
+
+        :invalid ->
+          {:error, :calibration_call_invalid}
+      end
+    end
+  end
+
   defp safe_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp safe_reason({kind, _value}) when is_atom(kind), do: Atom.to_string(kind)
   defp safe_reason(_reason), do: "redacted"
