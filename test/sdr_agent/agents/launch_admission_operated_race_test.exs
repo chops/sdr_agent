@@ -15,9 +15,12 @@ defmodule SdrAgent.Agents.LaunchAdmissionOperatedRaceTest do
   alias Ecto.Adapters.SQL
   alias Ecto.Adapters.SQL.Sandbox
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit
   alias SdrAgent.AuditCase
+  alias SdrAgent.Clock
+  alias SdrAgent.SDR.StaleRunSweeper
 
   @tables ~w(audit_accesses audit_events audit_chain_heads model_invocations
              model_call_allocations model_call_grants agent_runs failures operations
@@ -31,7 +34,10 @@ defmodule SdrAgent.Agents.LaunchAdmissionOperatedRaceTest do
     {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
     admin = AuditCase.human(:admin, tenant)
     AgentsFixtures.grant!(tenant, %{}, admin)
-    %{run: run, agent: agent, operation: operation} = AgentsFixtures.operated_run(tenant)
+    # The Operation is bound to a job id that does not exist, so the
+    # stale-run sweeper may recover the run (Codex's coverage note).
+    %{run: run, agent: agent, operation: operation} =
+      AgentsFixtures.operated_run(tenant, oban_job_id: 2_000_000_000)
 
     {:ok, invocation} =
       Agents.reserve_model_invocation(run, AgentsFixtures.claude_attrs("operated-race"),
@@ -92,6 +98,62 @@ defmodule SdrAgent.Agents.LaunchAdmissionOperatedRaceTest do
     assert {:ok, _} = Task.await(head, 30_000)
     assert {:ok, %{status: :sent}} = Task.await(launch, 30_000)
     assert {:ok, :written} = Task.await(writer, 30_000)
+  end
+
+  describe "the stale-run sweeper on an operated run" do
+    setup ctx do
+      Clock.freeze(
+        DateTime.add(Clock.utc_now(), StaleRunSweeper.stale_after_seconds() + 60, :second)
+      )
+
+      on_exit(&Clock.unfreeze/0)
+      ctx
+    end
+
+    test "recovery first: the row is failed unlaunched and the launch is refused", ctx do
+      parent = self()
+      head = Task.async(fn -> with_connection(fn -> hold_head(ctx, parent) end) end)
+      assert_receive :head_held, 10_000
+
+      sweep =
+        Task.async(fn -> with_connection(fn -> StaleRunSweeper.sweep(ctx.tenant.id) end) end)
+
+      await_lock_waiters(1)
+      launch = Task.async(fn -> admit(ctx) end)
+      await_lock_waiters(2)
+      send(head.pid, :go)
+
+      assert {:ok, _} = Task.await(head, 30_000)
+      assert :ok = Task.await(sweep, 30_000)
+      assert {:error, :invocation_not_reserved} = Task.await(launch, 30_000)
+
+      stored = Ash.get!(ModelInvocation, ctx.invocation.id, authorize?: false)
+      assert {stored.status, stored.sent_at} == {:failed, nil}
+      assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: auditor(ctx))
+    end
+
+    test "launch first: the call is sent, and recovery marks it unknown, not failed", ctx do
+      parent = self()
+      head = Task.async(fn -> with_connection(fn -> hold_head(ctx, parent) end) end)
+      assert_receive :head_held, 10_000
+
+      launch = Task.async(fn -> admit(ctx) end)
+      await_lock_waiters(1)
+
+      sweep =
+        Task.async(fn -> with_connection(fn -> StaleRunSweeper.sweep(ctx.tenant.id) end) end)
+
+      await_lock_waiters(2)
+      send(head.pid, :go)
+
+      assert {:ok, _} = Task.await(head, 30_000)
+      assert {:ok, %{status: :sent}} = Task.await(launch, 30_000)
+      assert :ok = Task.await(sweep, 30_000)
+
+      stored = Ash.get!(ModelInvocation, ctx.invocation.id, authorize?: false)
+      assert stored.status == :unknown
+      assert {:ok, %{valid?: true}} = Audit.verify_chain(actor: auditor(ctx))
+    end
   end
 
   defp hold_head(ctx, parent) do

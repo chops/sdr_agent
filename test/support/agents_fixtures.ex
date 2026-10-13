@@ -18,7 +18,9 @@ defmodule SdrAgent.AgentsFixtures do
   @doc """
   Like `running_run/2`, but the run owns a running `research_lead`
   Operation (as an assignment run does), so a result-gate cause can carry
-  its `operation_id` (R0-07 slice C). Returns `%{run, agent, operation}`.
+  its `operation_id` (R0-07 slice C). Option `oban_job_id:` binds the
+  Operation to that job id (e.g. one that no longer exists, so the
+  stale-run sweeper can recover the run). Returns `%{run, agent, operation}`.
   """
   def operated_run(tenant, opts \\ []) do
     agent = system_actor(:agent_runtime, tenant)
@@ -34,7 +36,8 @@ defmodule SdrAgent.AgentsFixtures do
           subject_id: Ecto.UUID.generate(),
           idempotency_key: key,
           correlation_id: Ecto.UUID.generate(),
-          max_attempts: 1
+          max_attempts: 1,
+          oban_job_id: Keyword.get(opts, :oban_job_id)
         },
         actor: agent
       )

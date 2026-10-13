@@ -715,9 +715,9 @@ enablement or spend.
     row (`{check, id}`), carried as structured metadata in the event and
     dedupe detail, while Failure prose keeps the label only.
   - **Operation lock:** true-connection launch versus Operation-writer
-    races in both orders. A launch-versus-sweeper race on an operated run
-    is not covered: with this fixture the sweeper does not treat the
-    operated run as stale.
+    races in both orders, and launch-versus-sweeper races on an operated
+    run whose Operation is bound to a job that no longer exists (both
+    orders; Codex noted the earlier fixture was skipped as `job_unbound`).
   - **Test order:** the three defects were RED first (Codex's probes,
     0/3 before the fixes). For the original slice B commits, test order
     is unrecorded and no reconstructed before/after evidence is attached
