@@ -198,13 +198,30 @@ defmodule SdrAgent.Agents.Admission.Gate do
     defp authorized(nil, _identity),
       do: {:error, :calibration_not_authorized, :authority_missing}
 
+    # The entry must also name the profile's current reviewed identity
+    # (review MF1): a historical tuple that agrees with its own stored
+    # invocation but not with today's reviewed CLI version or model is
+    # refused before the call is sent.
     defp authorized({profile_id, entry}, identity) do
       with {:ok, [entry]} <- Witness.exact_overrides([entry]),
            true <- entry.profile_id == profile_id and profile_id == identity.profile_id,
            true <- Witness.promoted?(identity, [entry]) do
-        {:ok, entry}
+        if current_reviewed?(identity),
+          do: {:ok, entry},
+          else: {:error, :calibration_not_authorized, :profile_drift}
       else
         _invalid -> {:error, :calibration_not_authorized, :authority_invalid}
+      end
+    end
+
+    defp current_reviewed?(identity) do
+      case ModelProfiles.fetch_real(identity.profile_id) do
+        {:ok, profile} ->
+          profile.cli_version == identity.provider_version and
+            profile.resolved_model == identity.model_id
+
+        _error ->
+          false
       end
     end
 
