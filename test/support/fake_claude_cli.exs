@@ -21,7 +21,14 @@ model =
   end
 
 tools = if(mode == "tool_drift", do: ~s(["Read"]), else: "[]")
-version = if(mode == "version_drift", do: "2.1.292", else: "2.1.291")
+
+version =
+  cond do
+    mode == "version_drift" -> "2.1.292"
+    # The previously reviewed version, now drift (R0-08).
+    mode == "old_version" -> "2.1.291"
+    true -> "2.1.294"
+  end
 
 init =
   ~s({"type":"system","subtype":"init","model":"#{model}","claude_code_version":"#{version}","tools":#{tools},"mcp_servers":[],"slash_commands":[]})
