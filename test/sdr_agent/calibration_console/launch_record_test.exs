@@ -110,7 +110,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
                LaunchRecord.advance(ctx.root, pending, :launched, launched_attrs())
 
       assert {launched.root_pid, launched.process_group_id} == {9001, 9001}
-      assert {:ok, finished} = LaunchRecord.advance(ctx.root, launched, :finished, %{})
+      assert finished = finished!(ctx.root, launched)
       assert finished.state == "finished"
 
       assert {:error, :invalid_transition} =
@@ -156,8 +156,8 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
           invocation_id: Ash.UUIDv7.generate()
         })
 
-      {:ok, launched} = LaunchRecord.advance(ctx.root, pending, :launched, launched_attrs())
-      {:ok, finished} = LaunchRecord.advance(ctx.root, launched, :finished, %{})
+      launched = launched!(ctx.root, pending)
+      finished = finished!(ctx.root, launched)
       assert :ok = LaunchRecord.release(ctx.root, finished)
       refute File.exists?(Path.join(ctx.root, "run.lock"))
       assert {:ok, :none} = LaunchRecord.read(ctx.root)
@@ -516,7 +516,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     end
 
     test "a stale finished record never releases a successor's lock", ctx do
-      finished = finished!(ctx)
+      finished = finished_record!(ctx)
       assert :ok = LaunchRecord.release(ctx.root, finished)
       {:ok, _successor} = LaunchRecord.claim(ctx.root, ctx.opts)
 
@@ -576,8 +576,8 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
           invocation_id: Ash.UUIDv7.generate()
         })
 
-      {:ok, launched} = LaunchRecord.advance(ctx.root, pending, :launched, launched_attrs())
-      {:ok, finished} = LaunchRecord.advance(ctx.root, launched, :finished, %{})
+      launched = launched!(ctx.root, pending)
+      finished = finished!(ctx.root, launched)
       assert :quiescent = LaunchRecord.quiescence(finished, ctx.opts)
     end
   end
@@ -634,7 +634,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     end
 
     test "a malformed root or session answer never establishes quiescence", ctx do
-      {:ok, launched} = LaunchRecord.advance(ctx.root, ctx.pending, :launched, launched_attrs())
+      launched = launched!(ctx.root, ctx.pending)
 
       for {key, reply} <- [
             identities: {:raw, nil},
@@ -693,8 +693,8 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     end
 
     test "a release refused by an active recovery or a stray entry keeps the record", ctx do
-      {:ok, launched} = LaunchRecord.advance(ctx.root, ctx.pending, :launched, launched_attrs())
-      {:ok, finished} = LaunchRecord.advance(ctx.root, launched, :finished, %{})
+      launched = launched!(ctx.root, ctx.pending)
+      finished = finished!(ctx.root, launched)
       path = Path.join(ctx.root, "run.lock/record.json")
       bytes = File.read!(path)
 
@@ -793,6 +793,30 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     end
   end
 
+  # Fixture steps that need the schema-2 transitions, checked by assertion
+  # so a missing implementation never crashes a test.
+  defp launched!(root, pending) do
+    result = LaunchRecord.advance(root, pending, :launched, launched_attrs())
+
+    assert match?({:ok, _}, result),
+           "advancing to launched with process_group_id (schema 2) is not implemented: " <>
+             inspect(result)
+
+    {:ok, launched} = result
+    launched
+  end
+
+  defp finished!(root, launched) do
+    result = LaunchRecord.advance(root, launched, :finished, %{})
+
+    assert match?({:ok, _}, result),
+           "advancing a schema-2 launched record to finished is not implemented: " <>
+             inspect(result)
+
+    {:ok, finished} = result
+    finished
+  end
+
   defp write_private!(path, bytes) do
     File.write!(path, bytes)
     File.chmod!(path, 0o600)
@@ -807,7 +831,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     |> Map.new(fn {k, v} -> {Atom.to_string(k), v} end)
   end
 
-  defp finished!(ctx) do
+  defp finished_record!(ctx) do
     {:ok, claimed} = LaunchRecord.claim(ctx.root, ctx.opts)
 
     {:ok, pending} =
@@ -815,8 +839,8 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
         invocation_id: Ash.UUIDv7.generate()
       })
 
-    {:ok, launched} = LaunchRecord.advance(ctx.root, pending, :launched, launched_attrs())
-    {:ok, finished} = LaunchRecord.advance(ctx.root, launched, :finished, %{})
+    launched = launched!(ctx.root, pending)
+    finished = finished!(ctx.root, launched)
     finished
   end
 

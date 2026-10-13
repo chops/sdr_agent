@@ -1400,6 +1400,13 @@ writer of `status_reason :calibration_latched`.
   on-disk replacement and stale cleanup, probe uncertainty, private paths,
   typed write failure and wrongly shaped records. RED revised; staged
   contract recorded under R11-1.
+- E4a code: **APPROVE** at b10d65f (Codex 1c67965f).
+- E4b staged process-group delta: **PASS** (Codex 2d6beb1d, entity and
+  action contract). ProcessProbe RED verified. GREEN held for clean
+  LaunchRecord-v2 fixture assertions, orphan-child cleanup and a
+  stderr-only case; corrected and resent. Owner acceptance of the weaker
+  observable, the launcher receipt, any launched-record attestation and the
+  ADR evaluation remain E4c gates before any real-call authorization.
 - E4a RED at 3c495f6: **NEEDS-REVIEW, one correction** (Codex, ad1bc5e0):
   the 0500 case is `:launch_record_unsafe`; the write failure is a
   separate replace-step fault. The other groups were accepted.

@@ -137,6 +137,13 @@ defmodule SdrAgent.CalibrationConsole.ProcessProbeTest do
       end
     end
 
+    test "a valid table with a diagnostic on stderr only", %{tmp_dir: tmp} do
+      {:ok, self} = ProcessProbe.self_pid()
+      ps!(tmp, "#{self} #{self} Ss Tue Oct 13 03:49:40 2026", 0, "ps: warning on stderr")
+      assert {:error, _} = ProcessProbe.start_identity(self)
+      assert {:error, _} = ProcessProbe.group_members(self)
+    end
+
     test "malformed rows, numbers, states or times", %{tmp_dir: tmp} do
       {:ok, self} = ProcessProbe.self_pid()
       good = "#{self} #{self} Ss Tue Oct 13 03:49:40 2026"
@@ -193,12 +200,17 @@ defmodule SdrAgent.CalibrationConsole.ProcessProbeTest do
   end
 
   # A process group of `count` sleeping processes led by the first (perl
-  # setpgrp, checked). Its cleanup is registered before any readiness
-  # assertion and signals only that identified group.
+  # setpgid, checked). Cleanup is registered before any readiness
+  # assertion. Once the group is up, each member's pid and start time are
+  # recorded; cleanup signals exactly the processes still matching a
+  # record (an orphaned member included, after its leader died), and, if
+  # the group never came up, only a group its leader still leads.
   defp group!(count) do
     script =
       "use POSIX; setpgid(0, 0) == 0 or die; " <>
         "for (2..#{count}) { if (fork() == 0) { exec 'sleep', '30' } } exec 'sleep', '30'"
+
+    {:ok, recorded} = Agent.start(fn -> [] end)
 
     port =
       Port.open({:spawn_executable, "/usr/bin/perl"}, [
@@ -208,21 +220,40 @@ defmodule SdrAgent.CalibrationConsole.ProcessProbeTest do
       ])
 
     {:os_pid, leader} = Port.info(port, :os_pid)
-    on_exit(fn -> kill_group!(leader) end)
-    assert eventually(fn -> group_size(leader) == count end)
+    on_exit(fn -> cleanup!(leader, recorded) end)
+    assert eventually(fn -> length(group_rows(leader)) == count end)
+    Agent.update(recorded, fn _ -> group_rows(leader) end)
     {leader, port}
   end
 
-  defp group_size(leader) do
-    {out, 0} = System.cmd("/bin/ps", ["-A", "-o", "pid=,pgid=,stat="], env: ChildEnv.cmd([]))
+  # `{pid, start time}` of the runnable members of `pgid` (fixed C/UTC).
+  defp group_rows(pgid) do
+    {out, 0} =
+      System.cmd("/bin/ps", ["-A", "-o", "pid=,pgid=,stat=,lstart="],
+        env: ChildEnv.cmd([], [{"LC_ALL", "C"}, {"TZ", "UTC"}])
+      )
 
-    out
-    |> String.split("\n", trim: true)
-    |> Enum.map(&String.split/1)
-    |> Enum.count(fn [_pid, pgid, stat] ->
-      pgid == Integer.to_string(leader) and not String.starts_with?(stat, "Z")
-    end)
+    for line <- String.split(out, "\n", trim: true),
+        [pid, group, stat | start] = String.split(line),
+        group == Integer.to_string(pgid) and not String.starts_with?(stat, "Z"),
+        do: {String.to_integer(pid), Enum.join(start, " ")}
   end
+
+  defp cleanup!(leader, recorded) do
+    case Agent.get(recorded, & &1) do
+      [] -> kill_group!(leader)
+      rows -> rows |> Enum.filter(&(&1 in group_rows(leader))) |> Enum.each(&kill_pid!/1)
+    end
+
+    Agent.stop(recorded)
+  end
+
+  defp kill_pid!({pid, _start}),
+    do:
+      System.cmd("kill", ["-KILL", Integer.to_string(pid)],
+        env: ChildEnv.cmd([]),
+        stderr_to_stdout: true
+      )
 
   # Signals the group only while its leader still leads it.
   defp kill_group!(leader) do
@@ -239,12 +270,15 @@ defmodule SdrAgent.CalibrationConsole.ProcessProbeTest do
     :ok
   end
 
-  # A test-seam ps that prints `output` and exits with `status`.
-  defp ps!(tmp, output, status) do
+  # A test-seam ps that prints `output` (and `stderr` on stderr) and exits
+  # with `status`.
+  defp ps!(tmp, output, status, stderr \\ "") do
     path = Path.join(tmp, "ps-#{System.unique_integer([:positive])}")
     data = Path.join(tmp, "ps-data-#{System.unique_integer([:positive])}")
+    err = Path.join(tmp, "ps-err-#{System.unique_integer([:positive])}")
     File.write!(data, output)
-    File.write!(path, "#!/bin/sh\ncat '#{data}'\nexit #{status}\n")
+    File.write!(err, stderr)
+    File.write!(path, "#!/bin/sh\ncat '#{data}'\ncat '#{err}' >&2\nexit #{status}\n")
     File.chmod!(path, 0o700)
     Application.put_env(:sdr_agent, ProcessProbe, ps: path)
   end
