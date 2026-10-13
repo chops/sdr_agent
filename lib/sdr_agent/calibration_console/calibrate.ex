@@ -31,10 +31,20 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     It exists only in test-seam builds (packet 8.14.1): a non-seam build has
     neither the module nor the `calibrate` subcommand path.
 
-    Inconsistent snapshots (a link the receipt does not name, a named link
-    that was not read, a link of another invocation, a run that is not the
-    invocation's, an own link without a lowercase hex inventory digest) are
-    `{:error, :evidence_input_invalid}`: a hard stop, never a nil field.
+    Only a genuine observation builds a document: a sent call needs the
+    await's own `{:ok | :timeout, receipt}`, and a nil `gate` is only the
+    unlaunched path (`sent_at` nil), whose `launch_failed` outcome is built
+    without evaluation or attestation and without inventing a receipt.
+
+    Inconsistent or malformed snapshots are `{:error,
+    :evidence_input_invalid}`, a hard stop, never a nil field or an
+    exception: an error or unknown observation tag, a malformed receipt, a
+    sent call without an observation or an unlaunched one with one, a link
+    the receipt does not name, a named link that was not read, a link of
+    another invocation, a run that is not the invocation's, an own link
+    without a lowercase hex inventory digest, a candidate that is not
+    exactly the six-key entry, a row or observation time that is not UTC,
+    or an output that is not a JSON object canonical encoding accepts.
     """
 
     alias SdrAgent.Audit.Canonical
@@ -44,31 +54,30 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     @schema "r0-calibration-evidence/1"
     @sha256 ~r/\A[0-9a-f]{64}\z/
     @invalid {:error, :evidence_input_invalid}
+    @tuple_names [:provider, :profile_id, :method]
+    @tuple_strings [:cli_version, :model_id, :projection_version]
 
     @doc "The evidence document of the gathered snapshots (see the moduledoc)."
     def document(
           %{
             invocation: invocation,
-            run: %{id: run_id},
-            tuple: %{} = tuple,
+            run: run,
+            tuple: tuple,
             gate: gate,
             link: link,
             attestation: attestation,
             output: output,
-            observed_at: %DateTime{} = observed_at
+            observed_at: observed_at
           } = _snapshot
         ) do
-      with true <- run_id == invocation.agent_run_id,
-           {:ok, link} <- own_link(link, gate, invocation),
-           {:ok, inventory} <- inventory(link) do
-        outcome =
-          Outcome.classify(%{
-            invocation: invocation,
-            attestation: attestation,
-            gate: gate || {:ok, %{status: :skipped}},
-            link: link,
-            candidate: tuple
-          })
+      with true <- invocation?(invocation) and tuple?(tuple) and utc?(observed_at),
+           %{id: run_id} when run_id == invocation.agent_run_id <- run,
+           {:ok, observation} <- observation(invocation, gate),
+           {:ok, link} <- own_link(link, observation, invocation),
+           {:ok, inventory} <- inventory(link),
+           {:ok, links} <- links(link),
+           {:ok, output_sha256} <- output_sha256(output) do
+        outcome = classify(observation, invocation, attestation, link, tuple)
 
         {:ok,
          %{
@@ -82,7 +91,7 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
            evaluated_projection_version: outcome.evaluated_projection_version,
            evaluated_method: outcome.evaluated_method,
            outcome: outcome.outcome,
-           links: links(link),
+           links: links,
            inventory_sha256: inventory,
            prompt: ref(Prompt.prompt_ref()),
            output_schema: ref(Prompt.schema_ref()),
@@ -90,7 +99,7 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
            attested_model_id: outcome.attested_model_id,
            invocation_status: to_string(invocation.status),
            validation_status: to_string(invocation.validation_status),
-           output_sha256: output && hex(Canonical.sha256(output)),
+           output_sha256: output_sha256,
            reserved_at: usec(invocation.reserved_at),
            sent_at: usec(invocation.sent_at),
            completed_at: usec(invocation.completed_at),
@@ -103,24 +112,93 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
 
     def document(_snapshot), do: @invalid
 
-    # The receipt's own link of this invocation, read when the receipt names
-    # one; nil only when it names none.
-    defp own_link(nil, nil, _invocation), do: {:ok, nil}
+    ## The snapshots' shapes
 
-    defp own_link(link, {_kind, %{} = receipt}, invocation) do
-      case {Map.get(receipt, :link_id), link} do
-        {nil, nil} ->
-          {:ok, nil}
-
-        {id, %{id: id, model_invocation_id: own}} when is_binary(id) and own == invocation.id ->
-          {:ok, link}
-
-        _inconsistent ->
-          :error
-      end
+    defp invocation?(%{
+           id: id,
+           agent_run_id: run_id,
+           tenant_id: tenant_id,
+           profile_id: profile_id,
+           status: status,
+           validation_status: validation_status,
+           reserved_at: reserved_at,
+           sent_at: sent_at,
+           completed_at: completed_at
+         }) do
+      Enum.all?([id, run_id, tenant_id], &is_binary/1) and
+        Enum.all?([profile_id, status, validation_status], &name?/1) and utc?(reserved_at) and
+        Enum.all?([sent_at, completed_at], &(is_nil(&1) or utc?(&1)))
     end
 
-    defp own_link(_link, _gate, _invocation), do: :error
+    defp invocation?(_invocation), do: false
+
+    # Exactly the six-key entry: names for the provider, profile and
+    # method, strings for the rest.
+    defp tuple?(%{} = tuple) when map_size(tuple) == 6 do
+      Enum.all?(@tuple_names, &name?(Map.get(tuple, &1))) and
+        Enum.all?(@tuple_strings, &is_binary(Map.get(tuple, &1)))
+    end
+
+    defp tuple?(_tuple), do: false
+
+    defp name?(value), do: is_atom(value) and value not in [nil, true, false]
+
+    defp utc?(%DateTime{time_zone: "Etc/UTC"}), do: true
+    defp utc?(_time), do: false
+
+    ## The observation
+
+    # A sent call is observed only through the await's own `{:ok |
+    # :timeout, receipt}`; an unlaunched one (`sent_at` nil) had no await.
+    # Nothing else is an observation, and none is ever invented.
+    defp observation(%{sent_at: nil}, nil), do: {:ok, :unlaunched}
+
+    defp observation(%{sent_at: %DateTime{}}, {kind, receipt} = gate)
+         when kind in [:ok, :timeout] do
+      if receipt?(receipt), do: {:ok, gate}, else: :error
+    end
+
+    defp observation(_invocation, _gate), do: :error
+
+    defp receipt?(%{status: status, link_id: link_id, cause_id: cause_id, codes: codes})
+         when is_list(codes) do
+      name?(status) and Enum.all?([link_id, cause_id], &(is_nil(&1) or is_binary(&1))) and
+        Enum.all?(codes, &is_binary/1)
+    end
+
+    defp receipt?(_receipt), do: false
+
+    # The unlaunched outcome is built here, not classified from an invented
+    # receipt: no evaluation and no attestation (packet 8.14.8).
+    defp classify(:unlaunched, _invocation, _attestation, _link, _tuple),
+      do: %{
+        outcome: "launch_failed",
+        evaluated_projection_version: nil,
+        evaluated_method: nil,
+        attested_cli_version: nil,
+        attested_model_id: nil
+      }
+
+    defp classify(gate, invocation, attestation, link, tuple) do
+      Outcome.classify(%{
+        invocation: invocation,
+        attestation: attestation,
+        gate: gate,
+        link: link,
+        candidate: tuple
+      })
+    end
+
+    # The receipt's own link of this invocation, read when the receipt names
+    # one; nil only when it names none (and always on the unlaunched path).
+    defp own_link(nil, :unlaunched, _invocation), do: {:ok, nil}
+    defp own_link(nil, {_kind, %{link_id: nil}}, _invocation), do: {:ok, nil}
+
+    defp own_link(%{id: id, model_invocation_id: own} = link, {_kind, %{link_id: id}}, invocation)
+         when is_binary(id) and own == invocation.id,
+         do: {:ok, link}
+
+    defp own_link(_link, _observation, _invocation), do: :error
 
     defp inventory(nil), do: {:ok, nil}
 
@@ -130,8 +208,28 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
 
     defp inventory(_link), do: :error
 
-    defp links(nil), do: []
-    defp links(link), do: [%{id: link.id, evidence_sha256: hex(Canonical.sha256(link.evidence))}]
+    defp links(nil), do: {:ok, []}
+
+    defp links(%{id: id, evidence: %{} = evidence}) do
+      with {:ok, digest} <- canonical_sha256(evidence),
+           do: {:ok, [%{id: id, evidence_sha256: digest}]}
+    end
+
+    # The commitment to the parsed output (a JSON object), nil without one.
+    defp output_sha256(nil), do: {:ok, nil}
+
+    defp output_sha256(%{} = output) when not is_struct(output),
+      do: canonical_sha256(output)
+
+    defp output_sha256(_output), do: :error
+
+    # Canonical encoding is pure; a value it cannot encode is invalid input,
+    # contained here and nowhere else.
+    defp canonical_sha256(value) do
+      {:ok, hex(Canonical.sha256(value))}
+    rescue
+      _unencodable -> :error
+    end
 
     defp ref(ref), do: %{id: ref.id, version: ref.version, sha256: hex(ref.sha256)}
 
