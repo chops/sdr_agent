@@ -131,6 +131,18 @@ defmodule SdrAgent.CalibrationConsole.AuthorityTest do
     end
   end
 
+  # GREEN-time verification (Codex 01a13607).
+  test "a restarted registry never authorizes a stale reference", ctx do
+    {:ok, ref} = Authority.issue(ctx.binding)
+    old_instance = Authority.instance()
+    stop_supervised!(Authority)
+    start_supervised!(Authority)
+
+    refute Authority.instance() == old_instance
+    assert entries() == 0
+    assert consume_in(ctx.server, ref, claims(ctx.binding)) == {:error, :real_model_staged}
+  end
+
   test "the registry table is protected: only its owner writes it", _ctx do
     table = Authority.table()
     assert :ets.info(table, :protection) == :protected
@@ -174,7 +186,18 @@ defmodule SdrAgent.CalibrationConsole.AuthorityTest do
   # Every fixture process is stopped when the test ends, pass or fail.
   defp spawn_owned(fun) do
     pid = spawn(fun)
-    on_exit(fn -> Process.exit(pid, :kill) end)
+
+    on_exit(fn ->
+      monitor = Process.monitor(pid)
+      Process.exit(pid, :kill)
+
+      receive do
+        {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+      after
+        5_000 -> raise "fixture process #{inspect(pid)} did not terminate"
+      end
+    end)
+
     pid
   end
 
