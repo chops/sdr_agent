@@ -78,3 +78,27 @@ head review requested; full repository gate running in the isolated test
 partition, with no real model calls or demo/calibration database access.
 ETA about 45 focused minutes from the final GO; preview was published first
 so the owner need not wait for the repository gate.
+
+* Verification completion and owner selection
+Independent comparison review: Claude APPROVE of exact HTML head 0a9a927,
+reply m_1791852708000003996_5b9d194a to m_1791852546995511750_8ad9f090.
+The HTML is unchanged at pushed evidence head 2f89942.
+
+At 2f89942 the first full precommit run had one stale-build failure:
+AnchoringTest expected current HEAD, but its compile-time Git SHA still
+named 0a9a927. Forced test compilation (no source/assertion changes) made
+the focused anchor test pass; the full rerun passed 1417 tests, 1 skipped,
+4 excluded. Workflow receipt, canonical =mix credo= (ADR-0007), codegen
+=--check= and =mix hex.audit= also passed. Evidence:
+=/tmp/codex-h1b-precommit-recheck.log= and the corresponding
+=codex-h1b-{workflow,credo,codegen,hex-audit}.log= files. This note-only
+commit records those results; it does not claim a full rerun at a new SHA.
+
+Owner choice routed in m_1791853629000003594_0e4817fe, verbatim:
+#+begin_quote
+there is only one thing i would change about concept A: make the left navbar collabsible so a user can fully expand it (as is shown now) or click/tap on a button to collapse it.
+#+end_quote
+Claude recorded this as A selected, with a collapsible sidebar. B remains
+the explored alternative; no changes to either design follow from this
+note. The prompted comparison is not an unprimed usability trial, and
+runtime H1, count semantics and ADR-0015 acceptance remain separate gates.
