@@ -46,9 +46,12 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   **Authority.** `aborted` and a release are the live owner's (`probe:`
   confirms this process is the recorded owner: `:not_owner` otherwise,
   `:recovery_in_progress` while any ticket exists), or the recovery
-  handle's (`recovery:`, whose own ticket and claim must still be on disk:
-  `:recovery_changed`, `:record_changed`). `recovered` is the handle's only
-  (`:recovery_required`).
+  handle's (`recovery:`, whose own ticket must still be on disk,
+  `:recovery_changed`, and whose record target must be unchanged,
+  `:record_changed`: the claim, the invocation and the launch identity,
+  having taken at most a reviewed finalization since). `recovered` is the
+  handle's only (`:recovery_required`). A malformed handle is
+  `:recovery_changed`, and a missing `probe:` is `:probe_unavailable`.
 
   **Release** re-checks the evidence bound to the final state before it
   removes anything: `finished` its quiescence again, `recovered` its
@@ -84,8 +87,11 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   attestation for a handle (`launch_pending` or `launched` only), bound to
   its claim, invocation, ticket and observation; the console appends its
   audit event first, then `write_attestation/4` writes `attestation.json`
-  (0600) in the ticket. The same attestation again is a replay; another is
-  `:attestation_conflict`.
+  (0600) in the ticket, in exactly the closed schema the reader accepts
+  (`:attestation_mismatch` before any write otherwise). It is published
+  create-only (an exclusive hard link, never a rename): the same
+  attestation again, or an identical competing one, is a replay; any other
+  is `:attestation_conflict`, and nothing is replaced.
 
   **Quiescence** (`quiescence/2`): `claimed` and `aborted` have nothing
   outstanding; a `launch_pending` or unreadable record needs the owner; a
@@ -102,9 +108,10 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   nothing, recovery is refused and quiescence is not established.
 
   **Test seams.** Only in test-seam builds are the `replace:` option (the
-  final rename, run after every check), the `remove:` option (each release
+  final rename, run after every check), the `publish:` option (the
+  attestation's create-only link), the `remove:` option (each release
   removal) and the `owner_uid:` option (the expected owner) honoured; other
-  builds always rename, remove and compare with this process's uid.
+  builds always rename, link, remove and compare with this process's uid.
 
   The directory entry is not synced (the runtime has no directory fsync):
   a power loss may lose a just-written record, which then reads as
@@ -339,16 +346,18 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   def write_attestation(root, handle, attestation, opts \\ []) do
     with {:ok, env} <- env(opts),
          {:ok, current} <- read_safe(root, env),
-         :ok <- own_ticket(root, handle.ticket, env),
+         :ok <- handle_holds(root, current, handle, env),
          :ok <- bound(attestation, current, handle.ticket) do
       case stored_attestation(root, env) do
         {:ok, :none} -> create_attestation(root, attestation, env)
-        {:ok, ^attestation} -> {:ok, attestation}
-        {:ok, _other} -> {:error, :attestation_conflict}
+        {:ok, stored} -> same_attestation(stored, attestation)
         {:error, _reason} = error -> error
       end
     end
   end
+
+  defp same_attestation(attestation, attestation), do: {:ok, attestation}
+  defp same_attestation(_stored, _attestation), do: {:error, :attestation_conflict}
 
   @doc """
   The attestation in the handle's own ticket: `{:ok, attestation}`, `{:ok,
@@ -358,7 +367,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   def read_attestation(root, handle, opts \\ []) do
     with {:ok, env} <- env(opts),
          {:ok, current} <- read_safe(root, env),
-         :ok <- own_ticket(root, handle.ticket, env),
+         :ok <- handle_holds(root, current, handle, env),
          {:ok, stored} <- stored_attestation(root, env) do
       checked(stored, current, handle.ticket)
     end
@@ -369,12 +378,26 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   defp checked(stored, record, ticket),
     do: with(:ok <- bound(stored, record, ticket), do: {:ok, stored})
 
+  # Create-only: the immutable artifact is published with an exclusive hard
+  # link, never a rename over an existing name. A competing publication is
+  # reused only when identical (Evidence pattern).
   defp create_attestation(root, attestation, env) do
-    case write_file(ticket_dir(root), "attestation.json", Jason.encode!(attestation), env) do
-      :ok -> {:ok, attestation}
-      _failed -> {:error, :launch_record_write_failed}
+    dir = ticket_dir(root)
+
+    case write_new(dir, "attestation.json", Jason.encode!(attestation), env) do
+      :ok ->
+        {:ok, attestation}
+
+      {:error, :eexist} ->
+        with {:ok, stored} <- stored_attestation(root, env), do: competing(stored, attestation)
+
+      _failed ->
+        {:error, :launch_record_write_failed}
     end
   end
+
+  defp competing(:none, _attestation), do: {:error, :launch_record_write_failed}
+  defp competing(stored, attestation), do: same_attestation(stored, attestation)
 
   defp stored_attestation(root, env) do
     path = attestation_path(root)
@@ -409,7 +432,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
     end
   end
 
-  defp closed?(decoded, keys),
+  defp closed?(decoded, keys) when is_map(decoded),
     do: Enum.sort(Map.keys(decoded)) == Enum.sort(Enum.map(keys, &Atom.to_string/1))
 
   defp atomize(decoded, keys), do: Map.new(keys, &{&1, Map.fetch!(decoded, Atom.to_string(&1))})
@@ -417,11 +440,20 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   # The attestation binds this record (its claim, invocation and attested
   # observation) and this ticket, and is well formed.
   defp bound(attestation, record, ticket) do
-    if is_map(attestation) and not Map.has_key?(record, :unreadable) and
+    if closed?(attestation) and not Map.has_key?(record, :unreadable) and
          well_formed?(attestation) and binds?(attestation, record, ticket),
        do: :ok,
        else: {:error, :attestation_mismatch}
   end
+
+  # Exactly the reader's closed schema: no missing or extra field, at the
+  # top level or in the observation.
+  defp closed?(%{observation: %{} = observation} = attestation),
+    do:
+      Enum.sort(Map.keys(attestation)) == Enum.sort(@attestation_keys) and
+        Enum.sort(Map.keys(observation)) == Enum.sort(@observation_keys)
+
+  defp closed?(_attestation), do: false
 
   defp well_formed?(attestation) do
     Map.get(attestation, :schema) == @attestation_schema and
@@ -514,19 +546,44 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
 
   defp authorized(_root, _current, _step, _opts, _env), do: :ok
 
-  defp handle_holds(root, current, %{record: snapshot, ticket: ticket}, env) do
+  defp handle_holds(root, current, %{record: %{} = snapshot, ticket: ticket}, env)
+       when is_binary(ticket) do
     with :ok <- own_ticket(root, ticket, env) do
-      if same_claim?(snapshot, current), do: :ok, else: {:error, :record_changed}
+      if same_target?(snapshot, current), do: :ok, else: {:error, :record_changed}
     end
   end
 
   defp handle_holds(_root, _current, _handle, _env), do: {:error, :recovery_changed}
 
-  defp same_claim?(snapshot, current) do
-    not Map.has_key?(snapshot, :unreadable) and
-      Map.take(snapshot, [:instance_id, :owner_pid, :owner_identity]) ==
-        Map.take(current, [:instance_id, :owner_pid, :owner_identity])
+  # A handle is bound to its record's immutable target: the claim, the
+  # invocation and the launch identity, never only the claim. Its state may
+  # only have taken a reviewed finalization since (Codex 01a1354a MF2).
+  @target ~w(schema instance_id owner_pid owner_identity generation invocation_id root_pid
+             root_identity process_group_id)a
+  @finalizations [
+    {"claimed", "aborted"},
+    {"launch_pending", "aborted"},
+    {"launch_pending", "recovered"},
+    {"launched", "recovered"}
+  ]
+
+  defp same_target?(snapshot, current) do
+    not Map.has_key?(snapshot, :unreadable) and not Map.has_key?(current, :unreadable) and
+      Map.take(snapshot, @target) == Map.take(current, @target) and
+      length(@target) == map_size(Map.take(current, @target)) and
+      reviewed_step?(snapshot, current)
   end
+
+  defp reviewed_step?(%{state: same} = snapshot, %{state: same} = current),
+    do: Map.get(snapshot, :attestation_id) == Map.get(current, :attestation_id)
+
+  defp reviewed_step?(%{state: from} = snapshot, %{state: "recovered"}),
+    do: {from, "recovered"} in @finalizations and is_nil(Map.get(snapshot, :attestation_id))
+
+  defp reviewed_step?(%{state: from} = snapshot, %{state: to} = current),
+    do:
+      {from, to} in @finalizations and
+        Map.get(snapshot, :attestation_id) == Map.get(current, :attestation_id)
 
   defp owner_holds(root, current, step, opts) do
     cond do
@@ -857,6 +914,24 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
     end
   end
 
+  # A private temporary file published create-only (`env.publish`, an
+  # exclusive hard link by default); the temporary file is always removed.
+  defp write_new(dir, name, bytes, env) do
+    temp = Path.join(dir, ".tmp-" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower))
+
+    try do
+      with {:ok, file} <- :file.open(temp, [:write, :exclusive, :binary, :raw]),
+           :ok <- synced(file, bytes),
+           :ok <- File.chmod(temp, 0o600) do
+        env.publish.(temp, Path.join(dir, name))
+      end
+    rescue
+      _error -> {:error, :write_raised}
+    after
+      File.rm(temp)
+    end
+  end
+
   defp synced(file, bytes) do
     with :ok <- :file.write(file, bytes), do: :file.sync(file)
   after
@@ -936,7 +1011,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   # the `owner_uid:` and `replace:` options.
   defp env(opts) do
     with {:ok, uid} <- expected_uid(opts) do
-      {:ok, %{uid: uid, replace: replace(opts), remove: remove(opts)}}
+      {:ok, %{uid: uid, replace: replace(opts), publish: publish(opts), remove: remove(opts)}}
     end
   end
 
@@ -950,10 +1025,12 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
 
     defp replace(opts), do: Keyword.get(opts, :replace, &File.rename/2)
     defp remove(opts), do: Keyword.get(opts, :remove, &remove_path/1)
+    defp publish(opts), do: Keyword.get(opts, :publish, &File.ln/2)
   else
     defp expected_uid(_opts), do: own_uid()
     defp replace(_opts), do: &File.rename/2
     defp remove(_opts), do: &remove_path/1
+    defp publish(_opts), do: &File.ln/2
   end
 
   defp remove_path(path) do
@@ -1034,7 +1111,9 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
 
   ## The probe
 
-  defp probe(opts), do: Keyword.fetch!(opts, :probe)
+  # A missing probe is `:probe_unavailable` (its calls raise and are
+  # observed as unavailable), never permission.
+  defp probe(opts), do: Keyword.get(opts, :probe)
 
   defp self_identity(probe) do
     with {:ok, pid} <- observe(:pid, &probe.self_pid/0),
