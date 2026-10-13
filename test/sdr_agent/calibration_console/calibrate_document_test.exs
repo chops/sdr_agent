@@ -255,6 +255,39 @@ defmodule SdrAgent.CalibrationConsole.CalibrateDocumentTest do
     end
   end
 
+  # Codex d3c@96804e8: the nested values the classifier and formatter read
+  # are validated too; nothing is defaulted.
+  describe "nested snapshot hard stops" do
+    for variant <- [:link_without_method, :link_method_a_map, :link_without_status] do
+      test "an own #{variant}", ctx do
+        link = AgentsFixtures.reconciled_link!(ctx.invocation, ctx.rec, evidence: v3_evidence())
+        malformed = malformed_link(link, unquote(variant))
+        assert_refused(ctx, snapshot(ctx, malformed, {:ok, receipt(:reconciled, malformed)}))
+      end
+    end
+
+    test "an observed_at with a malformed microsecond", ctx do
+      gate =
+        {:ok, %{status: :unwitnessed, link_id: nil, cause_id: nil, codes: ["witness_missing"]}}
+
+      input = %{snapshot(ctx, nil, gate) | observed_at: %{@observed | microsecond: :invalid}}
+      assert_refused(ctx, input)
+    end
+
+    test "a receipt status no producer emits", ctx do
+      gate = {:ok, %{status: :not_a_witness_status, link_id: nil, cause_id: nil, codes: []}}
+      assert_refused(ctx, snapshot(ctx, nil, gate))
+    end
+  end
+
+  defp malformed_link(link, :link_without_method),
+    do: link |> Map.from_struct() |> Map.delete(:method)
+
+  defp malformed_link(link, :link_method_a_map), do: %{link | method: %{}}
+
+  defp malformed_link(link, :link_without_status),
+    do: link |> Map.from_struct() |> Map.delete(:link_status)
+
   defp assert_refused(ctx, input) do
     result =
       try do
