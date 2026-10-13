@@ -102,3 +102,28 @@ Claude recorded this as A selected, with a collapsible sidebar. B remains
 the explored alternative; no changes to either design follow from this
 note. The prompted comparison is not an unprimed usability trial, and
 runtime H1, count semantics and ADR-0015 acceptance remain separate gates.
+
+* Follow-on owner walkthrough findings (concept A)
+Concept A diff-view head: 0b740d8, independently preview-reviewed by Codex.
+Asked "Is that the kind of what-changed view you had in mind?", owner
+answered verbatim:
+#+begin_quote
+yes, that's what i had in mind
+#+end_quote
+Source: m_1791860394000027513_96d010c7. The comparison's labeled
+last-viewed v3 to current v5 baseline, current email default and unchanged
+approval binding were reviewed as a static illustration; backend snapshot,
+authorization and comparison contracts remain subject to entity review.
+
+Asked whether the <=760px compact top bar with hidden toggle was right
+(alternative: hamburger drawer), owner answered verbatim:
+#+begin_quote
+yes, that's the right behavior on phones
+#+end_quote
+Source: m_1791860524000028222_a65cab21. This resolves the preview's
+nonblocking mobile interpretation question: phones intentionally remain
+compact without a collapse/expand control.
+
+These are prompted owner-walk answers, not an unprimed trial or approval
+of runtime implementation. ADR-0015 and count semantics remain separate
+owner decisions. B is retained unchanged as the explored alternative.
