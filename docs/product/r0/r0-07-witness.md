@@ -2048,6 +2048,72 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 - **Diagram:** the console → private server → command receipt flow is evaluated at
   the integrated review.
 
+#### 8.14.8 d3c addendum: the bounded observation and the evidence document (proposed)
+
+**Why this is needed.** Two inputs that 8.14.4 row 11 uses are not yet
+pinned:
+- **The observation.** Witness.reconcile/2 without gate: defers a
+  completed, unreleased generation-2 ClaudeCLI row (`:deferred_to_gate`),
+  which is exactly a calibration call. A gate-less reconcile therefore
+  never yields the receipt (`status`, `link_id`, `codes`) that Outcome
+  (E3) classifies.
+- **The document.** No code-owned builder exists for the
+  r0-calibration-evidence/1 document that Evidence.publish/3 (E2) takes.
+
+**Proposal: the observation.** Use the existing bounded result-gate wait
+once:
+`ResultGate.await(invocation, %{run_id: run.id, operation_id: nil},
+methods: [candidate])`.
+- It holds no lock and polls with the reconciler actor within `wait_ms`
+  (at most 120 s).
+- It returns `{:ok, receipt}`, `{:timeout, receipt}` or `{:error, reason}`.
+- `operation_id: nil` is the existing shape for a run without an
+  Operation, and proof runs have none (8.14.3).
+
+Effects of this choice:
+- **Attention.** The gate-path reconcile records any witness attention
+  exactly as for ordinary calls: a critical Failure for a link mismatch,
+  warnings otherwise. For a proof run that is the owner's attention on the
+  calibration attempt. Proof rows still never take a slice C release
+  decision; `finish_calibration` (E1) latches the `:calibration`
+  release.
+- **Errors.** `{:error, reason}` is the outcome `unreadable` when the reason
+  is a store error. Any other error stops the command (matrix row 13).
+- **No other call.** There is no second observation, no model call and no
+  allowlist write.
+
+**Rejected alternative:** a new gate-less receipt mode in Witness. It
+would be another reconcile entry point for proof rows; I propose instead to
+reuse the reviewed bounded gate wait.
+
+**Proposal: the document** (pure; `Calibrate.document/…`). Each field and
+its source:
+
+| Field | Source |
+|---|---|
+| `schema`, `canonicalization` | `r0-calibration-evidence/1`, `Canonical.version()` |
+| `invocation_id`, `run_id`, `tenant_id`, `profile_id` | the fresh committed row |
+| `candidate` | `Gate.recorded_tuple/1` of the invocation (the entry it was reserved under), as strings |
+| `outcome`, `evaluated_projection_version`, `evaluated_method`, `attested_cli_version`, `attested_model_id` | `Outcome.classify/1` with the row, `ClaudeCLI.attestation(server)`, the observation and the receipt's own link |
+| `links` | the receipt's own link only: `[%{id, evidence_sha256: Canonical.sha256(link.evidence)}]`, or `[]` |
+| `inventory_sha256` | that link's `evidence["inventory_sha256"]`, or nil |
+| `prompt`, `output_schema` | `Prompt.prompt_ref/schema_ref` (hex SHA-256) |
+| `invocation_status`, `validation_status`, `reserved_at`, `sent_at`, `completed_at` | the fresh row |
+| `output_sha256` | `Canonical.sha256` of the parsed output, read only through the existing scoped calibration read (E2), or nil |
+| `observed_at` | `Clock.utc_now()` once, after the observation |
+
+Nothing else (no prompt, response, output or error text) enters it, and
+Evidence.publish/3 validates it against the closed schema.
+
+**Unlaunched path (rows 7–8).** There is no observation:
+- the outcome is `launch_failed` (E3 precedence);
+- `links` is `[]`, and the projection, method and attestation fields are
+  nil.
+
+**Entity Model trigger:** no new attribute, action or relationship. The
+attention effect of the gate wait on a proof run is the one changed
+lifecycle effect, and is stated here for review.
+
 #### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 
 **d3a — the launch receipt:**
