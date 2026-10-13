@@ -2110,4 +2110,7 @@ and runs everywhere.
   - d1b staging exemption: first note **NEEDS-REVIEW** (01a13677); delta
     8.13 **NEEDS-REVIEW** at ad2948e (01a13685); **entity PASS** at
     b77426a (065416c6). RED **PASS / VERIFIED RED** at eacfcb0 (11c5b5b1;
-    positive shim test executed locally). GREEN in review.
+    positive shim test executed locally). Code **scoped APPROVE** at
+    7059727 (2dc068a3) after 21eb641 (witness validated before consume,
+    41dca95e).
+  - d3 orchestration: next.
