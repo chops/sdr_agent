@@ -1259,3 +1259,18 @@ writer of `status_reason :calibration_latched`.
   negatives, init and Sonnet cases, known no-spawn versus unknown.
 - Prompt GREEN at 42b9122; E1 GREEN at 930ef2a. Evidence and Outcome RED
   revised; pending recheck.
+- Component code verdicts (Codex), each scoped to its component and not
+  an integrated-harness, merge, calibration or spend approval:
+  - Prompt at 42b9122: **APPROVE** (component review 3495edab).
+  - E1 guarded finish: **APPROVE** at 524ba3f, after its review fixes
+    (6a7ce0d, c747bc3, and 4ceb38a for the action's build and profile
+    guard).
+  - E3 outcome map at 68a7f35: **APPROVE**. `projection_differs` means the
+    evaluated projection or method differs.
+  - Reaper post-spawn truthfulness: **APPROVE** at 74a6fbe (ca1c656a),
+    after 75f275d and the unidentified-launch lease fix.
+  - E2 Evidence: **APPROVE** at 1495ade (c1fcfa77), after 32af7f8 and
+    1495ade. Carried qualifications: a prompt v2 must keep v1's
+    commitments and add a replay test; no directory fsync, so a missing
+    file under a latch stays an owner conflict and is never recreated.
+- E4a launch record RED at 899a141: pending Codex review.
