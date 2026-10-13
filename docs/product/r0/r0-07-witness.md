@@ -2212,6 +2212,106 @@ method, attestation and inventory fields are nil.
   written. A warning-only receipt's warning is not resolved by
   `finish_calibration`.
 
+#### 8.14.9 d3c part 3: the `calibrate` test surface and one ordering hook (proposed)
+
+**Status:** proposed. It follows Codex's consultation answer a5443c2b
+(report sha256 162fda3b): **real failures** through the domain APIs, plus
+a narrow, explicit ordering hook. A generic fault map that replaces an
+action's result is **not** used. The existing-seam rows may start RED
+under the 8.14 and 8.14.8 PASSes. The hook needs an exact-head recheck of
+this section before any test uses it.
+
+**Entity Model trigger: yes.** A new orchestration option contract:
+`Calibrate.run/2` and its options, including `hook:`. No domain resource,
+action, policy, lock order or event changes.
+
+##### The command
+
+`Calibrate.run(profile_id, opts)` returns `{:ok, summary}` or
+`{:stop, reason, summary}`:
+- `summary` is `%{record: :none | :released | {:kept, state},
+  invocation_id: id | nil, outcome: string | nil, evidence: %{path, sha256}
+  | nil}`;
+- `reason` is an atom. Never provider, row or error text.
+
+Options are a **closed** key set. Any other key, or a missing key, is
+`{:stop, :calibration_options_invalid, %{record: :none, …}}` before the
+claim.
+
+| Option | The console's fixed value (`console_opts/1`) | Tests |
+|---|---|---|
+| `tenant_id` | the console tenant | the test tenant |
+| `root` | the launch-record root (owner-private) | a 0700 temporary directory |
+| `evidence_dir` | the evidence directory (0700) | a 0700 temporary directory |
+| `confirm` | reads one line from the terminal | a function returning a typed line |
+| `probe` | `ProcessProbe` | `ProcessProbe`, or a stub over it |
+| `server` | `[]`: the configured pinned executable and the real shim | a pinned stand-in and a stand-in command |
+| `isolation` | `[]`: the held target and default bounds | Isolation's existing seams |
+| `record` | `[]` | LaunchRecord's existing seams (`replace:`, `remove:`) |
+| `hook` | **absent** | see below |
+
+The witness store root is read from the Witness configuration, never from
+an option.
+
+**Wiring.** The subcommand is `bin/calibration-console calibrate
+<profile>`.
+- `Calibrate.command(argv)` is pure. It returns `{:run, profile_id,
+  console_opts(profile_id)}` for exactly one known real profile, otherwise
+  `{:error, :usage}`.
+- The task does exactly `{:run, p, o} = command(argv); run(p, o)`.
+- Tests assert `command/1` and `console_opts/1` exactly: no `hook`, the
+  `server`, `isolation` and `record` values `[]`, `ProcessProbe`, and no
+  value derived from argv or the environment beyond the profile.
+- The compile guard alone is not isolation from the console: the console
+  is itself a test-seam build. Owner code inside the console VM remains
+  out of scope, as already accepted (8.2). Nothing here claims more.
+
+##### The ordering hook (`hook:`, tests only)
+
+`hook: (phase, %{invocation_id, run_id, tenant_id} -> any)`.
+- **Closed phases:** `:before_issue` (immediately before
+  `Authority.issue/1`) and `:before_call` (immediately before
+  `ModelProvider.calibration_call/3`). There are no others.
+- **Called in the command process,** outside any transaction or row lock;
+  the context carries ids only. No payload, request or authority
+  reference.
+- **The return value is ignored.** The actual operation always runs next,
+  under its ordinary guards. A hook cannot supply a result, receipt, sent
+  bit, release or refusal.
+- **A raising or exiting hook** is a conservative stop:
+  `{:stop, :calibration_hook_failed, _}`, with the record kept in its
+  current state. Never a success, and never a write from another process.
+- **Use:** it synchronizes a real failure the test causes through the
+  domain API or the test's own processes (the table below). It is never
+  part of `console_opts/1`.
+
+##### How the rows without an existing seam are driven (real failures)
+
+| Row | Real failure | Ordering |
+|---|---|---|
+| 4b: the run stop after a reservation `%Refused{}` fails | a sandbox-scoped trigger (the existing `finish_calibration` test pattern) fails the exact run-stop audit event; the guarded stop rolls back, and the refusal's Failure and receipt remain | installed up front, matched to that event type |
+| 5: reserve fails without `%Refused{}` | a sandbox-scoped trigger fails the `model.invocation.reserved` append; the reservation rolls back, and the real `cancel_run` follows | installed up front; no invocation and no charge survive |
+| 7: `Authority.issue` fails | the test stops its own supervised Authority synchronously in `:before_issue`; the call exits, which is the issue failure | `:before_issue` |
+| 8: `sent_at` nil after the call | in `:before_call`, either the test admin amends or revokes the selected G-R0 through the existing grant action (the launch admission then refuses), or the test removes its synthetic pinned executable (a pre-launch refusal) | `:before_call` |
+
+These touch only the test's sandbox, its own fixtures and its own
+supervised processes. They never alter a live grant, the application's
+registry or a real pinned runtime.
+
+**Row 8, inherited rule (R11-2, not new).** An actual launch `%Refused{}`
+keeps its existing B1/R11-2 run stop:
+- **The stop:** `SDR.Model.stop_refused/3` with that receipt (its exact
+  Failure and request) runs **before** E1;
+- **Then:** evidence (`launch_failed`), `finish_calibration` (the run is
+  already terminal, so the latch is only recorded), `aborted`, `release`;
+- **If the stop fails,** the record is kept (`launch_pending`). No second
+  Failure, and no new run action;
+- **Never:** a refused proof run left running to become `:succeeded`
+  through E1.
+
+A pre-launch failure that leaves the row `reserved` takes
+`recover_calibration(:unlaunched)` as in the matrix.
+
 #### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 
 **d3a — the launch receipt:**
