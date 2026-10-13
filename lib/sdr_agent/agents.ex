@@ -63,6 +63,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
+  alias SdrAgent.Agents.CalibrationFinish
   alias SdrAgent.Agents.Decision
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
@@ -1111,6 +1112,26 @@ defmodule SdrAgent.Agents do
       {:ok, prelocked} -> Map.put(context, :sdr_prelocked, prelocked)
       :error -> context
     end
+  end
+
+  @doc """
+  AGT: the guarded calibration finish (R0-07 slice E, row R11-2) of a
+  terminal generation-2 ClaudeCLI invocation of a `:proof` run with no
+  Operation: decides its `:calibration` latch with `evidence: %{sha256:
+  <lowercase hex>}` — the published artifact's hash, validated first by the
+  calibration console — and finishes a still-running run `:succeeded` with
+  `:calibration_latched` (an already-terminal run is unchanged). The only
+  writer of `:calibration_latched`. Returns `{:ok, %{release:, run:}}`,
+  `{:error, :calibration_evidence_conflict}` for a different hash,
+  `{:error, :calibration_not_finishable}`, or `Ash.Error.Forbidden`. See
+  `SdrAgent.Agents.CalibrationFinish`.
+  """
+  def finish_calibration(invocation, evidence, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    guard(AgentRun, :finish_calibration, Map.get(invocation, :id), actor, fn ->
+      CalibrationFinish.run(invocation, evidence, actor)
+    end)
   end
 
   @doc "The release of an invocation in the actor's tenant: `{:ok, release | nil}`."

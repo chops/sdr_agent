@@ -156,9 +156,8 @@ defmodule SdrAgent.Agents.FinishCalibrationRaceTest do
     end)
   end
 
-  defp events(ctx, type) do
-    with_connection(fn -> AuditCase.events_of_type(ctx.tenant, type) end)
-  end
+  # The test process already holds its own non-sandboxed connection.
+  defp events(ctx, type), do: AuditCase.events_of_type(ctx.tenant, type)
 
   defp lock!(sql, id), do: SQL.query!(SdrAgent.Repo, sql, [Ecto.UUID.dump!(id)])
 
