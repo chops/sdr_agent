@@ -22,6 +22,32 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
   """
   use SdrAgent.AuditCase, async: false
 
+  defmodule ProbeStub do
+    @moduledoc "d3a: a ProcessProbe stand-in whose answers are set per test."
+
+    def mode(mode), do: :persistent_term.put({__MODULE__, :mode}, mode)
+    defp mode, do: :persistent_term.get({__MODULE__, :mode})
+
+    def start_identity(pid) do
+      case mode() do
+        :identity_absent -> :absent
+        :identity_error -> {:error, :ps_failed}
+        :identity_empty -> {:ok, ""}
+        :probe_raises -> raise "probe failure"
+        _other -> {:ok, "Tue Oct 13 12:00:00 2026 #{pid}"}
+      end
+    end
+
+    def group_members(pgid) do
+      case mode() do
+        :group_error -> {:error, :ps_failed}
+        :root_not_in_group -> {:ok, [pgid + 1]}
+        :member_not_a_pid -> {:ok, [pgid, "x"]}
+        _other -> {:ok, [pgid]}
+      end
+    end
+  end
+
   alias SdrAgent.AdmissionFixtures
   alias SdrAgent.Agents
   alias SdrAgent.Agents.Admission.Refused
@@ -101,6 +127,10 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
           :forged_authority,
           :bad_instance,
           :missing_witness,
+          :missing_observer,
+          :observer_not_a_pair,
+          :observer_bad_pid,
+          :observer_bad_ref,
           :missing_traceparent,
           :bad_traceparent,
           :zero_trace_id,
@@ -336,6 +366,90 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     end
   end
 
+  ## d3a: the launch receipt (packet 8.14.2)
+
+  describe "d3a: the launch receipt" do
+    setup ctx do
+      on_exit(fn -> Application.delete_env(:sdr_agent, :calibration_launch_probe) end)
+      %{cli: cli!(ctx, "cli", 0), slow_cli: cli!(ctx, "slow-cli", 1)}
+    end
+
+    test "a verified receipt reaches the command before the call's reply", ctx do
+      server = server!(ctx, command: ctx.slow_cli)
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+      ref = issue!(server, invocation, run)
+      request = request(invocation, run, agent, ref)
+      {_command, receipt_ref} = request.calibration.observer
+
+      result = admitting(fn -> complete(server, request) end)
+      assert match?({:ok, _}, result), inspect(result)
+
+      # Already queued when the reply arrived: no waiting.
+      assert_received {:calibration_launched, ^receipt_ref, receipt}
+      assert Enum.sort(Map.keys(receipt)) == receipt_keys()
+      assert {receipt.invocation_id, receipt.server} == {invocation.id, server}
+      assert is_integer(receipt.root_pid) and receipt.root_pid > 0
+      assert receipt.process_group_id == receipt.root_pid
+      assert is_binary(receipt.root_identity) and receipt.root_identity != ""
+      refute_received {:calibration_launch_unverified, _ref, _receipt}
+    end
+
+    for mode <- [
+          :identity_absent,
+          :identity_error,
+          :identity_empty,
+          :group_error,
+          :root_not_in_group,
+          :member_not_a_pid,
+          :probe_raises
+        ] do
+      test "an unproven launch (#{mode}) sends an unverified receipt, no launch fields", ctx do
+        ProbeStub.mode(unquote(mode))
+        Application.put_env(:sdr_agent, :calibration_launch_probe, ProbeStub)
+        server = server!(ctx, command: ctx.cli)
+        %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+        ref = issue!(server, invocation, run)
+        request = request(invocation, run, agent, ref)
+        {_command, receipt_ref} = request.calibration.observer
+
+        result = admitting(fn -> complete(server, request) end)
+        assert match?({:ok, _}, result), inspect(result)
+
+        assert_received {:calibration_launch_unverified, ^receipt_ref, receipt}
+        assert Enum.sort(Map.keys(receipt)) == [:invocation_id, :reason, :root_pid, :server]
+        assert {receipt.invocation_id, receipt.server} == {invocation.id, server}
+        refute_received {:calibration_launched, _ref, _receipt}
+      end
+    end
+
+    test "a launch that never opened sends no receipt", ctx do
+      server = server!(ctx, command: Path.join(System.tmp_dir!(), "d3a-no-such-cli"))
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+      ref = issue!(server, invocation, run)
+
+      _result = admitting(fn -> complete(server, request(invocation, run, agent, ref)) end)
+
+      refute_received {:calibration_launched, _ref, _receipt}
+      refute_received {:calibration_launch_unverified, _ref, _receipt}
+    end
+
+    test "an ordinary call sends no receipt", ctx do
+      {:ok, server} =
+        ClaudeCLI.start_link(
+          command: ctx.cli,
+          test_launcher: true,
+          launch_admission: &SdrAgent.Test.LaunchAdmission.admitted/3,
+          executable: ctx.stand_in,
+          environment: %{}
+        )
+
+      request = Map.delete(request_shape(), :calibration)
+      assert {:ok, _} = complete(server, request)
+      refute_received {:calibration_launched, _ref, _receipt}
+      refute_received {:calibration_launch_unverified, _ref, _receipt}
+    end
+  end
+
   ## Positive (real shim)
 
   describe "the exemption" do
@@ -561,7 +675,8 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
         authority: ref,
         run_id: run.id,
         tenant_id: run.tenant_id,
-        instance: Authority.instance()
+        instance: Authority.instance(),
+        observer: {self(), make_ref()}
       }
     })
   end
@@ -580,6 +695,18 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
   defp malform(request, :bad_instance), do: put_in(request.calibration.instance, "short")
   defp malform(request, :missing_witness), do: Map.delete(request, :witness)
+
+  # d3a (packet 8.14.2): the closed value carries `observer: {pid, ref}`.
+  defp malform(request, :missing_observer),
+    do: update_in(request.calibration, &Map.delete(&1, :observer))
+
+  defp malform(request, :observer_not_a_pair), do: put_in(request.calibration.observer, self())
+
+  defp malform(request, :observer_bad_pid),
+    do: put_in(request.calibration.observer, {"pid", make_ref()})
+
+  defp malform(request, :observer_bad_ref),
+    do: put_in(request.calibration.observer, {self(), "ref"})
 
   # Codex d1b@21eb641: the strict witness validator runs before the consume.
   defp malform(request, :missing_traceparent),
@@ -709,6 +836,44 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
     File.chmod!(path, 0o555)
     path
+  end
+
+  # d3a: a CLI stand-in run directly as the command (no shim): it reads the
+  # prompt and answers; `delay` seconds keep it alive to be probed.
+  defp cli!(ctx, name, delay) do
+    path = Path.join(Path.dirname(ctx.tripwire), name)
+
+    init =
+      ~s({"type":"system","subtype":"init","model":"claude-opus-5-5","claude_code_version":"#{ClaudeCLI.provenance().provider_version}","tools":[],"mcp_servers":[],"slash_commands":[]})
+
+    result =
+      ~s({"type":"result","subtype":"success","is_error":false,"result":"{\\"answer\\":\\"blue\\",\\"confidence\\":0.9}","usage":{"input_tokens":1,"output_tokens":1}})
+
+    File.write!(path, """
+    #!/bin/sh
+    cat > /dev/null
+    sleep #{delay}
+    printf '%s\\n' '#{init}'
+    printf '%s\\n' '#{result}'
+    """)
+
+    File.chmod!(path, 0o555)
+    path
+  end
+
+  defp receipt_keys,
+    do: [:invocation_id, :process_group_id, :root_identity, :root_pid, :server]
+
+  defp request_shape do
+    trace = 16 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+    span = 8 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+
+    "d3a-ordinary"
+    |> base_request()
+    |> Map.put(:witness, %{
+      model_invocation_id: Ash.UUIDv7.generate(),
+      traceparent: "00-#{trace}-#{span}-01"
+    })
   end
 
   # The command of every refusal test: it must never run.
