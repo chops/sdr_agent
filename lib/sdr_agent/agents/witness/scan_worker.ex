@@ -10,7 +10,11 @@ defmodule SdrAgent.Agents.Witness.ScanWorker do
   model-call cap normally keeps above the real window — see below), oldest
   first, decides
   eligibility for all of them, and then enqueues at most 50 per pass, so
-  invocations that are settled or not yet eligible never starve later ones:
+  invocations that are settled or not yet eligible never starve later ones.
+  A completed generation-2 invocation with no `ModelResultRelease` belongs
+  to the result gate or run recovery (R0-07 slice C, row G3) and is not
+  considered until it is decided (`Witness.reconcile/2` also refuses to
+  write for it under its lock):
 
     * no `reconcile_model` Operation yet → generation 1;
     * re-drive (recovery of a witness that was missing, open or otherwise
@@ -96,6 +100,11 @@ defmodule SdrAgent.Agents.Witness.ScanWorker do
     |> Ash.Query.filter(
       provider == :claude_cli and status in [:completed, :failed, :unknown] and
         updated_at >= ^since
+    )
+    # Row G3 (R0-07 slice C): a completed generation-2 row with no release is
+    # the result gate's or run recovery's; it is scheduled once decided.
+    |> Ash.Query.filter(
+      not (ledger_generation == 2 and status == :completed and not exists(result_release, true))
     )
     |> Ash.Query.sort(updated_at: :asc, id: :asc)
     |> Ash.Query.limit(@window_rows)

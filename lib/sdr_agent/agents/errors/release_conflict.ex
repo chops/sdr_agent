@@ -5,7 +5,9 @@ defmodule SdrAgent.Agents.Errors.ReleaseConflict do
   invocation). An identical replay returns the existing row; a conflicting
   decision fails with this error (class `:invalid`) and writes nothing.
   """
-  use Splode.Error, fields: [:model_invocation_id, :existing_id], class: :invalid
+  use Splode.Error,
+    fields: [:model_invocation_id, :existing_id, :existing_cause_id],
+    class: :invalid
 
   def message(error) do
     "model invocation #{error.model_invocation_id} already has a different release " <>

@@ -31,7 +31,9 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
          invocation of a `:proof` run in any terminal status;
        * any given link must be this invocation's current link.
     4. After the upsert: a fresh row passes; an existing row with the same
-       disposition, reason, link and evidence is an identical replay
+       disposition, reason, link and evidence — and the same gate cause
+       bound by its withheld event (R0-07 R7-1,
+       `SdrAgent.Agents.ReleaseDecision.Binding`) — is an identical replay
        (marked so no second event is appended); anything else fails with
        `SdrAgent.Agents.Errors.ReleaseConflict`.
 
@@ -47,6 +49,7 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   alias SdrAgent.Agents.Errors.ReleaseConflict
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ReleaseDecision.Binding
   alias SdrAgent.Agents.ReleaseDecision.Prelocked
   alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.Agents.Witness
@@ -106,6 +109,7 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
     ids = {tenant_id, get.(:model_invocation_id), get.(:wire_witness_link_id)}
 
     with {:ok, mode} <- lock_mode(changeset.context, ids),
+         :ok <- check_gate_cause(changeset, mode),
          {:ok, invocation} <- fetch(ModelInvocation, get.(:model_invocation_id), tenant_id, mode),
          {:ok, link} <- fetch_link(get.(:wire_witness_link_id), tenant_id, mode) do
       changeset =
@@ -141,13 +145,29 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
            {registered.tenant_id, registered.model_invocation_id, registered.wire_witness_link_id} ==
              {tenant_id, invocation_id, link_id},
          :ok <- check_receipt(registered) do
-      {:ok, :prelocked}
+      {:ok, {:prelocked, registered}}
     else
       _ -> {:error, :model_invocation_id, "the prelocked decision context is refused"}
     end
   end
 
   defp lock_mode(_context, _ids), do: {:ok, "FOR SHARE"}
+
+  # R0-07 slice C (G1/G2): `gate_cause_id` only for :withheld and only as the
+  # verified Prelocked receipt; `gate_classification` only with a cause.
+  defp check_gate_cause(changeset, mode) do
+    cause = Ash.Changeset.get_argument(changeset, :gate_cause_id)
+    classification = Ash.Changeset.get_argument(changeset, :gate_classification)
+    disposition = Ash.Changeset.get_attribute(changeset, :disposition)
+
+    cond do
+      is_nil(cause) and is_nil(classification) -> :ok
+      is_nil(cause) -> {:error, :gate_classification, "is recorded only with a gate cause"}
+      disposition != :withheld -> {:error, :gate_cause_id, "is recorded only when withheld"}
+      match?({:prelocked, %Prelocked{receipt_id: ^cause}}, mode) -> :ok
+      true -> {:error, :gate_cause_id, "must be the finalizer's selected receipt"}
+    end
+  end
 
   # The receipt, when bound, is this invocation's reconciliation cause.
   defp check_receipt(%Prelocked{receipt_id: nil}), do: :ok
@@ -182,7 +202,7 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
     resource
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
     |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
-    |> then(&if(mode == :prelocked, do: &1, else: Ash.Query.lock(&1, mode)))
+    |> then(&if(match?({:prelocked, _}, mode), do: &1, else: Ash.Query.lock(&1, mode)))
     |> Ash.read_one()
     |> case do
       {:ok, %^resource{} = row} -> {:ok, row}
@@ -344,19 +364,32 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   end
 
   defp check_replay(changeset, record) do
-    cond do
-      record.id == Ash.Changeset.get_attribute(changeset, :id) ->
-        {:ok, record}
+    if record.id == Ash.Changeset.get_attribute(changeset, :id),
+      do: {:ok, record},
+      else: replay(changeset, record, Binding.bound_cause(record))
+  end
 
-      Map.take(record, @fingerprint) == fingerprint(changeset) ->
-        {:ok, Ash.Resource.put_metadata(record, :sdr_replayed, true)}
+  # Round-7 obligation 1: an unavailable original binding is refused, never
+  # read as "no cause".
+  defp replay(_changeset, record, {:error, :binding_unavailable}) do
+    {:error,
+     Ash.Error.Changes.InvalidArgument.exception(
+       field: :gate_cause_id,
+       message: "the existing release #{record.id} has no readable original binding"
+     )}
+  end
 
-      true ->
-        {:error,
-         ReleaseConflict.exception(
-           model_invocation_id: record.model_invocation_id,
-           existing_id: record.id
-         )}
+  defp replay(changeset, record, {:ok, bound}) do
+    if Map.take(record, @fingerprint) == fingerprint(changeset) and
+         bound == Ash.Changeset.get_argument(changeset, :gate_cause_id) do
+      {:ok, Ash.Resource.put_metadata(record, :sdr_replayed, true)}
+    else
+      {:error,
+       ReleaseConflict.exception(
+         model_invocation_id: record.model_invocation_id,
+         existing_id: record.id,
+         existing_cause_id: bound
+       )}
     end
   end
 

@@ -15,11 +15,21 @@ defmodule SdrAgent.SDR.Model do
   refused real-model reservation (C9) stops the run `budget_exhausted` with
   `:grant_exhausted` for a grant cap, or `failed` with `:grant_unavailable`
   otherwise, linking the refusal's own Failure (one attention item).
+
+  **Result gate (R0-07 slice C, REQ-07-4).** A completed generation-2
+  ClaudeCLI output is returned only after `SdrAgent.Agents.ResultGate.gate/3`
+  commits its `:released` release. A withheld output halts with the run's
+  gate stop (`:witness_mismatch` or `:witness_unreconciled`, already
+  written by the gate). When the gate could not commit, the halt is
+  `:result_not_released`: no output, and the run is left running for run
+  recovery (`SdrAgent.SDR.StaleRunSweeper`), never a success or a crash.
   """
 
   alias SdrAgent.Agents
   alias SdrAgent.Agents.Admission
   alias SdrAgent.Agents.Admission.Refused
+  alias SdrAgent.Agents.ReleasedOutput
+  alias SdrAgent.Agents.ResultGate
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.Prompts
@@ -125,8 +135,11 @@ defmodule SdrAgent.SDR.Model do
   defp exhaust("token_budget_exhausted", ctx, run), do: halt_budget(ctx, run, :run_budget_tokens)
   defp exhaust("daily_budget_exhausted", ctx, run), do: halt_budget(ctx, run, :daily_budget)
 
-  defp settle({:ok, %{output: output, invocation: invocation}}, _ctx, _run),
-    do: {:ok, output, invocation}
+  defp settle({:ok, %{output: output, invocation: invocation}}, _ctx, run) do
+    if ReleasedOutput.gated?(invocation),
+      do: gate(invocation, output, run),
+      else: {:ok, output, invocation}
+  end
 
   defp settle({:error, {:budget_exhausted, :daily}}, ctx, run),
     do: halt_budget(ctx, run, :daily_budget)
@@ -144,6 +157,15 @@ defmodule SdrAgent.SDR.Model do
 
   defp settle({:error, reason}, ctx, run),
     do: halt_fail(ctx, run, :provider_error, "model provider error: #{safe(reason)}")
+
+  # R0-07 slice C: the in-process output only after its release commits.
+  defp gate(invocation, output, run) do
+    case ResultGate.gate(invocation, %{run_id: run.id, operation_id: run.operation_id}) do
+      {:released, _release, _read} -> {:ok, output, invocation}
+      {:withheld, release, stopped} -> {:error, {:halt, stopped.status_reason || release.reason}}
+      {:error, _reason} -> {:error, {:halt, :result_not_released}}
+    end
+  end
 
   @doc """
   C9: stops the run for a committed reservation refusal, linking the

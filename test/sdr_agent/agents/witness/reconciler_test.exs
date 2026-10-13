@@ -25,6 +25,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   alias SdrAgent.Agents.Witness
   alias SdrAgent.Agents.WitnessEvidence
   alias SdrAgent.AgentsFixtures
+  alias SdrAgent.GateFixtures
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.Audit.Canonical
@@ -986,7 +987,8 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
       )
 
     GenServer.stop(server)
-    result.invocation
+    # Row G3: the scan backfills only a decided generation-2 row.
+    GateFixtures.decided!(result.invocation)
   end
 
   # Simulates an invocation written before R0 (generation 1, no profile or

@@ -298,6 +298,53 @@ case mode do
           %{}
       end
 
+    # argv: sdr [<store root> [<variant>]] (R0-07 slice C). With a root,
+    # also plays shim + proxy: records the exchange of this call under the
+    # propagated invocation id — `cli_shape_v3` (default) matches,
+    # `cli_shape_v3_mismatch` mismatches, `none` records nothing.
+    text = JSON.encode!(answer)
+
+    # Positional arguments only (the launch appends `-p`, `--model <alias>`, …).
+    positional = System.argv() |> Enum.take_while(&(not String.starts_with?(&1, "-")))
+
+    case {Enum.at(positional, 1), System.get_env("SDR_MODEL_INVOCATION_ID")} do
+      {root, id} when is_binary(root) and is_binary(id) ->
+        unless Code.ensure_loaded?(SdrAgent.Test.FakeWitnessProxy),
+          do: Code.require_file(Path.join(__DIR__, "fake_witness_proxy.exs"))
+
+        alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
+        tp = System.get_env("SDR_TRACEPARENT")
+
+        shape = [
+          cache_ttl: "1h",
+          trailing_message_extra: %{"output_config" => %{"effort" => "high"}}
+        ]
+
+        case Enum.at(positional, 2, "cli_shape_v3") do
+          "none" ->
+            :ok
+
+          "cli_shape_v3" ->
+            reminders = ["<system-reminder>\nSynthetic date.\n</system-reminder>\n"]
+
+            Proxy.exchange!(root, id,
+              traceparent: tp,
+              request: Proxy.cli_request(stdin, [reminders: reminders] ++ shape),
+              response: Proxy.sse_response(text)
+            )
+
+          "cli_shape_v3_mismatch" ->
+            Proxy.exchange!(root, id,
+              traceparent: tp,
+              request: Proxy.cli_request(stdin <> " (edited)", shape),
+              response: Proxy.sse_response(text)
+            )
+        end
+
+      _no_witness ->
+        :ok
+    end
+
     IO.puts(init)
 
     IO.puts(
@@ -305,7 +352,7 @@ case mode do
         "type" => "result",
         "subtype" => "success",
         "is_error" => false,
-        "result" => JSON.encode!(answer),
+        "result" => text,
         "usage" => %{"input_tokens" => 12, "output_tokens" => 3}
       })
     )

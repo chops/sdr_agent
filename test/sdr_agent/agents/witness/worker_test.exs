@@ -293,7 +293,8 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
     {:ok, invocation} =
       Agents.complete_model_invocation(invocation, AgentsFixtures.completion(), actor: ctx.agent)
 
-    invocation
+    # Row G3: the scan schedules and backfills only a decided generation-2 row.
+    if provider == :claude_cli, do: SdrAgent.GateFixtures.decided!(invocation), else: invocation
   end
 
   defp enqueue(invocation, actor) do

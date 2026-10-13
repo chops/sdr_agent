@@ -35,6 +35,41 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
     3. a `running` Operation → `failed` linking that Failure (discarded at
        its one attempt).
 
+  **Result gate (R0-07 slice C, row G5; REQ-07-6).** An abandoned run that
+  holds a completed generation-2 ClaudeCLI invocation with no
+  `ModelResultRelease` is not a crash: its output stays withheld, no model
+  is called, and one selection rule applies (`SdrAgent.Agents.ResultGate`):
+
+    * R1, nothing persisted for the invocation (no link, no
+      `reconciliation_required` Failure on it, no release): the gated
+      `Witness.reconcile/2` (observation outside every lock), then
+      finalization with `:gate_interrupted` — `:witness_mismatch` with its
+      critical cause for a known mismatch;
+    * R2, links or a cause exist: no reconcile; `ResultGate.Recovery`
+      selects from the durable state;
+    * a refused finalization gets one recovery attempt; an existing
+      release is authoritative.
+
+  The run's staleness and its job's liveness are decided again under
+  finalization's own locks (run, Operation, job). The run stops
+  `:witness_mismatch` or `:witness_unreconciled` on its gate cause, and
+  its Operation then fails by the worker's rule
+  (`SdrAgent.SDR.AgentWorker.fail_operation/3`). A known mismatch without
+  a usable critical cause (`:mismatch_cause_unbound`) is skipped: it stays
+  the owner's attention.
+
+  **R3, a terminal run** with such an invocation completed before the stale
+  cutoff gets the same selection and a withheld release only; the run and
+  its Operation are not changed.
+
+  **A gate stop's Operation (review MF1).** The gate stop and the
+  Operation's failure are separate transactions (packet step 4), so a run
+  stopped `:witness_mismatch` or `:witness_unreconciled` whose Operation is
+  still `running` and whose job is no longer live has its Operation failed
+  here, revalidated under the run, Operation and job locks, by the worker's
+  rule (`SdrAgent.SDR.AgentWorker.fail_operation/3`). No other terminal
+  run's Operation is touched.
+
   Idempotent: a recovered run is `failed`, so a later sweep skips it.
   Integration-queue reply runs have no Operation (S9 choice 12); their job is
   found by its `run_id` argument.
@@ -65,12 +100,19 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   alias SdrAgent.Agents
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ResultGate
+  alias SdrAgent.Agents.ResultGate.Recovery
+  alias SdrAgent.Agents.WireWitnessLink
+  alias SdrAgent.Agents.Witness
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Clock
   alias SdrAgent.Operations
+  alias SdrAgent.Operations.Failure
   alias SdrAgent.Operations.Operation
   alias SdrAgent.Repo
+  alias SdrAgent.SDR.AgentWorker
 
   @live_states ~w(available scheduled executing retryable)
   @terminal [:succeeded, :failed, :budget_exhausted, :cancelled]
@@ -102,14 +144,63 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
              &(&1.status == :running and stale?(&1, cutoff) and maybe_abandoned?(&1, actor))
            )
            |> each_ok(&recovered(recover(&1, cutoff, actor))),
+         {:ok, invocations} <- terminal_unreleased(cutoff, actor),
+         :ok <- each_ok(invocations, &recovered(recover_terminal(&1, actor))),
+         {:ok, stopped} <- Agents.list_runs(actor: actor),
+         :ok <- stopped |> Enum.filter(&gate_stopped?/1) |> each_ok(&recovered(heal(&1, actor))),
          {:ok, run_ids} <- old_reservation_runs(cutoff, actor) do
       each_ok(run_ids, &recovered(recover_stopped(&1, cutoff, actor)))
     end
   end
 
+  # Review MF1: a run the result gate stopped whose Operation is still
+  # running (the worker or sweeper died between the gate's commit and the
+  # Operation's own transaction, packet step 4).
+  defp gate_stopped?(run),
+    do:
+      run.status == :failed and run.status_reason in [:witness_mismatch, :witness_unreconciled] and
+        is_binary(run.operation_id)
+
+  # One transaction: the run (re-read), its Operation and its job are locked
+  # in the recovery order and revalidated — still a gate stop, the
+  # Operation still running, the job no longer live — then the Operation
+  # fails by the worker's rule (the live gate cause, or its own Failure
+  # naming a resolved one). Anything else is left alone.
+  defp heal(run, actor) do
+    Audit.transaction(fn ->
+      with {:ok, run} <- lock(AgentRun, run.id, actor),
+           true <- gate_stopped?(run) || {:error, :not_running},
+           {:ok, %{status: :running} = operation} <- lock_operation(run, actor),
+           {:ok, state} <- job_state(run, actor, :for_update),
+           :ok <- not_live(state) do
+        :ok = AgentWorker.fail_operation(operation, run, actor)
+        run
+      else
+        {:ok, _settled_operation} -> Repo.rollback(:not_running)
+        {:error, error} -> Repo.rollback(error)
+      end
+    end)
+  end
+
   # Skips: the run stopped, became fresh, or its job is live under the lock
   # (case (b): the run is not terminal under its lock).
-  defp recovered({:error, skip}) when skip in [:not_running, :job_live, :not_terminal], do: :ok
+  # A known mismatch without a usable critical cause stays the owner's
+  # attention (row R7-2); a later pass completes once it is resolved.
+  # A withheld release without a readable bound cause is left as it is
+  # (fail closed; review MF5). A release that races recovery is honoured
+  # by recovery itself (G7, review round 2).
+  defp recovered({:error, skip})
+       when skip in [
+              :not_running,
+              :job_live,
+              :not_terminal,
+              :mismatch_cause_unbound,
+              :binding_unavailable
+            ],
+       do: :ok
+
+  # A stale observation is retried by the next pass.
+  defp recovered({:error, :stale_observation}), do: :ok
   defp recovered({:ok, _}), do: :ok
   defp recovered(error), do: error
 
@@ -178,15 +269,38 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   defp states(states),
     do: {:ok, Enum.find(states, List.last(states), &(&1 in @live_states))}
 
+  # R0-07 slice C: a run holding an unreleased output is recovered through
+  # the result gate (G5), never as a crash.
+  # The unlocked choice is a prefilter only: the crash path decides again
+  # under its run lock (review MF2) and, when a gated output has appeared,
+  # rolls back before any append; the gate path then runs outside every lock
+  # (its observation needs none).
+  defp recover(run, cutoff, actor) do
+    case ResultGate.unreleased_invocations(run) do
+      {:ok, []} ->
+        case recover_crash(run, cutoff, actor) do
+          {:error, :gate_owned} -> recover(run, cutoff, actor)
+          result -> result
+        end
+
+      {:ok, [invocation | _]} ->
+        recover_gate(run, invocation, cutoff, actor)
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
   # One transaction; every row it writes is locked before the first append
   # (ADR-0009): run → Operation → job → all `sent` and `reserved`
   # invocations. Staleness
   # and job liveness are decided again under those locks; Oban's own job
   # transitions (lifeline, staging, `retry_job`) wait on the job row lock.
-  defp recover(run, cutoff, actor) do
+  defp recover_crash(run, cutoff, actor) do
     Audit.transaction(fn ->
       with {:ok, run} <- lock(AgentRun, run.id, actor),
            :ok <- abandoned(run, cutoff),
+           :ok <- no_gated_output(run),
            {:ok, operation} <- lock_operation(run, actor),
            {:ok, state} <- job_state(run, actor, :for_update),
            :ok <- not_live(state),
@@ -208,6 +322,135 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
         {:error, error} -> Repo.rollback(error)
       end
     end)
+  end
+
+  # Rows G5 R1/R2: the gate's finalization (its own locks: run, Operation,
+  # then — in this guard — the job, before the invocation and the head),
+  # then the Operation by the worker's rule in its own transaction.
+  defp recover_gate(run, invocation, cutoff, actor) do
+    guard = fn locked ->
+      with :ok <- abandoned(locked, cutoff),
+           {:ok, state} <- job_state(locked, actor, :for_update),
+           do: not_live(state)
+    end
+
+    case gate_recovery(invocation, run, guard) do
+      {:withheld, _release, %{status: :failed} = stopped} -> fail_gate_operation(stopped, actor)
+      {:withheld, _release, stopped} -> {:ok, stopped}
+      {:released, _release, _output} -> {:error, :not_running}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp fail_gate_operation(%{operation_id: nil} = stopped, _actor), do: {:ok, stopped}
+
+  defp fail_gate_operation(stopped, actor) do
+    case Operations.get_operation(stopped.operation_id, actor: actor) do
+      {:ok, %{status: :running} = operation} ->
+        :ok = AgentWorker.fail_operation(operation, stopped, actor)
+        {:ok, stopped}
+
+      {:ok, _settled} ->
+        {:ok, stopped}
+
+      error ->
+        error
+    end
+  end
+
+  # Row G5 R3: a withheld release only (finalization stops no terminal run).
+  defp recover_terminal(invocation, actor) do
+    with {:ok, run} <- Agents.get_run(invocation.agent_run_id, actor: actor) do
+      guard = fn locked -> terminal(locked) end
+
+      case gate_recovery(invocation, run, guard) do
+        {:error, error} -> {:error, error}
+        _decided -> {:ok, run}
+      end
+    end
+  end
+
+  # R1 (nothing persisted): the gated reconcile, then finalization with
+  # :gate_interrupted. R2: the recovery selection. One recovery attempt
+  # after a refused finalization (G7).
+  defp gate_recovery(invocation, run, guard) do
+    gate = %{run_id: run.id, operation_id: run.operation_id}
+
+    if nothing_persisted?(invocation) do
+      rec = Actor.system(:reconciler, invocation.tenant_id)
+
+      case Witness.reconcile(invocation.id, actor: rec, gate: gate) do
+        {:ok, %{receipt: receipt}} -> finalize(invocation, gate, receipt, guard)
+        {:ok, _no_receipt} -> Recovery.run(invocation, gate, guard: guard)
+        {:error, error} -> {:error, error}
+      end
+    else
+      Recovery.run(invocation, gate, guard: guard)
+    end
+  end
+
+  @final [:not_running, :job_live, :not_terminal, :job_unbound, :mismatch_cause_unbound]
+
+  defp finalize(invocation, gate, receipt, guard) do
+    case ResultGate.finalize(invocation, gate, {:interrupted, receipt}, guard: guard) do
+      {:error, reason} when reason in @final -> {:error, reason}
+      {:error, _refused} -> Recovery.run(invocation, gate, guard: guard)
+      decided -> decided
+    end
+  end
+
+  # No link, no reconciliation_required Failure on it (live or resolved),
+  # no release (a withheld one goes to recovery, review MF5).
+  defp nothing_persisted?(invocation) do
+    opts = Kernel.opts(invocation.tenant_id)
+
+    released? =
+      ModelResultRelease
+      |> Ash.Query.for_read(:read, %{}, opts)
+      |> Ash.Query.filter(model_invocation_id == ^invocation.id)
+      |> Ash.exists?()
+
+    links? =
+      WireWitnessLink
+      |> Ash.Query.for_read(:read, %{}, opts)
+      |> Ash.Query.filter(model_invocation_id == ^invocation.id)
+      |> Ash.exists?()
+
+    causes? =
+      Failure
+      |> Ash.Query.for_read(:read, %{}, opts)
+      |> Ash.Query.filter(
+        subject_resource == "SdrAgent.Agents.ModelInvocation" and subject_id == ^invocation.id and
+          class == :reconciliation_required
+      )
+      |> Ash.exists?()
+
+    not released? and not links? and not causes?
+  end
+
+  # R3 prefilter (unlocked): completed generation-2 invocations with no
+  # release, of terminal runs, completed before the cutoff (a grace period
+  # for a live gate to decide itself); recovery decides under its locks.
+  defp terminal_unreleased(cutoff, actor) do
+    ModelInvocation
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(
+      tenant_id == ^actor.tenant_id and provider == :claude_cli and ledger_generation == 2 and
+        status == :completed and updated_at < ^cutoff and not exists(result_release, true) and
+        exists(agent_run, status in ^@terminal)
+    )
+    |> Ash.Query.sort(updated_at: :asc, id: :asc)
+    |> Ash.read()
+  end
+
+  # Under the run lock (a settlement completes its invocation while holding
+  # it): a completed generation-2 output with no release is the gate's.
+  defp no_gated_output(run) do
+    case ResultGate.unreleased_invocations(run) do
+      {:ok, []} -> :ok
+      {:ok, _gated} -> {:error, :gate_owned}
+      error -> error
+    end
   end
 
   defp abandoned(%{status: :running} = run, cutoff),

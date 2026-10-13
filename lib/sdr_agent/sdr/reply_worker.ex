@@ -23,6 +23,7 @@ defmodule SdrAgent.SDR.ReplyWorker do
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.ResultGate
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Audit
   alias SdrAgent.SDR.Runner
@@ -69,11 +70,23 @@ defmodule SdrAgent.SDR.ReplyWorker do
     {:ok, run} = Agents.get_run(run.id, actor: actor)
 
     case {run.status, result} do
-      {:running, {:ok, _agent}} ->
+      # R0-07 slice C: an unreleased generation-2 output is never a success
+      # or a crash; the run stays for run recovery.
+      {:running, result} ->
+        if ResultGate.unreleased?(run), do: :ok, else: finish_running(result, run, actor)
+
+      {_terminal, _result} ->
+        :ok
+    end
+  end
+
+  defp finish_running(result, run, actor) do
+    case result do
+      {:ok, _agent} ->
         {:ok, _} = Agents.succeed_run(run, actor: actor)
         :ok
 
-      {:running, {:refused, reason}} ->
+      {:refused, reason} ->
         {:ok, _} =
           Agents.fail_run(
             run,
@@ -83,15 +96,12 @@ defmodule SdrAgent.SDR.ReplyWorker do
 
         :ok
 
-      {:running, {:error, reason}} ->
+      {:error, reason} ->
         {:ok, _} =
           Agents.fail_run(run, %{status_reason: :crash, failure_reason: describe(reason)},
             actor: actor
           )
 
-        :ok
-
-      {_terminal, _result} ->
         :ok
     end
   end

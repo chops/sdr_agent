@@ -158,8 +158,31 @@ defmodule SdrAgent.Agents do
   @doc "running → succeeded (AGT)."
   def succeed_run(run, opts), do: update(run, :succeed, %{}, opts)
 
-  @doc "running → failed with `status_reason` and redacted `failure_reason` (AGT)."
-  def fail_run(run, attrs, opts), do: update(run, :fail, attrs, opts)
+  @doc """
+  running → failed with `status_reason` and redacted `failure_reason` (AGT).
+  A result-gate stop (`:witness_mismatch`, `:witness_unreconciled`) takes
+  `witness_failure_id` and `release_id`; its finalizer passes `prelocked:`
+  (its verified `SdrAgent.Agents.ReleaseDecision.Prelocked` context).
+  """
+  def fail_run(run, attrs, opts) do
+    case Keyword.fetch(opts, :prelocked) do
+      :error ->
+        update(run, :fail, attrs, opts)
+
+      {:ok, prelocked} ->
+        actor = Keyword.get(opts, :actor)
+
+        guard(AgentRun, :fail, run.id, actor, fn ->
+          run
+          |> Ash.Changeset.for_update(:fail, attrs,
+            actor: actor,
+            context: %{sdr_prelocked: prelocked}
+          )
+          |> Ash.update(return_notifications?: true)
+          |> collect()
+        end)
+    end
+  end
 
   @doc "running → budget_exhausted with `status_reason` (AGT)."
   def exhaust_run_budget(run, attrs, opts), do: update(run, :exhaust_budget, attrs, opts)

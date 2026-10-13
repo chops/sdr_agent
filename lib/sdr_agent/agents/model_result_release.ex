@@ -71,10 +71,26 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   ]
   @reasons [:reconciled, :calibration | @withheld_reasons]
   @methods [:time_window, :propagated_id]
+  # R0-07 slice C (G2): the bounded typed classification of a withheld
+  # gate outcome, recorded as metadata only.
+  @gate_classifications [
+    :mismatch,
+    :store_unconfigured,
+    :store_unreadable,
+    :capture_pending,
+    :method_not_enabled,
+    :ambiguous,
+    :unclassified,
+    :unsupported,
+    :no_exchange,
+    :inferred,
+    :interrupted
+  ]
   @event [
     category: :model,
     links: [model_invocation_id: :model_invocation_id],
-    context_links: [agent_run_id: :model_result_release_agent_run_id]
+    context_links: [agent_run_id: :model_result_release_agent_run_id],
+    arguments: [:gate_cause_id, :gate_classification]
   ]
 
   postgres do
@@ -172,6 +188,15 @@ defmodule SdrAgent.Agents.ModelResultRelease do
       upsert_fields []
       upsert_condition Ash.Expr.expr(false)
       return_skipped_upsert? true
+
+      # R0-07 slice C (G1/G2): the finalizer's selected gate cause and the
+      # typed classification, recorded in the withheld event only.
+      argument :gate_cause_id, :uuid
+
+      argument :gate_classification, :atom do
+        constraints one_of: @gate_classifications
+      end
+
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change SdrAgent.Agents.Changes.ReleaseDecision
@@ -270,6 +295,9 @@ defmodule SdrAgent.Agents.ModelResultRelease do
 
   @doc "The reasons allowed with `:withheld`."
   def withheld_reasons, do: @withheld_reasons
+
+  @doc "The typed classifications of a withheld gate outcome (R0-07 slice C, G2)."
+  def gate_classifications, do: @gate_classifications
 
   @doc "Whether `{disposition, reason}` is an allowed pair."
   def allowed_pair?(:released, :reconciled), do: true
