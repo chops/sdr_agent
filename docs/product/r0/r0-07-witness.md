@@ -871,6 +871,54 @@ crash after spawn and before `launched`; missing or corrupt record; a dead
 root with a live process in its session; `sent` with no receipt stays
 blocked until owner verification.
 
+**Staged E4a contract** (`SdrAgent.CalibrationConsole.LaunchRecord`;
+Codex's RED review at 899a141, report
+`codex-r007e-e4a-899a141-red-review.md` sha256
+fb65994da94abf5f01125d33537e9b7bece4edd5c27582e3842031232ac2fef3). This is
+the file artifact only. The OS probe implementation is E4b; the database
+rules and `calibrate` orchestration are E4c.
+
+- **Record.** The record (`r0-calibration-launch-record/1`) has closed
+  keys: `schema`, `instance_id` (uuid), `owner_pid` (integer),
+  `owner_identity` (string), `generation` (1), `state` (`claimed`,
+  `launch_pending`, `launched` or `finished`), `invocation_id`,
+  `root_pid`, `root_identity`, `session_id` and `owner_attested_at`.
+  Each state requires its own fields.
+- **Unreadable is `launch_pending`.** Any missing, partial, malformed,
+  wrongly typed or unknown-state record reads as `%{state:
+  "launch_pending", unreadable: true}`, and its quiescence needs the
+  owner's attestation.
+- **Private paths.** The root, `run.lock`, `record.json` and the recovery
+  ticket are private (directories 0700, files 0600), and neither they nor
+  any ancestor are symlinks. Otherwise `:launch_record_unsafe`, on claim,
+  read, advance, recover and release alike. Nothing outside the exact owned
+  lock is written or removed.
+- **Writes.** A record write is an atomic replace. A failure is
+  `:launch_record_write_failed`; the previous record and the lock stay.
+- **Probe.** `self_pid/0` returns `{:ok, pid}` or `{:error, reason}`;
+  `start_identity/1` returns `{:ok, identity}`, `:absent` or
+  `{:error, reason}`; `session_members/1` returns `{:ok, pids}` or
+  `{:error, reason}`. A raise counts as `{:error, _}`. An observation
+  failure is never absence or an empty session:
+  - a claim without a reliable own pid and identity creates nothing;
+  - recovery is refused;
+  - quiescence is never established.
+
+  All three return `:probe_unavailable`.
+- **Recovery.**
+  - It is refused for a live owner (`:owner_alive`) and for an unreadable
+    record (`:owner_unknown`), unless the owner passes the typed
+    attestation (`owner_verified_stopped: "STOPPED"`).
+  - The ticket (`run.lock/recover`, created by `mkdir`) is never taken
+    over silently after a crash (`:recovery_in_progress`).
+  - Verification re-reads the record on disk and compares it with the
+    recovery's snapshot (`:record_changed`, the replacement kept).
+  - A stale `end_recovery` never removes a successor's ticket
+    (`:recovery_changed`), and a stale `release` never removes a
+    successor's lock (`:record_changed`).
+- **Durability.** The no-directory-fsync power-loss qualification of E2
+  applies here too.
+
 #### R11-2: the guarded finish action
 
 New action `AgentRun :finish_calibration` with domain API
@@ -1273,4 +1321,7 @@ writer of `status_reason :calibration_latched`.
     1495ade. Carried qualifications: a prompt v2 must keep v1's
     commitments and add a replay test; no directory fsync, so a missing
     file under a latch stays an owner conflict and is never recreated.
-- E4a launch record RED at 899a141: pending Codex review.
+- E4a launch record RED at 899a141: **NEEDS-REVIEW** (Codex, 69cf68fa):
+  on-disk replacement and stale cleanup, probe uncertainty, private paths,
+  typed write failure and wrongly shaped records. RED revised; staged
+  contract recorded under R11-1.
