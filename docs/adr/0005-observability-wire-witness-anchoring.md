@@ -13,7 +13,7 @@ first-class concern, model-content spans and an independent wire witness both
 in the MVP, and audit-chain anchoring to a private Git repository plus
 OpenTimestamps"). Details amended by Codex consultations 11 and 13. The R0
 amendment in the wire witness section (2026-10-12) is accepted. The C4
-SQL-logging amendment in the OpenTelemetry section (2026-10-12) is
+database-logging amendment in the OpenTelemetry section (2026-10-12) is
 **proposed, pending owner acceptance**.
 
 ## Context
@@ -98,14 +98,16 @@ when `:sdr_agent, :otel_capture_content` is explicitly true; that switch is
 true only in development and false by default and in tests. S4 adds no audit
 resources or trace columns; S3 owns persisted correlation fields.
 
-#### C4 amendment (2026-10-12): parameter-free SQL logging
+#### C4 amendment (2026-10-12): metadata-only database logging and spans
 
 **Status: PROPOSED, pending owner acceptance.** Drafted by Claude for
 contract C4 (`docs/product/c4/readiness.md`, sections 3.6 and 7). Codex's
 round-2 entity review of that packet (PASS at a15cf8b, qualification 4)
 requires an explicit observability decision on this point before C4
 implementation is approved; the entity PASS is not acceptance of this
-amendment. Nothing here is in force until the owner accepts it.
+amendment. Revision 2 answers Codex's review of revision 1 (1f88700,
+REQUEST_CHANGES, one security must-fix: the Ecto span error status).
+Nothing here is in force until the owner accepts it.
 
 **Context.**
 
@@ -117,93 +119,153 @@ amendment. Nothing here is in force until the owner accepts it.
   (offering profile, writing guide, research brief guidance, booking
   link) and must not copy it outside its row and the authorized model
   payload seam. With the real-data switch (ADR-0014 amendment 2, C5-04),
-  queries also carry real company and person fields. Both reach the dev
-  log through query parameters.
+  queries also carry real company and person fields.
 - **The owner's instance runs in development.** `config/runtime.exs`
   refuses `SDR_MODEL_PROVIDER=claude_cli` in production, so the owner's
   local instance with real data is a dev build. A production-only control
   does not protect it.
-- **Error paths copy values too.** PostgreSQL constraint errors carry a
-  `DETAIL` such as "Failing row contains (…)" or "Key (…)=(…) already
-  exists", which Postgrex puts in the exception message. `config/dev.exs`
-  also sets `show_sensitive_data_on_connection_error: true`.
-- **OpenTelemetry Ecto spans** (`opentelemetry_ecto` 1.2.0) record
-  `db.statement` only when configured; `SdrAgent.Telemetry` calls
-  `OpentelemetryEcto.setup/1` without options, so the statement is
-  disabled today. Nothing tests that.
+- **Error paths copy values.** PostgreSQL errors carry `DETAIL` and
+  `HINT` text such as "Failing row contains (…)" or "Key (…)=(…) already
+  exists", and Postgrex's exception message includes them (and sometimes
+  the SQL). `config/dev.exs` also sets
+  `show_sensitive_data_on_connection_error: true`.
+- **Ecto spans copy the exception message.** `SdrAgent.Telemetry` calls
+  `OpentelemetryEcto.setup/1` (`opentelemetry_ecto` 1.2.0). Its
+  `db_statement: :disabled` default keeps the SQL text out, but on an
+  error `handle_event/4` sets the span status description to
+  `Exception.message/1` of the error, `DETAIL` and `HINT` included. Codex
+  reproduced this with a synthetic SDK probe (one span, canary present).
+  The same handler copies the Repo's configured `url` verbatim into
+  `db.url`; production configures the Repo from `DATABASE_URL`
+  (`config/runtime.exs`), which can carry a password.
+- **Automatic exception reports.** A raised Postgrex or Ash error that
+  escapes a process is rendered by crash reports, Oban job error records
+  and framework error logs, not only by hand-written Logger calls.
 
 **Options considered.**
 
-1. **Keep Ecto's default logging (status quo).**
+1. **Keep Ecto's default logging and spans (status quo).**
    - Pros: full debugging detail; no code.
    - Cons: settings text and real prospect data in dev logs at every
-     query; contradicts C4-R12 and ADR-0014 amendment 2 rule 2 (personal
-     content must not reach logs through any path).
-2. **Global parameter-free query logging, all environments
-   (recommended).** `SdrAgent.Repo` sets `log: false`; a telemetry handler
-   (`SdrAgent.Repo.QueryLog`) on `[:sdr_agent, :repo, :query]` logs an
-   allowlist of metadata only.
+     query and in span status on every error; credentials can reach
+     `db.url`. Contradicts C4-R12 and ADR-0014 amendment 2 rule 2.
+2. **Metadata-only logging and spans, all environments (recommended).**
+   The default Ecto logger and `OpentelemetryEcto.setup/1` are both
+   removed. One sanitizer (`SdrAgent.Repo.SafeMetadata`) turns each
+   `[:sdr_agent, :repo, :query]` event into allowlisted fields; a logging
+   handler (`SdrAgent.Repo.QueryLog`) and a span handler
+   (`SdrAgent.Telemetry.RepoSpans`) emit only those fields.
    - Pros: one control for every table, present and future, so a new
      table cannot leak by default; covers settings and real data alike;
-     testable with a canary.
-   - Cons: developers lose parameter values and SQL text when debugging;
-     a query must be reproduced in a test or `psql` to see its values.
+     the span error status is safe by construction; testable with
+     canaries without any database traffic.
+   - Cons: developers lose parameter values, SQL text and error detail
+     when debugging; a query must be reproduced in a test or `psql`. The
+     app owns span code that the dependency used to provide.
 3. **Per-query or per-table redaction.** Keep Ecto logging and redact
    chosen parameters (custom Ecto types whose inspected form is masked, or
    a handler that filters by `source`).
    - Pros: keeps detail for harmless tables.
    - Cons: fails open: every new table or column with sensitive content
      needs its own marking; Ecto logs dumped values, so Ash `sensitive?`
-     does not reach the log; an allowlist of tables drifts as resources
-     are added.
+     does not reach the log; does nothing for the span status or `db.url`.
 4. **Disable Repo logging only in production (or only when the real-data
    switch is on).**
    - Pros: dev keeps full detail on synthetic data.
-   - Cons: does not protect the owner's instance, which runs in dev; a
-     switch-scoped rule leaves settings text (present with the switch off)
-     unprotected and makes logging depend on runtime state that tests must
-     cover in both modes.
+   - Cons: does not protect the owner's instance, which runs in dev;
+     settings text is present with the switch off; leaves spans unchanged.
 5. **Raise the dev log level to `:info`.**
    - Pros: one line of config.
-   - Cons: hides every other debug log; trivially reverted per session; not
-     a reviewed control and has no test.
+   - Cons: hides every other debug log; trivially reverted per session;
+     does nothing for spans or crash reports; not a reviewed control.
 
 **Decision (proposed).** Option 2.
 
-- **Allowed metadata** (all of it, nothing else): repo, `source` (table
-  name), command (`select`, `insert`, `update`, `delete`, other), query,
-  queue, decode and total time, result row count, the outcome (`ok` or
-  `error`), and for an error the exception module, the PostgreSQL error
-  code and the constraint name. A short sha256 prefix of the SQL text may
-  be logged for grouping.
-- **Never logged:** bound parameters, SQL text (it can hold inlined
-  literals), the exception message or `inspect` of the exception, the
-  PostgreSQL `DETAIL` or `HINT`, or any value embedded in an error.
-- **Error-path controls.** Constraint errors are mapped to typed domain
-  errors by constraint name, never by echoing the message. Dev sets
-  `show_sensitive_data_on_connection_error: false`. Other code that logs a
-  raised `Postgrex.Error` or `Ecto` exception logs its module and code
-  only.
-- **Telemetry.** `OpentelemetryEcto.setup/1` keeps `db_statement:
-  :disabled`, written explicitly, with a test.
-- **Scope.** Every environment, so tests exercise the same handler. The
-  PostgreSQL server's own log (`devenv`) is outside the app; whether to set
-  `log_error_verbosity = terse` there is a separate project-configuration
-  choice, not part of this amendment.
-- **Tests.** A canary test at Logger `:debug` writes and reads rows holding
-  a canary string (valid insert, a constraint violation, a unique
-  violation) and asserts the canary is absent from captured logs and
-  spans; a test asserts the handler is attached and Ecto's default logger
-  is not; a test asserts `db.statement` is absent from Ecto spans.
+- **Sanitized fields** (the complete list; anything else is dropped):
+  - `repo` (module name);
+  - `source`: a table name from the fixed set of tables declared by the
+    app's Ash resources, else `"other"`;
+  - `command`: one of `select`, `insert`, `update`, `delete`, `other`;
+  - durations as integers in microseconds: `query_time_us`,
+    `queue_time_us`, `decode_time_us`, `idle_time_us`, `total_time_us`;
+  - `rows`: the result row count, when the result has one;
+  - `outcome`: `ok` or `error`;
+  - for an error: `error_module` from a fixed allowlist (`Postgrex.Error`,
+    `DBConnection.ConnectionError`, `DBConnection.OwnershipError`, else
+    `"other"`), `pg_code` (the SQLSTATE condition atom from Postgrex's
+    fixed table, else `"other"`), and `constraint`: a constraint or index
+    name from the fixed set declared in the app's migrations, else
+    `"other"`.
+
+  These are fixed schema and application identifiers, never free text
+  from a query, a value or a user.
+- **Never emitted** in a log, span attribute, span event or span status:
+  bound parameters; SQL text, in full or as a digest; the exception
+  message or any `inspect` of an exception or error struct; PostgreSQL
+  `DETAIL`, `HINT`, `where` or `column` values; the Repo URL, user name,
+  password or connection options. An error that does not match the
+  allowlist is reported as `error_module: "other"` without inspecting it.
+- **Spans.** `RepoSpans` emits one client span per query with the same
+  name scheme and parent (`$callers` propagation) as the dependency did,
+  attributes `db.system` (`postgresql`), `db.name` (the configured
+  database name, a fixed config value), the sanitized fields above, and on
+  error the status `:error` with a description built only from
+  `error_module`, `pg_code` and `constraint`. It never sets `db.url` or
+  `db.statement`. `opentelemetry_ecto` stays pinned but is no longer
+  attached; removing the dependency is a later, separate change. Vendor
+  code is not edited.
+- **Error boundaries and automatic reports.** Database errors are mapped
+  to typed domain errors at the domain boundary by constraint name or
+  SQLSTATE, never by echoing the message, so no raw Postgrex exception is
+  carried to a later renderer. A primary `:logger` filter
+  (`SdrAgent.Logger.ExceptionFilter`) rewrites any log event whose message,
+  report or metadata holds a Postgrex, DBConnection or Ash error struct
+  into the sanitized summary, so crash reports and framework error logs
+  are covered. Oban workers rescue database exceptions at their boundary
+  and return sanitized error reasons, so `oban_jobs.errors` holds no
+  exception message. Dev sets `show_sensitive_data_on_connection_error:
+  false`.
+- **Scope.** Every environment, so tests exercise the same handlers.
+- **Tests** (synthetic only; no real credentials; the first three need no
+  database):
+  - a synthetic `[:sdr_agent, :repo, :query]` event with a
+    `%Postgrex.Error{}` whose message, `DETAIL` and `HINT` hold a canary:
+    the canary is absent from every exported span attribute, event and
+    status description, and from captured logs at `:debug`;
+  - the same event with a Repo config holding a credential-bearing URL
+    (`postgres://user:canary@db.invalid/x?sslpassword=canary`): no canary
+    and no `db.url` in any span or log;
+  - an unknown error struct carrying a canary is reported as `"other"`;
+  - against the test database: a valid insert, a check-constraint and a
+    unique violation with a canary value; a raised error that crashes a
+    process; an Oban job that hits a constraint error. The canary is
+    absent from logs, spans and `oban_jobs.errors`;
+  - the default Ecto logger and `OpentelemetryEcto` handlers are not
+    attached; `QueryLog` and `RepoSpans` are.
+- **PostgreSQL server log: a separate prerequisite, not solved here.**
+  The app's controls do not reach the PostgreSQL server's own log, which
+  can record error `DETAIL` (failing row contents) and statements. That
+  configuration (for example `log_error_verbosity`,
+  `log_min_error_statement`, `log_statement`, set per database or per
+  session rather than on a shared server) is a separate project
+  configuration decision, owned by the owner with Claude and Codex
+  proposing. It is a gate: before private settings content is saved or
+  the real-data switch is turned on, either that decision is accepted
+  with its own test or the owner accepts an explicit retention exception
+  for the server log. No server setting is changed by this amendment or
+  its review.
 
 **Consequences.**
 
-- Positive: settings text and real prospect data stay out of SQL logs and
-  query spans everywhere, by default, for every table.
-- Negative: less detail when debugging queries in dev; reproducing a query
-  needs a test or `psql`.
-- Neutral: query timing and outcome stay visible, so slow queries and
-  errors are still diagnosable; the audit ledger is unaffected.
+- Positive: settings text, real prospect data, error detail and
+  credentials stay out of app logs, query spans and job error records
+  everywhere, by default, for every table.
+- Negative: less detail when debugging queries in dev; the app maintains
+  its own Repo span handler instead of the dependency's.
+- Neutral: query timing, outcome, error class and trace parentage stay
+  visible, so slow queries and errors are still diagnosable; the audit
+  ledger is unaffected. The server-log prerequisite remains open until
+  decided separately.
 
 **Acceptance (to fill).** Owner words, date and context; Codex review of
 the exact text.

@@ -241,7 +241,8 @@ copy is prevented by an executable control, each with a canary test
 | AuditEvent payloads | content attributes and `note` are `sensitive?: true`, so `AppendEvent` omits them (named under `redacted`); `record_sha256` still covers the full row. `settings.revision.created` carries kind, number, `supersedes_id`, `content_sha256`. `settings.snapshot.created` carries snapshot id, per-kind source, revision id, version and content hash, limits, `snapshot_sha256`. No event carries settings text. |
 | Ash errors and inspect output | `sensitive?` values are redacted by Ash in errors and `inspect`; validation messages never interpolate the value. |
 | LiveView event logging | `SettingsLive` uses `log: false`; form params live under the key `settings_content`, added to `config :phoenix, :filter_parameters` (with `password`). |
-| SQL logging | Ecto logs query parameters at debug (dev). `SdrAgent.Repo` sets `log: false` and attaches `SdrAgent.Repo.QueryLog`, a telemetry handler that logs allowlisted metadata only (never parameters, SQL text, exception messages or error values), in every environment. This also covers prospect data under the real-data switch. Proposed as the ADR-0005 C4 amendment, pending owner acceptance (section 7). |
+| SQL logging and query spans | Ecto logs query parameters at debug (dev), and `opentelemetry_ecto` 1.2.0 copies the exception message into the span status and the Repo URL into `db.url`. The default Ecto logger and `OpentelemetryEcto` are detached; `SdrAgent.Repo.QueryLog` and `SdrAgent.Telemetry.RepoSpans` emit only fields allowlisted by `SdrAgent.Repo.SafeMetadata` (never parameters, SQL text, exception messages, DETAIL/HINT, URLs or credentials), in every environment; a logger filter and Oban worker boundaries cover automatic exception reports. This also covers prospect data under the real-data switch. Proposed as the ADR-0005 C4 amendment, pending owner acceptance (section 7). |
+| PostgreSQL server log | Not covered by app controls. Separate prerequisite, owned by the owner: before private settings content is saved or the real-data switch is on, either a server-log configuration decision is accepted with its own test or the owner accepts an explicit retention exception (ADR-0005 C4 amendment). |
 | GenAI telemetry | settings-bearing requests use `content_capture: :off` (3.2 row Telemetry.GenAI); no content span events even with dev capture on. |
 | Failure messages, application logs | consumers name the setting kind and reason only; no code path formats settings text into a message. |
 
@@ -591,12 +592,14 @@ dependency or domain":
   (`Admission`) takes the head before its reads for the same reason; check
   whether that reviewed pattern covers this use or an ADR-0009 note is
   needed.
-- **Parameter-free SQL logging** in every environment changes debugging
-  for all queries. Codex requires an explicit decision before
-  implementation approval. Drafted as the proposed "C4 amendment
-  (2026-10-12): parameter-free SQL logging" in
+- **Metadata-only database logging and spans** in every environment
+  changes debugging for all queries and replaces the `opentelemetry_ecto`
+  handler. Codex requires an explicit decision before implementation
+  approval. Drafted as the proposed "C4 amendment (2026-10-12):
+  metadata-only database logging and spans" in
   `docs/adr/0005-observability-wire-witness-anchoring.md` (OpenTelemetry
-  section), pending owner acceptance.
+  section), pending owner acceptance. The PostgreSQL server log is a
+  separate prerequisite named there.
 - **Placement in Agents**: within the accepted domain and ADR-0009
   conventions (append-only trigger, supersedes chain, tenant column,
   layering). A separate `Settings` domain would be an ADR-0009 §7
@@ -701,8 +704,21 @@ These are the owner's decisions; this packet does not answer them.
   spend authority. It carries seven implementation obligations
   (section 11). Once the owner answers OQ-1..OQ-7, only a changed entity,
   authority or lifecycle contract goes back for recheck.
-- ADR-0005 C4 amendment (parameter-free SQL logging): proposed, pending
-  owner acceptance; required before implementation approval.
+- ADR-0005 C4 amendment (metadata-only database logging and spans):
+  revision 1 at 1f88700 reviewed by Codex: **REQUEST_CHANGES**, one
+  security must-fix (the `opentelemetry_ecto` span status copies the
+  exception message; `db.url` copies the Repo URL). Report
+  `/Users/charles/.local/state/sdr-agent/handoff-20261008/tmp/codex-c4-adr0005-1f887005-review.md`
+  (private; sha256
+  `8de031ba1c2c1126aacb5ef29a11fda8fcabaf4740865a6095fafadf421f87f2`).
+  Revision 2 adds the safe span handler and status, no `db.url`, named
+  duration fields, fixed identifiers only, logger filter and Oban
+  boundaries for automatic reports, full-span canary tests, and the
+  server log as a separate gated prerequisite. Pending Codex narrow
+  re-review, then owner acceptance; required before implementation
+  approval.
+- PostgreSQL server-log prerequisite: open, owner-owned; gates saving
+  private settings content and turning on the real-data switch.
 - Owner acceptance of scope and answers to OQ-1..OQ-7: pending.
 - Not authorized by this packet: code, migrations, UI, real data, model
   calls.
@@ -735,7 +751,8 @@ implementation and its review.
 4. **Architecture decisions before implementation approval.** The
    all-environment replacement of Ecto parameter logging is decided
    explicitly (the proposed ADR-0005 C4 amendment, with the tradeoff,
-   allowed metadata, error-path controls and tests). The durable retention
+   allowed metadata, error-path controls, the safe span status and tests;
+   revised after Codex's ADR review). The durable retention
    of released defaults and the head-first snapshot convention are
    recorded in the Phase 3 architecture evaluation (section 7), relying on
    existing accepted decisions only where they actually cover the choice.
