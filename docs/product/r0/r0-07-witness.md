@@ -2050,69 +2050,117 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 
 #### 8.14.8 d3c addendum: the bounded observation and the evidence document (proposed)
 
-**Why this is needed.** Two inputs that 8.14.4 row 11 uses are not yet
-pinned:
-- **The observation.** Witness.reconcile/2 without gate: defers a
-  completed, unreleased generation-2 ClaudeCLI row (`:deferred_to_gate`),
-  which is exactly a calibration call. A gate-less reconcile therefore
-  never yields the receipt (`status`, `link_id`, `codes`) that Outcome
-  (E3) classifies.
-- **The document.** No code-owned builder exists for the
-  r0-calibration-evidence/1 document that Evidence.publish/3 (E2) takes.
+**Status:**
+- **Round 1** at 431aa56: **NEEDS-REVIEW** (Codex c78cd51c, report sha256
+  86d1c74c). Reusing `ResultGate.await/3` (not `gate`/`finalize`) is sound.
+  Three contracts must be pinned: the proof-attention lifecycle, the typed
+  store-error mapping, and the digest and time formats.
+- **This revision** pins them. No d3c RED work starts before it passes.
 
-**Proposal: the observation.** Use the existing bounded result-gate wait
-once:
+**Why this is needed.** A gate-less `Witness.reconcile/2` defers a
+completed, unreleased generation-2 ClaudeCLI row (`:deferred_to_gate`),
+which is exactly a calibration call, so it never yields the receipt that
+`Outcome` (E3) classifies. No code-owned builder exists for the
+`r0-calibration-evidence/1` document that `Evidence.publish/3` (E2) takes.
+
+**Entity Model trigger: yes.** No new column, action or table. The changed
+lifecycle effect is that the observation can now open witness attention on
+a proof attempt.
+
+##### The observation
+
+There is one bounded await workflow per launched call:
 `ResultGate.await(invocation, %{run_id: run.id, operation_id: nil},
 methods: [candidate])`.
-- It holds no lock and polls with the reconciler actor within `wait_ms`
-  (at most 120 s).
-- It returns `{:ok, receipt}`, `{:timeout, receipt}` or `{:error, reason}`.
-- `operation_id: nil` is the existing shape for a run without an
-  Operation, and proof runs have none (8.14.3).
+- It may poll several times internally. Each poll is a short reconcile
+  transaction under the tenant's reconciler actor, with no lock held
+  across polls, within the configured `wait_ms` (at most 120 s).
+- `methods: [candidate]` is the reviewed calibration-only evaluation
+  override. It is not promotion or an allowlist write.
+- There is no `ResultGate.gate/…` or `finalize`: no slice C released or
+  withheld decision, and no business-output read.
+- There is no second await while the file is built. The unlaunched path
+  (rows 7–8) makes no await at all.
 
-Effects of this choice:
-- **Attention.** The gate-path reconcile records any witness attention
-  exactly as for ordinary calls: a critical Failure for a link mismatch,
-  warnings otherwise. For a proof run that is the owner's attention on the
-  calibration attempt. Proof rows still never take a slice C release
-  decision; `finish_calibration` (E1) latches the `:calibration`
-  release.
-- **Errors.** `{:error, reason}` is the outcome `unreadable` when the reason
-  is a store error. Any other error stops the command (matrix row 13).
-- **No other call.** There is no second observation, no model call and no
-  allowlist write.
+**Store errors are already typed receipts.** On the gate path, `Witness`
+never surfaces a store failure as `{:error, _}`:
+- An unset store root gives `{:ok, %{status: :skipped, receipt:
+  %{status: :skipped, link_id: nil, …}}}`.
+- An inventory failure is carried as the receipt code `store_unconfigured`,
+  `store_root_missing` or `store_root_untrusted`.
+- An unreadable stored blob is `store_unreadable` (a downgraded link).
 
-**Rejected alternative:** a new gate-less receipt mode in Witness. It
-would be another reconcile entry point for proof rows; I propose instead to
-reuse the reviewed bounded gate wait.
+`Outcome.classify/1` maps a skipped receipt, or any `store_*` code, to
+`unreadable`. The command therefore passes `ResultGate.await/3`'s own
+`{:ok, receipt}` or `{:timeout, receipt}` to the classifier unchanged. It
+never fabricates a receipt, link, evaluated tuple or init identity.
 
-**Proposal: the document** (pure; `Calibrate.document/…`). Each field and
-its source:
+**Any `{:error, reason}`** from the await is a hard stop (matrix row 13),
+whatever the reason: `:in_transaction`, an authorization or database
+error, or an invalid gate. The record and barrier are kept, and no
+evidence is written. No reason text enters the evidence file.
 
-| Field | Source |
+##### Attention on a proof attempt (lifecycle delta)
+
+| Entity | New / existing | Delta | Invariants / lifecycle | Actor / locks |
+|---|---|---|---|---|
+| Witness observation (`ResultGate.await/3`, gate binding with `operation_id: nil`) | Existing | Now also used for a `:proof` run's one calibration call | One bounded workflow; the receipt is the invocation's own primary link or none; existing scan deferral is bypassed only through the validated gate binding (own run, own null Operation) | Tenant reconciler actor; short reconcile transactions, no lock across polls |
+| `Operations.Failure` witness attention (`:reconciliation_required`, subject this ModelInvocation, `operation_id` nil) | Existing | May now be opened for a proof attempt | Existing rules unchanged: one critical for a link mismatch (sticky, never reopened for the same mismatch); a warning kept while its message is unchanged and resolved when stale; deduplicated against live Failures. It may coexist with a harness-complete run. `finish_calibration` does not resolve it, and only an operator resolves it | Reconciler actor, inside the reconcile transaction |
+| `GateEvidence.note/4` | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | A no-op without a protected gate cause, and a proof run has none | — |
+| AgentRun (`:proof`) and the `:calibration` release | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | The await binds no run cause, stops no run and writes no release. `finish_calibration` (E1) remains the sole writer of the calibration latch and the run's final state | E1's own transaction |
+
+##### The document (pure `Calibrate.document/…` over gathered snapshots)
+
+**Snapshot reads.** The builder takes snapshots gathered beforehand, all
+outside any database lock:
+- the fresh committed invocation and run;
+- the recorded tuple;
+- the receipt and its own link;
+- the server attestation;
+- the output commitment.
+
+A failed or forbidden read of any of them is a hard stop (row 13), never
+a nil field.
+
+| Field | Source and representation |
 |---|---|
-| `schema`, `canonicalization` | `r0-calibration-evidence/1`, `Canonical.version()` |
-| `invocation_id`, `run_id`, `tenant_id`, `profile_id` | the fresh committed row |
-| `candidate` | `Gate.recorded_tuple/1` of the invocation (the entry it was reserved under), as strings |
-| `outcome`, `evaluated_projection_version`, `evaluated_method`, `attested_cli_version`, `attested_model_id` | `Outcome.classify/1` with the row, `ClaudeCLI.attestation(server)`, the observation and the receipt's own link |
-| `links` | the receipt's own link only: `[%{id, evidence_sha256: Canonical.sha256(link.evidence)}]`, or `[]` |
-| `inventory_sha256` | that link's `evidence["inventory_sha256"]`, or nil |
-| `prompt`, `output_schema` | `Prompt.prompt_ref/schema_ref` (hex SHA-256) |
-| `invocation_status`, `validation_status`, `reserved_at`, `sent_at`, `completed_at` | the fresh row |
-| `output_sha256` | `Canonical.sha256` of the parsed output, read only through the existing scoped calibration read (E2), or nil |
-| `observed_at` | `Clock.utc_now()` once, after the observation |
+| `schema`, `canonicalization` | `"r0-calibration-evidence/1"`, `Canonical.version()` |
+| `invocation_id`, `run_id`, `tenant_id`, `profile_id` | the fresh row; `profile_id` as its string |
+| `candidate` | `Gate.recorded_tuple/1` of the invocation, with each value a string |
+| `outcome`, `evaluated_projection_version`, `evaluated_method`, `attested_cli_version`, `attested_model_id` | `Outcome.classify/1` with the row, `ClaudeCLI.attestation(server)`, the await result and the receipt's own link |
+| `links` | the receipt's own link only (the link whose id is `receipt.link_id`, read once, immutable): `[%{id, evidence_sha256: lowercase_hex(Canonical.sha256(link.evidence))}]`, or `[]`. Never a newest-live lookup or another link of the invocation |
+| `inventory_sha256` | that link's `evidence["inventory_sha256"]`, which must be a 64-character lowercase hex digest (else a hard stop); nil without a link |
+| `prompt`, `output_schema` | `Prompt.prompt_ref/schema_ref`, with `sha256` as lowercase hex |
+| `invocation_status`, `validation_status` | the fresh row, as strings |
+| `reserved_at`, `sent_at`, `completed_at`, `observed_at` | UTC `DateTime`s with microsecond precision `{_, 6}`, which canonical encoding renders as six-fraction `Z` text. `sent_at` and `completed_at` are nil only when the row's are; `observed_at` is `Clock.utc_now()`, read once after the await |
+| `output_sha256` | `lowercase_hex(Canonical.sha256(parsed_output))`, read through the existing scoped calibration read. Nil only when the row has no parsed output; a failed or forbidden read is a hard stop |
 
-Nothing else (no prompt, response, output or error text) enters it, and
-Evidence.publish/3 validates it against the closed schema.
+Nothing else enters the document: no prompt, response, output or error
+text. `Evidence.publish/3` validates it against the unchanged closed
+schema. A file that already exists replays frozen (E2); it is never
+recomputed.
 
-**Unlaunched path (rows 7–8).** There is no observation:
-- the outcome is `launch_failed` (E3 precedence);
-- `links` is `[]`, and the projection, method and attestation fields are
-  nil.
+**Unlaunched path (rows 7–8).** There is no await. The outcome is
+`launch_failed` (E3 precedence), `links` is `[]`, and the projection,
+method, attestation and inventory fields are nil.
 
-**Entity Model trigger:** no new attribute, action or relationship. The
-attention effect of the gate wait on a proof run is the one changed
-lifecycle effect, and is stated here for review.
+##### RED additions (d3c)
+
+- **A store-unreadable receipt** (an unset root giving `:skipped`; a
+  `store_root_missing` code) leads to outcome `unreadable`, and the
+  document is published with no link.
+- **A recognized store code** on the receipt leads to `unreadable`. An
+  `{:error, _}` from the await (non-store) is a hard stop: the record is
+  kept and no file is written.
+- **A real built document** passes `Evidence.publish/3` and `validate/3`:
+  hex digests, canonical times and links. The same call again replays the
+  frozen file.
+- **Malformed inputs** each hard-stop with no file written: a malformed
+  link `inventory_sha256`, and a failed scoped output read.
+- **Attention coexistence:** a mismatch receipt opens one critical
+  attention Failure, the calibration still latches through E1, the Failure
+  stays open, and no run cause or release other than `:calibration` is
+  written.
 
 #### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 
