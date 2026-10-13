@@ -1,10 +1,12 @@
 # C3 readiness packet: lead admission
 
-Status: **round 2 draft for independent entity review and owner G5.** C3-01
-(#55), Claude author → Codex reviewer; draft PR #141. Rounds 1 (5987410)
-and 2 (47259b9) were NEEDS-REVIEW (section 13); this revision answers both
-round-2 items and records the round-2 qualifications as implementation
-obligations (section 15). Nothing here
+Status: **entity/action PASS by Codex at 1737063 (round 4); owner gates
+pending.** C3-01 (#55), Claude author → Codex reviewer; draft PR #141.
+Rounds 1-3 were NEEDS-REVIEW (section 13); implementation obligations are in
+section 15. Still pending: the owner's answers to OQ-1..OQ-3, owner
+acceptance of the proposed ADR-0009 C3 amendment (and of C4's proposed
+ADR-0005 logging amendment, O4), and a scoped C3 G5 including the stricter
+company-domain suppression (O8). Nothing here
 authorizes C3-02 (#56) or C3-03 (#57) code, a migration, a model call or real
 data. Implementation starts only after (1) Codex records an entity-model
 verdict of PASS on sections 3-7, (2) the owner accepts the proposed ADR-0009
@@ -96,7 +98,7 @@ Account, Contact and Qualification writers.
 | Research.EvidenceClaim, Sales.Campaign, Accounts.User, Audit.Tenant, Actor | Existing | Qualification evidence, program, requester, tenant | — | campaigns and users gain unique `(id, tenant_id)` as composite FK targets | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (no new role or system actor) | — | none |
 
 Configured reviewer: Codex via ai-pair (`ai_pair=true`, `codex_review=true`).
-Verdict: round 1 NEEDS-REVIEW; round 2 pending (section 13).
+Verdict: **PASS** at 1737063 (round 4, after rounds 1-3 NEEDS-REVIEW; section 13).
 
 ## 4. Action contracts
 
@@ -641,9 +643,25 @@ and ADR-0010.
   - Revised in this commit: check `matched_lead_id IS NULL OR account_id IS
     NOT NULL` (section 3), section 5.3 wording, direct-DB negative and
     valid-binding tests, readmit test wording (section 9).
-  - Round 4: pending.
-- ADR-0009 C3 amendment: proposed, pending Codex review and owner acceptance.
-- Owner G5 (scoped C3): pending; answers to OQ-1..OQ-3 recorded here.
+  - Round 4 at 1737063: **PASS** (consultation
+    m_1791853220000017297_1bb73c77, answer m_1791853352000000000_codexc3r4;
+    private report
+    `~/.local/state/sdr-agent/handoff-20261008/tmp/codex-c3-01-1737063-round4-pass.md`,
+    sha256 acc20dd7…). No must-fix, nothing blocking. Implementation
+    obligations from the report, added to O1-O8 (section 15): the
+    matched-lead direct-SQL tests exercise both matched outcomes
+    (`duplicate_open_lead`, `active_target_exists`) and isolate each negative
+    so an unrelated constraint cannot mask the intended check or FK; the
+    readmit tests keep the action's input-presence refusal separate from the
+    DB restriction on stored `readmit = true`. The section 9 tests are a plan,
+    not executed proof; no RED/GREEN verdict is implied. The PASS is not
+    implementation, ADR acceptance, G5, real-data or spend authority.
+- ADR-0009 C3 amendment: proposed; **pending owner acceptance**.
+- ADR-0005 C4 amendment (logging and spans, O4) and the PostgreSQL
+  server-log decision: owned by C4 and the owner; **pending**; required
+  before private inputs.
+- Owner G5 (scoped C3), including the stricter company-domain suppression
+  (O8): **pending**; answers to OQ-1..OQ-3 (open) recorded here.
 - C3-01 verification: docs-only change; no code, migration or test changed.
 
 ## 14. Next authorized scope (when PASS, ADR acceptance and G5)
@@ -668,3 +686,4 @@ packet or by an entity PASS.
 | O6 | Atomic cutover: the key namespace, every cooperating writer (admission, Suppression, webhooks, Account, Contact, reopen, override) and the migration ship in one release; no deploy mixes the old webhook key and the new namespace. The owner's instance is single-node and restarts on deploy, so no rolling mix exists. | one PR/release; a test that no `hashtextextended` advisory call remains |
 | O7 | Seed boundary: `:seed` stays dev/test-only (`SeedingAllowed`); application writes cannot choose `source: fixture` (`:create` accepts only the admission kinds); the DB trigger's fixture exception is a trusted database-admin boundary only. Deferred lead binding and the account slot get direct DB negatives and transaction-rollback proof. | policy tests in prod config; direct SQL negatives |
 | O8 | The strengthened company-domain suppression is an owner-visible behaviour change; it stays in the scoped G5 for the owner to accept. No agent approves it. | G5 record |
+| O9 | Round-4 test obligations: matched-lead direct-SQL negatives cover both matched outcomes and isolate each negative (only the intended check or FK can fail); readmit tests separate the action's input-presence refusal from the DB restriction on stored `readmit = true`. | direct SQL tests with one violated rule each; readmit tests per kind |
