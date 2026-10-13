@@ -182,7 +182,52 @@ defmodule SdrAgent.Agents.CalibrationClaimTest do
     end
   end
 
+  # Code review (Codex 01a135c1, 51726f5): the recorded arguments
+  # container is shaped before any field is read.
+  test "a malformed arguments container is unrecorded, never claimless or a crash", ctx do
+    %{run: run, agent: agent} = proof_run(ctx)
+    {:ok, invocation} = reserve(run, agent, calibration: marker(claim: Ash.UUIDv7.generate()))
+
+    for arguments <- [false, "x", [1], 7, true] do
+      id = Ash.UUIDv7.generate()
+      {:ok, _event} = append_reserved(agent, id, invocation, %{"arguments" => arguments})
+
+      provenance = %{
+        id: id,
+        agent_run_id: invocation.agent_run_id,
+        tenant_id: invocation.tenant_id
+      }
+
+      assert typed(fn -> Gate.recorded_claim(provenance) end) == {:error, :claim_unrecorded},
+             inspect(arguments)
+
+      assert typed(fn -> Gate.recorded_tuple(provenance) end) == :invalid, inspect(arguments)
+    end
+
+    # Legacy: no arguments recorded at all is claimless and tupleless.
+    for payload <- [%{}, %{"arguments" => nil}] do
+      id = Ash.UUIDv7.generate()
+      {:ok, _event} = append_reserved(agent, id, invocation, payload)
+
+      provenance = %{
+        id: id,
+        agent_run_id: invocation.agent_run_id,
+        tenant_id: invocation.tenant_id
+      }
+
+      assert Gate.recorded_claim(provenance) == {:ok, nil}, inspect(payload)
+      assert Gate.recorded_tuple(provenance) == nil, inspect(payload)
+    end
+  end
+
   ## Fixtures
+
+  # A raise is returned as a value, so a crash fails as an assertion.
+  defp typed(call) do
+    call.()
+  rescue
+    error -> {:raised, error.__struct__}
+  end
 
   defp append_reserved(agent, id, invocation, payload) do
     SdrAgent.Audit.Kernel.append(
