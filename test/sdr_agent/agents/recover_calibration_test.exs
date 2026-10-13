@@ -397,6 +397,55 @@ defmodule SdrAgent.Agents.RecoverCalibrationTest do
     end
   end
 
+  # Code review (Codex, 5f90cf8): automatic quiescence and an owner
+  # attestation are validated separately.
+  describe "decision observations" do
+    test "quiescence needs a launched observation with both ids", ctx do
+      %{invocation: sent, agent: agent, run: run} = claimed!(ctx, :sent)
+      before = snapshot(ctx, sent, run, agent)
+
+      for observation <- [
+            %{state: "launch_pending", root_pid: nil, process_group_id: nil},
+            %{state: "launched", root_pid: nil, process_group_id: nil},
+            %{state: "launched", root_pid: 9001, process_group_id: nil},
+            %{state: "launched", root_pid: nil, process_group_id: 9001}
+          ] do
+        assert recover(sent, {:quiescent, observation}, agent) ==
+                 {:error, :calibration_not_recoverable},
+               inspect(observation)
+      end
+
+      assert snapshot(ctx, sent, run, agent) == before
+    end
+
+    test "an attested observation must be consistent with its state", ctx do
+      %{invocation: sent, agent: agent, claim: claim, run: run} = claimed!(ctx, :sent)
+      before = snapshot(ctx, sent, run, agent)
+
+      for observation <- [
+            %{state: "launch_pending", root_pid: 9001, process_group_id: nil},
+            %{state: "launch_pending", root_pid: nil, process_group_id: 9001},
+            %{state: "launched", root_pid: nil, process_group_id: nil},
+            %{state: "launched", root_pid: 9001, process_group_id: nil}
+          ] do
+        attestation = %{attestation(sent, claim) | observation: observation}
+
+        assert recover(sent, {:attested, attestation}, agent) ==
+                 {:error, :attestation_mismatch},
+               inspect(observation)
+      end
+
+      assert snapshot(ctx, sent, run, agent) == before
+
+      # Positive control: a launched attestation with both ids.
+      launched = %{state: "launched", root_pid: 9001, process_group_id: 9001}
+      attestation = %{attestation(sent, claim) | observation: launched}
+
+      assert {:ok, %{invocation: %{status: :unknown}}} =
+               recover(sent, {:attested, attestation}, agent)
+    end
+  end
+
   ## Fixtures
 
   defp claim_marker(claim),
