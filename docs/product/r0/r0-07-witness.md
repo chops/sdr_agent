@@ -2568,4 +2568,8 @@ method, attestation and inventory fields are nil.
     - d3b reserved-call wrapper: RED **PASS / VERIFIED RED** at 6d05e84
       (5f6a6ffc) after 54389c6 and 17a5d82 (direct no-provider-call
       evidence, acknowledged trace delivery). Coverage additions at 62374a6
-      and GREEN at c869b90, in review.
+      (verified failing first). Code **scoped APPROVE** at b756c49
+      (31c34763) after c869b90 (request-shape check before the span); the
+      optional d3a notes at 7ffede8 were approved with it.
+    - d3c and d3d: the 8.14.8 observation and document addendum is in
+      entity recheck; then d3c RED.
