@@ -101,6 +101,11 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
           :forged_authority,
           :bad_instance,
           :missing_witness,
+          :missing_traceparent,
+          :bad_traceparent,
+          :zero_trace_id,
+          :zero_span_id,
+          :bad_flags,
           :unrenderable_schema
         ] do
       test "#{variant} is staged before consumption", ctx do
@@ -575,6 +580,34 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
   defp malform(request, :bad_instance), do: put_in(request.calibration.instance, "short")
   defp malform(request, :missing_witness), do: Map.delete(request, :witness)
+
+  # Codex d1b@21eb641: the strict witness validator runs before the consume.
+  defp malform(request, :missing_traceparent),
+    do: update_in(request.witness, &Map.delete(&1, :traceparent))
+
+  defp malform(request, :bad_traceparent), do: put_in(request.witness.traceparent, "not-w3c")
+
+  defp malform(request, :zero_trace_id),
+    do:
+      put_in(
+        request.witness.traceparent,
+        "00-#{String.duplicate("0", 32)}-#{String.duplicate("1", 16)}-01"
+      )
+
+  defp malform(request, :zero_span_id),
+    do:
+      put_in(
+        request.witness.traceparent,
+        "00-#{String.duplicate("1", 32)}-#{String.duplicate("0", 16)}-01"
+      )
+
+  defp malform(request, :bad_flags),
+    do:
+      put_in(
+        request.witness.traceparent,
+        "00-#{String.duplicate("1", 32)}-#{String.duplicate("1", 16)}-ff"
+      )
+
   defp malform(request, :unrenderable_schema), do: %{request | schema: :not_a_schema}
 
   # A server, entry and request differing from the target in one claim.

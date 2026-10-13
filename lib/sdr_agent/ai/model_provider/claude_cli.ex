@@ -699,8 +699,14 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   if @test_seams do
     alias SdrAgent.AI.ModelProvider.ClaudeCLI.CalibrationExemption
 
-    defp staged(state, %{calibration: _} = request, caller),
-      do: CalibrationExemption.check(state, request, caller)
+    # The strict witness validator runs before the exemption, so a request
+    # it would refuse never consumes the entry (Codex d1b@21eb641).
+    defp staged(state, %{calibration: _} = request, caller) do
+      case witness_env(Map.get(request, :witness)) do
+        {:ok, _env} -> CalibrationExemption.check(state, request, caller)
+        {:error, _invalid} -> {:error, :real_model_staged}
+      end
+    end
   end
 
   defp staged(_state, _request, _caller), do: {:error, :real_model_staged}
