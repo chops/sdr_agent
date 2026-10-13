@@ -15,10 +15,11 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
        caller's `guard:`);
     2. the invocation `FOR SHARE`, and the immutable release is read
        **before any replacement selection**;
-    3. with no release: its current links `FOR SHARE`, the selected cause's
-       candidates `FOR UPDATE`, the chain head, and the release read again
-       (a release committed meanwhile is left for the next pass,
-       `{:error, :release_raced}`, nothing written);
+    3. with no release: a savepoint, its current links `FOR SHARE`, the
+       selected cause's candidates `FOR UPDATE`, the chain head, and the
+       release read again. A release committed meanwhile by a concurrent
+       decider rolls back to the savepoint (nothing written; the locks
+       taken after it released) and is then decided as in step 2 or 4;
     4. with a withheld release and a still-running run: its link `FOR
        SHARE` and its original bound cause `FOR UPDATE`, then the head.
 
@@ -106,18 +107,29 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
     end
   end
 
-  # No release: G5's selection, then the head; a release committed
-  # meanwhile by a competing decider (found under the head) leaves the
-  # state for the next pass, with nothing written.
-  defp decide(nil, {invocation, run}, actor) do
+  # No release: G5's selection, then the head. A release a concurrent
+  # decider committed meanwhile (found under the head; review round 2) is
+  # honoured like one found first: the selection is rolled back to a
+  # savepoint, which writes nothing and releases its link, cause and head
+  # locks, and the immutable winner is decided in the normal order. Once
+  # only: a found release never returns here.
+  @savepoint "result_gate_recovery_selection"
+
+  defp decide(nil, {invocation, run} = held, actor) do
+    Repo.query!("SAVEPOINT #{@savepoint}")
+
     with {:ok, links} <- lock_current_links(invocation),
          {:ok, plan, cause} <- select(links, invocation, run),
          {:ok, _head} <- Kernel.lock_head(invocation.tenant_id),
          {:ok, nil} <- existing_release(invocation) do
       ResultGate.under_head(plan, invocation, run, primary(links), cause, actor)
     else
-      {:ok, %ModelResultRelease{}} -> Repo.rollback(:release_raced)
-      {:error, error} -> Repo.rollback(error)
+      {:ok, %ModelResultRelease{} = winner} ->
+        Repo.query!("ROLLBACK TO SAVEPOINT #{@savepoint}")
+        decide(winner, held, actor)
+
+      {:error, error} ->
+        Repo.rollback(error)
     end
   end
 

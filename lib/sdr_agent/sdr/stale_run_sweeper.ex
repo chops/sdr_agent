@@ -186,16 +186,16 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   # (case (b): the run is not terminal under its lock).
   # A known mismatch without a usable critical cause stays the owner's
   # attention (row R7-2); a later pass completes once it is resolved.
-  # A withheld release without a readable bound cause, or a release that
-  # raced recovery, is left as it is (fail closed; review MF5).
+  # A withheld release without a readable bound cause is left as it is
+  # (fail closed; review MF5). A release that races recovery is honoured
+  # by recovery itself (G7, review round 2).
   defp recovered({:error, skip})
        when skip in [
               :not_running,
               :job_live,
               :not_terminal,
               :mismatch_cause_unbound,
-              :binding_unavailable,
-              :release_raced
+              :binding_unavailable
             ],
        do: :ok
 
