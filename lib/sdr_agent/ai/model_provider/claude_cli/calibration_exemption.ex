@@ -31,7 +31,7 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     `Agents.admit_launch/3` as `calibration_launch:` (packet 8.13 B and C);
     the entry stays consumed whatever follows.
 
-    `receipt/2` (packet 8.14.2, d3a) runs in the server after `Reaper.open`
+    `receipt/4` (packet 8.14.2, d3a) runs in the server after `Reaper.open`
     started the exempted call's process, before output collection. It
     proves this launch through the probe (a non-empty start identity, and a
     group of positive pids containing the root, which leads its own group)

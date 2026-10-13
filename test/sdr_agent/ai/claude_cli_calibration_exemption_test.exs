@@ -30,6 +30,15 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     # Tells the test which root is being probed, when it asked to know.
     def watch(test), do: :persistent_term.put({__MODULE__, :test}, test)
 
+    # The group phase announces itself, so the hung_group case kills the
+    # provider only once the group read has started.
+    defp notify_group(pgid) do
+      case :persistent_term.get({__MODULE__, :test}, nil) do
+        nil -> :ok
+        test -> send(test, {:probing_group, pgid, self()})
+      end
+    end
+
     defp notify(pid) do
       case :persistent_term.get({__MODULE__, :test}, nil) do
         nil -> :ok
@@ -55,17 +64,20 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     defp identity(:probe_killed, _pid), do: Process.exit(self(), :kill)
     defp identity(_mode, pid), do: {:ok, "Tue Oct 13 12:00:00 2026 #{pid}"}
 
-    def group_members(pgid) do
-      case mode() do
-        :group_error -> {:error, :ps_failed}
-        :root_not_in_group -> {:ok, [pgid + 1]}
-        :member_not_a_pid -> {:ok, [pgid, "x"]}
-        :slow_group -> Process.sleep(2_200) && {:ok, [pgid]}
-        :hung_group -> Process.sleep(:infinity)
-        :group_not_a_list -> {:ok, :members}
-        _other -> {:ok, [pgid]}
-      end
+    def group_members(pgid), do: members(mode(), pgid)
+
+    defp members(:group_error, _pgid), do: {:error, :ps_failed}
+    defp members(:root_not_in_group, pgid), do: {:ok, [pgid + 1]}
+    defp members(:member_not_a_pid, pgid), do: {:ok, [pgid, "x"]}
+    defp members(:slow_group, pgid), do: Process.sleep(2_200) && {:ok, [pgid]}
+    defp members(:group_not_a_list, _pgid), do: {:ok, :members}
+
+    defp members(:hung_group, pgid) do
+      notify_group(pgid)
+      Process.sleep(:infinity)
     end
+
+    defp members(_mode, pgid), do: {:ok, [pgid]}
   end
 
   alias SdrAgent.AdmissionFixtures
@@ -601,6 +613,9 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
         send(caller, {:go, request})
         assert_receive {:probing, os_pid, probe}, 10_000
         on_exit(fn -> Process.exit(probe, :kill) end)
+
+        if unquote(mode) == :hung_group,
+          do: assert_receive({:probing_group, ^os_pid, ^probe}, 10_000)
 
         Process.exit(server, :kill)
 
