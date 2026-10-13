@@ -71,6 +71,7 @@ defmodule SdrAgent.Agents.Witness do
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.Witness.GateEvidence
   alias SdrAgent.Agents.Witness.Projection
   alias SdrAgent.Agents.Witness.ReconcileWorker
   alias SdrAgent.Agents.Witness.Store
@@ -870,33 +871,52 @@ defmodule SdrAgent.Agents.Witness do
 
   ## Attention (same transaction)
 
+  # Row G4 (R0-07 slice C): after a withheld release, the scan treats the
+  # cause its event binds as protected (`SdrAgent.Agents.Witness.GateEvidence`);
+  # the gate's own reconcile (with `gate:`) runs before any release.
   defp attention(invocation, links, warnings, actor, gate) do
-    with {:ok, live} <- live_failures(invocation) do
+    with {:ok, live} <- live_failures(invocation),
+         {:ok, protection} <- protection(gate, invocation) do
       critical? = Enum.any?(links, &(&1.link_status == :mismatch))
       warnings = if critical?, do: [], else: Enum.sort(warnings)
       {criticals, live_warnings} = Enum.split_with(live, &(&1.severity == :critical))
 
-      with :ok <- ensure_critical(critical?, criticals, invocation, actor, gate) do
-        ensure_warning(warnings, live_warnings, invocation, actor, gate)
+      with :ok <-
+             ensure_critical(critical?, criticals, {invocation, links, protection}, actor, gate),
+           :ok <-
+             ensure_warning(warnings, live_warnings, {invocation, links, protection}, actor, gate) do
+        GateEvidence.note(protection, invocation, links, actor)
       end
     end
   end
 
-  defp ensure_critical(true, [], invocation, actor, gate),
-    do: open(invocation, :critical, "mismatch", actor, gate)
+  defp protection(nil, invocation), do: GateEvidence.protection(invocation)
+  defp protection(_gate, _invocation), do: {:ok, nil}
 
-  defp ensure_critical(_needed, _live, _invocation, _actor, _gate), do: :ok
+  # A protected critical (live) is already in `criticals`; a resolved one is
+  # not reopened for the same mismatch, only for a distinct later one.
+  defp ensure_critical(true, [], {invocation, links, protection}, actor, gate) do
+    if is_nil(protection) or GateEvidence.distinct_mismatch?(protection, links),
+      do: open(invocation, :critical, "mismatch", actor, gate),
+      else: :ok
+  end
 
-  defp ensure_warning(warnings, live, invocation, actor, gate) do
+  defp ensure_critical(_needed, _live, _held, _actor, _gate), do: :ok
+
+  defp ensure_warning(warnings, live, {invocation, links, protection}, actor, gate) do
     message = message(warnings)
+    {protected, live} = Enum.split_with(live, &(protection && &1.id == protection.cause_id))
     {keep, stale} = Enum.split_with(live, &(warnings != [] and &1.message == message))
 
     with :ok <- resolve_all(stale, actor) do
-      if warnings == [] or keep != [],
+      if warnings == [] or keep != [] or protected != [] or unchanged?(protection, links),
         do: :ok,
         else: open(invocation, :warning, Enum.join(warnings, ","), actor, gate)
     end
   end
+
+  defp unchanged?(nil, _links), do: false
+  defp unchanged?(protection, links), do: not GateEvidence.changed?(protection, links)
 
   defp message([]), do: nil
   defp message(warnings), do: message_for(Enum.join(warnings, ","))
