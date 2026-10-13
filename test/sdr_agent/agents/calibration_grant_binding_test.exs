@@ -31,6 +31,8 @@ defmodule SdrAgent.Agents.CalibrationGrantBindingTest do
   alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Clock
+  alias SdrAgent.GateFixtures
+  alias SdrAgent.Operations.Failure
 
   # Within G-R0's window.
   @now ~U[2026-10-15 12:00:00.000000Z]
@@ -122,6 +124,70 @@ defmodule SdrAgent.Agents.CalibrationGrantBindingTest do
         g_r0!(ctx, unquote(Macro.escape(overrides)))
         assert select(ctx, :claude_cli_opus) == {:error, :calibration_grant_unavailable}
       end
+    end
+
+    test "only the tenant's agent runtime may select", ctx do
+      g_r0!(ctx)
+
+      # Built first: creating a human actor's user is itself audited.
+      actors = [
+        nil,
+        human(:admin, ctx.tenant),
+        human(:reviewer, ctx.tenant),
+        system_actor(:reconciler, ctx.tenant),
+        struct(SdrAgent.Actor, type: :agent_runtime, tenant_id: Ash.UUIDv7.generate())
+      ]
+
+      before = event_count(ctx)
+
+      for actor <- actors do
+        assert {:error, %Ash.Error.Forbidden{}} =
+                 Agents.select_calibration_grant(ctx.tenant.id, :claude_cli_opus, actor: actor),
+               inspect(actor)
+      end
+
+      assert event_count(ctx) == before
+    end
+
+    test "the G-R0 window: before its start and at its expiry it is unavailable", ctx do
+      g_r0!(ctx, %{starts_at: ~U[2026-10-16 00:00:00.000000Z]})
+      assert select(ctx, :claude_cli_opus) == {:error, :calibration_grant_unavailable}
+
+      # At its start (inclusive) it is selectable.
+      Clock.freeze(~U[2026-10-16 00:00:00.000000Z])
+      assert {:ok, _} = select(ctx, :claude_cli_opus)
+
+      Clock.freeze(~U[2026-10-19 05:58:59.999999Z])
+      assert {:ok, _} = select(ctx, :claude_cli_opus)
+
+      # At its expiry (exclusive) it is not.
+      Clock.freeze(@expires)
+      assert select(ctx, :claude_cli_opus) == {:error, :calibration_grant_unavailable}
+    end
+
+    test "an otherwise valid revoked grant is unavailable", ctx do
+      grant = g_r0!(ctx)
+
+      {:ok, _revoked} =
+        Agents.revoke_grant(grant, %{expected_revision: grant.revision},
+          actor: human(:admin, ctx.tenant)
+        )
+
+      assert select(ctx, :claude_cli_opus) == {:error, :calibration_grant_unavailable}
+    end
+
+    test "a released allocation is unavailable", ctx do
+      grant = g_r0!(ctx)
+
+      {:ok, _released} =
+        Agents.release_allocation(
+          grant,
+          %{expected_revision: grant.revision, key: :proof, profile_id: :claude_cli_opus},
+          actor: human(:admin, ctx.tenant)
+        )
+
+      assert select(ctx, :claude_cli_opus) == {:error, :calibration_grant_unavailable}
+      assert select(ctx, :claude_cli_sonnet) == {:error, :calibration_grant_unavailable}
     end
 
     test "a revoked grant or a released allocation is unavailable", ctx do
@@ -229,7 +295,76 @@ defmodule SdrAgent.Agents.CalibrationGrantBindingTest do
           )
         end)
 
-      assert match?({:error, _}, result), inspect(result)
+      assert match?({:error, %Ash.Error.Forbidden{}}, result), inspect(result)
+      assert {:ok, []} = Agents.list_model_invocations(run.id, actor: agent)
+      assert events_of_type(ctx.tenant, "model.invocation.reserved") == []
+    end
+
+    test "a mismatch is one receipt, and its replay adds none", ctx do
+      grant = g_r0!(ctx)
+      {:ok, binding} = select(ctx, :claude_cli_opus)
+
+      {:ok, _amended} =
+        Agents.update_grant_terms(grant, %{expected_revision: grant.revision, name: "renamed"},
+          actor: human(:admin, ctx.tenant)
+        )
+
+      %{run: run, agent: agent} = proof_run(ctx)
+      call = attrs()
+
+      reserve = fn ->
+        AdmissionFixtures.admitting(fn ->
+          Agents.reserve_model_invocation(run, call, actor: agent, calibration: marker(binding))
+        end)
+      end
+
+      assert {:error, %Refused{reason: :calibration_grant_mismatch} = refused} = reserve.()
+      failures = failures_of(ctx, run)
+      assert [failure] = failures
+      assert failure.id == refused.failure_id
+      assert failure.class == :provider_error
+      assert length(events_of_type(ctx.tenant, "model.reservation.refused")) == 1
+
+      # The existing receipt contract: a repeated refusal adds a deduplicated
+      # event naming the same Failure, never a second Failure.
+      assert {:error, %Refused{reason: :calibration_grant_mismatch}} = reserve.()
+      assert failures_of(ctx, run) == failures
+      events = events_of_type(ctx.tenant, "model.reservation.refused")
+      assert Enum.map(events, & &1.payload["deduplicated"]) == [false, true]
+      assert Enum.all?(events, &(&1.payload["failure_id"] == failure.id))
+    end
+
+    test "run, grants, allocations, then the head; no row lock after it", ctx do
+      g_r0!(ctx)
+      {:ok, binding} = select(ctx, :claude_cli_opus)
+      %{run: run, agent: agent} = proof_run(ctx)
+
+      {result, sql} = GateFixtures.capture(fn -> reserve(run, agent, marker(binding)) end)
+      assert {:ok, _invocation} = result
+
+      at = &GateFixtures.index(sql, fn q -> GateFixtures.locks?(q, &1, &2) end)
+      run_lock = at.("agent_runs", "FOR UPDATE")
+      grants = at.("model_call_grants", "FOR SHARE")
+      allocations = at.("model_call_allocations", "FOR SHARE")
+      head = at.("audit_chain_heads", "FOR UPDATE")
+
+      assert run_lock && grants && allocations && head, inspect(sql)
+      assert run_lock < grants and grants < allocations and allocations < head
+
+      # No grant or allocation lock after the head: the fresh G-R0
+      # uniqueness observation under the head is a read. (The ordinary
+      # reservation's re-lock of the run row it already holds is unchanged.)
+      after_head =
+        sql
+        |> Enum.drop(head + 1)
+        |> Enum.filter(
+          &(GateFixtures.locks?(&1, "model_call_grants", "FOR SHARE") or
+              GateFixtures.locks?(&1, "model_call_grants", "FOR UPDATE") or
+              GateFixtures.locks?(&1, "model_call_allocations", "FOR SHARE") or
+              GateFixtures.locks?(&1, "model_call_allocations", "FOR UPDATE"))
+        )
+
+      assert after_head == [], inspect(after_head)
     end
 
     test "a malformed binding or one of another profile is an invalid marker", ctx do
@@ -324,4 +459,11 @@ defmodule SdrAgent.Agents.CalibrationGrantBindingTest do
   end
 
   defp event_count(ctx), do: length(events(ctx.tenant))
+
+  defp failures_of(ctx, run) do
+    Failure
+    |> Ash.read!(SdrAgent.Audit.Kernel.opts(ctx.tenant.id))
+    |> Enum.filter(&(&1.subject_id == run.id))
+    |> Enum.sort_by(& &1.id)
+  end
 end
