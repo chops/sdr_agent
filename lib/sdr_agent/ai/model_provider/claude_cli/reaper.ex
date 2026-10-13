@@ -112,8 +112,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   its OS pid is owned before the process can do anything. Waits for the
   receipt until `deadline` (monotonic ms). Returns `{:ok, port, os_pid}`
   (port messages are then forwarded to the caller); `{:error,
-  {:launch_failed, reason}}` when nothing was launched; or an unknown
-  outcome — the process may exist — `{:unknown, :reaper_down}` (the reaper
+  {:launch_failed, reason}}` only when `Port.open` itself failed, so nothing
+  was launched; or an unknown outcome — the process may exist —
+  `{:unknown, {:post_spawn_failure, port, os_pid}}` (a failure after the
+  port opened; the launch stays tracked), `{:unknown, :post_spawn_failure}`
+  (the same, with no readable pid), `{:unknown, :reaper_down}` (the reaper
   died before its receipt) or `{:pending, ref}` (no receipt by the
   deadline; a late `{ref, reply}` may still arrive).
   """
@@ -209,14 +212,48 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
     end
   end
 
+  # Only a failure of `Port.open` itself is a known no-spawn. Once the port
+  # is open a process may exist: the launch stays tracked (so the owner's
+  # exit still reaps it) and a later failure is unknown, never
+  # `:launch_failed` (code review of the R0-07 slice E integration).
   defp open_port(state, workspace, spawn, {port_opts, {allow, set}}) do
-    port = Port.open(spawn, [{:env, ChildEnv.port(allow, set)} | port_opts])
-    {:os_pid, os_pid} = Port.info(port, :os_pid)
-    state = put_in(state.launches[workspace], {port, os_pid})
-    if hook = state.opts[:on_open], do: hook.(os_pid)
-    {{:ok, port, os_pid}, state}
+    case spawn_port(spawn, port_opts, {allow, set}) do
+      {:ok, port} -> opened(state, workspace, port)
+      {:error, message} -> {{:error, {:launch_failed, message}}, state}
+    end
+  end
+
+  defp spawn_port(spawn, port_opts, {allow, set}) do
+    {:ok, Port.open(spawn, [{:env, ChildEnv.port(allow, set)} | port_opts])}
   rescue
-    error -> {{:error, {:launch_failed, Exception.message(error)}}, state}
+    error -> {:error, Exception.message(error)}
+  end
+
+  defp opened(state, workspace, port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, os_pid} ->
+        state = put_in(state.launches[workspace], {port, os_pid})
+
+        case after_open(state.opts[:on_open], os_pid) do
+          :ok -> {{:ok, port, os_pid}, state}
+          :error -> {{:unknown, {:post_spawn_failure, port, os_pid}}, state}
+        end
+
+      _no_pid ->
+        # The port closed before its pid could be read: whatever ran is not
+        # identifiable, so the workspace stays tracked and the outcome is
+        # unknown until an operator release.
+        {{:unknown, :post_spawn_failure}, put_in(state.launches[workspace], nil)}
+    end
+  end
+
+  defp after_open(nil, _os_pid), do: :ok
+
+  defp after_open(hook, os_pid) do
+    hook.(os_pid)
+    :ok
+  rescue
+    _error -> :error
   end
 
   # Kills every tracked tree and removes its workspace; releases the lease

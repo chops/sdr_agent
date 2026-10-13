@@ -630,6 +630,14 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         {:ok, _port, os_pid} ->
           prune_stuck(%{state | stuck: [{workspace, os_pid} | state.stuck]})
 
+        {:unknown, {:post_spawn_failure, _port, os_pid}} ->
+          prune_stuck(%{state | stuck: [{workspace, os_pid} | state.stuck]})
+
+        # Started but not identifiable: stays unconfirmed until an operator
+        # release (`Reaper.release/1`).
+        {:unknown, :post_spawn_failure} ->
+          %{state | unconfirmed: Map.put(state.unconfirmed, ref, workspace)}
+
         {:error, _reason} ->
           File.rm_rf(workspace)
           if state.reaper, do: Reaper.done(state.reaper, workspace)
@@ -806,8 +814,15 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       {:pending, ref} ->
         unknown(state, ref, workspace, :launch_handshake_timeout)
 
-      {:unknown, :reaper_down} ->
-        unknown(state, make_ref(), workspace, :reaper_down)
+      # A process was started and then something failed: the outcome is
+      # unknown (never a known no-spawn) and the tree is stopped and
+      # confirmed gone, or tracked as stuck, before the call returns.
+      {:unknown, {:post_spawn_failure, port, os_pid}} ->
+        Logger.error("ClaudeCLI launch failed after its process started; stopping its tree")
+        {{:unknown, :post_spawn_failure}, settle(state, port, os_pid, workspace)}
+
+      {:unknown, reason} when reason in [:reaper_down, :post_spawn_failure] ->
+        unknown(state, make_ref(), workspace, reason)
 
       error ->
         File.rm_rf(workspace)
