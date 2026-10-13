@@ -2055,7 +2055,11 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
   86d1c74c). Reusing `ResultGate.await/3` (not `gate`/`finalize`) is sound.
   Three contracts must be pinned: the proof-attention lifecycle, the typed
   store-error mapping, and the digest and time formats.
-- **This revision** pins them. No d3c RED work starts before it passes.
+- **Round 2** at e185bbd: **NEEDS-REVIEW** (Codex aba65e3d). Two source
+  mismatches: the critical-attention lifetime without a protected cause,
+  and blob and inventory error codes that are not `store_*`.
+- **This revision** corrects both and proposes a narrow E3 outcome delta.
+  No d3c RED work starts before it passes.
 
 **Why this is needed.** A gate-less `Witness.reconcile/2` defers a
 completed, unreleased generation-2 ClaudeCLI row (`:deferred_to_gate`),
@@ -2082,18 +2086,36 @@ methods: [candidate])`.
 - There is no second await while the file is built. The unlaunched path
   (rows 7–8) makes no await at all.
 
-**Store errors are already typed receipts.** On the gate path, `Witness`
-never surfaces a store failure as `{:error, _}`:
-- An unset store root gives `{:ok, %{status: :skipped, receipt:
-  %{status: :skipped, link_id: nil, …}}}`.
-- An inventory failure is carried as the receipt code `store_unconfigured`,
-  `store_root_missing` or `store_root_untrusted`.
-- An unreadable stored blob is `store_unreadable` (a downgraded link).
+**Store failures are typed receipts.** On the gate path, `Witness` never
+surfaces a store failure as `{:error, _}`. As the code stands:
 
-`Outcome.classify/1` maps a skipped receipt, or any `store_*` code, to
-`unreadable`. The command therefore passes `ResultGate.await/3`'s own
-`{:ok, receipt}` or `{:timeout, receipt}` to the classifier unchanged. It
-never fabricates a receipt, link, evaluated tuple or init identity.
+| Store failure | What the receipt carries | Outcome today |
+|---|---|---|
+| An unset store root | `{:ok, %{status: :skipped, receipt: %{status: :skipped, link_id: nil, …}}}` | `unreadable` |
+| An inventory failure (`Store.inventory/2`) | its reason as a receipt code: `store_unconfigured`, `store_root_missing`, `store_root_untrusted`, `unsafe_path`, `record_invalid`, `record_too_large`, `too_many_entries`, `invalid_invocation_id` or `witness_missing`; every current non-mismatch link downgraded (`store_unreadable`) | `unreadable` for `store_*`; **`missing`** for the rest |
+| An unreadable primary blob (`Store.blob/2`) | an inferred primary link with reason `blob_<reason>` (for example `blob_missing`, `blob_too_large`, `blob_corrupt`) and **no evaluated projection** | **`projection_differs`**, because that link's nil projection is not the candidate's |
+
+The command passes `ResultGate.await/3`'s own `{:ok, receipt}` or
+`{:timeout, receipt}` to the classifier unchanged. It never fabricates a
+receipt, link, evaluated tuple or init identity.
+
+**E3 delta (proposed, part of d3c).** In the table above, the cells marked
+`missing` and `projection_differs` misreport an unread store. "Missing"
+means no captured exchange, and "projection_differs" claims a different
+evaluated projection.
+- **The change:** `Outcome.classify/1` precedence step 4 (`unreadable`)
+  also covers the receipt codes and the receipt's own link reason codes
+  that denote a failed read:
+  - any code starting `blob_`;
+  - `unsafe_path`, `record_invalid`, `record_too_large`,
+    `too_many_entries` and `invalid_invocation_id`.
+- **Unchanged:** `witness_missing` (no capture) stays `missing`, and every
+  other step and precedence is as before.
+- **What is still recorded:** the evaluated projection, method and
+  attestation fields, exactly as before. For an unread blob they are nil.
+- **E3 RED:** an unreadable-blob receipt and each inventory read-failure
+  code give `unreadable`; `witness_missing` gives `missing`; the earlier
+  E3 cases are unchanged.
 
 **Any `{:error, reason}`** from the await is a hard stop (matrix row 13),
 whatever the reason: `:in_transaction`, an authorization or database
@@ -2105,7 +2127,7 @@ evidence is written. No reason text enters the evidence file.
 | Entity | New / existing | Delta | Invariants / lifecycle | Actor / locks |
 |---|---|---|---|---|
 | Witness observation (`ResultGate.await/3`, gate binding with `operation_id: nil`) | Existing | Now also used for a `:proof` run's one calibration call | One bounded workflow; the receipt is the invocation's own primary link or none; existing scan deferral is bypassed only through the validated gate binding (own run, own null Operation) | Tenant reconciler actor; short reconcile transactions, no lock across polls |
-| `Operations.Failure` witness attention (`:reconciliation_required`, subject this ModelInvocation, `operation_id` nil) | Existing | May now be opened for a proof attempt | Existing rules unchanged: one critical for a link mismatch (sticky, never reopened for the same mismatch); a warning kept while its message is unchanged and resolved when stale; deduplicated against live Failures. It may coexist with a harness-complete run. `finish_calibration` does not resolve it, and only an operator resolves it | Reconciler actor, inside the reconcile transaction |
+| `Operations.Failure` witness attention (`:reconciliation_required`, subject this ModelInvocation, `operation_id` nil) | Existing | May now be opened for a proof attempt | Existing rules unchanged, deduplicated against live Failures. A **critical** (link mismatch) is opened when none is live. A proof attempt has no protected withheld cause, so after an operator resolves it a later reconcile of a persisting mismatch can open a new critical. A **warning** is kept while its message is unchanged and is resolved automatically by a later reconcile when its condition changes or clears. Either may coexist with a harness-complete run. `finish_calibration` resolves neither: a critical needs the operator | Reconciler actor, inside the reconcile transaction |
 | `GateEvidence.note/4` | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | A no-op without a protected gate cause, and a proof run has none | — |
 | AgentRun (`:proof`) and the `:calibration` release | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | The await binds no run cause, stops no run and writes no release. `finish_calibration` (E1) remains the sole writer of the calibration latch and the run's final state | E1's own transaction |
 
@@ -2152,6 +2174,10 @@ method, attestation and inventory fields are nil.
 - **A recognized store code** on the receipt leads to `unreadable`. An
   `{:error, _}` from the await (non-store) is a hard stop: the record is
   kept and no file is written.
+- **An actual unreadable-blob receipt** (a stored blob removed or
+  corrupted after capture) gives an inferred primary link with `blob_*`
+  and outcome `unreadable` (E3 delta). An inventory read failure
+  (`record_invalid`) also gives `unreadable`.
 - **A real built document** passes `Evidence.publish/3` and `validate/3`:
   hex digests, canonical times and links. The same call again replays the
   frozen file.
@@ -2160,7 +2186,8 @@ method, attestation and inventory fields are nil.
 - **Attention coexistence:** a mismatch receipt opens one critical
   attention Failure, the calibration still latches through E1, the Failure
   stays open, and no run cause or release other than `:calibration` is
-  written.
+  written. A warning-only receipt's warning is not resolved by
+  `finish_calibration`.
 
 #### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 
