@@ -299,8 +299,11 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
         end
 
       elapsed = System.monotonic_time(:millisecond) - started
-      assert result == {:error, :calibration_isolation_unavailable}
-      assert elapsed < 6_000, "preflight took #{elapsed} ms"
+
+      # The probe never answers, so no cleanup can be confirmed physically
+      # (Codex 01a13590 MF2): reported as unconfirmed, never as stopped.
+      assert result == {:error, :calibration_isolation_cleanup_unconfirmed}
+      assert elapsed < 20_000, "preflight took #{elapsed} ms"
       assert_receive {:isolation, {:spawned, os_pid}, _identity}
       assert_receive {:isolation, {:helper, helper}}
       assert await(fn -> not Process.alive?(helper) and gone?(os_pid) end)
@@ -376,6 +379,128 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
       after
         stop!(port, os_pid)
       end
+    end
+  end
+
+  describe "code review (Codex 01a13590, 5231107)" do
+    # MF1: a group member is never signalled on age alone: a stale snapshot
+    # naming a separately owned process leaves it untouched.
+    test "a stale member snapshot never signals another process", ctx do
+      {port, other} = held_shell!()
+      {:ok, other_identity} = ProcessProbe.start_identity(other)
+
+      try do
+        GroupProbe.put({:plus, other})
+        result = Isolation.preflight(probe: GroupProbe, observer: ctx.observer)
+        assert result == {:error, :calibration_isolation_cleanup_unconfirmed}
+
+        assert ProcessProbe.start_identity(other) == {:ok, other_identity},
+               "another process was signalled"
+      after
+        stop!(port, other)
+      end
+    end
+
+    # MF1: a root whose identity changed after spawn is never signalled, by
+    # the preflight or by a reaper fallback.
+    test "a root whose identity changed is never signalled", ctx do
+      parent = self()
+
+      observer = fn
+        {:spawned, os_pid} = event ->
+          {:ok, identity} = ProcessProbe.start_identity(os_pid)
+          send(parent, {:isolation, event, {:ok, identity}})
+          # From now on the root pid reads as another (reused) process.
+          GroupProbe.put(:identity, {:fixed, {:ok, "Mon Jan  1 00:00:00 2001"}})
+
+        event ->
+          ctx.observer.(event)
+      end
+
+      result =
+        Isolation.preflight(
+          target: "printf ready; exec /bin/sleep 30",
+          probe: GroupProbe,
+          observer: observer
+        )
+
+      assert_received {:isolation, {:spawned, os_pid}, {:ok, identity}}
+
+      try do
+        assert result == {:error, :calibration_isolation_cleanup_unconfirmed}
+        # Past the helper's exit: no reaper fallback signalled it either.
+        Process.sleep(500)
+        assert ProcessProbe.start_identity(os_pid) == {:ok, identity}, "the root was signalled"
+      after
+        stop_group!(os_pid)
+      end
+    end
+
+    # MF2: a reaper that never completes is cleanup-unconfirmed, not merely
+    # unavailable.
+    test "a hung reaper after a timeout is cleanup-unconfirmed", ctx do
+      GroupProbe.put(:block)
+      test = self()
+
+      observer = fn
+        {:reaper, reaper} = event ->
+          send(test, {:isolation, event})
+          # Suspended by the test process, not the helper, so it stays
+          # suspended when the helper is killed.
+          send(test, {:suspend, reaper})
+          Process.sleep(200)
+
+        event ->
+          ctx.observer.(event)
+      end
+
+      task =
+        Task.async(fn ->
+          Isolation.preflight(
+            probe: GroupProbe,
+            ready_ms: 300,
+            bound_ms: 800,
+            reaper_ms: 500,
+            observer: observer
+          )
+        end)
+
+      assert_receive {:suspend, reaper}, 5_000
+      :erlang.suspend_process(reaper)
+
+      try do
+        result =
+          case Task.yield(task, 15_000) do
+            {:ok, result} -> result
+            nil -> Task.shutdown(task, :brutal_kill) && :unbounded
+          end
+
+        assert result == {:error, :calibration_isolation_cleanup_unconfirmed}
+      after
+        :erlang.resume_process(reaper)
+      end
+
+      assert_receive {:isolation, {:spawned, os_pid}, _identity}, 1_000
+      assert await(fn -> gone?(os_pid) end), "the resumed reaper must still clean up"
+    end
+
+    test "a helper crash after launch reports a physical cleanup check", ctx do
+      observer = fn
+        {:spawned, _os_pid} = event ->
+          ctx.observer.(event)
+          raise "synthetic observer failure"
+
+        event ->
+          ctx.observer.(event)
+      end
+
+      # The reaper's exit alone is no receipt: the root and group are
+      # checked; here both are gone, so the outcome is plain unavailable.
+      assert {:error, :calibration_isolation_unavailable} =
+               Isolation.preflight(observer: observer)
+
+      assert_received {:isolation, {:spawned, os_pid}, _identity}
+      assert gone?(os_pid)
     end
   end
 
