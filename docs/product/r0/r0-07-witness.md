@@ -1145,6 +1145,158 @@ writer of `status_reason :calibration_latched`.
   version; missing, unsupported and ambiguous evidence; missing and drifted
   init. None promotes anything.
 
+### 8.12 E4c staged delta: launcher, ordering, attestation, recovery (proposed)
+
+Status: **proposed for entity review** (Codex). Entity Model trigger:
+**yes**:
+- a launcher isolation contract;
+- the record and database ordering;
+- an owner-attestation lifecycle and a new audit event;
+- a recovery action contract.
+
+It builds on 8.2 (sealed authority, private server), 8.3 (G-R0), 8.4
+(recovery transitions), R11-1 with the E4a/E4b deltas, R11-2 (E1), R11-3
+(E2) and R11-4 (E3). It grants no real-call, calibration, dependency or
+spend authority. The real-model budget stays 0.
+
+#### E4c-1 Launcher: the CLI's own session and group
+
+- **Wrapper.** Only the private calibration server, and only under a
+  consumed `CalibrationAuthority` (8.2), launches through a checked
+  `setsid` wrapper. The wrapper is `/usr/bin/perl -e 'use POSIX; POSIX::setsid() > 0 or exit 126; exec { $ARGV[0] } @ARGV or exit 127' -- /bin/sh …`,
+  the existing shell launch passed as a list, with no string interpolation.
+  It is a launch option of that server, never a general option or config,
+  and absent outside test-seam builds.
+- **Prerequisite (pinned, checked at preflight, launches no CLI).**
+  `/usr/bin/perl` is a regular, root-owned macOS system binary, and `perl
+  -MPOSIX -e 'exit 0'` succeeds through `ChildEnv`. Otherwise
+  `:calibration_launcher_unavailable` before any reservation. This adds no
+  repository dependency. It relies on an OS-provided interpreter, which the
+  ADR amendment (E4c-6) names.
+- **Verification before `launched`.** After the port opens, the harness
+  requires two things:
+  - `ProcessProbe.start_identity(root)` is `{:ok, _}`;
+  - `ProcessProbe.group_members(root)` contains `root` (pgid = root pid).
+
+  Only then is `launched` written, with `process_group_id: root`. If the
+  probe fails, or the root does not lead its own group, the outcome is
+  post-spawn uncertainty: the tree is stopped through the reaper, the
+  outcome is unknown, and the record stays `launch_pending`. It is never a
+  known no-spawn. Exit 126 or 127 also counts as post-spawn (the wrapper
+  ran).
+
+#### E4c-2 Ordering: the record before `sent`
+
+The sequence is:
+
+1. `claim` (record `claimed`).
+2. Preflight (8.2 step 1).
+3. Reserve (DB `reserved`).
+4. `advance(:launch_pending, invocation_id)`.
+5. Issue the sealed authority.
+6. `Agents.admit_launch/3` commits `sent`.
+7. Spawn through the wrapper.
+8. Verify, then `advance(:launched, …)`.
+9. The bounded observation (E3).
+10. Evidence (E2).
+11. `finish_calibration` (E1).
+12. `advance(:finished)`.
+13. `release`.
+
+Writing the record before `sent` makes every crash window truthful:
+
+| Record | Database | Meaning | Recovery |
+|---|---|---|---|
+| `claimed` | none or `reserved` | No launch | `reserved` → `failed` (`abandoned_before_launch`) |
+| `launch_pending` | `reserved` | No launch (no `sent`) | the same |
+| `launch_pending` | `sent` | May have spawned | Owner attestation (STOPPED), then `unknown` |
+| `launched` | `sent` | Spawned | Quiescence (below), then `unknown` |
+| any | terminal | Finished call | Evidence, finish, `finished` |
+
+- A `sent` invocation is never declared unlaunched.
+- A record write failure before step 6 stops the command with no `sent`.
+- A failure of the step-8 record write (post-spawn) is post-spawn
+  uncertainty: tree stopped, record stays `launch_pending`.
+
+#### E4c-3 Owner attestation and the group observable
+
+- **Observed live work wins.** A live root, or any observed group member,
+  is `:not_quiescent`. No attestation overrides it.
+- **Empty group (OQ-E3).** An observed empty group with the root gone or
+  reused is automated quiescence **only if** the owner accepts the
+  process-group observable (OQ-E3). Without that acceptance, every
+  `launched` recovery needs the owner's attestation.
+- **When attestation is required.** It is required for:
+  - `launch_pending`;
+  - unreadable records;
+  - a `launched` record whose probe is unavailable;
+  - a `launched` record without OQ-E3.
+
+  `attest_stopped` is extended to `launched` records, but only for the
+  holder of a verified recovery ticket (`verify_recovery` `:ok`) whose
+  record owner is gone. It is never for a live owner, and an observation
+  failure is never turned into absence.
+- **The owner's check.** The console first prints the root pid, the group
+  id and the `ps` checks the owner must run, then requires the typed
+  `STOPPED`.
+- **Audit.** Every attestation appends one audit event,
+  `calibration.owner_attested`, in the recovery transaction. Its payload is
+  metadata only: invocation id, record state, record fingerprint or
+  instance id, ticket id. The in-process helper alone is not
+  authorization.
+
+#### E4c-4 Recovery action
+
+`Agents.recover_calibration(invocation, decision, actor:)` takes the
+owner's confirmation. Its actor is `agent_runtime`. Lock order: run
+`FOR UPDATE` → invocation `FOR UPDATE` → head.
+
+| Status and decision | Action |
+|---|---|
+| `reserved` with `:unlaunched` (record `claimed` or `launch_pending` and DB `reserved`) | `failed` with `abandoned_before_launch`, never re-sent |
+| `sent` with `:quiescent` (from E4c-3) | `unknown`, never re-sent |
+| `sent` otherwise | refused (`:calibration_not_quiescent`), nothing written |
+| terminal | evidence, finish, `finished`, no model call |
+
+It needs no active grant and keeps the original charge (8.4). The target is
+named explicitly (`calibrate-recover <invocation_id>`) and must equal the
+record's `invocation_id` when one is recorded.
+
+#### E4c-5 Outcome map
+
+A failure at the pre-`sent` record write never reaches the outcome map (no
+`sent`). The E3 known no-spawn set (`launch_failed`,
+`provider_queue_timeout`) is unchanged, and wrapper exits 126 and 127 are
+post-spawn, not no-spawn.
+
+#### E4c-6 ADR-0005 amendment (to draft, owner acceptance)
+
+The amendment records:
+- the process-group observable, with its weaker scope and the OQ-E3
+  choice;
+- the `/usr/bin/perl` `setsid` wrapper as the calibration-only launcher,
+  and its OS prerequisite;
+- the record-before-`sent` ordering;
+- the owner-attested audit event.
+
+#### Entity delta
+
+| Entity | New or existing | Delta | Invariants | Actor and locks |
+|---|---|---|---|---|
+| Private ClaudeCLI calibration launch | Existing server, new option | The `setsid` wrapper, under a consumed authority only | Test-seam builds only; root pid = pgid verified before `launched` | Server process |
+| LaunchRecord | Existing (E4a/E4b) | `attest_stopped` for `launched` under a verified ticket | Never a live owner, never over observed live work | File artifact |
+| AuditEvent `calibration.owner_attested` | Existing resource, new event type | Metadata only | Exactly one per attestation, in the recovery transaction | Kernel append |
+| `Agents.recover_calibration/3` | New domain action | Transitions in E4c-4 | `sent` never unlaunched; no model call; no grant needed | Run → invocation → head |
+| Console `calibrate` and `calibrate-recover` | Existing task | The E4c-2 sequence | Single flight, explicit target, typed confirmation | Owner at the terminal |
+
+#### Open questions for the owner
+
+- **OQ-E3:** accept the process-group observable as automated proof that a
+  launched CLI stopped (a descendant could escape by changing group), or
+  require your typed `STOPPED` for every launched recovery?
+- **OQ-E4:** accept `/usr/bin/perl` (the macOS system interpreter) as the
+  calibration-only `setsid` launcher?
+
 ### 8.11 Obligations accepted in round 11
 
 - **Authority:** consumption happens atomically through the registry owner
