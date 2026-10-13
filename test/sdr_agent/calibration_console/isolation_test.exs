@@ -33,15 +33,40 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
     # plus a phantom member that never exits.
     use Agent
 
-    def start_link(_), do: Agent.start_link(fn -> %{group: :real} end, name: __MODULE__)
+    def start_link(_),
+      do:
+        Agent.start_link(fn -> %{group: :real, identity: :real, self: :real} end,
+          name: __MODULE__
+        )
+
     def put(group), do: Agent.update(__MODULE__, &%{&1 | group: group})
-    def self_pid, do: ProcessProbe.self_pid()
-    def start_identity(pid), do: ProcessProbe.start_identity(pid)
+    def put(key, value), do: Agent.update(__MODULE__, &Map.put(&1, key, value))
+
+    def self_pid do
+      case Agent.get(__MODULE__, & &1.self) do
+        :real -> ProcessProbe.self_pid()
+        {:fixed, reply} -> reply
+      end
+    end
+
+    def start_identity(pid) do
+      case Agent.get(__MODULE__, & &1.identity) do
+        :real -> ProcessProbe.start_identity(pid)
+        {:fixed, reply} -> reply
+      end
+    end
 
     def group_members(pgid) do
       case Agent.get(__MODULE__, & &1.group) do
         :real ->
           ProcessProbe.group_members(pgid)
+
+        # A probe that never answers, or raises.
+        :block ->
+          Process.sleep(:infinity)
+
+        :raise ->
+          raise "synthetic probe failure"
 
         {:fixed, reply} ->
           reply
@@ -69,8 +94,13 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
 
     # The observer also records the root's start identity at spawn time, so
     # a test can tell a real launched root from a made-up pid.
-    observer = fn {:spawned, os_pid} = event ->
-      send(parent, {:isolation, event, ProcessProbe.start_identity(os_pid)})
+    observer = fn
+      {:spawned, os_pid} = event ->
+        send(parent, {:isolation, event, ProcessProbe.start_identity(os_pid)})
+
+      # Ownership events (helper, reaper, workspace): forwarded as they are.
+      event ->
+        send(parent, {:isolation, event})
     end
 
     %{observer: observer}
@@ -186,7 +216,184 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
     end
   end
 
+  describe "code review (Codex 01a13570, 119dd22)" do
+    # MF1: the reaper only ever cleans a private directory this preflight
+    # created exclusively, never a synthesized relative name.
+    test "the tracked workspace is a private absolute directory the preflight created", ctx do
+      parent = self()
+
+      observer = fn
+        {:workspace, path} = event ->
+          send(parent, {:isolation, event, File.lstat(path)})
+
+        event ->
+          ctx.observer.(event)
+      end
+
+      assert :ok = Isolation.preflight(observer: observer)
+      assert_received {:isolation, {:workspace, path}, stat}
+      assert Path.type(path) == :absolute
+      assert match?({:ok, %File.Stat{type: :directory}}, stat), inspect(stat)
+      {:ok, %File.Stat{mode: mode}} = stat
+      assert Bitwise.band(mode, 0o777) == 0o700
+      refute File.exists?(path), "the workspace must be removed after cleanup"
+    end
+
+    test "a helper crash after launch cleans only its own workspace and the tree", ctx do
+      parent = self()
+
+      observer = fn
+        {:spawned, _os_pid} = event ->
+          ctx.observer.(event)
+          raise "synthetic observer failure"
+
+        {:workspace, path} = event ->
+          send(parent, {:isolation, event})
+          File.write!(Path.join(path, "../" <> Path.basename(path) <> ".canary"), "keep")
+
+        event ->
+          ctx.observer.(event)
+      end
+
+      assert {:error, :calibration_isolation_unavailable} =
+               Isolation.preflight(observer: observer)
+
+      assert_received {:isolation, {:spawned, os_pid}, _identity}
+      assert_received {:isolation, {:workspace, path}}
+      canary = Path.join(Path.dirname(path), Path.basename(path) <> ".canary")
+
+      try do
+        assert await(fn -> gone?(os_pid) and not File.exists?(path) end),
+               "the tree and the workspace must be cleaned"
+
+        assert File.read!(canary) == "keep", "a file the preflight did not create was touched"
+      after
+        File.rm(canary)
+      end
+    end
+
+    # MF2: the whole preflight is bounded, and a dead caller still cleans.
+    test "a blocking probe is bounded and its target is stopped", ctx do
+      GroupProbe.put(:block)
+      started = System.monotonic_time(:millisecond)
+
+      # Run under an outer bound, so an unbounded preflight fails as an
+      # assertion rather than as a test timeout.
+      task =
+        Task.async(fn ->
+          Isolation.preflight(
+            probe: GroupProbe,
+            ready_ms: 200,
+            bound_ms: 1_500,
+            observer: ctx.observer
+          )
+        end)
+
+      result =
+        case Task.yield(task, 8_000) do
+          {:ok, result} -> result
+          nil -> Task.shutdown(task, :brutal_kill) && :unbounded
+        end
+
+      elapsed = System.monotonic_time(:millisecond) - started
+      assert result == {:error, :calibration_isolation_unavailable}
+      assert elapsed < 6_000, "preflight took #{elapsed} ms"
+      assert_receive {:isolation, {:spawned, os_pid}, _identity}
+      assert_receive {:isolation, {:helper, helper}}
+      assert await(fn -> not Process.alive?(helper) and gone?(os_pid) end)
+    end
+
+    test "a cancelled caller still stops the helper and the target", ctx do
+      GroupProbe.put(:block)
+
+      task =
+        Task.async(fn ->
+          Isolation.preflight(probe: GroupProbe, observer: ctx.observer, bound_ms: 60_000)
+        end)
+
+      assert_receive {:isolation, {:spawned, os_pid}, _identity}, 5_000
+      assert_receive {:isolation, {:helper, helper}}, 5_000
+      Task.shutdown(task, :brutal_kill)
+
+      assert await(fn -> not Process.alive?(helper) and gone?(os_pid) end),
+             "a dead caller left its helper or target running"
+    end
+
+    test "a raising probe is unavailable and stopped", ctx do
+      GroupProbe.put(:raise)
+      result = Isolation.preflight(probe: GroupProbe, observer: ctx.observer)
+      assert result == {:error, :calibration_isolation_unavailable}
+      assert_received {:isolation, {:spawned, os_pid}, _identity}
+      assert await(fn -> gone?(os_pid) end)
+    end
+
+    # MF3: a same-group child left behind by an exiting root is stopped,
+    # and tracking is kept until the cleanup is confirmed.
+    test "a same-group child of an exiting root is stopped", ctx do
+      result =
+        Isolation.preflight(
+          target: "/bin/sleep 20 & printf ready; exit 0",
+          observer: ctx.observer
+        )
+
+      assert result == {:error, :calibration_isolation_unavailable}
+      assert_received {:isolation, {:spawned, os_pid}, _identity}
+
+      try do
+        assert ProcessProbe.group_members(os_pid) == {:ok, []},
+               "a same-group child is still running"
+      after
+        stop_group!(os_pid)
+      end
+    end
+
+    # Important: verify_group shapes every observation.
+    test "verify_group refuses malformed observations" do
+      {port, os_pid} = held_shell!()
+
+      try do
+        for {key, reply} <- [
+              identity: {:fixed, {:ok, ""}},
+              self: {:fixed, {:ok, -1}},
+              self: {:fixed, {:ok, "x"}}
+            ] do
+          GroupProbe.put(key, reply)
+
+          assert Isolation.verify_group(os_pid, probe: GroupProbe) ==
+                   {:error, :calibration_isolation_unavailable},
+                 inspect({key, reply})
+
+          GroupProbe.put(key, :real)
+        end
+
+        GroupProbe.put({:plus, "not-a-pid"})
+
+        assert Isolation.verify_group(os_pid, probe: GroupProbe) ==
+                 {:error, :calibration_isolation_unavailable}
+      after
+        stop!(port, os_pid)
+      end
+    end
+  end
+
   ## Fixtures
+
+  # Bounded wait for `check` to hold.
+  defp await(check, deadline \\ System.monotonic_time(:millisecond) + 5_000) do
+    cond do
+      check.() -> true
+      System.monotonic_time(:millisecond) >= deadline -> false
+      true -> Process.sleep(50) && await(check, deadline)
+    end
+  end
+
+  # Test cleanup only: stops whatever is left in a fixture's own group.
+  defp stop_group!(pgid) do
+    case ProcessProbe.group_members(pgid) do
+      {:ok, members} -> Enum.each(members, &Reaper.kill_tree/1)
+      _ -> :ok
+    end
+  end
 
   # A held shell opened like a launch (Port + ChildEnv), for verify_group.
   defp held_shell! do
