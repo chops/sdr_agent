@@ -1316,7 +1316,8 @@ only, no CLI).
   attestation with these fields:
   - `attestation_id` (a uuid);
   - the target invocation id;
-  - the record binding (`instance_id`, or the unreadable fingerprint);
+  - the record binding (`instance_id`; an unreadable record is a hard
+    owner conflict and is never attested, round 4);
   - the ticket id;
   - the observation it attests (state, root and group ids if any);
   - `confirmed_at`.
@@ -1718,3 +1719,18 @@ launcher) is withdrawn: no wrapper is needed.
 - E4a RED at 3c495f6: **NEEDS-REVIEW, one correction** (Codex, ad1bc5e0):
   the 0500 case is `:launch_record_unsafe`; the write failure is a
   separate replace-step fault. The other groups were accepted.
+- E4c staged delta round 4 at 25c1b18: **ENTITY PASS** (Codex 01a13526,
+  report sha256 fcb6418f). Option A: orphan recovery deferred; unbindable
+  records, abandoned tickets and partial release stay hard owner
+  conflicts, and `STOPPED` grants no repair. Synthetic RED unblocked; each
+  sub-slice needs intended-failure verification before GREEN. Carried
+  bounds:
+  1. A later-process release of `aborted` or `finished` applies only with
+     no recovery ticket, a verified dead owner, and the exact record and
+     claim checked. An existing ticket stays a hard conflict (RED case
+     added).
+  2. A `launch_pending` record without launch metadata recovers only by
+     owner attestation. Physical absence is never derived from `sent_at`,
+     terminal status or an unrelated empty group.
+  3. Unreadable records are never attested (wording trimmed in E4c-4).
+     RED pins the nullable fields of each schema-3 state.
