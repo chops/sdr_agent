@@ -249,7 +249,7 @@ commit and green CI on it):
 - **Pronouns.** Some log entries used "he" for the owner, whose pronouns
   were never stated; the wording is now neutral.
 
-### Sprint 1, day 1 (Mon Oct 12), evening
+### Sprint 1, day 1 (Mon Oct 12), evening checkpoint
 
 **Merged after the mid-day checkpoint** (each with Codex's approval of the
 exact commit and green CI on it):
@@ -266,13 +266,13 @@ exact commit and green CI on it):
 - **The R0-07 design** (PR #133) and **part A of its code** (PR #139):
   - an exact allowlist of approved model setups;
   - an immutable record of each result's release;
-  - model output unreadable until released, with the audit log keeping only
-    a fingerprint of it.
+  - generation-2 Claude CLI output unreadable for business use until
+    released, with the audit log keeping only a fingerprint of it.
 - **The calibration console** (PR #138), where the owner will create the
   G-R0 budget: one fixed database, local port 4124 only, no reset path, no
   model server, and its own private secrets.
 
-**In review or in progress at the end of the day:**
+**In review or in progress at this checkpoint:**
 
 - **R0-07 part C** (PR #143), the per-call result check. Codex found five
   real defects; all five are fixed and back in review.
@@ -323,4 +323,4 @@ says what happened, why, what it cost and what changed.
 | **Oct 12: Claude's walk questions primed the owner.** Before the mockups existed, Claude explained the five walk questions in plain words that hinted at the answers. | Claude tried to help the owner answer questions written for engineers. | The first walk is prompted evidence, not an unprimed usability test; this is recorded in the H1 notes. | The walk now uses Codex's neutral script, and Claude does not explain the answers. |
 | **Oct 12: a pushed design update went unannounced.** A subagent pushed the R0-07 part C round-7 design but did not report it, so Codex was not asked to review it. | Claude relied on the subagent's report instead of checking the branch. | About half an hour of delay on the critical path, which also delayed the Home concept B mockup. | Claude checks branches directly and asks subagents to report each pushed commit. |
 | **Oct 12: tests were written after the code in two part C commits.** RED was captured afterwards by running the new tests against the old code. | A subagent wrote the code first under time pressure. | Weaker evidence that the tests drive the behaviour; disclosed in PR #143. | Disclosed rather than hidden; the process rule (failing test first) stands. |
-| **Oct 12, evening: the account hit its weekly usage limit.** Both background subagents stopped mid-gate with a 429 error. | Parallel subagent work used the shared weekly budget faster than planned. | Unfinished full gates on R0-07 parts B and C, and a checkpoint and login refresh. | No subagents for now; one full test suite at a time in the main session. If the limit returns, stop, keep the work, and tell the owner. |
+| **Oct 12, evening: the account hit its weekly usage limit.** Both background subagents stopped mid-gate with a 429 error. | The weekly limit is shared by every Claude session on the account; how much each session used was not measured. | Unfinished full gates on R0-07 parts B and C, and a checkpoint and login refresh. | No subagents for now; one full test suite at a time in the main session. If the limit returns, stop, keep the work, and tell the owner. |
