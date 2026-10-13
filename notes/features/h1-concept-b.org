@@ -1,0 +1,67 @@
+#+title: H1 Home concept B — compact outreach workbench
+#+date: 2026-10-12
+
+* Approved scope
+Normal-state static concept only, for comparison with Claude's concept A.
+Approval: m_1791851328000030137_e3890e0e replying to
+m_1791851317842264542_a4024c73. Owner briefly held drawing while deciding
+whether to choose A outright, then said "wait to compare concept B" and
+gave GO. A is not changed. No stale/partial/empty redesign until selection.
+
+* Owner walk evidence (verbatim)
+On the original normal.html, after the first neutral question:
+#+begin_quote
+i feel like the inbox is currently too messy. there's a lot of text which requires me to read a lot to figure out what's going on. it's unintuitive. it doesn't feel like an extension of a regular CRM. i'm supposed to be able to log in to the SDR agent and see what's teed up for me or what needs my attention at a glance. i want you and codex to make another mock-up that's more simple and more reprentative of the type of work i'll be doing. e.g. review leads that are ready for outreach, review any problems that need my attention. make the mock-ups sexy.
+#+end_quote
+Source: m_1791850058000032098_e59c2245. This is a rejection of that design,
+not a failure by the owner. #142 remains a reviewed baseline, not accepted
+usability or ADR-0015 evidence.
+
+On concept A:
+#+begin_quote
+concept A is a good start. i like it.
+#+end_quote
+Source: m_1791851163000011664_7b325f63.
+#+begin_quote
+i would not change anything about concept A right now. if we need to iterate on the design we can do it later.
+#+end_quote
+Source: m_1791851379000012079_9af1104f. No choice of B is inferred.
+Earlier contract-question framing mildly primed the owner (baseline notes);
+this comparison is prompted walkthrough evidence, not an unprimed trial.
+
+* Entity / ADR / architecture
+Entity Model trigger: no
+Reason: fictional presentation of the already reviewed Draft/Failure
+contracts; no Lead approval, new source/count API, persisted attribute,
+authorization, lifecycle or backend action changes.
+Counts explicitly mean shown rows, not unseen totals. No total scan;
+50+ would require positive overflow evidence and is not used here.
+No ADR required: static design artifact only. ADR-0015 remains proposed.
+Architecture unchanged — no diagram update needed.
+
+* Files and minimal steps
+1. docs/product/h1/concept-b.html: one self-contained normal workbench:
+   compact outreach rows (person/company/role, one Review action), smaller
+   problems rail, detail drawers on demand, small local-capture label.
+2. Preserve safe behavior in the illustration: approve only in shown email
+   detail, retry disabled, budget changes separate, no send/no mutation.
+3. Inspect desktop/mobile and light/dark; links, keyboard focus, disclosure,
+   overflow and CSP; publish for independent exact-head review and owner
+   comparison, recording uncertainty rather than predicting their answer.
+
+* Verification and limits
+Docs-only: no executable application behavior or runtime RED/GREEN claim.
+Use static structural checks and isolated-browser rendering/interactions;
+full repo gate before final PR. No scripts, forms, external fonts/resources,
+requests or real actions. All people/data fictional under example.org.
+No runtime Home build, database, model call, deployment or spend authority.
+Owner selection/usability and ADR-0015 acceptance are separate gates.
+
+* Neutral comparison
+Ask "What would you do first here?" and "Which direction would you rather
+work in, and why?" without explaining intended actions or naming a winner.
+Record first interpretation/confusion before discussing the implementation.
+
+* Progress
+Scope approved; normal concept drawing and verification in progress.
+ETA about 45 focused minutes from the final GO; report interruptions.
