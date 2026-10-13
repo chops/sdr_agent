@@ -307,12 +307,13 @@ exact commit and green CI on it):
   owner's honest "I'm not sure how to answer" was the most useful finding of
   the walk.
 
-### Sprint 1, day 2 (Tue Oct 13), mid-day checkpoint
+### Sprint 1, day 2 (Tue Oct 13), mid-day checkpoint (11:00 MDT)
 
 Day 2 went to the calibration harness: R0-07 part E, the code that will
-make the one tightly supervised real call per model and record what came
-back. All of it is on the `r0-07e-harness` branch (draft PR #146). Nothing
-merged to `main` today so far. Codex reviews every piece in two steps: it
+make one supervised calibration attempt per owner confirmation, within the
+four-attempt G-R0 grant (two per profile), and record what came back. All
+of it is on the `r0-07e-harness` branch (draft PR #146). Nothing merged to
+`main` today (Denver time) so far. Codex reviews every piece in two steps: it
 first confirms the new tests fail for the right reason, then reviews the
 code that makes them pass.
 
@@ -328,19 +329,23 @@ not a merge, a real call or any spend):
   review rounds tightened it:
   - it cleans up only a directory it created itself;
   - it is bounded in time, even when the caller dies;
-  - it never signals a process it cannot prove it started;
+  - it signals a process only while its recorded root identity still
+    matches; a changed or unverifiable root is never signalled;
   - anything it cannot confirm is reported as an unconfirmed cleanup,
     which keeps the lock and stops the console.
 - **The claim on the reservation** (E4c-c1). The console's lock id is
   recorded on the call's reservation event, so a crash cannot lose which
   call the lock belongs to.
-- **The recovery action** (E4c-c2). It closes out a call after a crash,
-  backed by an audited owner attestation.
+- **The recovery action** (E4c-c2). It safely settles stranded calibration
+  calls under the reviewed rules (never launched, observed quiet, or owner
+  attestation), keeps the attempt charged, and never treats a sent call as
+  proven unlaunched.
+- **The sealed one-shot authority** (d1a, approved at 10:49 MDT). The
+  registry that will support the staging exemption. It is not connected to
+  dispatch yet (part d1b), so on its own it lets no call through.
 
 **In review at this checkpoint:**
 
-- **The sealed one-shot authority** (d1a). It lets exactly one private
-  server call through the staging block.
 - **The G-R0 budget binding** (d2a). The call may only spend from the
   owner's G-R0 budget, at the exact version the console selected.
 
@@ -374,5 +379,5 @@ says what happened, why, what it cost and what changed.
 | **Oct 12: a pushed design update went unannounced.** A subagent pushed the R0-07 part C round-7 design but did not report it, so Codex was not asked to review it. | Claude relied on the subagent's report instead of checking the branch. | About half an hour of delay on the critical path, which also delayed the Home concept B mockup. | Claude checks branches directly and asks subagents to report each pushed commit. |
 | **Oct 12: tests were written after the code in two part C commits.** RED was captured afterwards by running the new tests against the old code. | A subagent wrote the code first under time pressure. | Weaker evidence that the tests drive the behaviour; disclosed in PR #143. | Disclosed rather than hidden; the process rule (failing test first) stands. |
 | **Oct 12, evening: the account hit its weekly usage limit.** Both background subagents stopped mid-gate with a 429 error. | The weekly limit is shared by every Claude session on the account; how much each session used was not measured. | Unfinished full gates on R0-07 parts B and C, and a checkpoint and login refresh. | No subagents for now; one full test suite at a time in the main session. If the limit returns, stop, keep the work, and tell the owner. |
-| **Oct 13: three gate reports overstated a passing build.** The non-test (dev) build failed to compile with warnings as errors, but the reports said the gate was green. | The gate script piped the compile output through `tail`, which hid the step's exit status. | Codex caught it; one extra review round on part E's claim binding. | The gate now checks each step's own exit status and reports PASS or FAIL per step. |
+| **Oct 13: three verification reports wrongly said the dev build compiled.** The non-test (dev) build failed to compile with warnings as errors. The held RED test failures were disclosed separately. | The gate script piped the compile output through `tail` without keeping the step's exit status, which hid the failure. | Codex caught it; one extra review round on part E's claim binding. | The gate now checks each step's own exit status and reports PASS or FAIL per step. |
 | **Oct 13: Claude's inbox watcher moved its own messages.** A watcher matched Claude's own follow-up note and moved two messages meant for Codex out of the shared inbox before Codex read them. | The watcher matched a message id, not who sent it. | Restored within minutes; no message was lost. | Watchers only match replies sent by Codex to Claude. |
