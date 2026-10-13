@@ -362,6 +362,66 @@ No real model call has been made; the budget for them is still zero.
   Each became a test before its fix.
 - **"Passed" has to mean each step passed.** See the misstep below.
 
+### Sprint 1, day 2 (Tue Oct 13), end of day (16:00 MDT)
+
+The afternoon finished the budget binding and the staging exemption, and
+got the console's last part designed and half built. Everything is still on
+the `r0-07e-harness` branch (draft PR #146). Nothing from it merged to
+`main` today; the morning journal entry (#148) did.
+
+**Approved by Codex as components since the checkpoint** (each approval
+covers that piece only, not a merge, a real call or any spend):
+
+- **The G-R0 budget binding** (d2a and d2b).
+  - A calibration call can be reserved only against the owner's G-R0 grant
+    at the exact version the console selected, and only while that
+    profile's allocation is open.
+  - At launch the same binding is checked again: an amended, revoked,
+    swapped or unreadable binding stops the call before it starts, and the
+    charge stays where it was.
+- **The staging exemption** (d1b). One private, unnamed server may make one
+  call, and only:
+  - for the fixed calibration prompt;
+  - after using up a one-shot authority entry;
+  - after the reservation, its run and its stored request are re-checked
+    under the launch locks.
+
+  Every other call stays blocked as today. A request the server would
+  reject never uses up the entry.
+- **The launch receipt** (d3a, the first part of the console commands).
+  After the CLI starts, the server reports the process it launched, or
+  says it could not prove it. The check is bounded by the call's deadline,
+  cannot crash the server, and cannot outlive it.
+
+**In review at the end of the day:**
+
+- **The reserved-call wrapper** (d3b): the console's way to settle its own
+  call through the existing settlement code, after re-checking the target.
+
+**Designed, not yet built:** `calibrate` and `calibrate-recover` (d3c and
+d3d). Codex passed their design after three rounds.
+- **Failure paths:** every failure point has a stated outcome.
+- **One writer:** the command is the only writer of its lock record.
+- **Recovery stays with the owner:** any attempt that may have reached the
+  model needs a typed `STOPPED` and an audited attestation until open
+  question OQ-E3 is decided.
+
+No real model call has been made; the budget for them is still zero.
+
+**What we learned:**
+
+- **Process lifetimes need their own design.** The launch receipt went back
+  three times, each for a different gap:
+  - a slow check could stretch an expired call into a late success;
+  - a crashing check could take the server down;
+  - a stuck check could outlive the server.
+
+  Each was found by a short probe and became a test first.
+- **A negative test has to observe the negative directly.** The wrapper's
+  "never calls the model" tests first only checked side effects. A probe
+  that called the model and then refused still passed them. They now trace
+  the server and require zero calls.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -380,4 +440,6 @@ says what happened, why, what it cost and what changed.
 | **Oct 12: tests were written after the code in two part C commits.** RED was captured afterwards by running the new tests against the old code. | A subagent wrote the code first under time pressure. | Weaker evidence that the tests drive the behaviour; disclosed in PR #143. | Disclosed rather than hidden; the process rule (failing test first) stands. |
 | **Oct 12, evening: the account hit its weekly usage limit.** Both background subagents stopped mid-gate with a 429 error. | The weekly limit is shared by every Claude session on the account; how much each session used was not measured. | Unfinished full gates on R0-07 parts B and C, and a checkpoint and login refresh. | No subagents for now; one full test suite at a time in the main session. If the limit returns, stop, keep the work, and tell the owner. |
 | **Oct 13: three verification reports wrongly said the dev build compiled.** The non-test (dev) build failed to compile with warnings as errors. The held RED test failures were disclosed separately. | The gate script piped the compile output through `tail` without keeping the step's exit status, which hid the failure. | Codex caught it; one extra review round on part E's claim binding. | The gate now checks each step's own exit status and reports PASS or FAIL per step. |
+| **Oct 13: Claude's reply watcher missed a review verdict.** A watcher read its list of message ids with `cat`, which is aliased to another tool in this shell, so the list came back empty and nothing ever matched. | The alias was known but not applied to watcher scripts. | A verified-tests verdict sat unread until Claude checked the inbox by hand; no work was lost. | Watchers read with `/bin/cat` and stop if the list is empty. |
+| **Oct 13: a test claimed a case it could not reach.** The test "a launch that never opened sends no receipt" used a missing CLI, but the launcher always opens `/bin/sh` first, so a launch did open. | The fixture's premise was not checked against how the launcher starts processes. | One extra review round on the launch receipt. Claude and Codex each found it independently. | The case was split: a real refusal before launch, and a missing CLI that is treated as launched. |
 | **Oct 13: Claude's inbox watcher moved its own messages.** A watcher matched Claude's own follow-up note and moved two messages meant for Codex out of the shared inbox before Codex read them. | The watcher matched a message id, not who sent it. | Restored within minutes; no message was lost. | Watchers only match replies sent by Codex to Claude. |
