@@ -1193,3 +1193,12 @@ writer of `status_reason :calibration_latched`.
   the artifact hash is only `evidence_sha256`. Other round-11 contracts
   resolved with implementation bounds.
 - Round 13 (that correction): **UNREVIEWED**, pending Codex recheck.
+- Round 13 at 094caa86: **PASS** (Codex, entity/action review, reply
+  cb187296-64c8-4b99-97c9-610b023e779f, report
+  `codex-r007e-094caa8-round13-pass.md` sha256
+  6606c9a37503e15b747024b761e26af2b7dbc06f9a085b41eaf6247e2b5491b1). The
+  nil `Prelocked` link and receipt with the artifact hash as
+  `evidence_sha256` resolves the last correction; the run-first finish is
+  unchanged and the earlier implementation bounds are kept. Planning and
+  RED tests may proceed. This grants no code merge, calibration,
+  publication, enablement or spend approval; the real-model budget stays 0.
