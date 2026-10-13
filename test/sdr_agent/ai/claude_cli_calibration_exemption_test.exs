@@ -507,6 +507,83 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     end
   end
 
+  ## d3b: the seam-only reserved-call wrapper (packet 8.14.3)
+
+  describe "d3b: ModelProvider.calibration_call/3" do
+    setup ctx do
+      %{cli: cli!(ctx, "d3b-cli", 0)}
+    end
+
+    test "a valid reserved target is called and settled through the facade's helper", ctx do
+      server = server!(ctx, command: ctx.cli)
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+      ref = issue!(server, invocation, run)
+      request = call_request(invocation, run, agent, ref)
+
+      result = admitting(fn -> calibration_call(request, invocation.id, server: server) end)
+
+      assert match?({:ok, %{invocation: %ModelInvocation{status: :completed}}}, result),
+             inspect(result)
+
+      {:ok, settled} = result
+      assert settled.output == %{answer: "blue", confidence: 0.9}
+      assert consumed?(ref)
+      # The witness was captured by the wrapper in this process: the
+      # server launched exactly this invocation.
+      {_command, receipt_ref} = request.calibration.observer
+      assert [{_kind, receipt}] = receipts(receipt_ref)
+      assert receipt.invocation_id == invocation.id
+    end
+
+    for variant <- [
+          :foreign_tenant,
+          :not_reserved,
+          :other_provider,
+          :other_profile,
+          :other_run,
+          :ordinary_run,
+          :operated_run,
+          :stopped_run,
+          :other_request,
+          :other_prompt_ref,
+          :malformed_request,
+          :fabricated_id
+        ] do
+      test "#{variant} is :calibration_call_invalid with no provider call or write", ctx do
+        %{server: server, ref: ref, request: request, id: id, before: before} =
+          call_target(ctx, unquote(variant))
+
+        result = admitting(fn -> calibration_call(request, id, server: server) end)
+
+        assert result == {:error, :calibration_call_invalid}, inspect(result)
+        refute consumed?(ref), "the provider was called"
+        refute File.exists?(ctx.records.tripped), "a process was launched"
+        assert snapshot(id) == before, "the target was written"
+      end
+    end
+
+    test "ordinary ModelProvider.complete/2 keeps the Fake's sent ordering", ctx do
+      AgentsFixtures.grant!(ctx.tenant, %{}, human(:admin, ctx.tenant))
+      %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
+
+      request = %{
+        id: "d3b-fake",
+        operation: "model.complete",
+        prompt: "qualify",
+        schema: Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()}, coerce: true),
+        run: run,
+        actor: agent,
+        audit: AgentsFixtures.model_attrs("d3b-fake") |> Map.drop([:request, :idempotency_key])
+      }
+
+      assert {:ok, %{invocation: %{status: :completed}}} =
+               ModelProvider.complete(request,
+                 provider: SdrAgent.AI.ModelProvider.Fake,
+                 provider_options: []
+               )
+    end
+  end
+
   ## Positive (real shim)
 
   describe "the exemption" do
@@ -917,6 +994,105 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     File.chmod!(path, 0o555)
     path
   end
+
+  # d3b: the console's request: no witness (the wrapper captures it).
+  defp call_request(invocation, run, agent, ref) do
+    invocation
+    |> request(run, agent, ref)
+    |> Map.delete(:witness)
+    |> Map.put(:run, run)
+  end
+
+  defp calibration_call(request, id, opts) do
+    Code.ensure_loaded!(ModelProvider)
+
+    if function_exported?(ModelProvider, :calibration_call, 3),
+      do: apply(ModelProvider, :calibration_call, [request, id, opts]),
+      else: {:error, :calibration_call_undefined}
+  end
+
+  defp snapshot(id) do
+    case Ash.get(ModelInvocation, id, authorize?: false) do
+      {:ok, row} -> {row.status, row.sent_at, row.updated_at}
+      _missing -> :missing
+    end
+  end
+
+  # One target per d3b refusal variant: a valid entry is issued for the
+  # private server, then the target or the request is made wrong.
+  defp call_target(ctx, variant) do
+    profile = if variant == :other_profile, do: :claude_cli_sonnet, else: :claude_cli_opus
+    server = server!(ctx, command: ctx.cli, profile: profile)
+    %{invocation: invocation, run: run, agent: agent} = target_for(ctx, variant)
+    ref = issue!(server, invocation, run, %{profile_id: profile})
+    request = call_request(invocation, run, agent, ref)
+    {request, id} = wrong(ctx, variant, request, invocation)
+    %{server: server, ref: ref, request: request, id: id, before: snapshot(id)}
+  end
+
+  defp target_for(ctx, :ordinary_run) do
+    AgentsFixtures.grant!(ctx.tenant, %{}, human(:admin, ctx.tenant))
+    %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
+    {invocation, _request} = reserve!(run, agent, nil)
+    %{invocation: invocation, run: run, agent: agent}
+  end
+
+  defp target_for(ctx, :operated_run) do
+    %{run: run, agent: agent} = AgentsFixtures.operated_run(ctx.tenant, usage_origin: :proof)
+    {invocation, _request} = reserve!(run, agent, marker(ctx, agent))
+    %{invocation: invocation, run: run, agent: agent}
+  end
+
+  defp target_for(ctx, :other_prompt_ref),
+    do: proof!(ctx, %{prompt_template_sha256: :crypto.hash(:sha256, "another prompt")})
+
+  defp target_for(ctx, _variant), do: proof!(ctx)
+
+  defp wrong(_ctx, :foreign_tenant, request, invocation) do
+    foreign = SdrAgent.Actor |> struct(type: :agent_runtime, tenant_id: Ash.UUIDv7.generate())
+    {%{request | actor: foreign}, invocation.id}
+  end
+
+  defp wrong(_ctx, :not_reserved, request, invocation) do
+    {:ok, _sent} =
+      admitting(fn ->
+        Agents.admit_launch(invocation.id, :claude_cli_opus, actor: request.actor)
+      end)
+
+    {request, invocation.id}
+  end
+
+  defp wrong(ctx, :other_provider, request, _invocation) do
+    AgentsFixtures.grant!(ctx.tenant, %{}, human(:admin, ctx.tenant))
+    %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
+
+    {:ok, fake} =
+      Agents.reserve_model_invocation(run, AgentsFixtures.model_attrs("d3b-fake-target"),
+        actor: agent
+      )
+
+    {%{request | run: run, actor: agent}, fake.id}
+  end
+
+  defp wrong(ctx, :other_run, request, invocation) do
+    %{run: other} = AgentsFixtures.running_run(ctx.tenant, usage_origin: :proof)
+    {%{request | run: other}, invocation.id}
+  end
+
+  defp wrong(_ctx, :stopped_run, request, invocation) do
+    {:ok, _cancelled} = Agents.cancel_run(request.run, actor: request.actor)
+    {request, invocation.id}
+  end
+
+  defp wrong(_ctx, :other_request, request, invocation),
+    do: {%{request | id: "another-request-id"}, invocation.id}
+
+  defp wrong(_ctx, :malformed_request, request, invocation),
+    do: {Map.drop(request, [:prompt, :schema]), invocation.id}
+
+  defp wrong(_ctx, :fabricated_id, request, _invocation), do: {request, Ash.UUIDv7.generate()}
+
+  defp wrong(_ctx, _variant, request, invocation), do: {request, invocation.id}
 
   # Every queued receipt message carrying `ref`, in order, drained.
   defp receipts(ref) do
