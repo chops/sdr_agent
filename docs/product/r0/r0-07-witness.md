@@ -592,7 +592,7 @@ recovery action).
 
 ### 8.4 Gate record
 
-- Round 10 (harness, proposed): **UNREVIEWED**, pending Codex.
+- Round 10 (harness, proposed): **UNREVIEWED**, pending Codex (recorded in section 9).
 
 ## 9. Gate record
 
@@ -771,3 +771,5 @@ recovery action).
     0/3 before the fixes). For the original slice B commits, test order
     is unrecorded and no reconstructed before/after evidence is attached
     yet.
+- Round 10 (calibration harness, section 8, proposed at this commit):
+  **UNREVIEWED**, pending Codex entity review.
