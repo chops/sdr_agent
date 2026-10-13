@@ -24,17 +24,21 @@ defmodule SdrAgent.Agents.Checks.CalibrationAdmission do
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
   @doc """
-  The `{profile_id, entry}` the marker `term` names, or nil when there is
-  none (always nil outside test-seam builds). The entry is returned as
-  given; admission validates it.
+  The `{profile_id, entry}` the marker `term` names; nil when no marker was
+  supplied; `:invalid` when one was supplied but is malformed (missing
+  fields, not a reviewed real profile, or not a marker at all), so it is
+  refused rather than read as absence (review MF2). Always nil outside
+  test-seam builds. The entry is returned as given; admission validates it.
   """
   def scope(term), do: if(@test_seams, do: marked(term))
 
+  defp marked(nil), do: nil
+
   defp marked(%{@marker => %{profile_id: profile_id, entry: entry}}) when is_atom(profile_id) do
-    if ModelProfiles.real?(profile_id), do: {profile_id, entry}
+    if ModelProfiles.real?(profile_id), do: {profile_id, entry}, else: :invalid
   end
 
-  defp marked(_term), do: nil
+  defp marked(_malformed), do: :invalid
 
   if @test_seams do
     @doc """
