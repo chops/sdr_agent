@@ -214,6 +214,9 @@ defmodule SdrAgent.Agents.Admission.Gate do
       end
     end
 
+    defp authorized(_authority, _identity),
+      do: {:error, :calibration_not_authorized, :authority_invalid}
+
     defp current_reviewed?(identity) do
       case ModelProfiles.fetch_real(identity.profile_id) do
         {:ok, profile} ->
@@ -224,9 +227,6 @@ defmodule SdrAgent.Agents.Admission.Gate do
           false
       end
     end
-
-    defp authorized(_authority, _identity),
-      do: {:error, :calibration_not_authorized, :authority_invalid}
   end
 
   defp gate, do: if(active?(), do: :ok, else: {:error, :result_gate_inactive, :inactive})
