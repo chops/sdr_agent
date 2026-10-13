@@ -2445,6 +2445,13 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
     41dca95e).
   - d3 orchestration: delta 8.14 **NEEDS-REVIEW** at edf023d (92ae3ded)
     and 7246478 (87fc001c); **entity PASS** at 125102e (d7278b6d).
-    Sub-slices d3a → d3b → d3c → d3d. d3a RED **PASS / VERIFIED RED** at
-    52a5329 (d26e1534) after c8da183 and 6bd0ed6 (opened-shell fixture,
-    post-open unknown control); GREEN in review.
+    Sub-slices d3a → d3b → d3c → d3d.
+    - d3a launch receipt: RED **PASS / VERIFIED RED** at 52a5329 (d26e1534)
+      after c8da183 and 6bd0ed6. Code **scoped APPROVE** at 48e66f1
+      (cddc87fa) after three fixes: 3b82624 (proof bounded by the deadline
+      and caller), 0a47a27 (unlinked helper) and cbe1e0f (probe lifetime
+      tied to the provider).
+    - d3b reserved-call wrapper: RED **PASS / VERIFIED RED** at 6d05e84
+      (5f6a6ffc) after 54389c6 and 17a5d82 (direct no-provider-call
+      evidence, acknowledged trace delivery). Coverage additions at 62374a6
+      and GREEN at c869b90, in review.
