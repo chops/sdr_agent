@@ -7,17 +7,20 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
 
   Under a private `root`, `run.lock` (created by `mkdir`, mode 0700) holds
   `record.json` (mode 0600) in the closed schema
-  `r0-calibration-launch-record/1`: `instance_id`, `owner_pid` and
+  `r0-calibration-launch-record/2`: `instance_id`, `owner_pid` and
   `owner_identity` (its start identity), `generation` 1, and a `state`
   with the fields it requires:
 
     * `claimed` (after preflight) — no launch can have happened;
     * `launch_pending` (`invocation_id`) — written after the invocation is
       `sent` and before the child is spawned;
-    * `launched` (`root_pid`, `root_identity`, `session_id`);
+    * `launched` (`root_pid`, `root_identity`, `process_group_id` — the
+      CLI's own process group: macOS `ps` reports no session id);
     * `finished` — nothing outstanding; `release/3` then removes the lock.
 
-  `owner_attested_at`, when present, is a canonical UTC timestamp.
+  `owner_attested_at`, when present, is a canonical UTC timestamp. A
+  schema-1 record (`session_id`) is never reinterpreted: it reads as
+  unreadable and needs the owner.
 
   **Private, owner-local paths.** Every operation first requires that the
   root, `run.lock`, the record and any recovery ticket (`run.lock/recover`
@@ -55,13 +58,15 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   **Quiescence** (`quiescence/2`): `claimed` and `finished` have nothing
   outstanding; a `launch_pending` or unreadable record needs the owner's
   attestation (`attest_stopped/4`, typed `STOPPED`); a `launched` record
-  needs no process in its session and its root absent or reused. Root death
-  alone is never quiescence.
+  needs its process group successfully observed empty and its root absent
+  or reused. Root death alone is never quiescence, and group emptiness is
+  not a whole-descendant proof (a descendant can change its group; packet
+  R11-1, staged E4b delta).
 
   **Probe** (`probe:`, a module): `self_pid/0` → `{:ok, pid}`,
-  `start_identity/1` → `{:ok, identity}` or `:absent`, `session_members/1`
-  → `{:ok, pids}`. Anything else — an error, a raise, or a malformed reply —
-  is `:probe_unavailable`, never absence or an empty session: claim creates
+  `start_identity/1` → `{:ok, identity}` or `:absent`, `group_members/1`
+  → `{:ok, pids}` (`SdrAgent.CalibrationConsole.ProcessProbe` on macOS). Anything else — an error, a raise, or a malformed reply —
+  is `:probe_unavailable`, never absence or an empty group: claim creates
   nothing, recovery is refused and quiescence is not established.
 
   **Test seams.** Only in test-seam builds are the `replace:` option (the
@@ -76,11 +81,11 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
 
   import Bitwise
 
-  @schema "r0-calibration-launch-record/1"
+  @schema "r0-calibration-launch-record/2"
   @confirmation "STOPPED"
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
   @keys ~w(schema instance_id owner_pid owner_identity generation state invocation_id root_pid
-           root_identity session_id owner_attested_at)a
+           root_identity process_group_id owner_attested_at)a
   @order %{claimed: :launch_pending, launch_pending: :launched, launched: :finished}
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
   @timestamp ~r/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\z/
@@ -115,7 +120,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   @doc """
   Moves `record` (which must equal the record on disk) to `state` with its
   `attrs`: `claimed → launch_pending (invocation_id) → launched (root_pid,
-  root_identity, session_id) → finished`. `{:ok, record}` or `{:error,
+  root_identity, process_group_id) → finished`. `{:ok, record}` or `{:error,
   :invalid_transition | :launch_record_unsafe | :launch_record_write_failed}`.
   """
   def advance(root, record, state, attrs, opts \\ []) do
@@ -223,7 +228,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   def quiescence(%{state: "launched"} = record, opts) do
     probe = probe(opts)
 
-    with {:ok, members} <- observe(:session, fn -> probe.session_members(record.session_id) end),
+    with {:ok, members} <- observe(:group, fn -> probe.group_members(record.process_group_id) end),
          {:ok, root} <- observe(:identity, fn -> probe.start_identity(record.root_pid) end) do
       if members == [] and root != {:ok, record.root_identity},
         do: :quiescent,
@@ -275,10 +280,10 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
     if id =~ @uuid, do: {:ok, %{invocation_id: id}}, else: :error
   end
 
-  defp fields(:launched, %{root_pid: pid, root_identity: identity, session_id: session})
+  defp fields(:launched, %{root_pid: pid, root_identity: identity, process_group_id: group})
        when is_integer(pid) and pid > 0 and is_binary(identity) and identity != "" and
-              is_integer(session) and session > 0,
-       do: {:ok, %{root_pid: pid, root_identity: identity, session_id: session}}
+              is_integer(group) and group > 0,
+       do: {:ok, %{root_pid: pid, root_identity: identity, process_group_id: group}}
 
   defp fields(:finished, _attrs), do: {:ok, %{}}
   defp fields(_state, _attrs), do: :error
@@ -449,12 +454,12 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   defp state_fields?(%{state: state} = r) when state in ["launched", "finished"],
     do:
       uuid?(r.invocation_id) and pos_int?(r.root_pid) and text?(r.root_identity) and
-        pos_int?(r.session_id)
+        pos_int?(r.process_group_id)
 
   defp state_fields?(_record), do: false
 
   defp launch_fields_nil?(r),
-    do: is_nil(r.root_pid) and is_nil(r.root_identity) and is_nil(r.session_id)
+    do: is_nil(r.root_pid) and is_nil(r.root_identity) and is_nil(r.process_group_id)
 
   defp uuid?(value), do: is_binary(value) and value =~ @uuid
   defp pos_int?(value), do: is_integer(value) and value > 0
@@ -664,7 +669,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   defp classify(:identity, {:ok, identity}) when is_binary(identity) and identity != "",
     do: {:ok, {:ok, identity}}
 
-  defp classify(:session, {:ok, pids}) when is_list(pids) do
+  defp classify(:group, {:ok, pids}) when is_list(pids) do
     if Enum.all?(pids, &(is_integer(&1) and &1 > 0)), do: {:ok, pids}, else: :error
   end
 
