@@ -45,5 +45,12 @@ defmodule SdrAgent.CalibrationConsole.PromptTest do
     assert {:error, _} = Prompt.parse(%{"answer" => "blue"})
     assert {:error, _} = Prompt.parse(%{"answer" => 1, "confidence" => 0.5})
     assert {:error, _} = Prompt.parse(%{"answer" => "blue", "confidence" => 2})
+    assert {:error, _} = Prompt.parse(%{"answer" => "blue", "confidence" => -0.1})
+  end
+
+  test "confidence accepts both endpoints, 0 and 1" do
+    assert {:ok, _} = Prompt.parse(%{"answer" => "blue", "confidence" => 0})
+    assert {:ok, _} = Prompt.parse(%{"answer" => "blue", "confidence" => 1})
+    assert {:ok, _} = Prompt.parse(%{"answer" => "blue", "confidence" => 1.0})
   end
 end
