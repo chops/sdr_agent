@@ -341,8 +341,10 @@ defmodule SdrAgent.Agents.Admission.Gate do
   evidence file (R0-07 slice E, R11-3) to bind its candidate.
   """
   def recorded_tuple(invocation) do
-    case original_reservation(invocation) do
-      {:ok, event} -> decode(get_in(event.payload, ["arguments", "calibration_tuple"]))
+    with {:ok, event} <- original_reservation(invocation),
+         {:ok, arguments} <- arguments(event) do
+      decode(arguments["calibration_tuple"])
+    else
       :error -> :invalid
     end
   end
@@ -357,7 +359,7 @@ defmodule SdrAgent.Agents.Admission.Gate do
   """
   def recorded_claim(invocation) do
     with {:ok, event} <- original_reservation(invocation),
-         arguments = Map.get(event.payload, "arguments") || %{},
+         {:ok, arguments} <- arguments(event),
          {:ok, claim} <- decode_claim(arguments["calibration_claim"]),
          :ok <- with_tuple(claim, decode(arguments["calibration_tuple"])) do
       {:ok, claim}
@@ -365,6 +367,17 @@ defmodule SdrAgent.Agents.Admission.Gate do
       _missing_duplicate_or_malformed -> {:error, :claim_unrecorded}
     end
   end
+
+  # The recorded arguments, shaped before any field is read: a map, or
+  # none at all (legacy: claimless and tupleless); anything else is
+  # malformed (Codex 01a135c1).
+  defp arguments(%{payload: %{"arguments" => %{} = arguments}}), do: {:ok, arguments}
+  defp arguments(%{payload: %{"arguments" => nil}}), do: {:ok, %{}}
+
+  defp arguments(%{payload: %{} = payload}),
+    do: if(Map.has_key?(payload, "arguments"), do: :error, else: {:ok, %{}})
+
+  defp arguments(_event), do: :error
 
   defp with_tuple(nil, _tuple), do: :ok
   defp with_tuple(_claim, {:ok, _entry}), do: :ok
