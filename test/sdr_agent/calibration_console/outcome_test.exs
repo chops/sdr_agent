@@ -166,6 +166,40 @@ defmodule SdrAgent.CalibrationConsole.OutcomeTest do
       assert classify(link: nil, gate: gate).outcome == "unreadable"
     end
 
+    # Packet 8.14.8 E3 delta: a failed read of the store is unreadable,
+    # never "missing" or "projection_differs"; no capture stays missing.
+    test "unreadable: an unreadable primary blob (inferred link, no projection)" do
+      for reason <- ~w(blob_missing blob_too_large blob_corrupt) do
+        blob = link(:inferred, projection: nil)
+        gate = {:ok, receipt(:inferred, [reason], @link_id)}
+        result = classify(link: blob, gate: gate)
+
+        # Only the projection is unknown: the link's own method and the
+        # independently valid init are recorded as before.
+        assert result == %{
+                 outcome: "unreadable",
+                 evaluated_projection_version: nil,
+                 evaluated_method: "propagated_id",
+                 attested_cli_version: "2.1.294",
+                 attested_model_id: "claude-opus-5-5"
+               },
+               reason
+      end
+    end
+
+    test "unreadable: a failed inventory read" do
+      for code <- ~w(unsafe_path record_invalid record_too_large too_many_entries
+                     invalid_invocation_id store_root_missing) do
+        gate = {:ok, receipt(:unwitnessed, [code], nil)}
+        assert classify(link: nil, gate: gate).outcome == "unreadable", code
+      end
+    end
+
+    test "missing: no capture (witness_missing) is not unreadable" do
+      gate = {:ok, receipt(:unwitnessed, ["witness_missing"], nil)}
+      assert classify(link: nil, gate: gate).outcome == "missing"
+    end
+
     test "init_drift: a drifted init, whatever the receipt says" do
       for reason <- [:model_attestation_drift, :version_attestation_drift] do
         attestation = %{status: :drift, reason: reason, model: nil, version: nil}

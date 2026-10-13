@@ -2061,8 +2061,10 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 - **Round 3** at acce675: **NEEDS-REVIEW** (Codex e0f21482). The E3
   mapping is supported. Correction: an unread blob clears only the
   projection, never the link's method or a valid init.
-- **This revision** corrects that wording. No d3c RED work starts before it
-  passes.
+- **Round 4** at 623e7db: **entity/action PASS** (Codex 40606098). This
+  approves the d3c RED scope and the narrow E3 delta; exact RED
+  verification comes before GREEN. It is not code, integrated, spend or
+  promotion approval.
 
 **Why this is needed.** A gate-less `Witness.reconcile/2` defers a
 completed, unreleased generation-2 ClaudeCLI row (`:deferred_to_gate`),
@@ -2619,5 +2621,6 @@ method, attestation and inventory fields are nil.
       (verified failing first). Code **scoped APPROVE** at b756c49
       (31c34763) after c869b90 (request-shape check before the span); the
       optional d3a notes at 7ffede8 were approved with it.
-    - d3c and d3d: the 8.14.8 observation and document addendum is in
-      entity recheck; then d3c RED.
+    - d3c and d3d: the 8.14.8 addendum has **entity/action PASS** at
+      623e7db (40606098) after edf023d-era rounds 431aa56, e185bbd and
+      acce675. d3c RED is in progress.
