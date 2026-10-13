@@ -612,7 +612,8 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     assert run.trigger_signal_type == "calibration.console"
     assert run.trigger_signal_id == reserved_claim(ctx, summary.invocation_id)
 
-    assert {run.phase, run.max_model_calls, run.max_tool_calls, run.max_tokens} ==
+    assert {run.phase, run.budget.max_model_calls, run.budget.max_tool_calls,
+            run.budget.max_tokens} ==
              {:research, 1, 0, 100_000}
 
     assert is_binary(run.correlation_id)
@@ -706,7 +707,11 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
 
       assert {run.status, run.status_reason} == {:budget_exhausted, :grant_exhausted}
       assert [failure] = Enum.reject(all_failures(ctx), &MapSet.member?(before, &1.id))
-      assert run.refusal_failure_id == failure.id
+      # The stored cause is the receipt's Failure; the stop event records
+      # the exact receipt it was given.
+      assert run.attention_failure_id == failure.id
+      assert [stop] = run_events(ctx, run, "agents.run.budget_exhausted")
+      assert stop.payload["arguments"]["refusal_failure_id"] == failure.id
       assert launches(ctx) == 0
     end
 
@@ -756,6 +761,8 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
         _phase, _context -> :ok
       end
 
+      before = MapSet.new(all_failures(ctx), & &1.id)
+
       assert {:stop, :calibration_launch_refused, summary} = run(ctx, hook: hook)
       assert summary.record == :released
       assert summary.outcome == "launch_failed"
@@ -763,10 +770,40 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
       invocation = invocation!(summary.invocation_id)
       assert {invocation.status, invocation.sent_at} == {:failed, nil}
       run = run_of(invocation.id)
-      # The refusal's own stop holds; E1 never turns it into a success.
-      assert run.status == :failed
-      assert is_binary(run.refusal_failure_id)
-      assert [_one] = Enum.filter(all_failures(ctx), &(&1.id == run.refusal_failure_id))
+
+      # The launch receipt: its one immutable event for this invocation,
+      # run and request, naming the one new Failure.
+      assert [refused] =
+               ctx.tenant
+               |> events_of_type("model.launch.refused")
+               |> Enum.filter(&(&1.subject_id == invocation.id))
+
+      assert {refused.agent_run_id, refused.idempotency_key} ==
+               {run.id, invocation.idempotency_key}
+
+      assert [cause] = Enum.reject(all_failures(ctx), &MapSet.member?(before, &1.id))
+      assert refused.payload["failure_id"] == cause.id
+
+      # The refusal's own stop holds, with that exact cause; E1 never turns
+      # it into a success.
+      assert {run.status, run.status_reason} == {:failed, :model_not_admitted}
+      assert run.attention_failure_id == cause.id
+      assert [stop] = run_events(ctx, run, "agents.run.failed")
+      assert stop.payload["arguments"]["refusal_failure_id"] == cause.id
+      assert stop.payload["arguments"]["refusal_request_id"] == invocation.idempotency_key
+
+      # The stop precedes the calibration latch in the tenant's sequence. A
+      # cause resolved before the stop is still linked by that same action
+      # (model_not_admitted_worker_test.exs, "a launch refusal resolved
+      # before the stop"); this test pins that calibrate forwards the exact
+      # receipt to it.
+      assert [latch] =
+               ctx.tenant
+               |> events_of_type("model.result.calibration")
+               |> Enum.filter(&(&1.model_invocation_id == invocation.id))
+
+      assert stop.sequence < latch.sequence
+
       assert_unlaunched_latched(ctx, invocation, summary, run_status: :failed)
       assert launches(ctx) == 0
     end
@@ -950,6 +987,15 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
         "WHEN (NEW.event_type IN (#{types})) EXECUTE FUNCTION #{name}()",
       []
     )
+  end
+
+  # The events of `event_type` whose subject is `subject` (a run or an
+  # invocation), in sequence order.
+  defp run_events(ctx, subject, event_type) do
+    ctx.tenant
+    |> events_of_type(event_type)
+    |> Enum.filter(&(&1.subject_id == subject.id))
+    |> Enum.sort_by(& &1.sequence)
   end
 
   defp proof_runs(ctx) do

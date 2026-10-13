@@ -2235,6 +2235,14 @@ method, attestation and inventory fields are nil.
   approved, so the scoped hook and setup RED may proceed. Exact RED
   verification comes before GREEN. This is not integrated, merge, spend or
   promotion approval.
+- **Open before the integrated merge (Claude):** a test clock for every
+  participating process. The private server reads the real clock in its
+  own process, so these hermetic tests pass only inside G-R0's fixed
+  window, which ends 2026-10-19 05:59 UTC (Codex 3b40a333). Its contract is
+  staged first if it needs a new test seam. It must include a genuine
+  expiry-boundary refusal case. Production's fixed expiry and real
+  admission instant stay unchanged: no renewal, no wall-clock bypass, no
+  silent skip and no global environment dispatcher.
 
 **Entity Model trigger: yes.** Three changes:
 - a new orchestration option contract: `Calibrate.run/2` and its options,
