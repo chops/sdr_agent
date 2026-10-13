@@ -31,7 +31,9 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
          invocation of a `:proof` run in any terminal status;
        * any given link must be this invocation's current link.
     4. After the upsert: a fresh row passes; an existing row with the same
-       disposition, reason, link and evidence is an identical replay
+       disposition, reason, link and evidence — and the same gate cause
+       bound by its withheld event (R0-07 R7-1,
+       `SdrAgent.Agents.ReleaseDecision.Binding`) — is an identical replay
        (marked so no second event is appended); anything else fails with
        `SdrAgent.Agents.Errors.ReleaseConflict`.
 
@@ -47,6 +49,7 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   alias SdrAgent.Agents.Errors.ReleaseConflict
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ReleaseDecision.Binding
   alias SdrAgent.Agents.ReleaseDecision.Prelocked
   alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.Agents.Witness
@@ -365,14 +368,16 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
       record.id == Ash.Changeset.get_attribute(changeset, :id) ->
         {:ok, record}
 
-      Map.take(record, @fingerprint) == fingerprint(changeset) ->
+      Map.take(record, @fingerprint) == fingerprint(changeset) and
+          Binding.bound_cause(record) == Ash.Changeset.get_argument(changeset, :gate_cause_id) ->
         {:ok, Ash.Resource.put_metadata(record, :sdr_replayed, true)}
 
       true ->
         {:error,
          ReleaseConflict.exception(
            model_invocation_id: record.model_invocation_id,
-           existing_id: record.id
+           existing_id: record.id,
+           existing_cause_id: Binding.bound_cause(record)
          )}
     end
   end
