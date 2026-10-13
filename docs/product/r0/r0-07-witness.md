@@ -1840,4 +1840,6 @@ launcher) is withdrawn: no wrapper is needed.
     to selection (01a1364c).
   - d2b launch binding: RED at 74a9691 **NEEDS-REVIEW** (01a13652:
     malformed recorded binding at launch; well-shaped grant, allocation and
-    profile mismatches); additions at 9a58223, awaiting re-verification.
+    profile mismatches); additions **PASS / VERIFIED RED** at 9a58223
+    (01a1365c); code **scoped APPROVE** at b39b62d (01a13674).
+  - d1b staging exemption: design note sent for review before RED.
