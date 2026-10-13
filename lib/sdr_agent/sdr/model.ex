@@ -14,7 +14,12 @@ defmodule SdrAgent.SDR.Model do
   records the outcome; the caller receives `{:error, {:halt, reason}}`. A
   refused real-model reservation (C9) stops the run `budget_exhausted` with
   `:grant_exhausted` for a grant cap, or `failed` with `:grant_unavailable`
-  otherwise, linking the refusal's own Failure (one attention item).
+  otherwise, linking the refusal's own Failure (one attention item). A
+  real call not admitted (R0-07 slice B, row B1) — an admission-gate
+  refusal before reservation, or any launch receipt (`%Refused{stage:
+  :launch}`, which the ClaudeCLI server and the facade pass on unchanged)
+  — stops the run `failed` with `:model_not_admitted`, linking that
+  receipt's one Failure the same way.
 
   **Result gate (R0-07 slice C, REQ-07-4).** A completed generation-2
   ClaudeCLI output is returned only after `SdrAgent.Agents.ResultGate.gate/3`
@@ -173,8 +178,9 @@ defmodule SdrAgent.SDR.Model do
   cap (`{:budget_exhausted, :grant | :grant_day | :allocation}`) →
   `budget_exhausted` with `:grant_exhausted`; no eligible grant, no or an
   ambiguous allocation, or no usage origin → `failed` with
-  `:grant_unavailable`. The link holds even if an admin resolved the Failure
-  meanwhile.
+  `:grant_unavailable`; an admission-gate refusal or a launch receipt
+  (R0-07 slice B) → `failed` with `:model_not_admitted`. The link holds even
+  if an admin resolved the Failure meanwhile.
   """
   def stop_refused(%Context{} = ctx, run, %Refused{} = refused) do
     link = %{refusal_failure_id: refused.failure_id, refusal_request_id: refused.request_id}
@@ -195,13 +201,33 @@ defmodule SdrAgent.SDR.Model do
           }),
           actor: ctx.actor
         )
+
+      :model_not_admitted ->
+        Agents.fail_run(
+          run,
+          Map.merge(link, %{
+            status_reason: :model_not_admitted,
+            failure_reason:
+              "model call not admitted (#{refused.stage}): " <>
+                "#{Admission.reason_name(refused.reason)} (#{Admission.check_label(refused.check)})"
+          }),
+          actor: ctx.actor
+        )
     end
   end
+
+  # R0-07 slice B (row B1): every launch receipt, and an admission-gate
+  # refusal before reservation, stops the run :model_not_admitted.
+  defp stop_reason(%Refused{stage: :launch}), do: :model_not_admitted
 
   defp stop_reason(%Refused{reason: reason}) when reason in @grant_caps, do: :grant_exhausted
 
   defp stop_reason(%Refused{reason: reason}) when reason in @grant_unavailable,
     do: :grant_unavailable
+
+  defp stop_reason(%Refused{reason: reason}) do
+    if Admission.admission_reason?(reason), do: :model_not_admitted
+  end
 
   defp halt_budget(ctx, run, reason) do
     with {:ok, _run} <- Agents.exhaust_run_budget(run, %{status_reason: reason}, actor: ctx.actor) do

@@ -24,8 +24,10 @@ defmodule SdrAgent.Agents.AgentRun do
   `attention_failure_id` in the same transaction (an operator cancel opens
   none); an operator `retry` resolves the retried run's Failure. A run
   stopped by a refused real-model reservation (C9: `:fail` with
-  `:grant_unavailable`, `:exhaust_budget` with `:grant_exhausted`, each with
-  the refusal receipt's `refusal_failure_id` and `refusal_request_id`)
+  `:grant_unavailable`, `:exhaust_budget` with `:grant_exhausted`; R0-07
+  slice B: `:fail` with `:model_not_admitted`, a real call refused by the
+  admission gate before reservation or at launch — each with the refusal
+  receipt's `refusal_failure_id` and `refusal_request_id`)
   opens none and links that exact deduplicated Failure instead, even if an
   admin has resolved it meanwhile; the stop event records both arguments
   (`SdrAgent.Agents.Changes.LinkRefusalAttention`). A run stopped by the
@@ -87,10 +89,13 @@ defmodule SdrAgent.Agents.AgentRun do
     :crash,
     :cancelled_by_operator,
     :witness_mismatch,
-    :witness_unreconciled
+    :witness_unreconciled,
+    :model_not_admitted
   ]
-  # C9: stop reasons of a refused real-model reservation (its Failure is linked).
-  @refused [:grant_exhausted, :grant_unavailable]
+  # C9: stop reasons of a refused real-model reservation (its Failure is
+  # linked); R0-07 slice B adds :model_not_admitted (admission refusals
+  # before reservation and at launch).
+  @refused [:grant_exhausted, :grant_unavailable, :model_not_admitted]
   # R0-07 slice C: stop reasons of the result gate (its exact cause is linked).
   @gate [:witness_mismatch, :witness_unreconciled]
   @transitions [
@@ -233,12 +238,14 @@ defmodule SdrAgent.Agents.AgentRun do
             :crash,
             :grant_unavailable,
             :witness_mismatch,
-            :witness_unreconciled
+            :witness_unreconciled,
+            :model_not_admitted
           ]
         ]
 
       # C9: the refusal receipt — its exact Failure and request id (required
-      # with, and only with, :grant_unavailable); linked instead of a new one.
+      # with, and only with, :grant_unavailable or :model_not_admitted);
+      # linked instead of a new one.
       argument :refusal_failure_id, :uuid
       argument :refusal_request_id, :string
 

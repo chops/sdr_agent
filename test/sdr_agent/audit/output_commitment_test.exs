@@ -31,6 +31,9 @@ defmodule SdrAgent.Audit.OutputCommitmentTest do
   @fields ~w(parsed_output validation_errors refusal)
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     tenant = bootstrap!()
     AgentsFixtures.grant!(tenant)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)

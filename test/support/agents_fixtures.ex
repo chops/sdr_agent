@@ -18,7 +18,9 @@ defmodule SdrAgent.AgentsFixtures do
   @doc """
   Like `running_run/2`, but the run owns a running `research_lead`
   Operation (as an assignment run does), so a result-gate cause can carry
-  its `operation_id` (R0-07 slice C). Returns `%{run, agent, operation}`.
+  its `operation_id` (R0-07 slice C). Option `oban_job_id:` binds the
+  Operation to that job id (e.g. one that no longer exists, so the
+  stale-run sweeper can recover the run). Returns `%{run, agent, operation}`.
   """
   def operated_run(tenant, opts \\ []) do
     agent = system_actor(:agent_runtime, tenant)
@@ -34,7 +36,8 @@ defmodule SdrAgent.AgentsFixtures do
           subject_id: Ecto.UUID.generate(),
           idempotency_key: key,
           correlation_id: Ecto.UUID.generate(),
-          max_attempts: 1
+          max_attempts: 1,
+          oban_job_id: Keyword.get(opts, :oban_job_id)
         },
         actor: agent
       )
@@ -141,8 +144,33 @@ defmodule SdrAgent.AgentsFixtures do
   tenant needs an eligible grant (`grant!/2`).
   """
   def claude_completed!(run, agent, key, completion \\ completion()) do
+    # R0-07 slice B: the reservation is admitted only for its own duration
+    # (`SdrAgent.AdmissionFixtures.admitting/1`), so the test's allowlist
+    # governs every later reconciliation.
     {:ok, reserved} =
-      SdrAgent.Agents.reserve_model_invocation(run, claude_attrs(key), actor: agent)
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        SdrAgent.Agents.reserve_model_invocation(run, claude_attrs(key), actor: agent)
+      end)
+
+    {:ok, sent} = SdrAgent.Agents.mark_model_invocation_sent(reserved, actor: agent)
+    {:ok, done} = SdrAgent.Agents.complete_model_invocation(sent, completion, actor: agent)
+    done
+  end
+
+  @doc """
+  Like `claude_completed!/4`, for a `:proof` run: the calibration call is
+  reserved with the test-seam calibration admission authority for the
+  Opus profile (`SdrAgent.AdmissionFixtures.calibration/0`; R0-07 slice B,
+  row B4), which a `:proof` run needs.
+  """
+  def proof_completed!(run, agent, key, completion \\ completion()) do
+    {:ok, reserved} =
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        SdrAgent.Agents.reserve_model_invocation(run, claude_attrs(key),
+          actor: agent,
+          calibration: SdrAgent.AdmissionFixtures.calibration()
+        )
+      end)
 
     {:ok, sent} = SdrAgent.Agents.mark_model_invocation_sent(reserved, actor: agent)
     {:ok, done} = SdrAgent.Agents.complete_model_invocation(sent, completion, actor: agent)

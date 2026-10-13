@@ -21,6 +21,9 @@ defmodule SdrAgent.Operations.AttentionTest do
   @fake_cli Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     tenant = bootstrap!()
 
     %{

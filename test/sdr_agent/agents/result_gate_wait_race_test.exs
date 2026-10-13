@@ -67,7 +67,12 @@ defmodule SdrAgent.Agents.ResultGateWaitRaceTest do
     {:ok, run} = Agents.get_run(ctx.run.id, actor: ctx.agent)
     started = System.monotonic_time(:millisecond)
     attrs = AgentsFixtures.claude_attrs("gate-race-#{System.unique_integer([:positive])}")
-    reserved = Agents.reserve_model_invocation(run, attrs, actor: ctx.agent)
+    # R0-07 slice B: admitted only for the reservation itself.
+    reserved =
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        Agents.reserve_model_invocation(run, attrs, actor: ctx.agent)
+      end)
+
     reserve_ms = System.monotonic_time(:millisecond) - started
 
     assert {:ok, %{status: :reserved}} = reserved

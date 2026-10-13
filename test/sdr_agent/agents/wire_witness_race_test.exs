@@ -27,6 +27,9 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
   @racers 8
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     :ok = Sandbox.checkout(SdrAgent.Repo, sandbox: false)
     cleanup!()
     on_exit(fn -> with_connection(&cleanup!/0) end)

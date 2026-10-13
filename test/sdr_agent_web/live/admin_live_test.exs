@@ -137,6 +137,9 @@ defmodule SdrAgentWeb.AdminLiveTest do
 
   test "the provider card refreshes when a call commits (attestation drift is seen live)",
        %{conn: conn} = ctx do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple.
+    SdrAgent.AdmissionFixtures.admit_tuples!()
+
     start_supervised!(
       {SdrAgent.AI.ModelProvider.ClaudeCLI,
        name: SdrAgent.AI.ModelProvider.ClaudeCLI.server(),

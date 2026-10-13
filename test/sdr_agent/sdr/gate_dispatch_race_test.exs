@@ -37,6 +37,10 @@ defmodule SdrAgent.SDR.GateDispatchRaceTest do
     AgentsFixtures.grant!(tenant)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
 
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
+
     {:ok, reserved} =
       Agents.reserve_model_invocation(run, AgentsFixtures.claude_attrs("dispatch-race"),
         actor: agent
