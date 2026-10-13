@@ -26,6 +26,8 @@ defmodule SdrAgent.AI.ClaudeCLITest do
           {"malformed", :invalid_cli_stream},
           {"model_drift", :model_attestation_drift},
           {"version_drift", :version_attestation_drift},
+          # R0-08: the previously reviewed 2.1.291 is now drift, not attested.
+          {"old_version", :version_attestation_drift},
           {"tool_drift", :tool_attestation_drift}
         ] do
       {:ok, server} = start_server(mode)
@@ -90,7 +92,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
       assert %{
                status: :attested,
                model: "claude-opus-5-5",
-               version: "2.1.291",
+               version: "2.1.294",
                reason: nil,
                at: %DateTime{}
              } = ClaudeCLI.attestation()
@@ -740,12 +742,12 @@ defmodule SdrAgent.AI.ClaudeCLITest do
         assert result.model == resolved
         assert result.provenance.profile_id == profile
         assert result.provenance.model_id == resolved
-        assert result.provenance.provider_version == "2.1.291"
+        assert result.provenance.provider_version == "2.1.294"
 
         assert %{"alias" => ^model_alias, "resolved_id" => ^resolved} =
                  result.provenance.model_catalog_entry
 
-        assert %{status: :attested, model: ^resolved, version: "2.1.291"} =
+        assert %{status: :attested, model: ^resolved, version: "2.1.294"} =
                  ClaudeCLI.attestation(server)
 
         GenServer.stop(server)
@@ -771,7 +773,7 @@ defmodule SdrAgent.AI.ClaudeCLITest do
                provider: :claude_cli,
                profile_id: :claude_cli_sonnet,
                model_id: "claude-sonnet-5-5",
-               provider_version: "2.1.291",
+               provider_version: "2.1.294",
                model_catalog_entry: %{"alias" => "sonnet", "resolved_id" => "claude-sonnet-5-5"}
              } = provenance
 

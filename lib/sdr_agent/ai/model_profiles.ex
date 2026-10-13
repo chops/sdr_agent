@@ -33,7 +33,11 @@ defmodule SdrAgent.AI.ModelProfiles do
 
   # The one pinned, reviewed Claude CLI version (R0-02 pin; ADR-0004 R0
   # amendment, item 1). A pin bump changes it here, in a reviewed PR.
-  @cli_version "2.1.291"
+  # R0-08 aligns it with the app-owned pin, 2.1.294 (offline evidence:
+  # version, store hash and advertised flags). The expected model ids are
+  # unchanged candidates, not verified by this alignment: the per-call init
+  # attestation still checks model, version and empty tools/MCP/slash.
+  @cli_version "2.1.294"
   @default_real :claude_cli_opus
 
   @profiles [

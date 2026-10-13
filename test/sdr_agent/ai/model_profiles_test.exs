@@ -24,7 +24,8 @@ defmodule SdrAgent.AI.ModelProfilesTest do
 
   test "the real profiles share the one reviewed CLI version, with their alias and model" do
     version = ModelProfiles.cli_version()
-    assert version == "2.1.291"
+    # R0-08: aligned to the app-owned pin (2.1.294).
+    assert version == "2.1.294"
 
     assert {:ok,
             %Profile{

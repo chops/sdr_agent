@@ -261,6 +261,58 @@ its run is failed. This delta makes such rows terminal.
 - A launch racing recovery: either order, real connections.
 - Never `unknown`.
 
+### R0-08: profile and attestation alignment to the existing 2.1.294 pin
+
+The app-owned pin (R0-02, `nix/app-claude-cli.identity`) is already Claude
+Code 2.1.294; the profile registry still expected 2.1.291, so every real
+call would fail attestation. This aligns the registry with the pin under
+ADR-0004 item 1's bump rule. It does not change the Nix pin, promote any
+tuple, or authorize any call.
+
+**Offline evidence (no model call):**
+
+| Check | Result |
+|---|---|
+| Executable | `/nix/store/n79j0drxclykgg673zpbh2aj0acmdzkp-app-claude-cli-2.1.294/bin/claude-code` |
+| `--version` | `2.1.294 (Claude Code)` |
+| SHA-256 | `def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53`, equal to the checked-in pin identity (also verified independently by Codex) |
+| Advertised flags | `--help` lists all 12 flags ClaudeCLI passes: `--output-format`, `--verbose`, `--safe-mode`, `--restricted`, `--model`, `--tools`, `--disable-slash-commands`, `--strict-mcp-config`, `--mcp-config`, `--permission-mode`, `--permission-prompts`, `--no-session-persistence` |
+
+These show advertised syntax and pin identity only. They do **not** verify
+2.1.294's init fields, its runtime tool removal, its alias-to-model
+resolution or its captured request grammar. The help also says safe and
+restricted modes still honour admin-managed settings, so the flags alone
+are not proof of an empty tool surface.
+
+**Entity delta:**
+
+| Entity | Delta | Invariants |
+|---|---|---|
+| `ModelProfiles.Profile` (`claude_cli_opus`, `claude_cli_sonnet`) | Expected CLI version 2.1.291 → 2.1.294 | Expected model ids (`claude-opus-5-5`, `claude-sonnet-5-5`) are unchanged **candidates**, not verified by this change |
+| ModelInvocation provenance | New gen-2 rows record 2.1.294 | Historical rows, catalog entries, events, evidence and releases are untouched |
+| Shipped witness allowlist | Unchanged | The 2.1.291 entry stays generation-1 / profile-nil only; no 2.1.294 entry ships until reviewed calibration evidence and a separate promotion PR |
+
+**Attestation and spend.** The per-call init attestation stays mandatory
+and fail-closed: model id, CLI version 2.1.294, and empty tools, MCP
+servers and slash commands. A mismatch kills the CLI tree and returns no
+business output, but it is **not guaranteed to be no-spend**: the prompt is
+handed to the CLI at launch and the init event is read afterwards, so
+traffic may already have gone out. A reserved attempt stays charged, is
+never retried automatically, and an id observed in a failed attempt is
+never adopted automatically. The owner is told this before any attended
+attempt. The calibration harness must also refuse a known pin/expected
+version mismatch before reservation (harness obligation, slice E).
+
+**Tests:** RED first (90bec2f, 0/2): the registry expects 2.1.294, and a
+2.1.291 init is `:version_attestation_drift`. Fake CLI positives now report
+2.1.294 deliberately; legacy generation-1 fixtures keep their literal
+2.1.291; model drift, missing/malformed init and non-empty tools stay
+fail-closed.
+
+**Gate:** Codex agreed the scope (reply 6d7651a6, bounds report sha256
+4ff89b36). Code review pending. No promotion, calibration or spend
+authority.
+
 ### Tracked prerequisites before ordinary real calls
 
 | Item | Source | Status | Required before |

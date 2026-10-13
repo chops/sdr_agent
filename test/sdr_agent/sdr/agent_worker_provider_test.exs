@@ -43,7 +43,7 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
 
   @v3_opus %{
     provider: :claude_cli,
-    cli_version: "2.1.291",
+    cli_version: "2.1.294",
     profile_id: :claude_cli_opus,
     model_id: "claude-opus-5-5",
     projection_version: "claude-message-json/3+prompt-builder/1",
