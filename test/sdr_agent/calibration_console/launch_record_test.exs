@@ -62,6 +62,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     # After the fixtures: a missing module fails as an assertion.
     assert Code.ensure_loaded?(LaunchRecord),
            "SdrAgent.CalibrationConsole.LaunchRecord is not defined"
+
     %{root: tmp, opts: [probe: FakeProbe]}
   end
 
