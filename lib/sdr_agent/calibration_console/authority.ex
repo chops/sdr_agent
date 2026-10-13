@@ -15,7 +15,8 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
         the console instance; it returns only an opaque reference. A
         malformed binding is `{:error, :invalid_binding}`.
       * `consume/2` is called in the server process. It succeeds only for
-        an unconsumed entry when `self()` is the bound server, the claimed
+        an unconsumed entry when the registry's actual caller is the bound
+        server (never a pid named in the request), the claimed
         caller is the bound command and every claimed id, hash and the
         instance equal the bound ones; the entry is then consumed before
         any launch. Anything else is `{:error, :real_model_staged}` and
@@ -51,7 +52,7 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     def issue(binding), do: GenServer.call(__MODULE__, {:issue, binding})
 
     @doc "`:ok`, consuming the entry, or `{:error, :real_model_staged}`."
-    def consume(ref, claims), do: GenServer.call(__MODULE__, {:consume, ref, claims, self()})
+    def consume(ref, claims), do: GenServer.call(__MODULE__, {:consume, ref, claims})
 
     @doc "Removes the entry, if any: `:ok`."
     def revoke(ref), do: GenServer.call(__MODULE__, {:revoke, ref})
@@ -78,7 +79,9 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
       end
     end
 
-    def handle_call({:consume, {__MODULE__, key}, claims, server}, _from, state)
+    # The server is the registry's actual caller (`from`), never a pid named
+    # in the request (Codex 01a13618).
+    def handle_call({:consume, {__MODULE__, key}, claims}, {server, _tag}, state)
         when is_binary(key) do
       with [{^key, binding, :unconsumed}] <- :ets.lookup(state.table, key),
            true <- server == binding.server_pid,
@@ -90,13 +93,14 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
       end
     end
 
-    def handle_call({:consume, _forged, _claims, _server}, _from, state),
-      do: {:reply, @staged, state}
-
     def handle_call({:revoke, {__MODULE__, key}}, _from, state) when is_binary(key),
       do: {:reply, :ok, forget(state, key)}
 
     def handle_call({:revoke, _forged}, _from, state), do: {:reply, :ok, state}
+
+    # Any other request, including a forged reference or another consume
+    # shape, authorizes nothing.
+    def handle_call(_other, _from, state), do: {:reply, @staged, state}
 
     # The command or the server died: every entry bound to it is removed.
     @impl true
