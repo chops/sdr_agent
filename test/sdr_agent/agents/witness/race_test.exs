@@ -43,7 +43,12 @@ defmodule SdrAgent.Agents.Witness.RaceTest do
     attrs =
       AgentsFixtures.model_attrs("race-witness") |> AgentsFixtures.with_provider(:claude_cli)
 
-    {:ok, invocation} = Agents.reserve_model_invocation(run, attrs, actor: agent)
+    # R0-07 slice B: admitted only for the reservation itself.
+    {:ok, invocation} =
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        Agents.reserve_model_invocation(run, attrs, actor: agent)
+      end)
+
     {:ok, invocation} = Agents.mark_model_invocation_sent(invocation, actor: agent)
 
     {:ok, invocation} =

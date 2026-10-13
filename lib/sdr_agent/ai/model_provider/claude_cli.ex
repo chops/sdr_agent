@@ -66,9 +66,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   witness checks and workspace preparation, and just before it asks the
   Reaper to open the port — by calling `SdrAgent.Agents.admit_launch/3`
   with that id, its own profile id and the request's `:actor`. Only an
-  admitted call (now `sent`) launches; a refusal (`{:error, reason}`, e.g.
-  `:grant_ineligible_at_launch`, `:profile_mismatch_at_launch`,
-  `:invocation_not_reserved`) launches nothing and is returned as is, and
+  admitted call (now `sent`) launches; a refusal launches nothing and is
+  returned as is — an identity or state refusal (`{:error, reason}`, e.g.
+  `:invocation_not_reserved`) or, for an owned reserved row, the typed
+  receipt `{:error, %SdrAgent.Agents.Admission.Refused{stage: :launch}}`
+  (R0-07 slice B, row B1), which the facade passes on unchanged — and
   an admission that fails unexpectedly is `{:error,
   :launch_admission_failed}`. The caller is monitored before admission; a
   caller that died while admission waited for its locks is never launched
@@ -158,6 +160,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   require Logger
 
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Admission.Refused
   alias SdrAgent.AI.JsonSchema
   alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
@@ -704,6 +707,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
     case state.launch_admission.(id, state.profile.id, actor: Map.get(request, :actor)) do
       {:ok, _sent} -> :ok
+      # R0-07 slice B (row B1): the committed launch refusal's typed receipt
+      # (metadata only) reaches the caller unchanged.
+      {:error, %Refused{} = refused} -> {:error, refused}
       {:error, reason} when is_atom(reason) -> {:error, reason}
       {:error, %Ash.Error.Forbidden{}} -> {:error, :launch_not_admitted}
       _other -> {:error, :launch_admission_failed}

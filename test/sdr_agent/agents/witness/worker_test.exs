@@ -287,7 +287,12 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
 
   defp invocation!(ctx, key, provider) do
     attrs = AgentsFixtures.model_attrs(key) |> AgentsFixtures.with_provider(provider)
-    {:ok, invocation} = Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+    # R0-07 slice B: admitted only for the reservation itself.
+    {:ok, invocation} =
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+      end)
+
     {:ok, invocation} = Agents.mark_model_invocation_sent(invocation, actor: ctx.agent)
 
     {:ok, invocation} =

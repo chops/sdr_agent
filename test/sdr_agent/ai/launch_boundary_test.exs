@@ -25,6 +25,9 @@ defmodule SdrAgent.AI.LaunchBoundaryTest do
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     tenant = bootstrap!()
     admin = human(:admin, tenant)
     grant = AgentsFixtures.grant!(tenant, %{}, admin)
@@ -140,7 +143,7 @@ defmodule SdrAgent.AI.LaunchBoundaryTest do
 
       refused = invocation!(ctx, "stopped")
       assert {refused.status, refused.sent_at} == {:failed, nil}
-      assert launch_failures(ctx, refused.id) == []
+      assert launch_failures(ctx, refused.agent_run_id) == []
       assert length(dumps(ctx.dump)) == 1
     end
 
@@ -160,11 +163,16 @@ defmodule SdrAgent.AI.LaunchBoundaryTest do
       assert {:ok, %{invocation: %{id: ^first_id, status: :completed}}} =
                Task.await(first, 20_000)
 
-      assert {:error, :grant_ineligible_at_launch} = Task.await(second, 20_000)
+      assert {:error,
+              %SdrAgent.Agents.Admission.Refused{
+                stage: :launch,
+                reason: :grant_ineligible_at_launch
+              }} =
+               Task.await(second, 20_000)
 
       refused = invocation!(ctx, "second")
       assert {refused.status, refused.sent_at} == {:failed, nil}
-      assert [_] = launch_failures(ctx, refused.id)
+      assert [_] = launch_failures(ctx, refused.agent_run_id)
       assert length(dumps(ctx.dump)) == 1
     end
 

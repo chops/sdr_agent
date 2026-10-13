@@ -30,6 +30,9 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
 
   # C9: real-model (ClaudeCLI) reservations are charged to a grant.
   setup ctx do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     SdrAgent.AgentsFixtures.grant!(ctx.tenant, %{}, ctx.admin)
     :ok
   end
@@ -43,14 +46,27 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
     method: :propagated_id
   }
 
-  defp start_named!(args \\ []) do
+  defp start_named!(args \\ [], opts \\ []) do
     start_supervised!(
       {ClaudeCLI,
-       name: ClaudeCLI.server(),
-       command: System.find_executable("elixir"),
-       test_launcher: true,
-       command_args: [@fake, "sdr" | args]}
+       [
+         name: ClaudeCLI.server(),
+         command: System.find_executable("elixir"),
+         test_launcher: true,
+         command_args: [@fake, "sdr" | args]
+       ] ++ opts}
     )
+  end
+
+  # R0-07 slice B: an unconfigured store refuses before spend
+  # (:witness_store_untrusted); the store disappears here only after launch
+  # admission committed the call as sent.
+  defp store_lost_after_launch do
+    fn id, profile, opts ->
+      admitted = Agents.admit_launch(id, profile, opts)
+      SdrAgent.AdmissionFixtures.put_root!(nil)
+      admitted
+    end
   end
 
   # A trusted stand-in witness store with the exact v3 Opus tuple enabled;
@@ -122,8 +138,8 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
       assert_claude_run(ctx, run, operation)
     end
 
-    test "an unconfigured witness store withholds the output; the run stops", ctx do
-      start_named!()
+    test "a store unconfigured after spend withholds the output; the run stops", ctx do
+      start_named!([], launch_admission: store_lost_after_launch())
       %{run: run, operation: operation} = assign!(ctx, "01")
 
       assert %{success: 1} = drain!()

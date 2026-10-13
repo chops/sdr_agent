@@ -126,7 +126,7 @@ defmodule SdrAgent.Agents.ResultReadGateTest do
 
     test "the calibration context reads only its own proof invocation (as AGT)", ctx do
       %{run: proof, agent: agent} = AgentsFixtures.running_run(ctx.tenant, usage_origin: :proof)
-      calibration = AgentsFixtures.claude_completed!(proof, agent, "gate-cal")
+      calibration = AgentsFixtures.proof_completed!(proof, agent, "gate-cal")
 
       context =
         SdrAgent.Agents.Checks.CalibrationContext.context(:claude_cli_opus, calibration.id)

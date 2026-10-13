@@ -27,6 +27,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionRaceTest do
              agent_definitions tokens users payloads provenance_snapshots tenants)
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     :ok = Sandbox.checkout(SdrAgent.Repo, sandbox: false)
     cleanup!()
     on_exit(fn -> with_connection(&cleanup!/0) end)
@@ -74,7 +77,13 @@ defmodule SdrAgent.Agents.LaunchAdmissionRaceTest do
     send(revoker.pid, :go)
 
     assert {:ok, %{status: :revoked}} = Task.await(revoker, 30_000)
-    assert {:error, :grant_ineligible_at_launch} = Task.await(launch, 30_000)
+
+    assert {:error,
+            %SdrAgent.Agents.Admission.Refused{
+              stage: :launch,
+              reason: :grant_ineligible_at_launch
+            }} =
+             Task.await(launch, 30_000)
 
     stored = Ash.get!(ModelInvocation, ctx.invocation.id, authorize?: false)
     assert {stored.status, stored.sent_at} == {:failed, nil}

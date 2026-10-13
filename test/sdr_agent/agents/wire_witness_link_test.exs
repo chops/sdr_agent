@@ -20,6 +20,9 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
   @identity %{"model_id" => "fake-qualifier", "profile_id" => "claude_cli_opus"}
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     tenant = bootstrap!()
     # C9: real-model (ClaudeCLI) reservations are charged to a grant.
     AgentsFixtures.grant!(tenant)

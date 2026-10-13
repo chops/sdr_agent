@@ -222,12 +222,19 @@ defmodule SdrAgent.Agents.ModelInvocation do
         :profile_id
       ]
 
+      # R0-07 slice B (row B4): the authority of an authorized calibration
+      # call, set only from the admitted charge (AdmissionCharge) and
+      # recorded on the reservation event for launch admission.
+      argument :calibration_tuple, :map
+
       validate SdrAgent.Agents.Validations.InvocationProfile
       change SdrAgent.Agents.Changes.AdmissionCharge
       change set_attribute(:ledger_generation, 2)
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
-      change {AppendEvent, [event_type: "model.invocation.reserved"] ++ @event}
+
+      change {AppendEvent,
+              [event_type: "model.invocation.reserved", arguments: [:calibration_tuple]] ++ @event}
     end
 
     update :mark_sent do

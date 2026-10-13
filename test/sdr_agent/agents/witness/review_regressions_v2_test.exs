@@ -237,7 +237,12 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
         request: Jason.encode!(%{prompt: prompt, schema: @schema})
       })
 
-    {:ok, invocation} = Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+    # R0-07 slice B: admitted only for the reservation itself.
+    {:ok, invocation} =
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+      end)
+
     {:ok, invocation} = Agents.mark_model_invocation_sent(invocation, actor: ctx.agent)
 
     completion =

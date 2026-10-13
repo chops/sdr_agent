@@ -501,6 +501,8 @@ defmodule SdrAgentWeb.AdminBudgetsLiveTest do
         )
 
       run = AgentsFixtures.running_run(ctx.tenant)
+      # R0-07 slice B: real calls are admitted only with a promoted tuple.
+      SdrAgent.AdmissionFixtures.admit_tuples!()
 
       for key <- ["c-1", "c-2", "c-3"] do
         attrs = key |> AgentsFixtures.claude_attrs() |> Map.put(:request, ~s({"k":"#{key}"}))
