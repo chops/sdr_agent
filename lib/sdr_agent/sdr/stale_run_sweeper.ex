@@ -261,11 +261,23 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
 
   # R0-07 slice C: a run holding an unreleased output is recovered through
   # the result gate (G5), never as a crash.
+  # The unlocked choice is a prefilter only: the crash path decides again
+  # under its run lock (review MF2) and, when a gated output has appeared,
+  # rolls back before any append; the gate path then runs outside every lock
+  # (its observation needs none).
   defp recover(run, cutoff, actor) do
     case ResultGate.unreleased_invocations(run) do
-      {:ok, []} -> recover_crash(run, cutoff, actor)
-      {:ok, [invocation | _]} -> recover_gate(run, invocation, cutoff, actor)
-      {:error, error} -> {:error, error}
+      {:ok, []} ->
+        case recover_crash(run, cutoff, actor) do
+          {:error, :gate_owned} -> recover(run, cutoff, actor)
+          result -> result
+        end
+
+      {:ok, [invocation | _]} ->
+        recover_gate(run, invocation, cutoff, actor)
+
+      {:error, error} ->
+        {:error, error}
     end
   end
 
@@ -278,6 +290,7 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
     Audit.transaction(fn ->
       with {:ok, run} <- lock(AgentRun, run.id, actor),
            :ok <- abandoned(run, cutoff),
+           :ok <- no_gated_output(run),
            {:ok, operation} <- lock_operation(run, actor),
            {:ok, state} <- job_state(run, actor, :for_update),
            :ok <- not_live(state),
@@ -412,6 +425,16 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
     )
     |> Ash.Query.sort(updated_at: :asc, id: :asc)
     |> Ash.read()
+  end
+
+  # Under the run lock (a settlement completes its invocation while holding
+  # it): a completed generation-2 output with no release is the gate's.
+  defp no_gated_output(run) do
+    case ResultGate.unreleased_invocations(run) do
+      {:ok, []} -> :ok
+      {:ok, _gated} -> {:error, :gate_owned}
+      error -> error
+    end
   end
 
   defp abandoned(%{status: :running} = run, cutoff),
