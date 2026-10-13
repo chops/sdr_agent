@@ -1770,6 +1770,219 @@ and runs everywhere.
 8. **Non-seam dev-VM proof.** `request.calibration` is ignored, the call is
    staged, and the Authority module is absent.
 
+### 8.14 d3 staged delta: console orchestration (proposed)
+
+**Status:** proposed for entity review; no RED work before it passes.
+
+**Entity Model trigger: yes.**
+- Two new console subcommands drive existing domain actions.
+- A server-to-console launch receipt is added to the d1b request.
+- The `ModelProvider` facade's settlement becomes callable for an
+  already-reserved invocation.
+
+No table is added. This builds on 8.2–8.4, 8.13 and E4c-1a/2/3/4/5/6. The
+E4c-6 step numbers are kept.
+
+#### 8.14.1 `calibrate <profile>`
+
+**Shape.** It runs through `bin/calibration-console calibrate <profile>`, a
+`mix sdr.calibration.console` subcommand. The orchestration lives in
+`SdrAgent.CalibrationConsole.Calibrate` (test-seam builds only). The task
+stays thin.
+
+**What it starts:**
+- the application with the console plan and `serve: false` (no listener,
+  no Oban queues, Fake as the runtime provider);
+- `Authority`, linked to the command;
+- one unnamed private ClaudeCLI server per command, linked to the command,
+  with the real pinned executable and shim (8.2 step 2).
+
+**Actor.** `agent_runtime` of the console tenant. The owner is at the
+terminal.
+
+| Step | Action | On failure |
+|---|---|---|
+| 1 claim | `LaunchRecord.claim/2` | Nothing is created; refuse |
+| 2 preflight | The profile is a real ClaudeCLI profile. `PinnedExecutable.verify/1` passes and equals the profile's version. `Store.validate_root(Witness.store_root())`. `select_calibration_grant/3`. `Isolation.preflight/1`. The plan is printed: profile, pin, G-R0 id and revision, remaining attempts, store root. Then the owner types exactly `CALIBRATE <profile>` (E-R1) | `advance(:aborted)`, then `release` |
+| 3 reserve | A `:proof` run (no Operation), then `reserve_model_invocation/3` with the d1b fixed input. The request body is `ModelProvider.request_body/1`, the refs are `Prompt.prompt_ref/schema_ref`, and the marker carries `claim: record.instance_id` and `binding:` | A refusal or no row: `advance(:aborted)`, `release` |
+| 4 | `advance(:launch_pending, invocation_id)` | Write failed: hard stop; the record stays for recovery |
+| 5 | `Authority.issue/1` binding the invocation, run, tenant, profile, command pid, server pid, prompt and schema SHA-256 (lowercase hex) and the VM instance | `advance(:aborted)` (still `reserved`), `release` |
+| 6 call | `ModelProvider.call_reserved/4` (8.14.3) with the private server, once. The server's own `admit_launch` runs immediately before `Reaper.open`; the console never pre-admits | See the outcome rules below |
+| 7 | Launch receipt (8.14.2), group verification, then `advance(:launched, root_pid, root_identity, process_group_id)` | No receipt: the record stays `launch_pending` |
+| 8 | Bounded observation: one `Witness.reconcile/2`, then `Outcome.classify/1` (E3) | Timeout is the outcome `timeout` |
+| 9 | Cleanup receipt: `LaunchRecord.quiescence/2` gives `:quiescent` | Stop. The record stays `launched` for `calibrate-recover` |
+| 10 | `Evidence.publish/3` (E2) gives the SHA-256 | Stop; recover |
+| 11 | `Agents.finish_calibration/3` (E1) | Stop; recover |
+| 12 | `advance(:finished)` | Stop; recover |
+| 13 | `release` | Owner conflict on a partial removal |
+
+`Authority.revoke/1` runs in an `after` on every path (8.2 step 7).
+
+**Outcome rules after step 6:**
+- **`:real_model_staged`** (nothing was consumed, or consume failed),
+  **`:calibration_target_mismatch` / `:calibration_launch_invalid`**
+  (rollback, the row still `reserved`), and any receipt refusal (the row
+  `failed`, `sent_at` nil):
+  - finalized as unlaunched (`aborted`, E4c-2);
+  - a still-`reserved` row first goes through
+    `recover_calibration(:unlaunched)`, so no row is left `reserved`;
+  - the run is settled by E1 only when evidence is latched. An aborted
+    attempt with a failed row latches its failed evidence (8.4) through
+    steps 10–11 before `aborted`, which is allowed because there was no
+    launch.
+- **After `sent`:** steps 7–13. A known no-spawn receipt keeps its `sent`
+  history (E4c-2), and the record follows the cleanup and evidence path.
+
+#### 8.14.2 Launch receipt (server to console)
+
+The server's reply comes only after the CLI is reaped, so the root must be
+reported while the call is in flight.
+
+- **The request.** The d1b closed `request.calibration` gains one key:
+  `observer` (a pid). The A3 shape becomes exactly `%{authority:, run_id:,
+  tenant_id:, instance:, observer:}`. It is not an Authority claim, and
+  `Authority` is unchanged.
+- **The message.** For an exempted call only, right after `Reaper.open`
+  returns `{:ok, port, os_pid}` (so after `sent`), the server sends exactly
+  one message, best-effort and without waiting:
+  `{:calibration_launched, invocation_id, %{root_pid: os_pid, root_identity:
+  identity, process_group_id: os_pid}}`.
+  - `identity` is the start identity the server's reaper captured at spawn.
+    The private server's reaper is started with the existing opt-in
+    `identity:` guard (E4c-1a), so a CLI that exits quickly still has a
+    spawn-time identity.
+  - The Port child leads its own group (E4c-1), so the group is the root
+    pid.
+- **The observer** is a console process, linked to the command and owned by
+  the same OS process. While the command is blocked in the call:
+  1. It waits for the receipt.
+  2. It checks the identity through the probe:
+     - if the root is still alive, the identity must match and
+       `Isolation.verify_group/2` must pass;
+     - if it is absent or reused, the spawn receipt stands, with the
+       evidence noting `root_gone_at_verification: true`.
+  3. It writes `advance(:launched, …)`, then reports to the command.
+- **No receipt** (refused before spawn, spawn failure, or server crash):
+  the record stays `launch_pending`, and step 9 onward follows the E4c-2
+  rules.
+- **Verification fails while the root is alive** (identity mismatch, or
+  not a group leader): the record stays `launch_pending`, the command
+  stops after the call, and recovery needs the owner.
+- **Only the command reads the observer's result**, and only after the call
+  returns, so there is never a second writer to the record.
+
+**Question 1 (Codex):** `observer` in the closed request, versus the server
+writing the receipt into its published status, versus the console polling
+`ProcessProbe` for the child of the server's reaper. I recommend
+`observer`: it is explicit, bounded and seam-only.
+
+#### 8.14.3 Settlement through the facade
+
+The console reserves itself (8.2 step 3, with the marker), so it cannot use
+`ModelProvider.call/…`, which reserves. To keep one settlement contract:
+
+- **New public function:** `ModelProvider.call_reserved(provider, request,
+  invocation, opts)`. It runs exactly the facade's existing
+  `invoke_validate_and_settle` path, which covers:
+  - the witness context, built by the caller;
+  - the provider call;
+  - the `current` re-read;
+  - completion with the parsed output, invalid completion, failure or
+    `unknown`;
+
+  for an invocation already reserved by the caller.
+- **Refusals:**
+  - a row not `reserved`, or of another provider than `provider`, is
+    `{:error, :invocation_not_reserved}`;
+  - the facade's semantics are otherwise unchanged;
+  - `call/…` becomes reserve, then `call_reserved/4`, with identical
+    behaviour.
+- **Usage:** only the console (test-seam builds) and the facade itself call
+  it.
+
+**Question 2 (Codex):** this extraction, versus the console calling
+`complete_` / `fail_` / `mark_model_invocation_unknown` directly, which
+duplicates the facade's rules. I recommend extraction.
+
+#### 8.14.4 `calibrate-recover <invocation_id> [--owner-verified-stopped]`
+
+This is 8.4 and E4c-2/4/5, unchanged. The console only orchestrates.
+
+1. **Take over the stale lock** (`LaunchRecord.recover/2`): refused while
+   the owner is alive (`:owner_alive`); an unreadable record is a hard
+   stop.
+2. **Select the target** by the claim (E4c-2): exactly the one proof
+   invocation whose original reserve event carries this record's
+   `instance_id`, and equal to the record's `invocation_id` when it has
+   one. Otherwise `:calibration_target_ambiguous`. A `claimed` record with
+   zero matches is aborted and released.
+3. **Print and confirm.** The console prints the id, profile, status and
+   record state. The owner types `RECOVER <invocation_id>`.
+4. **Decide:**
+   - `reserved`, or `failed` with `sent_at` nil: `:unlaunched`;
+   - `launched` and `LaunchRecord.quiescence/2` is `:quiescent`:
+     `{:quiescent, observation}`;
+   - otherwise, only with `--owner-verified-stopped` and a second typed
+     confirmation: `new_attestation/1`, the audit event inside
+     `recover_calibration/3`, then `write_attestation/4`
+     (`{:attested, attestation}`);
+   - with neither: `:calibration_not_quiescent`, and nothing is written.
+5. **Finish:** `recover_calibration/3`, then evidence (E2), then
+   `finish_calibration/3` (E1), then `advance(:recovered | :aborted)`, then
+   `release` (and the ticket ends with it).
+
+#### 8.14.5 Entity delta
+
+| Entity | New / existing | Delta | Invariants / lifecycle | Actor / locks |
+|---|---|---|---|---|
+| Console `calibrate`, `calibrate-recover` | Existing task, new subcommands | The 8.14.1 and 8.14.4 sequences in `CalibrationConsole.Calibrate` (seam-only) | Single flight. One reservation and one launch per `calibrate`. Typed confirmations. A record is written only by the command or its observer, never concurrently. Hard owner-conflict stops are kept | Owner at the terminal; `agent_runtime` |
+| ClaudeCLI exemption (8.13 A) | Existing | `request.calibration` gains `observer`. After `Reaper.open`, an exempted call sends one launch receipt; the private server's reaper uses the `identity:` guard | Best-effort, after `sent`, never before admission. Ordinary calls are unchanged. A missing or non-pid `observer` is `:real_model_staged` before the consume | Server process |
+| `ModelProvider.call_reserved/4` | Existing facade, new public entry | The facade's settlement for a caller-reserved invocation | Identical settlement semantics; refuses a non-`reserved` row | Existing |
+| LaunchRecord, Authority, `recover_calibration`, `finish_calibration`, Evidence, Outcome, Isolation | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Used as approved | As approved |
+| AgentRun (`:proof`) | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Created by the console, with no Operation. Settled only by E1 | Existing |
+
+**ADR and diagram.**
+- **ADR:** within ADR-0005's R0 calibration isolation. The pending
+  ADR-0005 amendment (E4c-7) also records the launch receipt and the
+  facade extraction.
+- **Diagram:** the console → private server → observer flow is a new
+  conditional runtime flow, evaluated at the integrated review.
+
+#### 8.14.6 RED plan (hermetic; no real call)
+
+Fixtures: a fake CLI behind the real shim when it is installed, as d1b
+does, and the tripwire elsewhere. The confirmations are injected as an IO
+function.
+
+1. **Happy path, through the record:** claimed → launch_pending → launched
+   → finished → released. The evidence is published, E1 latches, and the
+   run is `:succeeded` / `:calibration_latched`. One reservation, one
+   launch and one consumed entry.
+2. **Confirmation:** a missing or wrong `CALIBRATE <profile>` gives
+   `aborted` and released, with no reservation.
+3. **Preflight refusals** (pin, store, G-R0, isolation): aborted, with no
+   reservation.
+4. **Reservation refusal** (`calibration_evidence_pending`, a G-R0
+   mismatch): aborted, with no `sent`.
+5. **Pre-`sent` launch refusal** (`:binding_unrecorded`,
+   `:exemption_request`): aborted after latching the failed evidence; no
+   process launched.
+6. **Launch receipt:**
+   - a fast-exit CLI is still recorded `launched` from the spawn identity;
+   - an alive root with a mismatched identity stays `launch_pending`;
+   - no receipt stays `launch_pending`.
+7. **Cleanup unconfirmed:** stays `launched`, and `calibrate-recover` is
+   needed.
+8. **`calibrate-recover`:** each decision, the confirmation, an ambiguous
+   target, a live owner, an unreadable record, and the attested path
+   writing the event before the file.
+9. **`call_reserved/4`:**
+   - parity with `call/…`;
+   - a non-`reserved` row is refused;
+   - the facade's existing tests are unchanged.
+10. **Build scope:** a non-seam build has no `calibrate` path and no
+    `Calibrate` module, and the task refuses.
+
 ### 8.11 Obligations accepted in round 11
 
 - **Authority:** consumption happens atomically through the registry owner
@@ -2113,4 +2326,4 @@ and runs everywhere.
     positive shim test executed locally). Code **scoped APPROVE** at
     7059727 (2dc068a3) after 21eb641 (witness validated before consume,
     41dca95e).
-  - d3 orchestration: next.
+  - d3 orchestration: delta 8.14 proposed for entity review.
