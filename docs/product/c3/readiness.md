@@ -34,7 +34,8 @@ In scope:
 - C3-02: `SdrAgent.SDR.admit_lead/2` for `manual`, `csv`, `hubspot` and
   `agent_found`; the shared identity keys (`SdrAgent.Audit.IdentityKeys`) and
   their adoption by every writer of an email, domain or open-lead identity,
-  including Suppression and the webhook paths; parameter-free query logging.
+  including Suppression and the webhook paths. Logging and span controls come
+  from C4's proposed ADR-0005 amendment (O4), not from C3.
 - C3-03: `SdrAgent.SDR.hand_off_referral/2`, the only `referral` entry point.
   It closes the original lead as `referred`, keeps its history and admits the
   referred person at the same company.
@@ -66,7 +67,7 @@ Non-goals (owned elsewhere, each with its own review):
 | C3-R7 | A suppressed email, email domain or company domain is never admitted, including when the suppression and the admission run at the same time: they serialize on shared identity keys, and in either commit order the person ends with no open lead. A suppressed attempt is recorded as `suppressed` with no account, contact or lead created for it. |
 | C3-R8 | Only an active human admin admits, from any source. Reviewers, auditors and every system actor are refused, and the refusal is audited. The agent proposes people (B2); a human confirms them. |
 | C3-R9 | Referral has one entry point. The handover is one transaction: the original lead becomes `referred` (terminal, kept), its open enrollment, drafts, unclaimed deliveries and granted approvals are closed, and the referred person is admitted at the same company with a link to the original. If the referred person cannot be admitted, only the observation is recorded and the original is untouched. `admit_lead` refuses `referral`. |
-| C3-R10 | Real data only under amended constraint 7: the live real-data guard is checked before any read and again after all locks, just before the first write. A refusal writes nothing and does not echo the value. Executable tests show that no name, email or domain from an admission reaches logs (at debug, with query logging on), span attributes or events (with dev content capture on), or error terms, for valid, invalid, conflicting, suppressed and replayed input. |
+| C3-R10 | Real data only under amended constraint 7: the live real-data guard is checked before any read and again after all locks, just before the first write. A refusal writes nothing and does not echo the value. Executable tests show that no name, email or domain from an admission reaches logs (at debug), span attributes, span status or events (with dev content capture on), `oban_jobs.errors` or error terms, under the ADR-0005 C4 amendment's controls (O4), for valid, invalid, conflicting, suppressed and replayed input. |
 | C3-R11 | Concurrent admissions, suppressions, direct account/contact writes, reopen/override and referral serialize on the identity keys before any shared row lock. Exactly one order wins; the others get a recorded outcome or a typed retryable conflict. No unique-index wait or deadlock occurs after the chain head by design, shown by tests on independent database connections. |
 
 ## 3. Entity model (soft-stop)
@@ -364,24 +365,35 @@ Cycle check against existing writers:
   the existing reserved-name guard is the policy. With the switch off, C5-04
   also stops processing of persisted real leads; the queued run is refused
   there, never bypassed.
-- **Query logging.** Ecto's default `:debug` query log includes parameters,
-  so a contact insert logs its email in dev today. C3-02 depends on C4's
-  proposed ADR-0005 amendment "parameter-free SQL logging" (branch
-  `c4-01-settings-delta`, pending owner acceptance): Repo `log: false` and an
-  allowlisted metadata-only query log in every environment (no SQL text with
-  literals, no parameters, no exception or error values), Ecto span
-  statements off and tested, `show_sensitive_data_on_connection_error` off.
-  C3 adds no second logger. C3-02's privacy canaries need that control
-  merged; if it is not, C3-02 waits (an architecture and acceptance gate, not
+- **Database logging and spans.** Ecto's default `:debug` query log
+  includes parameters, so a contact insert logs its email in dev today.
+  C3-02 depends on C4's proposed ADR-0005 amendment "metadata-only database
+  logging and spans" (branch `c4-01-settings-delta` at 7f6d97d, pending
+  owner acceptance), and adds no logger or span handler of its own. Its
+  controls: metadata-only Repo logging in every environment (one
+  allowlisted sanitizer; no parameters, SQL text, exception message,
+  `DETAIL`/`HINT` or connection data); app `RepoSpans` with an allowlisted
+  error status (`error_module`, `pg_code`, `constraint` only) and no
+  `db.url` or `db.statement`; a primary `:logger` filter that rewrites
+  Postgrex, DBConnection and Ash error structs in crash reports and
+  framework logs; Oban workers sanitize database errors at their boundary,
+  so `oban_jobs.errors` holds no message; dev
+  `show_sensitive_data_on_connection_error: false`. C3's typed errors map
+  database errors by constraint name or SQLSTATE, as the amendment requires.
+  Separately, the owner-owned PostgreSQL server-log decision (or an explicit
+  owner retention exception) is a prerequisite before private inputs or the
+  real-data switch. C3-02's privacy canaries need the amendment accepted and
+  merged; otherwise C3-02 waits (an architecture and acceptance gate, not
   implied by an entity PASS). Advisory keys use integer ids (section 6),
   never strings.
 - **Errors and spans.** Closed reasons and field names only; no value, no Ash
   error struct, no changeset in any returned error, log line or span
   attribute. Span attributes are ids, kind and outcome.
 - **Executable proof** (section 9): canary tests at Logger `:debug` with the
-  dev query logging handler on and `otel_capture_content: true`, capturing
-  log output and exported spans, on valid, invalid, conflicting, suppressed
-  and replayed input, for both actions.
+  amendment's `QueryLog`, `RepoSpans` and `:logger` filter attached and
+  `otel_capture_content: true`, capturing log output, exported spans
+  (attributes, events, status) and `oban_jobs.errors`, on valid, invalid,
+  conflicting, suppressed and replayed input, for both actions.
 - **Local storage.** Contact rows and their audit after-images hold personal
   data locally only (amendment 2's accepted limitation). Provenance holds ids
   and a hash. Every C3 fixture, doc and screenshot uses reserved domains.
@@ -474,8 +486,9 @@ C3-02:
   on an advisory lock.
 - Privacy canaries: unique synthetic name, email and domain values absent
   from captured logs, spans and returned errors for valid, invalid,
-  conflicting, suppressed and replayed input, with debug logging, query
-  logging and content capture on.
+  conflicting, suppressed and replayed input, at debug with the ADR-0005
+  C4 amendment's controls attached and content capture on; also absent
+  from span status and `oban_jobs.errors` of the queued run.
 
 C3-03:
 
@@ -509,16 +522,16 @@ No code changes in C3-01. Names are proposals.
   `lib/sdr_agent/audit/changes/identity_key_lock.ex`,
   `lib/sdr_agent/sales/lead_admission.ex`, `lib/sdr_agent/sales/domain.ex`,
   `lib/sdr_agent/sales/checks/admission_context.ex`,
-  `lib/sdr_agent/sdr/admission.ex`, parameter-free Repo log handler (unless
-  C5-04 shipped it); migration (table, identities, composite FK targets,
+  `lib/sdr_agent/sdr/admission.ex` (logging and span controls come from the
+  ADR-0005 C4 amendment's implementation, not this slice); migration (table, identities, composite FK targets,
   checks, append-only, deferred and lead triggers, canonical function and
   index, pre-checks).
 - Changed: `sales/lead.ex`, `sales/account.ex`, `sales/contact.ex`,
   `sales/changes/normalize_domain.ex`, `outreach/suppression.ex`,
   `outreach/locks.ex` (domain match), `outreach/webhooks.ex` (key pass),
   `research/qualification.ex` (override key), `sales.ex`, `sdr.ex`
-  (`admit_lead/2`; extract the assign body for reuse), `config/*.exs` (Repo
-  log), `test/support/sales_fixtures.ex`, `lib/sdr_agent/demo/fixtures.ex` if
+  (`admit_lead/2`; extract the assign body for reuse),
+  `test/support/sales_fixtures.ex`, `lib/sdr_agent/demo/fixtures.ex` if
   a seed shares an account.
 - Diagrams: regenerate the Sales domain diagram and the data-flow diagram.
 
@@ -540,7 +553,7 @@ and ADR-0010.
 | Strengthened domain suppression stops more leads than today (contacts whose company domain is suppressed but whose email domain differs) | strengthening only; called out for the owner at G5; synthetic tests |
 | Existing tests and seeds create two open leads at one account | fixtures admit through the new path; assertions not weakened |
 | Migration meets collisions in the owner's dev data | pre-checks abort with counts; nothing merged automatically |
-| Parameter-free logging reduces dev debugging detail | SQL text and timing stay; values never logged |
+| Metadata-only logging and spans (ADR-0005 C4 amendment) reduce dev debugging detail | table, command, timing, outcome and allowlisted error class stay; reproduce values in a test or `psql` |
 | B6 batches take many keys | one sorted pass per transaction; B6 sets batch size under its own review |
 | B1 needs a campaign for manual add | admission requires `campaign_id`; B1 chooses the default in its packet |
 
@@ -630,7 +643,7 @@ packet or by an entity PASS.
 | O1 | The key pass is an outer-transaction contract on every caller, not only a Suppression hook: classification and override flows, whole seed and bootstrap transactions, and B6 batches take their full key set before any shared row lock or append. No key or row lock is held while a model call waits. | full-path tests per caller (not the local `AssessmentRules` check alone), asserting the first shared lock follows the pass; a test that a model-call wait holds no key |
 | O2 | Held-key state is transaction- and savepoint-aware. `pg_locks` is the authority for held keys; a transaction-local marker (`set_config('sdr.identity_pass', …, true)`, reverted with its savepoint) records that a pass was made, including an empty pass, so a later new key can never become a silent second pass. The whole sorted set is acquired before shared locks. | rollback-to-savepoint tests (keys and marker both reverted, re-pass allowed only then), empty-pass then new key → `LateAcquisition` |
 | O3 | One exact domain rule in SQL and Elixir: exactly one trailing dot and one leading `www.` stripped; malformed hosts rejected before normalization. Old audited rows and their record hashes stay untouched. | equivalence corpus (section 9); hash assertions on existing rows |
-| O4 | Logging follows C4's proposed ADR-0005 SQL-logging amendment once the owner accepts it: metadata-only query log in all environments, no SQL literals, parameters or error values, Ecto span statements and connection-error rendering controlled. | canary tests at debug with content capture on; ADR acceptance recorded before C3-02 merges |
+| O4 | Logging and spans follow C4's proposed ADR-0005 amendment (metadata-only database logging and spans, `c4-01-settings-delta` at 7f6d97d) once the owner accepts it: metadata-only Repo logging in all environments; app `RepoSpans` with allowlisted error status and no `db.url` or `db.statement`; the `:logger` exception filter; Oban boundary sanitizing; dev `show_sensitive_data_on_connection_error: false`. The separate owner-owned PostgreSQL server-log decision (or retention exception) precedes private inputs and the real-data switch. C3 adds no logger of its own. | canary tests at debug with content capture on over logs, spans and `oban_jobs.errors`; ADR acceptance and the server-log decision recorded before C3-02 merges |
 | O5 | Final real-data permission is authoritative at the first-write boundary, including replay output of persisted real records and adopted (not created) rows. If C5 makes the switch a runtime setting, admission reads it `FOR SHARE` after the key pass and before the head, and C5's toggle takes it `FOR UPDATE`, so a toggle waits for in-flight admissions and later ones see the new value; if C5 makes it boot-time configuration, it cannot change within a transaction. "Read twice" alone is not the proof. | a toggle race test on independent connections, matched to C5-04's chosen mechanism |
 | O6 | Atomic cutover: the key namespace, every cooperating writer (admission, Suppression, webhooks, Account, Contact, reopen, override) and the migration ship in one release; no deploy mixes the old webhook key and the new namespace. The owner's instance is single-node and restarts on deploy, so no rolling mix exists. | one PR/release; a test that no `hashtextextended` advisory call remains |
 | O7 | Seed boundary: `:seed` stays dev/test-only (`SeedingAllowed`); application writes cannot choose `source: fixture` (`:create` accepts only the admission kinds); the DB trigger's fixture exception is a trusted database-admin boundary only. Deferred lead binding and the account slot get direct DB negatives and transaction-rollback proof. | policy tests in prod config; direct SQL negatives |
