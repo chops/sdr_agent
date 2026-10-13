@@ -871,12 +871,14 @@ defmodule SdrAgent.Agents.Witness do
 
   ## Attention (same transaction)
 
-  # Row G4 (R0-07 slice C): after a withheld release, the scan treats the
-  # cause its event binds as protected (`SdrAgent.Agents.Witness.GateEvidence`);
-  # the gate's own reconcile (with `gate:`) runs before any release.
+  # Row G4 (R0-07 slice C): after a withheld release, the cause its event
+  # binds is protected (`SdrAgent.Agents.Witness.GateEvidence`). Read here,
+  # under the invocation FOR UPDATE lock, whatever the caller: a gate-mode
+  # reconcile that observed before a competing finalizer, or is called
+  # after the release, honours it too (review MF3).
   defp attention(invocation, links, warnings, actor, gate) do
     with {:ok, live} <- live_failures(invocation),
-         {:ok, protection} <- protection(gate, invocation) do
+         {:ok, protection} <- GateEvidence.protection(invocation) do
       critical? = Enum.any?(links, &(&1.link_status == :mismatch))
       warnings = if critical?, do: [], else: Enum.sort(warnings)
       {criticals, live_warnings} = Enum.split_with(live, &(&1.severity == :critical))
@@ -889,9 +891,6 @@ defmodule SdrAgent.Agents.Witness do
       end
     end
   end
-
-  defp protection(nil, invocation), do: GateEvidence.protection(invocation)
-  defp protection(_gate, _invocation), do: {:ok, nil}
 
   # A protected critical (live) is already in `criticals`; a resolved one is
   # not reopened for the same mismatch, only for a distinct later one.

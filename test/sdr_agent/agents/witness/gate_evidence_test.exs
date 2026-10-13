@@ -118,6 +118,19 @@ defmodule SdrAgent.Agents.Witness.GateEvidenceTest do
     assert [_one] = notes(ctx, release)
   end
 
+  test "a late gate-mode reconcile honours the protection too (review MF3)", ctx do
+    AgentsFixtures.put_allowlist!([])
+    {invocation, _release, cause} = gated!(ctx, "cli_shape_v3")
+
+    AgentsFixtures.put_allowlist!([@v3_opus])
+    gate = %{run_id: ctx.run.id, operation_id: ctx.run.operation_id}
+
+    assert {:ok, %{status: :reconciled}} =
+             Witness.reconcile(invocation.id, actor: ctx.rec, store_root: ctx.root, gate: gate)
+
+    assert failure!(ctx, cause.id).status == :open
+  end
+
   test "the protected warning is the live warning: no duplicate, no note", ctx do
     {invocation, release, cause} = gated!(ctx, "none")
     before = live(ctx, invocation)
