@@ -425,18 +425,58 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordV3Test do
     end
 
     test "claimed, finished and aborted records never become recovered", ctx do
-      {:ok, claimed} = LaunchRecord.claim(ctx.root, ctx.opts)
-      owner_gone()
-      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      for kind <- [:claimed, :finished, :aborted] do
+        sub = sub_root!(ctx, kind)
+        record = final_or_claimed!(sub, kind)
+        owner_gone()
+        {:ok, recovery} = LaunchRecord.recover(sub.root, sub.opts)
 
-      assert {:error, :invalid_transition} =
-               LaunchRecord.advance(
-                 ctx.root,
-                 claimed,
-                 :recovered,
-                 %{attestation_id: nil},
-                 ctx.opts ++ [recovery: recovery]
-               )
+        assert {:error, :invalid_transition} =
+                 LaunchRecord.advance(
+                   sub.root,
+                   record,
+                   :recovered,
+                   %{attestation_id: nil},
+                   sub.opts ++ [recovery: recovery]
+                 ),
+               inspect(kind)
+
+        owner_back()
+      end
+    end
+
+    # Codex 01a13532 must_fix 1: an independent live observation wins over
+    # a failed peer probe; an attestation covers only an unavailable probe.
+    test "attested launched recovery: a live root wins over a failed group probe", ctx do
+      %{launched: launched, handle: handle, attrs: attrs} = attested_launched!(ctx)
+      before = lock_files(ctx.root)
+
+      V3Probe.put(fn state ->
+        state
+        |> put_in([:groups, 9001], {:error, :ps_failed})
+        |> put_in([:identities, 9001], "Mon 10:01 cli")
+      end)
+
+      assert {:error, :not_quiescent} =
+               LaunchRecord.advance(ctx.root, launched, :recovered, attrs, handle)
+
+      assert lock_files(ctx.root) == before
+    end
+
+    test "attested launched recovery: a live member wins over a failed root probe", ctx do
+      %{launched: launched, handle: handle, attrs: attrs} = attested_launched!(ctx)
+      before = lock_files(ctx.root)
+
+      V3Probe.put(fn state ->
+        state
+        |> put_in([:groups, 9001], [9002])
+        |> put_in([:identities, 9001], {:error, :ps_failed})
+      end)
+
+      assert {:error, :not_quiescent} =
+               LaunchRecord.advance(ctx.root, launched, :recovered, attrs, handle)
+
+      assert lock_files(ctx.root) == before
     end
   end
 
@@ -472,26 +512,103 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordV3Test do
 
     test "a crash after aborted or finished: a later process releases through recovery",
          ctx do
-      {:ok, aborted} = abort!(ctx, pending!(ctx))
-      owner_gone()
-      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      for kind <- [:aborted, :finished] do
+        sub = sub_root!(ctx, kind)
+        record = final_or_claimed!(sub, kind)
+        owner_gone()
+        {:ok, recovery} = LaunchRecord.recover(sub.root, sub.opts)
 
-      assert :ok =
-               LaunchRecord.release(ctx.root, aborted, ctx.opts ++ [recovery: recovery])
+        assert :ok =
+                 LaunchRecord.release(sub.root, record, sub.opts ++ [recovery: recovery]),
+               inspect(kind)
 
-      refute File.exists?(Path.join(ctx.root, "run.lock"))
+        refute File.exists?(Path.join(sub.root, "run.lock"))
+        owner_back()
+      end
     end
 
     test "an abandoned ticket on an aborted or finished record is a hard conflict", ctx do
-      {:ok, aborted} = abort!(ctx, pending!(ctx))
-      owner_gone()
-      {:ok, _abandoned} = LaunchRecord.recover(ctx.root, ctx.opts)
+      for kind <- [:aborted, :finished] do
+        sub = sub_root!(ctx, kind)
+        record = final_or_claimed!(sub, kind)
+        owner_gone()
+        {:ok, _abandoned} = LaunchRecord.recover(sub.root, sub.opts)
 
-      # A later process: the ticket is never adopted or erased.
-      assert {:error, :recovery_in_progress} = LaunchRecord.recover(ctx.root, ctx.opts)
-      assert {:error, :recovery_in_progress} = LaunchRecord.release(ctx.root, aborted, ctx.opts)
-      assert File.exists?(Path.join(ctx.root, "run.lock/recover/ticket"))
-      assert disk(ctx.root)["state"] == "aborted"
+        # A later process: the ticket is never adopted or erased.
+        assert {:error, :recovery_in_progress} = LaunchRecord.recover(sub.root, sub.opts)
+
+        assert {:error, :recovery_in_progress} =
+                 LaunchRecord.release(sub.root, record, sub.opts)
+
+        assert File.exists?(Path.join(sub.root, "run.lock/recover/ticket"))
+        assert disk(sub.root)["state"] == Atom.to_string(kind)
+        owner_back()
+      end
+    end
+
+    # Codex 01a13532 must_fix 2: a recovered state is never unconditional
+    # deletion permission; release re-checks live work for both recoveries.
+    test "an observed-quiescence recovered release refuses newly live work", ctx do
+      launched = launched!(ctx, pending!(ctx))
+      owner_gone()
+      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      handle = ctx.opts ++ [recovery: recovery]
+
+      result =
+        LaunchRecord.advance(ctx.root, launched, :recovered, %{attestation_id: nil}, handle)
+
+      assert match?({:ok, %{state: "recovered"}}, result), inspect(result)
+      {:ok, recovered} = result
+      before = lock_files(ctx.root)
+
+      for live <- [
+            &put_in(&1, [:identities, 9001], "Mon 10:01 cli"),
+            &put_in(&1, [:groups, 9001], [9002])
+          ] do
+        V3Probe.put(live)
+        assert {:error, :not_quiescent} = LaunchRecord.release(ctx.root, recovered, handle)
+        assert lock_files(ctx.root) == before
+        owner_gone()
+        V3Probe.put(&put_in(&1, [:groups, 9001], []))
+      end
+
+      # Positive control: the group empty and the root gone.
+      assert :ok = LaunchRecord.release(ctx.root, recovered, handle)
+      refute File.exists?(Path.join(ctx.root, "run.lock"))
+    end
+
+    test "an attested recovered release refuses newly live work, even with a failed peer",
+         ctx do
+      %{launched: launched, handle: handle, attrs: attrs} = attested_launched!(ctx)
+      result = LaunchRecord.advance(ctx.root, launched, :recovered, attrs, handle)
+      assert match?({:ok, %{state: "recovered"}}, result), inspect(result)
+      {:ok, recovered} = result
+      before = lock_files(ctx.root)
+
+      for live <- [
+            &put_in(&1, [:identities, 9001], "Mon 10:01 cli"),
+            &put_in(&1, [:groups, 9001], [9002]),
+            fn state ->
+              state
+              |> put_in([:groups, 9001], {:error, :ps_failed})
+              |> put_in([:identities, 9001], "Mon 10:01 cli")
+            end,
+            fn state ->
+              state
+              |> put_in([:groups, 9001], [9002])
+              |> put_in([:identities, 9001], {:error, :ps_failed})
+            end
+          ] do
+        V3Probe.put(live)
+        assert {:error, :not_quiescent} = LaunchRecord.release(ctx.root, recovered, handle)
+        assert lock_files(ctx.root) == before
+        owner_gone()
+        V3Probe.put(&put_in(&1, [:groups, 9001], []))
+      end
+
+      # Positive control: the group empty and the root gone.
+      assert :ok = LaunchRecord.release(ctx.root, recovered, handle)
+      refute File.exists?(Path.join(ctx.root, "run.lock"))
     end
 
     test "a recovered record releases only by its own live handle, re-checking", ctx do
@@ -651,6 +768,52 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordV3Test do
 
     {:ok, attestation}
   end
+
+  # A launched record under a recovery handle with its written attestation.
+  defp attested_launched!(ctx) do
+    launched = launched!(ctx, pending!(ctx))
+    owner_gone()
+    {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+    {:ok, attestation} = new_written_attestation!(ctx, recovery)
+
+    %{
+      launched: launched,
+      handle: ctx.opts ++ [recovery: recovery],
+      attrs: %{attestation_id: attestation.attestation_id}
+    }
+  end
+
+  # A separate private root, so one test can cover several records.
+  defp sub_root!(ctx, kind) do
+    root = Path.join(ctx.root, Atom.to_string(kind))
+    File.mkdir!(root)
+    File.chmod!(root, 0o700)
+    %{ctx | root: root}
+  end
+
+  defp final_or_claimed!(sub, :claimed) do
+    {:ok, claimed} = LaunchRecord.claim(sub.root, sub.opts)
+    claimed
+  end
+
+  defp final_or_claimed!(sub, :aborted) do
+    {:ok, aborted} = abort!(sub, pending!(sub))
+    aborted
+  end
+
+  defp final_or_claimed!(sub, :finished), do: finished!(sub, launched!(sub, pending!(sub)))
+
+  # Every file and directory under the lock, with its bytes.
+  defp lock_files(root) do
+    lock = Path.join(root, "run.lock")
+
+    [lock | Path.wildcard(Path.join(lock, "**"), match_dot: true)]
+    |> Enum.sort()
+    |> Enum.map(fn path -> {path, if(File.dir?(path), do: :dir, else: File.read!(path))} end)
+  end
+
+  defp owner_back,
+    do: V3Probe.put(&%{&1 | self: 4242, identities: %{4242 => "Mon 10:00 owner"}})
 
   # The recorded owner (4242) is gone and this process is a later one.
   defp owner_gone,
