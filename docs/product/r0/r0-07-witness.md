@@ -698,3 +698,27 @@ enablement or spend.
     schema, the G-R0 binding, owner-run recovery and real-call authority,
     code review, calibration evidence review, separate enablement and the
     owner's grants.
+- Code review of PR #145 at 2fb4187: **CHANGES REQUESTED** (Codex, reply
+  m_1791865020000005587_44e242d5, report sha256 b5033135). Fixes:
+  - **MF1:** calibration authority must also name the profile's current
+    reviewed CLI version and model (`:profile_drift`), so a historical
+    tuple that only agrees with its own stored row cannot launch.
+  - **MF2:** a supplied but malformed marker is `:invalid` and refused on
+    proof and ordinary runs; only an absent marker is "none".
+  - **MF3:** the store is observed only after an authorized,
+    tenant-scoped preflight without a row lock (reservation: the run is
+    readable in the actor's tenant and `:reserve_model_call` is allowed;
+    launch: the invocation is in the actor's tenant). Anyone else causes
+    no I/O; the locked path stays authoritative.
+  - **B4' diagnostics:** a predecessor's recorded tuple must match its own
+    profile, CLI version and model; the check names the first blocking
+    row (`{check, id}`), carried as structured metadata in the event and
+    dedupe detail, while Failure prose keeps the label only.
+  - **Operation lock:** true-connection launch versus Operation-writer
+    races in both orders. A launch-versus-sweeper race on an operated run
+    is not covered: with this fixture the sweeper does not treat the
+    operated run as stale.
+  - **Test order:** the three defects were RED first (Codex's probes,
+    0/3 before the fixes). For the original slice B commits, test order
+    is unrecorded and no reconstructed before/after evidence is attached
+    yet.
