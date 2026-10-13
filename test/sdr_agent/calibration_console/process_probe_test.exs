@@ -110,8 +110,8 @@ defmodule SdrAgent.CalibrationConsole.ProcessProbeTest do
 
   test "invalid pids are errors, never absence" do
     for pid <- [0, -1, "1", nil, 1.5] do
-      assert {:error, :invalid_pid} = ProcessProbe.start_identity(pid), inspect(pid)
-      assert {:error, :invalid_pid} = ProcessProbe.group_members(pid), inspect(pid)
+      assert ProcessProbe.start_identity(pid) == {:error, :invalid_pid}, inspect(pid)
+      assert ProcessProbe.group_members(pid) == {:error, :invalid_pid}, inspect(pid)
     end
   end
 
@@ -132,8 +132,8 @@ defmodule SdrAgent.CalibrationConsole.ProcessProbeTest do
             {"", 0}
           ] do
         ps!(tmp, output, status)
-        assert {:error, _} = ProcessProbe.start_identity(self), inspect(output)
-        assert {:error, _} = ProcessProbe.group_members(self), inspect(output)
+        assert match?({:error, _}, ProcessProbe.start_identity(self)), inspect(output)
+        assert match?({:error, _}, ProcessProbe.group_members(self)), inspect(output)
       end
     end
 
@@ -157,8 +157,8 @@ defmodule SdrAgent.CalibrationConsole.ProcessProbeTest do
             "#{self} #{self}"
           ] do
         ps!(tmp, good <> "\n" <> bad, 0)
-        assert {:error, _} = ProcessProbe.start_identity(self), bad
-        assert {:error, _} = ProcessProbe.group_members(self), bad
+        assert match?({:error, _}, ProcessProbe.start_identity(self)), bad
+        assert match?({:error, _}, ProcessProbe.group_members(self)), bad
       end
     end
 
@@ -174,6 +174,72 @@ defmodule SdrAgent.CalibrationConsole.ProcessProbeTest do
       assert ProcessProbe.start_identity(101) == {:ok, "Tue Oct 13 03:49:41 2026"}
       assert ProcessProbe.start_identity(103) == :absent
     end
+  end
+
+  describe "code review (Codex, 9fdf9f8)" do
+    @live "Tue Oct 13 03:49:40 2026"
+
+    test "impossible C timestamps are malformed snapshots", %{tmp_dir: tmp} do
+      for start <- [
+            "Foo Bar 99 88:99:99 2026",
+            "Tue Feb 30 03:49:40 2026",
+            "Mon Oct 13 03:49:40 2026",
+            "Tue Okt 13 03:49:40 2026",
+            "Tue Oct 13 24:00:00 2026",
+            "Tue Oct 13 03:60:00 2026"
+          ] do
+        ps!(tmp, "100 100 S #{start}", 0)
+        assert ProcessProbe.start_identity(100) == {:error, :ps_malformed}, start
+        assert ProcessProbe.group_members(100) == {:error, :ps_malformed}, start
+      end
+    end
+
+    test "duplicate pid rows are ambiguous: never first or last wins", %{tmp_dir: tmp} do
+      for second <- [@live, "Tue Oct 13 04:49:40 2026"] do
+        ps!(tmp, "100 100 S #{@live}\n100 100 S #{second}", 0)
+        assert {:error, :ps_malformed} = ProcessProbe.start_identity(100)
+        assert {:error, :ps_malformed} = ProcessProbe.group_members(100)
+      end
+    end
+
+    test "native question-mark states are runnable members", %{tmp_dir: tmp} do
+      for stat <- ["?", "?Es", "?s"] do
+        ps!(tmp, "100 100 #{stat} #{@live}", 0)
+        assert ProcessProbe.group_members(100) == {:ok, [100]}, stat
+        assert ProcessProbe.start_identity(100) == {:ok, @live}, stat
+      end
+    end
+
+    test "an ambiguous owner row never establishes pid reuse", %{tmp_dir: tmp} do
+      File.chmod!(tmp, 0o700)
+      assert {:ok, _record} = LaunchRecord.claim(tmp, probe: __MODULE__.Owner)
+      ps!(tmp, "100 100 S #{@live}\n100 100 S Tue Oct 13 04:49:40 2026", 0)
+      assert {:error, :probe_unavailable} = LaunchRecord.recover(tmp, probe: ProcessProbe)
+      refute File.exists?(Path.join(tmp, "run.lock/recover"))
+    end
+
+    test "repeated live snapshots of the real table succeed" do
+      {:ok, self} = ProcessProbe.self_pid()
+
+      for _ <- 1..20 do
+        assert {:ok, _identity} = ProcessProbe.start_identity(self)
+        assert {:ok, [_ | _]} = ProcessProbe.group_members(self_group())
+      end
+    end
+  end
+
+  defmodule Owner do
+    @moduledoc false
+    # The owner of a synthetic claim: pid 100 with the fixture's live start.
+    def self_pid, do: {:ok, 100}
+    def start_identity(100), do: {:ok, "Tue Oct 13 03:49:40 2026"}
+  end
+
+  defp self_group do
+    {out, 0} =
+      System.cmd("/bin/ps", ["-o", "pgid=", "-p", System.pid()], env: ChildEnv.cmd([]))
+
+    out |> String.trim() |> String.to_integer()
   end
 
   test "the launch record's quiescence through the real probe" do

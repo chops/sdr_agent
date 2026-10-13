@@ -974,6 +974,12 @@ attribute and the probe API change. No database column changes.
   - Start times have one-second resolution, so a pid reused within the
     same second reads as alive (conservative false-busy).
   - The `ps:` override is test-seam only.
+  - **Refinement (Codex c54857cf, at 9fdf9f8).**
+    - A snapshot is malformed if it lists a pid twice (even identically),
+      or if a start time is not a real instant whose C weekday matches its
+      date. A lookup never picks the first or last row.
+    - Darwin's unknown state (`?`, `?Es`, `?s`, ...) is accepted as a
+      runnable member: outstanding work, never gone.
 - **Weaker scope, disclosed.** Group emptiness is not a whole-descendant
   proof. A descendant can change process group without starting a new
   session and so escape the observable. The bounded observable is a dead or
