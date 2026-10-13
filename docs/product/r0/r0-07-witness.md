@@ -1793,3 +1793,12 @@ launcher) is withdrawn: no wrapper is needed.
   GREEN at 119dd22 (with process and port termination evidence; full
   suite 1800/1800), awaiting code review.
 - E4c-c1 claim-binding RED at 9d27da0, awaiting verification.
+- E4c-b code: **CHANGES REQUESTED** at 119dd22 (Codex 01a13570: an
+  unowned relative workspace, an unbounded helper, tracking forgotten
+  before cleanup) and at 5231107 (Codex 01a13590: member signalling on age
+  alone, an unconfirmed cleanup reported as unavailable, the cleanup delta
+  unrecorded). Regressions at eb9ef78 and dffec8f; conservative fixes and
+  the E4c-1a delta at 8435dcf, awaiting re-review.
+- E4c-c1 RED at 9d27da0: **PASS / VERIFIED RED** (Codex 01a1359a). GREEN
+  at 51726f5 (full suite 1819/1819), awaiting code review.
+- E4c-c2 recovery-action RED at e9962bc, awaiting verification.
