@@ -37,14 +37,17 @@ defmodule SdrAgent.Agents.Checks.CalibrationAdmission do
   carries (R0-07 E4c-2), or nil: no marker, no claim, or a marker that is
   not valid (which `scope/1` refuses). Always nil outside test-seam builds.
   """
-  def claim(term) do
-    with true <- @test_seams,
-         {_profile_id, _entry} <- marked(term),
-         %{@marker => %{claim: claim}} <- term do
-      claim
-    else
-      _ -> nil
+  if @test_seams do
+    def claim(term) do
+      with {_profile_id, _entry} <- marked(term),
+           %{@marker => %{claim: claim}} <- term do
+        claim
+      else
+        _ -> nil
+      end
     end
+  else
+    def claim(_term), do: nil
   end
 
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
