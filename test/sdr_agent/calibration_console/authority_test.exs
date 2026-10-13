@@ -55,7 +55,7 @@ defmodule SdrAgent.CalibrationConsole.AuthorityTest do
     good = claims(ctx.binding)
 
     for {key, value} <- [
-          caller: spawn(fn -> :ok end),
+          caller: spawn_owned(fn -> :ok end),
           invocation_id: Ash.UUIDv7.generate(),
           run_id: Ash.UUIDv7.generate(),
           tenant_id: Ash.UUIDv7.generate(),
@@ -100,30 +100,35 @@ defmodule SdrAgent.CalibrationConsole.AuthorityTest do
     end
   end
 
-  test "revocation removes the entry", ctx do
+  # Removal is observed without mutating the entry: the registry's table
+  # (read-only from here) holds the issued row until it is removed
+  # (Codex 01a135f7).
+  test "revocation removes the row", ctx do
     {:ok, ref} = Authority.issue(ctx.binding)
+    assert entries() == 1
     assert :ok = Authority.revoke(ref)
+    assert entries() == 0
     assert consume_in(ctx.server, ref, claims(ctx.binding)) == {:error, :real_model_staged}
   end
 
-  test "the entry is removed when the command dies", ctx do
-    command = spawn(fn -> receive do: (:exit -> :ok) end)
-    binding = %{ctx.binding | command_pid: command}
-    {:ok, ref} = Authority.issue(binding)
-    await_down(command, fn -> send(command, :exit) end)
+  for state <- [:unconsumed, :consumed], dies <- [:command, :server] do
+    test "an #{state} entry is removed when the #{dies} dies", ctx do
+      command = spawn_owned(fn -> receive do: (:exit -> :ok) end)
+      binding = %{ctx.binding | command_pid: command}
+      {:ok, ref} = Authority.issue(binding)
 
-    assert await(fn ->
-             consume_in(ctx.server, ref, claims(binding)) == {:error, :real_model_staged}
-           end)
-  end
+      if unquote(state) == :consumed,
+        do: assert(consume_in(ctx.server, ref, claims(binding)) == :ok)
 
-  test "the entry is removed when the server dies", ctx do
-    {:ok, ref} = Authority.issue(ctx.binding)
-    await_down(ctx.server, fn -> send(ctx.server, :exit) end)
-    replacement = spawn_server()
+      assert entries() == 1, "the issued row must exist before the death"
+      victim = if unquote(dies) == :command, do: command, else: ctx.server
+      await_down(victim, fn -> send(victim, :exit) end)
 
-    # The dead server's entry cannot be used by any process.
-    assert consume_in(replacement, ref, claims(ctx.binding)) == {:error, :real_model_staged}
+      assert await(fn -> entries() == 0 end), "the row was not removed on #{unquote(dies)} death"
+
+      # Only then: no process can use the reference.
+      assert consume_in(spawn_server(), ref, claims(binding)) == {:error, :real_model_staged}
+    end
   end
 
   test "the registry table is protected: only its owner writes it", _ctx do
@@ -164,9 +169,17 @@ defmodule SdrAgent.CalibrationConsole.AuthorityTest do
   end
 
   # A stand-in server process: consumes in itself and reports back.
-  defp spawn_server do
-    spawn(fn -> server_loop() end)
+  defp spawn_server, do: spawn_owned(fn -> server_loop() end)
+
+  # Every fixture process is stopped when the test ends, pass or fail.
+  defp spawn_owned(fun) do
+    pid = spawn(fun)
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    pid
   end
+
+  # The size of the registry's protected table (a read, never a write).
+  defp entries, do: :ets.info(Authority.table(), :size)
 
   defp server_loop do
     receive do
