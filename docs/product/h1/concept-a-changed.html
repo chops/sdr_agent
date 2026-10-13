@@ -247,14 +247,17 @@
 
     /* Sidebar collapse (CSS-only: hidden checkbox + label) */
     .nav-toggle{position:fixed;top:0;left:0;width:1px;height:1px;margin:0;opacity:0}
-    .side-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
-    .collapse-btn{position:relative;display:grid;place-items:center;flex:none;width:28px;height:28px;border-radius:6px;color:var(--faint);cursor:pointer;transition:background .15s,color .15s}
+    .side-top{display:flex;align-items:center}
+    .side-foot{display:flex;flex-direction:column;gap:4px;padding:0}
+    .preview-label{padding:0 10px 6px;font-size:12px;color:var(--faint)}
+    .collapse-btn{position:relative;display:flex;align-items:center;gap:10px;height:32px;padding:0 10px;border-radius:6px;color:var(--muted);font-size:13px;font-weight:520;cursor:pointer;transition:background .15s,color .15s}
     .collapse-btn:hover{background:var(--surface);color:var(--ink);box-shadow:var(--shadow-sm)}
     .collapse-btn svg{transition:transform .22s}
     .nav-toggle:focus-visible ~ .app .collapse-btn{outline:2px solid var(--focus);outline-offset:2px;color:var(--ink)}
     .hint,.nav-item .label{white-space:nowrap}
     .hint{position:absolute;left:calc(100% + 10px);top:50%;transform:translateY(-50%);padding:5px 8px;border-radius:6px;background:var(--ink);color:var(--bg);font-size:12px;font-weight:550;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:opacity .12s}
     .collapse-btn:hover .hint,.nav-toggle:focus-visible ~ .app .hint{opacity:1}
+    .hint{display:none}
     .t-expand{display:none}
     .nav-toggle:checked ~ .app .t-expand{display:inline}
     .nav-toggle:checked ~ .app .t-collapse{display:none}
@@ -264,8 +267,12 @@
       .nav-toggle:checked ~ .app .sidebar{width:64px}
       .nav-toggle:checked ~ .app .side-top{flex-direction:column;gap:10px}
       .nav-toggle:checked ~ .app .brand{padding:6px 0}
-      .nav-toggle:checked ~ .app .brand-name,.nav-toggle:checked ~ .app .side-foot{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+      .nav-toggle:checked ~ .app .brand-name,.nav-toggle:checked ~ .app .preview-label{position:absolute;padding:0;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
       .nav-toggle:checked ~ .app .collapse-btn svg{transform:scaleX(-1)}
+      .nav-toggle:checked ~ .app .side-foot{align-items:center}
+      .nav-toggle:checked ~ .app .collapse-btn{justify-content:center;width:40px;padding:0}
+      .nav-toggle:checked ~ .app .btn-text{display:none}
+      .nav-toggle:checked ~ .app .hint{display:block}
       .nav-toggle:checked ~ .app .nav-item{position:relative;justify-content:center;padding:9px 0}
       .nav-toggle:checked ~ .app .nav-item .label{position:absolute;left:calc(100% + 12px);top:50%;transform:translateY(-50%);padding:5px 8px;border-radius:6px;background:var(--ink);color:var(--bg);font-size:12px;font-weight:550;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:opacity .12s}
       .nav-toggle:checked ~ .app .nav-item:hover .label{opacity:1}
@@ -300,7 +307,7 @@
     .empty h2{font-size:18px;letter-spacing:-.01em}
     .empty p{margin:6px 0 0;color:var(--faint);font-size:13px}
     @media (max-width:760px){
-      .collapse-btn,.nav-toggle,.crumbs{display:none}
+      .collapse-btn,.nav-toggle,.crumbs,.side-foot{display:none}
       .top-right{flex:1;justify-content:space-between}
       .row.changed{box-shadow:var(--shadow-sm),inset 3px 0 0 var(--amber)}
       .strip{flex-wrap:wrap;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:var(--r);background:var(--surface)}
@@ -321,7 +328,6 @@
         <span class="brand-mark" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8.5 14 2l-4.5 12-2-4.5z"/></svg></span>
         <span class="brand-name">SDR Agent</span>
       </div>
-      <label class="collapse-btn" for="nav-collapse"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2"/><path d="M6 3v10M11 6.2 9.2 8l1.8 1.8"/></svg><span class="hint" aria-hidden="true"><span class="t-collapse">Collapse sidebar</span><span class="t-expand">Expand sidebar</span></span></label>
     </div>
     <nav class="nav" aria-label="Main">
       <span class="nav-item" aria-current="page"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 7 8 2.5 13.5 7v6.5h-3.5v-4h-4v4H2.5z"/></svg><span class="label">Home</span><span class="count num"><span class="sr">, </span>4<span class="sr"> waiting</span></span></span>
@@ -330,7 +336,10 @@
       <span class="nav-item" aria-disabled="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M2 6.5v3h2.5L11 13V3L4.5 6.5zM13.5 6.5v3"/></svg><span class="label">Campaigns</span></span>
       <span class="nav-item" aria-disabled="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.8M8 12.4v1.8M1.8 8h1.8M12.4 8h1.8M3.6 3.6l1.3 1.3M11.1 11.1l1.3 1.3M3.6 12.4l1.3-1.3M11.1 4.9l1.3-1.3" stroke-linecap="round"/></svg><span class="label">Settings</span></span>
     </nav>
-    <div class="side-foot">Design preview</div>
+    <div class="side-foot">
+      <span class="preview-label">Design preview</span>
+      <label class="collapse-btn" for="nav-collapse"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.5 4 3.5 8l4 4M12.5 4l-4 4 4 4"/></svg><span class="btn-text" aria-hidden="true">Collapse</span><span class="hint" aria-hidden="true"><span class="t-collapse">Collapse sidebar</span><span class="t-expand">Expand sidebar</span></span></label>
+    </div>
   </aside>
 
   <div class="main">
