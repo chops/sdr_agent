@@ -62,6 +62,14 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   cutoff gets the same selection and a withheld release only; the run and
   its Operation are not changed.
 
+  **A gate stop's Operation (review MF1).** The gate stop and the
+  Operation's failure are separate transactions (packet step 4), so a run
+  stopped `:witness_mismatch` or `:witness_unreconciled` whose Operation is
+  still `running` and whose job is no longer live has its Operation failed
+  here, revalidated under the run, Operation and job locks, by the worker's
+  rule (`SdrAgent.SDR.AgentWorker.fail_operation/3`). No other terminal
+  run's Operation is touched.
+
   Idempotent: a recovered run is `failed`, so a later sweep skips it.
   Integration-queue reply runs have no Operation (S9 choice 12); their job is
   found by its `run_id` argument.
@@ -137,9 +145,40 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
            |> each_ok(&recovered(recover(&1, cutoff, actor))),
          {:ok, invocations} <- terminal_unreleased(cutoff, actor),
          :ok <- each_ok(invocations, &recovered(recover_terminal(&1, actor))),
+         {:ok, stopped} <- Agents.list_runs(actor: actor),
+         :ok <- stopped |> Enum.filter(&gate_stopped?/1) |> each_ok(&recovered(heal(&1, actor))),
          {:ok, run_ids} <- old_reservation_runs(cutoff, actor) do
       each_ok(run_ids, &recovered(recover_stopped(&1, cutoff, actor)))
     end
+  end
+
+  # Review MF1: a run the result gate stopped whose Operation is still
+  # running (the worker or sweeper died between the gate's commit and the
+  # Operation's own transaction, packet step 4).
+  defp gate_stopped?(run),
+    do:
+      run.status == :failed and run.status_reason in [:witness_mismatch, :witness_unreconciled] and
+        is_binary(run.operation_id)
+
+  # One transaction: the run (re-read), its Operation and its job are locked
+  # in the recovery order and revalidated — still a gate stop, the
+  # Operation still running, the job no longer live — then the Operation
+  # fails by the worker's rule (the live gate cause, or its own Failure
+  # naming a resolved one). Anything else is left alone.
+  defp heal(run, actor) do
+    Audit.transaction(fn ->
+      with {:ok, run} <- lock(AgentRun, run.id, actor),
+           true <- gate_stopped?(run) || {:error, :not_running},
+           {:ok, %{status: :running} = operation} <- lock_operation(run, actor),
+           {:ok, state} <- job_state(run, actor, :for_update),
+           :ok <- not_live(state) do
+        :ok = AgentWorker.fail_operation(operation, run, actor)
+        run
+      else
+        {:ok, _settled_operation} -> Repo.rollback(:not_running)
+        {:error, error} -> Repo.rollback(error)
+      end
+    end)
   end
 
   # Skips: the run stopped, became fresh, or its job is live under the lock

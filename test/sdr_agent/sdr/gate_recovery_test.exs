@@ -172,6 +172,50 @@ defmodule SdrAgent.SDR.GateRecoveryTest do
     assert run!(ctx, ctx.run).status == :running
   end
 
+  describe "a gate stop whose Operation was never failed (review MF1)" do
+    test "the next sweep fails the stranded Operation on the live gate cause", ctx do
+      invocation = GateFixtures.call_model!(ctx, "cli_shape_v3_mismatch")
+      assert {:withheld, _release, stopped} = ResultGate.gate(invocation, gate(ctx))
+      assert operation!(ctx).status == :running
+      abandon!(ctx)
+
+      assert :ok = StaleRunSweeper.sweep(ctx.tenant.id)
+      operation = operation!(ctx)
+      assert operation.status in [:failed, :discarded]
+      assert operation.last_failure_id == stopped.attention_failure_id
+      assert_no_crash(ctx)
+
+      events = length(events(ctx.tenant))
+      assert :ok = StaleRunSweeper.sweep(ctx.tenant.id)
+      assert length(events(ctx.tenant)) == events
+    end
+
+    test "a resolved gate cause: the Operation fails with its own Failure naming it", ctx do
+      invocation = GateFixtures.call_model!(ctx, "cli_shape_v3_mismatch")
+      assert {:withheld, _release, stopped} = ResultGate.gate(invocation, gate(ctx))
+      {:ok, cause} = Operations.get_failure(stopped.attention_failure_id, actor: ctx.admin)
+      {:ok, _} = Operations.resolve_failure(cause, %{resolution_note: "seen"}, actor: ctx.admin)
+      abandon!(ctx)
+
+      assert :ok = StaleRunSweeper.sweep(ctx.tenant.id)
+      operation = operation!(ctx)
+      assert operation.status in [:failed, :discarded]
+      refute operation.last_failure_id == cause.id
+      {:ok, own} = Operations.get_failure(operation.last_failure_id, actor: ctx.admin)
+      assert own.message =~ cause.id
+    end
+
+    test "a live job's Operation is left to its worker", ctx do
+      invocation = GateFixtures.call_model!(ctx, "cli_shape_v3_mismatch")
+      assert {:withheld, _release, _stopped} = ResultGate.gate(invocation, gate(ctx))
+      started = run!(ctx, ctx.run).started_at
+      Clock.freeze(DateTime.add(started, StaleRunSweeper.stale_after_seconds() + 1, :second))
+
+      assert :ok = StaleRunSweeper.sweep(ctx.tenant.id)
+      assert operation!(ctx).status == :running
+    end
+  end
+
   test "the finalizer won: recovery sees the stopped run and changes nothing", ctx do
     invocation = GateFixtures.call_model!(ctx, "cli_shape_v3_mismatch")
     assert {:withheld, release, _run} = ResultGate.gate(invocation, gate(ctx))
