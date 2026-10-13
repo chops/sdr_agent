@@ -303,21 +303,48 @@ defmodule SdrAgent.Agents do
 
   # R0-07 slice B (row B5'): the store observation — the admission gate's
   # only filesystem I/O — runs after input normalisation and before the
-  # reservation takes any lock.
+  # reservation takes any lock, and only for a caller an authorized,
+  # tenant-scoped preflight (no row lock) shows may reserve on this run
+  # (review MF3). Anyone else causes no I/O: the store stays unobserved and
+  # the locked path, which stays authoritative, gives its usual answer.
   defp reserve_normalized(run, attrs, actor, calibration) do
     with {:ok, attrs} <- normalize_reserve(attrs) do
       {request, attrs} = Map.pop(attrs, :request)
-      gate = gate_inputs(attrs, calibration)
+      gate = gate_inputs(attrs, calibration, run, actor)
       transact(fn -> do_reserve_model_invocation(run, attrs, request, actor, gate) end)
     end
   end
 
-  defp gate_inputs(%{provider: :claude_cli} = attrs, calibration) do
-    if ModelProfiles.real?(Map.get(attrs, :profile_id)),
-      do: %{store: Gate.observe_store(), calibration: calibration}
+  defp gate_inputs(%{provider: :claude_cli} = attrs, calibration, run, actor) do
+    if ModelProfiles.real?(Map.get(attrs, :profile_id)) do
+      store = if may_reserve?(run, actor), do: Gate.observe_store(), else: :unobserved
+      %{store: store, calibration: calibration}
+    end
   end
 
-  defp gate_inputs(_attrs, _calibration), do: nil
+  defp gate_inputs(_attrs, _calibration, _run, _actor), do: nil
+
+  defp may_reserve?(%{id: run_id}, %SdrAgent.Actor{tenant_id: tenant_id} = actor)
+       when is_binary(tenant_id) do
+    with id when is_binary(id) <- uuid(run_id),
+         {:ok, %AgentRun{} = run} <- tenant_run(id, actor) do
+      Ash.can?({run, :reserve_model_call}, actor)
+    else
+      _denied -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp may_reserve?(_run, _actor), do: false
+
+  defp tenant_run(id, actor) do
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.read_one()
+  end
 
   # A ClaudeCLI call with a reviewed real profile goes through admission
   # (lock order: run → candidate grants → their allocations → chain head; see
@@ -537,7 +564,11 @@ defmodule SdrAgent.Agents do
 
   defp launch(id, profile, %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor)
        when is_binary(tenant) do
-    store = Gate.observe_store()
+    # Review MF3: the store is observed (filesystem I/O) only for an
+    # invocation the preflight finds in the actor's tenant; the locked
+    # path stays authoritative.
+    store =
+      if match?({:ok, _}, launch_target(id, actor)), do: Gate.observe_store(), else: :unobserved
 
     case audit_transact(fn -> launch_locked(id, profile, actor, store) end) do
       {:ok, {:sent, sent}} ->
