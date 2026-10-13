@@ -134,7 +134,8 @@ defmodule SdrAgent.Agents.CalibrationRecovery do
     defp launched_ids?(observation),
       do:
         observation.state == "launched" and pos?(observation.root_pid) and
-          observation.process_group_id == observation.root_pid
+          pos?(observation.process_group_id) and
+          observation.process_group_id === observation.root_pid
 
     defp uuid?(value), do: is_binary(value) and value =~ @uuid
     defp pos?(value), do: is_integer(value) and value > 0
