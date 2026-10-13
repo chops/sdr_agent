@@ -1741,3 +1741,13 @@ launcher) is withdrawn: no wrapper is needed.
   (full suite 1777/1777; dev-VM proof that the `remove:` seam is ignored),
   awaiting code review. The file attestation is not database authority:
   the audited event binding is later E4c work.
+- E4c-a code: **CHANGES REQUESTED** at 38ce6e3 (Codex 01a1354a: closed
+  attestation writer schema, an immutable handle target, create-only
+  attestation publication). Regressions at 8094c90; fixes at cfbd8de:
+  **scoped APPROVE** (Codex 01a1355c), a component approval only. Carried
+  note: `new_attestation/1` assumes a complete record for a state-shaped
+  handle (real handles come from validated stored records).
+- E4c-b isolation RED at 9e47de2: **PASS / VERIFIED RED** (Codex 01a13550).
+  GREEN at 119dd22 (with process and port termination evidence; full
+  suite 1800/1800), awaiting code review.
+- E4c-c1 claim-binding RED at 9d27da0, awaiting verification.
