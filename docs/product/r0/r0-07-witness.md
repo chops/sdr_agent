@@ -1772,8 +1772,15 @@ and runs everywhere.
 
 ### 8.14 d3 staged delta: console orchestration (proposed)
 
-**Status:** proposed for entity re-review. No RED work starts before it
-passes.
+**Status: entity PASS** at 125102e (Codex, answer d7278b6d, in_reply_to
+m_1791920332000023054_9678351b, report
+`codex-r007e-d3-125102e-entity-review.md`, sha256 a688f6ed). This is entity
+and action PASS only: scoped d3a RED may proceed, then d3b, d3c and d3d,
+each through its own gates. GREEN, merge, spend and promotion are not
+approved. Any further attribute or action change is staged as a delta
+first.
+
+History:
 - **Round 1** at edf023d: **NEEDS-REVIEW** (Codex 92ae3ded, report sha256
   456b55dc). Q1: a bounded, correlated observer. Q2: shared settlement
   through a narrow seam-only ClaudeCLI calibration wrapper.
@@ -1821,10 +1828,14 @@ d3c and d3d consume only the verified d3a and d3b contracts.
   terminal; typed confirmations are read through an injected IO function.
 - **Steps.** These are the E4c-6 steps. Every branch is in the matrix
   (8.14.4).
-- **One durable writer.** The command process is the only writer of the
-  launch record in `calibrate`. No other process issues a record or file
-  operation for it, so no delegated file IO can outlive a writer
-  (Codex 87fc001c).
+- **One durable writer.** The command process is the single issuer of
+  synchronous launch-record operations in `calibrate`. There is no hand-off
+  to an observer and no concurrent writer (Codex 87fc001c).
+  - OTP's file APIs still delegate internally to the file server.
+  - The guarantee comes from record ownership: it is the console VM's OS
+    pid and start identity, so while that VM, and its file server, still
+    runs, any other recoverer refuses `:owner_alive`. Only an absent or
+    reused owner VM permits stale recovery (Codex d7278b6d).
 
 #### 8.14.2 d3a: the launch receipt (server → command)
 
@@ -1885,7 +1896,8 @@ identity is observation only, used by the record and by later quiescence.
    …)`, and then step 8 follows.
 4. Unverified or none: the record stays `launch_pending` (matrix row 10).
 
-There is no concurrent writer, so there is no join and no delegated-IO race.
+There is no concurrent writer and no join; the command issues every
+synchronous record operation itself.
 
 **Crash during the call.** The record stays `launch_pending`, and recovery
 is attended (8.14.5). Until OQ-E3 is accepted, a `launched` recovery also
@@ -2022,7 +2034,7 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 |---|---|---|---|---|
 | ClaudeCLI exemption request (8.13 A) | Existing | Closed key `observer: {pid, ref}` | Malformed is staged before the consume | Server |
 | Launch receipt (message) | New relationship | One correlated message after `Reaper.open`, sent from the server's `handle_call` before its reply: verified (typed identity plus a positive-pid group containing the root) or unverified | After `sent` only; never manufactured; ordinary calls have none; no cleanup authority; read by the command after the call | Server → command |
-| Launch record writer (`calibrate`) | Existing artifact | The command is the single writer, with no observer process | No concurrent or delegated record IO | Command |
+| Launch record writer (`calibrate`) | Existing artifact | The command is the single issuer of synchronous record operations; no observer hand-off | No concurrent record writer. While the owner VM lives, recovery refuses `:owner_alive` | Command |
 | Private server reaper and ClaudeCLI cleanup | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | No `identity:` guard; cleanup as for ordinary calls; identity is observation only | Server |
 | `ModelProvider.calibration_call/3` | New entry (seam-only) | Authoritative target checks, then the shared helper | No provider call or write on refusal; ordinary `complete/2` unchanged | Calling process |
 | AgentRun (`:proof`, no invocation) | Existing | Stopped by `SDR.Model.stop_refused/3` with the reservation receipt, or `cancel_run/2` without one | Never left running by `calibrate`; E1 settles runs with an invocation | Existing run actions |
@@ -2061,7 +2073,10 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 - no record write by any process other than the command;
 - a failed run stop on row 4 retains the claim;
 - `revoke` and shutdown do not mask a retained conflict;
-- command death;
+- command death while its VM stays alive: another recoverer refuses
+  `:owner_alive`;
+- only this protocol's stale receipt messages are flushed, never unrelated
+  mailbox traffic;
 - one launch, no retry.
 
 **d3d — `calibrate-recover`:**
@@ -2429,5 +2444,5 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
     7059727 (2dc068a3) after 21eb641 (witness validated before consume,
     41dca95e).
   - d3 orchestration: delta 8.14 **NEEDS-REVIEW** at edf023d (92ae3ded)
-    and 7246478 (87fc001c); revised (single writer, zero-target deferral),
-    awaiting entity recheck.
+    and 7246478 (87fc001c); **entity PASS** at 125102e (d7278b6d).
+    Sub-slices d3a → d3b → d3c → d3d; d3a RED next.
