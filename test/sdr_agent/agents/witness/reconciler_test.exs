@@ -136,8 +136,16 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   end
 
   test "R0-07: a generation-2 row reconciles only under its own profile's exact entry", ctx do
-    opus = %{@shipped_entry | profile_id: :claude_cli_opus}
-    sonnet = %{@shipped_entry | profile_id: :claude_cli_sonnet, model_id: "claude-sonnet-5-5"}
+    # Generation-2 entries name the current reviewed CLI version (R0-08).
+    current = SdrAgent.AI.ModelProfiles.cli_version()
+    opus = %{@shipped_entry | profile_id: :claude_cli_opus, cli_version: current}
+
+    sonnet = %{
+      @shipped_entry
+      | profile_id: :claude_cli_sonnet,
+        model_id: "claude-sonnet-5-5",
+        cli_version: current
+    }
 
     for {label, entries, expected} <- [
           {"the generation-1 entry", [@shipped_entry], :inferred},
@@ -996,15 +1004,23 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   end
 
   # Simulates an invocation written before R0 (generation 1, no profile or
-  # grant), as the shipped generation-1 entry requires (R0-07).
+  # grant) by the then-reviewed CLI 2.1.291, as the shipped generation-1
+  # entry requires (R0-07; R0-08 left that entry unchanged).
   defp legacy!(invocation) do
     tamper!(
       "UPDATE model_invocations SET ledger_generation = 1, profile_id = NULL, grant_id = NULL, " <>
-        "allocation_id = NULL WHERE id = $1",
+        "allocation_id = NULL, provider_version = '2.1.291' WHERE id = $1",
       [Ecto.UUID.dump!(invocation.id)]
     )
 
-    %{invocation | ledger_generation: 1, profile_id: nil, grant_id: nil, allocation_id: nil}
+    %{
+      invocation
+      | ledger_generation: 1,
+        profile_id: nil,
+        grant_id: nil,
+        allocation_id: nil,
+        provider_version: "2.1.291"
+    }
   end
 
   defp reconcile(ctx, invocation, methods \\ nil) do

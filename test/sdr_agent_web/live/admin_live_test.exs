@@ -62,7 +62,7 @@ defmodule SdrAgentWeb.AdminLiveTest do
       {:ok, view, _html} = live(admin, ~p"/admin")
       assert has_element?(view, "#model-alias", "opus")
       assert has_element?(view, "#model-id", "claude-opus-5-5")
-      assert has_element?(view, "#reviewed-cli-version", "2.1.291")
+      assert has_element?(view, "#reviewed-cli-version", "2.1.294")
       assert has_element?(view, "#provider-server[data-status='running']")
       assert has_element?(view, "#effective-provider[data-effective='ClaudeCLI']")
       assert has_element?(view, "#model-attestation[data-status='pending']", "first call")
@@ -126,7 +126,7 @@ defmodule SdrAgentWeb.AdminLiveTest do
              )
 
       assert has_element?(view, "#pinned-cli-path", bin)
-      assert has_element?(view, "#pinned-cli-version", "Claude Code 2.1.291")
+      assert has_element?(view, "#pinned-cli-version", "Claude Code 2.1.294")
     end
 
     test "R0-02: the Fake shows no pinned CLI", %{conn: conn} do
