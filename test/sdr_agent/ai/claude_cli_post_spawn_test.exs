@@ -52,6 +52,37 @@ defmodule SdrAgent.AI.ClaudeCLIPostSpawnTest do
     end
   end
 
+  test "a late unidentified receipt keeps admission closed", %{tmp_dir: tmp} do
+    # The pid lookup is held past the handshake deadline, then finds none.
+    lookup = fn _port ->
+      receive do: (:release_lookup -> nil)
+    end
+
+    {:ok, server} =
+      ClaudeCLI.start_link(
+        command: System.find_executable("elixir"),
+        test_launcher: true,
+        command_args: [@fake, "malformed", Path.join(tmp, "unused")],
+        launch_admission: &SdrAgent.Test.LaunchAdmission.admitted/3,
+        timeout: 1_000,
+        reaper: [os_pid: lookup]
+      )
+
+    on_exit(fn -> if Process.alive?(server), do: GenServer.stop(server) end)
+
+    assert ClaudeCLI.complete(request(), server: server) == {:unknown, :launch_handshake_timeout}
+    assert %{admission: :blocked} = ClaudeCLI.admission(server)
+
+    send(:sys.get_state(server).reaper, :release_lookup)
+    # The late receipt is handled before this synchronous call returns.
+    _ = :sys.get_state(server, 10_000)
+    Process.sleep(100)
+    _ = :sys.get_state(server, 10_000)
+
+    assert %{admission: :blocked} = ClaudeCLI.admission(server)
+    assert {:error, :provider_not_quiescent} = ClaudeCLI.complete(request(), server: server)
+  end
+
   defp request do
     %{
       id: "post-spawn",

@@ -22,7 +22,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   (descendants, then the root: TERM, a short grace, KILL, then waits until
   each is gone or a zombie), removes its workspace, and only then releases
   the lease and exits. A tree it cannot confirm stopped is retried every
-  `retry_ms`, with an error logged, and the lease stays held meanwhile.
+  `retry_ms`, with an error logged, and the lease stays held meanwhile. A
+  launch whose port opened but whose OS pid could not be read is
+  unidentified: it can never be confirmed stopped, so the reaper exits
+  **without** releasing the lease, and admission stays closed until an
+  operator `release/1` (code review of the R0-07 slice E integration).
 
   ## Admission lease (named servers)
 
@@ -50,7 +54,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   Options (`:reaper` of the server; failure injection for tests):
   `:signal` (`fn os_pid, "-TERM" | "-KILL" -> any end`), `:exit_wait_ms`
   (default 2000), `:retry_ms` (default 1000), `:on_open` (`fn os_pid -> any
-  end`, run after a launch is recorded and before its receipt is sent).
+  end`, run after a launch is recorded and before its receipt is sent),
+  `:os_pid` (`fn port -> {:os_pid, pid} | nil end`, replacing the pid
+  lookup of an opened port).
   """
 
   require Logger
@@ -200,7 +206,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
 
       {:done, workspace} ->
         {launch, launches} = Map.pop(state.launches, workspace)
-        with {port, _os_pid} <- launch, do: close(port)
+        close_launch(launch)
         loop(%{state | launches: launches})
 
       {:DOWN, ref, :process, _owner, _reason} when ref == state.ref ->
@@ -230,7 +236,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   end
 
   defp opened(state, workspace, port) do
-    case Port.info(port, :os_pid) do
+    case os_pid(state.opts, port) do
       {:os_pid, os_pid} ->
         state = put_in(state.launches[workspace], {port, os_pid})
 
@@ -240,10 +246,18 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
         end
 
       _no_pid ->
-        # The port closed before its pid could be read: whatever ran is not
-        # identifiable, so the workspace stays tracked and the outcome is
-        # unknown until an operator release.
-        {{:unknown, :post_spawn_failure}, put_in(state.launches[workspace], nil)}
+        # Opened, but its pid cannot be read: whatever ran is unidentified
+        # (never the pre-launch nil). It can never be confirmed stopped, so
+        # the reaper keeps the lease on owner death (see `reap/1`).
+        {{:unknown, :post_spawn_failure},
+         put_in(state.launches[workspace], {:unidentified, port})}
+    end
+  end
+
+  defp os_pid(opts, port) do
+    case Keyword.get(opts, :os_pid) do
+      nil -> Port.info(port, :os_pid)
+      lookup -> lookup.(port)
     end
   end
 
@@ -260,21 +274,39 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   # (the cleanup receipt) only when all are confirmed gone, retrying until
   # then.
   defp reap(state) do
-    remaining = Enum.reject(state.launches, &stop(&1, state.opts))
+    {unidentified, identified} = Enum.split_with(state.launches, &unidentified?/1)
+    remaining = Enum.reject(identified, &stop(&1, state.opts))
 
-    if remaining == [] do
-      if state.name, do: erase(state.name, self())
-      :ok
-    else
-      Logger.error(
-        "ClaudeCLI reaper could not confirm #{length(remaining)} CLI process tree(s) stopped; " <>
-          "calls stay refused until they are gone"
-      )
+    cond do
+      remaining != [] ->
+        Logger.error(
+          "ClaudeCLI reaper could not confirm #{length(remaining)} CLI process tree(s) stopped; " <>
+            "calls stay refused until they are gone"
+        )
 
-      Process.sleep(Keyword.get(state.opts, :retry_ms, @retry_ms))
-      reap(%{state | launches: Map.new(remaining)})
+        Process.sleep(Keyword.get(state.opts, :retry_ms, @retry_ms))
+        reap(%{state | launches: Map.new(remaining ++ unidentified)})
+
+      unidentified != [] ->
+        # Cannot ever be confirmed: exit holding the lease, so admission
+        # stays closed until an operator `release/1` (dead holder).
+        Enum.each(unidentified, fn {_workspace, {:unidentified, port}} -> close(port) end)
+
+        Logger.error(
+          "ClaudeCLI reaper could not identify #{length(unidentified)} launched CLI " <>
+            "process(es); admission stays closed until an operator release"
+        )
+
+        :ok
+
+      true ->
+        if state.name, do: erase(state.name, self())
+        :ok
     end
   end
+
+  defp unidentified?({_workspace, {:unidentified, _port}}), do: true
+  defp unidentified?(_launch), do: false
 
   defp stop({workspace, nil}, _opts) do
     File.rm_rf(workspace)
@@ -290,6 +322,10 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
       false
     end
   end
+
+  defp close_launch({:unidentified, port}), do: close(port)
+  defp close_launch({port, _os_pid}), do: close(port)
+  defp close_launch(nil), do: :ok
 
   defp close(port) do
     if Port.info(port), do: Port.close(port)
