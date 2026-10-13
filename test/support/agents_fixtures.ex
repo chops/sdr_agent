@@ -105,6 +105,116 @@ defmodule SdrAgent.AgentsFixtures do
   end
 
   @doc """
+  A completed generation-2 ClaudeCLI invocation of `run` (Opus profile,
+  reviewed provenance) with `completion` (default `completion/0`). The
+  tenant needs an eligible grant (`grant!/2`).
+  """
+  def claude_completed!(run, agent, key, completion \\ completion()) do
+    {:ok, reserved} =
+      SdrAgent.Agents.reserve_model_invocation(run, claude_attrs(key), actor: agent)
+
+    {:ok, sent} = SdrAgent.Agents.mark_model_invocation_sent(reserved, actor: agent)
+    {:ok, done} = SdrAgent.Agents.complete_model_invocation(sent, completion, actor: agent)
+    done
+  end
+
+  @doc "The projection version of the synthetic links below (`release_entry/0`)."
+  def release_projection, do: "claude-message-json/1+prompt-builder/1"
+
+  @doc """
+  The exact six-key allowlist entry (R0-07) naming the identity of
+  `claude_completed!/4` invocations and `reconciled_link!/3` links. The test
+  environment ships an empty allowlist; tests that release put this entry.
+  """
+  def release_entry do
+    provenance = SdrAgent.AI.ModelProvider.ClaudeCLI.provenance()
+
+    %{
+      provider: :claude_cli,
+      cli_version: provenance.provider_version,
+      profile_id: provenance.profile_id,
+      model_id: provenance.model_id,
+      projection_version: release_projection(),
+      method: :propagated_id
+    }
+  end
+
+  @doc """
+  Puts `entries` (default `[release_entry()]`) as the runtime witness
+  allowlist and returns the previous configuration (restore it on exit).
+  """
+  def put_allowlist!(entries \\ [release_entry()]) do
+    previous = Application.get_env(:sdr_agent, SdrAgent.Agents.Witness, [])
+
+    Application.put_env(
+      :sdr_agent,
+      SdrAgent.Agents.Witness,
+      Keyword.put(previous, :reconciled_methods, entries)
+    )
+
+    previous
+  end
+
+  @doc """
+  Records, as REC, a primary witness link of `invocation` (default
+  `:reconciled`) whose evidence names the invocation's own identity.
+  `overrides` replace link attributes; `evidence` overrides are merged.
+  """
+  def reconciled_link!(invocation, rec, overrides \\ %{}) do
+    {:ok, link} = SdrAgent.Agents.link_wire_witness(link_attrs(invocation, overrides), actor: rec)
+    link
+  end
+
+  @doc "Link attributes for `reconciled_link!/3`."
+  def link_attrs(invocation, overrides \\ %{}) do
+    overrides = Map.new(overrides)
+    {evidence, overrides} = Map.pop(overrides, :evidence, %{})
+
+    Map.merge(
+      %{
+        model_invocation_id: invocation.id,
+        proxy_record_ref: Ash.UUIDv7.generate(),
+        proxy_request_sha256: digest("raw request"),
+        proxy_response_sha256: digest("raw response"),
+        link_status: :reconciled,
+        method: :propagated_id,
+        evidence: Map.merge(link_evidence(invocation), evidence)
+      },
+      overrides
+    )
+  end
+
+  defp link_evidence(invocation) do
+    hex = &(&1 && Base.encode16(&1, case: :lower))
+
+    %{
+      "witness_schema" => 1,
+      "proxy_version" => "0.2.0",
+      "cli_version" => invocation.provider_version,
+      "route" => "/anthropic/v1/messages",
+      "http_method" => "POST",
+      "http_status" => 200,
+      "outcome" => "complete",
+      "classification" => "primary",
+      "projection_version" => release_projection(),
+      "app_request_sha256" => hex.(invocation.request_sha256),
+      "app_response_sha256" => hex.(invocation.response_sha256),
+      "reason_codes" => []
+    }
+    |> Map.merge(identity_evidence(invocation))
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  # R0-07 item 7: a gated parent's evidence names its model and profile.
+  defp identity_evidence(%{ledger_generation: 2, provider: :claude_cli} = invocation),
+    do: %{
+      "model_id" => invocation.model_id,
+      "profile_id" => Atom.to_string(invocation.profile_id)
+    }
+
+  defp identity_evidence(_invocation), do: %{}
+
+  @doc """
   Creates, as the tenant's admin, an active real-model call grant (C9) wide
   enough for synthetic ClaudeCLI tests: both profiles, a window around any
   frozen test clock, and one allocation funding every usage bucket.

@@ -84,11 +84,12 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
   end
 
   defp link(invocation, ref, supersedes_id) do
-    evidence = %{
-      "witness_schema" => 1,
-      "projection_version" => "claude-message-json/1+prompt-builder/1",
-      "reason_codes" => ["propagated_id_match"]
-    }
+    evidence =
+      Map.merge(SdrAgent.Agents.WitnessEvidence.identity(invocation), %{
+        "witness_schema" => 1,
+        "projection_version" => "claude-message-json/1+prompt-builder/1",
+        "reason_codes" => ["propagated_id_match"]
+      })
 
     %{
       model_invocation_id: invocation.id,

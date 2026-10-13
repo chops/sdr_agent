@@ -262,6 +262,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
     %{
       provider: :claude_cli,
       cli_version: invocation.provider_version,
+      profile_id: invocation.profile_id,
+      model_id: invocation.model_id,
       projection_version: @version,
       method: :propagated_id
     }
@@ -280,7 +282,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
         proxy_record_ref: ref,
         link_status: status,
         method: :propagated_id,
-        evidence: evidence
+        # R0-07 item 7: a gated parent's link names its model and profile.
+        evidence: Map.merge(SdrAgent.Agents.WitnessEvidence.identity(invocation), evidence)
       },
       actor: ctx.rec
     )

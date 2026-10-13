@@ -4,8 +4,11 @@ defmodule SdrAgent.Agents.Changes.DecisionRules do
   transaction:
 
     * `mode: :llm` ⇒ `model_invocation_id` and `output_pointer` present, the
-      invocation is `completed` with `validation_status: :valid`, the
-      pointer resolves in its `parsed_output`, and no rule fields;
+      invocation is `completed` with `validation_status: :valid`, its output
+      is released (`SdrAgent.Agents.ReleasedOutput`: a generation-2
+      ClaudeCLI output needs a `:released` release, R0-07; otherwise
+      `SdrAgent.Agents.Errors.ResultNotReleased`), the pointer resolves in
+      that output, and no rule fields;
     * `mode: :deterministic` ⇒ `rule_id` and `rule_version` present, no
       invocation and no pointer;
     * protected kinds (`SdrAgent.Agents.Decision.protected_kinds/0`) are
@@ -16,9 +19,12 @@ defmodule SdrAgent.Agents.Changes.DecisionRules do
   """
   use Ash.Resource.Change
 
+  alias SdrAgent.Actor
   alias SdrAgent.Agents.Decision
+  alias SdrAgent.Agents.Errors.ResultNotReleased
   alias SdrAgent.Agents.JsonPointer
   alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ReleasedOutput
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Audit.Payload
@@ -107,9 +113,18 @@ defmodule SdrAgent.Agents.Changes.DecisionRules do
   defp check_invocation(changeset, {:ok, %{status: :completed, validation_status: :valid} = inv}) do
     pointer = Ash.Changeset.get_attribute(changeset, :output_pointer)
 
-    case JsonPointer.resolve(inv.parsed_output, pointer) do
-      {:ok, _value} -> changeset
-      :error -> invalid(changeset, :output_pointer, "does not resolve in parsed_output")
+    with {:ok, output} <- ReleasedOutput.fetch(inv, Actor.system(:kernel, inv.tenant_id)),
+         {:ok, _value} <- JsonPointer.resolve(output, pointer) do
+      changeset
+    else
+      {:error, :result_not_released} ->
+        Ash.Changeset.add_error(
+          changeset,
+          ResultNotReleased.exception(field: :model_invocation_id, model_invocation_id: inv.id)
+        )
+
+      _unresolved ->
+        invalid(changeset, :output_pointer, "does not resolve in parsed_output")
     end
   end
 
