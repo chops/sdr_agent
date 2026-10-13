@@ -908,6 +908,27 @@ writer of `status_reason :calibration_latched`.
   held-lock concurrency; a query-order regression proving no row lock after
   the head.
 
+- **Staged E1 contract** (accepted in Codex's E1 RED review at 6f28fee,
+  report `codex-r007e-e1-6f28fee-red-review.md` sha256
+  c5f95e3e4a65f0a61cb557fca34dacd6e65585b680cc725301983b8a4c1e423e):
+  - `Agents.finish_calibration(invocation, %{sha256: <lowercase hex64>},
+    actor:)` returns `{:ok, %{release:, run:}}`.
+  - Shape and state refusals are `{:error, :calibration_not_finishable}`
+    and a different hash is `{:error, :calibration_evidence_conflict}`.
+    Wrong principals are a policy `Forbidden`; a human auditor's attempt is
+    audited once (`authz.denied`).
+  - The run event `agents.run.calibration_latched` is written only on the
+    first transition of a running run. An identical replay, or a finish of
+    an already-terminal run, writes no run event.
+  - The file path is not persisted, and no file I/O happens inside the
+    domain transaction. This is a trusted in-process latch API, not proof
+    that a file exists or was validated, and never a web, job or
+    request-body hash path. The console (E2, R11-3) must validate the file,
+    schema, identity and hash before it supplies the hash. End-to-end
+    artifact validation remains a later hard harness gate. Nil `Prelocked`
+    link and receipt, with the artifact hash as `evidence_sha256`, remain
+    mandatory.
+
 #### R11-3: the first published artifact is the frozen observation
 
 - The first artifact successfully published for an invocation **is** its
@@ -1202,3 +1223,8 @@ writer of `status_reason :calibration_latched`.
   unchanged and the earlier implementation bounds are kept. Planning and
   RED tests may proceed. This grants no code merge, calibration,
   publication, enablement or spend approval; the real-model budget stays 0.
+- E1 RED at 6f28fee: **NEEDS-REVIEW** (Codex, note fdd6cbd9, report
+  `codex-r007e-e1-6f28fee-red-review.md`): failures must be assertions,
+  not crashes; split the reserved and sent cases (B4' barrier); add event
+  rollback, auditor denial audit, failed-run and invalid-output coverage.
+  Staged contract accepted (R11-2 above). Revised RED pending recheck.

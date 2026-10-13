@@ -60,6 +60,17 @@ defmodule SdrAgent.Agents.FinishCalibrationRaceTest do
     %{tenant: tenant, run: run, agent: agent, invocation: invocation}
   end
 
+  # Checked by assertion in the test process before any task or held lock
+  # starts, so a missing implementation fails as an assertion.
+  setup do
+    Code.ensure_loaded!(Agents)
+
+    assert function_exported?(Agents, :finish_calibration, 3),
+           "Agents.finish_calibration/3 is not defined"
+
+    :ok
+  end
+
   test "a writer holding the run: the finish waits, then latches", ctx do
     parent = self()
 
@@ -133,7 +144,7 @@ defmodule SdrAgent.Agents.FinishCalibrationRaceTest do
 
   defp finish(ctx, hash) do
     with_connection(fn ->
-      Agents.finish_calibration(ctx.invocation, %{sha256: hash}, actor: ctx.agent)
+      apply(Agents, :finish_calibration, [ctx.invocation, %{sha256: hash}, [actor: ctx.agent]])
     end)
   end
 

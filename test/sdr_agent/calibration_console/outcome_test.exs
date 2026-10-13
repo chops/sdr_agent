@@ -18,6 +18,12 @@ defmodule SdrAgent.CalibrationConsole.OutcomeTest do
 
   alias SdrAgent.CalibrationConsole.Outcome
 
+  # A missing module fails as an assertion, never as a crash.
+  setup do
+    assert Code.ensure_loaded?(Outcome), "SdrAgent.CalibrationConsole.Outcome is not defined"
+    :ok
+  end
+
   @candidate %{
     provider: :claude_cli,
     cli_version: "2.1.294",

@@ -10,6 +10,12 @@ defmodule SdrAgent.CalibrationConsole.PromptTest do
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.CalibrationConsole.Prompt
 
+  # A missing module fails as an assertion, never as a crash.
+  setup do
+    assert Code.ensure_loaded?(Prompt), "SdrAgent.CalibrationConsole.Prompt is not defined"
+    :ok
+  end
+
   test "the prompt reference is versioned and commits to the rendered text" do
     assert %{id: "calibration.prompt", version: "1", sha256: sha} = Prompt.prompt_ref()
     assert sha == :crypto.hash(:sha256, Prompt.render())

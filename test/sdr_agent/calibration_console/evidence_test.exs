@@ -32,11 +32,18 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp} do
+    # A missing module fails as an assertion, never as a crash.
+    assert Code.ensure_loaded?(Prompt), "SdrAgent.CalibrationConsole.Prompt is not defined"
+    assert Code.ensure_loaded?(Evidence), "SdrAgent.CalibrationConsole.Evidence is not defined"
+
     tenant = bootstrap!()
 
     AgentsFixtures.grant!(tenant, %{
-      total_attempts: 4,
-      allocations: [%{key: :proof, applies_to: [:proof], attempts: 4}]
+      total_attempts: 6,
+      allocations: [
+        %{key: :b1, applies_to: [:b1], attempts: 2},
+        %{key: :proof, applies_to: [:proof], attempts: 4}
+      ]
     })
 
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant, usage_origin: :proof)
@@ -197,10 +204,11 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
     end
 
     test "a link that is unknown, foreign or with another evidence hash is a conflict", ctx do
-      %{run: other_run, agent: agent} =
-        AgentsFixtures.running_run(ctx.tenant, usage_origin: :proof)
-
-      foreign = AgentsFixtures.reconciled_link!(completed_proof!(other_run, agent), ctx.rec)
+      # Another invocation's link: a business call, since an unlatched proof
+      # invocation is a B4' predecessor that blocks a second proof reservation.
+      %{run: other_run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
+      other = AgentsFixtures.claude_completed!(other_run, agent, "other")
+      foreign = AgentsFixtures.reconciled_link!(other, ctx.rec)
 
       for links <- [
             [%{id: Ash.UUIDv7.generate(), evidence_sha256: link_sha(ctx.link)}],
@@ -302,7 +310,6 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
   defp opts(ctx), do: [actor: system_actor(:agent_runtime, ctx.tenant)]
 
   defp link_sha(link), do: hex(Canonical.sha256(link.evidence))
-
 
   defp dot?(path), do: Path.basename(path) in [".", ".."]
 end

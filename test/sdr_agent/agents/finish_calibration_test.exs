@@ -42,14 +42,14 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
   end
 
   describe "a running proof run" do
-    for outcome <- [:completed, :failed, :unknown] do
+    for outcome <- [:completed, :invalid, :failed, :unknown] do
       test "a #{outcome} call latches and the run succeeds as :calibration_latched", ctx do
         %{run: run, agent: agent} = proof_run(ctx)
         invocation = proof_invocation!(run, agent, unquote(outcome))
         sha = sha("evidence-#{unquote(outcome)}")
 
         assert {:ok, %{release: latch, run: finished}} =
-                 Agents.finish_calibration(invocation, %{sha256: sha}, actor: agent)
+                 finish(invocation, %{sha256: sha}, actor: agent)
 
         assert {latch.disposition, latch.reason, latch.evidence_sha256} ==
                  {:calibration, :calibration, sha}
@@ -73,12 +73,51 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
       {:ok, cancelled} = Agents.cancel_run(run, actor: agent, attrs: %{status_reason: :crash})
 
       assert {:ok, %{release: latch, run: same}} =
-               Agents.finish_calibration(invocation, %{sha256: sha("late")}, actor: agent)
+               finish(invocation, %{sha256: sha("late")}, actor: agent)
 
       assert latch.disposition == :calibration
       assert {same.status, same.status_reason} == {:cancelled, :crash}
       assert same.finished_at == cancelled.finished_at
       assert events_of_type(ctx.tenant, "agents.run.calibration_latched") == []
+    end
+  end
+
+  describe "an already-failed proof run" do
+    test "keeps its reason, attention Failure and finish time; the latch is recorded", ctx do
+      %{run: run, agent: agent} = proof_run(ctx)
+      invocation = proof_invocation!(run, agent, :invalid)
+
+      {:ok, failed} =
+        Agents.fail_run(run, %{status_reason: :invalid_model_output}, actor: agent)
+
+      assert failed.attention_failure_id
+
+      assert {:ok, %{release: latch, run: same}} =
+               finish(invocation, %{sha256: sha("failed")}, actor: agent)
+
+      assert latch.disposition == :calibration
+
+      assert {same.status, same.status_reason, same.attention_failure_id, same.finished_at} ==
+               {:failed, :invalid_model_output, failed.attention_failure_id, failed.finished_at}
+
+      assert events_of_type(ctx.tenant, "agents.run.calibration_latched") == []
+    end
+  end
+
+  describe "atomicity" do
+    test "a failure of the run event rolls back the latch and the run change", ctx do
+      %{run: run, agent: agent} = proof_run(ctx)
+      invocation = proof_invocation!(run, agent, :completed)
+      before = event_count(ctx)
+      fail_event!("agents.run.calibration_latched")
+
+      assert {:error, _} = finish(invocation, %{sha256: sha("rollback")}, actor: agent)
+
+      assert event_count(ctx) == before
+      assert_unchanged(ctx, run)
+
+      auditor = system_actor(:auditor_cli, ctx.tenant)
+      assert {:ok, nil} = Agents.get_result_release(invocation.id, actor: auditor)
     end
   end
 
@@ -88,7 +127,7 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
       invocation = proof_invocation!(run, agent, :completed)
 
       {:ok, %{release: latch}} =
-        Agents.finish_calibration(invocation, %{sha256: sha("first")}, actor: agent)
+        finish(invocation, %{sha256: sha("first")}, actor: agent)
 
       %{invocation: invocation, agent: agent, latch: latch}
     end
@@ -97,9 +136,7 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
       before = event_count(ctx)
 
       assert {:ok, %{release: again, run: run}} =
-               Agents.finish_calibration(ctx.invocation, %{sha256: sha("first")},
-                 actor: ctx.agent
-               )
+               finish(ctx.invocation, %{sha256: sha("first")}, actor: ctx.agent)
 
       assert again.id == ctx.latch.id
       assert {run.status, run.status_reason} == {:succeeded, :calibration_latched}
@@ -110,20 +147,19 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
       before = event_count(ctx)
 
       assert {:error, :calibration_evidence_conflict} =
-               Agents.finish_calibration(ctx.invocation, %{sha256: sha("other")},
-                 actor: ctx.agent
-               )
+               finish(ctx.invocation, %{sha256: sha("other")}, actor: ctx.agent)
 
       assert event_count(ctx) == before
     end
   end
 
   describe "refusals write nothing" do
-    test "an invocation that is not terminal", ctx do
-      %{run: run, agent: agent} = proof_run(ctx)
-
-      for status <- [:reserved, :sent] do
-        invocation = proof_invocation!(run, agent, status)
+    # One per test: an unlatched proof invocation is a B4' predecessor that
+    # blocks any later proof reservation in the tenant.
+    for status <- [:reserved, :sent] do
+      test "a #{status} invocation", ctx do
+        %{run: run, agent: agent} = proof_run(ctx)
+        invocation = proof_invocation!(run, agent, unquote(status))
         assert_refused(ctx, run, invocation, agent, :calibration_not_finishable)
       end
     end
@@ -155,7 +191,7 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
       invocation = proof_invocation!(run, agent, :failed)
 
       for bad <- [nil, "XYZ", String.upcase(sha("x")), sha("x") <> "0"] do
-        assert {:error, _} = Agents.finish_calibration(invocation, %{sha256: bad}, actor: agent)
+        assert {:error, _} = finish(invocation, %{sha256: bad}, actor: agent)
       end
 
       assert_unchanged(ctx, run)
@@ -170,13 +206,26 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
             human(:admin, ctx.tenant),
             human(:reviewer, ctx.tenant),
             system_actor(:reconciler, ctx.tenant),
+            system_actor(:auditor_cli, ctx.tenant),
             struct(SdrAgent.Actor, type: :agent_runtime, tenant_id: Ash.UUIDv7.generate())
           ] do
-        assert {:error, _} =
-                 Agents.finish_calibration(invocation, %{sha256: sha("actor")}, actor: actor),
+        assert {:error, %Ash.Error.Forbidden{}} =
+                 finish(invocation, %{sha256: sha("actor")}, actor: actor),
                inspect(actor)
       end
 
+      assert events_of_type(ctx.tenant, "authz.denied") == []
+      assert_unchanged(ctx, run)
+    end
+
+    test "a human auditor is denied, and the denial is audited once", ctx do
+      %{run: run, agent: agent} = proof_run(ctx)
+      invocation = proof_invocation!(run, agent, :failed)
+
+      assert {:error, %Ash.Error.Forbidden{}} =
+               finish(invocation, %{sha256: sha("aur")}, actor: human(:auditor, ctx.tenant))
+
+      assert [%{actor_role: :auditor}] = events_of_type(ctx.tenant, "authz.denied")
       assert_unchanged(ctx, run)
     end
   end
@@ -212,6 +261,9 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
     end
 
     test ":finish_calibration is not callable directly without its invocation", ctx do
+      assert Ash.Resource.Info.action(SdrAgent.Agents.AgentRun, :finish_calibration),
+             "AgentRun :finish_calibration is not defined"
+
       assert {:error, _} =
                ctx.run
                |> Ash.Changeset.for_update(:finish_calibration, %{}, actor: ctx.agent)
@@ -228,7 +280,7 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
 
       {result, sql} =
         GateFixtures.capture(fn ->
-          Agents.finish_calibration(invocation, %{sha256: sha("order")}, actor: agent)
+          finish(invocation, %{sha256: sha("order")}, actor: agent)
         end)
 
       assert {:ok, _} = result
@@ -270,35 +322,41 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
 
   defp advance(reserved, agent, outcome) do
     {:ok, sent} = Agents.mark_model_invocation_sent(reserved, actor: agent)
-    finish(sent, agent, outcome)
+    settle(sent, agent, outcome)
   end
 
-  defp finish(sent, _agent, :sent), do: sent
+  defp settle(sent, _agent, :sent), do: sent
 
-  defp finish(sent, agent, :completed) do
+  defp settle(sent, agent, :completed) do
     {:ok, done} =
       Agents.complete_model_invocation(sent, AgentsFixtures.completion(), actor: agent)
 
     done
   end
 
-  defp finish(sent, agent, :failed) do
+  defp settle(sent, agent, :failed) do
     {:ok, failed} =
       Agents.fail_model_invocation(sent, %{error: %{"kind" => "provider_error"}}, actor: agent)
 
     failed
   end
 
-  defp finish(sent, agent, :unknown) do
+  defp settle(sent, agent, :unknown) do
     {:ok, unknown} = Agents.mark_model_invocation_unknown(sent, actor: agent)
     unknown
+  end
+
+  defp settle(sent, agent, :invalid) do
+    invalid = %{AgentsFixtures.completion() | validation_status: :invalid}
+    {:ok, done} = Agents.complete_model_invocation(sent, invalid, actor: agent)
+    done
   end
 
   defp assert_refused(ctx, run, invocation, agent, reason) do
     before = event_count(ctx)
 
     assert {:error, ^reason} =
-             Agents.finish_calibration(invocation, %{sha256: sha("refused")}, actor: agent)
+             finish(invocation, %{sha256: sha("refused")}, actor: agent)
 
     assert event_count(ctx) == before
     assert_unchanged(ctx, run)
@@ -313,6 +371,37 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
   end
 
   defp event_count(ctx), do: length(events(ctx.tenant))
+
+  # The API is checked by assertion before it is called, so a missing
+  # implementation fails as an assertion, never as a crash.
+  defp finish(invocation, evidence, opts) do
+    Code.ensure_loaded!(Agents)
+
+    assert function_exported?(Agents, :finish_calibration, 3),
+           "Agents.finish_calibration/3 is not defined"
+
+    apply(Agents, :finish_calibration, [invocation, evidence, opts])
+  end
+
+  # Test-only fault: an insert of an `event_type` audit event raises, inside
+  # the test's sandbox transaction (the trigger is rolled back with it).
+  defp fail_event!(event_type) do
+    Ecto.Adapters.SQL.query!(
+      SdrAgent.Repo,
+      """
+      CREATE FUNCTION sdr_test_fail_calibration_event() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected event failure'; END $$
+      """,
+      []
+    )
+
+    Ecto.Adapters.SQL.query!(
+      SdrAgent.Repo,
+      "CREATE TRIGGER fail_calibration_event BEFORE INSERT ON audit_events FOR EACH ROW " <>
+        "WHEN (NEW.event_type = '#{event_type}') EXECUTE FUNCTION sdr_test_fail_calibration_event()",
+      []
+    )
+  end
 
   defp sha(label), do: :crypto.hash(:sha256, label) |> Base.encode16(case: :lower)
 end
