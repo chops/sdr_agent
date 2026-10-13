@@ -2058,8 +2058,11 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 - **Round 2** at e185bbd: **NEEDS-REVIEW** (Codex aba65e3d). Two source
   mismatches: the critical-attention lifetime without a protected cause,
   and blob and inventory error codes that are not `store_*`.
-- **This revision** corrects both and proposes a narrow E3 outcome delta.
-  No d3c RED work starts before it passes.
+- **Round 3** at acce675: **NEEDS-REVIEW** (Codex e0f21482). The E3
+  mapping is supported. Correction: an unread blob clears only the
+  projection, never the link's method or a valid init.
+- **This revision** corrects that wording. No d3c RED work starts before it
+  passes.
 
 **Why this is needed.** A gate-less `Witness.reconcile/2` defers a
 completed, unreleased generation-2 ClaudeCLI row (`:deferred_to_gate`),
@@ -2087,7 +2090,9 @@ methods: [candidate])`.
   (rows 7–8) makes no await at all.
 
 **Store failures are typed receipts.** On the gate path, `Witness` never
-surfaces a store failure as `{:error, _}`. As the code stands:
+surfaces a store failure as `{:error, _}`. As the code stands, the
+outcomes below are the typical case: an otherwise unremarkable receipt,
+with no existing links and no earlier precedence step applying.
 
 | Store failure | What the receipt carries | Outcome today |
 |---|---|---|
@@ -2111,8 +2116,18 @@ evaluated projection.
     `too_many_entries` and `invalid_invocation_id`.
 - **Unchanged:** `witness_missing` (no capture) stays `missing`, and every
   other step and precedence is as before.
-- **What is still recorded:** the evaluated projection, method and
-  attestation fields, exactly as before. For an unread blob they are nil.
+- **What is still recorded:** metadata extraction is unchanged, so
+  independently known fields are never cleared:
+  - `evaluated_projection_version`: the receipt's own link's actual
+    projection, nil for an unread blob's unprojected link;
+  - `evaluated_method`: that link's actual method, `propagated_id` for the
+    blob-error link;
+  - `attested_cli_version` and `attested_model_id`: the independently valid
+    observed init pair, both nil only when no valid candidate init was
+    observed.
+- **Precedence is unchanged:** unlaunched, init drift and timeout still
+  come before `unreadable`. Only the receipt's own link contributes reason
+  codes or metadata.
 - **E3 RED:** an unreadable-blob receipt and each inventory read-failure
   code give `unreadable`; `witness_missing` gives `missing`; the earlier
   E3 cases are unchanged.
@@ -2175,9 +2190,15 @@ method, attestation and inventory fields are nil.
   `{:error, _}` from the await (non-store) is a hard stop: the record is
   kept and no file is written.
 - **An actual unreadable-blob receipt** (a stored blob removed or
-  corrupted after capture) gives an inferred primary link with `blob_*`
-  and outcome `unreadable` (E3 delta). An inventory read failure
-  (`record_invalid`) also gives `unreadable`.
+  corrupted after capture) gives an inferred primary link with `blob_*`.
+  The test asserts:
+  - outcome `unreadable` (E3 delta);
+  - nil evaluated projection;
+  - `evaluated_method` `propagated_id`;
+  - the valid attested CLI/model pair retained.
+
+  The built document is published and validated by Evidence. An inventory
+  read failure (`record_invalid`) also gives `unreadable`.
 - **A real built document** passes `Evidence.publish/3` and `validate/3`:
   hex digests, canonical times and links. The same call again replays the
   frozen file.
