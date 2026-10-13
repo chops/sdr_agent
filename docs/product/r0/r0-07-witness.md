@@ -1507,9 +1507,14 @@ launcher) is withdrawn: no wrapper is needed.
 
 ### 8.13 d1b staged delta: the staging exemption dispatch (proposed)
 
-**Status:** proposed for entity re-review. The first d1b note was
-**NEEDS-REVIEW** (Codex 01a13677; reviewed note sha256 c7e2ef5a). No RED
-work starts until this delta passes.
+**Status:** proposed for entity re-review.
+- The first d1b note was **NEEDS-REVIEW** (Codex 01a13677; reviewed note
+  sha256 c7e2ef5a).
+- The delta at ad2948e was **NEEDS-REVIEW** (01a13685): admission and init
+  order, run settlement owner, and the carrier contract. All three are
+  revised here.
+
+No RED work starts until this delta passes.
 
 **Entity Model trigger: yes.** No table is added, but three things change:
 - a backend action contract (`Agents.admit_launch/3`, ClaudeCLI dispatch);
@@ -1521,13 +1526,22 @@ ClaudeCLI `staged/1`.
 
 #### 8.13.1 Flow
 
-Everything below runs only in test-seam builds (compile-time branch). In
-any other build, `request.calibration` is ignored and `staged/1` is
-unchanged.
+**Build scope.**
+- **A and B (request handling and the exemption) exist only in test-seam
+  builds** (compile-time branch). In any other build, `request.calibration`
+  is ignored, `staged/1` is unchanged and no exemption exists.
+- **C (the `calibration_launch:` option of `Agents.admit_launch/3`) exists
+  in every build** as an optional domain check that can only add refusals.
+  Only ClaudeCLI's seam-only path passes it.
 
-**A. In the server process (`staged/1`), after the pin check and before
-any process or workspace exists.** Every failure here returns
-`{:error, :real_model_staged}`.
+**A. In the server process (`staged/1`), after the pin check.** This runs
+before the call's own external process or workspace exists. The
+already-running server, registry and reaper BEAM processes are not meant.
+Every failure here returns `{:error, :real_model_staged}`. A1–A5 are
+validations with typed results: a malformed or missing witness, schema,
+prompt or calibration value, and any rendering or hashing exception, are
+caught and become `:real_model_staged` before A6. They never consume the
+entry and are never the intended response by way of a crash.
 
 1. **Test launchers** (`test_launcher: true`) are unchanged.
 2. **Private server.** The server was started without any `:name` option
@@ -1576,20 +1590,35 @@ any process or workspace exists.** Every failure here returns
    - A consumed or forged reference and any mismatched claim are also
      refused.
 
-**B. Unchanged after the consume, in the existing order.**
-1. Witness environment, bypass refusal, deadline and caller checks, the
-   pinned executable and the real shim, and the workspace.
-2. Exactly one real admission:
-   `Agents.admit_launch(id, profile, actor: request.actor,
-   calibration_launch: expected)`.
-3. Only after `{:ok, sent}` (the row is marked `sent`) does the reaper open
-   the port.
-4. Then the init attestation, deadline, reaping and output-schema
-   validation run as today.
+**B. After the consume: the existing `open_and_collect` order,
+unchanged.**
+1. **Unchanged pre-launch preparation and checks:** witness environment,
+   bypass refusal, workspace and prompt file, and the caller monitor.
+2. **One launch admission.** `Agents.admit_launch(id, profile, actor:
+   request.actor, calibration_launch: expected)` is the real function,
+   never an injected callback. It is one database admission transaction,
+   not a model call.
+3. **After `sent` commits,** the existing caller and deadline re-checks run.
+4. **The reaper opens the port** (`Reaper.open`), which starts the CLI.
+5. **Only then** come the init attestation, response collection, output
+   validation and cleanup, as today.
 
-- `expected` is
-  `%{run_id:, tenant_id:, request_sha256:, prompt_ref:, schema_ref:}`. Its
-  parts:
+No CLI or model process is started to obtain an attestation before
+admission.
+
+- **`expected` is a closed map** with exactly these keys and types:
+  - `run_id`, `tenant_id`: lowercase UUID strings;
+  - `request_sha256`: a 32-byte binary;
+  - `prompt_ref`, `schema_ref`: each exactly `%{id: binary, version:
+    binary, sha256: <32-byte binary>}`.
+
+  **Absence** (the option not given) keeps ordinary launch behaviour. A
+  **present** value that is not exactly this shape, including an explicit
+  `nil`, is refused `:calibration_launch_invalid`. That refusal goes
+  through the identity path (`launch_refused/2`, no owned id) before any
+  check: rollback, no mutation and one metadata event. It is never read as
+  absence.
+- Its parts:
   - `run_id` and `tenant_id`: the consumed claims;
   - `request_sha256`: SHA-256 of `ModelProvider.request_body(request)`;
   - `prompt_ref` and `schema_ref`: `Prompt.prompt_ref/0` and
@@ -1663,16 +1692,18 @@ distinct. d1b compares only the VM instance.
 | `ModelProvider.request_body/1` | Existing (private) | Made public; serialization unchanged | The one serialization behind `request_sha256` for d3's stored request and the server's expectation | Pure |
 | ModelInvocation `:admit_launch` (`Agents.admit_launch/3`) | Existing action | Refusal-only option `calibration_launch:` with expected run, tenant, request SHA and prompt/schema refs | C7 identity mismatch: rollback, no mutation, identity event. C8/C9: the targeted invocation's existing receipt. `sent` only when every check passes. Charge unchanged | Existing launch lock order; plain comparisons only |
 | `Admission.launch_check` | Existing | New step C8 before `Gate.admit_launch/3`; `launch_binding` required mode | Precedence: run → legacy → profile → exemption → gate → binding → terms | Under the head; no new lock |
-| Failure / refusal contract | Existing | Reasons reused (`Gate.reasons/0` unchanged): `:calibration_not_authorized` with new checks `:exemption_scope`, `:exemption_input`, `:exemption_request`; `:calibration_grant_mismatch` / `:binding_unrecorded`. New identity refusal reason `:calibration_target_mismatch` (non-receipt path, beside `:invocation_not_found`) | Same receipt validator and category (8.11) | Existing |
-| AgentRun | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | `usage_origin` and `operation_id` are read under the existing run lock. d1b never transitions the run: a refused launch fails only the invocation. Calibration does not go through `SDR.Model`, so settling the proof run belongs to d3. The console latches the failed attempt's evidence and calls `finish_calibration` (E1), which moves the running proof run to its terminal state. For a non-`:proof` target, d1b makes no run transition | Existing run lock |
+| Failure / refusal contract | Existing | Reasons reused (`Gate.reasons/0` unchanged): `:calibration_not_authorized` with new checks `:exemption_scope`, `:exemption_input`, `:exemption_request`; `:calibration_grant_mismatch` / `:binding_unrecorded`. New identity refusal reasons `:calibration_target_mismatch` and `:calibration_launch_invalid` (non-receipt path, beside `:invocation_not_found`) | Same receipt validator and category (8.11) | Existing |
+| AgentRun | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | `usage_origin` and `operation_id` are read under the existing run lock. d1b never transitions the run: a refused launch fails only the invocation. Calibration does not go through `SDR.Model`, so settling the proof run belongs to d3. The console latches the failed attempt's evidence and calls `finish_calibration` (E1) under its reviewed rules. A running proof run becomes `:succeeded` / `:calibration_latched` when its evidence is latched; a terminal run is unchanged. d3 adds no separate refusal stop, and admission never stops the run. C7 leaves every unrelated target untouched. For a non-`:proof` target, d1b makes no run transition | Existing run lock |
 
 **ADR and diagram evaluation.**
 - **ADR:** within ADR-0005's R0 calibration isolation (8.2). There is no
   new provider, no new dependency and no broader bypass, so no new ADR.
 - **Diagram:** the exemption is an in-process conditional path inside the
   existing ClaudeCLI server boundary. It adds no app boundary, endpoint,
-  supervision or integration, so there is no regeneration. This is recorded
-  for the integrated review.
+  supervision or integration. It does change a conditional public runtime
+  flow: console → private server → admission. That flow is evaluated
+  against the existing abstraction at the integrated review, with no
+  regeneration unless that abstraction no longer covers it.
 
 **Never exempted:**
 - `Runtime.resolve/1` for the real CLI, by any name or pid;
@@ -1697,6 +1728,8 @@ it is never skipped and claimed.
    entry is consumed.
 2. **A-stage refusals.** Each is `:real_model_staged`, with no workspace or
    process (no `Port.open`), and the entry left unconsumed:
+   - a missing or malformed witness, prompt or schema, including inputs
+     whose rendering raises;
    - a named server: the Runtime name, another local name, `:global`, `:via`;
    - a missing, malformed or extra-keyed calibration value;
    - a custom prompt or schema whose hashes the issuer registered;
@@ -1714,6 +1747,13 @@ it is never skipped and claimed.
    charge unchanged, one Failure and one event. The entry stays consumed.
 6. **C9.** An unbound proof invocation with a valid entry is refused
    `:calibration_grant_mismatch` / `:binding_unrecorded`.
+   - **Order:** a refused admission never opens the port and never yields
+     an init attestation. Port opening follows `sent`.
+   - **Run untouched:** every refusal leaves the run's status unchanged.
+     Settlement is d3's.
+   - **Malformed `calibration_launch:` at the domain:** a malformed value or
+     an explicit `nil` is refused `:calibration_launch_invalid` with no
+     mutation, in a non-seam test too.
 7. **Unchanged behaviour.** The admission option is absent on every
    non-exempt path. Existing pin, budget, deadline, caller, reaping,
    attestation and schema tests pass unchanged.
