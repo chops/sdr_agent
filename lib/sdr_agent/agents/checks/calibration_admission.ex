@@ -33,6 +33,24 @@ defmodule SdrAgent.Agents.Checks.CalibrationAdmission do
   def scope(term), do: if(@test_seams, do: marked(term))
 
   @doc """
+  The console's G-R0 binding (`%{grant_id, grant_revision, allocation_id,
+  profile_id}`, packet 8.3) the marker `term` carries, or nil (as
+  `claim/1`). Always nil outside test-seam builds.
+  """
+  if @test_seams do
+    def binding(term) do
+      with {_profile_id, _entry} <- marked(term),
+           %{@marker => %{binding: binding}} <- term do
+        binding
+      else
+        _ -> nil
+      end
+    end
+  else
+    def binding(_term), do: nil
+  end
+
+  @doc """
   The console's launch-record claim (`instance_id`) the marker `term`
   carries (R0-07 E4c-2), or nil: no marker, no claim, or a marker that is
   not valid (which `scope/1` refuses). Always nil outside test-seam builds.
@@ -56,9 +74,10 @@ defmodule SdrAgent.Agents.Checks.CalibrationAdmission do
 
   defp marked(%{@marker => %{profile_id: profile_id, entry: entry} = marker})
        when is_atom(profile_id) do
-    if ModelProfiles.real?(profile_id) and claim?(Map.get(marker, :claim, nil)),
-      do: {profile_id, entry},
-      else: :invalid
+    if ModelProfiles.real?(profile_id) and claim?(Map.get(marker, :claim, nil)) and
+         binding?(Map.get(marker, :binding, nil), profile_id),
+       do: {profile_id, entry},
+       else: :invalid
   end
 
   defp marked(_malformed), do: :invalid
@@ -67,6 +86,20 @@ defmodule SdrAgent.Agents.Checks.CalibrationAdmission do
   # the whole marker invalid (never a claimless reservation).
   defp claim?(nil), do: true
   defp claim?(claim), do: is_binary(claim) and claim =~ @uuid
+
+  # A binding is absent or a well-formed G-R0 binding of the marker's own
+  # profile; anything else makes the whole marker invalid.
+  defp binding?(nil, _profile_id), do: true
+
+  defp binding?(%{} = binding, profile_id) do
+    Enum.sort(Map.keys(binding)) == [:allocation_id, :grant_id, :grant_revision, :profile_id] and
+      claim?(binding.grant_id) and not is_nil(binding.grant_id) and
+      claim?(binding.allocation_id) and not is_nil(binding.allocation_id) and
+      is_integer(binding.grant_revision) and binding.grant_revision > 0 and
+      binding.profile_id == profile_id
+  end
+
+  defp binding?(_binding, _profile_id), do: false
 
   if @test_seams do
     @doc """
@@ -78,6 +111,7 @@ defmodule SdrAgent.Agents.Checks.CalibrationAdmission do
     """
     def context(profile_id, entry, opts \\ []) do
       claim = Keyword.get(opts, :claim)
+      binding = Keyword.get(opts, :binding)
 
       cond do
         not ModelProfiles.real?(profile_id) ->
@@ -86,12 +120,18 @@ defmodule SdrAgent.Agents.Checks.CalibrationAdmission do
         not claim?(claim) ->
           raise ArgumentError, "not a launch-record claim: #{inspect(claim)}"
 
-        is_nil(claim) ->
-          %{@marker => %{profile_id: profile_id, entry: entry}}
+        not binding?(binding, profile_id) ->
+          raise ArgumentError, "not a G-R0 binding of this profile: #{inspect(binding)}"
 
         true ->
-          %{@marker => %{profile_id: profile_id, entry: entry, claim: claim}}
+          %{profile_id: profile_id, entry: entry}
+          |> put_present(:claim, claim)
+          |> put_present(:binding, binding)
+          |> then(&%{@marker => &1})
       end
     end
+
+    defp put_present(map, _key, nil), do: map
+    defp put_present(map, key, value), do: Map.put(map, key, value)
   end
 end

@@ -148,12 +148,72 @@ defmodule SdrAgent.Agents.Admission do
     {:ok, locked}
   end
 
+  # The G-R0 shape (packet 8.3): the calibration grant the console binds.
+  @g_r0_profiles [:claude_cli_opus, :claude_cli_sonnet]
+  @g_r0_total 4
+  @g_r0_expires ~U[2026-10-19 05:59:00Z]
+  @g_r0_attempts 2
+
+  @doc """
+  The G-R0 binding for `profile_id` in `tenant_id` at `now` (packet 8.3,
+  read-only preflight): `{:ok, %{grant_id:, grant_revision:,
+  allocation_id:, profile_id:}}` when exactly one grant of the tenant has
+  the G-R0 shape; `{:error, :calibration_grant_unavailable}` otherwise.
+  """
+  def calibration_grant(tenant_id, profile_id, now) do
+    ModelCallGrant
+    |> Ash.Query.filter(tenant_id == ^tenant_id)
+    |> Ash.Query.load(:allocations)
+    |> Ash.read!(authorize?: false)
+    |> Enum.filter(&g_r0?(&1, now))
+    |> case do
+      [grant] -> grant_binding(grant, profile_id)
+      _none_or_several -> {:error, :calibration_grant_unavailable}
+    end
+  end
+
+  defp grant_binding(grant, profile_id) do
+    case Enum.filter(grant.allocations, &(&1.profile_id == profile_id)) do
+      [allocation] ->
+        {:ok,
+         %{
+           grant_id: grant.id,
+           grant_revision: grant.revision,
+           allocation_id: allocation.id,
+           profile_id: profile_id
+         }}
+
+      _ ->
+        {:error, :calibration_grant_unavailable}
+    end
+  end
+
+  @doc "Whether `grant` (allocations loaded) has the G-R0 shape at `now`."
+  def g_r0?(grant, now) do
+    grant.status == :active and Enum.sort(grant.profile_ids) == Enum.sort(@g_r0_profiles) and
+      grant.total_attempts == @g_r0_total and
+      DateTime.compare(grant.expires_at, @g_r0_expires) == :eq and
+      DateTime.compare(grant.starts_at, now) != :gt and
+      DateTime.compare(now, grant.expires_at) == :lt and g_r0_allocations?(grant.allocations)
+  end
+
+  defp g_r0_allocations?(allocations) when length(allocations) == 2 do
+    Enum.all?(allocations, fn allocation ->
+      allocation.key == :proof and allocation.applies_to == [:proof] and
+        allocation.attempts == @g_r0_attempts and is_nil(allocation.released_at)
+    end) and Enum.sort(Enum.map(allocations, & &1.profile_id)) == Enum.sort(@g_r0_profiles)
+  end
+
+  defp g_r0_allocations?(_allocations), do: false
+
   @doc """
   Step 4: admits a ClaudeCLI call of `profile_id` with `purpose` in the
   locked, freshly read `run`, among the share-locked `candidate_ids`.
   `gate` carries the admission gate's inputs taken before any lock
-  (`%{store: Gate.observe_store(), calibration: authority}`). Returns
-  `{:ok, %{grant_id:, allocation_id:, calibration_tuple:, calibration_claim:}}` or
+  (`%{store: Gate.observe_store(), calibration: authority, binding:}`; a G-R0
+  `binding` restricts the candidates to the bound grant, packet 8.3). Returns
+  `{:ok, %{grant_id:, allocation_id:, calibration_tuple:, calibration_claim:,
+  calibration_binding:}}` or
   `{:error, %Refusal{}}`. Callers hold the run row, candidate and
   chain-head locks.
   """
@@ -174,19 +234,83 @@ defmodule SdrAgent.Agents.Admission do
       idempotency_key: Map.get(call, :idempotency_key)
     }
 
+    binding = gate_binding(gate)
+
     with :ok <- origin(refusal),
          {:ok, tuple} <- admission_gate(refusal, run, gate),
+         {:ok, candidate_ids} <- bound_candidates(refusal, candidate_ids, binding, now),
          {:ok, grants} <- eligible_grants(refusal, candidate_ids, now),
          {:ok, grant, allocation} <- one_allocation(refusal, grants, now),
+         :ok <- bound_allocation(refusal, allocation, binding),
          :ok <- room(%{refusal | grant_id: grant.id, allocation_id: allocation.id}, grant, now) do
       {:ok,
        %{
          grant_id: grant.id,
          allocation_id: allocation.id,
          calibration_tuple: tuple,
-         calibration_claim: claim_record(tuple, gate)
+         calibration_claim: claim_record(tuple, gate),
+         calibration_binding: binding_record(tuple, binding)
        }}
     end
+  end
+
+  defp gate_binding(%{binding: %{} = binding}), do: binding
+  defp gate_binding(_gate), do: nil
+
+  # G-R0 binding (packet 8.3, round 11): under the candidate share locks the
+  # bound grant is the only G-R0-shaped candidate, at its bound revision,
+  # with its bound allocation unreleased; the candidate set is that grant.
+  defp bound_candidates(_refusal, candidate_ids, nil, _now), do: {:ok, candidate_ids}
+
+  # The uniqueness observation is fresh, under the head, over every grant of
+  # the tenant (a read, never a lock): a G-R0 grant committed after the
+  # candidates were discovered refuses (round 11, Codex 01a13625). The bound
+  # grant itself must be one of the share-locked candidates.
+  defp bound_candidates(refusal, candidate_ids, binding, now) do
+    shaped =
+      ModelCallGrant
+      |> Ash.Query.filter(tenant_id == ^refusal.tenant_id)
+      |> Ash.Query.load(:allocations)
+      |> Ash.read!(authorize?: false)
+      |> Enum.filter(&g_r0?(&1, now))
+
+    case shaped do
+      [%{id: id, revision: revision} = grant]
+      when id == binding.grant_id and revision == binding.grant_revision ->
+        bound_allocation_present(refusal, grant, binding, id in candidate_ids)
+
+      _ ->
+        mismatch(refusal)
+    end
+  end
+
+  defp bound_allocation_present(refusal, _grant, _binding, false = _locked?),
+    do: mismatch(refusal)
+
+  defp bound_allocation_present(refusal, grant, binding, true = _locked?) do
+    if Enum.any?(grant.allocations, &(&1.id == binding.allocation_id)),
+      do: {:ok, [grant.id]},
+      else: mismatch(refusal)
+  end
+
+  defp bound_allocation(_refusal, _allocation, nil), do: :ok
+
+  defp bound_allocation(refusal, allocation, binding),
+    do: if(allocation.id == binding.allocation_id, do: :ok, else: mismatch(refusal))
+
+  defp mismatch(refusal), do: {:error, %{refusal | reason: :calibration_grant_mismatch}}
+
+  # Recorded only next to an admitted calibration tuple, from the marker.
+  defp binding_record(nil, _binding), do: nil
+  defp binding_record(_tuple, nil), do: nil
+
+  defp binding_record(_tuple, binding) do
+    %{
+      "grant_id" => binding.grant_id,
+      "grant_revision" => binding.grant_revision,
+      "allocation_id" => binding.allocation_id,
+      "profile_id" => Atom.to_string(binding.profile_id)
+    }
   end
 
   # The console's claim is recorded only next to an admitted calibration

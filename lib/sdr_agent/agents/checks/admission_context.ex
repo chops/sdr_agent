@@ -31,7 +31,8 @@ defmodule SdrAgent.Agents.Checks.AdmissionContext do
         allocation_id: allocation_id,
         reserved_at: at,
         calibration_tuple: Map.get(charge, :calibration_tuple),
-        calibration_claim: Map.get(charge, :calibration_claim)
+        calibration_claim: Map.get(charge, :calibration_claim),
+        calibration_binding: Map.get(charge, :calibration_binding)
       }
     }
   end
@@ -43,7 +44,11 @@ defmodule SdrAgent.Agents.Checks.AdmissionContext do
             charge
       })
       when is_binary(grant_id) and is_binary(allocation_id),
-      do: charge |> Map.put_new(:calibration_tuple, nil) |> Map.put_new(:calibration_claim, nil)
+      do:
+        charge
+        |> Map.put_new(:calibration_tuple, nil)
+        |> Map.put_new(:calibration_claim, nil)
+        |> Map.put_new(:calibration_binding, nil)
 
   def charge(%{@marker => _malformed}), do: :malformed
   def charge(_context), do: nil

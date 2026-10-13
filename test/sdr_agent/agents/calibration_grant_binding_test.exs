@@ -300,7 +300,7 @@ defmodule SdrAgent.Agents.CalibrationGrantBindingTest do
       assert events_of_type(ctx.tenant, "model.invocation.reserved") == []
     end
 
-    test "a mismatch is one receipt, and its replay adds none", ctx do
+    test "a mismatch is one receipt, and its replay adds no second Failure", ctx do
       grant = g_r0!(ctx)
       {:ok, binding} = select(ctx, :claude_cli_opus)
 
@@ -394,7 +394,82 @@ defmodule SdrAgent.Agents.CalibrationGrantBindingTest do
     end
   end
 
+  # GREEN-time verification (Codex 01a1362e): the recorded binding is read
+  # only from the one original reservation event, with a closed decoder.
+  describe "recorded binding provenance" do
+    test "missing, duplicated or malformed provenance is unrecorded", ctx do
+      g_r0!(ctx)
+      {:ok, binding} = select(ctx, :claude_cli_opus)
+      %{run: run, agent: agent} = proof_run(ctx)
+      {:ok, invocation} = reserve(run, agent, marker(binding))
+      [original] = reserved_events(ctx, invocation)
+      stored = original.payload["arguments"]["calibration_binding"]
+
+      missing = %{id: Ash.UUIDv7.generate(), agent_run_id: run.id, tenant_id: ctx.tenant.id}
+      assert Gate.recorded_binding(missing) == {:error, :binding_unrecorded}
+      assert Gate.recorded_binding(%{}) == {:error, :binding_unrecorded}
+
+      for malformed <- [
+            Map.delete(stored, "allocation_id"),
+            Map.put(stored, "extra", 1),
+            %{stored | "grant_id" => "nope"},
+            %{stored | "grant_revision" => 0},
+            %{stored | "grant_revision" => 1.0},
+            %{stored | "profile_id" => "claude_cli_fake"},
+            %{stored | "profile_id" => nil},
+            "binding",
+            [stored]
+          ] do
+        id = Ash.UUIDv7.generate()
+
+        {:ok, _event} =
+          append_reserved(agent, id, run, %{"arguments" => %{"calibration_binding" => malformed}})
+
+        provenance = %{id: id, agent_run_id: run.id, tenant_id: ctx.tenant.id}
+
+        assert Gate.recorded_binding(provenance) == {:error, :binding_unrecorded},
+               inspect(malformed)
+      end
+
+      # A second event in the exact original scope (kernel append, fixture).
+      {:ok, _duplicate} = append_reserved(agent, invocation.id, run, original.payload)
+      assert Gate.recorded_binding(invocation) == {:error, :binding_unrecorded}
+    end
+
+    test "an event without a binding is a legacy, unbound reservation", ctx do
+      %{run: run, agent: agent} = proof_run(ctx)
+
+      for payload <- [
+            %{},
+            %{"arguments" => nil},
+            %{"arguments" => %{"calibration_binding" => nil}}
+          ] do
+        id = Ash.UUIDv7.generate()
+        {:ok, _event} = append_reserved(agent, id, run, payload)
+        provenance = %{id: id, agent_run_id: run.id, tenant_id: ctx.tenant.id}
+        assert Gate.recorded_binding(provenance) == {:ok, nil}, inspect(payload)
+      end
+    end
+  end
+
   ## Fixtures
+
+  defp append_reserved(agent, id, run, payload) do
+    SdrAgent.Audit.Kernel.append(
+      %{
+        event_type: "model.invocation.reserved",
+        category: :model,
+        subject_resource: "SdrAgent.Agents.ModelInvocation",
+        subject_id: id,
+        action: "reserve",
+        model_invocation_id: id,
+        agent_run_id: run.id,
+        payload: payload
+      },
+      actor: agent,
+      tenant_id: run.tenant_id
+    )
+  end
 
   defp g_r0!(ctx, overrides \\ %{}) do
     AgentsFixtures.grant!(

@@ -27,7 +27,7 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
     provider = Ash.Changeset.get_attribute(changeset, :provider)
 
     supplied? =
-      Enum.any?([:calibration_tuple, :calibration_claim], fn argument ->
+      Enum.any?([:calibration_tuple, :calibration_claim, :calibration_binding], fn argument ->
         not is_nil(Ash.Changeset.get_argument(changeset, argument))
       end)
 
@@ -44,6 +44,7 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
         })
         |> record_tuple(charge.calibration_tuple)
         |> record_claim(Map.get(charge, :calibration_claim))
+        |> record_binding(Map.get(charge, :calibration_binding))
 
       {:claude_cli, _missing} ->
         Ash.Changeset.add_error(changeset, Forbidden.exception([]))
@@ -60,6 +61,11 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
 
   defp record_tuple(changeset, tuple),
     do: Ash.Changeset.force_set_argument(changeset, :calibration_tuple, tuple)
+
+  defp record_binding(changeset, nil), do: changeset
+
+  defp record_binding(changeset, binding),
+    do: Ash.Changeset.force_set_argument(changeset, :calibration_binding, binding)
 
   defp record_claim(changeset, nil), do: changeset
 

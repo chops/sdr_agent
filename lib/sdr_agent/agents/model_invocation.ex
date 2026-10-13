@@ -231,6 +231,10 @@ defmodule SdrAgent.Agents.ModelInvocation do
       # (`%{"instance_id" => uuid}`), set only from the admitted charge.
       argument :calibration_claim, :map
 
+      # R0-07 packet 8.3: the console's G-R0 binding, set only from the
+      # admitted charge.
+      argument :calibration_binding, :map
+
       validate SdrAgent.Agents.Validations.InvocationProfile
       change SdrAgent.Agents.Changes.AdmissionCharge
       change set_attribute(:ledger_generation, 2)
@@ -240,7 +244,7 @@ defmodule SdrAgent.Agents.ModelInvocation do
       change {AppendEvent,
               [
                 event_type: "model.invocation.reserved",
-                arguments: [:calibration_tuple, :calibration_claim]
+                arguments: [:calibration_tuple, :calibration_claim, :calibration_binding]
               ] ++ @event}
     end
 

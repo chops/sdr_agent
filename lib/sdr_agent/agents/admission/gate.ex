@@ -68,12 +68,16 @@ defmodule SdrAgent.Agents.Admission.Gate do
     :tuple_not_promoted,
     :witness_store_untrusted,
     :calibration_not_authorized,
-    :calibration_evidence_pending
+    :calibration_evidence_pending,
+    :calibration_grant_mismatch
   ]
   @tuple_keys ~w(cli_version method model_id profile_id projection_version provider)
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
-  @doc "The five admission refusal reasons (packet section 2, Admission row)."
+  @doc """
+  The admission refusal reasons (packet section 2, Admission row; with
+  `:calibration_grant_mismatch`, packet 8.3 and 8.11).
+  """
   def reasons, do: @reasons
 
   ## Store observation (before any lock)
@@ -378,6 +382,49 @@ defmodule SdrAgent.Agents.Admission.Gate do
     do: if(Map.has_key?(payload, "arguments"), do: :error, else: {:ok, %{}})
 
   defp arguments(_event), do: :error
+
+  @doc """
+  The G-R0 binding recorded by the same one original reservation event
+  (packet 8.3): `{:ok, %{grant_id:, grant_revision:, allocation_id:,
+  profile_id:}}`, `{:ok, nil}` when it records none, or `{:error,
+  :binding_unrecorded}` when the event is missing or duplicated or the
+  binding is malformed.
+  """
+  def recorded_binding(invocation) do
+    with {:ok, event} <- original_reservation(invocation),
+         {:ok, arguments} <- arguments(event),
+         {:ok, binding} <- decode_binding(arguments["calibration_binding"]) do
+      {:ok, binding}
+    else
+      _missing_duplicate_or_malformed -> {:error, :binding_unrecorded}
+    end
+  end
+
+  @binding_keys ~w(allocation_id grant_id grant_revision profile_id)
+  @binding_uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+  defp decode_binding(nil), do: {:ok, nil}
+
+  defp decode_binding(%{} = binding) do
+    with true <- Enum.sort(Map.keys(binding)) == @binding_keys,
+         true <- uuid?(binding["grant_id"]) and uuid?(binding["allocation_id"]),
+         revision when is_integer(revision) and revision > 0 <- binding["grant_revision"],
+         {:ok, profile_id} <- real_profile(binding["profile_id"]) do
+      {:ok,
+       %{
+         grant_id: binding["grant_id"],
+         grant_revision: revision,
+         allocation_id: binding["allocation_id"],
+         profile_id: profile_id
+       }}
+    else
+      _ -> :error
+    end
+  end
+
+  defp decode_binding(_malformed), do: :error
+
+  defp uuid?(value), do: is_binary(value) and value =~ @binding_uuid
 
   defp with_tuple(nil, _tuple), do: :ok
   defp with_tuple(_claim, {:ok, _entry}), do: :ok

@@ -290,7 +290,10 @@ defmodule SdrAgent.Agents do
     actor = Keyword.get(opts, :actor)
 
     marker = Keyword.get(opts, :calibration)
-    calibration = {CalibrationAdmission.scope(marker), CalibrationAdmission.claim(marker)}
+
+    calibration =
+      {CalibrationAdmission.scope(marker), CalibrationAdmission.claim(marker),
+       CalibrationAdmission.binding(marker)}
 
     ModelInvocation
     |> guard(:reserve, run.id, actor, fn -> reserve_normalized(run, attrs, actor, calibration) end)
@@ -320,10 +323,10 @@ defmodule SdrAgent.Agents do
 
   # `claim` is the console's launch-record claim carried by the same marker
   # (R0-07 E4c-2): recorded only with an admitted calibration tuple.
-  defp gate_inputs(%{provider: :claude_cli} = attrs, {calibration, claim}, run, actor) do
+  defp gate_inputs(%{provider: :claude_cli} = attrs, {calibration, claim, binding}, run, actor) do
     if ModelProfiles.real?(Map.get(attrs, :profile_id)) do
       store = if may_reserve?(run, actor), do: Gate.observe_store(), else: :unobserved
-      %{store: store, calibration: calibration, claim: claim}
+      %{store: store, calibration: calibration, claim: claim, binding: binding}
     end
   end
 
@@ -1142,6 +1145,25 @@ defmodule SdrAgent.Agents do
     guard(AgentRun, :finish_calibration, subject_id, actor, fn ->
       CalibrationFinish.run(invocation, evidence, actor)
     end)
+  end
+
+  @doc """
+  The G-R0 binding for `profile_id` (packet 8.3, read-only preflight of the
+  calibration console), as AGT of `tenant_id`: `{:ok, %{grant_id:,
+  grant_revision:, allocation_id:, profile_id:}}`, `{:error,
+  :calibration_grant_unavailable}` (zero, several or a deviating grant),
+  or `Ash.Error.Forbidden`. Writes nothing.
+  """
+  def select_calibration_grant(tenant_id, profile_id, opts) do
+    case Keyword.get(opts, :actor) do
+      %SdrAgent.Actor{type: :agent_runtime, tenant_id: ^tenant_id} when is_binary(tenant_id) ->
+        if ModelProfiles.real?(profile_id),
+          do: Admission.calibration_grant(tenant_id, profile_id, SdrAgent.Clock.utc_now()),
+          else: {:error, :calibration_grant_unavailable}
+
+      _other ->
+        {:error, Ash.Error.Forbidden.exception([])}
+    end
   end
 
   @doc """
