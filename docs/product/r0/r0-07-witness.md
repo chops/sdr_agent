@@ -928,6 +928,22 @@ rules and `calibrate` orchestration are E4c.
     successor's lock (`:record_changed`).
 - **Durability.** The no-directory-fsync power-loss qualification of E2
   applies here too.
+- **Code review deltas** (Codex 8fba66d5, at 42c6ebc):
+  - Only a well-formed answer of the asked kind is an observation.
+  - `verify_recovery` checks the ticket id (`:recovery_changed`).
+  - `release` refuses an active ticket (`:recovery_in_progress`) or a stray
+    entry before it deletes anything.
+  - Cleanup failures are `:launch_record_write_failed`.
+  - The recovery directory and ticket are private on every operation and
+    owned by this user (uid parity with Evidence). A ticket is built
+    privately and renamed into place.
+  - `replace:` and `owner_uid:` are honoured only in test-seam builds;
+    Codex's dev-VM probe confirms the callback is not called there.
+  - `owner_attested_at` must be a canonical timestamp.
+  - An unreadable record carries a fingerprint, so a change under a
+    recoverer is `:record_changed`.
+  - A concurrent claim that meets the instant between `mkdir` and `chmod`
+    of `run.lock` is refused as unsafe (fail-closed).
 
 #### R11-2: the guarded finish action
 

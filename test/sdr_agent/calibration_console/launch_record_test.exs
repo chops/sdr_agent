@@ -55,6 +55,8 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     def session_members(session_id),
       do: __MODULE__ |> Agent.get(&Map.get(&1.sessions, session_id, [])) |> result(&{:ok, &1})
 
+    # `{:raw, reply}` returns `reply` itself (malformed answers).
+    defp result({:raw, reply}, _ok), do: reply
     defp result(:raise, _ok), do: raise("synthetic probe failure")
     defp result({:error, _reason} = error, _ok), do: error
     defp result(value, ok), do: ok.(value)
@@ -537,6 +539,178 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       {:ok, launched} = LaunchRecord.advance(ctx.root, pending, :launched, launched_attrs())
       {:ok, finished} = LaunchRecord.advance(ctx.root, launched, :finished, %{})
       assert :quiescent = LaunchRecord.quiescence(finished, ctx.opts)
+    end
+  end
+
+  describe "code review (Codex, 42c6ebc)" do
+    setup ctx do
+      {:ok, claimed} = LaunchRecord.claim(ctx.root, ctx.opts)
+
+      {:ok, pending} =
+        LaunchRecord.advance(ctx.root, claimed, :launch_pending, %{
+          invocation_id: Ash.UUIDv7.generate()
+        })
+
+      %{pending: pending}
+    end
+
+    test "a malformed root or session answer never establishes quiescence", ctx do
+      {:ok, launched} = LaunchRecord.advance(ctx.root, ctx.pending, :launched, launched_attrs())
+
+      for {key, reply} <- [
+            identities: {:raw, nil},
+            identities: {:raw, {:ok, ""}},
+            identities: {:raw, {:ok, 7}},
+            identities: {:raw, :reused},
+            identities: {:raw, {:absent}},
+            sessions: {:raw, nil},
+            sessions: {:raw, {:ok, nil}},
+            sessions: {:raw, {:ok, [9002, "x"]}},
+            sessions: {:raw, {:ok, [0]}},
+            sessions: {:raw, []}
+          ] do
+        FakeProbe.put(&put_in(&1, [key, 9001], reply))
+
+        assert {:error, :probe_unavailable} = LaunchRecord.quiescence(launched, ctx.opts),
+               inspect({key, reply})
+
+        FakeProbe.put(&%{&1 | identities: %{4242 => "Mon 10:00 owner"}, sessions: %{}})
+      end
+    end
+
+    test "a malformed owner answer never authorizes recovery", ctx do
+      for reply <- [nil, {:ok, ""}, {:ok, 7}, :gone, {:ok, "x", "y"}] do
+        FakeProbe.put(&put_in(&1.identities[4242], {:raw, reply}))
+
+        assert {:error, :probe_unavailable} = LaunchRecord.recover(ctx.root, ctx.opts),
+               inspect(reply)
+
+        refute File.exists?(Path.join(ctx.root, "run.lock/recover"))
+      end
+    end
+
+    test "a malformed own pid never claims", ctx do
+      {:ok, _} = LaunchRecord.attest_stopped(ctx.root, ctx.pending, "STOPPED")
+      other = Path.join(ctx.root, "other")
+      File.mkdir!(other)
+      File.chmod!(other, 0o700)
+
+      for reply <- [nil, {:ok, 0}, {:ok, "4242"}, 4242] do
+        FakeProbe.put(&%{&1 | self: {:raw, reply}})
+        assert {:error, :probe_unavailable} = LaunchRecord.claim(other, ctx.opts), inspect(reply)
+        refute File.exists?(Path.join(other, "run.lock"))
+      end
+    end
+
+    test "a stale recovery handle cannot verify after its ticket was replaced", ctx do
+      FakeProbe.put(&%{&1 | identities: %{}})
+      {:ok, first} = LaunchRecord.recover(ctx.root, ctx.opts)
+      assert :ok = LaunchRecord.end_recovery(ctx.root, first)
+      {:ok, second} = LaunchRecord.recover(ctx.root, ctx.opts)
+
+      assert first.ticket != second.ticket
+      assert {:error, :recovery_changed} = LaunchRecord.verify_recovery(ctx.root, first)
+      assert :ok = LaunchRecord.verify_recovery(ctx.root, second)
+    end
+
+    test "a release refused by an active recovery or a stray entry keeps the record", ctx do
+      {:ok, launched} = LaunchRecord.advance(ctx.root, ctx.pending, :launched, launched_attrs())
+      {:ok, finished} = LaunchRecord.advance(ctx.root, launched, :finished, %{})
+      path = Path.join(ctx.root, "run.lock/record.json")
+      bytes = File.read!(path)
+
+      FakeProbe.put(&%{&1 | identities: %{}})
+      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      assert {:error, :recovery_in_progress} = LaunchRecord.release(ctx.root, finished)
+      assert File.read(path) == {:ok, bytes}
+      :ok = LaunchRecord.end_recovery(ctx.root, recovery)
+
+      stray = Path.join(ctx.root, "run.lock/stray")
+      write_private!(stray, "x")
+      assert {:error, :launch_record_unsafe} = LaunchRecord.release(ctx.root, finished)
+      assert File.read(path) == {:ok, bytes}
+      File.rm!(stray)
+
+      assert :ok = LaunchRecord.release(ctx.root, finished)
+    end
+
+    test "a failed ticket removal is a typed failure and the ticket stays", ctx do
+      FakeProbe.put(&%{&1 | identities: %{}})
+      {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      dir = Path.join(ctx.root, "run.lock/recover")
+      write_private!(Path.join(dir, "obstruction"), "x")
+
+      assert {:error, :launch_record_write_failed} = LaunchRecord.end_recovery(ctx.root, recovery)
+      assert File.dir?(dir)
+    end
+
+    test "recovery artifacts are private on every operation", ctx do
+      FakeProbe.put(&%{&1 | identities: %{}})
+      {:ok, _recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
+      dir = Path.join(ctx.root, "run.lock/recover")
+      ticket = Path.join(dir, "ticket")
+
+      File.chmod!(ticket, 0o644)
+      assert {:error, :launch_record_unsafe} = LaunchRecord.read(ctx.root)
+      assert {:error, :launch_record_unsafe} = LaunchRecord.recover(ctx.root, ctx.opts)
+      File.chmod!(ticket, 0o600)
+
+      File.chmod!(dir, 0o755)
+      assert {:error, :launch_record_unsafe} = LaunchRecord.read(ctx.root)
+      assert {:error, :launch_record_unsafe} = LaunchRecord.recover(ctx.root, ctx.opts)
+      File.chmod!(dir, 0o700)
+
+      # A partial ticket (directory without its id) stays blocked.
+      File.rm!(ticket)
+      assert {:ok, %{state: "launch_pending"}} = LaunchRecord.read(ctx.root)
+      assert {:error, :recovery_in_progress} = LaunchRecord.recover(ctx.root, ctx.opts)
+    end
+
+    test "artifacts owned by another user are unsafe", ctx do
+      foreign = ctx.opts ++ [owner_uid: 999_999]
+      assert {:error, :launch_record_unsafe} = LaunchRecord.read(ctx.root, foreign)
+
+      assert {:error, :launch_record_unsafe} =
+               LaunchRecord.advance(
+                 ctx.root,
+                 ctx.pending,
+                 :launched,
+                 launched_attrs(),
+                 foreign
+               )
+
+      assert {:error, :launch_record_unsafe} = LaunchRecord.recover(ctx.root, foreign)
+      other = Path.join(ctx.root, "other")
+      File.mkdir!(other)
+      File.chmod!(other, 0o700)
+      assert {:error, :launch_record_unsafe} = LaunchRecord.claim(other, foreign)
+      refute File.exists?(Path.join(other, "run.lock"))
+    end
+
+    test "an attestation that is not a canonical timestamp is unreadable", ctx do
+      path = Path.join(ctx.root, "run.lock/record.json")
+
+      for bad <- ["raw-text", "2026-10-13T06:00:00Z", "2026-10-13"] do
+        tampered = path |> File.read!() |> Jason.decode!() |> Map.put("owner_attested_at", bad)
+        write_private!(path, Jason.encode!(tampered))
+        assert {:ok, %{unreadable: true}} = LaunchRecord.read(ctx.root), bad
+      end
+    end
+
+    test "an unreadable record that changes under its recoverer is refused", ctx do
+      path = Path.join(ctx.root, "run.lock/record.json")
+      write_private!(path, "corrupt one")
+
+      {:ok, recovery} =
+        LaunchRecord.recover(ctx.root, ctx.opts ++ [owner_verified_stopped: "STOPPED"])
+
+      assert :ok = LaunchRecord.verify_recovery(ctx.root, recovery)
+
+      write_private!(path, "corrupt two")
+      assert {:error, :record_changed} = LaunchRecord.verify_recovery(ctx.root, recovery)
+
+      File.rm!(path)
+      assert {:error, :record_changed} = LaunchRecord.verify_recovery(ctx.root, recovery)
     end
   end
 

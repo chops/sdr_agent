@@ -15,44 +15,56 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
     * `launch_pending` (`invocation_id`) — written after the invocation is
       `sent` and before the child is spawned;
     * `launched` (`root_pid`, `root_identity`, `session_id`);
-    * `finished` — nothing outstanding; `release/2` then removes the lock.
+    * `finished` — nothing outstanding; `release/3` then removes the lock.
 
-  Every operation first requires private paths: the root, `run.lock`, the
-  record and the recovery ticket are not symlinks, and neither is any
-  ancestor; directories are mode 0700 and files 0600. Otherwise
-  `:launch_record_unsafe`. The record on disk is authoritative: `advance`
-  needs the caller's record to equal it (else `:invalid_transition`), and
-  a record is rewritten only by atomic replace (temporary file, sync, 0600,
-  rename). A failed write is `:launch_record_write_failed` and leaves the
-  previous record and the lock. The `replace:` option (the final rename)
-  exists for tests and runs only after every check.
+  `owner_attested_at`, when present, is a canonical UTC timestamp.
+
+  **Private, owner-local paths.** Every operation first requires that the
+  root, `run.lock`, the record and any recovery ticket (`run.lock/recover`
+  and its `ticket` file) are this user's, are not symlinks (nor is any
+  ancestor), and are mode 0700 (directories) or 0600 (files). Otherwise
+  `:launch_record_unsafe`.
+
+  **The record on disk is authoritative.** `advance` needs the caller's
+  record to equal it (`:invalid_transition`); `release` needs the finished
+  record on disk, no recovery ticket (`:recovery_in_progress`) and nothing
+  else in the lock (`:launch_record_unsafe`) before it deletes anything. A
+  record is rewritten only by atomic replace (temporary file, sync, 0600,
+  rename). A failed write or removal is `:launch_record_write_failed` and
+  never reported as done.
 
   A missing, partial, malformed or wrongly shaped record reads as
-  `%{state: "launch_pending", unreadable: true}`, never as "no launch".
+  `%{state: "launch_pending", unreadable: true, fingerprint: _}` — never
+  "no launch" — and never advances. The fingerprint (the SHA-256 of the
+  bytes, or `"missing"`) lets a recoverer notice that it changed.
 
   **Recovery.** `recover/2` refuses a live owner (`:owner_alive`: the
   recorded pid alive with the recorded start identity) and an unreadable
   record (`:owner_unknown`) unless the owner passes the typed attestation
   `owner_verified_stopped: "STOPPED"`. It then claims `run.lock/recover`
-  by `mkdir`; an existing ticket, even an abandoned one, is
-  `:recovery_in_progress` and is never taken over. `verify_recovery/2`
-  re-reads the record on disk and requires the recovery's snapshot
-  (`:record_changed`); `end_recovery/2` removes only its own ticket
-  (`:recovery_changed`), and `release/2` only its own finished lock
-  (`:record_changed`).
+  by `mkdir` and writes a ticket id into it; an existing ticket, even a
+  partial or abandoned one, is `:recovery_in_progress` and is never taken
+  over (it appears only complete: it is built privately and renamed into
+  place). `verify_recovery/3` re-reads the ticket (`:recovery_changed`) and
+  the record (`:record_changed`); `end_recovery/3` removes only its own,
+  complete ticket.
 
   **Quiescence** (`quiescence/2`): `claimed` and `finished` have nothing
   outstanding; a `launch_pending` or unreadable record needs the owner's
-  attestation (`attest_stopped/3`, typed `STOPPED`); a `launched` record
+  attestation (`attest_stopped/4`, typed `STOPPED`); a `launched` record
   needs no process in its session and its root absent or reused. Root death
   alone is never quiescence.
 
-  **Probe** (`probe:`, a module): `self_pid/0` → `{:ok, pid} | {:error,
-  _}`, `start_identity/1` → `{:ok, identity} | :absent | {:error, _}`,
-  `session_members/1` → `{:ok, pids} | {:error, _}`; a raise is an error.
-  An observation failure is never absence or an empty session: claim
-  creates nothing, recovery is refused and quiescence is not established
-  (`:probe_unavailable`).
+  **Probe** (`probe:`, a module): `self_pid/0` → `{:ok, pid}`,
+  `start_identity/1` → `{:ok, identity}` or `:absent`, `session_members/1`
+  → `{:ok, pids}`. Anything else — an error, a raise, or a malformed reply —
+  is `:probe_unavailable`, never absence or an empty session: claim creates
+  nothing, recovery is refused and quiescence is not established.
+
+  **Test seams.** Only in test-seam builds are the `replace:` option (the
+  final rename, run after every check) and the `owner_uid:` option (the
+  expected owner) honoured; other builds always rename and compare with
+  this process's uid.
 
   The directory entry is not synced (the runtime has no directory fsync):
   a power loss may lose a just-written record, which then reads as
@@ -63,11 +75,12 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
 
   @schema "r0-calibration-launch-record/1"
   @confirmation "STOPPED"
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
   @keys ~w(schema instance_id owner_pid owner_identity generation state invocation_id root_pid
            root_identity session_id owner_attested_at)a
   @order %{claimed: :launch_pending, launch_pending: :launched, launched: :finished}
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
-  @unreadable %{state: "launch_pending", unreadable: true}
+  @timestamp ~r/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\z/
 
   @type launch_record :: %{required(atom()) => term()}
 
@@ -80,9 +93,10 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   `:launch_record_write_failed`.
   """
   def claim(root, opts) do
-    with :ok <- safe_root(root),
+    with {:ok, env} <- env(opts),
+         :ok <- safe_root(root, env),
          {:ok, pid, identity} <- self_identity(probe(opts)),
-         :ok <- make_lock(root) do
+         :ok <- make_lock(root, env) do
       record =
         Map.merge(blank(), %{
           instance_id: Ash.UUIDv7.generate(),
@@ -91,7 +105,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
           state: "claimed"
         })
 
-      with :ok <- write(root, record, opts), do: {:ok, record}
+      with :ok <- write(root, record, env), do: {:ok, record}
     end
   end
 
@@ -102,34 +116,40 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   :invalid_transition | :launch_record_unsafe | :launch_record_write_failed}`.
   """
   def advance(root, record, state, attrs, opts \\ []) do
-    with {:ok, current} <- read_safe(root),
+    with {:ok, env} <- env(opts),
+         {:ok, current} <- read_safe(root, env),
          :ok <- same(current, record, :invalid_transition),
          {:ok, next} <- transition(current, state, attrs),
-         :ok <- write(root, next, opts) do
+         :ok <- write(root, next, env) do
       {:ok, next}
     end
   end
 
   @doc """
   The record on disk: `{:ok, record}`, `{:ok, :none}` without a lock,
-  `{:ok, %{state: "launch_pending", unreadable: true}}` for anything
-  unreadable, or `{:error, :launch_record_unsafe}`.
+  `{:ok, %{state: "launch_pending", unreadable: true, fingerprint: _}}` for
+  anything unreadable, or `{:error, :launch_record_unsafe}`.
   """
-  def read(root), do: read_safe(root)
+  def read(root, opts \\ []) do
+    with {:ok, env} <- env(opts), do: read_safe(root, env)
+  end
 
   @doc """
-  Removes the lock of `record`, which must be the finished record on disk:
-  `:ok`, `{:error, :not_finished}`, `{:error, :record_changed}` (another
-  record is there) or `{:error, :launch_record_unsafe}`.
+  Removes the lock of `record`, which must be the finished record on disk,
+  with no recovery ticket and nothing else in the lock: `:ok`, or `{:error,
+  :not_finished | :record_changed | :recovery_in_progress |
+  :launch_record_unsafe | :launch_record_write_failed}`. Nothing is
+  deleted on a refusal.
   """
-  def release(root, record) do
-    with {:ok, current} <- read_safe(root),
+  def release(root, record, opts \\ []) do
+    lock = lock(root)
+
+    with {:ok, env} <- env(opts),
+         {:ok, current} <- read_safe(root, env),
          :ok <- same(current, record, :record_changed),
-         :ok <- finished(current) do
-      lock = lock(root)
-      File.rm(record_path(root))
-      File.rmdir(lock)
-      if File.exists?(lock), do: {:error, :launch_record_write_failed}, else: :ok
+         :ok <- finished(current),
+         :ok <- only(lock, ["record.json"], "recover") do
+      removed(File.rm(record_path(root)), File.rmdir(lock))
     end
   end
 
@@ -139,36 +159,46 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   Claims recovery of a stale lock: `{:ok, %{record:, ticket:}}`, or
   `{:error, reason}` with `:owner_alive`, `:owner_unknown`,
   `:confirmation_mismatch`, `:probe_unavailable`, `:recovery_in_progress`,
-  `:no_launch` or `:launch_record_unsafe`. `owner_verified_stopped:
-  "STOPPED"` is the owner's attestation for an unreadable record.
+  `:no_launch`, `:launch_record_unsafe` or `:launch_record_write_failed`.
+  `owner_verified_stopped: "STOPPED"` is the owner's attestation for an
+  unreadable record.
   """
   def recover(root, opts) do
-    with {:ok, record} <- read_safe(root),
+    with {:ok, env} <- env(opts),
+         {:ok, record} <- read_safe(root, env),
          :ok <- recoverable(record, opts),
-         {:ok, ticket} <- make_ticket(root) do
+         {:ok, ticket} <- make_ticket(root, env) do
       {:ok, %{record: record, ticket: ticket}}
     end
   end
 
-  @doc "`:ok` while the record on disk is still the recovery's snapshot, else `{:error, :record_changed}`."
-  def verify_recovery(root, %{record: snapshot}) do
-    with {:ok, current} <- read_safe(root), do: same(current, snapshot, :record_changed)
+  @doc """
+  `:ok` while the recovery's own ticket and record are still on disk;
+  `{:error, :recovery_changed | :record_changed | :launch_record_unsafe}`.
+  """
+  def verify_recovery(root, %{record: snapshot, ticket: ticket}, opts \\ []) do
+    with {:ok, env} <- env(opts),
+         {:ok, current} <- read_safe(root, env),
+         :ok <- own_ticket(root, ticket, env) do
+      same(current, snapshot, :record_changed)
+    end
   end
 
-  @doc "Removes the recovery's own ticket: `:ok` or `{:error, :recovery_changed | :launch_record_unsafe}`."
-  def end_recovery(root, %{ticket: ticket}) do
+  @doc """
+  Removes the recovery's own, complete ticket: `:ok`, or `{:error,
+  :recovery_changed | :launch_record_unsafe | :launch_record_write_failed}`
+  (the ticket stays).
+  """
+  def end_recovery(root, %{ticket: ticket}, opts \\ []) do
     dir = ticket_dir(root)
 
-    with :ok <- safe_root(root),
-         :ok <- private_dir(lock(root)),
-         :ok <- private_dir(dir),
-         {:ok, ^ticket} <- read_ticket(dir) do
-      File.rm(Path.join(dir, "ticket"))
-      File.rmdir(dir)
-      :ok
-    else
-      {:error, :launch_record_unsafe} = unsafe -> unsafe
-      _other -> {:error, :recovery_changed}
+    with {:ok, env} <- env(opts),
+         {:ok, _record} <- read_safe(root, env),
+         :ok <- own_ticket(root, ticket, env) do
+      case only(dir, ["ticket"], nil) do
+        :ok -> removed(File.rm(Path.join(dir, "ticket")), File.rmdir(dir))
+        {:error, _unexpected} -> {:error, :launch_record_write_failed}
+      end
     end
   end
 
@@ -182,7 +212,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   def quiescence(%{state: state}, _opts) when state in ["claimed", "finished"], do: :quiescent
 
   def quiescence(%{state: "launch_pending"} = record, _opts) do
-    if is_binary(Map.get(record, :owner_attested_at)),
+    if timestamp?(Map.get(record, :owner_attested_at)),
       do: :quiescent,
       else: :owner_verification_required
   end
@@ -190,8 +220,8 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   def quiescence(%{state: "launched"} = record, opts) do
     probe = probe(opts)
 
-    with {:ok, members} <- observe(fn -> probe.session_members(record.session_id) end),
-         {:ok, root} <- observe(fn -> probe.start_identity(record.root_pid) end) do
+    with {:ok, members} <- observe(:session, fn -> probe.session_members(record.session_id) end),
+         {:ok, root} <- observe(:identity, fn -> probe.start_identity(record.root_pid) end) do
       if members == [] and root != {:ok, record.root_identity},
         do: :quiescent,
         else: :not_quiescent
@@ -209,14 +239,12 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   def attest_stopped(root, record, confirmation, opts \\ [])
 
   def attest_stopped(root, record, @confirmation, opts) do
-    with {:ok, current} <- read_safe(root),
+    with {:ok, env} <- env(opts),
+         {:ok, current} <- read_safe(root, env),
          :ok <- same(current, record, :invalid_transition),
-         %{state: "launch_pending"} <- current do
+         :ok <- pending(current) do
       attested = %{current | owner_attested_at: now()}
-      with :ok <- write(root, attested, opts), do: {:ok, attested}
-    else
-      {:error, _reason} = error -> error
-      _not_pending -> {:error, :invalid_transition}
+      with :ok <- write(root, attested, env), do: {:ok, attested}
     end
   end
 
@@ -255,7 +283,11 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   defp finished(%{state: "finished"}), do: :ok
   defp finished(_record), do: {:error, :not_finished}
 
-  defp same(%{unreadable: true}, %{unreadable: true}, _error), do: :ok
+  defp pending(%{state: "launch_pending", unreadable: true}), do: {:error, :invalid_transition}
+  defp pending(%{state: "launch_pending"}), do: :ok
+  defp pending(_record), do: {:error, :invalid_transition}
+
+  # Whole-map equality, the unreadable fingerprint included.
   defp same(current, record, error), do: if(current == record, do: :ok, else: {:error, error})
 
   defp blank, do: Map.new(@keys, &{&1, nil}) |> Map.merge(%{schema: @schema, generation: 1})
@@ -273,83 +305,116 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   end
 
   defp recoverable(record, opts) do
-    case observe(fn -> probe(opts).start_identity(record.owner_pid) end) do
+    case observe(:identity, fn -> probe(opts).start_identity(record.owner_pid) end) do
       {:ok, {:ok, identity}} when identity == record.owner_identity -> {:error, :owner_alive}
       {:ok, _absent_or_reused} -> :ok
       {:error, :probe_unavailable} = error -> error
     end
   end
 
-  defp make_ticket(root) do
+  defp make_ticket(root, env) do
     dir = ticket_dir(root)
 
     case File.lstat(dir) do
-      {:ok, %File.Stat{type: :directory}} -> {:error, :recovery_in_progress}
-      {:ok, _symlink_or_other} -> {:error, :launch_record_unsafe}
-      {:error, :enoent} -> create_ticket(dir)
+      {:ok, _stat} -> {:error, :recovery_in_progress}
+      {:error, :enoent} -> create_ticket(dir, env)
       {:error, _reason} -> {:error, :launch_record_unsafe}
     end
   end
 
-  defp create_ticket(dir) do
+  # The ticket is built in a private temporary directory and renamed into
+  # place, so `recover` only ever appears complete (0700, with its 0600
+  # ticket). The rename fails if another recoverer's ticket is there.
+  defp create_ticket(dir, env) do
     ticket = Ash.UUIDv7.generate()
 
-    case File.mkdir(dir) do
-      :ok ->
-        with :ok <- File.chmod(dir, 0o700),
-             :ok <- write_file(dir, "ticket", ticket, &File.rename/2) do
-          {:ok, ticket}
-        else
-          _ -> {:error, :launch_record_write_failed}
-        end
+    temp =
+      Path.join(
+        Path.dirname(dir),
+        ".tmp-recover-" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+      )
 
-      {:error, :eexist} ->
-        {:error, :recovery_in_progress}
+    with :ok <- File.mkdir(temp),
+         :ok <- File.chmod(temp, 0o700),
+         :ok <- write_file(temp, "ticket", ticket, env),
+         :ok <- File.rename(temp, dir) do
+      {:ok, ticket}
+    else
+      _failed_or_taken ->
+        File.rm(Path.join(temp, "ticket"))
+        File.rmdir(temp)
 
-      {:error, _reason} ->
-        {:error, :launch_record_write_failed}
+        if File.dir?(dir),
+          do: {:error, :recovery_in_progress},
+          else: {:error, :launch_record_write_failed}
     end
   end
 
-  defp read_ticket(dir) do
-    path = Path.join(dir, "ticket")
+  defp own_ticket(root, ticket, env) do
+    path = Path.join(ticket_dir(root), "ticket")
 
-    with :ok <- private_file(path), do: File.read(path)
+    with :ok <- private_file(path, env),
+         {:ok, ^ticket} <- File.read(path) do
+      :ok
+    else
+      _missing_changed_or_unsafe -> {:error, :recovery_changed}
+    end
   end
 
   ## Reading
 
-  defp read_safe(root) do
-    with :ok <- safe_root(root) do
+  defp read_safe(root, env) do
+    with :ok <- safe_root(root, env) do
       lock = lock(root)
 
       case File.lstat(lock) do
         {:error, :enoent} -> {:ok, :none}
-        {:ok, _stat} -> read_lock(lock)
+        {:ok, _stat} -> read_lock(lock, env)
         {:error, _reason} -> {:error, :launch_record_unsafe}
       end
     end
   end
 
-  defp read_lock(lock) do
-    path = Path.join(lock, "record.json")
+  defp read_lock(lock, env) do
+    with :ok <- private_dir(lock, env),
+         :ok <- private_recovery(Path.join(lock, "recover"), env) do
+      path = Path.join(lock, "record.json")
 
-    with :ok <- private_dir(lock) do
       case File.lstat(path) do
-        {:error, :enoent} -> {:ok, @unreadable}
-        {:ok, _stat} -> read_record(path)
+        {:error, :enoent} -> {:ok, unreadable("missing")}
+        {:ok, _stat} -> read_record(path, env)
         {:error, _reason} -> {:error, :launch_record_unsafe}
       end
     end
   end
 
-  defp read_record(path) do
-    with :ok <- private_file(path),
+  # A present recovery directory, and its ticket file when written, must be
+  # private; an absent ticket file is a partial ticket (still blocking).
+  defp private_recovery(dir, env) do
+    case File.lstat(dir) do
+      {:error, :enoent} -> :ok
+      {:ok, _stat} -> with :ok <- private_dir(dir, env), do: private_ticket(dir, env)
+      {:error, _reason} -> {:error, :launch_record_unsafe}
+    end
+  end
+
+  defp private_ticket(dir, env) do
+    ticket = Path.join(dir, "ticket")
+
+    case File.lstat(ticket) do
+      {:error, :enoent} -> :ok
+      {:ok, _stat} -> private_file(ticket, env)
+      {:error, _reason} -> {:error, :launch_record_unsafe}
+    end
+  end
+
+  defp read_record(path, env) do
+    with :ok <- private_file(path, env),
          {:ok, bytes} <- File.read(path) do
       {:ok, parse(bytes)}
     else
       {:error, :launch_record_unsafe} = unsafe -> unsafe
-      _unreadable -> {:ok, @unreadable}
+      _unreadable -> {:ok, unreadable("unreadable")}
     end
   end
 
@@ -360,14 +425,17 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
          true <- valid?(record) do
       record
     else
-      _ -> @unreadable
+      _ -> unreadable(Base.encode16(:crypto.hash(:sha256, bytes), case: :lower))
     end
   end
+
+  defp unreadable(fingerprint),
+    do: %{state: "launch_pending", unreadable: true, fingerprint: fingerprint}
 
   defp valid?(record) do
     record.schema == @schema and uuid?(record.instance_id) and pos_int?(record.owner_pid) and
       text?(record.owner_identity) and record.generation == 1 and
-      (is_nil(record.owner_attested_at) or text?(record.owner_attested_at)) and
+      (is_nil(record.owner_attested_at) or timestamp?(record.owner_attested_at)) and
       state_fields?(record)
   end
 
@@ -391,9 +459,21 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   defp pos_int?(value), do: is_integer(value) and value > 0
   defp text?(value), do: is_binary(value) and value != ""
 
-  ## Writing
+  # A canonical UTC timestamp that round-trips exactly.
+  defp timestamp?(value) when is_binary(value) do
+    with true <- value =~ @timestamp,
+         {:ok, datetime, 0} <- DateTime.from_iso8601(value) do
+      DateTime.to_iso8601(datetime) == value
+    else
+      _ -> false
+    end
+  end
 
-  defp make_lock(root) do
+  defp timestamp?(_value), do: false
+
+  ## Writing and removing
+
+  defp make_lock(root, env) do
     lock = lock(root)
 
     case File.mkdir(lock) do
@@ -401,10 +481,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
         if File.chmod(lock, 0o700) == :ok, do: :ok, else: {:error, :launch_record_write_failed}
 
       {:error, :eexist} ->
-        case File.lstat(lock) do
-          {:ok, %File.Stat{type: :directory}} -> {:error, :calibration_in_progress}
-          _symlink_or_other -> {:error, :launch_record_unsafe}
-        end
+        with :ok <- private_dir(lock, env), do: {:error, :calibration_in_progress}
 
       {:error, _reason} ->
         {:error, :launch_record_write_failed}
@@ -412,26 +489,25 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   end
 
   # An atomic replace of the record, after the lock is checked private.
-  defp write(root, record, opts) do
+  defp write(root, record, env) do
     lock = lock(root)
-    replace = Keyword.get(opts, :replace, &File.rename/2)
 
-    with :ok <- private_dir(lock) do
-      case write_file(lock, "record.json", Jason.encode!(Map.new(record)), replace) do
+    with :ok <- private_dir(lock, env) do
+      case write_file(lock, "record.json", Jason.encode!(Map.new(record)), env) do
         :ok -> :ok
         _failed -> {:error, :launch_record_write_failed}
       end
     end
   end
 
-  defp write_file(dir, name, bytes, replace) do
+  defp write_file(dir, name, bytes, env) do
     temp = Path.join(dir, ".tmp-" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower))
 
     try do
       with {:ok, file} <- :file.open(temp, [:write, :exclusive, :binary, :raw]),
            :ok <- synced(file, bytes),
            :ok <- File.chmod(temp, 0o600) do
-        replace.(temp, Path.join(dir, name))
+        env.replace.(temp, Path.join(dir, name))
       end
     after
       File.rm(temp)
@@ -444,12 +520,82 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
     :file.close(file)
   end
 
-  ## Private paths
+  # `dir` holds exactly `expected` (a `busy` entry is `:recovery_in_progress`;
+  # anything else `:launch_record_unsafe`), checked before any removal.
+  defp only(dir, expected, busy) do
+    case File.ls(dir) do
+      {:ok, entries} -> entries_are(entries, expected, busy)
+      {:error, _reason} -> {:error, :launch_record_unsafe}
+    end
+  end
 
-  defp safe_root(root) do
+  defp entries_are(entries, expected, busy) do
+    cond do
+      busy && busy in entries -> {:error, :recovery_in_progress}
+      Enum.sort(entries) == Enum.sort(expected) -> :ok
+      true -> {:error, :launch_record_unsafe}
+    end
+  end
+
+  defp removed(:ok, :ok), do: :ok
+  defp removed(_file, _dir), do: {:error, :launch_record_write_failed}
+
+  ## Private, owner-local paths
+
+  # The expected owner and the final rename. Only test-seam builds honour
+  # the `owner_uid:` and `replace:` options.
+  defp env(opts) do
+    with {:ok, uid} <- expected_uid(opts) do
+      {:ok, %{uid: uid, replace: replace(opts)}}
+    end
+  end
+
+  if @test_seams do
+    defp expected_uid(opts) do
+      case Keyword.fetch(opts, :owner_uid) do
+        {:ok, uid} when is_integer(uid) -> {:ok, uid}
+        _absent -> own_uid()
+      end
+    end
+
+    defp replace(opts), do: Keyword.get(opts, :replace, &File.rename/2)
+  else
+    defp expected_uid(_opts), do: own_uid()
+    defp replace(_opts), do: &File.rename/2
+  end
+
+  # This process's uid: the owner of a file it has just created (no
+  # external command is launched).
+  defp own_uid do
+    probe =
+      Path.join(
+        System.tmp_dir!(),
+        ".sdr-uid-" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+      )
+
+    case :file.open(probe, [:write, :exclusive, :raw]) do
+      {:ok, file} ->
+        :file.close(file)
+        probe_owner(probe)
+
+      _cannot_create ->
+        {:error, :launch_record_unsafe}
+    end
+  end
+
+  defp probe_owner(probe) do
+    case File.lstat(probe) do
+      {:ok, %File.Stat{uid: uid}} -> {:ok, uid}
+      _ -> {:error, :launch_record_unsafe}
+    end
+  after
+    File.rm(probe)
+  end
+
+  defp safe_root(root, env) do
     expanded = Path.expand(root)
 
-    if no_symlink?(expanded) and private_dir(expanded) == :ok,
+    if no_symlink?(expanded) and private_dir(expanded, env) == :ok,
       do: :ok,
       else: {:error, :launch_record_unsafe}
   end
@@ -461,17 +607,23 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
     |> Enum.all?(&match?({:ok, %File.Stat{type: :directory}}, File.lstat(&1)))
   end
 
-  defp private_dir(path) do
+  defp private_dir(path, %{uid: uid}) do
     case File.lstat(path) do
-      {:ok, %File.Stat{type: :directory, mode: mode}} when (mode &&& 0o777) == 0o700 -> :ok
-      _ -> {:error, :launch_record_unsafe}
+      {:ok, %File.Stat{type: :directory, mode: mode, uid: ^uid}} when (mode &&& 0o777) == 0o700 ->
+        :ok
+
+      _ ->
+        {:error, :launch_record_unsafe}
     end
   end
 
-  defp private_file(path) do
+  defp private_file(path, %{uid: uid}) do
     case File.lstat(path) do
-      {:ok, %File.Stat{type: :regular, mode: mode}} when (mode &&& 0o777) == 0o600 -> :ok
-      _ -> {:error, :launch_record_unsafe}
+      {:ok, %File.Stat{type: :regular, mode: mode, uid: ^uid}} when (mode &&& 0o777) == 0o600 ->
+        :ok
+
+      _ ->
+        {:error, :launch_record_unsafe}
     end
   end
 
@@ -484,27 +636,36 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecord do
   defp probe(opts), do: Keyword.fetch!(opts, :probe)
 
   defp self_identity(probe) do
-    with {:ok, {:ok, pid}} when is_integer(pid) and pid > 0 <- observe(&probe.self_pid/0),
-         {:ok, {:ok, identity}} when is_binary(identity) and identity != "" <-
-           observe(fn -> probe.start_identity(pid) end) do
+    with {:ok, pid} <- observe(:pid, &probe.self_pid/0),
+         {:ok, {:ok, identity}} <- observe(:identity, fn -> probe.start_identity(pid) end) do
       {:ok, pid, identity}
     else
       _ -> {:error, :probe_unavailable}
     end
   end
 
-  # `{:ok, observation}` for a definite answer, `{:error, :probe_unavailable}`
-  # for a failure or a raise. `session_members/1` and `self_pid/0` answers
-  # are unwrapped by their callers.
-  defp observe(fun) do
-    case fun.() do
-      {:error, _reason} -> {:error, :probe_unavailable}
-      {:ok, members} when is_list(members) -> {:ok, members}
-      answer -> {:ok, answer}
+  # Only a well-formed answer of the asked kind is an observation; an
+  # error, a raise or anything malformed is `{:error, :probe_unavailable}`.
+  defp observe(kind, fun) do
+    case classify(kind, fun.()) do
+      {:ok, _observation} = observation -> observation
+      :error -> {:error, :probe_unavailable}
     end
   rescue
     _error -> {:error, :probe_unavailable}
   end
+
+  defp classify(:pid, {:ok, pid}) when is_integer(pid) and pid > 0, do: {:ok, pid}
+  defp classify(:identity, :absent), do: {:ok, :absent}
+
+  defp classify(:identity, {:ok, identity}) when is_binary(identity) and identity != "",
+    do: {:ok, {:ok, identity}}
+
+  defp classify(:session, {:ok, pids}) when is_list(pids) do
+    if Enum.all?(pids, &(is_integer(&1) and &1 > 0)), do: {:ok, pids}, else: :error
+  end
+
+  defp classify(_kind, _reply), do: :error
 
   defp now do
     DateTime.utc_now() |> DateTime.truncate(:microsecond) |> DateTime.to_iso8601()
