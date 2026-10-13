@@ -1772,216 +1772,276 @@ and runs everywhere.
 
 ### 8.14 d3 staged delta: console orchestration (proposed)
 
-**Status:** proposed for entity review; no RED work before it passes.
+**Status:** proposed for entity re-review. Round 1 at edf023d was
+**NEEDS-REVIEW** (Codex 92ae3ded, report sha256 456b55dc). Its answers:
+- **Q1:** a bounded, correlated observer;
+- **Q2:** shared settlement through a narrow seam-only ClaudeCLI calibration
+  wrapper.
 
-**Entity Model trigger: yes.**
-- Two new console subcommands drive existing domain actions.
-- A server-to-console launch receipt is added to the d1b request.
-- The `ModelProvider` facade's settlement becomes callable for an
-  already-reserved invocation.
+This revision addresses must_fix 1–4 and the completeness notes. No RED
+work starts before it passes.
 
-No table is added. This builds on 8.2–8.4, 8.13 and E4c-1a/2/3/4/5/6. The
-E4c-6 step numbers are kept.
+**Entity Model trigger: yes.** It adds:
+- a launch receipt relationship (server → observer);
+- a seam-only reserved-call entry;
+- orchestrated lifecycle and authorization for `calibrate` and
+  `calibrate-recover`;
+- an explicit stop for a proof run that was left without an invocation.
 
-#### 8.14.1 `calibrate <profile>`
+It builds on 8.2–8.4, 8.13 and E4c-1a/2/3/4/5/6. Every file, probe and
+provider I/O stays outside the domain locks. There is one bounded
+reconciliation and one candidate.
 
-**Shape.** It runs through `bin/calibration-console calibrate <profile>`, a
-`mix sdr.calibration.console` subcommand. The orchestration lives in
-`SdrAgent.CalibrationConsole.Calibrate` (test-seam builds only). The task
-stays thin.
+**Sub-slices, each with its own RED → GREEN → review:**
+1. **d3a** — the launch receipt (8.14.2).
+2. **d3b** — the reserved-call wrapper (8.14.3).
+3. **d3c** — `calibrate` (8.14.1, 8.14.4).
+4. **d3d** — `calibrate-recover` (8.14.5).
 
-**What it starts:**
-- the application with the console plan and `serve: false` (no listener,
-  no Oban queues, Fake as the runtime provider);
-- `Authority`, linked to the command;
-- one unnamed private ClaudeCLI server per command, linked to the command,
-  with the real pinned executable and shim (8.2 step 2).
+d3c and d3d consume only the verified d3a and d3b contracts.
 
-**Actor.** `agent_runtime` of the console tenant. The owner is at the
-terminal.
+#### 8.14.1 `calibrate <profile>`: shape
 
-| Step | Action | On failure |
-|---|---|---|
-| 1 claim | `LaunchRecord.claim/2` | Nothing is created; refuse |
-| 2 preflight | The profile is a real ClaudeCLI profile. `PinnedExecutable.verify/1` passes and equals the profile's version. `Store.validate_root(Witness.store_root())`. `select_calibration_grant/3`. `Isolation.preflight/1`. The plan is printed: profile, pin, G-R0 id and revision, remaining attempts, store root. Then the owner types exactly `CALIBRATE <profile>` (E-R1) | `advance(:aborted)`, then `release` |
-| 3 reserve | A `:proof` run (no Operation), then `reserve_model_invocation/3` with the d1b fixed input. The request body is `ModelProvider.request_body/1`, the refs are `Prompt.prompt_ref/schema_ref`, and the marker carries `claim: record.instance_id` and `binding:` | A refusal or no row: `advance(:aborted)`, `release` |
-| 4 | `advance(:launch_pending, invocation_id)` | Write failed: hard stop; the record stays for recovery |
-| 5 | `Authority.issue/1` binding the invocation, run, tenant, profile, command pid, server pid, prompt and schema SHA-256 (lowercase hex) and the VM instance | `advance(:aborted)` (still `reserved`), `release` |
-| 6 call | `ModelProvider.call_reserved/4` (8.14.3) with the private server, once. The server's own `admit_launch` runs immediately before `Reaper.open`; the console never pre-admits | See the outcome rules below |
-| 7 | Launch receipt (8.14.2), group verification, then `advance(:launched, root_pid, root_identity, process_group_id)` | No receipt: the record stays `launch_pending` |
-| 8 | Bounded observation: one `Witness.reconcile/2`, then `Outcome.classify/1` (E3) | Timeout is the outcome `timeout` |
-| 9 | Cleanup receipt: `LaunchRecord.quiescence/2` gives `:quiescent` | Stop. The record stays `launched` for `calibrate-recover` |
-| 10 | `Evidence.publish/3` (E2) gives the SHA-256 | Stop; recover |
-| 11 | `Agents.finish_calibration/3` (E1) | Stop; recover |
-| 12 | `advance(:finished)` | Stop; recover |
-| 13 | `release` | Owner conflict on a partial removal |
+- **Shape.** It runs through `bin/calibration-console calibrate <profile>`
+  (a task subcommand). The orchestration is `CalibrationConsole.Calibrate`,
+  in test-seam builds only. A non-seam build has neither the module nor the
+  subcommand path, and the task refuses.
+- **What it starts:**
+  - the application under the console plan with `serve: false` (no
+    listener, no Oban queues, Fake runtime provider);
+  - `Authority`, linked to the command;
+  - one unnamed private ClaudeCLI server, linked to the command (8.2 step
+    2).
+- **Actor.** `agent_runtime` of the console tenant. The owner is at the
+  terminal; typed confirmations are read through an injected IO function.
+- **Steps.** These are the E4c-6 steps. Every branch is in the matrix
+  (8.14.4).
 
-`Authority.revoke/1` runs in an `after` on every path (8.2 step 7).
+#### 8.14.2 d3a: the launch receipt (server → observer)
 
-**Outcome rules after step 6:**
-- **`:real_model_staged`** (nothing was consumed, or consume failed),
-  **`:calibration_target_mismatch` / `:calibration_launch_invalid`**
-  (rollback, the row still `reserved`), and any receipt refusal (the row
-  `failed`, `sent_at` nil):
-  - finalized as unlaunched (`aborted`, E4c-2);
-  - a still-`reserved` row first goes through
-    `recover_calibration(:unlaunched)`, so no row is left `reserved`;
-  - the run is settled by E1 only when evidence is latched. An aborted
-    attempt with a failed row latches its failed evidence (8.4) through
-    steps 10–11 before `aborted`, which is allowed because there was no
-    launch.
-- **After `sent`:** steps 7–13. A known no-spawn receipt keeps its `sent`
-  history (E4c-2), and the record follows the cleanup and evidence path.
+**Request.** The d1b closed `request.calibration` gains exactly one key,
+`observer: {pid, ref}` (a local pid and a reference). A missing or
+malformed value is `:real_model_staged` before the consume. It is not an
+Authority claim, and `Authority` is unchanged.
 
-#### 8.14.2 Launch receipt (server to console)
+**Per-launch proof (server process, exempted call only).**
+1. It runs after `Reaper.open` returns `{:ok, port, os_pid}`, so after
+   `sent`, and before output collection.
+2. `CalibrationExemption` reads, through `ProcessProbe`:
+   - `start_identity(os_pid)`, which must be `{:ok, non_empty}`;
+   - `group_members(os_pid)`, which must be `{:ok, members}` with `os_pid in
+     members` (the root leads its own group: E4c-1).
+3. It sends exactly one message, best-effort and without waiting:
+   - **all proven:** `{:calibration_launched, ref, %{invocation_id:, server:
+     self(), root_pid: os_pid, root_identity:, process_group_id: os_pid}}`;
+   - **otherwise** (identity `:absent`, `:error`, empty or malformed;
+     group read failed; root not in its group; or a probe raise):
+     `{:calibration_launch_unverified, ref, %{invocation_id:, server:,
+     root_pid: os_pid, reason:}}`. No launch fields are manufactured.
+4. `{:unknown, …}` or `{:pending, …}` from `Reaper.open` sends no message.
 
-The server's reply comes only after the CLI is reaped, so the root must be
-reported while the call is in flight.
+**Fast exit.** A CLI that exits before the probe yields `unverified`, never
+a guaranteed happy path. That is post-spawn uncertainty: the record stays
+`launch_pending`.
 
-- **The request.** The d1b closed `request.calibration` gains one key:
-  `observer` (a pid). The A3 shape becomes exactly `%{authority:, run_id:,
-  tenant_id:, instance:, observer:}`. It is not an Authority claim, and
-  `Authority` is unchanged.
-- **The message.** For an exempted call only, right after `Reaper.open`
-  returns `{:ok, port, os_pid}` (so after `sent`), the server sends exactly
-  one message, best-effort and without waiting:
-  `{:calibration_launched, invocation_id, %{root_pid: os_pid, root_identity:
-  identity, process_group_id: os_pid}}`.
-  - `identity` is the start identity the server's reaper captured at spawn.
-    The private server's reaper is started with the existing opt-in
-    `identity:` guard (E4c-1a), so a CLI that exits quickly still has a
-    spawn-time identity.
-  - The Port child leads its own group (E4c-1), so the group is the root
-    pid.
-- **The observer** is a console process, linked to the command and owned by
-  the same OS process. While the command is blocked in the call:
-  1. It waits for the receipt.
-  2. It checks the identity through the probe:
-     - if the root is still alive, the identity must match and
-       `Isolation.verify_group/2` must pass;
-     - if it is absent or reused, the spawn receipt stands, with the
-       evidence noting `root_gone_at_verification: true`.
-  3. It writes `advance(:launched, …)`, then reports to the command.
-- **No receipt** (refused before spawn, spawn failure, or server crash):
-  the record stays `launch_pending`, and step 9 onward follows the E4c-2
-  rules.
-- **Verification fails while the root is alive** (identity mismatch, or
-  not a group leader): the record stays `launch_pending`, the command
-  stops after the call, and recovery needs the owner.
-- **Only the command reads the observer's result**, and only after the call
-  returns, so there is never a second writer to the record.
+**Cleanup is unchanged.** The private server's reaper is started exactly as
+today, with no `identity:` guard. ClaudeCLI's `stop_tree`, `quiesce` and
+`prune_stuck` keep their existing `kill_tree` behaviour, exactly as for
+ordinary real calls. d3 promises no identity-bound signalling. The
+identity is observation only, used by the record and by later quiescence.
 
-**Question 1 (Codex):** `observer` in the closed request, versus the server
-writing the receipt into its published status, versus the console polling
-`ProcessProbe` for the child of the server's reaper. I recommend
-`observer`: it is explicit, bounded and seam-only.
+**Ordinary calls:** no observer and no message.
 
-#### 8.14.3 Settlement through the facade
+**Evidence:** no new field. Evidence v1 is unchanged (the round-1
+`root_gone_at_verification` is dropped).
 
-The console reserves itself (8.2 step 3, with the marker), so it cannot use
-`ModelProvider.call/…`, which reserves. To keep one settlement contract:
+**The observer** (`Calibrate`, one per `calibrate`):
+- **Start.** It is started with `spawn_monitor` by the command before the
+  call, and monitors the command.
+- **Accepts** exactly one message with its own `ref`, the expected
+  `invocation_id` and the expected private server pid. Stale, foreign or
+  duplicate messages are ignored.
+- **On a verified receipt,** it writes `LaunchRecord.advance(:launched,
+  root_pid, root_identity, process_group_id)` once.
+- **It never writes `aborted`, `finished` or `recovered`,** and never
+  releases.
+- **Bounded lifetime:** it exits by itself at the server's call deadline
+  plus 5 s, or when the command dies, in both cases without writing.
 
-- **New public function:** `ModelProvider.call_reserved(provider, request,
-  invocation, opts)`. It runs exactly the facade's existing
-  `invoke_validate_and_settle` path, which covers:
-  - the witness context, built by the caller;
-  - the provider call;
-  - the `current` re-read;
-  - completion with the parsed output, invalid completion, failure or
-    `unknown`;
+**Join (writer exclusion).** After the call returns:
+1. The command sends `{:join, ref}` and waits at most 5 s for the reply.
+2. Then it kills the observer, if it is still alive, and waits for its
+   `DOWN` (the `DOWN` is guaranteed).
+3. Only after `DOWN` does the command re-read `record.json` (atomic rename,
+   so it is whole or old) and treat it as authoritative.
 
-  for an invocation already reserved by the caller.
-- **Refusals:**
-  - a row not `reserved`, or of another provider than `provider`, is
-    `{:error, :invocation_not_reserved}`;
-  - the facade's semantics are otherwise unchanged;
-  - `call/…` becomes reserve, then `call_reserved/4`, with identical
-    behaviour.
-- **Usage:** only the console (test-seam builds) and the facade itself call
-  it.
+No observer write can follow `DOWN`. There is no retry: the command makes
+one call, and at most one CLI launch happens.
 
-**Question 2 (Codex):** this extraction, versus the console calling
-`complete_` / `fail_` / `mark_model_invocation_unknown` directly, which
-duplicates the facade's rules. I recommend extraction.
+**Server or observer death:**
+- no receipt means the record stays `launch_pending`;
+- an observer that died after its write is visible in the re-read record.
 
-#### 8.14.4 `calibrate-recover <invocation_id> [--owner-verified-stopped]`
+#### 8.14.3 d3b: the seam-only reserved-call wrapper
 
-This is 8.4 and E4c-2/4/5, unchanged. The console only orchestrates.
+`ModelProvider.calibration_call(request, invocation_id, opts)` is compiled
+only in test-seam builds and called only by `Calibrate`. Ordinary
+`ModelProvider.complete/2` (reserve, then the shared helper) is unchanged,
+including the Fake's `before_call` `sent` and its span.
 
-1. **Take over the stale lock** (`LaunchRecord.recover/2`): refused while
-   the owner is alive (`:owner_alive`); an unreadable record is a hard
-   stop.
-2. **Select the target** by the claim (E4c-2): exactly the one proof
-   invocation whose original reserve event carries this record's
-   `instance_id`, and equal to the record's `invocation_id` when it has
-   one. Otherwise `:calibration_target_ambiguous`. A `claimed` record with
-   zero matches is aborted and released.
-3. **Print and confirm.** The console prints the id, profile, status and
+**Authoritative target, checked before any provider effect.** Re-read the
+invocation under `request.actor` (`agent_runtime` of its tenant; the actor
+is never derived from row fields). All of these must hold:
+- the row exists in the actor's tenant;
+- `status == :reserved` and `sent_at` nil;
+- `provider == :claude_cli` (the only persisted provider this wrapper maps:
+  module `ClaudeCLI`);
+- generation 2;
+- `profile_id` equals the private server's published profile
+  (`ClaudeCLI.prepare/2`);
+- `agent_run_id == request.run.id`, and that run is the actor tenant's
+  running `:proof` run;
+- `request_sha256 == sha256(ModelProvider.request_body(request))`;
+- the prompt and schema refs equal `Prompt.prompt_ref/schema_ref`.
+
+Anything else is `{:error, :calibration_call_invalid}`: no provider call, no
+witness, no target write.
+
+**Then the facade's shared helper.** Inside `GenAI.with_span`, in the
+calling process, the witness (`model_invocation_id`, `traceparent`) is
+captured exactly as `complete/2` does. Then the existing private
+`invoke_validate_and_settle(ClaudeCLI, request, invocation, opts)` runs,
+unchanged:
+- `sent` only by the server's admission;
+- the `current` re-read;
+- complete, invalid complete, fail or `unknown`.
+
+Runtime staging and the admission guards stay as they are.
+
+#### 8.14.4 Failure and finalization matrix (`calibrate`)
+
+Every post-call decision reads the fresh committed row (`status`,
+`sent_at`), never only the provider's return value.
+
+| # | Point | Condition | Action | Record |
+|---|---|---|---|---|
+| 1 | claim | any error | refuse; nothing created | none |
+| 2 | preflight | pin, store, G-R0 or isolation unavailable; or the owner declines or mistypes `CALIBRATE <profile>` | `advance(:aborted)`, then `release` | released |
+| 3 | preflight | `Isolation.preflight` gives `:calibration_isolation_cleanup_unconfirmed` | **hard owner conflict**: no reservation, no release (E4c-1a) | `claimed`, kept |
+| 4 | reserve | a typed `%Refused{}` (no invocation; the proof run exists) | `SDR.Model.stop_refused/3` with that receipt (the existing guarded run stop and receipt link), then `aborted`, then `release` | released |
+| 5 | reserve | any other error (no invocation) | `Agents.cancel_run/2` (existing action), then `aborted`, then `release`. If the run stop itself fails: hard stop | released, or `claimed` kept |
+| 6 | `launch_pending` write | fails | hard stop. The reservation event's claim binds the target for recovery | `claimed`, kept |
+| 7 | `Authority.issue` | fails (the row is still `reserved`) | `recover_calibration(:unlaunched)`, then evidence (failed), then `finish_calibration`, then `aborted`, then `release`. Any step failing keeps the record | released, or `launch_pending` kept |
+| 8 | after the call | `sent_at` nil (`reserved`, or `failed` by the facade or an admission refusal; the reason is kept) | join the observer; a `launched` record here is a conflict (hard stop). Otherwise a `reserved` row gets `recover_calibration(:unlaunched)`, then evidence, `finish_calibration`, `aborted`, `release` | released, or `launch_pending` kept |
+| 9 | after the call | `sent_at` set and the record is `launched` | the normal path (10–13) | → `finished` |
+| 10 | after the call | `sent_at` set and the record is `launch_pending` (unverified or no receipt), **including a deterministic no-spawn after `sent`** | stop. Sent history is never aborted; recovery is attended (8.14.5) | `launch_pending`, kept |
+| 11 | normal | `ClaudeCLI.admission(server) == %{admission: :open}` **and** `LaunchRecord.quiescence(record, probe:) == :quiescent` (root absent or reused, group observed empty: E4c-3) | E3 reconcile, then `Outcome.classify`, then evidence, then `finish_calibration`, then `advance(:finished)`, then `release` | released |
+| 12 | normal | admission blocked or stuck, quiescence not established, or a probe error | stop. A probe error is never absence | `launched`, kept |
+| 13 | evidence, E1, `finished`, release | any failure | stop; the latch and evidence rules hold (E1/E2); `calibrate-recover` replays | kept |
+
+`Authority.revoke/1` and the private server's shutdown run in an `after` on
+every path.
+
+#### 8.14.5 d3d: `calibrate-recover <invocation_id> [--owner-verified-stopped]`
+
+This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
+
+1. **Lock.** `LaunchRecord.recover/2`. A live owner gives `:owner_alive`. An
+   unreadable record and an abandoned or partial ticket are hard owner
+   conflicts.
+2. **Final records only replay their release.**
+   - `aborted` and `finished` replay in any process, with their checks.
+   - `recovered` replays only in the same live process that holds its
+     ticket; otherwise it is an owner conflict.
+   - A final record is never advanced again.
+3. **Target by the claim** (E4c-2). Otherwise
+   `:calibration_target_ambiguous`. A `claimed` record with zero matches is
+   aborted and released.
+4. **Confirm.** The console prints the invocation, profile, status and
    record state. The owner types `RECOVER <invocation_id>`.
-4. **Decide:**
-   - `reserved`, or `failed` with `sent_at` nil: `:unlaunched`;
-   - `launched` and `LaunchRecord.quiescence/2` is `:quiescent`:
-     `{:quiescent, observation}`;
-   - otherwise, only with `--owner-verified-stopped` and a second typed
-     confirmation: `new_attestation/1`, the audit event inside
-     `recover_calibration/3`, then `write_attestation/4`
-     (`{:attested, attestation}`);
-   - with neither: `:calibration_not_quiescent`, and nothing is written.
-5. **Finish:** `recover_calibration/3`, then evidence (E2), then
-   `finish_calibration/3` (E1), then `advance(:recovered | :aborted)`, then
-   `release` (and the ticket ends with it).
+5. **Decide:**
+   - `reserved`, or `failed` with `sent_at` nil: `:unlaunched`, then
+     `aborted`.
+   - **Any sent history** (a `launch_pending` record, or `launched`) needs
+     `--owner-verified-stopped`, a fresh typed `STOPPED <invocation_id>`,
+     and the audited, bound attestation (E4c-4). In order:
+     1. `new_attestation/1`;
+     2. the event inside `recover_calibration({:attested, …})`;
+     3. `write_attestation/4`.
 
-#### 8.14.5 Entity delta
+     This holds until the owner's acceptance of automated process-group
+     proof (OQ-E3) is recorded. A compile-time `@automated_quiescence
+     false` is changed only by a reviewed PR after that acceptance. Until
+     then there is no automatic `{:quiescent, …}` recovery.
+   - **Observed live work refuses:** a live root or group members refuse
+     `:calibration_not_quiescent` even with the flag and `STOPPED`. A probe
+     error is never absence. Pending sent history is never inferred from a
+     group observation or a status alone.
+6. **Finish.** Evidence: an existing latched file is validated and reused
+   unchanged, and a changed or missing file under a latch is a conflict.
+   Then `finish_calibration`, then `advance(:recovered | :aborted)`, then
+   `release` (the ticket ends with it).
+7. **Deferred:** orphan mode and operator repair stay out of scope.
+
+#### 8.14.6 Entity delta
 
 | Entity | New / existing | Delta | Invariants / lifecycle | Actor / locks |
 |---|---|---|---|---|
-| Console `calibrate`, `calibrate-recover` | Existing task, new subcommands | The 8.14.1 and 8.14.4 sequences in `CalibrationConsole.Calibrate` (seam-only) | Single flight. One reservation and one launch per `calibrate`. Typed confirmations. A record is written only by the command or its observer, never concurrently. Hard owner-conflict stops are kept | Owner at the terminal; `agent_runtime` |
-| ClaudeCLI exemption (8.13 A) | Existing | `request.calibration` gains `observer`. After `Reaper.open`, an exempted call sends one launch receipt; the private server's reaper uses the `identity:` guard | Best-effort, after `sent`, never before admission. Ordinary calls are unchanged. A missing or non-pid `observer` is `:real_model_staged` before the consume | Server process |
-| `ModelProvider.call_reserved/4` | Existing facade, new public entry | The facade's settlement for a caller-reserved invocation | Identical settlement semantics; refuses a non-`reserved` row | Existing |
-| LaunchRecord, Authority, `recover_calibration`, `finish_calibration`, Evidence, Outcome, Isolation | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Used as approved | As approved |
-| AgentRun (`:proof`) | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Created by the console, with no Operation. Settled only by E1 | Existing |
+| ClaudeCLI exemption request (8.13 A) | Existing | Closed key `observer: {pid, ref}` | Malformed is staged before the consume | Server |
+| Launch receipt (message) | New relationship | One correlated message after `Reaper.open`: verified (identity plus group) or unverified | After `sent` only; never manufactured; ordinary calls have none; no cleanup authority | Server → observer |
+| Observer process | New (console, seam-only) | Accepts one correlated receipt; writes only `launched` | Bounded life; dies with the command; joined or killed before any later record write | Console VM |
+| Private server reaper and ClaudeCLI cleanup | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | No `identity:` guard; cleanup as for ordinary calls; identity is observation only | Server |
+| `ModelProvider.calibration_call/3` | New entry (seam-only) | Authoritative target checks, then the shared helper | No provider call or write on refusal; ordinary `complete/2` unchanged | Calling process |
+| AgentRun (`:proof`, no invocation) | Existing | Stopped by `SDR.Model.stop_refused/3` with the reservation receipt, or `cancel_run/2` without one | Never left running by `calibrate`; E1 settles runs with an invocation | Existing run actions |
+| Console `calibrate`, `calibrate-recover` | Existing task, new subcommands | 8.14.4 and 8.14.5 | Single flight; typed confirmations; hard stops kept; one launch, no retry | Owner; `agent_runtime` |
+| LaunchRecord, Authority, `recover_calibration`, `finish_calibration`, Evidence v1, Outcome, Isolation | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Used as approved | As approved |
 
 **ADR and diagram.**
-- **ADR:** within ADR-0005's R0 calibration isolation. The pending
-  ADR-0005 amendment (E4c-7) also records the launch receipt and the
-  facade extraction.
-- **Diagram:** the console → private server → observer flow is a new
-  conditional runtime flow, evaluated at the integrated review.
+- **ADR:** the accepted basis is ADR-0005. The pending E4c-7 amendment adds
+  the launch receipt, the observer, the wrapper and the OQ-E3 gate for the
+  owner.
+- **Diagram:** the console → private server → observer flow is evaluated at
+  the integrated review.
 
-#### 8.14.6 RED plan (hermetic; no real call)
+#### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 
-Fixtures: a fake CLI behind the real shim when it is installed, as d1b
-does, and the tripwire elsewhere. The confirmations are injected as an IO
-function.
+**d3a — the launch receipt:**
+- a verified receipt reaches its observer;
+- with the probe stubbed, each of these gives `unverified` with no launch
+  fields: fast exit (identity `:absent`), identity `:error` or empty,
+  group read error, root not in its group, a probe raise;
+- `{:unknown, …}` gives no message;
+- a missing or malformed `observer` is staged before the consume;
+- ordinary calls send nothing.
 
-1. **Happy path, through the record:** claimed → launch_pending → launched
-   → finished → released. The evidence is published, E1 latches, and the
-   run is `:succeeded` / `:calibration_latched`. One reservation, one
-   launch and one consumed entry.
-2. **Confirmation:** a missing or wrong `CALIBRATE <profile>` gives
-   `aborted` and released, with no reservation.
-3. **Preflight refusals** (pin, store, G-R0, isolation): aborted, with no
-   reservation.
-4. **Reservation refusal** (`calibration_evidence_pending`, a G-R0
-   mismatch): aborted, with no `sent`.
-5. **Pre-`sent` launch refusal** (`:binding_unrecorded`,
-   `:exemption_request`): aborted after latching the failed evidence; no
-   process launched.
-6. **Launch receipt:**
-   - a fast-exit CLI is still recorded `launched` from the spawn identity;
-   - an alive root with a mismatched identity stays `launch_pending`;
-   - no receipt stays `launch_pending`.
-7. **Cleanup unconfirmed:** stays `launched`, and `calibrate-recover` is
-   needed.
-8. **`calibrate-recover`:** each decision, the confirmation, an ambiguous
-   target, a live owner, an unreadable record, and the attested path
-   writing the event before the file.
-9. **`call_reserved/4`:**
-   - parity with `call/…`;
-   - a non-`reserved` row is refused;
-   - the facade's existing tests are unchanged.
-10. **Build scope:** a non-seam build has no `calibrate` path and no
-    `Calibrate` module, and the task refuses.
+**d3b — the wrapper:**
+- refusals, each with no provider call and no write: a foreign tenant, a
+  stale or terminal row, another provider, profile, run or request SHA,
+  and a fabricated row map;
+- a happy path through the private server;
+- parity of the witness and span with `complete/2`;
+- the Fake and ordinary `complete/2` tests unchanged.
+
+**d3c — `calibrate`:** one case per matrix row 1–13, plus:
+- observer join and kill (a late receipt after join is never written);
+- command death;
+- one launch, no retry.
+
+**d3d — `calibrate-recover`:**
+- unlaunched;
+- attested sent history;
+- `--owner-verified-stopped` without `STOPPED`;
+- live work plus `STOPPED` refuses;
+- a probe error;
+- OQ-E3 unaccepted (no automatic quiescence);
+- final-record release replay;
+- a `recovered` record in another process (owner conflict);
+- partial removal;
+- an abandoned ticket;
+- reuse of an existing latched artifact, and a changed artifact as a
+  conflict;
+- an ambiguous target;
+- a live owner.
 
 ### 8.11 Obligations accepted in round 11
 
@@ -2326,4 +2386,5 @@ function.
     positive shim test executed locally). Code **scoped APPROVE** at
     7059727 (2dc068a3) after 21eb641 (witness validated before consume,
     41dca95e).
-  - d3 orchestration: delta 8.14 proposed for entity review.
+  - d3 orchestration: delta 8.14 **NEEDS-REVIEW** at edf023d (92ae3ded);
+    revised as sub-slices d3a–d3d, awaiting entity recheck.
