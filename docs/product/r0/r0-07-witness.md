@@ -1726,8 +1726,11 @@ distinct. d1b compares only the VM instance.
 
 Hermetic. The positive route uses the real shim and a pinned stand-in
 executable via `PinnedCLI.inject_identity!/2`, with no `test_launcher:` and
-no admission callback. If the shim is unavailable, the positive test fails;
-it is never skipped and claimed.
+no admission callback. Where the shim is not installed (CI), only the
+positive test is skipped, visibly, as the existing shim integration test
+is. It is never claimed from a skipped run: RED and GREEN evidence names a
+local run in which it executed. Every refusal test uses a tripwire command
+and runs everywhere.
 
 1. **Positive.** A private server with a matching entry launches the call
    and marks it `sent`. The stand-in's prompt file bytes equal
