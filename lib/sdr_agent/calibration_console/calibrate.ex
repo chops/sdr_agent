@@ -55,6 +55,10 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     @sha256 ~r/\A[0-9a-f]{64}\z/
     @invalid {:error, :evidence_input_invalid}
     @tuple_names [:provider, :profile_id, :method]
+    # The states ResultGate/Witness receipts and their links carry.
+    @receipt_statuses [:skipped, :unwitnessed, :inferred, :reconciled, :mismatch]
+    @link_statuses [:inferred, :reconciled, :mismatch]
+    @methods [:time_window, :propagated_id]
     @tuple_strings [:cli_version, :model_id, :projection_version]
 
     @doc "The evidence document of the gathered snapshots (see the moduledoc)."
@@ -143,8 +147,28 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
 
     defp name?(value), do: is_atom(value) and value not in [nil, true, false]
 
-    defp utc?(%DateTime{time_zone: "Etc/UTC"}), do: true
+    # A well-formed UTC DateTime: zero offsets, an integer microsecond with
+    # a precision of at most 6, and fields ISO 8601 formatting accepts.
+    defp utc?(
+           %DateTime{
+             time_zone: "Etc/UTC",
+             utc_offset: 0,
+             std_offset: 0,
+             microsecond: {microsecond, precision}
+           } = time
+         )
+         when is_integer(microsecond) and microsecond in 0..999_999 and precision in 0..6,
+         do: formattable?(time)
+
     defp utc?(_time), do: false
+
+    # Formatting is pure; a value it cannot format is invalid input,
+    # contained here and nowhere else.
+    defp formattable?(time) do
+      match?({:ok, _time, 0}, DateTime.from_iso8601(DateTime.to_iso8601(time)))
+    rescue
+      _unformattable -> false
+    end
 
     ## The observation
 
@@ -162,7 +186,8 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
 
     defp receipt?(%{status: status, link_id: link_id, cause_id: cause_id, codes: codes})
          when is_list(codes) do
-      name?(status) and Enum.all?([link_id, cause_id], &(is_nil(&1) or is_binary(&1))) and
+      status in @receipt_statuses and
+        Enum.all?([link_id, cause_id], &(is_nil(&1) or is_binary(&1))) and
         Enum.all?(codes, &is_binary/1)
     end
 
@@ -194,8 +219,13 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     defp own_link(nil, :unlaunched, _invocation), do: {:ok, nil}
     defp own_link(nil, {_kind, %{link_id: nil}}, _invocation), do: {:ok, nil}
 
-    defp own_link(%{id: id, model_invocation_id: own} = link, {_kind, %{link_id: id}}, invocation)
-         when is_binary(id) and own == invocation.id,
+    defp own_link(
+           %{id: id, model_invocation_id: own, link_status: status, method: method} = link,
+           {_kind, %{link_id: id}},
+           invocation
+         )
+         when is_binary(id) and own == invocation.id and status in @link_statuses and
+                method in @methods,
          do: {:ok, link}
 
     defp own_link(_link, _observation, _invocation), do: :error
