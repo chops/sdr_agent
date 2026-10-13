@@ -276,6 +276,24 @@ defmodule SdrAgent.Scripts.CalibrationConsoleTest do
       assert out =~ "creates"
     end
 
+    # R0-07 d3c (packet 8.14.1): calibrate takes exactly one profile and
+    # passes it to the task unchanged; the guards above still run first.
+    test "calibrate passes exactly its one profile to the task", ctx do
+      assert {_out, 0} = console(["calibrate", "claude_cli_opus"], stubbed(ctx))
+
+      assert mix_calls(ctx) == [
+               "sdr.calibration.console check",
+               "sdr.calibration.console calibrate claude_cli_opus"
+             ]
+    end
+
+    test "calibrate without a profile, or with more, is refused", ctx do
+      assert {out, 2} = console(["calibrate"], stubbed(ctx))
+      assert out =~ "usage: bin/calibration-console"
+      assert {_out, 2} = console(["calibrate", "claude_cli_opus", "--yes"], stubbed(ctx))
+      assert mix_calls(ctx) == []
+    end
+
     test "no command, or extra arguments to serve, is refused", ctx do
       assert {_out, 2} = console([], stubbed(ctx))
       assert {_out, 2} = console(["serve", "--yes"], stubbed(ctx))

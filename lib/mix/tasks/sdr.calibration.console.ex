@@ -31,11 +31,24 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
       endpoint does not listen.
     * `serve` — serves the console until stopped; refuses unless the
       LiveView assets are built (`mix assets.build`).
+    * `calibrate PROFILE` — one attended calibration call of a real profile
+      (R0-07 d3c, packet 8.14.1 and 8.14.9): exactly
+      `{:run, p, o} = Calibrate.command(argv); Calibrate.run(p, o)`, with
+      the console's fixed `console_opts/1` (no hook, no override). The
+      endpoint does not listen; the command starts the authority registry
+      and its own private ClaudeCLI server, and asks the owner to type
+      `CALIBRATE PROFILE`. It prints only the stop or outcome, the record
+      state and the evidence file's path and hash.
   """
   use Mix.Task
 
   alias SdrAgent.CalibrationConsole
   alias SdrAgent.CalibrationConsole.Secrets
+
+  # Both exist only in test-seam builds; referenced through apply/3 so that
+  # other builds compile this task (which refuses outside MIX_ENV=test).
+  @calibrate SdrAgent.CalibrationConsole.Calibrate
+  @authority SdrAgent.CalibrationConsole.Authority
 
   @doc false
   @impl Mix.Task
@@ -76,11 +89,49 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
     Process.sleep(:infinity)
   end
 
+  def run(["calibrate" | argv]) do
+    plan = plan!()
+
+    Code.ensure_loaded?(@calibrate) ||
+      Mix.raise("mix sdr.calibration.console calibrate refuses: not a test-seam build")
+
+    case apply(@calibrate, :command, [argv]) do
+      {:run, profile_id, opts} ->
+        CalibrationConsole.apply!(plan, serve: false)
+        CalibrationConsole.ensure_storage!()
+        Mix.Task.run("app.start")
+        CalibrationConsole.verify_started!()
+        {:ok, _registry} = apply(@authority, :start_link, [[]])
+        report(apply(@calibrate, :run, [profile_id, opts]))
+
+      {:error, :usage} ->
+        Mix.raise(
+          "usage: mix sdr.calibration.console calibrate claude_cli_opus | claude_cli_sonnet"
+        )
+    end
+  end
+
   def run(_args) do
     Mix.raise(
-      "usage: mix sdr.calibration.console check | serve | bootstrap-admin ARGS " <>
+      "usage: mix sdr.calibration.console check | serve | bootstrap-admin ARGS | calibrate PROFILE " <>
         "(run it through bin/calibration-console)"
     )
+  end
+
+  defp report({:ok, summary}),
+    do: Mix.shell().info("calibrate: finished, outcome #{summary.outcome}; " <> details(summary))
+
+  defp report({:stop, reason, summary}),
+    do: Mix.raise("calibrate stopped: #{reason}; " <> details(summary))
+
+  defp details(summary) do
+    evidence =
+      case summary.evidence do
+        %{path: path, sha256: sha256} -> "evidence #{path} (sha256 #{sha256})"
+        nil -> "no evidence"
+      end
+
+    "record #{inspect(summary.record)}, invocation #{summary.invocation_id || "none"}, #{evidence}"
   end
 
   defp plan! do

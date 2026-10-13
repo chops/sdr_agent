@@ -1,8 +1,51 @@
 if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
   defmodule SdrAgent.CalibrationConsole.Calibrate do
     @moduledoc """
-    The calibration evidence document of one calibration call (R0-07 slice E,
-    d3c; packet 8.14.8, entity/action PASS at 623e7db).
+    The console's `calibrate <profile>` (R0-07 slice E, d3c; packet 8.14.1,
+    8.14.4, 8.14.8 and 8.14.9; entity/action PASS at 125102e, 623e7db and
+    babd986) and the evidence document of its one call.
+
+    ## The command
+
+    `run/2` performs one calibration call of `profile_id` and returns
+    `{:ok, summary}` or `{:stop, reason, summary}`, where `summary` is
+    `%{record: :none | :released | {:kept, state}, invocation_id:, outcome:,
+    evidence: %{path, sha256} | nil}` and `reason` an atom. Every decision
+    after the call reads the fresh committed row; the matrix (8.14.4) is
+    followed branch by branch:
+
+      1. the closed options (`:calibration_options_invalid`), the tenant
+         (`:console` is the singleton, read by the kernel actor; a test UUID
+         must exist), and the fixed `CalibrationConsole` v1 definition,
+         registered by that tenant's kernel actor and verified (tenant,
+         name, version, module, body and hash, active) — all before the
+         claim, which then follows (row 1);
+      2. preflight: the pinned CLI (`verify`), a trusted witness store,
+         G-R0, the owner's typed `CALIBRATE <profile>`, and the isolation
+         check (row 2 aborts and releases; row 3 keeps the claim);
+      3. the private server (unnamed, linked), the proof run (8.14.9
+         attributes) and the reservation under the calibration marker
+         (rows 4 and 5);
+      4. `launch_pending`, the sealed authority (row 7), the one call
+         through `ModelProvider.calibration_call/3`, then the launch receipt
+         read from this command's mailbox only after the call (rows 8–10);
+      5. admission open and quiescence observed (rows 11 and 12), the one
+         bounded observation (`ResultGate.await/3` with the candidate), the
+         document, `Evidence.publish/3`, `finish_calibration` (E1),
+         `finished` and the release (row 13).
+
+    A launch refused with a typed receipt is stopped through
+    `SDR.Model.stop_refused/3` before E1 (8.14.9). The command is the only
+    writer of the launch record. The authority is revoked and the private
+    server stopped on every path; neither ever masks the stop reported.
+    `hook:` (tests only) is called with `:before_issue` and `:before_call`
+    and its return value is ignored; a raising hook keeps the record.
+
+    `command/1` maps the subcommand's argv to `{:run, profile_id,
+    console_opts(profile_id)}`; `console_opts/1` holds the console's fixed
+    options (no hook, no server, isolation or record override).
+
+    ## The document
 
     `document/1` is pure. It takes the snapshots the command gathered outside
     any database lock and builds the `r0-calibration-evidence/1` document
@@ -47,9 +90,35 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     or an output that is not a JSON object canonical encoding accepts.
     """
 
+    require Ash.Query
+
+    alias SdrAgent.Actor
+    alias SdrAgent.Agents
+    alias SdrAgent.Agents.Admission.Gate
+    alias SdrAgent.Agents.Admission.Refused
+    alias SdrAgent.Agents.Checks.CalibrationAdmission
+    alias SdrAgent.Agents.Checks.CalibrationContext
+    alias SdrAgent.Agents.ModelInvocation
+    alias SdrAgent.Agents.ResultGate
+    alias SdrAgent.Agents.Witness
+    alias SdrAgent.Agents.Witness.Store
+    alias SdrAgent.Agents.WireWitnessLink
+    alias SdrAgent.AI.ModelProfiles
+    alias SdrAgent.AI.ModelProvider
+    alias SdrAgent.AI.ModelProvider.ClaudeCLI
+    alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
     alias SdrAgent.Audit.Canonical
+    alias SdrAgent.Audit.Kernel, as: AuditKernel
+    alias SdrAgent.Audit.Tenant
+    alias SdrAgent.CalibrationConsole.Authority
+    alias SdrAgent.CalibrationConsole.Evidence
+    alias SdrAgent.CalibrationConsole.Isolation
+    alias SdrAgent.CalibrationConsole.LaunchRecord
     alias SdrAgent.CalibrationConsole.Outcome
+    alias SdrAgent.CalibrationConsole.ProcessProbe
     alias SdrAgent.CalibrationConsole.Prompt
+    alias SdrAgent.Clock
+    alias SdrAgent.SDR
 
     @schema "r0-calibration-evidence/1"
     @sha256 ~r/\A[0-9a-f]{64}\z/
@@ -60,6 +129,735 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     @link_statuses [:inferred, :reconciled, :mismatch]
     @methods [:time_window, :propagated_id]
     @tuple_strings [:cli_version, :model_id, :projection_version]
+
+    @projection "claude-message-json/3+prompt-builder/1"
+    @required [:tenant, :root, :evidence_dir, :confirm, :probe, :server, :isolation, :record]
+    @definition %{
+      name: "CalibrationConsole",
+      version: 1,
+      module: "SdrAgent.CalibrationConsole.Calibrate",
+      definition: %{
+        "allowed_actions" => [],
+        "model_policy" => %{"provider" => "claude_cli", "max_model_calls_per_run" => 1}
+      }
+    }
+    @receipts [:calibration_launched, :calibration_launch_unverified]
+    @quiescence_ms 3_000
+    @poll_ms 50
+
+    ## The command
+
+    @doc "The subcommand's argv: `{:run, profile_id, console_opts(profile_id)}` or `{:error, :usage}`."
+    def command([name]) when is_binary(name) do
+      case Enum.find(ModelProfiles.real_ids(), &(Atom.to_string(&1) == name)) do
+        nil -> {:error, :usage}
+        profile_id -> {:run, profile_id, console_opts(profile_id)}
+      end
+    end
+
+    def command(_argv), do: {:error, :usage}
+
+    @doc "The console's fixed options for `profile_id` (no hook and no overrides)."
+    def console_opts(_profile_id) do
+      state = Path.join(System.user_home!(), ".local/state/sdr-agent/calibration")
+
+      [
+        tenant: :console,
+        root: Path.join(state, "launch"),
+        evidence_dir: Path.join(state, "evidence"),
+        confirm: &read_confirmation/1,
+        probe: ProcessProbe,
+        server: [],
+        isolation: [],
+        record: []
+      ]
+    end
+
+    defp read_confirmation(prompt) do
+      case IO.gets(prompt) do
+        line when is_binary(line) -> line
+        _eof_or_error -> ""
+      end
+    end
+
+    @doc "Performs one calibration call of `profile_id` (see the moduledoc)."
+    def run(profile_id, opts) do
+      with {:ok, options} <- options(profile_id, opts),
+           {:ok, tenant_id} <- tenant(options.tenant),
+           s = initial(profile_id, options, tenant_id),
+           {:ok, definition} <- definition(s),
+           {:ok, record} <- claim(s) do
+        s = %{s | definition: definition, record: record}
+
+        try do
+          preflight(s)
+        after
+          teardown()
+        end
+      end
+    end
+
+    ## Options, tenant and definition (before the claim)
+
+    defp options(profile_id, opts) do
+      with true <- ModelProfiles.real?(profile_id),
+           true <- Keyword.keyword?(opts),
+           keys = Keyword.keys(opts),
+           true <- keys == Enum.uniq(keys),
+           true <- Enum.all?(keys, &(&1 in [:hook | @required])),
+           true <- Enum.all?(@required, &Keyword.has_key?(opts, &1)),
+           options = Map.new(opts),
+           true <- valid_options?(options) do
+        {:ok, Map.put_new(options, :hook, nil)}
+      else
+        _invalid -> pre_claim_stop(:calibration_options_invalid)
+      end
+    end
+
+    defp valid_options?(o) do
+      Enum.all?([
+        o.tenant == :console or uuid?(o.tenant),
+        absolute?(o.root) and absolute?(o.evidence_dir),
+        is_function(o.confirm, 1),
+        module?(o.probe),
+        Enum.all?([o.server, o.isolation, o.record], &Keyword.keyword?/1),
+        not Map.has_key?(o, :hook) or is_function(o.hook, 2)
+      ])
+    end
+
+    defp module?(value), do: is_atom(value) and value not in [nil, true, false]
+
+    defp uuid?(value), do: is_binary(value) and match?({:ok, _}, Ecto.UUID.cast(value))
+    defp absolute?(path), do: is_binary(path) and Path.type(path) == :absolute
+
+    defp tenant(selector) do
+      query =
+        case selector do
+          :console -> Ash.Query.filter(Tenant, singleton == true)
+          id -> Ash.Query.filter(Tenant, id == ^id)
+        end
+
+      case query
+           |> Ash.Query.for_read(:read, %{}, actor: Actor.system(:kernel, nil))
+           |> Ash.read_one() do
+        {:ok, %Tenant{id: id}} -> {:ok, id}
+        _missing_or_unreadable -> pre_claim_stop(:calibration_tenant_unavailable)
+      end
+    end
+
+    defp initial(profile_id, options, tenant_id) do
+      %{
+        profile: profile_id,
+        options: options,
+        tenant_id: tenant_id,
+        agent: Actor.system(:agent_runtime, tenant_id),
+        record_opts: [probe: options.probe] ++ options.record,
+        definition: nil,
+        record: nil,
+        run: nil,
+        invocation: nil,
+        server: nil,
+        binding: nil,
+        outcome: nil,
+        evidence: nil
+      }
+    end
+
+    # The fixed definition, registered by the tenant's kernel actor and
+    # verified as returned (the replay compares the body hash only).
+    defp definition(s) do
+      case Agents.register_definition(@definition, actor: Actor.system(:kernel, s.tenant_id)) do
+        {:ok, definition} ->
+          if eligible?(definition, s.tenant_id),
+            do: {:ok, definition},
+            else: pre_claim_stop(:calibration_definition_conflict)
+
+        {:error, %Ash.Error.Invalid{}} ->
+          pre_claim_stop(:calibration_definition_conflict)
+
+        {:error, _unavailable} ->
+          pre_claim_stop(:calibration_definition_unavailable)
+      end
+    end
+
+    defp eligible?(definition, tenant_id) do
+      definition.tenant_id == tenant_id and definition.name == @definition.name and
+        definition.version == @definition.version and definition.module == @definition.module and
+        definition.definition == @definition.definition and
+        definition.definition_sha256 == Canonical.sha256(@definition.definition) and
+        definition.status == :active
+    end
+
+    defp claim(s) do
+      case LaunchRecord.claim(s.options.root, s.record_opts) do
+        {:ok, record} -> {:ok, record}
+        {:error, reason} -> pre_claim_stop(reason)
+      end
+    end
+
+    defp pre_claim_stop(reason), do: {:stop, reason, summary(:none)}
+
+    ## Preflight (rows 2 and 3)
+
+    defp preflight(s) do
+      with :ok <- pinned(s),
+           :ok <- store(),
+           {:ok, binding} <- grant(s),
+           :ok <- confirmed(s),
+           :ok <- isolation(s),
+           {:ok, server} <- server(s) do
+        create_run(%{s | binding: binding, server: server})
+      else
+        {:error, :calibration_isolation_cleanup_unconfirmed} ->
+          kept(:calibration_isolation_cleanup_unconfirmed, s)
+
+        {:error, reason} ->
+          abort(s, reason)
+      end
+    end
+
+    defp pinned(s) do
+      case PinnedExecutable.verify(executable(s)) do
+        :ok -> :ok
+        {:error, _reason} -> {:error, :pinned_cli_unavailable}
+      end
+    end
+
+    defp executable(s) do
+      Keyword.get_lazy(s.options.server, :executable, fn ->
+        case PinnedExecutable.identity() do
+          %{executable: path} -> path
+          nil -> nil
+        end
+      end)
+    end
+
+    defp store do
+      case Witness.store_root() do
+        root when is_binary(root) ->
+          if match?({:ok, _root}, Store.validate_root(root)),
+            do: :ok,
+            else: {:error, :witness_store_untrusted}
+
+        _unset ->
+          {:error, :witness_store_untrusted}
+      end
+    end
+
+    defp grant(s) do
+      case Agents.select_calibration_grant(s.tenant_id, s.profile, actor: s.agent) do
+        {:ok, binding} -> {:ok, binding}
+        {:error, _reason} -> {:error, :calibration_grant_unavailable}
+      end
+    end
+
+    defp confirmed(s) do
+      typed = "CALIBRATE #{s.profile}"
+
+      prompt =
+        "One real #{s.profile} calibration call is charged to G-R0. Type #{typed} to proceed: "
+
+      if String.trim(s.options.confirm.(prompt)) == typed,
+        do: :ok,
+        else: {:error, :calibration_not_confirmed}
+    end
+
+    defp isolation(s),
+      do: Isolation.preflight(Keyword.put(s.options.isolation, :probe, s.options.probe))
+
+    defp server(s) do
+      opts =
+        s.options.server
+        |> Keyword.put(:profile, s.profile)
+        |> Keyword.put(:executable, executable(s))
+
+      case ClaudeCLI.start_link(opts) do
+        {:ok, server} ->
+          Process.put({__MODULE__, :server}, server)
+          {:ok, server}
+
+        _failed ->
+          {:error, :calibration_server_unavailable}
+      end
+    end
+
+    ## The proof run and the reservation (rows 4 and 5)
+
+    defp create_run(s) do
+      attrs = %{
+        agent_definition_id: s.definition.id,
+        usage_origin: :proof,
+        trigger_signal_type: "calibration.console",
+        trigger_signal_id: s.record.instance_id,
+        correlation_id: Ash.UUIDv7.generate(),
+        phase: :research,
+        max_model_calls: 1,
+        max_tool_calls: 0
+      }
+
+      with {:ok, created} <- ok_or(Agents.create_run(attrs, actor: s.agent), :created),
+           {:ok, run} <- ok_or(Agents.start_run(created, actor: s.agent), {:started, created}) do
+        reserve(%{s | run: run})
+      else
+        {:error, :created} ->
+          abort(s, :calibration_run_unavailable)
+
+        {:error, {:started, created}} ->
+          stop_run_then_abort(%{s | run: created}, :calibration_run_unavailable)
+      end
+    end
+
+    defp reserve(s) do
+      marker =
+        CalibrationAdmission.context(s.profile, candidate(s.profile),
+          claim: s.record.instance_id,
+          binding: s.binding
+        )
+
+      case Agents.reserve_model_invocation(s.run, reservation(s),
+             actor: s.agent,
+             calibration: marker
+           ) do
+        {:ok, invocation} ->
+          pending(%{s | invocation: invocation})
+
+        {:error, %Refused{} = refused} ->
+          case stop_refused(s, refused) do
+            :ok -> abort(s, :calibration_reservation_refused)
+            :error -> kept(:calibration_run_stop_failed, s)
+          end
+
+        {:error, _other} ->
+          stop_run_then_abort(s, :calibration_reservation_failed)
+      end
+    end
+
+    defp reservation(s) do
+      prompt = Prompt.prompt_ref()
+      schema = Prompt.schema_ref()
+
+      %{
+        purpose: :qualification,
+        parameters: %{},
+        prompt_template_id: prompt.id,
+        prompt_template_version: prompt.version,
+        prompt_template_sha256: prompt.sha256,
+        output_schema_id: schema.id,
+        output_schema_version: schema.version,
+        output_schema_sha256: schema.sha256,
+        request: ModelProvider.request_body(base_request(s)),
+        idempotency_key: request_id(s)
+      }
+      |> Map.merge(ClaudeCLI.provenance(ModelProfiles.fetch_real(s.profile) |> elem(1)))
+    end
+
+    defp request_id(s), do: "calibration-#{s.record.instance_id}"
+
+    defp base_request(s),
+      do: %{
+        id: request_id(s),
+        operation: "calibration.complete",
+        prompt: Prompt.render(),
+        schema: Prompt.schema()
+      }
+
+    defp candidate(profile_id) do
+      {:ok, profile} = ModelProfiles.fetch_real(profile_id)
+
+      %{
+        provider: :claude_cli,
+        cli_version: profile.cli_version,
+        profile_id: profile.id,
+        model_id: profile.resolved_model,
+        projection_version: @projection,
+        method: :propagated_id
+      }
+    end
+
+    # The existing guarded run stop with the receipt, on the fresh run.
+    defp stop_refused(s, refused) do
+      ctx = %SDR.Context{
+        actor: s.agent,
+        tenant_id: s.tenant_id,
+        run_id: s.run.id,
+        correlation_id: s.run.correlation_id
+      }
+
+      with {:ok, run} <- Agents.get_run(s.run.id, actor: s.agent),
+           {:ok, _stopped} <- SDR.Model.stop_refused(ctx, run, refused) do
+        :ok
+      else
+        _failed -> :error
+      end
+    end
+
+    defp stop_run_then_abort(s, reason) do
+      with {:ok, run} <- Agents.get_run(s.run.id, actor: s.agent),
+           {:ok, _cancelled} <- Agents.cancel_run(run, actor: s.agent) do
+        abort(s, reason)
+      else
+        _failed -> kept(:calibration_run_stop_failed, s)
+      end
+    end
+
+    ## The launch (rows 6 to 10)
+
+    defp pending(s) do
+      case LaunchRecord.advance(
+             s.options.root,
+             s.record,
+             :launch_pending,
+             %{invocation_id: s.invocation.id},
+             s.record_opts
+           ) do
+        {:ok, record} -> hooked(%{s | record: record}, :before_issue, &issue/1)
+        {:error, reason} -> kept(reason, s)
+      end
+    end
+
+    defp issue(s) do
+      binding = %{
+        invocation_id: s.invocation.id,
+        run_id: s.run.id,
+        tenant_id: s.tenant_id,
+        profile_id: s.profile,
+        command_pid: self(),
+        server_pid: s.server,
+        prompt_sha256: hex(Prompt.prompt_ref().sha256),
+        schema_sha256: hex(Prompt.schema_ref().sha256),
+        instance: Authority.instance()
+      }
+
+      case Authority.issue(binding) do
+        {:ok, ref} ->
+          Process.put({__MODULE__, :authority}, ref)
+          hooked(s, :before_call, &call(&1, ref, binding.instance))
+
+        _refused ->
+          unlaunched(s, :calibration_authority_unavailable)
+      end
+    catch
+      :exit, _unavailable -> unlaunched(s, :calibration_authority_unavailable)
+    end
+
+    defp hooked(s, phase, next) do
+      case s.options.hook do
+        nil ->
+          next.(s)
+
+        hook ->
+          try do
+            hook.(phase, %{
+              invocation_id: s.invocation.id,
+              run_id: s.run.id,
+              tenant_id: s.tenant_id
+            })
+
+            :ok
+          catch
+            _kind, _reason -> :failed
+          end
+          |> case do
+            :ok -> next.(s)
+            :failed -> kept(:calibration_hook_failed, s)
+          end
+      end
+    end
+
+    defp call(s, ref, instance) do
+      observer = make_ref()
+
+      request =
+        s
+        |> base_request()
+        |> Map.merge(%{
+          actor: s.agent,
+          run: s.run,
+          calibration: %{
+            authority: ref,
+            run_id: s.run.id,
+            tenant_id: s.tenant_id,
+            instance: instance,
+            observer: {self(), observer}
+          }
+        })
+
+      result = ModelProvider.calibration_call(request, s.invocation.id, server: s.server)
+      revoke()
+      receipt = own_receipt(flush_receipts(), observer, s)
+
+      case Agents.get_model_invocation(s.invocation.id, actor: s.agent) do
+        {:ok, %ModelInvocation{sent_at: nil} = invocation} ->
+          unlaunched_after_call(%{s | invocation: invocation}, receipt, result)
+
+        {:ok, invocation} ->
+          launched(%{s | invocation: invocation}, receipt)
+
+        _unreadable ->
+          kept(:calibration_invocation_unreadable, s)
+      end
+    end
+
+    # Only this call's verified receipt of this invocation counts; any other
+    # receipt message (stale or foreign) is dropped.
+    defp own_receipt(receipts, observer, s) do
+      Enum.find_value(receipts, fn
+        {:calibration_launched, ^observer, %{invocation_id: id, server: server} = receipt}
+        when id == s.invocation.id and server == s.server ->
+          receipt
+
+        _other ->
+          nil
+      end)
+    end
+
+    defp flush_receipts do
+      receive do
+        {kind, ref, receipt} when kind in @receipts -> [{kind, ref, receipt} | flush_receipts()]
+      after
+        0 -> []
+      end
+    end
+
+    defp unlaunched_after_call(s, receipt, result) do
+      cond do
+        receipt != nil or s.record.state == "launched" ->
+          kept(:calibration_launch_conflict, s)
+
+        match?({:error, %Refused{}}, result) ->
+          {:error, refused} = result
+
+          case stop_refused(s, refused) do
+            :ok -> unlaunched(s, :calibration_launch_refused)
+            :error -> kept(:calibration_run_stop_failed, s)
+          end
+
+        true ->
+          unlaunched(s, failure_reason(result))
+      end
+    end
+
+    defp failure_reason({:error, reason}) when is_atom(reason), do: reason
+    defp failure_reason(_result), do: :calibration_launch_failed
+
+    defp launched(s, nil), do: kept(:calibration_launch_unverified, s)
+
+    defp launched(s, receipt) do
+      attrs = Map.take(receipt, [:root_pid, :root_identity, :process_group_id])
+
+      case LaunchRecord.advance(s.options.root, s.record, :launched, attrs, s.record_opts) do
+        {:ok, record} -> observe(%{s | record: record})
+        {:error, reason} -> kept(reason, s)
+      end
+    end
+
+    ## Unlaunched: recovery, evidence and latch (rows 7 and 8)
+
+    defp unlaunched(s, reason) do
+      with {:ok, invocation} <- recovered(s),
+           s = %{s | invocation: invocation},
+           {:ok, run} <-
+             ok_or(Agents.get_run(s.run.id, actor: s.agent), :calibration_run_unreadable),
+           {:ok, tuple} <- tuple(invocation),
+           {:ok, document} <-
+             document(%{
+               invocation: invocation,
+               run: run,
+               tuple: tuple,
+               gate: nil,
+               link: nil,
+               attestation: nil,
+               output: nil,
+               observed_at: Clock.utc_now()
+             }) do
+        s |> Map.put(:outcome, document.outcome) |> finalize(document, :aborted, reason)
+      else
+        {:error, failure} -> kept(failure, s)
+      end
+    end
+
+    defp recovered(%{invocation: %ModelInvocation{status: :reserved} = invocation} = s) do
+      case Agents.recover_calibration(invocation, :unlaunched, actor: s.agent) do
+        {:ok, %{invocation: recovered}} -> {:ok, recovered}
+        _failed -> {:error, :calibration_recovery_failed}
+      end
+    end
+
+    defp recovered(s), do: {:ok, s.invocation}
+
+    ## The normal path (rows 11 to 13)
+
+    defp observe(s) do
+      if ClaudeCLI.admission(s.server) == %{admission: :open} and quiescent?(s) do
+        gate = %{run_id: s.run.id, operation_id: nil}
+
+        case ResultGate.await(s.invocation, gate, methods: [candidate(s.profile)]) do
+          {kind, receipt} = observation when kind in [:ok, :timeout] ->
+            observed(s, observation, receipt)
+
+          {:error, _reason} ->
+            kept(:calibration_observation_failed, s)
+        end
+      else
+        kept(:calibration_not_quiescent, s)
+      end
+    end
+
+    defp quiescent?(s) do
+      until = System.monotonic_time(:millisecond) + @quiescence_ms
+      probe = [probe: s.options.probe]
+
+      Stream.repeatedly(fn -> LaunchRecord.quiescence(s.record, probe) == :quiescent end)
+      |> Enum.find(fn quiescent? ->
+        quiescent? or System.monotonic_time(:millisecond) > until or
+          (Process.sleep(@poll_ms) && false)
+      end)
+      |> Kernel.==(true)
+    end
+
+    defp observed(s, observation, receipt) do
+      observed_at = Clock.utc_now()
+
+      with {:ok, invocation} <- calibration_read(s),
+           {:ok, run} <-
+             ok_or(Agents.get_run(s.run.id, actor: s.agent), :calibration_run_unreadable),
+           {:ok, tuple} <- tuple(invocation),
+           {:ok, link} <- own_link_read(receipt, invocation),
+           {:ok, document} <-
+             document(%{
+               invocation: invocation,
+               run: run,
+               tuple: tuple,
+               gate: observation,
+               link: link,
+               attestation: ClaudeCLI.attestation(s.server),
+               output: invocation.parsed_output,
+               observed_at: observed_at
+             }) do
+        s
+        |> Map.merge(%{invocation: invocation, outcome: document.outcome})
+        |> finalize(document, :finished, nil)
+      else
+        {:error, failure} -> kept(failure, s)
+      end
+    end
+
+    # The bound invocation, parsed output included, through the audited
+    # calibration read.
+    defp calibration_read(s) do
+      ModelInvocation
+      |> Ash.Query.for_read(:read, %{},
+        actor: s.agent,
+        context: CalibrationContext.context(s.profile, s.invocation.id)
+      )
+      |> Ash.Query.filter(id == ^s.invocation.id and tenant_id == ^s.tenant_id)
+      |> Ash.read_one()
+      |> case do
+        {:ok, %ModelInvocation{} = invocation} -> {:ok, invocation}
+        _failed -> {:error, :calibration_invocation_unreadable}
+      end
+    end
+
+    defp own_link_read(%{link_id: nil}, _invocation), do: {:ok, nil}
+
+    defp own_link_read(%{link_id: id}, invocation) when is_binary(id) do
+      WireWitnessLink
+      |> Ash.Query.for_read(:read, %{}, AuditKernel.opts(invocation.tenant_id))
+      |> Ash.Query.filter(id == ^id and model_invocation_id == ^invocation.id)
+      |> Ash.read_one()
+      |> case do
+        {:ok, %WireWitnessLink{} = link} -> {:ok, link}
+        _failed -> {:error, :calibration_link_unreadable}
+      end
+    end
+
+    defp own_link_read(_receipt, _invocation), do: {:error, :evidence_input_invalid}
+
+    defp tuple(invocation) do
+      case Gate.recorded_tuple(invocation) do
+        {:ok, %{} = tuple} -> {:ok, tuple}
+        _missing -> {:error, :calibration_tuple_unrecorded}
+      end
+    end
+
+    # Evidence (E2), the latch (E1), the final record state and the release.
+    defp finalize(s, document, final, reason) do
+      with {:ok, evidence} <- Evidence.publish(s.options.evidence_dir, document, actor: s.agent),
+           s = %{s | evidence: Map.take(evidence, [:path, :sha256])},
+           {:ok, _latched} <-
+             ok_or(
+               Agents.finish_calibration(s.invocation, %{sha256: evidence.sha256},
+                 actor: s.agent
+               ),
+               :calibration_finish_failed
+             ),
+           {:ok, record} <-
+             LaunchRecord.advance(s.options.root, s.record, final, %{}, s.record_opts),
+           s = %{s | record: record},
+           :ok <- LaunchRecord.release(s.options.root, record, s.record_opts) do
+        result = summary(:released, s)
+        if reason, do: {:stop, reason, result}, else: {:ok, result}
+      else
+        {:error, failure} -> kept(failure, s)
+      end
+    end
+
+    ## Stops, teardown and summaries
+
+    # `aborted` then release; a failure keeps the record where it is and
+    # still reports the original stop.
+    defp abort(s, reason) do
+      with {:ok, aborted} <-
+             LaunchRecord.advance(s.options.root, s.record, :aborted, %{}, s.record_opts),
+           :ok <- LaunchRecord.release(s.options.root, aborted, s.record_opts) do
+        {:stop, reason, summary(:released, s)}
+      else
+        _failed -> kept(reason, s)
+      end
+    end
+
+    defp kept(reason, s), do: {:stop, reason, summary({:kept, current_state(s)}, s)}
+
+    defp current_state(s) do
+      case LaunchRecord.read(s.options.root, s.record_opts) do
+        {:ok, %{state: state}} -> state
+        _missing -> s.record.state
+      end
+    end
+
+    defp revoke do
+      case Process.delete({__MODULE__, :authority}) do
+        nil -> :ok
+        ref -> Authority.revoke(ref)
+      end
+    catch
+      :exit, _unavailable -> :ok
+    end
+
+    defp teardown do
+      revoke()
+
+      case Process.delete({__MODULE__, :server}) do
+        nil -> :ok
+        server -> GenServer.stop(server, :normal, 5_000)
+      end
+
+      flush_receipts()
+      :ok
+    catch
+      :exit, _gone -> :ok
+    end
+
+    defp summary(record, s \\ %{invocation: nil, outcome: nil, evidence: nil}),
+      do: %{
+        record: record,
+        invocation_id: s.invocation && s.invocation.id,
+        outcome: s.outcome,
+        evidence: s.evidence
+      }
+
+    defp ok_or({:ok, value}, _tag), do: {:ok, value}
+    defp ok_or(_failed, tag), do: {:error, tag}
 
     @doc "The evidence document of the gathered snapshots (see the moduledoc)."
     def document(
