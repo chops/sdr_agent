@@ -5,8 +5,11 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
   generation-2 row the complete non-room predicate is re-checked against the
   current terms (profile, grant status and window, grant profiles,
   allocation grant, profile restriction, bucket and availability); a failed
-  check moves it reserved → failed (never sent) and opens a `provider_error`
-  Failure in the same committed transaction. Room is grandfathered: the
+  check moves it reserved → failed (never sent) and, in the same committed
+  transaction, opens one `provider_error` Failure of the run and appends
+  `model.launch.refused`; the caller gets the typed receipt `%Refused{stage:
+  :launch}` (R0-07 slice B, row B1: the Failure's subject is the run, so the
+  run stop links it instead of opening a second one). Room is grandfathered: the
   attempt was charged at reservation. Identity and state refusals (missing,
   foreign, replayed, terminal, not ClaudeCLI) change nothing.
   """
@@ -15,6 +18,7 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
   require Ash.Query
 
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Admission.Refused
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit
@@ -24,9 +28,12 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
   @now ~U[2026-10-20 12:00:00.000000Z]
   @starts ~U[2026-10-12 00:00:00.000000Z]
   @expires ~U[2026-11-06 00:00:00.000000Z]
-  @invocation_resource "SdrAgent.Agents.ModelInvocation"
+  @run_resource "SdrAgent.Agents.AgentRun"
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     Clock.freeze(@now)
     on_exit(&Clock.unfreeze/0)
     tenant = bootstrap!()
@@ -66,7 +73,7 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
 
   defp launch_failures(ctx) do
     Failure
-    |> Ash.Query.filter(class == :provider_error and subject_resource == ^@invocation_resource)
+    |> Ash.Query.filter(class == :provider_error and subject_resource == ^@run_resource)
     |> Ash.read!(Audit.Kernel.opts(ctx.tenant.id))
   end
 
@@ -82,7 +89,7 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
   end
 
   # The row was refused at launch: failed, never sent, with the reason, and
-  # one critical provider_error Failure about it.
+  # one critical provider_error Failure of its run (R0-07 slice B, row B1).
   defp assert_refused_at_launch(ctx, invocation, reason) do
     refused = stored(invocation.id)
     assert refused.status == :failed
@@ -91,7 +98,7 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
     assert refused.error["reason"] == Atom.to_string(reason)
 
     assert [failure] =
-             ctx |> launch_failures() |> Enum.filter(&(&1.subject_id == invocation.id))
+             ctx |> launch_failures() |> Enum.filter(&(&1.subject_id == invocation.agent_run_id))
 
     assert failure.severity == :critical
     assert failure.status == :open
@@ -128,7 +135,13 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
     end
 
     test "a Sonnet row launches under the Sonnet profile", ctx do
-      invocation = reserve!(ctx, "sonnet", %{profile_id: :claude_cli_sonnet})
+      invocation =
+        reserve!(
+          ctx,
+          "sonnet",
+          SdrAgent.AI.ModelProvider.ClaudeCLI.provenance(:claude_cli_sonnet)
+        )
+
       assert {:ok, %{status: :sent}} = admit(ctx, invocation.id, :claude_cli_sonnet)
     end
 
@@ -164,7 +177,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
       invocation = reserve!(ctx, "expired")
       Clock.freeze(@expires)
 
-      assert {:error, :grant_ineligible_at_launch} = admit(ctx, invocation.id)
+      assert {:error, %Refused{stage: :launch, reason: :grant_ineligible_at_launch}} =
+               admit(ctx, invocation.id)
+
       refused = assert_refused_at_launch(ctx, invocation, :grant_ineligible_at_launch)
       assert refused.error["check"] == "grant_expired"
     end
@@ -173,7 +188,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
       invocation = reserve!(ctx, "revoked")
       {:ok, _} = Agents.revoke_grant(ctx.grant, %{expected_revision: 1}, actor: ctx.admin)
 
-      assert {:error, :grant_ineligible_at_launch} = admit(ctx, invocation.id)
+      assert {:error, %Refused{stage: :launch, reason: :grant_ineligible_at_launch}} =
+               admit(ctx, invocation.id)
+
       refused = assert_refused_at_launch(ctx, invocation, :grant_ineligible_at_launch)
       assert refused.error["check"] == "grant_revoked"
     end
@@ -182,7 +199,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
       invocation = reserve!(ctx, "later-start")
       edit!(ctx, %{starts_at: DateTime.add(@now, 1, :day)})
 
-      assert {:error, :grant_ineligible_at_launch} = admit(ctx, invocation.id)
+      assert {:error, %Refused{stage: :launch, reason: :grant_ineligible_at_launch}} =
+               admit(ctx, invocation.id)
+
       refused = assert_refused_at_launch(ctx, invocation, :grant_ineligible_at_launch)
       assert refused.error["check"] == "grant_not_started"
     end
@@ -191,7 +210,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
       invocation = reserve!(ctx, "profile-removed")
       edit!(ctx, %{profile_ids: [:claude_cli_sonnet]})
 
-      assert {:error, :grant_ineligible_at_launch} = admit(ctx, invocation.id)
+      assert {:error, %Refused{stage: :launch, reason: :grant_ineligible_at_launch}} =
+               admit(ctx, invocation.id)
+
       refused = assert_refused_at_launch(ctx, invocation, :grant_ineligible_at_launch)
       assert refused.error["check"] == "profile_not_in_grant"
     end
@@ -208,7 +229,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
         ]
       )
 
-      assert {:error, :grant_ineligible_at_launch} = admit(ctx, invocation.id)
+      assert {:error, %Refused{stage: :launch, reason: :grant_ineligible_at_launch}} =
+               admit(ctx, invocation.id)
+
       refused = assert_refused_at_launch(ctx, invocation, :grant_ineligible_at_launch)
       assert refused.error["check"] == "allocation_profile_restricted"
     end
@@ -217,7 +240,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
       invocation = reserve!(ctx, "bucket-removed")
       edit!(ctx, %{allocations: [%{key: :b1, applies_to: [:b2], attempts: 10}]})
 
-      assert {:error, :grant_ineligible_at_launch} = admit(ctx, invocation.id)
+      assert {:error, %Refused{stage: :launch, reason: :grant_ineligible_at_launch}} =
+               admit(ctx, invocation.id)
+
       refused = assert_refused_at_launch(ctx, invocation, :grant_ineligible_at_launch)
       assert refused.error["check"] == "bucket_not_applicable"
     end
@@ -229,7 +254,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
         allocations: [%{key: :b1, applies_to: [:b1], attempts: 10, available_until: @now}]
       })
 
-      assert {:error, :grant_ineligible_at_launch} = admit(ctx, invocation.id)
+      assert {:error, %Refused{stage: :launch, reason: :grant_ineligible_at_launch}} =
+               admit(ctx, invocation.id)
+
       refused = assert_refused_at_launch(ctx, invocation, :grant_ineligible_at_launch)
       assert refused.error["check"] == "allocation_unavailable"
     end
@@ -237,7 +264,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
     test "when the server's effective profile is not the reserved one", ctx do
       invocation = reserve!(ctx, "mismatch")
 
-      assert {:error, :profile_mismatch_at_launch} = admit(ctx, invocation.id, :claude_cli_sonnet)
+      assert {:error, %Refused{stage: :launch, reason: :profile_mismatch_at_launch}} =
+               admit(ctx, invocation.id, :claude_cli_sonnet)
+
       refused = assert_refused_at_launch(ctx, invocation, :profile_mismatch_at_launch)
       assert refused.error["check"] == "profile_mismatch"
     end
@@ -251,7 +280,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
         [Ecto.UUID.dump!(invocation.id)]
       )
 
-      assert {:error, :legacy_invocation_without_grant} = admit(ctx, invocation.id)
+      assert {:error, %Refused{stage: :launch, reason: :legacy_invocation_without_grant}} =
+               admit(ctx, invocation.id)
+
       refused = assert_refused_at_launch(ctx, invocation, :legacy_invocation_without_grant)
       assert refused.ledger_generation == 1
     end
@@ -259,7 +290,9 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
     test "a refused row cannot be admitted afterwards", ctx do
       invocation = reserve!(ctx, "refused-once")
       {:ok, _} = Agents.revoke_grant(ctx.grant, %{expected_revision: 1}, actor: ctx.admin)
-      assert {:error, :grant_ineligible_at_launch} = admit(ctx, invocation.id)
+
+      assert {:error, %Refused{stage: :launch, reason: :grant_ineligible_at_launch}} =
+               admit(ctx, invocation.id)
 
       assert {:error, :invocation_not_reserved} = admit(ctx, invocation.id)
       assert length(launch_failures(ctx)) == 1
@@ -305,7 +338,7 @@ defmodule SdrAgent.Agents.LaunchAdmissionTest do
                }
 
         # The run's own stop is its cause; launch admission adds no Failure.
-        assert ctx |> launch_failures() |> Enum.filter(&(&1.subject_id == invocation.id)) == []
+        assert ctx |> launch_failures() |> Enum.filter(&(&1.subject_id == run.id)) == []
 
         {:ok, after_refusal} = Agents.get_run(run.id, actor: agent)
         assert after_refusal.status == status

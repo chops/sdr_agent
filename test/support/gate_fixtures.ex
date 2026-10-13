@@ -53,20 +53,25 @@ defmodule SdrAgent.GateFixtures do
         :output_schema_sha256
       ])
 
+    # R0-07 slice B: reservation and launch are admitted only for the call
+    # itself (`SdrAgent.AdmissionFixtures.admitting/1`); the test's own
+    # allowlist governs the gate's reconciliation afterwards.
     {:ok, result} =
-      ModelProvider.complete(
-        %{
-          id: id,
-          run: run,
-          actor: agent,
-          operation: "model.complete",
-          prompt: "Qualify the fixture lead #{variant} (#{id})",
-          schema: @schema,
-          audit: audit
-        },
-        provider: ClaudeCLI,
-        provider_options: [server: server]
-      )
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        ModelProvider.complete(
+          %{
+            id: id,
+            run: run,
+            actor: agent,
+            operation: "model.complete",
+            prompt: "Qualify the fixture lead #{variant} (#{id})",
+            schema: @schema,
+            audit: audit
+          },
+          provider: ClaudeCLI,
+          provider_options: [server: server]
+        )
+      end)
 
     GenServer.stop(server)
     result.invocation

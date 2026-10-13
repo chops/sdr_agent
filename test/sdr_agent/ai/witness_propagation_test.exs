@@ -23,6 +23,9 @@ defmodule SdrAgent.AI.WitnessPropagationTest do
   @unsampled ~r/\A00-([0-9a-f]{32})-([0-9a-f]{16})-00\z/
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     tenant = bootstrap!()
     # C9: real-model (ClaudeCLI) reservations are charged to a grant.
     AgentsFixtures.grant!(tenant)

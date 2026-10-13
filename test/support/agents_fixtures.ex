@@ -141,8 +141,33 @@ defmodule SdrAgent.AgentsFixtures do
   tenant needs an eligible grant (`grant!/2`).
   """
   def claude_completed!(run, agent, key, completion \\ completion()) do
+    # R0-07 slice B: the reservation is admitted only for its own duration
+    # (`SdrAgent.AdmissionFixtures.admitting/1`), so the test's allowlist
+    # governs every later reconciliation.
     {:ok, reserved} =
-      SdrAgent.Agents.reserve_model_invocation(run, claude_attrs(key), actor: agent)
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        SdrAgent.Agents.reserve_model_invocation(run, claude_attrs(key), actor: agent)
+      end)
+
+    {:ok, sent} = SdrAgent.Agents.mark_model_invocation_sent(reserved, actor: agent)
+    {:ok, done} = SdrAgent.Agents.complete_model_invocation(sent, completion, actor: agent)
+    done
+  end
+
+  @doc """
+  Like `claude_completed!/4`, for a `:proof` run: the calibration call is
+  reserved with the test-seam calibration admission authority for the
+  Opus profile (`SdrAgent.AdmissionFixtures.calibration/0`; R0-07 slice B,
+  row B4), which a `:proof` run needs.
+  """
+  def proof_completed!(run, agent, key, completion \\ completion()) do
+    {:ok, reserved} =
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        SdrAgent.Agents.reserve_model_invocation(run, claude_attrs(key),
+          actor: agent,
+          calibration: SdrAgent.AdmissionFixtures.calibration()
+        )
+      end)
 
     {:ok, sent} = SdrAgent.Agents.mark_model_invocation_sent(reserved, actor: agent)
     {:ok, done} = SdrAgent.Agents.complete_model_invocation(sent, completion, actor: agent)

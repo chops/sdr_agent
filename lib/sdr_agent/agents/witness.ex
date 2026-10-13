@@ -183,6 +183,32 @@ defmodule SdrAgent.Agents.Witness do
     do:
       Enum.any?(reconciled_methods(), &entry_matches?(&1, invocation, projection_version, method))
 
+  @doc """
+  The pre-call admission predicate (R0-07 slice B, row B2): true when
+  `entries` (default: the shipped allowlist, `reconciled_methods/0`; never
+  a per-call override) hold an exact six-key entry for the generation-2
+  runtime identity `identity` (`provider`, `provider_version`,
+  `profile_id`, `model_id`, `ledger_generation`), with the propagated
+  method and a projection id of `Projection.current_versions/0`, compared
+  literally. It establishes an eligible promoted runtime identity, never
+  that the call's evaluated projection is proven: the result gate enforces
+  the exact projection and method actually evaluated. A nil-profile
+  (generation-1) entry never promotes a generation-2 identity.
+  """
+  def promoted?(identity, entries \\ reconciled_methods())
+
+  def promoted?(%{ledger_generation: 2, profile_id: profile_id} = identity, entries)
+      when is_list(entries) and not is_nil(profile_id) do
+    current = Projection.current_versions()
+
+    Enum.any?(entries, fn entry ->
+      exact_entry?(entry) and entry.method == @method and entry.projection_version in current and
+        entry_matches?(entry, identity, entry.projection_version, @method)
+    end)
+  end
+
+  def promoted?(_identity, _entries), do: false
+
   # A match is labelled reconciled only for an exact allowlisted entry — or,
   # under the test-only override, a bare method atom.
   defp enabled?(entries, invocation, projection) do

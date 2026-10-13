@@ -11,6 +11,9 @@ defmodule SdrAgentWeb.ResultGateViewsTest do
   alias SdrAgent.AgentsFixtures
 
   setup ctx do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     AgentsFixtures.grant!(ctx.tenant, %{}, user!(ctx, :admin))
     # A run of a seeded lead, so the run view resolves its contact.
     agent = ctx.agent

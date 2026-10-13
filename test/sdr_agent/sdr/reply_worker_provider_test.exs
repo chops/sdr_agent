@@ -32,6 +32,9 @@ defmodule SdrAgent.SDR.ReplyWorkerProviderTest do
 
   # C9: real-model (ClaudeCLI) reservations are charged to a grant.
   setup ctx do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     SdrAgent.AgentsFixtures.grant!(ctx.tenant, %{}, ctx.admin)
     :ok
   end
@@ -55,14 +58,26 @@ defmodule SdrAgent.SDR.ReplyWorkerProviderTest do
     %{reply_run: run}
   end
 
-  defp start_named!(args) do
+  defp start_named!(args, opts \\ []) do
     start_supervised!(
       {ClaudeCLI,
-       name: ClaudeCLI.server(),
-       command: System.find_executable("elixir"),
-       test_launcher: true,
-       command_args: [@fake | List.wrap(args)]}
+       [
+         name: ClaudeCLI.server(),
+         command: System.find_executable("elixir"),
+         test_launcher: true,
+         command_args: [@fake | List.wrap(args)]
+       ] ++ opts}
     )
+  end
+
+  # R0-07 slice B: an unconfigured store refuses before spend; the store
+  # disappears here only after launch admission committed the call as sent.
+  defp store_lost_after_launch do
+    fn id, profile, opts ->
+      admitted = Agents.admit_launch(id, profile, opts)
+      SdrAgent.AdmissionFixtures.put_root!(nil)
+      admitted
+    end
   end
 
   defp classify!, do: Oban.drain_queue(queue: :agent, with_safety: false)
@@ -124,8 +139,8 @@ defmodule SdrAgent.SDR.ReplyWorkerProviderTest do
 
   # R0-07 slice C (REQ-07-4, row G1): an unconfigured store after spend
   # withholds the output; the run stops on its event-bound gate cause.
-  test "an unconfigured witness store withholds the reply; the run stops", ctx do
-    start_named!(["sdr"])
+  test "a store unconfigured after spend withholds the reply; the run stops", ctx do
+    start_named!(["sdr"], launch_admission: store_lost_after_launch())
     assert %{success: 1} = classify!()
 
     run = run!(ctx, ctx.reply_run)

@@ -20,6 +20,9 @@ defmodule SdrAgent.Audit.ReconciliationContentTest do
   alias SdrAgent.Audit.Payload
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     tenant = bootstrap!()
     # C9: real-model (ClaudeCLI) reservations are charged to a grant.
     AgentsFixtures.grant!(tenant)
