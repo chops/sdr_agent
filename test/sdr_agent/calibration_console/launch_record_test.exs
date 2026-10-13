@@ -693,7 +693,6 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     end
 
     test "a malformed own pid never claims", ctx do
-      {:ok, _} = LaunchRecord.attest_stopped(ctx.root, ctx.pending, "STOPPED")
       other = Path.join(ctx.root, "other")
       File.mkdir!(other)
       File.chmod!(other, 0o700)

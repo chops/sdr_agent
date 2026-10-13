@@ -282,7 +282,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordV3Test do
     test "a claimed record (no invocation) has nothing to attest", ctx do
       :ok = LaunchRecord.end_recovery(ctx.root, ctx.recovery)
       File.rm_rf!(Path.join(ctx.root, "run.lock"))
-      V3Probe.put(&put_in(&1.identities[4242], "Mon 10:00 owner"))
+      V3Probe.put(&%{&1 | self: 4242, identities: %{4242 => "Mon 10:00 owner"}})
       {:ok, _claimed} = LaunchRecord.claim(ctx.root, ctx.opts)
       owner_gone()
       {:ok, recovery} = LaunchRecord.recover(ctx.root, ctx.opts)
