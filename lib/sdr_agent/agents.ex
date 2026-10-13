@@ -58,7 +58,9 @@ defmodule SdrAgent.Agents do
   alias Ash.Error.Changes.InvalidAttribute
   alias Ash.Error.Query.NotFound
   alias SdrAgent.Agents.Admission
+  alias SdrAgent.Agents.Admission.Gate
   alias SdrAgent.Agents.Checks.AdmissionContext
+  alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.Decision
@@ -285,8 +287,10 @@ defmodule SdrAgent.Agents do
   def reserve_model_invocation(run, attrs, opts) do
     actor = Keyword.get(opts, :actor)
 
+    calibration = CalibrationAdmission.scope(Keyword.get(opts, :calibration))
+
     ModelInvocation
-    |> guard(:reserve, run.id, actor, fn -> reserve_normalized(run, attrs, actor) end)
+    |> guard(:reserve, run.id, actor, fn -> reserve_normalized(run, attrs, actor, calibration) end)
     |> case do
       # The reservation rolled back; the refusal is committed on its own.
       {:error, %Admission.Refusal{} = refusal} ->
@@ -297,12 +301,23 @@ defmodule SdrAgent.Agents do
     end
   end
 
-  defp reserve_normalized(run, attrs, actor) do
+  # R0-07 slice B (row B5'): the store observation — the admission gate's
+  # only filesystem I/O — runs after input normalisation and before the
+  # reservation takes any lock.
+  defp reserve_normalized(run, attrs, actor, calibration) do
     with {:ok, attrs} <- normalize_reserve(attrs) do
       {request, attrs} = Map.pop(attrs, :request)
-      transact(fn -> do_reserve_model_invocation(run, attrs, request, actor) end)
+      gate = gate_inputs(attrs, calibration)
+      transact(fn -> do_reserve_model_invocation(run, attrs, request, actor, gate) end)
     end
   end
+
+  defp gate_inputs(%{provider: :claude_cli} = attrs, calibration) do
+    if ModelProfiles.real?(Map.get(attrs, :profile_id)),
+      do: %{store: Gate.observe_store(), calibration: calibration}
+  end
+
+  defp gate_inputs(_attrs, _calibration), do: nil
 
   # A ClaudeCLI call with a reviewed real profile goes through admission
   # (lock order: run → candidate grants → their allocations → chain head; see
@@ -310,28 +325,28 @@ defmodule SdrAgent.Agents do
   # through `AdmissionContext`. Any other call keeps the S6 order (run →
   # chain head); the Fake records its own profile, and any other profile is
   # left to the :reserve validation to refuse.
-  defp do_reserve_model_invocation(run, %{provider: :claude_cli} = attrs, request, actor) do
+  defp do_reserve_model_invocation(run, %{provider: :claude_cli} = attrs, request, actor, gate) do
     if ModelProfiles.real?(Map.get(attrs, :profile_id)),
-      do: reserve_admitted(run, attrs, request, actor),
+      do: reserve_admitted(run, attrs, request, actor, gate),
       else: reserve(run, attrs, request, actor, %{})
   end
 
-  defp do_reserve_model_invocation(run, %{provider: :fake} = attrs, request, actor),
+  defp do_reserve_model_invocation(run, %{provider: :fake} = attrs, request, actor, _gate),
     do: reserve(run, Map.put(attrs, :profile_id, :fake), request, actor, %{})
 
-  defp do_reserve_model_invocation(run, attrs, request, actor),
+  defp do_reserve_model_invocation(run, attrs, request, actor, _gate),
     do: reserve(run, attrs, request, actor, %{})
 
   # The admission instant is read only once every lock is held, and is used
   # for the daily limit, eligibility, the grant's UTC day and `reserved_at`.
-  defp reserve_admitted(run, attrs, request, actor) do
+  defp reserve_admitted(run, attrs, request, actor, gate) do
     with {:ok, locked} <- lock_run(run.id, actor),
          {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id),
          {:ok, _head} <- Kernel.lock_head(locked.tenant_id),
          now = SdrAgent.Clock.utc_now(),
          {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
          :ok <- check_daily_limit(run.tenant_id, now),
-         {:ok, charge} <- Admission.admit(locked, attrs, now, candidates) do
+         {:ok, charge} <- Admission.admit(locked, attrs, now, candidates, gate) do
       context = AdmissionContext.context(Map.put(charge, :reserved_at, now))
       create_reserved(run, attrs, request, actor, context)
     end
@@ -472,9 +487,12 @@ defmodule SdrAgent.Agents do
   contracts"). The only sent boundary of a ClaudeCLI call.
 
   One guarded transaction, as `agent_runtime` of a tenant (any other actor
-  is `Ash.Error.Forbidden`, audited as `authz.denied`). Lock order: the run
-  row, then the invocation row (`FOR UPDATE`, both re-read in the actor's
-  tenant), then the charged grant and allocation `FOR SHARE`
+  is `Ash.Error.Forbidden`, audited as `authz.denied`). Before any lock the
+  witness store root is observed (`Admission.Gate.observe_store/0`, the
+  only filesystem I/O; R0-07 slice B, row B5'). Lock order: the run row
+  (`FOR UPDATE`), the run's Operation (`FOR SHARE`, if any; R0-07 slice B,
+  row B1), the invocation row (`FOR UPDATE`; run and invocation re-read in
+  the actor's tenant), then the charged grant and allocation `FOR SHARE`
   (`Admission.lock_charge/1`, the reservation's order), then the chain head
   explicitly; only then is `now` read and are the terms read. Grant
   editors lock grant → allocations → head and never a run or invocation, so
@@ -486,16 +504,22 @@ defmodule SdrAgent.Agents do
       tenant's id), `:invocation_not_claude_cli`, `:invocation_not_reserved`
       (a replayed sent, in-flight or terminal row). Each is then recorded
       as a `model.launch.refused` event of the actor's tenant only.
-    * **Eligibility refusals** of an owned, reserved row
-      (`Admission.launch_check/4`: the locked run still `:running`,
-      generation, profile, grant status and window, grant profiles,
-      allocation grant, profile restriction, usage bucket, availability —
-      never room, which was charged at reservation) move it reserved →
-      failed (never sent) and open a critical `provider_error` Failure about
-      the invocation, committed together; `{:error,
-      :run_not_running_at_launch | :legacy_invocation_without_grant |
-      :profile_mismatch_at_launch | :grant_ineligible_at_launch}`. A stopped
-      run's refusal opens no Failure: the stop is already its cause.
+    * **A stopped run** (`:run_not_running_at_launch`): the row is failed
+      and never sent, and no Failure is opened (the stop is already its
+      cause): `{:error, :run_not_running_at_launch}`.
+    * **Every other refusal** of an owned, reserved row
+      (`Admission.launch_check/5`: generation, profile, then the R0-07
+      admission gate — calibration authority and predecessors, gate mode,
+      store root, promoted tuple — then grant status and window, grant
+      profiles, allocation grant, profile restriction, usage bucket,
+      availability; never room, which was charged at reservation) moves it
+      reserved → failed (never sent), opens one critical `provider_error`
+      Failure whose subject is the **run** (its `operation_id` the run's
+      Operation) and appends `model.launch.refused` (the reason, check and
+      Failure, with the invocation's `idempotency_key`), all in this
+      transaction. It returns the typed receipt `{:error, %Admission.Refused{
+      stage: :launch}}`, from which the run stops `:model_not_admitted`
+      linking exactly that Failure (R0-07 slice B, row B1).
     * **Success** marks it sent: `{:ok, invocation}`.
   """
   def admit_launch(invocation_id, effective_profile, opts) do
@@ -513,9 +537,14 @@ defmodule SdrAgent.Agents do
 
   defp launch(id, profile, %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor)
        when is_binary(tenant) do
-    case audit_transact(fn -> launch_locked(id, profile, actor) end) do
+    store = Gate.observe_store()
+
+    case audit_transact(fn -> launch_locked(id, profile, actor, store) end) do
       {:ok, {:sent, sent}} ->
         {:ok, sent}
+
+      {:ok, {:refused, %Admission.Refused{} = refused}} ->
+        {:error, refused}
 
       {:ok, {:refused, reason}} ->
         {:error, reason}
@@ -531,26 +560,27 @@ defmodule SdrAgent.Agents do
 
   defp launch(_id, _profile, _actor), do: {:error, Ash.Error.Forbidden.exception([])}
 
-  defp launch_locked(id, profile, actor) do
+  defp launch_locked(id, profile, actor, store) do
     with {:ok, target} <- launch_target(id, actor),
          {:ok, run} <- lock_tenant_run(target.agent_run_id, actor),
+         :ok <- Admission.lock_operation_share(run.operation_id),
          {:ok, invocation} <- lock_invocation(target.id, actor),
          :ok <- launch_state(invocation),
          :ok <- Admission.lock_charge(invocation),
          {:ok, _head} <- Kernel.lock_head(actor.tenant_id) do
       # The launch instant is read only once every lock is held.
       run
-      |> Admission.launch_check(invocation, profile, SdrAgent.Clock.utc_now())
-      |> admit_or_refuse(invocation, profile, actor)
+      |> Admission.launch_check(invocation, profile, SdrAgent.Clock.utc_now(), store)
+      |> admit_or_refuse(run, invocation, profile, actor)
     end
   end
 
-  defp admit_or_refuse(:ok, invocation, _profile, actor) do
+  defp admit_or_refuse(:ok, _run, invocation, _profile, actor) do
     with {:ok, sent} <- do_update(invocation, :mark_sent, %{}, actor), do: {:ok, {:sent, sent}}
   end
 
-  defp admit_or_refuse({:error, reason, check}, invocation, profile, actor),
-    do: refuse_launch(invocation, reason, check, profile, actor)
+  defp admit_or_refuse({:error, reason, check}, run, invocation, profile, actor),
+    do: refuse_launch(run, invocation, reason, check, profile, actor)
 
   # An unlocked read only to find the run to lock first; the row is re-read
   # under its own lock.
@@ -598,7 +628,7 @@ defmodule SdrAgent.Agents do
 
   defp launch_refused(reason, own_id \\ nil), do: {:error, {:launch_refused, reason, own_id}}
 
-  defp refuse_launch(invocation, reason, check, profile, actor) do
+  defp refuse_launch(run, invocation, reason, check, profile, actor) do
     error = %{
       "kind" => "launch_refused",
       "reason" => Atom.to_string(reason),
@@ -606,8 +636,9 @@ defmodule SdrAgent.Agents do
     }
 
     failure = %{
-      subject_resource: inspect(ModelInvocation),
-      subject_id: invocation.id,
+      operation_id: run.operation_id,
+      subject_resource: inspect(AgentRun),
+      subject_id: run.id,
       class: :provider_error,
       severity: :critical,
       retryable: false,
@@ -626,19 +657,55 @@ defmodule SdrAgent.Agents do
         })
     }
 
-    with {:ok, _failed} <- do_update(invocation, :fail, %{error: error}, actor),
-         {:ok, _failure} <- launch_attention(reason, failure, actor) do
-      {:ok, {:refused, reason}}
+    with {:ok, _failed} <- do_update(invocation, :fail, %{error: error}, actor) do
+      launch_receipt(reason, check, failure, {run, invocation, profile}, actor)
     end
   end
 
   # A run stopped while its call was queued already has its own cause (its
   # stop's Failure, or an operator's cancel or a success, which need none):
   # the refused call is failed, but no second attention item is opened.
-  defp launch_attention(:run_not_running_at_launch, _failure, _actor), do: {:ok, :none}
+  defp launch_receipt(:run_not_running_at_launch = reason, _check, _failure, _call, _actor),
+    do: {:ok, {:refused, reason}}
 
-  defp launch_attention(_reason, failure, actor),
-    do: SdrAgent.Operations.open_failure(failure, actor: actor)
+  # R0-07 slice B (row B1): the one Failure of the run and the launch
+  # event naming it, under the head already held (their FKs find the run,
+  # its Operation and the invocation locked), committed with the failed row.
+  defp launch_receipt(reason, check, failure, {run, invocation, profile}, actor) do
+    event = %{
+      event_type: "model.launch.refused",
+      category: :model,
+      subject_resource: inspect(ModelInvocation),
+      subject_id: invocation.id,
+      action: "admit_launch",
+      agent_run_id: run.id,
+      model_invocation_id: invocation.id,
+      correlation_id: run.correlation_id,
+      idempotency_key: invocation.idempotency_key,
+      payload: %{
+        "reason" => Atom.to_string(reason),
+        "check" => Atom.to_string(check),
+        "effective_profile" => profile_name(profile),
+        "reserved_profile" => profile_name(invocation.profile_id)
+      }
+    }
+
+    with {:ok, failure} <- SdrAgent.Operations.open_failure(failure, actor: actor),
+         event = put_in(event, [:payload, "failure_id"], failure.id),
+         {:ok, event} <- SdrAgent.Audit.append(event, actor: actor) do
+      {:ok,
+       {:refused,
+        %Admission.Refused{
+          reason: reason,
+          check: check,
+          failure_id: failure.id,
+          event_id: event.id,
+          agent_run_id: run.id,
+          request_id: invocation.idempotency_key,
+          stage: :launch
+        }}}
+    end
+  end
 
   # Metadata only, in the actor's own tenant; the refusal itself changed
   # nothing, so a tenant without an audit chain records nothing.

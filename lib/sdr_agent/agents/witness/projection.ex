@@ -341,6 +341,21 @@ defmodule SdrAgent.Agents.Witness.Projection do
   def version_v3, do: @version_v3
 
   @doc """
+  The supported projection ids of the current ClaudeCLI prompt builder
+  (R0-07 slice B, row B2): the literal registry ids `version/0`,
+  `version_v2/0` and `version_v3/0` whose builder is
+  `ClaudeCLI.prompt_builder/0`. Admission compares an allowlist entry's
+  `projection_version` with these ids exactly, never by substring.
+  """
+  def current_versions do
+    builder = "+" <> ClaudeCLI.prompt_builder()
+
+    for version <- [@version, @version_v2, @version_v3],
+        String.ends_with?(version, builder),
+        do: version
+  end
+
+  @doc """
   v2 comparison. Like `compare/4`, plus `proof.extras` — the typed
   WitnessEvidence context group (present on every evaluated v2 result).
   """

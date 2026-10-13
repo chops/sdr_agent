@@ -13,6 +13,9 @@ defmodule SdrAgent.Agents.GrantUsageTest do
   @now ~U[2026-10-20 12:00:00.000000Z]
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     Clock.freeze(@now)
     on_exit(&Clock.unfreeze/0)
     tenant = bootstrap!()

@@ -39,9 +39,10 @@ defmodule SdrAgent.SDR.AgentWorker do
   alias SdrAgent.SDR.Runner
   alias SdrAgent.SDR.Signals
 
-  # C9 stop reasons of a refused real-model reservation, and the R0-07
-  # result gate's stop reasons (see fail_operation/3).
-  @refused [:grant_exhausted, :grant_unavailable]
+  # C9 stop reasons of a refused real-model call (R0-07 slice B adds
+  # :model_not_admitted), and the R0-07 result gate's stop reasons (see
+  # fail_operation/3).
+  @refused [:grant_exhausted, :grant_unavailable, :model_not_admitted]
   @gate [:witness_mismatch, :witness_unreconciled]
   @providers %{
     "fake" => SdrAgent.AI.ModelProvider.Fake,
@@ -134,10 +135,12 @@ defmodule SdrAgent.SDR.AgentWorker do
   Failure (one queue entry per condition).
 
   C9 resolution race: a run stopped by a refused reservation
-  (`:grant_exhausted`, `:grant_unavailable`) links the refusal's Failure
+  (`:grant_exhausted`, `:grant_unavailable`; R0-07 slice B:
+  `:model_not_admitted`) links the refusal's Failure
   even if an admin resolved it before the stop. An Operation may link only a
   live Failure, so when that Failure is no longer live the Operation fails
-  with its own new `budget_exhausted` Failure (subject the Operation,
+  with its own new Failure (`budget_exhausted`, or `provider_error` for
+  `:model_not_admitted`; subject the Operation,
   naming the resolved refusal): the run keeps the refusal as its cause, the
   failed Operation keeps a live queue entry, and nothing is recorded as a
   crash. The Operation, then the Failure are locked before the choice (lock
@@ -214,6 +217,18 @@ defmodule SdrAgent.SDR.AgentWorker do
       message:
         "agent run #{run.status}: #{run.status_reason}; its result gate cause " <>
           "(Failure #{run.attention_failure_id}) was resolved before the run stopped"
+    }
+  end
+
+  # R0-07 slice B (row B1): an admission refusal's cause is a provider_error.
+  defp resolved_cause_failure(%{status_reason: :model_not_admitted} = run) do
+    %{
+      class: :provider_error,
+      severity: :critical,
+      retryable: false,
+      message:
+        "agent run #{run.status}: #{run.status_reason}; its model call admission " <>
+          "refusal (Failure #{run.attention_failure_id}) was resolved before the run stopped"
     }
   end
 

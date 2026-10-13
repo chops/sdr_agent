@@ -286,19 +286,21 @@ defmodule SdrAgent.Agents.ModelResultReleaseTest do
         Agents.complete_model_invocation(fake, AgentsFixtures.completion(), actor: ctx.agent)
 
       {:ok, sent} =
-        ctx.run
-        |> Agents.reserve_model_invocation(AgentsFixtures.claude_attrs("rel-sent"),
-          actor: ctx.agent
-        )
+        SdrAgent.AdmissionFixtures.admitting(fn ->
+          Agents.reserve_model_invocation(ctx.run, AgentsFixtures.claude_attrs("rel-sent"),
+            actor: ctx.agent
+          )
+        end)
         |> then(fn {:ok, reserved} ->
           Agents.mark_model_invocation_sent(reserved, actor: ctx.agent)
         end)
 
       {:ok, failed} =
-        ctx.run
-        |> Agents.reserve_model_invocation(AgentsFixtures.claude_attrs("rel-failed"),
-          actor: ctx.agent
-        )
+        SdrAgent.AdmissionFixtures.admitting(fn ->
+          Agents.reserve_model_invocation(ctx.run, AgentsFixtures.claude_attrs("rel-failed"),
+            actor: ctx.agent
+          )
+        end)
         |> then(fn {:ok, reserved} ->
           Agents.fail_model_invocation(reserved, %{error: %{"kind" => "x"}}, actor: ctx.agent)
         end)
@@ -512,7 +514,12 @@ defmodule SdrAgent.Agents.ModelResultReleaseTest do
         AgentsFixtures.running_run(ctx.tenant, usage_origin: :proof)
 
       {:ok, reserved} =
-        Agents.reserve_model_invocation(proof, AgentsFixtures.claude_attrs("cal-1"), actor: agent)
+        SdrAgent.AdmissionFixtures.admitting(fn ->
+          Agents.reserve_model_invocation(proof, AgentsFixtures.claude_attrs("cal-1"),
+            actor: agent,
+            calibration: SdrAgent.AdmissionFixtures.calibration()
+          )
+        end)
 
       {:ok, sent} = Agents.mark_model_invocation_sent(reserved, actor: agent)
 
