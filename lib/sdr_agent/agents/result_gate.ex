@@ -140,6 +140,34 @@ defmodule SdrAgent.Agents.ResultGate do
 
   defp expired?(deadline), do: System.monotonic_time(:millisecond) >= deadline
 
+  ## The gate (steps 2 and 3, with the G7 recovery)
+
+  # Refusals that a fresh recovery attempt cannot change (row G7): a gate
+  # that is not this invocation's, a nested call, and a known mismatch
+  # without a usable critical cause (row R7-2: the owner's attention).
+  @final [:invalid_gate, :in_transaction, :not_found, :mismatch_cause_unbound]
+
+  @doc """
+  The facade's gate step for a completed generation-2 ClaudeCLI
+  `invocation` of the run named by `gate`: the bounded wait (`await/3`),
+  then `finalize/4`; when finalization is refused, **one** recovery
+  attempt in a fresh transaction (`SdrAgent.Agents.ResultGate.Recovery`,
+  row G7). Returns `{:released, release, output}`, `{:withheld, release,
+  run}`, or `{:error, reason}` — no business output, the run left
+  recoverable by `SdrAgent.SDR.StaleRunSweeper`.
+  """
+  @spec gate(struct(), map(), keyword()) ::
+          {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
+  def gate(invocation, gate, opts \\ []) do
+    with {kind, _receipt} = outcome when kind in [:ok, :timeout] <- await(invocation, gate, opts) do
+      case finalize(invocation, gate, outcome, opts) do
+        {:error, reason} when reason in @final -> {:error, reason}
+        {:error, _refused} -> __MODULE__.Recovery.run(invocation, gate, opts)
+        result -> result
+      end
+    end
+  end
+
   ## Finalize (step 3)
 
   @unreadable_prefix "store_"
@@ -148,13 +176,17 @@ defmodule SdrAgent.Agents.ResultGate do
 
   @doc """
   Finalizes the gate of `invocation` under `gate` for the `outcome` of
-  `await/3` (`{:ok, receipt}` or `{:timeout, receipt}`). Returns
+  `await/3` (`{:ok, receipt}` or `{:timeout, receipt}`), or for run
+  recovery's own reconcile (`{:interrupted, receipt}`, row G5 R1: a
+  mismatch stays `:witness_mismatch`, anything else is `:gate_interrupted`,
+  never a release). Returns
   `{:released, release, output}`, `{:withheld, release, run}` or
   `{:error, reason}` (nothing written).
   """
   @spec finalize(struct(), map(), {:ok | :timeout, map()}, keyword()) ::
           {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
-  def finalize(invocation, gate, {kind, receipt}, _opts \\ []) when kind in [:ok, :timeout] do
+  def finalize(invocation, gate, {kind, receipt}, _opts \\ [])
+      when kind in [:ok, :timeout, :interrupted] do
     plan = plan(kind, receipt)
     actor = Actor.system(:agent_runtime, invocation.tenant_id)
 
@@ -169,6 +201,11 @@ defmodule SdrAgent.Agents.ResultGate do
 
   @doc false
   # The reason and typed classification of an outcome (rows G2, G5).
+  def plan(:interrupted, %{status: :mismatch}), do: plan(:ok, %{status: :mismatch})
+
+  def plan(:interrupted, _receipt),
+    do: %{release?: false, reason: :gate_interrupted, classification: :interrupted}
+
   def plan(:timeout, _receipt),
     do: %{release?: false, reason: :witness_timeout, classification: :capture_pending}
 
@@ -212,15 +249,17 @@ defmodule SdrAgent.Agents.ResultGate do
     end
   end
 
-  defp own_run(%AgentRun{id: id, operation_id: operation_id}, invocation, gate) do
+  @doc false
+  def own_run(%AgentRun{id: id, operation_id: operation_id}, invocation, gate) do
     if id == invocation.agent_run_id and operation_id == gate.operation_id,
       do: :ok,
       else: {:error, :invalid_gate}
   end
 
-  defp lock_operation(%AgentRun{operation_id: nil}, _tenant_id), do: :ok
+  @doc false
+  def lock_operation(%AgentRun{operation_id: nil}, _tenant_id), do: :ok
 
-  defp lock_operation(%AgentRun{operation_id: id}, tenant_id) do
+  def lock_operation(%AgentRun{operation_id: id}, tenant_id) do
     with {:ok, _operation} <- lock(Operation, id, tenant_id, "FOR SHARE"), do: :ok
   end
 
@@ -285,7 +324,8 @@ defmodule SdrAgent.Agents.ResultGate do
     end
   end
 
-  defp gate_capable?(failure, invocation, run) do
+  @doc false
+  def gate_capable?(failure, invocation, run) do
     failure.class == :reconciliation_required and failure.subject_resource == @subject and
       failure.subject_id == invocation.id and failure.operation_id == run.operation_id
   end
@@ -316,7 +356,10 @@ defmodule SdrAgent.Agents.ResultGate do
   defp cause_message(reason),
     do: "wire witness gate #{reason}: model invocation needs operator review"
 
-  defp under_head(%{release?: true}, invocation, _run, link, nil, actor) do
+  @doc false
+  # Under the head, every dependent row held: the release (and, withheld,
+  # the cause and the run stop) inside Prelocked.
+  def under_head(%{release?: true}, invocation, _run, link, nil, actor) do
     bindings = bindings(invocation, link, nil)
 
     Prelocked.run(bindings, fn prelocked ->
@@ -337,7 +380,7 @@ defmodule SdrAgent.Agents.ResultGate do
     end)
   end
 
-  defp under_head(plan, invocation, run, link, cause, actor) do
+  def under_head(plan, invocation, run, link, cause, actor) do
     case ensure_cause(cause, plan, invocation, run, actor) do
       {:ok, cause} ->
         Prelocked.run(
@@ -411,7 +454,8 @@ defmodule SdrAgent.Agents.ResultGate do
       receipt_id: cause && cause.id
     }
 
-  defp lock(resource, id, tenant_id, mode) when is_binary(id) do
+  @doc false
+  def lock(resource, id, tenant_id, mode) when is_binary(id) do
     resource
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
     |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
@@ -424,5 +468,5 @@ defmodule SdrAgent.Agents.ResultGate do
     end
   end
 
-  defp lock(_resource, _id, _tenant_id, _mode), do: {:error, :not_found}
+  def lock(_resource, _id, _tenant_id, _mode), do: {:error, :not_found}
 end
