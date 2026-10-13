@@ -63,5 +63,18 @@ work in, and why?" without explaining intended actions or naming a winner.
 Record first interpretation/confusion before discussing the implementation.
 
 * Progress
-Scope approved; normal concept drawing and verification in progress.
-ETA about 45 focused minutes from the final GO; report interruptions.
+Normal preview pushed at 0a9a927; owner can compare it with A now.
+Desktop/light/dark/390px visual and structural checks pass: no overflow,
+scripts/forms/remote resources, duplicate ids or broken fragment targets.
+All illustrative detail/capture/edit/reject/budget/seen links open their
+matching panel. Real click on Review focuses the email region; keyboard
+Tab has visible focus. Approval appears only in shown email detail; retry
+is disabled and explained. Browser console clear; network only local files.
+Reduced-motion CSS suppresses transitions/animation; no production dialog
+focus-trap/Escape behavior is claimed for this no-script static prototype.
+
+No unprimed usability or owner acceptance is inferred. Independent exact-
+head review requested; full repository gate running in the isolated test
+partition, with no real model calls or demo/calibration database access.
+ETA about 45 focused minutes from the final GO; preview was published first
+so the owner need not wait for the repository gate.
