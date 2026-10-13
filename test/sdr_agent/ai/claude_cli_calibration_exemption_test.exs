@@ -422,13 +422,16 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
       end
     end
 
-    test "a launch that never opened sends no receipt", ctx do
-      server = server!(ctx, command: Path.join(System.tmp_dir!(), "d3a-no-such-cli"))
-      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+    # The launcher always opens /bin/sh, so a refusal before Reaper.open is
+    # the reachable no-launch case: admission refuses an unbound invocation.
+    test "a launch refused before Reaper.open sends no receipt", ctx do
+      server = server!(ctx, command: ctx.cli)
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx, %{}, unbound: true)
       ref = issue!(server, invocation, run)
 
-      _result = admitting(fn -> complete(server, request(invocation, run, agent, ref)) end)
+      result = admitting(fn -> complete(server, request(invocation, run, agent, ref)) end)
 
+      assert match?({:error, %Refused{check: :binding_unrecorded}}, result), inspect(result)
       refute_received {:calibration_launched, _ref, _receipt}
       refute_received {:calibration_launch_unverified, _ref, _receipt}
     end
