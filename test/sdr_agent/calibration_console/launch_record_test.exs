@@ -37,7 +37,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     def start_link(_),
       do:
         Agent.start_link(
-          fn -> %{identities: %{4242 => "Mon 10:00 owner"}, sessions: %{}, self: 4242} end,
+          fn -> %{identities: %{4242 => "Mon 10:00 owner"}, groups: %{}, self: 4242} end,
           name: __MODULE__
         )
 
@@ -52,8 +52,8 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       end
     end
 
-    def session_members(session_id),
-      do: __MODULE__ |> Agent.get(&Map.get(&1.sessions, session_id, [])) |> result(&{:ok, &1})
+    def group_members(process_group_id),
+      do: __MODULE__ |> Agent.get(&Map.get(&1.groups, process_group_id, [])) |> result(&{:ok, &1})
 
     # `{:raw, reply}` returns `reply` itself (malformed answers).
     defp result({:raw, reply}, _ok), do: reply
@@ -109,7 +109,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       assert {:ok, launched} =
                LaunchRecord.advance(ctx.root, pending, :launched, launched_attrs())
 
-      assert {launched.root_pid, launched.session_id} == {9001, 9001}
+      assert {launched.root_pid, launched.process_group_id} == {9001, 9001}
       assert {:ok, finished} = LaunchRecord.advance(ctx.root, launched, :finished, %{})
       assert finished.state == "finished"
 
@@ -141,8 +141,10 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       decoded = ctx.root |> Path.join("run.lock/record.json") |> File.read!() |> Jason.decode!()
 
       assert Enum.sort(Map.keys(decoded)) ==
-               Enum.sort(~w(schema instance_id owner_pid owner_identity generation state
-                            invocation_id root_pid root_identity session_id owner_attested_at))
+               Enum.sort(
+                 ~w(schema instance_id owner_pid owner_identity generation state
+                            invocation_id root_pid root_identity process_group_id owner_attested_at)
+               )
     end
 
     test "release after finished removes the lock; before finished it is refused", ctx do
@@ -169,6 +171,33 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       assert {:ok, %{state: "launch_pending", unreadable: true}} = LaunchRecord.read(ctx.root)
     end
 
+    test "a schema-1 record (session_id) is never reinterpreted", ctx do
+      lock = Path.join(ctx.root, "run.lock")
+      File.mkdir!(lock)
+      File.chmod!(lock, 0o700)
+
+      v1 = %{
+        "schema" => "r0-calibration-launch-record/1",
+        "instance_id" => Ash.UUIDv7.generate(),
+        "owner_pid" => 4242,
+        "owner_identity" => "Mon 10:00 owner",
+        "generation" => 1,
+        "state" => "launched",
+        "invocation_id" => Ash.UUIDv7.generate(),
+        "root_pid" => 9001,
+        "root_identity" => "Mon 10:01 cli",
+        "session_id" => 9001,
+        "owner_attested_at" => nil
+      }
+
+      write_private!(Path.join(lock, "record.json"), Jason.encode!(v1))
+
+      assert {:ok, %{state: "launch_pending", unreadable: true} = read} =
+               LaunchRecord.read(ctx.root)
+
+      assert :owner_verification_required = LaunchRecord.quiescence(read, ctx.opts)
+    end
+
     test "a partial, malformed or wrongly shaped record", ctx do
       lock = Path.join(ctx.root, "run.lock")
       File.mkdir!(lock)
@@ -176,7 +205,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
 
       shaped = fn change ->
         %{
-          "schema" => "r0-calibration-launch-record/1",
+          "schema" => "r0-calibration-launch-record/2",
           "instance_id" => Ash.UUIDv7.generate(),
           "owner_pid" => 4242,
           "owner_identity" => "Mon 10:00 owner",
@@ -185,7 +214,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
           "invocation_id" => nil,
           "root_pid" => nil,
           "root_identity" => nil,
-          "session_id" => nil,
+          "process_group_id" => nil,
           "owner_attested_at" => nil
         }
         |> Map.merge(change)
@@ -197,7 +226,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
             ~s({"state":"claimed"}),
             "null",
             "not json",
-            shaped.(%{"schema" => "r0-calibration-launch-record/2"}),
+            shaped.(%{"schema" => "r0-calibration-launch-record/3"}),
             shaped.(%{"state" => "released"}),
             shaped.(%{"owner_pid" => "4242"}),
             shaped.(%{"owner_identity" => 7}),
@@ -364,8 +393,8 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
       for {key, failure} <- [
             {:identities, {:error, :unavailable}},
             {:identities, :raise},
-            {:sessions, {:error, :unavailable}},
-            {:sessions, :raise}
+            {:groups, {:error, :unavailable}},
+            {:groups, :raise}
           ] do
         FakeProbe.put(&put_in(&1, [key, 9001], failure))
 
@@ -373,7 +402,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
                  LaunchRecord.quiescence(launched_record(), ctx.opts),
                inspect({key, failure})
 
-        FakeProbe.put(&%{&1 | identities: %{4242 => "Mon 10:00 owner"}, sessions: %{}})
+        FakeProbe.put(&%{&1 | identities: %{4242 => "Mon 10:00 owner"}, groups: %{}})
       end
     end
   end
@@ -520,7 +549,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
 
     test "launched: a dead root with a live process in its session is not quiescent", ctx do
       record = %{launched_record() | state: "launched"}
-      FakeProbe.put(&put_in(&1.sessions[9001], [9002]))
+      FakeProbe.put(&put_in(&1.groups[9001], [9002]))
       assert :not_quiescent = LaunchRecord.quiescence(record, ctx.opts)
     end
 
@@ -613,18 +642,18 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
             identities: {:raw, {:ok, 7}},
             identities: {:raw, :reused},
             identities: {:raw, {:absent}},
-            sessions: {:raw, nil},
-            sessions: {:raw, {:ok, nil}},
-            sessions: {:raw, {:ok, [9002, "x"]}},
-            sessions: {:raw, {:ok, [0]}},
-            sessions: {:raw, []}
+            groups: {:raw, nil},
+            groups: {:raw, {:ok, nil}},
+            groups: {:raw, {:ok, [9002, "x"]}},
+            groups: {:raw, {:ok, [0]}},
+            groups: {:raw, []}
           ] do
         FakeProbe.put(&put_in(&1, [key, 9001], reply))
 
         assert {:error, :probe_unavailable} = LaunchRecord.quiescence(launched, ctx.opts),
                inspect({key, reply})
 
-        FakeProbe.put(&%{&1 | identities: %{4242 => "Mon 10:00 owner"}, sessions: %{}})
+        FakeProbe.put(&%{&1 | identities: %{4242 => "Mon 10:00 owner"}, groups: %{}})
       end
     end
 
@@ -773,7 +802,7 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     record
     |> Map.take(
       ~w(schema instance_id owner_pid owner_identity generation state invocation_id root_pid
-         root_identity session_id owner_attested_at)a
+         root_identity process_group_id owner_attested_at)a
     )
     |> Map.new(fn {k, v} -> {Atom.to_string(k), v} end)
   end
@@ -791,14 +820,15 @@ defmodule SdrAgent.CalibrationConsole.LaunchRecordTest do
     finished
   end
 
-  defp launched_attrs, do: %{root_pid: 9001, root_identity: "Mon 10:01 cli", session_id: 9001}
+  defp launched_attrs,
+    do: %{root_pid: 9001, root_identity: "Mon 10:01 cli", process_group_id: 9001}
 
   defp launched_record do
     %{
       state: "launched",
       root_pid: 9001,
       root_identity: "Mon 10:01 cli",
-      session_id: 9001,
+      process_group_id: 9001,
       owner_attested_at: nil
     }
   end

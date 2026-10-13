@@ -949,6 +949,51 @@ rules and `calibrate` orchestration are E4c.
   - A concurrent claim that meets the instant between `mkdir` and `chmod`
     of `run.lock` is refused as unsafe (fail-closed).
 
+**Staged E4b delta: the process-group observable** (Codex consultation
+and RED review at e77c749, report `codex-r007e-e4b-pgid-e77c749-review.md`).
+Entity Model trigger: **yes** — a persisted observation scope, an artifact
+attribute and the probe API change. No database column changes.
+
+- **Why.** On this macOS host `ps` reports session id 0 for every process,
+  so a session is not observable. The launch record therefore observes the
+  CLI's **own process group**. The record schema becomes
+  `r0-calibration-launch-record/2`, with `process_group_id` in place of
+  `session_id`. A schema-1 record is not reinterpreted: it reads as
+  unreadable and needs the owner (explicit recovery).
+- **Probe.** `group_members/1` replaces `session_members/1`.
+  `start_identity/1` and `group_members/1` read one successful,
+  well-formed snapshot of `/bin/ps -A -o pid=,pgid=,stat=,lstart=`, run
+  through `ChildEnv.cmd([], [{"LC_ALL", "C"}, {"TZ", "UTC"}])` because the
+  inherited TZ changes `lstart`.
+  - A pid is **absent** only when that snapshot has no row for it.
+  - A failed, empty, diagnostic-bearing or malformed snapshot is an error,
+    never absence or an empty group. This includes exit 1 with empty output
+    (`/usr/bin/false`).
+  - Zombies are not runnable members. An unreaped root zombie still has a
+    start identity, which conservatively keeps the record busy.
+  - Start times have one-second resolution, so a pid reused within the
+    same second reads as alive (conservative false-busy).
+  - The `ps:` override is test-seam only.
+- **Weaker scope, disclosed.** Group emptiness is not a whole-descendant
+  proof. A descendant can change process group without starting a new
+  session and so escape the observable. The bounded observable is a dead or
+  reused root **and** a successfully observed empty group.
+  - This must be disclosed to the owner before real-call authorization.
+  - If the owner does not accept it, recovery requires owner verification
+    or a stronger reviewed `getsid`-based observable.
+  - The existing STOPPED attestation covers readable `launch_pending`
+    only. Any owner attestation of a `launched` record is modelled
+    explicitly in E4c.
+- **Launcher (E4c).** Use a checked `setsid` (or a reviewed
+  `setpgid`/`setpgrp`) plus a list-form `exec` wrapper. `sh set -m` is not
+  accepted. E4c pins the exact launcher and OS prerequisite and verifies
+  root pid = pgid before recording `launched`. A wrapper failure after
+  spawn is post-spawn uncertainty, never a known no-spawn.
+- **ADR.** An ADR-0005 harness amendment for this observation trade-off and
+  the selected launcher is to be evaluated with E4c. It needs owner
+  acceptance; this consultation is not that acceptance, nor a dependency
+  grant.
+
 #### R11-2: the guarded finish action
 
 New action `AgentRun :finish_calibration` with domain API
