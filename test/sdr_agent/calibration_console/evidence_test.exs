@@ -63,6 +63,16 @@ defmodule SdrAgent.CalibrationConsole.EvidenceTest do
     File.mkdir_p!(dir)
     File.chmod!(dir, 0o700)
 
+    # The call was reserved under the same literal v3 candidate the document
+    # and link name (its original reservation event records it).
+    assert [reserved] =
+             tenant
+             |> events_of_type("model.invocation.reserved")
+             |> Enum.filter(&(&1.subject_id == invocation.id))
+
+    assert reserved.payload["arguments"]["calibration_tuple"] ==
+             Agents.Admission.Gate.tuple_record(candidate())
+
     # After every fixture has been built: a missing Evidence fails as an
     # assertion here, never as a crash.
     assert Code.ensure_loaded?(Evidence), "SdrAgent.CalibrationConsole.Evidence is not defined"

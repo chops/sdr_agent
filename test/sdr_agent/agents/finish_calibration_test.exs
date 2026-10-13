@@ -25,6 +25,7 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
   alias SdrAgent.AdmissionFixtures
   alias SdrAgent.Agents
   alias SdrAgent.Agents.AgentRun
+  alias SdrAgent.Agents.Changes.CalibrationLatch
   alias SdrAgent.Agents.Checks.CalibrationContext
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ReleaseDecision.Prelocked
@@ -244,6 +245,36 @@ defmodule SdrAgent.Agents.FinishCalibrationTest do
         assert {:error, :calibration_not_finishable} =
                  finish(target, %{sha256: sha("nil")}, actor: agent),
                inspect(target)
+      end
+    end
+
+    test "an auditor's malformed request is still denied and audited once", ctx do
+      assert {:error, %Ash.Error.Forbidden{}} =
+               finish(nil, %{sha256: sha("nil")}, actor: human(:auditor, ctx.tenant))
+
+      assert [%{actor_role: :auditor}] = events_of_type(ctx.tenant, "authz.denied")
+    end
+
+    test "the action's eligibility: test-seam builds, proof, no Operation, real profile", ctx do
+      %{run: run, agent: agent} = proof_run(ctx)
+      invocation = proof_invocation!(run, agent, :failed)
+      assert Code.ensure_loaded?(CalibrationLatch)
+
+      assert function_exported?(CalibrationLatch, :permitted?, 3),
+             "CalibrationLatch.permitted?/3 is not defined"
+
+      assert apply(CalibrationLatch, :permitted?, [run, invocation, true])
+      refute apply(CalibrationLatch, :permitted?, [run, invocation, false])
+
+      for {label, run, invocation} <- [
+            {"operated", %{run | operation_id: Ash.UUIDv7.generate()}, invocation},
+            {"business", %{run | usage_origin: :assignment}, invocation},
+            {"another run", %{run | id: Ash.UUIDv7.generate()}, invocation},
+            {"fake profile", run, %{invocation | profile_id: :fake}},
+            {"generation 1", run, %{invocation | ledger_generation: 1}},
+            {"not terminal", run, %{invocation | status: :sent}}
+          ] do
+        refute apply(CalibrationLatch, :permitted?, [run, invocation, true]), label
       end
     end
 

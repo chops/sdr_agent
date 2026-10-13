@@ -11,9 +11,10 @@ defmodule SdrAgent.Agents.Changes.CalibrationLatch do
   run. The finish already holds the run `FOR UPDATE` and the invocation
   `FOR SHARE` before the chain head, so the run row, the release and the
   invocation are re-read with no lock clause. It also enforces the finish's
-  own invariants: a `:proof` run with no Operation, and its own terminal
-  generation-2 ClaudeCLI invocation. Anything else is refused: the action
-  is never reachable without its latch, and never weaker than the finish.
+  own eligibility (`permitted?/3`): a test-seam build, a `:proof` run with
+  no Operation, and its own terminal generation-2 ClaudeCLI invocation of a
+  real profile. Anything else is refused: the action is never reachable
+  without its latch, and never weaker than the finish.
   """
   use Ash.Resource.Change
 
@@ -22,9 +23,11 @@ defmodule SdrAgent.Agents.Changes.CalibrationLatch do
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.Agents.ReleaseDecision.Prelocked
+  alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.Audit.Kernel
 
   @terminal [:completed, :failed, :unknown]
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
   @impl true
   def change(changeset, _opts, context) do
@@ -59,7 +62,7 @@ defmodule SdrAgent.Agents.Changes.CalibrationLatch do
            release.disposition == :calibration and
              release.model_invocation_id == registered.model_invocation_id,
          {:ok, invocation} <- read(ModelInvocation, release.model_invocation_id, run),
-         true <- finishable?(run, invocation) do
+         true <- permitted?(run, invocation) do
       :ok
     else
       _ ->
@@ -71,14 +74,19 @@ defmodule SdrAgent.Agents.Changes.CalibrationLatch do
     end
   end
 
-  # The finish's own invariants, enforced here too so the action is never
-  # weaker than `SdrAgent.Agents.finish_calibration/3` (code review of
-  # 930ef2a): a `:proof` run with no Operation, and its own terminal
-  # generation-2 ClaudeCLI invocation.
-  defp finishable?(run, invocation) do
-    invocation.agent_run_id == run.id and run.usage_origin == :proof and
+  @doc """
+  The finish's own eligibility, enforced at the action too so it is never
+  weaker than `SdrAgent.Agents.finish_calibration/3` (code review of
+  930ef2a): a test-seam build (`test_seams`, default this build's), a
+  `:proof` run with no Operation, and its own terminal generation-2
+  ClaudeCLI invocation of a reviewed real profile. Outside test-seam builds
+  even an existing historical latch finishes nothing.
+  """
+  def permitted?(run, invocation, test_seams \\ @test_seams) do
+    test_seams == true and invocation.agent_run_id == run.id and run.usage_origin == :proof and
       is_nil(run.operation_id) and invocation.ledger_generation == 2 and
-      invocation.provider == :claude_cli and invocation.status in @terminal
+      invocation.provider == :claude_cli and invocation.status in @terminal and
+      ModelProfiles.real?(invocation.profile_id)
   end
 
   defp read(resource, id, run) when is_binary(id) do
