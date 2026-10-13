@@ -884,10 +884,11 @@ writer of `status_reason :calibration_latched`.
   `unknown`); the run has no Operation (operated proof history is out of
   scope and refused).
 - **Lock order** (one transaction, no row lock after the head): run
-  `FOR UPDATE` → invocation `FOR SHARE` → its current primary link
-  `FOR SHARE` if one exists → head. Under a `Prelocked` context with the
-  truthful bindings (tenant, invocation, link, receipt = the artifact
-  hash), it decides the `:calibration` release with `evidence_sha256` and
+  `FOR UPDATE` → invocation `FOR SHARE` → head. Under a `Prelocked`
+  context with truthful bindings — tenant, invocation, and **nil** link and
+  **nil** receipt (a `Prelocked` receipt is a Failure id, and a calibration
+  latch binds neither a link nor a cause) — it decides the `:calibration`
+  release, carrying the artifact's hash only as `evidence_sha256`, and
   then:
   - a still-running run → `:succeeded`, `:calibration_latched` (meaning
     "harness workflow complete", not model success, even for failed or
@@ -1186,3 +1187,9 @@ writer of `status_reason :calibration_latched`.
   and outcome contract. Directions otherwise accepted, with obligations
   (8.11).
 - Round 12 (section 8.10–8.11 added): **UNREVIEWED**, pending Codex recheck.
+- Round 12 at 30f8b4c: **NEEDS-REVIEW, one correction** (Codex, reply
+  b9ac33a1): the `Prelocked` receipt binding is a Failure id, not the
+  artifact hash. Corrected: calibration binds nil link and nil receipt;
+  the artifact hash is only `evidence_sha256`. Other round-11 contracts
+  resolved with implementation bounds.
+- Round 13 (that correction): **UNREVIEWED**, pending Codex recheck.
