@@ -481,3 +481,40 @@ the G1, G2 and G6 bounds stand.
   (Codex, reply to m_1791848756000001078_e5faee73, report sha256 2ee51092).
   The replay semantics for `gate_cause_id` and G7's mismatch precedence are
   recorded as R7-1 and R7-2 in section 6.4, with the implementation bounds.
+- Round 7 at e7ae2f4: **PASS** (Codex, entity/action, reply to
+  m_1791850375000000194_70e6a9ad, report
+  `~/.local/state/sdr-agent/handoff-20261008/tmp/codex-r007c-e7ae2f4-entity-pass.md`,
+  sha256 a6d36d70). R7-1 and R7-2 resolve both round-6 cases. The verdict
+  covers the packet delta only, not later local code. It is no RED, code,
+  merge, calibration, enablement or spend approval.
+
+  Implementation obligations:
+  1. **Exact original event.** The binding is read from exactly the
+     release's original `model.result.withheld` event, scoped by tenant,
+     resource, release and event type. A missing, duplicate or malformed
+     event is not evidence that the cause was absent: it fails closed. A
+     real nil or absent argument on a valid original event remains the
+     legitimate no-cause case. The losing concurrent decide sees the
+     winner's committed event and gets the typed conflict, never an
+     apparent new-receipt success.
+  2. **Exact receipt locks before the head,** resolved causes included,
+     under the rollback-aware Prelocked context. In R3 a refused recovery
+     leaves the run's actual terminal status unchanged; the running-state
+     example in R7-2 applies only to running-run recovery. No lock clause
+     after the head except reentrant head locking.
+  3. **One live correctly selected critical,** including after
+     unusable-cause resolution races. Observation stays outside locks, and
+     job and run liveness are rechecked. Every no-write or conflict path
+     returns no business output. One fresh recovery attempt only; no model
+     repeat.
+  4. **The G3, G4 and G6 bounds of section 6.4 stand:**
+     - both unreleased running and terminal rows are deferred from the scan;
+     - real severity is respected;
+     - resolved causes are not resurrected;
+     - notes are metadata-only and idempotent;
+     - ordinary `:fail` locks are unchanged.
+  5. **Executable proof:** the true-connection race, no-extra-event,
+     unavailable-binding and recovery tests run through public actions.
+     They are not proof until independently verified. The RED, GREEN and
+     code-review gates continue for the affected implementation; this PASS
+     is not retrospective approval of local code.
