@@ -305,6 +305,28 @@ defmodule SdrAgent.Agents.RecoverCalibrationTest do
       assert failed.status == :failed
     end
 
+    # GREEN-time predicate coverage (Codex 01a135e3): historical rows the
+    # domain cannot build are refused by the stored-row predicate.
+    test "the stored-row predicate refuses historical and foreign rows", ctx do
+      %{invocation: reserved, run: run} = claimed!(ctx, :reserved)
+      predicate = SdrAgent.Agents.CalibrationRecovery
+      assert Code.ensure_loaded?(predicate)
+      assert function_exported?(predicate, :recoverable?, 2), "recoverable?/2 is not defined"
+
+      assert apply(predicate, :recoverable?, [run, reserved])
+
+      for {label, run, invocation} <- [
+            {"generation 1", run, %{reserved | ledger_generation: 1}},
+            {"fake profile", run, %{reserved | profile_id: :fake}},
+            {"fake provider", run, %{reserved | provider: :fake}},
+            {"operated", %{run | operation_id: Ash.UUIDv7.generate()}, reserved},
+            {"business", %{run | usage_origin: :assignment}, reserved},
+            {"another run", %{run | id: Ash.UUIDv7.generate()}, reserved}
+          ] do
+        refute apply(predicate, :recoverable?, [run, invocation]), label
+      end
+    end
+
     test "every other principal is refused; only a human auditor's denial is audited", ctx do
       %{invocation: reserved, run: run, agent: agent} = claimed!(ctx, :reserved)
 

@@ -64,6 +64,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.CalibrationFinish
+  alias SdrAgent.Agents.CalibrationRecovery
   alias SdrAgent.Agents.Decision
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
@@ -1140,6 +1141,29 @@ defmodule SdrAgent.Agents do
 
     guard(AgentRun, :finish_calibration, subject_id, actor, fn ->
       CalibrationFinish.run(invocation, evidence, actor)
+    end)
+  end
+
+  @doc """
+  The calibration recovery action (R0-07 E4c-5; test-seam builds and the
+  calibration console only): `decision` is `:unlaunched`, `{:quiescent,
+  observation}` or `{:attested, attestation}`. Returns `{:ok, %{invocation:,
+  attestation_event:}}`, `{:error, :calibration_not_recoverable |
+  :calibration_not_quiescent | :attestation_mismatch |
+  :attestation_conflict}`, or `Ash.Error.Forbidden`. See
+  `SdrAgent.Agents.CalibrationRecovery`.
+  """
+  def recover_calibration(invocation, decision, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    subject_id =
+      case invocation do
+        %{id: id} -> id
+        _malformed -> nil
+      end
+
+    guard(ModelInvocation, :mark_unknown, subject_id, actor, fn ->
+      CalibrationRecovery.run(invocation, decision, actor)
     end)
   end
 
