@@ -42,7 +42,8 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     root_pid:, reason:}}` with no launch fields. It never signals or cleans
     anything up.
 
-    The probe runs in a monitored task, bounded by the call's own `deadline`
+    The probe runs in a monitored, unlinked helper process (its exit or
+    kill never reaches the server), bounded by the call's own `deadline`
     (monotonic ms) and a 2 s probe budget, and by the caller: a
     probe still running at the bound is killed and reported unverified
     (`:probe_timeout`, or `:caller_down` when the caller died meanwhile;
@@ -141,37 +142,56 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
 
     @probe_budget_ms 2_000
 
+    # Not linked (Codex d3a@0a47a27): a probe that exits or is killed is
+    # only its own DOWN, never the server's exit.
     defp bounded_proof(os_pid, deadline, watch) do
-      task = Task.async(fn -> proof(os_pid) end)
+      server = self()
+      tag = make_ref()
+      {helper, monitor} = spawn_monitor(fn -> send(server, {tag, proof(os_pid)}) end)
       until = min(deadline, System.monotonic_time(:millisecond) + @probe_budget_ms)
 
-      case await_proof(task, watch, until) do
+      case await_proof(tag, monitor, watch, until) do
         {:done, result} ->
           {result, :ok}
 
         :caller_down ->
-          Task.shutdown(task, :brutal_kill)
+          stop_helper(helper, monitor, tag)
           {{:error, :caller_down}, :caller_down}
 
         :timeout ->
-          Task.shutdown(task, :brutal_kill)
+          stop_helper(helper, monitor, tag)
           {{:error, :probe_timeout}, :ok}
       end
     end
 
-    defp await_proof(%Task{ref: task_ref}, watch, until) do
+    defp await_proof(tag, monitor, watch, until) do
       receive do
-        {^task_ref, result} ->
-          Process.demonitor(task_ref, [:flush])
+        {^tag, result} ->
+          Process.demonitor(monitor, [:flush])
           {:done, result}
 
-        {:DOWN, ^task_ref, :process, _task, _reason} ->
+        {:DOWN, ^monitor, :process, _helper, _reason} ->
           {:done, {:error, :probe_failed}}
 
         {:DOWN, ^watch, :process, _caller, _reason} ->
           :caller_down
       after
         max(until - System.monotonic_time(:millisecond), 0) -> :timeout
+      end
+    end
+
+    # Kills the helper, then discards its DOWN and any late result.
+    defp stop_helper(helper, monitor, tag) do
+      Process.exit(helper, :kill)
+
+      receive do
+        {:DOWN, ^monitor, :process, ^helper, _reason} -> :ok
+      end
+
+      receive do
+        {^tag, _late} -> :ok
+      after
+        0 -> :ok
       end
     end
 

@@ -51,6 +51,8 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     defp identity(:probe_raises, _pid), do: raise("probe failure")
     defp identity(:slow, _pid), do: Process.sleep(2_200) && {:error, :ps_failed}
     defp identity(:hung, _pid), do: Process.sleep(:infinity)
+    defp identity(:probe_exits, _pid), do: exit(:probe_crashed)
+    defp identity(:probe_killed, _pid), do: Process.exit(self(), :kill)
     defp identity(_mode, pid), do: {:ok, "Tue Oct 13 12:00:00 2026 #{pid}"}
 
     def group_members(pgid) do
@@ -492,6 +494,28 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
       assert [{:calibration_launch_unverified, %{reason: :probe_timeout}}] =
                receipts(receipt_ref)
+    end
+
+    # Codex d3a@0a47a27: the probe helper is not linked to the server, so
+    # a probe that exits or is killed is only an unverified receipt.
+    for mode <- [:probe_exits, :probe_killed] do
+      test "a #{mode} probe is :probe_failed and the call goes on", ctx do
+        ProbeStub.mode(unquote(mode))
+        Application.put_env(:sdr_agent, :calibration_launch_probe, ProbeStub)
+        server = server!(ctx, command: ctx.cli)
+        %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+        ref = issue!(server, invocation, run)
+        request = request(invocation, run, agent, ref)
+        {_command, receipt_ref} = request.calibration.observer
+
+        result = admitting(fn -> complete(server, request) end)
+
+        assert match?({:ok, _}, result), inspect(result)
+        assert Process.alive?(server)
+
+        assert [{:calibration_launch_unverified, %{reason: :probe_failed}}] =
+                 receipts(receipt_ref)
+      end
     end
 
     # The CLI answers at once, so its output is queued while the probe runs
