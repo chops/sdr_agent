@@ -59,15 +59,16 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
 
   @doc """
   Recovers the gate of `invocation` under `gate` (`%{run_id,
-  operation_id}`). Returns `{:released, release, output}` (a competing
+  operation_id}`). Option `guard:` as for `ResultGate.finalize/4`. Returns `{:released, release, output}` (a competing
   release only), `{:withheld, release, run}` or `{:error, reason}`.
   """
   @spec run(struct(), map(), keyword()) ::
           {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
-  def run(invocation, gate, _opts \\ []) do
+  def run(invocation, gate, opts \\ []) do
     actor = Actor.system(:agent_runtime, invocation.tenant_id)
+    guard = Keyword.get(opts, :guard, fn _run -> :ok end)
 
-    fn -> locked(invocation, gate, actor) end
+    fn -> locked(invocation, gate, guard, actor) end
     |> Audit.transaction()
     |> case do
       {:ok, result} -> result
@@ -76,12 +77,13 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
     end
   end
 
-  defp locked(invocation, gate, actor) do
+  defp locked(invocation, gate, guard, actor) do
     tenant_id = invocation.tenant_id
 
     with {:ok, run} <- ResultGate.lock(AgentRun, gate.run_id, tenant_id, "FOR UPDATE"),
          :ok <- ResultGate.own_run(run, invocation, gate),
          :ok <- ResultGate.lock_operation(run, tenant_id),
+         :ok <- guard.(run),
          {:ok, invocation} <-
            ResultGate.lock(ModelInvocation, invocation.id, tenant_id, "FOR SHARE"),
          {:ok, links} <- lock_current_links(invocation),

@@ -191,16 +191,26 @@ defmodule SdrAgent.Agents.ResultGate do
   error counts as unreleased (fail closed).
   """
   @spec unreleased?(struct()) :: boolean()
-  def unreleased?(%AgentRun{id: run_id, tenant_id: tenant_id}) do
+  def unreleased?(%AgentRun{} = run) do
+    case unreleased_invocations(run) do
+      {:ok, invocations} -> invocations != []
+      {:error, _error} -> true
+    end
+  end
+
+  @doc "The run's completed generation-2 ClaudeCLI invocations with no release, in call order."
+  @spec unreleased_invocations(struct()) :: {:ok, [struct()]} | {:error, term()}
+  def unreleased_invocations(%AgentRun{id: run_id, tenant_id: tenant_id}) do
     ModelInvocation
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
     |> Ash.Query.filter(
       tenant_id == ^tenant_id and agent_run_id == ^run_id and provider == :claude_cli and
         ledger_generation == 2 and status == :completed and not exists(result_release, true)
     )
-    |> Ash.exists?()
+    |> Ash.Query.sort(sequence_in_run: :asc)
+    |> Ash.read()
   rescue
-    _error -> true
+    error -> {:error, error}
   end
 
   ## Finalize (step 3)
@@ -220,12 +230,13 @@ defmodule SdrAgent.Agents.ResultGate do
   """
   @spec finalize(struct(), map(), {:ok | :timeout, map()}, keyword()) ::
           {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
-  def finalize(invocation, gate, {kind, receipt}, _opts \\ [])
+  def finalize(invocation, gate, {kind, receipt}, opts \\ [])
       when kind in [:ok, :timeout, :interrupted] do
     plan = plan(kind, receipt)
     actor = Actor.system(:agent_runtime, invocation.tenant_id)
+    guard = Keyword.get(opts, :guard, fn _run -> :ok end)
 
-    fn -> locked_finalize(invocation, gate, receipt, plan, actor) end
+    fn -> locked_finalize(invocation, gate, receipt, {plan, guard}, actor) end
     |> Audit.transaction()
     |> case do
       {:ok, result} -> result
@@ -268,12 +279,13 @@ defmodule SdrAgent.Agents.ResultGate do
     %{release?: false, reason: reason, classification: classification}
   end
 
-  defp locked_finalize(invocation, gate, receipt, plan, actor) do
+  defp locked_finalize(invocation, gate, receipt, {plan, guard}, actor) do
     tenant_id = invocation.tenant_id
 
     with {:ok, run} <- lock(AgentRun, gate.run_id, tenant_id, "FOR UPDATE"),
          :ok <- own_run(run, invocation, gate),
          :ok <- lock_operation(run, tenant_id),
+         :ok <- guard.(run),
          {:ok, invocation} <- lock(ModelInvocation, invocation.id, tenant_id, "FOR SHARE"),
          {:ok, link} <- lock_link(receipt.link_id, invocation),
          {:ok, cause} <- select_cause(plan, receipt, invocation, run),
