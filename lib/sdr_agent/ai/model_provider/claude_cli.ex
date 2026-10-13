@@ -749,6 +749,17 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     _kind, _reason -> {:error, :launch_admission_failed}
   end
 
+  # Packet 8.14.2 (d3a): an exempted call's launch receipt, sent from this
+  # process before the call's reply.
+  if @test_seams do
+    alias SdrAgent.AI.ModelProvider.ClaudeCLI.CalibrationExemption
+
+    defp launch_receipt(%{calibration_launch: %{}} = request, os_pid),
+      do: CalibrationExemption.receipt(request, os_pid)
+  end
+
+  defp launch_receipt(_request, _os_pid), do: :ok
+
   defp launch_expectation(%{calibration_launch: %{} = expected}),
     do: [calibration_launch: expected]
 
@@ -834,6 +845,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
              spawn_opts,
              deadline
            ) do
+      launch_receipt(request, os_pid)
       result = collect(port, os_pid, Map.put(state, :caller, watch), deadline, nil, [])
       {result, settle(state, port, os_pid, workspace)}
     else
