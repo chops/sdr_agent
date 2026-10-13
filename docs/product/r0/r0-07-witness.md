@@ -1817,3 +1817,20 @@ launcher) is withdrawn: no wrapper is needed.
 - E4c-c1 RED at 9d27da0: **PASS / VERIFIED RED** (Codex 01a1359a). GREEN
   at 51726f5 (full suite 1819/1819), awaiting code review.
 - E4c-c2 recovery-action RED at e9962bc, awaiting verification.
+- E4c component approvals (Codex; each a component approval only, not an
+  integrated merge, calibration or spend approval):
+  - E4c-b isolation: **scoped APPROVE** at 220149d (01a135e0) after rounds
+    at 119dd22, 5231107 and 8435dcf; E4c-1a cleanup delta **entity PASS**.
+  - E4c-c1 claim binding: **scoped APPROVE** at 89bcdc8 (01a135e8) after
+    51726f5 (arguments shape) and e7c5841 (dev compile).
+  - E4c-c2 recovery action: RED **PASS / VERIFIED RED** at b923051
+    (01a135e3); code **scoped APPROVE** at 7db7b6b (01a1360e) after
+    5f90cf8 (observation validators) and 07d7c29 (typed ids).
+  - Gate correction: gate logs sent for 51726f5, e7c5841 and 220149d hid
+    a failing dev compile (output piped through tail without pipefail).
+    Every later gate runs each step with its own exit status.
+- Remaining slice E order (Codex 01a135f7): d1a authority registry, d2
+  G-R0 binding (d2a selection and reservation, d2b launch), d1b staging
+  exemption, d3 orchestration. d1a RED **PASS / VERIFIED RED** at ddf7dde
+  (01a13607); GREEN at 28a3f60 (full suite 1864/1864), awaiting review.
+  d2a RED at 65259c2, awaiting verification.
