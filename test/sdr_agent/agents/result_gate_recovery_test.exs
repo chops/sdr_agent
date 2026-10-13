@@ -198,6 +198,20 @@ defmodule SdrAgent.Agents.ResultGateRecoveryTest do
       refute run.attention_failure_id in [stray.id, receipt.cause_id]
     end
 
+    test "R3 refused: a terminal run keeps its actual status; nothing written", ctx do
+      {invocation, receipt} = reconciled(ctx, "cli_shape_v3_mismatch")
+      resolve!(ctx, receipt.cause_id)
+      stray_critical!(ctx, invocation, nil)
+      {:ok, cancelled} = Agents.cancel_run(run!(ctx), actor: ctx.admin)
+
+      assert {:error, :mismatch_cause_unbound} = Recovery.run(invocation, gate(ctx))
+      assert releases(ctx) == []
+      run = run!(ctx)
+
+      assert {run.status, run.status_reason, run.attention_failure_id} ==
+               {cancelled.status, cancelled.status_reason, cancelled.attention_failure_id}
+    end
+
     test "a run without an Operation binds its existing critical through the event", ctx do
       %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant)
       ctx = %{ctx | run: run, agent: agent}
