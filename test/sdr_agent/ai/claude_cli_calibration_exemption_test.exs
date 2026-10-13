@@ -33,6 +33,7 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
         :identity_absent -> :absent
         :identity_error -> {:error, :ps_failed}
         :identity_empty -> {:ok, ""}
+        :identity_not_binary -> {:ok, 123}
         :probe_raises -> raise "probe failure"
         _other -> {:ok, "Tue Oct 13 12:00:00 2026 #{pid}"}
       end
@@ -43,6 +44,7 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
         :group_error -> {:error, :ps_failed}
         :root_not_in_group -> {:ok, [pgid + 1]}
         :member_not_a_pid -> {:ok, [pgid, "x"]}
+        :group_not_a_list -> {:ok, :members}
         _other -> {:ok, [pgid]}
       end
     end
@@ -370,7 +372,17 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
   describe "d3a: the launch receipt" do
     setup ctx do
-      on_exit(fn -> Application.delete_env(:sdr_agent, :calibration_launch_probe) end)
+      previous = Application.fetch_env(:sdr_agent, :calibration_launch_probe)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:sdr_agent, :calibration_launch_probe, value)
+          :error -> Application.delete_env(:sdr_agent, :calibration_launch_probe)
+        end
+
+        :persistent_term.erase({ProbeStub, :mode})
+      end)
+
       %{cli: cli!(ctx, "cli", 0), slow_cli: cli!(ctx, "slow-cli", 1)}
     end
 
@@ -384,14 +396,13 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
       result = admitting(fn -> complete(server, request) end)
       assert match?({:ok, _}, result), inspect(result)
 
-      # Already queued when the reply arrived: no waiting.
-      assert_received {:calibration_launched, ^receipt_ref, receipt}
+      # Already queued when the reply arrived: no waiting, exactly one.
+      assert [{:calibration_launched, receipt}] = receipts(receipt_ref)
       assert Enum.sort(Map.keys(receipt)) == receipt_keys()
       assert {receipt.invocation_id, receipt.server} == {invocation.id, server}
       assert is_integer(receipt.root_pid) and receipt.root_pid > 0
       assert receipt.process_group_id == receipt.root_pid
       assert is_binary(receipt.root_identity) and receipt.root_identity != ""
-      refute_received {:calibration_launch_unverified, _ref, _receipt}
     end
 
     for mode <- [
@@ -401,6 +412,8 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
           :group_error,
           :root_not_in_group,
           :member_not_a_pid,
+          :identity_not_binary,
+          :group_not_a_list,
           :probe_raises
         ] do
       test "an unproven launch (#{mode}) sends an unverified receipt, no launch fields", ctx do
@@ -415,28 +428,70 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
         result = admitting(fn -> complete(server, request) end)
         assert match?({:ok, _}, result), inspect(result)
 
-        assert_received {:calibration_launch_unverified, ^receipt_ref, receipt}
+        assert [{:calibration_launch_unverified, receipt}] = receipts(receipt_ref)
         assert Enum.sort(Map.keys(receipt)) == [:invocation_id, :reason, :root_pid, :server]
         assert {receipt.invocation_id, receipt.server} == {invocation.id, server}
-        refute_received {:calibration_launched, _ref, _receipt}
+        assert is_integer(receipt.root_pid) and receipt.root_pid > 0
       end
     end
 
-    # The launcher always opens /bin/sh, so a refusal before Reaper.open is
-    # the reachable no-launch case: admission refuses an unbound invocation.
+    # A refusal before Reaper.open is the reachable no-launch case:
+    # admission refuses an unbound invocation; nothing is sent or opened.
     test "a launch refused before Reaper.open sends no receipt", ctx do
       server = server!(ctx, command: ctx.cli)
       %{invocation: invocation, run: run, agent: agent} = proof!(ctx, %{}, unbound: true)
       ref = issue!(server, invocation, run)
+      request = request(invocation, run, agent, ref)
+      {_command, receipt_ref} = request.calibration.observer
 
-      result = admitting(fn -> complete(server, request(invocation, run, agent, ref)) end)
+      result = admitting(fn -> complete(server, request) end)
 
       assert match?({:error, %Refused{check: :binding_unrecorded}}, result), inspect(result)
-      refute_received {:calibration_launched, _ref, _receipt}
-      refute_received {:calibration_launch_unverified, _ref, _receipt}
+      assert consumed?(ref)
+      assert status(invocation) == :failed
+      assert receipts(receipt_ref) == []
     end
 
-    test "an ordinary call sends no receipt", ctx do
+    # The launcher opens /bin/sh, which then fails to find the CLI: the
+    # launch did open, so exactly one receipt is sent (packet 8.14.2).
+    test "a missing CLI behind an opened shell still sends exactly one receipt", ctx do
+      server = server!(ctx, command: Path.join(System.tmp_dir!(), "d3a-no-such-cli"))
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+      ref = issue!(server, invocation, run)
+      request = request(invocation, run, agent, ref)
+      {_command, receipt_ref} = request.calibration.observer
+
+      result = admitting(fn -> complete(server, request) end)
+
+      assert result == {:error, :missing_init_attestation}, inspect(result)
+      assert consumed?(ref)
+      assert status(invocation) == :sent
+      assert [{kind, receipt}] = receipts(receipt_ref)
+      assert kind in [:calibration_launched, :calibration_launch_unverified]
+      assert receipt.invocation_id == invocation.id
+    end
+
+    # A failure after the port opened (the reaper's existing on_open hook):
+    # the outcome is unknown, the call stays sent and no receipt is sent.
+    test "a post-open unknown launch sends no receipt", ctx do
+      hook = fn _os_pid -> raise "synthetic post-open failure" end
+      server = server!(ctx, command: ctx.slow_cli, reaper: [on_open: hook])
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+      ref = issue!(server, invocation, run)
+      request = request(invocation, run, agent, ref)
+      {_command, receipt_ref} = request.calibration.observer
+
+      result = admitting(fn -> complete(server, request) end)
+
+      assert result == {:unknown, :post_spawn_failure}, inspect(result)
+      assert consumed?(ref)
+      assert status(invocation) == :sent
+      assert receipts(receipt_ref) == []
+    end
+
+    # Real ordinary calls stay staged; this control runs an injected test
+    # launcher, which is never exempted.
+    test "an ordinary call through an injected test launcher sends no receipt", ctx do
       {:ok, server} =
         ClaudeCLI.start_link(
           command: ctx.cli,
@@ -448,8 +503,7 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
       request = Map.delete(request_shape(), :calibration)
       assert {:ok, _} = complete(server, request)
-      refute_received {:calibration_launched, _ref, _receipt}
-      refute_received {:calibration_launch_unverified, _ref, _receipt}
+      assert all_receipts() == []
     end
   end
 
@@ -862,6 +916,27 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
 
     File.chmod!(path, 0o555)
     path
+  end
+
+  # Every queued receipt message carrying `ref`, in order, drained.
+  defp receipts(ref) do
+    receive do
+      {kind, ^ref, receipt}
+      when kind in [:calibration_launched, :calibration_launch_unverified] ->
+        [{kind, receipt} | receipts(ref)]
+    after
+      0 -> []
+    end
+  end
+
+  defp all_receipts do
+    receive do
+      {kind, _ref, receipt}
+      when kind in [:calibration_launched, :calibration_launch_unverified] ->
+        [{kind, receipt} | all_receipts()]
+    after
+      0 -> []
+    end
   end
 
   defp receipt_keys,
