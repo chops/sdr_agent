@@ -1700,7 +1700,7 @@ distinct. d1b compares only the VM instance.
 | ModelInvocation `:admit_launch` (`Agents.admit_launch/3`) | Existing action | Refusal-only option `calibration_launch:` with expected run, tenant, request SHA and prompt/schema refs | C7 identity mismatch: rollback, no mutation, identity event. C8/C9: the targeted invocation's existing receipt. `sent` only when every check passes. Charge unchanged | Existing launch lock order; plain comparisons only |
 | `Admission.launch_check` | Existing | New step C8 before `Gate.admit_launch/3`; `launch_binding` required mode | Precedence: run → legacy → profile → exemption → gate → binding → terms | Under the head; no new lock |
 | Failure / refusal contract | Existing | Reasons reused (`Gate.reasons/0` unchanged): `:calibration_not_authorized` with new checks `:exemption_scope`, `:exemption_input`, `:exemption_request`; `:calibration_grant_mismatch` / `:binding_unrecorded`. New identity refusal reasons `:calibration_target_mismatch` and `:calibration_launch_invalid` (non-receipt path, beside `:invocation_not_found`) | Same receipt validator and category (8.11) | Existing |
-| AgentRun | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | `usage_origin` and `operation_id` are read under the existing run lock. d1b never transitions the run: a refused launch fails only the invocation. Calibration does not go through `SDR.Model`, so settling the proof run belongs to d3. The console latches the failed attempt's evidence and calls `finish_calibration` (E1) under its reviewed rules. A running proof run becomes `:succeeded` / `:calibration_latched` when its evidence is latched; a terminal run is unchanged. d3 adds no separate refusal stop, and admission never stops the run. C7 leaves every unrelated target untouched. For a non-`:proof` target, d1b makes no run transition | Existing run lock |
+| AgentRun | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | `usage_origin` and `operation_id` are read under the existing run lock. d1b never transitions the run: a refused launch fails only the invocation. Calibration does not go through `SDR.Model`, so settling the proof run belongs to d3. The console latches the failed attempt's evidence and calls `finish_calibration` (E1) under its reviewed rules. A running proof run becomes `:succeeded` / `:calibration_latched` when its evidence is latched; a terminal run is unchanged. Admission never stops the run. *(Corrected in 8.14.9, Codex 622a059 review: the earlier clause "d3 adds no separate refusal stop", passed at b77426a, conflicted with R11-2. `calibrate` does stop a run refused at launch, through the existing `SDR.Model.stop_refused/3` with that receipt, before E1.)* C7 leaves every unrelated target untouched. For a non-`:proof` target, d1b makes no run transition | Existing run lock |
 
 **ADR and diagram evaluation.**
 - **ADR:** within ADR-0005's R0 calibration isolation (8.2). There is no
@@ -1959,7 +1959,7 @@ Every post-call decision reads the fresh committed row (`status`,
 | 5 | reserve | any other error (no invocation) | `Agents.cancel_run/2` (existing action), then `aborted`, then `release`. If the run stop itself fails: hard stop | released, or `claimed` kept |
 | 6 | `launch_pending` write | fails | hard stop. The reservation event's claim binds the target for recovery | `claimed`, kept |
 | 7 | `Authority.issue` | fails (the row is still `reserved`) | `recover_calibration(:unlaunched)`, then evidence (failed), then `finish_calibration`, then `aborted`, then `release`. Any step failing keeps the record | released, or `launch_pending` kept |
-| 8 | after the call | `sent_at` nil (`reserved`, or `failed` by the facade or an admission refusal; the reason is kept) | a verified receipt or a `launched` record here is a conflict (hard stop). Otherwise a `reserved` row gets `recover_calibration(:unlaunched)`, then evidence, `finish_calibration`, `aborted`, `release` | released, or `launch_pending` kept |
+| 8 | after the call | `sent_at` nil (`reserved`, or `failed` by the facade or an admission refusal; the reason is kept) | a verified receipt or a `launched` record here is a conflict (hard stop). An actual launch `%Refused{}`: `SDR.Model.stop_refused/3` with that receipt first (8.14.9; a failed stop keeps the record). A `reserved` row: `recover_calibration(:unlaunched)`. Then evidence, `finish_calibration`, `aborted`, `release` | released, or `launch_pending` kept |
 | 9 | after the call | `sent_at` set and the record is `launched` | the normal path (10–13) | → `finished` |
 | 10 | after the call | `sent_at` set and the record is `launch_pending` (unverified or no receipt), **including a deterministic no-spawn after `sent`** | stop. Sent history is never aborted; recovery is attended (8.14.5) | `launch_pending`, kept |
 | 11 | normal | `ClaudeCLI.admission(server) == %{admission: :open}` **and** `LaunchRecord.quiescence(record, probe:) == :quiescent` (root absent or reused, group observed empty: E4c-3) | E3 reconcile, then `Outcome.classify`, then evidence, then `finish_calibration`, then `advance(:finished)`, then `release` | released |
@@ -2037,7 +2037,7 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 | Launch record writer (`calibrate`) | Existing artifact | The command is the single issuer of synchronous record operations; no observer hand-off | No concurrent record writer. While the owner VM lives, recovery refuses `:owner_alive` | Command |
 | Private server reaper and ClaudeCLI cleanup | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | No `identity:` guard; cleanup as for ordinary calls; identity is observation only | Server |
 | `ModelProvider.calibration_call/3` | New entry (seam-only) | Authoritative target checks, then the shared helper | No provider call or write on refusal; ordinary `complete/2` unchanged | Calling process |
-| AgentRun (`:proof`, no invocation) | Existing | Stopped by `SDR.Model.stop_refused/3` with the reservation receipt, or `cancel_run/2` without one | Never left running by `calibrate`; E1 settles runs with an invocation | Existing run actions |
+| AgentRun (`:proof`) | Existing | Created and started by `calibrate` with the 8.14.9 attributes. With no invocation: stopped by `SDR.Model.stop_refused/3` with the reservation receipt, or `cancel_run/2` without one. Refused at launch: stopped by `stop_refused/3` with the launch receipt before E1 (8.14.9; corrects the 8.13 clause) | Never left running by `calibrate`; E1 latches and preserves an already-terminal run's reason, cause and finish time; E1 settles a still-running run | Existing run actions as the tenant's `agent_runtime` |
 | Console `calibrate`, `calibrate-recover` | Existing task, new subcommands | 8.14.4 and 8.14.5; zero-target `claimed` recovery is a hard conflict in R0 (narrows E4c-2) | Single flight; typed confirmations; hard stops kept; one launch, no retry | Owner; `agent_runtime` |
 | LaunchRecord, Authority, `recover_calibration`, `finish_calibration`, Evidence v1, Outcome, Isolation | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Used as approved | As approved |
 
@@ -2214,12 +2214,17 @@ method, attestation and inventory fields are nil.
 
 #### 8.14.9 d3c part 3: the `calibrate` test surface and one ordering hook (proposed)
 
-**Status:** proposed. It follows Codex's consultation answer a5443c2b
-(report sha256 162fda3b): **real failures** through the domain APIs, plus
-a narrow, explicit ordering hook. A generic fault map that replaces an
-action's result is **not** used. The existing-seam rows may start RED
-under the 8.14 and 8.14.8 PASSes. The hook needs an exact-head recheck of
-this section before any test uses it.
+**Status:**
+- **Basis:** Codex's consultation answer a5443c2b (report sha256
+  162fda3b): **real failures** through the domain APIs, plus a narrow,
+  explicit ordering hook. A generic fault map that replaces an action's
+  result is **not** used. The existing-seam rows may start RED under the
+  8.14 and 8.14.8 PASSes.
+- **Round 1** at 622a059: **NEEDS-REVIEW** (Codex fda4ce82, report sha256
+  7f113425). Three items: rule on the refusal-stop conflict; pin the
+  definition registration and its eligibility; close the option contract,
+  including how the console tenant is resolved. This revision takes all
+  three. The hook and the setup need PASS before any test uses them.
 
 **Entity Model trigger: yes.** A new orchestration option contract:
 `Calibrate.run/2` and its options, including `hook:`. No domain resource,
@@ -2227,20 +2232,30 @@ action, policy, lock order or event changes.
 
 ##### The command
 
-`Calibrate.run(profile_id, opts)` returns `{:ok, summary}` or
-`{:stop, reason, summary}`:
+`Calibrate.run(profile_id, opts)` (`profile_id` a real profile atom)
+returns `{:ok, summary}` or `{:stop, reason, summary}`:
 - `summary` is `%{record: :none | :released | {:kept, state},
   invocation_id: id | nil, outcome: string | nil, evidence: %{path, sha256}
   | nil}`;
 - `reason` is an atom. Never provider, row or error text.
 
-Options are a **closed** key set. Any other key, or a missing key, is
-`{:stop, :calibration_options_invalid, %{record: :none, …}}` before the
-claim.
+**The option contract** (a keyword list).
+- **Required keys:** `tenant`, `root`, `evidence_dir`, `confirm`, `probe`,
+  `server`, `isolation`, `record`. Missing values are never defaulted.
+- **Optional key:** `hook`, either absent or one function of arity 2.
+- **Refused before anything else** (no tenant read, no registration, no
+  claim): an unknown key, a duplicated key, a missing required key, or a
+  value of the wrong type. `tenant` must be `:console` or a UUID string;
+  `root` and `evidence_dir` absolute paths; `confirm` a function of arity
+  1; `probe` a module; `server`, `isolation` and `record` keyword lists. A
+  present but invalid `hook` is refused, never treated as absent. The
+  result is `{:stop, :calibration_options_invalid, %{record: :none, …}}`.
+- The console's own `console_opts/1` passes this validation without a
+  hook.
 
 | Option | The console's fixed value (`console_opts/1`) | Tests |
 |---|---|---|
-| `tenant_id` | the console tenant | the test tenant |
+| `tenant` | `:console`: the singleton tenant, resolved at startup | the sandbox tenant's id |
 | `root` | the launch-record root (owner-private) | a 0700 temporary directory |
 | `evidence_dir` | the evidence directory (0700) | a 0700 temporary directory |
 | `confirm` | reads one line from the terminal | a function returning a typed line |
@@ -2253,11 +2268,26 @@ claim.
 The witness store root is read from the Witness configuration, never from
 an option.
 
+**Startup, in this order:**
+1. **Options** are validated as above.
+2. **The tenant** is resolved once. `:console` is the singleton tenant,
+   read through a scoped, read-only kernel query (`singleton == true`,
+   nothing created). A UUID (only tests pass one) must name an existing
+   tenant, read the same way. A missing or unreadable tenant is
+   `{:stop, :calibration_tenant_unavailable, %{record: :none, …}}`. It is
+   never bootstrapped, and the tenant never comes from argv or the
+   environment. The one resolved tenant binds both actors below.
+3. **The definition** is registered (below).
+4. **The claim** (row 1), then preflight as in the matrix.
+
 **Wiring.** The subcommand is `bin/calibration-console calibrate
 <profile>`.
-- `Calibrate.command(argv)` is pure. It returns `{:run, profile_id,
-  console_opts(profile_id)}` for exactly one known real profile, otherwise
-  `{:error, :usage}`.
+- `Calibrate.command(argv)` is pure: no database, file or environment
+  read. For exactly one argument naming a known real profile it returns
+  `{:run, profile_id, console_opts(profile_id)}`; otherwise
+  `{:error, :usage}`. `console_opts/1` carries the `tenant: :console`
+  selector, not a tenant id, so it stays pure. The tenant is resolved
+  later, inside `run/2`.
 - The task does exactly `{:run, p, o} = command(argv); run(p, o)`.
 - Tests assert `command/1` and `console_opts/1` exactly: no `hook`, the
   `server`, `isolation` and `record` values `[]`, `ProcessProbe`, and no
@@ -2312,11 +2342,33 @@ keeps its existing B1/R11-2 run stop:
 A pre-launch failure that leaves the row `reserved` takes
 `recover_calibration(:unlaunched)` as in the matrix.
 
-**Conflict to resolve.** The 8.13 entity row for AgentRun (PASS b77426a)
-says that d3 adds no separate refusal stop and that admission never stops
-the run. The rule above, from the 8.14.9 consultation, stops a run refused
-at launch before E1. The recheck should confirm which one holds. These
-tests follow the rule above.
+**The refusal-stop conflict is resolved** (Codex fda4ce82). The rule
+above holds; 8.13's "d3 adds no separate refusal stop" clause is corrected
+in place, and matrix row 8 and the 8.14.6 AgentRun row are aligned.
+- **Admission stays run-neutral.** `admit_launch` refuses or fails the
+  invocation and records the exact receipt, and changes no run. d1b's
+  run-neutral tests are unchanged.
+- **The command stops the run.** `calibrate` calls
+  `SDR.Model.stop_refused/3` with that receipt as the tenant's
+  `agent_runtime`, and checks it succeeded before evidence, the latch or
+  release. No second Failure, no fabricated cause, no new stop action and
+  no change to the invocation's status.
+- **E1** latches the artifact and preserves the already-terminal run's
+  failure reason, cause and finish time. It never turns the refusal into
+  `:succeeded`.
+- **A failed stop** keeps `launch_pending`, with no latch and no release.
+- **Later snapshots** re-read the committed run.
+- **Without a typed `%Refused{}` receipt** (pre-launch errors), the
+  command follows the fresh row and the unlaunched recovery rules. A
+  receipt is never synthesized from an atom, a nil `sent_at` or an
+  identity-refusal event.
+- **RED:**
+  - a real launch refusal gives the exact run cause (also when that
+    cause's Failure was resolved meanwhile) and no second Failure;
+  - E1 preserves the failed run;
+  - a trigger-failed stop keeps the record, with no evidence, latch or
+    release;
+  - admission-only tests still show the run untouched.
 
 ##### The proof run (attributes previously unstated)
 
@@ -2336,23 +2388,56 @@ Its attributes:
 | `phase` | `:research`, the existing initial phase |
 | `max_model_calls` | 1 |
 | `max_tool_calls` | 0 |
+| `max_tokens` | the existing default, 100000 (unchanged) |
+
+The definition's metadata does not itself enforce these counters; the
+run's own caps do. Cardinality is unchanged: a run has one required
+definition, and a definition has many runs.
 
 **The code-owned definition:** `name: "CalibrationConsole"`,
 `version: 1`, `module: "SdrAgent.CalibrationConsole.Calibrate"`,
 `definition: %{"allowed_actions" => [], "model_policy" => %{"provider" =>
 "claude_cli", "max_model_calls_per_run" => 1}}`.
-- It is registered through the existing idempotent
-  `Agents.register_definition/2`: the same name, version and hash returns
-  the existing row; a different hash refuses, which is
-  `{:stop, :calibration_definition_conflict, _}` before the claim.
-- **Open question for the recheck: the actor.** Registering needs the
-  tenant's `:kernel` actor, the existing fixture and seed actor. The
-  console could register the definition as `:kernel` in preflight, or
-  require it to exist already (an owner bootstrap step) and refuse
-  otherwise. The tests follow whichever is chosen.
+- **Who registers, and when** (Codex fda4ce82): it is fixed, code-owned
+  startup registration. The actor is the resolved tenant's
+  `Actor.system(:kernel, tenant_id)`, through the existing
+  `Agents.register_definition/2`. It runs after the options and the
+  tenant, and before the claim, run creation, the isolation spawn or the
+  reservation. Never in `check` or in `command/1`. No owner bootstrap step
+  is needed.
+- **The kernel actor is used only for this registration.** Run creation,
+  start, reservation, the call, every stop and the finish use the same
+  tenant's `agent_runtime`.
+- **The returned row is verified.** `register_definition/2` replays a row
+  when its body hash matches, but that hash covers `definition` only, and
+  the replay does not check status. So the command checks the returned
+  row itself: the resolved tenant; the fixed name and version; exactly the
+  fixed module; exactly the fixed canonical body and its hash; and status
+  `active`.
+- **A mismatch** (another body hash, another module, or a retired row) is
+  `{:stop, :calibration_definition_conflict, %{record: :none, …}}` before
+  the claim. Nothing is overwritten, no retirement is undone, and there is
+  no version bump or fallback definition.
+- **A database or authorization failure** is
+  `{:stop, :calibration_definition_unavailable, %{record: :none, …}}`.
+  Never "missing, so success".
 
-A failed run creation or start is row 5: no invocation. The run, if one
-was created, is cancelled; then `aborted` and `release`.
+**Run creation failures are row 5:** no invocation.
+- If creation fails, nothing exists to stop: `aborted`, then `release`.
+- If creation commits and start fails, the queued run is cancelled
+  (`cancel_run/2`), then `aborted`, then `release`. A failed cancel keeps
+  the claim.
+
+**RED for the setup:**
+- the first registration writes one audited event; a repeat returns the
+  unchanged row with no extra event;
+- another hash, another module or a retired row is refused before the
+  claim;
+- the actor and tenant are the expected ones;
+- create, start and cancel behave as above;
+- the persisted proof run carries exactly the attributes in the table;
+- missing-tenant, option-contract and `command/1` / `console_opts/1`
+  cases.
 
 #### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 

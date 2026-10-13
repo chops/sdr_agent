@@ -93,13 +93,13 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   @v3 "claude-message-json/3+prompt-builder/1"
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
-  setup %{tmp_dir: tmp} do
+  setup %{tmp_dir: tmp} = tags do
     start_supervised!(ConsoleProbe)
     start_supervised!(LaunchProbe)
     start_supervised!(Authority)
     %{root: store} = AdmissionFixtures.admit_tuples!()
     tenant = bootstrap!()
-    g_r0!(tenant)
+    if Map.get(tags, :grant, true), do: g_r0!(tenant)
 
     previous = Application.get_env(:sdr_agent, :calibration_launch_probe)
     Application.put_env(:sdr_agent, :calibration_launch_probe, LaunchProbe)
@@ -189,13 +189,11 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
       end
     end
 
+    @tag grant: false
     test "no G-R0 aborts and releases", ctx do
-      # A tenant with no grant (the bootstrap tenant is a singleton).
       before = counts(ctx)
 
-      assert {:stop, :calibration_grant_unavailable, %{record: :released}} =
-               run(ctx, tenant_id: Ash.UUIDv7.generate())
-
+      assert {:stop, :calibration_grant_unavailable, %{record: :released}} = run(ctx)
       assert released?(ctx)
       assert counts(ctx) == before
     end
@@ -476,7 +474,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     opts =
       Keyword.merge(
         [
-          tenant_id: ctx.tenant.id,
+          tenant: ctx.tenant.id,
           root: ctx.root,
           evidence_dir: ctx.evidence,
           confirm: confirm(@typed),
