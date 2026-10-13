@@ -123,23 +123,7 @@ defmodule SdrAgent.Agents.ResultGateRecoveryLateWinnerTest do
 
     winner =
       Task.async(fn ->
-        with_connection(fn ->
-          {:ok, release} =
-            Audit.transaction(fn ->
-              lock_share(ModelInvocation, invocation.id, ctx.tenant.id)
-              Enum.each(shared, fn {resource, id} -> lock_share(resource, id, ctx.tenant.id) end)
-              {:ok, _} = Kernel.lock_head(ctx.tenant.id)
-              send(parent, :head_held)
-
-              receive do
-                :decide -> decide.()
-              after
-                30_000 -> raise "never told to decide"
-              end
-            end)
-
-          release
-        end)
+        with_connection(fn -> win(ctx, invocation, shared, decide, parent) end)
       end)
 
     assert_receive :head_held, 10_000
@@ -156,6 +140,28 @@ defmodule SdrAgent.Agents.ResultGateRecoveryLateWinnerTest do
     send(winner.pid, :decide)
     winner_release = Task.await(winner, 30_000)
     {winner_release, Task.await(recovery, 30_000)}
+  end
+
+  # The winner's transaction: its locks and the head, then (on :decide) its
+  # decision, committed.
+  defp win(ctx, invocation, shared, decide, parent) do
+    {:ok, release} =
+      Audit.transaction(fn -> hold_then_decide(ctx, invocation, shared, decide, parent) end)
+
+    release
+  end
+
+  defp hold_then_decide(ctx, invocation, shared, decide, parent) do
+    lock_share(ModelInvocation, invocation.id, ctx.tenant.id)
+    Enum.each(shared, fn {resource, id} -> lock_share(resource, id, ctx.tenant.id) end)
+    {:ok, _} = Kernel.lock_head(ctx.tenant.id)
+    send(parent, :head_held)
+
+    receive do
+      :decide -> decide.()
+    after
+      30_000 -> raise "never told to decide"
+    end
   end
 
   defp lock_share(resource, id, tenant_id) do
