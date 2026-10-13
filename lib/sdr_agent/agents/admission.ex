@@ -410,6 +410,10 @@ defmodule SdrAgent.Agents.Admission do
       `:calibration_not_authorized`, `:calibration_evidence_pending`,
       `:result_gate_inactive`, `:witness_store_untrusted` or
       `:tuple_not_promoted`, with its check;
+    * `:calibration_grant_mismatch` (`:binding_changed` or
+      `:binding_unrecorded`) — a G-R0 binding recorded at reservation no
+      longer matches the charge, the profile or the grant's revision, or
+      the recorded binding is malformed (packet 8.3);
     * `:grant_ineligible_at_launch` with the failed check: `:grant_missing`,
       `:grant_revoked`, `:grant_not_started`, `:grant_expired`,
       `:profile_not_in_grant`, `:allocation_not_in_grant`,
@@ -429,8 +433,36 @@ defmodule SdrAgent.Agents.Admission do
 
       true ->
         with :ok <- Gate.admit_launch(run, invocation, store),
+             :ok <- launch_binding(invocation, run.tenant_id),
              do: launch_terms(run, invocation, now)
     end
+  end
+
+  # The G-R0 binding recorded at reservation (packet 8.3 "At launch"): the
+  # charge and profile are still the bound ones, and the grant (read under
+  # its share lock) is still at the bound revision. An amendment or
+  # revocation refuses, a malformed recorded binding is never read as a
+  # legacy absence, and there is no fallback to another budget.
+  defp launch_binding(invocation, tenant_id) do
+    case Gate.recorded_binding(invocation) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, binding} ->
+        if bound?(invocation, binding, charged(ModelCallGrant, invocation.grant_id, tenant_id)),
+          do: :ok,
+          else: {:error, :calibration_grant_mismatch, :binding_changed}
+
+      {:error, :binding_unrecorded} ->
+        {:error, :calibration_grant_mismatch, :binding_unrecorded}
+    end
+  end
+
+  defp bound?(_invocation, _binding, nil), do: false
+
+  defp bound?(invocation, binding, grant) do
+    {invocation.grant_id, invocation.allocation_id, invocation.profile_id, grant.revision} ==
+      {binding.grant_id, binding.allocation_id, binding.profile_id, binding.grant_revision}
   end
 
   defp launch_terms(run, invocation, now) do
