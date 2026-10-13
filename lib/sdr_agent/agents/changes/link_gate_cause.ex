@@ -88,7 +88,7 @@ defmodule SdrAgent.Agents.Changes.LinkGateCause do
          {:ok, %Failure{} = failure} <-
            read(Failure, arg.(:witness_failure_id), run.tenant_id, lock),
          true <- cause_of?(failure, invocation, run),
-         true <- Binding.bound_cause(release) == failure.id do
+         true <- Binding.bound_cause(release) == {:ok, failure.id} do
       Ash.Changeset.force_change_attribute(changeset, :attention_failure_id, failure.id)
     else
       _ -> invalid(changeset)

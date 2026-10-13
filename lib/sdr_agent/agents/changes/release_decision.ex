@@ -364,21 +364,32 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   end
 
   defp check_replay(changeset, record) do
-    cond do
-      record.id == Ash.Changeset.get_attribute(changeset, :id) ->
-        {:ok, record}
+    if record.id == Ash.Changeset.get_attribute(changeset, :id),
+      do: {:ok, record},
+      else: replay(changeset, record, Binding.bound_cause(record))
+  end
 
-      Map.take(record, @fingerprint) == fingerprint(changeset) and
-          Binding.bound_cause(record) == Ash.Changeset.get_argument(changeset, :gate_cause_id) ->
-        {:ok, Ash.Resource.put_metadata(record, :sdr_replayed, true)}
+  # Round-7 obligation 1: an unavailable original binding is refused, never
+  # read as "no cause".
+  defp replay(_changeset, record, {:error, :binding_unavailable}) do
+    {:error,
+     Ash.Error.Changes.InvalidArgument.exception(
+       field: :gate_cause_id,
+       message: "the existing release #{record.id} has no readable original binding"
+     )}
+  end
 
-      true ->
-        {:error,
-         ReleaseConflict.exception(
-           model_invocation_id: record.model_invocation_id,
-           existing_id: record.id,
-           existing_cause_id: Binding.bound_cause(record)
-         )}
+  defp replay(changeset, record, {:ok, bound}) do
+    if Map.take(record, @fingerprint) == fingerprint(changeset) and
+         bound == Ash.Changeset.get_argument(changeset, :gate_cause_id) do
+      {:ok, Ash.Resource.put_metadata(record, :sdr_replayed, true)}
+    else
+      {:error,
+       ReleaseConflict.exception(
+         model_invocation_id: record.model_invocation_id,
+         existing_id: record.id,
+         existing_cause_id: bound
+       )}
     end
   end
 
