@@ -166,6 +166,37 @@ defmodule SdrAgent.Agents.Witness.GateEvidenceTest do
     assert Enum.filter(live(ctx, invocation), &(&1.severity == :critical)) == []
   end
 
+  test "a resolved distinct mismatch is not reopened while the C1 status stays mismatch (review MF4)",
+       ctx do
+    {invocation, release, cause} = gated!(ctx, "cli_shape_v3_mismatch")
+    resolve!(ctx, cause)
+
+    # A later link time than the release's (the clock is per process).
+    SdrAgent.Clock.freeze(DateTime.add(release.decided_at, 1, :second))
+    on_exit(&SdrAgent.Clock.unfreeze/0)
+
+    inventory = Path.join([ctx.root, "witnesses", invocation.id])
+    for entry <- File.ls!(inventory), do: File.rm!(Path.join(inventory, entry))
+
+    Proxy.exchange!(ctx.root, invocation.id,
+      request:
+        Proxy.cli_request("a different synthetic mismatch",
+          cache_ttl: "1h",
+          trailing_message_extra: %{"output_config" => %{"effort" => "high"}}
+        ),
+      response: Proxy.sse_response(~s({"answer":"qualified","score":42}))
+    )
+
+    assert {:ok, %{status: :mismatch, links: links}} = scan(ctx, invocation)
+    assert Enum.count(links, &(&1.link_status == :mismatch)) >= 2
+    assert [later] = Enum.filter(live(ctx, invocation), &(&1.severity == :critical))
+    resolve!(ctx, later)
+
+    assert {:ok, %{status: :mismatch}} = scan(ctx, invocation)
+    assert Enum.filter(live(ctx, invocation), &(&1.severity == :critical)) == []
+    assert notes(ctx, release) == []
+  end
+
   test "a distinct later mismatch still opens its own critical", ctx do
     {invocation, release, cause} = gated!(ctx, "none")
     assert cause.severity == :warning

@@ -16,8 +16,13 @@ defmodule SdrAgent.Agents.Witness.GateEvidence do
     * once it is resolved it stays resolved, and an unchanged observation
       (a C1 status equal to the baseline) never opens a new warning under
       a new id;
-    * a distinct later mismatch, meaning a current mismatch link that was
-      not current at the baseline, still opens its own critical.
+    * a distinct later mismatch, meaning a current mismatch link that has
+      not yet received attention, still opens its own critical. A link
+      has received attention when it was current at the baseline, or
+      current when a later critical for the invocation was opened (rebuilt
+      from the append-only link and Failure histories; review MF4). So a
+      resolved distinct critical is not reopened while the C1 status stays
+      the same.
 
   **Baseline.** The `current_status` and `current_link_ids` of the
   release's last `agents.witness.gate_evidence_changed` note. With no note,
@@ -44,16 +49,19 @@ defmodule SdrAgent.Agents.Witness.GateEvidence do
   alias SdrAgent.Agents.Witness
   alias SdrAgent.Audit.AuditEvent
   alias SdrAgent.Audit.Kernel
+  alias SdrAgent.Operations.Failure
 
   @note "agents.witness.gate_evidence_changed"
   @resource "SdrAgent.Agents.ModelResultRelease"
+  @subject "SdrAgent.Agents.ModelInvocation"
   @statuses ~w(unwitnessed inferred reconciled mismatch)
 
   @type t :: %{
           release: struct(),
           cause_id: Ecto.UUID.t(),
           baseline_status: atom(),
-          baseline_link_ids: [Ecto.UUID.t()]
+          baseline_link_ids: [Ecto.UUID.t()],
+          attended_link_ids: [Ecto.UUID.t()]
         }
 
   @doc """
@@ -64,13 +72,15 @@ defmodule SdrAgent.Agents.Witness.GateEvidence do
   def protection(invocation) do
     with {:ok, release} <- release(invocation),
          {:ok, cause_id} when is_binary(cause_id) <- Binding.bound_cause(release),
-         {:ok, status, link_ids} <- baseline(release, invocation) do
+         {:ok, status, link_ids} <- baseline(release, invocation),
+         {:ok, attended} <- attended(release, invocation) do
       {:ok,
        %{
          release: release,
          cause_id: cause_id,
          baseline_status: status,
-         baseline_link_ids: link_ids
+         baseline_link_ids: link_ids,
+         attended_link_ids: Enum.uniq(link_ids ++ attended)
        }}
     else
       {:ok, nil} -> {:ok, nil}
@@ -78,13 +88,17 @@ defmodule SdrAgent.Agents.Witness.GateEvidence do
     end
   end
 
-  @doc "Whether a current mismatch link was not current at the baseline."
+  @doc """
+  Whether a current mismatch link has not yet received attention: it was
+  neither current at the baseline nor current when a critical for this
+  invocation was opened after the release (review MF4).
+  """
   @spec distinct_mismatch?(t(), [struct()]) :: boolean()
   def distinct_mismatch?(protection, links),
     do:
       Enum.any?(
         links,
-        &(&1.link_status == :mismatch and &1.id not in protection.baseline_link_ids)
+        &(&1.link_status == :mismatch and &1.id not in protection.attended_link_ids)
       )
 
   @doc "Whether the C1 status over `links` differs from the baseline."
@@ -161,21 +175,56 @@ defmodule SdrAgent.Agents.Witness.GateEvidence do
 
   defp from_note(_malformed), do: {:error, :binding_unavailable}
 
-  # The links current at the decision: recorded by then, with no successor
-  # recorded by then.
   defp as_of(release, invocation) do
+    with {:ok, current} <- current_at(invocation, release.decided_at) do
+      {:ok, Witness.status(current), current |> Enum.map(& &1.id) |> Enum.sort()}
+    end
+  end
+
+  # The mismatch links that already received attention after the release:
+  # those current when each later critical for this invocation was opened
+  # (a critical is opened in the same transaction as the links it answers),
+  # rebuilt from the append-only histories.
+  defp attended(release, invocation) do
+    with {:ok, criticals} <- later_criticals(release, invocation) do
+      Enum.reduce_while(criticals, {:ok, []}, &attend(invocation, &1, &2))
+    end
+  end
+
+  defp attend(invocation, critical, {:ok, acc}) do
+    case current_at(invocation, critical.inserted_at) do
+      {:ok, links} -> {:cont, {:ok, acc ++ mismatch_ids(links)}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp later_criticals(release, invocation) do
+    Failure
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^invocation.tenant_id and subject_resource == @subject and
+        subject_id == ^invocation.id and class == :reconciliation_required and
+        severity == :critical and inserted_at >= ^release.decided_at
+    )
+    |> Ash.read()
+  end
+
+  defp mismatch_ids(links), do: for(%{link_status: :mismatch, id: id} <- links, do: id)
+
+  # The links current at `time`: recorded by then, with no successor
+  # recorded by then.
+  defp current_at(invocation, time) do
     WireWitnessLink
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
     |> Ash.Query.filter(
       tenant_id == ^invocation.tenant_id and model_invocation_id == ^invocation.id and
-        recorded_at <= ^release.decided_at
+        recorded_at <= ^time
     )
     |> Ash.read()
     |> case do
       {:ok, links} ->
         superseded = MapSet.new(links, & &1.supersedes_id)
-        current = Enum.reject(links, &MapSet.member?(superseded, &1.id))
-        {:ok, Witness.status(current), current |> Enum.map(& &1.id) |> Enum.sort()}
+        {:ok, Enum.reject(links, &MapSet.member?(superseded, &1.id))}
 
       error ->
         error
