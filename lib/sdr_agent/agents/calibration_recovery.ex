@@ -87,7 +87,7 @@ defmodule SdrAgent.Agents.CalibrationRecovery do
     defp decision(:unlaunched), do: {:ok, :unlaunched}
 
     defp decision({:quiescent, %{} = observation}) do
-      if observation?(observation),
+      if quiescent?(observation),
         do: {:ok, {:quiescent, observation}},
         else: {:error, :calibration_not_recoverable}
     end
@@ -108,16 +108,33 @@ defmodule SdrAgent.Agents.CalibrationRecovery do
           [:attestation_id, :instance_id, :invocation_id, :ticket_id],
           &uuid?(attestation[&1])
         ) and
-        timestamp?(attestation.confirmed_at) and observation?(observation)
+        timestamp?(attestation.confirmed_at) and attested?(observation)
     end
 
     defp attestation?(_attestation), do: false
 
-    defp observation?(observation) do
-      Enum.sort(Map.keys(observation)) == Enum.sort(@observation_keys) and
-        observation.state in ["launch_pending", "launched"] and
-        Enum.all?([observation.root_pid, observation.process_group_id], &(is_nil(&1) or pos?(&1)))
-    end
+    # Automatic quiescence is observed only for a launched tree: both ids,
+    # the root leading its own group (E4c-1; Codex, 5f90cf8). A pending launch needs the owner's attestation.
+    defp quiescent?(observation),
+      do: closed_observation?(observation) and launched_ids?(observation)
+
+    # An attestation's observation is consistent with its state: a pending
+    # launch has no ids; a launched tree has both.
+    defp attested?(%{state: "launch_pending"} = observation),
+      do:
+        closed_observation?(observation) and is_nil(observation.root_pid) and
+          is_nil(observation.process_group_id)
+
+    defp attested?(observation),
+      do: closed_observation?(observation) and launched_ids?(observation)
+
+    defp closed_observation?(observation),
+      do: Enum.sort(Map.keys(observation)) == Enum.sort(@observation_keys)
+
+    defp launched_ids?(observation),
+      do:
+        observation.state == "launched" and pos?(observation.root_pid) and
+          observation.process_group_id == observation.root_pid
 
     defp uuid?(value), do: is_binary(value) and value =~ @uuid
     defp pos?(value), do: is_integer(value) and value > 0
