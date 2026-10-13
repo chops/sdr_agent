@@ -13,7 +13,7 @@
       --line:#e5e8ed;--line-2:#eef0f3;
       --accent:#0f6b4e;--accent-hover:#0b563e;--accent-ink:#fff;--accent-tint:#e5f3ec;--accent-line:#bfe0cf;
       --red:#b42318;--red-tint:#fdecea;--red-line:#f5c6c0;
-      --amber:#9a5b06;--amber-tint:#fdf3e1;
+      --amber:#94570a;--amber-tint:#fdf3e1;--amber-line:#efd29b;
       --mark:#fff3c4;--mark-ink:#5a4300;
       --shadow-sm:0 1px 2px rgb(20 26 36/.05);
       --shadow:0 1px 2px rgb(20 26 36/.04),0 4px 14px rgb(20 26 36/.05);
@@ -29,7 +29,7 @@
         --line:#272d36;--line-2:#20252d;
         --accent:#3fbf8f;--accent-hover:#5ccfa2;--accent-ink:#06261a;--accent-tint:#13302a;--accent-line:#22513f;
         --red:#ff8a7d;--red-tint:#3a1d1b;--red-line:#5a2c28;
-        --amber:#f0b45a;--amber-tint:#33281a;
+        --amber:#f0b45a;--amber-tint:#33281a;--amber-line:#5c4521;
         --mark:#3b3420;--mark-ink:#f5e2a6;
         --shadow-sm:0 1px 2px rgb(0 0 0/.3);
         --shadow:0 1px 2px rgb(0 0 0/.3),0 6px 18px rgb(0 0 0/.25);
@@ -66,11 +66,9 @@
     .ws{display:flex;align-items:center;gap:8px;color:var(--ink);font-weight:600;white-space:nowrap}
     .ws-mark{display:grid;place-items:center;width:20px;height:20px;border-radius:5px;background:#e9d8b4;color:#4a3410;font-size:11px;font-weight:700}
     .top-right{display:flex;align-items:center;gap:14px}
-    .prev-link{font-size:12px;color:var(--muted);text-decoration:none;padding:4px 8px;border-radius:6px}
-    .prev-link:hover{background:var(--sunk);color:var(--ink)}
     .me{display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#2f7d63,#1f5a7a);color:#fff;font-size:11px;font-weight:700;letter-spacing:.02em}
 
-    .content{width:100%;max-width:1120px;margin:0 auto;padding:30px 28px 40px}
+    .content{width:100%;max-width:1280px;margin:0 auto;padding:30px 28px 40px}
 
     /* Greeting + tiles */
     .greet{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px}
@@ -98,7 +96,7 @@
     .sec-note{margin-left:auto;font-size:12px;color:var(--faint)}
 
     .panel{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);box-shadow:var(--shadow-sm);overflow:hidden}
-    .cols,.row{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1.05fr) minmax(0,1.7fr) minmax(0,.95fr) 128px;align-items:center;gap:16px;padding:0 16px}
+    .cols,.row{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1.05fr) minmax(0,1.7fr) minmax(0,.95fr) 172px;align-items:center;gap:16px;padding:0 16px}
     .cols{height:34px;border-bottom:1px solid var(--line);background:var(--sunk);font-size:12px;color:var(--faint);font-weight:550}
     .rows{list-style:none;margin:0;padding:0}
     .row{min-height:62px;padding-top:10px;padding-bottom:10px;border-top:1px solid var(--line-2);transition:background .12s}
@@ -198,14 +196,16 @@
 
     /* Responsive */
     @media (max-width:1080px){
-      .cols,.row{grid-template-columns:minmax(0,1.5fr) minmax(0,1fr) minmax(0,1.5fr) 124px}
+      .cols,.row{grid-template-columns:minmax(0,1.5fr) minmax(0,1fr) minmax(0,1.5fr) 172px}
       .col-fresh,.row .fresh{display:none}
     }
     @media (max-width:760px){
       .app{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+      .side-top{margin-right:auto}
       .sidebar{position:sticky;z-index:6;height:auto;flex-direction:row;align-items:center;gap:6px;padding:8px 12px;border-right:0;border-bottom:1px solid var(--line)}
-      .brand{padding:4px;margin-right:auto}
-      .brand-name,.side-foot,.nav-item .label,.nav-item .count{display:none}
+      .brand{padding:4px}
+      .brand-name,.side-foot,.nav-item .count,.collapse-btn,.nav-toggle,.ws-name,.crumb-sep,.crumb-page{display:none}
+      .nav-item .label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
       .nav{display:flex;gap:2px}
       .nav-item{padding:8px}
       .topbar{position:static;height:46px;padding:0 16px}
@@ -228,6 +228,8 @@
       .tag{white-space:normal}
       .prob{grid-template-columns:1fr;gap:10px;padding:14px;border:1px solid var(--line);border-left:3px solid var(--red);border-radius:var(--r);background:var(--surface);box-shadow:var(--shadow-sm)}
       .prob .pill{justify-self:start}
+      .states a{padding:4px 8px}
+      .notice{align-items:flex-start}
       .prob-main{flex-direction:column;align-items:flex-start;gap:6px}
       .prob-act .btn.primary{flex:1;height:38px}
       .prob-act{flex-wrap:wrap}
@@ -242,7 +244,68 @@
       .d-foot .btn:not(.primary){flex:1}
       .footer{padding:12px 16px 24px}
     }
-    @media (max-width:420px){.prev-link{display:none}}
+
+    /* Sidebar collapse (CSS-only: hidden checkbox + label) */
+    .nav-toggle{position:fixed;top:0;left:0;width:1px;height:1px;margin:0;opacity:0}
+    .side-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .collapse-btn{position:relative;display:grid;place-items:center;flex:none;width:28px;height:28px;border-radius:6px;color:var(--faint);cursor:pointer;transition:background .15s,color .15s}
+    .collapse-btn:hover{background:var(--surface);color:var(--ink);box-shadow:var(--shadow-sm)}
+    .collapse-btn svg{transition:transform .22s}
+    .nav-toggle:focus-visible ~ .app .collapse-btn{outline:2px solid var(--focus);outline-offset:2px;color:var(--ink)}
+    .hint,.nav-item .label{white-space:nowrap}
+    .hint{position:absolute;left:calc(100% + 10px);top:50%;transform:translateY(-50%);padding:5px 8px;border-radius:6px;background:var(--ink);color:var(--bg);font-size:12px;font-weight:550;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:opacity .12s}
+    .collapse-btn:hover .hint,.nav-toggle:focus-visible ~ .app .hint{opacity:1}
+    .t-expand{display:none}
+    .nav-toggle:checked ~ .app .t-expand{display:inline}
+    .nav-toggle:checked ~ .app .t-collapse{display:none}
+    @media (min-width:761px){
+      .app{grid-template-columns:auto minmax(0,1fr)}
+      .sidebar{z-index:10;width:232px;transition:width .24s cubic-bezier(.22,.8,.24,1)}
+      .nav-toggle:checked ~ .app .sidebar{width:64px}
+      .nav-toggle:checked ~ .app .side-top{flex-direction:column;gap:10px}
+      .nav-toggle:checked ~ .app .brand{padding:6px 0}
+      .nav-toggle:checked ~ .app .brand-name,.nav-toggle:checked ~ .app .side-foot{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+      .nav-toggle:checked ~ .app .collapse-btn svg{transform:scaleX(-1)}
+      .nav-toggle:checked ~ .app .nav-item{position:relative;justify-content:center;padding:9px 0}
+      .nav-toggle:checked ~ .app .nav-item .label{position:absolute;left:calc(100% + 12px);top:50%;transform:translateY(-50%);padding:5px 8px;border-radius:6px;background:var(--ink);color:var(--bg);font-size:12px;font-weight:550;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:opacity .12s}
+      .nav-toggle:checked ~ .app .nav-item:hover .label{opacity:1}
+      .nav-toggle:checked ~ .app .nav-item .count{position:absolute;top:2px;right:3px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--accent);color:var(--accent-ink);font-size:10px;font-weight:700;line-height:16px;text-align:center;box-shadow:0 0 0 2px var(--sunk)}
+    }
+
+    /* Preview state switcher */
+    .states{display:flex;gap:2px;padding:2px;border:1px solid var(--line);border-radius:8px;background:var(--sunk)}
+    .states a{padding:3px 10px;border-radius:6px;color:var(--muted);font-size:12.5px;font-weight:550;text-decoration:none;white-space:nowrap}
+    .states a:hover{color:var(--ink)}
+    .states a[aria-current]{background:var(--surface);color:var(--ink);box-shadow:var(--shadow-sm)}
+
+    /* Changed / partial / empty states */
+    .notice{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;margin:0 0 10px;padding:10px 14px;border:1px solid var(--amber-line);border-radius:var(--r);background:var(--amber-tint)}
+    .notice > svg{color:var(--amber)}
+    .notice strong{font-weight:600}
+    .diff{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted);flex-wrap:wrap}
+    .diff s{color:var(--faint)}
+    .diff b{color:var(--ink);font-weight:600}
+    .row.changed{box-shadow:inset 3px 0 0 var(--amber);background:color-mix(in srgb,var(--amber-tint) 45%,var(--surface))}
+    .tag.amber{background:var(--amber-tint);border-color:var(--amber-line)}
+    .tag.amber strong,.tag.amber svg{color:var(--amber)}
+    .dot.amber{background:var(--amber);box-shadow:0 0 0 3px var(--amber-tint)}
+    .d-note{display:inline-flex;align-items:center;gap:7px;margin:0 0 14px;padding:4px 10px;border-radius:999px;border:1px solid var(--amber-line);background:var(--amber-tint);color:var(--amber);font-size:12.5px;font-weight:600}
+    .strip{display:flex;align-items:center;gap:10px;min-height:52px;padding:8px 10px 8px 16px;border-left:3px solid var(--amber)}
+    .strip > svg{color:var(--amber)}
+    .strip span{font-weight:600}
+    .strip .btn{margin-left:auto}
+    .tile-num.unknown{color:var(--faint)}
+    .empty{display:flex;flex-direction:column;align-items:center;text-align:center;padding:56px 24px 60px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface);box-shadow:var(--shadow-sm)}
+    .empty-art{display:grid;place-items:center;width:64px;height:64px;margin-bottom:18px;border-radius:50%;background:var(--accent-tint);color:var(--accent);box-shadow:0 0 0 8px color-mix(in srgb,var(--accent-tint) 45%,transparent)}
+    .empty h2{font-size:18px;letter-spacing:-.01em}
+    .empty p{margin:6px 0 0;color:var(--faint);font-size:13px}
+    @media (max-width:760px){
+      .collapse-btn,.nav-toggle,.crumbs{display:none}
+      .top-right{flex:1;justify-content:space-between}
+      .row.changed{box-shadow:var(--shadow-sm),inset 3px 0 0 var(--amber)}
+      .strip{flex-wrap:wrap;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:var(--r);background:var(--surface)}
+      .empty{padding:44px 20px 48px}
+    }
     @media (prefers-reduced-motion:reduce){
       *,*::before,*::after{transition-duration:0s!important;transition-delay:0s!important;animation:none!important}
       a.tile:hover{transform:none}
@@ -250,14 +313,18 @@
   </style>
 </head>
 <body>
+<input class="nav-toggle" type="checkbox" id="nav-collapse" aria-label="Collapse sidebar">
 <div class="app" id="top">
   <aside class="sidebar" aria-label="Workspace">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8.5 14 2l-4.5 12-2-4.5z"/></svg></span>
-      <span class="brand-name">SDR Agent</span>
+    <div class="side-top">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8.5 14 2l-4.5 12-2-4.5z"/></svg></span>
+        <span class="brand-name">SDR Agent</span>
+      </div>
+      <label class="collapse-btn" for="nav-collapse"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2"/><path d="M6 3v10M11 6.2 9.2 8l1.8 1.8"/></svg><span class="hint" aria-hidden="true"><span class="t-collapse">Collapse sidebar</span><span class="t-expand">Expand sidebar</span></span></label>
     </div>
     <nav class="nav" aria-label="Main">
-      <span class="nav-item" aria-current="page"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 7 8 2.5 13.5 7v6.5h-3.5v-4h-4v4H2.5z"/></svg><span class="label">Home</span><span class="count num" aria-hidden="true">4</span></span>
+      <span class="nav-item" aria-current="page"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 7 8 2.5 13.5 7v6.5h-3.5v-4h-4v4H2.5z"/></svg><span class="label">Home</span><span class="count num"><span class="sr">, </span>4<span class="sr"> waiting</span></span></span>
       <span class="nav-item" aria-disabled="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="5.5" r="2.5"/><path d="M1.5 13.5c.6-2.4 2.3-3.6 4.5-3.6s3.9 1.2 4.5 3.6"/><path d="M11 3.2a2.4 2.4 0 0 1 0 4.6M12.4 10.2c1.1.5 1.8 1.6 2.1 3.3"/></svg><span class="label">Leads</span></span>
       <span class="nav-item" aria-disabled="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 14V3.5l6-1.5v12M8.5 6l5 1.5V14M1.5 14h13"/><path d="M5 6h1M5 8.5h1M5 11h1M10.5 9.5h1M10.5 12h1" stroke-linecap="round"/></svg><span class="label">Accounts</span></span>
       <span class="nav-item" aria-disabled="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M2 6.5v3h2.5L11 13V3L4.5 6.5zM13.5 6.5v3"/></svg><span class="label">Campaigns</span></span>
@@ -268,9 +335,9 @@
 
   <div class="main">
     <header class="topbar">
-      <div class="crumbs"><span class="ws"><span class="ws-mark" aria-hidden="true">E</span>Example Widgets</span><span aria-hidden="true">/</span><span>Home</span></div>
+      <div class="crumbs"><span class="ws"><span class="ws-mark" aria-hidden="true">E</span><span class="ws-name">Example Widgets</span></span><span class="crumb-sep" aria-hidden="true">/</span><span class="crumb-page">Home</span></div>
       <div class="top-right">
-        <a class="prev-link" href="normal.html">Previous mockup</a>
+        <nav class="states" aria-label="Preview state"><a href="concept-a.html" aria-current="page">Inbox</a><a href="concept-a-changed.html">Changed</a><a href="concept-a-partial.html">Partial</a><a href="concept-a-empty.html">Empty</a></nav>
         <span class="me" role="img" aria-label="Alex Morgan">AM</span>
       </div>
     </header>
@@ -280,7 +347,6 @@
         <h1>Good morning, Alex</h1>
         <span class="date">Monday, October 12</span>
       </div>
-
       <div class="tiles">
         <a class="tile ready" href="#ready">
           <span class="tile-label"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M2 8.5 14 2l-4.5 12-2-4.5z"/></svg>Ready for outreach</span>
@@ -342,6 +408,7 @@
           </div>
         </div>
       </section>
+
     </main>
 
     <footer class="footer">Concept A · design preview · fictional data · nothing here changes data or sends email.</footer>
@@ -379,7 +446,6 @@
     </div>
   </aside>
 </div>
-
 <div class="drawer-wrap" id="review-jonah">
   <a class="scrim" href="#top" tabindex="-1" aria-hidden="true"></a>
   <aside class="drawer" role="dialog" aria-labelledby="jonah-name">
@@ -410,7 +476,6 @@
     </div>
   </aside>
 </div>
-
 <div class="drawer-wrap" id="review-priya">
   <a class="scrim" href="#top" tabindex="-1" aria-hidden="true"></a>
   <aside class="drawer" role="dialog" aria-labelledby="priya-name">
@@ -443,9 +508,9 @@
 </div>
 
 <!-- Simulated outcomes: nothing changes in this preview -->
-<div class="toast" id="captured" role="status"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5"/></svg><span>Would capture locally — not sent. Preview only.</span><a href="#top">Dismiss</a></div>
-<div class="toast" id="edit" role="status"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 2.5 13.5 5.5 6 13H3v-3z"/></svg><span>Would open the editor. Preview only.</span><a href="#top">Dismiss</a></div>
-<div class="toast" id="rejected" role="status"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg><span>Would ask for a reject reason. Preview only.</span><a href="#top">Dismiss</a></div>
-<div class="toast" id="budget" role="status"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.8M8 12.4v1.8M1.8 8h1.8M12.4 8h1.8" stroke-linecap="round"/></svg><span>Would open Settings › Model budgets. Preview only.</span><a href="#top">Dismiss</a></div>
+<div class="toast" id="captured" role="status"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5"/></svg><span>Would capture locally — not sent. Preview only.</span><a href="#top">Dismiss</a></div>
+<div class="toast" id="edit" role="status"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 2.5 13.5 5.5 6 13H3v-3z"/></svg><span>Would open the editor. Preview only.</span><a href="#top">Dismiss</a></div>
+<div class="toast" id="rejected" role="status"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg><span>Would ask for a reject reason. Preview only.</span><a href="#top">Dismiss</a></div>
+<div class="toast" id="budget" role="status"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.8M8 12.4v1.8M1.8 8h1.8M12.4 8h1.8M3.6 3.6l1.3 1.3M11.1 11.1l1.3 1.3M3.6 12.4l1.3-1.3M11.1 4.9l1.3-1.3" stroke-linecap="round"/></svg><span>Would open Settings › Model budgets. Preview only.</span><a href="#top">Dismiss</a></div>
 </body>
 </html>
