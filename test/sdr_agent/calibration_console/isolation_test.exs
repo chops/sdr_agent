@@ -143,8 +143,10 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
     test "a probe error is unavailable, never isolation", ctx do
       GroupProbe.put({:fixed, {:error, :ps_failed}})
 
+      # The group can never be observed, so its cleanup is reported as
+      # unconfirmed, never as stopped (Codex 01a13570 MF3).
       result = Isolation.preflight(probe: GroupProbe, observer: ctx.observer)
-      assert result == {:error, :calibration_isolation_unavailable}
+      assert result == {:error, :calibration_isolation_cleanup_unconfirmed}
       assert_received {:isolation, {:spawned, os_pid}, _identity}
       assert gone?(os_pid)
     end
@@ -154,8 +156,9 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
       # never leaves: the cleanup is never confirmed.
       GroupProbe.put({:plus, 999_999})
 
+      # Reported explicitly, never as stopped (Codex 01a13570 MF3).
       result = Isolation.preflight(probe: GroupProbe, observer: ctx.observer)
-      assert result == {:error, :calibration_isolation_unavailable}
+      assert result == {:error, :calibration_isolation_cleanup_unconfirmed}
       assert_received {:isolation, {:spawned, os_pid}, _identity}
       assert gone?(os_pid), "the real target is still stopped"
     end
@@ -322,7 +325,7 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
     test "a raising probe is unavailable and stopped", ctx do
       GroupProbe.put(:raise)
       result = Isolation.preflight(probe: GroupProbe, observer: ctx.observer)
-      assert result == {:error, :calibration_isolation_unavailable}
+      assert result == {:error, :calibration_isolation_cleanup_unconfirmed}
       assert_received {:isolation, {:spawned, os_pid}, _identity}
       assert await(fn -> gone?(os_pid) end)
     end
