@@ -2,9 +2,13 @@ defmodule SdrAgent.SDR.ReplyWorkerProviderTest do
   @moduledoc """
   Q0.1 review: reply classification (`SdrAgent.SDR.ReplyWorker`) on the
   runtime-selected ClaudeCLI. Through the one named server (backed by the
-  hermetic fake CLI) a matched reply's classification call completes, but
-  its unreleased generation-2 output is withheld from the run (R0-07 slice
-  A; released by the slice C gate step); with the
+  hermetic fake CLI) a matched reply's classification call completes and
+  passes the R0-07 result gate: with a matching witness capture its output
+  is released and the reply is assessed; with the witness store
+  unconfigured it is withheld (`:store_unreadable`) and the run stops
+  `:witness_unreconciled` on its gate cause — a reply run has no
+  Operation, so the cause carries none and is bound by the withheld
+  event (row G1) — never a crash, nothing classified. With the
   server missing the run fails `provider_error` with its critical Failure
   and no model call (no reservation), the job returning `{:error,
   :provider_not_running}`; a drifted attestation fails the invocation and
@@ -47,29 +51,70 @@ defmodule SdrAgent.SDR.ReplyWorkerProviderTest do
     %{reply_run: run}
   end
 
-  defp start_named!(mode) do
+  defp start_named!(args) do
     start_supervised!(
       {ClaudeCLI,
        name: ClaudeCLI.server(),
        command: System.find_executable("elixir"),
        test_launcher: true,
-       command_args: [@fake, mode]}
+       command_args: [@fake | List.wrap(args)]}
     )
   end
 
   defp classify!, do: Oban.drain_queue(queue: :agent, with_safety: false)
 
-  # R0-07 slice A (REQ-07-5): a completed generation-2 ClaudeCLI output with
-  # no `:released` ModelResultRelease is no business output. Nothing in this
-  # slice writes a release (the facade gate step is R0-07 slice C), so the
-  # run cannot record its LLM decision on the output and fails closed:
-  # nothing is classified and the charged call is kept.
-  test "a reply classified through the named server is withheld until released", ctx do
-    start_named!("sdr")
+  @v3_opus %{
+    provider: :claude_cli,
+    cli_version: "2.1.291",
+    profile_id: :claude_cli_opus,
+    model_id: "claude-opus-5-5",
+    projection_version: "claude-message-json/3+prompt-builder/1",
+    method: :propagated_id
+  }
+
+  # A trusted stand-in witness store with the exact v3 Opus tuple enabled.
+  defp witnessed! do
+    root = SdrAgent.Test.WitnessRoot.mkdir!("reply")
+    previous = Application.get_env(:sdr_agent, SdrAgent.Agents.Witness, [])
+
+    Application.put_env(
+      :sdr_agent,
+      SdrAgent.Agents.Witness,
+      Keyword.merge(previous, store_root: root, reconciled_methods: [@v3_opus])
+    )
+
+    on_exit(fn ->
+      Application.put_env(:sdr_agent, SdrAgent.Agents.Witness, previous)
+      File.rm_rf!(root)
+    end)
+
+    root
+  end
+
+  test "a reply classified through the named server is released by the gate", ctx do
+    start_named!(["sdr", witnessed!()])
     assert %{success: 1} = classify!()
 
     run = run!(ctx, ctx.reply_run)
-    assert run.status == :failed, inspect({run.status_reason, run.failure_reason})
+    assert run.status == :succeeded, inspect({run.status_reason, run.failure_reason})
+    assert [invocation] = invocations!(ctx, run)
+
+    assert {:ok, %{disposition: :released}} =
+             Agents.get_result_release(invocation.id, actor: ctx.agent)
+
+    assert {:ok, %{}} = Agents.released_output(invocation, actor: ctx.agent)
+  end
+
+  # R0-07 slice C (REQ-07-4, row G1): an unconfigured store after spend
+  # withholds the output; the run stops on its event-bound gate cause.
+  test "an unconfigured witness store withholds the reply; the run stops", ctx do
+    start_named!(["sdr"])
+    assert %{success: 1} = classify!()
+
+    run = run!(ctx, ctx.reply_run)
+
+    assert {run.status, run.status_reason} == {:failed, :witness_unreconciled},
+           inspect(run.failure_reason)
 
     assert [invocation] = invocations!(ctx, run)
 
@@ -77,10 +122,17 @@ defmodule SdrAgent.SDR.ReplyWorkerProviderTest do
              {:claude_cli, "claude-opus-5-5", :reply_classification, :completed}
 
     assert invocation.ledger_generation == 2
-    assert {:ok, nil} = Agents.get_result_release(invocation.id, actor: ctx.agent)
+
+    assert {:ok, %{disposition: :withheld, reason: :store_unreadable}} =
+             Agents.get_result_release(invocation.id, actor: ctx.agent)
 
     assert {:error, :result_not_released} =
              Agents.released_output(invocation, actor: ctx.agent)
+
+    {:ok, cause} = Operations.get_failure(run.attention_failure_id, actor: ctx.admin)
+
+    assert {cause.class, cause.subject_id, cause.operation_id, cause.status} ==
+             {:reconciliation_required, invocation.id, nil, :open}
 
     {:ok, decisions} = Agents.list_decisions(run.id, actor: ctx.agent)
     refute Enum.any?(decisions, &(&1.model_invocation_id == invocation.id))

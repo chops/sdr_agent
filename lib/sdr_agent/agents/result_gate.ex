@@ -168,6 +168,26 @@ defmodule SdrAgent.Agents.ResultGate do
     end
   end
 
+  @doc """
+  Whether `run` holds an unreleased output: a completed generation-2
+  ClaudeCLI invocation with no `ModelResultRelease` (REQ-07-5/6). The
+  workers never turn such a run into a success or a `:crash`; it is left
+  for the gate or for run recovery (`SdrAgent.SDR.StaleRunSweeper`). A read
+  error counts as unreleased (fail closed).
+  """
+  @spec unreleased?(struct()) :: boolean()
+  def unreleased?(%AgentRun{id: run_id, tenant_id: tenant_id}) do
+    ModelInvocation
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^tenant_id and agent_run_id == ^run_id and provider == :claude_cli and
+        ledger_generation == 2 and status == :completed and not exists(result_release, true)
+    )
+    |> Ash.exists?()
+  rescue
+    _error -> true
+  end
+
   ## Finalize (step 3)
 
   @unreadable_prefix "store_"

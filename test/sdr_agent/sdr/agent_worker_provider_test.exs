@@ -7,11 +7,20 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
   with an explicit `provider_not_running`, a critical operator-attention
   Failure and no model call — never a raise and never a fallback to Fake.
   The Fake default is unchanged.
+
+  R0-07 slice C: every generation-2 ClaudeCLI output passes the result
+  gate before the run sees it. With a matching witness capture (the fake
+  CLI playing shim and proxy) each output is released and the run
+  succeeds; with the witness store unconfigured the first output is
+  withheld (`:store_unreadable`), the run stops `:witness_unreconciled` on
+  its gate cause, and the Operation fails linking that cause — never a
+  crash, never a success.
   """
   use SdrAgent.SDRCase, async: false
 
   import SdrAgent.OutreachFixtures, only: [put_env!: 2]
 
+  alias SdrAgent.Agents
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.Fake
   alias SdrAgent.Operations
@@ -25,14 +34,48 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
     :ok
   end
 
-  defp start_named! do
+  @v3_opus %{
+    provider: :claude_cli,
+    cli_version: "2.1.291",
+    profile_id: :claude_cli_opus,
+    model_id: "claude-opus-5-5",
+    projection_version: "claude-message-json/3+prompt-builder/1",
+    method: :propagated_id
+  }
+
+  defp start_named!(args \\ []) do
     start_supervised!(
       {ClaudeCLI,
        name: ClaudeCLI.server(),
        command: System.find_executable("elixir"),
        test_launcher: true,
-       command_args: [@fake, "sdr"]}
+       command_args: [@fake, "sdr" | args]}
     )
+  end
+
+  # A trusted stand-in witness store with the exact v3 Opus tuple enabled;
+  # the fake CLI records a matching capture of every call under it.
+  defp witnessed! do
+    root = SdrAgent.Test.WitnessRoot.mkdir!("worker")
+    previous = Application.get_env(:sdr_agent, SdrAgent.Agents.Witness, [])
+
+    Application.put_env(
+      :sdr_agent,
+      SdrAgent.Agents.Witness,
+      Keyword.merge(previous, store_root: root, reconciled_methods: [@v3_opus])
+    )
+
+    on_exit(fn ->
+      Application.put_env(:sdr_agent, SdrAgent.Agents.Witness, previous)
+      File.rm_rf!(root)
+    end)
+
+    start_named!([root])
+  end
+
+  defp release!(ctx, invocation) do
+    {:ok, release} = Agents.get_result_release(invocation.id, actor: ctx.agent)
+    release
   end
 
   defp assert_claude_run(ctx, run, operation) do
@@ -44,6 +87,7 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
     assert Enum.all?(invocations, &(&1.provider == :claude_cli))
     assert Enum.all?(invocations, &(&1.model_id == "claude-opus-5-5"))
     assert Enum.all?(invocations, &(&1.status == :completed))
+    assert Enum.all?(invocations, &match?(%{disposition: :released}, release!(ctx, &1)))
 
     assert {:ok, %{status: :succeeded}} = Operations.get_operation(operation.id, actor: ctx.admin)
   end
@@ -71,11 +115,36 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
     end
 
     test "a run succeeds end-to-end through the named server", ctx do
-      start_named!()
+      witnessed!()
       %{run: run, operation: operation} = assign!(ctx, "01")
 
       assert %{success: 1} = drain!()
       assert_claude_run(ctx, run, operation)
+    end
+
+    test "an unconfigured witness store withholds the output; the run stops", ctx do
+      start_named!()
+      %{run: run, operation: operation} = assign!(ctx, "01")
+
+      assert %{success: 1} = drain!()
+      run = run!(ctx, run)
+
+      assert {run.status, run.status_reason} == {:failed, :witness_unreconciled},
+             run.failure_reason
+
+      assert [invocation] = invocations!(ctx, run)
+      release = release!(ctx, invocation)
+      assert {release.disposition, release.reason} == {:withheld, :store_unreadable}
+
+      {:ok, cause} = Operations.get_failure(run.attention_failure_id, actor: ctx.admin)
+
+      assert {cause.class, cause.subject_id, cause.operation_id} ==
+               {:reconciliation_required, invocation.id, operation.id}
+
+      assert {:ok, operation} = Operations.get_operation(operation.id, actor: ctx.admin)
+      assert operation.status in [:failed, :discarded]
+      assert operation.last_failure_id == cause.id
+      refute Enum.any?(decisions!(ctx, run), &(&1.model_invocation_id == invocation.id))
     end
 
     test "with the server missing the run fails with provider_not_running", ctx do
@@ -89,7 +158,7 @@ defmodule SdrAgent.SDR.AgentWorkerProviderTest do
 
   describe "ClaudeCLI carried by the job (Fake selected)" do
     test "a run succeeds end-to-end through the named server", ctx do
-      start_named!()
+      witnessed!()
       %{run: run, operation: operation} = assign!(ctx, "01", model: [provider: ClaudeCLI])
 
       assert %{success: 1} = drain!()
