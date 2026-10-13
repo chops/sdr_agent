@@ -1734,3 +1734,10 @@ launcher) is withdrawn: no wrapper is needed.
      terminal status or an unrelated empty group.
   3. Unreadable records are never attested (wording trimmed in E4c-4).
      RED pins the nullable fields of each schema-3 state.
+- E4c-a launch record schema 3 RED: **NEEDS-REVIEW** at 5be8cb9 (Codex
+  01a13532): live work must win over a failed peer probe, and a recovered
+  release must re-check live work. Added at 650e4df: **PASS / VERIFIED RED**
+  (Codex 01a1353b; 37/80 assertion failures, 0 crashes). GREEN at 38ce6e3
+  (full suite 1777/1777; dev-VM proof that the `remove:` seam is ignored),
+  awaiting code review. The file attestation is not database authority:
+  the audited event binding is later E4c work.
