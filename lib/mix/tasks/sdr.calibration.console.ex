@@ -33,8 +33,10 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
       LiveView assets are built (`mix assets.build`).
     * `calibrate PROFILE` — one attended calibration call of a real profile
       (R0-07 d3c, packet 8.14.1 and 8.14.9): exactly
-      `{:run, p, o} = Calibrate.command(argv); Calibrate.run(p, o)`, with
-      the console's fixed `console_opts/1` (no hook, no override). The
+      `{:run, p, o} = Calibrate.command(argv)`, then the first-run
+      `Calibrate.prepare/1` of the two canonical paths, then
+      `Calibrate.run(p, o)`, with the console's fixed `console_opts/1` (no
+      hook, no override). The
       endpoint does not listen; the command starts the authority registry
       and its own private ClaudeCLI server, and asks the owner to type
       `CALIBRATE PROFILE`. It prints only the stop or outcome, the record
@@ -97,6 +99,7 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
 
     case apply(@calibrate, :command, [argv]) do
       {:run, profile_id, opts} ->
+        prepare!(opts)
         CalibrationConsole.apply!(plan, serve: false)
         CalibrationConsole.ensure_storage!()
         Mix.Task.run("app.start")
@@ -116,6 +119,15 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
       "usage: mix sdr.calibration.console check | serve | bootstrap-admin ARGS | calibrate PROFILE " <>
         "(run it through bin/calibration-console)"
     )
+  end
+
+  # First-run setup of the two canonical paths (packet 8.14.9 round 4),
+  # before the app starts; any refusal stops the command.
+  defp prepare!(opts) do
+    case apply(@calibrate, :prepare, [Keyword.take(opts, [:root, :evidence_dir])]) do
+      {:ok, _created_or_existing} -> :ok
+      {:error, reason} -> Mix.raise("mix sdr.calibration.console calibrate refuses: #{reason}")
+    end
   end
 
   defp report({:ok, summary}),

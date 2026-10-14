@@ -111,6 +111,14 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
             {:ok, %{path: Path.t(), sha256: String.t(), bytes: binary()}}
             | {:error, :evidence_schema | :evidence_dir_unsafe | :calibration_evidence_conflict}
 
+    @doc """
+    Read-only: `:ok` when `dir` is a safe evidence directory by the rule
+    `publish/3` applies (0700, this user's, no symlink in it or any
+    ancestor), otherwise `{:error, :evidence_dir_unsafe}` (packet 8.14.9
+    round 4). Nothing is changed.
+    """
+    def check_dir(dir), do: safe_dir(dir)
+
     @doc "Publishes `document` create-only in `dir` (see the moduledoc)."
     @spec publish(Path.t(), map(), keyword()) :: result()
     def publish(dir, document, opts) do
@@ -519,6 +527,9 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
   else
     @doc "Outside test-seam builds no calibration evidence is published."
     def publish(_dir, _document, _opts), do: {:error, :calibration_evidence_conflict}
+
+    @doc "Outside test-seam builds no evidence directory is usable."
+    def check_dir(_dir), do: {:error, :calibration_evidence_conflict}
 
     @doc "Outside test-seam builds no calibration evidence validates."
     def validate(_path, _target, _opts), do: {:error, :calibration_evidence_conflict}

@@ -173,6 +173,70 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
       ]
     end
 
+    @doc """
+    The console's first-run setup (packet 8.14.9 round 4): `opts` is exactly
+    `root` and `evidence_dir` (absolute, the latter `root/evidence`). The
+    root must already be safe; the evidence directory is created only by an
+    exclusive `mkdir`, its creator alone setting 0700, and an existing name
+    is only inspected. Returns `{:ok, :created | :existing}` or
+    `{:error, :calibration_options_invalid | :calibration_root_unsafe |
+    :evidence_dir_unsafe | :calibration_setup_failed}`.
+    """
+    def prepare(opts) do
+      with {:ok, root, evidence_dir} <- prepare_input(opts),
+           :ok <- prepared_root(root) do
+        create_evidence_dir(evidence_dir)
+      end
+    end
+
+    defp prepare_input(opts) do
+      with true <- Keyword.keyword?(opts),
+           [:evidence_dir, :root] <- opts |> Keyword.keys() |> Enum.sort(),
+           root = Keyword.fetch!(opts, :root),
+           evidence_dir = Keyword.fetch!(opts, :evidence_dir),
+           true <- absolute?(root) and absolute?(evidence_dir),
+           true <- evidence_dir == Path.join(root, "evidence") do
+        {:ok, root, evidence_dir}
+      else
+        _invalid -> {:error, :calibration_options_invalid}
+      end
+    end
+
+    # The root's rule is the evidence directory's own (0700, this user's,
+    # no symlink in it or any ancestor), as the launch record requires.
+    defp prepared_root(root) do
+      if Evidence.check_dir(root) == :ok, do: :ok, else: {:error, :calibration_root_unsafe}
+    end
+
+    defp create_evidence_dir(dir) do
+      case File.mkdir(dir) do
+        :ok -> secure_created(dir)
+        {:error, :eexist} -> existing(dir)
+        {:error, _io} -> {:error, :calibration_setup_failed}
+      end
+    end
+
+    # Only the creator sets the mode. A failed chmod removes only its own,
+    # still empty directory; a leftover is revalidated by later calls.
+    defp secure_created(dir) do
+      case File.chmod(dir, 0o700) do
+        :ok ->
+          if Evidence.check_dir(dir) == :ok,
+            do: {:ok, :created},
+            else: {:error, :evidence_dir_unsafe}
+
+        {:error, _io} ->
+          _ = File.rmdir(dir)
+          {:error, :calibration_setup_failed}
+      end
+    end
+
+    defp existing(dir) do
+      if Evidence.check_dir(dir) == :ok,
+        do: {:ok, :existing},
+        else: {:error, :evidence_dir_unsafe}
+    end
+
     defp read_confirmation(prompt) do
       case IO.gets(prompt) do
         line when is_binary(line) -> line
@@ -300,7 +364,8 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     ## Preflight (rows 2 and 3)
 
     defp preflight(s) do
-      with :ok <- pinned(s),
+      with :ok <- Evidence.check_dir(s.options.evidence_dir),
+           :ok <- pinned(s),
            :ok <- store(),
            {:ok, binding} <- grant(s),
            :ok <- confirmed(s),
