@@ -172,15 +172,14 @@ Defaults are the built-in limits revision. The owner decided on 2026-10-14
 admin raises or lowers every field in the app (D-062). Validation only
 keeps a value sane: a whole number, at least the minimum below, at most the
 representation maximum, and the cross-field rules of the OperationalLimits
-row. For counts the maximum is 2,147,483,647, the stored integer range. For
-the two time fields it is 4,294,967 s, the largest whole number of seconds
-whose milliseconds fit the runtime's maximum relative timer,
-4,294,967,295 ms (`erlang:send_after/3`, `erlang:start_timer/3`), so a job
-limit stays a finite, representable deadline (D-061). Seconds convert to
-milliseconds with a checked integer conversion before any timer or
-deadline; C4-01a re-verifies the timer maximum against the pinned OTP's
-documentation, and if it differs the maximum follows the documented range,
-never a lower policy value. These are representation limits, not policy
+row. Every field, counts and seconds alike, has the maximum 2,147,483,647,
+the stored signed 32-bit integer range; a finite job limit (D-061) needs
+nothing lower. The pinned runtime accepts that many seconds as a timer:
+Codex ran `:erlang.start_timer/3` under the project's OTP 29.0.5 with
+4,294,967,295 ms, 4,294,968,000 ms and 2,147,483,647,000 ms, and each was
+accepted and cancelled (answer 214dbafb, 2026-10-14). Consumers convert
+seconds to milliseconds with integer arithmetic and check the result before
+any timer or deadline. These are representation limits, not policy
 ceilings. A raise above the value
 in effect needs a per-field confirmation that names the old value, the new
 value, the built-in default and the budgets that still bound it; the
@@ -205,8 +204,8 @@ never adds to them.
 | `research_max_total_source_chars` | 24,000 | ≥ 500 | B1-04 — not enforced until B1-04 |
 | `research_max_output_tokens` | 2,500 | ≥ 256 | B1-04 model request — not enforced until B1-04 |
 | `research_max_model_calls` | 2 | ≥ 1, ≤ `run_max_model_calls` | B1-04 — not enforced until B1-04; each extra call is a deliberate repair inside the run budget, never a retry of an unknown outcome (D-064) |
-| `research_target_seconds` | 180 | 30..4,294,967, ≤ job limit (warning only, D-061) | B1-04 progress, H1 row — warning, never a stop |
-| `research_job_limit_seconds` | 600 | 60..4,294,967 (finite job limit, D-061) | B1-04 worker deadline; an in-flight model call ends by its own timeout and is recorded unknown, never cut silently or retried (D-064) — not enforced until B1-04 |
+| `research_target_seconds` | 180 | 30..2,147,483,647, ≤ job limit (warning only, D-061) | B1-04 progress, H1 row — warning, never a stop |
+| `research_job_limit_seconds` | 600 | 60..2,147,483,647 (finite job limit, D-061) | B1-04 worker deadline; an in-flight model call ends by its own timeout and is recorded unknown, never cut silently or retried (D-064) — not enforced until B1-04 |
 
 Count fields not shown with a maximum have the sanity maximum 2,147,483,647.
 
@@ -488,9 +487,11 @@ Validation (one success and the boundary failures per field):
    `confirm_raised` with a duplicate name, an unknown name or a non-limit
    atom is refused `{:invalid, [confirm_raised: ...]}` and writes nothing;
    unknown strings never create atoms.
-7b. Time fields above one day: `research_job_limit_seconds` 86,401 and
-   4,294,967 pass and convert to exact milliseconds; 4,294,968 is refused;
-   the conversion is checked, never truncated or wrapped.
+7b. Time fields: `research_job_limit_seconds` 86,401, 4,294,968 and
+   2,147,483,647 pass and convert to exact milliseconds that the pinned
+   runtime accepts as a timer (`:erlang.start_timer/3`, then cancelled);
+   2,147,483,648 is refused as outside the stored integer range; the
+   conversion is checked, never truncated or wrapped.
 8. Booking link: `http`, `javascript:`, user info, IP literal, `localhost`,
    port 8443, over 2,048 bytes, non-reserved host while the guard is off,
    token-shaped query — each refused; a reserved `https` link passes.
@@ -840,6 +841,15 @@ answers are quoted after each question and modeled in the sections named.
   Nonblocking, also done: section 3.6 status wording; `raised_fields` and
   `confirm_raised` limited to the closed set of limit names, with
   duplicate and unknown tests (7a).
+  Round at aec6304: **NEEDS-REVIEW** (Codex answer
+  214dbafb-8cb3-45e0-87ce-e831947bdb46). One must-fix: the pinned OTP
+  29.0.5 accepts timers above 4,294,967,295 ms (checked up to
+  2,147,483,647,000 ms), so 4,294,967 s was not the runtime limit.
+  Revised: the time fields share the stored integer maximum, 2,147,483,647,
+  with the runtime check cited and test 7b at that value. The closed
+  confirmation set and the 3.6 wording passed. This was the second
+  NEEDS-REVIEW on the same item; the owner was told the same day
+  (tripwire 2).
 - Owner scoped C4 G5: **pending**, after that re-review.
 - Not authorized by this packet: code, migrations, UI, real data, model
   calls.
