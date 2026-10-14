@@ -44,11 +44,12 @@ flowchart TB
     Owner --> Task
     Task --> Cmd
     Task --> Recover
-    Cmd -- "1 claim, then launch_pending before the call" --> Record
+    Cmd -- "1 claim (after the definition check), then preflight" --> Record
     Cmd -- "2 proof run; reservation (locked txn)" --> Run
     Cmd --> Inv
-    Cmd -- "3 issue sealed reference" --> Authority
-    Cmd -- "4 calibration_call (one, no retry)" --> Server
+    Cmd -- "3 launch_pending with the invocation id" --> Record
+    Cmd -- "4 issue sealed reference" --> Authority
+    Cmd -- "5 calibration_call (one, no retry)" --> Server
     Server --> Exempt
     Exempt -- "consume" --> Authority
     Server -- "locked sent admission, then spawn" --> Launch
@@ -57,18 +58,19 @@ flowchart TB
     Server -- "start identity + group" --> Probe
     Server -. "launch receipt, before the reply<br/>(verified only)" .-> Cmd
     Cmd -. "launched only on a verified receipt" .-> Record
-    Cmd -- "5 bounded observation, no lock held" --> Gate
+    Cmd -- "6 bounded observation, no lock held" --> Gate
     Gate -. "bounded wait and read, no lock" .-> Witness
-    Cmd -- "6 publish (lock-free file I/O)" --> Evidence
-    Cmd -- "7 then the E1 latch txn (file hash)" --> Latch
-    Cmd -- "8 finished/aborted, then release" --> Record
+    Cmd -- "7 publish (lock-free file I/O)" --> Evidence
+    Cmd -- "8 then the E1 latch txn (file hash)" --> Latch
+    Cmd -- "9 finished/aborted, then release" --> Record
     Cmd -. "typed launch refusal: stop_refused before E1" .-> Run
     Cmd -. "failed run stop or any unproven state: claim kept" .-> HardStop
 
     Recover -- "lock: new bare ticket, never adopted" --> Ticket
     Recover -- "claim-bound target, eligibility" --> Inv
-    Recover -. "launched only: live work observed before STOPPED" .-> Probe
-    Recover -. "sent history + STOPPED: event first" .-> Attest
+    Recover -. "owner identity at the lock; launched: live group before STOPPED;<br/>quiescence at a final release" .-> Probe
+    Recover -. "outstanding launch_pending/launched sent: STOPPED, event first" .-> Attest
+    Recover -. "finished replay: RECOVER only, latch + frozen file checked" .-> Evidence
     Recover -. "then attestation.json" .-> Ticket
     Recover -. "no latch and no file: one observation" .-> Gate
     Recover -- "reuse latched or frozen file, else publish" --> Evidence
@@ -92,16 +94,25 @@ flowchart TB
 - **A typed launch refusal**: admission is run-neutral, and the command stops
   the run through `SDR.Model.stop_refused/3` before E1.
 - **Recovery's dashed edges are conditional:**
-  - the probe is read only for a `launched` record, before the `STOPPED` prompt;
-  - the attestation (the database event, then the ticket's file) only for sent
-    history with `--owner-verified-stopped` and a typed `STOPPED`;
+  - the probe checks the owner's identity when recovery claims the lock, and
+    quiescence at a final release. For a `launched` record, it also checks
+    the live group before the `STOPPED` prompt;
+  - the attestation (the database event, then the ticket's file) only for an
+    **outstanding** sent record (`launch_pending` or `launched`), with
+    `--owner-verified-stopped` and a typed `STOPPED`;
+  - the final replay of an already-`finished` (or `aborted`) record needs
+    only `RECOVER`, plus its exact history, latch and frozen-file checks: no
+    `STOPPED`, no attestation;
   - a fresh observation only when there is neither a latch nor an existing file.
 - **No automatic quiescence or repair.** There is no unattended recovery or
   orphan-repair path (OQ-E3 is open). An unprovable state is a hard
-  owner-conflict stop: the lock, any ticket and the predecessor barrier stay.
+  owner-conflict stop: the console's single-flight lock and any ticket stay.
+  This is separate from the database predecessor barrier: while any real
+  calibration invocation is **unlatched**, it blocks later real calibration
+  attempts across every profile in the tenant.
 - **What the probe proves.** It observes the CLI's process group only. An
-  empty group does not prove that no escaped descendant exists, which is why
-  sent history always needs the owner's `STOPPED`.
+  empty group does not prove that no escaped descendant exists. That is why
+  an outstanding sent record always needs the owner's `STOPPED`.
 - **Lock boundaries.** Reservation and `sent` admission are locked database
   transactions. The witness wait, the probe and every file write happen with
   no database lock held. Evidence is published before the E1 transaction

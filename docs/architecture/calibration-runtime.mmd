@@ -34,11 +34,12 @@ flowchart TB
     Owner --> Task
     Task --> Cmd
     Task --> Recover
-    Cmd -- "1 claim, then launch_pending before the call" --> Record
+    Cmd -- "1 claim (after the definition check), then preflight" --> Record
     Cmd -- "2 proof run; reservation (locked txn)" --> Run
     Cmd --> Inv
-    Cmd -- "3 issue sealed reference" --> Authority
-    Cmd -- "4 calibration_call (one, no retry)" --> Server
+    Cmd -- "3 launch_pending with the invocation id" --> Record
+    Cmd -- "4 issue sealed reference" --> Authority
+    Cmd -- "5 calibration_call (one, no retry)" --> Server
     Server --> Exempt
     Exempt -- "consume" --> Authority
     Server -- "locked sent admission, then spawn" --> Launch
@@ -47,18 +48,19 @@ flowchart TB
     Server -- "start identity + group" --> Probe
     Server -. "launch receipt, before the reply<br/>(verified only)" .-> Cmd
     Cmd -. "launched only on a verified receipt" .-> Record
-    Cmd -- "5 bounded observation, no lock held" --> Gate
+    Cmd -- "6 bounded observation, no lock held" --> Gate
     Gate -. "bounded wait and read, no lock" .-> Witness
-    Cmd -- "6 publish (lock-free file I/O)" --> Evidence
-    Cmd -- "7 then the E1 latch txn (file hash)" --> Latch
-    Cmd -- "8 finished/aborted, then release" --> Record
+    Cmd -- "7 publish (lock-free file I/O)" --> Evidence
+    Cmd -- "8 then the E1 latch txn (file hash)" --> Latch
+    Cmd -- "9 finished/aborted, then release" --> Record
     Cmd -. "typed launch refusal: stop_refused before E1" .-> Run
     Cmd -. "failed run stop or any unproven state: claim kept" .-> HardStop
 
     Recover -- "lock: new bare ticket, never adopted" --> Ticket
     Recover -- "claim-bound target, eligibility" --> Inv
-    Recover -. "launched only: live work observed before STOPPED" .-> Probe
-    Recover -. "sent history + STOPPED: event first" .-> Attest
+    Recover -. "owner identity at the lock; launched: live group before STOPPED;<br/>quiescence at a final release" .-> Probe
+    Recover -. "outstanding launch_pending/launched sent: STOPPED, event first" .-> Attest
+    Recover -. "finished replay: RECOVER only, latch + frozen file checked" .-> Evidence
     Recover -. "then attestation.json" .-> Ticket
     Recover -. "no latch and no file: one observation" .-> Gate
     Recover -- "reuse latched or frozen file, else publish" --> Evidence

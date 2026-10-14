@@ -2051,10 +2051,13 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
      false` is changed only by a reviewed PR after that acceptance. Until
      then there is no automatic `{:quiescent, …}` recovery.
      - **Qualified at integration (2026-10-13).** As built, the code has no
-       automatic-quiescence path at all, so there is no flag to flip:
+       automatic-quiescence path at all, so there is no flag to flip. For
+       an outstanding sent record (`launch_pending` or `launched`),
        `Calibrate.recover/2` always requires `--owner-verified-stopped`
-       and `STOPPED` for sent history. After OQ-E3, adding that path would
-       be a reviewed code change.
+       and `STOPPED`. The approved final replay of a `finished` record
+       (8.14.11) is the exception: `RECOVER` plus the history, latch and
+       file checks, with quiescence re-checked at release. After OQ-E3,
+       adding an automatic path would be a reviewed code change.
    - **Observed live work refuses:** a live root or group members refuse
      `:calibration_not_quiescent` even with the flag and `STOPPED`.
      - Live work is observed **before** the attestation event and any
@@ -2093,7 +2096,9 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
   the integrated review.
   - **Added at integration (2026-10-13):**
     `docs/architecture/calibration-runtime.md` and `.mmd`, hand-authored.
-    The generated diagrams are unchanged. It shows the conditional private
+    The domain map and the generator are unchanged. The maintained
+    components and data-flow diagrams gain a calibration subgraph. It shows
+    the conditional private
     server, authority, receipt, file barrier, E1 and recovery edges.
 
 #### 8.14.8 d3c addendum: the bounded observation and the evidence document (proposed)

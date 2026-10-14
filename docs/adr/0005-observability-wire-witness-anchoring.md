@@ -488,7 +488,8 @@ the R0 amendment's calibration exception (item 2) is confined in the
 harness on PR #146. It is written for Codex review and owner acceptance;
 neither has happened. It enables no tuple, grants no spend and adds no
 dependency. **OQ-E3 is not accepted here.** The conservative default
-stays: every recovery of a sent call needs the owner's typed `STOPPED`.
+stays: recovering an outstanding sent call (a `launch_pending` or
+`launched` record) needs the owner's typed `STOPPED`.
 The contracts and their reviews are in
 `docs/product/r0/r0-07-witness.md`, sections 8.2–8.14.
 
@@ -565,10 +566,20 @@ The contracts and their reviews are in
    - **The limit.** The observable is the CLI's process group. A
      descendant that changes its group escapes it.
 5. **Recovery is attended (OQ-E3 stays open).**
-   - **The prompts.** `calibrate-recover` takes an explicit target. Every
-     state change needs `RECOVER <id>`, and every sent call also needs
-     `--owner-verified-stopped` and `STOPPED <id>`. Live work observed
-     through the probe refuses before that prompt.
+   - **The prompts.** `calibrate-recover` takes an explicit target, and
+     every state change needs `RECOVER <id>`.
+     - **An outstanding sent call** (a `launch_pending` or `launched`
+       record with sent history) also needs `--owner-verified-stopped`
+       and `STOPPED <id>`, and goes through the attestation below. For a
+       `launched` record, live work observed in its group refuses before
+       that prompt.
+     - **The final-replay exception.** An already-`finished` (or
+       `aborted`) record, with exactly the history, latch and frozen file
+       it attests, is replayed with `RECOVER <id>` alone: no `STOPPED`, no
+       attestation. Its release re-checks quiescence.
+   - **The probe's other uses.** Beyond that live-group check, the probe
+     also checks the owner's identity when recovery is claimed, and
+     quiescence at a final release.
    - **The attestation.** It is audited database-first: the
      `calibration.owner_attested` event, deduplicated by
      `attestation_id`, then `attestation.json` in the recovery ticket.
@@ -576,9 +587,14 @@ The contracts and their reviews are in
      seen through the probe refuses even with `STOPPED`. A probe error is
      never read as absence.
    - **Hard stops.** A ticket is never adopted. An unprovable state is a
-     hard owner-conflict stop that keeps the lock. That stop also keeps
-     the predecessor barrier, which blocks that profile's later
-     calibrations.
+     hard owner-conflict stop that keeps the filesystem single-flight
+     lock, and any ticket. These are two separate barriers:
+     - **The lock** blocks every later `calibrate` on this console.
+     - **The database predecessor barrier** (B4') is separate. An
+       **unlatched** real calibration invocation blocks later real
+       calibration attempts across every profile in the tenant. A hard
+       conflict that happens after a successful latch keeps the lock, but
+       its invocation already satisfies the predecessor condition.
    - **No automatic quiescence, and no orphan repair.** The code has no
      automatic-quiescence recovery path, and no automatic repair of an
      orphaned lock, ticket or barrier. Adding automatic quiescence needs
@@ -614,9 +630,11 @@ The contracts and their reviews are in
 
 - A calibration call can run only through this attended, single-flight
   path. Its output never reaches a business flow.
-- Any crash or uncertainty leaves a state the owner must clear by hand,
-  never one the harness clears on its own. That is slower, and
-  deliberate.
+- There is no unattended repair. After a crash or uncertainty, the
+  owner uses the reviewed, attended `calibrate-recover` where it applies.
+  A hard owner conflict waits for a separately reviewed repair workflow.
+  It is never cleared by deleting a lock, ticket or predecessor evidence.
+  That is slower, and deliberate.
 - **When this amendment is accepted,** it covers the harness as reviewed
   at PR #146. Any change to the authority, receipt, isolation or recovery
   rules then needs a further reviewed amendment.
