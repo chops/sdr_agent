@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <title>C1 founder task contract prototype</title>
+  <style>
+    :root { color-scheme: light; --ink: #15352f; --muted: #52675f; --line: #d9e2dd; --accent: #176b58; --paper: #f6f7f2; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.55 system-ui, sans-serif; }
+    main { max-width: 1040px; padding: 48px 24px 80px; margin: auto; }
+    .eyebrow { color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { font-size: clamp(30px, 4vw, 44px); line-height: 1.15; letter-spacing: -.035em; margin: 12px 0; }
+    h2 { font-size: 22px; line-height: 1.3; margin: 0 0 12px; }
+    h3 { font-size: 18px; margin: 0 0 8px; }
+    p { margin: 0 0 16px; }
+    .muted, small { color: var(--muted); }
+    .notice { border: 1px solid #d5cfae; background: #fffce8; padding: 16px 20px; border-radius: 12px; margin: 24px 0; }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+    .card, .outcome { border: 1px solid var(--line); border-radius: 16px; background: white; padding: 24px; box-shadow: 0 3px 10px #15352f05; }
+    .card { display: flex; flex-direction: column; }
+    .badge { display: inline-block; width: fit-content; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 99px; background: #e7f2ed; color: #176b58; margin-bottom: 16px; }
+    .badge.warning { background: #fff1d9; color: #83510b; }
+    .badge.critical { background: #ffe9e5; color: #8b3026; }
+    dl { margin: 8px 0 20px; }
+    dt { font-size: 12px; font-weight: 650; color: var(--muted); margin-top: 12px; }
+    dd { margin: 2px 0; overflow-wrap: anywhere; }
+    code, pre { font: 13px/1.5 ui-monospace, monospace; }
+    pre { background: #f2f5f1; border-radius: 10px; padding: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+    a.action, button { border: 1px solid #c9d8d0; border-radius: 9px; padding: 9px 12px; color: var(--ink); background: white; font: inherit; font-size: 14px; text-decoration: none; transition: background .15s, border-color .15s; }
+    a.action:hover { background: #edf5f0; border-color: var(--accent); }
+    a.action.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    a.action.primary:hover { background: #105644; }
+    button:disabled { background: #f3f3ef; color: #72796e; border-color: #dfdfd5; cursor: not-allowed; }
+    a:focus-visible, button:focus-visible, summary:focus-visible { outline: 3px solid #c17e1b; outline-offset: 3px; }
+    section { scroll-margin-top: 20px; }
+    .outcomes { display: grid; gap: 16px; margin: 32px 0; }
+    .outcome:target { border-color: var(--accent); box-shadow: 0 0 0 3px #176b581b; }
+    details { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 16px; }
+    summary { cursor: pointer; font-weight: 650; }
+    li { margin: 7px 0; }
+    footer { color: var(--muted); font-size: 13px; margin-top: 32px; }
+    @media (max-width: 720px) { .cards { grid-template-columns: 1fr; } main { padding-top: 28px; } }
+    @media (prefers-reduced-motion: reduce) { a.action, button { transition: none; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">C1 contract · synthetic owner walkthrough</div>
+    <h1>What needs your attention</h1>
+    <p class="muted">Review a draft or investigate a blocked run. Initial coverage: drafts and failures.</p>
+  </header>
+  <aside class="notice" aria-label="Prototype limits">
+    <strong>This is a contract prototype, not the application.</strong>
+    Names, addresses and identifiers are fictional. Links below open modeled outcomes on this page.
+    Nothing is approved, edited, captured, sent, retried or stored. No scripts, external assets, network requests or model calls.
+  </aside>
+  <div class="cards" id="tasks">
+    <article class="card" aria-labelledby="failure-title">
+      <span class="badge critical">Critical failure attention · open</span>
+      <h2 id="failure-title">Research needs recovery</h2>
+      <p>The model-call allocation is exhausted. The previous process cleanup is also unconfirmed.</p>
+      <dl>
+        <dt>Source</dt><dd>Failure F2 · AgentRun A2</dd>
+        <dt>Why rerun is blocked</dt><dd><code>grant_exhausted</code>, <code>cleanup_unconfirmed</code></dd>
+        <dt>Your role in this scenario</dt><dd>Active admin · freshness TF2</dd>
+      </dl>
+      <div class="actions" aria-label="Failure actions">
+        <a class="action" href="#investigate">Investigate</a>
+        <a class="action" href="#acknowledge">Acknowledge</a>
+        <a class="action" href="#resolve">Resolve with note</a>
+        <button type="button" disabled aria-describedby="retry-limit">Rerun</button>
+      </div>
+      <small id="retry-limit">Inspection does not grant spend. Recovery must pass the current source safeguards.</small>
+    </article>
+    <article class="card" aria-labelledby="draft-title">
+      <span class="badge">Draft review · pending_review</span>
+      <h2 id="draft-title">About developer onboarding</h2>
+      <p class="muted">The agent needs your decision on the current email revision.</p>
+      <dl>
+        <dt>Displayed recipient</dt><dd>Sam · sam@orbit.example.org</dd>
+        <dt>Source and current revision</dt><dd>Draft D1 · R3 · content hash H3</dd>
+        <dt>Freshness</dt><dd>Token T3 · channel email</dd>
+      </dl>
+      <div class="actions" aria-label="Draft actions">
+        <a class="action" href="#inspect">Inspect</a>
+        <a class="action" href="#edit">Edit</a>
+        <a class="action primary" href="#approve">Approve for capture</a>
+        <a class="action" href="#reject">Reject</a>
+      </div>
+      <details><summary>What if the revision or recipient changed?</summary>
+        <p>Use the same displayed R3/H3/sam binding in the <a href="#stale">stale-command scenario</a>. The server must not substitute newer source values.</p>
+      </details>
+    </article>
+  </div>
+  <section class="notice" aria-labelledby="walk-title">
+    <h2 id="walk-title">Owner task walk</h2>
+    <ol>
+      <li>Identify who the draft is for, which revision you are deciding on, and what “capture” means.</li>
+      <li>Choose approve, edit or reject. Explain what the modeled result tells you.</li>
+      <li>Try the stale-command scenario. What must you review again?</li>
+      <li>Investigate F2. What blocks rerun, and which action requires an admin?</li>
+      <li>Compare resolved attention, partial reads and an empty initial view below.</li>
+    </ol>
+    <p class="muted">Record answers and confusing labels before discussing the contract. This is not an accepted H1 visual design or a passed usability test.</p>
+  </section>
+  <div class="outcomes">
+    <section class="outcome" id="approve"><h3>Modeled approval</h3>
+      <pre>action_id: approve_capture
+item_id: D1
+expected_freshness_token: T3
+draft_revision_id: R3
+content_sha256: H3
+recipient_email: sam@orbit.example.org
+channel: email</pre>
+      <p>The producer rechecks the current actor, source and exact binding under its approval locks. A successful approval would queue the draft for captured delivery; it would not send a real email. The next list reflects the committed source state.</p>
+      <small>R3/H3/T3 are symbolic example identifiers, not API-valid values or actual approvals.</small>
+    </section>
+    <section class="outcome" id="inspect"><h3>Modeled inspection</h3>
+      <p>Open the source detail through its authorized, audited read. The list did not load the draft body, research payload or model output. A withheld result does not become readable because an Inspect link was shown.</p>
+    </section>
+    <section class="outcome" id="edit"><h3>Modeled edit</h3>
+      <p>A fresh edit creates R4 with H4/T4. D1 stays the same item and remains pending. An old R3 approval cannot carry forward. Compare-and-edit must be protected in the producer transaction; an unavailable adapter keeps this action blocked.</p>
+    </section>
+    <section class="outcome" id="reject"><h3>Modeled rejection</h3>
+      <p>Submit the displayed revision and content hash with your reason. A committed rejection removes D1 from pending work; it does not suppress a contact or invent a new campaign rule.</p>
+    </section>
+    <section class="outcome" id="stale"><h3>Modeled stale command</h3>
+      <p>R4/T4, or a new recipient pat@orbit.example.org, committed before your old command. Result: <code>stale / revision</code> or <code>stale / recipient</code>. No approval, capture or overwrite. Refresh and make a new decision on the displayed source.</p>
+    </section>
+    <section class="outcome" id="investigate"><h3>Modeled investigation</h3>
+      <p>Read F2 and its authorized run context. Only an active human admin can change a grant. Even after budget is available, unconfirmed cleanup or an unpromoted model tuple still blocks rerun. The agent never raises a budget or blindly repeats an unknown call.</p>
+    </section>
+    <section class="outcome" id="acknowledge"><h3>Modeled acknowledgment</h3>
+      <p>F2 becomes acknowledged with a new token and stays in the inbox. Acknowledgment is not resolution, cleanup confirmation or permission to spend.</p>
+    </section>
+    <section class="outcome" id="resolve"><h3>Modeled resolution</h3>
+      <p>A source-authorized resolution with your note removes that Failure after commit. Historical audit and run causes remain. If a separate Operation Failure F4 is live, it is still shown; the list does not collapse all conditions on one lead into “fixed.”</p>
+    </section>
+    <section class="outcome" id="other-states"><h3>Other contract states</h3>
+      <p><strong>Read-only actor:</strong> an auditor may inspect permitted records, not approve or rerun. Forged commands fail source authorization and are audited.</p>
+      <p><strong>Partial read:</strong> a failed Failure query cannot hide behind a successful Draft query. Authorized drafts may be shown, but the page warns that its view is incomplete.</p>
+      <p><strong>Complete empty initial view:</strong> “No drafts or failures need your attention in this view.” “Nothing needs your attention” waits for complete MVP producer coverage, not merely these two sources.</p>
+      <p><strong>More work:</strong> the first 50 items carry a continuation cursor; no unread candidate is silently skipped.</p>
+    </section>
+  </div>
+  <a class="action" href="#tasks">Back to the task rows</a>
+  <footer>All navigation stays inside this file. Decisions here are illustrative; domain behavior, owner G5 and H1 acceptance remain separate.</footer>
+</main>
+</body>
+</html>
