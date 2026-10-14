@@ -1,11 +1,13 @@
 # C1 Home inbox contract and readiness
 
-Status: **exact-total amendment draft for full review and amended-text acceptance**. C1-01 (#85), Codex
-author → Claude reviewer. No C1 code, new database table, UI mutation or
-model call is authorized by this draft. Owner acceptance of the architecture
-with exact totals is recorded below; amended text still needs review and
-acceptance. The owner must approve scoped G5
-before C1-02/03 implementation; H1 has its own owner task/prototype gate.
+Status: **full amended contract PASS; ADR-0015 amended wording accepted;
+scoped C1 G5 approved**. C1-01 (#85), Codex author → Claude reviewer.
+Full independent review passed at `2526a22`; the owner accepted the amended
+wording and separately approved scoped C1 G5 on 2026-10-14 (recorded below).
+C1-02/03 proceed RED-first as separate PRs, each with independent Claude
+review, full verification, green exact-head CI and owner merge. H1 screens,
+new producers/metrics, new tables, spend and real calls are outside this G5;
+H1 has its own owner task/prototype gate.
 
 ## Summary and scope
 
@@ -58,8 +60,8 @@ Verdict: **PASS** by Claude at `354c590`, consultation
 `m_1791836856639537000_6cbd35cf` (2026-10-12 20:27:36 UTC). Review report
 sha256 `818854327931d8638b9d6eb642c21e1f2a0d3a4860464c6d062aad9981df5bef`.
 The seven full-contract requirements are addressed below. This PASS permits
-affected-module planning, not C1-02/03 code or owner G5. Refined contracts
-below still require Claude's full review and B1/H1 producer-consumer agreement.
+affected-module planning, not C1-02/03 code or owner G5. Claude's full review
+and B1/H1 producer-consumer agreement are recorded below.
 
 ### Exact-total amendment: entity/action delta
 
@@ -69,7 +71,7 @@ access; no schema, persisted counter, new role, dependency or Task resource.
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| SectionTotal (derived value object) | New | Exact authorized metric independent of visible rows | closed `metric : pending_email_drafts / live_failures / local_captures_this_week`; `status : ready / unavailable`; nonnegative integer `value` only ready, null unavailable; UTC `observed_at`; scope/filter fingerprint; optional UTC week bounds and timezone; bounded unavailable reason `forbidden / timeout / producer_error / withheld` | One explicitly registered source-owned count read; belongs to ephemeral Home/Page result. No counted ids or bodies returned | Exact whole authorized metric, no cursor/LIMIT/estimate/50+ substitution. A refresh error removes an old number; successful zero differs from unavailable. No independent lifecycle, cache/counter or action authority | Current active authenticated actor/session/tenant and source read policies, never kernel/bypass count | none; proposed constants and week semantics require amended-text acceptance |
+| SectionTotal (derived value object) | New | Exact authorized metric independent of visible rows | closed `metric : pending_email_drafts / live_failures / local_captures_this_week`; `status : ready / unavailable`; nonnegative integer `value` only ready, null unavailable; UTC `observed_at`; scope/filter fingerprint; optional UTC week bounds and timezone; bounded unavailable reason `forbidden / timeout / producer_error / withheld` | One explicitly registered source-owned count read; belongs to ephemeral Home/Page result. No counted ids or bodies returned | Exact whole authorized metric, no cursor/LIMIT/estimate/50+ substitution. A refresh error removes an old number; successful zero differs from unavailable. No independent lifecycle, cache/counter or action authority | Current active authenticated actor/session/tenant and source read policies, never kernel/bypass count | none; constants and week semantics accepted in the amended wording on 2026-10-14 |
 | InboxPage / ProducerReadResult | Existing delta | Separate bounded list work from exact counts | per-section SectionTotal and separate list/count result states; completeness includes unavailable required sources | Draft+Failure row registry unchanged; capture history is a separate count-only source | 50 shown rows remains a cap, not the total. Source list/count failure makes its number unavailable; fresh authorized rows and healthy siblings may remain usable, but no stale capability is preserved. Counts exact at recorded observations, not one global snapshot. All-clear still needs complete successful coverage | Existing actor/session/tenant rules; losing scope clears rows and numbers | none |
 | Outreach.Draft count read | Existing read-contract delta | Ready-for-outreach total | distinct authorized email Draft ids in the same pending_review/current-revision membership as list | Source-owned aggregate; no revision/body/model-output loading | Count drafts, not distinct people. Invalid required source context is producer_error, not silent success. Pagination excluded | Same current Draft read policy and permitted view/real-data scope as rows | no new mutation or source-policy shortcut |
 | Operations.Failure count read | Existing read-contract delta | Needs-attention total | distinct authorized Failure ids, status open or acknowledged | Same attention membership | Acknowledged remains counted; resolved historical cause excluded, distinct live Operation cause included. No grouping/deduplication on Lead | Existing Failure read policy/scope | none |
@@ -395,23 +397,25 @@ per-metric AuditAccess. No real-model calls are needed for any of these.
 ## Architecture decisions and readiness
 
 ADR required: **yes**, [ADR-0015](../../adr/0015-home-inbox-projection-and-command-boundary.md)
-proposes the durable shared read/command boundary and compares it with a
+records the durable shared read/command boundary and compares it with a
 persisted task mirror and UI-owned composition. It adds no dependency and
 preserves existing domain ownership. Owner accepted the architecture with
-exact totals; the amended text's status stays **proposed** until independent
-full review and owner acceptance, and scoped C1 G5 is still required before
-code. Implementation should update the component/data-flow
-diagrams for the new public runtime path; no actual runtime changed in this
-docs proposal, so current diagrams are not rewritten to pretend it exists.
+exact totals; independent full amended-text review passed at `2526a22`,
+and the owner accepted that wording on 2026-10-14. ADR-0015 is **accepted**;
+scoped C1 G5 was separately approved at 11:04 MDT, with the scope below.
+Implementation should update the component/data-flow diagrams for the new
+public runtime path; no actual runtime changed in this docs record, so
+current diagrams are not rewritten to pretend it exists.
 
 | Readiness item | Status |
 |---|---|
-| Entity/action soft-stop | Base PASS at 354c590; base full contract PASS at 202349d; exact-total delta PASS via eafd672b (03:30:58 UTC), full amended contract review pending |
-| B1 producer / H1 consumer agreement | Base PASS by Claude at 202349d; amended count/row/audit agreement pending full review |
+| Entity/action soft-stop | Base PASS at 354c590; base full contract PASS at 202349d; exact-total delta PASS via eafd672b (03:30:58 UTC); full amended contract PASS by Claude at 2526a22 via a21b80ed (2026-10-13 04:04:19 UTC) |
+| B1 producer / H1 consumer agreement | Base PASS by Claude at 202349d; amended count/row/audit agreement PASS by Claude at 2526a22 via a21b80ed |
 | Owner task walk / interactive H1 prototype | A selected with collapsible nav; diff-view and phone layout explicitly confirmed at 0b740d8; prompted walkthrough, not an unprimed usability trial or C1 code gate |
-| ADR-0015 owner acceptance | Architecture accepted with exact-total direction; amended wording review and owner acceptance pending |
-| Scoped C1 G5 | Pending; existing R0 G5 does not cover C1 code |
+| ADR-0015 owner acceptance | Amended wording at 2526a22 accepted 2026-10-14 11:01 MDT: "accept the amended ADR-0015 wording", relayed in m_1791997310000000000_622e6df7 |
+| Scoped C1 G5 | Approved 2026-10-14 11:04 MDT: "approve scoped C1 G5 for C1-02 and C1-03", relayed in m_1791997445000000000_58eb5fd6; scope below |
 | C1-01 docs verification | Base d6ed725: workflow receipt, format, compile, canonical Credo, Hex audit, codegen, `mix precommit` and 1126 tests passed locally; base prototype link/browser checks passed. Exact-total amendment verification/review is recorded separately; no implemented-count or new runtime test claim. |
+| Owner acceptance status update (2026-10-14) | Documentation diff and relative links pass; workflow receipt, format, canonical Credo and Ash codegen check pass; isolated `mix precommit` exits 0: 1126 passed, 1 skipped, 4 excluded (303.6s). Acceptance-delta peer review and CI on the resulting commit remain required. No runtime code changed. |
 
 Full contract review: Claude at `202349d`, consultation
 `m_1791838602052826250_0c9eae1c`, answer
@@ -421,12 +425,35 @@ future reviewed severity changes moving between page groups (not a frozen
 snapshot); and bounded successors to both initial source readers. None is a
 new story or a claim that the code already exists.
 
+Full amended-text and B1/H1 producer-consumer review: Claude at
+`2526a22e7bfa1fd9bdd1f0e4d5540bfd3affaebb`, answer
+`m_1791864259000019496_a21b80ed` (2026-10-13 04:04:19 UTC), **PASS**.
+It preserves the three closed metrics, exact authorized membership,
+unavailable-versus-zero semantics, fixed lowerable-only deadlines,
+America/Denver week, and coalesced auditor audit after reads. H1 copy must
+name drafts rather than distinct leads or people.
+
 Owner decision record: `m_1791861397000025639_2dad34b9` routed the verbatim
 acceptance and clarification recorded in ADR-0015 amendment 1. On the chosen
 Home prototype the owner said “yes, that's what i had in mind” for the diff
 view (`m_1791860394000027513_96d010c7`) and “yes, that's the right behavior
 on phones” for the compact <=760px layout
 (`m_1791860524000028222_a65cab21`). These answers do not replace scoped G5.
+
+Amended-wording acceptance: on 2026-10-14 at 11:01 MDT, the owner said
+"accept the amended ADR-0015 wording" for PR #137 at `2526a22` (private
+Claude chat, relayed verbatim in `m_1791997310000000000_622e6df7`). This
+accepts ADR-0015 Amendment 1; the scoped G5 decision is separate.
+
+Scoped C1 G5: on 2026-10-14 at 11:04 MDT, the owner said "approve scoped
+C1 G5 for C1-02 and C1-03" (private Claude chat, relayed verbatim in
+`m_1791997445000000000_58eb5fd6`). C1-02 covers bounded draft/failure lists
+and the three exact counts; C1-03 covers the fixed existing domain action
+gateway (approve/edit/reject/re-run). Each is RED-first in its own PR under
+steps 1-4 and the RED obligations above, with independent Claude review,
+the full gate, green exact-head CI and owner merge. This approval excludes
+H1 screens (separate G5), new producers/metrics, new tables, spend and real
+calls.
 
 This contract draft does not complete C1-02/03 or H1, expand spend authority,
 add channels, change suppression, bypass the release gate, or authorize

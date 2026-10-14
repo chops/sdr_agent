@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-12
 supersedes: null
 ---
@@ -8,19 +8,24 @@ supersedes: null
 
 ## Status
 
-Proposed amended text for C1, following the owner-accepted Home framing
+Accepted for C1, following the owner-accepted Home framing
 (D-084) and [the C1 contract](../product/c1/readiness.md). On 2026-10-12 the
 owner accepted the architectural choice with **exact totals** for Home's
 count tiles. This replaces the prior prohibition on total-count queries;
-it does not uncap list rows or accept runtime code. Amendment 1 below needs
-independent full-text review and the owner's acceptance of the amended
-wording. Scoped C1 G5 remains required before implementation.
+it does not uncap list rows or accept runtime code. On 2026-10-14 at 11:01
+MDT, the owner accepted Amendment 1's wording at PR #137 head `2526a22`:
+"accept the amended ADR-0015 wording" (relayed verbatim in
+`m_1791997310000000000_622e6df7`). Scoped C1 G5 was separately approved at
+11:04 MDT (`m_1791997445000000000_58eb5fd6`); the C1 packet records its
+implementation scope and remaining review/merge gates.
 
 Initial entity/full-contract reviews passed at 354c590/202349d. The
 exact-total entity/action delta passed independent Claude review in
 `m_1791862258000010202_eafd672b` (2026-10-13 03:30:58 UTC), including
-auditor-only post-read audit placement. No runtime implementation is
-included here; frontmatter stays proposed until amended-text acceptance.
+auditor-only post-read audit placement. The full amended text and B1/H1
+producer-consumer agreement passed independent Claude review at `2526a22`
+in `m_1791864259000019496_a21b80ed` (2026-10-13 04:04:19 UTC).
+No runtime implementation is included here.
 
 ## Context
 
@@ -58,7 +63,7 @@ lifecycle and policy stay authoritative; no mirrored Task state or process.
 Cons: each producer needs a bounded reader and an atomic freshness/action
 adapter; paging across sources and partial-read states need explicit tests.
 
-## Proposed decision
+## Decision
 
 We will use the shared stateless projection and fixed command gateway.
 There is no persisted Task, new Ash domain or organizing GenServer. Item
@@ -158,4 +163,4 @@ inventing an implementation.
 Neutral: adding persistence, dynamic producers or independent task lifecycle
 later is a new architecture decision. No dependency or app-model permission
 is added by this ADR. Runtime diagrams change when the approved C1 code
-lands, not when this proposal is written.
+lands, not when this decision is recorded.
