@@ -41,19 +41,28 @@ defmodule SdrAgent.Agents.Admission do
   the allocation's below its `attempts`. Attempts are never refunded.
 
   Refusals (`%Refusal{reason: reason}`), in order of the checks:
-  `:no_usage_origin`, `:no_eligible_grant` (no grant passes the grant
-  checks), `:no_allocation` (an eligible grant, but no allocation for this
-  profile, bucket and time), `:ambiguous_allocation`, and
-  `{:budget_exhausted, :grant | :grant_day | :allocation}`.
+  `:no_usage_origin`; then the R0-07 slice B admission gate
+  (`SdrAgent.Agents.Admission.Gate`: `:calibration_not_authorized`,
+  `:calibration_evidence_pending`, `:result_gate_inactive`,
+  `:witness_store_untrusted`, `:tuple_not_promoted`, each with a
+  metadata-only `check`); then `:no_eligible_grant` (no grant passes the
+  grant checks), `:no_allocation` (an eligible grant, but no allocation for
+  this profile, bucket and time), `:ambiguous_allocation`, and
+  `{:budget_exhausted, :grant | :grant_day | :allocation}`. The gate's
+  checks come before the grant checks: they mean this build or
+  configuration may not spend, which no grant can fix.
 
   `record_refusal/1` then commits the refusal on its own, after the
-  reservation rolled back: one deduplicated `budget_exhausted` Failure and
-  a `model.reservation.refused` audit event (metadata only).
+  reservation rolled back: one deduplicated Failure of the run —
+  `budget_exhausted` for a grant refusal, `provider_error` for an
+  admission-gate refusal — and a `model.reservation.refused` audit event
+  (metadata only).
   """
 
   require Ash.Query
 
   alias SdrAgent.Actor
+  alias SdrAgent.Agents.Admission.Gate
   alias SdrAgent.Agents.ModelCallAllocation
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
@@ -86,20 +95,25 @@ defmodule SdrAgent.Agents.Admission do
       :bucket,
       :grant_id,
       :allocation_id,
-      :idempotency_key
+      :idempotency_key,
+      :check
     ]
   end
 
   defmodule Refused do
     @moduledoc """
-    The receipt of a committed reservation refusal, returned to the caller as
-    `{:error, %Refused{}}`: the refusal `reason`, the exact (deduplicated)
-    Failure recorded for it, the `model.reservation.refused` event, the run
-    and the refused request's idempotency key. A run stopped by the refusal
-    links exactly this Failure (`SdrAgent.Agents.Changes.LinkRefusalAttention`).
+    The receipt of a committed refusal, returned to the caller as
+    `{:error, %Refused{}}`: the refusal `reason` and its metadata-only
+    `check`, the exact Failure recorded for it, the refusal event, the run,
+    the refused request's idempotency key, and the `stage` —
+    `:reservation` (`model.reservation.refused`, after the reservation
+    rolled back) or `:launch` (`model.launch.refused`, committed with the
+    failed row by `SdrAgent.Agents.admit_launch/3`; R0-07 slice B, row B1).
+    A run stopped by the refusal links exactly this Failure
+    (`SdrAgent.Agents.Changes.LinkRefusalAttention`).
     """
     @enforce_keys [:reason, :failure_id, :event_id, :agent_run_id]
-    defstruct [:reason, :failure_id, :event_id, :agent_run_id, :request_id]
+    defstruct [:reason, :failure_id, :event_id, :agent_run_id, :request_id, :stage, :check]
   end
 
   @doc """
@@ -137,10 +151,13 @@ defmodule SdrAgent.Agents.Admission do
   @doc """
   Step 4: admits a ClaudeCLI call of `profile_id` with `purpose` in the
   locked, freshly read `run`, among the share-locked `candidate_ids`.
-  Returns `{:ok, %{grant_id:, allocation_id:}}` or `{:error, %Refusal{}}`.
-  Callers hold the run row, candidate and chain-head locks.
+  `gate` carries the admission gate's inputs taken before any lock
+  (`%{store: Gate.observe_store(), calibration: authority}`). Returns
+  `{:ok, %{grant_id:, allocation_id:, calibration_tuple:}}` or
+  `{:error, %Refusal{}}`. Callers hold the run row, candidate and
+  chain-head locks.
   """
-  def admit(run, call, now, candidate_ids) do
+  def admit(run, call, now, candidate_ids, gate) do
     purpose = Map.get(call, :purpose)
     profile_id = Map.get(call, :profile_id)
 
@@ -158,10 +175,18 @@ defmodule SdrAgent.Agents.Admission do
     }
 
     with :ok <- origin(refusal),
+         {:ok, tuple} <- admission_gate(refusal, run, gate),
          {:ok, grants} <- eligible_grants(refusal, candidate_ids, now),
          {:ok, grant, allocation} <- one_allocation(refusal, grants, now),
          :ok <- room(%{refusal | grant_id: grant.id, allocation_id: allocation.id}, grant, now) do
-      {:ok, %{grant_id: grant.id, allocation_id: allocation.id}}
+      {:ok, %{grant_id: grant.id, allocation_id: allocation.id, calibration_tuple: tuple}}
+    end
+  end
+
+  defp admission_gate(refusal, run, gate) do
+    case Gate.admit_reservation(run, refusal.profile_id, gate.store, gate.calibration) do
+      {:ok, tuple} -> {:ok, tuple}
+      {:error, reason, check} -> {:error, %{refusal | reason: reason, check: check}}
     end
   end
 
@@ -192,6 +217,128 @@ defmodule SdrAgent.Agents.Admission do
         DateTime.compare(now, allocation.available_until) == :lt
 
     opened? and open?
+  end
+
+  ## Launch admission (C9-03)
+
+  @doc """
+  Launch admission's share locks (`SdrAgent.Agents.admit_launch/3`): with
+  the run and invocation rows locked and before the chain head, locks the
+  grant and then the allocation the invocation was charged to `FOR SHARE`
+  (the reservation's order), so no grant editor commits a change to them
+  until the launch commits, and the launch waits for an editor that holds
+  them. A row without a charge (generation 1) locks nothing.
+  """
+  def lock_charge(invocation) do
+    for {resource, id} <- [
+          {ModelCallGrant, invocation.grant_id},
+          {ModelCallAllocation, invocation.allocation_id}
+        ],
+        not is_nil(id) do
+      resource
+      |> Ash.Query.filter(id == ^id)
+      |> Ash.Query.lock("FOR SHARE")
+      |> Ash.read!(authorize?: false)
+    end
+
+    :ok
+  end
+
+  @doc """
+  The complete non-room launch predicate for the owned, `:reserved`
+  ClaudeCLI `invocation` of the locked `run` at `now` (read under the chain
+  head), with the server's `effective_profile`. Room is not re-checked: the
+  attempt was charged at reservation. Returns `:ok` or `{:error, reason,
+  check}`:
+
+    * `:run_not_running_at_launch` (the run's status) — the run was stopped
+      (succeeded, failed, budget_exhausted or cancelled) while its call was
+      queued: only a `:running` run reserves and settles model calls
+      (`SdrAgent.Agents.Changes.BudgetCounter`), so no other status may
+      launch one;
+    * `:legacy_invocation_without_grant` (`:legacy_generation`) — a row
+      written before R0 (generation 1);
+    * `:profile_mismatch_at_launch` (`:profile_mismatch`) — reserved under
+      another profile than the server runs;
+    * the R0-07 slice B admission gate (`Gate.admit_launch/3`, with the
+      store observation `store` taken before the launch's locks):
+      `:calibration_not_authorized`, `:calibration_evidence_pending`,
+      `:result_gate_inactive`, `:witness_store_untrusted` or
+      `:tuple_not_promoted`, with its check;
+    * `:grant_ineligible_at_launch` with the failed check: `:grant_missing`,
+      `:grant_revoked`, `:grant_not_started`, `:grant_expired`,
+      `:profile_not_in_grant`, `:allocation_not_in_grant`,
+      `:allocation_profile_restricted`, `:bucket_not_applicable` or
+      `:allocation_unavailable`.
+  """
+  def launch_check(run, invocation, effective_profile, now, store) do
+    cond do
+      run.status != :running ->
+        {:error, :run_not_running_at_launch, run.status}
+
+      invocation.ledger_generation != 2 ->
+        {:error, :legacy_invocation_without_grant, :legacy_generation}
+
+      invocation.profile_id != effective_profile ->
+        {:error, :profile_mismatch_at_launch, :profile_mismatch}
+
+      true ->
+        with :ok <- Gate.admit_launch(run, invocation, store),
+             do: launch_terms(run, invocation, now)
+    end
+  end
+
+  defp launch_terms(run, invocation, now) do
+    with {:ok, grant} <- launch_grant(invocation, run.tenant_id, now),
+         :ok <- launch_allocation(invocation, grant, run, now) do
+      :ok
+    else
+      {:error, check} -> {:error, :grant_ineligible_at_launch, check}
+    end
+  end
+
+  defp launch_grant(invocation, tenant_id, now) do
+    grant = charged(ModelCallGrant, invocation.grant_id, tenant_id)
+
+    cond do
+      is_nil(grant) -> {:error, :grant_missing}
+      grant.status != :active -> {:error, :grant_revoked}
+      DateTime.compare(grant.starts_at, now) == :gt -> {:error, :grant_not_started}
+      DateTime.compare(now, grant.expires_at) != :lt -> {:error, :grant_expired}
+      invocation.profile_id not in grant.profile_ids -> {:error, :profile_not_in_grant}
+      true -> {:ok, grant}
+    end
+  end
+
+  defp launch_allocation(invocation, grant, run, now) do
+    allocation = charged(ModelCallAllocation, invocation.allocation_id, run.tenant_id)
+    bucket = UsageBucket.bucket(run.usage_origin, invocation.purpose)
+
+    cond do
+      is_nil(allocation) or allocation.grant_id != grant.id ->
+        {:error, :allocation_not_in_grant}
+
+      allocation.profile_id not in [nil, invocation.profile_id] ->
+        {:error, :allocation_profile_restricted}
+
+      is_nil(bucket) or bucket not in allocation.applies_to ->
+        {:error, :bucket_not_applicable}
+
+      not available?(allocation, now) ->
+        {:error, :allocation_unavailable}
+
+      true ->
+        :ok
+    end
+  end
+
+  # A fresh read of the charged row in the run's tenant (nil otherwise).
+  defp charged(_resource, nil, _tenant_id), do: nil
+
+  defp charged(resource, id, tenant_id) do
+    resource
+    |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
+    |> Ash.read_one!(authorize?: false)
   end
 
   defp origin(%Refusal{usage_origin: nil} = refusal),
@@ -315,7 +462,9 @@ defmodule SdrAgent.Agents.Admission do
           failure_id: failure.id,
           event_id: event.id,
           agent_run_id: refusal.agent_run_id,
-          request_id: refusal.idempotency_key
+          request_id: refusal.idempotency_key,
+          stage: :reservation,
+          check: refusal.check
         }
       else
         {:error, error} -> Repo.rollback(error)
@@ -327,9 +476,16 @@ defmodule SdrAgent.Agents.Admission do
   # head; the Failure's operation FK (FOR KEY SHARE) would otherwise wait for
   # them while this transaction holds the head. Taken first, it orders the
   # refusal before or after the writer.
-  defp lock_operation(%Refusal{operation_id: nil}), do: :ok
+  defp lock_operation(%Refusal{operation_id: id}), do: lock_operation_share(id)
 
-  defp lock_operation(%Refusal{operation_id: id}) do
+  @doc """
+  Locks the Operation `id` `FOR SHARE` (nil locks nothing), as refusal
+  recording and launch admission take it before the chain head: Operation
+  lifecycle writers lock it `FOR UPDATE`, then the head.
+  """
+  def lock_operation_share(nil), do: :ok
+
+  def lock_operation_share(id) do
     SdrAgent.Operations.Operation
     |> Ash.Query.filter(id == ^id)
     |> Ash.Query.lock("FOR SHARE")
@@ -337,6 +493,12 @@ defmodule SdrAgent.Agents.Admission do
 
     :ok
   end
+
+  @doc "Whether `reason` is an R0-07 admission-gate refusal (a `provider_error` Failure)."
+  def admission_reason?(reason), do: reason in Gate.reasons()
+
+  defp failure_class(reason),
+    do: if(admission_reason?(reason), do: :provider_error, else: :budget_exhausted)
 
   @doc "The detail reason recorded for a refusal reason (R0 packet, Operations.Failure)."
   def reason_name({:budget_exhausted, :grant}), do: "grant_exhausted"
@@ -350,7 +512,7 @@ defmodule SdrAgent.Agents.Admission do
     Failure
     |> Ash.Query.for_read(:read, %{}, actor: agent)
     |> Ash.Query.filter(
-      tenant_id == ^refusal.tenant_id and class == :budget_exhausted and
+      tenant_id == ^refusal.tenant_id and class == ^failure_class(refusal.reason) and
         subject_resource == ^@run_resource and subject_id == ^refusal.agent_run_id and
         detail_sha256 == ^sha256 and status in [:open, :acknowledged]
     )
@@ -369,13 +531,10 @@ defmodule SdrAgent.Agents.Admission do
       operation_id: refusal.operation_id,
       subject_resource: @run_resource,
       subject_id: refusal.agent_run_id,
-      class: :budget_exhausted,
+      class: failure_class(refusal.reason),
       severity: :critical,
       retryable: false,
-      message:
-        "model call reservation refused: #{reason_name(refusal.reason)} " <>
-          "(bucket #{refusal.bucket || "none"}, profile #{refusal.profile_id}); " <>
-          "no real call is made until an admin grants an eligible allocation",
+      message: message(refusal),
       detail: detail
     }
 
@@ -383,14 +542,28 @@ defmodule SdrAgent.Agents.Admission do
          do: {:ok, failure, false}
   end
 
-  # The dedupe key, stored as the Failure's detail.
+  defp message(refusal) do
+    if admission_reason?(refusal.reason) do
+      "model call not admitted: #{reason_name(refusal.reason)} (#{check_label(refusal.check)}) " <>
+        "(profile #{refusal.profile_id}); no real call is made until the result gate, " <>
+        "the witness store and the promoted tuple admit it"
+    else
+      "model call reservation refused: #{reason_name(refusal.reason)} " <>
+        "(bucket #{refusal.bucket || "none"}, profile #{refusal.profile_id}); " <>
+        "no real call is made until an admin grants an eligible allocation"
+    end
+  end
+
+  # The dedupe key, stored as the Failure's detail (the check only when set).
   defp detail(refusal) do
-    Canonical.encode!(%{
+    %{
       "kind" => "model_reservation_refused",
       "reason" => reason_name(refusal.reason),
       "grant_id" => refusal.grant_id || "none",
       "agent_run_id" => refusal.agent_run_id
-    })
+    }
+    |> then(&if(refusal.check, do: Map.put(&1, "check", name(refusal.check)), else: &1))
+    |> Canonical.encode!()
   end
 
   defp event(refusal, failure, deduplicated?) do
@@ -403,20 +576,38 @@ defmodule SdrAgent.Agents.Admission do
       agent_run_id: refusal.agent_run_id,
       correlation_id: refusal.correlation_id,
       idempotency_key: refusal.idempotency_key,
-      payload: %{
-        "reason" => reason_name(refusal.reason),
-        "usage_origin" => name(refusal.usage_origin),
-        "purpose" => name(refusal.purpose),
-        "bucket" => name(refusal.bucket),
-        "profile_id" => name(refusal.profile_id),
-        "grant_id" => refusal.grant_id,
-        "allocation_id" => refusal.allocation_id,
-        "failure_id" => failure.id,
-        "deduplicated" => deduplicated?
-      }
+      payload:
+        %{
+          "reason" => reason_name(refusal.reason),
+          "usage_origin" => name(refusal.usage_origin),
+          "purpose" => name(refusal.purpose),
+          "bucket" => name(refusal.bucket),
+          "profile_id" => name(refusal.profile_id),
+          "grant_id" => refusal.grant_id,
+          "allocation_id" => refusal.allocation_id,
+          "failure_id" => failure.id,
+          "deduplicated" => deduplicated?
+        }
+        |> then(&if(refusal.check, do: Map.put(&1, "check", name(refusal.check)), else: &1))
     }
   end
 
   defp name(nil), do: nil
   defp name(atom) when is_atom(atom), do: Atom.to_string(atom)
+  defp name(check), do: check_name(check)
+
+  @doc """
+  The metadata-only name of a refusal `check`: the atom's name, or
+  `"check:id"` for a check that names the blocking row (row B4').
+  """
+  def check_name(check) when is_atom(check), do: Atom.to_string(check)
+  def check_name({check, id}) when is_atom(check) and is_binary(id), do: "#{check}:#{id}"
+
+  @doc """
+  The human label of a refusal `check` for a Failure message: its name
+  without any row id (the id stays in the detail and event, where it is
+  structured metadata rather than prose).
+  """
+  def check_label({check, _id}) when is_atom(check), do: Atom.to_string(check)
+  def check_label(check), do: check_name(check)
 end

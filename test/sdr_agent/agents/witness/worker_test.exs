@@ -287,13 +287,19 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
 
   defp invocation!(ctx, key, provider) do
     attrs = AgentsFixtures.model_attrs(key) |> AgentsFixtures.with_provider(provider)
-    {:ok, invocation} = Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+    # R0-07 slice B: admitted only for the reservation itself.
+    {:ok, invocation} =
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+      end)
+
     {:ok, invocation} = Agents.mark_model_invocation_sent(invocation, actor: ctx.agent)
 
     {:ok, invocation} =
       Agents.complete_model_invocation(invocation, AgentsFixtures.completion(), actor: ctx.agent)
 
-    invocation
+    # Row G3: the scan schedules and backfills only a decided generation-2 row.
+    if provider == :claude_cli, do: SdrAgent.GateFixtures.decided!(invocation), else: invocation
   end
 
   defp enqueue(invocation, actor) do

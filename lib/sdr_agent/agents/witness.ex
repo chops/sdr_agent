@@ -32,11 +32,29 @@ defmodule SdrAgent.Agents.Witness do
        downgrades current non-mismatch links with an `inferred` successor.
 
   A match is `reconciled` only for an exact runtime allowlist entry
-  (`reconciled_methods`: `%{provider:, cli_version:, projection_version:,
-  method:}` — shipped empty, R3; enabled only by the reviewed S12d change);
-  otherwise `inferred` with `method_not_enabled`. A per-call `:methods` override is honoured only when
-  `allow_method_override` is configured (test configuration only). The
-  model is never called again.
+  (`reconciled_methods`; R0-07 REQ-07-1, ADR-0005 R0 amendment item 1):
+  exactly `%{provider:, cli_version:, profile_id:, model_id:,
+  projection_version:, method:}` and no other key, compared with the
+  invocation's recorded identity and the projection and method evaluated for
+  the exchange (`allowlisted?/3`). `profile_id: nil` names generation-1 rows
+  only (written before R0, without a profile); a profiled entry matches only
+  generation-2 rows of that profile, so a Sonnet call never matches an Opus
+  entry. Only reviewed `config/*.exs` changes define entries; there is no
+  stage key. Anything else is `inferred` with `method_not_enabled`. A
+  per-call `:methods` override (a bare method atom or exact entries) is
+  honoured only when `allow_method_override` is configured (test
+  configuration only). The model is never called again.
+
+  **Result gate (R0-07 slice C).** `gate: %{run_id, operation_id}` is
+  passed only by the facade gate step and run recovery; it must be the
+  invocation's own run and that run's Operation (`{:error, :invalid_gate}`
+  otherwise). The persist step then locks the Operation `FOR SHARE` before
+  the invocation `FOR UPDATE` and the chain head, every Failure it opens
+  carries `operation_id`, and the result carries a `receipt: %{status,
+  link_id, cause_id, codes}` — the single current primary link evaluated,
+  the live gate cause opened or found (critical for a mismatch, else the
+  warning), and the bounded observation and link reason codes. An unconfigured store under `gate:` is `:skipped` with an empty
+  receipt. Without `gate:` (the scan) nothing changes.
 
   `status/1` (used by `SdrAgent.Agents.witness_status/2`) is the C1
   invocation answer over current links. `enqueue/2` writes a
@@ -50,7 +68,10 @@ defmodule SdrAgent.Agents.Witness do
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.Witness.GateEvidence
   alias SdrAgent.Agents.Witness.Projection
   alias SdrAgent.Agents.Witness.ReconcileWorker
   alias SdrAgent.Agents.Witness.Store
@@ -105,10 +126,16 @@ defmodule SdrAgent.Agents.Witness do
     end
   end
 
+  @entry_keys [:cli_version, :method, :model_id, :profile_id, :projection_version, :provider]
+
   @doc """
-  Exact entries whose matching proof may be labelled reconciled. Dev and prod
-  ship exactly one (S12d enablement, ADR-0005); the test environment
-  configures none.
+  Exact entries whose matching proof may be labelled reconciled (R0-07
+  REQ-07-1): maps with exactly the six keys `provider`, `cli_version`,
+  `profile_id` (nil only for generation 1), `model_id`,
+  `projection_version` and `method`, each of its type; any other shape —
+  the pre-R0 four-key entry, an extra key such as a stage — is dropped. Dev
+  and prod ship exactly the generation-1 2.1.291 entry; the test
+  environment configures none.
   """
   def reconciled_methods do
     # Runtime entries must be exact proofs; a bare method atom is accepted
@@ -116,31 +143,88 @@ defmodule SdrAgent.Agents.Witness do
     config() |> Keyword.get(:reconciled_methods, []) |> Enum.filter(&exact_entry?/1)
   end
 
-  defp exact_entry?(%{
-         provider: provider,
-         cli_version: version,
-         projection_version: projection,
-         method: method
-       }),
-       do: is_atom(provider) and is_binary(version) and is_binary(projection) and is_atom(method)
+  defp exact_entry?(entry) when is_map(entry) and not is_struct(entry),
+    do: Enum.sort(Map.keys(entry)) == @entry_keys and typed_entry?(entry)
 
   defp exact_entry?(_entry), do: false
 
-  # A match is labelled reconciled only for an allowlisted (provider, attested
-  # CLI version, projection version, method) entry — or, under the test-only
-  # override, a bare method atom.
+  # `profile_id` may be nil (generation 1); every other value is required.
+  defp typed_entry?(%{provider: provider, method: method} = entry)
+       when is_atom(provider) and not is_nil(provider) and is_atom(method) and not is_nil(method),
+       do:
+         is_binary(entry.cli_version) and is_atom(entry.profile_id) and
+           is_binary(entry.model_id) and is_binary(entry.projection_version)
+
+  defp typed_entry?(_entry), do: false
+
+  @doc """
+  The exact per-call override for the calibration harness (R0-07 item 8):
+  `{:ok, entries}` when `entries` is a non-empty list of exact six-key
+  entries, otherwise `{:error, :inexact_override}` — a bare method atom, a
+  partial map, the pre-R0 four-key shape or an extra key is refused. Being
+  a test build is never spend authority; the bare-atom override remains for
+  hermetic legacy fixtures only.
+  """
+  def exact_overrides([_ | _] = entries) do
+    if Enum.all?(entries, &exact_entry?/1),
+      do: {:ok, entries},
+      else: {:error, :inexact_override}
+  end
+
+  def exact_overrides(_entries), do: {:error, :inexact_override}
+
+  @doc """
+  True when the shipped allowlist (`reconciled_methods/0`) holds an exact
+  entry for `invocation`'s recorded identity (provider, CLI version,
+  profile, model, ledger generation) together with the evaluated
+  `projection_version` and `method`. Never consults a test override.
+  """
+  def allowlisted?(invocation, projection_version, method),
+    do:
+      Enum.any?(reconciled_methods(), &entry_matches?(&1, invocation, projection_version, method))
+
+  @doc """
+  The pre-call admission predicate (R0-07 slice B, row B2): true when
+  `entries` (default: the shipped allowlist, `reconciled_methods/0`; never
+  a per-call override) hold an exact six-key entry for the generation-2
+  runtime identity `identity` (`provider`, `provider_version`,
+  `profile_id`, `model_id`, `ledger_generation`), with the propagated
+  method and a projection id of `Projection.current_versions/0`, compared
+  literally. It establishes an eligible promoted runtime identity, never
+  that the call's evaluated projection is proven: the result gate enforces
+  the exact projection and method actually evaluated. A nil-profile
+  (generation-1) entry never promotes a generation-2 identity.
+  """
+  def promoted?(identity, entries \\ reconciled_methods())
+
+  def promoted?(%{ledger_generation: 2, profile_id: profile_id} = identity, entries)
+      when is_list(entries) and not is_nil(profile_id) do
+    current = Projection.current_versions()
+
+    Enum.any?(entries, fn entry ->
+      exact_entry?(entry) and entry.method == @method and entry.projection_version in current and
+        entry_matches?(entry, identity, entry.projection_version, @method)
+    end)
+  end
+
+  def promoted?(_identity, _entries), do: false
+
+  # A match is labelled reconciled only for an exact allowlisted entry — or,
+  # under the test-only override, a bare method atom.
   defp enabled?(entries, invocation, projection) do
     Enum.any?(entries, fn
-      @method ->
-        true
-
-      %{provider: provider, cli_version: version, projection_version: version_p, method: @method} ->
-        provider == invocation.provider and version == invocation.provider_version and
-          version_p == projection
-
-      _other ->
-        false
+      @method -> true
+      entry -> exact_entry?(entry) and entry_matches?(entry, invocation, projection, @method)
     end)
+  end
+
+  # Every key is compared. A nil profile names generation-1 rows only; a
+  # profiled entry, generation-2 rows of that profile only.
+  defp entry_matches?(entry, invocation, projection, method) do
+    entry.provider == invocation.provider and entry.cli_version == invocation.provider_version and
+      entry.profile_id == invocation.profile_id and entry.model_id == invocation.model_id and
+      entry.projection_version == projection and entry.method == method and
+      invocation.ledger_generation == if(is_nil(entry.profile_id), do: 1, else: 2)
   end
 
   defp config, do: Application.get_env(:sdr_agent, __MODULE__, [])
@@ -161,24 +245,103 @@ defmodule SdrAgent.Agents.Witness do
       with :ok <- authorize(actor),
            {:ok, methods} <- methods(opts),
            {:ok, hook} <- test_hook(opts),
-           {:ok, tamper} <- tamper_hook(opts) do
+           {:ok, tamper} <- tamper_hook(opts),
+           {:ok, gate} <- gate_option(opts) do
         root = Keyword.get(opts, :store_root, store_root())
-        do_reconcile(invocation_id, root, methods, actor, {hook, tamper})
+        do_reconcile(invocation_id, root, methods, actor, {hook, tamper, gate})
       end
     end)
   end
 
-  defp do_reconcile(_invocation_id, nil, _methods, _actor, _hook), do: {:ok, %{status: :skipped}}
+  # Unconfigured and no gate: inert, exactly as before (no read).
+  defp do_reconcile(_invocation_id, nil, _methods, _actor, {_hook, _tamper, nil}),
+    do: {:ok, %{status: :skipped}}
 
-  defp do_reconcile(invocation_id, root, methods, actor, {hook, tamper}) do
+  defp do_reconcile(invocation_id, root, methods, actor, {hook, tamper, gate}) do
     with {:ok, invocation} <- GuardedCall.get(ModelInvocation, invocation_id, actor: actor),
+         :ok <- own_gate(gate, invocation),
+         :ok <- configured(root),
          :ok <- eligible(invocation),
          {:ok, observation} <- observe(invocation, root, actor, hook, tamper) do
-      persist(invocation, observation, methods, actor)
+      persist(invocation, observation, methods, actor, gate)
     else
-      :skip -> {:ok, %{status: :skipped}}
+      :skip -> {:ok, skipped(gate)}
       other -> other
     end
+  end
+
+  defp configured(nil), do: :skip
+  defp configured(_root), do: :ok
+
+  defp skipped(nil), do: %{status: :skipped}
+
+  defp skipped(_gate),
+    do: %{status: :skipped, receipt: %{status: :skipped, link_id: nil, cause_id: nil, codes: []}}
+
+  ## The result gate's reconcile (R0-07 slice C)
+
+  # `gate: %{run_id, operation_id}` — passed only by the facade gate step and
+  # run recovery. `operation_id` is nil only for a run without an Operation
+  # (a reply run; its gate-cause provenance is pending entity review).
+  defp gate_option(opts) do
+    case Keyword.fetch(opts, :gate) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, %{run_id: run_id, operation_id: operation_id}}
+      when is_binary(run_id) and (is_binary(operation_id) or is_nil(operation_id)) ->
+        {:ok, %{run_id: run_id, operation_id: operation_id}}
+
+      {:ok, _other} ->
+        {:error, :invalid_gate}
+    end
+  end
+
+  # The gate is the invocation's own run and that run's Operation.
+  defp own_gate(nil, _invocation), do: :ok
+
+  defp own_gate(gate, invocation) do
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+    |> Ash.Query.filter(id == ^gate.run_id and tenant_id == ^invocation.tenant_id)
+    |> Ash.read_one()
+    |> case do
+      {:ok, %AgentRun{id: run_id, operation_id: operation_id}}
+      when run_id == invocation.agent_run_id and operation_id == gate.operation_id ->
+        :ok
+
+      _ ->
+        {:error, :invalid_gate}
+    end
+  end
+
+  # The receipt: the primary link the gate evaluated (the single current
+  # primary, if any) and the live gate cause it opened or found — the
+  # critical item for a mismatch, else the warning.
+  defp receipt(links, status, live, codes) do
+    link_id =
+      case Enum.filter(links, &(&1.evidence["classification"] == "primary")) do
+        [primary] -> primary.id
+        _ -> nil
+      end
+
+    severity = if status == :mismatch, do: :critical, else: :warning
+    cause = Enum.find(live, &(&1.severity == severity))
+    # `codes`: the observation's bounded warning codes, and the evaluated
+    # primary link's reason codes (metadata only) for the typed
+    # classification of a withheld outcome (R0-07 slice C, G2).
+    link_codes =
+      case Enum.find(links, &(&1.id == link_id)) do
+        nil -> []
+        link -> link.evidence["reason_codes"] || []
+      end
+
+    %{
+      status: status,
+      link_id: link_id,
+      cause_id: cause && cause.id,
+      codes: Enum.uniq(codes ++ link_codes)
+    }
   end
 
   defp eligible(%{provider: :claude_cli, status: status}) when status in @terminal, do: :ok
@@ -466,23 +629,66 @@ defmodule SdrAgent.Agents.Witness do
 
   ## Persistence (one transaction; invocation row lock first)
 
-  defp persist(invocation, observation, methods, actor) do
+  # Lock order (R0-07 slice C): the gate's Operation `FOR SHARE` (only with
+  # `gate:`), the invocation `FOR UPDATE`, then the chain head (appends).
+  defp persist(invocation, observation, methods, actor, gate) do
     Audit.transaction(fn ->
-      with {:ok, _locked} <- lock(invocation),
+      with :ok <- lock_gate_operation(gate, invocation.tenant_id),
+           {:ok, _locked} <- lock(invocation),
+           :ok <- scan_may_write(gate, invocation),
            :ok <- fresh(invocation, observation),
            {:ok, current} <- Agents.current_wire_witness_links(invocation.id, actor: actor),
            :ok <- write_links(invocation, observation, current, methods, actor),
            {:ok, links} <- Agents.current_wire_witness_links(invocation.id, actor: actor),
-           :ok <- attention(invocation, links, observation.warnings, actor) do
-        %{status: status(links), links: links, attention: observation.warnings}
+           :ok <- attention(invocation, links, observation.warnings, actor, gate) do
+        result = %{status: status(links), links: links, attention: observation.warnings}
+        with_receipt(result, gate, invocation)
       else
         # Never completed work: the caller (worker) retries with a fresh
         # observation; nothing was written.
         :stale -> Repo.rollback(:stale_observation)
+        :deferred -> %{status: :deferred_to_gate}
         {:error, error} -> Repo.rollback(error)
       end
     end)
   end
+
+  # Row G3 (R0-07 slice C), rechecked under the invocation FOR UPDATE lock
+  # (plain read, no lock clause): without `gate:`, a completed generation-2
+  # ClaudeCLI invocation with no ModelResultRelease is the gate's (running
+  # run) or run recovery's (terminal run) — never the scan's. Nothing is
+  # written. The gate's reconcile holds this lock and finalization holds the
+  # invocation FOR SHARE while it writes the release, so this read sees the
+  # committed outcome of either.
+  defp scan_may_write(nil, invocation),
+    do: if(gate_owned?(invocation), do: :deferred, else: :ok)
+
+  defp scan_may_write(_gate, _invocation), do: :ok
+
+  @doc """
+  Whether `invocation` is owned by the result gate or run recovery (row G3):
+  a completed generation-2 ClaudeCLI invocation with no `ModelResultRelease`.
+  A read error counts as owned (the scan then writes nothing).
+  """
+  @spec gate_owned?(struct()) :: boolean()
+  def gate_owned?(
+        %ModelInvocation{provider: :claude_cli, ledger_generation: 2, status: :completed} =
+          invocation
+      ) do
+    decided? =
+      ModelResultRelease
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+      |> Ash.Query.filter(
+        tenant_id == ^invocation.tenant_id and model_invocation_id == ^invocation.id
+      )
+      |> Ash.exists?()
+
+    not decided?
+  rescue
+    _error -> true
+  end
+
+  def gate_owned?(_invocation), do: false
 
   # Under the invocation lock, a metadata-only re-check (lstat of at most 64
   # record entries and of the blobs they name, no content read) that the
@@ -494,6 +700,32 @@ defmodule SdrAgent.Agents.Witness do
          blob_identities(root, digests) == blobs,
        do: :ok,
        else: :stale
+  end
+
+  defp lock_gate_operation(%{operation_id: id}, tenant_id) when is_binary(id) do
+    Operation
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+    |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
+    |> Ash.Query.lock("FOR SHARE")
+    |> Ash.read_one()
+    |> case do
+      {:ok, %Operation{}} -> :ok
+      _ -> {:error, :invalid_gate}
+    end
+  end
+
+  defp lock_gate_operation(_gate, _tenant_id), do: :ok
+
+  defp with_receipt(result, nil, _invocation), do: result
+
+  defp with_receipt(result, _gate, invocation) do
+    case live_failures(invocation) do
+      {:ok, live} ->
+        Map.put(result, :receipt, receipt(result.links, result.status, live, result.attention))
+
+      {:error, error} ->
+        Repo.rollback(error)
+    end
   end
 
   defp lock(invocation) do
@@ -649,6 +881,8 @@ defmodule SdrAgent.Agents.Witness do
         "projections_inapplicable" => evaluated.inapplicable
       }
       |> Map.merge(evaluated.digests)
+      # R0-07 item 7: a gated parent's identity; generation 1 stays legacy.
+      |> Map.merge(WitnessEvidence.identity(invocation))
 
     # Untrusted proxy metadata: keep only values the allowlist accepts. The
     # v2/v3 context group was validated as a whole (exact keys) and is merged
@@ -663,33 +897,51 @@ defmodule SdrAgent.Agents.Witness do
 
   ## Attention (same transaction)
 
-  defp attention(invocation, links, warnings, actor) do
-    with {:ok, live} <- live_failures(invocation) do
+  # Row G4 (R0-07 slice C): after a withheld release, the cause its event
+  # binds is protected (`SdrAgent.Agents.Witness.GateEvidence`). Read here,
+  # under the invocation FOR UPDATE lock, whatever the caller: a gate-mode
+  # reconcile that observed before a competing finalizer, or is called
+  # after the release, honours it too (review MF3).
+  defp attention(invocation, links, warnings, actor, gate) do
+    with {:ok, live} <- live_failures(invocation),
+         {:ok, protection} <- GateEvidence.protection(invocation) do
       critical? = Enum.any?(links, &(&1.link_status == :mismatch))
       warnings = if critical?, do: [], else: Enum.sort(warnings)
       {criticals, live_warnings} = Enum.split_with(live, &(&1.severity == :critical))
 
-      with :ok <- ensure_critical(critical?, criticals, invocation, actor) do
-        ensure_warning(warnings, live_warnings, invocation, actor)
+      with :ok <-
+             ensure_critical(critical?, criticals, {invocation, links, protection}, actor, gate),
+           :ok <-
+             ensure_warning(warnings, live_warnings, {invocation, links, protection}, actor, gate) do
+        GateEvidence.note(protection, invocation, links, actor)
       end
     end
   end
 
-  defp ensure_critical(true, [], invocation, actor),
-    do: open(invocation, :critical, "mismatch", actor)
+  # A protected critical (live) is already in `criticals`; a resolved one is
+  # not reopened for the same mismatch, only for a distinct later one.
+  defp ensure_critical(true, [], {invocation, links, protection}, actor, gate) do
+    if is_nil(protection) or GateEvidence.distinct_mismatch?(protection, links),
+      do: open(invocation, :critical, "mismatch", actor, gate),
+      else: :ok
+  end
 
-  defp ensure_critical(_needed, _live, _invocation, _actor), do: :ok
+  defp ensure_critical(_needed, _live, _held, _actor, _gate), do: :ok
 
-  defp ensure_warning(warnings, live, invocation, actor) do
+  defp ensure_warning(warnings, live, {invocation, links, protection}, actor, gate) do
     message = message(warnings)
+    {protected, live} = Enum.split_with(live, &(protection && &1.id == protection.cause_id))
     {keep, stale} = Enum.split_with(live, &(warnings != [] and &1.message == message))
 
     with :ok <- resolve_all(stale, actor) do
-      if warnings == [] or keep != [],
+      if warnings == [] or keep != [] or protected != [] or unchanged?(protection, links),
         do: :ok,
-        else: open(invocation, :warning, Enum.join(warnings, ","), actor)
+        else: open(invocation, :warning, Enum.join(warnings, ","), actor, gate)
     end
   end
+
+  defp unchanged?(nil, _links), do: false
+  defp unchanged?(protection, links), do: not GateEvidence.changed?(protection, links)
 
   defp message([]), do: nil
   defp message(warnings), do: message_for(Enum.join(warnings, ","))
@@ -697,7 +949,8 @@ defmodule SdrAgent.Agents.Witness do
   defp message_for(reasons),
     do: "wire witness #{reasons}: model invocation needs operator review"
 
-  defp open(invocation, severity, reasons, actor) do
+  # With `gate:`, the opened cause carries the run's Operation (R0-07 slice C).
+  defp open(invocation, severity, reasons, actor, gate) do
     attrs = %{
       subject_resource: @subject,
       subject_id: invocation.id,
@@ -706,6 +959,8 @@ defmodule SdrAgent.Agents.Witness do
       message: message_for(reasons),
       retryable: false
     }
+
+    attrs = if gate, do: Map.put(attrs, :operation_id, gate.operation_id), else: attrs
 
     case Operations.open_failure(attrs, actor: actor) do
       {:ok, _failure} -> :ok

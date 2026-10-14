@@ -27,6 +27,9 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
   @racers 8
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     :ok = Sandbox.checkout(SdrAgent.Repo, sandbox: false)
     cleanup!()
     on_exit(fn -> with_connection(&cleanup!/0) end)
@@ -84,11 +87,12 @@ defmodule SdrAgent.Agents.WireWitnessRaceTest do
   end
 
   defp link(invocation, ref, supersedes_id) do
-    evidence = %{
-      "witness_schema" => 1,
-      "projection_version" => "claude-message-json/1+prompt-builder/1",
-      "reason_codes" => ["propagated_id_match"]
-    }
+    evidence =
+      Map.merge(SdrAgent.Agents.WitnessEvidence.identity(invocation), %{
+        "witness_schema" => 1,
+        "projection_version" => "claude-message-json/1+prompt-builder/1",
+        "reason_codes" => ["propagated_id_match"]
+      })
 
     %{
       model_invocation_id: invocation.id,

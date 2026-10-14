@@ -26,8 +26,13 @@ defmodule SdrAgentWeb.Router do
 
     # The operator console (S10): a signed-in operator is required; the role
     # only shapes the UI — every action is authorized by the domain.
+    # The calibration console hook is inert unless that console is being
+    # served (R0-07; `SdrAgentWeb.CalibrationConsole`): then only /admin mounts.
     ash_authentication_live_session :operator_console,
-      on_mount: [{SdrAgentWeb.LiveUserAuth, :operator}] do
+      on_mount: [
+        {SdrAgentWeb.LiveUserAuth, :operator},
+        {SdrAgentWeb.CalibrationConsole, :admin_only}
+      ] do
       live "/", DashboardLive, :index
       live "/leads", LeadLive.Index, :index
       live "/leads/:id", LeadLive.Show, :show

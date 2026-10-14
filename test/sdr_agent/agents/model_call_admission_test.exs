@@ -30,6 +30,9 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     Clock.freeze(@now)
     on_exit(&Clock.unfreeze/0)
     tenant = bootstrap!()
@@ -930,7 +933,14 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
 
     def prepare(_request, _opts), do: {:ok, ClaudeCLI.provenance()}
 
+    # A ClaudeCLI-shaped provider sends its call only through launch
+    # admission (C9-03), as the ClaudeCLI server does.
     def complete(request, _opts) do
+      {:ok, _sent} =
+        SdrAgent.Agents.admit_launch(request.witness.model_invocation_id, :claude_cli_opus,
+          actor: request.actor
+        )
+
       output = %{answer: "qualified", score: 7}
 
       {:ok,

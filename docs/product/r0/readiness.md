@@ -123,6 +123,37 @@ admission, launch admission, the facade's sent boundary).
     and hold it until the sent or failed transition commits. The event
     append's own after-action lock is too late to order the eligibility
     read.
+  - **As implemented (C9-03).** Between the invocation row and the chain
+    head, the charged grant and then its allocation are locked `FOR SHARE`
+    (the reservation's order, `Admission.lock_charge/1`); `now` is read
+    after the head. An editor holding the grant therefore commits first and
+    is seen (launch refused); an admission holding the share locks commits
+    first (launch proceeds) and the editor waits for it. Identity and state
+    refusals roll back and are then recorded as a `model.launch.refused`
+    event of the actor's tenant (reason `invocation_not_found`,
+    `invocation_not_claude_cli` or `invocation_not_reserved`); a non
+    `agent_runtime` actor is `Forbidden`, audited as `authz.denied`.
+    The locked run must still be `running` (the only status that reserves
+    and settles model calls); a run stopped while its call was queued
+    (`succeeded`, `failed`, `budget_exhausted`, `cancelled`) is refused as
+    `run_not_running_at_launch` (check = the run status): the call is
+    failed and never sent, and no launch Failure is opened, because the
+    stop already has its own cause.
+    The ClaudeCLI server monitors the caller before admission and re-checks
+    it after admission, before the Reaper handoff: a caller that died while
+    admission waited for its locks is never launched for. If admission had
+    already committed `sent`, the row stays `sent` (never reset to
+    `reserved`). The existing crash path recovers it only while its run is
+    still `running` and abandoned (`StaleRunSweeper`: sent → unknown, never
+    re-sent). A `sent` row of an already terminal run is not recovered
+    (settling it also needs a running run); this is tracked below as an
+    enablement prerequisite.
+    Eligibility refusals record the failed check (`grant_revoked`,
+    `grant_expired`, `grant_not_started`, `profile_not_in_grant`,
+    `allocation_not_in_grant`, `allocation_profile_restricted`,
+    `bucket_not_applicable`, `allocation_unavailable`, `profile_mismatch`,
+    `legacy_generation`) on the failed row and the Failure detail; the
+    Failure's subject is the invocation.
   - **Identity and state refusals (no mutation).** It refuses if the
     invocation is missing, belongs to another tenant, is not `reserved` (a
     replay of a sent, in-flight or terminal row), or is not `claude_cli`.
@@ -171,15 +202,125 @@ admission, launch admission, the facade's sent boundary).
   runtime. Agent CLIs are untouched.
 - **Lock order summary.** Reservation: run → candidate grants `FOR SHARE`
   → their allocations `FOR SHARE` → chain head (explicit), then the clock.
-  Launch admission: run → invocation → chain head (explicit, before grant
-  reads). Grant and allocation edits: grant row → its allocations → chain
-  head. Switch request: setting row → chain head. Refusal reporting: the
+  Launch admission: run → invocation → its grant `FOR SHARE` → its
+  allocation `FOR SHARE` → chain head (explicit, before the term reads; as
+  implemented in C9-03). Grant and allocation edits: grant row → its
+  allocations → chain head. Switch request: setting row → chain head. Refusal reporting: the
   run's Operation `FOR SHARE` → chain head (explicit, before the dedupe
   check). Run stop on a refusal: run → refusal Failure `FOR UPDATE` → chain
   head. Operation failure: Operation → Failure `FOR UPDATE` → chain head.
-  Launch admission never locks grant rows; it reads committed terms under
-  the chain head. Mutators never take run or invocation locks after the
-  chain head. No cycles.
+  Launch admission takes only share locks on grant rows, in the editors'
+  order and before the head, and reads the terms under the chain head.
+  Mutators never take run or invocation locks after the chain head. No
+  cycles.
+
+### C9-03 recovery delta: abandoned reserved invocations
+
+Status: **entity PASS; implemented in C9-03** (`SDR.StaleRunSweeper`).
+- Reviewer: Codex via ai-pair, 2026-10-12. Answer correlation
+  m_1791841877000009253_7afb24e6 → codex-pr136-10e7eba-answer. Report:
+  `~/.local/state/sdr-agent/handoff-20261008/tmp/codex-pr136-10e7eba-rereview.md`
+  (entity verdict PASS at 10e7eba; code verdict then REQUEST_CHANGES until
+  this was implemented and tested).
+- Answers to the open questions:
+  1. Both (a) and (b) are in scope. Case (b) covers explicitly terminal
+     runs only; queued and live runs are left alone.
+  2. The strict `reserved_at < now − stale_after_seconds` cutoff is
+     acceptable as a grace period. Age is not the proof.
+  3. The proof is the locked terminal run plus the locked, freshly re-read
+     `reserved` state, together with the atomic sent-before-spawn contract.
+     Status and age are re-checked under the locks; rows exactly at the
+     cutoff and recent rows are untouched.
+- The PASS covers this reserved-only delta, not tuple promotion,
+  calibration, deployment or real-call enablement.
+
+Origin: Codex PR #136 review (REQUEST_CHANGES at 543846b, must-fix 2). Moving the ClaudeCLI queue wait from `sent` to
+`reserved` lets a reservation outlive its caller: a facade caller killed
+while its call is queued never settles it, the server drops the dead
+caller's request unlaunched, and crash recovery (`SDR.StaleRunSweeper`)
+selects only `sent` rows, so the row stays `reserved` forever, even after
+its run is failed. This delta makes such rows terminal.
+
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|---|---|---|---|---|---|---|---|
+| ModelInvocation | Existing (lifecycle delta) | Close reservations proven abandoned and unlaunched | no new attributes; `error` = `%{"kind" => "abandoned_before_launch", "reason" => "run_abandoned" \| "run_stopped"}`; `sent_at` stays nil; `profile_id`, `grant_id`, `allocation_id`, `ledger_generation` unchanged | unchanged (still charged to its grant and allocation) | **Proof of "abandoned, unlaunched".** A row is `reserved` when read under its own `FOR UPDATE` lock, taken after its run's `FOR UPDATE` lock. It was never launched: `sent` is committed by launch admission before any port opens, and admission needs the run lock and a `running` run (MF1). It can never launch later: either (a) the same transaction proves the run abandoned and fails it (stale and its Oban job not live, decided again under the run, Operation and job locks, exactly as today), so later admissions see a non-running run and are refused; or (b) the run is already terminal (MF1: never launchable again) and the row was reserved before the stale cutoff (`reserved_at` < now − `stale_after_seconds`), which leaves time for a live facade to settle it itself. **Transition:** reserved → failed through the existing `:fail` action (`Agents.fail_model_invocation/3`), never `unknown` (the call provably never ran) and never back to `sent`. **No refund, no invented use:** the charged attempt is kept (grant and allocation consumption counts the row by `grant_id` / `allocation_id`, which stay); `model_calls_reserved` stays; `model_calls_used` and tokens are not settled, because `sent_at` is nil. **Idempotent:** only `reserved` rows are selected, so a failed row is never touched again; a recovered run is `failed`, so later sweeps skip it. **Never sweeps live work:** case (a) only for runs whose job is not live under its lock; case (b) only for terminal runs, whose rows launch admission already refuses. A live facade that later reaches admission gets `invocation_not_reserved`, and its re-read returns the failure without another write. | `agent_runtime` (as the sweeper today); the existing `:fail` action and policy; no new action | Answered (see the status above): (a) and (b) both in scope; the cutoff is a grace period |
+| AgentRun | Existing (behaviour only) | — | none | unchanged | Case (a): unchanged; the run is failed `:crash`, opening its one attention Failure as today. Case (b): the run is not written. | unchanged | none |
+| Operations.Failure | Existing (behaviour only) | — | none | unchanged | No Failure for a recovered reservation: case (a) has the run's crash Failure; case (b)'s run stop is already its cause. | unchanged | none |
+
+**Lock order.**
+- Case (a), inside the existing recovery transaction: run → Operation → Oban job → the run's `sent` **and** `reserved` invocations, `FOR UPDATE`, in sequence order → appends (chain head). This extends today's step 1, which locks only `sent` rows.
+- Case (b), one transaction per run: run `FOR UPDATE` → its `reserved` invocations older than the cutoff, `FOR UPDATE` → appends.
+- Both take the run first, as launch admission does (run → invocation → grant `FOR SHARE` → allocation `FOR SHARE` → head), so a recovery and a launch are serialized on the run row. No grant or allocation lock is taken (the `:fail` update does not change their key columns). No cycles.
+
+**Tests** (`test/sdr_agent/sdr/reserved_recovery_test.exs`, real-connection orderings in `test/sdr_agent/agents/launch_admission_race_test.exs`).
+- Regression: a facade caller killed while its call is queued leaves a `reserved` row.
+- After recovery, case (a) leaves the run `failed` and the row `failed` with `sent_at` nil; consumption is unchanged.
+- Idempotent re-sweep.
+- A run whose job is live is untouched (its `reserved` row too).
+- Case (b): a recent reserved row is untouched; an old one is failed.
+- A launch racing recovery: either order, real connections.
+- Never `unknown`.
+
+### R0-08: profile and attestation alignment to the existing 2.1.294 pin
+
+The app-owned pin (R0-02, `nix/app-claude-cli.identity`) is already Claude
+Code 2.1.294; the profile registry still expected 2.1.291, so every real
+call would fail attestation. This aligns the registry with the pin under
+ADR-0004 item 1's bump rule. It does not change the Nix pin, promote any
+tuple, or authorize any call.
+
+**Offline evidence (no model call):**
+
+| Check | Result |
+|---|---|
+| Executable | `/nix/store/n79j0drxclykgg673zpbh2aj0acmdzkp-app-claude-cli-2.1.294/bin/claude-code` |
+| `--version` | `2.1.294 (Claude Code)` |
+| SHA-256 | `def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53`, equal to the checked-in pin identity (also verified independently by Codex) |
+| Advertised flags | `--help` lists all 12 flags ClaudeCLI passes: `--output-format`, `--verbose`, `--safe-mode`, `--restricted`, `--model`, `--tools`, `--disable-slash-commands`, `--strict-mcp-config`, `--mcp-config`, `--permission-mode`, `--permission-prompts`, `--no-session-persistence` |
+
+These show advertised syntax and pin identity only. They do **not** verify
+2.1.294's init fields, its runtime tool removal, its alias-to-model
+resolution or its captured request grammar. The help also says safe and
+restricted modes still honour admin-managed settings, so the flags alone
+are not proof of an empty tool surface.
+
+**Entity delta:**
+
+| Entity | Delta | Invariants |
+|---|---|---|
+| `ModelProfiles.Profile` (`claude_cli_opus`, `claude_cli_sonnet`) | Expected CLI version 2.1.291 → 2.1.294 | Expected model ids (`claude-opus-5-5`, `claude-sonnet-5-5`) are unchanged **candidates**, not verified by this change |
+| ModelInvocation provenance | New gen-2 rows record 2.1.294 | Historical rows, catalog entries, events, evidence and releases are untouched |
+| Shipped witness allowlist | Unchanged | The 2.1.291 entry stays generation-1 / profile-nil only; no 2.1.294 entry ships until reviewed calibration evidence and a separate promotion PR |
+
+**Attestation and spend.** The per-call init attestation stays mandatory
+and fail-closed: model id, CLI version 2.1.294, and empty tools, MCP
+servers and slash commands. A mismatch kills the CLI tree and returns no
+business output, but it is **not guaranteed to be no-spend**: the prompt is
+handed to the CLI at launch and the init event is read afterwards, so
+traffic may already have gone out. A reserved attempt stays charged, is
+never retried automatically, and an id observed in a failed attempt is
+never adopted automatically. The owner is told this before any attended
+attempt. The calibration harness must also refuse a known pin/expected
+version mismatch before reservation (harness obligation, slice E).
+
+**Tests:** RED first (90bec2f, 0/2): the registry expects 2.1.294, and a
+2.1.291 init is `:version_attestation_drift`. Fake CLI positives now report
+2.1.294 deliberately; legacy generation-1 fixtures keep their literal
+2.1.291; model drift, missing/malformed init and non-empty tools stay
+fail-closed.
+
+**Gate:** Codex agreed the scope (reply 6d7651a6, bounds report sha256
+4ff89b36). Code review pending. No promotion, calibration or spend
+authority.
+
+### Tracked prerequisites before ordinary real calls
+
+| Item | Source | Status | Required before |
+|---|---|---|---|
+| **Launch refusal opens two live Failures.** `Agents.admit_launch/3` opens a `provider_error` Failure about the invocation. Then `SDR.Model` treats the refusal as a generic provider error, and `AgentRun :fail` opens a second run-stopped Failure for the same cause. Fix: follow the reservation refusal's exact-cause pattern. Admission returns a receipt (reason, Failure, event, run, request id), and the run stop (and its Operation) links that exact Failure instead of opening one. This needs a reviewed AgentRun/Operation action delta, plus a worker/Operation attention test through the full SDR path. Never look up "the newest" Failure, and never take an Operation lock after the chain head. | Codex PR #136 review, important | **Closed by R0-07 slice B (row B1, entity PASS at 3600fcf).** `admit_launch/3` locks run → Operation `FOR SHARE` → invocation → charge → head and commits the failed row, one run-subject `provider_error` Failure and `model.launch.refused` together; the typed receipt `%Refused{stage: :launch}` crosses the ClaudeCLI server and the facade unchanged, and the run stops `:model_not_admitted` linking exactly that Failure. Evidence: `test/sdr_agent/sdr/model_not_admitted_worker_test.exs` (end to end through the worker, the server and the facade: one attention item, the Operation linked, no port; the resolution race), `test/sdr_agent/agents/launch_gate_test.exs` (runs with and without an Operation, validator, rollback of the event append, lock order). | Real-call enablement (R0-07 promotion / lifting `:real_model_staged`) |
+| Abandoned reserved invocations (the delta above) | Codex PR #136 review, must-fix 2 | Entity PASS; implemented | Merge of #136 |
+| **Store trust at admission is observation-time trust (R0-07 row B5').** Admission validates the witness store root before its locks; under the locks it proves only that the configured root is the one trusted at that observation, not that the same path's permissions, ownership, inode or symlinks are unchanged at the admission instant. A same-path change after the observation is caught by the launch's fresh observation or, after spend, by the result gate's validated store read (`:store_unreadable`): a charged attempt can then be withheld after spend; no output is released. | Codex slice B rounds 8–9 (3600fcf) | Disclosed; tested (`test/sdr_agent/agents/admission_gate_race_test.exs`) | The owner is shown this residual before real-call enablement |
+| **`sent` rows of an already terminal run stay `sent`.** The sweeper recovers `sent` rows only for runs that are still `running` and abandoned. Settling a `sent` row also needs a running run (BudgetCounter). So a `sent` row whose run became terminal first (e.g. a dead caller after admission committed, then the run was stopped) is never settled or marked `unknown`. It is distinct from the reserved delta: a `sent` row is not proven unlaunched and must never be failed as such. It needs its own reviewed delta and tests. | Codex PR #136 re-review (10e7eba), important | Open, not implemented | Real-call enablement (lifting `:real_model_staged`) |
 
 ## 3. Out of scope
 

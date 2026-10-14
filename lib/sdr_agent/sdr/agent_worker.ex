@@ -32,14 +32,18 @@ defmodule SdrAgent.SDR.AgentWorker do
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.ResultGate
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Audit
   alias SdrAgent.Operations
   alias SdrAgent.SDR.Runner
   alias SdrAgent.SDR.Signals
 
-  # C9 stop reasons of a refused real-model reservation (see fail_operation/3).
-  @refused [:grant_exhausted, :grant_unavailable]
+  # C9 stop reasons of a refused real-model call (R0-07 slice B adds
+  # :model_not_admitted), and the R0-07 result gate's stop reasons (see
+  # fail_operation/3).
+  @refused [:grant_exhausted, :grant_unavailable, :model_not_admitted]
+  @gate [:witness_mismatch, :witness_unreconciled]
   @providers %{
     "fake" => SdrAgent.AI.ModelProvider.Fake,
     "claude_cli" => SdrAgent.AI.ModelProvider.ClaudeCLI
@@ -87,12 +91,26 @@ defmodule SdrAgent.SDR.AgentWorker do
     {:ok, run} = Agents.get_run(run.id, actor: actor)
 
     case {run.status, result} do
-      {:running, {:ok, _agent}} ->
+      # R0-07 slice C: an unreleased generation-2 output is never a success
+      # or a crash; the run (and its Operation) stay for run recovery.
+      {:running, result} ->
+        if ResultGate.unreleased?(run),
+          do: :ok,
+          else: terminalize_running(result, run, operation, actor)
+
+      {_terminal, _result} ->
+        fail_operation(operation, run, actor)
+    end
+  end
+
+  defp terminalize_running(result, run, operation, actor) do
+    case result do
+      {:ok, _agent} ->
         {:ok, _} = Agents.succeed_run(run, actor: actor)
         {:ok, _} = Operations.succeed_operation(operation, actor: actor)
         :ok
 
-      {:running, {:refused, reason}} ->
+      {:refused, reason} ->
         {:ok, failed} =
           Agents.fail_run(
             run,
@@ -102,16 +120,13 @@ defmodule SdrAgent.SDR.AgentWorker do
 
         fail_operation(operation, failed, actor)
 
-      {:running, {:error, reason}} ->
+      {:error, reason} ->
         {:ok, failed} =
           Agents.fail_run(run, %{status_reason: :crash, failure_reason: describe(reason)},
             actor: actor
           )
 
         fail_operation(operation, failed, actor)
-
-      {_terminal, _result} ->
-        fail_operation(operation, run, actor)
     end
   end
 
@@ -120,17 +135,25 @@ defmodule SdrAgent.SDR.AgentWorker do
   Failure (one queue entry per condition).
 
   C9 resolution race: a run stopped by a refused reservation
-  (`:grant_exhausted`, `:grant_unavailable`) links the refusal's Failure
+  (`:grant_exhausted`, `:grant_unavailable`; R0-07 slice B:
+  `:model_not_admitted`) links the refusal's Failure
   even if an admin resolved it before the stop. An Operation may link only a
   live Failure, so when that Failure is no longer live the Operation fails
-  with its own new `budget_exhausted` Failure (subject the Operation,
+  with its own new Failure (`budget_exhausted`, or `provider_error` for
+  `:model_not_admitted`; subject the Operation,
   naming the resolved refusal): the run keeps the refusal as its cause, the
   failed Operation keeps a live queue entry, and nothing is recorded as a
   crash. The Operation, then the Failure are locked before the choice (lock
   order Operation → Failure → chain head, as `Operation :fail` takes them).
+
+  R0-07 slice C: a run stopped by the result gate (`:witness_mismatch`,
+  `:witness_unreconciled`) follows the same rule with its gate cause: when
+  that cause is no longer live the Operation fails with its own
+  `reconciliation_required` Failure naming it (critical for a mismatch,
+  else a warning). There is no generic provider-error fallback.
   """
   def fail_operation(operation, %{status_reason: reason} = run, actor)
-      when reason in @refused do
+      when reason in @refused or reason in @gate do
     # The locks must hold from the liveness check to the Operation change,
     # so this always runs in one transaction (joining the caller's, if any).
     {:ok, :ok} =
@@ -140,7 +163,7 @@ defmodule SdrAgent.SDR.AgentWorker do
         attrs =
           if live_failure?(run.attention_failure_id, actor),
             do: %{failure_id: run.attention_failure_id},
-            else: %{failure: resolved_refusal_failure(run)}
+            else: %{failure: resolved_cause_failure(run)}
 
         {:ok, _} = Operations.fail_operation(operation, attrs, actor: actor)
         :ok
@@ -179,14 +202,37 @@ defmodule SdrAgent.SDR.AgentWorker do
       # A missing row or a read error is not a human resolution: fail loudly
       # rather than open a Failure that claims the cause was resolved.
       {:ok, nil} ->
-        raise "refusal Failure #{id} not found for its run"
+        raise "cause Failure #{id} not found for its run"
 
       {:error, error} ->
-        raise "could not read refusal Failure #{id}: #{Exception.message(error)}"
+        raise "could not read cause Failure #{id}: #{Exception.message(error)}"
     end
   end
 
-  defp resolved_refusal_failure(run) do
+  defp resolved_cause_failure(%{status_reason: reason} = run) when reason in @gate do
+    %{
+      class: :reconciliation_required,
+      severity: if(reason == :witness_mismatch, do: :critical, else: :warning),
+      retryable: false,
+      message:
+        "agent run #{run.status}: #{run.status_reason}; its result gate cause " <>
+          "(Failure #{run.attention_failure_id}) was resolved before the run stopped"
+    }
+  end
+
+  # R0-07 slice B (row B1): an admission refusal's cause is a provider_error.
+  defp resolved_cause_failure(%{status_reason: :model_not_admitted} = run) do
+    %{
+      class: :provider_error,
+      severity: :critical,
+      retryable: false,
+      message:
+        "agent run #{run.status}: #{run.status_reason}; its model call admission " <>
+          "refusal (Failure #{run.attention_failure_id}) was resolved before the run stopped"
+    }
+  end
+
+  defp resolved_cause_failure(run) do
     %{
       class: :budget_exhausted,
       severity: :critical,

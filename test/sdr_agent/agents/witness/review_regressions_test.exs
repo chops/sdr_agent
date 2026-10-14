@@ -62,7 +62,12 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsTest do
           Jason.encode!(%{id: key, operation: "model.complete", prompt: @prompt, schema: @schema})
       })
 
-    {:ok, invocation} = Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+    # R0-07 slice B: admitted only for the reservation itself.
+    {:ok, invocation} =
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+      end)
+
     {:ok, invocation} = Agents.mark_model_invocation_sent(invocation, actor: ctx.agent)
 
     completion =
@@ -73,7 +78,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsTest do
       })
 
     {:ok, invocation} = Agents.complete_model_invocation(invocation, completion, actor: ctx.agent)
-    invocation
+    # Row G3: the scan backfills only a decided generation-2 row.
+    SdrAgent.GateFixtures.decided!(invocation)
   end
 
   defp exchange!(ctx, invocation, answer \\ @answer) do

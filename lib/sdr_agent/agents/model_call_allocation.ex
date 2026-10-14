@@ -138,7 +138,7 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
 
     attribute :profile_id, :atom do
       public? true
-      constraints one_of: SdrAgent.Agents.ModelCallGrant.real_profiles()
+      constraints one_of: SdrAgent.AI.ModelProfiles.real_ids()
     end
 
     attribute :attempts, :integer, allow_nil?: false, public?: true, constraints: [min: 1]
@@ -188,4 +188,7 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
 
   @doc "Usage buckets an allocation may fund (D-104 mapping, C9-02)."
   def buckets, do: @buckets
+
+  @doc "The allocation keys: the usage buckets and the contexts (rehearsal, daily use, workshop)."
+  def keys, do: @keys
 end

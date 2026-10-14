@@ -55,13 +55,14 @@ defmodule SdrAgentWeb.AdminLiveTest do
          name: SdrAgent.AI.ModelProvider.ClaudeCLI.server(),
          command: System.find_executable("elixir"),
          test_launcher: true,
+         launch_admission: &SdrAgent.Test.LaunchAdmission.admitted/3,
          command_args: [@fake, "model_drift"]}
       )
 
       {:ok, view, _html} = live(admin, ~p"/admin")
       assert has_element?(view, "#model-alias", "opus")
       assert has_element?(view, "#model-id", "claude-opus-5-5")
-      assert has_element?(view, "#reviewed-cli-version", "2.1.291")
+      assert has_element?(view, "#reviewed-cli-version", "2.1.294")
       assert has_element?(view, "#provider-server[data-status='running']")
       assert has_element?(view, "#effective-provider[data-effective='ClaudeCLI']")
       assert has_element?(view, "#model-attestation[data-status='pending']", "first call")
@@ -98,6 +99,36 @@ defmodule SdrAgentWeb.AdminLiveTest do
       assert has_element?(view, "#pinned-cli-path", bin)
     end
 
+    test "R0-05: the Fake shows its profile as configured and effective, with no refusal",
+         %{conn: conn} do
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
+
+      assert has_element?(view, "#configured-profile[data-profile='fake']", "fake")
+      assert has_element?(view, "#effective-profile[data-profile='fake']", "fake")
+      refute has_element?(view, "#provider-refusal")
+    end
+
+    test "R0-05: a refused ClaudeCLI shows its profile, no effective profile and the reason",
+         %{conn: conn} do
+      bin = SdrAgent.Test.PinnedCLI.store_path!()
+      put_env!(:model_provider, SdrAgent.AI.ModelProvider.ClaudeCLI)
+      put_env!(SdrAgent.AI.ModelProvider.ClaudeCLI, executable: bin)
+
+      {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
+
+      assert has_element?(view, "#configured-profile[data-profile='claude_cli_opus']")
+      assert has_element?(view, "#effective-profile[data-profile='none']")
+
+      assert has_element?(
+               view,
+               "#provider-refusal[data-refusal='provider_not_running']",
+               "no supervised ClaudeCLI server"
+             )
+
+      assert has_element?(view, "#pinned-cli-path", bin)
+      assert has_element?(view, "#pinned-cli-version", "Claude Code 2.1.294")
+    end
+
     test "R0-02: the Fake shows no pinned CLI", %{conn: conn} do
       {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
       refute has_element?(view, "#pinned-cli-path")
@@ -106,11 +137,15 @@ defmodule SdrAgentWeb.AdminLiveTest do
 
   test "the provider card refreshes when a call commits (attestation drift is seen live)",
        %{conn: conn} = ctx do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple.
+    SdrAgent.AdmissionFixtures.admit_tuples!()
+
     start_supervised!(
       {SdrAgent.AI.ModelProvider.ClaudeCLI,
        name: SdrAgent.AI.ModelProvider.ClaudeCLI.server(),
        command: System.find_executable("elixir"),
        test_launcher: true,
+       launch_admission: &SdrAgent.Test.LaunchAdmission.admitted/3,
        command_args: [Path.expand("../../support/fake_claude_cli.exs", __DIR__), "model_drift"]}
     )
 

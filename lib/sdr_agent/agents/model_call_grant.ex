@@ -39,7 +39,8 @@ defmodule SdrAgent.Agents.ModelCallGrant do
   alias SdrAgent.Audit.Checks
   alias SdrAgent.Sales.Changes.RequireState
 
-  @real_profiles [:claude_cli_opus, :claude_cli_sonnet]
+  # The reviewed real profiles (R0-03 registry, `SdrAgent.AI.ModelProfiles`).
+  @real_profiles SdrAgent.AI.ModelProfiles.real_ids()
   @statuses [:active, :revoked]
   @terms [
     :name,
@@ -235,6 +236,9 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       public?: true
   end
 
-  @doc "The reviewed real profiles a grant may name (until the R0-03 registry exists)."
+  @doc """
+  The reviewed real profiles a grant may name: the registry's real ids
+  (`SdrAgent.AI.ModelProfiles.real_ids/0`).
+  """
   def real_profiles, do: @real_profiles
 end

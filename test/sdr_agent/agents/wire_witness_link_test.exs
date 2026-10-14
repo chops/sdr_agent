@@ -10,11 +10,19 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
   use SdrAgent.AuditCase, async: false
 
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.WitnessEvidence
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit.RecordHash
   alias SdrAgent.Test.SecretShapes
 
+  # R0-07 item 7: every parent here is a gated (generation-2 ClaudeCLI)
+  # invocation of the fixture model and the Opus profile.
+  @identity %{"model_id" => "fake-qualifier", "profile_id" => "claude_cli_opus"}
+
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     tenant = bootstrap!()
     # C9: real-model (ClaudeCLI) reservations are charged to a grant.
     AgentsFixtures.grant!(tenant)
@@ -214,6 +222,16 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
     test "typed maxima are accepted and stay inside the 4096-byte canonical bound", ctx do
       maximal = maximal_evidence()
       assert byte_size(JSON.encode!(maximal)) <= 4096
+
+      # The identity keys at their typed maxima stay inside the bound too.
+      widest =
+        Map.merge(maximal, %{
+          "model_id" => String.duplicate("m", 39),
+          "profile_id" => "claude_cli_sonnet"
+        })
+
+      assert {:ok, _} = WitnessEvidence.validate(widest)
+      assert byte_size(JSON.encode!(widest)) <= 4096
       assert {:ok, link} = link(attrs(ctx.invocation, %{evidence: maximal}), actor: ctx.rec)
       assert link.evidence == maximal
 
@@ -451,6 +469,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
         Enum.map(1..16, &(String.duplicate("r", 36) <> "_#{rem(&1, 10)}#{div(&1, 10)}")),
       "supersede_reason" => String.duplicate("s", 39)
     }
+    |> Map.merge(@identity)
   end
 
   defp attrs(invocation, overrides \\ %{}) do
@@ -514,6 +533,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
       "inventory_sha256" => hex(digest("inventory")),
       "reason_codes" => ["propagated_id_match"]
     }
+    |> Map.merge(@identity)
   end
 
   defp record_ref, do: Ash.UUIDv7.generate()

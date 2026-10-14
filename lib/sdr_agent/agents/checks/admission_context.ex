@@ -14,10 +14,25 @@ defmodule SdrAgent.Agents.Checks.AdmissionContext do
 
   @marker :sdr_agent_model_admission
 
-  @doc "The context map carrying an admitted charge."
-  def context(%{grant_id: grant_id, allocation_id: allocation_id, reserved_at: %DateTime{} = at})
-      when is_binary(grant_id) and is_binary(allocation_id),
-      do: %{@marker => %{grant_id: grant_id, allocation_id: allocation_id, reserved_at: at}}
+  @doc """
+  The context map carrying an admitted charge, with the recorded
+  `calibration_tuple` of an authorized calibration call (R0-07 slice B,
+  row B4; nil otherwise).
+  """
+  def context(
+        %{grant_id: grant_id, allocation_id: allocation_id, reserved_at: %DateTime{} = at} =
+          charge
+      )
+      when is_binary(grant_id) and is_binary(allocation_id) do
+    %{
+      @marker => %{
+        grant_id: grant_id,
+        allocation_id: allocation_id,
+        reserved_at: at,
+        calibration_tuple: Map.get(charge, :calibration_tuple)
+      }
+    }
+  end
 
   @doc "The admitted charge in a changeset context, or `nil`."
   def charge(%{
@@ -26,7 +41,7 @@ defmodule SdrAgent.Agents.Checks.AdmissionContext do
             charge
       })
       when is_binary(grant_id) and is_binary(allocation_id),
-      do: charge
+      do: Map.put_new(charge, :calibration_tuple, nil)
 
   def charge(%{@marker => _malformed}), do: :malformed
   def charge(_context), do: nil

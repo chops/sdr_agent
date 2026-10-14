@@ -18,7 +18,10 @@ defmodule SdrAgent.Audit.Verifier do
     * `:payload_hash_mismatch` — every Payload's content hashes to its key;
     * `:record_hash_mismatch` / `:record_missing` — for resources whose
       every write is audited (they export `__sdr_audited__/0`), the newest
-      event's `record_sha256` equals the canonical hash of the current row.
+      event's `record_sha256` equals the canonical hash of the current row,
+      read with `SdrAgent.Audit.Kernel.integrity_opts/1` so a field withheld
+      from business reads (R0-07 `ModelInvocation.parsed_output`) is hashed
+      as stored.
 
   Returns `%{valid?: boolean, issues: [map], last_sequence: integer,
   events_checked: integer}`. Anchor divergence is added in S11.
@@ -121,7 +124,7 @@ defmodule SdrAgent.Audit.Verifier do
   defp check_record(nil, _subject_id, _event), do: []
 
   defp check_record(module, subject_id, event) do
-    case Ash.get(module, subject_id, Kernel.opts(event.tenant_id)) do
+    case Ash.get(module, subject_id, Kernel.integrity_opts(event.tenant_id)) do
       {:ok, record} ->
         if RecordHash.hex(record) == event.payload["record_sha256"],
           do: [],
