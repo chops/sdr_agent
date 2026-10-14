@@ -15,7 +15,6 @@ defmodule SdrAgent.AI.ClaudeCLIClockFromTest do
   @frozen ~U[2026-10-15 12:00:00.000000Z]
 
   setup do
-    assert function_exported?(Clock, :follow, 1), "Clock.follow/1 is not defined"
     Clock.freeze(@frozen)
     on_exit(&Clock.unfreeze/0)
     :ok
@@ -28,14 +27,16 @@ defmodule SdrAgent.AI.ClaudeCLIClockFromTest do
     assert ClaudeCLI.attestation(server).at == @frozen
   end
 
+  # A regression control at RED: an omitted option keeps today's clock.
   test "without clock_from, the server reads its own clock" do
     server = start!([])
     refute ClaudeCLI.attestation(server).at == @frozen
   end
 
   test "a malformed clock_from refuses the start" do
-    for bad <- [:me, "pid", 42] do
-      assert {:error, _reason} = start(clock_from: bad), inspect(bad)
+    for bad <- [nil, :me, "pid", 42, remote_pid()] do
+      result = start(clock_from: bad)
+      assert match?({:error, _reason}, result), inspect({bad, result})
     end
   end
 
@@ -60,5 +61,16 @@ defmodule SdrAgent.AI.ClaudeCLIClockFromTest do
       {:started, {:ok, server}} -> {:ok, server}
       {:started, {:error, reason}} -> {:error, reason}
     end
+  end
+
+  # A pid of another node, built from this node's own pid encoding.
+  defp remote_pid do
+    local = Atom.to_string(node())
+    other = String.replace(local, ~r/^./, "x")
+
+    self()
+    |> :erlang.term_to_binary()
+    |> :binary.replace(local, other)
+    |> :erlang.binary_to_term()
   end
 end

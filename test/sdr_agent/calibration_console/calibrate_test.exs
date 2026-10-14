@@ -540,7 +540,9 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
                |> events_of_type("model.launch.refused")
                |> Enum.filter(&(&1.subject_id == invocation.id))
 
-      assert refused.payload["reason"] == "grant_expired"
+      # The existing receipt shape: the launch-grant refusal, by its check.
+      assert {refused.payload["reason"], refused.payload["check"]} ==
+               {"grant_ineligible_at_launch", "grant_expired"}
 
       assert {refused.agent_run_id, refused.idempotency_key} ==
                {run.id, invocation.idempotency_key}

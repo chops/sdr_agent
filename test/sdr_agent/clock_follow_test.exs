@@ -15,13 +15,13 @@ defmodule SdrAgent.ClockFollowTest do
   @callers ~U[2026-10-17 09:00:00.000000Z]
 
   setup do
-    assert function_exported?(Clock, :follow, 1), "Clock.follow/1 is not defined"
     on_exit(&Clock.unfreeze/0)
     :ok
   end
 
   test "a followed process's freeze is read live, on every read" do
     leader = frozen_process(@theirs)
+    follow_defined!()
 
     in_process(fn ->
       assert Clock.follow(leader) == :ok
@@ -36,19 +36,23 @@ defmodule SdrAgent.ClockFollowTest do
   test "precedence: own freeze, then the followed process, then $callers, then UTC" do
     leader = frozen_process(@theirs)
     caller = frozen_process(@callers)
+    follow_defined!()
 
     in_process(
       fn ->
         assert Clock.follow(leader) == :ok
-        assert Clock.utc_now() == @theirs
+        assert {Clock.utc_now(), Clock.source()} == {@theirs, :test_fixed}
 
         Clock.freeze(@mine)
-        assert Clock.utc_now() == @mine
+        assert {Clock.utc_now(), Clock.source()} == {@mine, :test_fixed}
 
         Clock.unfreeze()
         refreeze(leader, nil)
-        assert Clock.utc_now() == @callers
+        assert {Clock.utc_now(), Clock.source()} == {@callers, :test_fixed}
         assert Process.get(:"$callers") == [caller]
+
+        refreeze(caller, nil)
+        assert Clock.source() == :system_utc
       end,
       callers: [caller]
     )
@@ -56,6 +60,7 @@ defmodule SdrAgent.ClockFollowTest do
 
   test "an unfrozen or dead followed process contributes nothing" do
     leader = frozen_process(nil)
+    follow_defined!()
 
     in_process(fn ->
       assert Clock.follow(leader) == :ok
@@ -71,8 +76,12 @@ defmodule SdrAgent.ClockFollowTest do
   end
 
   test "only a local pid is followed; anything else is refused and changes nothing" do
+    remote = remote_pid()
+    assert node(remote) != node()
+    follow_defined!()
+
     in_process(fn ->
-      for bad <- [nil, :leader, "pid", 42, remote_pid()] do
+      for bad <- [nil, :leader, "pid", 42, remote] do
         assert Clock.follow(bad) == {:error, :invalid_pid}, inspect(bad)
         assert Clock.source() == :system_utc
       end
@@ -80,6 +89,10 @@ defmodule SdrAgent.ClockFollowTest do
   end
 
   ## Fixtures
+
+  # After the fixtures: a missing seam fails as an assertion.
+  defp follow_defined!,
+    do: assert(function_exported?(Clock, :follow, 1), "Clock.follow/1 is not defined")
 
   # Runs `fun` in a fresh process (with optional `$callers`), so this
   # test's own dictionary is never the subject.
@@ -102,6 +115,8 @@ defmodule SdrAgent.ClockFollowTest do
         send(test, {ref, result})
       end)
 
+    cleanup(pid)
+
     receive do
       {^ref, :ok} -> :ok
       {^ref, {:error, error, stack}} -> reraise error, stack
@@ -110,9 +125,13 @@ defmodule SdrAgent.ClockFollowTest do
     end
   end
 
+  # Every helper process is stopped when its test ends, however it ends.
+  defp cleanup(pid), do: on_exit(fn -> Process.exit(pid, :kill) end)
+
   # A process holding `at` frozen (nil: unfrozen) until told otherwise.
   defp frozen_process(at) do
     pid = spawn(fn -> hold(at) end)
+    cleanup(pid)
     refreeze(pid, at)
     pid
   end
