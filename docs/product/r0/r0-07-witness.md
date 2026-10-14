@@ -2660,6 +2660,13 @@ recorded there:
 GREEN follows only after exact RED verification. This is not
 implementation, integrated, spend or renewal approval.
 
+- **RED** verified at 8fbd4bb (Codex fcba9389), after one corrections
+  round (714ea9e7).
+- **GREEN** at d3707cf: **scoped code APPROVE** (Codex a1349f81).
+  Independently 74/75, with only the known setup RED failing, and a fresh
+  dev-VM proof that `follow/1` is absent and `clock_from:` ignored. This
+  is not integrated or spend approval.
+
 **Why it is needed:** the integrated-merge item from Codex 3b40a333. The
 `calibrate` tests read the real clock wherever their private ClaudeCLI
 server reads it. In that process, launch admission and the attestation
