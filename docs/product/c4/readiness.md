@@ -146,7 +146,7 @@ input (brief input 8).
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| SettingsRevision | New (APPEND-ONLY) | One immutable revision of one tenant-wide run setting | `id : uuid_v7`; `tenant_id : uuid, not nil`; `kind : atom, not nil, one of :offering_profile, :booking_link, :writing_guide, :research_brief, :operational_limits`; `number : int ≥ 1, not nil`; `supersedes_id : uuid, nullable`; `raised_fields : {:array, atom}, not nil, default []` (sorted limit-field names raised above the value in effect, confirmed by the admin; empty unless `kind = :operational_limits`; not sensitive); one embedded content attribute per kind (`offering_profile`, `booking_link`, `writing_guide`, `research_brief`, `operational_limits`), each nullable and `sensitive?: true`; `content_sha256 : string, not nil` (section 3.7); `note : string, nullable, ≤ 200, sensitive?: true`; `created_by_id : uuid, not nil`; `inserted_at`; trace ids | belongs_to Tenant (restrict); belongs_to User as `created_by` (restrict). Keys: PK `(id)`; UNIQUE `(id, tenant_id, kind)` (target of the self FK); UNIQUE `(id, tenant_id, kind, content_sha256)` (target of snapshot slot FKs); identity UNIQUE `(tenant_id, kind, number)`; partial UNIQUE `(supersedes_id) WHERE supersedes_id IS NOT NULL` (superseded at most once); partial UNIQUE `(tenant_id, kind) WHERE supersedes_id IS NULL` (one root per kind). Self FK `(supersedes_id, tenant_id, kind)` → `(id, tenant_id, kind)`, RESTRICT, so a revision supersedes only its own tenant's same kind. | Check: exactly the embedded attribute named by `kind` is non-null. Check: `number = 1` iff `supersedes_id IS NULL`. Check: `raised_fields` empty unless `kind = 'operational_limits'`. `number` = predecessor's number + 1, set by the action while it holds the predecessor's row lock (section 4). `content_sha256` computed from the cast, validated content (section 3.7). Trigger rejects UPDATE, DELETE, TRUNCATE. Current revision of a kind = highest `number`. No destroy action. | `:create_revision` (args `kind`, `content`, `expected_number : int ≥ 0` where 0 means "no revision yet", `note`, `confirm_raised : {:array, atom}, default []`): the action computes `raised_fields` against the value in effect (the locked predecessor, or the built-in default when none) and refuses `{:invalid, [confirm_raised: :mismatch]}` unless `confirm_raised` equals it exactly; active human admin only (`CurrentAdmin`, persisted row re-read); auditor role and every system actor forbidden. Appends `settings.revision.created` (section 3.6: metadata and hashes only). Row reads: admin, reviewer, auditor (through AuditedView), `agent_runtime`, `auditor_cli`, kernel. Field policy on the content attributes and `note`: admin, reviewer (read-only, OQ-6), auditor (audited), `agent_runtime`, `auditor_cli`, kernel. | none |
+| SettingsRevision | New (APPEND-ONLY) | One immutable revision of one tenant-wide run setting | `id : uuid_v7`; `tenant_id : uuid, not nil`; `kind : atom, not nil, one of :offering_profile, :booking_link, :writing_guide, :research_brief, :operational_limits`; `number : int ≥ 1, not nil`; `supersedes_id : uuid, nullable`; `raised_fields : {:array, atom}, not nil, default []`, each one of the twelve limit-field names of section 3.3 (a closed set; sorted, no duplicates; names raised above the value in effect, confirmed by the admin; empty unless `kind = :operational_limits`; not sensitive); one embedded content attribute per kind (`offering_profile`, `booking_link`, `writing_guide`, `research_brief`, `operational_limits`), each nullable and `sensitive?: true`; `content_sha256 : string, not nil` (section 3.7); `note : string, nullable, ≤ 200, sensitive?: true`; `created_by_id : uuid, not nil`; `inserted_at`; trace ids | belongs_to Tenant (restrict); belongs_to User as `created_by` (restrict). Keys: PK `(id)`; UNIQUE `(id, tenant_id, kind)` (target of the self FK); UNIQUE `(id, tenant_id, kind, content_sha256)` (target of snapshot slot FKs); identity UNIQUE `(tenant_id, kind, number)`; partial UNIQUE `(supersedes_id) WHERE supersedes_id IS NOT NULL` (superseded at most once); partial UNIQUE `(tenant_id, kind) WHERE supersedes_id IS NULL` (one root per kind). Self FK `(supersedes_id, tenant_id, kind)` → `(id, tenant_id, kind)`, RESTRICT, so a revision supersedes only its own tenant's same kind. | Check: exactly the embedded attribute named by `kind` is non-null. Check: `number = 1` iff `supersedes_id IS NULL`. Check: `raised_fields` empty unless `kind = 'operational_limits'`. `number` = predecessor's number + 1, set by the action while it holds the predecessor's row lock (section 4). `content_sha256` computed from the cast, validated content (section 3.7). Trigger rejects UPDATE, DELETE, TRUNCATE. Current revision of a kind = highest `number`. No destroy action. | `:create_revision` (args `kind`, `content`, `expected_number : int ≥ 0` where 0 means "no revision yet", `note`, `confirm_raised : {:array, atom}, default []`): the action computes `raised_fields` against the value in effect (the locked predecessor, or the built-in default when none) and refuses `{:invalid, [confirm_raised: :mismatch]}` unless `confirm_raised` equals it exactly; active human admin only (`CurrentAdmin`, persisted row re-read); auditor role and every system actor forbidden. Appends `settings.revision.created` (section 3.6: metadata and hashes only). Row reads: admin, reviewer, auditor (through AuditedView), `agent_runtime`, `auditor_cli`, kernel. Field policy on the content attributes and `note`: admin, reviewer (read-only, OQ-6), auditor (audited), `agent_runtime`, `auditor_cli`, kernel. | none |
 | OfferingProfile, OfferingItem | New (embedded) | What we sell, as structured items the research and draft cite | OfferingProfile: `name : 1..120`; `summary : 1..1,500`; `audience : 0..1,500`; `items : list, 1..30`. OfferingItem: `id : string ^[a-z0-9][a-z0-9_-]{0,39}$`; `kind : :feature \| :use_case \| :outcome \| :limit \| :proof_point`; `text : 1..400` | embedded in SettingsRevision | Item ids unique within the profile. Canonical JSON ≤ 16 KiB. Text rules of section 3.5. Citations name `(revision id, item id)` (brief appendix), so they resolve against the exact revision. | via SettingsRevision | OQ-1 |
 | BookingLink | New (embedded) | The owner's scheduling page, used in asks (D-025, D-053, D-082) | `url : string, not nil, ≤ 2,048 bytes` | embedded in SettingsRevision | `https` only; host required; no user info; no IP literal, `localhost` or `.local`; port absent or 443; no control or whitespace characters; redactor rule. Real-data guard at save and at each use (C4-R13). | via SettingsRevision | OQ-3, OQ-7 |
 | WritingGuide | New (embedded) | Tone and shape of drafts (D-053, D-065) | `text : string, 1..6,000` | embedded in SettingsRevision | Text rules of section 3.5. The built-in default is neutral generic text in code, not the owner's D-053 wording (OQ-5); the owner's version is saved in the app as a revision, after the server-log prerequisite. | via SettingsRevision | none |
@@ -171,10 +171,17 @@ Defaults are the built-in limits revision. The owner decided on 2026-10-14
 (OQ-2) that no limit has a hard ceiling that no setting can change: the
 admin raises or lowers every field in the app (D-062). Validation only
 keeps a value sane: a whole number, at least the minimum below, at most the
-sanity maximum (2,147,483,647, the stored integer range, for counts;
-86,400 s, one day, for the two time fields, so the job limit stays finite
-per D-061), and the cross-field rules of the OperationalLimits row. These
-are representability limits, not policy ceilings. A raise above the value
+representation maximum, and the cross-field rules of the OperationalLimits
+row. For counts the maximum is 2,147,483,647, the stored integer range. For
+the two time fields it is 4,294,967 s, the largest whole number of seconds
+whose milliseconds fit the runtime's maximum relative timer,
+4,294,967,295 ms (`erlang:send_after/3`, `erlang:start_timer/3`), so a job
+limit stays a finite, representable deadline (D-061). Seconds convert to
+milliseconds with a checked integer conversion before any timer or
+deadline; C4-01a re-verifies the timer maximum against the pinned OTP's
+documentation, and if it differs the maximum follows the documented range,
+never a lower policy value. These are representation limits, not policy
+ceilings. A raise above the value
 in effect needs a per-field confirmation that names the old value, the new
 value, the built-in default and the budgets that still bound it; the
 confirmed fields are recorded on the revision (`raised_fields`) and in its
@@ -198,8 +205,8 @@ never adds to them.
 | `research_max_total_source_chars` | 24,000 | ≥ 500 | B1-04 — not enforced until B1-04 |
 | `research_max_output_tokens` | 2,500 | ≥ 256 | B1-04 model request — not enforced until B1-04 |
 | `research_max_model_calls` | 2 | ≥ 1, ≤ `run_max_model_calls` | B1-04 — not enforced until B1-04; each extra call is a deliberate repair inside the run budget, never a retry of an unknown outcome (D-064) |
-| `research_target_seconds` | 180 | 30..86,400, ≤ job limit (warning only, D-061) | B1-04 progress, H1 row — warning, never a stop |
-| `research_job_limit_seconds` | 600 | 60..86,400 (finite job limit, D-061) | B1-04 worker deadline; an in-flight model call ends by its own timeout and is recorded unknown, never cut silently or retried (D-064) — not enforced until B1-04 |
+| `research_target_seconds` | 180 | 30..4,294,967, ≤ job limit (warning only, D-061) | B1-04 progress, H1 row — warning, never a stop |
+| `research_job_limit_seconds` | 600 | 60..4,294,967 (finite job limit, D-061) | B1-04 worker deadline; an in-flight model call ends by its own timeout and is recorded unknown, never cut silently or retried (D-064) — not enforced until B1-04 |
 
 Count fields not shown with a maximum have the sanity maximum 2,147,483,647.
 
@@ -263,7 +270,7 @@ copy is prevented by an executable control, each with a canary test
 | AuditEvent payloads | content attributes and `note` are `sensitive?: true`, so `AppendEvent` omits them (named under `redacted`); `record_sha256` still covers the full row. `settings.revision.created` carries kind, number, `supersedes_id`, `content_sha256`. `settings.snapshot.created` carries snapshot id, per-kind source, revision id, version and content hash, limits, `snapshot_sha256`. No event carries settings text. |
 | Ash errors and inspect output | `sensitive?` values are redacted by Ash in errors and `inspect`; validation messages never interpolate the value. |
 | LiveView event logging | `SettingsLive` uses `log: false`; form params live under the key `settings_content`, added to `config :phoenix, :filter_parameters` (with `password`). |
-| SQL logging and query spans | Ecto logs query parameters at debug (dev), and `opentelemetry_ecto` 1.2.0 copies the exception message into the span status and the Repo URL into `db.url`. The default Ecto logger and `OpentelemetryEcto` are detached; `SdrAgent.Repo.QueryLog` and `SdrAgent.Telemetry.RepoSpans` emit only fields allowlisted by `SdrAgent.Repo.SafeMetadata` (never parameters, SQL text, exception messages, DETAIL/HINT, URLs or credentials), in every environment; a logger filter and Oban worker boundaries cover automatic exception reports. This also covers prospect data under the real-data switch. Proposed as the ADR-0005 C4 amendment, pending owner acceptance (section 7). |
+| SQL logging and query spans | Ecto logs query parameters at debug (dev), and `opentelemetry_ecto` 1.2.0 copies the exception message into the span status and the Repo URL into `db.url`. The default Ecto logger and `OpentelemetryEcto` are detached; `SdrAgent.Repo.QueryLog` and `SdrAgent.Telemetry.RepoSpans` emit only fields allowlisted by `SdrAgent.Repo.SafeMetadata` (never parameters, SQL text, exception messages, DETAIL/HINT, URLs or credentials), in every environment; a logger filter and Oban worker boundaries cover automatic exception reports. This also covers prospect data under the real-data switch. The ADR-0005 C4 amendment, accepted by the owner on 2026-10-14 (section 7). |
 | PostgreSQL server log | Not covered by app controls. Separate prerequisite, owned by the owner: before private settings content is saved or the real-data switch is on, either a server-log configuration decision is accepted with its own test or the owner accepts an explicit retention exception (ADR-0005 C4 amendment). |
 | GenAI telemetry | settings-bearing requests use `content_capture: :off` (3.2 row Telemetry.GenAI); no content span events even with dev capture on. |
 | Failure messages, application logs | consumers name the setting kind and reason only; no code path formats settings text into a message. |
@@ -478,6 +485,12 @@ Validation (one success and the boundary failures per field):
    `raised_fields` on the revision and in its event; a pure lowering needs
    no confirmation; the first save compares against the built-in default.
    `raised_fields` on a non-limits kind is refused by the DB check.
+   `confirm_raised` with a duplicate name, an unknown name or a non-limit
+   atom is refused `{:invalid, [confirm_raised: ...]}` and writes nothing;
+   unknown strings never create atoms.
+7b. Time fields above one day: `research_job_limit_seconds` 86,401 and
+   4,294,967 pass and convert to exact milliseconds; 4,294,968 is refused;
+   the conversion is checked, never truncated or wrapped.
 8. Booking link: `http`, `javascript:`, user info, IP literal, `localhost`,
    port 8443, over 2,048 bytes, non-reserved host while the guard is off,
    token-shaped query — each refused; a reserved `https` link passes.
@@ -818,6 +831,15 @@ answers are quoted after each question and modeled in the sections named.
   narrow re-review** of the changed limits, authority and confirmation
   contract (C4-R6, C4-R9..R11; sections 3.2, 3.3, 3.7, 3.8, 3.9, 7, 8;
   tests 6, 7, 7a, 21, 21a, 31; obligation 6 note).
+  Round at c447470: **NEEDS-REVIEW** (Codex answer
+  8763438d-62e1-48fd-8fea-ef1c9619e1f0, in reply to
+  m_1792010909482749000_ea17c252). One must-fix: the 86,400 s maximum on
+  the time fields was a policy ceiling, not a representation limit.
+  Revised: the maximum is the timer representation limit (4,294,967 s,
+  checked ms conversion, re-verified against the pinned OTP), test 7b.
+  Nonblocking, also done: section 3.6 status wording; `raised_fields` and
+  `confirm_raised` limited to the closed set of limit names, with
+  duplicate and unknown tests (7a).
 - Owner scoped C4 G5: **pending**, after that re-review.
 - Not authorized by this packet: code, migrations, UI, real data, model
   calls.
