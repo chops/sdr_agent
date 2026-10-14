@@ -36,7 +36,10 @@ defmodule SdrAgent.Agents.AgentRun do
   likewise links the gate's exact cause
   (`SdrAgent.Agents.Changes.LinkGateCause`); under the finalizer's verified
   Prelocked context its run and cause are re-read with no lock clause
-  (`SdrAgent.Agents.Changes.RunRow`).
+  (`SdrAgent.Agents.Changes.RunRow`). A `:proof` run is finished by the
+  guarded calibration finish only (R0-07 slice E, row R11-2:
+  `:finish_calibration`, running → succeeded with `:calibration_latched`,
+  given its `:calibration` latch, `SdrAgent.Agents.Changes.CalibrationLatch`).
 
   Counters: `:reserve_model_call` (atomic, refuses at `max_model_calls`),
   `:settle_model_call`, `:record_tool_call` (atomic, refuses at
@@ -90,7 +93,8 @@ defmodule SdrAgent.Agents.AgentRun do
     :cancelled_by_operator,
     :witness_mismatch,
     :witness_unreconciled,
-    :model_not_admitted
+    :model_not_admitted,
+    :calibration_latched
   ]
   # C9: stop reasons of a refused real-model reservation (its Failure is
   # linked); R0-07 slice B adds :model_not_admitted (admission refusals
@@ -101,6 +105,7 @@ defmodule SdrAgent.Agents.AgentRun do
   @transitions [
     {:start, [:queued], :running},
     {:succeed, [:running], :succeeded},
+    {:finish_calibration, [:running], :succeeded},
     {:fail, [:running], :failed},
     {:exhaust_budget, [:running], :budget_exhausted},
     {:cancel, [:queued, :running], :cancelled}
@@ -222,6 +227,25 @@ defmodule SdrAgent.Agents.AgentRun do
 
       change {AppendEvent,
               event_type: "agents.run.succeeded", category: :domain_change, links: @links}
+    end
+
+    # R0-07 slice E (row R11-2): the only writer of :calibration_latched,
+    # reachable only through `SdrAgent.Agents.finish_calibration/3` under its
+    # verified Prelocked context with the run's calibration latch.
+    update :finish_calibration do
+      require_atomic? false
+      argument :release_id, :uuid, allow_nil?: false
+
+      change set_attribute(:status_reason, :calibration_latched)
+      change SdrAgent.Agents.Changes.CalibrationLatch
+      change {Transition, from: [:running], to: :succeeded, locked?: true}
+      change {Stamp, fields: [:finished_at]}
+
+      change {AppendEvent,
+              event_type: "agents.run.calibration_latched",
+              category: :domain_change,
+              links: @links,
+              arguments: [:release_id]}
     end
 
     update :fail do
@@ -432,6 +456,7 @@ defmodule SdrAgent.Agents.AgentRun do
              :start,
              :set_phase,
              :succeed,
+             :finish_calibration,
              :fail,
              :exhaust_budget,
              :reserve_model_call,

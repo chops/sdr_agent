@@ -148,12 +148,81 @@ defmodule SdrAgent.Agents.Admission do
     {:ok, locked}
   end
 
+  # The G-R0 shape (packet 8.3): the calibration grant the console binds.
+  @g_r0_profiles [:claude_cli_opus, :claude_cli_sonnet]
+  @g_r0_total 4
+  @g_r0_expires ~U[2026-10-19 05:59:00Z]
+  @g_r0_attempts 2
+
+  @doc """
+  The G-R0 binding for `profile_id` in `tenant_id` at `now` (packet 8.3,
+  read-only preflight): `{:ok, %{grant_id:, grant_revision:,
+  allocation_id:, profile_id:}}` when exactly one grant of the tenant has
+  the G-R0 shape and that profile's allocation is available at `now`
+  (`available?/2`); `{:error, :calibration_grant_unavailable}` otherwise.
+  """
+  def calibration_grant(tenant_id, profile_id, now) do
+    ModelCallGrant
+    |> Ash.Query.filter(tenant_id == ^tenant_id)
+    |> Ash.Query.load(:allocations)
+    |> Ash.read!(authorize?: false)
+    |> Enum.filter(&g_r0?(&1, now))
+    |> case do
+      [grant] -> grant_binding(grant, profile_id, now)
+      _none_or_several -> {:error, :calibration_grant_unavailable}
+    end
+  end
+
+  # The requested profile's allocation must also be inside its existing
+  # window at `now` (`available?/2`, packet 8.3 "existing ... window terms").
+  defp grant_binding(grant, profile_id, now) do
+    case Enum.filter(grant.allocations, &(&1.profile_id == profile_id)) do
+      [allocation] ->
+        if available?(allocation, now), do: binding(grant, allocation), else: unavailable()
+
+      _ ->
+        unavailable()
+    end
+  end
+
+  defp unavailable, do: {:error, :calibration_grant_unavailable}
+
+  defp binding(grant, allocation) do
+    {:ok,
+     %{
+       grant_id: grant.id,
+       grant_revision: grant.revision,
+       allocation_id: allocation.id,
+       profile_id: allocation.profile_id
+     }}
+  end
+
+  @doc "Whether `grant` (allocations loaded) has the G-R0 shape at `now`."
+  def g_r0?(grant, now) do
+    grant.status == :active and Enum.sort(grant.profile_ids) == Enum.sort(@g_r0_profiles) and
+      grant.total_attempts == @g_r0_total and
+      DateTime.compare(grant.expires_at, @g_r0_expires) == :eq and
+      DateTime.compare(grant.starts_at, now) != :gt and
+      DateTime.compare(now, grant.expires_at) == :lt and g_r0_allocations?(grant.allocations)
+  end
+
+  defp g_r0_allocations?(allocations) when length(allocations) == 2 do
+    Enum.all?(allocations, fn allocation ->
+      allocation.key == :proof and allocation.applies_to == [:proof] and
+        allocation.attempts == @g_r0_attempts and is_nil(allocation.released_at)
+    end) and Enum.sort(Enum.map(allocations, & &1.profile_id)) == Enum.sort(@g_r0_profiles)
+  end
+
+  defp g_r0_allocations?(_allocations), do: false
+
   @doc """
   Step 4: admits a ClaudeCLI call of `profile_id` with `purpose` in the
   locked, freshly read `run`, among the share-locked `candidate_ids`.
   `gate` carries the admission gate's inputs taken before any lock
-  (`%{store: Gate.observe_store(), calibration: authority}`). Returns
-  `{:ok, %{grant_id:, allocation_id:, calibration_tuple:}}` or
+  (`%{store: Gate.observe_store(), calibration: authority, binding:}`; a G-R0
+  `binding` restricts the candidates to the bound grant, packet 8.3). Returns
+  `{:ok, %{grant_id:, allocation_id:, calibration_tuple:, calibration_claim:,
+  calibration_binding:}}` or
   `{:error, %Refusal{}}`. Callers hold the run row, candidate and
   chain-head locks.
   """
@@ -174,14 +243,90 @@ defmodule SdrAgent.Agents.Admission do
       idempotency_key: Map.get(call, :idempotency_key)
     }
 
+    binding = gate_binding(gate)
+
     with :ok <- origin(refusal),
          {:ok, tuple} <- admission_gate(refusal, run, gate),
+         {:ok, candidate_ids} <- bound_candidates(refusal, candidate_ids, binding, now),
          {:ok, grants} <- eligible_grants(refusal, candidate_ids, now),
          {:ok, grant, allocation} <- one_allocation(refusal, grants, now),
+         :ok <- bound_allocation(refusal, allocation, binding),
          :ok <- room(%{refusal | grant_id: grant.id, allocation_id: allocation.id}, grant, now) do
-      {:ok, %{grant_id: grant.id, allocation_id: allocation.id, calibration_tuple: tuple}}
+      {:ok,
+       %{
+         grant_id: grant.id,
+         allocation_id: allocation.id,
+         calibration_tuple: tuple,
+         calibration_claim: claim_record(tuple, gate),
+         calibration_binding: binding_record(tuple, binding)
+       }}
     end
   end
+
+  defp gate_binding(%{binding: %{} = binding}), do: binding
+  defp gate_binding(_gate), do: nil
+
+  # G-R0 binding (packet 8.3, round 11): under the candidate share locks the
+  # bound grant is the only G-R0-shaped candidate, at its bound revision,
+  # with its bound allocation unreleased; the candidate set is that grant.
+  defp bound_candidates(_refusal, candidate_ids, nil, _now), do: {:ok, candidate_ids}
+
+  # The uniqueness observation is fresh, under the head, over every grant of
+  # the tenant (a read, never a lock): a G-R0 grant committed after the
+  # candidates were discovered refuses (round 11, Codex 01a13625). The bound
+  # grant itself must be one of the share-locked candidates.
+  defp bound_candidates(refusal, candidate_ids, binding, now) do
+    shaped =
+      ModelCallGrant
+      |> Ash.Query.filter(tenant_id == ^refusal.tenant_id)
+      |> Ash.Query.load(:allocations)
+      |> Ash.read!(authorize?: false)
+      |> Enum.filter(&g_r0?(&1, now))
+
+    case shaped do
+      [%{id: id, revision: revision} = grant]
+      when id == binding.grant_id and revision == binding.grant_revision ->
+        bound_allocation_present(refusal, grant, binding, id in candidate_ids)
+
+      _ ->
+        mismatch(refusal)
+    end
+  end
+
+  defp bound_allocation_present(refusal, _grant, _binding, false = _locked?),
+    do: mismatch(refusal)
+
+  defp bound_allocation_present(refusal, grant, binding, true = _locked?) do
+    if Enum.any?(grant.allocations, &(&1.id == binding.allocation_id)),
+      do: {:ok, [grant.id]},
+      else: mismatch(refusal)
+  end
+
+  defp bound_allocation(_refusal, _allocation, nil), do: :ok
+
+  defp bound_allocation(refusal, allocation, binding),
+    do: if(allocation.id == binding.allocation_id, do: :ok, else: mismatch(refusal))
+
+  defp mismatch(refusal), do: {:error, %{refusal | reason: :calibration_grant_mismatch}}
+
+  # Recorded only next to an admitted calibration tuple, from the marker.
+  defp binding_record(nil, _binding), do: nil
+  defp binding_record(_tuple, nil), do: nil
+
+  defp binding_record(_tuple, binding) do
+    %{
+      "grant_id" => binding.grant_id,
+      "grant_revision" => binding.grant_revision,
+      "allocation_id" => binding.allocation_id,
+      "profile_id" => Atom.to_string(binding.profile_id)
+    }
+  end
+
+  # The console's claim is recorded only next to an admitted calibration
+  # tuple (R0-07 E4c-2), never on its own.
+  defp claim_record(nil, _gate), do: nil
+  defp claim_record(_tuple, %{claim: claim}) when is_binary(claim), do: %{"instance_id" => claim}
+  defp claim_record(_tuple, _gate), do: nil
 
   defp admission_gate(refusal, run, gate) do
     case Gate.admit_reservation(run, refusal.profile_id, gate.store, gate.calibration) do
@@ -260,18 +405,30 @@ defmodule SdrAgent.Agents.Admission do
       written before R0 (generation 1);
     * `:profile_mismatch_at_launch` (`:profile_mismatch`) — reserved under
       another profile than the server runs;
+    * only for an exempted calibration call (`expected`, see
+      `calibration_launch/1`; packet 8.13 C8): `:calibration_not_authorized`
+      with `:exemption_scope` (not a `:proof` run, or the run has an
+      Operation), `:exemption_input` (the invocation's prompt or output
+      schema reference is not the expected one) or `:exemption_request`
+      (its stored request is not the expected one);
     * the R0-07 slice B admission gate (`Gate.admit_launch/3`, with the
       store observation `store` taken before the launch's locks):
       `:calibration_not_authorized`, `:calibration_evidence_pending`,
       `:result_gate_inactive`, `:witness_store_untrusted` or
       `:tuple_not_promoted`, with its check;
+    * `:calibration_grant_mismatch` (`:binding_changed` or
+      `:binding_unrecorded`) — a G-R0 binding recorded at reservation no
+      longer matches the charge, the profile or the grant's revision, or
+      the recorded binding is malformed (packet 8.3); with `expected`, a
+      recorded binding is required (`:binding_unrecorded` when there is
+      none);
     * `:grant_ineligible_at_launch` with the failed check: `:grant_missing`,
       `:grant_revoked`, `:grant_not_started`, `:grant_expired`,
       `:profile_not_in_grant`, `:allocation_not_in_grant`,
       `:allocation_profile_restricted`, `:bucket_not_applicable` or
       `:allocation_unavailable`.
   """
-  def launch_check(run, invocation, effective_profile, now, store) do
+  def launch_check(run, invocation, effective_profile, now, store, expected \\ nil) do
     cond do
       run.status != :running ->
         {:error, :run_not_running_at_launch, run.status}
@@ -283,9 +440,102 @@ defmodule SdrAgent.Agents.Admission do
         {:error, :profile_mismatch_at_launch, :profile_mismatch}
 
       true ->
-        with :ok <- Gate.admit_launch(run, invocation, store),
+        with :ok <- exemption(run, invocation, expected),
+             :ok <- Gate.admit_launch(run, invocation, store),
+             :ok <- launch_binding(invocation, run.tenant_id, not is_nil(expected)),
              do: launch_terms(run, invocation, now)
     end
+  end
+
+  @doc """
+  The `calibration_launch:` option of `Agents.admit_launch/3` (packet 8.13):
+  `nil` when it is absent (ordinary launch behaviour), the expectation when
+  it is exactly `%{run_id:, tenant_id:, request_sha256:, prompt_ref:,
+  schema_ref:}` (lowercase UUID strings, a 32-byte request SHA-256, and
+  references of exactly `%{id:, version:, sha256:}` with a 32-byte
+  SHA-256), and `:invalid` for any other present value, an explicit `nil`
+  included. It can only add refusals.
+  """
+  def calibration_launch(opts) do
+    case Keyword.fetch(opts, :calibration_launch) do
+      :error -> nil
+      {:ok, value} -> if expectation?(value), do: value, else: :invalid
+    end
+  end
+
+  @expectation_keys [:prompt_ref, :request_sha256, :run_id, :schema_ref, :tenant_id]
+  @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+  defp expectation?(%{} = expected) do
+    Enum.sort(Map.keys(expected)) == @expectation_keys and uuid?(expected.run_id) and
+      uuid?(expected.tenant_id) and sha256?(expected.request_sha256) and
+      ref?(expected.prompt_ref) and ref?(expected.schema_ref)
+  end
+
+  defp expectation?(_value), do: false
+
+  defp ref?(%{id: id, version: version, sha256: sha256} = ref),
+    do: map_size(ref) == 3 and is_binary(id) and is_binary(version) and sha256?(sha256)
+
+  defp ref?(_ref), do: false
+
+  defp uuid?(value), do: is_binary(value) and value =~ @uuid
+  defp sha256?(value), do: is_binary(value) and byte_size(value) == 32
+
+  # Packet 8.13 C8: an exempted calibration call launches only a proof run's
+  # own call (no Operation) with the code-owned input it was reserved with.
+  defp exemption(_run, _invocation, nil), do: :ok
+
+  defp exemption(run, invocation, expected) do
+    cond do
+      run.usage_origin != :proof or not is_nil(run.operation_id) ->
+        {:error, :calibration_not_authorized, :exemption_scope}
+
+      not fixed_input?(invocation, expected) ->
+        {:error, :calibration_not_authorized, :exemption_input}
+
+      invocation.request_sha256 != expected.request_sha256 ->
+        {:error, :calibration_not_authorized, :exemption_request}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp fixed_input?(invocation, %{prompt_ref: prompt, schema_ref: schema}) do
+    {invocation.prompt_template_id, invocation.prompt_template_version,
+     invocation.prompt_template_sha256} == {prompt.id, prompt.version, prompt.sha256} and
+      {invocation.output_schema_id, invocation.output_schema_version,
+       invocation.output_schema_sha256} == {schema.id, schema.version, schema.sha256}
+  end
+
+  # The G-R0 binding recorded at reservation (packet 8.3 "At launch"): the
+  # charge and profile are still the bound ones, and the grant (read under
+  # its share lock) is still at the bound revision. An amendment or
+  # revocation refuses, a malformed recorded binding is never read as a
+  # legacy absence, and there is no fallback to another budget.
+  defp launch_binding(invocation, tenant_id, required?) do
+    case Gate.recorded_binding(invocation) do
+      {:ok, nil} ->
+        if required?,
+          do: {:error, :calibration_grant_mismatch, :binding_unrecorded},
+          else: :ok
+
+      {:ok, binding} ->
+        if bound?(invocation, binding, charged(ModelCallGrant, invocation.grant_id, tenant_id)),
+          do: :ok,
+          else: {:error, :calibration_grant_mismatch, :binding_changed}
+
+      {:error, :binding_unrecorded} ->
+        {:error, :calibration_grant_mismatch, :binding_unrecorded}
+    end
+  end
+
+  defp bound?(_invocation, _binding, nil), do: false
+
+  defp bound?(invocation, binding, grant) do
+    {invocation.grant_id, invocation.allocation_id, invocation.profile_id, grant.revision} ==
+      {binding.grant_id, binding.allocation_id, binding.profile_id, binding.grant_revision}
   end
 
   defp launch_terms(run, invocation, now) do

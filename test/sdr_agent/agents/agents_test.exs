@@ -87,6 +87,8 @@ defmodule SdrAgent.AgentsTest do
                Enum.sort([
                  {:start, [:queued], :running},
                  {:succeed, [:running], :succeeded},
+                 # R0-07 slice E (R11-2): the guarded calibration finish.
+                 {:finish_calibration, [:running], :succeeded},
                  {:fail, [:running], :failed},
                  {:exhaust_budget, [:running], :budget_exhausted},
                  {:cancel, [:queued, :running], :cancelled}
