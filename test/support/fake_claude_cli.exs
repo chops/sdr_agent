@@ -61,7 +61,12 @@ case mode do
     stdin = IO.read(:stdio, :eof)
     id = System.get_env("SDR_MODEL_INVOCATION_ID")
     tp = System.get_env("SDR_TRACEPARENT")
-    answer = ~s({"answer":"qualified","score":42})
+    # A 4th argument `calibration` answers in the calibration console's
+    # fixed output schema (R0-07 d3c) instead of the qualification one.
+    answer =
+      if Enum.at(System.argv(), 3) == "calibration",
+        do: ~s({"answer":"blue","confidence":0.9}),
+        else: ~s({"answer":"qualified","score":42})
 
     message = fn prompt, text, sse_opts ->
       [
@@ -216,8 +221,12 @@ case mode do
       end
     end
 
+    # The same result line as `result`, carrying this mode's `answer`.
     IO.puts(init)
-    IO.puts(result)
+
+    IO.puts(
+      ~s({"type":"result","subtype":"success","is_error":false,"result":#{JSON.encode!(answer)},"usage":{"input_tokens":12,"output_tokens":3}})
+    )
 
   "pinned" ->
     # argv: pinned <expected path>. Plays llm-proxy-shim for R0-02: it

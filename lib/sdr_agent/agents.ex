@@ -63,6 +63,8 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
+  alias SdrAgent.Agents.CalibrationFinish
+  alias SdrAgent.Agents.CalibrationRecovery
   alias SdrAgent.Agents.Decision
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
@@ -287,7 +289,11 @@ defmodule SdrAgent.Agents do
   def reserve_model_invocation(run, attrs, opts) do
     actor = Keyword.get(opts, :actor)
 
-    calibration = CalibrationAdmission.scope(Keyword.get(opts, :calibration))
+    marker = Keyword.get(opts, :calibration)
+
+    calibration =
+      {CalibrationAdmission.scope(marker), CalibrationAdmission.claim(marker),
+       CalibrationAdmission.binding(marker)}
 
     ModelInvocation
     |> guard(:reserve, run.id, actor, fn -> reserve_normalized(run, attrs, actor, calibration) end)
@@ -315,10 +321,12 @@ defmodule SdrAgent.Agents do
     end
   end
 
-  defp gate_inputs(%{provider: :claude_cli} = attrs, calibration, run, actor) do
+  # `claim` is the console's launch-record claim carried by the same marker
+  # (R0-07 E4c-2): recorded only with an admitted calibration tuple.
+  defp gate_inputs(%{provider: :claude_cli} = attrs, {calibration, claim, binding}, run, actor) do
     if ModelProfiles.real?(Map.get(attrs, :profile_id)) do
       store = if may_reserve?(run, actor), do: Gate.observe_store(), else: :unobserved
-      %{store: store, calibration: calibration}
+      %{store: store, calibration: calibration, claim: claim, binding: binding}
     end
   end
 
@@ -529,8 +537,14 @@ defmodule SdrAgent.Agents do
     * **Identity and state refusals** change nothing and return `{:error,
       reason}`: `:invocation_not_found` (missing, malformed or another
       tenant's id), `:invocation_not_claude_cli`, `:invocation_not_reserved`
-      (a replayed sent, in-flight or terminal row). Each is then recorded
-      as a `model.launch.refused` event of the actor's tenant only.
+      (a replayed sent, in-flight or terminal row), and for the option
+      `calibration_launch:` (R0-07 packet 8.13; `Admission.calibration_launch/1`)
+      `:calibration_launch_invalid` (present but malformed, an explicit
+      `nil` included; checked before any lock) and
+      `:calibration_target_mismatch` (the locked invocation's run or tenant
+      is not the expected one). Each is then recorded as a
+      `model.launch.refused` event of the actor's tenant only. The option
+      can only add refusals; without it a launch is admitted as before.
     * **A stopped run** (`:run_not_running_at_launch`): the row is failed
       and never sent, and no Failure is opened (the stop is already its
       cause): `{:error, :run_not_running_at_launch}`.
@@ -559,10 +573,17 @@ defmodule SdrAgent.Agents do
       subject_id: uuid(invocation_id)
     }
 
-    Guard.run(meta, actor, fn -> launch(invocation_id, effective_profile, actor) end)
+    expected = Admission.calibration_launch(opts)
+
+    Guard.run(meta, actor, fn -> launch(invocation_id, effective_profile, actor, expected) end)
   end
 
-  defp launch(id, profile, %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor)
+  defp launch(
+         id,
+         profile,
+         %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor,
+         expected
+       )
        when is_binary(tenant) do
     # Review MF3: the store is observed (filesystem I/O) only for an
     # invocation the preflight finds in the actor's tenant; the locked
@@ -570,7 +591,7 @@ defmodule SdrAgent.Agents do
     store =
       if match?({:ok, _}, launch_target(id, actor)), do: Gate.observe_store(), else: :unobserved
 
-    case audit_transact(fn -> launch_locked(id, profile, actor, store) end) do
+    case audit_transact(fn -> launch_locked(id, profile, actor, store, expected) end) do
       {:ok, {:sent, sent}} ->
         {:ok, sent}
 
@@ -589,21 +610,37 @@ defmodule SdrAgent.Agents do
     end
   end
 
-  defp launch(_id, _profile, _actor), do: {:error, Ash.Error.Forbidden.exception([])}
+  defp launch(_id, _profile, _actor, _expected), do: {:error, Ash.Error.Forbidden.exception([])}
 
-  defp launch_locked(id, profile, actor, store) do
-    with {:ok, target} <- launch_target(id, actor),
+  defp launch_locked(id, profile, actor, store, expected) do
+    with :ok <- valid_expectation(expected),
+         {:ok, target} <- launch_target(id, actor),
          {:ok, run} <- lock_tenant_run(target.agent_run_id, actor),
          :ok <- Admission.lock_operation_share(run.operation_id),
          {:ok, invocation} <- lock_invocation(target.id, actor),
+         :ok <- calibration_target(invocation, actor, expected),
          :ok <- launch_state(invocation),
          :ok <- Admission.lock_charge(invocation),
          {:ok, _head} <- Kernel.lock_head(actor.tenant_id) do
       # The launch instant is read only once every lock is held.
       run
-      |> Admission.launch_check(invocation, profile, SdrAgent.Clock.utc_now(), store)
+      |> Admission.launch_check(invocation, profile, SdrAgent.Clock.utc_now(), store, expected)
       |> admit_or_refuse(run, invocation, profile, actor)
     end
+  end
+
+  defp valid_expectation(:invalid), do: launch_refused(:calibration_launch_invalid)
+  defp valid_expectation(_expected), do: :ok
+
+  # Packet 8.13 C7: an exempted call's target is the expected run's own
+  # invocation in the expected tenant; anything else changes nothing.
+  defp calibration_target(_invocation, _actor, nil), do: :ok
+
+  defp calibration_target(invocation, actor, expected) do
+    if invocation.agent_run_id == expected.run_id and invocation.tenant_id == expected.tenant_id and
+         actor.tenant_id == expected.tenant_id,
+       do: :ok,
+       else: launch_refused(:calibration_target_mismatch)
   end
 
   defp admit_or_refuse(:ok, _run, invocation, _profile, actor) do
@@ -1111,6 +1148,74 @@ defmodule SdrAgent.Agents do
       {:ok, prelocked} -> Map.put(context, :sdr_prelocked, prelocked)
       :error -> context
     end
+  end
+
+  @doc """
+  AGT: the guarded calibration finish (R0-07 slice E, row R11-2) of a
+  terminal generation-2 ClaudeCLI invocation of a `:proof` run with no
+  Operation: decides its `:calibration` latch with `evidence: %{sha256:
+  <lowercase hex>}` — the published artifact's hash, validated first by the
+  calibration console — and finishes a still-running run `:succeeded` with
+  `:calibration_latched` (an already-terminal run is unchanged). The only
+  writer of `:calibration_latched`. Returns `{:ok, %{release:, run:}}`,
+  `{:error, :calibration_evidence_conflict}` for a different hash,
+  `{:error, :calibration_not_finishable}`, or `Ash.Error.Forbidden`. See
+  `SdrAgent.Agents.CalibrationFinish`.
+  """
+  def finish_calibration(invocation, evidence, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    subject_id =
+      case invocation do
+        %{id: id} -> id
+        _malformed -> nil
+      end
+
+    guard(AgentRun, :finish_calibration, subject_id, actor, fn ->
+      CalibrationFinish.run(invocation, evidence, actor)
+    end)
+  end
+
+  @doc """
+  The G-R0 binding for `profile_id` (packet 8.3, read-only preflight of the
+  calibration console), as AGT of `tenant_id`: `{:ok, %{grant_id:,
+  grant_revision:, allocation_id:, profile_id:}}`, `{:error,
+  :calibration_grant_unavailable}` (zero, several or a deviating grant),
+  or `Ash.Error.Forbidden`. Writes nothing.
+  """
+  def select_calibration_grant(tenant_id, profile_id, opts) do
+    case Keyword.get(opts, :actor) do
+      %SdrAgent.Actor{type: :agent_runtime, tenant_id: ^tenant_id} when is_binary(tenant_id) ->
+        if ModelProfiles.real?(profile_id),
+          do: Admission.calibration_grant(tenant_id, profile_id, SdrAgent.Clock.utc_now()),
+          else: {:error, :calibration_grant_unavailable}
+
+      _other ->
+        {:error, Ash.Error.Forbidden.exception([])}
+    end
+  end
+
+  @doc """
+  The calibration recovery action (R0-07 E4c-5; test-seam builds and the
+  calibration console only): `decision` is `:unlaunched`, `{:quiescent,
+  observation}` or `{:attested, attestation}`. Returns `{:ok, %{invocation:,
+  attestation_event:}}`, `{:error, :calibration_not_recoverable |
+  :calibration_not_quiescent | :attestation_mismatch |
+  :attestation_conflict}`, or `Ash.Error.Forbidden`. See
+  `SdrAgent.Agents.CalibrationRecovery`.
+  """
+  def recover_calibration(invocation, decision, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    subject_id =
+      case invocation do
+        %{id: id} -> id
+        _malformed -> nil
+      end
+
+    guard(ModelInvocation, :mark_unknown, subject_id, actor, fn ->
+      CalibrationRecovery.run(invocation, decision, actor)
+    end)
   end
 
   @doc "The release of an invocation in the actor's tenant: `{:ok, release | nil}`."

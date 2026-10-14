@@ -199,8 +199,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   status readable by name), `:profile` (a real `SdrAgent.AI.ModelProfiles`
   id, default `:claude_cli_opus`), `:command`, `:command_args`,
   `:cli_args`, `:timeout` (ms), `:environment`, `:executable` (the app's
-  pinned CLI, absolute `/nix/store` path), `:test_launcher` (test builds
-  only).
+  pinned CLI, absolute `/nix/store` path), `:test_launcher` and
+  `:clock_from` (a local pid whose frozen clock the server reads, packet
+  8.14.10; both test-seam builds only).
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
 
@@ -421,7 +422,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   def init(opts) do
     profile = Keyword.get(opts, :profile, ModelProfiles.default_real())
 
-    with {:ok, profile} <- start_profile(profile) do
+    with :ok <- follow_clock(opts),
+         {:ok, profile} <- start_profile(profile) do
       case Keyword.get(opts, :timeout, @default_timeout) do
         timeout when is_integer(timeout) and timeout >= @min_timeout ->
           start(opts, profile, timeout)
@@ -630,6 +632,14 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         {:ok, _port, os_pid} ->
           prune_stuck(%{state | stuck: [{workspace, os_pid} | state.stuck]})
 
+        {:unknown, {:post_spawn_failure, _port, os_pid}} ->
+          prune_stuck(%{state | stuck: [{workspace, os_pid} | state.stuck]})
+
+        # Started but not identifiable: stays unconfirmed until an operator
+        # release (`Reaper.release/1`).
+        {:unknown, :post_spawn_failure} ->
+          %{state | unconfirmed: Map.put(state.unconfirmed, ref, workspace)}
+
         {:error, _reason} ->
           File.rm_rf(workspace)
           if state.reaper, do: Reaper.done(state.reaper, workspace)
@@ -657,9 +667,12 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   defp run(request, state, caller, deadline) do
     with :ok <- pinned_launch(state),
-         :ok <- staged(state),
+         {:ok, expected} <- staged(state, request, caller),
          {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
          :ok <- refuse_bypass(state.environment || System.get_env()) do
+      # Only the exemption sets the launch expectation; a caller's own
+      # value is always replaced.
+      request = Map.put(request, :calibration_launch, expected)
       launch(request, state, caller, deadline, witness_env)
     else
       error -> {error, state}
@@ -680,9 +693,46 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   end
 
   # R0-02 staging: the real launcher spends no call until R0-03, C9 and
-  # R0-07 land; only a test build's injected launcher runs.
-  defp staged(%{test_launcher: true}), do: :ok
-  defp staged(_state), do: {:error, :real_model_staged}
+  # R0-07 land; only a test build's injected launcher runs, or (test-seam
+  # builds, R0-07 packet 8.13) one exempted calibration call of a private
+  # server, which returns its launch expectation.
+  defp staged(%{test_launcher: true}, _request, _caller), do: {:ok, nil}
+
+  if @test_seams do
+    alias SdrAgent.AI.ModelProvider.ClaudeCLI.CalibrationExemption
+
+    # The strict witness validator runs before the exemption, so a request
+    # it would refuse never consumes the entry (Codex d1b@21eb641).
+    defp staged(state, %{calibration: _} = request, caller) do
+      case witness_env(Map.get(request, :witness)) do
+        {:ok, _env} -> CalibrationExemption.check(state, request, caller)
+        {:error, _invalid} -> {:error, :real_model_staged}
+      end
+    end
+  end
+
+  defp staged(_state, _request, _caller), do: {:error, :real_model_staged}
+
+  # R0-07 packet 8.14.10: test-seam builds only, `clock_from: pid` makes
+  # this server read that process's frozen clock (`Clock.follow/1`) from
+  # init on, before its first attestation note. A malformed value refuses
+  # the start; other builds ignore the option.
+  if @test_seams do
+    defp follow_clock(opts) do
+      case Keyword.fetch(opts, :clock_from) do
+        :error ->
+          :ok
+
+        {:ok, pid} ->
+          case Clock.follow(pid) do
+            :ok -> :ok
+            {:error, :invalid_pid} -> {:stop, {:invalid_clock_from, pid}}
+          end
+      end
+    end
+  else
+    defp follow_clock(_opts), do: :ok
+  end
 
   if @test_seams do
     defp test_launcher?(opts),
@@ -705,7 +755,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   defp admit_launch(state, request) do
     id = request.witness.model_invocation_id
 
-    case state.launch_admission.(id, state.profile.id, actor: Map.get(request, :actor)) do
+    opts = [actor: Map.get(request, :actor)] ++ launch_expectation(request)
+
+    case state.launch_admission.(id, state.profile.id, opts) do
       {:ok, _sent} -> :ok
       # R0-07 slice B (row B1): the committed launch refusal's typed receipt
       # (metadata only) reaches the caller unchanged.
@@ -719,6 +771,31 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   catch
     _kind, _reason -> {:error, :launch_admission_failed}
   end
+
+  # After the port opened. Test-seam builds, packet 8.14.2 (d3a): an
+  # exempted call first sends its launch receipt from this process, before
+  # the call's reply; an expired call is then a timeout and a lost caller
+  # stops the tree, both through the existing stop path, so queued output
+  # is never collected as a late success.
+  if @test_seams do
+    alias SdrAgent.AI.ModelProvider.ClaudeCLI.CalibrationExemption
+
+    defp launched(port, os_pid, state, deadline, %{calibration_launch: %{}} = request) do
+      case CalibrationExemption.receipt(request, os_pid, deadline, state.caller) do
+        :ok -> collect(port, os_pid, state, deadline, nil, [])
+        :expired -> stop_tree(os_pid, state, {:unknown, :claude_cli_timeout})
+        :caller_down -> stop_tree(os_pid, state, {:unknown, :caller_down})
+      end
+    end
+  end
+
+  defp launched(port, os_pid, state, deadline, _request),
+    do: collect(port, os_pid, state, deadline, nil, [])
+
+  defp launch_expectation(%{calibration_launch: %{} = expected}),
+    do: [calibration_launch: expected]
+
+  defp launch_expectation(_request), do: []
 
   defp witness_env(%{model_invocation_id: id, traceparent: traceparent})
        when is_binary(id) and is_binary(traceparent) do
@@ -800,14 +877,22 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
              spawn_opts,
              deadline
            ) do
-      result = collect(port, os_pid, Map.put(state, :caller, watch), deadline, nil, [])
+      result = launched(port, os_pid, Map.put(state, :caller, watch), deadline, request)
+
       {result, settle(state, port, os_pid, workspace)}
     else
       {:pending, ref} ->
         unknown(state, ref, workspace, :launch_handshake_timeout)
 
-      {:unknown, :reaper_down} ->
-        unknown(state, make_ref(), workspace, :reaper_down)
+      # A process was started and then something failed: the outcome is
+      # unknown (never a known no-spawn) and the tree is stopped and
+      # confirmed gone, or tracked as stuck, before the call returns.
+      {:unknown, {:post_spawn_failure, port, os_pid}} ->
+        Logger.error("ClaudeCLI launch failed after its process started; stopping its tree")
+        {{:unknown, :post_spawn_failure}, settle(state, port, os_pid, workspace)}
+
+      {:unknown, reason} when reason in [:reaper_down, :post_spawn_failure] ->
+        unknown(state, make_ref(), workspace, reason)
 
       error ->
         File.rm_rf(workspace)
