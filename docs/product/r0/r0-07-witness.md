@@ -2737,8 +2737,11 @@ outside the test's own private server.
   a33652d3). Q1 and Q2 are answered, below. Four items to pin: target
   eligibility and a state matrix; the final-replay checks and exceptions;
   a stage-specific ticket policy; the inline delta table and tests.
-- **Round 2** (this text) takes them. It needs an exact-head recheck
-  before d3d RED.
+- **Round 2** at fc2dbbf: **NEEDS-REVIEW** (Codex ceb76154, report sha256
+  35895ee0). Every round-1 concern but one is resolved. The open one: the
+  final-replay history and latch guards.
+- **Round 3** (this text) pins those guards. It needs an exact-head
+  recheck before d3d RED.
 
 It builds on 8.14.5 and 8.14.7 (entity PASS 125102e) and reuses 8.14.9's
 patterns.
@@ -2848,19 +2851,36 @@ for `RECOVER <invocation_id>`. The nil-target exception asks for
 `RECOVER ABORTED`. A mismatch is `:calibration_not_confirmed`, a
 pre-effect stop.
 
-**Final replay (`aborted` or `finished` with a target):**
+**Final replay (`aborted` or `finished` with a target).** A final record
+is replayed only when the target's history is exactly what that record
+attests.
 - **Checks first:** the target checks above, and LaunchRecord's own
   record and handle checks.
-- **A latched invocation:** the canonical evidence file must exist and
+- **A named `aborted` record** needs a target that was never sent and is
+  latched:
+  - `status: :failed` with `sent_at` nil;
+  - an E1 `:calibration` latch.
+
+  An `aborted` record whose target is `reserved`, unlatched, or has any
+  sent history is `:calibration_record_inconsistent`, kept.
+- **A `finished` record** needs a terminal target with sent history,
+  latched:
+  - `completed`, `failed` or `unknown`, with `sent_at` set;
+  - an E1 `:calibration` latch.
+
+  A `finished` record whose target has `sent_at` nil, is not terminal, or
+  has no latch is `:calibration_record_inconsistent`, kept.
+- **The latched file:** the canonical evidence file must exist and
   validate (`Evidence.validate/3`), with its hash equal to the latch's
   `evidence_sha256`. A missing or changed file is
   `:calibration_evidence_conflict`, never recreated, and the record is
   kept.
-- **A `finished` record** must have its latch; without one,
-  `:calibration_record_inconsistent`.
 - **Then** `LaunchRecord.release(root, record, recovery: handle)`, which
   re-checks quiescence for `finished`. A final record is never advanced
   again.
+- **Unchanged:** the nil-target `aborted` exception (below), and the
+  unlaunched path's own restriction (only a `reserved` row, or a `failed`
+  row with `sent_at` nil).
 
 **The nil-target release exception (`aborted`, `invocation_id` nil):**
 such a record proves that a live `calibrate` aborted with its preflight
@@ -2984,7 +3004,13 @@ result known, before any reservation (rows 2, 4 and 5).
 - **Inconsistent combinations:** `launched` with `sent_at` nil, and
   `claimed` with sent history, are kept.
 - **Final replay:**
-  - `finished` and `aborted` with a valid latched file release;
+  - a named `aborted` record with a failed, never-sent, latched target and
+    a valid file releases; so does a `finished` record with a terminal,
+    sent, latched target and a valid file;
+  - **negatives, each kept as `:calibration_record_inconsistent`:**
+    `aborted` with a `reserved` unlatched target; `aborted` with a sent,
+    latched target; `finished` with `sent_at` nil; `finished` without a
+    latch;
   - a missing or byte-changed latched file is a conflict, kept;
   - the nil-target exception releases only via `recover(nil, …)`.
 - **Evidence:** an unlatched valid file is reused unchanged (hash and
