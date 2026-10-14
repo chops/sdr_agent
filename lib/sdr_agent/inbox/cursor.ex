@@ -8,16 +8,16 @@ defmodule SdrAgent.Inbox.Cursor do
   def scope(actor), do: {@version, actor.tenant_id, actor.id, :email_and_live_failures}
 
   @doc "Sign the last returned sort key, never the last fetched candidate."
-  def encode(actor, key), do: Phoenix.Token.sign(SdrAgentWeb.Endpoint, @salt, {scope(actor), key})
+  def encode(actor, key, secret), do: Phoenix.Token.sign(secret, @salt, {scope(actor), key})
 
   @doc "Reject malformed, altered, expired, cross-user or cross-version continuations."
-  def decode(nil, _actor), do: {:ok, nil}
+  def decode(nil, _actor, _secret), do: {:ok, nil}
 
-  def decode(cursor, actor) when is_binary(cursor) and byte_size(cursor) <= 4_096 do
+  def decode(cursor, actor, secret) when is_binary(cursor) and byte_size(cursor) <= 4_096 do
     expected = scope(actor)
 
     with {:ok, {^expected, key}} <-
-           Phoenix.Token.verify(SdrAgentWeb.Endpoint, @salt, cursor, max_age: 86_400),
+           Phoenix.Token.verify(secret, @salt, cursor, max_age: 86_400),
          true <- valid_key?(key) do
       {:ok, key}
     else
@@ -25,7 +25,7 @@ defmodule SdrAgent.Inbox.Cursor do
     end
   end
 
-  def decode(_, _), do: {:error, :invalid_input}
+  def decode(_, _, _), do: {:error, :invalid_input}
 
   @doc "Stable ordering: priority, oldest source instant, producer, source UUID."
   def key(priority, time, producer, id),

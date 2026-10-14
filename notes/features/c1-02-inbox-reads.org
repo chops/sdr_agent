@@ -90,11 +90,42 @@ no new domain/resource, app, integration or supervision child.
 - Full =mix precommit= and independent exact-head review remain the final
   gates; use the correlated review packet for their fixed-SHA evidence. No
   feature/merge completion is claimed by these focused results.
+- First fixed-head full precommit at b0c7486: 2268/2269 passed, 1 skipped,
+  4 excluded; sole failure = R0's global aggregate source scanner, which also
+  rejected the approved C1 metadata-only count. No commits/edits during run.
+- Review e62042c7 requests config-only cursor signing (no runtime Endpoint
+  dependency) and explicit #153 forward-dependency disclosure. Added endpoint-
+  down cursor and absent/invalid-key regressions; failure reproduced before fix.
+- Reviewed security-inventory delta (Claude 9768aba4): recognize only exact
+  Outreach.Inbox.count_drafts/1 AST, total count + invalid/withheld integer
+  0/1 sums, no field option; explicit authorize?/authorize_fields? true.
+  Every other aggregate site remains forbidden, including in the same file.
+  Mutants cover field/kind/auth/function/arity/second-site changes. Runtime
+  tests list actual metadata guard refs and exclude ModelInvocation.output_fields;
+  differing unreleased gen-2 output still yields only :withheld. This is a
+  reviewed guard delta, not an advisory/security waiver or policy change.
+- Revised focused gate: Inbox (103) + R0 ResultReadGate (16) = 119/119 pass;
+  dev/test WAE, canonical Credo, codegen and the non-seam valid-session proof
+  pass. Final revised exact-head full precommit and peer re-review pending.
 
 * Known Limitations
 - Reviewer Home withholds gen-2 drafts; draft page unaffected. Existing release
   metadata policy is preserved; follow-up issue #152. Page is partial and its
   draft total unavailable, never a reduced ready count or all-clear.
+- Home remains synthetic-only today. C5-04's future real-data switch must be
+  consumed by both the Elixir list guard and SQL count guard, preserving the
+  parity test and adding switch-on/off coverage. Tracked consumer obligation
+  #153; C1 does not invent the switch or enable real data.
+- Whole-producer fail-closed: one corrupt or withheld Draft context withholds
+  all Draft rows and the Draft number (including mixed reviewer gen-2 queues).
+  Healthy Failure/capture siblings remain usable; no false empty/all-clear.
+- Candidate lists are SQL-row-bounded but not under ReadDeadline; pool/statement
+  waits use existing defaults. Reads are sequential: three count deadlines
+  and possibly the separate auditor append may accumulate, with additional
+  list/auth time. No whole-page latency ceiling is promised.
+- Direct count_captures validates its server window before actor; facade
+  authentication still precedes all request validation. An acknowledged
+  Failure's unavailable acknowledge capability uses :guard_not_available.
 - Shared dependency gate: =mix hex.audit= confirms Bandit 1.12.5 HIGH advisory
   =EEF-CVE-2026-105659= / =GHSA-69m6-wcv4-rwcf=. C1 does not change/ignore this
   dependency. ADR-0008 blocks merge until the separately authorized fix lands.

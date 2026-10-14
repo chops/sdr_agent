@@ -5,6 +5,12 @@ Implements accepted ADR-0015 and the C1-02 read-only slice. There is no new
 Ash domain/resource, persistent task, supervisor child or screen. C1-03
 commands and H1 UI are excluded; no calls or spend occur on refresh.
 
+Cursor signing and freshness use one validated configuration secret per
+authenticated request; the facade does not call or require the web Endpoint
+process. Missing/invalid signing configuration fails closed. The Draft
+aggregate is the single exact, field-authorized metadata-only call site in
+the reviewed R0 aggregate inventory; output-field aggregates stay forbidden.
+
 ```mermaid
 flowchart TB
     Caller[Authenticated consumer]
@@ -37,3 +43,9 @@ its pending-Draft total is unavailable, not a reduced ready count. Source
 draft-page policy is unchanged. Bodies, parsed outputs, stderr and Payloads
 are never read for this projection. Exact aggregates can scan many index
 entries; they are time/result bounded, not fixed-scan-work bounded.
+
+Forward obligation #153: C5-04 must make the synthetic-only list and count
+guards consume its real-data switch together, preserving SQL/Elixir parity.
+Until then, one withheld/corrupt Draft context withholds the whole Draft
+producer, not only that row. Lists have bounded candidates but use existing
+queue/query timeout defaults; sequential reads have no whole-page deadline.

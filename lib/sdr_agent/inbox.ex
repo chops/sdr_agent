@@ -31,7 +31,8 @@ defmodule SdrAgent.Inbox do
   def refresh(token, opts \\ []) do
     with {:ok, actor} <- session(token),
          :ok <- options(opts),
-         {:ok, cursor} <- Cursor.decode(Keyword.get(opts, :cursor), actor) do
+         {:ok, secret} <- signing_secret(),
+         {:ok, cursor} <- Cursor.decode(Keyword.get(opts, :cursor), actor, secret) do
       observed = Clock.utc_now()
       window = week(observed)
       fault = Keyword.get(opts, :test_fault)
@@ -51,8 +52,8 @@ defmodule SdrAgent.Inbox do
           end)
       }
 
-      page = page(actor, opts, observed, window, drafts, failures, counts)
-      audit_page(page, actor, fault)
+      page = page(actor, opts, observed, window, drafts, failures, counts, secret)
+      audit_page(page, actor, fault, secret)
     end
   end
 
@@ -105,15 +106,15 @@ defmodule SdrAgent.Inbox do
     _kind, _reason -> {:error, :producer_error}
   end
 
-  defp page(actor, opts, observed, window, drafts, failures, counts) do
+  defp page(actor, opts, observed, window, drafts, failures, counts, secret) do
     rows =
-      Enum.map(values(drafts), &draft_item(&1, actor, observed)) ++
-        Enum.map(values(failures), &failure_item(&1, actor, observed))
+      Enum.map(values(drafts), &draft_item(&1, actor, observed, secret)) ++
+        Enum.map(values(failures), &failure_item(&1, actor, observed, secret))
 
     sorted = Enum.sort_by(rows, & &1.sort_key)
     limit = Keyword.get(opts, :limit, 50)
     items = Enum.take(sorted, limit)
-    next = if length(sorted) > limit, do: Cursor.encode(actor, List.last(items).sort_key)
+    next = if length(sorted) > limit, do: Cursor.encode(actor, List.last(items).sort_key, secret)
     results = %{draft_list: drafts, failure_list: failures} |> Map.merge(counts)
 
     errors =
@@ -123,7 +124,7 @@ defmodule SdrAgent.Inbox do
     totals =
       Map.new(@metrics, fn metric ->
         result = metric_result(metric, counts[metric], drafts, failures)
-        {metric, total(metric, result, actor, window)}
+        {metric, total(metric, result, actor, window, secret)}
       end)
 
     %{
@@ -143,11 +144,11 @@ defmodule SdrAgent.Inbox do
   defp metric_result(:live_failures, _, _, {:error, _} = error), do: error
   defp metric_result(_, count, _, _), do: count
 
-  defp total(metric, result, actor, window) do
+  defp total(metric, result, actor, window, secret) do
     base = %{
       metric: metric,
       observed_at: Clock.utc_now(),
-      scope_fingerprint: scope_fingerprint(actor)
+      scope_fingerprint: scope_fingerprint(actor, secret)
     }
 
     base =
@@ -173,7 +174,8 @@ defmodule SdrAgent.Inbox do
            suppression_refs: suppression_refs
          },
          actor,
-         now
+         now,
+         secret
        ) do
     producer = :outreach_drafts
     kind = :draft_review
@@ -200,7 +202,7 @@ defmodule SdrAgent.Inbox do
       end
 
     %{
-      id: fingerprint({:item, identity}),
+      id: fingerprint({:item, identity}, secret),
       kind: kind,
       producer: producer,
       subject_ref: %{resource: "SdrAgent.Outreach.Draft", id: draft.id},
@@ -211,7 +213,7 @@ defmodule SdrAgent.Inbox do
       },
       channel: :email,
       recipient_binding: %{id: contact.id, email: to_string(contact.email)},
-      freshness_token: fingerprint({:freshness, identity, facts}),
+      freshness_token: fingerprint({:freshness, identity, facts}, secret),
       observed_at: now,
       summary: String.slice(rev.subject, 0, 200),
       actions: [
@@ -225,7 +227,7 @@ defmodule SdrAgent.Inbox do
     }
   end
 
-  defp failure_item(failure, actor, now) do
+  defp failure_item(failure, actor, now, secret) do
     producer = :operations_failures
     kind = :failure_attention
     identity = {actor.tenant_id, producer, kind, failure.id, nil}
@@ -249,14 +251,14 @@ defmodule SdrAgent.Inbox do
         else: []
 
     %{
-      id: fingerprint({:item, identity}),
+      id: fingerprint({:item, identity}, secret),
       kind: kind,
       producer: producer,
       subject_ref: %{resource: "SdrAgent.Operations.Failure", id: failure.id},
       revision_ref: nil,
       channel: nil,
       recipient_binding: nil,
-      freshness_token: fingerprint({:freshness, identity, facts}),
+      freshness_token: fingerprint({:freshness, identity, facts}, secret),
       observed_at: now,
       summary: String.slice(failure.message, 0, 240),
       actions:
@@ -294,10 +296,10 @@ defmodule SdrAgent.Inbox do
   defp acknowledgment_block(%{status: :acknowledged}, _), do: :guard_not_available
   defp acknowledgment_block(_, actor), do: actor_block(actor)
 
-  defp audit_page(page, %{role: :auditor} = actor, fault) do
+  defp audit_page(page, %{role: :auditor} = actor, fault, secret) do
     reference = %{
       version: "c1-inbox-view/1",
-      scope: scope_fingerprint(actor),
+      scope: scope_fingerprint(actor, secret),
       shown: Enum.map(page.items, &%{producer: &1.producer, id: &1.subject_ref.id}),
       metrics:
         Enum.map(@metrics, fn metric ->
@@ -314,7 +316,7 @@ defmodule SdrAgent.Inbox do
     end
   end
 
-  defp audit_page(page, _, _), do: {:ok, page}
+  defp audit_page(page, _, _, _), do: {:ok, page}
 
   defp append_access(actor, encoded) do
     ReadDeadline.run([actor: actor], fn _ ->
@@ -340,10 +342,20 @@ defmodule SdrAgent.Inbox do
     |> DateTime.shift_zone!("Etc/UTC")
   end
 
-  defp scope_fingerprint(actor), do: fingerprint({:scope, Cursor.scope(actor)})
+  defp scope_fingerprint(actor, secret), do: fingerprint({:scope, Cursor.scope(actor)}, secret)
 
-  defp fingerprint(term) do
-    secret = Application.fetch_env!(:sdr_agent, SdrAgentWeb.Endpoint)[:secret_key_base]
+  # A configuration key, not a runtime call into the web endpoint. Resolve
+  # once per authenticated request and share it with cursor + freshness.
+  defp signing_secret do
+    config = Application.get_env(:sdr_agent, SdrAgentWeb.Endpoint, [])
+
+    case config[:secret_key_base] do
+      secret when is_binary(secret) and byte_size(secret) >= 20 -> {:ok, secret}
+      _ -> {:error, :producer_error}
+    end
+  end
+
+  defp fingerprint(term, secret) do
     :crypto.mac(:hmac, :sha256, secret, Canonical.encode!({"c1-inbox/1", term})) |> hex()
   end
 

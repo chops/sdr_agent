@@ -76,8 +76,7 @@ defmodule SdrAgent.Outreach.Inbox do
   def count_drafts(opts) do
     ReadDeadline.run(opts, fn timeout ->
       actor = Keyword.fetch!(opts, :actor)
-      invalid = invalid_context(actor.tenant_id)
-      withheld = withheld_context(actor)
+      %{invalid: invalid, withheld: withheld} = count_guards(actor)
 
       actor
       |> base()
@@ -89,10 +88,17 @@ defmodule SdrAgent.Outreach.Inbox do
           {:withheld, :sum,
            expr: expr(if(^withheld, do: 1, else: 0)), expr_type: :integer, default: 0}
         ],
-        timeout: timeout
+        timeout: timeout,
+        authorize?: true,
+        authorize_fields?: true
       )
       |> count_result()
     end)
+  end
+
+  @doc "Pure metadata guard expressions, shared by the count and its protected-field inventory."
+  def count_guards(actor) do
+    %{invalid: invalid_context(actor.tenant_id), withheld: withheld_context(actor)}
   end
 
   @doc "Committed logical capture operations in a validated half-open UTC local-week window."
