@@ -199,8 +199,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   status readable by name), `:profile` (a real `SdrAgent.AI.ModelProfiles`
   id, default `:claude_cli_opus`), `:command`, `:command_args`,
   `:cli_args`, `:timeout` (ms), `:environment`, `:executable` (the app's
-  pinned CLI, absolute `/nix/store` path), `:test_launcher` (test builds
-  only).
+  pinned CLI, absolute `/nix/store` path), `:test_launcher` and
+  `:clock_from` (a local pid whose frozen clock the server reads, packet
+  8.14.10; both test-seam builds only).
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
 
@@ -421,7 +422,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   def init(opts) do
     profile = Keyword.get(opts, :profile, ModelProfiles.default_real())
 
-    with {:ok, profile} <- start_profile(profile) do
+    with :ok <- follow_clock(opts),
+         {:ok, profile} <- start_profile(profile) do
       case Keyword.get(opts, :timeout, @default_timeout) do
         timeout when is_integer(timeout) and timeout >= @min_timeout ->
           start(opts, profile, timeout)
@@ -710,6 +712,27 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   end
 
   defp staged(_state, _request, _caller), do: {:error, :real_model_staged}
+
+  # R0-07 packet 8.14.10: test-seam builds only, `clock_from: pid` makes
+  # this server read that process's frozen clock (`Clock.follow/1`) from
+  # init on, before its first attestation note. A malformed value refuses
+  # the start; other builds ignore the option.
+  if @test_seams do
+    defp follow_clock(opts) do
+      case Keyword.fetch(opts, :clock_from) do
+        :error ->
+          :ok
+
+        {:ok, pid} ->
+          case Clock.follow(pid) do
+            :ok -> :ok
+            {:error, :invalid_pid} -> {:stop, {:invalid_clock_from, pid}}
+          end
+      end
+    end
+  else
+    defp follow_clock(_opts), do: :ok
+  end
 
   if @test_seams do
     defp test_launcher?(opts),
