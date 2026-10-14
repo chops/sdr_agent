@@ -163,7 +163,7 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
 
       [
         tenant: :console,
-        root: Path.join(state, "launch"),
+        root: state,
         evidence_dir: Path.join(state, "evidence"),
         confirm: &read_confirmation/1,
         probe: ProcessProbe,
@@ -524,20 +524,30 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
         command_pid: self(),
         server_pid: s.server,
         prompt_sha256: hex(Prompt.prompt_ref().sha256),
-        schema_sha256: hex(Prompt.schema_ref().sha256),
-        instance: Authority.instance()
+        schema_sha256: hex(Prompt.schema_ref().sha256)
       }
 
-      case Authority.issue(binding) do
-        {:ok, ref} ->
+      case authority_issue(binding) do
+        {:ok, ref, instance} ->
           Process.put({__MODULE__, :authority}, ref)
-          hooked(s, :before_call, &call(&1, ref, binding.instance))
+          hooked(s, :before_call, &call(&1, ref, instance))
 
-        _refused ->
+        :unavailable ->
           unlaunched(s, :calibration_authority_unavailable)
       end
+    end
+
+    # Only the registry operations themselves are guarded here: an exit
+    # anywhere later is never reported as the authority being unavailable.
+    defp authority_issue(binding) do
+      instance = Authority.instance()
+
+      case Authority.issue(Map.put(binding, :instance, instance)) do
+        {:ok, ref} -> {:ok, ref, instance}
+        _refused -> :unavailable
+      end
     catch
-      :exit, _unavailable -> unlaunched(s, :calibration_authority_unavailable)
+      :exit, _unavailable -> :unavailable
     end
 
     defp hooked(s, phase, next) do
@@ -688,7 +698,8 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     ## The normal path (rows 11 to 13)
 
     defp observe(s) do
-      if ClaudeCLI.admission(s.server) == %{admission: :open} and quiescent?(s) do
+      with :open <- admission(s),
+           :quiescent <- quiescence(s, System.monotonic_time(:millisecond) + @quiescence_ms) do
         gate = %{run_id: s.run.id, operation_id: nil}
 
         case ResultGate.await(s.invocation, gate, methods: [candidate(s.profile)]) do
@@ -699,20 +710,31 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
             kept(:calibration_observation_failed, s)
         end
       else
-        kept(:calibration_not_quiescent, s)
+        {:error, reason} -> kept(reason, s)
+        _not_quiescent_or_blocked -> kept(:calibration_not_quiescent, s)
       end
     end
 
-    defp quiescent?(s) do
-      until = System.monotonic_time(:millisecond) + @quiescence_ms
-      probe = [probe: s.options.probe]
+    defp admission(s) do
+      if ClaudeCLI.admission(s.server) == %{admission: :open}, do: :open, else: :blocked
+    end
 
-      Stream.repeatedly(fn -> LaunchRecord.quiescence(s.record, probe) == :quiescent end)
-      |> Enum.find(fn quiescent? ->
-        quiescent? or System.monotonic_time(:millisecond) > until or
-          (Process.sleep(@poll_ms) && false)
-      end)
-      |> Kernel.==(true)
+    # Known live work (`:not_quiescent`) is re-observed within a short
+    # bound; any other answer, a probe error above all, is returned at once
+    # and never retried into absence.
+    defp quiescence(s, until) do
+      case LaunchRecord.quiescence(s.record, probe: s.options.probe) do
+        :not_quiescent ->
+          if System.monotonic_time(:millisecond) < until do
+            Process.sleep(@poll_ms)
+            quiescence(s, until)
+          else
+            :not_quiescent
+          end
+
+        other ->
+          other
+      end
     end
 
     defp observed(s, observation, receipt) do
@@ -780,25 +802,41 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
       end
     end
 
-    # Evidence (E2), the latch (E1), the final record state and the release.
+    # Evidence (E2), the latch (E1), the final record state and the
+    # release. Each step carries the state it reached, so a later failure
+    # still reports the published file.
     defp finalize(s, document, final, reason) do
-      with {:ok, evidence} <- Evidence.publish(s.options.evidence_dir, document, actor: s.agent),
-           s = %{s | evidence: Map.take(evidence, [:path, :sha256])},
-           {:ok, _latched} <-
-             ok_or(
-               Agents.finish_calibration(s.invocation, %{sha256: evidence.sha256},
-                 actor: s.agent
-               ),
-               :calibration_finish_failed
-             ),
-           {:ok, record} <-
-             LaunchRecord.advance(s.options.root, s.record, final, %{}, s.record_opts),
-           s = %{s | record: record},
-           :ok <- LaunchRecord.release(s.options.root, record, s.record_opts) do
-        result = summary(:released, s)
-        if reason, do: {:stop, reason, result}, else: {:ok, result}
-      else
+      case Evidence.publish(s.options.evidence_dir, document, actor: s.agent) do
+        {:ok, evidence} ->
+          latch(%{s | evidence: Map.take(evidence, [:path, :sha256])}, final, reason)
+
+        {:error, failure} ->
+          kept(failure, s)
+      end
+    end
+
+    defp latch(s, final, reason) do
+      case Agents.finish_calibration(s.invocation, %{sha256: s.evidence.sha256}, actor: s.agent) do
+        {:ok, _latched} -> final_record(s, final, reason)
+        _failed -> kept(:calibration_finish_failed, s)
+      end
+    end
+
+    defp final_record(s, final, reason) do
+      case LaunchRecord.advance(s.options.root, s.record, final, %{}, s.record_opts) do
+        {:ok, record} -> release(%{s | record: record}, reason)
         {:error, failure} -> kept(failure, s)
+      end
+    end
+
+    defp release(s, reason) do
+      case LaunchRecord.release(s.options.root, s.record, s.record_opts) do
+        :ok ->
+          result = summary(:released, s)
+          if reason, do: {:stop, reason, result}, else: {:ok, result}
+
+        {:error, failure} ->
+          kept(failure, s)
       end
     end
 

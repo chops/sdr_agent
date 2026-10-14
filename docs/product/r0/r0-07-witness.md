@@ -2331,6 +2331,65 @@ an option.
   is itself a test-seam build. Owner code inside the console VM remains
   out of scope, as already accepted (8.2). Nothing here claims more.
 
+##### Console paths and first-run setup (round 4, proposed)
+
+This follows Codex's d3c code review at 712e53a (e5b5c5a7, report sha256
+fdad2b8e), MF3 and its note on reading the owner's home. It needs an
+exact-head recheck before it is implemented.
+
+**The canonical paths.** There is one root, shared by `calibrate` and
+`calibrate-recover`:
+- `root` is `~/.local/state/sdr-agent/calibration`, so the lock is
+  `calibration/run.lock` (8.4). It is the directory that
+  `Secrets.load_or_create/0` already creates 0700, through a temporary
+  name and a rename, when the task builds its plan.
+- `evidence_dir` is `~/.local/state/sdr-agent/calibration/evidence` (the
+  E2 location).
+- No second root exists, so an earlier retained lock can never be ignored.
+  No old lock is moved, cleared or treated as irrelevant.
+
+**The home read (correcting 8.14.9's "pure").**
+- `command/1` parses argv. `console_opts/1` resolves the owner's home
+  (`System.user_home!/0`), as `Secrets.default_path/0` does. That is the
+  only environment read.
+- Nothing is taken from argv, the configuration or any other environment
+  value: not the model, the server, the hook, the grant or the tenant.
+- `command/1` and `console_opts/1` read no database and no file.
+
+**First-run setup** (`Calibrate.prepare(opts)`). The task calls it after
+the plan (so Secrets has made the root) and before the application
+starts. It never runs in `check` or `command/1`.
+- **The root** must already exist and pass the launch-record safety rules
+  (owned by this user, mode 0700, no symlink in it or in any ancestor).
+  Otherwise `{:error, :calibration_root_unsafe}`: nothing is created, and
+  no mode is changed.
+- **The evidence directory**, when it is absent, is created exclusively:
+  a temporary name made 0700 under the root, then renamed into place.
+  When it exists, it is left exactly as it is, never chmod-ed, replaced
+  or followed. A link or file at that name, or a directory that is unsafe
+  by E2's rules, is `{:error, :evidence_dir_unsafe}`.
+- **The launch-record lock** is never touched. `calibrate` and
+  `calibrate-recover` read and write it only through `LaunchRecord`.
+
+**Preflight also checks the evidence directory** before any charge:
+- `Evidence.check_dir/1` is a new public read of E2's existing directory
+  rule, with no change to that rule. It runs at the start of preflight,
+  after the claim, so an unusable directory is row 2: `aborted`, then
+  `release`.
+- A directory made unsafe after preflight is still caught at publication
+  (row 13: launched, kept). Its test makes the directory unsafe in
+  `:before_call`.
+
+**RED:**
+- `console_opts/1` gives exactly the two canonical paths;
+- `prepare/1` creates a missing evidence directory 0700, leaves an
+  existing safe one unchanged, refuses an unsafe root, and refuses an
+  evidence path that is a link, a file or an unsafe directory, each left
+  untouched;
+- preflight with an unsafe evidence directory aborts and releases with no
+  run and no reservation;
+- the row 13 publication failure still keeps `launched`.
+
 ##### The ordering hook (`hook:`, tests only)
 
 `hook: (phase, %{invocation_id, run_id, tenant_id} -> any)`.
