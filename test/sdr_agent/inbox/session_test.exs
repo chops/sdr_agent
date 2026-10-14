@@ -7,6 +7,7 @@ defmodule SdrAgent.Inbox.SessionTest do
 
   alias SdrAgent.Accounts
   alias SdrAgent.Audit
+  alias SdrAgent.Clock
 
   test "nil, malformed session and system actor cannot read Home", ctx do
     failure!(ctx)
@@ -14,6 +15,41 @@ defmodule SdrAgent.Inbox.SessionTest do
     for invalid <- [nil, %{}, %{"user_token" => "forged"}, ctx.agent, ctx.admin] do
       assert {:error, :forbidden} = refresh(invalid)
     end
+  end
+
+  test "authentication precedes invalid options, cursors, identity overrides and test faults",
+       ctx do
+    failure!(ctx)
+
+    for session <- [nil, "invalid-session", ctx.admin],
+        opts <- [
+          [limit: 0],
+          [cursor: "invalid-cursor"],
+          [actor: ctx.admin],
+          [tenant_id: ctx.tenant.id],
+          [test_fault: {:unknown_source, :returned}],
+          %{"limit" => 0}
+        ] do
+      assert {:error, :forbidden} = refresh(session, opts)
+    end
+  end
+
+  test "an invalid session cannot learn whether another user's cursor is valid", ctx do
+    for _ <- 1..3, do: failure!(ctx)
+    admin_session = session!(ctx.admin)
+    reviewer_session = session!(operator!(ctx, :reviewer))
+
+    assert :ok =
+             AshAuthentication.TokenResource.Actions.revoke(
+               SdrAgent.Accounts.Token,
+               reviewer_session
+             )
+
+    assert {:ok, page} = refresh(admin_session, limit: 1)
+    assert is_binary(page.next_cursor)
+
+    assert {:error, :forbidden} = refresh(reviewer_session, cursor: page.next_cursor)
+    assert {:error, :forbidden} = refresh(nil, cursor: page.next_cursor)
   end
 
   test "a signed and stored non-user-purpose token is not a Home session", ctx do
@@ -93,12 +129,15 @@ defmodule SdrAgent.Inbox.SessionTest do
     session = session!(operator!(ctx, :auditor))
 
     assert {:ok, first} = refresh(session)
+    Clock.freeze(DateTime.add(Clock.utc_now(), 1, :second))
     assert {:ok, second} = refresh(session)
+    refute first.observed_at == second.observed_at
     assert Enum.map(first.items, & &1.id) == Enum.map(second.items, & &1.id)
     assert {:ok, [a, b]} = Audit.list_accesses(actor: ctx.admin)
     assert a.target_ref == b.target_ref
     assert byte_size(a.target_ref) <= 12_000
     assert String.starts_with?(a.target_ref, ~s({"version":))
+    refute a.target_ref =~ ~s("observed_at")
     assert length(Jason.decode!(a.target_ref)["shown"]) == 50
   end
 

@@ -77,7 +77,7 @@ defmodule SdrAgent.Inbox.IntegrityTest do
     %{draft: draft} = drafted!(ctx)
 
     tamper!("UPDATE contacts SET email = $1 WHERE id = $2", [
-      "private-recipient@unapproved-company.com",
+      "private-recipient@nonsynthetic-fixture-domain.com",
       Ecto.UUID.dump!(draft.recipient_contact_id)
     ])
 
