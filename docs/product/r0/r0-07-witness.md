@@ -2369,6 +2369,13 @@ fdad2b8e), MF3 and its home-read note. Its rounds:
     `validate/3`) also treats a non-canonical path as unsafe. The
     directory judged is then exactly the one used.
   - The fixed `console_opts/1` paths are canonical already.
+- **Setup code:** **scoped APPROVE** at 9f351c2 (Codex 46ff9a2b, report
+  sha256 124e4c75), with the round-4d input narrowing PASS.
+  - Codex found no analogous mismatch in LaunchRecord: it expands both its
+    safety root and its lock paths.
+  - `calibrate-recover` (d3d) must inherit the canonical-path guard.
+  - With this, every d3c part is approved as code. This is not integrated,
+    merge or spend approval.
 
 **The canonical paths.** There is one root, shared by `calibrate` and
 `calibrate-recover`:
@@ -2770,7 +2777,7 @@ No new resource, column or action is added.
   …}}`, before the tenant read or any filesystem access.
 - **The options** are a closed keyword list, with `run/2`'s value rules:
   - `tenant`: `:console` or a UUID;
-  - `root` and `evidence_dir`: absolute paths;
+  - `root` and `evidence_dir`: absolute and canonical paths (round 4d);
   - `confirm`: a function of arity 1;
   - `probe`: a module;
   - `record`: a keyword list;
