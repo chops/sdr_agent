@@ -464,7 +464,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
 
   describe "8.14.8: store failures are typed receipts" do
     test "a store root removed after the call is unreadable; the document has no link", ctx do
-      cli = shell_cli!(ctx, 1, "rm -rf '#{ctx.store}'")
+      cli = shell_cli!(ctx, 1, "rm -rf #{sh(ctx.store)}")
 
       assert {:ok, summary} = run(ctx, server: server(ctx, cli))
       assert summary.outcome == "unreadable"
@@ -475,7 +475,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
 
     test "an actual unreadable blob: unreadable, nil projection, propagated_id, valid init",
          ctx do
-      cli = witness_cli!(ctx, "cli_shape_v3", "rm -f '#{ctx.store}'/witness/sha256/*/*.json")
+      cli = witness_cli!(ctx, "cli_shape_v3", "rm -f #{sh(ctx.store)}/witness/sha256/*/*.json")
 
       assert {:ok, summary} = run(ctx, server: server(ctx, cli))
       assert summary.outcome == "unreadable"
@@ -491,7 +491,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
 
     test "an unreadable inventory record is unreadable", ctx do
       corrupt =
-        ~s(for f in '#{ctx.store}'/witnesses/"$SDR_MODEL_INVOCATION_ID"/*.json; ) <>
+        ~s(for f in #{sh(ctx.store)}/witnesses/"$SDR_MODEL_INVOCATION_ID"/*.json; ) <>
           ~s(do printf 'not json' > "$f"; done)
 
       cli = witness_cli!(ctx, "cli_shape_v3", corrupt)
@@ -524,6 +524,9 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
          ctx do
       assert {:ok, summary} = run(ctx)
       assert invocation!(summary.invocation_id).sent_at == @now
+      # The stand-in really ran: this test's name (so its tmp_dir) has an
+      # apostrophe, which a quoted path must survive.
+      assert File.read!(ctx.ran) == "run\n"
     end
 
     test "at exactly G-R0's expiry, preflight selects no grant: released, nothing created", ctx do
@@ -1194,7 +1197,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
 
     File.write!(path, """
     #!/bin/sh
-    echo run >> '#{ctx.ran}'
+    echo run >> #{sh(ctx.ran)}
     cat > /dev/null
     sleep #{delay}
     #{after_script}
@@ -1215,8 +1218,8 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
 
     File.write!(path, """
     #!/bin/sh
-    echo run >> '#{ctx.ran}'
-    out=$('#{elixir}' '#{@fake}' witness '#{ctx.store}' #{variant} calibration "$@")
+    echo run >> #{sh(ctx.ran)}
+    out=$(#{sh(elixir)} #{sh(@fake)} witness #{sh(ctx.store)} #{variant} calibration "$@")
     status=$?
     #{after_script}
     printf '%s\\n' "$out"
@@ -1226,6 +1229,10 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     File.chmod!(path, 0o555)
     path
   end
+
+  # One single-quoted shell word. A test's name, and so its tmp_dir, may
+  # contain an apostrophe, which a bare '...' around a path would end.
+  defp sh(path), do: "'" <> String.replace(path, "'", ~S('\'')) <> "'"
 
   defp private_dir!(tmp, name) do
     path = Path.join(tmp, name)

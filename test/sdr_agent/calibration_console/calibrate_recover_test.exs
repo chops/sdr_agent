@@ -1275,8 +1275,8 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
     File.write!(path, """
     #!/bin/sh
-    echo run >> '#{ctx.ran}'
-    out=$('#{elixir}' '#{@fake}' witness '#{ctx.store}' #{variant} calibration "$@")
+    echo run >> #{sh(ctx.ran)}
+    out=$(#{sh(elixir)} #{sh(@fake)} witness #{sh(ctx.store)} #{variant} calibration "$@")
     status=$?
     printf '%s\\n' "$out"
     exit $status
@@ -1400,7 +1400,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
     File.write!(path, """
     #!/bin/sh
-    echo run >> '#{ctx.ran}'
+    echo run >> #{sh(ctx.ran)}
     cat > /dev/null
     sleep 1
     printf '%s\\n' '#{init}'
@@ -1418,10 +1418,10 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
     File.write!(path, """
     #!/bin/sh
-    echo $$ >> '#{pids}'
+    echo $$ >> #{sh(pids)}
     cat > /dev/null
     sleep 30 &
-    echo $! >> '#{pids}'
+    echo $! >> #{sh(pids)}
     wait $!
     """)
 
@@ -1487,6 +1487,10 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       end
     end)
   end
+
+  # One single-quoted shell word. A test's name, and so its tmp_dir, may
+  # contain an apostrophe, which a bare '...' around a path would end.
+  defp sh(path), do: "'" <> String.replace(path, "'", ~S('\'')) <> "'"
 
   defp private_dir!(parent, name) do
     path = Path.join(parent, name)
