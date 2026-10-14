@@ -307,6 +307,194 @@ exact commit and green CI on it):
   owner's honest "I'm not sure how to answer" was the most useful finding of
   the walk.
 
+### Sprint 1, day 2 (Tue Oct 13), mid-day checkpoint (11:00 MDT)
+
+Day 2 went to the calibration harness: R0-07 part E, the code that will
+make one supervised calibration attempt per owner confirmation, within the
+four-attempt G-R0 grant (two per profile), and record what came back. All
+of it is on the `r0-07e-harness` branch (draft PR #146). Nothing merged to
+`main` today (Denver time) so far. Codex reviews every piece in two steps: it
+first confirms the new tests fail for the right reason, then reviews the
+code that makes them pass.
+
+**Approved by Codex as components** (each approval covers that piece only,
+not a merge, a real call or any spend):
+
+- **The launch record** (E4c-a). It is the console's on-disk lock. It now
+  has `aborted` and `recovered` states, an owner attestation kept beside it,
+  and a release that checks again before it deletes anything.
+- **The isolation check** (E4c-b). Before any reservation, it launches a
+  harmless shell the same way the real CLI will be launched. It proves the
+  shell runs in its own process group, then confirms it is gone. Four
+  review rounds tightened it:
+  - it cleans up only a directory it created itself;
+  - it is bounded in time, even when the caller dies;
+  - it signals a process only while its recorded root identity still
+    matches; a changed or unverifiable root is never signalled;
+  - anything it cannot confirm is reported as an unconfirmed cleanup,
+    which keeps the lock and stops the console.
+- **The claim on the reservation** (E4c-c1). The console's lock id is
+  recorded on the call's reservation event, so a crash cannot lose which
+  call the lock belongs to.
+- **The recovery action** (E4c-c2). It safely settles stranded calibration
+  calls under the reviewed rules (never launched, observed quiet, or owner
+  attestation), keeps the attempt charged, and never treats a sent call as
+  proven unlaunched.
+- **The sealed one-shot authority** (d1a, approved at 10:49 MDT). The
+  registry that will support the staging exemption. It is not connected to
+  dispatch yet (part d1b), so on its own it lets no call through.
+
+**In review at this checkpoint:**
+
+- **The G-R0 budget binding** (d2a). The call may only spend from the
+  owner's G-R0 budget, at the exact version the console selected.
+
+No real model call has been made; the budget for them is still zero.
+
+**What we learned:**
+
+- **Reviewing with small probes finds real gaps.** Most of Codex's findings
+  today came from short probe tests:
+  - a float process id that compared equal to an integer;
+  - a raw message that named another process as the caller;
+  - a grant created in the gap between two locks.
+
+  Each became a test before its fix.
+- **"Passed" has to mean each step passed.** See the misstep below.
+
+### Sprint 1, day 2 (Tue Oct 13), afternoon checkpoint (as of 15:30 MDT)
+
+The afternoon finished the budget binding and the staging exemption, and
+got the console's last part designed. Of its four pieces, the launch
+receipt (d3a) is approved, the reserved-call wrapper (d3b) is in review, and
+`calibrate` (d3c) and `calibrate-recover` (d3d) are not yet built. Everything is still on
+the `r0-07e-harness` branch (draft PR #146). Nothing from it merged to
+`main` today; the morning journal entry (#148) did.
+
+**Approved by Codex as components since the checkpoint** (each approval
+covers that piece only, not a merge, a real call or any spend):
+
+- **The G-R0 budget binding** (d2a and d2b).
+  - A calibration call can be reserved only against the owner's G-R0 grant
+    at the exact version the console selected, and only while that
+    profile's allocation is open.
+  - At launch the same binding is checked again: an amended, revoked,
+    swapped or unreadable binding stops the call before it starts, and the
+    charge stays where it was.
+- **The staging exemption** (d1b). One private, unnamed server may make one
+  call, and only:
+  - for the fixed calibration prompt;
+  - after using up a one-shot authority entry;
+  - after the reservation, its run and its stored request are re-checked
+    under the launch locks.
+
+  Every other call stays blocked as today. A request refused by the
+  checks before the entry is used (wrong server, input, claims or witness)
+  leaves the entry untouched; a refusal at launch admission comes after the
+  entry is used, and the entry stays used up.
+- **The launch receipt** (d3a, the first part of the console commands).
+  After the CLI starts, the server reports the process it launched, or
+  says it could not prove it. The check is bounded by the call's deadline,
+  cannot crash the server, and cannot outlive it.
+
+**In review at this checkpoint:**
+
+- **The reserved-call wrapper** (d3b): the console's way to settle its own
+  call through the existing settlement code, after re-checking the target.
+  Codex has requested changes once (a request-shape check); not approved.
+
+**Designed, not yet built:** `calibrate` and `calibrate-recover` (d3c and
+d3d). Codex passed their design after three rounds.
+- **Failure paths:** every failure point has a stated outcome.
+- **One writer:** the command is the only writer of its lock record.
+- **Recovery stays with the owner:** any attempt that may have reached the
+  model needs a typed `STOPPED` and an audited attestation until open
+  question OQ-E3 is decided.
+
+No real model call has been made; the budget for them is still zero.
+
+**What we learned:**
+
+- **Process lifetimes need their own design.** The launch receipt went back
+  three times, each for a different gap:
+  - a slow check could stretch an expired call into a late success;
+  - a crashing check could take the server down;
+  - a stuck check could outlive the server.
+
+  Each was found by a short probe and became a test first.
+- **A negative test has to observe the negative directly.** The wrapper's
+  "never calls the provider" tests first only checked side effects. A probe
+  that called the staged provider and then returned invalid still passed
+  them; no real model was involved. They now trace the server and require
+  zero provider calls.
+
+### Sprint 1, day 2 (Tue Oct 13), evening checkpoint (as of 18:12 MDT)
+
+As of 18:12 the console's `calibrate` command (d3c) is built and approved
+by Codex as code, except for one setup step. Everything is still on the
+`r0-07e-harness` branch (draft PR #146). Nothing from it is merged to
+`main`.
+
+**Status of the console commands** (each approval covers that piece
+only, not a merge, a real call or any spend):
+
+- **d3a, the launch receipt:** approved.
+- **d3b, the reserved-call wrapper:** approved.
+- **d3c, `calibrate`:** approved as code in three parts.
+  - **Test-first:** the core behavior followed tests that Codex verified
+    as failing before the code was written, and so did each fix round's
+    regressions.
+  - **The exception:** the console script's two new forwarding tests were
+    written after the script was edited. That was disclosed, and they
+    were checked later.
+  - **The outcome and the evidence file.** An unreadable witness store
+    now reads as "unreadable", not "missing". The evidence uses the
+    committed records and, for a call that was sent, the witness check's
+    actual result; no observation is invented. Malformed input is refused
+    rather than crashing. Two fix rounds.
+  - **The command.** One attended call from start to finish: claim,
+    checks, the owner's typed confirmation, one launch, observation,
+    evidence, latch and release. Each tested failure row keeps or releases
+    the lock as designed. A launch refused by the budget check stops its
+    run with that exact refusal before anything is latched. One fix
+    round: a probe error could be retried into a success, a later failure
+    lost the evidence file from its report, and the lock was in the wrong
+    folder.
+  - **Still open:** creating the evidence folder on first use. Its design
+    is in its second review round, because the first version could have
+    replaced an existing empty folder.
+- **d3d, `calibrate-recover`:** not started.
+
+**Also staged:** a test clock for the console's private model server
+(8.14.10), queued for review. Without it, these tests pass only until
+G-R0's fixed window closes (Sun Oct 18, 23:59 MDT).
+
+No real model call has been made; the budget for them is still zero.
+
+**Estimate given at the owner's request:**
+- **Code merged:** Thu Oct 15 at best, Fri Oct 16 to Mon Oct 19 more
+  likely.
+- **Then:** owner-attended steps, estimated at 1 to 1.5 elapsed days.
+  Overall, Oct 16 to 20.
+- **The main risk** is G-R0's window. If the merge slips past about Sat
+  Oct 17, the real calls may need a renewed window; no renewal is
+  approved.
+
+**What we learned:**
+
+- **A test that stops at "not built yet" proves little about its own
+  fixtures.** Every new test failed on the missing command after the
+  shared setup but before its own per-test fixtures ran. A separate run of
+  those fixtures found a budget-grant fixture that could never have been
+  selected. It was fixed before review.
+- **Error paths lose state quietly.** A failure after the evidence file was
+  written still reported "no evidence", because the success path's updates
+  never reached the error branch. Codex found it with a short probe; each
+  step now carries what it has reached.
+- **"Create only" has to be checked against the real filesystem call.** A
+  rename used to publish a new folder can replace an existing empty one.
+  The design now uses a create call that fails when the name exists.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -324,3 +512,7 @@ says what happened, why, what it cost and what changed.
 | **Oct 12: a pushed design update went unannounced.** A subagent pushed the R0-07 part C round-7 design but did not report it, so Codex was not asked to review it. | Claude relied on the subagent's report instead of checking the branch. | About half an hour of delay on the critical path, which also delayed the Home concept B mockup. | Claude checks branches directly and asks subagents to report each pushed commit. |
 | **Oct 12: tests were written after the code in two part C commits.** RED was captured afterwards by running the new tests against the old code. | A subagent wrote the code first under time pressure. | Weaker evidence that the tests drive the behaviour; disclosed in PR #143. | Disclosed rather than hidden; the process rule (failing test first) stands. |
 | **Oct 12, evening: the account hit its weekly usage limit.** Both background subagents stopped mid-gate with a 429 error. | The weekly limit is shared by every Claude session on the account; how much each session used was not measured. | Unfinished full gates on R0-07 parts B and C, and a checkpoint and login refresh. | No subagents for now; one full test suite at a time in the main session. If the limit returns, stop, keep the work, and tell the owner. |
+| **Oct 13: three verification reports wrongly said the dev build compiled.** The non-test (dev) build failed to compile with warnings as errors. The held RED test failures were disclosed separately. | The gate script piped the compile output through `tail` without keeping the step's exit status, which hid the failure. | Codex caught it; one extra review round on part E's claim binding. | The gate now checks each step's own exit status and reports PASS or FAIL per step. |
+| **Oct 13: Claude's reply watcher missed a review verdict.** A watcher read its list of message ids with `cat`, which is aliased to another tool in this shell, so the list came back empty and nothing ever matched. | The alias was known but not applied to watcher scripts. | A verified-tests verdict sat unread until Claude checked the inbox by hand; no work was lost. | Watchers read with `/bin/cat` and stop if the list is empty. |
+| **Oct 13: a test claimed a case it could not reach.** The test "a launch that never opened sends no receipt" used a missing CLI, but the launcher always opens `/bin/sh` first, so a launch did open. | The fixture's premise was not checked against how the launcher starts processes. | One extra review round on the launch receipt. Claude and Codex each found it independently. | The case was split: a real refusal before launch, and a missing CLI that is treated as launched. |
+| **Oct 13: Claude's inbox watcher moved its own messages.** A watcher matched Claude's own follow-up note and moved two messages meant for Codex out of the shared inbox before Codex read them. | The watcher matched a message id, not who sent it. | Restored within minutes; no message was lost. | Watchers only match replies sent by Codex to Claude. |
