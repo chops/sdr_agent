@@ -3500,4 +3500,15 @@ result known, before any reservation (rows 2, 4 and 5).
       optional d3a notes at 7ffede8 were approved with it.
     - d3c and d3d: the 8.14.8 addendum has **entity/action PASS** at
       623e7db (40606098) after edf023d-era rounds 431aa56, e185bbd and
-      acce675. d3c RED is in progress.
+      acce675.
+    - d3c calibrate: parts 1 and 2 code **scoped APPROVE** at 0dd4b28,
+      part 3 at 3236205; the setup (8.14.9 round 4) at 9f351c2; the clock
+      (8.14.10) at d3707cf (a1349f81).
+    - d3d calibrate-recover (8.14.11): RED **PASS / VERIFIED RED** at
+      0338680 (7ccf50f7); code **scoped APPROVE** at e1402d4a (4c4fc481)
+      after 30488459 (bd17bc34) and ec62b985 (c109fa4d).
+    - Fixture fix e2556f1a (test-only): stand-in CLI paths are
+      shell-quoted, because a test name's apostrophe (kept in `tmp_dir`)
+      broke the clock test's script under Linux dash. **Scoped APPROVE**
+      (Codex 687caad9, report sha256 ebe21619). The first completed green
+      CI run on this branch is at e2556f1a.
