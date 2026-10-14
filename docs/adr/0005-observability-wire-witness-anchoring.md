@@ -13,8 +13,7 @@ first-class concern, model-content spans and an independent wire witness both
 in the MVP, and audit-chain anchoring to a private Git repository plus
 OpenTimestamps"). Details amended by Codex consultations 11 and 13. The R0
 amendment in the wire witness section (2026-10-12) is accepted. The R0-07
-calibration harness amendment (2026-10-13) is proposed and is not yet
-accepted.
+calibration harness amendment (2026-10-13) is accepted (2026-10-14).
 
 ## Context
 
@@ -483,13 +482,15 @@ independent entity/action PASS (story R0-07) before they are implemented.
 
 #### R0-07 calibration harness amendment (2026-10-13): the harness as built
 
-**Status: PROPOSED.** The owner has not accepted this yet. It records how
-the R0 amendment's calibration exception (item 2) is confined in the
-harness on PR #146. It is written for Codex review and owner acceptance;
-neither has happened. It enables no tuple, grants no spend and adds no
-dependency. **OQ-E3 is not accepted here.** The conservative default
-stays: recovering an outstanding sent call (a `launch_pending` or
-`launched` record) needs the owner's typed `STOPPED`.
+**Status: ACCEPTED.** The owner accepted this amendment on 2026-10-14
+(America/Denver, about 10:14 MDT), in the private Claude session chat,
+with the word "accept". This followed Codex's approval of its content for
+owner presentation at 7c0753c2 (reply 5712f2fc). It records how the R0
+amendment's calibration exception (item 2) is confined in the harness on
+PR #146. It enables no tuple, grants no spend and adds no dependency.
+**OQ-E3 is not accepted here.** The conservative default stays:
+recovering an outstanding sent call (a `launch_pending` or `launched`
+record) needs the owner's typed `STOPPED`.
 The contracts and their reviews are in
 `docs/product/r0/r0-07-witness.md`, sections 8.2–8.14.
 
@@ -635,9 +636,9 @@ The contracts and their reviews are in
   A hard owner conflict waits for a separately reviewed repair workflow.
   It is never cleared by deleting a lock, ticket or predecessor evidence.
   That is slower, and deliberate.
-- **When this amendment is accepted,** it covers the harness as reviewed
-  at PR #146. Any change to the authority, receipt, isolation or recovery
-  rules then needs a further reviewed amendment.
+- **As accepted,** this amendment covers the harness as reviewed at PR
+  #146. Any change to the authority, receipt, isolation or recovery rules
+  needs a further reviewed amendment.
 - **Not decided here:**
   - OQ-E1 (publishing evidence to the repository);
   - OQ-E2 (one profile and one attempt per command, with each attempt's

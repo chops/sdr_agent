@@ -2092,6 +2092,10 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
   - **Drafted at integration (2026-10-13):** ADR-0005, "R0-07 calibration
     harness amendment", **PROPOSED**. It awaits Codex review and the
     owner's acceptance. OQ-E3 is not accepted, and STOPPED stays required.
+  - **Accepted (2026-10-14):** the owner accepted the amendment
+    ("accept", America/Denver, about 10:14 MDT) after Codex approved its
+    content for owner presentation (5712f2fc). OQ-E1, OQ-E2 and OQ-E3
+    stay open.
 - **Diagram:** the console → private server → command receipt flow is evaluated at
   the integrated review.
   - **Added at integration (2026-10-13):**
@@ -3570,3 +3574,13 @@ result known, before any reservation (rows 2, 4 and 5).
       broke the clock test's script under Linux dash. **Scoped APPROVE**
       (Codex 687caad9, report sha256 ebe21619). The first completed green
       CI run on this branch is at e2556f1a.
+    - Integrated review of PR #146: **CHANGES REQUESTED** at 1d6ab1d
+      (interim 5ab367d1, verdict 0c5ea638: the ADR-0005 amendment, the
+      runtime diagram and older wording); narrow wording fixes at
+      265fea58 (97d3b740); **PASS** at 7c0753c2 (5712f2fc, report sha256
+      d89e00ec), with the amendment's content approved for owner
+      presentation. CI at 7c0753c2 failed on attempt 1 (one
+      nondeterministic isolation test, cause not proved, #151) and
+      passed on attempt 2; Codex 34516a31 found no new blocker.
+    - Owner acceptance of the ADR-0005 harness amendment: 2026-10-14
+      ("accept"). This is not merge, spend or promotion approval.

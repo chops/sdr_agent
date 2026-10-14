@@ -3,8 +3,8 @@
 Hand-authored (not generated): 2026-10-13. Source of truth: `calibration-runtime.mmd`.
 
 The R0-07 calibration harness (PR #146; packet `docs/product/r0/r0-07-witness.md`
-8.2–8.14; ADR-0005 R0-07 calibration harness amendment, proposed). It exists only
-in the test-seam build of the calibration console. A non-seam build has neither
+8.2–8.14; ADR-0005 R0-07 calibration harness amendment, accepted 2026-10-14).
+It exists only in the test-seam build of the calibration console. A non-seam build has neither
 `Calibrate` nor a working subcommand, and the ordinary Runtime never reaches it.
 
 ```mermaid
