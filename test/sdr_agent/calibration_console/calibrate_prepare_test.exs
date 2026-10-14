@@ -146,11 +146,40 @@ defmodule SdrAgent.CalibrationConsole.CalibratePrepareTest do
       {:ok, _recovery} = LaunchRecord.recover(ctx.root, opts)
       lock = Path.join(ctx.root, "run.lock")
       assert File.dir?(Path.join(lock, "recover")), "no recovery ticket was taken"
-      before = tree(lock)
+      before = {mode(lock), tree(lock)}
       defined!()
 
       assert prepare(ctx) == {:ok, :created}
-      assert tree(lock) == before
+      assert {mode(lock), tree(lock)} == before
+    end
+
+    # Codex setup@f408377: a path the kernel resolves through a symlink
+    # must not be checked lexically and then written elsewhere. A
+    # non-canonical path (`.` or `..`, or not its own expansion) is refused
+    # before any filesystem access.
+    test "a root reached through alias/.. is refused, and nothing is written anywhere", ctx do
+      %{lexical: lexical, actual: actual, root: root} = alias_root!(ctx)
+      defined!()
+
+      assert Calibrate.prepare(root: root, evidence_dir: Path.join(root, "evidence")) ==
+               {:error, :calibration_options_invalid}
+
+      refute File.exists?(Path.join(actual, "evidence")), "written under the actual root"
+      refute File.exists?(Path.join(lexical, "evidence")), "written under the lexical root"
+    end
+
+    test "an unsafe actual directory behind alias/.. is never reported as existing", ctx do
+      %{lexical: lexical, actual: actual, root: root} = alias_root!(ctx)
+      File.mkdir!(Path.join(lexical, "evidence"))
+      File.chmod!(Path.join(lexical, "evidence"), 0o700)
+      File.mkdir!(Path.join(actual, "evidence"))
+      File.chmod!(Path.join(actual, "evidence"), 0o755)
+      defined!()
+
+      assert Calibrate.prepare(root: root, evidence_dir: Path.join(root, "evidence")) ==
+               {:error, :calibration_options_invalid}
+
+      assert mode(Path.join(actual, "evidence")) == 0o755
     end
 
     test "malformed input is refused before any filesystem access", ctx do
@@ -211,6 +240,16 @@ defmodule SdrAgent.CalibrationConsole.CalibratePrepareTest do
       File.ln_s!(ctx.evidence, link)
       assert Evidence.check_dir(link) == {:error, :evidence_dir_unsafe}
     end
+
+    # The check judges exactly the path it is given: a non-canonical one
+    # is unsafe, never its lexical expansion.
+    test "a non-canonical path is unsafe, even when its expansion is safe", ctx do
+      %{lexical: lexical, root: root} = alias_root!(ctx)
+      assert Evidence.check_dir(lexical) == :ok
+      assert Evidence.check_dir(root) == {:error, :evidence_dir_unsafe}
+      assert Evidence.check_dir(Path.join(lexical, ".")) == {:error, :evidence_dir_unsafe}
+      assert Evidence.check_dir(lexical <> "/") == {:error, :evidence_dir_unsafe}
+    end
   end
 
   ## Fixtures
@@ -250,6 +289,19 @@ defmodule SdrAgent.CalibrationConsole.CalibratePrepareTest do
   defp unsafe_root(ctx, :unwritable) do
     File.chmod!(ctx.root, 0o500)
     {ctx.root, fn -> File.chmod(ctx.root, 0o700) end}
+  end
+
+  # Codex's reproduction: a safe lexical `calibration`, an unsafe (0755)
+  # `other/calibration`, and `alias -> other/child`, so the kernel resolves
+  # `alias/../calibration` to `other/calibration`.
+  defp alias_root!(ctx) do
+    other = Path.join(ctx.tmp, "other")
+    actual = Path.join(other, "calibration")
+    File.mkdir_p!(Path.join(other, "child"))
+    File.mkdir_p!(actual)
+    File.chmod!(actual, 0o755)
+    File.ln_s!(Path.join(other, "child"), Path.join(ctx.tmp, "alias"))
+    %{lexical: ctx.root, actual: actual, root: Path.join([ctx.tmp, "alias", "..", "calibration"])}
   end
 
   defp tree(path) do
