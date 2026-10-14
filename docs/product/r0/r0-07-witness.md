@@ -2324,8 +2324,10 @@ an option.
   id; the tenant is resolved later, inside `run/2`. Its only environment
   read is the owner's home, for the two canonical paths (corrected in
   round 4 below; it is not pure).
-- The task does exactly `{:ok, …} = prepare(o)` (round 4), then
-  `{:run, p, o} = command(argv); run(p, o)`.
+- The task does, in order: the plan; `{:run, p, o} = command(argv)`
+  (invalid usage stops here, and nothing is prepared); `{:ok, _} =
+  prepare(Keyword.take(o, [:root, :evidence_dir]))` (round 4); the app and
+  storage start; the authority registry; `run(p, o)`.
 - Tests assert `command/1` and `console_opts/1` exactly: no `hook`; the
   `server`, `isolation` and `record` values `[]`; `ProcessProbe`; and no
   value derived from argv or the environment beyond the profile and the
@@ -2342,8 +2344,15 @@ fdad2b8e), MF3 and its home-read note. Its rounds:
   03d93e18). A plain directory rename can replace an existing empty
   directory, so creation must be exclusive. Pin the return contracts and
   add the entity delta.
-- **Round 4b** (this text) takes both. It needs an exact-head recheck
-  before it is implemented.
+- **Round 4b** at 146f566: **NEEDS-REVIEW** (Codex 1a594269, report sha256
+  6b51a795). Exclusive `mkdir` is accepted. Still open:
+  - a failed `chmod` does not imply an unsafe leftover;
+  - exactly one concurrent creator returns `:created`;
+  - an unwritable root reports `:calibration_root_unsafe`;
+  - the task parses before it prepares, and `prepare/1` takes a closed
+    input.
+- **Round 4c** (this text) takes all of them. It needs an exact-head
+  recheck before RED.
 
 **The canonical paths.** There is one root, shared by `calibrate` and
 `calibrate-recover`:
@@ -2368,10 +2377,15 @@ the module).
 - **Where it runs:** the task calls it after the plan (so Secrets has made
   the root) and before the application starts. Never in `check`,
   `command/1` or `run/2`.
-- **Input, checked before any filesystem access:** a keyword list with
-  `root` and `evidence_dir`, both absolute, where `evidence_dir` is exactly
-  `Path.join(root, "evidence")`. Anything else is
-  `{:error, :calibration_options_invalid}`, with nothing touched.
+- **Input, checked before any filesystem access:** a keyword list of
+  exactly the two keys `root` and `evidence_dir`. The task passes them
+  with `Keyword.take/2` from the parsed `console_opts/1`.
+  - Both must be absolute, and `evidence_dir` must be exactly
+    `Path.join(root, "evidence")`.
+  - Any other key, a duplicate, a missing key or a malformed path is
+    `{:error, :calibration_options_invalid}`, with nothing touched.
+  - This is not a caller-supplied path: the values come only from
+    `console_opts/1`. The `run/2` option contract is unchanged.
 - **Returns** `{:ok, :created | :existing}` or
   `{:error, :calibration_options_invalid | :calibration_root_unsafe |
   :evidence_dir_unsafe | :calibration_setup_failed}`.
@@ -2398,17 +2412,29 @@ the module).
    `:calibration_setup_failed`. Nothing was created.
 
 **Visibility and failure limits, stated:**
-- **A brief umask window:** between `mkdir` and the `chmod`, the new
-  directory exists with the umask's mode. An observer in that window (a
-  competing `prepare`, or `check_dir/1`) sees an unsafe directory and
-  refuses, failing closed. It never makes the directory safe.
-- **A failed `chmod`:** the creator may remove only the empty directory
-  it just created (`File.rmdir/1`, which refuses a non-empty one), then
-  returns `:calibration_setup_failed`. If that removal fails too, the
-  leftover is unsafe and every later `prepare`, preflight and publication
-  refuses it. The owner removes it.
-- **Never touched:** another creator's directory, the launch-record lock,
-  any evidence file.
+- **The window between `mkdir` and the `chmod`:** the new directory
+  exists with whatever mode the umask gave it.
+  - An observer in that window (a competing `prepare`, `check_dir/1`, or
+    publication) accepts it only if E2's checks pass at that moment;
+    otherwise it refuses, failing closed. It never repairs it.
+  - Under a 0077 umask the directory is already 0700, so an observer may
+    accept it before the creator's `chmod`. That is correct: it meets the
+    rule.
+- **A failed `chmod`:**
+  - the creator may remove only the empty directory it just created
+    (`File.rmdir/1`, which refuses a non-empty one);
+  - it returns `:calibration_setup_failed`, and the task starts neither
+    the app nor a call.
+  - A directory that survives is not assumed unsafe. E2's checks cannot
+    tell a partial attempt from a finished one. Every later call
+    revalidates it: a safe one is reused as `:existing`, and an unsafe
+    one is refused and never repaired.
+- **Never touched:** another creator's directory, the launch-record lock
+  and its record or ticket, any evidence file. Nothing is removed by
+  anyone but the failed creator, and nothing is removed for the owner
+  automatically.
+- **Scope:** the promise to write nothing on an unsafe root covers
+  `prepare/1` itself. The plan's earlier Secrets step is outside it.
 
 **`Evidence.check_dir(dir)`** is a new public, read-only entry onto E2's
 existing directory rule (the same ancestor, uid and mode checks
@@ -2447,11 +2473,22 @@ runs:
   - an unsafe root is `:calibration_root_unsafe`, with nothing created;
   - malformed input is `:calibration_options_invalid`, with nothing
     touched;
-  - two concurrent `prepare/1` calls give one `:created`, the other
-    `:created`-or-`:existing` (or a fail-closed refusal in the umask
-    window), and the directory ends 0700 with one inode;
-  - an unwritable root gives `:calibration_setup_failed`, with nothing
-    created.
+  - two concurrent `prepare/1` calls give exactly one `:created`; the
+    other is `:existing` or the fail-closed `:evidence_dir_unsafe`, and
+    two `:created` results fail the test. The directory ends 0700 with one
+    inode;
+  - a missing root, a root that is a symlink or has a symlinked ancestor,
+    or a root whose mode is not 0700 (including one made unwritable,
+    0500) is `:calibration_root_unsafe`, with nothing created;
+  - a held launch record and its recovery ticket, when present under the
+    root, are byte-for-byte unchanged by `prepare/1`;
+  - an existing safe directory's inode and contents are unchanged.
+- **`:calibration_setup_failed` has no hermetic RED.** A `mkdir` or
+  `chmod` I/O failure on a valid root cannot be produced in a test without
+  weakening the root rule or adding a failure seam, and none is proposed.
+  Its handling (creator-only `rmdir`, the reason, no app start) is
+  qualified as covered by review of the code only, and no test asserts
+  another reason in its place.
 - **`check_dir/1`:** safe → `:ok`; unsafe → `:evidence_dir_unsafe`.
 - **Preflight:** an unsafe evidence directory aborts and releases, with
   no run and no reservation.
