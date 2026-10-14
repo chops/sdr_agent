@@ -2086,9 +2086,9 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 | LaunchRecord, Authority, `recover_calibration`, `finish_calibration`, Evidence v1, Outcome, Isolation | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Used as approved | As approved |
 
 **ADR and diagram.**
-- **ADR:** the accepted basis is ADR-0005. The pending E4c-7 amendment adds
-  the launch receipt, the single-writer rule, the wrapper and the OQ-E3 gate for the
-  owner.
+- **ADR:** the accepted basis is ADR-0005. The accepted ADR-0005 harness
+  amendment adds the launch receipt, the single-writer rule, the wrapper
+  and the OQ-E3 gate for the owner.
   - **Drafted at integration (2026-10-13):** ADR-0005, "R0-07 calibration
     harness amendment", **PROPOSED**. It awaits Codex review and the
     owner's acceptance. OQ-E3 is not accepted, and STOPPED stays required.
