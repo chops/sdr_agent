@@ -14,7 +14,7 @@ defmodule SdrAgent.Inbox.CountPoolTest do
   alias SdrAgent.Repo
 
   setup do
-    assert_raise DBConnection.OwnershipError, fn -> Repo.query!("SELECT 1") end
+    assert_manual_mode!(System.monotonic_time(:millisecond) + 250)
     pool_size = Repo.config()[:pool_size]
     assert is_integer(pool_size) and pool_size >= 2
     :ok = Sandbox.mode(Repo, :auto)
@@ -70,5 +70,22 @@ defmodule SdrAgent.Inbox.CountPoolTest do
       F.assert_no_count_query!()
       assert %{rows: [[1]]} = Repo.query!("SELECT 1")
     end
+  end
+
+  # A previous sandbox owner's DOWN may race the next setup. Retry only
+  # that exact teardown exit; success still requires OwnershipError (never
+  # an arbitrary checkout failure or a successful automatic checkout).
+  defp assert_manual_mode!(deadline) do
+    assert_raise DBConnection.OwnershipError, fn -> Repo.query!("SELECT 1") end
+  catch
+    :exit, {{:shutdown, message}, {DBConnection.Holder, :checkout, [_pool, _opts]}} = reason
+    when is_binary(message) ->
+      if Regex.match?(~r/\Aowner #PID<\d+\.\d+\.\d+> exited\z/, message) and
+           System.monotonic_time(:millisecond) < deadline do
+        Process.sleep(10)
+        assert_manual_mode!(deadline)
+      else
+        exit(reason)
+      end
   end
 end

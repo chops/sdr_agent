@@ -1,0 +1,107 @@
+#+TITLE: Feature: C1-02 bounded Home inbox reads
+#+DATE: 2026-10-14
+
+* Summary
+Implement the approved stateless Home read projection, bounded Draft/Failure
+producers and three exact authorized totals. Commands and screens are excluded.
+
+* Approval and Entity Model
+Entity Model trigger: yes — derived items/pages/totals and source read contracts.
+The authoritative table is =docs/product/c1/readiness.md= (base and exact-total
+delta), independently PASS at 354c590/202349d/eafd672b/2526a22. No additional
+entity/lifecycle/policy change is proposed here. Owner scoped C1 G5 was approved
+via 58eb5fd6; final RED at 35174b7 passed Claude review via 2fa99d43/1a849ca0.
+This records the existing approved plan, not a request for expanded scope.
+
+* Affected Apps and Modules
+- Core: =SdrAgent.Inbox= and derived value helpers; no Ash domain/resource/process.
+- Accounts: extract existing signed/stored/revocable active-user session check.
+- Web: LiveUserAuth delegates that unchanged check to Accounts.
+- Operations/Outreach: source-owned bounded authorized metadata reads/counts.
+- Shared read deadline helper: bounded transaction/session-local timeout,
+  cancellation, no orphan/retry; no new supervisor or dependency.
+- Failure: Ash tenant/status index plus generated migration; no new attribute.
+- Audit: reuse existing record_access action after all source work completes.
+
+* Implementation Steps
+1. Extract shared session validation and preserve existing LiveView behavior.
+2. Add derived values, scope-bound cursor/freshness and bounded audit-ref encoder.
+3. Implement source reads/counts with existing Ash policies and deadline handling.
+4. Compose the two producers/three metrics; closed test-only faults; one bounded
+   auditor append after reads release their connections.
+5. Generate the required Failure index and evaluate/update runtime flow diagram.
+6. Execute every reviewed RED test body, source regressions and full gate at a
+   fixed head; independent Claude code review, exact-head CI, owner merge.
+
+* Required Tests and TDD Tracking
+All 87 tests in =test/sdr_agent/inbox/= were independently VERIFIED RED at
+35174b7. Includes roles/session revocation, metadata/SQL bounds, global keyset,
+freshness/integrity/withholding, exact counts/local-week/DST/history, partial
+errors, real pool/table/head locks, cancellation/settings, EXPLAIN and auditor
+coalescing. Raw evidence and compile-SHA exception ruling:
+=/Users/charles/.local/state/sdr-agent/handoff-20261008/tmp/codex-c1-02-final-red-20261014.md=.
+GREEN must execute the full contention/EXPLAIN bodies, not only presence guards.
+
+* Risks and ADR
+Deadline includes pool/authorization wait; transaction-local settings never leak.
+Unreleased model output and non-synthetic data remain withheld. A missing context
+cannot silently reduce a count. Existing source policies remain authoritative.
+No real calls/spend, new metrics/producers/tables, commands or H1 UI.
+ADR required: existing accepted ADR-0015 covers this implementation; no new ADR.
+Architecture evaluation: new public facade flow requires diagram evaluation;
+no new domain/resource, app, integration or supervision child.
+
+* Implementation Notes
+- GREEN start: test sources byte-identical to 35174b7 during prior full gate;
+  commits only recorded existing files. Stale compile-time SHA exception cleared
+  by fresh AnchoringTest 12/12 under Claude's explicit composite-evidence ruling.
+- Do not commit while a verification run is active.
+- GREEN implements shared session validation, two 51-candidate source readers,
+  last-returned-key cursor/merge, selected metadata-only context, three exact
+  authorized aggregates, Denver DST week bounds, strict deadlines/cancellation,
+  typed partial/unavailable states and one auditor-only post-read append.
+- Shared =Outreach.SuppressionMatch= preserves the existing =:matching= rule for
+  the bounded Home join. Applicable ids bind freshness and block approval.
+  Edit/retry stay blocked without the C1-03 atomic adapters; capabilities are
+  advisory, source gates remain authoritative.
+- Post-RED regression additions: reviewer released-gen-2 qualification (#152),
+  suppression freshness/capabilities/51-candidate bound, three malformed model/
+  baseline-reference cases (assertion failures reproduced before fixes), SQL
+  synthetic-scope parity including malformed/long/Unicode address edges.
+- Post-RED harness adjustment: CountPoolTest setup retries only DBConnection's
+  exact ={{:shutdown, "owner #PID<...> exited"}, {DBConnection.Holder, :checkout,
+  [pool, opts]}}= teardown shape for <=250ms; it still requires OwnershipError
+  and re-exits the last error if the bound expires. Independent acceptance:
+  Claude =4088ae59/bb76c911=. No application query/retry bound is changed.
+- Focused GREEN evidence: 96/96 Inbox tests, including executed real connection
+  contention/pool cancellation/EXPLAIN bodies. Existing suppression/source
+  checks 14/14 and authentication/session regressions 8/8 passed. Raw logs in
+  the external handoff tmp directory, =codex-c1-02-all-green5.txt= and related
+  =codex-c1-02-*= artifacts. Legacy runner's Elixir-1.20 count parser reports
+  zero; counts above come from raw ExUnit results, not its stale summary.
+- Format, dev/test warnings-as-errors, canonical =mix credo= (ADR-0007, no
+  strict-mode exception) and =mix ash.codegen --check= pass. Non-test build
+  proof: TestFaults absent, valid authenticated session rejects =test_fault=
+  as invalid_input, invalid session forbidden; dedicated test DB sandbox only.
+- Moduledocs and generated migration/snapshots reviewed: only three indexes,
+  no new fields/tables; down drops those indexes only. Diagram generator was
+  evaluated on a scratch copy to preserve curated artifacts; added reviewed
+  public-facade flow =docs/architecture/inbox-runtime.{md,mmd}= and link.
+- Full =mix precommit= and independent exact-head review remain the final
+  gates; use the correlated review packet for their fixed-SHA evidence. No
+  feature/merge completion is claimed by these focused results.
+
+* Known Limitations
+- Reviewer Home withholds gen-2 drafts; draft page unaffected. Existing release
+  metadata policy is preserved; follow-up issue #152. Page is partial and its
+  draft total unavailable, never a reduced ready count or all-clear.
+- Shared dependency gate: =mix hex.audit= confirms Bandit 1.12.5 HIGH advisory
+  =EEF-CVE-2026-105659= / =GHSA-69m6-wcv4-rwcf=. C1 does not change/ignore this
+  dependency. ADR-0008 blocks merge until the separately authorized fix lands.
+
+* Completion Checklist
+- [X] All Phase 4a tests independently verified failing; GREEN confirmed.
+- [X] All reviewed tests pass, including full contention/EXPLAIN bodies.
+- [ ] Source/web regressions and full gate pass at fixed head.
+- [X] Moduledocs, generated artifacts and diagrams reviewed.
+- [ ] Independent code review, exact-head CI and owner merge.
