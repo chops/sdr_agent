@@ -1,13 +1,14 @@
 # C3 readiness packet: lead admission
 
 Status: **entity/action PASS by Codex at 1737063 (round 4); owner gates
-answered 2026-10-14; OQ-2 revision pending Codex's narrow re-review.**
+answered 2026-10-14; OQ-2 revision PASS by Codex at ef74d2a (round 5).**
 C3-01 (#55), Claude author → Codex reviewer; draft PR #141.
 Rounds 1-3 were NEEDS-REVIEW (section 13); implementation obligations are in
 section 15. On 2026-10-14 the owner accepted the ADR-0009 C3 amendment and
 C4's ADR-0005 logging amendment (O4), answered OQ-1..OQ-3 (section 12) and
 approved the scoped C3 G5 including the stricter company-domain suppression
-(O8), on this packet as revised for OQ-2 (section 4.4). Nothing here
+(O8), on this packet as revised for OQ-2 (section 4.4), which Codex passed
+at ef74d2a. Nothing here
 authorizes C3-02 (#56) or C3-03 (#57) code, a migration, a model call or real
 data. Implementation starts only after (1) Codex records an entity-model
 verdict of PASS on sections 3-7, (2) the owner accepts the proposed ADR-0009
@@ -699,8 +700,17 @@ needs no model change (the handover was already same-company only).
     implementation, ADR acceptance, G5, real-data or spend authority.
 - OQ-2 revision (round 5, after the PASS): outcome
   `company_in_relationship`, step 14a, rule 4.4, the LeadAdmission checks and
-  the tests. **Pending Codex's narrow re-review.** OQ-1 and OQ-3 needed no
-  model change.
+  the tests. **PASS by Codex at ef74d2a** (ask
+  m_1792010596945028000_a37fb69c, answer
+  8b8ec999-7fd9-4b2e-b337-f84f83396ab6, 2026-10-14T20:44:29Z; delta
+  131ddc9..ef74d2a, docs only). No must-fix; it also checked that the owner
+  records match the decision log. Tests to carry into C3-02 (already in
+  section 9): `closed_at` plus id ties and legacy null timestamps; a latest
+  other status after an older converted or nurture lead; no contact, run or
+  lead writes on the skip; same-key serialization with admission, reopen
+  and override. The PASS permits C3-02 RED under the scoped G5, not GREEN,
+  merge, private inputs or spend; the server-log prerequisite (O4) stands.
+  OQ-1 and OQ-3 needed no model change.
 - ADR-0009 C3 amendment: **accepted by the owner on 2026-10-14** (about
   14:28 MDT, "yes" to "Accept the ADR-0009 C3 amendment (shared identity
   keys)?"), on the text Codex passed in round 4.
@@ -710,8 +720,8 @@ needs no model change (the handover was already same-company only).
   required before private inputs and the real-data switch.
 - Owner G5 (scoped C3), including the stricter company-domain suppression
   (O8): **approved by the owner on 2026-10-14** (about 14:28 MDT,
-  "approved"), on this packet as revised for OQ-2, subject to Codex's narrow
-  re-review of that revision. It authorizes C3-02 then C3-03 under section
+  "approved"), on this packet as revised for OQ-2, which Codex passed at
+  ef74d2a. It authorizes C3-02 then C3-03 under section
   14; it is not merge, real-data or spend approval.
 - OQ-1..OQ-3: answered 2026-10-14 (section 12).
 - C3-01 verification: docs-only change; no code, migration or test changed.
