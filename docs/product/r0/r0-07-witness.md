@@ -2720,114 +2720,275 @@ outside the test's own private server.
 
 #### 8.14.11 d3d: the `calibrate-recover` test surface (proposed)
 
-**Status:** proposed, for a contract check before d3d RED. It builds on
-8.14.5 and 8.14.7 (entity PASS 125102e) and reuses 8.14.9's patterns:
-closed options, a typed tenant selector, real failures, and fixed console
-wiring.
+**Status:**
+- **Round 1** at 22fd9f9: **NEEDS-REVIEW** (Codex e58461b6, report sha256
+  a33652d3). Q1 and Q2 are answered, below. Four items to pin: target
+  eligibility and a state matrix; the final-replay checks and exceptions;
+  a stage-specific ticket policy; the inline delta table and tests.
+- **Round 2** (this text) takes them. It needs an exact-head recheck
+  before d3d RED.
 
-**Entity Model trigger: yes.** A new orchestration option contract:
-`Calibrate.recover/2`, its options and its wiring. No new resource,
-column or action. It uses the existing `LaunchRecord` recovery,
-`recover_calibration/3`, E1 and E2.
+It builds on 8.14.5 and 8.14.7 (entity PASS 125102e) and reuses 8.14.9's
+patterns.
 
-##### The command
+**Entity Model trigger: yes.** Five things change:
+- a new orchestration entry, `Calibrate.recover/2`;
+- the recovery-time observation;
+- evidence replay;
+- the recovery ticket's lifecycle;
+- one narrow final-release exception.
+
+No new resource, column or action is added.
+
+##### The entry and its wiring
 
 `Calibrate.recover(invocation_id, opts)` returns `{:ok, summary}` or
-`{:stop, reason, summary}`. `summary` has the same shape as `run/2`'s, and
-`reason` is an atom.
+`{:stop, reason, summary}`.
+- `summary` is `run/2`'s, plus `ticket: :none | :ended | :kept |
+  :released`.
+- `reason` is an atom.
 
-**Options**, a closed keyword list:
-- **Required:** `tenant`, `root`, `evidence_dir`, `confirm`, `probe`,
-  `record`, and `stopped` (a boolean, from `--owner-verified-stopped`).
-- **Refused before anything else:** unknown, duplicate, missing or
-  mistyped keys (`:calibration_options_invalid`).
-- **No `hook`, `server` or `isolation`:** recovery makes no model call and
-  starts no server.
+**Its arguments, refused before any read:**
+- **The id:** `invocation_id` is a UUID string, or `nil` only for the
+  nil-target exception below. Anything else is
+  `{:stop, :calibration_options_invalid, %{record: :none, ticket: :none,
+  …}}`, before the tenant read or any filesystem access.
+- **The options** are a closed keyword list, with `run/2`'s value rules:
+  - `tenant`: `:console` or a UUID;
+  - `root` and `evidence_dir`: absolute paths;
+  - `confirm`: a function of arity 1;
+  - `probe`: a module;
+  - `record`: a keyword list;
+  - `stopped`: a boolean.
+- Unknown, duplicate, missing or mistyped options are refused the same
+  way. There is no `hook`, `server` or `isolation`: recovery starts no
+  server and makes no model call.
 
-**Wiring.**
-- `recover_command(argv)` accepts exactly `[id]` or
-  `[id, "--owner-verified-stopped"]`, with `id` a UUID. It returns
-  `{:recover, id, recover_opts(stopped?)}`, otherwise `{:error, :usage}`.
-- `recover_opts/1` carries the same fixed `tenant: :console`, the
-  canonical `root` and `evidence_dir`, `ProcessProbe`, `record: []`, and
-  the flag. Its only environment read is the owner's home.
-- The task (`calibrate-recover`) and `bin/calibration-console
-  calibrate-recover ID [--owner-verified-stopped]` do: the plan;
-  `recover_command/1`; `prepare/1` on the two paths; the app and storage
-  start; `recover/2`.
+**The wiring:**
+- `recover_command(argv)` accepts exactly:
+  - `[id]` → `{:recover, id, recover_opts(false)}`;
+  - `[id, "--owner-verified-stopped"]` → `{:recover, id,
+    recover_opts(true)}`;
+  - `["--release-aborted"]` → `{:recover, nil, recover_opts(false)}`;
+  - anything else (including a non-UUID id) → `{:error, :usage}`.
+- `recover_opts/1` holds the fixed `tenant: :console`, the canonical
+  paths, `ProcessProbe`, `record: []` and the flag. Its only environment
+  read is the owner's home.
+- **The task**, `calibrate-recover`, and `bin/calibration-console
+  calibrate-recover …` do, in order: the plan; `recover_command/1`;
+  `prepare/1` on the two paths; the app start; `recover/2`.
 - Tests assert `recover_command/1` and `recover_opts/1` exactly.
 
-##### The steps (8.14.5, in order)
+##### Before the lock
 
-1. Options, then the tenant.
+1. The id and the options, then the tenant (as `run/2`). Every actor is
+   built from the resolved tenant (`agent_runtime`, and the kernel for
+   reads that need it), never from a row.
 2. **The lock:** `LaunchRecord.recover(root, record_opts)`.
-   - A live owner is `:owner_alive`; an unreadable record is
-     `:owner_unknown`; an existing ticket is `:recovery_in_progress`.
-     All of these stop, with nothing changed.
-   - The handle is ended (`end_recovery/3`) on every stop that leaves the
-     record as found.
-3. **Final records:** `aborted` and `finished` only replay their release
-   under the handle. `recovered` replays only under its own live ticket;
-   another process gets `:calibration_owner_conflict`. A final record is
-   never advanced again.
-4. **The target, by the claim:** exactly one invocation whose original
-   reservation event records this record's `instance_id`
-   (`Gate.recorded_claim/1`), and it must be `invocation_id`.
-   - Zero matches on a `claimed` record: `:calibration_owner_conflict`,
-     record kept, no release (the R0 narrowing).
-   - Several matches, or the wrong one: `:calibration_target_ambiguous`.
-5. **Confirm:** the owner types `RECOVER <invocation_id>`, otherwise
-   `:calibration_not_confirmed`, with the record kept and the handle ended.
-6. **Decide:**
-   - **Unlaunched** (`reserved`, or `failed` with `sent_at` nil, with the
-     record `claimed` or `launch_pending`):
-     `recover_calibration(:unlaunched)` where the row is still `reserved`;
-     then evidence (`launch_failed`, no observation), `finish_calibration`,
-     `advance(:aborted)` under the handle, `release`.
-   - **Sent history** (`sent_at` set, or a `launched` record):
-     - without `stopped: true`: `:owner_verification_required`, record
-       kept;
-     - live work observed first (`LaunchRecord.quiescence/2` on the
-       record): a live root or group member is
-       `:calibration_not_quiescent`, before any event or write. A probe
-       error is `:probe_unavailable`, never absence;
-     - then a fresh typed `STOPPED <invocation_id>`, otherwise
-       `:calibration_not_confirmed`;
-     - then `new_attestation/1`, `recover_calibration({:attested,
-       attestation})` (its event), and `write_attestation/4`;
-     - then the evidence (step 7), `finish_calibration`,
-       `advance(:recovered, %{attestation_id})` and `release`.
-   - **No automatic `{:quiescent, …}` recovery** while
-     `@automated_quiescence` is false (OQ-E3).
-7. **Evidence:**
-   - If the invocation already has a `:calibration` latch, its file at the
-     canonical name is validated and reused unchanged. A missing or
-     changed file under a latch is `:calibration_evidence_conflict`.
-   - **Otherwise** (open question **Q1** below), a sent invocation's
-     document needs a genuine observation (part 2's rule). The proposal:
-     recovery runs the same one bounded `ResultGate.await/3` with the
-     candidate as `calibrate`, after the attestation and outside any lock.
-     It makes no model call.
+   - **Refusals** (nothing is created): `:owner_alive`, `:owner_unknown`
+     (unreadable), `:recovery_in_progress` (any existing ticket),
+     `:probe_unavailable`, `:launch_record_unsafe`. The summary is `record:
+     :none` or `{:kept, state}`, with `ticket: :none`.
+   - **A ticket in place** is never read or adopted as this call's own.
+     That includes the ticket of a `recovered` record whose recoverer died:
+     it is `:recovery_in_progress`, a hard owner conflict.
+   - **Success** gives this call a new, bare ticket: a handle with no
+     attestation.
 
-##### Real failures (no new hooks)
+##### The target (every path, before any effect)
 
-| Case | How |
-|---|---|
-| A live owner | the claim by this VM (`LaunchRecord.claim` with `ProcessProbe`) |
-| A stale owner | a test probe whose owner pid reads absent after the claim, as the 8.14.9 setup tests do |
-| An abandoned ticket | an existing `run.lock/recover` (a prior `recover/2` whose handle was never ended) |
-| A partial removal | the existing `remove:` record seam failing after the record file is removed |
-| A changed latched file | a byte edit of the published file before recovery |
-| Live work | the console-probe phantom-member mode |
+**Candidates** are read in the resolved tenant as `agent_runtime`: the
+`:proof` invocations whose one original reservation event records this
+record's `instance_id` (`Gate.recorded_claim/1`). Exactly one must
+exist, and it must equal `invocation_id`. When the record itself names
+an invocation, it must be that one too. Then the target is validated:
+- its own run is `:proof` with a nil Operation;
+- it is a generation-2 ClaudeCLI row of a real profile;
+- `Gate.recorded_tuple/1` gives a valid tuple.
 
-##### Open questions for the contract check
+**Refusals**, all pre-effect:
+- several candidates, or an id that differs: `:calibration_target_ambiguous`;
+- a target that fails validation: `:calibration_target_invalid`;
+- zero candidates: the rows below.
 
-- **Q1:** does a recovered sent invocation with no latch get the one
-  bounded observation as proposed, or does R0 refuse to publish evidence
-  without a `calibrate`-time observation (a hard owner conflict)?
-- **Q2:** `recover_opts/1` passes no hook. The ordering of "observe, then
-  type `STOPPED`" is tested by asserting the absence of any event and
-  write after a live-work refusal, with no new phase. Is that sufficient?
+##### The state matrix (record state × target × history)
+
+| Record | Target | History | Action |
+|---|---|---|---|
+| `claimed` | none | — | `:calibration_owner_conflict`, kept (the R0 zero-target narrowing; never released) |
+| `claimed` | one | `sent_at` nil | the unlaunched path |
+| `claimed` | one | `sent_at` set | `:calibration_record_inconsistent`, kept: a sent call without `launch_pending` |
+| `launch_pending` | one | `sent_at` nil | the unlaunched path |
+| `launch_pending` | one | `sent_at` set | the attested path |
+| `launched` | one | `sent_at` nil | `:calibration_record_inconsistent`, kept (row 8's hard stop) |
+| `launched` | one | `sent_at` set | the attested path |
+| `aborted` | none, `invocation_id` nil, and `recover(nil, …)` | — | the nil-target release exception |
+| `aborted` | one | — | final replay (below) |
+| `finished` | one | — | final replay (below) |
+| `recovered` | — | — | only reachable under its own live handle, inside the same call; any fresh call stopped already at `:recovery_in_progress` |
+| any other combination | | | `:calibration_record_inconsistent` or `:calibration_target_ambiguous`, kept |
+
+"Kept" pre-effect stops end this call's bare ticket (ticket policy,
+below).
+
+**Confirmation:** every path that changes state or releases first asks
+for `RECOVER <invocation_id>`. The nil-target exception asks for
+`RECOVER ABORTED`. A mismatch is `:calibration_not_confirmed`, a
+pre-effect stop.
+
+**Final replay (`aborted` or `finished` with a target):**
+- **Checks first:** the target checks above, and LaunchRecord's own
+  record and handle checks.
+- **A latched invocation:** the canonical evidence file must exist and
+  validate (`Evidence.validate/3`), with its hash equal to the latch's
+  `evidence_sha256`. A missing or changed file is
+  `:calibration_evidence_conflict`, never recreated, and the record is
+  kept.
+- **A `finished` record** must have its latch; without one,
+  `:calibration_record_inconsistent`.
+- **Then** `LaunchRecord.release(root, record, recovery: handle)`, which
+  re-checks quiescence for `finished`. A final record is never advanced
+  again.
+
+**The nil-target release exception (`aborted`, `invocation_id` nil):**
+such a record proves that a live `calibrate` aborted with its preflight
+result known, before any reservation (rows 2, 4 and 5).
+- `recover(nil, …)` releases it after `RECOVER ABORTED`, with no target,
+  no evidence and no latch. The summary says `invocation_id: nil`.
+- An id is never given authority over such a record, and `recover(nil,
+  …)` against any other record is `:calibration_target_ambiguous`.
+- Zero-target `claimed` records, unreadable remnants, and orphan or
+  repair stay out of the release path.
+
+##### The two paths
+
+**The unlaunched path:**
+1. `recover_calibration(:unlaunched)` while the row is still `reserved`;
+2. evidence (below);
+3. `finish_calibration`;
+4. `advance(:aborted)` under the handle;
+5. `release`.
+
+**The attested path:**
+1. **Without `stopped: true`:** `:owner_verification_required`, a
+   pre-effect stop.
+2. **Live work is observed first.** For a `launched` record,
+   `LaunchRecord.quiescence/2`:
+   - `:not_quiescent` is `:calibration_not_quiescent`;
+   - `{:error, :probe_unavailable}` is `:probe_unavailable`, never
+     absence;
+   - both are pre-effect stops, made before the `STOPPED` prompt and
+     before any event or write.
+   - A `launch_pending` record has no launch fields, so nothing is
+     observable, and the owner's typed `STOPPED` is the only stop proof.
+     No automatic `{:quiescent, …}` recovery while `@automated_quiescence`
+     is false (OQ-E3).
+3. **Then the `STOPPED <invocation_id>` prompt.** A mismatch is
+   `:calibration_not_confirmed`, a pre-effect stop.
+4. **Then, in order:**
+   1. `new_attestation(handle)`;
+   2. `recover_calibration({:attested, attestation})`, which writes the
+      event to the database first;
+   3. `write_attestation/4`, the file;
+   4. evidence;
+   5. `finish_calibration`;
+   6. `advance(:recovered, %{attestation_id})`;
+   7. `release`.
+
+##### Evidence (both paths, in this order)
+
+1. **A latch exists:** the canonical file must exist, validate and match
+   the latch's hash. It is reused unchanged; otherwise
+   `:calibration_evidence_conflict`.
+2. **No latch, but a canonical file exists:** the first file is the
+   frozen observation (E2).
+   - If it validates, it is reused unchanged, and its actual bytes, hash
+     and outcome are reported. `finish_calibration` latches that hash.
+   - If it does not validate: `:calibration_evidence_conflict`. It is
+     never replaced, and a fresh outcome is never reported in its name.
+3. **No latch, no file (Q1):**
+   - **Unlaunched:** the document is built with `gate: nil`
+     (`launch_failed`).
+   - **Sent:** one fresh bounded observation, after the attestation and
+     outside any lock: `ResultGate.await(invocation, %{run_id,
+     operation_id: nil}, methods: [recorded tuple])`.
+     - It uses the receipt's own link and the scoped calibration output
+       read, on freshly re-read committed rows.
+     - There is no gate or finalize decision, no business release, no
+       allowlist write, no new reservation, no grant selection and no
+       refund.
+     - `attestation` is nil: the owner's `STOPPED` is not the CLI's init
+       attestation. So the CLI/model fields stay nil, and Outcome's
+       existing precedence applies, normally `init_drift`. Nothing is
+       copied from the tuple, quiescence or capture.
+     - An `{:error, _}` from the await is `:calibration_observation_failed`,
+       with no file, no latch and no final release.
+
+##### The ticket policy (stage-specific)
+
+**Pre-effect** means after the handle, but before any of these:
+`recover_calibration`, the attestation event or file, `Evidence.publish`,
+`finish_calibration`, `advance`.
+
+- **A pre-effect stop:**
+  - `end_recovery/3` removes this call's own bare ticket, and the summary
+    says `ticket: :ended`.
+  - If ending fails, the summary says `ticket: :kept` with the original
+    reason. Nothing else is removed.
+- **A post-effect stop:**
+  - The ticket is never ended. After an attestation it holds
+    `attestation.json`, which `end_recovery` refuses, and it is never
+    deleted.
+  - The summary says `ticket: :kept`. It carries the latest committed
+    state, and the evidence path and hash once published.
+  - A later recovery meets `:recovery_in_progress`, a hard owner
+    conflict. Crash resume and ticket adoption stay out of R0.
+- **The release:** `LaunchRecord.release` removes the record, then the
+  ticket (`ticket: :released`). A partial removal is
+  `:calibration_owner_conflict`.
+- **Single writer:** the command is the only writer of the record and the
+  ticket. The ticket's own claim and end are its legitimate writes; no
+  other filesystem write happens before the decided path.
+
+##### Entity delta
+
+| Entity / action | New / existing | Delta | Invariants / lifecycle | Actor |
+|---|---|---|---|---|
+| `Calibrate.recover/2` | New entry (seam-only) | The closed id and options; the steps above | Refusals before any read; one command writer | Owner, the tenant's `agent_runtime` |
+| Recovery observation | Existing action (`ResultGate.await/3`), new caller | Only for an unlatched sent target with no file | No model call, no gate decision, no release other than `:calibration`; the CLI init stays nil | The tenant's reconciler, inside the action |
+| Evidence replay | Existing artifact (E2) | A latched or unlatched existing file is reused unchanged | Never replaced; a mismatch is a conflict | Command |
+| Recovery ticket | Existing artifact (LaunchRecord) | The stage-specific end and keep policy | Never adopted, never ended after an attestation, never deleted outside the release | Command |
+| Nil-target `aborted` release | Existing record state, new exception | `recover(nil, …)` with `RECOVER ABORTED` | Only `aborted` with a nil `invocation_id`; no target, evidence or latch | Command |
+
+##### RED (d3d)
+
+- **The cases 8.14.7 already lists.**
+- **Malformed input:** a malformed id, or malformed options, are refused
+  before any read.
+- **The target:**
+  - a foreign-tenant, wrong or ambiguous target;
+  - an operated, non-proof, generation-1 or other-provider target, or one
+    with a bad tuple, refused before any effect.
+- **Inconsistent combinations:** `launched` with `sent_at` nil, and
+  `claimed` with sent history, are kept.
+- **Final replay:**
+  - `finished` and `aborted` with a valid latched file release;
+  - a missing or byte-changed latched file is a conflict, kept;
+  - the nil-target exception releases only via `recover(nil, …)`.
+- **Evidence:** an unlatched valid file is reused unchanged (hash and
+  outcome); an invalid one is a conflict; a fresh observation leaves the
+  CLI fields nil.
+- **Q2 ordering**, through the existing `confirm` and `probe` callbacks:
+  - a live-work refusal records no `STOPPED` prompt;
+  - on the positive path, the probe observation precedes the `STOPPED`
+    prompt;
+  - a decline is a pre-effect stop with no `STOPPED` prompt and the ticket
+    ended.
+- **The ticket:**
+  - a pre-effect stop ends it;
+  - a post-effect stop (an E1 failure after the attestation) keeps it,
+    with the evidence path and hash in the summary;
+  - when the end itself fails, the summary says `ticket: :kept`.
 
 #### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 
