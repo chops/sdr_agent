@@ -16,6 +16,11 @@
 #                                            one attended calibration call of
 #                                            PROFILE, charged to G-R0; asks the
 #                                            owner to type CALIBRATE PROFILE
+#   bin/calibration-console calibrate-recover ID [--owner-verified-stopped]
+#   bin/calibration-console calibrate-recover --release-aborted
+#                                            recovers a stale calibration launch
+#                                            record; asks the owner to type
+#                                            RECOVER ID (and STOPPED ID)
 #
 # It runs the test-seam build (MIX_ENV=test) against exactly one database,
 # the fixed, persistent sdr_agent_calibration on the local devenv Postgres
@@ -42,13 +47,18 @@ db_port=5520
 
 usage() {
   cat >&2 <<'EOF'
-usage: bin/calibration-console check | serve | bootstrap-admin ARGS | calibrate PROFILE
+usage: bin/calibration-console check | serve | bootstrap-admin ARGS | calibrate PROFILE |
+       calibrate-recover ID [--owner-verified-stopped] | calibrate-recover --release-aborted
   check            print the console's plan (database, listener, provider); starts no
                    server and touches no database
   serve            serve sign-in and /admin from sdr_agent_calibration on http://127.0.0.1:4124
   bootstrap-admin  create the first admin there: --email E --display-name N --password-stdin
   calibrate        one attended calibration call of PROFILE (claude_cli_opus or
                    claude_cli_sonnet), charged to G-R0; asks you to type CALIBRATE PROFILE
+  calibrate-recover
+                   recover a stale calibration launch record: the call ID (with
+                   --owner-verified-stopped once you have verified it stopped), or
+                   --release-aborted for an aborted record that never reserved
 Every command, check included, creates the console's own session and token secrets
 on first use in ~/.local/state/sdr-agent/calibration/secrets (0600; never printed).
 EOF
@@ -67,6 +77,7 @@ case "$cmd" in
   check | serve) [ "$#" -eq 0 ] || usage ;;
   bootstrap-admin) ;;
   calibrate) [ "$#" -eq 1 ] || usage ;;
+  calibrate-recover) [ "$#" -eq 1 ] || [ "$#" -eq 2 ] || usage ;;
   -h | --help) usage ;;
   *)
     echo "bin/calibration-console: unknown command: $cmd" >&2
@@ -141,5 +152,8 @@ case "$cmd" in
     ;;
   calibrate)
     exec mix sdr.calibration.console calibrate "$@"
+    ;;
+  calibrate-recover)
+    exec mix sdr.calibration.console calibrate-recover "$@"
     ;;
 esac

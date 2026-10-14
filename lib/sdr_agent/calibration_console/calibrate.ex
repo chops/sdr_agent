@@ -45,6 +45,43 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     console_opts(profile_id)}`; `console_opts/1` holds the console's fixed
     options (no hook, no server, isolation or record override).
 
+    ## Recovery
+
+    `recover/2` (d3d, packet 8.14.11; contract PASS at 5153ad3) recovers a
+    stale launch record for `invocation_id` (a UUID, or nil only for an
+    `aborted` record that never reserved) and returns `{:ok, summary}` or
+    `{:stop, reason, summary}`, `summary` being `run/2`'s plus `ticket:
+    :none | :ended | :kept | :released`. In order:
+
+      1. the closed options (`run/2`'s value rules plus a boolean `stopped`;
+         no hook, server or isolation: recovery makes no call) and the id,
+         then the tenant, all before any filesystem access;
+      2. the lock (`LaunchRecord.recover/2`): a refusal creates nothing, and
+         an existing ticket is never adopted (`:recovery_in_progress`);
+      3. the target, before any effect: the tenant's ClaudeCLI invocations
+         whose one original reservation event records this record's claim
+         must be exactly the one requested (and the one the record names),
+         and it must be a generation-2 row of a real profile, bound to its
+         recorded tuple, under a `:proof` run with no Operation;
+      4. the state matrix: the unlaunched path (`RECOVER <id>`, unlaunched
+         recovery of a reserved row, evidence, latch, `aborted`, release);
+         the attested path (`stopped: true`, live work observed before the
+         `STOPPED <id>` prompt, then the attestation event, its file in the
+         ticket, evidence, latch, `recovered`, release); the final replay of
+         an `aborted` or `finished` record whose target history and latched
+         file are exactly what it attests; and the nil-target release of an
+         `aborted` record with no candidate (`RECOVER ABORTED`).
+
+    Evidence is a latch's own file, else an existing unlatched file (the
+    frozen observation), each reused unchanged and never replaced; only
+    with neither is a document built: `gate: nil` when unlaunched, or one
+    bounded `ResultGate.await/3` with the recorded tuple, outside any lock,
+    whose CLI init attestation stays nil. A stop before any effect ends this
+    call's own bare ticket (`:ended`, or `:kept` when ending fails); after
+    an effect the ticket is never ended (`:kept`). `recover_command/1` and
+    `recover_opts/1` are the `calibrate-recover` subcommand's argv and fixed
+    options.
+
     ## The document
 
     `document/1` is pure. It takes the snapshots the command gathered outside
@@ -908,6 +945,478 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
           kept(failure, s)
       end
     end
+
+    ## Recovery (d3d, packet 8.14.11)
+
+    @doc "The `calibrate-recover` argv: `{:recover, id | nil, recover_opts(stopped)}` or `{:error, :usage}`."
+    def recover_command(["--release-aborted"]), do: {:recover, nil, recover_opts(false)}
+
+    def recover_command([id]) do
+      if uuid?(id), do: {:recover, id, recover_opts(false)}, else: {:error, :usage}
+    end
+
+    def recover_command([id, "--owner-verified-stopped"]) do
+      if uuid?(id), do: {:recover, id, recover_opts(true)}, else: {:error, :usage}
+    end
+
+    def recover_command(_argv), do: {:error, :usage}
+
+    @doc "The console's fixed recovery options; `stopped` is the owner's `--owner-verified-stopped`."
+    def recover_opts(stopped) when is_boolean(stopped) do
+      state = Path.join(System.user_home!(), ".local/state/sdr-agent/calibration")
+
+      [
+        tenant: :console,
+        root: state,
+        evidence_dir: Path.join(state, "evidence"),
+        confirm: &read_confirmation/1,
+        probe: ProcessProbe,
+        record: [],
+        stopped: stopped
+      ]
+    end
+
+    @doc "Recovers the console's stale launch record for `invocation_id` (see the moduledoc)."
+    def recover(invocation_id, opts) do
+      with {:ok, options} <- recover_options(invocation_id, opts),
+           {:ok, tenant_id} <- untracked(tenant(options.tenant)),
+           r = recover_initial(invocation_id, options, tenant_id),
+           {:ok, handle} <- lock(r) do
+        r = %{r | handle: handle, record: handle.record}
+
+        case target(r) do
+          {:ok, r} -> decide(r)
+          {:error, reason} -> pre_effect(reason, r)
+        end
+      end
+    end
+
+    @recover_required [:tenant, :root, :evidence_dir, :confirm, :probe, :record, :stopped]
+
+    defp recover_options(invocation_id, opts) do
+      with true <- is_nil(invocation_id) or uuid?(invocation_id),
+           true <- Keyword.keyword?(opts),
+           keys = Keyword.keys(opts),
+           true <- Enum.sort(keys) == Enum.sort(@recover_required),
+           options = Map.new(opts),
+           true <- valid_recover_options?(options) do
+        {:ok, options}
+      else
+        _invalid -> {:stop, :calibration_options_invalid, recover_summary(:none, :none)}
+      end
+    end
+
+    defp valid_recover_options?(o) do
+      Enum.all?([
+        o.tenant == :console or uuid?(o.tenant),
+        absolute?(o.root) and absolute?(o.evidence_dir),
+        is_function(o.confirm, 1),
+        module?(o.probe),
+        Keyword.keyword?(o.record),
+        is_boolean(o.stopped)
+      ])
+    end
+
+    defp untracked({:stop, reason, summary}),
+      do: {:stop, reason, Map.put(summary, :ticket, :none)}
+
+    defp untracked(ok), do: ok
+
+    defp recover_initial(invocation_id, options, tenant_id) do
+      %{
+        id: invocation_id,
+        options: options,
+        tenant_id: tenant_id,
+        agent: Actor.system(:agent_runtime, tenant_id),
+        record_opts: [probe: options.probe] ++ options.record,
+        handle: nil,
+        record: nil,
+        profile: nil,
+        run: nil,
+        invocation: nil,
+        attestation: nil,
+        outcome: nil,
+        evidence: nil
+      }
+    end
+
+    # A refusal creates nothing: no ticket, the record as it was.
+    defp lock(r) do
+      case LaunchRecord.recover(r.options.root, r.record_opts) do
+        {:ok, handle} ->
+          {:ok, handle}
+
+        {:error, reason} ->
+          record =
+            case LaunchRecord.read(r.options.root, r.record_opts) do
+              {:ok, %{state: state}} -> {:kept, state}
+              _none_or_unsafe -> :none
+            end
+
+          {:stop, reason, recover_summary(record, :none)}
+      end
+    end
+
+    ## The target (before any effect)
+
+    defp target(%{id: nil, record: %{state: "aborted", invocation_id: nil}} = r) do
+      case candidates(r) do
+        {:ok, []} -> {:ok, r}
+        _bound_or_unreadable -> {:error, :calibration_target_ambiguous}
+      end
+    end
+
+    defp target(%{id: nil}), do: {:error, :calibration_target_ambiguous}
+
+    defp target(r) do
+      with {:ok, candidates} <- candidates(r),
+           {:ok, invocation} <- one(candidates, r),
+           {:ok, run} <- eligible(invocation, r) do
+        {:ok, %{r | invocation: invocation, run: run, profile: invocation.profile_id}}
+      end
+    end
+
+    # The tenant's ClaudeCLI invocations whose one original reservation
+    # event records this record's claim. A requested row whose provenance
+    # is missing or malformed can never be shown to be the claim's target.
+    defp candidates(r) do
+      case ModelInvocation
+           |> Ash.Query.for_read(:read, %{}, actor: r.agent)
+           |> Ash.Query.filter(tenant_id == ^r.tenant_id and provider == :claude_cli)
+           |> Ash.read() do
+        {:ok, invocations} -> claimed(invocations, r)
+        {:error, _unreadable} -> {:error, :calibration_target_invalid}
+      end
+    end
+
+    defp claimed(invocations, r) do
+      instance_id = r.record.instance_id
+
+      Enum.reduce_while(invocations, {:ok, []}, fn invocation, {:ok, acc} ->
+        case Gate.recorded_claim(invocation) do
+          {:ok, %{instance_id: ^instance_id}} ->
+            {:cont, {:ok, [invocation | acc]}}
+
+          {:error, _malformed} when invocation.id == r.id ->
+            {:halt, {:error, :calibration_target_invalid}}
+
+          _other_claim ->
+            {:cont, {:ok, acc}}
+        end
+      end)
+    end
+
+    defp one([], %{record: %{state: "claimed"}}), do: {:error, :calibration_owner_conflict}
+
+    defp one([%ModelInvocation{id: id} = invocation], %{id: id, record: record})
+         when record.invocation_id in [nil, id],
+         do: {:ok, invocation}
+
+    defp one(_candidates, _r), do: {:error, :calibration_target_ambiguous}
+
+    # Its own run is `:proof` with no Operation; it is a generation-2
+    # ClaudeCLI row of a real profile bound to its recorded tuple.
+    defp eligible(invocation, r) do
+      with {:ok, run} <- Agents.get_run(invocation.agent_run_id, actor: r.agent),
+           true <- run.usage_origin == :proof and is_nil(run.operation_id),
+           true <- invocation.ledger_generation == 2 and invocation.provider == :claude_cli,
+           true <- ModelProfiles.real?(invocation.profile_id),
+           {:ok, %{} = tuple} <- Gate.recorded_tuple(invocation),
+           true <- bound?(tuple, invocation) do
+        {:ok, run}
+      else
+        _ineligible -> {:error, :calibration_target_invalid}
+      end
+    end
+
+    defp bound?(tuple, invocation),
+      do:
+        tuple.provider == :claude_cli and tuple.profile_id == invocation.profile_id and
+          tuple.model_id == invocation.model_id and
+          tuple.cli_version == invocation.provider_version
+
+    ## The state matrix
+
+    defp decide(%{invocation: nil} = r), do: release_aborted(r)
+
+    # The unlaunched path takes only a reserved row, or a failed one that
+    # was never sent; any other unsent status is inconsistent.
+    defp decide(%{record: %{state: state}, invocation: invocation} = r) do
+      sent? = not is_nil(invocation.sent_at)
+      unlaunched? = not sent? and invocation.status in [:reserved, :failed]
+
+      case {state, sent?} do
+        {pre, false} when pre in ["claimed", "launch_pending"] and unlaunched? ->
+          unlaunched_recovery(r)
+
+        {"launch_pending", true} ->
+          attested(r)
+
+        {"launched", true} ->
+          attested(r)
+
+        {final, _sent?} when final in ["aborted", "finished"] ->
+          replay(r)
+
+        _inconsistent ->
+          pre_effect(:calibration_record_inconsistent, r)
+      end
+    end
+
+    defp recover_confirmed(r, typed) do
+      prompt = "Recovery of the calibration launch record. Type #{typed} to proceed: "
+      String.trim(r.options.confirm.(prompt)) == typed
+    end
+
+    # The nil-target exception: an aborted record that never reserved.
+    defp release_aborted(r) do
+      if recover_confirmed(r, "RECOVER ABORTED"),
+        do: recovery_release(r),
+        else: pre_effect(:calibration_not_confirmed, r)
+    end
+
+    ## The unlaunched path
+
+    defp unlaunched_recovery(r) do
+      if recover_confirmed(r, "RECOVER #{r.id}") do
+        case recovered(r) do
+          {:ok, invocation} -> evidence(%{r | invocation: invocation}, :unlaunched)
+          {:error, failure} -> post_effect(failure, r)
+        end
+      else
+        pre_effect(:calibration_not_confirmed, r)
+      end
+    end
+
+    ## The attested path
+
+    defp attested(%{options: %{stopped: false}} = r),
+      do: pre_effect(:owner_verification_required, r)
+
+    defp attested(r) do
+      with true <- recover_confirmed(r, "RECOVER #{r.id}") || :not_confirmed,
+           :ok <- stopped(r),
+           true <- recover_confirmed(r, "STOPPED #{r.id}") || :not_confirmed,
+           {:ok, attestation} <- LaunchRecord.new_attestation(r.handle) do
+        attest(r, attestation)
+      else
+        :not_confirmed -> pre_effect(:calibration_not_confirmed, r)
+        {:error, reason} -> pre_effect(reason, r)
+      end
+    end
+
+    # Live work is observed before the STOPPED prompt; a launch_pending
+    # record has nothing observable and only the owner's STOPPED proves the
+    # stop (no automatic quiescence while OQ-E3 is open).
+    defp stopped(%{record: %{state: "launch_pending"}}), do: :ok
+
+    defp stopped(r) do
+      case LaunchRecord.quiescence(r.record, r.record_opts) do
+        :quiescent -> :ok
+        :not_quiescent -> {:error, :calibration_not_quiescent}
+        {:error, :probe_unavailable} -> {:error, :probe_unavailable}
+        _other -> {:error, :owner_verification_required}
+      end
+    end
+
+    # The event first, then the ticket's file; from here every stop keeps
+    # the ticket.
+    defp attest(r, attestation) do
+      with {:ok, %{invocation: invocation}} <-
+             ok_or(
+               Agents.recover_calibration(r.invocation, {:attested, attestation}, actor: r.agent),
+               :calibration_recovery_failed
+             ),
+           {:ok, _written} <-
+             LaunchRecord.write_attestation(r.options.root, r.handle, attestation, r.record_opts) do
+        evidence(%{r | invocation: invocation, attestation: attestation}, :sent)
+      else
+        {:error, failure} -> post_effect(failure, r)
+      end
+    end
+
+    ## Final replay
+
+    defp replay(r) do
+      with :ok <- attests(r.record.state, r.invocation),
+           {:ok, %{} = latch} <- latch_of(r),
+           {:ok, evidence} <- latched_file(r, latch),
+           true <- recover_confirmed(r, "RECOVER #{r.id}") || {:error, :calibration_not_confirmed} do
+        recovery_release(%{r | evidence: evidence})
+      else
+        {:ok, nil} -> pre_effect(:calibration_record_inconsistent, r)
+        {:error, reason} -> pre_effect(reason, r)
+      end
+    end
+
+    defp attests("aborted", %{status: :failed, sent_at: nil}), do: :ok
+
+    defp attests("finished", %{status: status, sent_at: sent_at})
+         when status in [:completed, :failed, :unknown] and not is_nil(sent_at),
+         do: :ok
+
+    defp attests(_state, _invocation), do: {:error, :calibration_record_inconsistent}
+
+    ## Evidence, the latch, the final record and the release
+
+    defp evidence(r, kind) do
+      with {:ok, invocation} <- calibration_read(r),
+           r = %{r | invocation: invocation},
+           {:ok, latch} <- latch_of(r),
+           {:ok, evidence} <- recovery_evidence(r, kind, latch) do
+        r = %{r | evidence: Map.take(evidence, [:path, :sha256]), outcome: evidence.outcome}
+        if latch, do: recovery_final(r, kind), else: recovery_latch(r, kind)
+      else
+        {:error, failure} -> post_effect(failure, r)
+      end
+    end
+
+    # A latch's own file, reused unchanged; otherwise an unlatched existing
+    # file (the frozen observation); otherwise a fresh document.
+    defp recovery_evidence(r, _kind, latch) when not is_nil(latch), do: latched_file(r, latch)
+
+    defp recovery_evidence(r, kind, nil) do
+      path = evidence_path(r)
+
+      if match?({:ok, _}, File.lstat(path)),
+        do: existing_file(r, path),
+        else: fresh_evidence(r, kind)
+    end
+
+    defp latched_file(r, latch) do
+      with {:ok, evidence} <- existing_file(r, evidence_path(r)),
+           true <- evidence.sha256 == latch.evidence_sha256 do
+        {:ok, evidence}
+      else
+        _changed_or_missing -> {:error, :calibration_evidence_conflict}
+      end
+    end
+
+    defp existing_file(r, path) do
+      case Evidence.validate(path, evidence_target(r), actor: r.agent) do
+        {:ok, %{bytes: bytes} = evidence} ->
+          {:ok, Map.put(evidence, :outcome, Jason.decode!(bytes)["outcome"])}
+
+        {:error, _invalid} ->
+          {:error, :calibration_evidence_conflict}
+      end
+    end
+
+    defp fresh_evidence(r, :unlaunched), do: publish(r, nil, nil)
+
+    # One bounded observation of the sent call, outside any lock, on the
+    # freshly re-read row: the receipt's own link, no CLI init attestation.
+    defp fresh_evidence(r, :sent) do
+      with {:ok, tuple} <- tuple(r.invocation),
+           {kind, receipt} = observation when kind in [:ok, :timeout] <-
+             ResultGate.await(r.invocation, %{run_id: r.run.id, operation_id: nil},
+               methods: [tuple]
+             ),
+           {:ok, invocation} <- calibration_read(r),
+           {:ok, link} <- own_link_read(receipt, invocation) do
+        publish(%{r | invocation: invocation}, observation, link)
+      else
+        {:error, :calibration_tuple_unrecorded} = error -> error
+        {:error, :calibration_invocation_unreadable} = error -> error
+        {:error, :calibration_link_unreadable} = error -> error
+        _failed -> {:error, :calibration_observation_failed}
+      end
+    end
+
+    defp publish(r, observation, link) do
+      with {:ok, run} <-
+             ok_or(Agents.get_run(r.run.id, actor: r.agent), :calibration_run_unreadable),
+           {:ok, tuple} <- tuple(r.invocation),
+           {:ok, document} <-
+             document(%{
+               invocation: r.invocation,
+               run: run,
+               tuple: tuple,
+               gate: observation,
+               link: link,
+               attestation: nil,
+               output: if(observation, do: r.invocation.parsed_output),
+               observed_at: Clock.utc_now()
+             }),
+           {:ok, evidence} <- Evidence.publish(r.options.evidence_dir, document, actor: r.agent) do
+        {:ok, Map.put(evidence, :outcome, document.outcome)}
+      end
+    end
+
+    defp recovery_latch(r, kind) do
+      case Agents.finish_calibration(r.invocation, %{sha256: r.evidence.sha256}, actor: r.agent) do
+        {:ok, _latched} -> recovery_final(r, kind)
+        _failed -> post_effect(:calibration_finish_failed, r)
+      end
+    end
+
+    defp recovery_final(r, :unlaunched), do: recovery_advance(r, :aborted, %{})
+
+    defp recovery_final(r, :sent),
+      do: recovery_advance(r, :recovered, %{attestation_id: r.attestation.attestation_id})
+
+    defp recovery_advance(r, state, attrs) do
+      case LaunchRecord.advance(r.options.root, r.record, state, attrs, recovery_opts(r)) do
+        {:ok, record} -> recovery_release(%{r | record: record})
+        {:error, failure} -> post_effect(failure, r)
+      end
+    end
+
+    defp recovery_release(r) do
+      case LaunchRecord.release(r.options.root, r.record, recovery_opts(r)) do
+        :ok -> {:ok, recover_summary(:released, r, :released)}
+        {:error, failure} -> post_effect(failure, r)
+      end
+    end
+
+    defp recovery_opts(r), do: r.record_opts ++ [recovery: r.handle]
+
+    defp latch_of(r) do
+      case Agents.get_result_release(r.invocation.id, actor: r.agent) do
+        {:ok, %{disposition: :calibration} = latch} -> {:ok, latch}
+        {:ok, _none_or_other} -> {:ok, nil}
+        {:error, _unreadable} -> {:error, :calibration_release_unreadable}
+      end
+    end
+
+    defp evidence_path(r),
+      do:
+        Path.join(
+          r.options.evidence_dir,
+          Evidence.file_name(r.invocation.profile_id, r.invocation.id)
+        )
+
+    defp evidence_target(r),
+      do: %{
+        invocation_id: r.invocation.id,
+        run_id: r.invocation.agent_run_id,
+        tenant_id: r.invocation.tenant_id,
+        profile_id: to_string(r.invocation.profile_id)
+      }
+
+    ## Recovery stops
+
+    # Before any effect: this call's own bare ticket is ended; a failed end
+    # keeps it, with the original reason.
+    defp pre_effect(reason, r) do
+      ticket =
+        case LaunchRecord.end_recovery(r.options.root, r.handle, r.record_opts) do
+          :ok -> :ended
+          {:error, _kept} -> :kept
+        end
+
+      {:stop, reason, recover_summary({:kept, current_state(r)}, r, ticket)}
+    end
+
+    # After an effect the ticket is never ended.
+    defp post_effect(reason, r),
+      do: {:stop, reason, recover_summary({:kept, current_state(r)}, r, :kept)}
+
+    defp recover_summary(record, ticket),
+      do: Map.put(summary(record), :ticket, ticket)
+
+    defp recover_summary(record, r, ticket),
+      do: Map.put(summary(record, r), :ticket, ticket)
 
     ## Stops, teardown and summaries
 

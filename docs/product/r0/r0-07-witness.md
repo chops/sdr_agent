@@ -2763,6 +2763,22 @@ outside the test's own private server.
   - The disclosed I/O and task-order inspection limits stay as stated.
   - A failed bare-ticket end reports `kept`, and a post-effect stop keeps
     its latest committed and evidence details.
+- **RED** at 4910dd9: **NEEDS-REVIEW** (Codex 4540c3d2, report sha256
+  a1e13f30). It asked for real latched fixtures, a genuine observation
+  proof, and the eligibility, ownership and ticket negatives.
+- **RED revision** at 0338680: **PASS / VERIFIED RED** (Codex 7ccf50f7,
+  in_reply_to m_1791942734632030000_05985da6, report
+  `~/.local/state/sdr-agent/handoff-20261008/tmp/codex-d3d-red-0338680-verified.md`,
+  sha256 2d5837ba). All 44 tests fail only at the missing API. Two notes
+  are applied in GREEN's tests:
+  - the frozen-timeout prerequisite now sits above the guard;
+  - the still-sent fixture stops exactly its two recorded stand-in CLI
+    pids, and awaits their exit (bounded), before any `STOPPED`. Nothing
+    wider is cleaned up.
+  This is not code, integrated, merge or spend approval.
+- **GREEN** (proposed): `recover/2`, `recover_command/1`, `recover_opts/1`,
+  the `calibrate-recover` task and bin subcommand. It is up for code
+  review.
 
 It builds on 8.14.5 and 8.14.7 (entity PASS 125102e) and reuses 8.14.9's
 patterns.

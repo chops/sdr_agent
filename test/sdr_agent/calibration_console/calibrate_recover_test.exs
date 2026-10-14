@@ -600,12 +600,11 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       %{invocation_id: id} = product!(ctx, :launched_file_unlatched)
       [file] = File.ls!(ctx.evidence)
       bytes = File.read!(Path.join(ctx.evidence, file))
-      recover_defined!()
-
       frozen = Jason.decode!(bytes)["outcome"]
       # The frozen observation (calibrate's own, a timeout with a valid
       # init) differs from what a fresh recovery would compute (init_drift).
       assert frozen == "timeout"
+      recover_defined!()
 
       assert {:ok, summary} = recover(ctx, id, stopped: true)
       assert File.read!(Path.join(ctx.evidence, file)) == bytes
@@ -734,13 +733,22 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
   defp product!(ctx, :still_sent, _opts) do
     test = self()
     LaunchProbe.put(:identity_absent)
-    opts = put_in(product_opts(ctx, :pending_sent)[:server][:command], shell_cli!(ctx, 30))
+    pids = Path.join(ctx.tmp, "slow-cli-pids")
+    opts = put_in(product_opts(ctx, :pending_sent)[:server][:command], slow_cli!(ctx, pids))
     command = spawn(fn -> send(test, {:still_sent, Calibrate.run(@profile, opts)}) end)
+    on_exit(fn -> kill_exact(pids, "-KILL") end)
 
     assert eventually(fn -> match?([%{status: :sent}], calibration_invocations(ctx)) end, 15_000)
+    # The stand-in CLI is waiting on its own sleep: both are recorded.
+    assert eventually(fn -> length(recorded_pids(pids)) == 2 end, 15_000)
     servers = command |> linked() |> Enum.filter(&claude_cli?/1)
     Process.exit(command, :kill)
     Enum.each(servers, &Process.exit(&1, :kill))
+
+    # Only the exact recorded children are stopped, and actually gone
+    # before any STOPPED is typed.
+    kill_exact(pids, "-TERM")
+    assert eventually(fn -> Enum.all?(recorded_pids(pids), &(not os_alive?(&1))) end, 5_000)
     RecoverProbe.owner_gone()
 
     [%{id: id}] = calibration_invocations(ctx)
@@ -1320,8 +1328,8 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     Process.put(:recover_triggers, [])
   end
 
-  defp shell_cli!(ctx, delay \\ 1) do
-    path = Path.join(ctx.tmp, "cli-#{delay}")
+  defp shell_cli!(ctx) do
+    path = Path.join(ctx.tmp, "cli")
 
     init =
       ~s({"type":"system","subtype":"init","model":"claude-opus-5-5","claude_code_version":"2.1.294","tools":[],"mcp_servers":[],"slash_commands":[]})
@@ -1333,7 +1341,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     #!/bin/sh
     echo run >> '#{ctx.ran}'
     cat > /dev/null
-    sleep #{delay}
+    sleep 1
     printf '%s\\n' '#{init}'
     printf '%s\\n' '#{result}'
     """)
@@ -1341,6 +1349,41 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     File.chmod!(path, 0o555)
     path
   end
+
+  # A stand-in CLI that stays mid-call, recording its own pid and its
+  # sleep's, so a fixture can stop exactly those two.
+  defp slow_cli!(ctx, pids) do
+    path = Path.join(ctx.tmp, "slow-cli")
+
+    File.write!(path, """
+    #!/bin/sh
+    echo $$ >> '#{pids}'
+    cat > /dev/null
+    sleep 30 &
+    echo $! >> '#{pids}'
+    wait $!
+    """)
+
+    File.chmod!(path, 0o555)
+    path
+  end
+
+  defp recorded_pids(file) do
+    case File.read(file) do
+      {:ok, text} -> String.split(text, "\n", trim: true)
+      {:error, :enoent} -> []
+    end
+  end
+
+  defp kill_exact(file, signal) do
+    for pid <- recorded_pids(file),
+        os_alive?(pid),
+        do: System.cmd("kill", [signal, pid], stderr_to_stdout: true)
+
+    :ok
+  end
+
+  defp os_alive?(pid), do: match?({_, 0}, System.cmd("kill", ["-0", pid], stderr_to_stdout: true))
 
   defp private_dir!(parent, name) do
     path = Path.join(parent, name)

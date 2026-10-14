@@ -41,6 +41,16 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
       and its own private ClaudeCLI server, and asks the owner to type
       `CALIBRATE PROFILE`. It prints only the stop or outcome, the record
       state and the evidence file's path and hash.
+    * `calibrate-recover ID [--owner-verified-stopped]` and
+      `calibrate-recover --release-aborted` — recovery of a stale launch
+      record (R0-07 d3d, packet 8.14.11): exactly `{:recover, id, o} =
+      Calibrate.recover_command(argv)`, then `Calibrate.prepare/1` of the
+      two canonical paths, the storage, the app start and
+      `Calibrate.recover(id, o)` with the fixed `recover_opts/1`. The
+      endpoint does not listen, and no model server or authority starts. It
+      asks the owner to type `RECOVER ID` (and `STOPPED ID` for sent
+      history) and prints only the stop or result, the record and ticket
+      state and the evidence file's path and hash.
   """
   use Mix.Task
 
@@ -114,10 +124,33 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
     end
   end
 
+  def run(["calibrate-recover" | argv]) do
+    plan = plan!()
+
+    Code.ensure_loaded?(@calibrate) ||
+      Mix.raise("mix sdr.calibration.console calibrate-recover refuses: not a test-seam build")
+
+    case apply(@calibrate, :recover_command, [argv]) do
+      {:recover, invocation_id, opts} ->
+        prepare!(opts)
+        CalibrationConsole.apply!(plan, serve: false)
+        CalibrationConsole.ensure_storage!()
+        Mix.Task.run("app.start")
+        CalibrationConsole.verify_started!()
+        recovery_report(apply(@calibrate, :recover, [invocation_id, opts]))
+
+      {:error, :usage} ->
+        Mix.raise(
+          "usage: mix sdr.calibration.console calibrate-recover ID [--owner-verified-stopped] | " <>
+            "calibrate-recover --release-aborted"
+        )
+    end
+  end
+
   def run(_args) do
     Mix.raise(
       "usage: mix sdr.calibration.console check | serve | bootstrap-admin ARGS | calibrate PROFILE " <>
-        "(run it through bin/calibration-console)"
+        "| calibrate-recover ARGS (run it through bin/calibration-console)"
     )
   end
 
@@ -135,6 +168,18 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
 
   defp report({:stop, reason, summary}),
     do: Mix.raise("calibrate stopped: #{reason}; " <> details(summary))
+
+  defp recovery_report({:ok, summary}),
+    do:
+      Mix.shell().info(
+        "calibrate-recover: released, ticket #{summary.ticket}; " <> details(summary)
+      )
+
+  defp recovery_report({:stop, reason, summary}),
+    do:
+      Mix.raise(
+        "calibrate-recover stopped: #{reason}; ticket #{summary.ticket}, " <> details(summary)
+      )
 
   defp details(summary) do
     evidence =
