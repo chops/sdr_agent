@@ -2776,9 +2776,21 @@ outside the test's own private server.
     pids, and awaits their exit (bounded), before any `STOPPED`. Nothing
     wider is cleaned up.
   This is not code, integrated, merge or spend approval.
-- **GREEN** (proposed): `recover/2`, `recover_command/1`, `recover_opts/1`,
-  the `calibrate-recover` task and bin subcommand. It is up for code
-  review.
+- **GREEN** at 30488459: **CHANGES REQUESTED** (Codex bd17bc34, report
+  sha256 90a04c7a). Three must-fixes, each now fixed with a regression
+  test written first:
+  - **MF1:** candidates are discovered from every invocation of the
+    tenant, with no provider or eligibility filter. A row whose claim
+    binding cannot be read is `:calibration_target_invalid` when it is the
+    requested row, and otherwise `:calibration_target_ambiguous`. It is
+    never treated as absence, so a nil-target release requires an actual
+    zero. The strict `Gate.recorded_claim/1` reader is unchanged and no
+    new read is added.
+  - **MF2:** a replayed artifact reports its own outcome, and only its path
+    and hash.
+  - **MF3:** the fixture signals only children whose recorded start
+    identity (`ProcessProbe`) is unchanged.
+- **GREEN revision** (proposed): up for re-review.
 
 It builds on 8.14.5 and 8.14.7 (entity PASS 125102e) and reuses 8.14.9's
 patterns.

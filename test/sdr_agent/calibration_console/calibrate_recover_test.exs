@@ -509,10 +509,17 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
   describe "final replay" do
     test "finished with a sent, latched target and its file: released", ctx do
       %{invocation_id: id} = product!(ctx, :finished_kept)
+      [file] = File.ls!(ctx.evidence)
+      path = Path.join(ctx.evidence, file)
+      bytes = File.read!(path)
       recover_defined!()
 
-      assert {:ok, %{record: :released, ticket: :released}} = recover(ctx, id)
+      assert {:ok, %{record: :released, ticket: :released} = summary} = recover(ctx, id)
       refute File.exists?(lock(ctx))
+      # Codex bd17bc34 MF2: the frozen file's own outcome; path and hash only.
+      assert summary.outcome == Jason.decode!(bytes)["outcome"]
+      assert summary.evidence == %{path: path, sha256: sha(bytes)}
+      assert File.read!(path) == bytes
     end
 
     test "finished with a changed or missing latched file is a conflict, kept", ctx do
@@ -534,9 +541,15 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
     test "aborted with a failed, never-sent, latched target: released", ctx do
       %{invocation_id: id} = product!(ctx, :aborted_latched)
+      [file] = File.ls!(ctx.evidence)
+      path = Path.join(ctx.evidence, file)
+      bytes = File.read!(path)
       recover_defined!()
 
-      assert {:ok, %{record: :released}} = recover(ctx, id)
+      assert {:ok, %{record: :released} = summary} = recover(ctx, id)
+
+      assert {summary.outcome, summary.evidence} ==
+               {"launch_failed", %{path: path, sha256: sha(bytes)}}
     end
 
     for variant <- [
@@ -582,6 +595,32 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       # Its actual target is failed, never sent and latched with a valid
       # file: it replays by its id.
       assert {:ok, %{record: :released, invocation_id: ^id}} = recover(ctx, id)
+    end
+
+    # Codex bd17bc34 MF1: neither stored ineligibility nor a refused decode
+    # of a bound row's provenance is proof that nothing was bound.
+    test "a bound row hidden by its provider is never absence for recover(nil)", ctx do
+      %{invocation_id: id} = craft!(ctx, :aborted_nil_bound)
+      tamper!("UPDATE model_invocations SET provider = 'fake' WHERE id = $1", [uuid(id)])
+      assert {:ok, %{instance_id: _}} = Gate.recorded_claim(invocation!(id))
+      recover_defined!()
+
+      assert {:stop, :calibration_target_ambiguous, %{record: {:kept, "aborted"}}} =
+               recover(ctx, nil, answers: %{recover: "RECOVER ABORTED"})
+
+      assert record_state(ctx) == "aborted"
+    end
+
+    test "a bound row with malformed provenance is never absence for recover(nil)", ctx do
+      %{invocation_id: id} = craft!(ctx, :aborted_nil_bound)
+      ineligible!(ctx, id, :malformed_tuple)
+      assert {:error, :claim_unrecorded} = Gate.recorded_claim(invocation!(id))
+      recover_defined!()
+
+      assert {:stop, :calibration_target_ambiguous, %{record: {:kept, "aborted"}}} =
+               recover(ctx, nil, answers: %{recover: "RECOVER ABORTED"})
+
+      assert record_state(ctx) == "aborted"
     end
 
     test "recover(nil) against any other record is ambiguous", ctx do
@@ -734,21 +773,26 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     test = self()
     LaunchProbe.put(:identity_absent)
     pids = Path.join(ctx.tmp, "slow-cli-pids")
+    children = start_supervised!({Agent, fn -> %{} end}, id: :slow_cli_children)
     opts = put_in(product_opts(ctx, :pending_sent)[:server][:command], slow_cli!(ctx, pids))
+    # Registered before any work; it signals only children whose recorded
+    # start identity is still theirs.
+    on_exit(fn -> signal_exact(identities_of(children), "-KILL") end)
     command = spawn(fn -> send(test, {:still_sent, Calibrate.run(@profile, opts)}) end)
-    on_exit(fn -> kill_exact(pids, "-KILL") end)
 
     assert eventually(fn -> match?([%{status: :sent}], calibration_invocations(ctx)) end, 15_000)
-    # The stand-in CLI is waiting on its own sleep: both are recorded.
+    # The stand-in CLI is waiting on its own sleep: both are recorded, and
+    # each one's start identity is read while it is known alive.
     assert eventually(fn -> length(recorded_pids(pids)) == 2 end, 15_000)
+    Agent.update(children, fn _ -> identities!(pids) end)
     servers = command |> linked() |> Enum.filter(&claude_cli?/1)
     Process.exit(command, :kill)
     Enum.each(servers, &Process.exit(&1, :kill))
 
-    # Only the exact recorded children are stopped, and actually gone
-    # before any STOPPED is typed.
-    kill_exact(pids, "-TERM")
-    assert eventually(fn -> Enum.all?(recorded_pids(pids), &(not os_alive?(&1))) end, 5_000)
+    # Only those exact children are stopped, and actually gone before any
+    # STOPPED is typed.
+    signal_exact(identities_of(children), "-TERM")
+    assert eventually(fn -> gone?(identities_of(children)) end, 5_000)
     RecoverProbe.owner_gone()
 
     [%{id: id}] = calibration_invocations(ctx)
@@ -1375,15 +1419,40 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     end
   end
 
-  defp kill_exact(file, signal) do
-    for pid <- recorded_pids(file),
-        os_alive?(pid),
-        do: System.cmd("kill", [signal, pid], stderr_to_stdout: true)
+  # Each recorded child's pid with its start identity (ProcessProbe).
+  defp identities!(file) do
+    Map.new(recorded_pids(file), fn text ->
+      pid = String.to_integer(text)
+      assert {:ok, identity} = ProcessProbe.start_identity(pid)
+      {pid, identity}
+    end)
+  end
+
+  defp identities_of(children) do
+    Agent.get(children, & &1)
+  catch
+    :exit, _stopped -> %{}
+  end
+
+  # A pid whose identity is absent, changed or unreadable is never
+  # signalled as the old child.
+  defp signal_exact(identities, signal) do
+    for {pid, identity} <- identities,
+        ProcessProbe.start_identity(pid) == {:ok, identity},
+        do: System.cmd("kill", [signal, Integer.to_string(pid)], stderr_to_stdout: true)
 
     :ok
   end
 
-  defp os_alive?(pid), do: match?({_, 0}, System.cmd("kill", ["-0", pid], stderr_to_stdout: true))
+  defp gone?(identities) do
+    Enum.all?(identities, fn {pid, identity} ->
+      case ProcessProbe.start_identity(pid) do
+        :absent -> true
+        {:ok, other} -> other != identity
+        {:error, _unreadable} -> false
+      end
+    end)
+  end
 
   defp private_dir!(parent, name) do
     path = Path.join(parent, name)

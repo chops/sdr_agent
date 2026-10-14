@@ -1076,13 +1076,15 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
       end
     end
 
-    # The tenant's ClaudeCLI invocations whose one original reservation
-    # event records this record's claim. A requested row whose provenance
-    # is missing or malformed can never be shown to be the claim's target.
+    # Every invocation of the tenant whose one original reservation event
+    # records this record's claim, whatever its current eligibility (which
+    # the target check judges). A row whose binding cannot be read (missing,
+    # duplicated or malformed provenance) can never show that nothing was
+    # bound: the requested row is invalid, any other makes the set unknown.
     defp candidates(r) do
       case ModelInvocation
            |> Ash.Query.for_read(:read, %{}, actor: r.agent)
-           |> Ash.Query.filter(tenant_id == ^r.tenant_id and provider == :claude_cli)
+           |> Ash.Query.filter(tenant_id == ^r.tenant_id)
            |> Ash.read() do
         {:ok, invocations} -> claimed(invocations, r)
         {:error, _unreadable} -> {:error, :calibration_target_invalid}
@@ -1097,8 +1099,11 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
           {:ok, %{instance_id: ^instance_id}} ->
             {:cont, {:ok, [invocation | acc]}}
 
-          {:error, _malformed} when invocation.id == r.id ->
+          {:error, _unreadable} when invocation.id == r.id ->
             {:halt, {:error, :calibration_target_invalid}}
+
+          {:error, _unreadable} ->
+            {:halt, {:error, :calibration_target_ambiguous}}
 
           _other_claim ->
             {:cont, {:ok, acc}}
@@ -1240,14 +1245,22 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     defp replay(r) do
       with :ok <- attests(r.record.state, r.invocation),
            {:ok, %{} = latch} <- latch_of(r),
-           {:ok, evidence} <- latched_file(r, latch),
-           true <- recover_confirmed(r, "RECOVER #{r.id}") || {:error, :calibration_not_confirmed} do
-        recovery_release(%{r | evidence: evidence})
+           {:ok, evidence} <- latched_file(r, latch) do
+        r = frozen(r, evidence)
+
+        if recover_confirmed(r, "RECOVER #{r.id}"),
+          do: recovery_release(r),
+          else: pre_effect(:calibration_not_confirmed, r)
       else
         {:ok, nil} -> pre_effect(:calibration_record_inconsistent, r)
         {:error, reason} -> pre_effect(reason, r)
       end
     end
+
+    # A known artifact is reported as run/2 does: its own outcome, and only
+    # its path and hash.
+    defp frozen(r, evidence),
+      do: %{r | evidence: Map.take(evidence, [:path, :sha256]), outcome: evidence.outcome}
 
     defp attests("aborted", %{status: :failed, sent_at: nil}), do: :ok
 
@@ -1264,7 +1277,7 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
            r = %{r | invocation: invocation},
            {:ok, latch} <- latch_of(r),
            {:ok, evidence} <- recovery_evidence(r, kind, latch) do
-        r = %{r | evidence: Map.take(evidence, [:path, :sha256]), outcome: evidence.outcome}
+        r = frozen(r, evidence)
         if latch, do: recovery_final(r, kind), else: recovery_latch(r, kind)
       else
         {:error, failure} -> post_effect(failure, r)
