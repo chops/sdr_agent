@@ -2,7 +2,7 @@
 
 Status: **entity PASS (Codex, round 2, at a15cf8b); owner answers
 recorded 2026-10-14; revision 3 (owner-editable limits, OQ answers)
-pending Codex's narrow re-review, then the owner's scoped C4 G5.**
+PASS by Codex at aa1cab8; awaiting the owner's scoped C4 G5.**
 C4-01, Claude author → Codex reviewer. Nothing here authorizes code, a
 migration, a UI change or a model call. On 2026-10-14 the owner accepted
 the ADR-0005 C4 amendment on SQL logging (section 7) and answered OQ-1..OQ-7
@@ -850,7 +850,13 @@ answers are quoted after each question and modeled in the sections named.
   confirmation set and the 3.6 wording passed. This was the second
   NEEDS-REVIEW on the same item; the owner was told the same day
   (tripwire 2).
-- Owner scoped C4 G5: **pending**, after that re-review.
+  Round at aa1cab8: **PASS** (Codex answer
+  c9f3457c-8aec-47f0-9d9c-ee866515f195, 2026-10-14T20:53:55Z, delta
+  aec6304..aa1cab8). Earlier qualifications carry (raise confirmation,
+  immutable snapshot and counters, unchanged independent budgets, booking
+  link, content access). No RED, GREEN or merge approval; the server-log
+  prerequisite (5b) stands.
+- Owner scoped C4 G5: **pending** (revision 3 passed at aa1cab8).
 - Not authorized by this packet: code, migrations, UI, real data, model
   calls.
 
