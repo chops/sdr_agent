@@ -38,6 +38,11 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
         :real ->
           ProcessProbe.group_members(pgid)
 
+        # One failed group read, then the real probe again.
+        :error_once ->
+          put(:real)
+          {:error, :ps_failed}
+
         {:plus, extra} ->
           with {:ok, members} <- ProcessProbe.group_members(pgid),
                do: {:ok, members ++ [extra]}
@@ -67,6 +72,10 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
 
         :then_phantom ->
           ConsoleProbe.put({:plus, 999_999})
+          ProcessProbe.start_identity(pid)
+
+        :then_error_once ->
+          ConsoleProbe.put(:error_once)
           ProcessProbe.start_identity(pid)
 
         :real ->
@@ -371,6 +380,20 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     assert releases(invocation!(summary.invocation_id)) == []
   end
 
+  # Codex d3c@712e53a MF1: a probe error is never absence, and is not
+  # retried into a later success.
+  test "row 12: one failed quiescence probe stops at once; launched kept, nothing published",
+       ctx do
+    LaunchProbe.put(:then_error_once)
+
+    assert {:stop, :probe_unavailable, summary} = run(ctx)
+    assert summary.record == {:kept, "launched"}
+    assert summary.evidence == nil
+    assert {:ok, %{state: "launched"}} = LaunchRecord.read(ctx.root)
+    assert File.ls!(ctx.evidence) == []
+    assert releases(invocation!(summary.invocation_id)) == []
+  end
+
   ## Row 13: evidence, E1, finished and release failures
 
   describe "row 13" do
@@ -391,6 +414,18 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
       invocation = invocation!(summary.invocation_id)
       assert [%ModelResultRelease{disposition: :calibration}] = releases(invocation)
       assert {:ok, %{state: "launched"}} = LaunchRecord.read(ctx.root)
+      assert_published(summary)
+    end
+
+    # Codex d3c@712e53a MF2: once published, the file's path and hash stay
+    # in the summary through every later failure.
+    test "a failed latch after publication keeps launched and reports the file", ctx do
+      fail_events!(ctx, ["model.result.calibration"])
+
+      assert {:stop, :calibration_finish_failed, summary} = run(ctx)
+      assert summary.record == {:kept, "launched"}
+      assert releases(invocation!(summary.invocation_id)) == []
+      assert_published(summary)
     end
 
     test "a failed release keeps finished; nothing removed", ctx do
@@ -399,6 +434,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
 
       assert summary.record == {:kept, "finished"}
       assert {:ok, %{state: "finished"}} = LaunchRecord.read(ctx.root)
+      assert_published(summary)
     end
   end
 
@@ -557,6 +593,11 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
                  :record
                ])
 
+      # The canonical paths (packet 8.4 and E2): the lock is
+      # calibration/run.lock, shared with calibrate-recover.
+      calibration = Path.join(System.user_home!(), ".local/state/sdr-agent/calibration")
+      assert opts[:root] == calibration
+      assert opts[:evidence_dir] == Path.join(calibration, "evidence")
       assert Keyword.get(opts, :tenant) == :console
       assert Keyword.get(opts, :probe) == ProcessProbe
       assert {opts[:server], opts[:isolation], opts[:record]} == {[], [], []}
@@ -1161,6 +1202,14 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     assert {run.status, run.status_reason} == {:succeeded, :calibration_latched}
     refute bytes =~ Prompt.render()
     Jason.decode!(bytes)
+  end
+
+  # The summary names the one published file: it exists, validates by
+  # name and its bytes hash to the reported digest.
+  defp assert_published(summary) do
+    assert %{path: path, sha256: sha} = summary.evidence
+    assert File.regular?(path)
+    assert sha == Base.encode16(:crypto.hash(:sha256, File.read!(path)), case: :lower)
   end
 
   defp released?(ctx), do: LaunchRecord.read(ctx.root) == {:ok, :none}
