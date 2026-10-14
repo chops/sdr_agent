@@ -428,10 +428,10 @@ No real model call has been made; the budget for them is still zero.
   them; no real model was involved. They now trace the server and require
   zero provider calls.
 
-### Sprint 1, day 2 (Tue Oct 13), evening checkpoint (as of 18:30 MDT)
+### Sprint 1, day 2 (Tue Oct 13), evening checkpoint (as of 18:12 MDT)
 
-At 18:30 the console's `calibrate` command (d3c) is built and approved by
-Codex as code, except for one setup step. Everything is still on the
+As of 18:12 the console's `calibrate` command (d3c) is built and approved
+by Codex as code, except for one setup step. Everything is still on the
 `r0-07e-harness` branch (draft PR #146). Nothing from it is merged to
 `main`.
 
@@ -440,15 +440,21 @@ only, not a merge, a real call or any spend):
 
 - **d3a, the launch receipt:** approved.
 - **d3b, the reserved-call wrapper:** approved.
-- **d3c, `calibrate`:** approved as code in three parts, each test-first
-  and verified as failing before its code was written.
+- **d3c, `calibrate`:** approved as code in three parts.
+  - **Test-first:** the core behavior followed tests that Codex verified
+    as failing before the code was written, and so did each fix round's
+    regressions.
+  - **The exception:** the console script's two new forwarding tests were
+    written after the script was edited. That was disclosed, and they
+    were checked later.
   - **The outcome and the evidence file.** An unreadable witness store
-    now reads as "unreadable", not "missing". The file is built only from
-    a real observation of the call. Malformed input is refused rather
-    than crashing. Two fix rounds.
+    now reads as "unreadable", not "missing". The evidence uses the
+    committed records and, for a call that was sent, the witness check's
+    actual result; no observation is invented. Malformed input is refused
+    rather than crashing. Two fix rounds.
   - **The command.** One attended call from start to finish: claim,
     checks, the owner's typed confirmation, one launch, observation,
-    evidence, latch and release. Every failure point keeps or releases
+    evidence, latch and release. Each tested failure row keeps or releases
     the lock as designed. A launch refused by the budget check stops its
     run with that exact refusal before anything is latched. One fix
     round: a probe error could be retried into a success, a later failure
@@ -468,16 +474,19 @@ No real model call has been made; the budget for them is still zero.
 **Estimate given at the owner's request:**
 - **Code merged:** Thu Oct 15 at best, Fri Oct 16 to Mon Oct 19 more
   likely.
-- **Then:** about a day of owner-attended steps.
+- **Then:** owner-attended steps, estimated at 1 to 1.5 elapsed days.
+  Overall, Oct 16 to 20.
 - **The main risk** is G-R0's window. If the merge slips past about Sat
-  Oct 17, the real calls need a renewed window.
+  Oct 17, the real calls may need a renewed window; no renewal is
+  approved.
 
 **What we learned:**
 
 - **A test that stops at "not built yet" proves little about its own
-  fixtures.** Every new test failed on the missing command before reaching
-  its own setup. A separate run of that setup found a budget-grant fixture
-  that could never have been selected. It was fixed before review.
+  fixtures.** Every new test failed on the missing command after the
+  shared setup but before its own per-test fixtures ran. A separate run of
+  those fixtures found a budget-grant fixture that could never have been
+  selected. It was fixed before review.
 - **Error paths lose state quietly.** A failure after the evidence file was
   written still reported "no evidence", because the success path's updates
   never reached the error branch. Codex found it with a short probe; each
