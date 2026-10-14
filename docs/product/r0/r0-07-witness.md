@@ -2357,6 +2357,18 @@ fdad2b8e), MF3 and its home-read note. Its rounds:
     an evidence limitation, so its code, error and task-stop path are
     inspected at GREEN. No new seam and no waiver.
   - This is not implementation, integrated or spend approval.
+- **Round 4d (input narrowing, from Codex's code review at f408377,
+  c6b45fef, report sha256 92d57902).** An absolute path with `alias/..` was
+  checked by its lexical expansion but written through the kernel's
+  symlink resolution, so the write could land under a different root.
+  - Every path is now required to be **canonical**: equal to its own
+    `Path.expand/1`, so no `.` or `..` and no trailing slash. This applies
+    to `prepare/1`'s two keys and `run/2`'s `root` and `evidence_dir` (a
+    malformed one is `:calibration_options_invalid`, before any access).
+  - E2's directory rule (`check_dir/1`, and so `publish/3` and
+    `validate/3`) also treats a non-canonical path as unsafe. The
+    directory judged is then exactly the one used.
+  - The fixed `console_opts/1` paths are canonical already.
 
 **The canonical paths.** There is one root, shared by `calibrate` and
 `calibrate-recover`:

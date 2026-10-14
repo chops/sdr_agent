@@ -175,7 +175,8 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
 
     @doc """
     The console's first-run setup (packet 8.14.9 round 4): `opts` is exactly
-    `root` and `evidence_dir` (absolute, the latter `root/evidence`). The
+    `root` and `evidence_dir` (absolute and canonical, the latter
+    `root/evidence`). The
     root must already be safe; the evidence directory is created only by an
     exclusive `mkdir`, its creator alone setting 0700, and an existing name
     is only inspected. Returns `{:ok, :created | :existing}` or
@@ -292,7 +293,10 @@ if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
     defp module?(value), do: is_atom(value) and value not in [nil, true, false]
 
     defp uuid?(value), do: is_binary(value) and match?({:ok, _}, Ecto.UUID.cast(value))
-    defp absolute?(path), do: is_binary(path) and Path.type(path) == :absolute
+    # Absolute and canonical (its own expansion: no `.` or `..`, no
+    # trailing slash), so every check judges exactly the path written.
+    defp absolute?(path),
+      do: is_binary(path) and Path.type(path) == :absolute and Path.expand(path) == path
 
     defp tenant(selector) do
       query =

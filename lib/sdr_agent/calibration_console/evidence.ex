@@ -113,8 +113,8 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
 
     @doc """
     Read-only: `:ok` when `dir` is a safe evidence directory by the rule
-    `publish/3` applies (0700, this user's, no symlink in it or any
-    ancestor), otherwise `{:error, :evidence_dir_unsafe}` (packet 8.14.9
+    `publish/3` applies (a canonical path, 0700, this user's, no symlink in
+    it or any ancestor), otherwise `{:error, :evidence_dir_unsafe}` (packet 8.14.9
     round 4). Nothing is changed.
     """
     def check_dir(dir), do: safe_dir(dir)
@@ -204,11 +204,15 @@ defmodule SdrAgent.CalibrationConsole.Evidence do
     end
 
     # The directory is 0700 and this user's; neither it nor an ancestor is a
-    # symlink.
+    # symlink; and its path is canonical.
+    # Only a canonical path (its own expansion: no `.` or `..` and no
+    # trailing slash) is judged, so the directory checked is exactly the
+    # one the kernel resolves (Codex setup@f408377).
     defp safe_dir(dir) do
-      expanded = Path.expand(dir)
+      expanded = if is_binary(dir), do: Path.expand(dir)
 
-      with true <- no_symlink?(expanded),
+      with true <- is_binary(dir) and expanded == dir,
+           true <- no_symlink?(expanded),
            {:ok, %File.Stat{type: :directory, mode: mode, uid: uid}} <- File.lstat(expanded),
            {:ok, me} <- uid(),
            true <- (mode &&& 0o777) == 0o700 and uid == me do
