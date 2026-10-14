@@ -143,8 +143,11 @@ on PR #7 (https://github.com/chops/sdr_agent/pull/7#issuecomment-6029500570).
 
 #### C3 amendment (2026-10-12): shared identity keys and their order
 
-**Status: PROPOSED, pending Codex review and owner acceptance.** Not in force
-until accepted; no code depends on it yet. Source: C3 readiness packet
+**Status: ACCEPTED.** The owner accepted this amendment on 2026-10-14
+(America/Denver, about 14:28 MDT), in the private Claude session chat,
+answering "yes" to "Accept the ADR-0009 C3 amendment (shared identity
+keys)?". Codex passed its text in the C3-01 round-4 entity review (PASS at
+1737063). No code depends on it yet; C3-02 implements it. Source: C3 readiness packet
 (`docs/product/c3/readiness.md`, sections 5-7), Codex C3-01 entity review
 round 1 (NEEDS-REVIEW at 5987410).
 
