@@ -428,6 +428,64 @@ No real model call has been made; the budget for them is still zero.
   them; no real model was involved. They now trace the server and require
   zero provider calls.
 
+### Sprint 1, day 2 (Tue Oct 13), evening checkpoint (as of 18:30 MDT)
+
+At 18:30 the console's `calibrate` command (d3c) is built and approved by
+Codex as code, except for one setup step. Everything is still on the
+`r0-07e-harness` branch (draft PR #146). Nothing from it is merged to
+`main`.
+
+**Status of the console commands** (each approval covers that piece
+only, not a merge, a real call or any spend):
+
+- **d3a, the launch receipt:** approved.
+- **d3b, the reserved-call wrapper:** approved.
+- **d3c, `calibrate`:** approved as code in three parts, each test-first
+  and verified as failing before its code was written.
+  - **The outcome and the evidence file.** An unreadable witness store
+    now reads as "unreadable", not "missing". The file is built only from
+    a real observation of the call. Malformed input is refused rather
+    than crashing. Two fix rounds.
+  - **The command.** One attended call from start to finish: claim,
+    checks, the owner's typed confirmation, one launch, observation,
+    evidence, latch and release. Every failure point keeps or releases
+    the lock as designed. A launch refused by the budget check stops its
+    run with that exact refusal before anything is latched. One fix
+    round: a probe error could be retried into a success, a later failure
+    lost the evidence file from its report, and the lock was in the wrong
+    folder.
+  - **Still open:** creating the evidence folder on first use. Its design
+    is in its second review round, because the first version could have
+    replaced an existing empty folder.
+- **d3d, `calibrate-recover`:** not started.
+
+**Also staged:** a test clock for the console's private model server
+(8.14.10), queued for review. Without it, these tests pass only until
+G-R0's fixed window closes (Sun Oct 18, 23:59 MDT).
+
+No real model call has been made; the budget for them is still zero.
+
+**Estimate given at the owner's request:**
+- **Code merged:** Thu Oct 15 at best, Fri Oct 16 to Mon Oct 19 more
+  likely.
+- **Then:** about a day of owner-attended steps.
+- **The main risk** is G-R0's window. If the merge slips past about Sat
+  Oct 17, the real calls need a renewed window.
+
+**What we learned:**
+
+- **A test that stops at "not built yet" proves little about its own
+  fixtures.** Every new test failed on the missing command before reaching
+  its own setup. A separate run of that setup found a budget-grant fixture
+  that could never have been selected. It was fixed before review.
+- **Error paths lose state quietly.** A failure after the evidence file was
+  written still reported "no evidence", because the success path's updates
+  never reached the error branch. Codex found it with a short probe; each
+  step now carries what it has reached.
+- **"Create only" has to be checked against the real filesystem call.** A
+  rename used to publish a new folder can replace an existing empty one.
+  The design now uses a create call that fails when the name exists.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
