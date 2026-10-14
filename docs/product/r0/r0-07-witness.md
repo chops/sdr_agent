@@ -2790,7 +2790,13 @@ outside the test's own private server.
     and hash.
   - **MF3:** the fixture signals only children whose recorded start
     identity (`ProcessProbe`) is unchanged.
-- **GREEN revision** (proposed): up for re-review.
+- **GREEN revision** at ec62b985: **CHANGES REQUESTED, narrow** (Codex
+  c109fa4d, report sha256 6432e9be). MF1–MF3 are resolved. One test
+  lifecycle defect remained: the identity registry was supervised, so it
+  stopped before `on_exit` and its fallback KILL saw nothing. It is now an
+  unlinked registry owned by the test and stopped only by its own
+  cleanup. A teardown regression covers it (failing-first).
+- **GREEN revision 2** (proposed): up for re-review.
 
 It builds on 8.14.5 and 8.14.7 (entity PASS 125102e) and reuses 8.14.9's
 patterns.

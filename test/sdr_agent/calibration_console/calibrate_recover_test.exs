@@ -703,6 +703,24 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     end
   end
 
+  ## The fixtures' own cleanup
+
+  describe "fixture cleanup" do
+    # Codex c109fa4d: the failure-path cleanup must still see the recorded
+    # identities after supervised teardown. No OS process is signalled.
+    test "the identity registry survives until its exit cleanup has run" do
+      recorded = %{123 => "a recorded identity (never signalled)"}
+
+      registry =
+        identity_registry!(fn identities ->
+          assert identities == recorded,
+                 "cleanup identity registry vanished before callback: #{inspect(identities)}"
+        end)
+
+      Agent.update(registry, fn _ -> recorded end)
+    end
+  end
+
   ## Fixtures
 
   defp recover_defined! do
@@ -773,11 +791,10 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     test = self()
     LaunchProbe.put(:identity_absent)
     pids = Path.join(ctx.tmp, "slow-cli-pids")
-    children = start_supervised!({Agent, fn -> %{} end}, id: :slow_cli_children)
+    # Registered before any work; its cleanup signals only children whose
+    # recorded start identity is still theirs.
+    children = identity_registry!(&signal_exact(&1, "-KILL"))
     opts = put_in(product_opts(ctx, :pending_sent)[:server][:command], slow_cli!(ctx, pids))
-    # Registered before any work; it signals only children whose recorded
-    # start identity is still theirs.
-    on_exit(fn -> signal_exact(identities_of(children), "-KILL") end)
     command = spawn(fn -> send(test, {:still_sent, Calibrate.run(@profile, opts)}) end)
 
     assert eventually(fn -> match?([%{status: :sent}], calibration_invocations(ctx)) end, 15_000)
@@ -1426,6 +1443,23 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       assert {:ok, identity} = ProcessProbe.start_identity(pid)
       {pid, identity}
     end)
+  end
+
+  # The registry's cleanup runs on exit with the identities recorded by
+  # then. The registry is the test's own, unlinked and outside the test
+  # supervisor (stopped before on_exit runs): only this cleanup stops it.
+  defp identity_registry!(cleanup) do
+    {:ok, registry} = Agent.start(fn -> %{} end)
+
+    on_exit(fn ->
+      try do
+        cleanup.(identities_of(registry))
+      after
+        Agent.stop(registry)
+      end
+    end)
+
+    registry
   end
 
   defp identities_of(children) do
