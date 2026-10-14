@@ -2533,6 +2533,59 @@ definition, and a definition has many runs.
 - missing-tenant, option-contract and `command/1` / `console_opts/1`
   cases.
 
+#### 8.14.10 The calibrate tests' clock (proposed)
+
+**Why it is needed:** the integrated-merge item from Codex 3b40a333. The
+`calibrate` tests read the real clock wherever their private ClaudeCLI
+server reads it. In that process, launch admission and the attestation
+time read `Clock.utc_now/0`, and `Clock.freeze/1` does not reach a
+GenServer: `Clock` follows only `self()` and `$callers`. So the suite
+passes only inside G-R0's code-owned window, which ends 2026-10-19 05:59
+UTC, and a renewal would have to move every fixture.
+
+**Entity Model trigger: no.** No resource, attribute, action, policy or
+event changes. This is a test-seam option. Its contract is staged here
+because it is a new runtime seam (Codex b60593f6).
+
+**The seam** (compiled only under `:claude_cli_test_seams`, like every
+other server seam):
+- `Clock.follow(pid)` records, in the calling process only, a pid whose
+  frozen time `utc_now/0` also consults. It sits after `self()` and before
+  `$callers`, and changes nothing when that pid has frozen nothing.
+- It is a separate key, never `$callers`, so Ecto sandbox ownership and
+  other callers' semantics are untouched.
+- In non-seam builds, `follow/1` does not exist and `utc_now/0` is
+  unchanged.
+- The ClaudeCLI start option `clock_from: pid` makes `init/1` call
+  `Clock.follow(pid)` in the server process. Only test-seam builds honour
+  it. It is a `server:` option, so `console_opts/1` (`server: []`) never
+  carries it; the existing exact-wiring test asserts that.
+
+**Unchanged:** production's fixed G-R0 expiry; the real admission instant
+(the server's own `utc_now/0`); the B5 store-trust order; every caller
+outside the test's own private server.
+- No renewal, no wall-clock bypass, no silent skip and no global
+  environment dispatcher.
+- With a test's clock frozen inside the window, the suite becomes
+  date-independent.
+
+**RED:**
+- **Freeze-through:** with the test clock frozen at 2026-10-15 12:00 UTC,
+  the normal path matches whatever today's date is. The server's
+  attestation `at` equals the frozen instant, which proves the server
+  read the test's time and not the wall clock.
+- **The expiry boundary, preflight:** frozen at exactly 2026-10-19
+  05:59:00.000000Z, G-R0 is not selected:
+  `{:stop, :calibration_grant_unavailable, %{record: :released}}`, with
+  no run and no reservation.
+- **The expiry boundary, launch:** frozen inside the window, then in
+  `:before_call` the test moves its frozen time to the expiry instant.
+  The server's launch admission refuses with a typed receipt, and row 8
+  follows (the stop before E1, then evidence, latch, release).
+- **Isolation of the seam:** a server started without `clock_from:` reads
+  the real clock while the test is frozen. `follow/1` is absent in the
+  dev VM.
+
 #### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 
 **d3a — the launch receipt:**
