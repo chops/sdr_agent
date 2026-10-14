@@ -244,6 +244,18 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
       assert counts(ctx) == before
     end
 
+    # 8.14.9 round 4: an unusable evidence directory is refused before any
+    # charge.
+    test "an unsafe evidence directory aborts and releases; no run, no launch", ctx do
+      File.chmod!(ctx.evidence, 0o755)
+      before = counts(ctx)
+
+      assert {:stop, :evidence_dir_unsafe, %{record: :released}} = run(ctx)
+      assert released?(ctx)
+      assert counts(ctx) == before
+      assert launches(ctx) == 0
+    end
+
     test "unavailable isolation aborts and releases", ctx do
       before = counts(ctx)
 
@@ -402,10 +414,15 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   ## Row 13: evidence, E1, finished and release failures
 
   describe "row 13" do
-    test "an unsafe evidence directory stops before any latch", ctx do
-      File.chmod!(ctx.evidence, 0o755)
+    # Made unsafe after preflight's own check (8.14.9 round 4): still
+    # caught at publication, with the launched record kept.
+    test "an evidence directory made unsafe after preflight stops before any latch", ctx do
+      hook = fn
+        :before_call, _context -> File.chmod!(ctx.evidence, 0o755)
+        _phase, _context -> :ok
+      end
 
-      assert {:stop, :evidence_dir_unsafe, summary} = run(ctx)
+      assert {:stop, :evidence_dir_unsafe, summary} = run(ctx, hook: hook)
       assert summary.record == {:kept, "launched"}
       assert releases(invocation!(summary.invocation_id)) == []
       assert run_of(summary.invocation_id).status == :running

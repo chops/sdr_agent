@@ -2351,8 +2351,12 @@ fdad2b8e), MF3 and its home-read note. Its rounds:
   - an unwritable root reports `:calibration_root_unsafe`;
   - the task parses before it prepares, and `prepare/1` takes a closed
     input.
-- **Round 4c** (this text) takes all of them. It needs an exact-head
-  recheck before RED.
+- **Round 4c** at 87b8f0b: **contract/entity PASS** (Codex 65d641ce,
+  report sha256 78acd307), for hermetic RED.
+  - `:calibration_setup_failed` has no hermetic RED in this scope. That is
+    an evidence limitation, so its code, error and task-stop path are
+    inspected at GREEN. No new seam and no waiver.
+  - This is not implementation, integrated or spend approval.
 
 **The canonical paths.** There is one root, shared by `calibrate` and
 `calibrate-recover`:
