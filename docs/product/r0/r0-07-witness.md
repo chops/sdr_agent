@@ -2796,7 +2796,13 @@ outside the test's own private server.
   stopped before `on_exit` and its fallback KILL saw nothing. It is now an
   unlinked registry owned by the test and stopped only by its own
   cleanup. A teardown regression covers it (failing-first).
-- **GREEN revision 2** (proposed): up for re-review.
+- **GREEN revision 2** at e1402d4a: **scoped code APPROVE** (Codex
+  4c4fc481, in_reply_to m_1791946565870389000_785fe0dc, report
+  `~/.local/state/sdr-agent/handoff-20261008/tmp/codex-d3d-green-e1402d4a-approved.md`,
+  sha256 9e061731). Independently, the recovery suite passes 47/47,
+  including the teardown regression, and the three original runtime probes
+  pass 3/3. This closes the d3d code review only. It is not integrated
+  #146, merge, spend, promotion or owner-acceptance approval. Budget 0.
 
 It builds on 8.14.5 and 8.14.7 (entity PASS 125102e) and reuses 8.14.9's
 patterns.
