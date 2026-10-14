@@ -11,11 +11,11 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   the committed rows and the evidence directory, never only the command's
   return value.
 
-  **Time-bound:** the private server the command starts reads the real
-  clock in its own process (`Clock.freeze/1` does not reach it), and G-R0's
-  window is code-owned, ending 2026-10-19 05:59 UTC. These tests can
-  therefore pass only before that instant; a renewed G-R0 window must move
-  them with it.
+  **The clock** (packet 8.14.10): every test runs frozen at 2026-10-15
+  12:00 UTC, inside G-R0's code-owned window (it ends 2026-10-19 05:59
+  UTC), and each private server follows the test's clock (`clock_from:`).
+  So the suite does not depend on today's date, and the window's real
+  expiry rule is exercised at its boundary.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -102,6 +102,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   alias SdrAgent.CalibrationConsole.LaunchRecord
   alias SdrAgent.CalibrationConsole.ProcessProbe
   alias SdrAgent.CalibrationConsole.Prompt
+  alias SdrAgent.Clock
   alias SdrAgent.Operations.Failure
   alias SdrAgent.Test.PinnedCLI
 
@@ -110,8 +111,12 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   @typed "CALIBRATE claude_cli_opus"
   @v3 "claude-message-json/3+prompt-builder/1"
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
+  @now ~U[2026-10-15 12:00:00.000000Z]
+  @expiry ~U[2026-10-19 05:59:00.000000Z]
 
   setup %{tmp_dir: tmp} = tags do
+    Clock.freeze(@now)
+    on_exit(&Clock.unfreeze/0)
     start_supervised!(ConsoleProbe)
     start_supervised!(LaunchProbe)
     start_supervised!(Authority)
@@ -492,6 +497,71 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
       assert status != :resolved
       assert run_of(invocation.id).attention_failure_id == nil
       assert Enum.map(releases(invocation), & &1.disposition) == [:calibration]
+    end
+  end
+
+  ## 8.14.10: the clock
+
+  describe "8.14.10: the clock" do
+    test "the private server follows the test's clock: the call is sent at the frozen instant",
+         ctx do
+      assert {:ok, summary} = run(ctx)
+      assert invocation!(summary.invocation_id).sent_at == @now
+    end
+
+    test "at exactly G-R0's expiry, preflight selects no grant: released, nothing created", ctx do
+      Clock.freeze(@expiry)
+      before = counts(ctx)
+
+      assert {:stop, :calibration_grant_unavailable, %{record: :released}} = run(ctx)
+      assert counts(ctx) == before
+      assert launches(ctx) == 0
+    end
+
+    test "reaching the expiry before the call: the server's launch admission refuses (row 8)",
+         ctx do
+      hook = fn
+        :before_call, _context -> Clock.freeze(@expiry)
+        _phase, _context -> :ok
+      end
+
+      before = MapSet.new(all_failures(ctx), & &1.id)
+
+      assert {:stop, :calibration_launch_refused, summary} = run(ctx, hook: hook)
+      assert summary.record == :released
+      assert summary.outcome == "launch_failed"
+
+      invocation = invocation!(summary.invocation_id)
+      assert {invocation.status, invocation.sent_at} == {:failed, nil}
+      run = run_of(invocation.id)
+
+      assert [refused] =
+               ctx.tenant
+               |> events_of_type("model.launch.refused")
+               |> Enum.filter(&(&1.subject_id == invocation.id))
+
+      assert refused.payload["reason"] == "grant_expired"
+
+      assert {refused.agent_run_id, refused.idempotency_key} ==
+               {run.id, invocation.idempotency_key}
+
+      assert [cause] = Enum.reject(all_failures(ctx), &MapSet.member?(before, &1.id))
+      assert refused.payload["failure_id"] == cause.id
+      assert {run.status, run.status_reason} == {:failed, :model_not_admitted}
+      assert run.attention_failure_id == cause.id
+
+      assert [stop] = run_events(ctx, run, "agents.run.failed")
+      assert stop.payload["arguments"]["refusal_failure_id"] == cause.id
+
+      assert [latch] =
+               ctx.tenant
+               |> events_of_type("model.result.calibration")
+               |> Enum.filter(&(&1.model_invocation_id == invocation.id))
+
+      assert stop.sequence < latch.sequence
+      # The reservation's charge stays where it was.
+      assert run.budget.model_calls_reserved == 1
+      assert launches(ctx) == 0
     end
   end
 
@@ -1078,8 +1148,9 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     end
   end
 
+  # The test's own private server, following the test's clock (8.14.10).
   defp server(ctx, command),
-    do: [command: command, executable: ctx.executable, environment: %{}]
+    do: [command: command, executable: ctx.executable, environment: %{}, clock_from: self()]
 
   # The confirmation reader: reports the prompt it was shown, answers `line`.
   defp confirm(line) do

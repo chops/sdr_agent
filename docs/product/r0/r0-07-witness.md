@@ -2603,6 +2603,22 @@ definition, and a definition has many runs.
 
 #### 8.14.10 The calibrate tests' clock (proposed)
 
+**Status:** contract **PASS** at 2b454d5 (Codex 6e317e34, report sha256
+f1a7304c), scoped to hermetic RED. Its implementation requirements, as
+recorded there:
+- the followed time is read live on every read, not copied at init;
+- `source/0` uses the same lookup;
+- precedence is own freeze, then followed, then `$callers`;
+- only a local pid is followed, and a dead or unfrozen one falls back;
+- the server follows from `init/1`, before its first attestation, and
+  the console's `server: []` is unchanged;
+- the launch-expiry case pins the typed refusal, the event and cause,
+  `sent_at` nil and no launch;
+- a dev-VM proof shows `follow/1` absent and `clock_from:` ignored.
+
+GREEN follows only after exact RED verification. This is not
+implementation, integrated, spend or renewal approval.
+
 **Why it is needed:** the integrated-merge item from Codex 3b40a333. The
 `calibrate` tests read the real clock wherever their private ClaudeCLI
 server reads it. In that process, launch admission and the attestation
