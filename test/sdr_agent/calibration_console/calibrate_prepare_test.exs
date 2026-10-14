@@ -14,14 +14,35 @@ defmodule SdrAgent.CalibrationConsole.CalibratePrepareTest do
   `:calibration_setup_failed` (an I/O failure on a valid root) has no
   hermetic test in this scope; it is covered by review of the code.
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   import Bitwise
+
+  defmodule StaleProbe do
+    @moduledoc false
+    # OS facts for a synthetic launch record whose owner (pid 4242) is
+    # alive at the claim and gone afterwards, so recovery takes a ticket.
+    use Agent
+
+    def start_link(_),
+      do: Agent.start_link(fn -> %{4242 => "Mon 10:00 owner"} end, name: __MODULE__)
+
+    def owner_gone, do: Agent.update(__MODULE__, fn _ -> %{} end)
+    def self_pid, do: {:ok, 4242}
+
+    def start_identity(pid) do
+      case Agent.get(__MODULE__, &Map.fetch(&1, pid)) do
+        {:ok, identity} -> {:ok, identity}
+        :error -> :absent
+      end
+    end
+
+    def group_members(_pgid), do: {:ok, []}
+  end
 
   alias SdrAgent.CalibrationConsole.Calibrate
   alias SdrAgent.CalibrationConsole.Evidence
   alias SdrAgent.CalibrationConsole.LaunchRecord
-  alias SdrAgent.CalibrationConsole.ProcessProbe
 
   @moduletag :tmp_dir
 
@@ -38,6 +59,21 @@ defmodule SdrAgent.CalibrationConsole.CalibratePrepareTest do
       assert prepare(ctx) == {:ok, :created}
       assert {File.dir?(ctx.evidence), mode(ctx.evidence)} == {true, 0o700}
       assert Evidence.check_dir(ctx.evidence) == :ok
+
+      # The directory it created is the one later calls keep.
+      created = inode(ctx.evidence)
+      assert prepare(ctx) == {:ok, :existing}
+      assert inode(ctx.evidence) == created
+    end
+
+    test "an existing safe empty directory is kept: same inode, mode and (no) contents", ctx do
+      File.mkdir!(ctx.evidence)
+      File.chmod!(ctx.evidence, 0o700)
+      before = {inode(ctx.evidence), mode(ctx.evidence), File.ls!(ctx.evidence)}
+      defined!()
+
+      assert prepare(ctx) == {:ok, :existing}
+      assert {inode(ctx.evidence), mode(ctx.evidence), File.ls!(ctx.evidence)} == before
     end
 
     test "leaves an existing safe directory exactly as it is", ctx do
@@ -78,29 +114,43 @@ defmodule SdrAgent.CalibrationConsole.CalibratePrepareTest do
       assert File.read!(ctx.evidence) == "not a directory"
     end
 
-    test "an unsafe root is refused and nothing is created", ctx do
-      defined!()
-
-      for {name, setup} <- unsafe_roots(ctx) do
-        {root, cleanup} = setup.()
+    for name <- [:missing, :symlink, :ancestor_symlink, :group_readable, :unwritable] do
+      test "an unsafe root (#{name}) is refused and nothing is created", ctx do
+        {root, cleanup} = unsafe_root(ctx, unquote(name))
+        on_exit(cleanup)
         evidence = Path.join(root, "evidence")
+        defined!()
 
         assert Calibrate.prepare(root: root, evidence_dir: evidence) ==
-                 {:error, :calibration_root_unsafe},
-               inspect(name)
+                 {:error, :calibration_root_unsafe}
 
-        refute File.exists?(evidence), "#{name}: something was created"
-        cleanup.()
+        refute File.exists?(evidence), "something was created"
       end
     end
 
-    test "a held launch record is byte-for-byte unchanged", ctx do
-      {:ok, _held} = LaunchRecord.claim(ctx.root, probe: ProcessProbe)
-      before = tree(Path.join(ctx.root, "run.lock"))
+    test "a held launch record and its recovery ticket are unchanged", ctx do
+      start_supervised!(StaleProbe)
+      opts = [probe: StaleProbe]
+      {:ok, claimed} = LaunchRecord.claim(ctx.root, opts)
+
+      {:ok, _pending} =
+        LaunchRecord.advance(
+          ctx.root,
+          claimed,
+          :launch_pending,
+          %{invocation_id: Ash.UUIDv7.generate()},
+          opts
+        )
+
+      StaleProbe.owner_gone()
+      {:ok, _recovery} = LaunchRecord.recover(ctx.root, opts)
+      lock = Path.join(ctx.root, "run.lock")
+      assert File.dir?(Path.join(lock, "recover")), "no recovery ticket was taken"
+      before = tree(lock)
       defined!()
 
       assert prepare(ctx) == {:ok, :created}
-      assert tree(Path.join(ctx.root, "run.lock")) == before
+      assert tree(lock) == before
     end
 
     test "malformed input is refused before any filesystem access", ctx do
@@ -173,33 +223,33 @@ defmodule SdrAgent.CalibrationConsole.CalibratePrepareTest do
 
   defp prepare(ctx), do: Calibrate.prepare(root: ctx.root, evidence_dir: ctx.evidence)
 
-  # Each unsafe root, with its own cleanup (a symlinked root or ancestor,
-  # a missing root, and roots whose mode is not 0700, unwritable included).
-  defp unsafe_roots(ctx) do
-    [
-      missing: fn -> {Path.join(ctx.tmp, "absent"), fn -> :ok end} end,
-      symlink: fn ->
-        link = Path.join(ctx.tmp, "root-link")
-        File.ln_s!(ctx.root, link)
-        {link, fn -> File.rm!(link) end}
-      end,
-      ancestor_symlink: fn ->
-        real = Path.join(ctx.tmp, "real-parent")
-        File.mkdir_p!(Path.join(real, "calibration"))
-        File.chmod!(Path.join(real, "calibration"), 0o700)
-        link = Path.join(ctx.tmp, "parent-link")
-        File.ln_s!(real, link)
-        {Path.join(link, "calibration"), fn -> File.rm!(link) end}
-      end,
-      group_readable: fn ->
-        File.chmod!(ctx.root, 0o750)
-        {ctx.root, fn -> File.chmod!(ctx.root, 0o700) end}
-      end,
-      unwritable: fn ->
-        File.chmod!(ctx.root, 0o500)
-        {ctx.root, fn -> File.chmod!(ctx.root, 0o700) end}
-      end
-    ]
+  # An unsafe root and its cleanup: missing, a symlink, under a symlinked
+  # ancestor, or a mode other than 0700 (group-readable, unwritable).
+  defp unsafe_root(ctx, :missing), do: {Path.join(ctx.tmp, "absent"), fn -> :ok end}
+
+  defp unsafe_root(ctx, :symlink) do
+    link = Path.join(ctx.tmp, "root-link")
+    File.ln_s!(ctx.root, link)
+    {link, fn -> File.rm(link) end}
+  end
+
+  defp unsafe_root(ctx, :ancestor_symlink) do
+    real = Path.join(ctx.tmp, "real-parent")
+    File.mkdir_p!(Path.join(real, "calibration"))
+    File.chmod!(Path.join(real, "calibration"), 0o700)
+    link = Path.join(ctx.tmp, "parent-link")
+    File.ln_s!(real, link)
+    {Path.join(link, "calibration"), fn -> File.rm(link) end}
+  end
+
+  defp unsafe_root(ctx, :group_readable) do
+    File.chmod!(ctx.root, 0o750)
+    {ctx.root, fn -> File.chmod(ctx.root, 0o700) end}
+  end
+
+  defp unsafe_root(ctx, :unwritable) do
+    File.chmod!(ctx.root, 0o500)
+    {ctx.root, fn -> File.chmod(ctx.root, 0o700) end}
   end
 
   defp tree(path) do
