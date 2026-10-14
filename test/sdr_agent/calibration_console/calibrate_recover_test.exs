@@ -9,9 +9,10 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
   with a real calibration reservation. Recovery itself runs as another
   process would: the recorded owner reads as absent.
 
-  Not hermetically testable, and covered by review of the code only: a
-  failed bare-ticket end (`end_recovery/3` removes with `File.rm`, not the
-  `remove:` seam), and the task's start order.
+  Not hermetically testable, and covered by review of the code only: a raw
+  unlink I/O failure inside `end_recovery/3` (it removes with `File.rm`,
+  not the `remove:` seam; its refusal of an unsafe ticket is tested here),
+  and the task's start order.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -94,9 +95,12 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
   alias SdrAgent.AdmissionFixtures
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Admission.Gate
   alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ResultGate
+  alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.CalibrationConsole.Authority
@@ -112,6 +116,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
   @profile :claude_cli_opus
   @v3 "claude-message-json/3+prompt-builder/1"
   @now ~U[2026-10-15 12:00:00.000000Z]
+  @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
   setup %{tmp_dir: tmp} do
     Clock.freeze(@now)
@@ -270,6 +275,45 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       assert {summary.record, summary.ticket} == {{:kept, "launch_pending"}, :ended}
     end
 
+    test "an unknown tenant is refused before the lock", ctx do
+      %{invocation_id: id} = product!(ctx, :pending_sent)
+      recover_defined!()
+
+      assert {:stop, :calibration_tenant_unavailable, %{ticket: :none}} =
+               recover(ctx, id, tenant: Ash.UUIDv7.generate())
+
+      refute ticket?(ctx)
+    end
+
+    test "two invocations bound to the one claim are ambiguous", ctx do
+      %{invocation_id: id} = craft!(ctx, :two_candidates)
+      recover_defined!()
+
+      assert {:stop, :calibration_target_ambiguous, %{ticket: :ended}} = recover(ctx, id)
+    end
+
+    test "a claim-bound id the record does not name is ambiguous", ctx do
+      %{invocation_id: id} = craft!(ctx, :record_names_other)
+      recover_defined!()
+
+      assert {:stop, :calibration_target_ambiguous, %{ticket: :ended}} = recover(ctx, id)
+    end
+
+    for variant <- [:operated, :generation_one, :other_profile, :malformed_tuple] do
+      test "a stored target that fails eligibility (#{variant}) is invalid, before any effect",
+           ctx do
+        %{invocation_id: id} = product!(ctx, :pending_sent)
+        ineligible!(ctx, id, unquote(variant))
+        before = untouched(ctx, id)
+        recover_defined!()
+
+        assert {:stop, :calibration_target_invalid, %{ticket: :ended}} =
+                 recover(ctx, id, stopped: true)
+
+        assert untouched(ctx, id) == before
+      end
+    end
+
     test "a target that is no longer a proof run's is invalid, before any effect", ctx do
       %{invocation_id: id} = product!(ctx, :pending_sent)
 
@@ -305,6 +349,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
     test "a declined RECOVER is a pre-effect stop: ticket ended, record kept", ctx do
       %{invocation_id: id} = product!(ctx, :claimed_reserved)
+      before = untouched(ctx, id)
       recover_defined!()
 
       assert {:stop, :calibration_not_confirmed, summary} =
@@ -312,7 +357,36 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
       assert {summary.record, summary.ticket} == {{:kept, "claimed"}, :ended}
       assert invocation!(id).status == :reserved
+      assert untouched(ctx, id) == before
       refute_received {:confirm, :stopped, _prompt}
+    end
+
+    test "a failed, never-sent call keeps its own failure reason through recovery", ctx do
+      %{invocation_id: id} = craft!(ctx, :pending_failed)
+      error = invocation!(id).error
+      recover_defined!()
+
+      assert {:ok, %{record: :released}} = recover(ctx, id)
+
+      assert {invocation!(id).status, invocation!(id).sent_at, invocation!(id).error} ==
+               {:failed, nil, error}
+
+      assert [%ModelResultRelease{disposition: :calibration}] = releases(id)
+    end
+
+    test "a ticket made unsafe before a decline is kept, with the original reason", ctx do
+      %{invocation_id: id} = product!(ctx, :claimed_reserved)
+      ticket_dir = Path.join(lock(ctx), "recover")
+      recover_defined!()
+
+      decline = fn _prompt ->
+        File.chmod!(ticket_dir, 0o755)
+        "no"
+      end
+
+      assert {:stop, :calibration_not_confirmed, summary} = recover(ctx, id, confirm: decline)
+      assert summary.ticket == :kept
+      assert File.dir?(ticket_dir)
     end
   end
 
@@ -321,16 +395,21 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
   describe "the attested path" do
     test "sent history without --owner-verified-stopped needs the owner; pre-effect", ctx do
       %{invocation_id: id} = product!(ctx, :pending_sent)
+      before = untouched(ctx, id)
       recover_defined!()
 
       assert {:stop, :owner_verification_required, summary} = recover(ctx, id)
       assert {summary.record, summary.ticket} == {{:kept, "launch_pending"}, :ended}
+      assert untouched(ctx, id) == before
       refute_received {:confirm, :stopped, _prompt}
     end
 
-    test "launch_pending + STOPPED: attested, fresh observation without CLI init, latched, recovered",
+    test "launch_pending + STOPPED: attested, a genuine observation without CLI init, recovered",
          ctx do
-      %{invocation_id: id} = product!(ctx, :pending_sent)
+      # The call's exchange was captured, but calibrate never observed it:
+      # only recovery's own bounded observation can name its link.
+      %{invocation_id: id} = product!(ctx, :pending_sent_captured)
+      assert links(id) == []
       recover_defined!()
 
       assert {:ok, summary} = recover(ctx, id, stopped: true)
@@ -338,17 +417,34 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       assert [_attested] = attested_events(ctx)
 
       document = assert_latched(ctx, id, summary)
+      assert [%WireWitnessLink{id: link_id}] = links(id)
+      assert [%{"id" => ^link_id}] = document["links"]
+      assert document["evaluated_projection_version"] == @v3
       # The owner's STOPPED is not the CLI's init attestation.
       assert {document["attested_cli_version"], document["attested_model_id"]} == {nil, nil}
       assert document["outcome"] == "init_drift"
+    end
+
+    test "a call still sent (its command and server killed mid-call) becomes unknown", ctx do
+      %{invocation_id: id} = product!(ctx, :still_sent)
+      assert invocation!(id).status == :sent
+      recover_defined!()
+
+      assert {:ok, %{record: :released}} = recover(ctx, id, stopped: true)
+      assert invocation!(id).status == :unknown
+      assert [%ModelResultRelease{disposition: :calibration}] = releases(id)
     end
 
     test "a mistyped STOPPED is a pre-effect stop: no attestation", ctx do
       %{invocation_id: id} = product!(ctx, :pending_sent)
       recover_defined!()
 
+      before = untouched(ctx, id)
+
       assert {:stop, :calibration_not_confirmed, summary} =
                recover(ctx, id, stopped: true, answers: %{stopped: "STOPPED"})
+
+      assert untouched(ctx, id) == before
 
       assert {summary.record, summary.ticket} == {{:kept, "launch_pending"}, :ended}
       assert attested_events(ctx) == []
@@ -356,24 +452,25 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
     test "live work refuses before any STOPPED prompt, event or write", ctx do
       %{invocation_id: id} = product!(ctx, :launched_live)
+      before = untouched(ctx, id)
       recover_defined!()
 
       assert {:stop, :calibration_not_quiescent, summary} = recover(ctx, id, stopped: true)
       assert {summary.record, summary.ticket} == {{:kept, "launched"}, :ended}
       assert_received {:confirm, :recover, _prompt}
       refute_received {:confirm, :stopped, _prompt}
-      assert attested_events(ctx) == []
-      assert releases(id) == []
+      assert untouched(ctx, id) == before
     end
 
     test "a probe error is never absence: refused before STOPPED", ctx do
       %{invocation_id: id} = product!(ctx, :launched_live)
       RecoverProbe.group(:error)
+      before = untouched(ctx, id)
       recover_defined!()
 
       assert {:stop, :probe_unavailable, %{ticket: :ended}} = recover(ctx, id, stopped: true)
       refute_received {:confirm, :stopped, _prompt}
-      assert attested_events(ctx) == []
+      assert untouched(ctx, id) == before
     end
 
     test "launched and stopped: the group is observed before the STOPPED prompt; recovered",
@@ -451,6 +548,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
         ] do
       test "#{variant} is inconsistent: kept, ticket ended", ctx do
         %{invocation_id: id, state: state} = craft!(ctx, unquote(variant))
+        assert_prerequisites(ctx, unquote(variant), id)
         recover_defined!()
 
         assert {:stop, :calibration_record_inconsistent, summary} = recover(ctx, id)
@@ -468,6 +566,22 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       assert {:ok, summary} = recover(ctx, nil, answers: %{recover: "RECOVER ABORTED"})
       assert {summary.record, summary.invocation_id} == {:released, nil}
       refute File.exists?(lock(ctx))
+    end
+
+    test "an aborted record with a nil field but a real candidate: never via recover(nil)", ctx do
+      %{invocation_id: id} = craft!(ctx, :aborted_nil_bound)
+      assert {record_field(ctx, :invocation_id), invocation!(id).status} == {nil, :failed}
+      recover_defined!()
+
+      assert {:stop, :calibration_target_ambiguous, _} =
+               recover(ctx, nil, answers: %{recover: "RECOVER ABORTED"})
+
+      assert record_state(ctx) == "aborted"
+      assert invocation!(id).status == :failed
+
+      # Its actual target is failed, never sent and latched with a valid
+      # file: it replays by its id.
+      assert {:ok, %{record: :released, invocation_id: ^id}} = recover(ctx, id)
     end
 
     test "recover(nil) against any other record is ambiguous", ctx do
@@ -488,9 +602,15 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       bytes = File.read!(Path.join(ctx.evidence, file))
       recover_defined!()
 
+      frozen = Jason.decode!(bytes)["outcome"]
+      # The frozen observation (calibrate's own, a timeout with a valid
+      # init) differs from what a fresh recovery would compute (init_drift).
+      assert frozen == "timeout"
+
       assert {:ok, summary} = recover(ctx, id, stopped: true)
       assert File.read!(Path.join(ctx.evidence, file)) == bytes
       assert summary.evidence.sha256 == sha(bytes)
+      assert summary.outcome == frozen
       assert [%ModelResultRelease{evidence_sha256: latched}] = releases(id)
       assert latched == sha(bytes)
     end
@@ -505,6 +625,30 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
       assert {:stop, :calibration_evidence_conflict, _summary} = recover(ctx, id, stopped: true)
       assert File.read!(path) == "{}"
+    end
+
+    test "a fresh caller never adopts a recovered record's live ticket", ctx do
+      %{invocation_id: id} = craft!(ctx, :recovered_kept)
+      before = tree(ctx)
+      recover_defined!()
+
+      assert {:stop, :recovery_in_progress, %{ticket: :none}} = recover(ctx, id, stopped: true)
+      assert tree(ctx) == before
+    end
+
+    test "a partial release removal is a hard owner conflict", ctx do
+      %{invocation_id: id} = product!(ctx, :claimed_reserved)
+      recover_defined!()
+
+      partial = fn path ->
+        if String.contains?(path, "/recover"), do: {:error, :eio}, else: remove(path)
+      end
+
+      assert {:stop, :calibration_owner_conflict, summary} =
+               recover(ctx, id, record: [remove: partial])
+
+      assert summary.ticket == :kept
+      assert File.dir?(Path.join(lock(ctx), "recover"))
     end
 
     test "a post-effect stop keeps the ticket and reports the published file", ctx do
@@ -583,9 +727,31 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
   ## Record states left by calibrate under the stale-owner probe
 
-  defp product!(ctx, kind, opts \\ []) do
+  defp product!(ctx, kind, opts \\ [])
+
+  # A command and its private server killed mid-call: the call stays sent,
+  # with no settlement, and the record stays launch_pending.
+  defp product!(ctx, :still_sent, _opts) do
+    test = self()
+    LaunchProbe.put(:identity_absent)
+    opts = put_in(product_opts(ctx, :pending_sent)[:server][:command], shell_cli!(ctx, 30))
+    command = spawn(fn -> send(test, {:still_sent, Calibrate.run(@profile, opts)}) end)
+
+    assert eventually(fn -> match?([%{status: :sent}], calibration_invocations(ctx)) end, 15_000)
+    servers = command |> linked() |> Enum.filter(&claude_cli?/1)
+    Process.exit(command, :kill)
+    Enum.each(servers, &Process.exit(&1, :kill))
+    RecoverProbe.owner_gone()
+
+    [%{id: id}] = calibration_invocations(ctx)
+    assert record_state(ctx) == "launch_pending"
+    %{invocation_id: id, state: "launch_pending"}
+  end
+
+  defp product!(ctx, kind, opts) do
+    opts = Keyword.put_new(opts, :owner, :gone)
     result = Calibrate.run(@profile, product_opts(ctx, kind))
-    if Keyword.get(opts, :owner, :gone) == :gone, do: RecoverProbe.owner_gone()
+    if opts[:owner] == :gone, do: RecoverProbe.owner_gone()
     drop_triggers!()
     flush_confirms()
 
@@ -602,6 +768,18 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
   end
 
   defp product_opts(ctx, kind) do
+    kind |> launch_probe() |> LaunchProbe.put()
+    kind_opts(ctx, kind)
+  end
+
+  defp launch_probe(:launched_live), do: :then_phantom
+
+  defp launch_probe(kind) when kind in [:pending_sent, :claimed_sent, :pending_sent_captured],
+    do: :identity_absent
+
+  defp launch_probe(_kind), do: :real
+
+  defp kind_opts(ctx, kind) do
     base = [
       tenant: ctx.tenant.id,
       root: ctx.root,
@@ -614,13 +792,11 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     ]
 
     case kind do
-      k when k in [:pending_sent, :claimed_sent] ->
-        LaunchProbe.put(:identity_absent)
+      k when k in [:pending_sent, :claimed_sent, :launched_live] ->
         base
 
-      :launched_live ->
-        LaunchProbe.put(:then_phantom)
-        base
+      :pending_sent_captured ->
+        put_in(base[:server][:command], witness_cli!(ctx, "cli_shape_v3"))
 
       :claimed_reserved ->
         Keyword.put(base, :record, replace: fail_writing("launch_pending"))
@@ -661,7 +837,8 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       finished_kept: "finished",
       aborted_latched: "aborted",
       aborted_nil: "aborted",
-      launched_file_unlatched: "launched"
+      launched_file_unlatched: "launched",
+      pending_sent_captured: "launch_pending"
     }
     |> Map.fetch!(kind)
   end
@@ -682,11 +859,13 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
 
   ## Record states built through LaunchRecord's own transitions
 
+  # A sent call, observed and latched with a real file, under an aborted
+  # record: only its sent history makes it inconsistent.
   defp craft!(ctx, :aborted_sent_latched) do
     %{invocation_id: id} = product!(ctx, :pending_sent, owner: :alive)
     {:ok, record} = LaunchRecord.read(ctx.root)
     {:ok, _aborted} = LaunchRecord.advance(ctx.root, record, :aborted, %{}, probe: RecoverProbe)
-    latch!(ctx, id)
+    freeze_and_latch!(ctx, id, :observed)
     RecoverProbe.owner_gone()
     %{invocation_id: id, state: "aborted"}
   end
@@ -698,6 +877,76 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     {:ok, _finished} = LaunchRecord.advance(ctx.root, record, :finished, %{}, probe: RecoverProbe)
     RecoverProbe.owner_gone()
     %{invocation_id: id, state: "finished"}
+  end
+
+  # A recovered record whose release never happened: its live ticket holds
+  # the attestation.
+  defp craft!(ctx, :recovered_kept) do
+    %{invocation_id: id} = product!(ctx, :pending_sent)
+    agent = system_actor(:agent_runtime, ctx.tenant)
+    {:ok, handle} = LaunchRecord.recover(ctx.root, probe: RecoverProbe)
+    {:ok, attestation} = LaunchRecord.new_attestation(handle)
+
+    {:ok, _recovered} =
+      Agents.recover_calibration(invocation!(id), {:attested, attestation}, actor: agent)
+
+    {:ok, _written} =
+      LaunchRecord.write_attestation(ctx.root, handle, attestation, probe: RecoverProbe)
+
+    {:ok, _record} =
+      LaunchRecord.advance(
+        ctx.root,
+        handle.record,
+        :recovered,
+        %{attestation_id: attestation.attestation_id},
+        probe: RecoverProbe,
+        recovery: handle
+      )
+
+    assert record_state(ctx) == "recovered"
+    %{invocation_id: id, state: "recovered"}
+  end
+
+  # Two invocations bound to one claim (the first settled and latched, so
+  # the predecessor barrier admits the second).
+  defp craft!(ctx, :two_candidates) do
+    {:ok, claimed} = LaunchRecord.claim(ctx.root, probe: RecoverProbe)
+    first = reserve_for_claim!(ctx, claimed.instance_id)
+    fail!(ctx, first)
+    freeze_and_latch!(ctx, first.id, :unlaunched)
+    second = reserve_for_claim!(ctx, claimed.instance_id)
+    RecoverProbe.owner_gone()
+    %{invocation_id: second.id, state: "claimed"}
+  end
+
+  # The requested id is bound to the record's claim, but the record names
+  # another invocation.
+  defp craft!(ctx, :record_names_other) do
+    other = reserve_for_claim!(ctx, Ash.UUIDv7.generate())
+    fail!(ctx, other)
+    freeze_and_latch!(ctx, other.id, :unlaunched)
+    {:ok, claimed} = LaunchRecord.claim(ctx.root, probe: RecoverProbe)
+    own = reserve_for_claim!(ctx, claimed.instance_id)
+
+    {:ok, _pending} =
+      LaunchRecord.advance(ctx.root, claimed, :launch_pending, %{invocation_id: other.id},
+        probe: RecoverProbe
+      )
+
+    RecoverProbe.owner_gone()
+    %{invocation_id: own.id, state: "launch_pending"}
+  end
+
+  # An aborted record whose own invocation_id field is nil, but whose
+  # claim bound a reservation (failed, latched, with its file).
+  defp craft!(ctx, :aborted_nil_bound) do
+    {:ok, claimed} = LaunchRecord.claim(ctx.root, probe: RecoverProbe)
+    invocation = reserve_for_claim!(ctx, claimed.instance_id)
+    fail!(ctx, invocation)
+    freeze_and_latch!(ctx, invocation.id, :unlaunched)
+    {:ok, _aborted} = LaunchRecord.advance(ctx.root, claimed, :aborted, %{}, probe: RecoverProbe)
+    RecoverProbe.owner_gone()
+    %{invocation_id: invocation.id, state: "aborted"}
   end
 
   defp craft!(ctx, kind) do
@@ -731,10 +980,18 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
           {:ok, _} = LaunchRecord.advance(ctx.root, pending, :aborted, %{}, opts)
           "aborted"
 
+        # Terminal, never sent, latched with a real file: only the
+        # missing sent history makes a finished record inconsistent.
         :finished_never_sent ->
+          fail!(ctx, invocation)
+          freeze_and_latch!(ctx, invocation.id, :unlaunched)
           {:ok, done} = LaunchRecord.advance(ctx.root, pending, :launched, launched, opts)
           {:ok, _} = LaunchRecord.advance(ctx.root, done, :finished, %{}, opts)
           "finished"
+
+        :pending_failed ->
+          fail!(ctx, invocation)
+          "launch_pending"
       end
 
     RecoverProbe.owner_gone()
@@ -785,13 +1042,179 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       )
   end
 
-  defp latch!(ctx, id) do
+  # Freezes a real evidence file for `id` (the unlaunched document, or a
+  # genuine bounded observation for a sent call) and latches its hash, as
+  # calibrate would have.
+  defp freeze_and_latch!(ctx, id, kind) do
     agent = system_actor(:agent_runtime, ctx.tenant)
+    invocation = invocation!(id)
+    {:ok, tuple} = Gate.recorded_tuple(invocation)
+    {:ok, run} = Agents.get_run(invocation.agent_run_id, actor: agent)
 
-    {:ok, _latched} =
-      Agents.finish_calibration(invocation!(id), %{sha256: String.duplicate("0", 64)},
-        actor: agent
+    gate =
+      if kind == :observed,
+        do: ResultGate.await(invocation, %{run_id: run.id, operation_id: nil}, methods: [tuple])
+
+    link =
+      case gate do
+        {_kind, %{link_id: link_id}} when is_binary(link_id) ->
+          Enum.find(links(id), &(&1.id == link_id))
+
+        _none ->
+          nil
+      end
+
+    {:ok, document} =
+      Calibrate.document(%{
+        invocation: invocation,
+        run: run,
+        tuple: tuple,
+        gate: gate,
+        link: link,
+        attestation: nil,
+        output: if(kind == :observed, do: invocation.parsed_output),
+        observed_at: Clock.utc_now()
+      })
+
+    {:ok, %{sha256: digest}} = Evidence.publish(ctx.evidence, document, actor: agent)
+    {:ok, _latched} = Agents.finish_calibration(invocation, %{sha256: digest}, actor: agent)
+    digest
+  end
+
+  # A target the stored-eligibility check must refuse: the run under an
+  # Operation, a generation-1 row, another profile, or a malformed recorded
+  # tuple (a database administrator's change, triggers off).
+  defp ineligible!(ctx, id, :operated) do
+    %{operation: operation} = AgentsFixtures.operated_run(ctx.tenant)
+
+    tamper!("UPDATE agent_runs SET operation_id = $1 WHERE id = $2", [
+      Ecto.UUID.dump!(operation.id),
+      Ecto.UUID.dump!(invocation!(id).agent_run_id)
+    ])
+  end
+
+  defp ineligible!(_ctx, id, :generation_one),
+    do: tamper!("UPDATE model_invocations SET ledger_generation = 1 WHERE id = $1", [uuid(id)])
+
+  defp ineligible!(_ctx, id, :other_profile),
+    do:
+      tamper!("UPDATE model_invocations SET profile_id = 'claude_cli_sonnet' WHERE id = $1", [
+        uuid(id)
+      ])
+
+  defp ineligible!(_ctx, id, :malformed_tuple) do
+    tamper!(
+      "UPDATE audit_events SET payload = jsonb_set(payload, '{arguments,calibration_tuple}', '\"broken\"') " <>
+        "WHERE event_type = 'model.invocation.reserved' AND subject_id = $1",
+      [id]
+    )
+  end
+
+  defp uuid(id), do: Ecto.UUID.dump!(id)
+
+  # What a pre-effect stop must leave unchanged: the target row, every
+  # attestation event, the evidence directory and the latches.
+  defp untouched(ctx, id) do
+    invocation = invocation!(id)
+
+    {invocation.status, invocation.sent_at, invocation.updated_at, length(attested_events(ctx)),
+     File.ls!(ctx.evidence), releases(id)}
+  end
+
+  # The distinguishing prerequisites of each inconsistent final record,
+  # checked before the missing-entry guard.
+  defp assert_prerequisites(ctx, :finished_never_sent, id) do
+    assert {invocation!(id).status, invocation!(id).sent_at} == {:failed, nil}
+    assert_latched_file(ctx, id)
+  end
+
+  defp assert_prerequisites(ctx, :aborted_sent_latched, id) do
+    refute is_nil(invocation!(id).sent_at)
+    assert_latched_file(ctx, id)
+  end
+
+  defp assert_prerequisites(_ctx, :aborted_reserved_unlatched, id),
+    do: assert({invocation!(id).status, releases(id)} == {:reserved, []})
+
+  defp assert_prerequisites(_ctx, :aborted_failed_unlatched, id),
+    do:
+      assert(
+        {invocation!(id).status, invocation!(id).sent_at, releases(id)} == {:failed, nil, []}
       )
+
+  defp assert_prerequisites(_ctx, :finished_unlatched, id) do
+    refute is_nil(invocation!(id).sent_at)
+    assert releases(id) == []
+  end
+
+  defp assert_latched_file(ctx, id) do
+    assert [%ModelResultRelease{evidence_sha256: digest}] = releases(id)
+    assert [file] = File.ls!(ctx.evidence)
+    assert sha(File.read!(Path.join(ctx.evidence, file))) == digest
+  end
+
+  defp links(id) do
+    WireWitnessLink
+    |> Ash.Query.filter(model_invocation_id == ^id)
+    |> Ash.read!(authorize?: false)
+  end
+
+  defp calibration_invocations(ctx) do
+    ModelInvocation
+    |> Ash.Query.filter(tenant_id == ^ctx.tenant.id)
+    |> Ash.read!(authorize?: false)
+  end
+
+  defp linked(pid) do
+    case Process.info(pid, :links) do
+      {:links, links} -> Enum.filter(links, &is_pid/1)
+      nil -> []
+    end
+  end
+
+  defp claude_cli?(pid) do
+    case Process.info(pid, :dictionary) do
+      {:dictionary, dictionary} ->
+        Keyword.get(dictionary, :"$initial_call") ==
+          {SdrAgent.AI.ModelProvider.ClaudeCLI, :init, 1}
+
+      nil ->
+        false
+    end
+  end
+
+  defp record_field(ctx, field) do
+    {:ok, record} = LaunchRecord.read(ctx.root)
+    Map.fetch!(record, field)
+  end
+
+  defp remove(path) do
+    if File.dir?(path), do: File.rmdir(path), else: File.rm(path)
+  end
+
+  defp eventually(check, within) do
+    until = System.monotonic_time(:millisecond) + within
+
+    Stream.repeatedly(fn -> check.() || (Process.sleep(50) && false) end)
+    |> Enum.find(fn ok -> ok or System.monotonic_time(:millisecond) > until end)
+    |> Kernel.==(true)
+  end
+
+  defp witness_cli!(ctx, variant) do
+    path = Path.join(ctx.tmp, "witness-cli-#{System.unique_integer([:positive])}")
+    elixir = System.find_executable("elixir")
+
+    File.write!(path, """
+    #!/bin/sh
+    echo run >> '#{ctx.ran}'
+    out=$('#{elixir}' '#{@fake}' witness '#{ctx.store}' #{variant} calibration "$@")
+    status=$?
+    printf '%s\\n' "$out"
+    exit $status
+    """)
+
+    File.chmod!(path, 0o555)
+    path
   end
 
   ## Assertions and small helpers
@@ -897,8 +1320,8 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     Process.put(:recover_triggers, [])
   end
 
-  defp shell_cli!(ctx) do
-    path = Path.join(ctx.tmp, "cli")
+  defp shell_cli!(ctx, delay \\ 1) do
+    path = Path.join(ctx.tmp, "cli-#{delay}")
 
     init =
       ~s({"type":"system","subtype":"init","model":"claude-opus-5-5","claude_code_version":"2.1.294","tools":[],"mcp_servers":[],"slash_commands":[]})
@@ -910,7 +1333,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     #!/bin/sh
     echo run >> '#{ctx.ran}'
     cat > /dev/null
-    sleep 1
+    sleep #{delay}
     printf '%s\\n' '#{init}'
     printf '%s\\n' '#{result}'
     """)
