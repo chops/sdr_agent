@@ -2747,8 +2747,22 @@ outside the test's own private server.
 - **Round 2** at fc2dbbf: **NEEDS-REVIEW** (Codex ceb76154, report sha256
   35895ee0). Every round-1 concern but one is resolved. The open one: the
   final-replay history and latch guards.
-- **Round 3** (this text) pins those guards. It needs an exact-head
-  recheck before d3d RED.
+- **Round 3** at 5153ad3: **contract/entity PASS** (Codex a69d3964, report
+  sha256 87df99fe), for d3d RED authoring only. Its execution notes are
+  binding on RED and GREEN:
+  - **"Named aborted"** means any `aborted` record with a bound target, even
+    when the record's own `invocation_id` is nil (a claimed record whose
+    reservation committed, then finalized as aborted). Its actual target
+    must pass the failed, nil-`sent_at`, latched checks.
+  - **The nil-target exception** requires zero actual candidates, not
+    merely a nil field.
+  - **A failed but unlatched `aborted` target** is a RED negative too.
+  - **The options inherit the canonical-path requirement** (round 4d) as a
+    pre-read refusal. The task keeps its storage setup before the app
+    start.
+  - The disclosed I/O and task-order inspection limits stay as stated.
+  - A failed bare-ticket end reports `kept`, and a post-effect stop keeps
+    its latest committed and evidence details.
 
 It builds on 8.14.5 and 8.14.7 (entity PASS 125102e) and reuses 8.14.9's
 patterns.
