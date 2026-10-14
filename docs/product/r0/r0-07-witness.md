@@ -2317,16 +2317,19 @@ an option.
 
 **Wiring.** The subcommand is `bin/calibration-console calibrate
 <profile>`.
-- `Calibrate.command(argv)` is pure: no database, file or environment
-  read. For exactly one argument naming a known real profile it returns
-  `{:run, profile_id, console_opts(profile_id)}`; otherwise
-  `{:error, :usage}`. `console_opts/1` carries the `tenant: :console`
-  selector, not a tenant id, so it stays pure. The tenant is resolved
-  later, inside `run/2`.
-- The task does exactly `{:run, p, o} = command(argv); run(p, o)`.
-- Tests assert `command/1` and `console_opts/1` exactly: no `hook`, the
-  `server`, `isolation` and `record` values `[]`, `ProcessProbe`, and no
-  value derived from argv or the environment beyond the profile.
+- `Calibrate.command(argv)` reads no database or file. For exactly one
+  argument naming a known real profile it returns `{:run, profile_id,
+  console_opts(profile_id)}`; otherwise `{:error, :usage}`.
+- `console_opts/1` carries the `tenant: :console` selector, not a tenant
+  id; the tenant is resolved later, inside `run/2`. Its only environment
+  read is the owner's home, for the two canonical paths (corrected in
+  round 4 below; it is not pure).
+- The task does exactly `{:ok, …} = prepare(o)` (round 4), then
+  `{:run, p, o} = command(argv); run(p, o)`.
+- Tests assert `command/1` and `console_opts/1` exactly: no `hook`; the
+  `server`, `isolation` and `record` values `[]`; `ProcessProbe`; and no
+  value derived from argv or the environment beyond the profile and the
+  owner's home.
 - The compile guard alone is not isolation from the console: the console
   is itself a test-seam build. Owner code inside the console VM remains
   out of scope, as already accepted (8.2). Nothing here claims more.
@@ -2334,61 +2337,126 @@ an option.
 ##### Console paths and first-run setup (round 4, proposed)
 
 This follows Codex's d3c code review at 712e53a (e5b5c5a7, report sha256
-fdad2b8e), MF3 and its note on reading the owner's home. It needs an
-exact-head recheck before it is implemented.
+fdad2b8e), MF3 and its home-read note. Its rounds:
+- **Round 4a** at 3236205: **NEEDS-REVIEW** (Codex 35980350, report sha256
+  03d93e18). A plain directory rename can replace an existing empty
+  directory, so creation must be exclusive. Pin the return contracts and
+  add the entity delta.
+- **Round 4b** (this text) takes both. It needs an exact-head recheck
+  before it is implemented.
 
 **The canonical paths.** There is one root, shared by `calibrate` and
 `calibrate-recover`:
 - `root` is `~/.local/state/sdr-agent/calibration`, so the lock is
   `calibration/run.lock` (8.4). It is the directory that
-  `Secrets.load_or_create/0` already creates 0700, through a temporary
-  name and a rename, when the task builds its plan.
+  `Secrets.load_or_create/0` already creates 0700 when the task builds its
+  plan. The code correction is approved at 3236205.
 - `evidence_dir` is `~/.local/state/sdr-agent/calibration/evidence` (the
   E2 location).
-- No second root exists, so an earlier retained lock can never be ignored.
-  No old lock is moved, cleared or treated as irrelevant.
+- No second root exists, so an earlier retained lock can never be
+  ignored. No old lock is moved, cleared or treated as irrelevant.
 
-**The home read (correcting 8.14.9's "pure").**
-- `command/1` parses argv. `console_opts/1` resolves the owner's home
-  (`System.user_home!/0`), as `Secrets.default_path/0` does. That is the
-  only environment read.
+**The home read.**
+- `console_opts/1` resolves the owner's home (`System.user_home!/0`), as
+  `Secrets.default_path/0` does. It is not pure, and that is its only
+  environment read.
 - Nothing is taken from argv, the configuration or any other environment
   value: not the model, the server, the hook, the grant or the tenant.
-- `command/1` and `console_opts/1` read no database and no file.
 
-**First-run setup** (`Calibrate.prepare(opts)`). The task calls it after
-the plan (so Secrets has made the root) and before the application
-starts. It never runs in `check` or `command/1`.
-- **The root** must already exist and pass the launch-record safety rules
-  (owned by this user, mode 0700, no symlink in it or in any ancestor).
-  Otherwise `{:error, :calibration_root_unsafe}`: nothing is created, and
-  no mode is changed.
-- **The evidence directory**, when it is absent, is created exclusively:
-  a temporary name made 0700 under the root, then renamed into place.
-  When it exists, it is left exactly as it is, never chmod-ed, replaced
-  or followed. A link or file at that name, or a directory that is unsafe
-  by E2's rules, is `{:error, :evidence_dir_unsafe}`.
-- **The launch-record lock** is never touched. `calibrate` and
-  `calibrate-recover` read and write it only through `LaunchRecord`.
+**First-run setup: `Calibrate.prepare(opts)`** (test-seam builds only, like
+the module).
+- **Where it runs:** the task calls it after the plan (so Secrets has made
+  the root) and before the application starts. Never in `check`,
+  `command/1` or `run/2`.
+- **Input, checked before any filesystem access:** a keyword list with
+  `root` and `evidence_dir`, both absolute, where `evidence_dir` is exactly
+  `Path.join(root, "evidence")`. Anything else is
+  `{:error, :calibration_options_invalid}`, with nothing touched.
+- **Returns** `{:ok, :created | :existing}` or
+  `{:error, :calibration_options_invalid | :calibration_root_unsafe |
+  :evidence_dir_unsafe | :calibration_setup_failed}`.
 
-**Preflight also checks the evidence directory** before any charge:
-- `Evidence.check_dir/1` is a new public read of E2's existing directory
-  rule, with no change to that rule. It runs at the start of preflight,
-  after the claim, so an unusable directory is row 2: `aborted`, then
-  `release`.
+**The steps of `prepare/1`:**
+1. **The root** must pass the launch-record safety rules: owned by this
+   user, mode 0700, and no symlink in it or in any ancestor. Otherwise
+   `:calibration_root_unsafe`, with nothing created and no mode changed.
+2. **The evidence directory is created exclusively:**
+   `File.mkdir(evidence_dir)`, which fails if the name exists, with no
+   staging name and no rename.
+   - Only the process whose `mkdir` succeeded sets that new directory's
+     mode, to 0700.
+   - It then checks the directory against E2's rule (`check_dir/1`) and
+     returns `{:ok, :created}`.
+3. **An existing name** (`:eexist`, including one created concurrently by
+   another `prepare`) is only inspected, through E2's rule:
+   - safe: `{:ok, :existing}`, with its inode, mode and contents
+     unchanged;
+   - a symlink, a file, the wrong owner or a group/other mode:
+     `:evidence_dir_unsafe`, left exactly as it is.
+   - It is never chmod-ed, replaced, followed or repaired.
+4. **Any other `mkdir` error** (the root unwritable, no space) is
+   `:calibration_setup_failed`. Nothing was created.
+
+**Visibility and failure limits, stated:**
+- **A brief umask window:** between `mkdir` and the `chmod`, the new
+  directory exists with the umask's mode. An observer in that window (a
+  competing `prepare`, or `check_dir/1`) sees an unsafe directory and
+  refuses, failing closed. It never makes the directory safe.
+- **A failed `chmod`:** the creator may remove only the empty directory
+  it just created (`File.rmdir/1`, which refuses a non-empty one), then
+  returns `:calibration_setup_failed`. If that removal fails too, the
+  leftover is unsafe and every later `prepare`, preflight and publication
+  refuses it. The owner removes it.
+- **Never touched:** another creator's directory, the launch-record lock,
+  any evidence file.
+
+**`Evidence.check_dir(dir)`** is a new public, read-only entry onto E2's
+existing directory rule (the same ancestor, uid and mode checks
+`publish/3` uses).
+- It returns `:ok` or `{:error, :evidence_dir_unsafe}`.
+- Like `publish/3`, outside test-seam builds it refuses
+  (`{:error, :calibration_evidence_conflict}`).
+
+**Preflight adds an evidence-directory check.** In `run/2`, right after
+the claim and before the other preflight checks, `check_dir(evidence_dir)`
+runs:
+- An unusable directory is row 2: `aborted`, then `release`, with no run
+  and no reservation (`{:stop, :evidence_dir_unsafe, _}`).
 - A directory made unsafe after preflight is still caught at publication
   (row 13: launched, kept). Its test makes the directory unsafe in
   `:before_call`.
 
+**Entity delta:**
+
+| Entity / action | New / existing | Delta | Invariants / lifecycle | Actor |
+|---|---|---|---|---|
+| Evidence directory (file artifact) | Existing location (E2), new creator | Created only by `prepare/1`, exclusively, mode 0700 | Never replaced, chmod-ed after the fact, followed or repaired; an unsafe one is refused everywhere | The console task |
+| `Calibrate.prepare/1` | New (seam-only) | The first-run setup above | Before the app starts; no lock, record, database or grant access | The console task |
+| `Evidence.check_dir/1` | New public read (seam-only) | E2's directory rule, read-only | Same rule as `publish/3`; no write | Caller |
+| `calibrate` preflight | Existing (8.14.9) | The evidence-directory check, right after the claim | An unusable directory aborts before any charge (row 2); row 13 unchanged | Command |
+
 **RED:**
-- `console_opts/1` gives exactly the two canonical paths;
-- `prepare/1` creates a missing evidence directory 0700, leaves an
-  existing safe one unchanged, refuses an unsafe root, and refuses an
-  evidence path that is a link, a file or an unsafe directory, each left
-  untouched;
-- preflight with an unsafe evidence directory aborts and releases with no
-  run and no reservation;
-- the row 13 publication failure still keeps `launched`.
+- **Paths:** `console_opts/1` gives exactly the two canonical paths.
+- **`prepare/1`:**
+  - creates a missing directory (`{:ok, :created}`, mode 0700);
+  - leaves an existing safe one unchanged (`{:ok, :existing}`, same inode
+    and mode);
+  - a pre-existing empty 0755 directory is `:evidence_dir_unsafe`, inode
+    and mode unchanged;
+  - a symlink or file at the name is `:evidence_dir_unsafe`, untouched;
+  - an unsafe root is `:calibration_root_unsafe`, with nothing created;
+  - malformed input is `:calibration_options_invalid`, with nothing
+    touched;
+  - two concurrent `prepare/1` calls give one `:created`, the other
+    `:created`-or-`:existing` (or a fail-closed refusal in the umask
+    window), and the directory ends 0700 with one inode;
+  - an unwritable root gives `:calibration_setup_failed`, with nothing
+    created.
+- **`check_dir/1`:** safe → `:ok`; unsafe → `:evidence_dir_unsafe`.
+- **Preflight:** an unsafe evidence directory aborts and releases, with
+  no run and no reservation.
+- **Row 13:** the publication failure keeps `launched`, with the
+  directory made unsafe in `:before_call`.
 
 ##### The ordering hook (`hook:`, tests only)
 
