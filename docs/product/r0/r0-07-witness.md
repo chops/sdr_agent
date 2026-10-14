@@ -2718,6 +2718,117 @@ outside the test's own private server.
   the real clock while the test is frozen. `follow/1` is absent in the
   dev VM.
 
+#### 8.14.11 d3d: the `calibrate-recover` test surface (proposed)
+
+**Status:** proposed, for a contract check before d3d RED. It builds on
+8.14.5 and 8.14.7 (entity PASS 125102e) and reuses 8.14.9's patterns:
+closed options, a typed tenant selector, real failures, and fixed console
+wiring.
+
+**Entity Model trigger: yes.** A new orchestration option contract:
+`Calibrate.recover/2`, its options and its wiring. No new resource,
+column or action. It uses the existing `LaunchRecord` recovery,
+`recover_calibration/3`, E1 and E2.
+
+##### The command
+
+`Calibrate.recover(invocation_id, opts)` returns `{:ok, summary}` or
+`{:stop, reason, summary}`. `summary` has the same shape as `run/2`'s, and
+`reason` is an atom.
+
+**Options**, a closed keyword list:
+- **Required:** `tenant`, `root`, `evidence_dir`, `confirm`, `probe`,
+  `record`, and `stopped` (a boolean, from `--owner-verified-stopped`).
+- **Refused before anything else:** unknown, duplicate, missing or
+  mistyped keys (`:calibration_options_invalid`).
+- **No `hook`, `server` or `isolation`:** recovery makes no model call and
+  starts no server.
+
+**Wiring.**
+- `recover_command(argv)` accepts exactly `[id]` or
+  `[id, "--owner-verified-stopped"]`, with `id` a UUID. It returns
+  `{:recover, id, recover_opts(stopped?)}`, otherwise `{:error, :usage}`.
+- `recover_opts/1` carries the same fixed `tenant: :console`, the
+  canonical `root` and `evidence_dir`, `ProcessProbe`, `record: []`, and
+  the flag. Its only environment read is the owner's home.
+- The task (`calibrate-recover`) and `bin/calibration-console
+  calibrate-recover ID [--owner-verified-stopped]` do: the plan;
+  `recover_command/1`; `prepare/1` on the two paths; the app and storage
+  start; `recover/2`.
+- Tests assert `recover_command/1` and `recover_opts/1` exactly.
+
+##### The steps (8.14.5, in order)
+
+1. Options, then the tenant.
+2. **The lock:** `LaunchRecord.recover(root, record_opts)`.
+   - A live owner is `:owner_alive`; an unreadable record is
+     `:owner_unknown`; an existing ticket is `:recovery_in_progress`.
+     All of these stop, with nothing changed.
+   - The handle is ended (`end_recovery/3`) on every stop that leaves the
+     record as found.
+3. **Final records:** `aborted` and `finished` only replay their release
+   under the handle. `recovered` replays only under its own live ticket;
+   another process gets `:calibration_owner_conflict`. A final record is
+   never advanced again.
+4. **The target, by the claim:** exactly one invocation whose original
+   reservation event records this record's `instance_id`
+   (`Gate.recorded_claim/1`), and it must be `invocation_id`.
+   - Zero matches on a `claimed` record: `:calibration_owner_conflict`,
+     record kept, no release (the R0 narrowing).
+   - Several matches, or the wrong one: `:calibration_target_ambiguous`.
+5. **Confirm:** the owner types `RECOVER <invocation_id>`, otherwise
+   `:calibration_not_confirmed`, with the record kept and the handle ended.
+6. **Decide:**
+   - **Unlaunched** (`reserved`, or `failed` with `sent_at` nil, with the
+     record `claimed` or `launch_pending`):
+     `recover_calibration(:unlaunched)` where the row is still `reserved`;
+     then evidence (`launch_failed`, no observation), `finish_calibration`,
+     `advance(:aborted)` under the handle, `release`.
+   - **Sent history** (`sent_at` set, or a `launched` record):
+     - without `stopped: true`: `:owner_verification_required`, record
+       kept;
+     - live work observed first (`LaunchRecord.quiescence/2` on the
+       record): a live root or group member is
+       `:calibration_not_quiescent`, before any event or write. A probe
+       error is `:probe_unavailable`, never absence;
+     - then a fresh typed `STOPPED <invocation_id>`, otherwise
+       `:calibration_not_confirmed`;
+     - then `new_attestation/1`, `recover_calibration({:attested,
+       attestation})` (its event), and `write_attestation/4`;
+     - then the evidence (step 7), `finish_calibration`,
+       `advance(:recovered, %{attestation_id})` and `release`.
+   - **No automatic `{:quiescent, …}` recovery** while
+     `@automated_quiescence` is false (OQ-E3).
+7. **Evidence:**
+   - If the invocation already has a `:calibration` latch, its file at the
+     canonical name is validated and reused unchanged. A missing or
+     changed file under a latch is `:calibration_evidence_conflict`.
+   - **Otherwise** (open question **Q1** below), a sent invocation's
+     document needs a genuine observation (part 2's rule). The proposal:
+     recovery runs the same one bounded `ResultGate.await/3` with the
+     candidate as `calibrate`, after the attestation and outside any lock.
+     It makes no model call.
+
+##### Real failures (no new hooks)
+
+| Case | How |
+|---|---|
+| A live owner | the claim by this VM (`LaunchRecord.claim` with `ProcessProbe`) |
+| A stale owner | a test probe whose owner pid reads absent after the claim, as the 8.14.9 setup tests do |
+| An abandoned ticket | an existing `run.lock/recover` (a prior `recover/2` whose handle was never ended) |
+| A partial removal | the existing `remove:` record seam failing after the record file is removed |
+| A changed latched file | a byte edit of the published file before recovery |
+| Live work | the console-probe phantom-member mode |
+
+##### Open questions for the contract check
+
+- **Q1:** does a recovered sent invocation with no latch get the one
+  bounded observation as proposed, or does R0 refuse to publish evidence
+  without a `calibrate`-time observation (a hard owner conflict)?
+- **Q2:** `recover_opts/1` passes no hook. The ordering of "observe, then
+  type `STOPPED`" is tested by asserting the absence of any event and
+  write after a live-work refusal, with no new phase. Is that sufficient?
+
 #### 8.14.7 RED plan, by sub-slice (hermetic; no real call)
 
 **d3a — the launch receipt:**
