@@ -1,13 +1,16 @@
 # C4 readiness packet: minimal run settings and per-run snapshot
 
-Status: **entity PASS (Codex, round 2, at a15cf8b); awaiting the owner.**
+Status: **entity PASS (Codex, round 2, at a15cf8b); owner answers
+recorded 2026-10-14; revision 3 (owner-editable limits, OQ answers)
+pending Codex's narrow re-review, then the owner's scoped C4 G5.**
 C4-01, Claude author → Codex reviewer. Nothing here authorizes code, a
-migration, a UI change or a model call. Implementation approval still
-needs (1) the owner's acceptance of the scope and answers to the
-questions in section 9, and (2) the owner's acceptance of the proposed
-ADR-0005 C4 amendment on SQL logging (section 7). Entity PASS, owner
-answers and ADR acceptance are separate gates; none implies another. The
-implementation obligations Codex attached to the PASS are in section 11.
+migration, a UI change or a model call. On 2026-10-14 the owner accepted
+the ADR-0005 C4 amendment on SQL logging (section 7) and answered OQ-1..OQ-7
+(section 9). OQ-2 changed the limits contract: no limit has a fixed ceiling
+in code; the owner raises or lowers each one in the app (D-062; sections
+3.3, 3.8). Entity PASS, owner answers, ADR acceptance and G5 are separate
+gates; none implies another. The implementation obligations Codex attached
+to the PASS are in section 11.
 
 Sources (precedence): owner decisions D-050 to D-053, D-057, D-061, D-062,
 D-064, D-065, D-069, D-101, D-102 (`docs/sdlc/decisions.md`); approved
@@ -44,7 +47,7 @@ shows which settings a run used.
 - Tenant-day limits (daily model calls 200, daily sends 25), grant terms
   (C9) and provider quotas (C5, D-102). They stay where they are and are
   shown read-only on the settings page. Making a tenant-day limit editable
-  is a B8-03 extension under the same "lower only" rule.
+  is a B8-03 extension, decided in B8-03's own review under D-062.
 - A research-depth selector (D-052: one fixed depth), per-lead research
   overrides (D-057: post-MVP), learning from edits (D-055).
 - Prompt wording, the split of the brief's Fixed rules into code, and the
@@ -64,12 +67,12 @@ shows which settings a run used.
 | C4-R3 | A save made against a revision that is no longer current is refused as stale, names the latest committed revision number, and writes nothing. Two concurrent saves of one setting produce exactly one new revision. |
 | C4-R4 | Every agent run created after the C4 migration binds exactly one settings snapshot in the transaction that creates it. The snapshot records, for each setting, the exact revision (id and content hash), or the built-in default version and hash, or "absent", plus the limits at snapshot time. A snapshot never changes. A later save never changes what a queued, running or finished run uses. Runs created before the migration keep a null snapshot and stay readable; nothing is backfilled. |
 | C4-R5 | Agents read settings only from their run's snapshot (`SdrAgent.Agents.run_settings/2`), never from the current revisions. A run with no snapshot gets no settings and its settings-dependent steps fail closed. |
-| C4-R6 | An operator retry reuses the original run's snapshot (its budget limits are already copied and never raised); current fixed bounds still apply at use (C4-R10). New settings apply to a new assignment. A retry of a run with no snapshot is refused before anything is written. |
+| C4-R6 | An operator retry reuses the original run's snapshot (its budget limits are already copied and never raised); current grants, tenant-day limits, provider quotas and safeguards still apply at use (C4-R10; OQ-4). New settings apply to a new assignment. A retry of a run with no snapshot is refused before anything is written. |
 | C4-R7 | The research brief, writing guide and operational limits have built-in defaults in code, used until an admin saves a revision. The offering profile and booking link have none. |
 | C4-R8 | Business-content completeness: runs whose origin is `:assignment`, `:referral`, `:followup`, `:discovery` or `:channel` require a saved offering profile and are refused before anything is written with `{:settings_incomplete, [:offering_profile]}`. Runs of origin `:reply` and `:proof` are exempt from this completeness rule only. They still bind a snapshot, and every operational, grant, tenant-day and provider limit and every R0 proof authority applies to them unchanged. An unknown or missing origin is refused as today. Reply classification and its unsubscribe and suppression effects never wait on an offering-, guide- or booking-dependent step; an interested-reply draft is a separate step that may refuse for missing business input. |
-| C4-R9 | A missing or withheld booking link never blocks a run. A consumer step that needs one refuses with a typed reason; it never invents, substitutes or leaks a link. |
-| C4-R10 | Each operational limit has a fixed bound in code. A save above the bound is refused with the bound named. At use, inside the guarded counter or admission path, the allowance is the lowest of the run's frozen maximum, the snapshot value, the current fixed bound and every independent budget (grant, provider quota, tenant day). Raising a setting never grants spend (D-062). Snapshot values are never rewritten. |
-| C4-R11 | The settings page shows every limit with its value, fixed bound, source (saved revision or built-in default) and whether code enforces it yet; tenant-day limits, grants and quotas read-only with their source; and the fixed architectural safeguards with their reasons, never editable here (D-062). The run page labels "limit at snapshot" separately from "allowed now". |
+| C4-R9 | A missing or withheld booking link never blocks a run. A first-touch draft without a usable link uses the writing guide's "questions first" ask (OQ-3). A consumer step that needs a link (B5's interested reply) refuses with a typed reason. No step invents, substitutes or leaks a link, or proposes times in its place. |
+| C4-R10 | Each operational limit is an owner setting with no fixed ceiling in code (D-062; OQ-2). A save is validated (a whole number, at least the field's minimum, at most its sanity maximum, the cross-field rules of section 3.3) and refused, never clamped, when invalid. A save that raises any field above the value in effect is refused unless the admin confirmed each raised field; the confirmed set is recorded on the revision. At use, inside the guarded counter or admission path, the allowance is the lowest of the run's frozen maximum, the snapshot value and every independent budget (grant allocation, provider quota, tenant-day limit). Raising a setting never grants spend (D-062). Snapshot values are never rewritten; a save, raise or lower, applies to runs created after it (OQ-4). |
+| C4-R11 | The settings page shows every limit with its value, built-in default, validation range, source (saved revision or built-in default) and whether code enforces it yet; tenant-day limits, grants and quotas read-only with their source; and the fixed architectural safeguards with their reasons, never editable here (D-062). The run page labels "limit at snapshot" separately from "allowed now". |
 | C4-R12 | Settings text is business content that may be sent to the model through the model-payload seam. It is refused when secret-shaped, holds no control characters other than newline and tab, and stays under the size caps of section 3.5. It is not copied into audit event payloads, logs (application, LiveView, SQL), Failure messages or telemetry, even with dev content capture on (section 3.6). |
 | C4-R13 | The booking link is an `https` URL with a host name, no user info, no IP-literal or local host, no explicit non-default port, at most 2,048 bytes. Its host must pass the real-data guard (`SdrAgent.Sales.Synthetic.reserved_domain?/1`, widened only by C5-04 when its switch is on) at save **and again at every use**. A link that fails at use is withheld: the step refuses `:booking_link_withheld`, history is kept, nothing newer is substituted, and the URL reaches no model input, draft or capture. |
 | C4-R14 | The run page shows the run's snapshot: revision number or built-in default version per setting, and its limits. Auditor views of settings and snapshots go through `SdrAgentWeb.AuditedView` and fail closed. |
@@ -134,7 +137,8 @@ ADR-0002) and always frame the editable text. No settings text can remove
 or weaken a Fixed rule (B8-02).
 
 **Research caps live in operational limits, not in the brief.** One place
-holds every numeric ceiling, validated against one bounds table (D-062).
+holds every numeric per-run ceiling, owner-editable and validated by one
+rules table (D-062; section 3.3).
 Consumers pass the run's allowances to the model as the research policy
 input (brief input 8).
 
@@ -142,18 +146,18 @@ input (brief input 8).
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| SettingsRevision | New (APPEND-ONLY) | One immutable revision of one tenant-wide run setting | `id : uuid_v7`; `tenant_id : uuid, not nil`; `kind : atom, not nil, one of :offering_profile, :booking_link, :writing_guide, :research_brief, :operational_limits`; `number : int ≥ 1, not nil`; `supersedes_id : uuid, nullable`; one embedded content attribute per kind (`offering_profile`, `booking_link`, `writing_guide`, `research_brief`, `operational_limits`), each nullable and `sensitive?: true`; `content_sha256 : string, not nil` (section 3.7); `note : string, nullable, ≤ 200, sensitive?: true`; `created_by_id : uuid, not nil`; `inserted_at`; trace ids | belongs_to Tenant (restrict); belongs_to User as `created_by` (restrict). Keys: PK `(id)`; UNIQUE `(id, tenant_id, kind)` (target of the self FK); UNIQUE `(id, tenant_id, kind, content_sha256)` (target of snapshot slot FKs); identity UNIQUE `(tenant_id, kind, number)`; partial UNIQUE `(supersedes_id) WHERE supersedes_id IS NOT NULL` (superseded at most once); partial UNIQUE `(tenant_id, kind) WHERE supersedes_id IS NULL` (one root per kind). Self FK `(supersedes_id, tenant_id, kind)` → `(id, tenant_id, kind)`, RESTRICT, so a revision supersedes only its own tenant's same kind. | Check: exactly the embedded attribute named by `kind` is non-null. Check: `number = 1` iff `supersedes_id IS NULL`. `number` = predecessor's number + 1, set by the action while it holds the predecessor's row lock (section 4). `content_sha256` computed from the cast, validated content (section 3.7). Trigger rejects UPDATE, DELETE, TRUNCATE. Current revision of a kind = highest `number`. No destroy action. | `:create_revision` (args `kind`, `content`, `expected_number : int ≥ 0` where 0 means "no revision yet", `note`): active human admin only (`CurrentAdmin`, persisted row re-read); auditor role and every system actor forbidden. Appends `settings.revision.created` (section 3.6: metadata and hashes only). Row reads: admin, reviewer, auditor (through AuditedView), `agent_runtime`, `auditor_cli`, kernel. Field policy on the content attributes and `note`: admin, auditor (audited), `agent_runtime`, `auditor_cli`, kernel; reviewer only if the owner says yes (OQ-6). | OQ-6 |
+| SettingsRevision | New (APPEND-ONLY) | One immutable revision of one tenant-wide run setting | `id : uuid_v7`; `tenant_id : uuid, not nil`; `kind : atom, not nil, one of :offering_profile, :booking_link, :writing_guide, :research_brief, :operational_limits`; `number : int ≥ 1, not nil`; `supersedes_id : uuid, nullable`; `raised_fields : {:array, atom}, not nil, default []` (sorted limit-field names raised above the value in effect, confirmed by the admin; empty unless `kind = :operational_limits`; not sensitive); one embedded content attribute per kind (`offering_profile`, `booking_link`, `writing_guide`, `research_brief`, `operational_limits`), each nullable and `sensitive?: true`; `content_sha256 : string, not nil` (section 3.7); `note : string, nullable, ≤ 200, sensitive?: true`; `created_by_id : uuid, not nil`; `inserted_at`; trace ids | belongs_to Tenant (restrict); belongs_to User as `created_by` (restrict). Keys: PK `(id)`; UNIQUE `(id, tenant_id, kind)` (target of the self FK); UNIQUE `(id, tenant_id, kind, content_sha256)` (target of snapshot slot FKs); identity UNIQUE `(tenant_id, kind, number)`; partial UNIQUE `(supersedes_id) WHERE supersedes_id IS NOT NULL` (superseded at most once); partial UNIQUE `(tenant_id, kind) WHERE supersedes_id IS NULL` (one root per kind). Self FK `(supersedes_id, tenant_id, kind)` → `(id, tenant_id, kind)`, RESTRICT, so a revision supersedes only its own tenant's same kind. | Check: exactly the embedded attribute named by `kind` is non-null. Check: `number = 1` iff `supersedes_id IS NULL`. Check: `raised_fields` empty unless `kind = 'operational_limits'`. `number` = predecessor's number + 1, set by the action while it holds the predecessor's row lock (section 4). `content_sha256` computed from the cast, validated content (section 3.7). Trigger rejects UPDATE, DELETE, TRUNCATE. Current revision of a kind = highest `number`. No destroy action. | `:create_revision` (args `kind`, `content`, `expected_number : int ≥ 0` where 0 means "no revision yet", `note`, `confirm_raised : {:array, atom}, default []`): the action computes `raised_fields` against the value in effect (the locked predecessor, or the built-in default when none) and refuses `{:invalid, [confirm_raised: :mismatch]}` unless `confirm_raised` equals it exactly; active human admin only (`CurrentAdmin`, persisted row re-read); auditor role and every system actor forbidden. Appends `settings.revision.created` (section 3.6: metadata and hashes only). Row reads: admin, reviewer, auditor (through AuditedView), `agent_runtime`, `auditor_cli`, kernel. Field policy on the content attributes and `note`: admin, reviewer (read-only, OQ-6), auditor (audited), `agent_runtime`, `auditor_cli`, kernel. | none |
 | OfferingProfile, OfferingItem | New (embedded) | What we sell, as structured items the research and draft cite | OfferingProfile: `name : 1..120`; `summary : 1..1,500`; `audience : 0..1,500`; `items : list, 1..30`. OfferingItem: `id : string ^[a-z0-9][a-z0-9_-]{0,39}$`; `kind : :feature \| :use_case \| :outcome \| :limit \| :proof_point`; `text : 1..400` | embedded in SettingsRevision | Item ids unique within the profile. Canonical JSON ≤ 16 KiB. Text rules of section 3.5. Citations name `(revision id, item id)` (brief appendix), so they resolve against the exact revision. | via SettingsRevision | OQ-1 |
 | BookingLink | New (embedded) | The owner's scheduling page, used in asks (D-025, D-053, D-082) | `url : string, not nil, ≤ 2,048 bytes` | embedded in SettingsRevision | `https` only; host required; no user info; no IP literal, `localhost` or `.local`; port absent or 443; no control or whitespace characters; redactor rule. Real-data guard at save and at each use (C4-R13). | via SettingsRevision | OQ-3, OQ-7 |
-| WritingGuide | New (embedded) | Tone and shape of drafts (D-053, D-065) | `text : string, 1..6,000` | embedded in SettingsRevision | Text rules of section 3.5. Built-in default from D-053 (code). | via SettingsRevision | OQ-1, OQ-5 |
+| WritingGuide | New (embedded) | Tone and shape of drafts (D-053, D-065) | `text : string, 1..6,000` | embedded in SettingsRevision | Text rules of section 3.5. The built-in default is neutral generic text in code, not the owner's D-053 wording (OQ-5); the owner's version is saved in the app as a revision, after the server-log prerequisite. | via SettingsRevision | none |
 | ResearchBrief | New (embedded) | Editable research guidance (D-050, D-051) | `guidance : string, 1..12,000`; `depth : atom, not nil, one of :standard` | embedded in SettingsRevision | One depth in the MVP (D-052). Holds no Fixed rule. Built-in default from the brief's editable sections (code). | via SettingsRevision | OQ-1, OQ-5 |
-| OperationalLimits | New (embedded) | Per-run ceilings an admin may set up to a fixed bound | the twelve integer fields of section 3.3, each not nil | embedded in SettingsRevision | Each field within its bound; cross-field: `research_max_total_source_chars ≥ research_max_source_chars`, `research_max_model_calls ≤ run_max_model_calls`, `research_target_seconds ≤ research_job_limit_seconds`. A save above a bound is refused, never clamped. | via SettingsRevision | OQ-2 |
+| OperationalLimits | New (embedded) | Per-run ceilings the admin raises or lowers (D-062, OQ-2) | the twelve integer fields of section 3.3, each not nil | embedded in SettingsRevision | Each field passes its validation rule in section 3.3 (whole number, minimum, sanity maximum; no policy ceiling); cross-field: `research_max_total_source_chars ≥ research_max_source_chars`, `research_max_model_calls ≤ run_max_model_calls`, `research_target_seconds ≤ research_job_limit_seconds`. An invalid save is refused, never clamped. Raised fields need confirmation (SettingsRevision `raised_fields`). | via SettingsRevision | none |
 | RunSettings.CodeDefaults | New (code registry, not persisted) | Built-in defaults for research brief, writing guide, operational limits | per kind: list of released `{version, content, content_sha256}` | referenced by version from RunSettingsSnapshot | Released versions are never edited or removed; a golden-hash test pins each `content_sha256` computed by the section 3.7 rule. Each default passes the same validation as an admin save. | n/a (code, reviewed) | OQ-1 |
-| RunSettings.Safeguards | New (code registry, not persisted) | Fixed bounds and the read-only safeguard list | `version : string`; bound per limit field; safeguard entries `{name, reason, enforced_by}` | referenced by `safeguards_version` from RunSettingsSnapshot | Changes only by reviewed code. A lowered bound applies at use to every existing run (C4-R10). | n/a (code, reviewed) | OQ-2 |
+| RunSettings.Safeguards | New (code registry, not persisted) | The limit validation rules and the read-only safeguard list | `version : string`; validation rule per limit field (minimum, sanity maximum; no policy ceiling); safeguard entries `{name, reason, enforced_by}` | referenced by `safeguards_version` from RunSettingsSnapshot | Changes only by reviewed code. Validation applies at save only; it never rewrites or re-limits a snapshot. | n/a (code, reviewed) | none |
 | RunSettingsSnapshot | New (APPEND-ONLY) | The exact settings one run (and its retries) uses | `id : uuid_v7`; `tenant_id`; for each kind K: `K_source : atom, not nil, one of :revision, :code_default, :absent`, `K_revision_id : uuid, nullable`, `K_code_default_version : string, nullable`, `K_content_sha256 : string, nullable`, and `K_kind : text GENERATED ALWAYS AS ('K') STORED`; `limits : SnapshotLimits, not nil`; `safeguards_version : string, not nil`; `hash_version : string, not nil` (`"c4-run-settings-snapshot/1"`); `snapshot_sha256 : string, not nil`; `inserted_at`; trace ids | belongs_to Tenant (restrict). Keys: PK `(id)`; UNIQUE `(id, tenant_id)` (target of the AgentRun FK). Per kind: FK `(K_revision_id, tenant_id, K_kind, K_content_sha256)` → SettingsRevision `(id, tenant_id, kind, content_sha256)`, RESTRICT, MATCH SIMPLE (skipped when `K_revision_id` is null). has_many AgentRun. | Per-kind checks: `:revision` ⇒ revision id and content hash set, version null; `:code_default` ⇒ version and content hash set, revision id null, allowed only for brief, guide and limits; `:absent` ⇒ all three null, allowed only for offering and booking link. The FK makes the DB refuse a cross-tenant, wrong-kind or wrong-hash revision reference. A code default's version and hash are checked against `CodeDefaults` by the building change and again at use. `snapshot_sha256` per section 3.7. Trigger rejects UPDATE, DELETE, TRUNCATE. | Created only inside `AgentRun :create` by `BuildSettingsSnapshot` under a context marker (`SettingsSnapshotContext`, the `GrantContext` pattern). The snapshot create action accepts no attributes: every id, version, hash and limit is computed by the change from the run's tenant and origin. A direct create, or a create with any supplied attribute, is forbidden for every actor. Appends `settings.snapshot.created` (references, hashes, limits only). Reads: admin, reviewer, auditor (AuditedView), `agent_runtime`, `auditor_cli`, kernel. | none |
-| SnapshotLimits | New (embedded) | Limits recorded at snapshot time | the twelve fields of section 3.3; `clamped : {:array, atom}` (sorted; fields lowered to a bound at snapshot time) | embedded in RunSettingsSnapshot | Each field = min(revision or built-in value, bound at snapshot time). Never rewritten; the allowance at use is computed (C4-R10), not stored. | via snapshot | none |
-| AgentRun | Existing (delta) | Agent run with per-run budget | add `settings_snapshot_id : uuid, nullable` | composite FK `(settings_snapshot_id, tenant_id)` → RunSettingsSnapshot `(id, tenant_id)`, RESTRICT; many runs to one snapshot (a run and its retries) | **Cutover trigger** (BEFORE INSERT OR UPDATE): an INSERT with null `settings_snapshot_id` is refused; an UPDATE that changes `settings_snapshot_id` (attach to a historical null, detach, or replace) is refused. Historical null rows keep every existing transition. No backfill. Set only by `:create` (the change builds the snapshot; no input accepts an id) and `:retry` (copied by `RetryOf`). `:create` refuses `{:settings_incomplete, kinds}` per C4-R8. Frozen budget: `max_model_calls`, `max_tool_calls`, `max_tokens` = min(caller argument when given, snapshot `run_*` value). `:retry` of a historical null-snapshot run is refused `no_settings_snapshot` before any Operation, job or attention resolution is written (`SDR.retry_run/2` pre-check; the transaction also rolls back). | Unchanged (AGT, SCH create; ADM retry inside `SDR.retry_run/2`) | OQ-4 |
-| AgentRun counters (`:reserve_model_call`, `:record_tool_call`) | Existing (behaviour delta) | Guarded per-run counters | — | unchanged | On the row locked `FOR UPDATE` (`BudgetCounter`): `:reserve_model_call` refuses when `model_calls_reserved ≥ min(budget.max_model_calls, bound(run_max_model_calls))` or `tokens_used ≥ min(budget.max_tokens, bound(run_max_tokens))`; `:record_tool_call` refuses when `tool_calls_used ≥ min(budget.max_tool_calls, bound(run_max_tool_calls))`. The token check moves here from the caller-side preflight in `SdrAgent.SDR.Model` (kept as an early message). Tokens are known only after a call, so one call can overshoot the remaining token allowance; the limit stops the next call. | unchanged | none |
+| SnapshotLimits | New (embedded) | Limits recorded at snapshot time | the twelve fields of section 3.3 | embedded in RunSettingsSnapshot | Each field = the revision or built-in value in effect at snapshot time. Never rewritten; the allowance at use is computed (C4-R10), not stored. | via snapshot | none |
+| AgentRun | Existing (delta) | Agent run with per-run budget | add `settings_snapshot_id : uuid, nullable` | composite FK `(settings_snapshot_id, tenant_id)` → RunSettingsSnapshot `(id, tenant_id)`, RESTRICT; many runs to one snapshot (a run and its retries) | **Cutover trigger** (BEFORE INSERT OR UPDATE): an INSERT with null `settings_snapshot_id` is refused; an UPDATE that changes `settings_snapshot_id` (attach to a historical null, detach, or replace) is refused. Historical null rows keep every existing transition. No backfill. Set only by `:create` (the change builds the snapshot; no input accepts an id) and `:retry` (copied by `RetryOf`). `:create` refuses `{:settings_incomplete, kinds}` per C4-R8. Frozen budget: `max_model_calls`, `max_tool_calls`, `max_tokens` = min(caller argument when given, snapshot `run_*` value). `:retry` of a historical null-snapshot run is refused `no_settings_snapshot` before any Operation, job or attention resolution is written (`SDR.retry_run/2` pre-check; the transaction also rolls back). | Unchanged (AGT, SCH create; ADM retry inside `SDR.retry_run/2`) | none (OQ-4 answered: a retry keeps its snapshot) |
+| AgentRun counters (`:reserve_model_call`, `:record_tool_call`) | Existing (behaviour delta) | Guarded per-run counters | — | unchanged | On the row locked `FOR UPDATE` (`BudgetCounter`): `:reserve_model_call` refuses when `model_calls_reserved ≥ budget.max_model_calls` or `tokens_used ≥ budget.max_tokens`; `:record_tool_call` refuses when `tool_calls_used ≥ budget.max_tool_calls` (the run's frozen budget, from the snapshot). Grant admission (C9) and the tenant-day model-call limit still apply in their own guarded paths. The token check moves here from the caller-side preflight in `SdrAgent.SDR.Model` (kept as an early message). Tokens are known only after a call, so one call can overshoot the remaining token allowance; the limit stops the next call. | unchanged | none |
 | AuditEvent (via `AppendEvent`) | Existing (behaviour use) | Ledger after-images | — | unchanged | No change to `AppendEvent`: it already omits `sensitive?` attributes from the after-image, names them under `redacted`, and keeps `record_sha256` over the full row. C4 marks every settings content attribute and `note` sensitive, so generic event readers (admin, reviewer, auditor) see kind, number, `supersedes_id`, `content_sha256` and `record_sha256`, never the text. | unchanged | none |
 | Telemetry.GenAI | Existing (behaviour delta) | GenAI spans | request option `content_capture : :inherit \| :off` | — | A request whose input carries run settings is built with `content_capture: :off`; then no `gen_ai.input.content` or `gen_ai.output.content` span event is emitted, whatever `otel_capture_content` says (dev sets it true today, `config/dev.exs`). Span attributes stay metadata and hashes. | — | none |
 | Accounts.User | Existing | Human operators | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (referenced as `created_by` only; roles and role-change rules unchanged) | — | — |
@@ -161,30 +165,48 @@ input (brief input 8).
 | Sales.Campaign | Existing | Sender identity and compliance defaults | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (sender identity stays on the campaign; campaign-scoped settings are B8) | — | — |
 | Actor | Existing | System actor types | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (no new system actor; `agent_runtime` gains read only) | — | — |
 
-### 3.3 Operational limits, fixed bounds and where each is enforced
+### 3.3 Operational limits, validation and where each is enforced
 
-Defaults are the built-in limits revision. Bounds are proposals awaiting
-the owner (OQ-2) and are not accepted until answered. The run bounds equal
-today's code values, so C4 loosens nothing.
+Defaults are the built-in limits revision. The owner decided on 2026-10-14
+(OQ-2) that no limit has a hard ceiling that no setting can change: the
+admin raises or lowers every field in the app (D-062). Validation only
+keeps a value sane: a whole number, at least the minimum below, at most the
+sanity maximum (2,147,483,647, the stored integer range, for counts;
+86,400 s, one day, for the two time fields, so the job limit stays finite
+per D-061), and the cross-field rules of the OperationalLimits row. These
+are representability limits, not policy ceilings. A raise above the value
+in effect needs a per-field confirmation that names the old value, the new
+value, the built-in default and the budgets that still bound it; the
+confirmed fields are recorded on the revision (`raised_fields`) and in its
+event.
 
-| Field | Default | Fixed bound | Authoritative check at use |
+Spend stays bounded where it is today, and no limit setting raises it
+(section 3.4): C9 grants and allocations, 200 model calls per UTC day and
+25 sends per local day (config may only lower), and the D-102 provider
+quotas. A larger per-run value lets one run use more of those budgets; it
+never adds to them.
+
+| Field | Default | Validation (minimum..sanity maximum) | Authoritative check at use |
 |---|---|---|---|
-| `run_max_model_calls` | 20 | 1..20 | `AgentRun :reserve_model_call` (`BudgetCounter`, row `FOR UPDATE`), with the current bound; ADR-0004 per-run cap |
-| `run_max_tool_calls` | 60 | 1..60 | `AgentRun :record_tool_call`, with the current bound |
-| `run_max_tokens` | 100,000 | 1..100,000 | `AgentRun :reserve_model_call`, with the current bound (moved from `SdrAgent.SDR.Model`); stops the next call, one call may overshoot |
-| `research_max_search_requests` | 4 | 0..8 | C5-02 adapter, before each request (retries and pagination counted) — not enforced until C5-02 |
-| `research_max_page_fetches` | 4 | 0..8 | C5-03 safe fetch — not enforced until C5-03 |
-| `research_max_sources` | 6 | 1..10 | B1-04 evidence bundle — not enforced until B1-04 |
-| `research_max_source_chars` | 4,000 | 500..8,000 | B1-04 — not enforced until B1-04 |
-| `research_max_total_source_chars` | 24,000 | 500..48,000 | B1-04 — not enforced until B1-04 |
-| `research_max_output_tokens` | 2,500 | 256..4,000 | B1-04 model request — not enforced until B1-04 |
-| `research_max_model_calls` | 2 | 1..2 (at most one repair) | B1-04 — not enforced until B1-04 |
-| `research_target_seconds` | 180 | 30..600 (warning only, D-061) | B1-04 progress, H1 row — warning, never a stop |
-| `research_job_limit_seconds` | 600 | 60..900 (finite job limit, D-061) | B1-04 worker deadline; an in-flight model call ends by its own timeout and is recorded unknown, never cut silently or retried (D-064) — not enforced until B1-04 |
+| `run_max_model_calls` | 20 | ≥ 1 | `AgentRun :reserve_model_call` (`BudgetCounter`, row `FOR UPDATE`) against the run's frozen budget; C9 grant admission and the 200-per-UTC-day limit separately; ADR-0004 C4 note |
+| `run_max_tool_calls` | 60 | ≥ 1 | `AgentRun :record_tool_call` against the run's frozen budget |
+| `run_max_tokens` | 100,000 | ≥ 1 | `AgentRun :reserve_model_call` against the run's frozen budget (moved from `SdrAgent.SDR.Model`); stops the next call, one call may overshoot |
+| `research_max_search_requests` | 4 | ≥ 0 | C5-02 adapter, before each request (retries and pagination counted), within the D-102 quota — not enforced until C5-02 |
+| `research_max_page_fetches` | 4 | ≥ 0 | C5-03 safe fetch — not enforced until C5-03 |
+| `research_max_sources` | 6 | ≥ 1 | B1-04 evidence bundle — not enforced until B1-04 |
+| `research_max_source_chars` | 4,000 | ≥ 500 | B1-04 — not enforced until B1-04 |
+| `research_max_total_source_chars` | 24,000 | ≥ 500 | B1-04 — not enforced until B1-04 |
+| `research_max_output_tokens` | 2,500 | ≥ 256 | B1-04 model request — not enforced until B1-04 |
+| `research_max_model_calls` | 2 | ≥ 1, ≤ `run_max_model_calls` | B1-04 — not enforced until B1-04; each extra call is a deliberate repair inside the run budget, never a retry of an unknown outcome (D-064) |
+| `research_target_seconds` | 180 | 30..86,400, ≤ job limit (warning only, D-061) | B1-04 progress, H1 row — warning, never a stop |
+| `research_job_limit_seconds` | 600 | 60..86,400 (finite job limit, D-061) | B1-04 worker deadline; an in-flight model call ends by its own timeout and is recorded unknown, never cut silently or retried (D-064) — not enforced until B1-04 |
+
+Count fields not shown with a maximum have the sanity maximum 2,147,483,647.
 
 Consumers read an allowance only through `Agents.RunSettings.allowance(run,
-field)`, which returns min(snapshot value, current bound), and combine it
-with their own independent budgets inside their guarded step. The settings
+field)`, which returns the snapshot value (for the three `run_*` fields,
+the run's frozen budget), and combine it with their own independent
+budgets inside their guarded step. The settings
 page shows "not yet enforced" for every field whose consumer has not
 merged, read from the same registry the consumers register in. Per-call
 and per-fetch timeouts stay fixed in code (`ClaudeCLI` default 120 s).
@@ -259,12 +281,12 @@ lowercase hex sha256.
   never supplies it. A recompute test checks every stored row.
 - **`snapshot_sha256`** = sha256 of the canonical encoding of
   `{"schema": "c4-run-settings-snapshot/1", "tenant_id": T,
-  "safeguards_version": V, "slots": S, "limits": L, "clamped": X}`.
+  "safeguards_version": V, "slots": S, "limits": L}`.
   S has all five kinds as keys, always. A slot is exactly one of
   `{"source": "revision", "revision_id": id, "content_sha256": h}`,
   `{"source": "code_default", "version": v, "content_sha256": h}`,
   `{"source": "absent"}`; no other keys, never `null`. L has all twelve
-  limit fields as integers. X is the sorted list of clamped field names.
+  limit fields as integers.
   Excluded: the snapshot id, trace ids, `inserted_at`, `hash_version` (it
   names the schema already in the input) and the digest itself. The
   hashed slots must equal the stored per-kind columns exactly; the
@@ -273,7 +295,8 @@ lowercase hex sha256.
 ### 3.8 Changed backend action contracts
 
 - **`Agents.create_settings_revision/2`** (new). Inputs: kind, content,
-  `expected_number`, note; actor a human admin. Returns the revision or a
+  `expected_number`, note, `confirm_raised` (limits only); actor a human
+  admin. Returns the revision or a
   typed error: `:forbidden`, `{:stale_revision, latest_committed_number}`,
   `{:invalid, field_errors}`. Writes one revision and one audit event, or
   nothing. On a unique violation the transaction rolls back first; the
@@ -287,8 +310,8 @@ lowercase hex sha256.
   its hash re-checked (`:settings_default_unavailable` on mismatch or
   missing version). `{:error, :no_settings_snapshot}` for a run without
   one. Content is returned to the agent process only.
-- **`Agents.RunSettings.allowance/2`** (new). min(snapshot value, current
-  bound) for one limit field.
+- **`Agents.RunSettings.allowance/2`** (new). The snapshot value of one
+  limit field (the frozen budget for the `run_*` fields).
 - **`Agents.RunSettings.booking_link_for_use/1`** (new). `{:ok, url}`,
   `{:error, :booking_link_absent}` or `{:error, :booking_link_withheld}`
   (guard fails now). Consumer obligations: call it when building model
@@ -310,8 +333,9 @@ lowercase hex sha256.
   before creating the new Operation, job or resolving attention.
 - **`SDR.ReplyIntake.received/3`** (changed). Its run binds a snapshot;
   business completeness is not required (C4-R8).
-- **`AgentRun :reserve_model_call`, `:record_tool_call`** (changed). Apply
-  the current bound (3.2 counters row).
+- **`AgentRun :reserve_model_call`, `:record_tool_call`** (changed). Enforce
+  the run's frozen budget on the locked row, including the token check
+  (3.2 counters row).
 - **`Telemetry.GenAI.with_span/3`** (changed). Honors `content_capture:
   :off`.
 
@@ -336,8 +360,7 @@ shortened):
     "research_brief": {"source": "code_default", "version": "2", "content_sha256": "e0…"},
     "operational_limits": {"source": "code_default", "version": "1", "content_sha256": "7a…"}
   },
-  "limits": {"run_max_model_calls": 20, "run_max_tool_calls": 60, "research_max_sources": 6, "…": "…"},
-  "clamped": []
+  "limits": {"run_max_model_calls": 20, "run_max_tool_calls": 60, "research_max_sources": 6, "…": "…"}
 }
 ```
 
@@ -345,9 +368,10 @@ The admin then saves writing guide revision 1 while the run is queued. The
 queued run still drafts with built-in guide version 1; the next assignment
 uses guide revision 1. A retry of the first run uses its original snapshot.
 A save of the offering against `expected_number` 0 after revision 1 exists
-is refused `{:stale_revision, 1}`. If a later release lowers the
-`run_max_model_calls` bound to 10, the queued run's snapshot still says 20
-but `:reserve_model_call` refuses its eleventh reservation.
+is refused `{:stale_revision, 1}`. If the admin later saves limits with
+`run_max_model_calls` 30 (confirming the raise), the queued run keeps 20
+and the next assignment gets 30; that run is still refused by grant
+admission or the 200-per-UTC-day limit whenever those run out first.
 
 ## 4. Locks and transactions
 
@@ -441,11 +465,19 @@ Revisions and policy:
    content hash; slot column combinations outside the per-kind checks;
    AgentRun with a snapshot of another tenant.
 6. Field policy: content and `note` hidden from roles outside the field
-   policy; reviewer case written once OQ-6 is answered.
+   policy; a reviewer reads them and cannot write (OQ-6).
 
 Validation (one success and the boundary failures per field):
-7. Each limit at its bound passes, bound + 1 is refused naming the bound;
-   cross-field rules refused.
+7. Each limit at its minimum and at its sanity maximum passes; minimum − 1,
+   maximum + 1, a non-integer and nil are refused; cross-field rules
+   refused. A value far above the built-in default (e.g. 1,000 model calls)
+   passes with confirmation: no policy ceiling exists.
+7a. Raise confirmation: a raise without `confirm_raised`, or with a set that
+   differs from the raised fields (missing, extra, a lowered field), is
+   refused and writes nothing; an exact match saves with sorted
+   `raised_fields` on the revision and in its event; a pure lowering needs
+   no confirmation; the first save compares against the built-in default.
+   `raised_fields` on a non-limits kind is refused by the DB check.
 8. Booking link: `http`, `javascript:`, user info, IP literal, `localhost`,
    port 8443, over 2,048 bytes, non-reserved host while the guard is off,
    token-shaped query — each refused; a reserved `https` link passes.
@@ -484,10 +516,17 @@ Snapshot, runs and cutover:
     revisions; agent actions use `run_settings/2` only.
 
 Live checks at use:
-21. Bound lowered after a snapshot (test-only bound override): the run's
-    snapshot value is unchanged, `:reserve_model_call`, `:record_tool_call`
-    and the token check refuse at the lower bound, also for a retry and for
-    a direct domain call; `allowance/2` returns the lower value.
+21. Limits saved after a snapshot, raised and lowered: the run's snapshot
+    and frozen budget are unchanged; `:reserve_model_call`,
+    `:record_tool_call` and the token check refuse at the frozen budget,
+    also for a retry and for a direct domain call; `allowance/2` returns
+    the snapshot value. A raised `run_max_model_calls` still yields to an
+    exhausted grant allocation and to the tenant-day limit (one refusal
+    case each).
+21a. First touch without a usable link (absent, or withheld as in 22) uses
+    the questions-first ask: the Fake model input carries no URL and
+    no proposed times; B5's interested-reply step refuses with the typed
+    reason (OQ-3). (Consumer tests land with B1-05 and B5-03.)
 22. Booking link withheld: with a revision whose host fails the guard now
     (test-only guard override standing in for "switch turned off"), a new
     assignment, a queued run and a retry all get `:booking_link_withheld`
@@ -528,8 +567,9 @@ UI (LiveView):
     nothing (the C9-05 `GrantForm` pattern).
 30. Read-only view per the field policy; auditor view records an
     AuditAccess and fails closed; non-operators redirected.
-31. The page shows bounds, sources, "not yet enforced" labels and the
-    safeguard list; the run page shows the snapshot with "limit at
+31. The page shows values, built-in defaults, validation ranges, sources,
+    "not yet enforced" labels, the raise confirmation and the safeguard
+    list; the run page shows the snapshot with "limit at
     snapshot" and "allowed now".
 
 Gates: `mix format --check-formatted`, `mix compile --warnings-as-errors`,
@@ -594,12 +634,17 @@ dependency or domain":
   needed.
 - **Metadata-only database logging and spans** in every environment
   changes debugging for all queries and replaces the `opentelemetry_ecto`
-  handler. Codex requires an explicit decision before implementation
-  approval. Drafted as the proposed "C4 amendment (2026-10-12):
-  metadata-only database logging and spans" in
+  handler. Recorded as the "C4 amendment (2026-10-12): metadata-only
+  database logging and spans" in
   `docs/adr/0005-observability-wire-witness-anchoring.md` (OpenTelemetry
-  section), pending owner acceptance. The PostgreSQL server log is a
-  separate prerequisite named there.
+  section): Codex approved revision 2 at 7f6d97d; **accepted by the owner
+  on 2026-10-14**. The PostgreSQL server log is a separate prerequisite
+  named there (direction approved 2026-10-14; proposal pending).
+- **Per-run model-call cap becomes an owner setting** (OQ-2). ADR-0004's
+  "at most 20 model calls per agent run" becomes the built-in default of
+  `run_max_model_calls`; a one-line C4 note in
+  `docs/adr/0004-model-provider.md` records it. The 200-per-UTC-day limit,
+  C9 grants and pre-call reservation are unchanged.
 - **Placement in Agents**: within the accepted domain and ADR-0009
   conventions (append-only trigger, supersedes chain, tenant column,
   layering). A separate `Settings` domain would be an ADR-0009 §7
@@ -615,16 +660,24 @@ The domain-boundaries diagram is regenerated in C4-01a.
   prevented mechanically; citations bind the revision id.
 - The redactor rule can refuse legitimate long tokens in text; the error
   says which field to change.
-- The research bounds and the built-in guide are proposals. Neither is
-  accepted, published or merged as settled until the owner answers OQ-2
-  and OQ-5; implementation waits for those answers as well as entity PASS.
+- Owner-editable limits (OQ-2) let one run use more of the shared budgets:
+  a large `run_max_model_calls` can spend a day's 200 calls or a grant's
+  allocation in one run. Mitigated by the raise confirmation naming those
+  budgets, the frozen per-run snapshot, and the unchanged tenant-day,
+  grant and provider limits; the owner chose editability over a fixed
+  ceiling.
+- The built-in writing guide is neutral generic text (OQ-5); drafts sound
+  generic until the owner saves their own guide, which waits for the
+  server-log prerequisite.
 - Generated stored columns in a composite FK are standard PostgreSQL
   (RESTRICT only); the migration test confirms it on the pinned version. A
   constraint trigger is the fallback if not.
 
 ## 9. Owner questions
 
-These are the owner's decisions; this packet does not answer them.
+These are the owner's decisions. The owner answered all seven on
+2026-10-14 (America/Denver) in the private Claude session chat; the
+answers are quoted after each question and modeled in the sections named.
 
 - **OQ-1 Content sign-off and defaults.** Please enter the offering
   profile and booking link (the build plan S1 checkpoint), and approve
@@ -632,30 +685,55 @@ These are the owner's decisions; this packet does not answer them.
   (b) the editable part of research brief revision 2 (row F3b). Until you
   save each one, runs use the built-in version and a deploy can change it;
   after you save, only your edits change it. Accept?
+  **Answer (12:16 MDT): "accept the behavior now".** Built-in defaults
+  until saved; only the owner's revisions after that; offering and booking
+  link have no default. The texts of (a) and (b) are approved later in the
+  C4 implementation PR; per OQ-5, (a) is the neutral built-in guide. The
+  owner enters content after the server-log prerequisite closes.
 - **OQ-2 Bounds.** Confirm the fixed bounds in section 3.3, in particular
   the research ceilings (8 searches, 8 fetches, 10 sources, 48,000
   characters, 4,000 output tokens) and the job limit (600 s default,
   900 s bound).
+  **Answer (12:23 MDT): "i don't think there should be a hard ceiling that
+  no setting can change. that's not user-friendly."** Claude noted the
+  conflict with D-062 and proposed owner-raisable and lowerable limits with
+  sanity validation, audited confirmation and the per-run snapshot,
+  budgets and safeguards unchanged, and a one-line ADR-0004 note; the
+  owner said **"revise C4 that way"**. Modeled in C4-R10, sections 3.2,
+  3.3, 3.8, 7 and tests 7, 7a, 21. The fixed bounds above are withdrawn.
 - **OQ-3 No booking link.** When no booking link is saved (or it is
   withheld), should a first-touch email use your "questions first" ask
   (recommended; D-053 allows either), or should drafting stop until one is
   saved? B5's interested reply never drafts without one.
+  **Answer (12:48 MDT): "i choose (a)"** (questions first; Codex also
+  recommended (a)). Never an invented link or times, no fallback URL; B5
+  still requires a saved, usable link (D-025). C4-R9, test 21a.
 - **OQ-4 Retry.** A re-run of a failed run uses the settings it started
   with (recommended, so a re-run is the same job; current safeguards still
   apply); a fresh assignment uses the current settings. Accept, or should
   re-runs pick up current settings?
+  **Answer (13:03 MDT): "i choose (a)".** C4-R6.
 - **OQ-5 Publication.** The built-in writing guide is derived from your
   own words (D-053) and would sit in the public repository as code. Is
   that allowed, or should the built-in guide be a neutral synthetic text
   and your version entered only in the app?
+  **Answer (13:12 MDT): "i choose (b)".** The built-in guide is neutral
+  generic text; the owner's version is a saved revision, entered after the
+  server-log prerequisite. WritingGuide row.
 - **OQ-6 Reviewer access.** Reviewers can read settings text, read-only
   (recommended, since they judge drafts against the guide and offering).
   Accept? If not, reviewers see only hashes and revision numbers.
+  **Answer (13:15 MDT): "i choose (a)".** Reviewers read settings text,
+  read-only; admin and auditor access unchanged, auditor views audited and
+  fail closed. SettingsRevision field policy, test 6.
 - **OQ-7 Booking link and the real-data switch.** This packet treats your
   own booking URL like other real data: allowed only while the real-data
   switch is on, checked at every use. Should your booking link instead be
   usable regardless of the switch (it is your own business link, not
   prospect data)?
+  **Answer (13:16 MDT): "(a)".** The booking link is real data: usable only
+  while the real-data switch is on, checked at each use; otherwise withheld
+  and the first touch uses questions first. C4-R13 unchanged, test 22.
 
 ## 10. Gate record (to fill)
 
@@ -714,12 +792,33 @@ These are the owner's decisions; this packet does not answer them.
   Revision 2 adds the safe span handler and status, no `db.url`, named
   duration fields, fixed identifiers only, logger filter and Oban
   boundaries for automatic reports, full-span canary tests, and the
-  server log as a separate gated prerequisite. Pending Codex narrow
-  re-review, then owner acceptance; required before implementation
-  approval.
+  server log as a separate gated prerequisite. Revision 2 at 7f6d97d:
+  **APPROVE** by Codex for owner consideration (answer
+  `codex-c4-adr0005-rev2-answer`, in reply to
+  `m_1791849930000026234_68d25cfc`; report
+  `/Users/charles/.local/state/sdr-agent/handoff-20261008/tmp/codex-c4-adr0005-7f6d97d-review.md`,
+  private; sha256
+  `6f82940887d7ba9f7eba4d58f3135ff76b5cdd72d5511e9a52fcf2ff9251c79d`).
+  **Accepted by the owner on 2026-10-14** (about 11:48 MDT, standup item
+  5a). The owner first said: "no, i don't think the C4 logging amendment
+  is a good idea. for example, if we're using nondeterministic methods to
+  reproduce data there's a possibility we won't be able to reproduce the
+  original data. am i understanding this correctly?" Claude explained that
+  the durable stores (audit payloads, invocation rows, the witness store)
+  keep the original data and that only failed or rolled-back write values
+  are lost from logs, and gave the benefits. The owner then said: "no, i
+  accept the C4 logging amendment as-is."
 - PostgreSQL server-log prerequisite: open, owner-owned; gates saving
-  private settings content and turning on the real-data switch.
-- Owner acceptance of scope and answers to OQ-1..OQ-7: pending.
+  private settings content and turning on the real-data switch. Direction
+  approved 2026-10-14 (about 11:55 MDT, "i approve option 1's direction for
+  5b", after Codex's recommendation 4aff1677); Claude drafts the proposal,
+  Codex reviews.
+- Owner answers to OQ-1..OQ-7: **recorded 2026-10-14** (section 9).
+- Revision 3: owner-editable limits and the OQ answers. **Pending Codex's
+  narrow re-review** of the changed limits, authority and confirmation
+  contract (C4-R6, C4-R9..R11; sections 3.2, 3.3, 3.7, 3.8, 3.9, 7, 8;
+  tests 6, 7, 7a, 21, 21a, 31; obligation 6 note).
+- Owner scoped C4 G5: **pending**, after that re-review.
 - Not authorized by this packet: code, migrations, UI, real data, model
   calls.
 
@@ -767,14 +866,18 @@ implementation and its review.
    independent real PostgreSQL connections and bounded barriers, never a
    shared sandbox.
 6. **Limits.** Guarded counters enforce current code bounds, including on
-   direct domain calls and retries. Snapshots stay immutable; creation-time
+   direct domain calls and retries. *(Revision 3 note, 2026-10-14: the
+   owner's OQ-2 answer removes fixed code bounds; the counters enforce the
+   run's frozen budget on direct domain calls and retries, and grants,
+   tenant-day limits and provider quotas still apply. Subject to Codex's
+   narrow re-review; the rest of this obligation stands.)* Snapshots stay immutable; creation-time
    limits are reported separately from the current allowance. Token
    enforcement stops the next call, with one-call overshoot as stated.
    Research limits whose consumers are not built stay labelled not
    enforced. Proof and reply origins are exempt only from missing business
    content, never from budget, provider or proof authority.
 7. **Booking link.** The use-time guard and no-substitution are the
-   default pending OQ-7. The draft binding and capture re-check in
+   default pending OQ-7 *(answered (a) on 2026-10-14: the default stands)*. The draft binding and capture re-check in
    section 3.8 are a consumer prerequisite, not approval of a new Draft
    attribute: B1-05 or B5-03 submits that entity delta before implementing
    it, with switch-off tests at model input, draft persistence and
@@ -783,4 +886,6 @@ implementation and its review.
 
 Owner answers to OQ-1..OQ-7 are not assumed by this PASS. Built-in
 defaults stay synthetic and unpublished as owner content until the
-publication decision (OQ-5).
+publication decision (OQ-5). *(OQ-5 answered (b) on 2026-10-14: the
+built-in guide stays neutral and the owner's text is never in the
+repository.)*

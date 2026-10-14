@@ -14,7 +14,7 @@ in the MVP, and audit-chain anchoring to a private Git repository plus
 OpenTimestamps"). Details amended by Codex consultations 11 and 13. The R0
 amendment in the wire witness section (2026-10-12) is accepted. The C4
 database-logging amendment in the OpenTelemetry section (2026-10-12) is
-**proposed, pending owner acceptance**.
+accepted (2026-10-14).
 
 ## Context
 
@@ -100,14 +100,20 @@ resources or trace columns; S3 owns persisted correlation fields.
 
 #### C4 amendment (2026-10-12): metadata-only database logging and spans
 
-**Status: PROPOSED, pending owner acceptance.** Drafted by Claude for
+**Status: ACCEPTED.** The owner accepted this amendment on 2026-10-14
+(America/Denver, about 11:48 MDT), in the private Claude session chat,
+after first questioning whether values reproduced later might differ from
+the originals; the reply was "no, i accept the C4 logging amendment
+as-is." Codex approved revision 2 for owner consideration at 7f6d97d. The
+PostgreSQL server-log prerequisite below remains separate and open.
+Drafted by Claude for
 contract C4 (`docs/product/c4/readiness.md`, sections 3.6 and 7). Codex's
 round-2 entity review of that packet (PASS at a15cf8b, qualification 4)
 requires an explicit observability decision on this point before C4
 implementation is approved; the entity PASS is not acceptance of this
 amendment. Revision 2 answers Codex's review of revision 1 (1f88700,
 REQUEST_CHANGES, one security must-fix: the Ecto span error status).
-Nothing here is in force until the owner accepts it.
+It is in force for C4 implementation from its acceptance.
 
 **Context.**
 
@@ -179,7 +185,7 @@ Nothing here is in force until the owner accepts it.
    - Cons: hides every other debug log; trivially reverted per session;
      does nothing for spans or crash reports; not a reviewed control.
 
-**Decision (proposed).** Option 2.
+**Decision (accepted 2026-10-14).** Option 2.
 
 - **Sanitized fields** (the complete list; anything else is dropped):
   - `repo` (module name);
