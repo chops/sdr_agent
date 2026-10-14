@@ -15,9 +15,11 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   fixed, persistent `sdr_agent_calibration` (`SdrAgent.CalibrationConsole`);
   it is created if absent and migrated, and never dropped, reset or seeded.
   The endpoint listens only on 127.0.0.1:4124 and, active, serves only the
-  sign-in and `/admin` pages (`SdrAgentWeb.CalibrationConsole`). The model
-  provider must be the Fake, so no model server starts, and Oban never
-  executes jobs. The endpoint `secret_key_base` and the token signing
+  sign-in and `/admin` pages (`SdrAgentWeb.CalibrationConsole`). The
+  Runtime model provider must be the Fake, so no Runtime model server
+  starts, and Oban never executes jobs. Only `calibrate` starts a model
+  server: its own private, unnamed ClaudeCLI server for its one call (see
+  below). The endpoint `secret_key_base` and the token signing
   secret are per-machine values from
   `~/.local/state/sdr-agent/calibration/secrets`, generated on first use
   (`SdrAgent.CalibrationConsole.Secrets`) and never printed; the checked-in

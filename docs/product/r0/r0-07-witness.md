@@ -590,6 +590,12 @@ and ClaudeCLI's `staged/1` refuses later, in the **server** process. The
 console starts no model server. So `calibrate` uses its own orchestration;
 it does not go through `Runtime`, `SDR.Model` or a worker:
 
+> **Qualified at integration (2026-10-13).** "No model server" means the
+> console's Runtime: it serves with the Fake provider, and `check`,
+> `serve`, `bootstrap-admin` and `calibrate-recover` start no ClaudeCLI
+> server. `calibrate` alone starts one private, unnamed server (step 2),
+> for its one call, linked to the command.
+
 1. **Preflight** (no locks, no writes): pin verified and equal to the
    profile's version; witness store trusted; G-R0 selected (8.3);
    predecessor barrier clear (B4'); single-flight lock acquired (8.4);
@@ -708,11 +714,25 @@ head):
 | `completed`, `failed`, `unknown` (including invalid output) with no evidence or latch | finish: evidence (8.5), latch, run stop |
 | latched, run still running | run stop only |
 
+> **Qualified at integration (2026-10-13).** "Run stop" here means E1's
+> settlement of a **still-running** proof run. An already-terminal run
+> (for example one stopped by `stop_refused/3` after a typed refusal) keeps
+> its reason, failure link and finish time. The run is never restarted or
+> re-stopped.
+
 **Run terminal states:** a proof run ends `:succeeded` with the new
 `status_reason :calibration_latched` once its latch commits, whatever the
 model outcome (the outcome is in the evidence). It opens no attention
 Failure for a model-level failure. If the latch cannot commit, the run
-stays running for `calibrate-recover`. Proof rows never go through slice
+stays running for `calibrate-recover`.
+
+> **Qualified at integration (2026-10-13).** This applies to a
+> **still-running** eligible proof run. E1 settles it `:succeeded` /
+> `:calibration_latched`. An already-terminal run keeps its reason,
+> failure link and finish time (8.14.6). "Opens no attention Failure"
+> means E1 adds none. Ordinary settlement may already have opened one for
+> a model-level failure, such as a witness mismatch's critical item, and E1
+> neither erases nor resolves it. Proof rows never go through slice
 C's ordinary gate (it rejects proof dispositions by design).
 
 ### 8.5 Evidence artifact (R10-4)
@@ -822,6 +842,16 @@ separate promotion, with obligations (recorded in 8.11). These four
 contracts replace the corresponding text above.
 
 #### R11-1: durable single flight and quiescence
+
+> **Qualified at integration (2026-10-13).** This round-12 text predates
+> E4b and E4c. Read every "session" or "session id" here as the CLI's own
+> **process group** (`process_group_id`; E4b, because `ps` reports session
+> 0 on this host). The CLI is not "started in a new session": there is no
+> wrapper, and the Port child already leads its own group (E4c-1). Read the owner-attested quiescence *event* as the E4c-4
+> attestation: `calibration.owner_attested` first, then `attestation.json`
+> in the ticket. `owner_attested_at` stays null. The states are schema 3's
+> (E4c-2). The quiescence rules are 8.14.5's: there is no automatic
+> recovery.
 
 **Launch record.** The console lock directory (`run.lock`, created by
 `mkdir`, mode 0700) holds `record.json`, rewritten only by atomic
@@ -1031,6 +1061,10 @@ writer of `status_reason :calibration_latched`.
   refusal (no invocation) stops the run through B1's one-Failure receipt
   (`:model_not_admitted`), and so does a launch refusal. A proof run never
   ends `:succeeded` without its latch.
+  - **Qualified at integration (2026-10-13).** For a calibration run, the
+    stop is not admission's. `admit_launch` is run-neutral (8.13 item 8).
+    `calibrate` stops the run itself, with `SDR.Model.stop_refused/3` and
+    the typed receipt, before E1 (8.14.9). E1 then preserves that reason.
 - **Tests:** ordinary `:succeed` and caller-supplied reasons cannot set
   `:calibration_latched`; non-proof, foreign, operated or unlatched
   attempts are refused; event rollback; already-terminal recovery;
@@ -1514,6 +1548,8 @@ m_1791916203000022140_a452a379, report
 GREEN, exemption, spend, merge and promotion are not approved.
 - **Non-blocking, for integration:** qualify the older 8.11 and run-stop
   text. Admission never stops a calibration run; d3 settles it through E1.
+  Addressed at integration (2026-10-13): see the qualifications in 8.2,
+  8.10 R11-1, R11-2, 8.11 and 8.14.5.
 
 History:
 - The first d1b note was **NEEDS-REVIEW** (Codex 01a13677; reviewed note
@@ -2014,6 +2050,11 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
      proof (OQ-E3) is recorded. A compile-time `@automated_quiescence
      false` is changed only by a reviewed PR after that acceptance. Until
      then there is no automatic `{:quiescent, …}` recovery.
+     - **Qualified at integration (2026-10-13).** As built, the code has no
+       automatic-quiescence path at all, so there is no flag to flip:
+       `Calibrate.recover/2` always requires `--owner-verified-stopped`
+       and `STOPPED` for sent history. After OQ-E3, adding that path would
+       be a reviewed code change.
    - **Observed live work refuses:** a live root or group members refuse
      `:calibration_not_quiescent` even with the flag and `STOPPED`.
      - Live work is observed **before** the attestation event and any
@@ -2037,7 +2078,7 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 | Launch record writer (`calibrate`) | Existing artifact | The command is the single issuer of synchronous record operations; no observer hand-off | No concurrent record writer. While the owner VM lives, recovery refuses `:owner_alive` | Command |
 | Private server reaper and ClaudeCLI cleanup | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | No `identity:` guard; cleanup as for ordinary calls; identity is observation only | Server |
 | `ModelProvider.calibration_call/3` | New entry (seam-only) | Authoritative target checks, then the shared helper | No provider call or write on refusal; ordinary `complete/2` unchanged | Calling process |
-| AgentRun (`:proof`) | Existing | Created and started by `calibrate` with the 8.14.9 attributes. With no invocation: stopped by `SDR.Model.stop_refused/3` with the reservation receipt, or `cancel_run/2` without one. Refused at launch: stopped by `stop_refused/3` with the launch receipt before E1 (8.14.9; corrects the 8.13 clause) | Never left running by `calibrate`; E1 latches and preserves an already-terminal run's reason, cause and finish time; E1 settles a still-running run | Existing run actions as the tenant's `agent_runtime` |
+| AgentRun (`:proof`) | Existing | Created and started by `calibrate` with the 8.14.9 attributes. With no invocation: stopped by `SDR.Model.stop_refused/3` with the reservation receipt, or `cancel_run/2` without one. Refused at launch: stopped by `stop_refused/3` with the launch receipt before E1 (8.14.9; corrects the 8.13 clause) | `calibrate` never releases its claim while a required run stop failed: it reports the hard stop (`:calibration_run_stop_failed`) and keeps the record, the running run and the predecessor barrier for owner recovery (qualified at integration, 2026-10-13; replaces "never left running"). E1 latches and preserves an already-terminal run's reason, cause and finish time; E1 settles a still-running run | Existing run actions as the tenant's `agent_runtime` |
 | Console `calibrate`, `calibrate-recover` | Existing task, new subcommands | 8.14.4 and 8.14.5; zero-target `claimed` recovery is a hard conflict in R0 (narrows E4c-2) | Single flight; typed confirmations; hard stops kept; one launch, no retry | Owner; `agent_runtime` |
 | LaunchRecord, Authority, `recover_calibration`, `finish_calibration`, Evidence v1, Outcome, Isolation | Existing | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Used as approved | As approved |
 
@@ -2045,8 +2086,15 @@ This is 8.4 and E4c-2/3/4/5, with the owner gates kept.
 - **ADR:** the accepted basis is ADR-0005. The pending E4c-7 amendment adds
   the launch receipt, the single-writer rule, the wrapper and the OQ-E3 gate for the
   owner.
+  - **Drafted at integration (2026-10-13):** ADR-0005, "R0-07 calibration
+    harness amendment", **PROPOSED**. It awaits Codex review and the
+    owner's acceptance. OQ-E3 is not accepted, and STOPPED stays required.
 - **Diagram:** the console → private server → command receipt flow is evaluated at
   the integrated review.
+  - **Added at integration (2026-10-13):**
+    `docs/architecture/calibration-runtime.md` and `.mmd`, hand-authored.
+    The generated diagrams are unchanged. It shows the conditional private
+    server, authority, receipt, file barrier, E1 and recovery edges.
 
 #### 8.14.8 d3c addendum: the bounded observation and the evidence document (proposed)
 
@@ -3156,7 +3204,12 @@ result known, before any reservation (rows 2, 4 and 5).
 - **Refusal category:** `:calibration_grant_mismatch` uses the
   calibration/provider-error category, stops the run as
   `:model_not_admitted`, and goes through the same receipt validator at
-  reservation and launch. The preflight `:calibration_grant_unavailable`
+  reservation and launch.
+  - **Qualified at integration (2026-10-13).** "Stops the run" is the
+    outcome, not admission's own act. Admission is run-neutral (8.13);
+    `calibrate` performs the stop through `SDR.Model.stop_refused/3` with
+    that receipt, before E1 (8.14.9). If that stop fails, the result is the
+    hard stop `:calibration_run_stop_failed`, with the claim kept. The preflight `:calibration_grant_unavailable`
   creates no invocation and no Failure.
 - **Recovery:** malformed recorded authority is reported honestly and the
   owner may latch its historical failed evidence; missing or duplicated

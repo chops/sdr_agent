@@ -26,8 +26,13 @@
 # the fixed, persistent sdr_agent_calibration on the local devenv Postgres
 # (localhost:5520). The database is created if absent and migrated; there is
 # no reset, drop or seed path. It listens only on 127.0.0.1:4124 (never the
-# dev port 4120 or the smoke port 4122) and starts no model server: the model
-# provider is the Fake, and no pinned CLI path is passed on. Its session
+# dev port 4120 or the smoke port 4122), and only serve listens. Its Runtime
+# starts no model server: the model provider is the Fake, and this script
+# passes no pinned CLI path on. check, serve, bootstrap-admin and
+# calibrate-recover start no ClaudeCLI server at all; calibrate alone starts
+# one private, unnamed ClaudeCLI server for its single attended call, on the
+# app's own verified pinned CLI, and stops it when the command ends (R0-07
+# packet 8.2 and 8.14.1). Its session
 # and token signing secrets are its own, never the checked-in test values:
 # every command creates them on first use in
 # ~/.local/state/sdr-agent/calibration/secrets (0700 directory, 0600 file)
