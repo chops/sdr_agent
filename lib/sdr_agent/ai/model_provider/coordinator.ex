@@ -69,6 +69,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   @lease_poll_ms 50
   @receipt_grace_ms 100
   @drain_timeout_ms 30_000
+  @replace_retry_ms 1_000
 
   ## API
 
@@ -124,7 +125,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
     state = %{
       boot_id: Ecto.UUID.generate(),
-      server_fun: Keyword.get(opts, :server, &default_server/1),
+      server_fun: Keyword.get(opts, :server, &SdrAgent.AI.ModelProvider.Runtime.server_options/1),
       cleanup_wait_ms:
         min(Keyword.get(opts, :cleanup_wait_ms, @max_cleanup_wait_ms), @max_cleanup_wait_ms),
       faults: Keyword.get(opts, :faults, []),
@@ -156,12 +157,6 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     end
   end
 
-  defp default_server(_profile_id) do
-    :sdr_agent
-    |> Application.get_env(ClaudeCLI, [])
-    |> Keyword.take([:timeout, :executable])
-  end
-
   @impl true
   def handle_continue(:boot, state) do
     case Kernel.singleton_tenant_id() do
@@ -183,9 +178,18 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
     case result do
       {:ok, state} -> after_boot(state)
-      {:error, state} -> state
+      {:error, state} -> retry_replacement(state)
     end
   end
+
+  # No server is running and none is switching: a held replacement is
+  # retried (a server can die even before its init returns).
+  defp retry_replacement(%{server: nil, op: nil} = state) do
+    Process.send_after(self(), :replace, @replace_retry_ms)
+    state
+  end
+
+  defp retry_replacement(state), do: state
 
   defp after_boot(state) do
     case pending_switch(state) do
@@ -492,10 +496,14 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     do: {:noreply, reconcile(state, expected)}
 
   def handle_info(:boot, state), do: {:noreply, state, {:continue, :boot}}
+
+  def handle_info(:replace, %{server: nil, op: nil, start: %{}} = state),
+    do: {:noreply, server_down(state)}
+
   def handle_info(_message, state), do: {:noreply, state}
 
-  @impl true
   if @test_seams do
+    @impl true
     def handle_call({:test_run, fun}, _from, state),
       do: {:reply, fun.(%{boot_id: state.boot_id}), state}
   end
@@ -698,7 +706,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
     case start_new(state, :replacement, state.start.profile_id, nil) do
       {:ok, state} -> reconcile(state, :boot)
-      {:error, state} -> state
+      {:error, state} -> retry_replacement(state)
     end
   end
 

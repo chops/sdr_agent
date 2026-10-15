@@ -19,6 +19,7 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceTest do
   alias SdrAgent.Agents.Admission.Refused
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.AgentsFixtures
+  alias SdrAgent.Test.CoordinatorHarness
   alias SdrAgent.Audit
   alias SdrAgent.Clock
   alias SdrAgent.Operations.Failure
@@ -34,6 +35,8 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceTest do
     Clock.freeze(@now)
     on_exit(&Clock.unfreeze/0)
     tenant = bootstrap!()
+    # C2-02b2α: the switch finalizers run in the coordinator (manual mode).
+    CoordinatorHarness.start!()
     admin = human(:admin, tenant)
 
     grant =
@@ -114,7 +117,8 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceTest do
 
   defp complete!(ctx, switch) do
     assert {:ok, done} =
-             Agents.complete_profile_switch(
+             CoordinatorHarness.finalize(
+               :complete_profile_switch,
                switch,
                %{server_generation: switch.server_generation},
                actor: ctx.runtime
@@ -125,11 +129,12 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceTest do
 
   defp transition!(ctx, action, switch) do
     assert {:ok, done} =
-             apply(Agents, action, [
+             CoordinatorHarness.finalize(
+               action,
                switch,
                %{server_generation: switch.server_generation, failure_reason: "test"},
-               [actor: ctx.runtime]
-             ])
+               actor: ctx.runtime
+             )
 
     done
   end

@@ -21,11 +21,14 @@ defmodule SdrAgent.SDR.ProfileSwitchSettlementTest do
   alias SdrAgent.AdmissionFixtures
   alias SdrAgent.Agents
   alias SdrAgent.AgentsFixtures
+  alias SdrAgent.Test.CoordinatorHarness
   alias SdrAgent.Operations
   alias SdrAgent.SDR.AgentWorker
   alias SdrAgent.SDR.StaleRunSweeper
 
   setup ctx do
+    # C2-02b2α: the switch finalizers run in the coordinator (manual mode).
+    CoordinatorHarness.start!()
     AgentsFixtures.grant!(ctx.tenant, %{}, ctx.admin)
     AdmissionFixtures.admit_tuples!()
     %{run: run, operation: operation, job: job} = assign!(ctx, "01")
@@ -193,7 +196,10 @@ defmodule SdrAgent.SDR.ProfileSwitchSettlementTest do
     # The reply row must be reserved while no switch is open: close the
     # setup's switch, reserve, then open a second one.
     {:ok, _} =
-      Agents.fail_profile_switch(ctx.switch, %{server_generation: 1, failure_reason: "test"},
+      CoordinatorHarness.finalize(
+        :fail_profile_switch,
+        ctx.switch,
+        %{server_generation: 1, failure_reason: "test"},
         actor: ctx.runtime
       )
 

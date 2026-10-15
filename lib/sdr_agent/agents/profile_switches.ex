@@ -211,23 +211,24 @@ defmodule SdrAgent.Agents.ProfileSwitches do
   ## Complete, fail, block
 
   @doc """
-  MRT: `action` (`:complete`, `:fail` or `:block`) on `switch` for
-  `server_generation` (and `failure_reason` for fail and block).
+  MRT, in the registered coordinator only (C2-02b2α): `action`
+  (`:complete`, `:fail` or `:block`) on `switch` for `server_generation`,
+  `boot_id` and `start_id` (and `failure_reason` for fail and block), as one
+  bounded ledger call (`budget_ms:`, at most 2 s).
   """
   def transition(action, %ModelProfileSwitch{id: switch_id}, attrs, opts)
       when is_map_key(@results, action) do
     actor = Keyword.get(opts, :actor)
     attrs = Map.new(attrs)
 
-    LedgerCall.run(
-      fn step ->
-        guard(action, switch_id, actor, fn ->
-          with :ok <- coordinator(actor),
-               do: runtime_transition(action, switch_id, attrs, actor, step)
-        end)
-      end,
-      opts
-    )
+    LedgerCall.run(&guarded_transition(action, switch_id, attrs, actor, &1), opts)
+  end
+
+  defp guarded_transition(action, switch_id, attrs, actor, step) do
+    guard(action, switch_id, actor, fn ->
+      with :ok <- coordinator(actor),
+           do: runtime_transition(action, switch_id, attrs, actor, step)
+    end)
   end
 
   # C2-02b2α: executed only in the registered coordinator (section 1a).
