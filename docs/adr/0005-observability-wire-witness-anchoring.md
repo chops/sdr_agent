@@ -276,7 +276,9 @@ It is in force for C4 implementation from its acceptance.
 
 **Acceptance.** Recorded in this amendment's Status paragraph above (owner,
 2026-10-14). The server-log prerequisite's direction was approved the same
-day; the prerequisite itself stays open until its proposal is accepted.
+day. The prerequisite itself stays open until its own test, activation
+check and retention decision pass, as the gate above requires; accepting
+its proposal alone does not close it.
 
 ### Wire witness (S12)
 
