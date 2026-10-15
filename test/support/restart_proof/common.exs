@@ -13,13 +13,18 @@ defmodule SdrAgent.RestartProof do
 
   # Refuses anything but the owned synthetic database on the devenv port,
   # the test build and the Fake provider; then takes a real connection.
-  def connect!(database) do
-    config = Repo.config()
-    true = Regex.match?(~r/\Asdr_agent_test_rp[0-9a-f]{10}\z/, database)
+  def validate_target!(database) do
+    config = Application.fetch_env!(:sdr_agent, Repo)
+    true = Regex.match?(SdrAgent.RestartProof.Harness.database_pattern(), database)
     ^database = config[:database]
     "localhost" = config[:hostname]
     5520 = config[:port]
     :test = Mix.env()
+    config
+  end
+
+  def connect!(database) do
+    validate_target!(database)
     SdrAgent.AI.ModelProvider.Fake = Application.fetch_env!(:sdr_agent, :model_provider)
     :ok = Sandbox.checkout(Repo, sandbox: false)
     Sandbox.mode(Repo, {:shared, self()})
@@ -43,8 +48,10 @@ defmodule SdrAgent.RestartProof do
         "id" => a.id,
         "key" => to_string(a.key),
         "applies_to" => Enum.map(a.applies_to, &to_string/1),
+        "profile_id" => a.profile_id && to_string(a.profile_id),
         "attempts" => a.attempts,
         "available_from" => a.available_from && DateTime.to_iso8601(a.available_from),
+        "available_until" => a.available_until && DateTime.to_iso8601(a.available_until),
         "released_at" => a.released_at && DateTime.to_iso8601(a.released_at),
         "grant_revision" => a.grant_revision
       }

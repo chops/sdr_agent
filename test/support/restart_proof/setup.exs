@@ -22,10 +22,16 @@ admin = AuditCase.human(:admin, tenant)
       expires_at: ~U[2026-11-06 00:00:00.000000Z],
       allocations: [
         %{key: :b1, applies_to: [:b1], attempts: 2},
-        %{key: :b5, applies_to: [:b5], attempts: 1},
+        %{
+          key: :b5,
+          applies_to: [:b5],
+          attempts: 1,
+          available_until: ~U[2026-11-05 00:00:00.000000Z]
+        },
         %{
           key: :workshop,
           applies_to: [:b2],
+          profile_id: :claude_cli_sonnet,
           attempts: 1,
           available_from: ~U[2026-11-01 00:00:00.000000Z]
         }
@@ -35,7 +41,9 @@ admin = AuditCase.human(:admin, tenant)
   )
 
 {:ok, grant} =
-  Agents.release_allocation(grant, %{expected_revision: 1, key: :workshop}, actor: admin)
+  Agents.release_allocation(
+    grant,
+    %{expected_revision: 1, key: :workshop, profile_id: :claude_cli_sonnet}, actor: admin)
 
 assignment = AgentsFixtures.running_run(tenant, usage_origin: :assignment)
 reply = AgentsFixtures.running_run(tenant, usage_origin: :reply)

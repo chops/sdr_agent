@@ -45,8 +45,23 @@ checks = %{
   "workshop_release_persisted" => not is_nil(by_key["workshop"].released_at),
   "setup_charges_still_counted" => before == %{"b1" => 1, "b5" => 1, "workshop" => 0},
   "setup_charges_bound_to_their_allocations" =>
-    setup["invocations"]["b1"]["allocation_id"] == by_key["b1"].id and
-      setup["invocations"]["b5"]["allocation_id"] == by_key["b5"].id,
+    Enum.all?(["b1", "b5"], fn key ->
+      saved = setup["invocations"][key]
+
+      persisted =
+        SdrAgent.Agents.ModelInvocation
+        |> Ash.Query.filter(id == ^saved["id"])
+        |> Ash.read!(authorize?: false)
+
+      case persisted do
+        [%{allocation_id: allocation_id, grant_id: grant_id}] ->
+          allocation_id == saved["allocation_id"] and grant_id == setup["grant_id"] and
+            allocation_id == by_key[key].id
+
+        _ ->
+          false
+      end
+    end),
   "full_b5_refused_exactly" =>
     match?({:error, %Refused{reason: {:budget_exhausted, :allocation}}}, b5_full),
   "next_b1_charged_to_b1" =>
