@@ -1,9 +1,11 @@
 # C2-02 (#52) in-app profile switch: proposed slices (draft)
 
-**Status:** draft 1, 2026-10-15, for Codex's review. No code.
+**Status:** draft 2, 2026-10-15, for Codex's review and the Oct 15 gate.
+No code. Draft 1 (`95b5cdd`) was NEEDS-REVIEW: split b; narrow the
+no-call claim; correct the estimate.
 
-**Tripwire 1 (growth):** C2-02 is one backlog story, but it needs three
-PRs. The owner is told the same day.
+**Tripwire 1 (growth):** C2-02 is one backlog story, but it needs four
+PRs (a, b1, b2, c). The owner is told the same day.
 
 **Where it starts:**
 - The entity delta was accepted (C2-01, #51, closed). It is in the R0
@@ -30,34 +32,83 @@ PRs. The owner is told the same day.
 server and Reaper death, restart, and failed-activation tests
 (REQ-R0-5, 6 and 7; packet section 4 "Switch").
 
+## Entity coverage
+
+**Entity Model trigger:** yes. It is covered by the existing independent
+PASS for the accepted C2 rows at `dc01a65`, subject to exact scope
+mapping (Codex, 560c37bc).
+- **The rows covered,** in R0 readiness section 2: ModelProfileSetting,
+  ModelProfileSwitch and Actor (`:model_runtime`), with their
+  qualifications. Slice a implements them as written.
+- **When a narrow delta is needed first:** any new field or marker,
+  changed generation identity, transition, lock or authorization
+  semantics, or wider runtime authority. Only that change is reviewed,
+  not the whole domain.
+
 ## Slices
 
-| Slice | Scope | Main tests | Size |
-|---|---|---|---|
-| **C2-02a. The records** | `ModelProfileSetting` (a singleton per tenant; `desired_profile_id`, a non-fake registry id; `revision`) and `ModelProfileSwitch` (statuses pending, completed, failed and blocked; `server_generation`; at most one pending or blocked per tenant, a partial unique identity). The `:model_runtime` actor type. Actions: `request` and `resolve_blocked` (human admin, current role re-read); `complete`, `fail` and `block` (`model_runtime` only, idempotent on `(id, server_generation)`, stale generation refused). Audit events `model.profile.switch_*`; the migration; the lock order "setting row → chain head" | Allow and deny for every action and actor. Stale revision; `to` equal to the current desired; a second pending switch. Stale generation; idempotent repeats. Completion updates the setting and revision in the same transaction. History is never relabelled | about 1 day |
-| **C2-02b. The switch** | Orchestration: fence admission; drain prepared, reserved, queued and in-flight work within a bounded wait (finished or refused); stop the old server; start the new profile; no-call preflight (pinned binary present, version reported); then complete. On activation failure with clean work, restart the old profile and fail. With unconfirmed work or a held Reaper lease, block, with admission closed. A call never launches under another profile (launch admission's existing refusal) | Queued old-profile calls finish or are refused. Caller, server and Reaper death mid-switch. Failed activation, clean or unconfirmed. No model call during a switch. Concurrent requests. All on independent connections, in both orders where it matters | 1.5 to 2 days |
-| **C2-02c. Restart and status** | At boot the server starts with `ModelProfileSetting.desired_profile_id`, replacing `ModelProfiles.default_real()`. A still-pending switch becomes failed (`interrupted_by_restart`), or blocked if the lease shows unconfirmed work. `Runtime.status/0` gains `desired_profile`, `effective_profile` and `switch` | Restart restores the desired profile. An interrupted switch at boot. Status makes no model call | about half a day |
-| **R0-05 (#53). The admin page** | Status (configured and effective profile, CLI version, last check) and the switch button with confirmation | LiveView: renders without a model call; confirmation; non-admins denied; the owner tries it | about 1 day |
+Each slice has a **safe exit:** when it merges alone, no switch is
+advertised, no real provider is activated, and behavior on main stays
+correct. The final integration matrix is required before R0-05.
 
-**Order:** a → b → c → R0-05. Slice b depends on a. Slice c can be
-built alongside b once a merges, since its boot path is separate.
+| Slice | Scope | Main tests | Safe exit | Author size |
+|---|---|---|---|---|
+| **a. The records** | ModelProfileSetting and ModelProfileSwitch, exactly the accepted rows; the `:model_runtime` actor; the actions (`request` and `resolve_blocked` for a human admin with the role re-read; `complete`, `fail` and `block` for `model_runtime` only, idempotent on `(id, server_generation)`, stale generation refused); `model.profile.switch_*` events; the migration; the lock order "setting row → chain head" | Allow and deny for every action and actor; stale revision; `to` equal to the current desired; a second pending switch; stale generation; idempotent repeats; completion updates the setting and revision atomically; history never relabelled | Records and actions only. Nothing calls `request`, there is no orchestrator and no UI. `desired_profile/0` is unchanged | about 1 day |
+| **b1. Fence and drain** | The admission fence: committed switch state observed in the reservation and launch order, not only an in-memory health check, so an old prepared caller can't race a later reservation. Then a bounded drain of prepared, reserved, queued and in-flight work: finished or refused under the accepted rules, never moved to another profile or grant. Reserved profile ids stay immutable | Concurrent reservations versus a committed fence, on independent connections in both orders; queued old-profile work finishes or is refused within the bound; caller and server death during the drain; nothing is held under a ledger lock while waiting | The fence can only be closed by a switch request, which slice a's actions alone don't start, so admission stays open in normal use | about 1 to 1.5 days |
+| **b2. Activation and rollback** | Coordinator and server generation ownership and handoff. Stop the old server, start the new profile, and run the no-call preflight (pinned binary, version), all outside the setting and chain-head transactions. Then short, generation-guarded `complete`. On failure with clean work, restart the old profile and `fail`. With unconfirmed work or a held Reaper lease, `block`, keep admission closed, and use the accepted attended resolution, never an automatic unlock or a rollback over a held lease | Stale-generation replies; clean failed activation; unconfirmed candidate or old work; Reaper death; no model call during a switch; concurrent requests | Integrated with b1; still no UI. Reachable only through the domain API in tests | about 1 to 1.5 days |
+| **c. Restart and status** | At boot, start with the setting's `desired_profile_id`. A pending switch becomes failed (`interrupted_by_restart`), or blocked if the lease shows unconfirmed work; a restart is not proof that earlier external work stopped. `Runtime.status/0` gains `desired_profile`, `effective_profile` and `switch` | Restart restores the desired profile; an interrupted switch at boot, clean and unconfirmed; status makes no model call | Depends on b2's generation and coordinator interface. Preparation while b2 is in review counts as preparation only, integrated in order | about half a day to 1 day |
+| **R0-05 (#53). The admin page** | Status and the switch button with confirmation | LiveView: no model call; confirmation; non-admins denied; the owner tries it | Last, after the integrated switch and status | about 1 day |
 
-## Forecast effect (draft, for the Oct 15 gate review)
+**Order:** a → b1 → b2 → c → R0-05. It is serial for one author. Work on
+c while b2 is in review is preparation, not extra capacity.
 
-- **Build:** about 3.5 to 4.5 days of Claude-lane work for C2-02 plus
-  R0-05, with one review round per slice. Starting Oct 15 that gives
-  **Oct 19 at the earliest, more likely Oct 20 to 21.** This assumes
-  Bandit clears promptly, since every slice needs a merge.
-- **The R0-06 proof itself makes no model call** (REQ-R0-11: the owner
-  switches Opus → Sonnet → Opus in the app). So G-R0's expiry (Oct 18,
-  23:59 MDT) limits only calibration, which is on Oct 15. It doesn't
-  limit the switch proof, as long as the calibration evidence stays
-  valid for the same tuple.
+## Forecast effect (provisional, low confidence, for the Oct 15 gate)
 
-## Questions for Codex
+- **Author time:** 4.5 to 6 days for C2-02 plus R0-05, with a = 1, b1 =
+  1 to 1.5, b2 = 1 to 1.5, c = 0.5 to 1 and R0-05 = 1.
+- **Plus time not counted in that sum:** each slice's review,
+  correction and CI round, so this doesn't overlap with review capacity.
+- **Also still ahead of R0-06:**
+  - R0-04 (contract in review, then about 1 to 1.5 days);
+  - C9-04 and C9-06 evidence (C9-06's Home test waits for C1-02 to
+    merge);
+  - the Bandit decision and fix;
+  - integration;
+  - the owner's try.
+- **Window:** starting Oct 15, R0-06 is **Oct 20 at the earliest, more
+  plausibly Oct 21 to 22.** This is a conditional planning window, not a
+  promise. While Bandit is unresolved there is no dependable date.
+  Protected S6 is not spent silently.
+- **What G-R0's expiry does and doesn't gate:**
+  - **R0-06 isn't a no-call story overall.** It includes calibration (2
+    attempts per profile under G-R0), Codex's independent review of the
+    captured exchanges, and the exact tuple promotion.
+  - **Calibration is scheduled for Oct 15, not done.** It is gated, and
+    its evidence must be valid for each exact tuple.
+  - **The rest can come after expiry.** Once valid evidence exists, the
+    remaining switch demonstration (Opus → Sonnet → Opus in the app) and
+    its preflight and UI checks make no model call. They can finish
+    after G-R0 expires (Oct 18, 23:59 MDT) without an extra call.
+  - **Any real attempt still needed after expiry** requires an
+    owner-authorized grant change or a new grant. There is no automatic
+    renewal, borrowing or rerun.
 
-1. Are three slices the right cut, or should b be split further (fence
-   and drain, then activation and rollback)?
-2. Does C2-02a need a fresh entity check against the accepted rows, or is
-   the existing PASS enough, given no change from the packet?
-3. Is the R0-06 reading (the switch proof needs no G-R0 call) right?
+## Answers recorded (Codex, 560c37bc)
+
+1. Split b into b1 (fence and drain) and b2 (activation and rollback).
+   Keep each slice's death and generation tests with the behavior they
+   protect.
+2. Don't repeat an unchanged entity review. The `dc01a65` PASS covers
+   the accepted rows; a narrow delta is needed only if the contract
+   changes.
+3. The remaining switch demonstration can be no-call after valid
+   pre-expiry calibration, review and promotion. R0-06 as a whole is not
+   no-call.
+
+The implementation obligations from that review bind slices b1, b2 and
+c. They cover:
+- the fence's linearization;
+- no external waiting under ledger locks;
+- generation ownership and recovery;
+- never rolling back over a held lease;
+- safe staging.
