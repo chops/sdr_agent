@@ -68,13 +68,13 @@ c while b2 is in review is preparation, not extra capacity.
 
 - **Author time:** 4.5 to 6 days for C2-02 plus R0-05, with a = 1, b1 =
   1 to 1.5, b2 = 1 to 1.5, c = 0.5 to 1 and R0-05 = 1.
-- **Reforecast (Oct 15, end of day):**
+- **Reforecast (Oct 15, 05:30 MDT, before calibration):**
   - **Done:** a (#159) and b1 (#160) are Codex-approved, unmerged
     (owner acceptance and Bandit). b1 took about 2 days with two
     CHANGES REQUESTED rounds (tripwire 2).
   - **Remaining author time:** b2α 1.5 to 2, b2β 1, c 0.5 to 1, R0-05 1,
-    and R0-04 1 to 1.5: **5 to 6.5 days** from Oct 16, review rounds not
-    counted.
+    and R0-04 1 to 1.5: **5 to 6.5 days** from Oct 15 after calibration. Review rounds
+    (b1 needed two) add to that, which is why the earliest R0-06 is Oct 22.
 - **Plus time not counted in that sum:** each slice's review,
   correction and CI round, so this doesn't overlap with review capacity.
 - **Also still ahead of R0-06:**
