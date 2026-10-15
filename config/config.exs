@@ -114,6 +114,11 @@ config :sdr_agent,
 config :sdr_agent, SdrAgentWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
+  # ADR-0008 amendment (EEF-CVE-2026-105659): HTTP/2 is off on every Bandit
+  # listener. The adapter passes only each scheme's list to Bandit, so the
+  # option lives inside `http:` (and inside any `https:`); environment files
+  # deep-merge into it, and code that rebuilds a scheme list reapplies it.
+  http: [http_2_options: [enabled: false]],
   render_errors: [
     formats: [html: SdrAgentWeb.ErrorHTML, json: SdrAgentWeb.ErrorJSON],
     layout: false
