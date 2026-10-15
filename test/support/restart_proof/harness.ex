@@ -186,47 +186,84 @@ defmodule SdrAgent.RestartProof.Harness do
         env: env
       ])
 
-    collect(port, [], System.monotonic_time(:millisecond) + deadline, grace)
+    until = System.monotonic_time(:millisecond) + deadline
+    await_output(port, until, grace, fn -> os_kill(port) end)
   end
 
-  defp collect(port, acc, until, grace) do
-    left = max(until - System.monotonic_time(:millisecond), 0)
+  @doc """
+  Collects `port`'s output until its exit or the absolute monotonic
+  `until` (ms). The deadline is checked before every message, so queued
+  or continuous output never extends it. Past the deadline, `kill` runs.
+  The exit is then awaited until one absolute grace deadline (`grace` ms
+  after the kill), which output does not extend either.
 
-    receive do
-      {^port, {:data, data}} -> collect(port, [acc | data], until, grace)
-      {^port, {:exit_status, 0}} -> {:ok, IO.iodata_to_binary(acc)}
-      {^port, {:exit_status, status}} -> {:exit, status, IO.iodata_to_binary(acc)}
-    after
-      left -> kill(port, acc, grace)
+  The result is `:confirmed` only when the exit status arrives, including
+  one already queued. Public for the harness's own tests, which pass a
+  reference as `port` and a stub `kill`.
+  """
+  def await_output(port, until, grace, kill) do
+    collect(port, [], until, grace, kill)
+  end
+
+  defp collect(port, acc, until, grace, kill) do
+    left = until - now()
+
+    if left <= 0 do
+      expire(port, acc, grace, kill)
+    else
+      receive do
+        {^port, {:data, data}} -> collect(port, [acc | data], until, grace, kill)
+        {^port, {:exit_status, 0}} -> {:ok, IO.iodata_to_binary(acc)}
+        {^port, {:exit_status, status}} -> {:exit, status, IO.iodata_to_binary(acc)}
+      after
+        left -> expire(port, acc, grace, kill)
+      end
     end
   end
 
-  defp kill(port, acc, grace) do
-    killed? =
-      case Port.info(port, :os_pid) do
-        {:os_pid, pid} ->
-          {_, status} =
-            System.cmd("kill", ["-KILL", Integer.to_string(pid)],
-              env: ChildEnv.cmd([]),
-              stderr_to_stdout: true
-            )
-
-          status == 0
-
-        nil ->
-          false
-      end
-
-    confirmed = if killed?, do: await_exit(port, acc, grace), else: :unconfirmed
+  defp expire(port, acc, grace, kill) do
+    kill.()
+    {confirmed, acc} = await_exit(port, acc, now() + grace)
     {:timeout, confirmed, IO.iodata_to_binary(acc)}
   end
 
-  defp await_exit(port, acc, grace) do
+  # An exit status already in the mailbox confirms the exit, whatever
+  # output is queued before it; otherwise output is collected only until
+  # the same absolute deadline.
+  defp await_exit(port, acc, until) do
     receive do
-      {^port, {:data, data}} -> await_exit(port, [acc | data], grace)
-      {^port, {:exit_status, _}} -> :confirmed
+      {^port, {:exit_status, _}} -> {:confirmed, acc}
     after
-      grace -> :unconfirmed
+      0 ->
+        left = until - now()
+
+        if left <= 0 do
+          {:unconfirmed, acc}
+        else
+          receive do
+            {^port, {:exit_status, _}} -> {:confirmed, acc}
+            {^port, {:data, data}} -> await_exit(port, [acc | data], until)
+          after
+            left -> {:unconfirmed, acc}
+          end
+        end
     end
   end
+
+  # SIGKILL with the scrubbed environment. Whether it worked is not
+  # trusted: only the port's exit status confirms the child is gone.
+  defp os_kill(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} ->
+        System.cmd("kill", ["-KILL", Integer.to_string(pid)],
+          env: ChildEnv.cmd([]),
+          stderr_to_stdout: true
+        )
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp now, do: System.monotonic_time(:millisecond)
 end

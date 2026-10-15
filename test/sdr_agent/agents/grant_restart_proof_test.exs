@@ -145,6 +145,53 @@ defmodule SdrAgent.Agents.GrantRestartProofTest do
   end
 
   describe "the bounded child" do
+    # Typed port messages to this process, with a reference as the port and
+    # a stub kill: no OS process is involved.
+    test "an expired deadline wins over output and an exit already queued" do
+      port = make_ref()
+      parent = self()
+      send(self(), {port, {:data, "late output"}})
+      send(self(), {port, {:exit_status, 0}})
+      until = System.monotonic_time(:millisecond) - 1
+
+      assert {:timeout, :confirmed, _} =
+               Harness.await_output(port, until, 1_000, fn -> send(parent, :killed) end)
+
+      assert_received :killed
+    end
+
+    test "output streaming through the exit grace does not extend it" do
+      port = make_ref()
+      parent = self()
+      until = System.monotonic_time(:millisecond) - 1
+
+      stream = fn ->
+        spawn(fn ->
+          for _ <- 1..30 do
+            send(parent, {port, {:data, "x"}})
+            Process.sleep(2)
+          end
+
+          send(parent, {port, {:exit_status, 137}})
+        end)
+      end
+
+      started = System.monotonic_time(:millisecond)
+      assert {:timeout, :unconfirmed, _} = Harness.await_output(port, until, 10, stream)
+      assert System.monotonic_time(:millisecond) - started < 40
+    end
+
+    test "output and an exit before the deadline return normally" do
+      port = make_ref()
+      send(self(), {port, {:data, "a"}})
+      send(self(), {port, {:data, "b"}})
+      send(self(), {port, {:exit_status, 0}})
+      until = System.monotonic_time(:millisecond) + 1_000
+
+      assert {:ok, "ab"} =
+               Harness.await_output(port, until, 1_000, fn -> flunk("killed early") end)
+    end
+
     test "a child past its deadline is killed and its exit confirmed" do
       sleep = System.find_executable("sleep") || flunk("sleep is not on PATH")
 

@@ -48,6 +48,19 @@ rules were added after Codex's review of 5409109:
   - a failed drop;
   - an unconfirmed timeout and a confirmed timeout;
   - a real `sleep` child killed at its deadline.
+- **The deadlines are absolute** (after Codex's recheck of d8791ee).
+  - The child's deadline is checked before every message, so queued or
+    continuous output can't extend it or turn an expired run into
+    `{:ok, _}`.
+  - The exit grace is one absolute deadline that output doesn't extend.
+  - An exit status that is already queued confirms the exit.
+  - **Regressions,** using typed messages and a stub kill, with no OS
+    process:
+    - an expired deadline with output and an exit already queued gives
+      a timeout;
+    - output streaming through a 10 ms grace is still unconfirmed in
+      under 40 ms;
+    - normal output and an exit before the deadline give `{:ok, _}`.
 - **The restart check itself:**
   - the projection now includes `profile_id` and `available_until`;
   - the saved charges are re-read by id;
@@ -66,9 +79,8 @@ restart acceptance is unverified, not passed.
    Both the test and each child check its name and that it is on
    localhost:5520 before any write. The parent never touches the Repo,
    and nothing changes the suite's sandbox mode; sandbox-off is used only
-   inside the child scripts. Cleanup drops only that database (`mix
-   ecto.drop` with the same partition) and the test's own temporary
-   folder. A cleanup failure is reported.
+   inside the child scripts. Cleanup drops only that database (through `drop.exs`, which
+   validates the target again) and the test's own temporary folder. A cleanup failure is reported.
 2. **A scrubbed child.**
    - Literal argv through `Port.open/2` with `:spawn_executable`.
    - The environment comes from `SdrAgent.ChildEnv`: its base allowlist,
