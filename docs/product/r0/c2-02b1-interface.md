@@ -272,6 +272,21 @@ end-to-end. There is no new status, enum or column.
   actor may still close the switch: that is the switch's own lifecycle,
   and MF1's revalidation keeps the drain from acting on it.
 
+### Observability (stage events)
+
+The drain emits `[:sdr_agent, :profile_switch, :drain]` telemetry events
+(agreed in the RED review, Codex 36cc598a).
+- **Contents:** empty measurements; metadata
+  `%{stage: stage, switch_id: id}` only. No prompts, outputs, rows,
+  credentials or caller-controlled values.
+- **Stages:**
+  - `:validated`: the initial validation of S passed;
+  - `:refused`: after each refusal transaction has committed and
+    released its locks, before that run's Operation transaction;
+  - `:polling`: each poll of the sent count, outside any transaction.
+- **They observe lifecycle points and authorize nothing.** No safety
+  check depends on them. Tests attach handlers to them as barriers.
+
 ### What "drained" means, and the b2 handoff (MF2)
 
 **"Drained" is a ledger fact:**
