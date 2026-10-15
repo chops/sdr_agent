@@ -1,6 +1,12 @@
 # C2-02b1 (#52, slice b1): the admission fence and the drain (draft 2)
 
-**Status:** draft 2, 2026-10-15, for Codex's recheck. No code.
+**Status:** draft 3, 2026-10-15, for Codex's recheck. No code.
+- **Draft 2** (`0dd410b`) was NEEDS-REVIEW (Codex, 3db4316e). Its epoch,
+  cleanup and consumer fixes were accepted. Two drain lifecycle gaps were
+  open, both fixed here:
+  - MF1: the stale drain must revalidate in each transaction;
+  - MF2: the Operation of a run the drain stopped needs a settlement and
+    recovery owner.
 - **Draft 1** (`90d622c`) was NEEDS-REVIEW (Codex, 1fd883a5). The
   chain-head ordering was accepted. There were three gaps:
   - reserved and prepared work, and an ABA gap;
@@ -56,7 +62,10 @@ The reason is `:profile_switch_fenced`. Its checks:
 - **`:reserved_before_switch`:** at launch, the invocation's
   `model.invocation.reserved` event has a lower sequence than some
   `model.profile.switch_requested` event of the tenant, whatever that
-  switch's outcome.
+  switch's outcome. The events are tenant-scoped and read by the kernel.
+  - **`:reservation_provenance_missing`:** the invocation's reserved event
+    is missing, ambiguous or unreadable. It fails closed: refused, never
+    "no later switch".
 
 The second check is the **epoch rule**, and it closes the ABA gap:
 - the case is reserve Opus, then switch to Sonnet, then switch back to
@@ -69,7 +78,7 @@ The second check is the **epoch rule**, and it closes the ABA gap:
 | Stage | Exact placement | Checks |
 |---|---|---|
 | Reservation | inside `Admission.admit/5`, which already runs after `Kernel.lock_head/1`: after `:no_usage_origin` and the admission gate (`Gate`), before grant eligibility | `:switch_pending`, `:switch_blocked` |
-| Launch | inside `Admission.launch_check/6`, after the run-status, generation and profile checks, the exemption check and `Gate.admit_launch`, before `launch_binding`/`launch_terms` | `:switch_pending`, `:switch_blocked`, then `:reserved_before_switch` |
+| Launch | inside `Admission.launch_check/6`, after the run-status, generation and profile checks, the exemption check and `Gate.admit_launch`, before `launch_binding`/`launch_terms` | `:switch_pending`, `:switch_blocked`, then `:reservation_provenance_missing` or `:reserved_before_switch` |
 
 - **Unchanged:** the budget and run checks before admission
   (`reserve_model_call`, the daily limit), and the calibration identity
@@ -129,9 +138,32 @@ end-to-end. There is no new status, enum or column.
      the request.
    - Each one is refused in its own transaction through the launch
      refusal path, with launch's lock order (run → Operation share →
-     invocation → charge → head):
-     - reason `:profile_switch_fenced`, check `:reserved_before_switch`,
-       recorded exactly as a launch refusal (above);
+     invocation → charge → head).
+   - **Revalidated in that transaction (MF1),** after the head is held,
+     by fresh non-locking reads. The switch row is never locked after the
+     head:
+     - the named switch S is still of the tenant, `pending`, at the input
+       `server_generation`;
+     - **the cutoff:** the row's `model.invocation.reserved` sequence is
+       lower than S's own `model.profile.switch_requested` sequence;
+     - the row is still `:reserved`.
+
+     **If S changed** (completed, failed, blocked, or another generation),
+     the transaction writes nothing and the drain returns
+     `{:error, :switch_not_open}` or `{:error, :stale_server_generation}`.
+     A drain therefore never refuses work reserved after S closed, or work
+     of a newer switch.
+
+     **A row past the cutoff** can't exist while S is pending (the fence),
+     so finding one fails closed: nothing is written, and the drain
+     returns `{:error, :drain_observation_failed}`.
+
+     **Missing or ambiguous provenance** (no reserved event, or no unique
+     request event for S) also fails closed, the same way.
+   - **On success,** that transaction:
+     - refuses with reason `:profile_switch_fenced`, check
+       `:reserved_before_switch`, recorded exactly as a launch refusal
+       (above), with `switch_id` S in the event payload;
      - the run is then stopped `failed`/`:model_not_admitted`, linking
        that Failure, in the same transaction;
      - a run that is no longer `:running` gets the existing
@@ -150,6 +182,39 @@ end-to-end. There is no new status, enum or column.
      not reserved.
    - **Nothing is rewritten or refunded:** not the reserved profile, not
      the grant or allocation, not the charge.
+   - **Operation settlement (MF2).** This is the existing outcome rule
+     with a named owner:
+     - after each refusal transaction commits and its locks are released,
+       the drain settles the stopped run's Operation by the worker's rule
+       (`SDR.AgentWorker.fail_operation/3`): it links the run's live
+       attention Failure, or opens the resolved-cause Failure if an admin
+       resolved it meanwhile;
+     - it runs in its own transaction, in the established Operation →
+       Failure → head order. It never upgrades the refusal transaction's
+       Operation share lock while holding the head;
+     - it applies only while the Operation is still `running`. An
+       Operation the ordinary worker already settled is left alone, so
+       there is exactly one live cause;
+     - reply-intake runs (no Operation) are exempt.
+
+     **A retried drain** for S first settles the still-running Operation
+     of every run it stopped for S, before it reports success. It finds
+     them by its `model.launch.refused` events naming S. So "no reserved
+     or sent rows" alone never skips that obligation.
+
+     **The crash backstop** is the stale-run sweeper. Its terminal-run
+     heal (today `:witness_mismatch` and `:witness_unreconciled`) is
+     extended to runs stopped `:model_not_admitted` whose Operation is
+     still `running` and whose job is no longer live, revalidated under
+     the run, Operation and job locks. It applies the same worker rule.
+     This covers a crash between the run-stop commit and the Operation's
+     transaction, whoever stopped the run.
+   - **A concurrent ordinary worker** may still hold the job. Its later
+     launch of the refused row gets `:invocation_not_reserved` against a
+     run already `failed`. The worker's handling of that must neither open
+     a second live Failure nor settle the Operation with another cause.
+     RED pins this; if the current handling does either, b1 narrows it to
+     "run already terminal: halt with no new Failure".
 2. **Wait for every `:sent` ClaudeCLI row of the tenant to settle**
    (completed, failed or unknown).
    - This polls a count query with no row lock. Nothing is held under a
@@ -159,20 +224,38 @@ end-to-end. There is no new status, enum or column.
      recovery (`stale_after_seconds`, 1800 s by default). That is longer
      than the drain's bound, so the drain times out, and b2 blocks.
    - **A server that dies:** its `:sent` rows behave the same way.
-3. **Prepared callers** (health check passed, not reserved) need nothing:
-   their reservation is refused by the fence.
+3. **Prepared callers** (health check passed, not reserved) leave nothing
+   to drain: no reservation exists.
+   - **While the switch is open,** their reservation is refused by the
+     fence.
+   - **A caller paused until after the switch closed** has no pre-fence
+     reservation event, so the epoch rule doesn't concern it. Its later
+     reservation and launch pass the fresh ordinary checks, against the
+     server and profile then running.
+   - **b2 owns** whether a new server generation admits it at all (its
+     ingress and generation obligation).
 
 ### Result
 
-- **`{:ok, %{refused: n}}`:** after step 1, no `:reserved` real-profile
-  row of the tenant remains, and after step 2 none is `:sent`. Both are
-  read in one final count query.
+- **`{:ok, %{refused: n}}`:** in one final transaction:
+  - S is still of the tenant, `pending`, at the generation;
+  - no `:reserved` or `:sent` real-profile row of the tenant remains;
+  - no run the drain stopped for S has a `running` Operation.
+
+  If S changed by then, the result is `{:error, :switch_not_open}` or
+  `{:error, :stale_server_generation}`, never an unqualified success.
 - **`{:error, :drain_timeout, %{reserved: n, sent: n}}`:** the deadline
   passed.
 - **`{:error, :drain_observation_failed}`:** any query error. It fails
   closed.
-- **Either error leaves the fence closed.** Nothing is unlocked or
-  refunded.
+- **The deadline is one monotonic budget.** It is never reset, and it
+  covers validation, every refusal and settlement transaction, the
+  polling, and the final observation. No wait happens under a ledger lock.
+  A failed observation is never read as zero outstanding work.
+- **Errors don't themselves reopen the fence.** The drain unlocks and
+  refunds nothing. A concurrent `complete`, `fail` or `block` by another
+  actor may still close the switch: that is the switch's own lifecycle,
+  and MF1's revalidation keeps the drain from acting on it.
 
 ### What "drained" means, and the b2 handoff (MF2)
 
@@ -217,7 +300,8 @@ No persisted field, relationship, identity or lifecycle state is added.
 | AgentRun | Existing (action-cause delta) | One agent run | unchanged | unchanged | `:fail` with `:model_not_admitted` accepts a `profile_switch_fenced` refusal Failure as its cause, at either stage, through `LinkRefusalAttention`'s lists. It links the same Failure even when resolved; no second attention item | unchanged (`agent_runtime`) | none |
 | Operations.Failure | Existing (recording delta) | Operator attention | unchanged | unchanged | a fence refusal opens one `provider_error` Failure with detail reason `profile_switch_fenced`: deduplicated per run at reservation; one per refused row at launch or drain | unchanged | none |
 | AuditEvent | Existing (event-contract delta) | Ledger | unchanged | unchanged | `model.reservation.refused` and `model.launch.refused` record `reason: "profile_switch_fenced"` and the check. The epoch rule reads `model.invocation.reserved` and `model.profile.switch_requested` sequences, kernel read, inside the admission and drain paths only | unchanged | none |
-| ModelProfileSwitch | Existing (slice a) | One requested change | unchanged | unchanged | read, never written or locked, by the fence (fresh read after the head) and by the drain's validation (stored, by the kernel: pending at the generation) | unchanged | none |
+| Operations.Operation | Existing (consumer and recovery delta) | One business operation | unchanged | unchanged | **A run the drain stopped `:model_not_admitted`:** the drain fails its still-running Operation by the worker's rule (`AgentWorker.fail_operation/3`), in its own Operation → Failure → head transaction after the refusal commits, linking the live cause or a resolved-cause Failure. A retried drain finishes that obligation for S's runs. The stale-run sweeper's terminal heal also takes `:model_not_admitted` runs with a running Operation and a dead job. Exactly one live attention item. Reply-intake runs have no Operation | unchanged: `agent_runtime` (drain); the sweeper's existing actor | none |
+| ModelProfileSwitch | Existing (slice a) | One requested change | unchanged | unchanged | read, never written or locked, by the fence and by the drain. Both use a fresh read after the head, in every destructive drain transaction and in the final observation: pending at the generation, plus its `switch_requested` sequence as the cutoff | unchanged | none |
 
 ModelProfileSetting: existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found.
 
@@ -255,6 +339,8 @@ ModelProfileSetting: existing dependency: unchanged — relationship/policy/life
 5. **The drain:**
    - a dead reserved caller's row is refused within the bound, its run is
      stopped, and the charge is unchanged;
+   - the launch-time epoch with missing provenance is refused
+     `:reservation_provenance_missing`;
    - a queued call's row is refused, and the later dequeue is refused
      `:invocation_not_reserved`;
    - drain versus a live launch of the same row, in both orders: never
@@ -265,15 +351,36 @@ ModelProfileSetting: existing dependency: unchanged — relationship/policy/life
    - a query error gives `:drain_observation_failed`;
    - caller death with a durable `:sent` row times out (no false drained);
    - no lock held while waiting.
-6. **Drain authority:**
+6. **Drain revalidation (MF1),** on independent connections:
+   - the drain validates S; another actor fails S and commits; a new
+     reservation V commits. The drain's next transaction writes nothing
+     and returns `:switch_not_open`, and V is never refused;
+   - the same with S completed, and with a newer pending switch at
+     another generation (`:stale_server_generation`);
+   - S changes between the last refusal and the final observation: no
+     success;
+   - a missing reserved event or request event fails closed.
+7. **Operation settlement (MF2):**
+   - a dead worker: the drain stops the run and fails its Operation by
+     the worker's rule, with one live attention item;
+   - a crash after the run-stop commit, before the Operation transaction:
+     a retried drain settles it before reporting success, and,
+     separately, the sweeper heals it once the job is dead;
+   - a concurrent ordinary worker: the Operation is settled once, by the
+     same cause, with no second live Failure;
+   - the resolved-cause race: an admin resolves the Failure before the
+     Operation transaction, and the worker's resolved-cause Failure is
+     used;
+   - a reply-intake run is left with no Operation.
+8. **Drain authority:**
    - `model_runtime`, an admin and a foreign-tenant `agent_runtime` are
      each refused;
    - a completed, failed or blocked switch gives `:switch_not_open`;
    - a stale generation gives `:stale_server_generation`;
    - the result carries counts only.
-7. **Immutability:** the profile, grant, allocation and charge of a
+9. **Immutability:** the profile, grant, allocation and charge of a
    refused row are unchanged; no action rewrites a reserved profile.
-8. **Safe exit:** with no switch ever requested, the existing admission,
+10. **Safe exit:** with no switch ever requested, the existing admission,
    launch and SDR suites pass unchanged.
 
 ## Open questions
