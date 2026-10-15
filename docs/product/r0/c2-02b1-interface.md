@@ -1,203 +1,282 @@
-# C2-02b1 (#52, slice b1): the admission fence and the drain (draft 1)
+# C2-02b1 (#52, slice b1): the admission fence and the drain (draft 2)
 
-**Status:** draft 1, 2026-10-15, for Codex's review. No code. It is
-written while slice a (PR #159) is in review, so it counts as preparation
-only (`c2-02-slices.md`). It builds on slice a's records as submitted
-(`ModelProfileSwitch`, a pending or blocked switch is "open").
+**Status:** draft 2, 2026-10-15, for Codex's recheck. No code.
+- **Draft 1** (`90d622c`) was NEEDS-REVIEW (Codex, 1fd883a5). The
+  chain-head ordering was accepted. There were three gaps:
+  - reserved and prepared work, and an ABA gap;
+  - samples are not a quiescence or cleanup proof;
+  - the refusal consumers and the drain authority.
+- **This draft:**
+  - closes the ABA gap with a chain-sequence epoch;
+  - keeps the accepted bounded finish-or-refuse contract (no acceptance
+    change);
+  - makes "drained" a ledger fact, with an explicit handoff to b2;
+  - maps the reason through every consumer.
+
+It builds on slice a as approved (`2590693`, PR #159).
 
 **Scope** (`c2-02-slices.md`, row b1):
-- the admission fence: committed switch state observed in the reservation
-  and launch order, not only an in-memory health check;
+- the admission fence: committed switch state observed in the
+  reservation and launch order;
 - a bounded drain of prepared, reserved, queued and in-flight work. That
-  work is finished or refused under the accepted rules, and never moved
-  to another profile or grant;
+  work is finished or refused, and never moved to another profile or
+  grant, nor refunded;
 - reserved profile ids stay immutable.
 
-**Safe exit:** the fence closes only while a switch is open. Only
-slice a's `request` opens one, and nothing in `lib/` calls it, so
-admission stays open in normal use. The drain is a function that nothing
-calls before b2.
+**Safe exit:** nothing in `lib/` opens a switch (slice a), so the fence
+never closes in normal use, and the drain has no caller before b2. With
+no switch ever requested, the epoch rule below refuses nothing.
 
-## The ordering argument (why the chain head is enough)
+## The ordering (accepted in draft 1)
 
-Every write that can open a switch, and every reservation and launch of a
-real-model call, takes the tenant's chain head `FOR UPDATE`:
-- **`request`** appends `switch_requested` after taking the head. It
-  commits while it still holds the head (slice a: setting → switch →
-  chain head);
-- **reservation** (`reserve_admitted`) takes the head in step 3 and holds
-  it until it commits (`SdrAgent.Agents.Admission`);
-- **launch** (`launch_locked`) takes the head last and holds it until the
-  row is sent or refused.
+- **Who takes the head:**
+  - `request` takes the tenant's chain head `FOR UPDATE` and commits
+    holding it;
+  - reservation (`reserve_admitted`, step 3) and launch (`launch_locked`,
+    last) each take the same head and hold it to commit.
+- **So the head totally orders them.** Each fence read is a new, ordinary,
+  non-locking statement, in the same Read Committed transaction, issued
+  after `Kernel.lock_head/1` returns. There is no earlier cached
+  observation and no snapshot isolation.
+- **The reader never locks the switch row while holding the head.** That
+  would reverse `request`'s setting → switch → head order.
+- **A rolled-back request** leaves no switch row and no event, so it
+  leaves no fence.
+- **The chain sequence materializes the order.** A request's
+  `model.profile.switch_requested` event and a reservation's
+  `model.invocation.reserved` event each get the tenant's next sequence
+  under the same head. So "this reservation is older than that switch" is
+  exactly "its reserved event has the lower sequence".
 
-So the chain head totally orders a `request` against every reservation
-and launch of the same tenant. The fence is a **fresh read of the
-tenant's open switch, made after the head is held** (Read Committed: a
-statement started after the lock was granted sees every transaction that
-committed before it). Then:
-- **A reservation or launch ordered after the request** sees the open
-  switch and is refused.
-- **One ordered before it** committed before the request took the head.
-  It is therefore visible to the drain, which starts only after the
-  request commits.
+## The fence rules
 
-No new lock is needed, and no lock is taken in a new order. The setting
-row is not locked by reservation or launch.
+The reason is `:profile_switch_fenced`. Its checks:
+- **`:switch_pending` / `:switch_blocked`:** the tenant has an open
+  switch;
+- **`:reserved_before_switch`:** at launch, the invocation's
+  `model.invocation.reserved` event has a lower sequence than some
+  `model.profile.switch_requested` event of the tenant, whatever that
+  switch's outcome.
 
-**Proof obligation (RED):** on independent connections, in both orders:
-- a request holds the head while a reservation waits. After the commit,
-  the reservation is refused;
-- a reservation holds the head while a request waits. After the commit,
-  the reservation's row is visible to the drain.
+The second check is the **epoch rule**, and it closes the ABA gap:
+- the case is reserve Opus, then switch to Sonnet, then switch back to
+  Opus, then a delayed launch. Profile equality alone would admit it;
+- an invocation may be sent only if no switch was requested after it was
+  reserved;
+- so a reservation never outlives a switch request. It is refused at
+  launch, or earlier by the drain.
 
-The same two orders are tested for launch.
-
-## The fence
-
-| Where | When | Refusal |
+| Stage | Exact placement | Checks |
 |---|---|---|
-| Reservation of a real-profile ClaudeCLI call (`reserve_admitted`) | after `Kernel.lock_head`, before `Admission.admit/5`; the check order becomes: `:no_usage_origin` → admission gate → **fence** → grant checks | `:profile_switch_in_progress`, check `:switch_pending` or `:switch_blocked` |
-| Launch (`Admission.launch_check/6`) | after the run status, generation and profile checks, before the admission gate | the same reason and checks; the row moves reserved → failed, never sent, as for every other launch refusal |
+| Reservation | inside `Admission.admit/5`, which already runs after `Kernel.lock_head/1`: after `:no_usage_origin` and the admission gate (`Gate`), before grant eligibility | `:switch_pending`, `:switch_blocked` |
+| Launch | inside `Admission.launch_check/6`, after the run-status, generation and profile checks, the exemption check and `Gate.admit_launch`, before `launch_binding`/`launch_terms` | `:switch_pending`, `:switch_blocked`, then `:reserved_before_switch` |
 
-- **Recorded like the admission-gate refusals:**
-  - reservation: `record_refusal/1`, one deduplicated `provider_error`
-    Failure of the run plus `model.reservation.refused`;
-  - launch: reserved → failed, one critical `provider_error` Failure plus
-    `model.launch.refused`, and the run stops `:model_not_admitted`.
-  - **OQ-1** asks whether a fence refusal should stop the run, or leave it
-    retryable.
-- **What isn't fenced:**
-  - the Fake and every non-real-profile path (no grant, no switch);
-  - the read paths;
-  - settlement of a row that is already `:sent` (`complete`, `fail`,
-    `mark_unknown`). In-flight work always settles.
-- **The in-memory check stays.** `Runtime.resolve/1` keeps refusing
-  `:provider_not_quiescent` while the server's admission is closed. It is
-  an early, advisory answer. The database fence is the authority.
+- **Unchanged:** the budget and run checks before admission
+  (`reserve_model_call`, the daily limit), and the calibration identity
+  and exemption safeguards. The fence only adds a refusal.
+- **Not fenced:**
+  - the Fake and non-real profiles;
+  - reads;
+  - settlement of a `:sent` row.
+- **The in-memory check stays.** `Runtime.resolve/1`'s
+  `:provider_not_quiescent` is advisory; the database fence is the
+  authority.
 
-## Reserved rows and their profile
+## Recording the refusal: every consumer (MF3)
 
-- **No change:** a reserved row's `profile_id` is written at reservation
-  and never updated. There is no action that rewrites it; RED pins that.
-- **During an open switch,** a reserved row of either profile is refused
-  at launch by the fence.
-- **After `complete`,** a reserved row of the old profile is refused at
-  launch by the existing `:profile_mismatch_at_launch`, since the server
-  then runs the new profile.
-- **After `fail`,** the old profile keeps running and the fence opens, so
-  the row launches normally.
-- **So reserved work never has to finish before the switch.** It is
-  refused or launched by the existing rules. The drain doesn't wait for
-  it. The stale-run sweeper still recovers it after `stale_after_seconds`,
-  as today.
+A fence refusal reuses the existing admission-gate stop contract
+end-to-end. There is no new status, enum or column.
 
-## The drain
+| Consumer | Change |
+|---|---|
+| `Admission` | **New `fence_reasons/0`** = `[:profile_switch_fenced]`. **`admission_reason?/1`:** true for `Gate.reasons()` and `fence_reasons()`, so `failure_class/1` gives `:provider_error` (not `:budget_exhausted`). **`reason_name/1`:** `"profile_switch_fenced"`. **Reservation:** the transaction rolls back, then `record_refusal/1` commits one deduplicated `provider_error` Failure of the run plus `model.reservation.refused` (`reason`, `check`, `failure_id`, the request's `idempotency_key`). The receipt is `%Refused{stage: :reservation, reason: :profile_switch_fenced, check, failure_id, event_id, agent_run_id, request_id}` |
+| Launch (`Agents.admit_launch/3`, `refuse_launch`) | reserved → failed, never sent, with `error = %{"kind" => "launch_refused", "reason" => "profile_switch_fenced", ...}`, plus one critical `provider_error` Failure of the run and `model.launch.refused`, in one transaction. The receipt is `%Refused{stage: :launch, ...}`, as for every launch refusal |
+| `SDR.Model.stop_reason/1` | **Launch:** `:model_not_admitted` (unchanged). **Reservation:** `:model_not_admitted`, through `admission_reason?/1`. No new branch |
+| `Changes.LinkRefusalAttention` | `"profile_switch_fenced"` joins both the reservation-admission list (`@admission`) and the launch list (`@launch`). So the run stops `failed`/`:model_not_admitted` linking exactly that Failure, even if an admin resolved it meanwhile. There is no second live attention item, and the worker and Operation rules are unchanged |
+| Operations.Failure | class `provider_error`, detail reason `profile_switch_fenced`. Unchanged schema |
+| AuditEvent | `model.reservation.refused` and `model.launch.refused` gain the reason and checks above. They are read (not written) for the epoch rule: the invocation's `model.invocation.reserved` and the tenant's `model.profile.switch_requested` sequences, by kernel read, in the admission path only |
 
-`SdrAgent.Agents.ProfileSwitches.drain(switch, opts)`. It is a function,
-not an action: called by b2's coordinator after `request` commits, outside
-every transaction.
-- **Waits for:**
-  - every `:sent` ClaudeCLI invocation of the switch's tenant to settle
-    (any profile);
-  - the ClaudeCLI server to report no running call and no queued call. A
-    queued call reaches launch, where the fence refuses it, so the queue
-    empties by refusal.
-- **Bounded:** the `timeout:` option. **OQ-2** proposes the server's call
-  timeout plus a margin.
-  - Polls a count query with no row lock, plus the server's published
-    state (ETS, never a `GenServer.call`).
-  - Nothing is held under a ledger lock while it waits.
-- **Returns:**
-  - `{:ok, :drained}`;
-  - or `{:error, :drain_timeout, %{sent: n, server: state}}`, which b2
-    turns into `block`.
-- **The server state.** The server already serves calls one at a time
-  (`handle_call` runs the call itself), so queued calls are messages in
-  its mailbox. The drain reads:
-  - a new published `activity` (`:idle` or `:running`, set around
-    `run/4`, in the status table as `admission/1` is);
-  - the server's `message_queue_len` (`Process.info/2`, which never
-    blocks).
+**OQ-1 (resolved):** a fence refusal stops the run (`failed`,
+`:model_not_admitted`), as Codex recommended. b1 adds no retry mechanism.
 
-  "Drained" requires no `:sent` row, `:idle`, and an empty mailbox. An
-  unrelated message only delays "drained", up to the bound and then
-  `block`; it never makes it early.
-- **Why late callers are still safe:** a caller whose reservation
-  committed before the request can enqueue after "drained". Its launch is
-  refused by the fence while the switch is open. After `complete` it is
-  refused by `:profile_mismatch_at_launch`. Every queued call also carries
-  its enqueue deadline (`:provider_queue_timeout`), as today. **OQ-3**
-  asks whether this is enough, or whether the server should count calls
-  it has accepted.
-- **Caller death:** a caller that dies with its row `:reserved` leaves a
-  row the drain ignores (see above). A caller that dies after `:sent`
-  leaves the server's own settlement path (`unknown`) to settle it. The
-  drain waits for that, within its bound.
-- **Server death:** the server state reads `:not_running`, and the `:sent`
-  rows are settled `unknown` by the existing paths. If they aren't
-  settled within the bound, the drain times out and b2 blocks.
+## The drain (MF1, MF2)
+
+### Authority and inputs
+
+`SdrAgent.Agents.drain_profile_switch(switch, %{server_generation, timeout_ms}, opts)`
+- **Actor:** `agent_runtime` of the switch's tenant. That is the ledger
+  actor that already admits launches, fails invocations and stops runs.
+  No new authority is granted, and `model_runtime` gets no invocation or
+  history read. Any other actor is `Forbidden`.
+- **Validation,** before anything else, by a kernel read of the stored
+  switch: the actor's tenant, `status == :pending`, and `server_generation`
+  equal to the input. Otherwise `{:error, :switch_not_open}` or
+  `{:error, :stale_server_generation}`. Nothing is written and nothing is
+  waited for.
+- **`timeout_ms`:** a positive integer, required, with no default in b1.
+  **OQ-2 (resolved):** b2 passes the CLI call timeout + 30 s.
+  - It is one end-to-end monotonic deadline, never reset on progress or
+    on a server change.
+  - Every wait and query is capped by the remaining budget.
+- **Results are counts only.** No rows are returned.
+
+### Steps
+
+1. **Refuse every reserved row (bounded finish-or-refuse; no acceptance
+   change).**
+   - While the switch is open, every `:reserved` real-profile ClaudeCLI
+     row of the tenant is pre-fence: the fence refuses reservations after
+     the request.
+   - Each one is refused in its own transaction through the launch
+     refusal path, with launch's lock order (run → Operation share →
+     invocation → charge → head):
+     - reason `:profile_switch_fenced`, check `:reserved_before_switch`,
+       recorded exactly as a launch refusal (above);
+     - the run is then stopped `failed`/`:model_not_admitted`, linking
+       that Failure, in the same transaction;
+     - a run that is no longer `:running` gets the existing
+       `:run_not_running_at_launch` treatment instead: the row is failed,
+       with no Failure.
+   - **If a live caller is launching that row at the same moment,** the
+     invocation lock serializes the two:
+     - launch first: launch, under the head, refuses it by the fence;
+     - drain first: the row is no longer reserved, so the caller's launch
+       gets the existing `:invocation_not_reserved` identity refusal.
+
+     Either way it is never sent.
+   - **Dead callers and queued calls** are refused the same way. A queued
+     call's row is still `:reserved` until the server dequeues it, so it
+     is refused here. When the server reaches it, launch refuses it as
+     not reserved.
+   - **Nothing is rewritten or refunded:** not the reserved profile, not
+     the grant or allocation, not the charge.
+2. **Wait for every `:sent` ClaudeCLI row of the tenant to settle**
+   (completed, failed or unknown).
+   - This polls a count query with no row lock. Nothing is held under a
+     ledger lock while waiting.
+   - **A caller that dies after `:sent`:** its row is settled by its own
+     facade path, if that is still running, or else only by the stale-run
+     recovery (`stale_after_seconds`, 1800 s by default). That is longer
+     than the drain's bound, so the drain times out, and b2 blocks.
+   - **A server that dies:** its `:sent` rows behave the same way.
+3. **Prepared callers** (health check passed, not reserved) need nothing:
+   their reservation is refused by the fence.
+
+### Result
+
+- **`{:ok, %{refused: n}}`:** after step 1, no `:reserved` real-profile
+  row of the tenant remains, and after step 2 none is `:sent`. Both are
+  read in one final count query.
+- **`{:error, :drain_timeout, %{reserved: n, sent: n}}`:** the deadline
+  passed.
+- **`{:error, :drain_observation_failed}`:** any query error. It fails
+  closed.
+- **Either error leaves the fence closed.** Nothing is unlocked or
+  refunded.
+
+### What "drained" means, and the b2 handoff (MF2)
+
+**"Drained" is a ledger fact:**
+- no admitted real-model spend of the tenant is outstanding;
+- none can start while the switch is open (the fence);
+- no row reserved before the switch can ever be sent (the epoch rule).
+
+**It is not a quiescence or cleanup proof:**
+- a settled or `unknown` row doesn't prove its CLI process tree stopped;
+- the server can keep stuck or unconfirmed work, with admission blocked;
+- b1 reads no server state.
+
+b1 therefore adds no server activity signal. Mailbox length and an
+activity flag would be advisory telemetry at best (Codex OQ-3), and b1
+makes no claim from them.
+
+**b2 must, outside every ledger lock, before it stops, activates, rolls
+back or reopens anything:**
+- bind the exact server instance (pid) of the switch's generation;
+- read that server's own cleanup state (no stuck or unconfirmed work) and
+  the Reaper lease;
+- treat absence, a replaced pid, an unavailable or malformed observation,
+  or a read error as **not clean**, which means `block`.
+
+A `{:ok, _}` drain is necessary for b2's `complete` or `fail`, never
+sufficient. This handoff is b2's contract, recorded here so it isn't
+implicit.
 
 ## Entity Model
 
-**Entity Model trigger:** yes, narrowly: a backend action contract.
-- reservation and launch gain a refusal reason (`:profile_switch_in_progress`);
-- the ClaudeCLI server publishes a new read-only state.
+**Entity Model trigger:** yes. The changes are:
+- backend action contracts: the reservation and launch refusal, the drain
+  function and its authority;
+- event-consumer contracts: Failure class, run stop and attention link.
 
-No persisted field, relationship, identity or lifecycle changes, and
-there is no new actor authority.
+No persisted field, relationship, identity or lifecycle state is added.
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| ModelInvocation | Existing (action contract delta) | One model call | unchanged; `profile_id` stays immutable after reservation | unchanged | **reserve:** refused while the tenant has an open switch (read under the chain head). **launch:** reserved → failed with `:profile_switch_in_progress` under the same read. Sent rows settle unchanged | unchanged (`agent_runtime`) | OQ-1 |
-| ModelProfileSwitch | Existing (slice a) | — | unchanged | unchanged | Read, not written, by reservation and launch: a fresh tenant read under the chain head (kernel read) | unchanged | none |
-| ClaudeCLI server state | Existing (runtime, not persisted) | Published status | adds `activity: :idle \| :running` (`:not_running` when absent), read with the mailbox length | n/a | read-only, never blocks | n/a | OQ-3 |
+| ModelInvocation | Existing (action contract delta) | One model call | unchanged; `profile_id`, grant and allocation are immutable after reservation; charges are never refunded | unchanged | **reserve:** refused (`:profile_switch_fenced`, `:switch_pending`/`:switch_blocked`) while the tenant has an open switch, read after the head. **launch:** the same checks, then `:reserved_before_switch` (the epoch rule: its reserved event's sequence is lower than a `switch_requested` event's); reserved → failed, never sent. **drain:** every reserved row of the tenant → failed through the launch refusal path. Sent rows settle unchanged | unchanged: `agent_runtime` (the drain runs as `agent_runtime`) | none |
+| AgentRun | Existing (action-cause delta) | One agent run | unchanged | unchanged | `:fail` with `:model_not_admitted` accepts a `profile_switch_fenced` refusal Failure as its cause, at either stage, through `LinkRefusalAttention`'s lists. It links the same Failure even when resolved; no second attention item | unchanged (`agent_runtime`) | none |
+| Operations.Failure | Existing (recording delta) | Operator attention | unchanged | unchanged | a fence refusal opens one `provider_error` Failure with detail reason `profile_switch_fenced`: deduplicated per run at reservation; one per refused row at launch or drain | unchanged | none |
+| AuditEvent | Existing (event-contract delta) | Ledger | unchanged | unchanged | `model.reservation.refused` and `model.launch.refused` record `reason: "profile_switch_fenced"` and the check. The epoch rule reads `model.invocation.reserved` and `model.profile.switch_requested` sequences, kernel read, inside the admission and drain paths only | unchanged | none |
+| ModelProfileSwitch | Existing (slice a) | One requested change | unchanged | unchanged | read, never written or locked, by the fence (fresh read after the head) and by the drain's validation (stored, by the kernel: pending at the generation) | unchanged | none |
 
-existing dependency: ModelProfileSetting unchanged — relationship/policy/lifecycle impact checked, none found.
+ModelProfileSetting: existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found.
 
 ## Tests (RED first)
 
-1. **Ordering, on independent connections** (as the C2-02a race file):
-   - request holds the head, then a reservation: the reservation is
-     refused;
-   - a reservation holds the head, then the request: the reservation's
-     row is visible to the drain afterwards;
-   - the same two orders for launch.
+1. **Ordering, on independent connections** (each task joined or
+   cancelled before cleanup; the disposable test DB only):
+   - request holds the head, then a reservation: the reservation waits on
+     the head (proved by `pg_blocking_pids`) and is refused;
+   - a reservation holds the head, then the request: the reservation's row
+     is visible afterwards and is refused by the drain;
+   - the same two orders for launch;
+   - a request that rolls back while a reservation waits leaves no fence:
+     the reservation is admitted;
+   - no fence reader locks the switch row (a `pg_locks` probe).
 2. **The fence:**
-   - a pending switch and a blocked switch each refuse reservation and
-     launch, with the reason and the check;
-   - a completed or failed switch doesn't;
-   - another tenant's open switch doesn't;
+   - pending and blocked each refuse reservation and launch, with the
+     reason and check;
+   - completed and failed switches don't fence new reservations;
+   - another tenant's switch doesn't;
    - the Fake is never fenced;
-   - a `:sent` row settles during an open switch.
-3. **Recording:**
-   - each refusal writes exactly the Failure and the event of its stage,
-     and nothing else;
-   - a refused reservation leaves no invocation.
-4. **Immutability:** no action changes a reserved row's `profile_id`, and
-   the profile is unchanged across the switch.
+   - a `:sent` row settles while the switch is open.
+3. **The epoch rule (ABA):** reserve Opus, complete Opus→Sonnet, complete
+   Sonnet→Opus, then launch the old row. It is refused
+   `:reserved_before_switch`, never sent. A row reserved after both
+   switches launches normally.
+4. **Consumers, at both stages:**
+   - the exact `Refused` receipt;
+   - one `provider_error` Failure;
+   - the event payload;
+   - the run `failed`/`:model_not_admitted` linking exactly that Failure,
+     also after the Failure was resolved;
+   - no budget-class Failure;
+   - no second attention item.
 5. **The drain:**
-   - it returns drained with no sent row and an idle server;
-   - with a sent row it waits, and returns drained once the row settles;
-   - with a row that never settles, it times out within the bound;
-   - queued calls are refused at launch and the queue empties;
-   - caller death after sent, and server death, are each covered;
-   - it holds no lock while waiting (`pg_locks` probe, as for C2-02a).
-6. **Safe exit:** with no open switch, admission is unchanged. The
-   existing admission and launch suites pass unchanged.
+   - a dead reserved caller's row is refused within the bound, its run is
+     stopped, and the charge is unchanged;
+   - a queued call's row is refused, and the later dequeue is refused
+     `:invocation_not_reserved`;
+   - drain versus a live launch of the same row, in both orders: never
+     sent;
+   - `:sent` settles, then drained;
+   - a row that never settles: `:drain_timeout` at the deadline, the
+     deadline not reset by progress, the fence still closed;
+   - a query error gives `:drain_observation_failed`;
+   - caller death with a durable `:sent` row times out (no false drained);
+   - no lock held while waiting.
+6. **Drain authority:**
+   - `model_runtime`, an admin and a foreign-tenant `agent_runtime` are
+     each refused;
+   - a completed, failed or blocked switch gives `:switch_not_open`;
+   - a stale generation gives `:stale_server_generation`;
+   - the result carries counts only.
+7. **Immutability:** the profile, grant, allocation and charge of a
+   refused row are unchanged; no action rewrites a reserved profile.
+8. **Safe exit:** with no switch ever requested, the existing admission,
+   launch and SDR suites pass unchanged.
 
 ## Open questions
 
-- **OQ-1:** should a fence refusal stop the run (as the admission-gate
-  refusals do: `provider_error`, run `:model_not_admitted`), or leave it
-  retryable?
-  - **Recommended:** stop it, as today's gate does. A switch is a rare,
-    attended action, and silently queueing SDR work across it would hide
-    the switch from the run's record.
-- **OQ-2:** the drain bound. **Recommended:** the ClaudeCLI call timeout
-  plus 30 s, passed by b2.
-- **OQ-3:** the "queued" signal.
-  - **Recommended:** the mailbox length plus `activity`, as above. It can
-    only delay "drained", and every late launch is refused by the fence or
-    the profile check.
-  - **The alternative:** a caller-side counter in `complete/2`, which
-    needs crash handling for every caller.
+None open. OQ-1 and OQ-2 are resolved above, as Codex recommended, and
+OQ-3 is dropped: b1 adds no server signal.
