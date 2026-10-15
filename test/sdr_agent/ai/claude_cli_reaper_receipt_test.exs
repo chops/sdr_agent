@@ -24,9 +24,15 @@ defmodule SdrAgent.AI.ClaudeCLIReaperReceiptTest do
   @port_opts {[:binary, :exit_status], {[], []}}
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
+  # MF2 (Codex 5f57e6ac): every fixture owner, reaper and server is
+  # registered the moment it exists, and on_exit stops and joins each one
+  # (bounded), then releases the lease, then checks none is left alive,
+  # so a failed assertion can't leave a live reaper loop behind.
   setup do
     name = :"reaper_receipt_#{System.unique_integer([:positive])}"
-    on_exit(fn -> Reaper.release(name) end)
+    {:ok, fixtures} = Agent.start(fn -> [] end)
+    Process.put(:fixtures, fixtures)
+    on_exit(fn -> cleanup_fixtures!(fixtures, name) end)
     %{name: name}
   end
 
@@ -114,8 +120,9 @@ defmodule SdrAgent.AI.ClaudeCLIReaperReceiptTest do
       parent = self()
 
       owner =
-        spawn(fn ->
+        fixture_owner(fn ->
           {:ok, reaper} = Reaper.start(name)
+          register(reaper)
           Reaper.track(reaper, tmp)
           send(parent, {:reaper, reaper})
           receive do: (:exit -> :ok)
@@ -177,6 +184,7 @@ defmodule SdrAgent.AI.ClaudeCLIReaperReceiptTest do
           command_args: [@fake, "ready"]
         )
 
+      register(server, :server)
       api!(ClaudeCLI, :reaper, 1)
       reaper = ClaudeCLI.reaper(name)
 
@@ -204,8 +212,9 @@ defmodule SdrAgent.AI.ClaudeCLIReaperReceiptTest do
     parent = self()
 
     owner =
-      spawn(fn ->
+      fixture_owner(fn ->
         {:ok, reaper} = Reaper.start(name, reaper_opts)
+        register(reaper)
         Reaper.track(reaper, tmp)
         deadline = System.monotonic_time(:millisecond) + 5_000
         send(parent, {:opened, reaper, Reaper.open(reaper, tmp, @spawn, @port_opts, deadline)})
@@ -214,6 +223,68 @@ defmodule SdrAgent.AI.ClaudeCLIReaperReceiptTest do
 
     assert_receive {:opened, reaper, result}, 10_000
     {owner, reaper, result}
+  end
+
+  # The owner registers its own reaper, so it carries the registry.
+  defp fixture_owner(fun) do
+    fixtures = Process.get(:fixtures)
+
+    owner =
+      spawn(fn ->
+        Process.put(:fixtures, fixtures)
+        fun.()
+      end)
+
+    register(owner)
+    owner
+  end
+
+  defp register(pid, kind \\ :process),
+    do: Agent.update(Process.get(:fixtures), &[{kind, pid} | &1])
+
+  defp stop_server(pid) do
+    GenServer.stop(pid, :normal, 5_000)
+  catch
+    :exit, _not_running -> :ok
+  end
+
+  # Runs in the on_exit process. Owners are told to exit; servers stopped;
+  # then every fixture (and a lease holder still alive) is joined within one
+  # 10 s bound, the lease released, and any survivor reported.
+  defp cleanup_fixtures!(fixtures, name) do
+    entries = Agent.get(fixtures, & &1)
+    Agent.stop(fixtures)
+    pids = Enum.map(entries, fn {_kind, pid} -> pid end)
+
+    Enum.each(entries, fn
+      {:server, pid} -> stop_server(pid)
+      {_owner_or_reaper, pid} -> send(pid, :exit)
+    end)
+
+    holder =
+      case Reaper.lease(name) do
+        {:held, pid} -> [pid]
+        nil -> []
+      end
+
+    deadline = System.monotonic_time(:millisecond) + 10_000
+    Enum.each(pids ++ holder, &join_fixture(&1, deadline))
+    Reaper.release(name)
+
+    case Enum.filter(pids ++ holder, &Process.alive?/1) do
+      [] -> :ok
+      alive -> raise "fixture leak: #{inspect(alive)} still alive after cleanup"
+    end
+  end
+
+  defp join_fixture(pid, deadline) do
+    ref = Process.monitor(pid)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _} -> :ok
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) -> Process.demonitor(ref, [:flush])
+    end
   end
 
   defp stop_owner(owner, reaper) do

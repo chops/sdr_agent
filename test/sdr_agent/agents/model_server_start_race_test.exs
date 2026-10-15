@@ -56,16 +56,22 @@ defmodule SdrAgent.Agents.ModelServerStartRaceTest do
   ## R2
 
   describe "R2: the lock order" do
-    test "an allocation waits behind a finalizer's counter share, without deadlock", ctx do
+    # MF3 (Codex 5f57e6ac): each holder first takes only its FIRST lock;
+    # the contender is shown waiting; only then does the holder take its
+    # SECOND lock. With the approved order the second lock is free; with
+    # the inversion it is held by the contender and the step deadlocks or
+    # times out. "the interleaving harness tells the orders apart" proves
+    # that sensitivity with raw-SQL contenders in both orders.
+    test "an allocation waiting on the counter holds no switch lock", ctx do
       race(fn ->
         binding = coordinator!()
         switch = switched!(ctx, binding)
 
+        # A finalizer mid-transaction: setting, counter FOR SHARE; next, the switch.
         {holder, holder_pid} =
           hold(fn ->
             lock_setting!(ctx)
             lock_counter!(ctx, "FOR SHARE")
-            lock_switch!(switch, "FOR UPDATE")
           end)
 
         allocation =
@@ -82,6 +88,11 @@ defmodule SdrAgent.Agents.ModelServerStartRaceTest do
           end)
 
         await_blocked_by!(pid_of(:allocator), holder_pid)
+
+        assert {:ok, waited} = step(holder, fn -> lock_switch!(switch, "FOR UPDATE") end),
+               "the waiting allocator holds the switch: it took the FK before the counter"
+
+        assert waited < 500
         release(holder)
         join(holder)
 
@@ -89,31 +100,61 @@ defmodule SdrAgent.Agents.ModelServerStartRaceTest do
       end)
     end
 
-    test "a finalizer waits behind an allocator's counter and FK lock, then re-reads latest",
-         ctx do
+    test "a finalizer waiting on the counter holds no switch lock, then re-reads latest", ctx do
       race(fn ->
         binding = coordinator!()
         switch = switched!(ctx, binding)
         candidate = ready_activation!(ctx, binding, switch)
 
-        # Stands for an allocation mid-transaction that will commit a newer
-        # latest start: counter FOR UPDATE, then the FK's KEY SHARE on S.
-        {holder, holder_pid} =
-          hold(fn ->
-            lock_counter!(ctx, "FOR UPDATE")
-            lock_switch!(switch, "FOR KEY SHARE")
-            insert_newer_start!(ctx, binding)
-          end)
+        # An allocation mid-transaction: counter FOR UPDATE; next, the FK's
+        # KEY SHARE on S and a newer latest start.
+        {holder, holder_pid} = hold(fn -> lock_counter!(ctx, "FOR UPDATE") end)
 
         finalizer =
           coordinator_call(:finalizer, fn -> complete(ctx, binding, switch, candidate) end)
 
         await_blocked_by!(pid_of(:finalizer), holder_pid)
+
+        assert {:ok, waited} =
+                 step(holder, fn ->
+                   lock_switch!(switch, "FOR KEY SHARE")
+                   insert_newer_start!(ctx, binding)
+                 end),
+               "the waiting finalizer holds the switch: it locked S before the counter"
+
+        assert waited < 500
         release(holder)
         join(holder)
 
         assert {:error, _} = join(finalizer), "the waiter re-read latest: the candidate is stale"
         assert switch_status(switch) == "pending"
+      end)
+    end
+
+    test "the interleaving harness tells the approved order from the inversion" do
+      race(fn ->
+        harness_tables!()
+
+        for {side, order, expected} <- [
+              {:allocator, :approved, :ok},
+              {:allocator, :inverted, :error},
+              {:finalizer, :approved, :ok},
+              {:finalizer, :inverted, :error}
+            ] do
+          {holder, holder_pid} = hold(holder_first(side))
+          contender = raw_contender(side, order)
+          await_blocked_by!(pid_of(:contender), holder_pid)
+
+          # Only a free second lock passes: a deadlock may abort the
+          # contender instead, and the holder then waits ~deadlock_timeout.
+          result = step(holder, holder_second(side))
+          outcome = if match?({:ok, ms} when ms < 500, result), do: :ok, else: :error
+          assert outcome == expected, "#{side} #{order}: #{inspect(result)}"
+
+          release(holder)
+          join(holder)
+          join(contender)
+        end
       end)
     end
 
@@ -503,15 +544,124 @@ defmodule SdrAgent.Agents.ModelServerStartRaceTest do
   defp held(parent, fun, outcome) do
     result = fun.()
     send(parent, {:held, self()})
+    await_release(parent)
+    if outcome == :rollback, do: Repo.rollback(:test_rollback), else: result
+  end
 
+  # A holder takes further steps on request until it is released.
+  defp await_release(parent) do
     receive do
-      :release -> :ok
+      {:step, fun} ->
+        send(parent, {:stepped, timed_step(fun)})
+        await_release(parent)
+
+      :release ->
+        :ok
     after
       30_000 -> :timeout
     end
-
-    if outcome == :rollback, do: Repo.rollback(:test_rollback), else: result
   end
+
+  # One step under a savepoint and a 1.5 s lock timeout: {:ok, waited_ms}
+  # or {:error, reason} (a lock timeout or a deadlock), the holder's
+  # transaction left usable.
+  defp timed_step(fun) do
+    Repo.query!("SAVEPOINT step")
+    Repo.query!("SET LOCAL lock_timeout = '1500ms'")
+    started = System.monotonic_time(:millisecond)
+
+    try do
+      fun.()
+      {:ok, System.monotonic_time(:millisecond) - started}
+    rescue
+      error ->
+        Repo.query!("ROLLBACK TO SAVEPOINT step")
+        {:error, Exception.message(error)}
+    end
+  end
+
+  defp step(%Task{} = holder, fun) do
+    send(holder.pid, {:step, fun})
+    assert_receive {:stepped, result}, 10_000
+    result
+  end
+
+  # The harness self-check runs on three bare one-row tables of its own
+  # (created and dropped here), standing for the setting, the counter and
+  # the switch; no ledger code or ledger table is involved.
+  @harness %{
+    setting: "c202b2a_harness_setting",
+    counter: "c202b2a_harness_counter",
+    switch: "c202b2a_harness_switch"
+  }
+
+  defp harness_tables! do
+    for {_role, table} <- @harness do
+      Repo.query!("DROP TABLE IF EXISTS #{table}")
+      Repo.query!("CREATE TABLE #{table} (id integer PRIMARY KEY)")
+      Repo.query!("INSERT INTO #{table} (id) VALUES (1)")
+    end
+
+    on_exit(fn -> with_connection(&drop_harness_tables/0) end)
+  end
+
+  defp drop_harness_tables,
+    do: for({_role, table} <- @harness, do: Repo.query!("DROP TABLE IF EXISTS #{table}"))
+
+  defp harness_lock(role, mode),
+    do: fn -> Repo.query!("SELECT 1 FROM #{Map.fetch!(@harness, role)} WHERE id = 1 #{mode}") end
+
+  # Holder: a finalizer (setting, counter share; then the switch) or an
+  # allocator (counter; then the switch's key share).
+  defp holder_first(:allocator) do
+    fn ->
+      harness_lock(:setting, "FOR UPDATE").()
+      harness_lock(:counter, "FOR SHARE").()
+    end
+  end
+
+  defp holder_first(:finalizer), do: harness_lock(:counter, "FOR UPDATE")
+  defp holder_second(:allocator), do: harness_lock(:switch, "FOR UPDATE")
+  defp holder_second(:finalizer), do: harness_lock(:switch, "FOR KEY SHARE")
+
+  # A raw contender on its own connection, in the approved or the inverted
+  # order.
+  defp raw_contender(side, order) do
+    statements = contender_statements(side, order)
+    parent = self()
+
+    task = Task.async(fn -> reported(parent, :contender, contending(statements)) end)
+
+    Process.put(:race_tasks, [task | Process.get(:race_tasks, [])])
+    task
+  end
+
+  defp contending(statements) do
+    fn ->
+      Repo.transaction(fn ->
+        Repo.query!("SET LOCAL lock_timeout = '3s'")
+        Enum.each(statements, &safe_run/1)
+      end)
+    end
+  end
+
+  defp safe_run(fun) do
+    fun.()
+  rescue
+    _error -> :aborted
+  end
+
+  defp contender_statements(:allocator, :approved),
+    do: [harness_lock(:counter, "FOR UPDATE"), harness_lock(:switch, "FOR KEY SHARE")]
+
+  defp contender_statements(:allocator, :inverted),
+    do: [harness_lock(:switch, "FOR KEY SHARE"), harness_lock(:counter, "FOR UPDATE")]
+
+  defp contender_statements(:finalizer, :approved),
+    do: [harness_lock(:counter, "FOR SHARE"), harness_lock(:switch, "FOR UPDATE")]
+
+  defp contender_statements(:finalizer, :inverted),
+    do: [harness_lock(:switch, "FOR UPDATE"), harness_lock(:counter, "FOR SHARE")]
 
   defp release(%Task{} = task), do: send(task.pid, :release)
   defp join(%Task{} = task, timeout \\ 20_000), do: Task.await(task, timeout)
@@ -549,13 +699,21 @@ defmodule SdrAgent.Agents.ModelServerStartRaceTest do
     end
   end
 
+  # MF1 (Codex 5f57e6ac): a process that already owns its non-sandboxed
+  # connection (the test process, after setup) reuses it and never checks
+  # it in; a process without one checks one out for `fun` only. An
+  # allowed (borrowed) connection is not an independent one: it raises.
   defp with_connection(fun) do
-    :ok = Sandbox.checkout(Repo, sandbox: false)
+    case Sandbox.checkout(Repo, sandbox: false) do
+      :ok ->
+        try do
+          fun.()
+        after
+          Sandbox.checkin(Repo)
+        end
 
-    try do
-      fun.()
-    after
-      Sandbox.checkin(Repo)
+      {:already, :owner} ->
+        fun.()
     end
   end
 
@@ -574,6 +732,18 @@ defmodule SdrAgent.Agents.ModelServerStartRaceTest do
     do: Regex.match?(~r/\Asdr_agent_test[a-z0-9_]*\z/, database)
 
   def truncatable?(_database), do: false
+
+  test "with_connection reuses an owned connection and keeps tasks independent" do
+    outer = backend_pid()
+    assert with_connection(&backend_pid/0) == outer
+    assert with_connection(fn -> with_connection(&backend_pid/0) end) == outer
+    assert backend_pid() == outer, "the owned connection survived the nested calls"
+
+    other = Task.async(fn -> with_connection(&backend_pid/0) end) |> Task.await(10_000)
+    refute other == outer
+  end
+
+  defp backend_pid, do: hd(hd(Repo.query!("SELECT pg_backend_pid()").rows))
 
   test "the cleanup guard refuses anything but a test database" do
     for name <- ["sdr_agent_dev", "sdr_agent_calibration", "postgres", nil, ""],

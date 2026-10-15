@@ -23,6 +23,10 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
       (ordinary, resolved and direct-pid calls are all refused), until a
       readable reconciliation releases it.
 
+  The R4 consumer cases pause the coordinator at `:old_stopping` (after
+  the subscription is acknowledged, before the stop). `cleanup_wait_ms:`
+  shortens the per-wait bound (at most the accepted 10 s).
+
   The `ProfileSupervisor` `server:` option maps a profile to the ClaudeCLI
   start options (configuration, not a seam). The test-build-only
   coordinator option `faults:` loses a finalization reply and gates the
@@ -58,7 +62,15 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
       status = await_status!(&(&1.hold == :released))
 
       assert {status.generation, status.profile_id} == {1, :claude_cli_opus}
-      assert [%{reason: :boot, status: :ready, ready_evidence: :spawn_preflight}] = starts!(ctx)
+
+      assert [%{reason: :boot, status: :ready, ready_evidence: :spawn_preflight} = start] =
+               starts!(ctx)
+
+      server = GenServer.whereis(ClaudeCLI.server())
+
+      assert {start.pid, start.reaper_pid} == {inspect(server), inspect(ClaudeCLI.reaper(server))},
+             "start_started records the exact live child and its own reaper"
+
       assert {:ok, nil} = Agents.get_profile_setting(actor: ctx.admin)
       assert %{status: :pending} = ClaudeCLI.attestation(), "the attestation is not reset"
 
@@ -74,6 +86,11 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
       assert_receive {:launch_admission, _, _, _}, 10_000
 
       kill_coordinator!()
+
+      # The re-hold waits behind the in-flight call: not acknowledged, so
+      # not reported as held, and never released.
+      pending = await_status!(&(&1.boot_id != first_boot), 5_000)
+      assert pending.hold == :pending, "a hold is reported only on its acknowledgement"
 
       status = await_status!(&(&1.boot_id != first_boot and &1.hold == :released), 20_000)
 
@@ -246,6 +263,64 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
     end
   end
 
+  ## The cleanup receipt, consumed by the coordinator (R4)
+
+  describe "the cleanup receipt, as the coordinator validates it" do
+    test "a forged ref is ignored, and a reaper DOWN without the receipt blocks", ctx do
+      tree!(ctx)
+      await_status!(&(&1.hold == :released))
+      pause_at!(:old_stopping)
+      assert {:ok, switch} = request(ctx)
+      assert_receive {:stage_paused, :old_stopping, coordinator}, 20_000
+
+      reaper = ClaudeCLI.reaper(ClaudeCLI.server())
+      forged = %{name: ClaudeCLI.server(), tracked: 0}
+      send(coordinator, {:reaper_cleanup_confirmed, make_ref(), forged})
+      Process.exit(reaper, :kill)
+      send(coordinator, :continue)
+
+      assert %{status: :blocked} = await_switch!(ctx, switch, :blocked)
+      assert switch_failure(ctx, switch) =~ "old_cleanup_unconfirmed"
+      assert [%{reason: :boot}] = starts!(ctx), "no candidate after an unconfirmed cleanup"
+    end
+
+    test "an absent lease is not a receipt, and stray messages never reset the bound", ctx do
+      tree!(ctx, cleanup_wait_ms: 600)
+      await_status!(&(&1.hold == :released))
+      pause_at!(:old_stopping)
+      assert {:ok, switch} = request(ctx)
+      assert_receive {:stage_paused, :old_stopping, coordinator}, 20_000
+
+      reaper = ClaudeCLI.reaper(ClaudeCLI.server())
+      :erlang.suspend_process(reaper)
+      on_exit(fn -> if Process.alive?(reaper), do: :erlang.resume_process(reaper) end)
+      :persistent_term.erase({SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper, ClaudeCLI.server()})
+
+      started = System.monotonic_time(:millisecond)
+      send(coordinator, :continue)
+
+      stray =
+        Task.async(fn ->
+          for _ <- 1..8 do
+            send(
+              coordinator,
+              {:reaper_cleanup_confirmed, make_ref(), %{name: ClaudeCLI.server()}}
+            )
+
+            Process.sleep(100)
+          end
+        end)
+
+      assert %{status: :blocked} = await_switch!(ctx, switch, :blocked)
+      elapsed = System.monotonic_time(:millisecond) - started
+      Task.await(stray, 5_000)
+
+      assert switch_failure(ctx, switch) =~ "old_cleanup_unconfirmed"
+      assert elapsed >= 550 and elapsed < 1_100, "the 600 ms bound took #{elapsed} ms"
+      assert [%{reason: :boot}] = starts!(ctx)
+    end
+  end
+
   ## Helpers
 
   defp tree!(ctx, opts \\ []) do
@@ -257,7 +332,7 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
     _ = ctx
 
     server = fn profile_id ->
-      args = if opts[:slow], do: ["env_dump", dump_path(), "800"], else: ["ready"]
+      args = if opts[:slow], do: ["env_dump", dump_path(), "1500"], else: ["ready"]
 
       base = [
         command: System.find_executable("elixir"),
@@ -278,7 +353,7 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
       )
     end
 
-    tree_opts = [server: server] ++ Keyword.take(opts, [:faults])
+    tree_opts = [server: server] ++ Keyword.take(opts, [:faults, :cleanup_wait_ms])
     start_supervised!({@profile_supervisor, tree_opts})
   end
 
