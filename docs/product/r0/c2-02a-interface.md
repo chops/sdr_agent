@@ -1,6 +1,16 @@
 # C2-02a (#52, slice a) the switch records: interface check (draft)
 
-**Status:** draft 3, 2026-10-15, for Codex's interface check before RED.
+**Status:** draft 4, 2026-10-15, for Codex's interface check before RED.
+Draft 3 (`dc28ee9`): NEEDS-REVIEW on one read/lock phase gap (Codex
+453d32f6). It is fixed in the phase table below.
+
+**Entity Model trigger: yes.** The internal setting actions, the
+phase-bound `ProfileSwitchContext` policy, the `setting_initialized`
+event and the read policy change backend action, policy and event
+contracts. These are covered by the narrow delta below; the unchanged
+`dc01a65` rows carry their PASS.
+
+Previously:
 No code. Draft 2 (`2bb2679`): NEEDS-REVIEW (Codex 6778082f). Its items
 are fixed below: block replay, the context phases, and the narrow
 entity delta. The probe result is in the section "Probe evidence".
@@ -122,13 +132,28 @@ The setting has two internal actions:
 - **`:initialize`** (create);
 - **`:apply_switch`** (update: `desired_profile_id := to`, `revision + 1`).
 
-It also allows one internal read. All of them are authorized only by the
-`ProfileSwitchContext` check, and the check is **phase-bound**:
+Internal reads and locks are allowed too. All of these are authorized
+only by `ProfileSwitchContext`, in **three phases**. A phase is set only
+by the action's own change, never by caller-supplied context. The
+resource write guards check the exact stored target and value, not just
+the marker.
 
-| Phase | Set by | Before | Authorizes | Bound to |
+| Phase | Set by | When | Authorizes | Bound to |
 |---|---|---|---|---|
-| `:initialize` | the `request` action's own change, **after** the admin check and **before** the initializing insert (the row doesn't exist yet) | the setting read and insert | `:initialize` create only | the actor's tenant; the insert's `tenant_id` must equal it; the actor must be a current human admin |
-| `:apply` | the `complete` action's own change, for its switch | the setting read `FOR UPDATE` | the internal setting read (for the lock) and `:apply_switch`, only | the switch's tenant and id. `:apply_switch` must set `desired_profile_id` to that switch's `to_profile_id`, the switch must be the pending one locked in the same transaction, and the actor must be `model_runtime` |
+| `:initialize` | `request`'s change, after the current-admin check | before the absent-row upsert | the `:initialize` upsert only. The id is generated fresh **inside** the request orchestration; it is not a caller argument, and the public signature has no id | the actor's tenant (the insert's `tenant_id` must equal it); a current human admin |
+| `:transition` | the change of `complete`, `fail` or `block` | before the first lock | **reads and locks only:** the tenant's setting `FOR UPDATE`, then that switch `FOR UPDATE`, whatever its status. A terminal or blocked status is read so the replay and conflict rules can run | the action name, the actor's tenant and the switch id; actor `model_runtime`. **No write** |
+| `:apply` | `complete`'s change only, **after** both rows are locked under `:transition`, the generation matches and the switch is `pending` | just before the write | `:apply_switch` only | that tenant's locked setting row and that pending switch. The write guard re-checks on the stored rows that the new `desired_profile_id` equals the switch's `to_profile_id` and the revision is the locked revision + 1; actor `model_runtime` |
+
+- **Fail and block** get `:transition` (reads and locks) only, never
+  `:apply` or any setting write.
+- **The pending check is on the write, not the read.** It belongs to
+  `:apply`'s guard. `:transition`'s reads don't require `pending`, so a
+  same-generation replay on a completed, failed or blocked switch reaches
+  its no-op or conflict decision.
+- **Lock order:** for all three runtime actions, setting → switch →
+  chain head, with no switch lock before the setting.
+- **What `model_runtime` gets:** no general setting or switch read. Its
+  reads exist only inside `:transition`, for one switch.
 
 - **Direct and forged calls fail.** A direct call to `:initialize` or
   `:apply_switch`, or to the internal read, without the matching phase is
@@ -139,8 +164,6 @@ It also allows one internal read. All of them are authorized only by the
   - another tenant;
   - another switch;
   - a `to` that differs from the switch's.
-- **What `model_runtime` gets:** no general setting read or write. Its
-  only setting access is the `:apply` phase for one switch.
 - **What the admin gets:** no direct setting write; `:initialize` (the
   first-row upsert) only inside `request`. On conflict it changes no
   value.
@@ -178,9 +201,9 @@ rows stay as they are for everything not listed.
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy / Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| ModelProfileSetting | Existing accepted row (action and policy delta) | Desired real profile | unchanged | unchanged | **Lazy creation:** `:initialize`, an upsert on the unique tenant identity, no-op on conflict, with a caller-generated id to detect the insert. Inside `request`'s transaction only. It gives revision 1 and `:claude_cli_opus`, and appends no event of its own. **`:apply_switch`:** inside `complete`'s transaction only, with `revision + 1`. A rejected request rolls everything back. One row per tenant | **Read:** admin; auditor (audited); `agent_runtime`; `model_runtime` only in the `:apply` phase for its switch's tenant. **Write:** only `:initialize` and `:apply_switch`, each only under its `ProfileSwitchContext` phase. No direct write action | none |
-| ModelProfileSwitch | Existing accepted row (action delta) | One requested change | unchanged | unchanged | **`resolve_blocked` is deferred to b2;** in slice a, blocked has no exit. Idempotency and conflicts are as above (`:switch_blocked`, `:switch_already_finished`). Request and complete each run in one transaction, with the setting, the switch and the events together | **Read:** admin; auditor (audited); `agent_runtime`. Writes are as accepted (`request`: a human admin; `complete`, `fail` and `block`: `model_runtime`) | the b2 resolver contract |
-| `Checks.ProfileSwitchContext` | New (policy check) | Phase-bound authorization of the internal setting actions | Context `%{phase: :initialize or :apply, tenant_id, switch_id (for :apply)}` | n/a | Set only by the `request` and `complete` changes, as in the phase table | Requires the phase's actor (a current human admin, or `model_runtime`) and an exact target match | none |
+| ModelProfileSetting | Existing accepted row (action and policy delta) | Desired real profile | unchanged | unchanged | **Lazy creation:** `:initialize`, an upsert on the unique tenant identity, no-op on conflict, with a caller-generated id to detect the insert. Inside `request`'s transaction only. It gives revision 1 and `:claude_cli_opus`, and appends no event of its own. **`:apply_switch`:** inside `complete`'s transaction only, with `revision + 1`. A rejected request rolls everything back. One row per tenant | **Read:** admin; auditor (audited); `agent_runtime`; `model_runtime` only in the `:transition` phase for one switch's tenant (read and lock). **Write:** only `:initialize` (phase `:initialize`) and `:apply_switch` (phase `:apply`, `complete` only). No direct write action | none |
+| ModelProfileSwitch | Existing accepted row (action delta) | One requested change | unchanged | unchanged | **`resolve_blocked` is deferred to b2;** in slice a, blocked has no exit. Idempotency and conflicts are as above (`:switch_blocked`, `:switch_already_finished`). Request and complete each run in one transaction, with the setting, the switch and the events together | **Read:** admin; auditor (audited); `agent_runtime`; `model_runtime` only in the `:transition` phase for that switch (read and lock). Writes are as accepted (`request`: a human admin; `complete`, `fail` and `block`: `model_runtime`) | the b2 resolver contract |
+| `Checks.ProfileSwitchContext` | New (policy check) | Phase-bound authorization of the internal setting and switch reads and locks, and the setting writes | Context `%{phase: :initialize, :transition or :apply, action, tenant_id, switch_id}` (switch id for `:transition` and `:apply`) | n/a | Set only by the action's own change (`request`, `complete`, `fail`, `block`), in the order of the phase table; never accepted from caller context alone | Requires the phase's actor and an exact target match. The resource write guards also check the stored target and value | none |
 | AuditEvent | Existing (new event types) | Ledger | **`model.profile.setting_initialized`:** tenant, `desired_profile_id`, revision 1, the requesting switch's id. It is appended by `request` after the head, only when that transaction inserted the row. **`model.profile.switch_requested`, `_completed`, `_failed`, `_blocked`:** from, to, `server_generation`, the setting revision after the change, `failure_reason` | unchanged | Appended in the same transaction as their change, after the chain head | unchanged | none |
 
 Actor `:model_runtime`: the accepted row, unchanged.
@@ -257,11 +280,22 @@ There is no production behavior during RED.
    - fail after complete, complete after fail, and block after completed
      or failed: each `:switch_already_finished`.
 6b. **Context phases:**
-   - direct `:initialize`, `:apply_switch` and the internal read without
-     a phase are each refused;
-   - a forged marker with the wrong phase, another tenant, another
-     switch, or a mismatched `to` is refused;
-   - `model_runtime` reading the setting outside `:apply` is denied.
+   - direct `:initialize`, `:apply_switch` and the internal reads
+     without a phase are each refused;
+   - a forged marker with the wrong phase, wrong action, another tenant,
+     another switch, or a mismatched `to` is refused;
+   - `model_runtime` reading the setting or a switch outside
+     `:transition` is denied;
+   - `fail` and `block` succeed through `:transition`, with the setting
+     locked first, and never write the setting;
+   - `:apply` without a prior `:transition` lock, or on a non-pending
+     switch, is refused by the write guard;
+   - a same-generation replay on a completed, failed or blocked switch
+     reaches its no-op or conflict result, and is not refused at the read.
+6c. **The first row on the actual resource:**
+   - on conflict, every field is kept;
+   - exactly one `setting_initialized` event appears across the race;
+   - the generated id is internal (no public id argument).
 7. **History** is never relabelled.
 8. **Direct-SQL negatives,** one rule each: the `from = to` check, the
    status check, the partial unique index, the setting's fake-profile
@@ -306,3 +340,15 @@ domain diagrams are regenerated for the new resources.
 one to implement. The savepoint plan would have failed. RED adds the
 same first-row race tests on independent connections against the real
 resource.
+
+## Soft-stop record
+
+Configured: `ai_pair=true`, `codex_review=true`, so the correlated peer
+review applies.
+
+| Round | Exact head | Reviewer | Correlation | Verdict |
+|---|---|---|---|---|
+| 1 | `037a1fe` | Codex | `m_1792044248024034000_52ef30fd` → 17604421 | NEEDS-REVIEW |
+| 2 | `2bb2679` | Codex | `m_1792044903990944000_53dd2bbc` → 6778082f | NEEDS-REVIEW |
+| 3 | `dc28ee9` | Codex | `m_1792047196002043000_afdb83d9` → 453d32f6 | NEEDS-REVIEW |
+| 4 | this draft | Codex | pending | pending |
