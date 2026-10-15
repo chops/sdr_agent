@@ -11,9 +11,34 @@ defmodule SdrAgentWeb.Endpoint do
     same_site: "Lax"
   ]
 
-  socket "/live", Phoenix.LiveView.Socket,
-    websocket: [connect_info: [session: @session_options]],
-    longpoll: [connect_info: [session: @session_options]]
+  # Test builds read the session options at runtime (`session_options/0`),
+  # so the R0-07 calibration console, when active, uses its own cookie name
+  # for HTTP and the LiveView socket alike. Other builds are unchanged.
+  if Mix.env() == :test do
+    @console_session_options Keyword.put(
+                               @session_options,
+                               :key,
+                               SdrAgentWeb.CalibrationConsole.session_key()
+                             )
+
+    @doc "The session options in effect (the calibration console's own when it is active)."
+    def session_options do
+      if SdrAgentWeb.CalibrationConsole.active?(),
+        do: @console_session_options,
+        else: @session_options
+    end
+
+    socket "/live", Phoenix.LiveView.Socket,
+      websocket: [connect_info: [session: {__MODULE__, :session_options, []}]],
+      longpoll: [connect_info: [session: {__MODULE__, :session_options, []}]]
+  else
+    @doc "The session options in effect."
+    def session_options, do: @session_options
+
+    socket "/live", Phoenix.LiveView.Socket,
+      websocket: [connect_info: [session: @session_options]],
+      longpoll: [connect_info: [session: @session_options]]
+  end
 
   # Serve at "/" the static files from "priv/static" directory.
   #
@@ -53,6 +78,12 @@ defmodule SdrAgentWeb.Endpoint do
     plug SdrAgentWeb.SmokeAttestation
   end
 
+  # R0-07 calibration console page allowlist: test builds only, inert unless
+  # `mix sdr.calibration.console serve` activated it (see the module).
+  if Mix.env() == :test do
+    plug SdrAgentWeb.CalibrationConsole
+  end
+
   # S9: webhook requests are read raw (bounded) before any parsing.
   plug SdrAgentWeb.WebhookIntake
 
@@ -63,6 +94,26 @@ defmodule SdrAgentWeb.Endpoint do
 
   plug Plug.MethodOverride
   plug Plug.Head
-  plug Plug.Session, @session_options
+
+  if Mix.env() == :test do
+    plug :session
+  else
+    plug Plug.Session, @session_options
+  end
+
   plug SdrAgentWeb.Router
+
+  if Mix.env() == :test do
+    @session_init Plug.Session.init(@session_options)
+    @console_session_init Plug.Session.init(@console_session_options)
+
+    defp session(conn, _opts) do
+      init =
+        if SdrAgentWeb.CalibrationConsole.active?(),
+          do: @console_session_init,
+          else: @session_init
+
+      Plug.Session.call(conn, init)
+    end
+  end
 end

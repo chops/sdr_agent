@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# The R0-07 calibration console (readiness packet section 3). Run inside the
+# devenv shell (direnv) with Postgres up (`devenv up`):
+#
+#   bin/calibration-console check            print the plan the console would
+#                                            serve with; starts no server and
+#                                            touches no database, but creates
+#                                            the secrets file on first use
+#   bin/calibration-console bootstrap-admin --email E --display-name N --password-stdin
+#                                            the first-admin bootstrap, in the
+#                                            calibration database (password on
+#                                            stdin, never echoed)
+#   bin/calibration-console serve            serve sign-in and /admin on
+#                                            http://127.0.0.1:4124
+#   bin/calibration-console calibrate PROFILE
+#                                            one attended calibration call of
+#                                            PROFILE, charged to G-R0; asks the
+#                                            owner to type CALIBRATE PROFILE
+#   bin/calibration-console calibrate-recover ID [--owner-verified-stopped]
+#   bin/calibration-console calibrate-recover --release-aborted
+#                                            recovers a stale calibration launch
+#                                            record; asks the owner to type
+#                                            RECOVER ID (and STOPPED ID)
+#
+# It runs the test-seam build (MIX_ENV=test) against exactly one database,
+# the fixed, persistent sdr_agent_calibration on the local devenv Postgres
+# (localhost:5520). The database is created if absent and migrated; there is
+# no reset, drop or seed path. It listens only on 127.0.0.1:4124 (never the
+# dev port 4120 or the smoke port 4122), and only serve listens. Its Runtime
+# starts no model server: the model provider is the Fake, and this script
+# passes no pinned CLI path on. check, serve, bootstrap-admin and
+# calibrate-recover start no ClaudeCLI server at all; calibrate alone starts
+# one private, unnamed ClaudeCLI server for its single attended call, on the
+# app's own verified pinned CLI, and stops it when the command ends (R0-07
+# packet 8.2 and 8.14.1). Its session
+# and token signing secrets are its own, never the checked-in test values:
+# every command creates them on first use in
+# ~/.local/state/sdr-agent/calibration/secrets (0700 directory, 0600 file)
+# and never prints them. It is not the
+# demo runbook and shares nothing with its smoke server. No secret is read
+# or printed.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$root"
+
+database=sdr_agent_calibration
+secrets_file="${HOME:-~}/.local/state/sdr-agent/calibration/secrets"
+bind_ip=127.0.0.1
+bind_port=4124
+db_port=5520
+
+usage() {
+  cat >&2 <<'EOF'
+usage: bin/calibration-console check | serve | bootstrap-admin ARGS | calibrate PROFILE |
+       calibrate-recover ID [--owner-verified-stopped] | calibrate-recover --release-aborted
+  check            print the console's plan (database, listener, provider); starts no
+                   server and touches no database
+  serve            serve sign-in and /admin from sdr_agent_calibration on http://127.0.0.1:4124
+  bootstrap-admin  create the first admin there: --email E --display-name N --password-stdin
+  calibrate        one attended calibration call of PROFILE (claude_cli_opus or
+                   claude_cli_sonnet), charged to G-R0; asks you to type CALIBRATE PROFILE
+  calibrate-recover
+                   recover a stale calibration launch record: the call ID (with
+                   --owner-verified-stopped once you have verified it stopped), or
+                   --release-aborted for an aborted record that never reserved
+Every command, check included, creates the console's own session and token secrets
+on first use in ~/.local/state/sdr-agent/calibration/secrets (0600; never printed).
+EOF
+  exit 2
+}
+
+refuse() {
+  echo "bin/calibration-console: refusing: $*" >&2
+  exit 2
+}
+
+[ "$#" -ge 1 ] || usage
+cmd="$1"
+shift
+case "$cmd" in
+  check | serve) [ "$#" -eq 0 ] || usage ;;
+  bootstrap-admin) ;;
+  calibrate) [ "$#" -eq 1 ] || usage ;;
+  calibrate-recover) [ "$#" -eq 1 ] || [ "$#" -eq 2 ] || usage ;;
+  -h | --help) usage ;;
+  *)
+    echo "bin/calibration-console: unknown command: $cmd" >&2
+    usage
+    ;;
+esac
+
+## Environment guard (before any Mix command)
+
+[ -z "${DATABASE_URL:-}" ] ||
+  refuse "DATABASE_URL is set; the calibration console serves only $database"
+
+[ "${MIX_ENV:-test}" = test ] ||
+  refuse "MIX_ENV=${MIX_ENV} is not the test-seam build (test)"
+export MIX_ENV=test
+
+case "${PORT:-$bind_port}" in
+  "$bind_port") ;;
+  *) refuse "PORT=${PORT}: the calibration console listens only on $bind_port" ;;
+esac
+unset PORT
+
+case "${SDR_MODEL_PROVIDER:-fake}" in
+  fake) ;;
+  *) refuse "SDR_MODEL_PROVIDER=${SDR_MODEL_PROVIDER}: the calibration console runs the Fake provider only and starts no model server" ;;
+esac
+export SDR_MODEL_PROVIDER=fake
+unset SDR_CLAUDE_CLI_BIN
+
+# Accepts a TCP connection on 127.0.0.1:$1 (bash /dev/tcp; no lsof needed).
+listening() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+if [ "$cmd" = serve ] && listening "$bind_port"; then
+  refuse "port $bind_port is already in use (lsof -nP -iTCP:$bind_port -sTCP:LISTEN)"
+fi
+
+## The plan Mix would really serve with
+
+line="$(mix sdr.calibration.console check | grep '^SDR_CALIBRATION_CONSOLE ' | tail -n 1)" || line=""
+read -r tag plan_db plan_host plan_db_port plan_ip plan_port plan_provider plan_server extra <<<"$line" || true
+
+[ "${tag:-}" = SDR_CALIBRATION_CONSOLE ] && [ -n "${plan_server:-}" ] && [ -z "${extra:-}" ] ||
+  refuse "could not read the calibration console plan (mix sdr.calibration.console check)"
+
+[ "$plan_db" = "$database" ] || refuse "database $plan_db is not $database"
+case "$plan_host" in
+  localhost | 127.0.0.1) ;;
+  *) refuse "database host $plan_host is not local" ;;
+esac
+[ "$plan_db_port" = "$db_port" ] ||
+  refuse "database port $plan_db_port is not the devenv Postgres port $db_port"
+[ "$plan_ip:$plan_port" = "$bind_ip:$bind_port" ] ||
+  refuse "bind address $plan_ip:$plan_port is not $bind_ip:$bind_port"
+[ "$plan_provider" = SdrAgent.AI.ModelProvider.Fake ] && [ "$plan_server" = none ] ||
+  refuse "the calibration console starts no model server (plan: provider $plan_provider, model server $plan_server)"
+
+case "$cmd" in
+  check)
+    echo "bin/calibration-console: database $database on $plan_host:$plan_db_port," \
+      "http://$bind_ip:$bind_port, provider Fake, no model server"
+    echo "bin/calibration-console: secrets $secrets_file (created on first use, by check too;" \
+      "values never printed)"
+    ;;
+  bootstrap-admin)
+    exec mix sdr.calibration.console bootstrap-admin "$@"
+    ;;
+  serve)
+    echo "bin/calibration-console: serving $database on http://$bind_ip:$bind_port (sign-in and /admin only)"
+    exec mix sdr.calibration.console serve
+    ;;
+  calibrate)
+    exec mix sdr.calibration.console calibrate "$@"
+    ;;
+  calibrate-recover)
+    exec mix sdr.calibration.console calibrate-recover "$@"
+    ;;
+esac

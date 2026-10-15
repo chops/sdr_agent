@@ -17,6 +17,9 @@ defmodule SdrAgent.AI.ProfileProvenanceTest do
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     tenant = bootstrap!()
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
     %{tenant: tenant, run: run, agent: agent}
@@ -36,7 +39,7 @@ defmodule SdrAgent.AI.ProfileProvenanceTest do
       assert invocation.status == :completed
       assert invocation.profile_id == profile
       assert invocation.model_id == resolved
-      assert invocation.provider_version == "2.1.291"
+      assert invocation.provider_version == "2.1.294"
       assert invocation.model_catalog_entry["alias"] == model_alias
       assert invocation.model_catalog_entry["resolved_id"] == resolved
       GenServer.stop(server)

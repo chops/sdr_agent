@@ -14,7 +14,8 @@ in the MVP, and audit-chain anchoring to a private Git repository plus
 OpenTimestamps"). Details amended by Codex consultations 11 and 13. The R0
 amendment in the wire witness section (2026-10-12) is accepted. The C4
 database-logging amendment in the OpenTelemetry section (2026-10-12) is
-accepted (2026-10-14).
+accepted (2026-10-14). The R0-07 calibration harness amendment (2026-10-13)
+is accepted (2026-10-14).
 
 ## Context
 
@@ -658,6 +659,172 @@ independent entity/action PASS (story R0-07) before they are implemented.
   measures the result.
 - Every CLI bump or new profile costs a projection review, calibration
   calls and an enablement change.
+
+#### R0-07 calibration harness amendment (2026-10-13): the harness as built
+
+**Status: ACCEPTED.** The owner accepted this amendment on 2026-10-14
+(America/Denver, about 10:14 MDT), in the private Claude session chat,
+with the word "accept". This followed Codex's approval of its content for
+owner presentation at 7c0753c2 (reply 5712f2fc). It records how the R0
+amendment's calibration exception (item 2) is confined in the harness on
+PR #146. It enables no tuple, grants no spend and adds no dependency.
+**OQ-E3 is not accepted here.** The conservative default stays:
+recovering an outstanding sent call (a `launch_pending` or `launched`
+record) needs the owner's typed `STOPPED`.
+The contracts and their reviews are in
+`docs/product/r0/r0-07-witness.md`, sections 8.2–8.14.
+
+**Context.**
+
+- **What the R0 amendment requires.** The four G-R0 calibration calls
+  must run in an isolated harness, never in a business flow. Their
+  evidence must be quarantined until it is reviewed.
+- **Where the harness sits.** It is built as the console subcommands
+  `calibrate <profile>` and `calibrate-recover`, in test-seam builds
+  only.
+- **What remains to be decided.** The harness can't prove some physical
+  facts, such as process quiescence or durability across power loss.
+  This amendment records each such limit and the conservative choice
+  made where it applies.
+
+**Decision.**
+
+1. **Confinement.**
+   - **The module.** The orchestration (`CalibrationConsole.Calibrate`)
+     exists only in test-seam builds. A non-seam build has neither the
+     module nor a working subcommand, and the dev-VM proofs check this.
+   - **The private server.** The command starts one unnamed ClaudeCLI
+     server, linked to itself. It is never registered under the Runtime's
+     name, and the console's Runtime provider stays the Fake.
+   - **The authority.** A sealed, one-shot authority registry in a
+     protected ETS table binds the call's invocation, run, tenant,
+     profile, the command and server pids, the prompt and schema
+     commitments, and the console instance. The staging exemption
+     consumes that entry before the launch. Any mismatch keeps
+     `:real_model_staged`. The registry revokes the entry when either pid
+     dies.
+   - **The wrapper.** A seam-only reserved-call wrapper
+     (`ModelProvider.calibration_call/3`) re-checks the reserved row,
+     the run and the request hash before any provider effect. It then runs
+     the facade's own shared invoke, validate and settle path, so `sent`,
+     completion and failure settle exactly as for an ordinary call.
+   - **Threat model.** This is a trusted in-process boundary. It stops
+     other callers, workers, second calls, servers and replays in the
+     same VM. It does not defend against code the owner runs inside the
+     console VM.
+2. **Admission and binding.**
+   - **The reservation.** The call is reserved under the calibration
+     marker on a `:proof` run with no Operation.
+   - **What the original reservation event records:**
+     - the G-R0 binding (grant, revision, allocation, profile);
+     - the console's claim (`calibration_claim.instance_id`);
+     - the exact tuple.
+   - **The launch re-check.** Launch admission re-derives exactly that
+     one event. Admission itself is run-neutral: a typed launch refusal is
+     stopped by the command (`SDR.Model.stop_refused/3`) before the latch.
+3. **Single flight, written before `sent`.** The command alone writes the
+   launch record (schema 3):
+   - `claimed` → `launch_pending` (written before the call, so before
+     `sent`) → `launched` (only on a verified receipt) → `finished`;
+   - `aborted` and `recovered` are the other final states.
+
+   The record names the owner VM's OS pid and its start identity. Another
+   recoverer refuses with `:owner_alive` while that VM lives.
+4. **The isolation is observed, not enforced.**
+   - **No wrapper.** The Port child already leads its own process group,
+     so no wrapper is added. A preflight launches a held synthetic target
+     and confirms it has its own group, and that its cleanup completed.
+   - **The launch receipt.** The request names its observer: the
+     command's own pid and a reference. Inside the call, the server reads
+     the root's start identity and its group membership, and sends one
+     correlated receipt to that observer. It arrives before the call's
+     reply. The command reads it only after the call returns, by reference,
+     invocation and server, and ignores stale or foreign messages. There
+     is no observer process, so the command stays the record's only
+     writer.
+   - **Unverified means unknown.** An unverified or missing receipt never
+     writes `launched` and never claims a cleanup.
+   - **The limit.** The observable is the CLI's process group. A
+     descendant that changes its group escapes it.
+5. **Recovery is attended (OQ-E3 stays open).**
+   - **The prompts.** `calibrate-recover` takes an explicit target, and
+     every state change needs `RECOVER <id>`.
+     - **An outstanding sent call** (a `launch_pending` or `launched`
+       record with sent history) also needs `--owner-verified-stopped`
+       and `STOPPED <id>`, and goes through the attestation below. For a
+       `launched` record, live work observed in its group refuses before
+       that prompt.
+     - **The final-replay exception.** An already-`finished` (or
+       `aborted`) record, with exactly the history, latch and frozen file
+       it attests, is replayed with `RECOVER <id>` alone: no `STOPPED`, no
+       attestation. Its release re-checks quiescence.
+   - **The probe's other uses.** Beyond that live-group check, the probe
+     also checks the owner's identity when recovery is claimed, and
+     quiescence at a final release.
+   - **The attestation.** It is audited database-first: the
+     `calibration.owner_attested` event, deduplicated by
+     `attestation_id`, then `attestation.json` in the recovery ticket.
+   - **Live work and probe failures are never permission.** Live work
+     seen through the probe refuses even with `STOPPED`. A probe error is
+     never read as absence.
+   - **Hard stops.** A ticket is never adopted. An unprovable state is a
+     hard owner-conflict stop that keeps the filesystem single-flight
+     lock, and any ticket. These are two separate barriers:
+     - **The lock** blocks every later `calibrate` on this console.
+     - **The database predecessor barrier** (B4') is separate. An
+       **unlatched** real calibration invocation blocks later real
+       calibration attempts across every profile in the tenant. A hard
+       conflict that happens after a successful latch keeps the lock, but
+       its invocation already satisfies the predecessor condition.
+   - **No automatic quiescence, and no orphan repair.** The code has no
+     automatic-quiescence recovery path, and no automatic repair of an
+     orphaned lock, ticket or barrier. Adding automatic quiescence needs
+     the owner's acceptance of OQ-E3 and then a reviewed code change. Any
+     repair workflow is a separately reviewed slice.
+6. **Evidence and quarantine.**
+   - **Observation.** One bounded observation runs with the recorded
+     tuple, outside any lock, and only the receipt's own link is used.
+   - **The file (E2).** It is published create-only and private, in the
+     `r0-calibration-evidence/1` schema, under
+     `~/.local/state/sdr-agent/calibration/evidence/`. It is never
+     replaced.
+   - **The latch (E1).** The latch is a `:calibration` release carrying
+     the file's hash. Calibration output is never `:released` to any
+     business read.
+   - **Publication.** Nothing is published to the repository unless the
+     owner accepts OQ-E1. Promotion of a tuple remains the R0 amendment's
+     separate, reviewed enablement change.
+
+**Qualifications (stated, not solved).**
+
+- **Durability.** The temp file is fsynced before `link(2)`, but the
+  directory is not fsynced. A power loss can lose a published name. A
+  missing file under a latch is then an owner conflict, and the file is
+  never recreated. The launch record has the same qualification.
+- **Pid identity.** `ps` start times have one-second resolution. A pid
+  reused within the same second reads as alive, which is a conservative
+  false-busy. On this macOS host the session id is 0 for every process,
+  which is why the process group, not the session, is observed.
+- **Trust boundary.** The owner's console VM is trusted (item 1).
+
+**Consequences.**
+
+- A calibration call can run only through this attended, single-flight
+  path. Its output never reaches a business flow.
+- There is no unattended repair. After a crash or uncertainty, the
+  owner uses the reviewed, attended `calibrate-recover` where it applies.
+  A hard owner conflict waits for a separately reviewed repair workflow.
+  It is never cleared by deleting a lock, ticket or predecessor evidence.
+  That is slower, and deliberate.
+- **As accepted,** this amendment covers the harness as reviewed at PR
+  #146. Any change to the authority, receipt, isolation or recovery rules
+  needs a further reviewed amendment.
+- **Not decided here:**
+  - OQ-E1 (publishing evidence to the repository);
+  - OQ-E2 (one profile and one attempt per command, with each attempt's
+    evidence reviewed before the next; the harness already behaves this
+    way and never batches);
+  - OQ-E3 (automated process-group proof of quiescence).
 
 ### Anchoring (S11)
 

@@ -67,6 +67,11 @@ config :sdr_agent, SdrAgent.Agents.Witness,
   reconciled_methods: [],
   allow_method_override: true
 
+# R0-07 slice C: the result gate's bounded wait, lowered for tests (the
+# 120 s ceiling may only be lowered) so a gated call whose capture never
+# arrives settles quickly.
+config :sdr_agent, SdrAgent.Agents.ResultGate, wait_ms: 1_000, poll_ms: 25
+
 # Demo seed fixtures may be written here (ADR-0009: seed actions are
 # authorized only for the seeder in :dev/:test; absent elsewhere = refused).
 config :sdr_agent, seeding_allowed?: true

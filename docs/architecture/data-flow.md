@@ -74,6 +74,12 @@ flowchart LR
         Classify[ReplyWorker queue agent -> ClassifyReply<br/>reply_classification + ReplyAssessment, no draft]
     end
 
+    subgraph Calibration["R0-07 calibration (test-seam console only; calibration-runtime.md)"]
+        CalCmd[Calibrate command<br/>owner-typed, single flight]
+        CalServer[Private ClaudeCLI server<br/>unnamed, one sealed call]
+        CalFiles[(Launch record + E2 evidence<br/>owner-local, create-only)]
+    end
+
     subgraph AI["Structured Model Boundary"]
         Provider[ModelProvider facade]
         Budget[persisted 20/run + 200/UTC day<br/>inside the reservation transaction]
@@ -128,6 +134,11 @@ flowchart LR
     Claude -. "proxy deployed: correlated exchange" .-> Witness[(Proxy witness store<br/>read by S12c reconciler)]
     Witness -. "store_root configured: bounded read, raw sha256 re-verified" .-> Reconciler[Witness reconciler<br/>queue reconciliation: 1]
     Reconciler -- "scoped audited payload read; links + attention, one txn" --> Append
+    CalCmd -- "reserve + locked sent admission (DB)" --> Actions
+    CalCmd -. "calibrate only: calibration_call, shared settle path" .-> CalServer
+    CalServer -. "pinned CLI, own process group" .-> Claude
+    CalCmd -- "lock-free file writes; evidence, then E1 latch txn" --> CalFiles
+    CalCmd -. "bounded ResultGate observation, no lock held" .-> Witness
     Resources -.-> Cache
     LiveViews -.-> Grant
     Grant --> Postgres

@@ -24,11 +24,22 @@ defmodule SdrAgent.Agents.AgentRun do
   `attention_failure_id` in the same transaction (an operator cancel opens
   none); an operator `retry` resolves the retried run's Failure. A run
   stopped by a refused real-model reservation (C9: `:fail` with
-  `:grant_unavailable`, `:exhaust_budget` with `:grant_exhausted`, each with
-  the refusal receipt's `refusal_failure_id` and `refusal_request_id`)
+  `:grant_unavailable`, `:exhaust_budget` with `:grant_exhausted`; R0-07
+  slice B: `:fail` with `:model_not_admitted`, a real call refused by the
+  admission gate before reservation or at launch — each with the refusal
+  receipt's `refusal_failure_id` and `refusal_request_id`)
   opens none and links that exact deduplicated Failure instead, even if an
   admin has resolved it meanwhile; the stop event records both arguments
-  (`SdrAgent.Agents.Changes.LinkRefusalAttention`).
+  (`SdrAgent.Agents.Changes.LinkRefusalAttention`). A run stopped by the
+  result gate (R0-07 slice C: `:fail` with `:witness_mismatch` or
+  `:witness_unreconciled`, with `witness_failure_id` and `release_id`)
+  likewise links the gate's exact cause
+  (`SdrAgent.Agents.Changes.LinkGateCause`); under the finalizer's verified
+  Prelocked context its run and cause are re-read with no lock clause
+  (`SdrAgent.Agents.Changes.RunRow`). A `:proof` run is finished by the
+  guarded calibration finish only (R0-07 slice E, row R11-2:
+  `:finish_calibration`, running → succeeded with `:calibration_latched`,
+  given its `:calibration` latch, `SdrAgent.Agents.Changes.CalibrationLatch`).
 
   Counters: `:reserve_model_call` (atomic, refuses at `max_model_calls`),
   `:settle_model_call`, `:record_tool_call` (atomic, refuses at
@@ -79,13 +90,22 @@ defmodule SdrAgent.Agents.AgentRun do
     :invalid_model_output,
     :provider_error,
     :crash,
-    :cancelled_by_operator
+    :cancelled_by_operator,
+    :witness_mismatch,
+    :witness_unreconciled,
+    :model_not_admitted,
+    :calibration_latched
   ]
-  # C9: stop reasons of a refused real-model reservation (its Failure is linked).
-  @refused [:grant_exhausted, :grant_unavailable]
+  # C9: stop reasons of a refused real-model reservation (its Failure is
+  # linked); R0-07 slice B adds :model_not_admitted (admission refusals
+  # before reservation and at launch).
+  @refused [:grant_exhausted, :grant_unavailable, :model_not_admitted]
+  # R0-07 slice C: stop reasons of the result gate (its exact cause is linked).
+  @gate [:witness_mismatch, :witness_unreconciled]
   @transitions [
     {:start, [:queued], :running},
     {:succeed, [:running], :succeeded},
+    {:finish_calibration, [:running], :succeeded},
     {:fail, [:running], :failed},
     {:exhaust_budget, [:running], :budget_exhausted},
     {:cancel, [:queued, :running], :cancelled}
@@ -209,6 +229,25 @@ defmodule SdrAgent.Agents.AgentRun do
               event_type: "agents.run.succeeded", category: :domain_change, links: @links}
     end
 
+    # R0-07 slice E (row R11-2): the only writer of :calibration_latched,
+    # reachable only through `SdrAgent.Agents.finish_calibration/3` under its
+    # verified Prelocked context with the run's calibration latch.
+    update :finish_calibration do
+      require_atomic? false
+      argument :release_id, :uuid, allow_nil?: false
+
+      change set_attribute(:status_reason, :calibration_latched)
+      change SdrAgent.Agents.Changes.CalibrationLatch
+      change {Transition, from: [:running], to: :succeeded, locked?: true}
+      change {Stamp, fields: [:finished_at]}
+
+      change {AppendEvent,
+              event_type: "agents.run.calibration_latched",
+              category: :domain_change,
+              links: @links,
+              arguments: [:release_id]}
+    end
+
     update :fail do
       require_atomic? false
       accept [:failure_reason]
@@ -217,11 +256,20 @@ defmodule SdrAgent.Agents.AgentRun do
       argument :status_reason, :atom,
         allow_nil?: false,
         constraints: [
-          one_of: [:invalid_model_output, :provider_error, :crash, :grant_unavailable]
+          one_of: [
+            :invalid_model_output,
+            :provider_error,
+            :crash,
+            :grant_unavailable,
+            :witness_mismatch,
+            :witness_unreconciled,
+            :model_not_admitted
+          ]
         ]
 
       # C9: the refusal receipt — its exact Failure and request id (required
-      # with, and only with, :grant_unavailable); linked instead of a new one.
+      # with, and only with, :grant_unavailable or :model_not_admitted);
+      # linked instead of a new one.
       argument :refusal_failure_id, :uuid
       argument :refusal_request_id, :string
 
@@ -231,8 +279,21 @@ defmodule SdrAgent.Agents.AgentRun do
       validate absent([:refusal_failure_id, :refusal_request_id]),
         where: [negate(argument_in(:status_reason, @refused))]
 
+      # R0-07 slice C: the result gate's receipt — the withheld release and
+      # its exact cause (required with, and only with, the gate reasons).
+      argument :witness_failure_id, :uuid
+      argument :release_id, :uuid
+
+      validate present([:witness_failure_id, :release_id]),
+        where: [argument_in(:status_reason, @gate)]
+
+      validate absent([:witness_failure_id, :release_id]),
+        where: [negate(argument_in(:status_reason, @gate))]
+
       change set_attribute(:status_reason, arg(:status_reason))
-      change get_and_lock_for_update()
+      # The run row re-read FOR UPDATE — or, for a gate stop under the
+      # finalizer's verified Prelocked context, with no lock clause (G6).
+      change SdrAgent.Agents.Changes.RunRow
       change {Transition, from: [:running], to: :failed, locked?: true}
 
       change {OpenAttention,
@@ -241,9 +302,10 @@ defmodule SdrAgent.Agents.AgentRun do
               message: {__MODULE__, :attention_message},
               field: :attention_failure_id,
               operation_field: :operation_id},
-             where: [absent(:refusal_failure_id)]
+             where: [absent(:refusal_failure_id), absent(:witness_failure_id)]
 
       change SdrAgent.Agents.Changes.LinkRefusalAttention, where: [present(:refusal_failure_id)]
+      change SdrAgent.Agents.Changes.LinkGateCause, where: [present(:witness_failure_id)]
 
       change {Stamp, fields: [:finished_at]}
 
@@ -251,7 +313,12 @@ defmodule SdrAgent.Agents.AgentRun do
               event_type: "agents.run.failed",
               category: :domain_change,
               links: @links,
-              arguments: [:refusal_failure_id, :refusal_request_id]}
+              arguments: [
+                :refusal_failure_id,
+                :refusal_request_id,
+                :witness_failure_id,
+                :release_id
+              ]}
     end
 
     update :exhaust_budget do
@@ -389,6 +456,7 @@ defmodule SdrAgent.Agents.AgentRun do
              :start,
              :set_phase,
              :succeed,
+             :finish_calibration,
              :fail,
              :exhaust_budget,
              :reserve_model_call,
@@ -507,6 +575,9 @@ defmodule SdrAgent.Agents.AgentRun do
       detail -> "agent run #{to}: #{reason}: #{detail}"
     end
   end
+
+  @doc "R0-07 slice C: the result gate's stop reasons."
+  def gate_reasons, do: @gate
 
   @doc false
   def __sdr_audited__, do: true

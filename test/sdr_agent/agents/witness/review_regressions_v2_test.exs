@@ -237,7 +237,12 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
         request: Jason.encode!(%{prompt: prompt, schema: @schema})
       })
 
-    {:ok, invocation} = Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+    # R0-07 slice B: admitted only for the reservation itself.
+    {:ok, invocation} =
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+      end)
+
     {:ok, invocation} = Agents.mark_model_invocation_sent(invocation, actor: ctx.agent)
 
     completion =
@@ -248,7 +253,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
       })
 
     {:ok, invocation} = Agents.complete_model_invocation(invocation, completion, actor: ctx.agent)
-    {invocation, ClaudeCLI.render_prompt(prompt, @schema)}
+    # Row G3: the scan backfills only a decided generation-2 row.
+    {SdrAgent.GateFixtures.decided!(invocation), ClaudeCLI.render_prompt(prompt, @schema)}
   end
 
   defp exchange!(ctx, invocation, stdin) do
@@ -262,6 +268,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
     %{
       provider: :claude_cli,
       cli_version: invocation.provider_version,
+      profile_id: invocation.profile_id,
+      model_id: invocation.model_id,
       projection_version: @version,
       method: :propagated_id
     }
@@ -280,7 +288,8 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsV2Test do
         proxy_record_ref: ref,
         link_status: status,
         method: :propagated_id,
-        evidence: evidence
+        # R0-07 item 7: a gated parent's link names its model and profile.
+        evidence: Map.merge(SdrAgent.Agents.WitnessEvidence.identity(invocation), evidence)
       },
       actor: ctx.rec
     )

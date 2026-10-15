@@ -48,6 +48,13 @@ graph TB
         Resources["Resources (57)"]
     end
 
+    subgraph Calibration["R0-07 calibration console: test-seam build only, owner command (see calibration-runtime.md)"]
+        CalCmd[Calibrate / calibrate-recover command<br/>sole launch-record writer]
+        CalAuthority[Authority registry<br/>one-shot entry, protected ETS]
+        CalServer[Private ClaudeCLI server<br/>unnamed, linked, own reaper]
+        CalFiles[(Launch record, ticket, E2 evidence<br/>owner-local 0700)]
+    end
+
     subgraph External["Local External Process"]
         Claude[App-pinned Claude CLI<br/>Nix store path SDR_CLAUDE_CLI_BIN<br/>stream JSON via llm-proxy-shim]
         OTSCLI[OpenTimestamps CLI 0.7.2]
@@ -105,6 +112,12 @@ graph TB
     Domains -. audit append: pg_notify, delivered at commit .-> Relay
     Relay -- tenant topic --> PubSub
     PubSub -. live refresh: re-read via Domains .-> LiveViews
+    CalCmd -. "calibrate only" .-> CalAuthority
+    CalCmd -. "calibrate only: one call via calibration_call" .-> CalServer
+    CalServer -. "staged exemption consumes the entry" .-> CalAuthority
+    CalServer -. "pinned CLI, launch receipt back to the command" .-> Claude
+    CalCmd --> CalFiles
+    CalCmd -- "reserve, E1 latch, recovery actions" --> Domains
     Telemetry -. instruments .-> Endpoint
     Telemetry -. instruments .-> Domains
     Telemetry -. instruments .-> Resources

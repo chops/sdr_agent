@@ -8,9 +8,16 @@ defmodule SdrAgent.Clock do
 
   Tests may `freeze/1` the clock for the calling process; tasks started by
   that process (via `$callers`) see the same frozen time.
+
+  In test-seam builds only (`:claude_cli_test_seams`, R0-07 packet 8.14.10),
+  a process may also `follow/1` one other local process: its frozen time is
+  read live on every read, after the process's own freeze and before
+  `$callers`. A dead or unfrozen followed process contributes nothing, and
+  `$callers` is never changed. Other builds have no `follow/1`.
   """
 
   @key {__MODULE__, :frozen}
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
   @doc "Current UTC time with microsecond precision."
   @spec utc_now() :: DateTime.t()
@@ -40,8 +47,34 @@ defmodule SdrAgent.Clock do
     :ok
   end
 
+  if @test_seams do
+    @follow {__MODULE__, :follow}
+
+    @doc """
+    Test-seam builds only: this process also reads `pid`'s frozen time
+    (see the moduledoc). `:ok`, or `{:error, :invalid_pid}` for anything but
+    a local pid, which changes nothing.
+    """
+    @spec follow(term()) :: :ok | {:error, :invalid_pid}
+    def follow(pid) when is_pid(pid) and node(pid) == node() do
+      Process.put(@follow, pid)
+      :ok
+    end
+
+    def follow(_other), do: {:error, :invalid_pid}
+
+    defp followed do
+      case Process.get(@follow) do
+        nil -> []
+        pid -> [pid]
+      end
+    end
+  else
+    defp followed, do: []
+  end
+
   defp frozen do
-    Enum.find_value([self() | Process.get(:"$callers", [])], fn pid ->
+    Enum.find_value([self()] ++ followed() ++ Process.get(:"$callers", []), fn pid ->
       if pid == self(), do: Process.get(@key), else: remote_frozen(pid)
     end)
   end

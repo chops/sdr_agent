@@ -39,6 +39,7 @@ defmodule SdrAgent.Audit.Kernel do
   alias SdrAgent.Audit.AuditChainHead
   alias SdrAgent.Audit.AuditEvent
   alias SdrAgent.Audit.Canonical
+  alias SdrAgent.Audit.Checks.IntegrityRead
   alias SdrAgent.Audit.Checks.KernelContext
   alias SdrAgent.Audit.Payload
   alias SdrAgent.Audit.Provenance
@@ -102,6 +103,17 @@ defmodule SdrAgent.Audit.Kernel do
   @doc "Options for an Ash request made by the kernel for `tenant_id`."
   def opts(tenant_id \\ nil) do
     [actor: Actor.system(:kernel, tenant_id), context: KernelContext.context()]
+  end
+
+  @doc """
+  Options for the chain verifier's read of a current audited row: `opts/1`
+  plus the integrity marker (`SdrAgent.Audit.Checks.IntegrityRead`), so
+  fields withheld from business reads by a field policy are hashed as
+  stored. Used by `SdrAgent.Audit.Verifier` and by
+  `SdrAgent.Audit.Changes.AppendEvent` (hashing the stored row).
+  """
+  def integrity_opts(tenant_id) do
+    [actor: Actor.system(:kernel, tenant_id), context: IntegrityRead.context()]
   end
 
   @doc "Appends one event. See the moduledoc; `opts`: `:actor`, `:tenant_id`."

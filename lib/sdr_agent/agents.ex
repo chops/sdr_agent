@@ -38,6 +38,10 @@ defmodule SdrAgent.Agents do
       `current_wire_witness_links/2`, `witness_status/2` (S12c), and
       `read_reconciliation_payloads/2` (REC; the only path to the scoped
       Payload read). Reconciliation itself: `SdrAgent.Agents.Witness`;
+    * result release (R0-07) — `decide_result_release/2` (AGT; the one
+      immutable `ModelResultRelease` of an invocation), `get_result_release/2`,
+      `list_result_releases/1`, and `released_output/2`, the only business
+      read of a generation-2 ClaudeCLI output (`SdrAgent.Agents.ReleasedOutput`);
     * real-model call grants (C9) — `create_grant/2`,
       `update_grant_terms/3`, `revoke_grant/3`, `release_allocation/3`
       (each an active human admin only, in one transaction, refusing a stale
@@ -54,12 +58,18 @@ defmodule SdrAgent.Agents do
   alias Ash.Error.Changes.InvalidAttribute
   alias Ash.Error.Query.NotFound
   alias SdrAgent.Agents.Admission
+  alias SdrAgent.Agents.Admission.Gate
   alias SdrAgent.Agents.Checks.AdmissionContext
+  alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
+  alias SdrAgent.Agents.CalibrationFinish
+  alias SdrAgent.Agents.CalibrationRecovery
   alias SdrAgent.Agents.Decision
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ReleasedOutput
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.AI.ModelProfiles
@@ -83,6 +93,7 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.WireWitnessLink
     resource SdrAgent.Agents.ModelCallGrant
     resource SdrAgent.Agents.ModelCallAllocation
+    resource SdrAgent.Agents.ModelResultRelease
   end
 
   ## Definitions
@@ -151,8 +162,31 @@ defmodule SdrAgent.Agents do
   @doc "running → succeeded (AGT)."
   def succeed_run(run, opts), do: update(run, :succeed, %{}, opts)
 
-  @doc "running → failed with `status_reason` and redacted `failure_reason` (AGT)."
-  def fail_run(run, attrs, opts), do: update(run, :fail, attrs, opts)
+  @doc """
+  running → failed with `status_reason` and redacted `failure_reason` (AGT).
+  A result-gate stop (`:witness_mismatch`, `:witness_unreconciled`) takes
+  `witness_failure_id` and `release_id`; its finalizer passes `prelocked:`
+  (its verified `SdrAgent.Agents.ReleaseDecision.Prelocked` context).
+  """
+  def fail_run(run, attrs, opts) do
+    case Keyword.fetch(opts, :prelocked) do
+      :error ->
+        update(run, :fail, attrs, opts)
+
+      {:ok, prelocked} ->
+        actor = Keyword.get(opts, :actor)
+
+        guard(AgentRun, :fail, run.id, actor, fn ->
+          run
+          |> Ash.Changeset.for_update(:fail, attrs,
+            actor: actor,
+            context: %{sdr_prelocked: prelocked}
+          )
+          |> Ash.update(return_notifications?: true)
+          |> collect()
+        end)
+    end
+  end
 
   @doc "running → budget_exhausted with `status_reason` (AGT)."
   def exhaust_run_budget(run, attrs, opts), do: update(run, :exhaust_budget, attrs, opts)
@@ -255,8 +289,14 @@ defmodule SdrAgent.Agents do
   def reserve_model_invocation(run, attrs, opts) do
     actor = Keyword.get(opts, :actor)
 
+    marker = Keyword.get(opts, :calibration)
+
+    calibration =
+      {CalibrationAdmission.scope(marker), CalibrationAdmission.claim(marker),
+       CalibrationAdmission.binding(marker)}
+
     ModelInvocation
-    |> guard(:reserve, run.id, actor, fn -> reserve_normalized(run, attrs, actor) end)
+    |> guard(:reserve, run.id, actor, fn -> reserve_normalized(run, attrs, actor, calibration) end)
     |> case do
       # The reservation rolled back; the refusal is committed on its own.
       {:error, %Admission.Refusal{} = refusal} ->
@@ -267,11 +307,51 @@ defmodule SdrAgent.Agents do
     end
   end
 
-  defp reserve_normalized(run, attrs, actor) do
+  # R0-07 slice B (row B5'): the store observation — the admission gate's
+  # only filesystem I/O — runs after input normalisation and before the
+  # reservation takes any lock, and only for a caller an authorized,
+  # tenant-scoped preflight (no row lock) shows may reserve on this run
+  # (review MF3). Anyone else causes no I/O: the store stays unobserved and
+  # the locked path, which stays authoritative, gives its usual answer.
+  defp reserve_normalized(run, attrs, actor, calibration) do
     with {:ok, attrs} <- normalize_reserve(attrs) do
       {request, attrs} = Map.pop(attrs, :request)
-      transact(fn -> do_reserve_model_invocation(run, attrs, request, actor) end)
+      gate = gate_inputs(attrs, calibration, run, actor)
+      transact(fn -> do_reserve_model_invocation(run, attrs, request, actor, gate) end)
     end
+  end
+
+  # `claim` is the console's launch-record claim carried by the same marker
+  # (R0-07 E4c-2): recorded only with an admitted calibration tuple.
+  defp gate_inputs(%{provider: :claude_cli} = attrs, {calibration, claim, binding}, run, actor) do
+    if ModelProfiles.real?(Map.get(attrs, :profile_id)) do
+      store = if may_reserve?(run, actor), do: Gate.observe_store(), else: :unobserved
+      %{store: store, calibration: calibration, claim: claim, binding: binding}
+    end
+  end
+
+  defp gate_inputs(_attrs, _calibration, _run, _actor), do: nil
+
+  defp may_reserve?(%{id: run_id}, %SdrAgent.Actor{tenant_id: tenant_id} = actor)
+       when is_binary(tenant_id) do
+    with id when is_binary(id) <- uuid(run_id),
+         {:ok, %AgentRun{} = run} <- tenant_run(id, actor) do
+      Ash.can?({run, :reserve_model_call}, actor)
+    else
+      _denied -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp may_reserve?(_run, _actor), do: false
+
+  defp tenant_run(id, actor) do
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.read_one()
   end
 
   # A ClaudeCLI call with a reviewed real profile goes through admission
@@ -280,28 +360,28 @@ defmodule SdrAgent.Agents do
   # through `AdmissionContext`. Any other call keeps the S6 order (run →
   # chain head); the Fake records its own profile, and any other profile is
   # left to the :reserve validation to refuse.
-  defp do_reserve_model_invocation(run, %{provider: :claude_cli} = attrs, request, actor) do
+  defp do_reserve_model_invocation(run, %{provider: :claude_cli} = attrs, request, actor, gate) do
     if ModelProfiles.real?(Map.get(attrs, :profile_id)),
-      do: reserve_admitted(run, attrs, request, actor),
+      do: reserve_admitted(run, attrs, request, actor, gate),
       else: reserve(run, attrs, request, actor, %{})
   end
 
-  defp do_reserve_model_invocation(run, %{provider: :fake} = attrs, request, actor),
+  defp do_reserve_model_invocation(run, %{provider: :fake} = attrs, request, actor, _gate),
     do: reserve(run, Map.put(attrs, :profile_id, :fake), request, actor, %{})
 
-  defp do_reserve_model_invocation(run, attrs, request, actor),
+  defp do_reserve_model_invocation(run, attrs, request, actor, _gate),
     do: reserve(run, attrs, request, actor, %{})
 
   # The admission instant is read only once every lock is held, and is used
   # for the daily limit, eligibility, the grant's UTC day and `reserved_at`.
-  defp reserve_admitted(run, attrs, request, actor) do
+  defp reserve_admitted(run, attrs, request, actor, gate) do
     with {:ok, locked} <- lock_run(run.id, actor),
          {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id),
          {:ok, _head} <- Kernel.lock_head(locked.tenant_id),
          now = SdrAgent.Clock.utc_now(),
          {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
          :ok <- check_daily_limit(run.tenant_id, now),
-         {:ok, charge} <- Admission.admit(locked, attrs, now, candidates) do
+         {:ok, charge} <- Admission.admit(locked, attrs, now, candidates, gate) do
       context = AdmissionContext.context(Map.put(charge, :reserved_at, now))
       create_reserved(run, attrs, request, actor, context)
     end
@@ -442,9 +522,12 @@ defmodule SdrAgent.Agents do
   contracts"). The only sent boundary of a ClaudeCLI call.
 
   One guarded transaction, as `agent_runtime` of a tenant (any other actor
-  is `Ash.Error.Forbidden`, audited as `authz.denied`). Lock order: the run
-  row, then the invocation row (`FOR UPDATE`, both re-read in the actor's
-  tenant), then the charged grant and allocation `FOR SHARE`
+  is `Ash.Error.Forbidden`, audited as `authz.denied`). Before any lock the
+  witness store root is observed (`Admission.Gate.observe_store/0`, the
+  only filesystem I/O; R0-07 slice B, row B5'). Lock order: the run row
+  (`FOR UPDATE`), the run's Operation (`FOR SHARE`, if any; R0-07 slice B,
+  row B1), the invocation row (`FOR UPDATE`; run and invocation re-read in
+  the actor's tenant), then the charged grant and allocation `FOR SHARE`
   (`Admission.lock_charge/1`, the reservation's order), then the chain head
   explicitly; only then is `now` read and are the terms read. Grant
   editors lock grant → allocations → head and never a run or invocation, so
@@ -454,18 +537,30 @@ defmodule SdrAgent.Agents do
     * **Identity and state refusals** change nothing and return `{:error,
       reason}`: `:invocation_not_found` (missing, malformed or another
       tenant's id), `:invocation_not_claude_cli`, `:invocation_not_reserved`
-      (a replayed sent, in-flight or terminal row). Each is then recorded
-      as a `model.launch.refused` event of the actor's tenant only.
-    * **Eligibility refusals** of an owned, reserved row
-      (`Admission.launch_check/4`: the locked run still `:running`,
-      generation, profile, grant status and window, grant profiles,
-      allocation grant, profile restriction, usage bucket, availability —
-      never room, which was charged at reservation) move it reserved →
-      failed (never sent) and open a critical `provider_error` Failure about
-      the invocation, committed together; `{:error,
-      :run_not_running_at_launch | :legacy_invocation_without_grant |
-      :profile_mismatch_at_launch | :grant_ineligible_at_launch}`. A stopped
-      run's refusal opens no Failure: the stop is already its cause.
+      (a replayed sent, in-flight or terminal row), and for the option
+      `calibration_launch:` (R0-07 packet 8.13; `Admission.calibration_launch/1`)
+      `:calibration_launch_invalid` (present but malformed, an explicit
+      `nil` included; checked before any lock) and
+      `:calibration_target_mismatch` (the locked invocation's run or tenant
+      is not the expected one). Each is then recorded as a
+      `model.launch.refused` event of the actor's tenant only. The option
+      can only add refusals; without it a launch is admitted as before.
+    * **A stopped run** (`:run_not_running_at_launch`): the row is failed
+      and never sent, and no Failure is opened (the stop is already its
+      cause): `{:error, :run_not_running_at_launch}`.
+    * **Every other refusal** of an owned, reserved row
+      (`Admission.launch_check/5`: generation, profile, then the R0-07
+      admission gate — calibration authority and predecessors, gate mode,
+      store root, promoted tuple — then grant status and window, grant
+      profiles, allocation grant, profile restriction, usage bucket,
+      availability; never room, which was charged at reservation) moves it
+      reserved → failed (never sent), opens one critical `provider_error`
+      Failure whose subject is the **run** (its `operation_id` the run's
+      Operation) and appends `model.launch.refused` (the reason, check and
+      Failure, with the invocation's `idempotency_key`), all in this
+      transaction. It returns the typed receipt `{:error, %Admission.Refused{
+      stage: :launch}}`, from which the run stops `:model_not_admitted`
+      linking exactly that Failure (R0-07 slice B, row B1).
     * **Success** marks it sent: `{:ok, invocation}`.
   """
   def admit_launch(invocation_id, effective_profile, opts) do
@@ -478,14 +573,30 @@ defmodule SdrAgent.Agents do
       subject_id: uuid(invocation_id)
     }
 
-    Guard.run(meta, actor, fn -> launch(invocation_id, effective_profile, actor) end)
+    expected = Admission.calibration_launch(opts)
+
+    Guard.run(meta, actor, fn -> launch(invocation_id, effective_profile, actor, expected) end)
   end
 
-  defp launch(id, profile, %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor)
+  defp launch(
+         id,
+         profile,
+         %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor,
+         expected
+       )
        when is_binary(tenant) do
-    case audit_transact(fn -> launch_locked(id, profile, actor) end) do
+    # Review MF3: the store is observed (filesystem I/O) only for an
+    # invocation the preflight finds in the actor's tenant; the locked
+    # path stays authoritative.
+    store =
+      if match?({:ok, _}, launch_target(id, actor)), do: Gate.observe_store(), else: :unobserved
+
+    case audit_transact(fn -> launch_locked(id, profile, actor, store, expected) end) do
       {:ok, {:sent, sent}} ->
         {:ok, sent}
+
+      {:ok, {:refused, %Admission.Refused{} = refused}} ->
+        {:error, refused}
 
       {:ok, {:refused, reason}} ->
         {:error, reason}
@@ -499,28 +610,45 @@ defmodule SdrAgent.Agents do
     end
   end
 
-  defp launch(_id, _profile, _actor), do: {:error, Ash.Error.Forbidden.exception([])}
+  defp launch(_id, _profile, _actor, _expected), do: {:error, Ash.Error.Forbidden.exception([])}
 
-  defp launch_locked(id, profile, actor) do
-    with {:ok, target} <- launch_target(id, actor),
+  defp launch_locked(id, profile, actor, store, expected) do
+    with :ok <- valid_expectation(expected),
+         {:ok, target} <- launch_target(id, actor),
          {:ok, run} <- lock_tenant_run(target.agent_run_id, actor),
+         :ok <- Admission.lock_operation_share(run.operation_id),
          {:ok, invocation} <- lock_invocation(target.id, actor),
+         :ok <- calibration_target(invocation, actor, expected),
          :ok <- launch_state(invocation),
          :ok <- Admission.lock_charge(invocation),
          {:ok, _head} <- Kernel.lock_head(actor.tenant_id) do
       # The launch instant is read only once every lock is held.
       run
-      |> Admission.launch_check(invocation, profile, SdrAgent.Clock.utc_now())
-      |> admit_or_refuse(invocation, profile, actor)
+      |> Admission.launch_check(invocation, profile, SdrAgent.Clock.utc_now(), store, expected)
+      |> admit_or_refuse(run, invocation, profile, actor)
     end
   end
 
-  defp admit_or_refuse(:ok, invocation, _profile, actor) do
+  defp valid_expectation(:invalid), do: launch_refused(:calibration_launch_invalid)
+  defp valid_expectation(_expected), do: :ok
+
+  # Packet 8.13 C7: an exempted call's target is the expected run's own
+  # invocation in the expected tenant; anything else changes nothing.
+  defp calibration_target(_invocation, _actor, nil), do: :ok
+
+  defp calibration_target(invocation, actor, expected) do
+    if invocation.agent_run_id == expected.run_id and invocation.tenant_id == expected.tenant_id and
+         actor.tenant_id == expected.tenant_id,
+       do: :ok,
+       else: launch_refused(:calibration_target_mismatch)
+  end
+
+  defp admit_or_refuse(:ok, _run, invocation, _profile, actor) do
     with {:ok, sent} <- do_update(invocation, :mark_sent, %{}, actor), do: {:ok, {:sent, sent}}
   end
 
-  defp admit_or_refuse({:error, reason, check}, invocation, profile, actor),
-    do: refuse_launch(invocation, reason, check, profile, actor)
+  defp admit_or_refuse({:error, reason, check}, run, invocation, profile, actor),
+    do: refuse_launch(run, invocation, reason, check, profile, actor)
 
   # An unlocked read only to find the run to lock first; the row is re-read
   # under its own lock.
@@ -568,27 +696,28 @@ defmodule SdrAgent.Agents do
 
   defp launch_refused(reason, own_id \\ nil), do: {:error, {:launch_refused, reason, own_id}}
 
-  defp refuse_launch(invocation, reason, check, profile, actor) do
+  defp refuse_launch(run, invocation, reason, check, profile, actor) do
     error = %{
       "kind" => "launch_refused",
       "reason" => Atom.to_string(reason),
-      "check" => Atom.to_string(check)
+      "check" => Admission.check_name(check)
     }
 
     failure = %{
-      subject_resource: inspect(ModelInvocation),
-      subject_id: invocation.id,
+      operation_id: run.operation_id,
+      subject_resource: inspect(AgentRun),
+      subject_id: run.id,
       class: :provider_error,
       severity: :critical,
       retryable: false,
       message:
-        "model call refused at launch: #{reason} (#{check}); the reserved call was failed " <>
+        "model call refused at launch: #{reason} (#{Admission.check_label(check)}); the reserved call was failed " <>
           "and never sent",
       detail:
         SdrAgent.Audit.Canonical.encode!(%{
           "kind" => "model_launch_refused",
           "reason" => Atom.to_string(reason),
-          "check" => Atom.to_string(check),
+          "check" => Admission.check_name(check),
           "model_invocation_id" => invocation.id,
           "grant_id" => invocation.grant_id,
           "reserved_profile" => profile_name(invocation.profile_id),
@@ -596,19 +725,55 @@ defmodule SdrAgent.Agents do
         })
     }
 
-    with {:ok, _failed} <- do_update(invocation, :fail, %{error: error}, actor),
-         {:ok, _failure} <- launch_attention(reason, failure, actor) do
-      {:ok, {:refused, reason}}
+    with {:ok, _failed} <- do_update(invocation, :fail, %{error: error}, actor) do
+      launch_receipt(reason, check, failure, {run, invocation, profile}, actor)
     end
   end
 
   # A run stopped while its call was queued already has its own cause (its
   # stop's Failure, or an operator's cancel or a success, which need none):
   # the refused call is failed, but no second attention item is opened.
-  defp launch_attention(:run_not_running_at_launch, _failure, _actor), do: {:ok, :none}
+  defp launch_receipt(:run_not_running_at_launch = reason, _check, _failure, _call, _actor),
+    do: {:ok, {:refused, reason}}
 
-  defp launch_attention(_reason, failure, actor),
-    do: SdrAgent.Operations.open_failure(failure, actor: actor)
+  # R0-07 slice B (row B1): the one Failure of the run and the launch
+  # event naming it, under the head already held (their FKs find the run,
+  # its Operation and the invocation locked), committed with the failed row.
+  defp launch_receipt(reason, check, failure, {run, invocation, profile}, actor) do
+    event = %{
+      event_type: "model.launch.refused",
+      category: :model,
+      subject_resource: inspect(ModelInvocation),
+      subject_id: invocation.id,
+      action: "admit_launch",
+      agent_run_id: run.id,
+      model_invocation_id: invocation.id,
+      correlation_id: run.correlation_id,
+      idempotency_key: invocation.idempotency_key,
+      payload: %{
+        "reason" => Atom.to_string(reason),
+        "check" => Admission.check_name(check),
+        "effective_profile" => profile_name(profile),
+        "reserved_profile" => profile_name(invocation.profile_id)
+      }
+    }
+
+    with {:ok, failure} <- SdrAgent.Operations.open_failure(failure, actor: actor),
+         event = put_in(event, [:payload, "failure_id"], failure.id),
+         {:ok, event} <- SdrAgent.Audit.append(event, actor: actor) do
+      {:ok,
+       {:refused,
+        %Admission.Refused{
+          reason: reason,
+          check: check,
+          failure_id: failure.id,
+          event_id: event.id,
+          agent_run_id: run.id,
+          request_id: invocation.idempotency_key,
+          stage: :launch
+        }}}
+    end
+  end
 
   # Metadata only, in the actor's own tenant; the refusal itself changed
   # nothing, so a tenant without an audit chain records nothing.
@@ -949,6 +1114,141 @@ defmodule SdrAgent.Agents do
     )
     |> Ash.run_action()
   end
+
+  ## Result release (R0-07)
+
+  @doc """
+  AGT: decides the one immutable release of a model output. `attrs`:
+  `model_invocation_id`, `disposition`, `reason`, optional
+  `wire_witness_link_id` and (calibration latches only) `evidence_sha256`;
+  `context:` carries the test-seam calibration context; `prelocked:` the
+  finalizer's verified `SdrAgent.Agents.ReleaseDecision.Prelocked` context
+  (no fresh lock requests; refused unless it matches). An identical replay
+  returns the existing release; a conflicting one fails with
+  `SdrAgent.Agents.Errors.ReleaseConflict`. See
+  `SdrAgent.Agents.ModelResultRelease`.
+  """
+  def decide_result_release(attrs, opts) do
+    actor = Keyword.get(opts, :actor)
+    attrs = Map.new(attrs)
+
+    guard(ModelResultRelease, :decide, Map.get(attrs, :model_invocation_id), actor, fn ->
+      ModelResultRelease
+      |> Ash.Changeset.for_create(:decide, attrs, actor: actor, context: decide_context(opts))
+      |> Ash.create()
+    end)
+  end
+
+  # `prelocked:` (the finalizer's `ReleaseDecision.Prelocked`, R0-07 round 5
+  # contract (d)) travels under its own key and is verified by the change.
+  defp decide_context(opts) do
+    context = Keyword.get(opts, :context, %{})
+
+    case Keyword.fetch(opts, :prelocked) do
+      {:ok, prelocked} -> Map.put(context, :sdr_prelocked, prelocked)
+      :error -> context
+    end
+  end
+
+  @doc """
+  AGT: the guarded calibration finish (R0-07 slice E, row R11-2) of a
+  terminal generation-2 ClaudeCLI invocation of a `:proof` run with no
+  Operation: decides its `:calibration` latch with `evidence: %{sha256:
+  <lowercase hex>}` — the published artifact's hash, validated first by the
+  calibration console — and finishes a still-running run `:succeeded` with
+  `:calibration_latched` (an already-terminal run is unchanged). The only
+  writer of `:calibration_latched`. Returns `{:ok, %{release:, run:}}`,
+  `{:error, :calibration_evidence_conflict}` for a different hash,
+  `{:error, :calibration_not_finishable}`, or `Ash.Error.Forbidden`. See
+  `SdrAgent.Agents.CalibrationFinish`.
+  """
+  def finish_calibration(invocation, evidence, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    subject_id =
+      case invocation do
+        %{id: id} -> id
+        _malformed -> nil
+      end
+
+    guard(AgentRun, :finish_calibration, subject_id, actor, fn ->
+      CalibrationFinish.run(invocation, evidence, actor)
+    end)
+  end
+
+  @doc """
+  The G-R0 binding for `profile_id` (packet 8.3, read-only preflight of the
+  calibration console), as AGT of `tenant_id`: `{:ok, %{grant_id:,
+  grant_revision:, allocation_id:, profile_id:}}`, `{:error,
+  :calibration_grant_unavailable}` (zero, several or a deviating grant),
+  or `Ash.Error.Forbidden`. Writes nothing.
+  """
+  def select_calibration_grant(tenant_id, profile_id, opts) do
+    case Keyword.get(opts, :actor) do
+      %SdrAgent.Actor{type: :agent_runtime, tenant_id: ^tenant_id} when is_binary(tenant_id) ->
+        if ModelProfiles.real?(profile_id),
+          do: Admission.calibration_grant(tenant_id, profile_id, SdrAgent.Clock.utc_now()),
+          else: {:error, :calibration_grant_unavailable}
+
+      _other ->
+        {:error, Ash.Error.Forbidden.exception([])}
+    end
+  end
+
+  @doc """
+  The calibration recovery action (R0-07 E4c-5; test-seam builds and the
+  calibration console only): `decision` is `:unlaunched`, `{:quiescent,
+  observation}` or `{:attested, attestation}`. Returns `{:ok, %{invocation:,
+  attestation_event:}}`, `{:error, :calibration_not_recoverable |
+  :calibration_not_quiescent | :attestation_mismatch |
+  :attestation_conflict}`, or `Ash.Error.Forbidden`. See
+  `SdrAgent.Agents.CalibrationRecovery`.
+  """
+  def recover_calibration(invocation, decision, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    subject_id =
+      case invocation do
+        %{id: id} -> id
+        _malformed -> nil
+      end
+
+    guard(ModelInvocation, :mark_unknown, subject_id, actor, fn ->
+      CalibrationRecovery.run(invocation, decision, actor)
+    end)
+  end
+
+  @doc "The release of an invocation in the actor's tenant: `{:ok, release | nil}`."
+  def get_result_release(invocation_id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    ModelResultRelease
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(model_invocation_id == ^invocation_id)
+    |> Ash.read_one()
+  end
+
+  @doc "The releases of the actor's tenant, oldest decision first."
+  def list_result_releases(opts) do
+    actor = Keyword.get(opts, :actor)
+
+    ModelResultRelease
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.sort(decided_at: :asc, id: :asc)
+    |> Ash.read()
+  end
+
+  @doc """
+  The business read of one invocation's model output (R0-07 REQ-07-5):
+  `{:ok, output}` for a generation-2 ClaudeCLI invocation only when it has a
+  `:released` release, and for a generation-1 or Fake invocation as stored;
+  otherwise `{:error, :result_not_released}` (`{:error, :not_found}` outside
+  the actor's tenant). See `SdrAgent.Agents.ReleasedOutput`.
+  """
+  def released_output(invocation, opts),
+    do: ReleasedOutput.fetch(invocation, Keyword.get(opts, :actor))
 
   ## Helpers
 

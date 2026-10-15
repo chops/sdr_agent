@@ -30,6 +30,9 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
 
   setup do
+    # R0-07 slice B: real calls are admitted only with a promoted tuple and
+    # a trusted store (`SdrAgent.AdmissionFixtures`).
+    SdrAgent.AdmissionFixtures.admit_tuples!()
     Clock.freeze(@now)
     on_exit(&Clock.unfreeze/0)
     tenant = bootstrap!()

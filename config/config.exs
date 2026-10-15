@@ -197,15 +197,22 @@ config :sdr_agent, :webhook_hmac, key_id: "derived-1", source: :derived
 # refuses boot. The reconciled-method allowlist holds exactly ONE exact entry,
 # enabled by the reviewed S12d change on the strength of proof 3
 # (docs/audit/s12d-wire-witness-proof-3.json, Codex evidence PASS c9a2bba3).
-# An eligible ClaudeCLI invocation under any other CLI version, projection or
-# method stays `inferred`; Fake or ineligible invocations stay `skipped`.
-# Changing it requires a reviewed ADR-0005 amendment.
+# R0-07 (ADR-0005 R0 amendment item 1): every entry names exactly
+# (provider, cli_version, profile_id, model_id, projection_version, method).
+# This entry is the generation-1 entry: `profile_id: nil` matches only rows
+# written before R0, which carry no profile. A generation-2 tuple is added
+# only by a separate reviewed config change citing Codex's evidence PASS;
+# there is no calibration stage. An eligible ClaudeCLI invocation under any
+# other tuple stays `inferred`; Fake or ineligible invocations stay
+# `skipped`. Changing it requires a reviewed ADR-0005 amendment.
 config :sdr_agent, SdrAgent.Agents.Witness,
   store_root: nil,
   reconciled_methods: [
     %{
       provider: :claude_cli,
       cli_version: "2.1.291",
+      profile_id: nil,
+      model_id: "claude-opus-5-5",
       projection_version: "claude-message-json/3+prompt-builder/1",
       method: :propagated_id
     }

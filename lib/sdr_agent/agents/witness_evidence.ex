@@ -76,7 +76,11 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     # S12d projection v3 (entity PASS 9343defb): the one v3-only group key,
     # and the outer diagnostic (never a member of a derived group).
     "trailing_output_config" => {:enum_list, ~w(absent null present), 2},
-    "projections_inapplicable" => :projections_inapplicable
+    "projections_inapplicable" => :projections_inapplicable,
+    # R0-07 item 7 (ADR-0005 R0 amendment item 1): the recorded identity of
+    # a gated (generation-2 ClaudeCLI) parent, never of a generation-1 one.
+    "model_id" => {:text, ~r/\A[a-z0-9][a-z0-9._-]{0,38}\z/},
+    "profile_id" => {:enum, Enum.map(SdrAgent.AI.ModelProfiles.real_ids(), &Atom.to_string/1)}
   }
   @group ~w(reminder_count reminder_sha256s reminder_bytes trailing_system_count
             trailing_system_sha256s trailing_system_bytes request_extras_sha256 request_fields)
@@ -84,6 +88,43 @@ defmodule SdrAgent.Agents.WitnessEvidence do
                  ~w(system thinking output_config context_management),
                  &["#{&1}_present", "#{&1}_null"]
                )
+
+  @doc """
+  The identity evidence a link of `invocation` must carry (R0-07 item 7):
+  `model_id` and `profile_id` for a gated parent (generation 2 and
+  `claude_cli`), nothing for any other parent (generation 1 keeps its
+  legacy shape).
+  """
+  def identity(%{ledger_generation: 2, provider: :claude_cli} = invocation),
+    do: %{"model_id" => invocation.model_id, "profile_id" => to_string(invocation.profile_id)}
+
+  def identity(_invocation), do: %{}
+
+  @doc """
+  `:ok` when `evidence` carries exactly `invocation`'s identity evidence
+  (`identity/1`): both keys, equal, for a gated parent; no `profile_id` for
+  any other parent (a `model_id`, when present, must still be its own).
+  """
+  def check_identity(invocation, evidence) when is_map(evidence) do
+    case identity(invocation) do
+      empty when empty == %{} ->
+        cond do
+          Map.has_key?(evidence, "profile_id") ->
+            {:error, "profile_id is recorded only for a generation-2 ClaudeCLI parent"}
+
+          Map.get(evidence, "model_id", invocation.model_id) != invocation.model_id ->
+            {:error, "model_id must be the invocation's"}
+
+          true ->
+            :ok
+        end
+
+      expected ->
+        if Map.take(evidence, Map.keys(expected)) == expected,
+          do: :ok,
+          else: {:error, "model_id and profile_id must be the invocation's"}
+    end
+  end
 
   @doc "The allowlisted keys and their types."
   def allowed, do: @allowed

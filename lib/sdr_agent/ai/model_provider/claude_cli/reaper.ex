@@ -22,7 +22,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   (descendants, then the root: TERM, a short grace, KILL, then waits until
   each is gone or a zombie), removes its workspace, and only then releases
   the lease and exits. A tree it cannot confirm stopped is retried every
-  `retry_ms`, with an error logged, and the lease stays held meanwhile.
+  `retry_ms`, with an error logged, and the lease stays held meanwhile. A
+  launch whose port opened but whose OS pid could not be read is
+  unidentified: it can never be confirmed stopped, so the reaper exits
+  **without** releasing the lease, and admission stays closed until an
+  operator `release/1` (code review of the R0-07 slice E integration).
 
   ## Admission lease (named servers)
 
@@ -50,7 +54,20 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   Options (`:reaper` of the server; failure injection for tests):
   `:signal` (`fn os_pid, "-TERM" | "-KILL" -> any end`), `:exit_wait_ms`
   (default 2000), `:retry_ms` (default 1000), `:on_open` (`fn os_pid -> any
-  end`, run after a launch is recorded and before its receipt is sent).
+  end`, run after a launch is recorded and before its receipt is sent),
+  `:os_pid` (`fn port -> {:os_pid, pid} | nil end`, replacing the pid
+  lookup of an opened port).
+
+  Stop guard (`:identity`, opt-in; used by the calibration console's
+  isolation preflight, R0-07 E4c-1a, Codex 01a135b6): `fn os_pid ->
+  {:ok, identity} | :absent | :error end`. The identity is read when a
+  launch opens and re-read before the reaper would signal it: only the
+  same identity is stopped; an absent or changed one is already gone and
+  is never signalled (its port is closed, its workspace removed); an
+  unreadable one (at open or now) is never signalled either: its port is
+  closed, its workspace removed, and the reaper exits as for an
+  unidentified launch (without its cleanup receipt). Without the option
+  every behaviour above is unchanged.
   """
 
   require Logger
@@ -112,8 +129,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   its OS pid is owned before the process can do anything. Waits for the
   receipt until `deadline` (monotonic ms). Returns `{:ok, port, os_pid}`
   (port messages are then forwarded to the caller); `{:error,
-  {:launch_failed, reason}}` when nothing was launched; or an unknown
-  outcome — the process may exist — `{:unknown, :reaper_down}` (the reaper
+  {:launch_failed, reason}}` only when `Port.open` itself failed, so nothing
+  was launched; or an unknown outcome — the process may exist —
+  `{:unknown, {:post_spawn_failure, port, os_pid}}` (a failure after the
+  port opened; the launch stays tracked), `{:unknown, :post_spawn_failure}`
+  (the same, with no readable pid), `{:unknown, :reaper_down}` (the reaper
   died before its receipt) or `{:pending, ref}` (no receipt by the
   deadline; a late `{ref, reply}` may still arrive).
   """
@@ -197,7 +217,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
 
       {:done, workspace} ->
         {launch, launches} = Map.pop(state.launches, workspace)
-        with {port, _os_pid} <- launch, do: close(port)
+        close_launch(launch)
         loop(%{state | launches: launches})
 
       {:DOWN, ref, :process, _owner, _reason} when ref == state.ref ->
@@ -209,39 +229,145 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
     end
   end
 
+  # Only a failure of `Port.open` itself is a known no-spawn. Once the port
+  # is open a process may exist: the launch stays tracked (so the owner's
+  # exit still reaps it) and a later failure is unknown, never
+  # `:launch_failed` (code review of the R0-07 slice E integration).
   defp open_port(state, workspace, spawn, {port_opts, {allow, set}}) do
-    port = Port.open(spawn, [{:env, ChildEnv.port(allow, set)} | port_opts])
-    {:os_pid, os_pid} = Port.info(port, :os_pid)
-    state = put_in(state.launches[workspace], {port, os_pid})
-    if hook = state.opts[:on_open], do: hook.(os_pid)
-    {{:ok, port, os_pid}, state}
+    case spawn_port(spawn, port_opts, {allow, set}) do
+      {:ok, port} -> opened(state, workspace, port)
+      {:error, message} -> {{:error, {:launch_failed, message}}, state}
+    end
+  end
+
+  defp spawn_port(spawn, port_opts, {allow, set}) do
+    {:ok, Port.open(spawn, [{:env, ChildEnv.port(allow, set)} | port_opts])}
   rescue
-    error -> {{:error, {:launch_failed, Exception.message(error)}}, state}
+    error -> {:error, Exception.message(error)}
+  end
+
+  defp opened(state, workspace, port) do
+    case os_pid(state.opts, port) do
+      {:os_pid, os_pid} ->
+        state = put_in(state.launches[workspace], launch(state.opts, port, os_pid))
+
+        case after_open(state.opts[:on_open], os_pid) do
+          :ok -> {{:ok, port, os_pid}, state}
+          :error -> {{:unknown, {:post_spawn_failure, port, os_pid}}, state}
+        end
+
+      _no_pid ->
+        # Opened, but its pid cannot be read: whatever ran is unidentified
+        # (never the pre-launch nil). It can never be confirmed stopped, so
+        # the reaper keeps the lease on owner death (see `reap/1`).
+        {{:unknown, :post_spawn_failure},
+         put_in(state.launches[workspace], {:unidentified, port})}
+    end
+  end
+
+  # With the opt-in stop guard the identity read at open is kept with it.
+  defp launch(opts, port, os_pid) do
+    case Keyword.get(opts, :identity) do
+      nil -> {port, os_pid}
+      read -> {port, os_pid, guarded_identity(read, os_pid)}
+    end
+  end
+
+  defp guarded_identity(read, os_pid) do
+    case read.(os_pid) do
+      {:ok, identity} when is_binary(identity) and identity != "" -> {:ok, identity}
+      :absent -> :absent
+      _other -> :error
+    end
+  rescue
+    _error -> :error
+  end
+
+  defp os_pid(opts, port) do
+    case Keyword.get(opts, :os_pid) do
+      nil -> Port.info(port, :os_pid)
+      lookup -> lookup.(port)
+    end
+  end
+
+  defp after_open(nil, _os_pid), do: :ok
+
+  defp after_open(hook, os_pid) do
+    hook.(os_pid)
+    :ok
+  rescue
+    _error -> :error
   end
 
   # Kills every tracked tree and removes its workspace; releases the lease
   # (the cleanup receipt) only when all are confirmed gone, retrying until
   # then.
   defp reap(state) do
-    remaining = Enum.reject(state.launches, &stop(&1, state.opts))
+    {unidentified, identified} = Enum.split_with(state.launches, &unidentified?/1)
+    results = Enum.map(identified, &{&1, stop(&1, state.opts)})
+    remaining = for {launch, false} <- results, do: launch
 
-    if remaining == [] do
-      if state.name, do: erase(state.name, self())
-      :ok
-    else
-      Logger.error(
-        "ClaudeCLI reaper could not confirm #{length(remaining)} CLI process tree(s) stopped; " <>
-          "calls stay refused until they are gone"
-      )
+    # A guarded launch that cannot be verified: never signalled; handled
+    # as unidentified (exit without the cleanup receipt).
+    unidentified =
+      unidentified ++
+        for(
+          {{workspace, {port, _, _}}, :unverifiable} <- results,
+          do: {workspace, {:unidentified, port}}
+        )
 
-      Process.sleep(Keyword.get(state.opts, :retry_ms, @retry_ms))
-      reap(%{state | launches: Map.new(remaining)})
+    cond do
+      remaining != [] ->
+        Logger.error(
+          "ClaudeCLI reaper could not confirm #{length(remaining)} CLI process tree(s) stopped; " <>
+            "calls stay refused until they are gone"
+        )
+
+        Process.sleep(Keyword.get(state.opts, :retry_ms, @retry_ms))
+        reap(%{state | launches: Map.new(remaining ++ unidentified)})
+
+      unidentified != [] ->
+        # Cannot ever be confirmed: exit holding the lease, so admission
+        # stays closed until an operator `release/1` (dead holder).
+        Enum.each(unidentified, fn {_workspace, {:unidentified, port}} -> close(port) end)
+
+        Logger.error(
+          "ClaudeCLI reaper could not identify #{length(unidentified)} launched CLI " <>
+            "process(es); admission stays closed until an operator release"
+        )
+
+        :ok
+
+      true ->
+        if state.name, do: erase(state.name, self())
+        :ok
     end
   end
+
+  defp unidentified?({_workspace, {:unidentified, _port}}), do: true
+  defp unidentified?(_launch), do: false
 
   defp stop({workspace, nil}, _opts) do
     File.rm_rf(workspace)
     true
+  end
+
+  defp stop({workspace, {port, os_pid, spawned}}, opts) do
+    case {spawned, guarded_identity(Keyword.fetch!(opts, :identity), os_pid)} do
+      {{:ok, same}, {:ok, same}} ->
+        stop({workspace, {port, os_pid}}, opts)
+
+      {_spawned, :absent} ->
+        gone(port, workspace)
+
+      {{:ok, _spawned}, {:ok, _reused}} ->
+        gone(port, workspace)
+
+      _unverifiable ->
+        close(port)
+        File.rm_rf(workspace)
+        :unverifiable
+    end
   end
 
   defp stop({workspace, {port, os_pid}}, opts) do
@@ -253,6 +379,19 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
       false
     end
   end
+
+  # A launch already gone: its port closed and workspace removed, never
+  # signalled.
+  defp gone(port, workspace) do
+    close(port)
+    File.rm_rf(workspace)
+    true
+  end
+
+  defp close_launch({:unidentified, port}), do: close(port)
+  defp close_launch({port, _os_pid, _identity}), do: close(port)
+  defp close_launch({port, _os_pid}), do: close(port)
+  defp close_launch(nil), do: :ok
 
   defp close(port) do
     if Port.info(port), do: Port.close(port)

@@ -21,7 +21,14 @@ model =
   end
 
 tools = if(mode == "tool_drift", do: ~s(["Read"]), else: "[]")
-version = if(mode == "version_drift", do: "2.1.292", else: "2.1.291")
+
+version =
+  cond do
+    mode == "version_drift" -> "2.1.292"
+    # The previously reviewed version, now drift (R0-08).
+    mode == "old_version" -> "2.1.291"
+    true -> "2.1.294"
+  end
 
 init =
   ~s({"type":"system","subtype":"init","model":"#{model}","claude_code_version":"#{version}","tools":#{tools},"mcp_servers":[],"slash_commands":[]})
@@ -54,7 +61,12 @@ case mode do
     stdin = IO.read(:stdio, :eof)
     id = System.get_env("SDR_MODEL_INVOCATION_ID")
     tp = System.get_env("SDR_TRACEPARENT")
-    answer = ~s({"answer":"qualified","score":42})
+    # A 4th argument `calibration` answers in the calibration console's
+    # fixed output schema (R0-07 d3c) instead of the qualification one.
+    answer =
+      if Enum.at(System.argv(), 3) == "calibration",
+        do: ~s({"answer":"blue","confidence":0.9}),
+        else: ~s({"answer":"qualified","score":42})
 
     message = fn prompt, text, sse_opts ->
       [
@@ -209,8 +221,12 @@ case mode do
       end
     end
 
+    # The same result line as `result`, carrying this mode's `answer`.
     IO.puts(init)
-    IO.puts(result)
+
+    IO.puts(
+      ~s({"type":"result","subtype":"success","is_error":false,"result":#{JSON.encode!(answer)},"usage":{"input_tokens":12,"output_tokens":3}})
+    )
 
   "pinned" ->
     # argv: pinned <expected path>. Plays llm-proxy-shim for R0-02: it
@@ -298,6 +314,53 @@ case mode do
           %{}
       end
 
+    # argv: sdr [<store root> [<variant>]] (R0-07 slice C). With a root,
+    # also plays shim + proxy: records the exchange of this call under the
+    # propagated invocation id — `cli_shape_v3` (default) matches,
+    # `cli_shape_v3_mismatch` mismatches, `none` records nothing.
+    text = JSON.encode!(answer)
+
+    # Positional arguments only (the launch appends `-p`, `--model <alias>`, …).
+    positional = System.argv() |> Enum.take_while(&(not String.starts_with?(&1, "-")))
+
+    case {Enum.at(positional, 1), System.get_env("SDR_MODEL_INVOCATION_ID")} do
+      {root, id} when is_binary(root) and is_binary(id) ->
+        unless Code.ensure_loaded?(SdrAgent.Test.FakeWitnessProxy),
+          do: Code.require_file(Path.join(__DIR__, "fake_witness_proxy.exs"))
+
+        alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
+        tp = System.get_env("SDR_TRACEPARENT")
+
+        shape = [
+          cache_ttl: "1h",
+          trailing_message_extra: %{"output_config" => %{"effort" => "high"}}
+        ]
+
+        case Enum.at(positional, 2, "cli_shape_v3") do
+          "none" ->
+            :ok
+
+          "cli_shape_v3" ->
+            reminders = ["<system-reminder>\nSynthetic date.\n</system-reminder>\n"]
+
+            Proxy.exchange!(root, id,
+              traceparent: tp,
+              request: Proxy.cli_request(stdin, [reminders: reminders] ++ shape),
+              response: Proxy.sse_response(text)
+            )
+
+          "cli_shape_v3_mismatch" ->
+            Proxy.exchange!(root, id,
+              traceparent: tp,
+              request: Proxy.cli_request(stdin <> " (edited)", shape),
+              response: Proxy.sse_response(text)
+            )
+        end
+
+      _no_witness ->
+        :ok
+    end
+
     IO.puts(init)
 
     IO.puts(
@@ -305,7 +368,7 @@ case mode do
         "type" => "result",
         "subtype" => "success",
         "is_error" => false,
-        "result" => JSON.encode!(answer),
+        "result" => text,
         "usage" => %{"input_tokens" => 12, "output_tokens" => 3}
       })
     )

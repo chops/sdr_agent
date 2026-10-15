@@ -261,12 +261,65 @@ its run is failed. This delta makes such rows terminal.
 - A launch racing recovery: either order, real connections.
 - Never `unknown`.
 
+### R0-08: profile and attestation alignment to the existing 2.1.294 pin
+
+The app-owned pin (R0-02, `nix/app-claude-cli.identity`) is already Claude
+Code 2.1.294; the profile registry still expected 2.1.291, so every real
+call would fail attestation. This aligns the registry with the pin under
+ADR-0004 item 1's bump rule. It does not change the Nix pin, promote any
+tuple, or authorize any call.
+
+**Offline evidence (no model call):**
+
+| Check | Result |
+|---|---|
+| Executable | `/nix/store/n79j0drxclykgg673zpbh2aj0acmdzkp-app-claude-cli-2.1.294/bin/claude-code` |
+| `--version` | `2.1.294 (Claude Code)` |
+| SHA-256 | `def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53`, equal to the checked-in pin identity (also verified independently by Codex) |
+| Advertised flags | `--help` lists all 12 flags ClaudeCLI passes: `--output-format`, `--verbose`, `--safe-mode`, `--restricted`, `--model`, `--tools`, `--disable-slash-commands`, `--strict-mcp-config`, `--mcp-config`, `--permission-mode`, `--permission-prompts`, `--no-session-persistence` |
+
+These show advertised syntax and pin identity only. They do **not** verify
+2.1.294's init fields, its runtime tool removal, its alias-to-model
+resolution or its captured request grammar. The help also says safe and
+restricted modes still honour admin-managed settings, so the flags alone
+are not proof of an empty tool surface.
+
+**Entity delta:**
+
+| Entity | Delta | Invariants |
+|---|---|---|
+| `ModelProfiles.Profile` (`claude_cli_opus`, `claude_cli_sonnet`) | Expected CLI version 2.1.291 → 2.1.294 | Expected model ids (`claude-opus-5-5`, `claude-sonnet-5-5`) are unchanged **candidates**, not verified by this change |
+| ModelInvocation provenance | New gen-2 rows record 2.1.294 | Historical rows, catalog entries, events, evidence and releases are untouched |
+| Shipped witness allowlist | Unchanged | The 2.1.291 entry stays generation-1 / profile-nil only; no 2.1.294 entry ships until reviewed calibration evidence and a separate promotion PR |
+
+**Attestation and spend.** The per-call init attestation stays mandatory
+and fail-closed: model id, CLI version 2.1.294, and empty tools, MCP
+servers and slash commands. A mismatch kills the CLI tree and returns no
+business output, but it is **not guaranteed to be no-spend**: the prompt is
+handed to the CLI at launch and the init event is read afterwards, so
+traffic may already have gone out. A reserved attempt stays charged, is
+never retried automatically, and an id observed in a failed attempt is
+never adopted automatically. The owner is told this before any attended
+attempt. The calibration harness must also refuse a known pin/expected
+version mismatch before reservation (harness obligation, slice E).
+
+**Tests:** RED first (90bec2f, 0/2): the registry expects 2.1.294, and a
+2.1.291 init is `:version_attestation_drift`. Fake CLI positives now report
+2.1.294 deliberately; legacy generation-1 fixtures keep their literal
+2.1.291; model drift, missing/malformed init and non-empty tools stay
+fail-closed.
+
+**Gate:** Codex agreed the scope (reply 6d7651a6, bounds report sha256
+4ff89b36). Code review pending. No promotion, calibration or spend
+authority.
+
 ### Tracked prerequisites before ordinary real calls
 
 | Item | Source | Status | Required before |
 |---|---|---|---|
-| **Launch refusal opens two live Failures.** `Agents.admit_launch/3` opens a `provider_error` Failure about the invocation. Then `SDR.Model` treats the refusal as a generic provider error, and `AgentRun :fail` opens a second run-stopped Failure for the same cause. Fix: follow the reservation refusal's exact-cause pattern. Admission returns a receipt (reason, Failure, event, run, request id), and the run stop (and its Operation) links that exact Failure instead of opening one. This needs a reviewed AgentRun/Operation action delta, plus a worker/Operation attention test through the full SDR path. Never look up "the newest" Failure, and never take an Operation lock after the chain head. | Codex PR #136 review, important | Open. Not tiny (new AgentRun stop arguments and link provenance), so not in C9-03. | Real-call enablement (R0-07 promotion / lifting `:real_model_staged`) |
+| **Launch refusal opens two live Failures.** `Agents.admit_launch/3` opens a `provider_error` Failure about the invocation. Then `SDR.Model` treats the refusal as a generic provider error, and `AgentRun :fail` opens a second run-stopped Failure for the same cause. Fix: follow the reservation refusal's exact-cause pattern. Admission returns a receipt (reason, Failure, event, run, request id), and the run stop (and its Operation) links that exact Failure instead of opening one. This needs a reviewed AgentRun/Operation action delta, plus a worker/Operation attention test through the full SDR path. Never look up "the newest" Failure, and never take an Operation lock after the chain head. | Codex PR #136 review, important | **Closed by R0-07 slice B (row B1, entity PASS at 3600fcf).** `admit_launch/3` locks run → Operation `FOR SHARE` → invocation → charge → head and commits the failed row, one run-subject `provider_error` Failure and `model.launch.refused` together; the typed receipt `%Refused{stage: :launch}` crosses the ClaudeCLI server and the facade unchanged, and the run stops `:model_not_admitted` linking exactly that Failure. Evidence: `test/sdr_agent/sdr/model_not_admitted_worker_test.exs` (end to end through the worker, the server and the facade: one attention item, the Operation linked, no port; the resolution race), `test/sdr_agent/agents/launch_gate_test.exs` (runs with and without an Operation, validator, rollback of the event append, lock order). | Real-call enablement (R0-07 promotion / lifting `:real_model_staged`) |
 | Abandoned reserved invocations (the delta above) | Codex PR #136 review, must-fix 2 | Entity PASS; implemented | Merge of #136 |
+| **Store trust at admission is observation-time trust (R0-07 row B5').** Admission validates the witness store root before its locks; under the locks it proves only that the configured root is the one trusted at that observation, not that the same path's permissions, ownership, inode or symlinks are unchanged at the admission instant. A same-path change after the observation is caught by the launch's fresh observation or, after spend, by the result gate's validated store read (`:store_unreadable`): a charged attempt can then be withheld after spend; no output is released. | Codex slice B rounds 8–9 (3600fcf) | Disclosed; tested (`test/sdr_agent/agents/admission_gate_race_test.exs`) | The owner is shown this residual before real-call enablement |
 | **`sent` rows of an already terminal run stay `sent`.** The sweeper recovers `sent` rows only for runs that are still `running` and abandoned. Settling a `sent` row also needs a running run (BudgetCounter). So a `sent` row whose run became terminal first (e.g. a dead caller after admission committed, then the run was stopped) is never settled or marked `unknown`. It is distinct from the reserved delta: a `sent` row is not proven unlaunched and must never be failed as such. It needs its own reviewed delta and tests. | Codex PR #136 re-review (10e7eba), important | Open, not implemented | Real-call enablement (lifting `:real_model_staged`) |
 
 ## 3. Out of scope

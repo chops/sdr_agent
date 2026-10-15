@@ -421,7 +421,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
                profile_id: :claude_cli_opus,
                model_alias: "opus",
                model_id: "claude-opus-5-5",
-               reviewed_version: "2.1.291",
+               reviewed_version: "2.1.294",
                server: :running,
                attestation: %{status: :pending}
              } = Runtime.status()
@@ -435,7 +435,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
                profile_id: :claude_cli_sonnet,
                model_alias: "sonnet",
                model_id: "claude-sonnet-5-5",
-               reviewed_version: "2.1.291"
+               reviewed_version: "2.1.294"
              } = Runtime.status()
     end
 
