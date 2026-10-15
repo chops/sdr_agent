@@ -589,6 +589,9 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   def handle_info({:DOWN, mref, :process, _server, _reason}, %{server_ref: mref} = state),
     do: {:noreply, server_down(state)}
 
+  def handle_info({:retry_block, id, reason}, state),
+    do: {:noreply, retry_block(state, id, reason)}
+
   def handle_info({:reconcile, expected}, %{reconcile: expected} = state),
     do: {:noreply, reconcile(state, expected)}
 
@@ -790,8 +793,13 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   defp end_op(state), do: state
 
-  # Blocks S under this boot's latest start; the server stays held.
+  # Blocks S under this boot's latest start; the server stays held. A block
+  # that fails (a spent bound, a lost connection) is retried from a fresh,
+  # target-bound read of S: stored blocked is done (no second write); still
+  # pending takes the same bounded block again.
   defp block(%{start: %{id: start_id}} = state, switch, reason) do
+    Logger.warning("model profile switch #{switch.id} blocked: #{reason}")
+
     attrs = %{
       server_generation: switch.server_generation,
       boot_id: state.boot_id,
@@ -799,17 +807,33 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
       failure_reason: reason
     }
 
-    Logger.warning("model profile switch #{switch.id} blocked: #{reason}")
-
     case Agents.block_profile_switch(switch, attrs, actor: actor(state)) do
-      {:ok, _blocked} -> :ok
-      error -> Logger.error("model profile switch block failed: #{inspect(error)}")
+      {:ok, _blocked} ->
+        :ok
+
+      error ->
+        Logger.error("model profile switch block failed: #{inspect(error)}; retrying")
+        Process.send_after(self(), {:retry_block, switch.id, reason}, @retry_ms)
     end
 
     end_op(state)
   end
 
   defp block(state, _switch, _reason), do: end_op(state)
+
+  defp retry_block(state, id, reason) do
+    case switch(state, id) do
+      %ModelProfileSwitch{status: :pending} = switch ->
+        block(state, switch, reason)
+
+      %ModelProfileSwitch{} ->
+        publish(state)
+
+      nil ->
+        Process.send_after(self(), {:retry_block, id, reason}, @retry_ms)
+        publish(state)
+    end
+  end
 
   # No server is running and none is switching: a held replacement is
   # retried (a server can die even before its init returns).
