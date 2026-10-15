@@ -26,6 +26,34 @@
 
 ## The restart proof (built; design passed by Codex, 406efa56)
 
+**The lifecycle owner:** `test/support/restart_proof/harness.ex`. These
+rules were added after Codex's review of 5409109:
+
+- **Claiming.** The folder is created with `File.mkdir/1`, and an
+  existing folder is refused. The database is claimed by creating it in
+  a child (`claim.exs`), after its target is validated; an existing
+  database is refused with exit 3. A refused target is never migrated
+  or dropped.
+- **Cleanup.** Only claimed resources are cleaned up. The database is
+  dropped through `drop.exs`, which validates the target again. A failed
+  drop or folder removal makes the result an error.
+- **Timeouts.** A child past its deadline is killed, using the scrubbed
+  environment. Its exit must then be confirmed. If it can't be, nothing
+  is cleaned up, and the error names what is left.
+- **Lifecycle tests.** These use a stubbed runner and no database. They
+  cover:
+  - a pre-existing folder;
+  - a pre-existing database;
+  - an invalid target name;
+  - a failed drop;
+  - an unconfirmed timeout and a confirmed timeout;
+  - a real `sleep` child killed at its deadline.
+- **The restart check itself:**
+  - the projection now includes `profile_id` and `available_until`;
+  - the saved charges are re-read by id;
+  - the parent requires exactly the 11 named checks, each strictly
+    `true`.
+
 **The test:** `test/sdr_agent/agents/grant_restart_proof_test.exs`, with
 its scripts in `test/support/restart_proof/`. It is tagged
 `:restart_proof` and runs in the default gate. If it can't run, C9-04's
@@ -71,9 +99,9 @@ restart acceptance is unverified, not passed.
      - the grant total is counted.
 
      It freezes its own clock and does not rely on the parent's state.
-4. **The result file.** It goes to a unique temporary path. The test
-   checks that the file exists, that all 11 named checks are true, that
-   `ok` is set, and the exit status. A missing or stale result fails the
+4. **The result file.** It goes to a path inside the claimed folder. The
+   test checks that exactly the 11 named checks are present and strictly
+   `true`, that `ok` is `true`, and that every child exited 0. A missing or stale result fails the
    test.
 
 ## Results at main (executed)
@@ -102,9 +130,14 @@ restart acceptance is unverified, not passed.
     `setup_charges_bound_to_their_allocations` and
     `full_b5_refused_exactly`.
 - **All of these results are author-executed**, not independently rerun.
-- **The full gate at `2fff977`:** PASS (author-executed, on owned
-  partition `_c904`).
-  - format, compile dev and test (`--warnings-as-errors --force`), Credo
-    and `bin/verify-workflow` all pass;
-  - **2176 passed, 1 skipped, 4 excluded.** main had 2173; the three
-    added tests account for the difference.
+- **The full gate,** author-executed on owned partition `_c904`:
+  - **at `2fff977`:** PASS, 2176 passed;
+  - **at `cbd015d`, after the harness rework (Codex review of 5409109):**
+    compile dev and test (`--warnings-as-errors --force`), Credo,
+    `bin/verify-workflow` and the full suite all pass: **2183 passed,
+    1 skipped, 4 excluded.** Format failed on one script: restoring it
+    after the sensitivity check had brought back its unformatted copy;
+  - **at `b2bc193`:** that file is formatted (whitespace only) and
+    `mix format --check-formatted` passes. The restart-proof file was
+    rerun there: 8 passed. The full suite was not rerun for this
+    whitespace-only change.
