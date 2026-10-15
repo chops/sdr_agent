@@ -25,6 +25,7 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
   alias SdrAgent.Agents.Admission.Refused
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.AgentsFixtures
+  alias SdrAgent.Test.CoordinatorHarness
   alias SdrAgent.Audit
   alias SdrAgent.AuditCase
   alias SdrAgent.Repo
@@ -39,6 +40,9 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
     :ok = Sandbox.checkout(Repo, sandbox: false)
     cleanup!()
     on_exit(fn -> with_connection(&cleanup!/0) end)
+    # C2-02b2α: the switch finalizers run in the coordinator (manual mode),
+    # each on the coordinator's own connection.
+    CoordinatorHarness.start!()
     {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
     admin = AuditCase.human(:admin, tenant)
     grant = AgentsFixtures.grant!(tenant, %{}, admin)
@@ -91,10 +95,12 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
 
   defp fail_switch(ctx, switch),
     do:
-      Agents.fail_profile_switch(
+      CoordinatorHarness.finalize(
+        :fail_profile_switch,
         switch,
         %{server_generation: switch.server_generation, failure_reason: "race"},
-        actor: ctx.runtime
+        actor: ctx.runtime,
+        own_connection: true
       )
 
   defp admit(ctx, id), do: Agents.admit_launch(id, :claude_cli_opus, actor: ctx.agent)
@@ -222,8 +228,12 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
                    if(unquote(close) == :fail,
                      do: fail_switch(ctx, switch),
                      else:
-                       Agents.complete_profile_switch(switch, %{server_generation: 1},
-                         actor: ctx.runtime
+                       CoordinatorHarness.finalize(
+                         :complete_profile_switch,
+                         switch,
+                         %{server_generation: 1},
+                         actor: ctx.runtime,
+                         own_connection: true
                        )
                    )
 

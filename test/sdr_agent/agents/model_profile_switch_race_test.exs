@@ -19,6 +19,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
   alias SdrAgent.Agents
   alias SdrAgent.Audit
   alias SdrAgent.Repo
+  alias SdrAgent.Test.CoordinatorHarness
 
   @tables ~w(model_profile_switches model_profile_settings audit_accesses audit_events
              audit_chain_heads model_call_allocations model_call_grants failures operations
@@ -28,6 +29,8 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
   setup do
     :ok = Sandbox.checkout(Repo, sandbox: false)
     cleanup!()
+    # C2-02b2α: the switch finalizers run in the coordinator (manual mode).
+    CoordinatorHarness.start!()
     on_exit(fn -> with_connection(&cleanup!/0) end)
 
     {:ok, tenant} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
@@ -108,6 +111,14 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
 
   # Runs `fun` on its own connection, reporting its backend pid first. The
   # task is tracked so `stop_tasks!/0` can stop and join it before cleanup.
+  # A tracked task that runs `fun` in the coordinator; the coordinator's
+  # connection reports itself as `tag`.
+  defp on_coordinator(parent, tag, fun) do
+    task = Task.async(fn -> fun.({parent, tag}) end)
+    Process.put(:race_tasks, [task | Process.get(:race_tasks, [])])
+    task
+  end
+
   defp on_own_connection(parent, tag, fun) do
     task = spawn_on_connection(parent, tag, fun)
     Process.put(:race_tasks, [task | Process.get(:race_tasks, [])])
@@ -212,34 +223,36 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
       [admin, _] = ctx.admins
       assert {:ok, switch} = request(admin, 1)
 
+      # C2-02b2α: the action runs in the coordinator, on its own
+      # connection, whose backend is the waiter.
       held_setting(
-        fn -> runtime(unquote(action), switch, 1, ctx) end,
+        fn report -> runtime(unquote(action), switch, 1, ctx, report) end,
         fn result -> assert {:ok, %{status: unquote(expected)}} = result end,
-        switch.id
+        switch.id,
+        &on_coordinator/3
       )
     end
   end
 
-  defp runtime(:complete_profile_switch, switch, generation, ctx),
-    do:
-      call(:complete_profile_switch, [
-        switch,
-        %{server_generation: generation},
-        [actor: ctx.runtime]
-      ])
+  # C2-02b2α: through the coordinator harness, on the coordinator's own
+  # non-sandboxed connection (`report` names the waiter's tag).
+  defp runtime(action, switch, generation, ctx, report \\ nil) do
+    attrs =
+      if action == :complete_profile_switch,
+        do: %{server_generation: generation},
+        else: %{server_generation: generation, failure_reason: "test"}
 
-  defp runtime(action, switch, generation, ctx),
-    do:
-      call(action, [
-        switch,
-        %{server_generation: generation, failure_reason: "test"},
-        [actor: ctx.runtime]
-      ])
+    CoordinatorHarness.finalize(action, switch, attrs,
+      actor: ctx.runtime,
+      own_connection: true,
+      report: report
+    )
+  end
 
   # Holds the setting row FOR UPDATE on one connection, runs `fun` on
   # another, proves it waits on a lock without holding the chain head, then
   # releases and checks the result. The hold is always released.
-  defp held_setting(fun, check, switch_id \\ nil) do
+  defp held_setting(fun, check, switch_id \\ nil, spawn \\ &on_own_connection/3) do
     parent = self()
 
     holder =
@@ -258,7 +271,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
 
     try do
       assert_receive :holding, 10_000
-      waiter = on_own_connection(parent, :waiter, fun)
+      waiter = spawn.(parent, :waiter, fun)
       assert_receive {:waiter, waiter_pid}, 10_000
       await_lock_wait!(waiter_pid)
       refute holds_head?(waiter_pid), "it held the chain head while waiting on the setting"

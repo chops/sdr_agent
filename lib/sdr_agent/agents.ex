@@ -79,6 +79,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.Agents.ProfileSwitches
+  alias SdrAgent.Agents.ServerStarts
   alias SdrAgent.Agents.ReleasedOutput
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
@@ -106,6 +107,8 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.ModelResultRelease
     resource SdrAgent.Agents.ModelProfileSetting
     resource SdrAgent.Agents.ModelProfileSwitch
+    resource SdrAgent.Agents.ModelServerCounter
+    resource SdrAgent.Agents.ModelServerStart
   end
 
   ## Definitions
@@ -1594,6 +1597,25 @@ defmodule SdrAgent.Agents do
 
   @doc "ADM, AUD (audited), AGT: the tenant's setting, or `{:ok, nil}` before the first one."
   def get_profile_setting(opts), do: ProfileSwitches.get_setting(opts)
+
+  # --- model server starts (C2-02b2α) -----------------------------------
+
+  @doc """
+  MRT, in the registered coordinator only: allocates the tenant's next
+  model server start — `%{boot_id, profile_id, reason, switch_id?}`. See
+  `SdrAgent.Agents.ServerStarts`.
+  """
+  def allocate_server_start(attrs, opts), do: ServerStarts.allocate(attrs, opts)
+
+  @doc """
+  MRT, in the registered coordinator only: moves the tenant's latest start
+  of this boot to `:started`, `:ready` or `:failed`.
+  """
+  def mark_server_start(start, status, attrs, opts),
+    do: ServerStarts.mark(start, status, attrs, opts)
+
+  @doc "ADM, AUD (audited), AGT: the tenant's model server starts, by generation."
+  def list_server_starts(opts), do: ServerStarts.list(opts)
 
   @doc "ADM, AUD (audited), AGT: the tenant's switches, newest first."
   def list_profile_switches(opts), do: ProfileSwitches.list_switches(opts)

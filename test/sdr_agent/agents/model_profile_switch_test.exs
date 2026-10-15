@@ -15,12 +15,15 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
   alias SdrAgent.Accounts
   alias SdrAgent.Agents
   alias SdrAgent.Agents.ProfileSwitches
+  alias SdrAgent.Test.CoordinatorHarness
 
   @setting SdrAgent.Agents.ModelProfileSetting
   @switch SdrAgent.Agents.ModelProfileSwitch
 
   setup do
     tenant = bootstrap!()
+    # C2-02b2α: the finalizers run in the coordinator (manual mode).
+    CoordinatorHarness.start!()
 
     %{
       tenant: tenant,
@@ -51,27 +54,30 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
 
   defp complete(ctx, switch, generation \\ 1, actor \\ nil),
     do:
-      call(:complete_profile_switch, [
+      CoordinatorHarness.finalize(
+        :complete_profile_switch,
         switch,
         %{server_generation: generation},
-        [actor: actor || ctx.runtime]
-      ])
+        actor: actor || ctx.runtime
+      )
 
   defp fail(ctx, switch, generation \\ 1, actor \\ nil),
     do:
-      call(:fail_profile_switch, [
+      CoordinatorHarness.finalize(
+        :fail_profile_switch,
         switch,
         %{server_generation: generation, failure_reason: "activation failed (test)"},
-        [actor: actor || ctx.runtime]
-      ])
+        actor: actor || ctx.runtime
+      )
 
   defp block(ctx, switch, generation \\ 1, actor \\ nil),
     do:
-      call(:block_profile_switch, [
+      CoordinatorHarness.finalize(
+        :block_profile_switch,
         switch,
         %{server_generation: generation, failure_reason: "unconfirmed work (test)"},
-        [actor: actor || ctx.runtime]
-      ])
+        actor: actor || ctx.runtime
+      )
 
   defp setting(actor), do: call(:get_profile_setting, [[actor: actor]])
   defp switches(actor), do: call(:list_profile_switches, [[actor: actor]])
@@ -915,21 +921,28 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
 
       for actor <- [nil, foreign] do
         assert {:error, _} =
-                 call(:complete_profile_switch, [switch, %{server_generation: 1}, [actor: actor]])
+                 CoordinatorHarness.finalize(
+                   :complete_profile_switch,
+                   switch,
+                   %{server_generation: 1},
+                   actor: actor
+                 )
 
         assert {:error, _} =
-                 call(:fail_profile_switch, [
+                 CoordinatorHarness.finalize(
+                   :fail_profile_switch,
                    switch,
                    %{server_generation: 1, failure_reason: "x"},
-                   [actor: actor]
-                 ])
+                   actor: actor
+                 )
 
         assert {:error, _} =
-                 call(:block_profile_switch, [
+                 CoordinatorHarness.finalize(
+                   :block_profile_switch,
                    switch,
                    %{server_generation: 1, failure_reason: "x"},
-                   [actor: actor]
-                 ])
+                   actor: actor
+                 )
       end
 
       assert {:ok, [%{status: :pending}]} = switches(ctx.admin)

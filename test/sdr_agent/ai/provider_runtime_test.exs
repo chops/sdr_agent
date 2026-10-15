@@ -20,6 +20,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
 
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.Fake
+  alias SdrAgent.AI.ModelProvider.ProfileSupervisor
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Test.PinnedCLI
 
@@ -189,9 +190,11 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
       Application.put_env(:sdr_agent, ClaudeCLI, timeout: 90_000)
 
-      assert [{ClaudeCLI, opts}] = Runtime.children()
-      assert opts[:name] == ClaudeCLI.server()
+      # C2-02b2α: the profile tree, whose coordinator names the one server.
+      assert [{ProfileSupervisor, tree}] = Runtime.children()
+      opts = tree[:server].(:claude_cli_opus)
       assert opts[:timeout] == 90_000
+      refute Keyword.has_key?(opts, :name), "the coordinator registers ClaudeCLI.server()"
     end
 
     test "R0-02: the app's server is started with the configured pinned CLI" do
@@ -199,9 +202,8 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
       Application.put_env(:sdr_agent, ClaudeCLI, timeout: 90_000, executable: bin)
 
-      assert [{ClaudeCLI, opts}] = Runtime.children()
-      assert opts[:executable] == bin
-      assert opts[:name] == ClaudeCLI.server()
+      assert [{ProfileSupervisor, tree}] = Runtime.children()
+      assert tree[:server].(:claude_cli_opus)[:executable] == bin
     end
 
     test "R0-03: the app's server is started with the desired profile (default Opus)" do
@@ -209,24 +211,25 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       Application.put_env(:sdr_agent, ClaudeCLI, timeout: 90_000)
 
       assert Runtime.desired_profile() == :claude_cli_opus
-      assert [{ClaudeCLI, opts}] = Runtime.children()
-      assert opts[:profile] == :claude_cli_opus
 
       # The profile is not an environment knob: only the (C2) persisted
-      # setting may choose another reviewed profile.
+      # setting may choose another reviewed profile. The coordinator runs
+      # the setting's profile, or desired_profile/0 before any setting.
       Application.put_env(:sdr_agent, ClaudeCLI, profile: :claude_cli_sonnet)
-      assert [{ClaudeCLI, opts}] = Runtime.children()
-      assert opts[:profile] == :claude_cli_opus
+      assert [{ProfileSupervisor, tree}] = Runtime.children()
+      refute Keyword.has_key?(tree[:server].(:claude_cli_opus), :profile)
     end
 
     test "the provider server starts before Oban, so no job can run before it exists" do
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
       children = SdrAgent.Application.children()
 
-      provider = Enum.find_index(children, &match?({ClaudeCLI, _}, &1))
+      # C2-02b2α: the profile tree runs the one server.
+      provider = Enum.find_index(children, &match?({ProfileSupervisor, _}, &1))
       oban = Enum.find_index(children, &match?({Oban, _}, &1))
       assert provider && oban && provider < oban
-      assert Enum.count(children, &match?({ClaudeCLI, _}, &1)) == 1
+      assert Enum.count(children, &match?({ProfileSupervisor, _}, &1)) == 1
+      refute Enum.any?(children, &match?({ClaudeCLI, _}, &1)), "no bare server child"
     end
   end
 
@@ -320,7 +323,9 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
       Application.put_env(:sdr_agent, ClaudeCLI, executable: bin)
       [child] = Runtime.children()
+      ledger!()
       start_supervised!(child)
+      await_released!()
 
       assert %{executable: ^bin, executable?: true, test_launcher?: false} =
                ClaudeCLI.attestation()
@@ -377,7 +382,11 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
       Application.put_env(:sdr_agent, ClaudeCLI, timeout: 90_000)
       [child] = Runtime.children()
-      server = start_supervised!(child)
+      ledger!()
+      start_supervised!(child)
+      # No pin and no shim here: the server runs, held (its preflight fails).
+      assert eventually(fn -> ClaudeCLI.admission() != %{admission: :not_running} end)
+      server = GenServer.whereis(ClaudeCLI.server())
 
       assert %{admission: :open} = ClaudeCLI.admission()
       Process.exit(server, :kill)
@@ -464,6 +473,20 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       Process.sleep(10)
       eventually(fun, attempts - 1)
     end
+  end
+
+  # C2-02b2α: the profile tree's coordinator allocates every start in the
+  # ledger, so these cases run with a sandboxed database and a tenant.
+  defp ledger! do
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(SdrAgent.Repo)
+    Ecto.Adapters.SQL.Sandbox.mode(SdrAgent.Repo, {:shared, self()})
+    {:ok, _tenant} = SdrAgent.Audit.bootstrap(slug: "demo", name: "Demo Tenant")
+  end
+
+  defp await_released! do
+    assert eventually(fn ->
+             match?(%{hold: :released}, SdrAgent.AI.ModelProvider.Coordinator.status())
+           end)
   end
 
   defp tmp_dir! do
