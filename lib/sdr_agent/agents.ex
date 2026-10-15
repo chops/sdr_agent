@@ -47,7 +47,13 @@ defmodule SdrAgent.Agents do
       (each an active human admin only, in one transaction, refusing a stale
       `expected_revision`), `list_grants/1`, `get_grant/2`, and
       `grant_usage/2` (the attempts consumed, derived from the charged
-      ModelInvocations).
+      ModelInvocations);
+    * model profile switches (C2-02a, `SdrAgent.Agents.ProfileSwitches`) —
+      `request_profile_switch/2` (a current human admin),
+      `complete_profile_switch/3`, `fail_profile_switch/3`,
+      `block_profile_switch/3` (`model_runtime` only; idempotent on the
+      switch's `server_generation`), `get_profile_setting/1` and
+      `list_profile_switches/1` (`ModelProfileSetting`, `ModelProfileSwitch`).
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -69,6 +75,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ProfileSwitches
   alias SdrAgent.Agents.ReleasedOutput
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
@@ -94,6 +101,8 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.ModelCallGrant
     resource SdrAgent.Agents.ModelCallAllocation
     resource SdrAgent.Agents.ModelResultRelease
+    resource SdrAgent.Agents.ModelProfileSetting
+    resource SdrAgent.Agents.ModelProfileSwitch
   end
 
   ## Definitions
@@ -1423,6 +1432,33 @@ defmodule SdrAgent.Agents do
       allocations: Map.new(grant.allocations, &{&1.id, Map.get(counts, &1.id, 0)})
     }
   end
+
+  # --- model profile switches (C2-02a) ---------------------------------
+
+  @doc """
+  ADM: requests a switch of the tenant's desired model profile —
+  `%{to_profile_id, expected_revision, server_generation}`. Creates the
+  setting on the first request. See `SdrAgent.Agents.ProfileSwitches`.
+  """
+  def request_profile_switch(attrs, opts), do: ProfileSwitches.request(attrs, opts)
+
+  @doc "MRT: pending → completed, applying the switch to the setting (`%{server_generation}`)."
+  def complete_profile_switch(switch, attrs, opts),
+    do: ProfileSwitches.transition(:complete, switch, attrs, opts)
+
+  @doc "MRT: pending → failed (`%{server_generation, failure_reason}`); the setting is unchanged."
+  def fail_profile_switch(switch, attrs, opts),
+    do: ProfileSwitches.transition(:fail, switch, attrs, opts)
+
+  @doc "MRT: pending → blocked (`%{server_generation, failure_reason}`); the setting is unchanged."
+  def block_profile_switch(switch, attrs, opts),
+    do: ProfileSwitches.transition(:block, switch, attrs, opts)
+
+  @doc "ADM, AUD (audited), AGT: the tenant's setting, or `{:ok, nil}` before the first one."
+  def get_profile_setting(opts), do: ProfileSwitches.get_setting(opts)
+
+  @doc "ADM, AUD (audited), AGT: the tenant's switches, newest first."
+  def list_profile_switches(opts), do: ProfileSwitches.list_switches(opts)
 
   # One guarded transaction per grant change. A human actor is re-read
   # first, so the change and its audit events carry the operator's current
