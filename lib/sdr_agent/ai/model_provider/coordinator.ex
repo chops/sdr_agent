@@ -443,10 +443,25 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   # A fresh read of the stored outcome before any release (section 2a).
   defp reconcile(state, expected) do
     case readable(state, expected) do
-      :read -> release_if_reconciled(state, expected)
+      :read -> reconciled(state, expected)
       :unavailable -> retry_reconcile(state, expected)
     end
   end
+
+  # An uncertain finalization whose switch is found still pending once the
+  # read recovers takes the permitted branch (section 1a): block, under the
+  # finalizer's own fresh fence; the server stays held.
+  defp reconciled(state, {:switch, id, _status} = expected) do
+    case switch(state, id) do
+      %ModelProfileSwitch{status: :pending} = switch ->
+        block(state, switch, "finalization_uncertain")
+
+      _stored_or_unknown ->
+        release_if_reconciled(state, expected)
+    end
+  end
+
+  defp reconciled(state, :boot), do: release_if_reconciled(state, :boot)
 
   # The test-build `reconcile:` fault gates only a switch's reconciliation,
   # never the boot release.
