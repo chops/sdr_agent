@@ -61,12 +61,25 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
     ).rows
   end
 
-  # Owned partition only: these tests commit rows and truncate them.
-  defp owned_partition! do
-    database = Repo.config()[:database]
+  # These tests commit rows and truncate them afterwards, so cleanup runs
+  # only against a test database: `sdr_agent_test` (CI's throwaway cluster
+  # and bin/verify) or a `sdr_agent_test<partition>` copy, as for the other
+  # race tests. Never the demo, dev or calibration database. The check runs
+  # inside `cleanup!/0`, before its first SQL, in setup and on_exit alike.
+  @doc false
+  def truncatable?(database) when is_binary(database),
+    do: Regex.match?(~r/\Asdr_agent_test[a-z0-9_]*\z/, database)
 
-    assert database =~ ~r/\Asdr_agent_test_[a-z0-9_]+\z/ and database != "sdr_agent_test",
-           "race tests need an isolated MIX_TEST_PARTITION, got #{database}"
+  def truncatable?(_database), do: false
+
+  test "the cleanup guard refuses anything but a test database (no SQL runs)" do
+    for name <- ["sdr_agent_dev", "sdr_agent_calibration", "postgres", "sdr_agent", nil, ""] do
+      refute truncatable?(name), "#{inspect(name)} must not be truncatable"
+    end
+
+    for name <- ["sdr_agent_test", "sdr_agent_test2", "sdr_agent_test_c202a"] do
+      assert truncatable?(name)
+    end
   end
 
   # Waits until `pid`'s backend is blocked on a lock; bounded.
@@ -106,8 +119,6 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
 
   for outcome <- [:commit, :rollback] do
     test "first-row race with the winner held, then #{outcome}", ctx do
-      owned_partition!()
-
       assert function_exported?(Agents, :request_profile_switch, 2),
              "C2-02a: SdrAgent.Agents.request_profile_switch/2 is not implemented"
 
@@ -133,8 +144,15 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
       try do
         assert_receive {:winner_requested, {:ok, %{status: :pending}}}, 10_000
         loser = on_own_connection(parent, :loser, fn -> request(loser_admin, 2) end)
+        assert_receive {:winner, winner_pid}, 10_000
         assert_receive {:loser, loser_pid}, 10_000
         await_lock_wait!(loser_pid)
+
+        # The loser is blocked by the winner's transaction (the initializing
+        # conflict), holding no chain head.
+        assert [[[^winner_pid]]] = Repo.query!("SELECT pg_blocking_pids($1)", [loser_pid]).rows
+
+        refute holds_head?(loser_pid)
         send(winner.pid, :finish)
         Task.await(winner, 15_000)
         loser_result = Task.await(loser, 15_000)
@@ -155,12 +173,12 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
         end
       after
         send(winner.pid, :finish)
+        Task.shutdown(winner, 5_000)
       end
     end
   end
 
   test "a request waits on the setting row before taking the chain head", ctx do
-    owned_partition!()
     [admin, _] = ctx.admins
     assert {:ok, first} = request(admin, 1)
     assert {:ok, _} = runtime(:fail_profile_switch, first, 1, ctx)
@@ -176,13 +194,14 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
         block_profile_switch: :blocked
       ] do
     test "#{action} waits on the setting row before taking the chain head", ctx do
-      owned_partition!()
       [admin, _] = ctx.admins
       assert {:ok, switch} = request(admin, 1)
 
-      held_setting(fn -> runtime(unquote(action), switch, 1, ctx) end, fn result ->
-        assert {:ok, %{status: unquote(expected)}} = result
-      end)
+      held_setting(
+        fn -> runtime(unquote(action), switch, 1, ctx) end,
+        fn result -> assert {:ok, %{status: unquote(expected)}} = result end,
+        switch.id
+      )
     end
   end
 
@@ -205,7 +224,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
   # Holds the setting row FOR UPDATE on one connection, runs `fun` on
   # another, proves it waits on a lock without holding the chain head, then
   # releases and checks the result. The hold is always released.
-  defp held_setting(fun, check) do
+  defp held_setting(fun, check, switch_id \\ nil) do
     parent = self()
 
     holder =
@@ -228,12 +247,39 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
       assert_receive {:waiter, waiter_pid}, 10_000
       await_lock_wait!(waiter_pid)
       refute holds_head?(waiter_pid), "it held the chain head while waiting on the setting"
+
+      if switch_id,
+        do: refute(switch_locked?(switch_id), "it locked the switch before the setting")
+
       send(holder.pid, :release)
       Task.await(holder, 15_000)
       check.(Task.await(waiter, 15_000))
     after
       send(holder.pid, :release)
+      Task.shutdown(holder, 5_000)
     end
+  end
+
+  # From a third connection: can the switch row be locked right now?
+  defp switch_locked?(switch_id) do
+    fn -> probe_lock(switch_id) end
+    |> Task.async()
+    |> Task.await(10_000)
+    |> case do
+      {:ok, {:ok, _}} -> false
+      {:ok, {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}}} -> true
+      other -> flunk("switch lock probe failed: #{inspect(other)}")
+    end
+  end
+
+  defp probe_lock(switch_id),
+    do: with_connection(fn -> Repo.transaction(fn -> lock_nowait(switch_id) end) end)
+
+  defp lock_nowait(switch_id) do
+    Repo.query(
+      "SELECT 1 FROM model_profile_switches WHERE id = $1 FOR UPDATE NOWAIT",
+      [Ecto.UUID.dump!(switch_id)]
+    )
   end
 
   defp with_connection(fun) do
@@ -247,6 +293,12 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
   end
 
   defp cleanup! do
+    database = Repo.config()[:database]
+
+    unless truncatable?(database) do
+      raise "refusing to truncate #{inspect(database)}: not a test database"
+    end
+
     existing =
       Enum.filter(@tables, fn table ->
         Repo.query!("SELECT to_regclass($1) IS NOT NULL", [table]).rows == [[true]]

@@ -542,7 +542,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
           )
           |> Ash.create()
 
-        assert {:error, _} = result
+        assert {:error, %Ash.Error.Forbidden{}} = result
       end
 
       unchanged!(ctx)
@@ -560,56 +560,84 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
         context =
           phase(ctx, unquote(phase_name), unquote(action), ctx.switch, unquote(overrides))
 
-        assert {:error, _} = apply_switch(ctx.setting_row, ctx.switch, ctx.runtime, context)
+        assert {:error, %Ash.Error.Forbidden{}} =
+                 apply_switch(ctx.setting_row, ctx.switch, ctx.runtime, context)
+
         unchanged!(ctx)
         assert {:ok, [%{status: :pending}]} = switches(ctx.admin)
       end
     end
 
+    # Stored-row guards (not policy): the switch must already be locked and
+    # transitioned in this transaction, so they refuse as Invalid on
+    # :switch_id with the matching marker and actor.
     test "a premature :apply_switch (no transition lock, switch still pending) is refused",
          ctx do
       context = phase(ctx, :apply, :complete, ctx.switch)
-      assert {:error, _} = apply_switch(ctx.setting_row, ctx.switch, ctx.runtime, context)
+
+      assert {:error, %Ash.Error.Invalid{errors: errors}} =
+               apply_switch(ctx.setting_row, ctx.switch, ctx.runtime, context)
+
+      assert Enum.any?(errors, &(Map.get(&1, :field) == :switch_id))
       unchanged!(ctx)
     end
 
     test ":apply_switch on a non-pending switch is refused", ctx do
       assert {:ok, failed} = fail(ctx, ctx.switch)
       context = phase(ctx, :apply, :complete, failed)
-      assert {:error, _} = apply_switch(ctx.setting_row, failed, ctx.runtime, context)
+
+      assert {:error, %Ash.Error.Invalid{errors: errors}} =
+               apply_switch(ctx.setting_row, failed, ctx.runtime, context)
+
+      assert Enum.any?(errors, &(Map.get(&1, :field) == :switch_id))
       unchanged!(ctx)
     end
 
     test ":apply_switch by an admin, even with a matching marker, is refused", ctx do
       context = phase(ctx, :apply, :complete, ctx.switch)
-      assert {:error, _} = apply_switch(ctx.setting_row, ctx.switch, ctx.admin, context)
+
+      assert {:error, %Ash.Error.Forbidden{}} =
+               apply_switch(ctx.setting_row, ctx.switch, ctx.admin, context)
+
       unchanged!(ctx)
     end
 
-    test "the internal transition read can't be used directly", ctx do
-      foreign = phase(ctx, :transition, :complete, ctx.switch, %{tenant_id: Ecto.UUID.generate()})
+    for {label, resource} <- [{"setting", @setting}, {"switch", @switch}] do
+      test "the #{label}'s internal transition read can't be used outside its phase", ctx do
+        assert Code.ensure_loaded?(unquote(resource)),
+               "C2-02a: #{inspect(unquote(resource))} is not implemented"
 
-      for {actor, context} <- [
-            {ctx.runtime, %{}},
-            {ctx.runtime, foreign},
-            {ctx.admin, phase(ctx, :transition, :complete, ctx.switch)}
-          ] do
-        result =
-          @setting
-          |> Ash.Query.for_read(:lock_for_transition, %{switch_id: ctx.switch.id},
-            actor: actor,
-            context: context
-          )
-          |> Ash.read()
+        foreign =
+          phase(ctx, :transition, :complete, ctx.switch, %{tenant_id: Ecto.UUID.generate()})
 
-        assert result == {:ok, []} or match?({:error, %Ash.Error.Forbidden{}}, result)
+        same_tenant_forged = phase(ctx, :transition, :complete, ctx.switch)
+
+        for {actor, context} <- [
+              {ctx.runtime, %{}},
+              {ctx.runtime, foreign},
+              {ctx.runtime, same_tenant_forged},
+              {ctx.admin, same_tenant_forged}
+            ] do
+          result =
+            unquote(resource)
+            |> Ash.Query.for_read(:lock_for_transition, %{switch_id: ctx.switch.id},
+              actor: actor,
+              context: context
+            )
+            |> Ash.read()
+
+          assert {:error, %Ash.Error.Forbidden{}} = result
+        end
       end
     end
 
-    test "fail and block take the transition lock but never write the setting", ctx do
-      assert {:ok, %{status: :blocked}} = block(ctx, ctx.switch)
-      unchanged!(ctx)
-      assert count("model.profile.setting_initialized", ctx) == 1
+    for action <- [:fail, :block] do
+      test "#{action} never writes the setting", ctx do
+        assert {:ok, %{status: status}} = unquote(action)(ctx, ctx.switch)
+        assert status in [:failed, :blocked]
+        unchanged!(ctx)
+        assert count("model.profile.setting_initialized", ctx) == 1
+      end
     end
   end
 
@@ -644,12 +672,16 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
   ## model_runtime confinement
 
   describe "model_runtime has no other write authority" do
-    test "grant, allocation and invocation writes are refused", ctx do
+    setup ctx do
       grant = SdrAgent.AgentsFixtures.grant!(ctx.tenant, %{}, ctx.admin)
       %{run: run} = SdrAgent.AgentsFixtures.running_run(ctx.tenant)
-      key = grant.allocations |> hd() |> Map.fetch!(:key)
+      %{grant: grant, run: run, key: grant.allocations |> hd() |> Map.fetch!(:key)}
+    end
 
-      grant_attrs = %{
+    # A crash (for example the unknown actor type on main) is observed as a
+    # value, so the assertion fails rather than an exception.
+    test "creating a grant is Forbidden", ctx do
+      attrs = %{
         name: "G-X",
         purpose: "synthetic",
         profile_ids: [:claude_cli_opus],
@@ -659,37 +691,54 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
         allocations: [%{key: :b1, applies_to: [:b1], attempts: 1}]
       }
 
-      writes = [
-        fn -> Agents.create_grant(grant_attrs, actor: ctx.runtime) end,
-        fn ->
-          Agents.update_grant_terms(
-            grant,
-            %{expected_revision: grant.revision, total_attempts: 9},
-            actor: ctx.runtime
-          )
-        end,
-        fn ->
-          Agents.revoke_grant(grant, %{expected_revision: grant.revision}, actor: ctx.runtime)
-        end,
-        fn ->
-          Agents.release_allocation(grant, %{expected_revision: grant.revision, key: key},
-            actor: ctx.runtime
-          )
-        end
-      ]
+      assert {:error, %Ash.Error.Forbidden{}} =
+               observe(fn -> Agents.create_grant(attrs, actor: ctx.runtime) end)
+    end
 
-      # A crash (for example an unknown actor type) is observed as a value,
-      # so the assertion, not an exception, fails.
-      for write <- writes do
-        assert {:error, %Ash.Error.Forbidden{}} = observe(write)
-      end
+    test "editing grant terms is Forbidden", ctx do
+      assert {:error, %Ash.Error.Forbidden{}} =
+               observe(fn ->
+                 Agents.update_grant_terms(
+                   ctx.grant,
+                   %{expected_revision: ctx.grant.revision, total_attempts: 9},
+                   actor: ctx.runtime
+                 )
+               end)
+    end
 
+    test "revoking a grant is Forbidden", ctx do
+      assert {:error, %Ash.Error.Forbidden{}} =
+               observe(fn ->
+                 Agents.revoke_grant(ctx.grant, %{expected_revision: ctx.grant.revision},
+                   actor: ctx.runtime
+                 )
+               end)
+    end
+
+    test "releasing an allocation is Forbidden", ctx do
+      assert {:error, %Ash.Error.Forbidden{}} =
+               observe(fn ->
+                 Agents.release_allocation(
+                   ctx.grant,
+                   %{expected_revision: ctx.grant.revision, key: ctx.key},
+                   actor: ctx.runtime
+                 )
+               end)
+    end
+
+    test "reserving a model invocation is Forbidden; the same input is allowed for agent_runtime",
+         ctx do
       attrs = SdrAgent.AgentsFixtures.model_attrs("runtime-reserve")
 
-      assert {:error, _} =
-               observe(fn -> Agents.reserve_model_invocation(run, attrs, actor: ctx.runtime) end)
+      assert {:error, %Ash.Error.Forbidden{}} =
+               observe(fn ->
+                 Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.runtime)
+               end)
 
-      assert {:ok, []} = Agents.list_model_invocations(run.id, actor: ctx.agent)
+      assert {:ok, []} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
+
+      control = SdrAgent.AgentsFixtures.model_attrs("agent-reserve")
+      assert {:ok, _} = Agents.reserve_model_invocation(ctx.run, control, actor: ctx.agent)
     end
 
     test "a missing or foreign-tenant runtime can't complete, fail or block", ctx do
@@ -771,14 +820,20 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
       assert completed.payload["setting_revision"] == 2
     end
 
-    test "an auditor's reads append AuditAccess records", ctx do
+    test "each auditor read appends its own AuditAccess", ctx do
       _switch = pending!(ctx)
       auditor = human(:auditor, ctx.tenant)
-      [[before_count]] = SdrAgent.Repo.query!("SELECT count(*) FROM audit_accesses").rows
+
+      accesses = fn ->
+        hd(hd(SdrAgent.Repo.query!("SELECT count(*) FROM audit_accesses").rows))
+      end
+
+      before = accesses.()
       assert {:ok, %{revision: 1}} = setting(auditor)
+      after_setting = accesses.()
+      assert after_setting == before + 1
       assert {:ok, [_]} = switches(auditor)
-      [[after_count]] = SdrAgent.Repo.query!("SELECT count(*) FROM audit_accesses").rows
-      assert after_count >= before_count + 2
+      assert accesses.() == after_setting + 1
     end
   end
 
