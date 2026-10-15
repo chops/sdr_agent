@@ -446,6 +446,42 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceTest do
 
   ## 8. Drain authority
 
+  describe "auditor denials of the drain entry points (GREEN review MF3)" do
+    test "an auditor's drain is refused and audited exactly once, nothing changed", ctx do
+      row = reserve!(ctx, "auditor-drain")
+      switch = request!(ctx, :claude_cli_sonnet, 1, 1)
+      auditor = human(:auditor, ctx.tenant)
+
+      for target <- [switch, nil, "not-a-switch"] do
+        denials = length(events_of_type(ctx.tenant, "authz.denied"))
+
+        assert {:error, %Ash.Error.Forbidden{}} =
+                 Agents.drain_profile_switch(target, %{server_generation: 1, timeout_ms: 500},
+                   actor: auditor
+                 )
+
+        assert length(events_of_type(ctx.tenant, "authz.denied")) == denials + 1
+      end
+
+      assert stored(row.id).status == :reserved
+      {:ok, run} = Agents.get_run(ctx.run.id, actor: ctx.agent)
+      assert run.status == :running
+    end
+
+    test "an auditor's per-row refusal is refused and audited exactly once", ctx do
+      row = reserve!(ctx, "auditor-refuse")
+      switch = request!(ctx, :claude_cli_sonnet, 1, 1)
+      auditor = human(:auditor, ctx.tenant)
+      denials = length(events_of_type(ctx.tenant, "authz.denied"))
+
+      assert {:error, %Ash.Error.Forbidden{}} =
+               Agents.refuse_reserved_for_switch(row.id, switch.id, 1, auditor)
+
+      assert length(events_of_type(ctx.tenant, "authz.denied")) == denials + 1
+      assert stored(row.id).status == :reserved
+    end
+  end
+
   describe "drain authority and validation" do
     test "only agent_runtime of the switch's tenant may drain; others change nothing", ctx do
       _row = reserve!(ctx, "kept")

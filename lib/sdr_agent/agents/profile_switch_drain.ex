@@ -58,17 +58,32 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
   @event [:sdr_agent, :profile_switch, :drain]
   @poll_ms 50
   @fence_errors [:switch_not_open, :stale_server_generation, :drain_observation_failed]
+  # The counts last observed within the deadline (nil: never observed).
+  @last_counts {__MODULE__, :last_counts}
+  @unknown %{reserved: nil, sent: nil}
+  # Client-side slack over the server-side timeouts, so Postgres cancels first.
+  @client_slack_ms 25
 
   @doc "See the moduledoc."
   def drain(switch, attrs, opts) do
     actor = Keyword.get(opts, :actor)
 
     with :ok <- authorized(actor),
-         {:ok, generation, timeout} <- inputs(Map.new(attrs)) do
+         {:ok, generation, timeout} <- inputs(Map.new(attrs)),
+         {:ok, switch_id} <- target(switch) do
       deadline = System.monotonic_time(:millisecond) + timeout
-      run(%{switch_id: switch.id, generation: generation, deadline: deadline, actor: actor})
+      Process.put(@last_counts, @unknown)
+
+      try do
+        run(%{switch_id: switch_id, generation: generation, deadline: deadline, actor: actor})
+      after
+        Process.delete(@last_counts)
+      end
     end
   end
+
+  defp target(%{id: id}) when is_binary(id), do: {:ok, id}
+  defp target(_switch), do: {:error, :switch_not_open}
 
   defp authorized(%SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant})
        when is_binary(tenant),
@@ -172,11 +187,31 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
 
   defp settle(%{operation_id: nil}, _drain), do: :ok
 
+  # In the Operation's own transaction (Operation → Failure → head): after
+  # both locks, the head is taken and S revalidated fresh before the
+  # Operation changes, so a stale drain never settles after S closed.
   defp settle(run, drain) do
-    case bounded(drain, fn -> StoppedRunOperation.settle(run.operation_id, run, drain.actor) end) do
+    result =
+      bounded(drain, fn step ->
+        StoppedRunOperation.settle(run.operation_id, run, drain.actor,
+          step: step,
+          before_write: fn -> revalidate_after_head(drain, step) end
+        )
+      end)
+
+    case result do
       :ok -> :ok
       {:error, :drain_timeout} -> timeout(drain)
+      {:error, reason} when reason in @fence_errors -> {:error, reason}
       {:error, _error} -> {:error, :drain_settlement_failed}
+    end
+  end
+
+  defp revalidate_after_head(drain, step) do
+    with :ok <- step.(),
+         {:ok, _head} <- Kernel.lock_head(tenant(drain)),
+         :ok <- step.() do
+      SwitchFence.named_open(tenant(drain), drain.switch_id, drain.generation)
     end
   end
 
@@ -184,9 +219,15 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
 
   defp refuse_reserved(drain) do
     case bounded(drain, fn -> counts_rows(drain, [:reserved]) end) do
-      {:ok, rows} -> refuse_each(rows, drain, 0)
-      {:error, :drain_timeout} -> timeout(drain)
-      {:error, _error} -> {:error, :drain_observation_failed}
+      {:ok, rows} ->
+        observed(%{last_counts() | reserved: length(rows)})
+        refuse_each(rows, drain, 0)
+
+      {:error, :drain_timeout} ->
+        timeout(drain)
+
+      {:error, _error} ->
+        {:error, :drain_observation_failed}
     end
   end
 
@@ -202,12 +243,13 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
 
   defp refuse_one(row, drain) do
     result =
-      bounded(drain, fn ->
+      bounded(drain, fn step ->
         SdrAgent.Agents.refuse_reserved_for_switch(
           row.id,
           drain.switch_id,
           drain.generation,
-          drain.actor
+          drain.actor,
+          step
         )
       end)
 
@@ -248,12 +290,12 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
         :ok = emit(:polling, drain)
         final(drain, refused)
 
-      {:ok, counts} ->
+      {:ok, _counts} ->
         :ok = emit(:polling, drain)
 
         case remaining(drain) do
           ms when ms <= 0 ->
-            {:error, :drain_timeout, counts}
+            timeout(drain)
 
           ms ->
             Process.sleep(min(@poll_ms, ms))
@@ -272,10 +314,13 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
     tenant = tenant(drain)
 
     observed =
-      bounded(drain, fn ->
+      bounded(drain, fn step ->
         with {:ok, _head} <- Kernel.lock_head(tenant),
+             :ok <- step.(),
              :ok <- SwitchFence.named_open(tenant, drain.switch_id, drain.generation),
+             :ok <- step.(),
              {:ok, %{reserved: 0, sent: 0}} <- counts_unbounded(drain),
+             :ok <- step.(),
              {:ok, []} <- running_operations(drain) do
           {:ok, :drained}
         else
@@ -325,7 +370,12 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
 
   ## Reads and bounds
 
-  defp counts(drain), do: bounded(drain, fn -> counts_unbounded(drain) end)
+  defp counts(drain) do
+    with {:ok, counts} <- bounded(drain, fn -> counts_unbounded(drain) end) do
+      observed(counts)
+      {:ok, counts}
+    end
+  end
 
   defp counts_unbounded(drain) do
     with {:ok, rows} <- counts_rows(drain, [:reserved, :sent]) do
@@ -350,17 +400,24 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
     |> Ash.read()
   end
 
-  # Runs `fun` in one transaction whose lock and statement waits are capped
-  # by the remaining budget (transaction-local settings, restored before it
-  # ends). `{:error, :drain_timeout}` once the budget is spent.
+  # Runs `fun` in one transaction under the one deadline:
+  #   * the transaction (connection checkout included) has a client-side
+  #     timeout of the remaining budget plus a small slack;
+  #   * before `fun` and before each of its steps (`fun.(step)`), the
+  #     transaction-local `lock_timeout` and `statement_timeout` are set to
+  #     the budget left at that moment, so no sequence of waits overruns it;
+  #   * before commit the budget is checked again: once it is spent, the
+  #     work rolls back as `{:error, :drain_timeout}` instead of committing.
+  # The settings are restored before commit (a savepoint under a test
+  # sandbox would otherwise keep them).
   defp bounded(drain, fun) do
     case remaining(drain) do
       ms when ms <= 0 ->
         {:error, :drain_timeout}
 
       ms ->
-        fn -> bounded_body(ms, fun) end
-        |> Audit.transaction()
+        fn -> audited_body(drain, fun) end
+        |> Repo.transaction(timeout: ms + @client_slack_ms)
         |> unwrap_bounded(drain)
     end
   rescue
@@ -368,19 +425,40 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
     error -> {:error, error}
   end
 
-  defp bounded_body(ms, fun) do
+  defp audited_body(drain, fun) do
+    fn -> bounded_body(drain, fun) end
+    |> Audit.transaction()
+    |> unwrap_inner()
+  end
+
+  defp bounded_body(drain, fun) do
     [[lock, statement]] =
       Repo.query!("SELECT current_setting('lock_timeout'), current_setting('statement_timeout')").rows
 
-    set_timeouts!("#{ms}ms", "#{ms}ms")
+    step = fn -> rebound(drain) end
 
-    case fun.() do
-      {:error, error} ->
-        Repo.rollback(error)
+    with :ok <- step.(),
+         result when not is_tuple(result) or elem(result, 0) != :error <- call(fun, step),
+         :ok <- step.() do
+      set_timeouts!(lock, statement)
+      result
+    else
+      {:error, error} -> Repo.rollback(error)
+    end
+  end
 
-      result ->
-        set_timeouts!(lock, statement)
-        result
+  defp call(fun, step) when is_function(fun, 1), do: fun.(step)
+  defp call(fun, _step), do: fun.()
+
+  # The budget left now, applied to the next statements; spent: roll back.
+  defp rebound(drain) do
+    case remaining(drain) do
+      ms when ms <= 0 ->
+        {:error, :drain_timeout}
+
+      ms ->
+        set_timeouts!("#{ms}ms", "#{ms}ms")
+        :ok
     end
   end
 
@@ -391,19 +469,21 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
     )
   end
 
+  defp unwrap_inner({:ok, result}), do: result
+  defp unwrap_inner({:error, error}), do: Repo.rollback(error)
+
   defp unwrap_bounded({:ok, result}, _drain), do: result
 
   defp unwrap_bounded({:error, error}, drain) do
     if remaining(drain) <= 0, do: {:error, :drain_timeout}, else: {:error, error}
   end
 
-  # The counts at the deadline, read once more (outside the spent budget).
-  defp timeout(drain) do
-    case counts_unbounded(drain) do
-      {:ok, counts} -> {:error, :drain_timeout, counts}
-      {:error, _error} -> {:error, :drain_observation_failed}
-    end
-  end
+  # The counts last observed within the deadline: no read happens after the
+  # budget is spent (a figure never observed is nil).
+  defp timeout(_drain), do: {:error, :drain_timeout, last_counts()}
+
+  defp observed(counts), do: Process.put(@last_counts, counts)
+  defp last_counts, do: Process.get(@last_counts, @unknown)
 
   defp fence_result(:ok, _drain), do: :ok
   defp fence_result({:error, :drain_timeout}, drain), do: timeout(drain)

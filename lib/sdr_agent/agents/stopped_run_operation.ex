@@ -20,6 +20,15 @@ defmodule SdrAgent.Agents.StoppedRunOperation do
 
   So exactly one live attention item remains. A missing or unreadable cause
   is never read as resolved: it raises.
+
+  Option `step:` (the drain's budget): run before each lock and the write,
+  `:ok` or `{:error, reason}` to roll back unchanged.
+
+  Option `before_write:` (the profile switch drain only): a function run
+  after both locks and before the Operation changes, returning `:ok` or
+  `{:error, reason}` to roll the transaction back unchanged. The drain uses
+  it to take the chain head and revalidate its named switch (Operation →
+  Failure → head). The worker and the sweeper pass none.
   """
   require Ash.Query
 
@@ -35,10 +44,16 @@ defmodule SdrAgent.Agents.StoppedRunOperation do
   when the Operation was already settled), or `{:error, error}` when the
   Operation transaction failed (nothing was changed).
   """
-  def settle(operation_id, run, actor) do
+  def settle(operation_id, run, actor, opts \\ []) do
+    before_write = Keyword.get(opts, :before_write, &ok/0)
+    step = Keyword.get(opts, :step, &ok/0)
+
     fn ->
-      case lock_operation(operation_id, actor) do
-        {:ok, %{status: :running} = operation} -> fail(operation, run, actor)
+      with :ok <- step.(),
+           {:ok, %{status: :running} = operation} <- lock_operation(operation_id, actor),
+           :ok <- step.() do
+        fail(operation, run, actor, before_write)
+      else
         {:ok, _settled_or_missing} -> :ok
         {:error, error} -> Repo.rollback(error)
       end
@@ -50,17 +65,21 @@ defmodule SdrAgent.Agents.StoppedRunOperation do
     end
   end
 
-  defp fail(operation, run, actor) do
+  defp fail(operation, run, actor, before_write) do
     attrs =
       if live_failure?(run.attention_failure_id, actor),
         do: %{failure_id: run.attention_failure_id},
         else: %{failure: resolved_cause_failure(run)}
 
-    case Operations.fail_operation(operation, attrs, actor: actor) do
-      {:ok, _operation} -> :ok
+    with :ok <- before_write.(),
+         {:ok, _operation} <- Operations.fail_operation(operation, attrs, actor: actor) do
+      :ok
+    else
       {:error, error} -> Repo.rollback(error)
     end
   end
+
+  defp ok, do: :ok
 
   defp lock_operation(id, actor) do
     Operations.Operation

@@ -470,6 +470,144 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
     end
   end
 
+  ## The end-to-end deadline (GREEN review MF1, Codex a1071e0e)
+
+  describe "the drain's one deadline" do
+    # Held run lock for ~300 ms, then the head until ~650 ms, against a
+    # 500 ms drain: each wait alone fits the original allowance, the sum
+    # doesn't. The refusal must not commit after the deadline.
+    test "waits across several locks never commit work after the deadline", ctx do
+      race(fn ->
+        fence!()
+        assert {:ok, row} = reserve(ctx, "multi-lock")
+        assert {:ok, switch} = request(ctx)
+
+        {run_holder, run_holder_pid} = hold_tagged(:run_holder, fn -> hold_run_lock!(ctx.run) end)
+        {head_holder, _} = hold_tagged(:head_holder, fn -> lock_head!(ctx) end)
+
+        started = System.monotonic_time(:millisecond)
+
+        # The drain's own return time, not the test's join (the test keeps
+        # the head held past the deadline).
+        drainer =
+          on_own_connection(:drainer, fn ->
+            {drain(ctx, switch, 500), System.monotonic_time(:millisecond)}
+          end)
+
+        await_blocked_by!(pid_of(:drainer), run_holder_pid)
+        Process.sleep(300)
+        release(run_holder)
+        join(run_holder)
+        Process.sleep(350)
+        release(head_holder)
+        join(head_holder)
+
+        {result, returned_at} = join(drainer)
+        elapsed = returned_at - started
+
+        assert stored(row.id).status == :reserved, "a refusal committed after the deadline"
+        assert match?({:error, :drain_timeout, _}, result), inspect(result)
+        assert elapsed < 600, "the drain returned after its deadline (#{elapsed} ms)"
+      end)
+    end
+
+    test "a blocked observation at the deadline is not waited for", ctx do
+      race(fn ->
+        fence!()
+        assert {:ok, _row} = reserve(ctx, "blocked-observation")
+        assert {:ok, switch} = request(ctx)
+
+        {holder, _pid} =
+          hold_tagged(:table_holder, fn ->
+            Repo.query!("LOCK TABLE model_invocations IN ACCESS EXCLUSIVE MODE")
+          end)
+
+        started = System.monotonic_time(:millisecond)
+        drainer = on_own_connection(:drainer, fn -> drain(ctx, switch, 200) end)
+        _ = pid_of(:drainer)
+        result = Task.yield(drainer, 1_500)
+        elapsed = System.monotonic_time(:millisecond) - started
+        release(holder)
+        join(holder)
+
+        assert match?({:ok, {:error, :drain_timeout, _}}, result),
+               "the drain still waited at #{elapsed} ms: #{inspect(result)}"
+
+        assert elapsed < 700
+        # Counts never observed within the deadline are reported as unknown.
+        {:ok, {:error, :drain_timeout, counts}} = result
+        assert counts == %{reserved: nil, sent: nil}
+      end)
+    end
+
+    test "a final observation after the deadline is a timeout, not success", ctx do
+      race(fn ->
+        fence!()
+        assert {:ok, row} = reserve(ctx, "late-final")
+        assert {:ok, sent} = admit(ctx, row.id)
+        assert {:ok, switch} = request(ctx)
+        pause_drain_at!(:polling)
+
+        drainer = on_own_connection(:drainer, fn -> drain(ctx, switch, 400) end)
+        assert_receive {:drain_paused, :polling, drain_process}, 10_000
+
+        assert {:ok, _} =
+                 Agents.complete_model_invocation(sent, AgentsFixtures.completion(),
+                   actor: ctx.agent
+                 )
+
+        Process.sleep(500)
+        release_pauses(drain_process)
+        assert {:error, :drain_timeout, _counts} = join(drainer)
+      end)
+    end
+  end
+
+  ## Settlement revalidates the named switch (GREEN review MF2)
+
+  describe "the drain's Operation settlement revalidates S" do
+    test "a retried drain doesn't settle after S closed", ctx do
+      race(fn ->
+        fence!()
+        %{run: run, operation: operation} = AgentsFixtures.operated_run(ctx.tenant)
+        assert {:ok, row} = reserve(ctx, "retry-stale", run)
+        assert {:ok, switch} = request(ctx)
+
+        # The documented crash gap: the row refused and its run stopped,
+        # its Operation not yet settled.
+        assert {:ok, {:refused, _}} =
+                 Agents.refuse_reserved_for_switch(row.id, switch.id, 1, ctx.agent)
+
+        pause_drain_at!(:validated)
+        drainer = on_own_connection(:drainer, fn -> drain(ctx, switch) end)
+        assert_receive {:drain_paused, :validated, drain_process}, 10_000
+        assert {:ok, _} = fail_switch(ctx, switch)
+        release_pauses(drain_process)
+
+        assert {:error, :switch_not_open} = join(drainer)
+        assert operation_status(operation) == :running
+      end)
+    end
+
+    test "S closing between the refusal and its settlement: nothing settled", ctx do
+      race(fn ->
+        fence!()
+        %{run: run, operation: operation} = AgentsFixtures.operated_run(ctx.tenant)
+        assert {:ok, _row} = reserve(ctx, "refused-then-stale", run)
+        assert {:ok, switch} = request(ctx)
+
+        pause_drain_at!(:refused)
+        drainer = on_own_connection(:drainer, fn -> drain(ctx, switch) end)
+        assert_receive {:drain_paused, :refused, drain_process}, 10_000
+        assert {:ok, _} = fail_switch(ctx, switch)
+        release_pauses(drain_process)
+
+        assert {:error, :switch_not_open} = join(drainer)
+        assert operation_status(operation) == :running
+      end)
+    end
+  end
+
   ## Drain observation, probes and queries
 
   # The drain's stage events (metadata only), sent to this test process.
@@ -529,6 +667,29 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
     after
       500 -> :ok
     end
+  end
+
+  defp operation_status(operation) do
+    [[status]] =
+      Repo.query!("SELECT status FROM operations WHERE id = $1", [Ecto.UUID.dump!(operation.id)]).rows
+
+    String.to_existing_atom(status)
+  end
+
+  # As `hold/2`, under its own tag, so one test can hold several locks.
+  defp hold_tagged(tag, fun) do
+    task =
+      on_own_connection(tag, fn ->
+        Audit.transaction(fn -> held(fun, :commit) end)
+      end)
+
+    pid = pid_of(tag)
+    assert_receive {:held, _}, 10_000
+    {task, pid}
+  end
+
+  defp hold_run_lock!(run) do
+    Repo.query!("SELECT 1 FROM agent_runs WHERE id = $1 FOR UPDATE", [Ecto.UUID.dump!(run.id)])
   end
 
   defp lock_head!(ctx) do

@@ -805,8 +805,15 @@ defmodule SdrAgent.Agents do
   Operation, waits (bounded) for the tenant's sent rows to settle, and
   reports counts only. See `SdrAgent.Agents.ProfileSwitchDrain`.
   """
-  def drain_profile_switch(switch, attrs, opts),
-    do: SdrAgent.Agents.ProfileSwitchDrain.drain(switch, attrs, opts)
+  def drain_profile_switch(switch, attrs, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    # Through the guard, so an auditor's attempt is refused before anything
+    # runs and audited exactly once (S2 auditor contract).
+    guard(SdrAgent.Agents.ModelProfileSwitch, :drain, subject_id(switch), actor, fn ->
+      SdrAgent.Agents.ProfileSwitchDrain.drain(switch, attrs, opts)
+    end)
+  end
 
   @doc false
   # The drain's refusal of one reserved row (`ProfileSwitchDrain` only), in
@@ -821,29 +828,55 @@ defmodule SdrAgent.Agents do
   # `{:ok, {:refused, run_id}}`, `{:ok, :not_running}`, `{:ok, :skipped}`
   # (the row is no longer reserved) or `{:error, reason}` with nothing
   # written.
-  def refuse_reserved_for_switch(
-        invocation_id,
-        switch_id,
-        generation,
-        %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor
-      )
-      when is_binary(tenant) do
-    audit_transact(fn -> drain_refuse_locked(invocation_id, switch_id, generation, actor) end)
+  #
+  # `step` (the drain's budget) runs before each lock and the writes:
+  # `:ok`, or `{:error, :drain_timeout}` to roll back unchanged.
+  def refuse_reserved_for_switch(invocation_id, switch_id, generation, actor, step \\ &ok/0) do
+    guard(ModelInvocation, :refuse_reserved_for_switch, invocation_id, actor, fn ->
+      refuse_reserved(invocation_id, switch_id, generation, actor, step)
+    end)
   end
 
-  def refuse_reserved_for_switch(_invocation_id, _switch_id, _generation, _actor),
+  defp refuse_reserved(
+         invocation_id,
+         switch_id,
+         generation,
+         %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor,
+         step
+       )
+       when is_binary(tenant) do
+    audit_transact(fn ->
+      drain_refuse_locked(invocation_id, switch_id, generation, actor, step)
+    end)
+  end
+
+  defp refuse_reserved(_invocation_id, _switch_id, _generation, _actor, _step),
     do: {:error, Ash.Error.Forbidden.exception([])}
 
-  defp drain_refuse_locked(id, switch_id, generation, actor) do
-    with {:ok, target} <- launch_target(id, actor),
+  defp ok, do: :ok
+
+  defp subject_id(%{id: id}) when is_binary(id), do: id
+  defp subject_id(id) when is_binary(id), do: id
+  defp subject_id(_other), do: nil
+
+  defp drain_refuse_locked(id, switch_id, generation, actor, step) do
+    with :ok <- step.(),
+         {:ok, target} <- launch_target(id, actor),
+         :ok <- step.(),
          {:ok, run} <- lock_tenant_run(target.agent_run_id, actor),
+         :ok <- step.(),
          :ok <- Admission.lock_operation_share(run.operation_id),
+         :ok <- step.(),
          {:ok, invocation} <- lock_invocation(target.id, actor),
          :ok <- launch_state(invocation),
+         :ok <- step.(),
          :ok <- Admission.lock_charge(invocation),
+         :ok <- step.(),
          {:ok, _head} <- Kernel.lock_head(actor.tenant_id),
+         :ok <- step.(),
          :ok <- SwitchFence.named_open(actor.tenant_id, switch_id, generation),
-         :ok <- SwitchFence.before_request(actor.tenant_id, invocation.id, switch_id) do
+         :ok <- SwitchFence.before_request(actor.tenant_id, invocation.id, switch_id),
+         :ok <- step.() do
       drain_refuse(run, invocation, switch_id, actor)
     else
       {:error, {:launch_refused, _reason, _own_id}} -> {:ok, :skipped}
