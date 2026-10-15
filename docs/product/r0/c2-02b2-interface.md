@@ -1,6 +1,32 @@
 # C2-02b2 (#52, slice b2α): activation, rollback and ownership (draft 4)
 
-**Status:** draft 4, 2026-10-15, for Codex's recheck. No code.
+**Status:** draft 4, 2026-10-15. **Interface and entity PASS** at exact
+`c00ed69e9fcf635e84cb342b8dfca0c252de4eda`.
+- **The review:** Codex, the independent ai-pair reviewer (recipe
+  `ai_pair=true`, `codex_review=true`).
+  - Request `m_1792064382520842000_faeeb578`; reply `f9834161`; 2026-10-15
+    11:42 UTC.
+  - Report:
+    `~/.local/state/sdr-agent/handoff-20261008/tmp/codex-c2-02b2-c00ed69-interface-pass.md`.
+- **What it authorizes:** scoped RED only. GREEN, the owner's acceptance
+  of the ADR-0004 amendment, runtime activation, real calls, spend and
+  merge stay separate gates.
+- **Binding implementation obligations** (from that report):
+  1. enforce the coordinator identity, actor, tenant and stored-row
+     checks on the direct Ash action paths too, with no `model_runtime`
+     widening and no production test bypass. Raw refs stay out of status,
+     events and snapshots;
+  2. the first allocation is the boot claim: it never requires the
+     previous latest start to already carry the new boot, nor any row at
+     a cold boot. A nominal same-stage replay can't rewrite facts;
+  3. b1's full end-to-end deadline mechanics apply to every coordinator
+     call and observation, not only a per-statement limit;
+  4. "held" is an acknowledged server state, established or retained
+     before it is reported, never inferred;
+  5. truthful lifecycle, replay and error behavior. A failure before the
+     start may have no pid, node or reaper. A same-action retry doesn't
+     bump the revision or append twice. The RED fails for its intended
+     reason.
 - **Draft 3** (`a1b4183`; unchanged at `c5e9fc0`) was NEEDS-REVIEW (Codex,
   0691c11b). R2 (the counter and FK order) and R4 (the acknowledged
   receipt) are accepted. Two residual groups are fixed here:
@@ -111,8 +137,8 @@ forward-only:
 registered `Coordinator` process** (`model_runtime`). Those writes are
 `allocate`, the start transitions, and the switch's `complete`, `fail`
 and `block`.
-- **The worker never writes the ledger.** It does the slow, ledger-free
-  work: the b1 drain (as `agent_runtime`), the cleanup waits and the
+- **The worker never performs b2 lifecycle ledger writes.** It does the
+  slow work outside them: the b1 drain (as `agent_runtime`), the cleanup waits and the
   preflight checks. It reports each result to the coordinator in a
   message carrying its operation token.
 - **There is no capability RPC.** The domain entry point checks
