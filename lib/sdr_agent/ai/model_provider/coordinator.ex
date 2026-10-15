@@ -132,6 +132,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
       faults: Keyword.get(opts, :faults, []),
       tenant_id: nil,
       start: nil,
+      spawned: nil,
       server: nil,
       server_ref: nil,
       hold: nil,
@@ -160,12 +161,15 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   @impl true
   def handle_continue(:boot, state) do
+    # Re-held before any database observation, the tenant read included.
+    state = rehold_survivor(state)
+
     case Kernel.singleton_tenant_id() do
       {:ok, tenant_id} when is_binary(tenant_id) ->
         {:noreply, boot(%{state | tenant_id: tenant_id})}
 
       _none ->
-        {:noreply, retry_boot(rehold_survivor(state))}
+        {:noreply, retry_boot(state)}
     end
   end
 
@@ -174,13 +178,14 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   # case. Any unknown read or failed allocation keeps everything held and
   # retries the boot.
   defp boot(state) do
-    state = rehold_survivor(state)
-
     with {:ok, open} <- open_switch(state),
          {:ok, desired} <- desired_profile(state),
          {:ok, state} <- first_start(state, desired) do
       after_boot(state, open)
     else
+      # Fail closed, no retry: this boot's own server failed its preflight,
+      # or a named server runs outside the supervisor.
+      {:held, %{boot_id: _} = state} -> publish(state)
       {:error, %{boot_id: _} = state} -> retry_boot(state)
       _unknown -> retry_boot(state)
     end
@@ -201,7 +206,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   # A surviving named child is re-held before any database work, so no
   # startup uncertainty leaves it callable.
   defp rehold_survivor(state) do
-    case live_server() do
+    case named_server() do
       pid when is_pid(pid) ->
         ref = if state.server == pid and state.hold, do: state.hold, else: make_ref()
         monitor = if state.server == pid, do: state.server_ref, else: Process.monitor(pid)
@@ -221,9 +226,22 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   # stop one that doesn't (bounded receipt protocol) and start fresh; start
   # the desired profile when none runs.
   defp first_start(%{server: pid, hold_state: :held} = state, desired) when is_pid(pid) do
-    if adoptable?(pid, desired),
-      do: adopt(state, pid, desired),
-      else: replace_survivor(state, pid, desired)
+    cond do
+      # This boot's own server (a retried boot): never laundered into an
+      # adoption; it stays held and failed.
+      pid == state.spawned ->
+        {:held, state}
+
+      not child?(pid) ->
+        Logger.error("a named ClaudeCLI server runs outside the model server supervisor; held")
+        {:held, state}
+
+      adoptable?(pid, desired) ->
+        adopt(state, pid, desired)
+
+      true ->
+        replace_survivor(state, pid, desired)
+    end
   end
 
   defp first_start(%{server: pid} = state, _desired) when is_pid(pid), do: {:error, state}
@@ -259,12 +277,11 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     end
   end
 
-  defp live_server do
-    with pid when is_pid(pid) <- Process.whereis(ClaudeCLI.server()),
-         true <- child?(pid) do
-      pid
-    else
-      _ -> nil
+  # The registered named server, managed or not (absent is nil).
+  defp named_server do
+    case Process.whereis(ClaudeCLI.server()) do
+      pid when is_pid(pid) -> pid
+      nil -> nil
     end
   end
 
@@ -338,6 +355,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
         else: {:ok, state}
     else
       {:not_started, %{boot_id: _} = state} -> {:not_started, state}
+      {:held, %{boot_id: _} = state} -> {:held, state}
       {:error, %{boot_id: _} = state} -> {:error, state}
       _error -> {:error, publish(state)}
     end
@@ -360,7 +378,8 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
           | server: pid,
             server_ref: Process.monitor(pid),
             hold: ref,
-            hold_state: :held
+            hold_state: :held,
+            spawned: pid
         }
 
         case mark(state, start, :started, observed(pid)) do
@@ -381,7 +400,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     else
       Logger.error("model server preflight failed; calls stay held")
       _ = mark(state, state.start, :failed, %{})
-      {:error, publish(state)}
+      {:held, publish(state)}
     end
   end
 
@@ -452,9 +471,10 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     with {:ok, latest} <- latest_start(state),
          true <- current_server?(state, latest),
          true <- outcome_stored?(state, expected) do
-      release(state)
+      release(state, expected)
     else
-      _not_reconciled -> publish(%{state | reconcile: nil})
+      # Not yet reconciled (a failed read or observation): held, retried.
+      _not_reconciled -> retry_reconcile(state, expected)
     end
   end
 
@@ -472,14 +492,15 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   defp outcome_stored?(state, :boot), do: open_switch(state) == {:ok, nil}
   defp outcome_stored?(state, {:switch, id, status}), do: switch_status(state, id) == status
 
-  defp release(%{server: pid, hold: ref} = state) when is_pid(pid) and is_reference(ref) do
+  defp release(%{server: pid, hold: ref} = state, expected)
+       when is_pid(pid) and is_reference(ref) do
     case ClaudeCLI.release_hold(pid, ref) do
       :ok -> publish(%{state | hold: nil, hold_state: :released, reconcile: nil})
-      _error -> publish(%{state | reconcile: nil})
+      _error -> retry_reconcile(state, expected)
     end
   end
 
-  defp release(state), do: publish(state)
+  defp release(state, _expected), do: publish(%{state | reconcile: nil})
 
   ## The switch
 
@@ -635,9 +656,10 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
     with true <- is_pid(reaper),
          {:subscribed, ^ref} <- Reaper.subscribe(reaper, ref, state.cleanup_wait_ms) do
+      # One deadline from the acknowledgement: nothing after it resets it.
+      deadline = System.monotonic_time(:millisecond) + state.cleanup_wait_ms
       monitor = Process.monitor(reaper)
       if switch_id, do: emit(:old_stopping, switch_id)
-      deadline = System.monotonic_time(:millisecond) + state.cleanup_wait_ms
       if state.server_ref, do: Process.demonitor(state.server_ref, [:flush])
       Process.exit(pid, :shutdown)
       result = await_receipt(ref, monitor, reaper, deadline)
@@ -653,29 +675,36 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     receive do
-      {:reaper_cleanup_confirmed, ^ref, _meta} -> :confirmed
+      {:reaper_cleanup_confirmed, ^ref, _meta} -> in_time(deadline)
       {:DOWN, ^monitor, :process, ^reaper, _reason} -> :unconfirmed
     after
       max(min(remaining, @lease_poll_ms), 0) ->
         cond do
           remaining <= 0 -> :unconfirmed
-          lease_lost?(reaper) -> receipt_grace(ref, monitor, reaper)
+          lease_lost?(reaper) -> receipt_grace(ref, monitor, reaper, deadline)
           true -> await_receipt(ref, monitor, reaper, deadline)
         end
     end
   end
+
+  # A receipt consumed after the deadline (one queued while this process
+  # was not running, say) is not a confirmation.
+  defp in_time(deadline),
+    do: if(System.monotonic_time(:millisecond) <= deadline, do: :confirmed, else: :unconfirmed)
 
   defp lease_lost?(reaper),
     do: Reaper.lease(ClaudeCLI.server()) != {:held, reaper} or not Process.alive?(reaper)
 
   # The receipt follows the reaper's own lease release at once: a short
   # grace, never a reset of the deadline.
-  defp receipt_grace(ref, monitor, reaper) do
+  defp receipt_grace(ref, monitor, reaper, deadline) do
+    grace = min(@receipt_grace_ms, max(deadline - System.monotonic_time(:millisecond), 0))
+
     receive do
-      {:reaper_cleanup_confirmed, ^ref, _meta} -> :confirmed
+      {:reaper_cleanup_confirmed, ^ref, _meta} -> in_time(deadline)
       {:DOWN, ^monitor, :process, ^reaper, _reason} -> :unconfirmed
     after
-      @receipt_grace_ms -> :unconfirmed
+      grace -> :unconfirmed
     end
   end
 
