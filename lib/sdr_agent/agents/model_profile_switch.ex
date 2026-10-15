@@ -20,7 +20,10 @@ defmodule SdrAgent.Agents.ModelProfileSwitch do
   phase, opened by `SdrAgent.Agents.ProfileSwitches`: `:request` (phase
   `:initialize`, a current human admin), `:fail` and `:block` (phase
   `:transition`, `model_runtime`), `:complete` (phase `:apply`,
-  `model_runtime`, after the setting was applied). Each appends its
+  `model_runtime`, after the setting was applied). The runtime writes are
+  guarded on the re-locked stored rows (`SdrAgent.Agents.Changes.ProfileSwitchGuard`):
+  only a pending switch of the phase's generation moves, so a finished one
+  is never relabelled. Each appends its
   `model.profile.switch_*` event (`SdrAgent.Agents.Changes.ProfileSwitchEvent`).
 
   Reads: admin, auditor (audited by the domain read), `agent_runtime`,
@@ -34,7 +37,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitch do
     authorizers: [Ash.Policy.Authorizer]
 
   alias SdrAgent.Agents.Changes.ProfileSwitchEvent
-  alias SdrAgent.Agents.Changes.RequireAppliedSetting
+  alias SdrAgent.Agents.Changes.ProfileSwitchGuard
   alias SdrAgent.Agents.Checks.ProfileSwitchContext
   alias SdrAgent.Agents.Preparations.TransitionLock
   alias SdrAgent.Audit.Checks
@@ -96,7 +99,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitch do
     update :complete do
       require_atomic? false
       accept []
-      change RequireAppliedSetting
+      change {ProfileSwitchGuard, write: :complete}
       change set_attribute(:status, :completed)
       change set_attribute(:finished_at, &SdrAgent.Clock.utc_now/0)
       change {ProfileSwitchEvent, event_type: "model.profile.switch_completed"}
@@ -105,6 +108,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitch do
     update :fail do
       require_atomic? false
       accept [:failure_reason]
+      change {ProfileSwitchGuard, write: :fail}
       change set_attribute(:status, :failed)
       change set_attribute(:finished_at, &SdrAgent.Clock.utc_now/0)
       change {ProfileSwitchEvent, event_type: "model.profile.switch_failed"}
@@ -113,6 +117,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitch do
     update :block do
       require_atomic? false
       accept [:failure_reason]
+      change {ProfileSwitchGuard, write: :block}
       change set_attribute(:status, :blocked)
       change {ProfileSwitchEvent, event_type: "model.profile.switch_blocked"}
     end

@@ -18,7 +18,7 @@ defmodule SdrAgent.Agents.ModelProfileSetting do
       transaction inserted the row; it appends no event of its own;
     * `:apply_switch` — phase `:apply` (`complete`, `model_runtime`):
       `desired_profile_id := to`, `revision + 1`, guarded on the stored rows
-      (`SdrAgent.Agents.Changes.ApplyProfileSwitch`).
+      (`SdrAgent.Agents.Changes.ProfileSwitchGuard`).
 
   Reads: admin, auditor (audited by the domain read), `agent_runtime`,
   kernel. `model_runtime` reads and locks it only through
@@ -30,7 +30,7 @@ defmodule SdrAgent.Agents.ModelProfileSetting do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
-  alias SdrAgent.Agents.Changes.ApplyProfileSwitch
+  alias SdrAgent.Agents.Changes.ProfileSwitchGuard
   alias SdrAgent.Agents.Checks.ProfileSwitchContext
   alias SdrAgent.Agents.Preparations.TransitionLock
   alias SdrAgent.Audit.Checks
@@ -75,7 +75,7 @@ defmodule SdrAgent.Agents.ModelProfileSetting do
       require_atomic? false
       accept []
       argument :switch_id, :uuid, allow_nil?: false
-      change ApplyProfileSwitch
+      change {ProfileSwitchGuard, write: :apply}
     end
   end
 

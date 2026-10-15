@@ -3,7 +3,9 @@ defmodule SdrAgent.Agents.Preparations.TransitionLock do
   The `:lock_for_transition` reads of `ModelProfileSetting` and
   `ModelProfileSwitch` (C2-02a): each locks its one row `FOR UPDATE`, in an
   open transaction only, and records the locked row as evidence of the
-  `:transition` phase (`SdrAgent.Agents.Checks.ProfileSwitchContext`).
+  `:transition` phase (`SdrAgent.Agents.Checks.ProfileSwitchContext`). The
+  write guard re-locks the rows itself (`SdrAgent.Agents.Changes.ProfileSwitchGuard`);
+  this evidence proves only that the phase took the locks, in order.
 
   Lock order is setting → switch: the switch read is refused unless the
   setting was already locked under the same phase. The status of the
@@ -15,7 +17,7 @@ defmodule SdrAgent.Agents.Preparations.TransitionLock do
   """
   use Ash.Resource.Preparation
 
-  alias SdrAgent.Agents.Checks.ProfileSwitchContext
+  alias SdrAgent.Agents.ProfileSwitches
   alias SdrAgent.Repo
 
   @impl true
@@ -42,11 +44,11 @@ defmodule SdrAgent.Agents.Preparations.TransitionLock do
   end
 
   defp setting_locked?(query) do
-    match?({:ok, %{evidence: %{setting: %{}}}}, ProfileSwitchContext.fetch(query.context))
+    match?({:ok, %{evidence: %{setting: %{}}}}, ProfileSwitches.phase(query.context))
   end
 
   defp record(query, [record], row) do
-    with :ok <- ProfileSwitchContext.put_evidence(query.context, row, record),
+    with :ok <- ProfileSwitches.record_evidence(query.context, row, record),
          do: {:ok, [record]}
   end
 

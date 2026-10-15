@@ -5,16 +5,16 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
   at 66cc086), on the accepted R0 rows for ModelProfileSetting,
   ModelProfileSwitch and Actor `:model_runtime`.
 
-  RED: the domain functions and resources don't exist on main. Every
-  call goes through `call/2`, which first asserts that the function is
-  exported. Each test therefore fails on an explicit assertion after its
-  fixtures, not on an undefined-function crash.
+  Written RED first (verified at f3ef30c): every call goes through
+  `call/2`, which first asserts that the function is exported, so on main
+  each test failed on an explicit assertion after its fixtures. The GREEN
+  review regressions (Codex 62e27b33) are in "the phase authority boundary".
   """
   use SdrAgent.AuditCase, async: false
 
   alias SdrAgent.Accounts
   alias SdrAgent.Agents
-  alias SdrAgent.Agents.Checks.ProfileSwitchContext
+  alias SdrAgent.Agents.ProfileSwitches
 
   @setting SdrAgent.Agents.ModelProfileSetting
   @switch SdrAgent.Agents.ModelProfileSwitch
@@ -570,7 +570,8 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
     end
 
     # Stored-row guards (not policy). A caller-built marker never opens a
-    # phase (the forged cases above are Forbidden), so these open a real one
+    # phase (the forged cases above are Forbidden), and no exported function
+    # opens one, so these use the test build's seam to open a genuine phase
     # the way `complete` does: `:transition` for complete, advanced to
     # `:apply`. The guard then refuses as Invalid on :switch_id: without the
     # `:transition` locks, or on a switch that is not pending.
@@ -668,15 +669,10 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
   # with `lock?`, the setting and the switch are first locked under
   # `:transition`.
   defp opened_apply(ctx, switch, lock?) do
-    binding = %{
-      action: :complete,
-      tenant_id: ctx.tenant.id,
-      switch_id: switch.id,
-      actor: ctx.runtime
-    }
+    binding = runtime_binding(ctx, :complete, switch)
 
     SdrAgent.Repo.transaction(fn ->
-      ProfileSwitchContext.with_phase(
+      ProfileSwitches.with_test_phase(
         :transition,
         binding,
         &apply_in_phase(ctx, switch, lock?, &1)
@@ -690,7 +686,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
 
   defp apply_in_phase(ctx, switch, lock?, context) do
     if lock?, do: lock_for_transition!(switch, ctx.runtime, context)
-    context = ProfileSwitchContext.advance(context, :apply)
+    context = ProfileSwitches.advance_test_phase(context)
 
     case apply_switch(ctx.setting_row, switch, ctx.runtime, context) do
       {:ok, setting} -> setting
@@ -711,6 +707,133 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
   end
 
   defp unchanged!(ctx) do
+    assert {:ok, %{desired_profile_id: :claude_cli_opus, revision: 1}} = setting(ctx.admin)
+  end
+
+  defp runtime_binding(ctx, action, switch) do
+    %{
+      action: action,
+      tenant_id: ctx.tenant.id,
+      switch_id: switch.id,
+      server_generation: switch.server_generation,
+      actor: ctx.runtime
+    }
+  end
+
+  ## The phase authority boundary (GREEN review, Codex 62e27b33)
+
+  describe "the phase authority boundary" do
+    test "no exported function opens or advances a phase; only the test build's seam does" do
+      for {module, name, arity} <- [
+            {ProfileSwitches, :with_phase, 3},
+            {ProfileSwitches, :advance, 1},
+            {SdrAgent.Agents.Checks.ProfileSwitchContext, :with_phase, 3},
+            {SdrAgent.Agents.Checks.ProfileSwitchContext, :advance, 2},
+            {SdrAgent.Agents.Checks.ProfileSwitchContext, :put_evidence, 3}
+          ] do
+        refute function_exported?(module, name, arity),
+               "#{inspect(module)}.#{name}/#{arity} must not be exported"
+      end
+
+      seams = [with_test_phase: 3, advance_test_phase: 1]
+
+      assert ProfileSwitches.__info__(:functions) -- seams ==
+               [
+                 get_setting: 1,
+                 list_switches: 1,
+                 phase: 1,
+                 record_evidence: 3,
+                 request: 2,
+                 transition: 4
+               ]
+
+      # The seams exist only under the test-seam compile flag (proved absent
+      # in a dev build separately).
+      assert Application.get_env(:sdr_agent, :claude_cli_test_seams) == true
+    end
+
+    for locks? <- [false, true] do
+      test "a completed switch can't be relabelled by a new fail phase (locks: #{locks?})",
+           ctx do
+        assert {:ok, switch} = request(ctx)
+        assert {:ok, completed} = complete(ctx, switch)
+        failed_events = count("model.profile.switch_failed", ctx)
+
+        result =
+          in_test_phase(ctx, :fail, completed, unquote(locks?), fn context ->
+            completed
+            |> Ash.Changeset.for_update(:fail, %{failure_reason: "rewritten"},
+              actor: ctx.runtime,
+              context: context
+            )
+            |> Ash.update()
+          end)
+
+        assert {:error, %Ash.Error.Invalid{}} = result
+        assert {:ok, [%{status: :completed, failure_reason: nil}]} = switches(ctx.admin)
+        assert count("model.profile.switch_failed", ctx) == failed_events
+        assert {:ok, %{desired_profile_id: :claude_cli_sonnet, revision: 2}} = setting(ctx.admin)
+      end
+    end
+
+    test "a rolled-back apply can't be followed by a completion", ctx do
+      assert {:ok, switch} = request(ctx)
+      assert {:ok, setting} = setting(ctx.admin)
+
+      result =
+        in_test_phase(ctx, :complete, switch, true, fn context ->
+          context = ProfileSwitches.advance_test_phase(context)
+          SdrAgent.Repo.query!("SAVEPOINT c202a_applied_setting")
+
+          assert {:ok, %{revision: 2}} =
+                   setting
+                   |> Ash.Changeset.for_update(:apply_switch, %{switch_id: switch.id},
+                     actor: ctx.runtime,
+                     context: context
+                   )
+                   |> Ash.update()
+
+          SdrAgent.Repo.query!("ROLLBACK TO SAVEPOINT c202a_applied_setting")
+
+          switch
+          |> Ash.Changeset.for_update(:complete, %{}, actor: ctx.runtime, context: context)
+          |> Ash.update()
+        end)
+
+      assert {:error, %Ash.Error.Invalid{}} = result
+      assert {:ok, [%{status: :pending, finished_at: nil}]} = switches(ctx.admin)
+      unchanged_setting!(ctx)
+      assert count("model.profile.switch_completed", ctx) == 0
+    end
+  end
+
+  # Runs `fun` behind a genuine phase of `action` for `switch` (the test
+  # build's seam), in a transaction, optionally after the `:transition`
+  # locks. An `{:error, _}` from `fun` rolls the transaction back.
+  defp in_test_phase(ctx, action, switch, locks?, fun) do
+    SdrAgent.Repo.transaction(fn ->
+      ProfileSwitches.with_test_phase(
+        :transition,
+        runtime_binding(ctx, action, switch),
+        &run_in_test_phase(ctx, switch, locks?, fun, &1)
+      )
+    end)
+    |> case do
+      {:error, %Ash.Changeset{errors: errors}} -> {:error, Ash.Error.to_error_class(errors)}
+      other -> other
+    end
+  end
+
+  defp run_in_test_phase(ctx, switch, locks?, fun, context) do
+    if locks?, do: lock_for_transition!(switch, ctx.runtime, context)
+
+    case fun.(context) do
+      {:ok, value} -> value
+      {:error, error} -> SdrAgent.Repo.rollback(error)
+    end
+  end
+
+  defp unchanged_setting!(ctx) do
     assert {:ok, %{desired_profile_id: :claude_cli_opus, revision: 1}} = setting(ctx.admin)
   end
 

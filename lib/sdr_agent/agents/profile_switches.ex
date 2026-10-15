@@ -37,7 +37,6 @@ defmodule SdrAgent.Agents.ProfileSwitches do
   alias Ash.Error.Query.NotFound
   alias SdrAgent.Accounts.User
   alias SdrAgent.Agents.Checks.CurrentAdmin
-  alias SdrAgent.Agents.Checks.ProfileSwitchContext
   alias SdrAgent.Agents.ModelProfileSetting
   alias SdrAgent.Agents.ModelProfileSwitch
   alias SdrAgent.AI.ModelProfiles
@@ -46,6 +45,10 @@ defmodule SdrAgent.Agents.ProfileSwitches do
   alias SdrAgent.Repo
 
   @results %{complete: :completed, fail: :failed, block: :blocked}
+  # The open phases of this process, by token (see "Phases" below).
+  @phases {__MODULE__, :phases}
+  @binding_keys [:action, :tenant_id, :switch_id, :server_generation, :actor]
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
   ## Reads
 
@@ -99,14 +102,13 @@ defmodule SdrAgent.Agents.ProfileSwitches do
   defp admin_request(attrs, actor) do
     with :ok <- admin(actor) do
       binding = %{action: :request, tenant_id: actor.tenant_id, actor: actor}
-      ProfileSwitchContext.with_phase(:initialize, binding, &do_request(attrs, actor, &1))
+      with_phase(:initialize, binding, &do_request(attrs, actor, &1))
     end
   end
 
   defp do_request(attrs, actor, context) do
     with {:ok, input} <- request_input(attrs),
          {:ok, setting} <- setting_for_request(actor, context),
-         :ok <- ProfileSwitchContext.put_evidence(context, :setting, setting),
          :ok <- requestable(input, setting),
          :ok <- no_open_switch(actor) do
       ModelProfileSwitch
@@ -170,7 +172,7 @@ defmodule SdrAgent.Agents.ProfileSwitches do
     |> Ash.create(touch_update_defaults?: false)
     |> case do
       {:ok, %{id: ^id} = setting} ->
-        with :ok <- ProfileSwitchContext.put_evidence(context, :initialized, setting),
+        with :ok <- record_evidence(context, :initialized, setting),
              do: {:ok, setting}
 
       other ->
@@ -222,20 +224,22 @@ defmodule SdrAgent.Agents.ProfileSwitches do
   end
 
   defp runtime_transition(action, switch_id, attrs, actor) do
-    with :ok <- runtime(actor) do
-      binding = %{action: action, tenant_id: actor.tenant_id, switch_id: switch_id, actor: actor}
+    with :ok <- runtime(actor),
+         :ok <- generation_input(attrs) do
+      binding = %{
+        action: action,
+        tenant_id: actor.tenant_id,
+        switch_id: switch_id,
+        server_generation: attrs.server_generation,
+        actor: actor
+      }
 
-      ProfileSwitchContext.with_phase(
-        :transition,
-        binding,
-        &do_transition(action, switch_id, attrs, actor, &1)
-      )
+      with_phase(:transition, binding, &do_transition(action, switch_id, attrs, actor, &1))
     end
   end
 
   defp do_transition(action, switch_id, attrs, actor, context) do
-    with :ok <- generation_input(attrs),
-         {:ok, setting} <- lock(ModelProfileSetting, switch_id, actor, context),
+    with {:ok, setting} <- lock(ModelProfileSetting, switch_id, actor, context),
          {:ok, switch} <- lock(ModelProfileSwitch, switch_id, actor, context),
          :ok <- same_generation(switch, attrs.server_generation) do
       case decide(action, switch.status) do
@@ -279,7 +283,7 @@ defmodule SdrAgent.Agents.ProfileSwitches do
   end
 
   defp write(:complete, setting, switch, _attrs, actor, context) do
-    context = ProfileSwitchContext.advance(context, :apply)
+    context = advance(context)
 
     with {:ok, _setting} <-
            setting
@@ -301,6 +305,85 @@ defmodule SdrAgent.Agents.ProfileSwitches do
       context: context
     )
     |> Ash.update()
+  end
+
+  ## Phases (`SdrAgent.Agents.Checks.ProfileSwitchContext`)
+
+  # A phase is opened only here, by the private `with_phase/3` and
+  # `advance/1`: no exported function opens or advances one, so the internal
+  # actions can't be reached outside this orchestration (a test build adds
+  # a seam below). The binding lives in this process under a fresh
+  # reference; the context passed to the actions carries only that
+  # reference. Evidence recorded in it never proves a database effect on its
+  # own: `SdrAgent.Agents.Changes.ProfileSwitchGuard` re-locks and re-checks
+  # the stored rows.
+
+  @doc """
+  The open phase binding a context names (`{:ok, binding}`), or `:error`.
+  Read-only; used by the phase check, the lock reads and the write guards.
+  """
+  def phase(%{profile_switch: %{token: token}}) when is_reference(token),
+    do: Map.fetch(Process.get(@phases, %{}), token)
+
+  def phase(_context), do: :error
+
+  @doc """
+  Adds evidence `key` to the open phase a context names (the lock reads
+  record the rows they locked; the request records the row it inserted).
+  It never opens a phase: `{:error, :no_profile_switch_phase}` without one.
+  """
+  def record_evidence(context, key, value) do
+    case phase(context) do
+      {:ok, binding} ->
+        put_phase(context.profile_switch.token, put_in(binding, [:evidence, key], value))
+        :ok
+
+      :error ->
+        {:error, :no_profile_switch_phase}
+    end
+  end
+
+  defp with_phase(phase, binding, fun) when phase in [:initialize, :transition] do
+    token = make_ref()
+
+    binding =
+      binding
+      |> Map.take(@binding_keys)
+      |> Map.merge(%{phase: phase, evidence: %{}})
+
+    put_phase(token, binding)
+
+    try do
+      fun.(%{profile_switch: %{token: token}})
+    after
+      Process.put(@phases, Map.delete(Process.get(@phases, %{}), token))
+    end
+  end
+
+  # `complete` only: its `:transition` phase moves to `:apply`, keeping the
+  # lock evidence.
+  defp advance(context) do
+    case phase(context) do
+      {:ok, %{phase: :transition, action: :complete} = binding} ->
+        put_phase(context.profile_switch.token, %{binding | phase: :apply})
+        context
+
+      _other ->
+        raise ArgumentError, "no open :transition phase of complete to advance"
+    end
+  end
+
+  defp put_phase(token, binding),
+    do: Process.put(@phases, Map.put(Process.get(@phases, %{}), token, binding))
+
+  if @test_seams do
+    @doc false
+    # Test builds only (`:claude_cli_test_seams`): opens a phase directly so
+    # the write guards can be exercised behind a genuine phase.
+    def with_test_phase(phase, binding, fun), do: with_phase(phase, Map.new(binding), fun)
+
+    @doc false
+    def advance_test_phase(context), do: advance(context)
   end
 
   ## Shared
