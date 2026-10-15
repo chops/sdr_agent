@@ -7,8 +7,11 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
   local edits, which were then reverted.
 
   **It flags:**
-  - a remote call with two arguments on an aliased or fully qualified
-    module that implements `SdrAgent.AI.ModelProvider`;
+  - a remote call with two arguments on a module that implements
+    `SdrAgent.AI.ModelProvider`. The module may be fully qualified or
+    aliased: a plain `alias`, `alias ..., as:`, or a grouped
+    `alias A.{B, C}`, each scoped to the module or function body it is
+    written in;
   - a remote call on a dynamic receiver (`var.prepare(_, _)` or
     `var.complete(_, _)`);
   - a capture (`&Mod.prepare/2`, `&Mod.complete/2`);
@@ -68,6 +71,20 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
         def go(mod, r), do: mod.complete(r, [])
       end
       """,
+      "grouped_alias" => """
+      defmodule Probe.Grouped do
+        alias SdrAgent.AI.ModelProvider.{ClaudeCLI, Fake}
+        def go(r), do: ClaudeCLI.complete(r, [])
+      end
+      """,
+      "function_scoped_alias" => """
+      defmodule Probe.FunctionScoped do
+        def go(r) do
+          alias SdrAgent.AI.ModelProvider.Fake
+          Fake.prepare(r, [])
+        end
+      end
+      """,
       "capture" => """
       defmodule Probe.Capture do
         def go, do: &SdrAgent.AI.ModelProvider.Fake.complete/2
@@ -96,6 +113,22 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
     """
 
     assert scan(other, "other") == []
+
+    # An alias made inside one function does not reach the next one: there
+    # `Fake` is the unaliased module `Fake`, not a provider.
+    scoped = """
+    defmodule Probe.Scope do
+      def a(r) do
+        alias SdrAgent.AI.ModelProvider.Fake
+        Fake.prepare(r, [])
+      end
+
+      def b(r), do: Fake.prepare(r, [])
+    end
+    """
+
+    assert [%{key: {Probe.Scope, :a, SdrAgent.AI.ModelProvider.Fake, :prepare}}] =
+             scan(scoped, "scope")
   end
 
   ## Inventory
@@ -113,14 +146,30 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
     Enum.map(acc.calls, &Map.put(&1, :file, file))
   end
 
+  # Each module and function body opens a lexical scope: aliases made in
+  # it are dropped when it ends (the alias map is saved on the stack).
   defp pre({:defmodule, _, [{:__aliases__, _, parts} | _]} = node, acc) do
     module = Module.concat(parts)
-    {node, %{acc | stack: [{:module, module} | acc.stack]}}
+    {node, %{acc | stack: [{:module, module, acc.aliases} | acc.stack]}}
   end
 
   defp pre({kind, _, [{name, _, _} | _]} = node, acc)
        when kind in [:def, :defp] and is_atom(name) do
-    {node, %{acc | stack: [{:function, name} | acc.stack]}}
+    {node, %{acc | stack: [{:function, name, acc.aliases} | acc.stack]}}
+  end
+
+  # Grouped alias: `alias A.B.{C, D.E}` aliases `C` and `E`.
+  defp pre({:alias, _, [{{:., _, [{:__aliases__, _, base}, :{}]}, _, children} | _]} = node, acc) do
+    aliases =
+      Enum.reduce(children, acc.aliases, fn
+        {:__aliases__, _, parts}, aliases ->
+          Map.put(aliases, List.last(parts), Module.concat(base ++ parts))
+
+        _other, aliases ->
+          aliases
+      end)
+
+    {node, %{acc | aliases: aliases}}
   end
 
   defp pre({:alias, _, [{:__aliases__, _, parts} | rest]} = node, acc) do
@@ -169,12 +218,14 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
 
   defp post(node, acc), do: {node, acc}
 
-  defp pop(%{stack: [{kind, _} | rest]} = acc, kind), do: %{acc | stack: rest}
+  defp pop(%{stack: [{kind, _, aliases} | rest]} = acc, kind),
+    do: %{acc | stack: rest, aliases: aliases}
+
   defp pop(acc, _kind), do: acc
 
   defp current(acc, kind) do
     Enum.find_value(acc.stack, fn
-      {^kind, value} -> value
+      {^kind, value, _aliases} -> value
       _ -> nil
     end)
   end

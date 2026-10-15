@@ -59,8 +59,26 @@ defmodule SdrAgent.AI.ModelProviderContractTest do
   defp call(ctx, id, options, schema \\ @object) do
     ModelProvider.complete(request(ctx, id, schema),
       provider: ContractProvider,
-      provider_options: options
+      provider_options: Keyword.put(options, :notify, self())
     )
+  end
+
+  # RED only: runs just the facade call and turns a crash into a value, so
+  # the test fails on its assertion about the required return, not on an
+  # uncaught exception. Fixtures and postconditions stay outside it.
+  defp observe(fun) do
+    fun.()
+  rescue
+    exception -> {:raised, exception.__struct__}
+  catch
+    kind, reason -> {kind, reason}
+  end
+
+  defp assert_calls(prepare, complete) do
+    for {callback, count} <- [prepare: prepare, complete: complete] do
+      for _ <- List.duplicate(nil, count), do: assert_received({:contract_provider, ^callback})
+      refute_received {:contract_provider, ^callback}
+    end
   end
 
   defp invocations(ctx) do
@@ -114,6 +132,19 @@ defmodule SdrAgent.AI.ModelProviderContractTest do
              {:ok,
               %{output: %{answer: "a", score: 1}, raw_response: "raw", usage: %{input_tokens: 1}}}
            )},
+          {"an explicit nil usage",
+           Macro.escape(
+             {:ok, %{output: %{answer: "a", score: 1}, raw_response: "raw", usage: nil}}
+           )},
+          {"a usage with an extra key",
+           Macro.escape(
+             {:ok,
+              %{
+                output: %{answer: "a", score: 1},
+                raw_response: "raw",
+                usage: %{input_tokens: 1, output_tokens: 1, plan_calls: 1, cost_usd: 5}
+              }}
+           )},
           {"a usage struct",
            Macro.escape(
              {:ok,
@@ -132,8 +163,9 @@ defmodule SdrAgent.AI.ModelProviderContractTest do
       test "#{label}", ctx do
         before = budget(ctx)
 
-        assert {:error, :provider_outcome_unknown} =
-                 call(ctx, "malformed", reply: unquote(reply))
+        result = observe(fn -> call(ctx, "malformed", reply: unquote(reply)) end)
+        assert {:error, :provider_outcome_unknown} = result
+        assert_calls(1, 1)
 
         assert [invocation] = invocations(ctx)
         assert invocation.status == :unknown
@@ -156,33 +188,43 @@ defmodule SdrAgent.AI.ModelProviderContractTest do
         ] do
       @tag :r0_04_red
       test "#{label} is validation_failed, never completed", ctx do
-        assert {:error, {:validation_failed, _errors}} =
-                 call(ctx, "non-map", [reply: ok(%{output: unquote(output)})], unquote(schema))
+        result =
+          observe(fn ->
+            call(ctx, "non-map", [reply: ok(%{output: unquote(output)})], unquote(schema))
+          end)
+
+        assert {:error, {:validation_failed, _errors}} = result
+        assert_calls(1, 1)
 
         assert [invocation] = invocations(ctx)
         assert invocation.status == :failed
         assert invocation.validation_status == :invalid
         assert invocation.parsed_output == nil
         assert invocation.error == %{"kind" => "validation_failed"}
+        assert invocation.response_sha256 == :crypto.hash(:sha256, "raw")
 
-        assert %{"message" => "output is not an object", "type" => unquote(type)} in invocation.validation_errors
+        assert invocation.validation_errors == [
+                 %{"message" => "output is not an object", "type" => unquote(type)}
+               ]
 
-        refute Enum.any?(invocation.validation_errors, &(inspect(&1) =~ "accepted scalar"))
         assert events_of_type(ctx.tenant, "model.invocation.completed") == []
       end
     end
 
     @tag :r0_04_red
     test "a Zoi-invalid non-map output is validation_failed with the type entry", ctx do
-      assert {:error, {:validation_failed, errors}} =
-               call(ctx, "invalid-non-map", reply: ok(%{output: "not an object"}))
+      result =
+        observe(fn -> call(ctx, "invalid-non-map", reply: ok(%{output: "a private value"})) end)
 
+      assert {:error, {:validation_failed, errors}} = result
       assert errors != []
       assert [invocation] = invocations(ctx)
       assert invocation.status == :failed
       assert invocation.parsed_output == nil
-
-      assert %{"message" => "output is not an object", "type" => "string"} in invocation.validation_errors
+      assert invocation.response_sha256 == :crypto.hash(:sha256, "raw")
+      type_entries = Enum.filter(invocation.validation_errors, &Map.has_key?(&1, "type"))
+      assert type_entries == [%{"message" => "output is not an object", "type" => "string"}]
+      refute inspect(type_entries) =~ "a private value"
     end
 
     test "a Zoi-invalid map output keeps it as parsed_output (characterization)", ctx do
@@ -193,7 +235,7 @@ defmodule SdrAgent.AI.ModelProviderContractTest do
 
       assert [invocation] = invocations(ctx)
       assert invocation.status == :failed
-      assert invocation.parsed_output != nil
+      assert invocation.parsed_output == %{"answer" => "qualified", "score" => "seven"}
     end
   end
 
@@ -208,9 +250,11 @@ defmodule SdrAgent.AI.ModelProviderContractTest do
       test "#{label}", ctx do
         before = budget(ctx)
 
-        assert {:error, :malformed_provider_prepare} =
-                 call(ctx, "bad-prepare", prepare: unquote(prepare), reply: ok(%{}))
+        result =
+          observe(fn -> call(ctx, "bad-prepare", prepare: unquote(prepare), reply: ok(%{})) end)
 
+        assert {:error, :malformed_provider_prepare} = result
+        assert_calls(1, 0)
         assert invocations(ctx) == []
         assert events_of_type(ctx.tenant, "model.invocation.reserved") == []
         assert budget(ctx) == before
@@ -233,9 +277,24 @@ defmodule SdrAgent.AI.ModelProviderContractTest do
       assert result.invocation.usage.input_tokens == 3
     end
 
-    test "success without usage keeps the default", ctx do
+    # The facade's existing default for an omitted usage: no tokens, one call.
+    test "success without usage keeps the full default", ctx do
       assert {:ok, result} = call(ctx, "ok-no-usage", reply: ok(%{}))
-      assert result.invocation.usage.input_tokens == 0
+
+      assert Map.take(result.invocation.usage, [:input_tokens, :output_tokens, :plan_calls]) ==
+               %{input_tokens: 0, output_tokens: 0, plan_calls: 1}
+    end
+
+    test "a complete numeric-string usage follows the embedded type's cast", ctx do
+      before = budget(ctx)
+      usage = %{input_tokens: "3", output_tokens: "4", plan_calls: "1"}
+
+      assert {:ok, result} = call(ctx, "ok-string-usage", reply: ok(%{usage: usage}))
+
+      assert Map.take(result.invocation.usage, [:input_tokens, :output_tokens, :plan_calls]) ==
+               %{input_tokens: 3, output_tokens: 4, plan_calls: 1}
+
+      assert budget(ctx).tokens_used == before.tokens_used + 7
     end
 
     test "a known failure is failed as provider_error, with no Failure", ctx do
@@ -309,7 +368,8 @@ defmodule SdrAgent.AI.ModelProviderContractTest do
 
     @tag :r0_04_red
     test "a reserved row with a malformed reply is failed, never sent", ctx do
-      assert {:error, :launch_not_admitted} = cli(ctx, "reserved-malformed", :ok)
+      result = observe(fn -> cli(ctx, "reserved-malformed", :ok) end)
+      assert {:error, :launch_not_admitted} = result
       assert [invocation] = invocations(ctx)
       assert {invocation.status, invocation.sent_at} == {:failed, nil}
       assert invocation.error["reason"] == "launch_not_admitted"
