@@ -107,6 +107,22 @@ defmodule SdrAgent.Scripts.CalibrationConsoleWitnessTest do
       end
     end
 
+    for args <- [
+          ["calibrate", "claude_cli_haiku"],
+          ["calibrate", "fake"],
+          ["calibrate-recover", "not-a-uuid"],
+          ["calibrate-recover", "01a13522-3260-73a7-a5c3-87aca9f1d310", "--bogus"],
+          ["calibrate-recover", "--release-aborted", "extra"]
+        ] do
+      test "malformed #{Enum.join(args, " ")} is a usage error, before the root guard", ctx do
+        env = stubbed(ctx, @good_plan <> "\n" <> @unset_line, [])
+        assert {out, 2} = console(unquote(args), env)
+        assert out =~ "usage:"
+        refute out =~ "SDR_WITNESS_STORE_ROOT is not set"
+        assert mix_calls(ctx) == [], "a Mix command ran before the usage refusal"
+      end
+    end
+
     test "release-aborted, check and bootstrap-admin run without it", ctx do
       env = stubbed(ctx, @good_plan <> "\n" <> @unset_line, [])
 

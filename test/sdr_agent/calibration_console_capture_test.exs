@@ -1,23 +1,23 @@
 defmodule SdrAgent.CalibrationConsoleCaptureTest do
   @moduledoc """
-  R0-07f RED (contract PASS at `0ee216e`, test 5 and 6): the console's
-  applied plan, not a fixture, decides where and how long a calibration's
-  observation waits.
+  R0-07f RED (contract PASS at `0ee216e`, tests 5 and 6), the **legacy
+  contrast** and the structural half. The calibrated positive proof (the
+  real calibration path, the console-applied root and budget, an empty
+  shipped allowlist throughout) is in
+  `SdrAgent.CalibrationConsole.CalibrateTest`, "R0-07f".
 
-  The root comes from `SDR_WITNESS_STORE_ROOT` through `current/1 →
-  plan/1 → apply_capture!/1`; no `AdmissionFixtures.admit_tuples!/0` and no
-  manual Witness `put_env`. A capture published about 1.5 s after the call
-  is observed within the console's 120 s budget, while the unit-test budget
-  (1 s) times out on the same capture, and the observation adds no
-  reservation or launch. Calibration's own observation and sent recovery
-  both read the applied root and budget: neither passes a root or a wait of
-  its own. The fake CLI and a stand-in store; no model call.
+    * Under the unit-test budget (1 s) a capture published about 1.5 s
+      after an ordinary gated call times out. This uses the generic gate
+      fixture (which admits its call through `AdmissionFixtures`); it is a
+      contrast only, never the calibrated proof.
+    * Calibration's own observation and sent recovery pass no root or wait
+      of their own, so the applied configuration decides both.
+
+  The delayed publisher is a tracked task, joined before the store is
+  removed. The fake CLI and a stand-in store; no model call.
   """
   use SdrAgent.AuditCase, async: false
 
-  require Ash.Query
-
-  alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ResultGate
   alias SdrAgent.Agents.Witness
   alias SdrAgent.AgentsFixtures
@@ -63,24 +63,6 @@ defmodule SdrAgent.CalibrationConsoleCaptureTest do
   defp restore(key, nil), do: Application.delete_env(:sdr_agent, key)
   defp restore(key, value), do: Application.put_env(:sdr_agent, key, value)
 
-  defp applied!(root) do
-    System.put_env(@variable, root)
-
-    {:ok, plan} =
-      :test
-      |> CalibrationConsole.current()
-      |> Map.put(:secrets, @secrets)
-      |> CalibrationConsole.plan()
-
-    Code.ensure_loaded!(CalibrationConsole)
-
-    assert function_exported?(CalibrationConsole, :apply_capture!, 1),
-           "R0-07f: CalibrationConsole.apply_capture!/1 is not implemented"
-
-    :ok = CalibrationConsole.apply_capture!(plan)
-    plan
-  end
-
   # A capture published `delay` ms after the call: its records are held
   # aside, then restored.
   defp delayed!(ctx, delay) do
@@ -89,39 +71,16 @@ defmodule SdrAgent.CalibrationConsoleCaptureTest do
     held = Path.join(ctx.root, "held-" <> invocation.id)
     File.rename!(records, held)
 
-    Task.start(fn ->
-      Process.sleep(delay)
-      File.rename!(held, records)
-    end)
+    publisher =
+      Task.async(fn ->
+        Process.sleep(delay)
+        File.rename!(held, records)
+      end)
 
-    invocation
+    {invocation, publisher}
   end
 
-  defp invocations(ctx) do
-    ModelInvocation
-    |> Ash.Query.filter(agent_run_id == ^ctx.run.id)
-    |> Ash.read!(authorize?: false)
-    |> length()
-  end
-
-  test "the applied console budget observes a capture that arrives after 1 s", ctx do
-    plan = applied!(ctx.root)
-    assert plan.witness.store_root == ctx.root
-    assert Witness.store_root() == ctx.root
-    assert Witness.reconciled_methods() == []
-
-    invocation = delayed!(ctx, 1_500)
-    calls = invocations(ctx)
-    started = System.monotonic_time(:millisecond)
-
-    # No root and no wait of the caller's own: the applied plan decides.
-    assert {:ok, %{status: :mismatch}} = ResultGate.await(invocation, ctx.gate)
-    elapsed = System.monotonic_time(:millisecond) - started
-    assert elapsed >= 1_000 and elapsed < 10_000, inspect(elapsed)
-    assert invocations(ctx) == calls, "the observation reserved or launched again"
-  end
-
-  test "under the unit-test budget the same capture times out", ctx do
+  test "legacy contrast: under the unit-test budget a capture after 1.5 s times out", ctx do
     Application.put_env(
       :sdr_agent,
       Witness,
@@ -129,9 +88,14 @@ defmodule SdrAgent.CalibrationConsoleCaptureTest do
     )
 
     Application.put_env(:sdr_agent, ResultGate, wait_ms: 1_000, poll_ms: 25)
-    invocation = delayed!(ctx, 1_500)
+    {invocation, publisher} = delayed!(ctx, 1_500)
 
-    assert {:timeout, _receipt} = ResultGate.await(invocation, ctx.gate)
+    try do
+      assert {:timeout, _receipt} = ResultGate.await(invocation, ctx.gate)
+    after
+      # Joined before setup's on_exit removes the store.
+      Task.await(publisher, 5_000)
+    end
   end
 
   test "calibration's observation and sent recovery pass no root or wait of their own" do

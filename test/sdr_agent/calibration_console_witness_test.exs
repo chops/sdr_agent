@@ -107,13 +107,20 @@ defmodule SdrAgent.CalibrationConsoleWitnessTest do
       refute File.exists?(missing), "the missing root was created"
     end
 
-    test "control characters, though spaces are allowed", _ctx do
+    test "real, owned 0700 directories whose names hold control characters", _ctx do
       spaced = WitnessRoot.mkdir!("r007f with space")
       on_exit(fn -> File.rm_rf!(spaced) end)
       assert {:ok, %{witness: %{store_root: ^spaced}}} = plan(spaced)
 
-      for bad <- [spaced <> "\nSDR_CALIBRATION_CONSOLE x", spaced <> "\t", spaced <> "\e[0m"] do
+      for char <- ["\n", "\t", "\e", <<0x7F>>] do
+        bad = WitnessRoot.mkdir!("r007f#{char}ctl")
+        on_exit(fn -> File.rm_rf!(bad) end)
+
+        # The directory itself would pass the store's own trust check, so
+        # only the console's control-character guard can refuse it.
+        assert {:ok, ^bad} = Store.validate_root(bad)
         assert refused!(bad) =~ @variable
+        assert File.dir?(bad) and Bitwise.band(File.stat!(bad).mode, 0o777) == 0o700
       end
     end
 
@@ -200,6 +207,73 @@ defmodule SdrAgent.CalibrationConsoleWitnessTest do
         find_def(ast, :apply!, 2) || flunk("CalibrationConsole.apply!/2 not found")
 
       assert calls?(body, :apply_capture!), "R0-07f: apply!/2 does not call apply_capture!/1"
+    end
+  end
+
+  describe "the real apply!/2 in a VM that starts nothing" do
+    @tag timeout: 120_000
+    test "applies the plan's root and budget; verification is bound to the plan", %{root: root} do
+      other = WitnessRoot.mkdir!("r007f-other")
+      on_exit(fn -> File.rm_rf!(other) end)
+      script = Path.join(root, "probe.exs")
+
+      File.write!(script, """
+      alias SdrAgent.Agents.{ResultGate, Witness}
+      alias SdrAgent.CalibrationConsole
+      secrets = %{secret_key_base: Base.encode64(:binary.copy(<<1>>, 64)),
+                  token_signing_secret: Base.encode64(:binary.copy(<<2>>, 64))}
+      {:ok, plan} = :test |> CalibrationConsole.current() |> Map.put(:secrets, secrets) |> CalibrationConsole.plan()
+      :ok = CalibrationConsole.apply!(plan, serve: false)
+      gate = Application.get_env(:sdr_agent, ResultGate, [])
+      IO.puts("PROBE root=" <> inspect(Witness.store_root()))
+      IO.puts("PROBE methods=" <> inspect(Witness.reconciled_methods()))
+      IO.puts("PROBE override=" <> inspect(Application.get_env(:sdr_agent, Witness)[:allow_method_override]))
+      IO.puts("PROBE wait=" <> inspect(gate[:wait_ms]) <> " poll=" <> inspect(gate[:poll_ms]))
+      IO.puts("PROBE repo=" <> inspect(Process.whereis(SdrAgent.Repo)) <> " children=" <> inspect(SdrAgent.AI.ModelProvider.Runtime.children()))
+      verify = fn ->
+        if function_exported?(CalibrationConsole, :verify_started!, 1) do
+          try do
+            CalibrationConsole.verify_started!(plan)
+            :accepted
+          rescue
+            _error -> :refused
+          end
+        else
+          :missing
+        end
+      end
+      witness = Application.get_env(:sdr_agent, Witness)
+      Application.put_env(:sdr_agent, Witness, Keyword.put(witness, :store_root, #{inspect(other)}))
+      IO.puts("PROBE moved_root=" <> inspect(verify.()))
+      Application.put_env(:sdr_agent, Witness, witness)
+      Application.put_env(:sdr_agent, ResultGate, Keyword.put(gate, :wait_ms, 1_000))
+      IO.puts("PROBE lowered_wait=" <> inspect(verify.()))
+      Application.put_env(:sdr_agent, ResultGate, gate)
+      IO.puts("PROBE restored=" <> inspect(verify.()))
+      """)
+
+      {out, status} =
+        System.cmd("mix", ["run", "--no-start", script],
+          env: [{"MIX_ENV", "test"}, {@variable, root}],
+          stderr_to_stdout: true
+        )
+
+      assert status == 0, out
+
+      probe =
+        for "PROBE " <> line <- String.split(out, "\n"), into: %{} do
+          [key, value] = String.split(line, "=", parts: 2)
+          {key, value}
+        end
+
+      assert probe["root"] == inspect(root)
+      assert probe["methods"] == "[]"
+      assert probe["override"] == "true"
+      assert probe["wait"] == "120000 poll=1000"
+      assert probe["repo"] == "nil children=[]"
+      assert probe["moved_root"] == ":refused", "verification must be bound to the plan's root"
+      assert probe["lowered_wait"] == ":refused", "verification must check the applied budget"
+      assert probe["restored"] == ":accepted"
     end
   end
 
