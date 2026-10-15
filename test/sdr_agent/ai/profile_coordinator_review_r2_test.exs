@@ -139,7 +139,9 @@ defmodule SdrAgent.AI.ProfileCoordinatorReviewR2Test do
 
     assert {:ok, switch} =
              Coordinator.request_switch(
-               %{to_profile_id: :claude_cli_sonnet, expected_revision: 1}, actor: ctx.admin)
+               %{to_profile_id: :claude_cli_sonnet, expected_revision: 1},
+               actor: ctx.admin
+             )
 
     assert_receive {:after_subscription, coordinator}, 5_000
     Process.sleep(450)
@@ -183,7 +185,9 @@ defmodule SdrAgent.AI.ProfileCoordinatorReviewR2Test do
 
     assert {:ok, switch} =
              Coordinator.request_switch(
-               %{to_profile_id: :claude_cli_sonnet, expected_revision: 1}, actor: ctx.admin)
+               %{to_profile_id: :claude_cli_sonnet, expected_revision: 1},
+               actor: ctx.admin
+             )
 
     assert_receive {:after_subscription, coordinator}, 5_000
     old = Process.whereis(ClaudeCLI.server())
@@ -243,7 +247,9 @@ defmodule SdrAgent.AI.ProfileCoordinatorReviewR2Test do
 
     assert {:ok, switch} =
              Coordinator.request_switch(
-               %{to_profile_id: :claude_cli_sonnet, expected_revision: 1}, actor: ctx.admin)
+               %{to_profile_id: :claude_cli_sonnet, expected_revision: 1},
+               actor: ctx.admin
+             )
 
     assert_receive {:before_finalization, coordinator}, 5_000
     lease = Reaper.lease(ClaudeCLI.server())
