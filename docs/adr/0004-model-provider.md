@@ -19,8 +19,11 @@ The R0 amendment (2026-10-12, at the end of the Decision section) is
 **accepted**: owner acceptance in the private Claude session chat on
 2026-10-12 ("accept PR #39"), after Codex's independent approval of 6f2fab2.
 The C2-02b2 amendment (2026-10-15, at the end of the Decision section) is
-**proposed**. It needs Codex's review and the owner's acceptance before
-any runtime implementation.
+**accepted**: owner acceptance in the private Claude session chat on
+2026-10-15 at about 10:06 MDT ("i accept the ADR-0004 C2-02b2 amendment at
+80771e5"), after Codex's independent approval of 65d7308 (16c1a6fe) and of
+the exact text at 80771e5 (61492fe0). Acceptance is not merge, activation
+or spend approval.
 
 ### Current policy (summary, 2026-10-12)
 
@@ -496,7 +499,7 @@ D-087, D-088, D-096, D-098, D-099):
 - The Nix store path ties the real-model path to this machine's Nix setup,
   which is acceptable for personal, local use.
 
-### C2-02b2 amendment (2026-10-15, proposed): a coordinator-owned server lifecycle with allocated generations
+### C2-02b2 amendment (2026-10-15, accepted): a coordinator-owned server lifecycle with allocated generations
 
 **Context.**
 - The R0 amendment accepted an audited in-app switch without a restart
