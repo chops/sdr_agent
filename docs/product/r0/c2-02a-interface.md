@@ -1,7 +1,16 @@
 # C2-02a (#52, slice a) the switch records: interface check (draft)
 
-**Status:** draft 1, 2026-10-15, for Codex's interface check before RED.
+**Status:** draft 2, 2026-10-15, for Codex's interface check before RED.
 No code.
+- **Draft 1** (`037a1fe`) was NEEDS-REVIEW (Codex, 17604421).
+- **What it asked for:** an executable first-row protocol; resolution
+  evidence, or deferring resolution fail-closed; plus notes on internal
+  writes, generations, reads and idempotency.
+- **This draft:**
+  - defines the first-row protocol (section "The first setting row");
+  - **defers `resolve_blocked` to slice b2,** since no verified "no CLI
+    left" proof exists today;
+  - adds the internal write path.
 
 **Scope:** exactly the accepted rows in R0 readiness section 2:
 ModelProfileSetting, ModelProfileSwitch and Actor `:model_runtime`. These
@@ -27,23 +36,112 @@ unchanged; it switches to the setting in slice c.
 
 ## Domain functions (proposed names)
 
+All reads and writes are scoped to the actor's tenant. A missing actor,
+or an actor of another tenant, is refused. Every write re-reads the
+stored, current actor and checks the locked rows.
+
 | Function | Actor | Effect |
 |---|---|---|
-| `get_profile_setting(opts)` | admin, auditor (audited read, as for grants), `agent_runtime` | The tenant's setting, or `{:ok, nil}` before the first one exists |
-| `request_profile_switch(%{to_profile_id, expected_revision}, opts)` | an active human admin, role re-read | Locks the setting row, then the chain head. Refused if: <br>• `to` is not a reviewed real profile, or is `:fake`; <br>• `to` equals the current desired profile; <br>• the revision is stale; <br>• a pending or blocked switch exists (partial unique identity). <br>Creates the switch as `pending`, with `from`, `requested_by_id`, `requested_at` and `server_generation` (given by the caller in this slice; the orchestrator supplies it in b2). Event `model.profile.switch_requested` |
-| `complete_profile_switch(switch, %{server_generation}, opts)` | `model_runtime` only | pending → completed. In the same transaction: setting `desired_profile_id := to` and revision + 1. Idempotent on `(id, server_generation)`; a stale generation is refused. Event `model.profile.switch_completed` |
-| `fail_profile_switch(switch, %{server_generation, failure_reason}, opts)` | `model_runtime` only | pending → failed; the setting is unchanged. Idempotent, with stale generations refused. Event `model.profile.switch_failed` |
-| `block_profile_switch(switch, %{server_generation, failure_reason}, opts)` | `model_runtime` only | pending → blocked. Idempotent, with stale generations refused. Event `model.profile.switch_blocked` |
-| `resolve_blocked_profile_switch(switch, %{outcome: :completed or :failed, attestation}, opts)` | an active human admin | blocked → completed or failed. It reuses the Reaper release attestation that no CLI process is left: the accepted attended boundary, not an automatic unlock. Event `model.profile.switch_resolved` |
-| `list_profile_switches(opts)` | admin, auditor (audited) | History, newest first. Never relabelled |
+| `get_profile_setting(opts)` | **reads:** admin; auditor (an audited read, as for grants); `agent_runtime` | Read-only. Gives the tenant's setting, or `{:ok, nil}` before the first one exists; nil means "the default: `:claude_cli_opus`, revision 1". **Denied:** a reviewer, `model_runtime` and other system actors |
+| `list_profile_switches(opts)` | **reads:** admin; auditor (audited); `agent_runtime` | History, newest first. Never relabelled |
+| `request_profile_switch(%{to_profile_id, expected_revision, server_generation}, opts)` | an active human admin, with the role re-read | See "The first setting row" and "Request" below. `server_generation` is a positive integer. In this slice the caller supplies it, as a records-test input only, not proof of live coordinator ownership; b2's coordinator supplies it |
+| `complete_profile_switch(switch, %{server_generation}, opts)` | `model_runtime` only | pending → completed. The setting is updated through its internal action (below), in the same transaction |
+| `fail_profile_switch(switch, %{server_generation, failure_reason}, opts)` | `model_runtime` only | pending → failed. The setting is unchanged |
+| `block_profile_switch(switch, %{server_generation, failure_reason}, opts)` | `model_runtime` only | pending → blocked. The setting is unchanged |
 
-**The setting's first row:** `request` creates the setting at revision 1
-(`desired_profile_id: :claude_cli_opus`, the registry default) if it is
-absent, under the same lock, before checking the request. There is no
-separate write action, matching "No direct write action".
+**`resolve_blocked` is deferred to slice b2, fail-closed.**
+- **Why:** `ClaudeCLI.Reaper.release/1` takes only a name and returns `:ok`
+  or `{:error, :reaper_running}`. It issues no typed receipt and doesn't
+  verify that no CLI process is left, so there is no existing proof to
+  accept.
+- **Until b2:** slice a defines no resolve action. A blocked switch has
+  no exit, and nothing in production creates one before b2.
+- **In b2:**
+  - a typed proof bound to the tenant, the switch, the current
+    generation and the runtime target;
+  - the completion invariant for `:completed`, so cleanup evidence alone
+    isn't treated as a passed preflight;
+  - no reopening of admission over unconfirmed work for `:failed`;
+  - no `Reaper.release` side effect inside a transaction that might roll
+    back.
 
-**Open question for Codex:** is the lazy first row acceptable, or must
-it be created at tenant bootstrap or in the migration?
+  b2 brings these as a narrow delta for review.
+
+### The first setting row
+
+The first row is created lazily, inside the request transaction, after
+the admin check.
+1. **Read** the tenant's setting `FOR UPDATE`.
+2. **If it is absent,** create it inside a savepoint through the
+   internal `:initialize` action: `desired_profile_id: :claude_cli_opus`,
+   `revision: 1`, on the unique `tenant_id` identity.
+   - A concurrent first request waits on the unique index until the
+     winner commits or rolls back.
+   - On a unique conflict, the loser rolls back its savepoint and
+     re-reads the winner's row `FOR UPDATE`. It never overwrites the
+     winner's desired profile or revision.
+   - Before the chain head, no lock is held except this row, so there is
+     no cycle.
+3. **Then:** the switch rows, then the chain head.
+4. **Events:** `:initialize` appends no event of its own, which would
+   take the head early. The request appends
+   `model.profile.setting_initialized` after taking the head, and only if
+   this transaction inserted the row. It then appends
+   `model.profile.switch_requested`.
+5. **A rejected request leaves nothing:** a refusal rolls back the whole
+   transaction, the initialized row included. No setting, switch or
+   event remains.
+6. **For an uninitialized tenant,** `expected_revision` must be 1;
+   anything else is a stale refusal.
+
+**Before RED,** the exact Ash mechanism (a plain create in a savepoint,
+with the unique-conflict error classified) is checked by a probe on an
+owned partition, rather than assumed.
+
+### Request
+
+These checks run under the setting lock, after initialization. A
+refusal writes nothing.
+- `to` must be a reviewed real profile; `:fake` and unknown ids are
+  refused.
+- `to` must differ from the current desired profile.
+- The revision must not be stale.
+- No pending or blocked switch may exist (checked, and backed by the
+  partial unique index).
+
+The new switch is `pending`, with `from`, `requested_by_id`,
+`requested_at` and `server_generation`.
+
+### The internal setting write path
+
+The setting has two internal actions:
+- **`:initialize`** (create);
+- **`:apply_switch`**, an update of `desired_profile_id` to the switch's
+  `to` with `revision + 1`.
+
+**Who can call them:** they are authorized only by a context marker,
+`ProfileSwitchContext`, the same pattern as `GrantContext`. Only the
+switch's own `request` and `complete` changes set it, after locking the
+setting row.
+- A direct call to either action is refused before any lock, even for an
+  admin or `model_runtime`.
+- `model_runtime` gets no general setting write.
+- There is no raw Repo mutation and no `authorize?: false` on these
+  paths.
+- **If anything fails,** the setting, the switch and their events roll
+  back together.
+
+### Idempotency and conflicts
+
+- **A replay** of the same action with the same generation on a switch
+  already in that action's result status returns that switch unchanged.
+  No event is appended and the revision doesn't move.
+- **A stale generation** (not the switch's `server_generation`) is
+  refused.
+- **A conflicting terminal action** is refused with
+  `{:error, :switch_already_finished}`, never reported as a success. That
+  covers fail after complete, complete after fail, and any `model_runtime`
+  action on a blocked switch.
 
 ## Invariants and locks
 
@@ -57,39 +155,72 @@ it be created at tenant bootstrap or in the migration?
     index);
   - `finished_at` is set exactly when the status is terminal;
   - rows are append-only apart from the status transitions above.
-- **Lock order:** setting row `FOR UPDATE` → chain head, for request,
-  complete, fail, block and resolve. The switch row is locked after the
-  setting and before the head.
+- **Lock order:** setting row `FOR UPDATE` (or its initializing insert)
+  → switch rows → chain head, for request, complete, fail and block.
 - **No model call** and no waiting under these locks; orchestration
   comes in b1 and b2.
 - **`model_runtime` authority:** only the switch's complete, fail and
   block. It is denied every grant, allocation, invocation and setting
   write (policy tests).
 
-## RED tests (all fail on main: the resources don't exist)
+## RED tests
 
-1. **Allow and deny for every action.** Allowed: an active admin, or
-   `model_runtime` for its three actions. Denied:
-   - a reviewer, an auditor, a disabled admin, a stale demoted admin
-     struct;
-   - every other system actor;
-   - `model_runtime` on request, resolve and every grant, allocation,
-     invocation and setting write.
-2. **Request refusals:** a stale revision; `to` equal to the current
-   desired; `to: :fake` and an unknown id; a second pending switch; a
-   blocked switch blocking a new request.
-3. **Complete:** the setting's desired profile and revision change in
-   the same transaction as the switch, with events in order.
-4. **Fail and block:** the setting is unchanged.
-5. **Idempotency and generations:** each transition repeated with the
-   same generation is a no-op success; a stale generation is refused;
-   completed and failed are final; blocked leaves only through the admin's `resolve_blocked`, never through `model_runtime`.
-6. **History** is never relabelled: earlier switches keep their values.
-7. **Direct-SQL negatives,** one rule each: the `from = to` check, the
+The resources don't exist on main. Each test first asserts that the
+module and function exist (`Code.ensure_loaded?/1`, then
+`function_exported?/3`), after its fixtures, so it fails with an explicit
+assertion message, not an `UndefinedFunctionError` setup crash. Codex
+verifies the intended reason against the draft once the resources exist.
+There is no production behavior during RED.
+
+1. **Authorization.**
+   - **Request** (`request_profile_switch`): allowed for an active admin.
+     Denied for a reviewer, an auditor, a disabled admin, a stale demoted
+     admin struct, a missing actor, another tenant's admin, `model_runtime`
+     and every other system actor.
+   - **Complete, fail and block:** allowed for `model_runtime` only;
+     everyone else is denied, including an admin.
+   - **Reads:** as in the table (an audited auditor read; reviewer
+     denied).
+   - **`model_runtime` beyond its three actions:** denied every grant,
+     allocation, invocation and setting write.
+   - **Direct calls** to the setting's `:initialize` and `:apply_switch`
+     actions are refused, even for an admin and `model_runtime`.
+2. **The first row, on independent connections:**
+   - two concurrent first requests give one setting at revision 1, one
+     `setting_initialized` event and one pending switch; the loser is
+     refused as having an existing pending switch;
+   - a first request that is invalid or stale leaves no setting, switch
+     or event;
+   - a request against an existing row doesn't re-initialize it.
+3. **Request refusals,** with nothing written:
+   - a stale revision;
+   - `to` equal to the current desired profile;
+   - `to: :fake` and an unknown id;
+   - a second pending switch;
+   - an existing blocked switch.
+4. **Complete:**
+   - the setting's desired profile and revision change in the same
+     transaction, through `:apply_switch`;
+   - the events come in order;
+   - a forced failure rolls back the setting, the switch and the events
+     together.
+5. **Fail and block** leave the setting unchanged.
+6. **Idempotency and conflicts:**
+   - a same-generation replay is a no-op, with no event and no revision
+     change;
+   - a stale generation is refused;
+   - fail after complete, complete after fail, and `model_runtime`
+     actions on a blocked switch are refused with
+     `:switch_already_finished`.
+7. **History** is never relabelled.
+8. **Direct-SQL negatives,** one rule each: the `from = to` check, the
    status check, the partial unique index, the setting's fake-profile
-   check.
-8. **The lock order:** a test on independent connections shows that a
-   request waits on the setting row before the chain head. This follows
-   the pattern of the grant edit tests.
+   check, and the one-setting-per-tenant uniqueness.
+9. **Lock order:** a request waits on the setting row, or on the
+   initializing insert, before the chain head (independent connections).
 
-**Gate:** the full gate on an owned partition. No model calls.
+**Not in slice a:** resolving a blocked switch (b2), the orchestrator, and
+reading the setting at boot (c).
+
+**Gate:** the full gate on an owned partition. No model calls. The
+domain diagrams are regenerated for the new resources.
