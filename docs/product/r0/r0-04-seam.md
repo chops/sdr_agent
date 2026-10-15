@@ -1,6 +1,14 @@
 # R0-04 (#50) seam cleanup: contract draft
 
-**Status:** draft 1, 2026-10-14, for Codex's review before RED. No code.
+**Status:** draft 2, 2026-10-15, for Codex's review before RED. No code.
+- **Draft 1** (`d6e9f34`): Codex NEEDS-REVIEW. The findings:
+  - the entity trigger is yes;
+  - the malformed-reply boundary needs a full definition, and the
+    invocation states must keep their precedence;
+  - the inventory missed `Runtime.prepared/1`;
+  - G3 is a partial gap, not a missing adapter.
+- **This draft** answers them, and adds a narrow entity delta (section 4)
+  for an independent PASS.
 
 **Backlog acceptance:**
 
@@ -19,131 +27,242 @@ reviewed PR.
   4. the sent boundary (the facade marks the call sent for in-process
      providers; for ClaudeCLI, the server's launch admission does);
   5. `complete/2`;
-  6. Zoi validation;
-  7. settlement: completed, failed or unknown.
-- **The behaviour** (`@callback prepare/2`, `complete/2`) and its
-  providers:
+  6. a re-read of the row for ClaudeCLI;
+  7. settlement: completed, failed or unknown, or nothing for a terminal
+     row.
+- **The behaviour** (`prepare/2`, `complete/2`) and its providers:
   - `Fake`;
   - `ClaudeCLI`;
   - `CodexAppServer`, a disabled legacy adapter that fails closed.
-- **The only direct call outside the facade:**
-  `ModelProvider.CalibrationCall` calls `ClaudeCLI.prepare/2`. This is
-  the accepted R0-07 calibration exception (ADR-0005 harness amendment).
-- **`Runtime.resolve/1`** accepts any provider module for an explicit
-  `:provider` option; only ClaudeCLI gets a health check.
+- **Calls to `prepare/2` or `complete/2` outside the facade:**
+  - `ModelProvider.CalibrationCall` calls `ClaudeCLI.prepare/2`. This is
+    the accepted R0-07 calibration exception, and it uses the facade's
+    shared invoke and settle path.
+  - `Runtime.prepared/1` (`runtime.ex`, the `prepared/1` helper) calls
+    `module.prepare(%{}, [])` on a **dynamic** receiver. It reads the
+    fixed provenance of an in-process provider for `Runtime.status/0`.
+    It reserves nothing and calls nothing.
+- **A test adapter already exists:** `ModelProviderTest.UnknownProvider`
+  (`test/sdr_agent/ai/model_provider_test.exs`) implements the behaviour
+  with Fake's `prepare/2`. It covers one outcome ("an ambiguous provider
+  outcome is persisted as unknown").
 - **The ledger's provider column** (`ModelInvocation.provider`) is a
   closed enum, `[:fake, :claude_cli, :codex_app_server]`, held in Ash and
   in a DB check.
+- **Settlement** goes through `Agents.finish_model_invocation/4`, in one
+  transaction:
+  1. lock the run (`FOR UPDATE`);
+  2. store the response body;
+  3. run the invocation action;
+  4. settle the run's budget (`BudgetCounter`).
 
-## 2. Gaps found
+  The transitions:
+  - `:complete`: sent → completed;
+  - `:fail`: reserved or sent → failed;
+  - `:mark_unknown`: sent → unknown.
 
-- **G1. A malformed provider answer crashes the call.** After the call is
-  marked sent, `settle/4` matches only `{:ok, _}`, `{:error, _}` and
-  `{:unknown, _}`:
-  - any other return (`:ok`, `nil`, a 3-tuple) raises `CaseClauseError`
-    inside the span;
-  - `{:ok, map}` without `:output` or `:raw_response` raises `KeyError`
-    in `settle_result/4`.
+## 2. Gaps
 
-  The row stays `sent`. Whether it is ever settled depends on the
-  sweeper; see the R0 packet's tracked item "`sent` rows of an already
-  terminal run stay `sent`". Exceptions and exits raised by the provider
-  are already turned into `{:unknown, _}`; malformed returns are not.
-- **G2. A malformed `prepare/2` return** (anything but `{:ok, map}` or
-  `{:error, _}`) falls through the facade's `with`, and that raw value
-  goes back to the caller untyped. Nothing is written, but callers can't
-  rely on the error shape. A `{:ok, non_map}` reaches reservation and
-  fails there with a less clear error. To confirm in RED.
-- **G3. No test shows a new provider plugging in** without changes to
-  the facade.
-- **G4. "One facade" is not checked.** Nothing stops a new module from
-  calling a provider's `complete/2` directly.
+- **G1. A malformed reply after send crashes the call.** `settle/4`'s
+  sent branch matches only `{:ok, _}`, `{:error, _}` and `{:unknown, _}`.
+  - Any other return raises `CaseClauseError` inside the span.
+  - An `{:ok, map}` without `:output` or `:raw_response` raises
+    `KeyError`.
+  - A non-binary `raw_response` or a malformed `:usage` fails inside
+    settlement.
 
-## 3. Proposed contract
+  The row stays `sent`, and the run's budget isn't settled. Whether it
+  ever is depends on the sweeper; see the R0 packet's tracked item
+  "`sent` rows of an already terminal run stay `sent`".
+- **G1b. Some invalid outputs crash instead of failing validation.** If
+  Zoi rejects an output that isn't a map, storing it as `parsed_output`
+  (a `:map` field) fails, instead of recording `validation_failed`.
+- **G2. A malformed `prepare/2` return** falls through the facade's
+  `with` and goes back to the caller untyped. Nothing is written. A
+  `{:ok, non_map}` reaches reservation and fails there less clearly. To
+  confirm in RED.
+- **G3. The full outcome matrix is untested** through a plugged-in
+  adapter. Only "unknown" is tested today.
+- **G4. "One facade" is not checked,** including the dynamic receiver in
+  `Runtime.prepared/1`.
 
-- **R0-04-1. The closed outcome set.** After send, the facade settles on
-  exactly three provider outcomes:
-  - **success:** `{:ok, %{output: _, raw_response: _}}`, optionally with
-    `:usage`. It is completed if valid, or failed as `validation_failed`;
-  - **known failure:** `{:error, reason}`. It is failed, with
-    attention for the drift reasons as today;
-  - **unknown:** `{:unknown, reason}`, or a raise or exit. It is marked
-    unknown and never retried automatically.
+## 3. Contract
 
-  **Anything else after send is unknown**
-  (`{:error, :provider_outcome_unknown}` to the caller), never a crash.
-  The reason is that the call may have reached the provider, so failing
-  it as "known" would be dishonest. (G1)
-- **R0-04-2. Before reservation:** a malformed `prepare/2` return is
-  refused as `{:error, :malformed_provider_prepare}`. No invocation is
-  reserved and nothing is charged. (G2)
-- **R0-04-3. A test-only adapter plugs in** without facade changes
-  (G3). The adapter is a module in `test/support` implementing the
-  behaviour; the test chooses its outcome. It is selected per call with
-  `provider: Adapter` and goes through every facade step, with each
-  outcome of R0-04-1 and R0-04-2.
-  - **The ledger:** its provenance records `provider: :fake` (the
-    in-process class), because the ledger enum is deliberately closed.
-    Adding a real provider remains a reviewed change: the enum, the DB
-    check and an ADR-0004 amendment. The test documents that, and asserts
-    that an unknown `provider` value is refused at reservation.
-  - **Open question OQ-1:** is `provider: :fake` acceptable for the test
-    adapter, or does Codex prefer the adapter to prove the closed-enum
-    refusal only?
-- **R0-04-4. One facade, checked** (G4). A source-inventory test (an
-  AST walk, like R0-07's `ResultAggregateInventory`) fails if any module
-  under `lib/` calls `complete/2` or `prepare/2` on a module that
-  implements `SdrAgent.AI.ModelProvider`. The only exceptions:
-  - the facade itself;
-  - the provider modules' own internals;
-  - `CalibrationCall`'s `ClaudeCLI.prepare/2`, named exactly.
-- **R0-04-5. Documented.** The facade's moduledoc states the closed
-  outcome set, the malformed-return rules and the sent boundary in one
-  section. The behaviour's callbacks document what each return means.
+### R0-04-1. The provider reply envelope, after `complete/2`
 
-**Not changed:**
-- `CodexAppServer` stays: it fails closed, and its enum value labels
-  historical rows. Removing it is a separate cleanup if wanted.
-- No migration, no new attribute, no new action, and no change to
-  ClaudeCLI's launch path or calibration.
+**A valid reply is exactly one of:**
 
-## 4. Entity Model and ADR
+| Reply | Shape | Settles as |
+|---|---|---|
+| **Success** | `{:ok, result}`. `result` is a map with `:output` (any term; Zoi decides validity) and `:raw_response` (a binary). An optional `:usage`, if present, must cast to `ModelInvocation.Usage`. | Zoi-valid: completed. Zoi-invalid: failed as `validation_failed` (R0-04-2) |
+| **Known failure** | `{:error, reason}`, any term | failed, `provider_error` with `safe_reason/1`; the drift reasons open their attention Failure as today |
+| **Unknown** | `{:unknown, reason}`, any term; or a raise or exit from the provider (as today) | unknown |
 
-- **Entity Model trigger:** no, proposed for Codex to judge.
-  - **No persisted change:** no new or changed resource, attribute,
-    policy or action. `mark_model_invocation_unknown/2` and
-    `fail_model_invocation/3` are used as they exist.
-  - **The behaviour change:** the facade's handling of malformed provider
-    returns, which today is a crash.
-  - **Open question OQ-2:** does the facade's return contract count as a
-    "backend action contract" for the trigger?
-- **ADR:** none. This is within ADR-0004's accepted provider seam.
+**Anything else is protocol-malformed:**
+- another tag or arity: `:ok`, `nil`, a 3-tuple;
+- `{:ok, non_map}`;
+- `:output` missing;
+- `:raw_response` missing or not a binary;
+- `:usage` present but not castable.
 
-## 5. Tests (RED first)
+The facade checks the envelope **before** any settlement write. It
+doesn't rescue the settlement write.
 
-1. **G1, real RED** (these fail on main with a crash, through the test
-   adapter):
-   - each malformed return after send (`:ok`, `nil`, a 3-tuple,
-     `{:ok, %{}}` without `:output`) gives `{:error,
-     :provider_outcome_unknown}`;
-   - the row is `unknown` and no Failure is created;
-   - nothing is retried.
-2. **G2, real RED:** a malformed `prepare/2` gives `{:error,
-   :malformed_provider_prepare}`, with no invocation row and no counter
-   change.
-3. **Characterization** (these pass on main):
-   - the adapter's success, validation failure, known failure and
-     unknown outcomes each settle as documented;
-   - a raise and an exit are each unknown.
-4. **G4:** the inventory test. It is a characterization test today. Its
-   sensitivity check is a temporary direct call added locally, then
-   reverted.
-5. **The ledger enum:** a reservation with an unknown `provider` value
-   is refused (characterization).
+**How a malformed reply settles depends on the re-read invocation state,
+which takes precedence over the reply:**
+
+| Row state when settling | Malformed reply | Unchanged for valid replies |
+|---|---|---|
+| `sent` | **Unknown.** `mark_model_invocation_unknown`; the caller gets `{:error, :provider_outcome_unknown}`. The call may have reached the provider, so a "known" failure would be untrue. No Failure is opened. | yes |
+| `reserved` (ClaudeCLI never launched) | **Failed, never sent,** with `:launch_not_admitted`, as for any reply on this branch today. Never marked sent or unknown. | yes |
+| terminal (launch-refused, recovered, already settled) | **No write:** no second settlement, event or Failure. The caller gets `{:error, :invocation_already_settled}`, as today for non-error replies. | yes |
+
+**Only provider and protocol outcomes are normalized.** A database,
+authorization, audit or Ash error from `Agents` settlement, the body
+store or the chain still comes back as that error. It is not relabeled
+as a provider "unknown", and there is no broad `rescue` around
+settlement.
+
+### R0-04-2. Zoi-invalid output (G1b)
+
+A valid envelope whose `:output` fails the schema is failed as
+`validation_failed`, as today, with these fields:
+- **`parsed_output`:** the output if it is a map, otherwise `nil`;
+- **`validation_errors`:** Zoi's errors, plus one naming the output's
+  type when it is not a map;
+- **`response`:** the raw response, unchanged.
+
+It is never a crash.
+
+### R0-04-3. Before reservation (G2)
+
+`prepare/2` must return `{:ok, provenance_map}` or `{:error, reason}`.
+Anything else gives `{:error, :malformed_provider_prepare}`: no
+reservation, no counter change, no event. A valid `{:error, reason}` is
+returned as today.
+
+### R0-04-4. The plugged-in adapter (G3)
+
+The existing `UnknownProvider` pattern is extended into one synthetic,
+in-process test adapter in `test/support`, whose outcome each test
+chooses.
+
+- **Its provenance:** `provider: :fake`, `profile_id: :fake`, and Fake's
+  synthetic provenance. Codex's OQ-1 answer: this proves the callback and
+  facade seam within the closed ledger classes. It is no authority for a
+  real provider.
+- **No external I/O and no model calls.**
+- **Adding a real provider** stays a reviewed change: the enum, the DB
+  check, admission and an ADR-0004 amendment.
+- **One test** asserts that an unknown `provider` value is refused at
+  reservation.
+
+### R0-04-5. One facade, checked (G4)
+
+An AST inventory test of `lib/**/*.ex` flags any call to `prepare` or
+`complete` with arity 2 in these forms:
+
+- a remote call on an aliased or fully qualified module that implements
+  `SdrAgent.AI.ModelProvider`;
+- a remote call on a **dynamic receiver** (`var.prepare(_, _)` or
+  `var.complete(_, _)`), whatever the receiver;
+- a capture, `&Mod.prepare/2` or `&Mod.complete/2`;
+- `apply/3` or `Kernel.apply/3` with a literal `:prepare` or `:complete`.
+
+**Exceptions,** each named exactly as module, function and receiver form:
+1. the facade's `run/3` (`provider.prepare/2`) and `provider_call/3`
+   (`provider.complete/2`);
+2. `CalibrationCall` → `ClaudeCLI.prepare/2`, the accepted calibration
+   exception;
+3. `Runtime.prepared/1` → `module.prepare(%{}, [])`. It is status-only:
+   it reads fixed in-process provenance and reserves nothing. It is
+   classified, not changed, and never routed through `complete`.
+
+A provider module's own internals are exempt only for calls to its own
+functions, not calls into another provider.
+
+**Limits, stated in the test:** it can't see a call whose function name
+is computed at runtime (for example `apply(m, String.to_atom(...), _)`).
+No such call exists in `lib/` today. Beyond the exceptions it enforces
+nothing for dynamic receivers named anything other than `prepare` or
+`complete`.
+
+### R0-04-6. Documented
+
+The facade's moduledoc gains one section stating:
+- the envelope;
+- the state precedence table;
+- the no-relabel rule.
+
+The behaviour's callback docs say what each return means.
+
+**Calibration:** `CalibrationCall` shares the invoke and settle path, so
+R0-04-1 applies to it too: a malformed reply after send becomes unknown,
+which the calibration flow already handles. Its guards, authority,
+witness and launch path, and the state precedence, are unchanged.
+
+## 4. Entity Model delta (narrow; trigger: yes)
+
+**Entity Model trigger: yes.** The facade's backend return contract
+changes, and the lifecycle and accounting outcome of a malformed reply
+after send changes from a crash to sent → unknown with the run budget
+settled. Codex's OQ-2 answer.
+
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy / Actor | Open Questions |
+|---|---|---|---|---|---|---|---|
+| `ModelProvider` facade (backend contract, not persisted) | Existing (contract delta) | The one public model call entry | The returns: `{:ok, %{output, invocation, ...}}`; `{:error, reason}`, adding `:malformed_provider_prepare` and adding malformed replies to the existing `:provider_outcome_unknown`; existing refusals unchanged | unchanged | R0-04-1 envelope and state precedence; R0-04-3 before reservation. A malformed reply is never retried | unchanged: the caller's actor; settlement as `agent_runtime` of the invocation's tenant (existing `actor/1`) | none |
+| `ModelInvocation` | Existing (lifecycle and value delta; no schema change) | Ledger row per attempt | No new attribute. **Values:** `parsed_output` is nil for a non-map Zoi-invalid output (R0-04-2); `validation_errors` gains the type entry | unchanged | **sent → unknown** now also on a malformed reply after send, in the same settlement transaction (run `FOR UPDATE` → body → transition → budget settle). Previously a crash, and the row stayed `sent`. reserved → failed (`:launch_not_admitted`) for any reply, unchanged. Terminal rows: no write. Existing actions only (`:mark_unknown`, `:fail`). Event `model.invocation.unknown` or `failed`, as today | unchanged | none |
+| `AgentRun` | Existing (accounting timing delta) | Per-run budget | unchanged | unchanged | For a malformed reply after send, the budget is settled at once by the existing `BudgetCounter` in the settlement transaction, instead of waiting for sweeper recovery. Counter rules and limits are unchanged; nothing is refunded | unchanged | none |
+
+`existing dependency: unchanged — relationship/policy/lifecycle impact
+checked, none found` applies to:
+- `ModelCallGrant` and `ModelCallAllocation`: the charge at reservation
+  is unchanged, with no refund or second charge;
+- `Operations.Failure`: no Failure for an unknown or malformed reply;
+  drift and launch Failures are unchanged;
+- `AuditEvent`: the same events;
+- the R0-07 result gate and release.
+
+**Lock and transaction boundaries:** unchanged. Settlement keeps run →
+chain; the envelope check is pure and happens before it. **ADR:** none.
+This is correctness work within ADR-0004's seam and ADR-0005's existing
+calibration and result-gate boundaries.
+
+## 5. Tests
+
+**Real RED, after the delta passes:**
+1. **After send:** each malformed reply gives `unknown` with exactly
+   one `model.invocation.unknown` event, the run budget settled once, no
+   Failure, no retry, and `{:error, :provider_outcome_unknown}`. The
+   malformed replies: `:ok`, `nil`, a 3-tuple, `{:ok, "x"}`, `{:ok, %{}}`
+   without `:output`, a missing or non-binary `raw_response`, and a
+   malformed `:usage`.
+2. **A reserved ClaudeCLI row** with a malformed reply is failed
+   (`:launch_not_admitted`) and never marked sent or unknown. It uses
+   the hermetic fake CLI server with a stubbed launch admission.
+3. **A terminal row** (launch-refused) with a malformed reply gets no
+   second write, event or Failure.
+4. **A Zoi-invalid non-map output** gives `validation_failed`, with
+   `parsed_output` nil and the type error recorded.
+5. **A malformed `prepare/2`** gives `{:error,
+   :malformed_provider_prepare}`, with no row, counter or event.
+
+**Characterization (passes on main):**
+- through the adapter, success, validation failure (map output), known
+  failure, drift failure with its Failure, unknown, raise and exit;
+- an unknown `provider` value is refused at reservation;
+- a settlement error is not relabeled. A forced Agents-side error
+  propagates as itself, via a narrow test seam or an invalid actor.
+
+**Inventory (R0-04-5):**
+- the baseline passes with exactly the three exceptions;
+- a sensitivity check, with temporary local changes that are reverted:
+  a direct `ClaudeCLI.complete/2`, a dynamic `mod.complete/2`, a capture
+  and a literal `apply/3` each fail it.
 
 **Gate:** the full gate on an owned test partition. Fake and test adapter
 only; no model calls.
 
 ## 6. Size
 
-One PR. About a day of work including review.
+One PR. About a day to a day and a half, including review.
