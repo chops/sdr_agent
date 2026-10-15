@@ -61,8 +61,16 @@ defmodule SdrAgent.AI.ProfileCoordinatorRaceTest do
     send(worker, :continue)
     await_blocked!(holder_pid)
 
+    # The worker is alive once the coordinator's wait is established; its
+    # death is observed, and its DOWN is shown queued in the (blocked)
+    # coordinator's mailbox before the lock is released.
+    assert Process.alive?(worker)
+    coordinator = Process.whereis(@coordinator)
+    watch = Process.monitor(worker)
     Process.exit(worker, :kill)
-    Process.sleep(200)
+    assert_receive {:DOWN, ^watch, :process, ^worker, :killed}, 5_000
+    await_until!(fn -> down_queued?(coordinator, worker) end, 5_000)
+    await_blocked!(holder_pid)
 
     assert switch_status(switch) == "pending"
     assert events(ctx, "model.profile.switch_blocked") == 0, "DOWN was acted on mid-call"
@@ -227,6 +235,11 @@ defmodule SdrAgent.AI.ProfileCoordinatorRaceTest do
       end,
       10_000
     )
+  end
+
+  defp down_queued?(coordinator, worker) do
+    {:messages, messages} = Process.info(coordinator, :messages)
+    Enum.any?(messages, &match?({:DOWN, _ref, :process, ^worker, _reason}, &1))
   end
 
   defp switch_status(switch) do

@@ -284,17 +284,46 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
       assert [%{reason: :boot}] = starts!(ctx), "no candidate after an unconfirmed cleanup"
     end
 
-    test "an absent lease is not a receipt, and stray messages never reset the bound", ctx do
+    test "a missing lease without the receipt blocks, with no minimum wait", ctx do
       tree!(ctx, cleanup_wait_ms: 600)
       await_status!(&(&1.hold == :released))
       pause_at!(:old_stopping)
       assert {:ok, switch} = request(ctx)
       assert_receive {:stage_paused, :old_stopping, coordinator}, 20_000
 
-      reaper = ClaudeCLI.reaper(ClaudeCLI.server())
-      :erlang.suspend_process(reaper)
-      on_exit(fn -> if Process.alive?(reaper), do: :erlang.resume_process(reaper) end)
+      # Withhold the receipt (a suspended reaper), then erase the lease by
+      # hand: an absence the reaper didn't certify.
+      suspend!(ClaudeCLI.reaper(ClaudeCLI.server()))
       :persistent_term.erase({SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper, ClaudeCLI.server()})
+
+      started = System.monotonic_time(:millisecond)
+      send(coordinator, :continue)
+
+      assert %{status: :blocked} = await_switch!(ctx, switch, :blocked)
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      assert switch_failure(ctx, switch) =~ "old_cleanup_unconfirmed"
+      assert elapsed < 1_100, "blocked within the bound (fail-fast allowed): #{elapsed} ms"
+      assert [%{reason: :boot}] = starts!(ctx), "no candidate"
+      refute_received {:launch_admission, _, _, _}
+      assert %{hold: :held} = status!()
+    end
+
+    test "a withheld receipt with a held lease waits one bound; stray refs don't reset it",
+         ctx do
+      tree!(ctx, cleanup_wait_ms: 600)
+      await_status!(&(&1.hold == :released))
+      pause_at!(:old_stopping)
+      assert {:ok, switch} = request(ctx)
+      assert_receive {:stage_paused, :old_stopping, coordinator}, 20_000
+
+      # The lease stays validly held by the live, suspended reaper; only
+      # its receipt is withheld.
+      reaper = ClaudeCLI.reaper(ClaudeCLI.server())
+      suspend!(reaper)
+
+      assert {:held, ^reaper} =
+               SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper.lease(ClaudeCLI.server())
 
       started = System.monotonic_time(:millisecond)
       send(coordinator, :continue)
@@ -316,12 +345,95 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
       Task.await(stray, 5_000)
 
       assert switch_failure(ctx, switch) =~ "old_cleanup_unconfirmed"
-      assert elapsed >= 550 and elapsed < 1_100, "the 600 ms bound took #{elapsed} ms"
+      assert elapsed >= 550 and elapsed < 1_100, "one 600 ms bound took #{elapsed} ms"
       assert [%{reason: :boot}] = starts!(ctx)
     end
   end
 
+  ## The suspension fixture (Codex 34dcf0b4 MF1)
+
+  describe "the suspension fixture" do
+    test "outlives the test process that asked for it, then resumes and is joined" do
+      target = spawn(fn -> receive do: (:stop -> :ok) end)
+      parent = self()
+
+      # A stand-in test process asks for the suspension, then dies.
+      {asker, ref} = spawn_monitor(fn -> send(parent, {:suspender, start_suspender(target)}) end)
+      assert_receive {:suspender, suspender}, 5_000
+      assert_receive {:DOWN, ^ref, :process, ^asker, _}, 5_000
+
+      assert Process.info(target, :status) == {:status, :suspended},
+             "the suspension survived its asker's death"
+
+      assert :ok = stop_suspender(suspender)
+      refute Process.info(target, :status) == {:status, :suspended}
+      refute Process.alive?(suspender)
+      send(target, :stop)
+    end
+  end
+
   ## Helpers
+
+  # A dedicated, unlinked suspender owns each suspension (a BEAM suspension
+  # is dropped when its suspending process exits), so a failed test can't
+  # leave it to an on_exit that doesn't own it. on_exit asks the suspender
+  # to resume, joins it, then joins the target's own cleanup.
+  defp suspend!(target) do
+    suspender = start_suspender(target)
+
+    on_exit(fn ->
+      :ok = stop_suspender(suspender)
+      join_bounded(target, 10_000)
+    end)
+
+    suspender
+  end
+
+  defp start_suspender(target) do
+    parent = self()
+
+    suspender =
+      spawn(fn ->
+        true = :erlang.suspend_process(target)
+        send(parent, {:suspended, self(), target})
+
+        receive do
+          {:resume, from} ->
+            try do
+              :erlang.resume_process(target)
+            after
+              send(from, {:resumed, self()})
+            end
+        end
+      end)
+
+    receive do
+      {:suspended, ^suspender, ^target} -> suspender
+    after
+      5_000 -> flunk("the reaper was never suspended")
+    end
+  end
+
+  defp stop_suspender(suspender) do
+    ref = Process.monitor(suspender)
+    send(suspender, {:resume, self()})
+
+    receive do
+      {:DOWN, ^ref, :process, ^suspender, _} -> :ok
+    after
+      5_000 -> {:error, :suspender_stuck}
+    end
+  end
+
+  defp join_bounded(pid, timeout) do
+    ref = Process.monitor(pid)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _} -> :ok
+    after
+      timeout -> Process.demonitor(ref, [:flush])
+    end
+  end
 
   defp tree!(ctx, opts \\ []) do
     for module <- [@profile_supervisor, @coordinator] do
