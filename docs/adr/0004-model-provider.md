@@ -529,8 +529,8 @@ D-087, D-088, D-096, D-098, D-099):
      adoption) is first an audited `ModelServerStart` row.
    - Its generation is allocated under a per-tenant counter row, in one
      global lock order.
-   - A row's identity is immutable, and its status is forward-only
-     (`allocated → started → ready`, or `failed`).
+   - A row's identity is immutable, and its status is forward-only:
+     `allocated → started → ready`, or `allocated | started → failed`.
    - Readiness evidence is truthful: `:spawn_preflight` or `:adopted`.
 3. **Only the coordinator writes the lifecycle ledger.**
    - These writes run in the registered coordinator's own process, are
@@ -569,7 +569,9 @@ D-087, D-088, D-096, D-098, D-099):
   can't let a stale owner finalize, and can't reopen calls over
   unconfirmed work or an unknown commit.
 - **Negative:**
-  - three new runtime processes and two new tables;
+  - four new named runtime processes (`ProfileSupervisor`,
+    `ServerSupervisor`, `Coordinator`, `OperationSupervisor`) and two new
+    tables;
   - a coordinator ledger call can delay its other messages for up to its
     bound (its status is read from ETS, so status never waits);
   - a crash during a switch leaves it blocked until b2β.
