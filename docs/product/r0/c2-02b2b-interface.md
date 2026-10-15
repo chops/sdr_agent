@@ -1,6 +1,9 @@
 # C2-02b2β interface: the attended resolver for a blocked switch
 
-**Status:** draft 1, 2026-10-15, for Codex's interface and entity review.
+**Status:** draft 2, 2026-10-15, for Codex's interface and entity review.
+Draft 2 folds in Codex's advisory pre-read (`codex-c202b2beta-22db5c0-preread.md`):
+the covered runtimes (1c), the deadline (1d), the crash and outcome table
+(2a), the unchanged α finalizers (1b), and `Reaper.release/1` as OQ-4.
 Slice plan: `c2-02-slices.md` (b2β, about 1 day). Builds on b2α
 (`c2-02b2-interface.md`, merged at `22db5c0`).
 
@@ -115,6 +118,52 @@ they don't attest to success.
      facts is a no-write replay that returns the stored switch. The same
      id with different facts is `{:error, :attestation_conflict}`.
 
+### 1c. What the attestation covers
+
+The attestation covers a **closed range of starts**: every
+`ModelServerStart` of the tenant with generation in
+`[S.server_generation, attested_generation]`. That range contains every
+runtime that can have run CLI work for S:
+- the old server (the start current at the request,
+  `S.server_generation`);
+- the candidate (`:activation` for S), if one was allocated;
+- the rollback (`:rollback` for S), if one was allocated;
+- any `:replacement` or `:boot` start allocated after S was blocked, for
+  example by a coordinator restart while S stayed blocked.
+
+How these starts are bound:
+- **Stored with the resolution:** both ends of the range, in the event
+  (`covered_generations: [first, last]`).
+- **No start after the attestation:** the stale check (1a.5) proves that
+  no start was allocated after the attested one, and the write holds the
+  latest start `FOR SHARE`.
+- **Starts after the commit:** the fresh start the coordinator makes
+  later (section 2) is outside the range. It is a new held start with its
+  own lifecycle and cleanup, and needs no attestation.
+- **Starts the admin never saw:** if a start in the range has `:started`
+  identity (pid, node, reaper) that the admin didn't see, the write still
+  binds only by id and generation. R0-05 must show every start in the
+  range, which is a UI obligation recorded for R0-05.
+
+**What is never proof:** an absent lease, a dead holder, a scan, stored
+pid text, or a healthy new server. Each of these can only refuse (1a.4);
+none of them permits.
+
+### 1d. The deadline
+
+One monotonic deadline of 15 s, pinned when the coordinator receives the
+call, covers:
+- the busy check;
+- the presence observation;
+- the single `LedgerCall`, whose budget is the remaining time, at most
+  2 s.
+
+Nothing restarts or extends it. When it is spent before the commit, the
+call returns `{:error, :resolve_timeout}` and nothing is written. When the
+reply to the admin is lost after the commit, the retry is a replay
+(1a.5). The post-commit reconciliation (section 2) keeps b2α's own
+bounds, and any failure there leaves the server held.
+
 ### 1b. The write: `ModelProfileSwitch.resolve_blocked`
 
 - `status` becomes `:failed`, and `finished_at` is set.
@@ -128,6 +177,18 @@ they don't attest to success.
   `attested_generation`, outcome `failed`, `resolution: owner_attested`
   and the block's reason. The confirmation text and pids are not stored.
 - The one-open index frees the slot, so a new `request` is possible.
+- **Kept as recorded:** `from_profile_id`, `to_profile_id`,
+  `server_generation`, `requested_by_id` and `requested_at`. The
+  resolution's provenance (`resolved_by_id`, `resolved_at`) is separate
+  from the request's.
+- **The setting:** its row and revision are not written. The event
+  reports the stored setting revision, as every switch event does
+  (`ProfileSwitchEvent`).
+- **The α finalizers are unchanged.** `complete`, `fail` and `block`
+  still accept only a pending switch (`ProfileSwitchGuard`), so a blocked
+  switch is refused by all three (RED test 6a). `resolve_blocked` is the
+  only action that moves a blocked switch. It never produces `:ready`
+  evidence, and never counts as an adopted or preflighted start.
 
 ## 2. After the commit: reconciliation, then release
 
@@ -167,6 +228,23 @@ side effect inside a transaction that might roll back").
   is a replay (1a.5).
 
 No step makes a model call.
+
+### 2a. Crash and outcome table
+
+| Point | Durable state | Next coordinator or caller | Hold |
+|---|---|---|---|
+| before the call reaches the coordinator | S `:blocked` | nothing; the admin may retry | kept |
+| refused at 1a.1–1a.4 | unchanged | the typed refusal; nothing is written | kept |
+| a death or spent deadline inside the `LedgerCall` before commit | unchanged (rolled back) | S is still blocked at the next boot | kept |
+| committed; the reply was lost | S `:failed`, with the resolution and its event | an admin retry with the same `attestation_id` is a no-write replay; a different id → `:switch_not_blocked` | kept until 2 below |
+| committed; a coordinator death before the lease release | S `:failed` | the new boot takes b2α's no-open-switch path. A dead-holder lease of a covered start is released only if the committed resolution covers that start (OQ-4) | kept until a ready start |
+| a lease whose holder is alive after the commit | S `:failed` | `{:error, :reaper_running}`; retried on the tick; never forced | kept |
+| the fresh start or its preflight fails | S `:failed`; the start is `:failed` | b2α's replacement retry | kept |
+| reconciliation is unknown | S `:failed` | retried on the tick | kept |
+| a ready `:replacement` or `:boot` start at the desired profile, with no open switch | S `:failed` | b2α's normal release branch | **released** |
+
+Another attended decision is needed only when a new switch blocks.
+Nothing in this table re-blocks S, or moves it again.
 
 ## 3. ADR evaluation
 
@@ -226,6 +304,9 @@ New files: `test/sdr_agent/agents/profile_switch_resolve_test.exs`
    coordinator is forbidden, even for an admin.
 6. **The state:** pending, completed and failed switches →
    `:switch_not_blocked`; the history is unchanged.
+6a. **The α finalizers refuse blocked:** `complete`, `fail` and `block`
+    on a blocked switch are refused through the coordinator and as
+    direct actions; nothing is written.
 7. **Staleness:** a newer start allocated after the admin's read →
    `:stale_attestation`, no write.
 8. **Replay:** the same `attestation_id` with the same facts returns the
@@ -277,6 +358,13 @@ New files: `test/sdr_agent/agents/profile_switch_resolve_test.exs`
   Should the resolver require the tenant owner specifically, or any
   active admin? **Recommendation: any active human admin, role re-read**,
   as `request` is today; the attestation names them (`resolved_by_id`).
+- **OQ-4, `Reaper.release/1`.** b2α never calls it. b2β calls it only
+  after a committed resolution whose covered range includes the lease's
+  start, and only for a **dead** holder. This is the function's documented
+  operator purpose, and it is attended rather than automatic.
+  **Recommendation: allow it, as stated.** The alternative is a separate
+  console command for the owner, which adds a manual step that proves
+  nothing more. Codex to rule.
 - **OQ-3, the 15 s bound.** The same bound as the hold acknowledgement in
   b2α. Codex to confirm that it covers the presence checks plus one
   `LedgerCall` (≤ 2 s).
