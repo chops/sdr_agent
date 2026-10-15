@@ -639,6 +639,53 @@ All were reported the same day.
 **Open with the owner:** #162 merge, then resuming calibration at step 4;
 the scoped C4 G5.
 
+### Sprint 1, day 4 (Thu Oct 15), afternoon
+
+**Merges and gates.** The owner merged #162 (R0-07f, D-133) and passed
+the scoped C4 G5 (D-134: RED then GREEN for C4-01a and C4-01b; not merge,
+real-data or model-call approval).
+
+**Calibration resumed.** With `SDR_WITNESS_STORE_ROOT` exported, `check`
+reported the witness store as trusted. `calibrate claude_cli_opus`
+finished with outcome **match** (invocation `01a140e1`, evidence sha256
+`0c2e3735`), and Codex passed the evidence. One of the four attempts is
+spent. The Sonnet attempt is next and is the owner's to run.
+
+**C2-02b2α approved after five review rounds.** Codex requested changes
+at `bce5653`, `5e10978`, `1d04d7a` and `e8a67a6`, and approved at
+`ace975a`. The later rounds were narrower:
+- holding a survivor before any database read;
+- adopting only with the exact child, the desired profile and its own live
+  reaper lease;
+- one deadline across the stop and the receipt;
+- a retried block that re-reads the switch and never writes a second
+  event.
+
+One round reached Codex unformatted and failed the gate at its first
+step. Every finding is kept as a regression test. Full gate at `ace975a`:
+2394 passed.
+
+**Integration.** #159 and #160 had failed CI only at the dependency
+audit, because they predated the Bandit pin. Main merged cleanly through
+the stack (#159 `8935b2f`, #160 `0a247d5`, new PR #163 `c4a29b8`). Codex
+approved the three integration deltas (71, 127 and 418 independent tests).
+Its first three test runs started together and hit PostgreSQL's
+connection limit (53300); it disclosed that and reran them one at a time
+cleanly. Our full gate on `c4a29b8`: 2426 passed, with no 53300.
+
+**The owner accepted the stack (D-135).** #159 merged at `3c54fa5` and
+#160 at `3527984`. Branch protection requires an up-to-date branch, so
+#160 and #163 each needed main merged in again. Both new heads have trees
+identical to the reviewed ones, verified with `git diff`. #163 merged at
+`22db5c0`. C2-02 slices a, b1 and b2α are on main; nothing is activated.
+
+**Tripwires fired this afternoon:** 2 (b2α's third and fourth CHANGES
+REQUESTED), reported as each arrived.
+
+**Next:** the Sonnet calibration, then Codex's evidence review; b2β and
+slice c; C4-01a/b RED; R0-05. The R0-06 forecast stays Fri Oct 23 (Mon
+Oct 26 without weekend work).
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -662,3 +709,6 @@ says what happened, why, what it cost and what changed.
 | **Oct 13: Claude's inbox watcher moved its own messages.** A watcher matched Claude's own follow-up note and moved two messages meant for Codex out of the shared inbox before Codex read them. | The watcher matched a message id, not who sent it. | Restored within minutes; no message was lost. | Watchers only match replies sent by Codex to Claude. |
 | **Oct 14: Sprint 1's missed exit reached the owner only on its last day.** R0-07 had grown from one story into about 12 PRs over Oct 12 and 13. | Growth was reported as progress, not as a schedule risk; there was no rule for when to warn. | The owner learned of the miss at standup, with no time to re-plan before it. | Forecast v2.2 and five approved tripwires that require same-day notice (see the Oct 14 entry). |
 | **Oct 14: C4's time limit was wrong twice.** The first maximum (one day) was a fixed policy ceiling, which the owner's decision against hard ceilings had just ruled out. The second came from a remembered timer limit that the pinned Erlang runtime does not have. | The first was not checked against the owner's decision, and the second was not checked against the running system. | Two extra review rounds on C4; the second "changes requested" tripped tripwire 2, reported to the owner the same day. | Codex probed the pinned runtime. The revised design bounds every limit by the stored 32-bit integer maximum, and the packet requires a test at that boundary when it is built. Runtime limits are checked by running them. |
+| **Oct 15: calibration's first attempt stopped at preflight.** `calibrate claude_cli_opus` refused with `witness_store_untrusted`. | The console runs the test build, which never read `SDR_WITNESS_STORE_ROOT`; the harness's tests had injected the root themselves, so no test exercised the real console path. | About two hours of the calibration window. No attempt or spend; fixed by R0-07f (#162). | The console now reads the root as a plan input, and a test runs the real `Calibrate.run` path. |
+| **Oct 15: one b2α review round reached Codex unformatted.** The gate failed at its first step (format). | New regression files were written and the gate was started without running `mix format --check-formatted` first. | One review round. | Run the format check after writing files and before the gate. |
+| **Oct 15: the first integration gate started without dependencies.** After main brought in the Bandit Git pin, the worktrees had not fetched it, and compile, credo and the audit all failed. | A dependency source change needs `mix deps.get` in every worktree; the merge was conflict-free, so nothing prompted it. | One aborted gate start, minutes. | Run `mix deps.get` after any merge that changes `mix.lock`. |
