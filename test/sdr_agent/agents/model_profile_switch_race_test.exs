@@ -106,8 +106,22 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
     ).rows != [[0]]
   end
 
-  # Runs `fun` on its own connection, reporting its backend pid first.
+  # Runs `fun` on its own connection, reporting its backend pid first. The
+  # task is tracked so `stop_tasks!/0` can stop and join it before cleanup.
   defp on_own_connection(parent, tag, fun) do
+    task = spawn_on_connection(parent, tag, fun)
+    Process.put(:race_tasks, [task | Process.get(:race_tasks, [])])
+    task
+  end
+
+  # Stops and joins every tracked task (holder, waiter, winner, loser), so
+  # none can still hold a connection or lock when on_exit truncates.
+  defp stop_tasks! do
+    for task <- Process.get(:race_tasks, []), do: Task.shutdown(task, 5_000)
+    Process.delete(:race_tasks)
+  end
+
+  defp spawn_on_connection(parent, tag, fun) do
     Task.async(fn ->
       with_connection(fn ->
         [[pid]] = Repo.query!("SELECT pg_backend_pid()").rows
@@ -173,7 +187,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
         end
       after
         send(winner.pid, :finish)
-        Task.shutdown(winner, 5_000)
+        stop_tasks!()
       end
     end
   end
@@ -256,7 +270,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
       check.(Task.await(waiter, 15_000))
     after
       send(holder.pid, :release)
-      Task.shutdown(holder, 5_000)
+      stop_tasks!()
     end
   end
 
