@@ -102,4 +102,9 @@ restart acceptance is unverified, not passed.
     `setup_charges_bound_to_their_allocations` and
     `full_b5_refused_exactly`.
 - **All of these results are author-executed**, not independently rerun.
-- **The full gate:** pending.
+- **The full gate at `2fff977`:** PASS (author-executed, on owned
+  partition `_c904`).
+  - format, compile dev and test (`--warnings-as-errors --force`), Credo
+    and `bin/verify-workflow` all pass;
+  - **2176 passed, 1 skipped, 4 excluded.** main had 2173; the three
+    added tests account for the difference.
