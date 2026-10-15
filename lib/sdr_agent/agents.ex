@@ -106,6 +106,8 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.ModelResultRelease
     resource SdrAgent.Agents.ModelProfileSetting
     resource SdrAgent.Agents.ModelProfileSwitch
+    resource SdrAgent.Agents.ModelServerCounter
+    resource SdrAgent.Agents.ModelServerStart
   end
 
   ## Definitions
