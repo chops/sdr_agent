@@ -114,7 +114,8 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
     task
   end
 
-  # Stops and joins every tracked task (holder, waiter, winner, loser), so
+  # Stops and joins every tracked task (holder, waiter, winner, loser and
+  # the NOWAIT lock probe), so
   # none can still hold a connection or lock when on_exit truncates.
   defp stop_tasks! do
     for task <- Process.get(:race_tasks, []), do: Task.shutdown(task, 5_000)
@@ -276,8 +277,10 @@ defmodule SdrAgent.Agents.ModelProfileSwitchRaceTest do
 
   # From a third connection: can the switch row be locked right now?
   defp switch_locked?(switch_id) do
-    fn -> probe_lock(switch_id) end
-    |> Task.async()
+    probe = Task.async(fn -> probe_lock(switch_id) end)
+    Process.put(:race_tasks, [probe | Process.get(:race_tasks, [])])
+
+    probe
     |> Task.await(10_000)
     |> case do
       {:ok, {:ok, _}} -> false
