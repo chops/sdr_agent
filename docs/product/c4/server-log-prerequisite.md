@@ -1,8 +1,13 @@
 # C4 prerequisite 5b: PostgreSQL server log (proposal)
 
-**Status:** PROPOSED, draft 2, 2026-10-14. Draft 1 (`86f27fe`) was
-reviewed by Codex, NEEDS-REVIEW, with three must-fixes: retention,
-the sink test, and activation. This draft answers them. Nothing is
+**Status:** PROPOSED, draft 3, 2026-10-15.
+
+- **Draft 1** (`86f27fe`): Codex NEEDS-REVIEW on retention, the sink
+  test and activation.
+- **Draft 2** (`94c8dd8`): Codex NEEDS-REVIEW on the new pruning step
+  and on what the sink test searches.
+- **This draft** drops automatic deletion as the default (3.4) and fixes
+  the sink test's search scope. Nothing is
 configured by this document or its review.
 
 **Owner direction (2026-10-14 11:55 MDT, standup 5b):** "i approve option
@@ -36,7 +41,8 @@ several ways:
   redact values written into SQL literals or into primary messages.
 
 So no setting makes the log content-free. This proposal reduces what the
-server writes, puts it in owner-only files that are pruned after 7 days of running time, and
+server writes, puts it in owner-only files, states plainly how long they
+are kept, and
 asks the owner to accept the small residual explicitly.
 
 ## 2. Facts (read-only checks, 2026-10-14)
@@ -76,9 +82,11 @@ contents were read or copied.
   PostgreSQL's other configuration sources: `postgresql.auto.conf`, the
   command line, and role, database or session settings. The activation
   receipt (section 6) checks all of them.
-- **Extensions:** debug print flags are off, and the shared, session and
-  local preload settings are empty. No logging-related role or database
-  defaults exist (Codex's read-only check, 2026-10-14).
+- **Preloads and overrides:** debug print flags are off, and the shared,
+  session and local preload settings are empty. No logging-related role
+  or database defaults exist (Codex's read-only check, 2026-10-14). That
+  is not a full audit of installed extensions; the invariant test and the
+  activation receipt list installed and loaded extensions explicitly.
 - **Who can change the settings.** The app connects as `postgres`, a
   SUPERUSER (devenv `initialScript`). The settings are defaults, not a
   security boundary against that role. This proposal does not change
@@ -128,8 +136,9 @@ debug_print_rewritten = off
 debug_print_plan = off
 ```
 
-`log_destination` and the collector are set in 3.3. No logging extension
-or preload library is loaded; the invariant test checks that.
+`log_destination` and the collector are set in 3.3. The invariant test
+and the activation receipt list installed and loaded extensions and the
+preload settings, and fail on any content-logging extension.
 
 `log_min_error_statement` has no `off` value. `panic` is the documented way
 to stop ordinary failing statements from being logged; a PANIC can still
@@ -149,13 +158,15 @@ log_file_mode = 0600
 log_rotation_age = 1d
 log_rotation_size = 50MB
 log_truncate_on_rotation = off
+log_timezone = 'UTC'
 ```
 
 - The server log lives in `.devenv/state/postgres/log/`, which only the
   owner's account can read.
-- **Each file is named by its start time** and is never reused or
-  appended to after a restart. That makes a file's age readable from its
-  name alone.
+- **Each file is named by its start time,** to the second, in UTC.
+  Names can collide (two starts in the same second). PostgreSQL then
+  appends to the existing file, because truncation is off. Nothing in
+  this proposal relies on names being unique.
 - `log_destination` is set explicitly, because the design depends on
   having that destination and no other. The activation receipt (section
   6) checks it.
@@ -165,47 +176,60 @@ starts, and the collector's own failures, still go to stderr. Under
 devenv, stderr goes to the process manager's files. The sink test
 (section 4.1) measures what actually lands there.
 
-### 3.4 Retention: a pruning step, with the stopped-server gap stated
+### 3.4 Retention: kept until the owner deletes them (recommended)
 
-Log files can't bound their own age, so a separate step deletes the old
-ones. **The policy proposed for review:**
+**Recommended (R1): no automatic deletion.** Collector files stay in
+`.devenv/state/postgres/log/` (files 0600, folder 0700, owner-only) until
+the owner deletes them by hand. There is no time limit and no total size
+cap; each file only rotates at 50 MB or daily.
 
-- **The rule:** a collector file whose name's start time is more than 7
-  days old is deleted.
-- **When it runs:**
-  - **at every server start,** by a small reviewed script that runs as a
-    devenv task before PostgreSQL starts, so before the app can connect;
-  - **hourly while devenv is up,** by the same script as a devenv
-    process.
-- **What it deletes:** only files in `.devenv/state/postgres/log/` whose
-  names match the collector's pattern exactly. Anything else in that
-  folder is left alone and reported.
-- **How it fails:** if the script fails or meets an unexpected file, it
-  stops PostgreSQL from starting (at start) or reports the failure
-  (hourly). It never deletes outside the log folder.
+**Why:** automatic deletion is a new destructive mechanism. Codex's review
+of draft 2 showed what a safe one needs:
+- a verified canonical folder;
+- owner and mode checks;
+- regular files only, with no symlinks or traversal;
+- valid UTC timestamps;
+- protection for the file the collector has open;
+- a defined response when cleanup fails or hangs.
 
-**The gap the owner must choose on, stated plainly:**
+Even then, it bounds age only while it runs. For a single-user local MVP,
+where these files hold only the rare unredacted primary messages of
+section 5, plain owner-only retention with the gap stated is simpler and
+easier to verify. The owner can delete the folder at any time; the
+server recreates it.
 
-- **While the server is stopped,** nothing runs, so files stay at rest
-  (mode 0600, owner-only) until the next start, however long that is.
-- **Before the next private-content use,** the server must start, so the
-  start-time pruning has already run by then.
+**Alternative (R2): a reviewed pruning step.** If the owner wants a time
+limit, it is designed as its own reviewed change before 5b closes. It
+would meet this contract:
 
-So the maximum age is "7 days of running time, plus however long the
-server is stopped". This is **not** a seven-day limit on files at rest,
-and the owner's acceptance in section 5 has to say so (Q3).
+- **The rule:** delete collector files whose UTC start time in the name
+  is more than N days old, compared with wall-clock time.
+- **Targets:**
+  - only regular files directly inside the verified canonical log
+    folder, owned by the owner with mode 0600;
+  - no symlinks, directories or traversal;
+  - names must match the pattern with a valid date.
+  - Anything else is left alone and reported.
+- **The open file:** the collector's current file (`pg_current_logfile()`,
+  or the newest file when the server is down) is never deleted, even when
+  it is past the age. A deletion would hide continuing output.
+- **When:** at every start, before PostgreSQL accepts connections, and on
+  a schedule while it runs.
+- **On failure:** a failed start-time pass stops the start. A failed,
+  missed or hung scheduled pass is a stated residual: files can then
+  outlive N days while the server runs.
+  - The healthy bound is N days plus one scheduling interval.
+  - Without a stronger response, such as stopping the server, that is
+    not a strict limit.
+- **Tests,** on the isolated setup:
+  - redirected and symlinked paths;
+  - malformed dates;
+  - non-regular and foreign files;
+  - an active old file;
+  - repeated short starts;
+  - a missed or failed scheduled pass, and recovery from it.
 
-**Size:** each file rotates at 50 MB. There is no total size cap; disk
-use is bounded by the 7-day pruning while the server runs.
-
-**Tests:** repeated short starts, a missed daily rotation, files with
-start times on either side of the 7-day boundary, a non-matching file,
-and a pruning failure that has to stop the start. All run on the isolated
-test setup of section 4.
-
-This script is a new, reviewed part of the change. It is not run on the
-owner's server until the owner restarts their own `devenv up` (section
-6).
+R2 adds a deletion mechanism and its tests to the change; Q3 chooses.
 
 ### 3.5 Logs written before the change
 
@@ -246,20 +270,31 @@ The sink test therefore uses the same launch path as the project:
 1. **Set up a throwaway devenv project** in a temporary folder:
    - it uses the project's locked devenv revision (`fe20b5c`) and the
      same PostgreSQL package;
-   - it uses the same `services.postgres` settings and pruning task as
-     the change;
+   - it uses the same `services.postgres` settings as the change,
+     and the pruning step only if Q3 chooses R2;
    - it listens on a free local port, never 5520.
 2. **Start it with `devenv up`,** so devenv's process manager captures
    stdout and stderr exactly as it does for the project.
-3. **Trace every sink it creates.** Before and after the run, list every
-   file under the throwaway's `.devenv/`, its `/private/tmp/devenv-*`
+3. **Inventory every file it creates.** Before and after the run, list
+   every file under the throwaway's `.devenv/`, its `/private/tmp/devenv-*`
    runtime folder, and the collector folder. For each file, record its
-   path, owner, mode and the modes of the folders above it.
+   path, owner, mode and the modes of the folders above it. Classify each
+   one as:
+   - **database storage:** the data directory's files and WAL, where
+     canary rows may legitimately be stored;
+   - **a log or output sink:** the collector files, the stdout and stderr
+     captures, the process-manager aggregate logs, and any other file
+     that output is forwarded to;
+   - **known other state:** for example, lock and pid files.
+
+   **An unclassified file fails the test** until it is explained.
 4. **Run the canaries** (section 4.2), then a restart, then the canaries
    again.
 5. **Force a collector start failure** (an unwritable log folder) and
    record where the server's messages go and whether the server starts.
-6. **Search every traced file** for every marker.
+6. **Search every log or output sink** for every marker. Database
+   storage is excluded from this search on purpose: a canary stored as
+   data is not a log leak. It is still in the inventory.
 
 **Pass criteria:**
 
@@ -284,9 +319,13 @@ Each uses a unique random marker string, never a private value:
   parameter (extended protocol, through Postgrex);
 - a failing statement with the marker in a SQL literal;
 - a slow statement (to confirm duration logging is off);
-- a connection-level failure with the marker in the client-supplied
-  application name. This is a primary message at a severity other than
-  ERROR.
+- a connection to a nonexistent database whose name is the marker. That
+  gives a FATAL primary message, a severity other than ERROR.
+
+**Positive controls:** each canary first runs once on a separate
+throwaway instance with default logging. There, the marker must appear
+in the log. That proves the canary reaches the message path, so its
+absence under the baseline means something.
 
 **Expected:**
 
@@ -330,15 +369,17 @@ subject to the sink test confirming it:
 - **location:** `.devenv/state/postgres/log/`, on this machine only;
 - **access:** files mode 0600, folder mode 0700, the owner's macOS
   account only;
-- **retention:** deleted 7 days after the file's start time, while the
-  server runs. **While the server is stopped, files stay at rest until
-  the next start, with no time limit** (section 3.4);
+- **retention:** under R1 (recommended), **kept with no time limit and
+  no total size cap until the owner deletes them** (section 3.4). Under
+  R2, about N days while the pruning runs healthily, with the failure and
+  stopped-server gaps stated in 3.4;
 - **copying:** never copied, uploaded or committed, as an operating rule
   (section 3.6).
 
-**Extensions:** no logging extension or preload library is in use today
-(Codex's metadata check, 2026-10-14). The invariant and the activation
-receipt check that this is still so. Adding one would reopen 5b.
+**Extensions:** the preload settings were empty in Codex's metadata
+check (2026-10-14). That is not a full extension audit. The invariant and
+the activation receipt list installed and loaded extensions. Any
+content-logging extension, now or later, reopens 5b.
 
 **What the sink test may add:** whatever the sink test finds in
 process-manager files (section 4.1) is written here before acceptance.
@@ -356,7 +397,7 @@ finds anything outside these bounds, the exception does not apply.
 3. Claude builds the change test-first (the invariant test fails on the
    current settings). It includes:
    - the `devenv.nix` settings;
-   - the pruning script, task and process;
+   - the pruning step, only if Q3 chooses R2;
    - the sink-test and canary script;
    - the invariant test;
    - the CI script change, if Q4 is yes;
@@ -381,7 +422,7 @@ finds anything outside these bounds, the exception does not apply.
      sets any of these settings on its own connections, that counts too.
      The app's pools have reconnected since the restart;
    - **sinks:** `pg_current_logfile()` is in the collector folder; the
-     folder and file paths and modes; the pruning task ran;
+     folder and file paths and modes; under R2, the pruning task ran;
    - **old copies:** the owner's choice from section 3.5 is recorded.
 
    **Any mismatch, or anything that can't be read or verified, leaves 5b
@@ -408,10 +449,9 @@ switch.
 - **Q2. Old log files.** Recommended: the owner deletes them after
   verification (3.5 a) if the demo database has ever held real people's
   data. Otherwise keep them (b).
-- **Q3. Retention.** Recommended: 7 days while the server runs, pruned at
-  every start and hourly, with files kept at rest while it is stopped
-  (3.4). Alternatives: a shorter window, or the owner also deletes the
-  folder by hand before any long stop.
+- **Q3. Retention.** Recommended: R1, keep the collector files until the
+  owner deletes them, with no time limit (3.4). Alternative: R2, a
+  reviewed pruning step with an N-day limit and its stated gaps.
 - **Q4. CI.** Should CI's own throwaway cluster
   (`.github/scripts/hermetic-verify.sh`) use the same settings, so the
   invariant runs there too? Recommended: yes, in the same PR, keeping
