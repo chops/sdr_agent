@@ -495,6 +495,102 @@ No real model call has been made; the budget for them is still zero.
   rename used to publish a new folder can replace an existing empty one.
   The design now uses a create call that fails when the name exists.
 
+### Sprint 1, day 3 (Wed Oct 14), end of day (as of 22:45 MDT)
+
+**The standup.** Sprint 1 missed its exit: R0-07 grew from one story into
+about 12 PRs over Oct 12 and 13, and the owner only learned of the miss
+today. The owner approved forecast v2.2 (R0 by Sat Oct 17, conditional;
+H1 Oct 20 to 23; B1 Oct 23 to 26; B2 Oct 26 to 29) and said: "we're going
+to have to be more disciplined about early notifications if it looks like
+we're falling behind." Five tripwires were approved for same-day notice:
+
+1. a story grows past its planned PRs or slices;
+2. the same item gets "changes requested" a second time;
+3. a critical-chain item is not started on its planned day, or passes
+   its window;
+4. an owner gate is needed within 24 hours and is not scheduled;
+5. a daily on-track, at-risk or slipping line for each critical-chain
+   item.
+
+**Merged to `main`:**
+
+- **#146, the calibration harness** (R0-07 slice E), at 11:20 MDT. It is
+  the owner-run `calibrate` and `calibrate-recover` commands, in test
+  builds only. No real model call has been made; the budget is still zero.
+- **#137, the Home inbox contract** (C1-01), at 14:31 MDT, after the owner
+  said "merge it".
+
+**Owner decisions** (each is a design or scope decision, not a merge or
+spend approval):
+
+- **C4, run settings:** the metadata-only logging amendment to ADR-0005
+  was accepted as written, after the owner first questioned it. The owner
+  answered all seven open questions. The main change: "i don't think
+  there should be a hard ceiling that no setting can change. that's not
+  user-friendly." The revised C4 design lets the owner raise or lower
+  every operational limit in the app, up to what the database column can
+  store, with an audited confirmation of what was raised. Budgets and the
+  separate safeguards still bound everything. This is a design decision;
+  nothing is built yet.
+- **C3, lead admission:** the ADR-0009 amendment was accepted, and the
+  three open questions were answered with Claude's recommendations. The
+  scoped G5 implementation approval was given. One new rule: CSV, HubSpot
+  and agent-found leads skip a company whose last lead ended converted or
+  in nurture.
+- **5b, PostgreSQL server logs:** the owner approved the direction (keep
+  them as retained files, with a disclosure). Nothing is configured yet;
+  a small proposal comes first.
+- **The B2 walkthrough** is confirmed for Oct 16 to 17.
+
+**Reviews:**
+
+- **C3** passed Codex's review of the revision (round 5).
+- **C4** passed at its third revision (3.2), after two rounds on one
+  number. See the misstep below. It now waits for the owner's G5.
+- **C1-02, the Home inbox reads** (Codex's branch), went through
+  test-first and code review. It is approved, and Codex's full test run
+  passed (2,276 tests). It is not merged.
+
+**The blocker: a HIGH security advisory in Bandit,** the web server
+(EEF-CVE-2026-105659, published 10:54 MDT). It affects the version we
+lock, 1.12.5. There is no fixed release yet, only an upstream fix in
+git. Codex showed that plain HTTP is affected too. Under ADR-0008 a HIGH
+advisory is never ignored, so nothing can merge. Codex recommends
+pinning the reviewed upstream fix with HTTP/2 turned off, under a
+reviewed ADR. The other option is to wait for a release. That choice is
+the owner's, and it is open.
+
+**Calibration** preparation was ready for the 17:00 slot. At 16:48 main
+had the harness, the pinned CLI and the database were in place, and Codex
+had approved the spend disclosure as accurate for presenting to the owner
+(not as approval to spend). Still outstanding before any call: creating
+G-R0, the owner's own account and billing check, and the command's live
+checks. At 22:44 the owner moved it to first thing Thu Oct 15. Nothing was run, no server was started and G-R0
+was not created.
+
+**Critical-chain status:**
+
+- **R0 (Oct 17): at risk.** It needs calibration on Oct 15 and five more
+  build items (C2-02, R0-04, R0-05, C9-04, C9-06). None of the five was
+  started today: the day went to C3, C4 and the C1-02 review. This was
+  reported to the owner today.
+- **Merges: slipping** while the Bandit decision is open. Each blocked day
+  costs about a day.
+- **G-R0's window** closes Sun Oct 18 at 23:59 MDT.
+
+**Follow-up issues:** #151 (a flaky CI test), #152 (a reviewer's Home
+leaves out some released drafts), #153 (Home's draft reads must respect
+the real-data switch).
+
+**What we learned:**
+
+- **Check a runtime limit by running it.** A remembered timer limit was
+  wrong for the Erlang version we pin. Codex's probe of the pinned
+  runtime settled it in one step.
+- **Don't commit while a full test run is going.** A commit made during
+  the run changed the source hash that a compile-time check embeds, and
+  the run had to prove that the test sources were unchanged.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -516,3 +612,5 @@ says what happened, why, what it cost and what changed.
 | **Oct 13: Claude's reply watcher missed a review verdict.** A watcher read its list of message ids with `cat`, which is aliased to another tool in this shell, so the list came back empty and nothing ever matched. | The alias was known but not applied to watcher scripts. | A verified-tests verdict sat unread until Claude checked the inbox by hand; no work was lost. | Watchers read with `/bin/cat` and stop if the list is empty. |
 | **Oct 13: a test claimed a case it could not reach.** The test "a launch that never opened sends no receipt" used a missing CLI, but the launcher always opens `/bin/sh` first, so a launch did open. | The fixture's premise was not checked against how the launcher starts processes. | One extra review round on the launch receipt. Claude and Codex each found it independently. | The case was split: a real refusal before launch, and a missing CLI that is treated as launched. |
 | **Oct 13: Claude's inbox watcher moved its own messages.** A watcher matched Claude's own follow-up note and moved two messages meant for Codex out of the shared inbox before Codex read them. | The watcher matched a message id, not who sent it. | Restored within minutes; no message was lost. | Watchers only match replies sent by Codex to Claude. |
+| **Oct 14: Sprint 1's missed exit reached the owner only on its last day.** R0-07 had grown from one story into about 12 PRs over Oct 12 and 13. | Growth was reported as progress, not as a schedule risk; there was no rule for when to warn. | The owner learned of the miss at standup, with no time to re-plan before it. | Forecast v2.2 and five approved tripwires that require same-day notice (see the Oct 14 entry). |
+| **Oct 14: C4's time limit was wrong twice.** The first maximum (one day) was a fixed policy ceiling, which the owner's decision against hard ceilings had just ruled out. The second came from a remembered timer limit that the pinned Erlang runtime does not have. | The first was not checked against the owner's decision, and the second was not checked against the running system. | Two extra review rounds on C4; the second "changes requested" tripped tripwire 2, reported to the owner the same day. | Codex probed the pinned runtime. The revised design bounds every limit by the stored 32-bit integer maximum, and the packet requires a test at that boundary when it is built. Runtime limits are checked by running them. |
