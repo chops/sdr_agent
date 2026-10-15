@@ -1,6 +1,6 @@
 # MVP build plan
 
-Revision: **v3.1 (2026-10-14).** §4 gains the S2–S5 re-plan (forecast v2.2) and §7 gains the early-warning tripwires, both approved by the owner on 2026-10-14 (D-110, D-111). Everything else is v3 as approved.
+Revision: **v3.1 (2026-10-14).** §4 gains the S2–S5 re-plan (forecast v2.2) and §7 gains the early-warning tripwires, both approved by the owner on 2026-10-14 (D-112, D-113). Everything else is v3 as approved.
 
 Status: **approved by the owner on 2026-10-11** (walkthrough row 22, D-097). Codex approved this exact text (v3, sha256 7866ee5f…) for owner presentation; Codex's private reviews of v1, v2 and v3 are kept outside git. Approval of the plan is not a G5, an entity PASS or a build start. Budget grants in §8 were granted by the owner with the preconditions recorded in row 22; until those preconditions and contract C9 are met, the real-model budget remains 0.
 
@@ -119,7 +119,7 @@ Critical chain: C9+C2 → R0 proof → (C1, C3, C4, C5) → B1 loop → B2.
 
 ## 4. Calendar
 
-### 4.0 v3.1 re-plan, S2 to S5 (approved 2026-10-14, D-110)
+### 4.0 v3.1 re-plan, S2 to S5 (approved 2026-10-14, D-112)
 
 Forecast v2.2. Codex approved it for owner presentation (62b886c0), after
 review rounds b27ee237, 1fad17f1 and c710d8ae. The owner chose option C,
@@ -214,7 +214,7 @@ tries uncoached), short retro.
 | Oct 30 | RC tagged | | Acceptance (tag ≠ acceptance) | Accept / fix list |
 | Oct 31-Nov 5 | Owner daily use; fixes only; rehearsal 2 | | Nov 6 script | Workshop claims fixed |
 
-Forecast honesty: the core four target end of S4 leaves S5 + S6 as buffer.
+Forecast honesty: *(v3 baseline, historical; under v3.1 §4.0 the core four by end of S4 is a stretch, not the baseline, and the Oct 30 RC is at risk.)* The core four target end of S4 leaves S5 + S6 as buffer.
 The all-ten plan is a stretch target, not an evidence-backed forecast yet:
 B2 (algorithm unknown, LinkedIn reliability), B6/B7 (portal capabilities,
 ADR-0013 findings) and B8 (late) carry the risk. Checkpoints: end S2 (core
@@ -260,7 +260,7 @@ not set priority.
   observed slip (any size), calendar delta.
 - Harmless CI retries and routine progress are not notified.
 - Waiting on the owner: pause that piece, continue other approved work.
-- **Early-warning tripwires (v3.1, approved 2026-10-14, D-111).** A slip
+- **Early-warning tripwires (v3.1, approved 2026-10-14, D-113).** A slip
   is reported as soon as it is projected, not once it is observed. If any
   one of these trips, the owner is told the same day in chat, with the
   date impact. For the critical chain, a Telegram goes out too if the
