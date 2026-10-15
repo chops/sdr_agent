@@ -24,29 +24,57 @@
 | **A3. Workshop reserve only on its day or after the owner's release.** | The workshop reserve is an ordinary allocation with `available_from`; `:release` sets `released_at` (`ModelCallAllocation`) | `model_call_admission_test.exs`: :364 unavailable before its time, available after release; :387 window opens and closes; `model_call_grant_test.exs`: :245 early release audited; :415 release refuses unknown/already released; `admin_budgets_live_test.exs`: :441 release with confirmation | **Was a gap.** **Added** a characterization test (`model_call_admission_test.exs`, "a released workshop reserve stays bound by the day limit, grant total and expiry"). |
 | **A4. Survives restart.** | No in-memory state: terms, `released_at`, `revision` and consumption are database rows, and `consumed/1` counts them on every admission | **None.** Rereading in the same process is not a restart proof (Codex). | **Add a restart proof** (below). |
 
-## The restart proof (proposed, for Codex's review before writing)
+## The restart proof (built; design passed by Codex, 406efa56)
 
-1. **Commit the state.** On an isolated test partition, with the sandbox
-   off, commit:
-   - a grant with two allocations, one of them released;
-   - one consumed attempt on each allocation.
-2. **Read it from a fresh BEAM.** Start a separate OS process with
-   `mix run` under `MIX_ENV=test` and the same partition, so no process
-   state is shared.
-3. **What the fresh process asserts:**
-   - the terms, `released_at` and the revision read back unchanged;
-   - admission charges the next call to the correct allocation;
-   - a full allocation is refused with its exact reason;
-   - consumed attempts still count and can't be spent again.
+**The test:** `test/sdr_agent/agents/grant_restart_proof_test.exs`, with
+its scripts in `test/support/restart_proof/`. It is tagged
+`:restart_proof` and runs in the default gate. If it can't run, C9-04's
+restart acceptance is unverified, not passed.
 
-   It writes a small result file, which the test reads.
-4. **Clean up:** drop the partition's committed rows afterwards (the
-   probe-pollution rule).
-5. **Tagging:** tagged `:restart_proof`. Whether the full gate includes
-   it by default is for Codex to decide; it costs a fresh application
-   boot.
+**The binding conditions (Codex) and how the test meets them:**
 
-Never the owner's database or app; no real calls.
+1. **An owned database.** The test uses a uniquely named synthetic
+   database, `sdr_agent_test_rp<10 hex>`, through `MIX_TEST_PARTITION`.
+   Both the test and each child check its name and that it is on
+   localhost:5520 before any write. The parent never touches the Repo,
+   and nothing changes the suite's sandbox mode; sandbox-off is used only
+   inside the child scripts. Cleanup drops only that database (`mix
+   ecto.drop` with the same partition) and the test's own temporary
+   folder. A cleanup failure is reported.
+2. **A scrubbed child.**
+   - Literal argv through `Port.open/2` with `:spawn_executable`.
+   - The environment comes from `SdrAgent.ChildEnv`: its base allowlist,
+     plus the devenv toolchain's paths (`MIX_HOME`, `HEX_HOME`,
+     `MIX_DEPS_PATH`, `MIX_BUILD_ROOT`, `ERL_LIBS`), plus
+     `MIX_ENV=test` and the partition. Secrets and provider settings are
+     removed.
+   - Each child checks the Fake provider and makes only reservations,
+     never a launch.
+   - Each child has a 300-second deadline, after which it is killed and
+     reported. Its exit status is checked.
+3. **Persisted state, read by a fresh BEAM.**
+   - `setup.exs` commits through the domain APIs, then exits:
+     - a grant (6 attempts) with three allocations: b1 with 2 attempts,
+       b5 with 1, and a workshop reserve with 1 that opens Nov 1;
+     - the owner's release of the workshop reserve (revision 2);
+     - one charged reservation each on b1 and b5.
+   - `verify.exs` then starts as a new OS process. It checks:
+     - the revision, the total and every allocation's id, key, buckets,
+       attempts, window, `released_at` and `grant_revision`, exactly as
+       committed;
+     - the setup charges are still counted, and still bound to their own
+       allocations;
+     - full b5 is refused with `{:budget_exhausted, :allocation}`;
+     - the next b1 call is charged to that b1 allocation and this grant;
+     - full b1 is then refused with the same exact reason;
+     - there is no borrowing and no extra debit;
+     - the grant total is counted.
+
+     It freezes its own clock and does not rely on the parent's state.
+4. **The result file.** It goes to a unique temporary path. The test
+   checks that the file exists, that all 11 named checks are true, that
+   `ok` is set, and the exit status. A missing or stale result fails the
+   test.
 
 ## Results at main (executed)
 
@@ -57,10 +85,21 @@ Never the owner's database or app; no real calls.
 - **With the two added characterization tests:** the admission and grant
   files ran **64 passed**, 0 failed. Both new tests passed on first run,
   as expected for characterization.
-- **Not done yet:**
-  - **a sensitivity check of the new tests:** a temporary local mutation
-    to show they can fail. It is evidence about the tests, not historical
-    RED;
-  - **the restart proof:** it waits for Codex's review of the design
-    above;
-  - **the full gate.**
+- **The restart proof:** 1 passed in about 5 seconds, on its own owned
+  database, which was dropped afterwards. No leftover databases or
+  temporary folders were found.
+- **Sensitivity checks.** Each is a temporary local change, reverted
+  afterwards and never committed. They are evidence about the tests, not
+  historical RED:
+  - **A2:** the grant policy was changed to also allow the scheduler.
+    The new test and the existing create test failed (2 of 25).
+  - **A3:** expiry was ignored in both places that enforce it, the query
+    filter and `grant_eligible?/3`. The new test and the existing expiry
+    test failed (2 of 39). Ignoring expiry in only one place fails
+    nothing, because the other check still applies (defense in depth).
+  - **A4:** the setup was changed to skip the b5 charge. Exactly three
+    checks failed: `setup_charges_still_counted`,
+    `setup_charges_bound_to_their_allocations` and
+    `full_b5_refused_exactly`.
+- **All of these results are author-executed**, not independently rerun.
+- **The full gate:** pending.
