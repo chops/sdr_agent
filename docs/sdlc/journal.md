@@ -499,7 +499,7 @@ No real model call has been made; the budget for them is still zero.
 
 **The standup.** Sprint 1 missed its exit: R0-07 grew from one story into
 about 12 PRs over Oct 12 and 13, and the owner only learned of the miss
-today. The owner approved forecast v2.2 (R0 by Fri Oct 17, conditional;
+today. The owner approved forecast v2.2 (R0 by Sat Oct 17, conditional;
 H1 Oct 20 to 23; B1 Oct 23 to 26; B2 Oct 26 to 29) and said: "we're going
 to have to be more disciplined about early notifications if it looks like
 we're falling behind." Five tripwires were approved for same-day notice:
@@ -527,9 +527,11 @@ spend approval):
   was accepted as written, after the owner first questioned it. The owner
   answered all seven open questions. The main change: "i don't think
   there should be a hard ceiling that no setting can change. that's not
-  user-friendly." Every operational limit can now be raised or lowered in
-  the app, with an audited confirmation of what was raised, and budgets
-  and safeguards still bound everything.
+  user-friendly." The revised C4 design lets the owner raise or lower
+  every operational limit in the app, up to what the database column can
+  store, with an audited confirmation of what was raised. Budgets and the
+  separate safeguards still bound everything. This is a design decision;
+  nothing is built yet.
 - **C3, lead admission:** the ADR-0009 amendment was accepted, and the
   three open questions were answered with Claude's recommendations. The
   scoped G5 implementation approval was given. One new rule: CSV, HubSpot
@@ -558,9 +560,12 @@ pinning the reviewed upstream fix with HTTP/2 turned off, under a
 reviewed ADR. The other option is to wait for a release. That choice is
 the owner's, and it is open.
 
-**Calibration** was ready at 16:48: every prerequisite was checked and
-the spend disclosure was approved by Codex. At 22:44 the owner moved it to
-first thing Thu Oct 15. Nothing was run, no server was started and G-R0
+**Calibration** preparation was ready for the 17:00 slot. At 16:48 main
+had the harness, the pinned CLI and the database were in place, and Codex
+had approved the spend disclosure as accurate for presenting to the owner
+(not as approval to spend). Still outstanding before any call: creating
+G-R0, the owner's own account and billing check, and the command's live
+checks. At 22:44 the owner moved it to first thing Thu Oct 15. Nothing was run, no server was started and G-R0
 was not created.
 
 **Critical-chain status:**
@@ -608,4 +613,4 @@ says what happened, why, what it cost and what changed.
 | **Oct 13: a test claimed a case it could not reach.** The test "a launch that never opened sends no receipt" used a missing CLI, but the launcher always opens `/bin/sh` first, so a launch did open. | The fixture's premise was not checked against how the launcher starts processes. | One extra review round on the launch receipt. Claude and Codex each found it independently. | The case was split: a real refusal before launch, and a missing CLI that is treated as launched. |
 | **Oct 13: Claude's inbox watcher moved its own messages.** A watcher matched Claude's own follow-up note and moved two messages meant for Codex out of the shared inbox before Codex read them. | The watcher matched a message id, not who sent it. | Restored within minutes; no message was lost. | Watchers only match replies sent by Codex to Claude. |
 | **Oct 14: Sprint 1's missed exit reached the owner only on its last day.** R0-07 had grown from one story into about 12 PRs over Oct 12 and 13. | Growth was reported as progress, not as a schedule risk; there was no rule for when to warn. | The owner learned of the miss at standup, with no time to re-plan before it. | Forecast v2.2 and five approved tripwires that require same-day notice (see the Oct 14 entry). |
-| **Oct 14: C4's time limit was wrong twice.** The first maximum (one day) was a fixed policy ceiling, which the owner's decision against hard ceilings had just ruled out. The second came from a remembered timer limit that the pinned Erlang runtime does not have. | The first was not checked against the owner's decision, and the second was not checked against the running system. | Two extra review rounds on C4; the second "changes requested" tripped tripwire 2, reported to the owner the same day. | Codex probed the pinned runtime; every limit is now bounded by the stored 32-bit integer maximum, with a test at the boundary. Runtime limits are checked by running them. |
+| **Oct 14: C4's time limit was wrong twice.** The first maximum (one day) was a fixed policy ceiling, which the owner's decision against hard ceilings had just ruled out. The second came from a remembered timer limit that the pinned Erlang runtime does not have. | The first was not checked against the owner's decision, and the second was not checked against the running system. | Two extra review rounds on C4; the second "changes requested" tripped tripwire 2, reported to the owner the same day. | Codex probed the pinned runtime. The revised design bounds every limit by the stored 32-bit integer maximum, and the packet requires a test at that boundary when it is built. Runtime limits are checked by running them. |
