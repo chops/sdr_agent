@@ -29,15 +29,20 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
        at the generation, no reserved or sent row, and no run stopped for S
        with a running Operation. Only then `{:ok, %{refused: n}}`.
 
-  **Errors:** `{:error, :drain_timeout, %{reserved: n, sent: n}}`,
+  **Errors:** `{:error, :drain_timeout, %{reserved: n, sent: n}}` (the
+  counts last observed within the deadline, each `nil` when never observed:
+  never read after the budget is spent, and never evidence of a clean
+  drain),
   `{:error, :drain_observation_failed}` (any failed or ambiguous read: never
   zero work), `{:error, :drain_settlement_failed}` (an Operation transaction
   failed; a retry finishes it), `{:error, :switch_not_open}`,
   `{:error, :stale_server_generation}`. Errors leave the fence as it is:
   nothing is unlocked or refunded.
 
-  Every transaction is bounded by the remaining budget (transaction-local
-  `lock_timeout` and `statement_timeout`).
+  Every transaction is bounded by the remaining budget: checkout without
+  queueing (retried until the budget is spent), a client-side timeout, the
+  transaction-local `lock_timeout` and `statement_timeout` re-set before
+  each step, and a rollback instead of a commit once the budget is spent.
 
   **Stage events:** `[:sdr_agent, :profile_switch, :drain]` telemetry
   (measurements empty, metadata `%{stage:, switch_id:}`). They observe
@@ -63,6 +68,10 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
   @unknown %{reserved: nil, sent: nil}
   # Client-side slack over the server-side timeouts, so Postgres cancels first.
   @client_slack_ms 25
+  # Between checkout attempts when no pool connection is free.
+  @checkout_retry_ms 10
+  # DBConnection's refusal of a checkout made with `queue: false`.
+  @no_connection "connection not available and queuing is disabled"
 
   @doc "See the moduledoc."
   def drain(switch, attrs, opts) do
@@ -401,8 +410,12 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
   end
 
   # Runs `fun` in one transaction under the one deadline:
-  #   * the transaction (connection checkout included) has a client-side
-  #     timeout of the remaining budget plus a small slack;
+  #   * the connection is checked out with `queue: false`: the pool answers
+  #     at once (DBConnection's queue wait is not bounded by `:timeout`), and
+  #     a busy pool is retried until the budget is spent, so no checkout is
+  #     left queued to run after the drain has returned;
+  #   * the transaction has a client-side timeout of the remaining budget
+  #     plus a small slack;
   #   * before `fun` and before each of its steps (`fun.(step)`), the
   #     transaction-local `lock_timeout` and `statement_timeout` are set to
   #     the budget left at that moment, so no sequence of waits overruns it;
@@ -417,12 +430,21 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
 
       ms ->
         fn -> audited_body(drain, fun) end
-        |> Repo.transaction(timeout: ms + @client_slack_ms)
+        |> Repo.transaction(timeout: ms + @client_slack_ms, queue: false)
         |> unwrap_bounded(drain)
     end
   rescue
+    error in DBConnection.ConnectionError ->
+      if error.message == @no_connection, do: retry_checkout(drain, fun), else: {:error, error}
+
     # A failed read or write is never read as zero outstanding work.
-    error -> {:error, error}
+    error ->
+      {:error, error}
+  end
+
+  defp retry_checkout(drain, fun) do
+    Process.sleep(min(@checkout_retry_ms, max(remaining(drain), 0)))
+    bounded(drain, fun)
   end
 
   defp audited_body(drain, fun) do

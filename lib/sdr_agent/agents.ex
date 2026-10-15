@@ -832,7 +832,7 @@ defmodule SdrAgent.Agents do
   # `step` (the drain's budget) runs before each lock and the writes:
   # `:ok`, or `{:error, :drain_timeout}` to roll back unchanged.
   def refuse_reserved_for_switch(invocation_id, switch_id, generation, actor, step \\ &ok/0) do
-    guard(ModelInvocation, :refuse_reserved_for_switch, invocation_id, actor, fn ->
+    guard(ModelInvocation, :refuse_reserved_for_switch, subject_id(invocation_id), actor, fn ->
       refuse_reserved(invocation_id, switch_id, generation, actor, step)
     end)
   end

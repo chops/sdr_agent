@@ -563,6 +563,69 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
     end
   end
 
+  ## Pool acquisition inside the deadline (GREEN re-review MF1, Codex 992eaec6)
+
+  describe "the drain's deadline includes connection checkout" do
+    # A separate, production-shaped pool (DBConnection.ConnectionPool, one
+    # connection, default queue settings) against this disposable test DB,
+    # with its only connection held. The domain call itself is timed.
+    test "a saturated regular pool: the drain still returns at its deadline", ctx do
+      race(fn ->
+        fence!()
+        assert {:ok, switch} = request(ctx)
+
+        {:ok, pool} =
+          Repo.start_link(name: nil, pool: DBConnection.ConnectionPool, pool_size: 1)
+
+        parent = self()
+
+        try do
+          holder =
+            Task.async(fn ->
+              Repo.put_dynamic_repo(pool)
+
+              Repo.transaction(fn ->
+                Repo.query!("SELECT 1")
+                send(parent, :pool_held)
+
+                receive do
+                  :release -> :ok
+                after
+                  5_000 -> :timeout
+                end
+              end)
+            end)
+
+          Process.put(:race_tasks, [holder | Process.get(:race_tasks, [])])
+          assert_receive :pool_held, 5_000
+
+          drainer =
+            Task.async(fn ->
+              Repo.put_dynamic_repo(pool)
+              started = System.monotonic_time(:millisecond)
+              result = drain(ctx, switch, 200)
+              {result, System.monotonic_time(:millisecond) - started}
+            end)
+
+          Process.put(:race_tasks, [drainer | Process.get(:race_tasks, [])])
+          at_600 = Task.yield(drainer, 600)
+          send(holder.pid, :release)
+          Task.await(holder, 5_000)
+
+          assert match?({:ok, {_result, _elapsed}}, at_600),
+                 "the drain still waited for a pool connection at 600 ms"
+
+          {:ok, {result, elapsed}} = at_600
+          assert match?({:error, :drain_timeout, _}, result), inspect(result)
+          assert elapsed < 400, "the drain returned after its deadline (#{elapsed} ms)"
+        after
+          stop_tasks!()
+          Supervisor.stop(pool)
+        end
+      end)
+    end
+  end
+
   ## Settlement revalidates the named switch (GREEN review MF2)
 
   describe "the drain's Operation settlement revalidates S" do

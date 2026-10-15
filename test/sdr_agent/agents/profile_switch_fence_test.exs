@@ -472,13 +472,19 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceTest do
       row = reserve!(ctx, "auditor-refuse")
       switch = request!(ctx, :claude_cli_sonnet, 1, 1)
       auditor = human(:auditor, ctx.tenant)
-      denials = length(events_of_type(ctx.tenant, "authz.denied"))
 
-      assert {:error, %Ash.Error.Forbidden{}} =
-               Agents.refuse_reserved_for_switch(row.id, switch.id, 1, auditor)
+      for target <- [row.id, %{}, nil, 42, %{id: :not_a_string}] do
+        denials = length(events_of_type(ctx.tenant, "authz.denied"))
 
-      assert length(events_of_type(ctx.tenant, "authz.denied")) == denials + 1
+        assert {:error, %Ash.Error.Forbidden{}} =
+                 Agents.refuse_reserved_for_switch(target, switch.id, 1, auditor)
+
+        assert length(events_of_type(ctx.tenant, "authz.denied")) == denials + 1
+      end
+
       assert stored(row.id).status == :reserved
+      {:ok, run} = Agents.get_run(ctx.run.id, actor: ctx.agent)
+      assert run.status == :running
     end
   end
 
