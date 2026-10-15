@@ -274,8 +274,9 @@ It is in force for C4 implementation from its acceptance.
   ledger is unaffected. The server-log prerequisite remains open until
   decided separately.
 
-**Acceptance (to fill).** Owner words, date and context; Codex review of
-the exact text.
+**Acceptance.** Recorded in this amendment's Status paragraph above (owner,
+2026-10-14). The server-log prerequisite's direction was approved the same
+day; the prerequisite itself stays open until its proposal is accepted.
 
 ### Wire witness (S12)
 
