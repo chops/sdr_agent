@@ -280,6 +280,64 @@ defmodule SdrAgent.Agents.ModelCallGrantTest do
     end
   end
 
+  describe "no agent or system changes to grant terms (C9-04 #44)" do
+    # Characterization: passes on merged code; not a RED test.
+    test "every non-admin and system actor is refused update, revoke and release; nothing changes",
+         ctx do
+      grant =
+        create!(
+          ctx,
+          g_r0(%{
+            name: "G-DEMO",
+            total_attempts: 10,
+            allocations: [
+              %{key: :b1, applies_to: [:b1], attempts: 5},
+              %{
+                key: :workshop,
+                applies_to: [:b1],
+                attempts: 5,
+                available_from: ~U[2026-11-06 07:00:00.000000Z]
+              }
+            ]
+          })
+        )
+
+      before = length(events_of_type(ctx.tenant, "model.grant.created"))
+
+      actors =
+        Enum.map([:reviewer, :auditor], &human(&1, ctx.tenant)) ++
+          Enum.map(
+            [:agent_runtime, :kernel, :seeder, :scheduler, :reconciler],
+            &system_actor(&1, ctx.tenant)
+          )
+
+      for actor <- actors do
+        assert {:error, %Forbidden{}} =
+                 Agents.update_grant_terms(grant, %{expected_revision: 1, total_attempts: 9},
+                   actor: actor
+                 )
+
+        assert {:error, %Forbidden{}} =
+                 Agents.revoke_grant(grant, %{expected_revision: 1}, actor: actor)
+
+        assert {:error, %Forbidden{}} =
+                 Agents.release_allocation(grant, %{expected_revision: 1, key: :workshop},
+                   actor: actor
+                 )
+      end
+
+      {:ok, stored} = Agents.get_grant(grant.id, actor: ctx.admin)
+      assert stored.revision == 1
+      assert stored.status == :active
+      assert stored.total_attempts == 10
+      assert Enum.all?(stored.allocations, &is_nil(&1.released_at))
+      assert length(events_of_type(ctx.tenant, "model.grant.created")) == before
+      assert [] = events_of_type(ctx.tenant, "model.grant.revoked")
+      assert [] = events_of_type(ctx.tenant, "model.grant.allocation_released")
+      assert [] = events_of_type(ctx.tenant, "model.grant.terms_changed")
+    end
+  end
+
   describe "read" do
     test "admins, auditors and the agent runtime can read; reviewers cannot", ctx do
       create!(ctx)

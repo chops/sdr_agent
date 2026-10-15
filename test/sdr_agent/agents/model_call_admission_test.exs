@@ -384,6 +384,60 @@ defmodule SdrAgent.Agents.ModelCallAdmissionTest do
       assert {:ok, _} = reserve(run, "released")
     end
 
+    # C9-04 (#44) characterization: passes on merged code; not a RED test.
+    test "a released workshop reserve stays bound by the day limit, grant total and expiry",
+         ctx do
+      workshop = ~U[2026-11-01 00:00:00.000000Z]
+
+      grant =
+        grant!(ctx, %{
+          total_attempts: 3,
+          per_utc_day_attempts: 1,
+          allocations: [
+            %{key: :workshop, applies_to: [:b1], attempts: 3, available_from: workshop}
+          ]
+        })
+
+      run = run!(ctx)
+
+      {:ok, grant} =
+        Agents.release_allocation(grant, %{expected_revision: 1, key: :workshop},
+          actor: ctx.admin
+        )
+
+      assert {:ok, _} = reserve(run, "w-1")
+      assert {:error, %Refused{reason: {:budget_exhausted, :grant_day}}} = reserve(run, "w-2")
+
+      Clock.freeze(DateTime.add(@now, 1, :day))
+      assert {:ok, _} = reserve(run, "w-3")
+
+      {:ok, _grant} =
+        Agents.update_grant_terms(
+          grant,
+          %{expected_revision: grant.revision, per_utc_day_attempts: 5},
+          actor: ctx.admin
+        )
+
+      {:ok, grant} = Agents.get_grant(grant.id, actor: ctx.admin)
+
+      {:ok, _grant} =
+        Agents.update_grant_terms(
+          grant,
+          %{
+            expected_revision: grant.revision,
+            total_attempts: 2,
+            allocations: [%{key: :workshop, attempts: 2}]
+          },
+          actor: ctx.admin
+        )
+
+      assert {:error, %Refused{reason: {:budget_exhausted, :grant}}} = reserve(run, "w-4")
+      assert consumed(grant) == 2
+
+      Clock.freeze(@expires)
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(run, "w-5")
+    end
+
     test "an allocation window opens at available_from and closes at available_until", ctx do
       from = ~U[2026-10-27 00:00:00.000000Z]
       until = ~U[2026-10-30 00:00:00.000000Z]
