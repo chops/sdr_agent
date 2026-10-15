@@ -22,6 +22,11 @@
 #                                            record; asks the owner to type
 #                                            RECOVER ID (and STOPPED ID)
 #
+# calibrate and calibrate-recover ID need SDR_WITNESS_STORE_ROOT, the
+# witness proxy's store root (for example
+# SDR_WITNESS_STORE_ROOT="$HOME/.local/share/llm-otel-proxy/blobs"); the
+# console validates it and check reports it (R0-07f).
+#
 # It runs the test-seam build (MIX_ENV=test) against exactly one database,
 # the fixed, persistent sdr_agent_calibration on the local devenv Postgres
 # (localhost:5520). The database is created if absent and migrated; there is
@@ -81,8 +86,24 @@ shift
 case "$cmd" in
   check | serve) [ "$#" -eq 0 ] || usage ;;
   bootstrap-admin) ;;
-  calibrate) [ "$#" -eq 1 ] || usage ;;
-  calibrate-recover) [ "$#" -eq 1 ] || [ "$#" -eq 2 ] || usage ;;
+  calibrate)
+    [ "$#" -eq 1 ] || usage
+    case "$1" in
+      claude_cli_opus | claude_cli_sonnet) ;;
+      *) usage ;;
+    esac
+    ;;
+  calibrate-recover)
+    uuid='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+    if [ "$#" -eq 1 ] && [ "$1" = --release-aborted ]; then
+      :
+    elif [ "$#" -ge 1 ] && [ "$#" -le 2 ] && [[ "$1" =~ $uuid ]] &&
+      { [ "$#" -eq 1 ] || [ "$2" = --owner-verified-stopped ]; }; then
+      :
+    else
+      usage
+    fi
+    ;;
   -h | --help) usage ;;
   *)
     echo "bin/calibration-console: unknown command: $cmd" >&2
@@ -91,6 +112,17 @@ case "$cmd" in
 esac
 
 ## Environment guard (before any Mix command)
+
+# R0-07f: calibrate and calibrate-recover ID need the witness proxy's store
+# root (SDR_WITNESS_STORE_ROOT); the console's plan validates it.
+case "$cmd" in
+  calibrate) capture_required=1 ;;
+  calibrate-recover) [ "$1" = --release-aborted ] && capture_required=0 || capture_required=1 ;;
+  *) capture_required=0 ;;
+esac
+if [ "$capture_required" = 1 ] && [ -z "${SDR_WITNESS_STORE_ROOT:-}" ]; then
+  refuse "SDR_WITNESS_STORE_ROOT is not set; $cmd needs the witness proxy's store root"
+fi
 
 [ -z "${DATABASE_URL:-}" ] ||
   refuse "DATABASE_URL is set; the calibration console serves only $database"
@@ -123,7 +155,15 @@ fi
 
 ## The plan Mix would really serve with
 
-line="$(mix sdr.calibration.console check | grep '^SDR_CALIBRATION_CONSOLE ' | tail -n 1)" || line=""
+# Exactly one plan line and exactly one witness line (R0-07f); the witness
+# root is data, compared byte for byte, never evaluated.
+out="$(mix sdr.calibration.console check)" || out=""
+plan_lines="$(printf '%s\n' "$out" | grep -c '^SDR_CALIBRATION_CONSOLE ' || true)"
+witness_lines="$(printf '%s\n' "$out" | grep -c '^SDR_CALIBRATION_WITNESS ' || true)"
+[ "$plan_lines" = 1 ] && [ "$witness_lines" = 1 ] ||
+  refuse "could not read the calibration console plan (mix sdr.calibration.console check)"
+line="$(printf '%s\n' "$out" | grep '^SDR_CALIBRATION_CONSOLE ')"
+witness="$(printf '%s\n' "$out" | grep '^SDR_CALIBRATION_WITNESS ')"
 read -r tag plan_db plan_host plan_db_port plan_ip plan_port plan_provider plan_server extra <<<"$line" || true
 
 [ "${tag:-}" = SDR_CALIBRATION_CONSOLE ] && [ -n "${plan_server:-}" ] && [ -z "${extra:-}" ] ||
@@ -141,12 +181,27 @@ esac
 [ "$plan_provider" = SdrAgent.AI.ModelProvider.Fake ] && [ "$plan_server" = none ] ||
   refuse "the calibration console starts no model server (plan: provider $plan_provider, model server $plan_server)"
 
+witness_root="${SDR_WITNESS_STORE_ROOT:-}"
+if [ -n "$witness_root" ]; then
+  [ "$witness" = "SDR_CALIBRATION_WITNESS set $witness_root" ] ||
+    refuse "the console's witness store root does not match SDR_WITNESS_STORE_ROOT"
+else
+  [ "$witness" = "SDR_CALIBRATION_WITNESS unset" ] ||
+    refuse "the console reports a witness store root, but SDR_WITNESS_STORE_ROOT is not set"
+fi
+
 case "$cmd" in
   check)
     echo "bin/calibration-console: database $database on $plan_host:$plan_db_port," \
       "http://$bind_ip:$bind_port, provider Fake, no model server"
     echo "bin/calibration-console: secrets $secrets_file (created on first use, by check too;" \
       "values never printed)"
+    if [ -n "$witness_root" ]; then
+      printf 'bin/calibration-console: witness store %s (trusted at check)\n' "$witness_root"
+    else
+      echo "bin/calibration-console: witness store unset: calibrate and calibrate-recover ID" \
+        "will refuse; set SDR_WITNESS_STORE_ROOT"
+    fi
     ;;
   bootstrap-admin)
     exec mix sdr.calibration.console bootstrap-admin "$@"

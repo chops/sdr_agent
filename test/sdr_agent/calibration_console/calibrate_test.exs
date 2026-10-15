@@ -95,7 +95,10 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ResultGate
+  alias SdrAgent.Agents.Witness
   alias SdrAgent.AgentsFixtures
+  alias SdrAgent.CalibrationConsole
   alias SdrAgent.CalibrationConsole.Authority
   alias SdrAgent.CalibrationConsole.Calibrate
   alias SdrAgent.CalibrationConsole.Evidence
@@ -105,6 +108,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   alias SdrAgent.Clock
   alias SdrAgent.Operations.Failure
   alias SdrAgent.Test.PinnedCLI
+  alias SdrAgent.Test.WitnessRoot
 
   @moduletag :tmp_dir
   @profile :claude_cli_opus
@@ -162,6 +166,103 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     assert function_exported?(Calibrate, :run, 2), "Calibrate.run/2 is not defined"
 
     Map.put(ctx, :cli, shell_cli!(ctx, 1))
+  end
+
+  ## R0-07f: the console-applied root and budget (contract PASS 0ee216e)
+
+  describe "R0-07f: the console-applied witness root and result wait" do
+    # The real calibration path, run without `AdmissionFixtures.admitting/1`:
+    # the shipped allowlist is empty throughout, the root and the budget
+    # come from `current/1 → plan/1 → apply_capture!/1` with
+    # `SDR_WITNESS_STORE_ROOT`, and the CLI hides its capture before it
+    # answers; this test publishes it about 1.5 s later.
+    test "a calibration observes a capture published after 1 s, with no shipped methods", ctx do
+      witness = Application.get_env(:sdr_agent, Witness, [])
+      gate = Application.get_env(:sdr_agent, ResultGate)
+      variable = System.get_env("SDR_WITNESS_STORE_ROOT")
+
+      Application.put_env(
+        :sdr_agent,
+        Witness,
+        Keyword.merge(witness, reconciled_methods: [], store_root: nil)
+      )
+
+      store = WitnessRoot.mkdir!("r007f-calibrate")
+
+      on_exit(fn ->
+        File.rm_rf!(store)
+
+        if gate,
+          do: Application.put_env(:sdr_agent, ResultGate, gate),
+          else: Application.delete_env(:sdr_agent, ResultGate)
+
+        if variable,
+          do: System.put_env("SDR_WITNESS_STORE_ROOT", variable),
+          else: System.delete_env("SDR_WITNESS_STORE_ROOT")
+      end)
+
+      System.put_env("SDR_WITNESS_STORE_ROOT", store)
+
+      {:ok, plan} =
+        :test
+        |> CalibrationConsole.current()
+        |> Map.put(:secrets, %{
+          secret_key_base: Base.encode64(:binary.copy(<<1>>, 64)),
+          token_signing_secret: Base.encode64(:binary.copy(<<2>>, 64))
+        })
+        |> CalibrationConsole.plan()
+
+      assert function_exported?(CalibrationConsole, :apply_capture!, 1),
+             "R0-07f: CalibrationConsole.apply_capture!/1 is not implemented"
+
+      :ok = CalibrationConsole.apply_capture!(plan)
+      assert Witness.store_root() == store
+      assert Witness.reconciled_methods() == []
+
+      hide =
+        ~s(mv #{sh(store)}/witnesses/"$SDR_MODEL_INVOCATION_ID" ) <>
+          ~s(#{sh(store)}/held-"$SDR_MODEL_INVOCATION_ID")
+
+      cli = witness_cli!(%{ctx | store: store}, "cli_shape_v3", hide)
+      {_runs, invocations} = counts(ctx)
+      opts = Keyword.merge(base_opts(ctx), server: server(ctx, cli))
+      calibration = Task.async(fn -> Calibrate.run(@profile, opts) end)
+
+      # The calibration task is joined, or shut down, before cleanup.
+      {id, result} =
+        try do
+          held = await_held!(store, 60_000)
+          Process.sleep(1_500)
+          id = held |> Path.basename() |> String.replace_prefix("held-", "")
+          File.rename!(held, Path.join([store, "witnesses", id]))
+          {id, Task.await(calibration, 60_000)}
+        after
+          Task.shutdown(calibration, :brutal_kill)
+        end
+
+      assert {:ok, summary} = result
+      assert summary.outcome == "match"
+      assert summary.invocation_id == id
+      assert elem(counts(ctx), 1) == invocations + 1, "a second invocation was made"
+      assert Witness.reconciled_methods() == []
+    end
+  end
+
+  defp await_held!(store, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    Stream.repeatedly(fn ->
+      case Path.wildcard(Path.join(store, "held-*")) do
+        [held] ->
+          held
+
+        [] ->
+          System.monotonic_time(:millisecond) < deadline || flunk("the CLI never hid its capture")
+          Process.sleep(20)
+          nil
+      end
+    end)
+    |> Enum.find(& &1)
   end
 
   ## Row 1: the claim
