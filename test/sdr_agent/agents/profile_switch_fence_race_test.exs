@@ -192,8 +192,10 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
 
         reserver = on_own_connection(:reserver, fn -> reserve(ctx, "switch-row-held") end)
 
-        assert {:error, %Refused{reason: :profile_switch_fenced}} = join(reserver, 5_000),
-               "the reservation waited on the switch row"
+        result = join(reserver, 5_000)
+
+        assert match?({:error, %Refused{reason: :profile_switch_fenced}}, result),
+               "the reservation waited on the switch row: #{inspect(result)}"
 
         release(holder)
         join(holder)
@@ -256,15 +258,21 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
       end)
     end
 
+    # The barrier is the drain's own stage event: it has validated S as
+    # pending and is polling the sent row, so only the final observation
+    # can see S change.
     test "S changes before the final observation: no success", ctx do
       race(fn ->
         fence!()
         assert {:ok, row} = reserve(ctx, "in-flight")
         assert {:ok, sent} = admit(ctx, row.id)
         assert {:ok, switch} = request(ctx)
+        observe_drain!()
 
         drainer = on_own_connection(:drainer, fn -> drain(ctx, switch) end)
         _ = pid_of(:drainer)
+        assert_receive {:drain_stage, :validated}, 10_000
+        assert_receive {:drain_stage, :polling}, 10_000
         assert {:ok, _} = fail_switch(ctx, switch)
 
         assert {:ok, _} =
@@ -282,10 +290,12 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
         assert {:ok, row} = reserve(ctx, "held-open")
         assert {:ok, sent} = admit(ctx, row.id)
         assert {:ok, switch} = request(ctx)
+        observe_drain!()
 
         drainer = on_own_connection(:drainer, fn -> drain(ctx, switch) end)
         drainer_pid = pid_of(:drainer)
-        Process.sleep(300)
+        assert_receive {:drain_stage, :polling}, 10_000
+        assert_receive {:drain_stage, :polling}, 10_000
 
         assert idle_without_locks?(drainer_pid),
                "the drain waited inside a transaction or holding a lock"
@@ -296,6 +306,55 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
                  )
 
         assert {:ok, %{refused: 0}} = join(drainer)
+      end)
+    end
+
+    test "progress doesn't reset the deadline", ctx do
+      race(fn ->
+        fence!()
+        assert {:ok, first} = reserve(ctx, "progress-1")
+        assert {:ok, second} = reserve(ctx, "progress-2")
+        assert {:ok, sent} = admit(ctx, first.id)
+        assert {:ok, _sent} = admit(ctx, second.id)
+        assert {:ok, switch} = request(ctx)
+        observe_drain!()
+
+        started = System.monotonic_time(:millisecond)
+        drainer = on_own_connection(:drainer, fn -> drain(ctx, switch, 800) end)
+        assert_receive {:drain_stage, :polling}, 10_000
+        Process.sleep(400)
+
+        assert {:ok, _} =
+                 Agents.complete_model_invocation(sent, AgentsFixtures.completion(),
+                   actor: ctx.agent
+                 )
+
+        assert {:error, :drain_timeout, %{reserved: 0, sent: 1}} = join(drainer)
+        elapsed = System.monotonic_time(:millisecond) - started
+        assert elapsed < 1_100, "the deadline was reset by progress (#{elapsed} ms)"
+      end)
+    end
+
+    test "a failed observation is drain_observation_failed, never zero work", ctx do
+      race(fn ->
+        fence!()
+        assert {:ok, row} = reserve(ctx, "observed")
+        assert {:ok, _sent} = admit(ctx, row.id)
+        assert {:ok, switch} = request(ctx)
+        observe_drain!()
+
+        drainer = on_own_connection(:drainer, fn -> drain(ctx, switch) end)
+        assert_receive {:drain_stage, :polling}, 10_000
+
+        try do
+          # The drain's next count query fails (disposable test DB only).
+          Repo.query!("ALTER TABLE model_invocations RENAME COLUMN status TO status_hidden")
+          assert {:error, :drain_observation_failed} = join(drainer)
+        after
+          Repo.query!("ALTER TABLE model_invocations RENAME COLUMN status_hidden TO status")
+        end
+
+        assert {:ok, [%{status: :pending}]} = Agents.list_profile_switches(actor: ctx.admin)
       end)
     end
   end
@@ -317,6 +376,144 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
         assert %{status: :failed, sent_at: nil} = stored(row.id)
       end)
     end
+
+    # The drain takes the run, the invocation and then waits on the head
+    # (held here), so a launch of the same row waits on the drain's run
+    # lock; after the drain commits, the launch finds the row refused.
+    test "the drain first: the launch waits on the drain, then is refused as not reserved",
+         ctx do
+      race(fn ->
+        fence!()
+        assert {:ok, row} = reserve(ctx, "drain-first")
+        assert {:ok, switch} = request(ctx)
+
+        {holder, holder_pid} = hold(fn -> lock_head!(ctx) end)
+        drainer = on_own_connection(:drainer, fn -> drain(ctx, switch) end)
+        drainer_pid = pid_of(:drainer)
+        await_blocked_by!(drainer_pid, holder_pid)
+
+        launcher = on_own_connection(:launcher, fn -> admit(ctx, row.id) end)
+        await_blocked_by!(pid_of(:launcher), drainer_pid)
+
+        release(holder)
+        join(holder)
+        assert {:ok, %{refused: 1}} = join(drainer)
+        assert {:error, :invocation_not_reserved} = join(launcher)
+        assert %{status: :failed, sent_at: nil} = stored(row.id)
+        assert [[0]] = sent_events(row)
+        assert [[1]] = run_failures(ctx.run)
+      end)
+    end
+  end
+
+  ## Operation settlement contention (MF2 of the interface; RED review MF3)
+
+  describe "the drain and a worker settling the same Operation" do
+    for resolved? <- [false, true] do
+      test "held contention: one terminal outcome, one cause, one live item (resolved: #{resolved?})",
+           ctx do
+        race(fn ->
+          fence!()
+          %{run: run, operation: operation} = AgentsFixtures.operated_run(ctx.tenant)
+          assert {:ok, _row} = reserve(ctx, "settle-race", run)
+          assert {:ok, switch} = request(ctx)
+
+          {holder, holder_pid} = hold(fn -> lock_operation!(operation) end)
+          drainer = on_own_connection(:drainer, fn -> drain(ctx, switch) end)
+          await_blocked_by!(pid_of(:drainer), holder_pid)
+
+          # The run stop committed before the drain waits on the Operation.
+          {:ok, stopped} = Agents.get_run(run.id, actor: ctx.agent)
+          assert {stopped.status, stopped.status_reason} == {:failed, :model_not_admitted}
+
+          worker =
+            on_own_connection(:worker, fn ->
+              SdrAgent.SDR.AgentWorker.fail_operation(operation, stopped, ctx.agent)
+            end)
+
+          await_blocked_by!(pid_of(:worker), holder_pid)
+          if unquote(resolved?), do: resolve!(ctx, stopped.attention_failure_id)
+
+          release(holder)
+          join(holder)
+          assert {:ok, %{refused: 1}} = join(drainer)
+          assert :ok = join(worker)
+
+          {:ok, settled} = SdrAgent.Operations.get_operation(operation.id, actor: ctx.admin)
+          assert settled.status in [:failed, :discarded]
+          assert [[1]] = operation_failed_events(operation)
+          assert live_items(ctx) == 1
+
+          if unquote(resolved?),
+            do: refute(settled.last_failure_id == stopped.attention_failure_id),
+            else: assert(settled.last_failure_id == stopped.attention_failure_id)
+        end)
+      end
+    end
+  end
+
+  ## Drain observation, probes and queries
+
+  # The drain's stage events (metadata only), sent to this test process.
+  defp observe_drain! do
+    id = "c202b1-drain-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    :ok =
+      :telemetry.attach(
+        id,
+        [:sdr_agent, :profile_switch, :drain],
+        fn _event, _measurements, %{stage: stage}, _config ->
+          send(parent, {:drain_stage, stage})
+        end,
+        nil
+      )
+
+    Process.put(:telemetry_handlers, [id | Process.get(:telemetry_handlers, [])])
+  end
+
+  defp lock_head!(ctx) do
+    Repo.query!("SELECT 1 FROM audit_chain_heads WHERE tenant_id = $1 FOR UPDATE", [
+      Ecto.UUID.dump!(ctx.tenant.id)
+    ])
+  end
+
+  defp lock_operation!(operation) do
+    Repo.query!("SELECT 1 FROM operations WHERE id = $1 FOR UPDATE", [
+      Ecto.UUID.dump!(operation.id)
+    ])
+  end
+
+  defp resolve!(ctx, failure_id) do
+    {:ok, failure} = SdrAgent.Operations.get_failure(failure_id, actor: ctx.admin)
+
+    {:ok, _} =
+      SdrAgent.Operations.resolve_failure(failure, %{resolution_note: "seen"}, actor: ctx.admin)
+  end
+
+  defp live_items(ctx) do
+    {:ok, items} = SdrAgent.Operations.list_attention(actor: ctx.admin)
+    length(items)
+  end
+
+  defp sent_events(row) do
+    Repo.query!(
+      "SELECT count(*) FROM audit_events WHERE event_type = 'model.invocation.sent' " <>
+        "AND model_invocation_id = $1",
+      [Ecto.UUID.dump!(row.id)]
+    ).rows
+  end
+
+  defp run_failures(run) do
+    Repo.query!("SELECT count(*) FROM failures WHERE subject_id::text = $1", [run.id]).rows
+  end
+
+  defp operation_failed_events(operation) do
+    Repo.query!(
+      "SELECT count(*) FROM audit_events WHERE subject_id = $1 AND event_type IN " <>
+        "('operations.operation.failed', 'operations.operation.discarded')",
+      [operation.id]
+    ).rows
   end
 
   ## Connections, holds and cleanup
@@ -357,7 +554,6 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
   defp holder_parent, do: Process.get(:test_parent)
 
   defp release({task, _pid}), do: send(task.pid, :release)
-  defp release(task), do: send(task.pid, :release)
 
   defp join(task_or_hold, timeout \\ 15_000)
   defp join({task, _pid}, timeout), do: Task.await(task, timeout)
@@ -441,6 +637,7 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
     fun.()
   after
     stop_tasks!()
+    for id <- Process.delete(:telemetry_handlers) || [], do: :telemetry.detach(id)
   end
 
   defp stop_tasks! do

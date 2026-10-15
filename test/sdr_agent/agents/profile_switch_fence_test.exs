@@ -279,14 +279,17 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceTest do
       assert {:ok, %{status: :sent}} = admit(ctx, fresh.id, :claude_cli_opus)
     end
 
+    # The round trip ends on Opus, the row's own profile, so the existing
+    # profile check passes and the provenance check is reached.
     test "missing reservation provenance fails closed", ctx do
       invocation = reserve!(ctx, "no-provenance")
       complete!(ctx, request!(ctx, :claude_cli_sonnet, 1, 1))
+      complete!(ctx, request!(ctx, :claude_cli_opus, 2, 2))
       hide_reserved_event!(invocation)
       fence!()
 
       assert {:error, %Refused{stage: :launch, check: :reservation_provenance_missing}} =
-               admit(ctx, invocation.id, :claude_cli_sonnet)
+               admit(ctx, invocation.id, :claude_cli_opus)
 
       refute sent?(ctx, invocation)
     end
@@ -440,19 +443,19 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceTest do
   ## 8. Drain authority
 
   describe "drain authority and validation" do
-    test "only agent_runtime of the switch's tenant may drain", ctx do
+    test "only agent_runtime of the switch's tenant may drain; others change nothing", ctx do
       _row = reserve!(ctx, "kept")
       switch = request!(ctx, :claude_cli_sonnet, 1, 1)
       attrs = %{server_generation: 1, timeout_ms: 500}
       foreign = struct(SdrAgent.Actor, type: :agent_runtime, tenant_id: Ecto.UUID.generate())
 
-      for actor <- [ctx.runtime, ctx.admin, foreign, nil] do
-        assert {:error, _} = drain(switch, attrs, actor)
-      end
-
-      for actor <- [ctx.runtime, ctx.admin] do
+      for actor <- [ctx.runtime, ctx.admin, nil] do
         assert {:error, %Ash.Error.Forbidden{}} = drain(switch, attrs, actor)
       end
+
+      # Its own type, but not this switch's tenant: the stored switch isn't
+      # found for it.
+      assert {:error, :switch_not_open} = drain(switch, attrs, foreign)
 
       assert {:ok, [%{status: :reserved}]} =
                Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)

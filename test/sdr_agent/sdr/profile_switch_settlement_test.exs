@@ -168,7 +168,10 @@ defmodule SdrAgent.SDR.ProfileSwitchSettlementTest do
     assert live_items(ctx) == 1
   end
 
-  test "a concurrent ordinary worker settles nothing twice and opens no second live item",
+  # A sequential replay of the worker's steps after the drain. The held
+  # contention is in ProfileSwitchFenceRaceTest, and the worker's whole
+  # producer path is in ProfileSwitchLateWorkerTest.
+  test "a worker replaying after the drain settles nothing twice and opens no second item",
        ctx do
     assert {:ok, %{refused: 1}} = drain(ctx)
     run = run!(ctx, ctx.run)
