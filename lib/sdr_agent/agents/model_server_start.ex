@@ -32,6 +32,7 @@ defmodule SdrAgent.Agents.ModelServerStart do
 
   alias SdrAgent.Agents.Changes.ServerStartEvent
   alias SdrAgent.Agents.Checks.CoordinatorProcess
+  alias SdrAgent.Agents.Checks.ServerStartPhase
   alias SdrAgent.Audit.Checks
 
   @real_profiles SdrAgent.AI.ModelProfiles.real_ids()
@@ -103,6 +104,7 @@ defmodule SdrAgent.Agents.ModelServerStart do
       argument :pid, :string, allow_nil?: false
       argument :node, :string, allow_nil?: false
       argument :reaper_pid, :string, allow_nil?: false
+      validate attribute_equals(:status, :allocated)
       change set_attribute(:status, :started)
       change set_attribute(:pid, arg(:pid))
       change set_attribute(:node, arg(:node))
@@ -114,6 +116,7 @@ defmodule SdrAgent.Agents.ModelServerStart do
       require_atomic? false
       accept []
       argument :ready_evidence, :atom, allow_nil?: false, constraints: [one_of: @evidence]
+      validate attribute_equals(:status, :started)
       change set_attribute(:status, :ready)
       change set_attribute(:ready_evidence, arg(:ready_evidence))
       change {ServerStartEvent, event_type: "model.server.start_ready"}
@@ -122,6 +125,7 @@ defmodule SdrAgent.Agents.ModelServerStart do
     update :mark_failed do
       require_atomic? false
       accept []
+      validate attribute_in(:status, [:allocated, :started])
       change set_attribute(:status, :failed)
       change {ServerStartEvent, event_type: "model.server.start_failed"}
     end
@@ -135,8 +139,30 @@ defmodule SdrAgent.Agents.ModelServerStart do
       authorize_if CoordinatorProcess
     end
 
-    policy action([:latest, :allocate, :mark_started, :mark_ready, :mark_failed]) do
+    policy action(:latest) do
       authorize_if CoordinatorProcess
+    end
+
+    # Writes: in the coordinator and inside the ledger's own phase for this
+    # action (and start), opened by ServerStarts after the boot fence.
+    policy action(:allocate) do
+      forbid_unless CoordinatorProcess
+      authorize_if {ServerStartPhase, action: :allocate}
+    end
+
+    policy action(:mark_started) do
+      forbid_unless CoordinatorProcess
+      authorize_if {ServerStartPhase, action: :mark_started}
+    end
+
+    policy action(:mark_ready) do
+      forbid_unless CoordinatorProcess
+      authorize_if {ServerStartPhase, action: :mark_ready}
+    end
+
+    policy action(:mark_failed) do
+      forbid_unless CoordinatorProcess
+      authorize_if {ServerStartPhase, action: :mark_failed}
     end
   end
 

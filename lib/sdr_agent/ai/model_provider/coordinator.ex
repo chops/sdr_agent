@@ -70,6 +70,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   @receipt_grace_ms 100
   @drain_timeout_ms 30_000
   @replace_retry_ms 1_000
+  @hold_bound_ms 15_000
 
   ## API
 
@@ -164,40 +165,97 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
         {:noreply, boot(%{state | tenant_id: tenant_id})}
 
       _none ->
-        Process.send_after(self(), :boot, 1_000)
-        {:noreply, state}
+        {:noreply, retry_boot(rehold_survivor(state))}
     end
   end
 
+  # Section 2: re-hold a survivor first, then one fresh read of the switch
+  # state and the desired profile, then this boot's first start, then by
+  # case. Any unknown read or failed allocation keeps everything held and
+  # retries the boot.
   defp boot(state) do
-    result =
-      case live_server() do
-        pid when is_pid(pid) -> adopt(state, pid)
-        nil -> start_new(state, :boot, boot_profile(state), nil)
-      end
+    state = rehold_survivor(state)
 
-    case result do
-      {:ok, state} -> after_boot(state)
-      {:error, state} -> retry_replacement(state)
+    with {:ok, open} <- open_switch(state),
+         {:ok, desired} <- desired_profile(state),
+         {:ok, state} <- first_start(state, desired) do
+      after_boot(state, open)
+    else
+      {:error, %{boot_id: _} = state} -> retry_boot(state)
+      _unknown -> retry_boot(state)
     end
   end
 
-  # No server is running and none is switching: a held replacement is
-  # retried (a server can die even before its init returns).
-  defp retry_replacement(%{server: nil, op: nil} = state) do
-    Process.send_after(self(), :replace, @replace_retry_ms)
-    state
+  defp retry_boot(state) do
+    Process.send_after(self(), :boot, @replace_retry_ms)
+    publish(state)
   end
 
-  defp retry_replacement(state), do: state
+  defp after_boot(state, %ModelProfileSwitch{status: :pending} = switch),
+    do: block(state, switch, "coordinator_restarted")
 
-  defp after_boot(state) do
-    case pending_switch(state) do
-      %ModelProfileSwitch{} = switch ->
-        block(state, switch, "coordinator_restarted")
+  # A blocked switch keeps the server held (section 2a); no release.
+  defp after_boot(state, %ModelProfileSwitch{status: :blocked}), do: publish(state)
+  defp after_boot(state, nil), do: reconcile(state, :boot)
+
+  # A surviving named child is re-held before any database work, so no
+  # startup uncertainty leaves it callable.
+  defp rehold_survivor(state) do
+    case live_server() do
+      pid when is_pid(pid) ->
+        ref = if state.server == pid and state.hold, do: state.hold, else: make_ref()
+        monitor = if state.server == pid, do: state.server_ref, else: Process.monitor(pid)
+        state = publish(%{state | server: pid, server_ref: monitor, hold: ref})
+
+        case hold(pid, ref) do
+          :held -> publish(%{state | hold_state: :held})
+          _pending -> publish(%{state | hold_state: :pending})
+        end
 
       nil ->
-        reconcile(state, :boot)
+        state
+    end
+  end
+
+  # The first start: adopt a survivor that meets the adoption conditions;
+  # stop one that doesn't (bounded receipt protocol) and start fresh; start
+  # the desired profile when none runs.
+  defp first_start(%{server: pid, hold_state: :held} = state, desired) when is_pid(pid) do
+    if adoptable?(pid, desired),
+      do: adopt(state, pid, desired),
+      else: replace_survivor(state, pid, desired)
+  end
+
+  defp first_start(%{server: pid} = state, _desired) when is_pid(pid), do: {:error, state}
+  defp first_start(state, desired), do: start_new(state, :boot, desired, nil)
+
+  # The exact supervised child, at the desired profile, whose own live
+  # reaper holds the named lease.
+  defp adoptable?(pid, desired) do
+    reaper = ClaudeCLI.reaper(pid)
+
+    child?(pid) and ClaudeCLI.profile(pid) == desired and is_pid(reaper) and
+      Process.alive?(reaper) and Reaper.lease(ClaudeCLI.server()) == {:held, reaper}
+  end
+
+  defp replace_survivor(state, pid, desired) do
+    case stop_and_confirm(state, pid, nil) do
+      :confirmed ->
+        state = %{state | server: nil, server_ref: nil, hold: nil}
+        start_new(state, :replacement, desired, nil)
+
+      :unconfirmed ->
+        # Its cleanup is unknown: nothing is started over it; the record
+        # stays held and failed until an operator acts.
+        state = %{state | server: nil, server_ref: nil, hold: nil, hold_state: :held}
+
+        with {:ok, start} <- allocate(state, :replacement, desired, nil),
+             state = bind(state, start),
+             {:ok, start} <- mark(state, start, :failed, %{}) do
+          {:ok, publish(bind(state, start))}
+        else
+          _error -> {:error, publish(state)}
+        end
     end
   end
 
@@ -218,37 +276,24 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     :exit, _ -> false
   end
 
-  defp boot_profile(state) do
+  # The setting's desired profile, or the default when none exists; an
+  # unreadable answer is unknown, never the default.
+  defp desired_profile(state) do
     ModelProfileSetting
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(state.tenant_id))
     |> Ash.Query.filter(tenant_id == ^state.tenant_id)
     |> Ash.read_one()
     |> case do
-      {:ok, %ModelProfileSetting{desired_profile_id: profile}} -> profile
-      _none -> ModelProfiles.default_real()
+      {:ok, %ModelProfileSetting{desired_profile_id: profile}} -> {:ok, profile}
+      {:ok, nil} -> {:ok, ModelProfiles.default_real()}
+      _error -> :error
     end
   end
 
   ## Adoption and starts
 
-  # Re-holds the surviving server (acknowledged, in its mailbox order behind
-  # any in-flight call), then records it under a new replacement start.
-  defp adopt(state, pid) do
-    ref = make_ref()
-
-    state = %{
-      state
-      | server: pid,
-        server_ref: Process.monitor(pid),
-        hold: ref,
-        hold_state: :pending
-    }
-
-    publish(state)
-    hold!(pid, ref)
-    state = %{state | hold_state: :held}
-    profile = ClaudeCLI.profile(pid)
-
+  # Records the re-held survivor under a new replacement start (`:adopted`).
+  defp adopt(state, pid, profile) do
     with {:ok, start} <- allocate(state, :replacement, profile, nil),
          state = bind(state, start),
          {:ok, start} <- mark(state, start, :started, observed(pid)),
@@ -259,17 +304,31 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     end
   end
 
-  defp hold!(pid, ref) do
-    case ClaudeCLI.hold(pid, ref, @hold_attempt_ms) do
-      {:held, ^ref} -> :ok
-      {:error, :timeout} -> hold!(pid, ref)
-      {:error, :not_running} -> :ok
+  # An acknowledged hold, bounded overall: `:held`, `:timeout` (still
+  # pending; the request stays queued in the server's mailbox) or
+  # `:not_running` (not an acknowledgement).
+  defp hold(pid, ref, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + @hold_bound_ms
+    wait = min(@hold_attempt_ms, max(deadline - System.monotonic_time(:millisecond), 0))
+
+    case ClaudeCLI.hold(pid, ref, max(wait, 1)) do
+      {:held, ^ref} ->
+        :held
+
+      {:error, :timeout} ->
+        if System.monotonic_time(:millisecond) < deadline,
+          do: hold(pid, ref, deadline),
+          else: :timeout
+
+      {:error, :not_running} ->
+        :not_running
     end
   end
 
   # Allocates, starts the server held, records it, and runs the no-call
   # preflight (boot and replacement); a switch's candidate and rollback are
-  # preflighted by the worker instead (`preflight: false`).
+  # preflighted by the worker instead (`preflight: false`). A server that
+  # never started is `{:not_started, state}`.
   defp start_new(state, reason, profile, switch, opts \\ []) do
     with {:ok, start} <- allocate(state, reason, profile, switch),
          state = bind(state, start),
@@ -278,6 +337,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
         do: preflighted_ready(state),
         else: {:ok, state}
     else
+      {:not_started, %{boot_id: _} = state} -> {:not_started, state}
       {:error, %{boot_id: _} = state} -> {:error, state}
       _error -> {:error, publish(state)}
     end
@@ -311,7 +371,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
       {:error, reason} ->
         Logger.error("model server start failed: #{inspect(reason)}")
         _ = mark(state, start, :failed, %{})
-        {:error, publish(state)}
+        {:not_started, publish(state)}
     end
   end
 
@@ -385,9 +445,12 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     publish(%{state | reconcile: expected})
   end
 
+  # Section 2a: release only the current boot's ready latest start, with
+  # its exact live server at the recorded profile and that server's own
+  # reaper holding the lease, and the stored outcome as expected.
   defp release_if_reconciled(state, expected) do
     with {:ok, latest} <- latest_start(state),
-         true <- latest.id == state.start.id and latest.status == :ready,
+         true <- current_server?(state, latest),
          true <- outcome_stored?(state, expected) do
       release(state)
     else
@@ -395,7 +458,18 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     end
   end
 
-  defp outcome_stored?(state, :boot), do: pending_switch(state) == nil
+  defp current_server?(%{server: pid, start: start, boot_id: boot}, latest) when is_pid(pid) do
+    reaper = ClaudeCLI.reaper(pid)
+
+    latest.id == start.id and latest.boot_id == boot and latest.status == :ready and
+      latest.pid == inspect(pid) and Process.alive?(pid) and
+      ClaudeCLI.profile(pid) == latest.profile_id and is_pid(reaper) and
+      Reaper.lease(ClaudeCLI.server()) == {:held, reaper}
+  end
+
+  defp current_server?(_state, _latest), do: false
+
+  defp outcome_stored?(state, :boot), do: open_switch(state) == {:ok, nil}
   defp outcome_stored?(state, {:switch, id, status}), do: switch_status(state, id) == status
 
   defp release(%{server: pid, hold: ref} = state) when is_pid(pid) and is_reference(ref) do
@@ -445,11 +519,16 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     publish(%{state | op: op})
   end
 
-  # A new hold of the current server for the switch (acknowledged).
+  # A new hold of the current server for the switch, acknowledged within
+  # its bound; reported held only on the acknowledgement.
   defp rehold(%{server: pid, hold: nil} = state) when is_pid(pid) do
     ref = make_ref()
-    hold!(pid, ref)
-    publish(%{state | hold: ref, hold_state: :held})
+    state = %{state | hold: ref}
+
+    case hold(pid, ref) do
+      :held -> publish(%{state | hold_state: :held})
+      _pending -> publish(%{state | hold_state: :pending})
+    end
   end
 
   defp rehold(state), do: state
@@ -460,26 +539,8 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   def handle_info({:op, _token, _message}, state), do: {:noreply, state}
 
-  def handle_info(
-        {:reaper_cleanup_confirmed, ref, _meta},
-        %{op: %{receipt: %{ref: ref}}} = state
-      ),
-      do: {:noreply, cleaned(state)}
-
-  # A forged, stale or duplicate receipt never counts.
+  # Receipts are awaited in the stop protocol itself; a stray one is ignored.
   def handle_info({:reaper_cleanup_confirmed, _ref, _meta}, state), do: {:noreply, state}
-
-  def handle_info({:lease_check, ref}, %{op: %{receipt: %{ref: ref}}} = state),
-    do: {:noreply, lease_check(state)}
-
-  def handle_info({:cleanup_timeout, ref}, %{op: %{receipt: %{ref: ref}}} = state),
-    do: {:noreply, unconfirmed(state)}
-
-  def handle_info(
-        {:DOWN, mref, :process, _reaper, _reason},
-        %{op: %{receipt: %{monitor: mref}}} = state
-      ),
-      do: {:noreply, unconfirmed(state)}
 
   def handle_info({:DOWN, mref, :process, _worker, reason}, %{op: %{worker_ref: mref}} = state) do
     if reason == :normal,
@@ -499,6 +560,9 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   def handle_info(:replace, %{server: nil, op: nil, start: %{}} = state),
     do: {:noreply, server_down(state)}
+
+  def handle_info(:replace, %{server: nil, op: nil, start: nil} = state),
+    do: {:noreply, state, {:continue, :boot}}
 
   def handle_info(_message, state), do: {:noreply, state}
 
@@ -543,87 +607,90 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   defp step(state, _message), do: state
 
-  # Subscribe (acknowledged) → stop → await the correlated receipt.
   defp stop_server(state, continue) do
-    reaper = ClaudeCLI.reaper(state.server)
-    ref = make_ref()
+    case stop_and_confirm(state, state.server, state.op.switch.id) do
+      :confirmed ->
+        state = publish(%{state | server: nil, server_ref: nil, hold: nil})
 
-    case is_pid(reaper) and Reaper.subscribe(reaper, ref) do
-      {:subscribed, ^ref} ->
-        receipt = %{
-          ref: ref,
-          reaper: reaper,
-          monitor: Process.monitor(reaper),
-          name: ClaudeCLI.server()
-        }
+        case continue do
+          :candidate -> start_switch_server(state, :activation, state.op.to, :candidate_preflight)
+          :rollback -> start_switch_server(state, :rollback, state.op.from, :rollback_preflight)
+        end
 
-        state =
-          publish(%{
-            state
-            | op: %{state.op | stage: :old_stopping, continue: continue, receipt: receipt}
-          })
-
-        emit(:old_stopping, state)
-        Process.demonitor(state.server_ref, [:flush])
-        _ = DynamicSupervisor.terminate_child(@server_supervisor, state.server)
-        Process.send_after(self(), {:cleanup_timeout, ref}, state.cleanup_wait_ms)
-        Process.send_after(self(), {:lease_check, ref}, @lease_poll_ms)
-        %{state | server: nil, server_ref: nil, hold: nil}
-
-      _not_subscribed ->
+      :unconfirmed ->
+        state = %{state | server: nil, server_ref: nil, hold: nil}
         block(state, state.op.switch, "old_cleanup_unconfirmed")
     end
   end
 
-  # An absent lease, or one held by a dead reaper, without the receipt is
-  # unconfirmed; the receipt (sent right after the reaper's own release) gets
-  # a short grace to arrive.
-  defp lease_check(%{op: %{receipt: receipt}} = state) do
-    case Reaper.lease(receipt.name) do
-      {:held, holder} when holder == receipt.reaper ->
-        if Process.alive?(holder) do
-          Process.send_after(self(), {:lease_check, receipt.ref}, @lease_poll_ms)
-          state
-        else
-          await_receipt(state)
-        end
+  # The receipt protocol (section 3), under one monotonic deadline from the
+  # acknowledged subscription: the stop is asynchronous, so a stop that
+  # blocks is charged to the same bound. Confirmed only by the exact ref's
+  # receipt; the reaper's DOWN without it, an absent or foreign lease, a
+  # dead holder or the deadline is unconfirmed. A server still running at
+  # the deadline is killed (its reaper still cleans up; the stage blocks).
+  defp stop_and_confirm(state, pid, switch_id) do
+    reaper = ClaudeCLI.reaper(pid)
+    ref = make_ref()
 
-      _absent_or_foreign ->
-        await_receipt(state)
+    with true <- is_pid(reaper),
+         {:subscribed, ^ref} <- Reaper.subscribe(reaper, ref, state.cleanup_wait_ms) do
+      monitor = Process.monitor(reaper)
+      if switch_id, do: emit(:old_stopping, switch_id)
+      deadline = System.monotonic_time(:millisecond) + state.cleanup_wait_ms
+      if state.server_ref, do: Process.demonitor(state.server_ref, [:flush])
+      Process.exit(pid, :shutdown)
+      result = await_receipt(ref, monitor, reaper, deadline)
+      Process.demonitor(monitor, [:flush])
+      if Process.alive?(pid), do: Process.exit(pid, :kill)
+      result
+    else
+      _not_subscribed -> :unconfirmed
     end
   end
 
-  defp await_receipt(%{op: %{receipt: %{ref: ref, monitor: monitor}}} = state) do
+  defp await_receipt(ref, monitor, reaper, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
     receive do
-      {:reaper_cleanup_confirmed, ^ref, _meta} -> cleaned(state)
-      {:DOWN, ^monitor, :process, _reaper, _reason} -> unconfirmed(state)
+      {:reaper_cleanup_confirmed, ^ref, _meta} -> :confirmed
+      {:DOWN, ^monitor, :process, ^reaper, _reason} -> :unconfirmed
     after
-      @receipt_grace_ms -> unconfirmed(state)
+      max(min(remaining, @lease_poll_ms), 0) ->
+        cond do
+          remaining <= 0 -> :unconfirmed
+          lease_lost?(reaper) -> receipt_grace(ref, monitor, reaper)
+          true -> await_receipt(ref, monitor, reaper, deadline)
+        end
     end
   end
 
-  defp cleaned(%{op: %{receipt: receipt}} = state) do
-    Process.demonitor(receipt.monitor, [:flush])
-    state = %{state | op: %{state.op | receipt: nil}}
+  defp lease_lost?(reaper),
+    do: Reaper.lease(ClaudeCLI.server()) != {:held, reaper} or not Process.alive?(reaper)
 
-    case state.op.continue do
-      :candidate -> start_switch_server(state, :activation, state.op.to, :candidate_preflight)
-      :rollback -> start_switch_server(state, :rollback, state.op.from, :rollback_preflight)
+  # The receipt follows the reaper's own lease release at once: a short
+  # grace, never a reset of the deadline.
+  defp receipt_grace(ref, monitor, reaper) do
+    receive do
+      {:reaper_cleanup_confirmed, ^ref, _meta} -> :confirmed
+      {:DOWN, ^monitor, :process, ^reaper, _reason} -> :unconfirmed
+    after
+      @receipt_grace_ms -> :unconfirmed
     end
   end
 
-  defp unconfirmed(%{op: %{receipt: receipt}} = state) do
-    Process.demonitor(receipt.monitor, [:flush])
-    block(%{state | op: %{state.op | receipt: nil}}, state.op.switch, "old_cleanup_unconfirmed")
-  end
-
+  # A candidate that provably never started takes the rollback path; any
+  # other failure blocks (fail closed).
   defp start_switch_server(state, reason, profile, stage) do
     case start_new(state, reason, profile, state.op.switch.id, preflight: false) do
       {:ok, state} ->
         send(state.op.worker, {:preflight, state.op.token, state.server, profile})
         publish(%{state | op: %{state.op | stage: stage}})
 
-      {:error, state} ->
+      {:not_started, state} when reason == :activation ->
+        start_switch_server(state, :rollback, state.op.from, :rollback_preflight)
+
+      {_error, state} ->
         block(state, state.op.switch, "#{reason}_start_failed")
     end
   end
@@ -700,13 +767,22 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   defp block(state, _switch, _reason), do: end_op(state)
 
+  # No server is running and none is switching: a held replacement is
+  # retried (a server can die even before its init returns).
+  defp retry_replacement(%{server: nil, op: nil} = state) do
+    Process.send_after(self(), :replace, @replace_retry_ms)
+    state
+  end
+
+  defp retry_replacement(state), do: state
+
   # An unexpected server death outside a switch: a held replacement.
   defp server_down(%{op: nil} = state) do
     state = publish(%{state | server: nil, server_ref: nil, hold: nil, hold_state: :pending})
 
     case start_new(state, :replacement, state.start.profile_id, nil) do
       {:ok, state} -> reconcile(state, :boot)
-      {:error, state} -> retry_replacement(state)
+      {_error, state} -> retry_replacement(state)
     end
   end
 
@@ -772,14 +848,16 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     |> Ash.read_one()
   end
 
-  defp pending_switch(state) do
+  # The tenant's open (pending or blocked) switch: `{:ok, switch | nil}`,
+  # or `:error` when unreadable (unknown, never "none").
+  defp open_switch(state) do
     ModelProfileSwitch
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(state.tenant_id))
-    |> Ash.Query.filter(tenant_id == ^state.tenant_id and status == :pending)
+    |> Ash.Query.filter(tenant_id == ^state.tenant_id and status in [:pending, :blocked])
     |> Ash.read_one()
     |> case do
-      {:ok, switch} -> switch
-      _error -> nil
+      {:ok, switch} -> {:ok, switch}
+      _error -> :error
     end
   end
 

@@ -126,7 +126,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   defp release(_name, _holder, true = _running), do: {:error, :reaper_running}
 
   defp release(name, holder, false) do
-    erase(name, holder)
+    _ = erase(name, holder)
     with pid when is_pid(pid) <- Process.whereis(name), do: send(pid, :admission_check)
     :ok
   end
@@ -417,9 +417,25 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
         :ok
 
       true ->
-        if state.name, do: erase(state.name, self())
+        release_and_confirm(state, tracked)
+    end
+  end
+
+  # A named reaper sends its receipt only after it proved that it held and
+  # released its own lease (C2-02b2α review MF4): a lease already absent or
+  # held by another reaper is not certified. An unnamed reaper has no lease.
+  defp release_and_confirm(%{name: nil} = state, tracked), do: confirm(state, tracked)
+
+  defp release_and_confirm(state, tracked) do
+    case erase(state.name, self()) do
+      :released ->
         confirm(state, tracked)
-        :ok
+
+      :not_held ->
+        Logger.error(
+          "ClaudeCLI reaper found its admission lease absent or foreign at cleanup; " <>
+            "no cleanup receipt is sent"
+        )
     end
   end
 
@@ -479,9 +495,16 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
     ArgumentError -> :ok
   end
 
+  # `:released` only when `holder` held the lease and it is now erased.
   defp erase(name, holder) do
-    with {:held, ^holder} <- lease(name), do: :persistent_term.erase(key(name))
-    :ok
+    case lease(name) do
+      {:held, ^holder} ->
+        :persistent_term.erase(key(name))
+        :released
+
+      _absent_or_foreign ->
+        :not_held
+    end
   end
 
   defp key(name), do: {__MODULE__, name}

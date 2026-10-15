@@ -74,7 +74,7 @@ defmodule SdrAgent.Agents.ServerStarts do
          :ok <- allocation_input(attrs) do
       # A failing insert may roll the transaction back itself, so the
       # conflict is recognised on the call's result.
-      fn step -> do_allocate(attrs, actor, step) end
+      fn step -> allocate_in_phase(attrs, actor, step) end
       |> LedgerCall.run(opts)
       |> conflict()
     end
@@ -91,20 +91,26 @@ defmodule SdrAgent.Agents.ServerStarts do
 
   defp allocation_input(_attrs), do: invalid(:reason, "must be one of #{inspect(@reasons)}")
 
-  defp do_allocate(attrs, actor, step) do
-    with {:ok, _opened} <- open_counter(actor),
+  defp allocate_in_phase(attrs, actor, step) do
+    with_phase(%{action: :allocate, tenant_id: actor.tenant_id, actor: actor}, fn context ->
+      do_allocate(attrs, actor, context, step)
+    end)
+  end
+
+  defp do_allocate(attrs, actor, context, step) do
+    with {:ok, _opened} <- open_counter(actor, context),
          :ok <- step.(),
          {:ok, counter} <- lock_counter(actor, :for_update),
          :ok <- step.(),
          :ok <- same_tenant_switch(attrs, actor),
          :ok <- step.() do
-      insert(attrs, counter, actor, step)
+      insert(attrs, counter, actor, context, step)
     end
   end
 
-  defp open_counter(actor) do
+  defp open_counter(actor, context) do
     ModelServerCounter
-    |> Ash.Changeset.for_create(:open, %{}, actor: actor)
+    |> Ash.Changeset.for_create(:open, %{}, actor: actor, context: context)
     |> Ash.create(return_skipped_upsert?: true)
   end
 
@@ -122,7 +128,7 @@ defmodule SdrAgent.Agents.ServerStarts do
 
   defp same_tenant_switch(_attrs, _actor), do: :ok
 
-  defp insert(attrs, counter, actor, step) do
+  defp insert(attrs, counter, actor, context, step) do
     generation = counter.last_generation + 1
 
     result =
@@ -132,13 +138,14 @@ defmodule SdrAgent.Agents.ServerStarts do
         attrs
         |> Map.take([:boot_id, :profile_id, :reason, :switch_id])
         |> Map.put(:generation, generation),
-        actor: actor
+        actor: actor,
+        context: context
       )
       |> Ash.create()
 
     with {:ok, start} <- conflict(result),
          :ok <- step.(),
-         {:ok, _counter} <- bump(counter, actor) do
+         {:ok, _counter} <- bump(counter, actor, context) do
       {:ok, start}
     end
   end
@@ -156,9 +163,9 @@ defmodule SdrAgent.Agents.ServerStarts do
 
   defp generation_conflict?(_error), do: false
 
-  defp bump(counter, actor) do
+  defp bump(counter, actor, context) do
     counter
-    |> Ash.Changeset.for_update(:bump, %{}, actor: actor)
+    |> Ash.Changeset.for_update(:bump, %{}, actor: actor, context: context)
     |> Ash.update()
   end
 
@@ -237,10 +244,14 @@ defmodule SdrAgent.Agents.ServerStarts do
     update(start, :mark_started, observed(attrs), actor)
   end
 
+  # An exact replay is a no-write success; changed facts are refused.
   defp transition(%{status: :started} = start, :started, attrs, _actor) do
-    if start.pid == inspect(attrs.pid),
-      do: {:ok, start},
-      else: invalid(:pid, "the start is already started by another server")
+    observed = observed(attrs)
+
+    if {start.pid, start.node, start.reaper_pid} ==
+         {observed.pid, observed.node, observed.reaper_pid},
+       do: {:ok, start},
+       else: invalid(:pid, "a replay cannot change the recorded identity")
   end
 
   defp transition(%{status: :started} = start, :ready, attrs, actor) do
@@ -279,9 +290,39 @@ defmodule SdrAgent.Agents.ServerStarts do
     }
 
   defp update(start, action, args, actor) do
-    start
-    |> Ash.Changeset.for_update(action, args, actor: actor)
-    |> Ash.update()
+    binding = %{action: action, tenant_id: actor.tenant_id, actor: actor, start_id: start.id}
+
+    with_phase(binding, fn context ->
+      start
+      |> Ash.Changeset.for_update(action, args, actor: actor, context: context)
+      |> Ash.update()
+    end)
+  end
+
+  ## Phases (`SdrAgent.Agents.Checks.ServerStartPhase`)
+
+  # A phase is opened only here, after the boot fence and the action's
+  # prerequisites: no exported function opens one, so a direct resource
+  # action names no binding and is refused. The binding lives in this
+  # process under a fresh reference; the context carries only that
+  # reference.
+  @phases {__MODULE__, :phases}
+
+  @doc "The open phase binding a context names (`{:ok, binding}`), or `:error`."
+  def phase(%{server_start: %{token: token}}) when is_reference(token),
+    do: Map.fetch(Process.get(@phases, %{}), token)
+
+  def phase(_context), do: :error
+
+  defp with_phase(binding, fun) do
+    token = make_ref()
+    Process.put(@phases, Map.put(Process.get(@phases, %{}), token, binding))
+
+    try do
+      fun.(%{server_start: %{token: token}})
+    after
+      Process.put(@phases, Map.delete(Process.get(@phases, %{}), token))
+    end
   end
 
   ## Locks

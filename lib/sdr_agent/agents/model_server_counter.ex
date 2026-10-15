@@ -21,6 +21,7 @@ defmodule SdrAgent.Agents.ModelServerCounter do
     authorizers: [Ash.Policy.Authorizer]
 
   alias SdrAgent.Agents.Checks.CoordinatorProcess
+  alias SdrAgent.Agents.Checks.ServerStartPhase
   alias SdrAgent.Audit.Checks
 
   postgres do
@@ -66,8 +67,14 @@ defmodule SdrAgent.Agents.ModelServerCounter do
       authorize_if CoordinatorProcess
     end
 
-    policy action([:lock, :open, :bump]) do
+    policy action(:lock) do
       authorize_if CoordinatorProcess
+    end
+
+    # Written only inside an allocation's ledger phase (ServerStarts).
+    policy action([:open, :bump]) do
+      forbid_unless CoordinatorProcess
+      authorize_if {ServerStartPhase, action: :allocate}
     end
   end
 

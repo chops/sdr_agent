@@ -10,7 +10,7 @@ defmodule SdrAgent.AI.ClaudeCLIReaperReceiptTest do
   holding the lease) sends no receipt. A subscriber's death drops its
   subscription; a ref is single-use.
 
-  Every launch is a harmless `/usr/bin/true`; no CLI, no model call.
+  Every launch is a harmless `/bin/sleep 1`; no CLI, no model call.
   """
   use ExUnit.Case, async: false
 
@@ -20,8 +20,10 @@ defmodule SdrAgent.AI.ClaudeCLIReaperReceiptTest do
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
   alias SdrAgent.Test.LaunchAdmission
 
-  @spawn {:spawn_executable, "/usr/bin/true"}
-  @port_opts {[:binary, :exit_status], {[], []}}
+  # A harmless process that stays up long enough for its pid to be read
+  # (an instant `/usr/bin/true` could exit first under load, a fixture flake).
+  @spawn {:spawn_executable, "/bin/sleep"}
+  @port_opts {[:binary, :exit_status, args: ["1"]], {[], []}}
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
 
   # MF2 (Codex 5f57e6ac): every fixture owner, reaper and server is
