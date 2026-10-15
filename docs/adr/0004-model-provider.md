@@ -581,6 +581,79 @@ D-087, D-088, D-096, D-098, D-099):
 - **Neutral:** no new dependency. Domain writes stay Ash actions with
   audit (ADR-0009).
 
+### C2-02b2β amendment (2026-10-15, proposed): the attended resolver for a blocked switch
+
+**Status: proposed.** It needs the owner's acceptance before b2β's
+implementation approval. Contract: `docs/product/r0/c2-02b2b-interface.md`
+(draft 3, in Codex review).
+
+**Context.**
+- The C2-02b2 amendment leaves a blocked switch without an exit
+  (decision 6), with the server held, and forbids `Reaper.release/1`
+  (decision 5).
+- A switch blocks when its outcome can't be proven: an unconfirmed
+  cleanup, a worker or coordinator death, an uncertain finalization, or a
+  drain or veto failure. Most of these have no receipt that could ever
+  arrive.
+- A blocked switch also occupies the tenant's single open-switch slot.
+
+**Decision.**
+1. **The only exit from blocked** is an attended resolution to
+   `:failed`.
+   - **Who:** an active human admin decides, with the role and tenant
+     re-read; any active admin may do it (C2-02b2β OQ-2).
+   - **Where:** the registered coordinator executes it, in a new
+     `:resolve` phase. `model_runtime` gains no authority.
+   - **What:** a typed attestation (`STOPPED <switch id>`). The setting is
+     unchanged, and there is no blocked → completed path.
+2. **The attestation binds:**
+   - the switch and the tenant;
+   - the covered range of starts, from the switch's generation to the
+     latest start, which must be the coordinator's current start of its
+     own boot, re-checked after the locks;
+   - the observed lease state: none, the current server's own live
+     reaper, or one dead holder recorded by a covered start;
+   - the outcome.
+
+   It is replay-idempotent by id. A replay writes nothing and authorizes
+   nothing new.
+3. **A narrow exception to C2-02b2 decision 5.** The coordinator may call
+   `Reaper.release/1` only under the cleanup authority R:
+   - the resolved switch is the tenant's newest;
+   - no switch is open;
+   - no start has been allocated since the resolution;
+   - the lease is held by a dead process exactly equal to the attested
+     holder;
+   - no named server is live.
+
+   R is evaluated after the commit and before a boot's first allocation.
+   The first later allocation, or the next open switch, consumes it.
+   Otherwise decision 5 stands.
+4. **The current server's work is never attested.** Stopping that server
+   still needs a fresh receipt. When cleanup can't be proven otherwise,
+   the result is a held hard conflict (`:cleanup_unprovable`), with the
+   existing operator path as its exit.
+5. **Unknown outcomes stay held.** An unknown commit is settled by a
+   stored read before any other action. Only the C2-02b2 reconciliation
+   releases the hold.
+6. **Unchanged:**
+   - `complete` and `fail` refuse a blocked switch;
+   - `block` keeps its no-write replay;
+   - one narrow change: `fail` on a resolved switch is refused rather
+     than read as a replay;
+   - the lock order, the Fake default and the call grants.
+
+**Consequences.**
+- **Positive:** a blocked switch has a safe, audited exit, and its lease
+  can be cleared without a manual console step when the attestation binds
+  it exactly.
+- **Negative:**
+  - a human attestation is trusted for work the system can't observe;
+  - the hard conflict still needs the operator path;
+  - the coordinator boot gains one read-only check and at most one
+    release before its first allocation.
+- **Neutral:** no new table, dependency or process.
+
 ## Justification
 
 Option 3 is documented for this use, available now, and keeps a migration path
