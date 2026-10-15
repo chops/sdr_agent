@@ -7,7 +7,10 @@
 - **Draft 2** (`94c8dd8`): Codex NEEDS-REVIEW on the new pruning step
   and on what the sink test searches.
 - **This draft** drops automatic deletion as the default (3.4) and fixes
-  the sink test's search scope. Nothing is
+  the sink test's search scope.
+- **Draft 3** (`9b9841f`): Codex NEEDS-REVIEW on the advice to delete
+  the folder while the server runs, and on positive controls that would
+  not log. Draft 3.1 (this text) corrects both. Nothing is
 configured by this document or its review.
 
 **Owner direction (2026-10-14 11:55 MDT, standup 5b):** "i approve option
