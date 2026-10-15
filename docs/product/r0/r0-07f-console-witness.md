@@ -1,9 +1,18 @@
-# R0-07f: the calibration console's witness store and result wait (contract, draft 1)
+# R0-07f: the calibration console's witness store and result wait (contract, draft 2)
 
-- **Status:** draft 2, for Codex recheck. Draft 1 (`cbc3db5`) was
-  NEEDS-REVIEW (Codex `e510d654`, report `codex-r007f-cbc3db5-contract-review.md`):
-  the entity trigger is yes; framing and no-effects evidence. No code, retry
-  or spend is authorized.
+- **Status:** draft 2. **Interface/entity PASS** (Codex, ai-pair reviewer;
+  capabilities `ai_pair: true`, `codex_review: true`): exact `0ee216e`,
+  request `m_1792080510401704916_82b61777`, answer `af639929`, 2026-10-15
+  16:10 UTC; report `codex-r007f-0ee216e-contract-pass.md`. Scoped RED only;
+  not VERIFIED RED, GREEN, merge, retry or spend. Draft 1 (`cbc3db5`) was
+  NEEDS-REVIEW (`e510d654`). Binding qualifications from the PASS:
+  argv/profile/recovery parsing precedes the root prerequisite (the AST
+  check distinguishes pure `Calibrate.command`/`recover_command` parsing
+  from effectful `run`/`recover`); a `require/2` refusal must short-circuit
+  the effectful branch; exactly one plan line and one witness line,
+  compared without trimming; the delayed-capture test proves the applied
+  console budget without fixture pre-promotion; the command-table order
+  applies to each command's own applicable steps.
 - **Base:** main `3b09183` (includes #146 `b0709f1`).
 - **Trigger:** the owner's first attended calibration (2026-10-15, 09:54 MDT)
   stopped at preflight with `calibrate stopped: witness_store_untrusted;
