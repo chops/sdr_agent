@@ -75,6 +75,14 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
   defp setting(actor), do: call(:get_profile_setting, [[actor: actor]])
   defp switches(actor), do: call(:list_profile_switches, [[actor: actor]])
 
+  defp observe(fun) do
+    fun.()
+  rescue
+    exception -> {:raised, exception.__struct__}
+  catch
+    kind, reason -> {kind, reason}
+  end
+
   defp count(type, ctx), do: length(events_of_type(ctx.tenant, type))
 
   defp nothing_written(ctx) do
@@ -190,7 +198,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
     end
 
     test "model_runtime and every other system actor are refused", ctx do
-      for type <- [:model_runtime, :agent_runtime, :kernel, :seeder, :scheduler, :reconciler] do
+      for type <- Enum.uniq([:model_runtime | SdrAgent.Actor.types()]) do
         assert {:error, %Ash.Error.Forbidden{}} =
                  request(ctx, %{}, system_actor(type, ctx.tenant))
       end
@@ -280,19 +288,19 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
     end
 
     test "conflicting terminal actions are refused as already finished", ctx do
-      completed = ctx |> pending!() |> then(&elem(complete(ctx, &1), 1))
+      switch = pending!(ctx)
+      assert {:ok, completed} = complete(ctx, switch)
       assert {:error, :switch_already_finished} = fail(ctx, completed)
       assert {:error, :switch_already_finished} = block(ctx, completed)
 
-      assert {:ok, _} =
+      assert {:ok, second} =
                request(ctx, %{
                  to_profile_id: :claude_cli_opus,
                  expected_revision: 2,
                  server_generation: 2
                })
 
-      [failed_switch | _] = elem(switches(ctx.admin), 1)
-      assert {:ok, failed} = fail(ctx, failed_switch, 2)
+      assert {:ok, failed} = fail(ctx, second, 2)
       assert {:error, :switch_already_finished} = complete(ctx, failed, 2)
       assert {:error, :switch_already_finished} = block(ctx, failed, 2)
     end
@@ -366,13 +374,16 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
         assert {:ok, [_]} = switches(actor)
       end
 
-      # Denied either as an empty read or as Forbidden.
+      # Denied either as an empty read or as Forbidden; each read once.
       for actor <- [human(:reviewer, ctx.tenant), ctx.runtime] do
-        assert setting(actor) in [{:ok, nil}] or
-                 match?({:error, %Ash.Error.Forbidden{}}, setting(actor))
+        read_setting = setting(actor)
+        read_switches = switches(actor)
 
-        assert switches(actor) in [{:ok, []}] or
-                 match?({:error, %Ash.Error.Forbidden{}}, switches(actor))
+        assert read_setting == {:ok, nil} or
+                 match?({:error, %Ash.Error.Forbidden{}}, read_setting)
+
+        assert read_switches == {:ok, []} or
+                 match?({:error, %Ash.Error.Forbidden{}}, read_switches)
       end
     end
   end
@@ -414,7 +425,13 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
       table!("model_profile_settings")
       _ = pending!(ctx)
 
-      assert {:error, %Postgrex.Error{postgres: %{code: :unique_violation}}} =
+      assert {:error,
+              %Postgrex.Error{
+                postgres: %{
+                  code: :unique_violation,
+                  constraint: "model_profile_settings_unique_tenant_index"
+                }
+              }} =
                sql_error(duplicate("model_profile_settings"))
     end
 
@@ -422,7 +439,13 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
       table!("model_profile_settings")
       _ = pending!(ctx)
 
-      assert {:error, %Postgrex.Error{postgres: %{code: :check_violation}}} =
+      assert {:error,
+              %Postgrex.Error{
+                postgres: %{
+                  code: :check_violation,
+                  constraint: "model_profile_settings_real_profile"
+                }
+              }} =
                sql_error(["UPDATE model_profile_settings SET desired_profile_id = 'fake'"])
     end
 
@@ -430,7 +453,13 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
       table!("model_profile_switches")
       _ = pending!(ctx)
 
-      assert {:error, %Postgrex.Error{postgres: %{code: :check_violation}}} =
+      assert {:error,
+              %Postgrex.Error{
+                postgres: %{
+                  code: :check_violation,
+                  constraint: "model_profile_switches_distinct_profiles"
+                }
+              }} =
                sql_error(["UPDATE model_profile_switches SET to_profile_id = from_profile_id"])
     end
 
@@ -438,17 +467,331 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
       table!("model_profile_switches")
       _ = pending!(ctx)
 
-      assert {:error, %Postgrex.Error{postgres: %{code: :check_violation}}} =
+      assert {:error,
+              %Postgrex.Error{
+                postgres: %{code: :check_violation, constraint: "model_profile_switches_status"}
+              }} =
                sql_error(["UPDATE model_profile_switches SET status = 'bogus'"])
     end
 
-    test "at most one pending or blocked switch per tenant", ctx do
-      table!("model_profile_switches")
-      _ = pending!(ctx)
+    # Each copy gets a fresh id and generation, so only the open-switch
+    # index can be the one violated.
+    for {label, original, copy} <- [
+          {"pending + pending", :pending, "pending"},
+          {"blocked + blocked", :blocked, "blocked"},
+          {"blocked + pending", :blocked, "pending"}
+        ] do
+      test "at most one open switch per tenant: #{label}", ctx do
+        table!("model_profile_switches")
+        switch = pending!(ctx)
 
-      assert {:error, %Postgrex.Error{postgres: %{code: :unique_violation}}} =
-               sql_error(duplicate("model_profile_switches"))
+        if unquote(original) == :blocked,
+          do: assert({:ok, %{status: :blocked}} = block(ctx, switch))
+
+        statements =
+          List.insert_at(
+            duplicate("model_profile_switches"),
+            2,
+            "UPDATE probe_copy SET status = '#{unquote(copy)}', " <>
+              "server_generation = server_generation + 100"
+          )
+
+        assert {:error,
+                %Postgrex.Error{
+                  postgres: %{
+                    code: :unique_violation,
+                    constraint: "model_profile_switches_one_open_index"
+                  }
+                }} = sql_error(statements)
+      end
     end
+
+    test "a completed and a pending switch may coexist", ctx do
+      table!("model_profile_switches")
+      switch = pending!(ctx)
+      assert {:ok, _} = complete(ctx, switch)
+
+      assert {:ok, %{status: :pending}} =
+               request(ctx, %{
+                 to_profile_id: :claude_cli_opus,
+                 expected_revision: 2,
+                 server_generation: 2
+               })
+    end
+  end
+
+  ## Phase confinement of the internal actions and reads (RED 6b)
+
+  describe "ProfileSwitchContext phases" do
+    setup ctx do
+      assert Code.ensure_loaded?(@setting), "C2-02a: #{inspect(@setting)} is not implemented"
+      assert {:ok, switch} = request(ctx)
+      assert {:ok, setting} = setting(ctx.admin)
+      %{switch: switch, setting_row: setting}
+    end
+
+    test ":initialize can't be called directly by an admin or model_runtime", ctx do
+      for actor <- [ctx.admin, ctx.runtime] do
+        result =
+          @setting
+          |> Ash.Changeset.for_create(
+            :initialize,
+            %{id: Ecto.UUID.generate(), tenant_id: ctx.tenant.id},
+            actor: actor,
+            context: phase(ctx, :initialize, :request, nil)
+          )
+          |> Ash.create()
+
+        assert {:error, _} = result
+      end
+
+      unchanged!(ctx)
+    end
+
+    for {label, overrides, phase_name, action} <- [
+          {"the wrong phase", Macro.escape(%{}), :transition, :complete},
+          {"the wrong action", Macro.escape(%{}), :apply, :fail},
+          {"another tenant", Macro.escape(%{tenant_id: "00000000-0000-0000-0000-000000000001"}),
+           :apply, :complete},
+          {"another switch", Macro.escape(%{switch_id: "00000000-0000-0000-0000-000000000002"}),
+           :apply, :complete}
+        ] do
+      test "a forged :apply_switch with #{label} is refused", ctx do
+        context =
+          phase(ctx, unquote(phase_name), unquote(action), ctx.switch, unquote(overrides))
+
+        assert {:error, _} = apply_switch(ctx.setting_row, ctx.switch, ctx.runtime, context)
+        unchanged!(ctx)
+        assert {:ok, [%{status: :pending}]} = switches(ctx.admin)
+      end
+    end
+
+    test "a premature :apply_switch (no transition lock, switch still pending) is refused",
+         ctx do
+      context = phase(ctx, :apply, :complete, ctx.switch)
+      assert {:error, _} = apply_switch(ctx.setting_row, ctx.switch, ctx.runtime, context)
+      unchanged!(ctx)
+    end
+
+    test ":apply_switch on a non-pending switch is refused", ctx do
+      assert {:ok, failed} = fail(ctx, ctx.switch)
+      context = phase(ctx, :apply, :complete, failed)
+      assert {:error, _} = apply_switch(ctx.setting_row, failed, ctx.runtime, context)
+      unchanged!(ctx)
+    end
+
+    test ":apply_switch by an admin, even with a matching marker, is refused", ctx do
+      context = phase(ctx, :apply, :complete, ctx.switch)
+      assert {:error, _} = apply_switch(ctx.setting_row, ctx.switch, ctx.admin, context)
+      unchanged!(ctx)
+    end
+
+    test "the internal transition read can't be used directly", ctx do
+      foreign = phase(ctx, :transition, :complete, ctx.switch, %{tenant_id: Ecto.UUID.generate()})
+
+      for {actor, context} <- [
+            {ctx.runtime, %{}},
+            {ctx.runtime, foreign},
+            {ctx.admin, phase(ctx, :transition, :complete, ctx.switch)}
+          ] do
+        result =
+          @setting
+          |> Ash.Query.for_read(:lock_for_transition, %{switch_id: ctx.switch.id},
+            actor: actor,
+            context: context
+          )
+          |> Ash.read()
+
+        assert result == {:ok, []} or match?({:error, %Ash.Error.Forbidden{}}, result)
+      end
+    end
+
+    test "fail and block take the transition lock but never write the setting", ctx do
+      assert {:ok, %{status: :blocked}} = block(ctx, ctx.switch)
+      unchanged!(ctx)
+      assert count("model.profile.setting_initialized", ctx) == 1
+    end
+  end
+
+  defp phase(ctx, phase, action, switch, overrides \\ %{}) do
+    %{
+      profile_switch:
+        Map.merge(
+          %{
+            phase: phase,
+            action: action,
+            tenant_id: ctx.tenant.id,
+            switch_id: switch && switch.id
+          },
+          overrides
+        )
+    }
+  end
+
+  defp apply_switch(setting, switch, actor, context) do
+    setting
+    |> Ash.Changeset.for_update(:apply_switch, %{switch_id: switch.id},
+      actor: actor,
+      context: context
+    )
+    |> Ash.update()
+  end
+
+  defp unchanged!(ctx) do
+    assert {:ok, %{desired_profile_id: :claude_cli_opus, revision: 1}} = setting(ctx.admin)
+  end
+
+  ## model_runtime confinement
+
+  describe "model_runtime has no other write authority" do
+    test "grant, allocation and invocation writes are refused", ctx do
+      grant = SdrAgent.AgentsFixtures.grant!(ctx.tenant, %{}, ctx.admin)
+      %{run: run} = SdrAgent.AgentsFixtures.running_run(ctx.tenant)
+      key = grant.allocations |> hd() |> Map.fetch!(:key)
+
+      grant_attrs = %{
+        name: "G-X",
+        purpose: "synthetic",
+        profile_ids: [:claude_cli_opus],
+        total_attempts: 1,
+        starts_at: ~U[2026-10-12 00:00:00.000000Z],
+        expires_at: ~U[2026-11-06 00:00:00.000000Z],
+        allocations: [%{key: :b1, applies_to: [:b1], attempts: 1}]
+      }
+
+      writes = [
+        fn -> Agents.create_grant(grant_attrs, actor: ctx.runtime) end,
+        fn ->
+          Agents.update_grant_terms(
+            grant,
+            %{expected_revision: grant.revision, total_attempts: 9},
+            actor: ctx.runtime
+          )
+        end,
+        fn ->
+          Agents.revoke_grant(grant, %{expected_revision: grant.revision}, actor: ctx.runtime)
+        end,
+        fn ->
+          Agents.release_allocation(grant, %{expected_revision: grant.revision, key: key},
+            actor: ctx.runtime
+          )
+        end
+      ]
+
+      # A crash (for example an unknown actor type) is observed as a value,
+      # so the assertion, not an exception, fails.
+      for write <- writes do
+        assert {:error, %Ash.Error.Forbidden{}} = observe(write)
+      end
+
+      attrs = SdrAgent.AgentsFixtures.model_attrs("runtime-reserve")
+
+      assert {:error, _} =
+               observe(fn -> Agents.reserve_model_invocation(run, attrs, actor: ctx.runtime) end)
+
+      assert {:ok, []} = Agents.list_model_invocations(run.id, actor: ctx.agent)
+    end
+
+    test "a missing or foreign-tenant runtime can't complete, fail or block", ctx do
+      switch = pending!(ctx)
+      foreign = struct(SdrAgent.Actor, type: :model_runtime, tenant_id: Ecto.UUID.generate())
+
+      for actor <- [nil, foreign] do
+        assert {:error, _} =
+                 call(:complete_profile_switch, [switch, %{server_generation: 1}, [actor: actor]])
+
+        assert {:error, _} =
+                 call(:fail_profile_switch, [
+                   switch,
+                   %{server_generation: 1, failure_reason: "x"},
+                   [actor: actor]
+                 ])
+
+        assert {:error, _} =
+                 call(:block_profile_switch, [
+                   switch,
+                   %{server_generation: 1, failure_reason: "x"},
+                   [actor: actor]
+                 ])
+      end
+
+      assert {:ok, [%{status: :pending}]} = switches(ctx.admin)
+    end
+  end
+
+  ## One transaction, events and audited reads (RED 4)
+
+  describe "transactions, events and audited reads" do
+    test "a failure after the setting changes rolls back the setting, the switch and the events",
+         ctx do
+      switch = pending!(ctx)
+      fail_event!("model.profile.switch_completed")
+
+      assert {:error, _} = complete(ctx, switch)
+      assert {:ok, %{desired_profile_id: :claude_cli_opus, revision: 1}} = setting(ctx.admin)
+      assert {:ok, [%{status: :pending, finished_at: nil}]} = switches(ctx.admin)
+      assert count("model.profile.switch_completed", ctx) == 0
+    end
+
+    test "a failed first request leaves no setting, switch or event", ctx do
+      assert function_exported?(Agents, :request_profile_switch, 2),
+             "C2-02a: SdrAgent.Agents.request_profile_switch/2 is not implemented"
+
+      fail_event!("model.profile.switch_requested")
+      assert {:error, _} = request(ctx)
+      nothing_written(ctx)
+    end
+
+    test "events come in order with the documented payload", ctx do
+      switch = pending!(ctx)
+      assert {:ok, _} = complete(ctx, switch)
+
+      profile_events =
+        ctx.tenant
+        |> events()
+        |> Enum.filter(&String.starts_with?(&1.event_type, "model.profile."))
+        |> Enum.sort_by(& &1.sequence)
+
+      assert Enum.map(profile_events, & &1.event_type) == [
+               "model.profile.setting_initialized",
+               "model.profile.switch_requested",
+               "model.profile.switch_completed"
+             ]
+
+      [initialized, requested, completed] = profile_events
+      assert initialized.payload["desired_profile_id"] == "claude_cli_opus"
+      assert initialized.payload["revision"] == 1
+
+      for event <- [requested, completed] do
+        assert event.payload["from_profile_id"] == "claude_cli_opus"
+        assert event.payload["to_profile_id"] == "claude_cli_sonnet"
+        assert event.payload["server_generation"] == 1
+      end
+
+      assert completed.payload["setting_revision"] == 2
+    end
+
+    test "an auditor's reads append AuditAccess records", ctx do
+      _switch = pending!(ctx)
+      auditor = human(:auditor, ctx.tenant)
+      [[before_count]] = SdrAgent.Repo.query!("SELECT count(*) FROM audit_accesses").rows
+      assert {:ok, %{revision: 1}} = setting(auditor)
+      assert {:ok, [_]} = switches(auditor)
+      [[after_count]] = SdrAgent.Repo.query!("SELECT count(*) FROM audit_accesses").rows
+      assert after_count >= before_count + 2
+    end
+  end
+
+  defp fail_event!(event_type) do
+    SdrAgent.Repo.query!("""
+    CREATE FUNCTION sdr_test_fail_switch_event() RETURNS trigger
+    LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected switch event failure'; END $$
+    """)
+
+    SdrAgent.Repo.query!(
+      "CREATE TRIGGER fail_switch_event BEFORE INSERT ON audit_events FOR EACH ROW " <>
+        "WHEN (NEW.event_type = '#{event_type}') EXECUTE FUNCTION sdr_test_fail_switch_event()"
+    )
   end
 
   test "the resources are the accepted ones", _ctx do
