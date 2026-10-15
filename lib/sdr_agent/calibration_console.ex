@@ -30,13 +30,27 @@ defmodule SdrAgent.CalibrationConsole do
       server, and Oban stays in `testing: :manual` (jobs are never
       executed), so no agent run can start.
 
+    * **Witness store and result wait (R0-07f).** The only new input is
+      `SDR_WITNESS_STORE_ROOT`, read by `current/1`: the witness proxy's
+      store root. A present value must have no control character and pass
+      `SdrAgent.Agents.Witness.Store.validate_root/1` unchanged (nothing is
+      created or repaired), or every command is refused; an absent one plans
+      `nil`, and `require/2` then refuses `calibrate` and every
+      `calibrate-recover ID` (the other commands need no capture). The
+      plan's `result_gate` is `ResultGate`'s own ceiling and default poll
+      (120 s, 1 s), never the test build's lowered wait.
+
   `apply!/2` puts the plan into the application environment (for this VM
-  only), `ensure_storage!/0` creates the database if it is absent and runs
+  only), including the Witness root and wait (`apply_capture!/1`), `ensure_storage!/0` creates the database if it is absent and runs
   pending migrations — there is no drop, reset or seed — and
-  `verify_started!/0` re-checks, after start, that the Repo serves the fixed
-  database and no ClaudeCLI server is running.
+  `verify_started!/1` re-checks, after start, that the Repo serves the fixed
+  database, that the Witness root and wait are still the plan's, and that
+  no ClaudeCLI server is running.
   """
 
+  alias SdrAgent.Agents.ResultGate
+  alias SdrAgent.Agents.Witness
+  alias SdrAgent.Agents.Witness.Store
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.Fake
   alias SdrAgent.AI.ModelProvider.Runtime
@@ -46,6 +60,8 @@ defmodule SdrAgent.CalibrationConsole do
   @port 4124
   @db_port 5520
   @local_hosts ["localhost", "127.0.0.1"]
+  @witness_variable "SDR_WITNESS_STORE_ROOT"
+  @result_gate [wait_ms: 120_000, poll_ms: 1_000]
 
   @typedoc "What `plan/1` reads: the build's environment and configuration."
   @type config :: %{
@@ -56,7 +72,9 @@ defmodule SdrAgent.CalibrationConsole do
           required(:endpoint) => keyword(),
           required(:oban) => keyword(),
           optional(:token_signing_secret) => String.t() | nil,
-          optional(:secrets) => SdrAgent.CalibrationConsole.Secrets.t()
+          optional(:secrets) => SdrAgent.CalibrationConsole.Secrets.t(),
+          optional(:witness_store_root) => String.t() | nil,
+          optional(:witness) => keyword()
         }
 
   @typedoc "The configuration the console serves with (it holds the secrets: never print it)."
@@ -66,8 +84,19 @@ defmodule SdrAgent.CalibrationConsole do
           oban: keyword(),
           token_signing_secret: String.t(),
           model_provider: module(),
-          model_server: :none
+          model_server: :none,
+          witness: %{store_root: String.t() | nil},
+          witness_env: keyword(),
+          result_gate: keyword()
         }
+
+  @typedoc "A console command, for `require/2`."
+  @type command ::
+          :check
+          | :serve
+          | :bootstrap_admin
+          | {:calibrate, atom()}
+          | {:recover, String.t() | nil}
 
   @doc "The only database the console serves."
   def database, do: @database
@@ -85,7 +114,9 @@ defmodule SdrAgent.CalibrationConsole do
       repo: Application.get_env(:sdr_agent, SdrAgent.Repo, []),
       endpoint: Application.get_env(:sdr_agent, SdrAgentWeb.Endpoint, []),
       oban: Application.get_env(:sdr_agent, Oban, []),
-      token_signing_secret: Application.get_env(:sdr_agent, :token_signing_secret)
+      token_signing_secret: Application.get_env(:sdr_agent, :token_signing_secret),
+      witness_store_root: System.get_env(@witness_variable),
+      witness: Application.get_env(:sdr_agent, Witness, [])
     }
   end
 
@@ -95,7 +126,8 @@ defmodule SdrAgent.CalibrationConsole do
     with :ok <- check_build(config),
          :ok <- check_repo(config.repo),
          :ok <- check_provider(config.model_provider),
-         {:ok, secrets} <- check_secrets(config) do
+         {:ok, secrets} <- check_secrets(config),
+         {:ok, root} <- check_witness_root(Map.get(config, :witness_store_root)) do
       {:ok,
        %{
          repo: repo(config.repo),
@@ -104,9 +136,53 @@ defmodule SdrAgent.CalibrationConsole do
          token_signing_secret: secrets.token_signing_secret,
          oban: Keyword.put(config.oban, :testing, :manual),
          model_provider: Fake,
-         model_server: :none
+         model_server: :none,
+         witness: %{store_root: root},
+         witness_env: Map.get(config, :witness, []),
+         result_gate: @result_gate
        }}
     end
+  end
+
+  @doc """
+  Whether `command` may run under `plan`: `calibrate` and every
+  `calibrate-recover ID` need the witness store root (the call's evidence
+  and sent recovery read it); `check`, `serve`, `bootstrap-admin` and
+  `calibrate-recover --release-aborted` (`{:recover, nil}`) do not. Returns
+  `:ok` or `{:error, message}`.
+  """
+  @spec require(plan(), command()) :: :ok | {:error, String.t()}
+  def require(%{witness: %{store_root: root}}, command)
+      when command in [:check, :serve, :bootstrap_admin] or command == {:recover, nil} or
+             is_binary(root),
+      do: :ok
+
+  def require(_plan, {kind, _arg}) when kind in [:calibrate, :recover] do
+    {:error,
+     "#{@witness_variable} is not set: calibrate and calibrate-recover ID need the witness " <>
+       "proxy's store root"}
+  end
+
+  # An explicitly supplied root must be exactly a trusted directory: no
+  # control character (it is printed on a machine-read line), then the
+  # store's own check. Absent is allowed; nothing is created or repaired.
+  defp check_witness_root(nil), do: {:ok, nil}
+
+  defp check_witness_root(root) when is_binary(root) do
+    if String.match?(root, ~r/[\x00-\x1F\x7F]/) do
+      witness_refusal(root, "it contains a control character")
+    else
+      case Store.validate_root(root) do
+        {:ok, ^root} -> {:ok, root}
+        {:error, reason} -> witness_refusal(root, reason)
+      end
+    end
+  end
+
+  defp witness_refusal(root, reason) do
+    {:error,
+     "#{@witness_variable}=#{inspect(root)} is not a trusted witness store root " <>
+       "(#{reason}); unset it, or name the witness proxy's store directory"}
   end
 
   defp check_build(%{mix_env: :test, test_seams?: true}), do: :ok
@@ -187,7 +263,8 @@ defmodule SdrAgent.CalibrationConsole do
     |> Keyword.delete(:https)
     |> Keyword.merge(
       server: true,
-      http: [ip: @ip, port: @port],
+      # ADR-0008 amendment (EEF-CVE-2026-105659): HTTP/2 stays off.
+      http: [ip: @ip, port: @port, http_2_options: [enabled: false]],
       url: [host: "127.0.0.1", port: @port],
       check_origin: ["//127.0.0.1:#{@port}", "//localhost:#{@port}"]
     )
@@ -218,6 +295,16 @@ defmodule SdrAgent.CalibrationConsole do
   end
 
   @doc """
+  The witness line `check` prints after the plan line:
+  `SDR_CALIBRATION_WITNESS set <root>` (the root verbatim; `plan/1` refuses
+  any control character, so it is one line) or `SDR_CALIBRATION_WITNESS
+  unset`.
+  """
+  @spec witness_line(plan()) :: String.t()
+  def witness_line(%{witness: %{store_root: nil}}), do: "SDR_CALIBRATION_WITNESS unset"
+  def witness_line(%{witness: %{store_root: root}}), do: "SDR_CALIBRATION_WITNESS set " <> root
+
+  @doc """
   Puts `plan` into this VM's application environment, before the app
   starts. `serve: true` also activates `SdrAgentWeb.CalibrationConsole`
   (sign-in and `/admin` only); otherwise the endpoint does not listen.
@@ -238,6 +325,7 @@ defmodule SdrAgent.CalibrationConsole do
     )
 
     if serve?, do: Application.put_env(:sdr_agent, SdrAgentWeb.CalibrationConsole, active: true)
+    apply_capture!(plan)
 
     endpoint = Application.get_env(:sdr_agent, SdrAgentWeb.Endpoint, [])
 
@@ -246,6 +334,42 @@ defmodule SdrAgent.CalibrationConsole do
       raise "the console's secrets were not applied"
 
     verify_applied!()
+  end
+
+  @doc """
+  Puts the plan's witness root (the build's `Witness` configuration with
+  only `store_root` replaced, so the shipped allowlist stays as built) and
+  its result wait into this VM, then verifies them against the plan.
+  Called by `apply!/2`.
+  """
+  @spec apply_capture!(plan()) :: :ok
+  def apply_capture!(plan) do
+    Application.put_env(
+      :sdr_agent,
+      Witness,
+      Keyword.put(plan.witness_env, :store_root, plan.witness.store_root)
+    )
+
+    Application.put_env(:sdr_agent, ResultGate, plan.result_gate)
+    verify_capture!(plan)
+  end
+
+  # Against the values the plan carries, never a second environment read.
+  defp verify_capture!(plan) do
+    witness = Application.get_env(:sdr_agent, Witness, [])
+    gate = Application.get_env(:sdr_agent, ResultGate, [])
+
+    Witness.store_root() == plan.witness.store_root ||
+      raise "the witness store root is not the plan's"
+
+    Witness.reconciled_methods() == [] || raise "the shipped witness allowlist is not empty"
+    witness[:allow_method_override] == true || raise "the calibration method override is off"
+
+    (ResultGate.wait_ms() == plan.result_gate[:wait_ms] and
+       gate[:poll_ms] == plan.result_gate[:poll_ms]) ||
+      raise "the result wait is not the plan's"
+
+    :ok
   end
 
   defp verify_applied! do
@@ -299,10 +423,14 @@ defmodule SdrAgent.CalibrationConsole do
     end
   end
 
-  @doc "After start: the Repo serves `sdr_agent_calibration` and no ClaudeCLI server runs."
-  @spec verify_started!() :: :ok
-  def verify_started! do
+  @doc """
+  After start: the Repo serves `sdr_agent_calibration`, the Witness root
+  and result wait are still `plan`'s, and no ClaudeCLI server runs.
+  """
+  @spec verify_started!(plan()) :: :ok
+  def verify_started!(plan) do
     verify_applied!()
+    verify_capture!(plan)
     ClaudeCLI.running?(ClaudeCLI.server()) && raise "a ClaudeCLI model server is running"
     :ok
   end
