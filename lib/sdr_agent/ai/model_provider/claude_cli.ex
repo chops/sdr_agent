@@ -149,6 +149,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       it is confirmed stopped, or an operator `Reaper.release/1` attests it
       is gone. A reaper lost while the server is idle is replaced only when
       no launch is unknown or unconfirmed.
+    * **Launch hold (C2-02b2α).** Separate from cleanup admission: a server
+      started with `hold: ref`, or held with `hold/2,3`, refuses every
+      newly dequeued call with `{:error, :provider_held}` before launch
+      admission. Only `release_hold/2,3` with the current ref releases it.
+      `held?/1` publishes whether it is held, never the ref.
     * `:timeout` must be at least 1000 ms (`{:error, {:invalid_timeout, t}}`
       otherwise); the deadline is absolute from enqueue, so it is checked
       again before launch and bounds the run.
@@ -193,6 +198,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   @min_timeout 1_000
   @exit_grace_ms 2_000
   @predecessor_wait_ms 3_000
+  @control_timeout_ms 5_000
 
   @doc """
   Starts a server. Options: `:name` (registers it and keeps its attestation
@@ -214,6 +220,63 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   @doc "The registered name of the application's one supervised server."
   def server, do: @server
+
+  @doc """
+  Holds `server`'s launches under `ref`, replacing any current hold (the
+  same ref is idempotent). Answers `{:held, ref}`, `{:error, :not_running}`,
+  or `{:error, :timeout}` when the server is busy past `timeout` ms with a
+  call already past admission; the request then still takes effect, in
+  mailbox order, before any later call.
+  """
+  def hold(server, ref, timeout \\ @control_timeout_ms) when is_reference(ref),
+    do: control(server, {:hold, ref}, timeout)
+
+  @doc """
+  Releases `server`'s hold if `ref` is the current one: `:ok`, `{:error,
+  :stale_hold}` (an older or foreign ref, or no hold; nothing changes),
+  `{:error, :not_running}` or `{:error, :timeout}`.
+  """
+  def release_hold(server, ref, timeout \\ @control_timeout_ms) when is_reference(ref),
+    do: control(server, {:release_hold, ref}, timeout)
+
+  defp control(server, message, timeout) do
+    GenServer.call(server, message, timeout)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
+    :exit, _not_running -> {:error, :not_running}
+  end
+
+  @doc """
+  Whether `server` (a registered name or any server's pid) is held; false
+  when it is not running. Never blocks on a running call.
+  """
+  def held?(server) when is_atom(server) do
+    :ets.lookup(server, :held) == [{:held, true}]
+  rescue
+    ArgumentError -> false
+  end
+
+  def held?(server) when is_pid(server), do: published(server, :held) == true
+
+  @doc """
+  The pid of `server`'s own reaper (a registered name or a server pid), or
+  nil when it is not running or has none. Never blocks on a running call.
+  """
+  def reaper(server) when is_atom(server) do
+    case :ets.lookup(server, :reaper) do
+      [{:reaper, reaper}] when is_pid(reaper) -> reaper
+      _none -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  def reaper(server) when is_pid(server) do
+    case published(server, :reaper) do
+      reaper when is_pid(reaper) -> reaper
+      _none -> nil
+    end
+  end
 
   @doc "Whether `server` (a name or pid) is a live process on this node."
   def running?(server) do
@@ -451,6 +514,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       reaper: nil,
       reaper_opts: Keyword.get(opts, :reaper, []),
       blocked: nil,
+      hold: hold_option(opts),
       lost_reaper: nil,
       predecessor: nil,
       stuck: [],
@@ -468,9 +532,17 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     }
 
     publish(state, :profile, profile.id)
+    publish(state, :held, not is_nil(state.hold))
     state = state |> await_predecessor() |> admit()
     preflight(state)
     {:ok, state}
+  end
+
+  defp hold_option(opts) do
+    case Keyword.get(opts, :hold) do
+      ref when is_reference(ref) or is_nil(ref) -> ref
+      other -> raise ArgumentError, "ClaudeCLI :hold must be a reference, got #{inspect(other)}"
+    end
   end
 
   # A predecessor's reaper still cleaning up gets a bounded wait; past it
@@ -537,6 +609,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     do: not is_nil(state.reaper) and state.stuck == [] and map_size(state.unconfirmed) == 0
 
   defp sync_admission(state) do
+    publish(state, :reaper, state.reaper)
+
     admission =
       cond do
         is_nil(state.reaper) -> {:blocked, state.blocked || :previous_cleanup_unconfirmed}
@@ -593,6 +667,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
       not Process.alive?(caller) ->
         {:reply, {:error, :caller_down}, state}
 
+      not is_nil(state.hold) ->
+        {:reply, {:error, :provider_held}, state}
+
       not admitted?(state) ->
         {:reply, {:error, :provider_not_quiescent}, state}
 
@@ -604,6 +681,19 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
         {:reply, result, state}
     end
   end
+
+  def handle_call({:hold, ref}, _from, state) do
+    publish(state, :held, true)
+    {:reply, {:held, ref}, %{state | hold: ref}}
+  end
+
+  def handle_call({:release_hold, ref}, _from, %{hold: ref} = state) do
+    publish(state, :held, false)
+    {:reply, :ok, %{state | hold: nil}}
+  end
+
+  def handle_call({:release_hold, _ref}, _from, state),
+    do: {:reply, {:error, :stale_hold}, state}
 
   @impl true
   def handle_info({port, {:data, _data}}, state) when is_port(port), do: {:noreply, state}

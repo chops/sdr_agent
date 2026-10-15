@@ -22,7 +22,8 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       used by `SdrAgent.SDR.AgentWorker`, `SdrAgent.SDR.ReplyWorker` and
       the public `SdrAgent.AI.ModelProvider.complete/2`. An absent or
       unhealthy ClaudeCLI is a typed refusal before any reservation:
-      `{:error, :provider_not_running}`, `:provider_not_quiescent`
+      `{:error, :provider_not_running}`, `:provider_held` (the coordinator
+      holds the server's launches, C2-02b2α), `:provider_not_quiescent`
       (admission closed), `:llm_proxy_shim_not_found` or
       `:pinned_cli_unavailable` (no pin, or the pinned build is missing or
       is not the reviewed identity) or `:real_model_staged` (R0-02 staging:
@@ -121,6 +122,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
     cond do
       admission == :not_running -> {:error, :provider_not_running}
+      ClaudeCLI.held?(server) -> {:error, :provider_held}
       admission != :open -> {:error, :provider_not_quiescent}
       attestation[:command?] == false -> {:error, :llm_proxy_shim_not_found}
       not pinned_cli_present?(attestation) -> {:error, :pinned_cli_unavailable}
@@ -148,7 +150,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
   @doc """
   The run `failure_reason` recorded when a worker refuses to run because of
-  `reason` (`:provider_not_running`, `:provider_not_quiescent`,
+  `reason` (`:provider_not_running`, `:provider_held`, `:provider_not_quiescent`,
   `:llm_proxy_shim_not_found`, `:pinned_cli_unavailable`,
   `:real_model_staged` or `:unknown_model_provider`); no model call was
   made.
@@ -160,6 +162,11 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
   def refusal_message(:unknown_model_provider),
     do: "unknown model provider named by the job (fake or claude_cli); no model call was made"
+
+  def refusal_message(:provider_held),
+    do:
+      "model provider claude_cli is held while its server is started, adopted or switched " <>
+        "(see Admin); no model call was made"
 
   def refusal_message(:provider_not_quiescent),
     do:
