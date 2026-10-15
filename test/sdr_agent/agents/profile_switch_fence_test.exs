@@ -280,7 +280,10 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceTest do
     end
 
     # The round trip ends on Opus, the row's own profile, so the existing
-    # profile check passes and the provenance check is reached.
+    # profile check passes. Tampering with the row's reserved event is
+    # caught first by the admission gate's own chain checks, which fail
+    # closed too; the fence's provenance check is then pinned directly on a
+    # row id with no reserved event.
     test "missing reservation provenance fails closed", ctx do
       invocation = reserve!(ctx, "no-provenance")
       complete!(ctx, request!(ctx, :claude_cli_sonnet, 1, 1))
@@ -288,10 +291,11 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceTest do
       hide_reserved_event!(invocation)
       fence!()
 
-      assert {:error, %Refused{stage: :launch, check: :reservation_provenance_missing}} =
-               admit(ctx, invocation.id, :claude_cli_opus)
-
+      assert {:error, %Refused{stage: :launch}} = admit(ctx, invocation.id, :claude_cli_opus)
       refute sent?(ctx, invocation)
+
+      assert {:error, :profile_switch_fenced, :reservation_provenance_missing} =
+               SdrAgent.Agents.Admission.SwitchFence.launch(ctx.tenant.id, Ecto.UUID.generate())
     end
   end
 

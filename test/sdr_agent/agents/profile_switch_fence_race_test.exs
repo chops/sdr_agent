@@ -284,18 +284,19 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
       end)
     end
 
+    # The drain is paused inside its own :polling stage, which it emits
+    # outside any transaction between polls.
     test "while it waits for a sent row, the drain holds no lock and no transaction", ctx do
       race(fn ->
         fence!()
         assert {:ok, row} = reserve(ctx, "held-open")
         assert {:ok, sent} = admit(ctx, row.id)
         assert {:ok, switch} = request(ctx)
-        observe_drain!()
+        pause_drain_at!(:polling)
 
         drainer = on_own_connection(:drainer, fn -> drain(ctx, switch) end)
         drainer_pid = pid_of(:drainer)
-        assert_receive {:drain_stage, :polling}, 10_000
-        assert_receive {:drain_stage, :polling}, 10_000
+        assert_receive {:drain_paused, :polling, drain_process}, 10_000
 
         assert idle_without_locks?(drainer_pid),
                "the drain waited inside a transaction or holding a lock"
@@ -305,6 +306,8 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
                    actor: ctx.agent
                  )
 
+        # Every later pause (one per poll) is released.
+        release_pauses(drain_process)
         assert {:ok, %{refused: 0}} = join(drainer)
       end)
     end
@@ -443,7 +446,9 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
               SdrAgent.SDR.AgentWorker.fail_operation(operation, stopped, ctx.agent)
             end)
 
-          await_blocked_by!(pid_of(:worker), holder_pid)
+          # Row-lock waiters queue: the worker waits behind the holder or
+          # behind the drain already queued on the same Operation row.
+          await_blocked_by_any!(pid_of(:worker), [holder_pid, drainer_pid])
           if unquote(resolved?), do: resolve!(ctx, stopped.attention_failure_id)
 
           release(holder)
@@ -514,6 +519,17 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
   end
 
   defp pause(_meta, _stage, _parent), do: :ok
+
+  # Keeps answering the drain's pauses until it stops pausing.
+  defp release_pauses(drain_process) do
+    send(drain_process, :continue)
+
+    receive do
+      {:drain_paused, _stage, ^drain_process} -> release_pauses(drain_process)
+    after
+      500 -> :ok
+    end
+  end
 
   defp lock_head!(ctx) do
     Repo.query!("SELECT 1 FROM audit_chain_heads WHERE tenant_id = $1 FOR UPDATE", [
@@ -638,6 +654,16 @@ defmodule SdrAgent.Agents.ProfileSwitchFenceRaceTest do
       end)
 
     assert blocked, "backend #{waiter} was never blocked by #{holder}"
+  end
+
+  defp await_blocked_by_any!(waiter, holders) do
+    blocked =
+      Enum.find_value(1..250, fn _ ->
+        Process.sleep(20)
+        Enum.any?(holders, &blocked_by?(waiter, &1)) || nil
+      end)
+
+    assert blocked, "backend #{waiter} was never blocked by any of #{inspect(holders)}"
   end
 
   defp blocked_by?(waiter, holder) do

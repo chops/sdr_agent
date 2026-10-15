@@ -28,11 +28,10 @@ defmodule SdrAgent.SDR.AgentWorker do
   """
   use Oban.Worker, queue: :research, max_attempts: 1
 
-  require Ash.Query
-
   alias SdrAgent.Actor
   alias SdrAgent.Agents
   alias SdrAgent.Agents.ResultGate
+  alias SdrAgent.Agents.StoppedRunOperation
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Audit
   alias SdrAgent.Operations
@@ -154,22 +153,10 @@ defmodule SdrAgent.SDR.AgentWorker do
   """
   def fail_operation(operation, %{status_reason: reason} = run, actor)
       when reason in @refused or reason in @gate do
-    # The locks must hold from the liveness check to the Operation change,
-    # so this always runs in one transaction (joining the caller's, if any).
-    {:ok, :ok} =
-      Audit.transaction(fn ->
-        {:ok, operation} = lock_operation(operation, actor)
-
-        attrs =
-          if live_failure?(run.attention_failure_id, actor),
-            do: %{failure_id: run.attention_failure_id},
-            else: %{failure: resolved_cause_failure(run)}
-
-        {:ok, _} = Operations.fail_operation(operation, attrs, actor: actor)
-        :ok
-      end)
-
-    :ok
+    # The rule is domain-owned (C2-02b1), shared with the sweeper and the
+    # profile switch drain; under its Operation lock an Operation already
+    # settled is left alone.
+    :ok = StoppedRunOperation.settle(operation.id, run, actor)
   end
 
   def fail_operation(operation, run, actor) do
@@ -177,70 +164,6 @@ defmodule SdrAgent.SDR.AgentWorker do
       Operations.fail_operation(operation, %{failure_id: run.attention_failure_id}, actor: actor)
 
     :ok
-  end
-
-  defp lock_operation(operation, actor) do
-    Operations.Operation
-    |> Ash.Query.for_read(:read, %{}, actor: actor)
-    |> Ash.Query.filter(id == ^operation.id)
-    |> Ash.Query.lock(:for_update)
-    |> Ash.read_one()
-  end
-
-  # Read FOR UPDATE, so a resolution cannot slip between this check and the
-  # Operation's link of the same Failure.
-  defp live_failure?(id, actor) do
-    Operations.Failure
-    |> Ash.Query.for_read(:read, %{}, actor: actor)
-    |> Ash.Query.filter(id == ^id)
-    |> Ash.Query.lock(:for_update)
-    |> Ash.read_one()
-    |> case do
-      {:ok, %{status: status}} ->
-        status in [:open, :acknowledged]
-
-      # A missing row or a read error is not a human resolution: fail loudly
-      # rather than open a Failure that claims the cause was resolved.
-      {:ok, nil} ->
-        raise "cause Failure #{id} not found for its run"
-
-      {:error, error} ->
-        raise "could not read cause Failure #{id}: #{Exception.message(error)}"
-    end
-  end
-
-  defp resolved_cause_failure(%{status_reason: reason} = run) when reason in @gate do
-    %{
-      class: :reconciliation_required,
-      severity: if(reason == :witness_mismatch, do: :critical, else: :warning),
-      retryable: false,
-      message:
-        "agent run #{run.status}: #{run.status_reason}; its result gate cause " <>
-          "(Failure #{run.attention_failure_id}) was resolved before the run stopped"
-    }
-  end
-
-  # R0-07 slice B (row B1): an admission refusal's cause is a provider_error.
-  defp resolved_cause_failure(%{status_reason: :model_not_admitted} = run) do
-    %{
-      class: :provider_error,
-      severity: :critical,
-      retryable: false,
-      message:
-        "agent run #{run.status}: #{run.status_reason}; its model call admission " <>
-          "refusal (Failure #{run.attention_failure_id}) was resolved before the run stopped"
-    }
-  end
-
-  defp resolved_cause_failure(run) do
-    %{
-      class: :budget_exhausted,
-      severity: :critical,
-      retryable: false,
-      message:
-        "agent run #{run.status}: #{run.status_reason}; its model call reservation " <>
-          "refusal (Failure #{run.attention_failure_id}) was resolved before the run stopped"
-    }
   end
 
   # Fixture responders and provider choice may travel with the job (tests,
