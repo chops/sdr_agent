@@ -76,7 +76,9 @@ defmodule SdrAgent.SDR.ProfileSwitchLateWorkerTest do
       Agents.admit_launch(id, profile, opts)
     end
 
-    server!(launch_admission: admit)
+    # The direct no-port witness: the reaper's hook after any port opens.
+    on_open = fn os_pid -> send(parent, {:port_opened, os_pid}) end
+    server!(launch_admission: admit, reaper: [on_open: on_open])
     before = attention!(ctx)
     %{run: run, operation: operation} = assign!(ctx, "01")
     drain!()
@@ -89,6 +91,7 @@ defmodule SdrAgent.SDR.ProfileSwitchLateWorkerTest do
     assert {invocation.status, invocation.sent_at} == {:failed, nil}
     assert invocation.error["reason"] == "profile_switch_fenced"
     assert events_of_type(ctx.tenant, "model.invocation.sent") == []
+    refute_received {:port_opened, _}
 
     assert [failure] = attention!(ctx) -- before
     assert failure.id == run.attention_failure_id
