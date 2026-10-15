@@ -1,6 +1,6 @@
 # Domain Boundaries
 
-Generated: 2026-10-06 (Sales and Research added by hand in S5, Outreach in S8, Reply, ReplyAssessment and WebhookEvent in S9, 2026-10-07; ModelCallGrant/ModelCallAllocation (C9) and ModelResultRelease (R0-07 slice A) added by hand, 2026-10-12, synced from `domain-boundaries.mmd`)
+Generated: 2026-10-06 (Sales and Research added by hand in S5, Outreach in S8, Reply, ReplyAssessment and WebhookEvent in S9, 2026-10-07; ModelCallGrant/ModelCallAllocation (C9) and ModelResultRelease (R0-07 slice A) added by hand, 2026-10-12; ModelProfileSetting/ModelProfileSwitch (C2-02a) added by hand, 2026-10-15, synced from `domain-boundaries.mmd`)
 
 Project shape: single
 
@@ -47,6 +47,8 @@ graph TB
         ModelCallGrant[ModelCallGrant<br/>owner-created real-call budget]
         ModelCallAllocation[ModelCallAllocation]
         ModelResultRelease[ModelResultRelease<br/>append-only, one per invocation]
+        ModelProfileSetting[ModelProfileSetting<br/>one per tenant, desired real profile]
+        ModelProfileSwitch[ModelProfileSwitch<br/>at most one open per tenant]
     end
     subgraph Operations["Operations Domain"]
         Operation[Operation]
@@ -82,6 +84,7 @@ graph TB
     ModelCallGrant --> ModelCallAllocation
     ModelInvocation -- "(id, tenant_id) FK" --> ModelResultRelease
     WireWitnessLink -. "optional (id, invocation) FK" .-> ModelResultRelease
+    ModelProfileSwitch -. "complete applies, same transaction" .-> ModelProfileSetting
     WireWitnessLink -. supersedes same exchange .-> WireWitnessLink
     WireWitnessLink -. REC scoped read_reconciliation_content .-> Payload
     ToolInvocation -. input/output sha256 FK .-> Payload

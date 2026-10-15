@@ -109,7 +109,11 @@ defmodule SdrAgent.MixProject do
       {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"}
+      # ADR-0008 amendment (EEF-CVE-2026-105659): a temporary, immutable Git
+      # pin to the upstream fix until a fixed Hex release exists. `override`
+      # resolves the Hex declarations of Phoenix, websock_adapter and Swoosh.
+      {:bandit,
+       github: "mtrudel/bandit", ref: "d88b21953c65061f21136ea76a89a4f95a2ac7a1", override: true}
     ]
   end
 
