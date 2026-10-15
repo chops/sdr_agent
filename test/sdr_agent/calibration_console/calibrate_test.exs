@@ -228,12 +228,19 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
       opts = Keyword.merge(base_opts(ctx), server: server(ctx, cli))
       calibration = Task.async(fn -> Calibrate.run(@profile, opts) end)
 
-      held = await_held!(store, 60_000)
-      Process.sleep(1_500)
-      id = held |> Path.basename() |> String.replace_prefix("held-", "")
-      File.rename!(held, Path.join([store, "witnesses", id]))
+      # The calibration task is joined, or shut down, before cleanup.
+      {id, result} =
+        try do
+          held = await_held!(store, 60_000)
+          Process.sleep(1_500)
+          id = held |> Path.basename() |> String.replace_prefix("held-", "")
+          File.rename!(held, Path.join([store, "witnesses", id]))
+          {id, Task.await(calibration, 60_000)}
+        after
+          Task.shutdown(calibration, :brutal_kill)
+        end
 
-      assert {:ok, summary} = Task.await(calibration, 60_000)
+      assert {:ok, summary} = result
       assert summary.outcome == "match"
       assert summary.invocation_id == id
       assert elem(counts(ctx), 1) == invocations + 1, "a second invocation was made"
