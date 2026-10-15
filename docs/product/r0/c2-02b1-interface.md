@@ -272,7 +272,16 @@ end-to-end. There is no new status, enum or column.
   actor may still close the switch: that is the switch's own lifecycle,
   and MF1's revalidation keeps the drain from acting on it.
 
-### GREEN review amendments (Codex a1071e0e, for approval)
+### GREEN review amendments (Codex a1071e0e; contract PASS at `afc8c4e`, Codex 992eaec6)
+
+**PASS as the required backend contract** (not as verification of the
+implementation). b2 must treat nullable timeout counts as unknown, as an
+error, and never infer clean or drained from `nil`. The 25 ms client slack
+is a cancellation and transport allowance, not a fresh budget.
+
+**Checkout is bounded** (rev 3): the connection is taken with
+`queue: false` and retried until the budget is spent, so no checkout is
+left queued after the drain returns.
 
 - **`{:error, :drain_timeout, %{reserved: n, sent: n}}`.** The counts are
   the **last observed within the deadline**, and `nil` for a figure never
