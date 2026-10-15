@@ -46,13 +46,18 @@ defmodule SdrAgent.Agents.LedgerCall do
     end
   rescue
     error in DBConnection.ConnectionError ->
-      if error.message == @no_connection,
+      if busy?(error.message),
         do: retry_checkout(deadline, fun),
         else: timeout_or(deadline, error)
 
     error in Postgrex.Error ->
       timeout_or(deadline, error)
   end
+
+  # No free connection (`queue: false`), or, under a test's shared SQL
+  # sandbox, the one connection is in use by another process.
+  defp busy?(message),
+    do: message == @no_connection or String.starts_with?(message, "could not checkout")
 
   defp retry_checkout(deadline, fun) do
     Process.sleep(min(@checkout_retry_ms, max(remaining(deadline), 0)))

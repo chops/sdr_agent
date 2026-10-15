@@ -50,7 +50,16 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
 
   setup do
     tenant = bootstrap!()
-    on_exit(fn -> SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper.release(ClaudeCLI.server()) end)
+    # A lease left by a test's last reaper is released only once that reaper
+    # has exited (a live holder refuses the release), so it never leaks into
+    # the next test's boot.
+    on_exit(fn ->
+      with {:held, holder} <- SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper.lease(ClaudeCLI.server()),
+           do: join_bounded(holder, 10_000)
+
+      SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper.release(ClaudeCLI.server())
+    end)
+
     %{tenant: tenant, admin: human(:admin, tenant)}
   end
 
@@ -111,6 +120,10 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
       await_status!(&(&1.hold == :released))
       assert {:ok, switch} = request(ctx)
       await_switch!(ctx, switch, :completed)
+      # Killed once idle, as the rolled-back case below: a client killed
+      # mid-query breaks the test's shared sandbox connection (a database
+      # would roll its transaction back), which is not what this case tests.
+      await_status!(&(&1.hold == :released and &1.generation == 2))
 
       kill_coordinator!()
 

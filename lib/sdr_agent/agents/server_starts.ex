@@ -72,7 +72,11 @@ defmodule SdrAgent.Agents.ServerStarts do
 
     with :ok <- coordinator(actor),
          :ok <- allocation_input(attrs) do
-      LedgerCall.run(&do_allocate(attrs, actor, &1), opts)
+      # A failing insert may roll the transaction back itself, so the
+      # conflict is recognised on the call's result.
+      fn step -> do_allocate(attrs, actor, step) end
+      |> LedgerCall.run(opts)
+      |> conflict()
     end
   end
 
@@ -147,8 +151,8 @@ defmodule SdrAgent.Agents.ServerStarts do
 
   defp conflict(result), do: result
 
-  defp generation_conflict?(%{fields: fields}) when is_list(fields),
-    do: :generation in fields or :tenant_id in fields
+  defp generation_conflict?(%{private_vars: vars}) when is_list(vars),
+    do: Keyword.get(vars, :constraint) == "model_server_starts_generation_index"
 
   defp generation_conflict?(_error), do: false
 

@@ -274,7 +274,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
         do: preflighted_ready(state),
         else: {:ok, state}
     else
-      {:error, %{} = state} -> {:error, state}
+      {:error, %{boot_id: _} = state} -> {:error, state}
       _error -> {:error, publish(state)}
     end
   end
@@ -359,18 +359,22 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   # A fresh read of the stored outcome before any release (section 2a).
   defp reconcile(state, expected) do
-    case readable(state) do
+    case readable(state, expected) do
       :read -> release_if_reconciled(state, expected)
       :unavailable -> retry_reconcile(state, expected)
     end
   end
 
-  defp readable(state) do
+  # The test-build `reconcile:` fault gates only a switch's reconciliation,
+  # never the boot release.
+  defp readable(state, {:switch, _id, _status}) do
     case Keyword.get(state.faults, :reconcile) do
       fun when is_function(fun, 0) -> fun.()
       nil -> :read
     end
   end
+
+  defp readable(_state, :boot), do: :read
 
   defp retry_reconcile(state, expected) do
     Process.send_after(self(), {:reconcile, expected}, @retry_ms)
@@ -640,7 +644,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   # No other action before the reconciled read (section 1a).
   defp uncertain(state, switch, expected) do
-    case readable(state) do
+    case readable(state, expected) do
       :read ->
         case switch_status(state, switch.id) do
           :pending -> block(state, switch, "finalization_uncertain")
@@ -675,6 +679,8 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
       start_id: start_id,
       failure_reason: reason
     }
+
+    Logger.warning("model profile switch #{switch.id} blocked: #{reason}")
 
     case Agents.block_profile_switch(switch, attrs, actor: actor(state)) do
       {:ok, _blocked} -> :ok
