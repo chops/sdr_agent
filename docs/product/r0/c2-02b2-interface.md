@@ -1,237 +1,297 @@
-# C2-02b2 (#52, slice b2): activation, rollback and the blocked-switch resolver (draft 1)
+# C2-02b2 (#52, slice b2): activation, rollback and ownership (draft 2)
 
-**Status:** draft 1, 2026-10-15, for Codex's review. No code.
-- **Builds on:** slice a (`2590693`, PR #159) and slice b1 (`5a234cf`,
-  PR #160), both approved.
-- **The b1 handoff it must honour** (`c2-02b1-interface.md`, "What
-  drained means"):
-  - a drained ledger is necessary, never sufficient;
-  - b2 binds the exact server instance, its cleanup state and the Reaper
-    lease outside every ledger lock, and treats any doubt as `block`;
-  - nullable timeout counts are unknown, never clean.
+**Status:** draft 2, 2026-10-15, for Codex's recheck. No code.
+- **Draft 1** (`40973a6`) was NEEDS-REVIEW (Codex, 5e037350). Its four
+  findings and how this draft answers them:
+  - **MF1, the generation was reused.** It is now a durable start
+    allocator, bound to the owner.
+  - **MF2, supervision and crash ownership.** There is now a supervision
+    tree, the per-stage crash outcomes, and a minimum fail-closed restart
+    in b2.
+  - **MF3, a caller proof and pgrep.** The resolver is now **staged** to
+    b2β (Codex's optional staging). Until it lands, a blocked switch keeps
+    no exit, fail-closed, as in slice a.
+  - **MF4, the resolver delta.** Deferred with the resolver to b2β. No
+    blocked → completed or failed path exists in b2α.
+- **Accepted from draft 1:**
+  - the b1 handoff (a drained ledger is necessary, never sufficient;
+    nullable counts are unknown);
+  - the cleanup veto before a stop;
+  - no rollback over a held or unconfirmed lease;
+  - never `Reaper.release/1`;
+  - a no-call preflight that leaves the attestation `:pending`;
+  - the actor split (admin request, `agent_runtime` drain, `model_runtime`
+    finalization);
+  - OQ-2: a 10 s maximum per named cleanup wait.
 
-**Scope** (`c2-02-slices.md`, row b2):
-- coordinator and server-generation ownership and handoff;
-- stopping the old server, starting the new profile, and the no-call
-  preflight, all outside the setting and chain-head transactions;
-- a short, generation-guarded `complete`;
-- on a failure with clean work, restart the old profile and `fail`;
-- with unconfirmed work or a held Reaper lease, `block`. Admission stays
-  closed, and only the attended resolution leaves it: never an automatic
-  unlock, and never a rollback over a held lease;
-- `resolve_blocked`, deferred here by slice a.
+**Staging (Codex optional; tripwire 1, growth: the owner is told).**
+- **b2α (this document):** generation and ownership, supervision,
+  activation and rollback, `block`, crash finalization.
+- **b2β (next):** the attended resolver, with a trusted operation-bound
+  receipt or an explicit owner attestation, never a scan.
+- **Order:** both land before R0-05. Nothing in production can request a
+  switch before R0-05, so a blocked switch with no exit can't occur in use
+  before b2β.
 
-**Safe exit:** still no UI. The coordinator is reachable only through its
-own API in tests, and R0-05 adds the admin page. Nothing in production
-requests a switch before R0-05. With no switch, the coordinator only owns
-the one server it starts at boot, as `Runtime.children/0` does today.
+**Safe exit of b2α:**
+- **No switch requested:** the new supervision tree runs the one server at
+  the setting's desired profile (the default before any setting), started
+  through the allocator. It behaves like `Runtime.children/0` today, and
+  the existing ClaudeCLI and admission suites pass unchanged.
+- **A pending switch at a coordinator start** is blocked, fail-closed.
 
-## What exists today (facts this draft relies on)
+## 1. Generation: a durable start allocator (MF1)
 
-- **One named ClaudeCLI server** (`ClaudeCLI.server/0`) is started by
-  `Runtime.children/0` under the app supervisor (`:one_for_one`), with
-  `profile: Runtime.desired_profile/0`. The profile is fixed for the
-  server's life.
-- **The Reaper lease** (`{Reaper, name}` in `:persistent_term`):
-  - it is held by the running server's reaper;
-  - on server death the reaper kills every tracked tree, then releases
-    it;
-  - a tree it can't confirm stopped, or an unidentified launch, keeps
-    the lease held, and a dead reaper's lease stays held until an
-    operator's `Reaper.release/1`;
-  - a new server whose name's lease is held by another reaper starts with
-    admission closed (`:previous_cli_not_quiescent` or
-    `:previous_cleanup_unconfirmed`).
-- **The CLI has no no-call probe** for its init attestation: model,
-  version and tools are reported only by a session that also sends a
-  request. Boot records the attestation `:pending`, checked at the first
-  call.
-- **The pinned CLI** is checked by `PinnedExecutable.check/1` (the exact
-  recorded store path).
+**New resource `ModelServerStart`.** One row per server start attempt, in
+the Agents domain; it is the authority on generations.
+- **Attributes:**
+  - `tenant_id`;
+  - `generation : integer ≥ 1`, unique per tenant;
+  - `boot_id : uuid`, minted by each coordinator start;
+  - `profile_id`, a real profile;
+  - `reason`: `:boot | :replacement | :activation | :rollback`;
+  - `switch_id`: nullable, required for `:activation` and `:rollback`;
+  - `inserted_at`.
+- **Allocation:** the `:allocate` action (`model_runtime` of the tenant,
+  only inside the coordinator's own phase).
+  - In one short transaction it locks the tenant's **latest start row**
+    `FOR UPDATE` (or, with none, uses the unique index), then inserts
+    `generation = latest + 1`, and appends `model.server.start_allocated`.
+  - A concurrent allocation meets the unique `(tenant_id, generation)`
+    index and retries once. Gaps are harmless; reuse is impossible.
+- **Every start is allocated first:** boot, replacement after an
+  unexpected server death, activation, and rollback. No supervisor
+  restarts a server on its own (section 2), so no start bypasses the
+  allocator.
 
-## The coordinator
+**The two identities stay separate:**
+- `S.server_generation` is the generation of the start that was
+  **running when S was requested**. The coordinator supplies its current
+  start's generation;
+- the **candidate** (activation) and **rollback** starts get their own,
+  later generations.
 
-`SdrAgent.AI.ModelProvider.ProfileCoordinator`: one GenServer, started by
-`Runtime.children/0` in place of the bare server. It supervises the named
-ClaudeCLI server itself, as a `DynamicSupervisor` child, and serializes
-every switch: one at a time, with no switch work under a ledger lock.
+**Ownership of finalization** (narrow delta to slice a's `complete`,
+`fail` and `block`).
+- **A new required argument** `owner: %{boot_id, start_id}`. Its guard,
+  inside the existing `:transition`/`:apply` phase after the existing
+  locks:
+  - the stored start row exists, is of the tenant, and has
+    `boot_id == owner.boot_id`;
+  - it is the tenant's **latest start**, so a replacement coordinator,
+    whose boot allocates a newer start, makes every older owner stale;
+  - **for `complete`:** `reason == :activation`, `switch_id == S.id`,
+    `profile_id == S.to_profile_id`;
+  - **for `fail`:** `reason == :rollback`, `switch_id == S.id`,
+    `profile_id == S.from_profile_id`;
+  - **for `block`:** any start of this owner's boot.
+- **Unchanged:** the stale-generation check (`S.server_generation`) still
+  runs first, before any replay. A coordinator that holds the numerically
+  correct S generation but a stale `boot_id` or a non-latest start is
+  refused.
+- **No runtime RPC under the ledger lock.** The guard reads stored rows
+  only. The coordinator compares its own in-memory pid and profile with
+  those rows before it calls.
+- **Lock order:** setting → switch → latest start (`FOR SHARE`) → head.
 
-- **Server generation.** The coordinator holds the current generation `G`:
-  a positive integer, bumped on every server start it makes.
-  - **At boot:** `G` = the tenant's highest stored
-    `ModelProfileSwitch.server_generation` + 1, or 1 with none. **OQ-1**
-    asks whether this is enough, or whether a persisted counter is needed
-    before slice c.
-  - **Each server start** records `{G, pid, profile}`. That is the bound
-    instance the b1 handoff requires.
-- **API** (proposed names):
-  - `request_switch(to_profile_id, expected_revision, actor: admin)`:
-    calls `Agents.request_profile_switch/2` with `server_generation: G`,
-    then runs the switch below, asynchronously. It returns the pending
-    switch, or the request's refusal;
-  - `status/0`: the current `G`, the bound pid and profile, the open
-    switch (if any), and the stage. Metadata only.
-- **Actors:** the request is the admin's (role re-read, slice a). The
-  drain runs as `agent_runtime`, and `complete`, `fail` and `block` as
-  `model_runtime`, both of the tenant (the coordinator holds both, as the
-  ClaudeCLI server holds `agent_runtime` for `admit_launch` today).
+## 2. Supervision and ownership (MF2)
 
-## The switch, step by step
+```mermaid
+graph TD
+  PS["ProfileSupervisor (Supervisor, :rest_for_one)"]
+  SS["ServerSupervisor (DynamicSupervisor)<br/>ClaudeCLI server: :temporary"]
+  CO["Coordinator (GenServer, :permanent)<br/>boot_id, current start, status"]
+  OS["OperationSupervisor (Task.Supervisor)<br/>switch worker: :temporary"]
+  PS --> SS
+  PS --> CO
+  PS --> OS
+  CO -. "starts / stops / monitors (via allocator)" .-> SS
+  CO -. "runs one worker, monitors it" .-> OS
+```
 
-Every step is outside the setting and chain-head transactions. Each
-ledger write is one short slice-a or b1 action.
+**The tree:**
+- **`ProfileSupervisor`** replaces today's bare server child in
+  `Runtime.children/0`. It runs `:rest_for_one` in this order:
+  - **`ServerSupervisor`** (first): a `DynamicSupervisor` whose ClaudeCLI
+    child is `:temporary`. It **never restarts** a server itself.
+  - **`Coordinator`** (second): the only process that starts, stops or
+    replaces a server, always through the allocator. It stays responsive:
+    switch work runs in a worker, and `status/0` answers from its own
+    state.
+  - **`OperationSupervisor`** (third): at most one `:temporary` switch
+    worker, started and monitored by the coordinator.
+- **A dead coordinator** restarts `OperationSupervisor` too
+  (`:rest_for_one`), so no worker outlives the owner that granted it
+  authority. The running server survives, and is re-owned under the new
+  boot (below).
+- **A worker's authority** is the coordinator's `owner` (`boot_id`, the
+  current `start_id`) plus an operation token. The coordinator rejects any
+  reply whose token is stale.
 
-1. **Request** (admin). The fence closes on commit (b1).
-2. **Drain** (`agent_runtime`): `drain_profile_switch(S, %{server_generation: G, timeout_ms: cli_timeout + 30_000})`.
-   - `{:error, :drain_timeout, counts}` (counts possibly `nil`), or
-     `:drain_observation_failed` or `:drain_settlement_failed`: go to
-     **block** with that reason.
-   - `:switch_not_open` or `:stale_server_generation`: stop. S was closed
-     by someone else, or this coordinator is stale. Nothing is touched.
-3. **Cleanup veto, part 1:** the old instance, before it is stopped, read
-   outside any lock:
-   - the bound pid is still the named server, alive, at generation `G`;
-   - `ClaudeCLI.admission(pid)` is `:open`: no stuck or unconfirmed work
-     of its own;
-   - the lease is held by that server's own reaper.
+**The coordinator's start (VM boot or restart: the minimum fail-closed
+rule in b2):**
+1. Mint a new `boot_id`.
+2. **If the tenant has a pending switch,** its operation's owner is gone.
+   - Allocate a start (`:replacement`, at the current server's profile,
+     or the setting's desired profile if no server is running), then
+     `block` S with reason `:coordinator_restarted`, as that owner.
+   - Cleanup can't be known after a crash, so it is blocked and never
+     failed. Slice c may refine this to failed, when it can prove clean
+     work.
+3. **If a switch is blocked** (now, or from before), the fence keeps real
+   calls closed. A server keeps running only if one already is: none is
+   started, and none is restarted over an unconfirmed lease.
+4. **Otherwise,** a server running under the old boot is **adopted**:
+   - a new `:replacement` start is allocated, and the coordinator then
+     confirms the running pid's published profile matches it. On a
+     mismatch, it stops that server and starts the start's profile;
+   - with no server running, it allocates `:boot` and starts the
+     setting's desired profile.
 
-   Any other answer (absent, a replaced pid, closed, unreadable,
-   malformed): go to **block** with the observation as its reason.
-4. **Stop the old server** (the coordinator terminates its child), then
-   wait, bounded by **OQ-2**, for the old reaper's lease release.
-   - **Released:** the old trees are confirmed gone (the reaper's own
-     receipt).
-   - **Still held** when the bound passes, or held by a dead reaper:
-     **block** (`:old_cleanup_unconfirmed`). The old profile is **not**
-     restarted, and nothing calls `Reaper.release/1`.
-5. **Start the new server** (generation `G+1`, profile `to`). The no-call
-   preflight then requires:
-   - `PinnedExecutable.check/1` passes for the configured pin;
-   - `ClaudeCLI.profile(pid) == to`;
-   - `admission(pid)` is `:open`: it took the lease;
-   - the attestation is `:pending` with the shim found (`command?`
-     true).
+**An unexpected server death** (no switch open): the coordinator sees
+`DOWN`, allocates `:replacement`, and starts the same profile. The new
+server's admission stays closed until the dead server's reaper confirms
+cleanup (today's lease rule). That is what a supervisor restart does
+today, but now through the allocator.
 
-   No model call is made. The first real call attests the model, version
-   and tools, as today.
-6. **Preflight passes:** `complete_profile_switch(S, %{server_generation: G})`
-   (`model_runtime`). The setting is applied in the same transaction (slice
-   a). The fence opens, and `G := G+1` is bound to the new pid.
-7. **Preflight fails** (or the start fails):
-   - stop the new server, wait for its lease release (as in step 4), and
-     restart the old profile (generation `G+2`) with the same preflight;
-   - **old preflight passes:** `fail_profile_switch(S, %{server_generation: G, failure_reason})`.
-     The setting is unchanged and the fence opens;
-   - **anything else** (the new server's cleanup unconfirmed, or the old
-     profile's preflight failing): **block**.
-8. **Block:** `block_profile_switch(S, %{server_generation: G, failure_reason})`.
-   - Admission stays closed: the fence holds while S is blocked (b1).
-   - No server is restarted over a held lease.
-   - The coordinator stays in `:blocked` until the resolver runs.
+**Ingress.**
+- **During a switch,** the fence (b1, durable, under the head) is the
+  authority. While a server is stopped, `Runtime.resolve/1` answers
+  `:provider_not_running` (advisory).
+- **After reopening,** a caller that prepared against the old profile
+  reserves with the old `profile_id`. Its launch on the new server is
+  refused by `:profile_mismatch_at_launch`, and the b1 epoch rule
+  refuses any reservation older than the switch request. b2 adds no other
+  ingress check.
+- **`admission/1` being `:open`** means only "lease taken, nothing of its
+  own unconfirmed". It is never treated as a generation or ownership
+  check.
 
-**Generation guard.** Every `complete`, `fail` and `block` carries S's own
-`server_generation` (`G` at request time). Slice a refuses any other value
-before any replay check. A coordinator restarted mid-switch has a new `G`
-and can't finish an older switch. That is slice c's boot rule: a still
-pending switch becomes failed or blocked.
+## 3. The switch (the worker), with crash outcomes
 
-## The blocked-switch resolver (`resolve_blocked`, deferred from slice a)
+The worker carries `owner` and `token`. Every step is outside the setting
+and head transactions. Before every stop, start and finalize, it re-reads
+the coordinator's binding, `{boot_id, start_id, pid, profile}`, and stops
+if it is stale.
 
-`ProfileCoordinator.resolve_blocked(switch, outcome, proof, actor: admin)`,
-with `outcome` `:completed` or `:failed`. It is attended: a current human
-admin, role re-read.
+| Stage | Action | Crash / failure here → outcome |
+|---|---|---|
+| 1 Request | the admin request, `server_generation` = the current start's generation | worker died after commit → the coordinator sees `DOWN` → `block` (`:operation_died`), as its owner |
+| 2 Drain | b1 `drain_profile_switch`, CLI timeout + 30 s | a timeout, a nil count, observation failed or settlement failed → `block` with that reason; `:switch_not_open` or `:stale_server_generation` → stop, nothing touched |
+| 3 Veto | the bound old pid is the named server at the current start; `admission(pid) == :open`; its lease holder is **that server's own reaper** (new published `ClaudeCLI.reaper/1`) | any other or unreadable answer → `block` |
+| 4 Stop old | the coordinator stops the bound pid, and **only** if it is still the bound pid | a lease release without the bound reaper's **cleanup receipt** (below) within 10 s, a dead holder or a lost observation → `block` (`:old_cleanup_unconfirmed`); no restart, no release |
+| 5 Start candidate | allocate `:activation` (S, `to`), then start | a failed start → stage 7 |
+| 6 Preflight | the pin check; `profile(pid) == to`; `admission == :open`; attestation `:pending` with the shim found; no model call | pass → stage 8; fail → stage 7 |
+| 7 Rollback | stop the candidate (as stage 4), allocate `:rollback` (S, `from`), start it, then the same preflight | pass → `fail(S, owner: rollback start)`; the candidate's cleanup unconfirmed or the old preflight failing → `block` |
+| 8 Finalize | `complete(S, owner: activation start)` | **the result is lost or failed:** re-read stored S, bounded. **completed** → success. **pending** → `block` (`:finalize_unconfirmed`), never a rollback. **unreadable** → the coordinator stays closed in memory and retries the read on its next tick; the fence stays closed because S is still open |
 
-- **The proof** is typed. It is gathered by the coordinator **before** any
-  transaction, never inside one that might roll back:
-  - `%{tenant_id, switch_id, server_generation, target_profile, reaper_lease: :released | {:held_by_live, pid}, cli_processes: :none_found}`.
-  - `cli_processes: :none_found` is the coordinator's own process-table
-    check: no `claude` process of a previous server under the app's tree.
-  - **OQ-3** asks whether that check is acceptable evidence, or whether
-    only the reaper's receipt may count.
-- **Rules:**
-  - **`:completed`** only when the target profile's server is running at
-    the current generation and passed the step 5 preflight. Cleanup
-    evidence alone never counts as a passed preflight.
-  - **`:failed`** only when the old profile is running and passed the
-    preflight, and no unconfirmed work remains. Admission never reopens
-    over unconfirmed work.
-  - **A dead reaper's held lease** stays the operator's own
-    `Reaper.release/1` step, done before the resolver and outside it. The
-    resolver never calls `release/1`.
-- **Entity delta** (ModelProfileSwitch): a new `:resolve_blocked` update,
-  blocked → completed or failed.
-  - `:completed` applies the setting in the same transaction (as
-    `complete`);
-  - it records `resolved_by_id` and `resolution` (a metadata-only map of
-    the proof);
-  - it appends `model.profile.switch_resolved`.
+- **A coordinator death at any stage:** the worker dies with it
+  (`:rest_for_one`), and the new coordinator's start rule blocks S.
+- **A request caller's death:** irrelevant once the request committed.
+  The coordinator owns the switch.
+- **Model calls:** no stage makes one, and the RED pins zero launches.
+
+### The Reaper cleanup receipt (runtime delta)
+
+The veto and the waits need a binding the current API doesn't expose:
+- **`ClaudeCLI.reaper(server)`:** publishes the server's own reaper pid,
+  like `admission/1` (never blocks);
+- **`Reaper.subscribe(reaper, pid)`:** the subscriber gets
+  `{:reaper_cleanup_confirmed, reaper, name}` **only** when that reaper
+  confirmed every tracked tree stopped and released the lease itself.
+
+Genuine completion = that message from the exact bound reaper. A lease
+that is merely absent (a manual erase or VM loss), a dead holder, or a
+`DOWN` without the receipt is **unconfirmed**, and gives `block`.
+
+## 4. ADR evaluation
+
+The coordinator-owned server lifecycle and the durable generation are a
+cross-cutting runtime pattern. **Recommended:** a narrow amendment to
+**ADR-0004** (runtime model selection: the supervised server is now
+coordinator-owned; generations are allocated, never derived).
+
+Proposed, needing the owner's acceptance. It is checked against:
+- ADR-0005 (C8, concurrency 1: unchanged);
+- ADR-0009 (audit coupling: allocation and finalization are audited
+  actions; no raw writes).
+
+No new dependency.
 
 ## Entity Model
 
 **Entity Model trigger:** yes:
-- a new switch action and its lifecycle edge (blocked → completed or
-  failed);
-- two new nullable switch attributes;
-- a new event;
-- the runtime ownership of the server (the coordinator and the
-  generation).
+- a new persisted resource (`ModelServerStart`) and its action and event;
+- an action-contract delta on switch `complete`, `fail` and `block`
+  (`owner`);
+- the runtime ownership and observation contracts (coordinator, ClaudeCLI
+  reaper publication, Reaper cleanup receipt).
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| ModelProfileSwitch | Existing (action and attribute delta) | One requested change | adds `resolved_by_id : uuid, nullable` (a human admin) and `resolution : map, nullable` (the metadata-only proof: lease state, process check, generation, target, profile) | adds belongs_to User (`resolved_by`, optional) | **`:resolve_blocked`:** blocked → completed (applies the setting, revision + 1, same transaction) or blocked → failed (setting unchanged), only with the typed proof and its rules; no other exit from blocked; terminal states unchanged | **resolve:** a current human admin (role re-read); `complete`, `fail` and `block` unchanged (`model_runtime`) | OQ-3 |
-| ModelProfileSetting | Existing | — | unchanged | unchanged | changed only by `complete` or by `resolve_blocked` as `:completed` | unchanged | none |
-| AuditEvent | Existing (new event type) | Ledger | `model.profile.switch_resolved`: from, to, `server_generation`, outcome, `setting_revision`, `resolution` (metadata only), `resolved_by` | unchanged | same transaction as the resolve | unchanged | none |
-| ProfileCoordinator (runtime, not persisted) | New | Owns the server lifecycle and the generation | `G`, the bound `{G, pid, profile}`, the stage | supervises the named ClaudeCLI server | one switch at a time; no step under a ledger lock; a generation from a past boot can't act | runs the drain as `agent_runtime` and `complete`, `fail`, `block` as `model_runtime`; the request and resolve are the admin's | OQ-1, OQ-2 |
+| ModelServerStart | New | One server start attempt; the generation authority | `tenant_id`; `generation : int ≥ 1`, unique `(tenant_id, generation)`; `boot_id : uuid`; `profile_id : real profile`; `reason : :boot \| :replacement \| :activation \| :rollback`; `switch_id : uuid, nullable` (required for activation and rollback, check constraint); `inserted_at` | belongs_to Tenant; belongs_to ModelProfileSwitch (optional, same tenant, `on_delete: :restrict`) | append-only (no update or destroy); `generation` = the tenant's latest + 1, allocated under a lock on the latest row; `model.server.start_allocated` in the same transaction | **allocate:** `model_runtime` only inside the coordinator's phase; **read:** admin, auditor (audited), `agent_runtime`, kernel | none |
+| ModelProfileSwitch | Existing (action-contract delta) | One requested change | unchanged | is referenced by ModelServerStart (activation, rollback) | `complete`, `fail` and `block` take the required `owner: %{boot_id, start_id}`, guarded on the stored latest start (section 1), after the stale-generation check and before replay; **blocked keeps no exit in b2α** | unchanged (`model_runtime`) | none |
+| Coordinator, ServerSupervisor, OperationSupervisor (runtime) | New | Own the server lifecycle and the switch worker | `boot_id`, the bound `{start_id, generation, pid, profile}`, the stage, the operation token | ProfileSupervisor `:rest_for_one` | no server is started except through the allocator; no worker outlives its coordinator; a stale token or binding stops a worker | drain as `agent_runtime`; allocation and finalization as `model_runtime`; the request is the admin's | none |
+| ClaudeCLI server (runtime) | Existing (observation delta) | The model server | publishes its reaper pid (`reaper/1`) | — | read-only, never blocks | n/a | none |
+| ClaudeCLI.Reaper (runtime) | Existing (receipt delta) | Crash-safe owner of CLI work | `subscribe/2`; the receipt `{:reaper_cleanup_confirmed, reaper, name}` sent only after confirmed cleanup and its own lease release | — | an absent lease without the receipt is never confirmed cleanup; `release/1` unchanged and never called by b2 | n/a | none |
+
+ModelProfileSetting: existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found.
 
 ## Tests (RED first)
 
-1. **The happy path:** request → drain → veto → stop → start → preflight →
-   complete.
-   - The setting is applied; the new pid is bound at `G+1`; no model call
-     is made (a fake launcher counts zero calls).
-2. **Activation fails cleanly:** the new preflight fails, the old is
-   restarted, and `fail` follows; the setting is unchanged and the fence
-   opens.
-3. **Block paths:**
-   - drain timeout, with nil counts and with real counts;
-   - veto failures: absent, replaced pid, admission closed, lease not the
-     server's own;
-   - an old lease not released within the bound;
-   - a dead reaper's lease;
-   - the new cleanup unconfirmed;
-   - the old preflight failing on rollback.
+1. **Allocation and generation:**
+   - a no-switch restart allocates a new, higher generation;
+   - a clean rollback, then a restart, never reuses a generation;
+   - concurrent allocations never collide (independent connections);
+   - a direct `:allocate` outside the phase is Forbidden;
+   - append-only.
+2. **Ownership:**
+   - a stale owner with the numerically correct `S.server_generation` is
+     refused (a stale `boot_id`, or a non-latest start);
+   - a wrong reason, switch or profile for `complete` or `fail` is
+     refused;
+   - the stale-generation check still precedes replay;
+   - existing replays keep working with the right owner.
+3. **Supervision and crashes:**
+   - deaths of the coordinator, the worker, the candidate server, the old
+     server and the Reaper at each stage boundary;
+   - a replacement server racing a stale worker;
+   - a request caller's death;
+   - a lost or failed `complete` (the stored state reconciled; never a
+     rollback over a committed completion).
 
-   Each gives block with its reason, the fence stays closed, nothing is
-   restarted over a held lease, and `Reaper.release/1` is never called.
-4. **Generation:**
-   - a stale coordinator (another `G`) can't complete, fail or block;
-   - a restart mid-switch can't finish an older switch.
-5. **The resolver:**
-   - completed and failed each succeed only with their rules;
-   - cleanup evidence alone can't complete;
-   - unconfirmed work can't fail-and-reopen;
-   - a non-admin and a stale admin are refused;
-   - the proof is gathered outside the transaction;
-   - the event and the setting are written in one transaction.
-6. **Serialization:** a second request while one switch runs is refused by
-   slice a's one-open rule; the coordinator never runs two.
-7. **No model call** in any switch path: the fake launcher's call count is
-   zero throughout.
+   Each asserts:
+   - the fence and admission state;
+   - the desired and effective profile;
+   - no generation bypass;
+   - no port and no model call;
+   - no `Reaper.release/1`.
+4. **Cleanup receipt:**
+   - only the bound reaper's receipt confirms;
+   - a manually absent lease, a dead holder, or a `DOWN` without the
+     receipt → `block`;
+   - the 10 s bound is never reset.
+5. **The coordinator's start:**
+   - a pending switch → blocked (`:coordinator_restarted`);
+   - a blocked switch → no server started over an unconfirmed lease;
+   - a running server is adopted under a new `:replacement` start;
+   - a profile mismatch is replaced.
+6. **The happy path, rollback and blocks**, as in draft 1, with `owner`
+   bound throughout and zero model calls.
+7. **Safe exit:** with no switch, the existing ClaudeCLI, admission and SDR
+   suites pass unchanged under the new tree.
 
 ## Open questions
 
-- **OQ-1, the generation source.**
-  - **Recommended:** derive it at boot from the highest stored switch
-    generation + 1, in memory afterwards. That is enough because every
-    switch row records its own generation, and slice c's boot rule closes
-    any pending switch from an earlier boot.
-  - **The alternative:** a persisted counter row, which is a new entity.
-- **OQ-2, the lease-release bound** after a stop. **Recommended:** the
-  reaper's own kill timeline (TERM grace + KILL + exit wait, about 2 s)
-  plus a margin, so 10 s, then block.
-- **OQ-3, the resolver's process evidence.**
-  - **Recommended:** accept the coordinator's process-table check
-    (`pgrep` under the app's process tree, on the same host) as
-    `cli_processes: :none_found`, plus the lease state.
-  - **The alternative:** only a live reaper's release counts. A dead
-    reaper's lease then always needs the operator's `release/1` first.
+- **OQ-1, resolved:** a durable allocator (`ModelServerStart`), as Codex
+  recommended. Max-switch + 1 is dropped.
+- **OQ-2, accepted:** 10 s per named cleanup wait, one monotonic deadline,
+  bounded calls, timeout or unknown → `block`.
+- **OQ-3, moved to b2β:** a process scan is diagnostic only. The resolver
+  needs the bound cleanup receipt, or an explicit owner attestation bound
+  to the switch, tenant, prior runtime identity and outcome.
+- **OQ-4, new:** adopting a running server at a coordinator restart (step
+  4) versus always restarting it.
+  - **Recommended:** adopt, with a fresh `:replacement` start and a
+    profile check. Restarting would kill in-flight calls on every
+    coordinator crash.
