@@ -67,8 +67,11 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   stopped `:witness_mismatch` or `:witness_unreconciled` whose Operation is
   still `running` and whose job is no longer live has its Operation failed
   here, revalidated under the run, Operation and job locks, by the worker's
-  rule (`SdrAgent.SDR.AgentWorker.fail_operation/3`). No other terminal
-  run's Operation is touched.
+  rule (`SdrAgent.SDR.AgentWorker.fail_operation/3`). C2-02b1: a run
+  stopped `:model_not_admitted` (by its worker, or by a profile switch
+  drain whose Operation transaction never ran) is healed the same way,
+  under the same locks and the same dead-job guard. No other terminal run's
+  Operation is touched.
 
   Idempotent: a recovered run is `failed`, so a later sweep skips it.
   Integration-queue reply runs have no Operation (S9 choice 12); their job is
@@ -155,10 +158,13 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
 
   # Review MF1: a run the result gate stopped whose Operation is still
   # running (the worker or sweeper died between the gate's commit and the
-  # Operation's own transaction, packet step 4).
+  # Operation's own transaction, packet step 4). C2-02b1: likewise a run
+  # stopped :model_not_admitted (by its worker or by a profile switch
+  # drain) whose Operation's transaction never ran.
   defp gate_stopped?(run),
     do:
-      run.status == :failed and run.status_reason in [:witness_mismatch, :witness_unreconciled] and
+      run.status == :failed and
+        run.status_reason in [:witness_mismatch, :witness_unreconciled, :model_not_admitted] and
         is_binary(run.operation_id)
 
   # One transaction: the run (re-read), its Operation and its job are locked
