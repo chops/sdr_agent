@@ -192,11 +192,22 @@ of draft 2 showed what a safe one needs:
 - protection for the file the collector has open;
 - a defined response when cleanup fails or hangs.
 
-Even then, it bounds age only while it runs. For a single-user local MVP,
-where these files hold only the rare unredacted primary messages of
-section 5, plain owner-only retention with the gap stated is simpler and
-easier to verify. The owner can delete the folder at any time; the
-server recreates it.
+Even then, it bounds age only while it runs. For a single-user local MVP, where these files hold only the unredacted
+primary messages described in section 5, plain owner-only retention with
+the gap stated is simpler and easier to verify.
+
+**Deleting files by hand (owner maintenance).** Never delete the log
+folder, or the file the collector has open, while the server runs.
+PostgreSQL keeps writing to an open file after its name is removed, so
+the output continues out of sight, and a missing folder can break
+rotation. The safe way:
+- delete only files that are verified closed: older rotated files, not
+  the current one (`pg_current_logfile()`); or
+- stop the server, check that nothing is writing, and delete only the
+  specific log files that were checked; then restart and confirm the
+  collector is writing to its configured file again.
+
+This proposal gives no cleanup command, and none is run.
 
 **Alternative (R2): a reviewed pruning step.** If the owner wants a time
 limit, it is designed as its own reviewed change before 5b closes. It
@@ -323,9 +334,18 @@ Each uses a unique random marker string, never a private value:
   gives a FATAL primary message, a severity other than ERROR.
 
 **Positive controls:** each canary first runs once on a separate
-throwaway instance with default logging. There, the marker must appear
-in the log. That proves the canary reaches the message path, so its
-absence under the baseline means something.
+throwaway control instance, set up so that the canary's signal is
+actually logged. That proves the canary reaches the message path, so
+its absence under the baseline means something.
+- **The error canaries** (`DETAIL`, failing statements, primary
+  messages, the FATAL connection) are logged under PostgreSQL's default
+  settings, so the control uses the defaults for them.
+- **The slow-statement canary** is not logged by default, because
+  duration logging is off. For it, the control instance sets
+  `log_min_duration_statement` to a threshold below the canary's
+  duration, so both its SQL marker and its duration should appear.
+- **The control's exact settings** are recorded in the report.
+- **The baseline instance is not changed** for the controls.
 
 **Expected:**
 
@@ -385,7 +405,11 @@ content-logging extension, now or later, reopens 5b.
 process-manager files (section 4.1) is written here before acceptance.
 If it finds any marker there, this exception does not cover it.
 
-**The request:** the owner accepts this specific server-log retention
+**The request:** the owner makes a fresh, explicit choice. Under R1, that
+means accepting content-bearing local server logs kept with no time
+limit and no total size cap, at the paths and access above, under the
+copy rule. The 5b direction approved on 2026-10-14 is not that
+acceptance. The owner accepts this specific server-log retention
 exception, with the paths, access, retention and at-rest gap above. This
 is not a blanket exception. If the sink test or the activation receipt
 finds anything outside these bounds, the exception does not apply.
