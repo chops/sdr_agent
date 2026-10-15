@@ -100,7 +100,7 @@ reviewed PR.
 
 | Reply | Shape | Settles as |
 |---|---|---|
-| **Success** | `{:ok, result}`. `result` is a map with `:output` (any term) and `:raw_response` (a binary). An optional `:usage`, if present, must pass `Ash.Type.cast_input/3` and `Ash.Type.apply_constraints/3` for the embedded `SdrAgent.Agents.Usage` type, with its non-null, nonnegative integer fields; the **normalized** value is what settlement writes. | Zoi-valid and the parsed value is a map: completed. Otherwise failed as `validation_failed` (R0-04-2) |
+| **Success** | `{:ok, result}`. `result` is a map with `:output` (any term) and `:raw_response` (a binary). An optional `:usage`, if present, must pass `Ash.Type.cast_input/3` and `Ash.Type.apply_constraints/3` for the embedded `SdrAgent.Agents.ModelInvocation.Usage` type (`lib/sdr_agent/agents/usage.ex`), and pass an **explicit envelope guard**; the **normalized** value is what settlement writes. A wholly omitted `:usage` keeps today's default. | Zoi-valid and the parsed value is a map: completed. Otherwise failed as `validation_failed` (R0-04-2) |
 | **Known failure** | `{:error, reason}`, any term | failed, `provider_error` with `safe_reason/1`; the drift reasons open their attention Failure as today |
 | **Unknown** | `{:unknown, reason}`, any term; or a raise or exit from the provider (as today) | unknown |
 
@@ -109,9 +109,17 @@ reviewed PR.
 - `{:ok, non_map}`;
 - `:output` missing;
 - `:raw_response` missing or not a binary;
-- `:usage` present but failing the embedded type's cast or constraints
-  (for example negative, nil or incomplete fields; numeric strings
-  follow the type's actual cast rules, and RED records the result).
+- `:usage` present but failing the explicit guard, then the embedded
+  type's cast and constraints.
+  - **Why a guard is needed** (Codex, 59e15c5f): the embedded type fills
+    missing fields with 0, and casting accepts a top-level `nil` or an
+    existing `Usage` struct without re-checking its fields.
+  - **What the guard requires:** a present `:usage` must be a map, not a
+    struct, with exactly the keys `input_tokens`, `output_tokens` and
+    `plan_calls`, each present and not nil. Only then is it cast and its
+    constraints applied, which also rejects negative values.
+  - **Not accepted:** a `Usage` struct, a nil field or a missing field.
+  - **Numeric strings** follow the type's cast; RED records the result.
 
 The facade checks the envelope **before** any settlement write. It
 doesn't rescue the settlement write.
@@ -136,7 +144,7 @@ settlement.
 `ModelInvocation.parsed_output` is a `:map`, and that is unchanged: the
 persisted type is not widened. A valid envelope settles like this:
 
-| Zoi result | Parsed value | Settles as |
+| Zoi result | Parsed value on success / original output on parse error | Settles as |
 |---|---|---|
 | valid | a map | **completed,** as today |
 | valid | not a map (a scalar, a list, or a transform that produces a non-map) | **failed as `validation_failed`**, with `parsed_output: nil` and one `validation_errors` entry `%{"message" => "output is not an object", "type" => <type name>}` |
@@ -304,4 +312,7 @@ review applies.
 |---|---|---|---|---|
 | 1 | `d6e9f34` | Codex | ask `m_1792043415015174000_4abaade2` → 70d98160 | NEEDS-REVIEW |
 | 2 | `d24f724` | Codex | ask `m_1792043838535062000_77c36653` → 7263fed7 | NEEDS-REVIEW |
-| 3 | this draft | Codex | pending | pending |
+| 3 | `72bd298` | Codex, 2026-10-15 | ask `m_1792044168185394000_9105d069` → `59e15c5f-252c-4276-8a35-bcb786520a7b` | **contract PASS and narrow entity PASS.** RED may proceed; not GREEN, merge or spend approval |
+
+The round-2 reply's full id is `7263fed7-32ab-4818-a951-f27f221be11d`.
+The round-1 reply was 70d98160, as logged.
