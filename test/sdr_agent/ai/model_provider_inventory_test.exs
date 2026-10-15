@@ -31,7 +31,7 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
 
   # {caller module, caller function, receiver, called function}
   @exceptions MapSet.new([
-                {SdrAgent.AI.ModelProvider, :run, :dynamic, :prepare},
+                {SdrAgent.AI.ModelProvider, :prepare, :dynamic, :prepare},
                 {SdrAgent.AI.ModelProvider, :provider_call, :dynamic, :complete},
                 {SdrAgent.AI.ModelProvider.CalibrationCall, :target,
                  SdrAgent.AI.ModelProvider.ClaudeCLI, :prepare},

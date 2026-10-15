@@ -196,8 +196,8 @@ An AST inventory test of `lib/**/*.ex` flags any call to `prepare` or
 - `apply/3` or `Kernel.apply/3` with a literal `:prepare` or `:complete`.
 
 **Exceptions,** each named exactly as module, function and receiver form:
-1. the facade's `run/3` (`provider.prepare/2`) and `provider_call/3`
-   (`provider.complete/2`);
+1. the facade's `prepare/3` helper (`provider.prepare/2`; `run/3` before
+   GREEN moved it there) and `provider_call/3` (`provider.complete/2`);
 2. `CalibrationCall` → `ClaudeCLI.prepare/2`, the accepted calibration
    exception;
 3. `Runtime.prepared/1` → `module.prepare(%{}, [])`. It is status-only:
