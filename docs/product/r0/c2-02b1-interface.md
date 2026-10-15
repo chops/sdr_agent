@@ -272,6 +272,25 @@ end-to-end. There is no new status, enum or column.
   actor may still close the switch: that is the switch's own lifecycle,
   and MF1's revalidation keeps the drain from acting on it.
 
+### GREEN review amendments (Codex a1071e0e, for approval)
+
+- **`{:error, :drain_timeout, %{reserved: n, sent: n}}`.** The counts are
+  the **last observed within the deadline**, and `nil` for a figure never
+  observed. No read happens after the budget is spent, so a blocked
+  observation can't extend the drain.
+- **`{:error, :drain_settlement_failed}`** is new: an Operation transaction
+  failed. A retry finishes it, and the sweeper backstops it.
+- **One end-to-end budget:**
+  - every drain transaction (checkout included) has a client-side timeout
+    of the remaining budget plus 25 ms;
+  - the lock and statement timeouts are re-set to the budget left before
+    each step;
+  - expired work rolls back and never commits.
+- **Settlement revalidates S** in its own transaction (Operation →
+  Failure → head, then a fresh read of S) before the Operation changes.
+- **Both drain entry points go through `Audit.Guard`,** so an auditor's
+  attempt is refused and audited exactly once.
+
 ### Observability (stage events)
 
 The drain emits `[:sdr_agent, :profile_switch, :drain]` telemetry events
