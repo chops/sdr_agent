@@ -90,7 +90,8 @@ defmodule SdrAgent.Agents.ModelServerStart do
 
     create :allocate do
       accept [:boot_id, :profile_id, :reason, :switch_id]
-      argument :generation, :integer, allow_nil?: false, constraints: [min: 1]
+      # Set by `SdrAgent.Agents.ServerStarts` under the counter lock.
+      argument :generation, :integer, constraints: [min: 1]
       change SdrAgent.Audit.Changes.SetTenant
       change set_attribute(:generation, arg(:generation))
       change {ServerStartEvent, event_type: "model.server.start_allocated"}

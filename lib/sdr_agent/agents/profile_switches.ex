@@ -36,9 +36,12 @@ defmodule SdrAgent.Agents.ProfileSwitches do
   alias Ash.Error.Changes.InvalidArgument
   alias Ash.Error.Query.NotFound
   alias SdrAgent.Accounts.User
+  alias SdrAgent.Agents.Checks.CoordinatorProcess
   alias SdrAgent.Agents.Checks.CurrentAdmin
+  alias SdrAgent.Agents.LedgerCall
   alias SdrAgent.Agents.ModelProfileSetting
   alias SdrAgent.Agents.ModelProfileSwitch
+  alias SdrAgent.Agents.ServerStarts
   alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Guard
@@ -216,16 +219,28 @@ defmodule SdrAgent.Agents.ProfileSwitches do
     actor = Keyword.get(opts, :actor)
     attrs = Map.new(attrs)
 
-    transaction(fn ->
-      guard(action, switch_id, actor, fn ->
-        runtime_transition(action, switch_id, attrs, actor)
-      end)
-    end)
+    LedgerCall.run(
+      fn step ->
+        guard(action, switch_id, actor, fn ->
+          with :ok <- coordinator(actor),
+               do: runtime_transition(action, switch_id, attrs, actor, step)
+        end)
+      end,
+      opts
+    )
   end
 
-  defp runtime_transition(action, switch_id, attrs, actor) do
+  # C2-02b2α: executed only in the registered coordinator (section 1a).
+  defp coordinator(%SdrAgent.Actor{type: :model_runtime}) do
+    if CoordinatorProcess.coordinator?(), do: :ok, else: forbidden()
+  end
+
+  defp coordinator(_actor), do: forbidden()
+
+  defp runtime_transition(action, switch_id, attrs, actor, step) do
     with :ok <- runtime(actor),
-         :ok <- generation_input(attrs) do
+         :ok <- generation_input(attrs),
+         :ok <- owner_input(attrs) do
       binding = %{
         action: action,
         tenant_id: actor.tenant_id,
@@ -234,14 +249,28 @@ defmodule SdrAgent.Agents.ProfileSwitches do
         actor: actor
       }
 
-      with_phase(:transition, binding, &do_transition(action, switch_id, attrs, actor, &1))
+      with_phase(
+        :transition,
+        binding,
+        &do_transition(action, switch_id, attrs, actor, &1, step)
+      )
     end
   end
 
-  defp do_transition(action, switch_id, attrs, actor, context) do
+  # Lock order setting → counter → switch → latest start → head (C2-02b2α
+  # section 1b); the stale-generation check runs first, then the boot fence
+  # and the action's prerequisites on the locked latest start (1a).
+  defp do_transition(action, switch_id, attrs, actor, context, step) do
     with {:ok, setting} <- lock(ModelProfileSetting, switch_id, actor, context),
+         :ok <- step.(),
+         {:ok, counter} <- ServerStarts.share_counter(actor),
+         :ok <- step.(),
          {:ok, switch} <- lock(ModelProfileSwitch, switch_id, actor, context),
-         :ok <- same_generation(switch, attrs.server_generation) do
+         :ok <- same_generation(switch, attrs.server_generation),
+         :ok <- step.(),
+         {:ok, latest} <- ServerStarts.fence(counter, attrs.start_id, attrs.boot_id, actor),
+         :ok <- prerequisite(action, latest, switch),
+         :ok <- step.() do
       case decide(action, switch.status) do
         :proceed -> write(action, setting, switch, attrs, actor, context)
         :replay -> {:ok, switch}
@@ -249,6 +278,30 @@ defmodule SdrAgent.Agents.ProfileSwitches do
       end
     end
   end
+
+  defp owner_input(%{boot_id: boot_id, start_id: start_id})
+       when is_binary(boot_id) and is_binary(start_id),
+       do: :ok
+
+  defp owner_input(_attrs),
+    do: invalid(:start_id, "the coordinator's boot_id and start_id are required")
+
+  # The disjoint per-action prerequisites on the locked latest start (1a).
+  defp prerequisite(:complete, start, switch) do
+    if start.status == :ready and start.reason == :activation and start.switch_id == switch.id and
+         start.profile_id == switch.to_profile_id and start.ready_evidence == :spawn_preflight,
+       do: :ok,
+       else: invalid(:start_id, "complete needs this boot's ready activation for the switch")
+  end
+
+  defp prerequisite(:fail, start, switch) do
+    if start.status == :ready and start.reason == :rollback and start.switch_id == switch.id and
+         start.profile_id == switch.from_profile_id and start.ready_evidence == :spawn_preflight,
+       do: :ok,
+       else: invalid(:start_id, "fail needs this boot's ready rollback for the switch")
+  end
+
+  defp prerequisite(:block, _start, _switch), do: :ok
 
   defp generation_input(attrs) do
     if positive?(Map.get(attrs, :server_generation)),
