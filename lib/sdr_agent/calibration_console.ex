@@ -169,15 +169,13 @@ defmodule SdrAgent.CalibrationConsole do
   defp check_witness_root(nil), do: {:ok, nil}
 
   defp check_witness_root(root) when is_binary(root) do
-    cond do
-      String.match?(root, ~r/[\x00-\x1F\x7F]/) ->
-        witness_refusal(root, "it contains a control character")
-
-      true ->
-        case Store.validate_root(root) do
-          {:ok, ^root} -> {:ok, root}
-          {:error, reason} -> witness_refusal(root, reason)
-        end
+    if String.match?(root, ~r/[\x00-\x1F\x7F]/) do
+      witness_refusal(root, "it contains a control character")
+    else
+      case Store.validate_root(root) do
+        {:ok, ^root} -> {:ok, root}
+        {:error, reason} -> witness_refusal(root, reason)
+      end
     end
   end
 
