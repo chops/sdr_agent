@@ -1,5 +1,7 @@
 # MVP build plan
 
+Revision: **v3.1 (2026-10-14).** §4 gains the S2–S5 re-plan (forecast v2.2) and §7 gains the early-warning tripwires, both approved by the owner on 2026-10-14 (D-110, D-111). Everything else is v3 as approved.
+
 Status: **approved by the owner on 2026-10-11** (walkthrough row 22, D-097). Codex approved this exact text (v3, sha256 7866ee5f…) for owner presentation; Codex's private reviews of v1, v2 and v3 are kept outside git. Approval of the plan is not a G5, an entity PASS or a build start. Budget grants in §8 were granted by the owner with the preconditions recorded in row 22; until those preconditions and contract C9 are met, the real-model budget remains 0.
 
 
@@ -117,6 +119,83 @@ Critical chain: C9+C2 → R0 proof → (C1, C3, C4, C5) → B1 loop → B2.
 
 ## 4. Calendar
 
+### 4.0 v3.1 re-plan, S2 to S5 (approved 2026-10-14, D-110)
+
+Forecast v2.2. Codex approved it for owner presentation (62b886c0), after
+review rounds b27ee237, 1fad17f1 and c710d8ae. The owner chose option C,
+"i choose option C" (about 10:29 MDT): re-plan S2 to S5 now and run R0
+first for 48 hours, with independent work in parallel. The owner approved
+the forecast with "i approve but we're going to have to be more
+disciplined about early notifications if it looks like we're falling
+behind" (about 10:55 MDT). That led to the tripwires in §7.
+
+This is a plan revision. It is not a G5, an entity PASS or a grant. Every
+gate, the WIP limits, the protected S6 and same-day slip reporting are
+unchanged. **The S2 to S5 rows of the v3 table below are superseded by
+this section.** The S0, S1, S6 and Oct 30 rows, and the forecast-honesty
+rules, still apply.
+
+**S1 close.** 9 of 25 stories closed; the exit was **not met**. Every
+open S1 story is carried forward with a new date. Nothing is closed by
+relabeling.
+
+**Core work is lopsided.** About 30 open core stories are in the Claude
+lane (C9-04, C9-06, C2-02, R0-04 to 07, C3-01 to 03, C5-01 to 04, C4-01,
+B1-01, B1-03 to 07, B2-01 to 08). There are 7 in the Codex lane (C1-01
+to 03, H1-01 to 04).
+
+- That is a rough count, not a rate. Stories vary widely in size: R0-07
+  was one story and about 12 PRs.
+- So the Claude lane is the critical resource, and the Codex lane has
+  core slack once C1 and H1 are done.
+- **All dates below are low-confidence.** They are calibrated at the
+  Oct 15 gate review against measured time.
+
+| Window | Claude lane | Codex lane | Owner | Exit / check |
+|---|---|---|---|---|
+| Oct 14–15 (48h R0-first) | #146 merge; C2-02; R0-04; R0-05; C9-04, C9-06 | C1 authoring and, once its owner gates pass, the C1 build (then exact-head green CI, then merge); review Claude's R0 PRs. C3-01 and C4-01 already have entity PASS | Merge #146; create G-R0; book the attended proof slot; B1 inputs; confirm the B2 walkthrough Oct 16–17; ADR-0015 amended text and scoped C1 G5 (H1 G5 is separate); C3: ADR-0009 amendment, OQ-1..3, scoped G5 (C3 also depends on C4's ADR-0005 logging amendment); C4: ADR-0005 logging amendment, OQ-1..7, the PostgreSQL server-log prerequisite, scoped G5 | **S2 gate review, end of Oct 15:** each R0 item has an owner and a date, or a same-day slip |
+| Oct 16–17 | R0-06 proof (attended, before G-R0 expires; **conditional** on #146 merged, G-R0 created and C2-02, R0-04/05, C9-04/06 merged; §3 puts C9 before any R0 proof) and the tuple promotion PR; C3-02/03 once C3's owner gates pass; C4 build once C4's owner gates pass; B2-01 mockups, then the B2-02 walkthrough | H1-01..03; review C3/C4 | Attended proof; B2 walkthrough; H1 G5 | R0 proven, both profiles (conditional); C1 merged if its gates passed; C3 and C4 in review |
+| Oct 18–20 (S3) | C5-01, C5-03/04, and C5-02 unless transferred; B1-01 G5 packet, then B1-03..05 | H1-04 and H1 acceptance; **possible lane transfer, decided at the Oct 15 gate review:** one build story with a named author, reviewer, prerequisites and start date, or none and a re-forecast. Candidates: C5-02 (adapters; only useful if it can start before H1 acceptance) or B2-03 (account discovery). A candidate sits in one lane only | B1 G5; B2 G5; Brave/Exa keys after C5-01 | **End-S3 checkpoint:** H1 accepted; B1 loop drafting |
+| Oct 21–23 (S4) | B1-06/07 (Home and the real acceptance run, G-DEMO); B2-04..06, and B2-03 unless transferred | The transferred story, if any; B3/B5 only without core contention | B1 acceptance; HubSpot portal check only if B6/B7 are kept | B1 accepted (stretch Oct 23) |
+| Oct 24–26 (S5) | B2-07/08 | Review B2; non-core as capacity allows | B2 acceptance | B2 accepted (plausible Oct 26–29) |
+| Oct 27–29 (S6) | Protected integration and rehearsal 1 | same | Full rehearsal | RC candidate (at risk) |
+
+**Forecast (Codex's numbers; Claude concurs):**
+
+- **R0 proven: Oct 17, conditional.** It needs #146 merged, G-R0 created
+  by Oct 15, C2-02, R0-04/05 and C9-04/06 merged, and the attended slot
+  holding.
+- **H1 accepted:** Oct 20–23.
+- **B1 accepted:** Oct 23–26.
+- **B2 accepted:** Oct 26–29. This is conditional on C3, C5 and the
+  Oct 16–17 walkthrough.
+- **Core four by Oct 23:** a stretch, not the baseline.
+- **The Oct 30 RC is at risk,** because B2 can collide with S6.
+- **On any further R0, C3 or C4 slip:** re-forecast immediately. S6 is
+  never spent silently.
+
+**Candidate non-core cuts,** named now and decided on S2 evidence. They
+are listed in the order they would move past Oct 29, most likely first:
+
+1. B7 HubSpot writeback (C7, B7-01..04): portal-dependent, the riskiest
+   new integration.
+2. B6 intake (C8, B6-01..04). CSV (B6-02/03) could be kept on its own.
+3. B8 editors (B8-02/03). C4's admin-only forms cover the MVP inputs.
+4. B4 sequences (B4-01..06). It needs C6 plus B5 semantics.
+5. B3 channels and B5 replies: the last to cut.
+
+Codex's S2 work on C6 (#88–#90), B3-01 (#101) and B5-00 (#105) waits
+until C1 and H1 are done. It is not cancelled.
+
+**Measurement:** authoring, review, correction and CI time per PR is
+tracked daily and resets the 35% allowance (§5). "Contracts closed versus
+planned" is reported at each standup.
+
+**Milestones:** GitHub milestones are updated by moving issues between
+them, never by closing issues.
+
+### 4.1 v3 calendar (approved 2026-10-11; S2–S5 rows superseded by 4.0)
+
 Day convention: build days Oct 12-29 = 18 calendar days in six sprints; Oct 30
 is RC acceptance, not build capacity. Today (Oct 11) is planning only.
 Sprints close early when their exit is met and the next sprint is pulled
@@ -181,6 +260,21 @@ not set priority.
   observed slip (any size), calendar delta.
 - Harmless CI retries and routine progress are not notified.
 - Waiting on the owner: pause that piece, continue other approved work.
+- **Early-warning tripwires (v3.1, approved 2026-10-14, D-111).** A slip
+  is reported as soon as it is projected, not once it is observed. If any
+  one of these trips, the owner is told the same day in chat, with the
+  date impact. For the critical chain, a Telegram goes out too if the
+  owner might be away. Each lane applies them to its own work.
+  1. **Growth:** a story needs more PRs or slices than planned, or its
+     contract gains a new component.
+  2. **Repeat findings:** the same item comes back "changes requested" a
+     second time. This is a signal to report, not a cap on review rounds.
+  3. **Age:** a critical-chain item has not started on its planned day,
+     or runs past its planned window.
+  4. **Owner gate:** an owner decision is needed within 24 hours and is
+     not scheduled yet.
+  5. **Daily line:** each critical-chain item gets "on track", "at risk"
+     or "slipping" at standup, with the date change.
 
 ## 8. Budget grants (proposals; nothing authorized until the owner grants)
 
