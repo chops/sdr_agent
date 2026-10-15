@@ -69,6 +69,7 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   def run(["check"]) do
     plan = plan!()
     Mix.shell().info(CalibrationConsole.plan_line(plan))
+    Mix.shell().info(CalibrationConsole.witness_line(plan))
 
     Mix.shell().info(
       "calibration console secrets: #{Secrets.default_path()} " <>
@@ -92,7 +93,7 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
     CalibrationConsole.apply!(plan, serve: true)
     CalibrationConsole.ensure_storage!()
     Mix.Task.run("app.start")
-    CalibrationConsole.verify_started!()
+    CalibrationConsole.verify_started!(plan)
     {ip, port} = CalibrationConsole.bind()
 
     Mix.shell().info(
@@ -111,11 +112,12 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
 
     case apply(@calibrate, :command, [argv]) do
       {:run, profile_id, opts} ->
+        required!(CalibrationConsole.require(plan, {:calibrate, profile_id}))
         prepare!(opts)
         CalibrationConsole.apply!(plan, serve: false)
         CalibrationConsole.ensure_storage!()
         Mix.Task.run("app.start")
-        CalibrationConsole.verify_started!()
+        CalibrationConsole.verify_started!(plan)
         {:ok, _registry} = apply(@authority, :start_link, [[]])
         report(apply(@calibrate, :run, [profile_id, opts]))
 
@@ -134,11 +136,12 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
 
     case apply(@calibrate, :recover_command, [argv]) do
       {:recover, invocation_id, opts} ->
+        required!(CalibrationConsole.require(plan, {:recover, invocation_id}))
         prepare!(opts)
         CalibrationConsole.apply!(plan, serve: false)
         CalibrationConsole.ensure_storage!()
         Mix.Task.run("app.start")
-        CalibrationConsole.verify_started!()
+        CalibrationConsole.verify_started!(plan)
         recovery_report(apply(@calibrate, :recover, [invocation_id, opts]))
 
       {:error, :usage} ->
@@ -157,6 +160,13 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   end
 
   # First-run setup of the two canonical paths (packet 8.14.9 round 4),
+  # R0-07f: a capture-required command without the witness store root stops
+  # here, before any storage, app start, tenant, definition or claim.
+  defp required!(:ok), do: :ok
+
+  defp required!({:error, reason}),
+    do: Mix.raise("mix sdr.calibration.console refuses: #{reason}")
+
   # before the app starts; any refusal stops the command.
   defp prepare!(opts) do
     case apply(@calibrate, :prepare, [Keyword.take(opts, [:root, :evidence_dir])]) do
