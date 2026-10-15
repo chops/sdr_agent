@@ -263,12 +263,14 @@ changes; `mix.exs` is unchanged (`mix deps.update decimal` alone offered the
 3.2.0 minor release, which is not required, so the patch release was
 selected). No `ignore_advisories` entry.
 
-## Amendment (2026-10-15, proposed): EEF-CVE-2026-105659
+## Amendment (2026-10-15): EEF-CVE-2026-105659
 
-**Status: proposed.** The owner chose option B on 2026-10-15 ("(B)", D-130):
-prepare a temporary, immutable upstream Git pin with HTTP/2 disabled, through
-this amendment and independent review. Accepting this amendment and merging
-the change remain separate owner decisions.
+**Status: accepted** by the owner in the private Claude session chat on
+2026-10-15 at about 10:58 MDT ("yes, accept the amendment and merge #161 once
+its CI is green"), after Codex's independent approval of the text at 09e46c5
+(d03a81e8) and of the code at 1fbea26 (10ea669c, complete upstream delta
+reviewed, live LiveView probe passed). The owner chose option B earlier the
+same day ("(B)", D-130; D-132 records this acceptance).
 
 ### Advisory
 
@@ -317,7 +319,7 @@ the change remain separate owner decisions.
 - **HTTP/2 off alone** removes today's reachable path but leaves the
   vulnerable library, so it does not clear the policy gate by itself.
 
-### Decision (proposed)
+### Decision
 
 1. **Source.** `{:bandit, github: "mtrudel/bandit", ref:
    "d88b21953c65061f21136ea76a89a4f95a2ac7a1", override: true}` in `mix.exs`.
