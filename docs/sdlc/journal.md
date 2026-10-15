@@ -591,6 +591,54 @@ the real-data switch).
   the run changed the source hash that a compile-time check embeds, and
   the run had to prove that the test sources were unchanged.
 
+### Sprint 1, day 4 (Thu Oct 15), mid-day checkpoint (as of 11:55 MDT)
+
+**Calibration, attempted and stopped safely.** At 07:57 the owner ran the
+console with Claude walking each step. They created the console's first
+admin and the single G-R0 grant (4 attempts, 2 + 2 proof allocations,
+expiring Oct 19 05:59 UTC). The first form attempt was refused because
+the grant-level Profiles boxes were unticked; the review step didn't flag
+it, a small follow-up. The owner confirmed included-only billing, the CLI
+login and the disclosure. The first `calibrate claude_cli_opus` stopped at
+preflight with `witness_store_untrusted`: **no invocation, no reservation,
+no attempt spent.** Cause, confirmed by Codex with a no-start probe: the
+console runs the test build, which never reads `SDR_WITNESS_STORE_ROOT`,
+and the merged harness's tests had injected the root themselves. Codex
+also found the console inherited the test build's 1 s result wait.
+
+**R0-07f, the fix.** Contract (Codex PASS at `0ee216e`), RED (VERIFIED at
+`ce859ce`, after one round fixing a detached-task crash, fixture
+pre-promotion, a missing real `apply!` probe and control-character
+directories), GREEN, then one code-review round (direct `mix` checked the
+root before parsing argv; docs). Codex APPROVE at `f01cae0`; PR #162 CI
+green. Awaiting the owner's merge decision.
+
+**Bandit HIGH (EEF-CVE-2026-105659).** The owner chose option B (D-130).
+ADR-0008 amendment approved by Codex after one correction round
+(mechanism wording, scheme-level `http_2_options`), accepted by the owner
+(D-132). PR #161: full-SHA Git pin to `d88b219`, HTTP/2 off on every
+listener, four regression tests on a hermetic HTTP/2 listener (three fail
+on 1.12.5, all pass on the pin), Codex code approval including a live
+LiveView probe. **Merged at 11:30 MDT (`1272ff8`).** Merges are unblocked.
+
+**C2-02b2α.** The owner accepted the ADR-0004 amendment at `80771e5`
+(D-131) after asking whether Codex had reviewed it (it had, and confirmed
+the copy-only follow-up). GREEN: the reaper receipt, the launch hold, the
+start allocator and the coordinator; all 68 RED tests and the migrated
+slice a/b1 suites pass; full gate 2368 passed. Codex's GREEN review
+requested changes (MF1-MF6: blocked switches released at restart,
+adoption conditions, a direct-action bypass, an uncertified receipt, the
+stop bound, rollback after a failed start). Fixed at `8b20acd` with
+Codex's eight probes kept as regressions; `main` and the planning docs
+merged in; the integrated gate is running.
+
+**Tripwires fired today:** 3 (calibration missed its morning window), 2
+(R0-07f and b2α each needed a second round), 1 earlier (5 PRs for C2-02).
+All were reported the same day.
+
+**Open with the owner:** #162 merge, then resuming calibration at step 4;
+the scoped C4 G5.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
