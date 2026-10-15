@@ -43,7 +43,9 @@ admin = AuditCase.human(:admin, tenant)
 {:ok, grant} =
   Agents.release_allocation(
     grant,
-    %{expected_revision: 1, key: :workshop, profile_id: :claude_cli_sonnet}, actor: admin)
+    %{expected_revision: 1, key: :workshop, profile_id: :claude_cli_sonnet},
+    actor: admin
+  )
 
 assignment = AgentsFixtures.running_run(tenant, usage_origin: :assignment)
 reply = AgentsFixtures.running_run(tenant, usage_origin: :reply)
