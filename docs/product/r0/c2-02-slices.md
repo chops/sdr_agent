@@ -85,8 +85,8 @@ c while b2 is in review is preparation, not extra capacity.
   - integration;
   - the owner's try.
 - **Window:** ~~starting Oct 15, R0-06 is Oct 20 at the earliest, more
-  plausibly Oct 21 to 22~~. **Reforecast: Oct 22 at the earliest, more
-  plausibly Oct 23 to 24.** This is a conditional planning window, not a
+  plausibly Oct 21 to 22~~. **Reforecast: Thu Oct 22 at the earliest, more
+  plausibly Fri Oct 23, or Mon Oct 26 if no weekend work.** This is a conditional planning window, not a
   promise. While Bandit is unresolved there is no dependable date.
   Protected S6 is not spent silently.
 - **What G-R0's expiry does and doesn't gate:**
