@@ -153,3 +153,7 @@ restart acceptance is unverified, not passed.
     `mix format --check-formatted` passes. The restart-proof file was
     rerun there: 8 passed. The full suite was not rerun for this
     whitespace-only change.
+  - **at `fcb8e3e`, after the absolute-deadline fix (Codex recheck of
+    d8791ee):** **PASS** on every step: format, compile dev and test
+    (`--warnings-as-errors --force`), Credo, `bin/verify-workflow`, and
+    the full suite with **2186 passed, 1 skipped, 4 excluded.**
