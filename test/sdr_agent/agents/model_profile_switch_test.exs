@@ -14,6 +14,7 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
 
   alias SdrAgent.Accounts
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Checks.ProfileSwitchContext
 
   @setting SdrAgent.Agents.ModelProfileSetting
   @switch SdrAgent.Agents.ModelProfileSwitch
@@ -568,15 +569,15 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
       end
     end
 
-    # Stored-row guards (not policy): the switch must already be locked and
-    # transitioned in this transaction, so they refuse as Invalid on
-    # :switch_id with the matching marker and actor.
+    # Stored-row guards (not policy). A caller-built marker never opens a
+    # phase (the forged cases above are Forbidden), so these open a real one
+    # the way `complete` does: `:transition` for complete, advanced to
+    # `:apply`. The guard then refuses as Invalid on :switch_id: without the
+    # `:transition` locks, or on a switch that is not pending.
     test "a premature :apply_switch (no transition lock, switch still pending) is refused",
          ctx do
-      context = phase(ctx, :apply, :complete, ctx.switch)
-
       assert {:error, %Ash.Error.Invalid{errors: errors}} =
-               apply_switch(ctx.setting_row, ctx.switch, ctx.runtime, context)
+               opened_apply(ctx, ctx.switch, false)
 
       assert Enum.any?(errors, &(Map.get(&1, :field) == :switch_id))
       unchanged!(ctx)
@@ -584,10 +585,8 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
 
     test ":apply_switch on a non-pending switch is refused", ctx do
       assert {:ok, failed} = fail(ctx, ctx.switch)
-      context = phase(ctx, :apply, :complete, failed)
 
-      assert {:error, %Ash.Error.Invalid{errors: errors}} =
-               apply_switch(ctx.setting_row, failed, ctx.runtime, context)
+      assert {:error, %Ash.Error.Invalid{errors: errors}} = opened_apply(ctx, failed, true)
 
       assert Enum.any?(errors, &(Map.get(&1, :field) == :switch_id))
       unchanged!(ctx)
@@ -663,6 +662,52 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
       context: context
     )
     |> Ash.update()
+  end
+
+  # A real `:apply` phase, opened as `complete` opens it, in a transaction;
+  # with `lock?`, the setting and the switch are first locked under
+  # `:transition`.
+  defp opened_apply(ctx, switch, lock?) do
+    binding = %{
+      action: :complete,
+      tenant_id: ctx.tenant.id,
+      switch_id: switch.id,
+      actor: ctx.runtime
+    }
+
+    SdrAgent.Repo.transaction(fn ->
+      ProfileSwitchContext.with_phase(
+        :transition,
+        binding,
+        &apply_in_phase(ctx, switch, lock?, &1)
+      )
+    end)
+    |> case do
+      {:error, %Ash.Changeset{errors: errors}} -> {:error, Ash.Error.to_error_class(errors)}
+      other -> other
+    end
+  end
+
+  defp apply_in_phase(ctx, switch, lock?, context) do
+    if lock?, do: lock_for_transition!(switch, ctx.runtime, context)
+    context = ProfileSwitchContext.advance(context, :apply)
+
+    case apply_switch(ctx.setting_row, switch, ctx.runtime, context) do
+      {:ok, setting} -> setting
+      {:error, error} -> SdrAgent.Repo.rollback(error)
+    end
+  end
+
+  defp lock_for_transition!(switch, actor, context) do
+    for resource <- [@setting, @switch] do
+      assert {:ok, [_row]} =
+               resource
+               |> Ash.Query.for_read(:lock_for_transition, %{switch_id: switch.id},
+                 actor: actor,
+                 context: context
+               )
+               |> Ash.read()
+    end
   end
 
   defp unchanged!(ctx) do
