@@ -1,6 +1,21 @@
-# C2-02b1 (#52, slice b1): the admission fence and the drain (draft 2)
+# C2-02b1 (#52, slice b1): the admission fence and the drain (draft 3)
 
-**Status:** draft 3, 2026-10-15, for Codex's recheck. No code.
+**Status:** draft 3, interface and entity **PASS**, recorded 2026-10-15.
+- **Reviewer:** Codex, ai-pair correlated review (`ccf36a4e`, request
+  `m_1792054834333758000_45f61327`), at exact `cda8ee5`, about 09:03 UTC.
+  Report:
+  `~/.local/state/sdr-agent/handoff-20261008/tmp/codex-c2-02b1-cda8ee5-interface-pass.md`.
+- **It authorizes scoped RED only:** no GREEN, activation, model calls or
+  merge.
+- **Binding implementation obligations from the PASS:**
+  - The settlement follows the existing outcome rule of
+    `AgentWorker.fail_operation/3` through a shared domain-owned helper:
+    `SdrAgent.Agents` never calls up into a worker.
+  - Idempotency is checked under the actual locks, bound to the stored
+    run, cause, request, event, switch and Operation.
+  - The full race and crash matrix runs with joined workers on a
+    disposable test DB.
+  - The final observation is one coherent, bounded read.
 - **Draft 2** (`0dd410b`) was NEEDS-REVIEW (Codex, 3db4316e). Its epoch,
   cleanup and consumer fixes were accepted. Two drain lifecycle gaps were
   open, both fixed here:
@@ -101,7 +116,7 @@ end-to-end. There is no new status, enum or column.
 | `Admission` | **New `fence_reasons/0`** = `[:profile_switch_fenced]`. **`admission_reason?/1`:** true for `Gate.reasons()` and `fence_reasons()`, so `failure_class/1` gives `:provider_error` (not `:budget_exhausted`). **`reason_name/1`:** `"profile_switch_fenced"`. **Reservation:** the transaction rolls back, then `record_refusal/1` commits one deduplicated `provider_error` Failure of the run plus `model.reservation.refused` (`reason`, `check`, `failure_id`, the request's `idempotency_key`). The receipt is `%Refused{stage: :reservation, reason: :profile_switch_fenced, check, failure_id, event_id, agent_run_id, request_id}` |
 | Launch (`Agents.admit_launch/3`, `refuse_launch`) | reserved → failed, never sent, with `error = %{"kind" => "launch_refused", "reason" => "profile_switch_fenced", ...}`, plus one critical `provider_error` Failure of the run and `model.launch.refused`, in one transaction. The receipt is `%Refused{stage: :launch, ...}`, as for every launch refusal |
 | `SDR.Model.stop_reason/1` | **Launch:** `:model_not_admitted` (unchanged). **Reservation:** `:model_not_admitted`, through `admission_reason?/1`. No new branch |
-| `Changes.LinkRefusalAttention` | `"profile_switch_fenced"` joins both the reservation-admission list (`@admission`) and the launch list (`@launch`). So the run stops `failed`/`:model_not_admitted` linking exactly that Failure, even if an admin resolved it meanwhile. There is no second live attention item, and the worker and Operation rules are unchanged |
+| `Changes.LinkRefusalAttention` | `"profile_switch_fenced"` joins both the reservation-admission list (`@admission`) and the launch list (`@launch`). So the run stops `failed`/`:model_not_admitted` linking exactly that Failure, even if an admin resolved it meanwhile. There is only one live attention item, and the worker and Operation rules are unchanged |
 | Operations.Failure | class `provider_error`, detail reason `profile_switch_fenced`. Unchanged schema |
 | AuditEvent | `model.reservation.refused` and `model.launch.refused` gain the reason and checks above. They are read (not written) for the epoch rule: the invocation's `model.invocation.reserved` and the tenant's `model.profile.switch_requested` sequences, by kernel read, in the admission path only |
 
@@ -296,10 +311,10 @@ No persisted field, relationship, identity or lifecycle state is added.
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| ModelInvocation | Existing (action contract delta) | One model call | unchanged; `profile_id`, grant and allocation are immutable after reservation; charges are never refunded | unchanged | **reserve:** refused (`:profile_switch_fenced`, `:switch_pending`/`:switch_blocked`) while the tenant has an open switch, read after the head. **launch:** the same checks, then `:reserved_before_switch` (the epoch rule: its reserved event's sequence is lower than a `switch_requested` event's); reserved → failed, never sent. **drain:** every reserved row of the tenant → failed through the launch refusal path. Sent rows settle unchanged | unchanged: `agent_runtime` (the drain runs as `agent_runtime`) | none |
-| AgentRun | Existing (action-cause delta) | One agent run | unchanged | unchanged | `:fail` with `:model_not_admitted` accepts a `profile_switch_fenced` refusal Failure as its cause, at either stage, through `LinkRefusalAttention`'s lists. It links the same Failure even when resolved; no second attention item | unchanged (`agent_runtime`) | none |
+| ModelInvocation | Existing (action contract delta) | One model call | unchanged; `profile_id`, grant and allocation are immutable after reservation; charges are never refunded | unchanged | **reserve:** refused (`:profile_switch_fenced`, `:switch_pending`/`:switch_blocked`) while the tenant has an open switch, read after the head. **launch:** the same checks, then `:reservation_provenance_missing` (fails closed) or `:reserved_before_switch` (the epoch rule: its reserved event's sequence is lower than a `switch_requested` event's); reserved → failed, never sent. **drain:** every reserved row of the tenant → failed through the launch refusal path. Sent rows settle unchanged | unchanged: `agent_runtime` (the drain runs as `agent_runtime`) | none |
+| AgentRun | Existing (action-cause delta) | One agent run | unchanged | unchanged | `:fail` with `:model_not_admitted` accepts a `profile_switch_fenced` refusal Failure as its cause, at either stage, through `LinkRefusalAttention`'s lists. It links the same Failure even when resolved; only one live attention item | unchanged (`agent_runtime`) | none |
 | Operations.Failure | Existing (recording delta) | Operator attention | unchanged | unchanged | a fence refusal opens one `provider_error` Failure with detail reason `profile_switch_fenced`: deduplicated per run at reservation; one per refused row at launch or drain | unchanged | none |
-| AuditEvent | Existing (event-contract delta) | Ledger | unchanged | unchanged | `model.reservation.refused` and `model.launch.refused` record `reason: "profile_switch_fenced"` and the check. The epoch rule reads `model.invocation.reserved` and `model.profile.switch_requested` sequences, kernel read, inside the admission and drain paths only | unchanged | none |
+| AuditEvent | Existing (event-contract delta) | Ledger | unchanged | unchanged | `model.reservation.refused` and `model.launch.refused` record `reason: "profile_switch_fenced"` and the check. A drain refusal also records `switch_id` (read back by a retried drain). The epoch rule reads `model.invocation.reserved` and `model.profile.switch_requested` sequences, kernel read, inside the admission and drain paths only | unchanged | none |
 | Operations.Operation | Existing (consumer and recovery delta) | One business operation | unchanged | unchanged | **A run the drain stopped `:model_not_admitted`:** the drain fails its still-running Operation by the worker's rule (`AgentWorker.fail_operation/3`), in its own Operation → Failure → head transaction after the refusal commits, linking the live cause or a resolved-cause Failure. A retried drain finishes that obligation for S's runs. The stale-run sweeper's terminal heal also takes `:model_not_admitted` runs with a running Operation and a dead job. Exactly one live attention item. Reply-intake runs have no Operation | unchanged: `agent_runtime` (drain); the sweeper's existing actor | none |
 | ModelProfileSwitch | Existing (slice a) | One requested change | unchanged | unchanged | read, never written or locked, by the fence and by the drain. Both use a fresh read after the head, in every destructive drain transaction and in the final observation: pending at the generation, plus its `switch_requested` sequence as the cutoff | unchanged | none |
 
@@ -335,7 +350,7 @@ ModelProfileSetting: existing dependency: unchanged — relationship/policy/life
    - the run `failed`/`:model_not_admitted` linking exactly that Failure,
      also after the Failure was resolved;
    - no budget-class Failure;
-   - no second attention item.
+   - only one live attention item.
 5. **The drain:**
    - a dead reserved caller's row is refused within the bound, its run is
      stopped, and the charge is unchanged;
@@ -367,7 +382,7 @@ ModelProfileSetting: existing dependency: unchanged — relationship/policy/life
      a retried drain settles it before reporting success, and,
      separately, the sweeper heals it once the job is dead;
    - a concurrent ordinary worker: the Operation is settled once, by the
-     same cause, with no second live Failure;
+     same cause, leaving only one live attention item;
    - the resolved-cause race: an admin resolves the Failure before the
      Operation transaction, and the worker's resolved-cause Failure is
      used;
