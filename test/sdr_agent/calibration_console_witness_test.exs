@@ -291,12 +291,34 @@ defmodule SdrAgent.CalibrationConsoleWitnessTest do
         index = &Enum.find_index(order, fn step -> step == &1 end)
 
         assert index.(:require), "R0-07f: #{command} never calls CalibrationConsole.require/2"
+        assert index.(:parse) < index.(:plan!), "argv parsing must precede the plan"
         assert index.(:plan!) < index.(:require)
-        assert index.(:parse) < index.(:require), "argv parsing must precede the prerequisite"
 
         for step <- effectful, at = index.(step), not is_nil(at) do
           assert index.(:require) < at, "#{inspect(step)} runs before require in #{command}"
         end
+      end
+    end
+  end
+
+  describe "direct Mix: malformed argv is a usage error before the root" do
+    @tag timeout: 120_000
+    test "with an explicitly invalid root, nothing is created", %{root: root} do
+      home = Path.join(root, "home")
+      File.mkdir_p!(home)
+      missing = Path.join(root, "not-there")
+
+      for args <- [["calibrate", "fake"], ["calibrate-recover", "not-a-uuid"]] do
+        {out, status} =
+          System.cmd("mix", ["sdr.calibration.console" | args],
+            env: [{"MIX_ENV", "test"}, {"HOME", home}, {@variable, missing}],
+            stderr_to_stdout: true
+          )
+
+        assert status != 0, out
+        assert out =~ "usage:", "#{inspect(args)}: #{out}"
+        refute out =~ "trusted witness store root", "#{inspect(args)}: root checked before argv"
+        refute File.exists?(Path.join(home, ".local")), "a malformed command created state"
       end
     end
   end

@@ -25,7 +25,22 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   (`SdrAgent.CalibrationConsole.Secrets`) and never printed; the checked-in
   test secrets are never used.
 
-    * `check` — prints the plan line and exits. It starts no server and
+  **The witness store root and the result wait (R0-07f,
+  `docs/product/r0/r0-07f-console-witness.md`).** The root is the
+  owner's `SDR_WITNESS_STORE_ROOT`, the witness proxy's store directory
+  (for example `$HOME/.local/share/llm-otel-proxy/blobs`). The plan
+  refuses a present root with a control character or failing the store's
+  trust check, for every command; an absent root is allowed for `check`,
+  `serve`, `bootstrap-admin` and `calibrate-recover --release-aborted`,
+  while `calibrate` and every `calibrate-recover ID` refuse without it,
+  before any storage, app start or claim. The plan's result wait is
+  `ResultGate`'s own 120 s ceiling with a 1 s poll, never the test build's
+  lowered wait. Both are applied before the app starts and verified again
+  after it. For `calibrate` and `calibrate-recover`, argv is parsed first,
+  then the plan is built, then that prerequisite is checked.
+
+    * `check` — prints the plan line and the witness line
+      (`SDR_CALIBRATION_WITNESS set <root>` or `… unset`) and exits. It starts no server and
       touches no database, but like every command it creates the secrets
       file on first use.
     * `bootstrap-admin ARGS` — the first-admin bootstrap
@@ -35,7 +50,8 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
       LiveView assets are built (`mix assets.build`).
     * `calibrate PROFILE` — one attended calibration call of a real profile
       (R0-07 d3c, packet 8.14.1 and 8.14.9): exactly
-      `{:run, p, o} = Calibrate.command(argv)`, then the first-run
+      `{:run, p, o} = Calibrate.command(argv)`, then the plan and the
+      witness root prerequisite (R0-07f), then the first-run
       `Calibrate.prepare/1` of the two canonical paths, then
       `Calibrate.run(p, o)`, with the console's fixed `console_opts/1` (no
       hook, no override). The
@@ -46,7 +62,8 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
     * `calibrate-recover ID [--owner-verified-stopped]` and
       `calibrate-recover --release-aborted` — recovery of a stale launch
       record (R0-07 d3d, packet 8.14.11): exactly `{:recover, id, o} =
-      Calibrate.recover_command(argv)`, then `Calibrate.prepare/1` of the
+      Calibrate.recover_command(argv)`, then the plan and (for an ID) the
+      witness root prerequisite (R0-07f), then `Calibrate.prepare/1` of the
       two canonical paths, the storage, the app start and
       `Calibrate.recover(id, o)` with the fixed `recover_opts/1`. The
       endpoint does not listen, and no model server or authority starts. It
@@ -104,14 +121,17 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
     Process.sleep(:infinity)
   end
 
+  # R0-07f: argv is parsed first, then the plan is built, then the
+  # capture prerequisite is checked, all before any effect.
   def run(["calibrate" | argv]) do
-    plan = plan!()
+    test_build!()
 
     Code.ensure_loaded?(@calibrate) ||
       Mix.raise("mix sdr.calibration.console calibrate refuses: not a test-seam build")
 
     case apply(@calibrate, :command, [argv]) do
       {:run, profile_id, opts} ->
+        plan = plan!()
         required!(CalibrationConsole.require(plan, {:calibrate, profile_id}))
         prepare!(opts)
         CalibrationConsole.apply!(plan, serve: false)
@@ -129,13 +149,14 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   end
 
   def run(["calibrate-recover" | argv]) do
-    plan = plan!()
+    test_build!()
 
     Code.ensure_loaded?(@calibrate) ||
       Mix.raise("mix sdr.calibration.console calibrate-recover refuses: not a test-seam build")
 
     case apply(@calibrate, :recover_command, [argv]) do
       {:recover, invocation_id, opts} ->
+        plan = plan!()
         required!(CalibrationConsole.require(plan, {:recover, invocation_id}))
         prepare!(opts)
         CalibrationConsole.apply!(plan, serve: false)
@@ -203,9 +224,13 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
     "record #{inspect(summary.record)}, invocation #{summary.invocation_id || "none"}, #{evidence}"
   end
 
-  defp plan! do
+  defp test_build! do
     Mix.env() == :test ||
       Mix.raise("mix sdr.calibration.console runs only the test-seam build (MIX_ENV=test)")
+  end
+
+  defp plan! do
+    test_build!()
 
     Mix.Task.run("app.config")
 
