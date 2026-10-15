@@ -263,7 +263,8 @@ defmodule SdrAgent.CalibrationConsole do
     |> Keyword.delete(:https)
     |> Keyword.merge(
       server: true,
-      http: [ip: @ip, port: @port],
+      # ADR-0008 amendment (EEF-CVE-2026-105659): HTTP/2 stays off.
+      http: [ip: @ip, port: @port, http_2_options: [enabled: false]],
       url: [host: "127.0.0.1", port: @port],
       check_origin: ["//127.0.0.1:#{@port}", "//localhost:#{@port}"]
     )
