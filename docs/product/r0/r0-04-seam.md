@@ -1,14 +1,18 @@
 # R0-04 (#50) seam cleanup: contract draft
 
-**Status:** draft 2, 2026-10-15, for Codex's review before RED. No code.
+**Status:** draft 3, 2026-10-15, for Codex's review before RED. No code.
 - **Draft 1** (`d6e9f34`): Codex NEEDS-REVIEW. The findings:
   - the entity trigger is yes;
   - the malformed-reply boundary needs a full definition, and the
     invocation states must keep their precedence;
   - the inventory missed `Runtime.prepared/1`;
   - G3 is a partial gap, not a missing adapter.
-- **This draft** answers them, and adds a narrow entity delta (section 4)
-  for an independent PASS.
+- **Draft 2** (`d24f724`): Codex NEEDS-REVIEW. The findings:
+  - a Zoi-valid output that isn't a map has no defined storage;
+  - the reserved-row reasons were misstated;
+  - "castable" usage needs a definition.
+- **This draft** answers them. Section 4 holds the narrow entity delta,
+  and section 7 holds the soft-stop record.
 
 **Backlog acceptance:**
 
@@ -74,9 +78,11 @@ reviewed PR.
   The row stays `sent`, and the run's budget isn't settled. Whether it
   ever is depends on the sweeper; see the R0 packet's tracked item
   "`sent` rows of an already terminal run stay `sent`".
-- **G1b. Some invalid outputs crash instead of failing validation.** If
-  Zoi rejects an output that isn't a map, storing it as `parsed_output`
-  (a `:map` field) fails, instead of recording `validation_failed`.
+- **G1b. A non-map output can't be stored, valid or not.** A non-map
+  parsed or invalid output written to `parsed_output` (a `:map` field)
+  fails settlement instead of being recorded. This covers a Zoi-valid
+  scalar or list from a non-object schema (the request contract allows
+  any `Zoi.schema()`) as well as a Zoi-invalid non-map.
 - **G2. A malformed `prepare/2` return** falls through the facade's
   `with` and goes back to the caller untyped. Nothing is written. A
   `{:ok, non_map}` reaches reservation and fails there less clearly. To
@@ -94,7 +100,7 @@ reviewed PR.
 
 | Reply | Shape | Settles as |
 |---|---|---|
-| **Success** | `{:ok, result}`. `result` is a map with `:output` (any term; Zoi decides validity) and `:raw_response` (a binary). An optional `:usage`, if present, must cast to `ModelInvocation.Usage`. | Zoi-valid: completed. Zoi-invalid: failed as `validation_failed` (R0-04-2) |
+| **Success** | `{:ok, result}`. `result` is a map with `:output` (any term) and `:raw_response` (a binary). An optional `:usage`, if present, must pass `Ash.Type.cast_input/3` and `Ash.Type.apply_constraints/3` for the embedded `SdrAgent.Agents.Usage` type, with its non-null, nonnegative integer fields; the **normalized** value is what settlement writes. | Zoi-valid and the parsed value is a map: completed. Otherwise failed as `validation_failed` (R0-04-2) |
 | **Known failure** | `{:error, reason}`, any term | failed, `provider_error` with `safe_reason/1`; the drift reasons open their attention Failure as today |
 | **Unknown** | `{:unknown, reason}`, any term; or a raise or exit from the provider (as today) | unknown |
 
@@ -103,7 +109,9 @@ reviewed PR.
 - `{:ok, non_map}`;
 - `:output` missing;
 - `:raw_response` missing or not a binary;
-- `:usage` present but not castable.
+- `:usage` present but failing the embedded type's cast or constraints
+  (for example negative, nil or incomplete fields; numeric strings
+  follow the type's actual cast rules, and RED records the result).
 
 The facade checks the envelope **before** any settlement write. It
 doesn't rescue the settlement write.
@@ -114,7 +122,7 @@ which takes precedence over the reply:**
 | Row state when settling | Malformed reply | Unchanged for valid replies |
 |---|---|---|
 | `sent` | **Unknown.** `mark_model_invocation_unknown`; the caller gets `{:error, :provider_outcome_unknown}`. The call may have reached the provider, so a "known" failure would be untrue. No Failure is opened. | yes |
-| `reserved` (ClaudeCLI never launched) | **Failed, never sent,** with `:launch_not_admitted`, as for any reply on this branch today. Never marked sent or unknown. | yes |
+| `reserved` (ClaudeCLI never launched) | **Failed, never sent,** with `:launch_not_admitted`. Never marked sent or unknown. | **Yes, kept exactly:** a valid `{:ok, _}` fails with `:launch_not_admitted`, and valid `{:error, reason}` and `{:unknown, reason}` fail with their own `reason`, as today |
 | terminal (launch-refused, recovered, already settled) | **No write:** no second settlement, event or Failure. The caller gets `{:error, :invocation_already_settled}`, as today for non-error replies. | yes |
 
 **Only provider and protocol outcomes are normalized.** A database,
@@ -123,16 +131,26 @@ store or the chain still comes back as that error. It is not relabeled
 as a provider "unknown", and there is no broad `rescue` around
 settlement.
 
-### R0-04-2. Zoi-invalid output (G1b)
+### R0-04-2. Validation and storable output (G1b)
 
-A valid envelope whose `:output` fails the schema is failed as
-`validation_failed`, as today, with these fields:
-- **`parsed_output`:** the output if it is a map, otherwise `nil`;
-- **`validation_errors`:** Zoi's errors, plus one naming the output's
-  type when it is not a map;
-- **`response`:** the raw response, unchanged.
+`ModelInvocation.parsed_output` is a `:map`, and that is unchanged: the
+persisted type is not widened. A valid envelope settles like this:
 
-It is never a crash.
+| Zoi result | Parsed value | Settles as |
+|---|---|---|
+| valid | a map | **completed,** as today |
+| valid | not a map (a scalar, a list, or a transform that produces a non-map) | **failed as `validation_failed`**, with `parsed_output: nil` and one `validation_errors` entry `%{"message" => "output is not an object", "type" => <type name>}` |
+| invalid | a map | **failed as `validation_failed`,** with `parsed_output` the output, as today |
+| invalid | not a map | **failed as `validation_failed`,** with `parsed_output: nil`, Zoi's errors and the same type-only entry |
+
+- **The type name** is one of `"string"`, `"number"`, `"boolean"`,
+  `"list"`, `"nil"` or `"other"`. The extra entry names only the type,
+  never the output itself.
+- **`response`** keeps the raw response unchanged.
+- **This is a validation outcome of a well-formed reply.** It is neither
+  protocol-malformed nor unknown, so it gives a known failure, `{:error,
+  {:validation_failed, errors}}`.
+- **It is never a crash,** and never a hidden settlement error.
 
 ### R0-04-3. Before reservation (G2)
 
@@ -211,7 +229,7 @@ settled. Codex's OQ-2 answer.
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy / Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
 | `ModelProvider` facade (backend contract, not persisted) | Existing (contract delta) | The one public model call entry | The returns: `{:ok, %{output, invocation, ...}}`; `{:error, reason}`, adding `:malformed_provider_prepare` and adding malformed replies to the existing `:provider_outcome_unknown`; existing refusals unchanged | unchanged | R0-04-1 envelope and state precedence; R0-04-3 before reservation. A malformed reply is never retried | unchanged: the caller's actor; settlement as `agent_runtime` of the invocation's tenant (existing `actor/1`) | none |
-| `ModelInvocation` | Existing (lifecycle and value delta; no schema change) | Ledger row per attempt | No new attribute. **Values:** `parsed_output` is nil for a non-map Zoi-invalid output (R0-04-2); `validation_errors` gains the type entry | unchanged | **sent → unknown** now also on a malformed reply after send, in the same settlement transaction (run `FOR UPDATE` → body → transition → budget settle). Previously a crash, and the row stayed `sent`. reserved → failed (`:launch_not_admitted`) for any reply, unchanged. Terminal rows: no write. Existing actions only (`:mark_unknown`, `:fail`). Event `model.invocation.unknown` or `failed`, as today | unchanged | none |
+| `ModelInvocation` | Existing (lifecycle and value delta; no schema change) | Ledger row per attempt | No new attribute. **Values:** `parsed_output` is nil whenever the parsed or invalid output is not a map, whether Zoi-valid or not (R0-04-2); `validation_errors` gains the type-only entry; the persisted `:map` type is unchanged. `usage` is the normalized embedded value | unchanged | **sent → unknown** now also on a malformed reply after send, in the same settlement transaction (run `FOR UPDATE` → body → transition → budget settle). Previously a crash, and the row stayed `sent`. reserved → failed: `:launch_not_admitted` for valid success and for malformed replies, and the reply's own reason for valid `{:error, _}` and `{:unknown, _}` (unchanged). **completed is reached only with a map parsed output**; a Zoi-valid non-map is `validation_failed`. Terminal rows: no write. Existing actions only (`:mark_unknown`, `:fail`). Event `model.invocation.unknown` or `failed`, as today | unchanged | none |
 | `AgentRun` | Existing (accounting timing delta) | Per-run budget | unchanged | unchanged | For a malformed reply after send, the budget is settled at once by the existing `BudgetCounter` in the settlement transaction, instead of waiting for sweeper recovery. Counter rules and limits are unchanged; nothing is refunded | unchanged | none |
 
 `existing dependency: unchanged — relationship/policy/lifecycle impact
@@ -242,12 +260,22 @@ calibration and result-gate boundaries.
    the hermetic fake CLI server with a stubbed launch admission.
 3. **A terminal row** (launch-refused) with a malformed reply gets no
    second write, event or Failure.
-4. **A Zoi-invalid non-map output** gives `validation_failed`, with
-   `parsed_output` nil and the type error recorded.
+4. **Non-map outputs:**
+   - a Zoi-valid string and a Zoi-valid list (from non-object schemas),
+     and, if supported, a transform producing a non-map: each gives
+     `validation_failed` with `parsed_output` nil and exactly the
+     type-only entry, never completed;
+   - a Zoi-invalid non-map: the same, plus Zoi's errors.
+4b. **Usage:** negative, nil and incomplete fields are protocol-malformed
+   (unknown after send); a numeric string follows the embedded type's
+   cast, recorded in RED; a valid usage is stored normalized.
 5. **A malformed `prepare/2`** gives `{:error,
    :malformed_provider_prepare}`, with no row, counter or event.
 
 **Characterization (passes on main):**
+- the three valid reserved-row branches keep their reasons (`{:ok, _}`
+  gives `:launch_not_admitted`; `{:error, r}` gives `r`; `{:unknown, r}`
+  gives `r`);
 - through the adapter, success, validation failure (map output), known
   failure, drift failure with its Failure, unknown, raise and exit;
 - an unknown `provider` value is refused at reservation;
@@ -266,3 +294,14 @@ only; no model calls.
 ## 6. Size
 
 One PR. About a day to a day and a half, including review.
+
+## 7. Soft-stop record
+
+Configured: `ai_pair=true`, `codex_review=true`, so the correlated peer
+review applies.
+
+| Round | Exact head | Reviewer | Correlation | Verdict |
+|---|---|---|---|---|
+| 1 | `d6e9f34` | Codex | ask `m_1792043415015174000_4abaade2` → 70d98160 | NEEDS-REVIEW |
+| 2 | `d24f724` | Codex | ask `m_1792043838535062000_77c36653` → 7263fed7 | NEEDS-REVIEW |
+| 3 | this draft | Codex | pending | pending |
