@@ -1,0 +1,194 @@
+defmodule SdrAgent.Agents.SettingsPrivacyTest do
+  @moduledoc """
+  C4-01a (`docs/product/c4/readiness.md`, section 5 test 23 without its
+  LiveView part, which is C4-01b; sections 3.6 and 7; obligation 3):
+  privacy canaries. With Logger at `:debug`, `otel_capture_content: true`
+  (as in dev) and the in-memory span exporter, a canary placed in every
+  settings text field is absent from captured logs (application and SQL),
+  span attributes and events, AuditEvent payloads, snapshot rows and
+  Failure rows; it is present only in the revision row and in the model
+  request Payload (the authorized model-payload seam).
+
+  RED: the settings API is presence-guarded; the model-call, GenAI and SQL
+  canaries fail because content capture and SQL parameter logging are not
+  yet suppressed.
+  """
+  use SdrAgent.AuditCase, async: false
+
+  import ExUnit.CaptureLog
+  import SdrAgent.SettingsFixtures
+
+  alias Ecto.Adapters.SQL
+  alias SdrAgent.AgentsFixtures
+  alias SdrAgent.AI.ModelProvider
+  alias SdrAgent.Telemetry.GenAI
+  alias SdrAgent.Telemetry.InMemoryExporter
+  alias SdrAgent.Test.SecretShapes
+
+  @moduletag :c4_01a
+
+  @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
+
+  setup do
+    tenant = bootstrap!()
+    level = Logger.level()
+    capture = Application.get_env(:sdr_agent, :otel_capture_content)
+    Logger.configure(level: :debug)
+    Application.put_env(:sdr_agent, :otel_capture_content, true)
+    InMemoryExporter.reset()
+
+    on_exit(fn ->
+      Logger.configure(level: level)
+      Application.put_env(:sdr_agent, :otel_capture_content, capture)
+      InMemoryExporter.reset()
+    end)
+
+    %{tenant: tenant, admin: human(:admin, tenant), agent: system_actor(:agent_runtime, tenant)}
+  end
+
+  defp rendered_spans do
+    # The simple processor exports on span end; give it a moment.
+    Process.sleep(50)
+    inspect(InMemoryExporter.spans(), limit: :infinity, printable_limit: :infinity)
+  end
+
+  defp assert_no_canary(log, label) do
+    c = canary()
+    refute log =~ c, "C4-01a: #{label}: the canary reached a log"
+    refute rendered_spans() =~ c, "C4-01a: #{label}: the canary reached a span"
+
+    refute table_contains?("audit_events", c),
+           "C4-01a: #{label}: the canary reached an AuditEvent"
+
+    refute table_contains?("failures", c), "C4-01a: #{label}: the canary reached a Failure"
+
+    refute table_contains?("run_settings_snapshots", c),
+           "C4-01a: #{label}: the canary reached a snapshot row"
+  end
+
+  test "valid and refused saves, a snapshot and its resolution copy no settings text", ctx do
+    c = canary()
+
+    log =
+      capture_log([level: :debug], fn ->
+        offering =
+          content(:offering_profile, %{
+            name: "Offer #{c}",
+            summary: "Summary #{c}",
+            audience: "Audience #{c}",
+            items: [%{id: "canary_item", kind: :feature, text: "Item #{c}"}]
+          })
+
+        save!(:offering_profile, offering, ctx.admin, note: "Note #{c}")
+        save!(:booking_link, %{url: "https://book.example.test/#{c}"}, ctx.admin)
+        save!(:writing_guide, %{text: "Guide #{c}"}, ctx.admin)
+        save!(:research_brief, content(:research_brief, %{guidance: "Brief #{c}"}), ctx.admin)
+
+        for {kind, content} <- [
+              {:writing_guide, %{text: "Guide #{c} " <> SecretShapes.provider_key()}},
+              {:writing_guide, %{text: "Guide #{c} " <> String.duplicate("abcd ", 1_300)}},
+              {:offering_profile,
+               content(:offering_profile, %{name: c <> String.duplicate("n", 120)})}
+            ] do
+          result =
+            observe(fn ->
+              create_revision(revision_attrs(kind, content, ctx.admin), ctx.admin)
+            end)
+
+          assert invalid_errors(result), "C4-01a: the invalid #{kind} save was not refused"
+          refute inspect(result, limit: :infinity) =~ c, "C4-01a: the refusal echoed the content"
+        end
+
+        definition = AgentsFixtures.definition!(ctx.tenant)
+        attrs = AgentsFixtures.run_attrs(definition, usage_origin: :assignment)
+        {:ok, run} = SdrAgent.Agents.create_run(attrs, actor: ctx.agent)
+        assert {:ok, _settings} = run_settings(run, ctx.agent)
+      end)
+
+    assert_no_canary(log, "saves and snapshot")
+    assert table_contains?("settings_revisions", c), "the revision row is the allowed copy"
+  end
+
+  test "a model call carrying settings emits no content spans; only its Payload keeps it", ctx do
+    c = canary()
+    %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant, usage_origin: :reply)
+
+    audit =
+      "c4-privacy"
+      |> AgentsFixtures.model_attrs()
+      |> Map.take([
+        :purpose,
+        :parameters,
+        :prompt_template_id,
+        :prompt_template_version,
+        :prompt_template_sha256,
+        :output_schema_id,
+        :output_schema_version,
+        :output_schema_sha256
+      ])
+
+    request = %{
+      id: "c4-privacy-1",
+      run: run,
+      actor: agent,
+      operation: "model.complete",
+      prompt: "Fixed rules.\n\n<settings>Guide #{c}</settings>",
+      schema: @schema,
+      audit: audit,
+      content_capture: :off
+    }
+
+    log =
+      capture_log([level: :debug], fn ->
+        assert {:ok, _} =
+                 ModelProvider.complete(request, provider: SdrAgent.AI.ModelProvider.Fake)
+      end)
+
+    spans = rendered_spans()
+    assert spans =~ "gen_ai.input.sha256", "the span keeps its metadata and hashes"
+    refute spans =~ c, "C4-01a: content_capture: :off did not suppress the GenAI content event"
+    refute log =~ c, "C4-01a: the canary reached a log (SQL parameters)"
+    refute table_contains?("audit_events", c)
+    assert payloads_contain?(c), "the model request Payload is the allowed copy"
+  end
+
+  test "GenAI.with_span/3 honours content_capture: :off whatever otel_capture_content says" do
+    c = canary()
+
+    payload = GenAI.telemetry_payload("chat", %{id: "c4", input: c, content_capture: :off})
+
+    assert match?({_attributes, []}, payload),
+           "C4-01a: content events built despite content_capture: :off"
+
+    GenAI.with_span("chat", %{id: "c4-span", input: c, output: c, content_capture: :off}, fn ->
+      :ok
+    end)
+
+    refute rendered_spans() =~ c, "C4-01a: content_capture: :off did not suppress span content"
+
+    # Allowed baseline: :inherit keeps today's dev behaviour (content events).
+    {_attributes, events} =
+      GenAI.telemetry_payload("chat", %{id: "c4", input: c, content_capture: :inherit})
+
+    assert events != []
+  end
+
+  test "database logging and query spans carry no parameters or error values" do
+    c = canary()
+
+    log =
+      capture_log([level: :debug], fn ->
+        SQL.query!(SdrAgent.Repo, "SELECT $1::text", [c])
+
+        failing = fn ->
+          SdrAgent.Repo.rollback(SQL.query(SdrAgent.Repo, "SELECT $1::text::integer", [c]))
+        end
+
+        assert match?({:error, {:error, %Postgrex.Error{}}}, SdrAgent.Repo.transaction(failing)),
+               "C4-01a setup: the failing query did not fail"
+      end)
+
+    refute log =~ c, "C4-01a: a query parameter reached the SQL log"
+    refute rendered_spans() =~ c, "C4-01a: a query parameter or error value reached a span"
+  end
+end
