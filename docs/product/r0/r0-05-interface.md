@@ -246,8 +246,9 @@ settlement rules cover the earlier request.
 **Safety.** The page has no lease release action. The confirmation text
 never appears in error messages, URLs, ordinary logs (the parameter is
 filtered, section 5), stored rows, audit payloads, the application's
-captured telemetry or exported spans. A mismatched text never leaves the
-page process (step 2).
+captured telemetry or exported spans. The page never forwards a
+mismatched text to a resolution task, the domain or the coordinator
+(step 2); the crash-report exceptions below still apply.
 
 **Crash reports (ADR-0005, R0-05 amendment; D-141).** The AdminLive
 channel is tagged, so its own crash and error reports become a fixed,
@@ -272,7 +273,8 @@ at `00c4998`, ruling 5).** Phoenix LiveView's own in-process
 the submitted params, including `resolution_confirmation`, by design. It
 is excluded: parameter filtering sanitizes Phoenix's and LiveView's logs,
 not arbitrary telemetry subscribers, so a handler attached to that event
-would see the text. The verified scope is: no logged or exported copy, no
+would see the text. The verified scope, for the ordinary flow (crash
+reports are covered separately below), is: no logged or exported copy, no
 URI or router copy, no stored copy, no copy in the captured application
 telemetry (the `[:sdr_agent | _]` events registered when the test runs,
 and repo queries with their parameters) and no exported span. It is not a
