@@ -1,6 +1,9 @@
 # R0-05 interface: the admin model card, switch and resolver UI
 
-**Status:** draft 3, 2026-10-15. **Interface PASS** (Codex `232bd20d`, exact
+**Status:** draft 4, 2026-10-16: the MF3 amendment for option B (D-141),
+in section 3 (step 2, results, crash reports), section 5, the ADR
+evaluation and tests 9, 12, 15a–15c. Needs Codex review. Draft 3 had the
+**Interface PASS** (Codex `232bd20d`, exact
 `fbc3203`, `codex-r005-fbc3203-interface-pass.md`). Entity trigger: no.
 This permits scoped RED only. The b2β owner ADR, b2β and C2-02c GREEN, and
 the staged checks remain prerequisites. Draft 2
@@ -172,6 +175,21 @@ status card may still update.
      `STOPPED <switch id>`. The server checks again.
    - The input's parameter key is `resolution_confirmation`, which is
      filtered (section 5).
+   - **The page checks the text itself (D-141, option B).** It compares
+     the submitted binary byte for byte with `"STOPPED " <>
+     review.switch_id`, using the switch id in the socket's review, never
+     one from the browser: no trimming, case folding or synthesis. A
+     `change_resolution` event keeps only whether the text matches, never
+     the text. A `confirm_resolution` whose text doesn't match is refused
+     by the page: no attestation is built, nothing is stored, and no task,
+     domain or coordinator call is made. The review stays in `:editing`
+     with the same attestation id, the input is cleared, and
+     `#resolution-mismatch` says "That text doesn't match. Type STOPPED,
+     a space and the switch id shown above." It never repeats the text and
+     claims no recorded or refused attempt.
+   - Only the original matching bytes are wrapped in `Confirmation` and
+     revealed at the domain call. The domain's own exact-confirmation
+     check is unchanged.
 3. **Confirm** sends the stored review: the facts shown, and the
    `attestation_id` generated once, when `:editing` began. A forged
    `confirm_resolution` with no review does nothing.
@@ -184,6 +202,11 @@ status card may still update.
 | `:resolve_uncertain` | "The result isn't known yet." The "Check again" button resends **exactly** the frozen semantic identity, under the current authorization | `:uncertain` |
 | `:resolve_timeout`, on a **first** attempt (no earlier unknown under this review) | "Not recorded. Start a new review." | `:terminal` |
 | `:stale_attestation`, `:live_work_observed`, `:observation_unknown`, `:coordinator_busy`, `:attestation_invalid`, `:attestation_conflict`, `:switch_not_blocked`, Forbidden, NotFound | the refusal in words | `:terminal` |
+| (no call) a text that doesn't match, refused by the page | `#resolution-mismatch` (step 2) | stays `:editing` |
+
+`:attestation_invalid` keeps its mapping, but the page no longer sends a
+mismatched text, so it arises only if the domain's check disagrees with
+the page's.
 
 **Retrying after an unknown outcome (R2 residual).** Once a review has an
 unresolved earlier attempt (it entered `:uncertain`), a refusal of the
@@ -221,9 +244,27 @@ admin who lost an uncertain review starts a new one, and b2β's replay and
 settlement rules cover the earlier request.
 
 **Safety.** The page has no lease release action. The confirmation text
-never appears in error messages, URLs, logs (the parameter is filtered,
-section 5), stored rows, audit payloads, the application's captured
-telemetry or exported spans.
+never appears in error messages, URLs, ordinary logs (the parameter is
+filtered, section 5), stored rows, audit payloads, the application's
+captured telemetry or exported spans. A mismatched text never leaves the
+page process (step 2).
+
+**Crash reports (ADR-0005, R0-05 amendment; D-141).** The AdminLive
+channel is tagged, so its own crash and error reports become a fixed,
+content-free diagnostic at any level. The owner accepted what that does
+not cover:
+- the valid phrase `STOPPED <switch id>` may appear in crash or error
+  reports of untagged downstream processes (the resolution task, the
+  coordinator and its retained settlement state);
+- a mismatched text can be anything, and a report another process writes
+  about the channel (a supervisor's) is not classified. SASL reports being
+  off by default is not a control;
+- the channel's error-or-higher diagnostics lose their detail.
+
+The page doesn't deliberately retain or forward a mismatched text after
+handling the event. It doesn't claim the text exists nowhere else
+(browser and transport buffers, raw `handle_event` telemetry, VM terms
+before collection).
 
 **The telemetry boundary (test 15 qualification, Codex RED verification
 at `00c4998`, ruling 5).** Phoenix LiveView's own in-process
@@ -257,6 +298,12 @@ checks readiness again." It promises no unconditional automatic restart.
 The pinned LiveView logger uses `Phoenix.filter_values/1`. Tests cover
 the change, submit and refusal events at `:debug`.
 
+The AdminLive channel sets `Logger.metadata(sdr_sensitive_input: true)`
+in `mount/3`, before any input, and never clears it. `ExceptionFilter`
+(C4-01a, #165) replaces the tagged process's crash, termination and
+error-or-higher events (ADR-0005, R0-05 amendment). R0-05 therefore lands
+after #165.
+
 ## Entity Model
 
 **Entity Model trigger: no.** It also consumes the existing
@@ -269,8 +316,10 @@ the change, submit and refusal events at `:debug`.
 
 ## ADR evaluation
 
-None. This is within ADR-0004's status card and the C2-02b2 and b2β
-amendments.
+The UI is within ADR-0004's status card and the C2-02b2 and b2β
+amendments. The crash-report rule is a cross-cutting logging change: the
+ADR-0005 R0-05 amendment (option B, D-141, proposed; needs Codex review
+and owner acceptance before the MF3 implementation).
 
 ## Tests (RED first)
 
@@ -309,7 +358,11 @@ spend, synthetic data only.
 8. **The facts:** every covered start (nil identity shows "not
    recorded"), and the lease kind. `:observation_unknown` shows a message.
 9. **The confirmation:** the button enables only for the exact text. A
-   wrong text refused by the server → `:attestation_invalid`.
+   forced submit of a wrong text is refused by the page: no call to the
+   domain (traced), `#resolution-mismatch` without the text, still
+   `:editing` with the same attestation id, the input cleared. The exact
+   text is then sent as the operator's own bytes. (Amended for D-141: the
+   verified RED expected the server's `:attestation_invalid`.)
 10. **Frozen states:** while `:submitting` and `:uncertain`:
     - an audit refresh and a manual refresh leave the attestation id,
       facts and statement unchanged;
@@ -331,7 +384,9 @@ spend, synthetic data only.
 12. **Forged and terminal:**
     - a forged `confirm_resolution` with no review does nothing;
     - after a terminal result, a new resolution needs a new review, id and
-      confirmation.
+      confirmation. (Amended for D-141: the terminal result comes from a
+      server refusal of the exact text, such as `:stale_attestation`, not
+      from a wrong text.)
 13. **Results:** each result in section 3 shows its message. A resolution
     never shows "ready".
 14. **Reconnect:** a remount re-reads the stored state, and no
@@ -342,6 +397,23 @@ spend, synthetic data only.
     captured application telemetry and exported spans. Phoenix LiveView's
     in-process `handle_event` telemetry carries the params by design and is
     excluded (section 3, the telemetry boundary).
+15a. **Minimization (D-141):** an arbitrary mismatched canary, typed and
+     force-submitted, is never in the socket's assigns or review and is
+     never passed to a task, `Agents`, `ProfileSwitches` or the
+     coordinator (traced calls). Positive control: the exact text is
+     passed, so an empty trace can't pass.
+15b. **The tagged channel (ADR-0005 R0-05 amendment):** a channel crash
+     while handling `change_resolution` and `confirm_resolution` (the real
+     form-encoded payload, valid and mismatched canaries), and while frozen
+     in `:submitting` and `:uncertain`. At `:debug` and at `:warning`
+     minimum the canary is absent from the captured message, report,
+     format arguments and metadata; the fixed diagnostic is present at its
+     level. Controls: an untagged crash keeps its report; the C4
+     database-error path is unchanged; a tagged `:info` event is unchanged;
+     a failed classification is replaced; the filter stays attached.
+15c. **The accepted limit (shown, not asserted absent):** a
+     supervisor-emitted report about the tagged channel is not classified.
+     This pins D-141's residual; no absence assertion is weakened for it.
 16. **The lag:** an audit event commits before the coordinator publishes.
     The card shows the earlier observation, and a manual refresh then
     shows the newer state.
