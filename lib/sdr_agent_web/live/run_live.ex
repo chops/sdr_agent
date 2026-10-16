@@ -8,10 +8,24 @@ defmodule SdrAgentWeb.RunLive do
   An admin may retry a stopped run that has no retry yet (`SDR.retry_run/2`,
   S13b; the new run opens); everything else is read-only. An auditor's view
   is recorded with the run id first.
+
+  The run's settings snapshot (C4-R4, C4-R11, C4-R14;
+  `SdrAgent.Agents.run_settings_summary/2`, metadata only): per setting the
+  revision number, the built-in default version or "not set", and each limit
+  as the "limit at snapshot" and the "run ceiling" (the run's frozen
+  allowance before independent budgets), apart from "allowed now", which is
+  not determined here: grants, the tenant-day limit and provider quotas are
+  checked at use. A later save never changes what is shown. A run created
+  before C4 has no snapshot and says so. An auditor's view of the snapshot
+  is recorded first; without that record the snapshot is withheld, never
+  shown as missing.
   """
   use SdrAgentWeb, :live_view
 
+  import SdrAgentWeb.SettingsLive.Components, only: [delimit: 1]
+
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.RunSettings.Safeguards
   alias SdrAgent.Audit
   alias SdrAgent.Sales
   alias SdrAgent.SDR
@@ -19,6 +33,14 @@ defmodule SdrAgentWeb.RunLive do
   alias SdrAgentWeb.ConsoleData
   alias SdrAgentWeb.LiveRefresh
   alias SdrAgentWeb.Scope
+
+  @settings_kinds [
+    :offering_profile,
+    :booking_link,
+    :writing_guide,
+    :research_brief,
+    :operational_limits
+  ]
 
   @budget [
     {"Model calls", :model_calls_used, :max_model_calls},
@@ -72,6 +94,7 @@ defmodule SdrAgentWeb.RunLive do
         tools: tools,
         signals: Enum.filter(events, &(&1.agent_run_id == run.id and &1.category == :signal)),
         budget: budget(run.budget),
+        settings: settings_summary(run, scope),
         retryable?:
           run.status in [:failed, :budget_exhausted, :cancelled] and
             not Enum.any?(runs, &(&1.retry_of_id == run.id))
@@ -111,6 +134,26 @@ defmodule SdrAgentWeb.RunLive do
     end
   end
 
+  # The snapshot shown, recorded first for an auditor. A failed read or
+  # record withholds it; only a run without a snapshot is `:none`.
+  defp settings_summary(%{settings_snapshot_id: nil}, _scope), do: :none
+
+  defp settings_summary(run, scope) do
+    with {:ok, summary} <- Agents.run_settings_summary(run, actor: scope.user),
+         :ok <-
+           AuditedView.record(
+             scope,
+             "SdrAgent.Agents.RunSettingsSnapshot",
+             summary.id,
+             "run settings view"
+           ) do
+      {:ok, summary}
+    else
+      {:error, :no_settings_snapshot} -> :none
+      {:error, reason} -> {:withheld, AuditedView.error_message(reason)}
+    end
+  end
+
   defp run_contact(%{lead_id: nil}, _opts), do: {:ok, nil}
 
   defp run_contact(%{lead_id: lead_id}, opts) do
@@ -133,8 +176,109 @@ defmodule SdrAgentWeb.RunLive do
     end
   end
 
+  attr :settings, :any, required: true
+  attr :kinds, :list, required: true
+
+  defp run_settings(assigns) do
+    assigns = assign(assigns, rules: Safeguards.limit_rules())
+
+    ~H"""
+    <.card id="run-settings" title="Settings snapshot">
+      <:subtitle>
+        The settings this run uses, bound when it was created; a later save never changes them.
+      </:subtitle>
+      <:actions>
+        <.link navigate={~p"/settings"} class="text-xs font-medium text-teal-700 hover:underline">
+          Current settings →
+        </.link>
+      </:actions>
+
+      <p :if={@settings == :none} id="run-settings-none" class="text-sm text-zinc-600">
+        <.icon name="hero-clock" class="size-4 text-zinc-400" />
+        This run was created before run settings existed: it has no settings snapshot, and
+        its settings-dependent steps fail closed. Nothing current is shown in its place.
+      </p>
+
+      <div
+        :if={match?({:withheld, _}, @settings)}
+        id="run-settings-withheld"
+        class="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800"
+      >
+        <.icon name="hero-lock-closed" class="mt-0.5 size-4 shrink-0" />
+        <span>The settings snapshot could not be shown: {elem(@settings, 1)}</span>
+      </div>
+
+      <div :if={match?({:ok, _}, @settings)} class="space-y-5">
+        <ul class="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+          <li
+            :for={kind <- @kinds}
+            id={"run-setting-#{kind}"}
+            data-source={elem(@settings, 1).slots[kind].source}
+            class="rounded-lg border border-zinc-200 px-3 py-2"
+          >
+            <p class="text-xs uppercase tracking-wider text-zinc-500">{humanize(kind)}</p>
+            <p class="mt-0.5 text-sm font-medium text-zinc-900">
+              {slot_label(elem(@settings, 1).slots[kind])}
+            </p>
+          </li>
+        </ul>
+
+        <div class="overflow-x-auto">
+          <table class="w-full min-w-[40rem] text-left text-sm">
+            <thead class="text-xs uppercase tracking-wider text-zinc-500">
+              <tr>
+                <th scope="col" class="py-2 pr-4 font-medium">Limit</th>
+                <th scope="col" class="py-2 pr-4 text-right font-medium">limit at snapshot</th>
+                <th scope="col" class="py-2 pr-4 text-right font-medium">run ceiling</th>
+                <th scope="col" class="py-2 font-medium">allowed now</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-zinc-100">
+              <tr
+                :for={{field, rule} <- @rules}
+                id={"run-limit-#{field}"}
+                data-at-snapshot={elem(@settings, 1).limits[field]}
+                data-run-ceiling={elem(@settings, 1).run_ceilings[field]}
+              >
+                <th scope="row" class="py-2 pr-4 font-medium text-zinc-900">{humanize(field)}</th>
+                <td class="py-2 pr-4 text-right tabular-nums">
+                  {delimit(elem(@settings, 1).limits[field])}
+                </td>
+                <td class="py-2 pr-4 text-right tabular-nums">
+                  {delimit(elem(@settings, 1).run_ceilings[field])}
+                </td>
+                <td class="py-2 text-xs">
+                  <span :if={rule.enforced_by} class="text-zinc-700">checked at use</span>
+                  <span :if={is_nil(rule.enforced_by)} class="text-amber-700">
+                    not yet enforced
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="text-xs text-zinc-500">
+          The run ceiling is the run's frozen allowance: the snapshot value, lowered for the
+          run_* fields by its assignment. Whether another call is allowed now is not
+          determined here: at each use the guarded step also applies the real-model grant
+          allocation, the tenant-day model-call limit and provider quotas.
+        </p>
+      </div>
+    </.card>
+    """
+  end
+
+  defp slot_label(%{source: :revision, number: number}), do: "revision #{number}"
+
+  defp slot_label(%{source: :code_default, version: version}),
+    do: "built-in default version #{version}"
+
+  defp slot_label(%{source: :absent}), do: "not set"
+
   @impl true
   def render(assigns) do
+    assigns = assign(assigns, settings_kinds: @settings_kinds)
+
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active={:operations}>
       <.link
@@ -197,6 +341,8 @@ defmodule SdrAgentWeb.RunLive do
             </div>
           </div>
         </div>
+
+        <.run_settings settings={@settings} kinds={@settings_kinds} />
 
         <.card id="decisions" title="Decisions">
           <:subtitle>
