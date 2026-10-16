@@ -32,7 +32,14 @@ defmodule SdrAgent.Agents.RunSettingsSnapshotTest do
   # Golden `content_sha256` of every released built-in default version
   # (section 3.7 rule), keyed `{kind, version}`. Pinned when the defaults
   # are written (C4-01a GREEN); a released entry is never edited or removed.
-  @golden []
+  # Each value was recomputed independently of the implementation (a
+  # standalone sdr-canonical-json/1 encoder over the reviewed content).
+  @golden [
+    {{:writing_guide, "1"}, "9af216ab3fdf3b11536fbb8fcfa47f816891b0a74f4e5cdcd4821e15831d02c3"},
+    {{:research_brief, "1"}, "7f169d445f877e99845bd13871ba096d36aac6ac5db163969b93caa80408d709"},
+    {{:operational_limits, "1"},
+     "bff11e94226951b449ec75332157de80518b1cc08cfae17803464867e22b0874"}
+  ]
 
   defmodule InvalidQualification do
     @moduledoc "Test responder: an invalid qualification score fails the run."
