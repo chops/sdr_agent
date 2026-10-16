@@ -24,18 +24,24 @@ defmodule SdrAgentWeb.AdminLive.ModelComponents do
   @doc """
   The "Model provider" card: `provider` is one `Runtime.status/0` sample;
   `switch` the open switch-request panel (or nil), `switch_notice` its
-  last result, `resolution` the resolver review (or nil) and `stored` the
-  recorded switch (`{:ok, switch | nil}` or `:unknown`).
+  last result, `resolution` the resolver review (or nil) and `switches`
+  the stored switches read as the admin (`{:ok, newest_first}` or
+  `:unknown`; see `recorded_switch/2`).
   """
   attr :provider, :map, required: true
   attr :switch, :map, default: nil
   attr :switch_notice, :map, default: nil
   attr :resolution, :map, default: nil
-  attr :stored, :any, required: true
+  attr :switches, :any, required: true
 
   def model_card(assigns) do
+    target = assigns.resolution && assigns.resolution.switch_id
+
     assigns =
       assign(assigns,
+        target: target,
+        recorded: recorded_switch(assigns.switches, target),
+        newest: recorded_switch(assigns.switches, nil),
         in_process?: assigns.provider.ledger_observation == :not_applicable,
         blocked_switch: blocked_switch(assigns.provider)
       )
@@ -90,8 +96,14 @@ defmodule SdrAgentWeb.AdminLive.ModelComponents do
             <.field label="Open switch">
               <.open_switch switch={@provider.switch} />
             </.field>
-            <.field label="Recorded switch">
-              <.stored_switch stored={@stored} />
+            <.field label={if @target, do: "Reviewed switch (stored)", else: "Newest stored switch"}>
+              <.stored_switch id="stored-switch" recorded={@recorded} target={@target} />
+            </.field>
+            <.field
+              :if={@target && newer?(@newest, @target)}
+              label="Newest stored switch"
+            >
+              <.stored_switch id="latest-switch" recorded={@newest} />
             </.field>
             <.field label="As of">
               <span
@@ -353,14 +365,45 @@ defmodule SdrAgentWeb.AdminLive.ModelComponents do
   def failure_words(reason) when is_binary(reason), do: String.replace(reason, "_", " ")
   def failure_words(_reason), do: "reason not recorded"
 
-  attr :stored, :any, required: true
+  @doc """
+  The stored switch the card shows from `switches` (the actor-authorized
+  read, newest first, or `:unknown`): with a `target` (the reviewed
+  switch's id) exactly that row, else `:unknown` (a missing target or a
+  failed read is never replaced by another row); with no target the newest
+  row, `{:ok, nil}` when there is none.
+  """
+  def recorded_switch(:unknown, _target), do: :unknown
+  def recorded_switch({:ok, [newest | _older]}, nil), do: {:ok, newest}
+  def recorded_switch({:ok, []}, nil), do: {:ok, nil}
 
-  defp stored_switch(%{stored: {:ok, %{} = switch}} = assigns) do
+  def recorded_switch({:ok, switches}, target) when is_binary(target) do
+    case Enum.find(switches, &(&1.id == target)) do
+      nil -> :unknown
+      switch -> {:ok, switch}
+    end
+  end
+
+  def recorded_switch(_unreadable, _target), do: :unknown
+
+  defp newer?({:ok, %{id: id}}, target), do: id != target
+  defp newer?(_newest, _target), do: false
+
+  attr :id, :string, required: true
+  attr :recorded, :any, required: true
+  attr :target, :string, default: nil
+
+  defp stored_switch(%{recorded: {:ok, %{} = switch}} = assigns) do
     assigns = assign(assigns, :switch, switch)
 
     ~H"""
-    <span id="stored-switch" data-status={@switch.status} class="block text-xs text-zinc-700">
+    <span
+      id={@id}
+      data-status={@switch.status}
+      data-switch-id={@switch.id}
+      class="block text-xs text-zinc-700"
+    >
       <span class="font-mono">{@switch.from_profile_id} → {@switch.to_profile_id}</span>, {@switch.status}
+      <span class="block break-all font-mono text-zinc-500">{@switch.id}</span>
       <span class="block text-zinc-400">
         requested <.timestamp at={@switch.requested_at} /> (the stored record)
       </span>
@@ -368,9 +411,9 @@ defmodule SdrAgentWeb.AdminLive.ModelComponents do
     """
   end
 
-  defp stored_switch(%{stored: {:ok, nil}} = assigns) do
+  defp stored_switch(%{recorded: {:ok, nil}} = assigns) do
     ~H"""
-    <span id="stored-switch" data-status="none" class="text-xs text-zinc-500">
+    <span id={@id} data-status="none" class="text-xs text-zinc-500">
       none recorded
     </span>
     """
@@ -378,8 +421,16 @@ defmodule SdrAgentWeb.AdminLive.ModelComponents do
 
   defp stored_switch(assigns) do
     ~H"""
-    <span id="stored-switch" data-status="unknown" class="text-xs font-medium text-amber-700">
+    <span
+      id={@id}
+      data-status="unknown"
+      data-switch-id={@target}
+      class="block text-xs font-medium text-amber-700"
+    >
       unknown (the stored switch can't be read)
+      <span :if={@target} class="block break-all font-mono font-normal text-zinc-500">
+        {@target}
+      </span>
     </span>
     """
   end

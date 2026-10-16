@@ -24,6 +24,7 @@ defmodule SdrAgentWeb.AdminLive.Resolution do
   recorded". Every message is operator-safe words, never a raw term.
   """
 
+  alias SdrAgentWeb.AdminLive.Confirmation
   alias SdrAgentWeb.AuditedView
 
   @attestable [:none, :survivor, :dead_holder]
@@ -198,7 +199,9 @@ defmodule SdrAgentWeb.AdminLive.Resolution do
 
   @doc """
   The frozen attestation of an `:editing` review, carrying the operator's
-  own `text` (never synthesized from the id) and the facts shown.
+  own `text` (never synthesized from the id; held as an opaque
+  `SdrAgentWeb.AdminLive.Confirmation`, unwrapped only for the domain call)
+  and the facts shown.
   """
   def attest(%{state: :editing, facts: facts} = review, text) do
     %{
@@ -210,7 +213,7 @@ defmodule SdrAgentWeb.AdminLive.Resolution do
           attested_generation: facts.latest_generation,
           attested_lease_kind: facts.lease_kind,
           outcome: :failed,
-          confirmation: text
+          confirmation: Confirmation.wrap(text)
         }
     }
   end
@@ -223,7 +226,9 @@ defmodule SdrAgentWeb.AdminLive.Resolution do
   `{:exit, reason}`). Returns `{review, reread?}`: `reread?` asks the view
   to re-read the stored switch and the status.
   """
-  def settle(review, {:ok, {:ok, %{switch: _switch}}}),
+  # Recorded only when the result is the reviewed switch, failed (a commit
+  # or the exact replay); any other success shape is an unknown outcome.
+  def settle(%{switch_id: id} = review, {:ok, {:ok, %{switch: %{id: id, status: :failed}}}}),
     do: {terminal(review, "recorded", @recorded), true}
 
   def settle(review, {:ok, {:error, reason}}), do: settle_error(review, reason)

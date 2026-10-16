@@ -19,8 +19,11 @@ defmodule SdrAgentWeb.AdminLive do
 
     * **The card** shows one C2-02c sample (desired, running and accepting
       profile, hold and stage, the open switch, the publication time; an
-      unknown field is "unknown", never the default) and the newest stored
-      switch (`Agents.list_profile_switches/1`, as the admin). It is re-read
+      unknown field is "unknown", never the default) and, as a separately
+      labelled stored line (`Agents.list_profile_switches/1`, as the admin),
+      the reviewed switch's own row while a resolution review exists (unknown
+      if it is missing or unreadable, never another row) or else the newest
+      one. It is re-read
       whenever an audit event commits (`SdrAgentWeb.LiveRefresh`) and by
       "Refresh status"; there is no timer, so it can lag the coordinator.
     * **A switch** is staged in the page: opening it reads the setting
@@ -37,7 +40,9 @@ defmodule SdrAgentWeb.AdminLive do
       stored review and matched to it on completion. `:submitting` and
       `:uncertain` are frozen; "Check again" resends exactly the same
       identity; a task exit or an unknown result is an unknown outcome,
-      never a rollback.
+      never a rollback. The operator is re-validated before a completion is
+      applied; the typed text is held as an opaque
+      `SdrAgentWeb.AdminLive.Confirmation` until the domain call.
 
   Model call budgets (C9-05, REQ-R0-9): the tenant's real-model call grants
   (`Agents.list_grants/1`) with their allocations, availability and the
@@ -75,11 +80,13 @@ defmodule SdrAgentWeb.AdminLive do
   alias SdrAgent.Outreach
   alias SdrAgent.Outreach.Compliance
   alias SdrAgent.Outreach.Delivery
+  alias SdrAgentWeb.AdminLive.Confirmation
   alias SdrAgentWeb.AdminLive.ModelComponents
   alias SdrAgentWeb.AdminLive.Resolution
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.GrantForm
   alias SdrAgentWeb.LiveRefresh
+  alias SdrAgentWeb.LiveUserAuth
 
   on_mount {SdrAgentWeb.LiveUserAuth, {:roles, [:admin]}}
 
@@ -98,7 +105,7 @@ defmodule SdrAgentWeb.AdminLive do
        switch: nil,
        switch_notice: nil,
        resolution: nil,
-       stored: :unknown
+       switches: :unknown
      )
      |> LiveRefresh.attach(&load/1)}
   end
@@ -139,7 +146,7 @@ defmodule SdrAgentWeb.AdminLive do
         grants: Enum.reverse(grants),
         usage: usage,
         now: SdrAgent.Clock.utc_now(),
-        stored: stored_switch(opts)
+        switches: switches(opts)
       )
       |> recheck_facts()
     else
@@ -329,32 +336,50 @@ defmodule SdrAgentWeb.AdminLive do
 
   # The attempt's completion, matched to the active review's dispatch; a
   # result for any other review or state is ignored.
+  #
+  # The connected operator is re-validated (`LiveUserAuth.revalidate/1`)
+  # before a completion is applied or anything is read after it: the async
+  # path runs no event hook. A demoted, disabled or revoked operator gets the
+  # existing redirect, and the local review is cleared without any claim
+  # about what the dispatched attempt did.
   @impl true
-  def handle_async(
-        {:resolution, ref},
-        result,
-        %{assigns: %{resolution: %{state: :submitting, dispatch: ref} = review}} = socket
-      ) do
-    {review, reread?} = Resolution.settle(review, result)
-    socket = assign(socket, resolution: review)
-    {:noreply, if(reread?, do: load(socket), else: socket)}
+  def handle_async(name, result, socket) do
+    if active_async?(name, socket.assigns.resolution) do
+      case LiveUserAuth.revalidate(socket) do
+        {:ok, socket} ->
+          {:noreply, apply_async(name, result, socket)}
+
+        {:error, redirected} ->
+          {:noreply, assign(redirected, resolution: nil, switch: nil, switch_notice: nil)}
+      end
+    else
+      {:noreply, socket}
+    end
   end
 
-  def handle_async(
-        {:facts_check, id},
-        {:ok, read},
-        %{assigns: %{resolution: %{state: :editing, attestation_id: id} = review}} = socket
-      ) do
+  defp active_async?({:resolution, ref}, %{state: :submitting, dispatch: ref}), do: true
+  defp active_async?({:facts_check, id}, %{state: :editing, attestation_id: id}), do: true
+  defp active_async?(_name, _review), do: false
+
+  defp apply_async({:resolution, _ref}, result, socket) do
+    {review, reread?} = Resolution.settle(socket.assigns.resolution, result)
+    socket = assign(socket, resolution: review)
+    if reread?, do: load(socket), else: socket
+  end
+
+  defp apply_async({:facts_check, _id}, {:ok, read}, socket) do
+    review = socket.assigns.resolution
+
     if Resolution.changed?(review, read),
       do:
-        {:noreply,
-         assign(socket,
-           resolution: Resolution.facts_changed(review, read, requester(socket, read))
-         )},
-      else: {:noreply, socket}
+        assign(socket,
+          resolution: Resolution.facts_changed(review, read, requester(socket, read))
+        ),
+      else: socket
   end
 
-  def handle_async(_stale, _result, socket), do: {:noreply, socket}
+  # A failed re-check proves no change (the domain re-checks at submit).
+  defp apply_async({:facts_check, _id}, {:exit, _reason}, socket), do: socket
 
   defp actor(socket), do: socket.assigns.current_scope.user
 
@@ -485,7 +510,12 @@ defmodule SdrAgentWeb.AdminLive do
     socket
     |> assign(resolution: Resolution.submitting(review, ref))
     |> start_async({:resolution, ref}, fn ->
-      Agents.resolve_blocked_switch(switch_id, attestation, actor: actor)
+      # The only place the confirmation is unwrapped: the domain call itself.
+      Agents.resolve_blocked_switch(
+        switch_id,
+        Confirmation.reveal_attestation(attestation),
+        actor: actor
+      )
     end)
   end
 
@@ -503,12 +533,13 @@ defmodule SdrAgentWeb.AdminLive do
 
   defp recheck_facts(socket), do: socket
 
-  # The tenant's newest stored switch, read as the actor (unknown on a
-  # failed read, never inferred).
-  defp stored_switch(opts) do
+  # The tenant's stored switches, read as the actor (newest first), or
+  # unknown on a failed read (never inferred). The card picks the reviewed
+  # switch's own row, or the newest when no review is open
+  # (`ModelComponents.recorded_switch/2`).
+  defp switches(opts) do
     case Agents.list_profile_switches(opts) do
-      {:ok, [latest | _older]} -> {:ok, latest}
-      {:ok, []} -> {:ok, nil}
+      {:ok, switches} -> {:ok, switches}
       {:error, _unreadable} -> :unknown
     end
   end
@@ -674,7 +705,7 @@ defmodule SdrAgentWeb.AdminLive do
           switch={@switch}
           switch_notice={@switch_notice}
           resolution={@resolution}
-          stored={@stored}
+          switches={@switches}
         />
 
         <div class="grid gap-6 lg:grid-cols-2">
