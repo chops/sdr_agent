@@ -1,7 +1,15 @@
 # C2-02c interface: restart and status
 
-**Status:** draft 3, 2026-10-15, for Codex's interface and entity
-re-review. Slice plan: `c2-02-slices.md` row c. Builds on b2α (merged at
+**Status:** draft 3, 2026-10-15.
+- **Review:** interface PASS and Entity Model PASS (Codex `2971a846`, exact
+  `401df6f`, `codex-c202c-401df6f-interface-pass.md`; configured
+  `ai_pair=true`, `codex_review=true`).
+- **What it permits:** scoped RED only.
+- **Still open:**
+  - the owner's decision on OQ-1;
+  - implementation, which comes after b2β.
+- **Binding:** the report's "Binding interpretations for RED/GREEN" (items
+  1–6) bind the tests and the implementation. Slice plan: `c2-02-slices.md` row c. Builds on b2α (merged at
 `22db5c0`) and b2β (`c2-02b2b-interface.md`, PASS at `e60943c`).
 Implementation lands after b2β.
 
