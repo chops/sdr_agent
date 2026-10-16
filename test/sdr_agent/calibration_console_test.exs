@@ -66,7 +66,13 @@ defmodule SdrAgent.CalibrationConsoleTest do
       for http <- [[ip: {0, 0, 0, 0}, port: 4120], [port: 0], [ip: {0, 0, 0, 0, 0, 0, 0, 0}]] do
         endpoint = Keyword.put(base().endpoint, :http, http)
         assert {:ok, plan} = CalibrationConsole.plan(base(%{endpoint: endpoint}))
-        assert plan.endpoint[:http] == [ip: {127, 0, 0, 1}, port: 4124]
+        # ADR-0008 amendment (EEF-CVE-2026-105659): HTTP/2 stays off.
+        assert plan.endpoint[:http] == [
+                 ip: {127, 0, 0, 1},
+                 port: 4124,
+                 http_2_options: [enabled: false]
+               ]
+
         assert plan.endpoint[:server] == true
         assert plan.endpoint[:url] == [host: "127.0.0.1", port: 4124]
         assert plan.endpoint[:check_origin] == ["//127.0.0.1:4124", "//localhost:4124"]

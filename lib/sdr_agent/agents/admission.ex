@@ -45,7 +45,10 @@ defmodule SdrAgent.Agents.Admission do
   (`SdrAgent.Agents.Admission.Gate`: `:calibration_not_authorized`,
   `:calibration_evidence_pending`, `:result_gate_inactive`,
   `:witness_store_untrusted`, `:tuple_not_promoted`, each with a
-  metadata-only `check`); then `:no_eligible_grant` (no grant passes the
+  metadata-only `check`); then the model profile switch fence (C2-02b1,
+  `SdrAgent.Agents.Admission.SwitchFence`: `:profile_switch_fenced` while
+  the tenant has an open switch, read fresh under the head; at launch also
+  the epoch rule); then `:no_eligible_grant` (no grant passes the
   grant checks), `:no_allocation` (an eligible grant, but no allocation for
   this profile, bucket and time), `:ambiguous_allocation`, and
   `{:budget_exhausted, :grant | :grant_day | :allocation}`. The gate's
@@ -63,6 +66,7 @@ defmodule SdrAgent.Agents.Admission do
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents.Admission.Gate
+  alias SdrAgent.Agents.Admission.SwitchFence
   alias SdrAgent.Agents.ModelCallAllocation
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
@@ -247,6 +251,7 @@ defmodule SdrAgent.Agents.Admission do
 
     with :ok <- origin(refusal),
          {:ok, tuple} <- admission_gate(refusal, run, gate),
+         :ok <- switch_fence(refusal),
          {:ok, candidate_ids} <- bound_candidates(refusal, candidate_ids, binding, now),
          {:ok, grants} <- eligible_grants(refusal, candidate_ids, now),
          {:ok, grant, allocation} <- one_allocation(refusal, grants, now),
@@ -260,6 +265,16 @@ defmodule SdrAgent.Agents.Admission do
          calibration_claim: claim_record(tuple, gate),
          calibration_binding: binding_record(tuple, binding)
        }}
+    end
+  end
+
+  # C2-02b1: a fresh read of the tenant's open switch, after the head
+  # (`admit/5` runs under it), before grant eligibility.
+  defp switch_fence(refusal) do
+    case SwitchFence.open_switch(refusal.tenant_id) do
+      :ok -> :ok
+      {:error, reason, check} -> {:error, %{refusal | reason: reason, check: check}}
+      {:error, error} -> {:error, error}
     end
   end
 
@@ -442,6 +457,7 @@ defmodule SdrAgent.Agents.Admission do
       true ->
         with :ok <- exemption(run, invocation, expected),
              :ok <- Gate.admit_launch(run, invocation, store),
+             :ok <- SwitchFence.launch(run.tenant_id, invocation.id),
              :ok <- launch_binding(invocation, run.tenant_id, not is_nil(expected)),
              do: launch_terms(run, invocation, now)
     end
@@ -745,7 +761,14 @@ defmodule SdrAgent.Agents.Admission do
   end
 
   @doc "Whether `reason` is an R0-07 admission-gate refusal (a `provider_error` Failure)."
-  def admission_reason?(reason), do: reason in Gate.reasons()
+  def admission_reason?(reason), do: reason in Gate.reasons() or reason in fence_reasons()
+
+  @doc """
+  The model profile switch fence's refusal reasons (C2-02b1,
+  `SdrAgent.Agents.Admission.SwitchFence`): admission reasons, recorded as a
+  `provider_error` and stopping the run `:model_not_admitted`.
+  """
+  def fence_reasons, do: SwitchFence.reasons()
 
   defp failure_class(reason),
     do: if(admission_reason?(reason), do: :provider_error, else: :budget_exhausted)
@@ -790,6 +813,11 @@ defmodule SdrAgent.Agents.Admission do
 
     with {:ok, failure} <- Operations.open_failure(attrs, actor: agent),
          do: {:ok, failure, false}
+  end
+
+  defp message(%{reason: reason} = refusal) when reason in [:profile_switch_fenced] do
+    "model call not admitted: #{reason_name(reason)} (#{check_label(refusal.check)}) " <>
+      "(profile #{refusal.profile_id}); a model profile switch is in progress"
   end
 
   defp message(refusal) do

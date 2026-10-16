@@ -10,6 +10,8 @@ defmodule SdrAgent.Actor do
   Types (S2 actor legend):
 
     * `:agent_runtime` (AGT) — Jido actions of the SDR agent
+    * `:model_runtime` (MRT) — the model server's runtime: completes, fails
+      or blocks a model profile switch (C2-02a), and nothing else
     * `:delivery_worker` (DLV), `:reconciler` (REC), `:webhook_ingestor` (WHK),
       `:scheduler` (SCH), `:anchorer` (ANC)
     * `:auditor_cli` (AUD) — read-only verify/export CLI
@@ -19,6 +21,7 @@ defmodule SdrAgent.Actor do
 
   @types [
     :agent_runtime,
+    :model_runtime,
     :delivery_worker,
     :reconciler,
     :webhook_ingestor,
@@ -34,6 +37,7 @@ defmodule SdrAgent.Actor do
 
   @type type ::
           :agent_runtime
+          | :model_runtime
           | :delivery_worker
           | :reconciler
           | :webhook_ingestor
