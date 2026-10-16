@@ -745,6 +745,76 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
     end
   end
 
+  ## Fail closed at the scan limit (coordinator review of 024723f)
+
+  # A raw error with the canary behind more than 50,000 scanned nodes:
+  # wide (a long list before it) and deep (nested one level per node).
+  defp over_budget(text, :wide), do: List.duplicate(%{pad: 1}, 60_000) ++ [pg_error(text)]
+
+  defp over_budget(text, :deep),
+    do: Enum.reduce(1..60_000, pg_error(text), fn _, acc -> {acc} end)
+
+  describe "an over-budget scan fails closed" do
+    test "the filter turns an unscannable event into the content-free scan_limit event" do
+      {fun, opts} = attached_filter!()
+      text = canary()
+
+      for shape <- [:wide, :deep],
+          event <- [
+            %{
+              level: :warning,
+              msg: {:report, %{data: over_budget(text, shape)}},
+              meta: %{pid: self()}
+            },
+            %{
+              level: :error,
+              msg: {:string, "c4 meta case"},
+              meta: %{big: over_budget(text, shape), pid: self()}
+            }
+          ] do
+        result = fun.(event, opts)
+        assert result.level == event.level, "C4-01a: the level was not kept"
+        assert result.msg == {:string, "sanitized error report: scan_limit"}, "C4-01a: #{shape}"
+        assert result.meta == %{pid: self()}, "C4-01a: unscanned metadata was kept"
+        refute render(result) =~ text
+      end
+
+      log =
+        capture_log([level: :debug], fn ->
+          :logger.error(%{report: over_budget(text, :wide)})
+        end)
+
+      assert log =~ "scan_limit"
+      refute log =~ text
+    end
+
+    test "the boundary summarizes an unscannable reason or exception as scan_limit" do
+      require_module!(@boundary)
+      text = canary()
+
+      for shape <- [:wide, :deep] do
+        big = over_budget(text, shape)
+
+        for {tag, expected} <- [error: {:error, "scan_limit"}, cancel: {:cancel, "scan_limit"}] do
+          result = observe(fn -> apply(@boundary, :run, [fn -> {tag, big} end]) end)
+
+          assert result == expected,
+                 "C4-01a: #{shape} #{tag}: #{String.slice(render(result), 0, 200)}"
+        end
+
+        raised =
+          observe(fn -> apply(@boundary, :run, [fn -> raise UnknownError, secret: big end]) end)
+
+        assert raised == {:error, "scan_limit"},
+               "C4-01a: #{shape} raise: #{String.slice(render(raised), 0, 200)}"
+      end
+
+      # Safe typed results are still returned as they are.
+      ok = {:ok, List.duplicate(%{pad: 1}, 60_000)}
+      assert apply(@boundary, :run, [fn -> ok end]) == ok
+    end
+  end
+
   ## ADR 250-251: handler attachment
 
   describe "ADR 250-251: handler attachment" do

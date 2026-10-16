@@ -73,23 +73,26 @@ defmodule SdrAgent.Repo.SafeMetadata do
     do: error_description(error({:error, error}))
 
   def error_summary(%module{}) when module in @ash_classes, do: inspect(module)
+  def error_summary(:scan_limit), do: "scan_limit"
   def error_summary(_error), do: "other"
 
   @doc """
   The first raw error struct — an exception of the Postgrex, DBConnection
   or Ash error namespaces — found anywhere in `term` (tuples, lists, maps
-  and struct fields, depth first), or nil. The walk is bounded: after
-  #{@scan_budget} nodes it stops and reports nil.
+  and struct fields, depth first), or nil. The walk is bounded and fails
+  closed: a term with more than #{@scan_budget} nodes is reported as
+  `:scan_limit` (it may hold a raw error), never as nil.
   """
-  @spec find_raw_error(term()) :: struct() | nil
+  @spec find_raw_error(term()) :: struct() | :scan_limit | nil
   def find_raw_error(term) do
     case scan(term, @scan_budget) do
       {:found, error} -> error
+      :exhausted -> :scan_limit
       _budget -> nil
     end
   end
 
-  defp scan(_term, budget) when budget <= 0, do: 0
+  defp scan(_term, budget) when budget <= 0, do: :exhausted
 
   defp scan(%module{} = struct, budget) do
     if raw_error_module?(module),
@@ -108,6 +111,7 @@ defmodule SdrAgent.Repo.SafeMetadata do
   defp scan_all([head | tail], budget), do: scan_next(scan(head, budget), [tail])
 
   defp scan_next({:found, _} = found, _rest), do: found
+  defp scan_next(:exhausted, _rest), do: :exhausted
   defp scan_next(budget, rest), do: scan_all(rest, budget)
 
   defp raw_error_module?(module) do

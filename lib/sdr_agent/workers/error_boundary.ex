@@ -19,7 +19,10 @@ defmodule SdrAgent.Workers.ErrorBoundary do
       by the sanitized summary (`SdrAgent.Repo.SafeMetadata.error_summary/1`);
     * a raised exception that is, or holds, a raw error struct becomes
       `{:error, summary}` (Oban retries an error as it retries a raise);
-      any other exception is re-raised unchanged.
+      any other exception is re-raised unchanged;
+    * a reason or exception too large for the bounded scan fails closed: it
+      is summarized as `"scan_limit"` under its tag (`{:error,
+      "scan_limit"}` for a raise).
 
   It adds no retry, spend or model authority, and treats an unknown model
   outcome no differently: the body's own handling runs first.
