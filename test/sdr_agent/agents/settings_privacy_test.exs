@@ -18,6 +18,8 @@ defmodule SdrAgent.Agents.SettingsPrivacyTest do
   import ExUnit.CaptureLog
   import SdrAgent.SettingsFixtures
 
+  require Record
+
   alias Ecto.Adapters.SQL
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.AI.ModelProvider
@@ -28,6 +30,8 @@ defmodule SdrAgent.Agents.SettingsPrivacyTest do
   @moduletag :c4_01a
 
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
+
+  Record.defrecordp(:span, Record.extract(:span, from_lib: "opentelemetry/include/otel_span.hrl"))
 
   setup do
     tenant = bootstrap!()
@@ -50,6 +54,32 @@ defmodule SdrAgent.Agents.SettingsPrivacyTest do
     # The simple processor exports on span end; give it a moment.
     Process.sleep(50)
     inspect(InMemoryExporter.spans(), limit: :infinity, printable_limit: :infinity)
+  end
+
+  # Each exported span's attributes, events and status, rendered separately.
+  defp span_parts do
+    Process.sleep(50)
+    render = &inspect(&1, limit: :infinity, printable_limit: :infinity)
+
+    for record <- InMemoryExporter.spans() do
+      %{
+        name: span(record, :name),
+        attributes: render.(span(record, :attributes)),
+        events: render.(span(record, :events)),
+        status: render.(span(record, :status))
+      }
+    end
+  end
+
+  defp assert_no_canary_in_spans(label) do
+    c = canary()
+
+    for part <- span_parts(), field <- [:attributes, :events, :status] do
+      refute Map.fetch!(part, field) =~ c,
+             "C4-01a: #{label}: the canary reached span #{inspect(part.name)} #{field}"
+    end
+
+    refute rendered_spans() =~ c, "C4-01a: #{label}: the canary reached a span"
   end
 
   defp assert_no_canary(log, label) do
@@ -147,8 +177,56 @@ defmodule SdrAgent.Agents.SettingsPrivacyTest do
     spans = rendered_spans()
     assert spans =~ "gen_ai.input.sha256", "the span keeps its metadata and hashes"
     refute spans =~ c, "C4-01a: content_capture: :off did not suppress the GenAI content event"
+    assert_no_canary_in_spans("model call")
     refute log =~ c, "C4-01a: the canary reached a log (SQL parameters)"
     refute table_contains?("audit_events", c)
+    assert payloads_contain?(c), "the model request Payload is the allowed copy"
+  end
+
+  test "content_capture: :off dominates a conflicting provider option along the request path",
+       ctx do
+    c = canary()
+    %{run: run, agent: agent} = AgentsFixtures.running_run(ctx.tenant, usage_origin: :reply)
+
+    audit =
+      "c4-conflict"
+      |> AgentsFixtures.model_attrs()
+      |> Map.take([
+        :purpose,
+        :parameters,
+        :prompt_template_id,
+        :prompt_template_version,
+        :prompt_template_sha256,
+        :output_schema_id,
+        :output_schema_version,
+        :output_schema_sha256
+      ])
+
+    request = %{
+      id: "c4-conflict-1",
+      run: run,
+      actor: agent,
+      operation: "model.complete",
+      prompt: "Fixed rules.\n\n<settings>Brief #{c}</settings>",
+      schema: @schema,
+      audit: audit,
+      content_capture: :off
+    }
+
+    # The provider options ask for capture; dev config asks for capture too.
+    conflicting = [content_capture: :inherit, otel_capture_content: true, capture_content: true]
+
+    log =
+      capture_log([level: :debug], fn ->
+        assert {:ok, _} =
+                 ModelProvider.complete(request,
+                   provider: SdrAgent.AI.ModelProvider.Fake,
+                   provider_options: conflicting
+                 )
+      end)
+
+    assert_no_canary_in_spans("conflicting provider option")
+    refute log =~ c, "C4-01a: the canary reached a log"
     assert payloads_contain?(c), "the model request Payload is the allowed copy"
   end
 
@@ -173,22 +251,59 @@ defmodule SdrAgent.Agents.SettingsPrivacyTest do
     assert events != []
   end
 
-  test "database logging and query spans carry no parameters or error values" do
+  test "database logging and query spans carry no query parameters" do
+    c = canary()
+
+    log =
+      capture_log([level: :debug], fn -> SQL.query!(SdrAgent.Repo, "SELECT $1::text", [c]) end)
+
+    refute log =~ c, "C4-01a: a query parameter reached the SQL log"
+    assert_no_canary_in_spans("query parameter")
+  end
+
+  test "database logging and query spans carry no raw SQL text (literals or comments)" do
     c = canary()
 
     log =
       capture_log([level: :debug], fn ->
-        SQL.query!(SdrAgent.Repo, "SELECT $1::text", [c])
+        SQL.query!(SdrAgent.Repo, "SELECT '#{c}'::text AS literal /* #{c} */", [])
+      end)
 
-        failing = fn ->
+    refute log =~ c, "C4-01a: raw SQL text with a literal or comment reached the SQL log"
+    assert_no_canary_in_spans("raw SQL text")
+  end
+
+  test "database error values and raised exceptions reach no log, span event or span status" do
+    c = canary()
+
+    log =
+      capture_log([level: :debug], fn ->
+        parameter = fn ->
           SdrAgent.Repo.rollback(SQL.query(SdrAgent.Repo, "SELECT $1::text::integer", [c]))
         end
 
-        assert match?({:error, {:error, %Postgrex.Error{}}}, SdrAgent.Repo.transaction(failing)),
-               "C4-01a setup: the failing query did not fail"
+        literal = fn ->
+          SdrAgent.Repo.rollback(SQL.query(SdrAgent.Repo, "SELECT '#{c}'::integer", []))
+        end
+
+        raised = fn ->
+          try do
+            SQL.query!(SdrAgent.Repo, "SELECT '#{c}'::integer", [])
+          rescue
+            error in Postgrex.Error -> SdrAgent.Repo.rollback({:raised, error})
+          end
+        end
+
+        for {label, fun} <- [parameter: parameter, literal: literal] do
+          assert match?({:error, {:error, %Postgrex.Error{}}}, SdrAgent.Repo.transaction(fun)),
+                 "C4-01a setup: the #{label} query did not fail"
+        end
+
+        assert match?({:error, {:raised, %Postgrex.Error{}}}, SdrAgent.Repo.transaction(raised)),
+               "C4-01a setup: the raising query did not raise"
       end)
 
-    refute log =~ c, "C4-01a: a query parameter reached the SQL log"
-    refute rendered_spans() =~ c, "C4-01a: a query parameter or error value reached a span"
+    refute log =~ c, "C4-01a: a database error value reached the log"
+    assert_no_canary_in_spans("database error")
   end
 end

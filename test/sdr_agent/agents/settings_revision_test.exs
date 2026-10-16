@@ -95,9 +95,15 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
                  {Atom.to_string(revision.kind), revision.number, revision.supersedes_id}
 
         assert changes["content_sha256"] == revision.content_sha256
-        refute Map.has_key?(changes, Atom.to_string(revision.kind))
-        refute Map.has_key?(changes, "note")
-        assert Atom.to_string(revision.kind) in event.payload["redacted"]
+
+        refute Map.has_key?(changes, Atom.to_string(revision.kind)),
+               "C4-01a: the #{revision.kind} content is in the event after-image"
+
+        refute Map.has_key?(changes, "note"), "C4-01a: the note is in the event after-image"
+
+        assert Atom.to_string(revision.kind) in (event.payload["redacted"] || []),
+               "C4-01a: the event does not name the redacted content attribute"
+
         assert is_binary(event.payload["record_sha256"])
       end
 
@@ -140,10 +146,8 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
       foreign = %{ctx.admin | tenant_id: Ash.UUIDv7.generate()}
 
       for actor <- [nil, foreign] do
-        result =
-          observe(fn -> attempt(ctx, :writing_guide, content(:writing_guide), actor: actor) end)
-
-        refute match?({:ok, _}, result), "C4-01a: #{short(actor)} saved a revision"
+        result = attempt(ctx, :writing_guide, content(:writing_guide), actor: actor)
+        assert forbidden?(result), "C4-01a: #{short(actor)} was not refused: #{short(result)}"
       end
 
       nothing_written(ctx, :writing_guide, 0)
@@ -285,8 +289,14 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
           {"#{field} = #{value}", limit_defaults() |> Map.put(field, value) |> consistent(field)}
         end
 
-      {number, _} = save_chain!(ctx, cases)
+      {number, previous} = save_chain!(ctx, cases)
       assert number == 24
+
+      # The same chain refuses one step past a boundary.
+      below = Map.put(previous, :run_max_tokens, 0)
+      result = attempt(ctx, :operational_limits, below, expected_number: 24)
+      assert_invalid(result, :run_max_tokens, "run_max_tokens = 0")
+      nothing_written(ctx, :operational_limits, 24)
     end
 
     test "minimum - 1, maximum + 1, a non-integer and nil are refused; nothing is written",
@@ -333,6 +343,11 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
          ctx do
       limits = Map.put(limit_defaults(), :run_max_model_calls, 1_000)
 
+      unconfirmed = attempt(ctx, :operational_limits, limits, expected_number: 0)
+
+      assert unconfirmed == {:error, {:invalid, [confirm_raised: :mismatch]}},
+             "C4-01a: an unconfirmed raise to 1,000: #{short(unconfirmed)}"
+
       revision =
         save!(:operational_limits, limits, ctx.admin,
           expected_number: 0,
@@ -371,11 +386,12 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
       nothing_written(ctx, :operational_limits, 0)
       assert revision_events(ctx) == []
 
-      # The first save compares against the built-in default.
+      # The first save compares against the built-in default. The
+      # confirmation is a set: any order is accepted; it is stored sorted.
       revision =
         save!(:operational_limits, raise_both, ctx.admin,
           expected_number: 0,
-          confirm_raised: [:run_max_model_calls, :run_max_tool_calls]
+          confirm_raised: [:run_max_tool_calls, :run_max_model_calls]
         )
 
       assert revision.raised_fields == [:run_max_model_calls, :run_max_tool_calls]
@@ -391,6 +407,12 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
     end
 
     test "a first save at or below the built-in defaults needs no confirmation", ctx do
+      raise_one = Map.merge(limit_defaults(), %{research_max_sources: 5, run_max_tool_calls: 61})
+      result = attempt(ctx, :operational_limits, raise_one, expected_number: 0)
+
+      assert result == {:error, {:invalid, [confirm_raised: :mismatch]}},
+             "C4-01a: a first save one above the built-in default: #{short(result)}"
+
       limits = Map.put(limit_defaults(), :research_max_sources, 5)
       revision = save!(:operational_limits, limits, ctx.admin, expected_number: 0)
       assert revision.raised_fields == []
@@ -634,6 +656,65 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
         })
 
       assert save!(:offering_profile, offering, ctx.admin).number == 1
+    end
+  end
+
+  ## Trim ruling (Codex f2d2253 review)
+
+  describe "trim: surrounding whitespace is normalized, then validated and hashed" do
+    test "surrounding whitespace is trimmed and hashed trimmed; edge controls and secrets are refused",
+         ctx do
+      padded = save!(:writing_guide, %{text: "  Synthetic guide.\n\n\t"}, ctx.admin)
+      assert padded.writing_guide.text == "Synthetic guide."
+      assert padded.content_sha256 == recompute_content_sha256(padded)
+
+      plain = save!(:writing_guide, %{text: "Synthetic guide."}, ctx.admin)
+      assert plain.content_sha256 == padded.content_sha256
+
+      offering =
+        content(:offering_profile, %{
+          name: " Example Widgets Scheduler ",
+          items: [%{id: "calendar_sync", kind: :feature, text: "\n Syncs calendars. "}]
+        })
+
+      saved = save!(:offering_profile, offering, ctx.admin)
+      assert saved.offering_profile.name == "Example Widgets Scheduler"
+      assert [%{text: "Syncs calendars."}] = saved.offering_profile.items
+
+      brief =
+        save!(:research_brief, content(:research_brief, %{guidance: "\t Brief. \n"}), ctx.admin)
+
+      assert brief.research_brief.guidance == "Brief."
+
+      # The same rule, in order: a forbidden control or secret-shaped text
+      # at an edge is refused, never trimmed away.
+      edges = [
+        "Guide\a",
+        "\aGuide",
+        "Guide\r",
+        "\rGuide",
+        "\vGuide",
+        "Guide\f",
+        "Guide\e",
+        "\0Guide"
+      ]
+
+      for text <- edges do
+        result = attempt(ctx, :writing_guide, %{text: text}, expected_number: 2)
+        assert_invalid(result, nil, "edge control #{inspect(text)}")
+      end
+
+      key = SecretShapes.provider_key()
+
+      for text <- ["Guide " <> key, key <> " Guide", "  " <> key <> "  "] do
+        result = attempt(ctx, :writing_guide, %{text: text}, expected_number: 2)
+        assert_invalid(result, nil, "edge secret")
+        refute inspect(result, limit: :infinity) =~ key
+      end
+
+      result = attempt(ctx, :writing_guide, %{text: " \n\t "}, expected_number: 2)
+      assert_invalid(result, nil, "whitespace only")
+      nothing_written(ctx, :writing_guide, 2)
     end
   end
 end

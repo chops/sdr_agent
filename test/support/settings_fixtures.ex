@@ -406,10 +406,22 @@ defmodule SdrAgent.SettingsFixtures do
     kind, reason -> {kind, reason}
   end
 
-  @doc "A refusal of an unauthorized actor (`:forbidden` or `Ash.Error.Forbidden`)."
+  @doc """
+  A refusal of an unauthorized actor by a domain function: the documented
+  typed `{:error, :forbidden}` or `{:error, %Ash.Error.Forbidden{}}`. A raised
+  exception or exit (see `observe/1`) is never a refusal.
+  """
   def forbidden?({:error, :forbidden}), do: true
   def forbidden?({:error, %Ash.Error.Forbidden{}}), do: true
   def forbidden?(_result), do: false
+
+  @doc "An Ash action refused by its policy: exactly `{:error, %Ash.Error.Forbidden{}}`."
+  def ash_forbidden?({:error, %Ash.Error.Forbidden{}}), do: true
+  def ash_forbidden?(_result), do: false
+
+  @doc "An Ash action refused for its input: exactly `{:error, %Ash.Error.Invalid{}}`."
+  def ash_invalid?({:error, %Ash.Error.Invalid{}}), do: true
+  def ash_invalid?(_result), do: false
 
   @doc "The field errors of `{:error, {:invalid, errors}}`, else nil."
   def invalid_errors({:error, {:invalid, errors}}) when is_list(errors), do: errors
@@ -417,12 +429,14 @@ defmodule SdrAgent.SettingsFixtures do
 
   @doc """
   Whether `result` is the business-completeness refusal naming `kinds`:
-  `{:error, {:settings_incomplete, kinds}}`, or an Ash error class whose
-  message names `settings_incomplete` and each kind.
+  `{:error, {:settings_incomplete, kinds}}`, or an `Ash.Error.Invalid` /
+  `Ash.Error.Forbidden` error class whose message names
+  `settings_incomplete` and each kind. A raised exception is not.
   """
   def settings_incomplete?({:error, {:settings_incomplete, kinds}}, kinds), do: true
 
-  def settings_incomplete?({:error, %{__exception__: true} = error}, kinds) do
+  def settings_incomplete?({:error, %error_class{} = error}, kinds)
+      when error_class in [Ash.Error.Invalid, Ash.Error.Forbidden] do
     message = Exception.message(error)
 
     message =~ "settings_incomplete" and
@@ -432,13 +446,63 @@ defmodule SdrAgent.SettingsFixtures do
   def settings_incomplete?(_result, _kinds), do: false
 
   @doc """
-  Whether a raw-SQL `result` (`SdrAgent.AuditCase.raw_error/2`) was refused
-  by the database for a reason other than a missing table or column.
+  `{sqlstate, constraint}` of a raw-SQL refusal (`SdrAgent.AuditCase.raw_error/2`),
+  or `{:not_refused, result}`.
   """
-  def refused_by_db?({:error, %Postgrex.Error{postgres: %{code: code}}}),
-    do: code not in [:undefined_table, :undefined_column, :syntax_error]
+  def db_refusal({:error, %Postgrex.Error{postgres: %{code: code} = postgres}}),
+    do: {code, Map.get(postgres, :constraint)}
 
-  def refused_by_db?(_result), do: false
+  def db_refusal(result), do: {:not_refused, result}
+
+  @doc """
+  Asserts a raw-SQL `result` was refused with SQLSTATE `code` (a Postgrex
+  code atom) and, when given, by `constraint` exactly.
+  """
+  def assert_db_refusal(result, code, constraint, label) do
+    refusal = db_refusal(result)
+
+    expected =
+      if constraint, do: {code, constraint}, else: {code, elem(refusal, 1)}
+
+    assert refusal == expected,
+           "C4-01a: #{label}: expected #{inspect(code)} #{inspect(constraint)}, " <>
+             "got #{inspect(refusal, limit: 6, printable_limit: 300)}"
+  end
+
+  @doc """
+  The message of a raw-SQL refusal raised by a trigger (`raise_exception` /
+  `restrict_violation`), or nil.
+  """
+  def trigger_message({:error, %Postgrex.Error{postgres: %{code: code, message: message}}})
+      when code in [:restrict_violation, :raise_exception],
+      do: message
+
+  def trigger_message(_result), do: nil
+
+  @doc """
+  Test-only fixture (C4-01a test 14): removes the tenant's offering-profile
+  revisions with triggers and foreign keys disabled, standing in for "no
+  offering saved" after synthetic delivery history was built with one. It
+  is a raw database-administrator write inside the test's sandbox, never an
+  application path.
+  """
+  def withhold_offering!(tenant_id) do
+    require_table!("settings_revisions")
+
+    Repo.transaction(fn ->
+      SQL.query!(Repo, "SET LOCAL session_replication_role = replica", [])
+
+      SQL.query!(
+        Repo,
+        "DELETE FROM settings_revisions WHERE tenant_id = $1 AND kind = 'offering_profile'",
+        [Ecto.UUID.dump!(tenant_id)]
+      )
+
+      SQL.query!(Repo, "SET LOCAL session_replication_role = origin", [])
+    end)
+
+    assert latest_number(tenant_id, :offering_profile) == 0
+  end
 
   ## Test doubles
 

@@ -927,3 +927,88 @@ defaults stay synthetic and unpublished as owner content until the
 publication decision (OQ-5). *(OQ-5 answered (b) on 2026-10-14: the
 built-in guide stays neutral and the owner's text is never in the
 repository.)*
+
+## 12. C4-01a interface rulings (RED round 1, Codex 533402a2, 2026-10-15)
+
+These are names and shapes the packet left open, chosen by the RED at
+`f2d2253` and ruled on by Codex in `codex-c401a-f2d2253-red-review.md`.
+They are binding on GREEN, and on consumers (B1-04 and B1-05) before
+those depend on them.
+
+**Accepted:**
+- **The APIs:** `create_settings_revision(%{kind, content,
+  expected_number, note, confirm_raised}, opts)`, `current_settings/1`,
+  `run_settings/2`, `RunSettings.allowance/2`, `booking_link_for_use/1`.
+- **Resources and tables:** SettingsRevision and RunSettingsSnapshot
+  (`settings_revisions`, `run_settings_snapshots`).
+- **Content shapes,** atom-keyed and per kind:
+  - offering: `%{name, summary, audience, items: [%{id, kind, text}]}`;
+  - booking: `%{url}`;
+  - guide: `%{text}`;
+  - brief: `%{guidance, depth}`;
+  - limits: a flat map of the 12 fields.
+- **`run_settings/2`** returns `{:ok, %{kind => %{source, content,
+  version, revision_id}}}`. An unsaved kind that has a built-in default
+  returns that default by version (`source: :code_default`, `revision_id:
+  nil`). An unsaved kind with no built-in default (the offering profile,
+  the booking link) returns the absent slot (below). Neither ever falls
+  back to the current revision.
+- **`allowance/2`** returns `{:ok, integer}` or `{:error,
+  :no_settings_snapshot}`.
+- **Errors:** validation errors are `{:invalid, keyword}`, keyed by field.
+  A stale save is `{:stale_revision, latest}`. A refusal is never
+  inferred from a crash.
+- **Helpers:** `CodeDefaults.released/1` and `current/1`,
+  `Safeguards.version/0`, `RunSettings.completeness/0`, and
+  `RunSettings.milliseconds/1`. The last does exact integer conversion
+  with range checks.
+- **Storage formats:** `raised_fields` is a closed-name `text[]`; hashes
+  are lowercase hex.
+- **`content_capture: :off | :inherit`,** as a request key and as GenAI
+  metadata. `:off` dominates any conflicting provider or request option.
+- **`agents.run.created`** reports the persisted `settings_snapshot_id`
+  in `payload["changes"]`.
+
+**Accepted with limits:**
+- **`SettingsSnapshotContext`:** only as a read-only accessor to a
+  phase that is already open, private and bound to its process. It is
+  never a public constructor of authority. A forged or copied context
+  grants nothing.
+- **`:booking_link_guard` override:** only as a failure-injection seam in
+  test builds. Builds without the seam ignore or refuse it. It is never a
+  production bypass or an owner-facing override. Dev and non-seam
+  evidence is due at GREEN.
+
+**Rules that resolve ambiguities:**
+- **Trimming:** surrounding whitespace is normalized first, then the
+  normalized value is cast, stored and hashed. A control character or
+  secret-shaped text at the edges is refused, never trimmed away.
+- **`confirm_raised`:** an exact **set** of the raised names. Any order is
+  accepted, and the names are stored sorted. A duplicate, unknown, extra
+  or missing name is refused. No atom is created from an unknown string.
+- **Golden defaults:** each pin is added at GREEN from exact, reviewed
+  default content and an independently recomputed canonical hash. A pin
+  is never derived from the implementation, and a historical pin is never
+  changed.
+
+**Chosen in RED round 2, for review:**
+- **Constraint names:**
+  - `settings_revisions_content_matches_kind`;
+  - `settings_revisions_root_number`;
+  - `settings_revisions_raised_fields_limits_only`;
+  - `settings_revisions_one_root_per_kind_index`;
+  - `settings_revisions_supersedes_once_index`;
+  - `settings_revisions_supersedes_fkey`;
+  - `run_settings_snapshots_<kind>_slot` and
+    `run_settings_snapshots_<kind>_revision_fkey`;
+  - `agent_runs_settings_snapshot_fkey`.
+- **Append-only:** a `<table>_guard_truncate` trigger calls
+  `<table>_append_only()`, which raises "<table> is append-only".
+- **Kind columns:** writing a kind column is refused with
+  `generated_always`.
+- **The cutover trigger** names `settings_snapshot_id` in its message.
+- **The absent slot**, for an unsaved kind with no built-in default:
+  `%{source: :absent, revision_id: nil, version: nil, content_sha256:
+  nil, content: nil}`.
+- **Snapshot create:** an empty or supplied-attribute create is refused
+  as Forbidden, never as a NoSuchInput Invalid.

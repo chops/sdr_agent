@@ -203,11 +203,12 @@ defmodule SdrAgent.Agents.RunSettingsLimitsTest do
       save_limits!(ctx, raised, limit_defaults())
 
       AgentsFixtures.grant!(ctx.tenant, %{
-        total_attempts: 1,
+        total_attempts: 10,
         allocations: [%{key: :b1, applies_to: [:b1], attempts: 1}]
       })
 
       {run, agent} = running!(ctx, max_model_calls: 1_000)
+      assert snapshot_of!(run, agent).limits.run_max_model_calls == 1_000
 
       assert run.budget.max_model_calls == 1_000,
              "C4-01a: the raised snapshot value is not frozen"
@@ -230,6 +231,7 @@ defmodule SdrAgent.Agents.RunSettingsLimitsTest do
       raised = Map.put(limit_defaults(), :run_max_model_calls, 1_000)
       save_limits!(ctx, raised, limit_defaults())
       {run, agent} = running!(ctx, max_model_calls: 1_000)
+      assert snapshot_of!(run, agent).limits.run_max_model_calls == 1_000
 
       assert run.budget.max_model_calls == 1_000,
              "C4-01a: the raised snapshot value is not frozen"
@@ -298,6 +300,15 @@ defmodule SdrAgent.Agents.RunSettingsLimitsTest do
       save_offering!(ctx.admin)
       %{run: run} = assign!(ctx, "01")
       assert booking_link_for_use(run) == {:error, :booking_link_absent}
+
+      # A link saved later is for later runs only.
+      save!(:booking_link, %{url: "https://book.example.test/demo/intro"}, ctx.admin)
+
+      assert booking_link_for_use(run!(ctx, run)) == {:error, :booking_link_absent},
+             "C4-01a: the bound run fell back to the current booking link"
+
+      %{run: later} = assign!(ctx, "02")
+      assert booking_link_for_use(later) == {:ok, "https://book.example.test/demo/intro"}
     end
   end
 

@@ -14,6 +14,18 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
   bounded, and committed rows are removed afterwards with triggers
   disabled, as in `SdrAgent.Agents.ModelProfileSwitchRaceTest`.
 
+  Test 27 is the narrowed form: the two later saves are committed by the
+  winner's one held transaction (revisions 1-3), because under the section 4
+  protocol the loser's post-rollback read is a plain statement that nothing
+  can hold, so two *independent* later commits cannot be placed
+  deterministically between its rollback and that read. A loser that maps
+  the violation to the conflicting row's number, or to `expected_number + 1`,
+  reports 1 and fails.
+
+  Every task is shut down and joined before cleanup (`stop_tasks!/0`
+  asserts none is alive), and cleanup asserts that no committed C4 row is
+  left.
+
   RED: the functions do not exist; each test fails on its presence guard
   before any task starts.
   """
@@ -76,11 +88,37 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
     Agents.create_run(attrs, actor: ctx.agent)
   end
 
-  defp bound_guide(ctx, run) do
-    {:ok, snapshot} =
-      Ash.get(snapshot_resource(), run.settings_snapshot_id, Kernel.opts(ctx.tenant.id))
+  # The writing-guide revision a run's snapshot binds (`:no_snapshot` when
+  # the run has none), read on the calling process's connection.
+  defp bound_guide(_ctx, %{settings_snapshot_id: nil}), do: :no_snapshot
 
-    snapshot.writing_guide_revision_id
+  defp bound_guide(ctx, run) do
+    case Ash.get(snapshot_resource(), run.settings_snapshot_id, Kernel.opts(ctx.tenant.id)) do
+      {:ok, snapshot} -> snapshot.writing_guide_revision_id
+      other -> {:unreadable, other}
+    end
+  end
+
+  defp lock_nowait(revision_id, mode) do
+    Repo.transaction(fn ->
+      Repo.query(
+        "SELECT 1 FROM settings_revisions WHERE id = $1 #{mode} NOWAIT",
+        [Ecto.UUID.dump!(revision_id)]
+      )
+    end)
+  end
+
+  # From a third connection: which row locks on `revision_id` are free now.
+  defp probe_revision_lock(revision_id, mode) do
+    task = Task.async(fn -> with_connection(fn -> lock_nowait(revision_id, mode) end) end)
+
+    Process.put(:race_tasks, [task | Process.get(:race_tasks, [])])
+
+    case Task.await(task, 10_000) do
+      {:ok, {:ok, _}} -> :free
+      {:ok, {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}}} -> :locked
+      other -> {:probe_failed, other}
+    end
   end
 
   defp guide_numbers(ctx), do: revision_numbers(ctx.tenant.id, :writing_guide)
@@ -165,8 +203,15 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
   end
 
   defp stop_tasks! do
-    for task <- Process.get(:race_tasks, []), do: Task.shutdown(task, 5_000)
+    tasks = Process.get(:race_tasks, [])
+    for task <- tasks, do: Task.shutdown(task, 5_000)
     Process.delete(:race_tasks)
+    assert Enum.filter(tasks, &Process.alive?(&1.pid)) == [], "a race task was not joined"
+  end
+
+  defp blocking_pids(pid) do
+    [[pids]] = Repo.query!("SELECT pg_blocking_pids($1)", [pid]).rows
+    pids
   end
 
   defp hold(message) do
@@ -201,20 +246,33 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
         assert_receive :head_held, 10_000
         editor_fun = fn -> save(editor_admin, "Guide two, synthetic.", 1) end
 
+        holder_pid = backend!(:holder)
+        creator_fun = fn -> create_run(ctx) end
+
+        {first_tag, first_fun, second_tag, second_fun} =
+          if unquote(order) == :editor_first,
+            do: {:editor, editor_fun, :creator, creator_fun},
+            else: {:creator, creator_fun, :editor, editor_fun}
+
+        first = on_own_connection(parent, first_tag, first_fun)
+        first_pid = backend!(first_tag)
+        await_lock_wait!(first_pid)
+        second = on_own_connection(parent, second_tag, second_fun)
+        second_pid = backend!(second_tag)
+        await_lock_wait!(second_pid)
+
+        # The observed queue on the head row: the first waiter is blocked by
+        # the holder only; the second waits behind the first.
+        assert blocking_pids(first_pid) == [holder_pid]
+
+        assert first_pid in blocking_pids(second_pid),
+               "the second waiter is not queued behind the first"
+
+        editor_pid = if first_tag == :editor, do: first_pid, else: second_pid
+        assert inserted_revision?(editor_pid), "the editor waits for the head before inserting"
+
         {editor, creator} =
-          if unquote(order) == :editor_first do
-            editor = on_own_connection(parent, :editor, editor_fun)
-            await_lock_wait!(backend!(:editor))
-            creator = on_own_connection(parent, :creator, fn -> create_run(ctx) end)
-            await_lock_wait!(backend!(:creator))
-            {editor, creator}
-          else
-            creator = on_own_connection(parent, :creator, fn -> create_run(ctx) end)
-            await_lock_wait!(backend!(:creator))
-            editor = on_own_connection(parent, :editor, editor_fun)
-            await_lock_wait!(backend!(:editor))
-            {editor, creator}
-          end
+          if first_tag == :editor, do: {first, second}, else: {second, first}
 
         send(holder.pid, :release)
         await!(holder, "head holder")
@@ -244,7 +302,7 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
   test "test 24: the waiting editor has inserted its successor and holds no head", ctx do
     guard!()
     [first_admin, editor_admin] = ctx.admins
-    {:ok, _guide1} = save(first_admin, "Guide one, synthetic.", 0)
+    {:ok, guide1} = save(first_admin, "Guide one, synthetic.", 0)
     parent = self()
     holder = head_holder(parent, ctx)
 
@@ -254,6 +312,15 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
       editor_pid = backend!(:editor)
       await_lock_wait!(editor_pid)
       assert inserted_revision?(editor_pid), "the editor waits for the head before inserting"
+
+      # It holds the predecessor FOR NO KEY UPDATE: FOR UPDATE conflicts,
+      # the snapshot FK's FOR KEY SHARE does not.
+      assert probe_revision_lock(guide1.id, "FOR UPDATE") == :locked,
+             "the editor does not hold the current revision's row lock"
+
+      assert probe_revision_lock(guide1.id, "FOR KEY SHARE") == :free,
+             "the editor's lock blocks a FOR KEY SHARE reader"
+
       send(holder.pid, :release)
       await!(holder, "head holder")
       assert {:ok, %{number: 2}} = await!(editor, "editor")
@@ -278,7 +345,9 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
           send(parent, :head_held)
           hold(:go)
           result = create_run(ctx)
-          send(parent, {:created, result})
+          # Read on the creator's own connection, inside its transaction.
+          bound = with {:ok, run} <- result, do: bound_guide(ctx, run)
+          send(parent, {:created, result, bound})
           hold(:commit)
           result
         end)
@@ -293,10 +362,10 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
       assert inserted_revision?(editor_pid)
 
       send(creator.pid, :go)
-      assert_receive {:created, {:ok, run}}, 5_000
-      refute lock_waiting?(creator_pid)
+      assert_receive {:created, {:ok, run}, bound}, 5_000
+      refute lock_waiting?(creator_pid), "the creator's FK check waited on the editor"
       assert lock_waiting?(editor_pid), "the editor commits only after the creator"
-      assert bound_guide(ctx, run) == guide1.id
+      assert bound == guide1.id
 
       send(creator.pid, :commit)
       assert {:ok, {:ok, _run}} = await!(creator, "creator")
@@ -350,7 +419,8 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
 
   ## Test 27
 
-  test "test 27: the loser reports the latest committed number after its rollback", ctx do
+  test "test 27 (narrowed: later saves in the winner's one held transaction): the loser reports the latest committed number",
+       ctx do
     guard!()
     [winner_admin, loser_admin] = ctx.admins
     parent = self()
@@ -410,6 +480,9 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
       assert blocked_by?(second_pid, first_pid)
       refute holds_head?(second_pid), "an editor waiting on the revision held the chain head"
 
+      refute inserted_revision?(second_pid),
+             "the second editor inserted before taking the revision lock"
+
       send(first.pid, :finish)
       assert {:ok, {:ok, _}} = await!(first, "first editor")
       assert await!(second, "second editor") == {:error, {:stale_revision, 2}}
@@ -448,5 +521,12 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
       Repo.query!("SET LOCAL session_replication_role = replica")
       Repo.query!("TRUNCATE #{Enum.join(existing, ", ")} CASCADE")
     end)
+
+    left =
+      for table <- existing,
+          Repo.query!("SELECT count(*) FROM #{table}").rows != [[0]],
+          do: table
+
+    unless left == [], do: raise("race cleanup left committed rows in #{inspect(left)}")
   end
 end

@@ -10,8 +10,11 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
   Rows are written with raw SQL (each refusal in its own savepoint via
   `SdrAgent.AuditCase.raw_error/2`); a foreign tenant's rows are written
   with triggers disabled (`tamper!/2`), since the singleton tenant table
-  holds one tenant. Every negative case has a positive control first, so a
-  refusal is attributable to the rule under test.
+  holds one tenant. Every negative case has a positive control and is
+  otherwise valid (no competing violation), and each refusal is pinned to its
+  SQLSTATE and constraint (or trigger function) name, so it is attributable
+  to the rule under test. The constraint and trigger names are C4-01a
+  interface choices (Ash/ADR-0009 naming); they are listed in the RED notes.
 
   RED: the tables and columns do not exist; each test fails on an explicit
   `C4-01a:` table or column assertion after its fixtures.
@@ -33,6 +36,9 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
 
   ## Raw rows
 
+  @rev "settings_revisions"
+  @snap "run_settings_snapshots"
+
   defp u(nil), do: nil
   defp u(id), do: Ecto.UUID.dump!(id)
 
@@ -40,15 +46,22 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
 
   defp now_sql, do: {:sql, "(now() AT TIME ZONE 'utc')"}
 
+  # Unique-key overrides: each override replaces the base column in place.
+  defp put_all(row, overrides),
+    do: Enum.reduce(overrides, row, fn {key, value}, acc -> Keyword.put(acc, key, value) end)
+
   defp insert_sql(table, columns) do
-    {names, placeholders, params, _} =
-      Enum.reduce(columns, {[], [], [], 1}, fn
-        {name, {:sql, expr}}, {ns, ps, vs, i} -> {[name | ns], [expr | ps], vs, i}
-        {name, value}, {ns, ps, vs, i} -> {[name | ns], ["$#{i}" | ps], [value | vs], i + 1}
+    names = Keyword.keys(columns)
+    assert names == Enum.uniq(names), "fixture bug: duplicate INSERT columns #{inspect(names)}"
+
+    {placeholders, params, _} =
+      Enum.reduce(columns, {[], [], 1}, fn
+        {_name, {:sql, expr}}, {ps, vs, i} -> {[expr | ps], vs, i}
+        {_name, value}, {ps, vs, i} -> {["$#{i}" | ps], [value | vs], i + 1}
       end)
 
     sql =
-      "INSERT INTO #{table} (#{names |> Enum.reverse() |> Enum.join(", ")}) " <>
+      "INSERT INTO #{table} (#{Enum.join(names, ", ")}) " <>
         "VALUES (#{placeholders |> Enum.reverse() |> Enum.join(", ")})"
 
     {sql, Enum.reverse(params)}
@@ -67,9 +80,9 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
     tamper!(sql, params)
   end
 
-  defp refused?(table, columns) do
+  defp attempt(table, columns) do
     {sql, params} = insert_sql(table, columns)
-    refused_by_db?(raw_error(sql, params))
+    raw_error(sql, params)
   end
 
   defp revision_row(ctx, kind, overrides \\ []) do
@@ -98,14 +111,14 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
       span_id: rand_hex(8)
     ]
 
-    {id, Keyword.merge(base, overrides)}
+    {id, put_all(base, overrides)}
   end
 
   defp stored_content(:offering_profile),
     do: %{
       "name" => "Example Widgets Scheduler",
       "summary" => "Synthetic.",
-      "audience" => "",
+      "audience" => "Synthetic audience.",
       "items" => [%{"id" => "calendar_sync", "kind" => "feature", "text" => "Syncs."}]
     }
 
@@ -158,7 +171,7 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
           span_id: rand_hex(8)
         ]
 
-    {id, Keyword.merge(base, overrides)}
+    {id, put_all(base, overrides)}
   end
 
   # A copy of agent run `run_id` with a new id and `settings_snapshot_id`.
@@ -195,44 +208,69 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
     id
   end
 
-  # The ADR-0009 append-only trigger (`SdrAgent.Audit.SQL.append_only/1`).
-  defp append_only_refusal?({:error, %Postgrex.Error{postgres: %{message: message}}})
-       when is_binary(message),
-       do: message =~ "append-only"
+  # The ADR-0009 append-only trigger (`SdrAgent.Audit.SQL.append_only/1`):
+  # restrict_violation "<table> is append-only: <op> rejected".
+  defp assert_append_only(result, table, op) do
+    message = trigger_message(result)
 
-  defp append_only_refusal?(_result), do: false
+    assert is_binary(message) and message =~ "#{table} is append-only" and message =~ op,
+           "C4-01a: #{op} on #{table} was not refused by its append-only trigger: " <>
+             inspect(result, limit: 6, printable_limit: 300)
+  end
 
-  defp truncate_trigger?(table) do
+  # The cutover trigger on agent_runs (section 3.2 AgentRun row).
+  defp assert_cutover(result, label) do
+    message = trigger_message(result)
+
+    assert is_binary(message) and message =~ "settings_snapshot_id",
+           "C4-01a: #{label}: not refused by the cutover trigger: " <>
+             inspect(result, limit: 6, printable_limit: 300)
+  end
+
+  # The enabled TRUNCATE trigger `<table>_guard_truncate` runs exactly the
+  # append-only function `<table>_append_only()`.
+  defp truncate_guard_function(table) do
     SQL.query!(
       SdrAgent.Repo,
-      "SELECT count(*) FROM pg_trigger WHERE tgrelid = to_regclass($1) AND NOT tgisinternal " <>
-        "AND tgenabled = 'O' AND (tgtype & 32) <> 0",
-      [table]
-    ).rows != [[0]]
+      "SELECT p.proname FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid " <>
+        "WHERE t.tgrelid = to_regclass($1) AND t.tgname = $2 AND NOT t.tgisinternal " <>
+        "AND t.tgenabled = 'O' AND (t.tgtype & 32) <> 0",
+      [table, "#{table}_guard_truncate"]
+    ).rows
   end
 
   ## Test 4
 
   describe "test 4: append-only" do
     test "UPDATE, DELETE and TRUNCATE on revisions and snapshots are refused", ctx do
-      require_table!("settings_revisions")
-      require_table!("run_settings_snapshots")
+      require_table!(@rev)
+      require_table!(@snap)
 
       revision = save!(:writing_guide, content(:writing_guide), ctx.admin)
       snapshot_id = ctx |> reply_run!() |> snapshot_id!()
 
       for {table, id, column} <- [
-            {"settings_revisions", revision.id, "note"},
-            {"run_settings_snapshots", snapshot_id, "safeguards_version"}
+            {@rev, revision.id, "note"},
+            {@snap, snapshot_id, "safeguards_version"}
           ] do
         update = raw_error("UPDATE #{table} SET #{column} = #{column} WHERE id = $1", [u(id)])
-        assert append_only_refusal?(update), "C4-01a: UPDATE on #{table}: #{inspect(update)}"
+        assert_append_only(update, table, "UPDATE")
 
         delete = raw_error("DELETE FROM #{table} WHERE id = $1", [u(id)])
-        assert append_only_refusal?(delete), "C4-01a: DELETE on #{table}: #{inspect(delete)}"
+        assert_append_only(delete, table, "DELETE")
 
-        assert truncate_trigger?(table), "C4-01a: #{table} has no TRUNCATE trigger"
+        # Executed in the disposable test database inside a savepoint that
+        # always rolls back. The table's own BEFORE TRUNCATE trigger fires
+        # first (named table, then the cascade), so its refusal is the one
+        # reported.
+        truncate = raw_error("TRUNCATE #{table} CASCADE")
+        assert_append_only(truncate, table, "TRUNCATE")
+
+        assert truncate_guard_function(table) == [["#{table}_append_only"]],
+               "C4-01a: #{table}_guard_truncate does not run #{table}_append_only()"
       end
+
+      assert count_rows(@rev) >= 1 and count_rows(@snap) >= 1
     end
   end
 
@@ -240,97 +278,146 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
 
   describe "test 5: revision constraints" do
     test "the embedded attribute must match the kind", ctx do
-      require_table!("settings_revisions")
+      require_table!(@rev)
       {_id, valid} = revision_row(ctx, :writing_guide)
-      insert!("settings_revisions", valid)
+      insert!(@rev, valid)
 
-      {_id, wrong} =
-        revision_row(ctx, :writing_guide,
-          writing_guide: nil,
-          booking_link: stored_content(:booking_link)
+      # Each case is a first root of a kind not yet saved here: its only
+      # violation is the content rule.
+      cases = [
+        {"wrong embedded attribute",
+         revision_row(ctx, :research_brief,
+           research_brief: nil,
+           booking_link: stored_content(:booking_link)
+         )},
+        {"two embedded attributes",
+         revision_row(ctx, :booking_link, writing_guide: stored_content(:writing_guide))},
+        {"no embedded attribute", revision_row(ctx, :offering_profile, offering_profile: nil)}
+      ]
+
+      for {label, {_id, row}} <- cases do
+        assert_db_refusal(
+          attempt(@rev, row),
+          :check_violation,
+          "settings_revisions_content_matches_kind",
+          label
         )
-
-      assert refused?("settings_revisions", wrong), "wrong embedded attribute for the kind"
-
-      {_id, both} =
-        revision_row(ctx, :booking_link, writing_guide: stored_content(:writing_guide))
-
-      assert refused?("settings_revisions", both), "two embedded attributes"
-
-      {_id, none} = revision_row(ctx, :research_brief, research_brief: nil)
-      assert refused?("settings_revisions", none), "no embedded attribute"
+      end
     end
 
     test "number and supersedes_id agree; one root per kind; superseded at most once", ctx do
-      require_table!("settings_revisions")
+      require_table!(@rev)
       {root, root_row} = revision_row(ctx, :writing_guide)
-      insert!("settings_revisions", root_row)
+      insert!(@rev, root_row)
 
-      {_id, orphan} = revision_row(ctx, :writing_guide, number: 2)
-      assert refused?("settings_revisions", orphan), "number 2 without supersedes_id"
+      {_id, orphan} = revision_row(ctx, :research_brief, number: 2)
+
+      assert_db_refusal(
+        attempt(@rev, orphan),
+        :check_violation,
+        "settings_revisions_root_number",
+        "number 2 without supersedes_id"
+      )
 
       {_id, rooted} = revision_row(ctx, :writing_guide, number: 1, supersedes_id: u(root))
-      assert refused?("settings_revisions", rooted), "number 1 with supersedes_id"
+
+      assert_db_refusal(
+        attempt(@rev, rooted),
+        :check_violation,
+        "settings_revisions_root_number",
+        "number 1 with supersedes_id"
+      )
 
       {_id, second_root} = revision_row(ctx, :writing_guide)
-      assert refused?("settings_revisions", second_root), "a second root of the kind"
+
+      assert_db_refusal(
+        attempt(@rev, second_root),
+        :unique_violation,
+        "settings_revisions_one_root_per_kind_index",
+        "a second root of the kind"
+      )
 
       {_id, successor} = revision_row(ctx, :writing_guide, number: 2, supersedes_id: u(root))
-      insert!("settings_revisions", successor)
+      insert!(@rev, successor)
 
-      {_id, again} = revision_row(ctx, :writing_guide, number: 2, supersedes_id: u(root))
-      assert refused?("settings_revisions", again), "a revision superseded twice"
+      # Number 3, so the (tenant, kind, number) identity does not compete.
+      {_id, again} = revision_row(ctx, :writing_guide, number: 3, supersedes_id: u(root))
+
+      assert_db_refusal(
+        attempt(@rev, again),
+        :unique_violation,
+        "settings_revisions_supersedes_once_index",
+        "a revision superseded twice"
+      )
     end
 
     test "supersedes_id may not cross kinds or tenants", ctx do
-      require_table!("settings_revisions")
+      require_table!(@rev)
       {booking, booking_row} = revision_row(ctx, :booking_link)
-      insert!("settings_revisions", booking_row)
+      insert!(@rev, booking_row)
       {guide, guide_row} = revision_row(ctx, :writing_guide)
-      insert!("settings_revisions", guide_row)
+      insert!(@rev, guide_row)
 
       {_id, cross_kind} = revision_row(ctx, :writing_guide, number: 2, supersedes_id: u(booking))
-      assert refused?("settings_revisions", cross_kind), "cross-kind supersedes_id"
 
-      foreign_tenant = Ash.UUIDv7.generate()
-      {foreign, foreign_row} = revision_row(ctx, :research_brief, tenant_id: u(foreign_tenant))
-      insert_tampered!("settings_revisions", foreign_row)
+      assert_db_refusal(
+        attempt(@rev, cross_kind),
+        :foreign_key_violation,
+        "settings_revisions_supersedes_fkey",
+        "cross-kind supersedes_id"
+      )
+
+      {foreign, foreign_row} =
+        revision_row(ctx, :research_brief, tenant_id: u(Ash.UUIDv7.generate()))
+
+      insert_tampered!(@rev, foreign_row)
 
       {_id, cross_tenant} =
         revision_row(ctx, :research_brief, number: 2, supersedes_id: u(foreign))
 
-      assert refused?("settings_revisions", cross_tenant), "cross-tenant supersedes_id"
+      assert_db_refusal(
+        attempt(@rev, cross_tenant),
+        :foreign_key_violation,
+        "settings_revisions_supersedes_fkey",
+        "cross-tenant supersedes_id"
+      )
 
       # Positive control: same tenant, same kind.
       {_id, same} = revision_row(ctx, :writing_guide, number: 2, supersedes_id: u(guide))
-      insert!("settings_revisions", same)
+      insert!(@rev, same)
     end
 
     test "test 7a: raised_fields is refused on a non-limits kind", ctx do
-      require_table!("settings_revisions")
+      require_table!(@rev)
 
       {_id, limits} =
         revision_row(ctx, :operational_limits, raised_fields: ["run_max_model_calls"])
 
-      insert!("settings_revisions", limits)
+      insert!(@rev, limits)
 
       {_id, guide} = revision_row(ctx, :writing_guide, raised_fields: ["run_max_model_calls"])
-      assert refused?("settings_revisions", guide), "raised_fields on writing_guide"
+
+      assert_db_refusal(
+        attempt(@rev, guide),
+        :check_violation,
+        "settings_revisions_raised_fields_limits_only",
+        "raised_fields on writing_guide"
+      )
     end
   end
 
   describe "test 5: snapshot constraints" do
     setup ctx do
-      require_table!("run_settings_snapshots")
+      require_table!(@snap)
       {offering, offering_row} = revision_row(ctx, :offering_profile)
-      insert!("settings_revisions", offering_row)
+      insert!(@rev, offering_row)
       {guide, guide_row} = revision_row(ctx, :writing_guide)
-      insert!("settings_revisions", guide_row)
+      insert!(@rev, guide_row)
 
       {foreign, foreign_row} =
         revision_row(ctx, :offering_profile, tenant_id: u(Ash.UUIDv7.generate()))
 
-      insert_tampered!("settings_revisions", foreign_row)
+      insert_tampered!(@rev, foreign_row)
 
       %{
         offering: {offering, Keyword.fetch!(offering_row, :content_sha256)},
@@ -347,7 +434,7 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
       {_id, valid} =
         snapshot_row(ctx.tenant.id, revision_slot(:offering_profile, offering, offering_sha))
 
-      insert!("run_settings_snapshots", valid)
+      insert!(@snap, valid)
 
       cases = [
         {"wrong kind", revision_slot(:offering_profile, guide, guide_sha)},
@@ -357,43 +444,73 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
 
       for {label, slot} <- cases do
         {_id, row} = snapshot_row(ctx.tenant.id, slot)
-        assert refused?("run_settings_snapshots", row), "C4-01a: slot with #{label} accepted"
+
+        assert_db_refusal(
+          attempt(@snap, row),
+          :foreign_key_violation,
+          "run_settings_snapshots_offering_profile_revision_fkey",
+          "slot with #{label}"
+        )
       end
     end
 
     test "slot column combinations outside the per-kind checks are refused", ctx do
       {offering, offering_sha} = ctx.offering
+      {guide, guide_sha} = ctx.guide
+      code_default = &put_all(code_default_slot(&1), &2)
 
+      # Every revision reference here is to a real row of that kind with its
+      # real hash, so no foreign key competes with the slot check.
       cases = [
-        {"revision without hash", revision_slot(:offering_profile, offering, nil)},
-        {"revision without id", revision_slot(:offering_profile, nil, offering_sha)},
-        {"revision with a version",
-         revision_slot(:offering_profile, offering, offering_sha) ++
-           [offering_profile_code_default_version: "1"]},
-        {"code_default with a revision id",
-         code_default_slot(:writing_guide) ++ [writing_guide_revision_id: u(offering)]},
-        {"code_default without version",
-         code_default_slot(:writing_guide) ++ [writing_guide_code_default_version: nil]},
-        {"code_default without hash",
-         code_default_slot(:writing_guide) ++ [writing_guide_content_sha256: nil]},
-        {"code_default for offering", code_default_slot(:offering_profile)},
-        {"code_default for booking link", code_default_slot(:booking_link)},
-        {"absent writing guide", absent_slot(:writing_guide)},
-        {"absent research brief", absent_slot(:research_brief)},
-        {"absent operational limits", absent_slot(:operational_limits)},
-        {"absent with a hash",
-         absent_slot(:booking_link) ++ [booking_link_content_sha256: rand_hex(32)]},
-        {"unknown source", [offering_profile_source: "bogus"]},
-        {"caller-written kind column", [offering_profile_kind: "writing_guide"]}
+        {:offering_profile, "revision without hash",
+         revision_slot(:offering_profile, offering, nil)},
+        {:offering_profile, "revision without id",
+         revision_slot(:offering_profile, nil, offering_sha)},
+        {:offering_profile, "revision with a version",
+         put_all(revision_slot(:offering_profile, offering, offering_sha),
+           offering_profile_code_default_version: "1"
+         )},
+        {:writing_guide, "code_default with a revision id",
+         code_default.(:writing_guide,
+           writing_guide_revision_id: u(guide),
+           writing_guide_content_sha256: guide_sha
+         )},
+        {:writing_guide, "code_default without version",
+         code_default.(:writing_guide, writing_guide_code_default_version: nil)},
+        {:writing_guide, "code_default without hash",
+         code_default.(:writing_guide, writing_guide_content_sha256: nil)},
+        {:offering_profile, "code_default for offering", code_default_slot(:offering_profile)},
+        {:booking_link, "code_default for booking link", code_default_slot(:booking_link)},
+        {:writing_guide, "absent writing guide", absent_slot(:writing_guide)},
+        {:research_brief, "absent research brief", absent_slot(:research_brief)},
+        {:operational_limits, "absent operational limits", absent_slot(:operational_limits)},
+        {:booking_link, "absent with a hash",
+         put_all(absent_slot(:booking_link), booking_link_content_sha256: rand_hex(32))},
+        {:offering_profile, "unknown source", [offering_profile_source: "bogus"]}
       ]
 
-      for {label, slot} <- cases do
+      for {kind, label, slot} <- cases do
         {_id, row} = snapshot_row(ctx.tenant.id, slot)
-        assert refused?("run_settings_snapshots", row), "C4-01a: #{label} accepted"
+
+        assert_db_refusal(
+          attempt(@snap, row),
+          :check_violation,
+          "run_settings_snapshots_#{kind}_slot",
+          label
+        )
       end
 
+      {_id, kind_written} = snapshot_row(ctx.tenant.id, offering_profile_kind: "writing_guide")
+
+      assert_db_refusal(
+        attempt(@snap, kind_written),
+        :generated_always,
+        nil,
+        "caller-written kind column"
+      )
+
       {_id, valid} = snapshot_row(ctx.tenant.id)
-      insert!("run_settings_snapshots", valid)
+      insert!(@snap, valid)
     end
 
     test "an AgentRun may not reference another tenant's snapshot", ctx do
@@ -401,14 +518,19 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
       run = reply_run!(ctx)
 
       {own, own_row} = snapshot_row(ctx.tenant.id)
-      insert!("run_settings_snapshots", own_row)
+      insert!(@snap, own_row)
       {foreign, foreign_row} = snapshot_row(Ash.UUIDv7.generate())
-      insert_tampered!("run_settings_snapshots", foreign_row)
+      insert_tampered!(@snap, foreign_row)
 
       assert match?({:error, {:unexpected_success, _}}, copy_run(run.id, own)),
              "C4-01a: positive control: a run copy with its own tenant's snapshot"
 
-      assert refused_by_db?(copy_run(run.id, foreign)), "C4-01a: cross-tenant snapshot accepted"
+      assert_db_refusal(
+        copy_run(run.id, foreign),
+        :foreign_key_violation,
+        "agent_runs_settings_snapshot_fkey",
+        "cross-tenant snapshot"
+      )
     end
   end
 
@@ -423,10 +545,11 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
       assert match?({:error, {:unexpected_success, _}}, copy_run(run.id, snapshot)),
              "positive control: a copy with a snapshot inserts"
 
-      assert refused_by_db?(copy_run(run.id, nil)), "C4-01a: a run without a snapshot inserted"
+      assert_cutover(copy_run(run.id, nil), "a run without a snapshot")
     end
 
-    test "attaching, replacing or clearing a snapshot by UPDATE is refused", ctx do
+    test "attaching, replacing or clearing a snapshot is refused; null runs still transition",
+         ctx do
       require_column!("agent_runs", "settings_snapshot_id")
       first = reply_run!(ctx)
       second = reply_run!(ctx)
@@ -441,22 +564,16 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
 
       update = "UPDATE agent_runs SET settings_snapshot_id = $2 WHERE id = $1"
 
-      assert refused_by_db?(raw_error(update, [u(historical.id), u(first_snapshot)])),
-             "C4-01a: a snapshot was attached to a historical null run"
+      assert_cutover(
+        raw_error(update, [u(historical.id), u(first_snapshot)]),
+        "attach to a historical null run"
+      )
 
-      assert refused_by_db?(raw_error(update, [u(first.id), u(second_snapshot)])),
-             "C4-01a: a run's snapshot was replaced"
+      assert_cutover(raw_error(update, [u(first.id), u(second_snapshot)]), "replace")
+      assert_cutover(raw_error(update, [u(first.id), nil]), "clear")
 
-      assert refused_by_db?(raw_error(update, [u(first.id), nil])),
-             "C4-01a: a run's snapshot was cleared"
-    end
-
-    test "historical null-snapshot runs stay readable and still transition", ctx do
-      require_column!("agent_runs", "settings_snapshot_id")
-      run = reply_run!(ctx)
-      tamper!("UPDATE agent_runs SET settings_snapshot_id = NULL WHERE id = $1", [u(run.id)])
-
-      {:ok, historical} = Agents.get_run(run.id, actor: ctx.agent)
+      # Historical null runs stay readable and keep every transition.
+      {:ok, historical} = Agents.get_run(historical.id, actor: ctx.agent)
       assert historical.settings_snapshot_id == nil
       assert {:ok, %{status: :running} = running} = Agents.start_run(historical, actor: ctx.agent)
       assert {:ok, %{status: :cancelled}} = Agents.cancel_run(running, actor: ctx.agent)
@@ -467,12 +584,10 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
 
   describe "test 17: snapshot rollback" do
     test "a failed run insert leaves no snapshot row", ctx do
-      require_table!("run_settings_snapshots")
-      before = count_rows("run_settings_snapshots")
+      require_table!(@snap)
+      before = count_rows(@snap)
       _run = reply_run!(ctx)
-
-      assert count_rows("run_settings_snapshots") == before + 1,
-             "C4-01a: :create built no snapshot"
+      assert count_rows(@snap) == before + 1, "C4-01a: :create built no snapshot"
 
       runs = count_rows("agent_runs")
       definition = AgentsFixtures.definition!(ctx.tenant)
@@ -482,9 +597,10 @@ defmodule SdrAgent.Agents.SettingsDbConstraintsTest do
         |> AgentsFixtures.run_attrs(usage_origin: :reply)
         |> Map.put(:agent_definition_id, Ash.UUIDv7.generate())
 
-      result = observe(fn -> Agents.create_run(attrs, actor: ctx.agent) end)
-      refute match?({:ok, _}, result), "the run with a dangling definition was created"
-      assert count_rows("run_settings_snapshots") == before + 1, "an orphan snapshot remained"
+      assert match?({:error, _}, Agents.create_run(attrs, actor: ctx.agent)),
+             "the run with a dangling definition was created"
+
+      assert count_rows(@snap) == before + 1, "C4-01a: an orphan snapshot remained"
       assert count_rows("agent_runs") == runs
     end
   end

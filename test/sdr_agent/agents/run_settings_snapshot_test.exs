@@ -131,9 +131,15 @@ defmodule SdrAgent.Agents.RunSettingsSnapshotTest do
                {20, 60, 100_000}
 
       assert {:ok, settings} = run_settings(run, ctx.agent)
-      assert slot_value(settings, :offering_profile, :source) == :revision
-      assert slot_value(settings, :offering_profile, :content) == offering.offering_profile
-      assert slot_value(settings, :booking_link, :content) == booking.booking_link
+
+      for revision <- [offering, booking] do
+        assert slot_value(settings, revision.kind, :source) == :revision
+        assert slot_value(settings, revision.kind, :revision_id) == revision.id
+        assert slot_value(settings, revision.kind, :content_sha256) == revision.content_sha256
+
+        assert slot_value(settings, revision.kind, :content) ==
+                 Map.fetch!(revision, revision.kind)
+      end
 
       for kind <- [:writing_guide, :research_brief, :operational_limits] do
         default = current_default(kind)
@@ -184,6 +190,33 @@ defmodule SdrAgent.Agents.RunSettingsSnapshotTest do
     end
   end
 
+  describe "absent slots (Codex f2d2253 ruling)" do
+    test "an absent slot has an explicit shape and never falls back to a later revision",
+         ctx do
+      save_offering!(ctx.admin)
+      %{run: run} = assign!(ctx, "01")
+
+      absent = %{
+        source: :absent,
+        revision_id: nil,
+        version: nil,
+        content_sha256: nil,
+        content: nil
+      }
+
+      assert {:ok, settings} = run_settings(run, ctx.agent)
+
+      assert Map.take(slot(settings, :booking_link) || %{}, Map.keys(absent)) == absent,
+             "C4-01a: absent booking slot: #{short(slot(settings, :booking_link))}"
+
+      save!(:booking_link, content(:booking_link), ctx.admin)
+      assert {:ok, after_save} = run_settings(run!(ctx, run), ctx.agent)
+
+      assert Map.take(slot(after_save, :booking_link) || %{}, Map.keys(absent)) == absent,
+             "C4-01a: the bound run fell back to the current booking revision"
+    end
+  end
+
   ## Test 13
 
   describe "test 13: retry" do
@@ -227,18 +260,33 @@ defmodule SdrAgent.Agents.RunSettingsSnapshotTest do
       before = count_rows("run_settings_snapshots")
 
       for actor <- [ctx.agent, system_actor(:kernel, ctx.tenant), ctx.admin] do
-        result =
-          observe(fn ->
-            snapshot |> Ash.Changeset.for_create(:create, %{}, actor: actor) |> Ash.create()
-          end)
+        result = snapshot |> Ash.Changeset.for_create(:create, %{}, actor: actor) |> Ash.create()
 
-        assert forbidden?(result), "C4-01a: direct snapshot create by #{short(actor)}"
+        assert ash_forbidden?(result),
+               "C4-01a: direct snapshot create by #{short(actor)}: #{short(result)}"
       end
 
-      marker =
-        call(SdrAgent.Agents.Checks.SettingsSnapshotContext, :context, [])
+      # Markers a caller could put on a changeset: the module's own accessor
+      # (called here, outside any run creation, and from another process)
+      # and forged keys. None may authorize a create.
+      context_module = require_module!(SdrAgent.Agents.Checks.SettingsSnapshotContext)
+
+      copied =
+        if function_exported?(context_module, :context, 0),
+          do: [
+            apply(context_module, :context, []),
+            Task.await(Task.async(context_module, :context, []))
+          ],
+          else: []
+
+      forged = [
+        %{sdr_agent_settings_snapshot: true},
+        %{sdr_agent_run_settings_snapshot: true},
+        %{settings_snapshot: true, run_settings_snapshot: true}
+      ]
 
       supplied = [
+        %{},
         %{id: Ash.UUIDv7.generate()},
         %{snapshot_sha256: String.duplicate("a", 64)},
         %{offering_profile_revision_id: Ash.UUIDv7.generate()},
@@ -247,16 +295,29 @@ defmodule SdrAgent.Agents.RunSettingsSnapshotTest do
         %{tenant_id: ctx.tenant.id}
       ]
 
-      for attrs <- supplied do
+      for marker <- copied ++ forged, attrs <- supplied do
         result =
-          observe(fn ->
-            snapshot
-            |> Ash.Changeset.for_create(:create, attrs, actor: ctx.agent, context: marker)
-            |> Ash.create()
-          end)
+          snapshot
+          |> Ash.Changeset.for_create(:create, attrs, actor: ctx.agent, context: marker)
+          |> Ash.create()
 
-        refute match?({:ok, _}, result), "C4-01a: snapshot created with #{short(attrs)}"
+        assert ash_forbidden?(result),
+               "C4-01a: snapshot create with marker #{short(marker)} and #{short(attrs)}: #{short(result)}"
       end
+
+      # From an arbitrary process, too.
+      result =
+        Task.async(fn ->
+          marker = if copied == [], do: hd(forged), else: hd(copied)
+
+          snapshot
+          |> Ash.Changeset.for_create(:create, %{}, actor: ctx.agent, context: marker)
+          |> Ash.create()
+        end)
+        |> Task.await()
+
+      assert ash_forbidden?(result),
+             "C4-01a: snapshot create from another process: #{short(result)}"
 
       assert count_rows("run_settings_snapshots") == before
     end
@@ -274,10 +335,10 @@ defmodule SdrAgent.Agents.RunSettingsSnapshotTest do
         |> SdrAgent.AgentsFixtures.run_attrs(usage_origin: :reply)
         |> Map.put(:settings_snapshot_id, run.settings_snapshot_id)
 
-      result = observe(fn -> Agents.create_run(attrs, actor: ctx.agent) end)
+      result = Agents.create_run(attrs, actor: ctx.agent)
 
-      refute match?({:ok, _}, result),
-             "C4-01a: a caller-supplied settings_snapshot_id was accepted"
+      assert ash_invalid?(result),
+             "C4-01a: a caller-supplied settings_snapshot_id was not refused as input: #{short(result)}"
     end
   end
 
@@ -309,8 +370,24 @@ defmodule SdrAgent.Agents.RunSettingsSnapshotTest do
     end
 
     test "each built-in default passes the same validation as an admin save", ctx do
+      broken = %{
+        writing_guide: &Map.put(&1, :text, Map.fetch!(&1, :text) <> "\a"),
+        research_brief: &Map.put(&1, :depth, :deep),
+        operational_limits: &Map.put(&1, :run_max_model_calls, 0)
+      }
+
       for kind <- [:writing_guide, :research_brief, :operational_limits] do
         default = current_default(kind)
+
+        # The same validation: a default broken in one field is refused.
+        attrs =
+          revision_attrs(kind, broken[kind].(default.content), ctx.admin, expected_number: 0)
+
+        result = observe(fn -> create_revision(attrs, ctx.admin) end)
+
+        assert invalid_errors(result),
+               "C4-01a: a broken built-in #{kind} was saved: #{short(result)}"
+
         revision = save!(kind, default.content, ctx.admin, expected_number: 0)
         assert revision.content_sha256 == default.content_sha256
         assert revision.raised_fields == []
@@ -322,6 +399,8 @@ defmodule SdrAgent.Agents.RunSettingsSnapshotTest do
       %{run: removed} = assign!(ctx, "01")
       %{run: changed} = assign!(ctx, "02")
       require_column!("run_settings_snapshots", "writing_guide_code_default_version")
+      _ = snapshot_of!(removed, ctx.agent)
+      _ = snapshot_of!(changed, ctx.agent)
 
       tamper!(
         "UPDATE run_settings_snapshots SET writing_guide_code_default_version = '999999' " <>
@@ -377,12 +456,17 @@ defmodule SdrAgent.Agents.RunSettingsSnapshotTest do
     end
   end
 
-  # Allowed readers: the Agents domain itself and the settings page (C4-01b).
+  # Allowed readers: the Agents domain itself (with the protocol
+  # implementations generated for its resources), the settings page
+  # (C4-01b), and test-support modules (never part of a release).
   defp settings_reader?(module) do
     name = Atom.to_string(module)
+    source = module.module_info(:compile)[:source] |> to_string()
 
     module == Agents or String.starts_with?(name, "Elixir.SdrAgent.Agents.") or
-      String.starts_with?(name, "Elixir.SdrAgentWeb.SettingsLive")
+      String.starts_with?(name, "Elixir.Inspect.SdrAgent.Agents.") or
+      String.starts_with?(name, "Elixir.SdrAgentWeb.SettingsLive") or
+      String.contains?(source, "/test/support/")
   end
 
   defp reads_current?(module, revision) do

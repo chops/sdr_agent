@@ -122,6 +122,31 @@ defmodule SdrAgent.Agents.RunSettingsReplyTest do
       end
     end
 
+    test "with the offering withheld after delivery, an unsubscribe reply is still suppressed",
+         ctx do
+      # Synthetic delivery history needs an offering (assignment); it is then
+      # withheld only by the explicit raw test fixture, never an app path.
+      save_offering!(ctx.admin)
+      %{delivery: delivery, lead: lead} = approved!(ctx)
+      assert %{success: 1} = deliver!()
+      delivery = outreach!(ctx, delivery)
+      withhold_offering!(ctx.tenant.id)
+
+      body = reply_body(delivery, "Please remove me from your list.\n\nUnsubscribe.")
+      assert {:ok, %{status: :accepted}} = ingest!("reply", body)
+      assert %{success: 1} = process!()
+
+      assert [reply] = replies!(ctx)
+      assert [rule] = decisions_about!(ctx, reply.id, :unsubscribe_rule)
+      assert {rule.mode, rule.outcome} == {:deterministic, "unsubscribe"}
+      assert [_] = Enum.filter(suppressions!(ctx), &(&1.reason == :unsubscribe_reply))
+      assert reload!(ctx, lead).status == :stopped
+
+      {:ok, runs} = Agents.list_runs(actor: ctx.admin)
+      assert [reply_run] = Enum.filter(runs, &(&1.trigger_signal_type == "sdr.reply.received"))
+      assert snapshot_of!(reply_run, ctx.agent).offering_profile_source == :absent
+    end
+
     test "a reply run is refused at its model-call budget", ctx do
       run = reply_run!(ctx)
       _snapshot = snapshot_of!(run, ctx.agent)
@@ -139,7 +164,7 @@ defmodule SdrAgent.Agents.RunSettingsReplyTest do
       SdrAgent.AdmissionFixtures.admit_tuples!()
 
       AgentsFixtures.grant!(ctx.tenant, %{
-        total_attempts: 1,
+        total_attempts: 10,
         allocations: [%{key: :b5, applies_to: [:b5], attempts: 1}]
       })
 
@@ -190,17 +215,29 @@ defmodule SdrAgent.Agents.RunSettingsReplyTest do
       for origin <- @exempt, do: assert(Map.fetch!(table, origin) == [])
     end
 
-    test "business origins need an offering; reply and proof bind a snapshot", ctx do
+    test "business origins need an offering, unknown or missing origins are refused; reply and proof bind a snapshot",
+         ctx do
       definition = AgentsFixtures.definition!(ctx.tenant)
       require_table!("run_settings_snapshots")
       before = {count_rows("agent_runs"), count_rows("run_settings_snapshots")}
 
       for origin <- @business do
         attrs = AgentsFixtures.run_attrs(definition, usage_origin: origin)
-        result = observe(fn -> Agents.create_run(attrs, actor: ctx.agent) end)
+        result = Agents.create_run(attrs, actor: ctx.agent)
 
         assert settings_incomplete?(result, [:offering_profile]),
                "C4-01a: #{origin} without an offering: #{short(result)}"
+      end
+
+      assert {count_rows("agent_runs"), count_rows("run_settings_snapshots")} == before
+
+      # An unknown or missing origin is refused as today (input error).
+      for origin <- [:unknown_origin, nil] do
+        attrs = AgentsFixtures.run_attrs(definition, usage_origin: origin)
+        result = Agents.create_run(attrs, actor: ctx.agent)
+
+        assert ash_invalid?(result),
+               "origin #{inspect(origin)} was not refused as input: #{short(result)}"
       end
 
       assert {count_rows("agent_runs"), count_rows("run_settings_snapshots")} == before
@@ -218,20 +255,6 @@ defmodule SdrAgent.Agents.RunSettingsReplyTest do
         assert {:ok, run} = Agents.create_run(attrs, actor: ctx.agent)
         assert snapshot_of!(run, ctx.agent).offering_profile_source == :revision
       end
-    end
-
-    test "an unknown or missing origin is refused", ctx do
-      _table = call(run_settings_module(), :completeness, [])
-      definition = AgentsFixtures.definition!(ctx.tenant)
-      before = count_rows("agent_runs")
-
-      for origin <- [:unknown_origin, nil] do
-        attrs = AgentsFixtures.run_attrs(definition, usage_origin: origin)
-        result = observe(fn -> Agents.create_run(attrs, actor: ctx.agent) end)
-        refute match?({:ok, _}, result), "origin #{inspect(origin)} accepted"
-      end
-
-      assert count_rows("agent_runs") == before
     end
   end
 end
