@@ -646,6 +646,108 @@ The contracts and their reviews are in
     way and never batches);
   - OQ-E3 (automated process-group proof of quiescence).
 
+
+#### R0-05 amendment (2026-10-16, proposed): crash reports from processes that hold operator input
+
+**Status: proposed.** It needs Codex review, then the owner's acceptance,
+before R0-05's MF3 implementation. It builds on the accepted C4
+amendment, "metadata-only database logging and spans" (D-117), and its
+primary filter `SdrAgent.Logger.ExceptionFilter`. That amendment is on
+the C4-01a branch (#165), so this one lands after #165.
+
+**Context.** R0-05's resolver collects a typed confirmation. The page
+accepts any binary before the domain validates it, so the text can be
+anything, not only the valid `STOPPED <switch id>`.
+`config :phoenix, :filter_parameters` covers only Phoenix's parameter
+logger. A crash can still copy the input into a log in three ways
+(reproduced by Codex, `codex-r005-8de4fca-green-review.md` and
+`codex-r005-379e701-rulings.md`):
+- **the socket state:** the LiveView channel's `format_status` state,
+  printed at `:debug`. The opaque `Confirmation` wrapper already redacts
+  this;
+- **the last message:** a GenServer crash report always prints it, at
+  every level. That is the raw `change_resolution` or `confirm_resolution`
+  event payload, with the form-encoded text;
+- **the domain call's frames:** a raise inside the resolution task, after
+  the text is unwrapped for the domain call, can print the attestation in
+  its exception or arguments.
+
+The C4 filter recognizes only database error structs, so none of these
+are caught.
+
+**Decision.**
+1. **Tag the processes that hold operator input.** A process that holds
+   sensitive operator input for its lifetime sets the logger metadata
+   `sdr_sensitive_input: true`. Today those are the `AdminLive` channel
+   process and the resolution and facts tasks it starts. They set the
+   flag in `mount/3` and at the start of each task function, before any
+   input arrives. Process metadata is attached to every event the process
+   logs, including its own crash, `proc_lib` and GenServer termination
+   reports.
+2. **Replace their crash reports with a fixed diagnostic.** The primary
+   filter gains a second, fixed classification. Any event from a tagged
+   process is replaced by a content-free diagnostic when it is any of:
+   - a crash, `proc_lib` or termination report (OTP report
+     `domain: [:otp, ...]`, an Elixir translator report, or a `crash_reason`
+     present in metadata);
+   - any event at `:error` or above.
+
+   The diagnostic is the message `"crash in a process holding operator
+   input"`, with its level kept and only the validated standard metadata
+   kept (the same shapes as the C4 `scan_limit` path: `pid`, `gl`, `time`,
+   `line`, `mfa`, `file`, `domain`), plus `sdr_sensitive_input: true`.
+   Nothing from the message, report, format arguments or other metadata
+   is kept. Rewriting arbitrary rendered strings case by case is rejected.
+3. **What stays as it was:**
+   - a tagged process's ordinary events below `:error`, which hold no
+     input, since the page logs none;
+   - every untagged event, so the C4 database-error guarantees are
+     unchanged.
+
+   The tag check is one bounded metadata lookup, made before the C4 scan.
+4. **Never raise, never fail open.** The C4 rescue path still applies.
+   The filter never decodes, formats or inspects the sensitive term. A
+   failed classification counts as tagged and is replaced.
+5. **Unchanged:**
+   - the error level and the fact that a crash happened;
+   - the logger configuration and its minimum level;
+   - Phoenix's parameter filtering;
+   - the documented exclusion for raw in-process telemetry, which this
+     doesn't sanitize (R0-05, test 15).
+
+**Consequences.**
+- **Positive:** a crash in the resolver can't copy operator input into a
+  log at any level, by any of the three paths.
+- **Negative:** that process's crash diagnostics lose their detail: the
+  reason, the stack and the last message. Debugging a resolver crash then
+  needs a reproduction, not the log.
+- **Neutral:** no new dependency, process or table.
+
+**Tests (RED first, synthetic canaries only):**
+- **Crash paths, with a valid and an invalid canary:**
+  - a LiveView crash while handling `change_resolution`, and while handling
+    `confirm_resolution`, with the real form-encoded payload;
+  - a crash while frozen in `:submitting`, and while `:uncertain`;
+  - a resolution task that raises inside the domain call after the unwrap.
+- **Where the canary must be absent:** in each case, at `:debug` and at
+  `:warning` minimum, from captured logs, the message and report, the
+  format arguments, and metadata keys and values. The diagnostic itself
+  must be present at its level.
+- **Controls:**
+  - an untagged crash keeps its normal report (it is not replaced);
+  - the C4 database-error path is unchanged;
+  - a tagged process's ordinary `:info` event is unchanged;
+  - a classification failure is replaced (fail closed);
+  - the filter is still attached after every test.
+
+**Open question for the owner (OQ-R5-1):**
+- **The question:** C4-01b's settings page holds settings content in the
+  same way: LiveView state, and the `settings_content` event payload in
+  the "last message". Should SettingsLive be tagged under this amendment
+  too?
+- **Claude's recommendation: yes.** It is one `Logger.metadata/1` call in
+  `mount/3` and its tasks, plus tests, as a small follow-up to #166.
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),
