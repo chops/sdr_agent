@@ -7,12 +7,26 @@ defmodule SdrAgentWeb.AdminLiveSwitchProbeTest do
   async completion re-validates a demoted admin before any read), MF3 (a
   LiveView crash report never carries the frozen confirmation) and MF2
   (the terminal re-read shows the reviewed switch, never a newer one).
+
+  **Amendment (probe 1 only; Codex ruling 1 in
+  `codex-r005-379e701-rulings.md`, PASS):** MF1's fix clears the review and
+  ends the restricted view with the existing redirect, so the original wait
+  for `#resolution-result` (and the render after it) is replaced by
+  `assert_redirect(view, "/", ...)`. The no-fresh-email intent is kept by:
+  the new user is still created after the demotion; the last page rendered
+  before the completion doesn't show its email; the page's own (view and
+  task) `Accounts.list_users/1` and `Agents.list_profile_switches/1` calls
+  are counted before the held coordinator is released, and none follows
+  the completion (trace delivered and acknowledged by the collector). A
+  stopped proxy is never rendered. The redirect is no proof of what the
+  dispatched attempt did.
   """
   use SdrAgentWeb.OperatorCase, async: false
 
   import SdrAgent.Test.AdminSwitchHarness
 
   alias SdrAgent.Accounts
+  alias SdrAgent.Agents
   alias SdrAgent.AuditCase
   alias SdrAgent.Test.ResolveHarness, as: RH
   alias SdrAgent.Test.StatusHarness, as: SH
@@ -30,6 +44,8 @@ defmodule SdrAgentWeb.AdminLiveSwitchProbeTest do
   test "async completion must revalidate a demoted admin before loading new admin data", ctx do
     blocked = RH.none!(ctx)
     other = AuditCase.new_human(:admin, ctx.tenant)
+    # Amendment: the page's own data reads (the test process's are excluded).
+    tracer = trace_calls!([{Accounts, :list_users, 1}, {Agents, :list_profile_switches, 1}])
     {:ok, view, _} = ctx.conn |> sign_in(:admin) |> live("/admin")
     click!(view, "#resolve-blocked", "review probe")
     blocker = RH.block_coordinator!()
@@ -39,12 +55,30 @@ defmodule SdrAgentWeb.AdminLiveSwitchProbeTest do
 
     {:ok, _} = Accounts.change_role(ctx.admin, :reviewer, actor: other)
     fresh = AuditCase.new_human(:reviewer, ctx.tenant)
-    RH.release_coordinator!(blocker)
-    await_element!(view, "#resolution-result", nil, 10_000, "async finished")
+    # Amendment: the last page rendered before the completion, and the
+    # page's read count, both taken before the coordinator is released.
     html = render(view)
+    reads = page_reads(tracer)
 
     refute html =~ to_string(fresh.email),
            "async completion loaded and disclosed a newly created user's email after demotion"
+
+    RH.release_coordinator!(blocker)
+    # Amendment: the redirect replaces the wait for #resolution-result.
+    assert_redirect(view, "/", 10_000)
+
+    assert page_reads(tracer) == reads,
+           "async completion read admin data for a demoted operator: " <>
+             inspect(Enum.map(page_reads(tracer) -- reads, & &1.mfa))
+  end
+
+  # The page's own reads; `calls/1` delivers every trace message
+  # (`:erlang.trace_delivered/1`) and waits for the collector's answer.
+  defp page_reads(tracer) do
+    tracer
+    |> calls()
+    |> Enum.filter(&(&1.pid != self()))
+    |> Enum.map(&Map.take(&1, [:pid, :mfa, :args]))
   end
 
   test "crash diagnostics must not include a frozen confirmation", ctx do
