@@ -144,6 +144,20 @@ defmodule SdrAgentWeb.AdminBudgetsLiveTest do
       assert grants!(ctx) == []
     end
 
+    test "a budget with no profile ticked is flagged on review, before the domain",
+         %{conn: conn} = ctx do
+      view =
+        conn
+        |> admin_view()
+        |> open_create()
+        |> review(Map.delete(g_r0_params(), "profile_ids"))
+
+      refute has_element?(view, "#grant-review")
+      assert has_element?(view, "#grant-form", "choose at least one profile")
+      refute has_element?(view, "#grant-form", "must have 1 or more items")
+      assert grants!(ctx) == []
+    end
+
     test "domain refusals are shown inline, the input is kept and nothing is written",
          %{conn: conn} = ctx do
       over = %{"0" => %{@opus | "attempts" => "3"}, "1" => @sonnet}

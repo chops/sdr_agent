@@ -19,9 +19,10 @@ defmodule SdrAgentWeb.GrantForm do
       refused by the domain instead of overwriting it.
 
   Only the shape of the input is checked here (required fields, numbers,
-  times, known values, repeated key/profile pairs). The domain validates the
-  terms themselves (window order, positive limits, the allocation sum,
-  profile membership) and `SdrAgentWeb.AdminLive` shows its errors inline.
+  times, known values, at least one profile, repeated key/profile pairs).
+  The domain validates the terms themselves (window order, positive limits,
+  the allocation sum, profile membership) and `SdrAgentWeb.AdminLive` shows
+  its errors inline.
   """
 
   alias SdrAgent.Agents.ModelCallAllocation
@@ -249,7 +250,11 @@ defmodule SdrAgentWeb.GrantForm do
     [
       name: required(text(params["name"])),
       purpose: required(text(params["purpose"])),
-      profile_ids: choices(params["profile_ids"], profiles(), "includes an unknown profile"),
+      profile_ids:
+        nonempty(
+          choices(params["profile_ids"], profiles(), "includes an unknown profile"),
+          "choose at least one profile"
+        ),
       total_attempts: required(integer(params["total_attempts"])),
       per_utc_day_attempts: integer(params["per_utc_day_attempts"]),
       starts_at:
@@ -339,6 +344,11 @@ defmodule SdrAgentWeb.GrantForm do
 
   defp required({:ok, nil}), do: {:error, "is required"}
   defp required(result), do: result
+
+  # A grant names at least one profile (the domain refuses an empty list
+  # too); the review step says so before anything is sent.
+  defp nonempty({:ok, []}, message), do: {:error, message}
+  defp nonempty(result, _message), do: result
 
   defp text(value) when is_binary(value) do
     case String.trim(value) do

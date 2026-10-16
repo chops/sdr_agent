@@ -18,6 +18,12 @@ amendment (runtime provider selection) is pending Codex review on its PR.
 The R0 amendment (2026-10-12, at the end of the Decision section) is
 **accepted**: owner acceptance in the private Claude session chat on
 2026-10-12 ("accept PR #39"), after Codex's independent approval of 6f2fab2.
+The C2-02b2 amendment (2026-10-15, at the end of the Decision section) is
+**accepted**: owner acceptance in the private Claude session chat on
+2026-10-15 at about 10:06 MDT ("i accept the ADR-0004 C2-02b2 amendment at
+80771e5"), after Codex's independent approval of 65d7308 (16c1a6fe) and of
+the exact text at 80771e5 (61492fe0). Acceptance is not merge, activation
+or spend approval.
 
 ### Current policy (summary, 2026-10-12)
 
@@ -492,6 +498,88 @@ D-087, D-088, D-096, D-098, D-099):
   proof. Each CLI bump costs a pin review and a witness disposition.
 - The Nix store path ties the real-model path to this machine's Nix setup,
   which is acceptable for personal, local use.
+
+### C2-02b2 amendment (2026-10-15, accepted): a coordinator-owned server lifecycle with allocated generations
+
+**Context.**
+- The R0 amendment accepted an audited in-app switch without a restart
+  (C2-02, #52).
+- Slices a and b1 built the switch records, the admission fence and the
+  drain.
+- The remaining step stops one supervised ClaudeCLI server and starts
+  another at a different profile. It must prove which server and which
+  owner a finalization belongs to. It must never open launches over
+  unconfirmed CLI work, or over an outcome it can't read.
+- Today a bare supervisor child restarts the server on its own, and the
+  server's generation can't be told apart across restarts.
+- The contract is `docs/product/r0/c2-02b2-interface.md` (interface and
+  entity PASS at `c00ed69`, Codex).
+
+**Decision.**
+
+1. **A coordinator owns the server lifecycle.** `Runtime.children/0`'s
+   bare ClaudeCLI child becomes a `ProfileSupervisor` (`:rest_for_one`):
+   - a `ServerSupervisor` whose server child is `:temporary` (never
+     restarted by a supervisor);
+   - a `Coordinator`, the only process that starts, stops or replaces a
+     server;
+   - an `OperationSupervisor` for at most one switch worker, which dies
+     with its coordinator.
+
+   Concurrency stays one call at a time (ADR-0005, C8).
+2. **Generations are allocated, never derived.**
+   - Every server start (boot, replacement, activation, rollback,
+     adoption) is first an audited `ModelServerStart` row.
+   - Its generation is allocated under a per-tenant counter row, in one
+     global lock order.
+   - A row's identity is immutable, and its status is forward-only:
+     `allocated → started → ready`, or `allocated | started → failed`.
+   - Readiness evidence is truthful: `:spawn_preflight` or `:adopted`.
+3. **Only the coordinator writes the lifecycle ledger.**
+   - These writes run in the registered coordinator's own process, are
+     bounded end to end like the b1 drain, and are fenced in the
+     transaction by the stored latest start's boot: allocation, start
+     transitions and the switch's `complete`, `fail` and `block`.
+   - A new coordinator boot's first allocation fences every older boot.
+   - Runtime code never initializes the admin-owned setting.
+4. **A server-side launch hold.**
+   - Every server the coordinator starts, or adopts after a restart,
+     refuses newly dequeued calls before launch admission
+     (`:provider_held`).
+   - Only a fresh reconciled read by the current owner releases it.
+   - An unknown outcome stays held.
+   - The hold is separate from the Reaper's cleanup admission, which
+     remains an independent veto.
+5. **Cleanup proof is an acknowledged, correlated Reaper receipt.**
+   - Before a stop, the coordinator registers a private single-use ref
+     with the server's own reaper.
+   - Only that ref's receipt, sent after confirmed cleanup and the
+     reaper's own lease release, counts.
+   - Anything else blocks the switch (a missing lease, a `DOWN` without
+     the receipt, a dead holder, a timeout).
+   - `Reaper.release/1` is never called by this code.
+6. **Unchanged:**
+   - the Fake default and the test/CI hermeticity;
+   - the pinned CLI;
+   - the per-call init attestation (never reset by a start or an
+     adoption);
+   - the call grants;
+   - the no-call preflight;
+   - a blocked switch has no exit until slice b2β's attended resolver.
+
+**Consequences.**
+- **Positive:** a switch or a coordinator crash can't reuse a generation,
+  can't let a stale owner finalize, and can't reopen calls over
+  unconfirmed work or an unknown commit.
+- **Negative:**
+  - four new named runtime processes (`ProfileSupervisor`,
+    `ServerSupervisor`, `Coordinator`, `OperationSupervisor`) and two new
+    tables;
+  - a coordinator ledger call can delay its other messages for up to its
+    bound (its status is read from ETS, so status never waits);
+  - a crash during a switch leaves it blocked until b2β.
+- **Neutral:** no new dependency. Domain writes stay Ash actions with
+  audit (ADR-0009).
 
 ## Justification
 

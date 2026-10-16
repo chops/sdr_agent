@@ -24,6 +24,18 @@ defmodule Mix.Tasks.Sdr.Demo.Serve do
   use Mix.Task
 
   @doc false
+  # The demo listener on loopback `port`. ADR-0008 amendment
+  # (EEF-CVE-2026-105659): the rebuilt scheme list keeps HTTP/2 off.
+  def endpoint(endpoint, port) do
+    Keyword.merge(endpoint,
+      server: true,
+      http: [ip: {127, 0, 0, 1}, port: port, http_2_options: [enabled: false]],
+      url: [host: "127.0.0.1", port: port],
+      check_origin: ["//127.0.0.1:#{port}", "//localhost:#{port}"]
+    )
+  end
+
+  @doc false
   @impl Mix.Task
   def run(_args) do
     Mix.env() == :test || Mix.raise("mix sdr.demo.serve runs only with MIX_ENV=test")
@@ -37,17 +49,7 @@ defmodule Mix.Tasks.Sdr.Demo.Serve do
     port = String.to_integer(System.get_env("PORT", "4122"))
     port != 4120 || Mix.raise("mix sdr.demo.serve refuses the dev port 4120")
     endpoint = Application.get_env(:sdr_agent, SdrAgentWeb.Endpoint, [])
-
-    Application.put_env(
-      :sdr_agent,
-      SdrAgentWeb.Endpoint,
-      Keyword.merge(endpoint,
-        server: true,
-        http: [ip: {127, 0, 0, 1}, port: port],
-        url: [host: "127.0.0.1", port: port],
-        check_origin: ["//127.0.0.1:#{port}", "//localhost:#{port}"]
-      )
-    )
+    Application.put_env(:sdr_agent, SdrAgentWeb.Endpoint, endpoint(endpoint, port))
 
     # A long-running server, not a test: an ordinary small connection pool
     # instead of the SQL sandbox (whose ownership times out after 120 s).

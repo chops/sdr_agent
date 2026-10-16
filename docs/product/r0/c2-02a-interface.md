@@ -1,0 +1,354 @@
+# C2-02a (#52, slice a) the switch records: interface check (draft)
+
+**Status:** draft 4, 2026-10-15, for Codex's interface check before RED.
+Draft 3 (`dc28ee9`): NEEDS-REVIEW on one read/lock phase gap (Codex
+453d32f6). It is fixed in the phase table below.
+
+**Entity Model trigger: yes.** The internal setting actions, the
+phase-bound `ProfileSwitchContext` policy, the `setting_initialized`
+event and the read policy change backend action, policy and event
+contracts. These are covered by the narrow delta below; the unchanged
+`dc01a65` rows carry their PASS.
+
+Previously:
+No code. Draft 2 (`2bb2679`): NEEDS-REVIEW (Codex 6778082f). Its items
+are fixed below: block replay, the context phases, and the narrow
+entity delta. The probe result is in the section "Probe evidence".
+- **Draft 1** (`037a1fe`) was NEEDS-REVIEW (Codex, 17604421).
+- **What it asked for:** an executable first-row protocol; resolution
+  evidence, or deferring resolution fail-closed; plus notes on internal
+  writes, generations, reads and idempotency.
+- **This draft:**
+  - defines the first-row protocol (section "The first setting row");
+  - **defers `resolve_blocked` to slice b2,** since no verified "no CLI
+    left" proof exists today;
+  - adds the internal write path.
+
+**Scope:** exactly the accepted rows in R0 readiness section 2:
+ModelProfileSetting, ModelProfileSwitch and Actor `:model_runtime`. These
+are covered by the `dc01a65` entity PASS. Plan PASS: c8f77ac9.
+
+**Safe exit:** records and actions only. There is no orchestrator, no UI,
+and nothing in `lib/` calls `request`. `Runtime.desired_profile/0` is
+unchanged; it switches to the setting in slice c.
+
+## Placement
+
+- **Domain:** `SdrAgent.Agents`, next to the grant resources, which share
+  the admin-authority pattern (`Checks.CurrentAdmin`) and the audit chain.
+- **New:**
+  - `lib/sdr_agent/agents/model_profile_setting.ex`;
+  - `lib/sdr_agent/agents/model_profile_switch.ex`;
+  - `lib/sdr_agent/agents/checks/model_runtime.ex`, if the existing
+    `Checks.ActorType` is not enough;
+  - one migration.
+- **Changed:**
+  - `lib/sdr_agent/actor.ex`: add `:model_runtime` to the system types;
+  - `lib/sdr_agent/agents.ex`: add the resources and the functions below.
+
+## Domain functions (proposed names)
+
+All reads and writes are scoped to the actor's tenant. A missing actor,
+or an actor of another tenant, is refused. Every write re-reads the
+stored, current actor and checks the locked rows.
+
+| Function | Actor | Effect |
+|---|---|---|
+| `get_profile_setting(opts)` | **reads:** admin; auditor (an audited read, as for grants); `agent_runtime` | Read-only. Gives the tenant's setting, or `{:ok, nil}` before the first one exists; nil means "the default: `:claude_cli_opus`, revision 1". **Denied:** a reviewer, `model_runtime` and other system actors |
+| `list_profile_switches(opts)` | **reads:** admin; auditor (audited); `agent_runtime` | History, newest first. Never relabelled |
+| `request_profile_switch(%{to_profile_id, expected_revision, server_generation}, opts)` | an active human admin, with the role re-read | See "The first setting row" and "Request" below. `server_generation` is a positive integer. In this slice the caller supplies it, as a records-test input only, not proof of live coordinator ownership; b2's coordinator supplies it |
+| `complete_profile_switch(switch, %{server_generation}, opts)` | `model_runtime` only | pending → completed. The setting is updated through its internal action (below), in the same transaction |
+| `fail_profile_switch(switch, %{server_generation, failure_reason}, opts)` | `model_runtime` only | pending → failed. The setting is unchanged |
+| `block_profile_switch(switch, %{server_generation, failure_reason}, opts)` | `model_runtime` only | pending → blocked. The setting is unchanged |
+
+**`resolve_blocked` is deferred to slice b2, fail-closed.**
+- **Why:** `ClaudeCLI.Reaper.release/1` takes only a name and returns `:ok`
+  or `{:error, :reaper_running}`. It issues no typed receipt and doesn't
+  verify that no CLI process is left, so there is no existing proof to
+  accept.
+- **Until b2:** slice a defines no resolve action. A blocked switch has
+  no exit, and nothing in production creates one before b2.
+- **In b2:**
+  - a typed proof bound to the tenant, the switch, the current
+    generation and the runtime target;
+  - the completion invariant for `:completed`, so cleanup evidence alone
+    isn't treated as a passed preflight;
+  - no reopening of admission over unconfirmed work for `:failed`;
+  - no `Reaper.release` side effect inside a transaction that might roll
+    back.
+
+  b2 brings these as a narrow delta for review.
+
+### The first setting row
+
+The first row is created lazily, inside the request transaction, after
+the admin check. The mechanism was changed after the probe below showed
+that the savepoint plan does not work.
+
+1. **Read** the tenant's setting `FOR UPDATE`. If it exists, carry on
+   with step 3. There is no write.
+2. **If it is absent,** call the internal `:initialize` action under
+   `ProfileSwitchContext` phase `:initialize`. It is an Ash **upsert** on
+   the unique `tenant_id` identity:
+   - `upsert_fields: [:tenant_id]` makes it a no-op on conflict. It
+     never overwrites the desired profile or the revision;
+   - it uses an id generated by the caller, `desired_profile_id:
+     :claude_cli_opus` and `revision: 1`.
+
+   **Whether this transaction inserted the row:** the returned row's id
+   equals the generated id.
+   - **A concurrent first request** waits on the unique index
+     (`transactionid`) until the winner commits or rolls back.
+   - **If the winner committed,** the loser gets the winner's row back,
+     unchanged, with its row locked by the upsert. Its transaction stays
+     usable. It then sees the winner's pending switch and is refused.
+   - **If the winner rolled back,** the loser inserts its own row.
+3. **Then:** the switch rows, then the chain head.
+4. **Events:** `:initialize` appends no event of its own. The request
+   appends `model.profile.setting_initialized` after taking the head,
+   only if this transaction inserted the row, then
+   `model.profile.switch_requested`.
+5. **A rejected request leaves nothing:** a refusal rolls back the whole
+   transaction, the initialized row included.
+6. **For an uninitialized tenant,** `expected_revision` must be 1.
+
+### Request
+
+These checks run under the setting lock, after initialization. A
+refusal writes nothing.
+- `to` must be a reviewed real profile; `:fake` and unknown ids are
+  refused.
+- `to` must differ from the current desired profile.
+- The revision must not be stale.
+- No pending or blocked switch may exist (checked, and backed by the
+  partial unique index).
+
+The new switch is `pending`, with `from`, `requested_by_id`,
+`requested_at` and `server_generation`.
+
+### The internal setting write path: `ProfileSwitchContext` phases
+
+The setting has two internal actions:
+- **`:initialize`** (create);
+- **`:apply_switch`** (update: `desired_profile_id := to`, `revision + 1`).
+
+Internal reads and locks are allowed too. All of these are authorized
+only by `ProfileSwitchContext`, in **three phases**. A phase is set only
+by the action's own change, never by caller-supplied context. The
+resource write guards check the exact stored target and value, not just
+the marker.
+
+| Phase | Set by | When | Authorizes | Bound to |
+|---|---|---|---|---|
+| `:initialize` | `request`'s change, after the current-admin check | before the absent-row upsert | the `:initialize` upsert only. The id is generated fresh **inside** the request orchestration; it is not a caller argument, and the public signature has no id | the actor's tenant (the insert's `tenant_id` must equal it); a current human admin |
+| `:transition` | the change of `complete`, `fail` or `block` | before the first lock | **reads and locks only:** the tenant's setting `FOR UPDATE`, then that switch `FOR UPDATE`, whatever its status. A terminal or blocked status is read so the replay and conflict rules can run | the action name, the actor's tenant and the switch id; actor `model_runtime`. **No write** |
+| `:apply` | `complete`'s change only, **after** both rows are locked under `:transition`, the generation matches and the switch is `pending` | just before the write | `:apply_switch` only | that tenant's locked setting row and that pending switch. The write guard re-checks on the stored rows that the new `desired_profile_id` equals the switch's `to_profile_id` and the revision is the locked revision + 1; actor `model_runtime` |
+
+- **Fail and block** get `:transition` (reads and locks) only, never
+  `:apply` or any setting write.
+- **The pending check is on the write, not the read.** It belongs to
+  `:apply`'s guard. `:transition`'s reads don't require `pending`, so a
+  same-generation replay on a completed, failed or blocked switch reaches
+  its no-op or conflict decision.
+- **Lock order:** for all three runtime actions, setting → switch →
+  chain head, with no switch lock before the setting.
+- **What `model_runtime` gets:** no general setting or switch read. Its
+  reads exist only inside `:transition`, for one switch.
+
+- **Direct and forged calls fail.** A direct call to `:initialize` or
+  `:apply_switch`, or to the internal read, without the matching phase is
+  refused before any lock. A context marker forged by a direct caller
+  still fails unless the phase's actor and exact target binding hold
+  too:
+  - the wrong phase;
+  - another tenant;
+  - another switch;
+  - a `to` that differs from the switch's.
+- **What the admin gets:** no direct setting write; `:initialize` (the
+  first-row upsert) only inside `request`. On conflict it changes no
+  value.
+- **No shortcuts:** there is no raw Repo mutation and no
+  `authorize?: false`.
+- **System actors** aren't persisted users. The current-actor re-read
+  applies to the human admin. `model_runtime` calls keep the typed actor
+  and tenant checks and the guards on stored rows.
+
+**Lock waits:** waiting on the setting row or on the unique index during
+an initializing insert is expected. "No waiting under locks" refers to
+external work (drain, server stop and start, preflight), not to
+database row and unique-index locks.
+
+### Idempotency and conflicts
+
+- **A stale generation** (not the switch's `server_generation`) is refused
+  first, before any replay check.
+- **A replay with the same generation is a no-op success** when the
+  switch is already in that action's result status. That means complete
+  on a completed switch, fail on a failed one and block on a blocked one.
+  No event is appended, and the revision, times and reason are not
+  rewritten.
+- **Refused:**
+  - **complete or fail on a blocked switch** gives `{:error,
+    :switch_blocked}`. Only b2's resolver will leave blocked;
+  - **a conflicting terminal action** (fail after complete, complete
+    after fail, block after either) gives `{:error,
+    :switch_already_finished}`.
+
+## Narrow entity and action delta
+
+This covers only what changes against the `dc01a65` rows. The accepted
+rows stay as they are for everything not listed.
+
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy / Actor | Open Questions |
+|---|---|---|---|---|---|---|---|
+| ModelProfileSetting | Existing accepted row (action and policy delta) | Desired real profile | unchanged | unchanged | **Lazy creation:** `:initialize`, an upsert on the unique tenant identity, no-op on conflict, with a request-orchestration-generated id to detect the insert. Inside `request`'s transaction only. It gives revision 1 and `:claude_cli_opus`, and appends no event of its own. **`:apply_switch`:** inside `complete`'s transaction only, with `revision + 1`. A rejected request rolls everything back. One row per tenant | **Read:** admin; auditor (audited); `agent_runtime`; `model_runtime` only in the `:transition` phase for one switch's tenant (read and lock). **Write:** only `:initialize` (phase `:initialize`) and `:apply_switch` (phase `:apply`, `complete` only). No direct write action | none |
+| ModelProfileSwitch | Existing accepted row (action delta) | One requested change | unchanged | unchanged | **`resolve_blocked` is deferred to b2;** in slice a, blocked has no exit. Idempotency and conflicts are as above (`:switch_blocked`, `:switch_already_finished`). Request and complete each run in one transaction, with the setting, the switch and the events together | **Read:** admin; auditor (audited); `agent_runtime`; `model_runtime` only in the `:transition` phase for that switch (read and lock). Writes are as accepted (`request`: a human admin; `complete`, `fail` and `block`: `model_runtime`) | the b2 resolver contract |
+| `Checks.ProfileSwitchContext` | New (policy check) | Phase-bound authorization of the internal setting and switch reads and locks, and the setting writes | Context `%{phase: :initialize, :transition or :apply, action, tenant_id, switch_id}` (switch id for `:transition` and `:apply`) | n/a | Set only by the action's own change (`request`, `complete`, `fail`, `block`), in the order of the phase table; never accepted from caller context alone | Requires the phase's actor and an exact target match. The resource write guards also check the stored target and value | none |
+| AuditEvent | Existing (new event types) | Ledger | **`model.profile.setting_initialized`:** tenant, `desired_profile_id`, revision 1, the requesting switch's id. It is appended by `request` after the head, only when that transaction inserted the row. **`model.profile.switch_requested`, `_completed`, `_failed`, `_blocked`:** from, to, `server_generation`, the setting revision after the change, `failure_reason` | unchanged | Appended in the same transaction as their change, after the chain head | unchanged | none |
+
+Actor `:model_runtime`: the accepted row, unchanged.
+
+## Invariants and locks
+
+- **Setting:** one row per tenant (unique `tenant_id`). `desired_profile_id`
+  is a non-fake registry id (a DB check against the registry's real ids).
+  `revision` is at least 1.
+- **Switch:**
+  - `from_profile_id` differs from `to_profile_id` (DB check);
+  - status is one of pending, completed, failed or blocked (DB check);
+  - at most one pending or blocked switch per tenant (partial unique
+    index);
+  - `finished_at` is set exactly when the status is terminal;
+  - rows are append-only apart from the status transitions above.
+- **Lock order:** setting row `FOR UPDATE` (or its initializing insert)
+  → switch rows → chain head, for request, complete, fail and block.
+- **No model call** and no waiting under these locks; orchestration
+  comes in b1 and b2.
+- **`model_runtime` authority:** only the switch's complete, fail and
+  block. It is denied every grant, allocation, invocation and setting
+  write (policy tests).
+
+## RED tests
+
+The resources don't exist on main. Each test first asserts that the
+module and function exist (`Code.ensure_loaded?/1`, then
+`function_exported?/3`), after its fixtures, so it fails with an explicit
+assertion message, not an `UndefinedFunctionError` setup crash. Codex
+verifies the intended reason against the draft once the resources exist.
+There is no production behavior during RED.
+
+1. **Authorization.**
+   - **Request** (`request_profile_switch`): allowed for an active admin.
+     Denied for a reviewer, an auditor, a disabled admin, a stale demoted
+     admin struct, a missing actor, another tenant's admin, `model_runtime`
+     and every other system actor.
+   - **Complete, fail and block:** allowed for `model_runtime` only;
+     everyone else is denied, including an admin.
+   - **Reads:** as in the table (an audited auditor read; reviewer
+     denied).
+   - **`model_runtime` beyond its three actions:** denied every grant,
+     allocation, invocation and setting write.
+   - **Direct calls** to the setting's `:initialize` and `:apply_switch`
+     actions are refused, even for an admin and `model_runtime`.
+2. **The first row, on independent connections:**
+   - two concurrent first requests give one setting at revision 1, one
+     `setting_initialized` event and one pending switch; the loser is
+     refused as having an existing pending switch;
+   - a first request that is invalid or stale leaves no setting, switch
+     or event;
+   - a request against an existing row doesn't re-initialize it.
+3. **Request refusals,** with nothing written:
+   - a stale revision;
+   - `to` equal to the current desired profile;
+   - `to: :fake` and an unknown id;
+   - a second pending switch;
+   - an existing blocked switch.
+4. **Complete:**
+   - the setting's desired profile and revision change in the same
+     transaction, through `:apply_switch`;
+   - the events come in order;
+   - a forced failure rolls back the setting, the switch and the events
+     together.
+5. **Fail and block** leave the setting unchanged.
+6. **Idempotency and conflicts,** each a separate case:
+   - a same-generation complete on a completed switch, fail on a failed
+     one and block on a blocked one: each a no-op, with no event and no
+     revision, time or reason rewrite;
+   - a stale generation is refused, before any replay;
+   - complete on a blocked switch and fail on a blocked switch: each
+     `:switch_blocked`;
+   - fail after complete, complete after fail, and block after completed
+     or failed: each `:switch_already_finished`.
+6b. **Context phases:**
+   - direct `:initialize`, `:apply_switch` and the internal reads
+     without a phase are each refused;
+   - a forged marker with the wrong phase, wrong action, another tenant,
+     another switch, or a mismatched `to` is refused;
+   - `model_runtime` reading the setting or a switch outside
+     `:transition` is denied;
+   - `fail` and `block` succeed through `:transition`, with the setting
+     locked first, and never write the setting;
+   - `:apply` without a prior `:transition` lock, or on a non-pending
+     switch, is refused by the write guard;
+   - a same-generation replay on a completed, failed or blocked switch
+     reaches its no-op or conflict result, and is not refused at the read.
+6c. **The first row on the actual resource:**
+   - on conflict, every field is kept;
+   - exactly one `setting_initialized` event appears across the race;
+   - the generated id is internal (no public id argument).
+7. **History** is never relabelled.
+8. **Direct-SQL negatives,** one rule each: the `from = to` check, the
+   status check, the partial unique index, the setting's fake-profile
+   check, and the one-setting-per-tenant uniqueness.
+9. **Lock order:** a request waits on the setting row, or on the
+   initializing insert, before the chain head (independent connections).
+
+**Not in slice a:** resolving a blocked switch (b2), the orchestrator, and
+reading the setting at boot (c).
+
+**Gate:** the full gate on an owned partition. No model calls. The
+domain diagrams are regenerated for the new resources.
+
+## Probe evidence (owned partition, before RED)
+
+**How it ran:**
+- On 2026-10-15, partition `_r004` (`sdr_agent_test_r004`), as a
+  temporary ExUnit test that was never committed and was deleted after
+  each run.
+- On a throwaway Ash resource and table (`probe_c202a_settings`, with a
+  unique tenant index), dropped afterwards.
+- With independent `sandbox: false` connections: a winner inserts and
+  holds its transaction, and a loser starts the same first insert.
+- No project code changed.
+
+**Artifacts** (in `~/.local/state/sdr-agent/handoff-20261008/tmp/c202a-probe/`):
+- `c202a_probe2.log` (sha256 prefix f7ad56142c603bc3), the savepoint
+  version;
+- `c202a_probe3.log` (920fe97f67cbf300), the upsert version;
+- the final probe source, `zz_c202a_probe_test.exs` (8ddb0ec3bdcce508).
+
+**Results:**
+
+| Mechanism | Winner | Loser waited on | Loser result |
+|---|---|---|---|
+| Savepoint plus plain create (draft 2's plan) | commits | `transactionid` | **The whole loser transaction is rolled back.** `Ash.create` returned `{:error, changeset}` with `InvalidAttribute(field: :tenant_id, "has already been taken", constraint: probe_c202a_settings_unique_tenant_index)`, and Ash's own error handling rolled back the outer transaction, not just the savepoint. **The plan is rejected.** |
+| Savepoint plus plain create | rolls back | `transactionid` | inserted; the transaction stays usable |
+| **Upsert** (`upsert_identity: :unique_tenant`, `upsert_fields: [:tenant_id]`), with a request-orchestration-generated id | commits | `transactionid` | `{:ok}` with the winner's row (revision 1 kept, though the loser asked for 7) and `inserted?: false`. The re-read `FOR UPDATE` works, and the transaction stays usable |
+| **Upsert** | rolls back | `transactionid` | inserted its own row (revision 7), `inserted?: true` |
+
+**Conclusion:** the upsert protocol in "The first setting row" is the
+one to implement. The savepoint plan would have failed. RED adds the
+same first-row race tests on independent connections against the real
+resource.
+
+## Soft-stop record
+
+Configured: `ai_pair=true`, `codex_review=true`, so the correlated peer
+review applies.
+
+| Round | Exact head | Reviewer | Correlation | Verdict |
+|---|---|---|---|---|
+| 1 | `037a1fe` | Codex | `m_1792044248024034000_52ef30fd` → 17604421 | NEEDS-REVIEW |
+| 2 | `2bb2679` | Codex | `m_1792044903990944000_53dd2bbc` → 6778082f | NEEDS-REVIEW |
+| 3 | `dc28ee9` | Codex | `m_1792047196002043000_afdb83d9` → 453d32f6 | NEEDS-REVIEW |
+| 4 | `66cc086` | Codex, 2026-10-15 | `m_1792047391845851000_e8f23096` → `acbfafda-502f-456b-88d0-47c1364a9394` | **interface PASS, and narrow entity and action PASS.** RED may proceed; not GREEN, code, merge or spend approval |
