@@ -1,6 +1,9 @@
 # R0-05 interface: the admin model card, switch and resolver UI
 
-**Status:** draft 1, 2026-10-15, for Codex's interface review. Issue #53.
+**Status:** draft 2, 2026-10-15, for Codex's interface re-review. Draft 1
+(`a0ffefe`) was NEEDS-REVIEW (Codex `a9d27e99`): the source of the setting revision
+and the frozen review lifecycle. Codex accepted OQ-1 with the lag
+qualification (section 1). Issue #53.
 Slice plan: `c2-02-slices.md`, row R0-05, last after the integrated switch
 and status. It builds on C2-02a, b1 and b2α (merged), b2β
 (`c2-02b2b-interface.md`, PASS) and C2-02c (`c2-02c-interface.md`, PASS).
@@ -46,7 +49,7 @@ last attestation lines.
 | Accepting calls | `effective_profile`, with `refusal` | "yes, on <profile>", or "no", with the refusal in words (existing `refusal_message/1`, plus words for `:provider_held`, `:status_unavailable`, `:status_inconsistent`) |
 | Hold | `hold`, `stage` | "held", "released" or "pending", with the stage in words. `:cleanup_unprovable` gets its own banner (below) |
 | Open switch | `switch` | "none (confirmed <time>)", "<from> → <to>, pending", "<from> → <to>, blocked: <reason>", or "unknown" |
-| As of | `published_at` | "status published <time>". The card says the status can lag and is not a guarantee (C2-02c section 2) |
+| As of | `published_at` | "coordinator published <time>". This is the ledger and runtime publication time, not the sampling instant, and not a guarantee about admission. Each ledger line shows its own `confirmed_at`. Runtime lines are marked as sampled |
 | Last check | `attestation` | unchanged: the last per-call init attestation with its time, or "not yet attested" |
 
 **Rules:**
@@ -55,10 +58,7 @@ last attestation lines.
 - **A held server never reads as ready.** Lines with no data show
   "unknown", never a blank or a default.
 
-**The `:cleanup_unprovable` banner:** "A model server's cleanup can't be
-confirmed. Calls stay paused. An operator must check the machine and
-release the old reaper's lease from a console; the app then restarts the
-server by itself." The page has no button for it.
+The `:cleanup_unprovable` banner is defined in section 3.
 
 **Refresh:**
 - **On audit events:** the card re-reads `Runtime.status/0` through the
@@ -67,92 +67,133 @@ server by itself." The page has no button for it.
   transitions are all audited.
 - **The "Refresh status" button** re-reads it on demand.
 - **No timer** and no polling.
+- **The lag (OQ-1 ruling):** an audit commit doesn't prove that the
+  coordinator has already handled the outcome, published it, or released
+  a hold. Some runtime-only changes are followed by no audit event. So an
+  audit-driven refresh can show an earlier observation until a manual
+  refresh. The card's timestamps disclose this.
+- **Card fields** come only from C2-02c's single bracketed sample, never
+  from fresh reads by name, and never from a default profile.
 
 Rendering calls only `Runtime.status/0`, which makes no database query
 and no coordinator call (C2-02c).
 
 ## 2. Requesting a switch
 
-**The control.** "Change model profile" shows only when all of these hold
-in the last status read:
-- the provider is ClaudeCLI;
-- `desired_profile` is confirmed;
-- `switch` is `%{state: :none}`.
+**The control.** "Change model profile" shows only when, in the last
+status read, the provider is ClaudeCLI, `desired_profile` is confirmed,
+and `switch` is `%{state: :none}`. It shows nothing when a switch is open
+or the status is unknown ("status unknown; refresh"), or for the Fake.
 
-**It shows nothing when:**
-- a switch is open (the open-switch line shows instead);
-- the desired profile or switch is unknown (with "status unknown;
-  refresh");
-- the provider is the Fake.
+**The revision comes from the setting itself (R1-MF1).** Opening the
+control reads `Agents.get_profile_setting(actor: user)` and branches:
+- **Present:** from = its `desired_profile_id`, and the revision is its
+  `revision`.
+- **Positively absent** (`{:ok, nil}`): from = the registry default, and
+  `expected_revision: 1`, the existing initialize-at-request convention.
+- **A failed read:** "the setting can't be read; try again", with no
+  review. A failed read is never treated as absent.
 
-**Steps**, on the C9-05 `GrantForm` pattern: staged in the page, with no
+The passive card stays `Runtime.status/0` only, and no status field is
+added.
+
+**Steps,** on the C9-05 `GrantForm` pattern: staged in the page, with no
 browser dialog.
-1. **Choose.** A select of the reviewed real profiles, excluding the
-   desired one (`ModelProfiles.real_ids/0`).
-2. **Review.** "Switch from <desired> to <target>." Then: "Calls in
-   progress finish first. While the switch runs, new calls are paused.
-   The new profile is checked without a model call. If it can't start
-   cleanly, the app returns to <desired>, or blocks the switch for you to
-   resolve." It also shows the setting revision the admin saw. The socket
-   holds `%{to_profile_id, expected_revision}`.
-3. **Confirm.** This acts only on the socket's review state. A forged
-   `confirm_switch` with no review step does nothing. It calls
-   `Coordinator.request_switch/2` as the signed-in user.
+1. **Choose** a target from the reviewed real profiles except `from`
+   (`ModelProfiles.real_ids/0`).
+2. **Review:**
+   - "Switch from <from> to <target>." Then: "Calls in progress finish
+     first. While the switch runs, new calls are paused. The new profile
+     is checked without a model call. If it can't start cleanly, the app
+     returns to <from>, or blocks the switch for you to resolve."
+   - It shows the revision.
+   - The socket stores exactly what was shown: `%{from, to_profile_id,
+     expected_revision}`.
+3. **Confirm:**
+   - **What it sends:** the **stored** review, never values supplied by
+     the browser, and never a revision refreshed in the background.
+   - **A forged `confirm_switch`** with no review does nothing.
+   - **If the setting changed** after the review, the existing stale
+     refusal applies, and the page shows a reload prompt. It never
+     rewrites the review the admin saw.
 
-**Results:**
+**Results.** Words come from the existing operator-safe mapping
+(`AuditedView.error_message/1`, plus the typed refusals), never from
+`inspect` or a raw exception message:
 
-| Result | Shown |
+| Result (actual shape) | Shown |
 |---|---|
-| `{:ok, switch}` | "Switch requested" and the open-switch line. The card updates as the coordinator publishes (C2-02c, the lag intervals) |
-| `{:stale_revision, _}` or a revision error | a reload prompt (the GrantForm stale pattern); nothing retried by itself |
-| an open-switch conflict (`:switch_blocked` or an open-switch refusal) | "Another switch is open", and a re-read |
+| `{:ok, switch}` | "Switch requested". The card follows the status as it is refreshed (section 1, the lag note) |
+| an Ash Invalid on stale `expected_revision` | a reload prompt; nothing retried by itself |
+| `{:error, :switch_open}` | "Another switch is open", then a re-read |
 | `{:error, :coordinator_not_ready}` | "The model server isn't ready to switch; try again shortly" |
-| Forbidden | the domain refusal. A demoted or signed-out user is already redirected by `LiveUserAuth` before any event reaches the domain |
-| any other error | its message, next to the control |
+| Forbidden | the refusal. A demoted or signed-out user is redirected by `LiveUserAuth` before any event reaches the domain |
+| other | the mapped message, next to the control |
 
 ## 3. Resolving a blocked switch
 
 **When it shows:** "Resolve blocked switch" appears when `switch` is
 `%{state: :open, status: :blocked}`.
 
+**Review states.** These are socket-local, for one resolution at a time:
+
+| State | Entered by | What refresh may do |
+|---|---|---|
+| `:facts` | opening the control | replace the facts; no confirmation is kept |
+| `:editing` | the facts are shown, the statement too, and the input is open | an audit or manual refresh updates the **status card** only. A change in the facts (a new latest start, a different lease kind) shows "the facts changed; review again", clears the input, and needs a new review |
+| `:submitting` | the confirm click | **frozen**: nothing in the review changes, and further clicks are ignored |
+| `:uncertain` | `:resolve_uncertain` | **frozen**, as in `:submitting`. Only "Check again" acts |
+| `:terminal` | a definite outcome or refusal | the review is discarded. A new resolution needs a new review, a new id and a new typed confirmation |
+
+**Frozen means** the attestation id, the switch, the shown start range,
+the lease kind and the confirmed statement can't be replaced. Opening a
+second review, or sending a fresh id by itself, is also impossible. The
+status card may still update.
+
 **Steps:**
-1. **Facts.** Opening the control calls `Agents.blocked_switch_facts/2`,
-   as the user. It shows:
-   - the switch (from, to, the block reason in words, when it was
-     requested and by whom);
+1. **Facts.** `Agents.blocked_switch_facts/2`, called as the user, shows:
+   - the switch (from, to, the reason in words, when it was requested and
+     by whom);
    - every covered start (generation, reason, profile, status, and its
      recorded pid, node and reaper, or "not recorded");
-   - the observed lease kind in words.
+   - the lease kind in words.
 
    `{:error, :observation_unknown}` → "The server's state can't be read
-   right now; try again." There is no confirmation step.
-2. **The statement and the typed confirmation.** The page shows the b2β
-   section 3 statement word for word, and a text input. The confirm
-   button enables only while the input is exactly `STOPPED <switch id>`.
-   The server checks it again, so the client check is only convenience.
-3. **Confirm.** The socket holds the facts it showed (`attested_start_id`,
-   `attested_generation`, `attested_lease_kind`) and an `attestation_id`
-   generated **once** when the review opened. A forged
-   `confirm_resolution` with no review state does nothing. It calls
-   `Agents.resolve_blocked_switch/3` as the user, with outcome `:failed`.
+   right now; try again".
+2. **The statement and the typed confirmation.**
+   - The page shows b2β's section 3 statement word for word, and an
+     input.
+   - The button enables only while the input is exactly
+     `STOPPED <switch id>`. The server checks again.
+   - The input's parameter key is `resolution_confirmation`, which is
+     filtered (section 5).
+3. **Confirm** sends the stored review: the facts shown, and the
+   `attestation_id` generated once, when `:editing` began. A forged
+   `confirm_resolution` with no review does nothing.
 
-**Results** (b2β section 1):
+**Results** (b2β section 1, `{:error, tag}` shapes):
 
-| Result | Shown |
-|---|---|
-| `{:ok, %{switch: s}}` | "Switch resolved as failed. Calls stay paused until the server restarts cleanly." It never says ready. The card follows the status |
-| `{:ok, %{replay: true}}` | the same message ("already recorded") |
-| `:resolve_uncertain` | "The result isn't known yet." A "Check again" button resends **the same** `attestation_id` and facts, which is a replay or a settlement. It is never a new id |
-| `:resolve_timeout` | "Not recorded. Try again." This starts a new review with a new id |
-| `:stale_attestation`, `:live_work_observed`, `:observation_unknown`, `:coordinator_busy` | the refusal in words, and a fresh facts read; nothing kept |
-| `:attestation_invalid`, `:attestation_conflict`, `:switch_not_blocked` | the refusal in words, and a re-read |
-| Forbidden or NotFound | the refusal |
+| Result | Shown | Next state |
+|---|---|---|
+| `{:ok, %{switch: s}}`, or a replay | "The resolution was recorded: the switch is failed. Readiness is checked separately; calls stay paused until the status shows the server accepting calls. A dead lease may still need an operator." It never says ready | `:terminal` |
+| `:resolve_uncertain` | "The result isn't known yet." The "Check again" button resends **exactly** the frozen semantic identity, under the current authorization | `:uncertain` |
+| `:resolve_timeout` | "Not recorded. Start a new review." | `:terminal` |
+| `:stale_attestation`, `:live_work_observed`, `:observation_unknown`, `:coordinator_busy`, `:attestation_invalid`, `:attestation_conflict`, `:switch_not_blocked`, Forbidden, NotFound | the refusal in words | `:terminal` |
 
-**Safety:**
-- The UI never shows a lease release action.
-- The confirmation text is never logged: the form parameter is filtered,
-  like `settings_content` in C4.
-- The confirmation text is never put in a URL.
+**Losing the socket.** A reconnect or a reload loses the socket-only
+review. No durable recovery of the same id is promised. On reconnect the
+page re-reads the stored state: the switch is still blocked, or it is
+resolved. It never invents or submits a replacement attestation. An
+admin who lost an uncertain review starts a new one, and b2β's replay and
+settlement rules cover the earlier request.
+
+**Safety.** The page has no lease release action. The confirmation text
+never appears in error messages, URLs, audit payloads or telemetry.
+
+**The `:cleanup_unprovable` banner:** "A model server's cleanup can't be
+confirmed. Calls stay paused. An operator must check the machine and
+release the old reaper's lease from a console. Normal reconciliation then
+checks readiness again." It promises no unconditional automatic restart.
 
 ## 4. Access
 
@@ -162,9 +203,16 @@ browser dialog.
 - **Non-admins:** reviewers, auditors and signed-out users are redirected
   before any event reaches the domain (the existing pattern).
 
+## 5. Logging
+
+`config :phoenix, :filter_parameters` gains `"resolution_confirmation"`.
+The pinned LiveView logger uses `Phoenix.filter_values/1`. Tests cover
+the change, submit and refusal events at `:debug`.
+
 ## Entity Model
 
-**Entity Model trigger: no.** Reason:
+**Entity Model trigger: no.** It also consumes the existing
+`Agents.get_profile_setting/1`. Reason:
 - no new or changed attributes, relationships, calculations, aggregates,
   policies, actions or backend event contracts;
 - R0-05 is LiveView UI over the existing, reviewed domain and runtime
@@ -193,32 +241,54 @@ spend, synthetic data only.
    status" re-reads it.
 
 **The switch:**
-4. **The control shows** only under the conditions in section 2.
-5. **Choose, review, confirm** calls `request_switch/2` with the target
-   and the revision seen. The open-switch line appears.
-6. **A forged `confirm_switch`** with no review state does nothing.
-7. **Stale revision** → a reload prompt with nothing retried;
-   `:coordinator_not_ready` → its message; an open-switch conflict → its
-   message.
+4. **The control** shows only under the conditions in section 2.
+5. **The setting read:**
+   - a present setting → its from and revision;
+   - absent → the default, and revision 1;
+   - a failed read → a message, with no review;
+   - the setting changed between review and confirm → the stale refusal
+     and a reload prompt, never a rewritten review.
+6. **Confirm** sends the stored review only. Browser-supplied
+   `to_profile_id` and `expected_revision` are ignored. A forged
+   `confirm_switch` with no review does nothing.
+7. **Results:**
+   - an Ash Invalid that is stale → a reload prompt;
+   - `{:error, :switch_open}` → its message;
+   - `:coordinator_not_ready` → its message;
+   - every message comes from the mapping, never from `inspect`.
 
 **The resolver:**
-8. **The facts** render every covered start, with "not recorded" for nil
-   identity, and the lease kind. `:observation_unknown` → a message with
-   no confirmation step.
+8. **The facts:** every covered start (nil identity shows "not
+   recorded"), and the lease kind. `:observation_unknown` shows a message.
 9. **The confirmation:** the button enables only for the exact text. A
-   server refusal of a wrong text shows `:attestation_invalid`.
-10. **Confirm** calls `resolve_blocked_switch/3` with the facts shown and
-    one `attestation_id`. "Check again" after `:resolve_uncertain` resends
-    the same id and facts.
-11. **A forged `confirm_resolution`** with no review state does nothing.
-12. **Results:** each one in section 3 shows its message. A resolution
+   wrong text refused by the server → `:attestation_invalid`.
+10. **Frozen states:** while `:submitting` and `:uncertain`:
+    - an audit refresh and a manual refresh leave the attestation id,
+      facts and statement unchanged;
+    - a duplicate click sends nothing;
+    - no second review opens.
+
+    "Check again" after `:resolve_uncertain` resends exactly the same
+    identity, and that is a replay or a settlement.
+11. **Stale facts:** in `:editing`, a refresh that changes the facts clears
+    the input and asks for a new review.
+12. **Forged and terminal:**
+    - a forged `confirm_resolution` with no review does nothing;
+    - after a terminal result, a new resolution needs a new review, id and
+      confirmation.
+13. **Results:** each result in section 3 shows its message. A resolution
     never shows "ready".
-13. **Never logged:** the confirmation text doesn't appear in captured
-    logs (LiveView and Phoenix at `:debug`), and the form parameter is
-    filtered.
+14. **Reconnect:** a remount re-reads the stored state, and no
+    attestation is invented or submitted.
+15. **Never logged:** the confirmation text is absent from captured logs
+    (LiveView and Phoenix at `:debug`) on change, submit and refusal, and
+    is absent from URLs, audit payloads and telemetry.
+16. **The lag:** an audit event commits before the coordinator publishes.
+    The card shows the earlier observation, and a manual refresh then
+    shows the newer state.
 
 **Access:**
-14. Reviewers, auditors, a demoted admin and a signed-out user are
+17. Reviewers, auditors, a demoted admin and a signed-out user are
     redirected. No event reaches the domain (allow and deny pairs).
 
 **The owner tries it (acceptance, by hand).** The owner runs the dev app
@@ -232,9 +302,6 @@ never run it.
 
 ## Open questions
 
-- **OQ-1 (for Codex):** is refresh on audit events plus a manual button
-  enough? Or should the card refresh on coordinator publications (a
-  PubSub broadcast from `publish/1`), so a hold release with no audit
-  event is visible? **Recommendation: audit events plus the button,**
-  since every lifecycle step is audited. Any gap shows the "as of" time
-  honestly.
+- **OQ-1 (Codex, accepted for R0):** audit-event refresh plus the manual
+  button, with the lag qualification in section 1. No coordinator PubSub
+  is added.
