@@ -189,6 +189,8 @@ defmodule SdrAgent.AgentsTest do
 
     test "SCH may create runs; DLV may not", ctx do
       definition = AgentsFixtures.definition!(ctx.tenant)
+      # C4-R8: an assignment-origin run needs a saved offering profile.
+      AgentsFixtures.ensure_offering!(ctx.tenant)
 
       assert {:ok, _} =
                Agents.create_run(AgentsFixtures.run_attrs(definition),

@@ -20,6 +20,7 @@ defmodule SdrAgent.SDR.ReplyWorker do
   `{:error, :provider_not_running}` — never the Fake instead.
   """
   use Oban.Worker, queue: :agent, max_attempts: 1
+  use SdrAgent.Workers.ErrorBoundary
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents

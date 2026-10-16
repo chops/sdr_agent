@@ -223,6 +223,8 @@ defmodule SdrAgentWeb.LeadsLiveTest do
 
   describe "assigning a lead to the agent" do
     test "a reviewer assigns a new lead; the agent run is queued", %{conn: conn} = ctx do
+      # C4-R8: an assignment needs a saved offering profile (synthetic fixture).
+      SdrAgent.SettingsFixtures.save_offering!(ctx.admin)
       lead = fixture_lead!(ctx, "01")
       {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/leads/#{lead.id}")
       refute has_element?(view, "#draft-awaiting-review")

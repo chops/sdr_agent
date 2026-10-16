@@ -62,6 +62,8 @@ defmodule SdrAgent.Outreach.OutreachRaceTest do
     {:ok, tenant_id} = Audit.Kernel.singleton_tenant_id()
     seeder = SdrAgent.Actor.system(:seeder, tenant_id, "race")
     {:ok, admin} = SdrAgent.Accounts.get_user(hd(Fixtures.users()).id, actor: seeder)
+    # C4-R8: assignments need a saved offering profile (synthetic fixture).
+    SdrAgent.SettingsFixtures.save_offering!(admin)
     {:ok, lead} = Sales.fetch(Sales.Lead, hd(Fixtures.leads()).id, actor: admin)
     {:ok, contact} = Sales.fetch(Sales.Contact, lead.contact_id, actor: admin)
     %{tenant_id: tenant_id, admin: admin, lead: lead, contact: contact}

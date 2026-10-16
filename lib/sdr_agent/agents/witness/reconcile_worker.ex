@@ -23,6 +23,7 @@ defmodule SdrAgent.Agents.Witness.ReconcileWorker do
   never calls a model.
   """
   use Oban.Worker, queue: :reconciliation, max_attempts: 3
+  use SdrAgent.Workers.ErrorBoundary
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents.Witness
