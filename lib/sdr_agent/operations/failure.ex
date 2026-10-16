@@ -67,6 +67,10 @@ defmodule SdrAgent.Operations.Failure do
     table "failures"
     repo SdrAgent.Repo
 
+    custom_indexes do
+      index [:tenant_id, :status, :occurred_at, :id], name: "failures_inbox_attention_index"
+    end
+
     references do
       reference :tenant, on_delete: :restrict
       reference :operation, on_delete: :restrict

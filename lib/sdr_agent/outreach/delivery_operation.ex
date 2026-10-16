@@ -104,6 +104,13 @@ defmodule SdrAgent.Outreach.DeliveryOperation do
     table "delivery_operations"
     repo SdrAgent.Repo
 
+    custom_indexes do
+      index [:tenant_id, :provider, :accepted_at],
+        name: "delivery_operations_inbox_captures_index",
+        include: ["id"],
+        where: "accepted_at IS NOT NULL"
+    end
+
     identity_wheres_to_sql unique_provider_message: "provider_message_id IS NOT NULL"
 
     references do
