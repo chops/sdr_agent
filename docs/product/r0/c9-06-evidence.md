@@ -1,8 +1,8 @@
 # C9-06 (#46) acceptance evidence map (draft)
 
-- **Main:** `3b0918384e348fb5e530a9234893d00ee5e1ecbd`.
-- **The Home producer:** C1-02's reviewed branch
-  (`c1-02-inbox-reads` at `ede9f2b`, approved, not merged).
+- **Main:** `397dcda7efc1b3320eb8bcb02b0b66d595cf458a`.
+- **The Home producer:** C1-02 on `c1-02-integration` at `6b17072`
+  (PR #169, not merged yet). This branch stacks on it.
 - **Entity Model trigger:** no. This change maps and tests merged behavior
   only (Codex 4ca892eb). A gap in production behavior would stop this
   work and get its own entity check and a real RED first.
@@ -57,5 +57,47 @@ the app.
 
 ## Results
 
-To fill. B1 and B2 run at main when the map is finalized. B3 waits for
-C1-02's merge and exact-head checks.
+Run on this branch with main `397dcda` and C1-02 `6b17072` merged in
+(local merge head `a0edf9c`). Test partition `_c906`.
+
+- **B1:** `model_call_admission_test.exs` and
+  `grant_refusal_worker_test.exs`.
+  - Seed 570129. `Result: 42 passed`.
+- **B2:** `launch_admission_test.exs` and `launch_admission_race_test.exs`.
+  - Seed 615734. `Result: 29 passed`.
+- **B3:** `test/sdr_agent/inbox/c9_06_refusal_rows_test.exs`, new.
+  - Characterization tests: they pass on merged code. Not RED.
+  - Seed 290267. `Result: 5 passed`.
+  - The refusals come from `Agents.reserve_model_invocation/3`: no grant
+    (`no_eligible_grant`) and an allocation cap (`allocation_exhausted`).
+    No Failure is seeded by hand.
+  - Home is read with `Inbox.refresh/2` and an admin's stored session
+    token.
+  - Each row: `producer: :operations_failures`,
+    `kind: :failure_attention`, and a `subject_ref` equal to the Failure
+    in the refusal receipt. That Failure is also the one in the
+    `model.reservation.refused` event.
+  - A repeated refusal keeps one row with the same row id, and the live
+    count stays 1.
+  - After an admin resolves the Failure, its row is gone and the live
+    count is 0.
+- **B3 step 6 (launch refusal):** not added. C1-02's tests already show
+  `provider_error` Failure rows (the `failure!/2` default class), for
+  example in `page_test.exs`. The producer filters on status only, not
+  class, so a launch refusal takes the same path.
+- **Sensitivity:** each key B3 assertion was shown to fail under a
+  temporary change, then reverted.
+  - Producer drops `budget_exhausted` Failures: row missing, 0/5 passed.
+  - Row `producer` or `kind` changed: that assertion fails, 0/5 passed.
+  - `subject_ref` points at the run, not the Failure: row missing,
+    0/5 passed.
+  - The test looks up a hand-seeded lookalike Failure instead of the
+    receipt's: the event binding fails, 0/5 passed.
+  - Refusal dedupe turned off: the dedupe test fails on the receipt, then
+    (with those checks removed) on the row count, then on the live count.
+    4/5 passed each time.
+  - The attention read keeps resolved Failures, or the test skips the
+    resolve: the resolution test fails, 4/5 passed.
+- **Checks:** `mix format --check-formatted`,
+  `MIX_ENV=test mix compile --warnings-as-errors` and `mix credo` on the
+  new file all pass. The full gate was not run.
