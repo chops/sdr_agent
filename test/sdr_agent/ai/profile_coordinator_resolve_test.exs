@@ -192,8 +192,9 @@ defmodule SdrAgent.AI.ProfileCoordinatorResolveTest do
       resume(read_x, :read_x)
       again = await_task(x, 25_000)
 
-      refute match?({:ok, _}, again) or again == {:error, :switch_not_blocked},
-             "a failed coordinator lookup is never a replay or a resolved refusal; got #{inspect(again)}"
+      assert match?({:error, _}, again) and again != {:error, :switch_not_blocked},
+             "a failed coordinator lookup is an error result, never a replay, a resolved refusal, " <>
+               "a crash or no reply; got #{inspect(again)}"
 
       assert length(resolved_events(ctx)) == 1
     end
