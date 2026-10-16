@@ -7,7 +7,8 @@ defmodule SdrAgent.Agents.RunSettings do
     * `allowance/2` — the snapshot value of one operational limit field
       (for the three `run_*` fields, the run's frozen budget), or
       `{:error, :no_settings_snapshot}`. Consumers combine it with their own
-      independent budgets inside their guarded step;
+      independent budgets inside their guarded step; `ceiling/3` is the same
+      value from an already-read snapshot's limits;
     * `booking_link_for_use/1` — the run's booking link if its host passes
       the real-data guard now: `{:ok, url}`, `{:error,
       :booking_link_absent}` or `{:error, :booking_link_withheld}`. Nothing
@@ -79,15 +80,25 @@ defmodule SdrAgent.Agents.RunSettings do
   def allowance(%{settings_snapshot_id: nil}, _field), do: {:error, :no_settings_snapshot}
 
   def allowance(run, field) do
-    cond do
-      field not in Safeguards.limit_fields() ->
-        {:error, :unknown_limit}
+    if field in Safeguards.limit_fields() do
+      with {:ok, snapshot} <- snapshot(run), do: {:ok, ceiling(run, snapshot.limits, field)}
+    else
+      {:error, :unknown_limit}
+    end
+  end
 
-      budget = Map.get(@budget_fields, field) ->
-        with {:ok, _snapshot} <- snapshot(run), do: {:ok, Map.fetch!(run.budget, budget)}
-
-      true ->
-        with {:ok, snapshot} <- snapshot(run), do: {:ok, Map.fetch!(snapshot.limits, field)}
+  @doc """
+  The ceiling of limit `field` for `run` given its snapshot `limits` (a map
+  or `SnapshotLimits`): the run's frozen budget for the `run_*` fields, the
+  snapshot value otherwise — what `allowance/2` returns, without reading
+  anything. Never a claim that another call is allowed now: independent
+  budgets (grants, the tenant-day limit, provider quotas) apply at use.
+  """
+  @spec ceiling(map(), map(), atom()) :: integer()
+  def ceiling(run, limits, field) do
+    case Map.get(@budget_fields, field) do
+      nil -> Map.fetch!(limits, field)
+      budget -> Map.fetch!(run.budget, budget)
     end
   end
 
