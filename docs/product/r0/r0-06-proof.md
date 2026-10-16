@@ -1,9 +1,10 @@
 # R0-06 profile proof: evidence record and owner runbook
 
-**Status:** draft 2, 2026-10-16. Shaped by Codex's pre-read rulings
+**Status:** draft 3, 2026-10-16. Shaped by Codex's pre-read rulings
 (`codex-r006-preread-4b41d10e.md`, consultation `4b41d10e`). Draft 1
 (`7027700`) was NEEDS-REVIEW (Codex `e87584b5`, five corrections, made
-here); needs Codex review. Issue #54. Not a completion claim: every row below is open until
+here). Draft 2 (`5ac7106`) was NEEDS-REVIEW (Codex `808cd478`, two
+evidence sources, fixed here); needs Codex review. Issue #54. Not a completion claim: every row below is open until
 its evidence is recorded and reviewed.
 
 **Entity Model trigger: no.** Reason: this is an evidence record and a
@@ -118,9 +119,13 @@ to the other.
 | projection_version | `claude-message-json/3+prompt-builder/1` | candidate: not yet known |
 | method | `propagated_id` | candidate: `propagated_id` |
 
-The Opus column is the tuple evaluated in attempt 1 (reviewed). The
-Sonnet column is the registry's configuration, a candidate only, until
-its captured identities are independently reviewed.
+The Opus column is the tuple evaluated in attempt 1 (reviewed). For
+Sonnet, the profile id, CLI version and model id are the registry's
+configuration, candidates only, until its captured identities are
+independently reviewed. The projection and method don't come from the
+registry: the candidate projection is fixed and hermetically reviewed
+before the attempt, and the evaluated result is unknown until the
+attempt is reviewed.
 
 For each tuple, record: the prompt-builder version and commitments, the
 hermetically reviewed candidate, the pin and code provenance, the
@@ -147,11 +152,18 @@ agents never run it.
   database (not the calibration database):
   - `model_invocations`: the row count, and the counts by status
     (reserved, `sent` and the terminal states);
-  - `model_call_grants` and `model_call_allocations`: the usage counters;
+  - grant usage: `Agents.grant_usage/2` for the app's grants (the
+    attempts consumed, derived from charged `model_invocations` of every
+    outcome; the grant tables hold terms and revisions, not usage
+    counters), read as the owner. A failed read is unknown, never zero;
   - `wire_witness_links`: the row count, and the witness store's exchange
     count;
   - `model_server_starts`: the latest generation and its status;
-  - the app's OS process id (from `ps`), to show it doesn't restart.
+  - the app's BEAM identity: its OS process id **and** start time
+    (`ps -o pid,lstart` for the process serving this app's port). A
+    reused pid with a different start time is a restart. This shows only
+    that the BEAM itself kept running, within what `ps` can show; it says
+    nothing about every child process. An unknown read stops the trial.
 - **The admin card shows:** desired profile Opus; running profile Opus,
   with its own server; server admission open; no open, pending, blocked or
   uncertain switch; the pinned CLI version. Ordinary model calls are still
@@ -164,8 +176,8 @@ agents never run it.
 2. Record: the time, the switch id and its audit events, the desired and
    running profiles and the setting revision, the server start
    generation and outcome, and any pending, blocked or uncertain state.
-3. Check what you can observe: the app's OS process id is unchanged (no
-   app restart); `model_server_starts` has one new generation for this
+3. Check what you can observe: the app's BEAM pid and start time are
+   unchanged (no app restart); `model_server_starts` has one new generation for this
    leg, and its status; the running profile is the target.
    **Not observed by the trial:** that two model servers never
    overlapped. Before-and-after reads can't show that across the
@@ -175,8 +187,8 @@ agents never run it.
    as the coordinator validates it"; `profile_coordinator_race_test.exs`).
    The record cites those tests, not the trial, for it.
 4. **No model call:** repeat the baseline reads. There are no new
-   `model_invocations` rows of any status, no change to the grant or
-   allocation counters, and no new witness links or exchanges. The new
+   `model_invocations` rows of any status, no change in
+   `Agents.grant_usage/2`, and no new witness links or exchanges. The new
    server's `--version` preflight is not a model call. An unchanged
    counter on the page, or a successful click, is not this proof. Keep
    other work quiet during the trial, so an unrelated call can't be
