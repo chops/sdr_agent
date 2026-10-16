@@ -7,8 +7,8 @@ defmodule SdrAgent.SDR do
     * `assign_lead/2` — ADM/REV assign a lead to the agent for a campaign.
       In one transaction (outbox): the lead new → assigned, the `SDRAgent`
       AgentDefinition (registered if absent), the Oban job, its Operation,
-      the queued AgentRun (usage origin `:assignment`, C9) and the
-      `sdr.lead.assigned` signal event.
+      the queued AgentRun (usage origin `:assignment`, C9; bound to its run
+      settings snapshot, C4) and the `sdr.lead.assigned` signal event.
     * `retry_run/2` — active ADM retries a stopped run (S13b);
     * `pause_campaign/2` — ADM/REV pause a campaign and record
       `sdr.campaign.paused` (the agent re-checks campaign state
@@ -36,10 +36,16 @@ defmodule SdrAgent.SDR do
 
   @doc """
   Assigns `lead` (new, or already assigned) to the agent. Options: `actor:`
-  (ADM/REV), `campaign_id:`, `owner_user_id:`, `max_model_calls:` (≤ 20),
-  `max_tool_calls:` (default 60), `model:` (test/demo only: `provider:`
-  fake | claude_cli module, `provider_options: [responder: module]`).
+  (ADM/REV), `campaign_id:`, `owner_user_id:`, `max_model_calls:` and
+  `max_tool_calls:` (each may only lower the run settings snapshot's limit,
+  C4), `model:` (test/demo only: `provider:` fake | claude_cli module,
+  `provider_options: [responder: module]`).
   Returns `{:ok, %{lead, run, operation, job, signal}}`.
+
+  C4-R8: the tenant must have saved an offering profile; otherwise
+  `{:error, {:settings_incomplete, [:offering_profile]}}` is returned before
+  anything is written (a plain read after the Lead lock; `AgentRun :create`
+  checks again under the chain head).
 
   The caller must be an active ADM or REV of the lead's tenant, for a new
   *and* an already-assigned lead; anyone else gets `Ash.Error.Forbidden`
@@ -81,6 +87,7 @@ defmodule SdrAgent.SDR do
     with {:ok, lead} <- lock_lead(lead.id, actor),
          :ok <- no_active_run(lead, agent),
          {:ok, _campaign} <- Sales.fetch(Sales.Campaign, campaign_id, actor: actor),
+         :ok <- Agents.settings_complete(:assignment, actor: agent),
          {:ok, lead} <- ensure_assigned(lead, opts, actor),
          {:ok, definition} <- SDRAgent.register(lead.tenant_id),
          {:ok, signal} <-
@@ -112,8 +119,8 @@ defmodule SdrAgent.SDR do
                phase: :discover,
                usage_origin: :assignment,
                operation_id: operation.id,
-               max_model_calls: min(Keyword.get(opts, :max_model_calls, 20), 20),
-               max_tool_calls: Keyword.get(opts, :max_tool_calls, 60)
+               max_model_calls: Keyword.get(opts, :max_model_calls),
+               max_tool_calls: Keyword.get(opts, :max_tool_calls)
              },
              actor: agent
            ),

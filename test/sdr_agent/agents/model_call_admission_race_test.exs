@@ -349,6 +349,8 @@ defmodule SdrAgent.Agents.ModelCallAdmissionRaceTest do
   defp run_with_operation!(ctx) do
     agent = struct(SdrAgent.Actor, type: :agent_runtime, tenant_id: ctx.tenant.id)
     definition = AgentsFixtures.definition!(ctx.tenant)
+    # C4-R8: an assignment-origin run needs a saved offering profile.
+    AgentsFixtures.ensure_offering!(ctx.tenant)
     lead_id = Ecto.UUID.generate()
 
     {:ok, operation} =
