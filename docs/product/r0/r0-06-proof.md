@@ -93,7 +93,7 @@ An outstanding lock, ticket or unlatched predecessor is a stop.
 | Order | Profile | Date (MDT) | Outcome | Evidence SHA-256 | Latch | Codex attempt verdict |
 |---|---|---|---|---|---|---|
 | 1 | `claude_cli_opus` | Oct 15 | completed / valid | `0c2e3735582d0bde76a7eb8eb2e59dec88852f683d8f5cd18834189a80c648b4` | `:calibration` | PASS, attempt only, not promotion (reviewer report in the private evidence index) |
-| 2 | `claude_cli_sonnet` | Oct 15 | completed / valid; console outcome `match` | `689a0514c7cc221b6e4525f57ada49671358d3ffa5fc746a26d8bc53ba9c40cb` | `:calibration` | **Not reviewed.** Charged about 24 minutes after attempt 1, before attempt 1's evidence review, so the review-before-next stop was not kept. It was missing from this ledger until Codex's ledger snapshot found it (Oct 16). Its outcome metadata was read only to reconcile the timeline; that is not an evidence verdict. |
+| 2 | `claude_cli_sonnet` | Oct 15 | completed / valid; console outcome `match` | `689a0514c7cc221b6e4525f57ada49671358d3ffa5fc746a26d8bc53ba9c40cb` | `:calibration` | **Retrospective PASS, Oct 16** (53/53 read-only checks; reviewer report in the private evidence index). **Deviation kept:** charged about 24 minutes after attempt 1, before attempt 1's evidence review, so the review-before-next stop was not kept; it was missing from this ledger until Codex's ledger snapshot found it (Oct 16). The later review cannot supply historical authorization or waive the stop; it awaits the owner's disposition. |
 | 3 | `claude_cli_sonnet` | Oct 16 | completed / valid; console outcome `match` | `a2e8a0b2ffbb84ff739f193a9bb91fb9b95baf36affb4f92dde5b148e4854525` | `:calibration` | PASS, attempt only, not promotion (53/53 read-only checks; reviewer report in the private evidence index) |
 
 **G-R0 usage** (Codex's read-only snapshot, 2026-10-16 19:40:51 UTC): Opus
@@ -250,8 +250,9 @@ history stays.
   publication; outstanding ADR acceptances; the UI trial and product
   acceptance; every merge and any enablement.
 - **Done when** all of: the prerequisites merged; one reviewed PASS per
-  profile recorded, with every actual attempt listed (item 1 is met:
-  attempts 1 and 3); the promotion merged through its
+  profile recorded, with every actual attempt listed (the evidence
+  subcriterion is met by attempts 1 and 3; the missed review-before-next
+  stop before attempt 2 is disclosed and awaits the owner's disposition); the promotion merged through its
   reviewed process; the owner's UI and no-call trial recorded; exact-head
   CI and Codex's approving review of this record; the owner's acceptance.
   The record then states that ordinary calls remain staged.
