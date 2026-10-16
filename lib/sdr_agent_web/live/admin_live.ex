@@ -72,7 +72,8 @@ defmodule SdrAgentWeb.AdminLive do
   No `IntegrationCredential` resource exists yet (S2 assigns it to S6; it
   was not built), so credential status is not shown; adding it is an
   entity-model change outside S10. Read-only: user management stays with
-  the `Accounts` API and `mix sdr.bootstrap_admin`.
+  the `Accounts` API and `mix sdr.bootstrap_admin`. The run settings (C4)
+  are edited on their own page, linked from the header (`SdrAgentWeb.SettingsLive`).
   """
   use SdrAgentWeb, :live_view
 
@@ -716,6 +717,11 @@ defmodule SdrAgentWeb.AdminLive do
         <:subtitle>
           Configuration as the running node sees it. Credentials are never displayed.
         </:subtitle>
+        <:actions>
+          <.ui_button id="settings-link" navigate={~p"/settings"}>
+            <.icon name="hero-adjustments-horizontal" class="size-4" /> Run settings
+          </.ui_button>
+        </:actions>
       </.page_header>
 
       <.empty
