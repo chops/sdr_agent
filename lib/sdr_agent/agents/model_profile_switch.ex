@@ -95,8 +95,9 @@ defmodule SdrAgent.Agents.ModelProfileSwitch do
         check: "server_generation >= 1"
 
       # C2-02b2β: the seven resolution columns are all null, or all set on
-      # a failed switch, from one clock value, over a covered range that
-      # starts at the switch's own generation.
+      # a failed switch, from one clock value (finished_at is required and
+      # compared with NULL-safe equality, so no NULL escapes the check), over
+      # a covered range that starts at the switch's own generation.
       check_constraint :resolution, "model_profile_switches_resolution",
         check:
           "(" <>
@@ -105,7 +106,8 @@ defmodule SdrAgent.Agents.ModelProfileSwitch do
             Enum.map_join(@resolution_columns, " AND ", &"#{&1} IS NOT NULL") <>
             " AND resolution = 'owner_attested' AND " <>
             SdrAgent.Audit.SQL.one_of("attested_lease_kind", @lease_kinds) <>
-            " AND status = 'failed' AND resolved_at = finished_at" <>
+            " AND status = 'failed' AND finished_at IS NOT NULL" <>
+            " AND resolved_at IS NOT DISTINCT FROM finished_at" <>
             " AND attested_generation >= server_generation)"
     end
 
