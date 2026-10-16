@@ -41,6 +41,7 @@ defmodule SdrAgent.Agents.Witness.ScanWorker do
   higher volume, not a guarantee of eventual processing.
   """
   use Oban.Worker, queue: :reconciliation, max_attempts: 1
+  use SdrAgent.Workers.ErrorBoundary
 
   require Ash.Query
 

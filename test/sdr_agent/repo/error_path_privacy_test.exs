@@ -554,23 +554,35 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
       require_module!(@boundary)
       text = canary()
 
-      for {worker, n} <- Enum.with_index(app_workers()), mode <- @raw_modes do
-        put_faults!(%{worker => fn _job -> fault(mode, text) end})
-        result = bounded(fn -> worker.perform(probe_job(worker, n)) end)
+      workers = app_workers()
 
-        assert disposition?(result, disposition(mode)) and
-                 render(result) =~ summary_module(mode),
-               "C4-01a: #{inspect(worker)} #{mode}: perform did not go through the boundary"
+      checked =
+        for {worker, n} <- Enum.with_index(workers), mode <- @raw_modes do
+          put_faults!(%{worker => fn _job -> fault(mode, text) end})
+          result = bounded(fn -> worker.perform(probe_job(worker, n)) end)
 
-        refute render(result) =~ text, "C4-01a: #{inspect(worker)} #{mode}: raw error passed"
-      end
+          assert disposition?(result, disposition(mode)) and
+                   render(result) =~ summary_module(mode),
+                 "C4-01a: #{inspect(worker)} #{mode}: perform did not go through the boundary"
 
-      for {worker, n} <- Enum.with_index(app_workers()) do
-        put_faults!(%{worker => fn _job -> {:snooze, 4321} end})
+          refute render(result) =~ text, "C4-01a: #{inspect(worker)} #{mode}: raw error passed"
+          {worker, mode}
+        end
 
-        assert bounded(fn -> worker.perform(probe_job(worker, n)) end) == {:snooze, 4321},
-               "C4-01a: #{inspect(worker)}: a safe result did not pass through its boundary"
-      end
+      # Every worker x mode pair ran to completion (not only the first).
+      assert length(Enum.uniq(checked)) == length(workers) * length(@raw_modes)
+
+      safe =
+        for {worker, n} <- Enum.with_index(workers) do
+          put_faults!(%{worker => fn _job -> {:snooze, 4321} end})
+
+          assert bounded(fn -> worker.perform(probe_job(worker, n)) end) == {:snooze, 4321},
+                 "C4-01a: #{inspect(worker)}: a safe result did not pass through its boundary"
+
+          worker
+        end
+
+      assert length(Enum.uniq(safe)) == length(workers)
     end
 
     test "every production worker's persisted job errors are summaries" do
@@ -599,13 +611,19 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
       ids = Process.get(:c4_job_ids)
       rows = job_rows(Map.values(ids))
 
-      for {worker, id} <- ids do
-        {_state, errors} = Map.fetch!(rows, id)
-        refute errors =~ text, "C4-01a: #{inspect(worker)}: the canary reached oban_jobs.errors"
+      checked =
+        for {worker, id} <- ids do
+          {_state, errors} = Map.fetch!(rows, id)
+          refute errors =~ text, "C4-01a: #{inspect(worker)}: the canary reached oban_jobs.errors"
 
-        assert errors =~ "Postgrex.Error",
-               "C4-01a: #{inspect(worker)}: its job error is not the boundary summary: #{errors}"
-      end
+          assert errors =~ "Postgrex.Error",
+                 "C4-01a: #{inspect(worker)}: its job error is not the boundary summary: #{errors}"
+
+          worker
+        end
+
+      # Every production worker's job row was checked.
+      assert Enum.sort(checked) == Enum.sort(workers)
 
       assert_no_canary(log, text, "production workers")
     end
@@ -724,6 +742,231 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
         assert fun.(event, opts) == event,
                "C4-01a: a safe event was rewritten: #{inspect(fun.(event, opts))}"
       end
+    end
+  end
+
+  ## Fail closed at the scan limit (coordinator review of 024723f)
+
+  # A raw error with the canary behind more than 50,000 scanned nodes:
+  # wide (a long list before it) and deep (nested one level per node).
+  defp over_budget(text, :wide), do: List.duplicate(%{pad: 1}, 60_000) ++ [pg_error(text)]
+
+  defp over_budget(text, :deep),
+    do: Enum.reduce(1..60_000, pg_error(text), fn _, acc -> {acc} end)
+
+  describe "an over-budget scan fails closed" do
+    test "the filter turns an unscannable event into the content-free scan_limit event" do
+      {fun, opts} = attached_filter!()
+      text = canary()
+
+      for shape <- [:wide, :deep],
+          event <- [
+            %{
+              level: :warning,
+              msg: {:report, %{data: over_budget(text, shape)}},
+              meta: %{pid: self()}
+            },
+            %{
+              level: :error,
+              msg: {:string, "c4 meta case"},
+              meta: %{big: over_budget(text, shape), pid: self()}
+            }
+          ] do
+        result = fun.(event, opts)
+        assert result.level == event.level, "C4-01a: the level was not kept"
+        assert result.msg == {:string, "sanitized error report: scan_limit"}, "C4-01a: #{shape}"
+        assert result.meta == %{pid: self()}, "C4-01a: unscanned metadata was kept"
+        refute render(result) =~ text
+      end
+
+      log =
+        capture_log([level: :debug], fn ->
+          :logger.error(%{report: over_budget(text, :wide)})
+        end)
+
+      assert log =~ "scan_limit"
+      refute log =~ text
+    end
+
+    test "the boundary summarizes an unscannable reason or exception as scan_limit" do
+      require_module!(@boundary)
+      text = canary()
+
+      for shape <- [:wide, :deep] do
+        big = over_budget(text, shape)
+
+        for {tag, expected} <- [error: {:error, "scan_limit"}, cancel: {:cancel, "scan_limit"}] do
+          result = observe(fn -> apply(@boundary, :run, [fn -> {tag, big} end]) end)
+
+          assert result == expected,
+                 "C4-01a: #{shape} #{tag}: #{String.slice(render(result), 0, 200)}"
+        end
+
+        raised =
+          observe(fn -> apply(@boundary, :run, [fn -> raise UnknownError, secret: big end]) end)
+
+        assert raised == {:error, "scan_limit"},
+               "C4-01a: #{shape} raise: #{String.slice(render(raised), 0, 200)}"
+      end
+
+      # Safe typed results are still returned as they are.
+      ok = {:ok, List.duplicate(%{pad: 1}, 60_000)}
+      assert apply(@boundary, :run, [fn -> ok end]) == ok
+    end
+  end
+
+  ## Map keys and reserved metadata (Codex review of 3e43470, MF1 and MF2)
+
+  describe "raw errors used as map keys" do
+    test "the scanner finds keyed, nested-keyed and MapSet errors; safe keys stay clean" do
+      text = canary()
+      pg = pg_error(text)
+
+      for {label, term} <- [
+            keyed: %{pg => :failed},
+            nested_key: %{outer: %{{:k, pg} => 1}},
+            map_set: MapSet.new([pg]),
+            struct_field_key: %UnknownError{secret: %{pg => 1}}
+          ] do
+        assert %Postgrex.Error{} = found = SafeMetadata.find_raw_error(term),
+               "C4-01a: #{label}: the keyed raw error was not found"
+
+        assert SafeMetadata.error_summary(found) =~ "Postgrex.Error"
+      end
+
+      assert SafeMetadata.find_raw_error(%{"a" => 1, {:x, :y} => [1], %{k: :v} => "w"}) == nil
+    end
+
+    test "a returned worker error with a keyed raw error is summarized" do
+      require_module!(@boundary)
+      text = canary()
+
+      for reason <- [%{pg_error(text) => :failed}, MapSet.new([pg_error(text)])] do
+        result = observe(fn -> apply(@boundary, :run, [fn -> {:error, reason} end]) end)
+        assert disposition?(result, :error) and render(result) =~ "Postgrex.Error"
+        refute render(result) =~ text
+      end
+
+      [worker | _] = app_workers()
+      put_faults!(%{worker => fn _job -> {:error, %{pg_error(text) => :failed}} end})
+      result = bounded(fn -> worker.perform(probe_job(worker, 0)) end)
+      assert disposition?(result, :error) and render(result) =~ "Postgrex.Error"
+      refute render(result) =~ text
+
+      safe = {:error, %{{:tag, 1} => :failed}}
+      assert apply(@boundary, :run, [fn -> safe end]) == safe
+    end
+
+    test "a logger report with a keyed raw error is rewritten" do
+      {fun, opts} = attached_filter!()
+      text = canary()
+
+      event = %{level: :error, msg: {:report, %{%{pg_error(text) => 1} => :failed}}, meta: %{}}
+      result = fun.(event, opts)
+      refute render(result) =~ text
+      assert render(result.msg) =~ "Postgrex.Error"
+
+      log =
+        capture_log([level: :debug], fn -> :logger.error(%{report: %{pg_error(text) => :x}}) end)
+
+      assert log =~ "Postgrex.Error"
+      refute log =~ text
+    end
+
+    test "metadata with a keyed or nested-keyed raw error is sanitized; safe entries kept" do
+      {fun, opts} = attached_filter!()
+      text = canary()
+
+      event = %{
+        level: :error,
+        msg: {:string, "c4 keyed meta"},
+        meta: %{pg_error(text) => 1, ctx: %{pg_error(text) => :failed}, safe: "kept"}
+      }
+
+      result = fun.(event, opts)
+      refute render(result) =~ text
+      assert result.level == :error
+      assert result.meta.safe == "kept"
+      assert result.meta.ctx =~ "Postgrex.Error"
+      assert Enum.sort(Map.keys(result.meta)) == [:ctx, :safe], "the raw-error key was kept"
+    end
+
+    test "safe non-atom keys are left unchanged (positive control)" do
+      {fun, opts} = attached_filter!()
+
+      event = %{
+        level: :info,
+        msg: {:report, %{%{a: 1} => :b, {:tag, 2} => "c"}},
+        meta: %{{:ctx, 1} => "v", safe: "kept"}
+      }
+
+      assert fun.(event, opts) == event
+    end
+  end
+
+  describe "scan-limit refusal keeps only validated standard metadata" do
+    test "raw or unscannable values under reserved keys are dropped" do
+      {fun, opts} = attached_filter!()
+      text = canary()
+      big = over_budget(text, :wide)
+
+      for meta <- [
+            %{domain: [pg_error(text)], pid: self()},
+            %{time: pg_error(text), mfa: {pg_error(text), :f, 1}, file: [pg_error(text)]},
+            %{line: "1", pid: pg_error(text), gl: big, domain: [:elixir, "x"]},
+            %{file: String.duplicate("f", 2_000), mfa: {:m, :f, -1}, time: 1.5}
+          ] do
+        event = %{level: :error, msg: {:report, %{data: big}}, meta: meta}
+        result = fun.(event, opts)
+        assert result.msg == {:string, "sanitized error report: scan_limit"}
+        assert result.level == :error
+        refute render(result) =~ text
+
+        refute Enum.any?(result.meta, fn {_key, value} -> SafeMetadata.find_raw_error(value) end),
+               "C4-01a: an unvalidated reserved value was kept: #{inspect(Map.keys(result.meta))}"
+      end
+
+      dropped =
+        fun.(
+          %{
+            level: :error,
+            msg: {:report, %{data: big}},
+            meta: %{domain: [pg_error(text)], pid: self()}
+          },
+          opts
+        )
+
+      assert dropped.meta == %{pid: self()}
+    end
+
+    test "validated safe standard metadata is kept at the refusal (positive control)" do
+      {fun, opts} = attached_filter!()
+      big = over_budget(canary(), :deep)
+
+      safe = %{
+        pid: self(),
+        gl: self(),
+        time: 1_760_000_000_000_000,
+        mfa: {__MODULE__, :test, 1},
+        file: "test/sdr_agent/repo/error_path_privacy_test.exs",
+        line: 42,
+        domain: [:elixir, :c4]
+      }
+
+      result =
+        fun.(
+          %{level: :notice, msg: {:report, %{data: big}}, meta: Map.put(safe, :extra, "x")},
+          opts
+        )
+
+      assert result.level == :notice
+      assert result.meta == safe
+
+      assert fun.(
+               %{level: :notice, msg: {:report, %{data: big}}, meta: %{file: ~c"lib/a.ex"}},
+               opts
+             ).meta ==
+               %{file: ~c"lib/a.ex"}
     end
   end
 
