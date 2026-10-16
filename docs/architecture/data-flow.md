@@ -1,5 +1,9 @@
 # Data Flow
 
+C1-02's stateless metadata read facade and auditor-only post-read append are
+shown in [Home inbox read runtime](inbox-runtime.md). This is a public read
+API, not a mounted Home screen; its command boundary remains C1-03.
+
 Generated: 2026-10-06
 
 Project shape: single

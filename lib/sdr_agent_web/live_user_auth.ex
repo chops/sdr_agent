@@ -10,7 +10,6 @@ defmodule SdrAgentWeb.LiveUserAuth do
   import Phoenix.Component
 
   @token_key "user_token"
-  @token_resource SdrAgent.Accounts.Token
 
   # This is used for nested liveviews to fetch the current user.
   # To use, place the following at the top of that liveview:
@@ -129,21 +128,7 @@ defmodule SdrAgentWeb.LiveUserAuth do
   end
 
   defp current_operator(session) do
-    with token when is_binary(token) <- Map.get(session, @token_key),
-         {:ok, %{"sub" => subject, "jti" => jti}, _resource} <-
-           AshAuthentication.Jwt.verify(token, :sdr_agent),
-         false <- AshAuthentication.TokenResource.Actions.jti_revoked?(@token_resource, jti),
-         {:ok, [_stored]} <-
-           AshAuthentication.TokenResource.Actions.get_token(@token_resource, %{
-             "jti" => jti,
-             "purpose" => "user"
-           }),
-         {:ok, %SdrAgent.Accounts.User{status: :active} = user} <-
-           AshAuthentication.subject_to_user(subject, SdrAgent.Accounts.User) do
-      {:ok, user}
-    else
-      _ -> :error
-    end
+    SdrAgent.Accounts.current_operator(Map.get(session, @token_key))
   end
 
   defp check_role(socket) do

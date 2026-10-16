@@ -297,14 +297,17 @@ defmodule SdrAgent.Agents.ResultReadGateTest do
       assert Ash.Resource.Info.calculations(ModelInvocation) == []
     end
 
-    test "no application code runs a field aggregate" do
+    test "no application code runs a field aggregate outside the reviewed metadata inventory" do
       offenders =
         "lib/**/*.ex"
         |> Path.wildcard()
-        |> Enum.filter(
-          &(File.read!(&1) =~
-              ~r/Ash\.(aggregate|max|min|sum|avg|list|first)\(|Query\.aggregate\(/)
-        )
+        |> Enum.filter(fn path ->
+          # C1-02's exact metadata-only source/count/0-or-1-sum shape was
+          # independently reviewed in 9768aba4. This is not a file waiver:
+          # output fields, changed kinds/options or other call sites fail.
+          inventory = SdrAgent.Test.ResultAggregateInventory.scan(File.read!(path))
+          inventory.violations != []
+        end)
 
       assert offenders == []
     end
