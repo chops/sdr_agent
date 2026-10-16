@@ -1,6 +1,8 @@
 # R0-06 profile proof: evidence record and owner runbook
 
-**Status:** draft 3, 2026-10-16. Shaped by Codex's pre-read rulings
+**Status:** draft 3, 2026-10-16. **Codex PASS** for the record and
+runbook template (`82c07ef7`, exact `3fbabaf`); not a completed proof
+or any execution authority. Shaped by Codex's pre-read rulings
 (`codex-r006-preread-4b41d10e.md`, consultation `4b41d10e`). Draft 1
 (`7027700`) was NEEDS-REVIEW (Codex `e87584b5`, five corrections, made
 here). Draft 2 (`5ac7106`) was NEEDS-REVIEW (Codex `808cd478`, two
@@ -125,7 +127,8 @@ configuration, candidates only, until its captured identities are
 independently reviewed. The projection and method don't come from the
 registry: the candidate projection is fixed and hermetically reviewed
 before the attempt, and the evaluated result is unknown until the
-attempt is reviewed.
+attempt is reviewed. Record the exact pre-reviewed Sonnet candidate
+here before its first attempt.
 
 For each tuple, record: the prompt-builder version and commitments, the
 hermetically reviewed candidate, the pin and code provenance, the
@@ -160,7 +163,8 @@ agents never run it.
     count;
   - `model_server_starts`: the latest generation and its status;
   - the app's BEAM identity: its OS process id **and** start time
-    (`ps -o pid,lstart` for the process serving this app's port). A
+    (`LC_ALL=C TZ=UTC ps -o pid,lstart -p <pid>`, for the process serving
+    this app's port; the fixed locale and UTC keep readings comparable). A
     reused pid with a different start time is a restart. This shows only
     that the BEAM itself kept running, within what `ps` can show; it says
     nothing about every child process. An unknown read stops the trial.
