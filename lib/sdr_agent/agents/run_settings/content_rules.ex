@@ -7,12 +7,10 @@ defmodule SdrAgent.Agents.RunSettings.ContentRules do
 
     * `text/1` — valid UTF-8; no control character other than newline and
       tab; not secret-shaped.
-    * `secret_shaped?/1` — the text would be changed by
-      `SdrAgent.Operations.Redactor.redact/1`. A run of one character
-      repeated (padding such as `"nnnn…"`) is not by itself secret-shaped:
-      it is collapsed before the redactor runs, so only its credential
-      patterns, secret key/value pairs and mixed hex or base64-like runs
-      refuse a value.
+    * `secret_shaped?/1` — the raw value would be changed by
+      `SdrAgent.Operations.Redactor.redact/1` (credential patterns, secret
+      key/value pairs, long hexadecimal or base64-like runs), exactly as
+      packet section 3.5 states; nothing is shortened or exempted first.
     * `booking_url/1` — the static rules of a booking link: `https` only, a
       host name, no user info, no IP literal, `localhost` or `.local`, port
       absent or 443, no control or whitespace character, at most 2,048 bytes,
@@ -45,8 +43,6 @@ defmodule SdrAgent.Agents.RunSettings.ContentRules do
   # Control characters other than newline (0x0A) and tab (0x09), C0 and C1.
   @forbidden_controls ~r/[\x{00}-\x{08}\x{0B}-\x{1F}\x{7F}-\x{9F}]/u
   @url_forbidden ~r/[\x{00}-\x{20}\x{7F}-\x{A0}\x{2028}\x{2029}]/u
-  # The same character repeated 32 or more times (redactor run lengths).
-  @repeated ~r/(.)\1{31,}/us
 
   @doc """
   `:ok`, or `{:error, [{field, rule}]}` for the content input of `kind`
@@ -241,6 +237,109 @@ defmodule SdrAgent.Agents.RunSettings.ContentRules do
     end
   end
 
+  @doc """
+  `:ok`, or `{:error, [{field, rule}]}` for the whole input of a settings
+  save (`SdrAgent.Agents.create_settings_revision/2`), checked before any
+  Ash cast: `kind` one of the five kinds, `content` a map valid for it
+  (`validate/2`), `note` nil or settings text of at most 200 characters,
+  `expected_number` a whole number ≥ 0, and `confirm_raised` a list of
+  distinct limit field names (atoms, or strings matching one; never a new
+  atom), empty for a kind other than `:operational_limits`.
+  """
+  @spec input(map()) :: :ok | {:error, [{atom(), atom()}]}
+  def input(attrs) when is_map(attrs) do
+    kind = Map.get(attrs, :kind)
+
+    errors =
+      kind_errors(kind) ++
+        content_errors(kind, Map.get(attrs, :content)) ++
+        note_errors(Map.get(attrs, :note)) ++
+        number_errors(Map.get(attrs, :expected_number)) ++
+        confirm_errors(kind, Map.get(attrs, :confirm_raised))
+
+    if errors == [], do: :ok, else: {:error, errors}
+  end
+
+  @doc """
+  The limit field names of `confirm_raised` as atoms (strings matched
+  against the known names; never a new atom).
+  """
+  @spec confirm_names(term()) :: [atom()]
+  def confirm_names(nil), do: []
+  def confirm_names(list) when is_list(list), do: Enum.map(list, &limit_name/1)
+
+  @doc """
+  An embedded settings struct as plain input (public attributes only), so it
+  is validated again like any other input; other terms are unchanged.
+  """
+  @spec plain(term()) :: term()
+  def plain(%module{} = struct) do
+    if Ash.Resource.Info.resource?(module) do
+      module
+      |> Ash.Resource.Info.public_attributes()
+      |> Map.new(&{&1.name, plain(Map.get(struct, &1.name))})
+    else
+      struct
+    end
+  end
+
+  def plain(map) when is_map(map), do: Map.new(map, fn {key, value} -> {key, plain(value)} end)
+  def plain(list) when is_list(list), do: Enum.map(list, &plain/1)
+  def plain(other), do: other
+
+  @kinds [:offering_profile, :booking_link, :writing_guide, :research_brief, :operational_limits]
+
+  defp kind_errors(kind) when kind in @kinds, do: []
+  defp kind_errors(_kind), do: [{:kind, :not_allowed}]
+
+  defp content_errors(kind, content) when kind in @kinds and is_map(content) do
+    case validate(kind, plain(content)) do
+      :ok -> []
+      {:error, errors} -> errors
+    end
+  end
+
+  defp content_errors(kind, _content) when kind in @kinds, do: [{:content, :not_a_map}]
+  defp content_errors(_kind, _content), do: []
+
+  defp note_errors(nil), do: []
+
+  defp note_errors(note) when is_binary(note) do
+    case text([], %{note: note}, :note, 0, 200, optional: true) do
+      [] -> []
+      errors -> errors
+    end
+  end
+
+  defp note_errors(_note), do: [{:note, :not_text}]
+
+  defp number_errors(n) when is_integer(n) and n >= 0, do: []
+  defp number_errors(_n), do: [{:expected_number, :invalid}]
+
+  defp confirm_errors(_kind, nil), do: []
+
+  defp confirm_errors(kind, list) when is_list(list) do
+    names = Enum.map(list, &limit_name/1)
+
+    cond do
+      :unknown in names -> [{:confirm_raised, :unknown}]
+      length(Enum.uniq(names)) != length(names) -> [{:confirm_raised, :duplicate}]
+      kind != :operational_limits and names != [] -> [{:confirm_raised, :not_limits}]
+      true -> []
+    end
+  end
+
+  defp confirm_errors(_kind, _other), do: [{:confirm_raised, :not_a_list}]
+
+  defp limit_name(name) when is_atom(name) do
+    if name in Safeguards.limit_fields(), do: name, else: :unknown
+  end
+
+  defp limit_name(name) when is_binary(name),
+    do: Enum.find(Safeguards.limit_fields(), :unknown, &(Atom.to_string(&1) == name))
+
+  defp limit_name(_name), do: :unknown
+
   @doc "`:ok` or `{:error, rule}` for settings text (before trimming)."
   @spec text(String.t()) :: :ok | {:error, atom()}
   def text(value) when is_binary(value) do
@@ -255,8 +354,7 @@ defmodule SdrAgent.Agents.RunSettings.ContentRules do
   @doc "Whether `value` holds a secret-shaped substring (see the moduledoc)."
   @spec secret_shaped?(String.t()) :: boolean()
   def secret_shaped?(value) when is_binary(value) do
-    probe = Regex.replace(@repeated, value, "\\1")
-    Redactor.redact(probe) != probe
+    Redactor.redact(value) != value
   end
 
   @doc "`{:ok, %URI{}}` or `{:error, rule}` for a booking link (static rules)."

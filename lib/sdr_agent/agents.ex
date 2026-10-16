@@ -1495,7 +1495,7 @@ defmodule SdrAgent.Agents do
 
     case settings_actor(Keyword.get(opts, :actor)) do
       {:ok, actor} ->
-        Guard.run(meta, actor, fn -> save_settings_revision(attrs, actor) end)
+        Guard.run(meta, actor, fn -> checked_settings_revision(attrs, actor) end)
 
       {:refuse, nil} ->
         {:error, Ash.Error.Forbidden.exception([])}
@@ -1521,11 +1521,27 @@ defmodule SdrAgent.Agents do
 
   defp settings_actor(actor), do: {:ok, actor}
 
+  # The raw input shapes are checked before Ash casts anything, so no input
+  # value reaches an Ash error, its message or a span status. An invalid
+  # input is still refused as Forbidden (and the denial audited) for an
+  # actor the action's policy refuses.
+  defp checked_settings_revision(attrs, actor) do
+    case RunSettings.ContentRules.input(attrs) do
+      :ok ->
+        save_settings_revision(attrs, actor)
+
+      {:error, errors} ->
+        if Ash.can?({SettingsRevision, :create_revision}, actor),
+          do: {:error, {:invalid, errors}},
+          else: {:error, Ash.Error.Forbidden.exception([])}
+    end
+  end
+
   defp save_settings_revision(attrs, actor) do
     input =
       attrs
-      |> Map.take([:kind, :content, :expected_number, :note, :confirm_raised])
-      |> Map.update(:confirm_raised, [], &(&1 || []))
+      |> Map.take([:kind, :content, :expected_number, :note])
+      |> Map.put(:confirm_raised, RunSettings.ContentRules.confirm_names(attrs[:confirm_raised]))
 
     fn ->
       SettingsRevision

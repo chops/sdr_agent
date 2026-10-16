@@ -493,7 +493,8 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
   describe "test 8: booking link" do
     test "unsafe or unreserved links are refused; a reserved https link passes", ctx do
       token = Enum.join(["to", "ken"]) <> "=" <> String.duplicate("0123456789abcdef", 2)
-      long = "https://book.example.test/" <> String.duplicate("a", 2_049 - 26)
+      # Ordinary path text (no secret-shaped run): 337 x "intro." is 2,022 bytes.
+      long = "https://book.example.test/" <> String.duplicate("intro.", 337) <> "x"
       assert byte_size(long) == 2_049
 
       refused = [
@@ -522,7 +523,7 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
 
       nothing_written(ctx, :booking_link, 0)
 
-      exact = "https://book.example.test/" <> String.duplicate("a", 2_048 - 26)
+      exact = "https://book.example.test/" <> String.duplicate("intro.", 337)
 
       for {url, number} <- [
             {"https://book.example.test/demo/intro", 1},
@@ -595,8 +596,7 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
         {:writing_guide, %{text: ""}, "empty guide"},
         {:research_brief, content(:research_brief, %{guidance: words.(12_001)}), "brief 12,001"},
         {:research_brief, content(:research_brief, %{depth: :deep}), "depth :deep"},
-        {:offering_profile, content(:offering_profile, %{name: String.duplicate("n", 121)}),
-         "name 121"},
+        {:offering_profile, content(:offering_profile, %{name: words.(121)}), "name 121"},
         {:offering_profile, content(:offering_profile, %{name: ""}), "empty name"},
         {:offering_profile, content(:offering_profile, %{summary: words.(1_501)}),
          "summary 1,501"},
@@ -630,7 +630,7 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
       result =
         attempt(ctx, :writing_guide, content(:writing_guide),
           expected_number: 0,
-          note: String.duplicate("n", 201)
+          note: words.(201)
         )
 
       assert_invalid(result, :note, "note 201")
@@ -639,9 +639,8 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
           do: nothing_written(ctx, kind, 0)
 
       # The caps themselves pass.
-      assert save!(:writing_guide, %{text: words.(6_000)}, ctx.admin,
-               note: String.duplicate("n", 200)
-             ).number == 1
+      assert save!(:writing_guide, %{text: words.(6_000)}, ctx.admin, note: words.(200)).number ==
+               1
 
       assert save!(
                :research_brief,
@@ -651,7 +650,7 @@ defmodule SdrAgent.Agents.SettingsRevisionTest do
 
       offering =
         content(:offering_profile, %{
-          name: String.duplicate("n", 120),
+          name: words.(120),
           items: [item.(String.duplicate("a", 40), "A."), item.("b", words.(400))]
         })
 

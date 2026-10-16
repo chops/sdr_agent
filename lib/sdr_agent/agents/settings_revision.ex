@@ -155,8 +155,12 @@ defmodule SdrAgent.Agents.SettingsRevision do
       revision number the admin saw (`expected_number`, 0 for none).
       """
 
-      accept [:kind, :note]
-      argument :content, :map, allow_nil?: false, sensitive?: true
+      accept [:kind]
+      # `content` and `note` are taken as raw terms and checked by
+      # SettingsRevisionChain, so a malformed value never reaches an Ash
+      # cast error (whose message and span status would print it).
+      argument :content, :term, allow_nil?: false, sensitive?: true
+      argument :note, :term, sensitive?: true
       argument :expected_number, :integer, allow_nil?: false, constraints: [min: 0]
 
       argument :confirm_raised, {:array, :atom},
@@ -167,7 +171,6 @@ defmodule SdrAgent.Agents.SettingsRevision do
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change relate_actor(:created_by, allow_nil?: true)
-      change {RunSettings.Changes.ApplyContentRules, text: [note: {0, 200}]}
       change SdrAgent.Agents.Changes.SettingsRevisionChain
 
       change {AppendEvent,

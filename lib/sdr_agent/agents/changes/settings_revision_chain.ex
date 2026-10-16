@@ -46,6 +46,7 @@ defmodule SdrAgent.Agents.Changes.SettingsRevisionChain do
       kind when is_atom(kind) and not is_nil(kind) ->
         changeset
         |> cast_content(kind)
+        |> cast_note()
         |> check_confirmation(kind)
         |> Ash.Changeset.before_action(&chain(&1, kind))
 
@@ -59,7 +60,8 @@ defmodule SdrAgent.Agents.Changes.SettingsRevisionChain do
   defp cast_content(changeset, kind) do
     attribute = Ash.Resource.Info.attribute(SettingsRevision, kind)
 
-    with content when is_map(content) <- plain(Ash.Changeset.get_argument(changeset, :content)),
+    with content when is_map(content) <-
+           ContentRules.plain(Ash.Changeset.get_argument(changeset, :content)),
          :ok <- ContentRules.validate(kind, content),
          {:ok, value} when not is_nil(value) <-
            Ash.Type.cast_input(attribute.type, content, attribute.constraints),
@@ -70,28 +72,6 @@ defmodule SdrAgent.Agents.Changes.SettingsRevisionChain do
       _other -> error(changeset, :content, :invalid)
     end
   end
-
-  # A struct is validated again as plain input (an embedded struct would
-  # otherwise be accepted as already cast): its public attributes only.
-  defp plain(%module{} = struct) do
-    if Ash.Resource.Info.resource?(module) do
-      module
-      |> Ash.Resource.Info.public_attributes()
-      |> Map.new(&{&1.name, Map.get(struct, &1.name)})
-      |> plain()
-    else
-      struct
-    end
-  end
-
-  defp plain(map) when is_map(map),
-    do: Map.new(map, fn {key, value} -> {key, plain_value(value)} end)
-
-  defp plain(other), do: other
-
-  defp plain_value(list) when is_list(list), do: Enum.map(list, &plain_value/1)
-  defp plain_value(%_{} = struct), do: plain(struct)
-  defp plain_value(value), do: value
 
   defp add_field_errors(changeset, kind, errors) do
     errors
@@ -122,6 +102,30 @@ defmodule SdrAgent.Agents.Changes.SettingsRevisionChain do
 
   defp error_rule(%{vars: vars}) when is_list(vars), do: Keyword.get(vars, :rule, :invalid)
   defp error_rule(_error), do: :invalid
+
+  ## Note (a raw term: settings text, at most 200 characters)
+
+  defp cast_note(changeset) do
+    case note_value(Ash.Changeset.get_argument(changeset, :note)) do
+      {:ok, value} -> Ash.Changeset.force_change_attribute(changeset, :note, value)
+      {:error, rule} -> error(changeset, :note, rule)
+    end
+  end
+
+  defp note_value(nil), do: {:ok, nil}
+
+  defp note_value(note) when is_binary(note) do
+    trimmed = String.trim(note)
+
+    cond do
+      ContentRules.text(note) != :ok -> ContentRules.text(note)
+      String.length(trimmed) > 200 -> {:error, :too_long}
+      trimmed == "" -> {:ok, nil}
+      true -> {:ok, trimmed}
+    end
+  end
+
+  defp note_value(_note), do: {:error, :not_text}
 
   ## Raise confirmation
 

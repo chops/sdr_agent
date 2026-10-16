@@ -16,8 +16,8 @@ defmodule SdrAgent.Repo.SafeMetadata do
     * `outcome` — `ok` or `error`;
     * for an error: `error_module` (`Postgrex.Error`,
       `DBConnection.ConnectionError`, `DBConnection.OwnershipError`, else
-      `"other"`), `pg_code` (the SQLSTATE condition name from Postgrex's
-      fixed table, else `"other"`) and `constraint` (a constraint or index
+      `"other"`), `pg_code` (the condition name Postgrex's fixed SQLSTATE
+      table gives the error's own SQLSTATE, else `"other"`) and `constraint` (a constraint or index
       name declared by the app's resources, else `"other"`).
 
   Never: bound parameters, SQL text (in full or as a digest), an exception
@@ -89,8 +89,15 @@ defmodule SdrAgent.Repo.SafeMetadata do
 
   defp error(_result), do: %{}
 
-  defp pg_code(%Postgrex.Error{postgres: %{code: code}}) when is_atom(code) and not is_nil(code),
-    do: Atom.to_string(code)
+  # Only a condition name from Postgrex's fixed SQLSTATE table, and only when
+  # it is the name of the error's own SQLSTATE: anything else is "other".
+  defp pg_code(%Postgrex.Error{postgres: %{code: code, pg_code: sqlstate}})
+       when is_atom(code) and is_binary(sqlstate) do
+    case Postgrex.ErrorCode.code_to_name(sqlstate) do
+      ^code when not is_nil(code) -> Atom.to_string(code)
+      _other -> "other"
+    end
+  end
 
   defp pg_code(_error), do: "other"
 

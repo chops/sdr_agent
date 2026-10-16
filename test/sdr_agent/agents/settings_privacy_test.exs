@@ -22,7 +22,10 @@ defmodule SdrAgent.Agents.SettingsPrivacyTest do
 
   alias Ecto.Adapters.SQL
   alias SdrAgent.AgentsFixtures
+  alias SdrAgent.Agents
+  alias SdrAgent.Agents.RunSettings.ContentRules
   alias SdrAgent.AI.ModelProvider
+  alias SdrAgent.Operations.Redactor
   alias SdrAgent.Telemetry.GenAI
   alias SdrAgent.Telemetry.InMemoryExporter
   alias SdrAgent.Test.SecretShapes
@@ -118,7 +121,7 @@ defmodule SdrAgent.Agents.SettingsPrivacyTest do
               {:writing_guide, %{text: "Guide #{c} " <> SecretShapes.provider_key()}},
               {:writing_guide, %{text: "Guide #{c} " <> String.duplicate("abcd ", 1_300)}},
               {:offering_profile,
-               content(:offering_profile, %{name: c <> String.duplicate("n", 120)})}
+               content(:offering_profile, %{name: c <> " " <> String.duplicate("name ", 24)})}
             ] do
           result =
             observe(fn ->
@@ -305,5 +308,77 @@ defmodule SdrAgent.Agents.SettingsPrivacyTest do
 
     refute log =~ c, "C4-01a: a database error value reached the log"
     assert_no_canary_in_spans("database error")
+  end
+
+  # Codex review of 38fd09d (codex-c401a-38fd09d-green-review.md): its five
+  # regression probes, kept verbatim as permanent tests.
+  describe "Codex 38fd09d review regressions" do
+    test "raw provider-key shape remains refused despite a repeated suffix", ctx do
+      value = "sk-" <> String.duplicate("a", 40)
+      assert Redactor.redact(value) != value
+
+      result =
+        Agents.create_settings_revision(
+          %{kind: :writing_guide, content: %{text: value}, expected_number: 0},
+          actor: ctx.admin
+        )
+
+      assert match?({:error, {:invalid, _}}, result),
+             "provider-shaped key was accepted by the save"
+    end
+
+    test "a mixed long run cannot be shortened past the redactor threshold" do
+      value = "ab" <> String.duplicate("x", 40) <> "cd"
+      assert Redactor.redact(value) != value
+      assert ContentRules.secret_shaped?(value)
+    end
+
+    test "wrong-shaped content has a typed refusal without leaking into Ash span status", ctx do
+      value = "c4 wrong shaped private content ZQXJ7"
+
+      assert {:error, {:invalid, _}} =
+               Agents.create_settings_revision(
+                 %{kind: :writing_guide, content: value, expected_number: 0},
+                 actor: ctx.admin
+               )
+
+      Process.sleep(50)
+      assert leaking_status_spans(value) == []
+    end
+
+    test "wrong-shaped note has a typed refusal without leaking into Ash span status", ctx do
+      value = "c4 wrong shaped private note ZQXJ7"
+
+      assert {:error, {:invalid, _}} =
+               Agents.create_settings_revision(
+                 %{
+                   kind: :writing_guide,
+                   content: %{text: "Plain guide."},
+                   note: %{text: value},
+                   expected_number: 0
+                 },
+                 actor: ctx.admin
+               )
+
+      Process.sleep(50)
+      assert leaking_status_spans(value) == []
+    end
+
+    test "unknown Postgrex condition atoms are not treated as allowlisted metadata" do
+      fields =
+        SdrAgent.Repo.SafeMetadata.fields(%{}, %{
+          repo: SdrAgent.Repo,
+          source: "settings_revisions",
+          result: {:error, %Postgrex.Error{postgres: %{code: :c4_unknown_condition_canary}}}
+        })
+
+      assert fields.pg_code == "other"
+    end
+  end
+
+  defp leaking_status_spans(value) do
+    for record <- InMemoryExporter.spans(),
+        inspect(elem(record, 13), limit: :infinity, printable_limit: :infinity) =~ value,
+        do: elem(record, 6)
   end
 end
