@@ -20,8 +20,15 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
       error struct into the sanitized summary;
     * ADR 231-233 — Oban workers rescue database exceptions at their
       boundary (`SdrAgent.Workers.ErrorBoundary.run/1`) and return
-      sanitized reasons; every app worker declares the boundary
-      (`__sdr_error_boundary__/0`);
+      sanitized reasons; raised *and returned* raw Postgrex, DBConnection
+      and Ash errors (nested too) become a summary inside the same
+      disposition, and safe results (`:ok`, `{:ok, _}`, `{:snooze, _}`,
+      `{:error, atom}`, `{:cancel, atom}`) pass unchanged. Every production
+      worker's real `perform/1` is exercised through a test-build fault
+      point (`config :sdr_agent, :worker_boundary_faults, %{worker =>
+      fun}`, read by the boundary wrapper, compiled into test-seam builds
+      only), so a worker carrying only the marker, without the wrapper,
+      fails; the marker (`__sdr_error_boundary__/0`) is inventory only;
     * ADR 250-251 — the default Ecto logger and `OpentelemetryEcto` are not
       attached; `QueryLog` and `RepoSpans` are.
 
@@ -30,7 +37,8 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
   `SdrAgent.Logger.ExceptionFilter`; `SdrAgent.Workers.ErrorBoundary.run/1`
   (`fun` result passed through, a database exception becomes `{:error,
   summary}` naming only the error module, SQLSTATE condition and declared
-  constraint); the worker marker `__sdr_error_boundary__/0`.
+  constraint); the worker marker `__sdr_error_boundary__/0`; the
+  test-build fault point `:worker_boundary_faults`.
 
   RED: the filter, the boundary and the worker markers do not exist yet;
   each such test fails on an explicit `C4-01a:` assertion (presence guards
@@ -81,24 +89,16 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
 
   defmodule BoundaryWorker do
     @moduledoc """
-    Test worker: runs a query that fails with a constraint error carrying
-    the canary, inside the boundary (looked up at run time, so this module
-    compiles before the boundary exists).
+    Test worker: runs one fault mode (`SdrAgent.Repo.ErrorPathPrivacyTest.fault/2`)
+    inside the boundary, looked up at run time so this module compiles
+    before the boundary exists. `max_attempts` 2, so an error is retryable.
     """
-    use Oban.Worker, queue: :default, max_attempts: 1
+    use Oban.Worker, queue: :default, max_attempts: 2
 
     @impl true
-    def perform(%Oban.Job{args: %{"canary" => canary}}) do
+    def perform(%Oban.Job{args: %{"mode" => mode, "canary" => canary}}) do
       apply(SdrAgent.Workers.ErrorBoundary, :run, [
-        fn ->
-          SdrAgent.Repo.transaction(fn ->
-            SQL.query!(
-              SdrAgent.Repo,
-              "INSERT INTO c4_error_path (v) VALUES ($1)",
-              [canary]
-            )
-          end)
-        end
+        fn -> SdrAgent.Repo.ErrorPathPrivacyTest.fault(mode, canary) end
       ])
     end
   end
@@ -114,6 +114,115 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
     end)
 
     :ok
+  end
+
+  # Raw error-bearing faults (raised or returned) and safe results, by mode.
+  @raw_modes ~w(raise_db return_pg return_nested raise_dbconn raise_ash return_ash cancel_pg)
+  @safe_results [
+    {"ok", :ok},
+    {"ok_value", {:ok, %{done: 1}}},
+    {"snooze", {:snooze, 4321}},
+    {"error_safe", {:error, :c4_safe_reason}},
+    {"cancel_safe", {:cancel, :c4_safe_reason}}
+  ]
+
+  @doc false
+  def fault("raise_db", text),
+    do: Repo.transaction(fn -> SQL.query!(Repo, "SELECT $1::text::integer", [text]) end)
+
+  def fault("return_pg", text), do: {:error, pg_error(text)}
+
+  def fault("return_nested", text),
+    do:
+      {:error,
+       {:wrapped,
+        %{cause: DBConnection.ConnectionError.exception(message: "connection " <> text)}}}
+
+  def fault("raise_dbconn", text),
+    do: raise(DBConnection.ConnectionError, message: "connection " <> text)
+
+  def fault("raise_ash", text), do: raise(ash_error(text))
+  def fault("return_ash", text), do: {:error, ash_error(text)}
+  def fault("cancel_pg", text), do: {:cancel, pg_error(text)}
+
+  def fault(mode, _text) do
+    {^mode, result} = List.keyfind(@safe_results, mode, 0)
+    result
+  end
+
+  # The module a raw mode's sanitized summary must name.
+  defp summary_module("raise_db"), do: "Postgrex.Error"
+  defp summary_module("return_pg"), do: "Postgrex.Error"
+  defp summary_module("cancel_pg"), do: "Postgrex.Error"
+  defp summary_module("return_nested"), do: "DBConnection.ConnectionError"
+  defp summary_module("raise_dbconn"), do: "DBConnection.ConnectionError"
+  defp summary_module(ash) when ash in ["raise_ash", "return_ash"], do: "Ash.Error.Invalid"
+
+  defp disposition?({tag, _reason}, tag), do: true
+  defp disposition?(_result, _tag), do: false
+
+  defp disposition("cancel_pg"), do: :cancel
+  defp disposition(_raw), do: :error
+
+  defp ash_error(text),
+    do:
+      Ash.Error.Invalid.exception(
+        errors: [
+          Ash.Error.Changes.InvalidAttribute.exception(field: :note, message: "bad", value: text)
+        ]
+      )
+
+  defp render(term), do: inspect(term, limit: :infinity, printable_limit: :infinity)
+
+  # Runs `fun` in a bounded task (sandbox allowed through `$callers`).
+  defp bounded(fun, ms \\ 15_000) do
+    task = Task.async(fn -> observe(fun) end)
+
+    case Task.yield(task, ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      other -> {:timeout, other}
+    end
+  end
+
+  defp put_faults!(faults) do
+    previous = Application.fetch_env(:sdr_agent, :worker_boundary_faults)
+    Application.put_env(:sdr_agent, :worker_boundary_faults, faults)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:sdr_agent, :worker_boundary_faults, value)
+        :error -> Application.delete_env(:sdr_agent, :worker_boundary_faults)
+      end
+    end)
+  end
+
+  defp app_workers do
+    {:ok, modules} = :application.get_key(:sdr_agent, :modules)
+    workers = Enum.filter(modules, &app_worker?/1)
+    assert length(workers) >= 12, "the worker inventory found #{length(workers)} workers"
+    workers
+  end
+
+  defp probe_job(worker, n) do
+    opts = worker.__opts__()
+
+    %Oban.Job{
+      id: nil,
+      worker: inspect(worker),
+      queue: to_string(Keyword.get(opts, :queue, :default)),
+      args: %{"c4_boundary_probe" => n},
+      attempt: 1,
+      max_attempts: Keyword.get(opts, :max_attempts, 20)
+    }
+  end
+
+  defp job_rows(ids) do
+    SQL.query!(
+      Repo,
+      "SELECT id, state, errors::text FROM oban_jobs WHERE id = ANY($1)",
+      [ids]
+    ).rows
+    |> Map.new(fn [id, state, errors] -> {id, {state, errors}} end)
   end
 
   defp canary, do: "c4errcanary" <> "ZQ7"
@@ -363,63 +472,147 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
   end
 
   describe "ADR 231-233, 248-249: Oban worker boundaries" do
-    test "the boundary passes results through and summarizes a database exception" do
+    test "run/1 passes safe results through unchanged" do
       require_module!(@boundary)
       assert function_exported?(@boundary, :run, 1), "C4-01a: ErrorBoundary.run/1 missing"
-      text = canary()
 
-      assert observe(fn -> apply(@boundary, :run, [fn -> {:ok, :done} end]) end) == {:ok, :done}
+      for {mode, expected} <- @safe_results do
+        result = observe(fn -> apply(@boundary, :run, [fn -> fault(mode, canary()) end]) end)
 
-      result =
-        observe(fn ->
-          apply(@boundary, :run, [
-            fn ->
-              Repo.transaction(fn -> SQL.query!(Repo, "SELECT $1::text::integer", [text]) end)
-            end
-          ])
-        end)
-
-      refute match?({:raised, _}, result), "C4-01a: the boundary let the database exception raise"
-      assert match?({:error, _}, result), "C4-01a: the boundary did not return {:error, _}"
-      refute inspect(result, limit: :infinity, printable_limit: :infinity) =~ text
-      assert inspect(result) =~ "Postgrex.Error"
+        assert result == expected,
+               "C4-01a: the safe result #{mode} was changed: #{inspect(result)}"
+      end
     end
 
-    test "an Oban job that hits a constraint error leaves no canary in oban_jobs.errors" do
+    test "run/1 summarizes raised and returned raw errors, keeping the disposition" do
       require_module!(@boundary)
       text = canary()
-      temp_tables!()
+
+      for mode <- @raw_modes do
+        result = observe(fn -> apply(@boundary, :run, [fn -> fault(mode, text) end]) end)
+
+        refute match?({:raised, _}, result), "C4-01a: #{mode}: the boundary let the error raise"
+
+        assert disposition?(result, disposition(mode)),
+               "C4-01a: #{mode}: disposition #{disposition(mode)} not kept"
+
+        refute render(result) =~ text, "C4-01a: #{mode}: the raw error passed through"
+        assert render(result) =~ summary_module(mode), "C4-01a: #{mode}: no sanitized summary"
+      end
+    end
+
+    test "persisted oban_jobs rows: raw errors are summaries; dispositions are kept" do
+      require_module!(@boundary)
+      text = canary()
+      modes = @raw_modes ++ Enum.map(@safe_results, &elem(&1, 0))
 
       log =
         capture_log([level: :debug], fn ->
-          {:ok, _job} = %{"canary" => text} |> BoundaryWorker.new() |> Oban.insert()
+          ids =
+            for mode <- modes, into: %{} do
+              {:ok, job} =
+                %{"mode" => mode, "canary" => text} |> BoundaryWorker.new() |> Oban.insert()
+
+              {mode, job.id}
+            end
+
+          Process.put(:c4_job_ids, ids)
           Oban.drain_queue(queue: :default, with_safety: true)
         end)
 
-      errors =
-        SQL.query!(
-          Repo,
-          "SELECT errors::text FROM oban_jobs WHERE worker = $1",
-          [inspect(BoundaryWorker)]
-        ).rows
-        |> List.flatten()
+      ids = Process.get(:c4_job_ids)
+      rows = job_rows(Map.values(ids))
 
-      assert errors != [] and Enum.all?(errors, &(&1 =~ "Postgrex.Error")),
-             "C4-01a: the job's error was not recorded as a summary: #{inspect(errors)}"
+      for mode <- @raw_modes do
+        {state, errors} = Map.fetch!(rows, Map.fetch!(ids, mode))
+        refute errors =~ text, "C4-01a: #{mode}: the canary reached oban_jobs.errors"
 
-      refute Enum.any?(errors, &(&1 =~ text)), "C4-01a: the canary reached oban_jobs.errors"
-      assert_no_canary(log, text, "Oban job")
+        assert errors =~ summary_module(mode),
+               "C4-01a: #{mode}: oban_jobs.errors holds no sanitized summary: #{errors}"
+
+        expected = if mode == "cancel_pg", do: "cancelled", else: "retryable"
+        assert state == expected, "C4-01a: #{mode}: state #{state}, expected #{expected}"
+      end
+
+      expected_states = %{
+        "ok" => "completed",
+        "ok_value" => "completed",
+        "snooze" => "scheduled",
+        "error_safe" => "retryable",
+        "cancel_safe" => "cancelled"
+      }
+
+      for {mode, expected} <- expected_states do
+        {state, _errors} = Map.fetch!(rows, Map.fetch!(ids, mode))
+        assert state == expected, "C4-01a: safe #{mode}: state #{state}, expected #{expected}"
+      end
+
+      assert_no_canary(log, text, "Oban jobs")
     end
 
-    test "every app Oban worker declares the error boundary" do
-      {:ok, modules} = :application.get_key(:sdr_agent, :modules)
+    test "every production worker's real perform path runs inside the boundary" do
+      require_module!(@boundary)
+      text = canary()
 
-      workers = Enum.filter(modules, &app_worker?/1)
+      for {worker, n} <- Enum.with_index(app_workers()), mode <- @raw_modes do
+        put_faults!(%{worker => fn _job -> fault(mode, text) end})
+        result = bounded(fn -> worker.perform(probe_job(worker, n)) end)
 
-      assert length(workers) >= 12, "the worker inventory found #{length(workers)} workers"
+        assert disposition?(result, disposition(mode)) and
+                 render(result) =~ summary_module(mode),
+               "C4-01a: #{inspect(worker)} #{mode}: perform did not go through the boundary"
 
+        refute render(result) =~ text, "C4-01a: #{inspect(worker)} #{mode}: raw error passed"
+      end
+
+      for {worker, n} <- Enum.with_index(app_workers()) do
+        put_faults!(%{worker => fn _job -> {:snooze, 4321} end})
+
+        assert bounded(fn -> worker.perform(probe_job(worker, n)) end) == {:snooze, 4321},
+               "C4-01a: #{inspect(worker)}: a safe result did not pass through its boundary"
+      end
+    end
+
+    test "every production worker's persisted job errors are summaries" do
+      require_module!(@boundary)
+      text = canary()
+      workers = app_workers()
+      put_faults!(Map.new(workers, &{&1, fn _job -> fault("return_pg", text) end}))
+
+      log =
+        capture_log([level: :debug], fn ->
+          ids =
+            for {worker, n} <- Enum.with_index(workers), into: %{} do
+              {:ok, job} = %{"c4_boundary_probe" => n} |> worker.new() |> Oban.insert()
+              {worker, job.id}
+            end
+
+          Process.put(:c4_job_ids, ids)
+
+          queues =
+            workers |> Enum.map(&Keyword.get(&1.__opts__(), :queue, :default)) |> Enum.uniq()
+
+          for queue <- queues,
+              do: bounded(fn -> Oban.drain_queue(queue: queue, with_safety: true) end, 30_000)
+        end)
+
+      ids = Process.get(:c4_job_ids)
+      rows = job_rows(Map.values(ids))
+
+      for {worker, id} <- ids do
+        {_state, errors} = Map.fetch!(rows, id)
+        refute errors =~ text, "C4-01a: #{inspect(worker)}: the canary reached oban_jobs.errors"
+
+        assert errors =~ "Postgrex.Error",
+               "C4-01a: #{inspect(worker)}: its job error is not the boundary summary: #{errors}"
+      end
+
+      assert_no_canary(log, text, "production workers")
+    end
+
+    test "every app Oban worker declares the error boundary (inventory)" do
       missing =
-        Enum.reject(workers, fn worker ->
+        Enum.reject(app_workers(), fn worker ->
           function_exported?(worker, :__sdr_error_boundary__, 0) and
             worker.__sdr_error_boundary__() == true
         end)
@@ -518,10 +711,19 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
     end
 
     test "leaves an event without an error struct unchanged (positive control)" do
-      _ = attached_filter!()
+      {fun, opts} = attached_filter!()
       marker = "c4 plain marker " <> "unchanged"
       log = capture_log([level: :debug], fn -> Logger.error(marker) end)
       assert log =~ marker
+
+      for event <- [
+            %{level: :error, msg: {:string, marker}, meta: %{c4_safe: "kept", time: 1}},
+            %{level: :warning, msg: {:report, %{c4: :report}}, meta: %{c4_safe: "kept"}},
+            %{level: :info, msg: {~c"c4 ~p", [:safe]}, meta: %{}}
+          ] do
+        assert fun.(event, opts) == event,
+               "C4-01a: a safe event was rewritten: #{inspect(fun.(event, opts))}"
+      end
     end
   end
 
