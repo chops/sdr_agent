@@ -1,6 +1,7 @@
 # R0-06 profile proof: evidence record and owner runbook
 
-**Status:** draft 3, 2026-10-16. **Codex PASS** for the record and
+**Status:** draft 4, 2026-10-16: the owner's OQ-R6-1 amendment (D-142) in
+sections 0, 2 and 5; needs Codex review. Draft 3 had **Codex PASS** for the record and
 runbook template (`82c07ef7`, exact `3fbabaf`); not a completed proof
 or any execution authority. Shaped by Codex's pre-read rulings
 (`codex-r006-preread-4b41d10e.md`, consultation `4b41d10e`). Draft 1
@@ -21,12 +22,14 @@ choice.
 
 ## 0. Acceptance (issue #54, REQ-R0-11)
 
-1. **Two synthetic calibration attempts per profile** under G-R0, four in
-   all. Each is an actual, separately attended attempt run by the owner,
-   with Codex's evidence review before the next attempt. One PASS plus an
-   unused slot is **not** equivalent (Codex ruling c). Changing this needs
-   an explicit owner amendment to #54, the readiness packet and this
-   record.
+1. **One reviewed PASS per profile** under G-R0 (amended by the owner,
+   D-142, OQ-R6-1 = B; the earlier text required two actual attempts per
+   profile, four in all). Each is an actual, separately attended attempt
+   run by the owner, with Codex's evidence review before the next attempt.
+   G-R0's terms are unchanged: the second slot per profile is reserved for
+   a failed, invalid or unknown attempt and is not required. A failed
+   attempt stays charged and is not proof. #54 and the readiness packet
+   carry the same amendment.
 2. **Witness reconciled:** Codex reviews each captured exchange against
    its hermetically built candidate; then each exact tuple is promoted by
    a reviewed config PR.
@@ -95,11 +98,12 @@ An outstanding lock, ticket or unlatched predecessor is a stop.
 
 | Profile | Required | Done | Remaining |
 |---|---|---|---|
-| `claude_cli_opus` | 2 | 1 | 1 |
-| `claude_cli_sonnet` | 2 | 0 | 2 |
+| `claude_cli_opus` | 1 PASS | 1 PASS | 0 |
+| `claude_cli_sonnet` | 1 PASS | 0 | 1 |
 
-These counts follow the current acceptance (section 0, item 1) and
-change if the owner amends it (OQ-R6-1). Grant usage after each attempt
+These counts follow the amended acceptance (section 0, item 1; D-142).
+A failed, invalid or unknown attempt uses that profile's reserved slot
+and the PASS is still required. Grant usage after each attempt
 is recorded in the private evidence index.
 
 The run, invocation, grant, allocation and witness-link ids, and the
@@ -229,16 +233,15 @@ history stays.
   billing and expiry exceptions; any change to the acceptance; OQ-E1
   publication; outstanding ADR acceptances; the UI trial and product
   acceptance; every merge and any enablement.
-- **Done when** all of: the prerequisites merged; the four attempts
-  recorded with reviewed evidence; the promotion merged through its
+- **Done when** all of: the prerequisites merged; one reviewed PASS per
+  profile recorded, with every actual attempt listed; the promotion merged through its
   reviewed process; the owner's UI and no-call trial recorded; exact-head
   CI and Codex's approving review of this record; the owner's acceptance.
   The record then states that ordinary calls remain staged.
 
 ## Open questions
 
-- **OQ-R6-1 (owner):** keep the two-attempts-per-profile acceptance, or
-  amend it to one reviewed PASS per profile with the second slot reserved
-  for failures? The current text requires two actual attempts each.
+- **OQ-R6-1 (owner): decided** (D-142, 2026-10-16): one reviewed PASS per
+  profile, the second slot reserved for failures.
 - **OQ-E1 (owner, existing):** publication of raw evidence. Until then this
   record carries hashes and verdict references only.

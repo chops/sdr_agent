@@ -90,8 +90,8 @@ c while b2 is in review is preparation, not extra capacity.
   promise. While Bandit is unresolved there is no dependable date.
   Protected S6 is not spent silently.
 - **What G-R0's expiry does and doesn't gate:**
-  - **R0-06 isn't a no-call story overall.** It includes calibration (2
-    attempts per profile under G-R0), Codex's independent review of the
+  - **R0-06 isn't a no-call story overall.** It includes calibration (one
+    reviewed PASS per profile under G-R0, D-142), Codex's independent review of the
     captured exchanges, and the exact tuple promotion.
   - **Calibration is scheduled for Oct 15, not done.** It is gated, and
     its evidence must be valid for each exact tuple.
