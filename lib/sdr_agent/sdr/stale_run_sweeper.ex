@@ -94,6 +94,7 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   case.
   """
   use Oban.Worker, queue: :default, max_attempts: 1
+  use SdrAgent.Workers.ErrorBoundary
 
   import Ecto.Query, only: [from: 2]
 

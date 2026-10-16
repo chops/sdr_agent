@@ -14,6 +14,9 @@ defmodule SdrAgent.Application do
     # root refuses to boot, before anything starts or reads (ADR-0005).
     Witness.check_configured_root!()
     SdrAgent.Telemetry.setup()
+    # ADR-0005 C4 amendment: crash reports and error logs never carry raw
+    # database or Ash error values.
+    :ok = SdrAgent.Logger.ExceptionFilter.attach()
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options

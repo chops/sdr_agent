@@ -9,6 +9,9 @@ defmodule SdrAgent.SDR.AssignmentTest do
   """
   use SdrAgent.SDRCase, async: false
 
+  # C4-R8: these assignments need a saved offering profile (synthetic fixture).
+  setup ctx, do: ensure_offering!(ctx)
+
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Operations.Operation

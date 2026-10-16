@@ -1,6 +1,7 @@
 defmodule SdrAgent.Audit.AnchorWorker do
   @moduledoc "Oban cadence job: anchors after N events or the configured maximum interval."
   use Oban.Worker, queue: :default, max_attempts: 5, unique: [period: 60]
+  use SdrAgent.Workers.ErrorBoundary
 
   require Ash.Query
 

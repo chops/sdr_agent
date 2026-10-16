@@ -28,6 +28,14 @@ defmodule SdrAgent.Agents.Witness.ReviewRegressionsTest do
     tenant = bootstrap!()
     # C9: real-model (ClaudeCLI) reservations are charged to a grant.
     AgentsFixtures.grant!(tenant)
+    # C4-R10: a run budget above the built-in 20 calls is an owner setting
+    # (a confirmed raise); the caller's argument may only lower it.
+    limits = Map.put(SdrAgent.SettingsFixtures.limit_defaults(), :run_max_model_calls, 100)
+
+    SdrAgent.SettingsFixtures.save!(:operational_limits, limits, human(:admin, tenant),
+      confirm_raised: [:run_max_model_calls]
+    )
+
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant, max_model_calls: 100)
 
     root =

@@ -97,6 +97,11 @@ config :spark,
     "Ash.Domain": [section_order: [:resources, :policies, :authorization, :domain, :execution]]
   ]
 
+# ADR-0005 C4 amendment: Ecto's default query logger (it logs bound
+# parameters) is off in every environment; `SdrAgent.Repo.QueryLog` logs
+# allowlisted metadata only.
+config :sdr_agent, SdrAgent.Repo, log: false
+
 config :sdr_agent,
   ecto_repos: [SdrAgent.Repo],
   generators: [timestamp_type: :utc_datetime],
@@ -229,10 +234,11 @@ config :opentelemetry, resource: %{service: %{name: "sdr_agent"}}
 config :phoenix, :json_library, Jason
 
 # Parameters shown as "[FILTERED]" in Phoenix and LiveView logs
-# (`Phoenix.Logger.filter_values/1`): the default "password", and R0-05's
-# typed resolution confirmation (`docs/product/r0/r0-05-interface.md`
-# section 5).
-config :phoenix, :filter_parameters, ["password", "resolution_confirmation"]
+# (`Phoenix.Logger.filter_values/1`): the default "password"; C4 section
+# 3.6's settings form params, which live under `settings_content`; and
+# R0-05's typed resolution confirmation
+# (`docs/product/r0/r0-05-interface.md` section 5).
+config :phoenix, :filter_parameters, ["password", "settings_content", "resolution_confirmation"]
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
