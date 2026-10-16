@@ -23,6 +23,8 @@ defmodule SdrAgent.Test.ResolveHarness do
       `Reaper.release/1`: no named server and no lease.
     * `admission_blocked!/1` — an unidentified fake launch blocks admission,
       then the switch's veto blocks it (`old_cli_not_quiescent`).
+    * `partial!/1` — a `:survivor` whose range holds a start allocated, then
+      failed with no recorded identity.
 
   **The calls** `facts/2` (`Agents.blocked_switch_facts/2`) and `resolve/4`
   (`Agents.resolve_blocked_switch/3`) first assert that the function is
@@ -64,7 +66,9 @@ defmodule SdrAgent.Test.ResolveHarness do
   Starts the profile tree (non-manual) with the fake CLI. Options: `faults:`
   and `cleanup_wait_ms:` (passed to the coordinator), `unidentified:` (a
   profile whose launches get no OS pid), `failing_preflight:` (a profile
-  whose server fails the no-call preflight).
+  whose server fails the no-call preflight), `start_failure:` (a profile
+  whose server never starts, so its start is allocated, then failed with no
+  recorded identity).
   """
   def tree!(opts \\ []) do
     parent = self()
@@ -87,6 +91,7 @@ defmodule SdrAgent.Test.ResolveHarness do
       |> then(
         &if(opts[:failing_preflight] == profile_id, do: Keyword.put(&1, :command, nil), else: &1)
       )
+      |> then(&if(opts[:start_failure] == profile_id, do: Keyword.put(&1, :timeout, 1), else: &1))
     end
 
     tree_opts = [server: server] ++ Keyword.take(opts, [:faults, :cleanup_wait_ms])
@@ -147,23 +152,58 @@ defmodule SdrAgent.Test.ResolveHarness do
   def sync, do: :sys.get_state(Coordinator, 30_000)
 
   @doc """
-  Waits (bounded, never failing) until the coordinator's mailbox is empty and
-  its status is unchanged over 300 ms, so a test doesn't end mid-call.
+  A bounded join of the coordinator's queued work: it handles everything
+  already in its mailbox, its mailbox is then empty, and it handles any
+  message that arrived meanwhile. Flunks if the mailbox never empties.
   """
-  def quiet!(timeout \\ 10_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    quiet(deadline)
+  def drain!(timeout \\ 10_000) do
+    sync()
+
+    await!(
+      fn ->
+        pid = Process.whereis(Coordinator)
+        is_pid(pid) and Process.info(pid, :message_queue_len) == {:message_queue_len, 0}
+      end,
+      timeout,
+      "the coordinator's mailbox never drained"
+    )
+
+    sync()
   end
 
-  defp quiet(deadline) do
-    before = status()
-    Process.sleep(300)
-    pid = Process.whereis(Coordinator)
-    empty? = is_pid(pid) and Process.info(pid, :message_queue_len) == {:message_queue_len, 0}
+  @doc """
+  Blocks the coordinator inside `Coordinator.test_run/2` (no database
+  connection held) until `release_coordinator!/1`; returns `{task,
+  coordinator}`. Released on exit.
+  """
+  def block_coordinator! do
+    parent = self()
 
-    if (empty? and status() == before) or System.monotonic_time(:millisecond) > deadline,
-      do: :ok,
-      else: quiet(deadline)
+    task =
+      Task.async(fn ->
+        Coordinator.test_run(
+          fn _binding ->
+            send(parent, {:coordinator_blocked, self()})
+
+            receive do
+              :go -> :ok
+            after
+              60_000 -> :ok
+            end
+          end,
+          65_000
+        )
+      end)
+
+    assert_receive {:coordinator_blocked, coordinator}, 5_000
+    on_exit(fn -> send(coordinator, :go) end)
+    {task, coordinator}
+  end
+
+  @doc "Releases a `block_coordinator!/0` block and joins it."
+  def release_coordinator!({task, coordinator}) do
+    send(coordinator, :go)
+    Task.await(task, 10_000)
   end
 
   @doc "Kills the coordinator (call only when it is idle or on its own connection)."
@@ -338,6 +378,32 @@ defmodule SdrAgent.Test.ResolveHarness do
     blocked
   end
 
+  @doc """
+  A blocked switch (`:survivor`) whose covered range holds a start that was
+  allocated, then failed with no recorded identity: the candidate never
+  starts, the rollback is paused after its preflight, then a coordinator
+  kill; the next boot adopts the rollback server and blocks the switch.
+  """
+  def partial!(ctx) do
+    tree!(start_failure: :claude_cli_sonnet)
+    first = await_status!(&(&1.hold == :released))
+    pause = pause_stage!(:preflighted)
+    switch = request_switch!(ctx)
+    assert_receive {:stage_paused, :preflighted, _worker}, 20_000
+    :telemetry.detach(pause)
+    kill_coordinator!()
+
+    blocked = await_switch!(ctx, switch.id, :blocked)
+    assert blocked.failure_reason =~ "coordinator_restarted"
+
+    await_status!(
+      &(&1.boot_id != first.boot_id and &1.hold == :held and is_integer(&1.generation))
+    )
+
+    sync()
+    blocked
+  end
+
   @doc "Builds the fixture of lease kind `kind`."
   def blocked!(ctx, :survivor), do: survivor!(ctx)
   def blocked!(ctx, :dead_holder), do: dead_holder!(ctx)
@@ -407,6 +473,12 @@ defmodule SdrAgent.Test.ResolveHarness do
   @doc "The facts' latest start."
   def facts_latest(facts), do: Map.fetch!(facts, :latest_start)
 
+  @doc "Asserts that the resolver exists (before a fixture that needs its columns)."
+  def require_resolver! do
+    assert function_exported?(Agents, :resolve_blocked_switch, 3),
+           "C2-02b2β: SdrAgent.Agents.resolve_blocked_switch/3 is not implemented"
+  end
+
   @doc "`Agents.resolve_blocked_switch/3`, presence-guarded and bounded."
   def resolve(switch, attestation, actor, opts \\ []) do
     task = resolve_task(switch, attestation, actor, opts)
@@ -418,8 +490,7 @@ defmodule SdrAgent.Test.ResolveHarness do
   (a 0-arity function) runs in it first, before the call.
   """
   def resolve_task(switch, attestation, actor, opts \\ []) do
-    assert function_exported?(Agents, :resolve_blocked_switch, 3),
-           "C2-02b2β: SdrAgent.Agents.resolve_blocked_switch/3 is not implemented"
+    require_resolver!()
 
     {init, opts} = Keyword.pop(opts, :init, fn -> :ok end)
 
@@ -465,22 +536,31 @@ defmodule SdrAgent.Test.ResolveHarness do
   """
   def pause_stage!(stage) do
     id = "c202b2b-stage-#{System.unique_integer([:positive])}"
+    {:ok, paused} = Agent.start(fn -> [] end)
 
     :ok =
       :telemetry.attach(
         id,
         @stage,
         &__MODULE__.stage_handler/4,
-        %{parent: self(), stage: stage}
+        %{parent: self(), stage: stage, paused: paused}
       )
 
-    on_exit(fn -> :telemetry.detach(id) end)
+    # Never leaves a paused process behind, even after a failure.
+    on_exit(fn ->
+      :telemetry.detach(id)
+      for pid <- Agent.get(paused, & &1), do: send(pid, :continue)
+      Agent.stop(paused)
+    end)
+
     id
   end
 
   @doc false
-  def stage_handler(_event, _measurements, %{stage: stage}, %{stage: stage, parent: parent}) do
-    send(parent, {:stage_paused, stage, self()})
+  def stage_handler(_event, _measurements, %{stage: stage}, %{stage: stage} = config) do
+    me = self()
+    Agent.update(config.paused, &[me | &1])
+    send(config.parent, {:stage_paused, stage, self()})
 
     receive do
       :continue -> :ok
@@ -499,23 +579,33 @@ defmodule SdrAgent.Test.ResolveHarness do
   def query_pause!(tag, matcher) do
     id = "c202b2b-query-#{System.unique_integer([:positive])}"
     once = :atomics.new(1, [])
+    {:ok, paused} = Agent.start(fn -> [] end)
 
     :ok =
       :telemetry.attach(id, @query, &__MODULE__.query_handler/4, %{
         parent: self(),
         tag: tag,
         matcher: matcher,
-        once: once
+        once: once,
+        paused: paused
       })
 
-    on_exit(fn -> :telemetry.detach(id) end)
+    # Never leaves a paused process behind, even after a failure.
+    on_exit(fn ->
+      :telemetry.detach(id)
+      for pid <- Agent.get(paused, & &1), do: resume(pid, tag)
+      Agent.stop(paused)
+    end)
+
     id
   end
 
   @doc false
   def query_handler(_event, _measurements, meta, config) do
     if config.matcher.(meta) and :atomics.compare_exchange(config.once, 1, 0, 1) == :ok do
-      send(config.parent, {config.tag, self()})
+      me = self()
+      Agent.update(config.paused, &[me | &1])
+      send(config.parent, {config.tag, me})
       tag = config.tag
 
       receive do
@@ -618,18 +708,23 @@ defmodule SdrAgent.Test.ResolveHarness do
 
   @doc false
   def log_handler(_event, _measurements, meta, %{log: log, matcher: matcher}) do
-    if matcher.(meta), do: Agent.update(log, &[to_string(meta.query) | &1])
+    if matcher.(meta) do
+      status = if match?({:ok, _}, meta.result), do: :ok, else: :error
+      Agent.update(log, &[{to_string(meta.query), status} | &1])
+    end
+
     :ok
   catch
     :exit, _ -> :ok
   end
 
-  @doc "The queries a `query_log!/1` recorded, in order."
+  @doc "The `{query, :ok | :error}` entries a `query_log!/1` recorded, in order."
   def logged(log), do: log |> Agent.get(& &1) |> Enum.reverse()
 
   @doc """
-  Records every `Reaper.release/1` call system-wide; `release_callers/1`
-  returns the calling pids. Stopped on exit.
+  Records every `Reaper.release/1` call system-wide, with its caller and
+  name. Positive control: a test-side release of a probe name is seen before
+  this returns. Tracing is disabled and the collector joined on exit.
   """
   def trace_release! do
     collector = spawn(fn -> collect([]) end)
@@ -639,34 +734,57 @@ defmodule SdrAgent.Test.ResolveHarness do
     on_exit(fn ->
       :erlang.trace(:all, false, [:call])
       :erlang.trace_pattern({Reaper, :release, 1}, false, [:global])
+      ref = Process.monitor(collector)
       send(collector, :stop)
+
+      receive do
+        {:DOWN, ^ref, :process, ^collector, _} -> :ok
+      after
+        5_000 -> Process.exit(collector, :kill)
+      end
     end)
+
+    :ok = Reaper.release(:c202b2b_trace_probe)
+
+    assert release_callers(collector, :c202b2b_trace_probe) == [self()],
+           "trace control: the test-side probe release was not seen"
 
     collector
   end
 
-  defp collect(callers) do
+  defp collect(calls) do
     receive do
-      {:trace, pid, :call, {Reaper, :release, _args}} ->
-        collect([pid | callers])
+      {:trace, pid, :call, {Reaper, :release, [name]}} ->
+        collect([{pid, name} | calls])
 
-      {:callers, from} ->
-        send(from, {:release_callers, Enum.reverse(callers)})
-        collect(callers)
+      {:calls, from, ref} ->
+        send(from, {:release_calls, ref, Enum.reverse(calls)})
+        collect(calls)
 
       :stop ->
         :ok
     end
   end
 
-  @doc "The pids that called `Reaper.release/1` since `trace_release!/0`."
-  def release_callers(collector) do
-    # Trace messages already sent precede this request.
-    Process.sleep(50)
-    send(collector, {:callers, self()})
+  @doc """
+  The pids that called `Reaper.release(name)` (default: the named server's
+  lease) since `trace_release!/0`. Every trace message already generated is
+  delivered first (`:erlang.trace_delivered/1`), then the collector answers.
+  """
+  def release_callers(collector, name \\ ClaudeCLI.server()) do
+    delivered = :erlang.trace_delivered(:all)
 
     receive do
-      {:release_callers, callers} -> callers
+      {:trace_delivered, :all, ^delivered} -> :ok
+    after
+      5_000 -> flunk("trace messages were never delivered")
+    end
+
+    ref = make_ref()
+    send(collector, {:calls, self(), ref})
+
+    receive do
+      {:release_calls, ^ref, calls} -> for {pid, ^name} <- calls, do: pid
     after
       5_000 -> flunk("the release trace collector did not answer")
     end
@@ -683,20 +801,24 @@ defmodule SdrAgent.Test.ResolveHarness do
 
     task =
       Task.async(fn ->
-        Repo.transaction(fn ->
-          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
-          fun.()
-          send(parent, {:holding, self(), backend})
+        Repo.transaction(
+          fn ->
+            [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+            fun.()
+            send(parent, {:holding, self(), backend})
 
-          receive do
-            :release -> :ok
-          after
-            60_000 -> :ok
-          end
-        end)
+            receive do
+              :release -> :ok
+            after
+              60_000 -> :ok
+            end
+          end,
+          timeout: 90_000
+        )
       end)
 
     assert_receive {:holding, _pid, backend}, 10_000
+    on_exit(fn -> send(task.pid, :release) end)
     {task, backend}
   end
 
@@ -714,18 +836,27 @@ defmodule SdrAgent.Test.ResolveHarness do
       ])
 
   @doc "Waits (bounded) until some backend waits on `holder`'s locks."
-  def await_blocked_by!(holder, timeout \\ 10_000) do
-    await!(
-      fn ->
-        Repo.query!(
-          "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
-          [holder]
-        ).rows != [[0]]
-      end,
-      timeout,
-      "no backend waited on #{holder}"
-    )
+  def await_blocked_by!(holder, timeout \\ 10_000, message \\ nil) do
+    await!(fn -> waiters(holder) != [] end, timeout, message || "no backend waited on #{holder}")
+    waiters(holder)
   end
+
+  @doc "The `[pid, query]` of every backend blocked by `holder`."
+  def waiters(holder),
+    do:
+      Repo.query!(
+        "SELECT pid, query FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+        [holder]
+      ).rows
+
+  @doc "The granted relation locks of backend `pid`, as `[relname, mode]`."
+  def relation_locks(pid),
+    do:
+      Repo.query!(
+        "SELECT c.relname, l.mode FROM pg_locks l JOIN pg_class c ON c.oid = l.relation " <>
+          "WHERE l.pid = $1 AND l.granted",
+        [pid]
+      ).rows
 
   @doc "The backend that holds an uncommitted switch-row write (nil if none)."
   def switch_writer do

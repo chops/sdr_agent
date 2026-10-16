@@ -1,25 +1,29 @@
 defmodule SdrAgent.AI.ProfileCoordinatorResolveTest do
   @moduledoc """
   C2-02b2β RED (`docs/product/r0/c2-02b2b-interface.md` draft 4, interface
-  and entity PASS at `e60943c`), section 8 "Coordinator and runtime": tests
-  15, 16, 17 (a request expired in a blocked mailbox), 18, 19 (a death after
-  the commit), 20 (a forced failure before the commit) and 21, plus the
-  binding obligations on the hard conflict, current runtime facts, failed
-  lookups and `Reaper.release/1` (`codex-c202b2beta-e60943c-interface-pass.md`).
+  and entity PASS at `e60943c`; revised for Codex 8a5eb73 MF1–MF4), section
+  8 "Coordinator and runtime": tests 15, 16, 18, 19 (a death after the
+  commit) and 20 (a forced failure before the commit), plus the binding
+  obligations on the hard conflict, current runtime facts, failed lookups
+  and `Reaper.release/1`. Test 17 is in the race file (it needs barrier
+  evidence on independent connections).
 
   Every switch is blocked by the real b2α coordinator
-  (`SdrAgent.Test.ResolveHarness`). Test-build-only seams chosen for the
-  cases the contract leaves to a seam: the coordinator faults `observe: fn
-  -> :read | :unavailable end` (the lease and hold observation) and
-  `replay_read: fn -> :read | :unavailable end` (the coordinator's stored
-  replay read); an unacknowledged hold and a busy coordinator are set on
-  b2α's own state fields (`hold_state`, `op`, `reconcile`) with
-  `:sys.replace_state/2`. The operator path (`Reaper.release/1`) is always
-  run by the test; a trace proves the coordinator never calls it. Shared SQL
-  sandbox; the fake CLI; no model call.
+  (`SdrAgent.Test.ResolveHarness`). Test-build-only seams chosen: the
+  coordinator faults `observe:` (the lease and hold observation),
+  `replay_read:` (the coordinator's stored replay read) and
+  `locked_replay_read:` (the replay check after the locks), each `fn ->
+  :read | :unavailable end`, and the caller option `faults: [replay_read:
+  fn -> ... end]` (the caller's first stored read). An unacknowledged hold
+  and a busy coordinator are set on b2α's own state fields (`hold_state`,
+  `op`, `reconcile`) with `:sys.replace_state/2`: defensive guard tests, not
+  an API precedent. The operator path (`Reaper.release/1`) is always run by
+  the test; a trace with a positive and a negative control proves the
+  coordinator never calls it. Shared SQL sandbox; the fake CLI; no model
+  call.
 
-  Passes by design: the held refusals before a resolution (test 21's first
-  step, b2α's hold) are asserted inside tests that fail on b2β behavior.
+  Passes by design: the release-trace control test, and the held refusals
+  before a resolution (b2α's hold) inside tests that fail on b2β behavior.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -147,35 +151,78 @@ defmodule SdrAgent.AI.ProfileCoordinatorResolveTest do
       assert ok?(resolve(blocked, attestation, ctx.admin))
     end
 
-    test "a failed coordinator replay read never counts as absent or resolved", ctx do
+    test "a failed caller replay read refuses before dispatch (test-only caller seam)", ctx do
+      blocked = dead_holder!(ctx)
+      attestation = attestation(blocked, latest_start!(ctx), :dead_holder)
+
+      result =
+        resolve(blocked, attestation, ctx.admin, faults: [replay_read: fn -> :unavailable end])
+
+      assert match?({:error, _}, result) and result != {:error, :switch_not_blocked},
+             "C2-02b2β: a failed caller lookup is never absence; got #{inspect(result)}"
+
+      assert switch!(ctx, blocked.id) == blocked
+      assert resolved_events(ctx) == []
+      assert ok?(resolve(blocked, attestation, ctx.admin)), "the allow side, once it reads"
+    end
+
+    test "a failed coordinator replay read refuses: never absent, never resolved", ctx do
       {:ok, gate} = Agent.start_link(fn -> :read end)
       blocked = dead_holder!(ctx, faults: [replay_read: fn -> Agent.get(gate, & &1) end])
       attestation = attestation(blocked, latest_start!(ctx), :dead_holder)
 
+      # Never resolved: a failed coordinator lookup must not proceed as absent.
       Agent.update(gate, fn _ -> :unavailable end)
-      before = resolve(blocked, attestation, ctx.admin)
+      first = resolve(blocked, attestation, ctx.admin)
 
-      assert match?({:error, _}, before) and before != {:error, :switch_not_blocked},
-             "C2-02b2β: a failed replay read must refuse, never proceed as absent; got #{inspect(before)}"
+      assert match?({:error, _}, first) and first != {:error, :switch_not_blocked},
+             "C2-02b2β: a failed coordinator lookup must refuse; got #{inspect(first)}"
 
       assert switch!(ctx, blocked.id) == blocked
       assert resolved_events(ctx) == []
 
+      # Historical: caller x misses before y's resolution commits (barriered
+      # after its own read), so x reaches the coordinator's lookup, which fails.
       Agent.update(gate, fn _ -> :read end)
-      assert ok?(resolve(blocked, attestation, ctx.admin))
-      quiet!()
-
+      query_pause!(:read_x, caller_replay_read(:x))
+      x = resolve_task(blocked, attestation, ctx.admin, init: fn -> mark_caller(:x) end)
+      assert_receive {:read_x, read_x}, 10_000, "caller x's stored replay read was never seen"
+      assert ok?(resolve(blocked, attestation, ctx.admin)), "caller y resolves"
       Agent.update(gate, fn _ -> :unavailable end)
-      again = resolve(blocked, attestation, ctx.admin)
+      resume(read_x, :read_x)
+      again = await_task(x, 25_000)
 
       refute match?({:ok, _}, again) or again == {:error, :switch_not_blocked},
-             "a failed replay read is never a replay or a resolved refusal; got #{inspect(again)}"
+             "a failed coordinator lookup is never a replay or a resolved refusal; got #{inspect(again)}"
 
       assert length(resolved_events(ctx)) == 1
+    end
+
+    test "a failed post-lock replay read rolls back: never absent", ctx do
+      blocked =
+        dead_holder!(ctx, faults: [locked_replay_read: fn -> :unavailable end])
+
+      attestation = attestation(blocked, latest_start!(ctx), :dead_holder)
+      result = resolve(blocked, attestation, ctx.admin)
+
+      assert match?({:error, _}, result) and result != {:error, :switch_not_blocked},
+             "C2-02b2β: a failed lookup after the locks must refuse; got #{inspect(result)}"
+
+      drain!()
+      assert switch!(ctx, blocked.id) == blocked
+      assert resolved_events(ctx) == []
     end
   end
 
   ## 16. Busy
+  #
+  # Coverage qualification (Codex 8a5eb73 ruling): busy during a block retry
+  # is omitted. It is unreachable with a blocked S: α's `{:retry_block, id,
+  # reason}` re-reads the target, a pending S is refused (:switch_not_blocked)
+  # before the busy branch, and a stored blocked S ends the retry. If β adds
+  # retained block-retry or settlement state, its reachable busy path must be
+  # covered then. These `:sys.replace_state/2` cases are defensive guard tests
+  # on b2α's own fields, not a natural runtime sequence.
 
   test "16. during a worker or a reconciliation the coordinator is busy; nothing is queued",
        ctx do
@@ -211,62 +258,14 @@ defmodule SdrAgent.AI.ProfileCoordinatorResolveTest do
              "C2-02b2β: during #{label} the reply is :coordinator_busy; got #{inspect(result)}"
     end
 
-    sync()
-    quiet!()
+    drain!()
     assert switch!(ctx, blocked.id) == blocked, "nothing was queued"
     assert resolved_events(ctx) == []
     assert ok?(resolve(blocked, attestation, ctx.admin))
   end
 
-  ## 17. The deadline (a request expired in a blocked mailbox)
-
-  test "17. a request expired in a blocked mailbox does nothing; held calls are refused", ctx do
-    blocked = survivor!(ctx)
-    attestation = attestation(blocked, latest_start!(ctx), :survivor)
-    assert_held_refusals!("before the resolution (passes by design)")
-    parent = self()
-
-    blocker =
-      Task.async(fn ->
-        Coordinator.test_run(
-          fn _binding ->
-            send(parent, {:coordinator_blocked, self()})
-
-            receive do
-              :go -> :ok
-            after
-              40_000 -> :ok
-            end
-          end,
-          45_000
-        )
-      end)
-
-    assert_receive {:coordinator_blocked, coordinator}, 5_000
-    started = System.monotonic_time(:millisecond)
-    caller = resolve_task(blocked, attestation, ctx.admin)
-    Process.sleep(1_000)
-    assert_held_refusals!("while the request waits")
-    result = await_task(caller, 25_000)
-    elapsed = System.monotonic_time(:millisecond) - started
-    send(coordinator, :go)
-    Task.await(blocker, 10_000)
-
-    assert result == {:error, :resolve_timeout},
-           "C2-02b2β: a request never dequeued before its deadline is a definite " <>
-             ":resolve_timeout; got #{inspect(result)}"
-
-    assert elapsed >= 14_500 and elapsed < 19_000,
-           "the 15 s deadline, then settlement: #{elapsed} ms"
-
-    # Dequeued after its deadline: refused, nothing else.
-    sync()
-    quiet!()
-    assert switch!(ctx, blocked.id) == blocked
-    assert resolved_events(ctx) == []
-    assert status().hold == :held
-    assert_held_refusals!("after the expired request")
-  end
+  ## 17. The deadline: in the race file (it needs barrier evidence on
+  ## independent connections).
 
   ## 18. After the commit
 
@@ -289,7 +288,7 @@ defmodule SdrAgent.AI.ProfileCoordinatorResolveTest do
                fresh.profile_id == blocked.from_profile_id and fresh.boot_id == released.boot_id,
              "a fresh held replacement at from, preflighted: #{inspect(Map.take(fresh, [:generation, :reason, :status, :ready_evidence, :profile_id]))}"
 
-      assert ClaudeCLI.profile(Process.whereis(ClaudeCLI.server())) == blocked.from_profile_id
+      assert_reconciled_ready!(fresh, released, blocked)
       refute_received {:launch_admission, _, _, _}, "zero launches"
       assert release_callers(tracer) == [], "the coordinator never calls Reaper.release/1"
     end
@@ -305,17 +304,22 @@ defmodule SdrAgent.AI.ProfileCoordinatorResolveTest do
       assert ok?(resolve(blocked, attestation(blocked, latest, :survivor), ctx.admin)),
              "C2-02b2β: the :survivor resolution"
 
-      await_status!(&(&1.hold == :released), 20_000)
+      released = await_status!(&(&1.hold == :released), 20_000)
       current = Process.whereis(ClaudeCLI.server())
       fresh = latest_start!(ctx)
 
-      assert current == server or
-               (fresh.generation > latest.generation and fresh.ready_evidence == :spawn_preflight),
-             "adopted, or replaced by a fresh preflighted start"
+      # The chosen path, then its reconciled readiness: adoption keeps the
+      # survivor; a replacement is a fresh preflighted start.
+      if current == server do
+        assert fresh.ready_evidence in [:adopted, :spawn_preflight]
+      else
+        assert fresh.generation > latest.generation and fresh.ready_evidence == :spawn_preflight,
+               "replaced by a fresh preflighted start"
+      end
 
-      assert ClaudeCLI.profile(current) == blocked.from_profile_id
+      assert_reconciled_ready!(fresh, released, blocked)
       refute_received {:launch_admission, _, _, _}, "zero launches"
-      assert release_callers(tracer) == []
+      assert release_callers(tracer) == [], "the coordinator never calls Reaper.release/1"
     end
 
     test ":dead_holder → held at :cleanup_unprovable; the operator path, then ready and released",
@@ -352,6 +356,8 @@ defmodule SdrAgent.AI.ProfileCoordinatorResolveTest do
                fresh.profile_id == blocked.from_profile_id,
              "a fresh allocation and preflight, not adopted or failed readiness"
 
+      assert_reconciled_ready!(fresh, released, blocked)
+
       refute_received {:launch_admission, _, _, _}, "zero launches"
       assert release_callers(tracer) == [self()], "only the test-side operator released the lease"
     end
@@ -368,7 +374,7 @@ defmodule SdrAgent.AI.ProfileCoordinatorResolveTest do
            "C2-02b2β: the :survivor resolution"
 
     await_status!(&(&1.hold == :released), 20_000)
-    quiet!()
+    drain!()
     server = Process.whereis(ClaudeCLI.server())
     reaper = ClaudeCLI.reaper(server)
     true = :erlang.suspend_process(server)
@@ -409,7 +415,45 @@ defmodule SdrAgent.AI.ProfileCoordinatorResolveTest do
     assert_held_refusals!("after the failed write")
   end
 
+  ## The release trace (harness control)
+
+  test "the release trace detects a coordinator Reaper.release/1 call (control, passes by design)",
+       _ctx do
+    tree!()
+    await_status!(&is_integer(&1.generation))
+    tracer = trace_release!()
+
+    coordinator =
+      Coordinator.test_run(
+        fn _binding ->
+          :ok = Reaper.release(:c202b2b_coordinator_control)
+          self()
+        end,
+        5_000
+      )
+
+    assert release_callers(tracer, :c202b2b_coordinator_control) == [coordinator],
+           "a forbidden coordinator release would be detected"
+  end
+
   ## Helpers
+
+  # The released server: the latest ready start of this boot, at the desired
+  # (from) profile, on the live named server's recorded pid, with that
+  # server's own live reaper holding the lease.
+  defp assert_reconciled_ready!(latest, released, blocked) do
+    server = Process.whereis(ClaudeCLI.server())
+    assert is_pid(server), "a live named server"
+    reaper = ClaudeCLI.reaper(server)
+
+    assert latest.status == :ready and latest.boot_id == released.boot_id and
+             latest.profile_id == blocked.from_profile_id and latest.pid == inspect(server),
+           "the latest start is this boot's ready start of the live server at from"
+
+    assert ClaudeCLI.profile(server) == blocked.from_profile_id
+    assert is_pid(reaper) and Process.alive?(reaper)
+    assert Reaper.lease(ClaudeCLI.server()) == {:held, reaper}, "its own live reaper's lease"
+  end
 
   defp ok?(result), do: match?({:ok, %{switch: %{status: :failed}}}, result)
 

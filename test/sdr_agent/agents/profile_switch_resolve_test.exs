@@ -104,7 +104,6 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
                "the setting row and revision are not written"
 
         assert_resolved_event!(ctx, blocked, attestation, unquote(kind), latest, setting)
-        quiet!()
       end
     end
 
@@ -132,11 +131,8 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
           |> starts!()
           |> Enum.filter(&(&1.generation in blocked.server_generation..latest.generation//1))
 
-        assert Enum.map(facts.covered_starts, & &1.id) == Enum.map(covered, & &1.id)
-
-        for start <- facts.covered_starts,
-            do: assert(start.pid && start.node && start.reaper_pid, "recorded identity")
-
+        # Each start's recorded identity, faithfully (nil for one never started).
+        assert Enum.map(facts.covered_starts, &identity/1) == Enum.map(covered, &identity/1)
         assert effects(ctx) == before, "the facts read makes no write and no runtime change"
 
         for actor <- [human(:reviewer, ctx.tenant), human(:auditor, ctx.tenant), ctx.runtime] do
@@ -145,6 +141,35 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
         end
       end
     end
+  end
+
+  test "1. the facts name a partially started range faithfully (nil identity kept)", ctx do
+    blocked = partial!(ctx)
+    latest = latest_start!(ctx)
+
+    covered =
+      ctx
+      |> starts!()
+      |> Enum.filter(&(&1.generation in blocked.server_generation..latest.generation//1))
+
+    assert Enum.any?(covered, &(&1.status == :failed and is_nil(&1.pid))),
+           "fixture: an allocated, never-started start is in the range"
+
+    result = facts(blocked, ctx.admin)
+
+    assert match?({:ok, %{}}, result),
+           "C2-02b2β: facts must be {:ok, map}; got #{inspect(result)}"
+
+    {:ok, facts} = result
+
+    assert Enum.map(facts.covered_starts, &identity/1) == Enum.map(covered, &identity/1),
+           "each covered start with its recorded identity, nil where none was recorded"
+
+    assert facts_latest(facts).id == latest.id
+    assert facts_kind(facts) == :survivor
+
+    assert match?({:error, %Ash.Error.Forbidden{}}, facts(blocked, human(:reviewer, ctx.tenant))),
+           "blocked_switch_facts is admin-only, whatever the range holds"
   end
 
   ## 2. The shape
@@ -424,7 +449,9 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
     assert match?({:ok, %{switch: _}}, resolve(blocked, attestation, ctx.admin))
     resolved = switch!(ctx, blocked.id)
     settled!(:dead_holder)
-    before = length(events(ctx.tenant))
+    # Scoped to the subject: the harness's start preparations append their
+    # own start events.
+    before = subject_events(ctx, blocked.id)
 
     # α's stale-generation guard still runs first.
     stale =
@@ -459,7 +486,8 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
     assert Map.take(switch!(ctx, blocked.id), [:status, :finished_at | @resolution_fields]) ==
              Map.take(resolved, [:status, :finished_at | @resolution_fields])
 
-    assert length(events(ctx.tenant)) == before, "no fail event on a resolved switch"
+    assert subject_events(ctx, blocked.id) == before,
+           "no fail or complete event on a resolved switch"
   end
 
   ## 7. Replay precedence
@@ -501,7 +529,7 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
     switch = request_switch!(ctx)
     await_switch!(ctx, switch.id, :completed)
     await_status!(&(&1.hold == :released))
-    quiet!()
+    drain!()
     before = effects(ctx)
 
     replay = resolve(blocked, attestation, ctx.admin)
@@ -535,10 +563,12 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
           actor: ctx.admin
         )
 
+      # Every actor exists before the baseline (creating one appends an event).
+      other_admin = new_human(:admin, ctx.tenant)
       before = effects(ctx)
 
       conflicts = [
-        {"another admin", blocked, attestation, new_human(:admin, ctx.tenant)},
+        {"another admin", blocked, attestation, other_admin},
         {"another switch", other,
          %{attestation | switch_id: other.id, confirmation: "STOPPED " <> other.id}, ctx.admin},
         {"another start", blocked, %{attestation | attested_start_id: Ecto.UUID.generate()},
@@ -608,21 +638,48 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
 
   ## 11. Tenancy and the slot
 
-  test "11. another tenant's switch is not found; a new request succeeds after the resolution",
+  test "11. another tenant's stored switch is not found: unreadable, unmutated, histories unchanged",
        ctx do
+    require_resolver!()
     blocked = dead_holder!(ctx)
     latest = latest_start!(ctx)
-    foreign = %{blocked | id: Ash.UUIDv7.generate(), tenant_id: Ash.UUIDv7.generate()}
+    foreign = foreign_switch!(blocked)
+    foreign_row = raw_row(foreign.id)
+    before = effects(ctx)
 
-    result =
-      resolve(
-        foreign,
-        attestation(foreign, latest, :dead_holder),
-        ctx.admin
-      )
+    assert facts_not_found?(facts(foreign, ctx.admin)), "the facts don't expose a foreign switch"
+
+    result = resolve(foreign, attestation(foreign, latest, :dead_holder), ctx.admin)
 
     assert not_found?(result),
-           "C2-02b2β: another tenant's switch is not found; got #{inspect(result)}"
+           "C2-02b2β: another tenant's stored switch is NotFound; got #{inspect(result)}"
+
+    {:ok, visible} = Agents.list_profile_switches(actor: ctx.admin)
+    refute Enum.any?(visible, &(&1.id == foreign.id)), "the foreign switch is never read"
+    assert raw_row(foreign.id) == foreign_row, "the foreign switch is never mutated"
+    assert effects(ctx) == before, "this tenant's history is unchanged"
+    assert switch!(ctx, blocked.id) == blocked
+    refute Enum.any?(events(ctx.tenant), &(&1.subject_id == foreign.id))
+  end
+
+  test "11. a nonexistent switch id is not found", ctx do
+    blocked = dead_holder!(ctx)
+    latest = latest_start!(ctx)
+    missing = %{blocked | id: Ash.UUIDv7.generate()}
+    before = effects(ctx)
+
+    result = resolve(missing, attestation(missing, latest, :dead_holder), ctx.admin)
+
+    assert not_found?(result),
+           "C2-02b2β: a nonexistent switch is NotFound; got #{inspect(result)}"
+
+    assert effects(ctx) == before
+    assert switch!(ctx, blocked.id) == blocked
+  end
+
+  test "11. the slot: a new request succeeds only after the resolution", ctx do
+    blocked = dead_holder!(ctx)
+    latest = latest_start!(ctx)
 
     request = fn ->
       Agents.request_profile_switch(
@@ -637,10 +694,21 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
 
     assert match?({:error, _}, request.()), "the slot is occupied while blocked"
 
+    # Only an attested resolution frees the slot: a malformed one doesn't.
+    malformed =
+      attestation(blocked, latest, :dead_holder, %{confirmation: "stopped " <> blocked.id})
+
+    assert resolve(blocked, malformed, ctx.admin) == {:error, :attestation_invalid},
+           "C2-02b2β: a malformed attestation is refused"
+
+    assert match?({:error, _}, request.()),
+           "C2-02b2β: the slot stays occupied after a refused attestation"
+
     assert match?(
              {:ok, %{switch: _}},
              resolve(blocked, attestation(blocked, latest, :dead_holder), ctx.admin)
-           )
+           ),
+           "C2-02b2β: the resolution"
 
     assert match?({:ok, %{status: :pending}}, request.()),
            "C2-02b2β: a new request after the resolution did not open a switch"
@@ -649,13 +717,19 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
   ## Helpers
 
   # After a commit: :none and :survivor end in b2α's release; :dead_holder
-  # stays held (the hard conflict), so it is only left to go quiet.
+  # stays held. Each then drains (a bounded join).
   defp settled!(kind) when kind in [:none, :survivor] do
     await_status!(&(&1.hold == :released), 20_000)
-    quiet!()
+    drain!()
   end
 
-  defp settled!(:dead_holder), do: quiet!()
+  # (The hard conflict's stage is test 18's subject, not asserted here.)
+  defp settled!(:dead_holder), do: drain!()
+
+  defp identity(start), do: {start.id, start.pid, start.node, start.reaper_pid}
+
+  defp subject_events(ctx, id),
+    do: ctx.tenant |> events() |> Enum.filter(&(&1.subject_id == id)) |> Enum.map(& &1.id)
 
   defp assert_resolved_event!(ctx, blocked, attestation, kind, latest, setting) do
     profile_events =
@@ -711,6 +785,38 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveTest do
     assert match?({:error, %Ash.Error.Forbidden{}}, result),
            "C2-02b2β: #{label} must be Forbidden; got #{inspect(result)}"
   end
+
+  # A clearly labelled privileged fixture (this sandboxed test transaction
+  # only): another tenant's blocked switch, stored with the replica role
+  # because that tenant has no chain here. Never an application path.
+  defp foreign_switch!(blocked) do
+    id = Ash.UUIDv7.generate()
+    tenant = Ash.UUIDv7.generate()
+
+    tamper!(
+      "INSERT INTO model_profile_switches (id, tenant_id, from_profile_id, to_profile_id, " <>
+        "status, server_generation, requested_by_id, requested_at, failure_reason, " <>
+        "inserted_at, updated_at) VALUES ($1, $2, $3, $4, 'blocked', 1, $5, now(), " <>
+        "'foreign fixture', now(), now())",
+      [
+        Ecto.UUID.dump!(id),
+        Ecto.UUID.dump!(tenant),
+        Atom.to_string(blocked.from_profile_id),
+        Atom.to_string(blocked.to_profile_id),
+        Ecto.UUID.dump!(Ecto.UUID.generate())
+      ]
+    )
+
+    {:ok, foreign} = Ash.get(ModelProfileSwitch, id, authorize?: false)
+    assert foreign.tenant_id == tenant and foreign.status == :blocked
+    foreign
+  end
+
+  defp raw_row(id) do
+    Repo.query!("SELECT * FROM model_profile_switches WHERE id = $1", [Ecto.UUID.dump!(id)]).rows
+  end
+
+  defp facts_not_found?(result), do: not_found?(result)
 
   defp not_found?({:error, %Ash.Error.Invalid{errors: errors}}),
     do: Enum.any?(errors, &match?(%Ash.Error.Query.NotFound{}, &1))

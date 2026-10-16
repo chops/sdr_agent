@@ -1,33 +1,35 @@
 defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
   @moduledoc """
   C2-02b2β RED (`docs/product/r0/c2-02b2b-interface.md` draft 4, interface
-  and entity PASS at `e60943c`), section 8 on independent connections: tests
-  3 (an admin changed between dispatch and the locks), 8, 9, 10 (a start
-  allocated during the write's lock wait), 12, 13, 14, 17 (a lock wait
-  crossing the deadline), 18 (a restart while conflicted), 19 (a death during
-  the lock wait), 20 (kills after and before the commit) and 21, plus the
-  settlement and replay obligations of `codex-c202b2beta-e60943c-interface-pass.md`.
+  and entity PASS at `e60943c`; revised for Codex 8a5eb73 MF1–MF4), section
+  8 on independent connections: tests 3 (an admin changed between dispatch
+  and the locks), 8, 9, 10 (a stored-state fault-injection probe), 12, 13,
+  14, 17 (a request expired in a blocked mailbox, a lock wait and a pool
+  wait crossing the deadline), 18 (a restart while conflicted), 19 (a death
+  during the lock wait), 20 (kills after and before the commit) and 21.
 
   The whole tree needs independent connections, so this module runs the SQL
   sandbox in `:auto` mode for its own duration (synchronous; restored to
   `:manual` afterwards) and truncates only a test database before and after
-  each test; every lease is cleaned up by `ResolveHarness.lease_cleanup!/0`.
-  Row-lock holders are raw SQL transactions on their own connections, joined
-  on release.
+  each test; leases, paused processes, holders, blocked coordinators and
+  tracing are all cleaned up on exit by `SdrAgent.Test.ResolveHarness`.
 
-  **The original transaction held uncommitted** (test 12): the coordinator
-  is paused by a query telemetry handler in its own process, after its
-  resolve transaction's switch update and LedgerCall's last budget step,
-  before `COMMIT` (`ResolveHarness.coordinator_precommit/0`). It is then
-  committed by resuming it, or rolled back by terminating its backend
-  (`pg_terminate_backend`), while the caller's settlement barrier waits on its
-  locks. The coordinator is killed only when it is paused on its own
-  connection. Test-build-only seam chosen: the coordinator fault `lose_reply:
-  [:resolve_blocked]` (b2α's `lose_reply:` key) makes a committed write's
-  outcome unknown to the coordinator (test 14). Test 10's concurrent start is
-  a raw insert (replica role) on an independent connection, the only way a
-  start can appear while the coordinator itself waits. The fake CLI; no
-  model call.
+  **Settlement (test 12)** is proven against an independent, uncommitted
+  "original": a privileged test transaction on its own connection (no
+  LedgerCall watchdog, so it really stays open) that takes the write's locks
+  in the write's order and writes the resolution row. With the coordinator
+  blocked in its mailbox, the caller's call times out and its barrier is
+  shown waiting on that exact writer (`pg_locks`, `pg_blocking_pids`) before
+  the original commits or rolls back. Short pauses inside the coordinator's
+  own LedgerCall (tests 13, 20, 21) stay below its budget plus 250 ms
+  connection watchdog.
+
+  Test-build-only seams chosen: the coordinator faults `lose_reply:
+  [:resolve_blocked]` (b2α's `lose_reply:` key: a committed write's outcome
+  is unknown to the coordinator, test 14) and `resolve_budget_ms:` (a
+  smaller write budget, test 13). Definite timeouts are accepted only with
+  an acknowledged rollback, a refusal within the deadline, or barrier
+  evidence. The fake CLI; no model call.
   """
   use ExUnit.Case, async: false
 
@@ -162,9 +164,16 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
     assert length(resolved_events(ctx)) == 1
   end
 
-  ## 10. A start allocated while the write waits on the setting lock
+  ## 10. A stored-state fault-injection probe (Codex 8a5eb73 ruling)
+  #
+  # Not a supported allocation and no proof of allocator concurrency: while
+  # the write waits on the setting lock, a privileged raw insert synthesizes
+  # an atomically consistent newer start and counter in this disposable
+  # database. It proves only that the resolver re-checks the stored fence
+  # after its locks. The real restart/allocation case is test 10 in
+  # `ProfileSwitchResolveTest`.
 
-  test "10. a start allocated during the write's setting-lock wait is refused after the locks",
+  test "10. probe: a newer start synthesized during the write's lock wait is refused after the locks",
        ctx do
     blocked = dead_holder!(ctx)
     latest = latest_start!(ctx)
@@ -172,8 +181,8 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
     {holder, backend} = hold!(fn -> lock_setting!(ctx.tenant.id) end)
 
     caller = resolve_task(blocked, attestation, ctx.admin)
-    await_blocked_by!(backend)
-    insert_start!(ctx.tenant.id, latest.generation + 1, status().boot_id)
+    await_blocked_by!(backend, 10_000, "C2-02b2β: the write never waited on the setting lock")
+    synthesize_start!(ctx.tenant.id, latest.generation + 1, status().boot_id)
     release_holder(holder)
     result = await_task(caller, 25_000)
 
@@ -184,87 +193,82 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
     assert resolved_events(ctx) == []
   end
 
-  ## 12. Settlement: the original transaction held uncommitted (R3-1)
+  ## 12. Settlement against a held, uncommitted original (R3-1)
+  #
+  # The original is an independent test transaction on its own connection
+  # (no LedgerCall watchdog), a clearly labelled privileged fixture: it takes
+  # the write's locks in the write's order (setting FOR UPDATE, counter FOR
+  # SHARE, switch FOR UPDATE) and writes the resolution row, then stays open.
+  # The coordinator is blocked in its mailbox, so the caller's call times out
+  # and its settlement barrier must wait on that writer.
 
   test "12. held past the settle bound: :resolve_uncertain, though an independent read sees blocked",
        ctx do
-    run = uncommitted_resolution!(ctx)
+    run = settlement_against_original!(ctx)
     result = await_task(run.caller, 10_000)
 
     assert result == {:error, :resolve_uncertain},
            "C2-02b2β: no barrier, no answer: :resolve_uncertain; got #{inspect(result)}"
 
+    assert Enum.any?(
+             relation_locks(run.writer),
+             &(&1 == ["model_profile_switches", "RowExclusiveLock"])
+           ),
+           "the original was still open when the settlement gave up"
+
     assert raw_status(run.blocked.id) == "blocked"
     assert status().hold == :held, "nothing acts on an unproven outcome"
-    assert starts!(ctx) == run.starts
 
-    # The original commits; a later settlement converges to the replay.
-    resume(run.coordinator, :precommit)
-    await!(fn -> raw_status(run.blocked.id) == "failed" end, 10_000, "the original committed")
+    # The original commits; the same attestation then converges to the replay.
+    commit_original!(run)
     replay = resolve(run.blocked, run.attestation, ctx.admin)
 
     assert match?({:ok, %{replay: true}}, replay),
            "after the commit, the same attestation is a replay; got #{inspect(replay)}"
 
-    assert length(resolved_events(ctx)) == 1
+    finish_settlement!(ctx, run)
   end
 
   test "12. the original commits while the caller's barrier waits: the replay result", ctx do
-    run = uncommitted_resolution!(ctx)
-    resume(run.coordinator, :precommit)
+    run = settlement_against_original!(ctx)
+    commit_original!(run)
     result = await_task(run.caller, 10_000)
 
     assert match?({:ok, %{switch: %{status: :failed}, replay: true}}, result),
            "C2-02b2β: a barrier acquired after the commit, then an exact match: the replay " <>
              "result; got #{inspect(result)}"
 
-    assert length(resolved_events(ctx)) == 1
+    finish_settlement!(ctx, run)
   end
 
   test "12. the original rolls back while the caller's barrier waits: a definite :resolve_timeout",
        ctx do
     tracer = trace_release!()
-    run = uncommitted_resolution!(ctx)
-    assert [[true]] = Repo.query!("SELECT pg_terminate_backend($1)", [run.writer]).rows
-    resume(run.coordinator, :precommit)
+    run = settlement_against_original!(ctx)
+    rollback_original!(run)
     result = await_task(run.caller, 10_000)
 
     assert result == {:error, :resolve_timeout},
            "C2-02b2β: a barrier acquired after the rollback, S blocked and no row: a " <>
              "definite :resolve_timeout; got #{inspect(result)}"
 
-    sync()
-    quiet!()
+    finish_settlement!(ctx, run)
     assert raw_status(run.blocked.id) == "blocked"
-    assert resolved_events(ctx) == []
     assert status().hold == :held
-    assert starts!(ctx) == run.starts, "nothing acted on the unknown commit"
     assert release_callers(tracer) == []
   end
 
   test "12. settlement keeps semantic matching: the same id from another admin conflicts", ctx do
     other_admin = AuditCase.new_human(:admin, ctx.tenant)
+    run = settlement_against_original!(ctx, other_admin)
+    commit_original!(run)
+    result = await_task(run.caller, 10_000)
 
-    run =
-      uncommitted_resolution!(
-        ctx,
-        fn blocked, attestation -> resolve_task(blocked, attestation, other_admin) end,
-        2
-      )
-
-    resume(run.coordinator, :precommit)
-    first = await_task(run.caller, 10_000)
-    second = await_task(run.other, 10_000)
-
-    assert match?({:ok, %{replay: true}}, first),
-           "C2-02b2β: the original's caller settles to the replay; got #{inspect(first)}"
-
-    assert second == {:error, :attestation_conflict},
+    assert result == {:error, :attestation_conflict},
            "C2-02b2β: after the barrier, a row with this id but another resolver is " <>
-             ":attestation_conflict, never a replay; got #{inspect(second)}"
+             ":attestation_conflict, never a replay; got #{inspect(result)}"
 
-    sync()
-    assert length(resolved_events(ctx)) == 1
+    finish_settlement!(ctx, run)
     assert field(switch!(ctx, run.blocked.id), :resolved_by_id) == ctx.admin.id
   end
 
@@ -272,7 +276,9 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
 
   test "13. the write's own pre-commit budget refusal is a definite :resolve_timeout, unsettled",
        ctx do
-    blocked = dead_holder!(ctx)
+    # Test-only seam: the write's budget is 400 ms, so a 525 ms pause inside
+    # it spends the budget without reaching the 650 ms connection watchdog.
+    blocked = dead_holder!(ctx, faults: [resolve_budget_ms: 400])
     attestation = attestation(blocked, latest_start!(ctx), :dead_holder)
     coordinator_log = query_log!(&coordinator_query/1)
     caller_log = query_log!(caller_query(:c13))
@@ -280,8 +286,7 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
 
     caller = resolve_task(blocked, attestation, ctx.admin, init: fn -> mark_caller(:c13) end)
     assert_receive {:appending, coordinator}, 10_000, "the write's event append was never seen"
-    # Past the write's 2 s budget, inside its transaction: its last step refuses the commit.
-    Process.sleep(2_300)
+    Process.sleep(525)
     resume(coordinator, :appending)
     result = await_task(caller, 10_000)
 
@@ -289,14 +294,20 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
            "C2-02b2β: LedgerCall's pre-commit refusal is a definite :resolve_timeout; " <>
              "got #{inspect(result)}"
 
-    sync()
-    after_rollback = coordinator_log |> logged() |> Enum.drop_while(&(&1 != "rollback"))
-    assert after_rollback != [], "the write rolled back"
+    drain!()
+    after_write = coordinator_log |> logged() |> Enum.drop_while(&(not switch_update?(&1)))
 
-    refute Enum.any?(after_rollback, &Regex.match?(@switch_lock, &1)),
+    assert {"rollback", :ok} in after_write,
+           "the write's own rollback was acknowledged (no connection loss)"
+
+    refute {"commit", :ok} in after_write, "nothing committed"
+
+    after_rollback = Enum.drop_while(after_write, &(&1 != {"rollback", :ok}))
+
+    refute Enum.any?(after_rollback, fn {query, _} -> Regex.match?(@switch_lock, query) end),
            "no settlement barrier after a definite refusal (coordinator)"
 
-    refute Enum.any?(logged(caller_log), &String.contains?(&1, " FOR ")),
+    refute Enum.any?(logged(caller_log), fn {query, _} -> String.contains?(query, " FOR ") end),
            "no settlement barrier after a definite refusal (caller)"
 
     assert raw_status(blocked.id) == "blocked"
@@ -320,7 +331,13 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
     # The coordinator's settlement can't take its barrier: unproven.
     {holder, backend} = hold!(fn -> lock_setting!(ctx.tenant.id) end)
     resume(coordinator, :committed)
-    await_blocked_by!(backend)
+
+    await_blocked_by!(
+      backend,
+      10_000,
+      "C2-02b2β: the coordinator's settlement barrier never waited after the unknown commit"
+    )
+
     Process.sleep(4_500)
 
     assert status().hold == :held, "an unproven outcome stays held"
@@ -330,15 +347,15 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
     # The tick retries the same settlement; it converges, then b2α's reconciliation.
     release_holder(holder)
     await_status!(&(&1.hold == :released), 20_000)
-    queries = logged(coordinator_log)
-    after_commit = Enum.drop_while(queries, &(&1 != "commit"))
-    barrier = Enum.find_index(after_commit, &Regex.match?(@switch_lock, &1))
+    after_commit = coordinator_log |> logged() |> Enum.drop_while(&(&1 != {"commit", :ok}))
+
+    barrier =
+      Enum.find_index(after_commit, fn {query, _} -> Regex.match?(@switch_lock, query) end)
 
     allocation =
-      Enum.find_index(
-        after_commit,
-        &String.starts_with?(&1, "INSERT INTO \"model_server_starts\"")
-      )
+      Enum.find_index(after_commit, fn {query, _} ->
+        String.starts_with?(query, "INSERT INTO \"model_server_starts\"")
+      end)
 
     assert is_integer(barrier) and is_integer(allocation) and barrier < allocation,
            "C2-02b2β: the settlement barrier precedes any reconciliation allocation"
@@ -346,48 +363,112 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
     assert release_callers(tracer) == []
   end
 
-  ## 17. A lock wait crossing the deadline
+  ## 17. The deadline
 
-  test "17. a write whose lock wait crosses the deadline doesn't commit", ctx do
+  test "17. a request expired in a blocked mailbox: definite only after the caller's barrier",
+       ctx do
+    blocked = survivor!(ctx)
+    attestation = attestation(blocked, latest_start!(ctx), :survivor)
+    assert_held_refusals!("before the resolution (passes by design)")
+    blocked_coordinator = block_coordinator!()
+
+    started = System.monotonic_time(:millisecond)
+    caller = resolve_task(blocked, attestation, ctx.admin)
+    Process.sleep(1_000)
+    assert_held_refusals!("while the request waits")
+    Process.sleep(max(13_500 - (System.monotonic_time(:millisecond) - started), 0))
+
+    # Contention the caller's settlement barrier must wait through: evidence
+    # that a definite answer follows a barrier, never the timeout alone.
+    {holder, backend} = hold!(fn -> lock_setting!(ctx.tenant.id) end)
+
+    [[_waiter, query] | _] =
+      await_blocked_by!(
+        backend,
+        10_000,
+        "C2-02b2β: the caller's settlement barrier never waited after its timeout"
+      )
+
+    assert query =~ ~r/model_profile_settings.*FOR UPDATE/s, "the barrier's setting lock"
+    release_holder(holder)
+    result = await_task(caller, 10_000)
+
+    assert result == {:error, :resolve_timeout},
+           "C2-02b2β: barrier acquired, S blocked and no row: a definite :resolve_timeout; " <>
+             "got #{inspect(result)}"
+
+    # Dequeued after its deadline: refused, nothing else.
+    release_coordinator!(blocked_coordinator)
+    drain!()
+    assert raw_status(blocked.id) == "blocked"
+    assert resolved_events(ctx) == []
+    assert status().hold == :held
+    assert_held_refusals!("after the expired request")
+  end
+
+  test "17. a write whose lock wait crosses the deadline rolls back, acknowledged, in time",
+       ctx do
     blocked = dead_holder!(ctx)
     attestation = attestation(blocked, latest_start!(ctx), :dead_holder)
-    parent = self()
+    blocked_coordinator = block_coordinator!()
+    coordinator_log = query_log!(&coordinator_query/1)
 
-    blocker =
-      Task.async(fn ->
-        Coordinator.test_run(
-          fn _binding ->
-            send(parent, {:coordinator_blocked, self()})
-
-            receive do
-              :go -> :ok
-            after
-              40_000 -> :ok
-            end
-          end,
-          45_000
-        )
-      end)
-
-    assert_receive {:coordinator_blocked, coordinator}, 5_000
     started = System.monotonic_time(:millisecond)
     caller = resolve_task(blocked, attestation, ctx.admin)
     Process.sleep(13_700)
     {holder, _backend} = hold!(fn -> lock_setting!(ctx.tenant.id) end)
-    send(coordinator, :go)
-    Task.await(blocker, 10_000)
+    release_coordinator!(blocked_coordinator)
     result = await_task(caller, 10_000)
     elapsed = System.monotonic_time(:millisecond) - started
     release_holder(holder)
+    drain!()
+    queries = logged(coordinator_log)
 
     assert result == {:error, :resolve_timeout},
            "C2-02b2β: a lock wait past the deadline rolls back: :resolve_timeout; got #{inspect(result)}"
 
-    assert elapsed < 17_000, "bounded by the deadline: #{elapsed} ms"
-    sync()
-    quiet!()
+    assert elapsed < 16_000, "a definite reply within the call's deadline: #{elapsed} ms"
+
+    assert Enum.any?(queries, &(&1 == {"rollback", :ok})) and
+             not Enum.any?(queries, &(&1 == {"commit", :ok})),
+           "the write's rollback was acknowledged and nothing committed"
+
     assert raw_status(blocked.id) == "blocked"
     assert resolved_events(ctx) == []
+  end
+
+  test "17. a pool wait crossing the deadline commits nothing, even once the pool frees", ctx do
+    blocked = dead_holder!(ctx)
+    attestation = attestation(blocked, latest_start!(ctx), :dead_holder)
+    # Under `:auto` ownership a process keeps its connection: the
+    # coordinator gives its own back, so its next use must wait on the pool.
+    assert Coordinator.test_run(fn _binding -> Sandbox.checkin(Repo) end, 5_000) in [
+             :ok,
+             :not_owner
+           ]
+
+    blocked_coordinator = block_coordinator!()
+
+    started = System.monotonic_time(:millisecond)
+    caller = resolve_task(blocked, attestation, ctx.admin)
+    Process.sleep(13_700)
+    occupiers = occupy_pool!()
+    release_coordinator!(blocked_coordinator)
+
+    # The pool frees just after the 15 s deadline: a write whose budget isn't
+    # bound by the deadline would now get its connection and commit.
+    Process.sleep(max(15_300 - (System.monotonic_time(:millisecond) - started), 0))
+    release_pool!(occupiers)
+    result = await_task(caller, 10_000)
+    elapsed = System.monotonic_time(:millisecond) - started
+    drain!()
+
+    assert raw_status(blocked.id) == "blocked",
+           "C2-02b2β: a pool wait past the deadline must never commit; got #{inspect(result)}"
+
+    assert resolved_events(ctx) == []
+    assert match?({:error, _}, result), "no commit, no success; got #{inspect(result)}"
+    assert elapsed < 25_000
   end
 
   ## 18. The hard conflict across a restart
@@ -405,7 +486,7 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
            "C2-02b2β: the :dead_holder resolution"
 
     await_status!(&(&1.stage == :cleanup_unprovable), 10_000)
-    quiet!()
+    drain!()
     before = status()
     kill_coordinator!()
     await_status!(&(&1.boot_id != before.boot_id), 10_000)
@@ -542,65 +623,202 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
     assert match?({:ok, %{switch: %{status: :failed}}}, result),
            "C2-02b2β: the :survivor resolution; got #{inspect(result)}"
 
-    quiet!()
+    drain!()
   end
 
   ## Helpers
 
-  # The coordinator paused with its resolve transaction uncommitted; the
-  # caller's call has timed out and its settlement barrier waits on it.
-  # `also.(blocked, attestation)` may start more callers first; `waiters`
-  # barriers are awaited.
-  defp uncommitted_resolution!(ctx, also \\ fn _blocked, _attestation -> nil end, waiters \\ 1) do
+  # Test 12's fixture: the coordinator blocked, the privileged original
+  # open with its locks, the caller's call timed out and its barrier waiting
+  # on exactly that writer. `resolver` is the caller's actor.
+  defp settlement_against_original!(ctx, resolver \\ nil) do
+    require_resolver!()
     blocked = dead_holder!(ctx)
     attestation = attestation(blocked, latest_start!(ctx), :dead_holder)
-    query_pause!(:precommit, coordinator_precommit())
-
-    caller = resolve_task(blocked, attestation, ctx.admin)
-    assert_receive {:precommit, coordinator}, 10_000, "the uncommitted write was never seen"
-    other = also.(blocked, attestation)
-    writer = switch_writer()
-    assert is_integer(writer), "the original transaction holds its row locks, uncommitted"
-    assert raw_status(blocked.id) == "blocked", "an independent read sees S blocked"
     starts = starts!(ctx)
+    blocked_coordinator = block_coordinator!()
+    {original, writer} = original!(blocked, attestation, ctx.admin)
 
-    # The callers' 15 s calls time out; their barriers then wait on the original.
-    await!(
-      fn -> waiting_on(writer) >= waiters end,
-      25_000,
-      "the settlement barriers never waited"
-    )
+    locks = relation_locks(writer)
 
-    assert status().hold == :held
+    for lock <- [
+          ["model_profile_settings", "RowShareLock"],
+          ["model_server_counters", "RowShareLock"],
+          ["model_profile_switches", "RowExclusiveLock"]
+        ],
+        do: assert(lock in locks, "the original holds #{inspect(lock)}: #{inspect(locks)}")
+
+    assert raw_status(blocked.id) == "blocked", "an independent read sees S blocked"
+    caller = resolve_task(blocked, attestation, resolver || ctx.admin)
+
+    [[_waiter, query]] =
+      await_blocked_by!(
+        writer,
+        25_000,
+        "C2-02b2β: the caller's settlement barrier never waited on the open original"
+      )
+
+    assert query =~ ~r/model_profile_settings.*FOR UPDATE/s, "the barrier's setting lock"
+
+    assert Enum.any?(
+             relation_locks(writer),
+             &(&1 == ["model_profile_switches", "RowExclusiveLock"])
+           )
+
     assert starts!(ctx) == starts
 
     %{
       blocked: blocked,
       attestation: attestation,
       caller: caller,
-      other: other,
-      coordinator: coordinator,
+      original: original,
       writer: writer,
-      starts: starts
+      starts: starts,
+      coordinator: blocked_coordinator
     }
   end
 
-  defp waiting_on(backend) do
-    [[count]] =
-      Repo.query!(
-        "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
-        [backend]
-      ).rows
+  # The privileged original: the write's locks in the write's order, then
+  # the resolution row, uncommitted until `commit_original!/1` or
+  # `rollback_original!/1`.
+  defp original!(switch, attestation, resolver) do
+    parent = self()
+    tenant = Ecto.UUID.dump!(switch.tenant_id)
+    id = Ecto.UUID.dump!(switch.id)
 
-    count
+    task =
+      Task.async(fn ->
+        Repo.transaction(
+          fn ->
+            [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+
+            Repo.query!("SELECT 1 FROM model_profile_settings WHERE tenant_id = $1 FOR UPDATE", [
+              tenant
+            ])
+
+            Repo.query!("SELECT 1 FROM model_server_counters WHERE tenant_id = $1 FOR SHARE", [
+              tenant
+            ])
+
+            Repo.query!("SELECT 1 FROM model_profile_switches WHERE id = $1 FOR UPDATE", [id])
+
+            Repo.query!(
+              "UPDATE model_profile_switches SET status = 'failed', finished_at = now(), " <>
+                "resolved_at = now(), resolution = 'owner_attested', resolved_by_id = $2, " <>
+                "attestation_id = $3, attested_start_id = $4, attested_generation = $5, " <>
+                "attested_lease_kind = $6, updated_at = now() WHERE id = $1",
+              [
+                id,
+                Ecto.UUID.dump!(resolver.id),
+                Ecto.UUID.dump!(attestation.attestation_id),
+                Ecto.UUID.dump!(attestation.attested_start_id),
+                attestation.attested_generation,
+                Atom.to_string(attestation.attested_lease_kind)
+              ]
+            )
+
+            send(parent, {:original_open, backend})
+
+            receive do
+              :commit -> :committed
+              :rollback -> Repo.rollback(:fixture_rollback)
+            after
+              60_000 -> Repo.rollback(:fixture_timeout)
+            end
+          end,
+          timeout: 90_000
+        )
+      end)
+
+    assert_receive {:original_open, backend}, 10_000
+    on_exit(fn -> send(task.pid, :rollback) end)
+    {task, backend}
+  end
+
+  defp commit_original!(run) do
+    send(run.original.pid, :commit)
+    assert Task.await(run.original, 10_000) == {:ok, :committed}
+    assert raw_status(run.blocked.id) == "failed"
+  end
+
+  defp rollback_original!(run) do
+    send(run.original.pid, :rollback)
+    assert Task.await(run.original, 10_000) == {:error, :fixture_rollback}
+    assert raw_status(run.blocked.id) == "blocked"
+  end
+
+  # Releases the blocked coordinator (it dequeues the expired request) and
+  # joins it: nothing it does may write a resolution or a start.
+  defp finish_settlement!(ctx, run) do
+    if Process.alive?(run.original.pid), do: commit_original!(run)
+    release_coordinator!(run.coordinator)
+    drain!()
+    assert resolved_events(ctx) == [], "the expired request wrote nothing"
+    assert starts!(ctx) == run.starts, "the expired request started nothing"
+  end
+
+  defp switch_update?({query, _status}),
+    do: String.starts_with?(query, "UPDATE \"model_profile_switches\"")
+
+  # Checks out pool connections (each held by its own unlinked process,
+  # `queue: false`) until the next checkout is refused: the pool is then
+  # exhausted until `release_pool!/1`.
+  defp occupy_pool! do
+    occupiers = occupy([], Repo.config()[:pool_size] + 5)
+    on_exit(fn -> for pid <- occupiers, do: send(pid, :release) end)
+    occupiers
+  end
+
+  defp occupy(occupiers, 0), do: flunk("the pool was never exhausted (#{length(occupiers)} held)")
+
+  defp occupy(occupiers, left) do
+    parent = self()
+    pid = spawn(fn -> hold_connection(parent) end)
+
+    receive do
+      {:occupied, ^pid} -> occupy([pid | occupiers], left - 1)
+      {:exhausted, ^pid} -> occupiers
+    after
+      10_000 -> flunk("a pool occupier never answered")
+    end
+  end
+
+  defp hold_connection(parent) do
+    Repo.checkout(fn -> occupied(parent) end, queue: false, timeout: 40_000)
+  rescue
+    DBConnection.ConnectionError -> send(parent, {:exhausted, self()})
+  end
+
+  defp occupied(parent) do
+    send(parent, {:occupied, self()})
+
+    receive do
+      :release -> :ok
+    after
+      30_000 -> :ok
+    end
+  end
+
+  defp release_pool!(occupiers) do
+    for pid <- occupiers do
+      ref = Process.monitor(pid)
+      send(pid, :release)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _} -> :ok
+      after
+        10_000 -> flunk("a pool occupier never exited")
+      end
+    end
   end
 
   defp change!(:demoted, user, admin), do: Accounts.change_role(user, :reviewer, actor: admin)
   defp change!(:disabled, user, admin), do: Accounts.change_status(user, :disabled, actor: admin)
 
-  # A start the coordinator didn't allocate, committed on its own connection
-  # while the coordinator's write waits (replica role: a raw simulation).
-  defp insert_start!(tenant_id, generation, boot_id) do
+  # The fault-injection probe's synthesized start: a privileged raw insert
+  # (replica role) and counter bump, committed on its own connection while
+  # the coordinator's write waits. Never a supported allocation.
+  defp synthesize_start!(tenant_id, generation, boot_id) do
     Task.async(fn ->
       Repo.transaction(fn ->
         Repo.query!("SET LOCAL session_replication_role = replica")
