@@ -9,9 +9,10 @@ defmodule SdrAgent.Inbox.C906RefusalRowsTest do
 
   Covered: an unavailable refusal (no eligible grant), an exhausted refusal
   (allocation cap), dedupe of a repeated refusal with a matching live
-  count, and the row leaving Home after an admin resolves it. Authorization,
-  retry actions (C1-03) and Home LiveView work are out of scope; C1-02's
-  own tests cover them. Synthetic data only.
+  count, and the row leaving Home after an admin resolves it. Out of scope:
+  authorization and the blocked-retry metadata, which C1-02's own tests
+  cover; the retry commands (C1-03) and the Home LiveView, which are not
+  built yet. Synthetic data only.
   """
   use SdrAgent.SDRCase, async: false
 
