@@ -5,9 +5,11 @@ defmodule SdrAgent.AI.ModelProviderContractTest do
   reply envelope, state precedence, storable output, the typed
   pre-reservation refusal, and the plugged-in test adapter.
 
-  Tests tagged `:r0_04_red` are RED: they fail on main for the intended
-  reason (a crash or an untyped return). The others are characterization:
-  they pass on merged code and document it.
+  Tests tagged `:r0_04_red` were the RED gate (Codex VERIFIED at 059674c):
+  they failed before the R0-04 implementation for the intended reason (a
+  crash or an untyped return) and are now regression coverage. The others
+  are characterization: they passed on the code before R0-04 and document
+  it.
   """
   use SdrAgent.AuditCase, async: false
 
