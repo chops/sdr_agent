@@ -4,8 +4,11 @@ defmodule SdrAgentWeb.RunSettingsSummaryTest do
   C4-R4, C4-R10, C4-R11, C4-R14; obligation 6): the run page shows the
   run's settings snapshot — per setting the revision number, the built-in
   default version or "not set" — and its limits, labelled "limit at
-  snapshot" separately from "allowed now" (the run's frozen allowance,
-  `SdrAgent.Agents.RunSettings.allowance/2`). A later save never changes
+  snapshot" separately from the run ceiling before independent checks (the
+  frozen allowance, `SdrAgent.Agents.RunSettings.allowance/2`) and from
+  "allowed now", which this page does not determine: grants, the tenant-day
+  limit and provider quotas are checked at use (MF1 of Codex's review of
+  0408661), so no current permission is claimed. A later save never changes
   what the page shows for an existing run. A run created before C4 (no
   snapshot) says so and is still served. An auditor's view of the snapshot
   is recorded through `SdrAgentWeb.AuditedView` and fails closed.
@@ -22,11 +25,14 @@ defmodule SdrAgentWeb.RunSettingsSummaryTest do
   import SdrAgent.SettingsFixtures,
     only: [content: 2, limit_fields: 0, save!: 3, save!: 4, snapshot_of!: 2]
 
-  alias Ecto.Adapters.SQL
+  import SdrAgentWeb.SettingsLiveHelpers, only: [refuse_accesses_to!: 1]
+
   alias SdrAgent.AuditCase
   alias SdrAgent.Repo
 
   @moduletag :c4_01b
+
+  @run_fields [:run_max_model_calls, :run_max_tool_calls, :run_max_tokens]
 
   setup ctx do
     limits = content(:operational_limits, %{run_max_model_calls: 8, run_max_tool_calls: 40})
@@ -83,13 +89,14 @@ defmodule SdrAgentWeb.RunSettingsSummaryTest do
     refute has_element?(view, "#run-setting-writing_guide[data-source='revision']")
   end
 
-  test "limits are labelled 'limit at snapshot' separately from 'allowed now'",
+  test "limits are labelled 'limit at snapshot', 'run ceiling' and 'allowed now' (checked at use)",
        %{conn: conn} = ctx do
     view = open_run(conn, :admin, ctx.run)
 
     assert has_element?(view, "#run-settings", "limit at snapshot"),
            "C4-01b: the run page does not label the limit at snapshot"
 
+    assert has_element?(view, "#run-settings", "run ceiling")
     assert has_element?(view, "#run-settings", "allowed now")
 
     for field <- limit_fields() do
@@ -99,21 +106,62 @@ defmodule SdrAgentWeb.RunSettingsSummaryTest do
              "C4-01b: limit #{field} does not show its snapshot value #{at_snapshot}"
     end
 
-    # Frozen at 5 by the assignment, under a snapshot value of 8.
+    # The run ceiling before independent checks: frozen at 5 by the
+    # assignment, under a snapshot value of 8 (`RunSettings.allowance/2`).
     assert has_element?(
              view,
-             "#run-limit-run_max_model_calls[data-at-snapshot='8'][data-allowed-now='5']"
+             "#run-limit-run_max_model_calls[data-at-snapshot='8'][data-run-ceiling='5']"
            ),
-           "C4-01b: 'allowed now' is not the run's frozen allowance"
+           "C4-01b: the run ceiling is not shown separately from the snapshot value"
 
     assert has_element?(
              view,
-             "#run-limit-run_max_tool_calls[data-at-snapshot='40'][data-allowed-now='40']"
+             "#run-limit-run_max_tool_calls[data-at-snapshot='40'][data-run-ceiling='40']"
            )
 
+    # "Allowed now" is not determined on this page: grants, the tenant-day
+    # limit and provider quotas are checked at use (MF1, Codex 0408661).
+    for field <- @run_fields do
+      assert has_element?(view, "#run-limit-#{field}", "checked at use"),
+             "C4-01b: #{field} does not say its current allowance is checked at use"
+    end
+
+    refute has_element?(view, "#run-settings [data-allowed-now]"),
+           "C4-01b: the run page claims a current allowance it cannot determine"
+
     refute has_element?(view, "#run-settings [data-at-snapshot='30']")
-    refute has_element?(view, "#run-settings [data-allowed-now='30']")
+    refute has_element?(view, "#run-settings [data-run-ceiling='30']")
   end
+
+  test "an exhausted tenant-day limit leaves the ceiling unchanged and claims no permitted calls",
+       %{conn: conn} = ctx do
+    # The tenant-day limit is reached (config may only lower it): no model
+    # call is permitted now, although the run's ceiling is still 5.
+    previous = Application.get_env(:sdr_agent, :daily_model_call_limit)
+    Application.put_env(:sdr_agent, :daily_model_call_limit, 0)
+    on_exit(fn -> restore_env(:daily_model_call_limit, previous) end)
+    assert SdrAgent.Agents.daily_model_call_limit() == 0
+
+    view = open_run(conn, :admin, ctx.run)
+
+    assert has_element?(view, "#run-limit-run_max_model_calls[data-run-ceiling='5']"),
+           "C4-01b: the run ceiling is not shown"
+
+    refute has_element?(view, "#run-settings [data-allowed-now]"),
+           "C4-01b: the run page claims a current allowance while the tenant-day limit is reached"
+
+    refute has_element?(
+             view,
+             "#run-limit-run_max_model_calls",
+             ~r/\b5\s+(more|remaining|left|permitted|allowed)/i
+           ),
+           "C4-01b: the run page claims 5 more permitted calls"
+
+    assert has_element?(view, "#run-limit-run_max_model_calls", "checked at use")
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:sdr_agent, key)
+  defp restore_env(key, value), do: Application.put_env(:sdr_agent, key, value)
 
   test "a reviewer sees the snapshot summary", %{conn: conn} = ctx do
     view = open_run(conn, :reviewer, ctx.run)
@@ -162,32 +210,12 @@ defmodule SdrAgentWeb.RunSettingsSummaryTest do
            ),
            "C4-01b: the auditor's view of the snapshot was not recorded"
 
-    refuse_snapshot_accesses!()
+    refuse_accesses_to!("SdrAgent.Agents.RunSettingsSnapshot")
     view = open_run(build_conn(), :auditor, ctx.run)
 
     refute has_element?(view, "#run-settings [data-source]"),
            "C4-01b: the snapshot was shown although its access was not recorded"
 
     refute has_element?(view, "#run-limit-run_max_model_calls")
-  end
-
-  # Refuses only AuditAccess rows naming a run settings snapshot, so the run
-  # view's own record still succeeds.
-  defp refuse_snapshot_accesses! do
-    SQL.query!(Repo, """
-    CREATE FUNCTION c4_01b_refuse_snapshot_access() RETURNS trigger LANGUAGE plpgsql AS $$
-    BEGIN
-      IF NEW.target_resource = 'SdrAgent.Agents.RunSettingsSnapshot' THEN
-        RAISE EXCEPTION 'access store unavailable';
-      END IF;
-      RETURN NEW;
-    END; $$
-    """)
-
-    SQL.query!(
-      Repo,
-      "CREATE TRIGGER c4_01b_refuse_snapshot_access BEFORE INSERT ON audit_accesses " <>
-        "FOR EACH ROW EXECUTE FUNCTION c4_01b_refuse_snapshot_access()"
-    )
   end
 end
