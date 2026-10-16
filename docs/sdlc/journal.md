@@ -767,6 +767,62 @@ The full gate passes, with 2503 tests. It isn't on the R0-06 path.
 All were reported as they happened. The R0-06 forecast is Fri Oct 23
 with weekend work, and at risk if b2β GREEN takes as many rounds as b2α.
 
+### Sprint 1, day 5 (Fri Oct 16), overnight to morning (as of 07:40 MDT)
+
+**Owner decisions:** the ADR-0004 C2-02b2β amendment (D-138; OQ-5 stays
+open), slice-c OQ-1 (D-139), the Sonnet calibration this morning (D-140),
+and R0-05 MF3 option B (D-141).
+
+**Approved by Codex, CI green, waiting for the owner's merge call:**
+
+| PR | Slice | Head | Notes |
+|---|---|---|---|
+| #165 | C4-01a, run settings and metadata-only Repo logging | `0bbd69d` | Includes the ADR-0005 error-path controls: the primary exception filter and a boundary on all 12 workers |
+| #166 | C4-01b, the settings page | `5eeac38` | Stacked on #165 |
+| #167 | C2-02b2β, the attended resolver | `ac95b9f` | Includes the b2α boot-gap correction |
+| #168 | C2-02c, restart and status | `6de84ff` | Stacked on #167; includes the drain fix below |
+
+All four were CLEAN against main `397dcda` at 07:37.
+
+**A flaky drain, found and fixed.** The full gate failed about 1 run in
+20 with `drain_failed`. The drain retried a busy connection only on an
+exact message, but the test sandbox prefixes it ("could not checkout the
+connection owned by…"). A probe at the b2β baseline showed the bug was
+older than this slice. It now matches by suffix, as `LedgerCall` already
+did, with a regression test; 10 of 10 gates ran clean afterwards.
+
+**R0-05, the admin page:**
+- **Contract and RED:** the contract passed at draft 3 (`fbc3203`). RED
+  was verified at `00c4998`, with 39 tests failing as intended.
+- **GREEN:** Codex's review found three must-fix items. Two are fixed at
+  `cce173f`: re-checking the user's access when an async result arrives,
+  and binding the stored-switch line to the reviewed switch.
+- **The third, MF3,** was about crash reports, which can copy the typed
+  confirmation into a log. The proposed fix, tagging every process that
+  holds the text, missed the coordinator and supervisor reports.
+- **The choice:** Codex recommended the narrower option B, and the owner
+  chose it, accepting the stated residual risks. Under B the page refuses
+  any text but the exact phrase itself, so arbitrary input never leaves
+  it.
+- **Next:** the revised ADR-0005 amendment and contract draft 4
+  (`d0c80ff`) are with Codex. Then the RED amendments, GREEN and the PR.
+  R0-05 lands after #165.
+
+**Waiting on the owner:**
+- the four merges, in order: #165 → #166, then #167 → #168;
+- the Sonnet calibration (G-R0 expires Sat 23:59 MDT);
+- OQ-R5-1 (SettingsLive crash reports);
+- OQ-5;
+- later, accepting the ADR-0005 R0-05 amendment, and the R0-05 manual try.
+
+**Tripwires:**
+- **2:** R0-05 GREEN had a CHANGES REQUESTED round, and its ADR draft was
+  NEEDS-REVIEW.
+- **4:** the calibration is today, and G-R0 expires within 48 hours.
+
+R0-06 is still forecast for Fri Oct 23. It is tight: R0-05 needs about a
+day more, and the merges are the owner's call.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -796,3 +852,4 @@ says what happened, why, what it cost and what changed.
 | **Oct 15: Claude pulled main into the owner's calibration checkout mid-sequence.** After #163 merged, `~/src/SDR_agent` was fast-forwarded from `3b2caaa` (the code Opus ran on) to `22db5c0`, which adds a migration and the coordinator. | Habit of refreshing the main checkout after a merge; it is the owner's console checkout and calibration was still open. | None: caught within a minute, before any command ran there; reset with `--keep` to `3b2caaa`. | Leave the owner's checkout alone during calibration; inspect main in a worktree or with `git fetch`. |
 | **Oct 15: Claude stopped with authorized work queued.** After the C2-02 merges, Claude posted a status and ended its turn instead of starting C4-01a RED and the b2β contract. Codex, told 'no action needed', went idle. | A milestone reached while waiting on an owner action was treated as a stopping point, despite the standing 'keep going until I say stop'. | About 2 hours of both agents idle, 15:30–17:30. | Status reports go out as the next item starts. Codex gets work or an optional pre-read whenever it would otherwise idle. |
 | **Oct 15: notes for a review reached Codex empty.** The C4-01a RED author notes were written through the shell's `cat`, which is aliased to `bat`, and arrived at zero bytes. | Claude's own memory warns about the alias, and Claude used the wrong command anyway. | Minutes: Codex asked for them. | Notes files are written with the Write tool, and the byte count is checked before sending. |
+| **Oct 16: Claude recorded OQ-5 as accepted under D-138.** The owner had accepted the ADR-0004 C2-02b2β amendment and OQ-2, not OQ-5. | The amendment's open questions were summarized as one item when the decision was written. | Minutes: caught before any work relied on it, and corrected in the decision log. | Each open question in an owner decision is recorded separately, as accepted or still open. |
