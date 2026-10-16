@@ -78,8 +78,8 @@ defmodule SdrAgent.Repo.SafeMetadata do
 
   @doc """
   The first raw error struct — an exception of the Postgrex, DBConnection
-  or Ash error namespaces — found anywhere in `term` (tuples, lists, maps
-  and struct fields, depth first), or nil. The walk is bounded and fails
+  or Ash error namespaces — found anywhere in `term` (tuples, lists, map
+  keys and values, struct fields, depth first), or nil. The walk is bounded and fails
   closed: a term with more than #{@scan_budget} nodes is reported as
   `:scan_limit` (it may hold a raw error), never as nil.
   """
@@ -97,10 +97,12 @@ defmodule SdrAgent.Repo.SafeMetadata do
   defp scan(%module{} = struct, budget) do
     if raw_error_module?(module),
       do: {:found, struct},
-      else: scan_all(Map.values(Map.from_struct(struct)), budget - 1)
+      else: scan_all(Map.to_list(Map.from_struct(struct)), budget - 1)
   end
 
-  defp scan(map, budget) when is_map(map), do: scan_all(Map.values(map), budget - 1)
+  # Keys and values both: a raw error used as a map key (or a MapSet member)
+  # is found too.
+  defp scan(map, budget) when is_map(map), do: scan_all(Map.to_list(map), budget - 1)
   defp scan(list, budget) when is_list(list), do: scan_all(list, budget - 1)
   defp scan(tuple, budget) when is_tuple(tuple), do: scan_all(Tuple.to_list(tuple), budget - 1)
   defp scan(_leaf, budget), do: budget - 1
