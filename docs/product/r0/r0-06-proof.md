@@ -75,7 +75,7 @@ branch does not satisfy a row.
 | C9-04, evidence | #157 | `8df6b0a` | open |
 | C1-02, Home inbox reads (C9-06's dependency) | #169 | `6b17072` | open |
 | C9-06, evidence | #170 | `d95457f` | open |
-| R0-05, the admin card, switch and resolver UI | not yet | — | GREEN waits on the ADR-0005 R0-05 amendment |
+| R0-05, the admin card, switch and resolver UI | not yet | — | ADR-0005 R0-05 amendment accepted (D-143); option-B GREEN in progress |
 
 Where a branch was updated from main only to satisfy branch protection,
 the record keeps both: the exact head Codex approved, and the
@@ -131,8 +131,17 @@ configuration, candidates only, until its captured identities are
 independently reviewed. The projection and method don't come from the
 registry: the candidate projection is fixed and hermetically reviewed
 before the attempt, and the evaluated result is unknown until the
-attempt is reviewed. Record the exact pre-reviewed Sonnet candidate
-here before its first attempt.
+attempt is reviewed.
+
+**Sonnet pre-attempt candidate (reviewed, 2026-10-16):** `(claude_cli,
+2.1.294, claude_cli_sonnet, claude-sonnet-5-5,
+claude-message-json/3+prompt-builder/1, propagated_id)`. Codex confirmed
+the held calibration code (`3b2caaa`) builds exactly this candidate,
+within the previously hermetically reviewed projection, prompt and
+outcome scope; an independent no-start pure check passed 46/46, including
+a Sonnet v3 match and a wrong-model refusal (consultation `f61b754d`,
+report sha256 `5a365cb8…`). This is the candidate only: not an observed
+init, an evaluated result, evidence PASS or promotion.
 
 For each tuple, record: the prompt-builder version and commitments, the
 hermetically reviewed candidate, the pin and code provenance, the
