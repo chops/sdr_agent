@@ -133,4 +133,42 @@ defmodule SdrAgentWeb.SettingsLiveHelpers do
     do: true
 
   def redirected_to?(_result, _to), do: false
+
+  @doc "Whether `result` is any LiveView redirect."
+  def redirected?({:error, {kind, %{to: _to}}}) when kind in [:redirect, :live_redirect],
+    do: true
+
+  def redirected?(_result), do: false
+
+  @doc """
+  Makes AuditAccess inserts naming `target_resource` fail inside the test's
+  sandbox transaction; every other access is still recorded.
+  """
+  def refuse_accesses_to!(target_resource) do
+    name = "c4_01b_refuse_" <> String.replace(String.downcase(target_resource), ".", "_")
+
+    SQL.query!(Repo, """
+    CREATE FUNCTION #{name}() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.target_resource = '#{target_resource}' THEN
+        RAISE EXCEPTION 'access store unavailable';
+      END IF;
+      RETURN NEW;
+    END; $$
+    """)
+
+    SQL.query!(
+      Repo,
+      "CREATE TRIGGER #{name} BEFORE INSERT ON audit_accesses " <>
+        "FOR EACH ROW EXECUTE FUNCTION #{name}()"
+    )
+
+    :ok
+  end
+
+  @doc "AuditAccess rows of `user` naming `target_resource`, read as `reader` (an admin)."
+  def accesses_to(reader, user, target_resource) do
+    {:ok, accesses} = SdrAgent.Audit.list_accesses(actor: reader)
+    Enum.filter(accesses, &(&1.actor_id == user.id and &1.target_resource == target_resource))
+  end
 end

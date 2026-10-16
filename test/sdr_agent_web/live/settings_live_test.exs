@@ -13,15 +13,20 @@ defmodule SdrAgentWeb.SettingsLiveTest do
       stale save shows a reload prompt; domain refusals are shown next to
       their fields; a forged confirmation without a held review does
       nothing; a demoted, disabled or signed-out admin never reaches the
-      domain.
+      domain; an admin changed to auditor while connected loses the staged
+      edit and is served only an audited view (or is redirected).
     * Test 30, the read-only view per the field policy: reviewers read
       settings text, read-only (OQ-6); an auditor's view records an
       AuditAccess through `SdrAgentWeb.AuditedView` and fails closed;
       signed-out visitors are redirected to sign-in.
     * Test 31 (page part): values, built-in defaults and their versions,
       validation ranges, sources, "not yet enforced" labels, the per-field
-      raise confirmation, tenant-day limits and the safeguard list
-      (`SdrAgent.Agents.RunSettings.Safeguards`), and the admin page's link.
+      raise confirmation, tenant-day limits with their source, the current
+      grants and allocations (admin and audited auditor reads only; a
+      reviewer is told they are not visible to the role), provider source
+      quotas as not yet built (no counter), the safeguard list
+      (`SdrAgent.Agents.RunSettings.Safeguards`), and the admin page's link
+      (C4-R11; MF2 of Codex's review of 0408661).
 
   RED: `/settings` is not routed (`SdrAgentWeb.SettingsLiveHelpers`
   asserts the route after the fixtures), and the admin page has no link.
@@ -45,6 +50,7 @@ defmodule SdrAgentWeb.SettingsLiveTest do
 
   alias SdrAgent.Accounts
   alias SdrAgent.Agents
+  alias SdrAgent.AgentsFixtures
   alias SdrAgent.Agents.RunSettings.CodeDefaults
   alias SdrAgent.Agents.RunSettings.Safeguards
   alias SdrAgent.AuditCase
@@ -352,6 +358,47 @@ defmodule SdrAgentWeb.SettingsLiveTest do
       assert denials_of(ctx, ctx.admin) == []
     end
 
+    test "an admin changed to auditor while connected: edits dropped, the new view audited",
+         ctx do
+      save!(:writing_guide, %{text: "Guide shown after the role change."}, ctx.admin)
+      ctx = staged(ctx)
+      {:ok, _auditor} = Accounts.change_role(ctx.admin, :auditor, actor: ctx.other)
+
+      result = confirm(ctx.view)
+
+      assert latest_number(ctx.tenant.id, :booking_link) == 0,
+             "C4-01b: the confirmation saved after the admin became an auditor"
+
+      unless redirected?(result) do
+        refute has_element?(ctx.view, "#settings-review")
+        refute has_element?(ctx.view, "#settings-form")
+        refute has_element?(ctx.view, "#edit-booking_link")
+
+        assert accesses_to(ctx.other, ctx.admin, "SdrAgent.Agents.SettingsRevision") != [],
+               "C4-01b: the view newly served to the auditor was not recorded"
+      end
+    end
+
+    test "an admin changed to auditor sees nothing when the new view cannot be recorded", ctx do
+      save!(:writing_guide, %{text: "Guide shown after the role change."}, ctx.admin)
+      ctx = staged(ctx)
+      refuse_access_inserts!()
+      {:ok, _auditor} = Accounts.change_role(ctx.admin, :auditor, actor: ctx.other)
+
+      result = confirm(ctx.view)
+
+      assert latest_number(ctx.tenant.id, :booking_link) == 0,
+             "C4-01b: the confirmation saved after the admin became an auditor"
+
+      unless redirected?(result) do
+        assert has_element?(ctx.view, "#withheld"),
+               "C4-01b: the unrecorded view was served to the new auditor"
+
+        refute render(ctx.view) =~ "Guide shown after the role change."
+        refute has_element?(ctx.view, "#settings-review")
+      end
+    end
+
     test "an admin whose sessions were revoked is signed out before the domain is called",
          ctx do
       ctx = staged(ctx)
@@ -415,14 +462,9 @@ defmodule SdrAgentWeb.SettingsLiveTest do
 
       view = open_settings(conn, :auditor)
 
-      accesses = accesses_of(ctx, auditor)
+      accesses = accesses_to(ctx.admin, auditor, "SdrAgent.Agents.SettingsRevision")
 
-      assert match?(
-               [
-                 %{access_kind: :record_view, target_resource: "SdrAgent.Agents.SettingsRevision"}
-               ],
-               accesses
-             ),
+      assert match?([%{access_kind: :record_view}], accesses),
              "C4-01b: the auditor's settings view was not recorded once: " <>
                inspect(accesses, limit: 4)
 
@@ -559,14 +601,107 @@ defmodule SdrAgentWeb.SettingsLiveTest do
              )
     end
 
-    test "tenant-day limits are shown read-only", %{conn: conn} do
-      view = open_settings(conn, :admin)
+    test "tenant-day limits are shown read-only with their source", %{conn: conn} do
+      view = open_settings(conn, :reviewer)
+      daily = Agents.daily_model_call_limit()
+      sends = Compliance.daily_send_cap()
 
-      assert has_element?(view, "#tenant-limits", "#{Agents.daily_model_call_limit()}"),
+      assert has_element?(view, "#tenant-limit-daily_model_calls[data-cap='#{daily}']"),
              "C4-01b: the daily model-call limit is not shown"
 
-      assert has_element?(view, "#tenant-limits", "#{Compliance.daily_send_cap()}")
+      assert has_element?(view, "#tenant-limit-daily_model_calls", "per UTC day")
+      assert has_element?(view, "#tenant-limit-daily_model_calls", "config may only lower")
+      assert has_element?(view, "#tenant-limit-daily_sends[data-cap='#{sends}']")
+      assert has_element?(view, "#tenant-limit-daily_sends", Compliance.timezone())
+      assert has_element?(view, "#tenant-limit-daily_sends", "config may only lower")
       refute has_element?(view, "#tenant-limits input")
+      refute has_element?(view, "#tenant-limits button")
+    end
+
+    test "provider source quotas are shown as not yet built, with no counter", %{conn: conn} do
+      view = open_settings(conn, :reviewer)
+
+      assert has_element?(view, "#tenant-limit-source_quotas[data-status='not_built']"),
+             "C4-01b: the source quotas are not shown as not yet built"
+
+      assert has_element?(view, "#tenant-limit-source_quotas", "1,000")
+      assert has_element?(view, "#tenant-limit-source_quotas", "$5")
+      assert has_element?(view, "#tenant-limit-source_quotas", "C5-02")
+
+      refute has_element?(view, "#tenant-limit-source_quotas[data-used]"),
+             "C4-01b: a source-quota usage was shown although no counter exists"
+
+      refute has_element?(view, "#tenant-limit-source_quotas [data-used]")
+    end
+
+    test "the admin sees the current grants and allocations read-only, with their source",
+         %{conn: conn} = ctx do
+      view = open_settings(conn, :admin)
+
+      assert has_element?(view, "#settings-grants-none", "No model-call grant"),
+             "C4-01b: the no-grant state is not shown"
+
+      grant = AgentsFixtures.grant!(ctx.tenant, %{name: "G-SETTINGS"}, ctx.admin)
+      [allocation] = grant.allocations
+      view = open_settings(conn, :admin)
+
+      assert has_element?(
+               view,
+               "#settings-grant-#{grant.id}[data-status='active'][data-total-attempts='1000']",
+               "G-SETTINGS"
+             ),
+             "C4-01b: the current grant is not shown"
+
+      assert has_element?(view, "#settings-allocation-#{allocation.id}[data-attempts='1000']")
+      refute has_element?(view, "#settings-grants-none")
+      assert has_element?(view, "#settings-grants-source a[href='/admin']")
+      refute has_element?(view, "#settings-grants input")
+      refute has_element?(view, "#settings-grants button")
+    end
+
+    test "a reviewer is told grants are not visible to the role, never shown a fabricated state",
+         %{conn: conn} = ctx do
+      AgentsFixtures.grant!(ctx.tenant, %{name: "G-HIDDEN"}, ctx.admin)
+      view = open_settings(conn, :reviewer)
+
+      assert has_element?(view, "#settings-grants-hidden", "not visible to your role"),
+             "C4-01b: the reviewer is not told grants are not visible to the role"
+
+      refute has_element?(view, "#settings-grants-none")
+      refute has_element?(view, "#settings-grants [data-total-attempts]")
+      refute render(view) =~ "G-HIDDEN"
+    end
+
+    test "an auditor's grant view is recorded through AuditedView and withheld without it",
+         %{conn: conn} = ctx do
+      grant = AgentsFixtures.grant!(ctx.tenant, %{name: "G-AUDITED"}, ctx.admin)
+      auditor = user!(ctx, :auditor)
+      view = open_settings(conn, :auditor)
+
+      assert has_element?(view, "#settings-grant-#{grant.id}", "G-AUDITED"),
+             "C4-01b: the auditor is not shown the current grant"
+
+      accesses = accesses_to(ctx.admin, auditor, "SdrAgent.Agents.ModelCallGrant")
+
+      assert match?([%{access_kind: :record_view}], accesses),
+             "C4-01b: the auditor's grant view was not recorded once: #{inspect(accesses, limit: 4)}"
+
+      assert hd(accesses).target_ref == grant.id
+
+      conn = sign_in(build_conn(), :auditor)
+      refuse_accesses_to!("SdrAgent.Agents.ModelCallGrant")
+      result = try_settings(conn)
+
+      assert match?({:ok, _view, _html}, result),
+             "C4-01b: the page crashed instead of failing closed"
+
+      {:ok, view, html} = result
+
+      refute has_element?(view, "#settings-grant-#{grant.id}"),
+             "C4-01b: the grant was shown although its access was not recorded"
+
+      refute html =~ "G-AUDITED"
+      refute render(view) =~ "G-AUDITED"
     end
 
     test "the fixed safeguards are listed read-only with their reasons", %{conn: conn} do

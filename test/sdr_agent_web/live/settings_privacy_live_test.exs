@@ -7,8 +7,9 @@ defmodule SdrAgentWeb.SettingsPrivacyLiveTest do
   notes, plus refused saves (secret-shaped and over-size) — is absent from
   the captured logs (application, Phoenix, LiveView, SQL), from every
   exported span's attributes, events and status, from AuditEvent payloads,
-  AuditAccess rows, Failure rows and snapshot rows. It is present only in
-  the revision rows (the allowed copy; the settings page itself is the
+  AuditAccess rows, Failure rows and snapshot rows; the refused secret is
+  checked against each of those too, and against the revision rows. The
+  canary is present only in the revision rows (the allowed copy; the settings page itself is the
   authorized settings UI seam).
 
   As in the C4-01a privacy tests: Logger at `:debug`,
@@ -118,11 +119,19 @@ defmodule SdrAgentWeb.SettingsPrivacyLiveTest do
     for part <- span_parts(), field <- [:attributes, :events, :status] do
       refute Map.fetch!(part, field) =~ c,
              "C4-01b: the canary reached span #{inspect(part.name)} #{field}"
+
+      refute Map.fetch!(part, field) =~ secret,
+             "C4-01b: the refused secret reached span #{inspect(part.name)} #{field}"
     end
 
     for table <- ["audit_events", "audit_accesses", "failures", "run_settings_snapshots"] do
       refute table_contains?(table, c), "C4-01b: the canary reached #{table}"
+      refute table_contains?(table, secret), "C4-01b: the refused secret reached #{table}"
     end
+
+    # Only accepted, non-secret content is an allowed copy.
+    refute table_contains?("settings_revisions", secret),
+           "C4-01b: the refused secret was stored in a revision"
 
     # The allowed copy: every valid submission was saved once; the refused
     # ones wrote nothing.
