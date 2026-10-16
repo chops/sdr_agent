@@ -758,7 +758,7 @@ The full gate passes, with 2503 tests. It isn't on the R0-06 path.
 - the ADR-0004 C2-02b2β amendment, which gates b2β GREEN and so the
   critical path;
 - slice-c OQ-1;
-- the Sonnet calibration (G-R0 expires Sat 23:59 MDT).
+- the Sonnet calibration (G-R0 expires Sun Oct 18, 23:59 MDT).
 
 **Tripwires fired:**
 - 2: b2β took 4 contract drafts; C4-01a GREEN had two CHANGES REQUESTED;
@@ -810,7 +810,7 @@ did, with a regression test; 10 of 10 gates ran clean afterwards.
 
 **Waiting on the owner:**
 - the four merges, in order: #165 → #166, then #167 → #168;
-- the Sonnet calibration (G-R0 expires Sat 23:59 MDT);
+- the Sonnet calibration (G-R0 expires Sun Oct 18, 23:59 MDT);
 - OQ-R5-1 (SettingsLive crash reports);
 - OQ-5;
 - later, accepting the ADR-0005 R0-05 amendment, and the R0-05 manual try.
@@ -853,3 +853,4 @@ says what happened, why, what it cost and what changed.
 | **Oct 15: Claude stopped with authorized work queued.** After the C2-02 merges, Claude posted a status and ended its turn instead of starting C4-01a RED and the b2β contract. Codex, told 'no action needed', went idle. | A milestone reached while waiting on an owner action was treated as a stopping point, despite the standing 'keep going until I say stop'. | About 2 hours of both agents idle, 15:30–17:30. | Status reports go out as the next item starts. Codex gets work or an optional pre-read whenever it would otherwise idle. |
 | **Oct 15: notes for a review reached Codex empty.** The C4-01a RED author notes were written through the shell's `cat`, which is aliased to `bat`, and arrived at zero bytes. | Claude's own memory warns about the alias, and Claude used the wrong command anyway. | Minutes: Codex asked for them. | Notes files are written with the Write tool, and the byte count is checked before sending. |
 | **Oct 16: Claude recorded OQ-5 as accepted under D-138.** The owner had accepted the ADR-0004 C2-02b2β amendment and OQ-2, not OQ-5. | The amendment's open questions were summarized as one item when the decision was written. | Minutes: caught before any work relied on it, and corrected in the decision log. | Each open question in an owner decision is recorded separately, as accepted or still open. |
+| **Oct 15–16: Claude gave the G-R0 expiry as "Saturday Oct 18".** It is Sunday Oct 18, 23:59 MDT (2026-10-19 05:59 UTC); the timestamp was right, the weekday wrong. It went into D-140, the journal and several owner messages. | The weekday was typed from memory, against Claude's own rule to derive weekdays with `date`. | None in time (the real deadline is a day later than stated), but the owner was told the wrong day while planning attended calibration attempts. Codex caught it (`e87584b5`). | D-140 and the journal corrected; weekdays come from `date -d`, never by hand. |
