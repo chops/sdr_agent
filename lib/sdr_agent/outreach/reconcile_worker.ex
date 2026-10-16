@@ -6,6 +6,7 @@ defmodule SdrAgent.Outreach.ReconcileWorker do
   but an unknown delivery is left alone.
   """
   use Oban.Worker, queue: :reconciliation, max_attempts: 3
+  use SdrAgent.Workers.ErrorBoundary
 
   alias SdrAgent.Outreach.Delivery
 

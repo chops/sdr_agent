@@ -743,13 +743,19 @@ defmodule SdrAgent.Agents.ModelProfileSwitchTest do
 
       seams = [with_test_phase: 3, advance_test_phase: 1]
 
+      # C2-02b2β adds four orchestration entry points, each opening only its
+      # own fixed phase (`:resolve` or `:settle`) around no caller code.
       assert ProfileSwitches.__info__(:functions) -- seams ==
                [
+                 blocked_facts: 2,
+                 commit_resolution: 2,
                  get_setting: 1,
                  list_switches: 1,
                  phase: 1,
                  record_evidence: 3,
                  request: 2,
+                 resolve_blocked: 3,
+                 settle_resolution: 2,
                  transition: 4
                ]
 

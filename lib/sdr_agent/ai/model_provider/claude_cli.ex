@@ -362,6 +362,35 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   def attestation(server) when is_pid(server),
     do: published(server, :attestation) || %{status: :not_running}
 
+  @doc """
+  C2-02c: one read of the status table named `name` with its identity, for
+  `SdrAgent.AI.ModelProvider.Runtime.status/0`'s bracket (S1 and S2):
+  `{:ok, %{table, owner, registered, values}}` (the table id, its owner,
+  the pid registered as `name` or nil, and every published value:
+  `:profile`, `:held`, `:reaper`, `:admission`, `:attestation`), `:absent`
+  when no table has that name, or `:error` when it vanished mid-read. The
+  caller checks the owner against the registered pid and its own binding;
+  the identity (a ref and pids) must never reach a caller's status.
+  Read-only; never blocks on, or messages, the server.
+  """
+  def table_sample(name) when is_atom(name) do
+    case :ets.whereis(name) do
+      :undefined ->
+        :absent
+
+      table ->
+        {:ok,
+         %{
+           table: table,
+           owner: :ets.info(table, :owner),
+           registered: Process.whereis(name),
+           values: Map.new(:ets.tab2list(table))
+         }}
+    end
+  rescue
+    ArgumentError -> :error
+  end
+
   # Every server, named or not, publishes its admission and attestation in
   # its own process dictionary; another process reads one key of it
   # without waiting behind a running call. It holds no prompt, output or

@@ -120,6 +120,10 @@ Constraints on the real provider:
   enforced before the call (pre-call reservation) and reconciled after it
   using provider-reported usage. Exhaustion persists a reason and requires an
   operator action; it never retries in a loop.
+  *C4 note (2026-10-14, owner decision D-062 / C4 OQ-2; in force when C4
+  merges): the 20-per-run figure is the built-in default of the owner-editable
+  `run_max_model_calls` limit, frozen per run in its settings snapshot; the
+  200-per-UTC-day limit, C9 grants and pre-call reservation are unchanged.*
 - **Concurrency 1:** app-server calls are serialized until trace or
   invocation-ID propagation to the wire witness is proven (ADR-0005).
 - **Preflight model selection:** the model is chosen at startup from the
@@ -580,6 +584,75 @@ D-087, D-088, D-096, D-098, D-099):
   - a crash during a switch leaves it blocked until b2β.
 - **Neutral:** no new dependency. Domain writes stay Ash actions with
   audit (ADR-0009).
+
+### C2-02b2β amendment (2026-10-15, accepted): the attended resolver for a blocked switch
+
+**Status: ACCEPTED.**
+- **Accepted by:** the owner, on 2026-10-15 (D-138), at the text Codex
+  passed at `e60943c`.
+- **Contract:** `docs/product/r0/c2-02b2b-interface.md` (draft 4,
+  interface and entity PASS).
+- **Approves:** b2β GREEN only. It is not merge, activation or spend
+  approval.
+
+**Context.**
+- The C2-02b2 amendment leaves a blocked switch without an exit
+  (decision 6). The server stays held, and the switch occupies the
+  tenant's single open-switch slot.
+- A switch blocks when its outcome can't be proven: an unconfirmed
+  cleanup, a worker or coordinator death, an uncertain finalization, or a
+  drain or veto failure. Most of these have no receipt that could ever
+  arrive.
+
+**Decision.**
+1. **The only exit from blocked** is an attended resolution to
+   `:failed`.
+   - An active human admin decides, with the role and tenant re-read.
+     Any active admin may do this (C2-02b2β OQ-2).
+   - The registered coordinator executes it, in a new `:resolve` phase.
+     `model_runtime` gains no write.
+   - It needs a typed attestation (`STOPPED <switch id>`).
+   - The setting is unchanged, and there is no blocked → completed path.
+2. **The attestation binds:**
+   - the switch and the tenant;
+   - the covered range of starts, from the switch's generation to the
+     latest start. That start must be the coordinator's current start of
+     its own boot, re-checked after the locks;
+   - the observed lease kind (none, the current server's own live
+     reaper, or a dead holder);
+   - the outcome.
+
+   Replay is idempotent by id and authorizes nothing. It is checked in
+   the caller, in the coordinator, and after the locks, against the
+   persisted semantic identity.
+3. **An unknown outcome** is settled only through a serialization
+   barrier (the original write's locks, in its order) and an exact
+   re-read. Elapsed time is never proof. Until the outcome is settled,
+   the server stays held and nothing acts.
+4. **No new cleanup authority. C2-02b2 decision 5 stands:**
+   `Reaper.release/1` is never called by this code.
+   - The resolution releases no lease and no hold.
+   - A dead lease is a held hard conflict (`:cleanup_unprovable`). Its
+     exit is the existing operator path.
+   - The coordinator resumes its cold-boot path once no lease and no
+     server exist.
+   - Only the C2-02b2 reconciliation releases the hold.
+5. **Unchanged:**
+   - `complete` and `fail` refuse a blocked switch;
+   - `block` keeps its no-write replay;
+   - the lock order, the Fake default and the call grants.
+
+   One narrow change: `fail` on a resolved switch is refused, after the
+   existing owner, boot and generation guards, rather than read as a
+   replay.
+
+**Consequences.**
+- **Positive:** a blocked switch has a safe, audited exit that frees the
+  slot, with no new authority over cleanup.
+- **Negative:** a human attestation is trusted for work the system can't
+  observe. A resolution can commit without restoring readiness: with a
+  dead lease, it still needs the operator path.
+- **Neutral:** no new table, dependency or process.
 
 ## Justification
 

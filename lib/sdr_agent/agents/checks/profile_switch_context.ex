@@ -22,19 +22,29 @@ defmodule SdrAgent.Agents.Checks.ProfileSwitchContext do
       `model_runtime`: the `:lock_for_transition` reads (setting, then
       switch) for one switch, and the switch's `:fail` or `:block` write;
     * `:apply` — `complete` only, entered from `:transition`: the setting's
-      `:apply_switch` and the switch's `:complete` write.
+      `:apply_switch` and the switch's `:complete` write;
+    * `:resolve` (C2-02b2β) — `resolve_blocked`, actor a current human
+      admin of the tenant (re-read), the binding's own: the
+      `:lock_for_transition` reads and the switch's `:resolve_blocked`
+      write. The binding also carries the validated attestation, the
+      coordinator's boot and its start, which the write guard compares;
+    * `:settle` (C2-02b2β, read-only) — the settlement barrier of an unknown
+      resolution: the `:lock_for_transition` reads only, never a write.
+      Actor: the resolving admin (re-read), or `model_runtime` of the
+      tenant in the registered coordinator process.
 
   This check binds only the phase, the actor and the target. The writes'
   own guard (`SdrAgent.Agents.Changes.ProfileSwitchGuard`) re-locks and
   re-checks the stored rows, so the phase is never the only proof.
 
-  Policy options: `phase:` (required), `action:` (the orchestrating
+  Policy options: `phase:` (required; one phase or a list), `action:` (the orchestrating
   action, default any of the phase's) and `target:` — `:switch_id`
   (the `switch_id` argument), `:subject` (the switch row being updated) or
   `:tenant` (the created row's `tenant_id`).
   """
   use Ash.Policy.SimpleCheck
 
+  alias SdrAgent.Agents.Checks.CoordinatorProcess
   alias SdrAgent.Agents.Checks.CurrentAdmin
   alias SdrAgent.Agents.ProfileSwitches
 
@@ -46,7 +56,7 @@ defmodule SdrAgent.Agents.Checks.ProfileSwitchContext do
   def match?(actor, %{subject: %{context: context} = subject}, opts) do
     case ProfileSwitches.phase(context) do
       {:ok, binding} ->
-        binding.phase == Keyword.fetch!(opts, :phase) and
+        binding.phase in List.wrap(Keyword.fetch!(opts, :phase)) and
           action?(binding, opts[:action]) and
           actor?(binding, actor) and
           target?(binding, subject, Keyword.fetch!(opts, :target))
@@ -62,14 +72,34 @@ defmodule SdrAgent.Agents.Checks.ProfileSwitchContext do
   defp action?(binding, actions), do: binding.action in List.wrap(actions)
 
   # The actor must be the binding's own actor, of the phase's kind: a
-  # current human admin of the tenant for `:initialize`, `model_runtime`
-  # of the tenant for `:transition` and `:apply`.
-  defp actor?(%{phase: :initialize, actor: bound, tenant_id: tenant_id}, actor) do
-    match?(%SdrAgent.Accounts.User{}, actor) and actor.id == bound.id and
+  # current human admin of the tenant for `:initialize` and `:resolve`;
+  # that admin, or `model_runtime` in the registered coordinator, for the
+  # read-only `:settle`; `model_runtime` of the tenant for `:transition`
+  # and `:apply`.
+  defp actor?(%{phase: phase, actor: bound, tenant_id: tenant_id}, actor)
+       when phase in [:initialize, :resolve] do
+    current_admin?(bound, tenant_id, actor)
+  end
+
+  defp actor?(
+         %{phase: :settle, actor: %SdrAgent.Accounts.User{} = bound, tenant_id: tenant_id},
+         actor
+       ),
+       do: current_admin?(bound, tenant_id, actor)
+
+  defp actor?(%{phase: :settle} = binding, actor),
+    do: runtime?(binding, actor) and CoordinatorProcess.coordinator?()
+
+  defp actor?(binding, actor), do: runtime?(binding, actor)
+
+  defp current_admin?(%{id: bound_id}, tenant_id, actor) do
+    match?(%SdrAgent.Accounts.User{}, actor) and actor.id == bound_id and
       actor.tenant_id == tenant_id and CurrentAdmin.match?(actor, %{}, [])
   end
 
-  defp actor?(%{actor: bound, tenant_id: tenant_id}, actor) do
+  defp current_admin?(_bound, _tenant_id, _actor), do: false
+
+  defp runtime?(%{actor: bound, tenant_id: tenant_id}, actor) do
     match?(%SdrAgent.Actor{type: :model_runtime}, actor) and actor == bound and
       is_binary(tenant_id) and actor.tenant_id == tenant_id
   end

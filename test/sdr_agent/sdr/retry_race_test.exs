@@ -55,6 +55,8 @@ defmodule SdrAgent.SDR.RetryRaceTest do
     {:ok, tenant_id} = Audit.Kernel.singleton_tenant_id()
     seeder = Actor.system(:seeder, tenant_id, "race")
     {:ok, admin} = Accounts.get_user(hd(Fixtures.users()).id, actor: seeder)
+    # C4-R8: assignments need a saved offering profile (synthetic fixture).
+    SdrAgent.SettingsFixtures.save_offering!(admin)
     {:ok, lead} = Sales.fetch(Sales.Lead, hd(Fixtures.leads()).id, actor: admin)
 
     %{

@@ -434,8 +434,15 @@ defmodule SdrAgent.Agents.ProfileSwitchDrain do
         |> unwrap_bounded(drain)
     end
   rescue
+    # Only the queue-disabled refusal is a busy pool, retried. Under the SQL
+    # sandbox, DBConnection prefixes that same refusal with its owner-redirect
+    # text ("could not checkout the connection owned by ... Reason: ..."),
+    # so it is matched as a suffix (`SdrAgent.Agents.LedgerCall.busy?/1`
+    # already accepts the sandbox form); any other reason fails closed.
     error in DBConnection.ConnectionError ->
-      if error.message == @no_connection, do: retry_checkout(drain, fun), else: {:error, error}
+      if String.ends_with?(error.message, @no_connection),
+        do: retry_checkout(drain, fun),
+        else: {:error, error}
 
     # A failed read or write is never read as zero outstanding work.
     error ->

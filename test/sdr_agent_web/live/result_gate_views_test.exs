@@ -20,6 +20,8 @@ defmodule SdrAgentWeb.ResultGateViewsTest do
     lead = fixture_lead!(ctx, "01")
     definition = AgentsFixtures.definition!(ctx.tenant)
     attrs = definition |> AgentsFixtures.run_attrs() |> Map.put(:lead_id, lead.id)
+    # C4-R8: an assignment-origin run needs a saved offering profile.
+    AgentsFixtures.ensure_offering!(ctx.tenant)
     {:ok, run} = Agents.create_run(attrs, actor: agent)
     {:ok, run} = Agents.start_run(run, actor: agent)
     canary = "canary-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)

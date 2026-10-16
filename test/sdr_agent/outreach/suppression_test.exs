@@ -7,6 +7,9 @@ defmodule SdrAgent.Outreach.SuppressionTest do
   """
   use SdrAgent.SDRCase, async: false
 
+  # C4-R8: these assignments need a saved offering profile (synthetic fixture).
+  setup ctx, do: ensure_offering!(ctx)
+
   import SdrAgent.OutreachFixtures
 
   alias SdrAgent.Outreach

@@ -1,5 +1,16 @@
 defmodule SdrAgent.Telemetry.GenAI do
-  @moduledoc "Creates privacy-aware GenAI spans following `gen_ai.*` conventions."
+  @moduledoc """
+  Creates privacy-aware GenAI spans following `gen_ai.*` conventions.
+
+  Span attributes carry identifiers and SHA-256 content hashes only. Prompt
+  and completion bodies become `gen_ai.input.content` /
+  `gen_ai.output.content` span events only when
+  `:sdr_agent, :otel_capture_content` is true (development) *and* the
+  metadata's `content_capture` is not `:off`. C4: a request whose input
+  carries run settings is built with `content_capture: :off`, which
+  dominates the configuration and any provider or request option; the span
+  then records `gen_ai.content_capture` = `"off"` and no content event.
+  """
 
   require OpenTelemetry.Tracer
 
@@ -44,13 +55,19 @@ defmodule SdrAgent.Telemetry.GenAI do
   end
 
   defp attributes(operation, metadata) do
-    base = %{"gen_ai.operation.name" => operation}
+    base = %{
+      "gen_ai.operation.name" => operation,
+      "gen_ai.content_capture" => Atom.to_string(content_capture(metadata))
+    }
 
     Enum.reduce(metadata, base, fn
       {key, value}, acc when key in @content_keys and is_binary(value) ->
         acc
         |> Map.put("gen_ai.#{key}.id", Map.get(metadata, :id, "unknown"))
         |> Map.put("gen_ai.#{key}.sha256", sha256(value))
+
+      {:content_capture, _value}, acc ->
+        acc
 
       {key, value}, acc
       when is_atom(key) and (is_binary(value) or is_number(value) or is_boolean(value)) ->
@@ -62,10 +79,19 @@ defmodule SdrAgent.Telemetry.GenAI do
   end
 
   defp content_events(metadata) do
-    if Application.get_env(:sdr_agent, :otel_capture_content, false) do
+    if content_capture(metadata) == :inherit and
+         Application.get_env(:sdr_agent, :otel_capture_content, false) == true do
       Enum.flat_map(@content_keys, &content_event(&1, metadata[&1]))
     else
       []
+    end
+  end
+
+  # Anything but an explicit `:inherit` (absent: the pre-C4 default) is off.
+  defp content_capture(metadata) do
+    case Map.get(metadata, :content_capture, :inherit) do
+      :inherit -> :inherit
+      _off -> :off
     end
   end
 

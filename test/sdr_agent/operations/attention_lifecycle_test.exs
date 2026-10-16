@@ -61,6 +61,8 @@ defmodule SdrAgent.Operations.AttentionLifecycleTest do
 
   defp run_for!(ctx, operation) do
     definition = AgentsFixtures.definition!(ctx.tenant)
+    # C4-R8: an assignment-origin run needs a saved offering profile.
+    AgentsFixtures.ensure_offering!(ctx.tenant)
 
     {:ok, run} =
       Agents.create_run(

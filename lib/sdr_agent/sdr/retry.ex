@@ -15,7 +15,9 @@ defmodule SdrAgent.SDR.Retry do
   Operation → its attention Failure → the original Oban job → the audit
   chain head (first append).
 
-  Checks, in order: one child per prior run (`:already_retried`); prior in
+  Checks, in order: the prior run has a run settings snapshot
+  (`:no_settings_snapshot`, C4-R6; the retry shares it); one child per prior
+  run (`:already_retried`); prior in
   `failed | budget_exhausted | cancelled` (`:not_retryable`); at most
   `max_retries/0` retries after the original (`:retry_limit_reached`); no
   other queued or running run on the lead (`:assignment_active`); a
@@ -90,6 +92,7 @@ defmodule SdrAgent.SDR.Retry do
     with {:ok, lead} <- lock(Sales.Lead, seen.lead_id, actor, :for_update),
          {:ok, campaign} <- lock(Sales.Campaign, seen.campaign_id, actor, "FOR SHARE"),
          {:ok, prior} <- lock(AgentRun, seen.id, actor, :for_update),
+         :ok <- settings_snapshot(prior),
          :ok <- no_child(prior),
          :ok <- retryable(prior),
          :ok <- within_limit(prior),
@@ -118,6 +121,12 @@ defmodule SdrAgent.SDR.Retry do
       other -> other
     end
   end
+
+  # C4-R6: a retry reuses its original's settings snapshot; a run created
+  # before the C4 cutover has none and cannot be retried (checked before any
+  # Operation, job or attention resolution is written).
+  defp settings_snapshot(%{settings_snapshot_id: nil}), do: {:error, :no_settings_snapshot}
+  defp settings_snapshot(_prior), do: :ok
 
   defp no_child(prior) do
     case children(prior.id, prior.tenant_id) do
