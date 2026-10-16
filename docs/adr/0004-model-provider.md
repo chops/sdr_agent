@@ -581,11 +581,15 @@ D-087, D-088, D-096, D-098, D-099):
 - **Neutral:** no new dependency. Domain writes stay Ash actions with
   audit (ADR-0009).
 
-### C2-02b2β amendment (2026-10-15, proposed): the attended resolver for a blocked switch
+### C2-02b2β amendment (2026-10-15, accepted): the attended resolver for a blocked switch
 
-**Status: proposed.** It needs the owner's acceptance before b2β's
-implementation approval. Contract: `docs/product/r0/c2-02b2b-interface.md`
-(draft 4, in Codex review).
+**Status: ACCEPTED.**
+- **Accepted by:** the owner, on 2026-10-15 (D-138), at the text Codex
+  passed at `e60943c`.
+- **Contract:** `docs/product/r0/c2-02b2b-interface.md` (draft 4,
+  interface and entity PASS).
+- **Approves:** b2β GREEN only. It is not merge, activation or spend
+  approval.
 
 **Context.**
 - The C2-02b2 amendment leaves a blocked switch without an exit

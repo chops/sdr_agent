@@ -4,12 +4,21 @@
 the proposed ADR-0004 amendment PASS for owner presentation** (Codex
 `c523f9ab`, exact `e60943c`, report
 `codex-c202b2beta-e60943c-interface-pass.md`; configured `ai_pair=true`,
-`codex_review=true`). This permits scoped RED only. The owner's
-acceptance of the ADR, OQ-2 and OQ-5, the RED verification and GREEN are
-separate gates. Slice plan: `c2-02-slices.md` (b2β). Builds on b2α
-(`c2-02b2-interface.md`, merged at `22db5c0`). Needs the proposed
-ADR-0004 C2-02b2β amendment (section 7), which the owner must accept
-before implementation approval.
+`codex_review=true`).
+
+**Gates:**
+- **RED:** VERIFIED at `a9a60c4`.
+- **Owner acceptance (2026-10-15, D-138):**
+  - the ADR-0004 C2-02b2β amendment (section 7), at `e60943c`, including
+    OQ-2 (any active human admin resolves);
+  - so b2β GREEN may proceed.
+- **Still open:**
+  - OQ-5 (whether R0-05 gets an attended action for the hard conflict) is
+    still for the owner;
+  - GREEN review, merge and activation are separate gates.
+
+Slice plan: `c2-02-slices.md` (b2β). Builds on b2α
+(`c2-02b2-interface.md`, merged at `22db5c0`).
 
 **Review record:**
 - **Draft 3** (`a62a1af`): interface, entity and ADR NEEDS-REVIEW,
