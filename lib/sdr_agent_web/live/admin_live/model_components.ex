@@ -831,16 +831,35 @@ defmodule SdrAgentWeb.AdminLive.ModelComponents do
         phx-submit="confirm_resolution"
         class="mt-4 space-y-2"
       >
+        <%!--
+          The page's local refusal clears the input in the browser too
+          (D-141). The pinned LiveView client keeps a focused input's value
+          when it patches it, unless the rendered input opts in with
+          phx-patch-focused; the attribute is rendered only while a mismatch
+          is shown (from the refusal to the next edit), so the refusal's
+          render patches the input to its empty value and typing is never
+          reset.
+        --%>
         <.input
           id="resolution-confirmation"
           name="resolution_confirmation"
           value={nil}
+          phx-patch-focused={@review.state == :editing and @review.mismatch?}
           label="To confirm, type the word STOPPED, one space and the switch id"
           autocomplete="off"
           spellcheck="false"
           disabled={@review.state != :editing}
           class={[@input, "font-mono"]}
         />
+        <p
+          :if={@review.state == :editing and @review.mismatch?}
+          id="resolution-mismatch"
+          role="alert"
+          class="flex items-start gap-1.5 rounded-lg border border-rose-200 bg-rose-50 p-2.5 text-sm text-rose-800"
+        >
+          <.icon name="hero-exclamation-circle" class="mt-0.5 size-4 shrink-0" />
+          <span>That text doesn't match. Type STOPPED, a space and the switch id shown above.</span>
+        </p>
         <div class="flex flex-wrap items-center gap-3">
           <.ui_button
             id="confirm-resolution"

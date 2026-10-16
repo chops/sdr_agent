@@ -13,6 +13,16 @@ defmodule SdrAgentWeb.AdminLive.Resolution do
   "Check again" from `:uncertain` acts) and `:terminal` (the review is
   discarded; a new resolution needs a new review, id and confirmation).
 
+  **The typed text (D-141, option B).** `typed/2` keeps only whether the
+  text is exactly `STOPPED <switch id>` (`exact?`), never the text.
+  `confirm/2` compares the submitted binary byte for byte with
+  `"STOPPED " <> review.switch_id` (the id the review holds; no trimming,
+  case folding or synthesis): only a match builds the attestation, from the
+  operator's own bytes; anything else (a wrong text, or a missing or
+  non-binary value) is the page's local refusal (`mismatch?`), which keeps
+  the review `:editing` with the same id and keeps nothing of the text. The
+  next edit clears `mismatch?`.
+
   `settle/2` maps an attempt's result to the next state. A first attempt's
   results follow section 3's table; a retry after an unknown outcome
   (`retry?`) settles the earlier attempt only on an exact success or
@@ -117,7 +127,8 @@ defmodule SdrAgentWeb.AdminLive.Resolution do
       dispatch: nil,
       result: nil,
       error: nil,
-      facts_changed?: false
+      facts_changed?: false,
+      mismatch?: false
     }
   end
 
@@ -191,19 +202,39 @@ defmodule SdrAgentWeb.AdminLive.Resolution do
     %{base(review.switch_id) | facts: facts, facts_changed?: true}
   end
 
-  @doc "Records whether the typed text is exactly `STOPPED <switch id>` (the button's state only)."
+  @doc """
+  Records whether the typed `text` (any decoded parameter value) is exactly
+  `STOPPED <switch id>`: a boolean for the button's state, never the text.
+  An edit clears the page's local refusal (`mismatch?`).
+  """
   def typed(%{state: :editing} = review, text),
-    do: %{review | exact?: text == "STOPPED " <> review.switch_id}
+    do: %{review | exact?: matches?(review, text), mismatch?: false}
 
   def typed(review, _text), do: review
 
   @doc """
-  The frozen attestation of an `:editing` review, carrying the operator's
-  own `text` (never synthesized from the id; held as an opaque
-  `SdrAgentWeb.AdminLive.Confirmation`, unwrapped only for the domain call)
-  and the facts shown.
+  The page's check of a submitted `text` (any decoded parameter value) for
+  an `:editing` review: `{:ok, review}` with the attestation built from
+  exactly these bytes when they match, or `{:mismatch, review}`, the local
+  refusal (no attestation; the same state and id; nothing of the text kept).
   """
-  def attest(%{state: :editing, facts: facts} = review, text) do
+  def confirm(%{state: :editing} = review, text) do
+    if matches?(review, text),
+      do: {:ok, attest(%{review | mismatch?: false}, text)},
+      else: {:mismatch, %{review | exact?: false, mismatch?: true}}
+  end
+
+  # Byte for byte against the id the review holds (never one from the browser).
+  defp matches?(%{switch_id: switch_id}, text) when is_binary(text),
+    do: text == "STOPPED " <> switch_id
+
+  defp matches?(_review, _text), do: false
+
+  # The frozen attestation of an `:editing` review, carrying the operator's
+  # own `text` (never synthesized from the id; held as an opaque
+  # `SdrAgentWeb.AdminLive.Confirmation`, unwrapped only for the domain call)
+  # and the facts shown. Built only by `confirm/2`, for a matching text.
+  defp attest(%{state: :editing, facts: facts} = review, text) do
     %{
       review
       | attestation: %{

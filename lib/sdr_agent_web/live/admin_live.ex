@@ -43,6 +43,16 @@ defmodule SdrAgentWeb.AdminLive do
       never a rollback. The operator is re-validated before a completion is
       applied; the typed text is held as an opaque
       `SdrAgentWeb.AdminLive.Confirmation` until the domain call.
+    * **Only the matching text leaves the page** (D-141, option B): the
+      page compares the submitted bytes with `STOPPED <switch id>`
+      (`Resolution.confirm/2`); a text that doesn't match is refused here,
+      with no attestation, task, domain or coordinator call, and the review
+      stays `:editing`. A change event keeps only whether the text matches.
+    * **The connected channel process is tagged** (ADR-0005, R0-05
+      amendment): `mount/3` sets the logger metadata
+      `sdr_sensitive_input: true` when connected, before any input, and
+      never clears it, so `SdrAgent.Logger.ExceptionFilter` turns its crash
+      and error reports into a fixed, content-free diagnostic.
 
   Model call budgets (C9-05, REQ-R0-9): the tenant's real-model call grants
   (`Agents.list_grants/1`) with their allocations, availability and the
@@ -92,6 +102,19 @@ defmodule SdrAgentWeb.AdminLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    if connected?(socket) do
+      # ADR-0005 R0-05 amendment (D-141): this channel process receives the
+      # operator's typed resolution confirmation, which may be any text, so
+      # it is tagged before any input arrives and never untagged;
+      # `SdrAgent.Logger.ExceptionFilter` replaces its crash, termination and
+      # error-or-higher reports with a fixed diagnostic. Only the connected
+      # channel: a disconnected render runs in the HTTP process, which
+      # receives no input. `update_process_metadata/1` merges, keeping the
+      # process's other metadata; it is the process metadata Logger.metadata/1
+      # updates, so no logger configuration changes.
+      :logger.update_process_metadata(%{sdr_sensitive_input: true})
+    end
+
     {:ok,
      socket
      |> assign(
@@ -300,28 +323,29 @@ defmodule SdrAgentWeb.AdminLive do
     end
   end
 
+  # Keeps only whether the text matches (the button's state), never the text.
   def handle_event(
         "change_resolution",
-        %{"resolution_confirmation" => text},
+        params,
         %{assigns: %{resolution: %{state: :editing} = review}} = socket
-      )
-      when is_binary(text),
-      do: {:noreply, assign(socket, resolution: Resolution.typed(review, text))}
+      ),
+      do:
+        {:noreply,
+         assign(socket, resolution: Resolution.typed(review, confirmation_param(params)))}
 
-  # Acts only on the :editing review the socket holds; the attempt carries
-  # the operator's own text and the frozen facts and id.
+  # Acts only on the :editing review the socket holds. The page checks the
+  # submitted bytes itself (D-141): only a match is attested, carrying the
+  # operator's own bytes and the frozen facts and id, and dispatched; a
+  # mismatch is refused here, with nothing built, stored or sent.
   def handle_event(
         "confirm_resolution",
         params,
         %{assigns: %{resolution: %{state: :editing} = review}} = socket
       ) do
-    text =
-      case params do
-        %{"resolution_confirmation" => text} when is_binary(text) -> text
-        _no_text -> ""
-      end
-
-    {:noreply, dispatch(socket, Resolution.attest(review, text))}
+    case Resolution.confirm(review, confirmation_param(params)) do
+      {:ok, attested} -> {:noreply, dispatch(socket, attested)}
+      {:mismatch, refused} -> {:noreply, assign(socket, resolution: refused)}
+    end
   end
 
   # Resends exactly the frozen identity; only from :uncertain.
@@ -333,6 +357,11 @@ defmodule SdrAgentWeb.AdminLive do
       do: {:noreply, dispatch(socket, socket.assigns.resolution)}
 
   def handle_event(_ignored_event, _params, socket), do: {:noreply, socket}
+
+  # The decoded `resolution_confirmation` value as sent (any shape; absent is
+  # nil); `Resolution` accepts only a binary that matches.
+  defp confirmation_param(%{"resolution_confirmation" => value}), do: value
+  defp confirmation_param(_params), do: nil
 
   # The attempt's completion, matched to the active review's dispatch; a
   # result for any other review or state is ignored.
