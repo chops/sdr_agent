@@ -315,13 +315,13 @@ its own attended action for that is OQ-5.
 | reconciliation unknown | S `:failed` | retried on the tick | kept |
 | a ready `:replacement` or `:boot` start at the desired profile, with no open switch | S `:failed` | b2α's normal release branch | **released** |
 
-## 7. The proposed ADR-0004 C2-02b2β amendment (substantive)
+## 7. The ADR-0004 C2-02b2β amendment (substantive; accepted, D-138)
 
 It changes C2-02b2 decision 6 (a blocked switch had no exit). **Decision
 5 is unchanged:** `Reaper.release/1` is never called by this code. The
-amendment is in `docs/adr/0004-model-provider.md`, status **proposed**,
-and needs the owner's acceptance before implementation approval. No new
-ADR number. ADR-0005's calibration recovery is precedent only.
+amendment is in `docs/adr/0004-model-provider.md`; the owner accepted it
+on 2026-10-15 (D-138), which cleared implementation. No new ADR number.
+ADR-0005's calibration recovery is precedent only.
 
 Its decisions:
 1. **The only exit from blocked** is the attended resolution to
