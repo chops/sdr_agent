@@ -66,7 +66,8 @@ defmodule SdrAgent.Agents do
       `SettingsRevision`, stale and raise-confirmation checks),
       `current_settings/1` (the settings page only), `run_settings/2` (the
       resolved settings of a run's `RunSettingsSnapshot`, the only read
-      agents use) and `settings_complete/2` (the assignment pre-check);
+      agents use), `run_settings_summary/2` (the run page's metadata-only
+      view of a snapshot) and `settings_complete/2` (the assignment pre-check);
       limits and booking links at use are `SdrAgent.Agents.RunSettings`.
   """
   use Ash.Domain,
@@ -1898,6 +1899,78 @@ defmodule SdrAgent.Agents do
       {:error, error} ->
         {:error, error}
     end
+  end
+
+  @doc """
+  The run page's view of `run`'s settings snapshot (C4-R11, C4-R14):
+  metadata only, never settings content — `{:ok, %{id, slots, limits,
+  run_ceilings}}` where `slots` maps each kind to `%{source, revision_id,
+  number, version}` (`number` is the revision number of a `:revision`
+  slot), `limits` are the twelve limits recorded at snapshot time and
+  `run_ceilings` the run's per-field ceiling before its independent budgets
+  (`SdrAgent.Agents.RunSettings.ceiling/3`, the value `allowance/2` gives).
+  Whether a call or fetch is allowed now is decided only at use, by the
+  guarded step. `{:error, :no_settings_snapshot}` for a run without one.
+  Read as `actor` through the snapshot's and revisions' read policies; an
+  auditor's view must be recorded by the caller.
+  """
+  def run_settings_summary(run, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    with id when is_binary(id) <- Map.get(run, :settings_snapshot_id) || :no_snapshot,
+         {:ok, snapshot} <- read_snapshot(id, run.tenant_id, actor),
+         {:ok, numbers} <- snapshot_revision_numbers(snapshot, actor) do
+      limits =
+        Map.new(RunSettings.Safeguards.limit_fields(), &{&1, Map.fetch!(snapshot.limits, &1)})
+
+      {:ok,
+       %{
+         id: snapshot.id,
+         slots: Map.new(RunSettings.kinds(), &{&1, summary_slot(&1, snapshot, numbers)}),
+         limits: limits,
+         run_ceilings:
+           Map.new(limits, fn {field, _value} ->
+             {field, RunSettings.ceiling(run, limits, field)}
+           end)
+       }}
+    else
+      :no_snapshot -> {:error, :no_settings_snapshot}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp snapshot_revision_numbers(snapshot, actor) do
+    ids =
+      RunSettings.kinds()
+      |> Enum.map(&Map.fetch!(snapshot, :"#{&1}_revision_id"))
+      |> Enum.reject(&is_nil/1)
+
+    SettingsRevision
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(id in ^ids and tenant_id == ^snapshot.tenant_id)
+    |> Ash.Query.select([:id, :kind, :number])
+    |> Ash.read()
+    |> case do
+      {:ok, revisions} when length(revisions) == length(ids) ->
+        {:ok, Map.new(revisions, &{&1.id, &1.number})}
+
+      {:ok, _missing} ->
+        {:error, :settings_revision_unavailable}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  defp summary_slot(kind, snapshot, numbers) do
+    revision_id = Map.fetch!(snapshot, :"#{kind}_revision_id")
+
+    %{
+      source: Map.fetch!(snapshot, :"#{kind}_source"),
+      revision_id: revision_id,
+      number: revision_id && Map.fetch!(numbers, revision_id),
+      version: Map.fetch!(snapshot, :"#{kind}_code_default_version")
+    }
   end
 
   @doc """
