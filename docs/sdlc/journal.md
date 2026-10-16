@@ -686,6 +686,87 @@ REQUESTED), reported as each arrived.
 slice c; C4-01a/b RED; R0-05. The R0-06 forecast stays Fri Oct 23 (Mon
 Oct 26 without weekend work).
 
+### Sprint 1, day 4 (Thu Oct 15), evening (through 21:00 MDT)
+
+**The stop, and the decision to keep going.** After the C2-02 stack
+merged, Claude posted a status report and stopped. It should have
+started the next work, which was already authorized. Codex, given
+nothing to review, sat idle for about two hours. The owner asked why,
+called for a standup, and then decided to work through the night and the
+weekend (D-136). Every status report now goes out as work starts, never
+in place of it.
+
+**Contracts, all passed by Codex:**
+
+| Contract | Drafts | Head | What it covers |
+|---|---|---|---|
+| b2β, the attended resolver | 4 | `e60943c` | A blocked switch's one exit, to failed |
+| Slice c, restart and status | 3 | `401df6f` | Restart behaviour, and a cross-checked status sample |
+| R0-05, the admin page | 3 | `fbc3203` | The model card, the switch, the resolver UI |
+
+- **b2β:** the admin's typed attestation goes through the coordinator.
+  Draft 3 had proposed a narrow lease-release power, but its binding
+  argument was wrong: a server can replace its own reaper without a new
+  start. Draft 4 withdrew the power. A dead lease now stays a held hard
+  conflict, ended by the operator. The proposed ADR-0004 amendment waits
+  for the owner.
+- **Slice c:** it narrows the plan's "clean pending → failed at boot"
+  branch, because a restart can never prove that earlier CLI work
+  stopped. That is OQ-1, for the owner. Status reports the last
+  confirmed observations, cross-checked within a bounded sample.
+- **R0-05:** each review freezes while it is being submitted or its
+  outcome is uncertain.
+
+**RED, verified by Codex:**
+
+| Slice | Head | Rounds | Notes |
+|---|---|---|---|
+| b2β | `a9a60c4` | 3 | 59 failing as intended |
+| C4-01a | `e8dcda3` | 2 | 72 tests |
+| Slice c | `1cb8506` | 2 | 3 tests stay staged until b2β GREEN |
+
+Each round came with throwaway stub evidence. Codex's critical b2β
+finding: `LedgerCall`'s connection watchdog ends a paused transaction at
+2.25 s, so a settlement test can't hold a writer open past the 15 s
+deadline. That needed an independent held transaction.
+
+**A b2α bug, found by the slice-c RED.** A coordinator restart whose
+first start is held leaves a pending switch pending forever. It fails
+closed, but has no exit. Codex confirmed it, and it is fixed as a
+prerequisite inside b2β GREEN.
+
+**C4-01a GREEN** was built by a background agent. Codex requested
+changes twice, each round narrower:
+- **Round 1:** a span leak on malformed input; the repeated-character
+  secret-rule shortcut (rejected, with test data changed instead); the
+  ADR-0005 error-path controls, required before merge.
+- **Round 2:** an atom/string key alias that splits validation from
+  casting, and worker-boundary tests that checked only a marker.
+
+The full gate passes, with 2503 tests. It isn't on the R0-06 path.
+
+**Small items:**
+- **PR #164:** a grant with no profile ticked is now flagged at the review
+  step (the owner's morning error). RED verified, gate green, and in code
+  review.
+- **The test scripts' zero-count bug:** those files are owned by the
+  project factory, so the fix goes upstream, for the owner to decide.
+- **Codex's pre-reads** of b2β and slice c caught design risks before the
+  drafts were written.
+
+**Waiting on the owner:**
+- the ADR-0004 C2-02b2β amendment, which gates b2β GREEN and so the
+  critical path;
+- slice-c OQ-1;
+- the Sonnet calibration (G-R0 expires Sat 23:59 MDT).
+
+**Tripwires fired:**
+- 2: b2β took 4 contract drafts; C4-01a GREEN had two CHANGES REQUESTED;
+- 3: the two-hour idle stop.
+
+All were reported as they happened. The R0-06 forecast is Fri Oct 23
+with weekend work, and at risk if b2β GREEN takes as many rounds as b2α.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -713,3 +794,5 @@ says what happened, why, what it cost and what changed.
 | **Oct 15: one b2α review round reached Codex unformatted.** The gate failed at its first step (format). | New regression files were written and the gate was started without running `mix format --check-formatted` first. | One review round. | Run the format check after writing files and before the gate. |
 | **Oct 15: the first integration gate started without dependencies.** After main brought in the Bandit Git pin, the worktrees had not fetched it, and compile, credo and the audit all failed. | A dependency source change needs `mix deps.get` in every worktree; the merge was conflict-free, so nothing prompted it. | One aborted gate start, minutes. | Run `mix deps.get` after any merge that changes `mix.lock`. |
 | **Oct 15: Claude pulled main into the owner's calibration checkout mid-sequence.** After #163 merged, `~/src/SDR_agent` was fast-forwarded from `3b2caaa` (the code Opus ran on) to `22db5c0`, which adds a migration and the coordinator. | Habit of refreshing the main checkout after a merge; it is the owner's console checkout and calibration was still open. | None: caught within a minute, before any command ran there; reset with `--keep` to `3b2caaa`. | Leave the owner's checkout alone during calibration; inspect main in a worktree or with `git fetch`. |
+| **Oct 15: Claude stopped with authorized work queued.** After the C2-02 merges, Claude posted a status and ended its turn instead of starting C4-01a RED and the b2β contract. Codex, told 'no action needed', went idle. | A milestone reached while waiting on an owner action was treated as a stopping point, despite the standing 'keep going until I say stop'. | About 2 hours of both agents idle, 15:30–17:30. | Status reports go out as the next item starts. Codex gets work or an optional pre-read whenever it would otherwise idle. |
+| **Oct 15: notes for a review reached Codex empty.** The C4-01a RED author notes were written through the shell's `cat`, which is aliased to `bat`, and arrived at zero bytes. | Claude's own memory warns about the alias, and Claude used the wrong command anyway. | Minutes: Codex asked for them. | Notes files are written with the Write tool, and the byte count is checked before sending. |
