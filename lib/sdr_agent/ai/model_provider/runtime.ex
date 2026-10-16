@@ -31,34 +31,85 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       no ordinary real call until R0-03, C9 and R0-07 land; only a test
       build's injected launcher passes) — never a raise and never a silent
       fallback to the Fake or to `claude` on `PATH`. Per-call init attestation stays
-      mandatory; this health check is in addition to it.
-    * `status/0` — what the Admin page shows: the configured and the
-      effective provider (nil, with the refusal, when calls are refused),
-      model alias and resolved id, reviewed CLI version, the configured
-      pinned CLI path (`cli_executable`), server state and the last init
-      attestation with its time, and the `profile_id` those model fields
-      belong to (the running server's, else the desired one). No secret is
-      read and no CLI is run.
+      mandatory; this health check is in addition to it. Its checks are one
+      pure function of a server view, shared with `status/0`.
+    * `status/0` — what the Admin page shows (C2-02c,
+      `docs/product/r0/c2-02c-interface.md` sections 2, 2a and 2b): the
+      coordinator's **last confirmed ledger observations** (`desired_profile`,
+      `switch`, `published_at`; `ledger_observation`) plus **one bracketed
+      runtime sample** (`observed_profile`, `hold`, `stage`, the
+      eligibility as `effective`, `refusal` and `effective_profile`,
+      `server` and the attestation; `runtime_observation`). An attempt
+      reads the coordinator's row (C1, `Coordinator.sample/0`), the bound
+      server's status table once (S1, `ClaudeCLI.table_sample/1`),
+      computes the eligibility from that view, pin file metadata and the
+      staging configuration, then re-reads the server (S2) and the row
+      (C2); it is consistent when C1 = C2, S1 = S2 and every owner matches
+      its binding, and is retried at most three times. No positive value is
+      ever taken from parts of different attempts; a missing server is
+      `:none` only when the coordinator positively binds none and no
+      process holds the name; `profile_id` and the model fields follow the
+      known observed profile, then the confirmed desired one, else nil
+      (never the registry default). It makes no database query, sends
+      nothing to the coordinator or the server, writes nothing and never
+      calls `resolve/1`. **Status is never authority:** admission stays
+      with the reservation and launch fencing. Also the configured
+      provider, the reviewed CLI version and the configured pinned CLI path
+      (`cli_executable`). No secret is read and no CLI is run. Test builds
+      only (`@test_seams`): each step of an attempt emits `[:sdr_agent,
+      :runtime_status, :sample]` (`%{}`, `%{point: :c1 | :s1 | :eligibility
+      | :s2 | :c2, attempt: 1..3}`) in the caller; other builds compile it
+      out.
+    * `desired_profile/0` — the coordinator's confirmed desired profile
+      (`{:ok, %{profile_id, source, confirmed_at}}`), `{:error, :unknown}`,
+      or `:not_applicable` for an in-process provider.
   """
 
-  alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
+  alias SdrAgent.AI.ModelProvider.Coordinator
   alias SdrAgent.AI.ModelProvider.ProfileSupervisor
+
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+  @attempts 3
 
   @doc "The selected provider module (`config :sdr_agent, :model_provider`)."
   def provider, do: Application.fetch_env!(:sdr_agent, :model_provider)
 
   @doc """
-  The real profile the app's ClaudeCLI server is started with (R0-03).
-
-  C2 seam: until the persisted `ModelProfileSetting` exists (C2-01), this is
-  the registry's default, `:claude_cli_opus`; C2 replaces it with the
-  tenant's persisted desired profile. It is deliberately not read from the
-  application environment: only the audited in-app switch may choose
-  another reviewed profile.
+  The desired real profile, as the coordinator last confirmed it (C2-02c
+  section 2b): `{:ok, %{profile_id, source: :setting | :default,
+  confirmed_at}}` when its row validates (owner and binding, read twice
+  and equal, at most three attempts) and holds a confirmed observation;
+  otherwise `{:error, :unknown}` for ClaudeCLI, never the registry
+  default. An in-process provider (the Fake) is `:not_applicable`: no real
+  profile is configured, which says nothing about a stored setting. No
+  database read and no coordinator call; the coordinator itself reads the
+  setting (C2-02b2α).
   """
-  def desired_profile, do: ModelProfiles.default_real()
+  def desired_profile do
+    case provider() do
+      ClaudeCLI ->
+        case ledger_sample(1) do
+          {:ok, %{public: %{desired: %{confirmed_at: %DateTime{}} = desired}}} -> {:ok, desired}
+          _unknown -> {:error, :unknown}
+        end
+
+      _in_process ->
+        :not_applicable
+    end
+  end
+
+  # The coordinator's row, twice and equal (C1 = C2), at most three times.
+  defp ledger_sample(attempt) do
+    c1 = Coordinator.sample()
+
+    cond do
+      match?({:ok, _row}, c1) and Coordinator.sample() == c1 -> c1
+      attempt < @attempts -> ledger_sample(attempt + 1)
+      true -> :error
+    end
+  end
 
   @doc """
   Supervision children for the selected provider: none for the Fake; for
@@ -78,7 +129,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   the coordinator adds the name, the profile and its hold): the configured
   `:timeout` and pinned `:executable` only. The profile is never an
   environment knob: the coordinator runs the persisted setting's desired
-  profile, or `desired_profile/0` before any setting.
+  profile, or the registry default before any setting.
   """
   def server_options(_profile_id) do
     :sdr_agent
@@ -127,12 +178,22 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   end
 
   defp published_health(server) do
-    admission = ClaudeCLI.admission(server).admission
-    attestation = ClaudeCLI.attestation(server)
+    eligibility(%{
+      admission: ClaudeCLI.admission(server).admission,
+      held?: ClaudeCLI.held?(server),
+      attestation: ClaudeCLI.attestation(server)
+    })
+  end
 
+  # The admission, launcher, pin and staging checks, as one pure function
+  # of a server view (`admission: :open | :blocked | :not_running`,
+  # `held?`, the attestation) plus pin file metadata and the staging
+  # configuration: `resolve/1` builds the view from the server's published
+  # status; `status/0` from its bracketed sample (C2-02c 2a).
+  defp eligibility(%{admission: admission, held?: held?, attestation: attestation}) do
     cond do
       admission == :not_running -> {:error, :provider_not_running}
-      ClaudeCLI.held?(server) -> {:error, :provider_held}
+      held? -> {:error, :provider_held}
       admission != :open -> {:error, :provider_not_quiescent}
       attestation[:command?] == false -> {:error, :llm_proxy_shim_not_found}
       not pinned_cli_present?(attestation) -> {:error, :pinned_cli_unavailable}
@@ -162,8 +223,9 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   The run `failure_reason` recorded when a worker refuses to run because of
   `reason` (`:provider_not_running`, `:provider_held`, `:provider_not_quiescent`,
   `:llm_proxy_shim_not_found`, `:pinned_cli_unavailable`,
-  `:real_model_staged` or `:unknown_model_provider`); no model call was
-  made.
+  `:real_model_staged` or `:unknown_model_provider`), or that status
+  shows for ClaudeCLI (`:status_unavailable`, `:status_inconsistent`); no
+  model call was made.
   """
   def refusal_message(:provider_not_running),
     do:
@@ -197,65 +259,272 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       "model provider claude_cli refuses calls: the app's pinned Claude CLI is not configured, " <>
         "missing or not the reviewed build (bin/app-claude-cli-root); no model call was made"
 
-  @doc "The selected provider's status for operators (no secrets)."
-  def status do
-    configured = provider()
+  def refusal_message(:status_unavailable),
+    do:
+      "model provider claude_cli status is unavailable: no valid coordinator or bound server " <>
+        "was observed (status is never authority); no model call was made"
 
+  def refusal_message(:status_inconsistent),
+    do:
+      "model provider claude_cli status kept changing while it was read, so no eligibility " <>
+        "is reported (status is never authority); no model call was made"
+
+  @doc """
+  The selected provider's status for operators (no secrets); see the
+  moduledoc. Never authority: a later instant may differ.
+  """
+  def status do
+    case provider() do
+      ClaudeCLI -> claude_cli_status()
+      configured -> in_process_status(configured)
+    end
+  end
+
+  # An in-process provider (the Fake): its fixed provenance, its effective
+  # provider from the pass-through `resolve/1`, and every ClaudeCLI field
+  # not applicable.
+  defp in_process_status(configured) do
     {effective, refusal} =
       case resolve([]) do
         {:ok, model} -> {model[:provider], nil}
         {:error, reason} -> {nil, reason}
       end
 
-    Map.merge(details(configured), %{
+    prepared = prepared(configured)
+
+    %{
       configured: configured,
       effective: effective,
-      refusal: refusal
-    })
+      refusal: refusal,
+      provider: configured,
+      profile_id: prepared[:profile_id],
+      model_alias: nil,
+      model_id: prepared[:model_id],
+      reviewed_version: nil,
+      cli_executable: nil,
+      server: :not_applicable,
+      attestation: %{status: :not_applicable},
+      ledger_observation: :not_applicable,
+      runtime_observation: :not_applicable,
+      desired_profile: :not_applicable,
+      switch: :not_applicable,
+      observed_profile: :not_applicable,
+      hold: :not_applicable,
+      stage: :not_applicable,
+      effective_profile: nil,
+      published_at: nil
+    }
   end
 
-  defp details(configured) do
-    case configured do
-      ClaudeCLI ->
-        profile = ClaudeCLI.profile(ClaudeCLI.server()) || desired_profile()
+  defp claude_cli_status do
+    observation = 1 |> bracket() |> observation()
+    profile = known_profile(observation.observed_profile, observation.desired_profile)
+
+    model =
+      if profile do
         provenance = ClaudeCLI.provenance(profile)
 
         %{
-          provider: ClaudeCLI,
-          profile_id: profile,
           model_alias: provenance.model_catalog_entry["alias"],
           model_id: provenance.model_id,
-          reviewed_version: provenance.provider_version,
-          cli_executable:
-            :sdr_agent |> Application.get_env(ClaudeCLI, []) |> Keyword.get(:executable),
-          server: server_state(),
-          attestation: ClaudeCLI.attestation(ClaudeCLI.server())
+          reviewed_version: provenance.provider_version
         }
+      else
+        %{model_alias: nil, model_id: nil, reviewed_version: nil}
+      end
 
-      module ->
-        prepared = prepared(module)
+    observation
+    |> Map.merge(model)
+    |> Map.merge(%{
+      configured: ClaudeCLI,
+      provider: ClaudeCLI,
+      profile_id: profile,
+      cli_executable: :sdr_agent |> Application.get_env(ClaudeCLI, []) |> Keyword.get(:executable)
+    })
+  end
 
-        %{
-          provider: module,
-          profile_id: prepared[:profile_id],
-          model_alias: nil,
-          model_id: prepared[:model_id],
-          reviewed_version: nil,
-          cli_executable: nil,
-          server: :not_applicable,
-          attestation: %{status: :not_applicable}
-        }
+  # The known observed profile, then the confirmed desired one, else nil.
+  defp known_profile(observed, _desired)
+       when is_atom(observed) and observed not in [nil, :none, :unknown],
+       do: observed
+
+  defp known_profile(_observed, %{profile_id: profile}), do: profile
+  defp known_profile(_observed, _unknown), do: nil
+
+  ## The bracket (C2-02c 2a)
+
+  # At most three attempts; the first wholly consistent one is the sample,
+  # else the last one (classified by `observation/1`).
+  defp bracket(attempt) do
+    sample = attempt(attempt)
+
+    if consistent?(sample) or attempt == @attempts,
+      do: sample,
+      else: bracket(attempt + 1)
+  end
+
+  # C1 → S1 → eligibility → S2 → C2: read-only, and no process is called.
+  defp attempt(n) do
+    c1 = Coordinator.sample()
+    point(:c1, n)
+    s1 = server_sample(c1)
+    point(:s1, n)
+    verdict = sampled_eligibility(c1, s1)
+    point(:eligibility, n)
+    s2 = server_sample(c1)
+    point(:s2, n)
+    c2 = Coordinator.sample()
+    point(:c2, n)
+    %{c1: c1, s1: s1, verdict: verdict, s2: s2, c2: c2}
+  end
+
+  # The server C1's row binds: its table, owned by the pid registered as
+  # the server's name and bound by the row; or positively none (the row
+  # binds none, no table and no process holds the name). Anything else is
+  # missing, never `:none`.
+  defp server_sample({:ok, %{private: %{server: bound}}}) do
+    name = ClaudeCLI.server()
+
+    case {bound, ClaudeCLI.table_sample(name)} do
+      {:none, :absent} ->
+        if Process.whereis(name) == nil, do: {:ok, :none}, else: :missing
+
+      {pid, {:ok, %{owner: pid, registered: pid} = sample}} when is_pid(pid) ->
+        {:ok, sample}
+
+      _missing_or_unbound ->
+        :missing
     end
   end
 
-  # :blocked while the named server refuses calls until earlier CLI work is
-  # confirmed stopped (`ClaudeCLI.admission/1`).
-  defp server_state do
+  defp server_sample(_invalid_coordinator), do: :skipped
+
+  # Eligibility inside the bracket, from C1 and S1 only: a published hold
+  # other than `:released` (a pending hold included) counts as held.
+  defp sampled_eligibility({:ok, _row}, {:ok, :none}), do: {:error, :provider_not_running}
+
+  defp sampled_eligibility({:ok, %{public: %{hold: hold}}}, {:ok, %{values: values}}) do
+    eligibility(%{
+      admission: admission(values[:admission]),
+      held?: values[:held] == true or hold != :released,
+      attestation: values[:attestation] || %{status: :not_running}
+    })
+  end
+
+  defp sampled_eligibility(_c1, _s1), do: nil
+
+  defp admission(:open), do: :open
+  defp admission({:blocked, _reason}), do: :blocked
+  defp admission(_none), do: :not_running
+
+  defp consistent?(%{c1: {:ok, _} = c1, c2: c2, s1: {:ok, _} = s1, s2: s2}),
+    do: c1 == c2 and s1 == s2
+
+  defp consistent?(_sample), do: false
+
+  defp coordinator_valid?(%{c1: {:ok, _} = c1, c2: c2}), do: c1 == c2
+  defp coordinator_valid?(_sample), do: false
+
+  # The 2b shapes. Ledger fields need the final attempt's coordinator
+  # validation (C1 = C2); runtime fields need a wholly consistent attempt.
+  defp observation(sample) do
     cond do
-      not ClaudeCLI.running?(ClaudeCLI.server()) -> :not_running
-      ClaudeCLI.admission(ClaudeCLI.server()).admission == :blocked -> :blocked
-      true -> :running
+      consistent?(sample) ->
+        sample |> ledger(:valid) |> Map.merge(runtime(sample))
+
+      coordinator_valid?(sample) ->
+        {runtime, refusal} =
+          if match?({:ok, _}, sample.s1) and match?({:ok, _}, sample.s2),
+            do: {:inconsistent, :status_inconsistent},
+            else: {:unavailable, :status_unavailable}
+
+        sample |> ledger(:valid) |> Map.merge(unknown_runtime(runtime, refusal))
+
+      true ->
+        sample
+        |> ledger(:unavailable)
+        |> Map.merge(unknown_runtime(:unavailable, :status_unavailable))
     end
+  end
+
+  defp ledger(%{c1: {:ok, %{public: row}}}, :valid) do
+    %{
+      ledger_observation: :valid,
+      desired_profile: row.desired,
+      switch: row.switch,
+      published_at: row.published_at
+    }
+  end
+
+  defp ledger(_sample, :unavailable) do
+    %{
+      ledger_observation: :unavailable,
+      desired_profile: :unknown,
+      switch: :unknown,
+      published_at: nil
+    }
+  end
+
+  defp runtime(%{c1: {:ok, %{public: row}}, s1: {:ok, server}, verdict: verdict}) do
+    {observed, server_state, attestation} =
+      case server do
+        :none ->
+          {:none, :not_running, %{status: :not_running}}
+
+        %{values: values} ->
+          {values[:profile], server_state(admission(values[:admission])),
+           values[:attestation] || %{status: :not_running}}
+      end
+
+    {effective, refusal, effective_profile} =
+      case verdict do
+        :ok -> {ClaudeCLI, nil, observed}
+        {:error, reason} -> {nil, reason, nil}
+      end
+
+    %{
+      runtime_observation: :consistent,
+      observed_profile: observed,
+      hold: row.hold,
+      stage: row.stage,
+      effective_profile: effective_profile,
+      effective: effective,
+      refusal: refusal,
+      server: server_state,
+      attestation: attestation
+    }
+  end
+
+  defp unknown_runtime(runtime, refusal) do
+    %{
+      runtime_observation: runtime,
+      observed_profile: :unknown,
+      hold: :unknown,
+      stage: :unknown,
+      effective_profile: nil,
+      effective: nil,
+      refusal: refusal,
+      server: :unknown,
+      attestation: %{status: :unknown}
+    }
+  end
+
+  # `:blocked` while the server refuses calls until earlier CLI work is
+  # confirmed stopped (`ClaudeCLI.admission/1`).
+  defp server_state(:open), do: :running
+  defp server_state(:blocked), do: :blocked
+  defp server_state(:not_running), do: :not_running
+
+  # The test-build sample seam (see the moduledoc); compiled out elsewhere.
+  if @test_seams do
+    defp point(point, attempt),
+      do:
+        :telemetry.execute([:sdr_agent, :runtime_status, :sample], %{}, %{
+          point: point,
+          attempt: attempt
+        })
+  else
+    defp point(_point, _attempt), do: :ok
   end
 
   # In-process providers record their fixed provenance without a request.
