@@ -1,0 +1,435 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "from_profile_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "to_profile_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"pending\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "status",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "server_generation",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "requested_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "finished_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "failure_reason",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "resolution",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "resolved_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "attestation_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "attested_generation",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "attested_lease_kind",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "updated_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "model_profile_switches_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "model_profile_switches_requested_by_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "requested_by_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "model_profile_switches_resolved_by_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "resolved_by_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "model_profile_switches_attested_start_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "model_server_starts"
+      },
+      "scale": null,
+      "size": null,
+      "source": "attested_start_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "to_profile_id"
+      ],
+      "base_filter": null,
+      "check": "from_profile_id <> to_profile_id",
+      "name": "model_profile_switches_distinct_profiles"
+    },
+    {
+      "attribute": [
+        "status"
+      ],
+      "base_filter": null,
+      "check": "status IN ('pending', 'completed', 'failed', 'blocked')",
+      "name": "model_profile_switches_status"
+    },
+    {
+      "attribute": [
+        "to_profile_id"
+      ],
+      "base_filter": null,
+      "check": "from_profile_id IN ('claude_cli_opus', 'claude_cli_sonnet') AND to_profile_id IN ('claude_cli_opus', 'claude_cli_sonnet')",
+      "name": "model_profile_switches_real_profiles"
+    },
+    {
+      "attribute": [
+        "server_generation"
+      ],
+      "base_filter": null,
+      "check": "server_generation >= 1",
+      "name": "model_profile_switches_generation_positive"
+    },
+    {
+      "attribute": [
+        "resolution"
+      ],
+      "base_filter": null,
+      "check": "(resolution IS NULL AND resolved_by_id IS NULL AND resolved_at IS NULL AND attestation_id IS NULL AND attested_start_id IS NULL AND attested_generation IS NULL AND attested_lease_kind IS NULL) OR (resolution IS NOT NULL AND resolved_by_id IS NOT NULL AND resolved_at IS NOT NULL AND attestation_id IS NOT NULL AND attested_start_id IS NOT NULL AND attested_generation IS NOT NULL AND attested_lease_kind IS NOT NULL AND resolution = 'owner_attested' AND attested_lease_kind IN ('none', 'survivor', 'dead_holder') AND status = 'failed' AND resolved_at = finished_at AND attested_generation >= server_generation)",
+      "name": "model_profile_switches_resolution"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "tenant_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": "model_profile_switches_one_open_index",
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": true,
+      "using": null,
+      "where": "status IN ('pending', 'blocked')"
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "attestation_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "attestation_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": "is already used by another resolution",
+      "name": "model_profile_switches_attestation_index",
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": true,
+      "using": null,
+      "where": "attestation_id IS NOT NULL"
+    }
+  ],
+  "custom_statements": [
+    {
+      "after_tables": [
+        "model_server_starts"
+      ],
+      "code?": false,
+      "down": "ALTER TABLE model_profile_switches DROP CONSTRAINT model_profile_switches_attested_start_tenant_fkey",
+      "global?": false,
+      "name": "model_profile_switches_attested_start_tenant_fkey",
+      "up": "ALTER TABLE model_profile_switches ADD CONSTRAINT model_profile_switches_attested_start_tenant_fkey FOREIGN KEY (attested_start_id, tenant_id) REFERENCES model_server_starts (id, tenant_id) ON DELETE RESTRICT"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "081732934C8CAB5352D8E0DF4F16085C02251140969A6CDE287418451B073489",
+  "identities": [],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "model_profile_switches"
+}
