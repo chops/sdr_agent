@@ -7,6 +7,8 @@ defmodule SdrAgentWeb.AdminLive do
   words (R0-05; read-only, no model call, no switch: that is C2), model alias
   and resolved id, reviewed CLI version, the app's pinned CLI path (R0-02;
   shown, never run), whether its supervised server runs
+  (unknown, with `:status_unavailable` or `:status_inconsistent`, when
+  C2-02c's bracketed sample is not consistent; status is never authority)
   and the last init attestation — refreshed live, like the other console
   views (`SdrAgentWeb.LiveRefresh`), whenever an audit event commits, so a
   first call's attestation or drift shows without a revisit; the card only
@@ -370,8 +372,12 @@ defmodule SdrAgentWeb.AdminLive do
 
   defp server_label(:not_applicable), do: "in-process (no server)"
 
+  # C2-02c: no consistent sample of the coordinator and its bound server.
+  defp server_label(:unknown), do: "unknown: no consistent status sample"
+
   defp attestation_label(%{status: :not_applicable}), do: "not applicable (deterministic)"
   defp attestation_label(%{status: :not_running}), do: "none (server not running)"
+  defp attestation_label(%{status: :unknown}), do: "unknown (no consistent status sample)"
 
   defp attestation_label(%{status: :pending} = attestation),
     do: "pending: checked at the first call" <> launcher_note(attestation)

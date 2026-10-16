@@ -131,6 +131,43 @@ defmodule SdrAgent.AI.ModelProviderTest do
       assert SdrAgent.Test.PinnedCLI.launches(counter) == 0
     end
 
+    test "R0-06: the shipped promoted tuples do not lift staging; zero launches", ctx do
+      witness = Application.get_env(:sdr_agent, SdrAgent.Agents.Witness)
+      on_exit(fn -> Application.put_env(:sdr_agent, SdrAgent.Agents.Witness, witness) end)
+
+      shipped =
+        Config.Reader.read!("config/config.exs", env: :prod, target: :host)
+        |> Keyword.fetch!(:sdr_agent)
+        |> Keyword.fetch!(SdrAgent.Agents.Witness)
+        |> Keyword.fetch!(:reconciled_methods)
+
+      assert Enum.any?(shipped, &(&1.profile_id == :claude_cli_opus))
+      assert Enum.any?(shipped, &(&1.profile_id == :claude_cli_sonnet))
+
+      Application.put_env(
+        :sdr_agent,
+        SdrAgent.Agents.Witness,
+        Keyword.put(witness, :reconciled_methods, shipped)
+      )
+
+      dir = Path.join(System.tmp_dir!(), "sdr-promoted-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      counter = SdrAgent.Test.PinnedCLI.stub_shim!(dir)
+
+      pid =
+        start_supervised!(
+          {ClaudeCLI, name: ctx.name, executable: SdrAgent.Test.PinnedCLI.inject_identity!()}
+        )
+
+      for reference <- [ctx.name, pid] do
+        assert {:error, :real_model_staged} = complete_via(ctx, reference)
+        assert_no_reservation(ctx)
+      end
+
+      assert SdrAgent.Test.PinnedCLI.launches(counter) == 0
+    end
+
     test "R0-02 re-review: an unnamed server addressed by pid gets the same fence", ctx do
       dir = Path.join(System.tmp_dir!(), "sdr-unnamed-#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)

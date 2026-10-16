@@ -55,7 +55,17 @@ defmodule SdrAgent.Agents do
       switch's `server_generation`), `get_profile_setting/1` and
       `list_profile_switches/1` (`ModelProfileSetting`, `ModelProfileSwitch`);
       C2-02b1: `drain_profile_switch/3` (AGT; `SdrAgent.Agents.ProfileSwitchDrain`),
-      and the admission fence (`SdrAgent.Agents.Admission.SwitchFence`).
+      and the admission fence (`SdrAgent.Agents.Admission.SwitchFence`);
+      C2-02b2β: `blocked_switch_facts/2` and `resolve_blocked_switch/3`
+      (an active human admin only; the attended blocked → failed
+      resolution, executed by the registered model coordinator).
+    * run settings (C4, `docs/product/c4/readiness.md`) —
+      `create_settings_revision/2` (an active human admin; append-only
+      `SettingsRevision`, stale and raise-confirmation checks),
+      `current_settings/1` (the settings page only), `run_settings/2` (the
+      resolved settings of a run's `RunSettingsSnapshot`, the only read
+      agents use) and `settings_complete/2` (the assignment pre-check);
+      limits and booking links at use are `SdrAgent.Agents.RunSettings`.
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -73,6 +83,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.AgentDefinition
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.CalibrationFinish
+  alias SdrAgent.Agents.Changes.BuildSettingsSnapshot
   alias SdrAgent.Agents.CalibrationRecovery
   alias SdrAgent.Agents.Decision
   alias SdrAgent.Agents.ModelCallGrant
@@ -81,6 +92,9 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.ProfileSwitches
   alias SdrAgent.Agents.ServerStarts
   alias SdrAgent.Agents.ReleasedOutput
+  alias SdrAgent.Agents.RunSettings
+  alias SdrAgent.Agents.RunSettingsSnapshot
+  alias SdrAgent.Agents.SettingsRevision
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.AI.ModelProfiles
@@ -109,6 +123,8 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.ModelProfileSwitch
     resource SdrAgent.Agents.ModelServerCounter
     resource SdrAgent.Agents.ModelServerStart
+    resource SdrAgent.Agents.SettingsRevision
+    resource SdrAgent.Agents.RunSettingsSnapshot
   end
 
   ## Definitions
@@ -1447,6 +1463,332 @@ defmodule SdrAgent.Agents do
   # Multi-step writes run in one transaction; Ash notifications produced
   # inside it are sent only after it commits.
 
+  # --- run settings (C4) -----------------------------------------------
+
+  @doc """
+  ADM: saves the next revision of one run setting (C4,
+  `docs/product/c4/readiness.md` sections 3.8 and 12). `attrs`: `kind`,
+  `content` (the atom-keyed shape of that kind), `expected_number` (the
+  revision number the admin saw, 0 for none), `note`, `confirm_raised`
+  (limits only: exactly the fields raised above the value in effect, any
+  order).
+
+  Returns `{:ok, revision}`, or `{:error, reason}` with nothing written:
+  `Ash.Error.Forbidden` for any actor but an active human admin of the
+  tenant (re-read now; the denial is audited), `{:stale_revision, latest}`
+  with the latest committed number, or `{:invalid, [{field, rule}]}` keyed
+  by field (`confirm_raised: :mismatch` for a raise whose confirmation is
+  not exactly the raised set). No error carries a settings value.
+
+  A stale save found under the revision lock, or a unique-key conflict with
+  a concurrent save, rolls back first; the latest committed number is then
+  read in a fresh statement. Called inside a caller's own transaction, a
+  unique-key conflict aborts that transaction, so the Ash error is returned
+  for the caller to roll back.
+  """
+  def create_settings_revision(attrs, opts) do
+    attrs = Map.new(attrs)
+
+    meta = %{
+      resource: SettingsRevision,
+      action: :create_revision,
+      guarded?: true,
+      subject_id: nil
+    }
+
+    case settings_actor(Keyword.get(opts, :actor)) do
+      {:ok, actor} ->
+        Guard.run(meta, actor, fn -> checked_settings_revision(attrs, actor) end)
+
+      {:refuse, nil} ->
+        {:error, Ash.Error.Forbidden.exception([])}
+
+      {:refuse, operator} ->
+        Guard.run(meta, operator, fn -> {:error, Ash.Error.Forbidden.exception([])} end)
+    end
+  end
+
+  # A human operator is re-read, so the save and its event carry the current
+  # role and status (`CurrentAdmin` re-reads it again). A struct claiming
+  # another tenant than its persisted row is refused, the denial audited in
+  # the operator's own tenant; an unknown operator is refused unaudited (it
+  # has no chain).
+  defp settings_actor(%SdrAgent.Accounts.User{id: id, tenant_id: tenant_id} = user)
+       when is_binary(id) do
+    case Ash.get(SdrAgent.Accounts.User, id, authorize?: false) do
+      {:ok, %{tenant_id: ^tenant_id} = fresh} -> {:ok, fresh}
+      {:ok, fresh} -> {:refuse, fresh}
+      _missing -> if is_binary(tenant_id), do: {:refuse, nil}, else: {:ok, user}
+    end
+  end
+
+  defp settings_actor(actor), do: {:ok, actor}
+
+  # The raw input shapes are checked before Ash casts anything, so no input
+  # value reaches an Ash error, its message or a span status. An invalid
+  # input is still refused as Forbidden (and the denial audited) for an
+  # actor the action's policy refuses.
+  defp checked_settings_revision(attrs, actor) do
+    case RunSettings.ContentRules.input(attrs) do
+      :ok ->
+        save_settings_revision(attrs, actor)
+
+      {:error, errors} ->
+        if Ash.can?({SettingsRevision, :create_revision}, actor),
+          do: {:error, {:invalid, errors}},
+          else: {:error, Ash.Error.Forbidden.exception([])}
+    end
+  end
+
+  defp save_settings_revision(attrs, actor) do
+    input =
+      attrs
+      |> Map.take([:kind, :content, :expected_number, :note])
+      |> Map.put(:confirm_raised, RunSettings.ContentRules.confirm_names(attrs[:confirm_raised]))
+
+    fn ->
+      SettingsRevision
+      |> Ash.Changeset.for_create(:create_revision, input, actor: actor)
+      |> Ash.create()
+      |> case do
+        {:ok, revision} -> revision
+        {:error, error} -> Repo.rollback(error)
+      end
+    end
+    |> SdrAgent.Audit.transaction()
+    |> settings_result(attrs, actor)
+  end
+
+  defp settings_result({:ok, revision}, _attrs, _actor), do: {:ok, revision}
+
+  defp settings_result({:error, error}, attrs, actor) do
+    error = Ash.Error.to_error_class(error)
+
+    cond do
+      match?(%Ash.Error.Forbidden{}, error) ->
+        {:error, error}
+
+      stale_revision?(error) and not Repo.in_transaction?() ->
+        {:error, {:stale_revision, latest_settings_number(actor, attrs[:kind])}}
+
+      stale_revision?(error) ->
+        {:error, error}
+
+      match?(%Ash.Error.Invalid{}, error) ->
+        {:error, {:invalid, settings_field_errors(error)}}
+
+      true ->
+        {:error, error}
+    end
+  end
+
+  defp stale_revision?(%{errors: errors}), do: Enum.any?(errors, &stale_error?/1)
+  defp stale_revision?(_error), do: false
+
+  defp stale_error?(%{field: :expected_number, vars: vars}) when is_list(vars),
+    do: vars[:rule] == :stale
+
+  defp stale_error?(%{private_vars: private}) when is_list(private),
+    do: private[:constraint_type] == :unique
+
+  defp stale_error?(_error), do: false
+
+  defp latest_settings_number(%{tenant_id: tenant_id}, kind) when is_binary(tenant_id),
+    do: SdrAgent.Agents.Changes.SettingsRevisionChain.latest_number(tenant_id, kind)
+
+  defp latest_settings_number(_actor, _kind), do: 0
+
+  defp settings_field_errors(%{errors: errors}) do
+    errors
+    |> Enum.map(fn error -> {settings_error_field(error), settings_error_rule(error)} end)
+    |> Enum.uniq()
+  end
+
+  defp settings_error_field(%{field: field}) when is_atom(field) and not is_nil(field), do: field
+  defp settings_error_field(%{fields: [field | _]}) when is_atom(field), do: field
+  defp settings_error_field(%{argument: argument}) when is_atom(argument), do: argument
+  defp settings_error_field(_error), do: :base
+
+  defp settings_error_rule(%{vars: vars}) when is_list(vars) do
+    case vars[:rule] do
+      rule when is_atom(rule) and not is_nil(rule) -> rule
+      _other -> :invalid
+    end
+  end
+
+  defp settings_error_rule(_error), do: :invalid
+
+  @doc """
+  The settings page only (C4-R11; never called by agent code): per kind,
+  the current revision or the built-in default in effect —
+  `{:ok, %{kind => %{source: :revision | :code_default | :absent, revision,
+  version, content_sha256, content}}}` — read as `actor` (admin, reviewer
+  or auditor of the tenant; content per the field policy).
+  """
+  def current_settings(opts) do
+    actor = Keyword.get(opts, :actor)
+
+    with %{tenant_id: tenant_id} when is_binary(tenant_id) <- actor || {:error, :forbidden},
+         {:ok, revisions} <-
+           SettingsRevision
+           |> Ash.Query.for_read(:read, %{}, actor: actor)
+           |> Ash.Query.filter(tenant_id == ^tenant_id)
+           |> Ash.Query.sort(number: :asc)
+           |> Ash.read() do
+      current = Map.new(revisions, &{&1.kind, &1})
+
+      {:ok,
+       Map.new(RunSettings.kinds(), fn kind -> {kind, current_slot(kind, current[kind])} end)}
+    else
+      {:error, error} -> {:error, error}
+      _other -> {:error, Ash.Error.Forbidden.exception([])}
+    end
+  end
+
+  defp current_slot(kind, nil) do
+    case RunSettings.CodeDefaults.current(kind) do
+      nil ->
+        %{source: :absent, revision: nil, version: nil, content_sha256: nil, content: nil}
+
+      entry ->
+        %{
+          source: :code_default,
+          revision: nil,
+          version: entry.version,
+          content_sha256: entry.content_sha256,
+          content: entry.content
+        }
+    end
+  end
+
+  defp current_slot(kind, revision),
+    do: %{
+      source: :revision,
+      revision: revision,
+      version: nil,
+      content_sha256: revision.content_sha256,
+      content: Map.get(revision, kind)
+    }
+
+  @doc """
+  The resolved settings of `run`'s snapshot (C4-R5, section 12): `{:ok,
+  %{kind => %{source, revision_id, version, content_sha256, content}}}`
+  for all five kinds — the revision's content, the built-in default's
+  content by version (its pinned hash re-checked, else
+  `{:error, :settings_default_unavailable}`), or the absent slot
+  `%{source: :absent, revision_id: nil, version: nil, content_sha256: nil,
+  content: nil}`. Never the current revisions. `{:error,
+  :no_settings_snapshot}` for a run without one. Read as `actor` (the
+  snapshot and the content field policy apply).
+  """
+  def run_settings(run, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    with id when is_binary(id) <- Map.get(run, :settings_snapshot_id) || :no_snapshot,
+         {:ok, snapshot} <- read_snapshot(id, run.tenant_id, actor) do
+      resolve_slots(snapshot, actor)
+    else
+      :no_snapshot -> {:error, :no_settings_snapshot}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp resolve_slots(snapshot, actor) do
+    Enum.reduce_while(RunSettings.kinds(), {:ok, %{}}, fn kind, {:ok, acc} ->
+      case resolve_slot(kind, snapshot, actor) do
+        {:ok, slot} -> {:cont, {:ok, Map.put(acc, kind, slot)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp read_snapshot(id, tenant_id, actor) do
+    RunSettingsSnapshot
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} -> {:error, NotFound.exception(resource: RunSettingsSnapshot)}
+      other -> other
+    end
+  end
+
+  defp resolve_slot(kind, snapshot, actor) do
+    sha = Map.fetch!(snapshot, :"#{kind}_content_sha256")
+
+    case Map.fetch!(snapshot, :"#{kind}_source") do
+      :revision ->
+        revision_slot(kind, Map.fetch!(snapshot, :"#{kind}_revision_id"), sha, snapshot, actor)
+
+      :code_default ->
+        version = Map.fetch!(snapshot, :"#{kind}_code_default_version")
+
+        with {:ok, entry} <- RunSettings.CodeDefaults.fetch(kind, version),
+             true <- entry.content_sha256 == sha do
+          {:ok,
+           %{
+             source: :code_default,
+             revision_id: nil,
+             version: version,
+             content_sha256: sha,
+             content: entry.content
+           }}
+        else
+          _ -> {:error, :settings_default_unavailable}
+        end
+
+      :absent ->
+        {:ok,
+         %{source: :absent, revision_id: nil, version: nil, content_sha256: nil, content: nil}}
+    end
+  end
+
+  defp revision_slot(kind, id, sha, snapshot, actor) do
+    SettingsRevision
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(id == ^id and tenant_id == ^snapshot.tenant_id and kind == ^kind)
+    |> Ash.read_one()
+    |> case do
+      {:ok, %SettingsRevision{content_sha256: ^sha} = revision} ->
+        {:ok,
+         %{
+           source: :revision,
+           revision_id: revision.id,
+           version: nil,
+           content_sha256: sha,
+           content: Map.get(revision, kind)
+         }}
+
+      {:ok, _other} ->
+        {:error, :settings_revision_unavailable}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  @doc """
+  The business-content completeness pre-check of `SdrAgent.SDR.assign_lead/2`
+  (C4-R8): `:ok`, or `{:error, {:settings_incomplete, kinds}}` when the
+  tenant of `actor` lacks a settings kind runs of `origin` require. A plain
+  read; `AgentRun :create` checks again under the chain head.
+  """
+  def settings_complete(origin, opts) do
+    case Keyword.get(opts, :actor) do
+      %{tenant_id: tenant_id} when is_binary(tenant_id) ->
+        case BuildSettingsSnapshot.missing(
+               origin,
+               BuildSettingsSnapshot.current_revisions(tenant_id)
+             ) do
+          [] -> :ok
+          kinds -> {:error, {:settings_incomplete, kinds}}
+        end
+
+      _other ->
+        {:error, Ash.Error.Forbidden.exception([])}
+    end
+  end
+
   # --- real-model call grants (C9) -------------------------------------
 
   @doc """
@@ -1597,6 +1939,25 @@ defmodule SdrAgent.Agents do
 
   @doc "ADM, AUD (audited), AGT: the tenant's setting, or `{:ok, nil}` before the first one."
   def get_profile_setting(opts), do: ProfileSwitches.get_setting(opts)
+
+  @doc """
+  ADM (C2-02b2β): the read-only facts a blocked switch's resolution is
+  attested on — the switch, the coordinator's boot, its latest start and
+  hold, the covered starts with their recorded identity, and the observed
+  lease kind. See `SdrAgent.Agents.ProfileSwitches.blocked_facts/2`.
+  """
+  def blocked_switch_facts(switch, opts), do: ProfileSwitches.blocked_facts(switch, opts)
+
+  @doc """
+  ADM (C2-02b2β): resolves a blocked switch to `:failed` under a typed owner
+  attestation (`%{attestation_id, switch_id, attested_start_id,
+  attested_generation, attested_lease_kind, outcome: :failed,
+  confirmation: "STOPPED " <> switch_id}`), executed by the registered
+  coordinator within a 15 s pre-dispatch deadline. A commit does not mean
+  the server is ready. See `SdrAgent.Agents.ProfileSwitches.resolve_blocked/3`.
+  """
+  def resolve_blocked_switch(switch, attestation, opts),
+    do: ProfileSwitches.resolve_blocked(switch, attestation, opts)
 
   # --- model server starts (C2-02b2α) -----------------------------------
 

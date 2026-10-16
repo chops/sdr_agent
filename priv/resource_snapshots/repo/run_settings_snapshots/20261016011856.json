@@ -1,0 +1,567 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "offering_profile_source",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "offering_profile_revision_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "offering_profile_code_default_version",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "offering_profile_content_sha256",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "booking_link_source",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "booking_link_revision_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "booking_link_code_default_version",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "booking_link_content_sha256",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "writing_guide_source",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "writing_guide_revision_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "writing_guide_code_default_version",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "writing_guide_content_sha256",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "research_brief_source",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "research_brief_revision_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "research_brief_code_default_version",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "research_brief_content_sha256",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "operational_limits_source",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "operational_limits_revision_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "operational_limits_code_default_version",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "operational_limits_content_sha256",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "limits",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "safeguards_version",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "hash_version",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "snapshot_sha256",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "run_settings_snapshots_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "run_settings_snapshots_trace_ids"
+    },
+    {
+      "attribute": [
+        "hash_version"
+      ],
+      "base_filter": null,
+      "check": "hash_version = 'c4-run-settings-snapshot/1'",
+      "name": "run_settings_snapshots_hash_version"
+    },
+    {
+      "attribute": [
+        "snapshot_sha256"
+      ],
+      "base_filter": null,
+      "check": "snapshot_sha256 ~ '^[0-9a-f]{64}$'",
+      "name": "run_settings_snapshots_snapshot_sha256_hex"
+    },
+    {
+      "attribute": [
+        "offering_profile_source"
+      ],
+      "base_filter": null,
+      "check": "(offering_profile_source = 'revision' AND offering_profile_revision_id IS NOT NULL AND offering_profile_content_sha256 IS NOT NULL AND offering_profile_content_sha256 ~ '^[0-9a-f]{64}$' AND offering_profile_code_default_version IS NULL) OR (offering_profile_source = 'absent' AND offering_profile_revision_id IS NULL AND offering_profile_code_default_version IS NULL AND offering_profile_content_sha256 IS NULL)",
+      "name": "run_settings_snapshots_offering_profile_slot"
+    },
+    {
+      "attribute": [
+        "booking_link_source"
+      ],
+      "base_filter": null,
+      "check": "(booking_link_source = 'revision' AND booking_link_revision_id IS NOT NULL AND booking_link_content_sha256 IS NOT NULL AND booking_link_content_sha256 ~ '^[0-9a-f]{64}$' AND booking_link_code_default_version IS NULL) OR (booking_link_source = 'absent' AND booking_link_revision_id IS NULL AND booking_link_code_default_version IS NULL AND booking_link_content_sha256 IS NULL)",
+      "name": "run_settings_snapshots_booking_link_slot"
+    },
+    {
+      "attribute": [
+        "writing_guide_source"
+      ],
+      "base_filter": null,
+      "check": "(writing_guide_source = 'revision' AND writing_guide_revision_id IS NOT NULL AND writing_guide_content_sha256 IS NOT NULL AND writing_guide_content_sha256 ~ '^[0-9a-f]{64}$' AND writing_guide_code_default_version IS NULL) OR (writing_guide_source = 'code_default' AND writing_guide_revision_id IS NULL AND writing_guide_code_default_version IS NOT NULL AND writing_guide_content_sha256 IS NOT NULL AND writing_guide_content_sha256 ~ '^[0-9a-f]{64}$')",
+      "name": "run_settings_snapshots_writing_guide_slot"
+    },
+    {
+      "attribute": [
+        "research_brief_source"
+      ],
+      "base_filter": null,
+      "check": "(research_brief_source = 'revision' AND research_brief_revision_id IS NOT NULL AND research_brief_content_sha256 IS NOT NULL AND research_brief_content_sha256 ~ '^[0-9a-f]{64}$' AND research_brief_code_default_version IS NULL) OR (research_brief_source = 'code_default' AND research_brief_revision_id IS NULL AND research_brief_code_default_version IS NOT NULL AND research_brief_content_sha256 IS NOT NULL AND research_brief_content_sha256 ~ '^[0-9a-f]{64}$')",
+      "name": "run_settings_snapshots_research_brief_slot"
+    },
+    {
+      "attribute": [
+        "operational_limits_source"
+      ],
+      "base_filter": null,
+      "check": "(operational_limits_source = 'revision' AND operational_limits_revision_id IS NOT NULL AND operational_limits_content_sha256 IS NOT NULL AND operational_limits_content_sha256 ~ '^[0-9a-f]{64}$' AND operational_limits_code_default_version IS NULL) OR (operational_limits_source = 'code_default' AND operational_limits_revision_id IS NULL AND operational_limits_code_default_version IS NOT NULL AND operational_limits_content_sha256 IS NOT NULL AND operational_limits_content_sha256 ~ '^[0-9a-f]{64}$')",
+      "name": "run_settings_snapshots_operational_limits_slot"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION run_settings_snapshots_append_only()",
+      "global?": false,
+      "name": "run_settings_snapshots_guard_function",
+      "up": "CREATE FUNCTION run_settings_snapshots_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER run_settings_snapshots_guard_row ON run_settings_snapshots",
+      "global?": false,
+      "name": "run_settings_snapshots_guard_row",
+      "up": "CREATE TRIGGER run_settings_snapshots_guard_row BEFORE UPDATE OR DELETE ON run_settings_snapshots FOR EACH ROW EXECUTE FUNCTION run_settings_snapshots_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER run_settings_snapshots_guard_truncate ON run_settings_snapshots",
+      "global?": false,
+      "name": "run_settings_snapshots_guard_truncate",
+      "up": "CREATE TRIGGER run_settings_snapshots_guard_truncate BEFORE TRUNCATE ON run_settings_snapshots FOR EACH STATEMENT EXECUTE FUNCTION run_settings_snapshots_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP CONSTRAINT run_settings_snapshots_id_tenant_key",
+      "global?": false,
+      "name": "run_settings_snapshots_id_tenant_key",
+      "up": "ALTER TABLE run_settings_snapshots ADD CONSTRAINT run_settings_snapshots_id_tenant_key UNIQUE (id, tenant_id)"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP COLUMN offering_profile_kind",
+      "global?": false,
+      "name": "run_settings_snapshots_offering_profile_kind",
+      "up": "ALTER TABLE run_settings_snapshots ADD COLUMN offering_profile_kind text GENERATED ALWAYS AS ('offering_profile') STORED"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP CONSTRAINT run_settings_snapshots_offering_profile_revision_fkey",
+      "global?": false,
+      "name": "run_settings_snapshots_offering_profile_revision_fkey",
+      "up": "ALTER TABLE run_settings_snapshots ADD CONSTRAINT run_settings_snapshots_offering_profile_revision_fkey FOREIGN KEY (offering_profile_revision_id, tenant_id, offering_profile_kind, offering_profile_content_sha256) REFERENCES settings_revisions (id, tenant_id, kind, content_sha256) MATCH SIMPLE ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP COLUMN booking_link_kind",
+      "global?": false,
+      "name": "run_settings_snapshots_booking_link_kind",
+      "up": "ALTER TABLE run_settings_snapshots ADD COLUMN booking_link_kind text GENERATED ALWAYS AS ('booking_link') STORED"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP CONSTRAINT run_settings_snapshots_booking_link_revision_fkey",
+      "global?": false,
+      "name": "run_settings_snapshots_booking_link_revision_fkey",
+      "up": "ALTER TABLE run_settings_snapshots ADD CONSTRAINT run_settings_snapshots_booking_link_revision_fkey FOREIGN KEY (booking_link_revision_id, tenant_id, booking_link_kind, booking_link_content_sha256) REFERENCES settings_revisions (id, tenant_id, kind, content_sha256) MATCH SIMPLE ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP COLUMN writing_guide_kind",
+      "global?": false,
+      "name": "run_settings_snapshots_writing_guide_kind",
+      "up": "ALTER TABLE run_settings_snapshots ADD COLUMN writing_guide_kind text GENERATED ALWAYS AS ('writing_guide') STORED"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP CONSTRAINT run_settings_snapshots_writing_guide_revision_fkey",
+      "global?": false,
+      "name": "run_settings_snapshots_writing_guide_revision_fkey",
+      "up": "ALTER TABLE run_settings_snapshots ADD CONSTRAINT run_settings_snapshots_writing_guide_revision_fkey FOREIGN KEY (writing_guide_revision_id, tenant_id, writing_guide_kind, writing_guide_content_sha256) REFERENCES settings_revisions (id, tenant_id, kind, content_sha256) MATCH SIMPLE ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP COLUMN research_brief_kind",
+      "global?": false,
+      "name": "run_settings_snapshots_research_brief_kind",
+      "up": "ALTER TABLE run_settings_snapshots ADD COLUMN research_brief_kind text GENERATED ALWAYS AS ('research_brief') STORED"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP CONSTRAINT run_settings_snapshots_research_brief_revision_fkey",
+      "global?": false,
+      "name": "run_settings_snapshots_research_brief_revision_fkey",
+      "up": "ALTER TABLE run_settings_snapshots ADD CONSTRAINT run_settings_snapshots_research_brief_revision_fkey FOREIGN KEY (research_brief_revision_id, tenant_id, research_brief_kind, research_brief_content_sha256) REFERENCES settings_revisions (id, tenant_id, kind, content_sha256) MATCH SIMPLE ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP COLUMN operational_limits_kind",
+      "global?": false,
+      "name": "run_settings_snapshots_operational_limits_kind",
+      "up": "ALTER TABLE run_settings_snapshots ADD COLUMN operational_limits_kind text GENERATED ALWAYS AS ('operational_limits') STORED"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE run_settings_snapshots DROP CONSTRAINT run_settings_snapshots_operational_limits_revision_fkey",
+      "global?": false,
+      "name": "run_settings_snapshots_operational_limits_revision_fkey",
+      "up": "ALTER TABLE run_settings_snapshots ADD CONSTRAINT run_settings_snapshots_operational_limits_revision_fkey FOREIGN KEY (operational_limits_revision_id, tenant_id, operational_limits_kind, operational_limits_content_sha256) REFERENCES settings_revisions (id, tenant_id, kind, content_sha256) MATCH SIMPLE ON DELETE RESTRICT"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "6E2D23D8AA43B3ED9BCC8DAF78626C9D81F11C39F45716E2BF3EA9469AEC0983",
+  "identities": [],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "run_settings_snapshots"
+}
