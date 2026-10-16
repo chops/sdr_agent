@@ -1,6 +1,8 @@
 # R0-05 interface: the admin model card, switch and resolver UI
 
-**Status:** draft 2, 2026-10-15, for Codex's interface re-review. Draft 1
+**Status:** draft 3, 2026-10-15, for Codex's interface re-review. Draft 2
+(`c7767b7`) was a narrow NEEDS-REVIEW (Codex `c05d20d9`): a retry-local timeout
+after uncertainty. Draft 1
 (`a0ffefe`) was NEEDS-REVIEW (Codex `a9d27e99`): the source of the setting revision
 and the frozen review lifecycle. Codex accepted OQ-1 with the lag
 qualification (section 1). Issue #53.
@@ -177,8 +179,33 @@ status card may still update.
 |---|---|---|
 | `{:ok, %{switch: s}}`, or a replay | "The resolution was recorded: the switch is failed. Readiness is checked separately; calls stay paused until the status shows the server accepting calls. A dead lease may still need an operator." It never says ready | `:terminal` |
 | `:resolve_uncertain` | "The result isn't known yet." The "Check again" button resends **exactly** the frozen semantic identity, under the current authorization | `:uncertain` |
-| `:resolve_timeout` | "Not recorded. Start a new review." | `:terminal` |
+| `:resolve_timeout`, on a **first** attempt (no earlier unknown under this review) | "Not recorded. Start a new review." | `:terminal` |
 | `:stale_attestation`, `:live_work_observed`, `:observation_unknown`, `:coordinator_busy`, `:attestation_invalid`, `:attestation_conflict`, `:switch_not_blocked`, Forbidden, NotFound | the refusal in words | `:terminal` |
+
+**Retrying after an unknown outcome (R2 residual).** Once a review has an
+unresolved earlier attempt (it entered `:uncertain`), a refusal of the
+retry proves nothing about that attempt. b2β can expire "Check again"
+before its coordinator replay lookup, while the earlier attempt commits
+meanwhile. So, for a retry from `:uncertain`:
+- **What the retry does:** "Check again" moves the review to
+  `:submitting`, so duplicate clicks send nothing.
+- **A result that settles the earlier attempt:** an exact success or
+  replay (`{:ok, …}`) is `:terminal` with the recorded message. So is
+  `:attestation_conflict` or `:switch_not_blocked`, which means the stored
+  switch is no longer blocked under this identity. The page then re-reads
+  the stored switch and shows what is actually recorded.
+- **Any other retry refusal returns to `:uncertain`,** with the same
+  frozen identity and the unknown-outcome wording ("The result still isn't
+  known"). That covers `:resolve_timeout`, `:resolve_uncertain`,
+  `:coordinator_busy`, `:observation_unknown` and `:stale_attestation`.
+  Such a refusal is never "Not recorded". It never discards the id, and
+  never opens a new review by itself.
+- **An authorization loss** (Forbidden, or a redirect by `LiveUserAuth`)
+  ends the session's review immediately. It is never described as proof of
+  rollback.
+
+The page adds no backend guarantee. It is only conservative about the
+shapes it already gets.
 
 **Losing the socket.** A reconnect or a reload loses the socket-only
 review. No durable recovery of the same id is promised. On reconnect the
@@ -270,6 +297,14 @@ spend, synthetic data only.
 
     "Check again" after `:resolve_uncertain` resends exactly the same
     identity, and that is a replay or a settlement.
+10a. **A refused retry after uncertainty:** attempt A comes back
+     `:resolve_uncertain`. "Check again" (B) is barriered after its caller
+     replay lookup. A then commits, and B expires with `:resolve_timeout`.
+     The page must show the unknown-outcome wording, never "Not recorded".
+     It keeps the same id, opens no new review, and returns to
+     `:uncertain`. A further "Check again" shows the recorded result
+     (replay). Duplicate "Check again" clicks while B is in flight send
+     nothing.
 11. **Stale facts:** in `:editing`, a refresh that changes the facts clears
     the input and asks for a new review.
 12. **Forged and terminal:**
