@@ -221,7 +221,22 @@ admin who lost an uncertain review starts a new one, and b2β's replay and
 settlement rules cover the earlier request.
 
 **Safety.** The page has no lease release action. The confirmation text
-never appears in error messages, URLs, audit payloads or telemetry.
+never appears in error messages, URLs, logs (the parameter is filtered,
+section 5), stored rows, audit payloads, the application's captured
+telemetry or exported spans.
+
+**The telemetry boundary (test 15 qualification, Codex RED verification
+at `00c4998`, ruling 5).** Phoenix LiveView's own in-process
+`[:phoenix, :live_view, :handle_event, :start | :stop]` telemetry carries
+the submitted params, including `resolution_confirmation`, by design. It
+is excluded: parameter filtering sanitizes Phoenix's and LiveView's logs,
+not arbitrary telemetry subscribers, so a handler attached to that event
+would see the text. The verified scope is: no logged or exported copy, no
+URI or router copy, no stored copy, no copy in the captured application
+telemetry (the `[:sdr_agent | _]` events registered when the test runs,
+and repo queries with their parameters) and no exported span. It is not a
+claim of universal event capture. R0-05 adds no telemetry event, log line,
+subscription or export path.
 
 **The `:cleanup_unprovable` banner:** "A model server's cleanup can't be
 confirmed. Calls stay paused. An operator must check the machine and
@@ -323,7 +338,10 @@ spend, synthetic data only.
     attestation is invented or submitted.
 15. **Never logged:** the confirmation text is absent from captured logs
     (LiveView and Phoenix at `:debug`) on change, submit and refusal, and
-    is absent from URLs, audit payloads and telemetry.
+    is absent from URLs, stored rows (audit payloads included), the
+    captured application telemetry and exported spans. Phoenix LiveView's
+    in-process `handle_event` telemetry carries the params by design and is
+    excluded (section 3, the telemetry boundary).
 16. **The lag:** an audit event commits before the coordinator publishes.
     The card shows the earlier observation, and a manual refresh then
     shows the newer state.
