@@ -52,10 +52,25 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
       `:submitting` is observable and the page stays responsive.
 
   Passes by design: none. Each test's guard names its missing element.
+
+  **Draft 4 amendment (option B, D-141; ADR-0005 R0-05 amendment; Codex
+  `codex-r005-d0c80ff-contract-pass.md`, permitted test amendments 1, 2 and
+  5).** Test 9: a forced wrong or malformed submit is refused by the page
+  (`#resolution-mismatch`: no dispatch, still `:editing` with the same id,
+  the input cleared, the button disabled until a fresh exact entry), in
+  place of the server's `:attestation_invalid`. Test 12: the terminal
+  result is b2β's `:stale_attestation` for the exact text. Test 15: its
+  wrong-text refusal is now the page's. New: 15a (minimization, traced with
+  a positive control), 15b (the tagged channel's own crash reports, through
+  the `crash_on_event!/3` seam and a `:logger` handler after the primary
+  filters; with controls) and 15c (the accepted supervisor-report residual,
+  shown, with SASL translation on for that test only).
   """
   use SdrAgentWeb.OperatorCase, async: false
 
   import SdrAgent.Test.AdminSwitchHarness
+
+  require Logger
 
   alias SdrAgent.Accounts
   alias SdrAgent.Agents
@@ -65,6 +80,7 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
   alias SdrAgent.AI.ModelProvider.Fake
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.AuditCase
+  alias SdrAgent.Repo
   alias SdrAgent.Test.ResolveHarness, as: RH
   alias SdrAgent.Test.StatusHarness, as: SH
 
@@ -79,6 +95,7 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
   @facts {Agents, :blocked_switch_facts, 2}
   @resolve {Agents, :resolve_blocked_switch, 3}
   @switches {Agents, :list_profile_switches, 1}
+  @mismatch "That text doesn't match. Type STOPPED, a space and the switch id shown above."
   @model_calls [
     {ClaudeCLI, :complete, 2},
     {Fake, :complete, 2},
@@ -735,23 +752,70 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
 
   ## 9. The typed confirmation
 
-  test "9. the button enables only for the exact text; a wrong text is refused as :attestation_invalid",
+  # The page's local refusal of a text that doesn't match (draft 4, section
+  # 3 step 2): no dispatch, #resolution-mismatch without the text, still
+  # :editing with the same id, the input cleared and the button disabled,
+  # and no raw value kept in the socket.
+  defp assert_mismatch!(view, tracer, blocked, id, wrong, label) do
+    sent = resolution_dispatches(tracer)
+
+    assert sent == [],
+           "R0-05 #{label}: a text that doesn't match is refused by the page, with no task, " <>
+             "domain or coordinator resolution call; got #{inspect(Enum.map(sent, & &1.mfa))}"
+
+    assert has_element?(view, "#resolution-mismatch"),
+           "R0-05 #{label}: the page's refusal shows #resolution-mismatch; got " <>
+             inspect(text_of(view, "#resolution-result") || review_state(view))
+
+    shown = text_of(view, "#resolution-mismatch")
+
+    assert shown =~ @mismatch,
+           "R0-05 #{label}: #resolution-mismatch says #{inspect(@mismatch)}; got #{inspect(shown)}"
+
+    refute shown =~ blocked.id, "R0-05 #{label}: the refusal never repeats the text"
+
+    assert review_state(view) == "editing" and review_id(view) == id,
+           "R0-05 #{label}: the review stays :editing with the same attestation id; got " <>
+             "#{inspect(review_state(view))} #{inspect(review_id(view))}"
+
+    refute has_element?(view, "#resolution-result"),
+           "R0-05 #{label}: a local refusal claims no recorded or refused attempt"
+
+    assert has_element?(view, "#confirm-resolution[disabled]"),
+           "R0-05 #{label}: the button is disabled until a fresh exact entry"
+
+    assert attr_of(view, "#resolution-confirmation", "value") in [nil, ""],
+           "R0-05 #{label}: the input is cleared"
+
+    if is_binary(wrong) and wrong not in ["", "STOPPED"] do
+      refute holds?(:sys.get_state(view.pid), wrong),
+             "R0-05 #{label}: the mismatched text is kept nowhere in the socket"
+
+      unless String.contains?(wrong, confirmation(blocked)) do
+        refute render(view) =~ wrong, "R0-05 #{label}: the page never shows the text"
+      end
+    end
+  end
+
+  test "9. the button enables only for the exact text; a forced wrong or malformed submit is refused by the page and stays :editing",
        ctx do
     blocked = RH.none!(ctx)
-    tracer = trace_calls!([@resolve])
+    tracer = trace_calls!(resolution_path_mfas())
     view = admin_view(ctx.conn)
-    open_resolution!(view, "9")
+    id = open_resolution!(view, "9")
     exact = confirmation(blocked)
 
-    for wrong <- [
-          "stopped " <> blocked.id,
-          " " <> exact,
-          exact <> " ",
-          "STOPPED  " <> blocked.id,
-          "STOPPED " <> Ecto.UUID.generate(),
-          "STOPPED",
-          ""
-        ] do
+    wrongs = [
+      "stopped " <> blocked.id,
+      " " <> exact,
+      exact <> " ",
+      "STOPPED  " <> blocked.id,
+      "STOPPED " <> Ecto.UUID.generate(),
+      "STOPPED",
+      ""
+    ]
+
+    for wrong <- wrongs do
       type!(view, wrong, "9")
 
       assert has_element?(view, "#confirm-resolution[disabled]"),
@@ -763,20 +827,45 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
     refute has_element?(view, "#confirm-resolution[disabled]"),
            "R0-05 9: the button enables for exactly STOPPED <switch id>"
 
-    wrong = "stopped " <> blocked.id
-    type!(view, wrong, "9")
-    confirm_resolution!(view, wrong, "9 forced submit")
-    await_outcome!(view, "attestation_invalid", 10_000, "9 the server checks again")
-    assert_terminal!(view, "9")
-    refute_raw_terms!(view, "9")
-
-    for call <- resolve_calls(tracer) do
-      assert attestation_of(call).confirmation == wrong,
-             "R0-05 9: the confirmation sent is the operator's text, never synthesized from the id"
+    # A forced submit after the button was enabled: the page checks the
+    # submitted bytes itself.
+    for wrong <- wrongs do
+      label = "9 forced #{inspect(wrong)}"
+      type!(view, exact, label)
+      confirm_resolution!(view, wrong, label)
+      assert_mismatch!(view, tracer, blocked, id, wrong, label)
     end
 
-    assert stored_status!(ctx, blocked) == :blocked
-    assert RH.resolved_events(ctx) == []
+    # Malformed input (absent, a list, a map) takes the same local route.
+    for {params, what} <- [
+          {%{}, "absent"},
+          {%{"resolution_confirmation" => [exact]}, "a list"},
+          {%{"resolution_confirmation" => %{"text" => exact}}, "a map"}
+        ] do
+      label = "9 malformed (#{what})"
+      type!(view, exact, label)
+      render_submit(view, "confirm_resolution", params)
+      assert_mismatch!(view, tracer, blocked, id, nil, label)
+    end
+
+    type!(view, exact, "9 a fresh exact entry")
+
+    refute has_element?(view, "#confirm-resolution[disabled]"),
+           "R0-05 9: a fresh exact entry enables the button again"
+
+    confirm_resolution!(view, exact, "9 exact")
+    await_outcome!(view, "recorded", 20_000, "9 exact")
+    refute_raw_terms!(view, "9")
+
+    call = one!(resolve_calls(tracer), "R0-05 9: one resolution, of the exact text only")
+    sent = attestation_of(call)
+
+    assert sent.confirmation === exact and sent.attestation_id == id,
+           "R0-05 9: the operator's own bytes are sent, under the same review id; got " <>
+             inspect(Map.take(sent, [:attestation_id, :confirmation]))
+
+    assert stored_status!(ctx, blocked) == :failed
+    assert length(RH.resolved_events(ctx)) == 1
   end
 
   ## 11. Stale facts while editing
@@ -837,9 +926,9 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
 
   ## 12. Forged and terminal
 
-  test "12. a forged confirm does nothing; after a terminal result a new review needs a new id and text",
+  test "12. a forged confirm does nothing; after a domain refusal of the exact text a new review needs a new id and text",
        ctx do
-    blocked = RH.none!(ctx)
+    blocked = RH.dead_holder!(ctx)
     tracer = trace_calls!([@resolve])
     view = admin_view(ctx.conn)
     exact = confirmation(blocked)
@@ -852,10 +941,21 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
            "R0-05 12: a forged confirm_resolution or check_again with no review sends nothing"
 
     first = open_resolution!(view, "12")
-    type!(view, "STOPPED " <> Ecto.UUID.generate(), "12")
-    confirm_resolution!(view, "STOPPED " <> Ecto.UUID.generate(), "12 wrong")
-    await_outcome!(view, "attestation_invalid", 10_000, "12 refused")
+    type!(view, exact, "12")
+    # Draft 4 (D-141): the terminal result is a real domain refusal of the
+    # exact text. The facts change under the review (the operator path
+    # removes the dead lease), so b2β refuses it as stale.
+    assert :ok = Reaper.release(ClaudeCLI.server())
+    confirm_resolution!(view, exact, "12 stale")
+    await_outcome!(view, "stale_attestation", 20_000, "12 a domain refusal of the exact text")
     assert_terminal!(view, "12")
+
+    refused = one!(resolve_calls(tracer), "R0-05 12: the exact text was sent once")
+    assert refused.result == {:error, :stale_attestation}, "fixture: b2β's typed refusal"
+
+    assert match?(%{attestation_id: ^first, confirmation: ^exact}, attestation_of(refused)),
+           "R0-05 12: the refused attempt carried the review's id and the operator's text"
+
     sent = length(resolve_calls(tracer))
 
     render_submit(view, "confirm_resolution", forged)
@@ -869,6 +969,17 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
 
     assert has_element?(view, "#confirm-resolution[disabled]"),
            "R0-05 12: a new resolution needs a new typed confirmation"
+
+    # The earlier text is never carried over: a submit without one sends
+    # nothing and keeps the new review.
+    render_submit(view, "confirm_resolution", %{})
+
+    assert length(resolve_calls(tracer)) == sent,
+           "R0-05 12: the new review needs a new typed text; a submit without one sends nothing"
+
+    assert review_state(view) == "editing" and review_id(view) == second,
+           "R0-05 12: the new review stays :editing with its own id; got " <>
+             "#{inspect(review_state(view))} #{inspect(review_id(view))}"
 
     type!(view, exact, "12 new review")
     confirm_resolution!(view, exact, "12 new review")
@@ -1060,8 +1171,10 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
         render_click(view, "open_resolution", %{})
         render_change(view, "change_resolution", %{"resolution_confirmation" => wrong})
         render_submit(view, "confirm_resolution", %{"resolution_confirmation" => wrong})
-        wait_until(fn -> has_element?(view, "#resolution-result") end, 5_000)
-        refusal = text_of(view, "#resolution-result")
+        # Draft 4 (D-141): the page refuses the wrong text itself and the
+        # review stays :editing, so the exact text follows on the same review.
+        wait_until(fn -> has_element?(view, "#resolution-mismatch") end, 5_000)
+        refusal = text_of(view, "#resolution-mismatch")
         render_click(view, "open_resolution", %{})
         render_change(view, "change_resolution", %{"resolution_confirmation" => exact})
         render_submit(view, "confirm_resolution", %{"resolution_confirmation" => exact})
@@ -1086,7 +1199,8 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
     assert log =~ "[FILTERED]", "control: the parameter is filtered, not dropped"
 
     assert refusal != nil and not (refusal =~ exact) and not (refusal =~ wrong),
-           "R0-05 15: the refusal is shown, without the text; got #{inspect(refusal)}"
+           "R0-05 15: the page's refusal (#resolution-mismatch) is shown, without the text; " <>
+             "got #{inspect(refusal)}"
 
     assert html =~ "data-outcome=\"recorded\"",
            "R0-05 15: the flow ran to the recorded result"
@@ -1101,6 +1215,286 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
     assert tables_containing(exact) == [] and tables_containing(wrong) == []
     refute spans_containing?(exact) or spans_containing?(wrong)
     assert stored_status!(ctx, blocked) == :failed
+  end
+
+  ## 15a. Minimization (D-141, option B)
+
+  test "15a. a mismatched canary never reaches the review, a task, Agents, ProfileSwitches or the coordinator; the exact text does",
+       ctx do
+    blocked = RH.none!(ctx)
+    exact = confirmation(blocked)
+    canary = mismatch_canary()
+    tracer = trace_calls!(resolution_path_mfas())
+    view = admin_view(ctx.conn)
+    id = open_resolution!(view, "15a")
+
+    type!(view, canary, "15a typed")
+
+    refute holds?(:sys.get_state(view.pid), canary),
+           "R0-05 15a: change_resolution keeps only whether the text matches, never the text"
+
+    confirm_resolution!(view, canary, "15a forced")
+    wait_until(fn -> has_element?(view, "#resolution-mismatch") end, 5_000)
+
+    passed = Enum.filter(calls(tracer), &(&1.pid != self() and holds?(&1.args, canary)))
+
+    assert passed == [],
+           "R0-05 15a: the mismatched canary was passed to " <>
+             inspect(passed |> Enum.map(&{&1.pid, &1.mfa}) |> Enum.uniq())
+
+    refute holds?(:sys.get_state(view.pid), canary),
+           "R0-05 15a: the mismatched canary is kept in the socket's assigns or review"
+
+    refute render(view) =~ canary, "R0-05 15a: the page never shows the mismatched text"
+
+    # Positive control: the exact text is passed, so an empty trace can't pass.
+    type!(view, exact, "15a exact")
+    confirm_resolution!(view, exact, "15a exact")
+    await_outcome!(view, "recorded", 20_000, "15a exact")
+
+    reached =
+      tracer
+      |> calls()
+      |> Enum.filter(&(&1.pid != self() and holds?(&1.args, exact)))
+      |> Enum.map(& &1.mfa)
+      |> Enum.uniq()
+
+    for mfa <- [
+          {Phoenix.LiveView.Async, :start_async, 4},
+          {Agents, :resolve_blocked_switch, 3},
+          {SdrAgent.Agents.ProfileSwitches, :resolve_blocked, 3},
+          {Coordinator, :resolve_blocked, 2}
+        ] do
+      assert mfa in reached,
+             "R0-05 15a positive control: the exact text reaches #{inspect(mfa)}; " <>
+               "reached #{inspect(reached)}"
+    end
+
+    assert attestation_of(one!(resolve_calls(tracer), "R0-05 15a: one resolution")).attestation_id ==
+             id,
+           "R0-05 15a: the exact attempt keeps the review's id"
+  end
+
+  ## 15b. The tagged channel's own crash reports (ADR-0005 R0-05 amendment)
+
+  for event <- ["change_resolution", "confirm_resolution"] do
+    test "15b. a channel crash while handling #{event} (form-encoded; valid and mismatched canaries) reports only the fixed diagnostic, at :debug and :warning",
+         ctx do
+      blocked = RH.none!(ctx)
+      event = unquote(event)
+
+      for level <- [:debug, :warning],
+          {kind, canary} <- [valid: confirmation(blocked), mismatched: mismatch_canary()] do
+        label = "15b #{event}, #{kind}, at #{level}"
+        view = admin_view(ctx.conn)
+        open_resolution!(view, label)
+        crash_on_event!(view, event)
+        params = %{"resolution_confirmation" => canary}
+
+        {reason, text, events} =
+          log_events(level, fn ->
+            crash!(view, fn ->
+              form = form(view, "#resolution-form", params)
+              if event == "change_resolution", do: render_change(form), else: render_submit(form)
+            end)
+          end)
+
+        assert seam_crash?(reason),
+               "fixture: the channel crashed in the seam while handling #{event}; got " <>
+                 inspect(reason, limit: 5)
+
+        assert_withheld!(events, view.pid, label)
+        assert text =~ withheld(), "R0-05 #{label}: the captured text shows the diagnostic"
+        # Nothing was dispatched (the seam runs before the page's handler).
+        refute_canary!(events, text, canary, label)
+      end
+
+      assert exception_filter!("15b #{event}")
+    end
+  end
+
+  for level <- [:debug, :warning] do
+    test "15b. a channel crash while frozen in :submitting reports only the fixed diagnostic, at #{level}",
+         ctx do
+      level = unquote(level)
+      label = "15b :submitting at #{level}"
+      blocked = RH.none!(ctx)
+      text = confirmation(blocked)
+      view = admin_view(ctx.conn)
+      open_resolution!(view, label)
+      blocker = RH.block_coordinator!()
+      type!(view, text, label)
+      confirm_resolution!(view, text, label)
+      await_element!(view, "#resolution-review[data-state='submitting']", nil, 5_000, label)
+      crash_on_event!(view, "refresh_status")
+
+      {reason, log, events} =
+        try do
+          log_events(level, fn ->
+            crash!(view, fn -> click!(view, "#refresh-status", label) end)
+          end)
+        after
+          RH.release_coordinator!(blocker)
+          RH.drain!()
+        end
+
+      assert seam_crash?(reason), "fixture: the seam crash; got #{inspect(reason, limit: 5)}"
+      own = assert_withheld!(events, view.pid, label)
+
+      # The valid phrase has been dispatched: downstream diagnostic copies
+      # are D-141's accepted residual, so only the channel's own reports are
+      # checked here.
+      refute Enum.any?(events_of(events, view.pid), &canary_in?(&1, text)),
+             "R0-05 #{label}: the channel's own events carry the confirmation"
+
+      assert own != [] and log =~ withheld()
+      assert exception_filter!(label)
+    end
+  end
+
+  test "15b controls: untagged and C4 database crashes keep their reports, a tagged :info event is unchanged; a tagged error is replaced",
+       _ctx do
+    marker = "r005control" <> Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
+    canary = mismatch_canary()
+    tagged_canary = mismatch_canary()
+
+    {pids, _text, events} =
+      log_events(:debug, fn ->
+        %{
+          untagged: run_task!(fn -> raise "r005 untagged control " <> marker end),
+          database:
+            run_task!(fn ->
+              Repo.transaction(fn ->
+                Ecto.Adapters.SQL.query!(Repo, "SELECT $1::text::integer", [canary])
+              end)
+            end),
+          info:
+            run_task!(fn ->
+              tag_process!()
+              Logger.info("r005 tagged info " <> marker)
+            end),
+          error:
+            run_task!(fn ->
+              tag_process!()
+              Logger.error("r005 tagged error " <> tagged_canary)
+            end),
+          tagged_database:
+            run_task!(fn ->
+              tag_process!()
+
+              Repo.transaction(fn ->
+                Ecto.Adapters.SQL.query!(Repo, "SELECT $1::text::integer", [tagged_canary])
+              end)
+            end)
+        }
+      end)
+
+    # Controls: unchanged by the tag.
+    untagged = events_of(events, pids.untagged)
+
+    assert Enum.any?(untagged, &(event_text(&1) =~ marker)) and
+             not Enum.any?(untagged, &(&1.msg == {:string, withheld()})),
+           "R0-05 15b control: an untagged crash keeps its report"
+
+    database = events_of(events, pids.database)
+
+    assert Enum.any?(database, &(event_text(&1) =~ "Postgrex.Error")) and
+             not Enum.any?(database, &canary_in?(&1, canary)),
+           "R0-05 15b control: the C4 database-error path is unchanged (summarized, no canary)"
+
+    assert Enum.any?(
+             events_of(events, pids.info),
+             &(&1.level == :info and event_text(&1) =~ marker and &1.meta[:sdr_sensitive_input])
+           ),
+           "R0-05 15b control: a tagged :info event is unchanged"
+
+    # A tagged error, and a tagged database crash (the tag check is made
+    # before the C4 scan), become the fixed diagnostic.
+    assert_withheld!(events, pids.error, "15b a tagged Logger.error")
+    # A Task's crash report carries no mfa.
+    assert_withheld!(events, pids.tagged_database, "15b a tagged database crash", mfa: false)
+    refute_canary!(events, "", tagged_canary, "15b tagged")
+    assert exception_filter!("15b controls")
+  end
+
+  test "15b controls: a failed classification of a tagged event is replaced and the filter stays attached" do
+    {fun, opts} = exception_filter!("15b classification")
+    canary = mismatch_canary()
+    meta = %{sdr_sensitive_input: true, pid: self(), note: canary}
+    deep = Enum.reduce(1..60_000, canary, fn _, acc -> {acc} end)
+
+    for {event, what} <- [
+          {%{msg: {:string, "r005 " <> canary}, meta: meta}, "no level"},
+          {%{level: :not_a_level, msg: {:string, "r005 " <> canary}, meta: meta},
+           "an invalid level"},
+          {%{level: :error, msg: {:string, "r005 " <> canary}, meta: Map.to_list(meta)},
+           "list metadata"},
+          # The tag check precedes the C4 scan: never C4's scan_limit event.
+          {%{level: :error, msg: {:report, %{data: deep}}, meta: meta}, "an unscannable report"},
+          {%{level: :error, msg: {:string, "r005"}, meta: Map.put(meta, :big, deep)},
+           "unscannable metadata"}
+        ] do
+      result = fun.(event, opts)
+
+      assert is_map(result) and result[:msg] == {:string, withheld()},
+             "R0-05 15b: a tagged event whose classification fails (#{what}) is replaced by the " <>
+               "fixed diagnostic, never returned unchanged; got #{inspect(result[:msg], limit: 5)}"
+
+      refute holds?(result, canary), "R0-05 15b: the replaced event (#{what}) keeps the canary"
+      assert Map.keys(result.meta) -- [:pid, :sdr_sensitive_input] == []
+    end
+
+    assert exception_filter!("15b classification")
+  end
+
+  ## 15c. The accepted limit, shown (D-141)
+
+  test "15c. a supervisor's report about the tagged channel is not classified; the channel's own report is",
+       ctx do
+    sasl_reports!()
+    RH.none!(ctx)
+    canary = mismatch_canary()
+    view = admin_view(ctx.conn)
+    open_resolution!(view, "15c")
+    crash_on_event!(view, "change_resolution", :params)
+    {:ok, supervisor} = ExUnit.fetch_test_supervisor()
+
+    {reason, _text, events} =
+      log_events(:debug, fn ->
+        crash!(view, fn ->
+          view
+          |> form("#resolution-form", %{"resolution_confirmation" => canary})
+          |> render_change()
+        end)
+      end)
+
+    assert match?({%MatchError{}, _stack}, reason),
+           "fixture: the seam's MatchError on the params; got #{inspect(reason, limit: 3)}"
+
+    # The control, in the same run: the channel's own reports are replaced.
+    assert_withheld!(events, view.pid, "15c the channel's own report")
+
+    refute Enum.any?(events_of(events, view.pid), &canary_in?(&1, canary)),
+           "R0-05 15c: the channel's own events carry the canary"
+
+    # The residual, shown (never an absence assertion): the supervisor's
+    # report about the channel is the supervisor's own event, untagged and
+    # unclassified, and it carries the crash reason with the input.
+    reports =
+      events |> events_of(supervisor) |> Enum.filter(&(event_text(&1) =~ inspect(view.pid)))
+
+    assert reports != [],
+           "R0-05 15c: with SASL translation on, the supervisor reports the channel's exit"
+
+    for report <- reports do
+      refute report.meta[:sdr_sensitive_input], "R0-05 15c: the supervisor's report is not tagged"
+      refute report.msg == {:string, withheld()}, "R0-05 15c: it is not classified"
+    end
+
+    assert Enum.any?(reports, &canary_in?(&1, canary)),
+           "R0-05 15c: the accepted residual: the supervisor's report carries the crash reason"
+
+    assert exception_filter!("15c")
   end
 
   ## 16. The lag

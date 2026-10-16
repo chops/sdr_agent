@@ -8,6 +8,13 @@ defmodule SdrAgentWeb.AdminLiveSwitchGreenRaceTest do
   be taken, so this module runs the SQL sandbox in `:auto` mode like
   `SdrAgentWeb.AdminLiveSwitchRaceTest` (`AdminSwitchHarness.auto_sandbox!/0`).
   The fake CLI; no model call.
+
+  **Draft 4 amendment (D-141; Codex d0c80ff, permitted amendments 4 and
+  5):** the MF3 positive control is the tagged channel's fixed diagnostic
+  (the crash reason and `#Confirmation<redacted>` are no longer in the
+  report), and test 15b's crash while frozen in `:uncertain`, through the
+  `crash_on_event!/3` seam on a real `refresh_status` click, at `:debug`
+  and at `:warning`.
   """
   use ExUnit.Case, async: false
 
@@ -33,58 +40,100 @@ defmodule SdrAgentWeb.AdminLiveSwitchGreenRaceTest do
     %{tenant: tenant, admin: AuditCase.new_human(:admin, tenant)}
   end
 
-  test "MF3: a LiveView crash while :uncertain keeps the confirmation out of the debug crash report",
-       ctx do
+  # The review in :uncertain: an attempt whose caller's call times out
+  # against the blocked coordinator and whose settlement barrier can't take
+  # the setting lock. Returns `{view, text, release}`.
+  defp uncertain!(ctx, label) do
     blocked = RH.dead_holder!(ctx)
     text = confirmation(blocked)
     {:ok, view, _html} = build_conn() |> sign_in_user(ctx.admin) |> live("/admin")
-    click!(view, "#resolve-blocked", "MF3 uncertain")
+    click!(view, "#resolve-blocked", label)
 
     await_element!(
       view,
       "#resolution-review[data-state='editing']",
       nil,
       10_000,
-      "MF3: the review"
+      "#{label}: the review"
     )
 
     blocker = RH.block_coordinator!()
     {holder, _backend} = RH.hold!(fn -> RH.lock_setting!(ctx.tenant.id) end)
-    change_form!(view, "#resolution-form", %{"resolution_confirmation" => text}, "MF3")
-    submit_form!(view, "#resolution-form", %{"resolution_confirmation" => text}, "MF3")
+    change_form!(view, "#resolution-form", %{"resolution_confirmation" => text}, label)
+    submit_form!(view, "#resolution-form", %{"resolution_confirmation" => text}, label)
 
     await_element!(
       view,
       "#resolution-review[data-state='uncertain']",
       nil,
       30_000,
-      "MF3: the unknown outcome"
+      "#{label}: the unknown outcome"
     )
 
-    Process.unlink(view.pid)
-    previous = Process.flag(:trap_exit, true)
+    release = fn ->
+      RH.release_holder(holder)
+      RH.release_coordinator!(blocker)
+      RH.drain!()
+    end
 
-    log =
+    {view, text, release}
+  end
+
+  test "MF3: a LiveView crash while :uncertain keeps the confirmation out of the debug crash report",
+       ctx do
+    {view, text, release} = uncertain!(ctx, "MF3 uncertain")
+
+    # Amendment (draft 4, D-141; ADR-0005 R0-05 amendment; Codex d0c80ff,
+    # permitted amendment 4): the tagged channel's report is the fixed
+    # diagnostic, so the crash reason and #Confirmation<redacted> are no
+    # longer in it. The positive control is the diagnostic itself, at its
+    # level with the safe metadata; the wrapper's own redaction is tested
+    # directly in SdrAgentWeb.AdminLiveSwitchGreenTest.
+    {_reason, log, events} =
       try do
-        {_result, captured} =
-          debug_logs(fn ->
-            :sys.terminate(view.pid, :r005_uncertain_crash)
-            Process.sleep(100)
-          end)
-
-        captured
+        log_events(:debug, fn ->
+          crash!(view, fn -> :sys.terminate(view.pid, :r005_uncertain_crash) end)
+        end)
       after
-        Process.flag(:trap_exit, previous)
-        RH.release_holder(holder)
-        RH.release_coordinator!(blocker)
-        RH.drain!()
+        release.()
       end
 
-    assert log =~ "r005_uncertain_crash", "positive control: the crash report was captured"
+    assert_withheld!(events, view.pid, "MF3 :uncertain crash report")
+    assert log =~ withheld(), "R0-05 MF3: the captured text shows the diagnostic"
 
-    assert log =~ "#Confirmation<redacted>",
-           "positive control: the frozen review is in the report"
+    refute Enum.any?(events_of(events, view.pid), &canary_in?(&1, text)),
+           "MF3: the :uncertain crash report disclosed the confirmation"
 
     refute log =~ text, "MF3: the :uncertain crash report disclosed the confirmation"
+  end
+
+  for level <- [:debug, :warning] do
+    test "15b. a channel crash while frozen in :uncertain reports only the fixed diagnostic, at #{level}",
+         ctx do
+      level = unquote(level)
+      label = "15b :uncertain at #{level}"
+      {view, text, release} = uncertain!(ctx, label)
+      crash_on_event!(view, "refresh_status")
+
+      {reason, log, events} =
+        try do
+          log_events(level, fn ->
+            crash!(view, fn -> click!(view, "#refresh-status", label) end)
+          end)
+        after
+          release.()
+        end
+
+      assert seam_crash?(reason), "fixture: the seam crash; got #{inspect(reason, limit: 5)}"
+      assert_withheld!(events, view.pid, label)
+      assert log =~ withheld(), "R0-05 #{label}: the captured text shows the diagnostic"
+
+      # The valid phrase was dispatched: downstream diagnostic copies are
+      # D-141's accepted residual; the channel's own reports are checked.
+      refute Enum.any?(events_of(events, view.pid), &canary_in?(&1, text)),
+             "R0-05 #{label}: the channel's own events carry the confirmation"
+
+      assert exception_filter!(label)
+    end
   end
 end

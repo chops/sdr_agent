@@ -20,6 +20,16 @@ defmodule SdrAgentWeb.AdminLiveSwitchProbeTest do
   the completion (trace delivered and acknowledged by the collector). A
   stopped proxy is never rendered. The redirect is no proof of what the
   dispatched attempt did.
+
+  **Amendment (probe 2 only; draft 4, D-141, ADR-0005 R0-05 amendment;
+  Codex `codex-r005-d0c80ff-contract-pass.md`, permitted amendment 4):** the
+  tagged channel's crash report becomes the fixed diagnostic, so it no
+  longer carries the crash reason. The positive control `log =~
+  "codex_review_crash"` is replaced by the diagnostic itself (captured
+  after the primary filters with `AdminSwitchHarness.log_events/2`): at
+  `:error`, with only the safe standard metadata (the view's `pid`, an
+  `mfa`) plus `sdr_sensitive_input: true`. The absence assertion is
+  unchanged.
   """
   use SdrAgentWeb.OperatorCase, async: false
 
@@ -92,21 +102,24 @@ defmodule SdrAgentWeb.AdminLiveSwitchProbeTest do
     Process.unlink(view.pid)
     previous = Process.flag(:trap_exit, true)
 
-    log =
+    {log, events} =
       try do
-        {_result, captured} =
-          debug_logs(fn ->
+        # Amendment (probe 2): every event after the primary filters too.
+        {_result, captured, events} =
+          log_events(:debug, fn ->
             :sys.terminate(view.pid, :codex_review_crash)
             Process.sleep(100)
           end)
 
-        captured
+        {captured, events}
       after
         Process.flag(:trap_exit, previous)
         RH.release_coordinator!(blocker)
       end
 
-    assert log =~ "codex_review_crash", "positive control: capture the crash report"
+    # Amendment (probe 2): the positive control is the fixed diagnostic.
+    assert_withheld!(events, view.pid, "probe crash report")
+    assert log =~ withheld(), "positive control: capture the crash report"
     refute log =~ text, "LiveView crash report disclosed the frozen confirmation"
   end
 

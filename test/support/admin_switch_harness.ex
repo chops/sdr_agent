@@ -37,6 +37,18 @@ defmodule SdrAgent.Test.AdminSwitchHarness do
   application's telemetry and the console's URLs; `tables_containing/1`
   scans every public table; `spans_containing?/1` scans the exported spans.
 
+  **Option B (draft 4, D-141; ADR-0005 R0-05 amendment).** Minimization
+  (tests 9, 15a): `resolution_path_mfas/0` for `trace_calls!/1`,
+  `resolution_dispatches/2`, and `holds?/2`, a structural search that
+  bypasses `Inspect` (closure environments included). Crash reports (tests
+  15b, 15c): `log_events/2` captures every event after the primary filters
+  through a test `:logger` handler (`LogSink`); `crash_on_event!/3` is the
+  test seam that makes the channel raise while it handles a real event (a
+  `:handle_event` hook attached through `:sys.replace_state/2`);
+  `crash!/2` awaits the view's death, its supervisor and its client proxy;
+  `assert_withheld!/3`, `refute_canary!/4`, `exception_filter!/1` and
+  `sasl_reports!/0` (SASL translation enabled in place, restored on exit).
+
   **Independent connections** (the race module only): `auto_sandbox!/0`
   runs the SQL sandbox in `:auto` mode for the test, truncating only a test
   database before and after (the b2β race test's table list), and
@@ -53,6 +65,8 @@ defmodule SdrAgent.Test.AdminSwitchHarness do
   alias Phoenix.ConnTest
   alias SdrAgent.Accounts
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.ProfileSwitches
+  alias SdrAgent.Agents.SwitchResolution
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.Coordinator
   alias SdrAgent.AI.ModelProvider.Runtime
@@ -73,6 +87,9 @@ defmodule SdrAgent.Test.AdminSwitchHarness do
   @recorded "The resolution was recorded: the switch is failed. Readiness is checked " <>
               "separately; calls stay paused until the status shows the server accepting " <>
               "calls. A dead lease may still need an operator."
+  @withheld "diagnostic withheld: process holds operator input"
+  @safe_meta [:pid, :gl, :time, :line, :mfa, :file, :domain, :sdr_sensitive_input]
+  @crash "r005 synthetic channel crash"
   @tables ~w(model_server_starts model_server_counters model_profile_switches
              model_profile_settings audit_accesses audit_events audit_chain_heads
              model_call_allocations model_call_grants failures operations model_invocations
@@ -541,6 +558,8 @@ defmodule SdrAgent.Test.AdminSwitchHarness do
   """
   def trace_calls!(mfas) do
     collector = spawn(fn -> collect([]) end)
+    # A module not yet loaded would match no pattern.
+    for {module, _f, _a} <- mfas, do: Code.ensure_loaded!(module)
     for mfa <- mfas, do: :erlang.trace_pattern(mfa, [{:_, [], [{:return_trace}]}], [:global])
     :erlang.trace(:all, true, [:call, {:tracer, collector}])
 
@@ -855,4 +874,365 @@ defmodule SdrAgent.Test.AdminSwitchHarness do
     {:ok, switches} = Agents.list_profile_switches(actor: actor)
     switches
   end
+
+  ## Minimization (test 15a; D-141 option B)
+
+  @doc """
+  The resolution path traced by tests 9 and 15a: the page's async start
+  (the task's closure), every `Agents`, `ProfileSwitches` and
+  `SwitchResolution` function, and every coordinator function (its
+  `handle_call/3` included). For `trace_calls!/1`.
+  """
+  def resolution_path_mfas,
+    do: [
+      {Phoenix.LiveView.Async, :start_async, 4},
+      {Agents, :_, :_},
+      {ProfileSwitches, :_, :_},
+      {SwitchResolution, :_, :_},
+      {Coordinator, :_, :_}
+    ]
+
+  @doc """
+  The resolution dispatches among the traced calls (`resolution_path_mfas/0`)
+  not made by the test process: a `{:resolution, _}` async start, the
+  domain's resolution entry points, the attestation checks and the
+  coordinator's resolve request.
+  """
+  def resolution_dispatches(collector, test_pid \\ self()) do
+    collector
+    |> calls()
+    |> Enum.filter(&(&1.pid != test_pid and dispatch?(&1)))
+  end
+
+  defp dispatch?(%{mfa: {Phoenix.LiveView.Async, :start_async, 4}, args: [_, key | _]}),
+    do: match?({:resolution, _}, key)
+
+  defp dispatch?(%{mfa: {Agents, :resolve_blocked_switch, 3}}), do: true
+
+  defp dispatch?(%{mfa: {ProfileSwitches, f, _}}),
+    do: f in [:resolve_blocked, :commit_resolution, :settle_resolution]
+
+  defp dispatch?(%{mfa: {SwitchResolution, f, _}}),
+    do: f in [:checked_attestation, :replay_lookup, :resolution_result]
+
+  defp dispatch?(%{mfa: {Coordinator, :resolve_blocked, 2}}), do: true
+
+  defp dispatch?(%{mfa: {Coordinator, :handle_call, 3}, args: [request | _]}),
+    do: match?({:resolve_blocked, _, _}, request)
+
+  defp dispatch?(_call), do: false
+
+  @doc "A synthetic mismatched confirmation canary (one token, so its form encoding is itself)."
+  def mismatch_canary,
+    do: "r005canary" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+  @doc """
+  Whether `term` holds `text` anywhere: a binary containing it, inside
+  lists (improper too), tuples, maps (keys and values), structs and the
+  environment of closures. `Inspect` is bypassed, so an opaque wrapper's
+  text is found.
+  """
+  def holds?(term, text) when is_binary(text) and text != "", do: holds_term?(term, text)
+
+  defp holds_term?(binary, text) when is_binary(binary),
+    do: :binary.match(binary, text) != :nomatch
+
+  defp holds_term?(list, text) when is_list(list), do: holds_list?(list, text)
+  defp holds_term?(tuple, text) when is_tuple(tuple), do: holds_list?(Tuple.to_list(tuple), text)
+
+  defp holds_term?(map, text) when is_map(map),
+    do:
+      Enum.any?(Map.to_list(map), fn {key, value} ->
+        holds_term?(key, text) or holds_term?(value, text)
+      end)
+
+  defp holds_term?(fun, text) when is_function(fun) do
+    case :erlang.fun_info(fun, :env) do
+      {:env, env} -> holds_list?(env, text)
+      _no_env -> false
+    end
+  end
+
+  defp holds_term?(_other, _text), do: false
+
+  defp holds_list?([head | tail], text), do: holds_term?(head, text) or holds_list?(tail, text)
+  defp holds_list?([], _text), do: false
+  defp holds_list?(tail, text), do: holds_term?(tail, text)
+
+  ## Crash reports (tests 15b, 15c; ADR-0005 R0-05 amendment, option B)
+
+  @doc "The fixed content-free diagnostic of a tagged process's report."
+  def withheld, do: @withheld
+
+  @doc """
+  Runs `fun` with the primary logger level `level` (restored after) and
+  returns `{result, text, events}`: the captured text (`CaptureLog` at
+  `level`) and every log event that passed the primary filters
+  (`SdrAgent.Logger.ExceptionFilter` among them), as a test `:logger`
+  handler received it (`SdrAgent.Test.AdminSwitchHarness.LogSink`, removed
+  after). The handler runs in each logging process, so a process's events
+  are delivered before its later signals (a crashed view's `:DOWN`).
+  """
+  def log_events(level, fun) do
+    previous = Logger.level()
+    id = :"r005_log_sink_#{System.unique_integer([:positive])}"
+    ref = make_ref()
+    config = %{level: :all, config: %{to: self(), ref: ref}}
+    :ok = :logger.add_handler(id, __MODULE__.LogSink, config)
+    Logger.configure(level: level)
+
+    try do
+      {result, text} = CaptureLog.with_log([level: level], fun)
+      {result, text, drain_events(ref, [])}
+    after
+      Logger.configure(level: previous)
+      _ = :logger.remove_handler(id)
+    end
+  end
+
+  defp drain_events(ref, events) do
+    receive do
+      {:r005_log_event, ^ref, event} -> drain_events(ref, [event | events])
+    after
+      0 -> Enum.reverse(events)
+    end
+  end
+
+  @doc "The events logged by `pid`."
+  def events_of(events, pid), do: Enum.filter(events, &(&1.meta[:pid] == pid))
+
+  @doc """
+  An event's message, report, format arguments and metadata as text: the
+  `:logger_formatter` rendering of its message and the inspected `{level,
+  msg, meta}` (no limits).
+  """
+  def event_text(%{msg: msg, meta: meta} = event) do
+    format = %{
+      single_line: false,
+      chars_limit: :unlimited,
+      max_size: :unlimited,
+      depth: :unlimited,
+      template: [:msg]
+    }
+
+    formatted =
+      try do
+        event |> :logger_formatter.format(format) |> IO.chardata_to_string()
+      rescue
+        _exception -> ""
+      catch
+        _kind, _reason -> ""
+      end
+
+    formatted <>
+      "\n" <> inspect({event[:level], msg, meta}, limit: :infinity, printable_limit: :infinity)
+  end
+
+  @doc "Whether `event` holds `canary` (raw or form-encoded) in any part."
+  def canary_in?(event, canary) do
+    text = event_text(event)
+
+    Enum.any?(
+      Enum.uniq([canary, URI.encode_www_form(canary)]),
+      &(String.contains?(text, &1) or holds?(event, &1))
+    )
+  end
+
+  @doc """
+  Asserts that every error-or-higher event of `pid` (a tagged process) is
+  the fixed diagnostic at `:error`, with only the safe standard metadata
+  (a `pid` of `pid`, a valid `mfa` unless `mfa: false` for a report that
+  carries none, such as a `Task`'s) plus `sdr_sensitive_input: true`, and
+  that there is at least one. Returns them.
+  """
+  def assert_withheld!(events, pid, label, opts \\ []) do
+    own = Enum.filter(events_of(events, pid), &(:logger.compare_levels(&1.level, :error) != :lt))
+
+    assert own != [],
+           "R0-05 #{label}: no error report of #{inspect(pid)} was captured (positive control)"
+
+    for event <- own do
+      assert event.msg == {:string, @withheld},
+             "R0-05 #{label}: a tagged process's report must be the fixed diagnostic " <>
+               "#{inspect(@withheld)}; got #{String.slice(event_text(event), 0, 600)}"
+
+      assert event.level == :error, "R0-05 #{label}: the diagnostic keeps the report's level"
+
+      assert event.meta[:sdr_sensitive_input] == true,
+             "R0-05 #{label}: the diagnostic carries sdr_sensitive_input: true"
+
+      extra = Map.keys(event.meta) -- @safe_meta
+
+      assert extra == [],
+             "R0-05 #{label}: only the safe standard metadata is kept; got #{inspect(extra)}"
+
+      assert event.meta[:pid] == pid, "R0-05 #{label}: the diagnostic keeps the pid"
+
+      if Keyword.get(opts, :mfa, true) do
+        assert match?(
+                 {m, f, a} when is_atom(m) and is_atom(f) and is_integer(a),
+                 event.meta[:mfa]
+               ),
+               "R0-05 #{label}: the safe mfa metadata is kept; got #{inspect(event.meta[:mfa])}"
+      end
+    end
+
+    own
+  end
+
+  @doc "Asserts that no event in `events` (nor the captured `text`) holds `canary`."
+  def refute_canary!(events, text, canary, label) do
+    leaks = Enum.filter(events, &canary_in?(&1, canary))
+
+    assert leaks == [],
+           "R0-05 #{label}: the canary is in captured events of " <>
+             inspect(Enum.map(leaks, &{&1.level, &1.meta[:pid], &1.meta[:mfa]}))
+
+    for form <- Enum.uniq([canary, URI.encode_www_form(canary)]) do
+      refute text =~ form, "R0-05 #{label}: the canary is in the captured log text"
+    end
+  end
+
+  @doc """
+  Test seam (tests 15b, 15c): attaches a `:handle_event` hook to the view's
+  socket through `:sys.replace_state/2` (as the b2α `reconcile` fault), so
+  the channel raises while it handles `event`, before the page's
+  `handle_event/3`: the real event message is the channel's last message.
+  `reason` is `:neutral` (a fixed `RuntimeError`) or `:params` (a
+  `MatchError` on the decoded params: the crash reason carries the input).
+  """
+  def crash_on_event!(view, event, reason \\ :neutral) do
+    hook = fn
+      ^event, params, _socket -> crash(reason, params)
+      _other, _params, socket -> {:cont, socket}
+    end
+
+    :sys.replace_state(view.pid, fn %{socket: socket} = state ->
+      %{state | socket: Phoenix.LiveView.attach_hook(socket, :r005_crash, :handle_event, hook)}
+    end)
+
+    :ok
+  end
+
+  @doc false
+  def crash(:neutral, _params), do: raise(@crash)
+  def crash(:params, params), do: raise(MatchError, term: params)
+
+  @doc "Whether `reason` is the neutral seam crash of `crash_on_event!/3`."
+  def seam_crash?({%RuntimeError{message: @crash}, _stack}), do: true
+  def seam_crash?(_reason), do: false
+
+  @doc """
+  Runs `trigger` (an event that crashes the view through `crash_on_event!/3`,
+  or a `:sys.terminate/2`) with the view unlinked and exits trapped, and
+  returns the view's exit reason once the view is down, the ExUnit
+  supervisor (the channel's parent) has handled its exit and the test's
+  client proxy is down (bounded).
+  """
+  def crash!(view, trigger) do
+    %{pid: pid, proxy: {_ref, _topic, proxy}} = view
+    Process.unlink(pid)
+    previous = Process.flag(:trap_exit, true)
+    view_ref = Process.monitor(pid)
+    proxy_ref = Process.monitor(proxy)
+
+    try do
+      try do
+        trigger.()
+      catch
+        :exit, _reason -> :ok
+      end
+
+      reason = await_down!(view_ref, pid, "the view")
+      {:ok, supervisor} = ExUnit.fetch_test_supervisor()
+      _ = :sys.get_state(supervisor)
+      _ = await_down!(proxy_ref, proxy, "the client proxy")
+      reason
+    after
+      Process.flag(:trap_exit, previous)
+      flush_exits()
+    end
+  end
+
+  defp await_down!(ref, pid, what) do
+    receive do
+      {:DOWN, ^ref, :process, ^pid, reason} -> reason
+    after
+      10_000 -> flunk("R0-05 crash: #{what} never went down")
+    end
+  end
+
+  defp flush_exits do
+    receive do
+      {:EXIT, _pid, _reason} -> flush_exits()
+    after
+      0 -> :ok
+    end
+  end
+
+  @doc """
+  Tags the calling process as AdminLive's channel does (ADR-0005 R0-05
+  amendment): the process logger metadata `sdr_sensitive_input: true`
+  (`:logger.update_process_metadata/1`, what `Logger.metadata/1` updates).
+  """
+  def tag_process!, do: :logger.update_process_metadata(%{sdr_sensitive_input: true})
+
+  @doc "Runs `fun` in an unlinked `Task` and waits (bounded) for it to end; returns its pid."
+  def run_task!(fun) do
+    {:ok, pid} = Task.start(fun)
+    ref = Process.monitor(pid)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} -> pid
+    after
+      10_000 -> flunk("R0-05 control: the task never ended")
+    end
+  end
+
+  @doc "The attached primary `:sdr_agent_exception_filter` as `{fun, opts}` (asserted present)."
+  def exception_filter!(label) do
+    entry = List.keyfind(:logger.get_primary_config().filters, :sdr_agent_exception_filter, 0)
+
+    assert match?({_, {fun, _}} when is_function(fun, 2), entry) and
+             Function.info(elem(elem(entry, 1), 0))[:module] == SdrAgent.Logger.ExceptionFilter,
+           "R0-05 #{label}: the primary :sdr_agent_exception_filter is not attached"
+
+    elem(entry, 1)
+  end
+
+  @doc """
+  Enables Elixir's SASL report translation (`handle_sasl_reports`) in place
+  in the primary filter list (its order kept), restored on exit. For
+  `async: false` tests only (test 15c).
+  """
+  def sasl_reports! do
+    %{filters: filters} = :logger.get_primary_config()
+    {:logger_translator, {fun, config}} = List.keyfind(filters, :logger_translator, 0)
+    :ok = put_translator(filters, {fun, %{config | sasl: true}})
+
+    on_exit(fn ->
+      %{filters: now} = :logger.get_primary_config()
+      :ok = put_translator(now, {fun, config})
+    end)
+  end
+
+  defp put_translator(filters, filter),
+    do:
+      :logger.set_primary_config(
+        :filters,
+        List.keyreplace(filters, :logger_translator, 0, {:logger_translator, filter})
+      )
+end
+
+defmodule SdrAgent.Test.AdminSwitchHarness.LogSink do
+  @moduledoc """
+  A test `:logger` handler (R0-05 tests 15b and 15c): forwards each event
+  it receives — after the primary filters,
+  `SdrAgent.Logger.ExceptionFilter` among them — to the test process in its
+  config. It runs in the logging process. Added and removed by
+  `SdrAgent.Test.AdminSwitchHarness.log_events/2`.
+  """
+
+  @doc "The `:logger` handler callback."
+  def log(event, %{config: %{to: to, ref: ref}}), do: send(to, {:r005_log_event, ref, event})
 end

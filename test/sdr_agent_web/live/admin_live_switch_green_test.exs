@@ -26,6 +26,8 @@ defmodule SdrAgentWeb.AdminLiveSwitchGreenTest do
 
   alias SdrAgent.Accounts
   alias SdrAgent.Agents
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper
   alias SdrAgent.AuditCase
   alias SdrAgent.Test.ResolveHarness, as: RH
   alias SdrAgent.Test.StatusHarness, as: SH
@@ -166,16 +168,21 @@ defmodule SdrAgentWeb.AdminLiveSwitchGreenTest do
 
   describe "MF2: the stored line is the reviewed switch's own row" do
     test "a failed stored read shows the reviewed switch as unknown, never another row", ctx do
-      blocked = RH.none!(ctx)
+      blocked = RH.dead_holder!(ctx)
       view = admin_view(ctx.conn)
       open_review!(view, "MF2 read failure")
-      submit!(view, "stopped " <> blocked.id, "MF2 read failure")
+      # Draft 4 (D-141; Codex d0c80ff, permitted amendment 3): a wrong text
+      # no longer reaches the domain, so the terminal refusal is b2β's
+      # :stale_attestation of the exact text (the dead lease is released
+      # under the review).
+      assert :ok = Reaper.release(ClaudeCLI.server())
+      submit!(view, confirmation(blocked), "MF2 read failure")
 
       await_element!(
         view,
-        "#resolution-result[data-outcome='attestation_invalid']",
+        "#resolution-result[data-outcome='stale_attestation']",
         nil,
-        10_000,
+        20_000,
         "MF2: a terminal refusal"
       )
 
