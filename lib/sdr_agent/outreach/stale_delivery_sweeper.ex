@@ -7,6 +7,7 @@ defmodule SdrAgent.Outreach.StaleDeliverySweeper do
   nothing before the tenant is bootstrapped.
   """
   use Oban.Worker, queue: :reconciliation, max_attempts: 1
+  use SdrAgent.Workers.ErrorBoundary
 
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Outreach.Delivery

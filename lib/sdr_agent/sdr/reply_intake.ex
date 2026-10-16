@@ -7,6 +7,11 @@ defmodule SdrAgent.SDR.ReplyIntake do
   small budget — one model call), inserts its `agent`-queue job (`SdrAgent.SDR.ReplyWorker`) and
   records the `sdr.reply.received` signal (data `reply_id`, `lead_id`,
   `campaign_id`, `enrollment_id`; actor the webhook ingestor) on that run.
+
+  C4-R8: the run binds a run settings snapshot like every new run, but needs
+  no saved business settings, so reply classification and its unsubscribe
+  and suppression effects never wait on them; its code budget (2 model
+  calls, 5 tool calls) is lowered further by the snapshot when smaller.
   """
   @behaviour SdrAgent.Outreach.ReplyIntake
 

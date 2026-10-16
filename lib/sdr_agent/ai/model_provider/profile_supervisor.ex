@@ -15,7 +15,8 @@ defmodule SdrAgent.AI.ModelProvider.ProfileSupervisor do
 
   Options (passed to the coordinator): `server:` (`fn profile_id ->
   ClaudeCLI start options end`, configuration), `cleanup_wait_ms:` (at
-  most 10 s); in test builds only, `manual: true` and `faults:`.
+  most 10 s); in test builds only, `manual: true` and `faults:` (see the
+  coordinator's moduledoc, including the C2-02b2β resolution faults).
   """
   use Supervisor
 

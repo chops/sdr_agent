@@ -3,10 +3,16 @@ defmodule SdrAgent.AgentsFixtures do
 
   import SdrAgent.AuditCase, only: [system_actor: 2, digest: 1, human: 2]
 
-  @doc "Registers a definition and starts a run for it; returns the rows and the agent actor."
+  @doc """
+  Registers a definition and starts a run for it; returns the rows and the
+  agent actor. A business-origin run (the default `:assignment`) needs a
+  saved offering profile (C4-R8): one is saved first when the tenant has
+  none (`ensure_offering!/2`).
+  """
   def running_run(tenant, opts \\ []) do
     agent = system_actor(:agent_runtime, tenant)
     definition = definition!(tenant)
+    ensure_offering!(tenant, opts)
 
     {:ok, run} =
       SdrAgent.Agents.create_run(run_attrs(definition, opts), actor: agent)
@@ -25,6 +31,7 @@ defmodule SdrAgent.AgentsFixtures do
   def operated_run(tenant, opts \\ []) do
     agent = system_actor(:agent_runtime, tenant)
     definition = definition!(tenant)
+    ensure_offering!(tenant, opts)
     key = "gate-run:#{System.unique_integer([:positive])}"
 
     {:ok, operation} =
@@ -47,6 +54,25 @@ defmodule SdrAgent.AgentsFixtures do
     {:ok, run} = SdrAgent.Agents.create_run(attrs, actor: agent)
     {:ok, run} = SdrAgent.Agents.start_run(run, actor: agent)
     %{run: run, agent: agent, operation: operation, definition: definition}
+  end
+
+  @doc """
+  C4-R8: saves the synthetic offering profile of the C4 fixtures
+  (`SdrAgent.SettingsFixtures.content/1`) through the domain API, as the
+  test's admin, when `tenant` has none and the run's `usage_origin` (default
+  `:assignment`) requires one. Per-test, explicit; completeness and
+  no-settings tests do not use it.
+  """
+  def ensure_offering!(tenant, opts \\ []) do
+    origin = Keyword.get(opts, :usage_origin, :assignment)
+    required = Map.get(SdrAgent.Agents.RunSettings.completeness(), origin, [])
+
+    if :offering_profile in required and
+         SdrAgent.SettingsFixtures.latest_number(tenant.id, :offering_profile) == 0 do
+      SdrAgent.SettingsFixtures.save_offering!(human(:admin, tenant))
+    end
+
+    :ok
   end
 
   @doc "Registers (or returns) the fixture agent definition."

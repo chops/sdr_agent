@@ -9,6 +9,7 @@ defmodule SdrAgent.Outreach.DeliveryWorker do
   the delivery `attempting` for the sweeper — never a blind resend.
   """
   use Oban.Worker, queue: :delivery, max_attempts: 3
+  use SdrAgent.Workers.ErrorBoundary
 
   alias SdrAgent.Outreach.Delivery
 

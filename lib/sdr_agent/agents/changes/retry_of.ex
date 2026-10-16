@@ -4,7 +4,9 @@ defmodule SdrAgent.Agents.Changes.RetryOf do
   run (retry_of_id), never a loop"; S13b): copies the definition, subject,
   trigger, correlation, phase, usage origin (C9) and budget limits (never
   raised) of a terminal run in `failed`, `budget_exhausted` or `cancelled`,
-  with fresh counters.
+  with fresh counters, and its run settings snapshot (C4-R6: a retry uses
+  the settings its original run started with). A run without a snapshot
+  (created before the C4 cutover) is refused (`no_settings_snapshot`).
 
   `operation_id` binds the new run to the Operation created for it in the
   same transaction (assignment retries): it must be `enqueued`, of kind
@@ -42,6 +44,13 @@ defmodule SdrAgent.Agents.Changes.RetryOf do
     tenant_id = SetTenant.tenant_of(context.actor)
 
     case Ash.get(AgentRun, run_id, Kernel.opts(tenant_id)) do
+      {:ok, %{status: status, settings_snapshot_id: nil}} when status in @retryable ->
+        Ash.Changeset.add_error(changeset,
+          field: :run_id,
+          message: "no_settings_snapshot",
+          rule: :no_settings_snapshot
+        )
+
       {:ok, %{status: status} = prior} when status in @retryable ->
         case operation(prior, operation_id, tenant_id) do
           :ok ->
@@ -74,6 +83,7 @@ defmodule SdrAgent.Agents.Changes.RetryOf do
       correlation_id: prior.correlation_id,
       phase: prior.phase,
       usage_origin: prior.usage_origin,
+      settings_snapshot_id: prior.settings_snapshot_id,
       budget: %{
         max_model_calls: prior.budget.max_model_calls,
         max_tool_calls: prior.budget.max_tool_calls,

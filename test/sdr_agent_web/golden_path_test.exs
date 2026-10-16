@@ -45,6 +45,8 @@ defmodule SdrAgentWeb.GoldenPathTest do
 
   test "seed → assign → research/qualify → draft → approve → capture → verified chain",
        %{conn: conn} = ctx do
+    # C4-R8: an assignment needs a saved offering profile (synthetic fixture).
+    SdrAgent.SettingsFixtures.save_offering!(ctx.admin)
     conn = sign_in(conn, :reviewer)
     lead = fixture_lead!(ctx, "01")
     contact = contact!(ctx, lead)
