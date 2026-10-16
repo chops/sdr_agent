@@ -1,136 +1,196 @@
 # C2-02c interface: restart and status
 
-**Status:** draft 1, 2026-10-15, for Codex's interface and entity review.
-Slice plan: `c2-02-slices.md` row c. Builds on b2α (merged at `22db5c0`)
-and b2β (`c2-02b2b-interface.md`, PASS at `e60943c`; RED in review).
-Implementation lands after b2β. Codex's advisory pre-read is
-`codex-c202-slice-c-preread-22db5c0.md`.
+**Status:** draft 2, 2026-10-15, for Codex's interface and entity
+re-review. Slice plan: `c2-02-slices.md` row c. Builds on b2α (merged at
+`22db5c0`) and b2β (`c2-02b2b-interface.md`, PASS at `e60943c`).
+Implementation lands after b2β.
+
+**Review record:**
+- **Draft 1** (`183d2cc`): interface and entity NEEDS-REVIEW (Codex
+  `1a54ed3e`, `codex-c202c-183d2cc-interface-review.md`). Draft 2 answers:
+  - **MF1:** a retained lease is separated from simulated VM-state loss,
+    and the current setting is authoritative (section 1);
+  - **MF2:** status is last confirmed observations plus sampled runtime
+    eligibility, with no promise about calls admitted now (section 2);
+  - **MF3:** a bounded sample binding, and every downgrade shape (2a, 2b).
+  - **Codex rulings:** OQ-1 is technically recommended yes, pending the
+    owner. OQ-2 is a qualified yes (section 1).
+- **Pre-read:** `codex-c202-slice-c-preread-22db5c0.md`.
 
 ## 0. Scope, and one narrowing
 
-The slice plan's row c has two parts:
-- **Restart:** start at the setting's `desired_profile_id`. A pending
-  switch becomes failed (`interrupted_by_restart`), or blocked if the lease
-  shows unconfirmed work.
-- **Status:** `Runtime.status/0` gains `desired_profile`,
-  `effective_profile` and `switch`.
+**The narrowing (the owner decides, OQ-1):** drop the slice plan's
+"clean pending switch → failed at boot" branch. Every pending switch at a
+coordinator start stays **blocked**, as b2α already does
+(`coordinator_restarted`), and the exit is b2β's attended resolver.
+- **Why:** a restart never proves that earlier external CLI work stopped.
+  b2α's `fail` needs a ready rollback start with preflight evidence, so
+  there is no honest route to it. b2β already covers every blocked switch.
+- **No new ADR is needed:** the accepted ADR-0004 C2-02b2 amendment
+  already says that a crash during a switch leaves it blocked until b2β.
+- **What changes once the owner decides:** the decision is recorded, and
+  the row c text of the slice plan is updated with the decision's
+  reference. Accepted text is never overwritten silently.
 
-**The narrowing (for the owner, OQ-1).** Drop the "clean pending switch →
-failed at boot" branch. **Every pending switch at a coordinator start
-stays blocked**, which is what b2α already does (`coordinator_restarted`).
-The exit is b2β's attended resolver. Why:
-- **No proof.** A restart is never proof that earlier external CLI work
-  stopped, and the slice plan says so itself. The lease is local to the
-  VM, so its absence after a whole-VM restart proves nothing.
-- **No route.** b2α's `fail` needs a ready rollback start with
-  `:spawn_preflight` evidence. A new boot's start is a `:boot` or
-  `:replacement` start, so there is no honest route to `fail` without
-  weakening b2α's guards.
-- **No gap.** b2β gives every blocked switch an attended exit. A
-  "provably clean" branch would add a second, weaker path to `:failed`
-  for no case that b2β doesn't already cover.
-
-So slice c adds **no lifecycle transition and no persisted change**. It
-pins the restart behaviour b2α and b2β already have, and builds the
+Slice c adds **no lifecycle transition and no persisted change**. It pins
+the restart behaviour that b2α and b2β already have, and builds the
 status contract.
 
 ## 1. Restart (behaviour pinned, not changed)
 
-| At a coordinator start | Outcome (existing b2α and b2β behaviour) |
-|---|---|
-| no switch open; the setting says Sonnet | the first start runs Sonnet (adopted or fresh); it is released after the reconciled read |
-| no setting row (a read that positively finds none) | the default (`:claude_cli_opus`) |
-| the setting read fails | no start; held; the boot is retried (`retry_boot`); **never the default** |
-| a pending switch | blocked (`coordinator_restarted`); held |
-| a blocked switch | stays blocked; held (b2β's resolver is the exit) |
-| a resolved switch (b2β) with a dead lease | held at `:cleanup_unprovable` (b2β section 5) |
-| a completed switch | the next start runs its `to` profile (the setting it applied) |
+**The current setting decides the profile.** The desired profile at a
+start is the **current committed setting**, read fresh at that start.
+Switch history never decides it: after several completed switches, the
+start runs the latest setting's profile, and terminal history is
+unchanged.
 
-**What counts as a restart.** Each row is tested twice:
-- a coordinator-only restart (the coordinator is killed while idle, and
-  `:rest_for_one` restarts it);
-- a full profile-tree cold start: `ProfileSupervisor` is stopped and
-  started again, with no surviving server and no lease, the closest
-  hermetic stand-in for a VM restart.
+**Three restart forms, tested separately:**
 
-These are different lifecycles. Calling a helper is neither.
-
-## 2. Status
-
-`Runtime.status/0` keeps every existing key with its current meaning,
-including `effective` (provider availability), `refusal`, `server` and
-`attestation`. For ClaudeCLI it adds:
-
-| Key | Meaning | Source |
+| Form | What it does | What it is not |
 |---|---|---|
-| `desired_profile` | `%{profile_id, source: :setting \| :default}`; `:unknown` when the coordinator's last setting read failed or it hasn't read yet; nil when no coordinator runs | the coordinator's published status (below) |
-| `observed_profile` | the profile the named server runs, or nil when none runs | `ClaudeCLI.profile/1` (the server's own status table) |
-| `effective_profile` | the profile a call admitted **now** would run: `observed_profile` when `resolve([])` succeeds, nil otherwise. A held, blocked or staged server never has one | computed |
-| `hold` and `stage` | the coordinator's hold (`:held \| :released \| :pending`) and stage (including `:cleanup_unprovable`) | published status |
-| `switch` | the open switch: `%{id, from_profile_id, to_profile_id, status: :pending \| :blocked, failure_reason}`, nil when none is open, `:unknown` when not known | published status |
-| `as_of` | `%{boot_id, generation, published_at}` of the published status the fields above came from | published status |
+| **A. Coordinator-only restart** | The coordinator is killed while idle; `:rest_for_one` restarts it | — |
+| **B. Profile-tree restart, lease retained** | `ProfileSupervisor` is stopped and started again. Its retained fixture lease (`:persistent_term`) is untouched, because a tree restart doesn't clear it | — |
+| **C. Simulated VM boundary** | B, plus explicit removal of VM-local state. This happens only after every fixture-owned server, reaper and worker has been stopped and joined, and only for a uniquely owned test lease | an actual BEAM restart, or proof of OS cleanup (OQ-2, Codex: qualified yes) |
+
+**Expected outcomes:**
+
+| State at the start | A and B (lease retained) | C (VM-local state gone) |
+|---|---|---|
+| no open switch, setting = Sonnet | Sonnet (adopted, or a fresh start), released after the reconciled read | Sonnet, fresh start, preflight, released |
+| setting positively absent | the default (`:claude_cli_opus`) | same |
+| setting read fails | no start, held, boot retried; never the default | same |
+| pending switch | blocked (`coordinator_restarted`), held | blocked, held. The lost lease proves nothing about the interrupted switch |
+| blocked switch | still blocked, held | still blocked, held; needs the attended resolver |
+| resolved (b2β), with a dead lease | held at `:cleanup_unprovable`; no release | b2β's no-open-switch branch, since no lease and no live server: a fresh start, preflight and reconciliation, then the release |
+| completed switch(es) | the current setting's profile | same |
+
+**Test-only state.** No application cleanup bypass and no production
+seam is added. The owner's runtime and leases are never touched.
+
+## 2. Status: last confirmed observations, plus sampled runtime eligibility
+
+`Runtime.status/0` reports two kinds of information, and promises
+nothing about any later instant:
+
+- **Ledger-derived fields** (`desired_profile`, `switch`) are the
+  coordinator's **last confirmed observation**. Each carries the time it
+  was confirmed.
+- **Runtime fields** (`observed_profile`, `hold`, `stage`, the admission
+  and attestation views) come from **one bounded sample** of the
+  coordinator's and the server's published tables (2a).
+
+**Authority stays elsewhere.** Admission is decided by normal reservation
+and launch fencing: the durable fence, grants, quotas, the hold, and
+per-call attestation. Status is never authority.
+
+**Its keys for ClaudeCLI** (all existing keys keep their meaning):
+
+| Key | Value |
+|---|---|
+| `desired_profile` | `%{profile_id, source: :setting \| :default, confirmed_at}` or `:unknown` |
+| `switch` | nil (none open, confirmed), `%{id, from_profile_id, to_profile_id, status: :pending \| :blocked, failure_reason, confirmed_at}`, or `:unknown` |
+| `observed_profile` | the bound server's profile, nil (confirmed: no server), or `:unknown` |
+| `hold` | `:held \| :released \| :pending \| :unknown` |
+| `stage` | the coordinator's stage (including `:cleanup_unprovable`), nil, or `:unknown` |
+| `effective_profile` | `observed_profile` only if the sample is consistent, the hold is `:released`, and `resolve([])` passed at sample time; nil otherwise. **Sampled eligibility, not a promise** about any later call |
+| `observation` | `:consistent \| :inconsistent \| :unavailable` |
+| `published_at` | when the coordinator **published** the record the sample used. It is not when every field was confirmed, which is `confirmed_at` |
+
+**When the coordinator publishes.**
+- **Who writes:** only the coordinator's own process writes its protected
+  table.
+- **When:** after the outcome of each of its own bounded reads and
+  writes, such as the setting read at boot, the switch read at boot, and
+  `request`, `block`, `complete`, `fail` and `resolve`.
+- **Never** inside `publish`, and never on a status read. There is no new
+  database read.
+
+**The intervals in which status lags, all acceptable:**
+
+| Interval | What status shows |
+|---|---|
+| **Request.** The caller commits the request, then casts to the coordinator (`request_switch/2`) | the previous confirmed observation (`switch` nil, `confirmed_at` older), until the coordinator handles the cast and publishes. No synchronous publication of another process's write is promised |
+| **Uncertain finalization or resolution, until settled** | `switch: :unknown`, `desired_profile: :unknown` and `stage` as published (for example `:finalizing` or `:settling`). It never shows the previous value as current |
+| **A failed read** | `:unknown` for that field |
+
+### 2a. The bounded sample binding
+
+**The coordinator's published record** holds a public part (the fields
+above) and a private part, kept in the same ETS row but never returned:
+- the coordinator's own pid;
+- the bound server pid;
+- the start id;
+- the boot id.
+
+**`Runtime.status/0` takes at most three attempts.** Each attempt is
+read-only and calls neither process:
+1. **Read** the coordinator row, R1.
+2. **Check the coordinator.** The table's owner (`:ets.info(table,
+   :owner)`) is `Process.whereis(Coordinator)` and is R1's private
+   coordinator pid.
+3. **Check the server.** Read the server's status table. Its owner is
+   `Process.whereis(ClaudeCLI.server())` and is R1's private bound server
+   pid. A replacement server with the same profile fails this check.
+4. **Re-read** the coordinator row, R2, and check it equals R1.
+
+**The outcome:**
+- **All four hold:** the sample is `:consistent`.
+- **A check fails or the tables change:** retry, up to three attempts in
+  total.
+- **Then:**
+  - `:inconsistent` when both tables exist but stay unbound or changing;
+  - `:unavailable` when either table or process is missing.
+
+  A positive combination is never synthesized from partial samples.
+
+**No raw pid, ref or capability** appears in the public status.
+
+### 2b. Shapes in every case
+
+| Case | `desired_profile` | `switch` | `observed_profile` | `hold`/`stage` | `effective_profile` | `effective`/`refusal` | `observation` |
+|---|---|---|---|---|---|---|---|
+| **Fake provider** | `:not_applicable` | `:not_applicable` | `:not_applicable` | `:not_applicable` | nil | as today (`effective: Fake`) | `:not_applicable` |
+| **ClaudeCLI, no coordinator or table** | `:unknown` | `:unknown` | `:unknown` | `:unknown` | nil | `effective: nil`, `refusal`: from `resolve([])`, otherwise `:status_unavailable` | `:unavailable` |
+| **Inconsistent sample** | as last confirmed in R1, or `:unknown` | same | `:unknown` | `:unknown` | nil | `effective: nil`, `refusal: :status_inconsistent` | `:inconsistent` |
+| **Consistent, held** | confirmed or `:unknown` | confirmed or `:unknown` | the profile | `:held`, stage | nil | `effective: nil`, `refusal: :provider_held` | `:consistent` |
+| **Consistent, released, `resolve` passes** | confirmed | confirmed | the profile | `:released` | the profile | `effective: ClaudeCLI`, `refusal: nil` | `:consistent` |
+| **Consistent, released, `resolve` refuses** (pin, staging, admission) | confirmed | confirmed | the profile | `:released` | nil | `effective: nil`, `refusal`: that reason | `:consistent` |
 
 **`profile_id` and the model fields** (`model_alias`, `model_id`,
-`reviewed_version`) keep the rule "the running server's, else the desired
-one", with one change:
-- when nothing runs and the desired profile is `:unknown` or nil, they
-  are **nil**, never the registry default.
+`reviewed_version`) follow `observed_profile` when it is known, then the
+confirmed `desired_profile`, and are **nil** otherwise, never the
+registry default. The reviewed registry identity and the per-call init
+attestation stay separate fields.
 
-This removes the default-on-unknown fallback in `details/1`.
+**`Runtime.desired_profile/0`** (it is today a constant default) becomes:
+- `{:ok, %{profile_id, source, confirmed_at}}`, from the published record
+  when it is consistent and confirmed;
+- `{:error, :unknown}` otherwise, for ClaudeCLI;
+- `:not_applicable` for the Fake. **This never claims** that a stored
+  setting is absent: it means only that no real profile is configured.
 
-**The reviewed registry identity and the per-call init attestation stay
-separate fields.** Status never claims that the model was attested by a
-boot or a no-call preflight.
-
-**The coordinator's published status gains** `desired`, `switch` and
-`published_at`:
-- **When it publishes:** after every successful setting read (boot,
-  `complete`), and on every switch read or write (boot, request, block,
-  complete, fail, resolve).
-- **On a failed read:** it publishes `:unknown` for that field. It never
-  keeps a stale value as current.
-
-**What status may not do.** It reads ETS and the server's own status table
-only. It never:
-- calls the coordinator, or waits on a queue;
-- reads the database;
-- initializes a setting, or writes a switch, a start or an event;
-- releases a hold, or decides a launch. Status is observational, not
-  authority.
-
-**Inconsistent combinations.** Some readings are downgraded rather than
-shown as ready:
-- `observed_profile` differs from the published start's profile;
-- the published `boot_id` doesn't match a live coordinator;
-- the ETS table is gone.
-
-In each case `effective_profile` is nil and the inconsistent field is
-`:unknown`. A server that is held never looks ready.
-
-**`Runtime.desired_profile/0`** is today a constant default. It becomes
-`{:ok, %{profile_id, source}} | {:error, :unknown}`, read from the
-published status. When no coordinator runs, it is `{:ok, %{profile_id:
-default, source: :default}}` only when the provider is the Fake (no
-setting applies). Otherwise it is `{:error, :unknown}`. Its callers are
-`runtime.ex` `details/1` and `provider_runtime_test.exs:213`, which is
-updated to the new shape.
+The callers are `runtime.ex` (`details/1`) and
+`provider_runtime_test.exs:213`, which is updated to the new shape.
 
 ## 3. ADR evaluation
 
-None needed. This is within ADR-0004: the R0 amendment's status card,
-and the C2-02b2 status table. No new dependency, process or authority.
+None needed:
+- the status fields and the reuse of b2α and b2β are within ADR-0004's
+  status card and the C2-02b2 amendment;
+- the narrowing is consistent with that amendment ("a crash during a
+  switch leaves it blocked until b2β"), and is recorded once the owner
+  decides OQ-1.
 
 ## Entity Model
 
-**Entity Model trigger:** yes, narrowly. Nothing persisted changes: no
-attribute, relationship, action or event. A runtime read contract does
-change: the published coordinator status, `Runtime.status/0` and
-`Runtime.desired_profile/0`.
+**Entity Model trigger:** yes, narrowly. Nothing persisted changes. A
+runtime read contract changes: the coordinator's published record,
+`Runtime.status/0` and `Runtime.desired_profile/0`.
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| Coordinator published status (runtime) | Existing (delta) | What operators see | **Added:** `desired` (`%{profile_id, source}` \| `:unknown`), `switch` (projection \| nil \| `:unknown`), `published_at` | — | Republished after every setting or switch read or write. A failed read gives `:unknown`, never a stale value. Never blocks on the coordinator. No raw refs or pids | written only by the coordinator; read by anyone in the node (protected ETS) | none |
-| `Runtime.status/0`, `Runtime.desired_profile/0` (runtime read API) | Existing (delta) | The admin card | **Added keys** as in section 2; `desired_profile/0`'s return shape changes | — | No database read, no coordinator call, no write. No default on unknown. `effective_profile` only when calls are admissible now | unchanged (the admin page) | none |
+| Coordinator published record (runtime) | Existing (delta) | What operators see | **Public, added:** `desired` (`%{profile_id, source, confirmed_at}` \| `:unknown`), `switch` (projection with `confirmed_at` \| nil \| `:unknown`), `published_at`. **Private, added, never returned:** the coordinator pid, the bound server pid, the start id, the boot id (the binding for 2a) | — | Written only by the coordinator, after its own bounded reads and writes. No database read inside `publish`. An uncertain or failed outcome publishes `:unknown`, never the previous value as current. No raw refs | written by the coordinator; read in-node (protected ETS) | none |
+| `Runtime.status/0`, `Runtime.desired_profile/0` (runtime read API) | Existing (delta) | The admin card | the keys and shapes in 2 and 2b; `desired_profile/0`'s tagged result | — | No database read, coordinator call or write. At most three bound-and-recheck attempts (2a). No positive value from a partial sample. No default on unknown. `effective_profile` is sampled eligibility only | unchanged (the admin page) | none |
 
 ModelProfileSwitch: existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found.
 ModelProfileSetting: existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found.
@@ -140,51 +200,57 @@ ModelServerStart: existing dependency: unchanged — relationship/policy/lifecyc
 
 Files: `test/sdr_agent/ai/profile_restart_test.exs` and
 `test/sdr_agent/ai/runtime_status_test.exs`. All hermetic, with zero
-model calls and no spend. Each restart row in section 1 runs as both a
-coordinator-only restart and a profile-tree cold start.
+model calls and no spend. Every lease belongs to the test and is cleared
+only after its fixture processes are stopped and joined.
 
-**Restart:**
-1. **Desired Sonnet restored**, with no open switch: by adoption on a
-   coordinator restart, and by a fresh start on a cold start.
-2. **The default only on a positively absent setting.** A failing setting
-   read gives no start, held, the boot retried, and recovery once the read
-   works (a test-only read fault).
-3. **A pending switch → blocked** (`coordinator_restarted`), with the
-   request history unchanged. It is never completed or continued, and
-   never failed by the restart.
-4. **Blocked, and resolved with `:cleanup_unprovable`**, across both
-   restarts: still held, with no release and no resolve.
-5. **A completed switch:** the next start runs `to`.
-6. **Old-boot replies:** a reply or `DOWN` from an old boot's server or
-   worker can't reopen the new boot's hold.
+**Restart (forms A, B and C, as in the section 1 table):**
+1. **Setting = Sonnet with no open switch:** A and B adopt or start
+   fresh; C starts fresh. All end at Sonnet.
+2. **Setting absent:** the default. **Setting read fails** (a test-only
+   fault): no start, held, retried, and recovery once the read works.
+3. **A pending switch → blocked**, under A, B and C. The request history
+   is unchanged; the switch is never completed, continued or failed.
+4. **A blocked switch:** still blocked and held under A, B and C.
+5. **Resolved with a dead lease:** held at `:cleanup_unprovable` under A
+   and B, with no release. Under C, a fresh start reaches ready, then the
+   release.
+6. **Several completed switches** (Opus → Sonnet → Opus): the start runs
+   the current setting's profile; the history is unchanged.
+7. **Old-boot replies:** a reply or `DOWN` from an old boot's server or
+   worker can't reopen the new hold.
 
 **Status:**
-7. **Each key** in each state: no provider tree (the Fake), held,
-   released, blocked, pending switch, `:cleanup_unprovable`, a failed
-   setting read, and the ETS table missing.
-8. **No default on unknown:** with nothing running and the desired profile
-   `:unknown`, `profile_id` and the model fields are nil.
-9. **No side effects:** `status/0` makes zero database queries
-   (query-telemetry trace), zero coordinator messages (trace), and zero
-   writes (counts of events, starts and switches), with zero launches and
-   reservations.
-10. **Concurrent changes:** a switch commit, a server death and an ETS
-    replacement between observations, with barriers. Every inconsistent
-    combination is downgraded, and `effective_profile` is never set while
-    the server is held.
-11. **Bounded:** `status/0` answers within 50 ms while the coordinator is
-    blocked in a ledger call (a test-only pause).
-12. **`desired_profile/0`'s shapes:** Fake, coordinator setting, default,
-    unknown, and no coordinator.
+8. **Every row of the 2b table.**
+9. **The binding:** a replacement server with the same profile; a
+   coordinator restart between R1 and R2; and the table deleted and
+   recreated mid-sample. Each → `:inconsistent` or `:unavailable`, never
+   a positive `effective_profile`, within three attempts.
+10. **The lag intervals,** with barriers around the commit, the
+    publication and an unknown outcome:
+    - a caller's committed request shows the old confirmed observation
+      until the coordinator publishes;
+    - an uncertain finalization shows `:unknown`;
+    - a failed read shows `:unknown`.
+11. **No side effects:** across 8–10, zero database queries (a
+    query-telemetry trace), zero coordinator messages (a trace), zero
+    writes (counts of events, starts and switches), and zero launches or
+    reservations.
+12. **No default on unknown:** with nothing running and the desired
+    profile unknown, `profile_id` and the model fields are nil.
+13. **`desired_profile/0`:** Fake → `:not_applicable` (even with a stored
+    Sonnet setting); consistent → `{:ok, …}`; otherwise `{:error,
+    :unknown}`.
+14. **A regression budget:** in a controlled test, `status/0` returns
+    within 50 ms while the coordinator is blocked in a ledger call (a
+    test-only pause). This is a budget for regressions, not a wall-clock
+    promise under load.
 
 ## Open questions
 
-- **OQ-1 (for the owner):** narrow slice c by dropping the "clean pending
-  → failed at boot" branch (section 0)? **Recommendation: yes.** It is
-  less code, and needs no new path to `:failed` that a restart can't
-  prove. A switch interrupted by a restart then always needs the attended
-  resolver, which costs one extra admin step in a rare case.
-- **OQ-2 (for Codex):** is a profile-tree cold start an adequate hermetic
-  stand-in for a VM restart in the automated suite, given that the lease
-  lives in `:persistent_term` and survives the tree but not the VM? A test
-  can clear the lease to simulate the VM boundary.
+- **OQ-1 (for the owner):** the narrowing in section 0. **Recommendation
+  (Claude and Codex): yes.**
+- **OQ-2 (Codex: a qualified yes):** a real `ProfileSupervisor` stop and
+  start, plus a simulated loss of VM-local state, is accepted as the
+  scoped hermetic lifecycle test. It is labelled as not a BEAM restart
+  and not proof of OS cleanup. An isolated disposable BEAM test would be
+  optional, stronger evidence.
