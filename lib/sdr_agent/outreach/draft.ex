@@ -60,6 +60,10 @@ defmodule SdrAgent.Outreach.Draft do
     table "drafts"
     repo SdrAgent.Repo
 
+    custom_indexes do
+      index [:tenant_id, :status, :inserted_at, :id], name: "drafts_inbox_review_index"
+    end
+
     identity_wheres_to_sql one_open_per_step: "status NOT IN ('rejected', 'cancelled', 'failed')"
 
     references do
