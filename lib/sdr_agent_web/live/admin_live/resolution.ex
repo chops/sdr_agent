@@ -16,11 +16,12 @@ defmodule SdrAgentWeb.AdminLive.Resolution do
   `settle/2` maps an attempt's result to the next state. A first attempt's
   results follow section 3's table; a retry after an unknown outcome
   (`retry?`) settles the earlier attempt only on an exact success or
-  replay, `:switch_not_blocked` or `:attestation_conflict`, ends on an
-  authorization loss, and otherwise returns to `:uncertain` with the same
-  frozen identity. A result of no known shape, and a task exit, are an
-  unknown outcome (dispatch may have happened): never a rollback, never
-  "Not recorded". Every message is operator-safe words, never a raw term.
+  replay, `:switch_not_blocked` or `:attestation_conflict`, and otherwise
+  returns to `:uncertain` with the same frozen identity. An authorization
+  loss (Forbidden or NotFound) ends any review without claiming what
+  happened. A result of no known shape, and a task exit, are an unknown
+  outcome (dispatch may have happened): never a rollback, never "Not
+  recorded". Every message is operator-safe words, never a raw term.
   """
 
   alias SdrAgentWeb.AuditedView
@@ -242,24 +243,29 @@ defmodule SdrAgentWeb.AdminLive.Resolution do
       else: {terminal(review, to_string(reason), Map.fetch!(@refusals, reason)), true}
   end
 
-  defp settle_error(review, %Ash.Error.Forbidden{} = error),
-    do: {terminal(review, "forbidden", authorization_loss(review, error)), true}
+  defp settle_error(review, %Ash.Error.Forbidden{}),
+    do: {terminal(review, "forbidden", authorization_loss(:forbidden)), true}
 
-  defp settle_error(review, %Ash.Error.Query.NotFound{} = error),
-    do: {terminal(review, "not_found", authorization_loss(review, error)), true}
+  defp settle_error(review, %Ash.Error.Query.NotFound{}),
+    do: {terminal(review, "not_found", authorization_loss(:not_found)), true}
 
   # `:resolve_uncertain`, a retry's `:resolve_timeout`, or any other shape:
   # the outcome is unknown.
   defp settle_error(review, _reason), do: {unknown(review), false}
 
-  # An authorization loss ends the review; it never proves a rollback.
-  defp authorization_loss(%{retry?: true}, error),
+  # An authorization loss ends the review and never proves a rollback, even
+  # on a first attempt: the caller's own settlement of an unknown dispatch
+  # can be refused too (b2β `settle_resolution/2`). So not AuditedView's
+  # "refused and recorded".
+  defp authorization_loss(:forbidden),
     do:
-      AuditedView.error_message(error) <>
-        " This doesn't show what happened to the earlier attempt; the recorded switch is " <>
-        "shown on the card."
+      "Not permitted for your role; the review has ended. This doesn't show whether the " <>
+        "resolution was recorded: the recorded switch is shown on the card."
 
-  defp authorization_loss(_review, error), do: AuditedView.error_message(error)
+  defp authorization_loss(:not_found),
+    do:
+      "The switch was not found for your account; the review has ended. This doesn't show " <>
+        "whether the resolution was recorded: the recorded switch is shown on the card."
 
   defp terminal(review, outcome, message),
     do: %{
