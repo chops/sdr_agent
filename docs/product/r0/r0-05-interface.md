@@ -1,6 +1,9 @@
 # R0-05 interface: the admin model card, switch and resolver UI
 
-**Status:** draft 3, 2026-10-15, for Codex's interface re-review. Draft 2
+**Status:** draft 3, 2026-10-15. **Interface PASS** (Codex `232bd20d`, exact
+`fbc3203`, `codex-r005-fbc3203-interface-pass.md`). Entity trigger: no.
+This permits scoped RED only. The b2β owner ADR, b2β and C2-02c GREEN, and
+the staged checks remain prerequisites. Draft 2
 (`c7767b7`) was a narrow NEEDS-REVIEW (Codex `c05d20d9`): a retry-local timeout
 after uncertainty. Draft 1
 (`a0ffefe`) was NEEDS-REVIEW (Codex `a9d27e99`): the source of the setting revision
@@ -190,10 +193,13 @@ meanwhile. So, for a retry from `:uncertain`:
 - **What the retry does:** "Check again" moves the review to
   `:submitting`, so duplicate clicks send nothing.
 - **A result that settles the earlier attempt:** an exact success or
-  replay (`{:ok, …}`) is `:terminal` with the recorded message. So is
-  `:attestation_conflict` or `:switch_not_blocked`, which means the stored
-  switch is no longer blocked under this identity. The page then re-reads
-  the stored switch and shows what is actually recorded.
+  replay (`{:ok, …}`) is `:terminal` with the recorded message.
+  `:switch_not_blocked` and `:attestation_conflict` also end the review.
+  A conflict does **not** mean the target switch is no longer blocked: it
+  can be an id collision with another switch, or a different semantic
+  identity. In both cases the page re-reads the stored switch, as the
+  actor, and shows only what is recorded. A failed re-read shows
+  "unknown", never an inferred resolution or rollback.
 - **Any other retry refusal returns to `:uncertain`,** with the same
   frozen identity and the unknown-outcome wording ("The result still isn't
   known"). That covers `:resolve_timeout`, `:resolve_uncertain`,
