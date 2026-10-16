@@ -82,8 +82,31 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   **Status** (`status/0`) is published in a protected ETS table and never
   waits on this process: `%{boot_id, generation, profile_id, hold: :held |
-  :released | :pending, stage, switch_id}`; it never holds a raw ref. The
-  stage is the switch's, or `:cleanup_unprovable` in the hard conflict.
+  :released | :pending, stage, switch_id, desired, switch, published_at}`;
+  it never holds a raw pid or ref. The stage is the switch's, or
+  `:cleanup_unprovable` in the hard conflict. C2-02c
+  (`docs/product/r0/c2-02c-interface.md` section 2): `desired`
+  (`%{profile_id, source: :setting | :default, confirmed_at}`) and `switch`
+  (`%{state: :none, confirmed_at}`, or `%{state: :open, id,
+  from_profile_id, to_profile_id, status: :pending | :blocked,
+  failure_reason, confirmed_at}`) are this process's **last confirmed
+  observations**, each taken from the outcome of its own bounded reads and
+  writes (the boot reads of the switch and the setting, the request's
+  read, `block`, `complete`, `fail`, the reconciled reads and `resolve`);
+  a failed read, or an uncertain finalization or resolution until it is
+  settled, is `:unknown`, never a stale value presented as current. Its
+  own acknowledged write establishes the switch's outcome; an exact read of
+  one switch changes the observations only for the switch they concern (an
+  older switch's history never replaces a newer desired profile or erases
+  an observed open switch). The stage stays published until an outcome is
+  definite: `:finalizing` for an uncertain finalization until its
+  reconciled read, `:settling` while a resolution's settlement is pending.
+  A caller's committed request shows the previous observation until this
+  process handles its cast. `publish/1` makes no database read. The same
+  row carries a **private** binding (this pid, the bound server pid or
+  `:none`, the start id, the boot id, a publication counter), read only by
+  `sample/0` for `SdrAgent.AI.ModelProvider.Runtime.status/0`'s bracket and
+  never returned by `status/0`.
 
   **Stages** are observed through `[:sdr_agent, :model_coordinator,
   :stage]` telemetry (`%{stage:, switch_id:}`): the worker emits `:drained`
@@ -139,16 +162,38 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   @doc """
-  The published status, read from the coordinator's ETS table without
-  waiting on it; nil when no coordinator runs.
+  The published status (its public part only), read from the coordinator's
+  ETS table without waiting on it; nil when no coordinator runs.
   """
   def status do
     case :ets.lookup(@table, :status) do
-      [{:status, status}] -> status
+      [{:status, public, _private}] -> public
       [] -> nil
     end
   rescue
     ArgumentError -> nil
+  end
+
+  @doc """
+  C2-02c: one read of the published row with its private binding, for
+  `SdrAgent.AI.ModelProvider.Runtime.status/0`'s bracket only (C1 and C2).
+  `{:ok, %{public, private}}` only when the table's owner is the registered
+  coordinator and the row's own coordinator pid is that owner; otherwise
+  `:error`. Read-only: no message to this process, no database read. The
+  private part (`coordinator`, `server` (a pid or `:none`), `start_id`,
+  `boot_id`, `publication`) must never reach a caller's status.
+  """
+  def sample do
+    with tid when tid != :undefined <- :ets.whereis(@table),
+         owner when is_pid(owner) <- :ets.info(tid, :owner),
+         ^owner <- Process.whereis(__MODULE__),
+         [{:status, public, %{coordinator: ^owner} = private}] <- :ets.lookup(tid, :status) do
+      {:ok, %{public: public, private: private}}
+    else
+      _invalid -> :error
+    end
+  rescue
+    ArgumentError -> :error
   end
 
   @doc """
@@ -239,7 +284,16 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
       # conflict (`:cleanup_unprovable`).
       settling: nil,
       deferred: [],
-      conflict: nil
+      conflict: nil,
+      # C2-02c: the last confirmed ledger observations (`publish/1`), and
+      # the desired profile an uncertain outcome masks until it settles.
+      desired: :unknown,
+      switch_obs: :unknown,
+      desired_stash: nil,
+      # The switch the switch observation concerns (only its own exact
+      # reads may change it), and the stage of an outcome not yet definite.
+      ledger_subject: nil,
+      unsettled: nil
     }
 
     publish(state)
@@ -285,11 +339,15 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   # case. Any unknown read or failed allocation keeps everything held and
   # retries the boot.
   defp boot(state) do
-    with {:ok, open} <- open_switch(state),
-         {:ok, desired} <- desired_profile(state) do
-      state |> first_start(desired) |> booted(open)
-    else
-      _unknown -> retry_boot(state)
+    case open_switch(state) do
+      {:ok, open} ->
+        case desired_profile(observe_open(state, {:ok, open})) do
+          {:ok, desired, state} -> state |> first_start(desired) |> booted(open)
+          {:error, state} -> retry_boot(state)
+        end
+
+      :error ->
+        retry_boot(observe_open(state, :error))
     end
   end
 
@@ -453,16 +511,24 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   end
 
   # The setting's desired profile, or the default when none exists; an
-  # unreadable answer is unknown, never the default.
+  # unreadable answer is unknown, never the default. Either outcome is the
+  # published desired observation (C2-02c): `{:ok, profile, state}` or
+  # `{:error, state}`.
   defp desired_profile(state) do
     ModelProfileSetting
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(state.tenant_id))
     |> Ash.Query.filter(tenant_id == ^state.tenant_id)
     |> Ash.read_one()
     |> case do
-      {:ok, %ModelProfileSetting{desired_profile_id: profile}} -> {:ok, profile}
-      {:ok, nil} -> {:ok, ModelProfiles.default_real()}
-      _error -> :error
+      {:ok, %ModelProfileSetting{desired_profile_id: profile}} ->
+        {:ok, profile, observe_desired(state, profile, :setting)}
+
+      {:ok, nil} ->
+        profile = ModelProfiles.default_real()
+        {:ok, profile, observe_desired(state, profile, :default)}
+
+      _error ->
+        {:error, %{state | desired: :unknown, desired_stash: nil}}
     end
   end
 
@@ -614,12 +680,12 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   # read recovers takes the permitted branch (section 1a): block, under the
   # finalizer's own fresh fence; the server stays held.
   defp reconciled(state, {:switch, id, _status} = expected) do
-    case switch(state, id) do
-      %ModelProfileSwitch{status: :pending} = switch ->
+    case switch_result(state, id) do
+      {:ok, %ModelProfileSwitch{status: :pending} = switch} ->
         block(state, switch, "finalization_uncertain")
 
-      _stored_or_unknown ->
-        release_if_reconciled(state, expected)
+      read ->
+        release_if_reconciled(ledger_read(state, id, read), expected)
     end
   end
 
@@ -647,10 +713,11 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   defp release_if_reconciled(state, expected) do
     with {:ok, latest} <- latest_start(state),
          true <- current_server?(state, latest),
-         true <- outcome_stored?(state, expected) do
+         {true, state} <- outcome_stored(state, expected) do
       release(state, expected)
     else
       # Not yet reconciled (a failed read or observation): held, retried.
+      {false, state} -> retry_reconcile(state, expected)
       _not_reconciled -> retry_reconcile(state, expected)
     end
   end
@@ -666,13 +733,21 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   defp current_server?(_state, _latest), do: false
 
-  defp outcome_stored?(state, :boot), do: open_switch(state) == {:ok, nil}
-  defp outcome_stored?(state, {:switch, id, status}), do: switch_status(state, id) == status
+  # The reconciled read, recorded as the published switch observation.
+  defp outcome_stored(state, :boot) do
+    read = open_switch(state)
+    {read == {:ok, nil}, observe_open(state, read)}
+  end
+
+  defp outcome_stored(state, {:switch, id, status}) do
+    read = switch_result(state, id)
+    {match?({:ok, %ModelProfileSwitch{status: ^status}}, read), ledger_read(state, id, read)}
+  end
 
   defp release(%{server: pid, hold: ref} = state, expected)
        when is_pid(pid) and is_reference(ref) do
     case ClaudeCLI.release_hold(pid, ref) do
-      :ok -> publish(%{state | hold: nil, hold_state: :released, reconcile: nil})
+      :ok -> publish(%{state | hold: nil, hold_state: :released, reconcile: nil, unsettled: nil})
       _error -> retry_reconcile(state, expected)
     end
   end
@@ -683,9 +758,16 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   @impl true
   def handle_cast({:switch_requested, switch_id}, %{op: nil, settling: nil, start: %{}} = state) do
-    case switch(state, switch_id) do
-      %ModelProfileSwitch{status: :pending} = switch -> {:noreply, begin_switch(state, switch)}
-      _other -> {:noreply, state}
+    case switch_result(state, switch_id) do
+      {:ok, %ModelProfileSwitch{status: :pending} = switch} ->
+        {:noreply, begin_switch(observe_open(state, {:ok, switch}), switch)}
+
+      {:ok, _other} ->
+        {:noreply, state}
+
+      # An unreadable request: the switch observation is unknown (C2-02c).
+      _unreadable ->
+        {:noreply, publish(%{state | switch_obs: :unknown, ledger_subject: switch_id})}
     end
   end
 
@@ -944,8 +1026,11 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     expected = {:switch, switch.id, Map.fetch!(%{complete: :completed, fail: :failed}, action)}
 
     case {result, action in Keyword.get(state.faults, :lose_reply, [])} do
-      {{:ok, _switch}, false} -> finish(state, expected)
-      _uncertain -> uncertain(state, switch, expected)
+      {{:ok, stored}, false} ->
+        finish(ledger_written(state, stored), expected)
+
+      _uncertain ->
+        uncertain(%{mask_ledger(state, switch.id) | unsettled: :finalizing}, switch, expected)
     end
   end
 
@@ -956,9 +1041,12 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   defp uncertain(state, switch, expected) do
     case readable(state, expected) do
       :read ->
-        case switch_status(state, switch.id) do
-          :pending -> block(state, switch, "finalization_uncertain")
-          _stored -> finish(state, expected)
+        case switch_result(state, switch.id) do
+          {:ok, %ModelProfileSwitch{status: :pending}} ->
+            block(state, switch, "finalization_uncertain")
+
+          read ->
+            finish(ledger_read(state, switch.id, read), expected)
         end
 
       :unavailable ->
@@ -995,31 +1083,33 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
       failure_reason: reason
     }
 
-    case Agents.block_profile_switch(switch, attrs, actor: actor(state)) do
-      {:ok, _blocked} ->
-        :ok
+    state =
+      case Agents.block_profile_switch(switch, attrs, actor: actor(state)) do
+        {:ok, blocked} ->
+          ledger_written(state, blocked)
 
-      error ->
-        Logger.error("model profile switch block failed: #{inspect(error)}; retrying")
-        Process.send_after(self(), {:retry_block, switch.id, reason}, @retry_ms)
-    end
+        error ->
+          Logger.error("model profile switch block failed: #{inspect(error)}; retrying")
+          Process.send_after(self(), {:retry_block, switch.id, reason}, @retry_ms)
+          %{state | switch_obs: :unknown, ledger_subject: switch.id}
+      end
 
-    end_op(state)
+    state |> end_op() |> publish()
   end
 
   defp block(state, _switch, _reason), do: end_op(state)
 
   defp retry_block(state, id, reason) do
-    case switch(state, id) do
-      %ModelProfileSwitch{status: :pending} = switch ->
+    case switch_result(state, id) do
+      {:ok, %ModelProfileSwitch{status: :pending} = switch} ->
         block(state, switch, reason)
 
-      %ModelProfileSwitch{} ->
-        publish(state)
+      {:ok, %ModelProfileSwitch{}} = read ->
+        publish(ledger_read(state, id, read))
 
-      nil ->
+      read ->
         Process.send_after(self(), {:retry_block, id, reason}, @retry_ms)
-        publish(state)
+        publish(ledger_read(state, id, read))
     end
   end
 
@@ -1075,7 +1165,10 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   # A fresh start with a blocked switch open stays held (b2α: b2β owns that
   # exit); otherwise the reconciled read decides the release.
   defp after_start(state) do
-    case open_switch(state) do
+    read = open_switch(state)
+    state = observe_open(state, read)
+
+    case read do
       {:ok, %ModelProfileSwitch{status: :blocked}} -> publish(state)
       _none_pending_or_unknown -> reconcile(state, :boot)
     end
@@ -1266,7 +1359,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
       {:ok, {:resolved, switch}} ->
         if lost?(state),
           do: unknown(state, request),
-          else: {:committed, {:ok, %{switch: switch}}, state}
+          else: {:committed, {:ok, %{switch: switch}}, ledger_written(state, switch)}
 
       {:ok, {:replay, switch}} ->
         {:reply, {:ok, %{switch: switch, replay: true}}, state}
@@ -1290,10 +1383,12 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
     case settle(state, settlement) do
       {:proven, reply} ->
-        {:committed, reply, state}
+        {:committed, reply, resolved_ledger(state)}
 
+      # Unsettled: the ledger observations are unknown until it settles.
       {:unproven, reply} ->
-        {:reply, reply, schedule_settle(%{state | settling: settlement})}
+        {:reply, reply,
+         schedule_settle(%{mask_ledger(state, request.switch_id) | settling: settlement})}
 
       {:settled, reply} ->
         {:reply, reply, state}
@@ -1307,8 +1402,11 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   # a definite non-commit replays the deferred work in its order.
   defp resettle(state) do
     case settle(state, state.settling) do
+      # C2-02c: a proven commit closes the switch (terminal); a definite
+      # non-commit restores the masked desired profile. `resume/2` publishes.
       {:proven, _reply} ->
         state
+        |> resolved_ledger()
         |> resume(&(&1 not in [:boot, :replace]))
         |> after_resolution()
 
@@ -1316,7 +1414,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
         schedule_settle(state)
 
       {:settled, _reply} ->
-        state |> resume(fn _message -> true end) |> retry_replacement()
+        state |> unmask_desired() |> resume(fn _message -> true end) |> retry_replacement()
     end
   end
 
@@ -1353,9 +1451,10 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   # After a committed resolution: b2α's no-open-switch reconciliation
   # (section 2a) on the current runtime facts, never the attested kind.
   defp after_resolution(state) do
-    state = %{state | conflict: nil}
+    read = open_switch(state)
+    state = observe_open(%{state | conflict: nil}, read)
 
-    case open_switch(state) do
+    case read do
       {:ok, nil} ->
         no_open_switch(state)
 
@@ -1374,8 +1473,8 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   defp no_open_switch(state) do
     case desired_profile(state) do
-      {:ok, desired} -> no_open_switch(state, named_server(), desired)
-      _unknown -> retry_reconcile(state, :resolution)
+      {:ok, desired, state} -> no_open_switch(state, named_server(), desired)
+      {:error, state} -> retry_reconcile(state, :resolution)
     end
   end
 
@@ -1543,13 +1642,6 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
     end
   end
 
-  defp switch(state, id) do
-    case switch_result(state, id) do
-      {:ok, switch} -> switch
-      _error -> nil
-    end
-  end
-
   # The tenant's switch `id`: `{:ok, switch | nil}`, or an error when unreadable.
   defp switch_result(state, id) do
     ModelProfileSwitch
@@ -1577,28 +1669,135 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   defp covered_starts(_state, _switch, _latest), do: {:error, :observation_unknown}
 
-  defp switch_status(state, id) do
-    case switch(state, id) do
-      %ModelProfileSwitch{status: status} -> status
-      nil -> nil
-    end
-  end
-
   ## Status and stages
 
+  # One row: the public status and the private binding (C2-02c 2a), from
+  # this process's state only (no database read).
   defp publish(state) do
-    status = %{
+    public = %{
       boot_id: state.boot_id,
       generation: state.start && state.start.generation,
       profile_id: state.start && state.start.profile_id,
       hold: state.hold_state,
-      stage: (state.op && state.op.stage) || state.conflict,
-      switch_id: state.op && state.op.switch.id
+      stage: stage(state),
+      switch_id: state.op && state.op.switch.id,
+      desired: state.desired,
+      switch: state.switch_obs,
+      published_at: DateTime.utc_now()
     }
 
-    :ets.insert(@table, {:status, status})
+    private = %{
+      coordinator: self(),
+      server: if(is_pid(state.server), do: state.server, else: :none),
+      start_id: state.start && state.start.id,
+      boot_id: state.boot_id,
+      publication: System.unique_integer([:monotonic])
+    }
+
+    :ets.insert(@table, {:status, public, private})
     state
   end
+
+  # The switch's stage; else an outcome not yet definite (an uncertain
+  # finalization until its reconciled read, `:settling` while a
+  # resolution's settlement is pending); else the hard conflict.
+  defp stage(%{op: %{stage: stage}}), do: stage
+  defp stage(%{unsettled: unsettled}) when not is_nil(unsettled), do: unsettled
+  defp stage(%{settling: %{}}), do: :settling
+  defp stage(state), do: state.conflict
+
+  ## The ledger observations (C2-02c section 2)
+
+  # A desired profile this process just read (`:setting` or `:default`).
+  defp observe_desired(state, profile, source),
+    do: %{
+      state
+      | desired: %{profile_id: profile, source: source, confirmed_at: DateTime.utc_now()},
+        desired_stash: nil
+    }
+
+  # This process's read of the open switch: none, the open one, or unknown.
+  defp observe_open(state, {:ok, nil}),
+    do: %{
+      state
+      | switch_obs: %{state: :none, confirmed_at: DateTime.utc_now()},
+        ledger_subject: nil
+    }
+
+  defp observe_open(state, {:ok, %ModelProfileSwitch{status: status} = switch})
+       when status in [:pending, :blocked],
+       do: %{state | switch_obs: open_observation(switch), ledger_subject: switch.id}
+
+  defp observe_open(state, _unreadable), do: %{state | switch_obs: :unknown, ledger_subject: nil}
+
+  defp open_observation(switch) do
+    %{
+      state: :open,
+      id: switch.id,
+      from_profile_id: switch.from_profile_id,
+      to_profile_id: switch.to_profile_id,
+      status: switch.status,
+      failure_reason: switch.failure_reason,
+      confirmed_at: DateTime.utc_now()
+    }
+  end
+
+  # This process's own acknowledged write on `switch` (block, complete,
+  # fail, resolve): the switch was the tenant's one open switch when it
+  # committed, so its outcome is the current one, and the switch becomes
+  # the subject of the observations.
+  defp ledger_written(state, %ModelProfileSwitch{} = switch),
+    do: %{ledger_after(state, switch) | ledger_subject: switch.id, unsettled: nil}
+
+  # This process's exact read of switch `id` (`switch_result/2`). Only the
+  # subject's own read changes the observations: a stored row establishes
+  # its outcome; a failed read, or the subject's row known absent, makes the
+  # switch observation unknown (never a retained none or open). A read of
+  # any other switch is history: it never replaces a newer desired profile
+  # or erases an observed open switch.
+  defp ledger_read(%{ledger_subject: id} = state, id, {:ok, %ModelProfileSwitch{} = stored}),
+    do: ledger_written(state, stored)
+
+  defp ledger_read(%{ledger_subject: id} = state, id, _failed_or_known_absent),
+    do: %{state | switch_obs: :unknown}
+
+  defp ledger_read(state, _history_id, _read), do: state
+
+  # The stored state of one switch (`ledger_written/2`). A terminal switch
+  # was the tenant's one open switch, so none is open as of that outcome; a
+  # completed one applied its profile to the setting, while fail, block and
+  # resolve leave the setting unchanged.
+  defp ledger_after(state, %ModelProfileSwitch{status: :completed, to_profile_id: to}),
+    do: observe_open(observe_desired(state, to, :setting), {:ok, nil})
+
+  defp ledger_after(state, %ModelProfileSwitch{status: :failed}),
+    do: state |> unmask_desired() |> observe_open({:ok, nil})
+
+  defp ledger_after(state, %ModelProfileSwitch{} = open),
+    do: state |> unmask_desired() |> observe_open({:ok, open})
+
+  # A committed resolution: the switch is terminal (`:failed`).
+  defp resolved_ledger(state), do: state |> unmask_desired() |> observe_open({:ok, nil})
+
+  # An uncertain finalization or resolution: both observations are unknown
+  # until it is settled; the desired profile is kept to be restored by an
+  # outcome that leaves the setting unchanged.
+  defp mask_ledger(%{desired_stash: nil} = state, id),
+    do: %{
+      state
+      | desired: :unknown,
+        switch_obs: :unknown,
+        desired_stash: {:stashed, state.desired},
+        ledger_subject: id
+    }
+
+  defp mask_ledger(state, id),
+    do: %{state | desired: :unknown, switch_obs: :unknown, ledger_subject: id}
+
+  defp unmask_desired(%{desired_stash: {:stashed, desired}} = state),
+    do: %{state | desired: desired, desired_stash: nil}
+
+  defp unmask_desired(state), do: state
 
   defp emit(stage, %{op: %{switch: switch}}), do: emit(stage, switch.id)
 
