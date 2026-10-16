@@ -22,7 +22,9 @@ defmodule SdrAgent.Agents.ModelProfileSetting do
 
   Reads: admin, auditor (audited by the domain read), `agent_runtime`,
   kernel. `model_runtime` reads and locks it only through
-  `:lock_for_transition`, in phase `:transition`.
+  `:lock_for_transition`, in phase `:transition`; the C2-02b2β resolution
+  takes the same lock in phase `:resolve` (the resolving admin) or the
+  read-only `:settle` (that admin, or `model_runtime` in the coordinator).
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -87,9 +89,12 @@ defmodule SdrAgent.Agents.ModelProfileSetting do
     end
 
     # Strict: refused as Forbidden outside its phase, never read as empty.
+    # `:resolve` and the read-only `:settle` take the same lock (C2-02b2β).
     policy action(:lock_for_transition) do
       access_type :strict
-      authorize_if {ProfileSwitchContext, phase: :transition, target: :switch_id}
+
+      authorize_if {ProfileSwitchContext,
+                    phase: [:transition, :resolve, :settle], target: :switch_id}
     end
 
     policy action(:initialize) do

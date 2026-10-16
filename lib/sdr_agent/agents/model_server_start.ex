@@ -22,7 +22,10 @@ defmodule SdrAgent.Agents.ModelServerStart do
   checks the boot fence and the per-action prerequisites. Each appends its
   `model.server.start_*` event (`SdrAgent.Agents.Changes.ServerStartEvent`);
   pids stay out of events. Reads: admin, auditor (audited by the domain
-  read), `agent_runtime`, kernel, and the coordinator.
+  read), `agent_runtime`, kernel, and the coordinator. A resolved switch
+  may name a start as its `attested_start` (C2-02b2β; composite FK on
+  `(id, tenant_id)`, restrict on delete); a start is never written by the
+  resolution.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -76,6 +79,17 @@ defmodule SdrAgent.Agents.ModelServerStart do
             "(ready_evidence IS NULL OR " <>
             SdrAgent.Audit.SQL.one_of("ready_evidence", @evidence) <>
             ") AND (ready_evidence IS DISTINCT FROM 'adopted' OR reason = 'replacement')"
+    end
+
+    custom_statements do
+      # Target of the ModelProfileSwitch (attested_start_id, tenant_id)
+      # composite FK (C2-02b2β).
+      statement :model_server_starts_id_tenant_key do
+        up "ALTER TABLE model_server_starts ADD CONSTRAINT model_server_starts_id_tenant_key " <>
+             "UNIQUE (id, tenant_id)"
+
+        down "ALTER TABLE model_server_starts DROP CONSTRAINT model_server_starts_id_tenant_key"
+      end
     end
   end
 

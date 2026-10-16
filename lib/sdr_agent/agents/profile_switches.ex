@@ -27,9 +27,54 @@ defmodule SdrAgent.Agents.ProfileSwitches do
       then moves to `:apply`, applies the switch to the setting and
       completes it; `fail` and `block` never write the setting.
 
+  **The attended resolution (C2-02b2β,
+  `docs/product/r0/c2-02b2b-interface.md`)**, behind
+  `SdrAgent.Agents.blocked_switch_facts/2` and
+  `SdrAgent.Agents.resolve_blocked_switch/3`: an active human admin decides
+  (the actor, re-read), the registered coordinator executes
+  (`SdrAgent.AI.ModelProvider.Coordinator.resolve_blocked/2`):
+
+    * **the caller** stamps one monotonic deadline (now + 15 s) before
+      dispatch, checks the actor, the attestation's closed shape
+      (`SdrAgent.Agents.SwitchResolution.checked_attestation/2`) and the first replay read (one stored read
+      by `attestation_id`, unique per tenant: an exact semantic match is
+      `{:ok, %{switch: stored, replay: true}}` with no effect, any other
+      row `:attestation_conflict`), then calls the coordinator with a call
+      timeout of the time left plus 500 ms;
+    * **the write** (`commit_resolution/2`, in the coordinator only, as the
+      admin, phase `:resolve`; one bounded `LedgerCall`) takes b2α's lock
+      order setting → counter `FOR SHARE` → switch → latest start `FOR
+      SHARE` → head and, after the locks: the actor is still an active
+      admin; the third replay read (the locked switch carrying this id, or
+      another switch carrying it, before any state refusal); the switch is
+      blocked; the latest start is the attested one, of the coordinator's
+      boot; no other switch is open. Any refusal rolls back. It writes only
+      the switch (`resolve_blocked`) and its `switch_resolved` event, never
+      the setting, a start or a lease;
+    * **settlement** (`settle_resolution/2`) of an unknown outcome (a
+      timeout, a lost reply, a connection error): one bounded `LedgerCall`
+      in the read-only phase `:settle` takes the same locks in the same
+      order (the barrier: the switch row lock proves the original
+      transaction has ended), then re-reads the switch and the row carrying
+      this id: an exact match is the replay result; the switch still
+      blocked with no such row is a definite `:resolve_timeout`; another
+      row is `:attestation_conflict`; a switch resolved under another id is
+      `:switch_not_blocked`; no barrier or no read is `:resolve_uncertain`.
+      Elapsed time is never proof.
+
+  `complete` and `fail` refuse a blocked switch (`:switch_blocked`), the
+  current owner's `block` on it stays a no-write replay, and `fail` on a
+  **resolved** switch is `:switch_already_finished` (checked after the
+  existing owner, boot and generation guards), never a `fail` replay.
+
   Reads are scoped to the actor's tenant; an auditor's read appends a
   `record_view` AuditAccess first (fail closed). `model_runtime` has no
   read here.
+
+  Test builds only (`:claude_cli_test_seams`): the caller option `faults:
+  [replay_read: fn -> :read | :unavailable end]` and the write option
+  `faults: [locked_replay_read: ...]`; other builds raise `ArgumentError`
+  on either.
   """
   require Ash.Query
 
@@ -41,17 +86,35 @@ defmodule SdrAgent.Agents.ProfileSwitches do
   alias SdrAgent.Agents.LedgerCall
   alias SdrAgent.Agents.ModelProfileSetting
   alias SdrAgent.Agents.ModelProfileSwitch
+  alias SdrAgent.Agents.ModelServerCounter
+  alias SdrAgent.Agents.ModelServerStart
   alias SdrAgent.Agents.ServerStarts
+  alias SdrAgent.Agents.SwitchResolution
   alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Guard
+  alias SdrAgent.Audit.Kernel
   alias SdrAgent.Repo
 
   @results %{complete: :completed, fail: :failed, block: :blocked}
   # The open phases of this process, by token (see "Phases" below).
   @phases {__MODULE__, :phases}
-  @binding_keys [:action, :tenant_id, :switch_id, :server_generation, :actor]
+  @binding_keys [
+    :action,
+    :tenant_id,
+    :switch_id,
+    :server_generation,
+    :actor,
+    :attestation,
+    :boot_id,
+    :start_id
+  ]
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+  # The C2-02b2β runtime owner, called at run time only.
+  @coordinator SdrAgent.AI.ModelProvider.Coordinator
+  @resolve_budget_ms 15_000
+  @settle_budget_ms 2_000
+  @attested [:attestation_id, :attested_start_id, :attested_generation, :attested_lease_kind]
 
   ## Reads
 
@@ -272,7 +335,7 @@ defmodule SdrAgent.Agents.ProfileSwitches do
          {:ok, latest} <- ServerStarts.fence(counter, attrs.start_id, attrs.boot_id, actor),
          :ok <- prerequisite(action, latest, switch),
          :ok <- step.() do
-      case decide(action, switch.status) do
+      case decide(action, switch) do
         :proceed -> write(action, setting, switch, attrs, actor, context)
         :replay -> {:ok, switch}
         {:error, reason} -> {:error, reason}
@@ -327,7 +390,14 @@ defmodule SdrAgent.Agents.ProfileSwitches do
   defp same_generation(%{server_generation: generation}, generation), do: :ok
   defp same_generation(_switch, _generation), do: invalid(:server_generation, "is stale")
 
-  defp decide(action, status) do
+  # C2-02b2β: a resolved switch is `:failed`, which would otherwise read as
+  # a replay of α's own `fail`; it is refused here, after the owner, boot
+  # and generation guards above.
+  defp decide(:fail, %ModelProfileSwitch{status: :failed, resolution: resolution})
+       when not is_nil(resolution),
+       do: {:error, :switch_already_finished}
+
+  defp decide(action, %ModelProfileSwitch{status: status}) do
     cond do
       Map.fetch!(@results, action) == status -> :replay
       status == :pending -> :proceed
@@ -359,6 +429,384 @@ defmodule SdrAgent.Agents.ProfileSwitches do
       context: context
     )
     |> Ash.update()
+  end
+
+  ## The attended resolution (C2-02b2β)
+
+  @doc """
+  ADM: the facts a blocked switch's resolution is attested on
+  (`SdrAgent.AI.ModelProvider.Coordinator.resolution_facts/2`, read-only):
+  `{:ok, %{switch, boot_id, latest_start, hold, covered_starts,
+  lease_kind}}`, `{:error, :observation_unknown}`, `{:error,
+  :switch_not_blocked}`, NotFound for a switch outside the tenant, or
+  Forbidden for any actor but an active human admin.
+  """
+  def blocked_facts(switch, opts) do
+    actor = current_operator(Keyword.get(opts, :actor))
+    id = switch_id(switch)
+
+    guard(:blocked_switch_facts, id, actor, fn ->
+      with :ok <- admin(actor),
+           {:ok, _stored} <- tenant_switch(actor, id) do
+        @coordinator.resolution_facts(id, actor: actor)
+      end
+    end)
+  end
+
+  @doc """
+  ADM: resolves blocked `switch` to `:failed` under `attestation` (see the
+  moduledoc): `{:ok, %{switch: s}}` (committed; the server is not
+  necessarily ready), `{:ok, %{switch: s, replay: true}}`, `{:error,
+  :resolve_timeout}` (definitely not committed), `{:error,
+  :resolve_uncertain}`, or a typed refusal.
+  """
+  def resolve_blocked(switch, attestation, opts) do
+    deadline = System.monotonic_time(:millisecond) + @resolve_budget_ms
+    faults = caller_faults(opts)
+    actor = current_operator(Keyword.get(opts, :actor))
+    id = switch_id(switch)
+
+    guard(:resolve_blocked, id, actor, fn ->
+      with :ok <- admin(actor),
+           {:ok, attestation} <- SwitchResolution.checked_attestation(id, attestation),
+           {:ok, nil} <- caller_replay(actor, attestation, faults),
+           {:ok, _stored} <- tenant_switch(actor, id) do
+        dispatch(%{switch_id: id, attestation: attestation, actor: actor}, deadline)
+      else
+        {:ok, %ModelProfileSwitch{} = stored} ->
+          SwitchResolution.resolution_result(stored, attestation, actor.id)
+
+        other ->
+          other
+      end
+    end)
+  end
+
+  @doc """
+  The resolution write, in the registered coordinator only, as the admin
+  (`request`: `%{switch_id, attestation, actor, boot_id, start_id}`), as one
+  bounded ledger call of `budget_ms:` (see the moduledoc). Returns
+  `SdrAgent.Agents.LedgerCall.attempt/2`'s outcome: `{:ok, {:resolved,
+  switch}}`, `{:ok, {:replay, switch}}` (the locked switch already carries
+  this exact attestation; nothing written), `{:rolled_back, reason}` or
+  `{:unknown, reason}`.
+  """
+  def commit_resolution(request, opts) do
+    faults = write_faults(opts)
+
+    LedgerCall.attempt(
+      &guarded_resolution(request, faults, &1),
+      budget_ms: Keyword.fetch!(opts, :budget_ms)
+    )
+  end
+
+  @doc """
+  The settlement barrier and exact re-read of an unknown resolution
+  (`request`: `%{switch_id, attestation, resolver_id}`), as `actor` — the
+  resolving admin, or `model_runtime` in the registered coordinator. One
+  bounded ledger call (2 s) in the read-only `:settle` phase; returns the
+  settled result (the replay, `:resolve_timeout`, `:attestation_conflict`
+  or `:switch_not_blocked`), Forbidden, or `{:error, :resolve_uncertain}`
+  when the barrier or the read is not obtained.
+  """
+  def settle_resolution(request, actor) do
+    fn step -> settle_in_phase(request, actor, step) end
+    |> LedgerCall.attempt(budget_ms: @settle_budget_ms)
+    |> case do
+      {:ok, {:settled, result}} -> result
+      {:rolled_back, %Ash.Error.Forbidden{} = forbidden} -> {:error, forbidden}
+      _unproven -> {:error, :resolve_uncertain}
+    end
+  end
+
+  # An unknown outcome (a caller timeout, a lost reply, the coordinator's
+  # death) is settled by the caller; a coordinator's answer is final.
+  defp dispatch(request, deadline) do
+    @coordinator.resolve_blocked(request, deadline)
+  catch
+    :exit, _unknown ->
+      settle_resolution(
+        %{
+          switch_id: request.switch_id,
+          attestation: request.attestation,
+          resolver_id: request.actor.id
+        },
+        request.actor
+      )
+  end
+
+  defp caller_replay(actor, attestation, faults) do
+    case fault(faults, :replay_read) do
+      :unavailable ->
+        {:error, :observation_unknown}
+
+      :read ->
+        SwitchResolution.replay_lookup(actor.tenant_id, attestation.attestation_id, actor: actor)
+    end
+  end
+
+  # The admin's own tenant only: another tenant's switch is not found.
+  defp tenant_switch(actor, id) when is_binary(id) do
+    ModelProfileSwitch
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(tenant_id == ^actor.tenant_id and id == ^id)
+    |> Ash.read_one()
+    |> case do
+      {:ok, %ModelProfileSwitch{} = switch} -> {:ok, switch}
+      {:ok, nil} -> not_found()
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp tenant_switch(_actor, _id), do: not_found()
+
+  defp not_found,
+    do: {:error, Ash.Error.to_error_class(NotFound.exception(resource: ModelProfileSwitch))}
+
+  defp guarded_resolution(request, faults, step) do
+    %{switch_id: id, actor: actor} = request
+
+    guard(:resolve_blocked, id, actor, fn ->
+      with :ok <- resolve_authority(actor),
+           {:ok, attestation} <- SwitchResolution.checked_attestation(id, request.attestation) do
+        binding = %{
+          action: :resolve_blocked,
+          tenant_id: actor.tenant_id,
+          switch_id: id,
+          actor: actor,
+          attestation: Map.take(attestation, @attested),
+          boot_id: request.boot_id,
+          start_id: request.start_id
+        }
+
+        with_phase(:resolve, binding, &locked_resolution(request, attestation, faults, &1, step))
+      end
+    end)
+  end
+
+  defp resolve_authority(actor) do
+    if CoordinatorProcess.coordinator?() and CurrentAdmin.match?(actor, %{}, []),
+      do: :ok,
+      else: forbidden()
+  end
+
+  # b2α's lock order (setting → counter FOR SHARE → switch → latest start
+  # FOR SHARE → head), then, after the locks: the admin, the third replay
+  # read, blocked, the attested fence, no other open switch.
+  defp locked_resolution(request, attestation, faults, context, step) do
+    %{switch_id: id, actor: actor} = request
+    tenant_id = actor.tenant_id
+
+    with {:ok, _setting} <- lock(ModelProfileSetting, id, actor, context),
+         :ok <- step.(),
+         {:ok, counter} <- shared(ModelServerCounter, tenant_id, nil),
+         :ok <- step.(),
+         {:ok, switch} <- lock(ModelProfileSwitch, id, actor, context),
+         :ok <- step.(),
+         {:ok, latest} <- shared(ModelServerStart, tenant_id, counter),
+         :ok <- step.(),
+         :ok <- resolve_authority(actor),
+         {:ok, nil} <- locked_replay(switch, attestation, actor, faults),
+         :ok <- still_blocked(switch),
+         :ok <- attested_fence(latest, attestation, request),
+         :ok <- no_other_open_switch(tenant_id, id),
+         :ok <- step.() do
+      resolve_write(switch, attestation, actor, context)
+    else
+      {:replay, switch} -> {:ok, {:replay, switch}}
+      other -> other
+    end
+  end
+
+  # A share lock on the tenant's counter, or on its latest start (the
+  # counter's generation), read as the kernel in this transaction.
+  defp shared(ModelServerCounter, tenant_id, nil) do
+    ModelServerCounter
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+    |> Ash.Query.filter(tenant_id == ^tenant_id)
+    |> Ash.Query.lock("FOR SHARE")
+    |> Ash.read_one()
+    |> case do
+      {:ok, %ModelServerCounter{} = counter} -> {:ok, counter}
+      {:ok, nil} -> {:error, :stale_attestation}
+      error -> error
+    end
+  end
+
+  defp shared(ModelServerStart, tenant_id, %ModelServerCounter{last_generation: generation}) do
+    ModelServerStart
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+    |> Ash.Query.filter(tenant_id == ^tenant_id and generation == ^generation)
+    |> Ash.Query.lock("FOR SHARE")
+    |> Ash.read_one()
+    |> case do
+      {:ok, %ModelServerStart{} = start} -> {:ok, start}
+      {:ok, nil} -> {:error, :stale_attestation}
+      error -> error
+    end
+  end
+
+  # The third replay read, before any state refusal: the locked switch
+  # carrying this id is the replay (exact) or a conflict; another switch
+  # carrying it is a conflict; an unreadable lookup refuses.
+  defp locked_replay(switch, attestation, actor, faults) do
+    cond do
+      fault(faults, :locked_replay_read) == :unavailable ->
+        {:error, :observation_unknown}
+
+      switch.attestation_id == attestation.attestation_id ->
+        case SwitchResolution.resolution_result(switch, attestation, actor.id) do
+          {:ok, _replay} -> {:replay, switch}
+          error -> error
+        end
+
+      true ->
+        case SwitchResolution.replay_lookup(
+               actor.tenant_id,
+               attestation.attestation_id,
+               Kernel.opts(actor.tenant_id)
+             ) do
+          {:ok, nil} -> {:ok, nil}
+          {:ok, %ModelProfileSwitch{}} -> {:error, :attestation_conflict}
+          error -> error
+        end
+    end
+  end
+
+  defp still_blocked(%ModelProfileSwitch{status: :blocked, resolution: nil}), do: :ok
+  defp still_blocked(_switch), do: {:error, :switch_not_blocked}
+
+  # The b2α fence: the latest start is the attested one and of the
+  # coordinator's boot (its own bound start).
+  defp attested_fence(latest, attestation, request) do
+    if latest.id == attestation.attested_start_id and
+         latest.generation == attestation.attested_generation and
+         latest.id == request.start_id and latest.boot_id == request.boot_id,
+       do: :ok,
+       else: {:error, :stale_attestation}
+  end
+
+  defp no_other_open_switch(tenant_id, id) do
+    ModelProfileSwitch
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+    |> Ash.Query.filter(tenant_id == ^tenant_id and id != ^id and status in [:pending, :blocked])
+    |> Ash.exists()
+    |> case do
+      {:ok, false} -> :ok
+      {:ok, true} -> {:error, :switch_open}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp resolve_write(switch, attestation, actor, context) do
+    switch
+    |> Ash.Changeset.for_update(:resolve_blocked, Map.take(attestation, @attested),
+      actor: actor,
+      context: context
+    )
+    |> Ash.update()
+    |> case do
+      {:ok, resolved} ->
+        {:ok, {:resolved, resolved}}
+
+      {:error, error} ->
+        if attestation_taken?(error), do: {:error, :attestation_conflict}, else: {:error, error}
+    end
+  end
+
+  # The per-tenant unique attestation id, taken by another switch.
+  defp attestation_taken?(%Ash.Error.Invalid{errors: errors}),
+    do: Enum.any?(errors, &match?(%{field: :attestation_id}, &1))
+
+  defp attestation_taken?(_error), do: false
+
+  # The barrier: the write's locks, in the write's order, read-only; then
+  # the exact re-read.
+  defp settle_in_phase(request, actor, step) do
+    with :ok <- settle_actor(actor) do
+      binding = %{
+        action: :settle,
+        tenant_id: actor.tenant_id,
+        switch_id: request.switch_id,
+        actor: actor
+      }
+
+      with_phase(:settle, binding, &settle_barrier(request, actor, &1, step))
+    end
+  end
+
+  defp settle_barrier(request, actor, context, step) do
+    %{switch_id: id, attestation: attestation, resolver_id: resolver_id} = request
+    tenant_id = actor.tenant_id
+
+    with {:ok, _setting} <- lock(ModelProfileSetting, id, actor, context),
+         :ok <- step.(),
+         {:ok, _counter} <- settle_counter(tenant_id),
+         :ok <- step.(),
+         {:ok, switch} <- lock(ModelProfileSwitch, id, actor, context),
+         :ok <- step.(),
+         {:ok, found} <-
+           SwitchResolution.replay_lookup(
+             tenant_id,
+             attestation.attestation_id,
+             Kernel.opts(tenant_id)
+           ) do
+      {:ok, {:settled, settled(switch, found, attestation, resolver_id)}}
+    end
+  end
+
+  defp settle_actor(%User{} = actor),
+    do: if(CurrentAdmin.match?(actor, %{}, []), do: :ok, else: forbidden())
+
+  defp settle_actor(%SdrAgent.Actor{type: :model_runtime, tenant_id: tenant_id})
+       when is_binary(tenant_id) do
+    if CoordinatorProcess.coordinator?(), do: :ok, else: forbidden()
+  end
+
+  defp settle_actor(_actor), do: forbidden()
+
+  # The barrier's counter lock (the write's order); a tenant without one
+  # has no start, which the re-read does not need.
+  defp settle_counter(tenant_id) do
+    case shared(ModelServerCounter, tenant_id, nil) do
+      {:error, :stale_attestation} -> {:ok, nil}
+      other -> other
+    end
+  end
+
+  defp settled(_switch, %ModelProfileSwitch{} = found, attestation, resolver_id),
+    do: SwitchResolution.resolution_result(found, attestation, resolver_id)
+
+  defp settled(%ModelProfileSwitch{status: :blocked}, nil, _attestation, _resolver_id),
+    do: {:error, :resolve_timeout}
+
+  defp settled(_switch, nil, _attestation, _resolver_id), do: {:error, :switch_not_blocked}
+
+  defp switch_id(%{id: id}) when is_binary(id), do: id
+  defp switch_id(id) when is_binary(id), do: id
+  defp switch_id(_switch), do: nil
+
+  # A test fault's answer; `:read` without one.
+  defp fault(faults, key) do
+    case Keyword.get(faults, key) do
+      fun when is_function(fun, 0) -> fun.()
+      nil -> :read
+    end
+  end
+
+  # `faults:` exist only in test builds (`:claude_cli_test_seams`).
+  if @test_seams do
+    defp caller_faults(opts), do: Keyword.get(opts, :faults, [])
+    defp write_faults(opts), do: Keyword.get(opts, :faults, [])
+  else
+    defp caller_faults(opts), do: no_faults!(opts)
+    defp write_faults(opts), do: no_faults!(opts)
+
+    defp no_faults!(opts) do
+      if Keyword.has_key?(opts, :faults),
+        do: raise(ArgumentError, "faults: exist only in test builds"),
+        else: []
+    end
   end
 
   ## Phases (`SdrAgent.Agents.Checks.ProfileSwitchContext`)
@@ -397,7 +845,8 @@ defmodule SdrAgent.Agents.ProfileSwitches do
     end
   end
 
-  defp with_phase(phase, binding, fun) when phase in [:initialize, :transition] do
+  defp with_phase(phase, binding, fun)
+       when phase in [:initialize, :transition, :resolve, :settle] do
     token = make_ref()
 
     binding =

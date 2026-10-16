@@ -258,12 +258,19 @@ defmodule SdrAgent.AI.ProfileRestartTest do
       RH.drain!()
       assert_pending_blocked!(ctx, requested, blocked)
 
+      # Codex 5503795b: b2β's dead-lease boot allocates only its fence and
+      # starts no server, so nothing is observed (the desired profile stays
+      # Opus); every blocked, provenance, hold and lease assertion is kept.
       assert_status!(
         status_now!(),
-        held_row(
-          @opus,
-          confirmed(@opus, :setting),
-          open_switch(switch, :blocked, "coordinator_restarted")
+        Keyword.merge(
+          held_row(
+            @opus,
+            confirmed(@opus, :setting),
+            open_switch(switch, :blocked, "coordinator_restarted")
+          ),
+          observed_profile: :none,
+          refusal: :provider_not_running
         ),
         "3#{unquote(form)}'"
       )
@@ -307,7 +314,7 @@ defmodule SdrAgent.AI.ProfileRestartTest do
     RH.drain!()
     Process.sleep(300)
 
-    assert_still_blocked!(ctx, blocked)
+    assert_still_blocked!(ctx, blocked, :provider_held)
 
     assert_status!(
       status_now!(),
@@ -335,14 +342,17 @@ defmodule SdrAgent.AI.ProfileRestartTest do
 
       assert_lease_after!(form, dead)
 
-      assert_still_blocked!(ctx, blocked)
+      assert_still_blocked!(ctx, blocked, blocked_refusal(form))
 
       assert_status!(
         status_now!(),
-        held_row(
-          @opus,
-          confirmed(@opus, :setting),
-          open_switch(blocked, :blocked, "old_cleanup_unconfirmed")
+        Keyword.merge(
+          held_row(
+            @opus,
+            confirmed(@opus, :setting),
+            open_switch(blocked, :blocked, "old_cleanup_unconfirmed")
+          ),
+          blocked_runtime(form)
         ),
         "4#{form}"
       )
@@ -623,11 +633,21 @@ defmodule SdrAgent.AI.ProfileRestartTest do
            ]
   end
 
-  defp assert_still_blocked!(ctx, blocked) do
+  defp assert_still_blocked!(ctx, blocked, refusal) do
     assert RH.switch!(ctx, blocked.id) == blocked, "still blocked, unchanged"
     assert %{hold: :held} = Coordinator.status()
-    assert Runtime.resolve(provider: ClaudeCLI) == {:error, :provider_held}
+    assert Runtime.resolve(provider: ClaudeCLI) == {:error, refusal}
   end
+
+  # Codex 5503795b, per form (runtime clauses): B keeps the dead lease, so
+  # b2β's boot allocates only its fence and no server runs (nothing
+  # observed, not running); C lost the lease with the simulated VM, so a
+  # fresh server runs, held (observed Opus, held).
+  defp blocked_refusal(:B), do: :provider_not_running
+  defp blocked_refusal(:C), do: :provider_held
+
+  defp blocked_runtime(:B), do: [observed_profile: :none, refusal: :provider_not_running]
+  defp blocked_runtime(:C), do: [observed_profile: @opus, refusal: :provider_held]
 
   # Form-specific restart evidence (runtime clauses, so each generated test
   # keeps its assertion without an unreachable branch).

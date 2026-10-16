@@ -23,6 +23,8 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
   alias SdrAgent.AI.ModelProvider.ProfileSupervisor
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Test.PinnedCLI
+  alias SdrAgent.Test.ResolveHarness
+  alias SdrAgent.Test.StatusHarness
 
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
   @env ~w(SDR_MODEL_PROVIDER SDR_CLAUDE_CLI_TIMEOUT_MS SDR_CLAUDE_CLI_BIN DATABASE_URL
@@ -305,7 +307,25 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       assert {:error, :pinned_cli_unavailable} = Runtime.resolve(provider: ClaudeCLI)
       assert Runtime.refusal_message(:pinned_cli_unavailable) =~ "no model call was made"
 
-      assert %{effective: nil, refusal: :pinned_cli_unavailable} = Runtime.status()
+      # C2-02c 2b: a named server no coordinator binds is no status sample
+      # (unavailable, never its own refusal). The pin refusal is status's
+      # through the profile tree's consistent, released sample.
+      assert %{effective: nil, refusal: :status_unavailable, observed_profile: :unknown} =
+               Runtime.status()
+
+      stop_supervised!(ClaudeCLI)
+      assert eventually(fn -> ClaudeCLI.Reaper.lease(ClaudeCLI.server()) == nil end)
+      tree!(executable: PinnedCLI.missing_store_path())
+
+      assert {:error, :pinned_cli_unavailable} = Runtime.resolve([])
+
+      assert %{
+               effective: nil,
+               refusal: :pinned_cli_unavailable,
+               runtime_observation: :consistent,
+               hold: :released,
+               observed_profile: :claude_cli_opus
+             } = Runtime.status()
     end
 
     test "R0-02: the real launcher without a pin is refused before any reservation" do
@@ -363,22 +383,38 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
 
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
 
+      # C2-02c 2b: no coordinator is an unavailable status whose model
+      # profile is unknown (nil), never the registry default.
+      assert %{
+               configured: ClaudeCLI,
+               effective: nil,
+               refusal: :status_unavailable,
+               profile_id: nil,
+               ledger_observation: :unavailable
+             } = Runtime.status()
+
+      tree!()
+
+      assert %{
+               configured: ClaudeCLI,
+               effective: ClaudeCLI,
+               refusal: nil,
+               profile_id: :claude_cli_opus,
+               effective_profile: :claude_cli_opus
+             } =
+               Runtime.status()
+
+      # A coordinator that positively runs no server: not running, at the
+      # confirmed desired (default) profile. (Last: it retries its boot.)
+      StatusHarness.stop_tree!()
+      no_server_tree!()
+
       assert %{
                configured: ClaudeCLI,
                effective: nil,
                refusal: :provider_not_running,
                profile_id: :claude_cli_opus
              } = Runtime.status()
-
-      start_named!("ready")
-
-      assert %{
-               configured: ClaudeCLI,
-               effective: ClaudeCLI,
-               refusal: nil,
-               profile_id: :claude_cli_opus
-             } =
-               Runtime.status()
     end
 
     test "the application's child restarts after a crash, admitting calls again" do
@@ -424,9 +460,11 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
     test "ClaudeCLI reports alias, resolved id, reviewed version, server and attestation" do
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
 
-      assert %{server: :not_running, attestation: %{status: :not_running}} = Runtime.status()
+      # C2-02c 2b: with no coordinator the server and its attestation are
+      # unknown, not positively absent.
+      assert %{server: :unknown, attestation: %{status: :unknown}} = Runtime.status()
 
-      start_named!("ready")
+      tree!()
 
       assert %{
                provider: ClaudeCLI,
@@ -437,14 +475,40 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
                server: :running,
                attestation: %{status: :pending}
              } = Runtime.status()
+
+      # Positively absent: the coordinator binds no server (every start
+      # fails before the server's init returns). Last: it retries its boot.
+      StatusHarness.stop_tree!()
+      no_server_tree!()
+
+      assert %{
+               server: :not_running,
+               attestation: %{status: :not_running},
+               observed_profile: :none,
+               profile_id: :claude_cli_opus,
+               model_alias: "opus"
+             } = Runtime.status()
     end
 
     test "R0-03: ClaudeCLI reports the running server's profile" do
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
-      start_named!("ready", profile: :claude_cli_sonnet)
+      # C2-02c: the profile is the coordinator-bound server's, so the tree
+      # runs Sonnet after a completed switch (the setting's profile).
+      tenant = tree!()
+      ctx = %{admin: SdrAgent.AuditCase.human(:admin, tenant)}
+      switch = ResolveHarness.request_switch!(ctx)
+      ResolveHarness.await_switch!(ctx, switch.id, :completed)
+
+      ResolveHarness.await_status!(
+        &(&1.hold == :released and &1.profile_id == :claude_cli_sonnet),
+        20_000
+      )
+
+      ResolveHarness.drain!()
 
       assert %{
                profile_id: :claude_cli_sonnet,
+               observed_profile: :claude_cli_sonnet,
                model_alias: "sonnet",
                model_id: "claude-sonnet-5-5",
                reviewed_version: "2.1.294"
@@ -484,6 +548,46 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
     :ok = Ecto.Adapters.SQL.Sandbox.checkout(SdrAgent.Repo)
     Ecto.Adapters.SQL.Sandbox.mode(SdrAgent.Repo, {:shared, self()})
     {:ok, _tenant} = SdrAgent.Audit.bootstrap(slug: "demo", name: "Demo Tenant")
+  end
+
+  # C2-02c: status is the coordinator's row plus its bound server's sample,
+  # so status cases run the profile tree (the fake CLI under the test
+  # launcher, ready; `server` adds ClaudeCLI options) with a sandboxed
+  # ledger, released. Returns the tenant.
+  defp tree!(server \\ []) do
+    tenant = ledgered!()
+    ResolveHarness.lease_cleanup!()
+    StatusHarness.tree!(server: server)
+    ResolveHarness.await_status!(&(&1.hold == :released))
+    ResolveHarness.drain!()
+    tenant
+  end
+
+  # The profile tree whose every start fails before the server's init
+  # returns: the coordinator positively binds no server.
+  defp no_server_tree! do
+    ledgered!()
+    ResolveHarness.lease_cleanup!()
+    StatusHarness.tree!(server: [timeout: 1])
+
+    assert eventually(fn ->
+             match?(
+               %{observed_profile: :none, desired_profile: %{profile_id: _}},
+               Runtime.status()
+             )
+           end)
+  end
+
+  defp ledgered! do
+    case Process.get({__MODULE__, :tenant}) do
+      nil ->
+        {:ok, tenant} = ledger!()
+        Process.put({__MODULE__, :tenant}, tenant)
+        tenant
+
+      tenant ->
+        tenant
+    end
   end
 
   defp await_released! do

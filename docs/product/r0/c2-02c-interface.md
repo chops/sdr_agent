@@ -5,9 +5,9 @@
   `401df6f`, `codex-c202c-401df6f-interface-pass.md`; configured
   `ai_pair=true`, `codex_review=true`).
 - **What it permits:** scoped RED only.
-- **Still open:**
-  - the owner's decision on OQ-1;
-  - implementation, which comes after b2β.
+- **OQ-1:** accepted by the owner on 2026-10-15 (D-139). Row c of the
+  slice plan is updated with that reference.
+- **Still open:** implementation, which comes after b2β.
 - **Binding:** the report's "Binding interpretations for RED/GREEN" (items
   1–6) bind the tests and the implementation. Slice plan: `c2-02-slices.md` row c. Builds on b2α (merged at
 `22db5c0`) and b2β (`c2-02b2b-interface.md`, PASS at `e60943c`).
