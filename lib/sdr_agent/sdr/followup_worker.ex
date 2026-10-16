@@ -18,6 +18,7 @@ defmodule SdrAgent.SDR.FollowupWorker do
   every follow-up still needs human approval (Tier 0).
   """
   use Oban.Worker, queue: :followup, max_attempts: 3
+  use SdrAgent.Workers.ErrorBoundary
 
   require Ash.Query
 

@@ -56,6 +56,67 @@ defmodule SdrAgent.Repo.SafeMetadata do
     |> Map.merge(error(result))
   end
 
+  @ash_classes [Ash.Error.Invalid, Ash.Error.Forbidden, Ash.Error.Framework, Ash.Error.Unknown]
+  @raw_prefixes ["Elixir.Postgrex.", "Elixir.DBConnection.", "Elixir.Ash.Error."]
+  @scan_budget 50_000
+
+  @doc """
+  The sanitized summary of a raw error struct (ADR-0005 C4 amendment, error
+  boundaries): for a Postgrex or DBConnection error,
+  `"<error_module> <pg_code> <constraint>"` from the allowlisted fields
+  above; for an Ash error, its error class (`Ash.Error.Invalid`,
+  `Forbidden`, `Framework`, `Unknown`, else `"other"`); anything else
+  `"other"`. Fixed identifiers only: never a message, value or `inspect`.
+  """
+  @spec error_summary(term()) :: String.t()
+  def error_summary(%module{} = error) when module in @error_modules,
+    do: error_description(error({:error, error}))
+
+  def error_summary(%module{}) when module in @ash_classes, do: inspect(module)
+  def error_summary(_error), do: "other"
+
+  @doc """
+  The first raw error struct — an exception of the Postgrex, DBConnection
+  or Ash error namespaces — found anywhere in `term` (tuples, lists, maps
+  and struct fields, depth first), or nil. The walk is bounded: after
+  #{@scan_budget} nodes it stops and reports nil.
+  """
+  @spec find_raw_error(term()) :: struct() | nil
+  def find_raw_error(term) do
+    case scan(term, @scan_budget) do
+      {:found, error} -> error
+      _budget -> nil
+    end
+  end
+
+  defp scan(_term, budget) when budget <= 0, do: 0
+
+  defp scan(%module{} = struct, budget) do
+    if raw_error_module?(module),
+      do: {:found, struct},
+      else: scan_all(Map.values(Map.from_struct(struct)), budget - 1)
+  end
+
+  defp scan(map, budget) when is_map(map), do: scan_all(Map.values(map), budget - 1)
+  defp scan(list, budget) when is_list(list), do: scan_all(list, budget - 1)
+  defp scan(tuple, budget) when is_tuple(tuple), do: scan_all(Tuple.to_list(tuple), budget - 1)
+  defp scan(_leaf, budget), do: budget - 1
+
+  defp scan_all([], budget), do: budget
+  defp scan_all([head | tail], budget) when is_list(tail), do: scan_next(scan(head, budget), tail)
+  # An improper list tail.
+  defp scan_all([head | tail], budget), do: scan_next(scan(head, budget), [tail])
+
+  defp scan_next({:found, _} = found, _rest), do: found
+  defp scan_next(budget, rest), do: scan_all(rest, budget)
+
+  defp raw_error_module?(module) do
+    name = Atom.to_string(module)
+
+    Enum.any?(@raw_prefixes, &String.starts_with?(name, &1)) and
+      function_exported?(module, :exception, 1)
+  end
+
   @doc "The span status description of an error: fixed identifiers only."
   @spec error_description(map()) :: String.t()
   def error_description(fields) do

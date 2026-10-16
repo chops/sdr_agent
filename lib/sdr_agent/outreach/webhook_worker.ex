@@ -10,6 +10,7 @@ defmodule SdrAgent.Outreach.WebhookWorker do
   attempt records it as a `crash` Failure on the event.
   """
   use Oban.Worker, queue: :integration, max_attempts: 3
+  use SdrAgent.Workers.ErrorBoundary
 
   alias SdrAgent.Outreach.Webhooks
 

@@ -554,23 +554,35 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
       require_module!(@boundary)
       text = canary()
 
-      for {worker, n} <- Enum.with_index(app_workers()), mode <- @raw_modes do
-        put_faults!(%{worker => fn _job -> fault(mode, text) end})
-        result = bounded(fn -> worker.perform(probe_job(worker, n)) end)
+      workers = app_workers()
 
-        assert disposition?(result, disposition(mode)) and
-                 render(result) =~ summary_module(mode),
-               "C4-01a: #{inspect(worker)} #{mode}: perform did not go through the boundary"
+      checked =
+        for {worker, n} <- Enum.with_index(workers), mode <- @raw_modes do
+          put_faults!(%{worker => fn _job -> fault(mode, text) end})
+          result = bounded(fn -> worker.perform(probe_job(worker, n)) end)
 
-        refute render(result) =~ text, "C4-01a: #{inspect(worker)} #{mode}: raw error passed"
-      end
+          assert disposition?(result, disposition(mode)) and
+                   render(result) =~ summary_module(mode),
+                 "C4-01a: #{inspect(worker)} #{mode}: perform did not go through the boundary"
 
-      for {worker, n} <- Enum.with_index(app_workers()) do
-        put_faults!(%{worker => fn _job -> {:snooze, 4321} end})
+          refute render(result) =~ text, "C4-01a: #{inspect(worker)} #{mode}: raw error passed"
+          {worker, mode}
+        end
 
-        assert bounded(fn -> worker.perform(probe_job(worker, n)) end) == {:snooze, 4321},
-               "C4-01a: #{inspect(worker)}: a safe result did not pass through its boundary"
-      end
+      # Every worker x mode pair ran to completion (not only the first).
+      assert length(Enum.uniq(checked)) == length(workers) * length(@raw_modes)
+
+      safe =
+        for {worker, n} <- Enum.with_index(workers) do
+          put_faults!(%{worker => fn _job -> {:snooze, 4321} end})
+
+          assert bounded(fn -> worker.perform(probe_job(worker, n)) end) == {:snooze, 4321},
+                 "C4-01a: #{inspect(worker)}: a safe result did not pass through its boundary"
+
+          worker
+        end
+
+      assert length(Enum.uniq(safe)) == length(workers)
     end
 
     test "every production worker's persisted job errors are summaries" do
@@ -599,13 +611,19 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
       ids = Process.get(:c4_job_ids)
       rows = job_rows(Map.values(ids))
 
-      for {worker, id} <- ids do
-        {_state, errors} = Map.fetch!(rows, id)
-        refute errors =~ text, "C4-01a: #{inspect(worker)}: the canary reached oban_jobs.errors"
+      checked =
+        for {worker, id} <- ids do
+          {_state, errors} = Map.fetch!(rows, id)
+          refute errors =~ text, "C4-01a: #{inspect(worker)}: the canary reached oban_jobs.errors"
 
-        assert errors =~ "Postgrex.Error",
-               "C4-01a: #{inspect(worker)}: its job error is not the boundary summary: #{errors}"
-      end
+          assert errors =~ "Postgrex.Error",
+                 "C4-01a: #{inspect(worker)}: its job error is not the boundary summary: #{errors}"
+
+          worker
+        end
+
+      # Every production worker's job row was checked.
+      assert Enum.sort(checked) == Enum.sort(workers)
 
       assert_no_canary(log, text, "production workers")
     end
