@@ -1,7 +1,12 @@
 # C2-02b2β interface: the attended resolver for a blocked switch
 
-**Status:** draft 4, 2026-10-15, for Codex's interface, entity and ADR
-re-review. Slice plan: `c2-02-slices.md` (b2β). Builds on b2α
+**Status:** draft 4, 2026-10-15. **Interface PASS, Entity Model PASS, and
+the proposed ADR-0004 amendment PASS for owner presentation** (Codex
+`c523f9ab`, exact `e60943c`, report
+`codex-c202b2beta-e60943c-interface-pass.md`; configured `ai_pair=true`,
+`codex_review=true`). This permits scoped RED only. The owner's
+acceptance of the ADR, OQ-2 and OQ-5, the RED verification and GREEN are
+separate gates. Slice plan: `c2-02-slices.md` (b2β). Builds on b2α
 (`c2-02b2-interface.md`, merged at `22db5c0`). Needs the proposed
 ADR-0004 C2-02b2β amendment (section 7), which the owner must accept
 before implementation approval.
@@ -274,9 +279,10 @@ no new authority:
   switch is open, the coordinator's tick re-observes the lease. Once there
   is **no lease and no live named server**, it runs the same b2α
   no-open-switch path as at a cold boot: a fresh held allocation,
-  preflight and ready. The lease's absence here doesn't prove anything
-  about S. It only means the operator has acted, and b2α's cold boot
-  already starts a fresh server whenever no lease exists.
+  preflight and ready. This is b2α's own cold-boot precondition, applied
+  after a proven terminal resolution. The absence proves nothing about S,
+  or about who removed the lease (an operator, or a VM restart), and is
+  never cleanup evidence.
 - **The release** of the hold, in every case, is b2α's normal branch: no
   open switch, and a ready `:boot` or `:replacement` start of this boot at
   the desired profile, on the held pid, with its reaper observed.
