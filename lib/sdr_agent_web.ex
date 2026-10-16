@@ -48,9 +48,9 @@ defmodule SdrAgentWeb do
     end
   end
 
-  def live_view do
+  def live_view(opts \\ []) do
     quote do
-      use Phoenix.LiveView
+      use Phoenix.LiveView, unquote(opts)
 
       unquote(html_helpers())
     end
@@ -113,5 +113,10 @@ defmodule SdrAgentWeb do
   """
   defmacro __using__(which) when is_atom(which) do
     apply(__MODULE__, which, [])
+  end
+
+  # `use SdrAgentWeb, {:live_view, log: false}`: a view with LiveView options.
+  defmacro __using__({which, opts}) when is_atom(which) and is_list(opts) do
+    apply(__MODULE__, which, [opts])
   end
 end
