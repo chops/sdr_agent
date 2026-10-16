@@ -48,6 +48,12 @@ graph TB
         Resources["Resources (57)"]
     end
 
+    subgraph ModelServerTree["C2-02b2 model server tree: ProfileSupervisor, rest_for_one"]
+        ServerSup[ServerSupervisor<br/>DynamicSupervisor, ClaudeCLI child temporary]
+        Coordinator[Coordinator<br/>sole start/stop/replace owner and b2 ledger writer,<br/>held until a reconciled read; status in protected ETS]
+        OperationSup[OperationSupervisor<br/>one switch worker]
+    end
+
     subgraph Calibration["R0-07 calibration console: test-seam build only, owner command (see calibration-runtime.md)"]
         CalCmd[Calibrate / calibrate-recover command<br/>sole launch-record writer]
         CalAuthority[Authority registry<br/>one-shot entry, protected ETS]
@@ -63,7 +69,13 @@ graph TB
     end
 
     App --> Oban
-    App -. "SDR_MODEL_PROVIDER=claude_cli (dev only): one named server, started before Oban" .-> ClaudeCLIAdapter
+    App -. "SDR_MODEL_PROVIDER=claude_cli (dev only): the model server tree, started before Oban" .-> ServerSup
+    ServerSup -- "one named server, started held" --> ClaudeCLIAdapter
+    Coordinator -. "start / stop (cleanup receipt) / hold / release_hold" .-> ClaudeCLIAdapter
+    Coordinator -- "allocate + mark starts, complete / fail / block, resolve_blocked (bounded LedgerCall)" --> Domains
+    Coordinator -. "drain + no-call preflight" .-> OperationSup
+    Coordinator -. "observes the reaper lease; never releases it (dead holder: held, cleanup_unprovable)" .-> ClaudeCLIAdapter
+    Domains -. "C2-02b2β, admin only (R0-05 UI not built): resolution_facts/2, resolve_blocked/2 (15 s pre-dispatch deadline; barrier settlement of unknown outcomes)" .-> Coordinator
     Oban --> Cadence
     Oban --> UpgradeDispatch
     UpgradeDispatch --> UpgradeJobs
@@ -142,4 +154,5 @@ graph TB
 - [x] Claude CLI local process boundary
 - [x] S13 LiveEvents.Relay (commit-time audit notifications -> PubSub -> live console views, ADR-0012)
 - [x] Q0.1 runtime-selected ClaudeCLI server (one named, supervised instance before Oban when `SDR_MODEL_PROVIDER=claude_cli`, dev only; ADR-0004)
+- [x] C2-02b2α model server tree (`ProfileSupervisor`: `ServerSupervisor`, `Coordinator`, `OperationSupervisor`, `:rest_for_one`) and C2-02b2β attended resolution (admin → `Agents.resolve_blocked_switch/3` → `Coordinator.resolve_blocked/2`; dead lease = held hard conflict, never released by code), added by hand 2026-10-15
 - [x] R0-02 app-pinned Claude CLI (`nix/app-claude-cli-package.nix` on the locked nixpkgs, exact reviewed store path and sha256 from `nix/app-claude-cli.identity` in `SDR_CLAUDE_CLI_BIN`, handed to the shim per launch as `LLM_PROXY_SHIM_CLAUDE_BIN`; never `claude` from `PATH`; real calls staged (`real_model_staged`) until R0-03, C9 and R0-07; ADR-0004 R0)

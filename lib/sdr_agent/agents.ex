@@ -56,6 +56,9 @@ defmodule SdrAgent.Agents do
       `list_profile_switches/1` (`ModelProfileSetting`, `ModelProfileSwitch`);
       C2-02b1: `drain_profile_switch/3` (AGT; `SdrAgent.Agents.ProfileSwitchDrain`),
       and the admission fence (`SdrAgent.Agents.Admission.SwitchFence`);
+      C2-02b2β: `blocked_switch_facts/2` and `resolve_blocked_switch/3`
+      (an active human admin only; the attended blocked → failed
+      resolution, executed by the registered model coordinator).
     * run settings (C4, `docs/product/c4/readiness.md`) —
       `create_settings_revision/2` (an active human admin; append-only
       `SettingsRevision`, stale and raise-confirmation checks),
@@ -1936,6 +1939,25 @@ defmodule SdrAgent.Agents do
 
   @doc "ADM, AUD (audited), AGT: the tenant's setting, or `{:ok, nil}` before the first one."
   def get_profile_setting(opts), do: ProfileSwitches.get_setting(opts)
+
+  @doc """
+  ADM (C2-02b2β): the read-only facts a blocked switch's resolution is
+  attested on — the switch, the coordinator's boot, its latest start and
+  hold, the covered starts with their recorded identity, and the observed
+  lease kind. See `SdrAgent.Agents.ProfileSwitches.blocked_facts/2`.
+  """
+  def blocked_switch_facts(switch, opts), do: ProfileSwitches.blocked_facts(switch, opts)
+
+  @doc """
+  ADM (C2-02b2β): resolves a blocked switch to `:failed` under a typed owner
+  attestation (`%{attestation_id, switch_id, attested_start_id,
+  attested_generation, attested_lease_kind, outcome: :failed,
+  confirmation: "STOPPED " <> switch_id}`), executed by the registered
+  coordinator within a 15 s pre-dispatch deadline. A commit does not mean
+  the server is ready. See `SdrAgent.Agents.ProfileSwitches.resolve_blocked/3`.
+  """
+  def resolve_blocked_switch(switch, attestation, opts),
+    do: ProfileSwitches.resolve_blocked(switch, attestation, opts)
 
   # --- model server starts (C2-02b2α) -----------------------------------
 

@@ -19,6 +19,16 @@ defmodule SdrAgent.Agents.LedgerCall do
   commit or `{:error, reason}` to roll everything back. There is no
   detached execution: the call returns before the caller handles anything
   else.
+
+  `attempt/2` (C2-02b2β) runs the same bounded call but reports whether its
+  outcome is **known**: `{:ok, value}` (committed), `{:rolled_back, reason}`
+  (definitely not committed: the budget was spent before any work, the
+  pool stayed busy until then, or the transaction ended through its own
+  rollback, so no `COMMIT` was ever sent — the pre-commit budget refusal is
+  `{:rolled_back, :ledger_timeout}`), or `{:unknown, reason}` (an exception
+  escaped the transaction, e.g. a connection error that may have hit the
+  `COMMIT` itself, or a rollback the driver did not acknowledge). `run/2` is
+  `attempt/2` with both failures folded into its `{:error, reason}`.
   """
   alias SdrAgent.Audit
   alias SdrAgent.Repo
@@ -30,28 +40,49 @@ defmodule SdrAgent.Agents.LedgerCall do
 
   @doc "Runs `fun` (arity 0, or 1 taking the step function) under one bound."
   def run(fun, opts \\ []) do
+    {deadline, result} = attempt_with_deadline(fun, opts)
+
+    case result do
+      {:ok, value} -> {:ok, value}
+      {:rolled_back, error} -> timeout_or(deadline, error)
+      {:unknown, error} -> timeout_or(deadline, error)
+    end
+  end
+
+  @doc """
+  Runs `fun` like `run/2`, reporting a known or unknown outcome:
+  `{:ok, value} | {:rolled_back, reason} | {:unknown, reason}` (see the
+  moduledoc).
+  """
+  def attempt(fun, opts \\ []) do
+    {_deadline, result} = attempt_with_deadline(fun, opts)
+    result
+  end
+
+  defp attempt_with_deadline(fun, opts) do
     budget = min(Keyword.get(opts, :budget_ms, @max_ms), @max_ms)
-    bounded(System.monotonic_time(:millisecond) + budget, fun)
+    deadline = System.monotonic_time(:millisecond) + budget
+    {deadline, bounded(deadline, fun)}
   end
 
   defp bounded(deadline, fun) do
     case remaining(deadline) do
       ms when ms <= 0 ->
-        {:error, :ledger_timeout}
+        {:rolled_back, :ledger_timeout}
 
       ms ->
         fn -> audited_body(deadline, fun) end
         |> Repo.transaction(timeout: ms + @client_slack_ms, queue: false)
-        |> unwrap_bounded(deadline)
+        |> unwrap_bounded()
     end
   rescue
     error in DBConnection.ConnectionError ->
       if busy?(error.message),
         do: retry_checkout(deadline, fun),
-        else: timeout_or(deadline, error)
+        else: {:unknown, error}
 
     error in Postgrex.Error ->
-      timeout_or(deadline, error)
+      {:unknown, error}
   end
 
   # No free connection (`queue: false`), or, under a test's shared SQL
@@ -110,12 +141,17 @@ defmodule SdrAgent.Agents.LedgerCall do
     )
   end
 
-  defp unwrap_bounded({:ok, result}, _deadline), do: result
+  # `{:ok, value}` is the committed body's own result. An `{:error, _}` came
+  # back through this call's own `Repo.rollback/1`, so no COMMIT was sent;
+  # only the driver's bare `:rollback` (a transaction it rolled back on its
+  # own) is not known to be this call's.
+  defp unwrap_bounded({:ok, result}), do: result
+  defp unwrap_bounded({:error, :rollback}), do: {:unknown, :rollback}
 
-  defp unwrap_bounded({:error, %Ash.Changeset{errors: errors}}, deadline),
-    do: timeout_or(deadline, Ash.Error.to_error_class(errors))
+  defp unwrap_bounded({:error, %Ash.Changeset{errors: errors}}),
+    do: {:rolled_back, Ash.Error.to_error_class(errors)}
 
-  defp unwrap_bounded({:error, error}, deadline), do: timeout_or(deadline, error)
+  defp unwrap_bounded({:error, error}), do: {:rolled_back, error}
 
   # A lock or statement timeout, or a spent budget, is the call's bound.
   defp timeout_or(deadline, error) do
