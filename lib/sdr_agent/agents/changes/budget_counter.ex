@@ -16,7 +16,11 @@ defmodule SdrAgent.Agents.Changes.BudgetCounter do
   Options:
 
     * `:increment` — keyword of `counter: amount | {:arg, name}`
-    * `:limit` — `{counter, max_field}`: refuse when `counter >= max_field`
+    * `:limit` — `{counter, max_field}`, or a list of them: refuse when any
+      `counter >= max_field`. The maxima are the run's budget, frozen from
+      its settings snapshot at `:create` (C4); `:reserve_model_call` also
+      refuses once `tokens_used` reaches `max_tokens`, so one call may
+      overshoot the token allowance and the next is stopped.
   """
   use Ash.Resource.Change
 
@@ -67,6 +71,9 @@ defmodule SdrAgent.Agents.Changes.BudgetCounter do
   defp amount(_changeset, amount), do: amount
 
   defp exhausted?(_budget, nil), do: false
+
+  defp exhausted?(budget, limits) when is_list(limits),
+    do: Enum.any?(limits, &exhausted?(budget, &1))
 
   defp exhausted?(budget, {counter, max}),
     do: Map.fetch!(budget, counter) >= Map.fetch!(budget, max)

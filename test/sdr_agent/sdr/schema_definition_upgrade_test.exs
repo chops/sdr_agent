@@ -18,6 +18,9 @@ defmodule SdrAgent.SDR.SchemaDefinitionUpgradeTest do
   """
   use SdrAgent.SDRCase, async: false
 
+  # C4-R8: these assignments need a saved offering profile (synthetic fixture).
+  setup ctx, do: ensure_offering!(ctx)
+
   alias SdrAgent.Actor
   alias SdrAgent.Agents
   alias SdrAgent.AgentsFixtures

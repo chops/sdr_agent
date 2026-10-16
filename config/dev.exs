@@ -18,7 +18,8 @@ config :sdr_agent, SdrAgent.Repo,
   hostname: "localhost",
   database: "sdr_agent_dev",
   stacktrace: true,
-  show_sensitive_data_on_connection_error: true,
+  # ADR-0005 C4 amendment: connection errors never print sensitive data.
+  show_sensitive_data_on_connection_error: false,
   pool_size: 10
 
 # For development, we disable any cache and enable
