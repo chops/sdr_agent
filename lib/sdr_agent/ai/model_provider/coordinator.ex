@@ -277,6 +277,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
       # C2-02b2β: an unknown resolution still to settle, and the hard
       # conflict (`:cleanup_unprovable`).
       settling: nil,
+      deferred: [],
       conflict: nil,
       # C2-02c: the last confirmed ledger observations (`publish/1`), and
       # the desired profile an uncertain outcome masks until it settles.
@@ -305,6 +306,10 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   @impl true
   def handle_continue(:resolved, state), do: {:noreply, after_resolution(state)}
+
+  # No maintenance work while a resolution's outcome is unproven (C2-02b2β):
+  # the boot waits for the settlement.
+  def handle_continue(:boot, %{settling: %{}} = state), do: {:noreply, defer(state, :boot)}
 
   def handle_continue(:boot, state) do
     # Re-held before any database observation, the tenant read included.
@@ -803,7 +808,18 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   defp rehold(state), do: state
 
+  # C2-02b2β: while a resolution's outcome is unproven, every maintenance
+  # message (a boot retry, a replacement or conflict tick, a block retry, a
+  # reconciliation retry) is deferred, never acted on: it is replayed only
+  # once the settlement is definite (`resettle/1`). A server DOWN still
+  # updates the facts (`server_down/1`), and starts nothing.
   @impl true
+  def handle_info(message, %{settling: %{}} = state)
+      when message in [:boot, :replace] or
+             (is_tuple(message) and tuple_size(message) >= 2 and
+                elem(message, 0) in [:retry_block, :reconcile]),
+      do: {:noreply, defer(state, message)}
+
   def handle_info({:op, token, message}, %{op: %{token: token}} = state),
     do: {:noreply, step(state, message)}
 
@@ -1100,7 +1116,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   # no lease is held (`no_server/2`); none while a resolution's outcome is
   # unproven.
   defp server_down(%{op: nil, settling: %{}} = state),
-    do: publish(%{state | server: nil, server_ref: nil, hold: nil})
+    do: defer(publish(%{state | server: nil, server_ref: nil, hold: nil}), :replace)
 
   defp server_down(%{op: nil} = state) do
     state = publish(%{state | server: nil, server_ref: nil, hold: nil, hold_state: :pending})
@@ -1370,12 +1386,38 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   # Proven committed: the reconciliation; definitely not committed: back to
   # b2α's rules (a server lost meanwhile gets its held replacement).
+  # A proven commit takes the reconciliation, which re-observes the runtime
+  # itself (a deferred boot retry or replacement tick is superseded by it);
+  # a definite non-commit replays the deferred work in its order.
   defp resettle(state) do
     case settle(state, state.settling) do
-      {:proven, _reply} -> after_resolution(resolved_ledger(%{state | settling: nil}))
-      {:unproven, _reply} -> schedule_settle(state)
-      {:settled, _reply} -> retry_replacement(publish(unmask_desired(%{state | settling: nil})))
+      # C2-02c: a proven commit closes the switch (terminal); a definite
+      # non-commit restores the masked desired profile. `resume/2` publishes.
+      {:proven, _reply} ->
+        state
+        |> resolved_ledger()
+        |> resume(&(&1 not in [:boot, :replace]))
+        |> after_resolution()
+
+      {:unproven, _reply} ->
+        schedule_settle(state)
+
+      {:settled, _reply} ->
+        state |> unmask_desired() |> resume(fn _message -> true end) |> retry_replacement()
     end
+  end
+
+  defp defer(state, message) do
+    if message in state.deferred,
+      do: state,
+      else: %{state | deferred: state.deferred ++ [message]}
+  end
+
+  # The settlement is definite: the deferred messages `keep?` keeps are
+  # delivered again, in order.
+  defp resume(state, keep?) do
+    for message <- state.deferred, keep?.(message), do: send(self(), message)
+    publish(%{state | settling: nil, deferred: []})
   end
 
   # The barrier and exact re-read, as `model_runtime` in this process. A
@@ -1444,6 +1486,14 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
       not child?(pid) ->
         Logger.error("a named ClaudeCLI server runs outside the model server supervisor; held")
         publish(state)
+
+      # b2α's own-boot failed-start exclusion (as `first_start/2`): this
+      # boot's own server, not ready on its start (its no-call preflight
+      # failed), is never adopted, never given `:adopted` evidence and never
+      # released; it stays held.
+      pid == state.spawned and not ready_on?(state, pid) ->
+        Logger.error("this boot's own server failed its readiness; held after the resolution")
+        publish(%{state | hold_state: :held})
 
       adoptable?(pid, desired) ->
         adopted_server(state, pid, desired)
