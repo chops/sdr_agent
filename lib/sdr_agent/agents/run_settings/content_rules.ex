@@ -293,8 +293,10 @@ defmodule SdrAgent.Agents.RunSettings.ContentRules do
   defp kind_errors(_kind), do: [{:kind, :not_allowed}]
 
   defp content_errors(kind, content) when kind in @kinds and is_map(content) do
-    case validate(kind, plain(content)) do
-      :ok -> []
+    with {:ok, content} <- canonical(kind, plain(content)),
+         :ok <- validate(kind, content) do
+      []
+    else
       {:error, errors} -> errors
     end
   end
@@ -339,6 +341,72 @@ defmodule SdrAgent.Agents.RunSettings.ContentRules do
     do: Enum.find(Safeguards.limit_fields(), :unknown, &(Atom.to_string(&1) == name))
 
   defp limit_name(_name), do: :unknown
+
+  @content_fields %{
+    offering_profile: [:name, :summary, :audience, :items],
+    booking_link: [:url],
+    writing_guide: [:text],
+    research_brief: [:guidance, :depth],
+    operational_limits: Safeguards.limit_fields()
+  }
+  @item_fields [:id, :kind, :text]
+
+  @doc """
+  The one representation of a content input that is both validated and cast:
+  every known field under its atom key, recursively through offering items.
+  A field given under both its atom and its string key is refused
+  (`{field, :alias_conflict}`), whatever the two values are, so validation
+  and the Ash cast can never see different values; neither value is echoed.
+  Unknown keys are kept, for `validate/2` to refuse. `{:ok, content}` or
+  `{:error, [{field, rule}]}`.
+  """
+  @spec canonical(atom(), term()) :: {:ok, term()} | {:error, [{atom(), atom()}]}
+  def canonical(kind, content) when is_map(content) do
+    with {:ok, content} <- keyed(content, Map.get(@content_fields, kind, [])) do
+      canonical_items(kind, content)
+    end
+  end
+
+  def canonical(_kind, content), do: {:ok, content}
+
+  defp canonical_items(:offering_profile, %{items: items} = content) when is_list(items) do
+    items
+    |> Enum.reduce_while({:ok, []}, fn
+      item, {:ok, acc} when is_map(item) ->
+        case keyed(item, @item_fields) do
+          {:ok, item} -> {:cont, {:ok, [item | acc]}}
+          error -> {:halt, error}
+        end
+
+      item, {:ok, acc} ->
+        {:cont, {:ok, [item | acc]}}
+    end)
+    |> case do
+      {:ok, items} -> {:ok, %{content | items: Enum.reverse(items)}}
+      error -> error
+    end
+  end
+
+  defp canonical_items(_kind, content), do: {:ok, content}
+
+  defp keyed(map, fields) do
+    conflicts =
+      for field <- fields,
+          Map.has_key?(map, field) and Map.has_key?(map, Atom.to_string(field)),
+          do: {field, :alias_conflict}
+
+    if conflicts == [] do
+      {:ok,
+       Map.new(map, fn {key, value} ->
+         case Enum.find(fields, &(Atom.to_string(&1) == key)) do
+           nil -> {key, value}
+           field -> {field, value}
+         end
+       end)}
+    else
+      {:error, conflicts}
+    end
+  end
 
   @doc "`:ok` or `{:error, rule}` for settings text (before trimming)."
   @spec text(String.t()) :: :ok | {:error, atom()}

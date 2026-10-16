@@ -3,7 +3,9 @@ defmodule SdrAgent.Agents.Changes.SettingsRevisionChain do
   Builds a `SdrAgent.Agents.SettingsRevision` in `:create_revision` (C4,
   `docs/product/c4/readiness.md` sections 3.2, 3.7, 4 and 12).
 
-  When the changeset is built: the `content` argument is checked by
+  When the changeset is built: the `content` argument is brought to its one
+  atom-keyed representation (`ContentRules.canonical/2`, refusing a field
+  given under both its atom and string key), checked by
   `SdrAgent.Agents.RunSettings.ContentRules.validate/2` (every field error
   is kept under its own field name, never with its value) and only then
   cast into the embedded attribute named by `kind`; and `confirm_raised` must hold no
@@ -62,6 +64,7 @@ defmodule SdrAgent.Agents.Changes.SettingsRevisionChain do
 
     with content when is_map(content) <-
            ContentRules.plain(Ash.Changeset.get_argument(changeset, :content)),
+         {:ok, content} <- ContentRules.canonical(kind, content),
          :ok <- ContentRules.validate(kind, content),
          {:ok, value} when not is_nil(value) <-
            Ash.Type.cast_input(attribute.type, content, attribute.constraints),

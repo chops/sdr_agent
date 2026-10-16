@@ -20,6 +20,15 @@ defmodule SdrAgent.Repo.SafeMetadata do
       table gives the error's own SQLSTATE, else `"other"`) and `constraint` (a constraint or index
       name declared by the app's resources, else `"other"`).
 
+  `pg_code` depends on `Postgrex.ErrorCode.code_to_name/1`, an internal
+  (`@moduledoc false`) Postgrex function: at the locked Postgrex 0.22.4 it is
+  generated from Postgrex's fixed `errcodes.txt` (literal SQLSTATE clauses
+  and a catch-all nil; no atom creation). Its stability is not promised by
+  Postgrex, so a Postgrex upgrade must re-check it; the upgrade-check tests
+  (a known code, an unknown code, a mismatched name and a missing code) pin
+  the behaviour, and a failed lookup is always `"other"`, never an
+  inspected or free-text fallback.
+
   Never: bound parameters, SQL text (in full or as a digest), an exception
   message or `inspect` of any error, PostgreSQL DETAIL, HINT, where or
   column values, the Repo URL, user name, password or connection options.

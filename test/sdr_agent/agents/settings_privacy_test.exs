@@ -376,6 +376,98 @@ defmodule SdrAgent.Agents.SettingsPrivacyTest do
     end
   end
 
+  # Codex 54aac3c re-review: an atom/string key alias must not let the
+  # validated and the cast representation differ.
+  describe "Codex 54aac3c review regressions" do
+    test "an atom/string key alias is refused and its value reaches no span status", ctx do
+      value = "private shape alias c4 ZQXJ7"
+      content = Map.put(%{text: "Plain guide."}, "text", %{private: value})
+
+      result =
+        Agents.create_settings_revision(
+          %{kind: :writing_guide, content: content, expected_number: 0},
+          actor: ctx.admin
+        )
+
+      assert match?({:error, {:invalid, _}}, result), "C4-01a: the alias was not refused"
+      refute inspect(result, limit: :infinity) =~ value
+      Process.sleep(50)
+      assert leaking_status_spans(value) == []
+      assert leaking_status_spans("Plain guide.") == []
+    end
+
+    test "aliases inside offering items are refused too", ctx do
+      value = "private item alias c4 ZQXJ7"
+      item = Map.put(%{id: "item_a", kind: :feature, text: "Item."}, "text", %{private: value})
+      content = content(:offering_profile, %{items: [item]})
+
+      result =
+        Agents.create_settings_revision(
+          %{kind: :offering_profile, content: content, expected_number: 0},
+          actor: ctx.admin
+        )
+
+      assert match?({:error, {:invalid, _}}, result), "C4-01a: the item alias was not refused"
+      refute inspect(result, limit: :infinity) =~ value
+      Process.sleep(50)
+      assert leaking_status_spans(value) == []
+    end
+
+    test "string keys alone are accepted as the same content", ctx do
+      saved =
+        save!(:writing_guide, %{"text" => "String keyed guide."}, ctx.admin, expected_number: 0)
+
+      assert saved.writing_guide.text == "String keyed guide."
+    end
+
+    test "an aliased content map on the action itself is refused without leaking", ctx do
+      value = "private direct alias c4 ZQXJ7"
+      content = Map.put(%{text: "Plain guide."}, "text", %{private: value})
+
+      result =
+        SdrAgent.Agents.SettingsRevision
+        |> Ash.Changeset.for_create(
+          :create_revision,
+          %{kind: :writing_guide, content: content, expected_number: 0},
+          actor: ctx.admin
+        )
+        |> Ash.create()
+
+      assert match?({:error, %Ash.Error.Invalid{}}, result)
+      refute inspect(result, limit: :infinity) =~ value
+      Process.sleep(50)
+      assert leaking_status_spans(value) == []
+    end
+  end
+
+  # Postgrex.ErrorCode.code_to_name/1 is internal: upgrade checks.
+  describe "SafeMetadata pg_code upgrade checks" do
+    defp pg(postgres),
+      do:
+        SdrAgent.Repo.SafeMetadata.fields(%{}, %{
+          repo: SdrAgent.Repo,
+          result: {:error, %Postgrex.Error{postgres: postgres}}
+        }).pg_code
+
+    test "a known SQLSTATE and its own name are kept" do
+      assert pg(%{code: :unique_violation, pg_code: "23505"}) == "unique_violation"
+      assert pg(%{code: :check_violation, pg_code: "23514"}) == "check_violation"
+    end
+
+    test "an unknown SQLSTATE is other" do
+      assert pg(%{code: :unique_violation, pg_code: "ZZ999"}) == "other"
+    end
+
+    test "a name that is not its SQLSTATE's name is other" do
+      assert pg(%{code: :check_violation, pg_code: "23505"}) == "other"
+    end
+
+    test "a missing SQLSTATE or postgres map is other" do
+      assert pg(%{code: :unique_violation}) == "other"
+      assert pg(nil) == "other"
+    end
+  end
+
   defp leaking_status_spans(value) do
     for record <- InMemoryExporter.spans(),
         inspect(elem(record, 13), limit: :infinity, printable_limit: :infinity) =~ value,
