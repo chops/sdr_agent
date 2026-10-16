@@ -20,9 +20,9 @@ defmodule SdrAgentWeb.GrantForm do
 
   Only the shape of the input is checked here (required fields, numbers,
   times, known values, at least one profile, repeated key/profile pairs).
-  The domain validates the
-  terms themselves (window order, positive limits, the allocation sum,
-  profile membership) and `SdrAgentWeb.AdminLive` shows its errors inline.
+  The domain validates the terms themselves (window order, positive limits,
+  the allocation sum, profile membership) and `SdrAgentWeb.AdminLive` shows
+  its errors inline.
   """
 
   alias SdrAgent.Agents.ModelCallAllocation
