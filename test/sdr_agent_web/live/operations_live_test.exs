@@ -272,14 +272,27 @@ defmodule SdrAgentWeb.OperationsLiveTest do
       assert has_element?(view, "#run-header a[data-trace-id='#{run.trace_id}']")
     end
 
+    # C4-01b (Codex ruling on 0408661): a run with a settings snapshot also
+    # records the snapshot shown. Still exact: one access per resource.
     test "an auditor's run view is recorded with the run id", %{conn: conn, run: run} = ctx do
       auditor = user!(ctx, :auditor)
       {:ok, _view, _html} = conn |> sign_in(:auditor) |> live(~p"/runs/#{run.id}")
 
-      assert [%{target_resource: "SdrAgent.Agents.AgentRun", target_ref: ref}] =
-               accesses_of(ctx, auditor)
+      accesses = accesses_of(ctx, auditor)
+      assert length(accesses) == 2
 
-      assert ref == run.id
+      assert [%{target_ref: run_ref}] =
+               Enum.filter(accesses, &(&1.target_resource == "SdrAgent.Agents.AgentRun"))
+
+      assert run_ref == run.id
+
+      assert [%{target_ref: snapshot_ref}] =
+               Enum.filter(
+                 accesses,
+                 &(&1.target_resource == "SdrAgent.Agents.RunSettingsSnapshot")
+               )
+
+      assert snapshot_ref == run.settings_snapshot_id
     end
   end
 end
