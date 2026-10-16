@@ -32,6 +32,27 @@ defmodule SdrAgent.Agents.Witness.EnablementTest do
     projection_version: "claude-message-json/3+prompt-builder/1",
     method: :propagated_id
   }
+
+  # R0-06 promotion (D-142): the two generation-2 tuples, each bound to its
+  # own Codex calibration evidence PASS (Opus 0c2e3735, Sonnet a2e8a0b2).
+  @shipped_gen2 [
+    %{
+      provider: :claude_cli,
+      cli_version: "2.1.294",
+      profile_id: :claude_cli_opus,
+      model_id: "claude-opus-5-5",
+      projection_version: "claude-message-json/3+prompt-builder/1",
+      method: :propagated_id
+    },
+    %{
+      provider: :claude_cli,
+      cli_version: "2.1.294",
+      profile_id: :claude_cli_sonnet,
+      model_id: "claude-sonnet-5-5",
+      projection_version: "claude-message-json/3+prompt-builder/1",
+      method: :propagated_id
+    }
+  ]
   @env "SDR_WITNESS_STORE_ROOT"
 
   setup do
@@ -64,10 +85,10 @@ defmodule SdrAgent.Agents.Witness.EnablementTest do
   defp runtime(env), do: Config.Reader.read!("config/runtime.exs", env: env, target: :host)
 
   describe "shipped allowlist (R3)" do
-    test "dev and prod ship exactly the one exact v3 entry, without test overrides" do
+    test "dev and prod ship exactly the generation-1 entry and the two promoted R0-06 tuples, without test overrides" do
       for env <- [:dev, :prod] do
         config = witness(shipped(env))
-        assert Keyword.get(config, :reconciled_methods) == [@entry], inspect(env)
+        assert Keyword.get(config, :reconciled_methods) == [@entry | @shipped_gen2], inspect(env)
         assert Keyword.get(config, :store_root) == nil, inspect(env)
         refute Keyword.get(config, :allow_method_override, false), inspect(env)
       end
