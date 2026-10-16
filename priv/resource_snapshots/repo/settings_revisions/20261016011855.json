@@ -1,0 +1,430 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "kind",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "number",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "[]",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "raised_fields",
+      "type": [
+        "array",
+        "text"
+      ]
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "offering_profile",
+      "type": "map"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "booking_link",
+      "type": "map"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "writing_guide",
+      "type": "map"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "research_brief",
+      "type": "map"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "operational_limits",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "content_sha256",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "note",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "settings_revisions_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "settings_revisions_created_by_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "created_by_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "supersedes_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "settings_revisions_trace_ids"
+    },
+    {
+      "attribute": [
+        "kind"
+      ],
+      "base_filter": null,
+      "check": "kind IN ('offering_profile', 'booking_link', 'writing_guide', 'research_brief', 'operational_limits')",
+      "name": "settings_revisions_kind"
+    },
+    {
+      "attribute": [
+        "kind"
+      ],
+      "base_filter": null,
+      "check": "((kind = 'offering_profile') = (offering_profile IS NOT NULL)) AND ((kind = 'booking_link') = (booking_link IS NOT NULL)) AND ((kind = 'writing_guide') = (writing_guide IS NOT NULL)) AND ((kind = 'research_brief') = (research_brief IS NOT NULL)) AND ((kind = 'operational_limits') = (operational_limits IS NOT NULL))",
+      "name": "settings_revisions_content_matches_kind"
+    },
+    {
+      "attribute": [
+        "number"
+      ],
+      "base_filter": null,
+      "check": "number >= 1 AND ((number = 1) = (supersedes_id IS NULL))",
+      "name": "settings_revisions_root_number"
+    },
+    {
+      "attribute": [
+        "raised_fields"
+      ],
+      "base_filter": null,
+      "check": "kind = 'operational_limits' OR cardinality(raised_fields) = 0",
+      "name": "settings_revisions_raised_fields_limits_only"
+    },
+    {
+      "attribute": [
+        "raised_fields"
+      ],
+      "base_filter": null,
+      "check": "raised_fields <@ ARRAY['run_max_model_calls', 'run_max_tool_calls', 'run_max_tokens', 'research_max_search_requests', 'research_max_page_fetches', 'research_max_sources', 'research_max_source_chars', 'research_max_total_source_chars', 'research_max_output_tokens', 'research_max_model_calls', 'research_target_seconds', 'research_job_limit_seconds']::text[]",
+      "name": "settings_revisions_raised_fields_names"
+    },
+    {
+      "attribute": [
+        "content_sha256"
+      ],
+      "base_filter": null,
+      "check": "content_sha256 ~ '^[0-9a-f]{64}$'",
+      "name": "settings_revisions_content_sha256_hex"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION settings_revisions_append_only()",
+      "global?": false,
+      "name": "settings_revisions_guard_function",
+      "up": "CREATE FUNCTION settings_revisions_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER settings_revisions_guard_row ON settings_revisions",
+      "global?": false,
+      "name": "settings_revisions_guard_row",
+      "up": "CREATE TRIGGER settings_revisions_guard_row BEFORE UPDATE OR DELETE ON settings_revisions FOR EACH ROW EXECUTE FUNCTION settings_revisions_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER settings_revisions_guard_truncate ON settings_revisions",
+      "global?": false,
+      "name": "settings_revisions_guard_truncate",
+      "up": "CREATE TRIGGER settings_revisions_guard_truncate BEFORE TRUNCATE ON settings_revisions FOR EACH STATEMENT EXECUTE FUNCTION settings_revisions_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE settings_revisions DROP CONSTRAINT settings_revisions_id_tenant_kind_key",
+      "global?": false,
+      "name": "settings_revisions_id_tenant_kind_key",
+      "up": "ALTER TABLE settings_revisions ADD CONSTRAINT settings_revisions_id_tenant_kind_key UNIQUE (id, tenant_id, kind)"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE settings_revisions DROP CONSTRAINT settings_revisions_id_tenant_kind_sha_key",
+      "global?": false,
+      "name": "settings_revisions_id_tenant_kind_sha_key",
+      "up": "ALTER TABLE settings_revisions ADD CONSTRAINT settings_revisions_id_tenant_kind_sha_key UNIQUE (id, tenant_id, kind, content_sha256)"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE settings_revisions DROP CONSTRAINT settings_revisions_supersedes_fkey",
+      "global?": false,
+      "name": "settings_revisions_supersedes_fkey",
+      "up": "ALTER TABLE settings_revisions ADD CONSTRAINT settings_revisions_supersedes_fkey FOREIGN KEY (supersedes_id, tenant_id, kind) REFERENCES settings_revisions (id, tenant_id, kind) ON DELETE RESTRICT"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "74493872D39859F9BAD1BF2D3C6215E675A167EAD02DD652D2732B978E6BA757",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "settings_revisions_one_root_per_kind_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "kind"
+        }
+      ],
+      "name": "one_root_per_kind",
+      "nils_distinct?": true,
+      "where": "supersedes_id IS NULL"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "settings_revisions_supersedes_once_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "supersedes_id"
+        }
+      ],
+      "name": "supersedes_once",
+      "nils_distinct?": true,
+      "where": "supersedes_id IS NOT NULL"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "settings_revisions_unique_number_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "kind"
+        },
+        {
+          "type": "atom",
+          "value": "number"
+        }
+      ],
+      "name": "unique_number",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "settings_revisions"
+}

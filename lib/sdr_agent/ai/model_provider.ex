@@ -70,6 +70,7 @@ defmodule SdrAgent.AI.ModelProvider do
           required(:schema) => Zoi.schema(),
           required(:audit) => map(),
           optional(:input) => map(),
+          optional(:content_capture) => :inherit | :off,
           optional(:witness) => %{model_invocation_id: String.t(), traceparent: String.t() | nil}
         }
   @type result :: map()
@@ -95,7 +96,7 @@ defmodule SdrAgent.AI.ModelProvider do
     with {:ok, provenance} <- provider.prepare(request, provider_options),
          {:ok, invocation} <- reserve(request, provenance),
          {:ok, invocation} <- before_call(invocation, request) do
-      metadata = %{id: request.id, model: provenance.model_id, input: request.prompt}
+      metadata = span_metadata(request, provenance)
 
       GenAI.with_span(request.operation, metadata, fn ->
         # Captured here, in the caller's process inside the gen_ai span and
@@ -301,7 +302,7 @@ defmodule SdrAgent.AI.ModelProvider do
 
       case CalibrationCall.target(request, invocation_id, provider_options) do
         {:ok, invocation, provenance} ->
-          metadata = %{id: request.id, model: provenance.model_id, input: request.prompt}
+          metadata = span_metadata(request, provenance)
 
           GenAI.with_span(request.operation, metadata, fn ->
             witness = %{model_invocation_id: invocation.id, traceparent: GenAI.traceparent()}
@@ -317,6 +318,25 @@ defmodule SdrAgent.AI.ModelProvider do
         :invalid ->
           {:error, :calibration_call_invalid}
       end
+    end
+  end
+
+  # C4: the request's `content_capture` (`:off` for input that carries run
+  # settings) decides the span's content events; provider options cannot
+  # turn capture back on.
+  defp span_metadata(request, provenance) do
+    %{
+      id: request.id,
+      model: provenance.model_id,
+      input: request.prompt,
+      content_capture: content_capture(request)
+    }
+  end
+
+  defp content_capture(request) do
+    case Map.get(request, :content_capture, :inherit) do
+      :inherit -> :inherit
+      _off -> :off
     end
   end
 

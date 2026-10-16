@@ -41,9 +41,19 @@ defmodule SdrAgent.Agents.AgentRun do
   `:finish_calibration`, running → succeeded with `:calibration_latched`,
   given its `:calibration` latch, `SdrAgent.Agents.Changes.CalibrationLatch`).
 
-  Counters: `:reserve_model_call` (atomic, refuses at `max_model_calls`),
-  `:settle_model_call`, `:record_tool_call` (atomic, refuses at
-  `max_tool_calls`) — counters only increase. An operator `:retry` creates a
+  Run settings (C4): `:create` binds the run to a new
+  `SdrAgent.Agents.RunSettingsSnapshot` (`settings_snapshot_id`) in its own
+  transaction, refuses a business origin without a saved offering profile
+  (`settings_incomplete`), and freezes `budget.max_model_calls`,
+  `max_tool_calls` and `max_tokens` at the lower of the caller's argument
+  and the snapshot's limit (`SdrAgent.Agents.Changes.BuildSettingsSnapshot`);
+  `:retry` copies the snapshot. A database trigger refuses a new run without
+  a snapshot and any update of `settings_snapshot_id`.
+
+  Counters: `:reserve_model_call` (atomic, refuses at `max_model_calls` or
+  once `tokens_used` reaches `max_tokens`), `:settle_model_call`,
+  `:record_tool_call` (atomic, refuses at `max_tool_calls`) — counters only
+  increase. An operator `:retry` creates a
   new run linked by `retry_of_id` (and, for an assignment, bound to its new
   Operation).
 
@@ -122,6 +132,9 @@ defmodule SdrAgent.Agents.AgentRun do
       reference :retry_of, on_delete: :restrict
       reference :operation, on_delete: :restrict
       reference :attention_failure, on_delete: :restrict
+      # C4: the composite (settings_snapshot_id, tenant_id) foreign key is a
+      # custom statement below.
+      reference :settings_snapshot, ignore?: true
     end
 
     check_constraints do
@@ -133,6 +146,47 @@ defmodule SdrAgent.Agents.AgentRun do
       check_constraint :status_reason, "agent_runs_status_reason_required",
         check:
           "status NOT IN ('failed', 'budget_exhausted', 'cancelled') OR status_reason IS NOT NULL"
+    end
+
+    custom_statements do
+      # C4: a run's settings snapshot is its own tenant's.
+      statement :agent_runs_settings_snapshot_fkey do
+        up "ALTER TABLE agent_runs ADD CONSTRAINT agent_runs_settings_snapshot_fkey " <>
+             "FOREIGN KEY (settings_snapshot_id, tenant_id) " <>
+             "REFERENCES run_settings_snapshots (id, tenant_id) ON DELETE RESTRICT"
+
+        down "ALTER TABLE agent_runs DROP CONSTRAINT agent_runs_settings_snapshot_fkey"
+      end
+
+      # C4 cutover (packet section 3.2, obligation 2): every new run binds a
+      # snapshot; no update attaches, replaces or clears one. Runs created
+      # before the cutover keep a null snapshot and every other transition.
+      statement :agent_runs_settings_snapshot_cutover_function do
+        up """
+        CREATE FUNCTION agent_runs_settings_snapshot_cutover() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF TG_OP = 'INSERT' AND NEW.settings_snapshot_id IS NULL THEN
+            RAISE EXCEPTION 'agent_runs.settings_snapshot_id is required for a new run (C4 cutover)'
+              USING ERRCODE = 'restrict_violation';
+          END IF;
+          IF TG_OP = 'UPDATE' AND NEW.settings_snapshot_id IS DISTINCT FROM OLD.settings_snapshot_id THEN
+            RAISE EXCEPTION 'agent_runs.settings_snapshot_id is immutable: update rejected'
+              USING ERRCODE = 'restrict_violation';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+
+        down "DROP FUNCTION agent_runs_settings_snapshot_cutover()"
+      end
+
+      statement :agent_runs_settings_snapshot_cutover do
+        up "CREATE TRIGGER agent_runs_settings_snapshot_cutover BEFORE INSERT OR UPDATE " <>
+             "ON agent_runs FOR EACH ROW EXECUTE FUNCTION agent_runs_settings_snapshot_cutover()"
+
+        down "DROP TRIGGER agent_runs_settings_snapshot_cutover ON agent_runs"
+      end
     end
   end
 
@@ -151,9 +205,11 @@ defmodule SdrAgent.Agents.AgentRun do
         :operation_id
       ]
 
-      argument :max_model_calls, :integer, default: 20, constraints: [min: 0]
-      argument :max_tool_calls, :integer, allow_nil?: false, constraints: [min: 0]
-      argument :max_tokens, :integer, default: 100_000, constraints: [min: 0]
+      # C4: optional caller limits; the frozen budget is the lower of each
+      # and the run settings snapshot's `run_*` limit (BuildSettingsSnapshot).
+      argument :max_model_calls, :integer, constraints: [min: 0]
+      argument :max_tool_calls, :integer, constraints: [min: 0]
+      argument :max_tokens, :integer, constraints: [min: 0]
 
       # C9: chosen by the server code of the entry point that creates the run
       # (`SdrAgent.SDR.assign_lead/2` → :assignment, reply intake → :reply),
@@ -163,17 +219,10 @@ defmodule SdrAgent.Agents.AgentRun do
         constraints: [one_of: SdrAgent.Agents.UsageBucket.origins()]
 
       change set_attribute(:usage_origin, arg(:usage_origin))
-
-      change fn changeset, _context ->
-        Ash.Changeset.force_change_attribute(changeset, :budget, %{
-          max_model_calls: Ash.Changeset.get_argument(changeset, :max_model_calls),
-          max_tool_calls: Ash.Changeset.get_argument(changeset, :max_tool_calls),
-          max_tokens: Ash.Changeset.get_argument(changeset, :max_tokens)
-        })
-      end
-
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
+      # C4: the run binds its settings snapshot and freezes its budget.
+      change SdrAgent.Agents.Changes.BuildSettingsSnapshot
 
       change {AppendEvent,
               event_type: "agents.run.created", category: :domain_change, links: @links}
@@ -393,9 +442,11 @@ defmodule SdrAgent.Agents.AgentRun do
       require_atomic? false
       description "Reserve one model call before it is made (atomic; refuses at the limit)."
 
+      # C4: the run's frozen budget, on the locked row; the token check
+      # stops the next call (one call may overshoot).
       change {BudgetCounter,
               increment: [model_calls_reserved: 1],
-              limit: {:model_calls_reserved, :max_model_calls}}
+              limit: [{:model_calls_reserved, :max_model_calls}, {:tokens_used, :max_tokens}]}
 
       change {AppendEvent,
               event_type: "agents.run.model_call_reserved",
@@ -553,6 +604,14 @@ defmodule SdrAgent.Agents.AgentRun do
     end
 
     belongs_to :attention_failure, SdrAgent.Operations.Failure do
+      attribute_writable? false
+      public? true
+    end
+
+    # C4: the run settings snapshot the run (and its retries) uses; set only
+    # by :create (BuildSettingsSnapshot) and :retry (RetryOf), never by input;
+    # null only for runs created before the C4 cutover.
+    belongs_to :settings_snapshot, SdrAgent.Agents.RunSettingsSnapshot do
       attribute_writable? false
       public? true
     end

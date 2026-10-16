@@ -120,6 +120,10 @@ Constraints on the real provider:
   enforced before the call (pre-call reservation) and reconciled after it
   using provider-reported usage. Exhaustion persists a reason and requires an
   operator action; it never retries in a loop.
+  *C4 note (2026-10-14, owner decision D-062 / C4 OQ-2; in force when C4
+  merges): the 20-per-run figure is the built-in default of the owner-editable
+  `run_max_model_calls` limit, frozen per run in its settings snapshot; the
+  200-per-UTC-day limit, C9 grants and pre-call reservation are unchanged.*
 - **Concurrency 1:** app-server calls are serialized until trace or
   invocation-ID propagation to the wire witness is proven (ADR-0005).
 - **Preflight model selection:** the model is chosen at startup from the

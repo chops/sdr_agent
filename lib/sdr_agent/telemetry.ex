@@ -15,7 +15,10 @@ defmodule SdrAgent.Telemetry do
     unless :persistent_term.get(@setup_key, false) do
       OpentelemetryBandit.setup()
       OpentelemetryPhoenix.setup(adapter: :bandit)
-      OpentelemetryEcto.setup([:sdr_agent, :repo])
+      # ADR-0005 C4 amendment: metadata-only query logs and spans in every
+      # environment; `opentelemetry_ecto` stays pinned but is not attached.
+      SdrAgent.Repo.QueryLog.setup()
+      SdrAgent.Telemetry.RepoSpans.setup()
       OpentelemetryOban.setup()
       :persistent_term.put(@setup_key, true)
     end
