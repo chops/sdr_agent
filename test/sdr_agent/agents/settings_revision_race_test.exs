@@ -99,12 +99,17 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
     end
   end
 
+  # A failed query aborts the transaction, so it is rolled back with the
+  # Postgrex error itself: `{:error, %Postgrex.Error{}}` when the row is locked.
   defp lock_nowait(revision_id, mode) do
     Repo.transaction(fn ->
-      Repo.query(
-        "SELECT 1 FROM settings_revisions WHERE id = $1 #{mode} NOWAIT",
-        [Ecto.UUID.dump!(revision_id)]
-      )
+      case Repo.query(
+             "SELECT 1 FROM settings_revisions WHERE id = $1 #{mode} NOWAIT",
+             [Ecto.UUID.dump!(revision_id)]
+           ) do
+        {:ok, result} -> {:ok, result}
+        {:error, error} -> Repo.rollback(error)
+      end
     end)
   end
 
@@ -116,7 +121,7 @@ defmodule SdrAgent.Agents.SettingsRevisionRaceTest do
 
     case Task.await(task, 10_000) do
       {:ok, {:ok, _}} -> :free
-      {:ok, {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}}} -> :locked
+      {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}} -> :locked
       other -> {:probe_failed, other}
     end
   end
