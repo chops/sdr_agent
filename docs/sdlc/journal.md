@@ -823,6 +823,53 @@ did, with a regression test; 10 of 10 gates ran clean afterwards.
 R0-06 is still forecast for Fri Oct 23. It is tight: R0-05 needs about a
 day more, and the merges are the owner's call.
 
+### Sprint 1, day 5 (Fri Oct 16), mid-morning (as of 09:45 MDT)
+
+**R0-05:**
+- **Docs:** the owner chose option B (D-141). Codex passed the rewritten
+  ADR-0005 amendment and the interface, draft 4 (`d0c80ff`).
+- **RED:** verified at `1ddd1a2`, with 15 tests failing as intended out
+  of 62.
+- **Merge:** C4-01a (#165) is merged into the R0-05 branch for its
+  exception filter. Codex passed that merge.
+- **Next:** GREEN waits only on the owner accepting the ADR text.
+
+**Unblocked after Bandit, approved, CI green:**
+- #158 (R0-04) and #157 (C9-04): updated from main, full gates green,
+  integration approved.
+- #169 (C1-02, Codex's branch, no PR until now): updated from main, full
+  gate green (2531 passed), integration approved.
+- #170 (C9-06 evidence, stacked on #169): Codex approved it. Its full
+  gate runs after #169 merges.
+
+**R0-06:**
+- The evidence record and owner runbook (#171, draft) passed at draft 3,
+  after two NEEDS-REVIEW rounds.
+- Codex ruled that the acceptance needs two actual attempts per profile;
+  that question (OQ-R6-1) is with the owner.
+- Ordinary real calls stay staged after R0-06.
+
+**#166 held.** Codex's OQ-R5-1 pre-read found the settings page's
+private content in more places than the channel:
+- the loaded settings, for every role;
+- the editor's state;
+- the raw last message;
+- the separate WebSocket transport process;
+- the synchronous save stack.
+
+Tagging the page alone doesn't keep C4's private-content promise. That
+needs full holder and reporter coverage under its own ADR-0005 section,
+or a new, explicit owner exception. #166 is no longer
+"ready to merge unconditionally". It isn't on the R0-06 path. #165 is
+unaffected.
+
+**Misstep:** the G-R0 expiry weekday (it is Sunday). See the table.
+
+**Tripwires:**
+- **2:** the R0-06 record took two NEEDS-REVIEW rounds.
+- **4:** the calibration attempts are due by Sun Oct 18, 23:59 MDT, and
+  the attempt count is undecided.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
