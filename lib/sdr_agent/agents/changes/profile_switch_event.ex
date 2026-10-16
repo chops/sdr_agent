@@ -9,6 +9,14 @@ defmodule SdrAgent.Agents.Changes.ProfileSwitchEvent do
   read in this transaction),
   `failure_reason`, the `action` and `record_sha256` of the stored row.
 
+  On `:resolve_blocked` (`model.profile.switch_resolved`, C2-02b2β) the
+  metadata is closed: besides the flat keys above, only `switch_id`,
+  `tenant_id`, `attestation_id`, the covered generations `[first, last]`
+  (`[server_generation, attested_generation]`), `attested_lease_kind`, the
+  `outcome` (`failed`) and the `resolution`; `failure_reason` is the block's
+  and `setting_revision` the stored, unchanged one. No confirmation text,
+  pid or ref is ever named.
+
   On `:request`, when this transaction inserted the setting row (evidence
   `:initialized` of the `:initialize` phase, matched against the stored
   row), it first appends
@@ -99,17 +107,36 @@ defmodule SdrAgent.Agents.Changes.ProfileSwitchEvent do
       subject_id: switch.id,
       action: action,
       authorization: %{decision: :authorized, action: "#{inspect(resource)}.#{action}"},
-      payload: %{
-        action: action,
-        from_profile_id: switch.from_profile_id,
-        to_profile_id: switch.to_profile_id,
-        server_generation: switch.server_generation,
-        setting_revision: setting.revision,
-        failure_reason: switch.failure_reason,
-        record_sha256: RecordHash.hex(switch)
-      }
+      payload:
+        Map.merge(
+          %{
+            action: action,
+            from_profile_id: switch.from_profile_id,
+            to_profile_id: switch.to_profile_id,
+            server_generation: switch.server_generation,
+            setting_revision: setting.revision,
+            failure_reason: switch.failure_reason,
+            record_sha256: RecordHash.hex(switch)
+          },
+          resolution_payload(changeset.action.name, switch)
+        )
     }
   end
+
+  # The closed resolution metadata (C2-02b2β, section 4).
+  defp resolution_payload(:resolve_blocked, switch) do
+    %{
+      switch_id: switch.id,
+      tenant_id: switch.tenant_id,
+      attestation_id: switch.attestation_id,
+      covered_generations: [switch.server_generation, switch.attested_generation],
+      attested_lease_kind: switch.attested_lease_kind,
+      outcome: switch.status,
+      resolution: switch.resolution
+    }
+  end
+
+  defp resolution_payload(_action, _switch), do: %{}
 
   defp append(event, switch, actor),
     do: Kernel.append(event, actor: actor, tenant_id: switch.tenant_id)

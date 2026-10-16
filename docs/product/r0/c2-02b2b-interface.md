@@ -4,12 +4,21 @@
 the proposed ADR-0004 amendment PASS for owner presentation** (Codex
 `c523f9ab`, exact `e60943c`, report
 `codex-c202b2beta-e60943c-interface-pass.md`; configured `ai_pair=true`,
-`codex_review=true`). This permits scoped RED only. The owner's
-acceptance of the ADR, OQ-2 and OQ-5, the RED verification and GREEN are
-separate gates. Slice plan: `c2-02-slices.md` (b2β). Builds on b2α
-(`c2-02b2-interface.md`, merged at `22db5c0`). Needs the proposed
-ADR-0004 C2-02b2β amendment (section 7), which the owner must accept
-before implementation approval.
+`codex_review=true`).
+
+**Gates:**
+- **RED:** VERIFIED at `a9a60c4`.
+- **Owner acceptance (2026-10-15, D-138):**
+  - the ADR-0004 C2-02b2β amendment (section 7), at `e60943c`, including
+    OQ-2 (any active human admin resolves);
+  - so b2β GREEN may proceed.
+- **Still open:**
+  - OQ-5 (whether R0-05 gets an attended action for the hard conflict) is
+    still for the owner;
+  - GREEN review, merge and activation are separate gates.
+
+Slice plan: `c2-02-slices.md` (b2β). Builds on b2α
+(`c2-02b2-interface.md`, merged at `22db5c0`).
 
 **Review record:**
 - **Draft 3** (`a62a1af`): interface, entity and ADR NEEDS-REVIEW,
@@ -475,3 +484,36 @@ model calls, no spend, and never the calibration or dev database.
 - Show the section 3 statement and collect the typed confirmation.
 - Report "committed, not ready" truthfully.
 - Show `:cleanup_unprovable` and that it needs the operator.
+
+## Prerequisite correction: the b2α boot gap (found by the C2-02c RED)
+
+**The gap.** The C2-02c RED (`b659d21`; Codex `098ce609`,
+`codex-c202c-b659d21-red-review.md`) reproduced it. At a coordinator
+start whose first start comes back held (for example, a failed preflight
+behind a retained dead lease), `Coordinator.boot/1` publishes without
+blocking an open **pending** switch. That switch then stays pending
+forever, with no exit, because b2β resolves only blocked switches. This
+breaks b2α's accepted rule ("a pending switch at a coordinator start is
+blocked").
+
+**The decision.** Codex ruled that b2β GREEN fixes this narrowly, as a
+prerequisite, with its own α regression test that needs neither the
+resolver nor C2-02c's status. It needs no new ADR or entity change, and
+the owner's ADR gate still applies. The fix must:
+- use the existing registered-coordinator `block` (`coordinator_restarted`)
+  with the stored latest-start boot fence, the normal locks and audit;
+- block only once this coordinator has a valid latest start of its own
+  boot. The same held tuple can come from an unmanaged named process
+  before any allocation, and that grants nothing. A missing, unreadable or
+  failed allocation stays held and is retried;
+- not run all of `after_boot` from a failed-preflight branch. The runtime
+  stays held, and blocked or terminal switch histories are unchanged;
+- also cover the never-started first start. `start_new` can return
+  `{:not_started, state}` after its allocation, and the boot's generic
+  fallback discards that state today;
+- never call `Reaper.release`, unlock unknown cleanup automatically, call
+  a candidate, or relabel a switch as failed at restart. Existing block
+  replay and retry still apply.
+
+If the fix would need a change to the guard, the actor or the start
+lifecycle, stop and submit a narrow entity and interface delta instead.
