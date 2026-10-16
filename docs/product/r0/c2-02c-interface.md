@@ -1,6 +1,6 @@
 # C2-02c interface: restart and status
 
-**Status:** draft 2, 2026-10-15, for Codex's interface and entity
+**Status:** draft 3, 2026-10-15, for Codex's interface and entity
 re-review. Slice plan: `c2-02-slices.md` row c. Builds on b2α (merged at
 `22db5c0`) and b2β (`c2-02b2b-interface.md`, PASS at `e60943c`).
 Implementation lands after b2β.
@@ -15,6 +15,12 @@ Implementation lands after b2β.
   - **MF3:** a bounded sample binding, and every downgrade shape (2a, 2b).
   - **Codex rulings:** OQ-1 is technically recommended yes, pending the
     owner. OQ-2 is a qualified yes (section 1).
+- **Draft 2** (`445f006`): a narrow NEEDS-REVIEW (Codex `9e98ed5e`). Codex
+  accepted the restart and lag groups. Draft 3 answers its two residuals:
+  - **R2-1:** the bracket now covers the server sample and eligibility, so
+    nothing is re-read by name outside it (2a);
+  - **R2-2:** a timestamped confirmed-none switch, split ledger and
+    runtime observations, and every remaining shape (2b).
 - **Pre-read:** `codex-c202-slice-c-preread-22db5c0.md`.
 
 ## 0. Scope, and one narrowing
@@ -69,107 +75,138 @@ seam is added. The owner's runtime and leases are never touched.
 
 ## 2. Status: last confirmed observations, plus sampled runtime eligibility
 
-`Runtime.status/0` reports two kinds of information, and promises
-nothing about any later instant:
+`Runtime.status/0` reports two kinds of information, and promises nothing
+about any later instant. Admission is still decided by normal reservation
+and launch fencing: the durable fence, grants, quotas, the hold and the
+per-call attestation. **Status is never authority.**
 
-- **Ledger-derived fields** (`desired_profile`, `switch`) are the
-  coordinator's **last confirmed observation**. Each carries the time it
-  was confirmed.
-- **Runtime fields** (`observed_profile`, `hold`, `stage`, the admission
-  and attestation views) come from **one bounded sample** of the
-  coordinator's and the server's published tables (2a).
+- **Ledger fields:** `desired_profile` and `switch`. These are the
+  coordinator's last confirmed observations. Each one carries its own
+  `confirmed_at`, including the confirmed "no switch open".
+- **Runtime fields:** `observed_profile`, `hold`, `stage`, the
+  eligibility, and the admission and attestation views. These come from
+  one bracketed sample (2a).
 
-**Authority stays elsewhere.** Admission is decided by normal reservation
-and launch fencing: the durable fence, grants, quotas, the hold, and
-per-call attestation. Status is never authority.
-
-**Its keys for ClaudeCLI** (all existing keys keep their meaning):
+**Public shapes:**
 
 | Key | Value |
 |---|---|
-| `desired_profile` | `%{profile_id, source: :setting \| :default, confirmed_at}` or `:unknown` |
-| `switch` | nil (none open, confirmed), `%{id, from_profile_id, to_profile_id, status: :pending \| :blocked, failure_reason, confirmed_at}`, or `:unknown` |
-| `observed_profile` | the bound server's profile, nil (confirmed: no server), or `:unknown` |
-| `hold` | `:held \| :released \| :pending \| :unknown` |
-| `stage` | the coordinator's stage (including `:cleanup_unprovable`), nil, or `:unknown` |
-| `effective_profile` | `observed_profile` only if the sample is consistent, the hold is `:released`, and `resolve([])` passed at sample time; nil otherwise. **Sampled eligibility, not a promise** about any later call |
-| `observation` | `:consistent \| :inconsistent \| :unavailable` |
-| `published_at` | when the coordinator **published** the record the sample used. It is not when every field was confirmed, which is `confirmed_at` |
+| `desired_profile` | `%{profile_id, source: :setting \| :default, confirmed_at}` \| `:unknown` \| `:not_applicable` |
+| `switch` | `%{state: :none, confirmed_at}` \| `%{state: :open, id, from_profile_id, to_profile_id, status: :pending \| :blocked, failure_reason, confirmed_at}` \| `:unknown` \| `:not_applicable` |
+| `observed_profile` | the bound server's profile \| `:none` (the coordinator positively has no bound server, and no process holds the name) \| `:unknown` \| `:not_applicable` |
+| `hold`, `stage` | the published values \| `:unknown` \| `:not_applicable` |
+| `effective_profile` | the observed profile, only if the runtime sample is `:consistent`, `hold` is `:released`, and eligibility passed inside the bracket; otherwise nil |
+| `effective`, `refusal` | from the same bracketed eligibility (2a). When the sample isn't consistent: `effective: nil` with `refusal: :status_inconsistent` or `:status_unavailable` |
+| `ledger_observation` | `:valid` (the coordinator row and its owner were validated) \| `:unavailable` \| `:not_applicable` |
+| `runtime_observation` | `:consistent` \| `:inconsistent` \| `:unavailable` \| `:not_applicable` |
+| `published_at` | the validated coordinator row's publication time, else nil |
 
-**When the coordinator publishes.**
-- **Who writes:** only the coordinator's own process writes its protected
-  table.
-- **When:** after the outcome of each of its own bounded reads and
-  writes, such as the setting read at boot, the switch read at boot, and
-  `request`, `block`, `complete`, `fail` and `resolve`.
-- **Never** inside `publish`, and never on a status read. There is no new
-  database read.
+**Unknown ledger fields don't block eligibility.** When the runtime is
+consistent and released, but `desired_profile` or `switch` is `:unknown`
+(a failed read), eligibility still follows the runtime and the ledger
+fields show `:unknown`. The reason: before any switch work, the
+coordinator **holds** the server, and a hold is a runtime fact. So a
+released, consistent server isn't mid-switch. An unknown ledger field
+only means the last read failed.
 
-**The intervals in which status lags, all acceptable:**
+**When the coordinator publishes.** Only the coordinator's own process
+writes its protected table, after the outcome of each of its own bounded
+reads and writes: the boot reads of the setting and the switch, and
+`request`, `block`, `complete`, `fail` and `resolve`. It never publishes
+inside `publish` or on a status read, and it adds no database read.
+
+**Lag intervals,** all acceptable:
 
 | Interval | What status shows |
 |---|---|
-| **Request.** The caller commits the request, then casts to the coordinator (`request_switch/2`) | the previous confirmed observation (`switch` nil, `confirmed_at` older), until the coordinator handles the cast and publishes. No synchronous publication of another process's write is promised |
-| **Uncertain finalization or resolution, until settled** | `switch: :unknown`, `desired_profile: :unknown` and `stage` as published (for example `:finalizing` or `:settling`). It never shows the previous value as current |
-| **A failed read** | `:unknown` for that field |
+| The caller commits a request, then casts to the coordinator (`request_switch/2`) | the previous confirmed observation, for example `%{state: :none, confirmed_at: <older>}`, until the coordinator handles the cast and publishes. No synchronous publication of another process's write is promised |
+| An uncertain finalization or resolution, until it is settled | `switch: :unknown`, `desired_profile: :unknown`, and `stage` as published (`:finalizing` or `:settling`) |
+| A failed read | `:unknown` for that field |
 
-### 2a. The bounded sample binding
+### 2a. The bracketed sample
 
-**The coordinator's published record** holds a public part (the fields
-above) and a private part, kept in the same ETS row but never returned:
+**The coordinator's row.** It is one ETS row with a public part (the
+fields above) and a private part, which is never returned by either
+`Runtime.status/0` or `Coordinator.status/0`. `Coordinator.status/0` is
+sanitized to the public part. The private part holds:
 - the coordinator's own pid;
-- the bound server pid;
+- the bound server pid, or `:none`;
 - the start id;
 - the boot id.
 
-**`Runtime.status/0` takes at most three attempts.** Each attempt is
-read-only and calls neither process:
-1. **Read** the coordinator row, R1.
-2. **Check the coordinator.** The table's owner (`:ets.info(table,
-   :owner)`) is `Process.whereis(Coordinator)` and is R1's private
+**One attempt** is read-only, and calls neither process:
+1. **C1:** read the coordinator row. Check that the table's owner is
+   `Process.whereis(Coordinator)` and matches the row's private
    coordinator pid.
-3. **Check the server.** Read the server's status table. Its owner is
-   `Process.whereis(ClaudeCLI.server())` and is R1's private bound server
-   pid. A replacement server with the same profile fails this check.
-4. **Re-read** the coordinator row, R2, and check it equals R1.
+2. **S1:** if the row binds a server, read the server's status table
+   once:
+   - its identity: the table id and owner, where the owner equals both
+     `Process.whereis(ClaudeCLI.server())` and the row's bound pid;
+   - every runtime value status needs: the profile, admission, held, and
+     the attestation view.
+3. **Eligibility,** computed **inside the bracket** as a pure function
+   of C1, S1 and the permitted read-only checks:
+   - the pin's file metadata (`PinnedExecutable`, no CLI run);
+   - the staging configuration.
 
-**The outcome:**
-- **All four hold:** the sample is `:consistent`.
-- **A check fails or the tables change:** retry, up to three attempts in
-  total.
-- **Then:**
-  - `:inconsistent` when both tables exist but stay unbound or changing;
-  - `:unavailable` when either table or process is missing.
+   It is the same check logic `resolve/1` uses, factored out. `resolve/1`
+   keeps its behaviour for real calls. Status never calls `resolve`,
+   `details` or the attestation again by registered name outside the
+   bracket.
+4. **S2, then C2:** re-collect the server view with its identity, then
+   the coordinator row with its owner.
 
-  A positive combination is never synthesized from partial samples.
+**The outcome of an attempt:**
+- **Consistent:** C1 = C2 and S1 = S2, and every owner matches its
+  binding.
+- **Otherwise, retry,** up to three attempts. A later wholly consistent
+  attempt succeeds.
+- **After three:**
+  - **The coordinator check fails or is missing:** `ledger_observation:
+    :unavailable`, with the ledger fields and the runtime fields
+    `:unknown`.
+  - **The coordinator is valid, but the bound server's table is missing,
+    or its owner or name doesn't match:** `ledger_observation: :valid`
+    (the ledger fields as confirmed in C1), and `runtime_observation:
+    :unavailable` with the runtime fields `:unknown`. A missing server
+    isn't positively established, so it is never reported as `:none`.
+  - **Both exist but keep changing:** `runtime_observation:
+    :inconsistent`.
 
-**No raw pid, ref or capability** appears in the public status.
+  A positive combination is never synthesized from parts of different
+  attempts.
+
+**No raw pid, ref or capability** is in any public status.
 
 ### 2b. Shapes in every case
 
-| Case | `desired_profile` | `switch` | `observed_profile` | `hold`/`stage` | `effective_profile` | `effective`/`refusal` | `observation` |
-|---|---|---|---|---|---|---|---|
-| **Fake provider** | `:not_applicable` | `:not_applicable` | `:not_applicable` | `:not_applicable` | nil | as today (`effective: Fake`) | `:not_applicable` |
-| **ClaudeCLI, no coordinator or table** | `:unknown` | `:unknown` | `:unknown` | `:unknown` | nil | `effective: nil`, `refusal`: from `resolve([])`, otherwise `:status_unavailable` | `:unavailable` |
-| **Inconsistent sample** | as last confirmed in R1, or `:unknown` | same | `:unknown` | `:unknown` | nil | `effective: nil`, `refusal: :status_inconsistent` | `:inconsistent` |
-| **Consistent, held** | confirmed or `:unknown` | confirmed or `:unknown` | the profile | `:held`, stage | nil | `effective: nil`, `refusal: :provider_held` | `:consistent` |
-| **Consistent, released, `resolve` passes** | confirmed | confirmed | the profile | `:released` | the profile | `effective: ClaudeCLI`, `refusal: nil` | `:consistent` |
-| **Consistent, released, `resolve` refuses** (pin, staging, admission) | confirmed | confirmed | the profile | `:released` | nil | `effective: nil`, `refusal`: that reason | `:consistent` |
+| Case | ledger | runtime | `desired_profile` / `switch` | `observed_profile` | `hold` / `stage` | `effective_profile` | `effective` / `refusal` | `published_at` |
+|---|---|---|---|---|---|---|---|---|
+| **Fake provider** | `:not_applicable` | `:not_applicable` | `:not_applicable` | `:not_applicable` | `:not_applicable` | nil | as today (`effective: Fake`) | nil |
+| **ClaudeCLI, no coordinator or row** | `:unavailable` | `:unavailable` | `:unknown` | `:unknown` | `:unknown` | nil | nil / `:status_unavailable` | nil |
+| **Coordinator invalid** (owner mismatch, changing) | `:unavailable` | `:unavailable` | `:unknown` | `:unknown` | `:unknown` | nil | nil / `:status_unavailable` | nil |
+| **Coordinator valid, no bound server** (none yet, or a known failed start) | `:valid` | `:consistent` | confirmed | `:none` | published | nil | nil / `:provider_not_running` | C1's |
+| **Coordinator valid, bound server missing or unbound** | `:valid` | `:unavailable` | confirmed | `:unknown` | `:unknown` | nil | nil / `:status_unavailable` | C1's |
+| **Both valid, but changing** | `:valid` | `:inconsistent` | confirmed | `:unknown` | `:unknown` | nil | nil / `:status_inconsistent` | C1's |
+| **Consistent, hold `:held`** | `:valid` | `:consistent` | confirmed or `:unknown` | the profile | `:held`, stage | nil | nil / `:provider_held` | C1's |
+| **Consistent, hold `:pending`** | `:valid` | `:consistent` | confirmed or `:unknown` | the profile | `:pending`, stage | nil | nil / `:provider_held` (a pending hold counts as held) | C1's |
+| **Consistent, released, eligibility passes** | `:valid` | `:consistent` | confirmed or `:unknown` | the profile | `:released` | the profile | `ClaudeCLI` / nil | C1's |
+| **Consistent, released, eligibility refuses** (pin, staging, admission) | `:valid` | `:consistent` | confirmed or `:unknown` | the profile | `:released` | nil | nil / that reason | C1's |
 
 **`profile_id` and the model fields** (`model_alias`, `model_id`,
-`reviewed_version`) follow `observed_profile` when it is known, then the
-confirmed `desired_profile`, and are **nil** otherwise, never the
+`reviewed_version`) follow the known `observed_profile`, then the
+confirmed `desired_profile`. Otherwise they are **nil**, never the
 registry default. The reviewed registry identity and the per-call init
-attestation stay separate fields.
+attestation stay separate.
 
-**`Runtime.desired_profile/0`** (it is today a constant default) becomes:
-- `{:ok, %{profile_id, source, confirmed_at}}`, from the published record
-  when it is consistent and confirmed;
-- `{:error, :unknown}` otherwise, for ClaudeCLI;
-- `:not_applicable` for the Fake. **This never claims** that a stored
-  setting is absent: it means only that no real profile is configured.
+**`Runtime.desired_profile/0`:**
+- **When ledger observation is `:valid` and the desired profile is
+  confirmed:** `{:ok, %{profile_id, source, confirmed_at}}`.
+- **Otherwise, for ClaudeCLI:** `{:error, :unknown}`.
+- **For the Fake:** `:not_applicable`. This means only that no real
+  profile is configured. It never claims a stored setting is absent.
 
-The callers are `runtime.ex` (`details/1`) and
+**Callers:** `runtime.ex` (`details/1`) and
 `provider_runtime_test.exs:213`, which is updated to the new shape.
 
 ## 3. ADR evaluation
@@ -189,8 +226,8 @@ runtime read contract changes: the coordinator's published record,
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| Coordinator published record (runtime) | Existing (delta) | What operators see | **Public, added:** `desired` (`%{profile_id, source, confirmed_at}` \| `:unknown`), `switch` (projection with `confirmed_at` \| nil \| `:unknown`), `published_at`. **Private, added, never returned:** the coordinator pid, the bound server pid, the start id, the boot id (the binding for 2a) | — | Written only by the coordinator, after its own bounded reads and writes. No database read inside `publish`. An uncertain or failed outcome publishes `:unknown`, never the previous value as current. No raw refs | written by the coordinator; read in-node (protected ETS) | none |
-| `Runtime.status/0`, `Runtime.desired_profile/0` (runtime read API) | Existing (delta) | The admin card | the keys and shapes in 2 and 2b; `desired_profile/0`'s tagged result | — | No database read, coordinator call or write. At most three bound-and-recheck attempts (2a). No positive value from a partial sample. No default on unknown. `effective_profile` is sampled eligibility only | unchanged (the admin page) | none |
+| Coordinator published record (runtime) | Existing (delta) | What operators see | **Public, added:** `desired` (`%{profile_id, source, confirmed_at}` \| `:unknown`), `switch` (`%{state: :none, confirmed_at}` \| `%{state: :open, …, confirmed_at}` \| `:unknown`), `published_at`. **Private, added, never returned** (`Coordinator.status/0` is sanitized): the coordinator pid, the bound server pid or `:none`, the start id, the boot id | — | Written only by the coordinator, after its own bounded reads and writes. `publish` makes no database read. An uncertain or failed outcome publishes `:unknown`, never a stale value as current. No raw refs | written by the coordinator; read in-node (protected ETS) | none |
+| `Runtime.status/0`, `Runtime.desired_profile/0` (runtime read API) | Existing (delta) | The admin card | the keys and shapes in 2 and 2b (`ledger_observation`, `runtime_observation`, `effective_profile`, `published_at`); `desired_profile/0`'s tagged result; eligibility factored out of `resolve/1` as a pure function | — | No database read, coordinator call or write. Permitted read-only work: pin file metadata. At most three attempts (C1, S1, eligibility, S2, C2). No positive value from parts of different attempts. A missing server is never `:none` unless the coordinator positively has none. No default on unknown | unchanged (the admin page) | none |
 
 ModelProfileSwitch: existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found.
 ModelProfileSetting: existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found.
@@ -221,29 +258,35 @@ only after its fixture processes are stopped and joined.
 
 **Status:**
 8. **Every row of the 2b table.**
-9. **The binding:** a replacement server with the same profile; a
-   coordinator restart between R1 and R2; and the table deleted and
-   recreated mid-sample. Each → `:inconsistent` or `:unavailable`, never
-   a positive `effective_profile`, within three attempts.
-10. **The lag intervals,** with barriers around the commit, the
-    publication and an unknown outcome:
-    - a caller's committed request shows the old confirmed observation
-      until the coordinator publishes;
-    - an uncertain finalization shows `:unknown`;
-    - a failed read shows `:unknown`.
+9. **The bracket:**
+   - a barrier **after S1**, then a replacement server with the same
+     profile, then a change of hold or admission → no positive
+     eligibility from mixed samples; a later consistent attempt succeeds;
+   - a coordinator restart between C1 and C2;
+   - the server table deleted and recreated mid-attempt;
+   - three changing attempts → `:inconsistent` or `:unavailable`.
+10. **The lag intervals,** with barriers around commit, publication and an
+    unknown outcome:
+    - a committed caller request shows the older `%{state: :none,
+      confirmed_at}` until the coordinator publishes;
+    - an uncertain outcome shows `:unknown`;
+    - a failed read shows `:unknown`, with eligibility still following the
+      consistent runtime.
 11. **No side effects:** across 8–10, zero database queries (a
     query-telemetry trace), zero coordinator messages (a trace), zero
-    writes (counts of events, starts and switches), and zero launches or
-    reservations.
-12. **No default on unknown:** with nothing running and the desired
-    profile unknown, `profile_id` and the model fields are nil.
-13. **`desired_profile/0`:** Fake → `:not_applicable` (even with a stored
-    Sonnet setting); consistent → `{:ok, …}`; otherwise `{:error,
-    :unknown}`.
-14. **A regression budget:** in a controlled test, `status/0` returns
+    writes (counts of events, starts and switches), zero launches and
+    reservations, and no CLI run. Only pin file metadata is read.
+12. **No default on unknown:** with no bound server and an unknown desired
+    profile, `profile_id` and the model fields are nil.
+13. **`desired_profile/0`:**
+    - Fake → `:not_applicable`, even with a stored Sonnet setting;
+    - a valid, confirmed observation → `{:ok, …}`;
+    - otherwise → `{:error, :unknown}`.
+14. **Sanitized:** neither `Coordinator.status/0` nor `Runtime.status/0`
+    returns a pid, a ref or the private binding.
+15. **A regression budget:** in a controlled test, `status/0` returns
     within 50 ms while the coordinator is blocked in a ledger call (a
-    test-only pause). This is a budget for regressions, not a wall-clock
-    promise under load.
+    test-only pause). This is not a wall-clock promise under load.
 
 ## Open questions
 
