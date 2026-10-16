@@ -9,14 +9,19 @@ defmodule Mix.Tasks.Sdr.Demo.RehearseResolver do
   CLI, no credentials; not runtime cleanup proof and not the R0-06 trial.
 
       MIX_ENV=test MIX_TEST_PARTITION=_r1 mix sdr.demo.rehearse_resolver [--port 4123]
-        [--email rehearsal-admin@example.test] [--existing-database NAME]
+        [--email rehearsal-admin@example.test]
 
   `MIX_ENV=test` only (the fixture driver, `SdrAgent.Test.ResolverRehearsal`,
-  exists only in test builds; see its moduledoc for every guard). It asks
-  for the fixture admin's password without echo, prints the report (code
-  SHA, database, fixture identities, counters before and after), serves
-  until `STOP` is typed, then stops and joins the fixture's processes
-  (Ctrl-C or SIGTERM end the VM without that join). The database is never dropped or reset.
+  exists only in test builds; see its moduledoc for every guard and the
+  phase order). The target database must not exist: it is created
+  exclusively and migrated; an existing one is refused and left untouched,
+  and nothing is ever dropped or reset. It asks for a fresh synthetic
+  password for the fixture admin without echo, prints the report (code SHA,
+  database, fixture identities, counters before and after), serves until
+  `STOP` is typed (or terminal input ends), then stops and joins every
+  fixture-owned process. It exits non-zero unless that stop is confirmed
+  clean with unchanged counters and no launch. Ctrl-C or SIGTERM end the VM
+  without the stop: such a run is interrupted, not clean-stop evidence.
   """
   use Mix.Task
 
