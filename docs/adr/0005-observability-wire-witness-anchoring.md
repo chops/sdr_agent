@@ -830,14 +830,18 @@ The contracts and their reviews are in
   - OQ-E3 (automated process-group proof of quiescence).
 
 
-#### R0-05 amendment (2026-10-16, proposed): operator input in crash reports, option B
+#### R0-05 amendment (2026-10-16): operator input in crash reports, option B
 
-**Status: proposed.** The owner chose option B and accepted its residual
-risks (D-141). This text still needs Codex review, then the owner's
-acceptance, before R0-05's MF3 implementation. It builds on the accepted
-C4 amendment, "metadata-only database logging and spans" (D-117), and its
-primary filter `SdrAgent.Logger.ExceptionFilter`. That amendment is on
-the C4-01a branch (#165), so this one lands after #165.
+**Status: ACCEPTED.** The owner accepted this amendment on 2026-10-16
+(America/Denver, about 13:20 MDT), at the text Codex passed for owner
+acceptance at `d0c80ff`; the reply was "2. yes" (D-143). The owner had
+chosen option B and accepted its residual risks earlier that day (D-141).
+Acceptance permits R0-05's MF3 implementation; it is not merge,
+activation or spend approval, and it does not cover SettingsLive
+(OQ-R5-1). It builds on the accepted C4 amendment, "metadata-only
+database logging and spans" (D-117), and its primary filter
+`SdrAgent.Logger.ExceptionFilter`, which merged with C4-01a (#165,
+`e34172c`).
 
 **Context.** R0-05's resolver collects a typed confirmation. The valid
 text is `STOPPED <switch id>`: a fixed word plus an id the page already
