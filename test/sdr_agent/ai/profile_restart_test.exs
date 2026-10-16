@@ -76,11 +76,7 @@ defmodule SdrAgent.AI.ProfileRestartTest do
 
       assert ClaudeCLI.profile(server) == @sonnet
 
-      case form do
-        :A -> assert latest.ready_evidence == :adopted, "A adopts the survivor"
-        :B -> assert latest.ready_evidence in [:adopted, :spawn_preflight]
-        :C -> assert {latest.reason, latest.ready_evidence} == {:boot, :spawn_preflight}
-      end
+      assert_restart_evidence!(form, latest)
 
       assert switches(ctx) == history, "terminal history unchanged"
       assert RH.switch!(ctx, switch.id).status == :completed
@@ -337,9 +333,7 @@ defmodule SdrAgent.AI.ProfileRestartTest do
       RH.drain!()
       Process.sleep(300)
 
-      if form == :B,
-        do: assert(Reaper.lease(ClaudeCLI.server()) == {:held, dead}, "retained"),
-        else: refute(Reaper.lease(ClaudeCLI.server()) == {:held, dead}, "lost with the VM")
+      assert_lease_after!(form, dead)
 
       assert_still_blocked!(ctx, blocked)
 
@@ -361,18 +355,31 @@ defmodule SdrAgent.AI.ProfileRestartTest do
     test "5#{form}. resolved with a dead lease (form #{form}): held at :cleanup_unprovable, no release",
          ctx do
       {blocked, dead, tracer} = resolved_dead_lease!(ctx)
-      starts = RH.starts!(ctx)
+      resolved = RH.switch!(ctx, blocked.id)
+      prior = RH.starts!(ctx)
       boot = Coordinator.status().boot_id
 
       restart!(unquote(form), fn -> RH.tree!() end, [dead])
-      await_boot!(boot, &(&1.stage == :cleanup_unprovable and &1.hold == :held), 10_000)
-      Process.sleep(1_000)
 
-      assert RH.starts!(ctx) == starts, "no start behind a known dead lease"
+      %{boot_id: new_boot} =
+        await_boot!(boot, &(&1.stage == :cleanup_unprovable and &1.hold == :held), 10_000)
+
+      RH.drain!()
+      conflicted = RH.starts!(ctx)
+      Process.sleep(1_000)
+      RH.drain!()
+
+      # The new boot's own fencing allocation is an intent only (b2α 1a, 2):
+      # permitted and required; no launch, readiness or release over the lease.
+      assert_conflicted_boot!(prior, conflicted, RH.starts!(ctx), new_boot)
       assert Process.whereis(ClaudeCLI.server()) == nil, "no failed live child behind it"
-      assert Reaper.lease(ClaudeCLI.server()) == {:held, dead}
+      assert server_children() == [], "no server launched over the retained dead lease"
+      assert %{hold: :held, stage: :cleanup_unprovable} = Coordinator.status(), "never released"
+      assert Reaper.lease(ClaudeCLI.server()) == {:held, dead}, "the dead lease is unchanged"
       assert RH.release_callers(tracer) == [], "nothing calls Reaper.release/1"
-      assert RH.switch!(ctx, blocked.id).status == :failed
+
+      assert RH.switch!(ctx, blocked.id) == resolved,
+             "the resolved switch's provenance is unchanged"
 
       assert_status!(
         status_now!(),
@@ -620,6 +627,58 @@ defmodule SdrAgent.AI.ProfileRestartTest do
     assert RH.switch!(ctx, blocked.id) == blocked, "still blocked, unchanged"
     assert %{hold: :held} = Coordinator.status()
     assert Runtime.resolve(provider: ClaudeCLI) == {:error, :provider_held}
+  end
+
+  # Form-specific restart evidence (runtime clauses, so each generated test
+  # keeps its assertion without an unreachable branch).
+  defp assert_restart_evidence!(:A, latest),
+    do: assert(latest.ready_evidence == :adopted, "A adopts the survivor")
+
+  defp assert_restart_evidence!(:B, latest),
+    do: assert(latest.ready_evidence in [:adopted, :spawn_preflight], "B adopts or starts fresh")
+
+  defp assert_restart_evidence!(:C, latest),
+    do:
+      assert(
+        {latest.reason, latest.ready_evidence} == {:boot, :spawn_preflight},
+        "C starts fresh"
+      )
+
+  defp assert_lease_after!(:B, dead),
+    do: assert(Reaper.lease(ClaudeCLI.server()) == {:held, dead}, "B retains the lease")
+
+  defp assert_lease_after!(:C, dead),
+    do: refute(Reaper.lease(ClaudeCLI.server()) == {:held, dead}, "C lost it with the VM")
+
+  # Prior starts are immutable; the new boot allocated its own fencing
+  # start(s) above every earlier generation, each only allocated or failed
+  # with no recorded server identity (never started or ready); its latest
+  # start is the current one; nothing more is allocated while conflicted.
+  defp assert_conflicted_boot!(prior, conflicted, later, new_boot) do
+    assert Enum.take(conflicted, length(prior)) == prior, "prior start history unchanged"
+    assert Enum.take(later, length(prior)) == prior, "prior start history unchanged (later)"
+    fresh = Enum.drop(conflicted, length(prior))
+    top = prior |> Enum.map(& &1.generation) |> Enum.max(fn -> 0 end)
+
+    assert fresh != [], "the new boot allocates its own fencing start (b2α section 2, step 3)"
+
+    for start <- fresh do
+      assert start.boot_id == new_boot and start.generation > top,
+             "a fenced allocation of the new boot: #{inspect(Map.take(start, [:boot_id, :generation]))}"
+
+      assert start.status in [:allocated, :failed] and is_nil(start.pid),
+             "an intent only, never a launched server: #{inspect(Map.take(start, [:status, :pid]))}"
+    end
+
+    assert List.last(later).boot_id == new_boot, "the new boot's start is the latest"
+    assert later == conflicted, "no repeated allocation or spawning while conflicted"
+  end
+
+  defp server_children do
+    SdrAgent.AI.ModelProvider.ServerSupervisor
+    |> DynamicSupervisor.which_children()
+  catch
+    :exit, _ -> []
   end
 
   defp switches(ctx) do

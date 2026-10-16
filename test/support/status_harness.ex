@@ -468,11 +468,14 @@ defmodule SdrAgent.Test.StatusHarness do
     {result, effects}
   end
 
+  # Idempotent and bounded, on every path (finish/1 and on_exit): the
+  # handlers are detached, the subject is resumed, then shut down if it
+  # outlives a short grace, the trace is disabled, the collector is stopped,
+  # and both processes are joined.
   defp cleanup(handle) do
     Enum.each(handle.ids, &:telemetry.detach/1)
-    for {m, f, a} <- @traced, do: :erlang.trace_pattern({m, f, a}, false, [:local])
     send(handle.task.pid, {:c202c_continue, handle.tag})
-    send(handle.collector, :stop)
+    stop_joined!(handle.task.pid, :subject, 1_000)
 
     try do
       :erlang.trace(handle.task.pid, false, [:send, :call])
@@ -480,8 +483,30 @@ defmodule SdrAgent.Test.StatusHarness do
       ArgumentError -> :ok
     end
 
+    for {m, f, a} <- @traced, do: :erlang.trace_pattern({m, f, a}, false, [:local])
+    send(handle.collector, :stop)
+    stop_joined!(handle.collector, :collector, 1_000)
     if :ets.info(handle.points) != :undefined, do: :ets.delete(handle.points)
     :ok
+  end
+
+  # Waits `grace` ms for `pid` to exit, then kills it and waits again
+  # (bounded); raises if it is still alive.
+  defp stop_joined!(pid, label, grace) do
+    ref = Process.monitor(pid)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _} -> :ok
+    after
+      grace ->
+        Process.exit(pid, :kill)
+
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _} -> :ok
+        after
+          5_000 -> raise "observation #{label} #{inspect(pid)} outlived its cleanup"
+        end
+    end
   end
 
   defp collect(acc) do

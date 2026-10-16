@@ -305,3 +305,19 @@ only after its fixture processes are stopped and joined.
   scoped hermetic lifecycle test. It is labelled as not a BEAM restart
   and not proof of OS cleanup. An isolated disposable BEAM test would be
   optional, stronger evidence.
+
+## RED gate record
+
+- **Round 1** (`b659d21`): NEEDS-REVIEW (Codex `098ce609`,
+  `codex-c202c-b659d21-red-review.md`). The must-fix is 5A/B: a new boot's
+  fencing allocation is an intent, and is allowed. Only launch, readiness,
+  hold release and repeated spawning over a retained dead lease are
+  forbidden. Plus cleanup and warning hygiene.
+- **Staged qualification.** Restart tests 5A, 5B and 5C stop at b2β's
+  resolver guard in both the real and the mutant runs. They are **staged
+  and unverified** for C2-02c's downstream recovery and status behaviour
+  until b2β GREEN lands. Then they are re-run, and their intended-reason
+  evidence is reviewed before the affected C2-02c GREEN.
+- **The b2α boot gap** (3A′ and 3B′): fixed as a b2β GREEN prerequisite
+  (`c2-02b2b-interface.md`, "Prerequisite correction"). C2-02c keeps its
+  integration tests.
