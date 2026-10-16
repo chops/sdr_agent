@@ -48,6 +48,17 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
 
   Unnamed servers (tests) have no lease, only the reaper.
 
+  ## Cleanup receipt (C2-02b2α, R4)
+
+  `subscribe/2` registers a caller's fresh private ref, synchronously, before
+  the caller stops the server. When the reaper has confirmed every tracked
+  tree stopped, removed the workspaces and released its own lease, it sends
+  each live subscriber `{:reaper_cleanup_confirmed, ref, %{name: name,
+  tracked: n}}`, then exits, so the receipt precedes the reaper's `DOWN`. An
+  unidentified or unverifiable launch (the reaper exits holding the lease)
+  sends no receipt. A ref is single-use, and a subscriber's death drops its
+  subscription.
+
   Limitation: descendants that re-parent away from the root before a kill
   are not found (the tree is walked with `pgrep -P`).
 
@@ -76,6 +87,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
 
   @exit_wait_ms 2_000
   @retry_ms 1_000
+  @subscribe_timeout_ms 5_000
 
   @doc """
   Starts the calling server's reaper, taking the lease of `name` (nil for an
@@ -114,9 +126,34 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
   defp release(_name, _holder, true = _running), do: {:error, :reaper_running}
 
   defp release(name, holder, false) do
-    erase(name, holder)
+    _ = erase(name, holder)
     with pid when is_pid(pid) <- Process.whereis(name), do: send(pid, :admission_check)
     :ok
+  end
+
+  @doc """
+  Registers `ref` (a fresh `make_ref()`) for the cleanup receipt, waiting at
+  most `timeout` ms for the acknowledgement. Returns `{:subscribed, ref}`,
+  `{:error, :duplicate_subscription}` for a ref this reaper has already
+  seen, `{:error, :not_running}` or `{:error, :timeout}`.
+  """
+  def subscribe(reaper, ref, timeout \\ @subscribe_timeout_ms)
+      when is_pid(reaper) and is_reference(ref) do
+    monitor = Process.monitor(reaper)
+    send(reaper, {:subscribe, {self(), monitor}, ref})
+
+    receive do
+      {^monitor, reply} ->
+        Process.demonitor(monitor, [:flush])
+        reply
+
+      {:DOWN, ^monitor, :process, ^reaper, _reason} ->
+        {:error, :not_running}
+    after
+      timeout ->
+        Process.demonitor(monitor, [:flush])
+        {:error, :timeout}
+    end
   end
 
   @doc "Records a launch's private workspace before anything is written to it."
@@ -202,7 +239,16 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
 
   defp watch(owner, name, opts) do
     ref = Process.monitor(owner)
-    loop(%{ref: ref, owner: owner, name: name, opts: opts, launches: %{}})
+
+    loop(%{
+      ref: ref,
+      owner: owner,
+      name: name,
+      opts: opts,
+      launches: %{},
+      subscribers: %{},
+      seen: MapSet.new()
+    })
   end
 
   defp loop(state) do
@@ -220,13 +266,45 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
         close_launch(launch)
         loop(%{state | launches: launches})
 
+      {:subscribe, {from, reply_ref}, ref} ->
+        {reply, state} = subscribed(state, from, ref)
+        send(from, {reply_ref, reply})
+        loop(state)
+
       {:DOWN, ref, :process, _owner, _reason} when ref == state.ref ->
-        reap(state)
+        reap(state, map_size(state.launches))
+
+      {:DOWN, monitor, :process, _subscriber, _reason} ->
+        loop(%{state | subscribers: Map.delete(state.subscribers, monitor)})
 
       {port, _message} = message when is_port(port) ->
         send(state.owner, message)
         loop(state)
     end
+  end
+
+  defp subscribed(state, from, ref) do
+    if MapSet.member?(state.seen, ref) do
+      {{:error, :duplicate_subscription}, state}
+    else
+      monitor = Process.monitor(from)
+
+      {{:subscribed, ref},
+       %{
+         state
+         | subscribers: Map.put(state.subscribers, monitor, {from, ref}),
+           seen: MapSet.put(state.seen, ref)
+       }}
+    end
+  end
+
+  # Sent after the lease is released, just before the reaper exits.
+  defp confirm(state, tracked) do
+    receipt = %{name: state.name, tracked: tracked}
+
+    Enum.each(state.subscribers, fn {_monitor, {from, ref}} ->
+      send(from, {:reaper_cleanup_confirmed, ref, receipt})
+    end)
   end
 
   # Only a failure of `Port.open` itself is a known no-spawn. Once the port
@@ -301,8 +379,8 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
 
   # Kills every tracked tree and removes its workspace; releases the lease
   # (the cleanup receipt) only when all are confirmed gone, retrying until
-  # then.
-  defp reap(state) do
+  # then. `tracked` is the number of launches tracked when the owner died.
+  defp reap(state, tracked) do
     {unidentified, identified} = Enum.split_with(state.launches, &unidentified?/1)
     results = Enum.map(identified, &{&1, stop(&1, state.opts)})
     remaining = for {launch, false} <- results, do: launch
@@ -324,7 +402,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
         )
 
         Process.sleep(Keyword.get(state.opts, :retry_ms, @retry_ms))
-        reap(%{state | launches: Map.new(remaining ++ unidentified)})
+        reap(%{state | launches: Map.new(remaining ++ unidentified)}, tracked)
 
       unidentified != [] ->
         # Cannot ever be confirmed: exit holding the lease, so admission
@@ -339,8 +417,25 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
         :ok
 
       true ->
-        if state.name, do: erase(state.name, self())
-        :ok
+        release_and_confirm(state, tracked)
+    end
+  end
+
+  # A named reaper sends its receipt only after it proved that it held and
+  # released its own lease (C2-02b2α review MF4): a lease already absent or
+  # held by another reaper is not certified. An unnamed reaper has no lease.
+  defp release_and_confirm(%{name: nil} = state, tracked), do: confirm(state, tracked)
+
+  defp release_and_confirm(state, tracked) do
+    case erase(state.name, self()) do
+      :released ->
+        confirm(state, tracked)
+
+      :not_held ->
+        Logger.error(
+          "ClaudeCLI reaper found its admission lease absent or foreign at cleanup; " <>
+            "no cleanup receipt is sent"
+        )
     end
   end
 
@@ -400,9 +495,16 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Reaper do
     ArgumentError -> :ok
   end
 
+  # `:released` only when `holder` held the lease and it is now erased.
   defp erase(name, holder) do
-    with {:held, ^holder} <- lease(name), do: :persistent_term.erase(key(name))
-    :ok
+    case lease(name) do
+      {:held, ^holder} ->
+        :persistent_term.erase(key(name))
+        :released
+
+      _absent_or_foreign ->
+        :not_held
+    end
   end
 
   defp key(name), do: {__MODULE__, name}

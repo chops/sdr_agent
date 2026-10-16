@@ -262,3 +262,126 @@ Lock `decimal` at **3.1.2**. Only the `decimal` entry in `mix.lock`
 changes; `mix.exs` is unchanged (`mix deps.update decimal` alone offered the
 3.2.0 minor release, which is not required, so the patch release was
 selected). No `ignore_advisories` entry.
+
+## Amendment (2026-10-15): EEF-CVE-2026-105659
+
+**Status: accepted** by the owner in the private Claude session chat on
+2026-10-15 at about 10:58 MDT ("yes, accept the amendment and merge #161 once
+its CI is green"), after Codex's independent approval of the text at 09e46c5
+(d03a81e8) and of the code at 1fbea26 (10ea669c, complete upstream delta
+reviewed, live LiveView probe passed). The owner chose option B earlier the
+same day ("(B)", D-130; D-132 records this acceptance).
+
+### Advisory
+
+- **EEF-CVE-2026-105659** (HIGH), aka CVE-2026-105659, GHSA-69m6-wcv4-rwcf
+  (OSV, published 2026-10-14 16:54 UTC).
+- HTTP/2 sends blocked on either the connection or the stream send window
+  restart their existing deadline whenever the peer permits partial
+  progress. Tiny `WINDOW_UPDATE` trickles (and empty `SETTINGS` on the
+  connection path) can therefore retain blocked stream processes and their
+  resources indefinitely: unauthenticated resource exhaustion. The two paths
+  are independent: on the connection, requeueing a pending send refreshes
+  its expiry on connection `WINDOW_UPDATE` and on `SETTINGS`, including an
+  empty `SETTINGS` that grants nothing; on a stream, recursive stream
+  `WINDOW_UPDATE` handling re-arms its read timeout.
+- The fix grants deadline credit in proportion to the bytes actually
+  drained (1 s per KiB, capped at the base timeout ahead of now). It is not
+  an absolute total-send limit: a legitimate send that keeps progressing
+  may last longer than the base timeout.
+- Affected: `bandit` from 1.4.0, with **no fixed Hex release**: 1.12.5
+  (2026-08-20) is still the newest on Hex as of 2026-10-15 09:58 MDT. The fix
+  is upstream commit `d88b21953c65061f21136ea76a89a4f95a2ac7a1`, with tests.
+  OSV names disabling HTTP/2 as a workaround.
+- Found by the blocking `mix hex.audit` step on main run 38632782130 (head
+  `3b09183`), as rule 4 of the policy above intends. It blocks every merge.
+
+### Exposure in this project
+
+- Bandit 1.12.5 enables HTTP/2 by default and accepts the cleartext
+  prior-knowledge preface, without TLS or ALPN. **Plain HTTP does not remove
+  the exposure**, and no project setting disabled HTTP/2.
+- Listeners: dev `127.0.0.1:4120`, test `127.0.0.1:4002`, the calibration
+  console `127.0.0.1:4124`, the demo smoke server (loopback), and production,
+  which binds all IPv6 interfaces (`config/runtime.exs`). The local listeners
+  are loopback only. Production reachability depends on the host, firewall
+  and proxy, none of which is verified here. Authentication does not help: the
+  path is pre-auth.
+
+### Options considered
+
+- **A. Wait for a fixed Hex release.** Keeps the source unchanged, but merges
+  stay blocked with no known date.
+- **B. A temporary Git pin to the fixed commit, with HTTP/2 disabled
+  (chosen).** Removes the vulnerable code now and the protocol that reaches
+  it, at the cost of unreleased upstream code.
+- **C. Ignore the HIGH.** Not allowed by rule 2 of the policy; not proposed.
+- **HTTP/2 off alone** removes today's reachable path but leaves the
+  vulnerable library, so it does not clear the policy gate by itself.
+
+### Decision
+
+1. **Source.** `{:bandit, github: "mtrudel/bandit", ref:
+   "d88b21953c65061f21136ea76a89a4f95a2ac7a1", override: true}` in `mix.exs`.
+   The full SHA, never a branch or tag. `override: true` is required because
+   Phoenix, `websock_adapter` and `swoosh` declare Hex dependencies on
+   `bandit` (`opentelemetry_bandit` 0.3.0 lists Bandit only among its own
+   dev/test dependencies, so it adds no constraint here, though its
+   instrumentation is still tested). Mix's `override: true` overrides every
+   other dependency of the same name; it is not limited to the source, so
+   the competing version requirements are reviewed explicitly against the
+   pinned `mix.exs`, and the reviewed lock records the commit. Only the `bandit` entry and any
+   transitive entries its `mix.exs` requires may change in `mix.lock`; any
+   other movement is reverted or reviewed.
+2. **HTTP/2 off on every Bandit listener.** `Bandit.PhoenixAdapter`
+   passes only each scheme's list to Bandit, so the option goes **inside**
+   each scheme, never as a top-level Endpoint key (which Bandit never sees):
+
+   ```elixir
+   http: [http_2_options: [enabled: false], ...]
+   # and inside https: [...] wherever an HTTPS listener is configured
+   ```
+
+   It is set in the endpoint's base `http:` configuration and reapplied
+   wherever a scheme list is rebuilt: the calibration console plan and the
+   demo smoke server. A test asserts the effective scheme options the
+   adapter receives on every listener configuration (not the presence of a
+   key), and a live test sends the HTTP/2 prior-knowledge preface to an
+   ordinary test listener and observes that it is not served as HTTP/2.
+   This adds no HTTPS listener and changes no production binding. This
+   stays after the pin is replaced, until a separate decision turns HTTP/2
+   back on.
+3. **Review of the whole upstream delta.** `1.12.5...d88b219` is 30 commits
+   and 37 paths, including HTTP/1, HTTP/2, WebSocket and compression changes,
+   not only the fix. The review covers the complete delta, the lock change,
+   and compatibility with Phoenix, LiveView's WebSocket and telemetry
+   (`opentelemetry_bandit`).
+4. **Regression evidence for the fix itself.** Tests run only with HTTP/2
+   off would prove the mitigation, not the pinned fix. So this
+   repository's suite starts a separate, hermetic, ephemeral loopback
+   Bandit listener **with HTTP/2 enabled**, used only by these tests, and
+   covers: tiny connection `WINDOW_UPDATE` trickles and empty `SETTINGS`;
+   a stream-window trickle with an ample connection window; and a
+   legitimate client that keeps draining past the base timeout and
+   completes. No flag enables HTTP/2 on an ordinary or deployed listener.
+5. **The audit is not the proof.** A Git dependency is outside `mix
+   hex.audit`'s Hex-package scan, so a green audit is necessary but does
+   not show the advisory is fixed (OSV still publishes a Git
+   introduced/fixed range for it). The fixed commit and the regression
+   evidence above are the record. A green audit does not clear any other
+   HIGH finding a live audit may report.
+6. **Revisit.** When a stable Hex release contains the fix, a reviewed change
+   replaces the pin with that release (a Hex source again, `override`
+   removed). "No fixed Hex release" is a time-stamped observation: Hex is
+   rechecked when implementing and again before merge. Owner of the
+   revisit: Claude, checking Hex at each daily standup. Any lock movement
+   beyond `bandit` and what its pinned `mix.exs` requires is reviewed
+   separately. No `ignore_advisories` entry.
+
+### Consequences
+
+- Merges can resume once this is reviewed, accepted and merged.
+- The project runs an unreleased Bandit commit until the Hex release; the
+  delta review and the full gate are the mitigation.
+- HTTP/2 is unavailable on all listeners. Nothing in this project needs it:
+  the browser UI and LiveView use HTTP/1.1 and WebSocket.

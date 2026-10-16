@@ -39,7 +39,7 @@ defmodule SdrAgent.Scripts.CalibrationConsoleTest do
     echo "MIX_ENV=${MIX_ENV-unset} SDR_MODEL_PROVIDER=${SDR_MODEL_PROVIDER-unset} \
     SDR_CLAUDE_CLI_BIN=${SDR_CLAUDE_CLI_BIN-unset} PORT=${PORT-unset} \
     DATABASE_URL=${DATABASE_URL-unset}" >> "#{tmp}/mix-env"
-    if [ "$2" = check ]; then echo "$STUB_PLAN_LINE"; fi
+    if [ "$2" = check ]; then echo "$STUB_PLAN_LINE"; echo "${STUB_WITNESS_LINE:-SDR_CALIBRATION_WITNESS unset}"; fi
     exit 0
     """)
 
@@ -63,9 +63,22 @@ defmodule SdrAgent.Scripts.CalibrationConsoleTest do
       {"PORT", nil},
       {"SDR_MODEL_PROVIDER", nil},
       {"SDR_CLAUDE_CLI_BIN", nil},
+      {"SDR_WITNESS_STORE_ROOT", nil},
       {"STUB_PLAN_LINE", @good_plan}
     ]
     |> then(&Enum.reduce(extra, &1, fn {k, _} = kv, env -> List.keystore(env, k, 0, kv) end))
+  end
+
+  # R0-07f: a capture-required command needs the witness store root, and
+  # the stub reports it back on its witness line (the root is only data
+  # here; the stub never reads it).
+  defp witnessed(ctx) do
+    root = Path.join(ctx.tmp, "witness root")
+
+    stubbed(ctx, [
+      {"SDR_WITNESS_STORE_ROOT", root},
+      {"STUB_WITNESS_LINE", "SDR_CALIBRATION_WITNESS set " <> root}
+    ])
   end
 
   defp lines(path) do
@@ -279,7 +292,7 @@ defmodule SdrAgent.Scripts.CalibrationConsoleTest do
     # R0-07 d3c (packet 8.14.1): calibrate takes exactly one profile and
     # passes it to the task unchanged; the guards above still run first.
     test "calibrate passes exactly its one profile to the task", ctx do
-      assert {_out, 0} = console(["calibrate", "claude_cli_opus"], stubbed(ctx))
+      assert {_out, 0} = console(["calibrate", "claude_cli_opus"], witnessed(ctx))
 
       assert mix_calls(ctx) == [
                "sdr.calibration.console check",
@@ -298,10 +311,10 @@ defmodule SdrAgent.Scripts.CalibrationConsoleTest do
     # arguments unchanged; the task's recover_command/1 decides the rest.
     test "calibrate-recover passes its arguments to the task unchanged", ctx do
       id = Ash.UUIDv7.generate()
-      assert {_out, 0} = console(["calibrate-recover", id], stubbed(ctx))
+      assert {_out, 0} = console(["calibrate-recover", id], witnessed(ctx))
 
       assert {_out, 0} =
-               console(["calibrate-recover", id, "--owner-verified-stopped"], stubbed(ctx))
+               console(["calibrate-recover", id, "--owner-verified-stopped"], witnessed(ctx))
 
       assert {_out, 0} = console(["calibrate-recover", "--release-aborted"], stubbed(ctx))
 
