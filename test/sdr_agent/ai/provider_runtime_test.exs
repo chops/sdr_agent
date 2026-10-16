@@ -210,7 +210,10 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       Application.put_env(:sdr_agent, :model_provider, ClaudeCLI)
       Application.put_env(:sdr_agent, ClaudeCLI, timeout: 90_000)
 
-      assert Runtime.desired_profile() == :claude_cli_opus
+      # C2-02c test 13: with no coordinator, ClaudeCLI's desired profile is
+      # unknown, never the registry default (the coordinator still boots at
+      # the default only after a successful read finds no setting).
+      assert Runtime.desired_profile() == {:error, :unknown}
 
       # The profile is not an environment knob: only the (C2) persisted
       # setting may choose another reviewed profile. The coordinator runs
