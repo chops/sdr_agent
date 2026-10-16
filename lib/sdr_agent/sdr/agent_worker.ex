@@ -27,6 +27,7 @@ defmodule SdrAgent.SDR.AgentWorker do
   instead.
   """
   use Oban.Worker, queue: :research, max_attempts: 1
+  use SdrAgent.Workers.ErrorBoundary
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents

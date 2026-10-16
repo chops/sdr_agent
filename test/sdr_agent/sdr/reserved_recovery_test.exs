@@ -214,6 +214,8 @@ defmodule SdrAgent.SDR.ReservedRecoveryTest do
     test "a queued (never started) run's reservations are not swept", ctx do
       agent = system_actor(:agent_runtime, ctx.tenant)
       definition = AgentsFixtures.definition!(ctx.tenant)
+      # C4-R8: an assignment-origin run needs a saved offering profile.
+      AgentsFixtures.ensure_offering!(ctx.tenant)
       {:ok, queued} = Agents.create_run(AgentsFixtures.run_attrs(definition), actor: agent)
 
       Clock.freeze(@t0)

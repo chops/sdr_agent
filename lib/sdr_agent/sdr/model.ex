@@ -94,6 +94,8 @@ defmodule SdrAgent.SDR.Model do
     }
   end
 
+  # An early, recorded message only: the authoritative call and token checks
+  # are on the locked run row in `AgentRun :reserve_model_call` (C4).
   defp budget_gate(ctx, run, request_id, subject_id) do
     budget = run.budget
     daily = Agents.daily_model_calls(ctx.tenant_id)

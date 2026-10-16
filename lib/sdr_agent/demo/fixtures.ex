@@ -98,6 +98,25 @@ defmodule SdrAgent.Demo.Fixtures do
     ]
   end
 
+  @doc """
+  The synthetic offering profile of the demo (C4-R8: an assignment needs a
+  saved one). The seed does **not** save it, so a seeded tenant starts with
+  no run settings; `SdrAgent.Demo.Predeliver` saves it as the demo admin
+  before assigning, when none is saved.
+  """
+  def offering_profile do
+    %{
+      name: "Example Freight Visibility Suite",
+      summary: "A synthetic shipment-tracking product used only by the local demo.",
+      audience: "Operations teams at synthetic mid-market logistics companies.",
+      items: [
+        %{id: "live_tracking", kind: :feature, text: "Shows synthetic shipments on one map."},
+        %{id: "fewer_delays", kind: :outcome, text: "Fewer late synthetic deliveries."},
+        %{id: "no_billing", kind: :limit, text: "Does not handle freight billing."}
+      ]
+    }
+  end
+
   @doc "The demo campaign (Tier 0, compliance defaults; activated by the seed)."
   def campaign do
     %{
