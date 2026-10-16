@@ -274,7 +274,7 @@ the submitted params, including `resolution_confirmation`, by design. It
 is excluded: parameter filtering sanitizes Phoenix's and LiveView's logs,
 not arbitrary telemetry subscribers, so a handler attached to that event
 would see the text. The verified scope, for the ordinary flow (crash
-reports are covered separately below), is: no logged or exported copy, no
+reports are covered separately above), is: no logged or exported copy, no
 URI or router copy, no stored copy, no copy in the captured application
 telemetry (the `[:sdr_agent | _]` events registered when the test runs,
 and repo queries with their parameters) and no exported span. It is not a
