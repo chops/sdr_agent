@@ -119,6 +119,20 @@ defmodule SdrAgentWeb.GrantFormTest do
       assert [_ | _] = errors[{:allocation, "0"}]
     end
 
+    test "no profile chosen is refused on review, not by the domain" do
+      for profile_ids <- [[], [""], nil] do
+        params =
+          if profile_ids,
+            do: g_r0_params(%{"profile_ids" => profile_ids}),
+            else: Map.delete(g_r0_params(), "profile_ids")
+
+        result = GrantForm.parse(params)
+
+        assert match?({:error, %{profile_ids: ["choose at least one profile"]}}, result),
+               "C9 follow-up: profile_ids #{inspect(profile_ids)} must be refused on review; got #{inspect(result)}"
+      end
+    end
+
     test "never creates atoms from input" do
       params = g_r0_params(%{"profile_ids" => ["not_an_atom_#{System.unique_integer()}"]})
       assert {:error, %{profile_ids: _}} = GrantForm.parse(params)

@@ -47,7 +47,15 @@ defmodule SdrAgent.Agents do
       (each an active human admin only, in one transaction, refusing a stale
       `expected_revision`), `list_grants/1`, `get_grant/2`, and
       `grant_usage/2` (the attempts consumed, derived from the charged
-      ModelInvocations).
+      ModelInvocations);
+    * model profile switches (C2-02a, `SdrAgent.Agents.ProfileSwitches`) —
+      `request_profile_switch/2` (a current human admin),
+      `complete_profile_switch/3`, `fail_profile_switch/3`,
+      `block_profile_switch/3` (`model_runtime` only; idempotent on the
+      switch's `server_generation`), `get_profile_setting/1` and
+      `list_profile_switches/1` (`ModelProfileSetting`, `ModelProfileSwitch`);
+      C2-02b1: `drain_profile_switch/3` (AGT; `SdrAgent.Agents.ProfileSwitchDrain`),
+      and the admission fence (`SdrAgent.Agents.Admission.SwitchFence`).
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -59,6 +67,7 @@ defmodule SdrAgent.Agents do
   alias Ash.Error.Query.NotFound
   alias SdrAgent.Agents.Admission
   alias SdrAgent.Agents.Admission.Gate
+  alias SdrAgent.Agents.Admission.SwitchFence
   alias SdrAgent.Agents.Checks.AdmissionContext
   alias SdrAgent.Agents.Checks.CalibrationAdmission
   alias SdrAgent.Agents.AgentDefinition
@@ -69,6 +78,8 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
+  alias SdrAgent.Agents.ProfileSwitches
+  alias SdrAgent.Agents.ServerStarts
   alias SdrAgent.Agents.ReleasedOutput
   alias SdrAgent.Agents.ToolInvocation
   alias SdrAgent.Agents.WireWitnessLink
@@ -94,6 +105,10 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.ModelCallGrant
     resource SdrAgent.Agents.ModelCallAllocation
     resource SdrAgent.Agents.ModelResultRelease
+    resource SdrAgent.Agents.ModelProfileSetting
+    resource SdrAgent.Agents.ModelProfileSwitch
+    resource SdrAgent.Agents.ModelServerCounter
+    resource SdrAgent.Agents.ModelServerStart
   end
 
   ## Definitions
@@ -696,7 +711,7 @@ defmodule SdrAgent.Agents do
 
   defp launch_refused(reason, own_id \\ nil), do: {:error, {:launch_refused, reason, own_id}}
 
-  defp refuse_launch(run, invocation, reason, check, profile, actor) do
+  defp refuse_launch(run, invocation, reason, check, profile, actor, extra \\ %{}) do
     error = %{
       "kind" => "launch_refused",
       "reason" => Atom.to_string(reason),
@@ -726,20 +741,27 @@ defmodule SdrAgent.Agents do
     }
 
     with {:ok, _failed} <- do_update(invocation, :fail, %{error: error}, actor) do
-      launch_receipt(reason, check, failure, {run, invocation, profile}, actor)
+      launch_receipt(reason, check, failure, {run, invocation, profile}, actor, extra)
     end
   end
 
   # A run stopped while its call was queued already has its own cause (its
   # stop's Failure, or an operator's cancel or a success, which need none):
   # the refused call is failed, but no second attention item is opened.
-  defp launch_receipt(:run_not_running_at_launch = reason, _check, _failure, _call, _actor),
-    do: {:ok, {:refused, reason}}
+  defp launch_receipt(
+         :run_not_running_at_launch = reason,
+         _check,
+         _failure,
+         _call,
+         _actor,
+         _extra
+       ),
+       do: {:ok, {:refused, reason}}
 
   # R0-07 slice B (row B1): the one Failure of the run and the launch
   # event naming it, under the head already held (their FKs find the run,
   # its Operation and the invocation locked), committed with the failed row.
-  defp launch_receipt(reason, check, failure, {run, invocation, profile}, actor) do
+  defp launch_receipt(reason, check, failure, {run, invocation, profile}, actor, extra) do
     event = %{
       event_type: "model.launch.refused",
       category: :model,
@@ -758,6 +780,8 @@ defmodule SdrAgent.Agents do
       }
     }
 
+    event = update_in(event.payload, &Map.merge(&1, extra))
+
     with {:ok, failure} <- SdrAgent.Operations.open_failure(failure, actor: actor),
          event = put_in(event, [:payload, "failure_id"], failure.id),
          {:ok, event} <- SdrAgent.Audit.append(event, actor: actor) do
@@ -773,6 +797,132 @@ defmodule SdrAgent.Agents do
           stage: :launch
         }}}
     end
+  end
+
+  ## Model profile switch drain (C2-02b1)
+
+  @doc """
+  AGT: drains the open model profile switch `switch` —
+  `%{server_generation, timeout_ms}`: refuses every row reserved before it,
+  stops each refused row's run `:model_not_admitted` and settles its
+  Operation, waits (bounded) for the tenant's sent rows to settle, and
+  reports counts only. See `SdrAgent.Agents.ProfileSwitchDrain`.
+  """
+  def drain_profile_switch(switch, attrs, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    # Through the guard, so an auditor's attempt is refused before anything
+    # runs and audited exactly once (S2 auditor contract).
+    guard(SdrAgent.Agents.ModelProfileSwitch, :drain, subject_id(switch), actor, fn ->
+      SdrAgent.Agents.ProfileSwitchDrain.drain(switch, attrs, opts)
+    end)
+  end
+
+  @doc false
+  # The drain's refusal of one reserved row (`ProfileSwitchDrain` only), in
+  # one transaction in launch's lock order (run → Operation share →
+  # invocation → charge → chain head). After the head, the named switch is
+  # revalidated by a fresh non-locking read (pending at `generation`) and
+  # the row must have been reserved before that switch's request. Then the
+  # row is refused exactly as a launch refusal (`:profile_switch_fenced`,
+  # `:reserved_before_switch`, the switch id in the event) and its run is
+  # stopped `:model_not_admitted` linking that Failure; a run no longer
+  # running gets the `:run_not_running_at_launch` treatment. Returns
+  # `{:ok, {:refused, run_id}}`, `{:ok, :not_running}`, `{:ok, :skipped}`
+  # (the row is no longer reserved) or `{:error, reason}` with nothing
+  # written.
+  #
+  # `step` (the drain's budget) runs before each lock and the writes:
+  # `:ok`, or `{:error, :drain_timeout}` to roll back unchanged.
+  def refuse_reserved_for_switch(invocation_id, switch_id, generation, actor, step \\ &ok/0) do
+    guard(ModelInvocation, :refuse_reserved_for_switch, subject_id(invocation_id), actor, fn ->
+      refuse_reserved(invocation_id, switch_id, generation, actor, step)
+    end)
+  end
+
+  defp refuse_reserved(
+         invocation_id,
+         switch_id,
+         generation,
+         %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant} = actor,
+         step
+       )
+       when is_binary(tenant) do
+    audit_transact(fn ->
+      drain_refuse_locked(invocation_id, switch_id, generation, actor, step)
+    end)
+  end
+
+  defp refuse_reserved(_invocation_id, _switch_id, _generation, _actor, _step),
+    do: {:error, Ash.Error.Forbidden.exception([])}
+
+  defp ok, do: :ok
+
+  defp subject_id(%{id: id}) when is_binary(id), do: id
+  defp subject_id(id) when is_binary(id), do: id
+  defp subject_id(_other), do: nil
+
+  defp drain_refuse_locked(id, switch_id, generation, actor, step) do
+    with :ok <- step.(),
+         {:ok, target} <- launch_target(id, actor),
+         :ok <- step.(),
+         {:ok, run} <- lock_tenant_run(target.agent_run_id, actor),
+         :ok <- step.(),
+         :ok <- Admission.lock_operation_share(run.operation_id),
+         :ok <- step.(),
+         {:ok, invocation} <- lock_invocation(target.id, actor),
+         :ok <- launch_state(invocation),
+         :ok <- step.(),
+         :ok <- Admission.lock_charge(invocation),
+         :ok <- step.(),
+         {:ok, _head} <- Kernel.lock_head(actor.tenant_id),
+         :ok <- step.(),
+         :ok <- SwitchFence.named_open(actor.tenant_id, switch_id, generation),
+         :ok <- SwitchFence.before_request(actor.tenant_id, invocation.id, switch_id),
+         :ok <- step.() do
+      drain_refuse(run, invocation, switch_id, actor)
+    else
+      {:error, {:launch_refused, _reason, _own_id}} -> {:ok, :skipped}
+      other -> other
+    end
+  end
+
+  defp drain_refuse(%{status: :running} = run, invocation, switch_id, actor) do
+    reason = :profile_switch_fenced
+    check = :reserved_before_switch
+    extra = %{"switch_id" => switch_id}
+
+    with {:ok, {:refused, refused}} <-
+           refuse_launch(run, invocation, reason, check, invocation.profile_id, actor, extra),
+         {:ok, _stopped} <-
+           do_update(
+             run,
+             :fail,
+             %{
+               status_reason: :model_not_admitted,
+               failure_reason:
+                 "model call not admitted (drain): #{Admission.reason_name(reason)} (#{check})",
+               refusal_failure_id: refused.failure_id,
+               refusal_request_id: refused.request_id
+             },
+             actor
+           ) do
+      {:ok, {:refused, run.id}}
+    end
+  end
+
+  defp drain_refuse(run, invocation, switch_id, actor) do
+    with {:ok, {:refused, _reason}} <-
+           refuse_launch(
+             run,
+             invocation,
+             :run_not_running_at_launch,
+             run.status,
+             invocation.profile_id,
+             actor,
+             %{"switch_id" => switch_id}
+           ),
+         do: {:ok, :not_running}
   end
 
   # Metadata only, in the actor's own tenant; the refusal itself changed
@@ -1423,6 +1573,52 @@ defmodule SdrAgent.Agents do
       allocations: Map.new(grant.allocations, &{&1.id, Map.get(counts, &1.id, 0)})
     }
   end
+
+  # --- model profile switches (C2-02a) ---------------------------------
+
+  @doc """
+  ADM: requests a switch of the tenant's desired model profile —
+  `%{to_profile_id, expected_revision, server_generation}`. Creates the
+  setting on the first request. See `SdrAgent.Agents.ProfileSwitches`.
+  """
+  def request_profile_switch(attrs, opts), do: ProfileSwitches.request(attrs, opts)
+
+  @doc "MRT: pending → completed, applying the switch to the setting (`%{server_generation}`)."
+  def complete_profile_switch(switch, attrs, opts),
+    do: ProfileSwitches.transition(:complete, switch, attrs, opts)
+
+  @doc "MRT: pending → failed (`%{server_generation, failure_reason}`); the setting is unchanged."
+  def fail_profile_switch(switch, attrs, opts),
+    do: ProfileSwitches.transition(:fail, switch, attrs, opts)
+
+  @doc "MRT: pending → blocked (`%{server_generation, failure_reason}`); the setting is unchanged."
+  def block_profile_switch(switch, attrs, opts),
+    do: ProfileSwitches.transition(:block, switch, attrs, opts)
+
+  @doc "ADM, AUD (audited), AGT: the tenant's setting, or `{:ok, nil}` before the first one."
+  def get_profile_setting(opts), do: ProfileSwitches.get_setting(opts)
+
+  # --- model server starts (C2-02b2α) -----------------------------------
+
+  @doc """
+  MRT, in the registered coordinator only: allocates the tenant's next
+  model server start — `%{boot_id, profile_id, reason, switch_id?}`. See
+  `SdrAgent.Agents.ServerStarts`.
+  """
+  def allocate_server_start(attrs, opts), do: ServerStarts.allocate(attrs, opts)
+
+  @doc """
+  MRT, in the registered coordinator only: moves the tenant's latest start
+  of this boot to `:started`, `:ready` or `:failed`.
+  """
+  def mark_server_start(start, status, attrs, opts),
+    do: ServerStarts.mark(start, status, attrs, opts)
+
+  @doc "ADM, AUD (audited), AGT: the tenant's model server starts, by generation."
+  def list_server_starts(opts), do: ServerStarts.list(opts)
+
+  @doc "ADM, AUD (audited), AGT: the tenant's switches, newest first."
+  def list_profile_switches(opts), do: ProfileSwitches.list_switches(opts)
 
   # One guarded transaction per grant change. A human actor is re-read
   # first, so the change and its audit events carry the operator's current

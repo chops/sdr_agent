@@ -596,6 +596,17 @@ it does not go through `Runtime`, `SDR.Model` or a worker:
 > server. `calibrate` alone starts one private, unnamed server (step 2),
 > for its one call, linked to the command.
 
+> **R0-07f (2026-10-15, `docs/product/r0/r0-07f-console-witness.md`).**
+> The first attended call stopped at preflight with
+> `witness_store_untrusted`: the console never configured the Witness
+> store root, and inherited the test build's 1 s result wait. The root is
+> now the owner's `SDR_WITNESS_STORE_ROOT`, carried in the console's plan,
+> validated by the store's own trust check (no repair; a control character
+> is refused), applied before the app starts and verified again after it;
+> `calibrate` and every `calibrate-recover ID` refuse without it, before
+> any storage or claim. The console's result wait is `ResultGate`'s own
+> 120 s ceiling and 1 s poll. The shipped allowlist stays empty.
+
 1. **Preflight** (no locks, no writes): pin verified and equal to the
    profile's version; witness store trusted; G-R0 selected (8.3);
    predecessor barrier clear (B4'); single-flight lock acquired (8.4);
@@ -2381,10 +2392,13 @@ an option.
   id; the tenant is resolved later, inside `run/2`. Its only environment
   read is the owner's home, for the two canonical paths (corrected in
   round 4 below; it is not pure).
-- The task does, in order: the plan; `{:run, p, o} = command(argv)`
-  (invalid usage stops here, and nothing is prepared); `{:ok, _} =
-  prepare(Keyword.take(o, [:root, :evidence_dir]))` (round 4); the app and
-  storage start; the authority registry; `run(p, o)`.
+- The task does, in order: `{:run, p, o} = command(argv)` (invalid usage
+  stops here: no plan, no secrets file, nothing prepared); the plan; the
+  witness root prerequisite (R0-07f: refused without
+  `SDR_WITNESS_STORE_ROOT`); `{:ok, _} = prepare(Keyword.take(o, [:root,
+  :evidence_dir]))` (round 4); the app and storage start, with the plan's
+  Witness root and result wait applied and verified; the authority
+  registry; `run(p, o)`.
 - Tests assert `command/1` and `console_opts/1` exactly: no `hook`; the
   `server`, `isolation` and `record` values `[]`; `ProcessProbe`; and no
   value derived from argv or the environment beyond the profile and the

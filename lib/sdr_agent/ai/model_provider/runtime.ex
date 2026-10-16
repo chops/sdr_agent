@@ -9,20 +9,22 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   hermetic and ClaudeCLI stays personal and local). This module turns that
   choice into:
 
-    * `children/0` — the supervision children: exactly one
-      `SdrAgent.AI.ModelProvider.ClaudeCLI` server, registered as
-      `ClaudeCLI.server/0`, with the configured `:timeout`, the app's
-      pinned CLI `:executable` (`SDR_CLAUDE_CLI_BIN`, R0-02) and the
-      `desired_profile/0` (R0-03), when ClaudeCLI is selected; none for the
-      Fake. One server serialises every call (concurrency 1, ADR-0004 /
-      ADR-0005 C8).
+    * `children/0` — the supervision children: when ClaudeCLI is
+      selected, the C2-02b2α profile tree, whose coordinator runs exactly
+      one `SdrAgent.AI.ModelProvider.ClaudeCLI` server, registered as
+      `ClaudeCLI.server/0`, with the configured `:timeout` and the app's
+      pinned CLI `:executable` (`SDR_CLAUDE_CLI_BIN`, R0-02;
+      `server_options/1`), at the setting's desired profile or
+      `desired_profile/0` (R0-03); none for the Fake. One server serialises
+      every call (concurrency 1, ADR-0004 / ADR-0005 C8).
     * `resolve/1` — a run's model options (`:provider`,
       `:provider_options`) with the provider made explicit and, for
       ClaudeCLI, the named server injected — the one validated selection
       used by `SdrAgent.SDR.AgentWorker`, `SdrAgent.SDR.ReplyWorker` and
       the public `SdrAgent.AI.ModelProvider.complete/2`. An absent or
       unhealthy ClaudeCLI is a typed refusal before any reservation:
-      `{:error, :provider_not_running}`, `:provider_not_quiescent`
+      `{:error, :provider_not_running}`, `:provider_held` (the coordinator
+      holds the server's launches, C2-02b2α), `:provider_not_quiescent`
       (admission closed), `:llm_proxy_shim_not_found` or
       `:pinned_cli_unavailable` (no pin, or the pinned build is missing or
       is not the reviewed identity) or `:real_model_staged` (R0-02 staging:
@@ -42,6 +44,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
+  alias SdrAgent.AI.ModelProvider.ProfileSupervisor
 
   @doc "The selected provider module (`config :sdr_agent, :model_provider`)."
   def provider, do: Application.fetch_env!(:sdr_agent, :model_provider)
@@ -57,22 +60,30 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   """
   def desired_profile, do: ModelProfiles.default_real()
 
-  @doc "Supervision children for the selected provider."
+  @doc """
+  Supervision children for the selected provider: none for the Fake; for
+  ClaudeCLI, the C2-02b2α profile tree (`ProfileSupervisor`), whose
+  coordinator starts the one named server through the allocator, held until
+  a reconciled read releases it.
+  """
   def children do
     case provider() do
-      ClaudeCLI ->
-        options =
-          :sdr_agent
-          |> Application.get_env(ClaudeCLI, [])
-          |> Keyword.take([:timeout, :executable])
-          |> Keyword.put(:name, ClaudeCLI.server())
-          |> Keyword.put(:profile, desired_profile())
-
-        [{ClaudeCLI, options}]
-
-      _other ->
-        []
+      ClaudeCLI -> [{ProfileSupervisor, server: &server_options/1}]
+      _other -> []
     end
+  end
+
+  @doc """
+  The ClaudeCLI start options of the app's server at `profile_id` (C2-02b2α:
+  the coordinator adds the name, the profile and its hold): the configured
+  `:timeout` and pinned `:executable` only. The profile is never an
+  environment knob: the coordinator runs the persisted setting's desired
+  profile, or `desired_profile/0` before any setting.
+  """
+  def server_options(_profile_id) do
+    :sdr_agent
+    |> Application.get_env(ClaudeCLI, [])
+    |> Keyword.take([:timeout, :executable])
   end
 
   @doc """
@@ -121,6 +132,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
     cond do
       admission == :not_running -> {:error, :provider_not_running}
+      ClaudeCLI.held?(server) -> {:error, :provider_held}
       admission != :open -> {:error, :provider_not_quiescent}
       attestation[:command?] == false -> {:error, :llm_proxy_shim_not_found}
       not pinned_cli_present?(attestation) -> {:error, :pinned_cli_unavailable}
@@ -148,7 +160,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
   @doc """
   The run `failure_reason` recorded when a worker refuses to run because of
-  `reason` (`:provider_not_running`, `:provider_not_quiescent`,
+  `reason` (`:provider_not_running`, `:provider_held`, `:provider_not_quiescent`,
   `:llm_proxy_shim_not_found`, `:pinned_cli_unavailable`,
   `:real_model_staged` or `:unknown_model_provider`); no model call was
   made.
@@ -160,6 +172,11 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
   def refusal_message(:unknown_model_provider),
     do: "unknown model provider named by the job (fake or claude_cli); no model call was made"
+
+  def refusal_message(:provider_held),
+    do:
+      "model provider claude_cli is held while its server is started, adopted or switched " <>
+        "(see Admin); no model call was made"
 
   def refusal_message(:provider_not_quiescent),
     do:
