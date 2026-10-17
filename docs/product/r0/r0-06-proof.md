@@ -69,13 +69,13 @@ branch does not satisfy a row.
 | C9-05, the grant form | #134 | `c9d640e` | `22c02bc4` |
 | R0-07f, the calibration console | #162 | — | `3b2caaa` |
 | C2-02a, b1, b2α | #159, #160, #163 | — | `3c54fa56`, `35279848`, `22db5c06` |
-| R0-04, the provider outcome contract | #158 | `83a5b74` | open |
-| C2-02b2β, the attended resolver | #167 | `ac95b9f` | open |
-| C2-02c, restart and status | #168 | `6de84ff` | open |
-| C9-04, evidence | #157 | `8df6b0a` | open |
-| C1-02, Home inbox reads (C9-06's dependency) | #169 | `6b17072` | open |
-| C9-06, evidence | #170 | `d95457f` | open |
-| R0-05, the admin card, switch and resolver UI | not yet | — | ADR-0005 R0-05 amendment accepted (D-143); option-B GREEN in progress |
+| R0-04, the provider outcome contract | #158 | `83a5b74` | `84025c35` |
+| C2-02b2β, the attended resolver | #167 | `ac95b9f` | `8cb5410a` |
+| C2-02c, restart and status | #168 | `6de84ff` | `6d30e5e6` |
+| C9-04, evidence | #157 | `8df6b0a` | `b7195c31` |
+| C1-02, Home inbox reads (C9-06's dependency) | #169 | `6b17072` | `b0af5f56` |
+| C9-06, evidence | #170 | `d95457f` | `aea57294` |
+| R0-05, the admin card, switch and resolver UI | #173 | `3d27aad` (draft 5; browser acceptance D-150) | `6f271abe` |
 
 Where a branch was updated from main only to satisfy branch protection,
 the record keeps both: the exact head Codex approved, and the
@@ -233,10 +233,27 @@ attended resolver where it applies; otherwise escalate.
 **After the return leg:** desired and running are Opus again. The switch
 history stays.
 
-| Leg | Time | Switch id | Desired / running / revision | Server generation | No-call check | Notes |
+**The trial, 2026-10-17 (owner-run).**
+- **Build and instance:** main `6f271abef7b3cfefa2c7eb6defcb07602c003181`; dev, `claude_cli` with the pinned CLI, port 4120, database `sdr_agent_dev`. The BEAM was pid 12403, started 21:34:09 UTC, and was the same at all six probes.
+- **Capture root:** `/Users/charles/.local/share/llm-otel-proxy/blobs`.
+- **Readings:** the baseline was read with the reviewed snapshot helper v3 (Codex 2b47b3f4) at three checkpoints, each `result complete` with an outer `exit=0`.
+- **Evidence:** `claude-r006-trial-evidence.md` and `owner-r006-snapshots.log`, in the handoff state dir.
+
+| Leg | Time (UTC) | Switch id | Desired / running / revision | Server generation | No-call check | Notes |
 |---|---|---|---|---|---|---|
-| Opus → Sonnet | — | — | — | — | — | — |
-| Sonnet → Opus | — | — | — | — | — | — |
+| Opus → Sonnet | 21:50:08 | `01a14bd7-fbd0-79be-98f2-25b699b69406` (completed) | Sonnet / Sonnet / 2 | 1 → 2 (sonnet, ready, activation) | Unchanged: model_invocations 19 (pre-existing, last reserved 2026-10-07), grants 0, witness links 0, result releases 0, capture-store aggregates 19/19/19/0 | Owner card gate passed |
+| Sonnet → Opus | 21:52:56 | `01a14bda-8b59-75e0-a954-df7c57e19451` (completed) | Opus / Opus / 3 | 2 → 3 (opus, ready, activation) | Unchanged, as above | Owner card gate passed |
+
+**Verdict:** Codex qualified technical PASS (`9f2ed2b2`) for the owner-run in-app Opus → Sonnet → Opus no-call trial, based on the three checkpoint blocks and the retrospective owner attestation.
+
+**Deviation, for owner disposition:** the approved pre-execution helper-hash check was omitted from the relayed instructions and not performed. Matching before/after file hashes do not prove the bytes that ran at execution time.
+
+**Recorded qualifications:**
+- **Owner attestation:** the build SHA, the baseline card gate, the outer exits and the quiet conditions are owner attestations (retrospective, "1–4 yes"), not captured output.
+- **Not captured:** the audit event ids.
+- **Capture entries:** the 19 were present at the baseline with unchanged aggregate counts; their individual ages were not inspected.
+- **Method limits:** the checkpoints are not atomic snapshots or continuous observation. No overlap of the two servers rests on the coordinator's tests, as above.
+- **Staging:** ordinary calls remain staged.
 
 ## 5. Who signs what (Codex ruling e)
 
