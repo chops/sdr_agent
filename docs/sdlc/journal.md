@@ -870,6 +870,36 @@ unaffected.
 - **4:** the calibration attempts are due by Sun Oct 18, 23:59 MDT, and
   the attempt count is undecided.
 
+### Sprint 1, day 5 (Fri Oct 16), afternoon and evening
+
+**Calibration closed.** Sonnet attempt 3 PASS. Attempt 2 (Oct 15) got a retrospective PASS, and the owner accepted its missed review-before-next stop (D-145). G-R0 used 3 of 4 attempts.
+
+**Merged:** #165, #167, #168, #158, #157, #169, and #172, the promotion of the Opus and Sonnet 2.1.294 tuples (D-146).
+
+**R0-05:**
+- Option-B GREEN approved; final integration `c8f6f23` approved.
+- The owner chose a reviewed test-only rehearsal driver for the browser check (D-147). It was approved at `0b68813` after one CHANGES REQUESTED round.
+
+**Tripwire 3:** layer 1 missed the owner's "late-night tonight" target. It was reported the next morning.
+
+### Sprint 1, day 6 (Sat Oct 17): layer 1 closed
+
+- **#170 merged** (`aea5729`; owner yes, D-148).
+- **R0-05 browser check:**
+  - **Driver fix:** the first owner run refused the password before any input, because the driver read it from the wrong device and in cooked mode. Fixed at `02ad8d8` and approved.
+  - **Defect found:** the owner's run found a real one. A browser can't submit a mismatched confirmation, because the button stayed disabled until the text was exact, so the reset could never be reached. The owner chose to fix it (D-149): contract draft 5, RED `3f89303` verified, GREEN `3d27aad`.
+  - **Gates:** the first full gate hit an unrelated CountPoolTest setup race (#175); the rerun passed with 2890 tests.
+  - **Pass:** the owner's `_r5` run passed four of four checks with a clean stop. The owner accepted the gap that the exit code wasn't captured, and #173 merged (`6f271ab`, D-150).
+- **R0-06 trial:**
+  - **Snapshot tool:** the full read-only Mix snapshot command went to the backlog (#176), and the owner chose a reviewed SQL and shell snapshot instead (D-151). It took three Codex rounds (v1 and v2 CHANGES REQUESTED, v3 approved, 31/31 tests).
+  - **Instance:** the existing dev app on port 4120, with the store measured at the owner's proxy capture root.
+  - **Trial steps:** they took two CHANGES REQUESTED rounds, and draft 3 was approved.
+  - **Run:** the owner ran Opus → Sonnet → Opus at `6f271ab`. All three checkpoints were complete with the same BEAM, with no change to invocations, grants, links or store counts, one new ready start per leg, and two completed switches. Codex gave a qualified technical PASS (`9f2ed2b2`). The owner accepted the omitted pre-run helper-hash check (D-152), then accepted R0-06 and closed layer 1 (D-153).
+  - **Record:** #171, Codex PASS at `63284b9`; it merges after CI.
+- **Next:** planning layers 2–4, starting with ordinary-call enablement. Codex's view was requested first.
+
+**Tripwire 2** fired several times today: the snapshot helper, the trial steps and the #171 record each needed a second CHANGES REQUESTED round. They were reported to the owner as they happened.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -901,3 +931,11 @@ says what happened, why, what it cost and what changed.
 | **Oct 15: notes for a review reached Codex empty.** The C4-01a RED author notes were written through the shell's `cat`, which is aliased to `bat`, and arrived at zero bytes. | Claude's own memory warns about the alias, and Claude used the wrong command anyway. | Minutes: Codex asked for them. | Notes files are written with the Write tool, and the byte count is checked before sending. |
 | **Oct 16: Claude recorded OQ-5 as accepted under D-138.** The owner had accepted the ADR-0004 C2-02b2β amendment and OQ-2, not OQ-5. | The amendment's open questions were summarized as one item when the decision was written. | Minutes: caught before any work relied on it, and corrected in the decision log. | Each open question in an owner decision is recorded separately, as accepted or still open. |
 | **Oct 15–16: Claude gave the G-R0 expiry as "Saturday Oct 18".** It is Sunday Oct 18, 23:59 MDT (2026-10-19 05:59 UTC); the timestamp was right, the weekday wrong. It went into D-140, the journal and several owner messages. | The weekday was typed from memory, against Claude's own rule to derive weekdays with `date`. | None in time (the real deadline is a day later than stated), but the owner was told the wrong day while planning attended calibration attempts. Codex caught it (`e87584b5`). | D-140 and the journal corrected; weekdays come from `date -d`, never by hand. |
+| **Oct 16: Claude's calibration ledger missed the Oct 15 Sonnet attempt.** | The ledger was compiled from conversation memory, not from the database. | Codex's read-only snapshot found it; the ledger was corrected and the missed stop disclosed (D-145). | Ledger counts come from Codex's read-only database snapshot, never from conversation. |
+| **Oct 16: Claude sent Codex the wrong SHA for a review** (`e826e7f` instead of `1d7d5c4`). | It was typed by hand. | Minutes; corrected with a reply envelope. | Copy SHAs from `git rev-parse` output. |
+| **Oct 16: the owner found Claude's messages too verbose.** | Claude explained background when the owner needed decisions. | Owner time. | Asks are numbered, one line each, with Claude's pick. |
+| **Oct 17: the resolver's mismatch reset was unreachable in a real browser.** | The tests submitted the form directly (`render_submit`), which bypasses the disabled button. No one checked that a browser could reach that path. | A contract, RED, GREEN and full-gate cycle, plus four owner reruns. | Draft 5 keeps the button enabled while editing. The browser check stays as the owner's evidence. |
+| **Oct 17: a rehearsal run used the old code.** The owner's `_r2` run reported `code: 02ad8d8`. | The checkout switch to `c745380` didn't happen, and the instructions didn't ask the owner to confirm the SHA. | One wasted run. | Owner instructions include `git rev-parse` checks with the expected value. |
+| **Oct 17: Claude's snapshot helper wrongly reported failures as "complete".** v1: a failed `find` or `lsof` still printed complete, and a changed BEAM wasn't compared. v2: an unreadable root read as zero, writable ancestors were accepted, and the environment was cleaned after child processes had already started. | The happy path was tested; the failure paths weren't. | Two CHANGES REQUESTED rounds, about 2 hours. | v3: every observation's exit is checked, the environment boundary is applied before anything runs, and there are regression tests for each reproduced failure. |
+| **Oct 17: Claude's test harness reassigned HOME and ran `rm -rf` on it.** Two further test-only bugs: fixtures were allocated in a subshell, and a check called the dev shell's `stat`. | Throwaway scripting habits. | Codex refused to rerun the harness; one round. | The harness uses `mktemp -d` fixtures only, never deletes, and calls system tools by absolute path. |
+| **Oct 17: Claude left the approved helper-hash check out of the owner's trial steps.** | Claude condensed the approved steps into a short message and dropped one. | A disclosed deviation that the owner accepted (D-152). | Relayed owner steps must match the approved document's steps one to one. |
