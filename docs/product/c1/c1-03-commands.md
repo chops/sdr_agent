@@ -1,7 +1,7 @@
 # C1-03: fixed inbox commands
 
-Status: **entity PASS; draft-3 implementation plan and slice A RED PASS**.
-No implementation, RED tests or H1 screen changes yet.
+Status: **entity/plan PASS; slice A VERIFIED RED, GREEN in progress**.
+No H1 screen changes, retry writer or story-complete claim.
 Base: merged main `6f271abef7b3cfefa2c7eb6defcb07602c003181`, including
 C1-02 (#169). Owner D-154 assigns C1-03 and the H1 packet to Codex, with
 Claude reviewing. D-155 retains the full Nov 6 core and the existing
@@ -76,6 +76,14 @@ absent from errors, logs and audit diagnostics. B remains gated on its
 separate preview/eligibility contract before B RED. Any newly identified
 semantic source-action delta returns for entity review, rather than being
 authorized by this status line.
+
+Slice A intended-reason gate: **VERIFIED RED**, Claude answer
+`m_1792277469126570000_ddcbcd7b` (2026-10-17T22:51:09Z), replying to
+`m_1792277241166230583_a2cb1b1d`, at exact RED head
+`f35c2febf5007e1454299136c0fc224356bc53cf`. Independent result: 4/51
+passed, 47 assertion failures, zero crashes; proceed to GREEN. Qualification:
+nine tests guard before their fixtures, so GREEN review must confirm all
+nine reach their subjects. No B/H1 or GREEN approval is implied.
 
 ## Observable behavior
 
@@ -414,6 +422,12 @@ the project's `mix precommit` plus canonical Credo, dependency audit and
 any configured workflow/codegen checks. No API/DB/provider configuration
 is weakened for a pass. Exact commands and log hashes go in RED/GREEN
 requests once the environment is verified; no tests have run yet.
+
+That last sentence records the planning checkpoint. Current execution
+evidence is maintained in
+`notes/features/c1-03-inbox-commands.org`: A's unchanged focused suite is
+51/51, including the nine independently qualified fixtures; final full
+gates and independent GREEN review are pending. No B or H1 gate changes.
 
 ## Risks and Design Review Questions
 

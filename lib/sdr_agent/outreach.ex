@@ -89,6 +89,12 @@ defmodule SdrAgent.Outreach do
   @doc "SQL-bounded Home Draft metadata after a validated global continuation."
   def list_inbox_drafts(actor, cursor), do: SdrAgent.Outreach.Inbox.list(actor, cursor)
 
+  @doc "One source-owned authorized Home command metadata context, never an inbox scan."
+  def get_inbox_draft(actor, id), do: SdrAgent.Outreach.Inbox.get(actor, id)
+
+  @doc "Exact atomic Home draft command; authenticates and revalidates the stored human session."
+  def inbox_command(token, command), do: SdrAgent.Outreach.InboxCommands.execute(token, command)
+
   @doc "Exact authorized pending-email total, with integrity/withholding and fixed lowerable deadlines."
   def count_inbox_drafts(opts), do: SdrAgent.Outreach.Inbox.count_drafts(opts)
 
