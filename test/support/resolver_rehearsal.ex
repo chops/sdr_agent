@@ -127,7 +127,7 @@ defmodule SdrAgent.Test.ResolverRehearsal do
       port_free: &check_port_free/1,
       storage_status: fn repo -> Repo.__adapter__().storage_status(repo) end,
       assets: &SdrAgent.CalibrationConsole.check_assets/0,
-      read_password: fn -> read_password(:stdio) end,
+      read_password: fn -> read_password(:standard_io, &raw_input/1) end,
       apply: &apply!/1,
       create: &create/1,
       migrate: &migrate/1,
@@ -241,21 +241,42 @@ defmodule SdrAgent.Test.ResolverRehearsal do
   defp info(line), do: Mix.shell().info(line)
 
   @doc """
-  Reads the password from `device` without echo (OTP's `io:get_password/1`);
-  nil when nothing could be read (no terminal, end of input).
+  Reads the password from `device` without echo (OTP's `io:get_password/1`,
+  an Erlang device name such as `:standard_io`, run through `hide`); nil
+  when nothing could be read (no terminal, raw mode refused, end of input).
   """
-  def read_password(device) do
+  def read_password(device, hide \\ fn read -> read.() end) do
     IO.write(
       "Type a fresh synthetic password for the fixture admin (16+ characters, not echoed): "
     )
 
-    case :io.get_password(device) do
+    case hide.(fn -> :io.get_password(device) end) do
       line when is_list(line) -> List.to_string(line)
       line when is_binary(line) -> line
       _other -> nil
     end
   after
     IO.write("\n")
+  end
+
+  @doc """
+  Runs `read` with standard input in raw mode, which `io:get_password/1`
+  needs under `mix` (`-noshell` starts cooked, and cooked input refuses it
+  with `{:error, :enotsup}`), then restores cooked mode for the `STOP`
+  line. `{:error, reason}` when raw mode is unavailable (no terminal).
+  """
+  def raw_input(read) do
+    case :shell.start_interactive({:noshell, :raw}) do
+      :ok ->
+        try do
+          read.()
+        after
+          :shell.start_interactive({:noshell, :cooked})
+        end
+
+      error ->
+        error
+    end
   end
 
   @doc """

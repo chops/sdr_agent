@@ -216,6 +216,14 @@ defmodule SdrAgent.ResolverRehearsalTest do
       {:ok, device} = StringIO.open("")
       capture_io(fn -> assert R.check_password(R.read_password(device)) |> elem(0) == :error end)
     end
+
+    test "a refused raw mode reads no password" do
+      {:ok, device} = StringIO.open("a-synthetic-password-line\n")
+
+      capture_io(fn ->
+        assert R.read_password(device, fn _read -> {:error, :enotsup} end) == nil
+      end)
+    end
   end
 
   describe "the fake-launcher check" do
