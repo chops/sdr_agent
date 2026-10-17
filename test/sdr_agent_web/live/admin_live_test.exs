@@ -111,15 +111,25 @@ defmodule SdrAgentWeb.AdminLiveTest do
       assert has_element?(view, "#pinned-cli-path", bin)
     end
 
-    test "R0-05: the Fake shows its profile as configured and effective, with no refusal",
+    # R0-05 GREEN migration (contract section 1): the configured and
+    # effective profile lines became the desired, running and accepting
+    # lines. The Fake has no desired profile; it runs and accepts on its
+    # in-process profile, with no refusal.
+    test "R0-05: the Fake shows its profile as running and accepting, with no refusal",
          %{conn: conn} do
       {:ok, view, _html} = conn |> sign_in(:admin) |> live(~p"/admin")
 
-      assert has_element?(view, "#configured-profile[data-profile='fake']", "fake")
-      assert has_element?(view, "#effective-profile[data-profile='fake']", "fake")
+      refute has_element?(view, "#desired-profile")
+      assert has_element?(view, "#running-profile[data-profile='fake']", "fake")
+      assert has_element?(view, "#accepting-calls[data-accepting='yes']", "yes, on fake")
+      refute has_element?(view, "#accepting-calls[data-refusal]")
       refute has_element?(view, "#provider-refusal")
     end
 
+    # R0-05 GREEN migration (contract section 1): `#configured-profile`
+    # became `#desired-profile` (the coordinator's confirmed desired
+    # profile, unknown without one) and `#effective-profile` became
+    # `#running-profile` and `#accepting-calls`.
     test "R0-05: a refused ClaudeCLI shows its profile, no effective profile and the reason",
          %{conn: conn} do
       bin = SdrAgent.Test.PinnedCLI.store_path!()
@@ -130,7 +140,14 @@ defmodule SdrAgentWeb.AdminLiveTest do
       # C2-02c 2b: with no coordinator the profile is unknown, never the
       # registry default, and the reason is the unavailable status.
       {:ok, view, _html} = live(admin, ~p"/admin")
-      assert has_element?(view, "#configured-profile[data-profile='none']")
+      assert has_element?(view, "#desired-profile[data-profile='unknown']", "unknown")
+      refute has_element?(view, "#desired-profile", "claude_cli_opus")
+      assert has_element?(view, "#running-profile[data-profile='unknown']")
+
+      assert has_element?(
+               view,
+               "#accepting-calls[data-accepting='no'][data-refusal='status_unavailable']"
+             )
 
       assert has_element?(
                view,
@@ -143,8 +160,18 @@ defmodule SdrAgentWeb.AdminLiveTest do
       no_server_tree!()
       {:ok, view, _html} = live(admin, ~p"/admin")
 
-      assert has_element?(view, "#configured-profile[data-profile='claude_cli_opus']")
-      assert has_element?(view, "#effective-profile[data-profile='none']")
+      assert has_element?(
+               view,
+               "#desired-profile[data-profile='claude_cli_opus'][data-source='default']",
+               "(default)"
+             )
+
+      assert has_element?(view, "#running-profile[data-profile='none']")
+
+      assert has_element?(
+               view,
+               "#accepting-calls[data-accepting='no'][data-refusal='provider_not_running']"
+             )
 
       assert has_element?(
                view,

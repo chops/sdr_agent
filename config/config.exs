@@ -254,9 +254,12 @@ config :opentelemetry, resource: %{service: %{name: "sdr_agent"}}
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
-# C4 section 3.6: settings form params live under `settings_content` and are
-# never logged (with the default `password`).
-config :phoenix, :filter_parameters, ["password", "settings_content"]
+# Parameters shown as "[FILTERED]" in Phoenix and LiveView logs
+# (`Phoenix.Logger.filter_values/1`): the default "password"; C4 section
+# 3.6's settings form params, which live under `settings_content`; and
+# R0-05's typed resolution confirmation
+# (`docs/product/r0/r0-05-interface.md` section 5).
+config :phoenix, :filter_parameters, ["password", "settings_content", "resolution_confirmation"]
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
