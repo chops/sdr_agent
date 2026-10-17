@@ -142,7 +142,7 @@ to the other.
 
 **Evaluated and promoted.** Each column is the exact tuple evaluated in its own reviewed attempt:
 - **Opus:** attempt 1, evidence `0c2e3735…80c648b4`.
-- **Sonnet:** attempt 3, evidence `a2e8a0b2…4e854525`.
+- **Sonnet:** attempt 3, evidence `a2e8a0b2…e4854525`.
 
 Neither rides on the other's PASS. Both tuples were promoted by #172: config-only, Codex-approved (`337e2807`) at reviewed head `82c005b3230a92dfd2817877f8733c6e0c638ea2`, and merged as `527c31562e362ab9f1246dabac19c7fba1bc9e19` (D-146). The trial build `6f271ab`'s `config/config.exs` Witness `reconciled_methods` holds exactly these two generation-2 entries, beside the gen-1 entry.
 
