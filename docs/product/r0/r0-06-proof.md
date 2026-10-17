@@ -1,7 +1,14 @@
 # R0-06 profile proof: evidence record and owner runbook
 
-**Status:** draft 4, 2026-10-16: the owner's OQ-R6-1 amendment (D-142) in
-sections 0, 2 and 5; needs Codex review. Draft 3 had **Codex PASS** for the record and
+**Status:** draft 5, 2026-10-17: the promotion and every prerequisite
+merged (section 1); the tuples evaluated and promoted (section 3); the
+owner-run in-app trial recorded, with Codex qualified technical PASS
+`9f2ed2b2` (section 4). Owner dispositions: D-145 (attempt 2's missed
+stop), D-152 (the trial's omitted helper-hash check) and D-153 (the owner
+accepts R0-06 and closes layer 1, given before this record's review).
+This exact record still needs Codex's review, exact-head CI and the
+owner's merge decision. Ordinary real calls remain staged. Draft 4,
+2026-10-16: the owner's OQ-R6-1 amendment (D-142) in sections 0, 2 and 5. Draft 3 had **Codex PASS** for the record and
 runbook template (`82c07ef7`, exact `3fbabaf`); not a completed proof
 or any execution authority. Shaped by Codex's pre-read rulings
 (`codex-r006-preread-4b41d10e.md`, consultation `4b41d10e`). Draft 1
@@ -76,6 +83,7 @@ branch does not satisfy a row.
 | C1-02, Home inbox reads (C9-06's dependency) | #169 | `6b17072` | `b0af5f56` |
 | C9-06, evidence | #170 | `d95457f` | `aea57294` |
 | R0-05, the admin card, switch and resolver UI | #173 | `3d27aad` (draft 5; browser acceptance D-150) | `6f271abe` |
+| R0-06, the tuple promotion (section 3) | #172 | `82c005b` | `527c3156` (D-146) |
 
 Where a branch was updated from main only to satisfy branch protection,
 the record keeps both: the exact head Codex approved, and the
@@ -93,7 +101,7 @@ An outstanding lock, ticket or unlatched predecessor is a stop.
 | Order | Profile | Date (MDT) | Outcome | Evidence SHA-256 | Latch | Codex attempt verdict |
 |---|---|---|---|---|---|---|
 | 1 | `claude_cli_opus` | Oct 15 | completed / valid | `0c2e3735582d0bde76a7eb8eb2e59dec88852f683d8f5cd18834189a80c648b4` | `:calibration` | PASS, attempt only, not promotion (reviewer report in the private evidence index) |
-| 2 | `claude_cli_sonnet` | Oct 15 | completed / valid; console outcome `match` | `689a0514c7cc221b6e4525f57ada49671358d3ffa5fc746a26d8bc53ba9c40cb` | `:calibration` | **Retrospective PASS, Oct 16** (53/53 read-only checks; reviewer report in the private evidence index). **Deviation kept:** charged about 24 minutes after attempt 1, before attempt 1's evidence review, so the review-before-next stop was not kept; it was missing from this ledger until Codex's ledger snapshot found it (Oct 16). The later review cannot supply historical authorization or waive the stop; it awaits the owner's disposition. |
+| 2 | `claude_cli_sonnet` | Oct 15 | completed / valid; console outcome `match` | `689a0514c7cc221b6e4525f57ada49671358d3ffa5fc746a26d8bc53ba9c40cb` | `:calibration` | **Retrospective PASS, Oct 16** (53/53 read-only checks; reviewer report in the private evidence index). **Deviation kept:** charged about 24 minutes after attempt 1, before attempt 1's evidence review, so the review-before-next stop was not kept; it was missing from this ledger until Codex's ledger snapshot found it (Oct 16). The later review cannot supply historical authorization or waive the stop; the owner accepted the deviation (D-145, Oct 16). |
 | 3 | `claude_cli_sonnet` | Oct 16 | completed / valid; console outcome `match` | `a2e8a0b2ffbb84ff739f193a9bb91fb9b95baf36affb4f92dde5b148e4854525` | `:calibration` | PASS, attempt only, not promotion (53/53 read-only checks; reviewer report in the private evidence index) |
 
 **G-R0 usage** (Codex's read-only snapshot, 2026-10-16 19:40:51 UTC): Opus
@@ -126,21 +134,21 @@ to the other.
 | Key | Opus | Sonnet |
 |---|---|---|
 | provider | `claude_cli` | `claude_cli` |
-| cli_version | `2.1.294` | candidate: `2.1.294` |
-| profile_id | `claude_cli_opus` | candidate: `claude_cli_sonnet` |
-| model_id | `claude-opus-5-5` | candidate: `claude-sonnet-5-5` |
-| projection_version | `claude-message-json/3+prompt-builder/1` | candidate: not yet known |
-| method | `propagated_id` | candidate: `propagated_id` |
+| cli_version | `2.1.294` | `2.1.294` |
+| profile_id | `claude_cli_opus` | `claude_cli_sonnet` |
+| model_id | `claude-opus-5-5` | `claude-sonnet-5-5` |
+| projection_version | `claude-message-json/3+prompt-builder/1` | `claude-message-json/3+prompt-builder/1` |
+| method | `propagated_id` | `propagated_id` |
 
-The Opus column is the tuple evaluated in attempt 1 (reviewed). For
-Sonnet, the profile id, CLI version and model id are the registry's
-configuration, candidates only, until its captured identities are
-independently reviewed. The projection and method don't come from the
-registry: the candidate projection is fixed and hermetically reviewed
-before the attempt, and the evaluated result is unknown until the
-attempt is reviewed.
+**Evaluated and promoted.** Each column is the exact tuple evaluated in its own reviewed attempt:
+- **Opus:** attempt 1, evidence `0c2e3735…80c648b4`.
+- **Sonnet:** attempt 3, evidence `a2e8a0b2…4e854525`.
 
-**Sonnet pre-attempt candidate (reviewed, 2026-10-16):** `(claude_cli,
+Neither rides on the other's PASS. Both tuples were promoted by #172: config-only, Codex-approved (`337e2807`) at reviewed head `82c005b3230a92dfd2817877f8733c6e0c638ea2`, and merged as `527c31562e362ab9f1246dabac19c7fba1bc9e19` (D-146). The trial build `6f271ab`'s `config/config.exs` Witness `reconciled_methods` holds exactly these two generation-2 entries, beside the gen-1 entry.
+
+Promotion admits these tuples to witness reconciliation only. It does not lift `:real_model_staged`; ordinary real calls remain staged.
+
+**Historical: Sonnet pre-attempt candidate (reviewed, 2026-10-16),** before attempt 3's evidence and the promotion: `(claude_cli,
 2.1.294, claude_cli_sonnet, claude-sonnet-5-5,
 claude-message-json/3+prompt-builder/1, propagated_id)`. Codex confirmed
 the held calibration code (`3b2caaa`) builds exactly this candidate,
@@ -237,7 +245,12 @@ history stays.
 - **Build and instance:** main `6f271abef7b3cfefa2c7eb6defcb07602c003181`; dev, `claude_cli` with the pinned CLI, port 4120, database `sdr_agent_dev`. The BEAM was pid 12403, started 21:34:09 UTC, and was the same at all six probes.
 - **Capture root:** `/Users/charles/.local/share/llm-otel-proxy/blobs`.
 - **Readings:** the baseline was read with the reviewed snapshot helper v3 (Codex 2b47b3f4) at three checkpoints, each `result complete` with an outer `exit=0`.
-- **Evidence:** `claude-r006-trial-evidence.md` and `owner-r006-snapshots.log`, in the handoff state dir.
+- **Evidence (private, in the handoff state dir; bound by hash):**
+  - `claude-r006-trial-evidence.md`, sha256 `8deb05d2aebfef1bb1e8f94a1af2aaeaaaa2232abcc1351a39e0ec1d7fecc5b4`;
+  - `owner-r006-snapshots.log`, sha256 `e0cea158b4485d8bab87d2f4aefa390bb809ef517738c2656e326eaec7decac6`.
+
+  If either file changes, this binding is updated, never kept for new content.
+- **Helper:** the expected, reviewed v3 mechanism. Its files hashed to the approved values before and after the trial; the bytes that ran at execution time are not proven (see the deviation).
 
 | Leg | Time (UTC) | Switch id | Desired / running / revision | Server generation | No-call check | Notes |
 |---|---|---|---|---|---|---|
@@ -246,7 +259,9 @@ history stays.
 
 **Verdict:** Codex qualified technical PASS (`9f2ed2b2`) for the owner-run in-app Opus → Sonnet → Opus no-call trial, based on the three checkpoint blocks and the retrospective owner attestation.
 
-**Deviation, for owner disposition:** the approved pre-execution helper-hash check was omitted from the relayed instructions and not performed. Matching before/after file hashes do not prove the bytes that ran at execution time.
+**Deviation, accepted by the owner (D-152, 2026-10-17):** the approved pre-execution helper-hash check was omitted from the relayed instructions and not performed. Matching before/after file hashes do not prove the bytes that ran at execution time. The acceptance disposes of the deviation; it is not new proof.
+
+**Owner acceptance:** D-153 (2026-10-17): the owner accepts R0-06 and closes layer 1. It was given before this exact record's review, which still governs the merge of #171.
 
 **Recorded qualifications:**
 - **Owner attestation:** the build SHA, the baseline card gate, the outer exits and the quiet conditions are owner attestations (retrospective, "1–4 yes"), not captured output.
@@ -269,7 +284,7 @@ history stays.
 - **Done when** all of: the prerequisites merged; one reviewed PASS per
   profile recorded, with every actual attempt listed (the evidence
   subcriterion is met by attempts 1 and 3; the missed review-before-next
-  stop before attempt 2 is disclosed and awaits the owner's disposition); the promotion merged through its
+  stop before attempt 2 is disclosed and accepted, D-145); the promotion merged through its
   reviewed process; the owner's UI and no-call trial recorded; exact-head
   CI and Codex's approving review of this record; the owner's acceptance.
   The record then states that ordinary calls remain staged.
