@@ -11,9 +11,22 @@ Reviewed contract and implementation plan:
 implementation plan and A RED PASS =c0d042d9=; exact error representation
 and existence-hiding confirmation =7f2b090a=.
 
-Current phase: *A RED prepared; independent verification pending*.
-No production files, migrations, dependencies or runtime configuration
-changed. GREEN is a hard stop until peer intended-reason verification.
+Current phase: *A GREEN implementation, independent code review pending*.
+Claude independently *VERIFIED RED* at =f35c2fe=, answer
+=m_1792277469126570000_ddcbcd7b= (2026-10-17T22:51:09Z), replying to
+=m_1792277241166230583_a2cb1b1d=. His isolated run was 4/51 passed,
+47 assertion failures, zero crashes. Explicit permission: proceed to GREEN;
+not GREEN approval, B or H1 authority. Qualification: nine tests guard before
+fixture setup (seven races, retry capability, count-read case); GREEN must
+prove each reaches its subject. The first unchanged focused suite is now
+51/51, including all nine; broader and full gates remain required.
+
+GREEN is isolated on =c1-03-a-green= from the RED head so the full RED
+baseline can finish on the unchanged original worktree. No schema,
+dependency, configuration, H1 or retry-writer changes. The pure typed
+Command validator is shared by facade and source boundary; dispatch stays
+fixed in Inbox, and the source adapter independently authenticates and
+validates direct calls. The pure Binding module keeps the v1 digest inputs.
 
 * Slices
 - A: strict session-authenticated command boundary and the three draft
@@ -74,7 +87,41 @@ verification script to manufacture a verdict. The Nix shell's existing
 exit codes and raw test/compile logs are tracked separately.
 
 Canonical =mix credo= is clean. The optional =--strict= wrapper reports
-the repository's pre-existing low-priority/dependency suggestions; no
+repository-wide lower-priority suggestions, including familiar alias/apply
+test-helper conventions; no
 repository-wide auto-fix or exclusion was introduced. Full gate and exact
 test counts/artifact hashes are supplied in the correlated RED request;
 no GREEN or story-complete claim is made here.
+
+* A GREEN implementation and verification checkpoint
+The source adapter independently validates the typed request and current
+stored session. It reauthenticates after enrollment/share, draft/update,
+campaign/share and contact/share waits, recomputes the exact v1 binding,
+and calls only the existing guarded source actions. Permitted actors also
+pass through =Audit.Guard=, preserving rejection of caller-owned raw
+transactions and deferred denial audit. Outcomes use closed content-free
+shapes, including identical foreign/unreadable/nonexistent =:not_found=.
+No policy, schema, dependency, model-call, grant or recovery change.
+
+The unchanged 51-case focused suite passes, including all nine qualified
+fixtures. The broader Inbox/Outreach suite passed 287 tests before the
+final Guard/outcome hardening; it is supplementary, not final-code proof.
+The first final-code focused run also passed 51 but logged two PostgreSQL
+=53300= messages while the RED full baseline was running; it is not used
+as a clean gate. A fresh run with =ERL_FLAGS='+S 4:4'= (test VM pool 8,
+max_cases 8; no repository/service setting changed) passes 51/51 with no
+=53300=. Exact raw log: =codex-c103g-focused-serial.log= in the private
+handoff tmp directory. The runner's parsed zero count is the known Elixir
+1.20 parser limitation above. All tests remain byte-identical to =f35c2fe=.
+
+=mix precommit= and subsequent workflow/format/Credo/audit/codegen/dev-WAE
+checks are running sequentially in =_codex_c103g=. Full-gate approval is
+not yet claimed. The original full RED run stays on unchanged =f35c2fe=
+in =_codex_c103=; its final result remains pending.
+
+Moduledocs and source/policy/error/lock boundaries self-reviewed. Public
+runtime flow changed, so the focused =inbox-runtime.mmd=, its Markdown
+wrapper and =data-flow.md= are updated. No new domain/resource, process,
+supervision or integration boundary; no new ADR beyond accepted ADR-0015.
+Independent exact-head GREEN review remains required. Slice B and H1 gates
+remain unchanged.
