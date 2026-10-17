@@ -30,6 +30,11 @@ defmodule SdrAgentWeb.AdminLiveSwitchOptionBTest do
     * **Ruling 8.** An error-or-higher level other than `:error` keeps its
       level through the tagged path; a tagged OTP report below `:error`
       keeps its level too; untagged events are unchanged.
+    * **Draft 5, test 17a (browser reachability; D-147, Codex `7c41ca3f`).**
+      The owner's rehearsal found the reset unreachable: a browser does not
+      submit through a disabled button, and the button was disabled unless
+      the text was exact. The rendered button now stays enabled throughout
+      `:editing`; ruling 4's and ruling 10's button assertions change with it.
 
   Synthetic data only; the fake CLI; zero model calls.
   """
@@ -120,8 +125,9 @@ defmodule SdrAgentWeb.AdminLiveSwitchOptionBTest do
     assert attr_of(view, @input, "value") == nil,
            "R0-05 reset: the patched input carries no value (morphdom sets it to empty)"
 
-    assert has_element?(view, "#confirm-resolution[disabled]"),
-           "R0-05 reset: the button matches the emptied input"
+    refute has_element?(view, "#confirm-resolution[disabled]"),
+           "R0-05 reset: the button stays enabled after a mismatch (draft 5), so the " <>
+             "next entry can be submitted from a browser"
 
     editing!(view, id, "reset mismatch")
 
@@ -134,8 +140,8 @@ defmodule SdrAgentWeb.AdminLiveSwitchOptionBTest do
     refute has_element?(view, "#resolution-mismatch"),
            "R0-05 ruling 10: #resolution-mismatch clears on the next edit"
 
-    assert has_element?(view, "#confirm-resolution[disabled]"),
-           "R0-05 ruling 10: the button stays truthful (not the exact text)"
+    refute has_element?(view, "#confirm-resolution[disabled]"),
+           "R0-05 ruling 10: the button stays enabled while :editing (draft 5)"
 
     editing!(view, id, "reset next edit")
 
@@ -176,6 +182,68 @@ defmodule SdrAgentWeb.AdminLiveSwitchOptionBTest do
 
     refute has_element?(view, "#resolution-mismatch")
     refute has_element?(view, @reset)
+  end
+
+  ## Draft 5: browser reachability (D-147; Codex 7c41ca3f)
+
+  # A browser submits a form by a click or Enter only through an enabled
+  # submit button, so the local refusal and the reset above are reachable
+  # only while the rendered button is enabled. This pins the server's
+  # rendered affordance; the browser's own behaviour is the owner's
+  # rehearsal (D-147), not this test.
+  test "17a. while :editing the rendered submit button is enabled for every text, so a click or Enter reaches the page's check; it is disabled in :submitting",
+       ctx do
+    blocked = RH.none!(ctx)
+    exact = confirmation(blocked)
+    view = admin_view(ctx.conn)
+    id = open_resolution!(view, "17a")
+
+    assert has_element?(
+             view,
+             "#resolution-form[phx-submit='confirm_resolution'] #confirm-resolution[type='submit']"
+           ),
+           "fixture: #confirm-resolution is the form's submit button"
+
+    refute has_element?(view, "#confirm-resolution[disabled]"),
+           "R0-05 17a: the button is enabled for the empty input, so a browser can submit it"
+
+    for text <- ["wrong", "stopped " <> blocked.id, "STOPPED", exact <> " "] do
+      type!(view, text, "17a typing")
+
+      refute has_element?(view, "#confirm-resolution[disabled]"),
+             "R0-05 17a: the button is enabled while :editing for " <>
+               "#{inspect(String.slice(text, 0, 7))}, so a browser can submit it"
+    end
+
+    submit!(view, "wrong", "17a mismatch")
+    assert has_element?(view, "#resolution-mismatch"), "fixture: the page's local refusal"
+    assert has_element?(view, @reset), "fixture: the reset signal"
+
+    refute has_element?(view, "#confirm-resolution[disabled]"),
+           "R0-05 17a: after a mismatch the button stays enabled, so a second mismatch is " <>
+             "reachable from a browser too"
+
+    editing!(view, id, "17a mismatch")
+
+    blocker = RH.block_coordinator!()
+
+    try do
+      submit!(view, exact, "17a exact")
+      await_element!(view, "#resolution-review[data-state='submitting']", nil, 5_000, "17a")
+
+      assert has_element?(view, "#confirm-resolution[disabled]"),
+             "R0-05 17a: the button is disabled in :submitting"
+    after
+      RH.release_coordinator!(blocker)
+    end
+
+    await_element!(
+      view,
+      "#resolution-result[data-outcome='recorded']",
+      nil,
+      20_000,
+      "17a: the exact text is recorded"
+    )
   end
 
   ## Ruling 6: the disconnected render
