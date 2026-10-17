@@ -282,6 +282,17 @@ body, reason, session token or raw exception is logged by this boundary.
 The H1 packet must cover sensitive-input tagging for its channel/tasks
 before it starts holding operator edits; this plan adds no H1 process.
 
+Exact error representation was confirmed by Claude in answer
+`m_1792276534986533000_7f2b090a`, 2026-10-17T22:35:34Z, replying to
+`m_1792276460103465750_25cbb419`: `{:error, %{reason: category}}` with
+the six C1 categories, optionally `change: :revision | :recipient |
+:lifecycle | :recovery_guard` only on authorized stale outcomes, or
+`blocked_reason:` from C1's existing closed codes only on authorized blocked
+outcomes. No other keys or raw terms. Unknown, foreign-tenant and otherwise
+unreadable source references return byte-identical
+`{:error, %{reason: :not_found}}`, with no change/block detail. `:forbidden`
+is actor/session/role-level refusal, not an existence oracle.
+
 ## Affected Modules (proposed)
 
 - `lib/sdr_agent/inbox.ex`: expose `command/2`; retain refresh/count/cursor

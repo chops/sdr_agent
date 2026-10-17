@@ -1,0 +1,80 @@
+#+TITLE: C1-03 fixed inbox commands — staged TDD record
+#+DATE: 2026-10-17
+
+* Authority and status
+Owner D-154 assigns Codex authorship and Claude review. Existing scoped C1
+G5 authorizes the fixed approve/edit/reject/re-run gateway, not H1 screens,
+new producers or model spend. Accepted ADR-0015 owns the boundary.
+
+Reviewed contract and implementation plan:
+=docs/product/c1/c1-03-commands.md=. Entity PASS =b6151911=;
+implementation plan and A RED PASS =c0d042d9=; exact error representation
+and existence-hiding confirmation =7f2b090a=.
+
+Current phase: *A RED prepared; independent verification pending*.
+No production files, migrations, dependencies or runtime configuration
+changed. GREEN is a hard stop until peer intended-reason verification.
+
+* Slices
+- A: strict session-authenticated command boundary and the three draft
+  commands, source-owned atomic comparison/mutation, exact safe outcomes.
+- B: run retry source adapter; its exact bounded preview/eligibility API
+  requires another reviewed contract before B RED. It must refuse source
+  reserved/sent/unsettled unknown rows including terminal-run sent,
+  independently of E1. Retry stays blocked throughout A.
+- H1 packet: separate =h1-owner-packet= branch; entity PASS only. H1 G5,
+  detailed consumer plan and an owner-accepted ADR-0005 participant amendment
+  remain prerequisites; no H1 code here.
+
+* A test inventory
+- =test/sdr_agent/inbox/command_test.exs=: real allowed source actions,
+  strict requests/authentication, actor and session changes, exact binding,
+  safe failure shapes, existence hiding, duplicates, privacy canaries and
+  unchanged blocked retry. A passing v1 HMAC compatibility control protects
+  the planned codec extraction without inventing a new token version.
+- =test/sdr_agent/outreach/inbox_commands_test.exs=: recipient/campaign/
+  suppression policy, safe rejection, real-data/release withholding,
+  corrupted context, independent count failure and exact edit fields.
+- =test/sdr_agent/inbox/command_race_test.exs=: independent real connections,
+  database wait-chain barriers, concurrent revision/recipient changes,
+  revocation/demotion during waits and duplicate submissions for all three
+  commands. Bounded supervised non-linked contenders are joined before
+  tenant-scoped cleanup. Cleanup checks the actual test DB and synthetic
+  tenant, retaining global content-addressed provenance snapshots.
+- =test/support/inbox_command_fixtures.ex=: projection-built commands,
+  closed error assertions and structural source effect observations.
+
+* Deliberate existing-test change
+The existing =Inbox.CapabilityTest= assertion that edit is blocked until
+C1-03 exists is changed during RED to assert enabled/nil block. This is an
+intended new behavior, not a GREEN-time weakening. The rest of that file's
+source assertions are unchanged. Retry remains explicitly blocked.
+
+* Verification environment and limitations
+Entered repository-local =nix develop --impure= with Elixir 1.20.4 /
+OTP 29.0.5. Existing Postgres port 5520 was read-checked; no app or service
+started, stopped or reconfigured. Ordinary CLI/store environment overrides
+are unset in tests. Primary tests use =MIX_TEST_PARTITION=_codex_c103=;
+the private in-memory mutant uses =_codex_c103mut=, never the owner DB.
+
+The untracked private mutant augments Inbox only in its own BEAM process,
+delegates to real source APIs, and deliberately omits C1 freshness, strict
+keys and post-wait reauthentication. It writes no production source/BEAM.
+It exposed two fixture bugs (connection ownership after mode change and
+using a raw transaction around a guarded source edit); both were corrected
+before the final diagnostic. Failed diagnostic data was removed only by
+validated tenant-scoped fixture cleanup, with no schema/database drop.
+
+The supplied =tdd_verify.sh= and =test_runner.sh= both parse the older
+ExUnit summary, not Elixir 1.20's =Result: N/M passed=. Their reported zero
+counts are not evidence of absent tests or a passed gate. Preserve the raw
+ExUnit output and obtain the independent review; do not edit a tracked
+verification script to manufacture a verdict. The Nix shell's existing
+=mix hex.info | head= hook also emits EPIPE before commands; actual command
+exit codes and raw test/compile logs are tracked separately.
+
+Canonical =mix credo= is clean. The optional =--strict= wrapper reports
+the repository's pre-existing low-priority/dependency suggestions; no
+repository-wide auto-fix or exclusion was introduced. Full gate and exact
+test counts/artifact hashes are supplied in the correlated RED request;
+no GREEN or story-complete claim is made here.
