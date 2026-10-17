@@ -1,6 +1,6 @@
 # Layer 2: ordinary-call enablement (E1 + E3)
 
-**Status:** draft 2, 2026-10-17. It answers Codex's NEEDS-REVIEW on draft 1 (`1a6b6361`, `codex-l2-bcd4faf-1a6b6361-entity-review.md`): four must-fixes and all of the open-question rulings. Needs a recheck. There is no implementation and there are no RED tests yet.
+**Status:** draft 3, 2026-10-17. It answers Codex's narrow NEEDS-REVIEW on draft 2 (`2f563f64` → `3e469294`): the cutover fence, the workshop reserve, and two copy corrections. Draft 2, It answers Codex's NEEDS-REVIEW on draft 1 (`1a6b6361`, `codex-l2-bcd4faf-1a6b6361-entity-review.md`): four must-fixes and all of the open-question rulings. Needs a recheck. There is no implementation and there are no RED tests yet.
 - **Base:** main `6f271ab`.
 - **Owner:** D-154 starts layer 2, with the E1 and E3 contracts drafted together. D-153 closed layer 1; it is not enablement authority.
 - **Exit:** synthetic-only ordinary model calls. E1 merged is a **release dependency** of E3 (E3 doesn't merge first); it is not a runtime predicate or a request flag. Real-data activation (C5-04) and B1/H1 product acceptance are separate exits.
@@ -55,22 +55,38 @@ Reviewer precedence: ai-pair; reviewer **Codex**. Verdict: **UNREVIEWED**. No af
 **Stage 2. Reviewed merges.**
 - E1 merges, then E3, each through contract, RED, GREEN, review, gate, CI and the owner's merge decision.
 - **G3 must be closed before the E3 merge** (OQ-E3-4, ruled open). The owner runs a metadata-only inventory of existing gen-2, provider and plaintext audit-copy rows and gives an explicit disposition. Claude supplies a reviewed read-only query, and agents never access the owner's database. Missing evidence is never a nil inventory, and append-only history is never rewritten.
-- **After E3 merges and before any grant exists,** every ordinary call refuses with `:no_eligible_grant`. Lifting staging alone activates nothing.
+- **After E3 merges and before any grant exists,** an ordinary call refuses with `:no_eligible_grant`. That holds once the earlier provider and store checks have passed; with Fake, or an unhealthy runtime, it refuses earlier with that step's reason. Lifting staging alone activates nothing.
 
 **Stage 3. Owner grant creation (G-DEMO), attended.**
 - **G-DEMO is an operational restriction, not a new runtime one.** It is the only ordinary grant the owner creates. Runtime selection is the existing C9 selector (purpose, profile, window and allocation `applies_to`). No named budget is enforced, and no display name is authority.
-- **Before creating it,** the owner runs a reviewed metadata-only read showing zero `agent_runs` queued or running and zero Oban jobs in the agent and reply queues that are available, scheduled or retryable. No cron enqueues agent runs: work enters only through `SDR` assignment, `ReplyIntake` and `Retry`. Any non-zero count stops the stage, so pre-existing work can't become an unrequested first call.
-- **The grant itself:**
-  - `starts_at` is set to the attended start;
-  - the first allocation's `applies_to` is the one bucket of the planned first run;
-  - the per-day limit follows D-099;
-  - the 30-attempt workshop reserve is held as a separate allocation that no bucket can spend until the owner releases it.
+- **The cutover fence.** This is an owner-only reviewed procedure, not a durable switch. A zero count is evidence, not the fence; the fence is the steps below, held from the check through the first owner execution.
+  1. **Freeze producer ingress.** During stage 3 and stage 4:
+     - the owner starts no assignment and no retry from the console, apart from the planned first run;
+     - inbound replies are not ingested: the dev app's integration webhook ingress stays idle, with no fixture or webhook posting;
+     - no other operator is signed in.
+
+     The producers are:
+     - `SDR` assignment (`sdr.ex:95`, `AgentWorker` on queue `research`);
+     - `ReplyIntake` (`reply_intake.ex:54`, `ReplyWorker` on queue `agent`), which is fed indirectly by `Outreach.WebhookWorker` (queue `integration`) and its matched-reply transaction;
+     - `Retry` (`retry.ex:328`, `353`).
+
+     No cron enqueues any of them.
+  2. **Drain and verify.** The owner runs a reviewed metadata-only read showing zero `agent_runs` queued or running, and zero Oban jobs in queues `research` and `agent`, plus `integration` (`Outreach.WebhookWorker`), in any of `available`, `scheduled`, `executing` or `retryable`. Any non-zero count stops the stage.
+  3. **Fund only the planned bucket.** The first allocation's `applies_to` is exactly the first run's bucket (`[:assignment]`). A reply- or other-bucket run arriving during the window has no eligible allocation and refuses with `:no_eligible_grant`.
+  4. **A narrow window.** The first allocation is `available_from` the attended start and `available_until` 60 minutes later. Wider allocations are added only after the first owner run is observed.
+  5. **Arrival proof (RED).** A run in an unfunded bucket that is enqueued after grant creation refuses with no launch. A run in the funded bucket outside the window refuses. Only the owner-started run reserves. This is in addition to the caller-inventory guard test.
+- **The grant itself:** `starts_at` at the attended start; the expiry and per-day limit per D-099.
+- **The workshop reserve (30 attempts)** is enforced by the existing allocation availability rule (`Admission.available?/2`: an allocation is usable only after `available_from` or once `released_at` is set, and before `available_until`).
+  - It is its own allocation: 30 attempts, and a non-empty `applies_to` (required by `model_call_allocation.ex`), covering the buckets the workshop uses.
+  - It opens at `available_from` = 2026-11-06 00:00 MDT (2026-11-06 06:00 UTC) and stays open until the grant expiry at 2026-11-07 06:59 UTC.
+  - **The owner acknowledges** that it opens automatically at that instant, and that releasing it early (setting `released_at`) is an owner action in the budgets UI.
+  - The `:workshop` key labels it but does not hold funds.
 - **Billing posture:** the owner confirms whether calls use the included subscription or extra usage.
 
 **Stage 4. Separately authorized owner execution.**
 - The owner starts the first ordinary run on a synthetic lead, attended. Synthetic data is guaranteed by the existing `Sales.Synthetic` guard (C5-04 unchanged: reserved domains only).
 - The owner observes the reservation, the launch, the reconciliation and the release (or the withholding).
-- Revoking the grant, or unsetting `SDR_MODEL_PROVIDER`, disables calls again.
+- **Disabling calls again:** revoking the grant, or letting the allocation window close, disables calls at once, at the next reservation or launch check. Unsetting `SDR_MODEL_PROVIDER` only takes effect after an app restart, because provider selection is startup configuration (`runtime.exs`).
 
 **Entry points.**
 - Ordinary calls enter only through `SDR.Model.call/4` → `ModelProvider.complete/2`, from `AgentWorker` and `ReplyWorker`.
@@ -94,7 +110,9 @@ Reviewer precedence: ai-pair; reviewer **Codex**. Verdict: **UNREVIEWED**. No af
   - the full ordinary path on the fake proxy and fake CLI with a non-test-launcher attestation in dev (no test seam): facade → reservation → launch → validated witness → release → the downstream read;
   - each pre-launch condition (1)–(5) refuses with its typed reason and no launch;
   - post-launch init drift: charged, withheld, no automatic retry;
-  - after merge with no grant: `:no_eligible_grant`, with no launch;
+  - after merge with no grant (provider and store healthy): `:no_eligible_grant`, with no launch;
+  - cutover arrival: an unfunded-bucket run, or a funded-bucket run outside the window, enqueued after grant creation, refuses with no launch;
+  - the workshop allocation is unusable before `available_from` unless `released_at` is set;
   - an unset store root refuses;
   - an alternate or direct caller cannot bypass;
   - grant races: exhausted, expired, revoked, wrong profile, day rollover, held reserve;
