@@ -72,6 +72,35 @@ defmodule SdrAgent.Outreach.Inbox do
     end
   end
 
+  @doc "One authorized id-bound command context, including terminal state for a stale refusal."
+  def get(actor, id) do
+    with :ok <- ReadDeadline.operator(actor),
+         {:ok, draft} <-
+           Draft
+           |> GuardedCall.read_query(actor: actor)
+           |> Ash.Query.filter(id == ^id)
+           |> Ash.Query.select(@draft_fields)
+           |> Ash.Query.load(context_loads(actor))
+           |> Ash.read_one() do
+      command_context(draft, actor)
+    end
+  end
+
+  defp command_context(nil, _actor), do: {:error, :not_found}
+
+  defp command_context(draft, actor) do
+    with %Contact{} = contact <- draft.recipient_contact,
+         true <-
+           Synthetic.reserved_email?(to_string(contact.email)) or {:error, :real_data_disabled},
+         {:ok, row} <- context(draft, actor),
+         {:ok, suppressions} <- suppressions([draft], actor) do
+      {:ok, Map.put(row, :suppression_refs, suppression_refs(contact, suppressions))}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :producer_error}
+    end
+  end
+
   @doc "One aggregate statement checks exact pending membership, integrity and withholding."
   def count_drafts(opts) do
     ReadDeadline.run(opts, fn timeout ->

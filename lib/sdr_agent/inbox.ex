@@ -11,14 +11,16 @@ defmodule SdrAgent.Inbox do
   exist only in compile-time test-seam builds. This module has no process,
   persistence or command authority; source actions remain authoritative.
   Capabilities are advisory metadata, not approval/delivery promises. Edit
-  and retry remain blocked while their atomic C1-03 adapters are absent.
+  is enabled through the atomic C1-03 adapter; retry stays blocked pending
+  its separately reviewed recovery adapter.
   """
 
   alias SdrAgent.Accounts
   alias SdrAgent.Audit
-  alias SdrAgent.Audit.Canonical
   alias SdrAgent.Clock
   alias SdrAgent.Inbox.AuditRef
+  alias SdrAgent.Inbox.Binding
+  alias SdrAgent.Inbox.Command
   alias SdrAgent.Inbox.Cursor
   alias SdrAgent.Operations
   alias SdrAgent.Outreach
@@ -56,6 +58,40 @@ defmodule SdrAgent.Inbox do
       audit_page(page, actor, fault, secret)
     end
   end
+
+  @doc "Execute one fixed typed command with the current session and source-owned atomic freshness."
+  def command(token, input) do
+    with {:ok, actor} <- session(token),
+         {:ok, command} <- Command.parse(input) do
+      case command.action_id do
+        action when action in [:approve_capture, :edit_draft, :reject_draft] ->
+          Outreach.inbox_command(token, command)
+
+        :retry_run ->
+          retry_unavailable(actor, command)
+      end
+    else
+      {:error, :forbidden} -> Command.error(:forbidden)
+      {:error, _} = error -> error
+    end
+  rescue
+    _ -> Command.error(:producer_error)
+  catch
+    _, _ -> Command.error(:producer_error)
+  end
+
+  # Slice A has no retry writer. Read one typed Failure only to preserve
+  # source pairing and existence hiding; never invoke the old retry API.
+  defp retry_unavailable(%{role: :admin} = actor, command) do
+    case Operations.get_failure(command.source_id, actor: actor) do
+      {:ok, _failure} -> Command.error(:blocked, %{blocked_reason: :guard_not_available})
+      {:error, %Ash.Error.Query.NotFound{}} -> Command.error(:not_found)
+      {:error, %Ash.Error.Forbidden{}} -> Command.error(:not_found)
+      _ -> Command.error(:producer_error)
+    end
+  end
+
+  defp retry_unavailable(_, _), do: Command.error(:forbidden)
 
   defp session(token) do
     case Accounts.current_operator(token) do
@@ -172,25 +208,15 @@ defmodule SdrAgent.Inbox do
            contact: contact,
            campaign: campaign,
            suppression_refs: suppression_refs
-         },
+         } = source,
          actor,
          now,
          secret
        ) do
     producer = :outreach_drafts
     kind = :draft_review
-    identity = {actor.tenant_id, producer, kind, draft.id, :email}
-
-    facts = {
-      draft.status,
-      rev.id,
-      hex(rev.content_sha256),
-      contact.id,
-      to_string(contact.email),
-      contact.status,
-      campaign.status,
-      suppression_refs
-    }
+    identity = Binding.draft_identity(actor, draft.id)
+    facts = Binding.draft_facts(source)
 
     block =
       cond do
@@ -218,7 +244,7 @@ defmodule SdrAgent.Inbox do
       summary: String.slice(rev.subject, 0, 200),
       actions: [
         action(:inspect, "Inspect", nil, %{resource: "SdrAgent.Outreach.Draft", id: draft.id}),
-        action(:edit_draft, "Edit", actor_block(actor) || :guard_not_available),
+        action(:edit_draft, "Edit", actor_block(actor)),
         action(:approve_capture, "Approve for capture", block),
         action(:reject_draft, "Reject", actor_block(actor))
       ],
@@ -230,20 +256,8 @@ defmodule SdrAgent.Inbox do
   defp failure_item(failure, actor, now, secret) do
     producer = :operations_failures
     kind = :failure_attention
-    identity = {actor.tenant_id, producer, kind, failure.id, nil}
-
-    facts =
-      Map.take(failure, [
-        :status,
-        :acknowledged_at,
-        :resolved_at,
-        :class,
-        :severity,
-        :subject_resource,
-        :subject_id,
-        :operation_id,
-        :retryable
-      ])
+    identity = Binding.failure_identity(actor, failure.id)
+    facts = Binding.failure_facts(failure)
 
     retry =
       if failure.subject_resource == "SdrAgent.Agents.AgentRun",
@@ -355,9 +369,7 @@ defmodule SdrAgent.Inbox do
     end
   end
 
-  defp fingerprint(term, secret) do
-    :crypto.mac(:hmac, :sha256, secret, Canonical.encode!({"c1-inbox/1", term})) |> hex()
-  end
+  defp fingerprint(term, secret), do: Binding.fingerprint(term, secret)
 
   defp hex(bytes), do: Base.encode16(bytes, case: :lower)
 end
