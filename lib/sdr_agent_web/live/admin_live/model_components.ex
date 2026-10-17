@@ -866,7 +866,7 @@ defmodule SdrAgentWeb.AdminLive.ModelComponents do
             type="submit"
             size="sm"
             variant="danger"
-            disabled={@review.state != :editing or not @review.exact?}
+            disabled={@review.state != :editing}
           >
             Record the resolution
           </.ui_button>
