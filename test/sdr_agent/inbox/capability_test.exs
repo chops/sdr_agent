@@ -33,12 +33,12 @@ defmodule SdrAgent.Inbox.CapabilityTest do
     assert [_] = source.suppression_refs
   end
 
-  test "edit is blocked until the atomic C1-03 freshness adapter exists", ctx do
+  test "edit is enabled through the atomic C1-03 freshness adapter", ctx do
     %{draft: draft} = drafted!(ctx)
     assert {:ok, page} = refresh(session!(ctx.admin))
     row = item!(page, draft)
-    assert action(row, :edit_draft).availability == :blocked
-    assert action(row, :edit_draft).blocked_reason == :guard_not_available
+    assert action(row, :edit_draft).availability == :enabled
+    assert action(row, :edit_draft).blocked_reason == nil
     assert action(row, :approve_capture).availability == :enabled
     assert action(row, :reject_draft).availability == :enabled
   end
