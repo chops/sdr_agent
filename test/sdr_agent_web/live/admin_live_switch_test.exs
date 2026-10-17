@@ -42,8 +42,8 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
       (`data-start-id`) and `#resolution-lease-kind` (`data-kind`)),
       `#resolution-statement`, `#resolution-form` (`change_resolution`,
       `confirm_resolution`; input `resolution_confirmation`, id
-      `#resolution-confirmation`), `#confirm-resolution` (disabled unless
-      the text is exact), `#resolution-facts-changed`, `#resolution-error`,
+      `#resolution-confirmation`), `#confirm-resolution` (enabled
+      throughout `:editing`, whatever the text; draft 5), `#resolution-facts-changed`, `#resolution-error`,
       `#resolution-result` (`data-outcome` recorded/uncertain/not_recorded
       or the refusal tag), `#check-again` (`check_again`) and
       `#stored-switch` (`data-status`: the stored switch re-read as the
@@ -57,7 +57,7 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
   `codex-r005-d0c80ff-contract-pass.md`, permitted test amendments 1, 2 and
   5).** Test 9: a forced wrong or malformed submit is refused by the page
   (`#resolution-mismatch`: no dispatch, still `:editing` with the same id,
-  the input cleared, the button disabled until a fresh exact entry), in
+  the input cleared, the button still enabled: draft 5), in
   place of the server's `:attestation_invalid`. Test 12: the terminal
   result is b2β's `:stale_attestation` for the exact text. Test 15: its
   wrong-text refusal is now the page's. New: 15a (minimization, traced with
@@ -754,8 +754,9 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
 
   # The page's local refusal of a text that doesn't match (draft 4, section
   # 3 step 2): no dispatch, #resolution-mismatch without the text, still
-  # :editing with the same id, the input cleared and the button disabled,
-  # and no raw value kept in the socket.
+  # :editing with the same id, the input cleared and the button still
+  # enabled (draft 5: a browser cannot submit through a disabled button), and
+  # no raw value kept in the socket.
   defp assert_mismatch!(view, tracer, blocked, id, wrong, label) do
     sent = resolution_dispatches(tracer)
 
@@ -781,8 +782,9 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
     refute has_element?(view, "#resolution-result"),
            "R0-05 #{label}: a local refusal claims no recorded or refused attempt"
 
-    assert has_element?(view, "#confirm-resolution[disabled]"),
-           "R0-05 #{label}: the button is disabled until a fresh exact entry"
+    refute has_element?(view, "#confirm-resolution[disabled]"),
+           "R0-05 #{label}: the button stays enabled in :editing (draft 5), so the next " <>
+             "entry can be submitted from a browser"
 
     assert attr_of(view, "#resolution-confirmation", "value") in [nil, ""],
            "R0-05 #{label}: the input is cleared"
@@ -797,7 +799,7 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
     end
   end
 
-  test "9. the button enables only for the exact text; a forced wrong or malformed submit is refused by the page and stays :editing",
+  test "9. the button stays enabled for every text; a wrong or malformed submit is refused by the page and stays :editing",
        ctx do
     blocked = RH.none!(ctx)
     tracer = trace_calls!(resolution_path_mfas())
@@ -818,17 +820,17 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
     for wrong <- wrongs do
       type!(view, wrong, "9")
 
-      assert has_element?(view, "#confirm-resolution[disabled]"),
-             "R0-05 9: the button stays disabled for #{inspect(wrong)}"
+      refute has_element?(view, "#confirm-resolution[disabled]"),
+             "R0-05 9: the button stays enabled for #{inspect(wrong)} (draft 5), so a " <>
+               "browser can submit it to the page's own check"
     end
 
     type!(view, exact, "9")
 
     refute has_element?(view, "#confirm-resolution[disabled]"),
-           "R0-05 9: the button enables for exactly STOPPED <switch id>"
+           "R0-05 9: the button is enabled for exactly STOPPED <switch id>"
 
-    # A forced submit after the button was enabled: the page checks the
-    # submitted bytes itself.
+    # A submit of a wrong text: the page checks the submitted bytes itself.
     for wrong <- wrongs do
       label = "9 forced #{inspect(wrong)}"
       type!(view, exact, label)
@@ -851,7 +853,7 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
     type!(view, exact, "9 a fresh exact entry")
 
     refute has_element?(view, "#confirm-resolution[disabled]"),
-           "R0-05 9: a fresh exact entry enables the button again"
+           "R0-05 9: the button is enabled for a fresh exact entry"
 
     confirm_resolution!(view, exact, "9 exact")
     await_outcome!(view, "recorded", 20_000, "9 exact")
@@ -967,8 +969,8 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
     second = open_resolution!(view, "12 new review")
     assert second != first, "R0-05 12: a new resolution has a new attestation id"
 
-    assert has_element?(view, "#confirm-resolution[disabled]"),
-           "R0-05 12: a new resolution needs a new typed confirmation"
+    assert attr_of(view, "#resolution-confirmation", "value") in [nil, ""],
+           "R0-05 12: a new resolution needs a new typed confirmation (its input is empty)"
 
     # The earlier text is never carried over: a submit without one sends
     # nothing and keeps the new review.

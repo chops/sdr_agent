@@ -146,6 +146,25 @@ defmodule SdrAgent.Operations do
     |> Ash.read()
   end
 
+  @doc """
+  Exact scalar Home total of this human actor's open/acknowledged Failures.
+  Uses the attention action and its existing read policy, without paging or
+  a view-audit/head lock. Server-only `count_timeout_ms` and
+  `statement_timeout_ms` may lower the fixed 2500/2000 ms ceilings.
+  Returns `{:ok, nonnegative_integer}` or a closed metadata-read error.
+  """
+  def count_inbox_failures(opts) do
+    SdrAgent.ReadDeadline.run(opts, fn timeout ->
+      opts
+      |> Keyword.put(:action, :attention)
+      |> then(&GuardedCall.read_query(Failure, &1))
+      |> Ash.count(timeout: timeout)
+    end)
+  end
+
+  @doc "SQL-bounded, metadata-only Home attention candidates after a validated global cursor."
+  def list_inbox_failures(actor, cursor), do: SdrAgent.Operations.Inbox.list(actor, cursor)
+
   defp do_update(record, action, attrs, actor) do
     record
     |> Ash.Changeset.for_update(action, attrs, actor: actor)

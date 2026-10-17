@@ -99,11 +99,7 @@ defmodule SdrAgent.Outreach.Suppression do
       description "Suppressions covering `email`: the email itself or its domain."
       argument :email, :string, allow_nil?: false
 
-      filter expr(
-               (scope == :email and value == ^arg(:email)) or
-                 (scope == :domain and
-                    value == fragment("split_part(?, '@', 2)", ^arg(:email)))
-             )
+      filter SdrAgent.Outreach.SuppressionMatch.filter(Ash.Expr.expr(^arg(:email)))
 
       prepare build(sort: [inserted_at: :asc, id: :asc])
     end

@@ -86,6 +86,15 @@ defmodule SdrAgent.Outreach do
     |> Ash.read()
   end
 
+  @doc "SQL-bounded Home Draft metadata after a validated global continuation."
+  def list_inbox_drafts(actor, cursor), do: SdrAgent.Outreach.Inbox.list(actor, cursor)
+
+  @doc "Exact authorized pending-email total, with integrity/withholding and fixed lowerable deadlines."
+  def count_inbox_drafts(opts), do: SdrAgent.Outreach.Inbox.count_drafts(opts)
+
+  @doc "Exact logical committed local captures in a server-computed UTC week window."
+  def count_inbox_captures(window, opts), do: SdrAgent.Outreach.Inbox.count_captures(window, opts)
+
   @doc """
   ADM, REV: grants `draft`'s current revision. `binding`: the reviewed
   `draft_revision_id`, its hex `content_sha256` and the `recipient_email`
@@ -124,7 +133,7 @@ defmodule SdrAgent.Outreach do
   @doc "Suppressions of `email` itself or of its domain (normalised), oldest first."
   def matching_suppressions(email, opts) do
     actor = Keyword.get(opts, :actor)
-    email = email |> to_string() |> String.trim() |> String.downcase()
+    email = SdrAgent.Outreach.SuppressionMatch.normalize(email)
 
     Suppression
     |> Ash.Query.for_read(:matching, %{email: email}, actor: actor)

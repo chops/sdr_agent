@@ -1,8 +1,17 @@
 # R0-05 interface: the admin model card, switch and resolver UI
 
-**Status:** draft 4, 2026-10-16: the MF3 amendment for option B (D-141),
+**Status:** draft 5, 2026-10-17: the browser-reachability correction
+(Codex `7c41ca3f`, `codex-r005-browser-reachability-7c41ca3f.md`; owner
+chose the fix). The owner's attended rehearsal at `02ad8d8` found that a
+mismatched text could not be submitted from a real browser: the button
+was disabled unless the text was exact, and a browser does not submit a
+form by Enter while its submit button is disabled, so the page's local
+refusal and the focused-input reset (D-147) were unreachable. Section 3
+step 2 now keeps the button enabled throughout `:editing`; tests 9 and 12
+and the option-B reset test change accordingly, plus one new test. Needs
+Codex review. Draft 4, 2026-10-16: the MF3 amendment for option B (D-141),
 in section 3 (step 2, results, crash reports), section 5, the ADR
-evaluation and tests 9, 12, 15a–15c. Needs Codex review. Draft 3 had the
+evaluation and tests 9, 12, 15a–15c. Draft 3 had the
 **Interface PASS** (Codex `232bd20d`, exact
 `fbc3203`, `codex-r005-fbc3203-interface-pass.md`). Entity trigger: no.
 This permits scoped RED only. The b2β owner ADR, b2β and C2-02c GREEN, and
@@ -171,8 +180,12 @@ status card may still update.
 2. **The statement and the typed confirmation.**
    - The page shows b2β's section 3 statement word for word, and an
      input.
-   - The button enables only while the input is exactly
-     `STOPPED <switch id>`. The server checks again.
+   - **The button is enabled throughout `:editing`, whatever the text**
+     (draft 5), so an ordinary click or Enter always reaches the page's
+     own check below, including for a text that doesn't match. It is
+     disabled in `:submitting` (the form is shown only in `:editing` and
+     `:submitting`). Its state is usability only, never a security boundary:
+     the page's exact-byte check is the gate, and the server checks again.
    - The input's parameter key is `resolution_confirmation`, which is
      filtered (section 5).
    - **The page checks the text itself (D-141, option B).** It compares
@@ -359,12 +372,14 @@ spend, synthetic data only.
 **The resolver:**
 8. **The facts:** every covered start (nil identity shows "not
    recorded"), and the lease kind. `:observation_unknown` shows a message.
-9. **The confirmation:** the button enables only for the exact text. A
-   forced submit of a wrong text is refused by the page: no call to the
-   domain (traced), `#resolution-mismatch` without the text, still
-   `:editing` with the same attestation id, the input cleared. The exact
+9. **The confirmation:** the button stays enabled in `:editing` for every
+   text, wrong, malformed or empty (draft 5). A submit of a wrong text is
+   refused by the page: no call to the domain (traced),
+   `#resolution-mismatch` without the text, still `:editing` with the same
+   attestation id, the input cleared, the button still enabled. The exact
    text is then sent as the operator's own bytes. (Amended for D-141: the
-   verified RED expected the server's `:attestation_invalid`.)
+   verified RED expected the server's `:attestation_invalid`. Amended for
+   draft 5: it expected the button disabled unless the text was exact.)
 10. **Frozen states:** while `:submitting` and `:uncertain`:
     - an audit refresh and a manual refresh leave the attestation id,
       facts and statement unchanged;
@@ -386,9 +401,10 @@ spend, synthetic data only.
 12. **Forged and terminal:**
     - a forged `confirm_resolution` with no review does nothing;
     - after a terminal result, a new resolution needs a new review, id and
-      confirmation. (Amended for D-141: the terminal result comes from a
-      server refusal of the exact text, such as `:stale_attestation`, not
-      from a wrong text.)
+      confirmation: the new review's input is empty. (Amended for D-141: the
+      terminal result comes from a server refusal of the exact text, such as
+      `:stale_attestation`, not from a wrong text. Amended for draft 5: the
+      empty input, not a disabled button, shows the confirmation is new.)
 13. **Results:** each result in section 3 shows its message. A resolution
     never shows "ready".
 14. **Reconnect:** a remount re-reads the stored state, and no
@@ -419,6 +435,14 @@ spend, synthetic data only.
 16. **The lag:** an audit event commits before the coordinator publishes.
     The card shows the earlier observation, and a manual refresh then
     shows the newer state.
+17a. **Browser reachability (draft 5):** while `:editing`, the rendered
+     `#confirm-resolution` is a `type="submit"` button inside
+     `#resolution-form` (whose submit event is `confirm_resolution`) and is
+     not disabled, for the empty input and for a wrong text; so a click or
+     Enter reaches the page's check. In `:submitting` it is disabled (the
+     form is shown only in `:editing` and `:submitting`). This is the server's rendered
+     affordance; the browser's own behaviour is the owner's rehearsal
+     (D-147), not this test.
 
 **Access:**
 17. Reviewers, auditors, a demoted admin and a signed-out user are
