@@ -1,6 +1,6 @@
 # H1 Home inbox: owner-review packet
 
-Status: **draft 1, entity/action review requested; H1 G5 not approved**.
+Status: **entity/consumer PASS; privacy amendment and H1 G5 pending**.
 Author Codex, independent reviewer Claude, under owner D-154. This is a
 packet, not a screen implementation or a request to make a model call.
 Baseline: main `6f271abef7b3cfefa2c7eb6defcb07602c003181` (C1-02 reads
@@ -58,8 +58,21 @@ No new persisted entity, attribute, session, role or task lifecycle.
 
 Configured capabilities: `.workflow/recipe.json` has `ai_pair=true` and
 `codex_review=true`. Reviewer precedence: ai-pair, **Claude**. Verdict:
-**UNREVIEWED**. No affected-module design or H1 RED starts before PASS;
-owner G5 and the detailed producer-consumer plan are additional gates.
+**PASS**, answer `m_1792276489806493000_a29a8381`,
+2026-10-17T22:34:49Z, replying to
+`m_1792276419652883584_f2058e98`, reviewing draft-1 SHA256
+`facfccf0bc2eb4f7e31f8820f5e743c8c605b18da67b13c23fad76683122a083`.
+This permits affected-module planning, not H1 RED. Owner G5 and the detailed
+producer-consumer plan are additional gates.
+
+Privacy participant ruling: **not covered** by the accepted ADR-0005
+R0-05 amendment. Home's connected channel, input/content-holding child
+tasks, transport/WebSocket reporter, synchronous source-write stack and
+source audit/Failure payload paths need a new reviewed amendment accepted
+by the owner before H1 implementation. Claude recommends a combined
+Home + SettingsLive participant amendment to address the existing
+OQ-R5-1 exclusion too. This records a design task, not permission to modify
+SettingsLive or a claim of full privacy coverage from a logger tag alone.
 
 ## Display and interaction contract
 
