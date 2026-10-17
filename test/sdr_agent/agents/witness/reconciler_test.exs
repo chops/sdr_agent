@@ -72,14 +72,36 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     method: :propagated_id
   }
 
-  test "the runtime allowlist ships exactly the one exact v3 entry (R3)" do
+  # R0-06 promotion (D-142): the two generation-2 tuples, each bound to its
+  # own Codex calibration evidence PASS (Opus 0c2e3735, Sonnet a2e8a0b2).
+  @shipped_gen2 [
+    %{
+      provider: :claude_cli,
+      cli_version: "2.1.294",
+      profile_id: :claude_cli_opus,
+      model_id: "claude-opus-5-5",
+      projection_version: "claude-message-json/3+prompt-builder/1",
+      method: :propagated_id
+    },
+    %{
+      provider: :claude_cli,
+      cli_version: "2.1.294",
+      profile_id: :claude_cli_sonnet,
+      model_id: "claude-sonnet-5-5",
+      projection_version: "claude-message-json/3+prompt-builder/1",
+      method: :propagated_id
+    }
+  ]
+
+  test "the runtime allowlist ships exactly the generation-1 entry and the two promoted R0-06 tuples (R3)" do
     for env <- [:dev, :prod] do
       shipped =
         Config.Reader.read!("config/config.exs", env: env, target: :host)
         |> Keyword.fetch!(:sdr_agent)
         |> Keyword.fetch!(Witness)
 
-      assert Keyword.fetch!(shipped, :reconciled_methods) == [@shipped_entry], inspect(env)
+      assert Keyword.fetch!(shipped, :reconciled_methods) == [@shipped_entry | @shipped_gen2],
+             inspect(env)
     end
 
     config = Application.get_env(:sdr_agent, Witness, [])

@@ -21,7 +21,8 @@ defmodule SdrAgent.Accounts do
     * `sign_in/2` — password sign-in (audited success/failure; returns the
       user with a session token in `__metadata__.token`),
       `record_signed_out/1` — appends `auth.signed_out`;
-    * reads: `get_user/2`, `list_users/2`.
+    * reads: `get_user/2`, `list_users/2`; `current_operator/1` validates
+      a signed, stored, unrevoked user session and re-reads its active user.
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -81,6 +82,35 @@ defmodule SdrAgent.Accounts do
     |> AshAuthentication.Info.strategy!(:password)
     |> AshAuthentication.Strategy.action(:sign_in, %{"email" => email, "password" => password})
   end
+
+  @doc """
+  Resolve a current operator from a signed session token. The token must
+  verify, remain stored for the `user` purpose and not be revoked; its
+  subject must resolve to an active user. Returns `{:ok, fresh_user}` or
+  `:error`, never a caller-supplied or cached actor. Shared by LiveUserAuth
+  and the stateless Home facade so role/status/session changes take effect
+  on each request.
+  """
+  def current_operator(token) when is_binary(token) do
+    token_resource = SdrAgent.Accounts.Token
+
+    with {:ok, %{"sub" => subject, "jti" => jti}, _resource} <-
+           AshAuthentication.Jwt.verify(token, :sdr_agent),
+         false <- AshAuthentication.TokenResource.Actions.jti_revoked?(token_resource, jti),
+         {:ok, [_stored]} <-
+           AshAuthentication.TokenResource.Actions.get_token(token_resource, %{
+             "jti" => jti,
+             "purpose" => "user"
+           }),
+         {:ok, %User{status: :active} = user} <-
+           AshAuthentication.subject_to_user(subject, User) do
+      {:ok, user}
+    else
+      _ -> :error
+    end
+  end
+
+  def current_operator(_token), do: :error
 
   @doc "Records that `user` signed out (`auth.signed_out`)."
   def record_signed_out(%User{} = user) do

@@ -1,0 +1,29 @@
+flowchart TB
+    Caller[Authenticated consumer<br/>no Home screen or commands in C1-02]
+    Inbox[Stateless Inbox.refresh<br/>fresh active session, fixed options + cursor]
+    Accounts[Accounts.current_operator<br/>signed + stored + unrevoked token]
+    Drafts[Outreach list adapter<br/>51 candidates, selected bounded context<br/>source suppression + release guards]
+    Failures[Operations list adapter<br/>51 candidates, global keyset]
+    Counts[Three source-owned authorized aggregates<br/>Drafts, Failures, committed local captures<br/>Denver Monday half-open window]
+    Budget[ReadDeadline short worker<br/>2500ms including pool + authorization<br/>SET LOCAL statement_timeout <=2000ms<br/>cancel / rollback, no retry]
+    Merge[Merge and return <=50 metadata rows<br/>last returned key cursor<br/>independent exact totals or unavailable]
+    AA[Auditor only: one coalesced AuditAccess<br/>after all reads finish + release connections<br/>2500ms append ceiling; failure withholds view]
+    DB[(PostgreSQL<br/>existing source policies; three new indexes)]
+
+    Caller --> Inbox
+    Inbox --> Accounts
+    Accounts --> DB
+    Inbox --> Drafts
+    Inbox --> Failures
+    Inbox --> Counts
+    Drafts --> DB
+    Failures --> DB
+    Counts --> Budget
+    Budget --> DB
+    Drafts --> Merge
+    Failures --> Merge
+    Counts --> Merge
+    Merge -- admin / reviewer: no audit append --> Caller
+    Merge -- auditor --> AA
+    AA --> DB
+    AA --> Caller

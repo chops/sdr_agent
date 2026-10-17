@@ -12,8 +12,10 @@ Accepted (2026-10-06, owner decision recorded in ADR-0001: "OpenTelemetry as a
 first-class concern, model-content spans and an independent wire witness both
 in the MVP, and audit-chain anchoring to a private Git repository plus
 OpenTimestamps"). Details amended by Codex consultations 11 and 13. The R0
-amendment in the wire witness section (2026-10-12) is accepted. The R0-07
-calibration harness amendment (2026-10-13) is accepted (2026-10-14).
+amendment in the wire witness section (2026-10-12) is accepted. The C4
+database-logging amendment in the OpenTelemetry section (2026-10-12) is
+accepted (2026-10-14). The R0-07 calibration harness amendment (2026-10-13)
+is accepted (2026-10-14).
 
 ## Context
 
@@ -96,6 +98,187 @@ and SHA-256 content hashes. Prompt and completion bodies are span events only
 when `:sdr_agent, :otel_capture_content` is explicitly true; that switch is
 true only in development and false by default and in tests. S4 adds no audit
 resources or trace columns; S3 owns persisted correlation fields.
+
+#### C4 amendment (2026-10-12): metadata-only database logging and spans
+
+**Status: ACCEPTED.** The owner accepted this amendment on 2026-10-14
+(America/Denver, about 11:48 MDT), in the private Claude session chat,
+after first questioning whether values reproduced later might differ from
+the originals; the reply was "no, i accept the C4 logging amendment
+as-is." Codex approved revision 2 for owner consideration at 7f6d97d. The
+PostgreSQL server-log prerequisite below remains separate and open.
+Drafted by Claude for
+contract C4 (`docs/product/c4/readiness.md`, sections 3.6 and 7). Codex's
+round-2 entity review of that packet (PASS at a15cf8b, qualification 4)
+requires an explicit observability decision on this point before C4
+implementation is approved; the entity PASS is not acceptance of this
+amendment. Revision 2 answers Codex's review of revision 1 (1f88700,
+REQUEST_CHANGES, one security must-fix: the Ecto span error status).
+It is in force for C4 implementation from its acceptance.
+
+**Context.**
+
+- **Ecto logs query parameters.** `SdrAgent.Repo` has no `log:` setting,
+  so Ecto's default logger writes every query and its bound parameters at
+  `:debug`. Development logs at `:debug` (`config/dev.exs` sets no level);
+  tests log at `:warning`, production at `:info`.
+- **What the parameters now carry.** C4 stores the owner's business text
+  (offering profile, writing guide, research brief guidance, booking
+  link) and must not copy it outside its row and the authorized model
+  payload seam. With the real-data switch (ADR-0014 amendment 2, C5-04),
+  queries also carry real company and person fields.
+- **The owner's instance runs in development.** `config/runtime.exs`
+  refuses `SDR_MODEL_PROVIDER=claude_cli` in production, so the owner's
+  local instance with real data is a dev build. A production-only control
+  does not protect it.
+- **Error paths copy values.** PostgreSQL errors carry `DETAIL` and
+  `HINT` text such as "Failing row contains (…)" or "Key (…)=(…) already
+  exists", and Postgrex's exception message includes them (and sometimes
+  the SQL). `config/dev.exs` also sets
+  `show_sensitive_data_on_connection_error: true`.
+- **Ecto spans copy the exception message.** `SdrAgent.Telemetry` calls
+  `OpentelemetryEcto.setup/1` (`opentelemetry_ecto` 1.2.0). Its
+  `db_statement: :disabled` default keeps the SQL text out, but on an
+  error `handle_event/4` sets the span status description to
+  `Exception.message/1` of the error, `DETAIL` and `HINT` included. Codex
+  reproduced this with a synthetic SDK probe (one span, canary present).
+  The same handler copies the Repo's configured `url` verbatim into
+  `db.url`; production configures the Repo from `DATABASE_URL`
+  (`config/runtime.exs`), which can carry a password.
+- **Automatic exception reports.** A raised Postgrex or Ash error that
+  escapes a process is rendered by crash reports, Oban job error records
+  and framework error logs, not only by hand-written Logger calls.
+
+**Options considered.**
+
+1. **Keep Ecto's default logging and spans (status quo).**
+   - Pros: full debugging detail; no code.
+   - Cons: settings text and real prospect data in dev logs at every
+     query and in span status on every error; credentials can reach
+     `db.url`. Contradicts C4-R12 and ADR-0014 amendment 2 rule 2.
+2. **Metadata-only logging and spans, all environments (recommended).**
+   The default Ecto logger and `OpentelemetryEcto.setup/1` are both
+   removed. One sanitizer (`SdrAgent.Repo.SafeMetadata`) turns each
+   `[:sdr_agent, :repo, :query]` event into allowlisted fields; a logging
+   handler (`SdrAgent.Repo.QueryLog`) and a span handler
+   (`SdrAgent.Telemetry.RepoSpans`) emit only those fields.
+   - Pros: one control for every table, present and future, so a new
+     table cannot leak by default; covers settings and real data alike;
+     the span error status is safe by construction; testable with
+     canaries without any database traffic.
+   - Cons: developers lose parameter values, SQL text and error detail
+     when debugging; a query must be reproduced in a test or `psql`. The
+     app owns span code that the dependency used to provide.
+3. **Per-query or per-table redaction.** Keep Ecto logging and redact
+   chosen parameters (custom Ecto types whose inspected form is masked, or
+   a handler that filters by `source`).
+   - Pros: keeps detail for harmless tables.
+   - Cons: fails open: every new table or column with sensitive content
+     needs its own marking; Ecto logs dumped values, so Ash `sensitive?`
+     does not reach the log; does nothing for the span status or `db.url`.
+4. **Disable Repo logging only in production (or only when the real-data
+   switch is on).**
+   - Pros: dev keeps full detail on synthetic data.
+   - Cons: does not protect the owner's instance, which runs in dev;
+     settings text is present with the switch off; leaves spans unchanged.
+5. **Raise the dev log level to `:info`.**
+   - Pros: one line of config.
+   - Cons: hides every other debug log; trivially reverted per session;
+     does nothing for spans or crash reports; not a reviewed control.
+
+**Decision (accepted 2026-10-14).** Option 2.
+
+- **Sanitized fields** (the complete list; anything else is dropped):
+  - `repo` (module name);
+  - `source`: a table name from the fixed set of tables declared by the
+    app's Ash resources, else `"other"`;
+  - `command`: one of `select`, `insert`, `update`, `delete`, `other`;
+  - durations as integers in microseconds: `query_time_us`,
+    `queue_time_us`, `decode_time_us`, `idle_time_us`, `total_time_us`;
+  - `rows`: the result row count, when the result has one;
+  - `outcome`: `ok` or `error`;
+  - for an error: `error_module` from a fixed allowlist (`Postgrex.Error`,
+    `DBConnection.ConnectionError`, `DBConnection.OwnershipError`, else
+    `"other"`), `pg_code` (the SQLSTATE condition atom from Postgrex's
+    fixed table, else `"other"`), and `constraint`: a constraint or index
+    name from the fixed set declared in the app's migrations, else
+    `"other"`.
+
+  These are fixed schema and application identifiers, never free text
+  from a query, a value or a user.
+- **Never emitted** in a log, span attribute, span event or span status:
+  bound parameters; SQL text, in full or as a digest; the exception
+  message or any `inspect` of an exception or error struct; PostgreSQL
+  `DETAIL`, `HINT`, `where` or `column` values; the Repo URL, user name,
+  password or connection options. An error that does not match the
+  allowlist is reported as `error_module: "other"` without inspecting it.
+- **Spans.** `RepoSpans` emits one client span per query with the same
+  name scheme and parent (`$callers` propagation) as the dependency did,
+  attributes `db.system` (`postgresql`), `db.name` (the configured
+  database name, a fixed config value), the sanitized fields above, and on
+  error the status `:error` with a description built only from
+  `error_module`, `pg_code` and `constraint`. It never sets `db.url` or
+  `db.statement`. `opentelemetry_ecto` stays pinned but is no longer
+  attached; removing the dependency is a later, separate change. Vendor
+  code is not edited.
+- **Error boundaries and automatic reports.** Database errors are mapped
+  to typed domain errors at the domain boundary by constraint name or
+  SQLSTATE, never by echoing the message, so no raw Postgrex exception is
+  carried to a later renderer. A primary `:logger` filter
+  (`SdrAgent.Logger.ExceptionFilter`) rewrites any log event whose message,
+  report or metadata holds a Postgrex, DBConnection or Ash error struct
+  into the sanitized summary, so crash reports and framework error logs
+  are covered. Oban workers rescue database exceptions at their boundary
+  and return sanitized error reasons, so `oban_jobs.errors` holds no
+  exception message. Dev sets `show_sensitive_data_on_connection_error:
+  false`.
+- **Scope.** Every environment, so tests exercise the same handlers.
+- **Tests** (synthetic only; no real credentials; the first three need no
+  database):
+  - a synthetic `[:sdr_agent, :repo, :query]` event with a
+    `%Postgrex.Error{}` whose message, `DETAIL` and `HINT` hold a canary:
+    the canary is absent from every exported span attribute, event and
+    status description, and from captured logs at `:debug`;
+  - the same event with a Repo config holding a credential-bearing URL
+    (`postgres://user:canary@db.invalid/x?sslpassword=canary`): no canary
+    and no `db.url` in any span or log;
+  - an unknown error struct carrying a canary is reported as `"other"`;
+  - against the test database: a valid insert, a check-constraint and a
+    unique violation with a canary value; a raised error that crashes a
+    process; an Oban job that hits a constraint error. The canary is
+    absent from logs, spans and `oban_jobs.errors`;
+  - the default Ecto logger and `OpentelemetryEcto` handlers are not
+    attached; `QueryLog` and `RepoSpans` are.
+- **PostgreSQL server log: a separate prerequisite, not solved here.**
+  The app's controls do not reach the PostgreSQL server's own log, which
+  can record error `DETAIL` (failing row contents) and statements. That
+  configuration (for example `log_error_verbosity`,
+  `log_min_error_statement`, `log_statement`, set per database or per
+  session rather than on a shared server) is a separate project
+  configuration decision, owned by the owner with Claude and Codex
+  proposing. It is a gate: before private settings content is saved or
+  the real-data switch is turned on, either that decision is accepted
+  with its own test or the owner accepts an explicit retention exception
+  for the server log. No server setting is changed by this amendment or
+  its review.
+
+**Consequences.**
+
+- Positive: settings text, real prospect data, error detail and
+  credentials stay out of app logs, query spans and job error records
+  everywhere, by default, for every table.
+- Negative: less detail when debugging queries in dev; the app maintains
+  its own Repo span handler instead of the dependency's.
+- Neutral: query timing, outcome, error class and trace parentage stay
+  visible, so slow queries and errors are still diagnosable; the audit
+  ledger is unaffected. The server-log prerequisite remains open until
+  decided separately.
+
+**Acceptance.** Recorded in this amendment's Status paragraph above (owner,
+2026-10-14). The server-log prerequisite's direction was approved the same
+day. The prerequisite itself stays open until its own test, activation
+check and retention decision pass, as the gate above requires; accepting
+its proposal alone does not close it.
 
 ### Wire witness (S12)
 
@@ -645,6 +828,164 @@ The contracts and their reviews are in
     evidence reviewed before the next; the harness already behaves this
     way and never batches);
   - OQ-E3 (automated process-group proof of quiescence).
+
+
+#### R0-05 amendment (2026-10-16): operator input in crash reports, option B
+
+**Status: ACCEPTED.** The owner accepted this amendment on 2026-10-16
+(America/Denver, about 13:20 MDT), at the text Codex passed for owner
+acceptance at `d0c80ff`; the reply was "2. yes" (D-143). The owner had
+chosen option B and accepted its residual risks earlier that day (D-141).
+Acceptance permits R0-05's MF3 implementation; it is not merge,
+activation or spend approval, and it does not cover SettingsLive
+(OQ-R5-1). It builds on the accepted C4 amendment, "metadata-only
+database logging and spans" (D-117), and its primary filter
+`SdrAgent.Logger.ExceptionFilter`, which merged with C4-01a (#165,
+`e34172c`).
+
+**Context.** R0-05's resolver collects a typed confirmation. The valid
+text is `STOPPED <switch id>`: a fixed word plus an id the page already
+shows and the database already stores. It is not a credential; the
+operation is authorized by authentication, the current-admin check, the
+frozen review identity, the lifecycle fences and domain validation. A
+mistyped text, though, can be anything, including an accidentally pasted
+secret. `config :phoenix, :filter_parameters` covers only Phoenix's
+parameter logger. Codex reproduced these crash-report paths
+(`codex-r005-8de4fca-green-review.md`, `codex-r005-379e701-rulings.md`,
+`codex-r005-03a16a2-adr-review.md`):
+- **the socket state:** the LiveView channel's `format_status` state,
+  printed at `:debug`. The opaque `Confirmation` wrapper already redacts
+  this;
+- **the last message:** a GenServer crash report always prints it, at
+  every level: the raw `change_resolution` or `confirm_resolution` payload;
+- **downstream holders:** the resolution task, `ProfileSwitches`, and the
+  registered coordinator, which receives the confirmation in its
+  `resolve_blocked` request and keeps the attestation in its state while
+  an unknown outcome settles;
+- **secondary reports:** a supervisor's report about a crashed child
+  (Phoenix's socket pool is a DynamicSupervisor) is emitted by the
+  supervisor and does not carry the child's logger metadata.
+
+The first draft of this amendment (option A, `03a16a2`) tagged every
+holder. Codex found the coordinator and secondary reports uncovered
+(NEEDS-REVIEW). Covering them means tagging the coordinator for its
+lifetime and attributing supervisor reports, about a day more. The owner
+chose B instead: minimize what leaves the page, and accept the rest.
+
+**Decision.**
+1. **Only the valid text leaves the page.** In `:editing`, the page
+   compares the submitted binary byte for byte with
+   `"STOPPED " <> review.switch_id`, using the switch id held in the
+   socket's review, never one from the browser. There is no trimming, case
+   folding, coercion or synthesis. A mismatch is refused by the page
+   before any attestation is built, before anything is stored, and before
+   any task, domain or coordinator call. A `change_resolution` event keeps
+   only whether the text matches (a boolean), never the text. A local
+   refusal is not a domain refusal: it claims no audit, rollback or
+   recorded attempt, and its wording never includes the text.
+2. **The valid bytes are forwarded as they were typed.** The page wraps
+   the original matching binary in `Confirmation` and reveals it only at
+   the existing domain call. "Check again" resends the same frozen
+   identity; nothing is rebuilt. The backend stays authoritative: the
+   domain's closed-shape, exact-confirmation, actor, replay and
+   coordinator checks are unchanged, and so is the public domain contract.
+3. **The AdminLive channel process is tagged.** It sets the logger
+   metadata `sdr_sensitive_input: true` in `mount/3`, before any operator
+   input arrives, and never clears it. The facts and resolution tasks are
+   not tagged: the facts task holds no input, and the resolution task holds
+   only the valid text, whose diagnostic copies are accepted (5).
+4. **A tagged process's error reports become a fixed diagnostic.** The
+   primary filter gains a second, fixed classification. An event from a
+   tagged process is replaced when it is any of:
+   - a crash, `proc_lib` or termination report (OTP report
+     `domain: [:otp, ...]`, an Elixir translator report, or a
+     `crash_reason` in metadata);
+   - any event at `:error` or above.
+
+   The replacement is the message `"diagnostic withheld: process holds
+   operator input"`, at the original level, with only the validated
+   standard metadata (the C4 `scan_limit` shapes: `pid`, `gl`, `time`,
+   `line`, `mfa`, `file`, `domain`) plus `sdr_sensitive_input: true`.
+   Nothing from the message, report, format arguments or other metadata is
+   kept. The tag check is one bounded metadata lookup, made before the C4
+   scan. The filter never raises and never fails open: a failed
+   classification of an event that may be tagged is replaced, and the
+   filter stays attached. Untagged events, including the C4
+   database-error path, are unchanged.
+5. **Accepted residual risks (owner, D-141).** This amendment does not
+   close every crash-report path. The owner accepted:
+   - **the valid phrase in downstream reports:** crash or error reports
+     from untagged downstream processes (the resolution task,
+     `ProfileSwitches` callers, the coordinator, including its retained
+     settlement state) may contain `STOPPED <switch id>` in arguments,
+     exit reasons or state. The allowance covers only these diagnostic
+     copies. It does not allow the phrase in ordinary UI errors, audit
+     payloads, stored columns, span attributes or new telemetry events;
+   - **mistyped input in secondary reports:** the text can be anything. The
+     tag classifies only the channel's own reports. A report another
+     process writes about the channel, such as a supervisor's, is not
+     classified and can carry the crash reason or stack. SASL reports being
+     off by default (`handle_sasl_reports: false`) reduces one visible path;
+     it is not a control, and a logging configuration change can expose
+     it. Process metadata does not propagate to reporters;
+   - **lost detail:** the channel's error-or-higher diagnostics lose their
+     detail (the reason, stack and last message), not only its crash
+     reports. Debugging a page crash then needs a reproduction.
+
+   **Lifetime wording.** Input also exists in browser and transport
+   buffers, and in the documented raw in-process `handle_event` telemetry
+   (R0-05, test 15). A callback may leave VM-managed terms until garbage
+   collection. The application does not deliberately retain or forward a
+   mismatched text after handling the event; it does not claim the text
+   exists in one place only, or that memory is erased.
+6. **Unchanged:** the error level and the fact that something failed; the
+   logger configuration and its minimum level; Phoenix's parameter
+   filtering; the `Confirmation` wrapper; the domain and coordinator
+   contracts.
+
+**Not covered: SettingsLive (OQ-R5-1).** C4-01b's settings page holds
+private settings content in its state and its `settings_content` event
+payload. The valid-phrase allowance above does not apply to it, and the
+C4 private-content guarantee is not satisfied by this amendment. It needs
+a separate, owner-owned follow-up that identifies its holders and
+reporters, the mitigation and the acceptance gate, or a separate explicit
+risk decision. Codex and Claude recommend full protection for it.
+
+**Consequences.**
+- **Positive:** arbitrary operator input never crosses the page boundary
+  into tasks, the domain or the coordinator. The channel's own crash and
+  error reports carry no input at any level. Coordinator diagnostics keep
+  their detail.
+- **Negative:** the residual risks in (5), accepted by the owner. The
+  promise is narrower than "the confirmation never appears in any log".
+- **Neutral:** no new dependency, process or table.
+
+**Tests (RED first, synthetic canaries only):**
+- **Minimization, traced with positive controls:** an arbitrary mismatched
+  canary, typed and force-submitted, is never stored in the review or
+  socket assigns, and is never passed to a task, `Agents`,
+  `ProfileSwitches` or the coordinator (trace the actual calls). The valid
+  text is passed, as the operator's own bytes, so an empty trace cannot
+  pass.
+- **The tagged channel:** a LiveView crash while handling
+  `change_resolution`, and while handling `confirm_resolution`, with the
+  real form-encoded payload, with a valid and a mismatched canary; a crash
+  while frozen in `:submitting` and in `:uncertain`. The canary is absent,
+  at `:debug` and at `:warning` minimum, from the captured message and
+  report, the format arguments, and metadata keys and values; the
+  diagnostic is present at its level.
+- **Controls:** an untagged crash keeps its normal report; the C4
+  database-error path and its bounded fail-closed scan are unchanged; a
+  tagged `:info` event is unchanged; a failed classification is replaced;
+  the filter is still attached after every test.
+- **The accepted limit, shown separately:** one test demonstrates that a
+  supervisor-emitted report about the tagged channel is not classified (it
+  pins the residual in (5)). It is never written as an absence assertion,
+  and no general absence assertion is weakened to accommodate it.
+- **Regressions kept:** the valid flow, the frozen exact retry, the actor
+  and redirect checks, the stored-row binding, and test 15's absence of
+  the text from ordinary logs, URLs, stored rows, audit payloads, captured
+  application telemetry and exported spans.
 
 ### Anchoring (S11)
 

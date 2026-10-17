@@ -2,9 +2,11 @@ defmodule SdrAgent.Demo.Predeliver do
   @moduledoc """
   Runs fixture lead 01 (Brightpath Freight Systems) up to human review ahead
   of a live demo (`bin/demo predeliver`, `mix sdr.demo.predeliver`; dev/test
-  only, seeded data set required): assigns the lead to the agent as the demo
-  reviewer (`SDR.assign_lead/2`) and runs its research job (fake model by
-  default) — evidence, qualification and a draft awaiting review.
+  only, seeded data set required): saves the synthetic demo offering
+  profile as the demo admin when none is saved (C4-R8), assigns the lead to
+  the agent as the demo reviewer (`SDR.assign_lead/2`) and runs its research
+  job (fake model by default) — evidence, qualification and a draft awaiting
+  review.
 
   It **never approves** (ADR-0001 Tier 0: every outbound message needs a
   human approval bound to an immutable revision). The owner approves the
@@ -51,6 +53,7 @@ defmodule SdrAgent.Demo.Predeliver do
     deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :wait_ms, 30_000)
 
     with :ok <- allowed(),
+         :ok <- offering(),
          {:ok, reviewer} <- reviewer(),
          {:ok, lead} <- lead(reviewer),
          {:ok, lead} <- researched(lead, reviewer),
@@ -61,6 +64,45 @@ defmodule SdrAgent.Demo.Predeliver do
 
   defp allowed do
     if SeedingAllowed.allowed?(), do: :ok, else: {:error, :demo_not_allowed}
+  end
+
+  # C4-R8: an assignment needs a saved offering profile. The demo saves its
+  # synthetic one (`Fixtures.offering_profile/0`) as the demo admin through
+  # the domain API, only when the tenant has none.
+  defp offering do
+    with {:ok, tenant_id} <- seeded_tenant(),
+         agent = SdrAgent.Actor.system(:agent_runtime, tenant_id),
+         {:error, {:settings_incomplete, _kinds}} <-
+           Agents.settings_complete(:assignment, actor: agent),
+         {:ok, admin} <- sign_in(Enum.find(Fixtures.users(), &(&1.role == :admin))) do
+      %{
+        kind: :offering_profile,
+        content: Fixtures.offering_profile(),
+        expected_number: 0,
+        note: "Synthetic demo offering (demo predeliver).",
+        confirm_raised: []
+      }
+      |> Agents.create_settings_revision(actor: admin)
+      |> case do
+        {:ok, _revision} -> :ok
+        {:error, {:stale_revision, _latest}} -> :ok
+        {:error, error} -> {:error, error}
+      end
+    end
+  end
+
+  defp seeded_tenant do
+    case SdrAgent.Audit.Kernel.singleton_tenant_id() do
+      {:ok, tenant_id} -> {:ok, tenant_id}
+      {:error, _} -> {:error, :not_seeded}
+    end
+  end
+
+  defp sign_in(fixture) do
+    case Accounts.sign_in(fixture.email, fixture.password) do
+      {:ok, user} -> {:ok, user}
+      {:error, _} -> {:error, :not_seeded}
+    end
   end
 
   defp reviewer do

@@ -21,6 +21,8 @@ defmodule SdrAgent.Audit.OtsUpgradeWorker do
       states: [:available, :scheduled, :executing, :retryable]
     ]
 
+  use SdrAgent.Workers.ErrorBoundary
+
   require Ash.Query
 
   alias SdrAgent.Actor

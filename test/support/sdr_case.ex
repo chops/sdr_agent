@@ -52,8 +52,15 @@ defmodule SdrAgent.SDRCase do
     lead
   end
 
-  @doc "Assigns the fixture lead `key` to the agent as ADM; returns the assignment."
+  @doc """
+  Assigns the fixture lead `key` to the agent as ADM; returns the
+  assignment. An assignment needs a saved offering profile (C4-R8): the
+  synthetic one is saved first, as `ctx.admin`, when the tenant has none
+  (`ensure_offering!/1`). Completeness tests call `SDR.assign_lead/2`
+  directly instead.
+  """
   def assign!(ctx, key, opts \\ []) do
+    ensure_offering!(ctx)
     lead = fixture_lead!(ctx, key)
 
     {:ok, assignment} =
@@ -63,6 +70,17 @@ defmodule SdrAgent.SDRCase do
       )
 
     assignment
+  end
+
+  @doc """
+  C4-R8: saves the synthetic offering profile (`SdrAgent.SettingsFixtures`)
+  through the domain API as `ctx.admin` when the tenant has none.
+  """
+  def ensure_offering!(ctx) do
+    if SdrAgent.SettingsFixtures.latest_number(ctx.tenant.id, :offering_profile) == 0,
+      do: SdrAgent.SettingsFixtures.save_offering!(ctx.admin)
+
+    :ok
   end
 
   @doc "Runs every queued research job inline (Oban testing: manual)."

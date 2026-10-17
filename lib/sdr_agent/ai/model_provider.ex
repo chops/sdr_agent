@@ -34,6 +34,38 @@ defmodule SdrAgent.AI.ModelProvider do
   `provider_error` Failure for operator attention, in the same transaction
   as the failed invocation.
 
+  ## Provider outcomes (R0-04, `docs/product/r0/r0-04-seam.md`)
+
+  `prepare/2` must return `{:ok, provenance_map}` or `{:error, reason}`.
+  Anything else gives `{:error, :malformed_provider_prepare}`, with nothing
+  reserved or charged.
+
+  `complete/2` may return exactly one of three replies:
+    * **success:** `{:ok, %{output: _, raw_response: binary}}`, optionally
+      with `:usage`. A present `:usage` must be a plain map with exactly
+      `input_tokens`, `output_tokens` and `plan_calls`, none nil, which
+      casts to `SdrAgent.Agents.ModelInvocation.Usage`; it is stored
+      normalized. An omitted `:usage` keeps the default.
+    * **known failure:** `{:error, reason}`.
+    * **unknown:** `{:unknown, reason}`, or a raise or exit.
+
+  Any other reply is malformed. It is checked before any settlement write
+  and settled by the re-read row's state, which takes precedence:
+    * a `sent` row becomes unknown (`{:error, :provider_outcome_unknown}`),
+      because the call may have reached the provider. It is never
+      retried;
+    * a `reserved` row (never launched) is failed with
+      `:launch_not_admitted`, never sent. Valid replies keep their reasons
+      as before;
+    * a terminal row gets no write (`{:error, :invocation_already_settled}`).
+
+  A success completes only if Zoi accepts the output and the parsed value
+  is a map. `parsed_output` is a map, so a non-map output is failed as
+  `validation_failed`, with no parsed output and one entry naming only its
+  type. Only provider and protocol outcomes are normalized: an error from
+  settlement itself (database, authorization, audit) comes back as that
+  error.
+
   Requests may carry an optional `:input` — the structured data the prompt
   was rendered from — which deterministic providers (the Fake) read instead
   of parsing the prompt.
@@ -70,11 +102,25 @@ defmodule SdrAgent.AI.ModelProvider do
           required(:schema) => Zoi.schema(),
           required(:audit) => map(),
           optional(:input) => map(),
+          optional(:content_capture) => :inherit | :off,
           optional(:witness) => %{model_invocation_id: String.t(), traceparent: String.t() | nil}
         }
   @type result :: map()
 
+  @doc """
+  The call's provenance (provider, `profile_id`, model and version fields),
+  read before reservation. `{:error, reason}` refuses the call; any other
+  return is `:malformed_provider_prepare`.
+  """
   @callback prepare(request(), keyword()) :: {:ok, map()} | {:error, term()}
+
+  @doc """
+  Performs the call. `{:ok, %{output, raw_response}}` (optional `:usage`)
+  is a reply to validate; `{:error, reason}` is a known failure;
+  `{:unknown, reason}` means the outcome is not known, and the call is
+  never repeated. Anything else is treated as malformed (see the module
+  doc).
+  """
   @callback complete(request(), keyword()) ::
               {:ok, result()} | {:error, term()} | {:unknown, term()}
 
@@ -92,10 +138,10 @@ defmodule SdrAgent.AI.ModelProvider do
   end
 
   defp run(request, provider, provider_options) do
-    with {:ok, provenance} <- provider.prepare(request, provider_options),
+    with {:ok, provenance} <- prepare(provider, request, provider_options),
          {:ok, invocation} <- reserve(request, provenance),
          {:ok, invocation} <- before_call(invocation, request) do
-      metadata = %{id: request.id, model: provenance.model_id, input: request.prompt}
+      metadata = span_metadata(request, provenance)
 
       GenAI.with_span(request.operation, metadata, fn ->
         # Captured here, in the caller's process inside the gen_ai span and
@@ -110,6 +156,15 @@ defmodule SdrAgent.AI.ModelProvider do
           provider_options
         )
       end)
+    end
+  end
+
+  # R0-04-3: only `{:ok, map}` or `{:error, reason}` reaches reservation.
+  defp prepare(provider, request, provider_options) do
+    case provider.prepare(request, provider_options) do
+      {:ok, provenance} when is_map(provenance) and not is_struct(provenance) -> {:ok, provenance}
+      {:error, _reason} = error -> error
+      _malformed -> {:error, :malformed_provider_prepare}
     end
   end
 
@@ -131,7 +186,7 @@ defmodule SdrAgent.AI.ModelProvider do
 
   defp invoke_validate_and_settle(provider, request, invocation, provider_options) do
     started = System.monotonic_time(:millisecond)
-    outcome = provider_call(provider, request, provider_options)
+    outcome = provider |> provider_call(request, provider_options) |> envelope()
 
     with {:ok, invocation} <- current(invocation) do
       settle(outcome, request, invocation, started)
@@ -150,6 +205,7 @@ defmodule SdrAgent.AI.ModelProvider do
       {:ok, result} -> settle_result(request, invocation, result, started)
       {:error, reason} -> fail(invocation, reason, started)
       {:unknown, _reason} -> mark_unknown(invocation)
+      :malformed -> mark_unknown(invocation)
     end
   end
 
@@ -160,6 +216,7 @@ defmodule SdrAgent.AI.ModelProvider do
         {:ok, _result} -> :launch_not_admitted
         {:error, reason} -> reason
         {:unknown, reason} -> reason
+        :malformed -> :launch_not_admitted
       end
 
     fail(invocation, reason, started)
@@ -178,17 +235,62 @@ defmodule SdrAgent.AI.ModelProvider do
     _kind, _reason -> {:unknown, :provider_exit}
   end
 
+  # R0-04-1: the closed reply envelope, checked before any settlement
+  # write. A success needs a map with `:output` and a binary
+  # `:raw_response`; a present `:usage` must be a plain map with exactly the
+  # three counters, none nil, that casts to the embedded type (whose
+  # constraints refuse negatives). Anything else is `:malformed`.
+  @usage_keys [:input_tokens, :output_tokens, :plan_calls]
+
+  defp envelope({:ok, %{output: _, raw_response: raw} = result})
+       when is_binary(raw) and not is_struct(result) do
+    case Map.fetch(result, :usage) do
+      :error ->
+        {:ok, Map.put(result, :usage, empty_usage())}
+
+      {:ok, usage} ->
+        case usage(usage) do
+          {:ok, usage} -> {:ok, Map.put(result, :usage, usage)}
+          :error -> :malformed
+        end
+    end
+  end
+
+  defp envelope({:error, _reason} = error), do: error
+  defp envelope({:unknown, _reason} = unknown), do: unknown
+  defp envelope(_other), do: :malformed
+
+  defp usage(usage) when is_map(usage) and not is_struct(usage) do
+    with true <- Enum.sort(Map.keys(usage)) == Enum.sort(@usage_keys),
+         true <- Enum.all?(@usage_keys, &(not is_nil(Map.fetch!(usage, &1)))),
+         {:ok, cast} <- Ash.Type.cast_input(SdrAgent.Agents.ModelInvocation.Usage, usage, []),
+         {:ok, cast} <-
+           Ash.Type.apply_constraints(SdrAgent.Agents.ModelInvocation.Usage, cast, []) do
+      {:ok, Map.take(cast, @usage_keys)}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp usage(_usage), do: :error
+
   defp settle_result(request, invocation, result, started) do
     latency = elapsed(started)
 
     case Zoi.parse(request.schema, result.output) do
+      {:ok, output} when not is_map(output) or is_struct(output) ->
+        not_object(request, invocation, result, output, [], latency)
+
+      {:error, errors} when not is_map(result.output) or is_struct(result.output) ->
+        not_object(request, invocation, result, result.output, errors, latency)
+
       {:ok, output} ->
         attrs = %{
           response: result.raw_response,
           parsed_output: output,
           validation_status: :valid,
           validation_errors: [],
-          usage: Map.get(result, :usage, empty_usage()),
+          usage: result.usage,
           latency_ms: latency
         }
 
@@ -204,7 +306,7 @@ defmodule SdrAgent.AI.ModelProvider do
           validation_status: :invalid,
           validation_errors: Enum.map(errors, &%{"message" => inspect(&1)}),
           error: %{"kind" => "validation_failed"},
-          usage: Map.get(result, :usage, empty_usage()),
+          usage: result.usage,
           latency_ms: latency
         }
 
@@ -214,6 +316,34 @@ defmodule SdrAgent.AI.ModelProvider do
         end
     end
   end
+
+  # R0-04-2: `parsed_output` is a map, so an output that is not one, valid
+  # or not, is failed as `validation_failed` with no parsed output and one
+  # entry naming only its type (never its value).
+  defp not_object(request, invocation, result, output, errors, latency) do
+    type_entry = %{"message" => "output is not an object", "type" => type_name(output)}
+
+    attrs = %{
+      response: result.raw_response,
+      parsed_output: nil,
+      validation_status: :invalid,
+      validation_errors: Enum.map(errors, &%{"message" => inspect(&1)}) ++ [type_entry],
+      error: %{"kind" => "validation_failed"},
+      usage: result.usage,
+      latency_ms: latency
+    }
+
+    with {:ok, _failed} <- Agents.fail_model_invocation(invocation, attrs, actor: request.actor) do
+      {:error, {:validation_failed, errors ++ [type_entry]}}
+    end
+  end
+
+  defp type_name(value) when is_binary(value), do: "string"
+  defp type_name(value) when is_number(value), do: "number"
+  defp type_name(value) when is_boolean(value), do: "boolean"
+  defp type_name(nil), do: "nil"
+  defp type_name(value) when is_list(value), do: "list"
+  defp type_name(_value), do: "other"
 
   defp fail(invocation, reason, started) do
     attrs = %{
@@ -301,7 +431,7 @@ defmodule SdrAgent.AI.ModelProvider do
 
       case CalibrationCall.target(request, invocation_id, provider_options) do
         {:ok, invocation, provenance} ->
-          metadata = %{id: request.id, model: provenance.model_id, input: request.prompt}
+          metadata = span_metadata(request, provenance)
 
           GenAI.with_span(request.operation, metadata, fn ->
             witness = %{model_invocation_id: invocation.id, traceparent: GenAI.traceparent()}
@@ -317,6 +447,25 @@ defmodule SdrAgent.AI.ModelProvider do
         :invalid ->
           {:error, :calibration_call_invalid}
       end
+    end
+  end
+
+  # C4: the request's `content_capture` (`:off` for input that carries run
+  # settings) decides the span's content events; provider options cannot
+  # turn capture back on.
+  defp span_metadata(request, provenance) do
+    %{
+      id: request.id,
+      model: provenance.model_id,
+      input: request.prompt,
+      content_capture: content_capture(request)
+    }
+  end
+
+  defp content_capture(request) do
+    case Map.get(request, :content_capture, :inherit) do
+      :inherit -> :inherit
+      _off -> :off
     end
   end
 
