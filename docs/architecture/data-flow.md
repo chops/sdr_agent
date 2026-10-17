@@ -1,8 +1,9 @@
 # Data Flow
 
-C1-02's stateless metadata read facade and auditor-only post-read append are
-shown in [Home inbox read runtime](inbox-runtime.md). This is a public read
-API, not a mounted Home screen; its command boundary remains C1-03.
+C1-02's stateless reads and C1-03 slice A's atomic approve/edit/reject
+boundary are shown in [Home inbox runtime](inbox-runtime.md). These are
+backend APIs, not a mounted Home screen. Retry remains blocked pending
+slice B; no model call or external delivery is authorized by these paths.
 
 Generated: 2026-10-06
 

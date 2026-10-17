@@ -1,5 +1,5 @@
 flowchart TB
-    Caller[Authenticated consumer<br/>no Home screen or commands in C1-02]
+    Caller[Authenticated backend consumer<br/>no H1 screen]
     Inbox[Stateless Inbox.refresh<br/>fresh active session, fixed options + cursor]
     Accounts[Accounts.current_operator<br/>signed + stored + unrevoked token]
     Drafts[Outreach list adapter<br/>51 candidates, selected bounded context<br/>source suppression + release guards]
@@ -8,7 +8,13 @@ flowchart TB
     Budget[ReadDeadline short worker<br/>2500ms including pool + authorization<br/>SET LOCAL statement_timeout <=2000ms<br/>cancel / rollback, no retry]
     Merge[Merge and return <=50 metadata rows<br/>last returned key cursor<br/>independent exact totals or unavailable]
     AA[Auditor only: one coalesced AuditAccess<br/>after all reads finish + release connections<br/>2500ms append ceiling; failure withholds view]
-    DB[(PostgreSQL<br/>existing source policies; three new indexes)]
+    Command[Inbox.command<br/>current session + closed typed request]
+    Adapter[Outreach.inbox_command<br/>independent session and shape validation]
+    Locks[Audit.transaction<br/>enrollment SHARE, draft UPDATE,<br/>campaign SHARE, contact SHARE]
+    Fresh[Revalidate session + current role after waits<br/>id-bound authorized source context<br/>synthetic, release and v1 freshness checks]
+    Write[Existing guarded approve / edit / reject<br/>source actions append after dependent locks<br/>capture outbox only, never external send]
+    Held[Retry has no writer in slice A<br/>one typed Failure read; stays blocked]
+    DB[(PostgreSQL<br/>existing source policies and indexes)]
 
     Caller --> Inbox
     Inbox --> Accounts
@@ -27,3 +33,15 @@ flowchart TB
     Merge -- auditor --> AA
     AA --> DB
     AA --> Caller
+    Caller --> Command
+    Command --> Accounts
+    Command -- three draft commands --> Adapter
+    Adapter --> Locks --> Fresh --> Write
+    Locks --> DB
+    Fresh --> DB
+    Write --> DB
+    Write -- after commit: applied, refresh source --> Caller
+    Fresh -- "refusal: rollback; guarded denial audited after txn" --> Caller
+    Command -- retry request --> Held
+    Held -- read only --> DB
+    Held -- typed refusal --> Caller
