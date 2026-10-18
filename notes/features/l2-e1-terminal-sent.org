@@ -224,5 +224,6 @@ no commits during it.
 
 * Risks
 - Terminal-run counters stay non-authoritative (ruled OQ-E1-1 (i)).
-- A legacy generation-1 row with a broken reservation event is accepted as
-  history (step 5); Codex to confirm that rule.
+- Generation 1 is eligible only on the expected legacy absence of a
+  reservation event, or one event with no tuple; a broken event fails
+  closed (step 5 is the operative rule).
