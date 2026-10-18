@@ -8,6 +8,13 @@ defmodule SdrAgent.Audit.KernelTest do
 
   @zero_hash <<0::256>>
 
+  # #178: a committed fixture earlier in this VM may hold the cached
+  # provenance identity's snapshot; each test here starts from a new one.
+  setup do
+    fresh_provenance!()
+    :ok
+  end
+
   describe "bootstrap" do
     test "creates the singleton tenant with a genesis event and provenance" do
       tenant = bootstrap!()
@@ -39,6 +46,20 @@ defmodule SdrAgent.Audit.KernelTest do
       assert {:ok, again} = Audit.bootstrap(slug: "demo", name: "Demo Tenant")
       assert again.id == tenant.id
       assert length(events(tenant)) == 2
+    end
+
+    test "with its provenance already recorded, records only the genesis event (#178)" do
+      {:ok, recorded} =
+        SdrAgent.Audit.ProvenanceSnapshot
+        |> Ash.Changeset.for_create(:record, SdrAgent.Audit.Provenance.current())
+        |> Ash.create(authorize?: false)
+
+      tenant = bootstrap!()
+
+      assert [genesis] = events(tenant)
+      assert genesis.event_type == "tenant.created"
+      assert genesis.provenance_snapshot_id == recorded.id
+      assert Enum.all?(events(tenant), &(&1.event_type != "system.provenance.recorded"))
     end
 
     test "records a provenance snapshot of the build and runtime" do

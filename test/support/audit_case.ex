@@ -23,6 +23,71 @@ defmodule SdrAgent.AuditCase do
     :ok
   end
 
+  @provenance_cache {SdrAgent.Audit.Provenance, :current}
+  @provenance_nonce :__test_provenance_nonce__
+  @absent {__MODULE__, :absent}
+
+  @doc """
+  #178: makes this test's bootstraps record a *new* provenance snapshot.
+  `SdrAgent.Audit.Provenance.current/0` is cached once per VM, and a
+  committed fixture that ran earlier in the VM keeps the snapshot of that
+  cached identity, so a later sandboxed bootstrap would find it and append
+  no `system.provenance.recorded` event.
+
+  It puts a unique test-only nonce into the `:sdr_agent` environment (part
+  of the provenance config hash) and drops the cache, so the next
+  `current/0` recollects; the new snapshot is created inside the test's
+  sandbox and rolled back. The nonce's previous value or absence and the
+  cache's exact previous value or absence are restored on exit; the
+  cleanup is registered before the first change, so a failing step still
+  restores both. Returns the fresh attributes.
+
+  Opt-in, for synchronous (`async: false`) tests only, with no surviving
+  workers of the test subject: the cache and the environment are global.
+  """
+  def fresh_provenance! do
+    previous_nonce = Application.fetch_env(:sdr_agent, @provenance_nonce)
+    previous_cache = :persistent_term.get(@provenance_cache, @absent)
+    ExUnit.Callbacks.on_exit(fn -> restore_provenance(previous_nonce, previous_cache) end)
+
+    baseline =
+      case previous_cache do
+        %{snapshot_sha256: sha} -> sha
+        @absent -> SdrAgent.Audit.Provenance.collect().snapshot_sha256
+      end
+
+    nonce = "nonce-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+    Application.put_env(:sdr_agent, @provenance_nonce, nonce)
+    :persistent_term.erase(@provenance_cache)
+    fresh = SdrAgent.Audit.Provenance.current()
+
+    ExUnit.Assertions.assert(
+      fresh.snapshot_sha256 != baseline,
+      "fresh_provenance!/0: the provenance identity did not change"
+    )
+
+    fresh
+  end
+
+  @doc false
+  # The restoration `fresh_provenance!/0` registers (public for its tests).
+  def restore_provenance(previous_nonce, previous_cache) do
+    case previous_nonce do
+      {:ok, value} -> Application.put_env(:sdr_agent, @provenance_nonce, value)
+      :error -> Application.delete_env(:sdr_agent, @provenance_nonce)
+    end
+
+    case previous_cache do
+      @absent -> :persistent_term.erase(@provenance_cache)
+      cache -> :persistent_term.put(@provenance_cache, cache)
+    end
+
+    :ok
+  end
+
+  @doc false
+  def provenance_absent, do: @absent
+
   @doc "Bootstraps the singleton tenant through the kernel and returns it."
   def bootstrap! do
     {:ok, tenant} = SdrAgent.Audit.bootstrap(slug: "demo", name: "Demo Tenant")
