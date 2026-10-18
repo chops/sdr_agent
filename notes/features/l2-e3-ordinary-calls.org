@@ -7,8 +7,10 @@ entity/action PASS; owner D-156 (scope accepted, B5' acknowledged). Not
 merge, enablement, grant or spend approval. The first real ordinary call is
 owner-run and separately authorized (stage 4).
 
-Author Claude; reviewer Codex. Phase: *plan, awaiting Codex review*. No
-RED before plan PASS. Base: =origin/l2-e1= (E1 GREEN =9c64247=, PR #181).
+Author Claude; reviewer Codex. Phase: *plan revision 2, awaiting Codex
+review*. Revision 1 (=0aa2a20=) got NEEDS-REVIEW
+(=codex-l2e3-0aa2a20-plan-review.md=, sha256 =d9d6b366…=): five
+must-fixes, taken below. No RED before plan PASS. Base: =origin/l2-e1= (E1 GREEN =9c64247=, PR #181).
 E3 merges only after E1, after G3 is closed by the owner, and after its
 own review, gate and owner decision.
 
@@ -62,6 +64,29 @@ own review, gate and owner decision.
   admission =:ambiguous_allocation= (exactly one match required). The owner
   steps must not leave two open allocations for one bucket.
 
+* Entity Model (must-fix 5)
+Entity Model trigger: yes. Reason: the accepted E3 row (contract
+=ed819b7=, Codex PASS) changes the admission contract; this revision adds
+a narrow delta to two existing action contracts (launch admission's
+ordinary mode, and the pinned identity's reviewed version). No new
+persisted entity, attribute, relationship or migration.
+
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|---|---|---|---|---|---|---|---|
+| Launch admission (=Agents.admit_launch/3=, =Admission.launch_check/6=) | Existing, E3 delta | The sent boundary of a reserved ClaudeCLI call | New option =ordinary_launch: true= (set only by the new ordinary =staged/3= clause); mutually exclusive with =calibration_launch:= (both → =:calibration_launch_invalid=) | Unchanged: the locked run, invocation, grant, allocation | With =ordinary_launch: true=, under the existing locks (run → invocation → grant/allocation =FOR SHARE= → head) and before any other effect: the run is not =:proof=, and =Gate.reservation_authority/1= of the locked invocation is =:no_tuple=. Otherwise the existing committed launch refusal: =%Refused{stage: :launch, reason: :calibration_not_authorized, check: :ordinary_scope}= (proof run or recorded tuple) or =check: :ordinary_unbindable= (=:no_event= / =:invalid=, a failed read included); the row reserved → failed, no port, no exemption consumed, no receipt. Without the option, behaviour is unchanged (incl. the existing "absent keeps ordinary launch behaviour" test-launcher case) | AGT only (unchanged) | none |
+| Pinned CLI identity (=nix/app-claude-cli.identity=, =PinnedExecutable=) | Existing, E3 delta | The reviewed artifact the app may launch | Each line gains a 4th field, the reviewed CLI version of that exact store path + sha256 (=2.1.294=); parsed at compile time, a missing/malformed field fails compilation; =identity/0= exposes =:version=; the test-seam injected identity must carry the same shape | Unchanged | Metadata only, inside the existing immutable-artifact trust (boot sha256 verification and the per-check file metadata stay). Checked against =ModelProfiles.cli_version/0= at resolution and in the server immediately before each launch (=pinned_launch=, which every queued call passes). Mismatch/missing → =:pinned_cli_version_mismatch=. It is reviewed artifact evidence, never an observed version; the per-call init check stays mandatory | Build-time review only | Whether the identity format change needs an ADR-0004 R0-amendment note (proposed: a one-line note in the same PR) |
+
+Reviewer precedence: ai-pair; reviewer *Codex*. Verdict: *UNREVIEWED*
+(this delta).
+
+* ADR evaluation (must-fix 5)
+No new ADR. The version binding is metadata within ADR-0004's accepted
+immutable pinned-artifact trust (no subprocess, no new lifecycle); the
+ordinary-launch mode narrows existing launch authority (it adds a refusal,
+grants nothing). Proposed: a one-line ADR-0004 note recording the identity
+line's new version field, reviewed with the PR. Calibration authority is
+unchanged.
+
 * Design
 ** 1. =Runtime.eligibility/1=
 Replace the last arm (=not test_launcher? -> :real_model_staged=) with:
@@ -73,35 +98,51 @@ unchanged and still come first. =status/0= and the Admin card's
 =:real_model_staged= is no longer reachable for a pinned server and stays
 for the other cases where it is returned).
 
-** 2. Version preflight (condition (1), the missing part) — OQ-E3P-1
-Proposed: a no-call, metadata-only binding at resolution and again at the
-server's launch: the pinned executable's recorded identity
-(=nix/app-claude-cli.identity=, already read by =PinnedExecutable=) must
-name the reviewed =ModelProfiles.cli_version/0= (2.1.294); else
-=:pinned_cli_version_mismatch=, no reservation. It runs no CLI and makes
-no call. The per-call init check stays the authoritative post-launch
-check. Alternative (b): run =claude --version= at server start (spawns a
-process; no model call) — more evidence, more surface. Codex to rule.
+** 2. Version binding (condition (1); OQ-E3P-1 ruled (a))
+The identity line's reviewed version (Entity delta above) must equal
+=ModelProfiles.cli_version/0=:
+- at resolution (=Runtime.eligibility/1=, pure, file metadata only):
+  refusal before any reservation;
+- in the server immediately before each launch (=pinned_launch/1=, every
+  queued call passes it, whatever its entry): the reservation is already
+  charged; the facade re-reads the still-=reserved= row and fails it
+  (charged, never launched), as for =:pinned_cli_unavailable= today.
+=Runtime.refusal_message/1= gains a fixed operator message for
+=:pinned_cli_version_mismatch=, so no worker or page crashes rendering it.
+Boot sha256 verification is unchanged. No =--version= subprocess.
 
-** 3. =ClaudeCLI.staged/3=
-Clause order:
+** 3. =ClaudeCLI.staged/3= (must-fix 1)
+A request's missing =:calibration= key proves nothing, so the new clause
+only *asks* launch admission to treat the call as ordinary; the stored,
+locked rows decide (Entity delta). Clause order:
 1. test launcher → ={:ok, nil}= (unchanged);
 2. test-seam builds only: =%{calibration: _}= → the calibration exemption
    (unchanged, first);
-3. *new:* a request with *no* =:calibration= key and a pinned server →
-   ={:ok, nil}= (ordinary; no launch expectation, so the full ordinary
-   =launch_check= applies);
-4. anything else (a =:calibration= request in a non-test build) →
-   =:real_model_staged= (unchanged).
-The pin itself is already checked just before (=pinned_launch=).
+3. *new:* any other request to a pinned server → ={:ok, :ordinary}=; the
+   launch then calls =Agents.admit_launch/3= with =ordinary_launch: true=
+   and no =calibration_launch:=;
+4. a =%{calibration: _}= request in a non-test build →
+   =:real_model_staged= (unchanged; clause 3 does not match it).
+So a genuinely authorized proof reservation whose request lost its
+=:calibration= key reaches clause 3 and is refused at launch admission
+(=:ordinary_scope=): no process, no sent transition, no exemption entry
+consumed, no receipt.
 
-** 4. Caller-inventory guard test
-An AST walk of =lib/**/*.ex= (as =child_env_inventory_test.exs=) that
-fails on any new call site of =ModelProvider.complete/2=,
-=ModelProvider.calibration_call/3=, =ClaudeCLI.complete/2=,
-=GenServer.call= with a ={:complete, _}= message,
-=Agents.admit_launch/3=, =Agents.reserve_model_invocation/3= and
-=SDR.Model.call/4= outside today's inventory (above).
+** 4. Caller inventory (must-fix 4)
+Extend the existing =ModelProviderInventoryTest= (it already resolves
+aliases, grouped aliases, captures and literal =apply/3=, and names its
+exceptions by caller module and function) rather than a new scanner:
+- add the server message ={:complete, _request, _enqueued_at}= (three
+  elements) in =GenServer.call/2,3= outside =ClaudeCLI.complete/2=;
+- add =Agents.admit_launch/3= (only =ClaudeCLI.admit/3=),
+  =Agents.reserve_model_invocation/3= (only the facade and the test-seam
+  calibration console), =SDR.Model.call/4= (only the four SDR actions) and
+  =ModelProvider.calibration_call/3= (only the console), each as a
+  module/function allowlist, in the same remote/alias/capture/apply forms;
+- synthetic positive and negative sources for every enforced form.
+Limits stated in its moduledoc: it is a regression inventory of source,
+not runtime caller authorization; a function name computed at runtime is
+not seen.
 
 ** 5. Docs
 Stale comments/moduledocs updated: =runtime.ex:29-33=,
@@ -115,7 +156,10 @@ config value or env flag added. No new resource/attribute/migration.
 
 * Affected modules
 =lib/sdr_agent/ai/model_provider/runtime.ex=, =claude_cli.ex=,
-=pinned_executable.ex= (version read, if (a)); docs in =config/config.exs=,
+=pinned_executable.ex= (version field), =nix/app-claude-cli.identity=
+(version column), =lib/sdr_agent/agents/admission.ex= and
+=lib/sdr_agent/agents.ex= (the =ordinary_launch= option and refusal);
+docs in =config/config.exs=,
 =config/runtime.exs=, =witness.ex=; contract copy. Tests below.
 
 * RED test inventory (contract E3 bullets; hermetic, no real call)
@@ -126,12 +170,44 @@ runs (the test build's only seam differences for ordinary requests are
 identity injection, =force_inactive=, =before_gate=, =clock_from=; stated
 in the RED notes).
 
-1. full ordinary path: facade → reservation → launch → validated witness
-   (fake CLI =witness= mode, fake proxy) → release → =ReleasedOutput=
-   read; for =AgentWorker= (=:assignment= → =:b1=) and a direct facade call;
-2. each pre-launch condition refuses with its reason and no launch: no
-   server (=:provider_not_running=), pin missing (=:pinned_cli_unavailable=),
-   version binding (=:pinned_cli_version_mismatch=), tuple not promoted
+1. applicability (must-fix 3), for each ordinary purpose and its
+   server-owned builder/schema — =evidence_extraction=, =qualification=,
+   =outreach_proposal= (=AgentWorker=, =:assignment= → =:b1=) and
+   =reply_classification= (=ReplyWorker=, =:reply= → =:b5=), on each
+   promoted profile (Opus, Sonnet 2.1.294):
+   - positive: =SDR.Model.call/4= → =ModelProvider.complete/2= (reserve,
+     launch, settle) → =ResultGate= (the business release, owned by
+     =SDR.Model=, not the provider) → the released output read through
+     =ReleasedOutput= by the worker's next step;
+   - negative: a witness mismatch for that purpose → withheld, charged,
+     not readable downstream;
+   - the fixed calibration prompt is never used as an ordinary case;
+1a. direct entries: a raw =ClaudeCLI.complete/2= or server call with no
+   reserved row, a mismatched invocation id, another actor or tenant, or a
+   missing/invalid witness context → refused (=:invocation_not_found=,
+   =:invocation_not_reserved=, =:invalid_witness_context=, Forbidden), no
+   process;
+1b. must-fix 1: a genuinely authorized reserved proof row (test-seam
+   calibration reservation), a valid witness, the same pinned
+   non-test-launcher server, *only* the =:calibration= key removed →
+   =:calibration_not_authorized= / =:ordinary_scope=; no process, row
+   reserved → failed, the exemption entry unconsumed, no receipt. Also: a
+   present =calibration: nil= or malformed key (unchanged refusals); an
+   =:assignment= run row whose reservation event records a tuple
+   (fixture SQL, triggers restored) → =:ordinary_scope=; a row with no or a
+   duplicated reservation event → =:ordinary_unbindable=; both options
+   at once → =:calibration_launch_invalid=;
+1c. non-test build (must-fix 3): a dev-VM probe, run by Claude with
+   =MIX_ENV=dev mix run --no-start= (no database, no app start), shows
+   =CalibrationExemption= is not compiled and the ordinary clause's
+   decision is the same; disclosed as build evidence, not a test;
+2. each pre-launch condition refuses with its exact typed receipt and no
+   launch, with every earlier predicate made to pass so the named check is
+   the one reached: no server (=:provider_not_running=), pin missing
+   (=:pinned_cli_unavailable=), version binding at resolution and at the
+   server's launch, plus a missing/malformed identity version
+   (=:pinned_cli_version_mismatch=; the launch-time case is a charged,
+   failed, never-launched row), tuple not promoted
    (=:tuple_not_promoted=), store unset/untrusted (=:witness_store_untrusted=),
    gate inactive (=:result_gate_inactive=, via the refuse-only seam), no
    grant (=:no_eligible_grant=);
@@ -145,9 +221,13 @@ in the RED notes).
    the window reserves;
 6. workshop allocation: unusable before =available_from= unless
    =released_at=; overlapping open =:b1= allocations → =:ambiguous_allocation=;
-7. grant races (existing C9 race harness): exhausted, expired, revoked
-   between reservation and launch, wrong profile, day rollover, held
-   reserve;
+7. grant races (existing C9 race harness), with the existing charging
+   semantics unchanged (a launch re-checks terms, not room; the attempt
+   was charged at reservation): expired, revoked or wrong profile between
+   reservation and launch → =:grant_ineligible_at_launch= with its check,
+   row reserved → failed, still charged; exhaustion and day rollover are
+   reservation-time refusals (={:budget_exhausted, _}=); the held reserve
+   is =:no_allocation= until =available_from= or =released_at=;
 8. withholding boundaries: witness mismatch, timeout, crash → charged and
    withheld;
 9. calibration still needs its exemption: a =:calibration= request to an
@@ -163,11 +243,13 @@ in the RED notes).
     =:witness_store_untrusted=), never a weakened assertion;
 12. no test makes a real model call (fake CLI only; existing guard).
 
-* Open questions for Codex
-- OQ-E3P-1: version preflight (a) metadata binding vs (b) =--version=.
-- OQ-E3P-2: should =status/0= surface the next admission refusal
-  (e.g. "no eligible grant") on the Admin card, or stay as today (runtime
-  eligibility only)? Proposed: stay; out of E3 scope.
+* Rulings (Codex =4b5769ed=)
+- OQ-E3P-1: (a) metadata version binding within the immutable artifact
+  trust; no subprocess.
+- OQ-E3P-2: status stays runtime-only: "Accepting calls" means runtime
+  eligibility, never invocation authority; no grant/store queries there.
+- Contract copy corrections (=:no_allocation=, =:reply= → =:b5=,
+  =:ambiguous_allocation=): accepted.
 
 * Verification
 Own partition =_l2e3=, =+S 4:4=, DB slot coordinated. Full gate at a
