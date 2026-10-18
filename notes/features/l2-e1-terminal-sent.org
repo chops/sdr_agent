@@ -6,9 +6,9 @@ Contract: =docs/product/r0/l2-enablement.md= draft 4 (=ed819b7=), Codex
 entity/action PASS. Owner D-156 accepts E1/E3 scope and the B5' residual
 (stage 1). Not merge, enablement, grant or spend approval.
 
-Author Claude; reviewer Codex. Current phase: *RED prepared, awaiting
-Codex intended-reason verification*; plan PASS at =e9200cf= (Codex
-=6097e361=). Revision 1 (=d5a70f8=) got NEEDS-REVIEW
+Author Claude; reviewer Codex. Current phase: *GREEN, awaiting Codex
+review*; plan PASS =e9200cf= (=6097e361=), RED VERIFIED =28622af=
+(=f93223db=). Revision 1 (=d5a70f8=) got NEEDS-REVIEW
 (=codex-l2-e1-d5a70f8-plan-review.md=, sha256 =7f27b75f…=): five must-fixes.
 Revision 2 (=93ede3c=) resolved them except two authority details
 (=codex-l2-e1-93ede3c-and-fix175-review.md=, sha256 =13ea7c8a…=), taken

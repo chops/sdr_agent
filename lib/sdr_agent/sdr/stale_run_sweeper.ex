@@ -92,6 +92,22 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   pass still finds a row that has since aged past the cutoff, and a failed
   row is never touched again. Queued and running runs are never in this
   case.
+
+  **`sent` rows of terminal runs (L2 E1, case (c); `docs/product/r0/
+  l2-enablement.md`).** Last, per terminal run that is not `:proof` (a
+  pre-R0 NULL origin included) with a `sent` ModelInvocation sent strictly
+  before the cutoff, `SdrAgent.Agents.mark_terminal_run_sent_unknown/3`
+  marks those rows `unknown` (one transaction, run first; see there). A
+  ledger-only normalization: the run is not settled or written, its
+  counters are not backfilled, the attempt stays charged, and no Failure,
+  Operation, release or retry follows. It is not cleanup proof and not
+  retry permission. A run whose invocations record calibration authority,
+  or whose reservation evidence cannot be bound, is left unchanged.
+
+  **The grace setting.** Each sweep reads `stale_after_seconds` once: the
+  configuration must be a keyword list and the value a positive integer.
+  Otherwise the sweep writes nothing, logs the fixed warning
+  `stale_run_sweeper.invalid_stale_after` (no value) and returns `:ok`.
   """
   use Oban.Worker, queue: :default, max_attempts: 1
   use SdrAgent.Workers.ErrorBoundary
@@ -99,6 +115,7 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   import Ecto.Query, only: [from: 2]
 
   require Ash.Query
+  require Logger
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents
@@ -138,8 +155,33 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   @doc "Recovers the tenant's abandoned runs (see the moduledoc). Returns `:ok`."
   @spec sweep(String.t()) :: :ok | {:error, term()}
   def sweep(tenant_id) do
+    case stale_after() do
+      {:ok, seconds} ->
+        sweep(tenant_id, seconds)
+
+      :error ->
+        Logger.warning("stale_run_sweeper.invalid_stale_after")
+        :ok
+    end
+  end
+
+  # L2 E1: the configured grace, read once per sweep: the config a keyword
+  # list and the value a positive integer, else :error (nothing is swept).
+  defp stale_after do
+    config = Application.get_env(:sdr_agent, __MODULE__, [])
+
+    with true <- Keyword.keyword?(config),
+         seconds when is_integer(seconds) and seconds > 0 <-
+           Keyword.get(config, :stale_after_seconds, 1800) do
+      {:ok, seconds}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp sweep(tenant_id, seconds) do
     actor = Actor.system(:agent_runtime, tenant_id)
-    cutoff = DateTime.add(Clock.utc_now(), -stale_after_seconds(), :second)
+    cutoff = DateTime.add(Clock.utc_now(), -seconds, :second)
 
     with {:ok, runs} <- Agents.list_runs(actor: actor),
          :ok <-
@@ -152,8 +194,33 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
          :ok <- each_ok(invocations, &recovered(recover_terminal(&1, actor))),
          {:ok, stopped} <- Agents.list_runs(actor: actor),
          :ok <- stopped |> Enum.filter(&gate_stopped?/1) |> each_ok(&recovered(heal(&1, actor))),
-         {:ok, run_ids} <- old_reservation_runs(cutoff, actor) do
-      each_ok(run_ids, &recovered(recover_stopped(&1, cutoff, actor)))
+         {:ok, run_ids} <- old_reservation_runs(cutoff, actor),
+         :ok <- each_ok(run_ids, &recovered(recover_stopped(&1, cutoff, actor))),
+         {:ok, sent_runs} <- terminal_sent_runs(cutoff, actor) do
+      each_ok(sent_runs, fn run_id ->
+        recovered(Agents.mark_terminal_run_sent_unknown(run_id, seconds, actor: actor))
+      end)
+    end
+  end
+
+  # Case (c) prefilter (unlocked; grants nothing): runs with a `sent` row
+  # older than the cutoff whose run is terminal and not proof (NULL origin
+  # included); the domain function decides again under its locks.
+  defp terminal_sent_runs(cutoff, actor) do
+    ModelInvocation
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(
+      tenant_id == ^actor.tenant_id and status == :sent and sent_at < ^cutoff and
+        exists(
+          agent_run,
+          status in ^@terminal and (is_nil(usage_origin) or usage_origin != :proof)
+        )
+    )
+    |> Ash.Query.select([:agent_run_id])
+    |> Ash.read()
+    |> case do
+      {:ok, rows} -> {:ok, rows |> Enum.map(& &1.agent_run_id) |> Enum.uniq() |> Enum.sort()}
+      error -> error
     end
   end
 
@@ -201,6 +268,10 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
               :not_running,
               :job_live,
               :not_terminal,
+              :proof_run,
+              :calibration_authority,
+              :authority_unbindable,
+              :run_not_found,
               :mismatch_cause_unbound,
               :binding_unavailable
             ],

@@ -27,7 +27,9 @@ defmodule SdrAgent.Agents do
       `admit_launch/3` (C9-03: a ClaudeCLI call's launch admission and sent
       boundary), `get_model_invocation/2`, `complete_model_invocation/3`,
       `fail_model_invocation/3`, `mark_model_invocation_unknown/2` (each
-      settles run usage in the same transaction), `list_model_invocations/2`;
+      settles run usage in the same transaction), `list_model_invocations/2`,
+      and `mark_terminal_run_sent_unknown/3` (L2 E1: a terminal run's old
+      `sent` rows → unknown, ledger-only, never settled);
     * tool calls — `list_tool_invocations/2`, `start_tool_invocation/3`,
       `succeed_tool_invocation/3`,
       `fail_tool_invocation/3`, `mark_tool_invocation_unknown/2`;
@@ -1010,6 +1012,133 @@ defmodule SdrAgent.Agents do
   def mark_model_invocation_unknown(invocation, opts) do
     finish_model_invocation(invocation, :mark_unknown, %{}, opts)
   end
+
+  @doc """
+  L2 E1 (AGT; `SdrAgent.SDR.StaleRunSweeper` case (c)): marks unknown each
+  `sent` invocation of the terminal, non-proof run `run_id` whose `sent_at`
+  is strictly before now minus `stale_after_seconds`, through the existing
+  `:mark_unknown` action. Ledger-only: the run is not settled or written,
+  its counters stay as they are, the charge stays in `grant_usage/2`, and
+  no Failure, Operation, release, lease or retry follows. It is not
+  cleanup proof.
+
+  One transaction: the run `FOR UPDATE` (tenant-scoped), then every `sent`
+  row of the run `FOR UPDATE` in sequence order, before the first append.
+  Recorded calibration authority on any invocation of the run
+  (`Admission.Gate.reservation_authority/1`) refuses the whole run.
+  Returns `{:ok, count}`, or `{:error, reason}` with nothing written:
+  `:invalid_stale_after`, `:run_not_found` (also a foreign tenant's run),
+  `:not_terminal`, `:proof_run`, `:calibration_authority`,
+  `:authority_unbindable`. Any principal but the tenant's agent runtime is
+  `Ash.Error.Forbidden`.
+  """
+  def mark_terminal_run_sent_unknown(run_id, stale_after_seconds, opts) do
+    actor = Keyword.get(opts, :actor)
+    meta = %{resource: AgentRun, action: :mark_terminal_run_sent_unknown, subject_id: run_id}
+
+    Guard.run(meta, actor, fn -> checked_normalize(run_id, stale_after_seconds, actor) end)
+  end
+
+  # The principal, the grace and the id are checked before any read.
+  defp checked_normalize(run_id, seconds, actor) do
+    with :ok <- runtime_actor(actor),
+         :ok <- grace(seconds),
+         {:ok, run_id} <- run_uuid(run_id) do
+      transact(fn -> normalize_terminal_sent(run_id, seconds, actor) end)
+    end
+  end
+
+  @terminal_runs [:succeeded, :failed, :budget_exhausted, :cancelled]
+
+  defp runtime_actor(%SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant_id})
+       when is_binary(tenant_id) do
+    if uuid(tenant_id), do: :ok, else: {:error, Ash.Error.Forbidden.exception([])}
+  end
+
+  defp runtime_actor(_actor), do: {:error, Ash.Error.Forbidden.exception([])}
+
+  defp grace(seconds) when is_integer(seconds) and seconds > 0, do: :ok
+  defp grace(_seconds), do: {:error, :invalid_stale_after}
+
+  defp run_uuid(run_id) do
+    case uuid(run_id) do
+      nil -> {:error, :run_not_found}
+      id -> {:ok, id}
+    end
+  end
+
+  defp normalize_terminal_sent(run_id, seconds, actor) do
+    with {:ok, run} <- lock_e1_run(run_id, actor),
+         :ok <- terminal_non_proof(run),
+         cutoff = DateTime.add(SdrAgent.Clock.utc_now(), -seconds, :second),
+         {:ok, sent} <- lock_sent_invocations(run, actor),
+         {:ok, invocations} <- run_invocations(run, actor),
+         :ok <- no_recorded_authority(invocations) do
+      sent
+      |> Enum.filter(&(&1.sent_at && DateTime.compare(&1.sent_at, cutoff) == :lt))
+      |> Enum.reduce_while({:ok, 0}, &mark_unknown_counted(&1, &2, actor))
+    end
+  end
+
+  # The existing :mark_unknown action only (no settle/2); stops at the
+  # first error, which rolls the whole run back.
+  defp mark_unknown_counted(invocation, {:ok, count}, actor) do
+    case do_update(invocation, :mark_unknown, %{}, actor) do
+      {:ok, _unknown} -> {:cont, {:ok, count + 1}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp lock_e1_run(run_id, actor) do
+    AgentRun
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(id == ^run_id and tenant_id == ^actor.tenant_id)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} -> {:error, :run_not_found}
+      other -> other
+    end
+  end
+
+  defp terminal_non_proof(%{status: status}) when status not in @terminal_runs,
+    do: {:error, :not_terminal}
+
+  defp terminal_non_proof(%{usage_origin: :proof}), do: {:error, :proof_run}
+  defp terminal_non_proof(_run), do: :ok
+
+  defp lock_sent_invocations(run, actor) do
+    ModelInvocation
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(
+      tenant_id == ^actor.tenant_id and agent_run_id == ^run.id and status == :sent
+    )
+    |> Ash.Query.sort(sequence_in_run: :asc)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read()
+  end
+
+  defp run_invocations(run, actor) do
+    ModelInvocation
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> Ash.Query.filter(tenant_id == ^actor.tenant_id and agent_run_id == ^run.id)
+    |> Ash.Query.sort(sequence_in_run: :asc)
+    |> Ash.read()
+  end
+
+  defp no_recorded_authority(invocations) do
+    Enum.reduce_while(invocations, :ok, fn invocation, :ok ->
+      case authority(invocation.ledger_generation, Gate.reservation_authority(invocation)) do
+        :ok -> {:cont, :ok}
+        refused -> {:halt, refused}
+      end
+    end)
+  end
+
+  defp authority(_generation, {:recorded, _entry}), do: {:error, :calibration_authority}
+  defp authority(_generation, :no_tuple), do: :ok
+  defp authority(1, :no_event), do: :ok
+  defp authority(_generation, _no_event_or_invalid), do: {:error, :authority_unbindable}
 
   @doc "Invocations of a run, in call order."
   def list_model_invocations(run_id, opts) do
