@@ -131,6 +131,14 @@ Rules:
 2. Material changes after review go back to the reviewer. Pull requests merge
    only on green CI for their exact commit. A recorded context-only range-diff
    can carry a prior approving review forward, never the CI result.
+   Since D-157, Claude and Codex make merge decisions without the owner: a PR
+   merges once the reviewer's approval names its exact head commit, any
+   conditions are met, the required `verify` check is green and the branch is
+   up to date. The merge is a rebase merge bound to that commit
+   (`gh pr merge --rebase --match-head-commit <sha>`), never `--admin`, and
+   never with a waived blocker. Claude merges; Codex is the backup. Gate
+   approvals, ADR acceptance, grants, spend, real calls and owner-run steps
+   stay with the owner.
 3. The owner settles disagreements between Claude and Codex, but that does not
    waive an unresolved security blocker. That needs a fix, or a written
    exception with scope and expiry backed by a recorded, independent security review of the exception and its mitigation, with a written disposition of the finding. If that review still finds it blocking, the gate stays blocked. Constraints that cannot be waived cannot be excepted at all.
@@ -235,7 +243,8 @@ days, Codex reviews fixes, and the owner sets priorities.
 4. **Owner review.** The owner reads or clicks through it and leaves notes. A
    note that changes substance sends it back to step 3.
 5. **Approve and record.** The owner approves in chat, Claude writes the gate
-   record, and the PR merges on green CI for that exact commit.
+   record, and the PR merges on green CI for that exact commit (rule 2; the
+   merge itself needs no further owner step).
 
 ## Owner notes on the interactive pages
 

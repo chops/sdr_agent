@@ -438,7 +438,7 @@ window.SDLC = {
     "Author and reviewer are never the same agent. Codex reviews Claude's work; Claude reviews Codex's.",
     "Only you approve a gate, an ADR, an exception or a real-model budget. Agents never infer approval, and notes on the interactive pages are feedback, not approval.",
     "A gate passes only with a committed gate record. Dates never pass gates.",
-    "Material changes after review go back to the reviewer. Pull requests merge only on green CI for their exact commit.",
+    "Material changes after review go back to the reviewer. Pull requests merge only on green CI for their exact commit. Since D-157, Claude and Codex merge without the owner once the reviewer has approved that exact commit and CI is green; gate approvals, ADRs, grants, spend and owner-run steps stay with the owner.",
     "The feature freeze holds until you explicitly approve G5. Process and hardening work continue, with no new authority.",
     "The constraints listed on this page stay in force unless you accept an ADR that amends them.",
     "Disagreements between Claude and Codex come to you with both positions. Your decision does not waive an unresolved security blocker.",
