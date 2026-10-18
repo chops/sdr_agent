@@ -102,11 +102,19 @@ They are **listed, not changed**. Any extension needs its own reviewed scope, be
 
 ## RED record
 
-- **Run:** `mix test test/sdr_agent/test_support/resolve_harness_await_switch_test.exs --seed 0` gives 10 of 14 passing.
-- **Intended failures:**
-  - two queue drops then a match: the old strict `{:ok, _}` match raises `MatchError` on the first drop;
-  - wrong status, absent row, then match: 4 reads instead of 3 (the old trailing re-read);
-  - persistent drop: `MatchError` instead of a deadline flunk naming `sandbox_queue_drop`;
-  - late match: accepted instead of refused.
-- **Already-passing controls, disclosed:** the 10 refused shapes. Each fails on its first read under the old strict match. They exist to catch a widened classifier.
-- **The seam is behaviour-preserving:** `test/sdr_agent_web/live/admin_live_switch_test.exs` seed 0, 44 passed.
+**Round 2** (Codex `codex-188-a27863b-red-review.md` must-fixes 1 to 3). Run `mix test test/sdr_agent/test_support/resolve_harness_await_switch_test.exs --seed 0`: 14 of 19 passed.
+
+**Intended failures, each through an assertion:**
+1. Two queue drops, then a match: the outcome is `{:raised, %MatchError{}}`, not `{:returned, row}`. The old strict match raises on the first drop, and the test captures that as an observed outcome.
+2. Wrong status, then an absent row, then the match: 4 reads instead of 3, because of the old trailing re-read.
+3. A persistent drop: `MatchError` instead of a deadline flunk naming `sandbox_queue_drop`. This is an `assert_raise` mismatch.
+4. A non-matching answer that arrives past the deadline: 2 reads instead of 1, because the old timeout message re-reads. This replaces round 1's timing-sensitive start-time assertion.
+5. A late match is accepted instead of refused.
+
+**Already-passing controls, disclosed (14):**
+- the 10 refused shapes;
+- 4 near misses built from the exact CI string with one required part changed each: no sandbox-owner marker; an owner exit as the reason; a disabled queue as the reason; a different error prefix.
+
+Each fails on its first read under the old strict match. The near misses isolate the classifier's three required checks.
+
+**The seam is behaviour-preserving:** `admin_live_switch_test.exs` seed 0 passed 44 of 44 (round 1; the seam is unchanged since).

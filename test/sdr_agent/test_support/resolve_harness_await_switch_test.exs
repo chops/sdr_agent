@@ -74,7 +74,16 @@ defmodule SdrAgent.Test.ResolveHarnessAwaitSwitchTest do
   test "two sandbox queue drops, then the matching row: that row, after exactly three reads" do
     {read, pid} = reader([drop(), drop(), {:ok, [@other, @target]}])
 
-    assert await(read, 2_000) == @target
+    outcome =
+      try do
+        {:returned, await(read, 2_000)}
+      rescue
+        error -> {:raised, error}
+      end
+
+    assert outcome == {:returned, @target},
+           "#188: a sandbox queue drop is transient; got #{inspect(outcome, limit: 4, printable_limit: 120)}"
+
     assert length(starts(pid)) == 3, "#188: no fourth read after the match"
   end
 
@@ -86,15 +95,21 @@ defmodule SdrAgent.Test.ResolveHarnessAwaitSwitchTest do
     assert length(starts(pid)) == 3, "#188: the matching observation is returned, not re-read"
   end
 
-  test "a persistent sandbox queue drop flunks at the deadline, naming it; no read starts after it" do
-    {read, pid} = reader([drop()])
-    entered = System.monotonic_time(:millisecond)
+  test "a persistent sandbox queue drop flunks at the deadline, naming it" do
+    {read, _pid} = reader([drop()])
 
     error = assert_raise ExUnit.AssertionError, fn -> await(read, 200) end
-
     assert error.message =~ "sandbox_queue_drop"
-    assert length(starts(pid)) >= 2
-    assert Enum.max(starts(pid)) <= entered + 200 + 20
+  end
+
+  test "no read starts after the deadline: a non-matching answer past it ends the wait" do
+    {read, pid} = reader([{:after, 300, {:ok, [@other]}}, {:ok, [@target]}])
+
+    error = assert_raise ExUnit.AssertionError, fn -> await(read, 100) end
+    assert error.message =~ "never reached"
+
+    assert length(starts(pid)) == 1,
+           "#188: the timeout reports the held observation, with no new read"
   end
 
   test "a matching row that arrives after the deadline is not accepted" do
@@ -105,7 +120,8 @@ defmodule SdrAgent.Test.ResolveHarnessAwaitSwitchTest do
   end
 
   # Controls: these already fail at once under the old strict match. They
-  # pin the classifier's refusal boundaries against widening.
+  # pin the classifier's refusal boundaries against widening, and each near
+  # miss isolates one of its three required parts.
   refused = [
     {"an owner exit", "exited",
      {:unknown, "** (DBConnection.ConnectionError) owner #PID<0.1.0> exited"}},
@@ -126,7 +142,32 @@ defmodule SdrAgent.Test.ResolveHarnessAwaitSwitchTest do
     {"the sandbox drop as a bare connection error", "DBConnection.ConnectionError", :bare},
     {"two causes, both sandbox drops", "sql_sandbox_owner", :two_drops},
     {"mixed causes", "query_canceled", :mixed},
-    {"a non-binary cause", ":boom", :non_binary}
+    {"a non-binary cause", ":boom", :non_binary},
+    # Near misses: the CI string with exactly one required part changed.
+    {"the CI drop without the sandbox-owner marker", "dropped from queue",
+     {:unknown,
+      String.replace(@drop, " ({:sql_sandbox_owner, %{started_by: #PID<0.445622.0>}})", "")}},
+    {"the CI drop with an owner exit as its reason", "exited",
+     {:unknown,
+      String.replace(
+        @drop,
+        "connection not available and request was dropped from queue after 343ms",
+        "owner #PID<0.445626.0> exited"
+      )}},
+    {"the CI drop with a disabled queue as its reason", "queuing is disabled",
+     {:unknown,
+      String.replace(
+        @drop,
+        "connection not available and request was dropped from queue after 343ms",
+        "connection not available and queuing is disabled"
+      )}},
+    {"the CI drop under a different error prefix", "OwnershipError",
+     {:unknown,
+      String.replace(
+        @drop,
+        "** (DBConnection.ConnectionError) could not checkout the connection owned by ",
+        "** (DBConnection.OwnershipError) cannot find ownership process for "
+      )}}
   ]
 
   for {name, token, shape} <- refused do
