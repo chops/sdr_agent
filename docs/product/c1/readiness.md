@@ -5,7 +5,8 @@ scoped C1 G5 approved**. C1-01 (#85), Codex author → Claude reviewer.
 Full independent review passed at `2526a22`; the owner accepted the amended
 wording and separately approved scoped C1 G5 on 2026-10-14 (recorded below).
 C1-02/03 proceed RED-first as separate PRs, each with independent Claude
-review, full verification, green exact-head CI and merge (owner merge until D-157, Claude/Codex since). H1 screens,
+review, full verification, green exact-head CI and merge (owner merge until
+D-157; since then the D-157 rule in `docs/sdlc/README.md` rule 2). H1 screens,
 new producers/metrics, new tables, spend and real calls are outside this G5;
 H1 has its own owner task/prototype gate.
 
@@ -451,7 +452,8 @@ C1 G5 for C1-02 and C1-03" (private Claude chat, relayed verbatim in
 and the three exact counts; C1-03 covers the fixed existing domain action
 gateway (approve/edit/reject/re-run). Each is RED-first in its own PR under
 steps 1-4 and the RED obligations above, with independent Claude review,
-the full gate, green exact-head CI and merge (owner merge until D-157, Claude/Codex since). This approval excludes
+the full gate, green exact-head CI and merge (owner merge until
+D-157; since then the D-157 rule in `docs/sdlc/README.md` rule 2). This approval excludes
 H1 screens (separate G5), new producers/metrics, new tables, spend and real
 calls.
 
