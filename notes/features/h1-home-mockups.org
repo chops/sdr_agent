@@ -1,0 +1,125 @@
+#+title: H1-01 founder-facing Home mockups
+#+date: 2026-10-12
+
+* Scope and approval
+Four local static design states of one Home design: normal draft/problem,
+changed draft/recipient, partial source load, and complete empty initial view.
+Synthetic examples only; no scripts, requests, database, real actions or
+application implementation. Owner task acceptance and ADR-0015 acceptance
+remain pending. Runtime H1/C1-02 work has no authority from these mockups.
+
+Approved priority/scope: m_1791846341000022677_9a4523b8, replying to
+codex-h1-mockups-view-20261012. H1 now; preempt only for slice A exact-head
+code review. C4 recheck then C3 stay queued behind that work.
+
+* Entity and architecture evaluation
+Entity Model trigger: no
+Reason: static fictional presentation of the already independently reviewed
+C1 projection/action contracts; no backend action, authority, stored value,
+resource, lifecycle, filter/count API or runtime behavior changes.
+No ADR required: no architecture decision; existing ADR-0015 stays proposed.
+Architecture unchanged — no diagram update needed.
+
+* Owner walk findings (verbatim, not accepted usability evidence)
+On ADR-0015:
+#+begin_quote
+shouldn't we also generate several mock-ups so i can see what the proposed home looks like? why or why not?
+#+end_quote
+On the five contract-walk questions:
+#+begin_quote
+i'm not sure how to answer these questions. walk me through this.
+#+end_quote
+Source: m_1791845298000019481_6d8f190e. Interpretation: the contract
+prototype did not let the owner judge founder-facing Home. Do not infer
+owner acceptance, a correct answer, or failure by the owner.
+
+* Files and steps
+1. docs/product/h1/normal.html: founder wording, urgent problem before draft;
+   fragment-linked synthetic inspection/action previews. Publish this first.
+2. docs/product/h1/stale.html: changed draft/recipient; old approval refuses,
+   fresh review required; no silently retargeted decision.
+3. docs/product/h1/partial.html: successful draft source plus visible failed
+   problem source; no fabricated problem, count or all-clear.
+4. docs/product/h1/empty.html: honest complete empty view of initial drafts
+   and problems only, not global MVP coverage.
+5. Validate CSP, no script/remote/form/mutation paths, local/fragment links,
+   unique ids, desktop/mobile layout and keyboard-visible focus; request
+   independent exact-head review, then owner walk.
+
+* Verification and limits
+Static design documents change no executable application behavior: no
+runtime behavior RED/GREEN gate is claimed. Use structural checks and
+isolated-browser rendering/click/keyboard checks; ordinary full repository
+gate before the final PR. No new dependency or generator required.
+Technical internals live only in optional details. No total-pending count
+or global empty promise. Disabled research retry does not grant spend.
+Only fictional data may be captured in browser screenshots.
+
+* Neutral walk script
+First explain only: "These are fictional examples. Nothing you click will
+change data or send an email. Imagine these arrived while you were away."
+Then ask, without a suggested answer:
+- Normal: "What do you think needs you here? What would you do first?"
+- Draft detail: "What would happen if you chose this action?"
+- Changed: "What do you think happened? What would you do next?"
+- Partial: "What can you tell from this screen, and what can't you tell?"
+- Empty: "What does this screen tell you about your work?"
+Clarify unfamiliar task wording if asked, but do not teach the desired
+answer. Record first interpretation, actions, confusing labels and requests
+before discussing internals. Rejection/confusion is useful evidence.
+
+* Progress
+Normal preview published at 723d343; all four states now authored.
+Desktop (1440px) and real mobile emulation (390px) inspected visually for
+each state: no horizontal overflow. CSP, no scripts/forms/remote resources,
+unique IDs and valid fragment targets checked for all four. All illustrative
+detail links reveal their matching panel; normal and changed review details
+take focus on click. Keyboard Tab has a visible focus outline. Technical
+details start closed; normal retry is disabled with its explanation.
+Browser network inventories contain only the local file document, and no
+console warning/error was reported. This is design QA, not owner acceptance
+or application end-to-end evidence.
+
+Preempted for slice A #139@5ae6549 exact-head code review, completed with
+REQUEST_CHANGES and two independently reproduced defects (PR comment
+6134590502). Mockup verification then resumed. Self-review removed the
+collapsed-row approval shortcut in normal/partial: approval is offered only
+in the email detail where the body is shown. The revised links/mobile layout
+were checked again.
+
+Repository verification (isolated reviewer partition, ERL_FLAGS=+S 2:2):
+- mix precommit: 1,335 passed, 1 skipped, 4 external tests excluded.
+- bin/verify: workflow receipt, format and warnings-as-errors compilation
+  passed; 1,335 passed, 1 skipped, 4 external tests excluded.
+- mix credo (canonical default priority): clean.
+- mix ash.codegen --check: clean; no persistence changes.
+- mix hex.audit: no retired or security advisory packages.
+- Sobelow: SKIP, not installed on this branch; Dialyzer not enabled.
+- git diff --check: clean. No application or dependency changes.
+Logs: /tmp/codex-h1-precommit.log, /tmp/codex-h1-verify.log,
+/tmp/codex-h1-readiness.log, /tmp/codex-h1-codegen.log,
+/tmp/codex-h1-hex-audit.log. Existing expected fake-provider failure-path
+logs and Ash notification warnings do not represent failing tests; no
+assertion or protection was weakened.
+
+Independent review: Claude APPROVE exact 8bcd1cc (PR #142), answer
+m_1791848935000021056_09ca501d replying to
+m_1791848865137463708_a377a2ae. Four non-blocking notes recorded:
+- Resolve-with-note and resolved-Failure/live-Operation states are not in
+  these four mockups. Contract walk Q4 is deferred to H1-02; this walk cannot
+  establish acceptance of that action or those states.
+- The draft revision number is in technical details, not the primary view.
+  Do not expect the owner to name a revision in the walkthrough.
+- Empty wording differs from C1's agreed "No drafts or failures need your
+  attention in this view." Reconcile presentation copy after the walk;
+  no backend/count/empty contract changes are authorized by this wording.
+- Evidence limitation: Claude reports earlier framing named "approve for
+  capture", "earlier yes doesn't count", and "part of the inbox didn't
+  load", and Q1 asked who/which version/what happens next. This mildly
+  primed the owner before these mockups. Record later answers as prompted
+  walkthrough evidence, not an unprimed usability trial. Claude switches
+  to the neutral script above from here.
+
+Owner task walk and ADR-0015 decision remain pending; no runtime
+implementation authorized here. These notes-only additions change none
+of the reviewed HTML states.
