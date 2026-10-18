@@ -73,19 +73,29 @@ defmodule SdrAgent.Inbox.CountPoolTest do
   end
 
   # A previous sandbox owner's DOWN may race the next setup. Retry only
-  # that exact teardown exit; success still requires OwnershipError (never
-  # an arbitrary checkout failure or a successful automatic checkout).
+  # that exact teardown exit, in either shape: the owner's exit reported by
+  # its holder, or the holder already gone (`:noproc`, #175). Success still
+  # requires OwnershipError (never an arbitrary checkout failure or a
+  # successful automatic checkout).
   defp assert_manual_mode!(deadline) do
     assert_raise DBConnection.OwnershipError, fn -> Repo.query!("SELECT 1") end
   catch
     :exit, {{:shutdown, message}, {DBConnection.Holder, :checkout, [_pool, _opts]}} = reason
     when is_binary(message) ->
-      if Regex.match?(~r/\Aowner #PID<\d+\.\d+\.\d+> exited\z/, message) and
-           System.monotonic_time(:millisecond) < deadline do
-        Process.sleep(10)
-        assert_manual_mode!(deadline)
-      else
-        exit(reason)
-      end
+      if Regex.match?(~r/\Aowner #PID<\d+\.\d+\.\d+> exited\z/, message),
+        do: retry_manual_mode!(deadline, reason),
+        else: exit(reason)
+
+    :exit, {:noproc, {DBConnection.Holder, :checkout, [_pool, _opts]}} = reason ->
+      retry_manual_mode!(deadline, reason)
+  end
+
+  defp retry_manual_mode!(deadline, reason) do
+    if System.monotonic_time(:millisecond) < deadline do
+      Process.sleep(10)
+      assert_manual_mode!(deadline)
+    else
+      exit(reason)
+    end
   end
 end
