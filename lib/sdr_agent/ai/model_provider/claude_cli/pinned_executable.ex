@@ -46,17 +46,23 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable do
               |> String.split("\n", trim: true)
               |> Enum.reject(&String.starts_with?(&1, "#"))
               |> Map.new(fn line ->
-                [system, store_path, sha256] = String.split(line)
+                [system, store_path, sha256, version] =
+                  case String.split(line) do
+                    [_, _, _, _] = fields -> fields
+                    _other -> raise("invalid app Claude CLI identity line: #{line}")
+                  end
 
                 unless String.starts_with?(store_path, @store <> "/") and
-                         Regex.match?(~r/\A[0-9a-f]{64}\z/, sha256),
+                         Regex.match?(~r/\A[0-9a-f]{64}\z/, sha256) and
+                         Regex.match?(~r/\A\d+\.\d+\.\d+\z/, version),
                        do: raise("invalid app Claude CLI identity line: #{line}")
 
                 {system,
                  %{
                    store: @store,
                    executable: Path.join(store_path, "bin/claude-code"),
-                   sha256: sha256
+                   sha256: sha256,
+                   version: version
                  }}
               end)
 
@@ -114,6 +120,23 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable do
   else
     @doc "The identity the app accepts on this machine, or nil (unsupported platform)."
     def identity, do: Map.get(@identities, platform())
+  end
+
+  @doc """
+  L2 E3: whether this machine's identity records the reviewed CLI version
+  (`SdrAgent.AI.ModelProfiles.cli_version/0`). Metadata only, read on every
+  call: a missing, malformed or other version is false. It is reviewed
+  artifact evidence, never an observed version.
+  """
+  @spec version_bound?() :: boolean()
+  def version_bound? do
+    case identity() do
+      %{version: version} when is_binary(version) ->
+        version == SdrAgent.AI.ModelProfiles.cli_version()
+
+      _missing ->
+        false
+    end
   end
 
   @doc "The boot check: `check/1` plus the file's sha256 against the identity."

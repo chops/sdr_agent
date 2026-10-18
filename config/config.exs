@@ -216,8 +216,9 @@ config :sdr_agent, :webhook_hmac, key_id: "derived-1", source: :derived
 # docs/product/r0/r0-06-proof.md) adds the two generation-2 tuples, each
 # bound to its own calibration evidence PASS: Opus (evidence sha256
 # 0c2e3735...) and Sonnet (a2e8a0b2...). Reconciling an exchange is not a
-# model-call permission: ordinary real calls stay staged
-# (`:real_model_staged`). An eligible ClaudeCLI invocation under any other
+# model-call permission: an ordinary real call also needs an owner grant
+# and allocation (C9) and passes every admission check (L2 E3). An
+# eligible ClaudeCLI invocation under any other
 # tuple stays `inferred`; Fake or ineligible invocations stay `skipped`.
 # Changing the mechanism requires a reviewed ADR-0005 amendment.
 config :sdr_agent, SdrAgent.Agents.Witness,

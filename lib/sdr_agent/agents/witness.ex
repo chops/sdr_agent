@@ -134,7 +134,8 @@ defmodule SdrAgent.Agents.Witness do
   `profile_id` (nil only for generation 1), `model_id`,
   `projection_version` and `method`, each of its type; any other shape —
   the pre-R0 four-key entry, an extra key such as a stage — is dropped. Dev
-  and prod ship exactly the generation-1 2.1.291 entry; the test
+  and prod ship the generation-1 2.1.291 entry and the two promoted
+  generation-2 2.1.294 tuples (Opus and Sonnet, R0-06); the test
   environment configures none.
   """
   def reconciled_methods do

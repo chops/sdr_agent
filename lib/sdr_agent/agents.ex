@@ -621,8 +621,11 @@ defmodule SdrAgent.Agents do
     # Review MF3: the store is observed (filesystem I/O) only for an
     # invocation the preflight finds in the actor's tenant; the locked
     # path stays authoritative.
+    # L2 E3: an invalid launch option is refused before any target read.
     store =
-      if match?({:ok, _}, launch_target(id, actor)), do: Gate.observe_store(), else: :unobserved
+      if expected != :invalid and match?({:ok, _}, launch_target(id, actor)),
+        do: Gate.observe_store(),
+        else: :unobserved
 
     case audit_transact(fn -> launch_locked(id, profile, actor, store, expected) end) do
       {:ok, {:sent, sent}} ->
@@ -668,6 +671,7 @@ defmodule SdrAgent.Agents do
   # Packet 8.13 C7: an exempted call's target is the expected run's own
   # invocation in the expected tenant; anything else changes nothing.
   defp calibration_target(_invocation, _actor, nil), do: :ok
+  defp calibration_target(_invocation, _actor, :ordinary), do: :ok
 
   defp calibration_target(invocation, actor, expected) do
     if invocation.agent_run_id == expected.run_id and invocation.tenant_id == expected.tenant_id and

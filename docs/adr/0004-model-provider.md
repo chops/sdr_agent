@@ -398,6 +398,13 @@ D-087, D-088, D-096, D-098, D-099):
      therefore cannot change the app's CLI.
    - Allowing the CLI's unfree licence is scoped to that one package.
    - Changing the pin (version, source or hash) is a reviewed pull request.
+   - Note (L2 E3, 2026-10-18; plan PASS Codex `cad33c66`): each line of
+     `nix/app-claude-cli.identity` also records the reviewed CLI version of
+     that exact store path and hash. The app refuses ordinary calls
+     (`:pinned_cli_version_mismatch`) unless it equals the profiles'
+     reviewed version, at resolution and before each launch. This is
+     reviewed artifact metadata inside the same immutable-pin trust, not an
+     observed version; the per-call init check stays mandatory.
      It records the candidate version's evidence (release, and that the flags
      and init attestation fields it relies on are unchanged or adapted),
      updates the reviewed version in the profile registry, and handles witness
