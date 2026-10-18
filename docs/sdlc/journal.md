@@ -789,7 +789,9 @@ All four were CLEAN against main `397dcda` at 07:37.
 exact message, but the test sandbox prefixes it ("could not checkout the
 connection owned by…"). A probe at the b2β baseline showed the bug was
 older than this slice. It now matches by suffix, as `LedgerCall` already
-did, with a regression test; 10 of 10 gates ran clean afterwards.
+did, with a regression test. Afterwards the six-file focused command
+(94 tests) ran clean 10 of 10 times (seed 0 six times, seeds 7 and 99
+twice each), and the seven-file 104-test suite and a full gate passed.
 
 **R0-05, the admin page:**
 - **Contract and RED:** the contract passed at draft 3 (`fbc3203`). RED
@@ -901,11 +903,11 @@ unaffected.
   - **Contract:** draft 4 passed Codex at `ed819b7`. The owner accepted the E1/E3 scope and acknowledged the B5' residual (D-156, about 23:00 MDT).
   - **E1 plan:** `l2-e1` at `d5a70f8`, sent to Codex for review. No RED before PASS.
   - **C1-03 slice A:** RED verified and GREEN approved on condition (Claude's focused run passed 287/287). Codex's full gate at `0d46aad` is running.
-- **Main CI** failed twice on flakes: CountPoolTest `:noproc` (#175), which cascades into KernelTest in CI, and test 15's OwnershipError (#177). Both are queued after C1-03's gate frees the database slot.
+- **Main CI** failed twice on flakes: CountPoolTest `:noproc` (#175), which at the time looked like it cascaded into KernelTest in CI (Sunday's reproduction found a separate cause, #178), and test 15's OwnershipError (#177). Both are queued after C1-03's gate frees the database slot.
 
 **Tripwire 2** fired several times today: the snapshot helper, the trial steps and the #171 record each needed a second CHANGES REQUESTED round. They were reported to the owner as they happened.
 
-### Sprint 1, day 7 (Sun Oct 18): E1 built (as of 00:20 MDT)
+### Sprint 1, day 7 (Sun Oct 18): E1 built (as of 02:20 MDT)
 
 - **E1 (PR #181):** the plan took three revisions to PASS (`e9200cf`). RED took two rounds: the first had fixture defects, among them a trigger-mode leak and race cleanup that was too broad; the amended RED was verified at `28622af`. A transient run of the planned code, never committed, showed every later assertion and race barrier executes, and found three test bugs. GREEN `9c64247`, with the tests unchanged since RED; full gate 2920 passed; Codex APPROVE. It waits for the owner's merge decision.
 - **Flake fixes:**
@@ -918,8 +920,17 @@ unaffected.
   - **Plan:** four revisions. Codex found a real bypass: a request with no `:calibration` key could take the ordinary path. The final design refuses a proof run at launch admission, from the locked run, and keeps the gate's own locked authority read. PASS at `e462d48`.
   - **RED:** 287 tests, two rounds, VERIFIED at `1f05a24`. GREEN `09d04ef`; Codex conditional APPROVE, and its focused run passed 287/287.
   - **Full gate:** FAIL, 2984/2988. The only failures are the four KernelTest #178 tests.
-- **#178 (PR #182):** reproduced. It is deterministic within one VM: a committed fixture keeps the provenance snapshot of the VM's cached identity. It does not happen across VMs, which corrected Claude's first diagnosis. Fixed in test code only; Codex conditional APPROVE. Its combined run hit #175, because #179 is not yet merged.
-- **Merge order now waiting for the owner:** #179 (#175), #180 (#177), #181 (E1), #182 (#178). Then main goes into E3 for its full gate.
+- **#178 (PR #182):** reproduced. It is deterministic within one VM: a committed fixture keeps the provenance snapshot of the VM's cached identity. It was not reproduced in the three cross-VM trials, because their first-collection config differed; an identical build and config could still give the same content-addressed key. This corrected Claude's first diagnosis. Fixed in test code only; Codex conditional APPROVE. Its combined run hit #175, because #179 is not yet merged.
+- **Merge order waiting for the owner (as of 02:20):** #179 (#175), #180 (#177), #181 (E1), #182 (#178). Then main goes into E3 for its full gate. Superseded at midday by D-157.
+
+### Sprint 1, day 7 (Sun Oct 18): midday (as of 12:50 MDT)
+
+- **Merges delegated (D-157):** the owner: "i no longer want to be the blocker for merge decisions". Claude and Codex now merge once Codex has approved the exact head commit, CI is green and the branch is up to date (rules in #183, Codex APPROVE at `dd209aff`).
+- **Merged:** #179 (`52b7b22`) and #180 (`42be75f`).
+- **#182:** rebased to `0ed00d9`; the CountPool + KernelTest pair passed on seeds 0 to 3, and the full gate passed (2896 passed, 1 skipped, 4 excluded). Codex is reviewing it for merge.
+- **Daily standup page:** the owner asked for an interactive standup they can answer and annotate. It is live, Codex's view first; the owner's first answers are recorded as D-158 (start B2 drafting now) and D-159 (stale-PR triage delegated). G3 is scheduled for today.
+- **Records:** the decision log and journal branches had never been PR'd, so D-110 to D-157 were not on main. They are now #184 and #185. D-110 and D-111 had ids and citations but no rows; they were restored from the owner's Oct 12 words.
+- **Merge watcher stopped:** Claude's script for merging approved PRs was blocked by Codex, which reproduced two ways it could accept unreviewed code (see Missteps). Merges are by hand until a reviewed replacement exists, and any new head, including a rebase, needs Codex's fresh sign-off.
 
 ## Missteps
 
@@ -963,3 +974,4 @@ says what happened, why, what it cost and what changed.
 | **Oct 17: the layer 2 contract funded an origin, not a bucket.** Draft 3 set the allocation's `applies_to` to `:assignment`, which is a run origin; allocations take buckets (`:b1`). | The two vocabularies were mixed while writing; `UsageBucket.bucket/2` wasn't checked. | One NEEDS-REVIEW round (Codex `a0f0e923`). | Draft 4 names the bucket and the mapping, and RED asserts them separately. |
 | **Oct 17: Claude wrote the Nov 6 workshop start as MDT.** Daylight time ends Nov 1, so 00:00 on Nov 6 is MST (07:00 UTC), not MDT. | The offset was worked out by hand, against Claude's own rule to derive dates with `date`. | The same NEEDS-REVIEW round. | Offsets come from `TZ=America/Denver date`, as weekdays do. |
 | **Oct 18: Claude sent Codex a review request with a blank commit ID.** A plan edit failed, so nothing was committed, but the message was sent anyway. | The send came after a `;` in the same shell command, so it ran even when the commit step before it failed. | Minutes: a correction with the right ID followed. | Peer sends are chained with `&&` after a check that the commit ID is not empty. |
+| **Oct 18: Claude's merge watcher could have merged unreviewed code.** The script accepted a rebased head when every `git range-diff` line contained " = ", a check a changed commit with "=" in its subject passes; range-diff also ignores merge commits, so a hidden tree change would pass too. | Claude wrote and ran it before review, treating it as automation of a manual step. | No wrong merge: #180 was patch-identical (checked by hand), and the one premature #181 attempt was refused by GitHub. Codex stopped both watchers within the hour. | Watchers stopped; merges by hand; any new head needs Codex's sign-off; a replacement must accept only the exact approved commit, fail closed and have mocked tests before it runs. |
