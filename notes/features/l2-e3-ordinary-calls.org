@@ -7,8 +7,9 @@ entity/action PASS; owner D-156 (scope accepted, B5' acknowledged). Not
 merge, enablement, grant or spend approval. The first real ordinary call is
 owner-run and separately authorized (stage 4).
 
-Author Claude; reviewer Codex. Phase: *plan revision 2, awaiting Codex
-review*. Revision 1 (=0aa2a20=) got NEEDS-REVIEW
+Author Claude; reviewer Codex. Phase: *plan revision 3, awaiting Codex
+review*. Revision 2 (=7a78e5f=): narrow NEEDS-REVIEW (=a0b40506=) on
+the evidence read inside the transaction. Revision 1 (=0aa2a20=) got NEEDS-REVIEW
 (=codex-l2e3-0aa2a20-plan-review.md=, sha256 =d9d6b366…=): five
 must-fixes, taken below. No RED before plan PASS. Base: =origin/l2-e1= (E1 GREEN =9c64247=, PR #181).
 E3 merges only after E1, after G3 is closed by the owner, and after its
@@ -73,7 +74,7 @@ persisted entity, attribute, relationship or migration.
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| Launch admission (=Agents.admit_launch/3=, =Admission.launch_check/6=) | Existing, E3 delta | The sent boundary of a reserved ClaudeCLI call | New option =ordinary_launch: true= (set only by the new ordinary =staged/3= clause); mutually exclusive with =calibration_launch:= (both → =:calibration_launch_invalid=) | Unchanged: the locked run, invocation, grant, allocation | With =ordinary_launch: true=, under the existing locks (run → invocation → grant/allocation =FOR SHARE= → head) and before any other effect: the run is not =:proof=, and =Gate.reservation_authority/1= of the locked invocation is =:no_tuple=. Otherwise the existing committed launch refusal: =%Refused{stage: :launch, reason: :calibration_not_authorized, check: :ordinary_scope}= (proof run or recorded tuple) or =check: :ordinary_unbindable= (=:no_event= / =:invalid=, a failed read included); the row reserved → failed, no port, no exemption consumed, no receipt. Without the option, behaviour is unchanged (incl. the existing "absent keeps ordinary launch behaviour" test-launcher case) | AGT only (unchanged) | none |
+| Launch admission (=Agents.admit_launch/3=, =Admission.launch_check/6=) | Existing, E3 delta | The sent boundary of a reserved ClaudeCLI call | New option =ordinary_launch: true= (set only by the new ordinary =staged/3= clause); mutually exclusive with =calibration_launch:= (both → =:calibration_launch_invalid=) | Unchanged: the locked run, invocation, grant, allocation | With =ordinary_launch: true=: the reservation evidence is *read before the locked transaction* (as =Gate.observe_store/0= is today, after the tenant-scoped =launch_target= preflight, never inside the transaction), with the non-raising =Gate.reservation_authority/1= on that tenant's invocation; a failed read classifies as =:invalid= and never aborts the launch transaction. The class is passed into =launch_check/6= as pure input, checked against the locked invocation's id, and under the existing locks (run → invocation → grant/allocation =FOR SHARE= → head), before any other effect, the locked run must not be =:proof= and the class must be =:no_tuple=. The evidence is the invocation's one original reservation event: append-only and written only at reservation, which precedes any launch, so reading it unlocked loses nothing (a later-appended duplicate is outside what launch can observe; disclosed). Otherwise the existing committed launch refusal (=admit_or_refuse= → =refuse_launch=, inside the same uncorrupted transaction): =%Refused{stage: :launch, reason: :calibration_not_authorized, check: :ordinary_scope}= (proof run or recorded tuple) or =check: :ordinary_unbindable= (=:no_event= / =:invalid=, a failed read included); the row reserved → failed, no port, no exemption consumed, no receipt. Without the option, behaviour is unchanged (incl. the existing "absent keeps ordinary launch behaviour" test-launcher case) | AGT only (unchanged) | none |
 | Pinned CLI identity (=nix/app-claude-cli.identity=, =PinnedExecutable=) | Existing, E3 delta | The reviewed artifact the app may launch | Each line gains a 4th field, the reviewed CLI version of that exact store path + sha256 (=2.1.294=); parsed at compile time, a missing/malformed field fails compilation; =identity/0= exposes =:version=; the test-seam injected identity must carry the same shape | Unchanged | Metadata only, inside the existing immutable-artifact trust (boot sha256 verification and the per-check file metadata stay). Checked against =ModelProfiles.cli_version/0= at resolution and in the server immediately before each launch (=pinned_launch=, which every queued call passes). Mismatch/missing → =:pinned_cli_version_mismatch=. It is reviewed artifact evidence, never an observed version; the per-call init check stays mandatory | Build-time review only | Whether the identity format change needs an ADR-0004 R0-amendment note (proposed: a one-line note in the same PR) |
 
 Reviewer precedence: ai-pair; reviewer *Codex*. Verdict: *UNREVIEWED*
@@ -196,7 +197,12 @@ in the RED notes).
    =:assignment= run row whose reservation event records a tuple
    (fixture SQL, triggers restored) → =:ordinary_scope=; a row with no or a
    duplicated reservation event → =:ordinary_unbindable=; both options
-   at once → =:calibration_launch_invalid=;
+   at once → =:calibration_launch_invalid=; a *failed evidence read*
+   (real connection: =audit_events= held =ACCESS EXCLUSIVE= by another
+   participant, the launcher's =lock_timeout= bounded) → a committed
+   =%Refused{check: :ordinary_unbindable}=, the row reserved → failed, the
+   refusal event appended, no port — proving the transaction was not
+   aborted;
 1c. non-test build (must-fix 3): a dev-VM probe, run by Claude with
    =MIX_ENV=dev mix run --no-start= (no database, no app start), shows
    =CalibrationExemption= is not compiled and the ordinary clause's
