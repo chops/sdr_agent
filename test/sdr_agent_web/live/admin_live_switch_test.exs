@@ -87,6 +87,9 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
   @moduletag :r0_05
   @moduletag :capture_log
   @moduletag timeout: 180_000
+  # The sandbox owner must outlive the test timeout: test 15 held its
+  # connection past the default 120 s under CI load (run 39068733145, #177).
+  @moduletag ownership_timeout: 200_000
 
   @opus :claude_cli_opus
   @sonnet :claude_cli_sonnet

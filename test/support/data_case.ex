@@ -33,12 +33,19 @@ defmodule SdrAgent.DataCase do
   end
 
   @doc """
-  Sets up the sandbox based on the test tags.
+  Sets up the sandbox based on the test tags. A module whose tests can hold
+  the connection longer than the pool's default 120 s ownership timeout
+  under load tags `ownership_timeout:` (milliseconds); otherwise the owner
+  is disconnected and the shared mode reverts to `:manual` mid-test (#177).
   """
   def setup_sandbox(tags) do
-    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(SdrAgent.Repo, shared: not tags[:async])
+    opts = [shared: not tags[:async]] ++ ownership_timeout(tags[:ownership_timeout])
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(SdrAgent.Repo, opts)
     on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
   end
+
+  defp ownership_timeout(nil), do: []
+  defp ownership_timeout(ms) when is_integer(ms) and ms > 0, do: [ownership_timeout: ms]
 
   @doc """
   A helper that transforms changeset errors into a map of messages.
