@@ -58,6 +58,10 @@ defmodule SdrAgent.Test.ResolveHarness do
   @stage [:sdr_agent, :model_coordinator, :stage]
   @query [:sdr_agent, :repo, :query]
   @caller {__MODULE__, :caller}
+  # #188: the shared-sandbox queue drop CI saw on a polled switch read.
+  @sandbox_drop_prefix "** (DBConnection.ConnectionError) could not checkout the connection owned by "
+  @sandbox_owner_marker "({:sql_sandbox_owner, "
+  @sandbox_drop_reason "Reason: connection not available and request was dropped from queue after "
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
 
   ## The tree
@@ -270,23 +274,60 @@ defmodule SdrAgent.Test.ResolveHarness do
     )
   end
 
-  # #188 seam: `await_switch!/4` with the switch read injected, so its
-  # observation path is testable without a database.
+  # #188: `await_switch!/4` with the switch read injected. One deadline: no
+  # read starts after it and no late match is accepted. The exact
+  # shared-sandbox queue drop is transient; any other error fails at once.
+  # The matching observation itself is returned, with no further read.
   @doc false
   def await_switch_with!(read, id, status, timeout) do
-    find = fn ->
-      {:ok, switches} = read.()
-      Enum.find(switches, &(&1.id == id))
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_switch_until(read, id, status, deadline, :none)
+  end
+
+  defp await_switch_until(read, id, status, deadline, last) do
+    if System.monotonic_time(:millisecond) > deadline do
+      flunk("switch never reached #{status}; last #{inspect(last)}")
     end
 
-    await!(
-      fn -> match?(%{status: ^status}, find.()) end,
-      timeout,
-      fn -> "switch never reached #{status}; last #{inspect(find.())}" end
-    )
+    case read.() do
+      {:ok, switches} ->
+        switch = Enum.find(switches, &(&1.id == id))
 
-    find.()
+        cond do
+          not match?(%{status: ^status}, switch) ->
+            Process.sleep(20)
+            await_switch_until(read, id, status, deadline, {:observed, switch})
+
+          System.monotonic_time(:millisecond) > deadline ->
+            flunk("switch reached #{status} only after the deadline: #{inspect(switch)}")
+
+          true ->
+            switch
+        end
+
+      {:error, error} = result ->
+        if sandbox_queue_drop?(error) do
+          Process.sleep(20)
+          await_switch_until(read, id, status, deadline, {:transient, :sandbox_queue_drop})
+        else
+          flunk("switch read failed: #{inspect(result)}")
+        end
+
+      other ->
+        flunk("switch read failed: #{inspect(other)}")
+    end
   end
+
+  defp sandbox_queue_drop?(%Ash.Error.Unknown{
+         errors: [%Ash.Error.Unknown.UnknownError{error: message}]
+       })
+       when is_binary(message) do
+    String.starts_with?(message, @sandbox_drop_prefix) and
+      String.contains?(message, @sandbox_owner_marker) and
+      String.contains?(message, @sandbox_drop_reason)
+  end
+
+  defp sandbox_queue_drop?(_error), do: false
 
   @doc "The tenant's starts, by generation."
   def starts!(ctx) do
