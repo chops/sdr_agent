@@ -2,7 +2,9 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
   @moduledoc """
   A source regression inventory of the model-call paths in `lib/`: it
   parses every `lib/**/*.ex` file and checks who calls what. Two
-  inventories share one walker.
+  inventories share one walker, and every call node reaches both. A
+  pipe counts as the first argument of the call on its right, so
+  `x |> Mod.fun(y)` is `fun/2` in both.
 
   **R0-04-5** (`docs/product/r0/r0-04-seam.md`): every `prepare/2` and
   `complete/2` call on a model provider in `lib/` goes through the
@@ -15,7 +17,7 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
     `SdrAgent.AI.ModelProvider`. The module may be fully qualified or
     aliased: a plain `alias`, `alias ..., as:`, or a grouped
     `alias A.{B, C}`, each scoped to the module or function body it is
-    written in;
+    written in, and it may be piped into;
   - a remote call on a dynamic receiver (`var.prepare(_, _)` or
     `var.complete(_, _)`);
   - a capture (`&Mod.prepare/2`, `&Mod.complete/2`);
@@ -41,10 +43,15 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
     actions `ScoreLead`, `ClassifyReply`, `DraftEmail` and
     `BuildEvidenceBundle`;
   - `SdrAgent.AI.ModelProvider.calibration_call/3` — only
-    `CalibrationConsole.Calibrate.call/3`.
+    `CalibrationConsole.Calibrate.call/3`;
+  - the facade's `SdrAgent.AI.ModelProvider.complete/1,2` (`/1` takes the
+    default options) — only `SdrAgent.SDR.Model.call/4`, plus the
+    facade's own dynamic provider dispatch in `provider_call/3`. The
+    facade does not implement the provider behaviour, so the R0-04-5
+    scan alone never sees a call to it.
 
   Each is flagged in the same forms as above: a remote call, fully
-  qualified or through any of those alias forms; a capture
+  qualified or through any of those alias forms, called or piped into; a capture
   `&Mod.fun/arity`; `apply/3` or `Kernel.apply/3` with a literal function
   name. A dynamic receiver (a variable or module attribute) with the same
   function name and arity is flagged too, and an argument list computed
@@ -80,12 +87,14 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
   @claude_cli SdrAgent.AI.ModelProvider.ClaudeCLI
   @calibrate SdrAgent.CalibrationConsole.Calibrate
 
-  # {receiver module, function} => arity of each L2-E3 entry point.
+  # {receiver module, function} => arities of each L2-E3 entry point. The
+  # facade's `complete` has default options, so both arities are public.
   @entry_points %{
-    {SdrAgent.Agents, :admit_launch} => 3,
-    {SdrAgent.Agents, :reserve_model_invocation} => 3,
-    {SdrAgent.SDR.Model, :call} => 4,
-    {SdrAgent.AI.ModelProvider, :calibration_call} => 3
+    {SdrAgent.Agents, :admit_launch} => [3],
+    {SdrAgent.Agents, :reserve_model_invocation} => [3],
+    {SdrAgent.SDR.Model, :call} => [4],
+    {SdrAgent.AI.ModelProvider, :calibration_call} => [3],
+    {SdrAgent.AI.ModelProvider, :complete} => [1, 2]
   }
   @entry_names Enum.uniq([:call | for({{_module, name}, _arity} <- @entry_points, do: name)])
   @servers [GenServer, :gen_server]
@@ -105,7 +114,11 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
                          {SdrAgent.SDR.Actions.DraftEmail, :perform, SdrAgent.SDR.Model, :call},
                          {SdrAgent.SDR.Actions.BuildEvidenceBundle, :perform, SdrAgent.SDR.Model,
                           :call},
-                         {@calibrate, :call, SdrAgent.AI.ModelProvider, :calibration_call}
+                         {@calibrate, :call, SdrAgent.AI.ModelProvider, :calibration_call},
+                         {SdrAgent.SDR.Model, :call, SdrAgent.AI.ModelProvider, :complete},
+                         # The facade's own provider dispatch (also an R0-04-5
+                         # exception): a dynamic `complete/2`.
+                         {SdrAgent.AI.ModelProvider, :provider_call, :dynamic, :complete}
                        ])
 
   test "every provider prepare/complete call goes through the facade or a named exception" do
@@ -168,6 +181,11 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
       "kernel_apply" => """
       defmodule Probe.KernelApply do
         def go(m, r), do: Kernel.apply(m, :complete, [r, []])
+      end
+      """,
+      "pipe" => """
+      defmodule Probe.Pipe do
+        def go(r), do: r |> SdrAgent.AI.ModelProvider.Fake.complete([])
       end
       """
     }
@@ -234,21 +252,43 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
   end
 
   test "each named caller is not flagged, and the same call elsewhere is (synthetic sources)" do
-    for {caller, function, receiver, called} = key <- @entry_point_callers do
-      entries = scan_entries(entry_source(caller, function, receiver, called), "named")
+    for {caller, function, receiver, called} = key <- @entry_point_callers,
+        source <- entry_sources(caller, function, receiver, called) do
+      entries = scan_entries(source, "named")
       assert [%{key: ^key}] = entries
       assert unexpected_entries(entries) == [], "named caller was flagged: #{inspect(key)}"
 
       # The named module from another function, and the named function
       # from another module.
-      for {other_module, other_function} <- [{caller, :elsewhere}, {Probe.Elsewhere, function}] do
-        source = entry_source(other_module, other_function, receiver, called)
+      for {other_module, other_function} <- [{caller, :elsewhere}, {Probe.Elsewhere, function}],
+          other_source <- entry_sources(other_module, other_function, receiver, called) do
         other = {other_module, other_function, receiver, called}
 
-        assert [%{key: ^other}] = unexpected_entries(scan_entries(source, "elsewhere")),
+        assert [%{key: ^other}] = unexpected_entries(scan_entries(other_source, "elsewhere")),
                "#{inspect(other)} was not flagged"
       end
     end
+
+    # The facade's one ordinary caller as written in lib (an alias and a
+    # pipe): an entry, not a provider call, and not flagged.
+    model = """
+    defmodule SdrAgent.SDR.Model do
+      alias SdrAgent.AI.ModelProvider
+
+      def call(ctx, purpose, input, subject_id) do
+        ctx
+        |> request(purpose, input, subject_id)
+        |> ModelProvider.complete(ctx.model)
+        |> settle(ctx)
+      end
+    end
+    """
+
+    assert [%{key: {SdrAgent.SDR.Model, :call, SdrAgent.AI.ModelProvider, :complete}}] =
+             entries = scan_entries(model, "model")
+
+    assert unexpected_entries(entries) == []
+    assert scan(model, "model") == []
   end
 
   test "near misses and the stated limits are not entry points (synthetic sources)" do
@@ -264,7 +304,12 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
       "model_call_arity_3" => "SdrAgent.SDR.Model.call(a1, a2, a3)",
       "other_call_arity_4" => "SdrAgent.Other.call(a1, a2, a3, a4)",
       "runtime_name" => "apply(SdrAgent.Agents, name, [a1, a2, a3])",
-      "local" => "admit_launch(a1, a2, a3)"
+      "local" => "admit_launch(a1, a2, a3)",
+      "facade_complete_arity_0" => "SdrAgent.AI.ModelProvider.complete()",
+      "facade_complete_arity_3" => "SdrAgent.AI.ModelProvider.complete(a1, a2, a3)",
+      "facade_piped_arity_3" => "a1 |> SdrAgent.AI.ModelProvider.complete(a2, a3)",
+      "facade_capture_arity_3" => "&SdrAgent.AI.ModelProvider.complete/3",
+      "dynamic_complete_arity_3" => "m.complete(a1, a2, a3)"
     }
 
     for {label, body} <- bodies do
@@ -290,13 +335,21 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
 
   ## Synthetic entry-point sources
 
-  # {label, expected receiver, called function, module body}
-  defp entry_probes({{module, name}, arity}) do
+  # {label, expected receiver, called function, module body} for each
+  # arity of an entry point.
+  defp entry_probes({{module, name}, arities}) do
+    for arity <- arities, {label, receiver, body} <- entry_forms(module, name, arity) do
+      {"#{name}_#{arity}_#{label}", receiver, name, body}
+    end
+  end
+
+  defp entry_forms(module, name, arity) do
     mod = inspect(module)
     [last | rest] = module |> Module.split() |> Enum.reverse()
     base = rest |> Enum.reverse() |> Enum.join(".")
-    args = arguments(arity)
+    args = arguments(1, arity)
     call = "#{name}(#{args})"
+    piped = "a1 |> #{last}.#{name}(#{arguments(2, arity)})"
 
     [
       {"qualified", module, "def go, do: #{mod}.#{call}"},
@@ -305,15 +358,17 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
       {"grouped_alias", module, "alias #{base}.{Other, #{last}}\n  def go, do: #{last}.#{call}"},
       {"function_scoped_alias", module,
        "def go do\n    alias #{mod}\n    #{last}.#{call}\n  end"},
+      {"pipe", module, "def go(a1), do: a1 |> #{mod}.#{name}(#{arguments(2, arity)})"},
+      {"alias_pipe", module, "alias #{mod}\n  def go(a1), do: a1 |> x() |> #{piped}"},
       {"capture", module, "def go, do: &#{mod}.#{name}/#{arity}"},
       {"apply", module, "def go, do: apply(#{mod}, :#{name}, [#{args}])"},
       {"kernel_apply", module, "def go, do: Kernel.apply(#{mod}, :#{name}, [#{args}])"},
       {"apply_computed_args", module, "def go(args), do: apply(#{mod}, :#{name}, args)"},
       {"dynamic", :dynamic, "def go(m), do: m.#{call}"},
+      {"dynamic_pipe", :dynamic, "def go(m, a1), do: a1 |> m.#{name}(#{arguments(2, arity)})"},
       {"dynamic_capture", :dynamic, "def go(m), do: &m.#{name}/#{arity}"},
       {"dynamic_apply", :dynamic, "def go(m), do: apply(m, :#{name}, [#{args}])"}
     ]
-    |> Enum.map(fn {label, receiver, body} -> {"#{name}_#{label}", receiver, name, body} end)
   end
 
   # {label, expected receiver, module body} for the ClaudeCLI server message.
@@ -323,6 +378,7 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
     [
       {"qualified", GenServer, "def go(s, r), do: GenServer.call(s, #{message})"},
       {"with_timeout", GenServer, "def go(s, r), do: GenServer.call(s, #{message}, :infinity)"},
+      {"pipe", GenServer, "def go(s, r), do: s |> GenServer.call(#{message}, :infinity)"},
       {"alias_as", GenServer,
        "alias GenServer, as: Server\n  def go(s, r), do: Server.call(s, #{message})"},
       {"function_scoped_alias", GenServer,
@@ -336,18 +392,27 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
     ]
   end
 
-  defp entry_source(module, function, receiver, called) do
-    "defmodule #{inspect(module)} do\n  def #{function}(s, r) do\n    " <>
-      entry_call(receiver, called) <> "\n  end\nend\n"
+  # One source per arity of the call, made from `function` of `module`.
+  defp entry_sources(module, function, receiver, called) do
+    for call <- entry_calls(receiver, called) do
+      "defmodule #{inspect(module)} do\n  def #{function}(m, s, r) do\n    #{call}\n  end\nend\n"
+    end
   end
 
-  defp entry_call(receiver, @server_message),
-    do: "#{inspect(receiver)}.call(s, {:complete, r, enqueued_at}, :infinity)"
+  defp entry_calls(receiver, @server_message),
+    do: ["#{inspect(receiver)}.call(s, {:complete, r, enqueued_at}, :infinity)"]
 
-  defp entry_call(receiver, name),
-    do: "#{inspect(receiver)}.#{name}(#{arguments(Map.fetch!(@entry_points, {receiver, name}))})"
+  defp entry_calls(receiver, name) do
+    target = if receiver == :dynamic, do: "m", else: inspect(receiver)
+    for arity <- entry_arities(receiver, name), do: "#{target}.#{name}(#{arguments(1, arity)})"
+  end
 
-  defp arguments(arity), do: Enum.map_join(1..arity, ", ", &"a#{&1}")
+  defp entry_arities(:dynamic, name),
+    do: for({{_module, ^name}, arities} <- @entry_points, arity <- arities, uniq: true, do: arity)
+
+  defp entry_arities(module, name), do: Map.fetch!(@entry_points, {module, name})
+
+  defp arguments(first, last), do: Enum.map_join(first..last//1, ", ", &"a#{&1}")
 
   defp unexpected_entries(entries),
     do: Enum.reject(entries, &MapSet.member?(@entry_point_callers, &1.key))
@@ -410,49 +475,62 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
     {node, %{acc | aliases: Map.put(acc.aliases, as, target)}}
   end
 
-  defp pre({{:., _, [receiver, name]}, meta, args} = node, acc)
-       when name in @names and is_list(args) and length(args) == 2 do
-    {node, record(acc, receiver(receiver, acc), name, meta)}
-  end
+  # A pipe passes its left side as the first argument of the call on its
+  # right: that call gets a placeholder argument (a dynamic value), so both
+  # collectors see it at its real arity.
+  defp pre({:|>, meta, [left, right]}, acc), do: {{:|>, meta, [left, piped(right)]}, acc}
 
-  defp pre({:&, meta, [{:/, _, [{{:., _, [receiver, name]}, _, []}, 2]}]} = node, acc)
-       when name in @names do
-    {node, record(acc, receiver(receiver, acc), name, meta)}
-  end
+  # Every other node goes to both collectors.
+  defp pre(node, acc), do: {node, acc |> collect_provider(node) |> collect_entry(node)}
 
-  defp pre({:apply, meta, [_m, name, args]} = node, acc) when name in @names do
-    {node, if(two_args?(args), do: record(acc, :dynamic, name, meta), else: acc)}
-  end
+  defp piped({:__aliases__, _, _} = right), do: right
 
-  defp pre({{:., _, [{:__aliases__, _, [:Kernel]}, :apply]}, meta, [_m, name, args]} = node, acc)
-       when name in @names do
-    {node, if(two_args?(args), do: record(acc, :dynamic, name, meta), else: acc)}
-  end
+  defp piped({call, meta, args}) when is_list(args),
+    do: {call, meta, [{:__piped__, [], nil} | args]}
+
+  defp piped(right), do: right
+
+  # R0-04-5 provider calls.
+  defp collect_provider(acc, {{:., _, [receiver, name]}, meta, args})
+       when name in @names and is_list(args) and length(args) == 2,
+       do: record(acc, receiver(receiver, acc), name, meta)
+
+  defp collect_provider(acc, {:&, meta, [{:/, _, [{{:., _, [receiver, name]}, _, []}, 2]}]})
+       when name in @names,
+       do: record(acc, receiver(receiver, acc), name, meta)
+
+  defp collect_provider(acc, {:apply, meta, [_m, name, args]}) when name in @names,
+    do: if(two_args?(args), do: record(acc, :dynamic, name, meta), else: acc)
+
+  defp collect_provider(
+         acc,
+         {{:., _, [{:__aliases__, _, [:Kernel]}, :apply]}, meta, [_m, name, args]}
+       )
+       when name in @names,
+       do: if(two_args?(args), do: record(acc, :dynamic, name, meta), else: acc)
+
+  defp collect_provider(acc, _node), do: acc
 
   # L2-E3 entry points and the ClaudeCLI server message.
-  defp pre({{:., _, [receiver, name]}, meta, args} = node, acc)
-       when name in @entry_names and is_list(args) do
-    {node, entry(acc, receiver(receiver, acc), name, args, meta)}
-  end
+  defp collect_entry(acc, {{:., _, [receiver, name]}, meta, args})
+       when name in @entry_names and is_list(args),
+       do: entry(acc, receiver(receiver, acc), name, args, meta)
 
-  defp pre({:&, meta, [{:/, _, [{{:., _, [receiver, name]}, _, []}, arity]}]} = node, acc)
-       when name in @entry_names and is_integer(arity) do
-    {node, entry_arity(acc, receiver(receiver, acc), name, arity, meta)}
-  end
+  defp collect_entry(acc, {:&, meta, [{:/, _, [{{:., _, [receiver, name]}, _, []}, arity]}]})
+       when name in @entry_names and is_integer(arity),
+       do: entry_arity(acc, receiver(receiver, acc), name, arity, meta)
 
-  defp pre({:apply, meta, [module, name, args]} = node, acc) when name in @entry_names do
-    {node, entry(acc, receiver(module, acc), name, args, meta)}
-  end
+  defp collect_entry(acc, {:apply, meta, [module, name, args]}) when name in @entry_names,
+    do: entry(acc, receiver(module, acc), name, args, meta)
 
-  defp pre(
-         {{:., _, [{:__aliases__, _, [:Kernel]}, :apply]}, meta, [module, name, args]} = node,
-         acc
+  defp collect_entry(
+         acc,
+         {{:., _, [{:__aliases__, _, [:Kernel]}, :apply]}, meta, [module, name, args]}
        )
-       when name in @entry_names do
-    {node, entry(acc, receiver(module, acc), name, args, meta)}
-  end
+       when name in @entry_names,
+       do: entry(acc, receiver(module, acc), name, args, meta)
 
-  defp pre(node, acc), do: {node, acc}
+  defp collect_entry(acc, _node), do: acc
 
   # A literal argument list must have two elements; a computed one is
   # flagged, since its arity can't be seen.
@@ -529,8 +607,9 @@ defmodule SdrAgent.AI.ModelProviderInventoryTest do
   # dynamic one when any entry point has that name and arity.
   defp entry_arity(acc, receiver, name, arity, meta) do
     entry_point? =
-      Enum.any?(@entry_points, fn {{module, entry_name}, entry_arity} ->
-        entry_name == name and receiver in [module, :dynamic] and arity in [entry_arity, :any]
+      Enum.any?(@entry_points, fn {{module, entry_name}, arities} ->
+        entry_name == name and receiver in [module, :dynamic] and
+          (arity == :any or arity in arities)
       end)
 
     if entry_point?, do: add(acc, :entries, receiver, name, meta), else: acc
