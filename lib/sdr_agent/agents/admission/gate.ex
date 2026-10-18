@@ -354,6 +354,47 @@ defmodule SdrAgent.Agents.Admission.Gate do
   end
 
   @doc """
+  L2 E1: the evidence class of `invocation`'s original
+  `model.invocation.reserved` events (same tenant, run and subject scope as
+  `recorded_tuple/1`, which this does not change), never raising:
+  `:no_event` (none), `:no_tuple` (exactly one, readable arguments, no
+  tuple), `{:recorded, entry}` (exactly one, a valid tuple), or `:invalid`
+  (duplicated events, unreadable arguments, a non-nil malformed tuple, a
+  malformed input or a failed read).
+  """
+  def reservation_authority(%{id: id, agent_run_id: run_id, tenant_id: tenant_id})
+      when is_binary(id) and is_binary(run_id) and is_binary(tenant_id) do
+    case read_reservation_events(id, run_id, tenant_id) do
+      {:ok, []} -> :no_event
+      {:ok, [event]} -> reservation_class(event)
+      _duplicated_or_failed -> :invalid
+    end
+  end
+
+  def reservation_authority(_invocation), do: :invalid
+
+  defp reservation_class(event) do
+    case arguments(event) do
+      {:ok, arguments} ->
+        case decode(arguments["calibration_tuple"]) do
+          nil -> :no_tuple
+          {:ok, entry} -> {:recorded, entry}
+          :invalid -> :invalid
+        end
+
+      :error ->
+        :invalid
+    end
+  end
+
+  # A failed read is evidence of nothing: :error, never an empty list.
+  defp read_reservation_events(id, run_id, tenant_id) do
+    {:ok, reservation_events(id, run_id, tenant_id)}
+  rescue
+    _error -> :error
+  end
+
+  @doc """
   The console's launch-record claim recorded by the same one original
   `model.invocation.reserved` event (R0-07 E4c-2): `{:ok, %{instance_id:
   id}}`, `{:ok, nil}` when it records none, or `{:error, :claim_unrecorded}`
