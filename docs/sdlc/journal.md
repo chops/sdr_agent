@@ -905,6 +905,16 @@ unaffected.
 
 **Tripwire 2** fired several times today: the snapshot helper, the trial steps and the #171 record each needed a second CHANGES REQUESTED round. They were reported to the owner as they happened.
 
+### Sprint 1, day 7 (Sun Oct 18): E1 built (as of 00:20 MDT)
+
+- **E1 (PR #181):** the plan took three revisions to PASS (`e9200cf`). RED took two rounds: the first had fixture defects, among them a trigger-mode leak and race cleanup that was too broad; the amended RED was verified at `28622af`. A transient run of the planned code, never committed, showed every later assertion and race barrier executes, and found three test bugs. GREEN `9c64247`, with the tests unchanged since RED; full gate 2920 passed; Codex APPROVE. It waits for the owner's merge decision.
+- **Flake fixes:**
+  - **#175 (PR #179):** CountPoolTest now also retries the `:noproc` teardown exit.
+  - **#177 (PR #180):** the cause was the default 120 s sandbox ownership timeout under CI load; the module now sets 200 s.
+  - **Status:** both are Codex-approved and CI-green, and they wait for the owner's merge decision.
+  - **#178:** main's KernelTest failure is a separate cause, provenance snapshots kept by committed fixtures. Codex owns it.
+- **Next:** the E3 implementation plan; G3's metadata inventory query for the owner.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
