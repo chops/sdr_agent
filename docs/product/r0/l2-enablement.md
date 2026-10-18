@@ -105,7 +105,7 @@ Reviewer precedence: ai-pair; reviewer **Codex**. Verdict: **UNREVIEWED**. No af
   - a recent terminal-run `sent` row is untouched; an old one becomes `unknown`, with an event and no run write;
   - re-sweeping is idempotent;
   - such a row is never `failed`, `released` or re-sent;
-  - a late facade `complete` gets `:invocation_already_settled`;
+  - a late facade settle, qualified by provider and order (Codex `fdc152b7`): a successful ClaudeCLI outcome whose re-read sees the recovered row gets exactly `:invocation_already_settled`; a re-read before recovery, a provider-error outcome, the Fake (no re-read) and a completion refused on the terminal run first each get their existing pinned refusal. In every case nothing is overwritten or released;
   - a concurrent cancel is serialized by the run lock;
   - the ledger charge stays in `grant_usage`;
   - real-connection race tests follow the case (b) precedent.
