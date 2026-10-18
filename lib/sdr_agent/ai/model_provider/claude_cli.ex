@@ -86,18 +86,23 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   with `test_launcher: true`, for adapter tests that have no reserved
   invocation; every other build and launcher uses `Agents.admit_launch/3`.
 
-  ## Staged: no ordinary real call yet (R0-02)
+  ## Ordinary real calls (L2 E3)
 
-  Until the profile registry (R0-03), owner call grants (C9) and the
-  witness tuple work (R0-07) land, every launch through the real launcher
-  is refused before any process starts with `{:error, :real_model_staged}`
-  (after the pin check), and `Runtime.resolve/1` refuses it before any
-  reservation. Nothing configurable from the environment lifts this.
+  A pinned real launcher whose identity records the reviewed CLI version
+  (`PinnedExecutable.version_bound?/0`, re-read before each launch;
+  `:pinned_cli_version_mismatch` otherwise) runs an ordinary request: one
+  with no `:calibration` key. It only asks launch admission for its
+  ordinary mode (`ordinary_launch: true`): the locked run and reservation
+  decide, so a `:proof` reservation is refused there whatever the request
+  carries, and every admission check (tuple, store, result gate, grant,
+  allocation) still applies. A `:calibration` request outside test-seam
+  builds stays `{:error, :real_model_staged}`. Nothing configurable from
+  the environment adds a call; grants stay the owner's.
 
   **Test launchers.** Only in a test build (`:claude_cli_test_seams`,
   config/test.exs) does `test_launcher: true` mark an explicitly injected
   `:command` (a hermetic fake, or the real shim aimed at a harmless
-  stand-in) that may run without `:executable` and past the staged gate.
+  stand-in) that may run without `:executable` and skips the version check.
   Other builds ignore the option.
 
   One GenServer serialises every call (ADR-0004, C8: concurrency 1).
@@ -789,9 +794,18 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
          {:ok, expected} <- staged(state, request, caller),
          {:ok, witness_env} <- witness_env(Map.get(request, :witness)),
          :ok <- refuse_bypass(state.environment || System.get_env()) do
-      # Only the exemption sets the launch expectation; a caller's own
-      # value is always replaced.
-      request = Map.put(request, :calibration_launch, expected)
+      # Only the exemption sets the launch expectation, and only the
+      # ordinary clause the ordinary mode; a caller's own values are always
+      # replaced, and the two never share a key (L2 E3).
+      request =
+        case expected do
+          :ordinary ->
+            request |> Map.put(:calibration_launch, nil) |> Map.put(:launch_mode, :ordinary)
+
+          expected ->
+            request |> Map.put(:calibration_launch, expected) |> Map.put(:launch_mode, nil)
+        end
+
       launch(request, state, caller, deadline, witness_env)
     else
       error -> {error, state}
@@ -806,9 +820,18 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   defp pinned_launch(state) do
     case pinned(state) do
-      :ok -> :ok
+      :ok -> reviewed_version(state)
       {:error, _reason} -> {:error, :pinned_cli_unavailable}
     end
+  end
+
+  # L2 E3: the identity's reviewed version, re-read before each launch.
+  defp reviewed_version(%{test_launcher: true}), do: :ok
+
+  defp reviewed_version(_state) do
+    if PinnedExecutable.version_bound?(),
+      do: :ok,
+      else: {:error, :pinned_cli_version_mismatch}
   end
 
   # R0-02 staging: the real launcher spends no call until R0-03, C9 and
@@ -830,7 +853,14 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     end
   end
 
-  defp staged(_state, _request, _caller), do: {:error, :real_model_staged}
+  # L2 E3: any other request to a pinned server is ordinary. It only asks
+  # launch admission for its ordinary mode; the locked rows decide.
+  # Outside test-seam builds a calibration request is never exempted.
+  unless @test_seams do
+    defp staged(_state, %{calibration: _}, _caller), do: {:error, :real_model_staged}
+  end
+
+  defp staged(_state, _request, _caller), do: {:ok, :ordinary}
 
   # R0-07 packet 8.14.10: test-seam builds only, `clock_from: pid` makes
   # this server read that process's frozen clock (`Clock.follow/1`) from
@@ -914,6 +944,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   defp launch_expectation(%{calibration_launch: %{} = expected}),
     do: [calibration_launch: expected]
 
+  defp launch_expectation(%{launch_mode: :ordinary}), do: [ordinary_launch: true]
   defp launch_expectation(_request), do: []
 
   defp witness_env(%{model_invocation_id: id, traceparent: traceparent})

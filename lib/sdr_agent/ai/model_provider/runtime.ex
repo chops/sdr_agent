@@ -27,9 +27,9 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       holds the server's launches, C2-02b2α), `:provider_not_quiescent`
       (admission closed), `:llm_proxy_shim_not_found` or
       `:pinned_cli_unavailable` (no pin, or the pinned build is missing or
-      is not the reviewed identity) or `:real_model_staged` (R0-02 staging:
-      no ordinary real call until R0-03, C9 and R0-07 land; only a test
-      build's injected launcher passes) — never a raise and never a silent
+      is not the reviewed identity) or `:pinned_cli_version_mismatch` (L2
+      E3: the pinned identity's reviewed version is not the profiles'
+      `ModelProfiles.cli_version/0`) — never a raise and never a silent
       fallback to the Fake or to `claude` on `PATH`. Per-call init attestation stays
       mandatory; this health check is in addition to it. Its checks are one
       pure function of a server view, shared with `status/0`.
@@ -192,13 +192,26 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   # status; `status/0` from its bracketed sample (C2-02c 2a).
   defp eligibility(%{admission: admission, held?: held?, attestation: attestation}) do
     cond do
-      admission == :not_running -> {:error, :provider_not_running}
-      held? -> {:error, :provider_held}
-      admission != :open -> {:error, :provider_not_quiescent}
-      attestation[:command?] == false -> {:error, :llm_proxy_shim_not_found}
-      not pinned_cli_present?(attestation) -> {:error, :pinned_cli_unavailable}
-      not attestation[:test_launcher?] -> {:error, :real_model_staged}
-      true -> :ok
+      admission == :not_running ->
+        {:error, :provider_not_running}
+
+      held? ->
+        {:error, :provider_held}
+
+      admission != :open ->
+        {:error, :provider_not_quiescent}
+
+      attestation[:command?] == false ->
+        {:error, :llm_proxy_shim_not_found}
+
+      not pinned_cli_present?(attestation) ->
+        {:error, :pinned_cli_unavailable}
+
+      not attestation[:test_launcher?] and not PinnedExecutable.version_bound?() ->
+        {:error, :pinned_cli_version_mismatch}
+
+      true ->
+        :ok
     end
   end
 
@@ -253,6 +266,11 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       "model provider claude_cli is staged: real model calls stay unavailable until the " <>
         "reviewed profiles, owner call grants and witness work land (R0-03, C9, R0-07); " <>
         "no model call was made"
+
+  def refusal_message(:pinned_cli_version_mismatch),
+    do:
+      "model provider claude_cli refuses calls: the pinned Claude CLI's reviewed version " <>
+        "does not match the reviewed model profiles; no model call was made"
 
   def refusal_message(:pinned_cli_unavailable),
     do:

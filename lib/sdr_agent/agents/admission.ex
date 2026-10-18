@@ -455,10 +455,11 @@ defmodule SdrAgent.Agents.Admission do
         {:error, :profile_mismatch_at_launch, :profile_mismatch}
 
       true ->
-        with :ok <- exemption(run, invocation, expected),
+        with :ok <- ordinary_scope(run, expected),
+             :ok <- exemption(run, invocation, expected),
              :ok <- Gate.admit_launch(run, invocation, store),
              :ok <- SwitchFence.launch(run.tenant_id, invocation.id),
-             :ok <- launch_binding(invocation, run.tenant_id, not is_nil(expected)),
+             :ok <- launch_binding(invocation, run.tenant_id, is_map(expected)),
              do: launch_terms(run, invocation, now)
     end
   end
@@ -473,11 +474,20 @@ defmodule SdrAgent.Agents.Admission do
   included. It can only add refusals.
   """
   def calibration_launch(opts) do
-    case Keyword.fetch(opts, :calibration_launch) do
-      :error -> nil
-      {:ok, value} -> if expectation?(value), do: value, else: :invalid
+    case {Keyword.fetch(opts, :ordinary_launch), Keyword.fetch(opts, :calibration_launch)} do
+      {:error, :error} -> nil
+      {:error, {:ok, value}} -> if expectation?(value), do: value, else: :invalid
+      {{:ok, true}, :error} -> :ordinary
+      _invalid -> :invalid
     end
   end
+
+  # L2 E3: the ordinary mode refuses a :proof run (the locked run decides;
+  # recorded authority stays with the gate's own re-read).
+  defp ordinary_scope(%{usage_origin: :proof}, :ordinary),
+    do: {:error, :calibration_not_authorized, :ordinary_scope}
+
+  defp ordinary_scope(_run, _expected), do: :ok
 
   @expectation_keys [:prompt_ref, :request_sha256, :run_id, :schema_ref, :tenant_id]
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
@@ -501,6 +511,7 @@ defmodule SdrAgent.Agents.Admission do
   # Packet 8.13 C8: an exempted calibration call launches only a proof run's
   # own call (no Operation) with the code-owned input it was reserved with.
   defp exemption(_run, _invocation, nil), do: :ok
+  defp exemption(_run, _invocation, :ordinary), do: :ok
 
   defp exemption(run, invocation, expected) do
     cond do

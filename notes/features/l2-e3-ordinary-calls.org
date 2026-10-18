@@ -7,8 +7,8 @@ entity/action PASS; owner D-156 (scope accepted, B5' acknowledged). Not
 merge, enablement, grant or spend approval. The first real ordinary call is
 owner-run and separately authorized (stage 4).
 
-Author Claude; reviewer Codex. Phase: *plan PASS at =e462d48= (Codex =cad33c66=, plan and both entity rows);
-RED in progress*. Revision 3 (=ecabc64=): NEEDS-REVIEW (=ffae271d=): the pre-read
+Author Claude; reviewer Codex. Phase: *GREEN, awaiting Codex review*; plan PASS =e462d48= (=cad33c66=), RED
+VERIFIED =1f05a24= (=3bc2912e=). Revision 3 (=ecabc64=): NEEDS-REVIEW (=ffae271d=): the pre-read
 was dropped for the existing locked gate read and a truthful rollback
 contract. Revision 2 (=7a78e5f=): narrow NEEDS-REVIEW (=a0b40506=) on
 the evidence read inside the transaction. Revision 1 (=0aa2a20=) got NEEDS-REVIEW

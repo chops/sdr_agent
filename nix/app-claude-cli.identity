@@ -4,5 +4,5 @@
 # file's sha256 matches (checked once at boot); other platforms are refused.
 # A pin bump changes nix/app-claude-cli.nix and this file in one reviewed PR.
 #
-# <nix system> <store path> <sha256 of bin/claude-code>
-aarch64-darwin /nix/store/n79j0drxclykgg673zpbh2aj0acmdzkp-app-claude-cli-2.1.294 def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53
+# <nix system> <store path> <sha256 of bin/claude-code> <reviewed CLI version>
+aarch64-darwin /nix/store/n79j0drxclykgg673zpbh2aj0acmdzkp-app-claude-cli-2.1.294 def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53 2.1.294
