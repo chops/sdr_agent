@@ -373,6 +373,26 @@ case mode do
       })
     )
 
+  "barrier_error" ->
+    # argv: barrier_error <barrier prefix>. Writes <prefix>.launched, waits
+    # (at most 30 s) for the test to create <prefix>.go, then answers with
+    # the CLI's own error result (`is_error`), so a provider error arrives
+    # exactly when the test releases it (L2 E1 16d).
+    prefix = Enum.at(System.argv(), 1)
+    File.write!(prefix <> ".launched", "")
+
+    Enum.reduce_while(1..3000, :waiting, fn _, _ ->
+      if File.exists?(prefix <> ".go"),
+        do: {:halt, :go},
+        else: Process.sleep(10) && {:cont, :waiting}
+    end)
+
+    IO.puts(init)
+
+    IO.puts(
+      ~s({"type":"result","subtype":"error_during_execution","is_error":true,"result":"synthetic error"})
+    )
+
   "fenced" ->
     IO.puts(init)
     IO.puts(fenced)

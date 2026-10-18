@@ -151,6 +151,14 @@ defmodule SdrAgent.SDR.TerminalSentRecoveryTest do
     |> Ash.exists?(authorize?: false)
   end
 
+  defp invocation_events(ctx, invocation) do
+    for %{event_type: "model.invocation." <> _} = event <- events(ctx.tenant),
+        event.subject_id == invocation.id,
+        do: event.id
+  end
+
+  defp payload_count, do: Repo.query!("SELECT count(*) FROM payloads").rows
+
   defp usage(ctx), do: Agents.grant_usage([ctx.grant.id], actor: ctx.admin)
 
   defp failures,
@@ -173,16 +181,18 @@ defmodule SdrAgent.SDR.TerminalSentRecoveryTest do
       ])
 
   # Fixture SQL in the sandboxed test database only, with the append-only
-  # triggers off for the statement (legacy and inconsistent states the
-  # domain API cannot write).
+  # triggers off for that statement alone (legacy and inconsistent states
+  # the domain API cannot write). `tamper!/2` restores `origin` itself; it
+  # is asserted here so no subject call ever runs with triggers off.
   defp fixture_sql!(sql, params) do
-    {:ok, result} =
-      Repo.transaction(fn ->
-        Repo.query!("SET LOCAL session_replication_role = replica")
-        Repo.query!(sql, params)
-      end)
-
+    result = tamper!(sql, params)
+    assert_triggers_on!()
     result
+  end
+
+  defp assert_triggers_on! do
+    assert %{rows: [["origin"]]} = Repo.query!("SHOW session_replication_role"),
+           "fixture SQL left the append-only triggers off"
   end
 
   defp uuid(id), do: Ecto.UUID.dump!(id)
@@ -235,6 +245,25 @@ defmodule SdrAgent.SDR.TerminalSentRecoveryTest do
         },
         actor: kernel
       )
+  end
+
+  ## The fixture harness
+
+  describe "fixture SQL" do
+    test "leaves the append-only triggers on for everything after it", ctx do
+      run = run!(ctx)
+      row = sent_fake!(run, "h-row")
+      {:ok, _} = Agents.mark_model_invocation_unknown(row, actor: run.agent)
+      set_origin!(run, nil)
+      assert_triggers_on!()
+
+      assert {:error, %Postgrex.Error{postgres: %{message: message}}} =
+               raw_error("UPDATE model_invocations SET status = 'sent' WHERE id = $1", [
+                 uuid(row.id)
+               ])
+
+      assert message =~ "is terminal: update rejected"
+    end
   end
 
   ## (c) eligible rows
@@ -524,6 +553,8 @@ defmodule SdrAgent.SDR.TerminalSentRecoveryTest do
       set_arguments!(args, ~s("not-a-map"))
       assert authority(args) == :invalid
 
+      # Malformed input (not a read failure): a non-UUID tenant is :invalid.
+      # The failed read of a valid, bound row is in the race file.
       assert authority(%{plain | tenant_id: "not-a-uuid"}) == :invalid
     end
   end
@@ -587,7 +618,11 @@ defmodule SdrAgent.SDR.TerminalSentRecoveryTest do
       """)
 
       Clock.freeze(past_cutoff(b.sent_at))
-      assert {:error, _} = e1(run.run.id, stale(), ctx.agent)
+
+      # The injected refusal is the second row's (later in sequence order,
+      # so the first row's transition was already attempted).
+      assert {:error, error} = e1(run.run.id, stale(), ctx.agent)
+      assert inspect(error) =~ "e1 injected failure"
       assert {stored(a.id).status, stored(b.id).status} == {:sent, :sent}
       assert unknown_events(ctx, a) == []
     end
@@ -698,7 +733,8 @@ defmodule SdrAgent.SDR.TerminalSentRecoveryTest do
       assert by_key(ctx, "l-first-retry") == nil
     end
 
-    test "a provider-error outcome keeps its own refusal", ctx do
+    test "a stale domain fail on the recovered row is refused by the status transition",
+         ctx do
       run = run!(ctx)
       sent = at(@t0, fn -> sent_claude!(run, "l-error") end)
       {:ok, _} = stop!(ctx, run, :cancelled)
@@ -713,6 +749,45 @@ defmodule SdrAgent.SDR.TerminalSentRecoveryTest do
       )
 
       assert stored(sent.id).status == :unknown
+    end
+
+    test "ClaudeCLI, a provider error released after recovery keeps its own refusal", ctx do
+      barrier = ctx.dump <> "-barrier"
+      on_exit(fn -> Enum.each([".launched", ".go"], &File.rm(barrier <> &1)) end)
+
+      {:ok, server} =
+        ClaudeCLI.start_link(
+          command: System.find_executable("elixir"),
+          test_launcher: true,
+          command_args: [@fake, "barrier_error", barrier],
+          timeout: 60_000
+        )
+
+      run = run!(ctx)
+      call = Task.async(fn -> complete(run, "l-provider-error", server) end)
+      assert eventually(fn -> File.exists?(barrier <> ".launched") end)
+      row = by_key(ctx, "l-provider-error")
+      assert row.status == :sent
+      {:ok, _} = stop!(ctx, run, :cancelled)
+
+      sweep_at(ctx, past_cutoff(row.sent_at))
+      assert stored(row.id).status == :unknown, "E1: the row is unknown before the error"
+      charged = usage(ctx)
+      failures = failures()
+      ledger = invocation_events(ctx, row)
+      payloads = payload_count()
+
+      File.write!(barrier <> ".go", "")
+      assert Task.await(call, 30_000) == {:error, :claude_cli_error}
+
+      after_error = stored(row.id)
+      assert {after_error.status, after_error.response_sha256} == {:unknown, nil}
+      assert usage(ctx) == charged
+      assert failures() == failures
+      assert invocation_events(ctx, row) == ledger, "no completed, failed or other ledger event"
+      assert payload_count() == payloads, "no response payload is stored"
+      refute released?(row)
+      assert by_key(ctx, "l-provider-error-retry") == nil
     end
 
     test "the Fake's stale settle is refused by the status transition", ctx do
