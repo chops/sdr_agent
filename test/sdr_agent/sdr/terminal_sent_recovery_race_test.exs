@@ -122,8 +122,9 @@ defmodule SdrAgent.SDR.TerminalSentRecoveryRaceTest do
     held
   end
 
+  # An audited transaction, so a guarded call (the cancel) may run in it.
   defp hold(parent, tag, lock, then) do
-    Repo.transaction(fn ->
+    Audit.transaction(fn ->
       lock.()
       send(parent, {:held, tag})
 
@@ -236,7 +237,9 @@ defmodule SdrAgent.SDR.TerminalSentRecoveryRaceTest do
         pass = participant(ctx, :pass, fn -> e1(ctx.run.id, ctx.agent) end)
 
         joined([pass], fn ->
-          await_blocked(pass, hold)
+          # Queued behind the settlement: the first waiter holds the row's
+          # tuple lock, so it (not the holder) blocks the pass.
+          await_blocked(pass, settle)
           release(hold)
           assert {:ok, :ok} = await(hold)
           assert_status_refused(await(settle), "run is not running")

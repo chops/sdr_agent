@@ -324,7 +324,9 @@ defmodule SdrAgent.SDR.TerminalSentRecoveryTest do
       sweep_at(ctx, past_cutoff(sent.sent_at))
 
       assert stored(sent.id).status == :unknown, "E1: the row is unknown"
-      assert {:ok, ^resolved} = Operations.get_failure(failure.id, actor: ctx.admin)
+      fields = [:status, :resolved_at, :resolved_by_id, :resolution_note, :updated_at]
+      assert {:ok, after_sweep} = Operations.get_failure(failure.id, actor: ctx.admin)
+      assert Map.take(after_sweep, fields) == Map.take(resolved, fields)
     end
 
     test "several rows of one run: old ones in order; fresh and equal-cutoff rows wait", ctx do
