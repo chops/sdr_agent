@@ -262,13 +262,30 @@ defmodule SdrAgent.Test.ResolveHarness do
 
   @doc "Waits (bounded) for switch `id` to reach `status`."
   def await_switch!(ctx, id, status, timeout \\ 20_000) do
+    await_switch_with!(
+      fn -> Agents.list_profile_switches(actor: ctx.admin) end,
+      id,
+      status,
+      timeout
+    )
+  end
+
+  # #188 seam: `await_switch!/4` with the switch read injected, so its
+  # observation path is testable without a database.
+  @doc false
+  def await_switch_with!(read, id, status, timeout) do
+    find = fn ->
+      {:ok, switches} = read.()
+      Enum.find(switches, &(&1.id == id))
+    end
+
     await!(
-      fn -> match?(%{status: ^status}, switch!(ctx, id)) end,
+      fn -> match?(%{status: ^status}, find.()) end,
       timeout,
-      fn -> "switch never reached #{status}; last #{inspect(switch!(ctx, id))}" end
+      fn -> "switch never reached #{status}; last #{inspect(find.())}" end
     )
 
-    switch!(ctx, id)
+    find.()
   end
 
   @doc "The tenant's starts, by generation."
