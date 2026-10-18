@@ -1,0 +1,180 @@
+#+TITLE: L2 E3 — lift :real_model_staged for ordinary calls — implementation plan
+#+DATE: 2026-10-18
+
+* Authority and status
+Contract: =docs/product/r0/l2-enablement.md= draft 4 (=ed819b7=), Codex
+entity/action PASS; owner D-156 (scope accepted, B5' acknowledged). Not
+merge, enablement, grant or spend approval. The first real ordinary call is
+owner-run and separately authorized (stage 4).
+
+Author Claude; reviewer Codex. Phase: *plan, awaiting Codex review*. No
+RED before plan PASS. Base: =origin/l2-e1= (E1 GREEN =9c64247=, PR #181).
+E3 merges only after E1, after G3 is closed by the owner, and after its
+own review, gate and owner decision.
+
+* Facts (read-only map of the code at =9c64247=)
+- Conditions (2)–(5) already run for an ordinary ClaudeCLI call, at
+  reservation (=Admission.admit/5=: gate → fence → grant → allocation →
+  budgets) and again at launch admission (=Admission.launch_check/6=):
+  - (2) promoted gen-2 tuple: =Gate.admit_reservation/4= (=:tuple_not_promoted=),
+    re-checked at launch against the recorded row (=Gate.admit_launch/3=);
+  - (3) store: =Gate.observe_store/0= then the locked check
+    (=:witness_store_untrusted=, checks =:store_unset | :store_untrusted |
+    :store_changed | :store_unobserved=);
+  - (4) =ResultGate= is compile-time =:enforced= in every build
+    (=result_gate.ex:69=; =result_gate_mode_test.exs= guards config);
+    =:result_gate_inactive= at reservation and launch;
+  - (5) C9 selector: =:no_eligible_grant=, =:no_allocation=,
+    =:ambiguous_allocation=, ={:budget_exhausted, _}=; at launch
+    =:grant_ineligible_at_launch= with its checks.
+  They are unreachable today only because =Runtime.eligibility/1=
+  (=runtime.ex:200=) refuses first.
+- (1) Partly enforced: dev-only provider selection (=runtime.exs:56-122=;
+  prod/test raise), pin verified with sha256 at boot, file-metadata pin
+  check at resolution and at server launch. *No no-call CLI version
+  preflight exists*: the version is checked only after launch, by the
+  per-call init check (=:version_attestation_drift=).
+- Post-launch: the per-call init check and the result gate already run for
+  every launch.
+- =ClaudeCLI.staged/3= returns ={:ok, nil}= only for the test launcher;
+  =nil= means no launch expectation, which is exactly the ordinary
+  =launch_check= path. The =%{calibration: _}= clause exists only in
+  test-seam builds.
+- Callers (lib/): =ModelProvider.complete/2= only from =SDR.Model.call/4=
+  (=model.ex:67=); =Model.call= only from the four SDR actions run by
+  =Runner.run= from =AgentWorker= and =ReplyWorker=; =ClaudeCLI.complete/2=
+  only via the facade's dynamic provider call; =GenServer.call(server,
+  {:complete, _})= only inside =ClaudeCLI=; =Agents.admit_launch/3= only
+  from =ClaudeCLI=; =Agents.reserve_model_invocation/3= from the facade and
+  the test-seam calibration console. No caller-inventory guard exists.
+
+* Contract corrections (copy, with this plan)
+- Stage 3 step 3 and the arrival-proof bullet say an unfunded-bucket run
+  refuses with =:no_eligible_grant=. The code refuses with
+  =:no_allocation= (the grant is eligible; no allocation matches), and a
+  funded bucket outside its window is also =:no_allocation=.
+  =:no_eligible_grant= is the no-grant / not-started / expired / revoked
+  case (stage 2's "after merge, before any grant" stays right).
+- A reply run's origin =:reply= maps to bucket =:b5=, so the first
+  allocation =[:b1]= does not fund inbound replies (consistent with the
+  frozen ingress).
+- An opened workshop reserve overlapping an open =:b1= allocation makes
+  admission =:ambiguous_allocation= (exactly one match required). The owner
+  steps must not leave two open allocations for one bucket.
+
+* Design
+** 1. =Runtime.eligibility/1=
+Replace the last arm (=not test_launcher? -> :real_model_staged=) with:
+- test launcher → =:ok= (unchanged);
+- otherwise, the version binding (below) → =:ok= or =:pinned_cli_version_mismatch=.
+The earlier arms (not running, held, not quiescent, shim, pin) are
+unchanged and still come first. =status/0= and the Admin card's
+"Accepting calls" follow the same function (no UI change; its copy for
+=:real_model_staged= is no longer reachable for a pinned server and stays
+for the other cases where it is returned).
+
+** 2. Version preflight (condition (1), the missing part) — OQ-E3P-1
+Proposed: a no-call, metadata-only binding at resolution and again at the
+server's launch: the pinned executable's recorded identity
+(=nix/app-claude-cli.identity=, already read by =PinnedExecutable=) must
+name the reviewed =ModelProfiles.cli_version/0= (2.1.294); else
+=:pinned_cli_version_mismatch=, no reservation. It runs no CLI and makes
+no call. The per-call init check stays the authoritative post-launch
+check. Alternative (b): run =claude --version= at server start (spawns a
+process; no model call) — more evidence, more surface. Codex to rule.
+
+** 3. =ClaudeCLI.staged/3=
+Clause order:
+1. test launcher → ={:ok, nil}= (unchanged);
+2. test-seam builds only: =%{calibration: _}= → the calibration exemption
+   (unchanged, first);
+3. *new:* a request with *no* =:calibration= key and a pinned server →
+   ={:ok, nil}= (ordinary; no launch expectation, so the full ordinary
+   =launch_check= applies);
+4. anything else (a =:calibration= request in a non-test build) →
+   =:real_model_staged= (unchanged).
+The pin itself is already checked just before (=pinned_launch=).
+
+** 4. Caller-inventory guard test
+An AST walk of =lib/**/*.ex= (as =child_env_inventory_test.exs=) that
+fails on any new call site of =ModelProvider.complete/2=,
+=ModelProvider.calibration_call/3=, =ClaudeCLI.complete/2=,
+=GenServer.call= with a ={:complete, _}= message,
+=Agents.admit_launch/3=, =Agents.reserve_model_invocation/3= and
+=SDR.Model.call/4= outside today's inventory (above).
+
+** 5. Docs
+Stale comments/moduledocs updated: =runtime.ex:29-33=,
+=claude_cli.ex:89-101,814-817=, =config/config.exs:219-221=,
+=runtime.exs:84-85=, =witness.ex:137-139= (ships three entries now).
+
+** Not changed
+Admission, Gate, ResultGate, C9 selector, Witness, calibration paths,
+provider selection (still dev-only startup config, default Fake), no
+config value or env flag added. No new resource/attribute/migration.
+
+* Affected modules
+=lib/sdr_agent/ai/model_provider/runtime.ex=, =claude_cli.ex=,
+=pinned_executable.ex= (version read, if (a)); docs in =config/config.exs=,
+=config/runtime.exs=, =witness.ex=; contract copy. Tests below.
+
+* RED test inventory (contract E3 bullets; hermetic, no real call)
+Ordinary path tests use a server started with =command:= (the fake CLI)
+and *without* =test_launcher=, plus =PinnedCLI.inject_identity!= and
+=AdmissionFixtures.admit_tuples!=, so the real =Agents.admit_launch/3=
+runs (the test build's only seam differences for ordinary requests are
+identity injection, =force_inactive=, =before_gate=, =clock_from=; stated
+in the RED notes).
+
+1. full ordinary path: facade → reservation → launch → validated witness
+   (fake CLI =witness= mode, fake proxy) → release → =ReleasedOutput=
+   read; for =AgentWorker= (=:assignment= → =:b1=) and a direct facade call;
+2. each pre-launch condition refuses with its reason and no launch: no
+   server (=:provider_not_running=), pin missing (=:pinned_cli_unavailable=),
+   version binding (=:pinned_cli_version_mismatch=), tuple not promoted
+   (=:tuple_not_promoted=), store unset/untrusted (=:witness_store_untrusted=),
+   gate inactive (=:result_gate_inactive=, via the refuse-only seam), no
+   grant (=:no_eligible_grant=);
+3. post-launch init drift (fake CLI =model_drift=/=version_drift=):
+   charged, withheld, no automatic retry, a critical =provider_error=;
+4. after merge with no grant, provider and store healthy:
+   =:no_eligible_grant=, no launch;
+5. arrival (stage 3 step 5): an unfunded-bucket run (origin set, mapped
+   bucket asserted separately) → =:no_allocation=, no launch; a funded
+   bucket outside its window → =:no_allocation=; the owner-started run in
+   the window reserves;
+6. workshop allocation: unusable before =available_from= unless
+   =released_at=; overlapping open =:b1= allocations → =:ambiguous_allocation=;
+7. grant races (existing C9 race harness): exhausted, expired, revoked
+   between reservation and launch, wrong profile, day rollover, held
+   reserve;
+8. withholding boundaries: witness mismatch, timeout, crash → charged and
+   withheld;
+9. calibration still needs its exemption: a =:calibration= request to an
+   ordinary pinned server without the exemption entry is refused;
+10. the caller-inventory guard (positive on today's tree; a synthetic new
+    caller in a fixture source fails it);
+11. the existing tests asserting =:real_model_staged= for a pinned
+    non-test-launcher server (=provider_runtime_test=,
+    =model_provider_test= incl. the R0-06 "shipped tuples do not lift
+    staging", =claude_cli_test=, =runtime_status_test=) are *deliberate
+    old-test changes*, listed exactly in the RED notes, each now asserting
+    the next refusal on that path (typically =:no_eligible_grant= or
+    =:witness_store_untrusted=), never a weakened assertion;
+12. no test makes a real model call (fake CLI only; existing guard).
+
+* Open questions for Codex
+- OQ-E3P-1: version preflight (a) metadata binding vs (b) =--version=.
+- OQ-E3P-2: should =status/0= surface the next admission refusal
+  (e.g. "no eligible grant") on the Admin card, or stay as today (runtime
+  eligibility only)? Proposed: stay; out of E3 scope.
+
+* Verification
+Own partition =_l2e3=, =+S 4:4=, DB slot coordinated. Full gate at a
+fixed head.
+
+* Risks
+- Lifting staging makes the existing (2)–(5) checks the only stops; their
+  coverage in RED items 2, 5–8 is the evidence.
+- The owner's grant shape (stage 3) is the operational fence; a wrong
+  allocation shape refuses (fails closed), it does not over-admit.
