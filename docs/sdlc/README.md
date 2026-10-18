@@ -1,6 +1,6 @@
 # From demo to product: the SDR Agent development process
 
-Status: **in force** (v1.0, data revision 2026-10-08.4). The owner passed
+Status: **in force** (v1.0, data revision 2026-10-18.1). The owner passed
 gate G0 on 2026-10-08 ([`gates/G0.md`](gates/G0.md)), accepting this process
 and the product-phase charter ([ADR-0014](../adr/0014-product-phase-charter.md)),
 which supersedes the unattended-build charter
@@ -131,14 +131,22 @@ Rules:
 2. Material changes after review go back to the reviewer. Pull requests merge
    only on green CI for their exact commit. A recorded context-only range-diff
    can carry a prior approving review forward, never the CI result.
-   Since D-157, Claude and Codex make merge decisions without the owner: a PR
-   merges once the reviewer's approval names its exact head commit, any
-   conditions are met, the required `verify` check is green and the branch is
-   up to date. The merge is a rebase merge bound to that commit
-   (`gh pr merge --rebase --match-head-commit <sha>`), never `--admin`, and
-   never with a waived blocker. Claude merges; Codex is the backup. Gate
-   approvals, ADR acceptance, grants, spend, real calls and owner-run steps
-   stay with the owner.
+   Since [D-157](decisions.md), merges no longer wait for the owner. Independent
+   review is unchanged (rule above and "Packet lifecycle" below). A PR may then
+   merge only when all of these hold:
+   - **Codex has approved its current head commit**, with every condition of
+     that approval met. For a Codex-authored PR this sign-off is in addition
+     to Claude's independent review;
+   - the required `verify` check is green for that exact commit;
+   - the branch is up to date with `main`;
+   - no blocker is waived;
+   - dependent PRs merge in dependency order.
+
+   The merge is a rebase merge bound to that commit
+   (`gh pr merge --rebase --match-head-commit <sha>`), never `--admin`. Claude
+   merges; Codex is the backup. Still owner-only: gate approvals, ADR
+   acceptance, grants, enablement, spend, promotion, real model calls and
+   owner-run steps.
 3. The owner settles disagreements between Claude and Codex, but that does not
    waive an unresolved security blocker. That needs a fix, or a written
    exception with scope and expiry backed by a recorded, independent security review of the exception and its mitigation, with a written disposition of the finding. If that review still finds it blocking, the gate stays blocked. Constraints that cannot be waived cannot be excepted at all.
