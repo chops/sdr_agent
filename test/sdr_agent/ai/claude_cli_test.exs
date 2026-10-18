@@ -616,8 +616,17 @@ defmodule SdrAgent.AI.ClaudeCLITest do
     {:ok, server} = ClaudeCLI.start_link([])
     assert {:error, :pinned_cli_unavailable} = ClaudeCLI.complete(request(), server: server)
 
+    # L2 E3 (deliberate change; was ":real_model_staged"): pinned, the
+    # ordinary path reaches launch admission, which refuses the actorless
+    # request before any process (with no tenant the actorless denial cannot be
+    # audited, so the server's rescue reports :launch_admission_failed).
     {:ok, server} = ClaudeCLI.start_link(executable: PinnedCLI.inject_identity!())
-    assert {:error, :real_model_staged} = ClaudeCLI.complete(request(), server: server)
+
+    result = ClaudeCLI.complete(request(), server: server)
+
+    assert result == {:error, :launch_admission_failed},
+           "E3: the pinned server's launch admission refuses an unreserved request; " <>
+             "got #{inspect(result)}"
 
     assert PinnedCLI.launches(counter) == 0
   end
@@ -941,7 +950,9 @@ defmodule SdrAgent.AI.ClaudeCLITest do
       refute_received {:launch_admission, _, _, _}
     end
 
-    test "outside a test launcher the admission seam is ignored (the real launcher is staged)" do
+    # L2 E3 (deliberate change; was ":real_model_staged"): the real launcher
+    # now reaches the real launch admission; the seam is still ignored.
+    test "outside a test launcher the admission seam is ignored (real admission refuses)" do
       dir = Path.join(System.tmp_dir!(), "sdr-claude-seam-#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)
       on_exit(fn -> File.rm_rf!(dir) end)
@@ -953,7 +964,11 @@ defmodule SdrAgent.AI.ClaudeCLITest do
           launch_admission: LaunchAdmission.recording(self())
         )
 
-      assert {:error, :real_model_staged} = ClaudeCLI.complete(request(), server: server)
+      result = ClaudeCLI.complete(request(), server: server)
+
+      assert result == {:error, :launch_admission_failed},
+             "E3: the real launch admission refuses an unreserved request; got #{inspect(result)}"
+
       refute_received {:launch_admission, _, _, _}
       assert PinnedCLI.launches(counter) == 0
     end

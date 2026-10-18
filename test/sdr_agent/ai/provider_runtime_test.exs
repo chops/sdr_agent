@@ -339,7 +339,9 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       assert PinnedCLI.launches(counter) == 0
     end
 
-    test "R0-02: the real launcher with the reviewed pin is staged: refused, zero launches" do
+    # L2 E3 (deliberate change; was ":real_model_staged"): the reviewed pin
+    # is now eligible; a request with no reserved row still launches nothing.
+    test "E3: the real launcher with the reviewed pin is eligible; nothing launches unreserved" do
       dir = tmp_dir!()
       counter = PinnedCLI.stub_shim!(dir)
       bin = PinnedCLI.inject_identity!()
@@ -353,10 +355,19 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       assert %{executable: ^bin, executable?: true, test_launcher?: false} =
                ClaudeCLI.attestation()
 
-      assert {:error, :real_model_staged} = Runtime.resolve([])
-      assert {:error, :real_model_staged} = Runtime.resolve(provider: ClaudeCLI)
-      assert {:error, :real_model_staged} = ClaudeCLI.complete(request(), [])
-      assert %{effective: nil, refusal: :real_model_staged} = Runtime.status()
+      resolved = Runtime.resolve([])
+
+      assert match?({:ok, _model}, resolved),
+             "E3: the reviewed pin resolves; got #{inspect(resolved)}"
+
+      {:ok, model} = resolved
+      assert model[:provider] == ClaudeCLI
+
+      assert {:ok, _model} = Runtime.resolve(provider: ClaudeCLI)
+      # Launch admission refuses the actorless request before any process;
+      # with this tenant's ledger its denial is audited (Forbidden).
+      assert {:error, :launch_not_admitted} = ClaudeCLI.complete(request(), [])
+      assert %{effective: ClaudeCLI, refusal: nil} = Runtime.status()
       assert Runtime.refusal_message(:real_model_staged) =~ "no model call was made"
       assert PinnedCLI.launches(counter) == 0
     end
@@ -371,9 +382,17 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
         {ClaudeCLI, name: ClaudeCLI.server(), executable: bin, test_launcher: true}
       )
 
+      # L2 E3 (deliberate change; was ":real_model_staged"): the ignored flag
+      # leaves the real launcher, now eligible; unreserved, nothing launches.
       assert %{test_launcher?: false} = ClaudeCLI.attestation()
-      assert {:error, :real_model_staged} = Runtime.resolve([])
-      assert {:error, :real_model_staged} = ClaudeCLI.complete(request(), [])
+      resolved = Runtime.resolve([])
+
+      assert match?({:ok, _model}, resolved),
+             "E3: the real launcher resolves; got #{inspect(resolved)}"
+
+      # No tenant exists here, so the actorless denial cannot be audited and
+      # the server's rescue reports :launch_admission_failed; no process.
+      assert {:error, :launch_admission_failed} = ClaudeCLI.complete(request(), [])
       assert PinnedCLI.launches(counter) == 0
     end
 
