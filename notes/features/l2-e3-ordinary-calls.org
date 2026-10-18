@@ -7,8 +7,10 @@ entity/action PASS; owner D-156 (scope accepted, B5' acknowledged). Not
 merge, enablement, grant or spend approval. The first real ordinary call is
 owner-run and separately authorized (stage 4).
 
-Author Claude; reviewer Codex. Phase: *plan revision 3, awaiting Codex
-review*. Revision 2 (=7a78e5f=): narrow NEEDS-REVIEW (=a0b40506=) on
+Author Claude; reviewer Codex. Phase: *plan revision 4, awaiting Codex
+review*. Revision 3 (=ecabc64=): NEEDS-REVIEW (=ffae271d=): the pre-read
+was dropped for the existing locked gate read and a truthful rollback
+contract. Revision 2 (=7a78e5f=): narrow NEEDS-REVIEW (=a0b40506=) on
 the evidence read inside the transaction. Revision 1 (=0aa2a20=) got NEEDS-REVIEW
 (=codex-l2e3-0aa2a20-plan-review.md=, sha256 =d9d6b366…=): five
 must-fixes, taken below. No RED before plan PASS. Base: =origin/l2-e1= (E1 GREEN =9c64247=, PR #181).
@@ -47,9 +49,21 @@ own review, gate and owner decision.
   (=model.ex:67=); =Model.call= only from the four SDR actions run by
   =Runner.run= from =AgentWorker= and =ReplyWorker=; =ClaudeCLI.complete/2=
   only via the facade's dynamic provider call; =GenServer.call(server,
-  {:complete, _})= only inside =ClaudeCLI=; =Agents.admit_launch/3= only
-  from =ClaudeCLI=; =Agents.reserve_model_invocation/3= from the facade and
-  the test-seam calibration console. No caller-inventory guard exists.
+  {:complete, request, enqueued_at})= (three elements) only inside
+  =ClaudeCLI.complete/2=; =Agents.admit_launch/3= only from =ClaudeCLI=;
+  =Agents.reserve_model_invocation/3= from the facade and the test-seam
+  calibration console. The existing =ModelProviderInventoryTest= guards
+  provider =prepare/complete= calls (aliases, captures, =apply=); it does not
+  yet cover the server message or the admission entry points.
+- Under the launch locks, =Gate.admit_launch/3= already re-derives the
+  recorded calibration authority from the invocation's one original
+  reservation event: a non-proof run naming a tuple →
+  =:calibration_not_authorized= / =:not_a_proof_run=; missing, duplicated
+  or malformed evidence → =:calibration_not_authorized= /
+  =:authority_invalid=; none → ordinary. In
+  non-test builds every =:proof= call is refused there. The only gap an
+  ordinary launch opens is a test-seam proof row launched without its
+  exemption.
 
 * Contract corrections (copy, with this plan)
 - Stage 3 step 3 and the arrival-proof bullet say an unfunded-bucket run
@@ -74,7 +88,7 @@ persisted entity, attribute, relationship or migration.
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |---|---|---|---|---|---|---|---|
-| Launch admission (=Agents.admit_launch/3=, =Admission.launch_check/6=) | Existing, E3 delta | The sent boundary of a reserved ClaudeCLI call | New option =ordinary_launch: true= (set only by the new ordinary =staged/3= clause); mutually exclusive with =calibration_launch:= (both → =:calibration_launch_invalid=) | Unchanged: the locked run, invocation, grant, allocation | With =ordinary_launch: true=: the reservation evidence is *read before the locked transaction* (as =Gate.observe_store/0= is today, after the tenant-scoped =launch_target= preflight, never inside the transaction), with the non-raising =Gate.reservation_authority/1= on that tenant's invocation; a failed read classifies as =:invalid= and never aborts the launch transaction. The class is passed into =launch_check/6= as pure input, checked against the locked invocation's id, and under the existing locks (run → invocation → grant/allocation =FOR SHARE= → head), before any other effect, the locked run must not be =:proof= and the class must be =:no_tuple=. The evidence is the invocation's one original reservation event: append-only and written only at reservation, which precedes any launch, so reading it unlocked loses nothing (a later-appended duplicate is outside what launch can observe; disclosed). Otherwise the existing committed launch refusal (=admit_or_refuse= → =refuse_launch=, inside the same uncorrupted transaction): =%Refused{stage: :launch, reason: :calibration_not_authorized, check: :ordinary_scope}= (proof run or recorded tuple) or =check: :ordinary_unbindable= (=:no_event= / =:invalid=, a failed read included); the row reserved → failed, no port, no exemption consumed, no receipt. Without the option, behaviour is unchanged (incl. the existing "absent keeps ordinary launch behaviour" test-launcher case) | AGT only (unchanged) | none |
+| Launch admission (=Agents.admit_launch/3=, =Admission.launch_check/6=) | Existing, E3 delta | The sent boundary of a reserved ClaudeCLI call | New option =ordinary_launch=, set (as exactly =true=) only by the new ordinary =staged/3= clause. Shape, checked first with the existing expectation check (=valid_expectation=, before any read): absent → today's behaviour; =true= with =calibration_launch:= absent → ordinary mode; =ordinary_launch= present as =nil=, =false= or any non-=true= value, or present together with =calibration_launch:= (an explicit =calibration_launch: nil= included) → =:calibration_launch_invalid=, nothing locked or written (as a malformed expectation today) | Unchanged: the locked run, invocation, grant, allocation | Ordinary mode adds one pure check on the *locked run*, inside =launch_check/6= after the existing run-state, legacy-row and profile refusals and before the gate: =run.usage_origin == :proof= → the existing committed launch refusal =%Refused{stage: :launch, reason: :calibration_not_authorized, check: :ordinary_scope}= (row reserved → failed, its launch-refusal event appended, no port, no exemption entry consumed, no *calibration launch receipt*). No new read. Recorded-authority evidence stays with the existing =Gate.admit_launch/3= re-read under the same locks (=:not_a_proof_run=, =:authority_invalid=), so a duplicate or tuple appended after reservation is still seen at launch. If that locked read itself fails (a storage error), the existing behaviour holds and is pinned honestly: the launch transaction rolls back, no committed refusal is promised, the row stays =reserved= (never sent, no port), and the facade then fails it in its own transaction (charged, never launched); inside a caller's =Audit.transaction/1= that caller's transaction is aborted, as today. Without the option, behaviour is unchanged (incl. "absent keeps ordinary launch behaviour") | AGT only (unchanged) | none |
 | Pinned CLI identity (=nix/app-claude-cli.identity=, =PinnedExecutable=) | Existing, E3 delta | The reviewed artifact the app may launch | Each line gains a 4th field, the reviewed CLI version of that exact store path + sha256 (=2.1.294=); parsed at compile time, a missing/malformed field fails compilation; =identity/0= exposes =:version=; the test-seam injected identity must carry the same shape | Unchanged | Metadata only, inside the existing immutable-artifact trust (boot sha256 verification and the per-check file metadata stay). Checked against =ModelProfiles.cli_version/0= at resolution and in the server immediately before each launch (=pinned_launch=, which every queued call passes). Mismatch/missing → =:pinned_cli_version_mismatch=. It is reviewed artifact evidence, never an observed version; the per-call init check stays mandatory | Build-time review only | Whether the identity format change needs an ADR-0004 R0-amendment note (proposed: a one-line note in the same PR) |
 
 Reviewer precedence: ai-pair; reviewer *Codex*. Verdict: *UNREVIEWED*
@@ -126,8 +140,9 @@ locked rows decide (Entity delta). Clause order:
    =:real_model_staged= (unchanged; clause 3 does not match it).
 So a genuinely authorized proof reservation whose request lost its
 =:calibration= key reaches clause 3 and is refused at launch admission
-(=:ordinary_scope=): no process, no sent transition, no exemption entry
-consumed, no receipt.
+(=:ordinary_scope=, from the locked run): no process, no sent transition,
+no exemption entry consumed, no calibration launch receipt; the committed
+launch-refusal event is expected.
 
 ** 4. Caller inventory (must-fix 4)
 Extend the existing =ModelProviderInventoryTest= (it already resolves
@@ -151,8 +166,9 @@ Stale comments/moduledocs updated: =runtime.ex:29-33=,
 =runtime.exs:84-85=, =witness.ex:137-139= (ships three entries now).
 
 ** Not changed
-Admission, Gate, ResultGate, C9 selector, Witness, calibration paths,
-provider selection (still dev-only startup config, default Fake), no
+Gate, ResultGate, the C9 selector, Witness, the calibration exemption and
+console; Admission only gains the ordinary-mode check above; provider
+selection (still dev-only startup config, default Fake), no
 config value or env flag added. No new resource/attribute/migration.
 
 * Affected modules
@@ -183,26 +199,38 @@ in the RED notes).
    - negative: a witness mismatch for that purpose → withheld, charged,
      not readable downstream;
    - the fixed calibration prompt is never used as an ordinary case;
-1a. direct entries: a raw =ClaudeCLI.complete/2= or server call with no
-   reserved row, a mismatched invocation id, another actor or tenant, or a
-   missing/invalid witness context → refused (=:invocation_not_found=,
-   =:invocation_not_reserved=, =:invalid_witness_context=, Forbidden), no
-   process;
-1b. must-fix 1: a genuinely authorized reserved proof row (test-seam
-   calibration reservation), a valid witness, the same pinned
-   non-test-launcher server, *only* the =:calibration= key removed →
-   =:calibration_not_authorized= / =:ordinary_scope=; no process, row
-   reserved → failed, the exemption entry unconsumed, no receipt. Also: a
-   present =calibration: nil= or malformed key (unchanged refusals); an
-   =:assignment= run row whose reservation event records a tuple
-   (fixture SQL, triggers restored) → =:ordinary_scope=; a row with no or a
-   duplicated reservation event → =:ordinary_unbindable=; both options
-   at once → =:calibration_launch_invalid=; a *failed evidence read*
-   (real connection: =audit_events= held =ACCESS EXCLUSIVE= by another
-   participant, the launcher's =lock_timeout= bounded) → a committed
-   =%Refused{check: :ordinary_unbindable}=, the row reserved → failed, the
-   refusal event appended, no port — proving the transaction was not
-   aborted;
+1a. direct entries to the pinned ordinary server, each with no process:
+   a witness naming an id not in the actor's tenant (or none) →
+   =:invocation_not_found=; an id already sent or terminal →
+   =:invocation_not_reserved=; a missing or malformed witness context →
+   =:invalid_witness_context=; a non-AGT actor → =:launch_not_admitted=
+   (Forbidden, with its existing denial audit);
+1b. must-fix 1 (ordinary mode):
+   - a genuinely authorized reserved proof row (test-seam calibration
+     reservation), a valid witness, the same pinned non-test-launcher
+     server, *only* the =:calibration= key removed → =%Refused{stage:
+     :launch, reason: :calibration_not_authorized, check: :ordinary_scope}=;
+     no process, row reserved → failed, its refusal event, the exemption
+     entry unconsumed, no calibration launch receipt;
+   - option shape at =Agents.admit_launch/3=: =ordinary_launch: nil=,
+     =false=, ="true"=, and =ordinary_launch: true= with
+     =calibration_launch:= (a valid map, and an explicit =nil=) →
+     =:calibration_launch_invalid=, nothing written; the existing
+     =calibration: nil= / malformed request-key refusals unchanged;
+   - existing evidence kept by the gate in ordinary mode: an =:assignment=
+     row whose reservation event names a tuple (fixture SQL, triggers
+     restored) → =:not_a_proof_run=; no or a duplicated reservation event →
+     =:authority_invalid=; a duplicate appended *after* reservation and
+     before launch (barrier between reserve and launch) → =:authority_invalid=
+     at launch;
+   - a failed locked evidence read (real connection; a holder takes
+     =audit_events= =ACCESS EXCLUSIVE=; the launcher's =lock_timeout=
+     bounded; its backend asserted blocked by that holder; the real
+     =lock_not_available= error observed): the launch transaction rolls
+     back, the row stays =reserved=, no sent, no port; *then* the holder is
+     released, and the facade's own fail of the reserved row commits
+     (charged, never launched). Timeouts reset; participants bounded and
+     joined;
 1c. non-test build (must-fix 3): a dev-VM probe, run by Claude with
    =MIX_ENV=dev mix run --no-start= (no database, no app start), shows
    =CalibrationExemption= is not compiled and the ordinary clause's
