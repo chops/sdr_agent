@@ -64,7 +64,8 @@ any other method unless the owner names it first.
    needs to see to confirm one.
 4. **Attended sources:** which steps, if any, the owner must do personally
    (as with LinkedIn), and where each must stop.
-5. **LinkedIn citation handling:** already decided by D-110 (private
+5. **"Not a fit":** what setting a suggested person aside should do (keep a reason, stop suggesting them for the account, or something else). The mockup shows it as an open question.
+6. **LinkedIn citation handling:** already decided by D-110 (private
    citation screenshots allowed, stored only on the owner's machine, never
    shared). The walkthrough only confirms it still fits.
 
@@ -77,7 +78,8 @@ any other method unless the owner names it first.
 | How it is reached (owner-attended, owner-supplied file, provider API) | TBD |
 | Needs keys or an account? Whose? | TBD; nothing is set up by this packet |
 | Cost and quota, and who approves spend | TBD; no spend authorized |
-| Terms-of-use limits the owner wants respected | TBD |
+| Applicable terms, access restrictions and required compliance decisions | TBD; the owner's preference alone is not access authorization |
+| Retention (keep or wipe), role access, allowed processing and export, and what queries disclose to the provider | TBD; reuse C5 and ADR-0014, not assumed implemented |
 | What is stored, and where | TBD |
 | Citation kept with each candidate | TBD |
 | How it fails, and what the user sees | TBD |

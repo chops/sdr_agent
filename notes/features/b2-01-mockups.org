@@ -25,6 +25,12 @@ produced with B2-02's source contract after the walkthrough, and goes to
 independent entity review then.
 No ADR required: no architecture decision.
 Architecture unchanged: no diagram update needed.
+Scope of this "no" (Codex 4ede349c): it covers only this static, explicitly
+unaccepted exploration. It is not an entity PASS for the real candidate,
+source or action model: the source contracts, candidate provenance and
+confirmation, and their lifecycle need an independent entity PASS before
+affected-module planning or build. "Not a fit" is shown as a walkthrough
+question, not an approved rule.
 
 * Boundaries shown in the design (must survive into the contract)
 - Search sources are shown as not set up; nothing searches or spends until
