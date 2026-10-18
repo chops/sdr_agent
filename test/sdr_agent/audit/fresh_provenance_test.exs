@@ -48,16 +48,34 @@ defmodule SdrAgent.Audit.FreshProvenanceTest do
     assert :persistent_term.get(@cache, provenance_absent()) == provenance_absent()
   end
 
-  test "after a helper run, its registered cleanup restores both exactly" do
+  # The helper's own registered cleanup, run by ExUnit: an observer
+  # registered *before* the helper runs after it (on_exit is LIFO), and the
+  # module's setup restoration, registered first, still runs last.
+  test "its registered cleanup restores an absent nonce and a present cache" do
+    Application.delete_env(:sdr_agent, @nonce)
+    cached = Provenance.current()
+
+    on_exit(fn ->
+      assert Application.fetch_env(:sdr_agent, @nonce) == :error
+      assert :persistent_term.get(@cache, provenance_absent()) == cached
+    end)
+
+    fresh = fresh_provenance!()
+    assert fresh != cached
+    assert {:ok, _nonce} = Application.fetch_env(:sdr_agent, @nonce)
+  end
+
+  test "its registered cleanup restores a pre-existing nonce and an absent cache" do
     Application.put_env(:sdr_agent, @nonce, "pre-existing")
     :persistent_term.erase(@cache)
-    previous = {Application.fetch_env(:sdr_agent, @nonce), provenance_absent()}
 
-    # The helper's own cleanup, applied to the state it captured.
+    on_exit(fn ->
+      assert Application.fetch_env(:sdr_agent, @nonce) == {:ok, "pre-existing"}
+      assert :persistent_term.get(@cache, provenance_absent()) == provenance_absent()
+    end)
+
     _fresh = fresh_provenance!()
-    restore_provenance(elem(previous, 0), elem(previous, 1))
-
-    assert Application.fetch_env(:sdr_agent, @nonce) == {:ok, "pre-existing"}
-    assert :persistent_term.get(@cache, provenance_absent()) == provenance_absent()
+    refute Application.fetch_env(:sdr_agent, @nonce) == {:ok, "pre-existing"}
+    assert %{} = :persistent_term.get(@cache, provenance_absent())
   end
 end

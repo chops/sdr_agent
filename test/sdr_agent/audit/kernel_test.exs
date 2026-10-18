@@ -49,17 +49,28 @@ defmodule SdrAgent.Audit.KernelTest do
     end
 
     test "with its provenance already recorded, records only the genesis event (#178)" do
+      # Recorded as the kernel records it (its `:record` policy checks the
+      # kernel context), before the tenant exists.
       {:ok, recorded} =
         SdrAgent.Audit.ProvenanceSnapshot
-        |> Ash.Changeset.for_create(:record, SdrAgent.Audit.Provenance.current())
-        |> Ash.create(authorize?: false)
+        |> Ash.Changeset.for_create(
+          :record,
+          SdrAgent.Audit.Provenance.current(),
+          SdrAgent.Audit.Kernel.opts()
+        )
+        |> Ash.create()
 
       tenant = bootstrap!()
 
       assert [genesis] = events(tenant)
       assert genesis.event_type == "tenant.created"
+      assert genesis.sequence == 1
       assert genesis.provenance_snapshot_id == recorded.id
-      assert Enum.all?(events(tenant), &(&1.event_type != "system.provenance.recorded"))
+
+      auditor = system_actor(:auditor_cli, tenant)
+      assert {:ok, %{last_sequence: 1} = head} = Audit.get_chain_head(actor: auditor)
+      assert head.last_event_hash == genesis.event_hash
+      assert {:ok, %{valid?: true, last_sequence: 1}} = Audit.verify_chain(actor: auditor)
     end
 
     test "records a provenance snapshot of the build and runtime" do
