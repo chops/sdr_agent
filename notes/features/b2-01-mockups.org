@@ -1,0 +1,89 @@
+#+title: B2-01 finding-people mockups and B2-02 walkthrough packet
+#+date: 2026-10-18
+
+* Scope and approval
+Five local static design states of one "finding people" flow (#70): target
+set, account, people at an account, contact candidates, attended LinkedIn.
+Plus the owner algorithm-walkthrough packet for B2-02 (#71). Synthetic
+examples only; no scripts, requests, database, real actions or application
+implementation.
+
+Authority: the owner's D-158 ("Yes, start now", standup page, 2026-10-18
+12:14 MDT) starts B2 drafting only. Codex f8b0b920 agreed: docs only, E3
+first, no owner-algorithm, access or spend assumptions, candidate and
+attended-source boundaries explicit. These mockups grant no build authority.
+B2's requirements, source contract, entity delta and G5 come after the
+walkthrough and need their own reviews and owner gate.
+
+* Entity and architecture evaluation
+Entity Model trigger: no
+Reason: static fictional presentation only; no resource, attribute,
+calculation, aggregate, relationship, identity, policy, action or backend
+event contract is added or changed. The real B2 entity delta (accounts,
+targets, candidate people, contact candidates and their sources) is
+produced with B2-02's source contract after the walkthrough, and goes to
+independent entity review then.
+No ADR required: no architecture decision.
+Architecture unchanged: no diagram update needed.
+
+* Boundaries shown in the design (must survive into the contract)
+- Search sources are shown as not set up; nothing searches or spends until
+  the owner adds keys under a separate decision.
+- One active target per company, with history; a second person only by a
+  referral handover (C3's admission rule).
+- People at an account are suggestions with a citation, not leads.
+- Contact candidates (email, phone, LinkedIn URL) are one row per source,
+  unconfirmed, never auto-promoted, never written to the CRM; the owner
+  confirms each on Home.
+- The owner's own method is an explicit placeholder: not guessed.
+- Attended LinkedIn runs in the owner's browser, signed in by the owner;
+  deterministic and human-paced; stops on CAPTCHA with no evasion; no model
+  drives it; captures name and profile URL only. Private citation
+  screenshots stay on the owner's machine (D-110).
+
+* Files and steps
+1. docs/product/b2/targets.html: describe a market or import a list with
+   provenance; exclusions visible with reasons; web search disabled with
+   its reason.
+2. docs/product/b2/account.html: one account, its active target and contact
+   history; second person blocked; referral handover explained.
+3. docs/product/b2/people.html: suggested people with source and date;
+   choosing one goes through normal admission.
+4. docs/product/b2/candidates.html: unconfirmed contact candidates per
+   source; confirmation happens on Home; owner-method placeholder.
+5. docs/product/b2/linkedin.html: the attended steps, the captured fields,
+   the private screenshot and the CAPTCHA stop.
+6. docs/product/b2/walkthrough-packet.md: the B2-02 owner walkthrough
+   packet (tentative Tue Oct 20, 10:00 to 11:30 MDT).
+7. Static and rendering checks; independent Codex review of the exact head;
+   then the owner walk before the algorithm walkthrough.
+
+* Verification and limits
+Static design documents change no executable behavior: no RED/GREEN gate
+is claimed, and no mix or test command was run for this branch.
+- Static: every page has the CSP meta; no script, form, img, iframe, link,
+  src or url(), and no http(s) URL; ids unique; every fragment link has a
+  target; every state-nav file exists. All five pass.
+- Data: only invented companies, example.org domains, 555-01xx numbers and
+  linkedin.example profile links.
+- Rendering: headless Chrome screenshots at 1440px, and each page inside a
+  390px-wide frame (headless Chrome cannot make a 390px window): no
+  horizontal overflow seen. Chrome DevTools emulation was unavailable (its
+  profile was in use by another session), so keyboard focus and
+  fragment-panel clicks were not exercised in a browser.
+
+* Neutral walk script
+First explain only: "These are fictional examples. Nothing you click will
+search, spend or contact anyone." Then ask, without a suggested answer:
+- Targets: "What would you do on this screen?"
+- Account: "What can you tell about this company from here?"
+- People: "What would you do with these people?"
+- Contact candidates: "What do you understand about these entries?"
+- LinkedIn: "Walk me through how you'd use this."
+Clarify unfamiliar wording if asked, but do not teach the intended answer.
+Record first interpretations, actions, confusing labels and requests before
+discussing internals. Confusion or rejection is useful evidence.
+
+* Progress
+- 2026-10-18: five mockups authored and checked (b646834); this note and the
+  walkthrough packet added. Next: Codex review of the exact head.
