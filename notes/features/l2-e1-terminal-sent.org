@@ -1,0 +1,139 @@
+#+TITLE: L2 E1 — terminal-run `sent` rows become unknown — implementation plan
+#+DATE: 2026-10-17
+
+* Authority and status
+Contract: =docs/product/r0/l2-enablement.md= draft 4 (=ed819b7=), Codex
+entity/action PASS. Owner D-156 accepts E1/E3 scope and the B5' residual
+(stage 1). Not merge, enablement, grant or spend approval.
+
+Author Claude; reviewer Codex. Current phase: *plan, awaiting Codex review*.
+No RED before plan PASS. No production change in this commit.
+
+Base: =origin/l2-enablement= =ed819b7= (main =6f271ab= + the contract).
+E1 merges before E3 (release dependency).
+
+* Entity Model
+Entity Model trigger: yes. The table is the contract's (PASS at =ed819b7=);
+this plan adds no entity, attribute, relationship, policy or migration.
+
+* Design
+** Domain function (=SdrAgent.Agents=)
+=Agents.mark_terminal_run_sent_unknown(run_id, stale_after_seconds, opts)=,
+actor =:agent_runtime= (the existing =:mark_unknown= policy; any other actor
+is =Ash.Error.Forbidden=). One =transact/1= (Kernel transaction):
+
+1. lock the run =FOR UPDATE= (existing =lock_run/2=; run first, as admission
+   and =finish_model_invocation=);
+2. re-check under the lock: status in =[:succeeded, :failed,
+   :budget_exhausted, :cancelled]= else ={:error, :not_terminal}=;
+   =usage_origin != :proof= else ={:error, :proof_run}=;
+3. cutoff = =Clock.utc_now()= read inside the transaction minus the seconds;
+4. lock *all* the run's =sent= invocations =FOR UPDATE= in one statement,
+   sorted =sequence_in_run= asc (re-reads status and =sent_at=);
+5. for each locked row with =sent_at < cutoff= (strict; equal or nil is
+   skipped): =do_update(row, :mark_unknown, %{}, actor)= — the existing
+   action, its =Transition= =[:sent] → :unknown= and its
+   =model.invocation.unknown= =AppendEvent=. *No =settle/2=*, no run write,
+   no Failure, no Operation, no release, no lease, no grant write;
+6. returns ={:ok, count}= (0 is a no-op commit).
+
+All dependent rows (run, every =sent= row) are locked before the first
+append (the first =AppendEvent= takes the head), per ADR-0009. Same order
+as case (b) and admission.
+
+The generic =finish_model_invocation= / =mark_model_invocation_unknown/2=
+are *unchanged* (no terminal-run bypass or flag). Calibration's own path
+(=CalibrationRecovery=) is unchanged.
+
+"Recorded calibration authority" is read as =usage_origin == :proof=:
+calibration launch (=Admission.calibration_launch/1=) only admits proof
+runs, and =CalibrationRecovery.recoverable?/2= requires it. Codex to
+confirm, or name a second marker to re-check under the lock.
+
+** Sweeper case (c) (=SdrAgent.SDR.StaleRunSweeper=)
+- After case (b), a new step in =sweep/1=: an unlocked prefilter
+  =terminal_sent_runs/2=: =ModelInvocation= with =tenant_id=, =status ==
+  :sent=, =sent_at < cutoff= and =exists(agent_run, status in @terminal and
+  usage_origin != :proof)=, selecting =agent_run_id=, uniq, sorted.
+- Per run: =Agents.mark_terminal_run_sent_unknown/3=. =:not_terminal= and
+  =:proof_run= join the existing skip list of =recovered/1=.
+- *Setting check:* =stale_after_seconds/0= is unchanged for cases (a), (b)
+  and R3. Case (c) reads it through a new =valid_stale_after/0=: a positive
+  integer, else the case (c) pass writes nothing and logs the fixed warning
+  =stale_run_sweeper.e1_invalid_stale_after= (no value printed). Cases
+  (a)/(b) keep today's behavior on a bad setting (=DateTime.add/3= raises);
+  widening the check to them is out of E1 scope (Codex to confirm).
+- Moduledoc gains a case (c) paragraph: ledger-only, not cleanup proof, not
+  retry permission, no Failure, counters not backfilled.
+
+* Affected modules
+- =lib/sdr_agent/agents.ex= — the new public function and its =@doc=; the
+  domain moduledoc's action list.
+- =lib/sdr_agent/sdr/stale_run_sweeper.ex= — case (c), the setting check,
+  moduledoc.
+- No resource, policy, migration, config or dependency change. No diagram
+  regeneration (no boundary change).
+
+* RED test inventory
+New =test/sdr_agent/sdr/terminal_sent_recovery_test.exs= (=AuditCase=,
+async false, the =reserved_recovery_test.exs= fixtures and style):
+
+1. each terminal status (succeeded, failed, budget_exhausted, cancelled):
+   an old =sent= row → =unknown=, one =model.invocation.unknown= event, the
+   run row byte-identical (status, reason, counters, =updated_at=), no new
+   Failure, Operation unchanged;
+2. a failed run whose attention Failure is already resolved: stays resolved,
+   nothing reopened;
+3. a recent row (=sent_at= after the cutoff) and a row exactly at the cutoff:
+   untouched; a later pass after aging converts it;
+4. invalid setting (0, -1, ="1800"=, =1.5=): case (c) writes nothing and
+   logs the fixed code; cases (a)/(b) unaffected as today;
+5. negative control: a terminal =:proof= run's =sent= row: no transition, no
+   event, no release, no latch, no attestation, no cleanup inference;
+6. queued and running runs: case (c) never touches them (case (a) owns
+   abandoned running runs, unchanged);
+7. idempotency: a second sweep writes no event; the row is never =failed=,
+   =completed=, released (=ModelResultRelease= absent) or re-sent
+   (=sequence_in_run= set and launch count unchanged);
+8. coverage across providers: Fake, legacy gen-1 and gen-2 ClaudeCLI rows;
+9. =grant_usage/2= for the row's grant: identical before and after (still
+   charged for its grant, allocation and UTC day);
+10. domain function: a non-=:agent_runtime= actor (admin, auditor) is
+    =Forbidden= and writes nothing; =:not_terminal=/=:proof_run= return with
+    no write;
+11. late facade settle after recovery: ClaudeCLI path (re-read) → ={:error,
+    :invocation_already_settled}=, nothing written, nothing released. *Fake
+    path:* =ModelProvider.current/1= does not re-read for the Fake, so a
+    late Fake settle reaches =finish_model_invocation= with a stale =:sent=
+    struct; the terminal-immutable trigger
+    (=model_invocations_terminal_immutable=) and =BudgetCounter= refuse it,
+    but with a different error. RED asserts no write and no release for
+    both; Codex to rule whether the Fake must also return exactly
+    =:invocation_already_settled= (that would be an extra facade change).
+
+New =test/sdr_agent/sdr/terminal_sent_recovery_race_test.exs= (real
+connections, =pg_blocking_pids= barriers, as the case (b) and C1-03 races):
+
+12. concurrent operator cancel of a running run with a =sent= row vs the
+    pass: the run lock serializes; the pass converts only once the run is
+    terminal (under its lock), never before;
+13. concurrent late facade complete vs the pass: exactly one wins; if the
+    complete wins on a running run it settles normally; if the run is
+    terminal the pass wins and the complete gets the settled refusal;
+14. lock order: run then all =sent= rows before the first append (the same
+    assertion style as =reserved_recovery_test.exs= "lock order").
+
+Expected RED: the domain function is undefined (asserted via a guarded
+=function_exported?= / =Code.ensure_loaded= check with an explicit message,
+not an =UndefinedFunctionError=), and the sweep leaves the row =sent=.
+Controls 5, 6 and parts of 3/4 pass in RED (existing behavior).
+
+* Verification
+Own partition =MIX_TEST_PARTITION=_l2e1=, =+S 4:4=, after Codex's DB slot
+signal. Then the full gate (format, =bin/verify=, credo, hex.audit) at a
+fixed head, no commits during it.
+
+* Risks
+- Counters on the terminal run stay non-authoritative (ruled OQ-E1-1 (i)).
+- The Fake late-settle reason (item 11).
+- Treating =:proof= as the only calibration marker (Codex to confirm).
