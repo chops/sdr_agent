@@ -896,7 +896,12 @@ unaffected.
   - **Trial steps:** they took two CHANGES REQUESTED rounds, and draft 3 was approved.
   - **Run:** the owner ran Opus → Sonnet → Opus at `6f271ab`. All three checkpoints were complete with the same BEAM, with no change to invocations, grants, links or store counts, one new ready start per leg, and two completed switches. Codex gave a qualified technical PASS (`9f2ed2b2`). The owner accepted the omitted pre-run helper-hash check (D-152), then accepted R0-06 and closed layer 1 (D-153).
   - **Record:** #171, Codex PASS at `63284b9`; it merges after CI.
-- **Next:** planning layers 2–4, starting with ordinary-call enablement. Codex's view was requested first.
+- **#171 merged** (`1381b37`) and #54 closed.
+- **Layer 2 started** (D-154): Claude drafts E1 and E3, and Codex authors C1-03 and the H1 packet. Nov 6 keeps the full core (D-155).
+  - **Contract:** draft 4 passed Codex at `ed819b7`. The owner accepted the E1/E3 scope and acknowledged the B5' residual (D-156, about 23:00 MDT).
+  - **E1 plan:** `l2-e1` at `d5a70f8`, sent to Codex for review. No RED before PASS.
+  - **C1-03 slice A:** RED verified and GREEN approved on condition (Claude's focused run passed 287/287). Codex's full gate at `0d46aad` is running.
+- **Main CI** failed twice on flakes: CountPoolTest `:noproc` (#175), which cascades into KernelTest in CI, and test 15's OwnershipError (#177). Both are queued after C1-03's gate frees the database slot.
 
 **Tripwire 2** fired several times today: the snapshot helper, the trial steps and the #171 record each needed a second CHANGES REQUESTED round. They were reported to the owner as they happened.
 
@@ -939,3 +944,5 @@ says what happened, why, what it cost and what changed.
 | **Oct 17: Claude's snapshot helper wrongly reported failures as "complete".** v1: a failed `find` or `lsof` still printed complete, and a changed BEAM wasn't compared. v2: an unreadable root read as zero, writable ancestors were accepted, and the environment was cleaned after child processes had already started. | The happy path was tested; the failure paths weren't. | Two CHANGES REQUESTED rounds, about 2 hours. | v3: every observation's exit is checked, the environment boundary is applied before anything runs, and there are regression tests for each reproduced failure. |
 | **Oct 17: Claude's test harness reassigned HOME and ran `rm -rf` on it.** Two further test-only bugs: fixtures were allocated in a subshell, and a check called the dev shell's `stat`. | Throwaway scripting habits. | Codex refused to rerun the harness; one round. | The harness uses `mktemp -d` fixtures only, never deletes, and calls system tools by absolute path. |
 | **Oct 17: Claude left the approved helper-hash check out of the owner's trial steps.** | Claude condensed the approved steps into a short message and dropped one. | A disclosed deviation that the owner accepted (D-152). | Relayed owner steps must match the approved document's steps one to one. |
+| **Oct 17: the layer 2 contract funded an origin, not a bucket.** Draft 3 set the allocation's `applies_to` to `:assignment`, which is a run origin; allocations take buckets (`:b1`). | The two vocabularies were mixed while writing; `UsageBucket.bucket/2` wasn't checked. | One NEEDS-REVIEW round (Codex `a0f0e923`). | Draft 4 names the bucket and the mapping, and RED asserts them separately. |
+| **Oct 17: Claude wrote the Nov 6 workshop start as MDT.** Daylight time ends Nov 1, so 00:00 on Nov 6 is MST (07:00 UTC), not MDT. | The offset was worked out by hand, against Claude's own rule to derive dates with `date`. | The same NEEDS-REVIEW round. | Offsets come from `TZ=America/Denver date`, as weekdays do. |
