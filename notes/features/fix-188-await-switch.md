@@ -118,3 +118,27 @@ They are **listed, not changed**. Any extension needs its own reviewed scope, be
 Each fails on its first read under the old strict match. The near misses isolate the classifier's three required checks.
 
 **The seam is behaviour-preserving:** `admin_live_switch_test.exs` seed 0 passed 44 of 44 (round 1; the seam is unchanged since).
+
+## GREEN record
+
+`await_switch_with!/4` now:
+- takes one monotonic deadline;
+- checks it before every read, and before accepting a match;
+- retries only the exact sandbox queue drop (three required parts);
+- fails at once on anything else;
+- returns the matching observation, with no further read.
+
+`switch!/2` is unchanged. The new file passes 19 of 19 at seed 0.
+
+**Mutants** (each applied, run, then reverted; log `claude-188-mutants.log`):
+
+| Mutant | Result | Caught by |
+|---|---|---|
+| a. never transient | 17/19 | two-drops-then-match; persistent drop |
+| b. any `ConnectionError` text | 12/19 | seven controls (owner exit, disabled queue, refused connection, plain queue drop, and three near misses) |
+| c. trailing re-read | 17/19 | both call-count tests |
+| d1. no prefix check | 18/19 | the different-prefix near miss |
+| d2. no marker check | 18/19 | the no-marker near miss |
+| d3. no reason check | 17/19 | the owner-exit and disabled-queue near misses |
+
+**Disclosure:** a first mutant run was invalid. Its mutation script ran inside the dev shell, where it did not modify the file, so every "mutant" was the unchanged fix (19/19). That was detected because the file failed to match the saved fix before the rerun. The results above come from the rerun, with each mutation applied and confirmed (`[mutated]`) before its test run.
