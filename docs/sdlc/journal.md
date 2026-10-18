@@ -913,7 +913,13 @@ unaffected.
   - **#177 (PR #180):** the cause was the default 120 s sandbox ownership timeout under CI load; the module now sets 200 s.
   - **Status:** both are Codex-approved and CI-green, and they wait for the owner's merge decision.
   - **#178:** main's KernelTest failure is a separate cause, provenance snapshots kept by committed fixtures. Codex owns it.
-- **Next:** the E3 implementation plan; G3's metadata inventory query for the owner.
+- **G3:** the read-only inventory query and the owner's steps passed Codex. They wait for the owner to run them and give a handling decision.
+- **E3:**
+  - **Plan:** four revisions. Codex found a real bypass: a request with no `:calibration` key could take the ordinary path. The final design refuses a proof run at launch admission, from the locked run, and keeps the gate's own locked authority read. PASS at `e462d48`.
+  - **RED:** 287 tests, two rounds, VERIFIED at `1f05a24`. GREEN `09d04ef`; Codex conditional APPROVE, and its focused run passed 287/287.
+  - **Full gate:** FAIL, 2984/2988. The only failures are the four KernelTest #178 tests.
+- **#178 (PR #182):** reproduced. It is deterministic within one VM: a committed fixture keeps the provenance snapshot of the VM's cached identity. It does not happen across VMs, which corrected Claude's first diagnosis. Fixed in test code only; Codex conditional APPROVE. Its combined run hit #175, because #179 is not yet merged.
+- **Merge order now waiting for the owner:** #179 (#175), #180 (#177), #181 (E1), #182 (#178). Then main goes into E3 for its full gate.
 
 ## Missteps
 
