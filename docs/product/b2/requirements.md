@@ -198,7 +198,7 @@ These notes are implementation readings of the owner-accepted wording in section
     - ingesting any real value (candidate, evidence, observation, company contact, phone, URL);
     - **dispatching any real query** (the guard is checked on the query's terms and target before reservation, not only on the result row);
     - any processing, recheck or admission of an already persisted real row.
-- **Stopping on a strong result (§2, §3, rule J).** The ladder looks for email, phone and profile together. Whether one strong result stops every kind, or each kind stops on its own, is **owner question 1** (section 14). Until it is answered, that behaviour is **excluded** from this slice. A cycle stops only when the ladder is exhausted or a section 11 limit is reached, and never runs beyond those limits.
+- **Stopping on a strong result (§2, §3, rule J).** The ladder looks for email, phone and profile together. **Owner answer (D-167): keep looking.** A strong result stops the search for **that kind** only. The ladder keeps going for the kinds still missing (email first, because admission needs it). A cycle ends when every kind has a strong result, the ladder is exhausted, or a section 11 limit is reached. It never runs beyond those limits, and a strong result for one kind never resets or extends them.
 - **"Sent without a bounce" (§3, rule E).** This is an observation. It proves neither that the person owns the mailbox nor that they can be reached. Delivery is capture-only under ADR-0014 (constraint 1), so in this phase a captured delivery never produces `verified`. Nothing here implies a verification send or a paid verification service. `verified` stays defined for a future reviewed real-delivery path, which would record its method, time and limits.
 - **"Links to evidence, not copies of pages" (§5 rule I).** This constrains only CandidateEvidence's own fields. The accepted C5 and ADR-0014 flow is unchanged: permitted fetched content is stored as local audit payloads, and model traffic goes to the private witness store.
 - **Decision payloads.** Decision payloads are metadata only: counts and ids. A Decision may point to private input payloads, but it never becomes a path to log, query or name their content.
@@ -284,16 +284,13 @@ Entity Model trigger: yes. Reason:
 - Paid enrichment.
 - Email verification services.
 - A C1 producer for tasks.
-- **Pending owner question 1:** stopping each kind separately, or all kinds together, on a strong result.
 
-### Owner questions (open; the owner answers, Claude fills them in)
+### Owner questions (answered 2026-10-18, D-167)
 
-Each blocks **only** the behaviour named. Neither is answered yet, and no answer is inferred.
-
-1. **Strong result across kinds.** *Blocks:* the ladder's strong-result stop (rule J). Until it is answered, a cycle stops only when the ladder is exhausted or a limit is reached. The ladder looks for email, phone and LinkedIn profile together. When it finds a strong result for one kind (say a phone number on the company website), should it stop for all kinds, or keep going for the kinds still missing (especially email, which admission needs), within the same limits?
-   **Owner answer:** _(pending)_
-2. **Person-wide "stop".** *Blocks:* whether `SDR.stop_contact/2` also refuses and suppresses addresses linked to the subject **after** the stop. Its coverage of the contact's current values and approved candidates at stop time is in this slice either way. When someone asks not to be contacted, should the stop also cover any address we find for them later? (Proposed: yes. All their known addresses are suppressed, and any later one is refused and suppressed.)
-   **Owner answer:** _(pending)_
+1. **Strong result across kinds.** *Was blocking:* the ladder's strong-result stop (rule J). The ladder looks for email, phone and LinkedIn profile together. When it finds a strong result for one kind (say a phone number on the company website), should it stop for all kinds, or keep going for the kinds still missing (especially email, which admission needs), within the same limits?
+   **Owner answer:** "keep looking". Each kind stops on its own strong result; the ladder continues for missing kinds within the same limits (see §13b).
+2. **Person-wide "stop".** *Was blocking:* whether `SDR.stop_contact/2` also refuses and suppresses addresses linked to the subject **after** the stop. Its coverage of the contact's current values and approved candidates at stop time is in this slice either way. When someone asks not to be contacted, should the stop also cover any address we find for them later? (Proposed: yes. All their known addresses are suppressed, and any later one is refused and suppressed.)
+   **Owner answer:** "yes". `SDR.stop_contact/2` covers the contact's current values and approved candidates at stop time, **and** any address later linked to the same subject: it is refused for approval and suppressed when linked. Coverage applies only through the explicit subject-to-contact link (R2-4).
 
 ### Soft-stop review record
 
