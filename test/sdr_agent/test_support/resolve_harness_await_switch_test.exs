@@ -44,12 +44,7 @@ defmodule SdrAgent.Test.ResolveHarnessAwaitSwitchTest do
 
       response =
         Agent.get_and_update(pid, fn %{left: left, starts: starts} = state ->
-          {next, rest} =
-            case left do
-              [only] -> {only, [only]}
-              [next | rest] -> {next, rest}
-            end
-
+          {next, rest} = take(left)
           {next, %{state | left: rest, starts: [now | starts]}}
         end)
 
@@ -65,6 +60,9 @@ defmodule SdrAgent.Test.ResolveHarnessAwaitSwitchTest do
 
     {read, pid}
   end
+
+  defp take([only]), do: {only, [only]}
+  defp take([next | rest]), do: {next, rest}
 
   defp starts(pid), do: pid |> Agent.get(& &1.starts) |> Enum.reverse()
 
