@@ -304,13 +304,16 @@ defmodule SdrAgent.AI.RuntimeStatusTest do
       assert_no_status_effects!()
     end
 
-    test "consistent, released, eligibility refuses: the pin, staging and admission reasons" do
-      bin = PinnedCLI.inject_identity!()
+    test "consistent, released, eligibility refuses: the pin, version and admission reasons" do
+      mismatched = PinnedCLI.inject_identity!(nil, version: "0.0.0")
 
       for {label, opts, reason} <- [
             {"pin missing", [server: [executable: PinnedCLI.missing_store_path()]],
              :pinned_cli_unavailable},
-            {"staged", [server: [test_launcher: false, executable: bin]], :real_model_staged},
+            # L2 E3 (deliberate change; was "staged", :real_model_staged): a
+            # reviewed pin whose identity names another CLI version.
+            {"version mismatch", [server: [test_launcher: false, executable: mismatched]],
+             :pinned_cli_version_mismatch},
             {"admission blocked", [unidentified: @opus], :provider_not_quiescent}
           ] do
         tree!(opts)

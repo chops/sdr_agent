@@ -36,18 +36,22 @@ defmodule SdrAgent.Test.PinnedCLI do
 
   @doc """
   Binds the accepted pin to `path` (default: `store_path!/0`) for this test:
-  its sha256 unless `sha256` is given, under `store` (default `/nix/store`).
-  Restored on exit. Returns the path.
+  its sha256 unless `sha256` is given, under `store` (default `/nix/store`),
+  with the reviewed CLI `version` (L2 E3; default the profiles' reviewed
+  `ModelProfiles.cli_version/0`; `version: nil` omits it, any other value is
+  recorded as given). Restored on exit. Returns the path.
   """
   def inject_identity!(path \\ nil, opts \\ []) do
     path = path || store_path!()
     previous = Application.get_env(:sdr_agent, PinnedExecutable)
 
-    identity = %{
-      executable: path,
-      sha256: Keyword.get_lazy(opts, :sha256, fn -> PinnedExecutable.sha256(path) end),
-      store: Keyword.get(opts, :store, "/nix/store")
-    }
+    identity =
+      %{
+        executable: path,
+        sha256: Keyword.get_lazy(opts, :sha256, fn -> PinnedExecutable.sha256(path) end),
+        store: Keyword.get(opts, :store, "/nix/store")
+      }
+      |> put_version(Keyword.get(opts, :version, SdrAgent.AI.ModelProfiles.cli_version()))
 
     Application.put_env(:sdr_agent, PinnedExecutable, identity: identity)
 
@@ -59,6 +63,9 @@ defmodule SdrAgent.Test.PinnedCLI do
 
     path
   end
+
+  defp put_version(identity, nil), do: identity
+  defp put_version(identity, version), do: Map.put(identity, :version, version)
 
   @doc """
   Puts a recording `llm-proxy-shim` first on `PATH` (restored on exit); each

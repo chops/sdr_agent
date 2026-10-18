@@ -87,6 +87,17 @@ defmodule SdrAgent.AI.ModelProviderTest do
       )
     end
 
+    # A bare refusal reason, or a committed reservation refusal's receipt.
+    defp refused_with?({:error, reason}, reason), do: true
+
+    defp refused_with?(
+           {:error, %SdrAgent.Agents.Admission.Refused{stage: :reservation, reason: reason}},
+           reason
+         ),
+         do: true
+
+    defp refused_with?(_result, _reason), do: false
+
     defp assert_no_reservation(ctx) do
       {:ok, invocations} = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent)
       assert invocations == [], "a known-unhealthy server consumed a reservation"
@@ -102,7 +113,10 @@ defmodule SdrAgent.AI.ModelProviderTest do
       end
     end
 
-    test "R0-02: the staged real launcher is refused before reservation, with zero launches",
+    # L2 E3 (deliberate change; was ":real_model_staged"): the pinned real
+    # launcher passes resolution; with no trusted store the reservation
+    # itself is refused (and rolled back), so nothing launches.
+    test "E3: the pinned real launcher reaches reservation; an untrusted store refuses it",
          ctx do
       dir = Path.join(System.tmp_dir!(), "sdr-staged-#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)
@@ -110,14 +124,16 @@ defmodule SdrAgent.AI.ModelProviderTest do
       counter = SdrAgent.Test.PinnedCLI.stub_shim!(dir)
 
       for {executable, reason} <- [
-            {SdrAgent.Test.PinnedCLI.inject_identity!(), :real_model_staged},
+            {SdrAgent.Test.PinnedCLI.inject_identity!(), :witness_store_untrusted},
             {nil, :pinned_cli_unavailable}
           ] do
         pid =
           start_supervised!({ClaudeCLI, name: ctx.name, executable: executable}, id: reason)
 
         for reference <- [ctx.name, pid] do
-          assert {:error, ^reason} = complete_via(ctx, reference)
+          assert refused_with?(complete_via(ctx, reference), reason),
+                 "E3: #{inspect(reason)} for #{inspect(reference)}"
+
           assert_no_reservation(ctx)
         end
 
@@ -131,7 +147,11 @@ defmodule SdrAgent.AI.ModelProviderTest do
       assert SdrAgent.Test.PinnedCLI.launches(counter) == 0
     end
 
-    test "R0-06: the shipped promoted tuples do not lift staging; zero launches", ctx do
+    # L2 E3 (deliberate change; was ":real_model_staged"): with the shipped
+    # tuples the launcher passes resolution; still no trusted store, so the
+    # reservation is refused and nothing launches.
+    test "E3: with the shipped promoted tuples an untrusted store still refuses; zero launches",
+         ctx do
       witness = Application.get_env(:sdr_agent, SdrAgent.Agents.Witness)
       on_exit(fn -> Application.put_env(:sdr_agent, SdrAgent.Agents.Witness, witness) end)
 
@@ -161,7 +181,9 @@ defmodule SdrAgent.AI.ModelProviderTest do
         )
 
       for reference <- [ctx.name, pid] do
-        assert {:error, :real_model_staged} = complete_via(ctx, reference)
+        assert refused_with?(complete_via(ctx, reference), :witness_store_untrusted),
+               "E3: the reservation is refused without a trusted store"
+
         assert_no_reservation(ctx)
       end
 
@@ -176,7 +198,8 @@ defmodule SdrAgent.AI.ModelProviderTest do
       bin = SdrAgent.Test.PinnedCLI.inject_identity!()
 
       for {opts, reason} <- [
-            {[executable: bin], :real_model_staged},
+            # L2 E3 (deliberate change; was :real_model_staged).
+            {[executable: bin], :witness_store_untrusted},
             {[], :pinned_cli_unavailable},
             {[executable: SdrAgent.Test.PinnedCLI.missing_store_path()], :pinned_cli_unavailable},
             {[command: nil], :llm_proxy_shim_not_found}
@@ -184,7 +207,7 @@ defmodule SdrAgent.AI.ModelProviderTest do
         {:ok, pid} = ClaudeCLI.start_link(opts)
         assert Process.info(pid, :registered_name) == {:registered_name, []}
 
-        assert {:error, ^reason} = complete_via(ctx, pid), inspect(opts)
+        assert refused_with?(complete_via(ctx, pid), reason), "E3: #{inspect(opts)}"
         assert_no_reservation(ctx)
         GenServer.stop(pid)
       end

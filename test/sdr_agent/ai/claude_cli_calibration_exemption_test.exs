@@ -151,8 +151,11 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
   end
 
   describe "A: the closed calibration value and the request" do
+    # L2 E3 (deliberate change): `:absent` is no longer staged here. A
+    # request with no calibration value is ordinary and is refused at
+    # launch admission by the locked proof run, the entry unconsumed (see
+    # "E3: a proof reservation whose request lost its :calibration key").
     for variant <- [
-          :absent,
           :nil_value,
           :missing_key,
           :extra_key,
@@ -795,6 +798,46 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     end
   end
 
+  ## L2 E3: an ordinary request names no calibration, so the locked run decides
+
+  describe "E3: a proof reservation whose request lost its :calibration key" do
+    setup ctx do
+      ran = Path.join(Path.dirname(ctx.tripwire), "e3-cli-ran")
+      %{cli: cli!(ctx, "e3-cli", 0, ran), ran: ran}
+    end
+
+    test "is refused at launch admission by the locked proof run: no process, entry kept",
+         ctx do
+      server = server!(ctx, command: ctx.cli)
+      %{invocation: invocation, run: run, agent: agent} = proof!(ctx)
+      ref = issue!(server, invocation, run)
+      full = request(invocation, run, agent, ref)
+      {_command, receipt_ref} = full.calibration.observer
+      request = Map.delete(full, :calibration)
+
+      result = admitting(fn -> complete(server, request) end)
+
+      assert match?(
+               {:error,
+                %SdrAgent.Agents.Admission.Refused{
+                  stage: :launch,
+                  reason: :calibration_not_authorized,
+                  check: :ordinary_scope
+                }},
+               result
+             ),
+             "E3: the ordinary path refuses a proof row at launch admission; got " <>
+               inspect(result)
+
+      refute File.exists?(ctx.ran), "the CLI was launched"
+      refute consumed?(ref), "the exemption entry was consumed"
+      assert status(invocation) == :failed
+      assert [event] = launch_events(ctx, invocation)
+      assert event.payload["reason"] == "calibration_not_authorized"
+      assert receipts(receipt_ref) == [], "no calibration launch receipt"
+    end
+  end
+
   ## Positive (real shim)
 
   describe "the exemption" do
@@ -1026,7 +1069,6 @@ defmodule SdrAgent.AI.ClaudeCLICalibrationExemptionTest do
     })
   end
 
-  defp malform(request, :absent), do: Map.delete(request, :calibration)
   defp malform(request, :nil_value), do: %{request | calibration: nil}
 
   defp malform(request, :missing_key),
