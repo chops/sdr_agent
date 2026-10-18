@@ -299,7 +299,11 @@ Entity Model trigger: yes. Reason:
 - **Round 1:** NEEDS-REVIEW on 2026-10-18 (UTC), head `2056f8b`, report `codex-b202-2056f8b9-review.md`.
 - **Round 2:** NEEDS-REVIEW on 2026-10-18 (UTC), head `e273c68`, report `codex-b202-e273c68a-review.md` (reply `ec1d5f25`).
 - **Round 3:** NEEDS-REVIEW on 2026-10-18 (UTC), head `51ead4b`, report `codex-b202-51ead4b7-review.md` (reply `e73e36b3`). R3-2 was resolved by the owner's answers (D-167) at `111b680`. The `do_not_contact_at` gate blocks every linked-subject approval and apply in any case.
-- **Round 4:** this revision (R3-1 admin-only settle with read-only reconciler reflection; R3-3 person-specific identity evidence; R3-4 runtime stop creates no phone rows; the important bullets). Resubmitted for review. Only an explicit PASS releases the soft stop. Until then, no affected-module planning or build.
+- **Round 4:** NEEDS-REVIEW, narrow (R4-1: the policy cells still allowed a reconciler settle), heads `900d5e4` and `2fc1756`, report `codex-b202-900d5e4d-review.md`.
+- **Round 5: PASS** on 2026-10-18 (UTC). Requirements and entity soft stop, exact head `1f8805b`, report `codex-b202-1f8805b2-pass.md` (reply `891a4dfa`). R4-1 closed.
+  - **What it permits:** affected-module planning.
+  - **What it does not:** any build, B2 G5, or source enablement. Those still need their own steps.
+  - **Unchanged:** the dependencies (C3-02/03 merged, the C5 real-data guard, C4 settings) and the deferred items (screenshots, calling and texting, phone and profile verification, paid enrichment).
 - **Binding planning obligations (Codex round 3):**
   - the stored intent input and hash use the C3 canonical input version;
   - Tx 2 settlement is recoverable and idempotent;
