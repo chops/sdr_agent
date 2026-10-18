@@ -37,7 +37,7 @@ defmodule SdrAgent.Agents.OrdinaryLaunchRaceTest do
     on_exit(fn -> with_connection(fn -> cleanup!(tenant, admin) end) end)
     supervisor = start_supervised!(Task.Supervisor)
 
-    AgentsFixtures.grant!(tenant, %{}, admin)
+    grant = AgentsFixtures.grant!(tenant, %{}, admin)
     %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
     attrs = AgentsFixtures.claude_attrs("e3-race")
 
@@ -52,6 +52,7 @@ defmodule SdrAgent.Agents.OrdinaryLaunchRaceTest do
       run: run,
       agent: agent,
       reserved: reserved,
+      grant: grant,
       supervisor: supervisor
     }
   end
@@ -117,6 +118,68 @@ defmodule SdrAgent.Agents.OrdinaryLaunchRaceTest do
              )
 
     assert {failed.status, failed.sent_at} == {:failed, nil}
+  end
+
+  # Plan item 7 (Codex 4a9174b8): ordinary mode still runs the unchanged
+  # launch terms after a grant change. An editor holds the grant row and
+  # revokes it while an already charged ordinary launch waits on that row
+  # (before the head); the revocation commits first and the launch gets the
+  # committed launch refusal. Direct `Agents.admit_launch/3` with the flag
+  # (the server forwarding of `ordinary_launch: true` is covered by the
+  # server-level tests); it already holds today, as a regression control.
+  test "control: a revocation holding the grant wins over an ordinary launch", ctx do
+    charged = usage(ctx)
+
+    revoke =
+      holder(ctx, :revoke, fn -> lock_grant!(ctx.grant.id) end, fn ->
+        {:ok, revoked} =
+          Agents.revoke_grant(ctx.grant, %{expected_revision: ctx.grant.revision},
+            actor: ctx.admin
+          )
+
+        revoked
+      end)
+
+    joined([revoke], fn ->
+      launch = participant(ctx, :launch, fn -> ordinary_launch(ctx) end)
+
+      joined([launch], fn ->
+        await_blocked(launch, revoke)
+        release(revoke)
+        assert {:ok, %{status: :revoked}} = await(revoke)
+
+        assert {:error,
+                %SdrAgent.Agents.Admission.Refused{
+                  stage: :launch,
+                  reason: :grant_ineligible_at_launch,
+                  check: :grant_revoked
+                }} = await(launch)
+      end)
+    end)
+
+    row = stored(ctx.reserved.id)
+    assert {row.status, row.sent_at, row.response_sha256} == {:failed, nil, nil}
+    assert usage(ctx) == charged, "the reservation's attempt stays charged"
+
+    assert [_one] = Agents.list_model_invocations(ctx.run.id, actor: ctx.agent) |> elem(1),
+           "no automatic retry"
+  end
+
+  defp ordinary_launch(ctx) do
+    AdmissionFixtures.admitting(fn ->
+      Agents.admit_launch(ctx.reserved.id, :claude_cli_opus,
+        actor: ctx.agent,
+        ordinary_launch: true
+      )
+    end)
+  end
+
+  defp lock_grant!(id),
+    do: SQL.query!(Repo, "SELECT id FROM model_call_grants WHERE id = $1 FOR UPDATE", [uuid(id)])
+
+  defp usage(ctx) do
+    {:ok, usage} = Agents.grant_usage([ctx.grant.id], actor: ctx.admin)
+    usage
   end
 
   ## Participants (the E1 race harness)
