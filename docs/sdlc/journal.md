@@ -932,6 +932,47 @@ unaffected.
 - **Records:** the decision log and journal branches had never been PR'd, so D-110 to D-157 were not on main. They are now #184 and #185. D-110 and D-111 had ids and citations but no rows; they were restored from the owner's Oct 12 words.
 - **Merge watcher stopped:** Claude's script for merging approved PRs was blocked by Codex, which reproduced two ways it could accept unreviewed code (see Missteps). Merges are by hand until a reviewed replacement exists, and any new head, including a rebase, needs Codex's fresh sign-off.
 
+### Sprint 1, day 7 (Sun Oct 18): evening (as of 22:30 MDT)
+
+**Merged, all by Claude under D-157:**
+- **#181 E1** (`ccb0238`), **#182 #178** (`2b82912`), **#187 E3** (`258283d`), **#190 #188** (`c033612`), **#183** (the merge rules), **#189** (the B2 requirements and entity model), **#184** (decisions D-110 to D-170), **#185** (the journal) and **#186** (the B2 mockups).
+- Each merged pinned to Codex's sign-off on its exact head, with green CI and the branch up to date.
+- Every rebase got its own fresh sign-off.
+- #154 and #155 were closed as superseded.
+
+**Layer 2:**
+- **G3 closed (D-162).** The owner ran the inventory. The first run failed with `psql` not on PATH; the query never ran, and the log was kept. The second run, through the dev-shell `psql`, passed. The owner attested that no bundle was ever exported, and chose disposition A, retain.
+- **E3** merged with its full gate at a fixed head (2994 passed), so layer 2's code was done about three days ahead of its forecast.
+
+**#188**, a new AdminLiveSwitch flake on #183's CI:
+- **Process:** diagnosed, planned in two rounds, RED in two rounds, then GREEN.
+- **Fix:** only the exact shared-sandbox queue drop is retried; the matching row is returned with no re-read.
+- **Proof:** six mutants were each caught.
+- **Gate:** the first full gate failed on credo nesting; the rerun passed (3013).
+
+**B2:**
+- **Walkthrough:** the owner's algorithm walkthrough was held in chat, with no real data and the notes kept private. The owner accepted the requirements wording (D-163 to D-167); LinkedIn is option 1, fixed steps in the owner's browser (D-164); the screenshot changes are direction only (D-165).
+- **Entity model:** Codex PASS after five rounds, for planning only. B2 code waits on C3-02/03, the C5 guard and C4 settings.
+
+**G-DEMO** (D-169 to D-171):
+- **Procedure:** three review rounds, and the run report validated on 28 disposable fixtures.
+- **The grant:** the owner created G-DEMO (3 attempts for b1, a 60-minute window, and the b1/b2/b5 workshop reserve). The workshop allocation was missed in the form and added by one owner-authorized corrective edit, with 0 attempts consumed.
+- **The first run was refused before it started:** assignment needs an offering-profile setting, and this build has no settings page (C4-01b, #166). Nothing was charged.
+- **Close-out:** after the window closed, the final check passed and the owner lifted the freeze: **no run**.
+
+**Owner tools:**
+- **Standup page:** the interactive standup page is live, Codex's view first, and checked every 30 minutes.
+- **D-168:** agents may run reviewed read-only summary checks on the dev database. Not yet built; Codex set the security requirements.
+
+**Overnight (owner asked):**
+- C4-01b (#166) rebased onto main and its full gate running;
+- the D-168 ADR and adversarial tests being drafted;
+- C3-02 next.
+
+**Waiting for the owner:**
+- the 5b decision and the SettingsLive protection gate, before any private settings content, including the offering profile;
+- authorizing the revised G-DEMO attempt.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -975,3 +1016,6 @@ says what happened, why, what it cost and what changed.
 | **Oct 17: Claude wrote the Nov 6 workshop start as MDT.** Daylight time ends Nov 1, so 00:00 on Nov 6 is MST (07:00 UTC), not MDT. | The offset was worked out by hand, against Claude's own rule to derive dates with `date`. | The same NEEDS-REVIEW round. | Offsets come from `TZ=America/Denver date`, as weekdays do. |
 | **Oct 18: Claude sent Codex a review request with a blank commit ID.** A plan edit failed, so nothing was committed, but the message was sent anyway. | The send came after a `;` in the same shell command, so it ran even when the commit step before it failed. | Minutes: a correction with the right ID followed. | Peer sends are chained with `&&` after a check that the commit ID is not empty. |
 | **Oct 18: Claude's merge watcher could have merged unreviewed code.** The script accepted a rebased head when every `git range-diff` line contained " = ", a check a changed commit with "=" in its subject passes; range-diff also ignores merge commits, so a hidden tree change would pass too. | Claude wrote and ran it before review, treating it as automation of a manual step. | No wrong merge: #180 was patch-identical (checked by hand), and the one premature #181 attempt was refused by GitHub. Codex requested the stop, and Claude stopped both watchers within the hour. | Watchers stopped; merges by hand; any new head needs Codex's sign-off; a replacement must accept only the exact approved commit, fail closed and have mocked tests before it runs. |
+| **Oct 18: the G-DEMO procedure never checked that the assignment settings existed.** It assumed **Assign** would check them, but nobody confirmed an offering profile was set, and this build has no settings page. | The prerequisite was described ("Assign checks them itself") rather than verified before the owner's session. | The owner's first-run attempt ended as no run, after about two hours of an attended session. Nothing was charged. | Owner procedures check every input a step consumes before the attended session, not just that a refusal would be safe. |
+| **Oct 18: an unclear conditional step made the owner stop the app.** Step C1 said "if anything has started, stop the app"; the owner read it as an instruction and stopped it. | The conditional was buried in a bullet under a step. | A restart and an extra pre-grant check, both approved by Codex; no grant existed yet. | Stop conditions in owner steps are set apart and worded "only if …". |
+| **Oct 18: a broken mutant run passed every mutant.** The #188 mutation script ran inside the dev shell, where it did not change the file, so all six "mutants" were the unchanged fix. | The script's effect wasn't checked before trusting the result. | None: it was caught before review, because the file didn't match the saved fix, then rerun and disclosed. | Each mutant is applied and confirmed `[mutated]` before its test run. |
