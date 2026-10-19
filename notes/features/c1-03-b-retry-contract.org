@@ -12,8 +12,9 @@ not RED/GREEN, H1, ordinary-call, cleanup or spend authority.
 
 Layer 2 E1/E3 are now merged. They provide NO positive real-provider retry
 cleanup seam: Claude's =d4fb5a96= ruling remains binding. E1 converting a
-terminal run's sent row to unknown never enables retry. Gen-2 and real
-provider recovery stay blocked in this slice. Existing non-C1 retry APIs
+terminal run's sent row to unknown never enables retry. Real-provider
+recovery (including gen-2 ClaudeCLI) stays blocked in this slice. Fake
+eligibility is provider-based, not a generation-1-only test. Existing non-C1 retry APIs
 must not be weakened or silently acquire the C1-only behavior.
 
 * Entity Model
@@ -26,16 +27,23 @@ resource, column, role, recovery authority or idempotency record.
 |--------+----------------+---------+------------+---------------+------------------------+--------------+----------------|
 | InboxCommand / Result | Existing action-contract refinement | Bind one explicit retry to the displayed Failure | Existing strict common keys; args exactly %{confirm: true}; no supplied run id, actor, tenant, provider or mutable options. Same closed result/error vocabulary; no new reason family | source_id is Failure id, never a caller-chosen AgentRun | Session revalidated after source locks. Exact Failure identity/freshness is compared under lock before any write. Duplicate child/current recovery changes give stale/recovery_guard, never a second run/job; unknown outcome of a command is not a rollback or retry promise | Active admin only, from the current stored human session; absent/expired/revoked/demoted/disabled/system/auditor/reviewer denied. Unreadable/foreign/nonexistent source refs remain identical not_found | None beyond the provider-mode question below |
 | Operations.Failure | Existing source-binding/read delta | Bind preview and execution to the exact live attention condition | Existing id, tenant, subject_resource/id, operation_id, status, retryable, occurrence/resolution metadata; no new fields | Must be the prior run's attention_failure_id; subject_resource exactly AgentRun and subject_id exactly that run; operation binding must agree with the prior's actual operation (including nil for reply) | Preview is advisory. Execution re-reads this exact Failure under the established retry lock order, requires open or acknowledged, verifies pairing and current v1 item/freshness HMAC. Never substitutes a newer Failure. Resolved or changed Failure is stale. Unsupported source is blocked, not dynamic dispatch. Original source ResolveAttention semantics remain unchanged | Existing authorized metadata read; new retry authority is admin-only, not Failure.retryable alone | None |
-| AgentRun / Operation / original Oban job | Existing action-contract refinement | Start one guarded explicit Fake-known-outcome retry | Existing snapshot id, trigger ids, retry lineage/depth, run/operation/job state; one new fixed Fake-only job mode is proposed below, never an arbitrary provider/responder argument | Existing retry_of parent, operation, original trigger/job and lead/campaign relations; one-child uniqueness and same-tenant guards unchanged | C1 entry joins the source-owned retry transaction, never Failure-first then old retry. Lock order lead/update -> campaign/share -> prior run/update -> Operation -> exact attention Failure -> original job -> first audit head. Preserve original child/depth/live-job/trigger/reply/lead/campaign/snapshot checks. Under the prior-run lock, any reserved, sent or unknown invocation blocks unknown_outcome, including terminal-run sent and E1-normalized unknown. Source run/invocation/grant/result/lease history is never settled or refunded. Only positively known Fake history is eligible; any gen-2 or non-Fake invocation blocks guard_not_available. Refusal creates no run/job or success audit | Source actions retain their current policies/context; C1 authenticates admin at entry and after lock waits. Original retry entry unchanged. No new system-role powers | B-1: reviewer ruling on immutable Fake-only job mode preventing a later runtime change from turning an admitted Fake retry into a real-provider call |
+| AgentRun / Operation / original Oban job | Existing action-contract refinement | Start one guarded explicit Fake-known-outcome retry | Existing snapshot id, trigger ids, retry lineage/depth, run/operation/job state; new refuse-only expected-provider binding below, never a provider-selection/responder argument | Existing retry_of parent, operation, original trigger/job and lead/campaign relations; one-child uniqueness and same-tenant guards unchanged | C1 entry joins the source-owned retry transaction, never Failure-first then old retry. Lock order lead/update -> campaign/share -> prior run/update -> Operation -> exact attention Failure -> original job -> first audit head. Preserve original child/depth/live-job/trigger/reply/lead/campaign/snapshot checks. Under the prior-run lock, any reserved, sent or unknown invocation blocks unknown_outcome, including terminal-run sent and E1-normalized unknown. Source run/invocation/grant/result/lease history is never settled or refunded. Only positively known Fake history is eligible, independent of ledger generation; any non-Fake invocation blocks guard_not_available. Command refusal creates no run/job or success audit. Perform-time refusal has the explicit new-run lifecycle below | Source actions retain their current policies/context; C1 authenticates admin at entry and after lock waits. Original retry entry unchanged. No new system-role powers | Revised B-1/lifecycle await independent review |
+| AgentWorker job-args contract | Existing backend contract delta | Recheck the retry's expected runtime without overriding it | Optional new exact object c1_retry_binding: version integer 1, expected_provider string fake, run_id UUID, retry_of_id UUID. No other keys/values. Existing tenant_id/signal fields retained; no C1 model/responder override | Binding must match the AgentRun found through this job's actual persisted Operation/job binding, that run's retry_of parent and same tenant | Marked job only proceeds when selected runtime and normally resolved model are both Fake, all bindings match and parent history remains known Fake. The stamp never selects a provider. Malformed/mismatched stamp, changed selection or unavailable facts refuse before any model reservation/call. New-run refusal/attention lifecycle below. Unmarked jobs retain existing behavior | Worker uses existing agent_runtime actions after server-owned job/run lookup, never a caller-supplied actor/run target | MF3 existing-side row; review pending |
+| ReplyWorker job-args contract | Existing backend contract delta | Apply the same refuse-only contract to reply retry | Same optional exact c1_retry_binding object as AgentWorker, in addition to existing tenant_id/run_id/signal; no arbitrary provider/responder argument | Binding must match the actual run_id/tenant on the persisted reply job, the run's retry_of parent and the existing reply trigger binding | Same selected-runtime plus normally resolved-model Fake check; never add a job-provider selection path. Forged/mismatched stamp or unavailable facts refuse before any model reservation/call; lifecycle below. Unmarked reply jobs retain existing behavior | Existing agent_runtime worker actions; no admin impersonation or new system permission | MF3 existing-side row; review pending |
 | RetryPreview / InboxAction | Existing derived backend/read contract refinement | Give only the rendered page's fixed retry capabilities, not spend/recovery permission | Proposed preview input: current session token and a unique list of 0..50 Failure UUIDs. Output: map keyed only by supplied readable Failure ids, each %{enabled?: boolean, blocked_reason: existing C1 code or nil}; no model/job/payload body, alternate source, provider secret or new opaque token | Only failures in the already bounded rendered page enter the preview; no new inbox membership/count/cursor or Home producer | Admin-only metadata preview. No domain-row locks, audit-head work, writes or per-row queries/aggregates. Reads are tenant/actor-authorized and restricted to input-linked source ids. Indexed existence/batch facts, bounded retry ancestry (hard limit 3), bounded output, one lowerable total 2500 ms deadline including pool wait/authorization/queries; statement ceiling 2000 ms. Missing/failed/unreadable guard facts never become enabled. A failed preview leaves original authorized item/navigation visible and retry blocked. Execution repeats all authoritative checks; a positive preview is not a reservation, cleanup receipt or promise of success | Only current active admin obtains recovery metadata; reviewer/auditor capabilities stay actor_not_permitted without invoking the richer preview. Session, tenant and source policy are not supplied as options | B-2: confirm batched preview's advisory coverage and bounded-read/error semantics before affected-module planning |
-| ModelInvocation / ModelResultRelease / runtime / grants / Reaper | Existing dependency | Preserve real-provider accounting and cleanup fences | unchanged | unchanged | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found. C1 only reads reviewed metadata; any unknown, real or gen-2 history blocks. No grant/witness projection claims spend eligibility or real retry readiness | Existing policies and authoritative reservation/launch/result/cleanup seams unchanged | No positive real cleanup seam assumed |
+| ModelInvocation / ModelResultRelease / runtime / grants / Reaper | Existing dependency | Preserve real-provider accounting and cleanup fences | unchanged | unchanged | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found. C1 only reads reviewed metadata; any unknown or non-Fake history blocks. Known terminal Fake history is not excluded by generation. No grant/witness projection claims spend eligibility or real retry readiness | Existing policies and authoritative reservation/launch/result/cleanup seams unchanged | No positive real cleanup seam assumed |
 | Accounts.User / session / Tenant; source lead/campaign/reply | Existing dependency | Current human identity, tenant and source lifecycle | unchanged | unchanged | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found. Existing live actor/source conditions are rechecked by their owning actions, not copied into a permissive C1 flag | Existing current-operator and source actor rules unchanged | None |
 
 Configured capabilities: =.workflow/recipe.json= ai_pair=true,
 codex_review=true. Reviewer: Claude via correlated =ap= consultation.
-Verdict: UNREVIEWED. No affected-module plan, B RED or implementation may
-proceed until independent PASS. B-1/B-2 are explicit decision questions,
-not implemented options or inferred authorization.
+Round 1: NEEDS-REVIEW by Claude, answer
+=m_1792383696295208000_9fefaf92= (2026-10-19T04:21:36Z), correlated to
+=m_1792383609074448833_a9f5ce9a=, exact =c00f7c3= / sha256 =9a782c84...=.
+MF1 refuse-only binding, MF2 refusal lifecycle, MF3 explicit worker rows,
+MF4 provider-based Fake eligibility. B-2 PASS-in-principle, with per-id
+authorization/failure blocking and token privacy notes.
+Round 2: UNREVIEWED pending the revised exact artifact. No affected-module
+plan, B RED or implementation may proceed until independent PASS.
 
 * B-1: Fake mode across the enqueue-to-perform interval
 Reading =Runtime= as Fake when the command commits is insufficient:
@@ -44,25 +52,67 @@ An operator could switch to ClaudeCLI after enqueue. That must not make
 this Fake-only slice a back door to a real retry, even though ordinary
 reservation and grant checks would still apply later.
 
-Proposed resolution for review:
-- Require at least one source invocation, all generation-1 Fake and all
-  known terminal (=completed= or =failed=), plus a currently selected Fake
+Revised resolution for review (accepts MF1):
+- Require at least one source invocation, all provider =fake= and all
+  known terminal (=completed= or =failed=), plus currently selected Fake
   runtime. Empty/unreadable/ambiguous history is conservatively blocked.
-- The source orchestration, never command args, stamps the newly created
-  retry job with fixed Fake-only mode bound to that new run and its
-  retry_of parent. No responder/module/provider from input is accepted.
-- The worker honors that mode only for a correctly bound retry of the
-  same known-Fake parent. It performs Fake or refuses; runtime changes
-  after enqueue never convert it to ClaudeCLI or silently relabel a real
-  parent's work as Fake. Existing jobs without the mode retain their
-  existing behavior. No new run column or configurable staging bypass.
-- Assignment's worker already has a closed job-provider mechanism;
-  reply's worker currently has none. Supporting both is an existing-side
-  backend job-contract delta, not something to slip in during GREEN.
+  Ledger generation is NOT the eligibility discriminator: current
+  =ModelInvocation :reserve= unconditionally sets generation 2, including
+  Fake, while =Agents= only admits real ClaudeCLI through the grant path.
+  =InvocationProfile= records Fake profile =fake= and forbids grant and
+  allocation on non-ClaudeCLI. Thus gen-2 Fake is a required positive;
+  real gen-2 remains blocked. Historical gen-1 Fake is not excluded merely
+  by its generation, but all other snapshot/source guards still apply.
+- Source orchestration, never command args, stamps the retry job with
+  =c1_retry_binding= containing exactly version =1=, expected_provider
+  ="fake"=, new =run_id= and =retry_of_id=. This is a REFUSE-ONLY binding,
+  not a provider override. No new column, responder/module or staging flag.
+- At perform, recover the actual run from existing persisted job/Operation
+  bindings first; never mutate a run selected by the stamp. Check the
+  stamp against that run/parent/tenant/trigger and current known-Fake parent
+  facts. The currently selected runtime AND normally resolved model must
+  both be Fake. A stamped job cannot carry a separate =model= or responder
+  override. If any predicate fails, refuse; never choose Fake, ClaudeCLI
+  or another provider, and never repair the stamp.
+- Existing unmarked jobs retain existing behavior, including the original
+  AgentWorker's job-provider mechanism. This C1 change adds no override to
+  ReplyWorker. Marker removal/forgery cannot be generated by the strict C1
+  command/API; producer/worker tests pin both presence and exact bindings.
 
-Alternative: retain blocked retry wherever an equally strong reviewed
-source/job binding cannot be supplied. Ask for this ruling before choosing
-modules or adding RED tests. No positive real-provider path is proposed.
+Retain blocked retry wherever this refuse-only source/job binding cannot
+be supplied. This is the narrowed ADR-0015/ADR-0004 path Claude endorsed
+in principle, not permission to implement before the revised entity PASS.
+No positive real-provider path is proposed.
+
+** Perform-time refusal lifecycle (MF2)
+For an actual job-bound retry whose run is queued, the existing worker
+actions may start it (=queued -> running=) and then fail it before Runner
+or ModelProvider is called (=running -> failed=). Use existing
+=status_reason: provider_error= with fixed content-free failure detail
+=retry_binding_refused= (proposed identifier for reviewer ruling), never
+the stamp, session, model options or raw exception. No model invocation,
+reservation, grant charge or release is created. No automatic new run/job.
+
+The run's existing =:fail= action opens its normal critical =run_stopped=
+Failure for the NEW run and binds =attention_failure_id= to it. For an
+assignment, fail the new Operation with that same live Failure (one
+attention cause, not a second Operation Failure); a reply has no Operation.
+The ordinary job returns only ={:error, :retry_binding_refused}=, so its
+existing max_attempts=1 makes it discarded rather than retried by Oban.
+The terminal transition/run lock and worker's terminal-state check make
+repeat perform incapable of opening another Failure or reopening a
+terminal run. This is not a new Failure upsert/dedupe record: new-run
+identity plus the existing single terminal transition supplies dedupe.
+
+The original Failure resolved by =AgentRun :retry=/=ResolveAttention= at
+command commit stays resolved, with its original note and historic run
+untouched. A later perform refusal does not undo that resolution or
+resurrect the original cause; the new run owns its own new Failure. If the
+job cannot be bound to an actual authorized run at all, discard/refuse the
+job with the same fixed reason and mutate no guessed run or Operation.
+If recording the terminal state itself fails, report a fixed worker error
+and leave recovery to the existing stale-run path, not a claimed failed
+run or a retry loop. No raw error can enter persisted job errors.
 
 * B-2: bounded preview and authoritative execution
 The preview considers only the final rendered page's Failure ids, not all
@@ -74,6 +124,11 @@ lead/campaign and unassessed-reply state. It may refuse conservatively on
 unavailable facts; source execution still repeats its full original
 checks under lock, including the durable trigger and source policy.
 
+Every id inside a batch receives its own tenant/actor authorization;
+no first-row authorization stands for all ids. Whole-preview failure
+blocks every requested retry, per-row failure blocks that row, and a
+missing/unreadable source reference exposes no different hidden detail.
+Session tokens never enter logs, spans, errors or returned guard facts.
 No payload is loaded merely to decide a button. If some original source
 guard cannot be evaluated from reviewed metadata, leave that case blocked
 instead of adding raw audit-event/job content to the Home projection.
@@ -84,22 +139,26 @@ The v1 item identity and Failure freshness encoding stay byte-compatible.
 Volatile guard changes can disable/reject a previously displayed command
 without changing its identity. After locks, changed Failure/token facts
 give stale, source reserved/sent/unknown gives blocked/unknown_outcome,
-and unsupported real/Fake-mode facts give blocked/guard_not_available.
+and unsupported real/expected-provider facts give blocked/guard_not_available.
 Already-retried or changed recovery context is stale/recovery_guard.
 
 * Review/test obligations to carry into the later plan
 - Positive assignment AND reply retry through real domain APIs and exact
   Failure binding, with permanent assertions of one child/job and original
   source ResolveAttention behavior.
-- reserved, sent, terminal-run sent, unknown/E1-normalized unknown, gen-2,
-  non-Fake, empty and unreadable history all block with no source writes.
+- reserved, sent, terminal-run sent, unknown/E1-normalized unknown,
+  non-Fake (including real gen-2), empty and unreadable history all block
+  with no source writes; known terminal Fake gen-2 is a real positive case.
 - Current-session revoke/demotion during independent lock waits; exact
   foreign/unreadable/nonexistent errors; resolved and mismatched Failure.
 - Concurrent duplicate retry, changing child/live original job/source
   lifecycle; proper wait-chain barriers, bounded joined contenders.
-- Runtime Fake -> ClaudeCLI change after enqueue cannot launch real work;
-  both worker triggers, forged mode, wrong parent/run and pre-existing
-  unmarked jobs covered without weakening their prior behavior.
+- Runtime Fake -> ClaudeCLI change after enqueue refuses before any model
+  call (never Fake under real selection); both worker triggers, malformed
+  stamp, wrong parent/run/tenant/trigger, extra override and pre-existing
+  unmarked jobs covered without weakening their prior behavior. Assert
+  new run/Operation/job/Failure lifecycle and preserved original resolution;
+  duplicate perform opens no second attention cause.
 - Preview query/row/deadline bounds for 1 and 50 rendered failures,
   no out-of-page reads, no per-row aggregates or domain/audit-head locks,
   occupied pool cancellation, whole/per-row failure safe blocking, and no
@@ -109,8 +168,10 @@ Already-retried or changed recovery context is stale/recovery_guard.
 
 * ADR and architecture checkpoint
 Expected to remain within accepted ADR-0015's stateless fixed gateway and
-source-owned actions; the proposed fixed Fake job binding narrows allowed
-behavior, not a real-provider recovery exception. This evaluation must be
+source-owned actions; the refuse-only expected-provider job binding
+narrows allowed behavior and never changes provider selection. Claude
+agreed this stays within ADR-0015/ADR-0004 with MF1's correction. It is not
+a real-provider recovery exception. This evaluation must be
 confirmed after entity/action PASS. If review finds a new durable boundary
 or authority, stop for the appropriate owner-owned ADR gate. Any runtime
 flow diagram update belongs to the later approved implementation plan.
