@@ -1,0 +1,73 @@
+#+TITLE: C1-03 B RED authoring checkpoint
+#+DATE: 2026-10-18
+
+* Authority
+Approved module plan =c1-03-b-retry-plan.org= at =87dafab=. Claude
+confirmed its condition met in answer
+=m_1792384526804615000_41ee2ccb= (2026-10-19T04:35:26Z). RED authoring
+permitted; no GREEN or merge authority. Current branch =c1-03-b-red= starts
+from that exact approved contract/plan and the unchanged A source baseline.
+
+* Preview error-shape clarification
+Consultation =m_1792385005874931875_714c4f69=, answer
+=m_1792385024824464000_9877c0a6= (2026-10-19T04:43:44Z), Claude:
+
+- =SDR.preview_inbox_retries(token, ids)= returns
+  ={:ok, %{failure_id => %{enabled?: boolean, blocked_reason: code_or_nil}}}=
+  or ={:error, :invalid_input | :forbidden | :timeout | :producer_error}=.
+- Entry invariant: enabled true iff reason nil; false has only an existing
+  closed C1 code. No raw errors or supplied token in the result.
+- Foreign, unreadable and nonexistent ids are indistinguishably ABSENT.
+- Non-UUIDs, duplicate ids and >50 refuse before authentication/DB reads;
+  empty input returns ={:ok, %{}}= without a DB read. This is specific to
+  the new metadata preview, not a change to command authentication order.
+- Non-current/non-admin session uniformly forbidden, without source reads.
+  Inbox maps that to =actor_not_permitted=. Whole read failure or per-id
+  absence becomes =producer_unavailable=, never hidden rows/changed metrics.
+
+* Partial test inventory (NOT VERIFIED RED)
+- =test/support/inbox_retry_fixtures.ex=: actual failed assignment/reply
+  via source APIs, known-terminal gen2 Fake assertion, projection-bound
+  requests, durable effects and actual worker calls. Worker-input fixtures
+  use the existing legacy retry action plus explicit synthetic Oban marker
+  setup; they do not implement or substitute the C1 command.
+- =test/sdr_agent/inbox/retry_command_test.exs=: source/gateway positives,
+  exact job stamps, original resolution, duplicate/stale/confirmation/
+  session/role cases, terminal reserved/sent/unknown and empty history,
+  stamp-failure rollback. Legacy source behavior is a disclosed control.
+- =test/sdr_agent/sdr/retry_binding_test.exs=: both AgentWorker entry paths
+  and ReplyWorker, actual bound-run refusal, malformed/mismatched/omitted
+  passed marker, override guards, selected vs resolved provider, unknown
+  actual job, terminal dedupe and actual Oban discard. Known Fake/legacy
+  execution cases are disclosed already-built controls.
+- =test/sdr_agent/inbox/retry_preview_test.exs=: fixed result/error shapes,
+  no-read invalid/empty cases, role and missing-id hiding, generation-2
+  positives and unsettled negatives, capability integration and read-only
+  effects. Missing source APIs are asserted after setup, not allowed to
+  raise undefined-function errors.
+
+Outstanding before a complete RED gate: independent-connection lock/session
+races and both-order proof; faithful real-gen2/E1 histories and unavailable
+reads; foreign/unreadable source equality; final-page-only batch/query/row
+bounds; occupied-pool cancellation/auth/statement/total budgets; whole and
+per-row fault handling; full privacy canaries, permissive mutant evidence,
+and verified fixture readiness at every subject. This checkpoint is NOT a
+claim of complete test coverage or a tdd-verify submission.
+
+* Verification and slot
+A's full gate runs alone at =78747b9= in =_codex_c103i2=. No B DB test has
+run concurrently; B uses only static authoring until it ends. A's result
+must not include these tests: separate worktrees/heads.
+
+The first B static invocation (=codex-c103b-initial-static.log=) did not
+reach compile: this fresh worktree has no dependencies. Preserve that
+failure; it is not a failed test or a RED verdict. Standard-library parsing
+and formatting of the four new Elixir files through the pinned Elixir
+1.20.4 executable pass, and =git diff --check= passes. Project formatter,
+warnings-as-errors compile, tests and complete gate remain unrun/pending
+dependency setup. Do not equate parser success with successful compilation.
+
+No production source, schema, configuration, policy or existing assertion
+changed. No private data, real model, owner app/database or spend action.
+GREEN is blocked until the completed RED evidence is independently verified
+and explicit permission is received.
