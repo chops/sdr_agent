@@ -277,10 +277,15 @@ C3 obligations:
 2. **The pre-check runs for every new request (step 8a).** It comes after
    replay (step 6) and the definition check (step 8), and before locks
    (step 9). A refusal returns `{:settings_incomplete, kinds}` and writes
-   nothing. That includes a request that would have recorded a non-admitted
-   outcome (steps 10-15), the same as the missing-definition rule. No
-   admission row is stored, so the source ref stays free and an identical
-   resubmission after the owner saves the settings is a new request.
+   nothing.
+   - **Scope.** This applies to every new request, including one that would
+     have recorded a non-admitted outcome (steps 10-15). That scope is C3's
+     own added precondition, chosen conservatively to mirror the
+     missing-definition rule. It is not an existing C4 rule: C4 checks
+     completeness only where a run is created.
+   - **The ref stays free.** No admission row is stored, so the source ref
+     stays free. An identical resubmission after the owner saves the
+     settings is a new request.
 3. **Replay does not depend on today's settings.** Replay (step 6) comes
    first and returns the stored result and the stored run's snapshot. It
    never builds a new snapshot.
@@ -425,8 +430,11 @@ admission waits on the definition's unique index after the head. Standalone
 
 Implicit foreign-key key-share checks during the writes (contact 3,
 admission up to 8, lead 6, assign path about 5) each target a row created by
-this transaction or already held in an equal or stronger mode, except the
-tenant row, which no writer locks. **Unique-index waits after the head**
+this transaction or already held in an equal or stronger mode, with two
+exceptions. The first is the tenant row, which no writer locks. The second is
+the pre-existing settings revisions named by the run's snapshot: their
+`FOR KEY SHARE` is compatible with an editor's `FOR NO KEY UPDATE`, as
+described below. **Unique-index waits after the head**
 are excluded per index: account domain (both indexes) and contact email:
 every writer holds the key; admission ref: key; leads per account and per
 contact: every writer that can make a lead open holds the company key;
@@ -438,16 +446,45 @@ The C4 settings dependencies (section 4.5; facts from `main` at fb54000) are
 part of the assign path's set above:
 
 - **Settings revisions.** `BuildSettingsSnapshot` reads the current revision
-  of each kind only after it holds the chain head, so no revision can commit
-  between that read and the run. It takes no row lock on revisions.
-- **Snapshot insert.** The `RunSettingsSnapshot` row is fresh. Its
-  `(tenant_id)` foreign key targets the tenant row, which no writer locks.
+  of each kind, unlocked, only after it holds the chain head. No revision can
+  commit between that read and the run, because a save appends under the
+  head.
+- **Snapshot insert.** The `RunSettingsSnapshot` row is fresh. Its foreign
+  keys check, in `FOR KEY SHARE`:
+  - the tenant row, which no writer locks;
+  - up to five pre-existing revisions, one composite foreign key per kind:
+    `(<kind>_revision_id, tenant_id, <kind>_kind, <kind>_content_sha256)` →
+    `settings_revisions (id, tenant_id, kind, content_sha256)`
+    (`RunSettingsSnapshot` migration statements, `run_settings_snapshot.ex:106-119`).
 - **Run to snapshot.** The run's `(settings_snapshot_id, tenant_id)` foreign
   key targets that row, created in this transaction.
 
-Revision writers (`SettingsRevision :create_revision`, the `/settings` save)
-take no identity key. They lock no domain row before the head. RED confirms
-this, as for classification below.
+**Revision writers.** The `/settings` save, `SettingsRevision
+:create_revision` through `Agents.Changes.SettingsRevisionChain`, runs in
+this order (moduledoc steps 1-5, `lock_current/2`):
+
+1. it locks the kind's current revision `FOR NO KEY UPDATE`, before the
+   head;
+2. it inserts the next revision;
+3. it appends under the chain head.
+
+It takes no identity key and locks no other domain row. C4 chose `FOR NO
+KEY UPDATE` so that a snapshot's `FOR KEY SHARE` foreign-key check never
+waits on an editor. These two modes do not conflict.
+
+**Both orders:**
+
+- **Admission holds the head first.** The editor holds the revision `FOR NO
+  KEY UPDATE` and waits for the head. The admission's snapshot `FOR KEY
+  SHARE` on that same revision is granted without waiting. The admission
+  commits, then the save proceeds. No cycle.
+- **The save holds the head first.** The admission waits at the head (or
+  before it, at a key-holding step that is unrelated to the save). After the
+  save commits, the admission reads the new current revision under the head.
+
+C3 adds no revision `UPDATE` lock and does not refactor C4. RED proves the
+actual order on independent connections (section 9). It does not assert
+that there is no lock.
 
 The cycle table below is historical code facts from 182bde6, plus the C4 row.
 C3-02's plan re-checks it against current main, including the C1 command
@@ -473,7 +510,7 @@ Cycle check against existing writers:
 | Account/Contact writes | key → row UPDATE → head | key first |
 | Lead `:reopen`, Qualification `:override` | key → lead UPDATE → head | key first; agent transitions take no key and only lock their lead |
 | User role/status, campaign transitions | row UPDATE → head (no key) | they block on our SHARE while holding nothing we need |
-| C4 settings revision save (`:create_revision`) | head (append; no key, no domain row) | admission reads revisions only while holding the head, so the two serialize on the head alone; a save never waits on a key or domain row we hold (to confirm in RED) |
+| C4 settings revision save (`:create_revision`, fb54000) | current revision `FOR NO KEY UPDATE` → insert → head (no key, no other domain row) | admission takes only `FOR KEY SHARE` on revisions (snapshot FKs, under the head), which is compatible with `FOR NO KEY UPDATE`; the save never waits on a key or domain row we hold (both orders proved on independent connections in RED) |
 | `SDR.assign_lead/2`, `retry_run/2` | lead UPDATE → head (no key) | lead-first as step 6; while the handover holds the original `FOR UPDATE`, an assignment of it waits and then fails its state check |
 
 ## 7. Real-data guard and privacy
@@ -503,7 +540,8 @@ Cycle check against existing writers:
     rewrites Postgrex, DBConnection and Ash error structs in crash reports
     and framework logs.
   - **Oban.** The worker boundary (`SdrAgent.Workers.ErrorBoundary`)
-    sanitizes database errors, so `oban_jobs.errors` holds no message.
+    sanitizes database errors, so `oban_jobs.errors` holds no raw database
+    or exception message (only the fixed safe summary persists).
   - **Dev connection errors.** Dev sets
     `show_sensitive_data_on_connection_error: false`.
 
@@ -626,11 +664,13 @@ C3-02:
 - Run settings (section 4.5):
   - **Pre-check refusal.** With no offering profile saved, for each of the
     four kinds, a new request is refused `{:settings_incomplete,
-    [:offering_profile]}`. Both shapes are covered: one that would be
-    admitted, and one that would record `suppressed`. Exact row and event
-    counts are unchanged: no account, contact, admission, lead, run, Oban
-    job, Operation, RunSettingsSnapshot, signal or success audit. The same
-    source ref admits once a profile is saved.
+    [:offering_profile]}`. Three shapes are covered: one that would be
+    admitted, one that would record `suppressed`, and one that would record
+    `duplicate_open_lead`. Exact row and event counts are unchanged: no
+    account, contact, admission, lead, run, Oban job, Operation,
+    RunSettingsSnapshot, signal or success audit. No admission row exists for
+    the ref. Once a profile is saved, the same source ref is accepted as a new
+    request: it is admitted, or it records its outcome.
   - **Authoritative refusal.** A snapshot-build refusal at step 16 is shown
     by the C4 tests' existing mechanism for `settings_default_unavailable`;
     if none reaches it, the plan names the code path. It rolls back
@@ -644,6 +684,18 @@ C3-02:
     `/settings` save of the first offering profile. Either the request is
     refused with nothing written, or it is admitted with its run and
     snapshot. `admitted` is never returned without the queued run.
+  - **Lock order of save vs snapshot** (independent connections, both
+    orders, monitor on `pg_locks`/`pg_stat_activity`). An editor holds the
+    current revision `FOR NO KEY UPDATE` and waits at the head, while the
+    admission holds the head and its snapshot foreign key takes `FOR KEY
+    SHARE` on that revision.
+    - **Granted at once.** The `FOR KEY SHARE` is granted with no wait.
+    - **Waits only at the head.** The editor is shown waiting only on the
+      head.
+    - **The reverse order.** With the save holding the head, the admission
+      waits at the head, then snapshots the new revision.
+
+    RED asserts this actual order, not an absence of locks.
 - Deferred trigger: an `admitted` row without a lead fails at commit.
 - Matched-lead binding (direct SQL inserts): `duplicate_open_lead` or
   `active_target_exists` with `account_id` null fails the check; a matched
