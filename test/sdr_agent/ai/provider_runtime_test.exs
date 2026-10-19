@@ -19,6 +19,7 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
   use ExUnit.Case, async: false
 
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
+  alias SdrAgent.AI.ModelProvider.Coordinator
   alias SdrAgent.AI.ModelProvider.Fake
   alias SdrAgent.AI.ModelProvider.ProfileSupervisor
   alias SdrAgent.AI.ModelProvider.Runtime
@@ -443,21 +444,25 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
       ledger!()
       start_supervised!(child)
       # No pin and no shim here: the server runs, held (its preflight fails).
-      assert eventually(fn -> ClaudeCLI.admission() != %{admission: :not_running} end)
-      server = GenServer.whereis(ClaudeCLI.server())
-
-      assert %{admission: :open} = ClaudeCLI.admission()
-      Process.exit(server, :kill)
+      # #194: init publishes admission before its attestation, so both are
+      # awaited, on one incarnation, before the kill and after the restart.
+      assert {:ok, first} = await_started(nil)
+      # Fully started before the kill: init has returned (a system message is
+      # answered only from the loop) and the coordinator's row, published
+      # after the start returns, binds it to a start.
+      _ = :sys.get_state(first, 1_000)
 
       assert eventually(fn ->
-               case GenServer.whereis(ClaudeCLI.server()) do
-                 pid when is_pid(pid) -> pid != server
-                 _ -> false
-               end
+               match?(
+                 {:ok, %{private: %{server: ^first, start_id: id}}} when is_binary(id),
+                 Coordinator.sample()
+               )
              end)
 
-      assert eventually(fn -> ClaudeCLI.admission() == %{admission: :open} end)
-      assert %{status: :pending} = ClaudeCLI.attestation()
+      Process.exit(first, :kill)
+
+      assert {:ok, replacement} = await_started(first)
+      assert replacement != first
     end
   end
 
@@ -546,6 +551,35 @@ defmodule SdrAgent.AI.ProviderRuntimeTest do
 
       Application.put_env(:sdr_agent, :model_provider, Fake)
       assert %{cli_executable: nil} = Runtime.status()
+    end
+  end
+
+  # #194: the registered server other than `previous`, once it admits calls
+  # and has noted its attestation as `status`, both read from that one pid,
+  # which is still registered and alive after the reads; else `:timeout`
+  # (the `eventually/2` bound).
+  defp await_started(previous, status \\ :pending) do
+    Enum.reduce_while(1..200, :timeout, fn _attempt, :timeout ->
+      case started(previous, status) do
+        {:ok, pid} ->
+          {:halt, {:ok, pid}}
+
+        false ->
+          Process.sleep(10)
+          {:cont, :timeout}
+      end
+    end)
+  end
+
+  defp started(previous, status) do
+    with pid when is_pid(pid) and pid != previous <- GenServer.whereis(ClaudeCLI.server()),
+         %{admission: :open} <- ClaudeCLI.admission(pid),
+         %{status: ^status} <- ClaudeCLI.attestation(pid),
+         ^pid <- GenServer.whereis(ClaudeCLI.server()),
+         true <- Process.alive?(pid) do
+      {:ok, pid}
+    else
+      _ -> false
     end
   end
 
