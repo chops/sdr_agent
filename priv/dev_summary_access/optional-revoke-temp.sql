@@ -12,10 +12,11 @@
 
 \set ON_ERROR_STOP on
 \pset footer off
+-- A refusal raises an error: psql exits 3 and prints no END marker.
 \if :{?mode}
 \else
   \echo REFUSED: pass -v mode=inventory or -v mode=apply. Nothing was changed.
-  \quit
+  DO $r$ BEGIN RAISE EXCEPTION 'optional TEMP revoke refused: no mode'; END $r$;
 \endif
 SELECT current_database() = 'sdr_agent_dev' AS db_ok,
        (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user) AS su_ok,
@@ -24,12 +25,12 @@ SELECT current_database() = 'sdr_agent_dev' AS db_ok,
 \if :db_ok
 \else
   \echo REFUSED: run against sdr_agent_dev only. Nothing was changed.
-  \quit
+  DO $r$ BEGIN RAISE EXCEPTION 'optional TEMP revoke refused: wrong database'; END $r$;
 \endif
 \if :mode_ok
 \else
   \echo REFUSED: mode must be inventory or apply. Nothing was changed.
-  \quit
+  DO $r$ BEGIN RAISE EXCEPTION 'optional TEMP revoke refused: bad mode'; END $r$;
 \endif
 
 -- Effects inventory: every login role that can connect here, whether it
@@ -60,7 +61,7 @@ WHERE datname = current_database();
   \if :su_ok
   \else
     \echo REFUSED: apply needs a superuser. Nothing was changed.
-    \quit
+    DO $r$ BEGIN RAISE EXCEPTION 'optional TEMP revoke refused: not a superuser'; END $r$;
   \endif
   BEGIN;
   REVOKE TEMP ON DATABASE sdr_agent_dev FROM PUBLIC;

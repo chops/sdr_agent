@@ -25,15 +25,17 @@
 
 SELECT current_database() = 'sdr_agent_dev' AS right_db,
        (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user) AS is_super \gset
+-- A refusal raises an error, so psql exits 3 (ON_ERROR_STOP) and never
+-- prints the END marker.
 \if :right_db
 \else
   \echo REFUSED: connect to sdr_agent_dev. Nothing was changed.
-  \quit
+  DO $r$ BEGIN RAISE EXCEPTION 'summary install refused: wrong database'; END $r$;
 \endif
 \if :is_super
 \else
   \echo REFUSED: run as a superuser. Nothing was changed.
-  \quit
+  DO $r$ BEGIN RAISE EXCEPTION 'summary install refused: not a superuser'; END $r$;
 \endif
 
 BEGIN;
@@ -64,7 +66,9 @@ GRANT CONNECT ON DATABASE sdr_agent_dev TO sdr_summary_login;
 CREATE SCHEMA summary;
 REVOKE ALL ON SCHEMA summary FROM PUBLIC;
 GRANT USAGE ON SCHEMA summary TO sdr_summary_login, sdr_summary_definer;
-ALTER DEFAULT PRIVILEGES IN SCHEMA summary REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+-- Future functions owned by the definer get no PUBLIC EXECUTE. (A
+-- per-schema default cannot revoke the global PUBLIC EXECUTE default, so
+-- each function below also has PUBLIC EXECUTE revoked by exact signature.)
 ALTER DEFAULT PRIVILEGES FOR ROLE sdr_summary_definer REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 -- 4. The definer's read access: exactly the columns the two functions read,
@@ -92,8 +96,10 @@ GRANT SELECT (grant_id, tenant_id, key, applies_to, attempts, profile_id, availa
 -- 5. summary.g3_inventory_v1(): the accepted G3 metadata inventory
 -- (tmp/g3-inventory.sql, sha256 602e9429...) as rows of fixed sections and
 -- labels with counts. It never returns a payload value, output, prompt,
--- response, bundle path or scope. Labels that do not match a short
--- lowercase pattern are returned as 'other'. Each section is capped.
+-- response, bundle path or scope. Every returned label is either a fixed
+-- string in this body or a member of a reviewed vocabulary below (the app's
+-- own enumerations); any other stored value is counted under 'other' and
+-- never returned. Generations are integers. Each section is capped.
 -- Read-only by privilege (the definer can only SELECT the columns above)
 -- and by volatility (STABLE: one snapshot for the whole call).
 CREATE FUNCTION summary.g3_inventory_v1()
@@ -109,6 +115,24 @@ DECLARE
   v_t constant text := current_database();
   v_at constant text := to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"');
   v_v constant text := 'summary.g3_inventory_v1';
+  -- Reviewed vocabularies (the app's enumerations at this version). Any
+  -- other stored value is grouped as 'other'; it is never returned.
+  c_providers constant text[] := ARRAY['claude_cli', 'codex_app_server', 'fake'];
+  c_inv_statuses constant text[] := ARRAY['completed', 'failed', 'reserved', 'sent', 'unknown'];
+  c_profiles constant text[] := ARRAY['claude_cli_opus', 'claude_cli_sonnet', 'fake'];
+  c_dispositions constant text[] := ARRAY['calibration', 'released', 'withheld'];
+  c_export_statuses constant text[] := ARRAY['building', 'completed', 'failed'];
+  c_event_types constant text[] := ARRAY[
+    'model.allocation.released', 'model.grant.allocation_changed',
+    'model.grant.allocation_created', 'model.grant.allocation_released', 'model.grant.created',
+    'model.grant.revoked', 'model.grant.terms_changed', 'model.invocation.completed',
+    'model.invocation.failed', 'model.invocation.reserved', 'model.invocation.sent',
+    'model.invocation.unknown', 'model.launch.refused', 'model.profile.setting_initialized',
+    'model.profile.switch_blocked', 'model.profile.switch_completed',
+    'model.profile.switch_failed', 'model.profile.switch_requested',
+    'model.profile.switch_resolved', 'model.reservation.refused', 'model.result.calibration',
+    'model.result.released', 'model.result.withheld', 'model.server.start_allocated',
+    'model.server.start_failed', 'model.server.start_ready', 'model.server.start_started'];
   -- A section that reaches its row limit makes the result incomplete.
   v_n bigint;
   v_trunc boolean := false;
@@ -120,8 +144,8 @@ BEGIN
   RETURN QUERY
     SELECT v_t, v_at, v_v, '1 invocations'::text, x.g, x.p, x.s, NULL::text, NULL::text, count(*)
     FROM (SELECT mi.ledger_generation::text AS g,
-                 CASE WHEN mi.provider ~ '^[a-z0-9_]{1,32}$' THEN mi.provider ELSE 'other' END AS p,
-                 CASE WHEN mi.status ~ '^[a-z0-9_]{1,32}$' THEN mi.status ELSE 'other' END AS s,
+                 CASE WHEN mi.provider = ANY (c_providers) THEN mi.provider ELSE 'other' END AS p,
+                 CASE WHEN mi.status = ANY (c_inv_statuses) THEN mi.status ELSE 'other' END AS s,
                  mi.ledger_generation AS go
           FROM public.model_invocations mi) x
     GROUP BY x.g, x.p, x.s, x.go ORDER BY x.go, x.p, x.s LIMIT 100;
@@ -135,8 +159,8 @@ BEGIN
   RETURN QUERY
     SELECT v_t, v_at, v_v, '2 gen2 claude_cli'::text, x.pr, x.s, NULL::text, NULL::text,
            NULL::text, count(*)
-    FROM (SELECT CASE WHEN mi.profile_id ~ '^[a-z0-9_]{1,40}$' THEN mi.profile_id ELSE 'other' END AS pr,
-                 CASE WHEN mi.status ~ '^[a-z0-9_]{1,32}$' THEN mi.status ELSE 'other' END AS s
+    FROM (SELECT CASE WHEN mi.profile_id = ANY (c_profiles) THEN mi.profile_id ELSE 'other' END AS pr,
+                 CASE WHEN mi.status = ANY (c_inv_statuses) THEN mi.status ELSE 'other' END AS s
           FROM public.model_invocations mi
           WHERE mi.ledger_generation = 2 AND mi.provider = 'claude_cli') x
     GROUP BY x.pr, x.s ORDER BY x.pr, x.s LIMIT 100;
@@ -153,7 +177,7 @@ BEGIN
   RETURN QUERY
     SELECT v_t, v_at, v_v, '2 releases'::text, x.d, NULL::text, NULL::text, NULL::text,
            NULL::text, count(*)
-    FROM (SELECT CASE WHEN r.disposition ~ '^[a-z0-9_]{1,32}$' THEN r.disposition ELSE 'other' END AS d
+    FROM (SELECT CASE WHEN r.disposition = ANY (c_dispositions) THEN r.disposition ELSE 'other' END AS d
           FROM public.model_result_releases r) x
     GROUP BY x.d ORDER BY x.d LIMIT 100;
   GET DIAGNOSTICS v_n = ROW_COUNT; IF v_n >= 100 THEN v_trunc := true; END IF;
@@ -172,7 +196,7 @@ BEGIN
                  OR e.subject_resource IS DISTINCT FROM 'SdrAgent.Agents.ModelInvocation'
                  OR e.subject_id IS DISTINCT FROM mi.id::text THEN 'inconsistent binding'
                ELSE 'gen' || mi.ledger_generation || ' '
-                    || CASE WHEN mi.provider ~ '^[a-z0-9_]{1,32}$' THEN mi.provider ELSE 'other' END
+                    || CASE WHEN mi.provider = ANY (c_providers) THEN mi.provider ELSE 'other' END
              END AS binding
       FROM public.audit_events e
       LEFT JOIN public.model_invocations mi ON mi.id = e.model_invocation_id
@@ -193,7 +217,7 @@ BEGIN
   RETURN QUERY
     WITH ev AS (
       SELECT e.payload,
-             CASE WHEN e.event_type ~ '^[a-z0-9_.]{1,64}$' THEN e.event_type ELSE 'other' END AS event_type,
+             CASE WHEN e.event_type = ANY (c_event_types) THEN e.event_type ELSE 'other' END AS event_type,
              CASE
                WHEN e.model_invocation_id IS NULL THEN 'unbound: no invocation id'
                WHEN mi.id IS NULL THEN 'unbound: invocation not found'
@@ -201,7 +225,7 @@ BEGIN
                  OR e.subject_resource IS DISTINCT FROM 'SdrAgent.Agents.ModelInvocation'
                  OR e.subject_id IS DISTINCT FROM mi.id::text THEN 'inconsistent binding'
                ELSE 'gen' || mi.ledger_generation || ' '
-                    || CASE WHEN mi.provider ~ '^[a-z0-9_]{1,32}$' THEN mi.provider ELSE 'other' END
+                    || CASE WHEN mi.provider = ANY (c_providers) THEN mi.provider ELSE 'other' END
              END AS binding
       FROM public.audit_events e
       LEFT JOIN public.model_invocations mi ON mi.id = e.model_invocation_id
@@ -225,7 +249,7 @@ BEGIN
   RETURN QUERY
     WITH ev AS (
       SELECT e.canonical_bytes,
-             CASE WHEN e.event_type ~ '^[a-z0-9_.]{1,64}$' THEN e.event_type ELSE 'other' END AS event_type,
+             CASE WHEN e.event_type = ANY (c_event_types) THEN e.event_type ELSE 'other' END AS event_type,
              CASE
                WHEN e.model_invocation_id IS NULL THEN 'unbound: no invocation id'
                WHEN mi.id IS NULL THEN 'unbound: invocation not found'
@@ -233,7 +257,7 @@ BEGIN
                  OR e.subject_resource IS DISTINCT FROM 'SdrAgent.Agents.ModelInvocation'
                  OR e.subject_id IS DISTINCT FROM mi.id::text THEN 'inconsistent binding'
                ELSE 'gen' || mi.ledger_generation || ' '
-                    || CASE WHEN mi.provider ~ '^[a-z0-9_]{1,32}$' THEN mi.provider ELSE 'other' END
+                    || CASE WHEN mi.provider = ANY (c_providers) THEN mi.provider ELSE 'other' END
              END AS binding
       FROM public.audit_events e
       LEFT JOIN public.model_invocations mi ON mi.id = e.model_invocation_id
@@ -256,7 +280,7 @@ BEGIN
     -- with_bundle_path_recorded (n is null for this section).
     SELECT v_t, v_at, v_v, '4 audit exports'::text, x.s, x.c::text, x.h::text, x.p::text,
            NULL::text, NULL::bigint
-    FROM (SELECT CASE WHEN a.status ~ '^[a-z0-9_]{1,32}$' THEN a.status ELSE 'other' END AS s,
+    FROM (SELECT CASE WHEN a.status = ANY (c_export_statuses) THEN a.status ELSE 'other' END AS s,
                  count(*) AS c, count(a.bundle_sha256) AS h, count(a.bundle_path) AS p
           FROM public.audit_exports a GROUP BY 1) x
     ORDER BY x.s LIMIT 100;
@@ -282,8 +306,11 @@ $fn$;
 --   pre:  summary.gdemo_drain_v1('pre', NULL, NULL, NULL)
 --   post: summary.gdemo_drain_v1('post', '2026-10-19 02:20:00+00', 3, ARRAY['b1','b2','b5'])
 -- Invalid arguments raise SQLSTATE 22023 with a fixed message that never
--- echoes the input. Labels as in the psql version; the last data row is
--- CHECK (GO, or STOP with a fixed reason), then END.
+-- echoes the input. Labels as in the psql version, mapped onto reviewed
+-- vocabularies ('other' for anything else; allocation buckets canonical or
+-- 'malformed'); the last data row is CHECK (GO, or STOP with a fixed
+-- reason), then END (complete, truncated, or incomplete when a live grant
+-- or allocation has malformed terms).
 CREATE FUNCTION summary.gdemo_drain_v1(phase text, start_at timestamptz,
                                        b1_attempts integer, workshop_buckets text[])
 RETURNS TABLE (target text, read_at text, fn_version text, section text,
@@ -298,6 +325,23 @@ DECLARE
   v_t constant text := current_database();
   v_at constant text := to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"');
   v_v constant text := 'summary.gdemo_drain_v1';
+  -- Reviewed vocabularies (the app's enumerations at this version). Any
+  -- other stored value is grouped as 'other' (or, for grant terms, makes
+  -- the result incomplete); it is never returned.
+  c_providers constant text[] := ARRAY['claude_cli', 'codex_app_server', 'fake'];
+  c_inv_statuses constant text[] := ARRAY['completed', 'failed', 'reserved', 'sent', 'unknown'];
+  c_run_statuses constant text[] := ARRAY['budget_exhausted', 'cancelled', 'failed', 'queued',
+                                          'running', 'succeeded'];
+  c_dispositions constant text[] := ARRAY['calibration', 'released', 'withheld'];
+  c_queues constant text[] := ARRAY['agent', 'default', 'delivery', 'followup', 'integration',
+                                    'reconciliation', 'research'];
+  c_job_states constant text[] := ARRAY['available', 'cancelled', 'completed', 'discarded',
+                                        'executing', 'retryable', 'scheduled'];
+  c_keys constant text[] := ARRAY['b1', 'b2', 'b3', 'b4', 'b5', 'daily_use', 'proof',
+                                  'rehearsal', 'workshop'];
+  c_buckets constant text[] := ARRAY['b1', 'b2', 'b3', 'b4', 'b5', 'proof'];
+  c_real_profiles constant text[] := ARRAY['claude_cli_opus', 'claude_cli_sonnet'];
+  v_malformed bigint;
   -- A section that reaches its row limit makes the result incomplete.
   v_n bigint;
   v_trunc boolean := false;
@@ -364,7 +408,7 @@ BEGIN
   RETURN QUERY
     SELECT v_t, v_at, v_v, 'CONTEXT 1 runs by status'::text, x.s, NULL::text, NULL::text,
            NULL::text, NULL::text, count(*)
-    FROM (SELECT CASE WHEN r.status ~ '^[a-z0-9_]{1,32}$' THEN r.status ELSE 'other' END AS s
+    FROM (SELECT CASE WHEN r.status = ANY (c_run_statuses) THEN r.status ELSE 'other' END AS s
           FROM public.agent_runs r) x
     GROUP BY x.s ORDER BY x.s LIMIT 100;
   GET DIAGNOSTICS v_n = ROW_COUNT; IF v_n >= 100 THEN v_trunc := true; END IF;
@@ -381,8 +425,8 @@ BEGIN
   RETURN QUERY
     SELECT v_t, v_at, v_v, 'CONTEXT 2 other queues pending (not part of the fence)'::text,
            x.q, x.st, NULL::text, NULL::text, NULL::text, count(*)
-    FROM (SELECT CASE WHEN j.queue ~ '^[a-z0-9_]{1,32}$' THEN j.queue ELSE 'other' END AS q,
-                 j.state::text AS st
+    FROM (SELECT CASE WHEN j.queue = ANY (c_queues) THEN j.queue ELSE 'other' END AS q,
+                 CASE WHEN j.state::text = ANY (c_job_states) THEN j.state::text ELSE 'other' END AS st
           FROM public.oban_jobs j
           WHERE j.queue NOT IN ('research', 'agent', 'integration')
             AND j.state IN ('available', 'scheduled', 'executing', 'retryable')) x
@@ -393,7 +437,7 @@ BEGIN
     SELECT v_t, v_at, v_v, 'CONTEXT 3 reserved or sent invocations on a terminal run'::text,
            x.g, x.p, x.s, NULL::text, NULL::text, count(*)
     FROM (SELECT mi.ledger_generation::text AS g, mi.ledger_generation AS go,
-                 CASE WHEN mi.provider ~ '^[a-z0-9_]{1,32}$' THEN mi.provider ELSE 'other' END AS p,
+                 CASE WHEN mi.provider = ANY (c_providers) THEN mi.provider ELSE 'other' END AS p,
                  mi.status AS s
           FROM public.model_invocations mi JOIN public.agent_runs r ON r.id = mi.agent_run_id
           WHERE mi.status IN ('reserved', 'sent') AND r.status NOT IN ('queued', 'running')) x
@@ -401,16 +445,30 @@ BEGIN
   GET DIAGNOSTICS v_n = ROW_COUNT; IF v_n >= 100 THEN v_trunc := true; END IF;
 
   -- 4. Authority: one classification per grant. A grant's name is never
-  -- read and never authority.
+  -- read and never authority. buckets and profiles are canonical (sorted,
+  -- distinct, one-dimensional, members of the fixed sets, bounded) or NULL
+  -- when malformed; NULL never matches a reviewed term, and a malformed
+  -- live grant or allocation makes the result incomplete.
   WITH a AS (
     SELECT al.grant_id, al.tenant_id, al.key, al.attempts, al.profile_id, al.available_from,
            al.available_until, al.released_at, al.applies_to,
-           (SELECT array_agg(x::text ORDER BY x::text) FROM unnest(al.applies_to) AS x) AS buckets
+           CASE WHEN al.applies_to IS NOT NULL AND array_ndims(al.applies_to) = 1 AND cardinality(al.applies_to) BETWEEN 1 AND 6
+                     AND NOT EXISTS (SELECT 1 FROM unnest(al.applies_to) AS b(x)
+                                     WHERE b.x IS NULL OR NOT (b.x::text = ANY (c_buckets)))
+                     AND (SELECT count(DISTINCT b.x) FROM unnest(al.applies_to) AS b(x)) = cardinality(al.applies_to)
+                THEN (SELECT array_agg(b.x::text ORDER BY b.x::text) FROM unnest(al.applies_to) AS b(x)) END AS buckets
     FROM public.model_call_allocations al
   ), g AS (
     SELECT gr.id, gr.status, gr.starts_at, gr.expires_at, gr.revoked_at,
            gr.total_attempts, gr.per_utc_day_attempts,
-           (SELECT array_agg(p::text ORDER BY p::text) FROM unnest(gr.profile_ids) AS p) AS profiles,
+           CASE WHEN gr.profile_ids IS NOT NULL AND array_ndims(gr.profile_ids) = 1
+                     AND cardinality(gr.profile_ids) BETWEEN 1 AND 2
+                     AND NOT EXISTS (SELECT 1 FROM unnest(gr.profile_ids) AS p(x)
+                                     WHERE p.x IS NULL OR NOT (p.x::text = ANY (c_real_profiles)))
+                     AND (SELECT count(DISTINCT p.x) FROM unnest(gr.profile_ids) AS p(x))
+                         = cardinality(gr.profile_ids)
+                THEN (SELECT array_agg(p.x::text ORDER BY p.x::text) FROM unnest(gr.profile_ids) AS p(x))
+           END AS profiles,
            (SELECT count(*) FROM a WHERE a.grant_id = gr.id) AS n_alloc,
            ((SELECT count(*) FROM a WHERE a.grant_id = gr.id) = 2
             AND NOT EXISTS (SELECT 1 FROM a WHERE a.grant_id = gr.id
@@ -459,8 +517,12 @@ BEGIN
          (SELECT count(*) FROM public.model_call_allocations al
           JOIN c c2 ON c2.id = al.grant_id
           WHERE c2.class NOT IN ('revoked', 'expired', 'gdemo')
-            AND al.applies_to && ARRAY['b1', 'b2', 'b3', 'b4', 'b5']::text[])
-    INTO a_other, a_not_started, a_gdemo, c_g_r0, a_ordinary
+            AND al.applies_to && ARRAY['b1', 'b2', 'b3', 'b4', 'b5']::text[]),
+         (SELECT count(*) FROM a JOIN c c3 ON c3.id = a.grant_id
+          WHERE c3.class NOT IN ('revoked', 'expired') AND a.buckets IS NULL)
+         + (SELECT count(*) FROM g JOIN c c4 ON c4.id = g.id
+            WHERE c4.class NOT IN ('revoked', 'expired') AND g.profiles IS NULL)
+    INTO a_other, a_not_started, a_gdemo, c_g_r0, a_ordinary, v_malformed
   FROM c;
 
   RETURN QUERY SELECT v_t, v_at, v_v, 'AUTHORITY 4a other active unexpired grants (must be 0)'::text,
@@ -487,10 +549,13 @@ BEGIN
     SELECT v_t, v_at, v_v,
            'CONTEXT 4 allocations of active unexpired grants by key, buckets and window state'::text,
            x.key, x.buckets, x.attempts::text, x.ws, NULL::text, count(*)
-    FROM (SELECT CASE WHEN al.key ~ '^[a-z0-9_]{1,32}$' THEN al.key ELSE 'other' END AS key,
-                 CASE WHEN NOT EXISTS (SELECT 1 FROM unnest(al.applies_to) AS b(x)
-                                       WHERE b.x !~ '^[a-z0-9_]{1,16}$')
-                      THEN al.applies_to::text ELSE 'other' END AS buckets,
+    FROM (SELECT CASE WHEN al.key = ANY (c_keys) THEN al.key ELSE 'other' END AS key,
+                 coalesce((CASE WHEN al.applies_to IS NOT NULL AND array_ndims(al.applies_to) = 1 AND cardinality(al.applies_to) BETWEEN 1 AND 6
+                     AND NOT EXISTS (SELECT 1 FROM unnest(al.applies_to) AS b(x)
+                                     WHERE b.x IS NULL OR NOT (b.x::text = ANY (c_buckets)))
+                     AND (SELECT count(DISTINCT b.x) FROM unnest(al.applies_to) AS b(x)) = cardinality(al.applies_to)
+                THEN (SELECT array_agg(b.x::text ORDER BY b.x::text) FROM unnest(al.applies_to) AS b(x)) END)::text,
+                          'malformed') AS buckets,
                  al.attempts,
                  CASE
                    WHEN al.released_at IS NULL AND al.available_until IS NOT NULL
@@ -510,8 +575,8 @@ BEGIN
     SELECT v_t, v_at, v_v, 'CONTEXT 5 invocations by generation, provider and status'::text,
            x.g, x.p, x.s, NULL::text, NULL::text, count(*)
     FROM (SELECT mi.ledger_generation::text AS g, mi.ledger_generation AS go,
-                 CASE WHEN mi.provider ~ '^[a-z0-9_]{1,32}$' THEN mi.provider ELSE 'other' END AS p,
-                 CASE WHEN mi.status ~ '^[a-z0-9_]{1,32}$' THEN mi.status ELSE 'other' END AS s
+                 CASE WHEN mi.provider = ANY (c_providers) THEN mi.provider ELSE 'other' END AS p,
+                 CASE WHEN mi.status = ANY (c_inv_statuses) THEN mi.status ELSE 'other' END AS s
           FROM public.model_invocations mi) x
     GROUP BY x.g, x.go, x.p, x.s ORDER BY x.go, x.p, x.s LIMIT 100;
   GET DIAGNOSTICS v_n = ROW_COUNT; IF v_n >= 100 THEN v_trunc := true; END IF;
@@ -519,13 +584,14 @@ BEGIN
   RETURN QUERY
     SELECT v_t, v_at, v_v, 'CONTEXT 5 releases by disposition'::text, x.d, NULL::text,
            NULL::text, NULL::text, NULL::text, count(*)
-    FROM (SELECT CASE WHEN r.disposition ~ '^[a-z0-9_]{1,32}$' THEN r.disposition ELSE 'other' END AS d
+    FROM (SELECT CASE WHEN r.disposition = ANY (c_dispositions) THEN r.disposition ELSE 'other' END AS d
           FROM public.model_result_releases r) x
     GROUP BY x.d ORDER BY x.d LIMIT 100;
   GET DIAGNOSTICS v_n = ROW_COUNT; IF v_n >= 100 THEN v_trunc := true; END IF;
 
   v_verdict := CASE
     WHEN v_trunc THEN 'STOP: a section reached its row limit (incomplete)'
+    WHEN v_malformed > 0 THEN 'STOP: malformed grant or allocation terms (incomplete)'
     WHEN d1 > 0 OR d2 > 0 OR d3 > 0 THEN 'STOP: a DRAIN row is not 0'
     WHEN a_other > 0 OR a_not_started > 0 OR a_ordinary > 0 THEN 'STOP: unexpected authority'
     WHEN v_post AND a_gdemo <> 1 THEN 'STOP: G-DEMO does not match the reviewed terms exactly once'
@@ -534,7 +600,9 @@ BEGIN
   RETURN QUERY SELECT v_t, v_at, v_v, 'CHECK'::text, v_verdict, NULL::text, NULL::text,
                       NULL::text, NULL::text, NULL::bigint;
   RETURN QUERY SELECT v_t, v_at, v_v, 'END'::text,
-                      CASE WHEN v_trunc THEN 'truncated' ELSE 'complete' END, NULL::text, NULL::text,
+                      CASE WHEN v_trunc THEN 'truncated'
+                           WHEN v_malformed > 0 THEN 'incomplete'
+                           ELSE 'complete' END, NULL::text, NULL::text,
                       NULL::text, NULL::text, NULL::bigint;
 END
 $fn$;
