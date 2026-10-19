@@ -8,15 +8,21 @@ supersedes: null
 
 ## Status
 
-Proposed. Nothing here is installed or approved for use. Codex's binding
-review requirements for D-168 (`codex-d168-role-requirements.md`, eight
-must-fix items) shaped this draft. The draft still needs:
+Proposed. Nothing here is installed, accepted or approved for use. Codex's
+D-168 review requirements (`codex-d168-role-requirements.md`, eight
+must-fix items) and its review of the first draft
+(`codex-d168-7b5e172-review.md`, MF1–MF4) shaped this revision. Before
+any agent may call the interface, all of these must exist:
 
-- Codex review of this text, `install.sql`, `attest.sql` and the test evidence;
-- owner acceptance;
-- an owner-run install, followed by an installed-state attestation that matches.
+1. Codex review of this text, the SQL, the harness and the test evidence.
+2. Owner acceptance of this ADR.
+3. An explicit owner decision on every item under
+   [Open owner choices](#open-owner-choices). Drafting direction is not
+   such a decision, and none is inferred from D-168.
+4. An owner-run install, followed by an installed-state attestation that
+   passes (see [Installed-state acceptance](#installed-state-acceptance-owner)).
 
-Until all of those exist, every dev-database check stays owner-run.
+Until all four exist, every dev-database check stays owner-run.
 
 ## Context
 
@@ -38,8 +44,8 @@ that an agent could read without seeing any content.
 
 ### Interface
 
-Agents get one dedicated **login** role. It can do exactly one useful
-thing: execute two reviewed functions in a dedicated `summary` schema.
+Agents get one dedicated **login** role. Its only useful capability is to
+execute two reviewed functions in a dedicated `summary` schema.
 
 | Function | Replaces | Output |
 | --- | --- | --- |
@@ -54,30 +60,84 @@ target, read_at, fn_version, section, k1..k5 text, n bigint
 
 - The first row is `target`, which names the database, the UTC read time
   and the function version.
-- The last row is `END`. Its k1 is `complete`, or `truncated` when any
-  section reached its row limit.
+- The last row is `END`. Its k1 is `complete`; `truncated` when any
+  section reached its row limit; or (drain only) `incomplete` when a live
+  grant or allocation has malformed terms.
 - A result is complete only when its last row is `END|complete`. Anything
   else is unknown, never "nothing found". That includes an error, a
-  timeout, a missing `END` row and `truncated`.
-- A truncated drain result also carries `CHECK = STOP`.
+  timeout, a missing `END` row, `truncated` and `incomplete`.
+- A truncated or incomplete drain result also carries `CHECK = STOP`.
+
+### Closed output vocabulary
+
+Every returned label is a fixed string in the function body or a member of
+a reviewed vocabulary declared in the body. These are the app's own
+enumerations at this version:
+
+| Category | Reviewed values |
+| --- | --- |
+| providers | `claude_cli`, `codex_app_server`, `fake` |
+| invocation statuses | `reserved`, `sent`, `completed`, `failed`, `unknown` |
+| profiles | `claude_cli_opus`, `claude_cli_sonnet`, `fake` |
+| release dispositions | `released`, `withheld`, `calibration` |
+| export statuses | `building`, `completed`, `failed` |
+| run statuses | `queued`, `running`, `succeeded`, `failed`, `budget_exhausted`, `cancelled` |
+| Oban queues | `default`, `research`, `delivery`, `reconciliation`, `followup`, `integration`, `agent` |
+| Oban job states | `available`, `scheduled`, `executing`, `retryable`, `completed`, `discarded`, `cancelled` |
+| allocation keys | `b1`–`b5`, `proof`, `rehearsal`, `daily_use`, `workshop` |
+| allocation buckets | `b1`–`b5`, `proof` |
+| event types | the 27 `model.*` event types the app emits |
+
+- Any other stored value is **counted under `other`** and never returned.
+  This keeps the agreed aggregate semantics: unknown values are grouped,
+  not dropped.
+- `applies_to` is canonicalized against the bucket set. It must be
+  one-dimensional, have 1–6 members, have no NULL or repeated member, and
+  use only known buckets. A valid array is returned sorted, as at most 23
+  bytes, such as `{b1,b2,b5}`. Anything else is returned as `malformed`
+  and never matches a reviewed authority term. A malformed live allocation
+  or grant `profile_ids` makes the drain result `incomplete` with
+  `CHECK = STOP`.
+- Generations, attempts and counts are integers.
+- With labels closed, a row's size is bounded. The row count is also
+  bounded: each section has a LIMIT, and reaching it marks the result
+  `truncated`.
+
+The harness checks this on every result row it receives. It also seeds
+canaries that the first draft's regular expressions would have returned:
+
+- lowercase and dotted values, such as `model.seedsecret` and the queue
+  `privateclient`;
+- unknown statuses and profiles;
+- malformed arrays: unknown, NULL, repeated, 1000-member, two-dimensional,
+  empty, and a 5000-byte member.
+
+None of them appears in any output.
 
 Files:
 
-- `priv/dev_summary_access/install.sql`: owner-run, one transaction, refuses
-  any database other than `sdr_agent_dev`, and refuses non-superusers.
-- `attest.sql`: the read-only installed-state attestation.
-- `uninstall.sql`: exact rollback.
-- `optional-revoke-temp.sql`: a separate owner decision, below.
-- `test/dev_summary_access/adversarial.sh` and `seed.sql`: run against a
-  throwaway cluster only.
+- `priv/dev_summary_access/install.sql`: owner-run, one transaction.
+  Refuses (psql exit 3) any database other than `sdr_agent_dev`, and any
+  non-superuser.
+- `attest.sql`: the read-only installed-state attestation, with a
+  machine-checked verdict.
+- `uninstall.sql`: exact rollback. It validates everything before it drops
+  anything.
+- `optional-revoke-temp.sql`: one of the options under Open owner choices.
+- `test/dev_summary_access/`: run against a throwaway cluster only.
+  - `adversarial.sh`, `seed.sql` and `canaries.sql`: the adversarial test.
+  - `guard.sh` and `guard-test.sh`: the throwaway guard and its hermetic
+    test.
+  - `throwaway-cluster.sh` and `migrate_throwaway.exs`: the disposable
+    cluster and its schema.
 
 ### Principals
 
 - **`sdr_summary_login`**
   - Role attributes: LOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE,
     NOREPLICATION, NOBYPASSRLS, NOINHERIT, CONNECTION LIMIT 2.
-  - It is a member of no role, owns nothing and holds no table, column,
-    sequence or large-object privilege.
+  - It is a member of no role and owns nothing at install time. It holds
+    no table, column, sequence or large-object privilege by any route.
   - Its only grants:
     - CONNECT on `sdr_agent_dev`;
     - USAGE on `summary`;
@@ -87,102 +147,98 @@ Files:
     - `statement_timeout=60s`, `lock_timeout=5s`,
       `idle_in_transaction_session_timeout=60s`;
     - `search_path=pg_catalog`.
+
+    These are not an authorization boundary. The login can change them
+    for its own sessions, and it can persist new values on its own role
+    with `ALTER ROLE sdr_summary_login SET ...`. The attestation refuses
+    any persisted change.
 - **`sdr_summary_definer`**
-  - NOLOGIN, with the same negative attributes. Nothing is a member of it.
-  - It owns only the two functions.
-  - It holds USAGE on `public` and `summary`, plus column-level SELECT on
-    exactly the columns the two queries read:
+  - NOLOGIN, with the same negative attributes. Nothing is a member of it,
+    and it is a member of nothing.
+  - It owns only the two functions and its own default-privilege entry.
+  - It holds USAGE on `public` and `summary`, plus SELECT on exactly 42
+    columns. The attestation pins that list. The columns cover:
     - `model_invocations`, `model_result_releases`, `audit_events`,
       `audit_exports`, `agent_runs` and `oban_jobs`;
     - `payloads.sha256` only;
     - the grant and allocation term columns.
-  - It cannot read:
-    - `payloads.content`;
-    - grant names and purposes;
-    - any prompt, response or bundle content.
-
-    It cannot write anything, and it cannot create objects in `public`.
-  - It does read `audit_events.payload` and `canonical_bytes`, because G3
-    tests whether fixed key names are present in them. The functions return
-    only fixed key names and counts from those columns.
+  - **It can read content.** Its grants include
+    `audit_events.payload`, `audit_events.canonical_bytes` and
+    `audit_exports.bundle_path`. G3 needs them to test whether fixed key
+    names are present and to count recorded paths. Only the fixed function
+    outputs bound what leaves those columns, not the column ACL: the
+    functions return only fixed key names and counts from them.
+  - It cannot read `payloads.content`, grant names, grant purposes or any
+    column outside the reviewed list.
+  - It holds no INSERT, UPDATE, DELETE, TRUNCATE, sequence or CREATE
+    privilege.
 - **The installing superuser** owns the `summary` schema. It is not the
   runtime function owner. The app's role is untouched.
 
 ### SECURITY DEFINER hardening
 
-- Each function is `SECURITY DEFINER STABLE` and carries
+- Each function is `SECURITY DEFINER STABLE PARALLEL UNSAFE`. Each carries
   `SET search_path = pg_catalog, pg_temp`, `SET "TimeZone" = 'UTC'` and
   `SET lock_timeout = '5s'`.
 - Every relation is schema-qualified as `public.x`. No helper is called
-  outside `pg_catalog`.
-- The bodies contain no dynamic SQL, `EXECUTE`, file, network or
-  large-object call, or write.
+  outside `pg_catalog`. Operators resolve in `pg_catalog`, and `pg_temp` is
+  never searched for operators or functions.
+- The bodies contain none of the following: dynamic SQL, `EXECUTE`, file
+  calls, network calls, large-object calls or writes.
 - Arguments are validated before any read.
   - Bad input raises SQLSTATE 22023 with a fixed message,
     `invalid_argument: <field>`.
   - The message never echoes the input.
-- Returned labels pass a fixed allow-pattern, otherwise they become `other`:
-  - statuses, providers and queues: `^[a-z0-9_]{1,32}$`;
-  - event types: `^[a-z0-9_.]{1,64}$`.
-- Key names come from fixed in-function lists.
-- No identifier, path, hash value or content is returned.
-- Every grouped section has a LIMIT, and reaching it marks the result
-  `truncated`.
-- PUBLIC EXECUTE is revoked on each exact signature twice: before and after
-  the ownership change.
-- Default privileges for the definer revoke PUBLIC EXECUTE on any future
-  function.
-- All of this happens inside the install transaction, so there is no window
-  where PUBLIC can execute either function.
+- No identifier, path, hash value or stored text is returned. Labels come
+  from the closed vocabulary above.
+- PUBLIC EXECUTE is revoked on each exact signature twice: once before the
+  ownership change and once after.
+- `ALTER DEFAULT PRIVILEGES FOR ROLE sdr_summary_definer` revokes PUBLIC
+  EXECUTE on any future function the definer owns.
+  - The first draft also had a per-schema default revoke. It was removed
+    because a per-schema default cannot cancel the global PUBLIC EXECUTE
+    default, so the line did nothing.
+- All of this happens inside the install transaction, so PUBLIC can never
+  execute either function, even briefly.
 - A STABLE function runs all of its queries on the calling statement's
   snapshot, so each call is one consistent observation.
 
 ### Shared defaults are not changed
 
 `install.sql` changes nothing about PUBLIC, the `public` schema, or any
-existing role, table or function. `attest.sql` instead reports the effective
-PUBLIC-derived privileges as inventory:
-
-- CONNECT and TEMP on each database;
-- USAGE on `public`;
-- the default backend-signal functions;
-- other SECURITY DEFINER functions executable by PUBLIC.
-
-Any database-wide change is a separate owner approval. The only one drafted
-is `optional-revoke-temp.sql`. It defaults to read-only inventory mode,
-prints which login roles would lose TEMP, and applies only with
-`-v mode=apply`. The undo command is in the file.
+existing role, table or function. `attest.sql` adds no revoke. It reports
+the PUBLIC-derived privileges as inventory and refuses only on unreviewed
+routes. Any database-wide change is a separate owner approval: see Open
+owner choices.
 
 ## Boundaries
-
-### Trust boundary (stated plainly)
-
-The dev cluster accepts `trust` authentication on 127.0.0.1 and ::1, so any
-local process can connect as any role, including `postgres`. On this
-cluster, the login role is therefore a **procedural** boundary:
-
-- agents agree to connect only as `sdr_summary_login` and to call only the
-  reviewed functions;
-- PostgreSQL then enforces what that role can do.
-
-PostgreSQL does not stop an agent that breaks the agreement. To make the
-boundary technical, the owner would change `pg_hba.conf` to `scram-sha-256`
-for every role, including the app's, and set the login's password out of
-band. That is an owner decision with app-configuration impact, and it is not
-part of this ADR.
 
 ### Privilege boundary (what PostgreSQL enforces for the login)
 
 The login cannot:
 
-- SELECT any `public` relation, which was tested on all 56;
-- write anything, even after it turns off its own read-only default;
+- read any application table: SELECT is denied on all 56 `public`
+  relations, and table, column and sequence privileges are 0 by any route;
+- insert, update, delete or truncate application data, or advance an app
+  sequence, even after it turns off its own read-only default;
 - run DDL in `public`, `summary` or a new schema;
-- replace, alter, drop or re-grant the functions;
+- replace, alter, drop or re-grant the summary functions;
 - SET ROLE or SET SESSION AUTHORIZATION to the definer or a superuser;
-- grant itself roles or alter itself;
-- read server files, list directories or import large objects;
-- COPY to or from files or programs.
+- grant itself a role, or give itself CREATEDB, CREATEROLE, a higher
+  connection limit or any other role attribute;
+- read server files, list directories or import server-side large objects;
+- COPY to or from server files or programs.
+
+It **can**:
+
+- create temporary objects in its own session (Open choice 1);
+- create and write large objects (Open choice 2);
+- connect to the cluster's other databases (Open choice 3);
+- change its own session settings, and persist role-level setting
+  defaults on itself. The attestation detects a persisted change.
+
+None of these lets it read application data. They are why "cannot write
+anything" was wrong in the first draft.
 
 Temporary objects can't change results:
 
@@ -190,69 +246,173 @@ Temporary objects can't change results:
 - `pg_temp` is never searched for functions or operators;
 - the functions pin `search_path`.
 
-The test shadows tables and views and defines a temp `~` operator and a
-`count` function. Results are unchanged. With the pinned `search_path`
-removed, the shadow probes still pass, so the attestation's shape check is
-what catches that regression.
+The test shadows the tables and a view, defines temp `~` and `=`
+operators and a temp `count` function, and changes TimeZone and
+DateStyle. Results are unchanged. With the pinned `search_path` removed,
+the shadow probes still pass, so the attestation's shape check is what
+catches that regression.
 
-### Residual risks (accepted, recorded, not hidden)
+### Trust boundary
 
-1. **TEMP.** The login can create temp objects in its own session through
-   the PUBLIC TEMP default. A per-role REVOKE can't cancel a PUBLIC grant,
-   so this stays until the owner applies `optional-revoke-temp.sql`. The app
-   connects as a superuser and is unaffected by that revoke.
-2. **CONNECT elsewhere.** The login can connect to other databases on the
-   cluster, such as `postgres`, through PUBLIC CONNECT. There it sees
-   catalog metadata only. Removing this needs a `pg_hba.conf` line limiting
-   the role to `sdr_agent_dev`, which is an owner option.
-3. **Large objects.** PostgreSQL has no privilege for creating large
-   objects, so once the login turns off its read-only default it can store
-   data that way. It still reads nothing. `attest.sql` section J fails if
-   either role owns any large object.
-4. **Settings the login can change.** It can raise its own timeouts and
-   turn off `default_transaction_read_only`. Timeouts and the connection
-   limit bound accidents, not a hostile caller. Writes stay denied by
-   privilege, not by the read-only default.
-5. **Function source is readable.** `pg_proc.prosrc` is world-readable.
-   The source is the reviewed file and contains no secrets.
-6. **Aggregates are not anonymity.** Counts over small populations reveal
-   facts about those populations. The outputs are limited to the two
-   reviewed scripts' categories, and no adaptive filter arguments exist.
+The dev cluster accepts `trust` authentication on 127.0.0.1 and ::1, so any
+local process can connect as any role, including `postgres`. The login
+role is therefore a **procedural** boundary on this cluster:
+
+- agents agree to connect only as `sdr_summary_login` and to call only the
+  reviewed functions;
+- PostgreSQL then enforces what that role can do.
+
+PostgreSQL does not stop an agent that breaks the agreement. Whether that
+is acceptable is Open choice 4.
+
+### Open owner choices
+
+None of these is accepted. D-168 did not decide them, and they diverge
+from the earlier role requirements. Each needs one of two things before
+installation or agent use:
+
+- an explicit, recorded owner decision naming it; or
+- technical closure through separately authorized hardening.
+
+1. **TEMP writes.** The login can create temporary tables, views and
+   functions in its own session, through the PUBLIC TEMP default on
+   `sdr_agent_dev`. A per-role REVOKE cannot cancel a PUBLIC grant.
+   - Options:
+     - (a) accept it;
+     - (b) run `optional-revoke-temp.sql`: inventory mode first, then
+       `-v mode=apply` after reviewing which login roles lose TEMP. That
+       revokes TEMP from PUBLIC database-wide, and is a shared-default
+       change.
+   - Prerequisite: a recorded decision. For (b), the attestation's C
+     inventory must show `can_temp = f` for the login on `sdr_agent_dev`.
+2. **Large-object writes.** PostgreSQL has no privilege that governs
+   creating large objects. Once the login turns off its read-only default,
+   it can store data with `lo_create` and `lowrite`. It cannot read large
+   objects it does not own.
+   - Options:
+     - (a) accept it, with the attestation as the detector. Checks M, J30
+       and J31 refuse while either role owns or can access any large
+       object. The owner sets a re-attestation cadence.
+     - (b) close it with separately authorized hardening: revoke EXECUTE on
+       the large-object creation functions from PUBLIC. That is a
+       shared-default change, so its effect on the app and other roles
+       must be inventoried first.
+   - Prerequisite: a recorded decision.
+3. **Other databases.** The login can CONNECT to `postgres`, `template1`
+   and any other database whose PUBLIC CONNECT default allows it. The
+   attestation reads this database's catalogs plus the shared ones. Those
+   prove that neither role owns anything or holds an explicit grant in
+   any other database. They do **not** cover another database's PUBLIC
+   grants or SECURITY DEFINER functions. "Catalog metadata only" is
+   unproven there.
+   - Options:
+     - (a) preferred: an owner `pg_hba.conf` line that limits
+       `sdr_summary_login` to database `sdr_agent_dev`;
+     - (b) REVOKE CONNECT from PUBLIC on the other databases, a shared
+       change;
+     - (c) an owner-run inventory of each other connectable database,
+       equivalent to checks 12, 13, 25, 26 and 28 there, with a narrowly
+       stated acceptance.
+   - Prerequisite: (a) or (b) in place, or (c) recorded. No agent probe
+     of another database.
+4. **Procedural connection boundary.** Under trust authentication the
+   role restricts only a cooperating agent.
+   - Options:
+     - (a) `scram-sha-256` for every role, including the app's, with the
+       login's password set out of band. This has app-configuration
+       impact.
+     - (b) accept the procedural boundary explicitly, for this
+       developer-machine cluster only.
+   - Prerequisite: a recorded decision.
+
+Known properties, not choices:
+
+- `pg_proc.prosrc` is world-readable. The source is the reviewed file and
+  contains no secrets.
+- Aggregates are not anonymity. Counts over small populations reveal facts
+  about those populations. Outputs are limited to the two reviewed
+  scripts' categories, and no adaptive filter argument exists.
 
 ### Operational boundary
 
 - Each call runs under the 60 s statement timeout and the 5 s lock timeout.
 - At most 2 concurrent login sessions are allowed.
 - Callers add their own deadline and call no more than the procedure needs.
-- A drain result of zero is a snapshot. It does not prove that no writer is
-  in flight, and it gives no authority to release leases, create grants,
-  enable models or spend. The drain protocol and its owner gates are
-  unchanged.
+- A drain result of zero is a snapshot. It does not prove that no writer
+  is in flight, and it gives no authority to release leases, create
+  grants, enable models or spend. The drain protocol and its owner gates
+  are unchanged.
 
 ### Failure boundary
 
-- Install is one transaction. A failed or repeated install leaves no
-  partial state: the test shows that a second install refuses with 42710
-  and leaves the function hashes unchanged.
+- Install is one transaction. A repeated install refuses with exit 3 and
+  42710, and leaves the function hashes unchanged.
+- Every refusal exits nonzero (psql exit 3) and prints no END marker. That
+  covers install, uninstall and the optional TEMP revoke when run in the
+  wrong database or by a non-superuser, and the optional revoke without a
+  mode.
+- Uninstall validates the complete dependency set before any DROP:
+  - pg_shdepend for both roles, in every database, large objects and
+    default ACLs included;
+  - the occupants of schema `summary`;
+  - role memberships.
+
+  Anything install.sql did not create refuses the whole transaction, so
+  `DROP OWNED` never removes something unreviewed.
 - Bad arguments fail before any read.
-- A caller sees only `complete`, `truncated`, or an error. All but
-  `complete` are inconclusive.
+- A caller sees only `complete`, `truncated`, `incomplete`, or an error.
+  All but `complete` are inconclusive.
 
-## Installation and attestation (owner)
+## Installed-state acceptance (owner)
 
-1. Review the exact `install.sql` at the reviewed commit, which must be
-   unchanged since Codex's PASS.
-2. Run it as the owner superuser against `sdr_agent_dev`. The last line
-   must be `END-OF-SUMMARY-INSTALL`.
-3. Run `attest.sql` and keep its output. Every `(must be …)` row must hold.
-   The `G summary functions` prosrc and functiondef sha256 values must equal
-   the values recorded for the reviewed commit; the adversarial log prints
-   them from the same file. Agents may start calling only after this
-   attestation is recorded.
-4. Re-attest after any CREATE OR REPLACE, ALTER, GRANT or REVOKE touching
-   these roles, the schema or the functions, and after any PostgreSQL major
-   upgrade.
-5. Each new function or version, such as `_v2`, needs its own review,
+1. Review the exact `install.sql` and `attest.sql` at the reviewed commit.
+   Both must be unchanged since Codex's PASS.
+2. Record a decision on each Open owner choice.
+3. Run `install.sql` as the owner superuser against `sdr_agent_dev`. psql
+   must exit 0, and the last line must be `END-OF-SUMMARY-INSTALL`.
+4. Run `attest.sql` and keep its full output. Acceptance requires all of:
+   - psql exit 0;
+   - the line `ATTEST PASS: 33 of 33 checks hold`;
+   - no row marked `FAILED`;
+   - the last line `END-OF-SUMMARY-ATTEST`.
+
+   On any failure it prints `ATTEST REFUSED`, rolls back and exits 3.
+   Do not activate agent use.
+
+   The checks are machine-checked, fixed sets:
+   - role attributes, connection limits and the exact session defaults;
+   - no per-database role settings;
+   - no membership in either direction;
+   - the exact 51 dependency records of both roles in every database;
+   - the definer's exact 42 SELECT columns;
+   - no other table, column, sequence or large-object privilege, by any
+     route;
+   - no callable SECURITY DEFINER function except the two, and no callable
+     untrusted-language function outside `pg_catalog` that is not in
+     citext, by direct, inherited, owned or PUBLIC route, for **both**
+     principals;
+   - the server-file and admin built-ins denied;
+   - the summary schema's owner, ACL and occupants;
+   - each function's owner, flags, settings, result type, ACL and pinned
+     prosrc SHA-256;
+   - the exact default ACLs naming either role;
+   - the extension set: `plpgsql` and `citext`.
+5. Compare the `G summary functions` `functiondef_sha256` values with the
+   reviewed values below. That hash depends on the server's formatting.
+   These values are for PostgreSQL 18.6:
+
+   | Function | prosrc SHA-256 (pinned in attest) | functiondef SHA-256 (PostgreSQL 18.6) |
+   | --- | --- | --- |
+   | `summary.g3_inventory_v1()` | `6357e1d4bd6bbd2038a0f07ff5f1ca8601ba1f864a24c28db8623859a527ea65` | `eae28c02a08eeb532c49d0c0a05b783b4856a1cbbec8c3dfa7706f8b312b829f` |
+   | `summary.gdemo_drain_v1(text,timestamp with time zone,integer,text[])` | `b6cc57a9dbe7154ee9f400821670e10035ae9bb7a63fb969389d9a5c4d6142b8` | `ea809c263d976e99d5ed7dfa0bfca796b89493704c87f0143c2783c792c2775e` |
+
+6. Agents may start calling only after steps 2–5 are recorded.
+7. Re-attest:
+   - after any CREATE OR REPLACE, ALTER, GRANT or REVOKE touching these
+     roles, the schema or the functions;
+   - after a PostgreSQL major upgrade;
+   - on the cadence set under Open choice 2.
+8. Each new function or version, such as `_v2`, needs its own review,
    install and attestation record.
 
 ## Credentials
@@ -267,57 +427,155 @@ repo, chat, command arguments, logs or environment dumps.
 - Writes, grants and raw reads.
 - Installing, replacing or removing the functions.
 - `pg_hba.conf` and authentication changes.
-- The optional TEMP revoke.
+- Every Open owner choice, including the optional TEMP revoke.
 - The app, the owner checkout, and every release, grant or spend decision.
 
 ## Verification
 
-`test/dev_summary_access/adversarial.sh` runs on a throwaway cluster. It
-uses its own initdb, a non-default port, the app schema restored without
-data, and synthetic rows. It connects as the real `sdr_summary_login`
-login, not only as `SET ROLE` from a superuser. It checks:
+Everything runs on a throwaway cluster. Nothing here connects to 5520 or
+to the app.
 
-- **Exact output.** The function output equals the reviewed psql scripts
-  for G3 and for drain pre and post, undrained and drained, plus a
-  wrong-term post. The only difference is label sanitization.
-- **Verdicts.** GO and STOP verdicts are correct.
-- **Row bound.** A section at its row limit gives `END=truncated`.
-- **Denials and shadowing.** Every denial and shadowing case listed above.
-- **Argument rejections.** 21 cases, with no echo of the input.
-- **Timeouts.** The statement timeout and the function lock timeout both
-  trip.
-- **Connection limit.** It is enforced.
-- **The definer's own reach.** `payloads.content`, grant names, `SELECT *`
-  and writes are all denied, and it cannot log in.
-- **Leakage.** No seeded secret, raw label or path appears in any login
-  output or error.
-- **Attestation.** It holds before and after.
+### The throwaway guard (`guard.sh`)
 
-The script exits 0 only if every check passes. Three install mutants each
-turn it red:
+- `throwaway-cluster.sh init` creates the cluster under a private temporary
+  root (mode 700) with initdb:
+  - trust on 127.0.0.1 only, no Unix socket, a free port in 49152–65535;
+  - a manifest recording the physical PGDATA, the port and the
+    `pg_controldata` system identifier.
+- Before its first connection, `adversarial.sh` refuses (exit 2, no psql
+  call) unless all of these hold:
+  - every `PG*`/`PSQL*` variable can be unset. The scrub does not use
+    `compgen`, which Nix's non-interactive bash lacks.
+  - the port is canonical decimal in that range, and never 5520 or 4120 in
+    any spelling;
+  - the root and PGDATA are physical paths, with no symlink, `.` or `..`
+    segment, under `/private/tmp/` or `/private/var/folders/`;
+  - the manifest agrees with the inputs;
+  - `pg_controldata` reports the manifest's system identifier;
+  - `postmaster.pid` names that PGDATA, port and 127.0.0.1;
+  - the postmaster PID is the only TCP listener on the port.
+- It then compares `system_identifier`, `data_directory` and `port` from
+  the server, and re-checks them before every destructive step. Every
+  connection passes all libpq parameters explicitly.
+- `guard-test.sh` stubs `psql`, `pg_controldata` and `lsof` on PATH, and
+  drives the real harness entry point through 51 cases:
+  - 5520 and 4120 in every spelling (`05520`, `005520`, `+5520`,
+    `' 5520'`, `5520.0`, `0x15a0`, ...);
+  - `/tmp` symlinks, `../` and `./` traversal, and symlinked roots and
+    PGDATA pointing at non-temporary directories;
+  - manifest drift;
+  - mismatched control-file, `postmaster.pid`, listener and server
+    identities.
 
-- widening the label sanitizer;
-- unpinning `search_path`;
-- granting the login `payloads`.
+  Every refused input makes zero psql calls. A server-identity mismatch
+  makes exactly one read-only identity query. A positive control with
+  hostile `PGSERVICE`/`PGHOST`/`PGPORT=5520`/`PSQLRC` values shows that
+  none reaches psql. The test passes under bash 5.3, Nix's non-interactive
+  bash 5.3 and macOS bash 3.2.
 
-The run log records the results.
+### The adversarial test (`adversarial.sh`)
+
+The app schema comes from the repository's own migrations
+(`throwaway-cluster.sh schema`, 25 migrations, 56 `public` relations),
+with synthetic rows. The test connects as the real `sdr_summary_login`
+login, not only through `SET ROLE` from a superuser. It checks:
+
+- **Exact output.** Function output equals the reviewed psql scripts for
+  G3 and for drain pre and post, undrained and drained, plus a wrong-term
+  post. The only difference is vocabulary mapping.
+- **Pinned references.** A FULL verdict requires `ADV_REF_DIR` with the
+  reference scripts at their pinned SHA-256 (`602e9429…f250`,
+  `908c2829…c41e`, recorded in full in the script). Without them the run
+  is marked REDUCED and exits 3.
+- **Attestation mutations.** Each of these makes attest refuse (exit 3,
+  named check FAILED); after the revert, attest passes again:
+  - a direct-only SECURITY DEFINER grant to the login (shown to be a real
+    route);
+  - `SELECT(content)` on `payloads` for the definer;
+  - table SELECT on `payloads` for the login, and a PUBLIC column grant
+    on `payloads.content`;
+  - a PUBLIC SECURITY DEFINER function;
+  - a SECURITY DEFINER function reached through a membership;
+  - a PUBLIC internal-language server-file wrapper;
+  - an outgoing definer membership;
+  - definer sequence USAGE;
+  - the login persisting its own `statement_timeout`;
+  - a raised connection limit;
+  - a per-database setting;
+  - a widened default ACL;
+  - a changed function `search_path`;
+  - a replaced function body;
+  - an extra EXECUTE grant;
+  - a login-owned large object;
+  - an object in `summary`;
+  - a grant to the login in another database.
+- **Uninstall drift.** Each of these refuses atomically, leaving roles,
+  functions and large objects intact:
+  - a login large object;
+  - a table in `summary`;
+  - an extra definer column grant;
+  - a definer membership.
+
+  Then a clean uninstall and a reinstall reproduce the same hashes.
+- **Refusals.** Every refusal path exits 3 with no END marker.
+- **Vocabulary.** The canaries collapse into `other` or `malformed`.
+  Malformed live terms give `END=incomplete` and `CHECK=STOP`. 150 unknown
+  queues give one `other` row. 150 generations reach the row limit, which
+  gives `truncated` and `STOP`.
+- **Closed outputs.** Every k field of every result row is a reviewed
+  label, an integer or a canonical bucket set, and at most 64 characters.
+  No canary or secret appears in any login output or error.
+- **Denials and shadowing.** Every case listed under Boundaries, plus the
+  definer's denials. A positive probe confirms that the definer can read
+  `audit_events.payload`.
+- **Arguments, timeouts and connection limit.** 21 argument rejections,
+  with no echo of the input. The statement timeout and the function lock
+  timeout both trip. The connection limit is enforced.
+
+Mutation check of the harness itself: restoring the first draft's
+event-type regex fails it through four independent checks:
+
+- the attest prosrc pin;
+- the canary grouping rows;
+- the leak check;
+- the closed-vocabulary check.
+
+The first draft's three install mutants are now covered inside the
+harness:
+
+- sanitizer widening: the mutation check above;
+- an unpinned `search_path`: the changed-`search_path` mutation;
+- a `payloads` grant to the login: the table SELECT mutation.
 
 Not proven here:
 
 - behaviour on the real `sdr_agent_dev` data;
 - the attestation of the real install;
-- that the dev cluster has no pre-existing PUBLIC SECURITY DEFINER
-  functions. The test schema copy has none; `attest.sql` section H shows it
-  on the real database.
+- what the real cluster's other databases expose (Open choice 3).
+
+### Evidence and process record
+
+- While drafting revision 1 (`7b5e172`), the drafting helper disclosed that
+  it had read the dev database's **schema only** (no rows) on port 5520,
+  to build the throwaway test schema.
+  - That access predates this ADR and is outside it.
+  - It authorizes no agent dev-database connection of any kind.
+- From revision 2, the throwaway schema is built from the repository's
+  migrations instead, and no harness, guard or helper step connects to
+  5520.
+- Author run logs are evidence from the author, not an independent run.
 
 ## Consequences
 
-- Agents can run the G3 and G-DEMO checks without the owner at the
-  keyboard, after the owner installs and attests once.
+- After the owner decides the Open choices, installs and attests once,
+  agents can run the G3 and G-DEMO checks without the owner at the
+  keyboard.
 - Every new question needs a new reviewed function version. There is no
   ad-hoc SQL, by design.
-- The trust-auth caveat means this lowers the owner's toil but is not a
-  hard security control until authentication changes.
+- A vocabulary change in the app needs a new function version. Until then,
+  new values are counted as `other`.
+- Under trust authentication this lowers the owner's toil but is not a
+  hard security control.
 
 ## Alternatives considered
 
@@ -328,6 +586,9 @@ Not proven here:
   including content-bearing JSON, instead of fixed aggregates.
 - **Views instead of functions.** Rejected: views need SELECT and would
   silently widen the EXECUTE-only interface.
+- **Regex-sanitized labels.** Rejected in revision 2 (MF2). A character
+  class is not a category vocabulary, so `model.seedsecret` or a queue
+  named `privateclient` would pass it.
 - **Blanket revokes of PUBLIC and `public`-schema privileges.** Rejected.
   They are database-wide, can affect the app and other roles, and need
-  their own owner approval (`optional-revoke-temp.sql` covers TEMP only).
+  their own owner approval.
