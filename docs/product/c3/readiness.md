@@ -684,8 +684,10 @@ remains and the definition has been restored:
 
 **Follow-up (owned work, outside C3-02).** Completing an owed hand-off
 after the retry horizon needs a new contract (an owed-hand-off sweeper, or
-an ADM action) with its own entity review. Plan r8 names no owner for it;
-one is to be named (Codex r8 review, important 2).
+an ADM action) with its own entity review. **Owner: Claude** (named
+2026-10-19 for Codex r8 review, important 2). It is tracked as a separate
+contract, and it must land before any real reply is processed, i.e.
+before C5-04 enables real data.
 
 1. No locks: actor shape, input validation and normalization, preflight
    real-data guard; unlocked reads to derive keys (referral: original →
