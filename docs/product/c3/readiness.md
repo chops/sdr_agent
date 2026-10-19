@@ -8,12 +8,20 @@ section 15. On 2026-10-14 the owner accepted the ADR-0009 C3 amendment and
 C4's ADR-0005 logging amendment (O4), answered OQ-1..OQ-3 (section 12) and
 approved the scoped C3 G5 including the stricter company-domain suppression
 (O8), on this packet as revised for OQ-2 (section 4.4), which Codex passed
-at ef74d2a. Nothing here
-authorizes C3-02 (#56) or C3-03 (#57) code, a migration, a model call or real
-data. Implementation starts only after (1) Codex records an entity-model
-verdict of PASS on sections 3-7, (2) the owner accepts the proposed ADR-0009
-identity-key amendment, and (3) the owner approves a scoped C3 G5. The R0 G5
-does not cover C3.
+at ef74d2a. This packet by itself authorizes no code, migration, model call
+or real data. Its three preconditions for implementation are met (Codex
+entity-model PASS on sections 3-7, the accepted ADR-0009 identity-key
+amendment and the scoped C3 G5; section 13), so the owner's G5 authorizes,
+as distinct steps:
+
+1. C3-02 (#56) RED;
+2. C3-02 GREEN under its own reviewed plan;
+3. a merge per D-157, only after O4's PostgreSQL server-log decision is
+   recorded;
+4. then C3-03 (#57), the same way (section 14).
+
+It is not authority for private inputs, real data (C5-04 and the switch),
+real model calls or spend. The R0 G5 does not cover C3.
 
 Sources: build plan v3 (D-097) §3 contract C3, §9, §9a
 ([`owner-decisions`](https://github.com/chops/sdr_agent/blob/owner-decisions/docs/product/build-plan.md));
@@ -22,7 +30,10 @@ decisions D-048, D-049, D-052, D-056, D-059, D-060, D-066, D-084, D-095,
 D-101, D-104; ADR-0014 amendment 2 (constraint 7, accepted 2026-10-12);
 ADR-0009 (persistence and audit conventions, plus the proposed identity-key
 amendment in this PR), ADR-0010 (lifecycles). Code facts are from `main` at
-182bde6.
+182bde6 unless marked otherwise. The run-settings contract (section 4.5) and
+the privacy baseline (section 7) were refreshed against `main` at fb54000
+(2026-10-19, rebase review). C3-02's plan re-inventories callers on current
+main (O11) rather than relying on the historical tables.
 
 All examples are synthetic (reserved domains, invented names).
 
@@ -39,7 +50,9 @@ In scope:
   `agent_found`; the shared identity keys (`SdrAgent.Audit.IdentityKeys`) and
   their adoption by every writer of an email, domain or open-lead identity,
   including Suppression and the webhook paths. Logging and span controls come
-  from C4's proposed ADR-0005 amendment (O4), not from C3.
+  from C4's ADR-0005 amendment (O4; accepted 2026-10-14, merged in C4-01a),
+  not from C3. Run settings come from C4's existing assignment contract
+  (section 4.5), not from C3.
 - C3-03: `SdrAgent.SDR.hand_off_referral/2`, the only `referral` entry point.
   It closes the original lead as `referred`, keeps its history and admits the
   referred person at the same company.
@@ -97,6 +110,7 @@ Account, Contact and Qualification writers.
 | Outreach.Draft / DeliveryOperation | Existing (behaviour delta, C3-03) | Cancel the original's open work | no schema change; `status_reason "referred"`, delivery `last_error %{"reason" => "lead_referred"}` | unchanged | Same selection and effects as `ApplySuppression` for one lead, run by a new Outreach-owned `SdrAgent.Outreach.Referral.close_open_work/3` that sets `InternalWrite`; a claimed delivery is left to its outcome (capture only) | unchanged | none |
 | Agents.AgentDefinition | Existing | Definition used by the reused assign path | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (registration is a named bootstrap prerequisite outside admission; admission only reads the committed definition, section 6) | — | none |
 | Agents.AgentRun | Existing | Queued research run; agent_found provenance | — | new unique `(id, tenant_id)` as composite FK target | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (origins `:assignment` and `:referral` exist, D-104) | — | none |
+| Agents.SettingsRevision, Agents.RunSettingsSnapshot (C4) | Existing | Business settings a run needs; the run's frozen settings and budget | — | — | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (admission reaches them only through the reused assign path's `AgentRun :create`, section 4.5; it reads revisions, never writes one, and the snapshot is created by `BuildSettingsSnapshot` exactly as for a standalone assignment) | — | none |
 | Research.EvidenceClaim, Sales.Campaign, Accounts.User, Audit.Tenant, Actor | Existing | Qualification evidence, program, requester, tenant | — | campaigns and users gain unique `(id, tenant_id)` as composite FK targets | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found (no new role or system actor) | — | none |
 
 Configured reviewer: Codex via ai-pair (`ai_pair=true`, `codex_review=true`).
@@ -130,6 +144,7 @@ task, never a placeholder address.
 | 6 | same ref exists: same hash → stored result; different → refuse | replay / `:source_ref_conflict` | nothing |
 | 7 | campaign missing or not `active` | `:campaign_not_active` | nothing |
 | 8 | agent run missing, other tenant, or origin not `:discovery`; committed `SDRAgent` definition for the tenant missing (read only, never registered here) | `{:invalid, [:agent_run_id]}` / `:agent_definition_unavailable` | nothing |
+| 8a | run settings incomplete for the server-owned origin (`:assignment`; section 4.5), plain pre-check | `{:settings_incomplete, kinds}` | nothing |
 | 9 | locks (section 6), then live real-data guard again on resolved values | `:real_data_disabled` | nothing |
 | 10 | suppression on email, email domain or company domain | `suppressed` | admission row |
 | 11 | email belongs to a contact at another account | `contact_at_other_account` | admission row |
@@ -138,7 +153,7 @@ task, never a placeholder address.
 | 14 | company has an open lead for another person | `active_target_exists` | admission row |
 | 14a | kind is `csv`, `hubspot` or `agent_found`, and the company's most recently closed lead ended `converted` or `nurture` (rule 4.4) | `company_in_relationship` | admission row |
 | 15 | contact has only closed leads and the readmit rule (4.3) does not allow it | `previously_worked` | admission row |
-| 16 | otherwise | `admitted` | account and contact if new, admission row, lead `new`, assign → `assigned`, queued run (`usage_origin :assignment`) |
+| 16 | otherwise | `admitted` | account and contact if new, admission row, lead `new`, assign → `assigned`, queued run (`usage_origin :assignment`) with its settings snapshot and frozen budget (section 4.5); a snapshot refusal here rolls back the whole transaction: `{:settings_incomplete, kinds}` / `:settings_default_unavailable`, nothing written |
 
 Replay (step 6) is refused only by steps 1-5. A replay returns the stored
 admission and the lead's current status; it writes nothing even if the
@@ -162,7 +177,9 @@ preconditions for a new request: original in the tenant and `in_outreach` or
 `replied` (`:original_not_referable`), no queued or running run on it
 (`:original_run_active`), not the same contact or email
 (`:self_referral`), campaign active, committed definition present
-(`:agent_definition_unavailable`). These refusals write nothing. Then
+(`:agent_definition_unavailable`), run settings complete for origin
+`:referral` (`{:settings_incomplete, kinds}`, section 4.5). These refusals
+write nothing. Then
 steps 9-16, except that at step 14 the open lead is the original, so the
 handover proceeds, and step 14a does not apply (rule 4.4).
 
@@ -225,6 +242,59 @@ round-4 PASS; it is the subject of Codex's narrow re-review.
 - `readmit` cannot override it (it is refused for these kinds), and nothing
   else changes: suppression (step 10) and the identity checks (11-13) still
   come first.
+
+### 4.5 Run settings prerequisite (C4, existing contract)
+
+These code facts are from `main` at fb54000. They are the existing C4
+assignment contract, which C3 reuses. They are not a C3 design.
+
+- **The reused path already enforces it.** `SDR.assign_lead/2` runs
+  `Agents.settings_complete(:assignment, actor: agent)` as a plain pre-check
+  before any write (`lib/sdr_agent/sdr.ex:90`).
+- **The authoritative check is under the head.** `AgentRun :create` runs
+  `Agents.Changes.BuildSettingsSnapshot`. Under the tenant's chain head
+  (reentrant), it:
+  - reads the current revision of each kind;
+  - refuses a missing required kind (`settings_incomplete`);
+  - builds the `RunSettingsSnapshot` (`settings_default_unavailable` when a
+    code default fails its pinned check);
+  - freezes the run's budget at the lower of the caller's argument and the
+    snapshot's `run_*` limit.
+
+  A database trigger refuses a new run without a snapshot.
+- **Which origins need settings.** `RunSettings.completeness/0` requires
+  `:offering_profile` for every business origin:
+  `:assignment`, `:referral`, `:followup`, `:discovery` and `:channel`.
+  The `:reply` and `:proof` exemptions do not apply to admission or
+  referral.
+
+C3 obligations:
+
+1. **Origin is server-owned.** The extracted assign body takes the usage
+   origin as an argument set by the orchestrator: `:assignment` from
+   `admit_lead/2`, `:referral` from `hand_off_referral/2`. It is never input.
+   The pre-check and the snapshot both use that origin.
+2. **The pre-check runs for every new request (step 8a).** It comes after
+   replay (step 6) and the definition check (step 8), and before locks
+   (step 9). A refusal returns `{:settings_incomplete, kinds}` and writes
+   nothing. That includes a request that would have recorded a non-admitted
+   outcome (steps 10-15), the same as the missing-definition rule. No
+   admission row is stored, so the source ref stays free and an identical
+   resubmission after the owner saves the settings is a new request.
+3. **Replay does not depend on today's settings.** Replay (step 6) comes
+   first and returns the stored result and the stored run's snapshot. It
+   never builds a new snapshot.
+4. **The snapshot is authoritative.** A refusal from `BuildSettingsSnapshot`
+   at step 16 rolls back the whole transaction. The return is the same closed
+   reason (`{:settings_incomplete, kinds}` or `:settings_default_unavailable`),
+   never an Ash error struct. So `admitted` is never returned without the
+   lead's queued run and its snapshot: they commit together or not at all.
+5. **No bypass.** No C3 flag, default or input skips completeness or
+   budgets. `admit_lead/2` and `hand_off_referral/2` take no budget fields, so
+   the run's budget is the snapshot's `run_*` limits.
+6. **Prerequisite for the owner, before the first admission:** an offering
+   profile saved in `/settings` (C4-01b, #166). C3-02's tests save a
+   synthetic offering profile in per-test setup.
 
 ## 5. Identity, input hash and agreement
 
@@ -364,6 +434,25 @@ agent definition: read, never inserted, by admission; Operation idempotency key 
 signal id: fresh per assignment. Tests prove this on independent
 connections (section 9).
 
+The C4 settings dependencies (section 4.5; facts from `main` at fb54000) are
+part of the assign path's set above:
+
+- **Settings revisions.** `BuildSettingsSnapshot` reads the current revision
+  of each kind only after it holds the chain head, so no revision can commit
+  between that read and the run. It takes no row lock on revisions.
+- **Snapshot insert.** The `RunSettingsSnapshot` row is fresh. Its
+  `(tenant_id)` foreign key targets the tenant row, which no writer locks.
+- **Run to snapshot.** The run's `(settings_snapshot_id, tenant_id)` foreign
+  key targets that row, created in this transaction.
+
+Revision writers (`SettingsRevision :create_revision`, the `/settings` save)
+take no identity key. They lock no domain row before the head. RED confirms
+this, as for classification below.
+
+The cycle table below is historical code facts from 182bde6, plus the C4 row.
+C3-02's plan re-checks it against current main, including the C1 command
+boundary (O11).
+
 **Suppression and admission, both commit orders** (C3-R7):
 
 - Suppression first: admission waits at its key pass; its step 8 read then
@@ -384,6 +473,7 @@ Cycle check against existing writers:
 | Account/Contact writes | key → row UPDATE → head | key first |
 | Lead `:reopen`, Qualification `:override` | key → lead UPDATE → head | key first; agent transitions take no key and only lock their lead |
 | User role/status, campaign transitions | row UPDATE → head (no key) | they block on our SHARE while holding nothing we need |
+| C4 settings revision save (`:create_revision`) | head (append; no key, no domain row) | admission reads revisions only while holding the head, so the two serialize on the head alone; a save never waits on a key or domain row we hold (to confirm in RED) |
 | `SDR.assign_lead/2`, `retry_run/2` | lead UPDATE → head (no key) | lead-first as step 6; while the handover holds the original `FOR UPDATE`, an assignment of it waits and then fails its state check |
 
 ## 7. Real-data guard and privacy
@@ -397,27 +487,45 @@ Cycle check against existing writers:
   the existing reserved-name guard is the policy. With the switch off, C5-04
   also stops processing of persisted real leads; the queued run is refused
   there, never bypassed.
-- **Database logging and spans.** Ecto's default `:debug` query log
-  includes parameters, so a contact insert logs its email in dev today.
-  C3-02 depends on C4's proposed ADR-0005 amendment "metadata-only database
-  logging and spans" (branch `c4-01-settings-delta` at 7f6d97d, pending
-  owner acceptance), and adds no logger or span handler of its own. Its
-  controls: metadata-only Repo logging in every environment (one
-  allowlisted sanitizer; no parameters, SQL text, exception message,
-  `DETAIL`/`HINT` or connection data); app `RepoSpans` with an allowlisted
-  error status (`error_module`, `pg_code`, `constraint` only) and no
-  `db.url` or `db.statement`; a primary `:logger` filter that rewrites
-  Postgrex, DBConnection and Ash error structs in crash reports and
-  framework logs; Oban workers sanitize database errors at their boundary,
-  so `oban_jobs.errors` holds no message; dev
-  `show_sensitive_data_on_connection_error: false`. C3's typed errors map
-  database errors by constraint name or SQLSTATE, as the amendment requires.
-  Separately, the owner-owned PostgreSQL server-log decision (or an explicit
-  owner retention exception) is a prerequisite before private inputs or the
-  real-data switch. C3-02's privacy canaries need the amendment accepted and
-  merged; otherwise C3-02 waits (an architecture and acceptance gate, not
-  implied by an entity PASS). Advisory keys use integer ids (section 6),
-  never strings.
+- **Database logging and spans (baseline on `main` at fb54000).** C4's
+  ADR-0005 amendment, "metadata-only database logging and spans", was
+  accepted by the owner on 2026-10-14 and merged in C4-01a. C3-02 builds on
+  it and adds no logger or span handler of its own. The controls in force:
+  - **Repo logging.** Metadata-only in every environment, through
+    `SdrAgent.Repo.QueryLog` and its one allowlisted sanitizer,
+    `SdrAgent.Repo.SafeMetadata`. It logs no parameters, SQL text,
+    exception message, `DETAIL`/`HINT` or connection data.
+  - **Spans.** `SdrAgent.Telemetry.RepoSpans` has an allowlisted error
+    status (`error_module`, `pg_code` and `constraint` only) and no
+    `db.url` or `db.statement`.
+  - **Log filter.** The primary `:logger` filter,
+    `SdrAgent.Logger.ExceptionFilter` (`:sdr_agent_exception_filter`),
+    rewrites Postgrex, DBConnection and Ash error structs in crash reports
+    and framework logs.
+  - **Oban.** The worker boundary (`SdrAgent.Workers.ErrorBoundary`)
+    sanitizes database errors, so `oban_jobs.errors` holds no message.
+  - **Dev connection errors.** Dev sets
+    `show_sensitive_data_on_connection_error: false`.
+
+  C3's typed errors map database errors by constraint name or SQLSTATE, as
+  the amendment requires. Advisory keys use integer ids (section 6), never
+  strings.
+- **Separate gates, none implied by the baseline above or by an entity
+  PASS:**
+  1. **PostgreSQL server log (5b, #156).** The owner-owned decision, or an
+     explicit owner retention exception, must be **recorded before C3-02
+     merges** (O4). That is the operative gate, and the stricter one. It
+     must also be in force before any private input or the real-data
+     switch.
+  2. **Input-surface protection.** The database sanitizer protects database
+     telemetry, not the processes that hold operator input. D-141's
+     sensitive-input tagging (ADR-0005 R0-05 amendment) covers only the
+     AdminLive channel, and ADR-0005 OQ-R5-1 excludes SettingsLive. Every
+     future input surface that calls C3 (B1-03, B6, C8, B2) brings its own
+     reviewed protection. C3 neither provides nor assumes it.
+  3. **C5-04 and the real-data switch.**
+  4. **Private data.**
+  5. **Spend.**
 - **Errors and spans.** Closed reasons and field names only; no value, no Ash
   error struct, no changeset in any returned error, log line or span
   attribute. Span attributes are ids, kind and outcome.
@@ -515,6 +623,27 @@ C3-02:
   handover. The
   contended-registration race runs against `bootstrap_definitions/1` outside
   any admission transaction.
+- Run settings (section 4.5):
+  - **Pre-check refusal.** With no offering profile saved, for each of the
+    four kinds, a new request is refused `{:settings_incomplete,
+    [:offering_profile]}`. Both shapes are covered: one that would be
+    admitted, and one that would record `suppressed`. Exact row and event
+    counts are unchanged: no account, contact, admission, lead, run, Oban
+    job, Operation, RunSettingsSnapshot, signal or success audit. The same
+    source ref admits once a profile is saved.
+  - **Authoritative refusal.** A snapshot-build refusal at step 16 is shown
+    by the C4 tests' existing mechanism for `settings_default_unavailable`;
+    if none reaches it, the plan names the code path. It rolls back
+    everything above and returns the closed reason.
+  - **Successful assignment.** The run's `settings_snapshot_id` is set, its
+    slots match the current revisions, its budget equals the snapshot's
+    `run_*` limits, and `usage_origin` is `:assignment`.
+  - **Replay.** After a new settings revision, a replay returns the stored
+    result. The run's snapshot is unchanged and no snapshot row is created.
+  - **Race** (independent connections, both orders): admission against a
+    `/settings` save of the first offering profile. Either the request is
+    refused with nothing written, or it is admitted with its run and
+    snapshot. `admitted` is never returned without the queued run.
 - Deferred trigger: an `admitted` row without a lead fails at commit.
 - Matched-lead binding (direct SQL inserts): `duplicate_open_lead` or
   `active_target_exists` with `account_id` null fails the check; a matched
@@ -541,7 +670,11 @@ C3-03:
 - Handover from `in_outreach` and `replied`: original `referred`; enrollment
   stopped; drafts, unclaimed deliveries cancelled; approvals invalidated;
   claimed delivery untouched; new lead `assigned` with `usage_origin
-  :referral` and `referred_from_lead_id`.
+  :referral` and `referred_from_lead_id`, its snapshot built for origin
+  `:referral`.
+- Run settings: with no offering profile, a new handover request is refused
+  `{:settings_incomplete, [:offering_profile]}`. Nothing is written and the
+  original is untouched.
 - Refusals with nothing written: original in another state or tenant, active
   run, self-referral, ref naming another original, non-admin.
 - Non-admitted referral (suppressed, other company, worked with
@@ -576,7 +709,9 @@ No code changes in C3-01. Names are proposals.
   `sales/changes/normalize_domain.ex`, `outreach/suppression.ex`,
   `outreach/locks.ex` (domain match), `outreach/webhooks.ex` (key pass),
   `research/qualification.ex` (override key), `sales.ex`, `sdr.ex`
-  (`admit_lead/2`; extract the assign body for reuse),
+  (`admit_lead/2`; extract the assign body for reuse, taking the definition
+  and the server-owned usage origin as arguments; the C4 settings modules
+  are unchanged),
   `test/support/sales_fixtures.ex`, `lib/sdr_agent/demo/fixtures.ex` if
   a seed shares an account.
 - Diagrams: regenerate the Sales domain diagram and the data-flow diagram.
@@ -599,7 +734,8 @@ and ADR-0010.
 | Strengthened domain suppression stops more leads than today (contacts whose company domain is suppressed but whose email domain differs) | strengthening only; called out for the owner at G5; synthetic tests |
 | Existing tests and seeds create two open leads at one account | fixtures admit through the new path; assertions not weakened |
 | Migration meets collisions in the owner's dev data | pre-checks abort with counts; nothing merged automatically |
-| Metadata-only logging and spans (ADR-0005 C4 amendment) reduce dev debugging detail | table, command, timing, outcome and allowlisted error class stay; reproduce values in a test or `psql` |
+| Metadata-only logging and spans (ADR-0005 C4 amendment) reduce dev debugging detail | table, command, timing, outcome and allowlisted error class stay; agents reproduce values in a synthetic test; reading private values on the owner's dev database with `psql` is owner-only (proposed D-168 summary access grants no raw read) |
+| An admission needs a saved offering profile (section 4.5); without one every new request is refused | the owner saves one in `/settings` (C4-01b) before the first admission; the refusal is closed and writes nothing |
 | B6 batches take many keys | one sorted pass per transaction; B6 sets batch size under its own review |
 | B1 needs a campaign for manual add | admission requires `campaign_id`; B1 chooses the default in its packet |
 
@@ -725,13 +861,45 @@ needs no model change (the handover was already same-company only).
   14; it is not merge, real-data or spend approval.
 - OQ-1..OQ-3: answered 2026-10-14 (section 12).
 - C3-01 verification: docs-only change; no code, migration or test changed.
+- **Rebase and drift review (round 6), 2026-10-19.**
+  - **Rebase.** Onto `main` at 967a45e, as `09311b5`: 8/8 patches `=`, docs
+    only.
+  - **Verdict.** Codex NEEDS-REVIEW, narrow (answer
+    m_1792385273990083083_33eab6d8; report
+    `codex-c301-09311b5-drift-review.md`). The original entity/action PASS
+    is retained.
+  - **MF1 (C4 settings contract).** New section 4.5, step 8a, the step-16
+    rollback, the settings lock inventory (section 6), tests (section 9),
+    O10.
+  - **MF2 (privacy baseline).** The merged baseline in section 7; the
+    separate gates listed; O4's server-log decision stated as the
+    operative gate before C3-02 merges.
+  - **Other updates.** The header and section 14 now separate
+    RED/GREEN/merge. Since D-157 (2026-10-18), merges no longer wait for the
+    owner, but the server-log gate still applies. The historical code facts
+    are labelled. B2 consumer (O12) and current-main caller inventory (O11)
+    added.
+  - **Server-log state.** The 5b proposal is #156, pending owner decision.
+  - **Records.** The historical records above keep their original SHAs and
+    wording.
 
 ## 14. Next authorized scope (when PASS, ADR acceptance and G5)
 
-Implement C3-02 then C3-03 as reviewed PRs (Claude authors, Codex reviews,
-exact-head CI), adjusted by the owner's answers. No real data until C5-04
-merges and the switch is on; no ordinary real model calls until R0's
-conditions hold. Nothing else.
+Implement C3-02, then C3-03, as reviewed PRs (Claude authors, Codex
+reviews, exact-head CI), adjusted by the owner's answers. Each step is
+distinct:
+
+1. **RED.** The plan is reviewed (O11 included), then Codex reviews RED.
+2. **GREEN.** Then Codex reviews GREEN.
+3. **Merge.** Per D-157: Codex's exact-head sign-off, green `verify`, up to
+   date. C3-02 also needs O4's server-log decision (5b, #156) recorded first.
+
+Not covered:
+- no private inputs until their own gates (section 7);
+- no real data until C5-04 merges and the switch is on;
+- no ordinary real model calls until R0's conditions hold.
+
+Nothing else.
 
 ## 15. Implementation obligations (Codex round-2 qualifications)
 
@@ -743,9 +911,12 @@ packet or by an entity PASS.
 | O1 | The key pass is an outer-transaction contract on every caller, not only a Suppression hook: classification and override flows, whole seed and bootstrap transactions, and B6 batches take their full key set before any shared row lock or append. No key or row lock is held while a model call waits. | full-path tests per caller (not the local `AssessmentRules` check alone), asserting the first shared lock follows the pass; a test that a model-call wait holds no key |
 | O2 | Held-key state is transaction- and savepoint-aware. `pg_locks` is the authority for held keys; a transaction-local marker (`set_config('sdr.identity_pass', …, true)`, reverted with its savepoint) records that a pass was made, including an empty pass, so a later new key can never become a silent second pass. The whole sorted set is acquired before shared locks. | rollback-to-savepoint tests (keys and marker both reverted, re-pass allowed only then), empty-pass then new key → `LateAcquisition` |
 | O3 | One exact domain rule in SQL and Elixir: exactly one trailing dot and one leading `www.` stripped; malformed hosts rejected before normalization. Old audited rows and their record hashes stay untouched. | equivalence corpus (section 9); hash assertions on existing rows |
-| O4 | Logging and spans follow C4's ADR-0005 amendment (metadata-only database logging and spans, `c4-01-settings-delta` at 7f6d97d; accepted by the owner on 2026-10-14): metadata-only Repo logging in all environments; app `RepoSpans` with allowlisted error status and no `db.url` or `db.statement`; the `:logger` exception filter; Oban boundary sanitizing; dev `show_sensitive_data_on_connection_error: false`. The separate owner-owned PostgreSQL server-log decision (or retention exception) precedes private inputs and the real-data switch. C3 adds no logger of its own. | canary tests at debug with content capture on over logs, spans and `oban_jobs.errors`; ADR acceptance and the server-log decision recorded before C3-02 merges |
+| O4 | Logging and spans follow C4's ADR-0005 amendment (metadata-only database logging and spans; accepted by the owner on 2026-10-14; merged in C4-01a): `Repo.QueryLog` with `Repo.SafeMetadata`, `Telemetry.RepoSpans` with allowlisted error status and no `db.url` or `db.statement`, `Logger.ExceptionFilter`, `Workers.ErrorBoundary` sanitizing, dev `show_sensitive_data_on_connection_error: false` (section 7). The separate owner-owned PostgreSQL server-log decision (5b, #156) or retention exception is recorded before C3-02 merges, and in force before private inputs and the real-data switch. C3 adds no logger of its own. | canary tests at debug with content capture on over logs, spans and `oban_jobs.errors`; ADR acceptance and the server-log decision recorded before C3-02 merges |
 | O5 | Final real-data permission is authoritative at the first-write boundary, including replay output of persisted real records and adopted (not created) rows. If C5 makes the switch a runtime setting, admission reads it `FOR SHARE` after the key pass and before the head, and C5's toggle takes it `FOR UPDATE`, so a toggle waits for in-flight admissions and later ones see the new value; if C5 makes it boot-time configuration, it cannot change within a transaction. "Read twice" alone is not the proof. | a toggle race test on independent connections, matched to C5-04's chosen mechanism |
 | O6 | Atomic cutover: the key namespace, every cooperating writer (admission, Suppression, webhooks, Account, Contact, reopen, override) and the migration ship in one release; no deploy mixes the old webhook key and the new namespace. The owner's instance is single-node and restarts on deploy, so no rolling mix exists. | one PR/release; a test that no `hashtextextended` advisory call remains |
 | O7 | Seed boundary: `:seed` stays dev/test-only (`SeedingAllowed`); application writes cannot choose `source: fixture` (`:create` accepts only the admission kinds); the DB trigger's fixture exception is a trusted database-admin boundary only. Deferred lead binding and the account slot get direct DB negatives and transaction-rollback proof. | policy tests in prod config; direct SQL negatives |
 | O8 | The strengthened company-domain suppression is an owner-visible behaviour change; it stays in the scoped G5 for the owner to accept. No agent approves it. | G5 record |
 | O9 | Round-4 test obligations: matched-lead direct-SQL negatives cover both matched outcomes and isolate each negative (only the intended check or FK can fail); readmit tests separate the action's input-presence refusal from the DB restriction on stored `readmit = true`. | direct SQL tests with one violated rule each; readmit tests per kind |
+| O10 | Run settings (section 4.5) are C4's existing contract, reused unchanged: <br>- the origin is server-owned (`:assignment` or `:referral`); <br>- the step-8a pre-check runs after replay and before locks; <br>- the snapshot under the head is authoritative and rolls back the whole admission; <br>- no C3 flag, default or input bypasses completeness or budgets; <br>- replay never builds a snapshot; <br>- refusals are closed reasons. | the section 9 run-settings tests (nothing-written counts, origin and budget asserted, replay unchanged, the save race on independent connections) |
+| O11 | C3-02's module plan inventories every changed caller and lock order on **current** main, not the historical 182bde6 tables. That includes the C1 command boundary (C1-03) and the C4 settings writers. | the plan's caller/lock table with source line references at its base SHA, reviewed before RED |
+| O12 | B2 is a consumer, not a C3 change: <br>- B2's merged requirements (`docs/product/b2/requirements.md` §14) treat the C3 APIs as future work; <br>- B2's `:reconciler` reads only an already committed admission (`reflect_committed_admission/1`), matched on tenant, `source_ref` and the section 5.2 input version and hash, which must agree with what B2's AdmissionIntent stores; <br>- this is no permission to call `admit_lead` as a system actor, and C3-R8 is unchanged; <br>- any LeadAdmission read policy for `:reconciler` is its own reviewed delta, at C3-02 or B2 planning. <br>B2's intent mapping also needs a disposition for `{:settings_incomplete, kinds}` and `:settings_default_unavailable` (section 4.5; not in its `last_error` set at fb54000). That is a B2 planning item. | B2 planning record; a C3-02 test that the stored input hash is the one replay matches |
