@@ -187,6 +187,7 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     assert {:error, :enoent} = File.lstat(fifo)
     assert {:ok, journal} = read_journal(ctx.entry)
     assert {:resolved, :exit_receipt} = last_outcome(journal.events)
+    assert_retained_receipt!(journal, state.port)
   end
 
   # The deliberate incomplete attempt: journalled, visible to the collector's
@@ -215,16 +216,28 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     assert cleanup(ctx) == :clean
     assert {:ok, journal} = read_journal(ctx.entry)
     assert {:resolved, :exit_receipt} = last_outcome(journal.events)
+    assert_retained_receipt!(journal, get(ctx.registry).port)
     assert classify(entry_facts(ctx.entry)) == :resolved
   end
 
   test "the collector classifies journals and fails closed on anything unproven" do
     root = Path.join(@selftest_root, "#{System.pid()}-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
-    clean = {:subject_cleanup, {:clean, resolved_details()}, attempt_meta(false)}
-    incomplete = {:subject_cleanup, {:incomplete, :synthetic, %{}}, attempt_meta(false)}
-    expected = {:subject_cleanup, {:incomplete, :synthetic, %{}}, attempt_meta(true)}
-    recovered = {:recovery, {:resolved, resolved_details()}, %{}}
+    clean = {:subject_cleanup, {:clean, resolved_details()}, attempt_meta(false, 2)}
+    incomplete = {:subject_cleanup, {:incomplete, :synthetic, %{}}, attempt_meta(false, 1)}
+    expected = {:subject_cleanup, {:incomplete, :synthetic, %{}}, attempt_meta(true, 1)}
+    recovered = {:recovery, {:resolved, resolved_details()}, %{at: utc()}}
+    no_evidence = Map.delete(resolved_details(), :evidence)
+    alive_actor = put_in(resolved_details(), [:evidence, :actors, :owner], {self(), true})
+
+    helper_running =
+      put_in(resolved_details(), [:evidence, :helpers], %{mkfifo: %{state: :running}})
+
+    meta_missing = {:subject_cleanup, {:incomplete, :synthetic, %{}}, %{at: utc(), attempt: 1}}
+
+    meta_invalid =
+      {:subject_cleanup, {:incomplete, :synthetic, %{}},
+       %{expected_incomplete: :maybe, at: utc(), attempt: 1}}
 
     cases = [
       resolved: {[clean], false, :resolved},
@@ -234,10 +247,27 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
       pending_only: {[], false, :unresolved},
       incomplete_last: {[incomplete], false, :unresolved},
       unresolved_recovery:
-        {[incomplete, {:recovery, {:unresolved, %{}}, %{}}], false, :unresolved},
+        {[incomplete, {:recovery, {:unresolved, %{}}, %{at: utc()}}], false, :unresolved},
       fifo_still_present: {[clean], true, :unresolved},
       unreadable: {:garbage, false, :unresolved},
-      missing: {:missing, false, :unresolved}
+      missing: {:missing, false, :unresolved},
+      trailing_unknown_event: {[clean, {:unexpected, :event}], false, :unresolved},
+      malformed_terminal:
+        {[{:subject_cleanup, :clean, attempt_meta(false, 1)}], false, :unresolved},
+      expected_meta_missing: {[meta_missing, recovered], false, :unresolved},
+      expected_meta_invalid: {[meta_invalid, recovered], false, :unresolved},
+      two_expected_attempts: {[expected, expected, clean], false, :unresolved},
+      expected_on_clean:
+        {[{:subject_cleanup, {:clean, resolved_details()}, attempt_meta(true, 1)}], false,
+         :unresolved},
+      resolved_without_evidence:
+        {[{:subject_cleanup, {:clean, no_evidence}, attempt_meta(false, 1)}], false, :unresolved},
+      resolved_actor_alive:
+        {[{:subject_cleanup, {:clean, alive_actor}, attempt_meta(false, 1)}], false, :unresolved},
+      resolved_helper_running:
+        {[{:subject_cleanup, {:clean, helper_running}, attempt_meta(false, 1)}], false,
+         :unresolved},
+      symlinked_entry: {:symlink, false, :unresolved}
     ]
 
     entries =
@@ -245,8 +275,11 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
 
     for {label, entry} <- entries do
       {_events, _fifo?, want} = Keyword.fetch!(cases, label)
-      got = classify(entry_facts(entry))
+      facts = entry_facts(entry)
+      got = classify(facts)
       assert class_kind(got) == want, "#{label}: got #{inspect(got)}"
+      # Anything not resolved is never deletable.
+      assert deletable?({facts, got}) == (want != :unresolved), "#{label}: deletable mismatch"
     end
 
     Enum.each(entries, fn {_label, entry} -> remove_selftest_entry!(entry) end)
@@ -393,18 +426,24 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
   # `:gone` only for an absent pid or another start identity; a read error
   # is `:unverified` and the same identity `:still_present` (at the bound).
   defp observe_gone(pid, identity, reader, within) do
+    pid |> observe_gone_read(identity, reader, within) |> elem(0)
+  end
+
+  # The same observation, also returning the final raw read it rests on.
+  defp observe_gone_read(pid, identity, reader, within) do
     observe_until(pid, identity, reader, now() + within)
   end
 
   defp observe_until(pid, identity, reader, deadline) do
-    outcome = observation(reader.(pid), identity)
+    read = reader.(pid)
+    outcome = observation(read, identity)
 
     cond do
       outcome == :gone ->
-        :gone
+        {:gone, read}
 
       now() >= deadline ->
-        outcome
+        {outcome, read}
 
       true ->
         Process.sleep(20)
@@ -590,7 +629,7 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     outcome = subject_cleanup(ctx, opts)
 
     expected? = Keyword.get(opts, :expected_incomplete, false)
-    meta = Map.put(attempt_meta(expected?), :attempt, subject_attempts(ctx.entry) + 1)
+    meta = attempt_meta(expected?, subject_attempts(ctx.entry) + 1)
 
     journal_event!(ctx.entry, {:subject_cleanup, outcome, meta})
 
@@ -604,11 +643,11 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     with :ok <- await_open_result(reg),
          {:ok, early} <- early_proof(reg, get(reg), opts),
          :ok <- teardown(get(reg)),
-         {:ok, proof} <- exit_proof(get(reg), early),
+         {:ok, proof, proof_evidence} <- exit_proof(get(reg), early),
          :ok <- helpers_ended(get(reg)),
          {:ok, lease} <- settle_lease(get(reg), name),
          {:ok, fifo} <- remove_fifo(get(reg)) do
-      {:clean, %{proof: proof, actors: :down, helpers: :ended, lease: lease, fifo: fifo}}
+      {:clean, completed(get(reg), name, {proof, proof_evidence}, lease, fifo)}
     else
       {:incomplete, reason} ->
         {:incomplete, reason, %{state: get(reg), lease: Reaper.lease(name)}}
@@ -736,32 +775,42 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     end
   end
 
-  defp exit_proof(_state, early) when early in [:no_launch, :exit_receipt], do: {:ok, early}
+  defp exit_proof(_state, :no_launch), do: {:ok, :no_launch, :no_launch}
+  defp exit_proof(state, :exit_receipt), do: receipt_proof(state)
 
   defp exit_proof(state, _early) do
     cond do
       is_binary(Map.get(state, :identity)) -> identity_proof(state)
-      valid_receipt?(state) -> {:ok, :exit_receipt}
+      valid_receipt?(state) -> receipt_proof(state)
       true -> {:incomplete, :no_child_exit_proof}
     end
   end
+
+  # The exact receipt itself: this entry's single port and its exit status.
+  defp receipt_proof(%{exit_receipt: {port, status}}),
+    do: {:ok, :exit_receipt, {:exit_receipt, {port, status}}}
+
+  defp receipt_proof(_state), do: {:incomplete, :exit_receipt_not_retained}
 
   # The real probe only; an eof-hold child still present is released
   # through its FIFO (no signal), then observed again.
   defp identity_proof(state) do
     %{identity_pid: pid, identity: identity} = state
 
-    case observe_gone(pid, identity, &ProcessProbe.start_identity/1, 5_000) do
-      :gone -> {:ok, :identity_gone}
-      outcome -> fifo_proof(state, outcome)
+    case observe_gone_read(pid, identity, &ProcessProbe.start_identity/1, 5_000) do
+      {:gone, read} -> {:ok, :identity_gone, identity_evidence(pid, identity, read)}
+      {outcome, _read} -> fifo_proof(state, outcome)
     end
   end
 
   defp fifo_proof(%{fifo: fifo, identity_pid: pid, identity: identity}, _outcome) do
     with :ok <- release_fifo(fifo) do
-      case observe_gone(pid, identity, &ProcessProbe.start_identity/1, 5_000) do
-        :gone -> {:ok, :identity_gone_after_fifo_release}
-        outcome -> {:incomplete, {:child_not_proven_gone, pid, identity, fifo, outcome}}
+      case observe_gone_read(pid, identity, &ProcessProbe.start_identity/1, 5_000) do
+        {:gone, read} ->
+          {:ok, :identity_gone_after_fifo_release, identity_evidence(pid, identity, read)}
+
+        {outcome, _read} ->
+          {:incomplete, {:child_not_proven_gone, pid, identity, fifo, outcome}}
       end
     end
   end
@@ -835,7 +884,7 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     release_gate(get(reg))
 
     case recovery_receipt(reg) do
-      :exit_receipt -> settle_recovery(reg, name, :exit_receipt)
+      :exit_receipt -> settle_recovery(reg, name, receipt_proof(get(reg)))
       :none -> recovery_identity(reg, name)
     end
   end
@@ -903,8 +952,8 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
 
   defp identity_route(reg, name, {pid, identity}, preload) do
     with :ok <- recovery_teardown(get(reg)),
-         :gone <- observe_gone(pid, identity, &ProcessProbe.start_identity/1, 5_000) do
-      settle_recovery(reg, name, :identity_gone)
+         {:gone, read} <- observe_gone_read(pid, identity, &ProcessProbe.start_identity/1, 5_000) do
+      settle_recovery(reg, name, {:ok, :identity_gone, identity_evidence(pid, identity, read)})
     else
       other -> {:unresolved, %{reason: {:identity_route, other}, fifo: preload}}
     end
@@ -928,15 +977,58 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     end
   end
 
-  defp settle_recovery(reg, name, proof) do
+  defp settle_recovery(reg, name, {:ok, proof, proof_evidence}) do
     with :ok <- recovery_teardown(get(reg)),
          :ok <- helpers_ended(get(reg)),
          {:ok, lease} <- settle_lease(get(reg), name),
          {:ok, fifo} <- remove_fifo(get(reg)) do
-      {:resolved, %{proof: proof, actors: :down, helpers: :ended, lease: lease, fifo: fifo}}
+      {:resolved, completed(get(reg), name, {proof, proof_evidence}, lease, fifo)}
     else
       other -> {:unresolved, %{reason: other, proof: proof, lease: Reaper.lease(name)}}
     end
+  end
+
+  defp settle_recovery(_reg, name, {:incomplete, reason}),
+    do: {:unresolved, %{reason: reason, lease: Reaper.lease(name)}}
+
+  ## Evidence retained with every completed attempt (content-free facts)
+
+  defp completed(state, name, {proof, proof_evidence}, lease, fifo) do
+    %{
+      proof: proof,
+      actors: :down,
+      helpers: :ended,
+      lease: lease,
+      fifo: fifo,
+      evidence: %{
+        proof: proof_evidence,
+        helpers: helper_records(Map.get(state, :helpers, %{})),
+        actors: %{
+          owner: {Map.get(state, :owner), alive?(Map.get(state, :owner))},
+          reaper: {Map.get(state, :reaper), alive?(Map.get(state, :reaper))}
+        },
+        lease: %{outcome: lease, after: Reaper.lease(name)}
+      }
+    }
+  end
+
+  defp identity_evidence(pid, identity, read),
+    do: {:identity, %{pid: pid, identity: identity, final_read: read}}
+
+  defp helper_records(helpers) when map_size(helpers) == 0, do: :none
+
+  defp helper_records(helpers),
+    do:
+      Map.new(helpers, fn {key, h} ->
+        {key, Map.take(h, [:path, :args, :state, :os_pid_report])}
+      end)
+
+  defp assert_retained_receipt!(journal, port) do
+    assert {_kind, {_done, %{evidence: evidence}}, _meta} = List.last(journal.events)
+    assert {:exit_receipt, {^port, 0}} = evidence.proof
+    assert %{mkfifo: %{state: {:exited, 0}}} = evidence.helpers
+    assert %{owner: {_owner, false}, reaper: {_reaper, false}} = evidence.actors
+    assert %{after: nil} = evidence.lease
   end
 
   ## Journal (per entry; append-only, written atomically)
@@ -985,19 +1077,37 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     end
   end
 
-  defp attempt_meta(expected?), do: %{expected_incomplete: expected?, at: utc()}
+  defp attempt_meta(expected?, attempt),
+    do: %{expected_incomplete: expected?, attempt: attempt, at: utc()}
 
   ## Classification (pure) and the module collector
 
   defp entry_facts(entry) do
-    fifo? = match?({:ok, _}, File.lstat(Path.join(entry, "release.fifo")))
-    %{entry: entry, journal: read_journal(entry), fifo?: fifo?}
+    case File.lstat(entry) do
+      {:ok, %File.Stat{type: :directory}} ->
+        fifo? = match?({:ok, _}, File.lstat(Path.join(entry, "release.fifo")))
+        %{entry: entry, kind: :directory, journal: read_journal(entry), fifo?: fifo?}
+
+      other ->
+        %{entry: entry, kind: other, journal: :not_read, fifo?: false}
+    end
   end
 
   # :resolved, :flagged (resolved, but with an unexpected incomplete attempt
   # or recovery) or {:unresolved, why}. `expected_incomplete` exempts only
   # the one attempt that carries it.
+  defp classify(%{kind: kind}) when kind != :directory, do: {:unresolved, {:entry_kind, kind}}
+
   defp classify(%{journal: {:ok, %{events: events}}, fifo?: fifo?}) do
+    case validate_events(events) do
+      :ok -> classify_valid(events, fifo?)
+      {:invalid, why} -> {:unresolved, why}
+    end
+  end
+
+  defp classify(%{journal: other}), do: {:unresolved, {:journal, other}}
+
+  defp classify_valid(events, fifo?) do
     case {last_outcome(events), fifo?} do
       {{:resolved, _proof}, true} ->
         {:unresolved, :fifo_still_present}
@@ -1010,7 +1120,46 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     end
   end
 
-  defp classify(%{journal: other}), do: {:unresolved, {:journal, other}}
+  # Every event must be known and well formed (the history starts pending);
+  # at most one attempt may carry expected_incomplete, and only an
+  # incomplete one. Anything else fails closed.
+  defp validate_events([{:pending, %DateTime{}} | rest]) do
+    expected = Enum.count(rest, &match?({:subject_cleanup, _, %{expected_incomplete: true}}, &1))
+
+    case Enum.reject(rest, &valid_event?/1) do
+      [] when expected <= 1 -> :ok
+      [] -> {:invalid, :more_than_one_expected_incomplete}
+      [bad | _] -> {:invalid, {:unknown_or_malformed_event, bad}}
+    end
+  end
+
+  defp validate_events(_events), do: {:invalid, :history_must_start_pending}
+
+  defp valid_event?({:launch, %{}}), do: true
+
+  defp valid_event?({:recovery_route, %{pid: pid, identity: identity}}),
+    do: is_integer(pid) and is_binary(identity)
+
+  defp valid_event?({:subject_cleanup, outcome, meta}),
+    do: valid_attempt_meta?(meta) and valid_subject_outcome?(outcome, meta)
+
+  defp valid_event?({:recovery, outcome, %{at: %DateTime{}}}),
+    do: valid_recovery_outcome?(outcome)
+
+  defp valid_event?(_event), do: false
+
+  defp valid_attempt_meta?(%{expected_incomplete: expected?, attempt: n, at: %DateTime{}}),
+    do: is_boolean(expected?) and is_integer(n) and n > 0
+
+  defp valid_attempt_meta?(_meta), do: false
+
+  defp valid_subject_outcome?({:clean, %{}}, %{expected_incomplete: false}), do: true
+  defp valid_subject_outcome?({:incomplete, _reason, %{}}, _meta), do: true
+  defp valid_subject_outcome?(_outcome, _meta), do: false
+
+  defp valid_recovery_outcome?({:resolved, %{}}), do: true
+  defp valid_recovery_outcome?({:unresolved, %{}}), do: true
+  defp valid_recovery_outcome?(_outcome), do: false
 
   defp class_kind({:unresolved, _why}), do: :unresolved
   defp class_kind(kind), do: kind
@@ -1027,11 +1176,48 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
   defp terminal(nil), do: :no_terminal_event
   defp terminal({kind, _outcome, _meta}), do: {:last_attempt_unresolved, kind}
 
-  defp resolved(%{proof: proof, actors: :down, helpers: :ended, lease: lease})
-       when proof in @proofs and lease in [:none, :released],
-       do: {:resolved, proof}
+  defp resolved(%{proof: proof, actors: :down, helpers: :ended, lease: lease, evidence: evidence})
+       when proof in @proofs and lease in [:none, :released] do
+    if valid_evidence?(proof, evidence),
+      do: {:resolved, proof},
+      else: {:evidence_missing_or_invalid, evidence}
+  end
 
   defp resolved(details), do: {:incomplete_details, details}
+
+  # The retained facts must actually show the proof: the exact receipt, or a
+  # final read that is absent or another start identity; every helper
+  # exited; both owned actors observed down; the lease observed nil.
+  defp valid_evidence?(proof, %{
+         proof: proof_evidence,
+         helpers: helpers,
+         actors: actors,
+         lease: lease
+       }) do
+    proof_shown?(proof, proof_evidence) and helpers_shown?(helpers) and
+      match?(%{owner: {_, false}, reaper: {_, false}}, actors) and match?(%{after: nil}, lease)
+  end
+
+  defp valid_evidence?(_proof, _evidence), do: false
+
+  defp proof_shown?(:no_launch, :no_launch), do: true
+
+  defp proof_shown?(:exit_receipt, {:exit_receipt, {port, status}}),
+    do: is_port(port) and is_integer(status)
+
+  defp proof_shown?(proof, {:identity, %{pid: pid, identity: identity, final_read: read}})
+       when proof in [:identity_gone, :identity_gone_after_fifo_release],
+       do: is_integer(pid) and is_binary(identity) and observation(read, identity) == :gone
+
+  defp proof_shown?(_proof, _evidence), do: false
+
+  defp helpers_shown?(:none), do: true
+
+  defp helpers_shown?(helpers) when is_map(helpers),
+    do:
+      Enum.all?(helpers, &match?({_key, %{state: {:exited, status}}} when is_integer(status), &1))
+
+  defp helpers_shown?(_helpers), do: false
 
   defp unexpected_attempt?(events) do
     Enum.any?(events, fn
@@ -1041,8 +1227,22 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     end)
   end
 
-  defp resolved_details,
-    do: %{proof: :exit_receipt, actors: :down, helpers: :ended, lease: :none, fifo: :none}
+  defp resolved_details do
+    %{
+      proof: :identity_gone,
+      actors: :down,
+      helpers: :ended,
+      lease: :none,
+      fifo: :none,
+      evidence: %{
+        proof:
+          {:identity, %{pid: 4_242, identity: "Mon Oct 19 06:00:00 2026", final_read: :absent}},
+        helpers: %{mkfifo: %{state: {:exited, 0}}},
+        actors: %{owner: {nil, false}, reaper: {nil, false}},
+        lease: %{outcome: :none, after: nil}
+      }
+    }
+  end
 
   defp start_run! do
     refuse_unresolved_controls!()
@@ -1101,8 +1301,14 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
 
   defp read_ledger!(%{id: id, ledger: ledger}) do
     case File.read(ledger) do
-      {:ok, text} -> text |> String.split("\n", trim: true) |> Enum.map(&ledger_entry!(&1, id))
-      {:error, reason} -> raise "#198 collector: ledger unreadable #{ledger}: #{inspect(reason)}"
+      {:ok, text} ->
+        text
+        |> String.split("\n", trim: true)
+        |> Enum.map(&ledger_entry!(&1, id))
+        |> unique_entries!()
+
+      {:error, reason} ->
+        raise "#198 collector: ledger unreadable #{ledger}: #{inspect(reason)}"
     end
   end
 
@@ -1117,6 +1323,12 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
 
   defp ledger_entry!(line, _id), do: raise("#198 collector: corrupt ledger line #{inspect(line)}")
 
+  defp unique_entries!(entries) do
+    if length(Enum.uniq(entries)) == length(entries),
+      do: entries,
+      else: raise("#198 collector: duplicate ledger entries #{inspect(entries)}")
+  end
+
   defp finalize_report!(run, classified) do
     base = Path.join(@reports_root, run.id <> ".report")
 
@@ -1130,7 +1342,7 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
 
     with :ok <- write_new(base <> ".term", :erlang.term_to_binary(report)),
          :ok <- write_new(base <> ".txt", inspect(report, pretty: true, limit: :infinity)),
-         :ok <- verify_report(base <> ".term", classified) do
+         :ok <- verify_report(base <> ".term", report) do
       base <> ".term"
     else
       other -> raise "#198 report finalisation failed (no control deleted): #{inspect(other)}"
@@ -1138,7 +1350,13 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
   end
 
   defp report_entry({facts, class}) do
-    %{entry: facts.entry, class: class, fifo_present: facts.fifo?, journal: facts.journal}
+    %{
+      entry: facts.entry,
+      kind: facts.kind,
+      class: class,
+      fifo_present: facts.fifo?,
+      journal: facts.journal
+    }
   end
 
   defp write_new(path, data) do
@@ -1154,10 +1372,10 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     end
   end
 
-  defp verify_report(path, classified) do
+  defp verify_report(path, report) do
     with {:ok, binary} <- File.read(path),
-         %{entries: entries} <- :erlang.binary_to_term(binary),
-         true <- MapSet.new(entries, & &1.entry) == MapSet.new(classified, &elem(&1, 0).entry) do
+         ^report <- :erlang.binary_to_term(binary),
+         true <- Enum.all?(report.entries, &reclassified?/1) do
       :ok
     else
       other -> {:error, {:report_verify, other}}
@@ -1165,6 +1383,11 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
   rescue
     error -> {:error, {:report_verify, error}}
   end
+
+  # The read-back entry, classified again from its retained journal alone,
+  # must give the class recorded for it (so its evidence really is there).
+  defp reclassified?(%{kind: kind, class: class, fifo_present: fifo?, journal: journal}),
+    do: classify(%{kind: kind, journal: journal, fifo?: fifo?}) == class
 
   defp deletable?({_facts, class}), do: class in [:resolved, :flagged]
 
@@ -1195,6 +1418,15 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
 
   ## The collector self-test fixtures (an exact-owned scratch root)
 
+  defp write_selftest_entry!(root, label, {:symlink, _fifo?, _want}) do
+    target = Path.join(root, "symlink-target")
+    File.mkdir!(target)
+    write_selftest_journal!(target, [])
+    entry = Path.join(root, Atom.to_string(label))
+    File.ln_s!(target, entry)
+    entry
+  end
+
   defp write_selftest_entry!(root, label, {events, fifo?, _want}) do
     entry = Path.join(root, Atom.to_string(label))
     File.mkdir!(entry)
@@ -1212,6 +1444,19 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     do: write_journal!(entry, %{entry: entry, events: [{:pending, utc()} | events]})
 
   defp remove_selftest_entry!(entry) do
+    case File.lstat(entry) do
+      {:ok, %File.Stat{type: :symlink}} -> remove_selftest_symlink!(entry)
+      _directory -> remove_selftest_dir!(entry)
+    end
+  end
+
+  defp remove_selftest_symlink!(link) do
+    {:ok, target} = File.read_link(link)
+    File.rm!(link)
+    remove_selftest_dir!(Path.expand(target, Path.dirname(link)))
+  end
+
+  defp remove_selftest_dir!(entry) do
     :ok = remove_if_present(Path.join(entry, "release.fifo"))
     :ok = remove_if_present(journal_path(entry))
     File.rmdir!(entry)
