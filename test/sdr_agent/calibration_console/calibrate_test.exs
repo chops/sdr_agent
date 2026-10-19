@@ -696,8 +696,15 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
 
     command =
       spawn(fn ->
+        # #197: the command reports the clock it runs on before it runs.
+        send(test, {:command_clock, Clock.source(), Clock.utc_now()})
         send(test, {:result, run(ctx, server: server(ctx, cli))})
       end)
+
+    assert_receive {:command_clock, source, now}, 5_000
+
+    assert {source, now} == {:test_fixed, @now},
+           "#197: the spawned command must run on the test's frozen clock, got #{inspect({source, now})}"
 
     assert eventually(
              fn -> match?({:ok, %{state: "launched"}}, LaunchRecord.read(ctx.root)) end,
