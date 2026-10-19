@@ -1,5 +1,8 @@
 -- Throwaway-cluster test seed only (ADR-0016 adversarial test). Never run
--- against sdr_agent_dev on the dev cluster. Synthetic rows inserted with the
+-- against sdr_agent_dev on the dev cluster; adversarial.sh runs it only
+-- after guard.sh has verified the throwaway cluster's identity. Every label
+-- here is in the functions' reviewed vocabularies except the two odd event
+-- types (mapped to 'other'); canaries.sql adds the vocabulary canaries. Synthetic rows inserted with the
 -- replica role (no FK or trigger checks; CHECK constraints still apply).
 -- Values containing SEEDSECRET must never appear in any function output.
 \set ON_ERROR_STOP on
@@ -70,7 +73,7 @@ SELECT testseed.ins('audit_events', '{"event_type":"model.launch.refused","tenan
 SELECT testseed.ins('audit_events', '{"event_type":"model.X<script>SEEDSECRET-TYPE","tenant_id":"00000000-0000-7000-8000-00000000000f","payload":"{}","sequence":"3"}');
 SELECT testseed.ins('audit_events', '{"event_type":"model.Y<b>SEEDSECRET-BOUNDTYPE","model_invocation_id":"00000000-0000-7000-8000-0000000000a1","tenant_id":"00000000-0000-7000-8000-00000000000f","subject_resource":"SdrAgent.Agents.ModelInvocation","subject_id":"00000000-0000-7000-8000-0000000000a1","payload":"{\"changes\":{\"refusal\":null,\"SEEDSECRET-KEY\":1}}","sequence":"4"}');
 -- An export and a payload row.
-SELECT testseed.ins('audit_exports', '{"status":"written","bundle_path":"/SEEDSECRET-PATH/bundle","bundle_sha256":"\\x01"}');
+SELECT testseed.ins('audit_exports', '{"status":"completed","bundle_path":"/SEEDSECRET-PATH/bundle","bundle_sha256":"\\x01"}');
 SELECT testseed.ins('payloads', '{"sha256":"\\x02","content":"\\x534545445345435245542d434f4e54454e54"}');
 -- G-DEMO in its reviewed post shape (start 2026-10-19 02:20 UTC), with a
 -- secret-bearing name and purpose that must never be read.
