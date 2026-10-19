@@ -696,8 +696,13 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     # #197: one deadline covers the clock report and the launch.
     deadline = GatedCommand.deadline(10_000)
 
+    # The server follows the test's clock, not the command killed below.
+    server = server(ctx, cli)
+
     command =
-      GatedCommand.start!(:result, fn -> run(ctx, server: server(ctx, cli)) end)
+      GatedCommand.start!(:result, fn -> run(ctx, server: server) end,
+        prelude: fn -> Clock.freeze(@now) end
+      )
       |> GatedCommand.open!(@now, deadline)
 
     assert GatedCommand.await!(command, deadline, fn ->
