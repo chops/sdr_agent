@@ -14,16 +14,27 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
   hold the identified state until it is observed. Its tests launch through
   the default, unguarded Reaper and prove the child live before owner death
   (READY, identity, PING/PONG) and gone after it (lease nil, identity
-  absent), with a probe error never read as gone. They keep their own
-  cleanup, registered before any launch, which works from registered state
-  only: an exit proof (no launch, this port's own exit status, or the
+  absent), with a probe error never read as gone.
+
+  #198 repair (plan r2, Codex PASS 84010d41). Every identified test owns a
+  control entry under `tmp/reaper-198-control/` (outside every ExUnit
+  `tmp_dir` reset) holding its FIFO and an append-only journal of attempts.
+  The subject cleanup runs from the body or from on_exit and journals each
+  attempt; an exit proof (no launch, this port's own exit status, or the
   captured identity gone) is required before a lease held by this test's
-  dead reaper is released, and an unproven child or helper is retained and
-  reported, never signalled. A FIFO lives outside the Reaper's workspace,
-  which the Reaper removes. Limits stated, not hidden: identities are read
-  with `ProcessProbe`, a synchronous `/bin/ps` whose calls no bound here
-  covers; an identity is captured only while the port is open before and
-  after the read, assuming no outside party signals the child.
+  dead reaper is released. An independent recovery, registered before
+  launch and run last, ends an unresolved child through its own controls
+  (EXIT for a receipt, or a FIFO line and teardown with a live-captured
+  identity read as gone) and journals a separate recovery event; it never
+  signals and never relabels the subject attempt. A module collector,
+  registered in `setup_all` (its failure is not masked by failed tests),
+  writes a retained per-run report under `tmp/reaper-198-reports/`, verifies
+  it, deletes only resolved entries' exact files, and fails on anything
+  unresolved or any unexpected incomplete attempt; an unresolved entry left
+  by an earlier run fails `setup_all`. Limits stated, not hidden: identities
+  are read with `ProcessProbe`, a synchronous `/bin/ps` whose calls no bound
+  here covers; an identity is captured only while the port is open before
+  and after the read, assuming no outside party signals the child.
   """
   use ExUnit.Case, async: false
 
@@ -41,14 +52,29 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
   @identified {:spawn_executable, "/bin/sh"}
   @fixture Path.expand("../../support/held_handshake.sh", __DIR__)
 
+  # #198 repair: durable roots outside every ExUnit tmp_dir reset subtree
+  # (`/tmp/` is gitignored). Controls are disposable once resolved; reports
+  # are never removed by a test.
+  @project Path.expand("../../..", __DIR__)
+  @control_root Path.join(@project, "tmp/reaper-198-control")
+  @reports_root Path.join(@project, "tmp/reaper-198-reports")
+  @selftest_root Path.join(@project, "tmp/reaper-198-control-selftest")
+  @proofs [:no_launch, :exit_receipt, :identity_gone, :identity_gone_after_fifo_release]
+
+  setup_all do
+    run = start_run!()
+    on_exit(fn -> finish_run!(run) end)
+    %{run: run}
+  end
+
   setup tags do
     name = :"reaper_unidentified_#{System.unique_integer([:positive])}"
     if tags[:lease] != :proof_gated, do: on_exit(fn -> Reaper.release(name) end)
     %{name: name}
   end
 
-  setup %{tmp_dir: tmp, name: name} = tags do
-    if tags[:lease] == :proof_gated, do: identified_setup(tmp, name), else: :ok
+  setup tags do
+    if tags[:lease] == :proof_gated, do: identified_setup(tags), else: :ok
   end
 
   test "an unidentified launch keeps the lease after owner death", %{tmp_dir: tmp, name: name} do
@@ -137,6 +163,96 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     assert Reaper.lease(name) == nil
   end
 
+  # The M5 shape without a mutant: the existing nil `:os_pid` seam makes the
+  # launch unidentified, and the relay gate keeps its port unknown to the
+  # cleanup's first snapshot (released only by the cleanup's own hook).
+  @tag lease: :proof_gated
+  test "an unidentified held launch is ended through its own controls and journalled complete",
+       %{name: name} = ctx do
+    fifo = make_fifo!(ctx)
+
+    {owner, reaper, result} =
+      launch_identified(ctx, [fifo], [os_pid: recovery_seam(ctx.registry)], relay_gate: true)
+
+    assert result == {:unknown, :post_spawn_failure}
+    capture_recovery_identity!(ctx)
+    assert cleanup(ctx, on_first_snapshot: fn -> send(owner, {:relay_go, self()}) end) == :clean
+
+    state = get(ctx.registry)
+    assert is_port(state.port) and Map.get(state, :exit_sent_to) == state.port
+    assert valid_receipt?(state)
+    refute Process.alive?(owner) or Process.alive?(reaper)
+    assert Reaper.lease(name) == nil
+    assert state.helpers.mkfifo.state == {:exited, 0}
+    assert {:error, :enoent} = File.lstat(fifo)
+    assert {:ok, journal} = read_journal(ctx.entry)
+    assert {:resolved, :exit_receipt} = last_outcome(journal.events)
+  end
+
+  # The deliberate incomplete attempt: journalled, visible to the collector's
+  # classification, then recovered by the subject's own cleanup.
+  @tag lease: :proof_gated
+  test "an unproven cleanup is journalled incomplete, reported by the collector, and recoverable",
+       %{name: name} = ctx do
+    fifo = make_fifo!(ctx)
+
+    {owner, reaper, result} =
+      launch_identified(ctx, [fifo], [os_pid: recovery_seam(ctx.registry)], relay_gate: true)
+
+    assert result == {:unknown, :post_spawn_failure}
+    capture_recovery_identity!(ctx)
+
+    assert {:incomplete, :no_exit_receipt, details} =
+             cleanup(ctx, control_window: 300, expected_incomplete: true)
+
+    assert %{port_known?: false, fifo_preloaded?: true} = details
+    assert Process.alive?(owner) and Process.alive?(reaper)
+    assert Reaper.lease(name) == {:held, reaper}
+    assert {:ok, %File.Stat{type: :other}} = File.lstat(fifo)
+    assert {:unresolved, _} = classify(entry_facts(ctx.entry))
+
+    send(owner, {:relay_go, self()})
+    assert cleanup(ctx) == :clean
+    assert {:ok, journal} = read_journal(ctx.entry)
+    assert {:resolved, :exit_receipt} = last_outcome(journal.events)
+    assert classify(entry_facts(ctx.entry)) == :resolved
+  end
+
+  test "the collector classifies journals and fails closed on anything unproven" do
+    root = Path.join(@selftest_root, "#{System.pid()}-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    clean = {:subject_cleanup, {:clean, resolved_details()}, attempt_meta(false)}
+    incomplete = {:subject_cleanup, {:incomplete, :synthetic, %{}}, attempt_meta(false)}
+    expected = {:subject_cleanup, {:incomplete, :synthetic, %{}}, attempt_meta(true)}
+    recovered = {:recovery, {:resolved, resolved_details()}, %{}}
+
+    cases = [
+      resolved: {[clean], false, :resolved},
+      flagged_recovered: {[incomplete, recovered], false, :flagged},
+      flagged_after_expected: {[expected, incomplete, clean], false, :flagged},
+      expected_then_clean: {[expected, clean], false, :resolved},
+      pending_only: {[], false, :unresolved},
+      incomplete_last: {[incomplete], false, :unresolved},
+      unresolved_recovery:
+        {[incomplete, {:recovery, {:unresolved, %{}}, %{}}], false, :unresolved},
+      fifo_still_present: {[clean], true, :unresolved},
+      unreadable: {:garbage, false, :unresolved},
+      missing: {:missing, false, :unresolved}
+    ]
+
+    entries =
+      Enum.map(cases, fn {label, spec} -> {label, write_selftest_entry!(root, label, spec)} end)
+
+    for {label, entry} <- entries do
+      {_events, _fifo?, want} = Keyword.fetch!(cases, label)
+      got = classify(entry_facts(entry))
+      assert class_kind(got) == want, "#{label}: got #{inspect(got)}"
+    end
+
+    Enum.each(entries, fn {_label, entry} -> remove_selftest_entry!(entry) end)
+    File.rmdir!(root)
+  end
+
   # An owner process starts the named reaper and opens one launch through
   # it, then waits to be told to exit.
   defp launch(name, tmp, reaper_opts) do
@@ -163,43 +279,41 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
 
   ## #198: the identified-launch subject
 
-  # The Reaper's workspace (`ws`, removed by the Reaper) and the test's
-  # private control directory (`ctl`, its sibling) are separate; the only
-  # lease-releasing callback is the proof-gated cleanup below.
-  defp identified_setup(tmp, name) do
+  # The Reaper's workspace (`ws`, in tmp_dir, removed by the Reaper) and the
+  # test's control entry (outside tmp_dir) are separate. The recovery is
+  # registered first, so it runs after the subject cleanup (LIFO).
+  defp identified_setup(%{tmp_dir: tmp, name: name, run: run, test: test}) do
     ws = Path.join(tmp, "ws")
-    ctl = Path.join(tmp, "ctl")
     File.mkdir_p!(ws)
-    File.mkdir_p!(ctl)
-    File.chmod!(ctl, 0o700)
+    entry = Path.join(@control_root, "#{run.id}-#{System.unique_integer([:positive])}")
+    File.write!(run.ledger, "created #{entry}\n", [:append, :sync])
+    File.mkdir!(entry)
+    File.chmod!(entry, 0o700)
+    write_journal!(entry, %{run: run.id, test: test, entry: entry, events: [{:pending, utc()}]})
     {:ok, registry} = Agent.start(fn -> %{helpers: %{}, ports_seen: []} end)
-
-    on_exit(fn ->
-      case cleanup(registry, name, ctl) do
-        :clean ->
-          Agent.stop(registry)
-
-        incomplete ->
-          raise "#198 cleanup incomplete (state retained): " <>
-                  inspect(incomplete, limit: :infinity, printable_limit: :infinity)
-      end
-    end)
-
-    %{registry: registry, ws: ws, ctl: ctl}
+    ctx = %{registry: registry, ws: ws, ctl: entry, entry: entry, name: name}
+    on_exit(fn -> recover!(ctx) end)
+    on_exit(fn -> subject_on_exit!(ctx) end)
+    ctx
   end
 
   # The owner registers itself, its reaper and the open before each reply
   # that depends on them, then relays the reaper's forwarded port messages
-  # (reaper.ex:280-282), writing an exit status into the registry first.
-  defp launch_identified(%{registry: reg, ws: ws, name: name}, extra_args, reaper_opts) do
+  # (reaper.ex:280-282), writing an exit status into the registry first. With
+  # `relay_gate: true` it relays only after `{:relay_go, from}`.
+  defp launch_identified(ctx, extra_args, reaper_opts, opts \\ []) do
+    %{registry: reg, ws: ws, name: name, entry: entry} = ctx
     test = self()
+    gate? = Keyword.get(opts, :relay_gate, false)
     port_opts = {[:binary, :exit_status, args: [@fixture | extra_args]], {[], []}}
-    owner = spawn(fn -> identified_owner(reg, test, name, ws, port_opts, reaper_opts) end)
+    launch = {name, ws, port_opts, reaper_opts, gate?}
+    owner = spawn(fn -> identified_owner(reg, test, launch) end)
     assert_receive {:opened, ^owner, reaper, result}, 10_000
+    journal_event!(entry, {:launch, %{owner: owner, reaper: reaper, result: result}})
     {owner, reaper, result}
   end
 
-  defp identified_owner(reg, test, name, ws, port_opts, reaper_opts) do
+  defp identified_owner(reg, test, {name, ws, port_opts, reaper_opts, gate?}) do
     put(reg, owner: self())
     {:ok, reaper} = Reaper.start(name, reaper_opts)
     put(reg, reaper: reaper)
@@ -208,8 +322,20 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     deadline = System.monotonic_time(:millisecond) + 5_000
     result = Reaper.open(reaper, ws, @identified, port_opts, deadline)
     put(reg, opened(result))
+    if gate?, do: put(reg, relay_gate: :closed)
     send(test, {:opened, self(), reaper, result})
-    relay(reg, test)
+    if gate?, do: await_relay_go(reg, test), else: relay(reg, test)
+  end
+
+  defp await_relay_go(reg, test) do
+    receive do
+      {:relay_go, _from} ->
+        put(reg, relay_gate: :open)
+        relay(reg, test)
+
+      :exit ->
+        :ok
+    end
   end
 
   defp opened({:ok, port, os_pid} = result), do: [open_result: result, port: port, os_pid: os_pid]
@@ -235,10 +361,11 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
 
   # Live-before: READY and PONG from `os_pid` itself, and its start identity
   # read while its port is open (it cannot leave before EOF or EXIT).
-  defp live_before!(%{registry: reg}, port, os_pid) do
+  defp live_before!(%{registry: reg, entry: entry}, port, os_pid) do
     assert {:ok, ^os_pid} = fixture_line(port, "READY", 5_000)
     assert {:ok, identity} = capture_identity(port, os_pid)
     put(reg, identity: identity, identity_pid: os_pid)
+    journal_event!(entry, {:recovery_route, %{port: port, pid: os_pid, identity: identity}})
     assert Port.command(port, "PING\n")
     assert {:ok, ^os_pid} = fixture_line(port, "PONG", 5_000)
     assert ProcessProbe.start_identity(os_pid) == {:ok, identity}
@@ -305,6 +432,38 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     end
   end
 
+  # The recovery route for :63e/:63f: the existing nil `:os_pid` seam shape
+  # (the launch stays unidentified), which also records, under a key the
+  # subject cleanup never reads, this port and the pid its READY line names
+  # (waited for, bounded at 2_000 ms, in the reaper's own mailbox).
+  defp recovery_seam(reg) do
+    fn port ->
+      observed = await_line(port, now() + 2_000)
+      put(reg, recovery: %{port: port, ready_pid: queued_ready_pid(port), observed: observed})
+      nil
+    end
+  end
+
+  defp queued_ready_pid(port) do
+    with [line | _] <- port |> queued_data() |> String.split("\n"),
+         {:ok, pid} <- parse_line(line, "READY") do
+      pid
+    else
+      _other -> nil
+    end
+  end
+
+  # Captured in the body, before any subject cleanup: the port is open
+  # before and after the read, and nothing has sent EXIT yet.
+  defp capture_recovery_identity!(%{registry: reg, entry: entry}) do
+    %{port: port, ready_pid: pid} = recovery = Map.fetch!(get(reg), :recovery)
+    assert is_integer(pid), "recovery route: no READY pid (#{inspect(recovery)})"
+    assert {:ok, identity} = capture_identity(port, pid)
+    put(reg, recovery: Map.put(recovery, :identity, identity))
+    journal_event!(entry, {:recovery_route, %{port: port, pid: pid, identity: identity}})
+    {pid, identity}
+  end
+
   defp await_line(port, deadline) do
     cond do
       line_queued?(port) ->
@@ -319,7 +478,9 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     end
   end
 
-  defp line_queued?(port) do
+  defp line_queued?(port), do: port |> queued_data() |> String.contains?("\n")
+
+  defp queued_data(port) do
     {:messages, messages} = Process.info(self(), :messages)
 
     messages
@@ -328,7 +489,6 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
       _other -> []
     end)
     |> Enum.join()
-    |> String.contains?("\n")
   end
 
   defp fixture_line(port, tag, within), do: take_line(port, tag, now() + within)
@@ -424,20 +584,52 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     end
   end
 
-  ## Cleanup from registered state (on_exit only, after every assertion)
+  ## The subject cleanup (from the body or on_exit; every attempt journalled)
 
-  defp cleanup(reg, name, ctl) do
-    with :ok <- await_open_result(reg),
-         {:ok, early} <- early_proof(reg, get(reg)),
-         :ok <- teardown(get(reg)),
-         {:ok, _proof} <- exit_proof(get(reg), early),
-         :ok <- helpers_ended(get(reg)),
-         :ok <- settle_lease(get(reg), name) do
-      File.rm_rf!(ctl)
-      :clean
-    else
-      {:incomplete, reason} -> {:incomplete, reason, get(reg), Reaper.lease(name)}
+  defp cleanup(ctx, opts \\ []) do
+    outcome = subject_cleanup(ctx, opts)
+
+    expected? = Keyword.get(opts, :expected_incomplete, false)
+    meta = Map.put(attempt_meta(expected?), :attempt, subject_attempts(ctx.entry) + 1)
+
+    journal_event!(ctx.entry, {:subject_cleanup, outcome, meta})
+
+    case outcome do
+      {:clean, _details} -> :clean
+      {:incomplete, reason, details} -> {:incomplete, reason, details}
     end
+  end
+
+  defp subject_cleanup(%{registry: reg, name: name}, opts) do
+    with :ok <- await_open_result(reg),
+         {:ok, early} <- early_proof(reg, get(reg), opts),
+         :ok <- teardown(get(reg)),
+         {:ok, proof} <- exit_proof(get(reg), early),
+         :ok <- helpers_ended(get(reg)),
+         {:ok, lease} <- settle_lease(get(reg), name),
+         {:ok, fifo} <- remove_fifo(get(reg)) do
+      {:clean, %{proof: proof, actors: :down, helpers: :ended, lease: lease, fifo: fifo}}
+    else
+      {:incomplete, reason} ->
+        {:incomplete, reason, %{state: get(reg), lease: Reaper.lease(name)}}
+    end
+  end
+
+  # The on_exit subject attempt: skipped when the body already resolved it.
+  defp subject_on_exit!(ctx) do
+    with {:ok, %{events: events}} <- read_journal(ctx.entry),
+         {:resolved, _proof} <- last_outcome(events) do
+      :ok
+    else
+      _unresolved -> raise_unless_clean!(cleanup(ctx))
+    end
+  end
+
+  defp raise_unless_clean!(:clean), do: :ok
+
+  defp raise_unless_clean!(incomplete) do
+    raise "#198 subject cleanup incomplete (journalled; recovery runs next): " <>
+            inspect(incomplete, limit: :infinity, printable_limit: :infinity)
   end
 
   # A launch whose open was called but whose result is not yet registered:
@@ -454,20 +646,23 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
   end
 
   # Before any teardown, while the reaper still forwards its port: an
-  # unarmed launch's exit status (asking a held child to EXIT first).
-  defp early_proof(reg, state) do
+  # unarmed launch's exit status (asking a held child to EXIT first). The
+  # `on_first_snapshot` hook runs after `state` was read.
+  defp early_proof(reg, state, opts) do
+    Keyword.get(opts, :on_first_snapshot, fn -> :ok end).()
+
     cond do
       not Map.get(state, :open_called?, false) -> {:ok, :no_launch}
       Map.get(state, :armed?, false) -> {:ok, :pending}
       valid_receipt?(state) -> {:ok, :exit_receipt}
-      true -> await_receipt(reg, state)
+      true -> await_receipt(reg, state, Keyword.get(opts, :control_window, 5_000))
     end
   end
 
-  defp await_receipt(reg, state) do
+  defp await_receipt(reg, state, window) do
     ask_exit(Map.get(state, :port))
 
-    if wait_until(fn -> valid_receipt?(get(reg)) end, 5_000),
+    if wait_until(fn -> valid_receipt?(get(reg)) end, window),
       do: {:ok, :exit_receipt},
       else: {:ok, :none}
   end
@@ -587,7 +782,7 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     reaper = Map.get(state, :reaper)
 
     case Reaper.lease(name) do
-      nil -> :ok
+      nil -> {:ok, :none}
       {:held, ^reaper} when is_pid(reaper) -> release_dead_holder(reaper, name)
       {:held, other} -> {:incomplete, {:lease_not_ours, other}}
     end
@@ -597,11 +792,474 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     with false <- Process.alive?(reaper),
          :ok <- Reaper.release(name),
          nil <- Reaper.lease(name) do
-      :ok
+      {:ok, :released}
     else
       _other -> {:incomplete, {:lease_not_released, reaper}}
     end
   end
+
+  # After an exit proof: this entry's FIFO, exactly, if it has one.
+  defp remove_fifo(state) do
+    case Map.get(state, :fifo) do
+      nil -> {:ok, :none}
+      fifo -> fifo_removed(File.rm(fifo))
+    end
+  end
+
+  defp fifo_removed(:ok), do: {:ok, :removed}
+  defp fifo_removed({:error, :enoent}), do: {:ok, :none}
+  defp fifo_removed({:error, reason}), do: {:incomplete, {:fifo_remove_failed, reason}}
+
+  ## The independent no-signal recovery (on_exit, registered first: runs last)
+
+  defp recover!(%{registry: reg, entry: entry, name: name}) do
+    with {:ok, %{events: events}} <- read_journal(entry),
+         {:resolved, _proof} <- last_outcome(events) do
+      Agent.stop(reg)
+    else
+      _unresolved ->
+        outcome = recover(reg, name)
+        journal_event!(entry, {:recovery, outcome, %{at: utc()}})
+        finish_recovery!(reg, outcome)
+    end
+  end
+
+  defp finish_recovery!(reg, {:resolved, _details}), do: Agent.stop(reg)
+
+  defp finish_recovery!(_reg, outcome) do
+    raise "#198 recovery unresolved (controls retained; STOP): " <>
+            inspect(outcome, limit: :infinity, printable_limit: :infinity)
+  end
+
+  defp recover(reg, name) do
+    release_gate(get(reg))
+
+    case recovery_receipt(reg) do
+      :exit_receipt -> settle_recovery(reg, name, :exit_receipt)
+      :none -> recovery_identity(reg, name)
+    end
+  end
+
+  defp release_gate(state) do
+    owner = Map.get(state, :owner)
+
+    if Map.get(state, :relay_gate) == :closed and alive?(owner),
+      do: send(owner, {:relay_go, self()})
+
+    :ok
+  end
+
+  # The receipt route, while the relay and the reaper live: a fresh snapshot
+  # each time, EXIT once to each learned port, this port's own exit status.
+  defp recovery_receipt(reg) do
+    state = get(reg)
+
+    cond do
+      valid_receipt?(state) -> :exit_receipt
+      alive?(state[:owner]) and alive?(state[:reaper]) -> receipt_loop(reg, nil, now() + 5_000)
+      true -> :none
+    end
+  end
+
+  defp receipt_loop(reg, sent_to, deadline) do
+    state = get(reg)
+    port = Map.get(state, :port) || get_in(state, [:recovery, :port])
+
+    cond do
+      valid_receipt?(state) ->
+        :exit_receipt
+
+      now() >= deadline ->
+        :none
+
+      is_port(port) and port != sent_to ->
+        recovery_exit(port)
+        receipt_loop(reg, port, deadline)
+
+      true ->
+        Process.sleep(10)
+        receipt_loop(reg, sent_to, deadline)
+    end
+  end
+
+  defp recovery_exit(port) do
+    if Port.info(port), do: Port.command(port, "EXIT\n")
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # The identity route: only with an identity captured while the child was
+  # provably live; FIFO line, ordered teardown, then the real probe.
+  defp recovery_identity(reg, name) do
+    state = get(reg)
+    preload = preload_fifo(state)
+
+    case recovery_anchor(state) do
+      {pid, identity} -> identity_route(reg, name, {pid, identity}, preload)
+      nil -> {:unresolved, %{reason: :no_receipt_no_live_identity, fifo: preload}}
+    end
+  end
+
+  defp identity_route(reg, name, {pid, identity}, preload) do
+    with :ok <- recovery_teardown(get(reg)),
+         :gone <- observe_gone(pid, identity, &ProcessProbe.start_identity/1, 5_000) do
+      settle_recovery(reg, name, :identity_gone)
+    else
+      other -> {:unresolved, %{reason: {:identity_route, other}, fifo: preload}}
+    end
+  end
+
+  defp recovery_anchor(%{identity: identity, identity_pid: pid}) when is_binary(identity),
+    do: {pid, identity}
+
+  defp recovery_anchor(%{recovery: %{identity: identity, ready_pid: pid}})
+       when is_binary(identity),
+       do: {pid, identity}
+
+  defp recovery_anchor(_state), do: nil
+
+  defp preload_fifo(%{fifo: fifo}) when is_binary(fifo), do: release_fifo(fifo)
+  defp preload_fifo(_state), do: :no_fifo
+
+  defp recovery_teardown(state) do
+    with :ok <- kill_exact(Map.get(state, :reaper), :reaper) do
+      kill_exact(Map.get(state, :owner), :owner)
+    end
+  end
+
+  defp settle_recovery(reg, name, proof) do
+    with :ok <- recovery_teardown(get(reg)),
+         :ok <- helpers_ended(get(reg)),
+         {:ok, lease} <- settle_lease(get(reg), name),
+         {:ok, fifo} <- remove_fifo(get(reg)) do
+      {:resolved, %{proof: proof, actors: :down, helpers: :ended, lease: lease, fifo: fifo}}
+    else
+      other -> {:unresolved, %{reason: other, proof: proof, lease: Reaper.lease(name)}}
+    end
+  end
+
+  ## Journal (per entry; append-only, written atomically)
+
+  defp journal_path(entry), do: Path.join(entry, "journal.term")
+
+  defp journal_event!(entry, event) do
+    case read_journal(entry) do
+      {:ok, journal} -> write_journal!(entry, %{journal | events: journal.events ++ [event]})
+      other -> raise "#198 journal write failed: cannot read #{entry}: #{inspect(other)}"
+    end
+  end
+
+  defp write_journal!(entry, journal) do
+    path = journal_path(entry)
+    next = path <> ".next"
+
+    with :ok <- File.write(next, :erlang.term_to_binary(journal), [:sync]),
+         :ok <- File.rename(next, path) do
+      :ok
+    else
+      other -> raise "#198 journal write failed: #{entry}: #{inspect(other)}"
+    end
+  end
+
+  defp read_journal(entry) do
+    case File.read(journal_path(entry)) do
+      {:ok, binary} -> decode_journal(binary)
+      {:error, reason} -> {:error, {:unreadable, reason}}
+    end
+  end
+
+  defp decode_journal(binary) do
+    case :erlang.binary_to_term(binary) do
+      %{events: events} = journal when is_list(events) -> {:ok, journal}
+      other -> {:error, {:malformed, other}}
+    end
+  rescue
+    ArgumentError -> {:error, :corrupt}
+  end
+
+  defp subject_attempts(entry) do
+    case read_journal(entry) do
+      {:ok, %{events: events}} -> Enum.count(events, &match?({:subject_cleanup, _, _}, &1))
+      _other -> 0
+    end
+  end
+
+  defp attempt_meta(expected?), do: %{expected_incomplete: expected?, at: utc()}
+
+  ## Classification (pure) and the module collector
+
+  defp entry_facts(entry) do
+    fifo? = match?({:ok, _}, File.lstat(Path.join(entry, "release.fifo")))
+    %{entry: entry, journal: read_journal(entry), fifo?: fifo?}
+  end
+
+  # :resolved, :flagged (resolved, but with an unexpected incomplete attempt
+  # or recovery) or {:unresolved, why}. `expected_incomplete` exempts only
+  # the one attempt that carries it.
+  defp classify(%{journal: {:ok, %{events: events}}, fifo?: fifo?}) do
+    case {last_outcome(events), fifo?} do
+      {{:resolved, _proof}, true} ->
+        {:unresolved, :fifo_still_present}
+
+      {{:resolved, _proof}, false} ->
+        if unexpected_attempt?(events), do: :flagged, else: :resolved
+
+      {other, _fifo?} ->
+        {:unresolved, other}
+    end
+  end
+
+  defp classify(%{journal: other}), do: {:unresolved, {:journal, other}}
+
+  defp class_kind({:unresolved, _why}), do: :unresolved
+  defp class_kind(kind), do: kind
+
+  defp last_outcome(events) do
+    events
+    |> Enum.filter(&match?({kind, _, _} when kind in [:subject_cleanup, :recovery], &1))
+    |> List.last()
+    |> terminal()
+  end
+
+  defp terminal({:subject_cleanup, {:clean, details}, _meta}), do: resolved(details)
+  defp terminal({:recovery, {:resolved, details}, _meta}), do: resolved(details)
+  defp terminal(nil), do: :no_terminal_event
+  defp terminal({kind, _outcome, _meta}), do: {:last_attempt_unresolved, kind}
+
+  defp resolved(%{proof: proof, actors: :down, helpers: :ended, lease: lease})
+       when proof in @proofs and lease in [:none, :released],
+       do: {:resolved, proof}
+
+  defp resolved(details), do: {:incomplete_details, details}
+
+  defp unexpected_attempt?(events) do
+    Enum.any?(events, fn
+      {:subject_cleanup, {:incomplete, _reason, _details}, %{expected_incomplete: false}} -> true
+      {:recovery, {:unresolved, _details}, _meta} -> true
+      _other -> false
+    end)
+  end
+
+  defp resolved_details,
+    do: %{proof: :exit_receipt, actors: :down, helpers: :ended, lease: :none, fifo: :none}
+
+  defp start_run! do
+    refuse_unresolved_controls!()
+    File.mkdir_p!(@control_root)
+    File.chmod!(@control_root, 0o700)
+    File.mkdir_p!(@reports_root)
+    id = "#{utc_stamp()}-#{System.pid()}-#{System.unique_integer([:positive])}"
+    ledger = Path.join(@control_root, id <> ".ledger")
+    File.write!(ledger, "", [:exclusive, :sync])
+    %{id: id, ledger: ledger, head: git_head(), started: utc()}
+  end
+
+  # An unresolved entry (or ledger) from an earlier run fails setup_all; its
+  # artifacts stay for recovery and are never removed to unblock a run.
+  defp refuse_unresolved_controls! do
+    case File.ls(@control_root) do
+      {:ok, []} ->
+        :ok
+
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, names} ->
+        raise "#198 setup_all: unresolved control artifacts from an earlier run in " <>
+                "#{@control_root}: #{inspect(Enum.sort(names))}; reports in #{@reports_root}. " <>
+                "Recover each entry first (write one line to its release.fifo, confirm its " <>
+                "journalled identity gone or its exit receipt), then remove only its exact files."
+
+      {:error, reason} ->
+        raise "#198 setup_all: cannot read #{@control_root}: #{inspect(reason)}"
+    end
+  end
+
+  # The module collector (setup_all's on_exit, not masked by failed tests):
+  # validate, classify, finalise and verify the report, then delete only
+  # resolved entries' exact files, then fail on anything left or flagged.
+  defp finish_run!(run) do
+    classified =
+      run
+      |> read_ledger!()
+      |> Enum.map(fn entry ->
+        facts = entry_facts(entry)
+        {facts, classify(facts)}
+      end)
+
+    report = finalize_report!(run, classified)
+    leftovers = classified |> Enum.filter(&deletable?/1) |> Enum.flat_map(&delete_entry/1)
+
+    unresolved =
+      Enum.filter(classified, fn {_facts, class} -> class_kind(class) == :unresolved end)
+
+    flagged = Enum.filter(classified, fn {_facts, class} -> class == :flagged end)
+    if unresolved == [] and leftovers == [], do: :ok = File.rm(run.ledger)
+    raise_collector!(report, unresolved, flagged, leftovers)
+  end
+
+  defp read_ledger!(%{id: id, ledger: ledger}) do
+    case File.read(ledger) do
+      {:ok, text} -> text |> String.split("\n", trim: true) |> Enum.map(&ledger_entry!(&1, id))
+      {:error, reason} -> raise "#198 collector: ledger unreadable #{ledger}: #{inspect(reason)}"
+    end
+  end
+
+  defp ledger_entry!("created " <> path, id) do
+    expanded = Path.expand(path)
+
+    if Path.dirname(expanded) == @control_root and
+         String.starts_with?(Path.basename(expanded), id <> "-"),
+       do: expanded,
+       else: raise("#198 collector: foreign ledger entry #{inspect(path)}")
+  end
+
+  defp ledger_entry!(line, _id), do: raise("#198 collector: corrupt ledger line #{inspect(line)}")
+
+  defp finalize_report!(run, classified) do
+    base = Path.join(@reports_root, run.id <> ".report")
+
+    report = %{
+      run: run.id,
+      head: run.head,
+      started: run.started,
+      finished: utc(),
+      entries: Enum.map(classified, &report_entry/1)
+    }
+
+    with :ok <- write_new(base <> ".term", :erlang.term_to_binary(report)),
+         :ok <- write_new(base <> ".txt", inspect(report, pretty: true, limit: :infinity)),
+         :ok <- verify_report(base <> ".term", classified) do
+      base <> ".term"
+    else
+      other -> raise "#198 report finalisation failed (no control deleted): #{inspect(other)}"
+    end
+  end
+
+  defp report_entry({facts, class}) do
+    %{entry: facts.entry, class: class, fifo_present: facts.fifo?, journal: facts.journal}
+  end
+
+  defp write_new(path, data) do
+    next = path <> ".next"
+
+    with false <- File.exists?(path),
+         :ok <- File.write(next, data, [:exclusive, :sync]),
+         :ok <- File.rename(next, path) do
+      :ok
+    else
+      true -> {:error, {:exists, path}}
+      other -> {:error, {path, other}}
+    end
+  end
+
+  defp verify_report(path, classified) do
+    with {:ok, binary} <- File.read(path),
+         %{entries: entries} <- :erlang.binary_to_term(binary),
+         true <- MapSet.new(entries, & &1.entry) == MapSet.new(classified, &elem(&1, 0).entry) do
+      :ok
+    else
+      other -> {:error, {:report_verify, other}}
+    end
+  rescue
+    error -> {:error, {:report_verify, error}}
+  end
+
+  defp deletable?({_facts, class}), do: class in [:resolved, :flagged]
+
+  defp delete_entry({%{entry: entry}, _class}) do
+    with :ok <- remove_if_present(Path.join(entry, "journal.term.next")),
+         :ok <- File.rm(journal_path(entry)),
+         :ok <- File.rmdir(entry) do
+      []
+    else
+      other -> [{entry, other}]
+    end
+  end
+
+  defp remove_if_present(path) do
+    case File.rm(path) do
+      {:error, :enoent} -> :ok
+      other -> other
+    end
+  end
+
+  defp raise_collector!(_report, [], [], []), do: :ok
+
+  defp raise_collector!(report, unresolved, flagged, leftovers) do
+    raise "#198 collector: #{length(unresolved)} unresolved, #{length(flagged)} flagged, " <>
+            "#{length(leftovers)} not deleted; report #{report}; retained: " <>
+            inspect(Enum.map(unresolved, &elem(&1, 0).entry) ++ leftovers, limit: :infinity)
+  end
+
+  ## The collector self-test fixtures (an exact-owned scratch root)
+
+  defp write_selftest_entry!(root, label, {events, fifo?, _want}) do
+    entry = Path.join(root, Atom.to_string(label))
+    File.mkdir!(entry)
+    write_selftest_journal!(entry, events)
+    if fifo?, do: File.write!(Path.join(entry, "release.fifo"), "")
+    entry
+  end
+
+  defp write_selftest_journal!(_entry, :missing), do: :ok
+
+  defp write_selftest_journal!(entry, :garbage),
+    do: File.write!(journal_path(entry), "not an erlang term")
+
+  defp write_selftest_journal!(entry, events),
+    do: write_journal!(entry, %{entry: entry, events: [{:pending, utc()} | events]})
+
+  defp remove_selftest_entry!(entry) do
+    :ok = remove_if_present(Path.join(entry, "release.fifo"))
+    :ok = remove_if_present(journal_path(entry))
+    File.rmdir!(entry)
+  end
+
+  ## Small helpers
+
+  defp git_head do
+    with {:ok, git_dir} <- git_dir(Path.join(@project, ".git")),
+         {:ok, head} <- File.read(Path.join(git_dir, "HEAD")) do
+      resolve_head(String.trim(head), git_dir)
+    else
+      other -> {:unknown, other}
+    end
+  end
+
+  defp git_dir(dot_git) do
+    case File.read(dot_git) do
+      {:ok, "gitdir: " <> rest} -> {:ok, Path.expand(String.trim(rest), @project)}
+      {:error, :eisdir} -> {:ok, dot_git}
+      other -> {:error, other}
+    end
+  end
+
+  defp resolve_head("ref: " <> ref, git_dir) do
+    common =
+      case File.read(Path.join(git_dir, "commondir")) do
+        {:ok, dir} -> Path.expand(String.trim(dir), git_dir)
+        _none -> git_dir
+      end
+
+    Enum.find_value([git_dir, common], {:unknown, {:ref, ref}}, &read_ref(&1, ref))
+  end
+
+  defp resolve_head(sha, _git_dir), do: sha
+
+  defp read_ref(dir, ref) do
+    case File.read(Path.join(dir, ref)) do
+      {:ok, sha} -> String.trim(sha)
+      _missing -> nil
+    end
+  end
+
+  defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
+  defp alive?(_pid), do: false
+
+  defp utc, do: DateTime.utc_now()
+  defp utc_stamp, do: Calendar.strftime(DateTime.utc_now(), "%Y%m%dT%H%M%SZ")
 
   ## Registry and time
 
