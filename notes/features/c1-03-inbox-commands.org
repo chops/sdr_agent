@@ -149,8 +149,10 @@ retry-race suites, seed 0) passed *302 tests*, exit 0, zero PostgreSQL
 =codex-c103i-a7c1420-focused.log= in private handoff tmp. The legacy runner's
 parsed count is still zero; its raw Result and exit are authoritative.
 Tests use only =sdr_agent_test_codex_c103i= with =ERL_FLAGS='+S 4:4'=,
-ordinary provider/store/DB URL overrides unset. DB slot was claimed from
-Claude before the run.
+ordinary provider/store/DB URL overrides unset. Codex announced a DB-slot
+claim before the run after the handoff said it was free; Claude later
+reported his earlier #166 claim was still active. The runs overlapped on
+separate partitions, so this is not exclusive-slot evidence.
 
 This documentation checkpoint precedes the integrated full gate; it does
 NOT claim that gate or final-head review has passed. The full gate and
@@ -165,3 +167,24 @@ Slice B's refined entity/action contract is separately UNREVIEWED on
 =c1-03-b-contract=; no B module planning, RED or code is authorized until
 that gate passes. Layer 2's ordinary-call lift never enables real/gen-2
 retry through this gateway.
+
+** Interrupted integrated full gate and slot correction
+At exact =bfdee8827a37e0d8e968025c4d17bf4eb76886a3=, workflow and format
+passed; the full precommit suite was still running when the explicit
+DB-slot hold notice arrived. Codex terminated only his validated gate
+process tree to honor the hold. Exit =143= is *INTERRUPTED*, never a full
+PASS or a completed failing-test verdict. No final Result or later
+Credo/audit/codegen/dev-WAE stages exist for that run. Preserve log
+=codex-c103i-bfdee88-full-gate.log=, SHA256
+=a6db635a8842cfa55c18b4eb56ae2a339ca4e167caa3011f1a123dc80d543b50=.
+It is not to be overwritten or counted as a green gate.
+
+Claude's independent integration reply =m_1792383731882454000_236333e5=
+(2026-10-19T04:22:11Z) conditionally approves =bfdee88=: six source files
+unchanged, range-diff 3x equality, notes-only delta, full gate still
+required. This later overlap/interruption record is documentation only;
+the eventual exact head needs re-sign and exact-head green CI under D-157.
+No further DB run starts until Claude explicitly releases the slot. A new
+full gate is required because this run was interrupted for coordination,
+not a rerun of an unchanged failed test to obtain green. Slice B remains
+at its independent entity/action review, with no B production code.
