@@ -29,7 +29,11 @@
 --     reviewed extension; the reviewed server-file/admin built-ins denied;
 --   * the summary schema's owner, ACL and occupants, the functions' exact
 --     shape, ACL, settings, result type and prosrc SHA-256 (pinned below);
---   * the exact default ACLs naming either role; the extension set.
+--   * the exact default ACLs naming either role; the extension set;
+--   * the exact ACL entries naming either role or on the summary objects,
+--     as full (grantor, grantee, privilege, grantability) tuples, so a
+--     WITH GRANT OPTION widening of an allowed grant is refused; an
+--     owner's own entry is modeled as OWNER, its implicit rights untouched.
 -- It changes nothing and revokes nothing shared. Re-run after install,
 -- after any CREATE OR REPLACE, ALTER, GRANT or REVOKE touching these roles,
 -- the schema or the functions, and after a PostgreSQL major upgrade.
@@ -293,6 +297,103 @@ callable AS (
   JOIN pg_catalog.pg_language l ON l.oid = p.prolang
   WHERE has_function_privilege(r.via, p.oid, 'EXECUTE')
 ),
+-- Every ACL entry (grantor, grantee, privilege, grantability) that names
+-- either role, or sits on schema summary or a summary function, in this
+-- database. An object owner's own entry and authority are spelled OWNER
+-- (the owner itself is pinned by checks 16 and 20); PUBLIC is PUBLIC.
+acl_ent AS (
+  SELECT 'function' AS kind, p.oid::regprocedure::text AS obj, p.proowner AS owner, a.*
+  FROM pg_catalog.pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) AS a
+  UNION ALL
+  SELECT 'schema', n.nspname::text, n.nspowner, a.*
+  FROM pg_catalog.pg_namespace n, aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) AS a
+  UNION ALL
+  SELECT 'database', d.datname::text, d.datdba, a.*
+  FROM pg_catalog.pg_database d, aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) AS a
+  WHERE d.datname = current_database()
+  UNION ALL
+  SELECT 'relation', c.oid::regclass::text, c.relowner, a.*
+  FROM pg_catalog.pg_class c, aclexplode(c.relacl) AS a
+  UNION ALL
+  SELECT 'column', c.oid::regclass::text || '.' || at.attname, c.relowner, a.*
+  FROM pg_catalog.pg_attribute at JOIN pg_catalog.pg_class c ON c.oid = at.attrelid,
+       aclexplode(at.attacl) AS a
+  WHERE at.attacl IS NOT NULL
+  UNION ALL
+  SELECT 'default acl ' || d.defaclobjtype::text || ' in '
+           || CASE WHEN d.defaclnamespace = 0 THEN '(all)' ELSE d.defaclnamespace::regnamespace::text END,
+         pg_catalog.pg_get_userbyid(d.defaclrole), d.defaclrole, a.*
+  FROM pg_catalog.pg_default_acl d, aclexplode(d.defaclacl) AS a
+  UNION ALL
+  SELECT 'large object', m.oid::text, m.lomowner, a.*
+  FROM pg_catalog.pg_largeobject_metadata m, aclexplode(m.lomacl) AS a
+),
+act_acl AS (
+  SELECT kind, obj,
+         CASE WHEN grantor = owner THEN 'OWNER' ELSE pg_catalog.pg_get_userbyid(grantor) END AS grantor,
+         CASE WHEN grantee = 0 THEN 'PUBLIC' WHEN grantee = owner THEN 'OWNER'
+              ELSE pg_catalog.pg_get_userbyid(grantee) END AS grantee,
+         privilege_type AS privilege, CASE WHEN is_grantable THEN 't' ELSE 'f' END AS grantable
+  FROM acl_ent
+  WHERE grantee IN (SELECT oid FROM pg_catalog.pg_roles WHERE rolname IN ('sdr_summary_login', 'sdr_summary_definer'))
+     OR grantor IN (SELECT oid FROM pg_catalog.pg_roles WHERE rolname IN ('sdr_summary_login', 'sdr_summary_definer'))
+     OR (kind = 'schema' AND obj = 'summary') OR (kind = 'function' AND obj LIKE 'summary.%')
+),
+exp_acl(kind, obj, grantor, grantee, privilege, grantable) AS (VALUES
+    ('column', 'public.agent_runs.id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.agent_runs.status', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.audit_events.canonical_bytes', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.audit_events.event_type', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.audit_events.model_invocation_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.audit_events.payload', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.audit_events.subject_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.audit_events.subject_resource', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.audit_events.tenant_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.audit_exports.bundle_path', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.audit_exports.bundle_sha256', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.audit_exports.status', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_allocations.applies_to', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_allocations.attempts', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_allocations.available_from', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_allocations.available_until', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_allocations.grant_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_allocations.key', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_allocations.profile_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_allocations.released_at', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_allocations.tenant_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_grants.expires_at', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_grants.id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_grants.per_utc_day_attempts', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_grants.profile_ids', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_grants.revoked_at', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_grants.starts_at', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_grants.status', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_grants.tenant_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_call_grants.total_attempts', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_invocations.agent_run_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_invocations.id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_invocations.ledger_generation', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_invocations.profile_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_invocations.provider', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_invocations.status', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_invocations.tenant_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_result_releases.disposition', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.model_result_releases.model_invocation_id', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.oban_jobs.queue', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.oban_jobs.state', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('column', 'public.payloads.sha256', 'OWNER', 'sdr_summary_definer', 'SELECT', 'f'),
+    ('database', 'sdr_agent_dev', 'OWNER', 'sdr_summary_login', 'CONNECT', 'f'),
+    ('default acl f in (all)', 'sdr_summary_definer', 'OWNER', 'OWNER', 'EXECUTE', 'f'),
+    ('function', 'summary.g3_inventory_v1()', 'OWNER', 'OWNER', 'EXECUTE', 'f'),
+    ('function', 'summary.g3_inventory_v1()', 'OWNER', 'sdr_summary_login', 'EXECUTE', 'f'),
+    ('function', 'summary.gdemo_drain_v1(text,timestamp with time zone,integer,text[])', 'OWNER', 'OWNER', 'EXECUTE', 'f'),
+    ('function', 'summary.gdemo_drain_v1(text,timestamp with time zone,integer,text[])', 'OWNER', 'sdr_summary_login', 'EXECUTE', 'f'),
+    ('schema', 'public', 'OWNER', 'sdr_summary_definer', 'USAGE', 'f'),
+    ('schema', 'summary', 'OWNER', 'OWNER', 'CREATE', 'f'),
+    ('schema', 'summary', 'OWNER', 'OWNER', 'USAGE', 'f'),
+    ('schema', 'summary', 'OWNER', 'sdr_summary_definer', 'USAGE', 'f'),
+    ('schema', 'summary', 'OWNER', 'sdr_summary_login', 'USAGE', 'f')
+),
 summary_fns AS (
   SELECT p.* FROM pg_catalog.pg_proc p WHERE p.pronamespace = 'summary'::regnamespace
 ),
@@ -492,6 +593,15 @@ c(ord, name, expected, actual) AS (
   UNION ALL
   SELECT 33, 'L extensions other than plpgsql and citext', '0',
          (SELECT count(*)::text FROM pg_catalog.pg_extension e WHERE e.extname NOT IN ('plpgsql', 'citext'))
+  UNION ALL
+  SELECT 34, 'N ACL entries (grantor, grantee, privilege, grantability) not on the reviewed list', '0',
+         (SELECT count(*)::text FROM (SELECT * FROM act_acl EXCEPT SELECT * FROM exp_acl) x)
+  UNION ALL
+  SELECT 35, 'N reviewed ACL entries missing', '0',
+         (SELECT count(*)::text FROM (SELECT * FROM exp_acl EXCEPT SELECT * FROM act_acl) x)
+  UNION ALL
+  SELECT 36, 'N grant options held by either role (WITH GRANT OPTION; ownership excluded)', '0',
+         (SELECT count(*)::text FROM act_acl WHERE grantable = 't' AND grantee <> 'OWNER')
 )
 SELECT string_agg(format('%s (must be %s)|%s%s', name, expected, coalesce(actual, '(null)'),
                          CASE WHEN actual IS DISTINCT FROM expected THEN '|FAILED' ELSE '' END),
