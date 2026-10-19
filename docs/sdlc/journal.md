@@ -973,6 +973,34 @@ unaffected.
 - the 5b decision and the SettingsLive protection gate, before any private settings content, including the offering profile;
 - authorizing the revised G-DEMO attempt.
 
+### Sprint 1, day 8 (Mon Oct 19): main's flaky tests fixed (as of 09:30 MDT)
+
+**Merged, all by Claude under D-157:**
+- **#166** C4-01b, the settings page (`14c2d64`), and **#195** C1-03 slice A (Codex), overnight.
+- **#199** the #197 fix (`0f4fc2a`), **#200** the #198 fix (`791466e`), **#196** the #194 fix (`9110987`), **#141** the C3-01 lead-admission contract (`0d2a64c`) and **#192** the journal (`687f877`).
+- Each merged pinned to Codex's sign-off on its exact head, with green CI on that head and the branch up to date. Every rebase got its own fresh sign-off. #141 was a draft, and was marked ready first (D-159).
+
+**Main's flaky tests:**
+- **#197** (calibration console): two tests ran the command in a process that read the real clock, while the test grant's expiry is fixed at 05:59 UTC. Fixed test-only, with a gated command that checks the frozen clock before it runs.
+- **#198** (reaper): the identified-launch test used a stand-in program that could exit before its lookup.
+  - The fix is a held-handshake fixture.
+  - A repair followed after a mutant left an orphan process. Every test cleanup now journals its proof that the program stopped, and a module-level collector fails visibly on anything unproven.
+  - Proof: three seeds, nine mutants, and the full gate including `mix precommit`.
+- **#194** (restart attestation): the test now awaits admission and attestation on one restarted incarnation.
+- **#201** (demo reset), new on main CI at `9110987`: the reset's count saw 2 other connections where the test held 1.
+  - A metadata-only probe did not reproduce it. It did show autoanalyze visiting the freshly seeded demo database, which the count included.
+  - The cause of the CI failure is not established.
+  - The fix (#202) counts every backend type except exactly `"autovacuum worker"`, the one type a non-forced `DROP DATABASE` asks to exit itself (PostgreSQL 18.6 source). Codex approved it; CI is pending.
+- No test was rerun to get a green.
+
+**C3-02 lead admission:**
+- The plan's facts were refreshed at post-#141 main: no drift.
+- Codex found that the agent's qualification write can supersede a row, so it contends with the planned override on the same unique entry.
+- Plan r5 to r7 make the agent's write lock the lead first, and add scheduled race tests.
+- Codex gave r7 a technical PASS. RED waits on the owner's six decisions and the D0 docs.
+
+**Waiting for the owner:** the G-DEMO attempt-2 sentences and choices, 5b (#156), D-168 (#193), C3-02's Q-O1 to Q-O6, and #29 and #37. All are on the standup page.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -1019,3 +1047,8 @@ says what happened, why, what it cost and what changed.
 | **Oct 18: the G-DEMO procedure never checked that the assignment settings existed.** It assumed **Assign** would check them, but nobody confirmed an offering profile was set, and this build has no settings page. | The prerequisite was described ("Assign checks them itself") rather than verified before the owner's session. | The owner's first-run attempt ended as no run, after about two hours of an attended session. Nothing was charged. | Owner procedures check every input a step consumes before the attended session, not just that a refusal would be safe. |
 | **Oct 18: an unclear conditional step made the owner stop the app.** Step C1 said "if anything has started, stop the app"; the owner read it as an instruction and stopped it. | The conditional was buried in a bullet under a step. | A restart and an extra pre-grant check, both approved by Codex; no grant existed yet. | Stop conditions in owner steps are set apart and worded "only if …". |
 | **Oct 18: a broken mutant run passed every mutant.** The #188 mutation script ran inside the dev shell, where it did not change the file, so all six "mutants" were the unchanged fix. | The script's effect wasn't checked before trusting the result. | None: it was caught before review, because the file didn't match the saved fix, then rerun and disclosed. | Each mutant is applied and confirmed `[mutated]` before its test run. |
+| **Oct 19: an approved diagnostic test failed to compile.** The #198 B1 diagnostic passed a parse-only check but failed at compile time (a nested `&` capture). | Parsing proves syntax only. The file wasn't compiled before its exact hash was approved. | One re-approval round and one spent DB slot. | Transient test files are compiled without a database (`mix run --no-start` with `Code.require_file`) before their hash is submitted. |
+| **Oct 19: a mutant left an orphan test process.** One #198 mutant stopped its owner without ending the stand-in program, which kept running. | The test cleanup tore down its actors without proof that the program had exited. | One Codex-approved, guarded one-off stop of that exact process, with a disclosed gap of about 25 s between its checks and the stop. | The repair: every cleanup journals its proof, never tears down without a receipt, and a collector fails the module on anything unproven. |
+| **Oct 19: the #198 gate skipped `mix precommit` and used `--force`.** The gate ran verify, credo and the audit, and forced the dev compile. | The gate script was carried over unreviewed from #194's. | One extra gate run; Codex caught it. | The gate is `mix precommit` plus the dev compile with warnings as errors, without `--force` unless stale state is shown. |
+| **Oct 19: C3-02's base refresh assumed the agent's qualification write is root-only.** | It was inferred from the one current caller (ScoreLead), not from the action's accepted inputs and existing tests. | Codex review MF1, then plan r5 to r7. | Action contracts are inventoried from their inputs and existing tests, not from today's call sites. |
+| **Oct 19: Claude drafted "main CI is green again" for the owner while main was red.** Main's own run after the #196 merge had failed (#201). | Only each PR's own CI was checked, not main's run after the merge. | None: caught before the standup was posted. | Main's post-merge CI is checked before main's status is reported. |
