@@ -941,8 +941,8 @@ unaffected.
 - #154 and #155 were closed as superseded.
 
 **Layer 2:**
-- **G3 closed (D-162).** The owner ran the inventory. The first run failed with `psql` not on PATH; the query never ran, and the log was kept. The second run, through the dev-shell `psql`, passed. The owner attested that no bundle was ever exported, and chose disposition A, retain.
-- **E3** merged with its full gate at a fixed head (2994 passed), so layer 2's code was done about three days ahead of its forecast.
+- **G3 closed (D-162).** The owner ran the inventory. The first run failed with `psql` not on PATH; the query never ran, and the log was kept. The second run, through the dev-shell `psql`, completed with exit 0 and the end marker. The owner chose disposition A: explicit acceptance, with no repair. It retains the 12 real and 6 Fake candidate `parsed_output` copies (not proven plaintext) and leaves 144 inconsistent-binding and 14 unbound events unresolved. "Never exported" is the owner's attestation, not independent proof.
+- **E3** merged with its full gate at a fixed head (2994 passed), so layer 2's code was done about three days ahead of its forecast (a forecast scenario, not a performance guarantee).
 
 **#188**, a new AdminLiveSwitch flake on #183's CI:
 - **Process:** diagnosed, planned in two rounds, RED in two rounds, then GREEN.
@@ -957,7 +957,7 @@ unaffected.
 **G-DEMO** (D-169 to D-171):
 - **Procedure:** three review rounds, and the run report validated on 28 disposable fixtures.
 - **The grant:** the owner created G-DEMO (3 attempts for b1, a 60-minute window, and the b1/b2/b5 workshop reserve). The workshop allocation was missed in the form and added by one owner-authorized corrective edit, with 0 attempts consumed.
-- **The first run was refused before it started:** assignment needs an offering-profile setting, and this build has no settings page (C4-01b, #166). Nothing was charged.
+- **Assign was refused before any run or job was created:** assignment needs an offering-profile setting, and this build has no settings page (C4-01b, #166). Nothing was charged.
 - **Close-out:** after the window closed, the final check passed and the owner lifted the freeze: **no run**.
 
 **Owner tools:**
