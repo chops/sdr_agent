@@ -9,6 +9,7 @@ defmodule SdrAgent.Scripts.DemoTest do
   # Spawns Mix processes that create and drop a database.
   use ExUnit.Case, async: false
 
+  alias Mix.Tasks.Sdr.Demo.Clients
   alias SdrAgent.Demo.Fixtures
 
   @script Path.expand("../../bin/demo", __DIR__)
@@ -297,20 +298,46 @@ defmodule SdrAgent.Scripts.DemoTest do
     to_string(port)
   end
 
+  # The count bin/demo reset uses (#201): Mix.Tasks.Sdr.Demo.Clients.count/2
+  # on a maintenance-database connection, so the helper has no counting
+  # logic of its own. With the held real client this is also the real driver
+  # boundary check: the task's real query, real rows, decoded without a raise.
   defp await_clients(database, expected, attempts \\ 50) do
     {:ok, conn} = Postgrex.start_link(Keyword.put(repo_connection(), :database, "postgres"))
 
-    %{rows: [[count]]} =
-      Postgrex.query!(conn, "SELECT count(*) FROM pg_stat_activity WHERE datname = $1", [
-        database
-      ])
+    outcome =
+      try do
+        case Clients.count(conn, database) do
+          ^expected -> :ok
+          count when attempts == 0 -> {:flunk, count, backend_types(conn, database)}
+          _count -> :retry
+        end
+      after
+        GenServer.stop(conn)
+      end
 
-    GenServer.stop(conn)
+    case outcome do
+      :ok ->
+        :ok
 
-    cond do
-      count == expected -> :ok
-      attempts == 0 -> flunk("#{database} has #{count} connections, expected #{expected}")
-      true -> Process.sleep(100) && await_clients(database, expected, attempts - 1)
+      :retry ->
+        Process.sleep(100)
+        await_clients(database, expected, attempts - 1)
+
+      {:flunk, count, types} ->
+        flunk(
+          "#{database} has #{count} blocking connections, expected #{expected} " <>
+            "(backend types, read after the count: #{inspect(types)})"
+        )
     end
+  end
+
+  # Per-type counts for the failure message only: a later observation, not
+  # the snapshot the count was taken from.
+  defp backend_types(conn, database) do
+    conn
+    |> Postgrex.query!(Clients.query(), [database])
+    |> Map.fetch!(:rows)
+    |> Enum.frequencies_by(fn [type] -> type end)
   end
 end
