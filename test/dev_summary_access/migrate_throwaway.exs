@@ -47,4 +47,13 @@ end
 if seen != sysid, do: raise("REFUSED: server identity is not the manifest's")
 
 Ecto.Migrator.run(repo, :up, all: true, log: false)
-IO.puts("MIGRATED #{length(Ecto.Migrator.migrations(repo))} migrations")
+migrations = Ecto.Migrator.migrations(repo)
+pending = Enum.reject(migrations, fn {status, _version, _name} -> status == :up end)
+repo.stop()
+
+if pending != [] do
+  raise "REFUSED: #{length(pending)} migration(s) not up"
+end
+
+# The success marker throwaway-cluster.sh requires.
+IO.puts("MIGRATED #{length(migrations)} migrations, all up")
