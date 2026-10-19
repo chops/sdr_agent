@@ -110,6 +110,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
   alias SdrAgent.CalibrationConsole.ProcessProbe
   alias SdrAgent.CalibrationConsole.Prompt
   alias SdrAgent.Clock
+  alias SdrAgent.Test.GatedCommand
   alias SdrAgent.Test.PinnedCLI
 
   @moduletag :tmp_dir
@@ -788,7 +789,6 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
   # A command and its private server killed mid-call: the call stays sent,
   # with no settlement, and the record stays launch_pending.
   defp product!(ctx, :still_sent, _opts) do
-    test = self()
     LaunchProbe.put(:identity_absent)
     pids = Path.join(ctx.tmp, "slow-cli-pids")
     # Registered before any work; its cleanup signals only children whose
@@ -796,25 +796,26 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     children = identity_registry!(&signal_exact(&1, "-KILL"))
     opts = put_in(product_opts(ctx, :pending_sent)[:server][:command], slow_cli!(ctx, pids))
 
+    # #197: one deadline covers the clock report and the sent call.
+    deadline = GatedCommand.deadline(15_000)
+
     command =
-      spawn(fn ->
-        # #197: the command reports the clock it runs on before it runs.
-        send(test, {:command_clock, Clock.source(), Clock.utc_now()})
-        send(test, {:still_sent, Calibrate.run(@profile, opts)})
-      end)
+      GatedCommand.start!(:still_sent, fn -> Calibrate.run(@profile, opts) end)
+      |> GatedCommand.open!(@now, deadline)
 
-    assert_receive {:command_clock, source, now}, 5_000
+    # Children are registered as they appear, so a failure on any later
+    # path still stops exactly them.
+    assert GatedCommand.await!(command, deadline, fn ->
+             register_live!(children, pids)
+             match?([%{status: :sent}], calibration_invocations(ctx))
+           end)
 
-    assert {source, now} == {:test_fixed, @now},
-           "#197: the spawned command must run on the test's frozen clock, got #{inspect({source, now})}"
-
-    assert eventually(fn -> match?([%{status: :sent}], calibration_invocations(ctx)) end, 15_000)
     # The stand-in CLI is waiting on its own sleep: both are recorded, and
     # each one's start identity is read while it is known alive.
-    assert eventually(fn -> length(recorded_pids(pids)) == 2 end, 15_000)
+    assert eventually(fn -> register_live!(children, pids) == 2 end, 15_000)
     Agent.update(children, fn _ -> identities!(pids) end)
-    servers = command |> linked() |> Enum.filter(&claude_cli?/1)
-    Process.exit(command, :kill)
+    servers = command.pid |> linked() |> Enum.filter(&claude_cli?/1)
+    Process.exit(command.pid, :kill)
     Enum.each(servers, &Process.exit(&1, :kill))
 
     # Only those exact children are stopped, and actually gone before any
@@ -1445,6 +1446,21 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
       {:ok, text} -> String.split(text, "\n", trim: true)
       {:error, :enoent} -> []
     end
+  end
+
+  # #197: adds each recorded child that is readable now to the registry,
+  # with the start identity read while it is alive; returns how many
+  # children are recorded.
+  defp register_live!(children, file) do
+    recorded = recorded_pids(file)
+
+    for text <- recorded,
+        pid = String.to_integer(text),
+        {:ok, identity} <- [ProcessProbe.start_identity(pid)] do
+      Agent.update(children, &Map.put_new(&1, pid, identity))
+    end
+
+    length(recorded)
   end
 
   # Each recorded child's pid with its start identity (ProcessProbe).
