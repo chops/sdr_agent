@@ -651,16 +651,22 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     else
       {:incomplete, reason} ->
         {:incomplete, reason, %{state: get(reg), lease: Reaper.lease(name)}}
+
+      {:incomplete, :no_exit_receipt, details} ->
+        {:incomplete, :no_exit_receipt,
+         Map.merge(details, %{state: get(reg), lease: Reaper.lease(name)})}
     end
   end
 
   # The on_exit subject attempt: skipped when the body already resolved it.
-  defp subject_on_exit!(ctx) do
+  # A test-held relay gate is released first (after its first snapshot).
+  defp subject_on_exit!(%{registry: reg} = ctx) do
     with {:ok, %{events: events}} <- read_journal(ctx.entry),
          {:resolved, _proof} <- last_outcome(events) do
       :ok
     else
-      _unresolved -> raise_unless_clean!(cleanup(ctx))
+      _unresolved ->
+        raise_unless_clean!(cleanup(ctx, on_first_snapshot: fn -> release_gate(get(reg)) end))
     end
   end
 
@@ -685,26 +691,69 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
   end
 
   # Before any teardown, while the reaper still forwards its port: an
-  # unarmed launch's exit status (asking a held child to EXIT first). The
-  # `on_first_snapshot` hook runs after `state` was read.
+  # unarmed launch goes through the control phase. The `on_first_snapshot`
+  # hook runs after `state` was read.
   defp early_proof(reg, state, opts) do
     Keyword.get(opts, :on_first_snapshot, fn -> :ok end).()
 
     cond do
       not Map.get(state, :open_called?, false) -> {:ok, :no_launch}
       Map.get(state, :armed?, false) -> {:ok, :pending}
-      valid_receipt?(state) -> {:ok, :exit_receipt}
-      true -> await_receipt(reg, state, Keyword.get(opts, :control_window, 5_000))
+      true -> control_phase(reg, Keyword.get(opts, :control_window, 5_000))
     end
   end
 
-  defp await_receipt(reg, state, window) do
-    ask_exit(Map.get(state, :port))
-
-    if wait_until(fn -> valid_receipt?(get(reg)) end, window),
-      do: {:ok, :exit_receipt},
-      else: {:ok, :none}
+  # The unarmed control phase, before any teardown, for at most the window
+  # (5 000 ms; only :63f's cleanup option changes it). Each iteration reads a
+  # fresh snapshot: this entry's single port's own exit status ends it; EXIT
+  # goes at most once to each port the relay learned (never the recovery
+  # route's); an unknown port is waited for; a dead owner or reaper ends the
+  # route. No receipt: no teardown, an eof-hold FIFO preloaded with one line
+  # (a control action, not a proof), and the actors, lease and entry kept.
+  defp control_phase(reg, window) do
+    case control_loop(reg, now() + window) do
+      :exit_receipt -> {:ok, :exit_receipt}
+      ending -> no_exit_receipt(get(reg), ending)
+    end
   end
+
+  defp control_loop(reg, deadline) do
+    state = get(reg)
+    port = Map.get(state, :port)
+
+    cond do
+      valid_receipt?(state) ->
+        :exit_receipt
+
+      not (alive?(Map.get(state, :owner)) and alive?(Map.get(state, :reaper))) ->
+        :route_lost
+
+      now() >= deadline ->
+        :window_elapsed
+
+      is_port(port) and Map.get(state, :exit_sent_to) != port ->
+        ask_exit(port)
+        put(reg, exit_sent_to: port)
+        control_loop(reg, deadline)
+
+      true ->
+        Process.sleep(10)
+        control_loop(reg, deadline)
+    end
+  end
+
+  defp no_exit_receipt(state, ending) do
+    {:incomplete, :no_exit_receipt,
+     %{
+       port_known?: is_port(Map.get(state, :port)),
+       exit_sent_to: Map.get(state, :exit_sent_to),
+       route_lost?: ending == :route_lost,
+       fifo_preloaded?: preload_held_child(state)
+     }}
+  end
+
+  defp preload_held_child(%{fifo: fifo}) when is_binary(fifo), do: release_fifo(fifo) == :ok
+  defp preload_held_child(_state), do: false
 
   defp ask_exit(port) when is_port(port) do
     if Port.info(port), do: Port.command(port, "EXIT\n")
@@ -713,12 +762,10 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
     ArgumentError -> :ok
   end
 
-  defp ask_exit(_port), do: :ok
-
-  # This entry's single port, and only it, reported an exit status.
+  # This entry's single port, and only it, reported `{:exit_status, status}`.
   defp valid_receipt?(state) do
     case {Map.get(state, :exit_receipt), Map.get(state, :port), Map.get(state, :ports_seen)} do
-      {{port, _status}, port, [port]} when is_port(port) -> true
+      {{port, status}, port, [port]} when is_port(port) and is_integer(status) -> true
       _other -> false
     end
   end
@@ -1020,7 +1067,7 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
   defp helper_records(helpers),
     do:
       Map.new(helpers, fn {key, h} ->
-        {key, Map.take(h, [:path, :args, :state, :os_pid_report])}
+        {key, Map.take(h, [:path, :args, :port, :state, :os_pid_report])}
       end)
 
   defp assert_retained_receipt!(journal, port) do
