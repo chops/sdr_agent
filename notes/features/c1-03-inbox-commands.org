@@ -163,9 +163,12 @@ configuration, dependencies or recovery authority to obtain a pass.
 No new architecture change is introduced by integration: the existing A
 runtime/data-flow diagram updates are preserved. Module docs were reviewed
 with the original A implementation; no new module or action is added here.
-Slice B's refined entity/action contract is separately UNREVIEWED on
-=c1-03-b-contract=; no B module planning, RED or code is authorized until
-that gate passes. Layer 2's ordinary-call lift never enables real/gen-2
+At that integration checkpoint slice B's refined entity/action contract
+was separately UNREVIEWED on =c1-03-b-contract=. It subsequently received
+Claude's PASS at =fa98fc9= (answer =f3477b8f=) and conditional module-plan
+approval (answer =c5d5b610=); the recorded plan at =87dafab= includes the
+required stored-stamp-removal residual. No B RED or production code exists
+at this checkpoint. Layer 2's ordinary-call lift never enables real/gen-2
 retry through this gateway.
 
 ** Interrupted integrated full gate and slot correction
@@ -173,7 +176,9 @@ At exact =bfdee8827a37e0d8e968025c4d17bf4eb76886a3=, workflow and format
 passed; the full precommit suite was still running when the explicit
 DB-slot hold notice arrived. Codex terminated only his validated gate
 process tree to honor the hold. Exit =143= is *INTERRUPTED*, never a full
-PASS or a completed failing-test verdict. No final Result or later
+PASS or a completed failing-test verdict. SIGTERM produced a partial
+=Result: 614 passed, 1 skipped, 4 excluded= followed by shutdown/on-exit
+errors; this is not the full suite result. No =GATE_COMPLETE= or later
 Credo/audit/codegen/dev-WAE stages exist for that run. Preserve log
 =codex-c103i-bfdee88-full-gate.log=, SHA256
 =a6db635a8842cfa55c18b4eb56ae2a339ca4e167caa3011f1a123dc80d543b50=.
@@ -186,5 +191,5 @@ required. This later overlap/interruption record is documentation only;
 the eventual exact head needs re-sign and exact-head green CI under D-157.
 No further DB run starts until Claude explicitly releases the slot. A new
 full gate is required because this run was interrupted for coordination,
-not a rerun of an unchanged failed test to obtain green. Slice B remains
-at its independent entity/action review, with no B production code.
+not a rerun of an unchanged failed test to obtain green. Slice B's later
+entity PASS/module-plan checkpoint above adds no B production code.
