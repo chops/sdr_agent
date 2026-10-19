@@ -1,0 +1,198 @@
+#+TITLE: C1-03 B: source retry, bounded preview and refuse-only workers
+#+DATE: 2026-10-18
+
+* Summary and authority
+Enable only exact displayed, admin-session, known-Fake recovery through
+the existing source-owned retry transaction. Add a bounded final-page
+advisory preview and a refuse-only worker binding. No real-provider retry,
+H1 UI, cleanup/release, grants, owner database access or spend authority.
+
+Entity Model trigger: yes
+Reason: existing retry action/read and worker job-args contracts change.
+The full table is in =c1-03-b-retry-contract.org=. Independent Claude
+entity/action *PASS* at =fa98fc968882ab96d6945afeac8efb2c85a4e506=,
+answer =m_1792383991233482000_f3477b8f=, 2026-10-19T04:26:31Z,
+correlated to =m_1792383966360669208_e8f33134=. No new resource, column,
+role, immutable command marker or real recovery authority.
+
+Module plan sent in consultation =m_1792384258864882916_d423ae61=.
+Claude's *conditional APPROVE*, answer
+=m_1792384289145083000_c5d5b610=, 2026-10-19T04:31:29Z, requires the
+stamp-absence residual below to be written before RED. His ruling permits
+that clarification without another plan round. The four important test
+and diagram obligations are incorporated below. Approval is for staged
+RED, not GREEN, story completion or merge. A's independent full-gate and
+exact-head-CI conditions remain outstanding.
+
+* Required clarification: stamp absence and threat boundary
+There is NO independent append-only fact identifying C1-created jobs in
+this design. A persisted job whose binding was removed cannot be
+distinguished from an unmarked legacy job by re-reading that same row.
+Do not claim otherwise or add a new marker implicitly during GREEN.
+
+The command accepts no job/provider fields; no C1 or operator-facing
+application API can omit, remove or rewrite its source-owned stamp.
+Tests must prove the producer cannot commit an unstamped C1 job, including
+rollback on failed stamping. Workers compare passed job data with the
+actual persisted job. Omitting/changing the stamp only in a perform
+argument must not evade the persisted stamp. Malformed persisted stamps
+refuse. However, trusted backend or database-level edits that REMOVE the
+stored stamp altogether are outside this guarantee: the resulting job is
+indistinguishable from legacy and may retain legacy behavior. This is an
+explicit residual, not coverage by the absent-binding test.
+
+Choosing an independent durable C1 marker would require a separately
+reviewed contract delta. It is not part of this slice.
+
+* Affected modules
+** Fixed gateway and unchanged version-1 identities
+=lib/sdr_agent/inbox.ex= (=command/2=, =page=, =failure_item=): dispatch
+retry to fixed =SDR.inbox_retry/2=. Preview only AFTER sorting/limit, with
+the final rendered page's Failure ids, never all producer candidates.
+Merge fixed action capabilities without changing membership, cursor,
+totals or Failure identity/freshness bytes. Non-admins get
+=actor_not_permitted= and no richer preview reads. A's commands unchanged.
+
+=lib/sdr_agent/inbox/binding.ex= and =inbox/command.ex=: reuse existing
+Failure HMAC inputs and exact =confirm: true= request. No token version,
+new request option or caller-supplied run/actor/tenant/provider.
+
+** Source retry transaction
+=lib/sdr_agent/sdr.ex=: additive fixed =inbox_retry/2= and
+=preview_inbox_retries/2= public interfaces.
+=lib/sdr_agent/sdr/retry.ex=: new =inbox/2= joins existing =locked= path;
+legacy =run/2= and its authority/guards remain unchanged.
+
+An authorized Failure peek derives the prior run, not a lock acquired out
+of order. Lock Lead UPDATE -> Campaign SHARE -> prior run UPDATE ->
+Operation -> exact attention Failure -> original job -> first audit head.
+Reauthenticate the stored session after lock waits. Require exact live
+attention Failure, tenant/subject/Operation pairing and displayed v1 HMAC
+before any write. Preserve all child/depth/job/trigger/source/snapshot
+guards and existing ResolveAttention behavior. No replacement Failure.
+
+C1-only eligibility requires nonempty known-terminal Fake history, any
+generation, plus current selected runtime and normally resolved model
+Fake. Reserved/sent/unknown, including terminal sent and E1-normalized
+unknown, blocks =unknown_outcome=. Non-Fake or unavailable proof blocks
+=guard_not_available=. Child/recovery changes are
+=stale/recovery_guard=; foreign/unreadable/nonexistent references are the
+same =not_found=. Unexpected errors remain content-free =producer_error=.
+
+Assignment =enqueue= currently creates job -> Operation -> run. Keep
+that order, then stamp the still-uncommitted job using installed
+=Oban.update_job/2= before outer transaction commit. Force-stamp-failure
+test must prove same-Repo-transaction rollback of job, Operation, run and
+success audit. Reply stamps at insert after creating its run. No new
+Ash id argument, provider override or preallocated run id. Legacy retry
+producers remain unmarked and unchanged.
+
+** Refuse-only worker guard
+New =lib/sdr_agent/sdr/retry_binding.ex=: shared exact stamp/actual-binding
+validation and closed constant =:retry_binding_refused=.
+=sdr/agent_worker.ex= and =sdr/reply_worker.ex=: enforce that same guard
+on Oban perform and =AgentWorker.run/2= before provider parsing, Runner
+or model reservation. Recover actual persisted job/run/Operation/parent/
+tenant/trigger before comparing stamp fields. Never mutate a run selected
+by the stamp. Reject malformed/extra/forged/mismatched values and model or
+responder overrides. Selected runtime AND normally resolved model must
+both be Fake, with parent still known-Fake. Never select a provider from
+the marker. See the stored-marker-removal residual above.
+
+Bound queued refusal uses existing start/fail actions and atomic terminal
+writes: =provider_error= with fixed detail =retry_binding_refused=, new
+run's own critical =run_stopped= Failure, linked as assignment Operation's
+same cause; reply has no Operation. Return fixed error with max_attempts1,
+no invocation/reservation/charge. Original resolved Failure stays resolved.
+Duplicate terminal perform must not open another Failure. An unbindable
+job mutates no guessed run/Operation. Failure to record terminal state
+must not be reported as successful terminalization.
+
+** Bounded metadata preview
+New =lib/sdr_agent/sdr/retry_preview.ex=: current token + unique 0..50
+Failure UUIDs, fixed safe result map. One monotonic total ceiling 2500ms
+starts BEFORE session authentication and includes pool wait, auth and all
+queries. Each statement <=2000ms AND remaining time. Cancellation joins
+the reader and leaves no queued retry/work. Use ReadDeadline's existing
+cancellation/SET LOCAL pattern; no speculative shared-helper refactor.
+
+Source-owned batch metadata helpers exposed through Operations, Agents,
+Sales, Outreach and Audit public APIs, with per-id actor/tenant policy
+checks. SDR owns its Oban metadata query. Never add raw Repo access to
+Inbox or web. Select only necessary fixed metadata/boolean facts, not
+payload bodies or raw job args. Fixed-count set-based batches over input
+and derived ids, ancestry max3, grouped batch existence facts instead of
+per-row queries/aggregates; bounded returned rows, overflow refuses.
+No domain-row/audit-head locks or writes. Unprovable safe metadata means
+blocked, not permission to load content. Whole-preview failure blocks
+all; one-row failure blocks that row. Neither changes page or metrics.
+
+* Implementation steps
+1. RED through public command/preview APIs and both worker entry paths;
+   independently verify intended failures before any production changes.
+2. Add exact source retry adapter and atomic job stamping, preserving
+   existing non-C1 retry behavior and source-owned writes.
+3. Add shared refuse-only guard and existing-action refusal lifecycle.
+4. Add bounded source metadata facts and preview orchestration.
+5. Integrate only final-page capabilities, preserving v1 identities.
+6. Focused/full/privacy review, runtime diagram update, exact-head code
+   review and CI. Never interpret source success as spend or launch permit.
+
+* Required RED inventory
+- [ ] Assignment AND reply known-terminal gen2 Fake positive through real
+  domain APIs; one child/job, original ResolveAttention/history preserved.
+- [ ] Reserved/sent/terminal-sent/unknown/E1-unknown, real-gen2, empty and
+  unreadable history all block without source writes.
+- [ ] Stale/resolved/mismatched Failure; current session revoked/demoted
+  during independently proven waits at named lock points.
+- [ ] Concurrent duplicate, changed child/live-job/lifecycle, pg_locks +
+  pg_blocking_pids wait-chain barriers and bounded joined contenders.
+- [ ] BOTH workers: forged, malformed, extra and mismatched stamp; absent
+  or changed passed stamp vs persisted stamped job; exact parent/run/
+  tenant/trigger binding; post-enqueue Fake->ClaudeCLI; overrides refuse
+  before Runner/calls/reservation; legacy unmarked behavior unchanged.
+- [ ] Assignment atomic stamp failure rolls back job+Operation+run+audit;
+  reply producer cannot commit an unstamped job. Stored-stamp deletion
+  is NOT claimed to be detected without an independent marker.
+- [ ] Same guard on AgentWorker.run/2 and perform/1; new run/Operation/job/
+  Failure dispositions, original Failure preserved, duplicate terminal
+  perform opens no new cause, unbindable job changes no guessed subject.
+- [ ] Preview 0/1/50, >50/duplicates/foreign ids, only final-page ids and
+  role gating; no per-row query growth, content selection, locks or audit.
+- [ ] Pool/statement/total deadlines measured from entry including auth;
+  cancellation leaves no queued work; whole/row failure blocks correctly.
+- [ ] Content/session/raw-error canaries absent in outcomes, logs, spans,
+  audits and persisted job errors; invocation/grant/lease history unchanged.
+- [ ] Diagnostic mutants omit session/unknown/stamp/perform guards or
+  weaken preview bounds; each must fail at its subject, not only API guards.
+
+All subjects use real domain actions; synthetic setup only. Existing A
+retry-blocked expectations will change deliberately during B RED, not be
+weakened opportunistically during GREEN. Initial missing-API assertions
+must be disclosed and followed by production-path mutant evidence.
+
+* Risks and architecture
+Risks: assignment stamp ordering/transaction participation, concurrent
+terminal workers, policy-safe metadata joins, cancellation and latency.
+Default is blocked whenever proof is unavailable, never fallback to old
+retry. Any new authority or plan gap stops for review.
+
+No ADR required: independent ruling places this inside accepted ADR-0015
+and ADR-0004. Refuse-only narrows behavior; it adds no provider-selection
+path or real-provider recovery exception. No resource/domain/supervision
+changes planned. Runtime data-flow diagram update required for conditional
+worker refusal and preview API; do not depict preview as admission.
+
+* Verification and current checkpoint
+Use repository Nix environment, test-only isolated partition, unset owner
+provider/store variables, +S 4:4. Hold all DB runs while Claude owns the
+#166 gate slot; no claim that separate partitions avoid pool contention.
+Before tests check explicit release, tools and service readiness.
+Focused tests cover Inbox, source retry/races and worker/provider suites.
+Full gate: workflow, format, mix precommit, mix credo, mix hex.audit,
+ash.codegen --check and dev warnings-as-errors. Raw ExUnit Results and
+process exits are authoritative, not the known old-format parser's zero.
+
+No B RED tests or production behavior exist at this checkpoint. The plan
+approval and residual are recorded; RED verification and GREEN approval
+remain separate mandatory stops. No claim that A/B or C1-03 is complete.
