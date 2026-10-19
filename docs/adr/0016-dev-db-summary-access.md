@@ -52,6 +52,17 @@ execute two reviewed functions in a dedicated `summary` schema.
 | `summary.g3_inventory_v1()` | `g3-inventory.sql`, sections 1–5 | The same section names and counts |
 | `summary.gdemo_drain_v1(phase text, start_at timestamptz, b1_attempts int, workshop_buckets text[])` | `claude-gdemo-drain.sql` (draft 3) | The same DRAIN, CONTEXT, AUTHORITY and CHECK rows and verdict |
 
+`gdemo_drain_v1` implements **only** the reviewed draft-3 G-DEMO contract:
+exactly two allocations, `b1` and `workshop`.
+
+- It is not the drain for any later G-DEMO attempt or procedure. Any other
+  grant shape is unexpected authority and gives `CHECK = STOP`. That
+  includes the proposed rehearsal or third-allocation shape, and the
+  harness tests that case.
+- If a procedure adopts a new shape, it needs a new function version (for
+  example `_v2`) with its own review, install and attestation record.
+- Code review of v1 implies no authority for any attempt.
+
 Both functions return one fixed row type:
 
 ```
@@ -126,8 +137,8 @@ Files:
 - `optional-revoke-temp.sql`: one of the options under Open owner choices.
 - `test/dev_summary_access/`: run against a throwaway cluster only.
   - `adversarial.sh`, `seed.sql` and `canaries.sql`: the adversarial test.
-  - `guard.sh` and `guard-test.sh`: the throwaway guard and its hermetic
-    test.
+  - `guard.sh`, `guard-test.sh` and `lifecycle-test.sh`: the throwaway
+    guard and its hermetic tests.
   - `throwaway-cluster.sh` and `migrate_throwaway.exs`: the disposable
     cluster and its schema.
 
@@ -306,8 +317,16 @@ installation or agent use:
    grants or SECURITY DEFINER functions. "Catalog metadata only" is
    unproven there.
    - Options:
-     - (a) preferred: an owner `pg_hba.conf` line that limits
-       `sdr_summary_login` to database `sdr_agent_dev`;
+     - (a) preferred: owner `pg_hba.conf` rules that deny the login every
+       other database. An allow line for `sdr_agent_dev` alone is not a
+       deny boundary: pg_hba is first-match, and the cluster's broader
+       `host all all ... trust` rule would still match other databases.
+       The rules need an allow line for `sdr_summary_login` on
+       `sdr_agent_dev`, followed by a `reject` line for
+       `sdr_summary_login` on `all`. Both must come before any broader
+       rule that could match the login, for every address it can use
+       (127.0.0.1 and ::1). An owner-run connection test then confirms
+       the denial, without reading data;
      - (b) REVOKE CONNECT from PUBLIC on the other databases, a shared
        change;
      - (c) an owner-run inventory of each other connectable database,
@@ -372,7 +391,7 @@ Known properties, not choices:
    must exit 0, and the last line must be `END-OF-SUMMARY-INSTALL`.
 4. Run `attest.sql` and keep its full output. Acceptance requires all of:
    - psql exit 0;
-   - the line `ATTEST PASS: 33 of 33 checks hold`;
+   - the line `ATTEST PASS: 36 of 36 checks hold`;
    - no row marked `FAILED`;
    - the last line `END-OF-SUMMARY-ATTEST`.
 
@@ -396,6 +415,11 @@ Known properties, not choices:
    - each function's owner, flags, settings, result type, ACL and pinned
      prosrc SHA-256;
    - the exact default ACLs naming either role;
+   - the exact 53 ACL entries naming either role or on the summary
+     objects, as full (grantor, grantee, privilege, grantability) tuples.
+     An object owner's own entry is modeled as `OWNER` and its implicit
+     rights are not revoked. So a `WITH GRANT OPTION` widening of an
+     allowed grant, or a delegation by either role, is refused;
    - the extension set: `plpgsql` and `citext`.
 5. Compare the `G summary functions` `functiondef_sha256` values with the
    reviewed values below. That hash depends on the server's formatting.
@@ -442,6 +466,32 @@ to the app.
   - trust on 127.0.0.1 only, no Unix socket, a free port in 49152–65535;
   - a manifest recording the physical PGDATA, the port and the
     `pg_controldata` system identifier.
+- Every other lifecycle action (`start`, `stop`, `destroy`, `schema`,
+  `env`) first runs `guard_offline` on the root. That works for a stopped
+  or a running cluster, and runs before any pg_ctl action, connection or
+  removal. It requires:
+  - the private temporary root and its creation marker;
+  - a regular, private, five-line manifest with the exact version and
+    root;
+  - a canonical allowed port;
+  - PGDATA exactly the physical, non-symlink `ROOT/pgdata`, mode 700;
+  - the control file's system identifier.
+
+  Then:
+  - `start` requires the stopped state: no pid file, no listener (a
+    failing `lsof` refuses), and the configured endpoint exactly the
+    manifest's, with no `postgresql.auto.conf` override or include. It
+    launches with that endpoint on the command line, then checks the
+    running and server identity.
+  - `stop` checks the running identity (pid file, live PID, sole
+    listener) and the server identity before signalling.
+  - `destroy` does the same if the cluster is running, then re-validates
+    the same root, stopped, immediately before `rm`.
+  - `schema` exits nonzero unless three things hold: the migration command
+    succeeds, it prints `MIGRATED N migrations, all up` for every
+    repository migration, and `schema_migrations` equals the repository's
+    set with the nine interface tables present. Only then does it print
+    `SCHEMA-READY`.
 - Before its first connection, `adversarial.sh` refuses (exit 2, no psql
   call) unless all of these hold:
   - every `PG*`/`PSQL*` variable can be unset. The scrub does not use
@@ -455,8 +505,19 @@ to the app.
   - `postmaster.pid` names that PGDATA, port and 127.0.0.1;
   - the postmaster PID is the only TCP listener on the port.
 - It then compares `system_identifier`, `data_directory` and `port` from
-  the server, and re-checks them before every destructive step. Every
-  connection passes all libpq parameters explicitly.
+  the server. It re-checks them at each stage boundary:
+  - before the initial uninstall and install;
+  - before the grant-option mutations;
+  - before the clean uninstall;
+  - before seeding;
+  - before the canaries;
+  - before the optional TEMP apply.
+
+  It does not re-check before each individual statement. Between checks,
+  every connection still names the same explicit endpoint, so drift would
+  need another server to bind that exact port in the interval. No
+  zero-width check-to-use window is claimed. Every connection passes all
+  libpq parameters explicitly.
 - `guard-test.sh` stubs `psql`, `pg_controldata` and `lsof` on PATH, and
   drives the real harness entry point through 51 cases:
   - 5520 and 4120 in every spelling (`05520`, `005520`, `+5520`,
@@ -472,17 +533,44 @@ to the app.
   hostile `PGSERVICE`/`PGHOST`/`PGPORT=5520`/`PSQLRC` values shows that
   none reaches psql. The test passes under bash 5.3, Nix's non-interactive
   bash 5.3 and macOS bash 3.2.
+- `lifecycle-test.sh` stubs `pg_ctl`, `psql`, `pg_controldata`, `lsof`,
+  `nix` and `rm` on PATH, and drives the real `throwaway-cluster.sh`
+  through 131 cases. Each of these refuses every action with zero `pg_ctl`
+  start/stop, `rm`, `nix` and `psql` calls:
+  - a manifest whose PGDATA is another cluster's physical data directory;
+  - a symlinked root, manifest or PGDATA;
+  - 5520, `05520`, `+5520`, 4120 and other bad ports;
+  - a changed system identifier;
+  - a non-temporary root;
+  - manifest version, line, mode, marker or root drift;
+  - PID, listener and pid-file mismatches;
+  - endpoint configuration drift;
+  - a failing `lsof`.
+
+  A server-identity mismatch stops after one identity query. For `start`,
+  the server it just launched cannot be checked before launch. Positive
+  controls show that start (stopped), stop (running), destroy (stopped and
+  running), schema and env act on exactly the validated target. The schema
+  cases refuse each of these, with no `SCHEMA-READY`, even though the
+  later relation count would succeed:
+  - a migration that exits 1;
+  - a missing or short success marker;
+  - a partial or extra `schema_migrations`;
+  - a missing interface table.
 
 ### The adversarial test (`adversarial.sh`)
 
 The app schema comes from the repository's own migrations
 (`throwaway-cluster.sh schema`, 25 migrations, 56 `public` relations),
-with synthetic rows. The test connects as the real `sdr_summary_login`
+with synthetic rows. This is author evidence about the repository's
+schema. It is not proof that it equals the real dev schema: installed-state
+attestation and the owner decisions still come before any agent use. The test connects as the real `sdr_summary_login`
 login, not only through `SET ROLE` from a superuser. It checks:
 
 - **Exact output.** Function output equals the reviewed psql scripts for
   G3 and for drain pre and post, undrained and drained, plus a wrong-term
-  post. The only difference is vocabulary mapping.
+  post. The only difference is vocabulary mapping. A three-allocation
+  G-DEMO shape gives `STOP`.
 - **Pinned references.** A FULL verdict requires `ADV_REF_DIR` with the
   reference scripts at their pinned SHA-256 (`602e9429…f250`,
   `908c2829…c41e`, recorded in full in the script). Without them the run
@@ -508,12 +596,26 @@ login, not only through `SET ROLE` from a superuser. It checks:
   - an extra EXECUTE grant;
   - a login-owned large object;
   - an object in `summary`;
-  - a grant to the login in another database.
+  - a grant to the login in another database;
+  - grant options, each refused as soon as the option exists, before any
+    delegation:
+    - EXECUTE WITH GRANT OPTION to the login, shown to permit real
+      delegation to PUBLIC, which is refused too;
+    - a WITH GRANT OPTION widening of the allowed definer column grant
+      `agent_runs.status`, shown to permit a real delegated read by the
+      login;
+    - schema USAGE and database CONNECT with grant option;
+    - a default ACL with a grant option.
+
+    Each is then restored with `REVOKE GRANT OPTION ... CASCADE`, which
+    removes the delegated grants and keeps the ordinary ones, and a clean
+    attest passes.
 - **Uninstall drift.** Each of these refuses atomically, leaving roles,
   functions and large objects intact:
   - a login large object;
   - a table in `summary`;
   - an extra definer column grant;
+  - an EXECUTE grant option held by the login;
   - a definer membership.
 
   Then a clean uninstall and a reinstall reproduce the same hashes.
