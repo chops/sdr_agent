@@ -112,9 +112,10 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
 
   @tag lease: :proof_gated
   test "a late pid lookup still finds the held launch identified", %{name: name} = ctx do
-    {owner, reaper, result} = launch_identified(ctx, [], os_pid: &late_lookup/1)
+    {owner, reaper, result} = launch_identified(ctx, [], os_pid: late_lookup(ctx.registry))
 
     assert {:ok, port, os_pid} = result
+    assert Map.get(get(ctx.registry), :late_lookup) == :observed
     identity = live_before!(ctx, port, os_pid)
     stop_subject!(ctx, owner, reaper)
     assert Reaper.lease(name) == nil
@@ -289,12 +290,19 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
   defp observation({:ok, _other}, _identity), do: :gone
   defp observation(_error, _identity), do: :unverified
 
-  # Runs inside the reaper (the port owner): waits, bounded, for a complete
-  # line in the reaper's own mailbox (peek only), then performs exactly the
-  # lookup of reaper.ex:366 and returns its result unchanged.
-  defp late_lookup(port) do
-    await_line(port, now() + 2_000)
-    Port.info(port, :os_pid)
+  # The `:os_pid` lookup for :63c. It runs inside the reaper (the port
+  # owner): it waits, bounded, for a complete line in the reaper's own
+  # mailbox (peek only), records whether that line was `:observed` or the
+  # wait hit `:timeout` (the test asserts `:observed`, so the lookup really
+  # came after READY), then performs exactly the lookup of reaper.ex:366 and
+  # returns its result unchanged. The 2_000 ms bound is a new bound for this
+  # new state; it stays below the existing 5_000 ms open deadline, so the
+  # open still answers in time, and no existing deadline is enlarged.
+  defp late_lookup(reg) do
+    fn port ->
+      put(reg, late_lookup: await_line(port, now() + 2_000))
+      Port.info(port, :os_pid)
+    end
   end
 
   defp await_line(port, deadline) do
