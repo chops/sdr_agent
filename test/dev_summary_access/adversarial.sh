@@ -129,6 +129,17 @@ mutant() {
   attest_ok "after reverting $name"
 }
 
+# attest_refused LABEL EXPECTED-FAILED-CHECK: attest exits 3, ATTEST REFUSED,
+# the named check FAILED, no END marker.
+attest_refused() {
+  local out rc failed
+  out=$(su -f "$SQL/attest.sql" 2>&1); rc=$?
+  failed=$(grep '|FAILED$' <<<"$out" | cut -d'|' -f1 | sed 's/ (must be.*//' | tr '\n' ';')
+  if [ "$rc" = 3 ] && grep -q '^ATTEST REFUSED' <<<"$out" && ! grep -q END-OF-SUMMARY-ATTEST <<<"$out" \
+     && grep -qF "$2" <<<"$failed"; then pass "attest refuses $1 (exit 3; FAILED: $failed)"
+  else fail "attest did not refuse $1: exit=$rc failed=$failed"; fi
+}
+
 norm_fn() { awk -F'|' '$4!="target" && $4!="END" {o=$4; for(i=5;i<=NF;i++) if($i!="") o=o "|" $i; print o}' | sort; }
 # Reference psql output: drop markers and blanks, join non-empty fields, and
 # map the one seeded out-of-vocabulary event type as the functions do.
@@ -236,6 +247,40 @@ mutant "an object added to schema summary" "F objects in schema summary" \
   "CREATE TABLE summary.adv_t (i int)" "DROP TABLE summary.adv_t"
 mutant "a grant to the login in another database" "M dependency records" \
   "CREATE TABLE public.adv_other (i int); GRANT SELECT ON public.adv_other TO sdr_summary_login" "DROP TABLE public.adv_other" su_pg
+# Grant options (R2-2): pinned as full ACL tuples, so attest refuses as soon
+# as an option exists, before any delegation; each is shown to be a real
+# delegation route on this disposable fixture, then restored.
+log "-- 1b' grant options"
+reverify
+RO="SET default_transaction_read_only = off"
+su -c "GRANT EXECUTE ON FUNCTION summary.g3_inventory_v1() TO sdr_summary_login WITH GRANT OPTION" >/dev/null
+attest_refused "EXECUTE WITH GRANT OPTION to the login, before any delegation" "N ACL entries"
+lg -c "$RO" -c "GRANT EXECUTE ON FUNCTION summary.g3_inventory_v1() TO PUBLIC" >/dev/null 2>&1
+[ "$(su -c "select has_function_privilege('public', 'summary.g3_inventory_v1()', 'EXECUTE')")" = t ] \
+  && pass "that grant option is a real route: the login delegated EXECUTE to PUBLIC" || fail "grant-option delegation by the login did not take effect"
+attest_refused "the login's delegation of EXECUTE to PUBLIC" "N ACL entries"
+su -c "REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION summary.g3_inventory_v1() FROM sdr_summary_login CASCADE" >/dev/null
+[ "$(su -c "select has_function_privilege('public', 'summary.g3_inventory_v1()', 'EXECUTE'), has_function_privilege('sdr_summary_login', 'summary.g3_inventory_v1()', 'EXECUTE')")" = "f|t" ] \
+  && pass "restored: grant option and PUBLIC's delegated grant revoked (CASCADE), the login keeps ordinary EXECUTE" || fail "grant option restore"
+attest_ok "after restoring the login's ordinary EXECUTE"
+su -c "GRANT SELECT (status) ON public.agent_runs TO sdr_summary_definer WITH GRANT OPTION" >/dev/null
+attest_refused "a grant-option widening of the allowed definer column grant agent_runs.status" "N grant options held"
+su -c "SET ROLE sdr_summary_definer" -c "GRANT SELECT (status) ON public.agent_runs TO sdr_summary_login" >/dev/null 2>&1
+out=$(lg -c "select count(status) from public.agent_runs" 2>&1)
+grep -qE '^[0-9]+$' <<<"$out" && pass "that grant option is a real route: the definer delegated agent_runs.status and the login read it" || fail "definer column delegation: $(head -1 <<<"$out")"
+su -c "REVOKE GRANT OPTION FOR SELECT (status) ON public.agent_runs FROM sdr_summary_definer CASCADE" >/dev/null
+out=$(lg -c "select count(status) from public.agent_runs" 2>&1)
+grep -q 'ERROR:  42501:' <<<"$out" && pass "restored: the definer's ordinary column grant kept, the login's delegated read revoked (42501)" || fail "column restore: $(head -1 <<<"$out")"
+attest_ok "after restoring the definer's ordinary column grant"
+mutant "summary schema USAGE WITH GRANT OPTION to the login" "N grant options held" \
+  "GRANT USAGE ON SCHEMA summary TO sdr_summary_login WITH GRANT OPTION" \
+  "REVOKE GRANT OPTION FOR USAGE ON SCHEMA summary FROM sdr_summary_login CASCADE"
+mutant "database CONNECT WITH GRANT OPTION to the login" "N grant options held" \
+  "GRANT CONNECT ON DATABASE sdr_agent_dev TO sdr_summary_login WITH GRANT OPTION" \
+  "REVOKE GRANT OPTION FOR CONNECT ON DATABASE sdr_agent_dev FROM sdr_summary_login CASCADE"
+mutant "a definer default ACL granting itself a grant option" "N ACL entries" \
+  "ALTER DEFAULT PRIVILEGES FOR ROLE sdr_summary_definer GRANT EXECUTE ON FUNCTIONS TO sdr_summary_definer WITH GRANT OPTION" \
+  "ALTER DEFAULT PRIVILEGES FOR ROLE sdr_summary_definer REVOKE GRANT OPTION FOR EXECUTE ON FUNCTIONS FROM sdr_summary_definer"
 [ "$(fn_inventory | cut -d'|' -f2,11,12)" = "$HASHES1" ] && pass "function hashes unchanged after all mutations and reverts" || fail "function hashes drifted"
 
 # --- 1c. Uninstall validates everything before dropping anything. ---
@@ -255,6 +300,9 @@ drift "a large object owned by the login" "REFUSED: 1 dependency record" "SELECT
 drift "a table in schema summary" "REFUSED: schema summary holds 1 object" "CREATE TABLE summary.adv_t (i int)" "DROP TABLE summary.adv_t"
 drift "an extra definer column grant" "REFUSED: 1 dependency record" "GRANT SELECT (content) ON public.payloads TO sdr_summary_definer" \
   "REVOKE SELECT (content) ON public.payloads FROM sdr_summary_definer"
+drift "an EXECUTE grant option held by the login" "REFUSED: 1 ACL entr" \
+  "GRANT EXECUTE ON FUNCTION summary.g3_inventory_v1() TO sdr_summary_login WITH GRANT OPTION" \
+  "REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION summary.g3_inventory_v1() FROM sdr_summary_login CASCADE"
 drift "a definer membership" "REFUSED: a summary role has 1 role membership" "GRANT pg_read_all_data TO sdr_summary_definer" \
   "REVOKE pg_read_all_data FROM sdr_summary_definer"
 reverify
@@ -295,6 +343,14 @@ v=$(lgc -c "$POST" | field CHECK 5); [ "$v" = GO ] && pass "drained post with re
 out=$(lgc -c "$POST_WRONG")
 v=$(field CHECK 5 <<<"$out"); d=$(awk -F'|' '$4 ~ /^AUTHORITY 4d/ {print $10}' <<<"$out")
 [ "$v" = "STOP: unexpected authority" ] && [ "$d" = 0 ] && pass "wrong b1 term is STOP (4d=0)" || fail "wrong-term verdict: $v 4d=$d"
+# v1 implements only the reviewed two-allocation draft-3 G-DEMO contract: a
+# third allocation (the later rehearsal shape) is not that grant, so it is
+# unexpected authority and STOP, never GO.
+su -c "SET session_replication_role = replica" -c "select testseed.ins('model_call_allocations', '{\"grant_id\":\"00000000-0000-7000-8000-0000000000b1\",\"tenant_id\":\"00000000-0000-7000-8000-00000000000f\",\"key\":\"rehearsal\",\"applies_to\":\"{b1}\",\"attempts\":\"1\",\"available_from\":\"2026-10-19 02:20:00\"}')" >/dev/null
+out=$(lgc -c "$POST")
+v=$(field CHECK 5 <<<"$out"); d=$(awk -F'|' '$4 ~ /^AUTHORITY 4d/ {print $10}' <<<"$out")
+[ "$v" = "STOP: unexpected authority" ] && [ "$d" = 0 ] && pass "three-allocation G-DEMO shape (added rehearsal) is refused: STOP, 4d=0" || fail "three-allocation shape: $v 4d=$d"
+su -c "SET session_replication_role = replica" -c "delete from public.model_call_allocations where grant_id = '00000000-0000-7000-8000-0000000000b1' and key = 'rehearsal'" >/dev/null
 v=$(lgc -c "$G3" | field END 5); [ "$v" = complete ] && pass "g3 END is complete" || fail "g3 END: $v"
 row=$(lgc -c "$G3" | head -1)
 [ "$(cut -d'|' -f1,3,4 <<<"$row")" = "sdr_agent_dev|summary.g3_inventory_v1|target" ] && grep -qE '^[^|]*\|20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z\|' <<<"$row" \
