@@ -38,7 +38,7 @@ defmodule SdrAgent.AI.ClaudeCLIReaperUnidentifiedTest do
 
   # #198: the identified-launch subject and its held-handshake fixture
   # (READY, PING/PONG, EXIT; stdin EOF ends it unless a FIFO holds it).
-  @identified {:spawn_executable, "/usr/bin/true"}
+  @identified {:spawn_executable, "/bin/sh"}
   @fixture Path.expand("../../support/held_handshake.sh", __DIR__)
 
   setup tags do
