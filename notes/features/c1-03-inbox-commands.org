@@ -125,3 +125,43 @@ wrapper and =data-flow.md= are updated. No new domain/resource, process,
 supervision or integration boundary; no new ADR beyond accepted ADR-0015.
 Independent exact-head GREEN review remains required. Slice B and H1 gates
 remain unchanged.
+
+* Integration checkpoint (2026-10-18, overnight continuation)
+Claude conditionally APPROVED slice A at =0d46aad= (answer =f5cf8233=),
+subject to the author full gate and his independent focused run. His
+subsequent independent result was 287/287 at that head (answer =a321abca=).
+The old author full gate was NOT green: =codex-c103g-stable-precommit.log=
+ended 2936/2937, with the one CountPoolTest setup =:noproc= failure tracked
+as #175. That fix and #178/#188 have since landed on main. The earlier
+failed gate is retained, never relabeled or rerun on an unchanged head to
+obtain green.
+
+The original reviewed and RED branches remain unchanged. Integration
+branch =c1-03-a-integration= starts at main =967a45e= and cherry-picks the
+three approved A commits; =a7c1420e= has range-diff 3x equality. The six A
+production files are byte-identical to the previously reviewed head. This
+worktree now holds the integration branch; the owner's checkout remains
+untouched.
+
+At =a7c1420e= the focused command (Inbox, Outreach and existing retry-run /
+retry-race suites, seed 0) passed *302 tests*, exit 0, zero PostgreSQL
+=53300= occurrences. Exact raw log:
+=codex-c103i-a7c1420-focused.log= in private handoff tmp. The legacy runner's
+parsed count is still zero; its raw Result and exit are authoritative.
+Tests use only =sdr_agent_test_codex_c103i= with =ERL_FLAGS='+S 4:4'=,
+ordinary provider/store/DB URL overrides unset. DB slot was claimed from
+Claude before the run.
+
+This documentation checkpoint precedes the integrated full gate; it does
+NOT claim that gate or final-head review has passed. The full gate and
+static/codegen/dev compilation evidence will be correlated to its exact
+head. Canonical verification will not change policy, assertions, source
+configuration, dependencies or recovery authority to obtain a pass.
+
+No new architecture change is introduced by integration: the existing A
+runtime/data-flow diagram updates are preserved. Module docs were reviewed
+with the original A implementation; no new module or action is added here.
+Slice B's refined entity/action contract is separately UNREVIEWED on
+=c1-03-b-contract=; no B module planning, RED or code is authorized until
+that gate passes. Layer 2's ordinary-call lift never enables real/gen-2
+retry through this gateway.
