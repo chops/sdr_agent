@@ -800,7 +800,9 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     deadline = GatedCommand.deadline(15_000)
 
     command =
-      GatedCommand.start!(:still_sent, fn -> Calibrate.run(@profile, opts) end)
+      GatedCommand.start!(:still_sent, fn -> Calibrate.run(@profile, opts) end,
+        prelude: fn -> Clock.freeze(@now) end
+      )
       |> GatedCommand.open!(@now, deadline)
 
     # Children are registered as they appear, so a failure on any later

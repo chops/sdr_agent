@@ -49,7 +49,14 @@ defmodule SdrAgent.Test.GatedCommandTest do
     test = self()
 
     command =
-      GatedCommand.start!(:result, fn -> send(test, :reached) && :done end, frozen())
+      GatedCommand.start!(
+        :result,
+        fn ->
+          send(test, :reached)
+          :done
+        end,
+        frozen()
+      )
       |> GatedCommand.open!(@now, deadline)
 
     assert_receive :reached, 1_000
