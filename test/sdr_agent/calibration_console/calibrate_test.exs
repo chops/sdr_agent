@@ -107,6 +107,7 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   alias SdrAgent.CalibrationConsole.Prompt
   alias SdrAgent.Clock
   alias SdrAgent.Operations.Failure
+  alias SdrAgent.Test.GatedCommand
   alias SdrAgent.Test.PinnedCLI
   alias SdrAgent.Test.WitnessRoot
 
@@ -691,27 +692,19 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
   ## Extras (8.14.7)
 
   test "command death while the VM lives: another recoverer refuses :owner_alive", ctx do
-    test = self()
     cli = shell_cli!(ctx, 5)
+    # #197: one deadline covers the clock report and the launch.
+    deadline = GatedCommand.deadline(10_000)
 
     command =
-      spawn(fn ->
-        # #197: the command reports the clock it runs on before it runs.
-        send(test, {:command_clock, Clock.source(), Clock.utc_now()})
-        send(test, {:result, run(ctx, server: server(ctx, cli))})
-      end)
+      GatedCommand.start!(:result, fn -> run(ctx, server: server(ctx, cli)) end)
+      |> GatedCommand.open!(@now, deadline)
 
-    assert_receive {:command_clock, source, now}, 5_000
+    assert GatedCommand.await!(command, deadline, fn ->
+             match?({:ok, %{state: "launched"}}, LaunchRecord.read(ctx.root))
+           end)
 
-    assert {source, now} == {:test_fixed, @now},
-           "#197: the spawned command must run on the test's frozen clock, got #{inspect({source, now})}"
-
-    assert eventually(
-             fn -> match?({:ok, %{state: "launched"}}, LaunchRecord.read(ctx.root)) end,
-             10_000
-           )
-
-    Process.exit(command, :kill)
+    Process.exit(command.pid, :kill)
 
     assert LaunchRecord.recover(ctx.root, probe: ProcessProbe) == {:error, :owner_alive}
   end
@@ -1468,13 +1461,5 @@ defmodule SdrAgent.CalibrationConsole.CalibrateTest do
     Authority.table()
     |> :ets.tab2list()
     |> Enum.count(&match?({_key, _binding, :unconsumed}, &1))
-  end
-
-  defp eventually(check, within) do
-    until = System.monotonic_time(:millisecond) + within
-
-    Stream.repeatedly(fn -> check.() || (Process.sleep(25) && false) end)
-    |> Enum.find(fn ok -> ok or System.monotonic_time(:millisecond) > until end)
-    |> Kernel.==(true)
   end
 end
