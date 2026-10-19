@@ -50,7 +50,7 @@ chmod 755 "$stubs"/*
 # mkroot DIR: a cluster root exactly as throwaway-cluster.sh lays it out.
 mkroot() {
   local r=$1
-  mkdir -p "$r/pgdata"; chmod 700 "$r"
+  mkdir -p "$r/pgdata"; chmod 700 "$r" "$r/pgdata"
   printf '%s' "$r" > "$r/.d168-throwaway-root"
   printf 'd168_throwaway_manifest=1\nroot=%s\npgdata=%s\nport=%s\nsystem_identifier=%s\n' \
     "$r" "$r/pgdata" "${2:-$PORT}" "$SYSID" > "$r/manifest"
