@@ -795,7 +795,18 @@ defmodule SdrAgent.CalibrationConsole.CalibrateRecoverTest do
     # recorded start identity is still theirs.
     children = identity_registry!(&signal_exact(&1, "-KILL"))
     opts = put_in(product_opts(ctx, :pending_sent)[:server][:command], slow_cli!(ctx, pids))
-    command = spawn(fn -> send(test, {:still_sent, Calibrate.run(@profile, opts)}) end)
+
+    command =
+      spawn(fn ->
+        # #197: the command reports the clock it runs on before it runs.
+        send(test, {:command_clock, Clock.source(), Clock.utc_now()})
+        send(test, {:still_sent, Calibrate.run(@profile, opts)})
+      end)
+
+    assert_receive {:command_clock, source, now}, 5_000
+
+    assert {source, now} == {:test_fixed, @now},
+           "#197: the spawned command must run on the test's frozen clock, got #{inspect({source, now})}"
 
     assert eventually(fn -> match?([%{status: :sent}], calibration_invocations(ctx)) end, 15_000)
     # The stand-in CLI is waiting on its own sleep: both are recorded, and
