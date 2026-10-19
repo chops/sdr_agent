@@ -973,12 +973,13 @@ unaffected.
 - the 5b decision and the SettingsLive protection gate, before any private settings content, including the offering profile;
 - authorizing the revised G-DEMO attempt.
 
-### Sprint 1, day 8 (Mon Oct 19): main's flaky tests fixed (as of 09:30 MDT)
+### Sprint 1, day 8 (Mon Oct 19): three flaky tests fixed, one in review (as of 09:30 MDT)
 
-**Merged, all by Claude under D-157:**
-- **#166** C4-01b, the settings page (`14c2d64`), and **#195** C1-03 slice A (Codex), overnight.
-- **#199** the #197 fix (`0f4fc2a`), **#200** the #198 fix (`791466e`), **#196** the #194 fix (`9110987`), **#141** the C3-01 lead-admission contract (`0d2a64c`) and **#192** the journal (`687f877`).
-- Each merged pinned to Codex's sign-off on its exact head, with green CI on that head and the branch up to date. Every rebase got its own fresh sign-off. #141 was a draft, and was marked ready first (D-159).
+**Merged under D-157:**
+- Overnight: **#166** C4-01b, the settings page (`14c2d64`), merged by Claude; **#195** C1-03 slice A, written by Codex, approved by Claude at its exact head and merged by Codex.
+- Today, by Claude:
+  - **#199** the #197 fix (`0f4fc2a`), **#200** the #198 fix (`791466e`), **#196** the #194 fix (`9110987`), **#141** the C3-01 lead-admission contract (`0d2a64c`) and **#192** the journal (`687f877`).
+- Each of Claude's merges was pinned to Codex's sign-off on its exact head, with green CI on that head and the branch up to date. Every rebase got its own fresh sign-off. #141 was a draft, and was marked ready first (D-159).
 
 **Main's flaky tests:**
 - **#197** (calibration console): two tests ran the command in a process that read the real clock, while the test grant's expiry is fixed at 05:59 UTC. Fixed test-only, with a gated command that checks the frozen clock before it runs.
@@ -988,7 +989,7 @@ unaffected.
   - Proof: three seeds, nine mutants, and the full gate including `mix precommit`.
 - **#194** (restart attestation): the test now awaits admission and attestation on one restarted incarnation.
 - **#201** (demo reset), new on main CI at `9110987`: the reset's count saw 2 other connections where the test held 1.
-  - A metadata-only probe did not reproduce it. It did show autoanalyze visiting the freshly seeded demo database, which the count included.
+  - A metadata-only probe did not reproduce it. The database's statistics show autoanalyze visited the freshly seeded demo database at 14:27:36, after the last probe run ended at 14:26:49. No worker row and no overcount were captured. By the PostgreSQL source, the old all-backend count would include such a worker if one were connected at count time.
   - The cause of the CI failure is not established.
   - The fix (#202) counts every backend type except exactly `"autovacuum worker"`, the one type a non-forced `DROP DATABASE` asks to exit itself (PostgreSQL 18.6 source). Codex approved it; CI is pending.
 - No test was rerun to get a green.
@@ -997,7 +998,7 @@ unaffected.
 - The plan's facts were refreshed at post-#141 main: no drift.
 - Codex found that the agent's qualification write can supersede a row, so it contends with the planned override on the same unique entry.
 - Plan r5 to r7 make the agent's write lock the lead first, and add scheduled race tests.
-- Codex gave r7 a technical PASS. RED waits on the owner's six decisions and the D0 docs.
+- Codex gave r7 a technical PASS. RED waits on the owner's six decisions, the D0 docs, and a final entity and module review PASS after both.
 
 **Waiting for the owner:** the G-DEMO attempt-2 sentences and choices, 5b (#156), D-168 (#193), C3-02's Q-O1 to Q-O6, and #29 and #37. All are on the standup page.
 
