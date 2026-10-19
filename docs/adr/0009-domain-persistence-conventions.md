@@ -206,6 +206,78 @@ Changing a kind, the id derivation, the order or the lock domain needs a
 further reviewed amendment and a green concurrency suite (independent
 connections, both commit orders, waits shown on advisory locks).
 
+#### C3-02 amendment (2026-10-19): application transactions, key-set additions and company identity
+
+**Status: ACCEPTED.** The owner accepted this amendment on 2026-10-19
+(D-176), through a pre-acceptance conditional on Codex's exact-text PASS of
+the draft `claude-c302-adr0009-amendment-draft.md` (sha256
+`149b3c7f0cb115d73d07600b3e71467b08b348e0d6654bfa798736ea3056c371`); Codex's
+review `c1847c86` gave that PASS. Apart from this status paragraph, the text
+below is exactly the text that PASS covered. The owner decided on 2026-10-19
+(D-174, Q-O3) that this is a new amendment, not a clarification of the C3
+amendment. No code depends on it yet; C3-02 implements it. Source: C3-02
+module plan (`claude-c302-plan-r8.md`, sections 2.2-2.7).
+
+The C3 amendment's items 2-3 speak of "the transaction", and its item 1
+gives one domain normalization. Implementing them showed three gaps. Under
+the Ecto SQL sandbox an application transaction is a savepoint, so the
+backend can still hold keys of an earlier, released one. Three writers
+change an identity value in place and so must serialize on both the old
+and the new value. And stripping exactly one leading `www.` is not
+idempotent (`www.www.acme.test` strips to `www.acme.test`, which strips
+again to `acme.test`), so "normalize first" does not by itself make every
+path agree on a company's identity. This amendment adds:
+
+1. **Application and physical transaction lifetime.** In items 2-3,
+   "transaction" means the outermost *application* transaction: the
+   outermost `SdrAgent.Repo` transaction a process opens (including those
+   Ash opens for an action, `Audit.transaction/1` and raw
+   `Repo.transaction/2`). In production it is the physical transaction;
+   under the Ecto SQL sandbox it is a savepoint, and advisory locks of an
+   earlier, released application transaction may still be held by the same
+   backend. Physically held keys are read from `pg_locks`, the authority
+   for ownership. Each application transaction gets a fresh scope token at
+   its root; its single pass records the complete deduplicated id set
+   (possibly empty), bound to that token and the backend, in a
+   transaction-local setting written after the last lock, so a rollback
+   that releases the keys also reverts the record. A later request is
+   allowed only when the whole recorded set is physically held and the
+   request is inside it; otherwise `LateAcquisition` (outside the set) or a
+   refusal (inconsistent). A failed acquisition ends the right to pass in
+   that application transaction. A recorded pass reverted by a rollback may
+   be followed by a fresh pass; detection relies on the convention that
+   `IdentityKeys` is the only writer of the setting. Keys left by an
+   earlier application transaction on the same backend neither count as
+   this transaction's pass nor block it. The same code runs in every
+   environment; lock-order and race proofs use independent physical
+   connections.
+2. **Key-set additions to item 4.** Lead `:seed` keys its account's
+   canonical domain. Account `:update` keys the old and the new canonical
+   domain. Contact `:change_email` keys the old email, the new email and
+   the new email's domain. Each of these writers re-checks the keyed value
+   on the locked row and refuses a stale one with a typed conflict,
+   requesting no further key.
+3. **Normalization by purpose (item 1).**
+   - Key and index canonicalization is `strip`, exactly as written in item
+     1 (`sdr_canonical_domain`: one trailing dot and one leading `www.`
+     removed). A domain key id hashes the stripped key input exactly once.
+   - Company identity additionally requires the stripped value `c` to be a
+     valid fixed point (`company(c) == {:ok, c}`: a valid host of at least
+     two labels with no leading `www.` and no trailing dot, unchanged by
+     a second normalization). It therefore refuses repeated `www.`. That
+     refusal at account and admission input, and the additive migration
+     stopping with counts only when an existing account's indexed value is
+     not such a fixed point, are the owner's separate decision D-174 Q-O6
+     (accepted), recorded here by reference only.
+   - Key inputs keep their purpose's existing validity. Suppression values
+     and contact emails are not restricted by the company rule; they stay
+     keyable as today.
+
+Changing the transaction lifetime, a key set or a normalization purpose
+needs a further reviewed amendment and a green concurrency suite
+(independent connections, both commit orders, waits shown on advisory
+locks).
+
 ## Justification
 
 UUIDv7 costs nothing (built into the pinned Ash) and gives ordered, local
