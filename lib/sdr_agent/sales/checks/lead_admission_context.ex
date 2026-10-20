@@ -18,10 +18,17 @@ defmodule SdrAgent.Sales.Checks.LeadAdmissionContext do
   def describe(_opts), do: "write made by the lead admission orchestrator"
 
   @impl true
-  def match?(_actor, %{subject: %{context: context}}, _opts) when is_map(context),
-    do: Map.get(context, @marker) == true
-
+  def match?(_actor, %{subject: %{context: context}}, _opts), do: context?(context)
   def match?(_actor, _context, _opts), do: false
+
+  @doc """
+  True when `context` (an action's context map) carries the marker: the
+  write is made inside the admission, whose identity pass already holds
+  its keys (C3-02 G4; `SdrAgent.Audit.Changes.IdentityKeyLock`
+  `held_when:`).
+  """
+  def context?(context) when is_map(context), do: Map.get(context, @marker) == true
+  def context?(_context), do: false
 
   @doc "The context map the admission orchestrator attaches to its writes."
   def context, do: %{@marker => true}

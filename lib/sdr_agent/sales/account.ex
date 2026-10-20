@@ -8,8 +8,9 @@ defmodule SdrAgent.Sales.Account do
   `sdr_canonical_domain(domain)`, the calculation `canonical_domain`),
   `website_url`, `industry`, `employee_count` (≥ 0), `geography`,
   `crm_provider` (`:fake_crm`) + `crm_external_id` (unique per tenant and
-  provider when present), `source` (`:fixture`, `:crm`, `:manual`),
-  `status`.
+  provider when present), `source` (`:fixture`, `:crm`, `:manual`, and,
+  for an account a lead admission creates, `:csv`, `:hubspot`,
+  `:agent_found`; C3-02), `status`.
 
   Lifecycle (`transitions/0`): active → archived (T); archived accounts are
   not edited and get no new leads (`Lead :create` checks).
@@ -21,7 +22,10 @@ defmodule SdrAgent.Sales.Account do
   domain's identity key first; `:update` with a domain change takes the old
   and the new domain's keys first, re-checks the old domain on the locked
   row (a typed conflict on `:domain` otherwise) and refuses a rename to a
-  suppressed company domain (D-174 Q-O1 = A, A.4). Existing rows keep their
+  suppressed company domain (D-174 Q-O1 = A, A.4). Inside the lead
+  admission (the `SdrAgent.Sales.Checks.LeadAdmissionContext` marker)
+  `:create` takes no key: it requires the admission's pass to hold it
+  (C3-02 G4). Existing rows keep their
   stored domain; the unique expression index
   `(tenant_id, sdr_canonical_domain(domain))` dedupes them with new input.
 
@@ -40,6 +44,7 @@ defmodule SdrAgent.Sales.Account do
   alias SdrAgent.Audit.Changes.Transition
   alias SdrAgent.Audit.Checks
   alias SdrAgent.Sales.Changes
+  alias SdrAgent.Sales.Checks.LeadAdmissionContext
   alias SdrAgent.Sales.Validations
 
   @statuses [:active, :archived]
@@ -113,7 +118,12 @@ defmodule SdrAgent.Sales.Account do
       change Changes.NormalizeDomain
       validate {Validations.Reserved, attribute: :domain, kind: :domain}
       change SdrAgent.Audit.Changes.SetTenant
-      change {IdentityKeyLock, mode: :entry, keys: {Changes.AccountDomainIdentity, :entry_keys}}
+
+      change {IdentityKeyLock,
+              mode: :entry,
+              held_when: LeadAdmissionContext,
+              keys: {Changes.AccountDomainIdentity, :entry_keys}}
+
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.account.created", category: :domain_change}
     end
@@ -189,7 +199,7 @@ defmodule SdrAgent.Sales.Account do
 
     attribute :source, :atom do
       allow_nil? false
-      constraints one_of: [:fixture, :crm, :manual]
+      constraints one_of: [:fixture, :crm, :manual, :csv, :hubspot, :agent_found]
       public? true
     end
 

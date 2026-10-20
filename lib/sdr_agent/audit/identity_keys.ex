@@ -4,8 +4,11 @@ defmodule SdrAgent.Audit.IdentityKeys do
   section 2): the only way this project takes a transaction advisory lock.
 
   **Ids.** `id(tenant_id, kind, raw)` is the key id of a raw key input:
-  `K_domain(raw) = H("domain", tenant, strip(key_value(:domain, raw)))`
-  and `K_email(raw) = H("email", tenant, key_value(:email, raw))`, where
+  `K_domain(raw) = H("domain", tenant, strip(key_value(:domain, raw)))`,
+  `K_email(raw) = H("email", tenant, key_value(:email, raw))` and
+  (C3-02 G4) `K_admission-ref(ref) = H("admission-ref", tenant, ref)`, the
+  exact admission `source_ref` (validated by the admission before its
+  pass; no trim, case or host normalization here), where
   `H(kind, tenant, bytes)` is the first 8 bytes of
   `sha256("sdr-identity-key/1\\0" <> kind <> "\\0" <> tenant_id <> "\\0" <>
   bytes)` read as a signed 64-bit integer (`Normalize`, section 2.7).
@@ -44,8 +47,10 @@ defmodule SdrAgent.Audit.IdentityKeys do
 
   Test-seam builds only (`:claude_cli_test_seams`, config/test.exs):
   `IdentityKeys.TestFaults.with_fault/2` raises at a chosen acquisition
-  point (section 2.5 fault cases); builds without the seam do not compile
-  that branch.
+  point (section 2.5 fault cases), `record_preimages/1` records every `H`
+  preimage computed in the calling process and `park_after_pass/2` parks
+  the first pass that publishes its record (`IdentityKeys.TestFaults`);
+  builds without the seam do not compile those branches.
   """
 
   alias SdrAgent.Audit.IdentityKeys.AcquisitionFailed
@@ -60,7 +65,7 @@ defmodule SdrAgent.Audit.IdentityKeys do
 
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
-  @kinds [:domain, :email]
+  @kinds [:domain, :email, :"admission-ref"]
 
   # Section 2.4: the one state query, no lock clause.
   @state_sql """
@@ -80,19 +85,33 @@ defmodule SdrAgent.Audit.IdentityKeys do
   @lock_sql "SELECT pg_advisory_xact_lock($1::bigint)"
   @publish_sql "SELECT set_config('sdr.identity_pass', $1, true)"
 
-  @type kind :: :domain | :email
+  @type kind :: :domain | :email | :"admission-ref"
   @type key :: {kind(), String.t()}
 
   @doc "The key id of a raw key input of `kind` for `tenant_id` (see the moduledoc)."
   @spec id(String.t(), kind(), String.t()) :: integer()
-  def id(tenant_id, :domain, raw) when is_binary(tenant_id),
-    do: digest("domain", tenant_id, Normalize.strip(Normalize.key_value(:domain, raw)))
+  def id(tenant_id, kind, raw), do: id(:id, tenant_id, kind, raw)
 
-  def id(tenant_id, :email, raw) when is_binary(tenant_id),
-    do: digest("email", tenant_id, Normalize.key_value(:email, raw))
+  # `op` is the entry that computes the id (`:id`, `:pass`, `:require_held`),
+  # for the test-build preimage record only.
+  defp id(op, tenant_id, kind, raw) when is_binary(tenant_id) and kind in @kinds do
+    bytes = preimage(kind, raw)
+    record!(op, kind, tenant_id, bytes)
+    digest(Atom.to_string(kind), tenant_id, bytes)
+  end
 
-  def id(_tenant_id, kind, _raw) when kind in @kinds, do: raise(InvalidKeyValue, kind: kind)
-  def id(_tenant_id, _kind, _raw), do: raise(InvalidKeyValue, kind: :unknown)
+  defp id(_op, _tenant_id, kind, _raw) when kind in @kinds, do: raise(InvalidKeyValue, kind: kind)
+  defp id(_op, _tenant_id, _kind, _raw), do: raise(InvalidKeyValue, kind: :unknown)
+
+  # The exact bytes `H` receives for a raw key input of `kind`.
+  defp preimage(:domain, raw), do: Normalize.strip(Normalize.key_value(:domain, raw))
+  defp preimage(:email, raw), do: Normalize.key_value(:email, raw)
+
+  defp preimage(:"admission-ref", raw) when is_binary(raw) and raw != "" do
+    if String.valid?(raw), do: raw, else: raise(InvalidKeyValue, kind: :"admission-ref")
+  end
+
+  defp preimage(kind, _raw), do: raise(InvalidKeyValue, kind: kind)
 
   @doc """
   The application scope's one pass over `keys` (`[{kind, raw}]`, possibly
@@ -110,7 +129,7 @@ defmodule SdrAgent.Audit.IdentityKeys do
 
   defp request(mode, tenant_id, keys) when is_list(keys) do
     scope = scope!()
-    requested = MapSet.new(keys, &key_id(tenant_id, &1))
+    requested = MapSet.new(keys, &key_id(mode, tenant_id, &1))
     {setting, backend, held} = state()
 
     case Decision.decide(scope, setting, backend, held, requested) do
@@ -134,8 +153,8 @@ defmodule SdrAgent.Audit.IdentityKeys do
     end
   end
 
-  defp key_id(tenant_id, {kind, raw}), do: id(tenant_id, kind, raw)
-  defp key_id(_tenant_id, _malformed), do: raise(InvalidKeyValue, kind: :unknown)
+  defp key_id(mode, tenant_id, {kind, raw}), do: id(mode, tenant_id, kind, raw)
+  defp key_id(_mode, _tenant_id, _malformed), do: raise(InvalidKeyValue, kind: :unknown)
 
   defp state do
     %{rows: [[setting, backend, held]]} = Repo.query!(@state_sql, [])
@@ -168,6 +187,7 @@ defmodule SdrAgent.Audit.IdentityKeys do
     end
 
     Scope.put_state(token, {:passed, prior, planned})
+    parked!(requested)
     :ok
   end
 
@@ -187,8 +207,15 @@ defmodule SdrAgent.Audit.IdentityKeys do
   end
 
   if @test_seams do
-    defp fault!(point), do: SdrAgent.Audit.IdentityKeys.TestFaults.trip!(point)
+    @test_faults SdrAgent.Audit.IdentityKeys.TestFaults
+
+    defp fault!(point), do: @test_faults.trip!(point)
+    defp record!(op, kind, tenant_id, bytes), do: @test_faults.record!(op, kind, tenant_id, bytes)
+    # After publication and the passed state, outside the acquisition rescue.
+    defp parked!(requested), do: @test_faults.parked!(Enum.sort(requested))
   else
     defp fault!(_point), do: :ok
+    defp record!(_op, _kind, _tenant_id, _bytes), do: :ok
+    defp parked!(_requested), do: :ok
   end
 end

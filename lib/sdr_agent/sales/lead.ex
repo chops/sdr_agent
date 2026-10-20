@@ -14,8 +14,14 @@ defmodule SdrAgent.Sales.Lead do
   `Sales.LeadAdmission` the lead was admitted by; composite FK to the
   admission's tenant, company and person) and `referred_from_lead_id` (the
   original lead of a referral, at the same tenant and company), both
-  nullable, unique when set and accepted by no action. `referred` is a
-  terminal status (no action produces it yet; C3-03 adds `:refer`).
+  nullable, unique when set. `admission_id` is accepted by `:create` only,
+  and only from inside the lead admission (`Changes.AdmissionOnly`; the
+  `SdrAgent.Sales.Checks.LeadAdmissionContext` marker); no other action
+  accepts either (C3-02 G4). `referred` is a terminal status (no action
+  produces it yet; C3-03 adds `:refer`). Inside the admission, `:create`
+  and `:assign` take no key: they require the admission's pass to hold the
+  account's company key (`Changes.LeadCompanyKey`). `source` adds `:csv`,
+  `:hubspot` and `:agent_found` (the admission's kinds).
 
   Lifecycle (`transitions/0`):
 
@@ -92,6 +98,13 @@ defmodule SdrAgent.Sales.Lead do
     {:requalify_by_override, [:disqualified], :qualified}
   ]
   @event [category: :domain_change, previous: [:status], links: [decision_id: :last_decision_id]]
+  # C3-02 G4: inside the lead admission only, `:create` and `:assign`
+  # require the admission's pass to hold the account's company key; no key
+  # outside it (until the cutover, G5).
+  @company_key {SdrAgent.Audit.Changes.IdentityKeyLock,
+                mode: :none,
+                held_when: SdrAgent.Sales.Checks.LeadAdmissionContext,
+                keys: {SdrAgent.Sales.Changes.LeadCompanyKey, :keys}}
 
   postgres do
     table "leads"
@@ -172,9 +185,11 @@ defmodule SdrAgent.Sales.Lead do
 
     create :create do
       description "ADM: create a new lead for an active account's contact."
-      accept [:contact_id, :account_id, :owner_user_id, :source]
+      accept [:contact_id, :account_id, :owner_user_id, :source, :admission_id]
+      change SdrAgent.Sales.Changes.AdmissionOnly
       change SdrAgent.Sales.Changes.LeadAccount
       change SdrAgent.Audit.Changes.SetTenant
+      change @company_key
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.lead.created", category: :domain_change}
     end
@@ -192,6 +207,7 @@ defmodule SdrAgent.Sales.Lead do
       description "ADM, REV: new → assigned, optionally with an owner."
       require_atomic? false
       accept [:owner_user_id]
+      change @company_key
       change get_and_lock_for_update()
       change {Transition, from: [:new], to: :assigned, locked?: true}
       change {Stamp, fields: [:assigned_at]}
@@ -420,7 +436,7 @@ defmodule SdrAgent.Sales.Lead do
 
     attribute :source, :atom do
       allow_nil? false
-      constraints one_of: [:fixture, :crm, :manual]
+      constraints one_of: [:fixture, :crm, :manual, :csv, :hubspot, :agent_found]
       public? true
     end
 
@@ -507,6 +523,9 @@ defmodule SdrAgent.Sales.Lead do
 
   @doc "Every lead status."
   def statuses, do: @statuses
+
+  @doc "The open (non-terminal) lead statuses."
+  def open_statuses, do: @open
 
   @doc "Declared lifecycle transitions `{action, from, to}` (ADR-0010)."
   def transitions, do: @transitions

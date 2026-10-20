@@ -17,7 +17,9 @@ defmodule SdrAgent.Sales.Contact do
   email, the new email and the new email's domain first, re-checks the old
   email on the locked row (a typed conflict on `:email` otherwise), and is
   refused on `:email`, writing nothing, when the new address or its domain
-  is suppressed (D-174 Q-O2, OQ6 (ii)).
+  is suppressed (D-174 Q-O2, OQ6 (ii)). Inside the lead admission (the
+  `SdrAgent.Sales.Checks.LeadAdmissionContext` marker) `:create` takes no
+  key: it requires the admission's pass to hold it (C3-02 G4).
 
   Lifecycle (`transitions/0`): active → archived (T); archived contacts are
   not edited.
@@ -37,6 +39,7 @@ defmodule SdrAgent.Sales.Contact do
   alias SdrAgent.Audit.Changes.Transition
   alias SdrAgent.Audit.Checks
   alias SdrAgent.Sales.Changes
+  alias SdrAgent.Sales.Checks.LeadAdmissionContext
   alias SdrAgent.Sales.Validations
 
   @statuses [:active, :archived]
@@ -86,7 +89,12 @@ defmodule SdrAgent.Sales.Contact do
       validate {Validations.Reserved, attribute: :email, kind: :email}
       validate {Validations.Timezone, attribute: :timezone}
       change SdrAgent.Audit.Changes.SetTenant
-      change {IdentityKeyLock, mode: :entry, keys: {Changes.ContactEmailIdentity, :entry_keys}}
+
+      change {IdentityKeyLock,
+              mode: :entry,
+              held_when: LeadAdmissionContext,
+              keys: {Changes.ContactEmailIdentity, :entry_keys}}
+
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.contact.created", category: :domain_change}
     end

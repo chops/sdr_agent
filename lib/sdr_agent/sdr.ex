@@ -10,6 +10,9 @@ defmodule SdrAgent.SDR do
       bound to its run settings snapshot, C4; pinned to the committed
       `SDRAgent` AgentDefinition, looked up read-only before any write) and
       the `sdr.lead.assigned` signal event.
+    * `admit_lead/2` — the only way a new lead is admitted (C3-02;
+      `SdrAgent.SDR.Admission`): ADM, for `manual`, `csv`, `hubspot` and
+      `agent_found` (a referral is C3-03's handover).
     * `bootstrap_definitions/1` — the only registration path of the
       `SDRAgent` definition (C3-02; `SdrAgent.SDR.DefinitionBootstrap`).
     * `retry_run/2` — active ADM retries a stopped run (S13b);
@@ -29,10 +32,10 @@ defmodule SdrAgent.SDR do
   alias SdrAgent.Agents
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Guard
-  alias SdrAgent.Operations
   alias SdrAgent.Repo
   alias SdrAgent.Sales
-  alias SdrAgent.SDR.AgentWorker
+  alias SdrAgent.SDR.Admission
+  alias SdrAgent.SDR.Assignment
   alias SdrAgent.SDR.DefinitionBootstrap
   alias SdrAgent.SDR.Schemas
   alias SdrAgent.SDR.SDRAgent
@@ -92,50 +95,51 @@ defmodule SdrAgent.SDR do
 
   defp do_assign(lead, campaign_id, actor, opts) do
     agent = Actor.system(:agent_runtime, lead.tenant_id)
-    correlation_id = Ecto.UUID.generate()
 
     with {:ok, lead} <- lock_lead(lead.id, actor),
          :ok <- no_active_run(lead, agent),
          {:ok, _campaign} <- Sales.fetch(Sales.Campaign, campaign_id, actor: actor),
          :ok <- Agents.settings_complete(:assignment, actor: agent),
          {:ok, definition} <- SDRAgent.fetch_definition(lead.tenant_id),
-         {:ok, lead} <- ensure_assigned(lead, opts, actor),
-         {:ok, signal} <-
-           Signals.build("sdr.lead.assigned", %{lead_id: lead.id, campaign_id: campaign_id}),
-         {:ok, job} <- Oban.insert(AgentWorker.new(job_args(lead, signal, opts))),
-         {:ok, operation} <-
-           Operations.create_operation(
-             %{
-               kind: :research_lead,
-               queue: :research,
-               oban_job_id: job.id,
-               subject_resource: "SdrAgent.Sales.Lead",
-               subject_id: lead.id,
-               idempotency_key: "assignment:#{lead.id}:#{signal.id}",
-               correlation_id: correlation_id,
-               max_attempts: 1
-             },
-             actor: agent
-           ),
-         {:ok, run} <-
-           Agents.create_run(
-             %{
-               agent_definition_id: definition.id,
-               lead_id: lead.id,
-               campaign_id: campaign_id,
-               trigger_signal_type: signal.type,
-               trigger_signal_id: signal.id,
-               correlation_id: correlation_id,
-               phase: :discover,
-               usage_origin: :assignment,
-               operation_id: operation.id,
-               max_model_calls: Keyword.get(opts, :max_model_calls),
-               max_tool_calls: Keyword.get(opts, :max_tool_calls)
-             },
-             actor: agent
-           ),
-         {:ok, _event} <- Signals.record(signal, agent, run: run) do
-      {:ok, %{lead: lead, run: run, operation: operation, job: job, signal: signal}}
+         {:ok, lead} <- ensure_assigned(lead, opts, actor) do
+      Assignment.queue(lead,
+        campaign_id: campaign_id,
+        definition: definition,
+        usage_origin: :assignment,
+        agent: agent,
+        correlation_id: Ecto.UUID.generate(),
+        job_opts: Keyword.take(opts, [:model, :max_model_calls, :max_tool_calls])
+      )
+    end
+  end
+
+  @doc """
+  C3-02 (packet section 4.1): admits one lead request. `input` is a map
+  with atom keys: `source_kind` (`:manual`, `:csv`, `:hubspot`,
+  `:agent_found`; `:referral` is refused `:use_referral_handover`),
+  `source_ref`, `campaign_id`, `company` (`domain` required; `name` when
+  new; optional `website_url`, `industry`, `employee_count`, `geography`),
+  `person` (`email` required; `first_name`, `last_name` when new; optional
+  `title`, `timezone`), `agent_run_id` (agent_found only) and `readmit`
+  (manual only). Option: `actor:` (an active ADM of the tenant).
+
+  Returns `{:ok, %{admission, outcome, lead, run, replayed?}}` (`lead` and
+  `run` only for `:admitted`; a replay returns the stored admission, its
+  lead re-read and its run) or `{:error, reason}`, a closed reason that
+  carries no input value: `:forbidden`, `:use_referral_handover`,
+  `{:invalid, [field]}`, `:real_data_disabled`, `:source_ref_conflict`,
+  `:campaign_not_active`, `:agent_definition_unavailable`,
+  `{:settings_incomplete, kinds}`, `:settings_default_unavailable` or
+  `:conflict`. An auditor's attempt is refused and audited
+  (`authz.denied`). See `SdrAgent.SDR.Admission` for the steps.
+  """
+  def admit_lead(input, opts) do
+    actor = Keyword.get(opts, :actor)
+    meta = %{resource: Sales.LeadAdmission, action: :sdr_admit_lead, subject_id: nil}
+
+    case Guard.run(meta, actor, fn -> Admission.run(input, actor) end) do
+      {:error, %Ash.Error.Forbidden{}} -> {:error, :forbidden}
+      result -> result
     end
   end
 
@@ -182,28 +186,6 @@ defmodule SdrAgent.SDR do
       {:ok, []} -> :ok
       {:ok, _runs} -> {:error, :assignment_active}
       error -> error
-    end
-  end
-
-  defp job_args(lead, signal, opts) do
-    base = %{"tenant_id" => lead.tenant_id, "signal" => Signals.dump(signal)}
-
-    case Keyword.get(opts, :model) do
-      nil ->
-        base
-
-      model ->
-        responder = get_in(model, [:provider_options, :responder])
-
-        provider =
-          if model[:provider] == SdrAgent.AI.ModelProvider.ClaudeCLI,
-            do: "claude_cli",
-            else: "fake"
-
-        Map.put(base, "model", %{
-          "provider" => provider,
-          "responder" => responder && inspect(responder)
-        })
     end
   end
 

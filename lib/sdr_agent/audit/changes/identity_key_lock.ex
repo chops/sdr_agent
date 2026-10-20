@@ -9,7 +9,17 @@ defmodule SdrAgent.Audit.Changes.IdentityKeyLock do
 
     * `mode` (required): `:entry` takes the application scope's pass
       (`SdrAgent.Audit.IdentityKeys.pass/2`); `:held` only requires keys an
-      enclosing entry point already passed (`require_held/2`).
+      enclosing entry point already passed (`require_held/2`); `:none`
+      takes and requires no key (used with `held_when`).
+    * `held_when` (optional): a module whose `context?/1` is given the
+      changeset's context map. When it returns true, the action runs inside
+      an enclosing entry point that has already passed its keys (C3-02:
+      the lead admission's `LeadAdmissionContext` marker, passed by the
+      resource, so this Audit change names no higher-domain module): the
+      keys are then only required held (`require_held/2`), whatever
+      `mode` says, never acquired, and a missing or different pass fails
+      closed (`MissingPass`, `LateAcquisition`); there is no fallback to
+      entry mode. Otherwise `mode` applies.
     * `keys` (required): `{module, function}` or `{module, function, args}`,
       called as `apply(module, function, [changeset | args])` inside the
       before_action; it returns the raw key inputs `[{kind, raw}]` (never
@@ -26,16 +36,19 @@ defmodule SdrAgent.Audit.Changes.IdentityKeyLock do
 
   alias SdrAgent.Audit.IdentityKeys
 
-  @modes [:entry, :held]
+  @modes [:entry, :held, :none]
 
   @impl true
   def init(opts) do
     with mode when mode in @modes <- Keyword.get(opts, :mode),
-         true <- keys_option?(Keyword.get(opts, :keys)) do
+         true <- keys_option?(Keyword.get(opts, :keys)),
+         true <- held_when_option?(Keyword.get(opts, :held_when)) do
       {:ok, opts}
     else
       _invalid ->
-        {:error, "IdentityKeyLock needs mode: :entry | :held and keys: {module, function}"}
+        {:error,
+         "IdentityKeyLock needs mode: :entry | :held | :none, keys: {module, function} " <>
+           "and an optional held_when: module"}
     end
   end
 
@@ -49,14 +62,31 @@ defmodule SdrAgent.Audit.Changes.IdentityKeyLock do
     do: {:not_atomic, "identity keys are taken in a before_action"}
 
   defp lock(changeset, opts) do
-    case keys(changeset, Keyword.fetch!(opts, :keys)) do
+    case mode(changeset, opts) do
+      :none -> changeset
+      mode -> lock(changeset, mode, Keyword.fetch!(opts, :keys))
+    end
+  end
+
+  defp lock(changeset, mode, keys_option) do
+    case keys(changeset, keys_option) do
       :none ->
         changeset
 
       keys when is_list(keys) ->
         tenant_id = Ash.Changeset.get_attribute(changeset, :tenant_id)
-        :ok = request(Keyword.fetch!(opts, :mode), tenant_id, keys)
+        :ok = request(mode, tenant_id, keys)
         changeset
+    end
+  end
+
+  defp mode(changeset, opts) do
+    case Keyword.get(opts, :held_when) do
+      nil ->
+        Keyword.fetch!(opts, :mode)
+
+      module ->
+        if module.context?(changeset.context), do: :held, else: Keyword.fetch!(opts, :mode)
     end
   end
 
@@ -73,4 +103,7 @@ defmodule SdrAgent.Audit.Changes.IdentityKeyLock do
        do: true
 
   defp keys_option?(_other), do: false
+
+  defp held_when_option?(nil), do: true
+  defp held_when_option?(module), do: is_atom(module)
 end
