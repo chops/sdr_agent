@@ -75,6 +75,7 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
   alias SdrAgent.Outreach
   alias SdrAgent.Outreach.Delivery
   alias SdrAgent.Outreach.WebhookWorker
+  alias SdrAgent.Sales
   alias SdrAgent.SalesFixtures
   alias SdrAgent.SDR.ReplyWorker
   alias SdrAgent.SDR.SuppressionCheck
@@ -125,7 +126,8 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
       assert_reply_phase!(ctx, reply)
 
       for enrollment <- extra do
-        stopped = reload!(ctx, enrollment)
+        assert {:ok, stopped} =
+                 Sales.fetch(Sales.CampaignEnrollment, enrollment.id, actor: ctx.admin)
 
         assert {stopped.status, stopped.stop_reason} == {:stopped, :unsubscribe},
                "C3-02: the deferred T1 stops the covered contact's active and paused enrollments"
@@ -521,7 +523,7 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
         ]
       )
 
-      enrollment = reload!(ctx, %{base | id: id})
+      assert {:ok, enrollment} = Sales.fetch(Sales.CampaignEnrollment, id, actor: ctx.admin)
       assert {enrollment.status, enrollment.campaign_id} == {atom, campaign.id}
       enrollment
     end

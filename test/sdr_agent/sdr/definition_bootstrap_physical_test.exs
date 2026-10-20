@@ -106,24 +106,41 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
     # the monitored worker gone (killed and its :DOWN awaited by the child)
     # before start_link/1 returns, so before any retry or cleanup. No
     # scheduler race: the worker never proceeds past the barrier.
+    #
+    # R2-1 (Codex f4ac4874): the synchronous start_link/1 runs in a tracked
+    # controller task, and the announced worker's termination is registered
+    # while that call is still in flight, before the test waits for it. So
+    # if start_link/1 raises after the announcement, hangs, or the test dies
+    # (an ExUnit timeout), on_exit still kills the controller and the
+    # unlinked, barrier-held worker (awaiting each :DOWN) before the tenant
+    # cleanup and the sandbox-mode restore. The worker announces itself
+    # before anything else, so no barrier waiter exists without an
+    # announcement; that wait is bounded.
     test "T-N10 a blocked worker past a positive deadline is killed; :timeout; then a run converges" do
       preflight!()
       tenant = commit_tenant!()
       parent = self()
       deadline_ms = 300
 
-      {elapsed_us, result} =
-        :timer.tc(fn -> start_child(deadline_ms: deadline_ms, test_barrier: parent) end)
+      controller =
+        Task.async(fn ->
+          :timer.tc(fn -> start_child(deadline_ms: deadline_ms, test_barrier: parent) end)
+        end)
 
-      assert_received {:c302_bootstrap_started, worker},
-                      "C3-02: not established: the worker never reached the test barrier"
+      track!(controller.pid)
+
+      assert_receive {:c302_bootstrap_started, worker},
+                     @wait_ms,
+                     "C3-02: not established: the worker never reached the test barrier"
 
       track!(worker)
+      assert is_pid(worker) and worker not in [parent, controller.pid]
+
+      {elapsed_us, result} = Task.await(controller, @wait_ms)
 
       assert result == {:error, {:definition_bootstrap_failed, :timeout}},
              "C3-02: a blocked worker past the deadline gives the sanitized :timeout class"
 
-      assert is_pid(worker) and worker != parent
       refute Process.alive?(worker), "C3-02: the child kills the worker and awaits its :DOWN"
       assert elapsed_us >= deadline_ms * 1_000, "C3-02: the child waited for the deadline"
       assert elapsed_us < @wait_ms * 1_000, "C3-02: the wait is bounded"
