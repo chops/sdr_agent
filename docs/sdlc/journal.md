@@ -1025,9 +1025,9 @@ Main is green at `14de644`.
   - One test literal was wrong (T-H3: an empty `jsonb[]` prints as `{}`). It was corrected in `16d18ff`, accepted by Codex.
   - Codex's G4 review found three input gaps: control characters in an email, raw 16-byte uuids, and step 9 judging the raw stored domain.
   - Their failing tests (`c8f2717`, exactly seven, each at its intended assertion) were approved. The minimal fix (`fb2474e`) is in its gate.
-- **Merge prerequisite:** after C3-02 the app refuses to start if the owner's database holds another `SDRAgent` definition. The preflight was reviewed in four rounds and approved at r4.
+- **Merge prerequisite:** after C3-02 the app refuses to start if the owner's database holds a retired or mismatched `SDRAgent` row at the code's current version; that stops for a reviewed owner disposition. Rows at other versions are retained history, and a missing current-version row bootstraps normally with a valid singleton tenant. No version bump, deletion or rewrite is implied. The preflight was reviewed in four rounds and its tooling approved at r4; the final-candidate code receipt and the owner's installed-state check are still separate steps.
   - It is an owner-run, read-only, metadata-only check with an exact output format and a classifier.
-  - The agent's code receipt is fail-closed. A shell path guard runs before any Mix command, because `mix run` writes into the build path before a Mix-based guard can run.
+  - The agent's code receipt is fail-closed. A shell path guard runs before the explicit Mix verification, fetch and build sequence (devenv's shell setup still runs `mix hex.info` earlier), because `mix run` writes into the build path before a Mix-based guard can run.
   - The code fingerprint at `16d18ff` (`f490cb2e`) equals main's.
 
 **5b (D-178):** the implementation plan passed Codex review for failing tests in two rounds.
