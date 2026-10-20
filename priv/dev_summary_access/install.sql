@@ -1,4 +1,4 @@
--- D-168 dev-database summary access: install (ADR-0016, proposed).
+-- D-168 dev-database summary access: install (ADR-0016, accepted D-173).
 --
 -- Owner-run only, once, as a superuser, connected to sdr_agent_dev:
 --   psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 5520 -U postgres -d sdr_agent_dev \
@@ -10,16 +10,17 @@
 --
 -- It creates two roles, one schema and two functions, and grants only what
 -- those functions need. It changes no privilege of PUBLIC, of the public
--- schema or of any existing role, function or table. The optional,
--- database-wide TEMP hardening is a separate owner decision
--- (optional-revoke-temp.sql).
+-- schema or of any existing role, function or table. The database-wide
+-- TEMP and large-object revokes D-173 requires are a separate reviewed
+-- owner step (revoke-public-temp-lo.sql; see OWNER-STEPS.md).
 --
 -- No password is set here. If the owner later moves this cluster from
 -- `trust` to password authentication, they set the login's password out of
 -- band (`\password sdr_summary_login`); it never goes in a file, chat or log.
 --
--- After installing, run attest.sql and keep its output: installation and an
--- exact installed-state check are separate prerequisites to any agent use.
+-- After installing, follow OWNER-STEPS.md (revokes, pg_hba, then accept.sh):
+-- no agent connects before accept.sh prints ACCEPTANCE PASS. Installation,
+-- and attest.sql alone, are not acceptance (D-173).
 
 \set ON_ERROR_STOP on
 
