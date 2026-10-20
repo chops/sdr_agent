@@ -227,51 +227,83 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
   # G3-2b (Codex 9d5c5c2 review): the client driver's own retry. A read
   # blocked in its prepare phase (`prepare: :unnamed`: every execution
   # parses, and the parse waits on the blocker's lock) that times out on the
-  # client is disconnected with reason `:closed`, which Postgrex marks
-  # retriable, and DBConnection checks out another connection with a fresh
-  # relative timeout (`checkout_retries`, default 3). One window is one
-  # client-timeout disconnect of the caller, logged by its connection.
+  # client is disconnected; when the client's pending receive ends with
+  # reason `:closed`, Postgrex marks it retriable and DBConnection checks out
+  # another connection with a fresh relative timeout (`checkout_retries`,
+  # default 3). One window is one client-timeout disconnect of the caller,
+  # logged by its connection.
+  #
+  # G3-2b RED r2 (coordinator run at abfe524: the control raised
+  # Postgrex.Error after 308 ms): the disconnect sends a CancelRequest before
+  # it closes the socket, and the blocked backend's answer to it can reach
+  # the client first, which ends the call without a retry; which comes
+  # first is a race. These reads therefore go through a test-owned pool
+  # (`SdrAgent.Repo` as a dynamic repo in the test process) whose
+  # connections pass through `SdrAgent.CancelWithholdingProxy`, which drops
+  # every CancelRequest: the blocked backend never answers, so every window
+  # ends in `:closed`, the retriable path. The proxy's count of withheld
+  # cancels equals the windows, one per client-timeout disconnect.
   describe "T-N10 (G3-2b) the driver's checkout retry" do
     test "T-N10 (G3-2b) (control) a blocked unnamed read with a relative timeout opens more than one window" do
       preflight!()
+      proxied = proxied_repo!()
       blocker = table_blocker!("tenants")
 
       {{elapsed_us, raised}, log} =
         with_log(fn ->
           :timer.tc(fn ->
-            try do
-              Repo.query!("SELECT count(*) FROM tenants", [], prepare: :unnamed, timeout: 300)
-              :returned
-            rescue
-              error -> error.__struct__
-            end
+            via_proxy(proxied, fn ->
+              try do
+                Repo.query!("SELECT count(*) FROM tenants", [], prepare: :unnamed, timeout: 300)
+                :returned
+              rescue
+                error in Postgrex.Error -> {Postgrex.Error, pg_code(error)}
+                error -> error.__struct__
+              end
+            end)
           end)
         end)
 
-      assert raised == DBConnection.ConnectionError
       windows = timeout_windows(log, self())
+
+      assert raised == DBConnection.ConnectionError,
+             "not established: the read ended with #{inspect(raised)} after " <>
+               "#{div(elapsed_us, 1000)} ms (#{windows} window(s))"
 
       assert windows >= 2,
              "not established: the driver did not retry (#{windows} window(s), #{div(elapsed_us, 1000)} ms)"
 
-      assert elapsed_us >= 2 * 300 * 1_000
+      assert withheld(proxied) == windows,
+             "not established: #{withheld(proxied)} cancel(s) withheld for #{windows} window(s)"
+
+      assert elapsed_us >= windows * 300 * 1_000
+      assert Process.alive?(blocker.pid), "not established: the blocker released first"
       release!(blocker)
     end
 
     test "T-N10 (G3-2b) run/1's blocked tenant read gets one window that ends at the deadline, no retry" do
       preflight!()
+      proxied = proxied_repo!()
       blocker = table_blocker!("tenants")
       hooks = [repo_opts: [prepare: :unnamed]]
 
       {{elapsed_us, result}, log} =
         with_log(fn ->
-          :timer.tc(fn -> run_bootstrap(deadline_ms: 1_000, test_hooks: hooks) end)
+          :timer.tc(fn ->
+            via_proxy(proxied, fn -> run_bootstrap(deadline_ms: 1_000, test_hooks: hooks) end)
+          end)
         end)
 
-      assert result == {:error, :timeout}, "C3-02: got " <> shape(result)
+      windows = timeout_windows(log, self())
 
-      assert timeout_windows(log, self()) == 1,
-             "C3-02: the driver opened another window after the budget's deadline"
+      assert windows == 1,
+             "C3-02: the driver opened #{windows} windows against a 1 000 ms deadline " <>
+               "(#{div(elapsed_us, 1000)} ms); another window after the budget's deadline"
+
+      assert withheld(proxied) == windows,
+             "not established: #{withheld(proxied)} cancel(s) withheld for #{windows} window(s)"
+
+      assert result == {:error, :timeout}, "C3-02: got " <> shape(result)
 
       assert elapsed_us < 1_500_000,
              "C3-02: the read took #{div(elapsed_us, 1000)} ms against a 1 000 ms deadline"
@@ -419,6 +451,59 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
     |> Regex.scan(log)
     |> length()
   end
+
+  # G3-2b RED r2: a test-owned `SdrAgent.Repo` instance (unnamed, a plain
+  # connection pool, not the sandbox) whose connections go through a
+  # `SdrAgent.CancelWithholdingProxy` in front of the configured server;
+  # both are test-supervised (the pool, started second, stops first). Its
+  # first query, before any blocker, checks it reaches the same database.
+  defp proxied_repo! do
+    config = Repo.config()
+    host = Keyword.get(config, :hostname, "localhost")
+    port = Keyword.get(config, :port) || String.to_integer(System.get_env("PGPORT") || "5432")
+    proxy = start_supervised!({SdrAgent.CancelWithholdingProxy, upstream: {host, port}})
+
+    repo =
+      start_supervised!(
+        Supervisor.child_spec(
+          {Repo,
+           name: nil,
+           pool: DBConnection.ConnectionPool,
+           pool_size: 5,
+           hostname: "127.0.0.1",
+           port: SdrAgent.CancelWithholdingProxy.port(proxy)},
+          id: :c302_proxied_repo
+        )
+      )
+
+    %{rows: [[database]]} = Repo.query!("SELECT current_database()")
+    proxied = %{repo: repo, proxy: proxy}
+
+    assert via_proxy(proxied, fn -> Repo.query!("SELECT current_database()").rows end) ==
+             [[database]],
+           "precondition: the proxied pool reaches the test database"
+
+    assert withheld(proxied) == 0
+    proxied
+  end
+
+  # Runs `fun` with `SdrAgent.Repo` calls of this process on the proxied
+  # pool, restoring the previous dynamic repo on every exit path.
+  defp via_proxy(%{repo: repo}, fun) do
+    previous = Repo.put_dynamic_repo(repo)
+
+    try do
+      fun.()
+    after
+      Repo.put_dynamic_repo(previous)
+    end
+  end
+
+  defp withheld(%{proxy: proxy}), do: SdrAgent.CancelWithholdingProxy.withheld(proxy)
+
+  # The SQLSTATE of a server error, for a failure message (codes only).
+  defp pg_code(%Postgrex.Error{postgres: %{code: code}}), do: code
+  defp pg_code(_error), do: nil
 
   defp release!(blocker) do
     send(blocker.pid, {blocker.tag, :release})
