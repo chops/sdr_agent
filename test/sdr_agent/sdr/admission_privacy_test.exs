@@ -129,7 +129,7 @@ defmodule SdrAgent.SDR.AdmissionPrivacyTest do
       # :manual`), so their persisted `errors` are empty by construction:
       # asserted as such, not counted as executor-sanitized error coverage
       # (that is T-K10's real-execution case for the webhook job).
-      for run <- runs, do: assert(elem(run_job!(run), 0) == "[]")
+      for run <- runs, do: assert(elem(run_job!(run), 0) == "{}")
 
       for run <- runs,
           {job_errors, job_args} <- [run_job!(run)],
