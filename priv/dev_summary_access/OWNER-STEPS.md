@@ -7,65 +7,104 @@ reports it (step 6). After that, agents may use only the dedicated role's
 reviewed aggregate functions; every other agent access to the dev database
 or app stays forbidden (D-173, D-179).
 
-Run every step in the owner checkout (`~/src/SDR_agent`), at the reviewed
-commit, inside its devenv shell, with `devenv up` running. Stop at the
-first step that does not end exactly as stated, and report its step number
-and marker. The commands use `/bin/cat` because `cat` may be aliased.
+**Every command goes through `owner-run.sh`.** It fixes the execution
+context, so nothing is taken from your shell:
 
-## 0. Preconditions
+- the pinned PostgreSQL 18.6 binaries, each checked;
+- no inherited `PG*`, `PSQL*` or `GIT_*` variable reaches any child,
+  including `PGHOSTADDR`, `PGSERVICE`, `PGOPTIONS` and `PGPASSFILE`;
+- every connection is explicit: `127.0.0.1` with `hostaddr`, the port, the
+  database, user `postgres`, and timeouts;
+- the data directory is an explicit `--pgdata` argument, checked against
+  the server's own `data_directory` and `hba_file`;
+- every command needs `--commit`, the full reviewed SHA. It refuses unless
+  the checkout is exactly that commit, with the package and ADR-0016
+  unmodified.
 
-1. `git rev-parse HEAD` is the commit Codex passed, and
-   `git status --short priv/dev_summary_access` prints nothing.
-2. `echo "$PGDATA"` prints `/Users/charles/src/SDR_agent/.devenv/state/postgres`.
-   This is derived from the repository's devenv configuration (devenv sets
-   `PGDATA` to `<checkout>/.devenv/state/postgres`). Item 3 confirms it.
-3. `psql -X -At -h 127.0.0.1 -p 5520 -U postgres -d postgres -c 'SHOW hba_file'`
-   prints `$PGDATA/pg_hba.conf`, spelled out. `devenv.nix` does not set
-   `services.postgres.hbaConf`. So devenv never rewrites `pg_hba.conf`, and
-   the edit in step 4 survives restarts. devenv does rewrite
-   `postgresql.conf` at every start, but that file sets no `hba_file`. If the
-   printed path differs, stop.
-4. `psql -X -At -h 127.0.0.1 -p 5520 -U postgres -d postgres -c 'SHOW server_version'`
-   prints `18.6`.
+Each command ends with `OWNER-RUN <command> OK` (exit 0) or
+`OWNER-RUN REFUSED: <reason>` (exit 3). Stop at the first command that
+does not end `OK`, and report its step number and that line.
+
+## 0. Setup and preflight
+
+Run these once, in this order. `devenv up` must be running for the dev
+cluster. No devenv shell is needed.
+
+1. Use a checkout at exactly the commit Codex passed. A detached worktree
+   leaves your own checkout where it is:
+
+   ```sh
+   git -C ~/src/SDR_agent fetch origin
+   git -C ~/src/SDR_agent worktree add --detach ~/src/SDR_agent-d173 <REVIEWED-SHA>
+   ```
+2. Set four names for the commands below. Each value is a single word with
+   no spaces, so they work in zsh and bash:
+
+   ```sh
+   C=<REVIEWED-SHA>
+   R=~/src/SDR_agent-d173/priv/dev_summary_access/owner-run.sh
+   D=/Users/charles/src/SDR_agent/.devenv/state/postgres
+   mkdir -m 700 ~/sdr-agent-owner-backups   # once; if it exists, it must be mode 700
+   ```
+
+   `D` is the dev cluster's data directory. The repository's devenv
+   configuration sets `PGDATA` to `<checkout>/.devenv/state/postgres`.
+   `devenv.nix` does not set `services.postgres.hbaConf`, so devenv never
+   rewrites `pg_hba.conf`. It does rewrite `postgresql.conf` at every
+   start, but that file sets no `hba_file`. Preflight confirms all of this
+   against the running server.
+3. Preflight:
+
+   ```sh
+   $R preflight --commit $C --port 5520 --pgdata $D
+   ```
+
+   It confirms the commit, the 18.6 binaries, the 18.6 server, and that
+   `data_directory` is `$D` and `hba_file` is `$D/pg_hba.conf`. It also
+   reports the TCP listen address and whether a Unix socket is configured.
 
 ## 1. Backup and verify point
 
-The backup holds real data. Keep it private (mode 700/600). It never goes
-in the repo, chat or a log.
-
 ```sh
-B=~/sdr-agent-owner-backups/d173-$(date -u +%Y%m%dT%H%M%SZ)
-mkdir -p -m 700 "$B"
-pg_dump -h 127.0.0.1 -p 5520 -U postgres -Fc -f "$B/sdr_agent_dev.dump" sdr_agent_dev
-pg_dumpall -h 127.0.0.1 -p 5520 -U postgres --globals-only -f "$B/globals.sql"
-cp -p "$PGDATA/pg_hba.conf" "$B/pg_hba.conf.before"
-chmod 600 "$B"/*
-pg_restore --list "$B/sdr_agent_dev.dump" > /dev/null && test -s "$B/globals.sql" \
-  && cmp -s "$PGDATA/pg_hba.conf" "$B/pg_hba.conf.before" && echo BACKUP-VERIFIED
+$R backup --commit $C --port 5520 --pgdata $D --backup-parent ~/sdr-agent-owner-backups
 ```
 
-The step must print `BACKUP-VERIFIED`. Keep `$B` set for steps 4 and 8.
+- The command creates a new private directory, mode 700 (never reused).
+  Into it go `pg_dump` of `sdr_agent_dev`, `pg_dumpall --globals-only`, a
+  copy of `pg_hba.conf` and the archive's table of contents.
+- It checks every producer's exit status. The dump must hold table data for
+  every `public` table, and the globals file must be complete.
+- It then writes a `MANIFEST` and a `BACKUP-COMPLETE` marker.
+- Only then does it print `BACKUP-VERIFIED` and `BACKUP-DIR <path>`.
+- On any failure, it prints `BACKUP-INCOMPLETE <path>`. That directory is
+  never accepted by a later step.
+- Earlier backups are never touched.
+
+Copy the printed path by hand, without sourcing anything:
+
+```sh
+B=<the BACKUP-DIR path>
+```
+
+The backup holds real data. It never goes in the repo, chat or a log.
 
 ## 2. Install
 
 ```sh
-psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 5520 -U postgres -d sdr_agent_dev \
-  -f priv/dev_summary_access/install.sql
+$R install --commit $C --port 5520 --backup $B
 ```
 
-The command must exit 0 and print `END-OF-SUMMARY-INSTALL` last. It runs in
-one transaction: a failure changes nothing.
+The output includes `END-OF-SUMMARY-INSTALL`. It runs in one transaction,
+so a failure changes nothing.
 
 ## 3. TEMP and large-object revokes (D-173 choices 1 and 2)
 
 a. Inventory (read-only):
 
 ```sh
-psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 5520 -U postgres -d sdr_agent_dev \
-  -v mode=inventory -f priv/dev_summary_access/revoke-public-temp-lo.sql
+$R revoke-inventory --commit $C --port 5520
 ```
 
-The last line must be `END-OF-REVOKE-PUBLIC-TEMP-LO-INVENTORY (nothing changed)`.
 The `before` row must read `t | 17 | 17 | 17`. The `effect` rows must match
 the reviewed list:
 
@@ -78,39 +117,38 @@ the reviewed list:
 If any other role appears, stop. It is a role the reviewed effect list
 did not cover.
 
-b. Apply (one transaction):
+b. Apply (one transaction; a `REFUSED` line means nothing was changed):
 
 ```sh
-psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 5520 -U postgres -d sdr_agent_dev \
-  -v mode=apply -f priv/dev_summary_access/revoke-public-temp-lo.sql
+$R revoke-apply --commit $C --port 5520 --backup $B
 ```
 
-The command must exit 0 and print `END-OF-REVOKE-PUBLIC-TEMP-LO-APPLIED`
-last. If it prints a `REFUSED` line instead, nothing was changed.
-
-## 4. pg_hba rules and reload (D-173 choice 3)
-
-a. Put the seven rule lines of `priv/dev_summary_access/pg_hba-summary.conf`
-   above every existing rule:
+## 4. pg_hba rules, applied and effectively loaded (D-173 choice 3)
 
 ```sh
-{ grep -vE '^[[:space:]]*(#|$)' priv/dev_summary_access/pg_hba-summary.conf; /bin/cat "$B/pg_hba.conf.before"; } \
-  > "$PGDATA/pg_hba.conf.new" \
-  && /bin/cat "$PGDATA/pg_hba.conf.new" > "$PGDATA/pg_hba.conf" && rm "$PGDATA/pg_hba.conf.new"
+$R hba-apply --commit $C --port 5520 --pgdata $D --backup $B
 ```
 
-b. Reload. The command must print `t`:
+It refuses, changing nothing, unless `pg_hba.conf` is byte for byte the
+backup's copy and is a regular file you own. Then:
 
-```sh
-psql -X -At -h 127.0.0.1 -p 5520 -U postgres -d postgres -c 'SELECT pg_reload_conf()'
-```
+1. It writes the seven rules of `pg_hba-summary.conf` above the copy's
+   content into a fresh private file in the same directory. It checks the
+   bytes and keeps the live file's mode.
+2. It re-checks the live file, then renames the staged file onto it
+   atomically.
+3. It has the server read the file back (`accept.sql` checks 12 and 13). If
+   that fails, it puts the backup copy back the same way, and nothing is
+   reloaded.
+4. Otherwise it waits until the server clock is past the file's
+   modification second, and reloads.
+5. It waits until `pg_conf_load_time()` shows a reload at least one second
+   after that modification. A `t` from `pg_reload_conf()` only means the
+   signal was sent.
 
-c. Check that the file loads cleanly. The command must print `0`:
-
-```sh
-psql -X -At -h 127.0.0.1 -p 5520 -U postgres -d postgres \
-  -c 'SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL'
-```
+It must print `HBA-APPLIED-AND-LOADED`. If a later step says the reload
+state is uncertain (acceptance check 14), run
+`$R hba-reload --commit $C --port 5520 --pgdata $D`.
 
 The allow line keeps `trust`. That is the owner-accepted procedural residual
 (D-173 choice 4). These rules confine where the login can connect. They are
@@ -120,41 +158,56 @@ role.
 ## 5. Acceptance (must pass before any agent connects)
 
 ```sh
-priv/dev_summary_access/accept.sh 5520
+$R accept --commit $C --port 5520
 ```
 
-The script must exit 0. Every line starts with `ACCEPT`, 18 lines end in
-`|ok`, and the last line is `ACCEPTANCE PASS`. It runs `attest.sql`, then
-`accept.sql`, then the live pg_hba checks. Running `attest.sql` alone is not
-acceptance (D-173).
+The output must have 20 lines ending in `|ok`, and the last two lines must
+be `ACCEPTANCE PASS` and `OWNER-RUN accept OK`. It runs these, in order:
 
-On `ACCEPTANCE STOP`, agents do not connect. The `STOP` lines name the
+- `attest.sql`;
+- `accept.sql`, including the strict reload check and the TCP listen
+  address;
+- live checks, each a pg_hba rejection, never a mere refused connection:
+  - the login is rejected for `postgres` and `template1` over 127.0.0.1;
+  - the login connects to `sdr_agent_dev` over 127.0.0.1 with its reviewed
+    settings;
+  - the login is rejected for every database over every Unix socket the
+    server reports.
+
+Running `attest.sql` alone is not acceptance (D-173). On
+`ACCEPTANCE STOP`, agents do not connect. The `STOP` lines name the
 failing checks. Fix the cause with Codex review, or roll back (step 8).
 
 ## 6. Report back (labels only)
 
 Paste only these into the standup answer or chat:
 
-- `BACKUP-VERIFIED`;
-- the three END markers from steps 2, 3a and 3b;
+- each step's last line (`OWNER-RUN <command> OK`);
+- `BACKUP-VERIFIED`, `END-OF-SUMMARY-INSTALL`,
+  `END-OF-REVOKE-PUBLIC-TEMP-LO-APPLIED` and `HBA-APPLIED-AND-LOADED`;
 - `effect rows as reviewed: yes` (or `no`, with the step number);
-- the `t` and `0` from steps 4b and 4c;
-- the complete `accept.sh` output, which is fixed labels, counts and fixed
-  values only.
+- the complete `ACCEPT ...` and `ACCEPTANCE ...` lines from step 5. These
+  are fixed labels, counts and fixed values only.
 
-Never paste the backup, the `attest.sql` inventory, role passwords, or any
-table data. Agents start calling the two functions only after this report
-shows `ACCEPTANCE PASS`.
+Never paste the backup, the backup path, the inventory rows, the attest
+inventory or any table data. Agents start calling the two functions only
+after this report shows `ACCEPTANCE PASS`.
+
+Acceptance authorizes only the two reviewed functions. `gdemo_drain_v1`
+implements the old two-allocation G-DEMO contract and returns STOP for the
+current three-allocation rehearsal shape. Installing and accepting it does
+not approve it as the current attempt's drain. That needs its own reviewed
+version and protocol.
 
 ## 7. Afterwards
 
-Re-run `accept.sh 5520` (not `attest.sql` alone), and report its output, in
-any of these cases:
+Re-run `$R accept --commit $C --port 5520`, not `attest.sql` alone, and
+report its output, in any of these cases:
 
 - after any change touching these roles, the `summary` schema or its
   functions;
-- after any change to PUBLIC's privileges on `sdr_agent_dev`, or to
-  `pg_hba.conf`;
+- after any change to PUBLIC's privileges on `sdr_agent_dev`, to
+  `pg_hba.conf`, or to the listen address or socket settings;
 - after a PostgreSQL upgrade.
 
 On `ACCEPTANCE STOP`, agents stop calling.
@@ -165,42 +218,35 @@ On `ACCEPTANCE STOP`, agents stop calling.
 2. End any login sessions:
 
    ```sh
-   psql -X -At -h 127.0.0.1 -p 5520 -U postgres -d sdr_agent_dev \
-     -c "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE usename = 'sdr_summary_login'"
+   $R end-login-sessions --commit $C --port 5520
    ```
-3. Uninstall. The last line must be `END-OF-SUMMARY-UNINSTALL`. It refuses,
-   changing nothing, if anything unreviewed depends on either role.
+3. Uninstall. It refuses, changing nothing, if anything unreviewed depends
+   on either role. Its output includes `END-OF-SUMMARY-UNINSTALL`.
 
    ```sh
-   psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 5520 -U postgres -d sdr_agent_dev \
-     -f priv/dev_summary_access/uninstall.sql
+   $R uninstall --commit $C --port 5520
    ```
-4. Restore PUBLIC's TEMP and large-object defaults. The last line must be
-   `END-OF-REVOKE-PUBLIC-TEMP-LO-RESTORED`. It refuses while either summary
-   role exists.
+4. Restore PUBLIC's TEMP and large-object defaults. It refuses while either
+   summary role exists.
 
    ```sh
-   psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 5520 -U postgres -d sdr_agent_dev \
-     -v mode=restore -f priv/dev_summary_access/revoke-public-temp-lo.sql
+   $R revoke-restore --commit $C --port 5520
    ```
-5. Revert `pg_hba.conf` and reload. If the file was edited for another
-   reason since step 4, delete only the seven lines instead of restoring the
-   copy.
+5. Restore `pg_hba.conf` from the backup copy:
 
    ```sh
-   /bin/cat "$B/pg_hba.conf.before" > "$PGDATA/pg_hba.conf"
-   psql -X -At -h 127.0.0.1 -p 5520 -U postgres -d postgres -c 'SELECT pg_reload_conf()'
+   $R hba-restore --commit $C --port 5520 --pgdata $D --backup $B
    ```
 
-   Then the following must print `0`:
+   It refuses, changing nothing, unless the live file is exactly the
+   applied content. In that case it was edited since step 4: delete only the
+   seven lines by hand, then run `$R hba-reload`. Otherwise it puts the copy
+   back with the same staged atomic write. It checks that no rule names the
+   login, then reloads and waits until the reload is effective. It must
+   print `HBA-RESTORED-AND-LOADED`.
+6. Report each step's last line.
 
-   ```sh
-   psql -X -At -h 127.0.0.1 -p 5520 -U postgres -d postgres \
-     -c "SELECT count(*) FROM pg_hba_file_rules WHERE 'sdr_summary_login' = ANY (user_name)"
-   ```
-6. Report the three END markers and the `0`.
-
-After a rollback, `accept.sh` prints `ACCEPTANCE STOP`, as expected. The
+After a rollback, `$R accept` prints `ACCEPTANCE STOP`, as expected. The
 step 1 backup is a last-resort recovery point, not part of rollback.
 Restoring it discards every change made since step 1, so only the owner
 decides that.
