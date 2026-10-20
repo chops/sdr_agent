@@ -19,10 +19,11 @@
 # pinned SHA-256 below; without it the reference comparisons do not run,
 # the run is REDUCED and exits 3 even if every other check passes. Exit 0
 # only for a full run with every check passing; 1 on any failure; 2 on a
-# guard refusal. OPEN lines are residuals awaiting an explicit owner
-# decision (ADR-0016 "Open owner choices"), not accepted gaps. The log
-# holds verdicts, SQLSTATEs and hashes only, never function output or
-# seeded values.
+# guard refusal. RESIDUAL lines record either a pre-hardening observation
+# that section 9 then closes through the D-173 owner path, or an
+# owner-accepted residual (D-173 (4), trust auth); they are not checks. The
+# log holds verdicts, SQLSTATEs, labels and hashes only, never function
+# output or seeded values.
 
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -59,7 +60,7 @@ FAILS=0
 log() { printf '%s\n' "$*" | tee -a "$LOG"; }
 pass() { PASSES=$((PASSES + 1)); log "PASS $*"; }
 fail() { FAILS=$((FAILS + 1)); log "FAIL $*"; }
-residual() { log "OPEN $*"; }
+residual() { log "RESIDUAL $*"; }
 sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 
 su() { "$PSQL" -X -q -At -F'|' -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -d "$CI_SU" "$@"; }
@@ -67,7 +68,7 @@ lg() { "$PSQL" -X -q -At -F'|' -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -d "$CI_L
 
 log "== ADR-0016 adversarial run $(date -u +%Y-%m-%dT%H:%M:%SZ) port=$GUARD_PORT system_identifier=$GUARD_SYSID server=$(su -c 'SHOW server_version')"
 log "   repo head $(git -C "$REPO" rev-parse HEAD 2>/dev/null)$(git -C "$REPO" diff --quiet HEAD 2>/dev/null || echo ' +uncommitted changes')"
-for f in install.sql attest.sql uninstall.sql optional-revoke-temp.sql; do log "   $f sha256 $(sha "$SQL/$f")"; done
+for f in install.sql attest.sql uninstall.sql revoke-public-temp-lo.sql accept.sql accept.sh pg_hba-summary.conf; do log "   $f sha256 $(sha "$SQL/$f")"; done
 log "   seed.sql sha256 $(sha "$HERE/seed.sql")  canaries.sql sha256 $(sha "$HERE/canaries.sql")"
 
 # Run as the login, keep its output for the leak check, return it.
@@ -188,9 +189,15 @@ script_refused "install in another database" '^REFUSED: connect to sdr_agent_dev
 script_refused "install by a non-superuser" '^REFUSED: run as a superuser' -d "$CI_LG" -f "$SQL/install.sql"
 script_refused "uninstall in another database" '^REFUSED: connect to sdr_agent_dev' -d "$CI_SU_PG" -f "$SQL/uninstall.sql"
 script_refused "uninstall by a non-superuser" '^REFUSED: uninstall needs a superuser' -d "$CI_LG" -f "$SQL/uninstall.sql"
-script_refused "optional TEMP revoke without a mode" '^REFUSED: pass -v mode' -d "$CI_SU" -f "$SQL/optional-revoke-temp.sql"
-script_refused "optional TEMP revoke in another database" '^REFUSED: run against sdr_agent_dev' -d "$CI_SU_PG" -v mode=apply -f "$SQL/optional-revoke-temp.sql"
-script_refused "optional TEMP apply by a non-superuser" '^REFUSED: apply needs a superuser' -d "$CI_LG" -v mode=apply -f "$SQL/optional-revoke-temp.sql"
+HARDEN="$SQL/revoke-public-temp-lo.sql"
+script_refused "TEMP/large-object revoke without a mode" '^REFUSED: pass -v mode' -d "$CI_SU" -f "$HARDEN"
+script_refused "TEMP/large-object revoke with a bad mode" '^REFUSED: mode must be' -d "$CI_SU" -v mode=force -f "$HARDEN"
+script_refused "TEMP/large-object revoke in another database" '^REFUSED: run against sdr_agent_dev' -d "$CI_SU_PG" -v mode=apply -f "$HARDEN"
+script_refused "TEMP/large-object apply by a non-superuser" '^REFUSED: apply and restore need a superuser' -d "$CI_LG" -v mode=apply -f "$HARDEN"
+script_refused "TEMP/large-object restore by a non-superuser" '^REFUSED: apply and restore need a superuser' -d "$CI_LG" -v mode=restore -f "$HARDEN"
+script_refused "TEMP/large-object restore while the summary roles exist" '^REFUSED: run uninstall.sql first' -d "$CI_SU" -v mode=restore -f "$HARDEN"
+script_refused "accept.sql in another database" '^ACCEPT-SQL STOP: connect to sdr_agent_dev' -d "$CI_SU_PG" -f "$SQL/accept.sql"
+script_refused "accept.sql by a non-superuser" '^ACCEPT-SQL STOP: run as a superuser' -d "$CI_LG" -f "$SQL/accept.sql"
 log "   summary function hashes (full SHA-256):"
 fn_inventory | awk -F'|' '{print "   " $2 " prosrc_sha256=" $11 " functiondef_sha256=" $12}' | tee -a "$LOG"
 HASHES1=$(fn_inventory | cut -d'|' -f2,11,12)
@@ -478,7 +485,7 @@ shadow=(-c "$OFF" -c "set search_path = pg_temp, public, pg_catalog"
   -c "set \"TimeZone\" = 'Pacific/Kiritimati'" -c "set datestyle = 'SQL, DMY'")
 [ "$(lgc "${shadow[@]}" -c "$G3" | norm_fn)" = "$base_g3" ] && pass "g3 unchanged under temp tables, views, ~ and = operators and a count function" || fail "g3 changed under shadowing"
 [ "$(lgc "${shadow[@]}" -c "$POST" | norm_fn)" = "$base_post" ] && pass "drain unchanged under the same shadows and caller TimeZone" || fail "drain changed under shadowing"
-residual "TEMP: the login can create temporary objects in its own session (PUBLIC TEMP default); optional-revoke-temp.sql removes it on owner approval"
+residual "TEMP, before the D-173 revoke: the login can create temporary objects in its own session (PUBLIC TEMP default); they change no result; section 9 revokes TEMP from PUBLIC and proves it denied"
 
 # --- 6. Argument validation: fixed errors, input never echoed. ---
 log "-- 6 unsafe arguments"
@@ -530,30 +537,237 @@ expect_err "login may lower its read-only default only for itself; writes still 
 v=$(lgc -c "show statement_timeout"); { [ "$v" = 60s ] || [ "$v" = 1min ]; } && pass "login session default statement_timeout is 60s" || fail "statement_timeout default: $v"
 residual "SETTINGS: the login can change its own timeouts and read-only default, per session and persistently (ALTER ROLE self SET); attest detects the persistent form, and they bound accidents, not a hostile caller"
 
-# --- 8. Open owner choices: probed and recorded. ---
-log "-- 8 open owner choices"
+# --- 8. Before the D-173 owner path: the residuals it closes, recorded. ---
+log "-- 8 before the D-173 owner path"
 out=$("$PSQL" -X -q -At -d "$CI_LG_PG" -c "select current_database()" 2>&1)
-[ "$out" = postgres ] && residual "OTHER DATABASES: the login can CONNECT to other databases on the cluster via the PUBLIC CONNECT default; what it can do there is not attested by this database's catalogs" \
+[ "$out" = postgres ] && residual "OTHER DATABASES, before the D-173 pg_hba rules: the login can CONNECT to other databases on the cluster via the PUBLIC CONNECT default; section 9 adds the reviewed allow and reject rules and proves the rejection" \
   || pass "login cannot connect to another database"
 oid=$(lgc -c "$OFF" -c "select lo_create(0)" | tail -1)
 if grep -qE '^[0-9]+$' <<<"$oid"; then
-  residual "LARGE OBJECTS: the login can create large objects (no privilege governs it); attest refuses while any exists"
+  residual "LARGE OBJECTS, before the D-173 revoke: the login can create large objects through PUBLIC's EXECUTE on the be_lo* functions; section 9 revokes it and proves every one denied"
   su -c "select lo_unlink($oid)" >/dev/null
 else pass "login cannot create large objects"; fi
-residual "CONNECTION BOUNDARY: the cluster uses trust auth on 127.0.0.1: any local process can connect as any role, so the role is a procedural boundary there"
+residual "CONNECTION BOUNDARY (owner-accepted, D-173 (4)): the cluster uses trust auth on 127.0.0.1: any local process can connect as any role, so the role is a procedural boundary there, not authenticated isolation"
 
-# --- 9. Optional TEMP revoke. ---
-log "-- 9 optional TEMP revoke"
-acl0=$(su -c "select datacl::text from pg_database where datname = 'sdr_agent_dev'")
-out=$(su -v mode=inventory -f "$SQL/optional-revoke-temp.sql" 2>&1)
-[ "$(su -c "select datacl::text from pg_database where datname = 'sdr_agent_dev'")" = "$acl0" ] && grep -q 'INVENTORY (nothing changed)' <<<"$out" \
-  && pass "inventory mode changes nothing" || fail "inventory mode changed the ACL"
+# --- 9. The D-173 owner path, in OWNER-STEPS.md order, then rollback. ---
+# From the uninstalled prior state: install, the TEMP and large-object
+# revokes (inventory first), the pg_hba rules and reload, and acceptance;
+# then every tampered variant must STOP; then the rollback must return the
+# prior state exactly.
+log "-- 9 D-173 owner path: revokes, other roles, pg_hba, acceptance, tampering, rollback"
 reverify
-su -v mode=apply -f "$SQL/optional-revoke-temp.sql" >/dev/null 2>&1
-expect_err "CREATE TEMP after optional revoke" 42501 -c "$OFF" -c "create temp table adv_t (i int)"
-[ "$(lgc -c "$G3" | norm_fn)" = "$base_g3" ] && pass "functions unaffected by the TEMP revoke" || fail "functions changed after TEMP revoke"
-su -c "grant temp on database sdr_agent_dev to public" >/dev/null
-attest_ok "at end"
+out=$(su -f "$SQL/uninstall.sql" 2>&1)
+[ "$(tail -1 <<<"$out")" = END-OF-SUMMARY-UNINSTALL ] && pass "uninstalled to the prior state" || { fail "uninstall before the owner path: $(grep -m1 -E 'REFUSED|ERROR' <<<"$out")"; exit 1; }
+# Other roles, for the effect list: a plain non-superuser login (PUBLIC's
+# defaults only) and one holding an explicit TEMP grant. postgres is the
+# superuser (the app's role on the dev cluster).
+su -c "CREATE ROLE adv_plain LOGIN" -c "CREATE ROLE adv_tempgrant LOGIN" -c "GRANT TEMP ON DATABASE sdr_agent_dev TO adv_tempgrant" >/dev/null
+asr() { local r=$1 d=$2; shift 2; "$PSQL" -X -q -At -F'|' -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -d "$(guard_conninfo "$d" "$r")" "$@"; }
+# expect_role NAME ok|SQLSTATE ROLE DB psql-args...
+expect_role() {
+  local name=$1 want=$2 r=$3 d=$4 out rc; shift 4
+  out=$(asr "$r" "$d" "$@" 2>&1); rc=$?
+  if [ "$want" = ok ]; then
+    [ "$rc" = 0 ] && pass "$name: allowed" || fail "$name: expected success, got: $(grep -m1 -E 'ERROR|FATAL' <<<"$out" | cut -c1-140)"
+  elif grep -q "ERROR:  $want:" <<<"$out"; then pass "$name ($want)"
+  else fail "$name: expected $want, got: $(grep -m1 -E 'ERROR|FATAL' <<<"$out" | cut -c1-140 || echo 'no error')"; fi
+}
+HBA="$GUARD_PGDATA/pg_hba.conf"
+HBA_ORIG="$WORK/pg_hba.conf.orig"
+cp -p "$HBA" "$HBA_ORIG"
+snippet() { grep -vE '^[[:space:]]*(#|$)' "$SQL/pg_hba-summary.conf"; }
+hba_write() { /bin/cat > "$HBA.new" && /bin/cat "$HBA.new" > "$HBA" && rm -f "$HBA.new"; }
+hba_good() { { snippet; /bin/cat "$HBA_ORIG"; } | hba_write; }
+reload() { su -c "select pg_reload_conf()" >/dev/null; sleep 1; }
+# Effective state that the rollback must restore: roles, the effective
+# sdr_agent_dev ACL and be_lo* function ACLs as (grantor, grantee, privilege,
+# grantability) tuples, the probed roles' TEMP and large-object reach, the
+# summary schema, default ACLs, large objects, and pg_hba (rules and bytes).
+state() {
+  su -c "SELECT 'roles=' || (SELECT string_agg(rolname::text, ',' ORDER BY rolname::text COLLATE \"C\") FROM pg_roles WHERE rolname !~ '^pg_')
+         UNION ALL SELECT 'db_acl=' || (SELECT string_agg(x, ',' ORDER BY x COLLATE \"C\") FROM (
+           SELECT format('%s>%s:%s:%s', pg_get_userbyid(a.grantor), CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END, a.privilege_type, a.is_grantable) AS x
+           FROM pg_database d, aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a WHERE d.datname = 'sdr_agent_dev') y)
+         UNION ALL SELECT 'lo_acl=' || (SELECT string_agg(x, ',' ORDER BY x COLLATE \"C\") FROM (
+           SELECT format('%s:%s>%s:%s:%s', p.oid::regprocedure, pg_get_userbyid(a.grantor), CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END, a.privilege_type, a.is_grantable) AS x
+           FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+           WHERE l.lanname = 'internal' AND p.prosrc LIKE 'be\\_lo%') y)
+         UNION ALL SELECT 'reach=' || (SELECT string_agg(r || ':temp=' || has_database_privilege(r, 'sdr_agent_dev', 'TEMP')
+             || ',lo=' || (SELECT count(*) FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+                           WHERE l.lanname = 'internal' AND p.prosrc LIKE 'be\\_lo%' AND has_function_privilege(r, p.oid, 'EXECUTE')), ';' ORDER BY r)
+           FROM unnest(ARRAY['adv_plain', 'adv_tempgrant', 'postgres', 'public']) AS r)
+         UNION ALL SELECT 'summary_schema=' || count(*) FROM pg_namespace WHERE nspname = 'summary'
+         UNION ALL SELECT 'default_acl=' || count(*) FROM pg_default_acl
+         UNION ALL SELECT 'large_objects=' || count(*) FROM pg_largeobject_metadata
+         UNION ALL SELECT 'hba_rules=' || (SELECT string_agg(concat_ws('|', rule_number, type, database::text, user_name::text, address, netmask, auth_method, error), ';' ORDER BY rule_number) FROM pg_hba_file_rules)"
+  echo "hba_sha256=$(sha "$HBA")"
+}
+acls() { su -c "SELECT (SELECT coalesce(datacl::text, '(default)') FROM pg_database WHERE datname = 'sdr_agent_dev') || ' ' || (SELECT string_agg(coalesce(p.proacl::text, '(default)'), ' ' ORDER BY p.oid) FROM pg_proc p WHERE p.prosrc LIKE 'be\\_lo%')"; }
+S0=$(state)
+log "   prior state sha256 $(printf '%s\n' "$S0" | shasum -a 256 | cut -d' ' -f1) ($(grep -c . <<<"$S0") lines)"
+
+# Acceptance on a throwaway cluster through the same owner script.
+ACC="$WORK/accept.out"
+run_accept() { env ACCEPT_PSQL="$PSQL" bash "$SQL/accept.sh" "$GUARD_PORT" > "$ACC" 2>&1; }
+# Every line accept.sh prints is a fixed label line.
+accept_closed() { ! grep -vqE '^ACCEPT(ANCE)? ' "$ACC"; }
+accept_pass() {
+  local rc; run_accept; rc=$?
+  if [ "$rc" = 0 ] && [ "$(tail -1 "$ACC")" = "ACCEPTANCE PASS" ] && ! grep -q '|STOP' "$ACC" \
+     && [ "$(grep -c '|ok$' "$ACC")" = 18 ] && accept_closed; then pass "$1: ACCEPTANCE PASS (18 ok, exit 0, labels only)"
+  else fail "$1: accept exit=$rc STOP: $(grep '|STOP' "$ACC" | cut -d' ' -f2 | tr '\n' ' ') last: $(tail -1 "$ACC")"; fi
+}
+# accept_stop NAME "N N ...": exit 3, last line ACCEPTANCE STOP, each named
+# check STOP, labels only.
+accept_stop() {
+  local name=$1 want=$2 rc n miss=""; run_accept; rc=$?
+  cp "$ACC" "$ACC.stop"
+  for n in $want; do grep -qE "^ACCEPT $n .*\|STOP(\||$)" "$ACC" || miss="$miss $n"; done
+  if [ "$rc" = 3 ] && [ "$(tail -1 "$ACC")" = "ACCEPTANCE STOP" ] && [ -z "$miss" ] && ! grep -q '^ACCEPTANCE PASS' "$ACC" && accept_closed; then
+    pass "acceptance STOPs on $name (exit 3; STOP: $(grep -E '\|STOP' "$ACC" | cut -d' ' -f2 | sort -un | tr '\n' ' '))"
+  else fail "acceptance did not STOP on $name: exit=$rc missing STOP:$miss last: $(tail -1 "$ACC")"; fi
+}
+
+# 9a. Install alone is not acceptance.
+reverify
+out=$(su -f "$SQL/install.sql" 2>&1)
+[ "$(tail -1 <<<"$out")" = END-OF-SUMMARY-INSTALL ] && pass "owner step: install completes" || { fail "install"; exit 1; }
+accept_stop "a fresh install without the revokes or pg_hba rules" "5 6 9 10 13 15 16"
+
+# 9b. Revokes: inventory first (changes nothing, predicts the effects).
+expect_role "before the revokes: adv_plain creates a temporary table" ok adv_plain sdr_agent_dev -c "create temp table t (i int)"
+expect_role "before the revokes: adv_plain creates and unlinks a large object" ok adv_plain sdr_agent_dev -c "select lo_unlink(lo_create(0))"
+a0=$(acls)
+out=$(su -v mode=inventory -f "$HARDEN" 2>&1); rc=$?
+[ "$rc" = 0 ] && [ "$(acls)" = "$a0" ] && grep -q '^END-OF-REVOKE-PUBLIC-TEMP-LO-INVENTORY (nothing changed)$' <<<"$out" \
+  && pass "inventory mode changes nothing (stored ACLs identical)" || fail "inventory mode: exit=$rc"
+miss=0
+for want in 'effect|adv_plain|f|t|t|17|17' 'effect|adv_tempgrant|f|t|f|17|17' 'effect|postgres|t|t|f|17|0' \
+            'effect|sdr_summary_definer|f|t|t|17|17' 'effect|sdr_summary_login|f|t|t|17|17' 'before|t|17|17|17'; do
+  grep -qxF "$want" <<<"$out" || { miss=$((miss + 1)); log "   missing inventory row: $want"; }
+done
+[ "$miss" = 0 ] && [ "$(grep -c '^effect|' <<<"$out")" = 5 ] \
+  && pass "inventory predicts: login, definer and adv_plain lose TEMP and all 17; adv_tempgrant keeps TEMP, loses 17; postgres keeps both" \
+  || fail "inventory effect rows ($miss missing)"
+reverify
+out=$(su -v mode=apply -f "$HARDEN" 2>&1); rc=$?
+[ "$rc" = 0 ] && [ "$(tail -1 <<<"$out")" = END-OF-REVOKE-PUBLIC-TEMP-LO-APPLIED ] && pass "owner step: revokes applied (exit 0)" || fail "apply: exit=$rc $(grep -m1 -E 'REFUSED|ERROR' <<<"$out")"
+a1=$(acls)
+script_refused "a second apply (precondition: already applied)" '^REFUSED: PUBLIC does not hold exactly' -d "$CI_SU" -v mode=apply -f "$HARDEN"
+[ "$(acls)" = "$a1" ] && pass "  ... and the refused second apply changed nothing" || fail "second apply changed ACLs"
+# The login and the definer.
+expect_err "login CREATE TEMP after the revoke" 42501 -c "$OFF" -c "create temp table adv_t (i int)"
+denied=0
+for call in "lo_close(0)" "lo_creat(-1)" "lo_create(0)" "lo_from_bytea(0, decode('00', 'hex'))" "lo_get(1)" "lo_get(1, 0, 1)" \
+            "lo_lseek(0, 0, 0)" "lo_lseek64(0, 0, 0)" "lo_open(1, 262144)" "lo_put(1, 0, decode('00', 'hex'))" "lo_tell(0)" \
+            "lo_tell64(0)" "lo_truncate(0, 0)" "lo_truncate64(0, 0)" "lo_unlink(1)" "loread(0, 1)" "lowrite(0, decode('00', 'hex'))"; do
+  out=$(lgc -c "$OFF" -c "select $call")
+  grep -q "ERROR:  42501: permission denied for function ${call%%(*}\$" <<<"$out" && denied=$((denied + 1)) || log "   not denied: ${call%%(*}"
+done
+[ "$denied" = 17 ] && pass "login: EXECUTE denied on all 17 large-object functions (42501)" || fail "login: $denied of 17 large-object functions denied"
+printf 'd168 large-object canary\n' > "$WORK/lo-canary"
+out=$(lgc -c "$OFF" -c "\\lo_import $WORK/lo-canary")
+grep -q 'permission denied for function lo_' <<<"$out" && [ "$(su -c "select count(*) from pg_largeobject_metadata")" = 0 ] \
+  && pass "login: client-side \\lo_import (libpq fast-path) denied too, no large object created" || fail "login fast-path lo_import: $(head -1 <<<"$out")"
+expect_err_su "definer CREATE TEMP after the revoke" 42501 -c "set role sdr_summary_definer" -c "create temp table adv_t (i int)"
+expect_err_su "definer lo_create after the revoke" 42501 -c "set role sdr_summary_definer" -c "select lo_create(0)"
+# Other roles, as the inventory predicted.
+expect_role "adv_plain CREATE TEMP in sdr_agent_dev after the revoke" 42501 adv_plain sdr_agent_dev -c "create temp table t (i int)"
+expect_role "adv_plain lo_create in sdr_agent_dev after the revoke" 42501 adv_plain sdr_agent_dev -c "select lo_create(0)"
+expect_role "adv_plain CREATE TEMP in database postgres (revokes are per-database)" ok adv_plain postgres -c "create temp table t (i int)"
+expect_role "adv_plain large object in database postgres (revokes are per-database)" ok adv_plain postgres -c "select lo_unlink(lo_create(0))"
+expect_role "adv_tempgrant CREATE TEMP (explicit grant kept)" ok adv_tempgrant sdr_agent_dev -c "create temp table t (i int)"
+expect_role "adv_tempgrant lo_create (PUBLIC route only)" 42501 adv_tempgrant sdr_agent_dev -c "select lo_create(0)"
+expect_role "postgres (superuser, the app's role) CREATE TEMP" ok postgres sdr_agent_dev -c "create temp table t (i int)"
+expect_role "postgres (superuser, the app's role) large object" ok postgres sdr_agent_dev -c "select lo_unlink(lo_create(0))"
+[ "$(lgc -c "$G3" | norm_fn)" = "$base_g3" ] && [ "$(lgc -c "$POST" | norm_fn)" = "$base_post" ] \
+  && pass "summary functions' results unchanged by the revokes" || fail "summary results changed after the revokes"
+attest_ok "after the revokes (attest alone; not acceptance)"
+accept_stop "the revokes without the pg_hba rules" "13 15 16"
+
+# 9c. pg_hba: edited but not reloaded, then reloaded.
+reverify
+hba_good
+accept_stop "pg_hba.conf edited but not reloaded" "14 15 16"
+reload
+accept_pass "owner path complete (install, revokes, pg_hba reload)"
+out=$("$PSQL" -X -q -At -d "$CI_LG_PG" -c "select 1" 2>&1)
+grep -q 'pg_hba.conf rejects connection' <<<"$out" && pass "login rejected by pg_hba for database postgres" || fail "login reached postgres: $(head -1 <<<"$out")"
+expect_role "adv_plain still connects to database postgres (rules name only the login)" ok adv_plain postgres -c "select 1"
+[ "$(lgc -c "$G3" | norm_fn)" = "$base_g3" ] && pass "login calls g3 through the allow rule, result unchanged" || fail "g3 through pg_hba allow rule"
+
+# 9d. Tampered variants: each must STOP, and pass again once reverted.
+tamper_sql() {
+  local name=$1 want=$2 apply=$3 revert=$4
+  su -c "$apply" >/dev/null 2>&1 || fail "tamper did not apply: $name"
+  accept_stop "$name" "$want"
+  su -c "$revert" >/dev/null 2>&1 || fail "tamper revert failed: $name"
+  accept_pass "after reverting $name"
+}
+tamper_sql "an extra grant: table SELECT on payloads to the login" "1" \
+  "GRANT SELECT ON public.payloads TO sdr_summary_login" "REVOKE SELECT ON public.payloads FROM sdr_summary_login"
+grep -qF 'ACCEPT 1 attest failed: E table-level or sequence privileges of either role (any route)' "$ACC.stop" \
+  && pass "  ... the failed attest check is named by its fixed label" || fail "  ... attest failure names"
+tamper_sql "an extra function: a SECURITY DEFINER function granted to the login" "1" \
+  "CREATE FUNCTION public.adv_secdef() RETURNS bigint LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS 'SELECT count(*) FROM public.payloads'; REVOKE ALL ON FUNCTION public.adv_secdef() FROM PUBLIC; GRANT EXECUTE ON FUNCTION public.adv_secdef() TO sdr_summary_login" \
+  "DROP FUNCTION public.adv_secdef()"
+tamper_sql "a missing TEMP revoke (TEMP granted back to PUBLIC)" "5 6" \
+  "GRANT TEMP ON DATABASE sdr_agent_dev TO PUBLIC" "REVOKE TEMP ON DATABASE sdr_agent_dev FROM PUBLIC"
+tamper_sql "a direct TEMP grant to the login" "1 6" \
+  "GRANT TEMP ON DATABASE sdr_agent_dev TO sdr_summary_login" "REVOKE TEMP ON DATABASE sdr_agent_dev FROM sdr_summary_login"
+tamper_sql "a missing large-object revoke (lo_from_bytea granted back to PUBLIC)" "9 10" \
+  "GRANT EXECUTE ON FUNCTION pg_catalog.lo_from_bytea(oid, bytea) TO PUBLIC" "REVOKE EXECUTE ON FUNCTION pg_catalog.lo_from_bytea(oid, bytea) FROM PUBLIC"
+tamper_sql "a direct large-object grant to the login (lo_create)" "1 10" \
+  "GRANT EXECUTE ON FUNCTION pg_catalog.lo_create(oid) TO sdr_summary_login" "REVOKE EXECUTE ON FUNCTION pg_catalog.lo_create(oid) FROM sdr_summary_login"
+tamper_sql "lo_compat_privileges switched on for the database" "1 11" \
+  "ALTER DATABASE sdr_agent_dev SET lo_compat_privileges = on" "ALTER DATABASE sdr_agent_dev RESET lo_compat_privileges"
+tamper_sql "a wrong role attribute: login CREATEDB" "1" \
+  "ALTER ROLE sdr_summary_login CREATEDB" "ALTER ROLE sdr_summary_login NOCREATEDB"
+tamper_sql "a wrong role attribute: login INHERIT" "1" \
+  "ALTER ROLE sdr_summary_login INHERIT" "ALTER ROLE sdr_summary_login NOINHERIT"
+tamper_sql "a wrong role attribute: definer LOGIN" "1" \
+  "ALTER ROLE sdr_summary_definer LOGIN" "ALTER ROLE sdr_summary_definer NOLOGIN"
+tamper_sql "a changed login search_path default" "1 17" \
+  "ALTER ROLE sdr_summary_login SET search_path = public, pg_catalog" "ALTER ROLE sdr_summary_login SET search_path = pg_catalog"
+tamper_sql "a login read-only default switched off" "1 17" \
+  "ALTER ROLE sdr_summary_login SET default_transaction_read_only = off" "ALTER ROLE sdr_summary_login SET default_transaction_read_only = on"
+tamper_sql "a replaced function body" "1 4" \
+  "DO \$m\$ BEGIN EXECUTE replace(pg_get_functiondef('summary.g3_inventory_v1()'::regprocedure), '-- 5. Context only', '-- 5. Context only (changed)'); END \$m\$" \
+  "DO \$m\$ BEGIN EXECUTE replace(pg_get_functiondef('summary.g3_inventory_v1()'::regprocedure), '-- 5. Context only (changed)', '-- 5. Context only'); END \$m\$"
+reverify
+{ snippet | sed 2d; /bin/cat "$HBA_ORIG"; } | hba_write; reload
+accept_stop "pg_hba without the reject line for other databases over 127.0.0.1" "13 15 16"
+hba_good; reload; accept_pass "after restoring the pg_hba rules"
+{ echo 'host all all 127.0.0.1/32 trust'; snippet; /bin/cat "$HBA_ORIG"; } | hba_write; reload
+accept_stop "a broader trust rule placed before the reviewed rules" "13 15 16"
+hba_good; reload; accept_pass "after restoring the rule order"
+{ snippet; echo 'host all'; /bin/cat "$HBA_ORIG"; } | hba_write; reload
+accept_stop "a pg_hba.conf with an invalid line" "12"
+hba_good; reload; accept_pass "after removing the invalid line"
+sleep 2; touch "$HBA"
+accept_stop "pg_hba.conf changed after its last reload" "14"
+reload; accept_pass "after reloading"
+[ "$(fn_inventory | cut -d'|' -f2,11,12)" = "$HASHES1" ] && pass "function hashes unchanged after every tamper and revert" || fail "function hashes drifted in section 9"
+
+# 9e. Rollback in OWNER-STEPS.md order: sessions ended, uninstall, restore,
+# pg_hba reverted and reloaded. The prior state must return exactly.
+reverify
+su -c "select count(pg_terminate_backend(pid)) from pg_stat_activity where usename = 'sdr_summary_login'" >/dev/null
+out=$(su -f "$SQL/uninstall.sql" 2>&1)
+[ "$(tail -1 <<<"$out")" = END-OF-SUMMARY-UNINSTALL ] && pass "rollback: uninstall completes" || fail "rollback uninstall: $(grep -m1 -E 'REFUSED|ERROR' <<<"$out")"
+out=$(su -v mode=restore -f "$HARDEN" 2>&1); rc=$?
+[ "$rc" = 0 ] && [ "$(tail -1 <<<"$out")" = END-OF-REVOKE-PUBLIC-TEMP-LO-RESTORED ] && pass "rollback: restore re-grants TEMP and the 17 to PUBLIC (exit 0)" || fail "restore: exit=$rc $(grep -m1 -E 'REFUSED|ERROR' <<<"$out")"
+hba_write < "$HBA_ORIG"; reload
+S1=$(state)
+if [ "$S1" = "$S0" ]; then pass "rollback restores the prior state exactly: roles, effective database and be_lo* ACL tuples, TEMP and large-object reach of adv_plain, adv_tempgrant, postgres and PUBLIC, schema, default ACLs, large objects, pg_hba rules and bytes"
+else fail "rollback state differs: $(diff <(printf '%s\n' "$S0") <(printf '%s\n' "$S1") | grep '^[<>]' | cut -c1-60 | tr '\n' ' ')"; fi
+[ "$(acls)" != "$a0" ] && log "   note: stored ACLs are now explicit rather than NULL (default); their effective tuples equal the prior ones"
+expect_role "after rollback: adv_plain creates a temporary table again" ok adv_plain sdr_agent_dev -c "create temp table t (i int)"
+expect_role "after rollback: adv_plain creates a large object again" ok adv_plain sdr_agent_dev -c "select lo_unlink(lo_create(0))"
+out=$("$PSQL" -X -q -At -d "$CI_LG" -c "select 1" 2>&1)
+grep -q 'role "sdr_summary_login" does not exist' <<<"$out" && pass "after rollback the login no longer exists" || fail "login after rollback: $(head -1 <<<"$out")"
+accept_stop "the rolled-back cluster" "1 3 13"
+su -c "REVOKE TEMP ON DATABASE sdr_agent_dev FROM adv_tempgrant" -c "DROP ROLE adv_plain" -c "DROP ROLE adv_tempgrant" >/dev/null
 
 # --- 10. Nothing seeded as secret ever reached the login; outputs closed. ---
 log "-- 10 leakage and closed vocabulary"
