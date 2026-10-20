@@ -40,11 +40,14 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
   `SdrAgent.SDR.DefinitionBootstrapTest` (`run/1`, `start_link/1` with
   `deadline_ms:`, `disposition/1`, `bootstrap_definitions/1`,
   `fetch_definition/1`), plus the compile-time test-build option
-  `test_barrier: pid` of `start_link/1` (new open choice, Codex 480e1baf
-  MF6): the worker, once its work has started and before its first
-  database write, sends `{:c302_bootstrap_started, worker_pid}` to `pid`
-  and waits without timeout for a release that never comes, so only the
-  child's deadline ends it. Absent from dev and prod builds.
+  `test_barrier: pid` of `start_link/1` (Codex 480e1baf MF6, choice 3
+  accepted): the worker, once its work has started and before its first
+  database write, monitors `pid` (the barrier owner), sends
+  `{:c302_bootstrap_started, worker_pid}` to it and waits for a release
+  that never comes; it ends only when the child kills it at the deadline,
+  or, on the owner's `:DOWN`, by terminating with no database work after
+  it (Codex b3f8d053 R3-1), so it cannot outlive its owner. Absent from
+  dev and prod builds.
   """
   use ExUnit.Case, async: false
 
@@ -107,36 +110,24 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
     # before start_link/1 returns, so before any retry or cleanup. No
     # scheduler race: the worker never proceeds past the barrier.
     #
-    # R2-1 (Codex f4ac4874): the synchronous start_link/1 runs in a tracked
-    # controller task, and the announced worker's termination is registered
-    # while that call is still in flight, before the test waits for it. So
-    # if start_link/1 raises after the announcement, hangs, or the test dies
-    # (an ExUnit timeout), on_exit still kills the controller and the
-    # unlinked, barrier-held worker (awaiting each :DOWN) before the tenant
-    # cleanup and the sandbox-mode restore. The worker announces itself
-    # before anything else, so no barrier waiter exists without an
-    # announcement; that wait is bounded.
+    # Cleanup (Codex f4ac4874 R2-1, b3f8d053 R3-1): the synchronous
+    # start_link/1 runs in a controller under a test-owned Task.Supervisor
+    # (start_supervised!/1), not linked to the test, so a caller raise or
+    # exit arrives as a value and cannot kill the test before the announced
+    # worker is received and its termination registered (track!/1); the
+    # test-supervised controller cannot outlive the test. The worker is
+    # bound to its barrier owner (this test process) by the barrier
+    # contract (moduledoc), so it cannot outlive the test either, even
+    # before registration. Every wait is bounded.
     test "T-N10 a blocked worker past a positive deadline is killed; :timeout; then a run converges" do
       preflight!()
       tenant = commit_tenant!()
       parent = self()
       deadline_ms = 300
 
-      controller =
-        Task.async(fn ->
-          :timer.tc(fn -> start_child(deadline_ms: deadline_ms, test_barrier: parent) end)
-        end)
-
-      track!(controller.pid)
-
-      assert_receive {:c302_bootstrap_started, worker},
-                     @wait_ms,
-                     "C3-02: not established: the worker never reached the test barrier"
-
-      track!(worker)
-      assert is_pid(worker) and worker not in [parent, controller.pid]
-
-      {elapsed_us, result} = Task.await(controller, @wait_ms)
+      controller = start_controller!(deadline_ms: deadline_ms, test_barrier: parent)
+      worker = await_announcement!(controller)
+      {elapsed_us, result} = await_controller!(controller)
 
       assert result == {:error, {:definition_bootstrap_failed, :timeout}},
              "C3-02: a blocked worker past the deadline gives the sanitized :timeout class"
@@ -154,6 +145,35 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
       {:ok, [definition]} = converged
       assert_valid!(definition, tenant.id)
       assert registered_events(tenant.id) == 1
+    end
+
+    # The barrier contract (Codex b3f8d053 R3-1 (2)): a barrier-held worker
+    # monitors its owner and terminates on the owner's :DOWN, with no
+    # database work after it. The owner here is a separate process, killed
+    # while the child's deadline is still far away, so the deadline is not
+    # what ends the worker.
+    test "T-N10 a barrier-held worker exits when its barrier owner dies, writing nothing" do
+      preflight!()
+      tenant = commit_tenant!()
+      owner = barrier_owner!()
+      deadline_ms = 5_000
+
+      controller = start_controller!(deadline_ms: deadline_ms, test_barrier: owner)
+      worker = await_announcement!(controller)
+      ref = Process.monitor(worker)
+      Process.exit(owner, :kill)
+
+      assert_receive {:DOWN, ^ref, :process, ^worker, _reason},
+                     div(deadline_ms, 2),
+                     "C3-02: the barrier-held worker must exit on its owner's :DOWN"
+
+      {_elapsed_us, result} = await_controller!(controller)
+      refute match?({:ok, _}, result), "C3-02: a worker that exited is not a success"
+      assert definitions(tenant.id) == [], "C3-02: no database work after the owner died"
+      assert registered_events(tenant.id) == 0
+
+      assert match?({:ok, [%AgentDefinition{}]}, run_bootstrap([])),
+             "C3-02: a later run still converges"
     end
 
     test "T-N10 a deadline is :timeout, then a second run converges" do
@@ -352,6 +372,62 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
   end
 
   defp track!(_other), do: :ok
+
+  # The bootstrap caller in a test-supervised, unlinked task: a raise or an
+  # exit of start_link/1 is a returned `{:exit, reason}`, never a link
+  # signal to the test; the test supervisor stops it when the test ends.
+  defp start_controller!(opts) do
+    supervisor = start_supervised!(Task.Supervisor)
+
+    task =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        :timer.tc(fn -> start_child(opts) end)
+      end)
+
+    track!(task.pid)
+    task
+  end
+
+  # Receives and registers the announced worker before the caller's outcome
+  # is handled (bounded).
+  defp await_announcement!(controller) do
+    receive do
+      {:c302_bootstrap_started, worker} when is_pid(worker) ->
+        track!(worker)
+        assert worker not in [self(), controller.pid]
+        worker
+    after
+      @wait_ms -> flunk("C3-02: not established: the worker never reached the test barrier")
+    end
+  end
+
+  defp await_controller!(controller) do
+    case Task.yield(controller, @wait_ms) || Task.shutdown(controller, :brutal_kill) do
+      {:ok, value} -> value
+      {:exit, reason} -> flunk("C3-02: the bootstrap caller exited: #{short(reason)}")
+      nil -> flunk("C3-02: the bootstrap caller did not return within the bound")
+    end
+  end
+
+  # A barrier owner that is not the test: forwards the worker's announcement
+  # to the test and otherwise only waits (bounded) to be killed.
+  defp barrier_owner! do
+    test = self()
+
+    owner =
+      spawn(fn ->
+        receive do
+          {:c302_bootstrap_started, worker} -> send(test, {:c302_bootstrap_started, worker})
+        after
+          @wait_ms -> :ok
+        end
+
+        Process.sleep(@wait_ms)
+      end)
+
+    track!(owner)
+    owner
+  end
 
   ## Reads and assertions
 
