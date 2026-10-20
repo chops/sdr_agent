@@ -104,8 +104,11 @@ defmodule SdrAgent.Audit do
   """
   defdelegate append(attrs, opts), to: Kernel
 
-  @doc "Runs `fun` in a transaction; guarded denials inside it are appended after it ends."
-  defdelegate transaction(fun), to: Guard
+  @doc """
+  Runs `fun` in a transaction; guarded denials inside it are appended after
+  it ends. `opts` go to `Repo.transaction/2` (e.g. `timeout:`).
+  """
+  defdelegate transaction(fun, opts \\ []), to: Guard
 
   @doc "Stores `content` (insert-if-absent by sha256). System actors only."
   def put_payload(content, content_type, opts) do

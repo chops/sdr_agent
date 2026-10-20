@@ -61,7 +61,7 @@ flowchart LR
         Ingest[WebhookController -> Webhooks.ingest<br/>raw bytes Payload, HMAC verify, dedupe, job, one txn]
         Process[WebhookWorker queue integration<br/>locks first; Reply / outcome / suppression, one txn]
         Rule[unsubscribe_rule Decision<br/>deterministic, never the model]
-        Intake[ReplyIntake seam: AgentRun + agent job<br/>+ sdr.reply.received, reply txn]
+        Intake[ReplyIntake seam: read-only SDRAgent lookup first,<br/>then AgentRun + agent job + sdr.reply.received]
         Classify[ReplyWorker queue agent -> ClassifyReply<br/>reply_classification + ReplyAssessment, no draft]
     end
 
@@ -148,9 +148,11 @@ flowchart LR
     Postgres -- integration job --> Process
     Process --> Rule
     Process --> Domains
-    Process -- sdr.reply.received + same transaction --> Append
-    Process --> Intake
-    Intake -- agent job same txn --> Postgres
+    Process -- reply phase appends --> Append
+    Process -- "T1, definition found: hand-off in the reply txn, then processed" --> Intake
+    Process -. "T1, definition missing: deferred, reply phase commits alone, event stays received, job retries (final: failed :crash)" .-> Postgres
+    Process -- "T2, later attempt or operator retry: own stored matched Reply, hand-off only, with processed" --> Intake
+    Intake -- agent job + sdr.reply.received in the hand-off txn --> Postgres
     Postgres -- agent job --> Classify
     Classify --> Provider
     Classify --> Domains

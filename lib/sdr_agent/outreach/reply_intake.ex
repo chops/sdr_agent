@@ -5,13 +5,18 @@ defmodule SdrAgent.Outreach.ReplyIntake do
   (Outreach is the highest domain; the agent plane sits above it and calls
   its code interfaces). `SdrAgent.Outreach.Webhooks` calls the configured
   implementation (`config :sdr_agent, :reply_intake, Module`; default
-  `SdrAgent.SDR.ReplyIntake`) inside the reply's transaction, so whatever it
-  records commits with the Reply or not at all; a deferral records nothing.
+  `SdrAgent.SDR.ReplyIntake`) inside the event's processing transaction:
+  on the first processing (T1) that is the transaction that writes the
+  Reply, on a later attempt or operator retry of the same event (T2, plan
+  r8 section 6.7) the one that resumes only the hand-off. Whatever it
+  records commits with the event's `processed` transition or not at all; a
+  deferral records nothing.
   """
 
   @doc """
-  Called once per matched reply, as the webhook ingestor, inside the reply
-  transaction: `match` has `lead_id`, `campaign_id`, `enrollment_id`.
+  Called for a matched reply, as the webhook ingestor, inside the event's
+  processing transaction (T1 or T2, see the moduledoc): `match` has
+  `lead_id`, `campaign_id`, `enrollment_id`.
 
   Returns `:ok` (handed off), `{:error, term}` (the whole event rolls back
   and retries) or, C3-02 (plan r8 section 6.7; D-174 Q-O5),

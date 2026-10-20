@@ -283,17 +283,28 @@ defmodule SdrAgent.Audit.Kernel do
     Map.new(@hashed_fields, fn field -> {field, canonical_value(field, Map.get(event, field))} end)
   end
 
-  @doc "The singleton tenant id (MVP), if bootstrapped."
-  def singleton_tenant_id do
+  @doc """
+  The singleton tenant id (MVP), if bootstrapped. Option `timeout:` (ms)
+  is the read's client timeout (AshPostgres passes the query context's
+  `data_layer.timeout` to the repo call); without it the repo default
+  applies.
+  """
+  def singleton_tenant_id(read_opts \\ []) do
     case Tenant
          |> Ash.Query.for_read(:read, %{}, opts())
          |> Ash.Query.filter(singleton == true)
+         |> with_client_timeout(Keyword.get(read_opts, :timeout))
          |> Ash.read_one() do
       {:ok, %{id: id}} -> {:ok, id}
       {:ok, nil} -> {:error, :tenant_not_bootstrapped}
       {:error, error} -> {:error, error}
     end
   end
+
+  defp with_client_timeout(query, nil), do: query
+
+  defp with_client_timeout(query, timeout),
+    do: Ash.Query.set_context(query, %{data_layer: %{timeout: timeout}})
 
   @doc "Locks and returns the tenant's chain head."
   def lock_head(tenant_id) do

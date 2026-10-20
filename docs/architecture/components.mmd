@@ -2,6 +2,7 @@
 graph TB
     subgraph Application["Application"]
         App[Application Supervisor]
+        DefBoot[SDR.DefinitionBootstrap boot child<br/>after Repo, before provider / Oban / Endpoint;<br/>registers the SDRAgent definition, any failure stops the app]
         Budget[Persisted budgets<br/>20/run + 200/UTC day in Postgres]
         ModelProvider[ModelProvider facade<br/>budget + Zoi validation]
         ClaudeCLIAdapter[ClaudeCLI adapter<br/>serialized, tool-free GenServer<br/>per-call SDR witness env, bypass routes scrubbed]
@@ -59,6 +60,8 @@ graph TB
         Bitcoin[Operator-configured Bitcoin node]
     end
 
+    App -- "starts first after the Repo; :ignore with no tenant" --> DefBoot
+    DefBoot -- "SDR.bootstrap_definitions (KRN, idempotent)" --> Domains
     App --> Oban
     App -. "SDR_MODEL_PROVIDER=claude_cli (dev only): the model server tree, started before Oban" .-> ServerSup
     ServerSup -- "one named server, started held" --> ClaudeCLIAdapter

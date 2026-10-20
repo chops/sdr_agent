@@ -51,15 +51,18 @@ defmodule SdrAgent.Audit.Guard do
     result
   end
 
-  @doc "Transaction that defers denial appends until it has finished."
-  def transaction(fun) do
+  @doc """
+  Transaction that defers denial appends until it has finished. `opts` go to
+  `Repo.transaction/2` (e.g. `timeout:`).
+  """
+  def transaction(fun, opts \\ []) do
     if Process.get(@queue) do
-      Repo.transaction(fun)
+      Repo.transaction(fun, opts)
     else
       Process.put(@queue, [])
 
       try do
-        Repo.transaction(fun)
+        Repo.transaction(fun, opts)
       after
         @queue |> Process.delete() |> Enum.reverse() |> Enum.each(&append!/1)
       end
