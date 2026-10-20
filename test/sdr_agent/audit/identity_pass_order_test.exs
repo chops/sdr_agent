@@ -8,7 +8,10 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
 
     * T-O1, per entry point of the section 2.6 table that takes a pass:
       `admit_lead/2`; Suppression `:manual`, `:seed`, `:from_classification`
-      (the `ReplyAssessment :record` scope, after the model call returned);
+      (the `ReplyAssessment :record` scope, after the model call returned:
+      `Outreach.record_assessment/2` driven synchronously in the parked
+      contender after a genuine Fake call and its LLM Decision, Codex
+      65ca9c0 R3-2);
       the webhook reply, unsubscribe, bounce and complaint paths; Account
       `:create`, `:seed`, `:update` with a domain change; Contact `:create`,
       `:seed`, `:change_email`; Lead `:seed`, `:reopen`; Qualification
@@ -40,9 +43,17 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       its pass before its domain row locks, over the trace of the seeding
       process; its first pass (the first account) is also parked for (b)
       and (c).
-    * T-O3: while a Fake model call is blocked (the reply classification,
-      whose `:from_classification` pass follows it), the calling backend
-      holds no advisory lock, and no pass precedes the call in its process.
+    * T-O3: the reply's real ReplyWorker job, run in a contender, is
+      blocked at its Fake reply-classification call (whose
+      `:from_classification` pass follows it). The blocked call is bound
+      to this execution (the reply canary in its input, its process in the
+      contender's run tree, the run's one in-flight classification
+      invocation); a test-scoped trace of the whole run tree, attached
+      before the contender exists, is split by the gate's own monotonic
+      stamps into before the call, the blocked call and after the release.
+      While blocked: no advisory lock on the caller's or the job's backend
+      or anywhere in the database, and no key statement before the call in
+      any process of the run; the pass comes after the release.
 
   Committed-row safety, connections and cleanup: the RED-3 [P] harness
   (below the tests, verbatim): sandbox `:auto` mode, every contender
@@ -98,18 +109,22 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       `Task.Supervisor.start_child/3`, `task/supervisor.ex:540-543`,
       `:603-608`; `task/supervised.ex:69-73`, `:87-89`). Neither inherits
       the process dictionary, so the gate owner is passed through the
-      application env (`BlockingResponder.gate_key/0`) and W2 opts in to
-      the statement trace when it blocks. The call is established as this
-      test's: its input carries this test's reply canary, and its
-      process reaches the contender through spawners (`:parent`) and
-      `$callers` (`descends_from?/3`); an unrelated call fails either
-      check. The contender's own backend is checked too.
+      application env (`BlockingResponder.gate_key/0`), and T-O3 traces
+      the run tree with a test-scoped telemetry handler
+      (`collect_run_tree!/0`, detached at exit) instead of the harness's
+      opt-in. At exit the whole run tree is killed and awaited before the
+      tenant cleanup (`stop_run_tree_on_exit!/1`); the blocked caller is
+      also tracked as soon as it reports.
   """
   use ExUnit.Case, async: false
+
+  import Ecto.Query, only: [from: 2]
 
   alias Ecto.Adapters.SQL.Sandbox
   alias SdrAgent.Accounts
   alias SdrAgent.Actor
+  alias SdrAgent.Agents
+  alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Audit.Kernel, as: AuditKernel
   alias SdrAgent.Audit.Tenant
   alias SdrAgent.AuditCase
@@ -118,15 +133,21 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
   alias SdrAgent.Demo.Seed
   alias SdrAgent.InboxConcurrencyFixtures
   alias SdrAgent.Outreach
+  alias SdrAgent.Outreach.ReplyAssessment
   alias SdrAgent.Outreach.Webhooks
   alias SdrAgent.OutreachFixtures
   alias SdrAgent.Repo
   alias SdrAgent.Research
   alias SdrAgent.Sales
   alias SdrAgent.SalesFixtures
+  alias SdrAgent.SDR.Context, as: SDRContext
+  alias SdrAgent.SDR.Model, as: SDRModel
+  alias SdrAgent.SDR.ReplyWorker
   alias SdrAgent.SDRCase
   alias SdrAgent.SettingsFixtures
   alias SdrAgent.WebhookFixtures
+
+  require Ash.Query
 
   @moduletag timeout: 300_000
 
@@ -202,10 +223,10 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     # process is a `Jido.Exec.TaskSupervisor` child two hops from the
     # contender (see the moduledoc): it inherits no process dictionary, so
     # the gate owner is read from the application env (`@gate`, set for the
-    # test by `OutreachFixtures.put_env!/2`), and it opts in to the
-    # statement trace itself. Owner-bound and bounded: on the owner's
-    # :DOWN, or at the bound, it kills its own process, so no further
-    # database work follows in it.
+    # test by `OutreachFixtures.put_env!/2`); its SQL, from its first
+    # statement, is in T-O3's test-scoped tree trace (`collect_run_tree!/0`).
+    # Owner-bound and bounded: on the owner's :DOWN, or at the bound, it
+    # kills its own process, so no further database work follows in it.
     @gate :c302_t_o3_model_gate
     @wait_ms 10_000
 
@@ -218,15 +239,22 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
 
     def respond(operation, input), do: SdrAgent.SDR.FakeBrain.respond(operation, input)
 
+    # `entered` and `released` are strictly monotonic stamps (the same
+    # clock as the T-O3 tree trace): they split the trace into before the
+    # call, the blocked call and after the release.
     defp block!(owner, text) when is_pid(owner) do
       ref = Process.monitor(owner)
-      Process.put(:c302_trace_to, owner)
+      entered = :erlang.unique_integer([:monotonic])
       %{rows: [[backend]]} = SdrAgent.Repo.query!("SELECT pg_backend_pid()")
-      send(owner, {:c302_model_call, self(), backend, text})
+      send(owner, {:c302_model_call, self(), backend, text, entered})
 
       receive do
-        :c302_model_release -> Process.demonitor(ref, [:flush])
-        {:DOWN, ^ref, :process, _pid, _reason} -> Process.exit(self(), :kill)
+        :c302_model_release ->
+          Process.demonitor(ref, [:flush])
+          send(owner, {:c302_model_released, self(), :erlang.unique_integer([:monotonic])})
+
+        {:DOWN, ^ref, :process, _pid, _reason} ->
+          Process.exit(self(), :kill)
       after
         @wait_ms -> Process.exit(self(), :kill)
       end
@@ -313,38 +341,74 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       ctx = demo!()
       delivery = delivered!(ctx)
       canary = "c302canary#{SalesFixtures.unique()}"
-      matched_reply!(ctx, delivery, "#{@missed_by_rule} Ref #{canary}.")
+      event = matched_reply!(ctx, delivery, "#{@missed_by_rule} Ref #{canary}.")
+      run = reply_run!(ctx, event)
+      job = reply_job!(ctx, run)
       OutreachFixtures.put_env!(BlockingResponder.gate_key(), self())
       OutreachFixtures.put_env!(:fake_model_responder, BlockingResponder)
-      task = contender!(supervisor!(), &classify/0)
+      tag = collect_run_tree!()
+      task = contender!(supervisor!(), fn -> ReplyWorker.perform(job) end)
+      stop_run_tree_on_exit!(task.pid)
 
-      %{caller: caller, backend: backend, text: call_text} = await_model_call!(task)
-      in_run? = descends_from?(caller, task.pid)
-      during_ids = advisory_ids(backend)
-      during_count = advisory_locks(backend)
-      job_count = advisory_locks(backend_of(task))
-      during = statements(task.pid)
-      send(caller, :c302_model_release)
+      # Blocked: the caller is tracked; every sample below is taken while
+      # the call waits at the gate.
+      call = await_model_call!(task)
+      in_run? = descends_from?(call.caller, task.pid)
+      in_flight = in_flight_invocations(ctx, run)
+      caller_ids = advisory_ids(call.backend)
+      caller_locks = advisory_locks(call.backend)
+      job_locks = advisory_locks(backend_of(task))
+      database_locks = database_advisory_locks()
+      send(call.caller, :c302_model_release)
+      released = await_released!(call.caller)
       result = await_result!(task)
-      after_call = statements(caller) ++ statements(task.pid)
+      trace = phases(tree_trace(tag), call.entered, released)
 
-      assert is_binary(call_text) and call_text =~ canary,
-             "C3-02: not established: the blocked call classifies another reply: #{short(call_text)}"
+      # The blocked call is this test's one execution: its reply, its run's
+      # process tree, its run's one in-flight classification invocation.
+      assert is_binary(call.text) and call.text =~ canary,
+             "C3-02: not established: the blocked call classifies another reply: #{short(call.text)}"
 
-      assert in_run?,
-             "C3-02: not established: the model call ran outside the contender's run"
+      assert in_run?, "C3-02: not established: the model call ran outside the contender's run"
 
-      assert during_ids == MapSet.new(),
+      assert [invocation] = in_flight,
+             "C3-02: not established: one in-flight invocation of the run: #{short(in_flight)}"
+
+      assert {invocation.purpose, invocation.idempotency_key} ==
+               {:reply_classification, "#{run.id}:reply_classification:#{run.trigger_signal_id}"},
+             "C3-02: not established: the in-flight call is the run's classification"
+
+      # The trace saw the caller before its call, and nothing ran while it
+      # was blocked but the gate's own report.
+      assert Enum.any?(
+               trace.before,
+               &(&1.pid == call.caller and &1.sql =~ ~r/model_invocations/)
+             ),
+             "C3-02: not established: the caller's pre-call SQL was not observed"
+
+      assert Enum.map(trace.blocked, &{&1.pid, &1.sql}) ==
+               [{call.caller, "SELECT pg_backend_pid()"}],
+             "C3-02: not established: the run did database work while blocked: " <>
+               short(trace.blocked)
+
+      # No key is held while the model call waits.
+      assert caller_ids == MapSet.new(),
              "C3-02: the calling backend holds an identity key during a model call"
 
-      assert during_count == 0, "C3-02: the calling backend holds an advisory lock"
-      assert job_count == 0, "C3-02: the job's backend holds an advisory lock during the call"
-      refute Enum.any?(during, &publishes?/1), "C3-02: a pass preceded the model call"
+      assert caller_locks == 0, "C3-02: the calling backend holds an advisory lock"
+      assert job_locks == 0, "C3-02: the job's backend holds an advisory lock during the call"
+      assert database_locks == 0, "C3-02: an advisory lock is held during the model call"
+
+      before_keys = Enum.filter(trace.before, &(publishes?(&1.sql) or &1.sql =~ ~r/pg_advisory/))
+
+      assert before_keys == [],
+             "C3-02: a key was taken before the model call: #{short(before_keys)}"
+
       refute deadlock?(result), "C3-02: a deadlock: #{short(result)}"
-      assert classified?(result), "the classification must still run: #{short(result)}"
+      assert result == :ok, "the classification must still run: #{short(result)}"
       assert [_suppression] = unsubscribe_replies(ctx)
 
-      assert Enum.any?(after_call, &publishes?/1),
+      assert Enum.any?(trace.after, &publishes?(&1.sql)),
              "C3-02: the classification's suppression takes its key after the model call returned"
     end
   end
@@ -765,20 +829,37 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     writer(tenant.id, [{:email, email}], fn -> Outreach.seed_suppression(attrs, actor: seeder) end)
   end
 
-  # The Fake classifies the matched reply as unsubscribe (UnsubscribeResponder);
-  # the reply worker's ReplyAssessment :record creates the :from_classification
-  # suppression, whose pass is the first in the worker's process.
+  # Codex 65ca9c0 R3-2: the approved entry point's own scope, ReplyAssessment
+  # `:record` (`Outreach.record_assessment/2`), run synchronously in the
+  # parked contender, so the caller-scoped seam and the harness trace see
+  # it. The model call comes first, outside the parked scope and in the
+  # test process: the reply's queued run is started, the Fake classifies
+  # the matched reply as unsubscribe through main's `SDR.Model.call/4`
+  # (a genuine completed, validated invocation), and the LLM
+  # `reply_classification` Decision is recorded through `SDR.Context.decide/4`
+  # with ClassifyReply's exact values (`classify_reply.ex:33-58`, `:64-87`).
+  # Then `record_assessment/2` (actor and values as ClassifyReply's) makes
+  # AssessmentRules create the :from_classification suppression inside that
+  # outer transaction (`assessment_rules.ex:41`, `:140-158`). No assessment
+  # or Decision is fabricated, no policy or released-output check bypassed.
   defp entry!(:suppression_from_classification) do
     ctx = demo!()
     delivery = delivered!(ctx)
-    matched_reply!(ctx, delivery, @missed_by_rule)
-    OutreachFixtures.put_env!(:fake_model_responder, UnsubscribeResponder)
+    event = matched_reply!(ctx, delivery, @missed_by_rule)
+
+    assert unsubscribe_replies(ctx) == [],
+           "precondition: no unsubscribe suppression before the assessment"
+
+    attrs = classified!(ctx, event)
 
     writer(
       ctx.tenant.id,
       [{:email, to_string(delivery.recipient_email)}],
-      &classify/0,
-      %{ok?: &classified?/1}
+      fn -> Outreach.record_assessment(attrs, actor: ctx.agent) end,
+      %{
+        ok?: &match?({:ok, %ReplyAssessment{classification: :unsubscribe}}, &1),
+        after: fn -> assert_classification_suppression!(ctx, attrs) end
+      }
     )
   end
 
@@ -930,7 +1011,15 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
   # holds an id the test does not compute.
   defp writer(tenant_id, keys, run, overrides \\ %{}) do
     Map.merge(
-      %{tenant_id: tenant_id, keys: keys, run: run, ok?: &ok?/1, witness?: true, published: nil},
+      %{
+        tenant_id: tenant_id,
+        keys: keys,
+        run: run,
+        ok?: &ok?/1,
+        witness?: true,
+        published: nil,
+        after: nil
+      },
       overrides
     )
   end
@@ -941,8 +1030,90 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
   defp process(ctx, event, body),
     do: fn -> Webhooks.process(event.id, ctx.tenant.id, body) end
 
-  defp classify, do: Oban.drain_queue(queue: :agent, with_safety: false)
-  defp classified?(result), do: match?(%{success: 1, failure: 0}, result)
+  # The matched reply classified by the Fake outside any parked scope, as
+  # ClassifyReply does before its assessment: the reply's queued run started,
+  # the model call, the LLM Decision. Returns ClassifyReply's assessment
+  # attributes.
+  defp classified!(ctx, event) do
+    run = reply_run!(ctx, event)
+    assert {:ok, run} = Agents.start_run(run, actor: ctx.agent)
+    reply = reply_of!(ctx, event)
+    OutreachFixtures.put_env!(:fake_model_responder, UnsubscribeResponder)
+
+    sdr = %SDRContext{
+      actor: ctx.agent,
+      tenant_id: ctx.tenant.id,
+      run_id: run.id,
+      correlation_id: run.correlation_id,
+      signal_id: run.trigger_signal_id,
+      signal_type: run.trigger_signal_type
+    }
+
+    input = %{reply: %{subject: reply.subject || "", text: reply.body_text}}
+
+    assert {:ok, output, invocation} =
+             SDRModel.call(sdr, :reply_classification, input, reply.lead_id)
+
+    assert {invocation.status, invocation.validation_status} == {:completed, :valid},
+           "precondition: a genuine completed, validated invocation"
+
+    assert {:ok, decision} =
+             SDRContext.decide(
+               sdr,
+               %{
+                 kind: :reply_classification,
+                 mode: :llm,
+                 subject_resource: inspect(Outreach.Reply),
+                 subject_id: reply.id,
+                 model_invocation_id: invocation.id,
+                 output_pointer: "/classification",
+                 inputs: %{
+                   "reply_id" => reply.id,
+                   "body_sha256" => Base.encode16(reply.body_sha256, case: :lower)
+                 },
+                 outcome: output.classification,
+                 outcome_detail: %{
+                   "sentiment" => output.sentiment,
+                   "suggested_next_action" => output.suggested_next_action
+                 },
+                 rationale: output.reason,
+                 confidence: output.confidence
+               },
+               "classify:#{reply.id}",
+               [reply]
+             )
+
+    %{
+      reply_id: reply.id,
+      classification: output.classification,
+      sentiment: output.sentiment,
+      intent: output.intent,
+      suggested_next_action: output.suggested_next_action,
+      confidence: output.confidence,
+      reason: output.reason,
+      agent_run_id: run.id,
+      decision_id: decision.id,
+      model_invocation_id: invocation.id
+    }
+  end
+
+  defp reply_of!(ctx, event) do
+    assert [stored] =
+             Enum.filter(WebhookFixtures.replies!(ctx), &(&1.webhook_event_id == event.id))
+
+    assert {:ok, reply} = Outreach.fetch(Outreach.Reply, stored.id, actor: ctx.agent)
+    reply
+  end
+
+  # The assessment's one :from_classification suppression, cited to its
+  # Decision and reply.
+  defp assert_classification_suppression!(ctx, attrs) do
+    assert [suppression] = unsubscribe_replies(ctx)
+
+    assert {suppression.decision_id, suppression.reply_id} ==
+             {attrs.decision_id, attrs.reply_id},
+           "C3-02: the assessment's own suppression"
+  end
 
   ## T-O1 and T-O2 assertions
 
@@ -964,6 +1135,7 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
 
     refute deadlock?(result) or deadlock?(waited), "C3-02: a deadlock: #{short(result)}"
     assert spec.ok?.(result), "the writer must still succeed: #{short(result)}"
+    if spec.after, do: spec.after.()
     assert waited == {:ok, :ok}, "the same-key contender passes once the writer ended"
 
     assert wait == "advisory", "C3-02: a same-key contender must wait on the advisory lock"
@@ -1075,14 +1247,17 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     count
   end
 
-  # Bounded: the blocked call's report, or at once the contender's own end
-  # (it returned or exited without the call reaching the gate).
+  # Bounded: the blocked call's report (its process, backend, the reply
+  # text it classifies and its entry stamp), or at once the contender's own
+  # end (it returned or exited without the call reaching the gate).
   defp await_model_call!(task) do
     ref = task.ref
 
     receive do
-      {:c302_model_call, caller, backend, text} ->
-        %{caller: caller, backend: backend, text: text}
+      {:c302_model_call, caller, backend, text, entered} ->
+        # Tracked before any assertion: killed and awaited at test exit.
+        track!(caller)
+        %{caller: caller, backend: backend, text: text, entered: entered}
 
       {^ref, result} ->
         flunk("C3-02: not established: the run ended before its model call: #{short(result)}")
@@ -1125,6 +1300,175 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     end
   end
 
+  defp await_released!(caller) do
+    receive do
+      {:c302_model_released, ^caller, released} -> released
+    after
+      @wait_ms -> flunk("C3-02: the released model call never resumed")
+    end
+  end
+
+  # The run's invocations not yet settled (reserved or sent), as the agent.
+  defp in_flight_invocations(ctx, run) do
+    {:ok, invocations} = Agents.list_model_invocations(run.id, actor: ctx.agent)
+    Enum.filter(invocations, &(&1.status in [:reserved, :sent]))
+  end
+
+  # Every advisory lock of this database, any backend, mode or form.
+  defp database_advisory_locks do
+    %{rows: [[count]]} =
+      Repo.query!(
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = " <>
+          "(SELECT oid FROM pg_database WHERE datname = current_database())"
+      )
+
+    count
+  end
+
+  ## T-O3: a test-scoped trace and stop of the contender's run tree
+
+  # Attached by T-O3 only, before its contender exists, and detached at
+  # exit (no production instrumentation changes): every statement of a
+  # process that is, or reaches through spawners and `$callers`
+  # (`spawners/1`), a process opted in to the harness trace for this test
+  # (`:c302_trace_to` == the test process, i.e. the contender) is sent to
+  # the test process with a strictly monotonic stamp taken in the sending
+  # process when the statement's telemetry fires. It sees Jido's turn and
+  # action workers from their first statement. A handler error drops the
+  # event (telemetry would otherwise detach the handler); a dropped
+  # pre-call event fails the precondition that the caller's pre-call SQL
+  # was observed.
+  defp collect_run_tree! do
+    tag = make_ref()
+    handler = "c3-02-t-o3-tree-#{System.unique_integer([:positive])}"
+    config = %{owner: self(), tag: tag}
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:sdr_agent, :repo, :query],
+        &__MODULE__.collect_tree_query/4,
+        config
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+    tag
+  end
+
+  @doc false
+  def collect_tree_query(_event, _measurements, metadata, %{owner: owner, tag: tag}) do
+    if in_run_tree?(self(), owner, 6) do
+      stamp = :erlang.unique_integer([:monotonic])
+      send(owner, {tag, stamp, self(), IO.iodata_to_binary(metadata.query)})
+    end
+
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp in_run_tree?(pid, owner, depth) do
+    traced_for?(pid, owner) or
+      (depth > 0 and Enum.any?(spawners(pid), &in_run_tree?(&1, owner, depth - 1)))
+  end
+
+  defp traced_for?(pid, owner) when pid == self(), do: Process.get(:c302_trace_to) == owner
+
+  defp traced_for?(pid, owner) do
+    case Process.info(pid, :dictionary) do
+      {:dictionary, dictionary} ->
+        List.keyfind(dictionary, :c302_trace_to, 0) == {:c302_trace_to, owner}
+
+      nil ->
+        false
+    end
+  end
+
+  # The tree trace so far (non-blocking drain), in stamp order.
+  defp tree_trace(tag), do: tag |> drain_tree([]) |> Enum.sort_by(& &1.stamp)
+
+  defp drain_tree(tag, acc) do
+    receive do
+      {^tag, stamp, pid, sql} -> drain_tree(tag, [%{stamp: stamp, pid: pid, sql: sql} | acc])
+    after
+      0 -> acc
+    end
+  end
+
+  # Split by the gate's stamps: before the call, while blocked, after the
+  # release.
+  defp phases(trace, entered, released) do
+    %{
+      before: Enum.filter(trace, &(&1.stamp < entered)),
+      blocked: Enum.filter(trace, &(&1.stamp > entered and &1.stamp < released)),
+      after: Enum.filter(trace, &(&1.stamp > released))
+    }
+  end
+
+  # Registered right after the contender starts, so at exit it runs before
+  # the contender's own tracker: the contender and every live process
+  # started on its behalf (spawner or `$callers` chain to it: Jido's turn
+  # and action workers and their guards) are killed and awaited (bounded),
+  # then the scan is repeated from all of them for any process started
+  # meanwhile. No run-tree process survives into the tenant cleanup.
+  defp stop_run_tree_on_exit!(root) do
+    on_exit(fn ->
+      first = run_tree(MapSet.new([root]))
+      stop_all!(first)
+      first |> run_tree() |> MapSet.difference(first) |> stop_all!()
+    end)
+  end
+
+  defp run_tree(set) do
+    grown =
+      for pid <- Process.list(),
+          not MapSet.member?(set, pid),
+          Enum.any?(spawners(pid), &MapSet.member?(set, &1)),
+          into: set,
+          do: pid
+
+    if MapSet.size(grown) == MapSet.size(set), do: set, else: run_tree(grown)
+  end
+
+  defp stop_all!(pids) do
+    monitors = for pid <- pids, do: {pid, Process.monitor(pid)}
+    Enum.each(monitors, fn {pid, _ref} -> Process.exit(pid, :kill) end)
+
+    for {pid, ref} <- monitors do
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        @wait_ms -> flunk("C3-02: a run-tree process did not terminate")
+      end
+    end
+  end
+
+  # The reply's queued AgentRun (ReplyIntake, correlated by the event) and
+  # its ReplyWorker job (by the run id).
+  defp reply_run!(ctx, event) do
+    assert [run] =
+             AgentRun
+             |> Ash.Query.filter(tenant_id == ^ctx.tenant.id and correlation_id == ^event.id)
+             |> Ash.read!(AuditKernel.opts(ctx.tenant.id))
+
+    assert run.status == :queued
+    run
+  end
+
+  defp reply_job!(ctx, run) do
+    job =
+      Repo.one!(
+        from(j in Oban.Job,
+          where:
+            j.worker == "SdrAgent.SDR.ReplyWorker" and
+              fragment("?->>'run_id' = ?", j.args, ^run.id)
+        )
+      )
+
+    assert job.args["tenant_id"] == ctx.tenant.id
+    job
+  end
+
   ## Fixtures (main's APIs; committed after preflight)
 
   defp tenant! do
@@ -1163,11 +1507,13 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     OutreachFixtures.outreach!(ctx, approved.delivery)
   end
 
-  # A matched reply ingested and processed (its classification job queued).
+  # A matched reply ingested and processed (its classification run and job
+  # queued); returns its WebhookEvent.
   defp matched_reply!(ctx, delivery, text) do
     body = WebhookFixtures.reply_body(delivery, text)
     event = ingest!("reply", body)
     assert Webhooks.process(event.id, ctx.tenant.id, body) == :ok
+    event
   end
 
   defp ingest!(type, body) do
