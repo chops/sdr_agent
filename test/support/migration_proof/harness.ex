@@ -4,8 +4,10 @@ defmodule SdrAgent.MigrationProof.Harness do
   (`SdrAgent.Sales.AdditiveMigrationProofTest`): the migration
   `20261020053346_c3_02_admission_additive` really dispatches
   `SdrAgent.Sales.AdmissionPrechecks.run!/1` and then
-  `SdrAgent.Sales.CutoverFence.run!/1` before any DDL, and an abort leaves
-  the database as it was. It follows `SdrAgent.RestartProof.Harness`.
+  `SdrAgent.Sales.CutoverFence.run!/1` before its index, column, table or
+  row changes (after `CREATE FUNCTION sdr_canonical_domain(text)` in the
+  same transaction), and an abort persists no DDL, schema or row change. It
+  follows `SdrAgent.RestartProof.Harness`.
 
   `prove/1` claims resources, runs the children and cleans up:
 

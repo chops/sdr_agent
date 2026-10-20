@@ -10,9 +10,11 @@ defmodule SdrAgent.Sales.AdditiveMigrationProofTest do
       first), counts only;
     * with only the covered contact, it aborts with `CutoverFence.Aborted`,
       counts only;
-    * after each abort no DDL of the migration is present (not even
-      `sdr_canonical_domain(text)`, created before the pre-checks), its
-      version is not recorded and the planned rows are unchanged;
+    * after each abort no DDL, schema or row change of the migration
+      persists: its transaction ran `CREATE FUNCTION
+      sdr_canonical_domain(text)` before the pre-checks (they need it), and
+      the abort rolled that back with everything else; its version is not
+      recorded and the planned rows are unchanged;
     * with neither, it applies, and the same facts all read true (the
       facts can see the DDL).
 
@@ -159,7 +161,7 @@ defmodule SdrAgent.Sales.AdditiveMigrationProofTest do
     end
   end
 
-  test "the additive migration runs the pre-checks, then the fence, before any DDL" do
+  test "the additive migration runs the pre-checks, then the fence; an abort persists no DDL, schema or row change" do
     sfx = suffix()
     mix = System.find_executable("mix") || flunk("mix is not on PATH")
 
@@ -229,7 +231,7 @@ defmodule SdrAgent.Sales.AdditiveMigrationProofTest do
     end
 
     assert facts(result) == Map.new(@facts, &{&1, false}),
-           "C3-02: an aborted migration leaves no DDL: #{inspect(result["facts"])}"
+           "C3-02: an aborted migration persists no DDL or schema change: #{inspect(result["facts"])}"
 
     assert result["rows_after"] == result["rows_before"],
            "C3-02: an aborted migration changes no row"
