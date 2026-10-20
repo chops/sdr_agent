@@ -5,9 +5,12 @@ defmodule SdrAgent.Test.WitnessRootTest do
   `tmp/witness-roots`. It never adopts an existing directory: it tries a
   bounded number of collision-resistant candidates with an atomic `mkdir`,
   skips one that already exists, and refuses when every candidate is taken.
-  The candidate suffixes can be given (`suffixes:`), so the collision path is
-  tested deterministically. Ownership, mode 0700 and the physical-ancestry
-  rule are unchanged.
+  The candidate suffixes can be given (`suffixes:`, at most 5, each a single
+  filename component), so the collision path is tested deterministically; by
+  default 5 random 32-hex suffixes are tried. Any error other than `:eexist`
+  propagates at once. Prefixes are kept verbatim (some callers pass spaces or
+  control characters on purpose, to test store-path refusal). Ownership, mode
+  0700 and the physical-ancestry rule are unchanged.
   """
   use ExUnit.Case, async: true
 
@@ -16,18 +19,31 @@ defmodule SdrAgent.Test.WitnessRootTest do
   @base Path.expand("tmp/witness-roots")
 
   defp require_mkdir_2! do
+    assert Code.ensure_loaded?(WitnessRoot)
+
     assert function_exported?(WitnessRoot, :mkdir!, 2),
            "#208: WitnessRoot.mkdir!/2 (prefix, suffixes:) must exist"
   end
 
   defp tag, do: "t208-#{Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)}"
 
+  # A leftover root this test owns: the leaf is created atomically (an
+  # existing leaf is never adopted) and its cleanup registered before the
+  # marker is written.
   defp leftover!(name) do
+    File.mkdir_p!(@base)
     path = Path.join(@base, name)
-    File.mkdir_p!(path)
-    File.write!(Path.join(path, "leftover"), "kept")
+    File.mkdir!(path)
     on_exit(fn -> File.rm_rf!(path) end)
+    File.write!(Path.join(path, "leftover"), "kept")
     path
+  end
+
+  defp mine(prefix) do
+    case File.ls(@base) do
+      {:ok, names} -> Enum.filter(names, &String.starts_with?(&1, prefix))
+      {:error, :enoent} -> []
+    end
   end
 
   defp mode(path), do: File.stat!(path).mode |> Bitwise.band(0o777)
@@ -65,8 +81,13 @@ defmodule SdrAgent.Test.WitnessRootTest do
   test "default candidates are collision-resistant random suffixes, not a per-VM counter" do
     require_mkdir_2!()
     prefix = tag()
-    roots = for _ <- 1..3, do: WitnessRoot.mkdir!(prefix, [])
-    on_exit(fn -> Enum.each(roots, &File.rm_rf!/1) end)
+
+    roots =
+      for _ <- 1..3 do
+        root = WitnessRoot.mkdir!(prefix, [])
+        on_exit(fn -> File.rm_rf!(root) end)
+        root
+      end
 
     for root <- roots do
       assert Path.basename(root) =~ ~r/\A#{prefix}-[0-9a-f]{32}\z/
@@ -85,5 +106,41 @@ defmodule SdrAgent.Test.WitnessRootTest do
     assert String.starts_with?(Path.basename(root), prefix <> "-")
     assert File.ls!(root) == []
     assert mode(root) == 0o700
+  end
+
+  test "an injected suffix stays one filename component" do
+    require_mkdir_2!()
+    prefix = tag()
+
+    for bad <- ["", "a/b", "..", ".", "a\0b"] do
+      assert_raise ArgumentError, fn -> WitnessRoot.mkdir!(prefix, suffixes: [bad]) end
+    end
+
+    assert mine(prefix) == []
+  end
+
+  test "the candidate count is bounded: at most 5 are tried, more are refused" do
+    require_mkdir_2!()
+    prefix = tag()
+
+    assert_raise ArgumentError, fn ->
+      WitnessRoot.mkdir!(prefix, suffixes: ~w(a b c d e f))
+    end
+
+    assert mine(prefix) == []
+  end
+
+  test "an error other than :eexist propagates at once, without trying the next candidate" do
+    require_mkdir_2!()
+    prefix = tag()
+    too_long = String.duplicate("x", 300)
+
+    error =
+      assert_raise File.Error, fn ->
+        WitnessRoot.mkdir!(prefix, suffixes: [too_long, "next"])
+      end
+
+    assert error.reason == :enametoolong
+    refute File.exists?(Path.join(@base, "#{prefix}-next"))
   end
 end
