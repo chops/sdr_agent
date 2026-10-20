@@ -9,7 +9,8 @@
 -- privilege, grantability) naming either role or on the summary objects,
 -- the occupants of schema summary, and role memberships. Anything not created by install.sql refuses the whole
 -- uninstall (psql exits 3, nothing changed), so DROP OWNED can never delete
--- or revoke something unreviewed. It does not undo optional-revoke-temp.sql.
+-- or revoke something unreviewed. It does not undo revoke-public-temp-lo.sql
+-- (run its mode=restore after this) or the pg_hba rules (OWNER-STEPS.md).
 
 \set ON_ERROR_STOP on
 
