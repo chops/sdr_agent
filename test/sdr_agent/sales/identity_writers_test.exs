@@ -31,9 +31,12 @@ defmodule SdrAgent.Sales.IdentityWritersTest do
   of the writer's keys is `:ok` and a key outside the pass is
   `LateAcquisition`. A refused action fails its transaction, after which
   DBConnection refuses further statements in an enclosing one, so a refusal
-  is observed through the section 2.5 lock statements
-  (`pg_advisory_xact_lock($1::bigint)`, one integer id each, RED-1 T-A15)
-  traced with the Repo query telemetry, and through what was not executed.
+  is observed through the traced pass statements: the published record
+  (`set_config('sdr.identity_pass', $1, true)`, whose ids are the pass's
+  keys) and any `pg_advisory_xact_lock($1::bigint)` (RED-1 T-A15), and
+  through what was not executed. A key already held from an earlier
+  sandbox scope gets no lock statement (section 2.4 rule 8), so the record
+  is the observation of which keys were taken.
   Expected ids are the plan's `H` over the exact preimage bytes (`h/3`, as
   RED-1 T-A1), for the live tenant id.
 
@@ -407,14 +410,31 @@ defmodule SdrAgent.Sales.IdentityWritersTest do
 
   defp unrelated_key, do: {:domain, "c302-unrelated-#{SalesFixtures.unique()}.test"}
 
+  # Every id keyed by the traced statements: the ids of each published pass
+  # record (section 2.3; a key already held from an earlier sandbox scope,
+  # such as the old domain from the account's create, is in the record
+  # without a lock statement, section 2.4 rule 8), plus each lock
+  # statement's single integer parameter.
   defp lock_ids(queries) do
-    for {sql, params} = query <- queries, advisory_lock?(query), param <- params do
-      assert sql =~ ~r/pg_advisory_xact_lock\(\$1::bigint\)/
-      param
-    end
+    published = for query <- queries, publication?(query), id <- record_ids(query), do: id
+
+    locked =
+      for {sql, params} = query <- queries, advisory_lock?(query), param <- params do
+        assert sql =~ ~r/pg_advisory_xact_lock\(\$1::bigint\)/
+        param
+      end
+
+    Enum.uniq(published ++ locked)
+  end
+
+  defp record_ids({_sql, [record]}) do
+    assert record =~ @record_format, "C3-02: the published record is not v1"
+    [_version, _token, _pid, ids] = String.split(record, ";")
+    MapSet.to_list(parse_ids(ids))
   end
 
   defp advisory_lock?({sql, _params}), do: sql =~ "pg_advisory_xact_lock"
+  defp publication?({sql, _params}), do: sql =~ ~r/set_config\(\s*'sdr\.identity_pass'/
 
   defp statement?({sql, _params}, :update, table), do: sql =~ ~r/^\s*UPDATE "#{table}"/
 

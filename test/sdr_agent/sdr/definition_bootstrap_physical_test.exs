@@ -31,10 +31,20 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
   cleanup deletes only rows whose `tenant_id` is that tenant, then the
   tenant row. Provenance snapshots are global and are not touched.
 
+  Failure-safe cleanup: every task and every observed worker is tracked;
+  its termination (kill, then await `:DOWN`) is registered after the
+  tenant's cleanup, so it runs first, then the tenant rows are deleted, then
+  the sandbox mode is restored.
+
   RED form: structural (every subject is new); interface names as in
   `SdrAgent.SDR.DefinitionBootstrapTest` (`run/1`, `start_link/1` with
   `deadline_ms:`, `disposition/1`, `bootstrap_definitions/1`,
-  `fetch_definition/1`).
+  `fetch_definition/1`), plus the compile-time test-build option
+  `test_barrier: pid` of `start_link/1` (new open choice, Codex 480e1baf
+  MF6): the worker, once its work has started and before its first
+  database write, sends `{:c302_bootstrap_started, worker_pid}` to `pid`
+  and waits without timeout for a release that never comes, so only the
+  child's deadline ends it. Absent from dev and prod builds.
   """
   use ExUnit.Case, async: false
 
@@ -91,6 +101,44 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
       assert elsewhere(fn -> ids(definitions(tenant.id)) end) == [definition.id]
     end
 
+    # MF6 (Codex 480e1baf): a worker held at a test-build barrier after its
+    # work started, a positive bounded deadline, the sanitized :timeout, and
+    # the monitored worker gone (killed and its :DOWN awaited by the child)
+    # before start_link/1 returns, so before any retry or cleanup. No
+    # scheduler race: the worker never proceeds past the barrier.
+    test "T-N10 a blocked worker past a positive deadline is killed; :timeout; then a run converges" do
+      preflight!()
+      tenant = commit_tenant!()
+      parent = self()
+      deadline_ms = 300
+
+      {elapsed_us, result} =
+        :timer.tc(fn -> start_child(deadline_ms: deadline_ms, test_barrier: parent) end)
+
+      assert_received {:c302_bootstrap_started, worker},
+                      "C3-02: not established: the worker never reached the test barrier"
+
+      track!(worker)
+
+      assert result == {:error, {:definition_bootstrap_failed, :timeout}},
+             "C3-02: a blocked worker past the deadline gives the sanitized :timeout class"
+
+      assert is_pid(worker) and worker != parent
+      refute Process.alive?(worker), "C3-02: the child kills the worker and awaits its :DOWN"
+      assert elapsed_us >= deadline_ms * 1_000, "C3-02: the child waited for the deadline"
+      assert elapsed_us < @wait_ms * 1_000, "C3-02: the wait is bounded"
+
+      # Not asserted: that nothing committed (`:timeout` means "not confirmed").
+      converged = run_bootstrap([])
+
+      assert match?({:ok, [%AgentDefinition{}]}, converged),
+             "C3-02: the next run converges: #{short(converged)}"
+
+      {:ok, [definition]} = converged
+      assert_valid!(definition, tenant.id)
+      assert registered_events(tenant.id) == 1
+    end
+
     test "T-N10 a deadline is :timeout, then a second run converges" do
       preflight!()
       tenant = commit_tenant!()
@@ -119,6 +167,7 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
       tenant = commit_tenant!()
       holder = hold_winner!(tenant)
       loser = Task.async(fn -> bootstrap_definitions(tenant.id) end)
+      track!(loser.pid)
       await_waiter!(holder.backend)
       send(holder.task.pid, {holder.tag, :release})
       assert Task.await(holder.task, @wait_ms) == {:ok, holder.winner_id}
@@ -203,6 +252,7 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
         end)
       end)
 
+    track!(task.pid)
     assert_receive {^tag, :held, backend, winner_id}, @wait_ms
     %{task: task, tag: tag, backend: backend, winner_id: winner_id}
   end
@@ -261,7 +311,30 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
     pid
   end
 
-  defp elsewhere(fun), do: fun |> Task.async() |> Task.await(@wait_ms)
+  defp elsewhere(fun) do
+    task = Task.async(fun)
+    track!(task.pid)
+    Task.await(task, @wait_ms)
+  end
+
+  # Failure-safe termination: registered after the tenant's cleanup, so
+  # (on_exit runs in reverse order) every contender or worker is killed and
+  # its :DOWN awaited before the tenant rows are deleted and before the
+  # sandbox mode is restored, even when a barrier assertion fails.
+  defp track!(pid) when is_pid(pid) do
+    on_exit(fn ->
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        @wait_ms -> flunk("C3-02: a tracked process did not terminate")
+      end
+    end)
+  end
+
+  defp track!(_other), do: :ok
 
   ## Reads and assertions
 

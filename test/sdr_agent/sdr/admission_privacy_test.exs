@@ -32,7 +32,11 @@ defmodule SdrAgent.SDR.AdmissionPrivacyTest do
       %{replayed?: true}}`;
     * the queued run's job is found through `agent_runs.operation_id` and
       `operations.oban_job_id`; it is not executed (Oban `testing: :manual`),
-      so its `errors` are asserted as persisted by the admission.
+      so its `errors` are empty by construction and asserted so: this is
+      not coverage of errors an executor persists (a failing research
+      attempt is not exercised here; the webhook job's executed, persisted
+      error is T-K10's case), only of the job's persisted `args` and of the
+      state the admission leaves.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -120,6 +124,12 @@ defmodule SdrAgent.SDR.AdmissionPrivacyTest do
 
       runs = for {_label, :admitted, {:ok, %{run: run}}} <- results, do: run
       assert length(runs) == 3, "C3-02: every admitted scenario returns its queued run"
+
+      # The queued runs' jobs are not executed here (Oban `testing:
+      # :manual`), so their persisted `errors` are empty by construction:
+      # asserted as such, not counted as executor-sanitized error coverage
+      # (that is T-K10's real-execution case for the webhook job).
+      for run <- runs, do: assert(elem(run_job!(run), 0) == "[]")
 
       for run <- runs,
           {job_errors, job_args} <- [run_job!(run)],

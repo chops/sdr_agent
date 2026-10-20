@@ -34,12 +34,18 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
   surface exists, C3-02 changes its behaviour) are labelled in comments.
   Controls pass on main and must stay green.
 
-  The migration pre-checks have no callable surface named by the plan:
-  T-E12 runs the literal section 2.7 SQL predicate, and T-E10/T-E11 run the
-  pre-check predicates over pre-cutover-shaped temporary tables, then pin
-  the post-cutover constraint that makes the state unrepresentable. That
-  the migration runs these predicates and aborts with counts only is GREEN
-  evidence (migration review), not asserted here.
+  The migration pre-checks (T-E10..T-E12) are bound to a shared production
+  surface that the additive migration itself runs (Codex 480e1baf MF3):
+  `SdrAgent.Sales.AdmissionPrechecks.run!/1` (given the repo; `:ok`, or it
+  raises `AdmissionPrechecks.Aborted` whose `counts` and message carry
+  counts only). A static check asserts that a migration under
+  `priv/repo/migrations` calls it and `CutoverFence.run!/1`. Each
+  pre-cutover state is built on the real tables in a rolled-back savepoint
+  (the index that would make it unrepresentable is dropped there); the
+  abort, its counts and the unchanged full rows are asserted in that
+  savepoint, and clean data returns `:ok`. T-E12 also keeps the plan's
+  literal section 2.7 predicate and its agreement with `company/1`; the
+  index enforcement (T-E10) stays a separate test.
 
   Interface names chosen here for review:
     * trigger refusal codes: `raise_exception` or `restrict_violation` (the
@@ -56,14 +62,21 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
       the marker is `Ash.Error.Invalid` on `:source`;
     * `LeadAdmission :record` is reached with only the inputs its action
       accepts (`Ash.Resource.Info.action/2` `accept`).
+    * `SdrAgent.Sales.AdmissionPrechecks.run!/1` and its exception
+      `AdmissionPrechecks.Aborted` (field `counts`, a map with exactly the
+      keys `:canonical_collisions` (accounts in a canonical-collision group),
+      `:double_open_leads` (accounts with more than one open lead) and
+      `:legacy_identity` (accounts whose indexed value fails the section 2.7
+      predicate)); counts are over all tenants;
+    * a manual Lead `:seed` is refused by `leads_admission_binding`, which
+      Ash returns as one `Ash.Error.Unknown.UnknownError` carrying the
+      formatted trigger refusal.
   """
   use SdrAgent.AuditCase, async: false
 
   alias Ecto.Adapters.SQL
   alias SdrAgent.Audit.GuardedCall
-  alias SdrAgent.Audit.RecordHash
   alias SdrAgent.OutreachFixtures
-  alias SdrAgent.Outreach.Locks
   alias SdrAgent.Sales
   alias SdrAgent.Sales.Account
   alias SdrAgent.Sales.Lead
@@ -72,6 +85,9 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
   @lead_admission SdrAgent.Sales.LeadAdmission
   @marker SdrAgent.Sales.Checks.LeadAdmissionContext
   @normalize SdrAgent.Audit.IdentityKeys.Normalize
+  @prechecks SdrAgent.Sales.AdmissionPrechecks
+  @aborted SdrAgent.Sales.AdmissionPrechecks.Aborted
+  @fence SdrAgent.Sales.CutoverFence
 
   @trigger_refusal [:raise_exception, :restrict_violation]
   @kinds [:manual, :csv, :hubspot, :agent_found, :referral]
@@ -326,26 +342,47 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
       assert lead_exists?(id) == false
     end
 
+    # The source-only refusal is isolated on a free account slot (a fresh
+    # account with no lead), so the account index cannot be what refuses it.
+    # The supported boundary is the BEFORE INSERT trigger
+    # leads_admission_binding: through Ash it surfaces as Ash.Error.Unknown
+    # carrying the Postgrex trigger refusal (AshPostgres maps no constraint
+    # for it). Attribution: with only that trigger disabled the same call
+    # inserts. Control: the same inputs with source :fixture insert.
     test "T-E3 Lead :seed stays the fixture path; it cannot write a manual lead", ctx do
+      guard_lead_columns!()
+      guard_binding_trigger!()
+
       assert Ash.Resource.Info.attribute(Lead, :admission_id),
              "C3-02: the Lead attribute :admission_id is not defined"
 
-      fixture = seed_lead!(ctx, ctx.contact)
-      assert {fixture.source, Map.get(fixture, :admission_id)} == {:fixture, nil}
-
-      # Behavioural: main's :seed accepts source :manual without an admission.
+      account = SalesFixtures.account!(ctx.tenant)
+      contact = SalesFixtures.contact!(ctx.tenant, account)
+      assert lead_count(account) == 0
+      events = length(events_of_type(ctx.tenant, "sales.lead.created"))
       id = Ecto.UUID.generate()
 
-      result =
-        attempt(fn ->
-          Sales.seed_lead(
-            %{id: id, contact_id: ctx.colleague.id, account_id: ctx.account.id, source: :manual},
-            actor: ctx.seeder
-          )
-        end)
-
-      refute match?({:ok, _}, result), "C3-02: a manual lead without an admission is impossible"
+      refused = seed_with_source(ctx, contact, id, :manual)
+      assert_trigger_refusal!(refused, "Lead :seed with source :manual")
       assert lead_exists?(id) == false
+      assert lead_count(account) == 0
+      assert length(events_of_type(ctx.tenant, "sales.lead.created")) == events
+
+      assert {:error, {:attributed, attributed}} =
+               Repo.transaction(fn ->
+                 Repo.query!("ALTER TABLE leads DISABLE TRIGGER leads_admission_binding")
+                 Repo.rollback({:attributed, seed_with_source(ctx, contact, id, :manual)})
+               end)
+
+      assert match?({:ok, _}, attributed),
+             "C3-02: with only leads_admission_binding disabled the manual seed must insert"
+
+      assert lead_exists?(id) == false
+
+      assert {:ok, fixture} = seed_with_source(ctx, contact, id, :fixture)
+      assert {fixture.source, Map.get(fixture, :admission_id)} == {:fixture, nil}
+      assert lead_count(account) == 1
+      assert length(events_of_type(ctx.tenant, "sales.lead.created")) == events + 1
     end
 
     # Behavioural: main's Lead :create accepts source :fixture for an admin.
@@ -606,32 +643,60 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
   end
 
   describe "T-E10..T-E12 migration pre-checks" do
-    test "T-E10 collisions: canonical collisions are counted; the index makes them unrepresentable",
+    # The pre-checks run through the shared production surface the additive
+    # migration calls, `SdrAgent.Sales.AdmissionPrechecks.run!/1` (it raises
+    # `AdmissionPrechecks.Aborted` with counts only, or returns :ok). The
+    # pre-cutover states are built on the real tables inside a rolled-back
+    # savepoint: the new index that makes a state unrepresentable is dropped
+    # there, the rows are written as a database administrator, and the
+    # savepoint rollback restores both. The abort, its counts-only message
+    # and the unchanged rows and hashes are asserted inside that savepoint.
+    test "T-E10..T-E12 the additive migration runs the shared pre-checks and the fence" do
+      present!(@prechecks, :run!, 1)
+      present!(@fence, :run!, 1)
+      sources = migration_sources()
+      assert sources != [], "C3-02: no migration under priv/repo/migrations"
+
+      assert Enum.any?(sources, &(&1 =~ "AdmissionPrechecks.run!")),
+             "C3-02: no migration runs SdrAgent.Sales.AdmissionPrechecks.run!/1"
+
+      assert Enum.any?(sources, &(&1 =~ "CutoverFence.run!")),
+             "C3-02: no migration runs SdrAgent.Sales.CutoverFence.run!/1"
+    end
+
+    test "T-E10..T-E12 clean data passes every pre-check", ctx do
+      guard_prechecks!()
+      legacy_account!(ctx, "www.clean-#{SalesFixtures.unique()}.test")
+      assert call(@prechecks, :run!, [Repo]) == :ok
+    end
+
+    test "T-E10 collisions: canonical collisions abort with counts only; rows and hashes unchanged",
          ctx do
+      guard_prechecks!()
       guard_canonical_index!()
       n = SalesFixtures.unique()
-      Repo.query!("CREATE TEMP TABLE c302_pre_accounts (LIKE accounts)")
-      other_tenant = Ecto.UUID.generate()
 
-      for {tenant_id, domain} <- [
-            {ctx.tenant.id, "www.acme-#{n}.test"},
-            {ctx.tenant.id, "ACME-#{n}.test."},
-            {ctx.tenant.id, "acme-#{n}.test"},
-            {ctx.tenant.id, "eu.acme-#{n}.test"},
-            {other_tenant, "acme-#{n}.test"}
-          ] do
-        {sql, params} = insert_sql("c302_pre_accounts", account_row(tenant_id, domain))
-        Repo.query!(sql, params)
-      end
+      stored = [
+        {ctx.tenant.id, "www.acme-#{n}.test"},
+        {ctx.tenant.id, "ACME-#{n}.test."},
+        {ctx.tenant.id, "acme-#{n}.test"},
+        {ctx.tenant.id, "eu.acme-#{n}.test"},
+        {Ecto.UUID.generate(), "acme-#{n}.test"}
+      ]
 
-      assert %{columns: ["groups", "accounts"], rows: [[1, 3]]} =
-               Repo.query!("""
-               SELECT count(*)::bigint AS groups, coalesce(sum(n), 0)::bigint AS accounts
-               FROM (SELECT count(*) AS n FROM c302_pre_accounts
-                     GROUP BY tenant_id, sdr_canonical_domain(domain::text)
-                     HAVING count(*) > 1) AS g
-               """)
+      result =
+        precheck_state(fn ->
+          drop_index!(canonical_index())
+          Enum.map(stored, fn {tenant_id, domain} -> raw_account!(tenant_id, domain) end)
+        end)
 
+      assert_aborted!(result, %{canonical_collisions: 3, double_open_leads: 0, legacy_identity: 0})
+
+      assert_values_absent!(result, Enum.map(stored, &elem(&1, 1)))
+    end
+
+    test "T-E10 the canonical index makes a collision unrepresentable", ctx do
+      guard_canonical_index!()
       domain = to_string(ctx.account.domain)
 
       for colliding <- ["www." <> domain, "WWW." <> String.upcase(domain) <> "."] do
@@ -643,43 +708,29 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
       assert_accepted!(raw(distinct), "a subdomain stays distinct")
     end
 
-    test "T-E11 double open leads: accounts with two open leads are counted over the open set",
-         ctx do
+    test "T-E11 double open leads: an account with two open leads aborts with counts only", ctx do
+      guard_prechecks!()
       guard_slot!()
-      Repo.query!("CREATE TEMP TABLE c302_pre_leads (LIKE leads)")
-      [a, b, c] = for _ <- 1..3, do: Ecto.UUID.generate()
+      closed_account = SalesFixtures.account!(ctx.tenant)
+      closed_contacts = for _ <- 1..2, do: SalesFixtures.contact!(ctx.tenant, closed_account)
 
-      for {account_id, status} <- [
-            {a, :new},
-            {a, :in_outreach},
-            {b, :assigned},
-            {b, :stopped},
-            {b, :disqualified},
-            {b, :referred},
-            {c, :qualified},
-            {c, :blocked},
-            {c, :replied}
-          ] do
-        row = %{
-          lead_row(ctx, ctx.contact, %{"status" => status, "source" => :fixture})
-          | "account_id" => account_id
-        }
+      rows =
+        [
+          {ctx.contact, :new},
+          {ctx.colleague, :in_outreach},
+          {ctx.other_contact, :assigned}
+        ] ++ Enum.zip(closed_contacts, [:stopped, :disqualified])
 
-        {sql, params} = insert_sql("c302_pre_leads", row)
-        Repo.query!(sql, params)
-      end
+      result =
+        precheck_state(fn ->
+          drop_index!(slot_index())
 
-      open = Enum.map(Locks.open_leads(), &Atom.to_string/1)
+          Enum.map(rows, fn {contact, status} ->
+            raw_lead!(ctx, contact, %{"status" => status, "source" => :fixture})
+          end)
+        end)
 
-      assert %{rows: [[2, 5]]} =
-               Repo.query!(
-                 """
-                 SELECT count(*)::bigint, coalesce(sum(n), 0)::bigint
-                 FROM (SELECT count(*) AS n FROM c302_pre_leads WHERE status = ANY($1::text[])
-                       GROUP BY tenant_id, account_id HAVING count(*) > 1) AS g
-                 """,
-                 [open]
-               )
+      assert_aborted!(result, %{canonical_collisions: 0, double_open_leads: 1, legacy_identity: 0})
     end
 
     test "T-E12 legacy identity: the section 2.7 predicate keeps the two failure kinds apart",
@@ -724,38 +775,24 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
       end
     end
 
-    test "T-E12 legacy identity: failing rows are counted only; rows and hashes unchanged", ctx do
+    test "T-E12 legacy identity: the shared pre-check aborts with counts only; rows and hashes unchanged",
+         ctx do
+      guard_prechecks!()
       guard_canonical_function!()
       n = SalesFixtures.unique()
 
-      stored = [
-        "www.www.x-#{n}.test",
-        "www.test",
-        "www.x-#{n}-pass.test",
-        "x-#{n}-plain.test"
-      ]
+      # The two failure kinds (www.www.x -> different value; www.test ->
+      # invalid indexed form) abort; the valid fixed points pass.
+      stored = ["www.www.x-#{n}.test", "www.test", "www.x-#{n}-pass.test", "x-#{n}-plain.test"]
 
-      accounts = Enum.map(stored, &legacy_account!(ctx, &1))
-      before = Enum.map(accounts, &{to_string(&1.domain), RecordHash.hex(&1)})
+      result =
+        precheck_state(fn -> Enum.map(stored, &raw_account!(ctx.tenant.id, &1)) end)
 
-      assert %{columns: ["failing", "total"], rows: [[2, 4]]} =
-               Repo.query!(
-                 "SELECT count(*) FILTER (WHERE NOT (" <>
-                   @legacy_predicate <>
-                   "))::bigint AS failing, count(*)::bigint AS total " <>
-                   "FROM (SELECT sdr_canonical_domain(domain::text) AS c FROM accounts " <>
-                   "WHERE id = ANY($1::uuid[])) AS s",
-                 [Enum.map(accounts, &dump(&1.id))]
-               )
+      assert_aborted!(result, %{canonical_collisions: 0, double_open_leads: 0, legacy_identity: 2})
 
-      after_check =
-        Enum.map(accounts, fn account ->
-          assert {:ok, fresh} = GuardedCall.get(Account, account.id, actor: ctx.admin)
-          {to_string(fresh.domain), RecordHash.hex(fresh)}
-        end)
-
-      assert after_check == before
-      assert Enum.map(before, &elem(&1, 0)) == stored
+      assert_values_absent!(result, stored)
+      %{before: before} = result
+      assert Enum.map(before, &elem(&1, 1)) == stored
     end
   end
 
@@ -1152,6 +1189,29 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
     )
   end
 
+  defp seed_with_source(ctx, contact, id, source) do
+    Sales.seed_lead(
+      %{id: id, contact_id: contact.id, account_id: contact.account_id, source: source},
+      actor: ctx.seeder
+    )
+  end
+
+  # The trigger refusal as an Ash create returns it: one UnknownError whose
+  # formatted Postgrex error names a trigger refusal code. Nothing else
+  # (no catch-all, no unrelated exception) satisfies it.
+  defp assert_trigger_refusal!(result, label) do
+    assert match?(
+             {:error, %Ash.Error.Unknown{errors: [%Ash.Error.Unknown.UnknownError{}]}},
+             result
+           ),
+           "C3-02: #{label}: expected the leads_admission_binding refusal, got " <>
+             inspect(result, limit: 5)
+
+    {:error, %Ash.Error.Unknown{errors: [%Ash.Error.Unknown.UnknownError{error: text}]}} = result
+    assert is_binary(text) and text =~ "Postgrex.Error"
+    assert text =~ ~r/\((raise_exception|restrict_violation)\)/, "C3-02: #{label}: #{text}"
+  end
+
   # A pre-cutover row in its stored form (the cutover trigger forbids new
   # manual and crm rows, so it is written as a database administrator).
   defp legacy_lead!(ctx, source) do
@@ -1229,6 +1289,119 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
       )
 
     {c, accepted?}
+  end
+
+  ## Migration pre-checks (shared production surface)
+
+  defp guard_prechecks! do
+    present!(@prechecks, :run!, 1)
+
+    assert Code.ensure_loaded?(@aborted) and function_exported?(@aborted, :exception, 1),
+           "C3-02: exception #{inspect(@aborted)} is not defined"
+  end
+
+  defp migration_sources do
+    "../../../priv/repo/migrations/*.exs"
+    |> Path.expand(__DIR__)
+    |> Path.wildcard()
+    |> Enum.map(&File.read!/1)
+  end
+
+  # Builds a pre-cutover state with `build` (returning `[{table, id}]`) in a
+  # savepoint that is always rolled back, runs the shared pre-checks there and
+  # returns the outcome with full-row snapshots taken before and after it.
+  defp precheck_state(build) do
+    {:error, {:precheck, state}} =
+      Repo.transaction(fn ->
+        rows = build.()
+        before = snapshot(rows)
+        outcome = run_prechecks()
+        Repo.rollback({:precheck, %{outcome: outcome, before: before, after: snapshot(rows)}})
+      end)
+
+    state
+  end
+
+  # Only the shared surface's own abort is an outcome; anything else raises.
+  defp run_prechecks do
+    call(@prechecks, :run!, [Repo])
+  rescue
+    error ->
+      if error.__struct__ == @aborted, do: error, else: reraise(error, __STACKTRACE__)
+  end
+
+  defp snapshot(rows) do
+    for {table, id} <- rows do
+      %{rows: [[domain, row]]} =
+        Repo.query!(
+          "SELECT #{if table == "accounts", do: "domain::text", else: "NULL::text"}, " <>
+            "to_jsonb(t)::text FROM #{table} AS t WHERE t.id = $1",
+          [dump(id)]
+        )
+
+      {id, domain, row}
+    end
+  end
+
+  defp assert_aborted!(%{outcome: outcome, before: before, after: after_check}, counts) do
+    assert match?(%{__struct__: @aborted}, outcome),
+           "C3-02: the pre-checks must abort, got #{inspect(outcome, limit: 5)}"
+
+    assert outcome.counts == counts, "C3-02: abort counts #{inspect(outcome.counts)}"
+
+    for {_category, count} <- counts, count > 0 do
+      assert Exception.message(outcome) =~ Integer.to_string(count),
+             "C3-02: the abort message reports the counts"
+    end
+
+    assert after_check == before, "C3-02: an aborting pre-check changes no row"
+  end
+
+  defp assert_values_absent!(%{outcome: outcome}, values) do
+    rendered = Exception.message(outcome) <> " " <> inspect(outcome, limit: :infinity)
+
+    for value <- values, form <- [value, String.downcase(String.trim(value, "."))] do
+      refute rendered =~ form, "C3-02: the abort must carry counts only"
+    end
+  end
+
+  defp raw_account!(tenant_id, domain) do
+    row = account_row(tenant_id, domain)
+    {sql, params} = insert_sql("accounts", row)
+    tamper!(sql, params)
+    {"accounts", row["id"]}
+  end
+
+  defp raw_lead!(ctx, contact, overrides) do
+    row = lead_row(ctx, contact, overrides)
+    {sql, params} = insert_sql("leads", row)
+    tamper!(sql, params)
+    {"leads", row["id"]}
+  end
+
+  defp drop_index!(name), do: Repo.query!("DROP INDEX #{name}")
+
+  defp canonical_index,
+    do:
+      one_index!(
+        "i.indrelid = 'accounts'::regclass AND i.indisunique " <>
+          "AND pg_get_indexdef(i.indexrelid) LIKE '%sdr_canonical_domain(%'"
+      )
+
+  defp slot_index,
+    do:
+      one_index!(
+        "i.indrelid = 'leads'::regclass AND i.indisunique AND i.indpred IS NOT NULL " <>
+          "AND pg_get_indexdef(i.indexrelid) LIKE '%(tenant_id, account_id)%'"
+      )
+
+  defp one_index!(condition) do
+    %{rows: rows} =
+      Repo.query!("SELECT i.indexrelid::regclass::text FROM pg_index i WHERE " <> condition)
+
+    assert match?([[_]], rows), "C3-02: expected exactly one such index, got #{inspect(rows)}"
+    [[name]] = rows
+    name
   end
 
   ## Ash calls

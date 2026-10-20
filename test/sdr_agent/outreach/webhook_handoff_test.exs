@@ -47,8 +47,15 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
       with the new Suppression) and the delivery send gate leaving the
       follow-up delivery cancelled with no capture (every claimable
       delivery of the contact is cancelled by the effects);
-    * "the job's errors" are the `{:error, reason}` values the worker
-      returns, which Oban records in `oban_jobs.errors`.
+    * "the job's errors": the `{:error, reason}` values the worker returns
+      (explicit-attempt cases) and, separately, the error Oban itself
+      persists in `oban_jobs.errors` for one real, bounded execution of a
+      retryable attempt (`Oban.drain_queue/1`, Codex 480e1baf MF5); no error
+      is ever written by the test;
+    * T-K7's matched lead also has two raw sandbox enrollments in other
+      active campaigns (one active, one paused), so the deferred T1 is shown
+      to run ApplySuppression's enrollment-stopping branch, not only
+      ApplyReply's (Codex 480e1baf important 1).
   """
   use SdrAgent.SDRCase, async: false
 
@@ -91,6 +98,7 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
       matched: %{
         delivery: delivery,
         lead: approved.lead,
+        enrollment: enrollment!(ctx, approved.lead),
         followup: followup,
         followup_approval: followup_approval,
         pending: delivery_of!(ctx, followup_approval)
@@ -104,12 +112,25 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
     test "T-K7 definition missing, attempt 1 of 3: deferred, reply phase committed, no hand-off",
          ctx do
       hide_definition!(ctx)
+      # ApplySuppression's enrollment branch (active/paused → stopped) in the
+      # deferred T1 itself: the matched enrollment becomes replied through
+      # ApplyReply, so two more enrollments of the same lead, in other
+      # campaigns, one active and one paused, are the suppression's targets.
+      extra = extra_enrollments!(ctx)
       reply = unsubscribe_reply!(ctx)
 
       assert perform!(reply.event, 1) == @unavailable,
              "C3-02: a missing definition must defer the hand-off, not complete the job"
 
       assert_reply_phase!(ctx, reply)
+
+      for enrollment <- extra do
+        stopped = reload!(ctx, enrollment)
+
+        assert {stopped.status, stopped.stop_reason} == {:stopped, :unsubscribe},
+               "C3-02: the deferred T1 stops the covered contact's active and paused enrollments"
+      end
+
       refute_handoff!(ctx, reply.event)
       assert webhook!(ctx, reply.event).processing_status == :received
 
@@ -303,19 +324,52 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
       assert_reply_phase!(ctx, reply)
       refute_handoff!(ctx, reply.event)
 
-      job = job_of(reply.event)
-
+      # perform/1 is called directly here, so no executor persisted these
+      # attempts' errors; the persisted oban_jobs.errors are checked by the
+      # real-execution case below.
       exposed = [
         @reason,
         Jason.encode!(failed.payload),
         inspect(failure),
         inspect(results),
-        inspect(job.errors),
         log
       ]
 
       for text <- exposed, value <- reply.canaries do
         refute String.contains?(text, value), "C3-02: a reply value reached a failure surface"
+      end
+    end
+
+    # Behavioural RED: on main the executed attempt hands off and returns :ok,
+    # so Oban persists no error. Bounded: one synchronous drain of the
+    # event's own queue, without recursion or scheduled jobs.
+    test "T-K10 a real Oban execution of a retryable missing-definition attempt persists a value-free error for that job",
+         ctx do
+      hide_definition!(ctx)
+      reply = unsubscribe_reply!(ctx)
+      job = job_of(reply.event)
+      assert {job.state, job.attempt, job.errors} == {"available", 0, []}
+
+      {drained, log} =
+        with_log(fn ->
+          Oban.drain_queue(queue: :integration, with_safety: true, with_recursion: false)
+        end)
+
+      assert drained.failure >= 1, "C3-02: the deferred attempt must fail the job for a retry"
+      executed = Repo.reload!(job)
+
+      assert {executed.state, executed.attempt} == {"retryable", 1},
+             "C3-02: a deferred, non-final attempt leaves the job retryable"
+
+      assert [%{"attempt" => 1, "error" => error} | _] = executed.errors,
+             "C3-02: Oban persisted an error entry for this job's attempt"
+
+      assert is_binary(error) and error != ""
+      assert webhook!(ctx, reply.event).processing_status == :received
+      assert_reply_phase!(ctx, reply)
+
+      for text <- [Jason.encode!(executed.errors), log], value <- reply.canaries do
+        refute String.contains?(text, value), "C3-02: a reply value reached oban_jobs.errors"
       end
     end
 
@@ -447,6 +501,32 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
   defp duplicate!(ctx, reply),
     do: unsubscribe_reply!(ctx, message_id: reply.message_id, text: reply.text)
 
+  # Two more enrollments of the matched lead in other active campaigns, one
+  # active and one paused (raw sandbox copies of the matched enrollment row:
+  # :enroll needs a qualified lead, and the lead is in outreach by now).
+  defp extra_enrollments!(ctx) do
+    base = ctx.matched.enrollment
+
+    for {status, atom} <- [{"active", :active}, {"paused", :paused}] do
+      campaign = SalesFixtures.active_campaign!(ctx.tenant)
+      id = Ecto.UUID.generate()
+
+      tamper!(
+        "INSERT INTO campaign_enrollments SELECT (jsonb_populate_record(" <>
+          "NULL::campaign_enrollments, to_jsonb(t) || $2::jsonb)).* " <>
+          "FROM campaign_enrollments AS t WHERE t.id = $1",
+        [
+          Ecto.UUID.dump!(base.id),
+          %{"id" => id, "campaign_id" => campaign.id, "status" => status}
+        ]
+      )
+
+      enrollment = reload!(ctx, %{base | id: id})
+      assert {enrollment.status, enrollment.campaign_id} == {atom, campaign.id}
+      enrollment
+    end
+  end
+
   defp job_of(event) do
     Repo.one!(
       from(j in Oban.Job,
@@ -546,7 +626,7 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
     assert %{status: :stopped, status_reason: "suppressed: unsubscribe_reply"} =
              reload!(ctx, m.lead)
 
-    assert reload!(ctx, enrollment!(ctx, m.lead)).status == :replied
+    assert reload!(ctx, m.enrollment).status == :replied
     assert outreach!(ctx, m.pending).state == :cancelled
     assert draft!(ctx, m.followup).status == :cancelled
     approval = outreach!(ctx, m.followup_approval)

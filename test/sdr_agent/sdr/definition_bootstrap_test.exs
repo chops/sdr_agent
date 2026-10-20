@@ -263,13 +263,15 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
       SettingsFixtures.save_offering!(admin)
       contact = SalesFixtures.contact!(tenant)
 
+      # Source :fixture, the only seed source valid after the cutover (C3-R1,
+      # T-E3); the miss under test does not depend on the lead's source.
       {:ok, lead} =
         Sales.seed_lead(
           %{
             id: Ecto.UUID.generate(),
             contact_id: contact.id,
             account_id: contact.account_id,
-            source: :manual
+            source: :fixture
           },
           actor: system_actor(:seeder, tenant)
         )

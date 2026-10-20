@@ -42,6 +42,12 @@ defmodule SdrAgent.Sales.CutoverFenceTest do
       `candidate_drafts`; no other column (counts only, no values);
     * no options: there is no `counts_sql/1`, and the text is independent
       of application config, OS environment and session settings.
+    * the abort decision is `CutoverFence.run!/1` (given the repo), the
+      function the cutover migration calls: it runs `counts_sql/0` and
+      raises `CutoverFence.Aborted` (field `counts`, a map with exactly the
+      keys `:a`, `:b1`, `:b2`, `:b3`, `:b4`; a message carrying counts only)
+      when any of them is non-zero, else returns `:ok` (Codex 480e1baf MF3:
+      the decision is the reviewed surface, not a test-local predicate).
   """
   use SdrAgent.SDRCase, async: false
 
@@ -53,7 +59,9 @@ defmodule SdrAgent.Sales.CutoverFenceTest do
   alias SdrAgent.Sales.Lead
 
   @fence SdrAgent.Sales.CutoverFence
+  @aborted SdrAgent.Sales.CutoverFence.Aborted
   @categories ["a", "b1", "b2", "b3", "b4"]
+  @category_atoms %{"a" => :a, "b1" => :b1, "b2" => :b2, "b3" => :b3, "b4" => :b4}
   @diagnostic "candidate_drafts"
 
   describe "T-E14 aborting states" do
@@ -248,7 +256,13 @@ defmodule SdrAgent.Sales.CutoverFenceTest do
     apply(module, function, args)
   end
 
-  defp guard_fence!, do: present!(@fence, :counts_sql, 0)
+  defp guard_fence! do
+    present!(@fence, :counts_sql, 0)
+    present!(@fence, :run!, 1)
+
+    assert Code.ensure_loaded?(@aborted) and function_exported?(@aborted, :exception, 1),
+           "C3-02: exception #{inspect(@aborted)} is not defined"
+  end
 
   defp counts! do
     sql = call(@fence, :counts_sql, [])
@@ -268,11 +282,31 @@ defmodule SdrAgent.Sales.CutoverFenceTest do
     expected = Map.merge(Map.new(@categories, &{&1, 0}), Map.new(expected, &stringify/1))
     actual = Map.take(counts, @categories)
     assert actual == expected, "C3-02: #{label}: counts #{inspect(actual)}"
-    assert aborts?(actual) == aborts?(expected)
+    assert_decision!(expected, label)
   end
 
   defp stringify({key, value}), do: {Atom.to_string(key), value}
-  defp aborts?(counts), do: Enum.any?(counts, fn {_category, count} -> count > 0 end)
+
+  # The abort decision the migration executes: CutoverFence.run!/1 over the
+  # same counts_sql/0 text. A non-zero (a)..(b4) raises Aborted carrying the
+  # per-category counts only; all zero returns :ok.
+  defp assert_decision!(expected, label) do
+    counts = Map.new(expected, fn {key, value} -> {Map.fetch!(@category_atoms, key), value} end)
+
+    if Enum.all?(counts, fn {_category, count} -> count == 0 end) do
+      assert call(@fence, :run!, [Repo]) == :ok, "C3-02: #{label}: the fence must pass"
+    else
+      error = assert_raise(@aborted, fn -> call(@fence, :run!, [Repo]) end)
+      assert error.counts == counts, "C3-02: #{label}: abort counts #{inspect(error.counts)}"
+
+      for {_category, count} <- counts, count > 0 do
+        assert Exception.message(error) =~ Integer.to_string(count)
+      end
+
+      # Counts only: no address, domain or other value in the diagnostic.
+      refute Exception.message(error) =~ ~r/@|\.test\b|example\./
+    end
+  end
 
   ## States (main's APIs)
 

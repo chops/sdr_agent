@@ -7,9 +7,11 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
   converted `research_test.exs:412-437` rollback case (section 4.5).
 
   Observation: a telemetry trace of the statements this test process sends
-  while the override runs (the pattern of RED-1 T-A15): the key statement
-  `pg_advisory_xact_lock($1::bigint)`, the pass's publication
-  (`set_config('sdr.identity_pass', ...)`), account `FOR SHARE`, lead
+  while the override runs (the pattern of RED-1 T-A15): the pass's
+  publication (`set_config('sdr.identity_pass', $1, true)`, whose record
+  names the keyed ids; a key already held from an earlier sandbox scope
+  gets no `pg_advisory_xact_lock` statement, section 2.4 rule 8, so the
+  publication is the observed key step), account `FOR SHARE`, lead
   `FOR UPDATE`, the `qualifications` INSERT and the chain head
   `FOR UPDATE` (the first append), in order. No production seam is used.
   T-L5 and T-L6 interleave a change inside the override's own transaction
@@ -43,6 +45,7 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
   alias SdrAgent.SalesFixtures, as: F
 
   @keys SdrAgent.Audit.IdentityKeys
+  @scope_key {SdrAgent.Audit.IdentityKeys, :scope}
   @sdr SdrAgent.SDR
   @injected {__MODULE__, :injected}
   @injecting {__MODULE__, :injecting}
@@ -89,7 +92,7 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
         trace(fn -> Research.override_qualification(override(subject), actor: ctx.reviewer) end)
 
       assert match?({:ok, _}, result), "the flip override must still succeed: #{short(result)}"
-      key = index(queries, @key_lock)
+      key = index(queries, @publication)
       insert = index(queries, @qualification_insert)
       assert key, "C3-02: the override must take its company key (IdentityKeys.pass)"
       assert insert
@@ -97,8 +100,10 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
 
       expected = key_id(ctx.tenant.id, subject.domain)
 
-      assert Enum.map(matching(queries, @key_lock), &lock_params/1) == [[expected]],
-             "C3-02: exactly one key, the domain key of the lead's account, and none later"
+      assert published_ids(queries) == [MapSet.new([expected])],
+             "C3-02: exactly one pass, holding the domain key of the lead's account"
+
+      assert_locks_within!(queries, key, [expected])
     end
 
     test "T-L2 account FOR SHARE, then lead FOR UPDATE, before the INSERT and the first append",
@@ -198,6 +203,12 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
     test "T-L6 a failure after the INSERT rolls the whole override back", ctx do
       subject = subject!(ctx)
       before = length(events(ctx.tenant))
+      # Earlier application scopes (the fixture's Account create, the lead
+      # seed) already took the company key in released savepoints, which the
+      # sandbox keeps (section 2.2, T-A3): the rollback cannot release them.
+      # So the rollback is proven to restore exactly this baseline (record
+      # and held keys), with no lock leaked by the override.
+      baseline = database_state()
 
       {result, queries} =
         trace(
@@ -211,6 +222,8 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
 
       assert match?({:error, %Ash.Error.Invalid{}}, result), "got: #{short(result)}"
       assert Process.get(@injected), "the override must reach its INSERT"
+      assert database_state() == baseline, "C3-02: the rollback restores the record and locks"
+      assert Process.get(@scope_key) == nil, "C3-02: the application scope entry is cleared"
       assert lead_status(ctx, subject.lead) == :disqualified
       assert current_id(ctx, subject.lead) == subject.qualification.id
       assert length(events(ctx.tenant)) == before
@@ -218,8 +231,8 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
 
       pre_insert_order!(queries, subject)
 
-      refute key_id(ctx.tenant.id, subject.domain) in held(),
-             "C3-02: the rolled-back override releases its company key"
+      assert published_ids(queries) == [MapSet.new([key_id(ctx.tenant.id, subject.domain)])],
+             "C3-02: the override passed its company key before the failure"
     end
   end
 
@@ -248,9 +261,11 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
       assert error.field == :lead_id
       assert Process.get(@injected), "C3-02: the company moved after the pass was published"
       publication = index(queries, @publication)
-      keys = for {{sql, _, _}, at} <- Enum.with_index(queries), sql =~ @key_lock, do: at
-      assert length(keys) == 1, "C3-02: the conflict requests no further key"
-      assert Enum.all?(keys, &(&1 < publication))
+
+      assert published_ids(queries) == [MapSet.new([key_id(ctx.tenant.id, subject.domain)])],
+             "C3-02: the conflict requests no further key"
+
+      assert_locks_within!(queries, publication, [key_id(ctx.tenant.id, subject.domain)])
       refute index(queries, @qualification_insert), "C3-02: the conflict comes before the INSERT"
       assert account_domain(ctx, subject.account) == subject.domain
       assert current_id(ctx, subject.lead) == subject.qualification.id
@@ -329,7 +344,7 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
   ## Assertions
 
   defp pre_insert_order!(queries, subject) do
-    key = index(queries, @key_lock)
+    key = index(queries, @publication)
     account = index(queries, @account_share)
     lead = index(queries, @lead_update)
     insert = index(queries, @qualification_insert)
@@ -401,9 +416,10 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
     count
   end
 
-  defp held do
-    %{rows: [[_setting, _pid, ids]]} = Repo.query!(@state_sql)
-    MapSet.new(ids)
+  # The section 2.4 state: the record as read and the held key set.
+  defp database_state do
+    %{rows: [[setting, _pid, ids]]} = Repo.query!(@state_sql)
+    {if(setting == "", do: nil, else: setting), MapSet.new(ids)}
   end
 
   ## In-transaction changes (test-only, raw SQL, rolled back with the override)
@@ -500,7 +516,29 @@ defmodule SdrAgent.Research.OverrideCompanyKeyTest do
   defp matching(queries, pattern),
     do: for({sql, _params, _cast} = query <- queries, sql =~ pattern, do: query)
 
-  defp lock_params({_sql, params, _cast}), do: params
+  # The ids of every pass record published (section 2.3), in order. The
+  # publication is the one statement every first pass makes: a key already
+  # held from an earlier sandbox scope gets no lock statement (rule 8 locks
+  # only requested minus held), but it is in the record.
+  defp published_ids(queries) do
+    for {_sql, params, _cast} <- matching(queries, @publication) do
+      assert [record] = params
+      assert [_version, _token, _pid, ids] = String.split(record, ";")
+
+      if ids == "",
+        do: MapSet.new(),
+        else: ids |> String.split(",") |> MapSet.new(&String.to_integer/1)
+    end
+  end
+
+  # Lock statements, if any, are only for the given ids and before `limit`.
+  defp assert_locks_within!(queries, limit, ids) do
+    for {{sql, params, _cast}, at} <- Enum.with_index(queries), sql =~ @key_lock do
+      assert at < limit, "C3-02: no key is requested after the pass"
+      assert match?([id] when is_integer(id), params)
+      assert hd(params) in ids, "C3-02: only the company key is locked"
+    end
+  end
 
   defp mentions?({_sql, params, cast}, id),
     do: Enum.any?(params ++ cast, &(&1 in [id, dump(id)]))

@@ -24,8 +24,10 @@ defmodule SdrAgent.SDR.AdmitLeadTest do
 
   Not buildable with main's APIs, so not covered here: a last closed lead
   `referred` (C3-03) and the referral handover (C3-03); the step 16
-  snapshot refusal (T-F13 names the code path); the step 9 guard on
-  resolved values (T-F11 says why); the direct-SQL negatives of step 14a
+  snapshot refusal (T-F13 names the code path; its rollback proof is a
+  RED-3 obligation); a step-9 refusal distinct from step 4 (T-F11 says
+  why; the step-9 check itself is pinned by its order through a test-build
+  observer); the direct-SQL negatives of step 14a
   and the DB checks (section 11 E).
 
   Interface names chosen here for review (beyond the RED-2 brief):
@@ -42,6 +44,13 @@ defmodule SdrAgent.SDR.AdmitLeadTest do
       event and one `lead_admissions` row, nothing else;
     * `assign_lead/2` on a missing definition returns
       `{:error, :agent_definition_unavailable}`;
+    * `SdrAgent.SDR.Admission.TestHooks.observe_guard(observer, fun)`, a
+      compile-time test-build, process-local seam (restored in `after`,
+      as `IdentityKeys.TestFaults`): while `fun` runs, every
+      `real_data_permitted?/2` check of the admission also calls
+      `observer.(stage, domain, email)`, `stage` being `:input` (step 4)
+      or `:resolved` (step 9, the stored values after the locks); it never
+      changes a verdict (Codex 480e1baf important 2);
     * `admission.contact_id` is nil for `active_target_exists` and
       `company_in_relationship` (no contact created), `account_id` nil for
       `contact_at_other_account` (packet section 3 check).
@@ -61,6 +70,7 @@ defmodule SdrAgent.SDR.AdmitLeadTest do
   @sdr SdrAgent.SDR
   @admission SdrAgent.Sales.LeadAdmission
   @admission_orchestrator SdrAgent.SDR.Admission
+  @guard_hooks SdrAgent.SDR.Admission.TestHooks
 
   @kinds [:manual, :csv, :hubspot, :agent_found]
   @company_kinds [:csv, :hubspot, :agent_found]
@@ -772,6 +782,32 @@ defmodule SdrAgent.SDR.AdmitLeadTest do
 
       assert changes(before) == @nothing
     end
+
+    # The executable step-9 obligation (Codex 480e1baf important 2): the
+    # second guard check on the resolved stored values after the locks is
+    # not optional even where its verdict equals step 4's over reachable
+    # fixtures. A test-build observer records each guard check in this
+    # process's mailbox, interleaved with the traced statements, so removing
+    # or moving the step-9 check fails here. Synthetic values only.
+    test "T-F11 step 9 re-checks the resolved stored values after the locks, before the first write",
+         ctx do
+      ctx = ready!(ctx, :manual)
+      present!(@guard_hooks, :observe_guard, 2)
+      e = existing(ctx)
+      legacy = legacy_account!(ctx, "www.legacy-#{SalesFixtures.unique()}.test")
+      legacy_domain = String.replace_prefix(legacy.domain, "www.", "")
+
+      cases = [
+        {input(ctx, :manual), :new},
+        {input(ctx, :manual, domain: e.domain), {:stored, e.domain}},
+        {input(ctx, :manual, domain: legacy_domain), {:stored, legacy.domain}}
+      ]
+
+      for {input, resolved} <- cases do
+        sequence = guard_sequence(fn -> admit!(input, ctx.admin, :admitted) end)
+        assert_step9!(sequence, input, resolved)
+      end
+    end
   end
 
   describe "T-F12 settings pre-check" do
@@ -819,6 +855,10 @@ defmodule SdrAgent.SDR.AdmitLeadTest do
   # profile to vanish between the step 8a pre-check and the snapshot (the
   # T-I9/T-I10 races, RED-3). What is reachable here: `admitted` always
   # carries its queued run bound to a snapshot, and a replay builds none.
+  # These two tests are not the snapshot-refusal rollback proof: that
+  # obligation (step 16 refuses, the whole admission writes nothing, the
+  # closed reason is returned) belongs to RED-3's T-I9/T-I10 races, with
+  # whole-admission no-write checks (Codex 480e1baf important 2).
   describe "T-F13 snapshot" do
     setup :offering
 
@@ -1181,6 +1221,109 @@ defmodule SdrAgent.SDR.AdmitLeadTest do
   defp ref(_ctx, :referral), do: "referral:#{Ecto.UUID.generate()}:#{Ecto.UUID.generate()}"
 
   defp canary, do: "c302canary#{SalesFixtures.unique()}"
+
+  ## The step-9 guard observation
+
+  # Runs `fun` with the guard observer and the statement trace attached and
+  # returns the interleaved sequence: `{:guard, stage, domain, email}` and
+  # `{:sql, text}`, in the order this process produced them.
+  defp guard_sequence(fun) do
+    parent = self()
+    handler = "c3-02-admit-guard-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:sdr_agent, :repo, :query],
+        fn _event, _measurements, metadata, _config ->
+          if self() == parent,
+            do: send(parent, {:c302_seq, {:sql, IO.iodata_to_binary(metadata.query)}})
+        end,
+        nil
+      )
+
+    observer = fn stage, domain, email ->
+      send(parent, {:c302_seq, {:guard, stage, domain, email}})
+    end
+
+    try do
+      call(@guard_hooks, :observe_guard, [observer, fun])
+      drain_sequence([])
+    after
+      :telemetry.detach(handler)
+    end
+  end
+
+  defp drain_sequence(acc) do
+    receive do
+      {:c302_seq, item} -> drain_sequence([item | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp assert_step9!(sequence, input, resolved) do
+    guards = for {:guard, _stage, _domain, _email} = g <- sequence, do: g
+
+    assert Enum.map(guards, &elem(&1, 1)) == [:input, :resolved],
+           "C3-02: the guard runs at step 4 on the input and at step 9 on the resolved values"
+
+    [{:guard, :input, _, _}, {:guard, :resolved, domain, email}] = guards
+    assert email == input.person.email
+
+    expected_domain =
+      case resolved do
+        :new -> input.company.domain
+        {:stored, stored} -> stored
+      end
+
+    assert domain == expected_domain, "C3-02: step 9 checks the resolved stored domain"
+
+    at = fn pattern -> Enum.find_index(sequence, &match_sql?(&1, pattern)) end
+    step9 = Enum.find_index(sequence, &match?({:guard, :resolved, _, _}, &1))
+    step4 = Enum.find_index(sequence, &match?({:guard, :input, _, _}, &1))
+    pass = at.(~r/set_config\(\s*'sdr\.identity_pass'/)
+    first_write = at.(~r/^\s*INSERT INTO/)
+    assert pass, "C3-02: the admission's key pass was not observed"
+    assert step4 < pass, "C3-02: step 4 runs before the key pass"
+    assert pass < step9, "C3-02: step 9 runs after the key pass and the locks"
+
+    locks =
+      [~r/FROM "?campaigns"?.*FOR SHARE/s, ~r/FROM "?users"?.*FOR SHARE/s] ++
+        if(match?({:stored, _}, resolved), do: [~r/FROM "?accounts"?.*FOR SHARE/s], else: [])
+
+    for lock <- locks do
+      locked = at.(lock)
+      assert locked && locked < step9, "C3-02: step 9 runs after #{inspect(lock)}"
+    end
+
+    assert first_write && step9 < first_write, "C3-02: step 9 runs before the first write"
+  end
+
+  defp match_sql?({:sql, text}, pattern), do: text =~ pattern
+  defp match_sql?(_item, _pattern), do: false
+
+  defp legacy_account!(ctx, stored_domain) do
+    id = Ecto.UUID.generate()
+
+    tamper!(
+      """
+      INSERT INTO accounts
+        (id, tenant_id, name, domain, source, status, trace_id, span_id, inserted_at, updated_at)
+      VALUES ($1, $2, $3, $4, 'manual', 'active', $5, $6, now(), now())
+      """,
+      [
+        uuid(id),
+        uuid(ctx.tenant.id),
+        "Legacy Co #{SalesFixtures.unique()}",
+        stored_domain,
+        hex(:crypto.strong_rand_bytes(16)),
+        hex(:crypto.strong_rand_bytes(8))
+      ]
+    )
+
+    %{id: id, domain: stored_domain}
+  end
 
   ## Guards and calls
 

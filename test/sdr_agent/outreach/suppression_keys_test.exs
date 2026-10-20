@@ -37,10 +37,13 @@ defmodule SdrAgent.Outreach.SuppressionKeysTest do
       `:ok` and a key outside the pass is `LateAcquisition`;
     * a refused action fails its (nested) transaction, after which
       DBConnection refuses further statements in an enclosing one, so a
-      refusal is observed through the section 2.5 lock statements
-      (`pg_advisory_xact_lock($1::bigint)`, one integer id each, RED-1
-      T-A15) traced with the Repo query telemetry, and through what was not
-      executed (no `UPDATE`/`INSERT` of the refused row);
+      refusal is observed through the traced pass statements: the published
+      record (`set_config('sdr.identity_pass', $1, true)`, whose ids are the
+      pass's keys) and any `pg_advisory_xact_lock($1::bigint)` (RED-1
+      T-A15), and through what was not executed (no `UPDATE`/`INSERT` of the
+      refused row). A key already held from an earlier sandbox scope gets
+      no lock statement (section 2.4 rule 8), so the record, not the lock
+      statements, is the observation of which keys were taken;
     * expected ids are the plan's `H` computed in the test over the exact
       preimage bytes (`h/3`, as RED-1 T-A1), for the live tenant id.
 
@@ -283,9 +286,12 @@ defmodule SdrAgent.Outreach.SuppressionKeysTest do
     test "T-J4 (control) www.test covers a@www.test and www.www.x covers a@www.www.x by email domain",
          ctx do
       n = SalesFixtures.unique()
-      account = account!(ctx, "j4c-#{n}.test")
-      %{lead: plain} = covered_lead!(ctx, account, "a-#{n}@www.test")
-      %{lead: doubled} = covered_lead!(ctx, account, "b-#{n}@www.www.acme-j4c-#{n}.test")
+      # One open lead per account (one_open_per_account, T-E6): each vector
+      # has its own account, neither of whose domain the suppressions name.
+      %{lead: plain} = covered_lead!(ctx, account!(ctx, "j4c-#{n}.test"), "a-#{n}@www.test")
+
+      %{lead: doubled} =
+        covered_lead!(ctx, account!(ctx, "j4c-b-#{n}.test"), "b-#{n}@www.www.acme-j4c-#{n}.test")
 
       assert {:ok, _} = Outreach.suppress(%{scope: :domain, value: "www.test"}, actor: ctx.admin)
       assert reload!(ctx, plain).status == :stopped
@@ -506,8 +512,16 @@ defmodule SdrAgent.Outreach.SuppressionKeysTest do
     assert {:ok, {{:ok, _suppression}, observed}} = result
     assert_pass!(observed, [h(kind, t, preimage)])
 
-    lock_at = Enum.find_index(queries, &advisory_lock?/1)
-    assert lock_at, "C3-02: no identity-key lock statement"
+    # The pass's publication is the observed key step: a key already held
+    # from an earlier sandbox scope (e.g. the contact create's email key)
+    # gets no lock statement (section 2.4 rule 8), but the first pass of a
+    # scope always publishes its record.
+    lock_at = Enum.find_index(queries, &publication?/1)
+    assert lock_at, "C3-02: no identity pass was published"
+
+    for {query, at} <- Enum.with_index(queries), advisory_lock?(query) do
+      assert at < lock_at, "C3-02: every key lock precedes the publication"
+    end
 
     for {label, pattern} <- [
           contacts: ~r/"contacts"/,
@@ -553,14 +567,30 @@ defmodule SdrAgent.Outreach.SuppressionKeysTest do
 
   defp unrelated_key, do: {:domain, "c302-unrelated-#{SalesFixtures.unique()}.test"}
 
+  # Every id keyed by the traced statements: the ids of each published pass
+  # record (section 2.3; a key already held from an earlier sandbox scope is
+  # in the record without a lock statement), plus each lock statement's
+  # single integer parameter.
   defp lock_ids(queries) do
-    for {sql, params} = query <- queries, advisory_lock?(query), param <- params do
-      assert sql =~ ~r/pg_advisory_xact_lock\(\$1::bigint\)/
-      param
-    end
+    published = for query <- queries, publication?(query), id <- record_ids(query), do: id
+
+    locked =
+      for {sql, params} = query <- queries, advisory_lock?(query), param <- params do
+        assert sql =~ ~r/pg_advisory_xact_lock\(\$1::bigint\)/
+        param
+      end
+
+    Enum.uniq(published ++ locked)
+  end
+
+  defp record_ids({_sql, [record]}) do
+    assert record =~ @record_format, "C3-02: the published record is not v1"
+    [_version, _token, _pid, ids] = String.split(record, ";")
+    MapSet.to_list(parse_ids(ids))
   end
 
   defp advisory_lock?({sql, _params}), do: sql =~ "pg_advisory_xact_lock"
+  defp publication?({sql, _params}), do: sql =~ ~r/set_config\(\s*'sdr\.identity_pass'/
 
   defp statement?({sql, _params}, :update, table), do: sql =~ ~r/^\s*UPDATE "#{table}"/
   defp statement?({sql, _params}, :insert, table), do: sql =~ ~r/^\s*INSERT INTO "#{table}"/
