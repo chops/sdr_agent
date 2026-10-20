@@ -264,8 +264,9 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
   # budget is spent, including after a backoff. Observed through the
   # test-build hooks of `DefinitionBootstrap.run/1` (`test_hooks:`, absent
   # from dev and prod): `observer:` receives `{:c302_bootstrap_call, step,
-  # timeout_ms}` for each DB call with the timeout that call is given, and
-  # `{:c302_bootstrap_attempt, n}` for each attempt; `connection_faults:`
+  # timeout}` for each DB call with the client timeout that call is
+  # actually given (`:default` when none), `{:c302_bootstrap_attempt, n}`
+  # and `{:c302_bootstrap_outcome, n, outcome}` for each attempt; `connection_faults:`
   # makes the first n attempts fail as `:connection` before any DB call;
   # `backoff_ms:` and `sleep:` replace the backoff and its sleep. The
   # physical proof that a blocked read is cut off by its client timeout is
@@ -312,21 +313,32 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
 
     test "G3-2 no attempt starts after a backoff that outlived the budget", ctx do
       parent = self()
+      started = System.monotonic_time(:millisecond)
 
       hooks = [
         observer: parent,
         connection_faults: 10,
         backoff_ms: 50,
         sleep: fn ms ->
-          send(parent, {:c302_backoff, ms})
           Process.sleep(ms + 300)
+          send(parent, {:c302_backoff, ms, System.monotonic_time(:millisecond)})
         end
       ]
 
       result = run_bootstrap(deadline_ms: 200, test_hooks: hooks)
-      assert result == {:error, :timeout}, "C3-02: got #{short(result)}"
-      assert_received {:c302_backoff, 50}, "C3-02: not established: no backoff ran"
+
+      # Preconditions: the injected connection failure came first, and the
+      # selected backoff ran and ended past the 200 ms budget.
+      assert [{1, {:error, :connection}} | _] = observed_outcomes(),
+             "C3-02: not established: the first attempt was not the injected connection failure"
+
+      assert_received {:c302_backoff, 50, slept_until}, "C3-02: not established: no backoff ran"
+
+      assert slept_until >= started + 200,
+             "C3-02: not established: the backoff did not outlive the budget"
+
       assert observed_attempts() == [1], "C3-02: a second attempt started after the budget"
+      assert result == {:error, :timeout}, "C3-02: got #{short(result)}"
       assert definitions(ctx.tenant.id) == []
     end
   end
@@ -602,6 +614,14 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
   defp observed_calls do
     receive do
       {:c302_bootstrap_call, step, timeout_ms} -> [{step, timeout_ms} | observed_calls()]
+    after
+      0 -> []
+    end
+  end
+
+  defp observed_outcomes do
+    receive do
+      {:c302_bootstrap_outcome, n, outcome} -> [{n, outcome} | observed_outcomes()]
     after
       0 -> []
     end

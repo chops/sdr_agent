@@ -56,7 +56,14 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   `lock_timeout` and `statement_timeout` are `min(remaining, 5 s)`.
 
   Test-seam builds only (`:claude_cli_test_seams`, compile time; absent from
-  dev and prod): `start_link/1` takes `test_barrier: pid`. The worker, once
+  dev and prod): `run/1` takes `test_hooks:`, which observe and inject but
+  decide nothing: `observer: pid` receives `{:c302_bootstrap_attempt, n}`,
+  `{:c302_bootstrap_outcome, n, outcome}` and, for each DB call,
+  `{:c302_bootstrap_call, step, timeout}` with the client timeout that call
+  is actually given (`:default` when none); `connection_faults: n` fails
+  the first n attempts as `:connection` before any DB call; `backoff_ms:`
+  and `sleep:` replace the backoff value and its sleep. And `start_link/1`
+  takes `test_barrier: pid`. The worker, once
   its work started (after the tenant enumeration) and before its first
   database write, monitors `pid`, sends it `{:c302_bootstrap_started,
   worker}` and waits for a release that never comes: it ends when the child
@@ -188,15 +195,25 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
         now() + Keyword.get(opts, :deadline_ms, configured_deadline_ms())
       end)
 
-    with_retries(deadline, @connection_retries, fn -> run_once(deadline, opts) end)
+    hooks = hooks(opts)
+
+    with_retries(deadline, @connection_retries, hooks, 1, fn n ->
+      attempt(deadline, opts, hooks, n)
+    end)
   end
 
-  defp with_retries(deadline, retries, fun) do
-    case fun.() do
+  defp with_retries(deadline, retries, hooks, n, fun) do
+    observe(hooks, {:c302_bootstrap_attempt, n})
+    outcome = fun.(n)
+    observe(hooks, {:c302_bootstrap_outcome, n, outcome})
+
+    case outcome do
       {:error, :connection} when retries > 0 ->
-        if remaining(deadline) > @backoff_ms do
-          Process.sleep(@backoff_ms)
-          with_retries(deadline, retries - 1, fun)
+        backoff = backoff_ms(hooks)
+
+        if remaining(deadline) > backoff do
+          sleep(hooks, backoff)
+          with_retries(deadline, retries - 1, hooks, n + 1, fun)
         else
           {:error, :connection}
         end
@@ -206,15 +223,15 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
     end
   end
 
-  defp run_once(deadline, opts) do
-    case tenant() do
+  defp run_once(deadline, opts, hooks) do
+    case tenant(hooks) do
       :no_tenant ->
         :no_tenant
 
       {:ok, tenant_id} ->
         barrier(opts)
 
-        case register(tenant_id, step_ms: min(remaining(deadline), @step_ms)) do
+        case register(tenant_id, step_ms: min(remaining(deadline), @step_ms), hooks: hooks) do
           {:ok, definition} -> {:ok, [definition]}
           {:error, :bootstrap_in_transaction} -> {:error, :crash}
           {:error, class} -> {:error, class}
@@ -225,7 +242,11 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
     end
   end
 
-  defp tenant do
+  # `Kernel.singleton_tenant_id/0` is given no client timeout: the repo
+  # default applies (observed as `:default`).
+  defp tenant(hooks) do
+    observe(hooks, {:c302_bootstrap_call, :tenant, :default})
+
     case Kernel.singleton_tenant_id() do
       {:ok, tenant_id} -> {:ok, tenant_id}
       {:error, :tenant_not_bootstrapped} -> :no_tenant
@@ -254,6 +275,36 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
     defp barrier(_opts), do: :ok
   end
 
+  # Test-seam builds only (compile time; absent from dev and prod): the
+  # caller's `test_hooks:` of `run/1` (see the moduledoc). They observe and
+  # inject; they change no timeout and no retry decision of their own.
+  if @test_seams do
+    defp hooks(opts), do: Keyword.get(opts, :test_hooks, [])
+
+    defp observe(hooks, message) do
+      case Keyword.get(hooks, :observer) do
+        pid when is_pid(pid) -> send(pid, message)
+        _none -> :ok
+      end
+    end
+
+    # `connection_faults: n` fails the first n attempts before any DB call.
+    defp attempt(deadline, opts, hooks, n) do
+      if n <= Keyword.get(hooks, :connection_faults, 0),
+        do: {:error, :connection},
+        else: run_once(deadline, opts, hooks)
+    end
+
+    defp backoff_ms(hooks), do: Keyword.get(hooks, :backoff_ms, @backoff_ms)
+    defp sleep(hooks, ms), do: Keyword.get(hooks, :sleep, &Process.sleep/1).(ms)
+  else
+    defp hooks(_opts), do: []
+    defp observe(_hooks, _message), do: :ok
+    defp attempt(deadline, opts, hooks, _n), do: run_once(deadline, opts, hooks)
+    defp backoff_ms(_hooks), do: @backoff_ms
+    defp sleep(_hooks, ms), do: Process.sleep(ms)
+  end
+
   ## Registration
 
   @doc """
@@ -261,25 +312,35 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   1-4): `{:ok, definition}`, `{:error, :bootstrap_in_transaction}`,
   `{:error, :definition_conflict}` or `{:error, class}`. Options:
   `step_ms:` bounds the registration transaction's lock and statement
-  waits (the boot run); without it no timeout is set.
+  waits (the boot run); without it no timeout is set. `hooks:` carries the
+  boot run's test hooks (test-seam builds).
   """
   def register(tenant_id, opts \\ []) do
     if Repo.in_transaction?(),
       do: {:error, :bootstrap_in_transaction},
-      else: registered(tenant_id, registration(tenant_id, Keyword.get(opts, :step_ms)))
+      else:
+        registered(
+          tenant_id,
+          registration(tenant_id, Keyword.get(opts, :step_ms), Keyword.get(opts, :hooks, [])),
+          Keyword.get(opts, :hooks, [])
+        )
   rescue
     error -> {:error, classify(error)}
   end
 
-  defp registered(_tenant_id, {:ok, definition}), do: validate(definition)
+  defp registered(_tenant_id, {:ok, definition}, _hooks), do: validate(definition)
 
-  defp registered(tenant_id, {:error, error}) do
+  defp registered(tenant_id, {:error, error}, hooks) do
     if winner_possible?(error),
-      do: reread(tenant_id, error),
+      do: reread(tenant_id, error, hooks),
       else: {:error, classify(error)}
   end
 
-  defp registration(tenant_id, step_ms) do
+  # The registration transaction is given no client timeout (observed as
+  # `:default`); `step_ms` sets only its transaction-local server timeouts.
+  defp registration(tenant_id, step_ms, hooks) do
+    observe(hooks, {:c302_bootstrap_call, :registration, :default})
+
     Audit.transaction(fn ->
       bound(step_ms)
 
@@ -314,9 +375,11 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   defp winner_error?(%InvalidAttribute{field: :definition}), do: true
   defp winner_error?(_error), do: false
 
-  # Outside any transaction (the registration's has ended): the row once.
-  defp reread(tenant_id, error) do
+  # Outside any transaction (the registration's has ended): the row once,
+  # given no client timeout (observed as `:default`).
+  defp reread(tenant_id, error, hooks) do
     version = SDRAgent.version()
+    observe(hooks, {:c302_bootstrap_call, :reread, :default})
 
     AgentDefinition
     |> Ash.Query.for_read(:read, %{}, actor: SdrAgent.Actor.system(:kernel, tenant_id))
