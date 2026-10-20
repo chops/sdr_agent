@@ -221,7 +221,7 @@ defmodule SdrAgent.Sales.AdditiveMigrationProofTest do
   defp assert_aborted!(result, module, counts) do
     outcome = result["outcome"]
     assert outcome["result"] == "aborted", inspect(result)
-    assert outcome["module"] == module
+    assert outcome["module"] == module, "C3-02: #{outcome["module"]}: #{outcome["message"]}"
     assert outcome["counts"] == counts
 
     for {category, count} <- counts, count > 0 do

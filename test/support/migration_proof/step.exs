@@ -10,8 +10,8 @@
 # Rows are written as a database administrator (session_replication_role
 # replica, as `SdrAgent.AuditCase.tamper!/2`), with query logging off, so no
 # planned value reaches the output. The attempt runs `Ecto.Migrator.run/3` up
-# to the additive migration's version only, in a monitored process: the
-# migration's own exception is the outcome. Writes one JSON result: the
+# to the additive migration's version only: the exception it re-raises (the
+# migration's own) is the outcome. Writes one JSON result: the
 # outcome (the exception's module, message and counts, or the versions
 # applied), the DDL facts after it, and per-row digests before and after it.
 #
@@ -162,45 +162,30 @@ defmodule SdrAgent.MigrationProof.Step do
     }
   end
 
-  # The migrator's own process (and its migration task) ends with the
-  # migration's exception; the versions are sent only after a normal return.
+  # The migration runs in the migrator's task, whose transaction catches what
+  # it raises and hands it back; `Ecto.Migrator.run/3` re-raises it here, in
+  # this process, after the lock transaction rolled back. It runs in this
+  # process on purpose: in the test pool's `:auto` ownership mode a process
+  # keeps the connection it first used until it exits, so this process
+  # (which owns one already) holding the lock and the task holding the
+  # migration's transaction fit `with_repo`'s pool of 2; a third owner (an
+  # extra migrator process) would leave the task no connection.
   defp migrate(repo) do
-    parent = self()
-
-    {pid, ref} =
-      spawn_monitor(fn ->
-        versions = Ecto.Migrator.run(repo, :up, to: Harness.version(), log: false)
-        send(parent, {:ran, self(), versions})
-      end)
-
-    receive do
-      {:DOWN, ^ref, :process, ^pid, reason} ->
-        receive do
-          {:ran, ^pid, versions} -> %{"result" => "applied", "versions" => versions}
-        after
-          0 -> aborted(reason)
-        end
-    end
+    versions = Ecto.Migrator.run(repo, :up, to: Harness.version(), log: false)
+    %{"result" => "applied", "versions" => versions}
+  rescue
+    error -> aborted(error)
   end
 
-  defp aborted(reason) do
-    case exception(reason) do
-      %{__exception__: true} = error ->
-        %{
-          "result" => "aborted",
-          "module" => inspect(error.__struct__),
-          "message" => Exception.message(error),
-          "counts" => Map.get(error, :counts)
-        }
-
-      nil ->
-        %{"result" => "crashed", "reason" => inspect(reason, limit: 20)}
-    end
+  # Bounded: an unexpected exception's message is cut to 500 characters.
+  defp aborted(error) do
+    %{
+      "result" => "aborted",
+      "module" => inspect(error.__struct__),
+      "message" => error |> Exception.message() |> String.slice(0, 500),
+      "counts" => Map.get(error, :counts)
+    }
   end
-
-  defp exception({%{__exception__: true} = error, _stacktrace}), do: error
-  defp exception({{%{__exception__: true} = error, _stacktrace}, _await}), do: error
-  defp exception(_reason), do: nil
 
   defp facts(repo) do
     %{columns: columns, rows: [row]} = repo.query!(@facts_sql, [Harness.version()], log: false)
