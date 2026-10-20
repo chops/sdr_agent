@@ -38,9 +38,9 @@ answer() {
 case "$args" in
   *attest.sql*) answer attest ;;
   *unix_socket_directories*) answer sockets ;;
-  *host=/*dbname=postgres\ *) answer sock_postgres ;;
-  *host=/*dbname=template1\ *) answer sock_template1 ;;
-  *host=/*dbname=sdr_agent_dev\ *) answer sock_sdr_agent_dev ;;
+  *"host='/"*dbname=postgres\ *) answer sock_postgres ;;
+  *"host='/"*dbname=template1\ *) answer sock_template1 ;;
+  *"host='/"*dbname=sdr_agent_dev\ *) answer sock_sdr_agent_dev ;;
   *accept.sql*) answer acceptsql ;;
   *dbname=postgres\ user=sdr_summary_login*) answer reject_postgres ;;
   *dbname=template1\ user=sdr_summary_login*) answer reject_template1 ;;
@@ -85,7 +85,7 @@ run() {
   grep -vqE '^ACCEPT(ANCE)? ' <<<"$out" && why="$why non-label-line"
   [ -z "$calls" ] || [ "$ncalls" = "$calls" ] || why="$why psql-calls=$ncalls"
   grep -q '^ENV .*[A-Z]' "$STUB_CALLS" && why="$why libpq-env-reached-psql"
-  if grep '^CALL' "$STUB_CALLS" | grep -v 'host=127.0.0.1 hostaddr=127.0.0.1 port=' | grep -v '\[-d\] \[host=/[^ ]* port=' | grep -q .; then why="$why implicit-endpoint"; fi
+  if grep '^CALL' "$STUB_CALLS" | grep -v 'host=127.0.0.1 hostaddr=127.0.0.1 port=' | grep -v "\[-d\] \[host='/[^']*' port=" | grep -q .; then why="$why implicit-endpoint"; fi
   [ -z "$why" ] && pass "$name" || fail "$name:$why"
 }
 
@@ -128,6 +128,35 @@ good; : > "$FX/sockets.out"; run "no Unix socket configured: reported disabled, 
 good; echo '/tmp/d168s.a, /tmp/d168s.b' > "$FX/sockets.out"; run "two socket directories: both probed (12 psql calls)" pass "" 12 -- 61999
 
 good; STUB_PSQL=/nonexistent/psql run "psql not found" stop 1 0 -- 61999
+
+# Socket directories are data (Codex R5-2): every unsupported or ambiguous
+# form STOPs before ANY socket probe; accepted ones reach libpq as exactly
+# that literal host, never as a keyword, a hostaddr or a second host.
+socket_calls() { grep -c "\[-d\] \[host=[^1]" "$STUB_CALLS"; }
+for dirs in '/tmp/d168 hostaddr=127.0.0.1' '/tmp/d168 a' '"/tmp/d168,a"' '/tmp/d168\a' "/tmp/d168'a" '/tmp/d168=a' \
+            '@d168abstract' '/tmp/d168s.a,,/tmp/d168s.b' '/tmp/d168s.a,' ',/tmp/d168s.a' '/tmp/d168s.a,/tmp/bad dir' \
+            '/tmp/d168s.a,service=evil' '  '; do
+  good; printf '%s\n' "$dirs" > "$FX/sockets.out"
+  run "socket list [$dirs] STOPs" stop 19 "" -- 61999
+  [ "$(socket_calls)" = 0 ] && grep -q '^ACCEPT 19 .*unsupported unix_socket_directories form; no socket probed$' <<<"$(env ACCEPT_PSQL="$base/psql" bash "$ACCEPT" 61999 2>&1)" \
+    && pass "  ... before any socket probe, with the fixed STOP reason" || fail "  ... socket calls: $(socket_calls)"
+done
+good; printf ' /tmp/d168s.a , /private/tmp/d168-x_y.1+v \n' > "$FX/sockets.out"
+run "two safe directories with surrounding spaces: both probed" pass "" 12 -- 61999
+LIBPQ=/nix/store/4n0cyq26dskdxq69d9c4hci8wkylh6bf-postgresql-18.6-lib/lib/libpq.5.dylib
+PARSE="$HERE/conninfo-parse.py"
+parsed=$(sed -n "s/.*\[-d\] \[\(host='[^]]*\)\].*/\1/p" "$STUB_CALLS" | /usr/bin/python3 -I "$PARSE" "$LIBPQ" | sort | uniq -c | sed 's/^ *//')
+want="3 host=/private/tmp/d168-x_y.1+v|hostaddr=(unset)|port=61999|dbname=postgres|user=sdr_summary_login|service=(unset)"
+if [ -f "$LIBPQ" ] && [ "$(wc -l <<<"$parsed" | tr -d ' ')" = 6 ] \
+   && [ "$(grep -c 'hostaddr=(unset)|.*service=(unset)$' <<<"$parsed")" = 6 ] \
+   && grep -qF '1 host=/tmp/d168s.a|hostaddr=(unset)|port=61999|dbname=sdr_agent_dev|user=sdr_summary_login|service=(unset)' <<<"$parsed" \
+   && grep -qF '1 host=/private/tmp/d168-x_y.1+v|hostaddr=(unset)|port=61999|dbname=template1|user=sdr_summary_login|service=(unset)' <<<"$parsed"; then
+  pass "parser control (pinned libpq PQconninfoParse): all 6 socket conninfos carry exactly the literal directory as host, no hostaddr, no service"
+else fail "parser control: $(tr '\n' ';' <<<"$parsed")"; fi
+neg=$(printf '%s\n' "host=/tmp/d168 hostaddr=203.0.113.1 port=61999 dbname=postgres user=sdr_summary_login" \
+        "$(printf "host='%s' port=61999 dbname=postgres user=sdr_summary_login" '/tmp/d168 hostaddr=203.0.113.1')" | /usr/bin/python3 -I "$PARSE" "$LIBPQ")
+[ "$(sed -n 1p <<<"$neg" | cut -d'|' -f2)" = 'hostaddr=203.0.113.1' ] && [ "$(sed -n 2p <<<"$neg" | cut -d'|' -f1,2)" = 'host=/tmp/d168 hostaddr=203.0.113.1|hostaddr=(unset)' ] \
+  && pass "parser control detects injection: r5's unquoted form yields a hostaddr override; the quoted form keeps the whole literal as host" || fail "parser negative control: $neg"
 
 # Interrupted mid-run: the last line must still be ACCEPTANCE STOP.
 good; echo 30 > "$FX/acceptsql.sleep"

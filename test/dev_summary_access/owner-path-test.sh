@@ -4,12 +4,15 @@
 # short-path Unix socket so the devenv cluster's local endpoint is
 # exercised:
 #   A  the target: app schema from the repository's migrations;
-#   B  a decoy with log_connections on. Every owner-run.sh command runs with
-#      a hostile environment aimed at B (PGHOST=B's socket, PGHOSTADDR,
-#      PGPORT, PGSERVICE + PGSERVICEFILE, PGDATABASE, PGUSER, PGDATA,
-#      PGOPTIONS='-c default_transaction_read_only=on', PSQLRC) and a
-#      hostile PATH psql/pg_dump. B must log no connection, and A's writes
-#      must succeed (PGOPTIONS would make them fail).
+#   B  a decoy with log_connections on. Every owner-run.sh command runs
+#      through the exact launch documented in OWNER-STEPS.md, from a zsh
+#      caller whose environment is hostile: aimed at B (PGHOST=B's socket,
+#      PGHOSTADDR, PGPORT, PGSERVICE + PGSERVICEFILE, PGDATABASE, PGUSER,
+#      PGDATA, PGOPTIONS='-c default_transaction_read_only=on', PSQLRC) and
+#      at the shell (decoy bash/env/psql/pg_dump/git on PATH, BASH_ENV, ENV,
+#      SHELLOPTS+PS4, BASHOPTS, exported functions). B must log no
+#      connection, no sentinel may run, and A's writes must succeed
+#      (PGOPTIONS would make them fail).
 # On A it also shows the acceptance check STOPs on a local-rule tamper and
 # on the same-second edit-not-reloaded schedule (where the r4 check would
 # have passed), and passes only after the rules are effectively loaded.
@@ -88,9 +91,15 @@ C=$(g rev-parse HEAD)
 OR="$REPO/priv/dev_summary_access/owner-run.sh"
 log "   package copied from $(git -C "$SRC" rev-parse HEAD)$(git -C "$SRC" diff --quiet HEAD -- priv/dev_summary_access docs/adr || echo ' +uncommitted') owner-run.sh sha256 $(sum "$OR")"
 
-HOSTILE="$W/hostile"; mkdir "$HOSTILE"
-for b in psql pg_dump pg_dumpall pg_restore; do printf '#!/bin/sh\necho HOSTILE >> "%s/hostile.calls"\nexit 1\n' "$W" > "$HOSTILE/$b"; done
-chmod 700 "$HOSTILE"/*
+# Every owner-run.sh call uses the EXACT launch documented in OWNER-STEPS.md,
+# from a hostile zsh caller (hostile-launch.sh: decoy bash/env/psql/pg_dump/
+# git on PATH, BASH_ENV, ENV, SHELLOPTS+PS4, BASHOPTS, exported functions).
+# shellcheck source=hostile-launch.sh
+. "$HERE/hostile-launch.sh"
+hostile_setup "$W/hl"
+LAUNCH=$(launch_line "$REPO/priv/dev_summary_access/OWNER-STEPS.md")
+[ -n "$LAUNCH" ] || { log "FAIL no documented launch line"; exit 1; }
+log "   documented launch: $LAUNCH"
 printf '[decoy]\nhost=127.0.0.1\nhostaddr=127.0.0.1\nport=%s\ndbname=sdr_agent_dev\nuser=postgres\n' "$PB" > "$W/pg_service.conf"
 printf '\\set ON_ERROR_STOP off\n' > "$W/psqlrc"
 BP="$W/backups"; mkdir -m 700 "$BP"
@@ -98,9 +107,11 @@ OUT="$W/out"
 # orun NAME ok|refused COMMAND ARGS...
 orun() {
   local name=$1 want=$2 rc; shift 2
-  env PATH="$HOSTILE:$PATH" PGHOST="$SOCKB" PGHOSTADDR=127.0.0.1 PGPORT="$PB" PGSERVICE=decoy PGSERVICEFILE="$W/pg_service.conf" \
-      PGDATABASE=sdr_agent_dev PGUSER=postgres PGDATA="$PGDB" PGOPTIONS='-c default_transaction_read_only=on' \
-      PGCONNECT_TIMEOUT=1 PSQLRC="$W/psqlrc" bash "$OR" "$@" > "$OUT" 2>&1; rc=$?
+  HOSTILE_EXTRA=(PGHOST="$SOCKB" PGHOSTADDR=127.0.0.1 PGPORT="$PB" PGSERVICE=decoy PGSERVICEFILE="$W/pg_service.conf"
+                 PGDATABASE=sdr_agent_dev PGUSER=postgres PGDATA="$PGDB" "PGOPTIONS=-c default_transaction_read_only=on"
+                 PGCONNECT_TIMEOUT=1 PSQLRC="$W/psqlrc")
+  hostile_call zsh "$LAUNCH" "$OR" "$OUT" "$@"; rc=$?
+  if [ -s "$HL_SENT" ]; then fail "$name: a sentinel or decoy ran: $(tr '\n' ';' < "$HL_SENT")"; : > "$HL_SENT"; return; fi
   if [ "$want" = ok ]; then
     [ "$rc" = 0 ] && [ "$(tail -1 "$OUT")" = "OWNER-RUN $1 OK" ] && pass "$name" \
       || fail "$name: exit=$rc $(tail -1 "$OUT") $(grep -E '^ACCEPT .*\|STOP' "$OUT" | cut -c1-300 | tr '\n' ';')"
@@ -183,7 +194,7 @@ orun "accept after rollback" refused accept "${A[@]}"
 # 5. Nothing reached the decoy or used the hostile PATH.
 [ "$(b_conns)" = "$n0" ] && pass "decoy B logged no connection during every owner-run.sh step (hostile PGHOST, PGHOSTADDR, PGPORT, PGSERVICE, PGSERVICEFILE, PGDATABASE, PGUSER, PGDATA, PGOPTIONS)" \
   || fail "decoy B logged $(( $(b_conns) - n0 )) connections"
-[ ! -e "$W/hostile.calls" ] && pass "no hostile PATH binary ran" || fail "a hostile PATH binary ran"
+[ ! -s "$HL_SENT" ] && pass "no startup file, exported function, xtrace or decoy binary ran in any launch" || fail "sentinels: $(tr '\n' ';' < "$HL_SENT")"
 
 log "== owner-path: $PASSES passed, $FAILS failed"
 [ "$FAILS" = 0 ]

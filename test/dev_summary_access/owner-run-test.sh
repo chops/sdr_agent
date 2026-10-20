@@ -31,12 +31,20 @@ REPO="$T/repo"; mkdir -p "$REPO/priv" "$REPO/docs/adr"
 cp -Rp "$SRC/priv/dev_summary_access" "$REPO/priv/"
 cp -p "$SRC/docs/adr/0016-dev-db-summary-access.md" "$REPO/docs/adr/"
 g() { env -i PATH=/usr/bin:/bin HOME="$T" /usr/bin/git -C "$REPO" -c user.name=t -c user.email=t@example.invalid "$@"; }
+FX="$T/fx"; STUBS="$T/stubs"; CALLS="$T/calls"; HOSTILE="$T/hostile"
+mkdir "$FX" "$STUBS" "$HOSTILE"; : > "$STUBS/.d168-owner-run-test-stubs"
+# The stub seam exists only in this throwaway repository, committed so that
+# the commit binding accepts it; the reviewed package has no such file.
+printf '%s' "$STUBS" > "$REPO/priv/dev_summary_access/.d168-owner-run-test-pgbin"
 g init -q && g add -A && g commit -q -m fixture || { echo "cannot build the fixture repo"; exit 1; }
 C=$(g rev-parse HEAD)
 OR="$REPO/priv/dev_summary_access/owner-run.sh"
-
-FX="$T/fx"; STUBS="$T/stubs"; CALLS="$T/calls"; HOSTILE="$T/hostile"
-mkdir "$FX" "$STUBS" "$HOSTILE"; : > "$STUBS/.d168-owner-run-test-stubs"
+# shellcheck source=hostile-launch.sh
+. "$HERE/hostile-launch.sh"
+hostile_setup "$T/hl"
+LAUNCH=$(launch_line "$REPO/priv/dev_summary_access/OWNER-STEPS.md")
+[ "$(grep -cE '^ *owner_run\(\) \{ .* \}$' "$REPO/priv/dev_summary_access/OWNER-STEPS.md")" = 1 ] || { echo "OWNER-STEPS.md must document exactly one launch line"; exit 1; }
+CALLER=zsh
 PGD="$T/pgdata"; mkdir -m 700 "$PGD"; BP="$T/backups"; mkdir -m 700 "$BP"
 PORT=61999
 
@@ -123,11 +131,11 @@ fixtures() {
 OUT="$T/out"
 orun() {
   local name=$1 want=$2 rc why=""; shift 2
-  : > "$CALLS"; rm -f "$T/hostile.calls"
-  env PATH="$HOSTILE:$PATH" D168_OWNER_RUN_TEST_PGBIN="$STUBS" PGHOST=/evil PGHOSTADDR=10.9.9.9 PGPORT=5520 \
-      PGSERVICE=evil PGSERVICEFILE="$T/evil.service" PGOPTIONS='-c default_transaction_read_only=on' PGPASSFILE="$T/evil.pass" \
-      PGDATA=/evil PGDATABASE=evil PGUSER=evil PSQLRC="$T/evil.psqlrc" GIT_DIR=/evil GIT_WORK_TREE=/evil \
-      bash "$OR" "$@" > "$OUT" 2>&1; rc=$?
+  : > "$CALLS"; rm -f "$T/hostile.calls"; : > "$HL_SENT"
+  HOSTILE_EXTRA=(PGHOST=/evil PGHOSTADDR=10.9.9.9 PGPORT=5520 PGSERVICE=evil PGSERVICEFILE="$T/evil.service"
+                 "PGOPTIONS=-c default_transaction_read_only=on" PGPASSFILE="$T/evil.pass" PGDATA=/evil PGDATABASE=evil
+                 PGUSER=evil PSQLRC="$T/evil.psqlrc" GIT_DIR=/evil GIT_WORK_TREE=/evil)
+  hostile_call "$CALLER" "$LAUNCH" "$OR" "$OUT" "$@"; rc=$?
   if [ "$want" = ok ]; then
     [ "$rc" = 0 ] && [ "$(tail -1 "$OUT")" = "OWNER-RUN $1 OK" ] || why="$why exit=$rc last='$(tail -1 "$OUT")'"
   else
@@ -135,6 +143,7 @@ orun() {
     grep -qE '^(BACKUP-VERIFIED|HBA-APPLIED-AND-LOADED|HBA-RESTORED-AND-LOADED|ACCEPTANCE PASS)$' "$OUT" && why="$why success-marker"
   fi
   [ -f "$T/hostile.calls" ] && why="$why hostile-PATH-binary-ran"
+  [ -s "$HL_SENT" ] && why="$why sentinel-or-decoy-ran($(tr '\n' ';' < "$HL_SENT"))"
   grep '^ENV ' "$CALLS" | grep -qE ' (PG[A-Z]*|PSQL[A-Z]*|GIT_[A-Z_]*|D168_[A-Z_]*) ' && why="$why inherited-variable-reached-a-child"
   if grep '^CALL ' "$CALLS" | grep -v '\[--version\]' | grep 'application_name=d168-owner-run' \
        | grep -v 'host=127.0.0.1 hostaddr=127.0.0.1 port=61999 dbname=[a-z_0-9]* user=postgres sslmode=disable gssencmode=disable passfile=/nonexistent/d168-no-pgpass' | grep -q .; then
@@ -148,6 +157,39 @@ stages() { find "$PGD" -name '.pg_hba.conf.d173.*' | wc -l | tr -d ' '; }
 A=(--commit "$C" --port "$PORT")
 
 log "== ADR-0016 owner-run.sh hermetic test $(date -u +%Y-%m-%dT%H:%M:%SZ) bash $BASH_VERSION owner-run.sh sha256 $(sum "$SRC/priv/dev_summary_access/owner-run.sh")"
+log "   documented launch: $LAUNCH"
+
+# --- 0. the launch (Codex R5-1) ---
+# Every orun below uses the exact documented launch from a hostile zsh
+# caller and requires that no sentinel or decoy ran. Positive controls: the
+# same hostile environment with any other launch runs the sentinels, and
+# owner-run.sh refuses to continue.
+fixtures
+naive() {
+  local name=$1 want_sent=$2; shift 2
+  : > "$HL_SENT"
+  /usr/bin/env -i PATH="$HL_DIR/decoy:/usr/bin:/bin" HOME="$HL_DIR/home" BASH_ENV="$HL_DIR/startup.sh" \
+    "BASH_FUNC_echo%%=() { builtin echo \"exported function echo ran\" >> \"$HL_SENT\"; builtin echo \"\$@\"; }" "$@" > "$OUT" 2>&1; rc=$?
+  if [ "$rc" != 0 ] && ! grep -q 'OWNER-RUN preflight OK' "$OUT" && grep -q "$want_sent" "$HL_SENT"; then
+    pass "control: $name: '$want_sent' ran and owner-run.sh did not continue (exit $rc: $(tail -1 "$OUT" | cut -c1-90))"
+  else fail "control: $name: exit=$rc sentinels=$(tr '\n' ';' < "$HL_SENT")"; fi
+}
+naive "launch with /bin/bash but the caller's environment" "startup file ran" /bin/bash "$OR" preflight "${A[@]}" --pgdata "$PGD"
+grep -q 'not started by the documented clean launch' "$OUT" && pass "  ... and owner-run.sh refused it as not the documented clean launch" || fail "  ... refusal: $(tail -1 "$OUT")"
+naive "launch with a Nix bash and the caller's environment" "exported function echo ran" /nix/var/nix/profiles/system/sw/bin/bash "$OR" preflight "${A[@]}" --pgdata "$PGD"
+naive "launch through PATH lookup of bash (#!/usr/bin/env bash style)" "decoy bash ran" bash "$OR" preflight "${A[@]}" --pgdata "$PGD"
+out=$(/usr/bin/env -i PATH=/usr/bin:/bin HOME=/var/empty "$OR" preflight "${A[@]}" --pgdata "$PGD" 2>&1); rc=$?
+[ "$rc" = 126 ] && pass "control: direct execution of owner-run.sh is impossible (not executable, exit 126)" || fail "direct execution: exit=$rc"
+out=$(cd "$REPO" && /usr/bin/env -i PATH=/usr/bin:/bin HOME=/var/empty /bin/bash --noprofile --norc priv/dev_summary_access/owner-run.sh preflight "${A[@]}" --pgdata "$PGD" 2>&1); rc=$?
+[ "$rc" = 3 ] && grep -q 'not started by the documented clean launch (relative path)' <<<"$out" && pass "control: a relative owner-run.sh path is refused" || fail "relative path: exit=$rc"
+out=$(/usr/bin/env -i PATH=/usr/bin:/bin HOME=/var/empty EXTRA=1 /bin/bash --noprofile --norc "$OR" preflight "${A[@]}" --pgdata "$PGD" 2>&1); rc=$?
+[ "$rc" = 3 ] && grep -q 'not started by the documented clean launch (inherited environment)' <<<"$out" && pass "control: one extra environment variable is refused" || fail "extra variable: exit=$rc"
+out=$(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin HOME=/var/empty /bin/bash --noprofile --norc "$OR" preflight "${A[@]}" --pgdata "$PGD" 2>&1); rc=$?
+[ "$rc" = 3 ] && grep -q 'not started by the documented clean launch' <<<"$out" && pass "control: a different PATH is refused" || fail "different PATH: exit=$rc"
+orun "the documented launch from a hostile zsh caller (decoy bash/env/psql/git, BASH_ENV, ENV, SHELLOPTS+PS4, BASHOPTS, exported functions, PG*, GIT_*)" ok preflight "${A[@]}" --pgdata "$PGD"
+CALLER=bash
+orun "the documented launch from a hostile bash caller (exported functions, decoy PATH, PG*, GIT_*)" ok preflight "${A[@]}" --pgdata "$PGD"
+CALLER=zsh
 
 # --- 1. the happy path, in OWNER-STEPS.md order ---
 fixtures
