@@ -38,7 +38,11 @@ defmodule SdrAgent.SDR.SDRAgent do
     name: "sdr_agent",
     description: "Researches, qualifies and prepares outreach for one assigned lead."
 
+  require Ash.Query
+
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.AgentDefinition
+  alias SdrAgent.Audit.Canonical
   alias SdrAgent.SDR.Actions
   alias SdrAgent.SDR.Flows
   alias SdrAgent.SDR.Prompts
@@ -162,7 +166,48 @@ defmodule SdrAgent.SDR.SDRAgent do
     }
   end
 
-  @doc "Registers (or returns) the `SDRAgent` v#{@version} AgentDefinition for `tenant_id` (KRN)."
+  @doc """
+  The canonical hash of `definition_body/0`, computed from current code at
+  each call (no cache, plan r8 section 7.2, Q-C9).
+  """
+  def definition_sha256, do: Canonical.sha256(definition_body())
+
+  @doc """
+  C3-02 (plan r8 section 7.2): the committed `SDRAgent` v#{@version}
+  AgentDefinition of `tenant_id`, read-only, as KRN: `{:ok, definition}`
+  only for the row of the tenant, name `SDRAgent`, the code's version,
+  status `active` and `definition_sha256` equal to `definition_sha256/0`;
+  any miss (absent, retired, another hash) is
+  `{:error, :agent_definition_unavailable}`. It never registers and never
+  locks; a read error is returned as `{:error, error}`, not as a miss.
+  Callers: `SdrAgent.SDR.assign_lead/2` (before any write) and
+  `SdrAgent.SDR.ReplyIntake.received/3` (the first step of the hand-off).
+  """
+  @spec fetch_definition(String.t()) ::
+          {:ok, struct()} | {:error, :agent_definition_unavailable | term()}
+  def fetch_definition(tenant_id) do
+    sha256 = definition_sha256()
+
+    AgentDefinition
+    |> Ash.Query.for_read(:read, %{}, actor: SdrAgent.Actor.system(:kernel, tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^tenant_id and name == "SDRAgent" and version == ^@version and
+        status == :active and definition_sha256 == ^sha256
+    )
+    |> Ash.read_one()
+    |> case do
+      {:ok, %AgentDefinition{} = definition} -> {:ok, definition}
+      {:ok, nil} -> {:error, :agent_definition_unavailable}
+      {:error, _error} = error -> error
+    end
+  end
+
+  @doc """
+  Registers (or returns) the `SDRAgent` v#{@version} AgentDefinition for
+  `tenant_id` (KRN). Since C3-02 the request paths no longer call it: the
+  only registration path is `SdrAgent.SDR.bootstrap_definitions/1`, which
+  calls it in its own transaction.
+  """
   def register(tenant_id) do
     Agents.register_definition(
       %{

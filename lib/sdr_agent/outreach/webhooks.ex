@@ -23,7 +23,10 @@ defmodule SdrAgent.Outreach.Webhooks do
   Event types: `reply` (match → `SdrAgent.Outreach.Reply`, the
   deterministic `unsubscribe_rule` Decision and, when it says so, an
   `unsubscribe_reply` Suppression; a matched reply is handed to the agent
-  plane through `SdrAgent.Outreach.ReplyIntake` in the same transaction), `unsubscribe` (the signed footer link: `Unsubscribe.verify/3` →
+  plane through `SdrAgent.Outreach.ReplyIntake` in the same transaction,
+  or, when the agent definition is unavailable, the reply phase commits
+  alone and a later attempt of the same event resumes only the hand-off,
+  C3-02 section 6.7), `unsubscribe` (the signed footer link: `Unsubscribe.verify/3` →
   `unsubscribe_link` Suppression), `delivered` and `bounce` (accepted →
   delivered | bounced with a receipt; a bounce always suppresses the
   recipient as `hard_bounce`), `complaint` (`complaint` Suppression).
@@ -60,6 +63,7 @@ defmodule SdrAgent.Outreach.Webhooks do
   @types Map.new(WebhookEvent.event_types(), &{Atom.to_string(&1), &1})
   @header_allowlist ~w(content-type user-agent x-sdr-key-id x-sdr-timestamp x-sdr-signature)
   @message_host "@sdr.example.test>"
+  @handoff_pending "reply hand-off pending: agent definition unavailable"
 
   ## Ingest
 
@@ -158,11 +162,28 @@ defmodule SdrAgent.Outreach.Webhooks do
   last attempt) records a transient failure as `failed` (class `crash`)
   instead; a permanent one (bad bytes, payload, message, token) is always
   `failed` with `validation_error`.
+
+  C3-02 (plan r8 section 6.7; D-174 Q-O5): a matched reply whose hand-off
+  defers (`{:deferred, :agent_definition_unavailable}` from
+  `SdrAgent.Outreach.ReplyIntake`) commits its reply phase without
+  `:mark_processed` and returns `{:error, :agent_definition_unavailable}`
+  (retry); on the final attempt the event is `failed`, class `crash`, with
+  the fixed reason "#{@handoff_pending}". A later attempt or operator retry
+  of that event finds its own stored matched Reply and resumes only the
+  hand-off.
   """
   def process(id, tenant_id, raw_body, opts \\ []) do
     whk = Actor.system(:webhook_ingestor, tenant_id)
 
     case transaction(fn -> process_locked(id, tenant_id, raw_body, whk) end) do
+      # C3-02 (plan r8 section 6.7.3 step 5): the reply phase committed, the
+      # hand-off is owed and the event stays unprocessed: retry, or on the
+      # final attempt fail the event with the fixed, value-free reason.
+      {:ok, {:deferred, reason}} ->
+        if Keyword.get(opts, :final?, false),
+          do: fail(id, tenant_id, :crash, @handoff_pending, whk),
+          else: {:error, reason}
+
       {:ok, _} ->
         :ok
 
@@ -282,9 +303,10 @@ defmodule SdrAgent.Outreach.Webhooks do
       # check, so a concurrent duplicate waits and then sees the stored reply.
       serialize_message(event.tenant_id, data.message_id)
 
-      if replied?(data.message_id, event.tenant_id),
-        do: :ok,
-        else: reply(data, from, match(data, from, event.tenant_id), event, whk)
+      case stored_reply(data.message_id, event.tenant_id) do
+        nil -> reply(data, from, match(data, from, event.tenant_id), event, whk)
+        stored -> stored_reply_of(stored, event, whk)
+      end
     end
   end
 
@@ -390,6 +412,36 @@ defmodule SdrAgent.Outreach.Webhooks do
 
   defp maybe_unsubscribe(_outcome, _match, _reply, _decision, _event, _whk), do: :ok
 
+  # C3-02 (plan r8 section 6.7.3, T2): this event's own matched Reply means
+  # its reply phase committed with the hand-off owed (a deferral): resume
+  # only the hand-off. A Reply of another event is a duplicate (no-op).
+  defp stored_reply_of(
+         %Reply{match_status: :matched, webhook_event_id: id} = reply,
+         %{id: id} = event,
+         whk
+       ),
+       do: resume(reply, event, whk)
+
+  defp stored_reply_of(_duplicate, _event, _whk), do: :ok
+
+  # The match rebuilt from the stored, append-only Reply (the committed
+  # match): lead and enrollment from it, the campaign from its delivery,
+  # read unlocked by id and tenant. No revalidation, no Locks.targets, no
+  # domain row lock; the hand-off is all that runs.
+  defp resume(reply, event, whk) do
+    delivery = read(DeliveryOperation, reply.delivery_operation_id, event.tenant_id)
+
+    match = %{
+      delivery_operation_id: reply.delivery_operation_id,
+      contact_id: reply.contact_id,
+      lead_id: reply.lead_id,
+      enrollment_id: reply.enrollment_id,
+      campaign_id: delivery.campaign_id
+    }
+
+    signal(match, reply, whk)
+  end
+
   defp signal(nil, _reply, _whk), do: :ok
 
   defp signal(match, reply, whk), do: ReplyIntake.impl().received(reply, match, whk)
@@ -445,10 +497,10 @@ defmodule SdrAgent.Outreach.Webhooks do
     ])
   end
 
-  defp replied?(message_id, tenant_id) do
+  defp stored_reply(message_id, tenant_id) do
     Reply
     |> Ash.Query.filter(tenant_id == ^tenant_id and message_id == ^message_id)
-    |> Ash.exists?(authorize?: false)
+    |> Ash.read_one!(authorize?: false)
   end
 
   ## Delivery outcomes

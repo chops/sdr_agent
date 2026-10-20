@@ -13,7 +13,9 @@ defmodule SdrAgent.Demo.Seed do
       non-volatile column are identical across runs on empty databases (the
       tenant id, trace ids and bcrypt salts differ by construction).
     * **Audited:** every write appends its usual event, attributed to the
-      seeder; the singleton tenant is bootstrapped by the kernel if absent.
+      seeder; the singleton tenant is bootstrapped by the kernel if absent,
+      then its `SDRAgent` definition (`SdrAgent.SDR.bootstrap_definitions/1`,
+      KRN; idempotent).
 
   Returns `{:ok, %{created: n, existing: m}}` or
   `{:error, :seeding_not_allowed}` without writing anything.
@@ -27,6 +29,7 @@ defmodule SdrAgent.Demo.Seed do
   alias SdrAgent.Demo.Fixtures
   alias SdrAgent.Outreach
   alias SdrAgent.Sales
+  alias SdrAgent.SDR
 
   @doc "Seeds the demo data set (see the moduledoc)."
   @spec run() ::
@@ -40,6 +43,10 @@ defmodule SdrAgent.Demo.Seed do
   defp seed do
     at(0)
     {:ok, tenant} = Audit.bootstrap(Fixtures.tenant())
+    # C3-02 (plan r8 section 7.3): a tenant created after boot gets its
+    # SDRAgent definition right away (idempotent; the seed has no wrapping
+    # transaction).
+    {:ok, _definition} = SDR.bootstrap_definitions(tenant.id)
     seeder = Actor.system(:seeder, tenant.id, "sdr.demo.seed")
 
     results =

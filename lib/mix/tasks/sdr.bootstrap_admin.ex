@@ -18,7 +18,8 @@ defmodule Mix.Tasks.Sdr.BootstrapAdmin do
   characters; empty and whitespace-only input is refused.
 
   Bootstraps the singleton tenant first if it does not exist
-  (`--tenant-slug`, default `sdr`; `--tenant-name`, default `SDR Agent`).
+  (`--tenant-slug`, default `sdr`; `--tenant-name`, default `SDR Agent`),
+  then its `SDRAgent` definition (`SdrAgent.SDR.bootstrap_definitions/1`).
   Every refusal — missing option, weak password, or a tenant that already
   has users — exits non-zero before anything is created. Runs in every
   environment; further users are created by an admin in the application.
@@ -27,6 +28,7 @@ defmodule Mix.Tasks.Sdr.BootstrapAdmin do
 
   alias SdrAgent.Accounts
   alias SdrAgent.Audit
+  alias SdrAgent.SDR
 
   @min_length 16
   @switches [
@@ -59,11 +61,18 @@ defmodule Mix.Tasks.Sdr.BootstrapAdmin do
 
     Mix.Task.run("app.start")
 
-    {:ok, _tenant} =
+    {:ok, tenant} =
       Audit.bootstrap(
         slug: Keyword.get(opts, :tenant_slug, "sdr"),
         name: Keyword.get(opts, :tenant_name, "SDR Agent")
       )
+
+    # C3-02 (plan r8 section 7.3): the tenant's SDRAgent definition, right
+    # after the tenant (idempotent).
+    case SDR.bootstrap_definitions(tenant.id) do
+      {:ok, _definition} -> :ok
+      {:error, class} -> Mix.raise("SDRAgent definition bootstrap refused: #{inspect(class)}")
+    end
 
     attrs = %{
       email: email,

@@ -5,10 +5,13 @@ defmodule SdrAgent.SDR do
   an explicit actor.
 
     * `assign_lead/2` — ADM/REV assign a lead to the agent for a campaign.
-      In one transaction (outbox): the lead new → assigned, the `SDRAgent`
-      AgentDefinition (registered if absent), the Oban job, its Operation,
-      the queued AgentRun (usage origin `:assignment`, C9; bound to its run
-      settings snapshot, C4) and the `sdr.lead.assigned` signal event.
+      In one transaction (outbox): the lead new → assigned, the Oban job,
+      its Operation, the queued AgentRun (usage origin `:assignment`, C9;
+      bound to its run settings snapshot, C4; pinned to the committed
+      `SDRAgent` AgentDefinition, looked up read-only before any write) and
+      the `sdr.lead.assigned` signal event.
+    * `bootstrap_definitions/1` — the only registration path of the
+      `SDRAgent` definition (C3-02; `SdrAgent.SDR.DefinitionBootstrap`).
     * `retry_run/2` — active ADM retries a stopped run (S13b);
     * `pause_campaign/2` — ADM/REV pause a campaign and record
       `sdr.campaign.paused` (the agent re-checks campaign state
@@ -30,6 +33,7 @@ defmodule SdrAgent.SDR do
   alias SdrAgent.Repo
   alias SdrAgent.Sales
   alias SdrAgent.SDR.AgentWorker
+  alias SdrAgent.SDR.DefinitionBootstrap
   alias SdrAgent.SDR.Schemas
   alias SdrAgent.SDR.SDRAgent
   alias SdrAgent.SDR.Signals
@@ -41,6 +45,12 @@ defmodule SdrAgent.SDR do
   C4), `model:` (test/demo only: `provider:` fake | claude_cli module,
   `provider_options: [responder: module]`).
   Returns `{:ok, %{lead, run, operation, job, signal}}`.
+
+  C3-02 (plan r8 section 7.2): the run's `SDRAgent` definition is looked
+  up read-only (`SDRAgent.fetch_definition/1`, after the Lead lock and the
+  settings check, before any write); it is never registered here. A miss
+  (absent, retired, another hash) is `{:error, :agent_definition_unavailable}`
+  with nothing written; `bootstrap_definitions/1` registers it.
 
   C4-R8: the tenant must have saved an offering profile; otherwise
   `{:error, {:settings_incomplete, [:offering_profile]}}` is returned before
@@ -88,8 +98,8 @@ defmodule SdrAgent.SDR do
          :ok <- no_active_run(lead, agent),
          {:ok, _campaign} <- Sales.fetch(Sales.Campaign, campaign_id, actor: actor),
          :ok <- Agents.settings_complete(:assignment, actor: agent),
+         {:ok, definition} <- SDRAgent.fetch_definition(lead.tenant_id),
          {:ok, lead} <- ensure_assigned(lead, opts, actor),
-         {:ok, definition} <- SDRAgent.register(lead.tenant_id),
          {:ok, signal} <-
            Signals.build("sdr.lead.assigned", %{lead_id: lead.id, campaign_id: campaign_id}),
          {:ok, job} <- Oban.insert(AgentWorker.new(job_args(lead, signal, opts))),
@@ -128,6 +138,20 @@ defmodule SdrAgent.SDR do
       {:ok, %{lead: lead, run: run, operation: operation, job: job, signal: signal}}
     end
   end
+
+  @doc """
+  C3-02 (plan r8 section 7.2): registers the tenant's `SDRAgent`
+  definition, the only path that does (`SdrAgent.SDR.DefinitionBootstrap.register/2`):
+  `{:ok, definition}` (idempotent: an existing valid row is returned and
+  nothing is written), `{:error, :bootstrap_in_transaction}` when called
+  inside a transaction (nothing written), `{:error, :definition_conflict}`
+  when the tenant's `SDRAgent` row of the code's version is retired or has
+  another hash, or `{:error, class}` with a sanitized class. Called at
+  application start (the boot child), by `SdrAgent.Demo.Seed` and
+  `mix sdr.bootstrap_admin` right after the tenant is bootstrapped, and by
+  test setup, always outside any transaction.
+  """
+  def bootstrap_definitions(tenant_id), do: DefinitionBootstrap.register(tenant_id)
 
   defp ensure_assigned(%{status: :new} = lead, opts, actor) do
     attrs = if owner = opts[:owner_user_id], do: %{owner_user_id: owner}, else: %{}
