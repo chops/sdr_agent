@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-18
 supersedes: null
 ---
@@ -8,21 +8,42 @@ supersedes: null
 
 ## Status
 
-Proposed. Nothing here is installed, accepted or approved for use. Codex's
-D-168 review requirements (`codex-d168-role-requirements.md`, eight
-must-fix items) and its review of the first draft
-(`codex-d168-7b5e172-review.md`, MF1–MF4) shaped this revision. Before
-any agent may call the interface, all of these must exist:
+Accepted by the owner on 2026-10-19 (D-173), with these four risk choices,
+recorded as D-173 states them:
 
-1. Codex review of this text, the SQL, the harness and the test evidence.
-2. Owner acceptance of this ADR.
-3. An explicit owner decision on every item under
-   [Open owner choices](#open-owner-choices). Drafting direction is not
-   such a decision, and none is inferred from D-168.
-4. An owner-run install, followed by an installed-state attestation that
-   passes (see [Installed-state acceptance](#installed-state-acceptance-owner)).
+1. revoke TEMP from PUBLIC;
+2. revoke the large-object functions from PUBLIC;
+3. pg_hba allow and reject rules for the summary login, which the owner
+   edits;
+4. the trust-auth procedural boundary is accepted for this dev machine, with
+   no switch to scram now.
 
-Until all four exist, every dev-database check stays owner-run.
+Choices 1 and 2 are shared changes: Codex reviews their effect on the other
+roles ([Shared hardening](#shared-hardening-d-173-choices-1-and-2)) before
+the owner applies them. The owner installs the role and applies the
+reviewed SQL, pg_hba and ACL changes for these choices. Trust auth remains a
+procedural residual accepted by the owner, not authenticated isolation.
+
+**Agent boundary (D-173, D-179).** Agents may use only the dedicated role's
+reviewed aggregate interfaces, and only once both of these hold:
+
+- the owner has installed them, following
+  [OWNER-STEPS.md](../../priv/dev_summary_access/OWNER-STEPS.md);
+- the installed-state acceptance check, `accept.sh`, has printed
+  `ACCEPTANCE PASS` on that install, and the owner has reported it.
+  Running the attestation alone is not enough.
+
+Every other agent access to the owner's dev database or app stays
+forbidden: raw or base-table SQL, arbitrary queries, writes, and dev-app or
+browser use. Until acceptance passes, every dev-database check stays
+owner-run.
+
+Accepting this ADR installs nothing. Three Codex reviews shaped revisions
+1–3: its D-168 review requirements (`codex-d168-role-requirements.md`), its
+review of the first draft (`codex-d168-7b5e172-review.md`, MF1–MF4), and its
+r3 PASS at `7bff0cc`. The D-173 owner path was added after acceptance: the
+revokes, the pg_hba rules, the acceptance check and the owner steps. It
+needs Codex review before the owner applies it.
 
 ## Context
 
@@ -130,15 +151,24 @@ Files:
 - `priv/dev_summary_access/install.sql`: owner-run, one transaction.
   Refuses (psql exit 3) any database other than `sdr_agent_dev`, and any
   non-superuser.
-- `attest.sql`: the read-only installed-state attestation, with a
-  machine-checked verdict.
-- `uninstall.sql`: exact rollback. It validates everything before it drops
-  anything.
-- `optional-revoke-temp.sql`: one of the options under Open owner choices.
-- `test/dev_summary_access/`: run against a throwaway cluster only.
-  - `adversarial.sh`, `seed.sql` and `canaries.sql`: the adversarial test.
+- `attest.sql`: the read-only attestation of the summary roles, with a
+  machine-checked verdict. It is part of acceptance, not acceptance on its
+  own.
+- `revoke-public-temp-lo.sql`: the D-173 TEMP and large-object revokes from
+  PUBLIC. It has three modes: inventory, apply and restore. It replaces
+  revision 3's `optional-revoke-temp.sql`.
+- `pg_hba-summary.conf`: the exact pg_hba rules for D-173 choice 3.
+- `accept.sql` and `accept.sh`: the installed-state acceptance check.
+- `OWNER-STEPS.md`: the owner's exact order of steps, including rollback.
+- `uninstall.sql`: exact rollback of `install.sql`. It validates everything
+  before it drops anything.
+- `test/dev_summary_access/`: run against a throwaway cluster only, or
+  hermetically.
+  - `adversarial.sh`, `seed.sql` and `canaries.sql`: the adversarial test,
+    including the full owner path (section 9).
   - `guard.sh`, `guard-test.sh` and `lifecycle-test.sh`: the throwaway
     guard and its hermetic tests.
+  - `accept-test.sh`: a hermetic test that `accept.sh` fails closed.
   - `throwaway-cluster.sh` and `migrate_throwaway.exs`: the disposable
     cluster and its schema.
 
@@ -214,13 +244,101 @@ Files:
 - A STABLE function runs all of its queries on the calling statement's
   snapshot, so each call is one consistent observation.
 
-### Shared defaults are not changed
+### Shared hardening (D-173 choices 1 and 2)
 
-`install.sql` changes nothing about PUBLIC, the `public` schema, or any
-existing role, table or function. `attest.sql` adds no revoke. It reports
-the PUBLIC-derived privileges as inventory and refuses only on unreviewed
-routes. Any database-wide change is a separate owner approval: see Open
-owner choices.
+`install.sql` still changes nothing about PUBLIC, the `public` schema, or
+any existing role, table or function. `attest.sql` adds no revoke. The
+shared changes are one separate owner step, `revoke-public-temp-lo.sql`,
+applied after install (OWNER-STEPS.md step 3). It acts on `sdr_agent_dev`
+only, in one transaction:
+
+- `REVOKE TEMP ON DATABASE sdr_agent_dev FROM PUBLIC`;
+- `REVOKE EXECUTE ... FROM PUBLIC` on the 17 server-side large-object
+  functions below.
+
+A per-role REVOKE cannot cancel a PUBLIC grant, so only a PUBLIC revoke
+closes either route for the login.
+
+**The large-object set** was read from the catalog, not from memory. The
+source was a fresh PostgreSQL 18.6 throwaway cluster with initdb defaults,
+built from the same Nix store package as the dev cluster
+(`/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6`):
+
+```sql
+SELECT p.oid::regprocedure::text AS signature, l.lanname, p.prosrc,
+       has_function_privilege('public', p.oid, 'EXECUTE') AS public_execute,
+       coalesce(p.proacl::text, '(default)') AS proacl
+FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_language l ON l.oid = p.prolang
+WHERE p.pronamespace = 'pg_catalog'::regnamespace
+  AND (p.proname LIKE 'lo\_%' OR p.proname IN ('loread', 'lowrite')
+       OR p.prosrc LIKE 'be\_lo%' OR p.prosrc LIKE '%lo\_%'
+       OR p.prosrc LIKE '%largeobject%')
+ORDER BY 1;
+```
+
+It returned 23 rows. Every row is `internal`.
+
+| Group | Functions | PUBLIC EXECUTE by default |
+| --- | --- | --- |
+| Revoked: 17 `be_lo*` | `lo_close(integer)`, `lo_creat(integer)`, `lo_create(oid)`, `lo_from_bytea(oid,bytea)`, `lo_get(oid)`, `lo_get(oid,bigint,integer)`, `lo_lseek(integer,integer,integer)`, `lo_lseek64(integer,bigint,integer)`, `lo_open(oid,integer)`, `lo_put(oid,bigint,bytea)`, `lo_tell(integer)`, `lo_tell64(integer)`, `lo_truncate(integer,integer)`, `lo_truncate64(integer,bigint)`, `lo_unlink(oid)`, `loread(integer,integer)`, `lowrite(integer,bytea)` | yes, default ACL |
+| Already superuser-only: 3 `be_lo*` | `lo_export(oid,text)`, `lo_import(text)`, `lo_import(text,oid)` | no (`{postgres=X/postgres}`); untouched |
+| Not large-object access: 3 | `has_largeobject_privilege(name,oid,text)`, `has_largeobject_privilege(oid,oid,text)`, `has_largeobject_privilege(oid,text)` | yes; kept, because they only answer a privilege question |
+
+- The script pins the 17 by signature.
+- Its apply mode refuses unless the internal `be_lo*` functions PUBLIC can
+  execute are exactly those 17. A server with a different set needs a new
+  review.
+- `accept.sql` fails closed on any `be_lo*` function outside the 17 and the
+  3.
+
+Revocation takes effect at once, also in sessions that already exist. On
+the throwaway cluster, a session that had created a temporary table could
+not create another after the revoke, and a later `lo_create` in it was
+denied. Existing temporary tables last until their session ends.
+
+**Effect on other roles**, for Codex review. The script's inventory mode
+prints the same for the live cluster before apply, and OWNER-STEPS.md step
+3a stops on any role not listed here.
+
+| Role | TEMP on `sdr_agent_dev` | The 17 functions on `sdr_agent_dev` |
+| --- | --- | --- |
+| `sdr_summary_login` | lost | lost |
+| `sdr_summary_definer` (NOLOGIN; the two functions use neither) | lost | lost |
+| `postgres`: superuser, the app's role (`config/dev.exs`) and the installer | kept (superuser) | kept (superuser) |
+| the initdb bootstrap superuser, the OS user on the devenv cluster, which also owns `sdr_agent_dev` | kept | kept |
+| any other non-superuser login holding only PUBLIC's defaults | lost | lost |
+| a non-superuser with an explicit TEMP grant | kept | lost |
+
+The adversarial test checks this table on synthetic roles: `adv_plain`,
+`adv_tempgrant`, `postgres`, the login and the definer.
+
+Not affected:
+
+- **Other databases.** `sdr_agent_test`, the `sdr_agent_test*` demo
+  databases, `postgres` and `template1` keep their defaults. Database ACLs
+  and `pg_proc` are per database, and databases created later from
+  `template1` do not inherit the revokes. The test shows a role that lost
+  both privileges on `sdr_agent_dev` keeps both in `postgres`.
+- **The app.** It connects as `postgres`, a superuser. A search of `lib`,
+  `priv` and `config` found no use of temporary tables or large objects.
+
+Also worth knowing:
+
+- Client-side libpq large-object calls, such as psql `\lo_import`, call the
+  same server functions through the fast-path protocol. That path checks
+  EXECUTE, so it is denied too. The test proves it for the login.
+- A `pg_dump` of `sdr_agent_dev` carries the revokes, because pg_dump
+  records changed privileges on `pg_catalog` objects. A restore therefore
+  reproduces them.
+- Large objects that a non-superuser already owns become unusable to that
+  owner through these functions. The inventory counts them; 0 are
+  expected.
+
+Rollback: after `uninstall.sql`, `-v mode=restore` re-grants exactly the
+revoked PUBLIC entries. It is refused while either summary role exists. The
+effective privileges then equal the PostgreSQL defaults. The stored ACLs
+stay explicit rather than NULL; the test compares effective
+(grantor, grantee, privilege, grantability) tuples.
 
 ## Boundaries
 
@@ -240,16 +358,19 @@ The login cannot:
 - read server files, list directories or import server-side large objects;
 - COPY to or from server files or programs.
 
-It **can**:
+Before the D-173 owner path, it **can** also do these four things:
 
-- create temporary objects in its own session (Open choice 1);
-- create and write large objects (Open choice 2);
-- connect to the cluster's other databases (Open choice 3);
-- change its own session settings, and persist role-level setting
-  defaults on itself. The attestation detects a persisted change.
+- create temporary objects in its own session. The TEMP revoke closes this.
+- create and write large objects. The large-object revoke closes this.
+- connect to the cluster's other databases. The pg_hba reject rules close
+  this.
+- change its own session settings, and persist role-level setting defaults
+  on itself. This one stays. The attestation detects a persisted change,
+  and acceptance checks the login's live session settings.
 
 None of these lets it read application data. They are why "cannot write
-anything" was wrong in the first draft.
+anything" was wrong in the first draft. After the owner path, the harness
+proves each of the first three denied (section 9).
 
 Temporary objects can't change results:
 
@@ -273,76 +394,47 @@ role is therefore a **procedural** boundary on this cluster:
   reviewed functions;
 - PostgreSQL then enforces what that role can do.
 
-PostgreSQL does not stop an agent that breaks the agreement. Whether that
-is acceptable is Open choice 4.
+PostgreSQL does not stop an agent that breaks the agreement. The owner
+accepted this procedural boundary for this developer-machine cluster, with
+no switch to scram now (D-173 choice 4). It is a procedural residual, not
+authenticated isolation. The pg_hba rules confine where the login can
+connect, not who can use it.
 
-### Open owner choices
+### Owner decisions (D-173)
 
-None of these is accepted. D-168 did not decide them, and they diverge
-from the earlier role requirements. Each needs one of two things before
-installation or agent use:
+Revision 3 listed four open choices. D-173 decided them:
 
-- an explicit, recorded owner decision naming it; or
-- technical closure through separately authorized hardening.
+1. **TEMP writes: revoked.** `revoke-public-temp-lo.sql` revokes TEMP on
+   `sdr_agent_dev` from PUBLIC. A per-role REVOKE cannot cancel a PUBLIC
+   grant. Acceptance checks 5 and 6.
+2. **Large-object writes: revoked.** No privilege governs creating a large
+   object, so the only closure is EXECUTE. The same script revokes PUBLIC
+   EXECUTE on the 17 functions. Acceptance checks 7–10. The attestation's
+   checks M, J30 and J31 still refuse any large object either role owns or
+   can access.
+3. **Other databases: pg_hba rules.**
+   - pg_hba is first-match. The cluster's initdb `trust` rules for `local`,
+     127.0.0.1 and ::1 match every database, so an allow line alone is not
+     a deny boundary.
+   - `pg_hba-summary.conf` has an allow line for the login on
+     `sdr_agent_dev` over 127.0.0.1. It then rejects the login for every
+     other database, and for replication, over 127.0.0.1, ::1 and the Unix
+     socket. The devenv cluster has a Unix socket in its runtime directory.
+     All seven lines go above every other rule.
+   - Acceptance checks 12–14 read the rules and their load time. Checks
+     15–16 confirm the rejection live, without reading data.
+   - The attestation still covers only this database's catalogs plus the
+     shared ones. The login can no longer reach the others.
+4. **Procedural connection boundary: accepted.** Trust auth stays on this
+   developer-machine cluster, with no scram switch now. See
+   [Trust boundary](#trust-boundary).
 
-1. **TEMP writes.** The login can create temporary tables, views and
-   functions in its own session, through the PUBLIC TEMP default on
-   `sdr_agent_dev`. A per-role REVOKE cannot cancel a PUBLIC grant.
-   - Options:
-     - (a) accept it;
-     - (b) run `optional-revoke-temp.sql`: inventory mode first, then
-       `-v mode=apply` after reviewing which login roles lose TEMP. That
-       revokes TEMP from PUBLIC database-wide, and is a shared-default
-       change.
-   - Prerequisite: a recorded decision. For (b), the attestation's C
-     inventory must show `can_temp = f` for the login on `sdr_agent_dev`.
-2. **Large-object writes.** PostgreSQL has no privilege that governs
-   creating large objects. Once the login turns off its read-only default,
-   it can store data with `lo_create` and `lowrite`. It cannot read large
-   objects it does not own.
-   - Options:
-     - (a) accept it, with the attestation as the detector. Checks M, J30
-       and J31 refuse while either role owns or can access any large
-       object. The owner sets a re-attestation cadence.
-     - (b) close it with separately authorized hardening: revoke EXECUTE on
-       the large-object creation functions from PUBLIC. That is a
-       shared-default change, so its effect on the app and other roles
-       must be inventoried first.
-   - Prerequisite: a recorded decision.
-3. **Other databases.** The login can CONNECT to `postgres`, `template1`
-   and any other database whose PUBLIC CONNECT default allows it. The
-   attestation reads this database's catalogs plus the shared ones. Those
-   prove that neither role owns anything or holds an explicit grant in
-   any other database. They do **not** cover another database's PUBLIC
-   grants or SECURITY DEFINER functions. "Catalog metadata only" is
-   unproven there.
-   - Options:
-     - (a) preferred: owner `pg_hba.conf` rules that deny the login every
-       other database. An allow line for `sdr_agent_dev` alone is not a
-       deny boundary: pg_hba is first-match, and the cluster's broader
-       `host all all ... trust` rule would still match other databases.
-       The rules need an allow line for `sdr_summary_login` on
-       `sdr_agent_dev`, followed by a `reject` line for
-       `sdr_summary_login` on `all`. Both must come before any broader
-       rule that could match the login, for every address it can use
-       (127.0.0.1 and ::1). An owner-run connection test then confirms
-       the denial, without reading data;
-     - (b) REVOKE CONNECT from PUBLIC on the other databases, a shared
-       change;
-     - (c) an owner-run inventory of each other connectable database,
-       equivalent to checks 12, 13, 25, 26 and 28 there, with a narrowly
-       stated acceptance.
-   - Prerequisite: (a) or (b) in place, or (c) recorded. No agent probe
-     of another database.
-4. **Procedural connection boundary.** Under trust authentication the
-   role restricts only a cooperating agent.
-   - Options:
-     - (a) `scram-sha-256` for every role, including the app's, with the
-       login's password set out of band. This has app-configuration
-       impact.
-     - (b) accept the procedural boundary explicitly, for this
-       developer-machine cluster only.
-   - Prerequisite: a recorded decision.
+D-173 records the rejected alternatives:
+
+- reject the ADR;
+- accept TEMP and large-object writes, with the attestation as detector;
+- revoke CONNECT, or an inventory only;
+- switch every role to scram.
 
 Known properties, not choices:
 
@@ -367,9 +459,15 @@ Known properties, not choices:
 - Install is one transaction. A repeated install refuses with exit 3 and
   42710, and leaves the function hashes unchanged.
 - Every refusal exits nonzero (psql exit 3) and prints no END marker. That
-  covers install, uninstall and the optional TEMP revoke when run in the
-  wrong database or by a non-superuser, and the optional revoke without a
-  mode.
+  covers:
+  - install, uninstall, the revoke script and `accept.sql` when run in the
+    wrong database or by a non-superuser;
+  - the revoke script without a valid mode;
+  - a repeated apply;
+  - a restore while the summary roles exist.
+- `accept.sh` prints `ACCEPTANCE STOP` last and exits 3 on any failure.
+  That includes a missing psql, an interrupted run, and output it cannot
+  account for.
 - Uninstall validates the complete dependency set before any DROP:
   - pg_shdepend for both roles, in every database, large objects and
     default ACLs included;
@@ -384,21 +482,32 @@ Known properties, not choices:
 
 ## Installed-state acceptance (owner)
 
-1. Review the exact `install.sql` and `attest.sql` at the reviewed commit.
-   Both must be unchanged since Codex's PASS.
-2. Record a decision on each Open owner choice.
-3. Run `install.sql` as the owner superuser against `sdr_agent_dev`. psql
-   must exit 0, and the last line must be `END-OF-SUMMARY-INSTALL`.
-4. Run `attest.sql` and keep its full output. Acceptance requires all of:
-   - psql exit 0;
-   - the line `ATTEST PASS: 36 of 36 checks hold`;
-   - no row marked `FAILED`;
-   - the last line `END-OF-SUMMARY-ATTEST`.
+The owner follows [OWNER-STEPS.md](../../priv/dev_summary_access/OWNER-STEPS.md)
+in its order: backup and verify point, install, the revokes (inventory,
+then apply), the pg_hba edit and reload, `accept.sh`, the labels-only
+report and, when needed, rollback. Agents do none of these. In summary:
 
-   On any failure it prints `ATTEST REFUSED`, rolls back and exits 3.
-   Do not activate agent use.
+1. Review the exact files at the reviewed commit. They must be unchanged
+   since Codex's PASS.
+2. Run the steps through the pg_hba reload. Each must end with its stated
+   marker.
+3. Run `accept.sh 5520`. Acceptance requires all of:
+   - exit 0;
+   - every line a fixed `ACCEPT` label line;
+   - 18 `ok` lines;
+   - the last line `ACCEPTANCE PASS`.
 
-   The checks are machine-checked, fixed sets:
+   On anything else, it prints `ACCEPTANCE STOP` last and exits 3. Do not
+   activate agent use. The checks, in order:
+
+   **Check 1: `attest.sql`.** It requires psql exit 0, the line
+   `ATTEST PASS: 36 of 36 checks hold`, no row marked `FAILED`, and the
+   last line `END-OF-SUMMARY-ATTEST`. Only the verdict and the fixed names
+   of any failed checks are printed; the inventory stays with the owner. On
+   its own, attest prints `ATTEST REFUSED`, rolls back and exits 3 on any
+   failure.
+
+   The 36 attest checks are machine-checked, fixed sets:
    - role attributes, connection limits and the exact session defaults;
    - no per-database role settings;
    - no membership in either direction;
@@ -421,23 +530,53 @@ Known properties, not choices:
      rights are not revoked. So a `WITH GRANT OPTION` widening of an
      allowed grant, or a delegation by either role, is refused;
    - the extension set: `plpgsql` and `citext`.
-5. Compare the `G summary functions` `functiondef_sha256` values with the
-   reviewed values below. That hash depends on the server's formatting.
-   These values are for PostgreSQL 18.6:
+
+   **Checks 2–14: `accept.sql`** (read-only):
+   - 2: the server is PostgreSQL 18.6, the version the functiondef hashes
+     were recorded on;
+   - 3: both summary roles are present;
+   - 4: both functions' `pg_get_functiondef` SHA-256 equal the reviewed
+     values below;
+   - 5–6: PUBLIC holds no TEMP on `sdr_agent_dev`, and neither summary role
+     can create temporary objects there by any route;
+   - 7–10: all 17 reviewed large-object functions are present, no `be_lo*`
+     function lies outside the reviewed lists, and none is executable by
+     PUBLIC or by either summary role, by any route;
+   - 11: `lo_compat_privileges` is off;
+   - 12–14: no pg_hba rule has an error; rules 1–7 of the loaded
+     `hba_file` are exactly the reviewed rules, in order; and the file was
+     loaded after its last change.
+
+   **Checks 15–17: live.**
+   - 15–16: pg_hba rejects the login for `postgres` and `template1`.
+   - 17: the login connects to `sdr_agent_dev` with its read-only default,
+     `search_path = pg_catalog`, its timeouts and no superuser attribute.
+
+   These read settings only. There is no table read, no function call and
+   no write probe on the owner's data.
+4. The functiondef hashes depend on the server's formatting. These values
+   are for PostgreSQL 18.6. Check 4 compares them, and attest pins the
+   prosrc values:
 
    | Function | prosrc SHA-256 (pinned in attest) | functiondef SHA-256 (PostgreSQL 18.6) |
    | --- | --- | --- |
    | `summary.g3_inventory_v1()` | `6357e1d4bd6bbd2038a0f07ff5f1ca8601ba1f864a24c28db8623859a527ea65` | `eae28c02a08eeb532c49d0c0a05b783b4856a1cbbec8c3dfa7706f8b312b829f` |
    | `summary.gdemo_drain_v1(text,timestamp with time zone,integer,text[])` | `b6cc57a9dbe7154ee9f400821670e10035ae9bb7a63fb969389d9a5c4d6142b8` | `ea809c263d976e99d5ed7dfa0bfca796b89493704c87f0143c2783c792c2775e` |
 
-6. Agents may start calling only after steps 2–5 are recorded.
-7. Re-attest:
+5. The owner reports the `accept.sh` output, labels only. Agents may start
+   calling only after `ACCEPTANCE PASS` is reported. Running the
+   attestation alone is not acceptance (D-173).
+6. Re-run `accept.sh`, not attest alone:
    - after any CREATE OR REPLACE, ALTER, GRANT or REVOKE touching these
      roles, the schema or the functions;
-   - after a PostgreSQL major upgrade;
-   - on the cadence set under Open choice 2.
-8. Each new function or version, such as `_v2`, needs its own review,
-   install and attestation record.
+   - after any change to PUBLIC's privileges on `sdr_agent_dev`, or to
+     `pg_hba.conf`;
+   - after a PostgreSQL upgrade. A new version also needs new functiondef
+     values, and check 2 STOPs until they are reviewed.
+
+   On STOP, agents stop calling.
+7. Each new function or version, such as `_v2`, needs its own review,
+   install and acceptance record.
 
 ## Credentials
 
@@ -450,8 +589,9 @@ repo, chat, command arguments, logs or environment dumps.
 
 - Writes, grants and raw reads.
 - Installing, replacing or removing the functions.
-- `pg_hba.conf` and authentication changes.
-- Every Open owner choice, including the optional TEMP revoke.
+- The TEMP and large-object revokes and their restore.
+- The `pg_hba.conf` edit and reload, and any authentication change.
+- Running acceptance and reporting it (OWNER-STEPS.md).
 - The app, the owner checkout, and every release, grant or spend decision.
 
 ## Verification
@@ -511,7 +651,8 @@ to the app.
   - before the clean uninstall;
   - before seeding;
   - before the canaries;
-  - before the optional TEMP apply.
+  - before each owner-path step in section 9: the uninstall, the install,
+    the apply, the pg_hba edits and the rollback.
 
   It does not re-check before each individual statement. Between checks,
   every connection still names the same explicit endpoint, so drift would
@@ -557,6 +698,27 @@ to the app.
   - a missing or short success marker;
   - a partial or extra `schema_migrations`;
   - a missing interface table.
+
+- `accept-test.sh` drives the real `accept.sh` through a stub `psql` in
+  28 cases. Each failing input must end with `ACCEPTANCE STOP` and exit 3,
+  with only fixed label lines. The inputs cover:
+  - a missing or non-canonical port (zero psql calls);
+  - attest exiting 3, missing its END marker, passing a different number
+    of checks, or holding a FAILED row next to a PASS line (reported by
+    name, never by value);
+  - `accept.sql` exiting 3, missing `ACCEPT-SQL PASS`, holding a STOP row,
+    having 12 `ok` rows, or printing nothing;
+  - the login reaching `postgres`, or being refused for a reason other than
+    pg_hba;
+  - wrong login session settings;
+  - a missing psql;
+  - SIGTERM mid-run.
+
+  A positive control shows hostile `PGHOST`/`PGPORT=5520`/`PGSERVICE`/
+  `PSQLRC` values never reach psql, and every call names the endpoint
+  explicitly. Mutating `accept.sh` (dropping the port bound, the FAILED-row
+  check, the 13-ok count, the pg_hba-message check or the signal trap)
+  fails the test.
 
 ### The adversarial test (`adversarial.sh`)
 
@@ -619,6 +781,34 @@ login, not only through `SET ROLE` from a superuser. It checks:
   - a definer membership.
 
   Then a clean uninstall and a reinstall reproduce the same hashes.
+- **Owner path (section 9), from the uninstalled prior state.**
+  - Acceptance STOPs on install alone, on the revokes without pg_hba, and
+    on pg_hba edited but not reloaded.
+  - The inventory changes nothing and predicts each role's effect exactly.
+  - After apply, the login and the definer are denied TEMP and all 17
+    functions (42501). That includes psql's client-side `\lo_import`.
+  - `adv_plain` loses both in `sdr_agent_dev` but keeps both in `postgres`.
+    `adv_tempgrant` keeps TEMP and loses the 17. `postgres` keeps both.
+  - The summary results are unchanged. A second apply is refused.
+  - After the pg_hba reload, `accept.sh` passes, and the login is rejected
+    for `postgres`.
+  - Each tampered variant STOPs on its named check, then passes once
+    reverted:
+    - an extra table grant;
+    - an extra SECURITY DEFINER function;
+    - TEMP or a large-object function granted back to PUBLIC;
+    - a direct TEMP or `lo_create` grant to the login;
+    - `lo_compat_privileges` on;
+    - login CREATEDB or INHERIT, or definer LOGIN;
+    - a changed `search_path` or read-only default;
+    - a replaced function body;
+    - a missing reject line, a broader rule first, or an invalid pg_hba
+      line;
+    - a pg_hba change after the reload.
+  - The rollback (uninstall, restore, pg_hba revert) returns the prior
+    state exactly: roles, the effective database and `be_lo*` ACL tuples,
+    the probed roles' reach, the schema, default ACLs, large objects, and
+    pg_hba rules and bytes. Acceptance then STOPs.
 - **Refusals.** Every refusal path exits 3 with no END marker.
 - **Vocabulary.** The canaries collapse into `other` or `malformed`.
   Malformed live terms give `END=incomplete` and `CHECK=STOP`. 150 unknown
@@ -652,8 +842,11 @@ harness:
 Not proven here:
 
 - behaviour on the real `sdr_agent_dev` data;
-- the attestation of the real install;
-- what the real cluster's other databases expose (Open choice 3).
+- the acceptance of the real install;
+- the effect inventory of the real cluster's roles (OWNER-STEPS.md step 3a
+  stops on any role the table above does not list);
+- the `local` (Unix socket) reject rules live. The throwaway cluster has no
+  socket, so checks 12–13 verify those rules from the loaded file only.
 
 ### Evidence and process record
 
@@ -669,9 +862,9 @@ Not proven here:
 
 ## Consequences
 
-- After the owner decides the Open choices, installs and attests once,
-  agents can run the G3 and G-DEMO checks without the owner at the
-  keyboard.
+- After the owner completes OWNER-STEPS.md once and reports
+  `ACCEPTANCE PASS`, agents can run the G3 and G-DEMO checks without the
+  owner at the keyboard.
 - Every new question needs a new reviewed function version. There is no
   ad-hoc SQL, by design.
 - A vocabulary change in the app needs a new function version. Until then,
@@ -693,4 +886,6 @@ Not proven here:
   named `privateclient` would pass it.
 - **Blanket revokes of PUBLIC and `public`-schema privileges.** Rejected.
   They are database-wide, can affect the app and other roles, and need
-  their own owner approval.
+  their own owner approval. D-173 approved exactly two narrow PUBLIC
+  revokes, TEMP and the 17 large-object functions, with the effect list
+  above. Nothing else is revoked.
