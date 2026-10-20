@@ -86,13 +86,24 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       published record of exactly three ids (the email's domain is the
       company domain, so the two domain keys are one id);
     * T-O3's backend is the one the blocked call reports from its own
-      process. On main that process is a `Jido.Exec` worker the contender
-      spawns for the turn (`spawn_monitor/1`, no `$callers`, its own
-      connection), so the gate owner is passed through the application env
-      (`BlockingResponder.gate_key/0`), the worker opts in to the statement
-      trace when it blocks, and the call must be in the contender's run
-      (the contender or a process it spawned, `Process.info/2` `:parent`);
-      the contender's own backend is checked too.
+      process. On main that process is two hops from the contender (the
+      ReplyWorker's process): the Runner's finite turn timeout
+      (`lib/sdr_agent/sdr/runner.ex:28`, `:87`) makes `Jido.Exec` run the
+      turn in a `spawn_monitor/1` worker W1 (jido_action
+      `lib/jido_exec.ex:497-519`; parent the contender, no `$callers`), and
+      the Action runner runs the action in a `Jido.Exec.TaskSupervisor`
+      child W2 (`lib/jido_exec/action/runner.ex:30-47`, `:295-316`;
+      `lib/jido_exec/runtime.ex:13`, `:25-28`), whose parent is that
+      supervisor and whose `$callers` is `[W1]` (Elixir
+      `Task.Supervisor.start_child/3`, `task/supervisor.ex:540-543`,
+      `:603-608`; `task/supervised.ex:69-73`, `:87-89`). Neither inherits
+      the process dictionary, so the gate owner is passed through the
+      application env (`BlockingResponder.gate_key/0`) and W2 opts in to
+      the statement trace when it blocks. The call is established as this
+      test's: its input carries this test's reply canary, and its
+      process reaches the contender through spawners (`:parent`) and
+      `$callers` (`descends_from?/3`); an unrelated call fails either
+      check. The contender's own backend is checked too.
   """
   use ExUnit.Case, async: false
 
@@ -186,33 +197,32 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
   defmodule BlockingResponder do
     @moduledoc false
     # T-O3: blocks the reply classification call in its calling process,
-    # after reporting that process and its backend to the gate owner, until
-    # the owner releases it. On main the call runs in a `Jido.Exec` worker
-    # that the ReplyWorker's process spawns with `spawn_monitor/1` (the
-    # Runner's finite turn timeout, `lib/sdr_agent/sdr/runner.ex:28` and
-    # `:87`; jido_action `Jido.Exec` `execute_with_timeout/6`): it inherits neither the process dictionary
-    # nor `$callers`, so the gate owner is read from the application env
-    # (`@gate`, set for the test by `OutreachFixtures.put_env!/2`), and the
-    # worker opts in to the statement trace itself. Owner-bound and bounded:
-    # on the owner's :DOWN, or at the bound, it kills its own process, so no
-    # further database work follows in it.
+    # after reporting that process, its backend and the classified reply
+    # text to the gate owner, until the owner releases it. On main that
+    # process is a `Jido.Exec.TaskSupervisor` child two hops from the
+    # contender (see the moduledoc): it inherits no process dictionary, so
+    # the gate owner is read from the application env (`@gate`, set for the
+    # test by `OutreachFixtures.put_env!/2`), and it opts in to the
+    # statement trace itself. Owner-bound and bounded: on the owner's
+    # :DOWN, or at the bound, it kills its own process, so no further
+    # database work follows in it.
     @gate :c302_t_o3_model_gate
     @wait_ms 10_000
 
     def gate_key, do: @gate
 
     def respond("sdr.reply_classification" = operation, input) do
-      block!(Application.fetch_env!(:sdr_agent, @gate))
+      block!(Application.fetch_env!(:sdr_agent, @gate), get_in(input, [:reply, :text]))
       SdrAgent.Audit.IdentityPassOrderTest.UnsubscribeResponder.respond(operation, input)
     end
 
     def respond(operation, input), do: SdrAgent.SDR.FakeBrain.respond(operation, input)
 
-    defp block!(owner) when is_pid(owner) do
+    defp block!(owner, text) when is_pid(owner) do
       ref = Process.monitor(owner)
       Process.put(:c302_trace_to, owner)
       %{rows: [[backend]]} = SdrAgent.Repo.query!("SELECT pg_backend_pid()")
-      send(owner, {:c302_model_call, self(), backend})
+      send(owner, {:c302_model_call, self(), backend, text})
 
       receive do
         :c302_model_release -> Process.demonitor(ref, [:flush])
@@ -302,12 +312,13 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       unguarded_preflight!()
       ctx = demo!()
       delivery = delivered!(ctx)
-      matched_reply!(ctx, delivery, @missed_by_rule)
+      canary = "c302canary#{SalesFixtures.unique()}"
+      matched_reply!(ctx, delivery, "#{@missed_by_rule} Ref #{canary}.")
       OutreachFixtures.put_env!(BlockingResponder.gate_key(), self())
       OutreachFixtures.put_env!(:fake_model_responder, BlockingResponder)
       task = contender!(supervisor!(), &classify/0)
 
-      %{caller: caller, backend: backend} = await_model_call!(task)
+      %{caller: caller, backend: backend, text: call_text} = await_model_call!(task)
       in_run? = descends_from?(caller, task.pid)
       during_ids = advisory_ids(backend)
       during_count = advisory_locks(backend)
@@ -316,6 +327,9 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       send(caller, :c302_model_release)
       result = await_result!(task)
       after_call = statements(caller) ++ statements(task.pid)
+
+      assert is_binary(call_text) and call_text =~ canary,
+             "C3-02: not established: the blocked call classifies another reply: #{short(call_text)}"
 
       assert in_run?,
              "C3-02: not established: the model call ran outside the contender's run"
@@ -1067,8 +1081,8 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     ref = task.ref
 
     receive do
-      {:c302_model_call, caller, backend} ->
-        %{caller: caller, backend: backend}
+      {:c302_model_call, caller, backend, text} ->
+        %{caller: caller, backend: backend, text: text}
 
       {^ref, result} ->
         flunk("C3-02: not established: the run ended before its model call: #{short(result)}")
@@ -1080,20 +1094,36 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     end
   end
 
-  # `pid` is `ancestor` or was spawned (`Process.info/2` `:parent`), at most
-  # a few levels down, by it.
-  defp descends_from?(pid, ancestor, depth \\ 4)
+  # `pid` is `ancestor` or was started on its behalf: `ancestor` is
+  # reachable from `pid` through each process's spawner (`Process.info/2`
+  # `:parent`) or its `$callers` (set by Elixir's Task), at most `depth`
+  # hops. Read while the chain is blocked, so every hop is alive. On main:
+  # W2 -$callers-> W1 -parent-> the contender (moduledoc). An unrelated
+  # process reaches only supervisors and other callers.
+  defp descends_from?(pid, ancestor, depth \\ 6)
   defp descends_from?(pid, pid, _depth), do: true
   defp descends_from?(_pid, _ancestor, 0), do: false
 
-  defp descends_from?(pid, ancestor, depth) when is_pid(pid) do
-    case Process.info(pid, :parent) do
-      {:parent, parent} when is_pid(parent) -> descends_from?(parent, ancestor, depth - 1)
-      _gone_or_root -> false
-    end
-  end
+  defp descends_from?(pid, ancestor, depth) when is_pid(pid),
+    do: Enum.any?(spawners(pid), &descends_from?(&1, ancestor, depth - 1))
 
   defp descends_from?(_other, _ancestor, _depth), do: false
+
+  defp spawners(pid) do
+    case Process.info(pid, [:parent, :dictionary]) do
+      [parent: parent, dictionary: dictionary] ->
+        callers =
+          case List.keyfind(dictionary, :"$callers", 0) do
+            {_key, list} when is_list(list) -> list
+            _none -> []
+          end
+
+        [parent | callers] |> Enum.filter(&is_pid/1) |> Enum.uniq()
+
+      nil ->
+        []
+    end
+  end
 
   ## Fixtures (main's APIs; committed after preflight)
 
