@@ -17,6 +17,7 @@ defmodule SdrAgent.Repo do
   alias SdrAgent.Audit.IdentityKeys.Scope
 
   @call_options {__MODULE__, :call_options}
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
   @impl true
   def installed_extensions do
@@ -40,8 +41,30 @@ defmodule SdrAgent.Repo do
 
   # The options `with_call_options/2` put in this process, merged under
   # every repo operation's own options (explicit options win).
-  @impl true
-  def default_options(_operation), do: Process.get(@call_options, [])
+  if @test_seams do
+    # Test builds also report them, per operation, to the observer set in
+    # this process by `observe_default_options/1` (C3-02 G3-2b).
+    @impl true
+    def default_options(operation) do
+      options = Process.get(@call_options, [])
+
+      case Process.get({__MODULE__, :default_options_observer}) do
+        pid when is_pid(pid) -> send(pid, {:c302_repo_default_options, operation, options})
+        _none -> :ok
+      end
+
+      options
+    end
+
+    @doc false
+    # Test builds only: `pid` receives `{:c302_repo_default_options,
+    # operation, options}` for every repo operation of this process.
+    def observe_default_options(pid) when is_pid(pid),
+      do: Process.put({__MODULE__, :default_options_observer}, pid)
+  else
+    @impl true
+    def default_options(_operation), do: Process.get(@call_options, [])
+  end
 
   @doc """
   Runs `fun` with `options` added, in the calling process only, to every

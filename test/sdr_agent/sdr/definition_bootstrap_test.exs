@@ -385,13 +385,24 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
       assert observed_attempts() == [1, 2], "not established: no second attempt"
       assert result == {:error, :definition_conflict}, "C3-02: got #{short(result)}"
       bounds = observed_bounds()
+      steps = Enum.map(bounds, &elem(&1, 0))
 
-      assert Enum.map(bounds, &elem(&1, 0)) == [:tenant, :registration, :reread],
-             "C3-02: a bounded call ran without its driver bounds: #{inspect(Enum.map(bounds, &elem(&1, 0)))}"
+      assert steps == [:tenant, :registration, :reread],
+             "C3-02: a bounded call ran without its driver bounds: #{inspect(steps)}"
 
-      for {step, options} <- bounds do
-        assert Enum.sort(options) == [checkout_retries: 0, deadline: deadline],
-               "C3-02: #{step} got #{inspect(options)}, not the run's deadline without retries"
+      for {step, operation} <- [tenant: :all, registration: :transaction, reread: :all] do
+        operations = bounds |> List.keyfind!(step, 0) |> elem(1) |> Keyword.keys()
+
+        assert operation in operations,
+               "C3-02: #{step} made no #{operation} through Ecto: #{inspect(operations)}"
+      end
+
+      for {step, operations} <- bounds, {operation, options} <- operations do
+        given = options |> Keyword.take([:deadline, :checkout_retries]) |> Enum.sort()
+
+        assert given == [checkout_retries: 0, deadline: deadline],
+               "C3-02: #{step}'s #{operation} was handed #{inspect(given)}, " <>
+                 "not the run's deadline without retries"
       end
 
       assert SdrAgent.Repo.default_options(:all) == [], "C3-02: the call options outlived run/1"
@@ -705,9 +716,26 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
     end
   end
 
+  # In arrival order: each bounded call's `{step, pid}` marker (sent from
+  # that call's process), then the repo operations that process made and
+  # the options `SdrAgent.Repo.default_options/1` handed to Ecto for each:
+  # `[{step, [{operation, options}]}]`.
   defp observed_bounds do
+    bound_events()
+    |> Enum.reduce([], fn
+      {:call, step}, acc ->
+        [{step, []} | acc]
+
+      {:operation, operation, options}, [{step, ops} | acc] ->
+        [{step, ops ++ [{operation, options}]} | acc]
+    end)
+    |> Enum.reverse()
+  end
+
+  defp bound_events do
     receive do
-      {:c302_bootstrap_bounds, step, options} -> [{step, options} | observed_bounds()]
+      {:c302_bootstrap_bounds, step, _pid} -> [{:call, step} | bound_events()]
+      {:c302_repo_default_options, op, options} -> [{:operation, op, options} | bound_events()]
     after
       0 -> []
     end
@@ -748,7 +776,8 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
         handler,
         [:sdr_agent, :repo, :query],
         fn _event, _measurements, metadata, _config ->
-          if self() == parent do
+          # The caller, or a process it runs a bounded call in (`$callers`).
+          if self() == parent or parent in Process.get(:"$callers", []) do
             send(parent, {:c302_query, IO.iodata_to_binary(metadata.query), metadata[:params]})
           end
         end,

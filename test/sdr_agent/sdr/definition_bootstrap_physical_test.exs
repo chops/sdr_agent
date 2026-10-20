@@ -230,8 +230,9 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
   # client is disconnected; when the client's pending receive ends with
   # reason `:closed`, Postgrex marks it retriable and DBConnection checks out
   # another connection with a fresh relative timeout (`checkout_retries`,
-  # default 3). One window is one client-timeout disconnect of the caller,
-  # logged by its connection.
+  # default 3). One window is one client-timeout disconnect of the reading
+  # process (the control's test process; for run/1, the process its bounded
+  # call runs in, reported by the observer), logged by its connection.
   #
   # G3-2b RED r2 (coordinator run at abfe524: the control raised
   # Postgrex.Error after 308 ms): the disconnect sends a CancelRequest before
@@ -285,7 +286,7 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
       preflight!()
       proxied = proxied_repo!()
       blocker = table_blocker!("tenants")
-      hooks = [repo_opts: [prepare: :unnamed]]
+      hooks = [observer: self(), repo_opts: [prepare: :unnamed]]
 
       {{elapsed_us, result}, log} =
         with_log(fn ->
@@ -294,7 +295,11 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
           end)
         end)
 
-      windows = timeout_windows(log, self())
+      # The read's client is the process the bounded call ran in.
+      assert_received {:c302_bootstrap_bounds, :tenant, call},
+                      "not established: the tenant read did not run"
+
+      windows = timeout_windows(log, call)
 
       assert windows == 1,
              "C3-02: the driver opened #{windows} windows against a 1 000 ms deadline " <>
@@ -346,11 +351,16 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
 
       assert_received {:c302_holder, holder}, "not established: the tenant read did not run"
 
-      assert_received {:c302_bootstrap_bounds, :registration, bounds},
+      assert_received {:c302_bootstrap_bounds, :registration, _call},
                       "not established: the registration did not start"
 
-      assert Enum.sort(bounds) == [checkout_retries: 0, deadline: deadline],
-             "C3-02: the registration's checkout got #{inspect(bounds)}"
+      assert_received {:c302_repo_default_options, :transaction, options},
+                      "not established: the registration's transaction did not reach Ecto"
+
+      given = options |> Keyword.take([:deadline, :checkout_retries]) |> Enum.sort()
+
+      assert given == [checkout_retries: 0, deadline: deadline],
+             "C3-02: the registration's transaction was handed #{inspect(given)}"
 
       assert result == {:error, :timeout}, "C3-02: got " <> shape(result)
 

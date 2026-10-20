@@ -58,8 +58,12 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   ended transaction. Each of those calls also carries the budget's absolute
   deadline as the DBConnection `deadline:` and `checkout_retries: 0` (G3-2b,
   Codex 9d5c5c2), for its repo operations only: one checkout per call,
-  whose window (queue wait included) ends at the budget's deadline at the
-  latest, so a driver retry cannot open a fresh window past it. A result
+  whose checked-out window ends at the budget's deadline at the latest, so
+  a driver retry cannot open a fresh window past it. DBConnection does not
+  bound a checkout still waiting in the pool's queue, so each such call
+  runs in a process linked to the caller, which waits for it until the
+  deadline (plus a 250 ms grace for the driver's own end of the window) and
+  then kills it and awaits its exit: `{:error, :timeout}`. A result
   that arrives after the deadline (tenant, no tenant, registered or
   re-read row) is `{:error, :timeout}`. No call and no attempt starts once
   the budget is spent (`{:error, :timeout}`). A `:connection` failure is
@@ -74,8 +78,10 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   `{:c302_bootstrap_outcome, n, outcome}` and, for each DB call,
   `{:c302_bootstrap_call, step, timeout}` with the client timeout read from
   the options that call actually receives (`:default` when none), and
-  `{:c302_bootstrap_bounds, step, bounds}` with the `deadline:` and
-  `checkout_retries:` its repo operations receive;
+  `{:c302_bootstrap_bounds, step, pid}` from each bounded call's process,
+  followed by `{:c302_repo_default_options, operation, options}` for each
+  repo operation that call makes (what `SdrAgent.Repo.default_options/1`
+  hands to Ecto);
   `connection_faults: n` fails the first n attempts as `:connection` before
   any DB call; `backoff_ms:` and `sleep:` replace the backoff value and its
   sleep; `repo_opts:` adds repo options to the bounded calls (e.g.
@@ -106,6 +112,7 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   @classes [:timeout, :crash, :schema_not_migrated, :connection, :definition_conflict]
   @default_deadline_ms 30_000
   @step_ms 5_000
+  @stop_grace_ms 250
   @connection_retries 3
   @backoff_ms 2_000
   @unique_index "agent_definitions_unique_name_version_index"
@@ -300,6 +307,7 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
       case read do
         {:ok, tenant_id} -> in_time(budget, {:ok, tenant_id})
         {:error, :tenant_not_bootstrapped} -> in_time(budget, :no_tenant)
+        {:error, :timeout} -> {:error, :timeout}
         {:error, error} -> {:error, classify(error)}
       end
     end
@@ -327,22 +335,125 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   defp spent?(budget), do: remaining(budget.deadline) <= 0
 
   # G3-2b (Codex 9d5c5c2): every repo operation of one bounded call carries
-  # the budget's absolute `deadline:` (DBConnection: each checkout's window
-  # is min(now + timeout, deadline), queue wait included) and
-  # `checkout_retries: 0` (no second checkout inside the call; a retry is
-  # the next attempt, admitted only while the budget remains), through
-  # `SdrAgent.Repo.with_call_options/2`. Without a budget nothing is added.
-  # For the registration this is the transaction's one checkout: its queue
-  # wait, BEGIN and every statement run inside that window.
+  # the budget's absolute `deadline:` and `checkout_retries: 0`, through
+  # `SdrAgent.Repo.with_call_options/2`: once a connection is checked out,
+  # DBConnection ends that checkout at min(now + timeout, deadline), and no
+  # second checkout follows inside the call (a retry is the next attempt,
+  # admitted only while the budget remains).
+  #
+  # G3-2b r2 (coordinator run at f61e5ac): DBConnection starts that timer
+  # only when the pool hands the connection over; a checkout still waiting
+  # in the pool's queue is bounded by the pool's queue_target/queue_interval
+  # only, not by the caller's deadline or timeout. So the call runs in a
+  # process linked to the caller (`within_deadline/2`), which the caller
+  # waits for until the deadline plus @stop_grace_ms (for the driver's own
+  # end of a checked-out window to arrive), then kills and awaits:
+  # `{:error, :timeout}`. Without a budget nothing is added and the call
+  # runs in the caller.
   defp bounded(nil, _step, fun), do: fun.()
 
   defp bounded(budget, step, fun) do
     options = [deadline: budget.deadline, checkout_retries: 0] ++ test_repo_opts(budget)
 
-    Repo.with_call_options(options, fn ->
+    within_deadline(budget, fn ->
       observe_bounds(budget, step)
-      fun.()
+      Repo.with_call_options(options, fun)
     end)
+  end
+
+  # Runs `call` in a process linked to the caller, with the caller's
+  # sandbox callers, dynamic repo and Ash tracer context; its value, raise,
+  # throw or exit comes back to the caller as if it had run there. Linked:
+  # if the caller dies (the boot child kills it at its ceiling), so does
+  # the call.
+  defp within_deadline(budget, call) do
+    parent = self()
+    tag = make_ref()
+    context = call_context()
+    pid = spawn_link(fn -> send(parent, {tag, run_call(context, call)}) end)
+    ref = Process.monitor(pid)
+
+    receive do
+      {^tag, result} ->
+        # The call process sent its last message and is ending normally.
+        Process.demonitor(ref, [:flush])
+        Process.unlink(pid)
+        flush_exit(pid)
+        returned(result)
+
+      {:DOWN, ^ref, :process, ^pid, reason} ->
+        exit(reason)
+    after
+      remaining(budget.deadline) + @stop_grace_ms ->
+        stop_call(pid, ref, tag)
+        {:error, :timeout}
+    end
+  end
+
+  defp call_context do
+    %{
+      callers: [self() | Process.get(:"$callers", [])],
+      repo: Repo.get_dynamic_repo(),
+      ash: Ash.ProcessHelpers.get_context_for_transfer(tracer: Application.get_env(:ash, :tracer))
+    }
+  end
+
+  defp run_call(context, call) do
+    Process.put(:"$callers", context.callers)
+    Repo.put_dynamic_repo(context.repo)
+    Ash.ProcessHelpers.transfer_context(context.ash)
+    {:returned, call.()}
+  catch
+    kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+  end
+
+  defp returned({:returned, value}), do: value
+  defp returned({:raised, kind, reason, stacktrace}), do: :erlang.raise(kind, reason, stacktrace)
+
+  # Kills the call process and awaits its :DOWN. Exits are trapped around
+  # the kill so the link does not take the caller with it; `:kill` stays
+  # untrappable, so a caller killed meanwhile still takes the linked call
+  # process down. Then the link is removed and its exit message flushed
+  # (with a late result); an abnormal exit signal from anything else that
+  # arrived while trapping is re-raised as the caller's own exit.
+  defp stop_call(pid, ref, tag) do
+    trapping = Process.flag(:trap_exit, true)
+    Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+    end
+
+    Process.unlink(pid)
+    flush_exit(pid)
+    flush_result(tag)
+    Process.flag(:trap_exit, trapping)
+    if not trapping, do: redeliver_exits()
+  end
+
+  defp flush_exit(pid) do
+    receive do
+      {:EXIT, ^pid, _reason} -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp flush_result(tag) do
+    receive do
+      {^tag, _late} -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp redeliver_exits do
+    receive do
+      {:EXIT, _from, :normal} -> redeliver_exits()
+      {:EXIT, _from, reason} -> exit(reason)
+    after
+      0 -> :ok
+    end
   end
 
   # A result that arrived after the deadline is not accepted.
@@ -390,11 +501,17 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
     # `prepare: :unnamed`).
     defp test_repo_opts(%{hooks: hooks}), do: Keyword.get(hooks, :repo_opts, [])
 
-    # Reports, from inside a bounded call's scope, the driver bounds that
-    # `SdrAgent.Repo.default_options/1` merges under its repo operations.
-    defp observe_bounds(budget, step) do
-      bounds = Keyword.take(Repo.default_options(:all), [:deadline, :checkout_retries])
-      observe(budget, {:c302_bootstrap_bounds, step, bounds})
+    # In the bounded call's process: reports `{:c302_bootstrap_bounds, step,
+    # pid}`, then has `SdrAgent.Repo.default_options/1` report, for every
+    # repo operation of the call, the options it hands to Ecto
+    # (`{:c302_repo_default_options, operation, options}`), in order.
+    defp observe_bounds(%{hooks: hooks} = budget, step) do
+      observe(budget, {:c302_bootstrap_bounds, step, self()})
+
+      case Keyword.get(hooks, :observer) do
+        pid when is_pid(pid) -> Repo.observe_default_options(pid)
+        _none -> :ok
+      end
     end
 
     # `after_call: fun` runs `fun.(step)` right after a bounded call returned,
@@ -533,6 +650,7 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
       case read do
         {:ok, %AgentDefinition{} = definition} -> in_time(budget, validate(definition))
         {:ok, nil} -> {:error, classify(error)}
+        {:error, :timeout} -> {:error, :timeout}
         {:error, read_error} -> {:error, classify(read_error)}
       end
     end
