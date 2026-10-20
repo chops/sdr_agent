@@ -508,15 +508,32 @@ A later correct acceptance run cannot make an earlier superuser install,
 revoke or dump safe. So every owner command, not only acceptance, runs in
 one fixed context (`owner-run.sh`):
 
+- **Launch.** A check inside a script cannot control what its shell did
+  before the script's first line runs. That covers a `PATH`-chosen bash,
+  `BASH_ENV` or `ENV` startup files, imported `BASH_FUNC_*` functions, and
+  `SHELLOPTS`/`BASHOPTS` with `PS4`. So the boundary is one documented
+  clean launch, which fixes the environment before bash starts:
+  `owner_run() { /usr/bin/env -i PATH=/usr/bin:/bin HOME=/var/empty /bin/bash --noprofile --norc "$R" "$@"; }`,
+  with `R` absolute. Every owner command uses it, rechecks and rollback
+  included. `owner-run.sh` is not executable (mode 644, `#!/bin/bash`).
+  Its first lines refuse any other launch: another bash, a relative path,
+  another `PATH` or `HOME`, `BASH_ENV`/`ENV`, or any environment variable
+  besides `PATH`, `HOME` and those bash sets itself. That refusal only
+  stops a wrong launch from continuing; it cannot undo startup code that
+  launch already ran.
 - **Binaries.** The pinned PostgreSQL 18.6 store path
   (`/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin`, the
   same package as devenv's), with each of `psql`, `pg_dump`,
   `pg_dumpall` and `pg_restore` checked to report 18.6. System tools come
   from `/usr/bin` and `/bin` only.
-- **Environment.** Every child runs under `env -i`. No inherited `PG*`,
-  `PSQL*` or `GIT_*` variable reaches it, including `PGHOSTADDR`,
+- **Environment.** The launch leaves nothing inherited. Every child,
+  git included, also runs under `env -i` with `HOME=/var/empty`. So no
+  `PG*`, `PSQL*` or `GIT_*` variable reaches it, including `PGHOSTADDR`,
   `PGSERVICE`, `PGSERVICEFILE`, `PGOPTIONS`, `PGPASSFILE` and `PGDATA`.
-  `HOME` is `/var/empty`.
+  The hermetic test's stub binaries come only from a seam file committed
+  inside that test's own throwaway repository. The reviewed package has no
+  such file, and the commit binding refuses any file outside the reviewed
+  commit. The seam also refuses protected ports.
 - **Connections.** Every connection names
   `host=127.0.0.1 hostaddr=127.0.0.1`, the port, the database and user
   `postgres`. It also sets `sslmode` and `gssencmode` off, a nonexistent
@@ -545,11 +562,19 @@ one fixed context (`owner-run.sh`):
   - The new content goes into a fresh `mktemp` file in the same directory.
     Its bytes are checked, and the live file's mode is kept.
   - The live file is re-checked, then the staged file is renamed onto it.
-    Any failure removes only the staged file and leaves the live file
-    unchanged.
+    A refusal before that rename removes only the staged file and leaves
+    the live file unchanged. Such a refusal says `before any change`.
   - After apply, the server must read the file back as the reviewed rules
     (checks 12–13), or the backup copy is put back the same way, without a
     reload.
+  - After the rename, a later failure can leave the new file on disk:
+    - a failed put-back says `PUT-BACK FAILED`;
+    - a reload not confirmed in time says
+      `the NEW pg_hba.conf is in place` (for a restore,
+      `the restored backup copy is in place`).
+
+    The owner then stops and reports that line. No automatic rollback or
+    other privilege action follows.
 - **Reload.** `pg_reload_conf()` returning `t` only means the signal was
   sent. `owner-run.sh` waits until the server clock is past the file's
   modification second, reloads, then waits until `pg_conf_load_time()`
@@ -637,7 +662,16 @@ In summary:
    - 19: over every directory in the server's `unix_socket_directories`,
      pg_hba rejects the login for `postgres`, `template1` and
      `sdr_agent_dev`. With no socket configured, the endpoint is reported
-     disabled. A relative directory STOPs.
+     disabled.
+     - The server-reported value is data, validated in full before any
+       probe. It is a comma-separated list of trimmed entries, each exactly
+       `/` plus letters, digits and `. _ / + -`.
+     - Anything else STOPs with no socket probed: a quote (PostgreSQL's
+       quoted form), a backslash, a space, `=`, `@`, an empty entry or a
+       relative path. So no directory can be read as a conninfo keyword,
+       such as `hostaddr` or `service`, or as a second host.
+     - Each accepted directory is passed as a libpq single-quoted `host`
+       value, with no `hostaddr`.
 
    These read settings only. There is no table read, no function call and
    no write probe on the owner's data.
@@ -787,7 +821,7 @@ to the app.
   - a missing interface table.
 
 - `accept-test.sh` drives the real `accept.sh` through a stub `psql` in
-  35 cases. Each failing input must end with `ACCEPTANCE STOP` and exit 3,
+  64 cases. Each failing input must end with `ACCEPTANCE STOP` and exit 3,
   with only fixed label lines. The inputs cover:
   - a missing or non-canonical port (zero psql calls);
   - attest exiting 3, missing its END marker, passing a different number
@@ -802,23 +836,57 @@ to the app.
     or unreadable socket directory;
   - no socket (reported disabled) and two sockets (both probed) as passing
     controls;
+  - 13 unsupported or ambiguous socket lists. Each STOPs with the fixed
+    reason before any socket call:
+    - `/tmp/d168 hostaddr=127.0.0.1` and `/tmp/d168s.a,service=evil`;
+    - a space, a double-quoted entry with a comma, a backslash, a single
+      quote, `=` or `@`;
+    - an empty, leading or trailing comma entry, a bad entry after a good
+      one, and whitespace only;
+  - a parser-level control. Every socket conninfo `accept.sh` produced for
+    two accepted directories (one surrounded by spaces) goes through the
+    pinned libpq's `PQconninfoParse`, with no connection. Each must carry
+    exactly the literal directory as `host`, with no `hostaddr` and no
+    `service`. A negative control shows revision 5's unquoted form parses
+    `/tmp/d168 hostaddr=203.0.113.1` into a `hostaddr` override, while the
+    quoted form keeps it all as `host`;
   - wrong login session settings;
   - a missing psql;
   - SIGTERM mid-run.
 
   A positive control shows hostile `PGHOST`/`PGPORT=5520`/`PGSERVICE`/
   `PSQLRC` values never reach psql, and every call names the endpoint
-  explicitly. Mutating `accept.sh` (dropping the port bound, the FAILED-row
-  check, the ok count, the pg_hba-message check or the signal trap)
-  fails the test.
+  explicitly. Mutating `accept.sh` fails the test in each of these cases:
+  - dropping the port bound, the FAILED-row check, the ok count, the
+    pg_hba-message check or the signal trap;
+  - loosening the socket entry pattern;
+  - dropping the list-level quote and empty-entry check;
+  - removing the host quoting, which the endpoint check catches.
 - `owner-run-test.sh` drives the real `owner-run.sh` through stub
-  binaries in 80 cases. The package runs from a temporary git copy, so the
-  commit binding is real. Every run uses a hostile environment: `PGHOST`,
-  `PGHOSTADDR`, `PGPORT=5520`, `PGSERVICE`, `PGSERVICEFILE`, `PGOPTIONS`,
-  `PGPASSFILE`, `PGDATA`, `PSQLRC` and `GIT_DIR` are set, and hostile
-  `psql`, `pg_dump` and `git` binaries come first on PATH. No inherited
-  variable reaches a child, no hostile binary runs, and every connection
-  is explicit. The cases cover:
+  binaries in 90 cases. The package runs from a temporary git copy, so the
+  commit binding is real.
+  - Every run uses the exact launch line read from OWNER-STEPS.md (the
+    test refuses unless exactly one is documented). It is called from a
+    `zsh -f` caller, the owner's shell, whose environment is hostile:
+    - decoy `bash`, `env`, `sh`, `psql`, `pg_dump`, `pg_dumpall`,
+      `pg_restore` and `git` first on `PATH`;
+    - `BASH_ENV` and `ENV` startup sentinels, `SHELLOPTS=xtrace` with a
+      marker `PS4`, `BASHOPTS`, `BASH_XTRACEFD`, `CDPATH`, `GLOBIGNORE`
+      and `TMPDIR`;
+    - exported `BASH_FUNC_*%%` functions shadowing 27 commands and
+      builtins the script uses;
+    - `PGHOST`, `PGHOSTADDR`, `PGPORT=5520`, `PGSERVICE`,
+      `PGSERVICEFILE`, `PGOPTIONS`, `PGPASSFILE`, `PGDATA`, `PSQLRC` and
+      `GIT_DIR`.
+  - No sentinel, decoy or exported function may run. One case uses a bash
+    caller instead.
+  - Positive controls run the same hostile environment through other
+    launches: `/bin/bash` without `env -i`, a Nix bash, and `bash` found
+    on `PATH`. Each runs a sentinel, and `owner-run.sh` does not continue.
+    Direct execution fails (exit 126). A relative path, one extra
+    variable or a different `PATH` is refused.
+  - In the other cases, no inherited variable reaches a child, and every
+    connection is explicit. The cases cover:
   - the whole owner path;
   - the binding refusals: no or short commit, an unknown commit, HEAD one
     commit past the reviewed one, a modified, untracked or ADR-0016 file,
@@ -837,21 +905,26 @@ to the app.
     that never becomes effective is refused. Restore refuses a
     non-applied file. The mode is kept.
 
-  Mutating `owner-run.sh` fails the test: dropping `hostaddr`, the
-  fresh-directory `mktemp`, a producer's exit check, the table-data check,
-  the revert, or the HEAD check. Dropping `env -i` is caught only through
-  acceptance, because the script also unsets those variables itself. The
-  up-front pg_hba state check is duplicated by the post-staging re-check.
+  Mutating `owner-run.sh` fails the test in each of these cases: dropping
+  `hostaddr`, the fresh-directory `mktemp`, a producer's exit check, the
+  table-data check, the revert, the HEAD check, or the clean-launch check.
+  So does changing the documented launch line to `/bin/bash "$R"` (68
+  failures, sentinels ran). One mutant survives: the up-front pg_hba state
+  check is duplicated by the post-staging re-check. The children's own
+  `env -i` is a second layer behind the clean launch, not separately
+  tested.
 - `owner-path-test.sh` runs the owner path for real through `owner-run.sh`
   on two throwaway clusters. Each has a short-path Unix socket in a
   directory the test creates and removes, and a devenv-like initdb
   pg_hba.conf. A is the target; B is a decoy with `log_connections`.
-  - Every command runs with `PGHOST` set to B's socket, `PGHOSTADDR`,
-    `PGPORT`, `PGSERVICE` and `PGSERVICEFILE` naming B, B's `PGDATA`,
-    `PGOPTIONS='-c default_transaction_read_only=on'` and a hostile PATH.
-    B logs no connection (positive control: it logs the test's own
-    setup). A's writes succeed, which they would not under that
-    `PGOPTIONS`. No hostile binary runs.
+  - Every command runs through the exact documented launch, from a zsh
+    caller with the same hostile shell environment as `owner-run-test.sh`.
+    In addition, `PGHOST` is set to B's socket, `PGHOSTADDR`, `PGPORT`,
+    `PGSERVICE` and `PGSERVICEFILE` name B, and `PGDATA` is B's, with
+    `PGOPTIONS='-c default_transaction_read_only=on'`.
+  - B logs no connection (positive control: it logs the test's own setup).
+    A's writes succeed, which they would not under that `PGOPTIONS`. No
+    sentinel or decoy runs.
   - Acceptance STOPs before pg_hba (16, 17, 19 among others) and passes
     after `hba-apply` with the socket probe on A's real socket.
   - It STOPs on a loaded local-rule tamper (13, 19).
