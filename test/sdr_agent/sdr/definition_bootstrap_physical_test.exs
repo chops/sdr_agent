@@ -198,6 +198,30 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
     end
   end
 
+  # G3-2 (Codex 944d822 review): plan r8 section 7.3, "each DB call uses
+  # timeout: min(remaining, 5_000)". An owned blocker holds the tenants
+  # table ACCESS EXCLUSIVE in an open transaction on its own connection, so
+  # the tenant enumeration of run/1 (caller mode, no supervising child)
+  # blocks; its client timeout, not the blocker, must end it, well before
+  # the default 15 s query timeout and before the blocker would release.
+  describe "T-N10 (G3-2) a blocked tenant read" do
+    test "T-N10 (G3-2) run/1's blocked tenant enumeration ends at its budget as :timeout" do
+      preflight!()
+      blocker = table_blocker!("tenants")
+      {elapsed_us, result} = :timer.tc(fn -> run_bootstrap(deadline_ms: 1_000) end)
+
+      assert result == {:error, :timeout},
+             "C3-02: a blocked tenant read must end at the budget: " <> shape(result)
+
+      assert elapsed_us < 4_000_000,
+             "C3-02: the tenant read waited #{div(elapsed_us, 1000)} ms, past its 1 000 ms budget"
+
+      assert Process.alive?(blocker.pid), "C3-02: not established: the blocker released first"
+      release!(blocker)
+      assert run_bootstrap([]) == :no_tenant
+    end
+  end
+
   describe "T-N11" do
     test "T-N11 the post-violation re-read rejects a different-hash winner" do
       preflight!()
@@ -295,6 +319,40 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
     track!(task.pid)
     assert_receive {^tag, :held, backend, winner_id}, @wait_ms
     %{task: task, tag: tag, backend: backend, winner_id: winner_id}
+  end
+
+  # G3-2: holds `table` ACCESS EXCLUSIVE in an open transaction on its own
+  # connection until released (then rolls back), or for at most @wait_ms;
+  # it monitors the test process and rolls back on its :DOWN.
+  defp table_blocker!(table) do
+    parent = self()
+    tag = make_ref()
+
+    task =
+      Task.async(fn ->
+        ref = Process.monitor(parent)
+
+        Repo.transaction(fn ->
+          Repo.query!(~s(LOCK TABLE "#{table}" IN ACCESS EXCLUSIVE MODE))
+          send(parent, {tag, :held})
+
+          receive do
+            {^tag, :release} -> Repo.rollback(:released)
+            {:DOWN, ^ref, :process, ^parent, _reason} -> Repo.rollback(:owner_down)
+          after
+            @wait_ms -> Repo.rollback(:blocker_timeout)
+          end
+        end)
+      end)
+
+    track!(task.pid)
+    assert_receive {^tag, :held}, @wait_ms
+    %{task: task, pid: task.pid, tag: tag}
+  end
+
+  defp release!(blocker) do
+    send(blocker.pid, {blocker.tag, :release})
+    assert {:error, :released} = Task.await(blocker.task, @wait_ms)
   end
 
   defp await_release(tag, winner_id) do

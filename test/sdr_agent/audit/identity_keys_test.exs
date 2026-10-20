@@ -746,9 +746,32 @@ defmodule SdrAgent.Audit.IdentityKeysTest do
       naming = for path <- files, File.read!(path) =~ "sdr.identity_pass", do: path
       assert Enum.reject(naming, identity?) == []
 
+      # G3-1 (Codex 944d822): the definition bootstrap's registration
+      # transaction sets its own lock and statement timeouts (plan r8 section
+      # 7.3). Allowed by exact call: only those two setting names, only
+      # transaction-local (`true`), only a bound parameter as the value.
+      timeouts_only = %{
+        "lib/sdr_agent/sdr/definition_bootstrap.ex" => [
+          "set_config('lock_timeout', $1, true)",
+          "set_config('statement_timeout', $1, true)"
+        ]
+      }
+
+      for {path, allowed} <- timeouts_only do
+        calls =
+          ~r/set_config\([^)]*\)/
+          |> Regex.scan(File.read!(Path.join(root, path)))
+          |> List.flatten()
+
+        assert calls != [], "#{path} no longer sets its timeouts: update this guard"
+
+        assert Enum.reject(calls, &(&1 in allowed)) == [],
+               "#{path} calls set_config beyond its pinned transaction-local timeouts"
+      end
+
       set_config = for path <- files, File.read!(path) =~ "set_config", do: path
       unexpected = for path <- set_config, not identity?.(path), do: relative.(path)
-      assert unexpected -- allowed_set_config == []
+      assert unexpected -- (allowed_set_config ++ Map.keys(timeouts_only)) == []
     end
   end
 

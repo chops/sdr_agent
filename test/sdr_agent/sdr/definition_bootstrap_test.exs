@@ -11,7 +11,9 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
   after the Repo and before Oban and the Endpoint, and every outcome goes
   through `disposition/1` (D-174 Q-O4: any non-success is
   `{:error, {:definition_bootstrap_failed, class}}`; only "no tenant" is
-  `:ignore`); `Demo.Seed` and `mix sdr.bootstrap_admin` register.
+  `:ignore`); `Demo.Seed` and `mix sdr.bootstrap_admin` register. G3-2
+  (Codex 944d822, added after RED-2): every DB call of the boot run gets
+  `min(remaining, 5_000)` and no attempt starts once the budget is spent.
 
   RED form: absent subjects are guarded (`Code.ensure_loaded?/1`,
   `function_exported?/3`) and called through `apply/3`. T-N6, T-N7 and
@@ -252,6 +254,79 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
              "C3-02: refused inside a Repo transaction"
 
       assert counts() == before
+      assert definitions(ctx.tenant.id) == []
+    end
+  end
+
+  # G3-2 (Codex 944d822 review): plan r8 section 7.3, "each DB call uses
+  # timeout: min(remaining, 5_000)", for the tenant enumeration, the
+  # registration and the post-rollback re-read; no attempt starts once the
+  # budget is spent, including after a backoff. Observed through the
+  # test-build hooks of `DefinitionBootstrap.run/1` (`test_hooks:`, absent
+  # from dev and prod): `observer:` receives `{:c302_bootstrap_call, step,
+  # timeout_ms}` for each DB call with the timeout that call is given, and
+  # `{:c302_bootstrap_attempt, n}` for each attempt; `connection_faults:`
+  # makes the first n attempts fail as `:connection` before any DB call;
+  # `backoff_ms:` and `sleep:` replace the backoff and its sleep. The
+  # physical proof that a blocked read is cut off by its client timeout is
+  # T-N10 in `definition_bootstrap_physical_test.exs`.
+  describe "G3-2 the boot budget bounds every DB call" do
+    setup do
+      %{tenant: bootstrap!()}
+    end
+
+    test "G3-2 every DB call of run/1 gets min(remaining, cap), lowered by step_ms, through the re-read",
+         ctx do
+      # An existing other-hash row: tenant read, registration (refused), then
+      # the re-read outside the ended transaction.
+      hash_different!(ctx.tenant)
+      result = run_bootstrap(deadline_ms: 3_000, step_ms: 700, test_hooks: [observer: self()])
+      assert result == {:error, :definition_conflict}, "C3-02: got #{short(result)}"
+      calls = observed_calls()
+      steps = Enum.map(calls, &elem(&1, 0))
+
+      for step <- [:tenant, :registration, :reread] do
+        assert step in steps, "C3-02: the #{step} call ran without a bounded timeout"
+      end
+
+      assert Enum.find_index(steps, &(&1 == :tenant)) < Enum.find_index(steps, &(&1 == :reread))
+
+      for {step, timeout_ms} <- calls do
+        assert is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= 700,
+               "C3-02: #{step} got timeout #{inspect(timeout_ms)}, not min(remaining, 700)"
+      end
+    end
+
+    test "G3-2 a spent budget starts no DB call", ctx do
+      before = counts()
+
+      {result, queries} =
+        trace(fn -> run_bootstrap(deadline_ms: 0, test_hooks: [observer: self()]) end)
+
+      assert result == {:error, :timeout}, "C3-02: got #{short(result)}"
+      assert queries == [], "C3-02: a spent budget must not start a DB call"
+      assert observed_calls() == []
+      assert counts() == before
+      assert definitions(ctx.tenant.id) == []
+    end
+
+    test "G3-2 no attempt starts after a backoff that outlived the budget", ctx do
+      parent = self()
+
+      hooks = [
+        observer: parent,
+        connection_faults: 10,
+        backoff_ms: 50,
+        sleep: fn ms ->
+          send(parent, {:c302_backoff, ms})
+          Process.sleep(ms + 300)
+        end
+      ]
+
+      result = run_bootstrap(deadline_ms: 200, test_hooks: hooks)
+      assert result == {:error, :timeout}, "C3-02: got #{short(result)}"
+      assert_received {:c302_backoff, 50}, "C3-02: not established: no backoff ran"
+      assert observed_attempts() == [1], "C3-02: a second attempt started after the budget"
       assert definitions(ctx.tenant.id) == []
     end
   end
@@ -521,6 +596,23 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)
     assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+  end
+
+  # G3-2: the hook messages the bootstrap sent to this process.
+  defp observed_calls do
+    receive do
+      {:c302_bootstrap_call, step, timeout_ms} -> [{step, timeout_ms} | observed_calls()]
+    after
+      0 -> []
+    end
+  end
+
+  defp observed_attempts do
+    receive do
+      {:c302_bootstrap_attempt, n} -> [n | observed_attempts()]
+    after
+      0 -> []
+    end
   end
 
   defp outcome(fun) do
