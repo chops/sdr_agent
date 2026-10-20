@@ -37,6 +37,10 @@ answer() {
 }
 case "$args" in
   *attest.sql*) answer attest ;;
+  *unix_socket_directories*) answer sockets ;;
+  *host=/*dbname=postgres\ *) answer sock_postgres ;;
+  *host=/*dbname=template1\ *) answer sock_template1 ;;
+  *host=/*dbname=sdr_agent_dev\ *) answer sock_sdr_agent_dev ;;
   *accept.sql*) answer acceptsql ;;
   *dbname=postgres\ user=sdr_summary_login*) answer reject_postgres ;;
   *dbname=template1\ user=sdr_summary_login*) answer reject_template1 ;;
@@ -49,12 +53,17 @@ chmod 700 "$base/psql"
 good() {
   rm -f "$FX"/*
   { printf 'G summary functions|...\n'; printf 'A roles present (must be 2)|2\n'; printf 'ATTEST PASS: 36 of 36 checks hold\n'; printf 'END-OF-SUMMARY-ATTEST\n'; } > "$FX/attest.out"
-  { for n in 2 3 4 5 6 7 8 9 10 11 12 13 14; do printf 'ACCEPT %s check %s (must be x)|x|ok\n' "$n" "$n"; done; printf 'ACCEPT-SQL PASS\n'; } > "$FX/acceptsql.out"
+  { for n in 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do printf 'ACCEPT %s check %s (must be x)|x|ok\n' "$n" "$n"; done; printf 'ACCEPT-SQL PASS\n'; } > "$FX/acceptsql.out"
   for db in postgres template1; do
     printf 'psql: error: connection to server at "127.0.0.1", port 61999 failed: FATAL:  pg_hba.conf rejects connection for host "127.0.0.1", user "sdr_summary_login", database "%s", no encryption\n' "$db" > "$FX/reject_$db.out"
     echo 2 > "$FX/reject_$db.rc"
   done
   echo t > "$FX/login.out"
+  echo '/tmp/d168s.stub' > "$FX/sockets.out"
+  for db in postgres template1 sdr_agent_dev; do
+    printf 'psql: error: connection to server on socket "/tmp/d168s.stub/.s.PGSQL.61999" failed: FATAL:  pg_hba.conf rejects connection for host "[local]", user "sdr_summary_login", database "%s", no encryption\n' "$db" > "$FX/sock_$db.out"
+    echo 2 > "$FX/sock_$db.rc"
+  done
 }
 
 # run NAME WANT(pass|stop) [STOP-LABEL-NUMBER] [CALLS] [-- accept.sh args]
@@ -76,12 +85,12 @@ run() {
   grep -vqE '^ACCEPT(ANCE)? ' <<<"$out" && why="$why non-label-line"
   [ -z "$calls" ] || [ "$ncalls" = "$calls" ] || why="$why psql-calls=$ncalls"
   grep -q '^ENV .*[A-Z]' "$STUB_CALLS" && why="$why libpq-env-reached-psql"
-  if grep '^CALL' "$STUB_CALLS" | grep -v 'host=127.0.0.1 hostaddr=127.0.0.1 port=' | grep -q .; then why="$why implicit-endpoint"; fi
+  if grep '^CALL' "$STUB_CALLS" | grep -v 'host=127.0.0.1 hostaddr=127.0.0.1 port=' | grep -v '\[-d\] \[host=/[^ ]* port=' | grep -q .; then why="$why implicit-endpoint"; fi
   [ -z "$why" ] && pass "$name" || fail "$name:$why"
 }
 
 log "== ADR-0016 accept.sh hermetic test $(date -u +%Y-%m-%dT%H:%M:%SZ) bash $BASH_VERSION accept.sh sha256 $(shasum -a 256 "$ACCEPT" | cut -d' ' -f1)"
-good; run "all components hold: ACCEPTANCE PASS with 5 explicit-endpoint psql calls, hostile PG*/PSQLRC never reach psql" pass "" 5 -- 61999
+good; run "all components hold: ACCEPTANCE PASS with 9 explicit-endpoint psql calls (3 over the Unix socket), hostile PG*/PSQLRC never reach psql" pass "" 9 -- 61999
 grep -q 'port=61999 dbname=sdr_agent_dev user=postgres' "$STUB_CALLS" && pass "attest and accept.sql run as postgres on sdr_agent_dev at the given port" || fail "superuser connection string"
 
 for p in "" 05520 +5520 " 5520" 5520.0 0x15a0 70000 0 abc; do
@@ -98,16 +107,25 @@ grep -qxF 'ACCEPT 1 attest failed: E table-level or sequence privileges of eithe
   && pass "a FAILED attest row is reported by its fixed name only, never its value" || fail "attest failure reporting"
 run "a FAILED attest row even with a PASS line" stop 1 "" -- 61999
 
-good; echo 3 > "$FX/acceptsql.rc"; run "accept.sql exits 3" stop 2-14 "" -- 61999
-good; sed -i.bak '$d' "$FX/acceptsql.out"; run "accept.sql without ACCEPT-SQL PASS" stop 2-14 "" -- 61999
+good; echo 3 > "$FX/acceptsql.rc"; run "accept.sql exits 3" stop 2-15 "" -- 61999
+good; sed -i.bak '$d' "$FX/acceptsql.out"; run "accept.sql without ACCEPT-SQL PASS" stop 2-15 "" -- 61999
 good; sed -i.bak 's/^ACCEPT 9 \(.*\)|ok$/ACCEPT 9 \1|STOP/' "$FX/acceptsql.out"; run "accept.sql with one STOP row (and a PASS line)" stop 9 "" -- 61999
-good; sed -i.bak '/^ACCEPT 13 /d' "$FX/acceptsql.out"; run "accept.sql with only 12 ok rows" stop 2-14 "" -- 61999
-good; : > "$FX/acceptsql.out"; run "accept.sql printing nothing" stop 2-14 "" -- 61999
+good; sed -i.bak '/^ACCEPT 13 /d' "$FX/acceptsql.out"; run "accept.sql with only 13 ok rows" stop 2-15 "" -- 61999
+good; : > "$FX/acceptsql.out"; run "accept.sql printing nothing" stop 2-15 "" -- 61999
 
-good; : > "$FX/reject_postgres.out"; echo 0 > "$FX/reject_postgres.rc"; run "the login reaches database postgres" stop 15 "" -- 61999
-good; echo 'psql: error: FATAL:  role "sdr_summary_login" does not exist' > "$FX/reject_template1.out"; run "template1 refused for another reason than pg_hba" stop 16 "" -- 61999
-good; echo f > "$FX/login.out"; run "the login session settings are not the reviewed ones" stop 17 "" -- 61999
-good; echo 2 > "$FX/login.rc"; run "the login cannot reach sdr_agent_dev" stop 17 "" -- 61999
+good; : > "$FX/reject_postgres.out"; echo 0 > "$FX/reject_postgres.rc"; run "the login reaches database postgres over TCP" stop 16 "" -- 61999
+good; echo 'psql: error: FATAL:  role "sdr_summary_login" does not exist' > "$FX/reject_template1.out"; run "template1 refused for another reason than pg_hba" stop 17 "" -- 61999
+good; echo f > "$FX/login.out"; run "the login session settings are not the reviewed ones" stop 18 "" -- 61999
+good; echo 2 > "$FX/login.rc"; run "the login cannot reach sdr_agent_dev" stop 18 "" -- 61999
+
+good; : > "$FX/sock_postgres.out"; echo 0 > "$FX/sock_postgres.rc"; run "the login reaches database postgres over the Unix socket" stop 19 "" -- 61999
+good; : > "$FX/sock_sdr_agent_dev.out"; echo 0 > "$FX/sock_sdr_agent_dev.rc"; run "the login reaches sdr_agent_dev over the Unix socket" stop 19 "" -- 61999
+good; echo 'psql: error: connection to server on socket "/tmp/d168s.stub/.s.PGSQL.61999" failed: No such file or directory' > "$FX/sock_template1.out"
+run "a socket connection refused (not a pg_hba rejection)" stop 19 "" -- 61999
+good; echo 'pg_socket_rel' > "$FX/sockets.out"; run "a relative socket directory" stop 19 "" -- 61999
+good; echo 2 > "$FX/sockets.rc"; : > "$FX/sockets.out"; run "socket directories unreadable" stop 19 "" -- 61999
+good; : > "$FX/sockets.out"; run "no Unix socket configured: reported disabled, 6 psql calls" pass "" 6 -- 61999
+good; echo '/tmp/d168s.a, /tmp/d168s.b' > "$FX/sockets.out"; run "two socket directories: both probed (12 psql calls)" pass "" 12 -- 61999
 
 good; STUB_PSQL=/nonexistent/psql run "psql not found" stop 1 0 -- 61999
 
