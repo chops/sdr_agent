@@ -44,10 +44,15 @@ defmodule SdrAgent.Repo do
   def default_options(_operation), do: Process.get(@call_options, [])
 
   @doc """
-  Runs `fun` with `options` added to every repo operation it makes in the
-  calling process (Ecto `default_options/1`; an operation's explicit
-  options win), restoring the previous set afterwards on every exit path.
-  Used to pass driver options that an Ash call cannot carry (C3-02 G3-2).
+  Runs `fun` with `options` added, in the calling process only, to every
+  repo operation that Ecto builds through `default_options/1` (queries such
+  as `all/2`, writes and `transaction/2`; not `query/3`, which Ecto SQL runs
+  with its own options only). An operation's explicit options win. A
+  nested call merges its options over the enclosing ones (the inner value
+  of a key wins). The previous set is restored on every exit path (return,
+  raise, throw, exit); outside any call nothing is added. Used to pass
+  driver options that an Ash call cannot carry (C3-02 G3-2b: the
+  definition bootstrap's `deadline:` and `checkout_retries: 0`).
   """
   def with_call_options(options, fun) when is_list(options) and is_function(fun, 0) do
     previous = Process.get(@call_options)

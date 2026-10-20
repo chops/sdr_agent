@@ -55,29 +55,39 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   `min(remaining, cap)` (cap 5 s, lowered by `step_ms:`); the registration
   transaction also sets its transaction-local `lock_timeout` and
   `statement_timeout` to that value, and the re-read stays outside the
-  ended transaction. No call and no attempt starts once the budget is
-  spent (`{:error, :timeout}`). A `:connection` failure is retried up to 3
-  times with a 2 s backoff while time remains, never after the budget ran
-  out during the backoff. `:timeout` means "not confirmed" here as well:
-  a client timeout does not prove that the server rolled back.
+  ended transaction. Each of those calls also carries the budget's absolute
+  deadline as the DBConnection `deadline:` and `checkout_retries: 0` (G3-2b,
+  Codex 9d5c5c2), for its repo operations only: one checkout per call,
+  whose window (queue wait included) ends at the budget's deadline at the
+  latest, so a driver retry cannot open a fresh window past it. A result
+  that arrives after the deadline (tenant, no tenant, registered or
+  re-read row) is `{:error, :timeout}`. No call and no attempt starts once
+  the budget is spent (`{:error, :timeout}`). A `:connection` failure is
+  retried up to 3 times with a 2 s backoff while time remains, never after
+  the budget ran out during the backoff. `:timeout` means "not confirmed"
+  here as well: a client timeout does not prove that the server rolled
+  back.
 
   Test-seam builds only (`:claude_cli_test_seams`, compile time; absent from
   dev and prod): `run/1` takes `test_hooks:`, which observe and inject but
   decide nothing: `observer: pid` receives `{:c302_bootstrap_attempt, n}`,
   `{:c302_bootstrap_outcome, n, outcome}` and, for each DB call,
   `{:c302_bootstrap_call, step, timeout}` with the client timeout read from
-  the options that call actually receives (`:default` when none);
+  the options that call actually receives (`:default` when none), and
+  `{:c302_bootstrap_bounds, step, bounds}` with the `deadline:` and
+  `checkout_retries:` its repo operations receive;
   `connection_faults: n` fails the first n attempts as `:connection` before
   any DB call; `backoff_ms:` and `sleep:` replace the backoff value and its
-  sleep; `repo_opts:` adds repo options to the tenant read and the re-read
-  (e.g. `prepare: :unnamed`, so a blocked read waits in its retriable
-  prepare phase); `after_call: fun` runs `fun.(step)` right after such a
-  read returned. And `start_link/1` takes `test_barrier: pid`. The worker, once
-  its work started (after the tenant enumeration) and before its first
-  database write, monitors `pid`, sends it `{:c302_bootstrap_started,
-  worker}` and waits for a release that never comes: it ends when the child
-  kills it at the deadline, or on `pid`'s `:DOWN`, by exiting with no
-  further database work.
+  sleep; `repo_opts:` adds repo options to the bounded calls (e.g.
+  `prepare: :unnamed`, so a blocked read waits in its retriable prepare
+  phase); `after_call: fun` runs `fun.(step)` right after a bounded call
+  (the tenant read, the registration, the re-read) returned. And
+  `start_link/1` takes `test_barrier: pid`. The worker, once its work
+  started (after the tenant enumeration) and before its first database
+  write, monitors `pid`, sends it `{:c302_bootstrap_started, worker}` and
+  waits for a release that never comes: it ends when the child kills it at
+  the deadline, or on `pid`'s `:DOWN`, by exiting with no further database
+  work.
   """
   use GenServer, restart: :temporary
 
@@ -284,12 +294,12 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
       read_opts = [timeout: timeout]
       observe_call(budget, :tenant, read_opts)
 
-      read = with_repo_opts(budget, fn -> Kernel.singleton_tenant_id(read_opts) end)
+      read = bounded(budget, :tenant, fn -> Kernel.singleton_tenant_id(read_opts) end)
       after_call(budget, :tenant)
 
       case read do
-        {:ok, tenant_id} -> {:ok, tenant_id}
-        {:error, :tenant_not_bootstrapped} -> :no_tenant
+        {:ok, tenant_id} -> in_time(budget, {:ok, tenant_id})
+        {:error, :tenant_not_bootstrapped} -> in_time(budget, :no_tenant)
         {:error, error} -> {:error, classify(error)}
       end
     end
@@ -315,6 +325,29 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
     do: observe(budget, {:c302_bootstrap_call, step, Keyword.get(call_opts, :timeout, :default)})
 
   defp spent?(budget), do: remaining(budget.deadline) <= 0
+
+  # G3-2b (Codex 9d5c5c2): every repo operation of one bounded call carries
+  # the budget's absolute `deadline:` (DBConnection: each checkout's window
+  # is min(now + timeout, deadline), queue wait included) and
+  # `checkout_retries: 0` (no second checkout inside the call; a retry is
+  # the next attempt, admitted only while the budget remains), through
+  # `SdrAgent.Repo.with_call_options/2`. Without a budget nothing is added.
+  # For the registration this is the transaction's one checkout: its queue
+  # wait, BEGIN and every statement run inside that window.
+  defp bounded(nil, _step, fun), do: fun.()
+
+  defp bounded(budget, step, fun) do
+    options = [deadline: budget.deadline, checkout_retries: 0] ++ test_repo_opts(budget)
+
+    Repo.with_call_options(options, fn ->
+      observe_bounds(budget, step)
+      fun.()
+    end)
+  end
+
+  # A result that arrived after the deadline is not accepted.
+  defp in_time(nil, result), do: result
+  defp in_time(budget, result), do: if(spent?(budget), do: {:error, :timeout}, else: result)
 
   if @test_seams do
     defp barrier(opts) do
@@ -353,18 +386,18 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
 
     defp backoff_ms(%{hooks: hooks}), do: Keyword.get(hooks, :backoff_ms, @backoff_ms)
 
-    # `repo_opts:` adds repo options to the tenant read and the re-read
-    # (e.g. `prepare: :unnamed`), through `Repo.with_call_options/2`.
-    defp with_repo_opts(nil, fun), do: fun.()
+    # `repo_opts:` adds repo options to the bounded calls (e.g.
+    # `prepare: :unnamed`).
+    defp test_repo_opts(%{hooks: hooks}), do: Keyword.get(hooks, :repo_opts, [])
 
-    defp with_repo_opts(%{hooks: hooks}, fun) do
-      case Keyword.get(hooks, :repo_opts, []) do
-        [] -> fun.()
-        repo_opts -> Repo.with_call_options(repo_opts, fun)
-      end
+    # Reports, from inside a bounded call's scope, the driver bounds that
+    # `SdrAgent.Repo.default_options/1` merges under its repo operations.
+    defp observe_bounds(budget, step) do
+      bounds = Keyword.take(Repo.default_options(:all), [:deadline, :checkout_retries])
+      observe(budget, {:c302_bootstrap_bounds, step, bounds})
     end
 
-    # `after_call: fun` runs `fun.(step)` right after a read returned,
+    # `after_call: fun` runs `fun.(step)` right after a bounded call returned,
     # before its result is used (e.g. to make the result arrive late).
     defp after_call(nil, _step), do: :ok
 
@@ -382,7 +415,8 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
     defp observe(_budget, _message), do: :ok
     defp attempt(budget, opts, _n), do: run_once(budget, opts)
     defp backoff_ms(_budget), do: @backoff_ms
-    defp with_repo_opts(_budget, fun), do: fun.()
+    defp test_repo_opts(_budget), do: []
+    defp observe_bounds(_budget, _step), do: :ok
     defp after_call(_budget, _step), do: :ok
     defp sleep(_budget, ms), do: Process.sleep(ms)
   end
@@ -408,7 +442,10 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
     error -> {:error, classify(error)}
   end
 
-  defp registered(_tenant_id, {:ok, definition}, _budget), do: validate(definition)
+  # A registration that returned after the deadline is not confirmed.
+  defp registered(_tenant_id, {:ok, definition}, budget),
+    do: in_time(budget, validate(definition))
+
   # The budget was spent before the registration could start.
   defp registered(_tenant_id, {:error, :timeout}, _budget), do: {:error, :timeout}
 
@@ -422,9 +459,19 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
     with {:ok, timeout} <- call_timeout(budget) do
       transaction_opts = client_timeout(timeout)
       observe_call(budget, :registration, transaction_opts)
-      Audit.transaction(fn -> registered_row!(tenant_id, timeout) end, transaction_opts)
+
+      result =
+        bounded(budget, :registration, fn ->
+          registration_transaction(tenant_id, timeout, transaction_opts)
+        end)
+
+      after_call(budget, :registration)
+      result
     end
   end
+
+  defp registration_transaction(tenant_id, timeout, transaction_opts),
+    do: Audit.transaction(fn -> registered_row!(tenant_id, timeout) end, transaction_opts)
 
   # Inside the registration transaction: its bounds, then the register.
   defp registered_row!(tenant_id, timeout) do
@@ -480,11 +527,11 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
         )
         |> with_client_timeout(Keyword.get(read_opts, :timeout))
 
-      read = with_repo_opts(budget, fn -> Ash.read_one(query) end)
+      read = bounded(budget, :reread, fn -> Ash.read_one(query) end)
       after_call(budget, :reread)
 
       case read do
-        {:ok, %AgentDefinition{} = definition} -> validate(definition)
+        {:ok, %AgentDefinition{} = definition} -> in_time(budget, validate(definition))
         {:ok, nil} -> {:error, classify(error)}
         {:error, read_error} -> {:error, classify(read_error)}
       end

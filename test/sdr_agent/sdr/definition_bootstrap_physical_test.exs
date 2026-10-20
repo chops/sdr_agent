@@ -313,6 +313,60 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
     end
   end
 
+  # G3-2b (Codex d47c9d0, addition (a)): the registration transaction's
+  # client checkout. The proxied pool has one connection (and a queue
+  # target past the test, so the pool never drops the request early); as
+  # soon as the tenant read returned (`after_call: :tenant`), a holder
+  # process takes that connection and keeps it, so the registration's
+  # checkout waits in the queue. That wait must end at the run's one
+  # deadline (the bounds observed inside the call are that deadline with
+  # no driver retry), with `:timeout`, nothing registered and no event,
+  # while the holder still holds; after the holder releases, a run
+  # converges.
+  describe "T-N10 (G3-2b) the registration's checkout" do
+    test "T-N10 (G3-2b) a registration queued for its checkout ends at the deadline; no late success" do
+      preflight!()
+      tenant = commit_tenant!()
+      proxied = proxied_repo!(pool_size: 1, queue_target: 5_000, queue_interval: 5_000)
+      parent = self()
+
+      occupy = fn
+        :tenant -> send(parent, {:c302_holder, occupy!(proxied)})
+        _step -> :ok
+      end
+
+      deadline = System.monotonic_time(:millisecond) + 1_000
+
+      {elapsed_us, result} =
+        :timer.tc(fn ->
+          via_proxy(proxied, fn ->
+            run_bootstrap(deadline: deadline, test_hooks: [observer: parent, after_call: occupy])
+          end)
+        end)
+
+      assert_received {:c302_holder, holder}, "not established: the tenant read did not run"
+
+      assert_received {:c302_bootstrap_bounds, :registration, bounds},
+                      "not established: the registration did not start"
+
+      assert Enum.sort(bounds) == [checkout_retries: 0, deadline: deadline],
+             "C3-02: the registration's checkout got #{inspect(bounds)}"
+
+      assert result == {:error, :timeout}, "C3-02: got " <> shape(result)
+
+      assert elapsed_us < 1_500_000,
+             "C3-02: the registration waited #{div(elapsed_us, 1000)} ms against a 1 000 ms deadline"
+
+      assert Process.alive?(holder.task.pid), "not established: the holder released first"
+      assert elsewhere(fn -> definitions(tenant.id) end) == [], "C3-02: a late registration"
+      assert registered_events(tenant.id) == 0
+      release_holder!(holder)
+
+      assert match?({:ok, [%AgentDefinition{}]}, run_bootstrap([])),
+             "C3-02: a later run converges"
+    end
+  end
+
   describe "T-N11" do
     test "T-N11 the post-violation re-read rejects a different-hash winner" do
       preflight!()
@@ -457,7 +511,7 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
   # `SdrAgent.CancelWithholdingProxy` in front of the configured server;
   # both are test-supervised (the pool, started second, stops first). Its
   # first query, before any blocker, checks it reaches the same database.
-  defp proxied_repo! do
+  defp proxied_repo!(pool_opts \\ []) do
     config = Repo.config()
     host = Keyword.get(config, :hostname, "localhost")
     port = Keyword.get(config, :port) || String.to_integer(System.get_env("PGPORT") || "5432")
@@ -467,11 +521,16 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
       start_supervised!(
         Supervisor.child_spec(
           {Repo,
-           name: nil,
-           pool: DBConnection.ConnectionPool,
-           pool_size: 5,
-           hostname: "127.0.0.1",
-           port: SdrAgent.CancelWithholdingProxy.port(proxy)},
+           Keyword.merge(
+             [
+               name: nil,
+               pool: DBConnection.ConnectionPool,
+               pool_size: 5,
+               hostname: "127.0.0.1",
+               port: SdrAgent.CancelWithholdingProxy.port(proxy)
+             ],
+             pool_opts
+           )},
           id: :c302_proxied_repo
         )
       )
@@ -497,6 +556,41 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
     after
       Repo.put_dynamic_repo(previous)
     end
+  end
+
+  # G3-2b: a holder that checks out a connection of the proxied pool and
+  # keeps it until released (or for at most @wait_ms); tracked, so it is
+  # killed and awaited on any test exit.
+  defp occupy!(%{repo: repo}) do
+    parent = self()
+    tag = make_ref()
+
+    task =
+      Task.async(fn ->
+        Repo.put_dynamic_repo(repo)
+
+        Repo.checkout(
+          fn ->
+            send(parent, {tag, :held})
+
+            receive do
+              {^tag, :release} -> :released
+            after
+              @wait_ms -> :holder_timeout
+            end
+          end,
+          timeout: @wait_ms * 2
+        )
+      end)
+
+    track!(task.pid)
+    assert_receive {^tag, :held}, @wait_ms
+    %{task: task, tag: tag}
+  end
+
+  defp release_holder!(holder) do
+    send(holder.task.pid, {holder.tag, :release})
+    assert Task.await(holder.task, @wait_ms) == :released
   end
 
   defp withheld(%{proxy: proxy}), do: SdrAgent.CancelWithholdingProxy.withheld(proxy)

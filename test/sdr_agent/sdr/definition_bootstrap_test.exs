@@ -351,6 +351,52 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
       assert result == {:error, :timeout}, "C3-02: a late re-read was accepted: #{short(result)}"
     end
 
+    # G3-2b (Codex d47c9d0, addition (a)): a registration that commits but
+    # returns after the deadline (made late by `after_call:`) is not a
+    # success: `:timeout` ("not confirmed"); the committed row is what the
+    # next run converges on.
+    test "G3-2b a registration that returns after the deadline is :timeout", ctx do
+      late = fn step -> if step == :registration, do: Process.sleep(400) end
+      result = run_bootstrap(deadline_ms: 250, test_hooks: [observer: self(), after_call: late])
+
+      assert :registration in Enum.map(observed_calls(), &elem(&1, 0)),
+             "not established: the registration did not run"
+
+      assert [definition] = definitions(ctx.tenant.id),
+             "not established: the registration did not succeed"
+
+      assert definition.definition_sha256 == code_sha()
+
+      assert result == {:error, :timeout},
+             "C3-02: a late registration was accepted: #{short(result)}"
+    end
+
+    # G3-2b (Codex d47c9d0, items 2 and 4): every bounded call (tenant read,
+    # registration transaction, post-rollback re-read) receives, for its repo
+    # operations, the run's one absolute deadline and checkout_retries: 0,
+    # also on an attempt after a connection failure; nothing is left in the
+    # caller's options afterwards.
+    test "G3-2b every bounded call carries the run's one deadline and no driver retry", ctx do
+      hash_different!(ctx.tenant)
+      deadline = System.monotonic_time(:millisecond) + 5_000
+      hooks = [observer: self(), connection_faults: 1, backoff_ms: 10]
+      result = run_bootstrap(deadline: deadline, test_hooks: hooks)
+
+      assert observed_attempts() == [1, 2], "not established: no second attempt"
+      assert result == {:error, :definition_conflict}, "C3-02: got #{short(result)}"
+      bounds = observed_bounds()
+
+      assert Enum.map(bounds, &elem(&1, 0)) == [:tenant, :registration, :reread],
+             "C3-02: a bounded call ran without its driver bounds: #{inspect(Enum.map(bounds, &elem(&1, 0)))}"
+
+      for {step, options} <- bounds do
+        assert Enum.sort(options) == [checkout_retries: 0, deadline: deadline],
+               "C3-02: #{step} got #{inspect(options)}, not the run's deadline without retries"
+      end
+
+      assert SdrAgent.Repo.default_options(:all) == [], "C3-02: the call options outlived run/1"
+    end
+
     test "G3-2 no attempt starts after a backoff that outlived the budget", ctx do
       parent = self()
       started = System.monotonic_time(:millisecond)
@@ -654,6 +700,14 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
   defp observed_calls do
     receive do
       {:c302_bootstrap_call, step, timeout_ms} -> [{step, timeout_ms} | observed_calls()]
+    after
+      0 -> []
+    end
+  end
+
+  defp observed_bounds do
+    receive do
+      {:c302_bootstrap_bounds, step, options} -> [{step, options} | observed_bounds()]
     after
       0 -> []
     end
