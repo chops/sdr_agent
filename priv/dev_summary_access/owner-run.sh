@@ -1,6 +1,19 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # ADR-0016 / D-173: the ONE owner execution context. Every owner command in
 # OWNER-STEPS.md runs through this script; agents never run it.
+#
+# It is started ONLY by this exact clean launch, which fixes the environment
+# before any shell starts (no caller PATH, BASH_ENV, ENV, exported function
+# or shell option variable can reach bash):
+#
+#   /usr/bin/env -i PATH=/usr/bin:/bin HOME=/var/empty /bin/bash --noprofile --norc \
+#     /ABSOLUTE/PATH/priv/dev_summary_access/owner-run.sh COMMAND ...
+#
+# The file is deliberately not executable. Its first check refuses any other
+# launch (another bash, a relative $0, or any variable besides PATH, HOME and
+# those bash itself sets). That check cannot undo what another launch ran at
+# startup: the clean launch is the boundary; the check only makes any other
+# launch fail instead of continuing.
 #
 #   owner-run.sh COMMAND --commit SHA --port PORT [--pgdata DIR] [--backup DIR]
 #                        [--backup-parent DIR]
@@ -23,9 +36,9 @@
 # The execution context is fixed here, not inherited:
 #   * binaries: the pinned PostgreSQL 18.6 Nix store path below, each one
 #     checked to report 18.6; system tools from /usr/bin and /bin only;
-#   * every child process runs under `env -i` (no PG*, PSQL*, PGHOSTADDR,
-#     PGSERVICE, PGSERVICEFILE, PGOPTIONS, PGPASSFILE, PGDATA, GIT_* or any
-#     other inherited variable), with HOME=/var/empty;
+#   * every child process, git included, runs under `env -i` (no PG*,
+#     PSQL*, PGHOSTADDR, PGSERVICE, PGSERVICEFILE, PGOPTIONS, PGPASSFILE,
+#     PGDATA, GIT_* or any other variable), with HOME=/var/empty;
 #   * every connection names host=127.0.0.1 hostaddr=127.0.0.1, the given
 #     port, an explicit database and user postgres, sslmode and gssencmode
 #     off, passfile=/nonexistent/d168-no-pgpass, connect_timeout=10, lock_timeout=10s and
@@ -40,20 +53,32 @@
 # exact MANIFEST). Each command ends with "OWNER-RUN <command> OK" (exit 0)
 # or "OWNER-RUN REFUSED: <reason>" (exit 3).
 
+# --- the clean-launch check, before anything else ------------------------
+if [ "${BASH:-}" != /bin/bash ] || [ "${PATH:-}" != /usr/bin:/bin ] || [ "${HOME:-}" != /var/empty ] \
+   || [ -n "${BASH_ENV+set}${ENV+set}" ]; then
+  echo "OWNER-RUN REFUSED: not started by the documented clean launch (OWNER-STEPS.md)"; exit 3
+fi
+case "$0" in
+  /*) ;;
+  *) echo "OWNER-RUN REFUSED: not started by the documented clean launch (relative path)"; exit 3 ;;
+esac
+if /usr/bin/env | /usr/bin/grep -vqE '^(PATH|HOME|PWD|SHLVL|OLDPWD|_)='; then
+  echo "OWNER-RUN REFUSED: not started by the documented clean launch (inherited environment)"; exit 3
+fi
 set -u
 set -o pipefail
-# Test seam, read before the environment is discarded: honoured only for a
-# directory holding the stub marker, and then protected ports are refused.
-SEAM_PGBIN=${D168_OWNER_RUN_TEST_PGBIN:-}
-PATH=/usr/bin:/bin:/usr/sbin:/sbin
-export PATH
-for v in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | grep -E '^(PG|PSQL|GIT_|D168_)'); do unset "$v"; done
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 REPO=$(cd "$HERE/../.." && pwd -P)
 PINNED_PGBIN=/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin
 PGVER=18.6
 SEAM_MARKER=.d168-owner-run-test-stubs
+# Test seam for the hermetic stub test only: a file in this package naming a
+# stub directory that holds the stub marker. The reviewed package has no such
+# file, and check_commit refuses any file not committed at the reviewed
+# commit, so the seam acts only in a test's own throwaway repository, and it
+# then refuses protected ports.
+SEAM_FILE="$HERE/.d168-owner-run-test-pgbin"
 CMD=${1:-}
 [ $# -gt 0 ] && shift
 
@@ -80,7 +105,8 @@ case "$CMD" in
 esac
 
 PGBIN=$PINNED_PGBIN
-if [ -n "$SEAM_PGBIN" ]; then
+if [ -e "$SEAM_FILE" ]; then
+  SEAM_PGBIN=$(/bin/cat "$SEAM_FILE")
   [ -f "$SEAM_PGBIN/$SEAM_MARKER" ] || refuse "test binaries without the stub marker"
   PGBIN=$SEAM_PGBIN
   note "TEST STUB BINARIES (protected ports refused)"
@@ -116,7 +142,7 @@ check_binaries() {
     [ "$v" = "$b (PostgreSQL) $PGVER" ] || refuse "$b is not PostgreSQL $PGVER"
   done
 }
-G() { env -i PATH=/usr/bin:/bin HOME="$HOME" /usr/bin/git -C "$REPO" "$@"; }
+G() { env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/git -C "$REPO" "$@"; }
 check_commit() {
   [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || refuse "--commit must be the full 40-character reviewed SHA"
   [ "$HERE" = "$REPO/priv/dev_summary_access" ] || refuse "owner-run.sh is not inside its repository"
@@ -178,30 +204,32 @@ HBA_RULES() { grep -vE '^[[:space:]]*(#|$)' "$HERE/pg_hba-summary.conf"; }
 # write_hba CONTENT-FILE EXPECT-LIVE-FILE: replace the live hba file with
 # exactly CONTENT-FILE's bytes, only if it still equals EXPECT-LIVE-FILE.
 # Stages into a fresh private file in the same directory, checks the staged
-# bytes and mode, re-checks the live file, then renames atomically. Any
-# failure leaves the live file unchanged and removes only the staged file.
+# bytes and mode, re-checks the live file, then renames atomically. A
+# refusal inside leaves the live file as it was before THIS write and
+# removes only the staged file; LABEL (third argument) says which write.
 STAGE=""
 trap '[ -n "$STAGE" ] && [ -f "$STAGE" ] && rm -f -- "$STAGE"' EXIT
 write_hba() {
-  local want=$1 expect=$2 hba="$PGD/pg_hba.conf" mode
-  [ -f "$hba" ] && [ ! -L "$hba" ] || refuse "pg_hba.conf is not a regular file; nothing was changed"
-  [ "$(stat_um "$hba" | cut -d' ' -f1)" = "$(id -u)" ] || refuse "pg_hba.conf is not owned by you; nothing was changed"
-  cmp -s "$hba" "$expect" || refuse "pg_hba.conf is not in the expected state; nothing was changed"
+  local want=$1 expect=$2 lbl=$3 hba="$PGD/pg_hba.conf" mode
+  [ -f "$hba" ] && [ ! -L "$hba" ] || refuse "$lbl: pg_hba.conf is not a regular file; this write changed nothing"
+  [ "$(stat_um "$hba" | cut -d' ' -f1)" = "$(id -u)" ] || refuse "$lbl: pg_hba.conf is not owned by you; this write changed nothing"
+  cmp -s "$hba" "$expect" || refuse "$lbl: pg_hba.conf is not in the expected state; this write changed nothing"
   mode=$(stat_um "$hba" | cut -d' ' -f2)
-  STAGE=$( (umask 077 && mktemp "$PGD/.pg_hba.conf.d173.XXXXXXXX") 2>/dev/null) || { STAGE=""; refuse "cannot create a staging file; nothing was changed"; }
-  [ -f "$STAGE" ] && [ ! -L "$STAGE" ] && [ ! -s "$STAGE" ] || refuse "staging file is not fresh; nothing was changed"
-  /bin/cat "$want" > "$STAGE" && cmp -s "$STAGE" "$want" || refuse "staging write failed; nothing was changed"
-  chmod "$mode" "$STAGE" && [ "$(stat_um "$STAGE")" = "$(id -u) $mode" ] || refuse "cannot set the staged mode; nothing was changed"
-  cmp -s "$hba" "$expect" || refuse "pg_hba.conf changed during staging; nothing was changed"
-  mv -f -- "$STAGE" "$hba" || refuse "atomic replace failed; check pg_hba.conf"
+  STAGE=$( (umask 077 && mktemp "$PGD/.pg_hba.conf.d173.XXXXXXXX") 2>/dev/null) || { STAGE=""; refuse "$lbl: cannot create a staging file; this write changed nothing"; }
+  [ -f "$STAGE" ] && [ ! -L "$STAGE" ] && [ ! -s "$STAGE" ] || refuse "$lbl: staging file is not fresh; this write changed nothing"
+  /bin/cat "$want" > "$STAGE" && cmp -s "$STAGE" "$want" || refuse "$lbl: staging write failed; this write changed nothing"
+  chmod "$mode" "$STAGE" && [ "$(stat_um "$STAGE")" = "$(id -u) $mode" ] || refuse "$lbl: cannot set the staged mode; this write changed nothing"
+  cmp -s "$hba" "$expect" || refuse "$lbl: pg_hba.conf changed during staging; this write changed nothing"
+  mv -f -- "$STAGE" "$hba" || refuse "$lbl: atomic replace failed; check pg_hba.conf and report this stage"
   STAGE=""
 }
 # Reload so that the acceptance check can count it effective: wait until the
 # server clock is at least one second past the file's mtime, signal, then
 # wait until pg_conf_load_time() is newer than before and at least one
 # second after that mtime, with the mtime unchanged.
+# reload_and_wait STATE: STATE says what is on disk, for the refusal text.
 reload_and_wait() {
-  local lm l0 m ok _
+  local lm l0 m ok _ st=$1
   lm=$(psql_su postgres -At -F'|' -c "SELECT pg_conf_load_time()::text, (pg_stat_file(current_setting('hba_file'))).modification::text") \
     || refuse "cannot read the reload state"
   l0=${lm%%|*} m=${lm#*|}
@@ -216,7 +244,7 @@ reload_and_wait() {
       || refuse "cannot read the reload state"
     [ "$ok" = t ] && break; sleep 0.2
   done
-  [ "$ok" = t ] || refuse "the reload did not take effect after the last pg_hba.conf change"
+  [ "$ok" = t ] || refuse "the reload did not take effect after the last pg_hba.conf change ($st); stop and report this stage"
   note "reload effective after the last pg_hba.conf change"
 }
 # The on-disk rules, read by the server: no error line, and rules 1-7 the
@@ -278,21 +306,21 @@ case "$CMD" in
     WANT=$( (umask 077 && mktemp "${TMPDIR:-/tmp}/d173-hba-want.XXXXXXXX") ) || refuse "cannot create a private temporary file"
     trap '[ -n "$STAGE" ] && [ -f "$STAGE" ] && rm -f -- "$STAGE"; rm -f -- "$WANT"' EXIT
     { HBA_RULES; /bin/cat "$BACKUP/pg_hba.conf.before"; } > "$WANT" || refuse "cannot build the new pg_hba.conf"
-    write_hba "$WANT" "$BACKUP/pg_hba.conf.before"
+    write_hba "$WANT" "$BACKUP/pg_hba.conf.before" "before any change"
     if ! hba_file_ok; then
-      write_hba "$BACKUP/pg_hba.conf.before" "$WANT"
+      write_hba "$BACKUP/pg_hba.conf.before" "$WANT" "PUT-BACK FAILED: the live file holds the NEW rules, not reloaded; stop and report this stage"
       refuse "the new pg_hba.conf did not validate (accept.sql checks 12-13); the backup copy was put back and nothing was reloaded"
     fi
-    reload_and_wait
+    reload_and_wait "the NEW pg_hba.conf is in place"
     echo HBA-APPLIED-AND-LOADED
     ;;
   hba-reload)
     check_pgdata; check_server
-    reload_and_wait
+    reload_and_wait "pg_hba.conf was not changed by this command"
     ;;
   accept)
     check_server
-    out=$(run ACCEPT_PSQL="$PGBIN/psql" bash "$HERE/accept.sh" "$PORT" 2>&1); rc=$?
+    out=$(run ACCEPT_PSQL="$PGBIN/psql" /bin/bash "$HERE/accept.sh" "$PORT" 2>&1); rc=$?
     printf '%s\n' "$out"
     [ "$rc" = 0 ] && [ "$(tail -1 <<<"$out")" = "ACCEPTANCE PASS" ] || refuse "acceptance did not pass"
     ;;
@@ -317,10 +345,10 @@ case "$CMD" in
     { HBA_RULES; /bin/cat "$BACKUP/pg_hba.conf.before"; } > "$WANT" || refuse "cannot build the applied pg_hba.conf"
     cmp -s "$PGD/pg_hba.conf" "$WANT" \
       || refuse "pg_hba.conf is not exactly the applied content (edited since?); remove the seven lines by hand; nothing was changed"
-    write_hba "$BACKUP/pg_hba.conf.before" "$WANT"
+    write_hba "$BACKUP/pg_hba.conf.before" "$WANT" "before any change"
     n=$(psql_su postgres -At -c "SELECT count(*) FROM pg_catalog.pg_hba_file_rules WHERE error IS NOT NULL OR 'sdr_summary_login' = ANY (user_name)") || refuse "cannot read pg_hba_file_rules"
-    [ "$n" = 0 ] || refuse "the restored pg_hba.conf has errors or still names the login"
-    reload_and_wait
+    [ "$n" = 0 ] || refuse "the backup copy is restored on disk but has errors or still names the login (not reloaded); stop and report this stage"
+    reload_and_wait "the restored backup copy is in place"
     echo HBA-RESTORED-AND-LOADED
     ;;
 esac
