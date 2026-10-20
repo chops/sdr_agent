@@ -301,6 +301,37 @@ defmodule SdrAgent.SDR.AdmitLeadTest do
       end
     end
 
+    # C3-02 G4 (plan r8 section 14, ruling 8): the recorded scope follows
+    # one precedence, (a) the exact address, (b) the address's host, (c) the
+    # company's canonical domain, so a request matched by several
+    # suppressions records the first: an exact-address match is `:email`
+    # even when its host or the company is also suppressed, and a host match
+    # is `:domain`.
+    test "T-F3 (G4) an exact address beats a domain match on its host or company: :email",
+         ctx do
+      ctx = ready!(ctx, :agent_found)
+
+      for kind <- @kinds do
+        n = SalesFixtures.unique()
+        mail_host = "mailhost-#{n}.test"
+        input = input(ctx, kind, email: "pat.#{n}@#{mail_host}")
+        suppress!(ctx, :domain, mail_host)
+        suppress!(ctx, :domain, input.company.domain)
+        suppress!(ctx, :email, input.person.email)
+        assert_suppressed!(ctx, input, :email)
+
+        same_host = input(ctx, kind)
+        suppress!(ctx, :domain, same_host.company.domain)
+        suppress!(ctx, :email, same_host.person.email)
+        assert_suppressed!(ctx, same_host, :email)
+
+        host_and_company = input(ctx, kind, email: "kim.#{n}@other-#{mail_host}")
+        suppress!(ctx, :domain, "other-#{mail_host}")
+        suppress!(ctx, :domain, host_and_company.company.domain)
+        assert_suppressed!(ctx, host_and_company, :domain)
+      end
+    end
+
     test "T-F3 suppression (step 10) wins over an email at another account (step 11)", ctx do
       ctx = ready!(ctx, :manual)
       e = existing(ctx)
@@ -1007,6 +1038,98 @@ defmodule SdrAgent.SDR.AdmitLeadTest do
     end
   end
 
+  # C3-02 G4 (plan r8 section 14, ruling 7): a nested write that returns a
+  # refusal no packet reason names, after the admission already wrote, rolls
+  # the whole admission back and returns the content-free `:conflict`. The
+  # refusal is a test-local trigger (rolled back with the test's sandbox
+  # transaction) that makes every lead INSERT raise, so the account, the
+  # contact and the admission row are written first (observed in the
+  # trace) and the Lead `:create` returns the database error.
+  describe "T-F16 (G4) a returned nested refusal" do
+    setup :offering
+
+    test "T-F16 (G4) after earlier writes, an unmapped nested refusal is :conflict; nothing kept",
+         ctx do
+      ctx = ready!(ctx, :manual)
+      canary = canary()
+      domain = "#{canary}d.test"
+
+      input =
+        ctx
+        |> input(:manual, domain: domain, email: "#{canary}e@#{domain}")
+        |> put_in([:company, :name], "#{canary}n")
+
+      refuse_lead_inserts!()
+      before = snapshot()
+
+      {{result, statements}, log} =
+        ExUnit.CaptureLog.with_log(fn -> traced(fn -> admit(input, ctx.admin) end) end)
+
+      for table <- ["accounts", "contacts", "lead_admissions"] do
+        assert Enum.any?(statements, &(&1 =~ ~r/^\s*INSERT INTO "#{table}"/)),
+               "not established: the admission did not write #{table} before the refusal"
+      end
+
+      assert Enum.any?(statements, &(&1 =~ ~r/^\s*INSERT INTO "leads"/)),
+             "not established: the Lead :create did not run"
+
+      assert result == {:error, :conflict}, "C3-02: got #{short(result)}"
+      assert changes(before) == @nothing, "C3-02: the whole admission must roll back"
+      assert admissions_for(input.source_ref) == 0
+      refute inspect(result, limit: :infinity) =~ canary
+      refute log =~ canary, "C3-02: the refusal must not log an input value"
+    end
+  end
+
+  # Test-local: every lead INSERT raises (the default ERRCODE, P0001).
+  defp refuse_lead_inserts! do
+    Repo.query!("""
+    CREATE FUNCTION c302_refuse_lead_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      RAISE EXCEPTION 'c302 test refusal';
+    END;
+    $$
+    """)
+
+    Repo.query!(
+      "CREATE TRIGGER c302_refuse_lead_insert BEFORE INSERT ON leads " <>
+        "FOR EACH ROW EXECUTE FUNCTION c302_refuse_lead_insert()"
+    )
+  end
+
+  # `fun`'s value and the SQL statements this process ran meanwhile, in order.
+  defp traced(fun) do
+    parent = self()
+    handler = "c3-02-admit-trace-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:sdr_agent, :repo, :query],
+        fn _event, _measurements, metadata, _config ->
+          if self() == parent,
+            do: send(parent, {:c302_statement, IO.iodata_to_binary(metadata.query)})
+        end,
+        nil
+      )
+
+    try do
+      result = fun.()
+      {result, drain_statements([])}
+    after
+      :telemetry.detach(handler)
+    end
+  end
+
+  defp drain_statements(acc) do
+    receive do
+      {:c302_statement, sql} -> drain_statements([sql | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  ## Setup helpers
   ## Setup helpers
 
   defp offering(ctx), do: %{offering: SettingsFixtures.save_offering!(ctx.admin)}

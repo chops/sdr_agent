@@ -149,6 +149,54 @@ defmodule SdrAgent.Audit.IdentityKeysTest do
   @c 7
   @x 11
 
+  # C3-02 G4 (plan r8 section 14, ruling 1): the admission's `admission-ref`
+  # kind. Its raw key input is the exact `source_ref` (the admission
+  # validates the grammar first): no trim, case or host normalization, the
+  # same tenant and kind separation and signed-int64 formula. The literals
+  # were computed outside the VM (Python `hashlib.sha256` over
+  # "sdr-identity-key/1\0admission-ref\0" <> tenant <> "\0" <> ref, the
+  # first 8 bytes read as a signed big-endian int64).
+  describe "T-A1 (G4) the admission-ref kind" do
+    test "T-A1 (G4) admission-ref ids: the exact ref, separate per tenant and kind, stable" do
+      present!(@keys, :id, 3)
+      manual = "manual:0192a6c4-3b1e-7f21-9c3d-5e6f7a8b9c2f"
+
+      vectors = [
+        {manual, 4_104_483_232_722_833_990, -6_785_165_038_799_197_174},
+        {"csv:0192a6c4-3b1e-7f21-9c3d-5e6f7a8b9c5c:7", -4_433_594_401_147_850_906,
+         -3_822_347_956_748_115_077},
+        {"hubspot:123456:789", 5_766_568_727_716_675_439, 7_781_447_160_973_226_631}
+      ]
+
+      for {ref, expected, other_tenant} <- vectors do
+        assert h(:"admission-ref", @tenant, ref) == expected
+        assert key_id(@tenant, :"admission-ref", ref) == expected
+        assert key_id(@tenant, :"admission-ref", ref) == expected, "C3-02: the same ref is stable"
+        assert key_id(@other_tenant, :"admission-ref", ref) == other_tenant
+      end
+
+      assert vectors |> Enum.map(&elem(&1, 1)) |> Enum.uniq() |> length() == 3,
+             "C3-02: distinct refs give distinct ids"
+
+      # Kind separation: H over the same bytes under the email kind.
+      assert h(:email, @tenant, manual) == -9_192_477_763_250_758_533
+      refute key_id(@tenant, :"admission-ref", manual) == -9_192_477_763_250_758_533
+
+      # Exact: no trim, no case folding.
+      refute key_id(@tenant, :"admission-ref", " " <> manual) == 4_104_483_232_722_833_990
+      refute key_id(@tenant, :"admission-ref", String.upcase(manual)) == 4_104_483_232_722_833_990
+
+      # The existing kinds are unchanged (T-A1 above pins them all).
+      assert key_id(@tenant, :domain, "acme.test") == 5_030_586_291_530_585_766
+
+      # An unrepresentable ref raises InvalidKeyValue carrying the kind only.
+      for raw <- ["", <<0xFF>>, nil] do
+        invalid = assert_raise(@invalid, fn -> key_id(@tenant, :"admission-ref", raw) end)
+        assert invalid.kind == :"admission-ref"
+      end
+    end
+  end
+
   describe "T-A2 decision table (section 2.4, rules 1-9)" do
     test "T-A2 every rule and the section 2.4 worked examples" do
       present!(@scope_struct, :__struct__, 0)
