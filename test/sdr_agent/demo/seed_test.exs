@@ -147,11 +147,15 @@ defmodule SdrAgent.Demo.SeedTest do
   end
 
   test "is deterministic: two runs on empty databases produce the same rows" do
-    assert {:error, {:snapshot, first}} =
-             Audit.transaction(fn ->
-               {:ok, _} = Seed.run()
-               SdrAgent.Repo.rollback({:snapshot, snapshot()})
-             end)
+    # C3-02 G2: every Account and Contact seed row takes its identity key in
+    # its own application scope (the outermost Repo transaction), so the
+    # first run must not sit inside one caller-owned transaction (its second
+    # account would be a LateAcquisition). A raw savepoint in the sandbox
+    # transaction undoes the first run instead; it opens no scope.
+    SdrAgent.Repo.query!("SAVEPOINT c302_seed_snapshot")
+    {:ok, _} = Seed.run()
+    first = snapshot()
+    SdrAgent.Repo.query!("ROLLBACK TO SAVEPOINT c302_seed_snapshot")
 
     assert {:error, :tenant_not_bootstrapped} = Kernel.singleton_tenant_id()
     {:ok, _} = Seed.run()

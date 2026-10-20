@@ -187,6 +187,13 @@ defmodule SdrAgent.Agents.AgentRun do
 
         down "DROP TRIGGER agent_runs_settings_snapshot_cutover ON agent_runs"
       end
+
+      # C3-02: target of the lead admission's agent_found run foreign key
+      # (packet section 3: the run is its own tenant's).
+      statement :agent_runs_id_tenant_key do
+        up "ALTER TABLE agent_runs ADD CONSTRAINT agent_runs_id_tenant_key UNIQUE (id, tenant_id)"
+        down "ALTER TABLE agent_runs DROP CONSTRAINT agent_runs_id_tenant_key"
+      end
     end
   end
 

@@ -7,7 +7,15 @@ defmodule SdrAgent.Sales.Lead do
   active, at create), `owner_user_id`, `source`, `status`, `status_reason`,
   `last_decision_id` (the Agents Decision behind the latest agent
   transition), `assigned_at`, `handed_off_at`, `closed_at`. A contact has at
-  most one open lead (partial unique index over the non-terminal states).
+  most one open lead, and so has an account (partial unique indexes over
+  the non-terminal states, `unique_open_lead` and `one_open_per_account`).
+
+  Admission provenance (C3-02, packet section 3 Lead): `admission_id` (the
+  `Sales.LeadAdmission` the lead was admitted by; composite FK to the
+  admission's tenant, company and person) and `referred_from_lead_id` (the
+  original lead of a referral, at the same tenant and company), both
+  nullable, unique when set and accepted by no action. `referred` is a
+  terminal status (no action produces it yet; C3-03 adds `:refer`).
 
   Lifecycle (`transitions/0`):
 
@@ -61,9 +69,10 @@ defmodule SdrAgent.Sales.Lead do
     :converted,
     :nurture,
     :stopped,
-    :blocked
+    :blocked,
+    :referred
   ]
-  @terminal [:disqualified, :converted, :nurture, :stopped]
+  @terminal [:disqualified, :converted, :nurture, :stopped, :referred]
   @open @statuses -- @terminal
   @transitions [
     {:assign, [:new], :assigned},
@@ -89,7 +98,11 @@ defmodule SdrAgent.Sales.Lead do
     repo SdrAgent.Repo
 
     identity_wheres_to_sql unique_open_lead:
-                             "status NOT IN ('disqualified', 'converted', 'nurture', 'stopped')"
+                             "status NOT IN ('disqualified', 'converted', 'nurture', 'stopped', 'referred')",
+                           one_open_per_account:
+                             "status NOT IN ('disqualified', 'converted', 'nurture', 'stopped', 'referred')",
+                           unique_admission: "admission_id IS NOT NULL",
+                           unique_referred_from: "referred_from_lead_id IS NOT NULL"
 
     references do
       reference :tenant, on_delete: :restrict
@@ -107,6 +120,44 @@ defmodule SdrAgent.Sales.Lead do
 
       check_constraint :status_reason, "leads_reason_when_stopped_or_blocked",
         check: "status NOT IN ('stopped', 'blocked') OR status_reason IS NOT NULL"
+    end
+
+    custom_statements do
+      # C3-02 (packet section 3): composite foreign key targets. (id,
+      # tenant_id) for a referral admission's original lead; (id, tenant_id,
+      # account_id) for an admission's matched lead and a referral's
+      # original lead, both at the same company.
+      statement :leads_id_tenant_key do
+        up "ALTER TABLE leads ADD CONSTRAINT leads_id_tenant_key UNIQUE (id, tenant_id)"
+        down "ALTER TABLE leads DROP CONSTRAINT leads_id_tenant_key"
+      end
+
+      statement :leads_id_tenant_account_key do
+        up "ALTER TABLE leads ADD CONSTRAINT leads_id_tenant_account_key " <>
+             "UNIQUE (id, tenant_id, account_id)"
+
+        down "ALTER TABLE leads DROP CONSTRAINT leads_id_tenant_account_key"
+      end
+
+      # A lead binds its admission's tenant, company and person (MATCH
+      # SIMPLE: a lead without an admission is not checked).
+      statement :leads_admission_fkey do
+        up "ALTER TABLE leads ADD CONSTRAINT leads_admission_fkey " <>
+             "FOREIGN KEY (admission_id, tenant_id, account_id, contact_id) " <>
+             "REFERENCES lead_admissions (id, tenant_id, account_id, contact_id) " <>
+             "ON DELETE RESTRICT"
+
+        down "ALTER TABLE leads DROP CONSTRAINT leads_admission_fkey"
+      end
+
+      # A referral's successor is at the same tenant and company.
+      statement :leads_referred_from_fkey do
+        up "ALTER TABLE leads ADD CONSTRAINT leads_referred_from_fkey " <>
+             "FOREIGN KEY (referred_from_lead_id, tenant_id, account_id) " <>
+             "REFERENCES leads (id, tenant_id, account_id) ON DELETE RESTRICT"
+
+        down "ALTER TABLE leads DROP CONSTRAINT leads_referred_from_fkey"
+      end
     end
   end
 
@@ -382,6 +433,8 @@ defmodule SdrAgent.Sales.Lead do
     end
 
     attribute :status_reason, :string, public?: true
+    attribute :admission_id, :uuid, public?: true
+    attribute :referred_from_lead_id, :uuid, public?: true
     attribute :assigned_at, :utc_datetime_usec, writable?: false, public?: true
     attribute :handed_off_at, :utc_datetime_usec, writable?: false, public?: true
     attribute :closed_at, :utc_datetime_usec, writable?: false, public?: true
@@ -439,7 +492,17 @@ defmodule SdrAgent.Sales.Lead do
 
   identities do
     identity :unique_open_lead, [:tenant_id, :contact_id],
-      where: expr(status not in [:disqualified, :converted, :nurture, :stopped])
+      where: expr(status not in [:disqualified, :converted, :nurture, :stopped, :referred])
+
+    # C3-02 (packet section 3): one open lead per account, the active-target
+    # slot.
+    identity :one_open_per_account, [:tenant_id, :account_id],
+      where: expr(status not in [:disqualified, :converted, :nurture, :stopped, :referred])
+
+    identity :unique_admission, [:admission_id], where: expr(not is_nil(admission_id))
+
+    identity :unique_referred_from, [:referred_from_lead_id],
+      where: expr(not is_nil(referred_from_lead_id))
   end
 
   @doc "Every lead status."

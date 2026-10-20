@@ -13,7 +13,16 @@ defmodule SdrAgent.Inbox.CapabilityTest do
     contact = contact!(ctx, lead)
     email = "blocked-recipient@example.invalid"
     assert {:ok, _} = Outreach.suppress(%{scope: :email, value: email}, actor: ctx.admin)
-    assert {:ok, _} = Sales.update(contact, :change_email, %{email: email}, actor: ctx.admin)
+
+    # C3-02 G2 (D-174 Q-O2, OQ6 (ii)): `:change_email` now refuses a
+    # suppressed address, so a contact moved onto one is a legacy row. Model
+    # it in this sandbox by setting only the email, as main's `:change_email`
+    # did (it changed the email and appended its event; nothing else).
+    tamper!("UPDATE contacts SET email = $1 WHERE id = $2", [
+      email,
+      Ecto.UUID.dump!(contact.id)
+    ])
+
     session = session!(ctx.admin)
 
     {{:ok, page}, queries} = trace_queries(fn -> refresh(session) end)
