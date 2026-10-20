@@ -17,8 +17,19 @@ defmodule SdrAgent.Test.PostgresLogContract do
   The three preload settings are part of the contract as explicit empty
   strings. Also pinned: the benign extension and loaded-module identities the
   audit accepts (`plpgsql` 1.0 and `citext` 1.8, installed by migration
-  `20261006212604`), and `dynamic_library_path = '$libdir'`, which confines
-  module loading to the pinned package.
+  `20261006212604`), and `dynamic_library_path = '$libdir'`, which restricts
+  only the search for relative module names. It does not stop an absolute-path
+  `LOAD` or a SUPERUSER session change: these settings and the audit are
+  defaults and metadata observations, not isolation.
+
+  Calibrated on PostgreSQL 18.6, 2026-10-20 (throwaway cluster):
+  `pg_get_loaded_modules()` reports `file_name` as the basename only
+  (`auto_explain.dylib` whether loaded by name or from a foreign absolute
+  path), and `module_name` from the module's own magic block (`auto_explain`
+  loaded from a file named `citext.dylib` reports `auto_explain`). So the audit
+  requires `module_name` to equal the file's stem and the pinned version, but
+  cannot prove a module's directory; a byte-identical copy of a benign module at
+  a foreign path is indistinguishable through this interface.
   """
 
   @baseline [
@@ -66,6 +77,19 @@ defmodule SdrAgent.Test.PostgresLogContract do
 
   @doc "Expected `pg_settings` `{setting, unit}` per name."
   def effective, do: Map.new(@baseline, fn {name, _, _, eff} -> {name, eff} end)
+
+  @doc "The JSON type each setting must have: `:boolean`, `:string`, `:integer` or `:number`."
+  def json_type("log_transaction_sample_rate"), do: :number
+
+  def json_type(name) do
+    {^name, value, _, _} = List.keyfind(@baseline, name, 0)
+
+    cond do
+      is_boolean(value) -> :boolean
+      is_binary(value) -> :string
+      is_integer(value) -> :integer
+    end
+  end
 
   @doc "Benign extensions: name => pinned version."
   def benign_extensions, do: @benign_extensions

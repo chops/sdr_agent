@@ -34,7 +34,23 @@ defmodule SdrAgent.PostgresLogSettingsContractTest do
     test "decodes to exactly the approved baseline: keys, JSON types and values" do
       assert File.regular?(@json), "5b: #{@json} must exist"
       assert {:ok, decoded} = Jason.decode(File.read!(@json))
-      assert decoded == Contract.json_map()
+      # `===` and the per-key types: `==` would accept 0.0 for 0.
+      assert decoded === Contract.json_map()
+
+      for name <- Contract.names() do
+        value = Map.fetch!(decoded, name)
+
+        ok? =
+          case Contract.json_type(name) do
+            :boolean -> is_boolean(value)
+            :string -> is_binary(value)
+            :integer -> is_integer(value)
+            :number -> is_number(value)
+          end
+
+        assert ok?,
+               "5b: #{name} must be a JSON #{Contract.json_type(name)}, got #{inspect(value)}"
+      end
     end
   end
 
@@ -65,6 +81,8 @@ defmodule SdrAgent.PostgresLogSettingsContractTest do
         bool_as_string: Jason.encode!(Map.put(base, "logging_collector", "on")),
         string_as_number: Jason.encode!(Map.put(base, "log_rotation_age", 1440)),
         number_as_string: Jason.encode!(Map.put(base, "log_parameter_max_length", "0")),
+        integer_as_float: Jason.encode!(Map.put(base, "log_parameter_max_length", 0.0)),
+        bool_as_integer: Jason.encode!(Map.put(base, "log_duration", 0)),
         newline_value: Jason.encode!(Map.put(base, "log_directory", "log\nport = 1")),
         control_value: Jason.encode!(Map.put(base, "log_directory", "log\u0001")),
         backslash_value: Jason.encode!(Map.put(base, "log_directory", "log\\x")),
@@ -126,6 +144,19 @@ defmodule SdrAgent.PostgresLogSettingsContractTest do
 
       assert source =~
                ~r/render-pg-log-settings\.sh priv\/postgres\/log_settings\.json >> "\$PGDATA\/postgresql\.conf"/
+    end
+
+    test "CI runs the devenv render check as its own required step, online, before the hermetic gate" do
+      ci = File.read!(".github/workflows/ci.yml")
+      render_at = :binary.match(ci, "bash test/postgres_log_settings/devenv-render-test.sh")
+      hermetic_at = :binary.match(ci, "bash .github/scripts/hermetic-verify.sh")
+
+      assert render_at != :nomatch,
+             "5b: ci.yml must run test/postgres_log_settings/devenv-render-test.sh"
+
+      assert {r, _} = render_at
+      assert {h, _} = hermetic_at
+      assert r < h
     end
 
     test "the CI cluster's port and network isolation are unchanged" do

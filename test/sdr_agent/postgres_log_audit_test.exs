@@ -70,6 +70,17 @@ defmodule SdrAgent.PostgresLogAuditTest do
     end
   end
 
+  test "a module whose name differs from its file's stem fails (calibrated: auto_explain loaded as citext.dylib)" do
+    renamed = {"auto_explain", "18.6", "citext.dylib"}
+    result = classify(%{@clean | loaded_modules: [renamed]})
+    assert {:fail, [{^renamed, :logging}]} = source(result, :loaded_modules)
+
+    odd = {"citext", "18.6", "plpgsql.dylib"}
+
+    assert {:fail, [{^odd, :unknown}]} =
+             source(classify(%{@clean | loaded_modules: [odd]}), :loaded_modules)
+  end
+
   test "known logging facilities fail as :logging in each source" do
     for name <- ~w(auto_explain pgaudit pg_stat_statements log_fdw passwordcheck pg_stat_monitor) do
       ext = classify(%{@clean | extensions: @clean.extensions ++ [{name, "1.0"}]})
