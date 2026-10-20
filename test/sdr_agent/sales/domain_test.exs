@@ -145,8 +145,22 @@ defmodule SdrAgent.Sales.DomainTest do
       assert lookup(admin, c) == [legacy.id]
       assert lookup(admin, "sales." <> c) == []
 
-      duplicate = attempt(fn -> Sales.create_account(attrs(c), actor: admin) end)
-      refute match?({:ok, _}, duplicate), "C3-02: new input #{c} must dedupe to the legacy row"
+      legacy_hash = RecordHash.hex(legacy)
+      ids_before = account_ids(admin)
+
+      # The supported typed uniqueness refusal of an Ash create (AshPostgres
+      # maps a registered unique index to InvalidAttribute with
+      # `constraint_type: :unique`); the plan names the index, the unique
+      # `(tenant_id, sdr_canonical_domain(domain))` expression index, not a
+      # new error surface. Called directly: any other exception fails here.
+      duplicate = Sales.create_account(attrs(c), actor: admin)
+      assert_unique_domain_refusal!(duplicate, c)
+
+      assert account_ids(admin) == ids_before
+      assert lookup(admin, c) == [legacy.id]
+      legacy_now = reread!(admin, legacy)
+      assert to_string(legacy_now.domain) == "www." <> c
+      assert RecordHash.hex(legacy_now) == legacy_hash
 
       assert {:ok, subdomain} = Sales.create_account(attrs("sales." <> c), actor: admin)
       assert lookup(admin, "sales." <> c) == [subdomain.id]
@@ -357,6 +371,28 @@ defmodule SdrAgent.Sales.DomainTest do
     |> Ash.Query.filter(canonical_domain == ^canonical)
     |> Ash.read!()
     |> Enum.map(& &1.id)
+  end
+
+  defp account_ids(admin) do
+    assert {:ok, accounts} = GuardedCall.list(Account, actor: admin)
+    accounts |> Enum.map(& &1.id) |> Enum.sort()
+  end
+
+  defp assert_unique_domain_refusal!(result, c) do
+    assert match?({:error, %Ash.Error.Invalid{errors: [_ | _]}}, result),
+           "C3-02: new input #{c} must be refused as a duplicate of the legacy row"
+
+    {:error, %Ash.Error.Invalid{errors: errors}} = result
+
+    for error <- errors do
+      assert match?(%Ash.Error.Changes.InvalidAttribute{}, error),
+             "C3-02: the duplicate refusal must be a typed uniqueness error"
+
+      assert Keyword.get(error.private_vars || [], :constraint_type) == :unique,
+             "C3-02: the duplicate refusal must come from a unique constraint"
+    end
+
+    assert :domain in Enum.map(errors, & &1.field)
   end
 
   defp lookup_raw(admin, fragment) do

@@ -123,7 +123,17 @@ defmodule SdrAgent.Audit.IdentityKeysTest do
 
       assert key_id(@other_tenant, :domain, "acme.test") == -7_761_260_325_681_070_342
       refute key_id(@tenant, :domain, "acme.test") == key_id(@other_tenant, :domain, "acme.test")
-      refute key_id(@tenant, :domain, "a@acme.test") == key_id(@tenant, :email, "a@acme.test")
+      # Kind separation over valid inputs only: each pinned K differs from H
+      # over the same bytes under the other kind (computed outside the VM as
+      # above): email/acme.test -> ac278c2640241987 -> -6041706279181477497;
+      # domain/a@acme.test -> 896fb6ac0a97d3c5 -> -8543409118070189115.
+      # (A domain key input containing "@" is unrepresentable, section 2.7.)
+      assert key_id(@tenant, :domain, "acme.test") == 5_030_586_291_530_585_766
+      assert h(:email, @tenant, "acme.test") == -6_041_706_279_181_477_497
+      refute key_id(@tenant, :domain, "acme.test") == -6_041_706_279_181_477_497
+      assert key_id(@tenant, :email, "a@acme.test") == -4_543_070_132_910_430_270
+      assert h(:domain, @tenant, "a@acme.test") == -8_543_409_118_070_189_115
+      refute key_id(@tenant, :email, "a@acme.test") == -8_543_409_118_070_189_115
       # K_domain("www.acme.test") = H("acme.test"), never H("www.acme.test").
       refute key_id(@tenant, :domain, "www.acme.test") ==
                key_id(@tenant, :domain, "www.www.acme.test")
