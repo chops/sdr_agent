@@ -14,10 +14,15 @@ defmodule SdrAgent.Inbox.CapabilityTest do
     email = "blocked-recipient@example.invalid"
     assert {:ok, _} = Outreach.suppress(%{scope: :email, value: email}, actor: ctx.admin)
 
-    # C3-02 G2 (D-174 Q-O2, OQ6 (ii)): `:change_email` now refuses a
-    # suppressed address, so a contact moved onto one is a legacy row. Model
-    # it in this sandbox by setting only the email, as main's `:change_email`
-    # did (it changed the email and appended its event; nothing else).
+    # C3-02 G2 (D-174 Q-O2, OQ6 (ii)) -- SANDBOX LEGACY/CORRUPTION FIXTURE,
+    # for the metadata-read defense only. `:change_email` now refuses a
+    # suppressed address, so no valid application path produces this
+    # contact: it stands for a pre-C3-02 legacy row (or a corrupted one)
+    # whose email is already suppressed. The raw write sets only the email,
+    # bypassing the action, its policy and its audit event; it is neither a
+    # valid `:change_email` nor auditable history, and it is no precedent for
+    # production writes. What this test checks is that the Inbox read still
+    # binds freshness and blocks approval for such a row.
     tamper!("UPDATE contacts SET email = $1 WHERE id = $2", [
       email,
       Ecto.UUID.dump!(contact.id)

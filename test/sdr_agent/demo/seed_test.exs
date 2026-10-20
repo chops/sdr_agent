@@ -151,11 +151,15 @@ defmodule SdrAgent.Demo.SeedTest do
     # its own application scope (the outermost Repo transaction), so the
     # first run must not sit inside one caller-owned transaction (its second
     # account would be a LateAcquisition). A raw savepoint in the sandbox
-    # transaction undoes the first run instead; it opens no scope.
-    SdrAgent.Repo.query!("SAVEPOINT c302_seed_snapshot")
+    # transaction undoes the first run instead; it opens no scope. Both
+    # statements pass `sandbox_subtransaction: false`: outside a Repo
+    # transaction the sandbox otherwise wraps each statement in its own
+    # savepoint and releases it, which would destroy this one with it.
+    raw = [sandbox_subtransaction: false]
+    SdrAgent.Repo.query!("SAVEPOINT c302_seed_snapshot", [], raw)
     {:ok, _} = Seed.run()
     first = snapshot()
-    SdrAgent.Repo.query!("ROLLBACK TO SAVEPOINT c302_seed_snapshot")
+    SdrAgent.Repo.query!("ROLLBACK TO SAVEPOINT c302_seed_snapshot", [], raw)
 
     assert {:error, :tenant_not_bootstrapped} = Kernel.singleton_tenant_id()
     {:ok, _} = Seed.run()
