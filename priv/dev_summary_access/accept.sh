@@ -9,16 +9,22 @@
 # alone is not acceptance (D-173). Read-only; it runs, in order:
 #   1      attest.sql (the 36 summary-role checks), reporting only its verdict
 #          and the fixed names of any failed checks;
-#   2-14   accept.sql: server version, function definition hashes, TEMP and
-#          large-object revocations, pg_hba rules and reload state;
-#   15-17  live pg_hba checks: the login is rejected by pg_hba for the
+#   2-15   accept.sql: server version, function definition hashes, TEMP and
+#          large-object revocations, pg_hba rules, reload state and the TCP
+#          listen address;
+#   16-18  live over 127.0.0.1: the login is rejected by pg_hba for the
 #          postgres and template1 databases, and on sdr_agent_dev connects
-#          with its reviewed session settings (SELECT of settings only).
+#          with its reviewed session settings (SELECT of settings only);
+#   19     live over every Unix socket directory the server reports: the
+#          login is rejected by pg_hba for postgres, template1 and
+#          sdr_agent_dev (no socket configured is reported as disabled).
+# A refused connection is never counted as a pg_hba rejection.
 # Output is fixed labels, counts and fixed values only, safe to report back.
 # The last line is ACCEPTANCE PASS (exit 0) or ACCEPTANCE STOP (exit 3).
 # Anything else, including an interrupted run or no last line, is STOP.
 #
-# ACCEPT_PSQL may name the psql binary (default: psql on PATH).
+# ACCEPT_PSQL may name the psql binary (default: psql on PATH); owner-run.sh
+# passes the pinned PostgreSQL 18.6 psql.
 
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -38,9 +44,16 @@ if env | grep -qE '^(PG|PSQL)[A-Za-z0-9_]*='; then stop "0 libpq environment cle
 port=${1:-}
 if ! [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$port" -gt 65535 ]; then stop "0 usage: accept.sh PORT"; exit 3; fi
 ci() {
-  printf 'host=127.0.0.1 hostaddr=127.0.0.1 port=%s dbname=%s user=%s sslmode=disable connect_timeout=10 application_name=d168-accept' \
+  printf 'host=127.0.0.1 hostaddr=127.0.0.1 port=%s dbname=%s user=%s sslmode=disable gssencmode=disable passfile=/nonexistent/d168-no-pgpass connect_timeout=10 application_name=d168-accept' \
     "$port" "$1" "$2"
 }
+# A Unix-socket connection: host is the socket directory, no hostaddr.
+cs() {
+  printf 'host=%s port=%s dbname=%s user=sdr_summary_login sslmode=disable gssencmode=disable passfile=/nonexistent/d168-no-pgpass connect_timeout=10 application_name=d168-accept' \
+    "$1" "$port" "$2"
+}
+# rejected OUTPUT RC: the connection failed with pg_hba's own rejection.
+rejected() { [ "$2" != 0 ] && grep -q 'pg_hba.conf rejects connection' <<<"$1"; }
 
 # 1. attest.sql: the verdict only (its inventory stays with the owner).
 out=$("$PSQL" -X -q -v ON_ERROR_STOP=1 -d "$(ci sdr_agent_dev postgres)" -f "$HERE/attest.sql" 2>&1); rc=$?
@@ -55,29 +68,29 @@ else
   grep '|FAILED$' <<<"$out" | sed 's/ (must be.*//; s/^/ACCEPT 1 attest failed: /'
 fi
 
-# 2-14. accept.sql.
+# 2-15. accept.sql.
 out=$("$PSQL" -X -q -At -v ON_ERROR_STOP=1 -d "$(ci sdr_agent_dev postgres)" -f "$HERE/accept.sql" 2>&1); rc=$?
 grep -E '^ACCEPT [0-9]+ ' <<<"$out"
 if [ "$rc" = 0 ] && [ "$(tail -1 <<<"$out")" = 'ACCEPT-SQL PASS' ] && ! grep -qE '^ACCEPT [0-9]+ .*\|STOP$' <<<"$out" \
-   && [ "$(grep -cE '^ACCEPT [0-9]+ .*\|ok$' <<<"$out")" = 13 ]; then
-  ok "2-14 accept.sql (must be 13 ok and ACCEPT-SQL PASS)"
+   && [ "$(grep -cE '^ACCEPT [0-9]+ .*\|ok$' <<<"$out")" = 14 ]; then
+  ok "2-15 accept.sql (must be 14 ok and ACCEPT-SQL PASS)"
 else
-  stop "2-14 accept.sql (must be 13 ok and ACCEPT-SQL PASS)" "exit=$rc"
+  stop "2-15 accept.sql (must be 14 ok and ACCEPT-SQL PASS)" "exit=$rc"
 fi
 
-# 15-16. pg_hba rejects the login everywhere but sdr_agent_dev (live, so the
+# 16-17. pg_hba rejects the login everywhere but sdr_agent_dev (live, so the
 # loaded rules are tested, not only the file).
 for db in postgres template1; do
-  n=$([ "$db" = postgres ] && echo 15 || echo 16)
+  n=$([ "$db" = postgres ] && echo 16 || echo 17)
   out=$("$PSQL" -X -q -At -d "$(ci "$db" sdr_summary_login)" -c 'SELECT 1' 2>&1); rc=$?
-  if [ "$rc" != 0 ] && grep -q 'pg_hba.conf rejects connection' <<<"$out"; then
+  if rejected "$out" "$rc"; then
     ok "$n login connection to database $db (must be rejected by pg_hba)"
   else
     stop "$n login connection to database $db (must be rejected by pg_hba)" "exit=$rc"
   fi
 done
 
-# 17. The login reaches sdr_agent_dev with its reviewed session settings.
+# 18. The login reaches sdr_agent_dev with its reviewed session settings.
 # It reads settings only: no table, no function call, no write probe.
 out=$("$PSQL" -X -q -At -d "$(ci sdr_agent_dev sdr_summary_login)" -c \
   "SELECT current_user = 'sdr_summary_login' AND current_database() = 'sdr_agent_dev'
@@ -87,9 +100,32 @@ out=$("$PSQL" -X -q -At -d "$(ci sdr_agent_dev sdr_summary_login)" -c \
           AND current_setting('lock_timeout') = '5s'
           AND NOT (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user)" 2>&1); rc=$?
 if [ "$rc" = 0 ] && [ "$out" = t ]; then
-  ok "17 login connects to sdr_agent_dev with read-only default, search_path pg_catalog and timeouts"
+  ok "18 login connects to sdr_agent_dev with read-only default, search_path pg_catalog and timeouts"
 else
-  stop "17 login connects to sdr_agent_dev with read-only default, search_path pg_catalog and timeouts" "exit=$rc"
+  stop "18 login connects to sdr_agent_dev with read-only default, search_path pg_catalog and timeouts" "exit=$rc"
+fi
+
+# 19. Every Unix socket directory the server reports: the login is rejected
+# by pg_hba for every database (the reviewed local rules reject it there).
+label="19 login over every Unix socket (must be rejected by pg_hba for postgres, template1 and sdr_agent_dev)"
+dirs=$("$PSQL" -X -q -At -d "$(ci sdr_agent_dev postgres)" -c "SELECT current_setting('unix_socket_directories')" 2>/dev/null); rc=$?
+if [ "$rc" != 0 ]; then
+  stop "$label" "socket directories unreadable"
+elif [ -z "$dirs" ]; then
+  ok "19 Unix socket disabled (unix_socket_directories is empty)"
+else
+  nd=0 bad=0
+  IFS=',' read -r -a list <<<"$dirs"
+  for d in "${list[@]}"; do
+    d=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<<"$d")
+    case "$d" in /*) ;; *) bad=$((bad + 1)); continue ;; esac
+    nd=$((nd + 1))
+    for db in postgres template1 sdr_agent_dev; do
+      out=$("$PSQL" -X -q -At -d "$(cs "$d" "$db")" -c 'SELECT 1' 2>&1); rc=$?
+      rejected "$out" "$rc" || bad=$((bad + 1))
+    done
+  done
+  if [ "$bad" = 0 ] && [ "$nd" -gt 0 ]; then ok "$label, directories=$nd"; else stop "$label" "directories=$nd failures=$bad"; fi
 fi
 
 if [ "$STOPS" = 0 ]; then
