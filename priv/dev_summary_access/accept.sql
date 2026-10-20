@@ -1,6 +1,7 @@
 -- ADR-0016 / D-173 installed-state acceptance: the shared-hardening and
 -- pg_hba part. Owner-run through accept.sh (which also runs attest.sql and
--- the live pg_hba connection checks); never on its own as acceptance.
+-- the live pg_hba connection checks over TCP and every Unix socket); never
+-- on its own as acceptance.
 -- Read-only: one REPEATABLE READ, READ ONLY transaction over catalogs, the
 -- pg_hba file view and the file's modification time. It never reads a table
 -- row and changes nothing.
@@ -113,9 +114,18 @@ c(ord, name, expected, actual) AS (
   SELECT 13, 'reviewed summary-login rules are pg_hba rules 1 to 7, in order', '7',
          (SELECT count(*)::text FROM act_hba JOIN exp_hba USING (rule_number, rule))
   UNION ALL
-  SELECT 14, 'pg_hba.conf loaded after its last change', 'true',
+  -- pg_hba_file_rules reads the file, not the active rules, and the file's
+  -- mtime has one-second resolution. A reload counts as effective only if
+  -- it happened at least one second after the mtime; a same-second (or
+  -- later) change is uncertain and STOPs. The live probes (16-19) test the
+  -- active rules.
+  SELECT 14, 'pg_hba.conf reloaded at least one second after its last change', 'true',
          (pg_catalog.pg_conf_load_time()
-            >= (pg_catalog.pg_stat_file(current_setting('hba_file'))).modification)::text
+            >= (pg_catalog.pg_stat_file(current_setting('hba_file'))).modification + interval '1 second')::text
+  UNION ALL
+  -- The only TCP endpoint is IPv4 loopback: no IPv6 or other address to probe.
+  SELECT 15, 'listen_addresses (only IPv4 loopback; no IPv6 or other TCP endpoint)', '127.0.0.1',
+         current_setting('listen_addresses')
 )
 SELECT string_agg(format('ACCEPT %s %s (must be %s)|%s|%s', ord, name, expected, coalesce(actual, '(null)'),
                          CASE WHEN actual IS DISTINCT FROM expected THEN 'STOP' ELSE 'ok' END),
