@@ -98,6 +98,7 @@ defmodule SdrAgent.SDR.AdmissionRaceTest do
   use ExUnit.Case, async: false
 
   alias Ecto.Adapters.SQL.Sandbox
+  alias SdrAgent.Audit
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.AuditCase
   alias SdrAgent.InboxConcurrencyFixtures
@@ -768,7 +769,7 @@ defmodule SdrAgent.SDR.AdmissionRaceTest do
       preflight!()
       ctx = world!(definition: false)
       input = input(ctx, :manual)
-      registration = holder!(ctx.sup, fn -> register!(ctx.tenant) end)
+      registration = audit_holder!(ctx.sup, fn -> register!(ctx.tenant) end)
       before = snapshot()
 
       # Returned while the registration is uncommitted: not blocked.
@@ -792,7 +793,7 @@ defmodule SdrAgent.SDR.AdmissionRaceTest do
       ctx = world!(definition: false)
       e = existing!(ctx, "i12-#{SalesFixtures.unique()}.test")
       assert {:ok, lead} = seed_fn(ctx, e.contact).()
-      registration = holder!(ctx.sup, fn -> register!(ctx.tenant) end)
+      registration = audit_holder!(ctx.sup, fn -> register!(ctx.tenant) end)
       before = snapshot(@main_tables)
       assign = fn -> @sdr.assign_lead(lead, campaign_id: ctx.campaign.id, actor: ctx.admin) end
 
@@ -820,7 +821,7 @@ defmodule SdrAgent.SDR.AdmissionRaceTest do
       owner = self()
 
       winner =
-        holder!(ctx.sup, fn ->
+        audit_holder!(ctx.sup, fn ->
           definition = register!(ctx.tenant)
           send(owner, {:c302_winner, definition.id})
         end)
@@ -1508,16 +1509,61 @@ defmodule SdrAgent.SDR.AdmissionRaceTest do
              Sales.create_contact(contact_attrs(account, s.email), actor: ctx.admin)
   end
 
+  ## Guarded holders (T-I9, T-I10, T-I12, T-I14)
+
+  # holder!/2 with its transaction opened by `Audit.transaction/1`, for a
+  # lock function that runs a guarded action (a settings save, a definition
+  # registration): `Audit.Guard.run/3` raises inside any other transaction
+  # (guard.ex:35-38), so the plain holder's `Repo.transaction` cannot hold
+  # one. Same guarantees as holder!/2: a tracked contender, owner-bound
+  # (rolls back on the test process's :DOWN), bounded handshake, ended by
+  # release!/1. A lock function that raises ends the wait at once with its
+  # exit reason.
+  defp audit_holder!(supervisor, lock) do
+    owner = self()
+    tag = make_ref()
+
+    task =
+      contender!(supervisor, fn ->
+        down = Process.monitor(owner)
+
+        Audit.transaction(fn ->
+          lock.()
+          send(owner, {tag, :held})
+
+          receive do
+            {^tag, :release} -> :released
+            {:DOWN, ^down, :process, _pid, _reason} -> Repo.rollback(:owner_down)
+          end
+        end)
+      end)
+
+    ref = task.ref
+
+    receive do
+      {^tag, :held} ->
+        :ok
+
+      {:DOWN, ^ref, :process, _pid, reason} ->
+        flunk("C3-02: not established: a guarded holder exited: #{short(reason)}")
+    after
+      @wait_ms -> flunk("C3-02: a guarded holder never took its lock")
+    end
+
+    %{task: task, tag: tag, backend: backend_of(task)}
+  end
+
   ## Settings holders and row locks (T-I9, T-I10)
 
   # A real save (`SettingsFixtures.save_offering!/2`) completed inside a
-  # holder's open transaction: it holds its uncommitted revision, the
-  # current revision FOR NO KEY UPDATE (a successor) and the chain head.
+  # guarded holder's open `Audit.transaction`: it holds its uncommitted
+  # revision, the current revision FOR NO KEY UPDATE (a successor) and the
+  # chain head.
   defp hold_save!(ctx, overrides) do
     owner = self()
 
     holder =
-      holder!(ctx.sup, fn ->
+      audit_holder!(ctx.sup, fn ->
         revision = SettingsFixtures.save_offering!(ctx.admin, overrides)
         send(owner, {:c302_saved, revision.id})
       end)

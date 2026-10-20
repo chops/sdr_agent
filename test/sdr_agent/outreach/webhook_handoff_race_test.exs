@@ -196,7 +196,7 @@ defmodule SdrAgent.Outreach.WebhookHandoffRaceTest do
       hide_definition!(ctx)
       reply = unsubscribe_reply!(matched)
       sup = supervisor!()
-      in_flight = holder!(sup, fn -> register_code_definition!(ctx) end)
+      in_flight = audit_holder!(sup, fn -> register_code_definition!(ctx) end)
 
       t1 = contender!(sup, fn -> perform(reply.event, 1) end)
       wait = await_blocked!(backend_of(t1), in_flight.backend)
@@ -565,6 +565,49 @@ defmodule SdrAgent.Outreach.WebhookHandoffRaceTest do
 
   defp short(term), do: inspect(term, limit: 12, printable_limit: 300)
 
+  ## Guarded holders (below the harness, same guarantees)
+
+  # holder!/2 with its transaction opened by `Audit.transaction/1`, for a
+  # lock function that runs a guarded action: `Audit.Guard.run/3` raises
+  # inside any other transaction (guard.ex:35-38), so the plain holder's
+  # `Repo.transaction` cannot hold a registration. Same guarantees as
+  # holder!/2: a tracked contender, owner-bound (rolls back on the test
+  # process's :DOWN), bounded handshake, ended by release!/1. A lock
+  # function that raises ends the wait at once with its exit reason.
+  defp audit_holder!(supervisor, lock) do
+    owner = self()
+    tag = make_ref()
+
+    task =
+      contender!(supervisor, fn ->
+        down = Process.monitor(owner)
+
+        Audit.transaction(fn ->
+          lock.()
+          send(owner, {tag, :held})
+
+          receive do
+            {^tag, :release} -> :released
+            {:DOWN, ^down, :process, _pid, _reason} -> Repo.rollback(:owner_down)
+          end
+        end)
+      end)
+
+    ref = task.ref
+
+    receive do
+      {^tag, :held} ->
+        :ok
+
+      {:DOWN, ^ref, :process, _pid, reason} ->
+        flunk("C3-02: not established: a guarded holder exited: #{short(reason)}")
+    after
+      @wait_ms -> flunk("C3-02: a guarded holder never took its lock")
+    end
+
+    %{task: task, tag: tag, backend: backend_of(task)}
+  end
+
   ## Waits and locks (below the harness, same guarantees: bounded, unlinked)
 
   # Bounded wait for a contender that must not wait on `holder_backend`: on
@@ -649,8 +692,9 @@ defmodule SdrAgent.Outreach.WebhookHandoffRaceTest do
              )
   end
 
-  # The bootstrap's registration, held uncommitted (bootstrap-first holder):
-  # INSERT, then the chain head in its append.
+  # The bootstrap's registration, held uncommitted (bootstrap-first holder,
+  # inside `audit_holder!/2`'s `Audit.transaction`): INSERT, then the chain
+  # head in its append.
   defp register_code_definition!(ctx) do
     assert {:ok, %AgentDefinition{}} =
              Agents.register_definition(

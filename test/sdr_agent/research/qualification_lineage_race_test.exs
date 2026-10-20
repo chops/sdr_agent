@@ -51,8 +51,10 @@ defmodule SdrAgent.Research.QualificationLineageRaceTest do
       main every writer inserts before it touches the lead, so a waiter
       blocked by a lead holder or by the first writer is the INSERT holding
       `RowExclusiveLock` on `qualifications`; and an invalid T-L10 writer is
-      refused by its unlocked reads without ever waiting
-      (`await_blocked!/2` fails at its bound);
+      refused by its unlocked reads without ever waiting (T-L10 (i) (a),
+      (i) (b) R first, (ii) (a), (ii) (b) O first: `await_waiting!/3`
+      fails as soon as that writer returns, "returned without waiting",
+      with its refusal and its qualifications statements);
     * control (passes on main; must stay green): T-L9 (b) (all four). Its
       plan schedule assertion (first blocked by the holder, second behind
       the first) and its outcome oracle already hold on main, where the
@@ -409,7 +411,7 @@ defmodule SdrAgent.Research.QualificationLineageRaceTest do
   # INSERT holding RowExclusiveLock on qualifications.
   defp assert_parked_before_lead!(task, blocker, label) do
     backend = backend_of(task)
-    await_blocked!(backend, blocker)
+    await_waiting!(task, blocker, label)
     held = qualification_locks(backend)
 
     assert held == [],
@@ -994,6 +996,59 @@ defmodule SdrAgent.Research.QualificationLineageRaceTest do
   defp short(term), do: inspect(term, limit: 12, printable_limit: 300)
 
   ## Helpers added below the harness (read-only, bounded, same guarantees)
+
+  # await_blocked!/2 for a waiter that may end without ever waiting:
+  # bounded, until `task`'s backend is blocked by `blocker` on a lock; if
+  # the task returns or exits first, it fails at once and says what the
+  # writer did instead. On main that is the T-L10 invalid writer (a root R
+  # while R0 is current, an override naming another lead's row): every
+  # check before its INSERT is an unlocked read (`Supersedes` and
+  # `QualificationRules` before_actions, `lib/sdr_agent/audit/changes/
+  # supersedes.ex`, `lib/sdr_agent/research/changes/qualification_rules.ex`)
+  # and it locks the lead only in `RecordOutcome`'s after_action, so it is
+  # refused without waiting on the lead or on the first writer.
+  defp await_waiting!(task, blocker, label) do
+    deadline = System.monotonic_time(:millisecond) + @wait_ms
+    poll_waiting(task, blocker, label, deadline)
+  end
+
+  defp poll_waiting(task, blocker, label, deadline) do
+    backend = backend_of(task)
+
+    %{rows: [[type, event, blockers]]} =
+      Repo.query!(
+        "SELECT wait_event_type, wait_event, pg_blocking_pids(pid) " <>
+          "FROM pg_stat_activity WHERE pid = $1",
+        [backend]
+      )
+
+    cond do
+      type == "Lock" and blocker in blockers ->
+        event
+
+      ended = Task.yield(task, 0) ->
+        flunk(ended_without_waiting(task, label, blocker, ended))
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("C3-02: #{backend} never waited on #{blocker} (#{inspect({type, event})})")
+
+      true ->
+        Process.sleep(20)
+        poll_waiting(task, blocker, label, deadline)
+    end
+  end
+
+  defp ended_without_waiting(task, label, blocker, {:ok, result}) do
+    read = Enum.filter(statements(task.pid), &(&1 =~ @qualifications))
+
+    "C3-02: #{label} returned without waiting on #{blocker}: it was refused " <>
+      "before any lead lock (on main: by its unlocked reads, before its INSERT), " <>
+      "not serialized behind the lead: #{short(result)}; its qualifications " <>
+      "statements: #{short(read)}"
+  end
+
+  defp ended_without_waiting(_task, label, blocker, {:exit, reason}),
+    do: "C3-02: #{label} exited before waiting on #{blocker}: #{short(reason)}"
 
   # The statement `backend` is currently running (it is blocked, so it is
   # the waiting statement).

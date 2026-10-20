@@ -86,7 +86,13 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       published record of exactly three ids (the email's domain is the
       company domain, so the two domain keys are one id);
     * T-O3's backend is the one the blocked call reports from its own
-      process, and that process must be the contender's.
+      process. On main that process is a `Jido.Exec` worker the contender
+      spawns for the turn (`spawn_monitor/1`, no `$callers`, its own
+      connection), so the gate owner is passed through the application env
+      (`BlockingResponder.gate_key/0`), the worker opts in to the statement
+      trace when it blocks, and the call must be in the contender's run
+      (the contender or a process it spawned, `Process.info/2` `:parent`);
+      the contender's own backend is checked too.
   """
   use ExUnit.Case, async: false
 
@@ -181,15 +187,22 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     @moduledoc false
     # T-O3: blocks the reply classification call in its calling process,
     # after reporting that process and its backend to the gate owner, until
-    # the owner releases it. Owner-bound and bounded: on the owner's :DOWN,
-    # or at the bound, it kills its own process, so no database work follows.
-    @owner {__MODULE__, :owner}
+    # the owner releases it. On main the call runs in a `Jido.Exec` worker
+    # that the ReplyWorker's process spawns with `spawn_monitor/1` (the
+    # Runner's finite turn timeout, `lib/sdr_agent/sdr/runner.ex:28` and
+    # `:87`; jido_action `Jido.Exec` `execute_with_timeout/6`): it inherits neither the process dictionary
+    # nor `$callers`, so the gate owner is read from the application env
+    # (`@gate`, set for the test by `OutreachFixtures.put_env!/2`), and the
+    # worker opts in to the statement trace itself. Owner-bound and bounded:
+    # on the owner's :DOWN, or at the bound, it kills its own process, so no
+    # further database work follows in it.
+    @gate :c302_t_o3_model_gate
     @wait_ms 10_000
 
-    def gate(owner) when is_pid(owner), do: Process.put(@owner, owner)
+    def gate_key, do: @gate
 
     def respond("sdr.reply_classification" = operation, input) do
-      block!(Process.get(@owner))
+      block!(Application.fetch_env!(:sdr_agent, @gate))
       SdrAgent.Audit.IdentityPassOrderTest.UnsubscribeResponder.respond(operation, input)
     end
 
@@ -197,6 +210,7 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
 
     defp block!(owner) when is_pid(owner) do
       ref = Process.monitor(owner)
+      Process.put(:c302_trace_to, owner)
       %{rows: [[backend]]} = SdrAgent.Repo.query!("SELECT pg_backend_pid()")
       send(owner, {:c302_model_call, self(), backend})
 
@@ -289,30 +303,28 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       ctx = demo!()
       delivery = delivered!(ctx)
       matched_reply!(ctx, delivery, @missed_by_rule)
+      OutreachFixtures.put_env!(BlockingResponder.gate_key(), self())
       OutreachFixtures.put_env!(:fake_model_responder, BlockingResponder)
-      owner = self()
+      task = contender!(supervisor!(), &classify/0)
 
-      task =
-        contender!(supervisor!(), fn ->
-          BlockingResponder.gate(owner)
-          classify()
-        end)
-
-      {caller, backend} = await_model_call!()
+      %{caller: caller, backend: backend} = await_model_call!(task)
+      in_run? = descends_from?(caller, task.pid)
       during_ids = advisory_ids(backend)
       during_count = advisory_locks(backend)
+      job_count = advisory_locks(backend_of(task))
       during = statements(task.pid)
       send(caller, :c302_model_release)
       result = await_result!(task)
-      after_call = statements(task.pid)
+      after_call = statements(caller) ++ statements(task.pid)
 
-      assert {caller, backend} == {task.pid, backend_of(task)},
-             "C3-02: not established: the model call ran outside the contender's process"
+      assert in_run?,
+             "C3-02: not established: the model call ran outside the contender's run"
 
       assert during_ids == MapSet.new(),
              "C3-02: the calling backend holds an identity key during a model call"
 
       assert during_count == 0, "C3-02: the calling backend holds an advisory lock"
+      assert job_count == 0, "C3-02: the job's backend holds an advisory lock during the call"
       refute Enum.any?(during, &publishes?/1), "C3-02: a pass preceded the model call"
       refute deadlock?(result), "C3-02: a deadlock: #{short(result)}"
       assert classified?(result), "the classification must still run: #{short(result)}"
@@ -1049,13 +1061,39 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     count
   end
 
-  defp await_model_call! do
+  # Bounded: the blocked call's report, or at once the contender's own end
+  # (it returned or exited without the call reaching the gate).
+  defp await_model_call!(task) do
+    ref = task.ref
+
     receive do
-      {:c302_model_call, caller, backend} -> {caller, backend}
+      {:c302_model_call, caller, backend} ->
+        %{caller: caller, backend: backend}
+
+      {^ref, result} ->
+        flunk("C3-02: not established: the run ended before its model call: #{short(result)}")
+
+      {:DOWN, ^ref, :process, _pid, reason} ->
+        flunk("C3-02: not established: the contender exited before the call: #{short(reason)}")
     after
       @wait_ms -> flunk("C3-02: not established: the Fake model call never reached the gate")
     end
   end
+
+  # `pid` is `ancestor` or was spawned (`Process.info/2` `:parent`), at most
+  # a few levels down, by it.
+  defp descends_from?(pid, ancestor, depth \\ 4)
+  defp descends_from?(pid, pid, _depth), do: true
+  defp descends_from?(_pid, _ancestor, 0), do: false
+
+  defp descends_from?(pid, ancestor, depth) when is_pid(pid) do
+    case Process.info(pid, :parent) do
+      {:parent, parent} when is_pid(parent) -> descends_from?(parent, ancestor, depth - 1)
+      _gone_or_root -> false
+    end
+  end
+
+  defp descends_from?(_other, _ancestor, _depth), do: false
 
   ## Fixtures (main's APIs; committed after preflight)
 
