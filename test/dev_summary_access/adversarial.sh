@@ -68,7 +68,7 @@ lg() { "$PSQL" -X -q -At -F'|' -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -d "$CI_L
 
 log "== ADR-0016 adversarial run $(date -u +%Y-%m-%dT%H:%M:%SZ) port=$GUARD_PORT system_identifier=$GUARD_SYSID server=$(su -c 'SHOW server_version')"
 log "   repo head $(git -C "$REPO" rev-parse HEAD 2>/dev/null)$(git -C "$REPO" diff --quiet HEAD 2>/dev/null || echo ' +uncommitted changes')"
-for f in install.sql attest.sql uninstall.sql revoke-public-temp-lo.sql accept.sql accept.sh pg_hba-summary.conf; do log "   $f sha256 $(sha "$SQL/$f")"; done
+for f in install.sql attest.sql uninstall.sql revoke-public-temp-lo.sql accept.sql accept.sh pg_hba-summary.conf owner-run.sh; do log "   $f sha256 $(sha "$SQL/$f")"; done
 log "   seed.sql sha256 $(sha "$HERE/seed.sql")  canaries.sql sha256 $(sha "$HERE/canaries.sql")"
 
 # Run as the login, keep its output for the leak check, return it.
@@ -578,7 +578,9 @@ cp -p "$HBA" "$HBA_ORIG"
 snippet() { grep -vE '^[[:space:]]*(#|$)' "$SQL/pg_hba-summary.conf"; }
 hba_write() { /bin/cat > "$HBA.new" && /bin/cat "$HBA.new" > "$HBA" && rm -f "$HBA.new"; }
 hba_good() { { snippet; /bin/cat "$HBA_ORIG"; } | hba_write; }
-reload() { su -c "select pg_reload_conf()" >/dev/null; sleep 1; }
+# Acceptance counts a reload only at least one second after the file's
+# mtime (check 14), so wait past that second before reloading.
+reload() { sleep 1.2; su -c "select pg_reload_conf()" >/dev/null; sleep 1; }
 # Effective state that the rollback must restore: roles, the effective
 # sdr_agent_dev ACL and be_lo* function ACLs as (grantor, grantee, privilege,
 # grantability) tuples, the probed roles' TEMP and large-object reach, the
@@ -614,7 +616,7 @@ accept_closed() { ! grep -vqE '^ACCEPT(ANCE)? ' "$ACC"; }
 accept_pass() {
   local rc; run_accept; rc=$?
   if [ "$rc" = 0 ] && [ "$(tail -1 "$ACC")" = "ACCEPTANCE PASS" ] && ! grep -q '|STOP' "$ACC" \
-     && [ "$(grep -c '|ok$' "$ACC")" = 18 ] && accept_closed; then pass "$1: ACCEPTANCE PASS (18 ok, exit 0, labels only)"
+     && [ "$(grep -c '|ok$' "$ACC")" = 20 ] && accept_closed; then pass "$1: ACCEPTANCE PASS (20 ok, exit 0, labels only)"
   else fail "$1: accept exit=$rc STOP: $(grep '|STOP' "$ACC" | cut -d' ' -f2 | tr '\n' ' ') last: $(tail -1 "$ACC")"; fi
 }
 # accept_stop NAME "N N ...": exit 3, last line ACCEPTANCE STOP, each named
@@ -632,7 +634,7 @@ accept_stop() {
 reverify
 out=$(su -f "$SQL/install.sql" 2>&1)
 [ "$(tail -1 <<<"$out")" = END-OF-SUMMARY-INSTALL ] && pass "owner step: install completes" || { fail "install"; exit 1; }
-accept_stop "a fresh install without the revokes or pg_hba rules" "5 6 9 10 13 15 16"
+accept_stop "a fresh install without the revokes or pg_hba rules" "5 6 9 10 13 16 17"
 
 # 9b. Revokes: inventory first (changes nothing, predicts the effects).
 expect_role "before the revokes: adv_plain creates a temporary table" ok adv_plain sdr_agent_dev -c "create temp table t (i int)"
@@ -683,12 +685,12 @@ expect_role "postgres (superuser, the app's role) large object" ok postgres sdr_
 [ "$(lgc -c "$G3" | norm_fn)" = "$base_g3" ] && [ "$(lgc -c "$POST" | norm_fn)" = "$base_post" ] \
   && pass "summary functions' results unchanged by the revokes" || fail "summary results changed after the revokes"
 attest_ok "after the revokes (attest alone; not acceptance)"
-accept_stop "the revokes without the pg_hba rules" "13 15 16"
+accept_stop "the revokes without the pg_hba rules" "13 16 17"
 
 # 9c. pg_hba: edited but not reloaded, then reloaded.
 reverify
 hba_good
-accept_stop "pg_hba.conf edited but not reloaded" "14 15 16"
+accept_stop "pg_hba.conf edited but not reloaded" "14 16 17"
 reload
 accept_pass "owner path complete (install, revokes, pg_hba reload)"
 out=$("$PSQL" -X -q -At -d "$CI_LG_PG" -c "select 1" 2>&1)
@@ -727,19 +729,19 @@ tamper_sql "a wrong role attribute: login INHERIT" "1" \
   "ALTER ROLE sdr_summary_login INHERIT" "ALTER ROLE sdr_summary_login NOINHERIT"
 tamper_sql "a wrong role attribute: definer LOGIN" "1" \
   "ALTER ROLE sdr_summary_definer LOGIN" "ALTER ROLE sdr_summary_definer NOLOGIN"
-tamper_sql "a changed login search_path default" "1 17" \
+tamper_sql "a changed login search_path default" "1 18" \
   "ALTER ROLE sdr_summary_login SET search_path = public, pg_catalog" "ALTER ROLE sdr_summary_login SET search_path = pg_catalog"
-tamper_sql "a login read-only default switched off" "1 17" \
+tamper_sql "a login read-only default switched off" "1 18" \
   "ALTER ROLE sdr_summary_login SET default_transaction_read_only = off" "ALTER ROLE sdr_summary_login SET default_transaction_read_only = on"
 tamper_sql "a replaced function body" "1 4" \
   "DO \$m\$ BEGIN EXECUTE replace(pg_get_functiondef('summary.g3_inventory_v1()'::regprocedure), '-- 5. Context only', '-- 5. Context only (changed)'); END \$m\$" \
   "DO \$m\$ BEGIN EXECUTE replace(pg_get_functiondef('summary.g3_inventory_v1()'::regprocedure), '-- 5. Context only (changed)', '-- 5. Context only'); END \$m\$"
 reverify
 { snippet | sed 2d; /bin/cat "$HBA_ORIG"; } | hba_write; reload
-accept_stop "pg_hba without the reject line for other databases over 127.0.0.1" "13 15 16"
+accept_stop "pg_hba without the reject line for other databases over 127.0.0.1" "13 16 17"
 hba_good; reload; accept_pass "after restoring the pg_hba rules"
 { echo 'host all all 127.0.0.1/32 trust'; snippet; /bin/cat "$HBA_ORIG"; } | hba_write; reload
-accept_stop "a broader trust rule placed before the reviewed rules" "13 15 16"
+accept_stop "a broader trust rule placed before the reviewed rules" "13 16 17"
 hba_good; reload; accept_pass "after restoring the rule order"
 { snippet; echo 'host all'; /bin/cat "$HBA_ORIG"; } | hba_write; reload
 accept_stop "a pg_hba.conf with an invalid line" "12"
