@@ -10,6 +10,13 @@ defmodule SdrAgent.Sales.IdentityWritersTest do
       domain; a stale struct (its old domain no longer the locked row's) is
       a typed conflict with nothing written and no late key; a repeated
       `www.` is refused (D-174 Q-O6);
+    * G2-1 (Codex 1b78e40 review, added after RED-2): a legacy `www.` row
+      restated in its canonical form is a pending domain write: from a stale
+      struct it is the typed conflict with nothing written and no key for
+      the locked row's current domain (also when the restated identity was
+      since suppressed); from a current struct (control) it keys the
+      identity it restates and changes only the stored form, and, keeping
+      the company identity, it is not an A.4 rename;
     * T-M3: Contact `:create`/`:seed` key the new email;
     * T-M4: Contact `:change_email` keys the old email, the new email and
       the new email's domain; OQ6 (ii) (D-174 Q-O2): to a suppressed address
@@ -180,6 +187,98 @@ defmodule SdrAgent.Sales.IdentityWritersTest do
              "C3-02: the conflict keys the struct's old and the new domain, and no other"
 
       refute Enum.any?(queries, &statement?(&1, :update, "accounts"))
+    end
+
+    # G2-1 (Codex 1b78e40 review): a pending domain write whose new value has
+    # the caller's old key form (a legacy `www.` row restated canonically) is
+    # still a domain write. From a stale struct it must not rename the locked
+    # row back: it keys the restated identity, finds the locked row's
+    # identity changed, and is the typed conflict.
+    test "G2-1 a stale legacy struct restating its key form is a typed conflict: nothing written, no late key",
+         ctx do
+      t = ctx.tenant.id
+      n = SalesFixtures.unique()
+      plain = "g21-a-#{n}.test"
+      current = "g21-b-#{n}.test"
+      stale = legacy_account!(ctx, plain)
+      assert {:ok, _renamed} = Sales.update(stale, :update, %{domain: current}, actor: ctx.admin)
+      before = length(events(ctx.tenant))
+
+      {result, queries} =
+        trace_queries(fn -> Sales.update(stale, :update, %{domain: plain}, actor: ctx.admin) end)
+
+      assert_refused!(result, :domain, [plain, current])
+      assert to_string(reload!(ctx, stale).domain) == current
+      assert length(events(ctx.tenant)) == before
+
+      refute h(:domain, t, current) in lock_ids(queries),
+             "C3-02: no late key for the locked row's current domain"
+
+      assert MapSet.new(lock_ids(queries)) == MapSet.new([h(:domain, t, plain)]),
+             "C3-02: the restatement keys the identity it restates, and no other"
+
+      refute Enum.any?(queries, &statement?(&1, :update, "accounts"))
+    end
+
+    test "G2-1 a stale legacy restatement of a since-suppressed identity is refused: nothing written",
+         ctx do
+      t = ctx.tenant.id
+      n = SalesFixtures.unique()
+      plain = "g21-sa-#{n}.test"
+      current = "g21-sb-#{n}.test"
+      stale = legacy_account!(ctx, plain)
+      assert {:ok, _renamed} = Sales.update(stale, :update, %{domain: current}, actor: ctx.admin)
+      assert {:ok, _} = Outreach.suppress(%{scope: :domain, value: plain}, actor: ctx.admin)
+      before = length(events(ctx.tenant))
+
+      {result, queries} =
+        trace_queries(fn -> Sales.update(stale, :update, %{domain: plain}, actor: ctx.admin) end)
+
+      assert_refused!(result, :domain, [plain, current])
+      assert to_string(reload!(ctx, stale).domain) == current
+      assert length(events(ctx.tenant)) == before
+      refute h(:domain, t, current) in lock_ids(queries)
+      assert MapSet.new(lock_ids(queries)) == MapSet.new([h(:domain, t, plain)])
+      refute Enum.any?(queries, &statement?(&1, :update, "accounts"))
+    end
+
+    # Control, with the explicit contract: a restatement from a current
+    # struct keys the identity it restates, re-checks it on the locked row
+    # and changes only the stored form (canonical_domain is unchanged). It
+    # is not an A.4 rename, since the company identity does not change, so a
+    # suppression of that same identity does not refuse it (the second case).
+    test "G2-1 (control) a current legacy struct restates its identity under that one key", ctx do
+      t = ctx.tenant.id
+      n = SalesFixtures.unique()
+      plain = "g21-c-#{n}.test"
+      account = legacy_account!(ctx, plain)
+
+      assert {:ok, {{:ok, updated}, observed}} =
+               in_scope(t, [{:domain, plain}], fn ->
+                 Sales.update(account, :update, %{domain: plain}, actor: ctx.admin)
+               end)
+
+      assert_pass!(observed, [h(:domain, t, plain)])
+      assert to_string(updated.domain) == plain
+      assert canonical_domain!(ctx, account) == plain
+    end
+
+    test "G2-1 (control) a current restatement of a suppressed identity is not an A.4 rename",
+         ctx do
+      t = ctx.tenant.id
+      n = SalesFixtures.unique()
+      plain = "g21-cs-#{n}.test"
+      account = legacy_account!(ctx, plain)
+      assert {:ok, _} = Outreach.suppress(%{scope: :domain, value: plain}, actor: ctx.admin)
+
+      assert {:ok, {{:ok, updated}, observed}} =
+               in_scope(t, [{:domain, plain}], fn ->
+                 Sales.update(account, :update, %{domain: plain}, actor: ctx.admin)
+               end)
+
+      assert_pass!(observed, [h(:domain, t, plain)])
+      assert to_string(updated.domain) == plain
+      assert canonical_domain!(ctx, account) == plain
     end
 
     test "T-M2 a repeated www. is refused without echoing it", ctx do
@@ -544,6 +643,30 @@ defmodule SdrAgent.Sales.IdentityWritersTest do
   defp account!(ctx, domain) do
     assert {:ok, account} = Sales.create_account(account_attrs(domain), actor: ctx.admin)
     account
+  end
+
+  # G2-1: a legacy row whose stored domain is the pre-C3-02 form
+  # `www.<plain>` (canonical_domain `<plain>`). Sandbox legacy fixture: the
+  # API stores only the company form, so the stored form is set by one raw
+  # write (as `override_company_key_test.exs` does); it is not an application
+  # write. Returns the row as read back, with its `www.` domain.
+  defp legacy_account!(ctx, plain) do
+    account = account!(ctx, plain)
+
+    assert %{num_rows: 1} =
+             tamper!("UPDATE accounts SET domain = $1 WHERE id = $2", [
+               "www." <> plain,
+               Ecto.UUID.dump!(account.id)
+             ])
+
+    legacy = reload!(ctx, account)
+    assert to_string(legacy.domain) == "www." <> plain
+    legacy
+  end
+
+  defp canonical_domain!(ctx, account) do
+    assert {:ok, loaded} = Ash.load(reload!(ctx, account), :canonical_domain, actor: ctx.admin)
+    to_string(loaded.canonical_domain)
   end
 
   # A contact `jo.<label>@<domain>` at a new account with `domain`.
