@@ -88,6 +88,11 @@ defmodule SdrAgent.SDR.DefinitionBootstrapEnvelopeTest do
           end)
         end)
 
+      # Owner-side cleanup on every exit path (Codex fb5166a important): the
+      # unlinked caller is killed and its :DOWN awaited, which also ends the
+      # call process linked to it.
+      on_exit(fn -> kill_and_await!(caller) end)
+
       assert_receive {:c302_call, call}, 5_000
       ref = Process.monitor(call)
       Process.exit(caller, :kill)
@@ -148,6 +153,17 @@ defmodule SdrAgent.SDR.DefinitionBootstrapEnvelopeTest do
   defp envelope(deadline_ms, call) do
     deadline = System.monotonic_time(:millisecond) + deadline_ms
     DefinitionBootstrap.within_deadline_for_test(deadline, call)
+  end
+
+  defp kill_and_await!(pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+    after
+      5_000 -> flunk("the spawned caller did not terminate")
+    end
   end
 
   defp mailbox do

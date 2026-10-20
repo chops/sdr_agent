@@ -360,6 +360,98 @@ defmodule SdrAgent.SDR.AdmissionInputTest do
     end
   end
 
+  # Codex fb5166a G4-1: an email that the identity-key representation
+  # cannot carry (a control character, `Normalize.key_value/2`) is refused
+  # at step 3 naming the field only, before any hash, transaction or key.
+  # Valid emails and the accepted `www.` host vectors stay accepted.
+  describe "T-G1 (G4-1) email representation" do
+    test "T-G1 (G4-1) a control character in the email is refused naming :email only" do
+      present!(@input, :normalize, 2)
+
+      for char <- [0x00, 0x01, 0x1F, 0x7F] do
+        email = "jo" <> <<char>> <> "doe@acme-freight.test"
+        input = put_in(@manual_full_input, [:person, :email], email)
+
+        assert call(@input, :normalize, [input, @tenant_id]) == {:error, {:invalid, [:email]}},
+               "C3-02: an email with U+#{Integer.to_string(char, 16)} must be refused at step 3"
+      end
+    end
+
+    test "T-G1 (G4-1) (control) valid emails, including www. hosts, are accepted" do
+      present!(@input, :normalize, 2)
+
+      for email <- ["jo@www.test", "jo@www.www.acme-freight.test", " Jo.Doe@Acme-Freight.TEST "] do
+        input = put_in(@manual_full_input, [:person, :email], email)
+
+        assert {:ok, %{"person" => %{"email" => normalized}}} =
+                 call(@input, :normalize, [input, @tenant_id])
+
+        assert normalized == email |> String.trim() |> String.downcase()
+      end
+    end
+  end
+
+  # Codex fb5166a G4-2: ids are textual uuids only (packet section 5.2:
+  # reject non-UTF-8; uuids lowercased). A raw 16-byte binary, which
+  # `Ecto.UUID.cast/1` also accepts, is refused naming the field, before
+  # any database access; uppercase textual uuids keep normalizing (the
+  # pinned vectors above).
+  describe "T-G1 (G4-2) textual uuids only" do
+    @raw_ids [<<255::128>>, "0123456789abcdef"]
+
+    test "T-G1 (G4-2) a raw 16-byte campaign_id is refused naming :campaign_id" do
+      present!(@input, :normalize, 2)
+
+      for raw <- @raw_ids do
+        input = Map.put(@manual_full_input, :campaign_id, raw)
+
+        assert call(@input, :normalize, [input, @tenant_id]) ==
+                 {:error, {:invalid, [:campaign_id]}},
+               "C3-02: a raw binary campaign_id must be refused"
+      end
+    end
+
+    test "T-G1 (G4-2) a raw 16-byte agent_run_id is refused naming :agent_run_id" do
+      present!(@input, :normalize, 2)
+
+      for raw <- @raw_ids do
+        # The ref embeds the textual form of the same 16 bytes, so only the
+        # representation of agent_run_id is wrong.
+        {:ok, textual} = Ecto.UUID.load(raw)
+
+        input =
+          Map.merge(@agent_found_input, %{
+            agent_run_id: raw,
+            source_ref: "agent_found:#{textual}:0192a6c4-3b1e-7f21-9c3d-5e6f7a8b9c4b"
+          })
+
+        assert call(@input, :normalize, [input, @tenant_id]) ==
+                 {:error, {:invalid, [:agent_run_id]}},
+               "C3-02: a raw binary agent_run_id must be refused"
+      end
+    end
+
+    test "T-G1 (G4-2) a raw 16-byte tenant id is refused naming :tenant_id" do
+      present!(@input, :normalize, 2)
+
+      for raw <- @raw_ids do
+        assert call(@input, :normalize, [@manual_full_input, raw]) ==
+                 {:error, {:invalid, [:tenant_id]}},
+               "C3-02: a raw binary tenant id must be refused"
+      end
+    end
+
+    test "T-G1 (G4-2) (control) uppercase textual uuids still normalize to lowercase" do
+      present!(@input, :normalize, 2)
+
+      assert {:ok, %{"campaign_id" => campaign_id, "tenant_id" => tenant_id}} =
+               call(@input, :normalize, [@manual_full_input, @tenant_id])
+
+      assert {campaign_id, tenant_id} ==
+               {String.downcase(@campaign_id), String.downcase(@tenant_id)}
+    end
+  end
+
   describe "T-G2 stored hash = replay key" do
     setup do
       tenant = bootstrap!()

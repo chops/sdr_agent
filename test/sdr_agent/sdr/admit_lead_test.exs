@@ -1081,6 +1081,104 @@ defmodule SdrAgent.SDR.AdmitLeadTest do
     end
   end
 
+  # Codex fb5166a must-fix G4-1..G4-3 (existing contracts, regressions
+  # first). G4-1: an email the identity-key representation cannot carry is
+  # the step-3 `{:invalid, [:email]}`, not an identity-key raise. G4-2: a
+  # raw 16-byte campaign_id is the step-3 `{:invalid, [:campaign_id]}`
+  # before any database access. G4-3: the step-9 guard evaluates the locked
+  # stored account's company identity in its approved canonical form, so a
+  # valid legacy spelling (trailing dot, padding, case, one `www.`) is
+  # reused, unchanged, by an admission whose hash is the canonical input's;
+  # a non-reserved legacy company stays refused (control).
+  describe "G4 corrections (Codex fb5166a)" do
+    setup :offering
+
+    test "G4-1 an email with a control character is {:invalid, [:email]}; nothing written",
+         ctx do
+      ctx = ready!(ctx, :manual)
+      before = snapshot()
+
+      for char <- [0x00, 0x01, 0x1F, 0x7F] do
+        n = SalesFixtures.unique()
+        domain = "admit-#{n}.test"
+        input = input(ctx, :manual, domain: domain, email: "pat" <> <<char>> <> ".#{n}@#{domain}")
+        result = outcome_of(fn -> admit(input, ctx.admin) end)
+
+        assert result == {:error, {:invalid, [:email]}},
+               "C3-02: U+#{Integer.to_string(char, 16)} in the email: #{short(result)}"
+
+        assert admissions_for(input.source_ref) == 0
+      end
+
+      assert changes(before) == @nothing
+    end
+
+    test "G4-2 a raw 16-byte campaign_id is {:invalid, [:campaign_id]}; nothing written", ctx do
+      ctx = ready!(ctx, :manual)
+      before = snapshot()
+
+      for raw <- [<<255::128>>, "0123456789abcdef"] do
+        input = input(ctx, :manual, put: [campaign_id: raw])
+        result = outcome_of(fn -> admit(input, ctx.admin) end)
+        assert result == {:error, {:invalid, [:campaign_id]}}, "C3-02: got #{short(result)}"
+        assert admissions_for(input.source_ref) == 0
+      end
+
+      assert changes(before) == @nothing
+    end
+
+    test "G4-3 a legacy trailing-dot or padded stored domain is reused unchanged; the hash is the input's",
+         ctx do
+      ctx = ready!(ctx, :manual)
+
+      for spelling <- [&"#{&1}.", &"  WWW.#{String.upcase(&1)}. "] do
+        canonical = "legacy-dot-#{SalesFixtures.unique()}.test"
+        legacy = legacy_account!(ctx, spelling.(canonical))
+        row = account_row(legacy.id)
+        input = input(ctx, :manual, domain: canonical)
+        before = snapshot()
+
+        value = admit!(input, ctx.admin, :admitted)
+
+        assert value.lead.account_id == legacy.id, "C3-02: the legacy account is reused"
+        refute value.admission.account_created
+        assert_admitted_rows!(before, account: false, contact: true)
+        assert account_row(legacy.id) == row, "C3-02: the legacy row is never rewritten"
+
+        assert {:ok, doc} = call(SdrAgent.SDR.Admission.Input, :normalize, [input, ctx.tenant.id])
+        assert doc["company"]["domain"] == canonical
+        assert value.admission.input_sha256 == call(SdrAgent.SDR.Admission.Input, :sha256, [doc])
+      end
+    end
+
+    test "G4-3 (control) a non-reserved legacy company stays :real_data_disabled", ctx do
+      ctx = ready!(ctx, :manual)
+      canonical = "#{canary()}.zz"
+      _legacy = legacy_account!(ctx, "  WWW.#{String.upcase(canonical)}. ")
+      input = input(ctx, :manual, domain: canonical, email: "pat@acme-#{canary()}.test")
+      before = snapshot()
+      assert admit(input, ctx.admin) == {:error, :real_data_disabled}
+      assert changes(before) == @nothing
+      assert admissions_for(input.source_ref) == 0
+    end
+  end
+
+  # The value of `fun`, or `{:raised, module}` for a raise (a RED reason).
+  defp outcome_of(fun) do
+    fun.()
+  rescue
+    error in ExUnit.AssertionError -> reraise error, __STACKTRACE__
+    error -> {:raised, error.__struct__}
+  end
+
+  # Every stored column of an account (raw), to prove a row unchanged.
+  defp account_row(id) do
+    %{rows: [[row]]} =
+      Repo.query!("SELECT row_to_json(a)::text FROM accounts a WHERE id = $1", [uuid(id)])
+
+    row
+  end
+
   # Test-local: every lead INSERT raises (the default ERRCODE, P0001).
   defp refuse_lead_inserts! do
     Repo.query!("""
