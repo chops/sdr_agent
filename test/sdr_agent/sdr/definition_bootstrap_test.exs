@@ -106,6 +106,18 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
       assert start_child([]) == :ignore
       assert counts() == before
     end
+
+    # G3-2b (Codex 9d5c5c2): a late "no tenant" is not accepted either.
+    test "G3-2b a no-tenant answer that arrives after the deadline is :timeout" do
+      guard_child!()
+      late = fn step -> if step == :tenant, do: Process.sleep(300) end
+      result = run_bootstrap(deadline_ms: 100, test_hooks: [observer: self(), after_call: late])
+
+      assert [:tenant | _] = Enum.map(observed_calls(), &elem(&1, 0)),
+             "not established: the tenant read did not run"
+
+      assert result == {:error, :timeout}, "C3-02: a late answer was accepted: #{short(result)}"
+    end
   end
 
   describe "T-N3..T-N5 and T-N9 with a tenant" do
@@ -309,6 +321,34 @@ defmodule SdrAgent.SDR.DefinitionBootstrapTest do
       assert observed_calls() == []
       assert counts() == before
       assert definitions(ctx.tenant.id) == []
+    end
+
+    # G3-2b (Codex 9d5c5c2): a read that returns successfully after the
+    # deadline (made late by the `after_call:` hook) is not accepted.
+    # Control: the next call's budget check already refuses it at this head.
+    test "G3-2b (control) a late tenant answer is :timeout; nothing registered",
+         ctx do
+      late = fn step -> if step == :tenant, do: Process.sleep(300) end
+      result = run_bootstrap(deadline_ms: 100, test_hooks: [observer: self(), after_call: late])
+
+      assert [:tenant | _] = Enum.map(observed_calls(), &elem(&1, 0)),
+             "not established: the tenant read did not run"
+
+      assert result == {:error, :timeout}, "C3-02: a late answer was accepted: #{short(result)}"
+      assert definitions(ctx.tenant.id) == []
+    end
+
+    test "G3-2b a winner re-read that returns after the deadline is :timeout", ctx do
+      hash_different!(ctx.tenant)
+      late = fn step -> if step == :reread, do: Process.sleep(400) end
+
+      result =
+        run_bootstrap(deadline_ms: 250, test_hooks: [observer: self(), after_call: late])
+
+      assert :reread in Enum.map(observed_calls(), &elem(&1, 0)),
+             "not established: the re-read did not run"
+
+      assert result == {:error, :timeout}, "C3-02: a late re-read was accepted: #{short(result)}"
     end
 
     test "G3-2 no attempt starts after a backoff that outlived the budget", ctx do

@@ -51,6 +51,8 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
   """
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   require Ash.Query
 
   alias Ecto.Adapters.SQL.Sandbox
@@ -222,6 +224,63 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
     end
   end
 
+  # G3-2b (Codex 9d5c5c2 review): the client driver's own retry. A read
+  # blocked in its prepare phase (`prepare: :unnamed`: every execution
+  # parses, and the parse waits on the blocker's lock) that times out on the
+  # client is disconnected with reason `:closed`, which Postgrex marks
+  # retriable, and DBConnection checks out another connection with a fresh
+  # relative timeout (`checkout_retries`, default 3). One window is one
+  # client-timeout disconnect of the caller, logged by its connection.
+  describe "T-N10 (G3-2b) the driver's checkout retry" do
+    test "T-N10 (G3-2b) (control) a blocked unnamed read with a relative timeout opens more than one window" do
+      preflight!()
+      blocker = table_blocker!("tenants")
+
+      {{elapsed_us, raised}, log} =
+        with_log(fn ->
+          :timer.tc(fn ->
+            try do
+              Repo.query!("SELECT count(*) FROM tenants", [], prepare: :unnamed, timeout: 300)
+              :returned
+            rescue
+              error -> error.__struct__
+            end
+          end)
+        end)
+
+      assert raised == DBConnection.ConnectionError
+      windows = timeout_windows(log, self())
+
+      assert windows >= 2,
+             "not established: the driver did not retry (#{windows} window(s), #{div(elapsed_us, 1000)} ms)"
+
+      assert elapsed_us >= 2 * 300 * 1_000
+      release!(blocker)
+    end
+
+    test "T-N10 (G3-2b) run/1's blocked tenant read gets one window that ends at the deadline, no retry" do
+      preflight!()
+      blocker = table_blocker!("tenants")
+      hooks = [repo_opts: [prepare: :unnamed]]
+
+      {{elapsed_us, result}, log} =
+        with_log(fn ->
+          :timer.tc(fn -> run_bootstrap(deadline_ms: 1_000, test_hooks: hooks) end)
+        end)
+
+      assert result == {:error, :timeout}, "C3-02: got " <> shape(result)
+
+      assert timeout_windows(log, self()) == 1,
+             "C3-02: the driver opened another window after the budget's deadline"
+
+      assert elapsed_us < 1_500_000,
+             "C3-02: the read took #{div(elapsed_us, 1000)} ms against a 1 000 ms deadline"
+
+      assert Process.alive?(blocker.pid), "C3-02: not established: the blocker released first"
+      release!(blocker)
+    end
+  end
+
   describe "T-N11" do
     test "T-N11 the post-violation re-read rejects a different-hash winner" do
       preflight!()
@@ -348,6 +407,17 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
     track!(task.pid)
     assert_receive {^tag, :held}, @wait_ms
     %{task: task, pid: task.pid, tag: tag}
+  end
+
+  # G3-2b: client-timeout disconnects of `client` in a captured log, one per
+  # checkout window ("client #PID<...> timed out because it queued and
+  # checked out the connection for longer than <n>ms").
+  defp timeout_windows(log, client) do
+    pid = String.replace_prefix(inspect(client), "#PID", "")
+
+    ~r/client #PID#{Regex.escape(pid)}[^\n]*timed out because it queued and checked out/
+    |> Regex.scan(log)
+    |> length()
   end
 
   defp release!(blocker) do

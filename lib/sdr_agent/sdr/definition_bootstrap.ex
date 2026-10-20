@@ -69,7 +69,10 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   the options that call actually receives (`:default` when none);
   `connection_faults: n` fails the first n attempts as `:connection` before
   any DB call; `backoff_ms:` and `sleep:` replace the backoff value and its
-  sleep. And `start_link/1` takes `test_barrier: pid`. The worker, once
+  sleep; `repo_opts:` adds repo options to the tenant read and the re-read
+  (e.g. `prepare: :unnamed`, so a blocked read waits in its retriable
+  prepare phase); `after_call: fun` runs `fun.(step)` right after such a
+  read returned. And `start_link/1` takes `test_barrier: pid`. The worker, once
   its work started (after the tenant enumeration) and before its first
   database write, monitors `pid`, sends it `{:c302_bootstrap_started,
   worker}` and waits for a release that never comes: it ends when the child
@@ -281,7 +284,10 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
       read_opts = [timeout: timeout]
       observe_call(budget, :tenant, read_opts)
 
-      case Kernel.singleton_tenant_id(read_opts) do
+      read = with_repo_opts(budget, fn -> Kernel.singleton_tenant_id(read_opts) end)
+      after_call(budget, :tenant)
+
+      case read do
         {:ok, tenant_id} -> {:ok, tenant_id}
         {:error, :tenant_not_bootstrapped} -> :no_tenant
         {:error, error} -> {:error, classify(error)}
@@ -346,6 +352,29 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
     end
 
     defp backoff_ms(%{hooks: hooks}), do: Keyword.get(hooks, :backoff_ms, @backoff_ms)
+
+    # `repo_opts:` adds repo options to the tenant read and the re-read
+    # (e.g. `prepare: :unnamed`), through `Repo.with_call_options/2`.
+    defp with_repo_opts(nil, fun), do: fun.()
+
+    defp with_repo_opts(%{hooks: hooks}, fun) do
+      case Keyword.get(hooks, :repo_opts, []) do
+        [] -> fun.()
+        repo_opts -> Repo.with_call_options(repo_opts, fun)
+      end
+    end
+
+    # `after_call: fun` runs `fun.(step)` right after a read returned,
+    # before its result is used (e.g. to make the result arrive late).
+    defp after_call(nil, _step), do: :ok
+
+    defp after_call(%{hooks: hooks}, step) do
+      case Keyword.get(hooks, :after_call) do
+        fun when is_function(fun, 1) -> fun.(step)
+        _none -> :ok
+      end
+    end
+
     defp sleep(%{hooks: hooks}, ms), do: Keyword.get(hooks, :sleep, &Process.sleep/1).(ms)
   else
     defp barrier(_opts), do: :ok
@@ -353,6 +382,8 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
     defp observe(_budget, _message), do: :ok
     defp attempt(budget, opts, _n), do: run_once(budget, opts)
     defp backoff_ms(_budget), do: @backoff_ms
+    defp with_repo_opts(_budget, fun), do: fun.()
+    defp after_call(_budget, _step), do: :ok
     defp sleep(_budget, ms), do: Process.sleep(ms)
   end
 
@@ -441,12 +472,18 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
       read_opts = client_timeout(timeout)
       observe_call(budget, :reread, read_opts)
 
-      AgentDefinition
-      |> Ash.Query.for_read(:read, %{}, actor: SdrAgent.Actor.system(:kernel, tenant_id))
-      |> Ash.Query.filter(tenant_id == ^tenant_id and name == "SDRAgent" and version == ^version)
-      |> with_client_timeout(Keyword.get(read_opts, :timeout))
-      |> Ash.read_one()
-      |> case do
+      query =
+        AgentDefinition
+        |> Ash.Query.for_read(:read, %{}, actor: SdrAgent.Actor.system(:kernel, tenant_id))
+        |> Ash.Query.filter(
+          tenant_id == ^tenant_id and name == "SDRAgent" and version == ^version
+        )
+        |> with_client_timeout(Keyword.get(read_opts, :timeout))
+
+      read = with_repo_opts(budget, fn -> Ash.read_one(query) end)
+      after_call(budget, :reread)
+
+      case read do
         {:ok, %AgentDefinition{} = definition} -> validate(definition)
         {:ok, nil} -> {:error, classify(error)}
         {:error, read_error} -> {:error, classify(read_error)}

@@ -16,6 +16,8 @@ defmodule SdrAgent.Repo do
 
   alias SdrAgent.Audit.IdentityKeys.Scope
 
+  @call_options {__MODULE__, :call_options}
+
   @impl true
   def installed_extensions do
     # Add extensions here, and the migration generator will install them.
@@ -35,6 +37,28 @@ defmodule SdrAgent.Repo do
   end
 
   def prepare_transaction(multi, opts), do: {multi, opts}
+
+  # The options `with_call_options/2` put in this process, merged under
+  # every repo operation's own options (explicit options win).
+  @impl true
+  def default_options(_operation), do: Process.get(@call_options, [])
+
+  @doc """
+  Runs `fun` with `options` added to every repo operation it makes in the
+  calling process (Ecto `default_options/1`; an operation's explicit
+  options win), restoring the previous set afterwards on every exit path.
+  Used to pass driver options that an Ash call cannot carry (C3-02 G3-2).
+  """
+  def with_call_options(options, fun) when is_list(options) and is_function(fun, 0) do
+    previous = Process.get(@call_options)
+    Process.put(@call_options, Keyword.merge(previous || [], options))
+
+    try do
+      fun.()
+    after
+      if previous, do: Process.put(@call_options, previous), else: Process.delete(@call_options)
+    end
+  end
 
   @impl true
   def min_pg_version do
