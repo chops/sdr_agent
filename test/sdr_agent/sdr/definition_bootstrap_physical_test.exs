@@ -209,8 +209,11 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
       send(holder.task.pid, {holder.tag, :release})
       assert Task.await(holder.task, @wait_ms) == {:ok, holder.winner_id}
 
-      assert Task.await(loser, @wait_ms) == {:error, :definition_conflict},
-             "C3-02: a different-hash winner is rejected after the unique violation"
+      lost = Task.await(loser, @wait_ms)
+
+      assert lost == {:error, :definition_conflict},
+             "C3-02: a different-hash winner is rejected after the unique violation: " <>
+               shape(lost)
 
       assert [winner] = definitions(tenant.id)
       assert winner.id == holder.winner_id
@@ -509,4 +512,14 @@ defmodule SdrAgent.SDR.DefinitionBootstrapPhysicalTest do
   end
 
   defp short(term), do: inspect(term, limit: 12, printable_limit: 300)
+
+  # A bounded, value-free shape of a bootstrap result (G3 diagnostic): the
+  # sanitized class, or the returned struct's module and status only.
+  defp shape({:error, class}) when is_atom(class), do: "{:error, #{inspect(class)}}"
+
+  defp shape({:ok, %module{} = row}),
+    do: "{:ok, %#{inspect(module)}{status: #{inspect(Map.get(row, :status))}}}"
+
+  defp shape({tag, _other}) when is_atom(tag), do: "{#{inspect(tag)}, <term>}"
+  defp shape(_other), do: "<term>"
 end

@@ -300,11 +300,13 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   end
 
   # A concurrent winner (the unique index) or an existing row of another
-  # hash (`Agents.register_definition/2`'s refusal on `:definition`).
-  defp winner_possible?(%Ash.Error.Invalid{errors: errors}),
-    do: Enum.any?(errors, &winner_error?/1)
-
-  defp winner_possible?(_error), do: false
+  # hash (`Agents.register_definition/2`'s refusal on `:definition`). The
+  # error arrives in more than one shape: the hash refusal is our own
+  # rollback of an `Ash.Error.Invalid`, but on the unique violation Ash
+  # itself rolls the enclosing transaction back (`rollback_on_error?`,
+  # default true) with its in-flight error (for example the changeset
+  # carrying the `InvalidAttribute`), so every leaf error is inspected.
+  defp winner_possible?(error), do: error |> leaves() |> Enum.any?(&winner_error?/1)
 
   defp winner_error?(%InvalidAttribute{private_vars: vars}) when is_list(vars) and vars != [],
     do: Keyword.get(vars, :constraint) == @unique_index
@@ -341,26 +343,26 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
 
   ## Sanitized classes
 
-  defp classify(%DBConnection.ConnectionError{}), do: :connection
+  # The leaf errors of an error class, a changeset or a list of them.
+  defp leaves(errors) when is_list(errors), do: Enum.flat_map(errors, &leaves/1)
+  defp leaves(%{errors: errors}) when is_list(errors), do: leaves(errors)
+  defp leaves(error), do: [error]
 
-  defp classify(%Postgrex.Error{postgres: %{code: :undefined_table}}), do: :schema_not_migrated
+  defp classify(error), do: error |> leaves() |> Enum.find_value(:crash, &leaf_class/1)
 
-  defp classify(%Postgrex.Error{postgres: %{code: code}})
+  defp leaf_class(%DBConnection.ConnectionError{}), do: :connection
+
+  defp leaf_class(%Postgrex.Error{postgres: %{code: :undefined_table}}),
+    do: :schema_not_migrated
+
+  defp leaf_class(%Postgrex.Error{postgres: %{code: code}})
        when code in [:query_canceled, :lock_not_available],
        do: :timeout
 
-  defp classify(%{errors: errors}) when is_list(errors), do: first_class(errors)
-  defp classify(%{error: error}) when is_map(error), do: classify(error)
-  defp classify(_error), do: :crash
+  defp leaf_class(%{error: error}) when is_map(error),
+    do: error |> leaves() |> Enum.find_value(&leaf_class/1)
 
-  defp first_class(errors) do
-    Enum.find_value(errors, :crash, fn error ->
-      case classify(error) do
-        :crash -> nil
-        class -> class
-      end
-    end)
-  end
+  defp leaf_class(_error), do: nil
 
   ## Time
 
