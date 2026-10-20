@@ -141,6 +141,21 @@ for dirs in '/tmp/d168 hostaddr=127.0.0.1' '/tmp/d168 a' '"/tmp/d168,a"' '/tmp/d
   [ "$(socket_calls)" = 0 ] && grep -q '^ACCEPT 19 .*unsupported unix_socket_directories form; no socket probed$' <<<"$(env ACCEPT_PSQL="$base/psql" bash "$ACCEPT" 61999 2>&1)" \
     && pass "  ... before any socket probe, with the fixed STOP reason" || fail "  ... socket calls: $(socket_calls)"
 done
+# Codex R6-1: the whole value is checked before the line-oriented read, so
+# a valid first line can never hide later lines or control bytes.
+for fmt in '/tmp/d168s.a\n, /tmp/d168s.b' '/tmp/d168s.a,\n/tmp/d168s.b' '/tmp/d168s.a\n/tmp/d168s.b' \
+           '/tmp/d168s.a\nhostaddr=127.0.0.1' '/tmp/d168s.a\n,/tmp/bad dir' '/tmp/d168s.a\r, /tmp/d168s.b' \
+           '/tmp/d168s.a\r' '/tmp/d168s.a\r\n/tmp/d168s.b' '/tmp/d168s.a\t,/tmp/d168s.b' '/tmp/d168s.a\0001' \
+           '/tmp/d168s.a\0033[0m' '/tmp/d168s.a\v,/tmp/d168s.b' '/tmp/d168s.a\f' '/tmp/d168s.\0303\0251'; do
+  good; printf '%b\n' "$fmt" > "$FX/sockets.out"
+  n=$(wc -c < "$FX/sockets.out" | tr -d ' ')
+  run "socket value [$fmt] ($n bytes, control or non-ASCII byte) STOPs" stop 19 "" -- 61999
+  out=$(env ACCEPT_PSQL="$base/psql" bash "$ACCEPT" 61999 2>&1)
+  [ "$(socket_calls)" = 0 ] && grep -q '^ACCEPT 19 .*unsupported unix_socket_directories form; no socket probed$' <<<"$out" \
+    && ! grep -q '^ACCEPTANCE PASS' <<<"$out" && pass "  ... no socket probed, fixed STOP reason, no PASS" || fail "  ... socket calls: $(socket_calls)"
+done
+good; printf '/tmp/d168s.a\n, /tmp/d168s.b\n' > "$FX/sockets.out"
+[ "$(grep -c . "$FX/sockets.out")" = 2 ] && pass "control: the stub really returns Codex's two-line value" || fail "multiline fixture"
 good; printf ' /tmp/d168s.a , /private/tmp/d168-x_y.1+v \n' > "$FX/sockets.out"
 run "two safe directories with surrounding spaces: both probed" pass "" 12 -- 61999
 LIBPQ=/nix/store/4n0cyq26dskdxq69d9c4hci8wkylh6bf-postgresql-18.6-lib/lib/libpq.5.dylib

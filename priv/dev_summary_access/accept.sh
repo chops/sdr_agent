@@ -123,6 +123,13 @@ else
   # '=', '@' (abstract namespace) or other character STOPs with no socket
   # probed, so nothing can be read as a conninfo keyword or a second host.
   re='^/[A-Za-z0-9._/+-]+$' unsafe=no sockets=()
+  # The WHOLE captured value first: only these bytes, spelled out so no
+  # locale can widen them. Any LF, CR, tab or other control byte, quote,
+  # backslash, '=', '@' or non-ASCII byte STOPs before the line-oriented
+  # read below could see only part of the value.
+  case "$dirs" in
+    *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/+,\ -]*) unsafe=yes ;;
+  esac
   case "$dirs" in *\"*|*\'*|*\\*|,*|*,|*,,*) unsafe=yes ;; esac
   if [ "$unsafe" = no ]; then
     IFS=',' read -r -a list <<<"$dirs"
