@@ -1002,6 +1002,49 @@ unaffected.
 
 **Waiting for the owner:** the G-DEMO attempt-2 sentences and choices, 5b (#156), D-168 (#193), C3-02's Q-O1 to Q-O6, and #29 and #37. All are on the standup page.
 
+### Sprint 1, day 9 (Tue Oct 20): C3-02 half built (as of 09:25 MDT)
+
+**Merged since the last entry, under D-157:**
+- **#202** (`425d7c9`): the #201 demo-reset fix.
+- **#203** and **#204**: the journal and the D-172 to D-179 decisions.
+- **#205**: D-180, G-DEMO attempt 2 closed QUALIFIED.
+- **#206**: C3-02's D0 docs and the ADR-0009 amendment.
+- **#193**: D-168's install package (ADR-0016), merged at `14de644`. Its tree is identical to Codex's r7-approved head, `99c0163`.
+
+Main is green at `14de644`.
+
+**G-DEMO attempt 2 (D-177, D-180):** the owner authorized one rehearsal window and changed the lead to Juniper Crate Labs.
+- **The call:** one real Opus call completed and was charged (1 of 3). The result gate withheld its output (`witness_missing`): the reply was not exactly one text block (`response_block_unsupported`). Which blocks it held is not established.
+- **No retry.** The freeze lifted after the owner's closeout.
+- **The fix:** projection v4. Its plan (r5) and its proposed ADR-0005 amendment text passed Codex review. A read-only decision-link diagnostic (r4) also passed. Both wait on the owner.
+
+**C3-02 lead admission:**
+- **Failing tests and slices:** the three failing-test stages (RED-1 to RED-3) were approved. Build slices G1 to G3 were approved after Codex findings G2-1, G3-1, G3-2 and G3-2b. G3-2b led to an owned call envelope that bounds DBConnection's untimed queue wait.
+- **G4 (`fb5166a`):** `admit_lead` and `Assignment.queue`, built under Codex's nine design rulings. Item 8 was amended: `address?/2` also matches domain suppression on the email host, so a closed-scope classifier replaced it.
+- **G4's full gate:** 193 to 105 failing; 88 tests newly pass, none newly fail.
+  - One test literal was wrong (T-H3: an empty `jsonb[]` prints as `{}`). It was corrected in `16d18ff`, accepted by Codex.
+  - Codex's G4 review found three input gaps: control characters in an email, raw 16-byte uuids, and step 9 judging the raw stored domain.
+  - Their failing tests (`c8f2717`, exactly seven, each at its intended assertion) were approved. The minimal fix (`fb2474e`) is in its gate.
+- **Merge prerequisite:** after C3-02 the app refuses to start if the owner's database holds another `SDRAgent` definition. The preflight was reviewed in four rounds and approved at r4.
+  - It is an owner-run, read-only, metadata-only check with an exact output format and a classifier.
+  - The agent's code receipt is fail-closed. A shell path guard runs before any Mix command, because `mix run` writes into the build path before a Mix-based guard can run.
+  - The code fingerprint at `16d18ff` (`f490cb2e`) equals main's.
+
+**5b (D-178):** the implementation plan passed Codex review for failing tests in two rounds.
+- **No known-red merge.** The configured disposable full gate is exact-head CI. The owner activates at the reviewed candidate before merge.
+- **One typed JSON settings source.** devenv's actually generated `postgresql.conf` is checked, not its settings attrset.
+- **A source-by-source audit:** extensions, loaded modules, preloads and dotted settings names.
+- **Status:** the failing tests are being written on `c4-5b-impl`. 5b's implementation slipped a day behind C3-02 (noted on the standup page).
+
+**Owner decision:** D-181, install D-168 today, after the agents release the shared database.
+
+**Waiting for the owner:**
+- the D-168 install and acceptance;
+- the projection v4 ADR amendment;
+- the witness diagnostic;
+- the B2 search provider and key;
+- #29 and #37.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -1053,3 +1096,6 @@ says what happened, why, what it cost and what changed.
 | **Oct 19: the #198 gate skipped `mix precommit` and used `--force`.** The gate ran verify, credo and the audit, and forced the dev compile. | The gate script was carried over unreviewed from #194's. | One extra gate run; Codex caught it. | The gate is `mix precommit` plus the dev compile with warnings as errors, without `--force` unless stale state is shown. |
 | **Oct 19: C3-02's base refresh assumed the agent's qualification write is root-only.** | It was inferred from the one current caller (ScoreLead), not from the action's accepted inputs and existing tests. | Codex review MF1, then plan r5 to r7. | Action contracts are inventoried from their inputs and existing tests, not from today's call sites. |
 | **Oct 19: Claude drafted "main CI is green again" for the owner while main was red.** Main's own run after the #196 merge had failed (#201). | Only each PR's own CI was checked, not main's run after the merge. | None: caught before the standup was posted. | Main's post-merge CI is checked before main's status is reported. |
+| **Oct 20: a G3 regression was reported as planned RED.** T-A17, a completed control inside a RED file, newly failed; Claude counted it as planned because it sat in a RED file. | Failures were classified by file membership, not by diffing failing names against the previous approved head. | One Codex review round. | Every slice now reports newly failing and newly passing names against the last approved head (`faildiff.py`). |
+| **Oct 20: a gate result could not be counted.** The authoring agent edited two test files three minutes into Claude's G2 full run. | The author was not told to freeze during the run. | One full rerun. | Authors freeze before every gate; manifests record dirty state before and after. |
+| **Oct 20: three synthetic preflight receipts were malformed, and one was wrongly classified COMPATIBLE.** BSD `sed` dropped the newline Claude meant to insert. | The fixtures were generated with a GNU-style `sed` idiom and not inspected. | Minutes; caught before review. | The fixtures were regenerated in Python and the byte content checked; the r3 report disclosed it. |
