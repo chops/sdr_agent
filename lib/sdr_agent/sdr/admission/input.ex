@@ -25,7 +25,11 @@ defmodule SdrAgent.SDR.Admission.Input do
   `first_name`, `last_name`, `title`, `industry` and `geography`; empty
   string to `nil`; then the domain through `company/1`, the email
   lowercased, `website_url` trimmed only, `timezone` as given; uuids
-  lowercased.
+  lowercased. A uuid is accepted only in its 36-character textual form
+  (any case); a raw binary is refused. An email is accepted only when the
+  identity keys can represent it (exactly one `@`, non-empty parts, no
+  whitespace or control character, `Normalize.key_value/2`), so a refused
+  one is this step's `{:invalid, [:email]}`, never a later key failure.
 
   Also checked here, before any lock (packet section 4.1 step 3): the kind
   (`manual`, `csv`, `hubspot`, `agent_found`), the per-kind `source_ref`
@@ -53,7 +57,11 @@ defmodule SdrAgent.SDR.Admission.Input do
     hubspot: ~r/\Ahubspot:[0-9]+:[0-9]+\z/,
     agent_found: ~r/\Aagent_found:(#{@uuid}):#{@uuid}\z/
   }
-  @email ~r/\A[^\s@]+@[^\s@]+\z/u
+  # Exactly one `@`, non-empty parts, no whitespace or control character:
+  # the identity-key email representation (`Normalize.key_value/2`).
+  @email ~r/\A[^\s\p{Cc}@]+@[^\s\p{Cc}@]+\z/u
+  # A textual uuid only (36 characters; any case, lowercased).
+  @textual_uuid ~r/\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z/
   @zone ~r/^(UTC|Etc\/UTC|[A-Z][A-Za-z_-]+(\/[A-Za-z0-9_+-]+){1,2})$/
 
   @type doc :: %{String.t() => term()}
@@ -131,11 +139,12 @@ defmodule SdrAgent.SDR.Admission.Input do
   defp agent_run_id(_kind, _ref, nil), do: {:ok, nil}
   defp agent_run_id(_kind, _ref, _raw), do: {:error, :agent_run_id}
 
-  defp uuid(raw, field) when is_binary(raw) do
-    case Ecto.UUID.cast(raw) do
-      {:ok, uuid} -> {:ok, String.downcase(uuid)}
-      :error -> {:error, field}
-    end
+  # Codex fb5166a G4-2: the textual form only, never a raw 16-byte binary
+  # (which `Ecto.UUID.cast/1` would also accept).
+  defp uuid(raw, field) when is_binary(raw) and byte_size(raw) == 36 do
+    if String.valid?(raw) and Regex.match?(@textual_uuid, raw),
+      do: {:ok, String.downcase(raw)},
+      else: {:error, field}
   end
 
   defp uuid(_raw, field), do: {:error, field}

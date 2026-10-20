@@ -34,7 +34,9 @@ defmodule SdrAgent.SDR.Admission do
        server-owned origin `:assignment` (`{:settings_incomplete, kinds}`);
     9. the account by canonical domain `FOR SHARE`, the contact by email
        `FOR SHARE`, the account's open leads `FOR SHARE`; then the guard
-       again on the resolved stored values (`:real_data_disabled`);
+       again on the resolved stored values (`:real_data_disabled`): the
+       stored account's company identity in its key form (a legacy stored
+       spelling is judged as its identity) and the stored or input email;
     10-15. the decision table: suppression
        (`SdrAgent.Sales.SuppressionFacts.scope/3`), contact at another
        account, archived contact or account, the contact's open lead, an
@@ -78,6 +80,7 @@ defmodule SdrAgent.SDR.Admission do
   alias SdrAgent.Agents.RunSettings
   alias SdrAgent.Audit
   alias SdrAgent.Audit.IdentityKeys
+  alias SdrAgent.Audit.IdentityKeys.Normalize
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Repo
   alias SdrAgent.Sales
@@ -141,8 +144,11 @@ defmodule SdrAgent.SDR.Admission do
 
   defp guard(stage, domain, email) do
     observe_guard(stage, domain, email)
-    if real_data_permitted?(domain, email), do: :ok, else: {:error, :real_data_disabled}
+    permitted(domain, email)
   end
+
+  defp permitted(domain, email),
+    do: if(real_data_permitted?(domain, email), do: :ok, else: {:error, :real_data_disabled})
 
   ## The transaction
 
@@ -160,7 +166,7 @@ defmodule SdrAgent.SDR.Admission do
          {:ok, definition} <- SDRAgent.fetch_definition(tenant_id),
          :ok <- Agents.settings_complete(:assignment, actor: agent(tenant_id)),
          {:ok, facts} <- facts(doc, requester),
-         :ok <- guard(:resolved, resolved_domain(facts, doc), resolved_email(facts, doc)) do
+         :ok <- resolved_guard(facts, doc) do
       context = %{
         doc: doc,
         sha: sha,
@@ -318,8 +324,25 @@ defmodule SdrAgent.SDR.Admission do
     |> Ash.read!()
   end
 
+  # Step 9's guard (Codex fb5166a G4-3): the observer sees the resolved
+  # values as stored; the policy evaluates the locked stored account's
+  # company identity in its approved key form (`Normalize.strip/1`, the
+  # index expression), so a valid legacy spelling (`acme.test.`, a padded
+  # or uppercase `WWW.` form) is judged as its identity, never by caller
+  # input, and the row is not rewritten.
+  defp resolved_guard(facts, doc) do
+    email = resolved_email(facts, doc)
+    observe_guard(:resolved, resolved_domain(facts, doc), email)
+    permitted(company_identity(facts, doc), email)
+  end
+
   defp resolved_domain(%{account: %{domain: domain}}, _doc), do: to_string(domain)
   defp resolved_domain(_facts, doc), do: doc["company"]["domain"]
+
+  defp company_identity(%{account: %{domain: domain}}, _doc),
+    do: Normalize.strip(to_string(domain))
+
+  defp company_identity(_facts, doc), do: doc["company"]["domain"]
 
   defp resolved_email(%{contact: %{email: email}}, _doc), do: to_string(email)
   defp resolved_email(_facts, doc), do: doc["person"]["email"]
