@@ -111,10 +111,18 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       the process dictionary, so the gate owner is passed through the
       application env (`BlockingResponder.gate_key/0`), and T-O3 traces
       the run tree with a test-scoped telemetry handler
-      (`collect_run_tree!/0`, detached at exit) instead of the harness's
-      opt-in. At exit the whole run tree is killed and awaited before the
-      tenant cleanup (`stop_run_tree_on_exit!/1`); the blocked caller is
-      also tracked as soon as it reports.
+      (`collect_run_tree!/1`, detached at exit) instead of the harness's
+      opt-in. The trace fails closed: a collector error or a detached
+      handler refuses the trace (`checked_trace!/1`; control "a lost trace
+      event or a detached collector"). Cleanup is owned and bounded
+      (`stop_execution!/2`): only the run's Jido workers, positively
+      identified by the execution telemetry tracker the contender started
+      (recorded while the chain is alive), and their guards are stopped,
+      in the test body on every path and again at exit before the tenant
+      cleanup; registered processes and supervisors are refused; the
+      blocked caller is also tracked as soon as it reports (controls
+      "cleanup while the model call is blocked" and "cleanup before the
+      model report").
   """
   use ExUnit.Case, async: false
 
@@ -160,6 +168,9 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
   ]
 
   @keys SdrAgent.Audit.IdentityKeys
+  # T-O3 cleanup ownership (see "owned, bounded stop" below the harness).
+  @tracker_key {Jido.Exec.Telemetry, :tracker}
+  @guard_function {Jido.Exec.Runtime, :terminate_with_caller, 2}
   @sdr SdrAgent.SDR
 
   @publication ~r/set_config\(\s*'sdr\.identity_pass'/
@@ -224,16 +235,22 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     # contender (see the moduledoc): it inherits no process dictionary, so
     # the gate owner is read from the application env (`@gate`, set for the
     # test by `OutreachFixtures.put_env!/2`); its SQL, from its first
-    # statement, is in T-O3's test-scoped tree trace (`collect_run_tree!/0`).
-    # Owner-bound and bounded: on the owner's :DOWN, or at the bound, it
-    # kills its own process, so no further database work follows in it.
+    # statement, is in T-O3's test-scoped tree trace (`collect_run_tree!/1`).
+    # A gate of `{owner, :silent}` blocks without reporting (the cleanup
+    # control's "failure before the model report"). Owner-bound and
+    # bounded: on the owner's :DOWN, or at the bound, it kills its own
+    # process, so no further database work follows in it.
     @gate :c302_t_o3_model_gate
     @wait_ms 10_000
 
     def gate_key, do: @gate
 
     def respond("sdr.reply_classification" = operation, input) do
-      block!(Application.fetch_env!(:sdr_agent, @gate), get_in(input, [:reply, :text]))
+      case Application.fetch_env!(:sdr_agent, @gate) do
+        {owner, :silent} -> silent!(owner)
+        owner -> block!(owner, get_in(input, [:reply, :text]))
+      end
+
       SdrAgent.Audit.IdentityPassOrderTest.UnsubscribeResponder.respond(operation, input)
     end
 
@@ -255,6 +272,18 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
 
         {:DOWN, ^ref, :process, _pid, _reason} ->
           Process.exit(self(), :kill)
+      after
+        @wait_ms -> Process.exit(self(), :kill)
+      end
+    end
+
+    # Never returns: ends its own process on the owner's :DOWN or at the
+    # bound (the caller is stopped by the test's cleanup before either).
+    defp silent!(owner) when is_pid(owner) do
+      ref = Process.monitor(owner)
+
+      receive do
+        {:DOWN, ^ref, :process, _pid, _reason} -> Process.exit(self(), :kill)
       after
         @wait_ms -> Process.exit(self(), :kill)
       end
@@ -338,78 +367,185 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     # its key after the call returned) fails on main, which takes none.
     test "T-O3 no advisory lock is held while a Fake model call is blocked" do
       unguarded_preflight!()
-      ctx = demo!()
-      delivery = delivered!(ctx)
-      canary = "c302canary#{SalesFixtures.unique()}"
-      event = matched_reply!(ctx, delivery, "#{@missed_by_rule} Ref #{canary}.")
-      run = reply_run!(ctx, event)
-      job = reply_job!(ctx, run)
+      %{ctx: ctx, run: run, job: job, canary: canary} = queued_reply!()
       OutreachFixtures.put_env!(BlockingResponder.gate_key(), self())
       OutreachFixtures.put_env!(:fake_model_responder, BlockingResponder)
-      tag = collect_run_tree!()
+      recorder = execution_recorder!()
+      collector = collect_run_tree!(recorder)
       task = contender!(supervisor!(), fn -> ReplyWorker.perform(job) end)
-      stop_run_tree_on_exit!(task.pid)
+      stop_execution_on_exit!(task.pid, recorder)
 
-      # Blocked: the caller is tracked; every sample below is taken while
-      # the call waits at the gate.
+      try do
+        # Blocked: the caller is tracked; every sample below is taken while
+        # the call waits at the gate.
+        call = await_model_call!(task)
+        in_run? = descends_from?(call.caller, task.pid)
+        in_flight = in_flight_invocations(ctx, run)
+        caller_ids = advisory_ids(call.backend)
+        caller_locks = advisory_locks(call.backend)
+        job_locks = advisory_locks(backend_of(task))
+        database_locks = database_advisory_locks()
+        attached_while_blocked? = attached?(collector)
+        send(call.caller, :c302_model_release)
+        released = await_released!(call.caller)
+        result = await_result!(task)
+
+        # Fail closed: no collector error, the handler attached through both
+        # phase boundaries, before any trace is evaluated.
+        assert attached_while_blocked?, "C3-02: not established: the collector detached"
+        trace = collector |> checked_trace!() |> phases(call.entered, released)
+
+        # The blocked call is this test's one execution: its reply, its
+        # run's process tree, its run's one in-flight classification
+        # invocation.
+        assert is_binary(call.text) and call.text =~ canary,
+               "C3-02: not established: the blocked call classifies another reply: " <>
+                 short(call.text)
+
+        assert in_run?, "C3-02: not established: the model call ran outside the contender's run"
+
+        assert [invocation] = in_flight,
+               "C3-02: not established: one in-flight invocation of the run: #{short(in_flight)}"
+
+        assert {invocation.purpose, invocation.idempotency_key} ==
+                 {:reply_classification,
+                  "#{run.id}:reply_classification:#{run.trigger_signal_id}"},
+               "C3-02: not established: the in-flight call is the run's classification"
+
+        # The trace saw the caller before its call, and nothing ran while
+        # it was blocked but the gate's own report.
+        assert Enum.any?(
+                 trace.before,
+                 &(&1.pid == call.caller and &1.sql =~ ~r/model_invocations/)
+               ),
+               "C3-02: not established: the caller's pre-call SQL was not observed"
+
+        assert Enum.map(trace.blocked, &{&1.pid, &1.sql}) ==
+                 [{call.caller, "SELECT pg_backend_pid()"}],
+               "C3-02: not established: the run did database work while blocked: " <>
+                 short(trace.blocked)
+
+        # No key is held while the model call waits.
+        assert caller_ids == MapSet.new(),
+               "C3-02: the calling backend holds an identity key during a model call"
+
+        assert caller_locks == 0, "C3-02: the calling backend holds an advisory lock"
+        assert job_locks == 0, "C3-02: the job's backend holds an advisory lock during the call"
+        assert database_locks == 0, "C3-02: an advisory lock is held during the model call"
+
+        before_keys =
+          Enum.filter(trace.before, &(publishes?(&1.sql) or &1.sql =~ ~r/pg_advisory/))
+
+        assert before_keys == [],
+               "C3-02: a key was taken before the model call: #{short(before_keys)}"
+
+        refute deadlock?(result), "C3-02: a deadlock: #{short(result)}"
+        assert result == :ok, "the classification must still run: #{short(result)}"
+        assert [_suppression] = unsubscribe_replies(ctx)
+
+        assert Enum.any?(trace.after, &publishes?(&1.sql)),
+               "C3-02: the classification's suppression takes its key after the model call returned"
+      after
+        # Success and failure paths alike: the run's Jido workers joined.
+        stop_execution!(task.pid, recorder)
+      end
+    end
+
+    # Control (Codex 340e7b4 R4-1): a dropped trace event is never a valid
+    # negative trace. The collector's injected fault drops one statement's
+    # event; the trace without it would pass a naive "no key statement"
+    # check, and `checked_trace!/1` rejects it; a detached collector is
+    # rejected too. Calls nothing new: passes on main.
+    test "T-O3 (control) a lost trace event or a detached collector fails the trace check" do
+      unguarded_preflight!()
+      recorder = execution_recorder!()
+      fault = fn sql -> if sql =~ "c302_lost", do: raise("injected collector fault") end
+      collector = collect_run_tree!(recorder, fault: fault)
+
+      task =
+        contender!(supervisor!(), fn ->
+          Repo.query!("SELECT pg_advisory_xact_lock(0), 'c302_lost' AS marker")
+          Repo.query!("SELECT 'c302_kept' AS marker")
+          :ok
+        end)
+
+      assert await_result!(task) == :ok
+      messages = tree_messages(collector)
+      %{events: events, errors: errors} = split_trace(collector, messages)
+      sql = Enum.map(events, & &1.sql)
+
+      assert Enum.any?(sql, &(&1 =~ "c302_kept")), "the kept statement was traced"
+      refute Enum.any?(sql, &(&1 =~ "c302_lost")), "the injected fault dropped the key statement"
+      refute Enum.any?(sql, &(&1 =~ ~r/pg_advisory/)), "the dropped trace looks key-free"
+      assert [_one] = errors, "the dropped event left a collector-error sentinel"
+
+      assert_raise ExUnit.AssertionError, ~r/collector error/, fn ->
+        check_trace!(collector, messages)
+      end
+
+      :ok = :telemetry.detach(collector.handler)
+
+      assert_raise ExUnit.AssertionError, ~r/collector detached/, fn ->
+        check_trace!(collector, [])
+      end
+    end
+
+    # Control (Codex 340e7b4 R4-2): while the model call is blocked, the
+    # run's own Jido workers (bound to its execution telemetry tracker) and
+    # their guards are stopped and joined; nothing owned remains; shared
+    # infrastructure stays alive and the database stays usable. Calls
+    # nothing new: passes on main.
+    test "T-O3 (control) cleanup while the model call is blocked stops only the run's workers" do
+      unguarded_preflight!()
+      %{job: job} = queued_reply!()
+      OutreachFixtures.put_env!(BlockingResponder.gate_key(), self())
+      OutreachFixtures.put_env!(:fake_model_responder, BlockingResponder)
+      recorder = execution_recorder!()
+      supervisor = supervisor!()
+      task = contender!(supervisor, fn -> ReplyWorker.perform(job) end)
+      stop_execution_on_exit!(task.pid, recorder)
       call = await_model_call!(task)
-      in_run? = descends_from?(call.caller, task.pid)
-      in_flight = in_flight_invocations(ctx, run)
-      caller_ids = advisory_ids(call.backend)
-      caller_locks = advisory_locks(call.backend)
-      job_locks = advisory_locks(backend_of(task))
-      database_locks = database_advisory_locks()
-      send(call.caller, :c302_model_release)
-      released = await_released!(call.caller)
-      result = await_result!(task)
-      trace = phases(tree_trace(tag), call.entered, released)
+      assert [turn_worker | _] = callers_of(call.caller), "precondition: the action's turn worker"
+      shared = shared_infrastructure(supervisor)
 
-      # The blocked call is this test's one execution: its reply, its run's
-      # process tree, its run's one in-flight classification invocation.
-      assert is_binary(call.text) and call.text =~ canary,
-             "C3-02: not established: the blocked call classifies another reply: #{short(call.text)}"
+      stopped = stop_execution!(task.pid, recorder)
 
-      assert in_run?, "C3-02: not established: the model call ran outside the contender's run"
+      assert MapSet.subset?(MapSet.new([call.caller, turn_worker]), stopped),
+             "the blocked action worker and its turn worker were stopped: #{short(stopped)}"
 
-      assert [invocation] = in_flight,
-             "C3-02: not established: one in-flight invocation of the run: #{short(in_flight)}"
+      refute Enum.any?(stopped, &Process.alive?/1), "every stopped worker is gone"
+      assert execution_set(task.pid, recorder) == MapSet.new(), "no owned worker remains"
+      assert Enum.all?(shared, &Process.alive?/1), "shared infrastructure stays alive"
+      assert %{rows: [[1]]} = Repo.query!("SELECT 1")
+    end
 
-      assert {invocation.purpose, invocation.idempotency_key} ==
-               {:reply_classification, "#{run.id}:reply_classification:#{run.trigger_signal_id}"},
-             "C3-02: not established: the in-flight call is the run's classification"
+    # Control (Codex 340e7b4 R4-2): a failure before the model report (the
+    # silent gate never reports, so no caller is tracked): the action
+    # worker, identified by its traced reservation statement, is still
+    # stopped by the owned cleanup, and nothing owned remains. Calls
+    # nothing new: passes on main.
+    test "T-O3 (control) cleanup before the model report stops only the run's workers" do
+      unguarded_preflight!()
+      %{job: job} = queued_reply!()
+      OutreachFixtures.put_env!(BlockingResponder.gate_key(), {self(), :silent})
+      OutreachFixtures.put_env!(:fake_model_responder, BlockingResponder)
+      recorder = execution_recorder!()
+      collector = collect_run_tree!(recorder)
+      supervisor = supervisor!()
+      task = contender!(supervisor, fn -> ReplyWorker.perform(job) end)
+      stop_execution_on_exit!(task.pid, recorder)
+      worker = await_worker_statement!(collector, ~r/model_invocations/)
+      shared = shared_infrastructure(supervisor)
 
-      # The trace saw the caller before its call, and nothing ran while it
-      # was blocked but the gate's own report.
-      assert Enum.any?(
-               trace.before,
-               &(&1.pid == call.caller and &1.sql =~ ~r/model_invocations/)
-             ),
-             "C3-02: not established: the caller's pre-call SQL was not observed"
+      stopped = stop_execution!(task.pid, recorder)
 
-      assert Enum.map(trace.blocked, &{&1.pid, &1.sql}) ==
-               [{call.caller, "SELECT pg_backend_pid()"}],
-             "C3-02: not established: the run did database work while blocked: " <>
-               short(trace.blocked)
+      assert MapSet.member?(stopped, worker),
+             "the unreported action worker was stopped: #{short(stopped)}"
 
-      # No key is held while the model call waits.
-      assert caller_ids == MapSet.new(),
-             "C3-02: the calling backend holds an identity key during a model call"
-
-      assert caller_locks == 0, "C3-02: the calling backend holds an advisory lock"
-      assert job_locks == 0, "C3-02: the job's backend holds an advisory lock during the call"
-      assert database_locks == 0, "C3-02: an advisory lock is held during the model call"
-
-      before_keys = Enum.filter(trace.before, &(publishes?(&1.sql) or &1.sql =~ ~r/pg_advisory/))
-
-      assert before_keys == [],
-             "C3-02: a key was taken before the model call: #{short(before_keys)}"
-
-      refute deadlock?(result), "C3-02: a deadlock: #{short(result)}"
-      assert result == :ok, "the classification must still run: #{short(result)}"
-      assert [_suppression] = unsubscribe_replies(ctx)
-
-      assert Enum.any?(trace.after, &publishes?(&1.sql)),
-             "C3-02: the classification's suppression takes its key after the model call returned"
+      refute Enum.any?(stopped, &Process.alive?/1), "every stopped worker is gone"
+      assert execution_set(task.pid, recorder) == MapSet.new(), "no owned worker remains"
+      assert Enum.all?(shared, &Process.alive?/1), "shared infrastructure stays alive"
+      assert %{rows: [[1]]} = Repo.query!("SELECT 1")
     end
   end
 
@@ -1325,23 +1461,26 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     count
   end
 
-  ## T-O3: a test-scoped trace and stop of the contender's run tree
+  ## T-O3: a test-scoped, fail-closed trace of the contender's run tree
 
-  # Attached by T-O3 only, before its contender exists, and detached at
-  # exit (no production instrumentation changes): every statement of a
+  # Attached by a T-O3 test only, before its contender exists, and detached
+  # at exit (no production instrumentation changes): every statement of a
   # process that is, or reaches through spawners and `$callers`
   # (`spawners/1`), a process opted in to the harness trace for this test
   # (`:c302_trace_to` == the test process, i.e. the contender) is sent to
   # the test process with a strictly monotonic stamp taken in the sending
   # process when the statement's telemetry fires. It sees Jido's turn and
-  # action workers from their first statement. A handler error drops the
-  # event (telemetry would otherwise detach the handler); a dropped
-  # pre-call event fails the precondition that the caller's pre-call SQL
-  # was observed.
-  defp collect_run_tree! do
+  # action workers from their first statement, and records their
+  # execution telemetry tracker in `recorder` (cleanup ownership). Fail
+  # closed (Codex 340e7b4 R4-1): an error in the handler, for any process,
+  # is not silently dropped but sent as a `:collector_error` sentinel, and
+  # `checked_trace!/1` refuses a trace with any sentinel or with the
+  # handler detached; `fault` (a test-only injection used by the control)
+  # runs on each traced statement before its event is sent.
+  defp collect_run_tree!(recorder, opts \\ []) do
     tag = make_ref()
     handler = "c3-02-t-o3-tree-#{System.unique_integer([:positive])}"
-    config = %{owner: self(), tag: tag}
+    config = %{owner: self(), tag: tag, recorder: recorder, fault: Keyword.get(opts, :fault)}
 
     :ok =
       :telemetry.attach(
@@ -1352,19 +1491,25 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       )
 
     on_exit(fn -> :telemetry.detach(handler) end)
-    tag
+    %{tag: tag, handler: handler}
   end
 
   @doc false
-  def collect_tree_query(_event, _measurements, metadata, %{owner: owner, tag: tag}) do
-    if in_run_tree?(self(), owner, 6) do
-      stamp = :erlang.unique_integer([:monotonic])
-      send(owner, {tag, stamp, self(), IO.iodata_to_binary(metadata.query)})
+  def collect_tree_query(_event, _measurements, metadata, %{owner: owner, tag: tag} = config) do
+    try do
+      if in_run_tree?(self(), owner, 6) do
+        record_tracker(config.recorder)
+        sql = IO.iodata_to_binary(metadata.query)
+        if config.fault, do: config.fault.(sql)
+        send(owner, {tag, :erlang.unique_integer([:monotonic]), self(), sql})
+      end
+    rescue
+      error -> send(owner, {tag, :collector_error, self(), Exception.message(error)})
+    catch
+      kind, reason -> send(owner, {tag, :collector_error, self(), {kind, reason}})
     end
 
     :ok
-  rescue
-    _error -> :ok
   end
 
   defp in_run_tree?(pid, owner, depth) do
@@ -1384,14 +1529,76 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     end
   end
 
-  # The tree trace so far (non-blocking drain), in stamp order.
-  defp tree_trace(tag), do: tag |> drain_tree([]) |> Enum.sort_by(& &1.stamp)
+  defp attached?(collector) do
+    [:sdr_agent, :repo, :query]
+    |> :telemetry.list_handlers()
+    |> Enum.any?(&(&1.id == collector.handler))
+  end
+
+  # Every collector message so far (non-blocking drain).
+  defp tree_messages(collector), do: drain_tree(collector.tag, [])
 
   defp drain_tree(tag, acc) do
     receive do
-      {^tag, stamp, pid, sql} -> drain_tree(tag, [%{stamp: stamp, pid: pid, sql: sql} | acc])
+      {^tag, _stamp, _pid, _sql} = message -> drain_tree(tag, [message | acc])
     after
-      0 -> acc
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp split_trace(collector, messages) do
+    tag = collector.tag
+
+    %{
+      events:
+        for(
+          {^tag, stamp, pid, sql} when is_integer(stamp) <- messages,
+          do: %{stamp: stamp, pid: pid, sql: sql}
+        )
+        |> Enum.sort_by(& &1.stamp),
+      errors: for({^tag, :collector_error, pid, reason} <- messages, do: {pid, reason})
+    }
+  end
+
+  # The trace, only if it is complete: no collector error and the handler
+  # still attached; otherwise the trace is refused ("not established").
+  defp checked_trace!(collector), do: check_trace!(collector, tree_messages(collector))
+
+  defp check_trace!(collector, messages) do
+    assert attached?(collector), "C3-02: not established: the collector detached"
+    %{events: events, errors: errors} = split_trace(collector, messages)
+
+    assert errors == [],
+           "C3-02: not established: a collector error lost trace events: #{short(errors)}"
+
+    events
+  end
+
+  # Bounded: the first traced Jido execution worker (it holds an execution
+  # telemetry tracker) whose statement matches `pattern`.
+  defp await_worker_statement!(collector, pattern) do
+    deadline = System.monotonic_time(:millisecond) + @wait_ms
+    await_worker_statement(collector.tag, pattern, deadline)
+  end
+
+  defp await_worker_statement(tag, pattern, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^tag, stamp, pid, sql} when is_integer(stamp) ->
+        if sql =~ pattern and execution_worker?(pid),
+          do: pid,
+          else: await_worker_statement(tag, pattern, deadline)
+    after
+      remaining ->
+        flunk("C3-02: not established: no worker statement matched #{inspect(pattern)}")
+    end
+  end
+
+  defp execution_worker?(pid) do
+    case Process.info(pid, :dictionary) do
+      {:dictionary, dictionary} -> is_pid(dictionary_value(dictionary, @tracker_key))
+      nil -> false
     end
   end
 
@@ -1405,29 +1612,110 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
     }
   end
 
-  # Registered right after the contender starts, so at exit it runs before
-  # the contender's own tracker: the contender and every live process
-  # started on its behalf (spawner or `$callers` chain to it: Jido's turn
-  # and action workers and their guards) are killed and awaited (bounded),
-  # then the scan is repeated from all of them for any process started
-  # meanwhile. No run-tree process survives into the tenant cleanup.
-  defp stop_run_tree_on_exit!(root) do
-    on_exit(fn ->
-      first = run_tree(MapSet.new([root]))
-      stop_all!(first)
-      first |> run_tree() |> MapSet.difference(first) |> stop_all!()
-    end)
+  ## T-O3: owned, bounded stop of the run's Jido execution (Codex 340e7b4 R4-2)
+
+  # Ownership is positive, never inferred from an arbitrary `$callers`
+  # edge. On main the run's Jido execution is: one execution telemetry
+  # tracker per turn, a `Jido.Exec.Telemetry.Tracker` GenServer the
+  # contender starts and links (jido_action `lib/jido_exec.ex:504`,
+  # `lib/jido_exec/telemetry/tracker.ex:13-15`); the turn worker W1 and the
+  # action worker W2, each holding that tracker under
+  # `{Jido.Exec.Telemetry, :tracker}` in its dictionary (`jido_exec.ex:515`
+  # `with_tracker/2`; `lib/jido_exec/action/runner.ex:299`, `:305`;
+  # `lib/jido_exec/telemetry.ex:17`, `:86-99`); and their execution-local
+  # guards, each running `Jido.Exec.Runtime.terminate_with_caller/2` with
+  # a worker as its parent (`jido_exec.ex:510`, `runner.ex:304`). Owned
+  # trackers are those whose parent is the contender (read while it is
+  # alive) or that the collector recorded from a traced statement (read
+  # while the chain is alive, so a dead W1 does not hide a live W2). A
+  # selected process that is registered or a supervisor is refused (the
+  # test fails), never stopped: shared Repo, pool, connection, Oban and
+  # supervisor processes are outside the selection.
+
+  # An unlinked, unsupervised recorder of owned tracker pids: it outlives
+  # the test process and the test supervisor (both end before on_exit
+  # callbacks run), so the exit-time stop can still name the run's workers;
+  # it is stopped (killed, :DOWN awaited) after that stop.
+  defp execution_recorder! do
+    {:ok, recorder} = Agent.start(fn -> MapSet.new() end)
+    track!(recorder)
+    recorder
   end
 
-  defp run_tree(set) do
-    grown =
-      for pid <- Process.list(),
-          not MapSet.member?(set, pid),
-          Enum.any?(spawners(pid), &MapSet.member?(set, &1)),
-          into: set,
+  defp record_tracker(recorder) do
+    case Process.get(@tracker_key) do
+      tracker when is_pid(tracker) -> Agent.cast(recorder, &MapSet.put(&1, tracker))
+      _none -> :ok
+    end
+  end
+
+  # Registered right after the contender starts: at exit (after the test
+  # supervisor has stopped the contender) it stops the recorded workers
+  # before the tenant cleanup.
+  defp stop_execution_on_exit!(root, recorder),
+    do: on_exit(fn -> stop_execution!(root, recorder) end)
+
+  # Stops (kills, then awaits :DOWN, bounded) the owned workers and guards,
+  # twice (for any started meanwhile); returns every pid stopped.
+  defp stop_execution!(root, recorder) do
+    first = execution_set(root, recorder)
+    stop_all!(first)
+    second = execution_set(root, recorder)
+    stop_all!(second)
+    MapSet.union(first, second)
+  end
+
+  # The live owned workers and guards of `root`'s execution.
+  defp execution_set(root, recorder) do
+    infos =
+      Enum.flat_map(Process.list(), fn pid ->
+        case Process.info(pid, [:parent, :dictionary, :current_function, :registered_name]) do
+          nil -> []
+          info -> [{pid, Map.new(info)}]
+        end
+      end)
+
+    owned =
+      for {pid, info} <- infos,
+          info.parent == root,
+          dictionary_value(info.dictionary, :"$initial_call") ==
+            {Jido.Exec.Telemetry.Tracker, :init, 1},
+          into: MapSet.new(),
           do: pid
 
-    if MapSet.size(grown) == MapSet.size(set), do: set, else: run_tree(grown)
+    Agent.update(recorder, &MapSet.union(&1, owned))
+    trackers = Agent.get(recorder, & &1)
+
+    workers =
+      for {pid, info} <- infos,
+          MapSet.member?(trackers, dictionary_value(info.dictionary, @tracker_key)),
+          into: MapSet.new(),
+          do: pid
+
+    selected =
+      for {pid, info} <- infos,
+          MapSet.member?(workers, pid) or
+            (info.current_function == @guard_function and MapSet.member?(workers, info.parent)),
+          into: MapSet.new(),
+          do: refute_infrastructure!(pid, info)
+
+    selected
+  end
+
+  defp dictionary_value(dictionary, key) do
+    case List.keyfind(dictionary, key, 0) do
+      {^key, value} -> value
+      nil -> nil
+    end
+  end
+
+  defp refute_infrastructure!(pid, info) do
+    initial = dictionary_value(info.dictionary, :"$initial_call")
+
+    assert info.registered_name == [] and not match?({:supervisor, _, _}, initial),
+           "C3-02: refusing to stop shared infrastructure #{inspect(pid)} (#{short(initial)})"
+
+    pid
   end
 
   defp stop_all!(pids) do
@@ -1438,9 +1726,39 @@ defmodule SdrAgent.Audit.IdentityPassOrderTest do
       receive do
         {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
       after
-        @wait_ms -> flunk("C3-02: a run-tree process did not terminate")
+        @wait_ms -> flunk("C3-02: an owned execution worker did not terminate")
       end
     end
+  end
+
+  defp callers_of(pid) do
+    {:dictionary, dictionary} = Process.info(pid, :dictionary)
+    dictionary_value(dictionary, :"$callers") || []
+  end
+
+  # Shared processes the cleanup must leave alive: the Repo and its pool
+  # supervisor, Jido's task supervisor, Oban, and the test's own supervisor.
+  defp shared_infrastructure(supervisor) do
+    shared = [
+      supervisor,
+      Process.whereis(SdrAgent.Repo),
+      Process.whereis(Jido.Exec.TaskSupervisor),
+      Oban.whereis(Oban)
+    ]
+
+    assert Enum.all?(shared, &is_pid/1), "precondition: the shared processes exist"
+    shared
+  end
+
+  # The demo tenant with a matched reply (canary in its text) whose queued
+  # classification run and job ReplyIntake created.
+  defp queued_reply! do
+    ctx = demo!()
+    delivery = delivered!(ctx)
+    canary = "c302canary#{SalesFixtures.unique()}"
+    event = matched_reply!(ctx, delivery, "#{@missed_by_rule} Ref #{canary}.")
+    run = reply_run!(ctx, event)
+    %{ctx: ctx, run: run, job: reply_job!(ctx, run), canary: canary}
   end
 
   # The reply's queued AgentRun (ReplyIntake, correlated by the event) and
