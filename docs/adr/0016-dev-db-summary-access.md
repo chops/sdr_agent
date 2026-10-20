@@ -664,8 +664,13 @@ In summary:
      `sdr_agent_dev`. With no socket configured, the endpoint is reported
      disabled.
      - The server-reported value is data, validated in full before any
-       probe. It is a comma-separated list of trimmed entries, each exactly
-       `/` plus letters, digits and `. _ / + -`.
+       probe. The whole captured value is checked first. It may contain
+       only letters, digits, `. _ / + -`, commas and spaces, spelled out
+       so no locale can widen the set. So any LF, CR, tab or other control
+       byte, or any non-ASCII byte, STOPs before a line-oriented read could
+       see only its first line. Then it must be a comma-separated list of
+       trimmed entries, each exactly `/` plus letters, digits and
+       `. _ / + -`.
      - Anything else STOPs with no socket probed: a quote (PostgreSQL's
        quoted form), a backslash, a space, `=`, `@`, an empty entry or a
        relative path. So no directory can be read as a conninfo keyword,
@@ -821,7 +826,7 @@ to the app.
   - a missing interface table.
 
 - `accept-test.sh` drives the real `accept.sh` through a stub `psql` in
-  64 cases. Each failing input must end with `ACCEPTANCE STOP` and exit 3,
+  93 cases. Each failing input must end with `ACCEPTANCE STOP` and exit 3,
   with only fixed label lines. The inputs cover:
   - a missing or non-canonical port (zero psql calls);
   - attest exiting 3, missing its END marker, passing a different number
@@ -843,6 +848,15 @@ to the app.
       quote, `=` or `@`;
     - an empty, leading or trailing comma entry, a bad entry after a good
       one, and whitespace only;
+  - 14 whole values that start with a valid first line, each a fixed STOP
+    with no socket call and no PASS. A control confirms the stub really
+    returns two lines. The values are:
+    - a newline before a comma and a second directory (Codex's
+      reproduction), a comma before a newline, and a newline alone;
+    - a newline before `hostaddr=...` or before a bad entry;
+    - CR, CR+LF and tab;
+    - `\001`, ESC, VT and FF;
+    - non-ASCII bytes;
   - a parser-level control. Every socket conninfo `accept.sh` produced for
     two accepted directories (one surrounded by spaces) goes through the
     pinned libpq's `PQconninfoParse`, with no connection. Each must carry
@@ -860,6 +874,8 @@ to the app.
   - dropping the port bound, the FAILED-row check, the ok count, the
     pg_hba-message check or the signal trap;
   - loosening the socket entry pattern;
+  - dropping the whole-value byte check, which lets Codex's two-line
+    value reach ACCEPTANCE PASS again (22 failures);
   - dropping the list-level quote and empty-entry check;
   - removing the host quoting, which the endpoint check catches.
 - `owner-run-test.sh` drives the real `owner-run.sh` through stub
