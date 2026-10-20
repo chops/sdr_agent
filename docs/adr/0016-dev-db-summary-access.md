@@ -82,7 +82,9 @@ exactly two allocations, `b1` and `workshop`.
   harness tests that case.
 - If a procedure adopts a new shape, it needs a new function version (for
   example `_v2`) with its own review, install and attestation record.
-- Code review of v1 implies no authority for any attempt.
+- Code review of v1 implies no authority for any attempt. Neither do its
+  installation and acceptance: they do not approve v1 as the current
+  attempt's drain.
 
 Both functions return one fixed row type:
 
@@ -159,6 +161,9 @@ Files:
   revision 3's `optional-revoke-temp.sql`.
 - `pg_hba-summary.conf`: the exact pg_hba rules for D-173 choice 3.
 - `accept.sql` and `accept.sh`: the installed-state acceptance check.
+- `owner-run.sh`: the one owner execution context. Every owner command in
+  `OWNER-STEPS.md` goes through it (see
+  [Owner execution context](#owner-execution-context)).
 - `OWNER-STEPS.md`: the owner's exact order of steps, including rollback.
 - `uninstall.sql`: exact rollback of `install.sql`. It validates everything
   before it drops anything.
@@ -169,6 +174,11 @@ Files:
   - `guard.sh`, `guard-test.sh` and `lifecycle-test.sh`: the throwaway
     guard and its hermetic tests.
   - `accept-test.sh`: a hermetic test that `accept.sh` fails closed.
+  - `owner-run-test.sh`: a hermetic test of `owner-run.sh`'s context,
+    backup and pg_hba write guarantees.
+  - `owner-path-test.sh`: the whole owner path through `owner-run.sh`, for
+    real, on two throwaway clusters with Unix sockets and a hostile
+    environment aimed at the decoy.
   - `throwaway-cluster.sh` and `migrate_throwaway.exs`: the disposable
     cluster and its schema.
 
@@ -421,8 +431,10 @@ Revision 3 listed four open choices. D-173 decided them:
      other database, and for replication, over 127.0.0.1, ::1 and the Unix
      socket. The devenv cluster has a Unix socket in its runtime directory.
      All seven lines go above every other rule.
-   - Acceptance checks 12–14 read the rules and their load time. Checks
-     15–16 confirm the rejection live, without reading data.
+   - Acceptance checks 12–14 read the rules and whether the last reload
+     is certain to postdate the last change. Checks 16–19 confirm the
+     rejection live, over 127.0.0.1 and over every Unix socket, without
+     reading data. Check 15 confirms that no other TCP endpoint exists.
    - The attestation still covers only this database's catalogs plus the
      shared ones. The login can no longer reach the others.
 4. **Procedural connection boundary: accepted.** Trust auth stays on this
@@ -465,6 +477,8 @@ Known properties, not choices:
   - the revoke script without a valid mode;
   - a repeated apply;
   - a restore while the summary roles exist.
+- `owner-run.sh` ends `OWNER-RUN REFUSED: <reason>` with exit 3 on any
+  failure, and never prints a success marker after a failed step.
 - `accept.sh` prints `ACCEPTANCE STOP` last and exits 3 on any failure.
   That includes a missing psql, an interrupted run, and output it cannot
   account for.
@@ -483,18 +497,76 @@ Known properties, not choices:
 ## Installed-state acceptance (owner)
 
 The owner follows [OWNER-STEPS.md](../../priv/dev_summary_access/OWNER-STEPS.md)
-in its order: backup and verify point, install, the revokes (inventory,
-then apply), the pg_hba edit and reload, `accept.sh`, the labels-only
-report and, when needed, rollback. Agents do none of these. In summary:
+in its order: preflight, backup and verify point, install, the revokes
+(inventory, then apply), the pg_hba apply and effective reload,
+acceptance, the labels-only report and, when needed, rollback. Every one
+of these runs through `owner-run.sh`. Agents do none of these.
+
+### Owner execution context
+
+A later correct acceptance run cannot make an earlier superuser install,
+revoke or dump safe. So every owner command, not only acceptance, runs in
+one fixed context (`owner-run.sh`):
+
+- **Binaries.** The pinned PostgreSQL 18.6 store path
+  (`/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin`, the
+  same package as devenv's), with each of `psql`, `pg_dump`,
+  `pg_dumpall` and `pg_restore` checked to report 18.6. System tools come
+  from `/usr/bin` and `/bin` only.
+- **Environment.** Every child runs under `env -i`. No inherited `PG*`,
+  `PSQL*` or `GIT_*` variable reaches it, including `PGHOSTADDR`,
+  `PGSERVICE`, `PGSERVICEFILE`, `PGOPTIONS`, `PGPASSFILE` and `PGDATA`.
+  `HOME` is `/var/empty`.
+- **Connections.** Every connection names
+  `host=127.0.0.1 hostaddr=127.0.0.1`, the port, the database and user
+  `postgres`. It also sets `sslmode` and `gssencmode` off, a nonexistent
+  `passfile`, `connect_timeout=10`, `lock_timeout=10s` and
+  `statement_timeout=300s`.
+- **Data directory.** Never taken from the environment. The pg_hba
+  commands need an explicit `--pgdata`, which must equal the server's
+  `data_directory`, with `hba_file` exactly `<pgdata>/pg_hba.conf`.
+- **Commit binding.** Every command needs `--commit`, the full reviewed SHA.
+  It refuses unless the checkout's HEAD is that commit and
+  `priv/dev_summary_access` and this ADR are unmodified, with no
+  untracked or ignored file.
+- **Backup.** Created with umask 077 by `mktemp -d` under a parent that must
+  be yours, physical and mode 700. Each producer's exit status is checked
+  (pg_dump, pg_dumpall, the pg_hba copy, pg_restore --list). The archive
+  must hold table data for every `public` table, and the globals file must
+  carry pg_dumpall's completion trailer. Only then are a `MANIFEST` and
+  `BACKUP-COMPLETE` written and `BACKUP-VERIFIED` printed. Writing
+  commands (install, revoke apply, hba apply and restore) refuse any
+  backup without the marker and an exact MANIFEST. Earlier backups are
+  never touched. The owner copies the printed path by hand; nothing is
+  sourced.
+- **pg_hba writes.**
+  - The live file must be a regular file you own, in exactly the expected
+    state: the backup copy for apply, the applied content for restore.
+  - The new content goes into a fresh `mktemp` file in the same directory.
+    Its bytes are checked, and the live file's mode is kept.
+  - The live file is re-checked, then the staged file is renamed onto it.
+    Any failure removes only the staged file and leaves the live file
+    unchanged.
+  - After apply, the server must read the file back as the reviewed rules
+    (checks 12–13), or the backup copy is put back the same way, without a
+    reload.
+- **Reload.** `pg_reload_conf()` returning `t` only means the signal was
+  sent. `owner-run.sh` waits until the server clock is past the file's
+  modification second, reloads, then waits until `pg_conf_load_time()`
+  is newer and at least one second after that modification, with the file
+  unchanged.
+
+In summary:
 
 1. Review the exact files at the reviewed commit. They must be unchanged
    since Codex's PASS.
 2. Run the steps through the pg_hba reload. Each must end with its stated
    marker.
-3. Run `accept.sh 5520`. Acceptance requires all of:
+3. Run acceptance (`owner-run.sh accept`, which runs `accept.sh` with
+   the pinned psql). Acceptance requires all of:
    - exit 0;
    - every line a fixed `ACCEPT` label line;
-   - 18 `ok` lines;
+   - 20 `ok` lines;
    - the last line `ACCEPTANCE PASS`.
 
    On anything else, it prints `ACCEPTANCE STOP` last and exits 3. Do not
@@ -531,7 +603,7 @@ report and, when needed, rollback. Agents do none of these. In summary:
      allowed grant, or a delegation by either role, is refused;
    - the extension set: `plpgsql` and `citext`.
 
-   **Checks 2–14: `accept.sql`** (read-only):
+   **Checks 2–15: `accept.sql`** (read-only):
    - 2: the server is PostgreSQL 18.6, the version the functiondef hashes
      were recorded on;
    - 3: both summary roles are present;
@@ -543,14 +615,29 @@ report and, when needed, rollback. Agents do none of these. In summary:
      function lies outside the reviewed lists, and none is executable by
      PUBLIC or by either summary role, by any route;
    - 11: `lo_compat_privileges` is off;
-   - 12–14: no pg_hba rule has an error; rules 1–7 of the loaded
-     `hba_file` are exactly the reviewed rules, in order; and the file was
-     loaded after its last change.
+   - 12–13: no pg_hba rule has an error, and rules 1–7 of `hba_file` are
+     exactly the reviewed rules, in order. `pg_hba_file_rules` reads the
+     file, not the active rules.
+   - 14: the last reload is at least one second after the file's
+     modification time. The mtime has one-second resolution, so a change
+     in the same second as the reload, or later, is uncertain and STOPs.
+     Revision 4's `>=` comparison could pass a same-second edit that was
+     never loaded. The owner-path test reproduces that schedule, and the
+     old predicate reads true there.
+   - 15: `listen_addresses` is exactly `127.0.0.1`, so there is no IPv6 or
+     other TCP endpoint to probe.
 
-   **Checks 15–17: live.**
-   - 15–16: pg_hba rejects the login for `postgres` and `template1`.
-   - 17: the login connects to `sdr_agent_dev` with its read-only default,
-     `search_path = pg_catalog`, its timeouts and no superuser attribute.
+   **Checks 16–19: live, against the active rules.** Each must be pg_hba's
+   own rejection. A refused or failed connection is never counted as one.
+   - 16–17: pg_hba rejects the login for `postgres` and `template1` over
+     127.0.0.1.
+   - 18: the login connects to `sdr_agent_dev` over 127.0.0.1 with its
+     read-only default, `search_path = pg_catalog`, its timeouts and no
+     superuser attribute.
+   - 19: over every directory in the server's `unix_socket_directories`,
+     pg_hba rejects the login for `postgres`, `template1` and
+     `sdr_agent_dev`. With no socket configured, the endpoint is reported
+     disabled. A relative directory STOPs.
 
    These read settings only. There is no table read, no function call and
    no write probe on the owner's data.
@@ -566,11 +653,11 @@ report and, when needed, rollback. Agents do none of these. In summary:
 5. The owner reports the `accept.sh` output, labels only. Agents may start
    calling only after `ACCEPTANCE PASS` is reported. Running the
    attestation alone is not acceptance (D-173).
-6. Re-run `accept.sh`, not attest alone:
+6. Re-run acceptance (`owner-run.sh accept`), not attest alone:
    - after any CREATE OR REPLACE, ALTER, GRANT or REVOKE touching these
      roles, the schema or the functions;
-   - after any change to PUBLIC's privileges on `sdr_agent_dev`, or to
-     `pg_hba.conf`;
+   - after any change to PUBLIC's privileges on `sdr_agent_dev`, to
+     `pg_hba.conf`, or to the listen address or socket settings;
    - after a PostgreSQL upgrade. A new version also needs new functiondef
      values, and check 2 STOPs until they are reviewed.
 
@@ -700,7 +787,7 @@ to the app.
   - a missing interface table.
 
 - `accept-test.sh` drives the real `accept.sh` through a stub `psql` in
-  28 cases. Each failing input must end with `ACCEPTANCE STOP` and exit 3,
+  35 cases. Each failing input must end with `ACCEPTANCE STOP` and exit 3,
   with only fixed label lines. The inputs cover:
   - a missing or non-canonical port (zero psql calls);
   - attest exiting 3, missing its END marker, passing a different number
@@ -710,6 +797,11 @@ to the app.
     having 12 `ok` rows, or printing nothing;
   - the login reaching `postgres`, or being refused for a reason other than
     pg_hba;
+  - the login reaching `postgres` or `sdr_agent_dev` over the Unix socket,
+    a socket connection refused rather than rejected by pg_hba, a relative
+    or unreadable socket directory;
+  - no socket (reported disabled) and two sockets (both probed) as passing
+    controls;
   - wrong login session settings;
   - a missing psql;
   - SIGTERM mid-run.
@@ -717,8 +809,59 @@ to the app.
   A positive control shows hostile `PGHOST`/`PGPORT=5520`/`PGSERVICE`/
   `PSQLRC` values never reach psql, and every call names the endpoint
   explicitly. Mutating `accept.sh` (dropping the port bound, the FAILED-row
-  check, the 13-ok count, the pg_hba-message check or the signal trap)
+  check, the ok count, the pg_hba-message check or the signal trap)
   fails the test.
+- `owner-run-test.sh` drives the real `owner-run.sh` through stub
+  binaries in 80 cases. The package runs from a temporary git copy, so the
+  commit binding is real. Every run uses a hostile environment: `PGHOST`,
+  `PGHOSTADDR`, `PGPORT=5520`, `PGSERVICE`, `PGSERVICEFILE`, `PGOPTIONS`,
+  `PGPASSFILE`, `PGDATA`, `PSQLRC` and `GIT_DIR` are set, and hostile
+  `psql`, `pg_dump` and `git` binaries come first on PATH. No inherited
+  variable reaches a child, no hostile binary runs, and every connection
+  is explicit. The cases cover:
+  - the whole owner path;
+  - the binding refusals: no or short commit, an unknown commit, HEAD one
+    commit past the reviewed one, a modified, untracked or ADR-0016 file,
+    port 5520 with stub binaries, a missing stub marker, a non-18.6 psql
+    or server, a `data_directory` or `hba_file` mismatch, a symlinked
+    `--pgdata`;
+  - backup: two backups get distinct directories and the first stays
+    untouched. Each partial backup (pg_dump or pg_dumpall failing, an
+    unreadable archive, missing table data, no globals trailer) prints
+    `BACKUP-INCOMPLETE` and never `BACKUP-VERIFIED`, and a later install
+    refuses it before any database call. So do a tampered backup, a
+    mode-755, symlinked or missing parent, and a missing `--backup`;
+  - pg_hba: no live change and no staging file left when the live file has
+    drifted, is a symlink, or no staging file can be created. Staged rules
+    the server does not read back are reverted without a reload. A reload
+    that never becomes effective is refused. Restore refuses a
+    non-applied file. The mode is kept.
+
+  Mutating `owner-run.sh` fails the test: dropping `hostaddr`, the
+  fresh-directory `mktemp`, a producer's exit check, the table-data check,
+  the revert, or the HEAD check. Dropping `env -i` is caught only through
+  acceptance, because the script also unsets those variables itself. The
+  up-front pg_hba state check is duplicated by the post-staging re-check.
+- `owner-path-test.sh` runs the owner path for real through `owner-run.sh`
+  on two throwaway clusters. Each has a short-path Unix socket in a
+  directory the test creates and removes, and a devenv-like initdb
+  pg_hba.conf. A is the target; B is a decoy with `log_connections`.
+  - Every command runs with `PGHOST` set to B's socket, `PGHOSTADDR`,
+    `PGPORT`, `PGSERVICE` and `PGSERVICEFILE` naming B, B's `PGDATA`,
+    `PGOPTIONS='-c default_transaction_read_only=on'` and a hostile PATH.
+    B logs no connection (positive control: it logs the test's own
+    setup). A's writes succeed, which they would not under that
+    `PGOPTIONS`. No hostile binary runs.
+  - Acceptance STOPs before pg_hba (16, 17, 19 among others) and passes
+    after `hba-apply` with the socket probe on A's real socket.
+  - It STOPs on a loaded local-rule tamper (13, 19).
+  - It STOPs on the same-second schedule: active rules lack the local
+    rejects, and the file is corrected in the reload's second without a
+    reload. Check 14 and the live socket check 19 STOP while check 13
+    reads ok.
+  - It passes only after `hba-reload` makes the reload effective.
+  - The rollback restores A's pg_hba.conf byte for byte and PUBLIC's
+    defaults.
 
 ### The adversarial test (`adversarial.sh`)
 
@@ -790,7 +933,8 @@ login, not only through `SET ROLE` from a superuser. It checks:
   - `adv_plain` loses both in `sdr_agent_dev` but keeps both in `postgres`.
     `adv_tempgrant` keeps TEMP and loses the 17. `postgres` keeps both.
   - The summary results are unchanged. A second apply is refused.
-  - After the pg_hba reload, `accept.sh` passes, and the login is rejected
+  - After the pg_hba reload (waiting past the file's modification second),
+    `accept.sh` passes, and the login is rejected
     for `postgres`.
   - Each tampered variant STOPs on its named check, then passes once
     reverted:
@@ -845,8 +989,11 @@ Not proven here:
 - the acceptance of the real install;
 - the effect inventory of the real cluster's roles (OWNER-STEPS.md step 3a
   stops on any role the table above does not list);
-- the `local` (Unix socket) reject rules live. The throwaway cluster has no
-  socket, so checks 12–13 verify those rules from the loaded file only.
+- the dev cluster's own socket. `owner-path-test.sh` exercises a real
+  socket on a throwaway cluster; on the dev cluster, check 19 probes
+  whatever `unix_socket_directories` reports;
+- IPv6 or other TCP endpoints. Check 15 requires their absence instead of
+  probing them.
 
 ### Evidence and process record
 
