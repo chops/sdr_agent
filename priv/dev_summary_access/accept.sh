@@ -47,9 +47,11 @@ ci() {
   printf 'host=127.0.0.1 hostaddr=127.0.0.1 port=%s dbname=%s user=%s sslmode=disable gssencmode=disable passfile=/nonexistent/d168-no-pgpass connect_timeout=10 application_name=d168-accept' \
     "$port" "$1" "$2"
 }
-# A Unix-socket connection: host is the socket directory, no hostaddr.
+# A Unix-socket connection: host is the socket directory, no hostaddr. The
+# directory is libpq-quoted data, never conninfo syntax; check 19 accepts
+# only directories made of / letters digits . _ + - so it needs no escapes.
 cs() {
-  printf 'host=%s port=%s dbname=%s user=sdr_summary_login sslmode=disable gssencmode=disable passfile=/nonexistent/d168-no-pgpass connect_timeout=10 application_name=d168-accept' \
+  printf "host='%s' port=%s dbname=%s user=sdr_summary_login sslmode=disable gssencmode=disable passfile=/nonexistent/d168-no-pgpass connect_timeout=10 application_name=d168-accept" \
     "$1" "$port" "$2"
 }
 # rejected OUTPUT RC: the connection failed with pg_hba's own rejection.
@@ -114,18 +116,33 @@ if [ "$rc" != 0 ]; then
 elif [ -z "$dirs" ]; then
   ok "19 Unix socket disabled (unix_socket_directories is empty)"
 else
-  nd=0 bad=0
-  IFS=',' read -r -a list <<<"$dirs"
-  for d in "${list[@]}"; do
-    d=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<<"$d")
-    case "$d" in /*) ;; *) bad=$((bad + 1)); continue ;; esac
-    nd=$((nd + 1))
-    for db in postgres template1 sdr_agent_dev; do
-      out=$("$PSQL" -X -q -At -d "$(cs "$d" "$db")" -c 'SELECT 1' 2>&1); rc=$?
-      rejected "$out" "$rc" || bad=$((bad + 1))
+  # The server-reported value is data. It is parsed conservatively, and the
+  # whole list is validated BEFORE any probe: comma-separated entries, each
+  # trimmed and then exactly '/' plus letters, digits and . _ / + -. Any
+  # quote (PostgreSQL's quoted-list form), backslash, empty entry, space,
+  # '=', '@' (abstract namespace) or other character STOPs with no socket
+  # probed, so nothing can be read as a conninfo keyword or a second host.
+  re='^/[A-Za-z0-9._/+-]+$' unsafe=no sockets=()
+  case "$dirs" in *\"*|*\'*|*\\*|,*|*,|*,,*) unsafe=yes ;; esac
+  if [ "$unsafe" = no ]; then
+    IFS=',' read -r -a list <<<"$dirs"
+    for d in "${list[@]}"; do
+      d=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<<"$d")
+      if [[ "$d" =~ $re ]]; then sockets+=("$d"); else unsafe=yes; fi
     done
-  done
-  if [ "$bad" = 0 ] && [ "$nd" -gt 0 ]; then ok "$label, directories=$nd"; else stop "$label" "directories=$nd failures=$bad"; fi
+  fi
+  if [ "$unsafe" = yes ] || [ "${#sockets[@]}" = 0 ]; then
+    stop "$label" "unsupported unix_socket_directories form; no socket probed"
+  else
+    bad=0
+    for d in "${sockets[@]}"; do
+      for db in postgres template1 sdr_agent_dev; do
+        out=$("$PSQL" -X -q -At -d "$(cs "$d" "$db")" -c 'SELECT 1' 2>&1); rc=$?
+        rejected "$out" "$rc" || bad=$((bad + 1))
+      done
+    done
+    if [ "$bad" = 0 ]; then ok "$label, directories=${#sockets[@]}"; else stop "$label" "directories=${#sockets[@]} failures=$bad"; fi
+  fi
 fi
 
 if [ "$STOPS" = 0 ]; then
