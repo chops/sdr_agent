@@ -63,7 +63,11 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   bound a checkout still waiting in the pool's queue, so each such call
   runs in a process linked to the caller, which waits for it until the
   deadline (plus a 250 ms grace for the driver's own end of the window) and
-  then kills it and awaits its exit: `{:error, :timeout}`. A result
+  then kills it and awaits its `:DOWN`: `{:error, :timeout}`. On a returned
+  result the caller demonitors and unlinks the call process without
+  awaiting its `:DOWN` (sending that result is the call process's last
+  act), so that branch is not a receipt that the call process has exited;
+  neither branch is a receipt that the server rolled back. A result
   that arrives after the deadline (tenant, no tenant, registered or
   re-read row) is `{:error, :timeout}`. No call and no attempt starts once
   the budget is spent (`{:error, :timeout}`). A `:connection` failure is
@@ -365,7 +369,9 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   # sandbox callers, dynamic repo and Ash tracer context; its value, raise,
   # throw or exit comes back to the caller as if it had run there. Linked:
   # if the caller dies (the boot child kills it at its ceiling), so does
-  # the call.
+  # the call. On a returned result the call process is demonitored and
+  # unlinked, not awaited (its last act is the send); only the timeout
+  # branch awaits its :DOWN (`stop_call/3`).
   defp within_deadline(budget, call) do
     parent = self()
     tag = make_ref()
@@ -461,6 +467,11 @@ defmodule SdrAgent.SDR.DefinitionBootstrap do
   defp in_time(budget, result), do: if(spent?(budget), do: {:error, :timeout}, else: result)
 
   if @test_seams do
+    @doc false
+    # Test builds only: the bounded-call envelope with an absolute deadline
+    # (monotonic milliseconds), for its regression tests.
+    def within_deadline_for_test(deadline, call), do: within_deadline(%{deadline: deadline}, call)
+
     defp barrier(opts) do
       case Keyword.get(opts, :test_barrier) do
         owner when is_pid(owner) ->
