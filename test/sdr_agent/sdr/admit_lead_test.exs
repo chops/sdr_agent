@@ -1113,6 +1113,22 @@ defmodule SdrAgent.SDR.AdmitLeadTest do
       assert changes(before) == @nothing
     end
 
+    # Codex fb2474e (G4-1 continued): an email host over 253 bytes (after
+    # normalization) cannot be a domain key, so it is the step-3
+    # `{:invalid, [:email]}`, whatever the later guard would say.
+    test "G4-1 an email host of 254 bytes is {:invalid, [:email]}; nothing written", ctx do
+      ctx = ready!(ctx, :manual)
+      full = String.duplicate("a", 63)
+      host = Enum.join([full, full, full, String.duplicate("b", 57), "test"], ".")
+      assert byte_size(host) == 254
+      input = input(ctx, :manual, email: "pat@" <> host)
+      before = snapshot()
+      result = outcome_of(fn -> admit(input, ctx.admin) end)
+      assert result == {:error, {:invalid, [:email]}}, "C3-02: got #{short(result)}"
+      assert admissions_for(input.source_ref) == 0
+      assert changes(before) == @nothing
+    end
+
     test "G4-2 a raw 16-byte campaign_id is {:invalid, [:campaign_id]}; nothing written", ctx do
       ctx = ready!(ctx, :manual)
       before = snapshot()

@@ -377,6 +377,33 @@ defmodule SdrAgent.SDR.AdmissionInputTest do
       end
     end
 
+    # Codex fb2474e (G4-1 continued): the email's host is also a domain key
+    # input (`{:domain, host}`), which the identity keys represent only up to
+    # 253 bytes. The length is measured on the host after this step's
+    # normalization (trimmed, lowercased), before any key stripping; labels
+    # stay within 63 bytes and the host ends in `.test`.
+    test "T-G1 (G4-1) an email host over 253 bytes after normalization is refused :email" do
+      present!(@input, :normalize, 2)
+      host = long_host(254)
+      assert byte_size(host) == 254
+      input = put_in(@manual_full_input, [:person, :email], "  JO@" <> String.upcase(host) <> " ")
+
+      assert call(@input, :normalize, [input, @tenant_id]) == {:error, {:invalid, [:email]}},
+             "C3-02: a 254-byte email host must be refused at step 3"
+    end
+
+    test "T-G1 (G4-1) (control) an email host of exactly 253 bytes is accepted" do
+      present!(@input, :normalize, 2)
+      host = long_host(253)
+      assert byte_size(host) == 253
+      input = put_in(@manual_full_input, [:person, :email], "  JO@" <> String.upcase(host) <> " ")
+
+      assert {:ok, %{"person" => %{"email" => email}}} =
+               call(@input, :normalize, [input, @tenant_id])
+
+      assert email == "jo@" <> host
+    end
+
     test "T-G1 (G4-1) (control) valid emails, including www. hosts, are accepted" do
       present!(@input, :normalize, 2)
 
@@ -585,4 +612,11 @@ defmodule SdrAgent.SDR.AdmissionInputTest do
   end
 
   defp short(term), do: inspect(term, limit: 8, printable_limit: 200)
+
+  # A lowercase `.test` host of exactly `bytes` bytes, labels of at most 63.
+  defp long_host(bytes) do
+    full = String.duplicate("a", 63)
+    last = bytes - (3 * 64 + 5)
+    Enum.join([full, full, full, String.duplicate("b", last), "test"], ".")
+  end
 end
