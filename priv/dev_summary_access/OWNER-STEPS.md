@@ -7,8 +7,12 @@ reports it (step 6). After that, agents may use only the dedicated role's
 reviewed aggregate functions; every other agent access to the dev database
 or app stays forbidden (D-173, D-179).
 
-**Every command goes through `owner-run.sh`.** It fixes the execution
-context, so nothing is taken from your shell:
+**Every command goes through `owner-run.sh`, started by one clean launch**
+(step 0.2, the `owner_run` function). The launch clears the environment
+before any shell starts, so no `PATH`, `BASH_ENV`, `ENV`, exported shell
+function or shell-option variable from your shell reaches bash. The script
+is not executable, and it refuses any other way of starting it. Inside, it
+fixes the rest of the execution context:
 
 - the pinned PostgreSQL 18.6 binaries, each checked;
 - no inherited `PG*`, `PSQL*` or `GIT_*` variable reaches any child,
@@ -37,15 +41,20 @@ cluster. No devenv shell is needed.
    git -C ~/src/SDR_agent fetch origin
    git -C ~/src/SDR_agent worktree add --detach ~/src/SDR_agent-d173 <REVIEWED-SHA>
    ```
-2. Set four names for the commands below. Each value is a single word with
-   no spaces, so they work in zsh and bash:
+2. Set three names and the launch function. Each value is a single word
+   with no spaces, so they work in zsh and bash. `R` must be absolute:
 
    ```sh
    C=<REVIEWED-SHA>
-   R=~/src/SDR_agent-d173/priv/dev_summary_access/owner-run.sh
+   R=/Users/charles/src/SDR_agent-d173/priv/dev_summary_access/owner-run.sh
    D=/Users/charles/src/SDR_agent/.devenv/state/postgres
+   owner_run() { /usr/bin/env -i PATH=/usr/bin:/bin HOME=/var/empty /bin/bash --noprofile --norc "$R" "$@"; }
    mkdir -m 700 ~/sdr-agent-owner-backups   # once; if it exists, it must be mode 700
    ```
+
+   `owner_run` is the only launch. Every command below uses it, rechecks
+   and rollback included. Never run `$R` directly, or with another `bash`
+   or `env`.
 
    `D` is the dev cluster's data directory. The repository's devenv
    configuration sets `PGDATA` to `<checkout>/.devenv/state/postgres`.
@@ -56,7 +65,7 @@ cluster. No devenv shell is needed.
 3. Preflight:
 
    ```sh
-   $R preflight --commit $C --port 5520 --pgdata $D
+   owner_run preflight --commit $C --port 5520 --pgdata $D
    ```
 
    It confirms the commit, the 18.6 binaries, the 18.6 server, and that
@@ -66,7 +75,7 @@ cluster. No devenv shell is needed.
 ## 1. Backup and verify point
 
 ```sh
-$R backup --commit $C --port 5520 --pgdata $D --backup-parent ~/sdr-agent-owner-backups
+owner_run backup --commit $C --port 5520 --pgdata $D --backup-parent ~/sdr-agent-owner-backups
 ```
 
 - The command creates a new private directory, mode 700 (never reused).
@@ -91,7 +100,7 @@ The backup holds real data. It never goes in the repo, chat or a log.
 ## 2. Install
 
 ```sh
-$R install --commit $C --port 5520 --backup $B
+owner_run install --commit $C --port 5520 --backup $B
 ```
 
 The output includes `END-OF-SUMMARY-INSTALL`. It runs in one transaction,
@@ -102,7 +111,7 @@ so a failure changes nothing.
 a. Inventory (read-only):
 
 ```sh
-$R revoke-inventory --commit $C --port 5520
+owner_run revoke-inventory --commit $C --port 5520
 ```
 
 The `before` row must read `t | 17 | 17 | 17`. The `effect` rows must match
@@ -120,13 +129,13 @@ did not cover.
 b. Apply (one transaction; a `REFUSED` line means nothing was changed):
 
 ```sh
-$R revoke-apply --commit $C --port 5520 --backup $B
+owner_run revoke-apply --commit $C --port 5520 --backup $B
 ```
 
 ## 4. pg_hba rules, applied and effectively loaded (D-173 choice 3)
 
 ```sh
-$R hba-apply --commit $C --port 5520 --pgdata $D --backup $B
+owner_run hba-apply --commit $C --port 5520 --pgdata $D --backup $B
 ```
 
 It refuses, changing nothing, unless `pg_hba.conf` is byte for byte the
@@ -146,9 +155,16 @@ backup's copy and is a regular file you own. Then:
    after that modification. A `t` from `pg_reload_conf()` only means the
    signal was sent.
 
-It must print `HBA-APPLIED-AND-LOADED`. If a later step says the reload
-state is uncertain (acceptance check 14), run
-`$R hba-reload --commit $C --port 5520 --pgdata $D`.
+It must print `HBA-APPLIED-AND-LOADED`. A refusal names its stage. Its
+reason starts `before any change` when the live file is untouched. It says
+`the backup copy was put back` after a successful revert. It starts
+`PUT-BACK FAILED`, or says `the NEW pg_hba.conf is in place`, when the new
+file is on disk without a confirmed reload. In those last two cases, stop
+and report the line; do not retry or repair it without review.
+
+If a later step says the reload state is uncertain (acceptance check 14),
+run
+`owner_run hba-reload --commit $C --port 5520 --pgdata $D`.
 
 The allow line keeps `trust`. That is the owner-accepted procedural residual
 (D-173 choice 4). These rules confine where the login can connect. They are
@@ -158,7 +174,7 @@ role.
 ## 5. Acceptance (must pass before any agent connects)
 
 ```sh
-$R accept --commit $C --port 5520
+owner_run accept --commit $C --port 5520
 ```
 
 The output must have 20 lines ending in `|ok`, and the last two lines must
@@ -201,7 +217,7 @@ version and protocol.
 
 ## 7. Afterwards
 
-Re-run `$R accept --commit $C --port 5520`, not `attest.sql` alone, and
+Re-run `owner_run accept --commit $C --port 5520`, not `attest.sql` alone, and
 report its output, in any of these cases:
 
 - after any change touching these roles, the `summary` schema or its
@@ -218,35 +234,36 @@ On `ACCEPTANCE STOP`, agents stop calling.
 2. End any login sessions:
 
    ```sh
-   $R end-login-sessions --commit $C --port 5520
+   owner_run end-login-sessions --commit $C --port 5520
    ```
 3. Uninstall. It refuses, changing nothing, if anything unreviewed depends
    on either role. Its output includes `END-OF-SUMMARY-UNINSTALL`.
 
    ```sh
-   $R uninstall --commit $C --port 5520
+   owner_run uninstall --commit $C --port 5520
    ```
 4. Restore PUBLIC's TEMP and large-object defaults. It refuses while either
    summary role exists.
 
    ```sh
-   $R revoke-restore --commit $C --port 5520
+   owner_run revoke-restore --commit $C --port 5520
    ```
 5. Restore `pg_hba.conf` from the backup copy:
 
    ```sh
-   $R hba-restore --commit $C --port 5520 --pgdata $D --backup $B
+   owner_run hba-restore --commit $C --port 5520 --pgdata $D --backup $B
    ```
 
-   It refuses, changing nothing, unless the live file is exactly the
-   applied content. In that case it was edited since step 4: delete only the
-   seven lines by hand, then run `$R hba-reload`. Otherwise it puts the copy
-   back with the same staged atomic write. It checks that no rule names the
+   If the live file is not exactly the applied content, it refuses and
+   changes nothing. That means the file was edited after step 4, and it
+   needs reviewed manual handling: delete only the seven lines by hand, then
+   run `owner_run hba-reload --commit $C --port 5520 --pgdata $D`. If the live file is exactly the applied
+   content, it puts the copy back with the same staged atomic write. It checks that no rule names the
    login, then reloads and waits until the reload is effective. It must
    print `HBA-RESTORED-AND-LOADED`.
 6. Report each step's last line.
 
-After a rollback, `$R accept` prints `ACCEPTANCE STOP`, as expected. The
+After a rollback, `owner_run accept` prints `ACCEPTANCE STOP`, as expected. The
 step 1 backup is a last-resort recovery point, not part of rollback.
 Restoring it discards every change made since step 1, so only the owner
 decides that.
