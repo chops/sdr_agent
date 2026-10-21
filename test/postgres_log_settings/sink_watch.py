@@ -429,9 +429,16 @@ def procargs(pid, birth_us, reader=None):
     return parse_procargs(data, n, cap)
 
 
-def proc_cwd(pid):
-    rc, out, err = run(["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
-                       env=TOOL_ENV)
+def proc_cwd(pid, timeout=60):
+    """`timeout` is capped by the caller's remaining shared bound (R2); a late or timed-out
+    read is HOLD, never a cwd."""
+    if timeout <= 0:
+        raise Hold("lsof cwd pid %d: no time left in the bound" % pid)
+    try:
+        rc, out, err = run(["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(pid), "-d", "cwd",
+                            "-Fn"], env=TOOL_ENV, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Hold("lsof cwd pid %d timed out" % pid)
     if rc not in (0, 1) or err != "":
         raise Hold("lsof cwd pid %d rc=%d stderr %d bytes" % (pid, rc, len(err)))
     for line in out.splitlines():
@@ -533,10 +540,16 @@ def open_handles_under(path):
         path, r["why"], r["rc"], r["stdout_bytes"], r["stderr_bytes"]))
 
 
-def writable_fds(pid):
-    """Writable regular files open by `pid` (supplementary tripwire only, r3 4.2)."""
-    rc, out, err = run(["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(pid), "-F", "ftan"],
-                       env=TOOL_ENV)
+def writable_fds(pid, timeout=60):
+    """Writable regular files open by `pid` (supplementary tripwire only, r3 4.2). The wait
+    is capped by the caller's remaining bound (R2); no time or a timeout is None (no fact)."""
+    if timeout <= 0:
+        return None
+    try:
+        rc, out, err = run(["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(pid), "-F", "ftan"],
+                           env=TOOL_ENV, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
     if rc not in (0, 1):
         return None
     files, cur = [], {}
@@ -1219,7 +1232,8 @@ SNAPSHOT_RESOLVE_S = 2.0        # per unresolved obligation, never reset by a ne
 ITER_SLICE_S = 0.25
 SETTLE_S = 1.0                  # one shared budget per refresh call (R2)
 GEN_MAX = (1 << 63) - 1
-UNRESOLVED_GEN = ("provisional", "live", "unobserved", "unbound-gone")
+UNRESOLVED_GEN = ("provisional", "live", "unobserved", "unbound-gone", "unbound-deadline")
+INF = float("inf")
 POSTMASTER_ROLES = ("postmaster-final", "postmaster-init", "postmaster-identified")
 NONFORKING_ROLES = ("pg-version-probe", "pg-locale")
 # PostgreSQL 18.6 titles on Darwin (ps_status.c:310 PROGRAM_NAME_PREFIX "postgres: ",
@@ -1486,6 +1500,19 @@ class Watch(object):
         x["state"] = "live"
         return True
 
+    def bind(self, g, b_pre, deadline):
+        """Seal token g within the shared bound (R2): the post-registration identity read is
+        not started after the deadline, and one that returns late is not used. Either way
+        the token stays UNBOUND (its events are never attributed; its own NOTE_EXIT retires
+        it) and the missed admission is a violation."""
+        pid = self.gens[g]["pid"]
+        b_post = bsdinfo(pid) if now() < deadline else None
+        if now() >= deadline:
+            self.gens[g]["state"] = "unbound-deadline"
+            self.violation("registration-deadline", pid=pid, gen=g)
+            return False
+        return self.seal(g, b_pre, b_post)
+
     def new_entry(self, g, cur, path, parent, lineage, proof):
         pe = self.entries.get(parent) if parent is not None else None
         e = {"pid": cur["pid"], "birth_us": cur["birth_us"], "gen": g,
@@ -1511,17 +1538,26 @@ class Watch(object):
                 return d
         return None
 
-    def admit(self, pid, parent, path):
-        """Admit `pid` as a lineage child of `parent` (an owned, live entry) - r3 2.2."""
+    def admit(self, pid, parent, path, deadline=INF):
+        """Admit `pid` as a lineage child of `parent` (an owned, live entry) - r3 2.2. The
+        shared bound is checked before and after every stage (R2): before registration an
+        expired bound just stops (the child stays unadmitted for a later census); after it,
+        `bind` leaves the token unbound with a violation."""
         pe = self.entries.get(parent)
         if pe is None or pe.get("exit") is not None:
             self.gap("parent-not-live", pid, parent)
             return None
+        if now() >= deadline:
+            return None
         pcur = bsdinfo(parent)
+        if now() >= deadline:
+            return None
         if pcur is None or pcur["birth_us"] != pe["birth_us"]:
             self.gap("parent-identity-changed", pid, parent)
             return None
         b_pre = bsdinfo(pid)
+        if now() >= deadline:
+            return None
         if b_pre is None:
             self.gap("child-gone-before-register", pid, parent)
             return None
@@ -1535,8 +1571,9 @@ class Watch(object):
         if g is None:
             self.gap("child-gone-before-register", pid, parent)
             return None
-        if not self.seal(g, b_pre, bsdinfo(pid)):
-            self.gap("child-gone-after-register", pid, parent)
+        if not self.bind(g, b_pre, deadline):
+            if self.gens[g]["state"] == "unbound-gone":
+                self.gap("child-gone-after-register", pid, parent)
             return None
         pcur2 = bsdinfo(parent)
         if pcur2 is None or pcur2["birth_us"] != pe["birth_us"]:
@@ -1591,8 +1628,11 @@ class Watch(object):
             if now() >= deadline:
                 return None
             n = self.fetch(FENCE_BATCH, 0)
+            t = now()
+            if t >= deadline:
+                return None         # the fetch itself returned late: no empty-fence claim
             if n == 0:
-                return now()
+                return t
             fetched += n
             if fetched >= cap:
                 return None
@@ -1607,7 +1647,7 @@ class Watch(object):
     def process_pending(self, deadline, max_events=256):
         handled = 0
         while self.pending and handled < max_events and now() < deadline:
-            self.handle(self.pending.popleft())
+            self.handle(self.pending.popleft(), deadline)
             handled += 1
         return handled
 
@@ -1622,14 +1662,14 @@ class Watch(object):
             r["kind"] = "exec"
 
     # -- event handling (R1b)
-    def handle(self, ev):
+    def handle(self, ev, deadline=INF):
         x = self.attributed(ev)
         if x is None:
             self.violation("event-unattributable", ident=ev.ident, udata=ev.udata,
                            fflags=ev.fflags)
             return
         g, st = ev.udata, x["state"]
-        if st == "unbound-gone":
+        if st in ("unbound-gone", "unbound-deadline"):
             if ev.fflags & NOTE_EXIT:
                 x["state"] = "retired"
             return
@@ -1656,7 +1696,7 @@ class Watch(object):
             if e["role"] in NONFORKING_ROLES:
                 self.violation("fork-from-nonforking-role", pid=pid, role=e["role"])
             if not ev.fflags & NOTE_EXIT:
-                self.scan_children(pid, "note-fork")
+                self.scan_children(pid, "note-fork", deadline)
         if ev.fflags & NOTE_EXEC:
             e["execs"] += 1
             e.setdefault("prior_images", []).append({"image": e["image"], "role": e["role"]})
@@ -1702,13 +1742,25 @@ class Watch(object):
         if self.relevant(g, self.pending):
             return {"result": "DEFERRED"}
         mark = len(self.pending)
+        late = {"result": "UNKNOWN", "why": "deadline"}
         b0 = bsdinfo(pid)
         if b0 is None or b0["birth_us"] != B:
             return {"result": "GONE"}
+        # R2: no stage starts after the bound, and a stage that returns late voids the read
+        if now() >= deadline:
+            return late
         p1 = pidpath(pid)
+        if now() >= deadline:
+            return late
         a = procargs(pid, B)
+        if now() >= deadline:
+            return late
         p2 = pidpath(pid)
+        if now() >= deadline:
+            return late
         b1 = bsdinfo(pid)
+        if now() >= deadline:
+            return late
         post = self.fence(deadline)
         if post is None:
             return {"result": "UNKNOWN"}
@@ -1793,6 +1845,7 @@ class Watch(object):
     def record_argv(self, e, s):
         e["exec_path"] = s["exec_path"]
         e["argv"] = s["argv"]
+        e["argv_status"] = s.get("argv_status")
         e["argv_meta"] = s["meta"]
         e["snapshot_cutoff"] = s["cutoff"]
 
@@ -1853,15 +1906,34 @@ class Watch(object):
 
     # -- classification and image checks (vectors only; unknown grants nothing, B4)
     def classify(self, e):
+        """Image observation and operational permission are separate (R1, B4): a role that
+        carries authority (signal, fork coverage, form parent, postmaster identity) needs a
+        closed, representable argv vector. A missing, UNSUPPORTED or UNREPRESENTABLE vector
+        gets "unknown-argv" (no authority) and a violation. Exceptions, both fail-closed
+        already: /bin/sh (sh_allowed refuses an absent vector) and the reviewed PG title rule
+        for postmaster children."""
         img = e.get("image")
         if not img:
             return "unknown-image"
         real = os.path.realpath(img)
         pe = self.parent_entry(e)
         prole = pe["role"] if pe else None
-        argv = e.get("argv")
         if real in SYSTEM_SH:
             return "pg-sh"
+        if img == PG_BIN + "/postgres" and not e.get("identified_role") and \
+                prole in POSTMASTER_ROLES:
+            return self.title_role(e)
+        role = self.image_role(e, img, prole)
+        if role != "other" and (e.get("argv") is None or
+                                e.get("argv_status", "OK") != "OK"):
+            self.violation("argv-unknown-operational", pid=e["pid"], image_role=role,
+                           argv_status=e.get("argv_status"))
+            return "unknown-argv"
+        return role
+
+    def image_role(self, e, img, prole):
+        """The role an image would have; descriptive only until classify's argv gate."""
+        argv = e.get("argv")
         if self.launcher is not None and e["pid"] == self.launcher.pid:
             return "launcher"
         if img == PC_BIN:
@@ -1871,8 +1943,6 @@ class Watch(object):
         if img == PG_BIN + "/postgres":
             if e.get("identified_role"):
                 return e["identified_role"]
-            if prole in POSTMASTER_ROLES:
-                return self.title_role(e)
             if prole in ("wrapper", "start-postgres") or \
                     any(p.get("role") == "start-postgres" for p in e.get("prior_images", [])):
                 return "postmaster-final"
@@ -1949,9 +2019,11 @@ class Watch(object):
         if not ok:
             self.violation("exe-not-allowlisted", pid=e["pid"], image=e["image"])
 
-    def scan_children(self, pid, path):
+    def scan_children(self, pid, path, deadline=INF):
+        """A child census under the shared bound (R2): checked before the census and
+        between children; children not reached stay unadmitted for a later census."""
         e = self.entries.get(pid)
-        if e is None or e["exit"] is not None:
+        if e is None or e["exit"] is not None or now() >= deadline:
             return
         try:
             kids = child_pids(pid)
@@ -1962,11 +2034,16 @@ class Watch(object):
         if path == "note-fork" and not new:
             self.gap("fork-note-no-new-child", None, pid)
         for k in new:
-            self.admit(k, pid, path)
+            if now() >= deadline:
+                return
+            self.admit(k, pid, path, deadline)
 
-    def identify_postmaster(self):
+    def identify_postmaster(self, deadline=INF):
         """PGDATA identity for postmasters lineage cannot hold (reparented init server).
-        Identified, not lineage-owned: never signalled directly (r3 2.3)."""
+        Identified, not lineage-owned: never signalled directly (r3 2.3). Every stage runs
+        under the shared bound (R2); lsof waits are capped by what remains."""
+        if now() >= deadline:
+            return
         pidfile = self.m["pgdata"] + "/postmaster.pid"
         try:
             with open(pidfile, "r") as f:
@@ -1979,12 +2056,13 @@ class Watch(object):
         if pid in self.entries or lines[1] != self.m["pgdata"]:
             return
         b_pre = bsdinfo(pid)
-        if b_pre is None or b_pre["uid"] != me():
+        if b_pre is None or b_pre["uid"] != me() or now() >= deadline:
             return
-        if proc_cwd(pid) != os.path.realpath(self.m["pgdata"]):
+        if proc_cwd(pid, timeout=min(60.0, deadline - now())) != \
+                os.path.realpath(self.m["pgdata"]) or now() >= deadline:
             return
         g = self.register(pid)
-        if g is None or not self.seal(g, b_pre, bsdinfo(pid)):
+        if g is None or not self.bind(g, b_pre, deadline):
             return
         e = self.new_entry(g, b_pre, "pgdata-identity", None, False, "pgdata-identity")
         e["identified_role"] = "postmaster-init" if not os.path.exists(
@@ -1995,8 +2073,12 @@ class Watch(object):
         """R2: exits with no kqueue event are judged only after ONE shared settle budget for
         all candidates (capped by `enclosing`), relooking candidates up by generation after
         every bounded drain; titles of postmaster children are re-snapshotted on request."""
+        deadline = min(now() + SETTLE_S, enclosing if enclosing is not None else INF,
+                       self.enclosing)
         cands = []
         for pid, e in list(self.entries.items()):
+            if now() >= deadline:
+                return              # census incomplete: nothing is judged in this call
             cur = bsdinfo(pid)
             if cur is None or cur["birth_us"] != e["birth_us"]:
                 cands.append(e["gen"])
@@ -2008,8 +2090,6 @@ class Watch(object):
                                                            self.enclosing)}
         if not cands:
             return
-        deadline = min(now() + SETTLE_S, enclosing if enclosing is not None else float("inf"),
-                       self.enclosing)
         while True:
             cands = [g for g in cands if self.gens[g]["state"] == "live"]
             if not cands or now() >= deadline:
@@ -2031,15 +2111,18 @@ class Watch(object):
                 self.dead.append(e)
             x["state"] = "unobserved"
 
-    def tripwire(self):
+    def tripwire(self, deadline=INF):
         """Supplementary only (r3 4.2): a writable regular file outside the owned roots,
-        held by a long-lived owned process, is a violation. A miss proves nothing."""
+        held by a long-lived owned process, is a violation. A miss proves nothing. Bounded
+        by the shared deadline between entries and in each lsof wait (R2)."""
         allowed = (self.m["root"] + "/", self.m["runtime_canonical"] + "/",
                    self.m["runtime"] + "/", self.m["evidence"] + "/", "/dev/")
         for e in list(self.entries.values()):
+            if now() >= deadline:
+                return
             if e["role"] not in TRIPWIRE_ROLES:
                 continue
-            paths = writable_fds(e["pid"])
+            paths = writable_fds(e["pid"], timeout=min(60.0, deadline - now()))
             if paths is None:
                 continue
             for path in paths:
@@ -2073,7 +2156,15 @@ class Watch(object):
             if self.pending:
                 raise Hold("events still pending at the deadline")
             self.process_requests(deadline)
-            if not self.pending:
+            self.expire_requests()
+            if self.pending:
+                continue
+            # R2: success needs every required (admission/exec) observation resolved
+            # within this bound; an expired or unresolved one refuses the effect
+            unresolved = sorted(g for g, r in self.requests.items() if r["kind"] != "title")
+            if now() >= deadline:
+                raise Hold("quiesce bound passed (unresolved image obligations: %r)" % unresolved)
+            if not unresolved:
                 return
 
     # -- signalling (r3 2.3, r4 3.3; repair H2, M2/Q2)
@@ -2279,13 +2370,14 @@ def supervise(m, ctl, state_path, launcher_path, epoch, seam_exit_before_registe
                 w.step(0.2, min(now() + ITER_SLICE_S, w.enclosing))
                 t = now()
                 if t - last_scan > 0.2:
+                    sl = min(now() + ITER_SLICE_S, w.enclosing)
                     for pid in list(w.entries):
-                        w.scan_children(pid, "periodic")
-                    w.identify_postmaster()
+                        w.scan_children(pid, "periodic", sl)
+                    w.identify_postmaster(sl)
                     w.refresh(enclosing=w.enclosing)
                     last_scan = t
                 if t - last_trip > TRIPWIRE_PERIOD:
-                    w.tripwire()
+                    w.tripwire(min(now() + ITER_SLICE_S, w.enclosing))
                     last_trip = t
             except Hold as h:
                 w.violation("HOLD", detail=str(h))
