@@ -1522,6 +1522,18 @@ def main(argv):
             return 0 if out["pass"] else 4
         elif cmd == "inject":
             W.jdump(inject(a["kind"], a["path"], a.get("pid")))
+        elif cmd == "state-live-role":
+            st = W.jload(a["state"])
+            W.jdump({"live": any(e["role"] == a["role"] and e["exit"] is None
+                                 for e in st["live"])})
+        elif cmd == "incomplete-class":
+            cls = W.jload(a["file"])
+            if cls.get("complete") is not False:
+                obs = "COMPLETE"
+            else:
+                hits = [x for x in a["subs"].split(",") if any(x in r for r in cls["reasons"])]
+                obs = "INCOMPLETE:" + hits[0] if hits else "INCOMPLETE-OTHER"
+            W.jdump({"class": obs})
         elif cmd == "state-has-pid":
             st = W.jload(a["state"])
             pid = int(a["pid"])
