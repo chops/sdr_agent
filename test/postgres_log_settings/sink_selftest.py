@@ -67,9 +67,10 @@ def _proof(ids, **fields):
 
 _proof(["T9a", "T9b", "T10", "T11", "T12", "T15d", "T16", "T17a", "T17b", "T18a", "T18b",
         "T18c", "T18d", "T18d-vanish", "T18d-rebind", "T20a", "T20b", "T20c", "T20d", "T20e",
-        "T20f", "T21a", "T21b", "T21c", "T21d", "T21e", "T22a", "T22b", "T22d", "T24", "T27"],
+        "T20f", "T20g", "T21a", "T21b", "T21c", "T21d", "T21e", "T22a", "T22b", "T22d", "T24", "T27"],
        fixtures=REQ)
-_proof(["T17-baseline", "T22c", "T23a", "T23b", "T23c", "T23d", "T23e", "T26d"], fixtures=NA)
+_proof(["T17-baseline", "T22c", "T23a", "T23b", "T23c", "T23d", "T23e", "T26d", "T28a", "T28b",
+        "T28c"], fixtures=NA)
 _proof(["T19a"], launcher_reap=REQ, fixtures=REQ)
 _proof(["T19b", "T19c", "T19d", "T19f", "T19g", "T19i", "T26a", "T26c"], outer_reap=REQ,
        fixtures=REQ)
@@ -446,6 +447,74 @@ def verdict(d, test_id, expected, observed, teardown, runroot, retained_manifest
     return rec
 
 
+def finish(labels, d, test_id, expected, observed, teardown, runroot, retained_manifests=(),
+           notes=None, contract=None):
+    """R2: the functional outcome and every proof available now are decided BEFORE any
+    disposal. Only an expected outcome with a complete proof authorizes disposing `labels`
+    (validated by dispose); otherwise every registered object is RETAINED for disposition and
+    the non-passing receipt (FAIL or REAL-UNCERTAINTY) stops the suite."""
+    pre = proof_problems(test_id, teardown, contract)
+    if observed not in expected or pre:
+        rec = {"id": test_id, "expected": list(expected), "observed": observed,
+               "verdict": "REAL-UNCERTAINTY" if pre else "FAIL", "teardown": teardown,
+               "problems": ["retained for disposition, not disposed: %r" % list(labels)],
+               "bad_teardown": pre, "retained": list(labels), "notes": notes or {}}
+        W.jdump(rec, "%s/%s.json" % (d, test_id))
+        return rec
+    for label in labels:
+        dispose(d, test_id, label)
+    return verdict(d, test_id, expected, observed, teardown, runroot, retained_manifests,
+                   notes, contract)
+
+
+def precheck(d, test_id, expected, observed, partial):
+    """R2 for shell tests: before any disposal or cleanup, the observed class must be
+    expected and every proof field known so far must be acceptable. Otherwise a retaining
+    non-passing receipt is written and the caller stops (no disposal, no cleanup)."""
+    c = REQUIRED_PROOF.get(test_id)
+    bad = [] if c is not None else ["no proof contract for %s" % test_id]
+    if c is not None:
+        sub = {k: v for k, v in c.items() if k in partial}
+        bad = ["unknown proof field %s" % k for k in sorted(set(partial) - set(c))] + \
+            proof_problems(test_id, partial, sub)
+    if observed in expected and not bad:
+        return True
+    W.jdump({"id": test_id, "expected": list(expected), "observed": observed,
+             "verdict": "REAL-UNCERTAINTY" if bad else "FAIL", "teardown": partial,
+             "problems": ["retained for disposition before disposal/cleanup"],
+             "bad_teardown": bad, "notes": {}}, "%s/%s.json" % (d, test_id))
+    return False
+
+
+T5_CASES = {"bad-pgdata": {"status": 2, "halt": "identity mismatch: data_directory,config_file"},
+            "bad-port": {"status": 2, "halt": "target socket mismatch"},
+            "db-exists": {"status": 0, "exists": False}}
+
+
+def client_gate(path, actual, case):
+    """R1: one T5 client's ACTUAL exit status and its exact receipt, checked before the next
+    client or effect. Only the specified status-2/halt pairs and the db-exists positive pass;
+    a missing, malformed or inconsistent receipt, or any other status, fails the gate."""
+    want = T5_CASES.get(case)
+    if want is None:
+        return "unknown case"
+    if not os.path.exists(path):
+        return "no receipt"
+    try:
+        rec = W.jload(path)
+    except (ValueError, OSError):
+        return "malformed receipt"
+    if not isinstance(rec, dict) or rec.get("status") != int(actual):
+        return "receipt status disagrees with the actual exit status %s" % actual
+    if rec.get("status") != want["status"]:
+        return "status %s, not %s" % (rec.get("status"), want["status"])
+    if "halt" in want and rec.get("halt") != want["halt"]:
+        return "unexpected halt reason"
+    if "exists" in want and (rec.get("exists") is not want["exists"] or "halt" in rec):
+        return "unexpected db-exists result"
+    return "ok"
+
+
 def receipt_ok(d, test_id):
     p = "%s/%s.json" % (d, test_id)
     if not os.path.exists(p):
@@ -501,10 +570,6 @@ def observed_class(stderr_text):
     return "NONE"
 
 
-T5_PGDATA_HALT = "identity mismatch: data_directory,config_file"
-T5_PORT_HALT = "target socket mismatch"
-
-
 def t5_class(f_pgdata, f_port, f_exists):
     """Choice 5 / Q4 exact mapping from the three client receipts."""
     rec = {}
@@ -515,7 +580,7 @@ def t5_class(f_pgdata, f_port, f_exists):
     for name in ("bad-pgdata", "bad-port", "db-exists"):
         if rec[name].get("status") == 3:
             return "HOLD-CLIENT-" + name
-    want = {"bad-pgdata": (2, T5_PGDATA_HALT), "bad-port": (2, T5_PORT_HALT)}
+    want = {k: (v["status"], v["halt"]) for k, v in T5_CASES.items() if "halt" in v}
     for name, (st, halt) in sorted(want.items()):
         if rec[name].get("status") != st or rec[name].get("halt") != halt:
             return "CLIENT-%s-%s" % (name, rec[name].get("status"))
@@ -810,16 +875,16 @@ def t9a(d, scratch, runroot):
         d2.terminate()
         reap(d2, D_REAP)
     if found is None:
-        dispose(d, T, "root")
-        return verdict(d, T, ["REFUSE-SIGNAL"], "INCONCLUSIVE-NO-SAME-SECOND-PAIR",
+        labels = ['root']  # disposed by finish() only after a validated outcome (R2)
+        return finish(labels, d, T, ["REFUSE-SIGNAL"], "INCONCLUSIVE-NO-SAME-SECOND-PAIR",
                        {"fixtures": "ok"}, runroot)
     d2, i1, i2, l1, l2 = found
     notes = {"lstart_equal": True, "us_distinct": i1["birth_us"] != i2["birth_us"]}
     if not notes["us_distinct"]:
         d2.terminate()
         reap(d2, D_REAP)
-        dispose(d, T, "root")
-        return verdict(d, T, ["REFUSE-SIGNAL"], "INCONCLUSIVE-EQUAL-US", {"fixtures": "ok"},
+        labels = ['root']  # disposed by finish() only after a validated outcome (R2)
+        return finish(labels, d, T, ["REFUSE-SIGNAL"], "INCONCLUSIVE-EQUAL-US", {"fixtures": "ok"},
                        runroot, notes=notes)
     old_match = (i1["uid"], i1["comm"], l1) == (i2["uid"], i2["comm"], l2)
     w = bare_watch(root)
@@ -833,11 +898,11 @@ def t9a(d, scratch, runroot):
     alive = W.bsdinfo(d2.pid) is not None and W.bsdinfo(d2.pid)["birth_us"] == i2["birth_us"]
     d2.terminate()
     reap(d2, D_REAP)
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     notes.update({"old_predicate_matches": old_match, "new_rule_refused": refused,
                   "d2_not_signalled": alive, "label": "emulated PID-reuse record"})
     obs = "REFUSE-SIGNAL" if old_match and refused and alive else "FAIL"
-    return verdict(d, T, ["REFUSE-SIGNAL"], obs, {"fixtures": "ok"}, runroot, notes=notes)
+    return finish(labels, d, T, ["REFUSE-SIGNAL"], obs, {"fixtures": "ok"}, runroot, notes=notes)
 
 
 def t9b(d, scratch, runroot):
@@ -875,11 +940,11 @@ def t9b(d, scratch, runroot):
     gone = wait_gone(yi, 15.0)
     if not gone:
         raise RealUncertainty("T9b: Y still alive 15 s later (never signalled)")
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     notes = {"admitted_via_exited_parent": admitted, "signal_refused": refused, "y_alive": alive,
              "stale_admitted": stale_admit, "y_ended_by_itself": gone}
     obs = "REFUSE-ADMISSION" if (not admitted and refused and alive and not stale_admit) else "FAIL"
-    return verdict(d, T, ["REFUSE-ADMISSION"], obs, {"fixtures": "ok"}, runroot, notes=notes)
+    return finish(labels, d, T, ["REFUSE-ADMISSION"], obs, {"fixtures": "ok"}, runroot, notes=notes)
 
 
 # ---------------------------------------------------------------- T10 / T11 / T12
@@ -897,8 +962,8 @@ def t10(d, scratch, runroot):
     except W.Fail as e:
         obs = str(e).split()[0]
     os.chmod(sub, 0o700)
-    dispose(d, T, "root")
-    return verdict(d, T, ["FAIL-CLEANUP"], obs, {"fixtures": "ok"}, runroot)
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
+    return finish(labels, d, T, ["FAIL-CLEANUP"], obs, {"fixtures": "ok"}, runroot)
 
 
 def t11(d, scratch, runroot):
@@ -920,8 +985,8 @@ def t11(d, scratch, runroot):
     W.cleanup(m, root + "/no-claim.json")  # the subject removes the root (symlink unfollowed)
     after = (W.lstat_rec(sentinel)["ino"], sorted(os.listdir(sentinel)))
     obs = inv if before == after and not os.path.lexists(root) else "FAIL"
-    dispose(d, T, "sentinel")
-    return verdict(d, T, ["FAIL-SYMLINK"], obs, {"fixtures": "ok"}, runroot,
+    labels = ['sentinel']  # disposed by finish() only after a validated outcome (R2)
+    return finish(labels, d, T, ["FAIL-SYMLINK"], obs, {"fixtures": "ok"}, runroot,
                    notes={"sentinel_intact": before == after})
 
 
@@ -940,8 +1005,8 @@ def t12(d, scratch, runroot):
     except W.Fail as e:
         obs = str(e).split()[0]
     os.chmod(sink, 0o600)
-    dispose(d, T, "root")
-    return verdict(d, T, ["FAIL-UNREADABLE"], obs, {"fixtures": "ok"}, runroot)
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
+    return finish(labels, d, T, ["FAIL-UNREADABLE"], obs, {"fixtures": "ok"}, runroot)
 
 
 # ---------------------------------------------------------------- T15d buffered producer
@@ -986,8 +1051,8 @@ def t15d(d, scratch, runroot):
         notes[name] = {"status": st, "eligible": eligible, "has_A": "A" in content,
                        "has_B": "B" in content, "proof": "fixture-synthetic"}
         ok &= eligible == want_eligible and ("A" in content) and (("B" in content) == want_b)
-    dispose(d, T, "root")
-    return verdict(d, T, ["INCOMPLETE"], "INCOMPLETE" if ok else "FAIL", {"fixtures": "ok"},
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
+    return finish(labels, d, T, ["INCOMPLETE"], "INCOMPLETE" if ok else "FAIL", {"fixtures": "ok"},
                    runroot, notes=notes)
 
 
@@ -1107,7 +1172,7 @@ def t17(d, scratch, runroot, variant):
     state["events"] = events
     res = classify(state, snaps, lock)
     classes = reason_classes(res["reasons"])
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     notes = {"c1_admitted": c1_admitted, "c2_admitted": c2_admitted, "final_len": len(final),
              "want_len": want_len, "prefix_unchanged": prefix_unchanged, "tail_ok": tail_ok,
              "prefix_violation": bool(v), "fork_notes": len(events), "reason_classes": classes,
@@ -1118,7 +1183,7 @@ def t17(d, scratch, runroot, variant):
             and tail_ok and not v and classes == [FORK_CLASS]
     else:
         ok = c1_admitted and bool(v) and not res["complete"] and FORK_CLASS in classes
-    return verdict(d, T, ["INCOMPLETE"], "INCOMPLETE" if ok else "FAIL", {"fixtures": "ok"},
+    return finish(labels, d, T, ["INCOMPLETE"], "INCOMPLETE" if ok else "FAIL", {"fixtures": "ok"},
                    runroot, notes=notes)
 
 
@@ -1236,16 +1301,15 @@ def t18(d, scratch, runroot, variant):
                           verdict=False)
     res = classify(state, snaps, lock)
     socket_post = "present" if W.socket_rec(sock)["present"] else "unlinked"
-    dispose(d, T, "root")
-    dispose(d, T, "sockdir")
+    labels = ['root', 'sockdir']  # disposed by finish() only after a validated outcome (R2)
     notes = {"eacces_after_lock": eacces, "complete": res["complete"], "reasons": res["reasons"],
              "socket_post": socket_post, "proof": "fixture-synthetic"}
     if variant == "d":
         ok = res["complete"] and eacces == "errno-13" and socket_post == "unlinked"
-        return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+        return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
                        notes=notes)
     ok = (not res["complete"]) and (eacces == "errno-13" or variant.startswith("d-"))
-    return verdict(d, T, ["INCOMPLETE"], "INCOMPLETE" if ok else "FAIL", {"fixtures": "ok"},
+    return finish(labels, d, T, ["INCOMPLETE"], "INCOMPLETE" if ok else "FAIL", {"fixtures": "ok"},
                    runroot, notes=notes)
 
 
@@ -1339,8 +1403,8 @@ def t19a(d, scratch, runroot):
     reaped = (st.get("launcher_reaped") or {}).get("returncode")
     ok = rc == W.EXIT_HOLD and "launcher-unregistered" in kinds and li.get("identity") == "unknown" \
         and li.get("birth_us") is None and reaped == 0
-    dispose(d, T, "root")
-    return verdict(d, T, ["HOLD-LAUNCHER-UNREGISTERED"], "HOLD-LAUNCHER-UNREGISTERED" if ok else
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
+    return finish(labels, d, T, ["HOLD-LAUNCHER-UNREGISTERED"], "HOLD-LAUNCHER-UNREGISTERED" if ok else
                    "FAIL", {"launcher_reap": "ok" if reaped == 0 else "not-reaped",
                             "fixtures": "ok"}, runroot,
                    notes={"rc": rc, "violations": kinds, "launcher_identity": li})
@@ -1358,10 +1422,10 @@ def t19b(d, scratch, runroot):
         frozen = True
     kills = [s for s in w.harness_signals if s["signal"] == int(signal.SIGKILL)]
     rcs = outer_reap(procs)
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     ok = res["ok"] is False and [r["role"] for r in res["remaining"]] == ["launcher"] and frozen \
         and not kills
-    return verdict(d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
+    return finish(labels, d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
                    {"outer_reap": rcs_word(rcs, {"launcher": 0}), "fixtures": "ok"}, runroot,
                    notes={"result": res, "outer_rcs": rcs})
 
@@ -1382,12 +1446,12 @@ def t19c(d, scratch, runroot):
         f.write("%d\n%s\n" % (procs["pm"].pid, pgd))
     res = W.stop_tree(w, fake_manifest(root), stages=STAGES)
     rcs = outer_reap(procs)
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     pgctl = [s for s in res["stages"] if s[0] == "pg_ctl"]
     ok = res["ok"] is False and bool(pgctl) and pgctl[0][1] != 0 and \
         any(r["role"] == "postmaster-final" for r in res["remaining"]) and \
         not [s for s in w.harness_signals if s["signal"] == int(signal.SIGKILL)]
-    return verdict(d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
+    return finish(labels, d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
                    {"outer_reap": rcs_word(rcs, {"launcher": -15, "pm": 0}), "fixtures": "ok"},
                    runroot, notes={"result": res, "outer_rcs": rcs})
 
@@ -1401,11 +1465,11 @@ def t19d(d, scratch, runroot):
                                       ("aux", "pg-aux", "SIGTERM", None)])
     res = W.stop_tree(w, fake_manifest(root), stages=STAGES)
     rcs = outer_reap(procs)
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     killed = sorted(s["role"] for s in w.harness_signals if s["signal"] == int(signal.SIGKILL))
     ok = res["ok"] is False and [r["role"] for r in res["remaining"]] == ["pg-aux"] and \
         killed == ["devenv-tasks", "process-compose"]
-    return verdict(d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
+    return finish(labels, d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
                    {"outer_reap": rcs_word(rcs, {"launcher": -15, "pc": -9, "dt": -9, "aux": 0}),
                     "fixtures": "ok"}, runroot,
                    notes={"result": res, "outer_rcs": rcs, "killed": killed})
@@ -1420,10 +1484,10 @@ def t19f(d, scratch, runroot):
     res = W.stop_tree(w, fake_manifest(root), stages=dict(STAGES, overall=0.5, launcher=1.0))
     sent = [(s["role"], s["signal"]) for s in w.harness_signals]
     rcs = outer_reap(procs)
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     ok = res["ok"] is False and "overall deadline passed before pc-term" in res.get("hold", "") \
         and sent == [("launcher", int(signal.SIGTERM))]
-    return verdict(d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
+    return finish(labels, d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
                    {"outer_reap": rcs_word(rcs, {"launcher": -15, "pc": 0}), "fixtures": "ok"},
                    runroot, notes={"result": res, "sent": sent, "outer_rcs": rcs})
 
@@ -1442,9 +1506,9 @@ def t19g(d, scratch, runroot):
         subject = "HOLD-HANDSHAKE"
     took = W.now() - t0
     rcs = outer_reap({"silent": p})
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     obs = subject if took <= 2.0 else "SUBJECT-OVERRAN"
-    return verdict(d, T, ["HOLD-HANDSHAKE"], obs,
+    return finish(labels, d, T, ["HOLD-HANDSHAKE"], obs,
                    {"outer_reap": rcs_word(rcs, {"silent": 0}), "fixtures": "ok"}, runroot,
                    notes={"took_s": took})
 
@@ -1474,10 +1538,10 @@ def t19i(d, scratch, runroot):
         refused_pgctl = "deadline" in str(h)
     alive = {k: (W.bsdinfo(p.pid) or {}).get("birth_us") == births[k] for k, p in procs.items()}
     rcs = outer_reap(procs)
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     ok = refused_sig and refused_pgctl and alive == {"pc": True, "pm": True} and \
         w.harness_signals == [] and w.helpers == []
-    return verdict(d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
+    return finish(labels, d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
                    {"outer_reap": rcs_word(rcs, {"pc": 0, "pm": 0}), "fixtures": "ok"}, runroot,
                    notes={"refused_sig": refused_sig, "refused_pgctl": refused_pgctl,
                           "alive_after": alive})
@@ -1493,6 +1557,8 @@ T20_CONTENTS = {
           "run"],
     "e": ["selftest", "selftest/X.json", "run"],
     "f": ["selftest", "selftest/fixtures.json", "run", "run/fy", "run/fy/stray"],
+    "g": ["selftest", "selftest/fixtures.json", "selftest/X.json", "selftest/X2.json", "run",
+          "run/ev", "run/ev/evidence"],
 }
 
 
@@ -1555,6 +1621,23 @@ def t20(d, scratch, runroot, variant):
         bad = verdict(pd, "X", ["PASS"], "PASS", {"cleanup": "ok"}, run, contract=c)
         ok = good == "PASS" and bad["verdict"] == "REAL-UNCERTAINTY" and \
             bad["bad_teardown"] == ["missing proof field barrier"]
+    elif variant == "g":
+        # R2: an unexpected functional result retains its declared, registered evidence;
+        # the paired expected result disposes of it. No stray or identity fault involved.
+        c = {"fixtures": REQ}
+        register_path(pd, "X", "ev", run + "/ev", "dir", ["evidence"])
+        with open(run + "/ev/evidence", "w") as f:
+            f.write("e")
+        bad = finish(["ev"], pd, "X", ["PASS"], "FAIL", {"fixtures": "ok"}, run, contract=c)
+        register_path(pd, "X2", "ev2", run + "/ev2", "dir", ["evidence"])
+        with open(run + "/ev2/evidence", "w") as f:
+            f.write("e")
+        good = finish(["ev2"], pd, "X2", ["PASS"], "PASS", {"fixtures": "ok"}, run, contract=c)
+        kept = os.path.exists(run + "/ev/evidence")
+        notes = {"bad": bad["verdict"], "good": good["verdict"], "kept": kept,
+                 "good_gone": not os.path.lexists(run + "/ev2")}
+        ok = bad["verdict"] == "FAIL" and kept and good["verdict"] == "PASS" and \
+            notes["good_gone"]
     else:
         register_path(pd, "X", "fz", run + "/fz", "dir", ["keep"])
         with open(run + "/fz/keep", "w") as f:
@@ -1571,8 +1654,8 @@ def t20(d, scratch, runroot, variant):
         kept = os.path.exists(run + "/fy/stray")
         ok = clean and held and kept
         notes = {"clean_disposed": clean, "stray_held": held, "stray_kept": kept}
-    dispose(d, T, "private")
-    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+    labels = ['private']  # disposed by finish() only after a validated outcome (R2)
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
                    notes=notes)
 
 
@@ -1613,9 +1696,9 @@ def t21(d, scratch, runroot, variant):
             obs = "COUNTED"
         except W.Hold:
             obs = "HOLD"
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     want = "PASS" if variant == "a" else "HOLD"
-    return verdict(d, T, [want], obs, {"fixtures": "ok"}, runroot)
+    return finish(labels, d, T, [want], obs, {"fixtures": "ok"}, runroot)
 
 
 T21E_CASES = {"multi": b"mk mk mk\nmk\nnone\n", "unterminated": b"none\nmk-last",
@@ -1636,8 +1719,8 @@ def t21e(d, scratch, runroot):
         mine = W.grep_count(data, b"mk")
         res[name] = {"grep": g, "in_memory": mine, "grep_rc": rc}
         ok &= g is not None and g == mine
-    dispose(d, T, "root")
-    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
                    notes=res)
 
 
@@ -1666,7 +1749,7 @@ def t22a(d, scratch, runroot):
     dead = next(x for x in w.dead if x["pid"] == c.pid)
     kinds = [v["kind"] for v in w.violations]
     res, h = h_check(w)
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     ok = base["complete"] is True and kinds == ["exec-image-unobserved-before-exit"] and \
         dead["exe"] is None and dead["role"] == "unknown-image" and \
         dead["prior_images"][0]["exe"] == PC_FAKE and h["closure_verified"] is True and \
@@ -1674,7 +1757,7 @@ def t22a(d, scratch, runroot):
         h["api_client_history"] == "unknown" and not res["complete"] and \
         "H: not established" in res["reasons"] and "watcher violations: 1" in res["reasons"] and \
         no_malformed_h(res["reasons"]) and w.signals_frozen
-    return verdict(d, T, ["INCOMPLETE"], "INCOMPLETE" if ok else "FAIL", {"fixtures": "ok"},
+    return finish(labels, d, T, ["INCOMPLETE"], "INCOMPLETE" if ok else "FAIL", {"fixtures": "ok"},
                    runroot, notes={"baseline": base["reasons"], "violations": kinds,
                                    "reasons": res["reasons"]})
 
@@ -1705,12 +1788,12 @@ def t22b(d, scratch, runroot):
     kinds = [v["kind"] for v in w.violations]
     res, h = h_check(w)
     reap(c, D_REAP)
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     ok = base["complete"] is True and held and kinds == ["admission-image-unreadable-live"] and \
         h["closure_verified"] is True and h["admission_unreadable_live"] == 1 and \
         h["verdict"] is False and not res["complete"] and \
         "H: not established" in res["reasons"] and no_malformed_h(res["reasons"])
-    return verdict(d, T, ["HOLD"], "HOLD" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+    return finish(labels, d, T, ["HOLD"], "HOLD" if ok else "FAIL", {"fixtures": "ok"}, runroot,
                    notes={"baseline": base["reasons"], "violations": kinds, "h": h,
                           "reasons": res["reasons"]})
 
@@ -1808,11 +1891,11 @@ def t22d(d, scratch, runroot):
     finally:
         W.pidpath, W.proc_args, W.bsdinfo = real
     cases["exec_other_image"] = len(w.violations) == before
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     positives = ("pgctl_ok", "check_ok", "boot_ok", "single_ok")
     ok = all(cases[k] for k in positives) and not any(v for k, v in cases.items()
                                                       if k not in positives)
-    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
                    notes={"allowed": cases, "proof": "fixture-synthetic"})
 
 
@@ -1896,9 +1979,9 @@ def t24(d, scratch, runroot):
     W.jdump({"inst": "B", "epoch": "E1", "markers": {"S_u": marker}}, mk)
     only_post = W.cross_check([(post, "B")], [mk])
     all_snaps = W.cross_check([(pre, "B"), (post, "B")], [mk])
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     ok = only_post["pass"] is True and all_snaps["pass"] is False
-    return verdict(d, T, ["FAIL-CROSS-CHECK"], "FAIL-CROSS-CHECK" if ok else "FAIL",
+    return finish(labels, d, T, ["FAIL-CROSS-CHECK"], "FAIL-CROSS-CHECK" if ok else "FAIL",
                    {"fixtures": "ok"}, runroot,
                    notes={"post_only_pass": only_post["pass"], "all_pass": all_snaps["pass"]})
 
@@ -1936,10 +2019,10 @@ def t26a(d, scratch, runroot):
     kinds = [v["kind"] for v in w.violations]
     alive = (W.bsdinfo(p.pid) or {}).get("birth_us") == birth
     rcs = outer_reap(procs)
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     ok = refused and kinds == ["exe-not-allowlisted"] and w.signals_frozen and alive and \
         w.harness_signals == []
-    return verdict(d, T, ["HOLD"], "HOLD" if ok else "FAIL",
+    return finish(labels, d, T, ["HOLD"], "HOLD" if ok else "FAIL",
                    {"outer_reap": rcs_word(rcs, {"pc": 0}), "fixtures": "ok"}, runroot,
                    notes={"violations": kinds, "alive_after": alive})
 
@@ -1975,9 +2058,9 @@ def t26b(d, scratch, runroot):
         out["pending"] = "accepting-none" if r["accepting"] is None else "accepting"
     finally:
         W.listener_proof, W.tcp_listeners = real
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     ok = out == {"foreign": "hold", "pending": "accepting-none"}
-    return verdict(d, T, ["HOLD"], "HOLD" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+    return finish(labels, d, T, ["HOLD"], "HOLD" if ok else "FAIL", {"fixtures": "ok"}, runroot,
                    notes=out)
 
 
@@ -1991,10 +2074,10 @@ def t26c(d, scratch, runroot):
     held = W.finalize(w, reap_s=1.0)
     kinds = [v["kind"] for v in w.violations]
     rcs = outer_reap({"helper": hp})
-    dispose(d, T, "root")
+    labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     ok = held is True and kinds == ["helper-not-reaped"] and w.signals_frozen and \
         w.harness_signals == []
-    return verdict(d, T, ["HOLD"], "HOLD" if ok else "FAIL",
+    return finish(labels, d, T, ["HOLD"], "HOLD" if ok else "FAIL",
                    {"outer_reap": rcs_word(rcs, {"helper": 0}), "fixtures": "ok"}, runroot,
                    notes={"violations": kinds})
 
@@ -2005,7 +2088,7 @@ def t27(d, scratch, runroot):
     negatives (absent, wrong type, symlink, foreign lock, symlinked lock, non-canonical)."""
     T = "T27"
     names = []
-    for port in range(25432, 25438):
+    for port in range(25432, 25441):
         names += [".s.PGSQL.%d" % port, ".s.PGSQL.%d.lock" % port]
     intent(d, T, "sockdir", "dir", names + ["lock-target"])
     sdir = tempfile.mkdtemp(prefix="sk27", dir="/private/tmp")
@@ -2033,6 +2116,10 @@ def t27(d, scratch, runroot):
     os.symlink("%s/.s.PGSQL.25432" % sdir, "%s/.s.PGSQL.25435" % sdir)
     bound(25436, str(int(me) + 1) + "\n")
     bound(25437, lock_link=True)
+    bound(25438)
+    os.mkfifo("%s/.s.PGSQL.25438.lock" % sdir, 0o600)      # R3: FIFO lock, no writer
+    bound(25439, "1" * 100 + "\n")                          # R3: oversized first line
+    bound(25440, "pid-%s\n" % me)                           # R3: malformed first line
 
     def check(port, sd=sdir, cd=canon):
         try:
@@ -2043,16 +2130,36 @@ def t27(d, scratch, runroot):
 
     got = {"valid": check(25432), "absent": check(25433), "not_socket": check(25434),
            "symlink": check(25435), "foreign_lock": check(25436), "lock_symlink": check(25437),
+           "oversized": check(25439), "malformed": check(25440),
            "non_canonical": check(25432, cd=canon + "-other")}
+    # The FIFO case runs in a child under its own bounded wait, so a regression that blocks
+    # in open() cannot hang this control: on timeout the write end is opened (no signal),
+    # which unblocks the reader, and the case is recorded as BLOCKED.
+    intent(d, T, "fifo-check", "proc")
+    fc = subprocess.Popen([PY, "-I", os.path.join(HERE, "sink_watch.py"), "target-socket-check",
+                           "--socket-dir", sdir, "--canonical-dir", canon, "--port", "25438",
+                           "--postmaster-pid", me], stdin=subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, close_fds=True)
+    set_identity(d, T, "fifo-check", proc_identity(fc.pid, os.getpid()))
+    try:
+        fc.wait(timeout=5.0)
+        err = fc.stderr.read().decode("utf-8", "replace")
+        got["fifo"] = observed_class(err) + ("/%d" % fc.returncode)
+    except subprocess.TimeoutExpired:
+        wfd = os.open("%s/.s.PGSQL.25438.lock" % sdir, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(wfd)
+        reap(fc, D_REAP)
+        got["fifo"] = "BLOCKED"
     for s in socks:
         s.close()
-    dispose(d, T, "sockdir")
+    labels = ['sockdir']  # disposed by finish() only after a validated outcome (R2)
     want = {"valid": "ok", "absent": "socket absent", "not_socket": "not an owned socket",
             "symlink": "not an owned socket", "foreign_lock": "lock names another process",
-            "lock_symlink": "lock is a symlink",
+            "lock_symlink": "lock is a symlink", "oversized": "lock first line malformed",
+            "malformed": "lock first line malformed", "fifo": "REFUSE-TARGET/2",
             "non_canonical": "socket dir not the canonical runtime dir"}
     ok = got == want
-    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
                    notes=got)
 
 
@@ -2094,6 +2201,7 @@ SYNTHETIC = {
     "T20a": lambda d, s, r: t20(d, s, r, "a"), "T20b": lambda d, s, r: t20(d, s, r, "b"),
     "T20c": lambda d, s, r: t20(d, s, r, "c"), "T20d": lambda d, s, r: t20(d, s, r, "d"),
     "T20e": lambda d, s, r: t20(d, s, r, "e"), "T20f": lambda d, s, r: t20(d, s, r, "f"),
+    "T20g": lambda d, s, r: t20(d, s, r, "g"),
     "T21a": lambda d, s, r: t21(d, s, r, "a"), "T21b": lambda d, s, r: t21(d, s, r, "b"),
     "T21c": lambda d, s, r: t21(d, s, r, "c"), "T21d": lambda d, s, r: t21(d, s, r, "d"),
     "T21e": t21e,
@@ -2131,6 +2239,14 @@ def main(argv):
             return 0 if ok else 3
         elif cmd == "observed-class":
             W.jdump({"class": observed_class(open(a["file"]).read())})
+        elif cmd == "client-gate":
+            res = client_gate(a["file"], a["actual"], a["case"])
+            W.jdump({"case": a["case"], "gate": res})
+            return 0 if res == "ok" else 3
+        elif cmd == "precheck":
+            ok = precheck(a["dir"], a["test"], a["expected"].split(","), a["observed"],
+                          json.loads(a["partial"]))
+            return 0 if ok else 3
         elif cmd == "t5-class":
             W.jdump({"class": t5_class(a["pgdata"], a["port"], a["exists"])})
         elif cmd == "exit-stop-allowed":
