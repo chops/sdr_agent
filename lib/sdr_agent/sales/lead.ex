@@ -21,7 +21,20 @@ defmodule SdrAgent.Sales.Lead do
   produces it yet; C3-03 adds `:refer`). Inside the admission, `:create`
   and `:assign` take no key: they require the admission's pass to hold the
   account's company key (`Changes.LeadCompanyKey`). `source` adds `:csv`,
-  `:hubspot` and `:agent_found` (the admission's kinds).
+  `:hubspot`, `:agent_found` and `:referral` (the admission kinds; no
+  referral is admitted before C3-03).
+
+  Cutover (C3-02 G5): `:create` is allowed only from inside the lead
+  admission (`LeadAdmissionContext`) and only to an active human admin
+  (`SdrAgent.Sales.Checks.ActiveAdmin`), with an admission kind as source
+  and the company key always required held. In the database, the BEFORE
+  INSERT trigger `leads_admission_binding` refuses a new lead that is not
+  bound to its admitted admission of the same tenant, kind and referrer
+  (except a dev/test `fixture` seed; a `crm` lead can no longer be
+  inserted), and the BEFORE UPDATE trigger `leads_identity_immutable`
+  keeps `source`, `admission_id`, `referred_from_lead_id`, `account_id` and
+  `contact_id` unchanged. Existing rows are never rewritten. The index
+  `leads_closed_history_index` serves the admission's closed-history read.
 
   Lifecycle (`transitions/0`):
 
@@ -49,7 +62,8 @@ defmodule SdrAgent.Sales.Lead do
   row re-read under `FOR UPDATE` and appends an AuditEvent (`sales.lead.*`)
   with the previous status, the new status, the reason and the decision id.
 
-  Actors: ADM create; SEED (dev/test only) `:seed`; reads for ADM, REV, AUR,
+  Actors: ADM create (inside the admission only); SEED (dev/test only)
+  `:seed`; reads for ADM, REV, AUR,
   AGT, WHK, AUD.
   """
   use Ash.Resource,
@@ -97,10 +111,12 @@ defmodule SdrAgent.Sales.Lead do
     {:disqualify_by_override, [:qualified], :disqualified},
     {:requalify_by_override, [:disqualified], :qualified}
   ]
+  @admission_kinds [:manual, :csv, :hubspot, :agent_found, :referral]
   @event [category: :domain_change, previous: [:status], links: [decision_id: :last_decision_id]]
-  # C3-02 G4: inside the lead admission only, `:create` and `:assign`
-  # require the admission's pass to hold the account's company key; no key
-  # outside it (until the cutover, G5).
+  # C3-02 G4: inside the lead admission only, `:assign` requires the
+  # admission's pass to hold the account's company key; no key outside it
+  # (a legacy lead is still assigned standalone). `:create` always requires
+  # it held (G5).
   @company_key {SdrAgent.Audit.Changes.IdentityKeyLock,
                 mode: :none,
                 held_when: SdrAgent.Sales.Checks.LeadAdmissionContext,
@@ -135,6 +151,13 @@ defmodule SdrAgent.Sales.Lead do
         check: "status NOT IN ('stopped', 'blocked') OR status_reason IS NOT NULL"
     end
 
+    custom_indexes do
+      # C3-02 (packet section 4.4, step 14a): the account's most recently
+      # closed lead, one bounded read under the company key.
+      index [:tenant_id, :account_id, "closed_at DESC NULLS LAST", "id DESC"],
+        name: "leads_closed_history_index"
+    end
+
     custom_statements do
       # C3-02 (packet section 3): composite foreign key targets. (id,
       # tenant_id) for a referral admission's original lead; (id, tenant_id,
@@ -163,6 +186,69 @@ defmodule SdrAgent.Sales.Lead do
         down "ALTER TABLE leads DROP CONSTRAINT leads_admission_fkey"
       end
 
+      # C3-02 cutover (packet section 3 Lead row): a new lead is bound to its
+      # admitted admission of the same tenant, kind and referrer, except a
+      # dev/test `fixture` seed; a `crm` lead can no longer be inserted.
+      # Fixed, content-free message; the default SQLSTATE (raise_exception).
+      statement :leads_admission_binding_function do
+        up """
+        CREATE FUNCTION leads_admission_binding() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.source = 'fixture' AND NEW.admission_id IS NULL THEN
+            RETURN NEW;
+          END IF;
+          IF NEW.source = 'crm' OR NEW.admission_id IS NULL OR NOT EXISTS (
+               SELECT 1 FROM lead_admissions a
+                WHERE a.id = NEW.admission_id
+                  AND a.tenant_id = NEW.tenant_id
+                  AND a.outcome = 'admitted'
+                  AND a.source_kind = NEW.source
+                  AND a.referral_from_lead_id IS NOT DISTINCT FROM NEW.referred_from_lead_id) THEN
+            RAISE EXCEPTION 'leads: a new lead must be bound to its admitted admission';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+
+        down "DROP FUNCTION leads_admission_binding()"
+      end
+
+      statement :leads_admission_binding do
+        up "CREATE TRIGGER leads_admission_binding BEFORE INSERT ON leads " <>
+             "FOR EACH ROW EXECUTE FUNCTION leads_admission_binding()"
+
+        down "DROP TRIGGER leads_admission_binding ON leads"
+      end
+
+      # C3-02 cutover: a lead's source, admission, referrer, account and
+      # contact never change (NULL-safe, by value: other updates pass).
+      statement :leads_identity_immutable_function do
+        up """
+        CREATE FUNCTION leads_identity_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.source IS DISTINCT FROM OLD.source
+             OR NEW.admission_id IS DISTINCT FROM OLD.admission_id
+             OR NEW.referred_from_lead_id IS DISTINCT FROM OLD.referred_from_lead_id
+             OR NEW.account_id IS DISTINCT FROM OLD.account_id
+             OR NEW.contact_id IS DISTINCT FROM OLD.contact_id THEN
+            RAISE EXCEPTION 'leads: source, admission, referrer, account and contact are immutable';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+
+        down "DROP FUNCTION leads_identity_immutable()"
+      end
+
+      statement :leads_identity_immutable do
+        up "CREATE TRIGGER leads_identity_immutable BEFORE UPDATE ON leads " <>
+             "FOR EACH ROW EXECUTE FUNCTION leads_identity_immutable()"
+
+        down "DROP TRIGGER leads_identity_immutable ON leads"
+      end
+
       # A referral's successor is at the same tenant and company.
       statement :leads_referred_from_fkey do
         up "ALTER TABLE leads ADD CONSTRAINT leads_referred_from_fkey " <>
@@ -186,10 +272,15 @@ defmodule SdrAgent.Sales.Lead do
     create :create do
       description "ADM: create a new lead for an active account's contact."
       accept [:contact_id, :account_id, :owner_user_id, :source, :admission_id]
+      # C3-02 cutover: an admission kind only (fixture and crm are refused).
+      validate one_of(:source, @admission_kinds)
       change SdrAgent.Sales.Changes.AdmissionOnly
       change SdrAgent.Sales.Changes.LeadAccount
       change SdrAgent.Audit.Changes.SetTenant
-      change @company_key
+
+      change {SdrAgent.Audit.Changes.IdentityKeyLock,
+              mode: :held, keys: {SdrAgent.Sales.Changes.LeadCompanyKey, :keys}}
+
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.lead.created", category: :domain_change}
     end
@@ -378,8 +469,14 @@ defmodule SdrAgent.Sales.Lead do
       authorize_if always()
     end
 
-    policy action([:create, :retry, :reopen]) do
+    policy action([:retry, :reopen]) do
       authorize_if {Checks.ActorRole, roles: [:admin]}
+    end
+
+    # C3-02 cutover: only from inside the lead admission, by an active admin.
+    policy action(:create) do
+      forbid_unless SdrAgent.Sales.Checks.LeadAdmissionContext
+      authorize_if SdrAgent.Sales.Checks.ActiveAdmin
     end
 
     policy action(:seed) do
@@ -436,7 +533,7 @@ defmodule SdrAgent.Sales.Lead do
 
     attribute :source, :atom do
       allow_nil? false
-      constraints one_of: [:fixture, :crm, :manual, :csv, :hubspot, :agent_found]
+      constraints one_of: [:fixture, :crm, :manual, :csv, :hubspot, :agent_found, :referral]
       public? true
     end
 

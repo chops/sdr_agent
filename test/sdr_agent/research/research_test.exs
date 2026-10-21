@@ -23,6 +23,23 @@ defmodule SdrAgent.ResearchTest do
     }
   end
 
+  defp readmit!(ctx, lead) do
+    {:ok, account} = Sales.fetch(SdrAgent.Sales.Account, lead.account_id, actor: ctx.admin)
+    {:ok, contact} = Sales.fetch(SdrAgent.Sales.Contact, lead.contact_id, actor: ctx.admin)
+
+    SdrAgent.SDR.admit_lead(
+      %{
+        source_kind: :manual,
+        source_ref: "manual:#{Ecto.UUID.generate()}",
+        campaign_id: F.active_campaign!(ctx.tenant).id,
+        readmit: true,
+        company: %{domain: to_string(account.domain)},
+        person: %{email: to_string(contact.email)}
+      },
+      actor: ctx.admin
+    )
+  end
+
   defp lead_status(ctx, lead) do
     {:ok, lead} = Sales.fetch(SdrAgent.Sales.Lead, lead.id, actor: ctx.admin)
     lead.status
@@ -413,12 +430,12 @@ defmodule SdrAgent.ResearchTest do
       %{lead: lead, qualification: first, claim: claim} = F.qualified_lead!(ctx.tenant, false)
 
       # A newer open lead for the same contact: re-qualifying the old one would
-      # break the one-open-lead-per-contact index inside the override transaction.
-      {:ok, _newer} =
-        Sales.create_lead(
-          %{contact_id: lead.contact_id, account_id: lead.account_id, source: :manual},
-          actor: ctx.admin
-        )
+      # break the one-open-lead-per-contact index inside the override
+      # transaction. C3-02 cutover (plan r8 section 4.5): the newer lead is
+      # admitted, `admit_lead(manual, readmit: true)` (the contact's only
+      # lead is closed, so readmit is needed). The early typed refusal and
+      # the after-INSERT rollback proofs are G7's T-L4 and T-L6.
+      {:ok, %{outcome: :admitted, lead: _newer}} = readmit!(ctx, lead)
 
       before = length(events(ctx.tenant))
 

@@ -368,8 +368,10 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
       assert lead_count(account) == 0
       assert length(events_of_type(ctx.tenant, "sales.lead.created")) == events
 
+      # Audit.transaction (plan r8 section 15 item 1): the guarded :seed
+      # runs only inside it; the explicit rollback and scope are unchanged.
       assert {:error, {:attributed, attributed}} =
-               Repo.transaction(fn ->
+               SdrAgent.Audit.transaction(fn ->
                  Repo.query!("ALTER TABLE leads DISABLE TRIGGER leads_admission_binding")
                  Repo.rollback({:attributed, seed_with_source(ctx, contact, id, :manual)})
                end)

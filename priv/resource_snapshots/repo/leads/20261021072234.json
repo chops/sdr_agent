@@ -1,0 +1,533 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "source",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"new\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "status",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "status_reason",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "admission_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "referred_from_lead_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "assigned_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "handed_off_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "closed_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "updated_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "leads_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "leads_contact_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "contacts"
+      },
+      "scale": null,
+      "size": null,
+      "source": "contact_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "leads_account_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "accounts"
+      },
+      "scale": null,
+      "size": null,
+      "source": "account_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "leads_owner_user_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "owner_user_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "leads_last_decision_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "decisions"
+      },
+      "scale": null,
+      "size": null,
+      "source": "last_decision_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "leads_trace_ids"
+    },
+    {
+      "attribute": [
+        "status"
+      ],
+      "base_filter": null,
+      "check": "status IN ('new', 'assigned', 'researching', 'qualifying', 'qualified', 'disqualified', 'in_outreach', 'replied', 'converted', 'nurture', 'stopped', 'blocked', 'referred')",
+      "name": "leads_status"
+    },
+    {
+      "attribute": [
+        "status_reason"
+      ],
+      "base_filter": null,
+      "check": "status NOT IN ('stopped', 'blocked') OR status_reason IS NOT NULL",
+      "name": "leads_reason_when_stopped_or_blocked"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "tenant_id",
+        "account_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "account_id"
+        },
+        {
+          "type": "string",
+          "value": "closed_at DESC NULLS LAST"
+        },
+        {
+          "type": "string",
+          "value": "id DESC"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": "leads_closed_history_index",
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": false,
+      "using": null,
+      "where": null
+    }
+  ],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE leads DROP CONSTRAINT leads_id_tenant_key",
+      "global?": false,
+      "name": "leads_id_tenant_key",
+      "up": "ALTER TABLE leads ADD CONSTRAINT leads_id_tenant_key UNIQUE (id, tenant_id)"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE leads DROP CONSTRAINT leads_id_tenant_account_key",
+      "global?": false,
+      "name": "leads_id_tenant_account_key",
+      "up": "ALTER TABLE leads ADD CONSTRAINT leads_id_tenant_account_key UNIQUE (id, tenant_id, account_id)"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE leads DROP CONSTRAINT leads_admission_fkey",
+      "global?": false,
+      "name": "leads_admission_fkey",
+      "up": "ALTER TABLE leads ADD CONSTRAINT leads_admission_fkey FOREIGN KEY (admission_id, tenant_id, account_id, contact_id) REFERENCES lead_admissions (id, tenant_id, account_id, contact_id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION leads_admission_binding()",
+      "global?": false,
+      "name": "leads_admission_binding_function",
+      "up": "CREATE FUNCTION leads_admission_binding() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  IF NEW.source = 'fixture' AND NEW.admission_id IS NULL THEN\n    RETURN NEW;\n  END IF;\n  IF NEW.source = 'crm' OR NEW.admission_id IS NULL OR NOT EXISTS (\n       SELECT 1 FROM lead_admissions a\n        WHERE a.id = NEW.admission_id\n          AND a.tenant_id = NEW.tenant_id\n          AND a.outcome = 'admitted'\n          AND a.source_kind = NEW.source\n          AND a.referral_from_lead_id IS NOT DISTINCT FROM NEW.referred_from_lead_id) THEN\n    RAISE EXCEPTION 'leads: a new lead must be bound to its admitted admission';\n  END IF;\n  RETURN NEW;\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER leads_admission_binding ON leads",
+      "global?": false,
+      "name": "leads_admission_binding",
+      "up": "CREATE TRIGGER leads_admission_binding BEFORE INSERT ON leads FOR EACH ROW EXECUTE FUNCTION leads_admission_binding()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION leads_identity_immutable()",
+      "global?": false,
+      "name": "leads_identity_immutable_function",
+      "up": "CREATE FUNCTION leads_identity_immutable() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  IF NEW.source IS DISTINCT FROM OLD.source\n     OR NEW.admission_id IS DISTINCT FROM OLD.admission_id\n     OR NEW.referred_from_lead_id IS DISTINCT FROM OLD.referred_from_lead_id\n     OR NEW.account_id IS DISTINCT FROM OLD.account_id\n     OR NEW.contact_id IS DISTINCT FROM OLD.contact_id THEN\n    RAISE EXCEPTION 'leads: source, admission, referrer, account and contact are immutable';\n  END IF;\n  RETURN NEW;\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER leads_identity_immutable ON leads",
+      "global?": false,
+      "name": "leads_identity_immutable",
+      "up": "CREATE TRIGGER leads_identity_immutable BEFORE UPDATE ON leads FOR EACH ROW EXECUTE FUNCTION leads_identity_immutable()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE leads DROP CONSTRAINT leads_referred_from_fkey",
+      "global?": false,
+      "name": "leads_referred_from_fkey",
+      "up": "ALTER TABLE leads ADD CONSTRAINT leads_referred_from_fkey FOREIGN KEY (referred_from_lead_id, tenant_id, account_id) REFERENCES leads (id, tenant_id, account_id) ON DELETE RESTRICT"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "DB8113A9CFB469089EC230E98395B5156902D7B11C3729AD2F3FBC18D708AE5F",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "leads_one_open_per_account_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "account_id"
+        }
+      ],
+      "name": "one_open_per_account",
+      "nils_distinct?": true,
+      "where": "status NOT IN ('disqualified', 'converted', 'nurture', 'stopped', 'referred')"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "leads_unique_admission_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "admission_id"
+        }
+      ],
+      "name": "unique_admission",
+      "nils_distinct?": true,
+      "where": "admission_id IS NOT NULL"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "leads_unique_open_lead_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "contact_id"
+        }
+      ],
+      "name": "unique_open_lead",
+      "nils_distinct?": true,
+      "where": "status NOT IN ('disqualified', 'converted', 'nurture', 'stopped', 'referred')"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "leads_unique_referred_from_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "referred_from_lead_id"
+        }
+      ],
+      "name": "unique_referred_from",
+      "nils_distinct?": true,
+      "where": "referred_from_lead_id IS NOT NULL"
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "leads"
+}

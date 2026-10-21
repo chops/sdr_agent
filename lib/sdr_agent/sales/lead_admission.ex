@@ -313,7 +313,7 @@ defmodule SdrAgent.Sales.LeadAdmission do
 
     policy action(:record) do
       forbid_unless LeadAdmissionContext
-      authorize_if {Checks.ActorRole, roles: [:admin]}
+      authorize_if SdrAgent.Sales.Checks.ActiveAdmin
     end
 
     policy action_type(:read) do
