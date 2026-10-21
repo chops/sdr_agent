@@ -31,6 +31,20 @@ defmodule SdrAgent.Agents.Witness.Projection do
   `cache_control` ttl `"1h"`, and a message-level `output_config`. For both
   versions, `extras: nil` means that the request is outside the grammar, so
   the version does not apply.
+
+  Version 4 (`compare_v4/4`; ADR-0005 response-layout amendment, D-182) is
+  v3's request contract and prompt-builder guard, unchanged, plus a
+  response of 1 to 4 leading `thinking` / `redacted_thinking` blocks in
+  total, then exactly one `text` block, with nothing after it. It is
+  evaluated only where v3's response-layout refusal applies (a v3 request
+  `:match`, the current builder, a decodable application output, a stream
+  the shared parser accepts, no `tool_use`, a block list other than one
+  text block); otherwise it is `:ineligible` and v3's result stands. The
+  stream first passes the unchanged shared parser; a v4-only walk over the
+  decoded events then checks each reasoning block syntactically (no local
+  authentication, decryption or benignity claim). Its evidence adds only a
+  closed layout label and, for an admitted layout, block counts: no
+  reasoning text, signature, encrypted data or per-block digest.
   """
 
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
@@ -328,6 +342,9 @@ defmodule SdrAgent.Agents.Witness.Projection do
 
   # v3 (entity PASS 9343defb): v2 plus exactly three bounded relaxations.
   @version_v3 "claude-message-json/3+prompt-builder/1"
+  # v4 (D-182, plan r5 section 6): v3's request plus the bounded reasoning layout.
+  @version_v4 "claude-message-json/4+prompt-builder/1"
+  @max_reasoning 4
   @cache_ttls ["1h"]
 
   @doc "The v2 projection version (CLI request shape with recorded context)."
@@ -341,16 +358,22 @@ defmodule SdrAgent.Agents.Witness.Projection do
   def version_v3, do: @version_v3
 
   @doc """
+  The v4 projection version: v3's request contract plus 1 to 4 leading
+  reasoning blocks, then exactly one text block (D-182).
+  """
+  def version_v4, do: @version_v4
+
+  @doc """
   The supported projection ids of the current ClaudeCLI prompt builder
   (R0-07 slice B, row B2): the literal registry ids `version/0`,
-  `version_v2/0` and `version_v3/0` whose builder is
+  `version_v2/0`, `version_v3/0` and `version_v4/0` whose builder is
   `ClaudeCLI.prompt_builder/0`. Admission compares an allowlist entry's
   `projection_version` with these ids exactly, never by substring.
   """
   def current_versions do
     builder = "+" <> ClaudeCLI.prompt_builder()
 
-    for version <- [@version, @version_v2, @version_v3],
+    for version <- [@version, @version_v2, @version_v3, @version_v4],
         String.ends_with?(version, builder),
         do: version
   end
@@ -369,6 +392,143 @@ defmodule SdrAgent.Agents.Witness.Projection do
   """
   def compare_v3(invocation, app, raw_request, raw_response),
     do: compare_cli(:v3, invocation, app, raw_request, raw_response)
+
+  @doc """
+  v4 comparison (D-182; plan r5 sections 6.1 and 6.2). `:ineligible` unless
+  every one of these holds, re-derived structurally: (a) the recorded
+  prompt builder is the current one; (b) the v3 request verdict is
+  `:match`; (c) the application output decodes; (d) the shared parser
+  accepts the raw stream; (e) its block types are not `["text"]`; (f) it
+  has no `tool_use`. These are exactly the conditions of v3's
+  `response_block_unsupported`.
+
+  Otherwise `{verdict, %{reasons:, digests:, extras:}}`: `extras` is the
+  complete v3 request group plus `response_layout` and, only for
+  `reasoning_then_text`, `response_thinking_count` and
+  `response_redacted_thinking_count`. `reasoning_then_text` compares its
+  one text block like v3 (`:match` or `:mismatch`,
+  `response_output_differs`); every other layout is `:unsupported` with
+  exactly one code, `"response_" <> layout`. Layout precedence:
+  `block_type_unsupported`, `reasoning_unparsed`, `text_count_invalid`,
+  `block_after_text`, `reasoning_overflow`, then `reasoning_then_text`.
+  """
+  def compare_v4(invocation, app, raw_request, raw_response) do
+    builder = Map.get(invocation.model_catalog_entry || %{}, "prompt_builder")
+
+    with true <- builder == ClaudeCLI.prompt_builder(),
+         {:match, [], request_digests, %{} = extras} <-
+           compare_request_v2(:v3, invocation, app.request, raw_request),
+         {:ok, expected} <- app_output(app.response),
+         {:ok, events} <- v4_events(raw_response) do
+      expected_digest = %{"projected_response_sha256" => sha(Canonical.encode!(expected))}
+      {layout, response} = v4_response(v4_blocks(events), expected, expected_digest)
+      {verdict, proof} = combine({:match, [], request_digests}, response)
+      extras = Map.merge(extras, layout)
+      {verdict, proof |> Map.put(:extras, extras) |> add_reason(extras)}
+    else
+      _ineligible -> :ineligible
+    end
+  end
+
+  # (d)-(f): the shared parser accepts the stream, which is not exactly one
+  # text block and has no tool_use. Returns the decoded events (pings out).
+  defp v4_events(raw) do
+    with {:ok, events} <- sse_events(raw),
+         events = Enum.reject(events, &(&1["type"] == "ping")),
+         {:ok, blocks} <- sequence(events),
+         types = Enum.map(blocks, & &1.type),
+         true <- types != ["text"] and "tool_use" not in types do
+      {:ok, events}
+    else
+      _ -> :ineligible
+    end
+  end
+
+  # The v4-only walk over the decoded (already sequence-validated) events:
+  # each block's exact start `content_block` and its delta maps.
+  defp v4_blocks([%{"type" => "message_start"} | rest]), do: v4_blocks(rest, [])
+
+  defp v4_blocks([%{"type" => "content_block_start", "content_block" => start} | rest], acc) do
+    {deltas, [_stop | rest]} = Enum.split_while(rest, &(&1["type"] == "content_block_delta"))
+    v4_blocks(rest, [{start["type"], start, Enum.map(deltas, & &1["delta"])} | acc])
+  end
+
+  defp v4_blocks(_rest, acc), do: Enum.reverse(acc)
+
+  defp v4_response(blocks, expected, expected_digest) do
+    case v4_layout(blocks) do
+      {:ok, text, thinking, redacted} ->
+        {verdict, reasons, digests} = compare_output(expected, expected_digest, {:ok, text})
+
+        {%{
+           "response_layout" => "reasoning_then_text",
+           "response_thinking_count" => thinking,
+           "response_redacted_thinking_count" => redacted
+         }, {verdict, reasons, digests}}
+
+      layout ->
+        {%{"response_layout" => layout}, {:unsupported, ["response_" <> layout], expected_digest}}
+    end
+  end
+
+  defp v4_layout(blocks) do
+    types = Enum.map(blocks, &elem(&1, 0))
+    texts = Enum.count(types, &(&1 == "text"))
+    reasoning = Enum.count(types, &(&1 in ["thinking", "redacted_thinking"]))
+
+    cond do
+      Enum.any?(types, &(&1 not in ["thinking", "redacted_thinking", "text"])) ->
+        "block_type_unsupported"
+
+      not Enum.all?(blocks, &reasoning_valid?/1) ->
+        "reasoning_unparsed"
+
+      texts != 1 ->
+        "text_count_invalid"
+
+      List.last(types) != "text" ->
+        "block_after_text"
+
+      reasoning > @max_reasoning ->
+        "reasoning_overflow"
+
+      true ->
+        {"text", _start, deltas} = List.last(blocks)
+        text = Enum.map_join(deltas, & &1["text"])
+
+        {:ok, text, Enum.count(types, &(&1 == "thinking")),
+         Enum.count(types, &(&1 == "redacted_thinking"))}
+    end
+  end
+
+  # Syntactic checks only. thinking: the exact empty start, zero or more
+  # string thinking deltas, then one or more string signature deltas with a
+  # non-empty combined value. redacted_thinking: exactly {type, data} with a
+  # string `data` and no deltas.
+  defp reasoning_valid?({"thinking", start, deltas}),
+    do:
+      start == %{"type" => "thinking", "thinking" => "", "signature" => ""} and
+        thinking_phase(deltas)
+
+  defp reasoning_valid?({"redacted_thinking", start, deltas}),
+    do:
+      deltas == [] and Enum.sort(Map.keys(start)) == ["data", "type"] and
+        is_binary(start["data"])
+
+  defp reasoning_valid?(_text), do: true
+
+  defp thinking_phase([%{"type" => "thinking_delta", "thinking" => text} = delta | rest])
+       when is_binary(text) and map_size(delta) == 2,
+       do: thinking_phase(rest)
+
+  defp thinking_phase(deltas), do: signature_phase(deltas, [])
+
+  defp signature_phase([%{"type" => "signature_delta", "signature" => part} = delta | rest], acc)
+       when is_binary(part) and map_size(delta) == 2,
+       do: signature_phase(rest, [part | acc])
+
+  defp signature_phase([], [_ | _] = parts), do: Enum.join(parts) != ""
+  defp signature_phase(_deltas, _parts), do: false
 
   defp compare_cli(grammar, invocation, app, raw_request, raw_response) do
     builder = Map.get(invocation.model_catalog_entry || %{}, "prompt_builder")
