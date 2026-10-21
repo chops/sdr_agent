@@ -1534,6 +1534,14 @@ class Watch(object):
         x["state"] = "live"
         return True
 
+    def unbind_late(self, g):
+        """A sealed token whose admission did not complete within the bound (R2): the
+        binding is withdrawn (unbound-deadline: never attributed, retired by its own
+        NOTE_EXIT), nothing is admitted and no snapshot obligation is created; violation."""
+        self.gens[g]["state"] = "unbound-deadline"
+        self.violation("registration-deadline", pid=self.gens[g]["pid"], gen=g)
+        return None
+
     def bind(self, g, b_pre, deadline):
         """Seal token g within the shared bound (R2): the post-registration identity read is
         not started after the deadline, and one that returns late is not used. Either way
@@ -1609,7 +1617,11 @@ class Watch(object):
             if self.gens[g]["state"] == "unbound-gone":
                 self.gap("child-gone-after-register", pid, parent)
             return None
+        if now() >= deadline:
+            return self.unbind_late(g)
         pcur2 = bsdinfo(parent)
+        if now() >= deadline:
+            return self.unbind_late(g)      # the final parent read returned late
         if pcur2 is None or pcur2["birth_us"] != pe["birth_us"]:
             self.gap("parent-changed-during-admission", pid, parent)
         return self.new_entry(g, b_pre, path, parent, True, "kernel-event")
@@ -1809,8 +1821,12 @@ class Watch(object):
         if not ep or not ep.startswith("/"):
             return {"result": "INCONSISTENT"}
         rp = os.path.realpath(ep)
-        if not (rp == os.path.realpath(p1) or (os.path.realpath(p1) in SYSTEM_SH and
-                                                rp in SYSTEM_SH)):
+        if now() >= deadline:
+            return late
+        rp1 = os.path.realpath(p1)
+        if now() >= deadline:
+            return late             # a late path resolution never yields VALID (R2)
+        if not (rp == rp1 or (rp1 in SYSTEM_SH and rp in SYSTEM_SH)):
             return {"result": "INCONSISTENT"}
         return {"result": "VALID", "image": p1, "exec_path": ep, "argv": a["argv"],
                 "meta": a["meta"], "argv_status": a["status"], "cutoff": post, "pre": pre}
@@ -1845,13 +1861,15 @@ class Watch(object):
             if s["result"] == "GONE":
                 continue          # resolved by the exit event (or refresh's budget)
             if now() >= r["deadline"] or r["attempts"] >= 3:
-                self.judge_request(g, r, s["result"])
+                self.judge_request(g, r, s["result"], deadline)
 
-    def judge_request(self, g, r, last):
+    def judge_request(self, g, r, last, deadline=INF):
         """An obligation at its EARLIEST deadline (B1) or after 3 INCONSISTENT attempts: for
         a still-live identity a violation; a title obligation a gap. A gone identity's image
         obligation is KEPT for its exit event (or refresh's budget) to resolve, so a missed
-        exec image is never silently dropped."""
+        exec image is never silently dropped. With the caller's bound exhausted (R2) no
+        identity read is started: the obligation is judged fail-closed as unresolved with
+        its liveness unread (violation), never left for a fresh retry budget."""
         x = self.gens.get(g)
         if x is None or x["state"] != "live":
             self.requests.pop(g, None)
@@ -1861,20 +1879,27 @@ class Watch(object):
             self.requests.pop(g, None)
             self.gap("title-unresolved", e["pid"], e.get("parent"))
             return
+        kind = "image-snapshot-inconsistent" if r["attempts"] >= 3 \
+            else "image-snapshot-unresolved"
+        if now() >= deadline:
+            self.requests.pop(g, None)
+            self.violation(kind, pid=e["pid"], last=last, liveness="unread: bound exhausted")
+            return
         cur = bsdinfo(e["pid"])
         if cur is None or cur["birth_us"] != e["birth_us"]:
             return
         self.requests.pop(g, None)
-        self.violation("image-snapshot-inconsistent" if r["attempts"] >= 3
-                       else "image-snapshot-unresolved", pid=e["pid"], last=last)
+        self.violation(kind, pid=e["pid"], last=last)
 
-    def expire_requests(self):
+    def expire_requests(self, deadline=INF):
         """B1: judged after EVERY slice, even one whose event handlers consumed it all
-        (handler time counts against the obligation; nothing resets its deadline)."""
+        (handler time counts against the obligation; nothing resets its deadline). The
+        caller's bound (R2) is passed on: once it is exhausted no further identity read is
+        started, and the remaining expired obligations are judged unread (fail-closed)."""
         for g in sorted(self.requests):
             r = self.requests.get(g)
             if r is not None and now() >= r["deadline"]:
-                self.judge_request(g, r, "deadline")
+                self.judge_request(g, r, "deadline", deadline)
 
     def record_argv(self, e, s):
         e["exec_path"] = s["exec_path"]
@@ -2098,6 +2123,8 @@ class Watch(object):
         g = self.register(pid)
         if g is None or not self.bind(g, b_pre, deadline):
             return
+        if now() >= deadline:
+            return self.unbind_late(g)
         e = self.new_entry(g, b_pre, "pgdata-identity", None, False, "pgdata-identity")
         e["identified_role"] = "postmaster-init" if not os.path.exists(
             self.m["pgdata"] + "/.devenv_initialized") else "postmaster-identified"
@@ -2114,6 +2141,8 @@ class Watch(object):
             if now() >= deadline:
                 return              # census incomplete: nothing is judged in this call
             cur = bsdinfo(pid)
+            if now() >= deadline:
+                return              # this census read returned late: nothing is judged
             if cur is None or cur["birth_us"] != e["birth_us"]:
                 cands.append(e["gen"])
             elif e["role"] == "pg-aux" and e.get("title") is None and e["gen"] not in \
@@ -2174,7 +2203,7 @@ class Watch(object):
             self.process_pending(deadline)
         if now() < deadline:
             self.process_requests(deadline)
-        self.expire_requests()
+        self.expire_requests(deadline)
 
     def drain(self, timeout=0, deadline=None):
         self.step(timeout, deadline if deadline is not None else
@@ -2190,7 +2219,7 @@ class Watch(object):
             if self.pending:
                 raise Hold("events still pending at the deadline")
             self.process_requests(deadline)
-            self.expire_requests()
+            self.expire_requests(deadline)
             if self.pending:
                 continue
             # R2: success needs every required (admission/exec) observation resolved
@@ -2207,8 +2236,8 @@ class Watch(object):
         `deadline` is rechecked after the identity proof, immediately before the effect."""
         if self.signals_frozen:
             raise Hold("refuse signal: signals are frozen after an uncertainty")
-        self.quiesce(min(now() + ITER_SLICE_S, deadline if deadline is not None else
-                         float("inf")))
+        qd = min(now() + ITER_SLICE_S, deadline if deadline is not None else INF)
+        self.quiesce(qd)
         if self.signals_frozen:
             raise Hold("refuse signal: an event observed during the drain froze signals")
         e = self.entries.get(pid)
@@ -2220,7 +2249,13 @@ class Watch(object):
             return "already-exited"
         if not e["lineage"] or e["role"] not in ROLE_SIGNALLABLE:
             raise Hold("refuse signal: pid %d role %s lineage %s" % (pid, e["role"], e["lineage"]))
+        # R2: the final identity proof runs inside the same quiesce bound; a proof started
+        # or returned after it never authorizes the effect
+        if now() >= qd:
+            raise Hold("refuse signal: quiesce bound passed before the final identity proof")
         cur = bsdinfo(pid)
+        if now() >= qd:
+            raise Hold("refuse signal: the final identity proof returned after the bound")
         if cur is None:
             return "gone"
         if cur["birth_us"] != e["birth_us"] or cur["uid"] != me():
