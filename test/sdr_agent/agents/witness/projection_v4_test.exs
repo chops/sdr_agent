@@ -128,7 +128,8 @@ defmodule SdrAgent.Agents.Witness.ProjectionV4Test do
   defp request_group(%{extras: extras}), do: Map.drop(extras, @r_keys)
 
   defp assert_refusal(result, layout, code, label) do
-    assert {:unsupported, proof} = result, "#{label}: #{inspect(result)}"
+    assert match?({:unsupported, _}, result), "#{label}: #{inspect(result)}"
+    {:unsupported, proof} = result
     assert r_group(proof) == %{"response_layout" => layout}, "#{label}: #{inspect(proof.extras)}"
     assert response_codes(proof) == [code], "#{label}: #{inspect(proof.reasons)}"
 
@@ -171,7 +172,8 @@ defmodule SdrAgent.Agents.Witness.ProjectionV4Test do
            [thinking_with([td(""), td(""), sd("s")]), text()], {1, 0}}
         ] do
       result = v4(ctx, v3_only(ctx), stream(blocks))
-      assert {:match, proof} = result, "#{label}: #{inspect(result)}"
+      assert match?({:match, _}, result), "#{label}: #{inspect(result)}"
+      {:match, proof} = result
 
       assert r_group(proof) == %{
                "response_layout" => "reasoning_then_text",
@@ -193,7 +195,8 @@ defmodule SdrAgent.Agents.Witness.ProjectionV4Test do
 
   test "a reasoning response with different output is a v4 mismatch with counts", ctx do
     result = v4(ctx, v3_only(ctx), stream([thinking(), text(@other)]))
-    assert {:mismatch, proof} = result, inspect(result)
+    assert match?({:mismatch, _}, result), inspect(result)
+    {:mismatch, proof} = result
     assert response_codes(proof) == ["response_output_differs"]
 
     assert r_group(proof) == %{

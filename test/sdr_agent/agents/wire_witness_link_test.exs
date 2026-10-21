@@ -477,15 +477,14 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
       for version <- [:v1, :v3], head_status <- [:inferred, :reconciled] do
         head = head!(ctx, version, head_status)
 
-        assert {:ok, successor} =
-                 link(
-                   successor_attrs(head, %{
-                     link_status: :reconciled,
-                     evidence: v4_successor_evidence()
-                   }),
-                   actor: ctx.rec
-                 ),
-               "#{version} #{head_status} head"
+        result =
+          link(
+            successor_attrs(head, %{link_status: :reconciled, evidence: v4_successor_evidence()}),
+            actor: ctx.rec
+          )
+
+        assert match?({:ok, _}, result), "#{version} #{head_status} head: #{inspect(result)}"
+        {:ok, successor} = result
 
         assert successor.supersedes_id == head.id
         assert successor.evidence["projection_version"] == @v4_projection
