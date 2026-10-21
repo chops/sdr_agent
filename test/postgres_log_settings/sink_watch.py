@@ -3249,6 +3249,104 @@ def report(evid, head):
 
 
 # ---------------------------------------------------------------- CLI
+LIVE_STACK_KINDS = ("watcher-exited-bounded", "launcher-not-reaped")
+RUNBOOK = "test/postgres_log_settings/README.md (Recovery runbook)"
+
+
+def live_stack_record(state_path, manifest_path=None, registries=(), label="observed"):
+    """F5 (reviews 3c0acb06, 04deddd8): a record of a stack that may still be live, for a
+    case-specific review. Observation only: it sends no signal, issues no ctl and cleans
+    nothing, and it carries NO recovery authority. Last-observed identities (the state
+    file) are kept separate from fresh kernel reads (alive / gone / reused / unknown, and
+    live children never recorded in the state). A missing or unreadable state is never a
+    clean empty set: it makes the record required with every fresh fact unknown."""
+    rec = {"schema": "5b-live-stack-left/1", "label": label, "t": now(), "wall": wall(),
+           "authority": "none: observation only; disposition needs a case-specific review",
+           "runbook": RUNBOOK, "state_path": state_path}
+    reasons, live, kinds = [], None, []
+    try:
+        st = jload(state_path)
+        live, viol = st["live"], st["violations"]
+        if not isinstance(live, list) or not isinstance(viol, list):
+            raise ValueError("state shape")
+        kinds = [v.get("kind") for v in viol if isinstance(v, dict)]
+        rec["state"], rec["state_t"] = "read", st.get("t")
+    except FileNotFoundError:
+        rec["state"] = "missing"
+        reasons.append("state missing: live set UNKNOWN, not empty")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        rec["state"] = "unreadable:%s" % type(e).__name__
+        reasons.append("state unreadable: live set UNKNOWN, not empty")
+    reasons.extend(k for k in LIVE_STACK_KINDS if k in kinds)
+    if live is None:
+        rec["last_observed"] = None
+        rec["fresh"] = "unknown: no last-observed set to check"
+    else:
+        last = []
+        for e in live:
+            if isinstance(e, dict):
+                last.append({k: e.get(k) for k in ("pid", "birth_us", "role", "gen")})
+        rec["last_observed"] = {"source": "state file live set", "t": rec.get("state_t"),
+                                "identities": last}
+        if last:
+            reasons.append("last-observed live set non-empty (%d)" % len(last))
+        fresh, unrecorded, known = [], [], {x["pid"] for x in last}
+        for x in last:
+            try:
+                cur = bsdinfo(int(x["pid"]))
+            except (Hold, TypeError, ValueError):
+                fresh.append(dict(x, fresh="unknown"))
+                continue
+            if cur is None:
+                fresh.append(dict(x, fresh="gone"))
+                continue
+            if cur["birth_us"] != x["birth_us"]:
+                fresh.append(dict(x, fresh="pid-reused-by-another-process"))
+                continue
+            fresh.append(dict(x, fresh="alive-same-birth"))
+            try:
+                for k in child_pids(int(x["pid"])):
+                    if k in known:
+                        continue
+                    kc = bsdinfo(k)
+                    unrecorded.append({"pid": k, "parent": x["pid"],
+                                       "birth_us": kc["birth_us"] if kc else None,
+                                       "fresh": "alive-not-in-state" if kc else "gone"})
+            except Hold:
+                unrecorded.append({"parent": x["pid"], "fresh": "children-unknown"})
+        rec["fresh"] = {"source": "kernel reads at record time", "identities": fresh,
+                        "unrecorded_children": unrecorded}
+        alive = sum(1 for x in fresh if x["fresh"] != "gone") + \
+            sum(1 for x in unrecorded if x["fresh"] != "gone")
+        if alive:
+            reasons.append("fresh: %d identities alive or unknown" % alive)
+    if manifest_path:
+        try:
+            m = load_manifest(manifest_path)
+            rec["instance"] = {k: m.get(k) for k in ("inst", "root", "runtime", "pgdata", "port")}
+        except (Refuse, OSError, ValueError, KeyError) as e:
+            rec["instance"] = {"unreadable": type(e).__name__}
+    fixtures = []
+    for rp in registries:
+        try:
+            for f in jload(rp)["fixtures"]:
+                ident_ = f.get("identity") or {}
+                if "birth_us" not in ident_:
+                    continue
+                cur = bsdinfo(int(ident_["pid"]))
+                if cur is not None and cur["birth_us"] == ident_["birth_us"]:
+                    fixtures.append({"registry": rp, "test": f["test"], "label": f["label"],
+                                     "pid": ident_["pid"], "birth_us": ident_["birth_us"]})
+        except (OSError, ValueError, KeyError, TypeError, Hold) as e:
+            fixtures.append({"registry": rp, "unreadable": type(e).__name__})
+    rec["registered_fixtures_alive"] = fixtures
+    if any("pid" in f for f in fixtures):
+        reasons.append("registered fixtures alive (%d)" % sum(1 for f in fixtures if "pid" in f))
+    rec["reasons"] = reasons
+    rec["required"] = bool(reasons)
+    return rec
+
+
 def observe_deadline(pid, birth_us, deadline_s, out):
     """Independent outer controller (repair M1, A1, Q2): its own process; never signals.
     Polls the (pid, birth) identity against a monotonic deadline and writes its own receipt.
@@ -3411,6 +3509,18 @@ def main(argv):
             return EXIT_OK
         if cmd == "runtime-for":
             jdump(dict(zip(("runtime", "canonical"), runtime_for_root(a["root"]))))
+            return EXIT_OK
+        if cmd == "live-stack-left":
+            # F5: decides and records only; never signals, stops or cleans (exit 0 either way)
+            rec = live_stack_record(a["state"], a.get("manifest"),
+                                    [x for x in a.get("registries", "").split(",") if x],
+                                    a.get("label", "observed"))
+            if rec["required"]:
+                if os.path.lexists(a["out"]):
+                    raise Hold("live-stack record %s already exists" % a["out"])
+                jdump(rec, a["out"])
+            jdump({"required": rec["required"], "reasons": rec["reasons"],
+                   "label": rec["label"]})
             return EXIT_OK
         if cmd == "manifest-new":
             if "port" in a:
