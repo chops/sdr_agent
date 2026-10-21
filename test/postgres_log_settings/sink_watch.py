@@ -140,6 +140,12 @@ class Fail(Exception):
     """A definite negative result."""
 
 
+class NotReady(Hold):
+    """A CLOSED pending state only (repair M2, Q1): zero owned final candidates with no
+    listener at all, the init phase (.devenv_initialized absent), postmaster.pid absent or
+    in a source-supported not-ready status. Everything else is a plain Hold."""
+
+
 def jdump(obj, path=None):
     text = json.dumps(obj, indent=2, sort_keys=True, default=str)
     if path is None:
@@ -1124,12 +1130,17 @@ class Watch(object):
         self.launcher_reaped = None
         self.helpers = []
         self.signals_frozen = False
+        self.held = False
         self.closure = {"closure_verified": False, "detail": "not-loaded"}
         self.forms = sh_forms(m) if all(k in m for k in ("runtime", "pgdata", "port")) else {}
         self.dirty = True
 
     def violation(self, kind, **kw):
+        """Every violation is actual uncertainty (M2): record it and freeze at once, so no
+        later signal, stop stage or helper can follow it. Coverage gaps are not violations."""
         self.violations.append(dict(kw, t=now(), kind=kind))
+        self.signals_frozen = True
+        self.held = True
         self.dirty = True
 
     # -- registration
@@ -1460,10 +1471,15 @@ class Watch(object):
             self.handle(ev)
 
     # -- signalling (r3 2.3, r4 3.3; repair H2: frozen after any uncertainty)
-    def signal_verified(self, pid, sig, reason):
+    def signal_verified(self, pid, sig, reason, deadline=None):
+        """Verified signal (r3 2.3, r4 3.3). Repair M2/Q2: the freeze is checked before AND
+        after draining events, and the absolute `deadline` (monotonic) is rechecked after
+        the drain and the identity proof, immediately before the effect."""
         if self.signals_frozen:
             raise Hold("refuse signal: signals are frozen after an uncertainty")
         self.drain(0)
+        if self.signals_frozen:
+            raise Hold("refuse signal: an event observed during the drain froze signals")
         e = self.entries.get(pid)
         if e is None:
             if any(d["pid"] == pid for d in self.dead):
@@ -1478,6 +1494,8 @@ class Watch(object):
             return "gone"
         if cur["birth_us"] != e["birth_us"] or cur["uid"] != me():
             raise Hold("refuse signal: pid %d identity changed (possible PID reuse)" % pid)
+        if deadline is not None and now() >= deadline:
+            raise Hold("refuse signal: overall deadline passed before the effect")
         os.kill(pid, sig)
         self.harness_signals.append({"t": now(), "pid": pid, "birth_us": e["birth_us"],
                                      "role": e["role"], "signal": int(sig), "reason": reason})
@@ -1542,6 +1560,36 @@ def ident(e):
     return {"pid": e["pid"], "birth_us": e["birth_us"], "role": e["role"]}
 
 
+SEAM_DEADLINE = 10.0
+
+
+def finalize(w, reap_s=5.0):
+    """Bounded reap of the launcher and helpers, then the state receipt (repair M2).
+    Returns True (HOLD) if anything is left unreaped, the receipt cannot be written, or any
+    violation was recorded. Nothing is signalled."""
+    held = False
+    if w.launcher is not None:
+        try:
+            w.launcher_reaped = {"returncode": w.launcher.wait(timeout=reap_s)}
+        except subprocess.TimeoutExpired:
+            w.launcher_reaped = {"returncode": None, "state": "not-reaped-live"}
+            w.violation("launcher-not-reaped", pid=w.launcher.pid)
+            held = True
+    for hp in w.helpers:
+        try:
+            hp.wait(timeout=reap_s)
+        except subprocess.TimeoutExpired:
+            w.violation("helper-not-reaped", pid=hp.pid)
+            held = True
+    w.dirty = True
+    try:
+        w.flush()
+    except OSError as e:
+        sys.stderr.write("HOLD IO state receipt not written (%s)\n" % type(e).__name__)
+        held = True
+    return held or w.held
+
+
 def supervise(m, ctl, state_path, launcher_path, epoch, seam_exit_before_register=False,
               post_stop_s=None):
     """Spawn the reviewed launcher with the exact envelope and watch its tree (repair H2).
@@ -1560,6 +1608,12 @@ def supervise(m, ctl, state_path, launcher_path, epoch, seam_exit_before_registe
     w = Watch(m, state_path)
     w.closure = h_closure(m) if "evidence" in m else {"closure_verified": False,
                                                        "detail": "no evidence dir"}
+    if w.closure.get("closure_verified") is not True:
+        # repair M2: the source closure must be established before the launcher is spawned
+        w.violation("closure-not-established", detail=w.closure.get("detail"))
+        w.flush()
+        sys.stderr.write("REFUSE REFUSE-CLOSURE source closure not established\n")
+        return EXIT_REFUSE
     post_s = TIMEOUTS["barrier"] + 30 if post_stop_s is None else float(post_stop_s)
     stop_requested = held = False
     post_deadline = None
@@ -1581,7 +1635,12 @@ def supervise(m, ctl, state_path, launcher_path, epoch, seam_exit_before_registe
         w.launcher_identity = {"pid": lp, "birth_us": None, "identity": "unknown"}
         w.dirty = True
         if seam_exit_before_register:
-            os.waitid(os.P_PID, lp, os.WEXITED | os.WNOWAIT)
+            seam_end = now() + SEAM_DEADLINE
+            while os.waitid(os.P_PID, lp, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                if now() >= seam_end:
+                    w.violation("seam-fixture-did-not-exit", pid=lp)
+                    raise Hold("seam: fixture launcher did not exit within %.0f s" % SEAM_DEADLINE)
+                time.sleep(0.05)
         registered = w.register(lp)
         exited = os.waitid(os.P_PID, lp, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
         cur = bsdinfo(lp) if registered and not exited else None
@@ -1624,6 +1683,8 @@ def supervise(m, ctl, state_path, launcher_path, epoch, seam_exit_before_registe
                         held = True
                 if req.get("cmd") == "exit-watch":
                     end_watch = True
+            if w.signals_frozen:
+                held = True
             if (stop_requested or held) and post_deadline is None:
                 post_deadline = now() + post_s
             if w.launcher.poll() is not None and not w.entries:
@@ -1641,18 +1702,8 @@ def supervise(m, ctl, state_path, launcher_path, epoch, seam_exit_before_registe
         w.violation("HOLD", detail=str(h))
         w.signals_frozen = held = True
     finally:
-        if w.launcher is not None:
-            try:
-                w.launcher_reaped = {"returncode": w.launcher.wait(timeout=5)}
-            except subprocess.TimeoutExpired:
-                w.launcher_reaped = {"returncode": None, "state": "not-reaped-live"}
-        for hp in w.helpers:
-            try:
-                hp.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                w.violation("helper-not-reaped", pid=hp.pid)
-        w.dirty = True
-        w.flush()
+        if finalize(w):
+            held = True
     if held:
         return EXIT_HOLD
     if not stop_requested:
@@ -1694,34 +1745,43 @@ def stop_tree(w, m, stages=None):
     def until(sec):
         return min(now() + float(sec), overall)
 
+    def gate(stage):
+        # repair M1: no further escalation or helper once the overall deadline has passed
+        if now() >= overall:
+            raise Hold("overall deadline passed before %s" % stage)
+
+    def sig(pid, s, reason, stage):
+        gate(stage)
+        return w.signal_verified(pid, s, reason, deadline=overall)
+
     try:
         if w.signals_frozen:
             raise Hold("signals frozen before the stop began")
-        log.append(("launcher-term", w.signal_verified(w.launcher.pid, signal.SIGTERM,
-                                                       "deliberate-stop")))
+        log.append(("launcher-term", sig(w.launcher.pid, signal.SIGTERM, "deliberate-stop",
+                                         "launcher-term")))
         if not w.wait_roles_gone(("process-compose",), until(st["launcher"])):
             for e in w.alive("process-compose"):
-                log.append(("pc-term", w.signal_verified(e["pid"], signal.SIGTERM, "escalate-pc")))
+                log.append(("pc-term", sig(e["pid"], signal.SIGTERM, "escalate-pc", "pc-term")))
         if not w.wait_roles_gone(("devenv-tasks",), until(st["pc"])):
             for e in w.alive("devenv-tasks"):
-                log.append(("dt-term", w.signal_verified(e["pid"], signal.SIGTERM, "escalate-dt")))
+                log.append(("dt-term", sig(e["pid"], signal.SIGTERM, "escalate-dt", "dt-term")))
         managers = ("process-compose", "devenv-tasks")
         if not w.wait_roles_gone(managers, until(st["dt"])):
             for r in managers:
                 for e in w.alive(r):
-                    log.append(("kill", w.signal_verified(e["pid"], signal.SIGKILL,
-                                                          "escalate-kill")))
+                    log.append(("kill", sig(e["pid"], signal.SIGKILL, "escalate-kill", "kill")))
             if not w.wait_roles_gone(managers, until(st["kill"])):
                 raise Hold("manager processes alive after KILL stage")
         pms = w.alive("postmaster-final") + w.alive("postmaster-init") + \
             w.alive("postmaster-identified")
         if pms:
-            rc = pg_ctl_stop(w, m, pms, timeout=max(0.0, min(float(st["pgctl"]),
-                                                              overall - now())),
-                             t=int(st["pgctl_t"]))
+            gate("pg_ctl")
+            rc = pg_ctl_stop(w, m, pms, timeout=min(float(st["pgctl"]), overall - now()),
+                             t=int(st["pgctl_t"]), deadline=overall)
             log.append(("pg_ctl", rc))
             if rc != 0:
                 raise Hold("pg_ctl stop failed: %r" % (rc,))
+        gate("final wait")
         if not w.wait_all_gone(overall):
             raise Hold("owned processes live after all stop stages")
         return {"ok": True, "stages": log, "remaining": [],
@@ -1734,9 +1794,11 @@ def stop_tree(w, m, stages=None):
                 "harness_signals": w.harness_signals}
 
 
-def pg_ctl_stop(w, m, pms, timeout=90.0, t=60):
+def pg_ctl_stop(w, m, pms, timeout=90.0, t=60, deadline=None):
     """The only postmaster stop path: pg_ctl -D <pgdata>, after identity proof. Returns
-    pg_ctl's exit status, or "timeout" (the helper is kept for a bounded reap, not killed)."""
+    pg_ctl's exit status, or "timeout" (the helper is kept for a bounded reap, not killed).
+    Repair M1/Q2: refuses (no spawn) when the absolute `deadline` has passed after the
+    identity proof, when the remaining time is not positive, or when -t exceeds it."""
     with open(m["pgdata"] + "/postmaster.pid") as f:
         lines = f.read().splitlines()
     pid = int(lines[0])
@@ -1748,6 +1810,12 @@ def pg_ctl_stop(w, m, pms, timeout=90.0, t=60):
         raise Hold("postmaster identity changed")
     if proc_cwd(pid) != os.path.realpath(m["pgdata"]):
         raise Hold("postmaster cwd mismatch")
+    if w.signals_frozen:
+        raise Hold("refuse pg_ctl: signals are frozen after an uncertainty")
+    if deadline is not None:
+        timeout = min(float(timeout), deadline - now())
+        if timeout <= 0 or t > timeout:
+            raise Hold("refuse pg_ctl: overall deadline leaves %.1f s for -t %d" % (timeout, t))
     env = {"PATH": PG_BIN, "PGDATA": m["pgdata"], "LC_ALL": "C"}
     p = subprocess.Popen([PG_BIN + "/pg_ctl", "-D", m["pgdata"], "-m", "fast", "-w", "-t", str(t),
                           "stop"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -1796,24 +1864,52 @@ def final_postmaster(state):
     return pms[0] if len(pms) == 1 else None
 
 
+PIDFILE_NOT_READY = ("starting", "standby")  # PG 18 pidfile.h PM_STATUS_* not "ready"
+
+
 def listener_proof(m, state):
-    """r3 1.3 + r4 4.1: exactly one 127.0.0.1 listener owned by the verified final postmaster."""
-    pm = final_postmaster(state)
-    if pm is None:
-        raise Hold("no unique final postmaster")
+    """r3 1.3 + r4 4.1: exactly one 127.0.0.1 listener owned by the verified final postmaster.
+    Repair Q1: uncertainty facts (watcher violations, several live final postmasters, any
+    listener not owned by the window postmaster, unreadable identity) are checked FIRST and
+    are a Hold; only closed pending states raise NotReady."""
+    if state.get("violations"):
+        raise Hold("watcher violations: %d" % len(state["violations"]))
+    finals = [e for e in state["live"] if e["role"] == "postmaster-final"]
+    if len(finals) > 1:
+        raise Hold("several live final postmasters: %r" % [e["pid"] for e in finals])
+    recs = tcp_listeners(m["port"])
+    want = "127.0.0.1:%d" % m["port"]
+    if not finals:
+        if recs:
+            raise Hold("FOREIGN-LISTENER listener without an owned final postmaster: %r" % recs)
+        raise NotReady("no final postmaster yet")
+    pm = finals[0]
     cur = bsdinfo(pm["pid"])
     if cur is None or cur["birth_us"] != pm["birth_us"]:
         raise Hold("final postmaster identity changed")
-    recs = tcp_listeners(m["port"])
-    want = "127.0.0.1:%d" % m["port"]
-    if len(recs) != 1 or recs[0]["addr"] != want or recs[0]["pid"] != pm["pid"]:
+    if recs and (len(recs) != 1 or recs[0]["addr"] != want or recs[0]["pid"] != pm["pid"]):
         raise Hold("FOREIGN-LISTENER or unexpected listeners: %r" % recs)
+    if not os.path.exists(m["pgdata"] + "/.devenv_initialized"):
+        raise NotReady("init phase")
+    pid, status, _ = postmaster_pid_status(m)
+    if pid is None and status is None:
+        if recs:
+            raise Hold("listener without postmaster.pid")
+        raise NotReady("postmaster.pid absent")
+    if pid != pm["pid"]:
+        raise Hold("postmaster.pid names %r, not the final postmaster" % (pid,))
+    if status in PIDFILE_NOT_READY:
+        raise NotReady("postmaster.pid status %s" % status)
+    if status != "ready":
+        raise Hold("postmaster.pid status not a known state: %r" % (status,))
+    if not recs:
+        raise Hold("ready postmaster without its listener")
     ns = netstat_listen(m["port"])
     if ns != ["127.0.0.1.%d" % m["port"]]:
         raise Hold("netstat disagrees with lsof: %r" % ns)
     sock = m["pg_socket"]
     if socket_rec(sock).get("type") != "socket":
-        raise Hold("pg UDS missing")
+        raise Hold("pg UDS missing for a ready postmaster")
     with open(sock + ".lock") as f:
         lock_pid = f.readline().strip()
     if lock_pid != str(pm["pid"]):
@@ -1822,20 +1918,18 @@ def listener_proof(m, state):
     holders = sorted({int(l[1:]) for l in out.splitlines() if l.startswith("p")})
     if pm["pid"] not in holders:
         raise Hold("UDS not held by postmaster: %r" % holders)
-    pid, status, _ = postmaster_pid_status(m)
-    if pid != pm["pid"] or status != "ready":
-        raise Hold("postmaster.pid not ready/consistent: %r %r" % (pid, status))
     return {"pid": pm["pid"], "birth_us": pm["birth_us"], "t": now()}
 
 
 def ready_wait(m, state_path, deadline_s):
+    """Retries ONLY NotReady (repair Q1); every other Hold propagates at once."""
     deadline = now() + deadline_s
     last = None
     while now() < deadline:
         try:
             state = jload(state_path)
-        except (FileNotFoundError, ValueError):
-            time.sleep(0.5)
+        except FileNotFoundError:
+            time.sleep(0.5)  # the watcher has not written its first receipt yet
             continue
         if state["violations"]:
             raise Hold("watcher violations: %r" % state["violations"][:3])
@@ -1846,13 +1940,10 @@ def ready_wait(m, state_path, deadline_s):
             # ready postmaster; a timeout without an observed exit is FAIL-TIMEOUT, never this
             raise Fail("FAIL-START postmaster exit %r" % [(e["pid"], e["role"], e["exit"])
                                                           for e in bad])
-        if os.path.exists(m["pgdata"] + "/.devenv_initialized"):
-            try:
-                return listener_proof(m, state)
-            except Hold as h:
-                last = str(h)
-                if "FOREIGN" in last:
-                    raise
+        try:
+            return listener_proof(m, state)
+        except NotReady as n:
+            last = str(n)
         time.sleep(0.5)
     raise Fail("FAIL-TIMEOUT readiness (%s)" % last)
 
@@ -2028,6 +2119,9 @@ def classify_epoch(state, snaps, lock, barrier_ok, closure_ok):
         else:
             window[r] = spanning[0]
     pm, lg = window.get("postmaster-final"), window.get("pg-logger")
+    chain = window_job_chain(all_e, window)
+    if chain is None:
+        reasons.append("window job chain unresolved")
     if pm and lg:
         if (lg.get("parent"), lg.get("parent_birth_us")) != (pm["pid"], pm["birth_us"]):
             reasons.append("window logger is not a child of the window postmaster")
@@ -2043,7 +2137,7 @@ def classify_epoch(state, snaps, lock, barrier_ok, closure_ok):
             continue
         r = e["role"]
         if r == "devenv-tasks":
-            ok = devenv_tasks_eligible(e, window, signalled)
+            ok = devenv_tasks_eligible(e, window, signalled, chain)
         elif r in ALLOWED_EXIT:
             ok = ALLOWED_EXIT[r](st)
         else:
@@ -2083,8 +2177,10 @@ def classify_epoch(state, snaps, lock, barrier_ok, closure_ok):
     hr = h_reasons(state.get("h"), state.get("violations", []), closure_ok)
     reasons.extend(hr)
     reasons.extend(gate_b(not hr, lock))
+    win = {r: ident(e) for r, e in window.items()}
+    win["job_chain"] = [ident(e) for e in chain] if chain is not None else None
     return {"complete": not reasons, "reasons": reasons, "init_facts": init_facts,
-            "window": {r: ident(e) for r, e in window.items()}}
+            "window": win}
 
 
 # Roles whose forks are covered by the r5 3.2 exit-gated singleton-writer argument.
@@ -2112,9 +2208,40 @@ def producer_exit_eligible(binding, status):
     return False
 
 
-def devenv_tasks_eligible(e, window, signalled):
-    """r5 2.2 row 2 (r6 Q2; repair H4): signaled(SIGINT) only under (i)-(iii) on the WINDOW
-    generations; (iv) is a source precondition, not a measured signal count."""
+def find_gen(all_e, pid, birth):
+    """The entry with exactly this (pid, birth_us), or None (never a bare pid)."""
+    if pid is None or birth is None:
+        return None
+    hits = [x for x in all_e if x["pid"] == pid and x["birth_us"] == birth]
+    return hits[0] if len(hits) == 1 else None
+
+
+def window_job_chain(all_e, window):
+    """Repair M4: the window job-tree members between the window final postmaster and the
+    window devenv-tasks, resolved by (pid, birth) parent links: only wrapper / start-postgres
+    roles, exactly one wrapper. None when unresolved, ambiguous or missing (fail closed)."""
+    pm, dt = window.get("postmaster-final"), window.get("devenv-tasks")
+    if pm is None or dt is None:
+        return None
+    chain, cur = [], pm
+    for _ in range(8):
+        par = find_gen(all_e, cur.get("parent"), cur.get("parent_birth_us"))
+        if par is None:
+            return None
+        if (par["pid"], par["birth_us"]) == (dt["pid"], dt["birth_us"]):
+            return chain if sum(1 for c in chain if c["role"] == "wrapper") == 1 else None
+        if par["role"] not in ("wrapper", "start-postgres"):
+            return None
+        chain.append(par)
+        cur = par
+    return None
+
+
+def devenv_tasks_eligible(e, window, signalled, chain):
+    """r5 2.2 row 2 (r6 Q2; repair H4, M4): signaled(SIGINT) only under (i)-(iii) on the
+    WINDOW generations. (ii) is every job-tree member (the resolved window wrapper chain,
+    final postmaster, logger) exiting with an allowed status no later than devenv-tasks.
+    (iv) is a source precondition, not a measured signal count."""
     st = e["exit"]
     if not (st.get("kind") == "signaled" and st.get("signal") == signal.SIGINT):
         return False
@@ -2125,9 +2252,13 @@ def devenv_tasks_eligible(e, window, signalled):
             (e["pid"], e["birth_us"]):
         return False
     t = st["t"]
-    for r in ("postmaster-final", "pg-logger"):
-        x = window.get(r)
+    if not chain:
+        return False
+    members = list(chain) + [window.get("postmaster-final"), window.get("pg-logger")]
+    for x in members:
         if x is None or x["exit"] is None or x["exit"]["t"] > t:
+            return False
+        if not ALLOWED_EXIT[x["role"]](x["exit"]):
             return False
     pc = window.get("process-compose")
     if pc is None or pc["exit"] is None or pc["exit"]["t"] < t or \
@@ -2374,7 +2505,7 @@ def s5_observe(m, state_path, deadline_s):
     while now() < deadline:
         try:
             state = jload(state_path)
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError:
             time.sleep(0.2)
             continue
         for r in tcp_listeners(m["port"]):
@@ -2382,9 +2513,9 @@ def s5_observe(m, state_path, deadline_s):
         if os.path.lexists(m["pg_socket"]):
             uds_seen = True
         try:
-            accepting = listener_proof(m, state)
+            accepting = listener_proof(m, state)  # Hold (foreign, identity, violations) propagates
             break
-        except Hold:
+        except NotReady:
             pass
         time.sleep(0.2)
     state = jload(state_path)
@@ -2482,6 +2613,76 @@ def report(evid, head):
 
 
 # ---------------------------------------------------------------- CLI
+def observe_deadline(pid, birth_us, deadline_s, out):
+    """Independent outer controller (repair M1, A1, Q2): its own process; never signals.
+    Polls the (pid, birth) identity against a monotonic deadline and writes its own receipt.
+    0 only for "gone"; "live-at-deadline" and an unreadable identity are HOLD (3). Gone is
+    not descendant, handle or barrier proof."""
+    rec = {"pid": pid, "birth_us": birth_us, "deadline_s": deadline_s, "start": now(),
+           "proof": "poll-observation"}
+    end = now() + deadline_s
+    while True:
+        try:
+            cur = bsdinfo(pid)
+        except Hold:
+            rec.update(result="identity-unreadable", t=now())
+            jdump(rec, out)
+            return EXIT_HOLD
+        if cur is None or cur["birth_us"] != birth_us:
+            rec.update(result="gone", t=now())
+            jdump(rec, out)
+            return EXIT_OK
+        if now() >= end:
+            rec.update(result="live-at-deadline", t=now(), live=cur)
+            jdump(rec, out)
+            return EXIT_HOLD
+        time.sleep(0.1)
+
+
+def target_socket_check(sdir, port, postmaster_pid):
+    """Supplementary pre-connect guard for the client (choice 5, Q4). Read-only, no follow:
+    the socket dir is a physical dir owned by me; `.s.PGSQL.<port>` is a socket owned by me
+    (S_ISSOCK on lstat); its `.lock` is a regular file owned by me whose first line names the
+    expected postmaster. A mismatch is REFUSE (fixed reasons, no raw content). It proves no
+    server identity: the client's SQL identity, sysid, settings and listener checks remain."""
+    st = os.lstat(sdir)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != me() or not physical(sdir):
+        raise Refuse("REFUSE-TARGET socket dir")
+    sock = "%s/.s.PGSQL.%d" % (sdir, int(port))
+    try:
+        ss = os.lstat(sock)
+    except FileNotFoundError:
+        raise Refuse("REFUSE-TARGET socket absent")
+    if not stat.S_ISSOCK(ss.st_mode) or ss.st_uid != me():
+        raise Refuse("REFUSE-TARGET not an owned socket")
+    try:
+        fd = os.open(sock + ".lock", os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise Refuse("REFUSE-TARGET lock absent")
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise Refuse("REFUSE-TARGET lock is a symlink")
+        raise
+    with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
+        ls = os.fstat(f.fileno())
+        if not stat.S_ISREG(ls.st_mode) or ls.st_uid != me():
+            raise Refuse("REFUSE-TARGET lock not an owned regular file")
+        first = f.readline().strip()
+    if first != str(int(postmaster_pid)):
+        raise Refuse("REFUSE-TARGET lock names another process")
+    return {"ok": True, "proof": "file-read"}
+
+
+def wait_gate(path, deadline_s=10.0):
+    """Start gate for guarded subjects (repair M1): do nothing until the controller has
+    recorded this process's identity. A missing gate at the deadline is HOLD."""
+    end = now() + deadline_s
+    while not os.path.exists(path):
+        if now() >= end:
+            raise Hold("start gate %s not opened" % os.path.basename(path))
+        time.sleep(0.05)
+
+
 def parse_kv(argv):
     out, i = {}, 0
     while i < len(argv):
@@ -2504,6 +2705,8 @@ def main(argv):
         return EXIT_USAGE
     cmd, a = argv[0], parse_kv(argv[1:])
     try:
+        if "gate" in a:
+            wait_gate(a.pop("gate"))
         if cmd == "plan":
             jdump({"packages": PKG, "env_keys": ENV_KEYS, "env_absent": ENV_MUST_BE_ABSENT,
                    "edits": EDITS, "db_allow": DB_ALLOW, "markers": MARKER_KINDS,
@@ -2528,6 +2731,18 @@ def main(argv):
             return EXIT_OK
         if cmd == "mono-before":
             return EXIT_OK if now() < float(a["deadline"]) else EXIT_HOLD
+        if cmd == "observe-deadline":
+            return observe_deadline(int(a["pid"]), int(a["birth_us"]), float(a["deadline"]),
+                                    a["out"])
+        if cmd == "birth":
+            cur = bsdinfo(int(a["pid"]))
+            if cur is None:
+                raise Hold("pid %s gone before its identity was read" % a["pid"])
+            sys.stdout.write("%d\n" % cur["birth_us"])
+            return EXIT_OK
+        if cmd == "target-socket-check":
+            jdump(target_socket_check(a["socket_dir"], a["port"], a["postmaster_pid"]))
+            return EXIT_OK
         if cmd == "runtime-for":
             jdump(dict(zip(("runtime", "canonical"), runtime_for_root(a["root"]))))
             return EXIT_OK
@@ -2680,6 +2895,10 @@ def main(argv):
     except Fail as f:
         sys.stderr.write("FAIL %s\n" % f)
         return EXIT_FAIL
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as e:
+        # repair M2: an I/O, parse or helper failure is HOLD, never a traceback status
+        sys.stderr.write("HOLD IO %s\n" % type(e).__name__)
+        return EXIT_HOLD
 
 
 if __name__ == "__main__":
