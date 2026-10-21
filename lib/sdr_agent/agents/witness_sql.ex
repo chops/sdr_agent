@@ -10,7 +10,14 @@ defmodule SdrAgent.Agents.WitnessSQL do
   `(tenant_id, model_invocation_id, proxy_record_ref, id)` and a composite
   foreign key from `(…, supersedes_id)` to it, so a successor belongs to its
   predecessor's exchange; and a `BEFORE INSERT` trigger refusing a successor
-  of a `mismatch` row under the same `evidence.projection_version` (C3).
+  of a `mismatch` row under the same `evidence.projection_version` (C3), and
+  any successor of a `mismatch` row whose `evidence.projection_version` is
+  v4 (`claude-message-json/4+prompt-builder/1`, D-182).
+
+  The function body here is the current one, kept in sync with the resource
+  snapshot for `mix ash.codegen --check`. Deployed databases get it from the
+  frozen-body migration `*_v4_mismatch_lineage.exs` (`CREATE OR REPLACE`;
+  its down restores the exact previous body), never from this module.
   """
   def lineage do
     [
@@ -38,6 +45,11 @@ defmodule SdrAgent.Agents.WitnessSQL do
             (NEW.evidence ->> 'projection_version') IS NOT DISTINCT FROM
             (previous.evidence ->> 'projection_version') THEN
            RAISE EXCEPTION 'wire witness mismatch % can only be superseded under a different projection version', previous.id
+             USING ERRCODE = 'check_violation';
+         END IF;
+         IF previous.link_status = 'mismatch' AND
+            (NEW.evidence ->> 'projection_version') = 'claude-message-json/4+prompt-builder/1' THEN
+           RAISE EXCEPTION 'wire witness mismatch % is never superseded by a projection v4 link', previous.id
              USING ERRCODE = 'check_violation';
          END IF;
          RETURN NEW;
