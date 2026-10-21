@@ -1839,6 +1839,13 @@ def ready_wait(m, state_path, deadline_s):
             continue
         if state["violations"]:
             raise Hold("watcher violations: %r" % state["violations"][:3])
+        bad = [e for e in state["dead"] if e["role"] in ("postmaster-init", "postmaster-final")
+               and not (e["exit"].get("kind") == "exited" and e["exit"].get("code") == 0)]
+        if bad:
+            # repair H3 (T6): a startup FATAL is an OBSERVED non-zero postmaster exit with no
+            # ready postmaster; a timeout without an observed exit is FAIL-TIMEOUT, never this
+            raise Fail("FAIL-START postmaster exit %r" % [(e["pid"], e["role"], e["exit"])
+                                                          for e in bad])
         if os.path.exists(m["pgdata"] + "/.devenv_initialized"):
             try:
                 return listener_proof(m, state)
@@ -2514,6 +2521,13 @@ def main(argv):
         if cmd == "report":
             report(a["evid"], a["head"])
             return EXIT_OK
+        if cmd == "mono":
+            # repair H2/A1: the shell's bounded waits use this monotonic clock
+            plus = float(a.get("plus", 0))
+            sys.stdout.write("%.6f\n" % (now() + plus))
+            return EXIT_OK
+        if cmd == "mono-before":
+            return EXIT_OK if now() < float(a["deadline"]) else EXIT_HOLD
         if cmd == "runtime-for":
             jdump(dict(zip(("runtime", "canonical"), runtime_for_root(a["root"]))))
             return EXIT_OK
@@ -2537,6 +2551,8 @@ def main(argv):
             jdump({"problems": problems}, m["evidence"] + "/provenance.json")
             if problems:
                 jdump({"problems": problems})
+                sys.stderr.write("REFUSE REFUSE-PROVENANCE %d problem(s), see provenance.json\n"
+                                 % len(problems))
                 return EXIT_REFUSE
         elif cmd == "preflight":
             jdump(preflight(m, bool(a.get("first_start"))))
