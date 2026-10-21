@@ -867,6 +867,41 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
       assert lead_count(ctx.account) == 0
       assert admission_count(ctx.tenant) == 0
     end
+
+    # Plan r8 section 15 item 3 (Codex G5 pre-rulings): with the marker,
+    # only an ACTIVE human admin passes. `Checks.ActorRole` checks the role
+    # alone, so an admin whose status is disabled must be refused on both
+    # marked writes, writing nothing.
+    test "T-E13 with the marker, a disabled admin is refused on :create and :record", ctx do
+      present!(@marker, :context, 0)
+      disabled = disabled_admin!(ctx)
+      assert {disabled.role, disabled.status} == {:admin, :disabled}
+
+      # Both writes run before either assertion, so both refusals are reported.
+      create = outcome_of(fn -> marked_create(disabled, lead_attrs(ctx.contact, :manual)) end)
+
+      record =
+        outcome_of(fn ->
+          @lead_admission
+          |> Ash.Changeset.for_create(:record, record_input(ctx),
+            actor: disabled,
+            context: call(@marker, :context, [])
+          )
+          |> Ash.create()
+        end)
+
+      refused = %{
+        create: match?({:error, %Ash.Error.Forbidden{}}, create),
+        record: match?({:error, %Ash.Error.Forbidden{}}, record)
+      }
+
+      assert refused == %{create: true, record: true},
+             "C3-02: a disabled admin's marked writes must be Forbidden: " <>
+               "create #{inspect(create, limit: 8)}, record #{inspect(record, limit: 8)}"
+
+      assert lead_count(ctx.account) == 0
+      assert admission_count(ctx.tenant) == 0
+    end
   end
 
   ## Guards and calls
@@ -1405,6 +1440,21 @@ defmodule SdrAgent.Sales.LeadAdmissionTest do
   end
 
   ## Ash calls
+
+  # A fresh admin of the tenant, then disabled by the context's admin.
+  defp disabled_admin!(ctx) do
+    admin = new_human(:admin, ctx.tenant)
+    assert {:ok, disabled} = SdrAgent.Accounts.change_status(admin, :disabled, actor: ctx.admin)
+    disabled
+  end
+
+  # The value of `fun`, or `{:raised, module}` for a raise.
+  defp outcome_of(fun) do
+    fun.()
+  rescue
+    error in ExUnit.AssertionError -> reraise error, __STACKTRACE__
+    error -> {:raised, error.__struct__}
+  end
 
   defp marked_create(actor, attrs) do
     Lead
