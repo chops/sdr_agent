@@ -19,8 +19,11 @@ defmodule SdrAgent.Agents.WitnessEvidenceV4Test do
   refusal cannot pass merely because R is not yet an allowlisted key.
 
   Only the public `validate/1` and `validate_claim/1` are used; no new
-  production seam is added for this test (size backstop: see the size
-  test's own note).
+  production seam is added for this test. Size: the largest valid v4
+  evidence map was measured at 3205 bytes (`Jason.encode!` of the typed
+  maximum, `reasoning_then_text`), below the 4096-byte cap, so the cap's
+  own refusal branch is not reachable through `validate/1` and stays
+  explicitly NOT covered here (see the size tests).
 
   RED report labels: tests named `control: ...` are expected to pass now
   and after GREEN; every other test is an intended failure (R is not yet
@@ -347,26 +350,55 @@ defmodule SdrAgent.Agents.WitnessEvidenceV4Test do
     |> Map.merge(r_group)
   end
 
-  test "size: the largest valid v4 map is measured, accepted and within 4096 bytes" do
+  # Measured, not estimated: `byte_size(Jason.encode!(maximal(group)))` for
+  # every layout's typed maximum, computed DB-free on 2026-10-21
+  # (`mix run --no-start`, Jason). The largest valid v4 evidence map is
+  # 3205 bytes (`reasoning_then_text`, 42 keys), 891 bytes below the
+  # 4096-byte cap; the refusal layouts' maxima are 3137 to 3143 bytes.
+  @measured_bytes %{
+    "reasoning_then_text" => 3205,
+    "reasoning_overflow" => 3139,
+    "text_count_invalid" => 3139,
+    "block_after_text" => 3137,
+    "block_type_unsupported" => 3143,
+    "reasoning_unparsed" => 3139
+  }
+  @measured_max 3205
+
+  test "size: the largest valid v4 map per layout is measured, accepted and within 4096 bytes" do
     candidates =
       [r("reasoning_then_text", {4, 0}), r("reasoning_then_text", {2, 2})] ++
         for(layout <- @refusal_layouts, do: r(layout))
 
-    for group <- candidates do
-      map = maximal(group)
+    allowed = Map.keys(WitnessEvidence.allowed())
+    counts = [@thinking, @redacted]
 
-      # Every bounded field of the allowlist is populated.
-      assert Enum.sort(Map.keys(map)) == Enum.sort(Map.keys(WitnessEvidence.allowed())),
-             inspect(Map.keys(WitnessEvidence.allowed()) -- Map.keys(map))
+    sizes =
+      for group <- candidates do
+        layout = group["response_layout"]
+        map = maximal(group)
 
-      size = byte_size(Jason.encode!(map))
-      assert accepted?(map), "#{group["response_layout"]} (#{size} bytes): #{inspect(error(map))}"
-      assert size <= WitnessEvidence.max_bytes(), "measured #{size} bytes"
-    end
+        # Every bounded field of the allowlist is populated, except that a
+        # refusal layout must carry no counts (required absence).
+        expected_keys = if layout == "reasoning_then_text", do: allowed, else: allowed -- counts
+        assert Enum.sort(Map.keys(map)) == Enum.sort(expected_keys), layout
+        assert Enum.all?(counts, &(&1 in allowed)), "the R count keys are allowlisted"
+
+        if layout != "reasoning_then_text",
+          do: refute(Enum.any?(counts, &Map.has_key?(map, &1)), "#{layout}: no counts")
+
+        size = byte_size(Jason.encode!(map))
+        assert size == Map.fetch!(@measured_bytes, layout), "#{layout}: measured #{size} bytes"
+        assert accepted?(map), "#{layout} (#{size} bytes): #{inspect(error(map))}"
+        size
+      end
+
+    assert Enum.max(sizes) == @measured_max
+    assert @measured_max <= WitnessEvidence.max_bytes()
   end
 
-  # Disclosure (Codex r5 PASS clarification): the fully typed maximum above
-  # is below 4096 bytes, so no fully typed, valid map reaches the size
+  # Disclosure (Codex r5 PASS clarification): the measured typed maximum
+  # (3205 bytes) is below 4096 bytes, so no fully typed, valid map reaches the size
   # check through `validate/1`; every larger map is refused earlier by a
   # typed validator. The backstop branch is kept but is NOT directly
   # covered here, and the refusal below is asserted as a typed refusal, not

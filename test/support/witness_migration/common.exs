@@ -20,22 +20,43 @@ defmodule SdrAgent.WitnessMigration do
   @v4 "claude-message-json/4+prompt-builder/1"
   @statuses ~w(inferred reconciled mismatch)
 
-  # Refuses anything but the owned disposable database on the devenv port,
-  # the test build and the Fake provider, before any connection is opened.
-  def validate_target!(database) do
+  # The child's resolved target, read from configuration only (no startup,
+  # no connection).
+  def facts do
     config = Application.fetch_env!(:sdr_agent, Repo)
-    true = Regex.match?(Harness.database_pattern(), database)
-    ^database = config[:database]
-    "localhost" = config[:hostname]
-    5520 = config[:port]
-    :test = Mix.env()
-    SdrAgent.AI.ModelProvider.Fake = Application.fetch_env!(:sdr_agent, :model_provider)
-    config
+
+    %{
+      database: config[:database],
+      hostname: config[:hostname],
+      port: config[:port],
+      env: Mix.env(),
+      provider: Application.get_env(:sdr_agent, :model_provider)
+    }
   end
 
-  # The probe's real connection (the application is started by `mix run`).
-  def connect!(database) do
+  # Refuses anything but the owned disposable database on the devenv port,
+  # the test build and the Fake provider (`Harness.check_target/2`), before
+  # any startup, connection or other effect: a refusal prints `REFUSED
+  # <reason>` and halts with `Harness.target_refused/0`.
+  def validate_target!(database) do
+    case Harness.check_target(database, facts()) do
+      :ok ->
+        IO.puts("VALIDATED #{database}")
+        Application.fetch_env!(:sdr_agent, Repo)
+
+      {:error, reason} ->
+        IO.puts("REFUSED #{reason}")
+        System.halt(Harness.target_refused())
+    end
+  end
+
+  # The probe (run with `--no-start`): validates first, then starts the
+  # application explicitly (its heads are made through the domain APIs) and
+  # takes a real connection.
+  def start!(database) do
     validate_target!(database)
+    IO.puts("STARTING after validation")
+    {:ok, _} = Application.ensure_all_started(:sdr_agent)
     :ok = Sandbox.checkout(Repo, sandbox: false)
     Sandbox.mode(Repo, {:shared, self()})
     :ok

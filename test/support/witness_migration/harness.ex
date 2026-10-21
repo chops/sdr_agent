@@ -2,7 +2,9 @@ defmodule SdrAgent.WitnessMigration.Harness do
   @moduledoc """
   Lifecycle of the projection v4 lineage migration campaign (witness
   response-block plan r5, T4 group 2; `SdrAgent.Agents.WitnessLineageMigrationTest`,
-  tagged `:external`, run only by the explicit campaign command).
+  tagged `:external`, run only by the explicit campaign command). Its
+  stubbed lifecycle and target checks are `SdrAgent.Agents.WitnessMigrationHarnessTest`
+  (no database).
 
   It follows the ownership discipline of the C9-04 restart proof
   (`SdrAgent.RestartProof.Harness`), not its grant-proof semantics or its
@@ -11,27 +13,46 @@ defmodule SdrAgent.WitnessMigration.Harness do
     1. refuses a database name other than `sdr_agent_test_wm<10 hex>` and
        claims a temporary folder with `File.mkdir/1` (an existing folder is
        refused);
-    2. claims the database by creating it in a child (`claim.exs`). Before
-       creating anything that child validates the exact name, the resolved
-       host and port 5520, `MIX_ENV=test` and the Fake provider. Creating a
-       previously absent database is the ownership receipt; an existing
-       database is refused and never adopted, migrated or dropped;
-    3. in children (`migrate.exs`, each validating the target again before
-       it opens a connection), migrates the owned database to the immediate
-       predecessor of the new migration, then runs the new migration up,
-       down and up again;
+    2. claims the database by creating it in a child (`claim.exs`). Every
+       child runs with `mix run --no-start` and, as its first effectful
+       statement, validates the target (`check_target/2`: the exact name,
+       the configured database, the resolved host and port 5520,
+       `MIX_ENV=test` and the Fake provider); a refusal exits
+       with status 4 (`REFUSED <reason>`) before any startup, connection or other
+       effect. Creating a previously absent database is the ownership
+       receipt; an existing database is refused and never adopted,
+       migrated or dropped;
+    3. in children (`migrate.exs`, starting only Postgrex, Ecto SQL and the
+       Repo after validation), migrates the owned database to the
+       immediate predecessor of the new migration, then runs the new
+       migration up, down and up again;
     4. after each of those four states, proves the installed lineage
-       function's behaviour in a child (`probe.exs`) by raw inserts inside
+       function's behaviour in a child (`probe.exs`, starting the
+       application explicitly only after validation, since its committed
+       heads are made through the domain APIs) by raw inserts inside
        rolled-back transactions, against heads committed once in the owned
-       database (never by matching source strings);
+       database (never by matching source strings). Each probe result must
+       be a JSON object naming this database and state label, with a
+       non-empty map of string check results;
     5. cleans up only what it claimed: a normal drop of the owned database
        through `drop.exs` (no `FORCE`, no connection termination), after
        every child has exited, then the folder.
 
-  Any failed step or failed cleanup makes the result `{:error, _}`. If a
-  child's end cannot be confirmed, nothing is cleaned up and the error
-  names what is left behind. The parent test Repo and application
-  configuration are never changed.
+  **Failures after ownership.** Once the claim has confirmed ownership, a
+  failed step, an invalid probe result, a runner exception or any other
+  exception in the steps is an error outcome that still goes through
+  cleanup. A failed cleanup keeps both errors:
+  `{:error, {:cleanup_failed, cleanup_error, original_outcome}}`.
+
+  **Uncertainty is never ownership.** If a child's end cannot be confirmed
+  (`{:timeout, :unconfirmed, _}`), or the claim itself raised (whether the
+  database was created is unknown), nothing is cleaned up or dropped and
+  the error names what is left behind. A runner that raises returned no
+  outcome; the real runner raises only when it cannot spawn the child, so a
+  raise never hides a running child. A normal drop also refuses a database
+  that still has connections.
+
+  The parent test Repo and application configuration are never changed.
 
   The runner is injectable (the same contract as the restart proof's): a
   runner is `fn step, args -> outcome end` with outcome `{:ok, output}`,
@@ -43,9 +64,44 @@ defmodule SdrAgent.WitnessMigration.Harness do
   @migration "_v4_mismatch_lineage.exs"
   @scripts Path.expand(".", __DIR__)
   @claim_refused 3
+  @target_refused 4
 
   @doc "The only database names this campaign may claim."
   def database_pattern, do: @database
+
+  @doc "The exit status of a child that refused its target (`REFUSED <reason>`)."
+  def target_refused, do: @target_refused
+
+  @doc """
+  Pure target check, made by every child before any startup, connection
+  or effect. `facts` are the child's resolved `database`, `hostname`,
+  `port`, `env` (`Mix.env/0`) and `provider` (the configured model
+  provider). Returns `:ok` or `{:error, reason}`.
+  """
+  def check_target(database, facts) do
+    cond do
+      not (is_binary(database) and Regex.match?(@database, database)) ->
+        {:error, :invalid_target}
+
+      facts[:database] != database ->
+        {:error, :target_not_configured}
+
+      facts[:hostname] != "localhost" ->
+        {:error, :host_not_local}
+
+      facts[:port] != 5520 ->
+        {:error, :port_not_5520}
+
+      facts[:env] != :test ->
+        {:error, :env_not_test}
+
+      facts[:provider] != SdrAgent.AI.ModelProvider.Fake ->
+        {:error, :provider_not_fake}
+
+      true ->
+        :ok
+    end
+  end
 
   @doc """
   The new migration's version and its immediate predecessor in `dir`:
@@ -98,19 +154,34 @@ defmodule SdrAgent.WitnessMigration.Harness do
   end
 
   defp run_owned(database, tmp, versions, runner, owned) do
-    case runner.(:claim, script("claim.exs", [database], start: false)) do
+    case run(runner, :claim, script("claim.exs", [database])) do
       {:ok, _} ->
         owned = %{owned | database: database}
-        {steps(database, tmp, versions, runner), owned}
+        {guarded_steps(database, tmp, versions, runner), owned}
 
       {:exit, @claim_refused, out} ->
         {{:error, {:database_not_claimed, out}}, owned}
+
+      {:raised, _} = raised ->
+        # Whether the database was created is unknown: never owned, never
+        # dropped, and nothing else is cleaned up either.
+        {{:error, {:claim_failed, raised}}, Map.put(owned, :unconfirmed, true)}
 
       other ->
         # The claim may or may not have created the database: not owned,
         # never dropped; an unconfirmed child also stops all cleanup.
         {{:error, {:claim_failed, other}}, Map.put(owned, :unconfirmed, unconfirmed?(other))}
     end
+  end
+
+  # Ownership is confirmed here: any exception becomes an error outcome, so
+  # it reaches `finish/4` and the owned cleanup.
+  defp guarded_steps(database, tmp, versions, runner) do
+    steps(database, tmp, versions, runner)
+  rescue
+    exception -> {:error, {:raised, exception}}
+  catch
+    kind, reason -> {:error, {:raised, {kind, reason}}}
   end
 
   # predecessor -> new up -> new down -> new up, probing after each.
@@ -125,16 +196,14 @@ defmodule SdrAgent.WitnessMigration.Harness do
     ]
 
     Enum.reduce_while(plan, {:ok, %{}}, fn {direction, version, label}, {:ok, states} ->
-      args =
-        script("migrate.exs", [database, direction, Integer.to_string(version)], start: false)
-
+      migrate = script("migrate.exs", [database, direction, Integer.to_string(version)])
       out = Path.join(tmp, label <> ".json")
 
-      with {:ok, _} <- step(runner, :migrate, args),
+      with {:ok, _} <- step(runner, :migrate, migrate),
            {:ok, _} <- step(runner, :probe, script("probe.exs", [database, label, fixtures, out])),
            {:ok, probe} <- read_json(out),
-           true <- probe["database"] == database || {:error, {:probe_database, probe["database"]}} do
-        {:cont, {:ok, Map.put(states, label, probe["checks"])}}
+           {:ok, checks} <- probe_checks(probe, database, label) do
+        {:cont, {:ok, Map.put(states, label, checks)}}
       else
         {:timeout, _, _} = timeout -> {:halt, {:error, {:step_timeout, label, timeout}}}
         {:error, _} = error -> {:halt, error}
@@ -142,12 +211,49 @@ defmodule SdrAgent.WitnessMigration.Harness do
     end)
   end
 
+  @doc """
+  Validates one probe result: a JSON object naming `database` and `label`,
+  whose `checks` is a non-empty map of string results. Returns `{:ok,
+  checks}` or `{:error, reason}`.
+  """
+  def probe_checks(probe, database, label) do
+    case probe do
+      %{"database" => ^database, "label" => ^label, "checks" => %{} = checks}
+      when map_size(checks) > 0 ->
+        string_checks(checks, label)
+
+      %{"database" => other} when other != database ->
+        {:error, {:probe_database, label, other}}
+
+      %{} ->
+        {:error, {:probe_result_invalid, label}}
+
+      _not_a_map ->
+        {:error, {:probe_result_not_a_map, label}}
+    end
+  end
+
+  defp string_checks(checks, label) do
+    if Enum.all?(checks, fn {name, value} -> is_binary(name) and is_binary(value) end),
+      do: {:ok, checks},
+      else: {:error, {:probe_checks_invalid, label}}
+  end
+
   defp step(runner, name, args) do
-    case runner.(name, args) do
+    case run(runner, name, args) do
       {:ok, out} -> {:ok, out}
       {:timeout, _, _} = timeout -> timeout
       other -> {:error, {name, other}}
     end
+  end
+
+  # A runner exception is reported as `{:raised, _}`, never re-raised.
+  defp run(runner, name, args) do
+    runner.(name, args)
+  rescue
+    exception -> {:raised, exception}
+  catch
+    kind, reason -> {:raised, {kind, reason}}
   end
 
   defp finish(outcome, owned, database, runner) do
@@ -177,7 +283,7 @@ defmodule SdrAgent.WitnessMigration.Harness do
   end
 
   defp drop(database, runner) do
-    case runner.(:drop, script("drop.exs", [database], start: false)) do
+    case run(runner, :drop, script("drop.exs", [database])) do
       {:ok, _} -> :ok
       other -> {:error, {:drop, other}}
     end
@@ -196,8 +302,8 @@ defmodule SdrAgent.WitnessMigration.Harness do
     end
   end
 
-  defp script(name, args, opts \\ []) do
-    start = if Keyword.get(opts, :start, true), do: [], else: ["--no-start"]
-    ["run" | start] ++ ["--no-compile", "--no-deps-check", Path.join(@scripts, name) | args]
-  end
+  # Every child starts with `--no-start`: it validates its target before it
+  # starts anything itself.
+  defp script(name, args),
+    do: ["run", "--no-start", "--no-compile", "--no-deps-check", Path.join(@scripts, name) | args]
 end

@@ -15,6 +15,7 @@ direction =
   end
 
 version = String.to_integer(version)
+IO.puts("STARTING after validation")
 {:ok, _} = Application.ensure_all_started(:postgrex)
 {:ok, _} = Application.ensure_all_started(:ecto_sql)
 

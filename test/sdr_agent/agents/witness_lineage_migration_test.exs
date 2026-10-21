@@ -21,10 +21,14 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
 
       mix test test/sdr_agent/agents/witness_lineage_migration_test.exs --include external
 
-  `SdrAgent.WitnessMigration.Harness` owns the lifecycle (target
-  validation, ownership by creation, child VMs, cleanup of only what it
-  claimed). The lifecycle tests use a stubbed runner and touch no
-  database.
+  `SdrAgent.WitnessMigration.Harness` owns the lifecycle; its stubbed
+  lifecycle and pure target checks run in the ordinary suite
+  (`SdrAgent.Agents.WitnessMigrationHarnessTest`, no database). The child
+  refusal controls below spawn real `mix run --no-start` children against
+  a wrong target and show the refusal before any startup, connection or
+  effect; a wrong environment or provider cannot be configured for a child
+  without changing the project's configuration, so those refusals are
+  covered by the pure `Harness.check_target/2` controls there.
 
   RED: until GREEN adds the migration, the campaign test fails at its
   presence check (no `*_v4_mismatch_lineage.exs`), before anything is
@@ -41,17 +45,21 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
 
   @root Path.expand("../../..", __DIR__)
   @migrations Path.join(@root, "priv/repo/migrations")
-  @versions %{new: 20_261_021_000_000, predecessor: 20_261_016_052_435}
+  @scripts Path.join(@root, "test/support/witness_migration")
   @states ~w(predecessor up down up_again)
 
   defp suffix, do: "_wm" <> Base.encode16(:crypto.strong_rand_bytes(5), case: :lower)
 
-  defp tmp_root do
-    root = Path.join(System.tmp_dir!(), "sdr-wm-lifecycle" <> suffix())
-    :ok = File.mkdir(root)
-    on_exit(fn -> File.rm_rf!(root) end)
-    root
-  end
+  defp mix!, do: System.find_executable("mix") || flunk("mix is not on PATH")
+
+  defp child_args(script, args),
+    do: [
+      "run",
+      "--no-start",
+      "--no-compile",
+      "--no-deps-check",
+      Path.join(@scripts, script) | args
+    ]
 
   # The checks each probe state must report (`SdrAgent.WitnessMigration.checks/1`).
   defp expected(restricted?) do
@@ -70,145 +78,31 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
     })
   end
 
-  # A stub runner: records every step and answers from `answers` (default
-  # `{:ok, ""}`); a successful `:probe` writes the JSON a real child would.
-  defp stub(database, answers \\ %{}) do
-    {:ok, log} = Agent.start_link(fn -> [] end)
+  test "a real child refuses a wrong target before any startup, connection or effect" do
+    # The children run under this partition, so the configured database is
+    # `sdr_agent_test<partition>`; every target below differs from it.
+    partition = suffix()
+    runner = Bounded.port_runner(mix!(), partition, @root, 300_000)
+    out = Path.join(System.tmp_dir!(), "sdr-wm-refusal" <> partition <> ".json")
+    fixtures = out <> ".fixtures"
+    unconfigured = "sdr_agent_test" <> suffix()
 
-    runner = fn step, args ->
-      Agent.update(log, &[step | &1])
-      outcome = Map.get(answers, step, {:ok, ""})
-
-      case {step, outcome} do
-        {:probe, {:ok, _}} ->
-          File.write!(
-            List.last(args),
-            JSON.encode!(%{"database" => database, "checks" => %{"stub" => "ok"}})
-          )
-
-        _other ->
-          :ok
-      end
-
-      outcome
-    end
-
-    {runner, fn -> Enum.reverse(Agent.get(log, & &1)) end}
-  end
-
-  describe "versions (no database)" do
-    test "the new migration must exist exactly once and have a predecessor" do
-      dir = tmp_root()
-      assert Harness.versions(dir) == {:error, :migration_absent}
-
-      File.write!(Path.join(dir, "20261016052435_c2_02b2b_resolution_check.exs"), "")
-      File.write!(Path.join(dir, "20261007021151_s3_audit_kernel.exs"), "")
-      assert Harness.versions(dir) == {:error, :migration_absent}
-
-      File.write!(Path.join(dir, "20261021000000_v4_mismatch_lineage.exs"), "")
-
-      assert Harness.versions(dir) ==
-               {:ok, %{new: 20_261_021_000_000, predecessor: 20_261_016_052_435}}
-
-      File.write!(Path.join(dir, "20261022000000_v4_mismatch_lineage.exs"), "")
-      assert {:error, {:migration_ambiguous, [_, _]}} = Harness.versions(dir)
-    end
-  end
-
-  describe "lifecycle (stubbed children, no database)" do
-    test "the sequence: claim, then migrate and probe at each state, then drop" do
-      sfx = suffix()
-      {runner, steps} = stub("sdr_agent_test" <> sfx)
-
-      assert {:ok, states} =
-               Harness.prove(
-                 suffix: sfx,
-                 tmp_root: tmp_root(),
-                 versions: @versions,
-                 runner: runner
-               )
-
-      assert Enum.sort(Map.keys(states)) == Enum.sort(@states)
-
-      assert steps.() ==
-               [:claim] ++ List.flatten(List.duplicate([:migrate, :probe], 4)) ++ [:drop]
-    end
-
-    test "an invalid target name is refused before anything is claimed" do
-      {runner, steps} = stub("sdr_agent_test")
-
-      assert {:error, {:invalid_target, "sdr_agent_test"}} =
-               Harness.prove(
-                 suffix: "",
-                 tmp_root: tmp_root(),
-                 versions: @versions,
-                 runner: runner
-               )
-
-      assert {:error, {:invalid_target, _}} =
-               Harness.prove(
-                 suffix: "_rp0123456789",
-                 tmp_root: tmp_root(),
-                 versions: @versions,
-                 runner: runner
-               )
-
-      assert steps.() == []
-    end
-
-    test "a pre-existing database is refused: never migrated, probed or dropped" do
-      sfx = suffix()
-      {runner, steps} = stub("sdr_agent_test" <> sfx, %{claim: {:exit, 3, "exists"}})
-
-      assert {:error, {:database_not_claimed, "exists"}} =
-               Harness.prove(
-                 suffix: sfx,
-                 tmp_root: tmp_root(),
-                 versions: @versions,
-                 runner: runner
-               )
-
-      assert steps.() == [:claim]
-    end
-
-    test "a failed migration still drops the owned database, and fails" do
-      sfx = suffix()
-      {runner, steps} = stub("sdr_agent_test" <> sfx, %{migrate: {:exit, 1, "boom"}})
-
-      assert {:error, {:migrate, {:exit, 1, "boom"}}} =
-               Harness.prove(
-                 suffix: sfx,
-                 tmp_root: tmp_root(),
-                 versions: @versions,
-                 runner: runner
-               )
-
-      assert steps.() == [:claim, :migrate, :drop]
-    end
-
-    test "a failed drop fails the campaign" do
-      sfx = suffix()
-      {runner, _steps} = stub("sdr_agent_test" <> sfx, %{drop: {:exit, 1, "busy"}})
-
-      assert {:error, {:cleanup_failed, {:drop, {:exit, 1, "busy"}}, {:ok, _}}} =
-               Harness.prove(
-                 suffix: sfx,
-                 tmp_root: tmp_root(),
-                 versions: @versions,
-                 runner: runner
-               )
-    end
-
-    test "an unconfirmed timeout leaves everything in place and fails" do
-      sfx = suffix()
-      root = tmp_root()
-      {runner, steps} = stub("sdr_agent_test" <> sfx, %{probe: {:timeout, :unconfirmed, ""}})
-
-      assert {:error, {:cleanup_skipped_unconfirmed_child, _, _}} =
-               Harness.prove(suffix: sfx, tmp_root: root, versions: @versions, runner: runner)
-
-      refute :drop in steps.()
-      assert File.dir?(Path.join(root, "sdr-witness-migration" <> sfx))
+    for {label, script, args, reason} <- [
+          {"claim, unconfigured", "claim.exs", [unconfigured], "target_not_configured"},
+          {"claim, invalid name", "claim.exs", ["sdr_agent_dev"], "invalid_target"},
+          {"migrate, unconfigured", "migrate.exs", [unconfigured, "up", "1"],
+           "target_not_configured"},
+          {"probe, unconfigured", "probe.exs", [unconfigured, "predecessor", fixtures, out],
+           "target_not_configured"},
+          {"drop, unconfigured", "drop.exs", [unconfigured], "target_not_configured"}
+        ] do
+      status = Harness.target_refused()
+      assert {:exit, ^status, output} = runner.(:refusal, child_args(script, args)), label
+      assert output =~ "REFUSED #{reason}", "#{label}: #{output}"
+      refute output =~ "VALIDATED", label
+      refute output =~ "STARTING", label
+      refute File.exists?(out), "#{label}: no probe result"
+      refute File.exists?(fixtures), "#{label}: no fixtures"
     end
   end
 
@@ -217,14 +111,13 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
            "structural RED: the *_v4_mismatch_lineage.exs migration does not exist yet"
 
     sfx = suffix()
-    mix = System.find_executable("mix") || flunk("mix is not on PATH")
 
     outcome =
       Harness.prove(
         suffix: sfx,
         tmp_root: System.tmp_dir!(),
         versions: versions,
-        runner: Bounded.port_runner(mix, sfx, @root, 600_000)
+        runner: Bounded.port_runner(mix!(), sfx, @root, 600_000)
       )
 
     assert {:ok, states} = outcome
