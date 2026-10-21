@@ -2,14 +2,19 @@
 # connection termination) of the database this run claimed, after
 # validating the resolved target again. Every other child has exited.
 #
-# Receipt facts (Codex 9ef62e5 G2), printed as closed `WM-CHILD key=value`
-# lines for the harness, never any row content or connection setting:
-# the number of backends connected to the target just before the drop, and
-# whether the target is absent afterwards. Both are read from the
-# maintenance database's catalogs (`pg_stat_activity`, `pg_database`); that
-# connection is never to the target itself.
+# The decision is `SdrAgent.WitnessMigration.Harness.drop_flow/1` (Codex
+# 7ad3bd0 G2-F1), with the real effects injected here: the target's backend
+# count must be zero before the drop (otherwise it refuses, with no drop and
+# no termination), the target must be absent afterwards, and both closed
+# `WM-CHILD key=value` receipt lines must be written. Both counts are read
+# from the maintenance database's catalogs (`pg_stat_activity`,
+# `pg_database`); that connection is never to the target itself, and no row
+# content or connection setting is ever printed. A refusal prints
+# `DROP-REFUSED <label>` and exits with `Harness.drop_refused/0`.
 # Usage: mix run --no-start drop.exs DATABASE
 Code.require_file("common.exs", __DIR__)
+
+alias SdrAgent.WitnessMigration.Harness
 
 [database] = System.argv()
 config = SdrAgent.WitnessMigration.validate_target!(database)
@@ -23,20 +28,26 @@ maintenance =
 
 {:ok, catalog} = Postgrex.start_link(maintenance)
 
-%{rows: [[backends]]} =
-  Postgrex.query!(catalog, "SELECT count(*) FROM pg_stat_activity WHERE datname = $1", [database])
+count = fn sql ->
+  %{rows: [[count]]} = Postgrex.query!(catalog, sql, [database])
+  count
+end
 
-IO.puts("WM-CHILD backends_before_drop=#{backends}")
+effects = %{
+  count_backends: fn -> count.("SELECT count(*) FROM pg_stat_activity WHERE datname = $1") end,
+  storage_down: fn -> Ecto.Adapters.Postgres.storage_down(config) end,
+  count_present: fn -> count.("SELECT count(*) FROM pg_database WHERE datname = $1") end,
+  emit: &IO.puts/1
+}
 
-case Ecto.Adapters.Postgres.storage_down(config) do
+decision = Harness.drop_flow(effects)
+GenServer.stop(catalog)
+
+case decision do
   :ok ->
-    %{rows: [[present]]} =
-      Postgrex.query!(catalog, "SELECT count(*) FROM pg_database WHERE datname = $1", [database])
-
-    IO.puts("WM-CHILD database_absent_after_drop=#{present == 0}")
-    GenServer.stop(catalog)
     System.halt(0)
 
   {:error, reason} ->
-    raise "drop failed: #{inspect(reason)}"
+    :ok = IO.puts("DROP-REFUSED #{Harness.drop_refusal_label(reason)}")
+    System.halt(Harness.drop_refused())
 end

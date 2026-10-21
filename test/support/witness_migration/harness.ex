@@ -402,16 +402,129 @@ defmodule SdrAgent.WitnessMigration.Harness do
     note_drop_facts(outcome)
 
     case outcome do
-      {:ok, _} ->
-        note("cleanup.drop_result", "ok")
-        :ok
+      {:ok, out} ->
+        # An exit-0 drop child counts only with exactly its two successful
+        # facts (Codex 7ad3bd0 G2-F1); otherwise cleanup fails and the
+        # folder (the evidence) is kept.
+        case verify_drop_receipt(out) do
+          {:ok, _facts} ->
+            note("cleanup.drop_receipt", "valid")
+            note("cleanup.drop_result", "ok")
+            :ok
+
+          {:error, reason} ->
+            note("cleanup.drop_receipt", Atom.to_string(reason))
+            note("cleanup.drop_result", "failed")
+            note("cleanup.temp_folder", "retained")
+            note("cleanup.temp_folder_retained_reason", "drop_receipt_invalid")
+            {:error, {:drop, {:receipt_invalid, reason}}}
+        end
 
       other ->
+        note("cleanup.drop_receipt", "not_verified")
         note("cleanup.drop_result", "failed")
         note("cleanup.temp_folder", "retained")
         note("cleanup.temp_folder_retained_reason", "drop_failed")
         {:error, {:drop, other}}
     end
+  end
+
+  ## The drop child's decision (pure; `drop.exs` injects the real effects)
+
+  @drop_refused 5
+  @drop_fact ~r/\A(backends_before_drop|database_absent_after_drop)=(\S+)\z/
+
+  @doc "The exit status of a drop child that refused (`DROP-REFUSED <label>`)."
+  def drop_refused, do: @drop_refused
+
+  @doc """
+  The drop child's decision, with injected `effects`: `count_backends`,
+  `storage_down`, `count_present` (zero-arity functions) and `emit` (one
+  receipt line, must return `:ok`). It writes `WM-CHILD
+  backends_before_drop=<n>`, refuses a nonzero count before any drop (no
+  drop and no backend termination), runs the normal `storage_down`, then
+  writes `WM-CHILD database_absent_after_drop=<bool>` and requires the
+  database to be absent. Returns `:ok` or `{:error, reason}`:
+  `{:backends_present, n}`, `{:drop_failed, reason}`,
+  `:database_present_after_drop` or `:receipt_write_failed`.
+  """
+  def drop_flow(effects) do
+    backends = effects.count_backends.()
+
+    with :ok <- emit(effects, "backends_before_drop=#{backends}"),
+         :ok <- if(backends == 0, do: :ok, else: {:error, {:backends_present, backends}}),
+         :ok <- storage_down(effects),
+         present = effects.count_present.(),
+         :ok <- emit(effects, "database_absent_after_drop=#{present == 0}") do
+      if present == 0, do: :ok, else: {:error, :database_present_after_drop}
+    end
+  end
+
+  defp emit(effects, fact) do
+    case effects.emit.("WM-CHILD " <> fact) do
+      :ok -> :ok
+      _failed -> {:error, :receipt_write_failed}
+    end
+  end
+
+  defp storage_down(effects) do
+    case effects.storage_down.() do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:drop_failed, reason}}
+    end
+  end
+
+  @doc "The closed label a refusing drop child prints (`DROP-REFUSED <label>`)."
+  def drop_refusal_label({:backends_present, _count}), do: "backends_present"
+  def drop_refusal_label({:drop_failed, _reason}), do: "drop_failed"
+  def drop_refusal_label(:database_present_after_drop), do: "database_present_after_drop"
+  def drop_refusal_label(:receipt_write_failed), do: "receipt_write_failed"
+
+  @doc """
+  Strict check of an exit-0 drop child's output: exactly one
+  `backends_before_drop=0` and one `database_absent_after_drop=true`
+  `WM-CHILD` fact. `{:ok, facts}` or `{:error, reason}`, checked in this
+  order: `:facts_malformed` (an unknown key, a bad line or value),
+  `:facts_duplicate`, `:facts_missing`, `:facts_contradictory` (any value
+  other than the successful one).
+  """
+  def verify_drop_receipt(output) when is_binary(output) do
+    lines = for [_, fact] <- Regex.scan(~r/^WM-CHILD (.*)$/m, output), do: fact
+    parsed = Enum.map(lines, &parse_drop_fact/1)
+    keys = for {:ok, key, _value} <- parsed, do: key
+
+    cond do
+      Enum.any?(parsed, &(&1 == :error)) ->
+        {:error, :facts_malformed}
+
+      length(keys) != length(Enum.uniq(keys)) ->
+        {:error, :facts_duplicate}
+
+      Enum.sort(keys) != ["backends_before_drop", "database_absent_after_drop"] ->
+        {:error, :facts_missing}
+
+      successful_drop_facts?(parsed) ->
+        {:ok, Map.new(parsed, fn {:ok, k, v} -> {k, v} end)}
+
+      true ->
+        {:error, :facts_contradictory}
+    end
+  end
+
+  def verify_drop_receipt(_output), do: {:error, :facts_missing}
+
+  defp parse_drop_fact(fact) do
+    case Regex.run(@drop_fact, fact) do
+      [_, key, value] -> if valid_drop_fact?(key, value), do: {:ok, key, value}, else: :error
+      nil -> :error
+    end
+  end
+
+  defp successful_drop_facts?(parsed) do
+    Enum.all?(parsed, fn
+      {:ok, "backends_before_drop", value} -> value == "0"
+      {:ok, "database_absent_after_drop", value} -> value == "true"
+    end)
   end
 
   ## Receipts (closed keys; closed or synthetic values only)
