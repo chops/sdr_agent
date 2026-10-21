@@ -44,7 +44,7 @@ bash test/postgres_log_settings/sink-test.sh campaign  --scratch DIR --evidence 
 | Mode | What it does |
 |---|---|
 | `--dry-plan` | Prints the plan constants and the shape of each instance manifest. Builds nothing, starts nothing, creates nothing, reads no runtime or log path. |
-| `selftest` | T1–T8, T9a/b, T10–T14, T15a–d, T16, T17a/b and T17-baseline, T18a–d with the R6-1 cases `d-vanish` and `d-rebind`, T19a–i, T20a–g, T21a–e, T22a–d, T23a–e, T24, T25, T26a–d, T27 and T28a–c. Each test runs under an independent outer controller. Its observed class must equal its fixed expected class, its exact per-test proof contract must be met, and an independent reconciliation (fixture trees against their declared contents, retained instances against their inventory and retention contract) must find nothing unauthorized. The outcome and the proof are decided before anything is disposed of; an unexpected result keeps all its evidence. Disposal itself is validated, and a final audit re-checks everything retained. The suite stops at the first other result (exit 3). |
+| `selftest` | T1–T8, T9a/b, T10–T14, T15a–d, T16, T17a/b and T17-baseline, T18a–d with the R6-1 cases `d-vanish` and `d-rebind`, T19a–i, T20a–g, T21a–e, T22a–d, T23a–e, T24, T25, T26a–d, T27, T28a–c, T29a/b and the T4a-repair controls T30a–g and T30i–p, T31a–g, T32–T35, T36a–d and T37. The capability gate T35 (separate `EV_UDATA_SPECIFIC` knotes per registration token, with an exact-tuple removal oracle) and the layout gate T30m (the `KERN_PROCARGS2` H-pad hypothesis on owned argv-tolerant fixtures) run first; if either fails, the suite stops before anything relies on them. Each test runs under an independent outer controller. Its observed class must equal its fixed expected class, its exact per-test proof contract must be met, and an independent reconciliation (fixture trees against their declared contents, retained instances against their inventory and retention contract) must find nothing unauthorized. The outcome and the proof are decided before anything is disposed of; an unexpected result keeps all its evidence. Disposal itself is validated, and a final audit re-checks everything retained. The suite stops at the first other result (exit 3). |
 | `discovery` | One B-configured instance, two epochs, no markers. It records real exit statuses, socket outcomes and the inventory, and checks the API-socket lockout (EACCES) on the real sockets. |
 | `campaign` | In this order: positive controls P (E1, E2), audit controls A, then the candidate B (E1, E2, and the forced collector-start failure S5). Every epoch needs a complete classification; an INCOMPLETE one stops the run before any later instance. Then the cross-instance search over SNAP-0, SNAP-pre and SNAP-post of every required epoch, and the count-only report. S5 must show the forced failure was exercised, otherwise the result is NOT-EXERCISED (exit 4, roots retained). |
 
@@ -65,6 +65,18 @@ the instance is left for disposition.
   worktree. Entering that shell runs devenv's `enterShell` and `files:cleanup` tasks in the
   candidate worktree's **own** `.devenv` (build and dependency caches). That is the only
   `.devenv` outside the throwaway roots that the harness causes to be written.
+- **Process observation (T4a repair):** events are attributed only by their registration
+  token (`EV_UDATA_SPECIFIC` udata) to one sealed generation of a pid, never by pid alone.
+  Image and argv come from one fenced snapshot (`proc_pidpath` and `KERN_PROCARGS2` between
+  two empty event fences); nothing is attributed partially or from an earlier image. The
+  pending event queue and every snapshot obligation are bounded, and a new exec never resets
+  an obligation's earliest deadline. Two premises stay **unverified hypotheses**, gated by
+  tests and never by a runtime fallback: the H-pad argument layout (alignment 8, T30m), and
+  the kernel ordering of exec events before later reads (sampled by T30j). Unknown argument
+  vectors grant nothing and are kept only as metadata (argc, lengths, sha256), which is no
+  proof that no environment bytes were read; PostgreSQL children keep only their title.
+- **No bytecode:** every interpreter call uses `-I -B`, and `sink_selftest.py` sets
+  `sys.dont_write_bytecode` before its local import (T34 checks this in a disposable copy).
 - **Image checks (deviation D-7):** the package-bin-directory image check is supplementary.
   The "no API client" fact H rests on the verified command and source closure plus the
   watcher's image observations and the exact `/bin/sh` forms, never on the directory check
@@ -79,6 +91,14 @@ the instance is left for disposition.
   detection.
 - **On failure:** nothing is deleted. Evidence (dir 0700, files 0600) and instance roots are
   retained and reported. Disposal is a separately reviewed step.
+- **Live stack left:** when a stop, the watcher's exit or the barrier fails, or the exit
+  path leaves a watcher running, the harness writes `<evidence>/LIVE-STACK-LEFT.json`. It
+  lists the identities last observed in the watcher state, separately from fresh kernel
+  reads (alive, gone, reused, unknown, and live children the state never recorded), plus
+  the instance root, runtime and port, and every registered fixture still alive (a T4
+  decoy stays alive after a failed stop or barrier, and is listed). A missing or unreadable
+  state is recorded as unknown, never as an empty set. The record sends no signal and has
+  no recovery authority; if writing it fails, the original HOLD stands.
 - **Publication:** count-only. No raw log, error message or marker in context is printed,
   committed or uploaded.
 - **Scope of claims:** they hold only under the reviewed launch envelope: `PGHOST=<runtime>/postgres`, an
@@ -86,6 +106,19 @@ the instance is left for disposition.
   same-uid interference is outside the claim.
 - **Residuals that keep 5b open:** the unexercised init-only collector failure, and
   forced-failure attempts whose output was truncated.
+
+### Recovery runbook
+A live stack is dispositioned by hand, after a case-specific review, never by an automatic
+TERM. This is a procedure, not a script:
+1. Read `LIVE-STACK-LEFT.json` and the retained evidence. Re-check every identity fresh and
+   completely (pid, birth time, uid, parent, image) against the last-observed record.
+2. Get a reviewed ruling for this case. Only then send one SIGTERM, to process-compose only.
+3. Wait, with a bound.
+4. Take a census of the whole tree by kernel identity.
+5. Compare open handles and listeners with the retained evidence.
+6. Prove the stack quiet. Only then disposition any retained fixture (such as the T4 decoy)
+   separately, by its registered identity.
+7. Release the DB slot only after the review accepts the result.
 
 ### Not in CI
 CI's render check already builds the locked `devenv-up`, process-compose included. Keeping
