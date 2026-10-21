@@ -59,12 +59,18 @@ HEAD=$(git -C "$WT" rev-parse HEAD)
 INPUTS=(flake.nix flake.lock devenv.nix priv/postgres/log_settings.json
         test/postgres_log_settings/expected-contract.conf)
 
-# The self-test IDs, in run order (repair plan + amendment self-test list).
-SYNTHETIC_IDS="T9a T9b T10 T11 T12 T15d T16 T17a T17b T17-baseline T18a T18b T18c T18d"
+# The self-test IDs, in run order (repair plan + amendment self-test list). T35 (the
+# EV_UDATA_SPECIFIC capability gate) and T30m (the KERN_PROCARGS2 H-pad layout gate) run
+# FIRST: a failure stops the suite before anything relies on either (B2, B3, B4).
+SYNTHETIC_IDS="T35 T30m"
+SYNTHETIC_IDS="$SYNTHETIC_IDS T9a T9b T10 T11 T12 T15d T16 T17a T17b T17-baseline T18a T18b T18c T18d"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T18d-vanish T18d-rebind T19a T19b T19c T19d T19f T19g T19i"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T20a T20b T20c T20d T20e T20f T20g T21a T21b T21c T21d T21e"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T22a T22b T22c T22d T23a T23b T23c T23d T23e T24 T26a T26b T26c T27"
-SHELL_IDS="T1 T2 T3 T13 T14 T19e T19h T26d T28a T28b T28c T29a T29b"
+SYNTHETIC_IDS="$SYNTHETIC_IDS T30a T30b T30c T30d T30e T30f T30g T30i T30j T30k T30l T30n T30o"
+SYNTHETIC_IDS="$SYNTHETIC_IDS T30p T31a T31b T31c T31d T31e T31f T31g T32 T34 T36a T36b T36c"
+SYNTHETIC_IDS="$SYNTHETIC_IDS T36d T37"
+SHELL_IDS="T1 T2 T3 T13 T14 T19e T19h T26d T28a T28b T28c T29a T29b T33"
 INSTANCE_IDS="T4a T4b T5 T6 T7 T8 T15a T15b T15c T25"
 
 # supervise's post-stop bound is TIMEOUTS.barrier (90) + 30 s; the shell allows 30 s more.
@@ -153,8 +159,10 @@ PYOUT=$("$NIX" build --no-link --print-out-paths --impure --expr \
 PY="$PYOUT/bin/python3"
 [ -x "$PY" ] || die REFUSE "locked python3 not found" 2
 echo "$PY" > "$EVID/python.txt"
-W=("$PY" -I "$HERE/sink_watch.py")
-ST=("$PY" -I "$HERE/sink_selftest.py")
+# F7: -B on every interpreter call (and sink_selftest.py sets sys.dont_write_bytecode before
+# its local import): no bytecode is ever written next to the reviewed sources.
+W=("$PY" -I -B "$HERE/sink_watch.py")
+ST=("$PY" -I -B "$HERE/sink_selftest.py")
 
 for s in "$ST_SUMMARY" "$DISC_SUMMARY"; do
   [ -n "$s" ] || continue
@@ -257,8 +265,36 @@ exit_may_stop() { # rc status-json
   "${ST[@]}" exit-stop-allowed --status "$2" > /dev/null 2>&1
 }
 
+# F5: record a stack that may still be live; never act on it. The recorder (sink_watch.py
+# live-stack-left) decides from the watcher state (missing/unreadable is never a clean empty
+# set), keeps last-observed identities apart from fresh kernel reads, and lists registered
+# fixtures still alive (e.g. a retained T4 decoy). It sends no signal, starts no stop and
+# cleans nothing; its own failure is noted and never changes the status (the original HOLD
+# stands). Recovery is the README runbook, after a case-specific review only.
+LIVE_N=0 LIVE_DONE=""
+live_stack_left() { # manifest state -> always 0
+  local out regs="" f r=0 extra=()
+  [ -n "$2" ] || { note "LIVE-STACK-LEFT: no watcher state path known: live set UNKNOWN (HOLD stands)"; return 0; }
+  [ "$LIVE_DONE" != "$2" ] || return 0
+  LIVE_DONE=$2 LIVE_N=$((LIVE_N + 1))
+  out="$EVID/LIVE-STACK-LEFT.json"; [ "$LIVE_N" -eq 1 ] || out="$EVID/LIVE-STACK-LEFT-$LIVE_N.json"
+  for f in "${SD:-$EVID/none}/fixtures.json" "$GD/fixtures.json"; do
+    [ -f "$f" ] && regs="$regs${regs:+,}$f"
+  done
+  [ -z "$regs" ] || extra=(--registries "$regs")
+  [ -z "$1" ] || extra+=(--manifest "$1")
+  "${W[@]}" live-stack-left --state "$2" --out "$out" --label observed "${extra[@]}" \
+    > "$EVID/live-stack-left-$LIVE_N.decision.json" 2> "$EVID/live-stack-left-$LIVE_N.err" || r=$?
+  if [ "$r" -ne 0 ]; then
+    note "LIVE-STACK-LEFT recorder status $r (see $EVID/live-stack-left-$LIVE_N.err): the original HOLD stands; nothing signalled, stopped or cleaned"
+  elif [ -f "$out" ]; then
+    note "LIVE STACK LEFT: $out (no signal sent, no stop started; see the README Recovery runbook)"
+  fi
+  return 0
+}
+
 # Per-watcher flags: at most one stop request; none after a HOLD.
-ACTIVE_CTL="" ACTIVE_WPID="" STOP_ATTEMPTED=0 HOLD_SEEN=0
+ACTIVE_CTL="" ACTIVE_WPID="" ACTIVE_M="" ACTIVE_STATE="" STOP_ATTEMPTED=0 HOLD_SEEN=0
 on_exit() {
   local rc=$? st crc=0
   trap - EXIT
@@ -279,10 +315,12 @@ on_exit() {
         note "exit-path stop completed; the instance is retained for disposition"
       else
         note "exit-path stop did not complete: HOLD"
+        live_stack_left "$ACTIVE_M" "$ACTIVE_STATE"
         rc=3
       fi
     else
       note "watcher $ACTIVE_WPID left running for disposition (exit $rc; no automatic stop): HOLD"
+      live_stack_left "$ACTIVE_M" "$ACTIVE_STATE"
       rc=3
     fi
   fi
@@ -357,7 +395,8 @@ prepare_reference() {
   new_instance R R
   make_copy "$M"
   build_launcher "$M" > "$EVID/R/launcher-path"
-  "${W[@]}" artifacts --manifest "$M" --launcher "$(< "$EVID/R/launcher-path")" > /dev/null
+  "${W[@]}" artifacts --manifest "$M" --launcher "$(< "$EVID/R/launcher-path")" \
+    --nix-store "$NIXBIN/nix-store" > /dev/null
 }
 
 prepare_instance() { # kind inst -> M
@@ -369,7 +408,8 @@ prepare_instance() { # kind inst -> M
   eval_check "$M"
   case "$kind" in B|D|S) extra=(--expected-contract "$EVID/expected-contract.conf") ;; esac
   "${W[@]}" artifacts --manifest "$M" --launcher "$(< "$ev/launcher-path")" \
-    --reference "$EVID/R/artifacts.json" "${extra[@]+"${extra[@]}"}" > /dev/null \
+    --nix-store "$NIXBIN/nix-store" --reference "$EVID/R/artifacts.json" \
+    "${extra[@]+"${extra[@]}"}" > /dev/null \
     || die REFUSE "provenance check failed for $inst (see $ev/provenance.json)" 2
 }
 
@@ -389,7 +429,7 @@ start_epoch() { # manifest epoch first(1|0) -> ED CTL STATE WPID
   CTL="$ED/ctl" STATE="$ED/state.json"
   "${W[@]}" supervise --manifest "$m" --ctl "$CTL" --state "$STATE" \
     --launcher "$(< "$ev/launcher-path")" --epoch "$ep" > "$ED/supervise.out" 2> "$ED/supervise.err" &
-  WPID=$! ACTIVE_CTL=$CTL ACTIVE_WPID=$WPID STOP_ATTEMPTED=0 HOLD_SEEN=0
+  WPID=$! ACTIVE_CTL=$CTL ACTIVE_WPID=$WPID ACTIVE_M=$m ACTIVE_STATE=$STATE STOP_ATTEMPTED=0 HOLD_SEEN=0
 }
 
 wait_ready() { # manifest deadline -> PMPID PMBIRTH (rc of ready-wait; stderr in $ED/ready.err)
@@ -439,19 +479,24 @@ stop_and_barrier() { # manifest
   if ! wait_bounded "$WPID" "$WATCH_EXIT_S"; then
     HOLD_SEEN=1
     echo "running-at-deadline" > "$ED/supervise.rc"
+    live_stack_left "$1" "$STATE"
     return 3
   fi
-  ACTIVE_CTL="" ACTIVE_WPID=""
+  ACTIVE_CTL="" ACTIVE_WPID="" ACTIVE_M="" ACTIVE_STATE=""
   echo "$WAIT_RC" > "$ED/supervise.rc"
   echo "$crc" > "$ED/stop.rc"
   if [ "$crc" -ne 0 ] || [ "$WAIT_RC" -ne 0 ]; then
     HOLD_SEEN=1
+    live_stack_left "$1" "$STATE"
     return 3
   fi
   guarded_w 120 /dev/null "$ED/barrier.err" barrier --manifest "$1" --state "$STATE" \
     --out "$ED/barrier.json" || brc=$?
   echo "$brc" > "$ED/barrier.rc"
-  [ "$brc" -eq 0 ] || HOLD_SEEN=1
+  if [ "$brc" -ne 0 ]; then
+    HOLD_SEEN=1
+    live_stack_left "$1" "$STATE"
+  fi
   return "$brc"
 }
 
@@ -805,7 +850,8 @@ st_T14() {
   make_copy "$m"
   build_launcher "$m" "$other" > "$ev/launcher-path"
   "${W[@]}" artifacts --manifest "$m" --launcher "$(< "$ev/launcher-path")" \
-    --reference "$EVID/R/artifacts.json" > /dev/null 2> "$SD/T14.err" || rc=$?
+    --nix-store "$NIXBIN/nix-store" --reference "$EVID/R/artifacts.json" \
+    > /dev/null 2> "$SD/T14.err" || rc=$?
   cls=$(obs "$SD/T14.err"); [ "$rc" -eq 2 ] || cls="$cls-STATUS-$rc"
   st_pre T14 REFUSE-PROVENANCE "$cls" '{}'
   dispose_or_hold T14 other
@@ -902,6 +948,38 @@ st_T26d() {
   sv T26d DECISIONS-AS-REQUIRED "$cls" '{"fixtures": "not-applicable:decision function on fabricated status files"}'
 }
 
+# The T4 decoy may be stopped only after a successful stop AND barrier (pure; T33).
+decoy_after_stop() { if [ "$1" = 0 ]; then echo stop; else echo retain; fi; }
+
+# T33 (F5): the live-stack recorder and the decoy decision on FABRICATED state files,
+# labelled fixture-synthetic (no recovery authority): a record exactly when required
+# (live identities, a bounded watcher exit, an unreaped launcher, a missing or a malformed
+# state), none for a clean state; the decoy is retained after any failed stop/barrier.
+# No ctl, stop or signal is issued; like T26d it tests decision functions only.
+st_T33() {
+  local dir="$SD/T33" got="" c dec
+  mkdir -m 700 "$dir"
+  printf '%s\n' '{"live": [{"pid": 999999999, "birth_us": 1, "role": "process-compose", "gen": 1}], "violations": []}' > "$dir/live.json"
+  printf '%s\n' '{"live": [], "violations": [{"kind": "watcher-exited-bounded", "live": []}]}' > "$dir/bounded.json"
+  printf '%s\n' '{"live": [], "violations": [{"kind": "launcher-not-reaped", "pid": 999999999}]}' > "$dir/unreaped.json"
+  printf '%s\n' '{"live": [], "violations": []}' > "$dir/clean.json"
+  printf '%s\n' '{"live": [' > "$dir/malformed.json"
+  for c in live bounded unreaped missing malformed clean; do
+    "${W[@]}" live-stack-left --state "$dir/$c.json" --out "$dir/out-$c.json" \
+      --label fixture-synthetic > "$dir/$c.decision.json" 2> "$dir/$c.err" || { got="$got $c=status-$?"; continue; }
+    if [ -f "$dir/out-$c.json" ] && [ "$(jget "$dir/out-$c.json" label)" = fixture-synthetic ] \
+        && [ "$(jget "$dir/out-$c.json" authority | cut -c1-5)" = "none:" ]; then
+      got="$got $c=recorded"
+    elif [ -f "$dir/out-$c.json" ]; then got="$got $c=bad-record"
+    else got="$got $c=none"; fi
+  done
+  for c in 0 3 4; do dec=$(decoy_after_stop "$c"); got="$got decoy$c=$dec"; done
+  local want=" live=recorded bounded=recorded unreaped=recorded missing=recorded malformed=recorded clean=none decoy0=stop decoy3=retain decoy4=retain"
+  local cls="DECISIONS:$got"
+  [ "$got" != "$want" ] || cls=DECISIONS-AS-REQUIRED
+  sv T33 DECISIONS-AS-REQUIRED "$cls" '{"fixtures": "not-applicable:decision functions on fabricated state files"}'
+}
+
 st_T4() { # a|b
   local v=$1 addr; [ "$v" = a ] && addr=127.0.0.1 || addr=0.0.0.0
   local T="T4$v"
@@ -919,11 +997,20 @@ st_T4() { # a|b
   "${W[@]}" supervise --manifest "$m" --ctl "$CTL" --state "$STATE" \
     --launcher "$(< "$(mf "$m" evidence)/launcher-path")" --epoch E1 > "$ED/supervise.out" \
     2> "$ED/supervise.err" &
-  WPID=$! ACTIVE_CTL=$CTL ACTIVE_WPID=$WPID STOP_ATTEMPTED=0 HOLD_SEEN=0
+  WPID=$! ACTIVE_CTL=$CTL ACTIVE_WPID=$WPID ACTIVE_M=$m ACTIVE_STATE=$STATE STOP_ATTEMPTED=0 HOLD_SEEN=0
   wait_ready "$m" 60 || rc=$?
   cls=$(obs "$ED/ready.err")
   [ "$rc" -ne 0 ] || cls="READY"
   stop_and_barrier "$m" || sb=$?
+  # F5/Q3: after a failed stop or barrier the identity-registered decoy is NOT stopped: it
+  # stays alive holding the port, is recorded (LIVE-STACK-LEFT lists it) and retained,
+  # and the test HOLDs before any further effect. Recovery stops and proves the stack
+  # quiet first, then dispositions the decoy separately (README runbook).
+  if [ "$(decoy_after_stop "$sb")" != stop ]; then
+    HOLD_SEEN=1
+    note "$T: stop/barrier status $sb: decoy pid $dp left alive and retained (identity in $SD/fixtures.json)"
+    die HOLD "$T stop/barrier status $sb; decoy retained, nothing stopped" 3
+  fi
   st_kill "$T" tcp-decoy "$dp" || k=$?
   [ "$k" -eq 0 ] || die HOLD "$T fixture teardown: REAL-UNCERTAINTY" 3
   acc=$(jget "$SD/$T-count.json" accepts)
@@ -1162,7 +1249,7 @@ run_selftest() {
   SD="$EVID/selftest"; mkdir -m 700 "$SD"
   local id dl ids="" r=0 g
   for id in $SYNTHETIC_IDS; do
-    case "$id" in T16|T18*) dl=180 ;; *) dl=120 ;; esac
+    case "$id" in T16|T18*|T30j) dl=180 ;; *) dl=120 ;; esac
     g=0
     run_guarded "$dl" /dev/null "$SD/$id.err" "${ST[@]}" synthetic --dir "$SD" --scratch "$RUNROOT" \
       --runroot "$RUNROOT" --id "$id" || g=$?
@@ -1173,6 +1260,7 @@ run_selftest() {
   done
   ST_TEST=R; prepare_reference; ST_TEST=""
   st_T1; st_T2; st_T3; st_T13; st_T14; st_T19e; st_T19h; st_T26d; st_T28 a; st_T28 b; st_T28 c; st_T29 a; st_T29 b
+  st_T33
   st_T4 a; st_T4 b; st_T5; st_T6; st_T7; st_T8; st_T15 a; st_T15 b; st_T15 c; st_T25
   for id in $SYNTHETIC_IDS $SHELL_IDS $INSTANCE_IDS; do ids="$ids${ids:+,}$id"; done
   "${ST[@]}" summary --dir "$SD" --head "$HEAD" --ids "$ids" --runroot "$RUNROOT" \

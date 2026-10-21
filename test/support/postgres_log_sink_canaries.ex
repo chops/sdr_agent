@@ -235,6 +235,7 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
   defp target_check!(m, opts) do
     args = [
       "-I",
+      "-B",
       Map.fetch!(opts, "watch"),
       "target-socket-check",
       "--socket-dir",
@@ -365,6 +366,7 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
 
     args = [
       "-I",
+      "-B",
       watch,
       "listener-proof",
       "--manifest",
