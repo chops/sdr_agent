@@ -70,7 +70,7 @@ _proof(["T9a", "T9b", "T10", "T11", "T12", "T15d", "T16", "T17a", "T17b", "T18a"
         "T20f", "T20g", "T21a", "T21b", "T21c", "T21d", "T21e", "T22a", "T22b", "T22d", "T24", "T27"],
        fixtures=REQ)
 _proof(["T17-baseline", "T22c", "T23a", "T23b", "T23c", "T23d", "T23e", "T26d", "T28a", "T28b",
-        "T28c"], fixtures=NA)
+        "T28c", "T29a", "T29b"], fixtures=NA)
 _proof(["T19a"], launcher_reap=REQ, fixtures=REQ)
 _proof(["T19b", "T19c", "T19d", "T19f", "T19g", "T19i", "T26a", "T26c"], outer_reap=REQ,
        fixtures=REQ)

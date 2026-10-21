@@ -64,7 +64,7 @@ SYNTHETIC_IDS="T9a T9b T10 T11 T12 T15d T16 T17a T17b T17-baseline T18a T18b T18
 SYNTHETIC_IDS="$SYNTHETIC_IDS T18d-vanish T18d-rebind T19a T19b T19c T19d T19f T19g T19i"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T20a T20b T20c T20d T20e T20f T20g T21a T21b T21c T21d T21e"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T22a T22b T22c T22d T23a T23b T23c T23d T23e T24 T26a T26b T26c T27"
-SHELL_IDS="T1 T2 T3 T13 T14 T19e T19h T26d T28a T28b T28c"
+SHELL_IDS="T1 T2 T3 T13 T14 T19e T19h T26d T28a T28b T28c T29a T29b"
 INSTANCE_IDS="T4a T4b T5 T6 T7 T8 T15a T15b T15c T25"
 
 # supervise's post-stop bound is TIMEOUTS.barrier (90) + 30 s; the shell allows 30 s more.
@@ -698,7 +698,16 @@ st_intent() { "${ST[@]}" intent --dir "$SD" --test "$1" --label "$2" --kind "$3"
 st_idpath() { "${ST[@]}" identity-path --dir "$SD" --test "$1" --label "$2" --path "$3"; }
 st_idproc() { "${ST[@]}" identity-proc --dir "$SD" --test "$1" --label "$2" --pid "$3" --ppid "${4:-$BASHPID}"; }
 st_retain() { "${ST[@]}" retain --dir "$SD" --test "$1" --labels "$2" --manifests "${3:-}"; }
-st_dispose() { "${ST[@]}" dispose --dir "$SD" --test "$1" --label "$2" > /dev/null; }
+st_dispose() { "${ST[@]}" dispose --dir "$SD" --test "$1" --label "$2" > "$SD/$1-$2.dispose.out" 2> "$SD/$1-$2.dispose.err"; }
+# R2 residual: a validated disposal that does not succeed is actual teardown uncertainty.
+# It HOLDs at once, before any later disposal, cleanup or other effect; the status and the
+# disposer's own receipt stay visible and everything is retained. Injectable for T29.
+ST_DISPOSE=st_dispose ST_CLEANUP=cleanup_instance
+dispose_or_hold() { # test label
+  local rc=0
+  "$ST_DISPOSE" "$1" "$2" || rc=$?
+  [ "$rc" -eq 0 ] || die HOLD "self-test $1: disposal of $2 status $rc (see $SD/$1-$2.dispose.err); everything retained, no cleanup" 3
+}
 obs() { "${ST[@]}" observed-class --file "$1" | "${W[@]}" jget --file - --key class; }
 rcword() { if [ "$1" = 0 ]; then echo ok; else echo "status-$1"; fi; }
 gate_wait() { local _i; for _i in $(seq 1 200); do [ -e "$1" ] && return 0; sleep 0.05; done; return 3; }
@@ -723,7 +732,7 @@ st_fixture() { # test label ready-path fixture-args...
 }
 
 st_T1() {
-  ST_TEST=T1; new_instance S T1; local m=$M rt rc=0 b a cls cl=0 fx=0
+  ST_TEST=T1; new_instance S T1; local m=$M rt rc=0 b a cls cl=0
   rt=$(mf "$m" runtime)
   st_intent T1 rtdir dir ""; mkdir -m 700 "$rt"; st_idpath T1 rtdir "$rt"; b=$($STAT -f '%d:%i' "$rt")
   "${W[@]}" claim-runtime --manifest "$m" > /dev/null 2> "$SD/T1.err" || rc=$?
@@ -731,14 +740,14 @@ st_T1() {
   cls=$(obs "$SD/T1.err"); [ "$rc" -eq 2 ] || cls="$cls-STATUS-$rc"
   { [ "$a" = "$b" ] && [ -z "$(ls -A "$rt")" ]; } || cls="RUNTIME-DIR-CHANGED"
   st_pre T1 REFUSE-RUNTIME-EXISTS "$cls" '{}'
-  st_dispose T1 rtdir || fx=$?
-  cleanup_instance "$m" || cl=$?
+  dispose_or_hold T1 rtdir
+  "$ST_CLEANUP" "$m" || cl=$?
   ST_TEST=""
-  sv T1 REFUSE-RUNTIME-EXISTS "$cls" "{\"fixtures\": \"$(rcword $fx)\", \"cleanup\": \"$(rcword $cl)\"}"
+  sv T1 REFUSE-RUNTIME-EXISTS "$cls" "{\"fixtures\": \"ok\", \"cleanup\": \"$(rcword $cl)\"}"
 }
 
 st_T2() {
-  ST_TEST=T2; new_instance S T2; local m=$M rt rc=0 cls k=0 cl=0 fx=0
+  ST_TEST=T2; new_instance S T2; local m=$M rt rc=0 cls k=0 cl=0
   rt=$(mf "$m" runtime)
   st_intent T2 rtdir dir "pc.sock"; mkdir -m 700 "$rt"; st_idpath T2 rtdir "$rt"
   st_fixture T2 unix-decoy "$rt/pc.sock" fixture-unix-listener --path "$rt/pc.sock"
@@ -747,15 +756,15 @@ st_T2() {
   st_kill T2 unix-decoy "$FX" || k=$?
   [ "$k" -eq 0 ] || die HOLD "T2 fixture teardown: REAL-UNCERTAINTY" 3
   st_pre T2 REFUSE-RUNTIME-EXISTS "$cls" '{}'
-  st_dispose T2 rtdir || fx=$?
-  cleanup_instance "$m" || cl=$?
+  dispose_or_hold T2 rtdir
+  "$ST_CLEANUP" "$m" || cl=$?
   ST_TEST=""
-  sv T2 REFUSE-RUNTIME-EXISTS "$cls" "{\"fixtures\": \"$(rcword $fx)\", \"cleanup\": \"$(rcword $cl)\"}"
+  sv T2 REFUSE-RUNTIME-EXISTS "$cls" "{\"fixtures\": \"ok\", \"cleanup\": \"$(rcword $cl)\"}"
 }
 
 st_T3() {
   local real="$RUNROOT/t3-real" link="$RUNROOT/t3-link" d755="$RUNROOT/t3-755" repo="$RUNROOT/t3-repo"
-  local ca cb cc cls ra=0 rb=0 rc=0 fx=0
+  local ca cb cc cls ra=0 rb=0 rc=0
   st_intent T3 real dir ""; mkdir -m 700 "$real"; st_idpath T3 real "$real"
   st_intent T3 link symlink; ln -s "$real" "$link"; st_idpath T3 link "$link"
   st_intent T3 d755 dir ""; mkdir -m 755 "$d755"; st_idpath T3 d755 "$d755"
@@ -771,8 +780,8 @@ st_T3() {
   cls="symlink=$ca/$ra,mode755=$cb/$rb,in-checkout=$cc/$rc"
   [ "$cls" != "symlink=REFUSE-ROOT/2,mode755=REFUSE-ROOT/2,in-checkout=REFUSE-ROOT/2" ] || cls=REFUSE-ROOT
   st_pre T3 REFUSE-ROOT "$cls" '{}'
-  { st_dispose T3 link && st_dispose T3 real && st_dispose T3 d755 && st_dispose T3 repo; } || fx=$?
-  sv T3 REFUSE-ROOT "$cls" "{\"fixtures\": \"$(rcword $fx)\"}"
+  dispose_or_hold T3 link; dispose_or_hold T3 real; dispose_or_hold T3 d755; dispose_or_hold T3 repo
+  sv T3 REFUSE-ROOT "$cls" "{\"fixtures\": \"ok\"}"
 }
 
 st_T13() {
@@ -790,7 +799,7 @@ st_T13() {
 }
 
 st_T14() {
-  ST_TEST=T14; new_instance S T14; local m=$M other="$RUNROOT/t14-other" ev cls cl=0 rc=0 fx=0
+  ST_TEST=T14; new_instance S T14; local m=$M other="$RUNROOT/t14-other" ev cls cl=0 rc=0
   ev=$(mf "$m" evidence)
   st_intent T14 other dir ""; mkdir -m 700 "$other"; st_idpath T14 other "$other"
   make_copy "$m"
@@ -799,10 +808,10 @@ st_T14() {
     --reference "$EVID/R/artifacts.json" > /dev/null 2> "$SD/T14.err" || rc=$?
   cls=$(obs "$SD/T14.err"); [ "$rc" -eq 2 ] || cls="$cls-STATUS-$rc"
   st_pre T14 REFUSE-PROVENANCE "$cls" '{}'
-  st_dispose T14 other || fx=$?
-  cleanup_instance "$m" || cl=$?
+  dispose_or_hold T14 other
+  "$ST_CLEANUP" "$m" || cl=$?
   ST_TEST=""
-  sv T14 REFUSE-PROVENANCE "$cls" "{\"fixtures\": \"$(rcword $fx)\", \"cleanup\": \"$(rcword $cl)\"}"
+  sv T14 REFUSE-PROVENANCE "$cls" "{\"fixtures\": \"ok\", \"cleanup\": \"$(rcword $cl)\"}"
 }
 
 # T19e (A1): the subject is wait_bounded on its own 8 s fixture with a 2 s deadline; it must
@@ -983,6 +992,29 @@ t28_client() { # fabricated client: logs the call, writes the scenario's receipt
     *:db-exists) printf '%s\n' '{"status": 0, "exists": false}' > "$f"; return 0 ;;
   esac
 }
+# T29 (R2 residual control): the real dispose_or_hold -> cleanup sequence in a subshell with
+# an injected disposer and cleanup. a: an expected functional result whose disposal returns
+# 3; cleanup must NOT be called and the evidence must remain. b: the paired successful
+# disposal reaches cleanup and the evidence is gone.
+t29_dispose() { echo "dispose" >> "$T29_DIR/calls.log"; [ "$T29_SCENARIO" = ok ] || return 3; rm -f "$T29_DIR/evidence"; }
+t29_cleanup() { echo "cleanup" >> "$T29_DIR/calls.log"; }
+st_T29() { # a|b
+  local v=$1 T sc rc=0 calls want wrc ev cls
+  T="T29$v"
+  T29_DIR="$SD/$T"; mkdir -m 700 "$T29_DIR"; : > "$T29_DIR/calls.log"; : > "$T29_DIR/evidence"
+  case "$v" in
+    a) sc=fail want="dispose " wrc=3 ev=present ;;
+    *) sc=ok want="dispose cleanup " wrc=0 ev=absent ;;
+  esac
+  ( T29_SCENARIO=$sc; ST_DISPOSE=t29_dispose; ST_CLEANUP=t29_cleanup
+    dispose_or_hold "$T" evidence; "$ST_CLEANUP" /fabricated ) > "$T29_DIR/sub.out" 2> "$T29_DIR/sub.err" || rc=$?
+  calls=$(tr '\n' ' ' < "$T29_DIR/calls.log")
+  local now=absent; [ ! -e "$T29_DIR/evidence" ] || now=present
+  cls="CALLS:${calls}RC:$rc:EVIDENCE:$now"
+  [ "$calls" != "$want" ] || [ "$rc" != "$wrc" ] || [ "$now" != "$ev" ] || cls=DISPOSAL-GATE-AS-REQUIRED
+  sv "$T" DISPOSAL-GATE-AS-REQUIRED "$cls" '{"fixtures": "not-applicable:fabricated disposer and cleanup"}'
+}
+
 st_T28() { # a|b|c
   local v=$1 T sc rc=0 calls want wrc cls
   T="T28$v"
@@ -1140,7 +1172,7 @@ run_selftest() {
     check_receipt "$id"
   done
   ST_TEST=R; prepare_reference; ST_TEST=""
-  st_T1; st_T2; st_T3; st_T13; st_T14; st_T19e; st_T19h; st_T26d; st_T28 a; st_T28 b; st_T28 c
+  st_T1; st_T2; st_T3; st_T13; st_T14; st_T19e; st_T19h; st_T26d; st_T28 a; st_T28 b; st_T28 c; st_T29 a; st_T29 b
   st_T4 a; st_T4 b; st_T5; st_T6; st_T7; st_T8; st_T15 a; st_T15 b; st_T15 c; st_T25
   for id in $SYNTHETIC_IDS $SHELL_IDS $INSTANCE_IDS; do ids="$ids${ids:+,}$id"; done
   "${ST[@]}" summary --dir "$SD" --head "$HEAD" --ids "$ids" --runroot "$RUNROOT" \
