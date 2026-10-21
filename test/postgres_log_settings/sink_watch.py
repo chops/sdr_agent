@@ -1538,42 +1538,79 @@ class Watch(object):
             self.dirty = False
 
 
-def supervise(m, ctl, state_path, launcher_path, epoch):
-    """Spawn the reviewed launcher with the exact envelope and watch its tree."""
+def ident(e):
+    return {"pid": e["pid"], "birth_us": e["birth_us"], "role": e["role"]}
+
+
+def supervise(m, ctl, state_path, launcher_path, epoch, seam_exit_before_register=False,
+              post_stop_s=None):
+    """Spawn the reviewed launcher with the exact envelope and watch its tree (repair H2).
+
+    Spawn, registration and first admission run inside try/finally, so a state receipt is
+    always written. A launcher that exits before registration completes is
+    `launcher-unregistered` with its identity recorded as unknown. After a stop request or
+    any uncertainty, the loop runs at most to a monotonic post-stop deadline, then writes
+    the live identities and exits HOLD without signalling. A bounded exit is never proof
+    that descendants or connections are gone; the barrier decides.
+
+    `seam_exit_before_register` is a test-only seam (A2, T19a): it blocks, without reaping,
+    until the spawned fixture has exited, so the registration step deterministically meets
+    an exited launcher. Production callers never pass it."""
     os.makedirs(ctl, 0o700, exist_ok=True)
     w = Watch(m, state_path)
-    out_base = m["evidence"] + "/" + epoch
-    os.makedirs(out_base, 0o700, exist_ok=True)
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-    fo = os.open(out_base + "/launcher.out", flags, 0o600)
-    fe = os.open(out_base + "/launcher.err", flags, 0o600)
-    w.launcher = subprocess.Popen([launcher_path], env=dict(m["launch_env"]), cwd=m["root"],
-                                  stdin=subprocess.DEVNULL, stdout=fo, stderr=fe,
-                                  close_fds=True, start_new_session=True)
-    os.close(fo)
-    os.close(fe)
-    lp = w.launcher.pid
-    if not w.register(lp):
-        raise Hold("launcher exited before registration")
-    cur = bsdinfo(lp)
-    if cur is None:
-        raise Hold("launcher gone")
-    w._add(lp, cur, "spawned", None, lineage=True)
-    stop_requested, last_scan, last_trip, served = False, 0.0, 0.0, set()
+    w.closure = h_closure(m) if "evidence" in m else {"closure_verified": False,
+                                                       "detail": "no evidence dir"}
+    post_s = TIMEOUTS["barrier"] + 30 if post_stop_s is None else float(post_stop_s)
+    stop_requested = held = False
+    post_deadline = None
     exit_code = EXIT_OK
     try:
+        out_base = m["evidence"] + "/" + epoch
+        os.makedirs(out_base, 0o700, exist_ok=True)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fo = os.open(out_base + "/launcher.out", flags, 0o600)
+        fe = os.open(out_base + "/launcher.err", flags, 0o600)
+        try:
+            w.launcher = subprocess.Popen([launcher_path], env=dict(m["launch_env"]),
+                                          cwd=m["root"], stdin=subprocess.DEVNULL, stdout=fo,
+                                          stderr=fe, close_fds=True, start_new_session=True)
+        finally:
+            os.close(fo)
+            os.close(fe)
+        lp = w.launcher.pid
+        w.launcher_identity = {"pid": lp, "birth_us": None, "identity": "unknown"}
+        w.dirty = True
+        if seam_exit_before_register:
+            os.waitid(os.P_PID, lp, os.WEXITED | os.WNOWAIT)
+        registered = w.register(lp)
+        exited = os.waitid(os.P_PID, lp, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        cur = bsdinfo(lp) if registered and not exited else None
+        if not registered or exited or cur is None:
+            w.violation("launcher-unregistered", pid=lp)
+            raise Hold("launcher exited before registration completed")
+        w.launcher_identity = {"pid": lp, "birth_us": cur["birth_us"], "identity": "kernel"}
+        if w._add(lp, cur, "spawned", None, lineage=True, proof="kernel-event") is None:
+            w.violation("launcher-unregistered", pid=lp)
+            raise Hold("launcher not admitted")
+        last_scan = last_trip = 0.0
+        served = set()
         while True:
-            w.drain(0.2)
-            t = now()
-            if t - last_scan > 0.2:
-                for pid in list(w.entries):
-                    w.scan_children(pid, "periodic")
-                w.identify_postmaster()
-                w.refresh()
-                last_scan = t
-            if t - last_trip > TRIPWIRE_PERIOD:
-                w.tripwire()
-                last_trip = t
+            try:
+                w.drain(0.2)
+                t = now()
+                if t - last_scan > 0.2:
+                    for pid in list(w.entries):
+                        w.scan_children(pid, "periodic")
+                    w.identify_postmaster()
+                    w.refresh()
+                    last_scan = t
+                if t - last_trip > TRIPWIRE_PERIOD:
+                    w.tripwire()
+                    last_trip = t
+            except Hold as h:
+                w.violation("HOLD", detail=str(h))
+                w.signals_frozen = held = True
+            end_watch = False
             for name in sorted(os.listdir(ctl)):
                 if not name.startswith("req-") or name in served:
                     continue
@@ -1583,19 +1620,43 @@ def supervise(m, ctl, state_path, launcher_path, epoch):
                 jdump(resp, ctl + "/resp-" + name[4:])
                 if req.get("cmd") == "stop":
                     stop_requested = True
+                    if not resp.get("ok"):
+                        held = True
                 if req.get("cmd") == "exit-watch":
-                    raise Hold("watch ended by request with %d live entries" % len(w.entries))
+                    end_watch = True
+            if (stop_requested or held) and post_deadline is None:
+                post_deadline = now() + post_s
             if w.launcher.poll() is not None and not w.entries:
+                break
+            if end_watch:
+                w.violation("watch-ended-by-request", live=[ident(e) for e in w.entries.values()])
+                held = True
+                break
+            if post_deadline is not None and now() > post_deadline:
+                w.violation("watcher-exited-bounded", live=[ident(e) for e in w.entries.values()])
+                held = True
                 break
             w.flush()
     except Hold as h:
-        w.violations.append({"t": now(), "kind": "HOLD", "detail": str(h)})
-        exit_code = EXIT_HOLD
+        w.violation("HOLD", detail=str(h))
+        w.signals_frozen = held = True
     finally:
+        if w.launcher is not None:
+            try:
+                w.launcher_reaped = {"returncode": w.launcher.wait(timeout=5)}
+            except subprocess.TimeoutExpired:
+                w.launcher_reaped = {"returncode": None, "state": "not-reaped-live"}
+        for hp in w.helpers:
+            try:
+                hp.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                w.violation("helper-not-reaped", pid=hp.pid)
         w.dirty = True
         w.flush()
-    if not stop_requested and exit_code == EXIT_OK:
-        exit_code = EXIT_FAIL  # the tree ended without a deliberate stop
+    if held:
+        return EXIT_HOLD
+    if not stop_requested:
+        return EXIT_FAIL  # the tree ended without a deliberate stop
     return exit_code
 
 
@@ -1614,37 +1675,68 @@ def serve(w, m, req):
     return {"ok": False, "error": "unknown cmd"}
 
 
-def stop_tree(w, m):
-    """Deliberate stop with verified escalation (r3 2.4); never SIGKILL a postmaster."""
-    w.marks["stop_begin"] = now()
+STOP_STAGES = {"launcher": 30.0, "pc": 20.0, "dt": 20.0, "kill": 10.0, "pgctl": 90.0,
+               "pgctl_t": 60, "overall": 300.0}
+
+
+def stop_tree(w, m, stages=None):
+    """Deliberate stop with verified escalation (r3 2.4; repair H2). Every stage result is
+    checked against its own deadline and an absolute monotonic overall deadline. pg_ctl's
+    exit status and timeout propagate. Any failure freezes signals and returns ok:false with
+    the remaining identities; nothing more is signalled. A postmaster is never SIGKILLed.
+    `stages` overrides the deadlines for the T19 subjects only."""
+    st = dict(STOP_STAGES, **(stages or {}))
+    t0 = now()
+    overall = t0 + float(st["overall"])
+    w.marks["stop_begin"] = t0
+    log = []
+
+    def until(sec):
+        return min(now() + float(sec), overall)
+
     try:
-        w.signal_verified(w.launcher.pid, signal.SIGTERM, "deliberate-stop")
-        if not w.wait_roles_gone(("process-compose",), now() + TIMEOUTS["stop_launcher"]):
+        if w.signals_frozen:
+            raise Hold("signals frozen before the stop began")
+        log.append(("launcher-term", w.signal_verified(w.launcher.pid, signal.SIGTERM,
+                                                       "deliberate-stop")))
+        if not w.wait_roles_gone(("process-compose",), until(st["launcher"])):
             for e in w.alive("process-compose"):
-                w.signal_verified(e["pid"], signal.SIGTERM, "escalate-pc")
-        if not w.wait_roles_gone(("devenv-tasks",), now() + TIMEOUTS["stop_pc"]):
+                log.append(("pc-term", w.signal_verified(e["pid"], signal.SIGTERM, "escalate-pc")))
+        if not w.wait_roles_gone(("devenv-tasks",), until(st["pc"])):
             for e in w.alive("devenv-tasks"):
-                w.signal_verified(e["pid"], signal.SIGTERM, "escalate-dt")
-        if not w.wait_roles_gone(("process-compose", "devenv-tasks"), now() + TIMEOUTS["stop_dt"]):
-            for r in ("process-compose", "devenv-tasks"):
+                log.append(("dt-term", w.signal_verified(e["pid"], signal.SIGTERM, "escalate-dt")))
+        managers = ("process-compose", "devenv-tasks")
+        if not w.wait_roles_gone(managers, until(st["dt"])):
+            for r in managers:
                 for e in w.alive(r):
-                    w.signal_verified(e["pid"], signal.SIGKILL, "escalate-kill")
-            w.wait_roles_gone(("process-compose", "devenv-tasks"), now() + TIMEOUTS["kill_wait"])
-        pm = w.alive("postmaster-final") + w.alive("postmaster-init") + \
+                    log.append(("kill", w.signal_verified(e["pid"], signal.SIGKILL,
+                                                          "escalate-kill")))
+            if not w.wait_roles_gone(managers, until(st["kill"])):
+                raise Hold("manager processes alive after KILL stage")
+        pms = w.alive("postmaster-final") + w.alive("postmaster-init") + \
             w.alive("postmaster-identified")
-        if pm:
-            pg_ctl_stop(w, m, pm)
-        w.wait_roles_gone(tuple({e["role"] for e in w.entries.values()}),
-                          now() + TIMEOUTS["barrier"])
-        return {"ok": True, "remaining": list(w.entries.values()),
+        if pms:
+            rc = pg_ctl_stop(w, m, pms, timeout=max(0.0, min(float(st["pgctl"]),
+                                                              overall - now())),
+                             t=int(st["pgctl_t"]))
+            log.append(("pg_ctl", rc))
+            if rc != 0:
+                raise Hold("pg_ctl stop failed: %r" % (rc,))
+        if not w.wait_all_gone(overall):
+            raise Hold("owned processes live after all stop stages")
+        return {"ok": True, "stages": log, "remaining": [],
                 "harness_signals": w.harness_signals}
     except Hold as h:
-        w.violations.append({"t": now(), "kind": "HOLD", "detail": str(h)})
-        return {"ok": False, "hold": str(h)}
+        w.signals_frozen = True
+        w.violation("HOLD", detail=str(h))
+        return {"ok": False, "hold": str(h), "stages": log,
+                "remaining": [ident(e) for e in w.entries.values()],
+                "harness_signals": w.harness_signals}
 
 
-def pg_ctl_stop(w, m, pms):
-    """The only postmaster stop path: pg_ctl -D <pgdata>, after identity proof."""
+def pg_ctl_stop(w, m, pms, timeout=90.0, t=60):
+    """The only postmaster stop path: pg_ctl -D <pgdata>, after identity proof. Returns
+    pg_ctl's exit status, or "timeout" (the helper is kept for a bounded reap, not killed)."""
     with open(m["pgdata"] + "/postmaster.pid") as f:
         lines = f.read().splitlines()
     pid = int(lines[0])
@@ -1657,11 +1749,19 @@ def pg_ctl_stop(w, m, pms):
     if proc_cwd(pid) != os.path.realpath(m["pgdata"]):
         raise Hold("postmaster cwd mismatch")
     env = {"PATH": PG_BIN, "PGDATA": m["pgdata"], "LC_ALL": "C"}
-    rc, _, _ = run([PG_BIN + "/pg_ctl", "-D", m["pgdata"], "-m", "fast", "-w", "-t", "60", "stop"],
-                   env=env, timeout=90)
-    w.harness_signals.append({"t": now(), "pid": pid, "role": "postmaster", "signal": "pg_ctl-fast",
-                              "rc": rc, "reason": "pg_ctl-stop"})
+    p = subprocess.Popen([PG_BIN + "/pg_ctl", "-D", m["pgdata"], "-m", "fast", "-w", "-t", str(t),
+                          "stop"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True)
+    try:
+        rc = p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        w.helpers.append(p)
+        rc = "timeout"
+    w.harness_signals.append({"t": now(), "pid": pid, "birth_us": match[0]["birth_us"],
+                              "role": "postmaster", "signal": "pg_ctl-fast", "rc": rc,
+                              "reason": "pg_ctl-stop"})
     w.dirty = True
+    return rc
 
 
 def ctl_request(ctl, cmd, timeout, **kw):
@@ -2383,7 +2483,10 @@ def main(argv):
             return supervise(m, a["ctl"], a["state"], a["launcher"], a["epoch"])
         elif cmd == "ctl":
             extra = {k: v for k, v in a.items() if k not in ("ctl", "cmd", "timeout", "manifest")}
-            jdump(ctl_request(a["ctl"], a["cmd"], float(a.get("timeout", 300)), **extra))
+            resp = ctl_request(a["ctl"], a["cmd"], float(a.get("timeout", 300)), **extra)
+            jdump(resp)
+            if resp.get("ok") is not True:
+                return EXIT_HOLD  # repair H2: an ok:false response is HOLD, never exit 0
         elif cmd == "ready-wait":
             jdump(ready_wait(m, a["state"], float(a["deadline"])), a["out"])
         elif cmd == "listener-proof":
