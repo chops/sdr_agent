@@ -10,7 +10,13 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
   database in the manifest's allowlist, and proves the server identity
   (data directory, config file, socket directory, port, a UDS connection,
   the backend's parent being the verified postmaster, the postmaster start
-  time) before any mutation. It refuses ambient `PG*`/`DATABASE_URL`
+  time) before any mutation. Before each ordinary connection a supplementary,
+  read-only pre-connect guard (`sink_watch.py target-socket-check`, choice 5 /
+  Q4) requires the manifest's socket to be an owned unix socket in the
+  canonical runtime directory whose lock names the expected postmaster; a
+  mismatch refuses with status 2 and no connection. It proves no server
+  identity and replaces none of the later checks. C8's nonexistent-database
+  connection keeps its own server-origin FATAL oracle. It refuses ambient `PG*`/`DATABASE_URL`
   configuration. It never prints a message, an error struct or a marker:
   results are written to a private JSON file as SQLSTATE codes, severities
   and routines only.
@@ -100,7 +106,9 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
   # -- modes -------------------------------------------------------------------
 
   defp run_mode("identity", m, opts) do
-    with_conn(m, "postgres", fn conn -> %{"identity" => identity!(conn, m, opts, "postgres")} end)
+    with_conn(m, opts, "postgres", fn conn ->
+      %{"identity" => identity!(conn, m, opts, "postgres")}
+    end)
   end
 
   defp run_mode("prepare", m, opts) do
@@ -108,7 +116,7 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
     Enum.each(creates, &allowed_db!(m, &1))
 
     created =
-      with_conn(m, "postgres", fn conn ->
+      with_conn(m, opts, "postgres", fn conn ->
         id = identity!(conn, m, opts, "postgres")
         listener_reproof!(opts)
         Enum.each(creates, fn db -> Postgrex.query!(conn, ~s(CREATE DATABASE "#{db}"), []) end)
@@ -118,7 +126,7 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
     tables =
       case Map.get(opts, "canary_db") do
         nil -> nil
-        db -> with_conn(m, db, fn conn -> create_canary_tables!(conn, m, opts, db) end)
+        db -> with_conn(m, opts, db, fn conn -> create_canary_tables!(conn, m, opts, db) end)
       end
 
     Map.put(created, "canary_tables", tables)
@@ -129,7 +137,7 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
     markers = Map.fetch!(read_json!(Map.fetch!(opts, "markers")), "markers")
 
     results =
-      with_conn(m, db, fn conn ->
+      with_conn(m, opts, db, fn conn ->
         _ = identity!(conn, m, opts, db)
 
         [c1(conn, markers), c2(conn, markers), c3(conn, markers), c4(conn, markers)] ++
@@ -146,7 +154,7 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
   end
 
   defp run_mode("a_ext_setup", m, opts) do
-    with_conn(m, "a_ext", fn conn ->
+    with_conn(m, opts, "a_ext", fn conn ->
       _ = identity!(conn, m, opts, "a_ext")
       Postgrex.query!(conn, "CREATE EXTENSION pg_stat_statements", [])
       %{"a_ext" => "pg_stat_statements created"}
@@ -157,7 +165,7 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
     db = Map.fetch!(opts, "db")
     expect = Map.fetch!(opts, "expect")
 
-    with_conn(m, db, fn conn ->
+    with_conn(m, opts, db, fn conn ->
       _ = identity!(conn, m, opts, db)
       if expect == "p_load", do: Postgrex.query!(conn, "LOAD 'auto_explain'", [])
       Process.put(:sink_conn, conn)
@@ -175,7 +183,7 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
   defp run_mode("db_exists", m, opts) do
     name = Map.fetch!(opts, "name")
 
-    with_conn(m, "postgres", fn conn ->
+    with_conn(m, opts, "postgres", fn conn ->
       _ = identity!(conn, m, opts, "postgres")
 
       %{rows: [[n]]} =
@@ -208,14 +216,41 @@ defmodule SdrAgent.Test.PostgresLogSinkCanaries do
     if db in Map.fetch!(m, "db_allow"), do: :ok, else: halt!(2, "database not in allowlist")
   end
 
-  defp with_conn(m, db, fun) do
+  defp with_conn(m, opts, db, fun) do
     allowed_db!(m, db)
+    _ = conn_opts(m, db)
+    target_check!(m, opts)
     {:ok, conn} = Postgrex.start_link(conn_opts(m, db))
 
     try do
       fun.(conn)
     after
       GenServer.stop(conn, :normal, 10_000)
+    end
+  end
+
+  # Supplementary pre-connect guard (choice 5, Q4): read-only, explicit options, run by the
+  # pinned watcher (lstat S_ISSOCK, O_NOFOLLOW lock, owned, canonical dir). Status 2 is a
+  # refusal before any connection; anything else is a hold. Fixed reasons only.
+  defp target_check!(m, opts) do
+    args = [
+      "-I",
+      Map.fetch!(opts, "watch"),
+      "target-socket-check",
+      "--socket-dir",
+      Map.fetch!(m, "pg_socket_dir"),
+      "--canonical-dir",
+      Map.fetch!(m, "runtime_canonical") <> "/postgres",
+      "--port",
+      Integer.to_string(Map.fetch!(m, "port")),
+      "--postmaster-pid",
+      Map.fetch!(opts, "postmaster_pid")
+    ]
+
+    case System.cmd(Map.fetch!(opts, "py"), args, stderr_to_stdout: true) do
+      {_out, 0} -> :ok
+      {_out, 2} -> halt!(2, "target socket mismatch")
+      _ -> halt!(3, "target socket check failed")
     end
   end
 
