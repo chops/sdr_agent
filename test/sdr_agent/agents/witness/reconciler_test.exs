@@ -25,10 +25,11 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
   alias SdrAgent.Agents.Witness
   alias SdrAgent.Agents.WitnessEvidence
   alias SdrAgent.AgentsFixtures
-  alias SdrAgent.GateFixtures
+  alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.Audit.Canonical
+  alias SdrAgent.GateFixtures
   alias SdrAgent.Operations
   alias SdrAgent.Telemetry.InMemoryExporter
   alias SdrAgent.Test.FakeWitnessProxy, as: Proxy
@@ -159,7 +160,7 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
 
   test "R0-07: a generation-2 row reconciles only under its own profile's exact entry", ctx do
     # Generation-2 entries name the current reviewed CLI version (R0-08).
-    current = SdrAgent.AI.ModelProfiles.cli_version()
+    current = ModelProfiles.cli_version()
     opus = %{@shipped_entry | profile_id: :claude_cli_opus, cli_version: current}
 
     sonnet = %{

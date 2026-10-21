@@ -74,6 +74,7 @@ defmodule SdrAgent.Agents.Witness do
 
   require Ash.Query
 
+  alias Ash.Error.Forbidden
   alias SdrAgent.Actor
   alias SdrAgent.Agents
   alias SdrAgent.Agents.AgentRun
@@ -359,7 +360,7 @@ defmodule SdrAgent.Agents.Witness do
   defp authorize(%Actor{type: :reconciler, tenant_id: tenant_id}) when is_binary(tenant_id),
     do: :ok
 
-  defp authorize(_actor), do: {:error, Ash.Error.Forbidden.exception([])}
+  defp authorize(_actor), do: {:error, Forbidden.exception([])}
 
   # Test-only hook run after the observation, before persistence (stale
   # observation tests); refused unless test overrides are configured.
