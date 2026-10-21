@@ -46,6 +46,9 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
   @migrations Path.join(@root, "priv/repo/migrations")
   @scripts Path.join(@root, "test/support/witness_migration")
   @states ~w(predecessor up down up_again)
+  @cleanup_keys ~w(child.drop cleanup.drop_attempted cleanup.drop_mode cleanup.drop_result
+                   cleanup.drop_receipt cleanup.backends_before_drop
+                   cleanup.database_absent_after_drop cleanup.temp_folder outcome)
 
   defp suffix, do: "_wm" <> Base.encode16(:crypto.strong_rand_bytes(5), case: :lower)
 
@@ -181,10 +184,36 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
           do: assert(Map.has_key?(facts, "state.#{state}.check.#{check}"), "#{state} #{check}")
     end
 
-    for key <- ~w(child.drop cleanup.drop_attempted cleanup.drop_mode cleanup.drop_result
-                  cleanup.backends_before_drop cleanup.database_absent_after_drop
-                  cleanup.temp_folder outcome) do
-      assert Map.has_key?(facts, key), key
+    # Codex 7ad3bd0 G2-F1: the published values, not only their keys. Each
+    # state's published checks equal that state's expected map exactly...
+    for {state, restricted?} <- [
+          {"predecessor", false},
+          {"up", true},
+          {"down", false},
+          {"up_again", true}
+        ] do
+      published =
+        for {key, value} <- facts,
+            String.starts_with?(key, "state.#{state}.check."),
+            into: %{},
+            do: {String.replace_prefix(key, "state.#{state}.check.", ""), value}
+
+      assert published == expected(restricted?), state
     end
+
+    # ...and cleanup succeeded with exactly these facts.
+    assert Map.take(facts, @cleanup_keys) == %{
+             "child.drop" => "exit:0",
+             "cleanup.drop_attempted" => "true",
+             "cleanup.drop_mode" => "normal",
+             "cleanup.drop_result" => "ok",
+             "cleanup.drop_receipt" => "valid",
+             "cleanup.backends_before_drop" => "0",
+             "cleanup.database_absent_after_drop" => "true",
+             "cleanup.temp_folder" => "removed",
+             "outcome" => "ok"
+           }
+
+    refute Map.has_key?(facts, "cleanup.temp_folder_retained_reason")
   end
 end
