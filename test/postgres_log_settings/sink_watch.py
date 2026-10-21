@@ -2639,6 +2639,9 @@ def observe_deadline(pid, birth_us, deadline_s, out):
         time.sleep(0.1)
 
 
+LOCK_READ_MAX = 64  # a PG socket lock's first line is a pid of at most 10 digits
+
+
 def target_socket_check(sdir, canonical, port, postmaster_pid):
     """Supplementary pre-connect guard for the client (choice 5, Q4). Read-only, no follow:
     realpath(<socket dir>) must equal the given canonical dir, which is a physical dir owned
@@ -2658,20 +2661,43 @@ def target_socket_check(sdir, canonical, port, postmaster_pid):
         raise Refuse("REFUSE-TARGET socket absent")
     if not stat.S_ISSOCK(ss.st_mode) or ss.st_uid != me():
         raise Refuse("REFUSE-TARGET not an owned socket")
+    lock = sock + ".lock"
+    # R3: the lock's type, owner and link status are judged on lstat BEFORE any open; the
+    # open is O_NONBLOCK|O_NOFOLLOW (a FIFO or device can never block it) and must be the
+    # same object; at most LOCK_READ_MAX bytes are read and the first line must be a
+    # decimal pid within them. Fixed refusal reasons; no raw lock content is reported.
     try:
-        fd = os.open(sock + ".lock", os.O_RDONLY | os.O_NOFOLLOW)
+        ls = os.lstat(lock)
     except FileNotFoundError:
         raise Refuse("REFUSE-TARGET lock absent")
+    if stat.S_ISLNK(ls.st_mode):
+        raise Refuse("REFUSE-TARGET lock is a symlink")
+    if not stat.S_ISREG(ls.st_mode) or ls.st_uid != me():
+        raise Refuse("REFUSE-TARGET lock not an owned regular file")
+    try:
+        fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise Refuse("REFUSE-TARGET lock absent")
+    except PermissionError:
+        raise Refuse("REFUSE-TARGET lock unreadable")
     except OSError as e:
         if e.errno == errno.ELOOP:
             raise Refuse("REFUSE-TARGET lock is a symlink")
         raise
-    with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
-        ls = os.fstat(f.fileno())
-        if not stat.S_ISREG(ls.st_mode) or ls.st_uid != me():
+    try:
+        fs = os.fstat(fd)
+        if (fs.st_dev, fs.st_ino) != (ls.st_dev, ls.st_ino) or not stat.S_ISREG(fs.st_mode) or \
+                fs.st_uid != me():
             raise Refuse("REFUSE-TARGET lock not an owned regular file")
-        first = f.readline().strip()
-    if first != str(int(postmaster_pid)):
+        head = os.read(fd, LOCK_READ_MAX)
+    finally:
+        os.close(fd)
+    if b"\n" not in head:
+        raise Refuse("REFUSE-TARGET lock first line malformed")
+    first = head.split(b"\n", 1)[0]
+    if not re.match(rb"^[1-9][0-9]{0,9}$", first):
+        raise Refuse("REFUSE-TARGET lock first line malformed")
+    if first.decode("ascii") != str(int(postmaster_pid)):
         raise Refuse("REFUSE-TARGET lock names another process")
     return {"ok": True, "proof": "file-read"}
 
