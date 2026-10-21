@@ -33,10 +33,15 @@ conf=$(cat "$confs"; echo)
 topology=$(printf '%s\n' "$conf" | grep -E '^(listen_addresses|port|unix_socket_directories) = ' || true)
 contract=$(printf '%s\n' "$conf" | grep -vE '^(listen_addresses|port|unix_socket_directories) = ' | grep -v '^$' || true)
 
-printf '%s\n' "$topology" | grep -qx "listen_addresses = '127.0.0.1'" || fail topology-listen
-printf '%s\n' "$topology" | grep -qx "port = 5520" || fail topology-port
-printf '%s\n' "$topology" | grep -qxE "unix_socket_directories = '/tmp/devenv-[0-9a-f]+/postgres'" || fail topology-socket
-[ "$(printf '%s\n' "$topology" | grep -c .)" = 3 ] || fail topology-count
+# Topology is devenv's own: the address and port from devenv.nix, and the
+# socket in devenv's per-project runtime directory, whose parent depends on
+# the platform ($XDG_RUNTIME_DIR on Linux, $TMPDIR or /tmp on macOS). The
+# observed lines are printed on failure (paths only, no data).
+topo_fail() { fail "$1 [$(printf '%s\n' "$topology" | tr '\n' ';')]"; }
+printf '%s\n' "$topology" | grep -qx "listen_addresses = '127.0.0.1'" || topo_fail topology-listen
+printf '%s\n' "$topology" | grep -qx "port = 5520" || topo_fail topology-port
+printf '%s\n' "$topology" | grep -qxE "unix_socket_directories = '/[^']*/devenv-[0-9a-f]+/postgres'" || topo_fail topology-socket
+[ "$(printf '%s\n' "$topology" | grep -c .)" = 3 ] || topo_fail topology-count
 
 [ "$contract" = "$(cat "$expected")" ] || fail contract-lines-differ
 echo DEVENV-RENDER-PASS
