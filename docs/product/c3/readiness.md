@@ -1355,8 +1355,11 @@ needs no model change (the handover was already same-company only).
   - **G7:** PASS at `853e399` (`codex-c302-g7-green-853e399-review.org`):
     FULL 3554 passed, 0 failures.
   - **Open:** G8 (negative controls, diagrams, full gate), the #209 rebase
-    and equivalence review, exact-head CI, O4's server-log decision (5b,
-    #156) and the D-157 merge.
+    and equivalence review, exact-head CI, the O4/5b (#156) gates and the
+    D-157 merge. The 5b server-log decision is recorded (D-178: the owner
+    accepted all five picks), so no new owner choice is owed; its
+    implementation and review, the sink test, the owner-run activation
+    receipt and the owner's acceptance of the residual remain open.
 
 ## 14. Next authorized scope (when PASS, ADR acceptance and G5)
 

@@ -70,7 +70,7 @@ flowchart LR
         AdmitPass["One IdentityKeys entry pass, before any domain row lock:<br/>admission-ref, company, email, email host"]
         Replay["Replay: same ref and input hash returns the stored admission, writes nothing;<br/>a different hash is source_ref_conflict"]
         Decide["Decision table under campaign / account / contact / open-lead SHARE locks,<br/>real-data guard again on the stored values;<br/>closed-reason refusals (campaign, settings, conflict) roll back, nothing written"]
-        Recorded["Refused outcome (suppressed, duplicate open lead, active target, ...):<br/>one LeadAdmission row + event; no account, contact, lead or run"]
+        Recorded["Refused business outcome (suppressed, duplicate open lead, active target, ...):<br/>one LeadAdmission row + event; no new account, contact, lead or run is written<br/>(the row may reference existing ones); closed-reason errors record no row"]
         Admitted["Admitted only: Account / Contact if new, LeadAdmission,<br/>Lead :create + :assign (held keys), Assignment.queue: run + snapshot + Operation + job + signal, one txn"]
     end
 
