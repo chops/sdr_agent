@@ -77,6 +77,7 @@ defmodule SdrAgent.WitnessMigration.Harness do
   @migration "_v4_mismatch_lineage.exs"
   @scripts Path.expand(".", __DIR__)
   @claim_refused 3
+  @receipts {__MODULE__, :receipts}
   @target_refused 4
 
   @doc """
@@ -174,12 +175,53 @@ defmodule SdrAgent.WitnessMigration.Harness do
   where `states` maps `"predecessor"`, `"up"`, `"down"` and `"up_again"`
   to that state's probe checks, or `{:error, reason}`.
   """
-  def prove(opts) do
+  def prove(opts), do: opts |> prove_with_receipts() |> elem(0)
+
+  @doc """
+  `prove/1`, plus its operational receipt (Codex 9ef62e5 G2): `{outcome,
+  receipts}`, where `receipts` is the ordered list of `{key, value}` facts
+  this run observed, one fact each, with closed keys and closed or
+  synthetic values only (never row content, output text or secrets):
+
+    * `target_database`, `temp_folder`, `migration_predecessor`,
+      `migration_new`;
+    * `child.claim`, `child.migrate.<state>`, `child.probe.<state>`,
+      `child.drop`: `exit:<status>`, `timeout:confirmed`,
+      `timeout:unconfirmed`, `not_started` or `raised` (untyped);
+    * `migrate.<state>.direction` and `migrate.<state>.version`;
+    * `state.<state>.check_count` and `state.<state>.check.<name>`
+      (`permitted`, `refused:<code>` or `unexpected`), for the states
+      `predecessor`, `up`, `down` and `up_again`;
+    * `cleanup.drop_attempted`, `cleanup.drop_mode` (`normal`: no `FORCE`,
+      no connection termination), `cleanup.backends_before_drop` and
+      `cleanup.database_absent_after_drop` (reported by the drop child, or
+      `unreported`), `cleanup.drop_result`, `cleanup.temp_folder`
+      (`removed` or `retained`) and `cleanup.temp_folder_retained_reason`;
+    * `outcome` (`ok` or `error`).
+
+  The receipts are collected in memory and only returned: publishing them
+  is the caller's job, after every cleanup decision has been made, so a
+  failed write can fail the caller but never changes the cleanup.
+  """
+  def prove_with_receipts(opts) do
+    previous = Process.put(@receipts, [])
+
+    try do
+      outcome = do_prove(opts)
+      note("outcome", if(match?({:ok, _}, outcome), do: "ok", else: "error"))
+      {outcome, Enum.reverse(Process.get(@receipts))}
+    after
+      if previous, do: Process.put(@receipts, previous), else: Process.delete(@receipts)
+    end
+  end
+
+  defp do_prove(opts) do
     suffix = Keyword.fetch!(opts, :suffix)
     database = "sdr_agent_test" <> suffix
     runner = Keyword.fetch!(opts, :runner)
     versions = Keyword.fetch!(opts, :versions)
     tmp = Path.join(Keyword.fetch!(opts, :tmp_root), "sdr-witness-migration" <> suffix)
+    note_target(database, tmp, versions)
 
     with {:target, true} <- {:target, Regex.match?(@database, database)},
          {:tmp, :ok} <- {:tmp, File.mkdir(tmp)} do
@@ -193,7 +235,10 @@ defmodule SdrAgent.WitnessMigration.Harness do
   end
 
   defp run_owned(database, tmp, versions, runner, owned) do
-    case run(runner, :claim, script("claim.exs", [database])) do
+    claim = run(runner, :claim, script("claim.exs", [database]))
+    note("child.claim", child_outcome(claim))
+
+    case claim do
       {:ok, _} ->
         owned = %{owned | database: database}
         {guarded_steps(database, tmp, versions, runner), owned}
@@ -239,11 +284,20 @@ defmodule SdrAgent.WitnessMigration.Harness do
     Enum.reduce_while(plan, {:ok, %{}}, fn {direction, version, label}, {:ok, states} ->
       migrate = script("migrate.exs", [database, direction, Integer.to_string(version)])
       out = Path.join(tmp, label <> ".json")
+      note("migrate.#{label}.direction", direction)
+      note("migrate.#{label}.version", Integer.to_string(version))
 
-      with {:ok, _} <- step(runner, :migrate, migrate),
-           {:ok, _} <- step(runner, :probe, script("probe.exs", [database, label, fixtures, out])),
+      with {:ok, _} <- step(runner, :migrate, migrate, "child.migrate." <> label),
+           {:ok, _} <-
+             step(
+               runner,
+               :probe,
+               script("probe.exs", [database, label, fixtures, out]),
+               "child.probe." <> label
+             ),
            {:ok, probe} <- read_json(out),
            {:ok, checks} <- probe_checks(probe, database, label) do
+        note_checks(label, checks)
         {:cont, {:ok, Map.put(states, label, checks)}}
       else
         {:timeout, _, _} = timeout -> {:halt, {:error, {:step_timeout, label, timeout}}}
@@ -280,8 +334,11 @@ defmodule SdrAgent.WitnessMigration.Harness do
       else: {:error, {:probe_checks_invalid, label}}
   end
 
-  defp step(runner, name, args) do
-    case run(runner, name, args) do
+  defp step(runner, name, args, receipt) do
+    outcome = run(runner, name, args)
+    note(receipt, child_outcome(outcome))
+
+    case outcome do
       {:ok, out} -> {:ok, out}
       {:timeout, _, _} = timeout -> timeout
       other -> {:error, {name, other}}
@@ -300,6 +357,9 @@ defmodule SdrAgent.WitnessMigration.Harness do
 
   defp finish(outcome, owned, database, runner) do
     if Map.get(owned, :unconfirmed, false) or unconfirmed?(outcome) do
+      note("cleanup.drop_attempted", "false")
+      note("cleanup.temp_folder", "retained")
+      note("cleanup.temp_folder_retained_reason", "unconfirmed_child")
       {:error, {:cleanup_skipped_unconfirmed_child, outcome, owned}}
     else
       case cleanup(owned, database, runner) do
@@ -312,24 +372,131 @@ defmodule SdrAgent.WitnessMigration.Harness do
   defp cleanup(owned, database, runner) do
     dropped =
       case owned.database do
-        nil -> :ok
-        ^database -> drop(database, runner)
+        nil ->
+          note("cleanup.drop_attempted", "false")
+          :ok
+
+        ^database ->
+          drop(database, runner)
       end
 
     with :ok <- dropped do
       case File.rm_rf(owned.tmp) do
-        {:ok, _} -> :ok
-        {:error, reason, path} -> {:error, {:tmp_not_removed, path, reason}}
+        {:ok, _} ->
+          note("cleanup.temp_folder", "removed")
+          :ok
+
+        {:error, reason, path} ->
+          note("cleanup.temp_folder", "retained")
+          note("cleanup.temp_folder_retained_reason", "remove_failed")
+          {:error, {:tmp_not_removed, path, reason}}
       end
     end
   end
 
   defp drop(database, runner) do
-    case run(runner, :drop, script("drop.exs", [database])) do
-      {:ok, _} -> :ok
-      other -> {:error, {:drop, other}}
+    note("cleanup.drop_attempted", "true")
+    note("cleanup.drop_mode", "normal")
+    outcome = run(runner, :drop, script("drop.exs", [database]))
+    note("child.drop", child_outcome(outcome))
+    note_drop_facts(outcome)
+
+    case outcome do
+      {:ok, _} ->
+        note("cleanup.drop_result", "ok")
+        :ok
+
+      other ->
+        note("cleanup.drop_result", "failed")
+        note("cleanup.temp_folder", "retained")
+        note("cleanup.temp_folder_retained_reason", "drop_failed")
+        {:error, {:drop, other}}
     end
   end
+
+  ## Receipts (closed keys; closed or synthetic values only)
+
+  defp note(key, value) when is_binary(key) and is_binary(value) do
+    case Process.get(@receipts) do
+      receipts when is_list(receipts) -> Process.put(@receipts, [{key, value} | receipts])
+      nil -> :ok
+    end
+
+    :ok
+  end
+
+  defp note_target(database, tmp, versions) do
+    note("target_database", database)
+    note("temp_folder", tmp)
+
+    with %{new: new, predecessor: predecessor} <- versions do
+      note("migration_predecessor", Integer.to_string(predecessor))
+      note("migration_new", Integer.to_string(new))
+    end
+  end
+
+  defp note_checks(label, checks) do
+    note("state.#{label}.check_count", Integer.to_string(map_size(checks)))
+
+    for {name, result} <- Enum.sort(checks) do
+      name = if Regex.match?(~r/\A[a-z0-9_]{1,64}\z/, name), do: name, else: "invalid_name"
+      note("state.#{label}.check.#{name}", closed_result(result))
+    end
+  end
+
+  defp closed_result(result) do
+    if Regex.match?(~r/\A(permitted|refused:[a-z_]{1,64})\z/, result),
+      do: result,
+      else: "unexpected"
+  end
+
+  @doc false
+  # The closed label of one child outcome (never its output).
+  def child_outcome({:ok, _out}), do: "exit:0"
+  def child_outcome({:exit, status, _out}) when is_integer(status), do: "exit:#{status}"
+  def child_outcome({:timeout, :confirmed, _out}), do: "timeout:confirmed"
+  def child_outcome({:timeout, :unconfirmed, _out}), do: "timeout:unconfirmed"
+  def child_outcome({:not_started, _reason}), do: "not_started"
+  def child_outcome({:raised, _reason}), do: "raised"
+  def child_outcome(_other), do: "unknown"
+
+  # The drop child's own two facts (`WM-CHILD <key>=<value>` lines), each
+  # validated to its closed form; `unreported` when absent or malformed.
+  defp note_drop_facts(outcome) do
+    output =
+      case outcome do
+        {:ok, out} when is_binary(out) -> out
+        {:exit, _status, out} when is_binary(out) -> out
+        {:timeout, _confirmed, out} when is_binary(out) -> out
+        _other -> ""
+      end
+
+    facts = drop_facts(output)
+    note("cleanup.backends_before_drop", Map.get(facts, "backends_before_drop", "unreported"))
+
+    note(
+      "cleanup.database_absent_after_drop",
+      Map.get(facts, "database_absent_after_drop", "unreported")
+    )
+  end
+
+  @doc false
+  # Parses the drop child's closed facts from its output.
+  def drop_facts(output) when is_binary(output) do
+    for [_, key, value] <-
+          Regex.scan(
+            ~r/^WM-CHILD (backends_before_drop|database_absent_after_drop)=(\S+)$/m,
+            output
+          ),
+        valid_drop_fact?(key, value),
+        into: %{},
+        do: {key, value}
+  end
+
+  defp valid_drop_fact?("backends_before_drop", value),
+    do: Regex.match?(~r/\A[0-9]{1,6}\z/, value)
+
+  defp valid_drop_fact?("database_absent_after_drop", value), do: value in ["true", "false"]
 
   defp unconfirmed?({:timeout, :unconfirmed, _}), do: true
   defp unconfirmed?({:raised, _}), do: true
