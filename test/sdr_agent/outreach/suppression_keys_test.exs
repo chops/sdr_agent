@@ -499,6 +499,48 @@ defmodule SdrAgent.Outreach.SuppressionKeysTest do
     end
   end
 
+  # C3-02 G6 (plan r8 section 16.13 R-S1/R-S2; Codex Q6.11): the suppression
+  # key is taken on a replay (it precedes the upsert) and not on an invalid
+  # changeset (Ash runs no before_action on one), both through the action.
+  describe "T-J8 (G6) replay and invalid value" do
+    # Behavioural RED: main publishes no pass for the replay.
+    test "T-J8 a replayed :manual suppression takes its key and returns the stored row", ctx do
+      t = ctx.tenant.id
+      n = SalesFixtures.unique()
+      email = "jo-#{n}@mail-j8-#{n}.test"
+      assert {:ok, original} = Outreach.suppress(%{scope: :email, value: email}, actor: ctx.admin)
+      created = created_count(ctx)
+
+      result =
+        Audit.transaction(fn ->
+          replay = Outreach.suppress(%{scope: :email, value: email}, actor: ctx.admin)
+          {replay, observe(t, [{:email, email}])}
+        end)
+
+      assert match?({:ok, {{:ok, _}, _}}, result), "C3-02: the replay must succeed"
+      {:ok, {{:ok, replay}, observed}} = result
+      assert replay.id == original.id
+      assert Ash.Resource.get_metadata(replay, :sdr_replayed) == true
+      assert created_count(ctx) == created
+      assert_pass!(observed, [h(:email, t, email)])
+    end
+
+    # Control: passes on main (no key at all) and must stay green after G6.
+    test "T-J8 (control) an invalid value is refused with no key, no pass and no insert", ctx do
+      {result, queries} =
+        trace_queries(fn ->
+          Outreach.suppress(%{scope: :domain, value: "not a host"}, actor: ctx.admin)
+        end)
+
+      assert match?({:error, %Ash.Error.Invalid{}}, result)
+      refute Enum.any?(queries, &publication?/1), "C3-02: an invalid value published a pass"
+      refute Enum.any?(queries, &advisory_lock?/1), "C3-02: an invalid value locked a key"
+
+      refute Enum.any?(queries, &statement?(&1, :insert, "suppressions")),
+             "C3-02: an invalid value was inserted"
+    end
+  end
+
   ## Key observation
 
   defp assert_keyed_first!(ctx, {kind, _raw} = key, preimage, create) do

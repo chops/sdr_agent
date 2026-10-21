@@ -142,6 +142,28 @@ defmodule SdrAgent.Outreach.WebhookKeysRaceTest do
       shared = MapSet.new([key_id(ctx, :"reply-message", message_id)])
       duplicate_race!(ctx, matched, other, shared)
     end
+
+    # C3-02 G6 (plan r8 sections 16.4, 16.13 R-W6; Codex G6-R1): the second
+    # event carries the same Message-ID padded with spaces, which
+    # `Reply.message_id` stores trimmed, from another sender: it waits on the
+    # represented value's reply-message key, then is a duplicate no-op.
+    test "T-K4 (G6) a padded Message-ID from another sender waits on the represented reply-message key" do
+      preflight!()
+      ctx = demo!()
+      op = delivered!(ctx)
+      message_id = message_id()
+      matched = reply_event!(op, message_id)
+      stranger = "c302-stranger-#{SalesFixtures.unique()}@unknown.example.test"
+
+      padded =
+        reply_event!(op, " " <> message_id <> " ",
+          from: stranger,
+          in_reply_to: "<nothing@elsewhere.example.test>"
+        )
+
+      shared = MapSet.new([key_id(ctx, :"reply-message", message_id)])
+      duplicate_race!(ctx, matched, padded, shared)
+    end
   end
 
   describe "T-K5 old-address bounce vs manual suppression after :change_email" do

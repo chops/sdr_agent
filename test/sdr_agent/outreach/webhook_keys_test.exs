@@ -235,6 +235,129 @@ defmodule SdrAgent.Outreach.WebhookKeysTest do
     end
   end
 
+  # C3-02 G6 (plan r8 sections 16.4, 16.13 R-W1..R-W3, R-W5; Codex G6-R1):
+  # the webhook keys the represented Message-ID, the value `Reply.message_id`
+  # stores (its own Ash constraints: trimmed, case kept), and that one value
+  # is also the stored-reply lookup's. The pass is read from the processing's
+  # own statement trace (the published record's ids), so a failed attempt
+  # leaves nothing to observe inside a caller-opened scope.
+  describe "T-K1b the represented Message-ID" do
+    # Behavioural RED: on main the padded Message-ID misses the stored Reply
+    # and the Reply insert fails on unique_message_id (or, if the lookup
+    # matched, no pass is published).
+    test "T-K1b a padded duplicate from the same sender is the stored Message-ID: same keys, a duplicate no-op",
+         ctx do
+      op = delivered!(ctx)
+      message_id = represented_message_id()
+      first = reply_event!(op, "Interested.", message_id: message_id)
+      assert :ok = process(ctx, first)
+      before = effect_counts(ctx)
+
+      padded = reply_event!(op, "Interested.", message_id: " " <> message_id <> " ")
+      {result, queries} = trace_queries(fn -> process(ctx, padded) end)
+
+      assert result == :ok
+      published = published_ids(queries)
+      assert length(published) == 1, "C3-02: the padded duplicate published no identity pass"
+      assert published == [expected_ids(ctx, message_id, first.from)]
+
+      assert_one_reply_of!(ctx, first, message_id)
+      assert webhook!(ctx, padded.event).processing_status == :processed
+      assert effect_counts(ctx) == before
+    end
+
+    # Behavioural RED: as above.
+    test "T-K1b a padded duplicate from another sender shares the reply-message key and is a duplicate no-op",
+         ctx do
+      op = delivered!(ctx)
+      message_id = represented_message_id()
+      first = reply_event!(op, "Interested.", message_id: message_id)
+      assert :ok = process(ctx, first)
+      before = effect_counts(ctx)
+      other = "c302-other-#{SalesFixtures.unique()}@elsewhere.example.test"
+
+      padded =
+        reply_event!(op, "Interested.",
+          message_id: " " <> message_id <> " ",
+          from: other,
+          in_reply_to: "<nothing@elsewhere.example.test>"
+        )
+
+      {result, queries} = trace_queries(fn -> process(ctx, padded) end)
+
+      assert result == :ok
+      published = published_ids(queries)
+      assert length(published) == 1, "C3-02: the padded duplicate published no identity pass"
+      assert published == [expected_ids(ctx, message_id, other)]
+
+      # No duplicate reply, suppression or hand-off effect; the event's own
+      # processed transition is the expected lifecycle.
+      assert_one_reply_of!(ctx, first, message_id)
+      assert webhook!(ctx, padded.event).processing_status == :processed
+      assert effect_counts(ctx) == before
+    end
+
+    # Behavioural RED: on main a whitespace-only Message-ID reaches Reply
+    # :receive, whose nil message_id is a transient {:error, _} (retried),
+    # not a validation failure.
+    test "T-K1b a whitespace-only Message-ID is refused before any pass, lookup or write: validation_error",
+         ctx do
+      op = delivered!(ctx)
+      blank = reply_event!(op, "Hello.", message_id: "   ")
+      before = effect_counts(ctx)
+
+      {result, queries} = trace_queries(fn -> process(ctx, blank) end)
+
+      assert result == :ok
+      event = webhook!(ctx, blank.event)
+      assert event.processing_status == :failed
+      assert match?({:ok, _}, Operations.get_failure(event.failure_id, actor: ctx.admin))
+      {:ok, failure} = Operations.get_failure(event.failure_id, actor: ctx.admin)
+      assert failure.class == :validation_error
+
+      assert failure.message ==
+               "webhook event not processed: payload does not match the reply schema"
+
+      # Nothing of the reply phase; only the existing mark_failed Failure and
+      # its event are written.
+      assert replies!(ctx) == []
+      assert effect_counts(ctx) == before
+      refute Enum.any?(queries, &publication?/1), "C3-02: a pass was published"
+      refute Enum.any?(queries, &advisory_lock?/1), "C3-02: an identity key was locked"
+      refute Enum.any?(queries, &insert_into?(&1, "replies")), "C3-02: a Reply was inserted"
+    end
+
+    # Behavioural RED: both events are stored on main; no pass is published.
+    test "T-K1b case is kept: two Message-IDs differing only in case are two keys and two Replies",
+         ctx do
+      op = delivered!(ctx)
+      n = SalesFixtures.unique()
+      stranger = "c302-case-#{n}@unknown.example.test"
+      upper = "<C302-Case-#{n}@Prospect.Example.test>"
+      lower = String.downcase(upper)
+      opts = [from: stranger, in_reply_to: "<nothing@elsewhere.example.test>"]
+
+      first = reply_event!(op, "Who is this?", [message_id: upper] ++ opts)
+      second = reply_event!(op, "Who is this?", [message_id: lower] ++ opts)
+      {first_result, first_queries} = trace_queries(fn -> process(ctx, first) end)
+      {second_result, second_queries} = trace_queries(fn -> process(ctx, second) end)
+
+      assert {first_result, second_result} == {:ok, :ok}
+      first_published = published_ids(first_queries)
+      second_published = published_ids(second_queries)
+
+      assert {length(first_published), length(second_published)} == {1, 1},
+             "C3-02: each event must publish one identity pass"
+
+      assert first_published == [expected_ids(ctx, upper, stranger)]
+      assert second_published == [expected_ids(ctx, lower, stranger)]
+      refute first_published == second_published
+
+      assert replies!(ctx) |> Enum.map(&to_string(&1.message_id)) |> Enum.sort() ==
+               Enum.sort([upper, lower])
+    end
+  end
+
   describe "T-K6 no hashtextextended or raw pg_advisory outside IdentityKeys" do
     # Behavioural RED: lib/sdr_agent/outreach/webhooks.ex serialize_message
     # (pg_advisory_xact_lock(hashtextextended(...))) is deleted by G6.
@@ -289,6 +412,24 @@ defmodule SdrAgent.Outreach.WebhookKeysTest do
 
   defp process(ctx, reply), do: Webhooks.process(reply.event.id, ctx.tenant.id, reply.body)
 
+  defp represented_message_id,
+    do: "<c302-rm-#{SalesFixtures.unique()}@prospect.example.test>"
+
+  # The reply-phase effects a duplicate must not repeat (lifecycle events of
+  # the WebhookEvent itself are not counted here).
+  defp effect_counts(ctx) do
+    for type <- ~w(outreach.reply.received outreach.suppression.created sdr.reply.received),
+        into: %{},
+        do: {type, length(events_of_type(ctx.tenant, type))}
+  end
+
+  defp assert_one_reply_of!(ctx, first, message_id) do
+    replies = replies!(ctx)
+    assert match?([_], replies), "C3-02: exactly one Reply is stored"
+    [stored] = replies
+    assert {stored.webhook_event_id, to_string(stored.message_id)} == {first.event.id, message_id}
+  end
+
   defp webhook!(ctx, event) do
     {:ok, event} = Ash.get(WebhookEvent, event.id, actor: ctx.admin)
     event
@@ -332,6 +473,56 @@ defmodule SdrAgent.Outreach.WebhookKeysTest do
     do:
       rel == "lib/sdr_agent/audit/identity_keys.ex" or
         String.starts_with?(rel, "lib/sdr_agent/audit/identity_keys/")
+
+  ## The pass, observed in the processing's own statement trace
+
+  # The ids of every published pass record in `queries`, one MapSet each.
+  defp published_ids(queries) do
+    for {_sql, [value | _]} = query <- queries, publication?(query) do
+      assert value =~ @record_format, "C3-02: sdr.identity_pass is not a v1 record"
+      [_version, _token, _pid, ids] = String.split(value, ";")
+      parse_ids(ids)
+    end
+  end
+
+  defp advisory_lock?({sql, _params}), do: sql =~ "pg_advisory_xact_lock"
+  defp publication?({sql, _params}), do: sql =~ ~r/set_config\(\s*'sdr\.identity_pass'/
+  defp insert_into?({sql, _params}, table), do: sql =~ ~r/^\s*INSERT INTO "#{table}"/
+
+  defp trace_queries(fun) do
+    parent = self()
+    handler = "c3-02-webhook-keys-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:sdr_agent, :repo, :query],
+        fn _event, _measurements, metadata, _config ->
+          if self() == parent do
+            send(
+              parent,
+              {:c302_query, IO.iodata_to_binary(metadata.query), metadata[:params] || []}
+            )
+          end
+        end,
+        nil
+      )
+
+    try do
+      result = fun.()
+      {result, drain_queries([])}
+    after
+      :telemetry.detach(handler)
+    end
+  end
+
+  defp drain_queries(acc) do
+    receive do
+      {:c302_query, sql, params} -> drain_queries([{sql, params} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
 
   ## The pass, observed inside the caller-opened application scope
 

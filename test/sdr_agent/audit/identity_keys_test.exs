@@ -197,6 +197,77 @@ defmodule SdrAgent.Audit.IdentityKeysTest do
     end
   end
 
+  # C3-02 G6 (plan r8 section 16.4, 16.13 R-A1/R-A2; Codex G6-R1/G6-R2): the
+  # `reply-message` kind. The helper input is the represented Message-ID (the
+  # webhook derives it once with the Reply attribute's own constraints); the
+  # preimage is the exact helper bytes: no trim, no case folding. The
+  # literals were computed outside the VM (Python `hashlib.sha256` over
+  # "sdr-identity-key/1\0reply-message\0" <> tenant <> "\0" <> bytes, the
+  # first 8 bytes read as a signed big-endian int64); the same computation
+  # reproduces the T-A1 acme.test pins for both tenants, and Codex recomputed
+  # all of them independently (codex-c302-g6r2-plan-review.org).
+  describe "T-A1 (G6) the reply-message kind" do
+    test "T-A1 (G6) reply-message ids: the exact helper bytes, separate per tenant and kind, stable" do
+      present!(@keys, :id, 3)
+      plain = "<c302-a@prospect.example.test>"
+
+      # {helper input, id for @tenant, id for @other_tenant}
+      vectors = [
+        {plain, -2_961_466_829_739_951_965, -6_122_150_999_814_710_842},
+        # case kept: a distinct Message-ID and a distinct id
+        {"<C302-A@Prospect.Example.test>", 7_032_449_472_738_624_118, 7_765_332_955_089_300_185},
+        {"<c302-b.1700000000@mail.example.test>", -711_627_853_640_270_851,
+         -7_656_837_646_547_798_945},
+        # helper whitespace kept (the webhook represents before it calls the helper)
+        {" " <> plain <> " ", 8_594_672_828_337_064_874, 7_085_218_719_716_432_101}
+      ]
+
+      for {raw, expected, other_tenant} <- vectors do
+        # Cross-checks the recorded literals against the plan's H.
+        assert h(:"reply-message", @tenant, raw) == expected
+        assert h(:"reply-message", @other_tenant, raw) == other_tenant
+
+        assert id_outcome(@tenant, :"reply-message", raw) == {:ok, expected},
+               "C3-02: id(:\"reply-message\", ...) must be H over the exact helper bytes"
+
+        assert id_outcome(@tenant, :"reply-message", raw) == {:ok, expected},
+               "C3-02: the same Message-ID is stable"
+
+        assert id_outcome(@other_tenant, :"reply-message", raw) == {:ok, other_tenant},
+               "C3-02: tenants are separate namespaces"
+      end
+
+      assert vectors |> Enum.map(&elem(&1, 1)) |> Enum.uniq() |> length() == 4,
+             "C3-02: distinct helper inputs give distinct ids"
+
+      # Kind separation: H over the same bytes under the email and the
+      # admission-ref kinds (computed outside the VM as above).
+      assert h(:email, @tenant, plain) == -8_547_734_143_584_886_394
+      assert h(:"admission-ref", @tenant, plain) == 4_189_496_421_725_156_895
+      refute id_outcome(@tenant, :"reply-message", plain) == {:ok, -8_547_734_143_584_886_394}
+      refute id_outcome(@tenant, :"reply-message", plain) == {:ok, 4_189_496_421_725_156_895}
+
+      # The existing kinds are unchanged (T-A1 above pins them all).
+      assert key_id(@tenant, :domain, "acme.test") == 5_030_586_291_530_585_766
+      assert key_id(@other_tenant, :domain, "acme.test") == -7_761_260_325_681_070_342
+    end
+
+    test "T-A1 (G6) an unrepresentable reply-message helper input raises the closed InvalidKeyValue" do
+      present!(@keys, :id, 3)
+      sentinel = "c302-reply-message-sentinel"
+      expected = {:raised, @invalid, :"reply-message", "invalid reply-message identity key value"}
+
+      for raw <- ["", <<0xFF>>, sentinel <> <<0xFF>>, nil, 123, :c302_atom] do
+        outcome = id_outcome(@tenant, :"reply-message", raw)
+
+        assert outcome == expected,
+               "C3-02: an unrepresentable reply-message input must raise the closed InvalidKeyValue"
+
+        refute inspect(outcome) =~ sentinel
+      end
+    end
+  end
+
   describe "T-A2 decision table (section 2.4, rules 1-9)" do
     test "T-A2 every rule and the section 2.4 worked examples" do
       present!(@scope_struct, :__struct__, 0)
@@ -1087,6 +1158,15 @@ defmodule SdrAgent.Audit.IdentityKeysTest do
   defp pass(tenant, keys), do: call(@keys, :pass, [tenant, keys])
   defp require_held(tenant, keys), do: call(@keys, :require_held, [tenant, keys])
   defp key_id(tenant, kind, raw), do: call(@keys, :id, [tenant, kind, raw])
+
+  # `id/3`'s result or its raised exception as a value (struct, kind and
+  # message), so a RED assertion compares values instead of raising.
+  defp id_outcome(tenant, kind, raw) do
+    {:ok, key_id(tenant, kind, raw)}
+  rescue
+    error -> {:raised, error.__struct__, Map.get(error, :kind), Exception.message(error)}
+  end
+
   defp id(tenant, {kind, raw}), do: key_id(tenant, kind, raw)
   defp with_fault(point, fun), do: call(@faults, :with_fault, [point, fun])
 

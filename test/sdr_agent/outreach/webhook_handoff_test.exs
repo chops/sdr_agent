@@ -212,6 +212,40 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
     end
   end
 
+  # C3-02 G6 (plan r8 sections 16.4, 16.13 R-W4; Codex G6-R1): the deferred
+  # hand-off of an event whose Message-ID is padded resumes its own Reply,
+  # which `Reply.message_id`'s constraints stored trimmed: the resume's lookup
+  # and key use the same represented value.
+  describe "T-K8b a padded Message-ID resumes its own Reply" do
+    # Behavioural RED: on main attempt 2 looks the Reply up with the untrimmed
+    # Message-ID, misses its own Reply and fails on a unique identity (or, if
+    # that lookup matched, this case passes as a control; the RED evidence
+    # states which).
+    test "T-K8b attempt 2 of a padded deferred reply finds its own Reply and hands off exactly once",
+         ctx do
+      present!(@sdr, :bootstrap_definitions, 1)
+      hide_definition!(ctx)
+      represented = "<c302pad#{SalesFixtures.unique()}@prospect.example.test>"
+      reply = unsubscribe_reply!(ctx, message_id: " " <> represented <> " ")
+      assert perform!(reply.event, 1) == @unavailable
+      phase = reply_phase(ctx)
+
+      stored = replies!(ctx)
+      assert match?([_], stored), "C3-02: attempt 1 stores exactly one Reply"
+      [own] = stored
+      assert to_string(own.message_id) == represented
+
+      assert {:ok, _definition} = bootstrap(ctx)
+      before = event_counts(ctx)
+
+      assert perform!(reply.event, 2) == :ok
+      assert webhook!(ctx, reply.event).processing_status == :processed
+      assert_handed_off_once!(ctx, reply)
+      assert_only_handoff_events!(before, event_counts(ctx))
+      assert reply_phase(ctx) == phase
+    end
+  end
+
   describe "T-K9 duplicate events do not double-apply" do
     # Control: passes on main and must stay green (plan section 10.1,
     # duplicate behaviour unchanged).
