@@ -82,6 +82,8 @@ _proof(["T30c", "T30d", "T30e", "T30f", "T30g", "T30i", "T30j", "T30k", "T30l", 
         "T31a", "T31b", "T31c", "T31d", "T31e", "T31f", "T31g", "T34", "T35", "T36a", "T36b",
         "T36c", "T36d"], fixtures=REQ)
 _proof(["T30a", "T30b", "T30n", "T30o", "T30p", "T32", "T37"], fixtures=NA)
+# 930cad6 review: R1 (T30q), R2 (T30r, T30s, T30t), R4 (T38)
+_proof(["T30q", "T30r", "T30s", "T30t", "T38"], fixtures=REQ)
 _proof(["T1", "T2", "T14"], fixtures=REQ, cleanup=REQ)
 _proof(["T3"], fixtures=REQ)
 _proof(["T13"], cleanup=REQ)
@@ -204,7 +206,7 @@ def start_fixture(d, test, label, code, *args, **kw):
     p = subprocess.Popen([PY, "-I", "-B", "-c", code] + [str(a) for a in args],
                          stdin=kw.get("stdin", subprocess.DEVNULL),
                          stdout=kw.get("stdout", subprocess.DEVNULL),
-                         cwd=kw.get("cwd"), close_fds=True)
+                         cwd=kw.get("cwd"), close_fds=True, pass_fds=kw.get("pass_fds", ()))
     set_identity(d, test, label, proc_identity(p.pid, os.getpid()))
     return p
 
@@ -1921,7 +1923,7 @@ def t22d(d, scratch, runroot):
     def snap(image, argv):
         return {"image": image, "exec_path": image, "argv": argv,
                 "meta": W.argv_meta([a.encode() for a in argv]) if argv else None,
-                "cutoff": W.now()}
+                "argv_status": "OK" if argv is not None else None, "cutoff": W.now()}
 
     def exec_case(pkey, child_argv, image, argv):
         def run():
@@ -2450,7 +2452,70 @@ def t30e(d, scratch, runroot):
                   notes={"result": res, "violations": kinds})
 
 
-EXECER = ("import os,sys\nsys.stdin.readline()\nos.execv(sys.argv[1], sys.argv[2:])\n")
+# R4 (review 930cad6): every fixture stage that waits on the controller has its OWN
+# autonomous bound. A gate is a pipe whose read end the fixture selects on for at most
+# FIXTURE_HOLD_S: one release byte "g" proceeds; the bound, or EOF (the controller gone),
+# exits 3. A shell stage that must stay alive reads a stdin pipe whose write end is held by
+# a registered holder fixture that exits on release, on EOF or after FIXTURE_HOLD_S, so the
+# shell's read always ends without any signal.
+FIXTURE_HOLD_S = 8
+GATED = ("import os,select,sys\nfd=int(sys.argv[1])\n"
+         "if not select.select([fd], [], [], %d)[0] or os.read(fd, 1) != b'g':\n"
+         "    sys.exit(3)\n" % FIXTURE_HOLD_S)
+# gate fd, path, argv...: exec path with argv after the release
+EXECER = GATED + "os.execv(sys.argv[2], sys.argv[3:])\n"
+# gate fd, command: libc popen(command), then pclose (the child is reaped by this fixture)
+POPENER = GATED + ("import ctypes,ctypes.util\nc=ctypes.CDLL(ctypes.util.find_library('c'))\n"
+                   "c.popen.restype=ctypes.c_void_p\n"
+                   "c.popen.argtypes=[ctypes.c_char_p, ctypes.c_char_p]\n"
+                   "c.pclose.argtypes=[ctypes.c_void_p]\n"
+                   "f=c.popen(sys.argv[2].encode(), b'r')\n"
+                   "sys.exit(0 if f and c.pclose(f) == 0 else 4)\n")
+HOLDER_CODE = ("import os,select\nselect.select([0], [], [], %d)\ntry:\n"
+               "    os.write(1, b'\\n')\nexcept OSError:\n    pass\n" % FIXTURE_HOLD_S)
+
+
+def gate_open():
+    """(read end for the fixture, write end kept by the controller)."""
+    return os.pipe()
+
+
+def release_gate(wfd, data=b"g"):
+    try:
+        os.write(wfd, data)
+        return True
+    except BrokenPipeError:
+        return False
+
+
+def gated_fixture(d, T, label, code, *args, **kw):
+    """A fixture whose first argument is its gate fd. Returns (Popen, gate write end)."""
+    gr, gw = gate_open()
+    try:
+        p = start_fixture(d, T, label, code, gr, *args, pass_fds=(gr,), **kw)
+    finally:
+        os.close(gr)
+    return p, gw
+
+
+def stdin_holder(d, T, label):
+    """(read end to use as a shell's stdin, holder Popen). The holder holds the only write
+    end; on release, on controller EOF or after FIXTURE_HOLD_S it writes one newline (the
+    shell's `read` returns) and exits, closing the pipe."""
+    r, w = os.pipe()
+    try:
+        h = start_fixture(d, T, label, HOLDER_CODE, stdin=subprocess.PIPE, stdout=w)
+    finally:
+        os.close(w)
+    return r, h
+
+
+def release_holder(h):
+    try:
+        h.stdin.write(b"\n")
+        h.stdin.flush()
+    except (BrokenPipeError, ValueError):
+        pass
 
 
 def run_watch_until(w, cond, deadline, each=None):
@@ -2462,22 +2527,21 @@ def run_watch_until(w, cond, deadline, each=None):
 
 
 def t30f(d, scratch, runroot):
-    """Real kernel: the fixture execs pinned coreutils `sleep 5` and stays alive; a VALID
-    snapshot records the exact exec_path, image and argv vector."""
+    """Real kernel: the gated fixture execs pinned coreutils `sleep 5` and stays alive; a
+    VALID snapshot records the exact exec_path, image and argv vector."""
     T = "T30f"
     root = mkroot(d, scratch, T, "root")
     w = bare_watch(root)
-    p = start_fixture(d, T, "execer", EXECER, COREUTILS_SLEEP, "sleep", "5",
-                      stdin=subprocess.PIPE)
+    p, gw = gated_fixture(d, T, "execer", EXECER, COREUTILS_SLEEP, "sleep", "5")
     e = adopt_or_hold(w, p, "fixture", image=PY)
-    p.stdin.write(b"go\n")
-    p.stdin.flush()
     seen = {}
 
     def record(entry, s, kind):
         seen.update(image=s["image"], exec_path=s["exec_path"], argv=s["argv"], kind=kind)
     w.apply_snapshot = record
+    release_gate(gw)
     run_watch_until(w, lambda: "argv" in seen, W.now() + 5.0)
+    os.close(gw)
     rc = reap(p, D_REAP)
     labels = ["root"]
     ok = seen.get("kind") == "exec" and seen.get("exec_path") == COREUTILS_SLEEP and \
@@ -2487,48 +2551,46 @@ def t30f(d, scratch, runroot):
                   {"fixtures": "ok" if rc == 0 else "rc-%s" % rc}, runroot, notes=seen)
 
 
-POPENER = ("import ctypes,ctypes.util,sys,time\nsys.stdin.readline()\n"
-           "c=ctypes.CDLL(ctypes.util.find_library('c'))\nc.popen.restype=ctypes.c_void_p\n"
-           "c.popen(sys.argv[1].encode(), b'r')\ntime.sleep(4)\n")
-
-
 def t30g(d, scratch, runroot):
     """Measurement on the pinned macOS ([A], B3/B4): (a) execv("/bin/sh", ["/bin/sh","-c",
     CMD]): every observed SYSTEM_SH stage keeps exactly that vector (the shim hand-off
     equality apply_snapshot relies on); (b) libc popen(CMD): the child's observed shell stage
-    is exactly ["sh","-c",CMD] (the popen argv0 the forms rely on). CMD first reads one line
-    from the shared stdin, so the shell stage stays alive until it has been observed (or
-    6 s passed); only then is the line written and the shell execs pinned sleep. Each side
+    is exactly ["sh","-c",CMD] (the popen argv0 the forms rely on). CMD reads one line from
+    a holder pipe (R4: the holder bounds it autonomously), so the shell stage stays alive
+    until observed; the holder is then released and the shell execs pinned sleep. Each side
     needs at least one observed shell stage: an unobserved stage is UNMEASURED (a non-pass
-    that returns the [A] premise for review), never assumed."""
+    that returns the [A] premise for review), never assumed. This measures the shell/popen
+    vectors only, NOT the devenv-tasks wrapper vector (still an unmeasured premise)."""
     T = "T30g"
     root = mkroot(d, scratch, T, "root")
     cmd = "read x; exec %s 3" % COREUTILS_SLEEP
     sleep_real = os.path.realpath(COREUTILS_SLEEP)
     stages = {"a": [], "b": []}
 
-    def watched(p, key):
+    def watched(key, label, code, *args):
+        sin, h = stdin_holder(d, T, label + "-holder")
+        try:
+            p, gw = gated_fixture(d, T, label, code, *args, stdin=sin)
+        finally:
+            os.close(sin)
         w = bare_watch(root)
         adopt_or_hold(w, p, "fixture", image=PY)
         w.apply_snapshot = lambda entry, s, kind: stages[key].append(
             {"pid": entry["pid"], "image": s["image"], "argv": s["argv"]})
         mine = (lambda x: True) if key == "a" else (lambda x: x["pid"] != p.pid)
         poll = None if key == "a" else (lambda: w.scan_children(p.pid, "poll"))
-        p.stdin.write(b"go\n")
-        p.stdin.flush()
+        release_gate(gw)
         run_watch_until(w, lambda: any(mine(x) and os.path.realpath(x["image"]) in W.SYSTEM_SH
                                        for x in stages[key]), W.now() + 6.0, poll)
-        p.stdin.write(b"x\n")
-        p.stdin.flush()
+        release_holder(h)
         run_watch_until(w, lambda: any(mine(x) and os.path.realpath(x["image"]) == sleep_real
                                        for x in stages[key]), W.now() + 6.0, poll)
-        return w
-    pa = start_fixture(d, T, "shim", EXECER, "/bin/sh", "/bin/sh", "-c", cmd,
-                       stdin=subprocess.PIPE)
-    watched(pa, "a")
-    pb = start_fixture(d, T, "popen", POPENER, cmd, stdin=subprocess.PIPE)
-    watched(pb, "b")
-    rca, rcb = reap(pa, D_REAP), reap(pb, D_REAP)
+        os.close(gw)
+        return p, h
+    pa, ha = watched("a", "shim", EXECER, "/bin/sh", "/bin/sh", "-c", cmd)
+    pb, hb = watched("b", "popen", POPENER, cmd)
+    rcs = {k: reap(x, D_REAP) for k, x in (("shim", pa), ("shim-holder", ha), ("popen", pb),
+                                           ("popen-holder", hb))}
     sh_a = [x for x in stages["a"] if os.path.realpath(x["image"]) in W.SYSTEM_SH]
     sh_b = [x for x in stages["b"] if x["pid"] != pb.pid and
             os.path.realpath(x["image"]) in W.SYSTEM_SH]
@@ -2541,7 +2603,7 @@ def t30g(d, scratch, runroot):
         obs = "FAIL"
     labels = ["root"]
     return finish(labels, d, T, ["PASS"], obs,
-                  {"fixtures": "ok" if rca == 0 and rcb == 0 else "rc-%s/%s" % (rca, rcb)},
+                  {"fixtures": "ok" if all(v == 0 for v in rcs.values()) else "rc-%r" % rcs},
                   runroot, notes={"stages": stages, "shell_stages_observed":
                                   {"a": len(sh_a), "b": len(sh_b)}})
 
@@ -2567,7 +2629,7 @@ def t30i(d, scratch, runroot):
 
     def snap(image, argv):
         return {"image": image, "exec_path": image, "argv": argv, "meta": None,
-                "cutoff": W.now()}
+                "argv_status": "OK", "cutoff": W.now()}
     bad = child(7002)
     before = len(w.violations)
     w.apply_snapshot(bad, snap(P, [P, "-V"]), "exec")
@@ -2582,13 +2644,92 @@ def t30i(d, scratch, runroot):
                   notes={"skipped": skipped, "healthy": healthy})
 
 
+class HidingKq(object):
+    """fixture-synthetic injection: the REAL kqueue with every event carrying `udata` and
+    NOTE_EXEC withheld (a delayed/missing exec event). Used only to prove the T30j oracle
+    fails on the new image when the event is not visible."""
+
+    def __init__(self, kq, udata):
+        self.kq, self.udata = kq, udata
+
+    def control(self, changes, n, timeout=None):
+        return [e for e in self.kq.control(changes, n, timeout)
+                if not (e.udata == self.udata and e.fflags & W.NOTE_EXEC)]
+
+
+# gate fd, progress fd, bash: write "b", exec pinned bash, which writes "a" (progress after
+# the exec) and waits on the gate fd for at most FIXTURE_HOLD_S (R4).
+ORDER_EXECER = GATED + ("p=int(sys.argv[2])\nos.write(p, b'b')\n"
+                        "os.execv(sys.argv[3], ['bash', '-c', 'printf a >&%d; read -t %d -u %d x'"
+                        " % (p, " + str(FIXTURE_HOLD_S) + ", fd)])\n")
+
+
+def ordering_run(d, T, label, w, hide=False):
+    """One adverse-ordering schedule (R3): the target's exec is triggered INSIDE the
+    snapshot interval (after the pre-fence, the pending check and the first identity read;
+    before the image/argv reads) and is independently observed to have happened (progress
+    "b" before the exec, "a" from the new image) before those reads run, and before its
+    event is handled. Oracle: VOID or DEFERRED is PASS; VALID (the new image attributed
+    while its NOTE_EXEC is invisible to the post-fence) is FAIL; an unobserved schedule or
+    an UNKNOWN snapshot is UNMEASURED; anything else is FAIL. `hide` withholds the target's
+    exec events, which must make the oracle FAIL."""
+    bash = W.PKG["bash"] + "/bin/bash"
+    pr, pw = os.pipe()
+    gr, gw = gate_open()
+    try:
+        p = start_fixture(d, T, label, ORDER_EXECER, gr, pw, bash, pass_fds=(gr, pw))
+    finally:
+        os.close(gr)
+        os.close(pw)
+    e = adopt_or_hold(w, p, "fixture", image=PY)
+    g = e["gen"]
+    if hide:
+        w.kq = HidingKq(w.kq, g)
+    progress, real_pidpath = {}, W.pidpath
+
+    def hooked(pid):
+        if pid == p.pid and "released" not in progress:
+            progress["released"] = W.now()
+            release_gate(gw)
+            got, end = b"", W.now() + 5.0
+            while W.now() < end and got != b"ba":
+                if select.select([pr], [], [], max(0.0, end - W.now()))[0]:
+                    chunk = os.read(pr, 2 - len(got))
+                    if chunk == b"":
+                        break
+                    got += chunk
+            progress["observed"] = got.decode("ascii", "replace")
+            progress["observed_t"] = W.now()
+        return real_pidpath(pid)
+    try:
+        W.pidpath = hooked
+        s = w.snapshot(g, W.now() + 10.0)
+    finally:
+        W.pidpath = real_pidpath
+    handled_before = e["execs"]
+    release_gate(gw, b"\n")              # the bash stage's own read ends at once
+    os.close(gw)
+    os.close(pr)
+    rc = reap(p, D_REAP)
+    if progress.get("observed") != "ba" or s["result"] == "UNKNOWN":
+        oracle = "UNMEASURED"
+    elif s["result"] in ("VOID", "DEFERRED"):
+        oracle = "PASS"
+    else:
+        oracle = "FAIL"
+    return {"oracle": oracle, "result": s["result"], "progress": progress.get("observed"),
+            "execs_handled_at_snapshot": handled_before,
+            "image": os.path.realpath(s.get("image") or ""), "rc": rc}
+
+
 def t30j(d, scratch, runroot):
-    """Target event BEHIND 256 unrelated events (R1a). Stub-ordered on the real snapshot
-    code: VOID, an exec obligation, then VALID once handled. Real kernel: 300 registered
-    pinned-coreutils sleepers EXIT (queued) before the target's exec; no snapshot taken
-    after the exec was handled may be VALID for the pre-exec image, the final snapshot is
-    VALID for the exec'd image, and nothing saturates. Sampled evidence for the UNVERIFIED
-    kernel-ordering premise (B1), not a theorem: a failure returns it for review."""
+    """Target event BEHIND 256 unrelated events (R1a) and the adverse-ordering oracle (R3).
+    Stub-ordered on the real snapshot code: VOID, an exec obligation, then VALID once
+    handled. Real kernel: 300 registered pinned-coreutils sleepers EXIT (queued ahead), then
+    the ordering schedule (ordering_run) must give VOID/DEFERRED; the same schedule with the
+    target's exec event withheld (HidingKq) must make the oracle FAIL, proving it can.
+    An unobserved schedule is UNMEASURED (non-pass: HOLD for review). Sampled evidence for
+    the UNVERIFIED kernel-ordering premise, never a theorem."""
     T = "T30j"
     root = mkroot(d, scratch, T, "root")
     w = bare_watch(root)
@@ -2604,7 +2745,7 @@ def t30j(d, scratch, runroot):
     second = w.snapshot(et["gen"], W.now() + 2.0)
     stub_ok = first == "VOID" and req.get("kind") == "exec" and second["result"] == "VALID"
     rct, rco = reap(t, D_REAP), reap(o, D_REAP)
-    # real kernel
+    # real kernel: a queued backlog of 300 exits, then the schedule
     wr = bare_watch(root)
     sleepers = []
     for i in range(300):
@@ -2615,36 +2756,27 @@ def t30j(d, scratch, runroot):
         sleepers.append(sp)
         if wr.adopt(sp.pid, "fixture") is None:
             raise RealUncertainty("T30j: sleeper %d gone before adoption" % sp.pid)
-    tg = start_fixture(d, T, "real-target", EXECER, COREUTILS_SLEEP, "sleep", "3",
-                       stdin=subprocess.PIPE)
-    eg = adopt_or_hold(wr, tg, "fixture", image=PY)
-    t_last = W.now()
-    time.sleep(max(0.0, t_last + 2.0 - W.now()))     # every sleeper's 1.5 s has passed
-    tg.stdin.write(b"go\n")
-    tg.stdin.flush()
-    snaps, sleep_real = [], os.path.realpath(COREUTILS_SLEEP)
-    end = W.now() + 8.0
-    while W.now() < end:
-        handled_before = eg["execs"]
-        s = wr.snapshot(eg["gen"], min(W.now() + 1.0, end))
-        img = os.path.realpath(s.get("image") or "")
-        snaps.append({"result": s["result"], "image": img, "execs_handled": handled_before})
-        if s["result"] == "VALID" and img == sleep_real:
-            break
-        wr.process_pending(min(W.now() + 0.5, end), W.PENDING_CAP)
-        wr.requests.pop(eg["gen"], None)
-    rcs = [reap(sp, D_REAP) for sp in sleepers] + [reap(tg, D_REAP)]
-    stale = [x for x in snaps if x["result"] == "VALID" and x["execs_handled"] > 0 and
-             x["image"] != sleep_real]
-    real_ok = bool(snaps) and snaps[-1]["result"] == "VALID" and \
-        snaps[-1]["image"] == sleep_real and not stale and wr.violations == []
+    time.sleep(2.0)                                   # every sleeper's 1.5 s has passed
+    real = ordering_run(d, T, "order-real", wr)
+    rcs = [reap(sp, D_REAP) for sp in sleepers]
+    wh = bare_watch(root)
+    hidden = ordering_run(d, T, "order-hidden", wh, hide=True)
+    if real["oracle"] == "UNMEASURED" or hidden["oracle"] == "UNMEASURED":
+        obs = "UNMEASURED"
+    elif stub_ok and real["oracle"] == "PASS" and hidden["oracle"] == "FAIL" and \
+            [v["kind"] for v in wr.violations] == []:
+        obs = "PASS"
+    else:
+        obs = "FAIL"
     labels = ["root"]
-    ok = stub_ok and real_ok
-    fixtures = "ok" if all(r == 0 for r in rcs + [rct, rco]) else "nonzero"
-    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": fixtures},
-                  runroot, notes={"stub": [first, req.get("kind"), second["result"]],
-                                  "real": snaps[-5:], "stale_valid": len(stale),
-                                  "violations": [v["kind"] for v in wr.violations]})
+    allrc = rcs + [rct, rco]
+    fixtures = "ok" if all(r == 0 for r in allrc) and real["rc"] in (0, 1) and \
+        hidden["rc"] in (0, 1) else "nonzero"
+    return finish(labels, d, T, ["PASS"], obs, {"fixtures": fixtures}, runroot,
+                  notes={"stub": [first, req.get("kind"), second["result"]], "real": real,
+                         "hidden": hidden,
+                         "violations": [v["kind"] for v in wr.violations],
+                         "premise": "kernel ordering UNVERIFIED (sampled)"})
 
 
 def t30k(d, scratch, runroot):
@@ -2674,9 +2806,9 @@ def t30k(d, scratch, runroot):
     w2.kq = StubKq([[FakeEv(t2.pid, W.NOTE_EXEC, udata=g2) for _ in range(20)]])
     real_handle = w2.handle
 
-    def slow(ev):
+    def slow(ev, deadline=W.INF):
         time.sleep(0.3)
-        real_handle(ev)
+        real_handle(ev, deadline)
     w2.handle = slow
     t1 = W.now()
     while W.now() < first_deadline + 1.0 and g2 in w2.requests:
@@ -2749,14 +2881,17 @@ def reap_pid(pid, deadline_s):
 
 def t30m(d, scratch, runroot):
     """Layout gate (r3 3.2, B3): owned ARGV-TOLERANT accepting fixtures, execve'd through
-    libc: the pinned python (HOLDER: any argv0, any trailing arguments after -c CODE) via
-    declared symlinks whose exec_path lengths cover every residue mod 8; the source-known
-    shell forms (/bin/sh with argv0 "sh" and "/bin/sh", pinned bash with "bash") waiting on
-    stdin. argc, argument lengths, empties (including an empty argv0) and environment sizes
-    vary. Each fixture signals readiness on fd 3 and is held alive by its open stdin while
-    its KERN_PROCARGS2 is read: the parse under H-pad (A = 8) must be exactly the known
-    vector and exec_path (the shells: a SYSTEM_SH/bash image after any shim hand-off). Any
-    mismatch is FAIL and returns the hypothesis for review: no later reliance, no fallback."""
+    libc: the pinned python (HOLDER: any argv0, any trailing arguments after -c CODE; it
+    waits on its stdin for at most 8 s) via declared symlinks whose exec_path lengths cover
+    every residue mod 8; the source-known shell forms (/bin/sh with argv0 "sh" and
+    "/bin/sh", pinned bash with "bash") reading a holder pipe (R4: the registered holder
+    bounds the read autonomously). argc, argument lengths, empties (including an empty
+    argv0) and environment sizes vary. Each fixture signals readiness on fd 3 and is held
+    alive while its KERN_PROCARGS2 is read: the parse under H-pad (A = 8) must be exactly
+    the known vector and exec_path (the shells: a SYSTEM_SH/bash image after any shim
+    hand-off). Any mismatch is FAIL and returns the hypothesis for review: no later
+    reliance, no fallback. Python start-up with an empty/short argv0 and a minimal env is a
+    fixture premise: a start-up refusal is a fixture issue, not an H-pad falsification."""
     T = "T30m"
     names = ["l" * k for k in range(1, 9)]
     root = mkroot(d, scratch, T, "root", names)
@@ -2770,21 +2905,26 @@ def t30m(d, scratch, runroot):
     cases = []
     for i, lp in enumerate(links):
         cases.append((lp, [argv0s[i % 4], "-I", "-c", HOLDER] + tails[i % 5], envs[i % 4],
-                      "exact"))
+                      "exact", False))
     sh_cmd = "echo r >&3; read x"
     bash = W.PKG["bash"] + "/bin/bash"
-    cases.append(("/bin/sh", ["sh", "-c", sh_cmd], ["E=1"], "shell"))
-    cases.append(("/bin/sh", ["/bin/sh", "-c", sh_cmd], ["E=" + "y" * 333], "shell"))
-    cases.append((bash, ["bash", "-c", sh_cmd], ["E=" + "z" * 13], "exact"))
+    cases.append(("/bin/sh", ["sh", "-c", sh_cmd], ["E=1"], "shell", True))
+    cases.append(("/bin/sh", ["/bin/sh", "-c", sh_cmd], ["E=" + "y" * 333], "shell", True))
+    cases.append((bash, ["bash", "-c", sh_cmd], ["E=" + "z" * 13], "exact", True))
     shells = {os.path.realpath(x) for x in W.SYSTEM_SH}
-    results = []
-    for n, (path, argv, env, mode) in enumerate(cases):
+    results, holders = [], []
+    for n, (path, argv, env, mode, held) in enumerate(cases):
         r, wfd = os.pipe()
-        sr, sw = os.pipe()
+        h, sw = None, None
+        if held:
+            sin, h = stdin_holder(d, T, "case%d-holder" % n)
+            holders.append(h)
+        else:
+            sin, sw = os.pipe()
         intent(d, T, "case%d" % n, "proc")
-        pid = fork_execve(path, argv, env, stdin_fd=sr, ready_fd=wfd)
+        pid = fork_execve(path, argv, env, stdin_fd=sin, ready_fd=wfd)
         os.close(wfd)
-        os.close(sr)
+        os.close(sin)
         res = {"case": n, "path_len": len(path), "argc": len(argv), "mode": mode}
         try:
             set_identity(d, T, "case%d" % n, proc_identity(pid, os.getpid()))
@@ -2797,20 +2937,26 @@ def t30m(d, scratch, runroot):
                        (ep is not None and os.path.realpath(ep) in shells))
         finally:
             os.close(r)
-            try:
-                os.write(sw, b"\n")
-            except BrokenPipeError:
-                res["stdin"] = "fixture already gone"
-            os.close(sw)
+            if h is not None:
+                release_holder(h)
+            else:
+                try:
+                    os.write(sw, b"\n")
+                except BrokenPipeError:
+                    res["stdin"] = "fixture already gone"
+                os.close(sw)
         res["rc"] = reap_pid(pid, D_REAP)
         results.append(res)
+    hrcs = [reap(h, D_REAP) for h in holders]
     residues = sorted({len(c[0]) % 8 for c in cases[:8]})
     labels = ["root"]
     ok = len(results) == len(cases) and residues == list(range(8)) and \
         all(x["status"] == "OK" and x["match"] and x["exec_path_ok"] for x in results)
-    fixtures = "ok" if all(x["rc"] == 0 for x in results) else "nonzero"
+    fixtures = "ok" if all(x["rc"] == 0 for x in results) and all(x == 0 for x in hrcs) \
+        else "nonzero"
     return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": fixtures},
-                  runroot, notes={"results": results, "residues": residues})
+                  runroot, notes={"results": results, "residues": residues,
+                                  "holder_rcs": hrcs})
 
 
 def t30n(d, scratch, runroot):
@@ -2969,7 +3115,10 @@ def t31(d, scratch, runroot, variant):
 
 
 def t32(d, scratch, runroot):
-    """lsof_holders on fabricated outputs (F4): exact outcomes, rc/stdout/stderr distinct."""
+    """lsof_holders on fabricated outputs (F4, review 930cad6): exact outcomes with rc,
+    stdout and stderr distinct, and the exact p / c / (f, n)+ group grammar: every empty
+    value, orphan, repeat, missing field, group without files or trailing partial pair is
+    HOLD, never holders or none."""
     T = "T32"
 
     def runner(rc, out, err):
@@ -2978,8 +3127,18 @@ def t32(d, scratch, runroot):
     def timeout_runner(argv, env=None, timeout=None):
         raise subprocess.TimeoutExpired(argv, timeout)
     cases = {
-        "rc0_holders": (runner(0, "p11\ncbash\nf3\nn/x\np12\ncsh\nn/y\n", ""), "holders"),
-        "rc1_holders": (runner(1, "p13\ncpg\nn/z\n", ""), "holders"),
+        "rc0_holders": (runner(0, "p11\ncbash\nf3\nn/x\nf4\nn/x/y\np12\ncsh\nfcwd\nn/y\n",
+                               ""), "holders"),
+        "rc1_holders": (runner(1, "p13\ncpg\nf5\nn/z\n", ""), "holders"),
+        "empty_c": (runner(0, "p11\nc\nf3\nn/x\n", ""), "hold"),
+        "empty_n": (runner(0, "p11\ncbash\nf3\nn\n", ""), "hold"),
+        "empty_f": (runner(0, "p11\ncbash\nf\nn/x\n", ""), "hold"),
+        "missing_c": (runner(0, "p11\nf3\nn/x\n", ""), "hold"),
+        "repeated_c": (runner(0, "p11\ncbash\ncsh\nf3\nn/x\n", ""), "hold"),
+        "n_without_f": (runner(0, "p11\ncbash\nn/x\n", ""), "hold"),
+        "group_without_files": (runner(0, "p11\ncbash\np12\ncsh\nf3\nn/y\n", ""), "hold"),
+        "trailing_f": (runner(0, "p11\ncbash\nf3\nn/x\nf4\n", ""), "hold"),
+        "zero_pid": (runner(0, "p0\ncbash\nf3\nn/x\n", ""), "hold"),
         "rc1_empty": (runner(1, "", ""), "none"),
         "rc1_stderr": (runner(1, "", "lsof: WARNING\n"), "hold"),
         "rc2": (runner(2, "", ""), "hold"),
@@ -3030,11 +3189,13 @@ def t35(d, scratch, runroot):
     succeeds (control) and its NOTE_EXIT never arrives; udata 101 and 102 each deliver
     their own NOTE_EXIT with the exit status (independent attribution); after delivery,
     while the process is still an unreaped zombie, EV_DELETE of 101 and of 102 fails with
-    ENOENT (removed). Anything else is a non-pass that returns the capability for review;
-    there is no pid-keyed fallback."""
+    ENOENT (removed; this expectation is itself UNVERIFIED). Anything else is a non-pass
+    that returns the capability for review; there is no pid-keyed fallback. The subject
+    waits on its stdin for at most FIXTURE_HOLD_S (R4)."""
     T = "T35"
     kq = select.kqueue()
-    p = start_fixture(d, T, "subject", "import sys; sys.stdin.readline()", stdin=subprocess.PIPE)
+    p = start_fixture(d, T, "subject", HOLDER_CODE, stdin=subprocess.PIPE,
+                      stdout=subprocess.DEVNULL)
     flags = select.KQ_EV_ADD | select.KQ_EV_ENABLE | W.KQ_EV_UDATA_SPECIFIC
 
     def ev(u, fl):
@@ -3054,8 +3215,7 @@ def t35(d, scratch, runroot):
     except OSError as e:
         out["registered"] = "errno-%d" % e.errno
     out["delete_present_103"] = delete(103)
-    p.stdin.write(b"\n")
-    p.stdin.flush()
+    release_holder(p)
     got, end = {}, W.now() + 5.0
     while W.now() < end and len(got) < 2:
         for e in kq.control(None, 16, 0.2):
@@ -3094,7 +3254,7 @@ def t36(d, scratch, runroot, variant):
         rcs.append(reap(p, D_REAP))
         real_kq = w.kq
         w.kq = StubKq([])
-        w.refresh(enclosing=W.now())
+        w.refresh(enclosing=W.now() + 0.05)   # a census, then no settle budget
         refused = False
         try:
             w.register(p.pid)
@@ -3167,6 +3327,331 @@ def t37(d, scratch, runroot):
                    notes={"present": present, "absent": absent, "erred": erred})
 
 
+def t38(d, scratch, runroot):
+    """R4 withheld-release control: every controller-held fixture stage is started and NEVER
+    released. Each must end by its own bound (FIXTURE_HOLD_S) and be reaped by its handle,
+    with no signal from the harness: the gated execer and popen-er (exit 3), the holder and
+    the holder-fed shell, the T35-style subject, the argv-tolerant HOLDER via execve, and the
+    ordering target's bash stage (released past its gate, its own read -t bounds it)."""
+    T = "T38"
+    root = mkroot(d, scratch, T, "root")
+    t0 = W.now()
+    procs, pids, gws = {}, {}, []
+    p, gw = gated_fixture(d, T, "execer", EXECER, "/usr/bin/true", "true")
+    procs["execer"] = p
+    gws.append(gw)
+    sin, h = stdin_holder(d, T, "popen-holder")
+    try:
+        p, gw = gated_fixture(d, T, "popen", POPENER, "read x", stdin=sin)
+    finally:
+        os.close(sin)
+    procs["popen"], procs["popen-holder"] = p, h
+    gws.append(gw)
+    sin, h = stdin_holder(d, T, "shell-holder")
+    intent(d, T, "shell", "proc")
+    pids["shell"] = fork_execve("/bin/sh", ["sh", "-c", "read x"], ["E=1"], stdin_fd=sin)
+    os.close(sin)
+    set_identity(d, T, "shell", proc_identity(pids["shell"], os.getpid()))
+    procs["shell-holder"] = h
+    procs["subject"] = start_fixture(d, T, "subject", HOLDER_CODE, stdin=subprocess.PIPE,
+                                     stdout=subprocess.DEVNULL)
+    sr, sw = os.pipe()
+    r3, w3 = os.pipe()                       # HOLDER's readiness fd (kept open, not read)
+    intent(d, T, "holder-exec", "proc")
+    pids["holder-exec"] = fork_execve(PY, ["", "-I", "-c", HOLDER, "x"], ["E=1"], stdin_fd=sr,
+                                      ready_fd=w3)
+    os.close(sr)
+    os.close(w3)
+    set_identity(d, T, "holder-exec", proc_identity(pids["holder-exec"], os.getpid()))
+    pr, pw = os.pipe()
+    gr, gw = gate_open()
+    try:
+        procs["order"] = start_fixture(d, T, "order", ORDER_EXECER, gr, pw,
+                                       W.PKG["bash"] + "/bin/bash", pass_fds=(gr, pw))
+    finally:
+        os.close(gr)
+        os.close(pw)
+    release_gate(gw)                         # past the gate; the bash read is withheld
+    gws.append(gw)
+    rcs = {k: reap(x, D_REAP) for k, x in procs.items()}
+    rcs.update({k: reap_pid(x, D_REAP) for k, x in pids.items()})
+    took = W.now() - t0
+    for fd in gws + [sw, pr, r3]:
+        os.close(fd)
+    want = {"execer": 3, "popen": 3, "popen-holder": 0, "shell": 0, "shell-holder": 0,
+            "subject": 0, "holder-exec": 0}
+    ok = all(rcs.get(k) == v for k, v in want.items()) and rcs.get("order") not in (None, 0) \
+        and took <= FIXTURE_HOLD_S + 6.0
+    labels = ["root"]
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+                  notes={"rcs": rcs, "took_s": took, "signals_sent": 0})
+
+
+class FakeLauncher(object):
+    def __init__(self, pid):
+        self.pid, self.returncode = pid, None
+
+
+def t30q(d, scratch, runroot):
+    """R1/B4: image observation never grants operational permission without a closed,
+    representable argv vector. Fabricated records: launcher, process-compose, devenv-tasks,
+    bash shell, postmaster under the wrapper and a pg tool each give "unknown-argv" plus
+    argv-unknown-operational for a missing, UNSUPPORTED or UNREPRESENTABLE vector, and their
+    operational role for a known OK vector (healthy pairs); a postmaster child keeps the
+    reviewed title-only rule. Effects: with os.kill INTERCEPTED (no real signal), a live
+    adopted fixture whose snapshot has an unknown vector is refused (frozen, then by role
+    once unfrozen for the check), and its healthy pair reaches the intercepted kill."""
+    T = "T30q"
+    root = mkroot(d, scratch, T, "root")
+    P = W.PG_BIN + "/postgres"
+    bash = W.PKG["bash"] + "/bin/bash"
+    cases = {"launcher": (bash, None), "process-compose": (W.PC_BIN, None),
+             "devenv-tasks": (W.DT_BIN, None), "shell": (bash, None),
+             "postmaster-final": (P, "wrapper"), "pg-tool": (W.PG_BIN + "/initdb", None)}
+    got, pid = {}, [8000]
+    for want, (img, prole) in sorted(cases.items()):
+        for status in (None, "UNSUPPORTED", "UNREPRESENTABLE", "OK"):
+            w = bare_watch(root)
+            pid[0] += 2
+            parent = None
+            if prole is not None:
+                parent = {"pid": pid[0] - 1, "birth_us": 1, "role": prole, "image": bash,
+                          "lineage": True, "exit": None, "parent": None, "gen": None}
+                w.entries[parent["pid"]] = parent
+            e = {"pid": pid[0], "birth_us": 1, "image": img, "exe": img, "lineage": True,
+                 "parent": parent["pid"] if parent else None,
+                 "parent_birth_us": 1 if parent else None, "exit": None, "gen": None,
+                 "argv": ["x", "y"] if status == "OK" else None, "argv_status": status,
+                 "argv_known": False}
+            if want == "launcher":
+                w.launcher = FakeLauncher(e["pid"])
+            w.entries[e["pid"]] = e
+            role = w.classify(e)
+            kinds = [v["kind"] for v in w.violations]
+            got["%s/%s" % (want, status)] = [role, kinds]
+    pm = {"pid": 8901, "birth_us": 1, "role": "postmaster-final", "image": P, "lineage": True,
+          "exit": None, "parent": None, "gen": None}
+    child = {"pid": 8902, "birth_us": 1, "image": P, "exe": P, "lineage": True, "parent": 8901,
+             "parent_birth_us": 1, "exit": None, "gen": None, "argv": None,
+             "argv_status": "UNREPRESENTABLE", "argv_known": False}
+    wp = bare_watch(root)
+    wp.entries.update({8901: pm, 8902: child})
+    got["pg-child/UNREPRESENTABLE"] = [wp.classify(child), [v["kind"] for v in wp.violations]]
+    gate_ok = all(
+        v == (["unknown-argv", ["argv-unknown-operational"]] if not k.endswith("/OK")
+              else [k.split("/")[0], []])
+        for k, v in got.items() if not k.startswith("pg-child")) and \
+        got["pg-child/UNREPRESENTABLE"] == ["pg-aux", []]
+    # effects, intercepted
+    real_kill, kills = os.kill, []
+
+    def snap_for(argv, status):
+        return {"image": W.PC_BIN, "exec_path": W.PC_BIN, "argv": argv, "meta": None,
+                "argv_status": status, "cutoff": W.now()}
+    fx = {}
+    eff = {}
+    try:
+        os.kill = lambda p_, s_: kills.append((p_, int(s_)))
+        for label, argv, status in (("healthy", ["process-compose", "up"], "OK"),
+                                    ("unknown", None, "UNSUPPORTED")):
+            p = live_fixture(d, T, label)
+            fx[label] = p
+            w = bare_watch(root)
+            e = adopt_or_hold(w, p, "unsnapshotted")
+            w.check_exe = lambda e_: None       # the image allowlist is not the subject here
+            w.apply_snapshot(e, snap_for(argv, status), "admission")
+            out = []
+            for attempt in (1, 2):
+                try:
+                    out.append(w.signal_verified(p.pid, signal.SIGTERM, "T30q"))
+                except W.Hold as h:
+                    out.append("HOLD:" + str(h).split(":")[0])
+                if label == "unknown" and attempt == 1:
+                    w.signals_frozen = False    # test-only: show the ROLE also refuses
+                else:
+                    break
+            eff[label] = {"role": e["role"], "results": out, "signals": len(w.harness_signals)}
+    finally:
+        os.kill = real_kill
+    rcs = {k: reap(p, D_REAP) for k, p in fx.items()}
+    eff_ok = eff.get("healthy", {}).get("results") == ["sent"] and \
+        eff["healthy"]["role"] == "process-compose" and \
+        kills == [(fx["healthy"].pid, int(signal.SIGTERM))] and \
+        eff.get("unknown", {}).get("role") == "unknown-argv" and \
+        len(eff["unknown"]["results"]) == 2 and \
+        all(r.startswith("HOLD") for r in eff["unknown"]["results"]) and \
+        eff["unknown"]["signals"] == 0
+    labels = ["root"]
+    return finish(labels, d, T, ["PASS"], "PASS" if gate_ok and eff_ok else "FAIL",
+                  {"fixtures": "ok" if all(r == 0 for r in rcs.values()) else "rc-%r" % rcs},
+                  runroot, notes={"classify": got, "effects": eff, "kills": kills})
+
+
+def t30r(d, scratch, runroot):
+    """R2: nested admission under the shared bound. A live fixture X has a live child Y
+    (bounded). (a) A slow identity read of Y crosses the bound BEFORE registration: no
+    later stage starts, Y gets no generation and stays unadmitted, no violation. (b) The
+    bound expires DURING registration: the token is never sealed (unbound-deadline,
+    registration-deadline violation), Y is not admitted, and Y's own NOTE_EXIT retires the
+    token. handle() returns promptly in both."""
+    T = "T30r"
+    root = mkroot(d, scratch, T, "root")
+    notes, oks, rcs = {}, [], []
+    for v in ("a", "b"):
+        x = start_fixture(d, T, "x-" + v, "import subprocess,sys;"
+                          "y=subprocess.Popen([sys.executable,'-I','-B','-c',"
+                          "'import time; time.sleep(2)']);print(y.pid,flush=True);y.wait()",
+                          stdout=subprocess.PIPE)
+        ypid = int(bounded_readline(x.stdout))
+        intent(d, T, "y-" + v, "proc")
+        set_identity(d, T, "y-" + v, proc_identity(ypid, x.pid))
+        w = bare_watch(root)
+        ex = adopt_or_hold(w, x, "fixture")
+        real_bsd, real_reg = W.bsdinfo, w.register
+
+        def slow_bsd(pid):
+            if pid == ypid:
+                time.sleep(0.3)
+            return real_bsd(pid)
+
+        def slow_reg(pid):
+            g = real_reg(pid)
+            time.sleep(0.3)
+            return g
+        t0 = W.now()
+        try:
+            if v == "a":
+                W.bsdinfo = slow_bsd
+            else:
+                w.register = slow_reg
+            w.handle(FakeEv(x.pid, W.NOTE_FORK, udata=ex["gen"]), t0 + 0.2)
+        finally:
+            W.bsdinfo = real_bsd
+            if v == "b":
+                del w.register
+        took = W.now() - t0
+        ygens = [g for g, r in w.gens.items() if r["pid"] == ypid]
+        kinds = [k["kind"] for k in w.violations]
+        if v == "a":
+            ok = ygens == [] and ypid not in w.entries and kinds == [] and took <= 0.6
+        else:
+            st0 = [w.gens[g]["state"] for g in ygens]
+            rcs.append(reap(x, D_REAP))
+            run_watch_until(w, lambda: all(w.gens[g]["state"] == "retired" for g in ygens),
+                            W.now() + 5.0)
+            st1 = [w.gens[g]["state"] for g in ygens]
+            ok = st0 == ["unbound-deadline"] and st1 == ["retired"] and \
+                ypid not in w.entries and kinds == ["registration-deadline"] and took <= 0.6
+            notes["b_states"] = [st0, st1]
+        if v == "a":
+            rcs.append(reap(x, D_REAP))
+        notes[v] = {"took_s": took, "violations": kinds, "gens": len(ygens)}
+        oks.append(ok)
+    labels = ["root"]
+    return finish(labels, d, T, ["PASS"], "PASS" if all(oks) else "FAIL",
+                  {"fixtures": "ok" if all(r == 0 for r in rcs) else "rc-%r" % rcs}, runroot,
+                  notes=notes)
+
+
+class SlowEmptyKq(object):
+    """fixture-synthetic: every fetch returns [] only after `delay` seconds."""
+
+    def __init__(self, delay):
+        self.delay = delay
+
+    def control(self, changes, n, timeout=None):
+        if changes:
+            raise OSError(1, "stub kqueue takes no registrations")
+        time.sleep(self.delay)
+        return []
+
+
+def t30s(d, scratch, runroot):
+    """R2: a read or an empty fetch that RETURNS after the bound never yields VALID or an
+    empty-fence claim: slow procargs and slow pidpath give UNKNOWN; a slow empty fetch makes
+    fence() None and the snapshot UNKNOWN; the healthy pair is VALID."""
+    T = "T30s"
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root)
+    p = live_fixture(d, T, "target")
+    e = adopt_or_hold(w, p, "fixture")
+    g = e["gen"]
+    out = {}
+    real_pa, real_pp = W.procargs, W.pidpath
+
+    def slow(fn):
+        def f(*a, **k):
+            time.sleep(0.3)
+            return fn(*a, **k)
+        return f
+    try:
+        W.procargs = slow(real_pa)
+        out["slow_procargs"] = w.snapshot(g, W.now() + 0.2)["result"]
+        W.procargs = real_pa
+        W.pidpath = slow(real_pp)
+        out["slow_pidpath"] = w.snapshot(g, W.now() + 0.2)["result"]
+    finally:
+        W.procargs, W.pidpath = real_pa, real_pp
+    real_kq = w.kq
+    w.kq = SlowEmptyKq(0.3)
+    out["slow_fence"] = w.fence(W.now() + 0.2)
+    out["slow_fetch_snapshot"] = w.snapshot(g, W.now() + 0.2)["result"]
+    w.kq = real_kq
+    out["healthy"] = w.snapshot(g, W.now() + 2.0)["result"]
+    rc = reap(p, D_REAP)
+    labels = ["root"]
+    ok = out == {"slow_procargs": "UNKNOWN", "slow_pidpath": "UNKNOWN", "slow_fence": None,
+                 "slow_fetch_snapshot": "UNKNOWN", "healthy": "VALID"}
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if rc == 0 else "rc-%s" % rc}, runroot, notes=out)
+
+
+def t30t(d, scratch, runroot):
+    """R2 effect path: quiesce refuses an effect while a required image obligation of ANOTHER
+    target is unresolved after a handler consumed the bound (os.kill INTERCEPTED, no real
+    signal): HOLD, no kill, no harness signal. Healthy pair: the obligation resolves inside
+    the bound and the intercepted kill is reached once."""
+    T = "T30t"
+    root = mkroot(d, scratch, T, "root")
+    real_kill, kills, res, fx = os.kill, [], {}, {}
+    try:
+        os.kill = lambda p_, s_: kills.append((p_, int(s_)))
+        for label in ("slow", "healthy"):
+            a = live_fixture(d, T, "a-" + label)
+            b = live_fixture(d, T, "b-" + label)
+            fx["a-" + label], fx["b-" + label] = a, b
+            w = bare_watch(root)
+            ea = adopt_or_hold(w, a, "process-compose", image=W.PC_BIN, argv=["process-compose"])
+            eb = adopt_or_hold(w, b, "fixture")
+            w.kq = StubKq([[FakeEv(b.pid, W.NOTE_EXEC, udata=eb["gen"])]])
+            w.apply_snapshot = lambda e_, s_, k_: None     # B's image is not the subject
+            if label == "slow":
+                real_handle = w.handle
+
+                def slow(ev, deadline=W.INF, _h=real_handle):
+                    time.sleep(0.3)
+                    _h(ev, deadline)
+                w.handle = slow
+            n0 = len(kills)
+            try:
+                r = w.signal_verified(a.pid, signal.SIGTERM, "T30t", deadline=W.now() + 30.0)
+            except W.Hold as h:
+                r = "HOLD:" + str(h)[:60]
+            res[label] = {"result": r, "kills": len(kills) - n0,
+                          "harness_signals": len(w.harness_signals),
+                          "unresolved": sorted(w.requests), "a_role": ea["role"]}
+    finally:
+        os.kill = real_kill
+    rcs = {k: reap(p, D_REAP) for k, p in fx.items()}
+    ok = res["slow"]["result"].startswith("HOLD") and res["slow"]["kills"] == 0 and \
+        res["slow"]["harness_signals"] == 0 and res["healthy"]["result"] == "sent" and \
+        res["healthy"]["kills"] == 1
+    labels = ["root"]
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if all(r == 0 for r in rcs.values()) else "rc-%r" % rcs},
+                  runroot, notes=res)
+
+
 # ---------------------------------------------------------------- injections (T15a-c)
 def inject(kind, path, pid=None):
     if kind == "truncate":
@@ -3225,6 +3710,7 @@ SYNTHETIC = {
     "T36a": lambda d, s, r: t36(d, s, r, "a"), "T36b": lambda d, s, r: t36(d, s, r, "b"),
     "T36c": lambda d, s, r: t36(d, s, r, "c"), "T36d": lambda d, s, r: t36(d, s, r, "d"),
     "T37": t37,
+    "T30q": t30q, "T30r": t30r, "T30s": t30s, "T30t": t30t, "T38": t38,
 }
 
 
