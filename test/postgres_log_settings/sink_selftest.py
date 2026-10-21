@@ -84,6 +84,9 @@ _proof(["T30c", "T30d", "T30e", "T30f", "T30g", "T30i", "T30j", "T30k", "T30l", 
 _proof(["T30a", "T30b", "T30n", "T30o", "T30p", "T32", "T37"], fixtures=NA)
 # 930cad6 review: R1 (T30q), R2 (T30r, T30s, T30t), R4 (T38)
 _proof(["T30q", "T30r", "T30s", "T30t", "T38"], fixtures=REQ)
+# e3d897b review: R2 (T31h, T30u), R3 (T30v)
+_proof(["T31h", "T30u"], fixtures=REQ)
+_proof(["T30v"], fixtures=NA)
 _proof(["T1", "T2", "T14"], fixtures=REQ, cleanup=REQ)
 _proof(["T3"], fixtures=REQ)
 _proof(["T13"], cleanup=REQ)
@@ -2676,6 +2679,7 @@ def ordering_run(d, T, label, w, hide=False):
     bash = W.PKG["bash"] + "/bin/bash"
     pr, pw = os.pipe()
     gr, gw = gate_open()
+    want_argv = ["bash", "-c", "printf a >&%d; read -t %d -u %d x" % (pw, FIXTURE_HOLD_S, gr)]
     try:
         p = start_fixture(d, T, label, ORDER_EXECER, gr, pw, bash, pass_fds=(gr, pw))
     finally:
@@ -2719,7 +2723,21 @@ def ordering_run(d, T, label, w, hide=False):
         oracle = "FAIL"
     return {"oracle": oracle, "result": s["result"], "progress": progress.get("observed"),
             "execs_handled_at_snapshot": handled_before,
-            "image": os.path.realpath(s.get("image") or ""), "rc": rc}
+            "image": os.path.realpath(s.get("image") or ""), "argv": s.get("argv"),
+            "want_image": os.path.realpath(bash), "want_argv": want_argv, "rc": rc}
+
+
+def hidden_companion_proves(run):
+    """R3 (review e3d897b): the hidden-EXEC companion counts as proof that the ordering
+    oracle detects the intended attribution bug ONLY for the specific unsafe outcome: the
+    schedule observed (progress "ba"), no target exec handled before the result, and VALID
+    for exactly the new image and its known vector. GONE, INCONSISTENT, UNKNOWN, missing
+    progress, an old image or any other result establishes nothing (UNMEASURED/HOLD)."""
+    return isinstance(run, dict) and run.get("progress") == "ba" and \
+        run.get("execs_handled_at_snapshot") == 0 and run.get("result") == "VALID" and \
+        run.get("oracle") == "FAIL" and bool(run.get("want_image")) and \
+        run.get("image") == run.get("want_image") and \
+        run.get("argv") is not None and run.get("argv") == run.get("want_argv")
 
 
 def t30j(d, scratch, runroot):
@@ -2727,8 +2745,10 @@ def t30j(d, scratch, runroot):
     Stub-ordered on the real snapshot code: VOID, an exec obligation, then VALID once
     handled. Real kernel: 300 registered pinned-coreutils sleepers EXIT (queued ahead), then
     the ordering schedule (ordering_run) must give VOID/DEFERRED; the same schedule with the
-    target's exec event withheld (HidingKq) must make the oracle FAIL, proving it can.
-    An unobserved schedule is UNMEASURED (non-pass: HOLD for review). Sampled evidence for
+    target's exec event withheld (HidingKq) must produce exactly the unsafe outcome
+    (hidden_companion_proves: progress "ba", no exec handled, VALID for the new image and
+    vector), proving the oracle detects it; GONE, INCONSISTENT or any other hidden result is
+    UNMEASURED. An unobserved schedule is UNMEASURED (non-pass: HOLD for review). Sampled evidence for
     the UNVERIFIED kernel-ordering premise, never a theorem."""
     T = "T30j"
     root = mkroot(d, scratch, T, "root")
@@ -2761,9 +2781,10 @@ def t30j(d, scratch, runroot):
     rcs = [reap(sp, D_REAP) for sp in sleepers]
     wh = bare_watch(root)
     hidden = ordering_run(d, T, "order-hidden", wh, hide=True)
-    if real["oracle"] == "UNMEASURED" or hidden["oracle"] == "UNMEASURED":
-        obs = "UNMEASURED"
-    elif stub_ok and real["oracle"] == "PASS" and hidden["oracle"] == "FAIL" and \
+    proves = hidden_companion_proves(hidden)
+    if real["oracle"] == "UNMEASURED" or not proves:
+        obs = "UNMEASURED"          # an unproven negative companion is HOLD, never a pass
+    elif stub_ok and real["oracle"] == "PASS" and \
             [v["kind"] for v in wr.violations] == []:
         obs = "PASS"
     else:
@@ -2774,7 +2795,7 @@ def t30j(d, scratch, runroot):
         hidden["rc"] in (0, 1) else "nonzero"
     return finish(labels, d, T, ["PASS"], obs, {"fixtures": fixtures}, runroot,
                   notes={"stub": [first, req.get("kind"), second["result"]], "real": real,
-                         "hidden": hidden,
+                         "hidden": hidden, "hidden_companion_proves": proves,
                          "violations": [v["kind"] for v in wr.violations],
                          "premise": "kernel ordering UNVERIFIED (sampled)"})
 
@@ -3085,6 +3106,27 @@ def t31(d, scratch, runroot, variant):
         ok = kinds == ["exit-unobserved"] and (e.get("late_exit") or {}).get("code") == 0 and \
             sum(1 for x in w.dead if x["gen"] == e["gen"]) == 1 and \
             w.gens[e["gen"]]["state"] == "retired" and e["exit"]["kind"] == "unobserved"
+    elif variant == "h":   # R2: the LAST census read crosses the bound -> nothing judged
+        u = unregistered_gone(w, d, T, "late-census")
+        real_bsd = W.bsdinfo
+
+        def slow(pid):
+            if pid == u["pid"]:
+                time.sleep(0.3)
+            return real_bsd(pid)
+        t0 = W.now()
+        try:
+            W.bsdinfo = slow
+            w.refresh(enclosing=t0 + 0.2)
+        finally:
+            W.bsdinfo = real_bsd
+        late_kinds = [v["kind"] for v in w.violations]
+        late_state = w.gens[u["gen"]]["state"]
+        w.refresh(enclosing=W.now() + 0.2)                 # healthy pair: judged
+        kinds = [v["kind"] for v in w.violations]
+        notes = {"late": [late_kinds, late_state], "healthy": kinds}
+        ok = late_kinds == [] and late_state == "live" and kinds == ["exit-unobserved"] and \
+            w.gens[u["gen"]]["state"] == "unobserved"
     else:   # g: bounded event work
         p = live_fixture(d, T, "noisy")
         e = adopt_or_hold(w, p, "fixture")
@@ -3493,11 +3535,14 @@ def t30r(d, scratch, runroot):
     later stage starts, Y gets no generation and stays unadmitted, no violation. (b) The
     bound expires DURING registration: the token is never sealed (unbound-deadline,
     registration-deadline violation), Y is not admitted, and Y's own NOTE_EXIT retires the
-    token. handle() returns promptly in both."""
+    token. (c) The bound expires during admit's FINAL parent read: the sealed token is
+    withdrawn (unbound-deadline, registration-deadline), no entry and no obligation is
+    created. (d) Healthy pair: Y is admitted with its admission obligation. handle()
+    returns promptly in a-c."""
     T = "T30r"
     root = mkroot(d, scratch, T, "root")
     notes, oks, rcs = {}, [], []
-    for v in ("a", "b"):
+    for v in ("a", "b", "c", "d"):
         x = start_fixture(d, T, "x-" + v, "import subprocess,sys;"
                           "y=subprocess.Popen([sys.executable,'-I','-B','-c',"
                           "'import time; time.sleep(2)']);print(y.pid,flush=True);y.wait()",
@@ -3508,10 +3553,18 @@ def t30r(d, scratch, runroot):
         w = bare_watch(root)
         ex = adopt_or_hold(w, x, "fixture")
         real_bsd, real_reg = W.bsdinfo, w.register
+        parent_reads = [0]
 
         def slow_bsd(pid):
             if pid == ypid:
                 time.sleep(0.3)
+            return real_bsd(pid)
+
+        def slow_final_parent(pid):
+            if pid == x.pid:
+                parent_reads[0] += 1
+                if parent_reads[0] == 2:          # admit's final parent read
+                    time.sleep(0.3)
             return real_bsd(pid)
 
         def slow_reg(pid):
@@ -3522,9 +3575,12 @@ def t30r(d, scratch, runroot):
         try:
             if v == "a":
                 W.bsdinfo = slow_bsd
-            else:
+            elif v == "b":
                 w.register = slow_reg
-            w.handle(FakeEv(x.pid, W.NOTE_FORK, udata=ex["gen"]), t0 + 0.2)
+            elif v == "c":
+                W.bsdinfo = slow_final_parent
+            w.handle(FakeEv(x.pid, W.NOTE_FORK, udata=ex["gen"]),
+                     t0 + (2.0 if v == "d" else 0.2))
         finally:
             W.bsdinfo = real_bsd
             if v == "b":
@@ -3534,6 +3590,16 @@ def t30r(d, scratch, runroot):
         kinds = [k["kind"] for k in w.violations]
         if v == "a":
             ok = ygens == [] and ypid not in w.entries and kinds == [] and took <= 0.6
+        elif v in ("c", "d"):
+            st0 = [w.gens[g]["state"] for g in ygens]
+            req = [w.requests.get(g, {}).get("kind") for g in ygens]
+            if v == "c":      # sealed, then the final parent read returned late
+                ok = st0 == ["unbound-deadline"] and ypid not in w.entries and req == [None] \
+                    and kinds == ["registration-deadline"] and took <= 0.6
+            else:             # healthy pair: admitted with its admission obligation
+                ok = st0 == ["live"] and ypid in w.entries and req == ["admission"] and \
+                    kinds == []
+            notes[v + "_state"] = [st0, req]
         else:
             st0 = [w.gens[g]["state"] for g in ygens]
             rcs.append(reap(x, D_REAP))
@@ -3543,7 +3609,7 @@ def t30r(d, scratch, runroot):
             ok = st0 == ["unbound-deadline"] and st1 == ["retired"] and \
                 ypid not in w.entries and kinds == ["registration-deadline"] and took <= 0.6
             notes["b_states"] = [st0, st1]
-        if v == "a":
+        if v != "b":
             rcs.append(reap(x, D_REAP))
         notes[v] = {"took_s": took, "violations": kinds, "gens": len(ygens)}
         oks.append(ok)
@@ -3567,9 +3633,10 @@ class SlowEmptyKq(object):
 
 
 def t30s(d, scratch, runroot):
-    """R2: a read or an empty fetch that RETURNS after the bound never yields VALID or an
-    empty-fence claim: slow procargs and slow pidpath give UNKNOWN; a slow empty fetch makes
-    fence() None and the snapshot UNKNOWN; the healthy pair is VALID."""
+    """R2: a read, a path resolution or an empty fetch that RETURNS after the bound never
+    yields VALID or an empty-fence claim: slow procargs, slow pidpath and a slow final
+    realpath give UNKNOWN; a slow empty fetch makes fence() None and the snapshot UNKNOWN;
+    the healthy pair is VALID."""
     T = "T30s"
     root = mkroot(d, scratch, T, "root")
     w = bare_watch(root)
@@ -3592,6 +3659,12 @@ def t30s(d, scratch, runroot):
         out["slow_pidpath"] = w.snapshot(g, W.now() + 0.2)["result"]
     finally:
         W.procargs, W.pidpath = real_pa, real_pp
+    real_rp = os.path.realpath
+    try:
+        os.path.realpath = slow(real_rp)
+        out["slow_realpath"] = w.snapshot(g, W.now() + 0.2)["result"]
+    finally:
+        os.path.realpath = real_rp
     real_kq = w.kq
     w.kq = SlowEmptyKq(0.3)
     out["slow_fence"] = w.fence(W.now() + 0.2)
@@ -3600,7 +3673,8 @@ def t30s(d, scratch, runroot):
     out["healthy"] = w.snapshot(g, W.now() + 2.0)["result"]
     rc = reap(p, D_REAP)
     labels = ["root"]
-    ok = out == {"slow_procargs": "UNKNOWN", "slow_pidpath": "UNKNOWN", "slow_fence": None,
+    ok = out == {"slow_procargs": "UNKNOWN", "slow_pidpath": "UNKNOWN",
+                 "slow_realpath": "UNKNOWN", "slow_fence": None,
                  "slow_fetch_snapshot": "UNKNOWN", "healthy": "VALID"}
     return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
                   {"fixtures": "ok" if rc == 0 else "rc-%s" % rc}, runroot, notes=out)
@@ -3609,14 +3683,16 @@ def t30s(d, scratch, runroot):
 def t30t(d, scratch, runroot):
     """R2 effect path: quiesce refuses an effect while a required image obligation of ANOTHER
     target is unresolved after a handler consumed the bound (os.kill INTERCEPTED, no real
-    signal): HOLD, no kill, no harness signal. Healthy pair: the obligation resolves inside
-    the bound and the intercepted kill is reached once."""
+    signal): HOLD, no kill, no harness signal. The final identity proof returning after the
+    quiesce bound (slowproof) is also HOLD with no kill even though the overall deadline is
+    far away. Healthy pair: the obligation resolves inside the bound and the intercepted
+    kill is reached once."""
     T = "T30t"
     root = mkroot(d, scratch, T, "root")
     real_kill, kills, res, fx = os.kill, [], {}, {}
     try:
         os.kill = lambda p_, s_: kills.append((p_, int(s_)))
-        for label in ("slow", "healthy"):
+        for label in ("slow", "slowproof", "healthy"):
             a = live_fixture(d, T, "a-" + label)
             b = live_fixture(d, T, "b-" + label)
             fx["a-" + label], fx["b-" + label] = a, b
@@ -3633,23 +3709,113 @@ def t30t(d, scratch, runroot):
                     _h(ev, deadline)
                 w.handle = slow
             n0 = len(kills)
+            real_bsd = W.bsdinfo
+
+            def slow_proof(pid, _a=a.pid, _r=real_bsd):
+                if pid == _a:
+                    time.sleep(0.3)               # past the 0.25 s quiesce bound
+                return _r(pid)
             try:
+                if label == "slowproof":
+                    W.bsdinfo = slow_proof
                 r = w.signal_verified(a.pid, signal.SIGTERM, "T30t", deadline=W.now() + 30.0)
             except W.Hold as h:
                 r = "HOLD:" + str(h)[:60]
+            finally:
+                W.bsdinfo = real_bsd
             res[label] = {"result": r, "kills": len(kills) - n0,
                           "harness_signals": len(w.harness_signals),
                           "unresolved": sorted(w.requests), "a_role": ea["role"]}
     finally:
         os.kill = real_kill
     rcs = {k: reap(p, D_REAP) for k, p in fx.items()}
-    ok = res["slow"]["result"].startswith("HOLD") and res["slow"]["kills"] == 0 and \
-        res["slow"]["harness_signals"] == 0 and res["healthy"]["result"] == "sent" and \
-        res["healthy"]["kills"] == 1
+    ok = all(res[k]["result"].startswith("HOLD") and res[k]["kills"] == 0 and
+             res[k]["harness_signals"] == 0 for k in ("slow", "slowproof")) and \
+        res["healthy"]["result"] == "sent" and res["healthy"]["kills"] == 1
     labels = ["root"]
     return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
                   {"fixtures": "ok" if all(r == 0 for r in rcs.values()) else "rc-%r" % rcs},
                   runroot, notes=res)
+
+
+def t30u(d, scratch, runroot):
+    """R2 multi-request expiry: expired obligations of three live fixtures. (a) Bound already
+    exhausted: all three are judged unread (image-snapshot-unresolved, liveness unread) and
+    NO identity read is started. (b) The first read is slow and crosses the bound: exactly
+    one read happens; the other two are judged unread. (c) Healthy pair: with time left each
+    live identity is read and judged, and a gone identity's obligation is kept (for its
+    exit event), never dropped."""
+    T = "T30u"
+    root = mkroot(d, scratch, T, "root")
+    fx, out = [], {}
+    real_bsd = W.bsdinfo
+    for case in ("a", "b", "c"):
+        w = bare_watch(root)
+        ents = []
+        for i in range(3):
+            p = live_fixture(d, T, "%s%d" % (case, i))
+            fx.append(p)
+            ents.append(adopt_or_hold(w, p, "fixture"))
+        gone = unregistered_gone(w, d, T, "%s-gone" % case) if case == "c" else None
+        for e in ents + ([gone] if gone else []):
+            w.request(e["gen"], "exec")
+            w.requests[e["gen"]]["deadline"] = W.now() - 1.0     # already expired
+        pids = {e["pid"] for e in ents + ([gone] if gone else [])}
+        reads = []
+
+        def counting(pid, _slow=(case == "b")):
+            if pid in pids:
+                reads.append(pid)
+                if _slow and len(reads) == 1:
+                    time.sleep(0.3)
+            return real_bsd(pid)
+        try:
+            W.bsdinfo = counting
+            bound = W.now() - 0.001 if case == "a" else W.now() + (0.2 if case == "b" else 2.0)
+            w.expire_requests(bound)
+        finally:
+            W.bsdinfo = real_bsd
+        v = w.violations
+        out[case] = {"reads": len(reads),
+                     "unread": sum(1 for x in v if x.get("liveness")),
+                     "read_judged": sum(1 for x in v if x["kind"] == "image-snapshot-unresolved"
+                                        and not x.get("liveness")),
+                     "kept": sorted(w.requests) == ([gone["gen"]] if gone else [])}
+    rcs = [reap(p, D_REAP) for p in fx]
+    ok = out["a"] == {"reads": 0, "unread": 3, "read_judged": 0, "kept": True} and \
+        out["b"] == {"reads": 1, "unread": 2, "read_judged": 1, "kept": True} and \
+        out["c"] == {"reads": 4, "unread": 0, "read_judged": 3, "kept": True}
+    labels = ["root"]
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if all(r == 0 for r in rcs) else "rc-%r" % rcs}, runroot,
+                  notes=out)
+
+
+def t30v(d, scratch, runroot):
+    """R3 negative-companion control (pure): hidden_companion_proves accepts ONLY the
+    specific unsafe outcome (progress "ba", no exec handled, VALID for the new image and
+    vector). GONE, INCONSISTENT, UNKNOWN, missing progress, a handled exec, the old image
+    or another vector cannot satisfy the negative-companion requirement."""
+    T = "T30v"
+    base = {"oracle": "FAIL", "result": "VALID", "progress": "ba",
+            "execs_handled_at_snapshot": 0, "image": "/nix/store/x-bash/bin/bash",
+            "want_image": "/nix/store/x-bash/bin/bash", "argv": ["bash", "-c", "k"],
+            "want_argv": ["bash", "-c", "k"]}
+    cases = {
+        "unsafe_valid": dict(base),
+        "gone": dict(base, oracle="FAIL", result="GONE", image="", argv=None),
+        "inconsistent": dict(base, oracle="FAIL", result="INCONSISTENT", image="", argv=None),
+        "unknown": dict(base, oracle="UNMEASURED", result="UNKNOWN"),
+        "no_progress": dict(base, progress="b"),
+        "exec_handled": dict(base, execs_handled_at_snapshot=1),
+        "old_image": dict(base, image="/nix/store/y-python3/bin/python3"),
+        "other_vector": dict(base, argv=["bash", "-c", "other"]),
+        "void": dict(base, oracle="PASS", result="VOID"),
+    }
+    got = {k: hidden_companion_proves(v) for k, v in sorted(cases.items())}
+    ok = got == {k: k == "unsafe_valid" for k in cases}
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL",
+                   {"fixtures": "not-applicable:fabricated run records"}, runroot, notes=got)
 
 
 # ---------------------------------------------------------------- injections (T15a-c)
@@ -3711,6 +3877,7 @@ SYNTHETIC = {
     "T36c": lambda d, s, r: t36(d, s, r, "c"), "T36d": lambda d, s, r: t36(d, s, r, "d"),
     "T37": t37,
     "T30q": t30q, "T30r": t30r, "T30s": t30s, "T30t": t30t, "T38": t38,
+    "T31h": lambda d, s, r: t31(d, s, r, "h"), "T30u": t30u, "T30v": t30v,
 }
 
 
