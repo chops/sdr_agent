@@ -28,8 +28,9 @@ defmodule SdrAgent.SDR.Admission.Input do
   lowercased. A uuid is accepted only in its 36-character textual form
   (any case); a raw binary is refused. An email is accepted only when the
   identity keys can represent it (exactly one `@`, non-empty parts, no
-  whitespace or control character, `Normalize.key_value/2`), so a refused
-  one is this step's `{:invalid, [:email]}`, never a later key failure.
+  whitespace or control character, and a host of at most 253 bytes, the
+  domain key's limit, `Normalize.key_value/2`), so a refused one is this
+  step's `{:invalid, [:email]}`, never a later key failure.
 
   Also checked here, before any lock (packet section 4.1 step 3): the kind
   (`manual`, `csv`, `hubspot`, `agent_found`), the per-kind `source_ref`
@@ -203,11 +204,20 @@ defmodule SdrAgent.SDR.Admission.Input do
   defp email(raw) do
     with {:ok, value} when is_binary(value) <- text(raw, :email, false),
          value = String.downcase(value),
-         true <- Regex.match?(@email, value) do
+         true <- Regex.match?(@email, value),
+         true <- host_keyable?(value) do
       {:ok, value}
     else
       _invalid -> {:error, :email}
     end
+  end
+
+  # Codex fb2474e (G4-1): the email's host is also a domain key input,
+  # which the identity keys represent up to 253 bytes (`Normalize.key_value/2`);
+  # measured on the normalized host, before any key stripping.
+  defp host_keyable?(email) do
+    [_local, host] = String.split(email, "@", parts: 2)
+    byte_size(host) <= 253
   end
 
   defp timezone(raw) do
