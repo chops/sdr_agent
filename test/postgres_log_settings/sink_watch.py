@@ -1759,15 +1759,36 @@ class Watch(object):
             if s["result"] == "GONE":
                 continue          # resolved by the exit event (or refresh's budget)
             if now() >= r["deadline"] or r["attempts"] >= 3:
-                self.requests.pop(g, None)
-                if r["kind"] == "title":
-                    self.gap("title-unresolved", e["pid"], e.get("parent"))
-                    continue
-                cur = bsdinfo(e["pid"])
-                if cur is not None and cur["birth_us"] == e["birth_us"]:
-                    self.violation("image-snapshot-inconsistent" if r["attempts"] >= 3
-                                   else "image-snapshot-unresolved", pid=e["pid"],
-                                   last=s["result"])
+                self.judge_request(g, r, s["result"])
+
+    def judge_request(self, g, r, last):
+        """An obligation at its EARLIEST deadline (B1) or after 3 INCONSISTENT attempts: for
+        a still-live identity a violation; a title obligation a gap. A gone identity's image
+        obligation is KEPT for its exit event (or refresh's budget) to resolve, so a missed
+        exec image is never silently dropped."""
+        x = self.gens.get(g)
+        if x is None or x["state"] != "live":
+            self.requests.pop(g, None)
+            return
+        e = x["entry"]
+        if r["kind"] == "title":
+            self.requests.pop(g, None)
+            self.gap("title-unresolved", e["pid"], e.get("parent"))
+            return
+        cur = bsdinfo(e["pid"])
+        if cur is None or cur["birth_us"] != e["birth_us"]:
+            return
+        self.requests.pop(g, None)
+        self.violation("image-snapshot-inconsistent" if r["attempts"] >= 3
+                       else "image-snapshot-unresolved", pid=e["pid"], last=last)
+
+    def expire_requests(self):
+        """B1: judged after EVERY slice, even one whose event handlers consumed it all
+        (handler time counts against the obligation; nothing resets its deadline)."""
+        for g in sorted(self.requests):
+            r = self.requests.get(g)
+            if r is not None and now() >= r["deadline"]:
+                self.judge_request(g, r, "deadline")
 
     def record_argv(self, e, s):
         e["exec_path"] = s["exec_path"]
@@ -2036,6 +2057,7 @@ class Watch(object):
             self.process_pending(deadline)
         if now() < deadline:
             self.process_requests(deadline)
+        self.expire_requests()
 
     def drain(self, timeout=0, deadline=None):
         self.step(timeout, deadline if deadline is not None else
