@@ -1807,7 +1807,7 @@ def listener_proof(m, state):
     recs = tcp_listeners(m["port"])
     want = "127.0.0.1:%d" % m["port"]
     if len(recs) != 1 or recs[0]["addr"] != want or recs[0]["pid"] != pm["pid"]:
-        raise Hold("FAIL-FOREIGN-LISTENER or unexpected listeners: %r" % recs)
+        raise Hold("FOREIGN-LISTENER or unexpected listeners: %r" % recs)
     ns = netstat_listen(m["port"])
     if ns != ["127.0.0.1.%d" % m["port"]]:
         raise Hold("netstat disagrees with lsof: %r" % ns)
