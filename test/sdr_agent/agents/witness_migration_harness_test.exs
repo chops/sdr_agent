@@ -15,17 +15,21 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
       startup, connection or effect (an ordering control over the scripts'
       top-level statements; the runtime refusal of a real child is in the
       external campaign file);
-    * after confirmed ownership, a step failure, a runner exception, an
+    * after confirmed ownership, a confirmed step failure (exit or
+      timeout), a typed pre-spawn failure (`{:not_started, _}`), and an
       unreadable, non-object or malformed probe result all still drop the
       owned database, and a failed cleanup keeps both errors;
-    * an unconfirmed child, or a claim that raised, is never cleaned up or
-      dropped.
+    * an unconfirmed child, any untyped runner exception, throw or exit
+      (including the real runner's kill-failure path), and a claim that
+      raised are never cleaned up or dropped (Codex static review of
+      336c1cc, R2-1).
 
   These are tests of test support (not RED for production behaviour):
   they are expected to pass now.
   """
   use ExUnit.Case, async: true
 
+  alias SdrAgent.RestartProof.Harness, as: Bounded
   alias SdrAgent.WitnessMigration.Harness
 
   @versions %{new: 20_261_021_000_000, predecessor: 20_261_016_052_435}
@@ -278,31 +282,94 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
       assert steps.() == [:claim, :migrate, :drop]
     end
 
-    test "a runner exception after ownership still drops the owned database" do
-      for step <- [:migrate, :probe] do
+    # Codex static review of 336c1cc, R2-1: a runner exception proves
+    # nothing about its child, so it retains the database and the folder.
+    test "an unknown runner failure after ownership: no drop and no removal" do
+      for {label, step, fun} <- [
+            {"raise in migrate", :migrate, fn _args -> raise "synthetic runner failure" end},
+            {"raise in probe", :probe, fn _args -> raise "synthetic runner failure" end},
+            {"throw", :probe, fn _args -> throw(:synthetic) end},
+            {"exit", :migrate, fn _args -> exit(:synthetic) end}
+          ] do
         sfx = suffix()
         root = tmp_root()
-        raising = fn _args -> raise "synthetic runner failure" end
-        {runner, steps} = stub("sdr_agent_test" <> sfx, %{step => raising})
+        {runner, steps} = stub("sdr_agent_test" <> sfx, %{step => fun})
 
-        assert {:error, {^step, {:raised, %RuntimeError{message: "synthetic runner failure"}}}} =
-                 prove(sfx, runner, root)
+        assert {:error,
+                {:cleanup_skipped_unconfirmed_child, {:error, {^step, {:raised, _}}}, owned}} =
+                 prove(sfx, runner, root),
+               label
 
-        assert List.last(steps.()) == :drop, inspect(step)
-        refute File.exists?(owned_tmp(root, sfx))
+        assert owned.database == "sdr_agent_test" <> sfx, label
+        refute :drop in steps.(), label
+        assert File.dir?(owned_tmp(root, sfx)), label
       end
     end
 
-    test "a thrown or exited runner after ownership still drops the owned database" do
-      for {label, fun} <- [
-            {"throw", fn _args -> throw(:synthetic) end},
-            {"exit", fn _args -> exit(:synthetic) end}
+    # The real runner's own timeout path: past the deadline it kills the
+    # child, and the kill itself fails while the child may still run.
+    test "the kill-failure path of the real runner retains the database and the folder" do
+      sfx = suffix()
+      root = tmp_root()
+
+      kill_fails = fn _args ->
+        expired = System.monotonic_time(:millisecond) - 1
+
+        Bounded.await_output(make_ref(), expired, 10, fn ->
+          raise ErlangError, original: :enoent
+        end)
+      end
+
+      {runner, steps} = stub("sdr_agent_test" <> sfx, %{migrate: kill_fails})
+
+      assert {:error,
+              {:cleanup_skipped_unconfirmed_child,
+               {:error, {:migrate, {:raised, %ErlangError{original: :enoent}}}}, _owned}} =
+               prove(sfx, runner, root)
+
+      assert steps.() == [:claim, :migrate]
+      assert File.dir?(owned_tmp(root, sfx))
+    end
+
+    test "a known pre-spawn or confirmed-termination failure after ownership is cleaned up" do
+      for {label, step, outcome} <- [
+            {"not started", :migrate, {:not_started, {:executable_unusable, "/nonexistent"}}},
+            {"not started probe", :probe, {:not_started, {:executable_unusable, "/nonexistent"}}},
+            {"confirmed exit", :probe, {:exit, 1, "boom"}},
+            {"confirmed exit by signal", :migrate, {:exit, 137, ""}}
           ] do
         sfx = suffix()
-        {runner, steps} = stub("sdr_agent_test" <> sfx, %{probe: fun})
+        root = tmp_root()
+        {runner, steps} = stub("sdr_agent_test" <> sfx, %{step => outcome})
 
-        assert {:error, {:probe, {:raised, {_kind, :synthetic}}}} = prove(sfx, runner), label
+        assert {:error, {^step, ^outcome}} = prove(sfx, runner, root), label
         assert List.last(steps.()) == :drop, label
+        refute File.exists?(owned_tmp(root, sfx)), label
+      end
+    end
+
+    test "a claim that was typed not-started is not owned: folder removed, nothing dropped" do
+      sfx = suffix()
+      root = tmp_root()
+      outcome = {:not_started, {:executable_unusable, "/nonexistent"}}
+      {runner, steps} = stub("sdr_agent_test" <> sfx, %{claim: outcome})
+
+      assert {:error, {:claim_failed, ^outcome}} = prove(sfx, runner, root)
+      assert steps.() == [:claim]
+      refute File.exists?(owned_tmp(root, sfx))
+    end
+
+    test "the real runner proves an unusable executable before spawning anything" do
+      root = tmp_root()
+      not_executable = Path.join(root, "not-executable")
+      File.write!(not_executable, "#!/bin/sh\nexit 0\n")
+      File.chmod!(not_executable, 0o600)
+
+      for path <- [Path.join(root, "missing"), root, not_executable, nil] do
+        runner = Harness.checked_runner(path, suffix(), root, 1_000)
+
+        assert runner.(:claim, ["run"]) == {:not_started, {:executable_unusable, path}},
+               inspect(path)
       end
     end
 

@@ -38,33 +38,72 @@ defmodule SdrAgent.WitnessMigration.Harness do
        through `drop.exs` (no `FORCE`, no connection termination), after
        every child has exited, then the folder.
 
-  **Failures after ownership.** Once the claim has confirmed ownership, a
-  failed step, an invalid probe result, a runner exception or any other
-  exception in the steps is an error outcome that still goes through
-  cleanup. A failed cleanup keeps both errors:
+  **Failures after ownership.** Once the claim has confirmed ownership,
+  only failures whose child is proven gone or never started still go
+  through cleanup: a confirmed exit (`{:exit, status, _}`), a confirmed
+  timeout (`{:timeout, :confirmed, _}`), a typed pre-spawn refusal
+  (`{:not_started, reason}`), and, after a completed runner result, an
+  unreadable or invalid probe result or an exception in local result
+  parsing or validation. A failed cleanup keeps both errors:
   `{:error, {:cleanup_failed, cleanup_error, original_outcome}}`.
 
-  **Uncertainty is never ownership.** If a child's end cannot be confirmed
-  (`{:timeout, :unconfirmed, _}`), or the claim itself raised (whether the
-  database was created is unknown), nothing is cleaned up or dropped and
-  the error names what is left behind. A runner that raises returned no
-  outcome; the real runner raises only when it cannot spawn the child, so a
-  raise never hides a running child. A normal drop also refuses a database
-  that still has connections.
+  **Uncertainty is never ownership, and never cleaned up.** A child whose
+  end is not confirmed (`{:timeout, :unconfirmed, _}`), and any untyped
+  runner exception, throw or exit (`{:raised, _}`), retain the database and
+  the folder: nothing is dropped or removed, and the error reports the
+  original failure with what is left behind. A runner exception proves
+  nothing about its child: the real runner can raise after the port is
+  open, for example when its timeout kill (`System.cmd("kill", ...)`)
+  itself fails while the child may still be running, and a successful
+  drop would not prove that child gone either. No exception class is taken
+  as proof of termination. A claim that raised is uncertain in the same
+  way (whether the database was created is unknown).
 
   The parent test Repo and application configuration are never changed.
 
-  The runner is injectable (the same contract as the restart proof's): a
-  runner is `fn step, args -> outcome end` with outcome `{:ok, output}`,
-  `{:exit, status, output}` or `{:timeout, :confirmed | :unconfirmed,
-  output}`. The real runner is `SdrAgent.RestartProof.Harness.port_runner/5`.
+  The runner is injectable: a runner is `fn step, args -> outcome end`
+  with outcome `{:ok, output}`, `{:exit, status, output}`, `{:timeout,
+  :confirmed | :unconfirmed, output}` (the restart proof's contract) or
+  `{:not_started, reason}`, which a runner returns only when it has proven
+  that it spawned nothing. The real runner is `checked_runner/4`: it
+  returns `{:not_started, _}` for an unusable executable, checked before
+  spawning, and otherwise delegates to
+  `SdrAgent.RestartProof.Harness.port_runner/5`.
   """
+
+  alias SdrAgent.RestartProof.Harness, as: Bounded
 
   @database ~r/\Asdr_agent_test_wm[0-9a-f]{10}\z/
   @migration "_v4_mismatch_lineage.exs"
   @scripts Path.expand(".", __DIR__)
   @claim_refused 3
   @target_refused 4
+
+  @doc """
+  The real runner: `{:not_started, {:executable_unusable, executable}}`,
+  without spawning anything, unless `executable` is an existing regular
+  file with an execute bit; otherwise
+  `SdrAgent.RestartProof.Harness.port_runner/5` with the same arguments.
+  An exception from that runner is never typed: it is held as uncertain.
+  """
+  def checked_runner(executable, suffix, root, deadline) do
+    runner = Bounded.port_runner(executable, suffix, root, deadline)
+
+    fn step, args ->
+      if executable?(executable),
+        do: runner.(step, args),
+        else: {:not_started, {:executable_unusable, executable}}
+    end
+  end
+
+  defp executable?(path) when is_binary(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+      _ -> false
+    end
+  end
+
+  defp executable?(_path), do: false
 
   @doc "The only database names this campaign may claim."
   def database_pattern, do: @database
@@ -174,14 +213,16 @@ defmodule SdrAgent.WitnessMigration.Harness do
     end
   end
 
-  # Ownership is confirmed here: any exception becomes an error outcome, so
-  # it reaches `finish/4` and the owned cleanup.
+  # Ownership is confirmed here. Runner exceptions never reach this rescue
+  # (`run/3` holds them as `{:raised, _}`, which `finish/4` never cleans
+  # up); what does is an exception in local result parsing or validation
+  # after a completed runner result, which still reaches the owned cleanup.
   defp guarded_steps(database, tmp, versions, runner) do
     steps(database, tmp, versions, runner)
   rescue
-    exception -> {:error, {:raised, exception}}
+    exception -> {:error, {:local_exception, exception}}
   catch
-    kind, reason -> {:error, {:raised, {kind, reason}}}
+    kind, reason -> {:error, {:local_exception, {kind, reason}}}
   end
 
   # predecessor -> new up -> new down -> new up, probing after each.
@@ -247,7 +288,8 @@ defmodule SdrAgent.WitnessMigration.Harness do
     end
   end
 
-  # A runner exception is reported as `{:raised, _}`, never re-raised.
+  # A runner exception is reported as `{:raised, _}`, never re-raised, and
+  # is always uncertain (`unconfirmed?/1`): it proves nothing about its child.
   defp run(runner, name, args) do
     runner.(name, args)
   rescue
@@ -290,7 +332,9 @@ defmodule SdrAgent.WitnessMigration.Harness do
   end
 
   defp unconfirmed?({:timeout, :unconfirmed, _}), do: true
+  defp unconfirmed?({:raised, _}), do: true
   defp unconfirmed?({:error, {:step_timeout, _label, {:timeout, :unconfirmed, _}}}), do: true
+  defp unconfirmed?({:error, {_step, {:raised, _}}}), do: true
   defp unconfirmed?(_), do: false
 
   defp read_json(path) do

@@ -37,7 +37,6 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
   """
   use ExUnit.Case, async: false
 
-  alias SdrAgent.RestartProof.Harness, as: Bounded
   alias SdrAgent.WitnessMigration.Harness
 
   @moduletag :external
@@ -82,7 +81,7 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
     # The children run under this partition, so the configured database is
     # `sdr_agent_test<partition>`; every target below differs from it.
     partition = suffix()
-    runner = Bounded.port_runner(mix!(), partition, @root, 300_000)
+    runner = Harness.checked_runner(mix!(), partition, @root, 300_000)
     out = Path.join(System.tmp_dir!(), "sdr-wm-refusal" <> partition <> ".json")
     fixtures = out <> ".fixtures"
     unconfigured = "sdr_agent_test" <> suffix()
@@ -117,7 +116,7 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
         suffix: sfx,
         tmp_root: System.tmp_dir!(),
         versions: versions,
-        runner: Bounded.port_runner(mix!(), sfx, @root, 600_000)
+        runner: Harness.checked_runner(mix!(), sfx, @root, 600_000)
       )
 
     assert {:ok, states} = outcome
