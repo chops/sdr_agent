@@ -69,7 +69,7 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
       Agent.update(log, &[step | &1])
 
       outcome =
-        case Map.get(answers, step, {:ok, ""}) do
+        case Map.get(answers, step, default_answer(step)) do
           fun when is_function(fun, 1) -> fun.(args)
           answer -> answer
         end
@@ -80,6 +80,13 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
 
     {runner, fn -> Enum.reverse(Agent.get(log, & &1)) end}
   end
+
+  # A successful drop child now reports its two closed facts (Codex 7ad3bd0
+  # G2-F1); every other child answers `{:ok, ""}` by default.
+  @valid_drop_output "WM-CHILD backends_before_drop=0\nWM-CHILD database_absent_after_drop=true\n"
+
+  defp default_answer(:drop), do: {:ok, @valid_drop_output}
+  defp default_answer(_step), do: {:ok, ""}
 
   defp write_probe(:probe, {:ok, _}, args, database, probe_body) do
     [label, _fixtures, out] = Enum.take(args, -3)
@@ -610,6 +617,191 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
       {runner, _steps} = stub("sdr_agent_test" <> sfx)
       assert {:ok, states} = prove(sfx, runner)
       assert Enum.sort(Map.keys(states)) == Enum.sort(@states)
+    end
+  end
+
+  # Codex 7ad3bd0 G2-F1: cleanup facts are enforced, not merely printed or
+  # present. RED until `Harness.drop_flow/1` and `Harness.verify_drop_receipt/1`
+  # exist and the harness rejects an exit-0 drop child without valid facts.
+  describe "enforced cleanup facts (no database)" do
+    # Injected effects for the drop child's decision: each records its call.
+    defp effects(backends, storage_down, present, emit \\ fn _line -> :ok end) do
+      parent = self()
+
+      %{
+        count_backends: fn ->
+          send(parent, :count_backends)
+          backends
+        end,
+        storage_down: fn ->
+          send(parent, :storage_down)
+          storage_down
+        end,
+        count_present: fn ->
+          send(parent, :count_present)
+          present
+        end,
+        emit: fn line ->
+          send(parent, {:emit, line})
+          emit.(line)
+        end
+      }
+    end
+
+    defp harness(function, args) do
+      Code.ensure_loaded(Harness)
+
+      if function_exported?(Harness, function, length(args)),
+        do: apply(Harness, function, args),
+        else: {:not_implemented, function, length(args)}
+    end
+
+    test "a nonzero pre-drop backend count refuses without calling storage_down" do
+      for backends <- [1, 3] do
+        assert harness(:drop_flow, [effects(backends, :ok, 0)]) ==
+                 {:error, {:backends_present, backends}},
+               inspect(backends)
+
+        assert_received {:emit, "WM-CHILD backends_before_drop=" <> _}
+        refute_received :storage_down
+        refute_received :count_present
+      end
+    end
+
+    test "zero backends, a normal drop and absence afterwards: both facts are written" do
+      assert harness(:drop_flow, [effects(0, :ok, 0)]) == :ok
+      assert_received {:emit, "WM-CHILD backends_before_drop=0"}
+      assert_received :storage_down
+      assert_received {:emit, "WM-CHILD database_absent_after_drop=true"}
+    end
+
+    test "the database still present after the drop is refused" do
+      assert harness(:drop_flow, [effects(0, :ok, 1)]) == {:error, :database_present_after_drop}
+      assert_received {:emit, "WM-CHILD database_absent_after_drop=false"}
+    end
+
+    test "a failed storage_down is refused, with no absence fact" do
+      assert harness(:drop_flow, [effects(0, {:error, :busy}, 0)]) ==
+               {:error, {:drop_failed, :busy}}
+
+      refute_received :count_present
+    end
+
+    test "a failed receipt write is refused; before the drop it prevents the drop" do
+      failing = fn _line -> {:error, :closed} end
+
+      assert harness(:drop_flow, [effects(0, :ok, 0, failing)]) ==
+               {:error, :receipt_write_failed}
+
+      refute_received :storage_down
+
+      after_drop = fn line ->
+        if line =~ "database_absent_after_drop", do: {:error, :closed}, else: :ok
+      end
+
+      assert harness(:drop_flow, [effects(0, :ok, 0, after_drop)]) ==
+               {:error, :receipt_write_failed}
+
+      assert_received :storage_down
+    end
+
+    test "each refusal has a closed child label" do
+      assert Enum.map(
+               [
+                 {:backends_present, 2},
+                 {:drop_failed, :busy},
+                 :database_present_after_drop,
+                 :receipt_write_failed
+               ],
+               &harness(:drop_refusal_label, [&1])
+             ) ==
+               ~w(backends_present drop_failed database_present_after_drop receipt_write_failed)
+    end
+
+    test "the drop child's receipt: exactly the two successful facts, once each" do
+      assert harness(:verify_drop_receipt, [@valid_drop_output]) ==
+               {:ok, %{"backends_before_drop" => "0", "database_absent_after_drop" => "true"}}
+
+      absent = "WM-CHILD database_absent_after_drop=true\n"
+      zero = "WM-CHILD backends_before_drop=0\n"
+
+      for {label, output, reason} <- [
+            {"no facts", "", :facts_missing},
+            {"backends only", zero, :facts_missing},
+            {"absence only", absent, :facts_missing},
+            {"non-numeric backends", "WM-CHILD backends_before_drop=many\n" <> absent,
+             :facts_malformed},
+            {"non-boolean absence", zero <> "WM-CHILD database_absent_after_drop=yes\n",
+             :facts_malformed},
+            {"an unknown fact", @valid_drop_output <> "WM-CHILD other=1\n", :facts_malformed},
+            {"a malformed fact line", @valid_drop_output <> "WM-CHILD backends_before_drop\n",
+             :facts_malformed},
+            {"duplicate backends", zero <> @valid_drop_output, :facts_duplicate},
+            {"duplicate absence", @valid_drop_output <> absent, :facts_duplicate},
+            {"contradictory backends", "WM-CHILD backends_before_drop=2\n" <> absent,
+             :facts_contradictory},
+            {"contradictory absence", zero <> "WM-CHILD database_absent_after_drop=false\n",
+             :facts_contradictory}
+          ] do
+        assert harness(:verify_drop_receipt, [output]) == {:error, reason}, label
+      end
+    end
+
+    test "an exit-0 drop child without valid facts fails cleanup and keeps the evidence" do
+      for {label, output, reason} <- [
+            {"no facts", "", :facts_missing},
+            {"malformed",
+             "WM-CHILD backends_before_drop=x\nWM-CHILD database_absent_after_drop=true\n",
+             :facts_malformed},
+            {"duplicate", "WM-CHILD backends_before_drop=0\n" <> @valid_drop_output,
+             :facts_duplicate},
+            {"contradictory",
+             "WM-CHILD backends_before_drop=1\nWM-CHILD database_absent_after_drop=true\n",
+             :facts_contradictory}
+          ] do
+        sfx = suffix()
+        root = tmp_root()
+        {runner, steps} = stub("sdr_agent_test" <> sfx, %{drop: {:ok, output}})
+
+        {outcome, receipts} =
+          Harness.prove_with_receipts(
+            suffix: sfx,
+            tmp_root: root,
+            versions: @versions,
+            runner: runner
+          )
+
+        assert match?(
+                 {:error, {:cleanup_failed, {:drop, {:receipt_invalid, ^reason}}, {:ok, _}}},
+                 outcome
+               ),
+               "#{label}: #{inspect(outcome)}"
+
+        facts = Map.new(receipts)
+        assert facts["child.drop"] == "exit:0", label
+        assert facts["cleanup.drop_result"] == "failed", label
+        assert facts["cleanup.drop_receipt"] == Atom.to_string(reason), label
+        assert facts["cleanup.temp_folder"] == "retained", label
+        assert facts["cleanup.temp_folder_retained_reason"] == "drop_receipt_invalid", label
+        assert facts["outcome"] == "error", label
+        assert List.last(steps.()) == :drop, label
+        assert File.dir?(owned_tmp(root, sfx)), "#{label}: evidence retained"
+      end
+    end
+
+    test "a valid drop receipt is recorded as such" do
+      sfx = suffix()
+      {runner, _steps} = stub("sdr_agent_test" <> sfx)
+
+      assert {{:ok, _}, receipts} =
+               Harness.prove_with_receipts(
+                 suffix: sfx,
+                 tmp_root: tmp_root(),
+                 versions: @versions,
+                 runner: runner
+               )
+
+      assert Map.new(receipts)["cleanup.drop_receipt"] == "valid"
     end
   end
 
