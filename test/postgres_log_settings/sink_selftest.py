@@ -27,6 +27,7 @@ whole (Q2). Labels: `fixture-synthetic` marks classifier inputs built here;
 """
 
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -40,6 +41,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # explicit: -I does not add the script directory on 3.11+
+sys.dont_write_bytecode = True  # F7: before the local import (-I ignores the env variable)
 import sink_watch as W  # noqa: E402
 
 PY = sys.executable
@@ -70,11 +72,16 @@ _proof(["T9a", "T9b", "T10", "T11", "T12", "T15d", "T16", "T17a", "T17b", "T18a"
         "T20f", "T20g", "T21a", "T21b", "T21c", "T21d", "T21e", "T22a", "T22b", "T22d", "T24", "T27"],
        fixtures=REQ)
 _proof(["T17-baseline", "T22c", "T23a", "T23b", "T23c", "T23d", "T23e", "T26d", "T28a", "T28b",
-        "T28c", "T29a", "T29b"], fixtures=NA)
+        "T28c", "T29a", "T29b", "T33"], fixtures=NA)
 _proof(["T19a"], launcher_reap=REQ, fixtures=REQ)
 _proof(["T19b", "T19c", "T19d", "T19f", "T19g", "T19i", "T26a", "T26c"], outer_reap=REQ,
        fixtures=REQ)
 _proof(["T26b"], fixtures=REQ)
+# T4a repair controls (r2, r3, B1-B4): T35 and T30m are the capability/layout gates
+_proof(["T30c", "T30d", "T30e", "T30f", "T30g", "T30i", "T30j", "T30k", "T30l", "T30m",
+        "T31a", "T31b", "T31c", "T31d", "T31e", "T31f", "T31g", "T34", "T35", "T36a", "T36b",
+        "T36c", "T36d"], fixtures=REQ)
+_proof(["T30a", "T30b", "T30n", "T30o", "T30p", "T32", "T37"], fixtures=NA)
 _proof(["T1", "T2", "T14"], fixtures=REQ, cleanup=REQ)
 _proof(["T3"], fixtures=REQ)
 _proof(["T13"], cleanup=REQ)
@@ -194,7 +201,7 @@ def lookup(d, test, label):
 # ---------------------------------------------------------------- owned fixture handles
 def start_fixture(d, test, label, code, *args, **kw):
     intent(d, test, label, "proc")
-    p = subprocess.Popen([PY, "-I", "-c", code] + [str(a) for a in args],
+    p = subprocess.Popen([PY, "-I", "-B", "-c", code] + [str(a) for a in args],
                          stdin=kw.get("stdin", subprocess.DEVNULL),
                          stdout=kw.get("stdout", subprocess.DEVNULL),
                          cwd=kw.get("cwd"), close_fds=True)
@@ -681,8 +688,36 @@ def bare_watch(root, port=25000, closure=False):
 
 
 class FakeEv(object):
-    def __init__(self, ident, fflags, data=0):
-        self.ident, self.fflags, self.data = ident, fflags, data
+    """fixture-synthetic kevent (ident, fflags, data, udata = registration token, flags)."""
+
+    def __init__(self, ident, fflags, data=0, udata=0, flags=0):
+        self.ident, self.fflags, self.data, self.udata, self.flags = \
+            ident, fflags, data, udata, flags
+
+
+class StubKq(object):
+    """fixture-synthetic kqueue driving the REAL fence/process/snapshot code into a
+    deterministic order: each control() returns the next batch (at most n events of it);
+    an exhausted script returns []; `forever` repeats its batch. Registrations are refused."""
+
+    def __init__(self, batches, forever=None):
+        self.batches = [list(b) for b in batches]
+        self.forever = forever
+        self.calls = 0
+
+    def control(self, changes, n, timeout=None):
+        self.calls += 1
+        if changes:
+            raise OSError(1, "stub kqueue takes no registrations")
+        if self.forever is not None and not self.batches:
+            return list(self.forever)[:n]
+        if not self.batches:
+            return []
+        b = self.batches[0]
+        out, self.batches[0] = b[:n], b[n:]
+        if not self.batches[0]:
+            self.batches.pop(0)
+        return out
 
 
 PG_DIRS = [".devenv", ".devenv/state", ".devenv/state/postgres"]
@@ -781,7 +816,7 @@ def t16(d, scratch, runroot):
         notes["child_sig_%d" % sig] = st
         ok &= st.get("kind") == "signaled" and st.get("signal") == sig and rc == -sig
     mid = start_fixture(d, T, "mid", "import subprocess,sys;"
-                        "g=subprocess.Popen([sys.executable,'-I','-c','import time; time.sleep(%d)']);"
+                        "g=subprocess.Popen([sys.executable,'-I','-B','-c','import time; time.sleep(%d)']);"
                         "print(g.pid,flush=True); g.wait()" % L_FIXTURE, stdout=subprocess.PIPE)
     gpid = int(bounded_readline(mid.stdout))
     intent(d, T, "grandchild", "proc")
@@ -911,13 +946,12 @@ def t9b(d, scratch, runroot):
     T = "T9b"
     root = mkroot(d, scratch, T, "root")
     x = start_fixture(d, T, "x", "import subprocess,sys;"
-                      "y=subprocess.Popen([sys.executable,'-I','-c','import time; time.sleep(6)']);"
+                      "y=subprocess.Popen([sys.executable,'-I','-B','-c','import time; time.sleep(6)']);"
                       "print(y.pid,flush=True)", stdout=subprocess.PIPE)
     w = bare_watch(root)
     cur = W.bsdinfo(x.pid)
-    w.register(x.pid)
-    w.entries[x.pid] = {"pid": x.pid, "birth_us": cur["birth_us"], "lineage": True,
-                        "role": "process-compose", "exit": None, "parent": None}
+    if w.adopt(x.pid, "process-compose", image=PY) is None:
+        raise RealUncertainty("T9b: X gone before adoption")
     ypid = int(bounded_readline(x.stdout))
     intent(d, T, "y", "proc")
     set_identity(d, T, "y", proc_identity(ypid, x.pid))
@@ -1132,11 +1166,8 @@ def t17(d, scratch, runroot, variant):
     old_sha = snappre["files"][cap]["sha256"]
     f = start_fixture(d, T, "F", FORKER, cap, N, variant, stdin=subprocess.PIPE,
                       stdout=subprocess.PIPE)
-    cur = W.bsdinfo(f.pid)
-    w.register(f.pid)
-    w.entries[f.pid] = {"pid": f.pid, "birth_us": cur["birth_us"], "lineage": True,
-                        "role": "fixture-writer", "exit": None, "parent": None,
-                        "parent_birth_us": None, "admitted": W.now(), "exe": PY, "args": "F"}
+    if w.adopt(f.pid, "fixture-writer", image=PY, argv=["F"]) is None:
+        raise RealUncertainty("T17: F gone before adoption")
     # paused: no drain/scan until F reports c2 reaped and c1 ready
     f.stdin.write(b"go\n")
     f.stdin.flush()
@@ -1334,11 +1365,8 @@ def watch_with(d, T, root, fixtures, closure=False):
                           stdout=subprocess.PIPE)
         if bounded_readline(p.stdout) != "ready":  # handlers installed before any stop
             raise RealUncertainty("fixture %s/%s not ready" % (T, label))
-        cur = W.bsdinfo(p.pid)
-        w.register(p.pid)
-        w.entries[p.pid] = {"pid": p.pid, "birth_us": cur["birth_us"], "lineage": True,
-                            "role": role, "exit": None, "parent": None, "admitted": W.now(),
-                            "exe": PY, "args": label, "execs": 0}
+        if w.adopt(p.pid, role, image=PY, argv=[label]) is None:
+            raise RealUncertainty("fixture %s/%s gone before adoption" % (T, label))
         if role == "launcher":
             w.launcher = p
         procs[label] = p
@@ -1523,13 +1551,13 @@ def t19i(d, scratch, runroot):
     with open(pgd + "/postmaster.pid", "w") as f:
         f.write("%d\n%s\n" % (procs["pm"].pid, pgd))
     births = {k: W.bsdinfo(p.pid)["birth_us"] for k, p in procs.items()}
-    w.drain = lambda timeout=0: time.sleep(0.6)  # fixture-synthetic slow drain
+    w.quiesce = lambda deadline: time.sleep(0.6)  # fixture-synthetic slow fence/drain
     refused_sig = False
     try:
         w.signal_verified(procs["pc"].pid, signal.SIGTERM, "T19i", deadline=W.now() + 0.3)
     except W.Hold as h:
         refused_sig = "deadline" in str(h)
-    del w.drain
+    del w.quiesce
     refused_pgctl = False
     try:
         W.pg_ctl_stop(w, fake_manifest(root), w.alive("postmaster-final"), timeout=5, t=2,
@@ -1740,19 +1768,19 @@ def t22a(d, scratch, runroot):
     root = mkroot(d, scratch, T, "root")
     w = bare_watch(root, closure=True)
     base, _ = h_check(w)
-    c = start_fixture(d, T, "child", "pass")
-    reap(c, D_REAP)
-    w.entries[c.pid] = {"pid": c.pid, "birth_us": 1, "lineage": True, "role": "process-compose",
-                        "exit": None, "parent": None, "exe": PC_FAKE, "args": "old", "execs": 0,
-                        "admitted": W.now()}
-    w.handle(FakeEv(c.pid, W.NOTE_EXEC | W.NOTE_EXIT | W.NOTE_EXITSTATUS, 0))
+    c = start_fixture(d, T, "child", "import time; time.sleep(3)")
+    ce = w.adopt(c.pid, "process-compose", image=PC_FAKE)
+    if ce is None:
+        raise RealUncertainty("T22a: fixture gone before adoption")
+    w.handle(FakeEv(c.pid, W.NOTE_EXEC | W.NOTE_EXIT | W.NOTE_EXITSTATUS, 0, udata=ce["gen"]))
     dead = next(x for x in w.dead if x["pid"] == c.pid)
+    reap(c, D_REAP)
     kinds = [v["kind"] for v in w.violations]
     res, h = h_check(w)
     labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     ok = base["complete"] is True and kinds == ["exec-image-unobserved-before-exit"] and \
-        dead["exe"] is None and dead["role"] == "unknown-image" and \
-        dead["prior_images"][0]["exe"] == PC_FAKE and h["closure_verified"] is True and \
+        dead["image"] is None and dead["role"] == "unknown-image" and \
+        dead["prior_images"][0]["image"] == PC_FAKE and h["closure_verified"] is True and \
         h["exec_unobserved"] == 1 and h["verdict"] is False and \
         h["api_client_history"] == "unknown" and not res["complete"] and \
         "H: not established" in res["reasons"] and "watcher violations: 1" in res["reasons"] and \
@@ -1777,10 +1805,12 @@ def t22b(d, scratch, runroot):
         if pid == c.pid:
             raise W.Hold("injected image read failure (fixture-synthetic)")
         return real(pid)
+    if w.admit(c.pid, os.getpid(), "T22b") is None:
+        raise RealUncertainty("T22b: child not admitted")
     W.pidpath = failing
     held = False
     try:
-        w.admit(c.pid, os.getpid(), "T22b")
+        w.process_requests(W.now() + 2.0)
     except W.Hold:
         held = True
     finally:
@@ -1824,7 +1854,12 @@ def t22c(d, scratch, runroot):
 
 
 def t22d(d, scratch, runroot):
-    """D-1 exact forms: four positives and the extra-command/wrong-parent/nesting negatives."""
+    """D-1/F2 exact VECTOR forms (r2 1.4, r3 B3/B4): seven positives (pg_ctl start, the two
+    version probes, check, boot, single, single-user locale), shim and exec hand-offs, and
+    negatives (extra command/option, other pgdata, wrong parent image/argv/role, nested
+    shell, absent argv, -V extra option, locale extra argument, other locale image, fork
+    from a non-forking role, skipped shell step). fixture-synthetic records except the
+    fork case, which uses an adopted live fixture."""
     T = "T22d"
     root = mkroot(d, scratch, T, "root")
     w = bare_watch(root, port=25432)
@@ -1832,74 +1867,145 @@ def t22d(d, scratch, runroot):
     P = W.PG_BIN + "/postgres"
     pgd, rt = m["pgdata"], m["runtime"]
     opts = "-c unix_socket_directories=%s/postgres -c listen_addresses= -p 25432" % rt
-    pgctl_child = '/bin/sh -c exec "%s" -D "%s" %s < "/dev/null" 2>&1' % (P, pgd, opts)
-    check = ('sh -c "%s" --check -F -c log_checkpoints=false  -c max_connections=100 '
+    pgctl_cmd = 'exec "%s" -D "%s" %s < "/dev/null" 2>&1' % (P, pgd, opts)
+    check = ('"%s" --check -F -c log_checkpoints=false  -c max_connections=100 '
              '-c autovacuum_worker_slots=16 -c shared_buffers=16384 '
              '-c dynamic_shared_memory_type=posix < "/dev/null" > "/dev/null" 2>&1' % P)
-    boot = 'sh -c "%s" --boot -F -c log_checkpoints=false  -X 16777216 -k' % P
-    single = ('sh -c "%s" --single -F -O -j -c search_path=pg_catalog -c exit_on_error=true '
+    boot = '"%s" --boot -F -c log_checkpoints=false  -X 16777216 -k' % P
+    single = ('"%s" --single -F -O -j -c search_path=pg_catalog -c exit_on_error=true '
               '-c log_checkpoints=false  template1 >/dev/null' % P)
-    parents = {"pgctl": (W.PG_BIN + "/pg_ctl", "pg_ctl -D %s -w start -o %s" % (pgd, opts)),
-               "pgctl_stop": (W.PG_BIN + "/pg_ctl", "pg_ctl -D %s -m fast -w stop" % pgd),
-               "initdb": (W.PG_BIN + "/initdb", "initdb --locale=C --encoding=UTF8"),
-               "psql": (W.PG_BIN + "/psql", "psql --dbname postgres")}
+    vprobe = '"%s" -V' % P
+    locale = "%s -a" % W.LOCALE_BIN
+    single_argv = [P, "--single", "-F", "-O", "-j", "-c", "search_path=pg_catalog", "-c",
+                   "exit_on_error=true", "-c", "log_checkpoints=false", "template1"]
+    parents = {"pgctl": (W.PG_BIN + "/pg_ctl", ["pg_ctl", "-D", pgd, "-w", "start", "-o", opts],
+                         None),
+               "pgctl_stop": (W.PG_BIN + "/pg_ctl", ["pg_ctl", "-D", pgd, "-m", "fast", "-w",
+                                                     "stop"], None),
+               "initdb": (W.PG_BIN + "/initdb", ["initdb", "--locale=C", "--encoding=UTF8"], None),
+               "psql": (W.PG_BIN + "/psql", ["psql", "--dbname", "postgres"], None),
+               "single": (P, single_argv, "pg-bootstrap"),
+               "single_other": (P, single_argv[:-1], "pg-bootstrap"),
+               "single_wrong_role": (P, single_argv, "postmaster-init")}
     pid = [5000]
 
-    def mk(exe, args, parent=None):
+    def mk(image, argv, parent=None, role=None):
         pid[0] += 1
-        e = {"pid": pid[0], "birth_us": pid[0], "exe": exe, "args": args, "lineage": True,
+        e = {"pid": pid[0], "birth_us": pid[0], "image": image, "exe": image, "argv": argv,
+             "argv_meta": None, "argv_known": False, "lineage": True,
              "parent": parent["pid"] if parent else None,
              "parent_birth_us": parent["birth_us"] if parent else None, "exit": None,
-             "execs": 0, "admitted": W.now()}
-        e["role"] = w.classify(e)
+             "execs": 0, "admitted": W.now(), "gen": None}
+        e["role"] = role or w.classify(e)
         w.entries[e["pid"]] = e
         return e
 
-    def allowed(pkey, child_args, nested=False):
+    def quiet(fn):
         before = len(w.violations)
-        pe = mk(*parents[pkey])
-        if nested:
-            pe = mk("/bin/sh", pgctl_child, pe)
-        ce = mk("/bin/sh", child_args, pe)
-        w.check_exe(ce)
-        return len(w.violations) == before and "allowance" in ce
+        r = fn()
+        return r, len(w.violations) == before
 
+    def allowed(pkey, child_argv, nested=False):
+        def run():
+            img, argv, role = parents[pkey]
+            pe = mk(img, argv, role=role)
+            if nested:
+                pe = mk("/bin/sh", ["/bin/sh", "-c", pgctl_cmd], pe)
+                w.check_exe(pe)
+            ce = mk("/bin/sh", child_argv, pe)
+            w.check_exe(ce)
+            return ce
+        ce, clean = quiet(run)
+        return clean and "allowance" in ce
+
+    def snap(image, argv):
+        return {"image": image, "exec_path": image, "argv": argv,
+                "meta": W.argv_meta([a.encode() for a in argv]) if argv else None,
+                "cutoff": W.now()}
+
+    def exec_case(pkey, child_argv, image, argv):
+        def run():
+            img, pargv, role = parents[pkey]
+            pe = mk(img, pargv, role=role)
+            ce = mk("/bin/sh", child_argv, pe)
+            w.check_exe(ce)
+            if "allowance" not in ce:
+                return None
+            w.apply_snapshot(ce, snap(image, argv), "exec")
+            return ce["role"]
+        role, clean = quiet(run)
+        return role if clean else "violation"
+
+    sh_real = os.path.realpath("/private/var/select/sh")
     cases = {
-        "pgctl_ok": allowed("pgctl", pgctl_child),
-        "check_ok": allowed("initdb", check),
-        "boot_ok": allowed("initdb", boot),
-        "single_ok": allowed("initdb", single),
-        "extra_semicolon": allowed("pgctl", pgctl_child + "; /usr/bin/true"),
-        "extra_andand": allowed("initdb", boot + " && x"),
-        "extra_option": allowed("initdb", boot + " -c foo=bar"),
-        "other_pgdata": allowed("pgctl", pgctl_child.replace(pgd, pgd + "-other")),
-        "wrong_parent_psql": allowed("psql", boot),
-        "wrong_parent_argv": allowed("pgctl_stop", pgctl_child),
-        "nested_shell": allowed("pgctl", pgctl_child, nested=True),
-        "unreadable_args": allowed("initdb", None),
+        "pgctl_ok": allowed("pgctl", ["/bin/sh", "-c", pgctl_cmd]),
+        "pgctl_probe_ok": allowed("pgctl", ["sh", "-c", vprobe]),
+        "initdb_probe_ok": allowed("initdb", ["sh", "-c", vprobe]),
+        "check_ok": allowed("initdb", ["sh", "-c", check]),
+        "boot_ok": allowed("initdb", ["sh", "-c", boot]),
+        "single_ok": allowed("initdb", ["sh", "-c", single]),
+        "locale_ok": allowed("single", ["sh", "-c", locale]),
+        "extra_semicolon": allowed("pgctl", ["/bin/sh", "-c", pgctl_cmd + "; /usr/bin/true"]),
+        "extra_andand": allowed("initdb", ["sh", "-c", boot + " && x"]),
+        "extra_option": allowed("initdb", ["sh", "-c", boot + " -c foo=bar"]),
+        "split_command": allowed("initdb", ["sh", "-c"] + boot.split(" ")),
+        "other_pgdata": allowed("pgctl", ["/bin/sh", "-c", pgctl_cmd.replace(pgd, pgd + "-other")]),
+        "wrong_argv0": allowed("pgctl", ["sh", "-c", pgctl_cmd]),
+        "wrong_parent_psql": allowed("psql", ["sh", "-c", boot]),
+        "wrong_parent_argv": allowed("pgctl_stop", ["/bin/sh", "-c", pgctl_cmd]),
+        "nested_shell": allowed("pgctl", ["/bin/sh", "-c", pgctl_cmd], nested=True),
+        "absent_argv": allowed("initdb", None),
+        "probe_extra_option": allowed("initdb", ["sh", "-c", vprobe + " -x"]),
+        "probe_under_psql": allowed("psql", ["sh", "-c", vprobe]),
+        "locale_extra_arg": allowed("single", ["sh", "-c", locale + " -x"]),
+        "locale_other_single_argv": allowed("single_other", ["sh", "-c", locale]),
+        "locale_wrong_parent_role": allowed("single_wrong_role", ["sh", "-c", locale]),
+        "locale_under_initdb": allowed("initdb", ["sh", "-c", locale]),
     }
-    pe = mk(*parents["pgctl"])
-    ce = mk("/bin/sh", pgctl_child, pe)
-    w.check_exe(ce)
-    real = (W.pidpath, W.proc_args, W.bsdinfo)
-    W.pidpath = lambda p: "/usr/bin/true"
-    W.proc_args = lambda p: "/usr/bin/true"
-    W.bsdinfo = lambda p: {"birth_us": ce["birth_us"], "pid": p, "ppid": 0, "uid": 0, "comm": "x"}
+    execs = {
+        "probe_exec": exec_case("initdb", ["sh", "-c", vprobe], P, [P, "-V"]) == "pg-version-probe",
+        "locale_exec": exec_case("single", ["sh", "-c", locale], W.LOCALE_BIN,
+                                 [W.LOCALE_BIN, "-a"]) == "pg-locale",
+        "shim_handoff": exec_case("initdb", ["sh", "-c", vprobe], sh_real,
+                                  ["sh", "-c", vprobe]) == "pg-sh",
+        "shim_changed_argv": exec_case("initdb", ["sh", "-c", vprobe], sh_real,
+                                       ["/bin/sh", "-c", vprobe]) == "violation",
+        "probe_exec_extra": exec_case("initdb", ["sh", "-c", vprobe], P,
+                                      [P, "-V", "-x"]) == "violation",
+        "locale_exec_extra": exec_case("single", ["sh", "-c", locale], W.LOCALE_BIN,
+                                       [W.LOCALE_BIN, "-a", "-x"]) == "violation",
+        "locale_other_image": exec_case("single", ["sh", "-c", locale], "/usr/bin/locale",
+                                        ["/usr/bin/locale", "-a"]) == "violation",
+        "exec_other_image": exec_case("pgctl", ["/bin/sh", "-c", pgctl_cmd], "/usr/bin/true",
+                                      ["/usr/bin/true"]) == "violation",
+    }
+    # a popen child seen first as a non-shell image: the shell step was skipped
+    img, pargv, _ = parents["initdb"]
+    pe = mk(img, pargv)
+    ce = mk(W.PG_BIN + "/initdb", pargv, pe)      # fork image (pre-exec): allowed
+    ce_r, ce_clean = quiet(lambda: w.apply_snapshot(ce, snap(P, [P, "-V"]), "exec"))
+    execs["skipped_shell"] = not ce_clean and any(v["kind"] == "exec-chain-unobserved"
+                                                  for v in w.violations)
+    # fork from a non-forking role, on an adopted live fixture (real generation)
+    fx = start_fixture(d, T, "nonforking", "import time; time.sleep(3)")
+    fe = w.adopt(fx.pid, "pg-locale", image=W.LOCALE_BIN)
+    if fe is None:
+        raise RealUncertainty("T22d: fixture gone before adoption")
     before = len(w.violations)
-    try:
-        w.on_exec(ce, gone=False)
-    finally:
-        W.pidpath, W.proc_args, W.bsdinfo = real
-    cases["exec_other_image"] = len(w.violations) == before
+    w.handle(FakeEv(fx.pid, W.NOTE_FORK, udata=fe["gen"]))
+    execs["fork_from_pg_locale"] = any(v["kind"] == "fork-from-nonforking-role"
+                                       for v in w.violations[before:])
+    rc = reap(fx, D_REAP)
     labels = ['root']  # disposed by finish() only after a validated outcome (R2)
-    positives = ("pgctl_ok", "check_ok", "boot_ok", "single_ok")
+    positives = ("pgctl_ok", "pgctl_probe_ok", "initdb_probe_ok", "check_ok", "boot_ok",
+                 "single_ok", "locale_ok")
     ok = all(cases[k] for k in positives) and not any(v for k, v in cases.items()
-                                                      if k not in positives)
+                                                      if k not in positives) and \
+        all(execs.values()) and rc == 0
     return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
-                   notes={"allowed": cases, "proof": "fixture-synthetic"})
+                  notes={"allowed": cases, "execs": execs, "proof": "fixture-synthetic"})
 
 
-# ---------------------------------------------------------------- T23 (H4, M4)
 def t23(d, scratch, runroot, variant):
     T = "T23" + variant
     st, sn, lk = healthy_now()
@@ -1987,35 +2093,29 @@ def t24(d, scratch, runroot):
 
 
 # ---------------------------------------------------------------- T26 (M2)
-class StubKq(object):
-    """fixture-synthetic kqueue: delivers the given events once, then nothing."""
-
-    def __init__(self, events):
-        self.events = list(events)
-
-    def control(self, changes, n, timeout=None):
-        out, self.events = self.events, []
-        return out
-
-
 def t26a(d, scratch, runroot):
-    """An image violation delivered DURING signal_verified's drain refuses the signal."""
+    """An image violation observed DURING signal_verified's quiescing refuses the signal:
+    a generation-attributed NOTE_EXEC is fetched by the fence, its snapshot obligation is
+    resolved (patched image and argv: /usr/bin/true) and the image check freezes signals."""
     T = "T26a"
     root = mkroot(d, scratch, T, "root")
     w, procs = watch_with(d, T, root, [("pc", "process-compose", "", None)], closure=True)
     p = procs["pc"]
+    g = w.entries[p.pid]["gen"]
     birth = W.bsdinfo(p.pid)["birth_us"]
-    w.kq = StubKq([FakeEv(p.pid, W.NOTE_EXEC)])
-    real = (W.pidpath, W.proc_args)
+    w.kq = StubKq([[FakeEv(p.pid, W.NOTE_EXEC, udata=g)]])
+    real = (W.pidpath, W.procargs)
     W.pidpath = lambda pid: "/usr/bin/true"
-    W.proc_args = lambda pid: "/usr/bin/true"
+    W.procargs = lambda pid, birth_us, reader=None: {
+        "status": "OK", "exec_path": "/usr/bin/true", "argv": ["/usr/bin/true"],
+        "meta": W.argv_meta([b"/usr/bin/true"])}
     refused = False
     try:
         w.signal_verified(p.pid, signal.SIGTERM, "T26a")
     except W.Hold as h:
         refused = "during the drain" in str(h)
     finally:
-        W.pidpath, W.proc_args = real
+        W.pidpath, W.procargs = real
     kinds = [v["kind"] for v in w.violations]
     alive = (W.bsdinfo(p.pid) or {}).get("birth_us") == birth
     rcs = outer_reap(procs)
@@ -2023,8 +2123,8 @@ def t26a(d, scratch, runroot):
     ok = refused and kinds == ["exe-not-allowlisted"] and w.signals_frozen and alive and \
         w.harness_signals == []
     return finish(labels, d, T, ["HOLD"], "HOLD" if ok else "FAIL",
-                   {"outer_reap": rcs_word(rcs, {"pc": 0}), "fixtures": "ok"}, runroot,
-                   notes={"violations": kinds, "alive_after": alive})
+                  {"outer_reap": rcs_word(rcs, {"pc": 0}), "fixtures": "ok"}, runroot,
+                  notes={"violations": kinds, "alive_after": alive})
 
 
 def t26b(d, scratch, runroot):
@@ -2136,7 +2236,7 @@ def t27(d, scratch, runroot):
     # in open() cannot hang this control: on timeout the write end is opened (no signal),
     # which unblocks the reader, and the case is recorded as BLOCKED.
     intent(d, T, "fifo-check", "proc")
-    fc = subprocess.Popen([PY, "-I", os.path.join(HERE, "sink_watch.py"), "target-socket-check",
+    fc = subprocess.Popen([PY, "-I", "-B", os.path.join(HERE, "sink_watch.py"), "target-socket-check",
                            "--socket-dir", sdir, "--canonical-dir", canon, "--port", "25438",
                            "--postmaster-pid", me], stdin=subprocess.DEVNULL,
                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, close_fds=True)
@@ -2161,6 +2261,910 @@ def t27(d, scratch, runroot):
     ok = got == want
     return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
                    notes=got)
+
+
+# ---------------------------------------------------------------- T4a repair controls (r2, r3, B1-B4)
+COREUTILS_SLEEP = W.PKG["coreutils"] + "/bin/sleep"
+# argv-tolerant accepting fixture (B3): any argv0 and any trailing arguments; readiness on
+# fd 3; waits for one stdin byte, autonomously bounded (8 s)
+HOLDER = "import os,select\nos.write(3, b'r\\n')\nselect.select([0], [], [], 8)\n"
+
+
+def live_fixture(d, T, label, code=None, stdin=None):
+    return start_fixture(d, T, label, code or "import time; time.sleep(3)",
+                         stdin=stdin if stdin is not None else subprocess.DEVNULL)
+
+
+def adopt_or_hold(w, p, role, image=None, argv=None):
+    e = w.adopt(p.pid, role, image=image, argv=argv)
+    if e is None:
+        raise RealUncertainty("fixture %d gone before adoption" % p.pid)
+    return e
+
+
+def pa_buf(argc, exec_path, args, env=(), extra_nul=0, pad_bytes=None):
+    """A KERN_PROCARGS2-shaped buffer under the H-pad hypothesis (fixture-synthetic)."""
+    ep = exec_path if isinstance(exec_path, bytes) else exec_path.encode()
+    pad = W.align_up(len(ep) + 1, W.ARGV_ALIGN) - (len(ep) + 1)
+    padding = pad_bytes if pad_bytes is not None else b"\0" * pad
+    body = ep + b"\0" + padding + b"\0" * extra_nul + b"".join(a + b"\0" for a in args) + \
+        b"".join(e + b"\0" for e in env)
+    return argc.to_bytes(4, sys.byteorder, signed=True) + body
+
+
+def parse(buf, cap=None):
+    return W.parse_procargs(buf, len(buf), cap or len(buf) + 1)
+
+
+def t30a(d, scratch, runroot):
+    """Parser on byte buffers (pure): closed states, preserved empties, no NUL skipping."""
+    T = "T30a"
+    got = {
+        "valid": parse(pa_buf(3, "/bin/sh", [b"sh", b"-c", b"x y"])),
+        "argc0": parse(pa_buf(0, "/bin/sh", [b"sh"])),
+        "argc5000": parse(pa_buf(5000, "/bin/sh", [b"sh"])),
+        "no_nul_after_path": parse((1).to_bytes(4, sys.byteorder) + b"/bin/shXXXX"),
+        "path_too_long": parse(pa_buf(1, b"/" + b"a" * 5000, [b"x"])),
+        "pad_not_nul": parse(pa_buf(1, b"/b", [b"x"], pad_bytes=b"\0Z\0\0\0")),
+        "empty_argv0": parse(pa_buf(2, "/bin/sh", [b"", b"x"])),
+        "internal_empty": parse(pa_buf(3, "/bin/sh", [b"a", b"", b"b"])),
+        "truncated": parse(pa_buf(3, "/bin/sh", [b"a", b"b"])[:-1]),
+        "n_equals_cap": W.parse_procargs(pa_buf(1, "/bin/sh", [b"sh"]),
+                                         len(pa_buf(1, "/bin/sh", [b"sh"])),
+                                         len(pa_buf(1, "/bin/sh", [b"sh"]))),
+        "n_lt_6": parse(b"\x01\x00\x00\x00/"),
+        "bad_utf8": parse(pa_buf(1, "/bin/sh", [b"\xff"])),
+    }
+    want = {"valid": ("OK", ["sh", "-c", "x y"]), "argc0": ("MALFORMED", None),
+            "argc5000": ("MALFORMED", None), "no_nul_after_path": ("MALFORMED", None),
+            "path_too_long": ("MALFORMED", None), "pad_not_nul": ("UNSUPPORTED", None),
+            "empty_argv0": ("OK", ["", "x"]), "internal_empty": ("OK", ["a", "", "b"]),
+            "truncated": ("MALFORMED", None), "n_equals_cap": ("MALFORMED", None),
+            "n_lt_6": ("MALFORMED", None), "bad_utf8": ("UNREPRESENTABLE", None)}
+    obs = {k: (v["status"], v["argv"]) for k, v in got.items()}
+    ok = obs == want and got["bad_utf8"]["meta"]["lengths"] == [1]
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL",
+                   {"fixtures": "not-applicable:pure parser"}, runroot,
+                   notes={"observed": {k: list(v) for k, v in obs.items()}})
+
+
+def t30b(d, scratch, runroot):
+    """errno mapping with an injected reader and identity (r2 1.3)."""
+    T = "T30b"
+    me = W.bsdinfo(os.getpid())
+    real_bsd = W.bsdinfo
+    out = {}
+
+    def reader_err(err):
+        return lambda pid, cap: (-1, err, b"", 0)
+    try:
+        W.bsdinfo = lambda pid: None
+        out["einval_gone"] = W.procargs(424242, 1, reader=reader_err(errno.EINVAL))["status"]
+        W.bsdinfo = lambda pid: dict(me, birth_us=7)
+        for name, err in (("einval_alive", errno.EINVAL), ("esrch_alive", errno.ESRCH),
+                          ("eperm", errno.EPERM), ("enomem", errno.ENOMEM)):
+            try:
+                W.procargs(424242, 7, reader=reader_err(err))
+                out[name] = "no-hold"
+            except W.Hold:
+                out[name] = "HOLD"
+        W.bsdinfo = lambda pid: dict(me, birth_us=8)
+        out["einval_other_birth"] = W.procargs(424242, 7, reader=reader_err(errno.EINVAL))["status"]
+    finally:
+        W.bsdinfo = real_bsd
+    saved = (W._argmax, W.ARGMAX_RANGE)
+    try:
+        W._argmax, W.ARGMAX_RANGE = None, (1, 2)
+        try:
+            W.kern_argmax()
+            out["argmax_implausible"] = "no-hold"
+        except W.Hold:
+            out["argmax_implausible"] = "HOLD"
+    finally:
+        W._argmax, W.ARGMAX_RANGE = saved
+    want = {"einval_gone": "GONE", "einval_alive": "HOLD", "esrch_alive": "HOLD", "eperm": "HOLD",
+            "enomem": "HOLD", "einval_other_birth": "GONE", "argmax_implausible": "HOLD"}
+    return verdict(d, T, ["PASS"], "PASS" if out == want else "FAIL",
+                   {"fixtures": "not-applicable:injected reader"}, runroot, notes=out)
+
+
+def t30c(d, scratch, runroot):
+    """Identity reuse during the reads: never attributed (r2 1.2)."""
+    T = "T30c"
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root)
+    p = live_fixture(d, T, "target")
+    e = adopt_or_hold(w, p, "fixture")
+    real_bsd, calls = W.bsdinfo, [0]
+
+    def shifting(pid):
+        cur = real_bsd(pid)
+        if pid == p.pid and cur is not None:
+            calls[0] += 1
+            if calls[0] >= 2:
+                return dict(cur, birth_us=cur["birth_us"] + 1)
+        return cur
+    try:
+        W.bsdinfo = shifting
+        res = w.snapshot(e["gen"], W.now() + 2.0)["result"]
+    finally:
+        W.bsdinfo = real_bsd
+    rc = reap(p, D_REAP)
+    labels = ["root"]
+    ok = res == "GONE" and e["image"] is None and rc == 0
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if rc == 0 else "rc-%s" % rc}, runroot, notes={"result": res})
+
+
+def t30d(d, scratch, runroot):
+    """An exec event observed by the POST fence voids the snapshot; once handled, a fresh
+    VALID snapshot is recorded (real reads of the live fixture)."""
+    T = "T30d"
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root)
+    p = live_fixture(d, T, "target")
+    e = adopt_or_hold(w, p, "fixture")
+    g = e["gen"]
+    w.kq = StubKq([[], [FakeEv(p.pid, W.NOTE_EXEC, udata=g)]])
+    first = w.snapshot(g, W.now() + 2.0)["result"]
+    w.process_pending(W.now() + 1.0)
+    pending_kind = (w.requests.get(g) or {}).get("kind")
+    w.requests.pop(g, None)
+    second = w.snapshot(g, W.now() + 2.0)
+    rc = reap(p, D_REAP)
+    labels = ["root"]
+    ok = first == "VOID" and pending_kind == "exec" and second["result"] == "VALID" and \
+        os.path.realpath(second["image"]) == os.path.realpath(PY) and rc == 0
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if rc == 0 else "rc-%s" % rc}, runroot,
+                  notes={"first": first, "second": second["result"]})
+
+
+def t30e(d, scratch, runroot):
+    """No partial attribution: pidpath succeeds but procargs is GONE after a handled exec;
+    then the exit arrives. exec-image-unobserved-before-exit, no image, no argv."""
+    T = "T30e"
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root)
+    p = live_fixture(d, T, "target")
+    e = adopt_or_hold(w, p, "fixture", image=PY)
+    g = e["gen"]
+    w.kq = StubKq([])
+    w.handle(FakeEv(p.pid, W.NOTE_EXEC, udata=g))
+    real = W.procargs
+    try:
+        W.procargs = lambda pid, birth_us, reader=None: {"status": "GONE", "exec_path": None,
+                                                        "argv": None, "meta": None}
+        res = w.snapshot(g, W.now() + 2.0)["result"]
+    finally:
+        W.procargs = real
+    w.handle(FakeEv(p.pid, W.NOTE_EXIT | W.NOTE_EXITSTATUS, 0, udata=g))
+    kinds = [v["kind"] for v in w.violations]
+    dead = [x for x in w.dead if x["gen"] == g]
+    rc = reap(p, D_REAP)
+    labels = ["root"]
+    ok = res == "GONE" and kinds == ["exec-image-unobserved-before-exit"] and len(dead) == 1 and \
+        dead[0]["image"] is None and dead[0]["argv"] is None and dead[0]["role"] == "unknown-image"
+    return finish(labels, d, T, ["PASS"], "PASS" if ok and rc == 0 else "FAIL",
+                  {"fixtures": "ok" if rc == 0 else "rc-%s" % rc}, runroot,
+                  notes={"result": res, "violations": kinds})
+
+
+EXECER = ("import os,sys\nsys.stdin.readline()\nos.execv(sys.argv[1], sys.argv[2:])\n")
+
+
+def run_watch_until(w, cond, deadline, each=None):
+    while W.now() < deadline and not cond():
+        w.step(0.05, min(W.now() + W.ITER_SLICE_S, deadline))
+        if each is not None:
+            each()
+    return cond()
+
+
+def t30f(d, scratch, runroot):
+    """Real kernel: the fixture execs pinned coreutils `sleep 5` and stays alive; a VALID
+    snapshot records the exact exec_path, image and argv vector."""
+    T = "T30f"
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root)
+    p = start_fixture(d, T, "execer", EXECER, COREUTILS_SLEEP, "sleep", "5",
+                      stdin=subprocess.PIPE)
+    e = adopt_or_hold(w, p, "fixture", image=PY)
+    p.stdin.write(b"go\n")
+    p.stdin.flush()
+    seen = {}
+
+    def record(entry, s, kind):
+        seen.update(image=s["image"], exec_path=s["exec_path"], argv=s["argv"], kind=kind)
+    w.apply_snapshot = record
+    run_watch_until(w, lambda: "argv" in seen, W.now() + 5.0)
+    rc = reap(p, D_REAP)
+    labels = ["root"]
+    ok = seen.get("kind") == "exec" and seen.get("exec_path") == COREUTILS_SLEEP and \
+        os.path.realpath(seen.get("image") or "") == os.path.realpath(COREUTILS_SLEEP) and \
+        seen.get("argv") == ["sleep", "5"] and e["gen"] and rc == 0
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if rc == 0 else "rc-%s" % rc}, runroot, notes=seen)
+
+
+POPENER = ("import ctypes,ctypes.util,sys,time\nsys.stdin.readline()\n"
+           "c=ctypes.CDLL(ctypes.util.find_library('c'))\nc.popen.restype=ctypes.c_void_p\n"
+           "c.popen(sys.argv[1].encode(), b'r')\ntime.sleep(4)\n")
+
+
+def t30g(d, scratch, runroot):
+    """Measurement on the pinned macOS ([A], B3/B4): (a) execv("/bin/sh", ["/bin/sh","-c",
+    CMD]): every observed SYSTEM_SH stage keeps exactly that vector (the shim hand-off
+    equality apply_snapshot relies on); (b) libc popen(CMD): the child's observed shell stage
+    is exactly ["sh","-c",CMD] (the popen argv0 the forms rely on). CMD first reads one line
+    from the shared stdin, so the shell stage stays alive until it has been observed (or
+    6 s passed); only then is the line written and the shell execs pinned sleep. Each side
+    needs at least one observed shell stage: an unobserved stage is UNMEASURED (a non-pass
+    that returns the [A] premise for review), never assumed."""
+    T = "T30g"
+    root = mkroot(d, scratch, T, "root")
+    cmd = "read x; exec %s 3" % COREUTILS_SLEEP
+    sleep_real = os.path.realpath(COREUTILS_SLEEP)
+    stages = {"a": [], "b": []}
+
+    def watched(p, key):
+        w = bare_watch(root)
+        adopt_or_hold(w, p, "fixture", image=PY)
+        w.apply_snapshot = lambda entry, s, kind: stages[key].append(
+            {"pid": entry["pid"], "image": s["image"], "argv": s["argv"]})
+        mine = (lambda x: True) if key == "a" else (lambda x: x["pid"] != p.pid)
+        poll = None if key == "a" else (lambda: w.scan_children(p.pid, "poll"))
+        p.stdin.write(b"go\n")
+        p.stdin.flush()
+        run_watch_until(w, lambda: any(mine(x) and os.path.realpath(x["image"]) in W.SYSTEM_SH
+                                       for x in stages[key]), W.now() + 6.0, poll)
+        p.stdin.write(b"x\n")
+        p.stdin.flush()
+        run_watch_until(w, lambda: any(mine(x) and os.path.realpath(x["image"]) == sleep_real
+                                       for x in stages[key]), W.now() + 6.0, poll)
+        return w
+    pa = start_fixture(d, T, "shim", EXECER, "/bin/sh", "/bin/sh", "-c", cmd,
+                       stdin=subprocess.PIPE)
+    watched(pa, "a")
+    pb = start_fixture(d, T, "popen", POPENER, cmd, stdin=subprocess.PIPE)
+    watched(pb, "b")
+    rca, rcb = reap(pa, D_REAP), reap(pb, D_REAP)
+    sh_a = [x for x in stages["a"] if os.path.realpath(x["image"]) in W.SYSTEM_SH]
+    sh_b = [x for x in stages["b"] if x["pid"] != pb.pid and
+            os.path.realpath(x["image"]) in W.SYSTEM_SH]
+    if not sh_a or not sh_b:
+        obs = "UNMEASURED"
+    elif all(x["argv"] == ["/bin/sh", "-c", cmd] for x in sh_a) and \
+            all(x["argv"] == ["sh", "-c", cmd] for x in sh_b):
+        obs = "PASS"
+    else:
+        obs = "FAIL"
+    labels = ["root"]
+    return finish(labels, d, T, ["PASS"], obs,
+                  {"fixtures": "ok" if rca == 0 and rcb == 0 else "rc-%s/%s" % (rca, rcb)},
+                  runroot, notes={"stages": stages, "shell_stages_observed":
+                                  {"a": len(sh_a), "b": len(sh_b)}})
+
+
+def t30i(d, scratch, runroot):
+    """Popen-parent coalescing: a child first seen as a non-shell image is
+    exec-chain-unobserved; the healthy pair (shell first) is allowed."""
+    T = "T30i"
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root, port=25432)
+    P = W.PG_BIN + "/postgres"
+    parent = {"pid": 7001, "birth_us": 7001, "image": W.PG_BIN + "/initdb",
+              "exe": W.PG_BIN + "/initdb", "argv": ["initdb", "--locale=C", "--encoding=UTF8"],
+              "lineage": True, "parent": None, "exit": None, "role": "pg-tool", "gen": None}
+    w.entries[7001] = parent
+
+    def child(pid):
+        e = {"pid": pid, "birth_us": pid, "image": parent["image"], "exe": parent["image"],
+             "argv": list(parent["argv"]), "lineage": True, "parent": 7001,
+             "parent_birth_us": 7001, "exit": None, "role": "pg-tool", "gen": None}
+        w.entries[pid] = e
+        return e
+
+    def snap(image, argv):
+        return {"image": image, "exec_path": image, "argv": argv, "meta": None,
+                "cutoff": W.now()}
+    bad = child(7002)
+    before = len(w.violations)
+    w.apply_snapshot(bad, snap(P, [P, "-V"]), "exec")
+    skipped = [v["kind"] for v in w.violations[before:]]
+    good = child(7003)
+    before = len(w.violations)
+    w.apply_snapshot(good, snap("/bin/sh", ["sh", "-c", '"%s" -V' % P]), "exec")
+    healthy = w.violations[before:] == [] and "allowance" in good
+    labels = ["root"]
+    ok = "exec-chain-unobserved" in skipped and healthy
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+                  notes={"skipped": skipped, "healthy": healthy})
+
+
+def t30j(d, scratch, runroot):
+    """Target event BEHIND 256 unrelated events (R1a). Stub-ordered on the real snapshot
+    code: VOID, an exec obligation, then VALID once handled. Real kernel: 300 registered
+    pinned-coreutils sleepers EXIT (queued) before the target's exec; no snapshot taken
+    after the exec was handled may be VALID for the pre-exec image, the final snapshot is
+    VALID for the exec'd image, and nothing saturates. Sampled evidence for the UNVERIFIED
+    kernel-ordering premise (B1), not a theorem: a failure returns it for review."""
+    T = "T30j"
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root)
+    t = live_fixture(d, T, "target")
+    o = live_fixture(d, T, "other")
+    et, eo = adopt_or_hold(w, t, "fixture"), adopt_or_hold(w, o, "fixture")
+    filler = [FakeEv(o.pid, 0, udata=eo["gen"]) for _ in range(256)]
+    w.kq = StubKq([[], filler, [FakeEv(t.pid, W.NOTE_EXEC, udata=et["gen"])], []])
+    first = w.snapshot(et["gen"], W.now() + 3.0)["result"]
+    w.process_pending(W.now() + 2.0, W.PENDING_CAP)
+    req = dict(w.requests.get(et["gen"]) or {})
+    w.requests.pop(et["gen"], None)
+    second = w.snapshot(et["gen"], W.now() + 2.0)
+    stub_ok = first == "VOID" and req.get("kind") == "exec" and second["result"] == "VALID"
+    rct, rco = reap(t, D_REAP), reap(o, D_REAP)
+    # real kernel
+    wr = bare_watch(root)
+    sleepers = []
+    for i in range(300):
+        intent(d, T, "s%d" % i, "proc")
+        sp = subprocess.Popen([COREUTILS_SLEEP, "1.5"], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, close_fds=True)
+        set_identity(d, T, "s%d" % i, proc_identity(sp.pid, os.getpid()))
+        sleepers.append(sp)
+        if wr.adopt(sp.pid, "fixture") is None:
+            raise RealUncertainty("T30j: sleeper %d gone before adoption" % sp.pid)
+    tg = start_fixture(d, T, "real-target", EXECER, COREUTILS_SLEEP, "sleep", "3",
+                       stdin=subprocess.PIPE)
+    eg = adopt_or_hold(wr, tg, "fixture", image=PY)
+    t_last = W.now()
+    time.sleep(max(0.0, t_last + 2.0 - W.now()))     # every sleeper's 1.5 s has passed
+    tg.stdin.write(b"go\n")
+    tg.stdin.flush()
+    snaps, sleep_real = [], os.path.realpath(COREUTILS_SLEEP)
+    end = W.now() + 8.0
+    while W.now() < end:
+        handled_before = eg["execs"]
+        s = wr.snapshot(eg["gen"], min(W.now() + 1.0, end))
+        img = os.path.realpath(s.get("image") or "")
+        snaps.append({"result": s["result"], "image": img, "execs_handled": handled_before})
+        if s["result"] == "VALID" and img == sleep_real:
+            break
+        wr.process_pending(min(W.now() + 0.5, end), W.PENDING_CAP)
+        wr.requests.pop(eg["gen"], None)
+    rcs = [reap(sp, D_REAP) for sp in sleepers] + [reap(tg, D_REAP)]
+    stale = [x for x in snaps if x["result"] == "VALID" and x["execs_handled"] > 0 and
+             x["image"] != sleep_real]
+    real_ok = bool(snaps) and snaps[-1]["result"] == "VALID" and \
+        snaps[-1]["image"] == sleep_real and not stale and wr.violations == []
+    labels = ["root"]
+    ok = stub_ok and real_ok
+    fixtures = "ok" if all(r == 0 for r in rcs + [rct, rco]) else "nonzero"
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": fixtures},
+                  runroot, notes={"stub": [first, req.get("kind"), second["result"]],
+                                  "real": snaps[-5:], "stale_valid": len(stale),
+                                  "violations": [v["kind"] for v in wr.violations]})
+
+
+def t30k(d, scratch, runroot):
+    """Persistent backlog (never an empty fence) and slow handling of the target's own
+    exec events (handler time counted; the earliest deadline is never reset, B1)."""
+    T = "T30k"
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root)
+    t = live_fixture(d, T, "target")
+    o = live_fixture(d, T, "other")
+    et, eo = adopt_or_hold(w, t, "fixture"), adopt_or_hold(w, o, "fixture")
+    w.kq = StubKq([], forever=[FakeEv(o.pid, 0, udata=eo["gen"])])   # never an empty fence
+    t0 = W.now()
+    try:
+        backlog = w.snapshot(et["gen"], t0 + 1.0)["result"]
+    except W.Hold:
+        backlog = "HOLD"
+    backlog_s = W.now() - t0
+    backlog_kinds = [v["kind"] for v in w.violations]
+    # slow handling
+    w2 = bare_watch(root)
+    t2 = live_fixture(d, T, "target2")
+    e2 = adopt_or_hold(w2, t2, "fixture")
+    g2 = e2["gen"]
+    w2.request(g2, "exec")
+    first_deadline = w2.requests[g2]["deadline"]
+    w2.kq = StubKq([[FakeEv(t2.pid, W.NOTE_EXEC, udata=g2) for _ in range(20)]])
+    real_handle = w2.handle
+
+    def slow(ev):
+        time.sleep(0.3)
+        real_handle(ev)
+    w2.handle = slow
+    t1 = W.now()
+    while W.now() < first_deadline + 1.0 and g2 in w2.requests:
+        w2.step(0.05, min(W.now() + W.ITER_SLICE_S, first_deadline + 1.0))
+        if g2 in w2.requests and w2.requests[g2]["deadline"] != first_deadline:
+            break
+    deadline_kept = g2 not in w2.requests or w2.requests[g2]["deadline"] == first_deadline
+    slow_kinds = [v["kind"] for v in w2.violations]
+    slow_s = W.now() - t1
+    rcs = [reap(x, D_REAP) for x in (t, o, t2)]
+    labels = ["root"]
+    ok = backlog == "HOLD" and backlog_s <= 1.5 and \
+        backlog_kinds == ["event-queue-saturated"] and deadline_kept and \
+        "image-snapshot-unresolved" in slow_kinds and slow_s <= 2.0 + 1.5 and \
+        all(r == 0 for r in rcs)
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if all(r == 0 for r in rcs) else "nonzero"}, runroot,
+                  notes={"backlog": backlog, "backlog_s": backlog_s, "slow_kinds": slow_kinds,
+                         "slow_s": slow_s, "deadline_kept": deadline_kept})
+
+
+def t30l(d, scratch, runroot):
+    """Healthy pair: an idle registered fixture gives a VALID snapshot with its cutoff."""
+    T = "T30l"
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root)
+    p = live_fixture(d, T, "idle")
+    e = adopt_or_hold(w, p, "fixture")
+    s = w.snapshot(e["gen"], W.now() + 2.0)
+    rc = reap(p, D_REAP)
+    labels = ["root"]
+    ok = s["result"] == "VALID" and s["pre"] <= s["cutoff"] and \
+        os.path.realpath(s["image"]) == os.path.realpath(PY) and rc == 0
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if rc == 0 else "rc-%s" % rc}, runroot,
+                  notes={"result": s["result"]})
+
+
+def fork_execve(path, argv, env, stdin_fd=None, ready_fd=None):
+    """Fork, then execve(path, argv, env) through libc in the child (argv0 may be empty).
+    The child is this process's own; reaped with reap_pid."""
+    lib = W.libc()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            if stdin_fd is not None:
+                os.dup2(stdin_fd, 0)
+            if ready_fd is not None:
+                if ready_fd == 3:
+                    os.set_inheritable(3, True)
+                else:
+                    os.dup2(ready_fd, 3)
+            cargv = (ctypes.c_char_p * (len(argv) + 1))(*[a.encode() for a in argv], None)
+            cenv = (ctypes.c_char_p * (len(env) + 1))(*[e.encode() for e in env], None)
+            lib.execve(path.encode(), cargv, cenv)
+        finally:
+            os._exit(127)
+    return pid
+
+
+def reap_pid(pid, deadline_s):
+    end = W.now() + deadline_s
+    while W.now() < end:
+        r, st = os.waitpid(pid, os.WNOHANG)
+        if r == pid:
+            return os.waitstatus_to_exitcode(st)
+        time.sleep(0.05)
+    raise RealUncertainty("forked fixture %d alive after %.0f s" % (pid, deadline_s))
+
+
+def t30m(d, scratch, runroot):
+    """Layout gate (r3 3.2, B3): owned ARGV-TOLERANT accepting fixtures, execve'd through
+    libc: the pinned python (HOLDER: any argv0, any trailing arguments after -c CODE) via
+    declared symlinks whose exec_path lengths cover every residue mod 8; the source-known
+    shell forms (/bin/sh with argv0 "sh" and "/bin/sh", pinned bash with "bash") waiting on
+    stdin. argc, argument lengths, empties (including an empty argv0) and environment sizes
+    vary. Each fixture signals readiness on fd 3 and is held alive by its open stdin while
+    its KERN_PROCARGS2 is read: the parse under H-pad (A = 8) must be exactly the known
+    vector and exec_path (the shells: a SYSTEM_SH/bash image after any shim hand-off). Any
+    mismatch is FAIL and returns the hypothesis for review: no later reliance, no fallback."""
+    T = "T30m"
+    names = ["l" * k for k in range(1, 9)]
+    root = mkroot(d, scratch, T, "root", names)
+    links = []
+    for name in names:
+        os.symlink(PY, root + "/" + name)
+        links.append(root + "/" + name)
+    tails = [[], [""], ["a", "", "b"], ["x" * 100], ["KEY=VALUE", "-c", ""]]
+    argv0s = ["", "p", "pp", "python-fixture"]
+    envs = [["E=1"], ["E=" + "x" * 7], ["E=" + "x" * 64, "F="], ["E=" + "x" * 1000]]
+    cases = []
+    for i, lp in enumerate(links):
+        cases.append((lp, [argv0s[i % 4], "-I", "-c", HOLDER] + tails[i % 5], envs[i % 4],
+                      "exact"))
+    sh_cmd = "echo r >&3; read x"
+    bash = W.PKG["bash"] + "/bin/bash"
+    cases.append(("/bin/sh", ["sh", "-c", sh_cmd], ["E=1"], "shell"))
+    cases.append(("/bin/sh", ["/bin/sh", "-c", sh_cmd], ["E=" + "y" * 333], "shell"))
+    cases.append((bash, ["bash", "-c", sh_cmd], ["E=" + "z" * 13], "exact"))
+    shells = {os.path.realpath(x) for x in W.SYSTEM_SH}
+    results = []
+    for n, (path, argv, env, mode) in enumerate(cases):
+        r, wfd = os.pipe()
+        sr, sw = os.pipe()
+        intent(d, T, "case%d" % n, "proc")
+        pid = fork_execve(path, argv, env, stdin_fd=sr, ready_fd=wfd)
+        os.close(wfd)
+        os.close(sr)
+        res = {"case": n, "path_len": len(path), "argc": len(argv), "mode": mode}
+        try:
+            set_identity(d, T, "case%d" % n, proc_identity(pid, os.getpid()))
+            ready = bool(select.select([r], [], [], D_LINE)[0]) and os.read(r, 2) == b"r\n"
+            cur = W.bsdinfo(pid)
+            a = W.procargs(pid, cur["birth_us"]) if ready and cur else {"status": "NOT-READY"}
+            ep = a.get("exec_path")
+            res.update(status=a["status"], match=a.get("argv") == argv,
+                       exec_path_ok=(ep == path) if mode == "exact" else
+                       (ep is not None and os.path.realpath(ep) in shells))
+        finally:
+            os.close(r)
+            try:
+                os.write(sw, b"\n")
+            except BrokenPipeError:
+                res["stdin"] = "fixture already gone"
+            os.close(sw)
+        res["rc"] = reap_pid(pid, D_REAP)
+        results.append(res)
+    residues = sorted({len(c[0]) % 8 for c in cases[:8]})
+    labels = ["root"]
+    ok = len(results) == len(cases) and residues == list(range(8)) and \
+        all(x["status"] == "OK" and x["match"] and x["exec_path_ok"] for x in results)
+    fixtures = "ok" if all(x["rc"] == 0 for x in results) else "nonzero"
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": fixtures},
+                  runroot, notes={"results": results, "residues": residues})
+
+
+def t30n(d, scratch, runroot):
+    """The ambiguous pair (B3): (i) an empty argv[0] after exact padding parses as "";
+    (ii) one extra NUL after the exact padding is read as another EMPTY argument (the
+    parser cannot know it was padding) and no source-known form matches; (iii) the old
+    skip-NUL reading is never produced."""
+    T = "T30n"
+    w = bare_watch(scratch, port=25432)
+    i = parse(pa_buf(2, "/bin/sh", [b"", b"x"]))
+    ii = parse(pa_buf(2, "/bin/sh", [b"x", b"y"], extra_nul=1))
+
+    def any_form(argv):
+        return any(len(argv) == 3 and argv[0] == f["child_argv0"] and argv[1] == "-c" and
+                   f["child_cmd"].fullmatch(argv[2]) for f in w.forms.values()) or \
+            any(W.vec_match(f["exec_argv"], argv) for f in w.forms.values())
+    ok = i["status"] == "OK" and i["argv"] == ["", "x"] and not any_form(i["argv"]) and \
+        ii["status"] == "OK" and ii["argv"] == ["", "x"] and not any_form(ii["argv"]) and \
+        ii["argv"] != ["x", "y"]
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL",
+                   {"fixtures": "not-applicable:pure parser"}, runroot,
+                   notes={"i": i["argv"], "ii": ii["argv"]})
+
+
+def t30o(d, scratch, runroot):
+    """Environment-looking bytes after a truncated argv: the parse consumes them, no shell
+    form is granted, and receipts hold metadata only (no "PATH=" anywhere)."""
+    T = "T30o"
+    w = bare_watch(scratch, port=25432)
+    a = parse(pa_buf(3, "/bin/sh", [b"sh", b"-c"], env=[b"PATH=/x"]))
+    parent = {"pid": 7101, "birth_us": 7101, "image": W.PG_BIN + "/initdb",
+              "exe": W.PG_BIN + "/initdb", "argv": ["initdb", "--locale=C", "--encoding=UTF8"],
+              "lineage": True, "parent": None, "exit": None, "role": "pg-tool", "gen": None}
+    e = {"pid": 7102, "birth_us": 7102, "image": "/bin/sh", "exe": "/bin/sh", "argv": a["argv"],
+         "argv_meta": a["meta"], "argv_known": False, "lineage": True, "parent": 7101,
+         "parent_birth_us": 7101, "exit": None, "role": "pg-sh", "gen": None}
+    w.entries.update({7101: parent, 7102: e})
+    w.check_exe(e)
+    kinds = [v["kind"] for v in w.violations]
+    blob = json.dumps({"entry": W.entry_view(e), "violations": w.violations}, default=str)
+    ok = a["argv"] == ["sh", "-c", "PATH=/x"] and kinds == ["sh-form-mismatch"] and \
+        "PATH=" not in blob and "allowance" not in e
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL",
+                   {"fixtures": "not-applicable:fabricated records"}, runroot,
+                   notes={"violations": kinds})
+
+
+def t30p(d, scratch, runroot):
+    """PG title only (r3 3.3, B4): under a postmaster parent only argv[0] is consumed and
+    recorded; trailing KEY=VALUE bytes never reach the receipt, not even as metadata."""
+    T = "T30p"
+    w = bare_watch(scratch)
+    P = W.PG_BIN + "/postgres"
+    pm = {"pid": 7201, "birth_us": 7201, "image": P, "exe": P, "argv": None, "lineage": True,
+          "parent": None, "exit": None, "role": "postmaster-final", "gen": None}
+    ch = {"pid": 7202, "birth_us": 7202, "image": P, "exe": P,
+          "argv": ["postgres: logger ", "", "KEY=VALUE"],
+          "argv_meta": W.argv_meta([b"postgres: logger ", b"", b"KEY=VALUE"]),
+          "argv_known": False, "lineage": True, "parent": 7201, "parent_birth_us": 7201,
+          "exit": None, "role": "pg-aux", "gen": None}
+    w.entries.update({7201: pm, 7202: ch})
+    role = w.classify(ch)
+    other = dict(ch, pid=7203, argv=["postgres: checkpointer ", "KEY=VALUE"])
+    w.entries[7203] = other
+    role2 = w.classify(other)
+    blob = json.dumps([W.entry_view(ch), W.entry_view(other)])
+    ok = role == "pg-logger" and role2 == "pg-aux" and ch["title"] == "postgres: logger " and \
+        "KEY=" not in blob and W.entry_view(ch).get("argv_meta") is None
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL",
+                   {"fixtures": "not-applicable:fabricated records"}, runroot,
+                   notes={"roles": [role, role2]})
+
+
+# -- R2 controls
+def unregistered_gone(w, d, T, label):
+    """An entry for a real exited fixture whose generation has NO knote (fixture-synthetic)."""
+    p = start_fixture(d, T, label, "import time; time.sleep(0.2)")
+    cur = W.bsdinfo(p.pid)
+    reap(p, D_REAP)
+    g = w.alloc_gen()
+    e = {"pid": p.pid, "birth_us": (cur or {}).get("birth_us", 1), "gen": g, "role": "fixture",
+         "lineage": True, "parent": None, "exit": None, "image": None, "argv": None,
+         "argv_meta": None, "argv_known": False}
+    w.gens[g] = {"pid": p.pid, "birth_us": e["birth_us"], "state": "live", "entry": e}
+    w.entries[p.pid] = e
+    return e
+
+
+def t31(d, scratch, runroot, variant):
+    T = "T31" + variant
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root)
+    notes, ok, rcs = {}, False, []
+    if variant in ("a", "d"):
+        ps = [live_fixture(d, T, "f%d" % i, code="import time; time.sleep(0.3)")
+              for i in range(1 if variant == "a" else 2)]
+        es = [adopt_or_hold(w, p, "fixture") for p in ps]
+        rcs = [reap(p, D_REAP) for p in ps]
+        w.refresh()
+        kinds = [v["kind"] for v in w.violations]
+        dead = [sum(1 for x in w.dead if x["gen"] == e["gen"]) for e in es]
+        notes = {"violations": kinds, "dead": dead}
+        ok = kinds == [] and dead == [1] * len(es) and all(e["exit"]["kind"] == "exited"
+                                                            for e in es)
+    elif variant in ("b", "c", "e"):
+        n = 5 if variant == "c" else 1
+        es = [unregistered_gone(w, d, T, "u%d" % i) for i in range(n)]
+        t0 = W.now()
+        w.refresh(enclosing=(t0 + 0.2) if variant == "e" else None)
+        took = W.now() - t0
+        kinds = [v["kind"] for v in w.violations]
+        notes = {"violations": kinds, "took_s": took}
+        bound = 0.2 + 0.2 if variant == "e" else W.SETTLE_S + 0.3
+        ok = kinds == ["exit-unobserved"] * n and took <= bound and \
+            all(w.gens[e["gen"]]["state"] == "unobserved" for e in es)
+    elif variant == "f":
+        p = live_fixture(d, T, "late", code="import time; time.sleep(0.2)")
+        e = adopt_or_hold(w, p, "fixture")
+        rcs = [reap(p, D_REAP)]
+        w.kq = StubKq([])
+        w.refresh(enclosing=W.now() + 0.2)
+        w.kq = StubKq([[FakeEv(p.pid, W.NOTE_EXIT | W.NOTE_EXITSTATUS, 0, udata=e["gen"])]])
+        w.step(0.0, W.now() + 0.5)
+        kinds = [v["kind"] for v in w.violations]
+        notes = {"violations": kinds, "late_exit": e.get("late_exit")}
+        ok = kinds == ["exit-unobserved"] and (e.get("late_exit") or {}).get("code") == 0 and \
+            sum(1 for x in w.dead if x["gen"] == e["gen"]) == 1 and \
+            w.gens[e["gen"]]["state"] == "retired" and e["exit"]["kind"] == "unobserved"
+    else:   # g: bounded event work
+        p = live_fixture(d, T, "noisy")
+        e = adopt_or_hold(w, p, "fixture")
+        u = unregistered_gone(w, d, T, "gone")
+        w.kq = StubKq([], forever=[FakeEv(p.pid, 0, udata=e["gen"])] * 200)
+        per_call = []
+        real_pp = w.process_pending
+
+        def counting(deadline, max_events=256):
+            n = real_pp(deadline, max_events)
+            per_call.append(n)
+            return n
+        w.process_pending = counting
+        t0 = W.now()
+        try:
+            w.refresh(enclosing=t0 + 0.5)
+            outcome = "returned"
+        except W.Hold:
+            outcome = "HOLD"
+        took = W.now() - t0
+        rcs = [reap(p, D_REAP)]
+        notes = {"outcome": outcome, "took_s": took, "max_per_call": max(per_call or [0])}
+        ok = took <= 0.5 + 0.5 and max(per_call or [0]) <= 256 and u is not None
+    labels = ["root"]
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if all(r in (0, -15) for r in rcs) else "rc-%r" % rcs},
+                  runroot, notes=notes)
+
+
+def t32(d, scratch, runroot):
+    """lsof_holders on fabricated outputs (F4): exact outcomes, rc/stdout/stderr distinct."""
+    T = "T32"
+
+    def runner(rc, out, err):
+        return lambda argv, env=None, timeout=None: (rc, out, err)
+
+    def timeout_runner(argv, env=None, timeout=None):
+        raise subprocess.TimeoutExpired(argv, timeout)
+    cases = {
+        "rc0_holders": (runner(0, "p11\ncbash\nf3\nn/x\np12\ncsh\nn/y\n", ""), "holders"),
+        "rc1_holders": (runner(1, "p13\ncpg\nn/z\n", ""), "holders"),
+        "rc1_empty": (runner(1, "", ""), "none"),
+        "rc1_stderr": (runner(1, "", "lsof: WARNING\n"), "hold"),
+        "rc2": (runner(2, "", ""), "hold"),
+        "malformed_p": (runner(0, "pX\nn/x\n", ""), "hold"),
+        "orphan_n": (runner(0, "n/x\np1\n", ""), "hold"),
+        "unknown_record": (runner(0, "p1\nz9\n", ""), "hold"),
+        "rc0_empty": (runner(0, "", ""), "hold"),
+        "timeout": (timeout_runner, "hold"),
+    }
+    out = {}
+    for name, (rn, want) in sorted(cases.items()):
+        r = W.lsof_holders("/x", runner=rn)
+        out[name] = {"outcome": r["outcome"], "rc": r["rc"], "stdout_bytes": r["stdout_bytes"],
+                     "stderr_bytes": r["stderr_bytes"], "pids": r["pids"], "want": want}
+    ok = all(v["outcome"] == v["want"] for v in out.values()) and \
+        out["rc0_holders"]["pids"] == [11, 12] and out["rc1_holders"]["pids"] == [13] and \
+        out["rc1_stderr"]["stderr_bytes"] > 0 and out["rc2"]["rc"] == 2
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL",
+                   {"fixtures": "not-applicable:injected runner"}, runroot, notes=out)
+
+
+def t34(d, scratch, runroot):
+    """F7 import control: in a registered disposable COPY of the two Python files (never the
+    reviewed worktree), running sink_selftest.py (which imports sink_watch) with -I -B and
+    with -I alone must leave no bytecode anywhere in the copy."""
+    T = "T34"
+    root = mkroot(d, scratch, T, "copy", ["sink_watch.py", "sink_selftest.py", "empty.txt"])
+    for name in ("sink_watch.py", "sink_selftest.py"):
+        with open(os.path.join(HERE, name), "rb") as f, open(root + "/" + name, "wb") as g:
+            g.write(f.read())
+    open(root + "/empty.txt", "w").close()
+    rcs = []
+    for flags in (["-I", "-B"], ["-I"]):
+        rc, _, _ = W.run([PY] + flags + [root + "/sink_selftest.py", "observed-class", "--file",
+                                         root + "/empty.txt"], env=W.TOOL_ENV, timeout=60)
+        rcs.append(rc)
+    found = [rel for rel, rec in W.walk(root) if "__pycache__" in rel or rel.endswith(".pyc")]
+    labels = ["copy"]
+    ok = rcs == [0, 0] and found == []
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+                  notes={"rcs": rcs, "bytecode": found})
+
+
+def t35(d, scratch, runroot):
+    """Capability gate (R1b, B2) on the pinned macOS/python: three EV_UDATA_SPECIFIC knotes
+    with DISTINCT udata on the SAME live pid. Removal oracle: EV_DELETE of the exact tuple
+    (pid, EVFILT_PROC, udata). Expected: deleting udata 103 while the process lives
+    succeeds (control) and its NOTE_EXIT never arrives; udata 101 and 102 each deliver
+    their own NOTE_EXIT with the exit status (independent attribution); after delivery,
+    while the process is still an unreaped zombie, EV_DELETE of 101 and of 102 fails with
+    ENOENT (removed). Anything else is a non-pass that returns the capability for review;
+    there is no pid-keyed fallback."""
+    T = "T35"
+    kq = select.kqueue()
+    p = start_fixture(d, T, "subject", "import sys; sys.stdin.readline()", stdin=subprocess.PIPE)
+    flags = select.KQ_EV_ADD | select.KQ_EV_ENABLE | W.KQ_EV_UDATA_SPECIFIC
+
+    def ev(u, fl):
+        return select.kevent(p.pid, filter=select.KQ_FILTER_PROC, flags=fl,
+                             fflags=W.PROC_FFLAGS, data=0, udata=u)
+
+    def delete(u):
+        try:
+            kq.control([ev(u, select.KQ_EV_DELETE | W.KQ_EV_UDATA_SPECIFIC)], 0, 0)
+            return "deleted"
+        except OSError as e:
+            return "errno-%d" % e.errno
+    out = {}
+    try:
+        kq.control([ev(101, flags), ev(102, flags), ev(103, flags)], 0, 0)
+        out["registered"] = True
+    except OSError as e:
+        out["registered"] = "errno-%d" % e.errno
+    out["delete_present_103"] = delete(103)
+    p.stdin.write(b"\n")
+    p.stdin.flush()
+    got, end = {}, W.now() + 5.0
+    while W.now() < end and len(got) < 2:
+        for e in kq.control(None, 16, 0.2):
+            if e.flags & select.KQ_EV_ERROR:
+                out.setdefault("ev_error", []).append(e.data)
+            elif e.ident == p.pid and e.fflags & W.NOTE_EXIT:
+                got.setdefault(e.udata, []).append(
+                    W.decode_status(e.data) if e.fflags & W.NOTE_EXITSTATUS else None)
+    out["exit_udata"] = sorted(got)
+    out["statuses"] = [[(x or {}).get("code") for x in got[u]] for u in sorted(got)]
+    out["delete_removed_101"] = delete(101)     # the zombie is not yet reaped
+    out["delete_removed_102"] = delete(102)
+    out["extra_events"] = len(kq.control(None, 16, 0.2))
+    rc = reap(p, D_REAP)
+    kq.close()
+    want_enoent = "errno-%d" % errno.ENOENT
+    ok = out["registered"] is True and out["delete_present_103"] == "deleted" and \
+        out["exit_udata"] == [101, 102] and out["statuses"] == [[0], [0]] and \
+        out["delete_removed_101"] == want_enoent and \
+        out["delete_removed_102"] == want_enoent and out["extra_events"] == 0 and \
+        "ev_error" not in out
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL",
+                   {"fixtures": "ok" if rc == 0 else "rc-%s" % rc}, runroot, notes=out)
+
+
+def t36(d, scratch, runroot, variant):
+    """Generation attribution (R1b): a, old EXIT queued then the same pid; b, EXEC for a
+    retired generation; c, unattributable events; d, healthy interleaving."""
+    T = "T36" + variant
+    root = mkroot(d, scratch, T, "root")
+    w = bare_watch(root)
+    notes, ok, rcs = {}, False, []
+    if variant == "a":
+        p = live_fixture(d, T, "old", code="import time; time.sleep(0.2)")
+        e = adopt_or_hold(w, p, "fixture")
+        rcs.append(reap(p, D_REAP))
+        real_kq = w.kq
+        w.kq = StubKq([])
+        w.refresh(enclosing=W.now())
+        refused = False
+        try:
+            w.register(p.pid)
+        except W.Hold:
+            refused = True
+        w.kq = real_kq                      # the REAL queued NOTE_EXIT of generation g1
+        w.step(0.5, W.now() + 1.0)
+        kinds = [v["kind"] for v in w.violations]
+        gens_for_pid = sorted(g for g, x in w.gens.items() if x["pid"] == p.pid)
+        notes = {"violations": kinds, "late_exit": e.get("late_exit"), "gens": gens_for_pid}
+        ok = refused and "pid-generation-unresolved" in kinds and "exit-unobserved" in kinds and \
+            (e.get("late_exit") or {}).get("kind") == "exited" and \
+            sum(1 for x in w.dead if x["gen"] == e["gen"]) == 1 and \
+            w.gens[e["gen"]]["state"] == "retired" and gens_for_pid[0] == e["gen"] and \
+            all(w.gens[g]["state"] in ("retired", "refused-gone") for g in gens_for_pid)
+    elif variant == "b":
+        p = live_fixture(d, T, "retired", code="import time; time.sleep(0.2)")
+        e = adopt_or_hold(w, p, "fixture")
+        rcs.append(reap(p, D_REAP))
+        w.step(0.5, W.now() + 1.0)
+        before = (e["exit"], len(w.dead))
+        w.handle(FakeEv(p.pid, W.NOTE_EXEC, udata=e["gen"]))
+        kinds = [v["kind"] for v in w.violations]
+        notes = {"violations": kinds}
+        ok = kinds == ["event-after-retirement"] and (e["exit"], len(w.dead)) == before
+    elif variant == "c":
+        p = live_fixture(d, T, "live")
+        e = adopt_or_hold(w, p, "fixture")
+        snapshot = json.dumps(W.entry_view(e), sort_keys=True, default=str)
+        for ev in (FakeEv(p.pid, W.NOTE_EXIT, udata=0), FakeEv(p.pid, W.NOTE_EXIT, udata=999999),
+                   FakeEv(p.pid + 1, W.NOTE_EXIT, udata=e["gen"])):
+            w.handle(ev)
+        kinds = [v["kind"] for v in w.violations]
+        rcs.append(reap(p, D_REAP))
+        notes = {"violations": kinds}
+        ok = kinds == ["event-unattributable"] * 3 and \
+            json.dumps(W.entry_view(e), sort_keys=True, default=str) == snapshot and \
+            p.pid not in [x["pid"] for x in w.dead]
+    else:
+        ps = [live_fixture(d, T, "f%d" % i, code="import time; time.sleep(0.%d)" % (2 + i))
+              for i in range(2)]
+        es = [adopt_or_hold(w, p, "fixture") for p in ps]
+        rcs = [reap(p, D_REAP) for p in ps]
+        run_watch_until(w, lambda: all(x["exit"] is not None for x in es), W.now() + 3.0)
+        kinds = [v["kind"] for v in w.violations]
+        notes = {"violations": kinds}
+        ok = kinds == [] and all(sum(1 for x in w.dead if x["gen"] == e["gen"]) == 1 and
+                                 e["exit"]["kind"] == "exited" for e in es)
+    labels = ["root"]
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if all(r == 0 for r in rcs) else "rc-%r" % rcs}, runroot,
+                  notes=notes)
+
+
+def t37(d, scratch, runroot):
+    """Locale provenance binding (F2/Q4) with an injected references runner: a reference
+    list without the owning output refuses; with it, the file and literal checks decide."""
+    T = "T37"
+    present = W.locale_binding("nix-store", runner=lambda argv, env=None, timeout=None:
+                               (0, W.LOCALE_OUT + "\n/nix/store/other\n", ""))
+    absent = W.locale_binding("nix-store", runner=lambda argv, env=None, timeout=None:
+                              (0, "/nix/store/other\n", ""))
+    erred = W.locale_binding("nix-store", runner=lambda argv, env=None, timeout=None:
+                             (1, W.LOCALE_OUT + "\n", "error\n"))
+    ok = present["references"] is True and absent["references"] is False and \
+        absent["ok"] is False and erred["references"] is False and erred["ok"] is False and \
+        present["ok"] == (present["file"] and present["literal"])
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL",
+                   {"fixtures": "not-applicable:injected runner"}, runroot,
+                   notes={"present": present, "absent": absent, "erred": erred})
 
 
 # ---------------------------------------------------------------- injections (T15a-c)
@@ -2210,6 +3214,17 @@ SYNTHETIC = {
     "T23c": lambda d, s, r: t23(d, s, r, "c"), "T23d": lambda d, s, r: t23(d, s, r, "d"),
     "T23e": lambda d, s, r: t23(d, s, r, "e"),
     "T24": t24, "T26a": t26a, "T26b": t26b, "T26c": t26c, "T27": t27,
+    "T30a": t30a, "T30b": t30b, "T30c": t30c, "T30d": t30d, "T30e": t30e, "T30f": t30f,
+    "T30g": t30g, "T30i": t30i, "T30j": t30j, "T30k": t30k, "T30l": t30l, "T30m": t30m,
+    "T30n": t30n, "T30o": t30o, "T30p": t30p,
+    "T31a": lambda d, s, r: t31(d, s, r, "a"), "T31b": lambda d, s, r: t31(d, s, r, "b"),
+    "T31c": lambda d, s, r: t31(d, s, r, "c"), "T31d": lambda d, s, r: t31(d, s, r, "d"),
+    "T31e": lambda d, s, r: t31(d, s, r, "e"), "T31f": lambda d, s, r: t31(d, s, r, "f"),
+    "T31g": lambda d, s, r: t31(d, s, r, "g"),
+    "T32": t32, "T34": t34, "T35": t35,
+    "T36a": lambda d, s, r: t36(d, s, r, "a"), "T36b": lambda d, s, r: t36(d, s, r, "b"),
+    "T36c": lambda d, s, r: t36(d, s, r, "c"), "T36d": lambda d, s, r: t36(d, s, r, "d"),
+    "T37": t37,
 }
 
 
