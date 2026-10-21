@@ -484,13 +484,59 @@ def netstat_listen(port):
     return hits
 
 
+def lsof_groups(out):
+    """The exact `lsof -F pcn` grammar (F4, review 930cad6): one or more process groups,
+    each p<pid> (decimal > 0), then exactly one c<command> (non-empty), then one or more
+    file pairs f<fd> (non-empty) followed by exactly one n<name> (non-empty). Returns
+    (pids, None) or (None, why); anything else (empty values, orphans, repeats, unknown
+    tags, a group without files, a trailing partial pair) is a malformed group."""
+    pids, state = [], "start"     # start | need-c | need-f | need-n | after-n
+    for line in out.split("\n"):
+        if line == "":
+            continue
+        tag, val = line[:1], line[1:]
+        if tag not in ("p", "c", "f", "n"):
+            return None, "unknown-record"
+        if tag == "p":
+            if state not in ("start", "after-n"):
+                return None, "malformed-group"
+            if not val.isdigit() or int(val) <= 0:
+                return None, "malformed-p"
+            pids.append(int(val))
+            state = "need-c"
+        elif tag == "c":
+            if state != "need-c":
+                return None, "orphan-c" if state == "start" else "malformed-group"
+            if val == "":
+                return None, "malformed-c"
+            state = "need-f"
+        elif tag == "f":
+            if state not in ("need-f", "after-n"):
+                return None, "orphan-f" if state == "start" else "malformed-group"
+            if val == "":
+                return None, "malformed-f"
+            state = "need-n"
+        else:
+            if state != "need-n":
+                return None, "orphan-n" if state == "start" else "malformed-group"
+            if val == "":
+                return None, "malformed-n"
+            state = "after-n"
+    if state == "start":
+        return None, "no-pid-records"
+    if state != "after-n":
+        return None, "incomplete-group"
+    return pids, None
+
+
 def lsof_holders(path, runner=None, timeout=180):
-    """F4 (reviews 3c0acb06, 04deddd8): `lsof -F pcn +D path` as a receipt with rc, stdout
-    and stderr kept distinct, and complete p/c/n record groups parsed. Outcomes:
-    holders (rc 0 or 1, empty stderr, every line in a well-formed group, at least one pid);
-    none (rc 1, empty stdout, empty stderr: the documented no-match case); otherwise HOLD:
-    rc 0 with empty stdout, any stderr, any other rc, an orphan/malformed/unknown record,
-    or a timeout. Holder pids are existence evidence only, never signal authority."""
+    """F4 (reviews 3c0acb06, 04deddd8, 930cad6): `lsof -F pcn +D path` as a receipt with
+    rc, stdout and stderr kept distinct and the output parsed by the exact group grammar
+    (lsof_groups). Outcomes: holders (rc 0 or 1, empty stderr, every record in a complete
+    p/c/(f,n)+ group); none (rc 1, empty stdout, empty stderr: the documented no-match
+    case); otherwise HOLD: rc 0 with empty stdout, any stderr, any other rc, any malformed
+    or incomplete group, or a timeout. Holder pids are existence evidence only, never
+    signal authority."""
     argv = ["/usr/sbin/lsof", "-n", "-P", "-F", "pcn", "+D", path]
     try:
         rc, out, err = (runner or run)(argv, env=TOOL_ENV, timeout=timeout)
@@ -507,23 +553,9 @@ def lsof_holders(path, runner=None, timeout=180):
         return dict(rec, outcome="hold", why="rc")
     if out == "":
         return dict(rec, outcome="hold", why="rc0-empty")
-    pids, cur = [], None
-    for line in out.split("\n"):
-        if line == "":
-            continue
-        tag, val = line[:1], line[1:]
-        if tag == "p":
-            if not val.isdigit() or int(val) <= 0:
-                return dict(rec, outcome="hold", why="malformed-p")
-            cur = int(val)
-            pids.append(cur)
-        elif tag in ("c", "f", "n"):
-            if cur is None:
-                return dict(rec, outcome="hold", why="orphan-%s" % tag)
-        else:
-            return dict(rec, outcome="hold", why="unknown-record")
-    if not pids:
-        return dict(rec, outcome="hold", why="no-pid-records")
+    pids, why = lsof_groups(out)
+    if why is not None:
+        return dict(rec, outcome="hold", why=why)
     return dict(rec, outcome="holders", why="ok", pids=sorted(set(pids)))
 
 
@@ -1274,8 +1306,8 @@ def sh_forms(m):
     exec.c:310/330/352/360 find_other_exec "\"%s\" -V" via popen, called at initdb.c:2652
     and pg_ctl.c:952; collationcmds.c:868 + the nixpkgs locale patch "<LOCALE_BIN> -a" via
     fd.c:2747/2769 popen, from initdb.c:1781's single-user session. [A] popen()/system()
-    pass argv0 "sh" (macOS libc; T30g measures): a mismatch is a violation, never a
-    broader allowance."""
+    pass argv0 "sh" (macOS libc): an UNMEASURED premise until T30g has run (T30g measures
+    the shell/popen vectors only); a mismatch is a violation, never a broader allowance."""
     P = PG_BIN + "/postgres"
     rt, pgd, port = m["runtime"], m["pgdata"], str(int(m["port"]))
     opts = "-c unix_socket_directories=%s/postgres -c listen_addresses= -p %s" % (rt, port)
@@ -1374,8 +1406,10 @@ def h_closure(m):
 def script_vectors(m):
     """Exact argv vectors of the closure-bound generated scripts (r2 1.4), from the
     verified artifacts.json: the shebang interpreter tokens plus the script path, and the
-    devenv-tasks `bash -c <task_cmd>` wrapper form [A: measured from T4a ps strings; any
-    other vector is "shell", never a script role]."""
+    devenv-tasks `bash -c <task_cmd>` wrapper form. [A] UNMEASURED premise: the wrapper
+    vector comes from T4a's ps DISPLAY strings, not from a KERN_PROCARGS2 vector, and T30g
+    does not measure it; any eventual measurement must bind to actual VALID snapshots or
+    source. Any other vector is "shell", never a script role."""
     try:
         art = jload(m["evidence"] + "/artifacts.json")
         files = art["files"]
@@ -3342,25 +3376,62 @@ def report(evid, head):
 
 # ---------------------------------------------------------------- CLI
 LIVE_STACK_KINDS = ("watcher-exited-bounded", "launcher-not-reaped")
+LIVE_STACK_CONTEXTS = ("stop-failed", "watcher-running-at-deadline", "watcher-nonzero",
+                       "barrier-failed", "exit-path-stop-incomplete", "exit-path-left-running")
 RUNBOOK = "test/postgres_log_settings/README.md (Recovery runbook)"
 
 
-def live_stack_record(state_path, manifest_path=None, registries=(), label="observed"):
-    """F5 (reviews 3c0acb06, 04deddd8): a record of a stack that may still be live, for a
-    case-specific review. Observation only: it sends no signal, issues no ctl and cleans
-    nothing, and it carries NO recovery authority. Last-observed identities (the state
-    file) are kept separate from fresh kernel reads (alive / gone / reused / unknown, and
-    live children never recorded in the state). A missing or unreadable state is never a
-    clean empty set: it makes the record required with every fresh fact unknown."""
-    rec = {"schema": "5b-live-stack-left/1", "label": label, "t": now(), "wall": wall(),
+def _ident_ok(x):
+    return isinstance(x, dict) and isinstance(x.get("pid"), int) and x["pid"] > 0 and \
+        isinstance(x.get("birth_us"), int) and not isinstance(x["pid"], bool)
+
+
+def fresh_identity(pid, birth_us):
+    try:
+        cur = bsdinfo(int(pid))
+    except (Hold, TypeError, ValueError):
+        return "unknown"
+    if cur is None:
+        return "gone"
+    if birth_us is None:
+        return "alive-birth-unknown"
+    return "alive-same-birth" if cur["birth_us"] == birth_us else "pid-reused-by-another-process"
+
+
+def live_stack_record(state_path, manifest_path=None, registries=(), label="observed",
+                      context=None, watcher=None):
+    """F5 (reviews 3c0acb06, 04deddd8; R5 of the 930cad6 review): a record of a stack that
+    may still be live, for a case-specific review. Observation only: it sends no signal,
+    issues no ctl and cleans nothing, and it carries NO recovery authority.
+    - A failure `context` from the caller (failed stop, watcher still running or non-zero,
+      failed barrier, exit path) REQUIRES a record even when the state looks clean.
+    - The `watcher` identity ({pid, birth_us}) is re-read fresh.
+    - Last-observed identities (the state file) are kept apart from fresh kernel reads.
+    - A missing or unreadable state, a malformed live or violation entry, and an unreadable
+      or malformed registry are UNKNOWN, never an empty set: each requires the record."""
+    rec = {"schema": "5b-live-stack-left/2", "label": label, "t": now(), "wall": wall(),
            "authority": "none: observation only; disposition needs a case-specific review",
-           "runbook": RUNBOOK, "state_path": state_path}
+           "runbook": RUNBOOK, "state_path": state_path, "context": context}
     reasons, live, kinds = [], None, []
+    if context is not None:
+        reasons.append("failure context: %s" % (context if context in LIVE_STACK_CONTEXTS
+                                                 else "unrecognized"))
+    if watcher is not None:
+        wp = watcher.get("pid") if isinstance(watcher, dict) else None
+        wb = watcher.get("birth_us") if isinstance(watcher, dict) else None
+        wf = fresh_identity(wp, wb) if isinstance(wp, int) else "unknown"
+        rec["watcher"] = {"pid": wp, "birth_us": wb, "fresh": wf}
+        if wf != "gone":
+            reasons.append("watcher %s" % wf)
     try:
         st = jload(state_path)
         live, viol = st["live"], st["violations"]
         if not isinstance(live, list) or not isinstance(viol, list):
             raise ValueError("state shape")
+        bad_v = [i for i, v in enumerate(viol) if not isinstance(v, dict) or
+                 not isinstance(v.get("kind"), str)]
+        if bad_v:
+            reasons.append("malformed violation entries %r: kinds UNKNOWN" % bad_v)
         kinds = [v.get("kind") for v in viol if isinstance(v, dict)]
         rec["state"], rec["state_t"] = "read", st.get("t")
     except FileNotFoundError:
@@ -3369,35 +3440,32 @@ def live_stack_record(state_path, manifest_path=None, registries=(), label="obse
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
         rec["state"] = "unreadable:%s" % type(e).__name__
         reasons.append("state unreadable: live set UNKNOWN, not empty")
+        live = None
     reasons.extend(k for k in LIVE_STACK_KINDS if k in kinds)
     if live is None:
         rec["last_observed"] = None
         rec["fresh"] = "unknown: no last-observed set to check"
     else:
-        last = []
-        for e in live:
-            if isinstance(e, dict):
+        last, malformed = [], []
+        for i, e in enumerate(live):
+            if _ident_ok(e):
                 last.append({k: e.get(k) for k in ("pid", "birth_us", "role", "gen")})
+            else:
+                malformed.append(i)
         rec["last_observed"] = {"source": "state file live set", "t": rec.get("state_t"),
-                                "identities": last}
+                                "identities": last, "malformed_entries": malformed}
+        if malformed:
+            reasons.append("malformed live entries %r: identities UNKNOWN" % malformed)
         if last:
             reasons.append("last-observed live set non-empty (%d)" % len(last))
         fresh, unrecorded, known = [], [], {x["pid"] for x in last}
         for x in last:
+            f = fresh_identity(x["pid"], x["birth_us"])
+            fresh.append(dict(x, fresh=f))
+            if f != "alive-same-birth":
+                continue
             try:
-                cur = bsdinfo(int(x["pid"]))
-            except (Hold, TypeError, ValueError):
-                fresh.append(dict(x, fresh="unknown"))
-                continue
-            if cur is None:
-                fresh.append(dict(x, fresh="gone"))
-                continue
-            if cur["birth_us"] != x["birth_us"]:
-                fresh.append(dict(x, fresh="pid-reused-by-another-process"))
-                continue
-            fresh.append(dict(x, fresh="alive-same-birth"))
-            try:
-                for k in child_pids(int(x["pid"])):
+                for k in child_pids(x["pid"]):
                     if k in known:
                         continue
                     kc = bsdinfo(k)
@@ -3421,19 +3489,33 @@ def live_stack_record(state_path, manifest_path=None, registries=(), label="obse
     fixtures = []
     for rp in registries:
         try:
-            for f in jload(rp)["fixtures"]:
-                ident_ = f.get("identity") or {}
-                if "birth_us" not in ident_:
-                    continue
-                cur = bsdinfo(int(ident_["pid"]))
-                if cur is not None and cur["birth_us"] == ident_["birth_us"]:
-                    fixtures.append({"registry": rp, "test": f["test"], "label": f["label"],
-                                     "pid": ident_["pid"], "birth_us": ident_["birth_us"]})
-        except (OSError, ValueError, KeyError, TypeError, Hold) as e:
-            fixtures.append({"registry": rp, "unreadable": type(e).__name__})
-    rec["registered_fixtures_alive"] = fixtures
+            entries = jload(rp)["fixtures"]
+            if not isinstance(entries, list):
+                raise ValueError("registry shape")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            fixtures.append({"registry": rp, "unknown": "unreadable:%s" % type(e).__name__})
+            continue
+        for i, f in enumerate(entries):
+            ident_ = f.get("identity") if isinstance(f, dict) else None
+            if isinstance(ident_, dict) and "path" in ident_ and "birth_us" not in ident_:
+                continue                    # a path fixture: not a process
+            if ident_ is None and isinstance(f, dict) and f.get("kind") != "proc":
+                continue                    # a non-process intent without identity yet
+            if not _ident_ok(ident_):
+                fixtures.append({"registry": rp, "index": i, "unknown": "malformed or "
+                                 "missing process identity"})
+                continue
+            fr = fresh_identity(ident_["pid"], ident_["birth_us"])
+            if fr != "gone":
+                fixtures.append({"registry": rp, "test": f.get("test"), "label": f.get("label"),
+                                 "pid": ident_["pid"], "birth_us": ident_["birth_us"],
+                                 "fresh": fr})
+    rec["registered_fixtures"] = fixtures
     if any("pid" in f for f in fixtures):
-        reasons.append("registered fixtures alive (%d)" % sum(1 for f in fixtures if "pid" in f))
+        reasons.append("registered fixtures alive or unknown (%d)" %
+                       sum(1 for f in fixtures if "pid" in f))
+    if any("unknown" in f for f in fixtures):
+        reasons.append("registry entries UNKNOWN (%d)" % sum(1 for f in fixtures if "unknown" in f))
     rec["reasons"] = reasons
     rec["required"] = bool(reasons)
     return rec
@@ -3604,9 +3686,17 @@ def main(argv):
             return EXIT_OK
         if cmd == "live-stack-left":
             # F5: decides and records only; never signals, stops or cleans (exit 0 either way)
+            watcher = None
+            if "watcher_pid" in a:
+                try:
+                    watcher = {"pid": int(a["watcher_pid"]),
+                               "birth_us": int(a["watcher_birth_us"])
+                               if a.get("watcher_birth_us") not in (None, True, "") else None}
+                except ValueError:
+                    watcher = {"pid": None, "birth_us": None}
             rec = live_stack_record(a["state"], a.get("manifest"),
                                     [x for x in a.get("registries", "").split(",") if x],
-                                    a.get("label", "observed"))
+                                    a.get("label", "observed"), a.get("context"), watcher)
             if rec["required"]:
                 if os.path.lexists(a["out"]):
                     raise Hold("live-stack record %s already exists" % a["out"])
