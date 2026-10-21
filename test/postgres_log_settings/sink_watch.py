@@ -16,6 +16,7 @@ connects to a database and never reads a file outside the manifest's
 owned roots, except the store paths it validates.
 """
 
+import collections
 import ctypes
 import ctypes.util
 import errno
@@ -119,7 +120,6 @@ TIMEOUTS = {
 }
 
 # Backend process title: "postgres: <user> <db> [local] ..." or an address.
-BACKEND_RE = re.compile(r"postgres: \S+ \S+ (\[local\]|\d+\.\d+\.\d+\.\d+)")
 # /bin/sh and its macOS target, used by pg_ctl and initdb (deviation D-1).
 SYSTEM_SH = {"/bin/sh", os.path.realpath("/private/var/select/sh")}
 
@@ -299,6 +299,7 @@ def child_pids(ppid):
 
 def pidpath(pid):
     buf = ctypes.create_string_buffer(PROC_PIDPATHINFO_MAXSIZE)
+    ctypes.set_errno(0)
     n = libproc().proc_pidpath(int(pid), buf, PROC_PIDPATHINFO_MAXSIZE)
     if n <= 0:
         e = ctypes.get_errno()
@@ -308,19 +309,131 @@ def pidpath(pid):
     return buf.value.decode("utf-8", "replace")
 
 
-def proc_args(pid):
-    """Process title/args (`ps -ww -o args=`); None if gone."""
-    rc, out, _ = run(["/bin/ps", "-ww", "-o", "args=", "-p", str(pid)], env=TOOL_ENV)
+# ---------------------------------------------------------------- KERN_PROCARGS2 (T4a repair)
+# r2 1.1/1.3 and r3 3.2-3.3 (reviews 3c0acb06, 04deddd8, 7e9a0832 B3/B4): one sysctl copy of
+# the target's argument area. SDK sys/sysctl.h: CTL_KERN 1, KERN_ARGMAX 8, KERN_PROCARGS2 49.
+# The layout premise H-pad (argv[0] at 4 + align_up(L + 1, ARGV_ALIGN) where L =
+# len(exec_path)) is an UNVERIFIED hypothesis gated by T30m; never auto-detected at runtime.
+CTL_KERN, KERN_ARGMAX, KERN_PROCARGS2 = 1, 8, 49
+ARGV_ALIGN = 8
+ARGC_MAX = 4096
+ARGMAX_RANGE = (4096, 16 << 20)
+_libc = None
+_argmax = None
+
+
+def libc():
+    global _libc
+    if _libc is None:
+        name = ctypes.util.find_library("c")
+        if not name:
+            raise Hold("libc not found")
+        _libc = ctypes.CDLL(name, use_errno=True)
+        _libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                                 ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p,
+                                 ctypes.c_size_t]
+        _libc.sysctl.restype = ctypes.c_int
+    return _libc
+
+
+def kern_argmax():
+    global _argmax
+    if _argmax is None:
+        mib = (ctypes.c_int * 2)(CTL_KERN, KERN_ARGMAX)
+        val = ctypes.c_int(0)
+        size = ctypes.c_size_t(ctypes.sizeof(val))
+        ctypes.set_errno(0)
+        if libc().sysctl(mib, 2, ctypes.byref(val), ctypes.byref(size), None, 0) != 0:
+            raise Hold("sysctl kern.argmax errno=%d" % ctypes.get_errno())
+        if size.value != ctypes.sizeof(val) or not ARGMAX_RANGE[0] <= val.value <= ARGMAX_RANGE[1]:
+            raise Hold("kern.argmax implausible")
+        _argmax = val.value
+    return _argmax
+
+
+def align_up(x, a):
+    return (x + a - 1) // a * a
+
+
+def argv_meta(raw_args):
+    """Metadata only (B4, Q4): argc, element lengths and a sha256 of the NUL-joined bytes.
+    It may be derived from ambiguous argument-area bytes; it is no proof that no
+    environment data was read, and it never carries content."""
+    return {"argc": len(raw_args), "lengths": [len(x) for x in raw_args],
+            "sha256": sha256_bytes(b"\0".join(raw_args))}
+
+
+def parse_procargs(data, n, cap):
+    """Closed parse of a KERN_PROCARGS2 buffer under H-pad. Never skips NULs heuristically:
+    exactly the H-pad padding must be NUL, then exactly argc NUL-terminated strings are read
+    (an empty argument, including an empty argv[0], is preserved, not shifted). States:
+    OK, UNSUPPORTED (padding not as H-pad predicts), UNREPRESENTABLE (strict UTF-8 fails),
+    MALFORMED (short, truncated, out of bounds). Environment bytes are never parsed."""
+    out = {"status": "MALFORMED", "exec_path": None, "argv": None, "meta": None}
+    if not isinstance(data, (bytes, bytearray)) or n < 6 or n >= cap or len(data) < n:
+        return out
+    argc = int.from_bytes(bytes(data[0:4]), sys.byteorder, signed=True)
+    if not 1 <= argc <= ARGC_MAX:
+        return out
+    i = data.find(b"\0", 4, n)
+    if i < 0 or i == 4 or i - 4 >= PROC_PIDPATHINFO_MAXSIZE:
+        return out
+    try:
+        out["exec_path"] = bytes(data[4:i]).decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        out["exec_path"] = None
+        return out
+    start = 4 + align_up(i - 4 + 1, ARGV_ALIGN)
+    if start > n:
+        return out
+    if any(data[i + 1:start]):
+        out["status"] = "UNSUPPORTED"
+        return out
+    pos, raw = start, []
+    for _ in range(argc):
+        j = data.find(b"\0", pos, n)
+        if j < 0:
+            return out
+        raw.append(bytes(data[pos:j]))
+        pos = j + 1
+    out["meta"] = argv_meta(raw)
+    try:
+        out["argv"] = [x.decode("utf-8", "strict") for x in raw]
+        out["status"] = "OK"
+    except UnicodeDecodeError:
+        out["status"] = "UNREPRESENTABLE"
+    return out
+
+
+def procargs(pid, birth_us, reader=None):
+    """`KERN_PROCARGS2` for the tracked identity (pid, birth_us). EINVAL/ESRCH are GONE only
+    after re-proving the identity gone (bsdinfo None or another birth); with the same birth
+    alive they are HOLD, as is every other errno. `reader` is the T30b injection seam."""
+    cap = kern_argmax() + 4096
+    if reader is not None:
+        rc, err, data, n = reader(pid, cap)
+    else:
+        buf = ctypes.create_string_buffer(cap)
+        size = ctypes.c_size_t(cap)
+        mib = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, int(pid))
+        ctypes.set_errno(0)
+        rc = libc().sysctl(mib, 3, buf, ctypes.byref(size), None, 0)
+        err, data, n = ctypes.get_errno(), buf.raw, size.value
     if rc != 0:
-        return None
-    return out.strip()
+        if err in (errno.EINVAL, errno.ESRCH):
+            cur = bsdinfo(pid)
+            if cur is None or cur["birth_us"] != birth_us:
+                return {"status": "GONE", "exec_path": None, "argv": None, "meta": None}
+            raise Hold("procargs(%d) errno %d for the live tracked identity" % (pid, err))
+        raise Hold("procargs(%d) errno %d" % (pid, err))
+    return parse_procargs(data, n, cap)
 
 
 def proc_cwd(pid):
     rc, out, err = run(["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
                        env=TOOL_ENV)
-    if rc not in (0, 1):
-        raise Hold("lsof cwd pid %d rc=%d" % (pid, rc))
+    if rc not in (0, 1) or err != "":
+        raise Hold("lsof cwd pid %d rc=%d stderr %d bytes" % (pid, rc, len(err)))
     for line in out.splitlines():
         if line.startswith("n"):
             return line[1:]
@@ -364,16 +477,60 @@ def netstat_listen(port):
     return hits
 
 
+def lsof_holders(path, runner=None, timeout=180):
+    """F4 (reviews 3c0acb06, 04deddd8): `lsof -F pcn +D path` as a receipt with rc, stdout
+    and stderr kept distinct, and complete p/c/n record groups parsed. Outcomes:
+    holders (rc 0 or 1, empty stderr, every line in a well-formed group, at least one pid);
+    none (rc 1, empty stdout, empty stderr: the documented no-match case); otherwise HOLD:
+    rc 0 with empty stdout, any stderr, any other rc, an orphan/malformed/unknown record,
+    or a timeout. Holder pids are existence evidence only, never signal authority."""
+    argv = ["/usr/sbin/lsof", "-n", "-P", "-F", "pcn", "+D", path]
+    try:
+        rc, out, err = (runner or run)(argv, env=TOOL_ENV, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"outcome": "hold", "why": "timeout", "rc": None, "stdout_bytes": 0,
+                "stderr_bytes": 0, "pids": []}
+    rec = {"rc": rc, "stdout_bytes": len(out.encode("utf-8")),
+           "stderr_bytes": len(err.encode("utf-8")), "pids": []}
+    if err != "":
+        return dict(rec, outcome="hold", why="stderr")
+    if rc == 1 and out == "":
+        return dict(rec, outcome="none", why="rc1-empty")
+    if rc not in (0, 1):
+        return dict(rec, outcome="hold", why="rc")
+    if out == "":
+        return dict(rec, outcome="hold", why="rc0-empty")
+    pids, cur = [], None
+    for line in out.split("\n"):
+        if line == "":
+            continue
+        tag, val = line[:1], line[1:]
+        if tag == "p":
+            if not val.isdigit() or int(val) <= 0:
+                return dict(rec, outcome="hold", why="malformed-p")
+            cur = int(val)
+            pids.append(cur)
+        elif tag in ("c", "f", "n"):
+            if cur is None:
+                return dict(rec, outcome="hold", why="orphan-%s" % tag)
+        else:
+            return dict(rec, outcome="hold", why="unknown-record")
+    if not pids:
+        return dict(rec, outcome="hold", why="no-pid-records")
+    return dict(rec, outcome="holders", why="ok", pids=sorted(set(pids)))
+
+
 def open_handles_under(path):
-    """Processes with any open file under `path` (lsof +D). Hold on any lsof error."""
-    rc, out, err = run(["/usr/sbin/lsof", "-n", "-P", "-F", "pcn", "+D", path], env=TOOL_ENV,
-                       timeout=180)
-    if rc == 1 and not out.strip() and not err.strip():
+    """Processes with any open file under `path`. HOLD unless lsof's result is the exact
+    no-match case or well-formed holder records; holders are returned for the caller to
+    refuse on ("open handles: [pids]"), never treated as none."""
+    r = lsof_holders(path)
+    if r["outcome"] == "none":
         return []
-    if rc == 0 and not err.strip():
-        pids = sorted({int(l[1:]) for l in out.splitlines() if l.startswith("p")})
-        return pids
-    raise Hold("lsof +D %s rc=%d err=%r" % (path, rc, err.strip()[:200]))
+    if r["outcome"] == "holders":
+        return r["pids"]
+    raise Hold("lsof +D %s: %s (rc=%r, stdout %d bytes, stderr %d bytes)" % (
+        path, r["why"], r["rc"], r["stdout_bytes"], r["stderr_bytes"]))
 
 
 def writable_fds(pid):
@@ -661,6 +818,27 @@ def json_value_line(v):
     return "'" + str(v).replace("'", "''") + "'"
 
 
+def locale_binding(nix_store, runner=None):
+    """F2 / Q4 (reviews 3c0acb06, 04deddd8): the pinned locale program is bound by (i) its
+    owning output among the pinned postgresql output's references, (ii) the exact relative
+    path bin/locale as a regular, non-symlink file with the reviewed sha256, and (iii) the
+    exact literal "<LOCALE_BIN> -a" in the pinned postgres binary. Each check is recorded;
+    any failure is a provenance problem (refusal before launch)."""
+    chk = {"references": False, "file": False, "literal": False}
+    try:
+        rc, out, err = (runner or run)([nix_store, "--query", "--references", PKG["postgresql"]],
+                                       env=TOOL_ENV, timeout=120)
+        chk["references"] = rc == 0 and err == "" and LOCALE_OUT in out.split("\n")
+        st = os.lstat(LOCALE_BIN)
+        chk["file"] = stat.S_ISREG(st.st_mode) and sha256_file_nofollow(LOCALE_BIN) == LOCALE_SHA256
+        with open(PG_BIN + "/postgres", "rb") as f:
+            chk["literal"] = f.read().count((LOCALE_BIN + " -a").encode()) == 1
+    except (OSError, subprocess.SubprocessError) as e:
+        chk["error"] = type(e).__name__
+    chk["ok"] = chk["references"] and chk["file"] and chk["literal"]
+    return chk
+
+
 def provenance_check(m, a, ref):
     """r2 6.1/6.2: package equality, normalized semantic diff with only reviewed deltas."""
     problems = []
@@ -702,6 +880,9 @@ def provenance_check(m, a, ref):
         problems.append(("ready_notify", a["task_ready_notify"]))
     if a["has_log_configuration"]:
         problems.append(("yaml_log_configuration_present", True))
+    lb = a.get("locale_binding")
+    if not isinstance(lb, dict) or lb.get("ok") is not True:
+        problems.append(("locale_binding", lb))
     return problems
 
 
@@ -1029,45 +1210,113 @@ ROLE_SIGNALLABLE = ("launcher", "process-compose", "devenv-tasks")
 TRIPWIRE_ROLES = ("launcher", "process-compose", "devenv-tasks", "postmaster-final", "pg-logger")
 TRIPWIRE_PERIOD = 5.0
 
+# T4a repair (proposals ad7b84a3, r2 9ef7c250, r3 13341fd6; reviews 3c0acb06, 04deddd8, 7e9a0832).
+KQ_EV_UDATA_SPECIFIC = 0x0100   # SDK sys/event.h:150 "unique kevent per udata value"
+PENDING_CAP = 4096              # B1: bound on the TOTAL pending raw event queue
+FENCE_BATCH = 256
+FENCE_CAP = 4096
+SNAPSHOT_RESOLVE_S = 2.0        # per unresolved obligation, never reset by a new event (B1)
+ITER_SLICE_S = 0.25
+SETTLE_S = 1.0                  # one shared budget per refresh call (R2)
+GEN_MAX = (1 << 63) - 1
+UNRESOLVED_GEN = ("provisional", "live", "unobserved", "unbound-gone")
+POSTMASTER_ROLES = ("postmaster-final", "postmaster-init", "postmaster-identified")
+NONFORKING_ROLES = ("pg-version-probe", "pg-locale")
+# PostgreSQL 18.6 titles on Darwin (ps_status.c:310 PROGRAM_NAME_PREFIX "postgres: ",
+# fixed part "%s " with an empty cluster_name; miscinit.c:299-300 B_LOGGER "logger";
+# ps_status.c:55-66 PS_USE_CLOBBER_ARGV with NUL padding). The exact logger title and the
+# anchored backend rule are source-bound; their runtime form is UNVERIFIED (T30h).
+LOGGER_TITLE = "postgres: logger "
+BACKEND_TITLE_RE = re.compile(r"^postgres: \S+ \S+ (\[local\]|\d+\.\d+\.\d+\.\d+)( |$)")
+# The pinned Darwin locale program (generic.nix:367-375, locale-binary-path.patch;
+# collationcmds.c:868); bound by provenance_check (owning output, path, sha256, literal).
+LOCALE_OUT = "/nix/store/sqsb3m7r3x2dk0cpaqgynffi489dsdhq-adv_cmds-237"
+LOCALE_BIN = LOCALE_OUT + "/bin/locale"
+LOCALE_SHA256 = "6e917f7a3934307f427a1dcf44344c325e4dc7582b6ffeb233d842d50c30404f"
+
+
+def _vec(*items):
+    """An exact argv pattern: str items match exactly, compiled regexes fully."""
+    return list(items)
+
+
+def vec_match(pattern, argv):
+    if argv is None or len(pattern) != len(argv):
+        return False
+    for p, a in zip(pattern, argv):
+        if isinstance(p, str):
+            if p != a:
+                return False
+        elif not p.fullmatch(a):
+            return False
+    return True
+
 
 def sh_forms(m):
-    """The four source-bound /bin/sh command forms allowed in the owned init phase
-    (deviation D-1 as replaced by amendment R2). Sources: pinned PostgreSQL 18.6,
-    pg_ctl.c:486-497 (execl("/bin/sh", "/bin/sh", "-c", cmd)), 2278-2290 (-D), 2306-2317 (-o);
-    initdb.c:1231-1252 (system, --check), 1612-1617 (popen, --boot), 3112-3115 (popen,
-    --single); port.h:162 (DEVNULL). Every literal path and manifest value is escaped.
-    [A] popen()/system() pass argv0 "sh" (macOS libc), and the WAL segment is the 16 MiB
-    default: a mismatch is a violation and HOLD for review, never a broader allowance."""
+    """The source-bound /bin/sh forms allowed in the owned init phase, as exact argv
+    VECTORS (r2 1.4: the -c command is ONE argument). Sources, pinned PostgreSQL 18.6:
+    pg_ctl.c:486-497 execl("/bin/sh","/bin/sh","-c",cmd), 2278-2290 (-D), 2306-2317 (-o);
+    initdb.c:1231-1252 system --check, 1612-1617 popen --boot, 3112-3115 popen --single;
+    exec.c:310/330/352/360 find_other_exec "\"%s\" -V" via popen, called at initdb.c:2652
+    and pg_ctl.c:952; collationcmds.c:868 + the nixpkgs locale patch "<LOCALE_BIN> -a" via
+    fd.c:2747/2769 popen, from initdb.c:1781's single-user session. [A] popen()/system()
+    pass argv0 "sh" (macOS libc; T30g measures): a mismatch is a violation, never a
+    broader allowance."""
     P = PG_BIN + "/postgres"
-    rt, pgd, port = m["runtime"], m["pgdata"], int(m["port"])
-    opts = "-c unix_socket_directories=%s/postgres -c listen_addresses= -p %d" % (rt, port)
+    rt, pgd, port = m["runtime"], m["pgdata"], str(int(m["port"]))
+    opts = "-c unix_socket_directories=%s/postgres -c listen_addresses= -p %s" % (rt, port)
+    initdb_parent = {"parent_exe": PG_BIN + "/initdb",
+                     "parent_argv": _vec("initdb", "--locale=C", "--encoding=UTF8")}
+    pgctl_parent = {"parent_exe": PG_BIN + "/pg_ctl",
+                    "parent_argv": _vec("pg_ctl", "-D", pgd, "-w", "start", "-o", opts)}
+    single = _vec(P, "--single", "-F", "-O", "-j", "-c", "search_path=pg_catalog", "-c",
+                  "exit_on_error=true", "-c", "log_checkpoints=false", "template1")
+    single_parent = {"parent_exe": P, "parent_argv": single, "parent_role": "pg-bootstrap"}
 
-    def exact(s):
-        return re.compile("^" + re.escape(s) + "$")
+    def form(parent, argv0, cmd, exec_image, exec_argv, exec_role):
+        f = dict(parent, child_argv0=argv0, exec_image=exec_image, exec_argv=exec_argv,
+                 exec_role=exec_role)
+        f["child_cmd"] = cmd if not isinstance(cmd, str) else re.compile(re.escape(cmd))
+        return f
 
-    initdb = {"parent_exe": PG_BIN + "/initdb", "parent_args": "initdb --locale=C --encoding=UTF8"}
+    check_cmd = re.compile(
+        re.escape('"%s" --check -F -c log_checkpoints=false  -c max_connections=' % P) + r"[0-9]+" +
+        re.escape(" -c autovacuum_worker_slots=") + r"[0-9]+" + re.escape(" -c shared_buffers=") +
+        r"[0-9]+" + re.escape(" -c dynamic_shared_memory_type=") + r"(posix|sysv)" +
+        re.escape(' < "/dev/null" > "/dev/null" 2>&1'))
     return {
-        "pg_ctl-start": {
-            "parent_exe": PG_BIN + "/pg_ctl",
-            "parent_args": "pg_ctl -D %s -w start -o %s" % (pgd, opts),
-            "child": exact('/bin/sh -c exec "%s" -D "%s" %s < "/dev/null" 2>&1' % (P, pgd, opts)),
-            "exec_role": "postmaster-init"},
-        "initdb-check": dict(initdb, exec_role="pg-bootstrap", child=re.compile(
-            "^" + re.escape('sh -c "%s" --check -F -c log_checkpoints=false  -c max_connections='
-                            % P) + r"[0-9]+" + re.escape(" -c autovacuum_worker_slots=") +
-            r"[0-9]+" + re.escape(" -c shared_buffers=") + r"[0-9]+" +
-            re.escape(" -c dynamic_shared_memory_type=") + r"(posix|sysv)" +
-            re.escape(' < "/dev/null" > "/dev/null" 2>&1') + "$")),
-        "initdb-boot": dict(initdb, exec_role="pg-bootstrap", child=exact(
-            'sh -c "%s" --boot -F -c log_checkpoints=false  -X 16777216 -k' % P)),
-        "initdb-single": dict(initdb, exec_role="pg-bootstrap", child=exact(
-            'sh -c "%s" --single -F -O -j -c search_path=pg_catalog -c exit_on_error=true '
-            '-c log_checkpoints=false  template1 >/dev/null' % P)),
+        "pg_ctl-start": form(
+            pgctl_parent, "/bin/sh",
+            'exec "%s" -D "%s" %s < "/dev/null" 2>&1' % (P, pgd, opts), P,
+            _vec(P, "-D", pgd, "-c", "unix_socket_directories=%s/postgres" % rt, "-c",
+                 "listen_addresses=", "-p", port), "postmaster-init"),
+        "pg_ctl-version-probe": form(pgctl_parent, "sh", '"%s" -V' % P, P, _vec(P, "-V"),
+                                     "pg-version-probe"),
+        "initdb-version-probe": form(initdb_parent, "sh", '"%s" -V' % P, P, _vec(P, "-V"),
+                                     "pg-version-probe"),
+        "initdb-check": form(
+            initdb_parent, "sh", check_cmd, P,
+            _vec(P, "--check", "-F", "-c", "log_checkpoints=false", "-c",
+                 re.compile(r"max_connections=[0-9]+"), "-c",
+                 re.compile(r"autovacuum_worker_slots=[0-9]+"), "-c",
+                 re.compile(r"shared_buffers=[0-9]+"), "-c",
+                 re.compile(r"dynamic_shared_memory_type=(posix|sysv)")), "pg-bootstrap"),
+        "initdb-boot": form(
+            initdb_parent, "sh", '"%s" --boot -F -c log_checkpoints=false  -X 16777216 -k' % P,
+            P, _vec(P, "--boot", "-F", "-c", "log_checkpoints=false", "-X", "16777216", "-k"),
+            "pg-bootstrap"),
+        "initdb-single": form(
+            initdb_parent, "sh",
+            '"%s" --single -F -O -j -c search_path=pg_catalog -c exit_on_error=true '
+            '-c log_checkpoints=false  template1 >/dev/null' % P, P, single, "pg-bootstrap"),
+        "single-user-locale": form(single_parent, "sh", "%s -a" % LOCALE_BIN, LOCALE_BIN,
+                                   _vec(LOCALE_BIN, "-a"), "pg-locale"),
     }
 
 
 IMAGE_VIOLATIONS = ("exe-not-allowlisted", "sh-form-mismatch", "sh-child-mismatch",
-                    "sh-exec-mismatch", "sh-outside-init-phase")
+                    "sh-exec-mismatch", "sh-outside-init-phase", "exec-chain-unobserved",
+                    "fork-from-nonforking-role")
 H_FIELDS = {"closure_verified": bool, "image_violations": int, "exec_unobserved": int,
             "admission_unreadable_live": int, "api_client_history": str, "verdict": bool}
 
@@ -1108,21 +1357,55 @@ def h_closure(m):
             "detail": "ok" if ok else "failed: %s" % sorted(k for k, v in checks.items() if not v)}
 
 
+def script_vectors(m):
+    """Exact argv vectors of the closure-bound generated scripts (r2 1.4), from the
+    verified artifacts.json: the shebang interpreter tokens plus the script path, and the
+    devenv-tasks `bash -c <task_cmd>` wrapper form [A: measured from T4a ps strings; any
+    other vector is "shell", never a script role]."""
+    try:
+        art = jload(m["evidence"] + "/artifacts.json")
+        files = art["files"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    out = []
+    for role, key in (("wrapper", "task_cmd"), ("start-postgres", "start"),
+                      ("setup-postgres", "setup")):
+        path = files.get(key, {}).get("path")
+        if not isinstance(path, str):
+            continue
+        try:
+            with open(path, "rb") as f:
+                first = f.readline(512)
+        except OSError:
+            continue
+        if first.startswith(b"#!"):
+            interp = first[2:].decode("utf-8", "replace").split()
+            if interp:
+                out.append((role, interp + [path]))
+        if role == "wrapper":
+            out.append((role, ["bash", "-c", path]))
+    return out
+
+
 class Watch(object):
-    """Owned-process tracking with kqueue handles and µs birth identity (r3 2, r4 3),
-    repaired per H1 (no old-image reuse; fail-closed image reads; explicit H record),
-    H2 (signals freeze after any uncertainty) and D-1 (exact /bin/sh forms)."""
+    """Owned-process tracking (r3 2, r4 3; repairs H1, H2, D-1 and the T4a repair).
+
+    Events are fetched without handling into a bounded queue and attributed ONLY through
+    their registration generation (`udata`, EV_UDATA_SPECIFIC). Images and argv vectors are
+    recorded only from VALID snapshots bracketed by empty queue fences; an exec clears the
+    image and creates an obligation with one absolute deadline. Every violation freezes
+    signals at once."""
 
     def __init__(self, m, state_path):
         self.m = m
         self.state_path = state_path
         self.kq = select.kqueue()
-        self.entries = {}       # pid -> live entry (a pid key is reused only after exit)
-        self.dead = []          # exited entries
+        self.entries = {}       # pid -> live entry of its current sealed generation
+        self.dead = []
         self.events = []
         self.violations = []
         self.gaps = []
-        self.fork_notes = {}    # pid -> count (observation only)
+        self.fork_notes = {}
         self.marks = {}
         self.harness_signals = []
         self.launcher = None
@@ -1133,30 +1416,93 @@ class Watch(object):
         self.held = False
         self.closure = {"closure_verified": False, "detail": "not-loaded"}
         self.forms = sh_forms(m) if all(k in m for k in ("runtime", "pgdata", "port")) else {}
+        self.scripts = script_vectors(m) if "evidence" in m else []
+        self.gens = {}
+        self._next_gen = 1
+        self.pending = collections.deque()
+        self.requests = {}      # gen -> {"kind", "deadline", "created", "attempts"}
+        self.enclosing = float("inf")
         self.dirty = True
 
     def violation(self, kind, **kw):
-        """Every violation is actual uncertainty (M2): record it and freeze at once, so no
-        later signal, stop stage or helper can follow it. Coverage gaps are not violations."""
+        """Every violation is actual uncertainty (M2): record it and freeze at once."""
         self.violations.append(dict(kw, t=now(), kind=kind))
         self.signals_frozen = True
         self.held = True
         self.dirty = True
 
-    # -- registration
+    def gap(self, why, pid, parent):
+        self.gaps.append({"t": now(), "why": why, "pid": pid, "parent": parent,
+                          "proof": "poll-observation"})
+        self.dirty = True
+
+    # -- registration generations (R1b, B2)
+    def alloc_gen(self):
+        if self._next_gen > GEN_MAX:
+            raise Hold("registration token space exhausted")
+        g = self._next_gen
+        self._next_gen += 1
+        return g
+
     def register(self, pid):
+        """A new generation token and an EV_UDATA_SPECIFIC knote carrying it. Refused while
+        an earlier generation of this pid is unresolved (its knote may still exist or hold an
+        undelivered exit). Returns the token, or None if the pid is already gone."""
+        blocking = sorted(g for g, x in self.gens.items()
+                          if x["pid"] == pid and x["state"] in UNRESOLVED_GEN)
+        if blocking:
+            self.violation("pid-generation-unresolved", pid=pid, gens=blocking)
+            raise Hold("pid %d reused before its earlier generation resolved" % pid)
+        g = self.alloc_gen()
+        self.gens[g] = {"pid": pid, "birth_us": None, "state": "provisional", "entry": None}
         ev = select.kevent(pid, filter=select.KQ_FILTER_PROC,
-                           flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE, fflags=PROC_FFLAGS)
+                           flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | KQ_EV_UDATA_SPECIFIC,
+                           fflags=PROC_FFLAGS, data=0, udata=g)
         try:
             self.kq.control([ev], 0, 0)
-            return True
         except OSError as e:
             if e.errno == errno.ESRCH:
-                return False
+                self.gens[g]["state"] = "refused-gone"
+                return None
+            self.gens[g]["state"] = "registration-failed"
+            self.violation("registration-failed", pid=pid, errno=e.errno)
             raise Hold("kqueue registration pid %d errno %d" % (pid, e.errno))
+        return g
+
+    def seal(self, g, b_pre, b_post):
+        """Bind token g to one birth only if the identity read before AND after the
+        registration is the same live process (B2). Gone around registration: unbound-gone
+        (its events are never attributed; it is retired by its own NOTE_EXIT). A birth
+        change: unbound-reused, violation."""
+        x = self.gens[g]
+        if b_pre is None or b_post is None:
+            x["state"] = "unbound-gone"
+            return False
+        if b_pre["birth_us"] != b_post["birth_us"] or b_pre["uid"] != b_post["uid"]:
+            x["state"] = "unbound-reused"
+            self.violation("generation-binding-incoherent", pid=x["pid"])
+            raise Hold("pid %d changed identity around registration" % x["pid"])
+        x["birth_us"] = b_pre["birth_us"]
+        x["state"] = "live"
+        return True
+
+    def new_entry(self, g, cur, path, parent, lineage, proof):
+        pe = self.entries.get(parent) if parent is not None else None
+        e = {"pid": cur["pid"], "birth_us": cur["birth_us"], "gen": g,
+             "ppid_at_admission": cur["ppid"], "uid": cur["uid"], "comm": cur["comm"],
+             "image": None, "exe": None, "exec_path": None, "argv": None, "argv_meta": None,
+             "argv_known": False, "title": None, "lineage": lineage, "parent": parent,
+             "parent_birth_us": pe["birth_us"] if pe else None, "admitted": now(),
+             "via": path, "proof": proof, "exit": None, "role": "unsnapshotted", "execs": 0}
+        self.gens[g]["entry"] = e
+        self.entries[cur["pid"]] = e
+        self.events.append({"t": now(), "ev": "admit", "pid": cur["pid"],
+                            "birth_us": cur["birth_us"], "gen": g, "via": path, "proof": proof})
+        self.request(g, "admission")
+        self.dirty = True
+        return e
 
     def find(self, pid, birth=None):
-        """The live or dead entry for pid (and birth when given)."""
         e = self.entries.get(pid)
         if e is not None and (birth is None or e["birth_us"] == birth):
             return e
@@ -1175,54 +1521,38 @@ class Watch(object):
         if pcur is None or pcur["birth_us"] != pe["birth_us"]:
             self.gap("parent-identity-changed", pid, parent)
             return None
-        if not self.register(pid):
+        b_pre = bsdinfo(pid)
+        if b_pre is None:
             self.gap("child-gone-before-register", pid, parent)
             return None
-        cur = bsdinfo(pid)
-        if cur is None:
-            self.gap("child-gone-after-register", pid, parent)
-            return None
-        if cur["ppid"] != parent or cur["uid"] != me() or cur["birth_us"] < pe["birth_us"]:
+        if b_pre["ppid"] != parent or b_pre["uid"] != me() or b_pre["birth_us"] < pe["birth_us"]:
             self.gap("child-not-of-parent", pid, parent)
+            return None
+        if pe.get("role") in NONFORKING_ROLES:
+            self.violation("fork-from-nonforking-role", pid=pid, parent=parent,
+                           role=pe.get("role"))
+        g = self.register(pid)
+        if g is None:
+            self.gap("child-gone-before-register", pid, parent)
+            return None
+        if not self.seal(g, b_pre, bsdinfo(pid)):
+            self.gap("child-gone-after-register", pid, parent)
             return None
         pcur2 = bsdinfo(parent)
         if pcur2 is None or pcur2["birth_us"] != pe["birth_us"]:
             self.gap("parent-changed-during-admission", pid, parent)
-            return None
-        return self._add(pid, cur, path, parent, lineage=True, proof="kernel-event")
+        return self.new_entry(g, b_pre, path, parent, True, "kernel-event")
 
-    def _add(self, pid, cur, path, parent, lineage, proof="poll-observation"):
-        """Admission (repair H1): an image that cannot be read for a LIVE process is a
-        violation and HOLD; a child already gone is an ordinary coverage gap only."""
-        try:
-            exe = pidpath(pid)
-        except Hold as h:
-            self.violation("admission-image-unreadable-live", pid=pid, detail=str(h))
-            raise
-        if exe is None:
-            self.gap("exe-unreadable-gone", pid, parent)
+    def adopt(self, pid, role, image=None, argv=None, parent=None, lineage=True):
+        """Fixture-synthetic adoption (self-tests and the launcher path): a sealed generation
+        and an entry whose role/image are GIVEN, labelled as such; no snapshot request."""
+        b_pre = bsdinfo(pid)
+        g = self.register(pid)
+        if g is None or not self.seal(g, b_pre, bsdinfo(pid)):
             return None
-        args = proc_args(pid)
-        if args is None:
-            again = bsdinfo(pid)
-            if again is not None and again["birth_us"] == cur["birth_us"]:
-                self.violation("admission-image-unreadable-live", pid=pid, detail="args")
-                raise Hold("admission args unreadable for live pid %d" % pid)
-            self.gap("args-unreadable-gone", pid, parent)
-            return None
-        pe = self.entries.get(parent) if parent is not None else None
-        e = {"pid": pid, "birth_us": cur["birth_us"], "ppid_at_admission": cur["ppid"],
-             "uid": cur["uid"], "comm": cur["comm"], "exe": exe, "args": args,
-             "lineage": lineage, "parent": parent,
-             "parent_birth_us": pe["birth_us"] if pe else None,
-             "admitted": now(), "via": path, "proof": proof,
-             "exit": None, "role": None, "execs": 0}
-        e["role"] = self.classify(e)
-        self.entries[pid] = e
-        self.check_exe(e)
-        self.events.append({"t": now(), "ev": "admit", "pid": pid, "birth_us": cur["birth_us"],
-                            "role": e["role"], "via": path, "proof": proof})
-        self.dirty = True
+        e = self.new_entry(g, b_pre, "adopted", parent, lineage, "fixture-synthetic")
+        self.requests.pop(g, None)
+        e.update(role=role, image=image, exe=image, argv=argv, argv_known=argv is not None)
         return e
 
     def parent_entry(self, e):
@@ -1234,159 +1564,369 @@ class Watch(object):
         pe = self.parent_entry(e)
         return pe["role"] if pe else None
 
-    def sh_allowed(self, e):
-        """D-1 (amendment R2): /bin/sh only in the four exact source-bound forms, under the
-        exact pg_ctl/initdb parent image and argv, in the owned init phase."""
-        if os.path.exists(self.m["pgdata"] + "/.devenv_initialized"):
-            self.violation("sh-outside-init-phase", pid=e["pid"])
-            return False
-        pe = self.parent_entry(e)
-        if pe is None or not pe.get("lineage") or not e.get("lineage") or pe.get("exe") is None:
-            self.violation("sh-form-mismatch", pid=e["pid"], why="parent not lineage-owned")
-            return False
-        parent_exe = os.path.realpath(pe["exe"])
-        for name, f in sorted(self.forms.items()):
-            if parent_exe == f["parent_exe"] and pe.get("args") == f["parent_args"] and \
-                    e.get("args") is not None and f["child"].match(e["args"]):
-                e["allowance"] = name
-                e["exec_role"] = f["exec_role"]
-                e["allowed_children"] = 0
-                self.events.append({"t": now(), "ev": "allowance", "pid": e["pid"], "form": name})
-                return True
-        self.violation("sh-form-mismatch", pid=e["pid"], args=e.get("args"),
-                       parent_exe=pe.get("exe"), parent_args=pe.get("args"))
-        return False
-
-    def check_exe(self, e):
-        """Image checks. The package-bin-directory test is SUPPLEMENTARY (deviation D-7):
-        H rests on h_closure plus these observations, never on the directory test alone."""
-        exe = os.path.realpath(e["exe"]) if e["exe"] else None
-        pe = self.parent_entry(e)
-        if exe is None:
-            ok = False
-        elif e["role"] == "launcher":
-            ok = exe.startswith(PKG["bash"] + "/bin/")
-        elif exe in SYSTEM_SH:
-            return self.sh_allowed(e) or None
-        elif pe is not None and "allowance" in pe:
-            ok = exe == PG_BIN + "/postgres" and pe.get("allowed_children", 0) == 0
-            if ok:
-                pe["allowed_children"] = 1
+    # -- queue, fences and attribution (R1a, B1)
+    def fetch(self, max_events, timeout):
+        """Append raw kevents (unhandled) to the bounded pending queue. EV_ERROR results are
+        tagged failures, not process events. Saturation is HOLD, never a dropped event."""
+        room = PENDING_CAP - len(self.pending)
+        if room <= 0:
+            self.violation("event-queue-saturated", pending=len(self.pending))
+            raise Hold("event queue saturated")
+        evs = self.kq.control(None, min(max_events, room), timeout)
+        for ev in evs:
+            if ev.flags & select.KQ_EV_ERROR:
+                self.violation("kevent-error", ident=ev.ident, udata=ev.udata, data=ev.data)
             else:
-                self.violation("sh-child-mismatch", pid=e["pid"], exe=e["exe"])
+                self.pending.append(ev)
+        if evs and len(self.pending) >= PENDING_CAP:
+            self.violation("event-queue-saturated", pending=len(self.pending))
+            raise Hold("event queue saturated")
+        return len(evs)
+
+    def fence(self, deadline, cap=FENCE_CAP):
+        """Fetch non-blocking until an ACTUAL empty result: its monotonic time, or None when
+        the deadline or the cap comes first (no empty-fence claim). Handles nothing."""
+        fetched = 0
+        while True:
+            if now() >= deadline:
                 return None
-        else:
-            ok = exe.startswith(EXEC_ALLOW_PREFIXES)
-        if not ok:
-            self.violation("exe-not-allowlisted", pid=e["pid"], exe=e["exe"])
+            n = self.fetch(FENCE_BATCH, 0)
+            if n == 0:
+                return now()
+            fetched += n
+            if fetched >= cap:
+                return None
 
-    def classify(self, e):
-        exe, args = e["exe"] or "", e["args"] or ""
-        pe = self.parent_entry(e)
-        prole = pe["role"] if pe else None
-        if exe and os.path.realpath(exe) in SYSTEM_SH:
-            return "pg-sh"
-        if pe is not None and "allowance" in pe and exe == PG_BIN + "/postgres":
-            return pe["exec_role"]
-        if self.launcher is not None and e["pid"] == self.launcher.pid:
-            return "launcher"
-        if exe == PC_BIN:
-            return "process-compose"
-        if exe == DT_BIN:
-            return "devenv-tasks"
-        if exe == PG_BIN + "/postgres":
-            if prole in ("postmaster-final", "postmaster-init", "postmaster-identified"):
-                if "logger" in args:
-                    return "pg-logger"
-                if BACKEND_RE.match(args):
-                    return "pg-backend"
-                return "pg-aux"
-            if prole in ("wrapper", "start-postgres") or e.get("prev_role") == "start-postgres":
-                return "postmaster-final"
-            return "postmaster-init"
-        if exe.startswith(PKG["bash"] + "/bin/") or exe.startswith(PKG["bash-interactive"] + "/bin/"):
-            if "-devenv-processes-postgres" in args:
-                return "wrapper"
-            if "/bin/start-postgres" in args:
-                return "start-postgres"
-            if "/bin/setup-postgres" in args:
-                return "setup-postgres"
-            return "shell"
-        if exe.startswith(PG_BIN + "/"):
-            return "pg-tool"
-        return "other"
+    def attributed(self, ev):
+        x = self.gens.get(ev.udata)
+        return x if x is not None and ev.ident == x["pid"] else None
 
-    def gap(self, why, pid, parent):
-        self.gaps.append({"t": now(), "why": why, "pid": pid, "parent": parent,
-                          "proof": "poll-observation"})
-        self.dirty = True
+    def relevant(self, g, evs):
+        return any(ev.udata == g and ev.fflags & (NOTE_EXEC | NOTE_EXIT) for ev in evs)
 
-    # -- event handling
+    def process_pending(self, deadline, max_events=256):
+        handled = 0
+        while self.pending and handled < max_events and now() < deadline:
+            self.handle(self.pending.popleft())
+            handled += 1
+        return handled
+
+    def request(self, g, kind):
+        """A snapshot obligation. A new event never resets an unresolved obligation's
+        deadline (B1); an exec upgrades its kind."""
+        r = self.requests.get(g)
+        if r is None:
+            self.requests[g] = {"kind": kind, "created": now(), "attempts": 0,
+                                "deadline": min(now() + SNAPSHOT_RESOLVE_S, self.enclosing)}
+        elif kind == "exec":
+            r["kind"] = "exec"
+
+    # -- event handling (R1b)
     def handle(self, ev):
-        pid = ev.ident
-        e = self.entries.get(pid)
+        x = self.attributed(ev)
+        if x is None:
+            self.violation("event-unattributable", ident=ev.ident, udata=ev.udata,
+                           fflags=ev.fflags)
+            return
+        g, st = ev.udata, x["state"]
+        if st == "unbound-gone":
+            if ev.fflags & NOTE_EXIT:
+                x["state"] = "retired"
+            return
+        if st == "unobserved":
+            e = x["entry"]
+            if ev.fflags & NOTE_EXIT:
+                e["late_exit"] = dict(decode_status(ev.data), t=now()) \
+                    if ev.fflags & NOTE_EXITSTATUS else {"kind": "no-exitstatus", "t": now()}
+                x["state"] = "retired"
+            if ev.fflags & NOTE_EXEC:
+                e["late_exec"] = e.get("late_exec", 0) + 1
+            self.dirty = True
+            return
+        if st != "live":
+            self.violation("event-after-retirement", gen=g, pid=x["pid"], state=st,
+                           fflags=ev.fflags)
+            return
+        e = x["entry"]
+        pid = e["pid"]
         if ev.fflags & NOTE_FORK:
             self.fork_notes[pid] = self.fork_notes.get(pid, 0) + 1
             self.events.append({"t": now(), "ev": "fork-note", "pid": pid,
-                                "birth_us": e["birth_us"] if e else None, "proof": "kernel-event"})
+                                "birth_us": e["birth_us"], "gen": g, "proof": "kernel-event"})
+            if e["role"] in NONFORKING_ROLES:
+                self.violation("fork-from-nonforking-role", pid=pid, role=e["role"])
             if not ev.fflags & NOTE_EXIT:
                 self.scan_children(pid, "note-fork")
-        if ev.fflags & NOTE_EXEC and e is not None and e["exit"] is None:
-            self.on_exec(e, gone=bool(ev.fflags & NOTE_EXIT))
+        if ev.fflags & NOTE_EXEC:
+            e["execs"] += 1
+            e.setdefault("prior_images", []).append({"image": e["image"], "role": e["role"]})
+            e.update(image=None, exe=None, exec_path=None, argv=None, argv_meta=None,
+                     argv_known=False, title=None, role="exec-pending")
+            self.request(g, "exec")
+            self.events.append({"t": now(), "ev": "exec", "pid": pid, "birth_us": e["birth_us"],
+                                "gen": g, "proof": "kernel-event"})
         if ev.fflags & NOTE_EXIT:
-            if e is None:
-                return
             if not ev.fflags & NOTE_EXITSTATUS:
                 e["exit"] = {"t": now(), "kind": "no-exitstatus"}
                 self.violation("exit-without-status", pid=pid)
             else:
                 e["exit"] = dict(decode_status(ev.data), t=now(), proof="kernel-event")
+            r = self.requests.pop(g, None)
+            if r is not None and r["kind"] == "exec":
+                e["role"] = "unknown-image"
+                self.violation("exec-image-unobserved-before-exit", pid=pid,
+                               prior_role=(e.get("prior_images") or [{}])[-1].get("role"))
+            elif r is not None and r["kind"] == "admission":
+                self.gap("snapshot-unavailable-gone", pid, e.get("parent"))
             self.events.append({"t": now(), "ev": "exit", "pid": pid, "birth_us": e["birth_us"],
-                                "role": e["role"], "status": e["exit"]})
-            self.dead.append(self.entries.pop(pid))
-            self.dirty = True
-
-    def on_exec(self, e, gone):
-        """NOTE_EXEC (repair H1): the new image is re-read with NO fallback to the old one.
-        Unreadable while alive: violation + HOLD. Gone (coalesced EXEC+EXIT or exited):
-        violation exec-image-unobserved-before-exit, role unknown-image."""
-        pid = e["pid"]
-        e["execs"] += 1
-        prior = {"exe": e["exe"], "args": e["args"], "role": e["role"]}
-        e.setdefault("prior_images", []).append(prior)
-        exe = args = None
-        if not gone:
-            try:
-                exe = pidpath(pid)
-            except Hold as h:
-                self.violation("exec-image-unreadable-live", pid=pid, detail=str(h))
-                raise
-            args = proc_args(pid) if exe is not None else None
-            if exe is None or args is None:
-                cur = bsdinfo(pid)
-                if cur is not None and cur["birth_us"] == e["birth_us"]:
-                    self.violation("exec-image-unreadable-live", pid=pid)
-                    raise Hold("exec image unreadable for live pid %d" % pid)
-                gone = True
-        if gone:
-            e["exe"], e["args"], e["role"] = None, None, "unknown-image"
-            self.violation("exec-image-unobserved-before-exit", pid=pid, prior_role=prior["role"])
-        else:
-            e["exe"], e["args"], e["prev_role"] = exe, args, prior["role"]
-            if "allowance" in e:
-                real = os.path.realpath(exe)
-                if real in SYSTEM_SH and args == prior["args"]:
-                    pass  # the /bin/sh shim handing the same command to its select target
-                elif real == PG_BIN + "/postgres":
-                    e["role"] = e["exec_role"]
-                else:
-                    self.violation("sh-exec-mismatch", pid=pid, exe=exe)
-            else:
-                e["role"] = self.classify(e)
-                self.check_exe(e)
-        self.events.append({"t": now(), "ev": "exec", "pid": pid, "birth_us": e["birth_us"],
-                            "from": prior["role"], "to": e["role"], "proof": "kernel-event"})
+                                "gen": g, "role": e["role"], "status": e["exit"]})
+            self.retire(g, e)
         self.dirty = True
+
+    def retire(self, g, e):
+        """Exactly one move per tracked identity; never touches another generation."""
+        if self.entries.get(e["pid"]) is e:
+            del self.entries[e["pid"]]
+            self.dead.append(e)
+        self.gens[g]["state"] = "retired"
+
+    # -- snapshots (R1, R1a, R1c)
+    def snapshot(self, g, deadline):
+        """One fenced snapshot of generation g (r3 1.2). Results: VALID (with cutoff),
+        DEFERRED, VOID, UNKNOWN, GONE, INCONSISTENT. Never a partial attribution."""
+        x = self.gens[g]
+        pid, B = x["pid"], x["birth_us"]
+        pre = self.fence(deadline)
+        if pre is None:
+            return {"result": "UNKNOWN"}
+        if self.relevant(g, self.pending):
+            return {"result": "DEFERRED"}
+        mark = len(self.pending)
+        b0 = bsdinfo(pid)
+        if b0 is None or b0["birth_us"] != B:
+            return {"result": "GONE"}
+        p1 = pidpath(pid)
+        a = procargs(pid, B)
+        p2 = pidpath(pid)
+        b1 = bsdinfo(pid)
+        post = self.fence(deadline)
+        if post is None:
+            return {"result": "UNKNOWN"}
+        if self.relevant(g, list(self.pending)[mark:]):
+            return {"result": "VOID"}
+        if b1 is None or b1["birth_us"] != B or p1 is None or p2 is None or \
+                a["status"] == "GONE":
+            return {"result": "GONE"}
+        if p1 != p2 or a["status"] == "MALFORMED":
+            return {"result": "INCONSISTENT"}
+        ep = a["exec_path"]
+        if not ep or not ep.startswith("/"):
+            return {"result": "INCONSISTENT"}
+        rp = os.path.realpath(ep)
+        if not (rp == os.path.realpath(p1) or (os.path.realpath(p1) in SYSTEM_SH and
+                                                rp in SYSTEM_SH)):
+            return {"result": "INCONSISTENT"}
+        return {"result": "VALID", "image": p1, "exec_path": ep, "argv": a["argv"],
+                "meta": a["meta"], "argv_status": a["status"], "cutoff": post, "pre": pre}
+
+    def process_requests(self, deadline):
+        for g in sorted(self.requests):
+            if now() >= deadline:
+                return
+            r = self.requests.get(g)
+            x = self.gens.get(g)
+            if r is None or x is None or x["state"] != "live":
+                self.requests.pop(g, None)
+                continue
+            e = x["entry"]
+            try:
+                s = self.snapshot(g, min(deadline, r["deadline"]))
+            except Hold as h:
+                kind = "admission-image-unreadable-live" if r["kind"] == "admission" \
+                    else "exec-image-unreadable-live"
+                self.violation(kind, pid=e["pid"], detail=str(h))
+                self.requests.pop(g, None)
+                raise
+            if s["result"] == "VALID":
+                self.requests.pop(g, None)
+                if r["kind"] == "title":
+                    self.apply_title(e, s)
+                else:
+                    self.apply_snapshot(e, s, r["kind"])
+                continue
+            if s["result"] == "INCONSISTENT":
+                r["attempts"] += 1
+            if s["result"] == "GONE":
+                continue          # resolved by the exit event (or refresh's budget)
+            if now() >= r["deadline"] or r["attempts"] >= 3:
+                self.requests.pop(g, None)
+                if r["kind"] == "title":
+                    self.gap("title-unresolved", e["pid"], e.get("parent"))
+                    continue
+                cur = bsdinfo(e["pid"])
+                if cur is not None and cur["birth_us"] == e["birth_us"]:
+                    self.violation("image-snapshot-inconsistent" if r["attempts"] >= 3
+                                   else "image-snapshot-unresolved", pid=e["pid"],
+                                   last=s["result"])
+
+    def record_argv(self, e, s):
+        e["exec_path"] = s["exec_path"]
+        e["argv"] = s["argv"]
+        e["argv_meta"] = s["meta"]
+        e["snapshot_cutoff"] = s["cutoff"]
+
+    def apply_snapshot(self, e, s, kind):
+        e["image"] = e["exe"] = s["image"]
+        self.record_argv(e, s)
+        pe = self.parent_entry(e)
+        real = os.path.realpath(s["image"])
+        if pe is not None and self.popen_parent(pe) and "allowance" not in e and \
+                real not in SYSTEM_SH and real != os.path.realpath(pe.get("image") or ""):
+            # popen/system/execl children start as /bin/sh: a coalesced exec that skipped
+            # the observed shell step can never be allowed (r2 1.2)
+            self.violation("exec-chain-unobserved", pid=e["pid"], parent_role=pe["role"])
+        if kind == "exec" and "allowance" in e:
+            f = self.forms[e["allowance"]]
+            if real in SYSTEM_SH and e["argv"] is not None and e["argv"] == e["allowance_argv"]:
+                e["role"], e["argv_known"] = "pg-sh", True   # the /bin/sh shim hand-off
+            elif real == f["exec_image"] and vec_match(f["exec_argv"], e["argv"]):
+                e["role"], e["argv_known"] = f["exec_role"], True
+            else:
+                e["role"] = "other"
+                self.violation("sh-exec-mismatch", pid=e["pid"], image=s["image"])
+        else:
+            e["role"] = self.classify(e)
+            self.check_exe(e)
+        self.events.append({"t": now(), "ev": "snapshot", "pid": e["pid"], "gen": e["gen"],
+                            "kind": kind, "role": e["role"], "cutoff": s["cutoff"],
+                            "proof": "kernel-pidpath+procargs+fenced"})
+        self.dirty = True
+
+    def apply_title(self, e, s):
+        self.record_argv(e, s)
+        role = self.title_role(e)
+        if role != e["role"]:
+            self.events.append({"t": now(), "ev": "reclassify", "pid": e["pid"],
+                                "from": e["role"], "to": role})
+            e["role"] = role
+        self.dirty = True
+
+    def popen_parent(self, pe):
+        img = os.path.realpath(pe.get("image") or "")
+        return img in (PG_BIN + "/initdb", PG_BIN + "/pg_ctl") or pe.get("role") == "pg-bootstrap"
+
+    def title_role(self, e):
+        """PG postmaster children: only argv[0] (the title) is consumed and recorded (r3 3.3,
+        B4): the exact logger title, the anchored backend rule, otherwise pg-aux."""
+        argv = e.get("argv")
+        t = argv[0] if argv else None
+        e["title"] = t if isinstance(t, str) and t.startswith("postgres: ") else None
+        e["argv"] = None
+        e["argv_meta"] = None     # later elements may be former environment bytes
+        e["argv_known"] = False
+        if t == LOGGER_TITLE:
+            return "pg-logger"
+        if t and BACKEND_TITLE_RE.match(t):
+            return "pg-backend"
+        return "pg-aux"
+
+    # -- classification and image checks (vectors only; unknown grants nothing, B4)
+    def classify(self, e):
+        img = e.get("image")
+        if not img:
+            return "unknown-image"
+        real = os.path.realpath(img)
+        pe = self.parent_entry(e)
+        prole = pe["role"] if pe else None
+        argv = e.get("argv")
+        if real in SYSTEM_SH:
+            return "pg-sh"
+        if self.launcher is not None and e["pid"] == self.launcher.pid:
+            return "launcher"
+        if img == PC_BIN:
+            return "process-compose"
+        if img == DT_BIN:
+            return "devenv-tasks"
+        if img == PG_BIN + "/postgres":
+            if e.get("identified_role"):
+                return e["identified_role"]
+            if prole in POSTMASTER_ROLES:
+                return self.title_role(e)
+            if prole in ("wrapper", "start-postgres") or \
+                    any(p.get("role") == "start-postgres" for p in e.get("prior_images", [])):
+                return "postmaster-final"
+            return "postmaster-init"
+        if img.startswith(PKG["bash"] + "/bin/") or img.startswith(PKG["bash-interactive"] + "/bin/"):
+            for role, vec in self.scripts:
+                if argv is not None and argv == vec:
+                    e["argv_known"] = True
+                    return role
+            return "shell"
+        if img.startswith(PG_BIN + "/"):
+            return "pg-tool"
+        return "other"
+
+    def sh_allowed(self, e):
+        """D-1 (amendment R2, r2 1.4): /bin/sh only in the exact source-bound vector forms,
+        under the exact parent image and argv vector, in the owned init phase."""
+        if os.path.exists(self.m["pgdata"] + "/.devenv_initialized"):
+            self.violation("sh-outside-init-phase", pid=e["pid"])
+            return False
+        pe = self.parent_entry(e)
+        argv = e.get("argv")
+        if pe is None or not pe.get("lineage") or not e.get("lineage") or not pe.get("image"):
+            self.violation("sh-form-mismatch", pid=e["pid"], why="parent not lineage-owned")
+            return False
+        if argv is None:
+            self.violation("sh-form-mismatch", pid=e["pid"], why="argv absent")
+            return False
+        parent_exe = os.path.realpath(pe["image"])
+        for name, f in sorted(self.forms.items()):
+            if parent_exe != f["parent_exe"] or not vec_match(f["parent_argv"], pe.get("argv")):
+                continue
+            if "parent_role" in f and pe.get("role") != f["parent_role"]:
+                continue
+            if len(argv) == 3 and argv[0] == f["child_argv0"] and argv[1] == "-c" and \
+                    f["child_cmd"].fullmatch(argv[2]):
+                e["allowance"] = name
+                e["allowance_argv"] = list(argv)
+                e["exec_role"] = f["exec_role"]
+                e["allowed_children"] = 0
+                e["argv_known"] = True
+                self.events.append({"t": now(), "ev": "allowance", "pid": e["pid"], "form": name})
+                return True
+        self.violation("sh-form-mismatch", pid=e["pid"], argv_meta=e.get("argv_meta"),
+                       parent_exe=pe.get("image"))
+        return False
+
+    def check_exe(self, e):
+        """Image checks. The package-bin-directory test is SUPPLEMENTARY (deviation D-7)."""
+        img = os.path.realpath(e["image"]) if e.get("image") else None
+        pe = self.parent_entry(e)
+        if img is None:
+            self.violation("exe-not-allowlisted", pid=e["pid"], image=None)
+            return
+        if e["role"] == "launcher":
+            ok = img.startswith(PKG["bash"] + "/bin/")
+        elif img in SYSTEM_SH:
+            self.sh_allowed(e)
+            return
+        elif pe is not None and "allowance" in pe:
+            f = self.forms[pe["allowance"]]
+            ok = img == f["exec_image"] and vec_match(f["exec_argv"], e.get("argv")) and \
+                pe.get("allowed_children", 0) == 0
+            if ok:
+                pe["allowed_children"] = 1
+                e["role"], e["argv_known"] = f["exec_role"], True
+                return
+            self.violation("sh-child-mismatch", pid=e["pid"], image=e["image"])
+            return
+        elif img == LOCALE_BIN:
+            ok = False           # only as the exact exec of the single-user-locale form
+        else:
+            ok = img.startswith(EXEC_ALLOW_PREFIXES)
+        if not ok:
+            self.violation("exe-not-allowlisted", pid=e["pid"], image=e["image"])
 
     def scan_children(self, pid, path):
         e = self.entries.get(pid)
@@ -1417,38 +1957,58 @@ class Watch(object):
         pid = int(lines[0])
         if pid in self.entries or lines[1] != self.m["pgdata"]:
             return
-        cur = bsdinfo(pid)
-        if cur is None or cur["uid"] != me():
+        b_pre = bsdinfo(pid)
+        if b_pre is None or b_pre["uid"] != me():
             return
         if proc_cwd(pid) != os.path.realpath(self.m["pgdata"]):
             return
-        if not self.register(pid):
+        g = self.register(pid)
+        if g is None or not self.seal(g, b_pre, bsdinfo(pid)):
             return
-        e = self._add(pid, cur, "pgdata-identity", None, lineage=False, proof="pgdata-identity")
-        if e is not None:
-            e["role"] = "postmaster-init" if not os.path.exists(
-                self.m["pgdata"] + "/.devenv_initialized") else "postmaster-identified"
+        e = self.new_entry(g, b_pre, "pgdata-identity", None, False, "pgdata-identity")
+        e["identified_role"] = "postmaster-init" if not os.path.exists(
+            self.m["pgdata"] + "/.devenv_initialized") else "postmaster-identified"
+        return e
 
-    def refresh(self):
-        """Re-read titles of PG children (a title may be set after admission) and detect
-        any exit that produced no kqueue event (uncertainty, never absence)."""
+    def refresh(self, enclosing=None):
+        """R2: exits with no kqueue event are judged only after ONE shared settle budget for
+        all candidates (capped by `enclosing`), relooking candidates up by generation after
+        every bounded drain; titles of postmaster children are re-snapshotted on request."""
+        cands = []
         for pid, e in list(self.entries.items()):
             cur = bsdinfo(pid)
             if cur is None or cur["birth_us"] != e["birth_us"]:
-                e["exit"] = {"t": now(), "kind": "unobserved"}
-                self.violation("exit-unobserved", pid=pid, role=e["role"])
-                self.dead.append(self.entries.pop(pid))
+                cands.append(e["gen"])
+            elif e["role"] == "pg-aux" and e.get("title") is None and e["gen"] not in \
+                    self.requests and now() - e.get("title_try", 0) > 1.0:
+                e["title_try"] = now()
+                self.requests[e["gen"]] = {"kind": "title", "created": now(), "attempts": 0,
+                                           "deadline": min(now() + SNAPSHOT_RESOLVE_S,
+                                                           self.enclosing)}
+        if not cands:
+            return
+        deadline = min(now() + SETTLE_S, enclosing if enclosing is not None else float("inf"),
+                       self.enclosing)
+        while True:
+            cands = [g for g in cands if self.gens[g]["state"] == "live"]
+            if not cands or now() >= deadline:
+                break
+            self.fetch(FENCE_BATCH, max(0.0, min(0.05, deadline - now())))
+            self.process_pending(deadline)
+        for g in cands:
+            x = self.gens[g]
+            if x["state"] != "live":
                 continue
-            if e["role"] in ("pg-aux", "pg-backend", "pg-logger"):
-                args = proc_args(pid)
-                if args and args != e["args"]:
-                    e["args"] = args
-                    role = self.classify(e)
-                    if role != e["role"]:
-                        self.events.append({"t": now(), "ev": "reclassify", "pid": pid,
-                                            "from": e["role"], "to": role})
-                        e["role"] = role
-                    self.dirty = True
+            e = x["entry"]
+            e["exit"] = {"t": now(), "kind": "unobserved"}
+            self.violation("exit-unobserved", pid=e["pid"], role=e["role"])
+            r = self.requests.pop(g, None)
+            if r is not None and r["kind"] == "exec":
+                self.violation("exec-image-unobserved-before-exit", pid=e["pid"])
+            if self.entries.get(e["pid"]) is e:
+                del self.entries[e["pid"]]
+                self.dead.append(e)
+            x["state"] = "unobserved"
 
     def tripwire(self):
         """Supplementary only (r3 4.2): a writable regular file outside the owned roots,
@@ -1466,18 +2026,42 @@ class Watch(object):
                     self.violation("writable-fd-outside-roots", pid=e["pid"], role=e["role"],
                                    path=path)
 
-    def drain(self, timeout=0):
-        for ev in self.kq.control(None, 64, timeout):
-            self.handle(ev)
+    def step(self, timeout, deadline):
+        """One bounded slice: a blocking wait of at most `timeout` for events, then handling
+        and snapshot obligations, all under `deadline` (B1: checked before every stage)."""
+        if now() < deadline:
+            wait = 0 if self.pending else max(0.0, min(timeout, deadline - now()))
+            self.fetch(FENCE_BATCH, wait)
+        if now() < deadline:
+            self.process_pending(deadline)
+        if now() < deadline:
+            self.process_requests(deadline)
 
-    # -- signalling (r3 2.3, r4 3.3; repair H2: frozen after any uncertainty)
+    def drain(self, timeout=0, deadline=None):
+        self.step(timeout, deadline if deadline is not None else
+                  min(now() + max(timeout, 0) + ITER_SLICE_S, self.enclosing))
+
+    def quiesce(self, deadline):
+        """Before an effect: an actual empty fence, every pending event handled and the
+        snapshot obligations processed, within `deadline`; otherwise HOLD."""
+        while True:
+            if self.fence(deadline) is None:
+                raise Hold("no empty event fence before the deadline")
+            self.process_pending(deadline, PENDING_CAP)
+            if self.pending:
+                raise Hold("events still pending at the deadline")
+            self.process_requests(deadline)
+            if not self.pending:
+                return
+
+    # -- signalling (r3 2.3, r4 3.3; repair H2, M2/Q2)
     def signal_verified(self, pid, sig, reason, deadline=None):
-        """Verified signal (r3 2.3, r4 3.3). Repair M2/Q2: the freeze is checked before AND
-        after draining events, and the absolute `deadline` (monotonic) is rechecked after
-        the drain and the identity proof, immediately before the effect."""
+        """The freeze is checked before AND after quiescing events, and the absolute
+        `deadline` is rechecked after the identity proof, immediately before the effect."""
         if self.signals_frozen:
             raise Hold("refuse signal: signals are frozen after an uncertainty")
-        self.drain(0)
+        self.quiesce(min(now() + ITER_SLICE_S, deadline if deadline is not None else
+                         float("inf")))
         if self.signals_frozen:
             raise Hold("refuse signal: an event observed during the drain froze signals")
         e = self.entries.get(pid)
@@ -1507,14 +2091,14 @@ class Watch(object):
 
     def wait_roles_gone(self, roles, deadline):
         while now() < deadline:
-            self.drain(0.2)
+            self.step(0.2, deadline)
             if not any(self.alive(r) for r in roles):
                 return True
         return not any(self.alive(r) for r in roles)
 
     def wait_all_gone(self, deadline):
         while now() < deadline:
-            self.drain(0.2)
+            self.step(0.2, deadline)
             if not self.entries:
                 return True
         return not self.entries
@@ -1539,11 +2123,16 @@ class Watch(object):
     def state(self):
         return {
             "inst": self.m.get("inst"), "t": now(), "wall": wall(),
-            "live": list(self.entries.values()), "dead": self.dead,
+            "live": [entry_view(e) for e in self.entries.values()],
+            "dead": [entry_view(e) for e in self.dead],
             "events": self.events, "violations": self.violations, "gaps": self.gaps,
             "fork_notes": self.fork_notes, "marks": self.marks,
             "harness_signals": self.harness_signals, "signals_frozen": self.signals_frozen,
             "h": self.h_record(),
+            "gens": {str(g): {"pid": x["pid"], "birth_us": x["birth_us"], "state": x["state"]}
+                     for g, x in self.gens.items()},
+            "pending": len(self.pending),
+            "requests": {str(g): dict(r) for g, r in self.requests.items()},
             "launcher_pid": self.launcher.pid if self.launcher else None,
             "launcher_identity": self.launcher_identity,
             "launcher_returncode": self.launcher.returncode if self.launcher else None,
@@ -1554,6 +2143,16 @@ class Watch(object):
         if self.dirty:
             jdump(self.state(), self.state_path)
             self.dirty = False
+
+
+def entry_view(e):
+    """Receipt form of an entry (B4, Q4): argv content only for vectors that matched a
+    source-known form exactly; otherwise metadata only; postmaster children: the title."""
+    out = {k: v for k, v in e.items() if k not in ("argv", "allowance_argv")}
+    if e.get("argv_known") and e.get("argv") is not None:
+        out["argv"] = list(e["argv"])
+    out["argv_meta"] = e.get("argv_meta")
+    return out
 
 
 def ident(e):
@@ -1641,27 +2240,27 @@ def supervise(m, ctl, state_path, launcher_path, epoch, seam_exit_before_registe
                     w.violation("seam-fixture-did-not-exit", pid=lp)
                     raise Hold("seam: fixture launcher did not exit within %.0f s" % SEAM_DEADLINE)
                 time.sleep(0.05)
-        registered = w.register(lp)
+        b_pre = bsdinfo(lp)
+        g = w.register(lp) if b_pre is not None else None
         exited = os.waitid(os.P_PID, lp, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
-        cur = bsdinfo(lp) if registered and not exited else None
-        if not registered or exited or cur is None:
+        b_post = bsdinfo(lp) if g is not None and not exited else None
+        if g is None or exited or b_post is None or not w.seal(g, b_pre, b_post):
             w.violation("launcher-unregistered", pid=lp)
             raise Hold("launcher exited before registration completed")
-        w.launcher_identity = {"pid": lp, "birth_us": cur["birth_us"], "identity": "kernel"}
-        if w._add(lp, cur, "spawned", None, lineage=True, proof="kernel-event") is None:
-            w.violation("launcher-unregistered", pid=lp)
-            raise Hold("launcher not admitted")
+        w.launcher_identity = {"pid": lp, "birth_us": b_pre["birth_us"], "identity": "kernel"}
+        w.new_entry(g, b_pre, "spawned", None, True, "kernel-event")
         last_scan = last_trip = 0.0
         served = set()
         while True:
             try:
-                w.drain(0.2)
+                w.enclosing = post_deadline if post_deadline is not None else float("inf")
+                w.step(0.2, min(now() + ITER_SLICE_S, w.enclosing))
                 t = now()
                 if t - last_scan > 0.2:
                     for pid in list(w.entries):
                         w.scan_children(pid, "periodic")
                     w.identify_postmaster()
-                    w.refresh()
+                    w.refresh(enclosing=w.enclosing)
                     last_scan = t
                 if t - last_trip > TRIPWIRE_PERIOD:
                     w.tripwire()
@@ -1722,7 +2321,7 @@ def serve(w, m, req):
     if cmd == "stop":
         return stop_tree(w, m)
     if cmd == "exit-watch":
-        return {"ok": True, "live": list(w.entries.values())}
+        return {"ok": True, "live": [entry_view(e) for e in w.entries.values()]}
     return {"ok": False, "error": "unknown cmd"}
 
 
@@ -1739,6 +2338,7 @@ def stop_tree(w, m, stages=None):
     st = dict(STOP_STAGES, **(stages or {}))
     t0 = now()
     overall = t0 + float(st["overall"])
+    w.enclosing = min(w.enclosing, overall)
     w.marks["stop_begin"] = t0
     log = []
 
@@ -1948,6 +2548,20 @@ def ready_wait(m, state_path, deadline_s):
     raise Fail("FAIL-TIMEOUT readiness (%s)" % last)
 
 
+def child_may_be_backend(pid):
+    """drain_check (r2 1.4): a postmaster child is a possible backend unless its title,
+    read from KERN_PROCARGS2 argv[0], is known and not a backend title (fail closed)."""
+    cur = bsdinfo(pid)
+    if cur is None:
+        return False
+    a = procargs(pid, cur["birth_us"])
+    if a["status"] == "GONE":
+        return False
+    if a["status"] != "OK" or not a["argv"]:
+        return True
+    return bool(BACKEND_TITLE_RE.match(a["argv"][0]))
+
+
 def drain_check(m, state_path, deadline_s):
     deadline = now() + deadline_s
     while now() < deadline:
@@ -1955,7 +2569,7 @@ def drain_check(m, state_path, deadline_s):
         pm = final_postmaster(state)
         if pm is None:
             raise Hold("no final postmaster for drain check")
-        backends = [p for p in child_pids(pm["pid"]) if BACKEND_RE.match(proc_args(p) or "")]
+        backends = [p for p in child_pids(pm["pid"]) if child_may_be_backend(p)]
         if not backends:
             return True
         time.sleep(0.5)
@@ -2787,6 +3401,8 @@ def main(argv):
             jdump(recheck_runtime(m))
         elif cmd == "artifacts":
             art = artifacts(m, a["launcher"])
+            art["locale_binding"] = locale_binding(a["nix_store"]) if "nix_store" in a else \
+                {"ok": False, "why": "no --nix-store given"}
             jdump(art, m["evidence"] + "/artifacts.json")
             problems = []
             if "reference" in a:
