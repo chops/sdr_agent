@@ -62,9 +62,9 @@ INPUTS=(flake.nix flake.lock devenv.nix priv/postgres/log_settings.json
 # The self-test IDs, in run order (repair plan + amendment self-test list).
 SYNTHETIC_IDS="T9a T9b T10 T11 T12 T15d T16 T17a T17b T17-baseline T18a T18b T18c T18d"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T18d-vanish T18d-rebind T19a T19b T19c T19d T19f T19g T19i"
-SYNTHETIC_IDS="$SYNTHETIC_IDS T20a T20b T20c T20d T20e T20f T21a T21b T21c T21d T21e"
+SYNTHETIC_IDS="$SYNTHETIC_IDS T20a T20b T20c T20d T20e T20f T20g T21a T21b T21c T21d T21e"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T22a T22b T22c T22d T23a T23b T23c T23d T23e T24 T26a T26b T26c T27"
-SHELL_IDS="T1 T2 T3 T13 T14 T19e T19h T26d"
+SHELL_IDS="T1 T2 T3 T13 T14 T19e T19h T26d T28a T28b T28c"
 INSTANCE_IDS="T4a T4b T5 T6 T7 T8 T15a T15b T15c T25"
 
 # supervise's post-stop bound is TIMEOUTS.barrier (90) + 30 s; the shell allows 30 s more.
@@ -688,6 +688,12 @@ sv() { # test expected(comma list) observed teardown-json [retained manifests, c
   check_receipt "$1"
 }
 check_receipt() { "${ST[@]}" check-receipt --dir "$SD" --test "$1" || die HOLD "self-test $1: no passing receipt" 3; }
+# R2: before any disposal or cleanup, the observed class must be expected and the proof known
+# so far acceptable; otherwise everything is retained and the suite stops.
+st_pre() { # test expected observed partial-proof-json
+  "${ST[@]}" precheck --dir "$SD" --test "$1" --expected "$2" --observed "$3" --partial "$4" \
+    || die HOLD "self-test $1: unexpected result or proof before disposal/cleanup; everything retained (see $SD/$1.json)" 3
+}
 st_intent() { "${ST[@]}" intent --dir "$SD" --test "$1" --label "$2" --kind "$3" --contents "${4:-}"; }
 st_idpath() { "${ST[@]}" identity-path --dir "$SD" --test "$1" --label "$2" --path "$3"; }
 st_idproc() { "${ST[@]}" identity-proc --dir "$SD" --test "$1" --label "$2" --pid "$3" --ppid "${4:-$BASHPID}"; }
@@ -724,6 +730,7 @@ st_T1() {
   a=$($STAT -f '%d:%i' "$rt")
   cls=$(obs "$SD/T1.err"); [ "$rc" -eq 2 ] || cls="$cls-STATUS-$rc"
   { [ "$a" = "$b" ] && [ -z "$(ls -A "$rt")" ]; } || cls="RUNTIME-DIR-CHANGED"
+  st_pre T1 REFUSE-RUNTIME-EXISTS "$cls" '{}'
   st_dispose T1 rtdir || fx=$?
   cleanup_instance "$m" || cl=$?
   ST_TEST=""
@@ -739,6 +746,7 @@ st_T2() {
   cls=$(obs "$SD/T2.err"); [ "$rc" -eq 2 ] || cls="$cls-STATUS-$rc"
   st_kill T2 unix-decoy "$FX" || k=$?
   [ "$k" -eq 0 ] || die HOLD "T2 fixture teardown: REAL-UNCERTAINTY" 3
+  st_pre T2 REFUSE-RUNTIME-EXISTS "$cls" '{}'
   st_dispose T2 rtdir || fx=$?
   cleanup_instance "$m" || cl=$?
   ST_TEST=""
@@ -762,6 +770,7 @@ st_T3() {
   ca=$(obs "$SD/T3a.err"); cb=$(obs "$SD/T3b.err"); cc=$(obs "$SD/T3c.err")
   cls="symlink=$ca/$ra,mode755=$cb/$rb,in-checkout=$cc/$rc"
   [ "$cls" != "symlink=REFUSE-ROOT/2,mode755=REFUSE-ROOT/2,in-checkout=REFUSE-ROOT/2" ] || cls=REFUSE-ROOT
+  st_pre T3 REFUSE-ROOT "$cls" '{}'
   { st_dispose T3 link && st_dispose T3 real && st_dispose T3 d755 && st_dispose T3 repo; } || fx=$?
   sv T3 REFUSE-ROOT "$cls" "{\"fixtures\": \"$(rcword $fx)\"}"
 }
@@ -774,6 +783,7 @@ st_T13() {
   "${W[@]}" preflight --manifest "$ev/manifest-attach.json" --first-start > /dev/null 2> "$SD/T13.err" \
     || rc=$?
   cls=$(obs "$SD/T13.err"); [ "$rc" -eq 2 ] || cls="$cls-STATUS-$rc"
+  st_pre T13 REFUSE-ENV "$cls" '{}'
   cleanup_instance "$m" || cl=$?
   ST_TEST=""
   sv T13 REFUSE-ENV "$cls" "{\"cleanup\": \"$(rcword $cl)\"}"
@@ -788,6 +798,7 @@ st_T14() {
   "${W[@]}" artifacts --manifest "$m" --launcher "$(< "$ev/launcher-path")" \
     --reference "$EVID/R/artifacts.json" > /dev/null 2> "$SD/T14.err" || rc=$?
   cls=$(obs "$SD/T14.err"); [ "$rc" -eq 2 ] || cls="$cls-STATUS-$rc"
+  st_pre T14 REFUSE-PROVENANCE "$cls" '{}'
   st_dispose T14 other || fx=$?
   cleanup_instance "$m" || cl=$?
   ST_TEST=""
@@ -914,26 +925,79 @@ st_T4() { # a|b
     "{\"stop_barrier\": \"$(rcword $sb)\", \"fixtures\": \"ok\", \"cleanup\": \"not-applicable:retained by design (H3)\"}" "$m"
 }
 
-st_T5() { # choice 5 / Q4: exact receipts, see sink_selftest.py t5_class
-  ST_TEST=T5; prepare_instance S T5; local m=$M ev r1=0 r2=0 dx=0 sb=0 cl=0 cls f1 f2 f3
+# R1: each T5 client's actual exit status and exact receipt are gated before the next
+# client or any other effect. Only the specified status-2/halt refusals and the db-exists
+# positive pass; anything else HOLDs at once: statuses recorded, everything retained, no
+# further client, stop or cleanup (the exit trap never stops after a HOLD).
+T5_CLIENT=client T5_STATUS=""
+t5_gate() { # case actual-status
+  T5_STATUS="$T5_STATUS $1=$2"
+  printf '%s\n' "$T5_STATUS" > "$ED/T5-client-status.txt"
+  "${ST[@]}" client-gate --file "$ED/client-$CLIENT_N-$1.json" --actual "$2" --case "$1" \
+    > "$ED/T5-gate-$1.json" \
+    || { HOLD_SEEN=1; die HOLD "T5: client $1 (status $2) did not give its exact expected receipt; retained, no further client, stop or cleanup" 3; }
+}
+t5_clients() { # manifest evidence-dir
+  local r
+  r=0; "$T5_CLIENT" "$2/manifest-bad-pgdata.json" bad-pgdata --mode prepare --create s_probe || r=$?
+  t5_gate bad-pgdata "$r"
+  r=0; "$T5_CLIENT" "$2/manifest-bad-port.json" bad-port --mode prepare --create s_probe || r=$?
+  t5_gate bad-port "$r"
+  r=0; "$T5_CLIENT" "$1" db-exists --mode db_exists --name s_probe || r=$?
+  t5_gate db-exists "$r"
+}
+
+st_T5() { # choice 5 / Q4: exact receipts, see sink_selftest.py t5_class / client_gate
+  ST_TEST=T5; prepare_instance S T5; local m=$M ev sb=0 cl=0 cls n0
   ev=$(mf "$m" evidence)
   start_epoch "$m" E1 1
   wait_ready "$m" 120 || die HOLD "T5: instance not ready (setup failure)" 3
   "${W[@]}" perturb --manifest "$m" --out "$ev/manifest-bad-pgdata.json" --set "pgdata=/nonexistent/pgdata" > /dev/null
   "${W[@]}" perturb --manifest "$m" --out "$ev/manifest-bad-port.json" --set "port=$(( $(mf "$m" port) + 1 ))" > /dev/null
-  client "$ev/manifest-bad-pgdata.json" bad-pgdata --mode prepare --create s_probe || r1=$?
-  f1="$ED/client-$CLIENT_N-bad-pgdata.json"
-  client "$ev/manifest-bad-port.json" bad-port --mode prepare --create s_probe || r2=$?
-  f2="$ED/client-$CLIENT_N-bad-port.json"
-  client "$m" db-exists --mode db_exists --name s_probe || dx=$?
-  f3="$ED/client-$CLIENT_N-db-exists.json"
-  printf 'bad-pgdata=%s bad-port=%s db-exists=%s\n' "$r1" "$r2" "$dx" > "$ED/T5-client-status.txt"
-  cls=$("${ST[@]}" t5-class --pgdata "$f1" --port "$f2" --exists "$f3" | "${W[@]}" jget --file - --key class)
+  T5_STATUS="" n0=$CLIENT_N
+  t5_clients "$m" "$ev"
+  cls=$("${ST[@]}" t5-class --pgdata "$ED/client-$((n0 + 1))-bad-pgdata.json" \
+    --port "$ED/client-$((n0 + 2))-bad-port.json" --exists "$ED/client-$((n0 + 3))-db-exists.json" \
+    | "${W[@]}" jget --file - --key class)
   stop_and_barrier "$m" || sb=$?
-  if [ "$sb" -eq 0 ]; then cleanup_instance "$m" || cl=$?; else cl=not-run; fi
+  st_pre T5 REFUSE-CLIENT-TARGET "$cls" "{\"db_exists_client\": \"ok\", \"stop_barrier\": \"$(rcword $sb)\"}"
+  cleanup_instance "$m" || cl=$?
   ST_TEST=""
   sv T5 REFUSE-CLIENT-TARGET "$cls" \
-    "{\"db_exists_client\": \"$(rcword $dx)\", \"stop_barrier\": \"$(rcword $sb)\", \"cleanup\": \"$(rcword "$cl")\"}"
+    "{\"db_exists_client\": \"ok\", \"stop_barrier\": \"ok\", \"cleanup\": \"$(rcword "$cl")\"}"
+}
+
+# T28 (R1 controls): the T5 gate sequence with a fabricated client in a subshell (its own
+# exit; traps are not inherited). a: a client HOLD at the first client; b: a missing
+# receipt at the second; c: the paired all-expected sequence. The call log proves which
+# later clients and effects ran.
+t28_client() { # fabricated client: logs the call, writes the scenario's receipt
+  local name=$2 f
+  CLIENT_N=$((CLIENT_N + 1)); f="$ED/client-$CLIENT_N-$name.json"
+  echo "$name" >> "$ED/calls.log"
+  case "$T28_SCENARIO:$name" in
+    hold:bad-pgdata) printf '%s\n' '{"status": 3, "halt": "identity query failed"}' > "$f"; return 3 ;;
+    noreceipt:bad-port) return 2 ;;
+    *:bad-pgdata) printf '%s\n' '{"status": 2, "halt": "identity mismatch: data_directory,config_file"}' > "$f"; return 2 ;;
+    *:bad-port) printf '%s\n' '{"status": 2, "halt": "target socket mismatch"}' > "$f"; return 2 ;;
+    *:db-exists) printf '%s\n' '{"status": 0, "exists": false}' > "$f"; return 0 ;;
+  esac
+}
+st_T28() { # a|b|c
+  local v=$1 T sc rc=0 calls want wrc cls
+  T="T28$v"
+  ED="$SD/$T"; mkdir -m 700 "$ED"; : > "$ED/calls.log"
+  case "$v" in
+    a) sc=hold want="bad-pgdata " wrc=3 ;;
+    b) sc=noreceipt want="bad-pgdata bad-port " wrc=3 ;;
+    *) sc=good want="bad-pgdata bad-port db-exists after-effects " wrc=0 ;;
+  esac
+  ( T28_SCENARIO=$sc; T5_CLIENT=t28_client; T5_STATUS=""; t5_clients /fabricated "$ED"
+    echo after-effects >> "$ED/calls.log" ) > "$ED/sub.out" 2> "$ED/sub.err" || rc=$?
+  calls=$(tr '\n' ' ' < "$ED/calls.log")
+  cls="CALLS:${calls}RC:$rc"
+  [ "$calls" != "$want" ] || [ "$rc" != "$wrc" ] || cls=GATE-AS-REQUIRED
+  sv "$T" GATE-AS-REQUIRED "$cls" '{"fixtures": "not-applicable:fabricated client receipts"}'
 }
 
 st_T6() {
@@ -990,7 +1054,8 @@ st_T8() {
   [ "$k" -eq 0 ] || die HOLD "T8 fixture teardown: REAL-UNCERTAINTY" 3
   guarded_w 120 /dev/null "$ED/barrier-after-fixture.err" barrier --manifest "$m" --state "$STATE" \
     --out "$ED/barrier-after-fixture.json" || b2=$?
-  if [ "$b2" -eq 0 ]; then cleanup_instance "$m" || cl=$?; else cl=not-run; fi
+  st_pre T8 FAIL-UNCERTAIN "$cls" "{\"fixtures\": \"ok\", \"second_barrier\": \"$(rcword $b2)\"}"
+  cleanup_instance "$m" || cl=$?
   ST_TEST=""
   sv T8 FAIL-UNCERTAIN "$cls" \
     "{\"fixtures\": \"ok\", \"second_barrier\": \"$(rcword $b2)\", \"cleanup\": \"$(rcword "$cl")\"}"
@@ -1055,6 +1120,7 @@ st_T25() { # H7: the S5 accepting branch end to end on an S instance (plumbing o
   "${W[@]}" cross-check --entries "$entries" --markers "$EVID/markers-list.json" \
     --out "$SD/T25-cross-check.json" > /dev/null || xc=$?
   [ "$xc" -eq 0 ] || die FAIL "T25 cross-check status $xc" 4
+  st_pre T25 PASS PASS '{"stop_barrier": "ok"}'
   cleanup_instance "$m" || cl=$?
   ST_TEST=""
   sv T25 PASS PASS "{\"stop_barrier\": \"ok\", \"cleanup\": \"$(rcword $cl)\"}"
@@ -1074,7 +1140,7 @@ run_selftest() {
     check_receipt "$id"
   done
   ST_TEST=R; prepare_reference; ST_TEST=""
-  st_T1; st_T2; st_T3; st_T13; st_T14; st_T19e; st_T19h; st_T26d
+  st_T1; st_T2; st_T3; st_T13; st_T14; st_T19e; st_T19h; st_T26d; st_T28 a; st_T28 b; st_T28 c
   st_T4 a; st_T4 b; st_T5; st_T6; st_T7; st_T8; st_T15 a; st_T15 b; st_T15 c; st_T25
   for id in $SYNTHETIC_IDS $SHELL_IDS $INSTANCE_IDS; do ids="$ids${ids:+,}$id"; done
   "${ST[@]}" summary --dir "$SD" --head "$HEAD" --ids "$ids" --runroot "$RUNROOT" \
