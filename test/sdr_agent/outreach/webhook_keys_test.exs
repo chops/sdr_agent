@@ -325,6 +325,12 @@ defmodule SdrAgent.Outreach.WebhookKeysTest do
       refute Enum.any?(queries, &publication?/1), "C3-02: a pass was published"
       refute Enum.any?(queries, &advisory_lock?/1), "C3-02: an identity key was locked"
       refute Enum.any?(queries, &insert_into?(&1, "replies")), "C3-02: a Reply was inserted"
+
+      # Codex G6-RED R2: no stored-reply lookup and no Decision either.
+      refute Enum.any?(queries, &select_from?(&1, "replies")),
+             "C3-02: the stored-reply lookup ran"
+
+      refute Enum.any?(queries, &insert_into?(&1, "decisions")), "C3-02: a Decision was written"
     end
 
     # Behavioural RED: both events are stored on main; no pass is published.
@@ -488,6 +494,7 @@ defmodule SdrAgent.Outreach.WebhookKeysTest do
   defp advisory_lock?({sql, _params}), do: sql =~ "pg_advisory_xact_lock"
   defp publication?({sql, _params}), do: sql =~ ~r/set_config\(\s*'sdr\.identity_pass'/
   defp insert_into?({sql, _params}, table), do: sql =~ ~r/^\s*INSERT INTO "#{table}"/
+  defp select_from?({sql, _params}, table), do: sql =~ ~r/^\s*SELECT\b.*\bFROM "#{table}"/s
 
   defp trace_queries(fun) do
     parent = self()

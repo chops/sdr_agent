@@ -161,7 +161,15 @@ defmodule SdrAgent.Outreach.WebhookKeysRaceTest do
           in_reply_to: "<nothing@elsewhere.example.test>"
         )
 
-      shared = MapSet.new([key_id(ctx, :"reply-message", message_id)])
+      # Assertion gate (Codex G6-RED R1): the represented Message-ID's
+      # reply-message key must exist before it builds the shared key set.
+      represented = key_outcome(ctx, :"reply-message", message_id)
+
+      assert match?({:ok, _}, represented),
+             "C3-02: the reply-message key kind is not implemented: #{inspect(represented)}"
+
+      {:ok, represented_id} = represented
+      shared = MapSet.new([represented_id])
       duplicate_race!(ctx, matched, padded, shared)
     end
   end
@@ -672,6 +680,15 @@ defmodule SdrAgent.Outreach.WebhookKeysRaceTest do
   end
 
   defp key_id(ctx, kind, raw), do: call(@keys, :id, [ctx.tenant_id, kind, raw])
+
+  # `id/3`'s result, or the closed InvalidKeyValue it raises (its kind only),
+  # as a value an assertion can check.
+  defp key_outcome(ctx, kind, raw) do
+    {:ok, key_id(ctx, kind, raw)}
+  rescue
+    error in SdrAgent.Audit.IdentityKeys.InvalidKeyValue ->
+      {:raised, error.__struct__, error.kind}
+  end
 
   ## T-K5 fixtures and outcome
 
