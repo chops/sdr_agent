@@ -22,12 +22,25 @@ defmodule SdrAgent.Agents.WitnessEvidence do
       refused even when they fit a pattern (digests are typed hex and
       exempt);
     * the canonical JSON encoding is at most 4096 bytes. The typed maxima
-      keep any valid map below that bound; the check is the backstop.
+      keep any valid map below that bound (the largest valid v4 map was
+      measured at 3205 bytes); the check is the backstop.
+
+  Projection v4 (`claude-message-json/4+prompt-builder/1`, D-182) adds the
+  R group, a discriminated group: `response_layout` (a closed enum) and,
+  if and only if the layout is `reasoning_then_text`,
+  `response_thinking_count` and `response_redacted_thinking_count`,
+  totalling 1 to 4. Counts are never zero-filled or saturated and never
+  appear on a refusal layout. R requires the complete 9-key v3 request
+  group. A v4 claim requires the v3 group plus R exactly
+  (`exact_v4_group?/1`); a v1, v2 or v3 claim refuses R; a downgrade (no
+  `projection_version`) keeps the whole group. R adds no reasoning text,
+  signature, encrypted data or per-block digest.
   """
 
   alias SdrAgent.Operations.Redactor
 
   @max_bytes 4096
+  @max_reasoning 4
   @code ~r/\A[a-z][a-z0-9_]{0,38}\z/
   @hex64 ~r/\A[0-9a-f]{64}\z/
   @timestamp ~r/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z\z/
@@ -35,6 +48,15 @@ defmodule SdrAgent.Agents.WitnessEvidence do
   @projection ~r/\A(?=.{1,39}\z)[a-z][a-z0-9-]*\/[0-9]{1,4}(?:\+[a-z][a-z0-9-]*\/[0-9]{1,4})?\z/
   @routes ["/anthropic/v1/messages", "/anthropic/v1/messages/count_tokens", "/anthropic/unknown"]
   @classifications ["primary", "ancillary", "unclassified", "ambiguous"]
+  @admitted_layout "reasoning_then_text"
+  @layouts [
+    @admitted_layout,
+    "reasoning_overflow",
+    "text_count_invalid",
+    "block_after_text",
+    "block_type_unsupported",
+    "reasoning_unparsed"
+  ]
 
   @allowed %{
     "witness_schema" => {:integer, 1, 99},
@@ -76,6 +98,11 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     # S12d projection v3 (entity PASS 9343defb): the one v3-only group key,
     # and the outer diagnostic (never a member of a derived group).
     "trailing_output_config" => {:enum_list, ~w(absent null present), 2},
+    # Projection v4 R group (D-182; plan r5 E2): a closed layout label and,
+    # for an admitted layout only, block counts.
+    "response_layout" => {:enum, @layouts},
+    "response_thinking_count" => {:integer, 0, 4},
+    "response_redacted_thinking_count" => {:integer, 0, 4},
     "projections_inapplicable" => :projections_inapplicable,
     # R0-07 item 7 (ADR-0005 R0 amendment item 1): the recorded identity of
     # a gated (generation-2 ClaudeCLI) parent, never of a generation-1 one.
@@ -183,6 +210,11 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     "claude-message-json/3+prompt-builder/1" => @group ++ [@v3_key]
   }
 
+  @v3 "claude-message-json/3+prompt-builder/1"
+  @v4 "claude-message-json/4+prompt-builder/1"
+  @counts ~w(response_thinking_count response_redacted_thinking_count)
+  @r_keys ["response_layout" | @counts]
+
   @doc "The S12d v2 context-group keys (all present together or none)."
   def context_group, do: @group
 
@@ -204,20 +236,60 @@ defmodule SdrAgent.Agents.WitnessEvidence do
   def exact_context_group?(_extras, _version), do: false
 
   @doc """
+  The layout-aware v4 helper (plan r5 section 6.4): true when `extras` is
+  exactly the complete 9-key v3 request group plus the R group of its own
+  `response_layout` (the layout and, for `reasoning_then_text`, both
+  counts), and no other key. `context_group/1` and `exact_context_group?/2`
+  are unchanged for v1 to v3.
+  """
+  def exact_v4_group?(%{"response_layout" => layout} = extras) do
+    Enum.sort(Map.keys(extras)) ==
+      Enum.sort(Map.fetch!(@group_versions, @v3) ++ r_keys(layout))
+  end
+
+  def exact_v4_group?(_extras), do: false
+
+  defp r_keys(@admitted_layout), do: @r_keys
+  defp r_keys(_layout), do: ["response_layout"]
+
+  @doc """
   Claim-boundary rule for a full link's (normalized) evidence, at any link
   status: a `projection_version` that records CLI context requires exactly
   its complete context group (v2: the 8 keys and no v3-only key; v3: all 9).
   Other evidence, v1 included, is unaffected.
   """
+  def validate_claim(%{"projection_version" => @v4} = evidence) do
+    all = [@r_keys | Map.values(@group_versions)] |> List.flatten() |> Enum.uniq()
+    present = Enum.filter(all, &Map.has_key?(evidence, &1))
+
+    if exact_v4_group?(Map.take(evidence, present)),
+      do: :ok,
+      else: {:error, "#{@v4} evidence requires exactly the v3 group and its response layout"}
+  end
+
+  def validate_claim(%{"projection_version" => version} = evidence)
+      when is_binary(version) and not is_map_key(@group_versions, version) do
+    if r_present?(evidence),
+      do: {:error, "#{version} evidence cannot carry a response layout"},
+      else: :ok
+  end
+
   def validate_claim(%{"projection_version" => version} = evidence)
       when is_map_key(@group_versions, version) do
     group = Map.fetch!(@group_versions, version)
     all = Map.values(@group_versions) |> List.flatten() |> Enum.uniq()
     present = Enum.filter(all, &Map.has_key?(evidence, &1))
 
-    if Enum.sort(present) == Enum.sort(group),
-      do: :ok,
-      else: {:error, "#{version} evidence requires exactly its complete context group"}
+    cond do
+      Enum.sort(present) != Enum.sort(group) ->
+        {:error, "#{version} evidence requires exactly its complete context group"}
+
+      r_present?(evidence) ->
+        {:error, "#{version} evidence cannot carry a response layout"}
+
+      true ->
+        :ok
+    end
   end
 
   def validate_claim(_evidence), do: :ok
@@ -228,10 +300,41 @@ defmodule SdrAgent.Agents.WitnessEvidence do
     present = Enum.filter(@group, &Map.has_key?(evidence, &1))
 
     cond do
-      present == [] and not Map.has_key?(evidence, @v3_key) -> :ok
+      present == [] and not Map.has_key?(evidence, @v3_key) -> validate_r(evidence)
       length(present) != length(@group) -> {:error, "context group is incomplete"}
       not counts_match?(evidence) -> {:error, "context group counts differ from lists"}
-      true -> :ok
+      true -> validate_r(evidence)
+    end
+  end
+
+  defp r_present?(evidence), do: Enum.any?(@r_keys, &Map.has_key?(evidence, &1))
+
+  # The R group: the layout, with both counts totalling 1..4 if and only if
+  # it is `reasoning_then_text`, and only beside the complete v3 group.
+  defp validate_r(evidence) do
+    counts = Enum.filter(@counts, &Map.has_key?(evidence, &1))
+
+    cond do
+      not r_present?(evidence) ->
+        :ok
+
+      not Map.has_key?(evidence, "response_layout") ->
+        {:error, "response layout group requires response_layout"}
+
+      not Enum.all?(Map.fetch!(@group_versions, @v3), &Map.has_key?(evidence, &1)) ->
+        {:error, "response layout group requires the complete v3 context group"}
+
+      evidence["response_layout"] != @admitted_layout ->
+        if counts == [], do: :ok, else: {:error, "a refusal layout carries no block counts"}
+
+      length(counts) != 2 ->
+        {:error, "an admitted layout carries both block counts"}
+
+      (evidence |> Map.take(@counts) |> Map.values() |> Enum.sum()) not in 1..@max_reasoning ->
+        {:error, "block counts must total 1 to #{@max_reasoning}"}
+
+      true ->
+        :ok
     end
   end
 
