@@ -13,8 +13,9 @@ PostgreSQL server writes its log, and what it may write there.
 The sink test starts throwaway devenv projects through the project's locked launcher. It
 sends synthetic canaries, then checks where every marker could land, using count-only
 searches of every file the launch path can write. The design is reviewed plan r2 as amended
-by r3, r4, r5, r6 and R6-1 (handoff `claude-5b-sink-plan-r*.md`). That plan, not this README,
-is normative.
+by r3, r4, r5, r6 and R6-1 (handoff `claude-5b-sink-plan-r*.md`), repaired per
+`claude-5b-harness-repair-plan.md`, its amendment and the binding A1/A2. Those documents, not
+this README, are normative.
 
 | File | Role |
 |---|---|
@@ -43,16 +44,28 @@ bash test/postgres_log_settings/sink-test.sh campaign  --scratch DIR --evidence 
 | Mode | What it does |
 |---|---|
 | `--dry-plan` | Prints the plan constants and the shape of each instance manifest. Builds nothing, starts nothing, creates nothing, reads no runtime or log path. |
-| `selftest` | T1–T18, including T15a–d, T17a/b and T18a–d with the R6-1 cases `d-vanish` and `d-rebind`. Each test must give its expected verdict, and anything it retains must be in the fixture registry. |
+| `selftest` | T1–T8, T9a/b, T10–T14, T15a–d, T16, T17a/b and T17-baseline, T18a–d with the R6-1 cases `d-vanish` and `d-rebind`, T19a–e, T20a–d, T21a–e, T22a–d, T23a–d, T24 and T25. Each test's observed class must equal its fixed expected class, its teardown proof must be complete, and an independent reconciliation must find nothing left that the test was not authorized to retain. The suite stops at the first other result (exit 3). |
 | `discovery` | One B-configured instance, two epochs, no markers. It records real exit statuses, socket outcomes and the inventory, and checks the API-socket lockout (EACCES) on the real sockets. |
-| `campaign` | In this order: positive controls P (E1, E2), audit controls A, then the candidate B (E1, E2, and the forced collector-start failure E3). Then the cross-instance search and the count-only report. |
+| `campaign` | In this order: positive controls P (E1, E2), audit controls A, then the candidate B (E1, E2, and the forced collector-start failure S5). Every epoch needs a complete classification; an INCOMPLETE one stops the run before any later instance. Then the cross-instance search over SNAP-0, SNAP-pre and SNAP-post of every required epoch, and the count-only report. S5 must show the forced failure was exercised, otherwise the result is NOT-EXERCISED (exit 4, roots retained). |
 
 Exit status: 0 pass; 2 refusal (nothing was started); 3 HOLD (uncertainty; everything is
 retained); 4 FAIL.
 
+Every wait on a background job has a monotonic deadline. A job still running at its deadline
+is HOLD, and the script never signals it. A stop is requested at most once per watcher, and
+never again after a HOLD.
+
 ### Guarantees and boundaries
 - **Never touched:** port 5520 or 4120, the owner's checkout, any existing `/tmp/devenv-*`,
-  any `.devenv/state` other than the throwaway roots it creates, and any owner log.
+  any owner log, and any owner, shared-app, runtime or database state.
+- **Dev shell (deviation D-5):** the client runs through `nix develop` in the candidate
+  worktree. Entering that shell runs devenv's `enterShell` and `files:cleanup` tasks in the
+  candidate worktree's **own** `.devenv` (build and dependency caches). That is the only
+  `.devenv` outside the throwaway roots that the harness causes to be written.
+- **Image checks (deviation D-7):** the package-bin-directory image check is supplementary.
+  The "no API client" fact H rests on the verified command and source closure plus the
+  watcher's image observations and the exact `/bin/sh` forms, never on the directory check
+  alone.
 - **Database access:** the client connects only over the claimed unix socket, to databases on
   the manifest's allowlist, and proves the server's identity before any mutation.
 - **On failure:** nothing is deleted. Evidence (dir 0700, files 0600) and instance roots are
