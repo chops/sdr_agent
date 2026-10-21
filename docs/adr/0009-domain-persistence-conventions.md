@@ -147,7 +147,7 @@ on PR #7 (https://github.com/chops/sdr_agent/pull/7#issuecomment-6029500570).
 (America/Denver, about 14:28 MDT), in the private Claude session chat,
 answering "yes" to "Accept the ADR-0009 C3 amendment (shared identity
 keys)?". Codex passed its text in the C3-01 round-4 entity review (PASS at
-1737063). No code depends on it yet; C3-02 implements it. Source: C3 readiness packet
+1737063). C3-02 (#56) implements it on branch c3-02-red; it takes effect when that PR merges. Source: C3 readiness packet
 (`docs/product/c3/readiness.md`, sections 5-7), Codex C3-01 entity review
 round 1 (NEEDS-REVIEW at 5987410).
 
@@ -215,7 +215,7 @@ the draft `claude-c302-adr0009-amendment-draft.md` (sha256
 review `c1847c86` gave that PASS. Apart from this status paragraph, the text
 below is exactly the text that PASS covered. The owner decided on 2026-10-19
 (D-174, Q-O3) that this is a new amendment, not a clarification of the C3
-amendment. No code depends on it yet; C3-02 implements it. Source: C3-02
+amendment. C3-02 (#56) implements it on branch c3-02-red; it takes effect when that PR merges. Source: C3-02
 module plan (`claude-c302-plan-r8.md`, sections 2.2-2.7).
 
 The C3 amendment's items 2-3 speak of "the transaction", and its item 1

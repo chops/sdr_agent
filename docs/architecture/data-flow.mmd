@@ -65,6 +65,19 @@ flowchart LR
         Classify[ReplyWorker queue agent -> ClassifyReply<br/>reply_classification + ReplyAssessment, no draft]
     end
 
+    subgraph Admission["Lead admission (C3-02): SDR.admit_lead/2 inside Guard.run"]
+        Admit["admit_lead: active human admin; referral refused (C3-03);<br/>input normalized; real-data guard. Refusals write nothing"]
+        AdmitPass["One IdentityKeys entry pass, before any domain row lock:<br/>admission-ref, company, email, email host"]
+        Replay["Replay: same ref and input hash returns the stored admission, writes nothing;<br/>a different hash is source_ref_conflict"]
+        Decide["Decision table under campaign / account / contact / open-lead SHARE locks,<br/>real-data guard again on the stored values;<br/>closed-reason refusals (campaign, settings, conflict) roll back, nothing written"]
+        Recorded["Refused outcome (suppressed, duplicate open lead, active target, ...):<br/>one LeadAdmission row + event; no account, contact, lead or run"]
+        Admitted["Admitted only: Account / Contact if new, LeadAdmission,<br/>Lead :create + :assign (held keys), Assignment.queue: run + snapshot + Operation + job + signal, one txn"]
+    end
+
+    subgraph Keys["Identity keys (Audit.IdentityKeys; non-process helper)"]
+        KeyPass["One pass per application scope (outermost Repo transaction):<br/>transaction-scoped advisory locks, ascending, then the published pass record"]
+    end
+
     subgraph Calibration["R0-07 calibration (test-seam console only; calibration-runtime.md)"]
         CalCmd[Calibrate command<br/>owner-typed, single flight]
         CalServer[Private ClaudeCLI server<br/>unnamed, one sealed call]
@@ -156,6 +169,22 @@ flowchart LR
     Postgres -- agent job --> Classify
     Classify --> Provider
     Classify --> Domains
+    Admit --> AdmitPass
+    AdmitPass --> KeyPass
+    AdmitPass --> Replay
+    Replay -- "no stored admission for the ref" --> Decide
+    Decide -- "refused outcome" --> Recorded
+    Decide -- "admitted" --> Admitted
+    Recorded --> Domains
+    Admitted --> Domains
+    Admitted -- "Oban.insert same txn" --> Postgres
+    Admitted -- same transaction --> Append
+    Actions -. "entry pass before any domain row lock: Account :create / :update (domain), Contact :create / :change_email, Lead :reopen, Qualification :override, Suppression :manual; their :seed actions dev/test only" .-> KeyPass
+    Actions -. "held membership only, no acquisition: Lead :create / :assign under the admission marker, override lead transitions, Suppression :from_webhook" .-> KeyPass
+    Actions -. "Qualification :record: lead FOR UPDATE first, no identity key" .-> Postgres
+    Process -. "after its own WebhookEvent row lock: one pass, then the domain suffix" .-> KeyPass
+    Classify -. "Suppression :from_classification: pass only after the model call returned" .-> KeyPass
+    KeyPass --> Postgres
 
     %% Project shape: single
     %% Detected data layers:

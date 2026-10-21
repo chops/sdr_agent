@@ -1,6 +1,6 @@
 # Component Relationships
 
-Generated: 2026-10-06
+Generated: 2026-10-06 (Audit.IdentityKeys helper (C3-02) added by hand, 2026-10-21, synced from `components.mmd`)
 
 Project shape: single
 
@@ -47,6 +47,7 @@ graph TB
     subgraph Ash["Ash Framework"]
         Domains["Domains (7)"]
         Resources["Resources (57)"]
+        IdentityKeys["Audit.IdentityKeys helper: no process, not a domain<br/>one pass per application scope; scope root = outermost Repo transaction (Repo.prepare_transaction/2)"]
     end
 
     subgraph ModelServerTree["C2-02b2 model server tree: ProfileSupervisor, rest_for_one"]
@@ -123,6 +124,8 @@ graph TB
     Controllers --> Domains
     LiveViews --> Domains
     Domains --> Resources
+    Domains -. "identity writers: entry pass or held membership, before any domain row lock" .-> IdentityKeys
+    WebhookWorker -. "after its own WebhookEvent row lock" .-> IdentityKeys
     App --> Relay
     Domains -. audit append: pg_notify, delivered at commit .-> Relay
     Relay -- tenant topic --> PubSub
