@@ -12,8 +12,10 @@ defmodule SdrAgent.Agents.Witness.AllowlistTest do
   """
   use ExUnit.Case, async: false
 
+  alias SdrAgent.AdmissionFixtures
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.Witness
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI
 
   @v3 "claude-message-json/3+prompt-builder/1"
 
@@ -203,6 +205,75 @@ defmodule SdrAgent.Agents.Witness.AllowlistTest do
       end
 
       assert Keyword.get(Application.get_env(:sdr_agent, Witness, []), :reconciled_methods) == []
+    end
+  end
+
+  # Witness response-block plan r5, T6 (E1/E5; ADR-0005 response-layout
+  # amendment item 7, D-182): no v4 entry ships with the grammar, the v3
+  # tuples still promote, and a v4 entry promotes only as an exact tuple once
+  # v4 is a current projection of the builder. Tests named `control: ...`
+  # are expected to pass now and after GREEN; the others are intended
+  # failures.
+  describe "projection v4 (witness response-block plan r5, T6)" do
+    @v4 "claude-message-json/4+prompt-builder/1"
+
+    defp gen2(profile) do
+      provenance = ClaudeCLI.provenance(profile)
+
+      struct(ModelInvocation, %{
+        provider: :claude_cli,
+        provider_version: provenance.provider_version,
+        profile_id: profile,
+        model_id: provenance.model_id,
+        ledger_generation: 2
+      })
+    end
+
+    defp v4_entry(profile \\ :claude_cli_opus),
+      do: %{AdmissionFixtures.entry(profile) | projection_version: @v4}
+
+    test "control: the shipped v3 tuples still promote their own identities" do
+      [opus_entry, sonnet_entry] = @shipped_gen2
+      opus = %{gen2(:claude_cli_opus) | provider_version: opus_entry.cli_version}
+      sonnet = %{gen2(:claude_cli_sonnet) | provider_version: sonnet_entry.cli_version}
+
+      assert Witness.promoted?(opus, @shipped_gen2)
+      assert Witness.promoted?(sonnet, @shipped_gen2)
+      refute Witness.promoted?(opus, [sonnet_entry])
+      refute Witness.promoted?(sonnet, [opus_entry])
+    end
+
+    test "an exact v4 entry promotes its identity" do
+      assert Witness.promoted?(gen2(:claude_cli_opus), [v4_entry()])
+    end
+
+    test "control: a v4 entry promotes nothing but its exact tuple" do
+      v4 = v4_entry()
+      opus = gen2(:claude_cli_opus)
+
+      for {label, entries, identity} <- [
+            {"the Sonnet identity", [v4], gen2(:claude_cli_sonnet)},
+            {"another CLI version", [%{v4 | cli_version: "9.9.9"}], opus},
+            {"another model", [%{v4 | model_id: "claude-sonnet-5-5"}], opus},
+            {"another profile", [%{v4 | profile_id: :claude_cli_sonnet}], opus},
+            {"a nil profile", [%{v4 | profile_id: nil}], opus},
+            {"another method", [%{v4 | method: :time_window}], opus},
+            {"an extra key", [Map.put(v4, :stage, :calibration)], opus},
+            {"another builder suffix",
+             [%{v4 | projection_version: "claude-message-json/4+prompt-builder/2"}], opus},
+            {"a prefixed id", [%{v4 | projection_version: "x" <> @v4}], opus},
+            {"a generation-1 row", [v4], %{opus | ledger_generation: 1}}
+          ] do
+        refute Witness.promoted?(identity, entries), label
+      end
+    end
+
+    test "control: the exact v4 tuple is allowlisted only for the projection it names" do
+      put_entries([v4_entry()])
+      opus = %{opus() | provider_version: AdmissionFixtures.entry().cli_version}
+      assert allowlisted?(opus, @v4)
+      refute allowlisted?(opus, @v3)
+      refute allowlisted?(sonnet(), @v4)
     end
   end
 
