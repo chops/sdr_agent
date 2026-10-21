@@ -987,6 +987,85 @@ risk decision. Codex and Claude recommend full protection for it.
   the text from ordinary logs, URLs, stored rows, audit payloads, captured
   application telemetry and exported spans.
 
+#### Response-layout amendment (2026-10-20): projection v4
+
+**Status: ACCEPTED.** The owner accepted this amendment on 2026-10-20
+(D-182), at the exact text Codex approved for owner presentation
+(witness response-block plan r5, section 8). Acceptance starts the T1 to
+T6 grammar slice only; it is not proof, enablement, merge or spend
+approval.
+
+**Context.** G-DEMO attempt 2's one ordinary Opus output was withheld
+(`witness_missing`): its response was not exactly one text block
+(`response_block_unsupported`). Which blocks it held is not established.
+This amendment adds a candidate grammar; it attributes no cause.
+
+**Decision.**
+1. **Grammar.** Add `claude-message-json/4+prompt-builder/1`: v3's request
+   contract and prompt-builder guard, unchanged, plus a response of 1 to 4
+   leading `thinking` or `redacted_thinking` blocks in total, then exactly
+   one `text` block, with nothing after it. `tool_use` stays a mismatch.
+   The stream first passes the unchanged shared v1 to v3 parser; its
+   refusals stay v3 refusals. A v4-only validator then checks each
+   reasoning block syntactically:
+   - `thinking` starts as exactly `{type, thinking: "", signature: ""}`,
+     with zero or more string `thinking_delta`s, then one or more string
+     `signature_delta`s with a non-empty combined value, then stop;
+   - `redacted_thinking` is exactly `{type, data: <string>}` with no deltas;
+   - anything else is `reasoning_unparsed`.
+
+   There is no local authentication, decryption or benignity claim.
+2. **Claim and privacy.** The stdin and the structured output are equal.
+   CLI context is recorded, not proven equal or benign. The v4 application
+   link evidence adds only a closed layout label and, for an admitted
+   layout, block counts. It adds no reasoning text, signature, encrypted
+   data or per-block digest to application evidence. The owner's existing
+   raw proxy capture, its retention and its access controls are unchanged.
+   Reasoning contents are not part of the equality claim.
+3. **Selection.** v2, then v3, then v1 as before. v4 is evaluated only for
+   a v3-selected request when all of these hold: the current prompt
+   builder; a passing v3 contract; a `:match`ed request; a decodable
+   application output; a stream the shared parser accepts; no `tool_use`;
+   and a block list other than one text block. These are exactly v3's
+   response-layout refusal. Everything else keeps its v3, v2 or v1 result:
+   v2-admitted requests, single-text responses, mismatches, malformed
+   streams, unreadable application output and contract-invalid evidence.
+   Invalid evidence is never healed by v4, and a failed v4 contract never
+   falls back to v3. v4 is never evaluated first.
+4. **Evidence.** `response_layout` is a closed enum. The thinking and
+   redacted-thinking counts are present only for `reasoning_then_text`,
+   totalling 1 to 4. They are never zero-filled or saturated, and refusals
+   carry no counts. The full v3 request group is required. Downgrades keep
+   the whole group without a projection. R is refused for v1 to v3. Each
+   other refusal has one closed code. The 4096-byte cap is unchanged.
+5. **Inapplicability.** `projections_inapplicable` keeps its request-only
+   meaning; a v4 link carries `["v2"]`.
+6. **Lineage.** A v4 successor never supersedes a mismatch head. This is
+   enforced in `put_link`, in the link action's lineage validation, and in
+   the database by a new migration that replaces the lineage function's
+   body (its down restores the exact previous body). C3 is otherwise
+   unchanged.
+7. **Proof and enablement.** No v4 allowlist entry ships with the grammar.
+   First, the reviewed harness: the closed `calibrate claude_cli_opus
+   --projection v4` syntax; typed `V4` confirmation; a one-attempt Opus
+   proof-grant family with owner-fixed start and expiry and no runtime
+   override; and the distinct `:binding_family` launch check. Then one
+   owner-granted synthetic calibration call with `calibration-prompt/1`.
+   Only `match` counts as v4 evidence. `projection_differs`, `missing` and
+   every other outcome are STOP: no retry, no relabel, no widening. Then
+   Codex's independent evidence PASS. Then a separate enablement change for
+   the exact Opus tuple. Sonnet needs its own proof.
+8. **Unchanged.** Admission before spend, the result gate, release
+   immutability, "never released to the original run", concurrency 1,
+   the test-only overrides, the G-R0 family, and the existing single-text
+   v2 and v3 behaviour, including release when the tuple is enabled.
+
+**Consequences.** A response with leading reasoning blocks can become
+releasable only after the proof and enablement. Other v4-eligible layouts
+stay withheld, with a finer code. One more projection is to be maintained.
+The proof may STOP without v4 evidence if the model replies with a single
+text block, or with a layout outside the grammar.
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),
