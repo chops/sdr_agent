@@ -47,7 +47,17 @@ defmodule SdrAgent.Outreach.Locks do
   @doc "Open lead states (a suppression stops these; terminal leads keep their state)."
   def open_leads, do: @open_leads
 
-  @doc "Ids of the contacts a suppression of `scope` / `value` (normalised) covers."
+  @doc """
+  Ids of the contacts a suppression of `scope` / `value` (normalised)
+  covers: `:email`, the contact email equals the value; `:domain`, the
+  contact email's domain equals the value, or (C3-02 G6, plan r8 section
+  16.3, packet section 3) the canonical domain of the contact's account
+  does (`sdr_canonical_domain`, the A.5 fence's and the
+  `accounts_canonical_domain_index` form). Status is ignored, as for the
+  email-domain match. An unlocked, tenant-scoped id read: under the
+  suppression's key, every writer that can change a company's coverage
+  (Account `:create`, `:seed`, `:update` of the domain) takes the same key.
+  """
   def contacts(tenant_id, :email, value) do
     Contact
     |> Ash.Query.filter(tenant_id == ^tenant_id and email == ^value)
@@ -57,7 +67,13 @@ defmodule SdrAgent.Outreach.Locks do
   def contacts(tenant_id, :domain, value) do
     Contact
     |> Ash.Query.filter(
-      tenant_id == ^tenant_id and fragment("lower(split_part(?::text, '@', 2))", email) == ^value
+      tenant_id == ^tenant_id and
+        (fragment("lower(split_part(?::text, '@', 2))", email) == ^value or
+           exists(
+             account,
+             tenant_id == ^tenant_id and
+               fragment("sdr_canonical_domain(?::text)", domain) == ^value
+           ))
     )
     |> ids()
   end

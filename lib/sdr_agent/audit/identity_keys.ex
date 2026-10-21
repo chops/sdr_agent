@@ -5,10 +5,14 @@ defmodule SdrAgent.Audit.IdentityKeys do
 
   **Ids.** `id(tenant_id, kind, raw)` is the key id of a raw key input:
   `K_domain(raw) = H("domain", tenant, strip(key_value(:domain, raw)))`,
-  `K_email(raw) = H("email", tenant, key_value(:email, raw))` and
+  `K_email(raw) = H("email", tenant, key_value(:email, raw))`,
   (C3-02 G4) `K_admission-ref(ref) = H("admission-ref", tenant, ref)`, the
   exact admission `source_ref` (validated by the admission before its
-  pass; no trim, case or host normalization here), where
+  pass; no trim, case or host normalization here), and (C3-02 G6)
+  `K_reply-message(m) = H("reply-message", tenant, m)`, the exact bytes of
+  the represented Message-ID the webhook derives once from the payload
+  (plan r8 section 16.4: the value `Reply.message_id` stores; never the raw
+  payload string; no trim or case folding here), where
   `H(kind, tenant, bytes)` is the first 8 bytes of
   `sha256("sdr-identity-key/1\\0" <> kind <> "\\0" <> tenant_id <> "\\0" <>
   bytes)` read as a signed 64-bit integer (`Normalize`, section 2.7).
@@ -65,7 +69,7 @@ defmodule SdrAgent.Audit.IdentityKeys do
 
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
-  @kinds [:domain, :email, :"admission-ref"]
+  @kinds [:domain, :email, :"admission-ref", :"reply-message"]
 
   # Section 2.4: the one state query, no lock clause.
   @state_sql """
@@ -85,7 +89,7 @@ defmodule SdrAgent.Audit.IdentityKeys do
   @lock_sql "SELECT pg_advisory_xact_lock($1::bigint)"
   @publish_sql "SELECT set_config('sdr.identity_pass', $1, true)"
 
-  @type kind :: :domain | :email | :"admission-ref"
+  @type kind :: :domain | :email | :"admission-ref" | :"reply-message"
   @type key :: {kind(), String.t()}
 
   @doc "The key id of a raw key input of `kind` for `tenant_id` (see the moduledoc)."
@@ -107,8 +111,9 @@ defmodule SdrAgent.Audit.IdentityKeys do
   defp preimage(:domain, raw), do: Normalize.strip(Normalize.key_value(:domain, raw))
   defp preimage(:email, raw), do: Normalize.key_value(:email, raw)
 
-  defp preimage(:"admission-ref", raw) when is_binary(raw) and raw != "" do
-    if String.valid?(raw), do: raw, else: raise(InvalidKeyValue, kind: :"admission-ref")
+  defp preimage(kind, raw)
+       when kind in [:"admission-ref", :"reply-message"] and is_binary(raw) and raw != "" do
+    if String.valid?(raw), do: raw, else: raise(InvalidKeyValue, kind: kind)
   end
 
   defp preimage(kind, _raw), do: raise(InvalidKeyValue, kind: kind)
