@@ -474,6 +474,145 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
     end
   end
 
+  # Codex 9ef62e5 G2: the operational receipt (`Harness.prove_with_receipts/1`).
+  describe "operational receipts (stubbed children, no database)" do
+    @drop_facts "WM-CHILD backends_before_drop=0\nWM-CHILD database_absent_after_drop=true\n"
+
+    test "a completed run records target, versions, child outcomes, states and cleanup" do
+      sfx = suffix()
+      root = tmp_root()
+      {runner, _steps} = stub("sdr_agent_test" <> sfx, %{drop: {:ok, @drop_facts}})
+
+      assert {{:ok, _states}, receipts} =
+               Harness.prove_with_receipts(
+                 suffix: sfx,
+                 tmp_root: root,
+                 versions: @versions,
+                 runner: runner
+               )
+
+      facts = Map.new(receipts)
+      assert length(receipts) == map_size(facts), "one fact per key"
+      assert facts["target_database"] == "sdr_agent_test" <> sfx
+      assert facts["temp_folder"] == owned_tmp(root, sfx)
+      assert facts["migration_predecessor"] == "20261016052435"
+      assert facts["migration_new"] == "20261021000000"
+      assert facts["child.claim"] == "exit:0"
+
+      for state <- @states do
+        assert facts["child.migrate.#{state}"] == "exit:0", state
+        assert facts["child.probe.#{state}"] == "exit:0", state
+        assert facts["state.#{state}.check_count"] == "1", state
+        assert facts["state.#{state}.check.stub"] == "unexpected", "closed results only"
+      end
+
+      assert {facts["migrate.down.direction"], facts["migrate.down.version"]} ==
+               {"down", "20261021000000"}
+
+      assert {facts["migrate.predecessor.direction"], facts["migrate.predecessor.version"]} ==
+               {"up", "20261016052435"}
+
+      assert Map.take(facts, ~w(child.drop cleanup.drop_attempted cleanup.drop_mode
+                               cleanup.drop_result cleanup.backends_before_drop
+                               cleanup.database_absent_after_drop cleanup.temp_folder outcome)) ==
+               %{
+                 "child.drop" => "exit:0",
+                 "cleanup.drop_attempted" => "true",
+                 "cleanup.drop_mode" => "normal",
+                 "cleanup.drop_result" => "ok",
+                 "cleanup.backends_before_drop" => "0",
+                 "cleanup.database_absent_after_drop" => "true",
+                 "cleanup.temp_folder" => "removed",
+                 "outcome" => "ok"
+               }
+
+      refute Map.has_key?(facts, "cleanup.temp_folder_retained_reason")
+    end
+
+    test "an unconfirmed child records the hold: no drop, folder retained, and why" do
+      sfx = suffix()
+      {runner, _steps} = stub("sdr_agent_test" <> sfx, %{probe: {:timeout, :unconfirmed, ""}})
+
+      assert {{:error, _}, receipts} =
+               Harness.prove_with_receipts(
+                 suffix: sfx,
+                 tmp_root: tmp_root(),
+                 versions: @versions,
+                 runner: runner
+               )
+
+      facts = Map.new(receipts)
+      assert facts["child.probe.predecessor"] == "timeout:unconfirmed"
+
+      assert Map.take(facts, ~w(cleanup.drop_attempted cleanup.temp_folder
+                               cleanup.temp_folder_retained_reason outcome)) == %{
+               "cleanup.drop_attempted" => "false",
+               "cleanup.temp_folder" => "retained",
+               "cleanup.temp_folder_retained_reason" => "unconfirmed_child",
+               "outcome" => "error"
+             }
+
+      refute Map.has_key?(facts, "child.drop")
+    end
+
+    test "a failed drop records its outcome and the retained folder" do
+      sfx = suffix()
+      {runner, _steps} = stub("sdr_agent_test" <> sfx, %{drop: {:exit, 1, "busy"}})
+
+      assert {{:error, {:cleanup_failed, _, _}}, receipts} =
+               Harness.prove_with_receipts(
+                 suffix: sfx,
+                 tmp_root: tmp_root(),
+                 versions: @versions,
+                 runner: runner
+               )
+
+      facts = Map.new(receipts)
+
+      assert Map.take(facts, ~w(child.drop cleanup.drop_result cleanup.backends_before_drop
+                               cleanup.database_absent_after_drop cleanup.temp_folder
+                               cleanup.temp_folder_retained_reason)) == %{
+               "child.drop" => "exit:1",
+               "cleanup.drop_result" => "failed",
+               "cleanup.backends_before_drop" => "unreported",
+               "cleanup.database_absent_after_drop" => "unreported",
+               "cleanup.temp_folder" => "retained",
+               "cleanup.temp_folder_retained_reason" => "drop_failed"
+             }
+    end
+
+    test "child outcomes and drop facts are closed labels only" do
+      assert Enum.map(
+               [
+                 {:ok, "secret output"},
+                 {:exit, 4, "REFUSED x"},
+                 {:timeout, :confirmed, "x"},
+                 {:timeout, :unconfirmed, "x"},
+                 {:not_started, {:executable_unusable, "/x"}},
+                 {:raised, %RuntimeError{message: "x"}},
+                 :other
+               ],
+               &Harness.child_outcome/1
+             ) ==
+               ~w(exit:0 exit:4 timeout:confirmed timeout:unconfirmed not_started raised unknown)
+
+      assert Harness.drop_facts(@drop_facts) ==
+               %{"backends_before_drop" => "0", "database_absent_after_drop" => "true"}
+
+      assert Harness.drop_facts(
+               "WM-CHILD backends_before_drop=many\nWM-CHILD database_absent_after_drop=yes\n" <>
+                 "WM-CHILD other=1\nnoise backends_before_drop=0\n"
+             ) == %{}
+    end
+
+    test "prove/1 still returns the bare outcome" do
+      sfx = suffix()
+      {runner, _steps} = stub("sdr_agent_test" <> sfx)
+      assert {:ok, states} = prove(sfx, runner)
+      assert Enum.sort(Map.keys(states)) == Enum.sort(@states)
+    end
+  end
+
   ## Helpers
 
   # The names of a script's top-level calls, in order (`Mod.fun(...)`,

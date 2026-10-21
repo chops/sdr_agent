@@ -96,7 +96,9 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
           {"drop, unconfigured", "drop.exs", [unconfigured], "target_not_configured"}
         ] do
       status = Harness.target_refused()
-      assert {:exit, ^status, output} = runner.(:refusal, child_args(script, args)), label
+      result = runner.(:refusal, child_args(script, args))
+      publish_refusal!(label, hd(args), result)
+      assert {:exit, ^status, output} = result, label
       assert output =~ "REFUSED #{reason}", "#{label}: #{output}"
       refute output =~ "VALIDATED", label
       refute output =~ "STARTING", label
@@ -111,13 +113,17 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
 
     sfx = suffix()
 
-    outcome =
-      Harness.prove(
+    {outcome, receipts} =
+      Harness.prove_with_receipts(
         suffix: sfx,
         tmp_root: System.tmp_dir!(),
         versions: versions,
         runner: Harness.checked_runner(mix!(), sfx, @root, 600_000)
       )
+
+    # The operational receipt is published before any assertion, after
+    # every cleanup decision; a failed write fails the test.
+    Enum.each(receipts, fn {key, value} -> publish!(key, value) end)
 
     assert {:ok, states} = outcome
     assert Enum.sort(Map.keys(states)) == Enum.sort(@states)
@@ -125,5 +131,60 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
     assert states["up"] == expected(true), "after up: the v4 restriction is active"
     assert states["down"] == expected(false), "after down: the old C3 exactly, v4 permitted"
     assert states["up_again"] == expected(true), "after the second up: refused again"
+    assert_receipt_complete(receipts, "sdr_agent_test" <> sfx, versions)
+  end
+
+  ## Operational receipts (Codex 9ef62e5 G2): `WM-RECEIPT key=value`, one
+  ## fact per line, closed keys and closed or synthetic values only.
+
+  defp publish!(key, value) do
+    line = "WM-RECEIPT #{key}=#{value}\n"
+    :ok = IO.write(line)
+  end
+
+  # The case key and refused target of one wrong-target child, and what it
+  # did; never its output text beyond the closed refusal reason.
+  defp publish_refusal!(label, target, result) do
+    key = "refusal." <> (label |> String.replace(", ", "_") |> String.replace(" ", "_"))
+    output = if match?({_, _, out} when is_binary(out), result), do: elem(result, 2), else: ""
+
+    reason =
+      case Regex.run(~r/^REFUSED ([a-z_]{1,64})$/m, output) do
+        [_, reason] -> reason
+        nil -> "none"
+      end
+
+    publish!(key <> ".target", target)
+    publish!(key <> ".outcome", Harness.child_outcome(result))
+    publish!(key <> ".reason", reason)
+    publish!(key <> ".validated", to_string(output =~ "VALIDATED"))
+    publish!(key <> ".started", to_string(output =~ "STARTING"))
+  end
+
+  # Every required fact was observed (receipt completeness, not behaviour:
+  # the behaviour assertions above are unchanged).
+  defp assert_receipt_complete(receipts, database, versions) do
+    facts = Map.new(receipts)
+    assert length(receipts) == map_size(facts), "one fact per key"
+    assert facts["target_database"] == database
+    assert facts["temp_folder"] =~ "sdr-witness-migration_wm"
+    assert facts["migration_predecessor"] == Integer.to_string(versions.predecessor)
+    assert facts["migration_new"] == Integer.to_string(versions.new)
+    assert facts["child.claim"] == "exit:0"
+
+    for state <- @states do
+      assert facts["child.migrate.#{state}"] == "exit:0", state
+      assert facts["child.probe.#{state}"] == "exit:0", state
+      assert facts["state.#{state}.check_count"] == Integer.to_string(map_size(expected(true)))
+
+      for {check, _} <- expected(true),
+          do: assert(Map.has_key?(facts, "state.#{state}.check.#{check}"), "#{state} #{check}")
+    end
+
+    for key <- ~w(child.drop cleanup.drop_attempted cleanup.drop_mode cleanup.drop_result
+                  cleanup.backends_before_drop cleanup.database_absent_after_drop
+                  cleanup.temp_folder outcome) do
+      assert Map.has_key?(facts, key), key
+    end
   end
 end
