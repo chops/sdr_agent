@@ -2,21 +2,28 @@
 """5b sink test: self-test fixtures and synthetic self-tests.
 
 Plan r2 9, r3 7, r4 2.6/3.5, r5 2.3/3.4, r6 2, R6-1 T18d; repaired per
-claude-5b-harness-repair-plan.md (35a4926f), its amendment (25092856) and A1/A2.
+claude-5b-harness-repair-plan.md (35a4926f), its amendment (25092856), A1/A2, the ba40b5b
+dispositions (74d41237) and their binding Q1-Q4.
 
-Run only by sink-test.sh in `selftest` mode, with the locked-nixpkgs python3 (-I).
+Run only by sink-test.sh in `selftest` mode, with the locked-nixpkgs python3 (-I), each
+test under the shell's independent outer controller (`run_guarded`).
 
-Registry (repair H3): every fixture gets an INTENT record before it is created and an
-IDENTITY record after (path: dev/ino/type/mode; process: pid, birth_us, ppid at start,
-uid). A test's verdict is computed here, not by the caller: the observed refusal class
-must equal the test's fixed expected class, the teardown proof must be complete, and an
-independent reconciliation must find no leftover that is not explicitly authorized for
-retention. Anything else is REAL-UNCERTAINTY, and the suite stops.
+Registry (H3, Q3): every fixture gets an INTENT record before it is created (for a
+directory, with its declared contents: a pre-creation contract, never adopted after a
+scan) and an IDENTITY record after (path: dev/ino/type/mode; process: pid, birth_us, ppid
+at start, uid). Each test id has a fixed proof contract (REQUIRED_PROOF) and a fixed
+retention contract (RETENTION). A verdict is computed here, not by the caller: the observed
+class must equal one of the test's fixed expected classes, every required proof field must
+be present and "ok" (or an allowed "not-applicable:<reason>"), and an independent
+reconciliation (full trees of registered fixture dirs, retained instance inventories, the
+run root, fixture processes) must find nothing unauthorized. Disposal is validated before
+anything is deleted. Anything else is REAL-UNCERTAINTY, and the suite stops.
 
-Fixture processes are owned children with retained Popen handles, or shell jobs whose
-identity is recorded; they are stopped only by identity (SIGTERM, bounded wait) and the
-T19 subjects end by themselves (amendment R1). Labels: `fixture-synthetic` marks
-classifier inputs built here; `kernel-event` / `fixture-handshake` mark measured facts.
+Fixture processes are owned children with retained Popen handles (or shell jobs whose
+identity is recorded); they are stopped only by identity (SIGTERM, bounded wait) and the
+T19/T26 subjects end by themselves (amendment R1). Every handshake line is bounded as a
+whole (Q2). Labels: `fixture-synthetic` marks classifier inputs built here;
+`kernel-event` / `fixture-handshake` mark measured facts.
 """
 
 import ctypes
@@ -39,11 +46,52 @@ PY = sys.executable
 L_FIXTURE = 8.0      # autonomous fixture lifetime (amendment R1)
 D_SUBJECT = 1.0      # injected per-stage subject deadline
 D_REAP = 20.0        # outer reap deadline
+D_LINE = 10.0        # whole-line handshake bound (Q2)
 FORK_CLASS = "fork in window by role fixture-writer without source-gated attribution"
+PASSING = ("PASS", "EXPECTED-REFUSAL")
 
 
 class RealUncertainty(Exception):
     """An actual (not expected) identity, observation or teardown uncertainty."""
+
+
+# ---------------------------------------------------------------- per-id contracts (Q3)
+REQ, NA = "required", "may-be-na"
+REQUIRED_PROOF = {}
+
+
+def _proof(ids, **fields):
+    for i in ids:
+        REQUIRED_PROOF[i] = dict(fields)
+
+
+_proof(["T9a", "T9b", "T10", "T11", "T12", "T15d", "T16", "T17a", "T17b", "T18a", "T18b",
+        "T18c", "T18d", "T18d-vanish", "T18d-rebind", "T20a", "T20b", "T20c", "T20d", "T20e",
+        "T20f", "T21a", "T21b", "T21c", "T21d", "T21e", "T22a", "T22b", "T22d", "T24", "T27"],
+       fixtures=REQ)
+_proof(["T17-baseline", "T22c", "T23a", "T23b", "T23c", "T23d", "T23e", "T26d"], fixtures=NA)
+_proof(["T19a"], launcher_reap=REQ, fixtures=REQ)
+_proof(["T19b", "T19c", "T19d", "T19f", "T19g", "T19i", "T26a", "T26c"], outer_reap=REQ,
+       fixtures=REQ)
+_proof(["T26b"], fixtures=REQ)
+_proof(["T1", "T2", "T14"], fixtures=REQ, cleanup=REQ)
+_proof(["T3"], fixtures=REQ)
+_proof(["T13"], cleanup=REQ)
+_proof(["T19e"], subject_receipt=REQ, outer_reap=REQ)
+_proof(["T19h"], observer_receipt=REQ, outer_reap=REQ, descendants=REQ)
+_proof(["T4a", "T4b"], stop_barrier=REQ, fixtures=REQ, cleanup=NA)
+_proof(["T5"], db_exists_client=REQ, stop_barrier=REQ, cleanup=REQ)
+_proof(["T6"], stop_barrier=REQ, cleanup=NA)
+_proof(["T7"], stop_barrier=REQ, fixtures=REQ, cleanup=NA)
+_proof(["T8"], fixtures=REQ, second_barrier=REQ, cleanup=REQ)
+_proof(["T15a", "T15b"], stop=REQ, barrier=REQ, cleanup=NA)
+_proof(["T15c"], stop=REQ, barrier=REQ, fixtures=REQ, cleanup=NA)
+_proof(["T25"], stop_barrier=REQ, cleanup=REQ)
+
+RETENTION = {t: ("root-" + t, "runtime-" + t) for t in ("T4a", "T4b", "T6", "T15a", "T15b",
+                                                         "T15c")}
+RETENTION["T7"] = ("root-T7", "runtime-T7", "standby-signal")
+INSTANCE_KINDS = ("instance-root", "instance-runtime")
 
 
 # ---------------------------------------------------------------- registry
@@ -60,11 +108,16 @@ def save(d, r):
     W.jdump(r, reg_path(d))
 
 
-def intent(d, test, label, kind):
+def intent(d, test, label, kind, contents=None):
+    """INTENT before creation. A directory's `contents` (relative paths; "X/**" for a
+    subtree created by a named tool) is a pre-creation contract."""
     r = registry(d)
     if any(f["test"] == test and f["label"] == label for f in r["fixtures"]):
         raise RealUncertainty("duplicate fixture label %s/%s" % (test, label))
-    r["fixtures"].append({"test": test, "label": label, "kind": kind, "intent_t": W.now()})
+    rec = {"test": test, "label": label, "kind": kind, "intent_t": W.now()}
+    if kind == "dir":
+        rec["contents"] = sorted(contents or [])
+    r["fixtures"].append(rec)
     save(d, r)
 
 
@@ -72,10 +125,22 @@ def set_identity(d, test, label, ident):
     r = registry(d)
     for f in r["fixtures"]:
         if f["test"] == test and f["label"] == label:
+            if "identity" in f:
+                raise RealUncertainty("identity recorded twice: %s/%s" % (test, label))
             f["identity"] = ident
             save(d, r)
             return
     raise RealUncertainty("identity without intent: %s/%s" % (test, label))
+
+
+def mark(d, test, label, **kw):
+    r = registry(d)
+    for f in r["fixtures"]:
+        if f["test"] == test and f["label"] == label:
+            f.update(kw)
+            save(d, r)
+            return
+    raise RealUncertainty("unregistered fixture %s/%s" % (test, label))
 
 
 def path_identity(path):
@@ -92,8 +157,8 @@ def proc_identity(pid, ppid_at_start):
             "uid": cur["uid"]}
 
 
-def register_path(d, test, label, path, kind="dir"):
-    intent(d, test, label, kind)
+def register_path(d, test, label, path, kind="dir", contents=None):
+    intent(d, test, label, kind, contents)
     if kind == "dir":
         os.mkdir(path, 0o700)
     elif kind == "file":
@@ -103,10 +168,18 @@ def register_path(d, test, label, path, kind="dir"):
     return path
 
 
-def retain(d, test, labels):
-    """Explicit per-test retention authorization (amendment, H3)."""
+def retain(d, test, labels, manifests=(), contract=None):
+    """Explicit per-test retention (H3, Q3): only labels in the test's fixed contract."""
+    allowed = set(contract if contract is not None else RETENTION.get(test, ()))
+    extra = sorted(set(labels) - allowed)
+    if not allowed or extra:
+        raise RealUncertainty("retention outside the contract of %s: %r" % (test, extra or labels))
     r = registry(d)
-    r["retain"][test] = sorted(set(r["retain"].get(test, [])) | set(labels))
+    cur = r["retain"].get(test, {"labels": [], "manifests": []})
+    cur["labels"] = sorted(set(cur["labels"]) | set(labels))
+    cur["manifests"] = sorted(set(cur["manifests"]) | set(x for x in manifests if x))
+    cur["contract"] = sorted(allowed)
+    r["retain"][test] = cur
     save(d, r)
 
 
@@ -134,6 +207,27 @@ def reap(p, deadline_s):
         return p.wait(timeout=deadline_s)
     except subprocess.TimeoutExpired:
         raise RealUncertainty("owned fixture %d still alive after %.0f s" % (p.pid, deadline_s))
+
+
+def bounded_readline(pipe, deadline_s=D_LINE):
+    """One whole handshake line under one monotonic bound (Q2): byte reads after select,
+    never a blocking readline on partial data. Timeout or EOF is RealUncertainty."""
+    fd = pipe.fileno()
+    end = W.now() + deadline_s
+    buf = b""
+    while True:
+        left = end - W.now()
+        if left <= 0:
+            raise RealUncertainty("handshake line incomplete after %.0f s" % deadline_s)
+        ready, _, _ = select.select([fd], [], [], left)
+        if not ready:
+            continue
+        ch = os.read(fd, 1)
+        if not ch:
+            raise RealUncertainty("handshake pipe closed before a full line")
+        if ch == b"\n":
+            return buf.decode("utf-8", "replace").strip()
+        buf += ch
 
 
 def identity_gone(ident):
@@ -169,34 +263,135 @@ def kill_fixture(d, test, label):
     return "stopped"
 
 
+# ---------------------------------------------------------------- contents and disposal (Q3)
+def _covered(rel, allowed):
+    for a in allowed:
+        if a.endswith("/**"):
+            base = a[:-3]
+            if rel == base or rel.startswith(base + "/"):
+                return True
+        elif rel == a:
+            return True
+    return False
+
+
+def tree_strays(d, f):
+    """Objects under a registered fixture dir that are neither in its declared contents nor
+    registered (by any test) as fixtures below it. Uses W.walk (no follow, one device)."""
+    ident = f["identity"]
+    root = ident["path"]
+    allowed = list(f.get("contents", []))
+    for g in registry(d)["fixtures"]:
+        gi = g.get("identity") or {}
+        p = gi.get("path")
+        if p and p != root and p.startswith(root + "/"):
+            allowed.append(p[len(root) + 1:])
+            if g.get("kind") == "dir":
+                rel = p[len(root) + 1:]
+                allowed.extend(rel + "/" + c for c in g.get("contents", []))
+    try:
+        present = [rel for rel, _ in W.walk(root)]
+    except W.Fail as e:
+        return ["unwalkable %s: %s" % (root, str(e).split()[0])]
+    return ["undeclared object %s/%s" % (root, rel) for rel in sorted(present)
+            if not _covered(rel, allowed)]
+
+
+def dispose(d, test, label):
+    """Validated disposal (M3, Q3): identity, then contents, then no live users, and only
+    then removal. Any mismatch is RealUncertainty and the object is RETAINED."""
+    f = lookup(d, test, label)
+    ident = f.get("identity")
+    if not ident or "path" not in ident:
+        raise RealUncertainty("dispose %s/%s: no path identity" % (test, label))
+    path = ident["path"]
+    if not os.path.lexists(path):
+        raise RealUncertainty("dispose %s/%s: already gone" % (test, label))
+    cur = W.lstat_rec(path)
+    if (cur["dev"], cur["ino"], cur["type"]) != (ident["dev"], ident["ino"], ident["type"]):
+        raise RealUncertainty("dispose %s/%s: identity changed" % (test, label))
+    if cur["type"] == "dir":
+        strays = tree_strays(d, f)
+        if strays:
+            raise RealUncertainty("dispose %s/%s retained: %s" % (test, label, strays[:3]))
+        if W.open_handles_under(os.path.realpath(path)):
+            raise RealUncertainty("dispose %s/%s retained: open handles" % (test, label))
+        rc, _, _ = W.run(["/bin/rm", "-rf", "--", path], env=W.TOOL_ENV)
+        if rc != 0 or os.path.lexists(path):
+            raise RealUncertainty("dispose %s/%s: removal failed" % (test, label))
+    else:
+        os.unlink(path)
+    mark(d, test, label, disposed=W.now())
+    return "disposed"
+
+
 # ---------------------------------------------------------------- verdicts and reconciliation
+def _instance_audit(d, test_id, mp, auth, mine):
+    problems = []
+    try:
+        m = W.load_manifest(mp)
+    except (W.Refuse, OSError, ValueError, KeyError) as e:
+        return ["retained manifest unreadable: %s" % type(e).__name__]
+    by_path = {(f.get("identity") or {}).get("path"): f for f in mine}
+    for key, kind in (("root", "instance-root"), ("runtime", "instance-runtime")):
+        f = by_path.get(m[key])
+        if f is None or f.get("kind") != kind or f["label"] not in auth:
+            problems.append("retained %s not registered and authorized for %s" % (key, test_id))
+    try:
+        inv = W.inventory(m)
+    except (W.Fail, W.Hold, OSError) as e:
+        return problems + ["retained instance inventory failed: %s" % str(e).split()[0]]
+    fixture_paths = {(f.get("identity") or {}).get("path"): f for f in mine
+                     if f.get("kind") not in INSTANCE_KINDS}
+    for e in inv["entries"]:
+        p = e.get("path")
+        if p in fixture_paths and fixture_paths[p]["label"] not in auth:
+            problems.append("fixture object under retained root not authorized: %s" % p)
+    for top in (m["root"], m["runtime_canonical"]):
+        if os.path.lexists(top) and W.open_handles_under(top):
+            problems.append("open handles under retained %s" % top)
+    return problems
+
+
 def reconcile(d, test_id, runroot, retained_manifests=()):
-    """Independent leftover scan (repair H3). Returns a list of problems."""
+    """Independent leftover scan (H3, M3, Q3). Returns a list of problems."""
     r = registry(d)
     problems = []
-    auth = set(r["retain"].get(test_id, []))
+    ret = r["retain"].get(test_id, {"labels": [], "manifests": []})
+    auth = set(ret.get("labels", []))
+    manifests = sorted(set(retained_manifests) | set(ret.get("manifests", [])))
     registered_paths = {}
     for f in r["fixtures"]:
         ident = f.get("identity")
         if ident and "path" in ident:
             registered_paths[ident["path"]] = ident
-    for f in r["fixtures"]:
-        if f["test"] != test_id:
-            continue
+    mine = [f for f in r["fixtures"] if f["test"] == test_id]
+    covered_instances = set()
+    for f in mine:
         ident = f.get("identity")
         if ident is None:
             problems.append("intent without identity: %s" % f["label"])
             continue
         if "path" in ident:
-            if os.path.lexists(ident["path"]):
-                cur = W.lstat_rec(ident["path"])
-                if f["label"] not in auth:
-                    problems.append("leftover not authorized: %s" % ident["path"])
-                elif (cur["dev"], cur["ino"]) != (ident["dev"], ident["ino"]):
-                    problems.append("retained identity changed: %s" % ident["path"])
+            if not os.path.lexists(ident["path"]):
+                continue
+            cur = W.lstat_rec(ident["path"])
+            if f["label"] not in auth:
+                problems.append("leftover not authorized: %s" % ident["path"])
+            elif (cur["dev"], cur["ino"]) != (ident["dev"], ident["ino"]):
+                problems.append("retained identity changed: %s" % ident["path"])
+            elif f.get("kind") in INSTANCE_KINDS:
+                covered_instances.add(f["label"])
+            elif f.get("kind") == "dir":
+                problems.extend(tree_strays(d, f))
         elif "birth_us" in ident:
             if not identity_gone(ident):
                 problems.append("fixture process alive: %s" % f["label"])
+    for mp in manifests:
+        problems.extend(_instance_audit(d, test_id, mp, auth, mine))
+    if covered_instances and not manifests:
+        problems.append("retained instance objects without a manifest audit: %s"
+                        % sorted(covered_instances))
     if runroot and os.path.isdir(runroot):
         for name in sorted(os.listdir(runroot)):
             full = runroot + "/" + name
@@ -207,27 +402,37 @@ def reconcile(d, test_id, runroot, retained_manifests=()):
             cur = W.lstat_rec(full)
             if (cur["dev"], cur["ino"]) != (ident["dev"], ident["ino"]):
                 problems.append("run-root object identity changed: %s" % full)
-    for mp in retained_manifests:
-        try:
-            m = W.load_manifest(mp)
-            W.inventory(m)
-            for top in (m["root"], m["runtime_canonical"]):
-                if os.path.lexists(top) and W.open_handles_under(top):
-                    problems.append("open handles under retained %s" % top)
-        except (W.Fail, W.Hold, W.Refuse, OSError, ValueError) as e:
-            problems.append("retained instance not clean: %s" % str(e)[:120])
     return problems
 
 
+def proof_problems(test_id, teardown, contract=None):
+    """Exact per-id proof contract (Q3): every field present, nothing extra; a required
+    field must be "ok"; a may-be-na field may be "not-applicable:<reason>"."""
+    c = contract if contract is not None else REQUIRED_PROOF.get(test_id)
+    if c is None:
+        return ["no proof contract for %s" % test_id]
+    td = teardown if isinstance(teardown, dict) else {}
+    out = ["unknown proof field %s" % k for k in sorted(set(td) - set(c))]
+    for k, mode in sorted(c.items()):
+        v = td.get(k)
+        if v is None:
+            out.append("missing proof field %s" % k)
+        elif v == "ok":
+            continue
+        elif mode == NA and isinstance(v, str) and v.startswith("not-applicable:") and \
+                len(v) > len("not-applicable:"):
+            continue
+        else:
+            out.append("proof field %s=%s" % (k, v))
+    return out
+
+
 def verdict(d, test_id, expected, observed, teardown, runroot, retained_manifests=(),
-            notes=None):
+            notes=None, contract=None):
     """`expected`: the test's fixed class list; `observed`: the parsed actual class;
-    `teardown`: each value "ok" or "not-applicable:<reason>"."""
+    `teardown`: the test's exact proof record (see REQUIRED_PROOF)."""
     problems = reconcile(d, test_id, runroot, retained_manifests)
-    bad_teardown = sorted(k for k, v in (teardown or {}).items()
-                          if not (v == "ok" or str(v).startswith("not-applicable:")))
-    if not teardown:
-        bad_teardown = ["missing"]
+    bad_teardown = proof_problems(test_id, teardown, contract)
     if problems or bad_teardown:
         v = "REAL-UNCERTAINTY"
     elif observed in expected:
@@ -241,7 +446,17 @@ def verdict(d, test_id, expected, observed, teardown, runroot, retained_manifest
     return rec
 
 
-def summary(d, head, ids):
+def receipt_ok(d, test_id):
+    p = "%s/%s.json" % (d, test_id)
+    if not os.path.exists(p):
+        return False
+    r = W.jload(p)
+    return r["verdict"] in PASSING and not r.get("problems") and not r.get("bad_teardown")
+
+
+def summary(d, head, ids, runroot=None):
+    """Every listed receipt must pass, and a FINAL audit (Q3) re-reconciles every test
+    holding a retention at summary time."""
     missing, bad, recs = [], [], {}
     for tid in ids:
         p = "%s/%s.json" % (d, tid)
@@ -250,11 +465,16 @@ def summary(d, head, ids):
             continue
         r = W.jload(p)
         recs[tid] = r["verdict"]
-        if r["verdict"] not in ("PASS", "EXPECTED-REFUSAL") or r.get("problems") or \
-                r.get("bad_teardown"):
+        if not receipt_ok(d, tid):
+            bad.append(tid)
+    audit = {}
+    for tid in sorted(registry(d)["retain"]):
+        pr = reconcile(d, tid, runroot)
+        audit[tid] = pr
+        if pr and tid not in bad:
             bad.append(tid)
     out = {"head": head, "pass": not missing and not bad, "missing": missing, "bad": bad,
-           "verdicts": recs}
+           "verdicts": recs, "final_audit": audit}
     W.jdump(out, d + "/selftest-summary.json")
     return out
 
@@ -279,6 +499,44 @@ def observed_class(stderr_text):
                 return parts[0] + "-" + tok
             return parts[0]
     return "NONE"
+
+
+T5_PGDATA_HALT = "identity mismatch: data_directory,config_file"
+T5_PORT_HALT = "target socket mismatch"
+
+
+def t5_class(f_pgdata, f_port, f_exists):
+    """Choice 5 / Q4 exact mapping from the three client receipts."""
+    rec = {}
+    for name, p in (("bad-pgdata", f_pgdata), ("bad-port", f_port), ("db-exists", f_exists)):
+        if not os.path.exists(p):
+            return "CLIENT-NO-RECEIPT"
+        rec[name] = W.jload(p)
+    for name in ("bad-pgdata", "bad-port", "db-exists"):
+        if rec[name].get("status") == 3:
+            return "HOLD-CLIENT-" + name
+    want = {"bad-pgdata": (2, T5_PGDATA_HALT), "bad-port": (2, T5_PORT_HALT)}
+    for name, (st, halt) in sorted(want.items()):
+        if rec[name].get("status") != st or rec[name].get("halt") != halt:
+            return "CLIENT-%s-%s" % (name, rec[name].get("status"))
+    if rec["db-exists"].get("status") != 0 or rec["db-exists"].get("exists") is not False:
+        return "CLIENT-db-exists-%s" % rec["db-exists"].get("status")
+    return "REFUSE-CLIENT-TARGET"
+
+
+def exit_stop_allowed(status_path):
+    """Choice 3 as replaced (M2): the exit path may stop only for a current, clean, unfrozen
+    watcher whose launcher identity is kernel-proven."""
+    if not os.path.exists(status_path):
+        return False
+    try:
+        resp = W.jload(status_path)
+        st = resp["state"]
+        return resp.get("ok") is True and st.get("signals_frozen") is False and \
+            st.get("violations") == [] and \
+            (st.get("launcher_identity") or {}).get("identity") == "kernel"
+    except (ValueError, KeyError, TypeError, AttributeError, OSError):
+        return False
 
 
 # ---------------------------------------------------------------- fixture programs (shell-started)
@@ -344,18 +602,17 @@ def fake_manifest(root, port=25000):
             "evidence": root + "/evidence"}
 
 
-def mkroot(d, scratch, test, label):
-    return register_path(d, test, label, scratch + "/" + test.lower() + "-" + label, "dir")
+def mkroot(d, scratch, test, label, contents=()):
+    return register_path(d, test, label, scratch + "/" + test.lower() + "-" + label, "dir",
+                         list(contents))
 
 
-def rmtree(path):
-    rc, _, err = W.run(["/bin/rm", "-rf", "--", path], env=W.TOOL_ENV)
-    if rc != 0 or os.path.lexists(path):
-        raise RealUncertainty("could not remove fixture %s" % path)
-
-
-def bare_watch(root, port=25000):
-    return W.Watch(fake_manifest(root, port), root + "/watch-state.json")
+def bare_watch(root, port=25000, closure=False):
+    w = W.Watch(fake_manifest(root, port), root + "/watch-state.json")
+    if closure:
+        # fixture-synthetic established closure (M5): never a production fact
+        w.closure = {"closure_verified": True, "detail": "fixture-synthetic"}
+    return w
 
 
 class FakeEv(object):
@@ -363,11 +620,14 @@ class FakeEv(object):
         self.ident, self.fflags, self.data = ident, fflags, data
 
 
+PG_DIRS = [".devenv", ".devenv/state", ".devenv/state/postgres"]
+
+
 # ---------------------------------------------------------------- healthy synthetic facts
 def healthy(t0, t_pre, t_stop, t_post, sockets=None):
-    """A graceful epoch as classifier inputs (fixture-synthetic): window singletons with
-    (pid, birth) parent links, graceful exits in source order, R6-1-consistent sockets, a
-    lockout record and a consistent H record. classify_epoch must call it complete."""
+    """A graceful epoch as classifier inputs (fixture-synthetic): window singletons and the
+    job chain with (pid, birth) parent links, graceful exits in source order, R6-1-consistent
+    sockets, a lockout record and a consistent H record. classify_epoch must call it complete."""
     adm = t0 - 5.0
 
     def ent(pid, role, parent, pbirth, st):
@@ -414,7 +674,21 @@ def classify(state, snaps, lock, barrier_ok=True, closure_ok=True):
     return W.classify_epoch(state, snaps, lock, barrier_ok, closure_ok)
 
 
+def no_malformed_h(reasons):
+    return not [r for r in reasons if r.startswith("H:") and
+                ("missing" in r or "type" in r or "inconsistent" in r)]
+
+
 # ---------------------------------------------------------------- T16 capability
+def poll_waitid_nowait(pid, deadline_s):
+    end = W.now() + deadline_s
+    while W.now() < end:
+        if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def t16(d, scratch, runroot):
     notes, ok = {}, True
     T = "T16"
@@ -444,7 +718,7 @@ def t16(d, scratch, runroot):
     mid = start_fixture(d, T, "mid", "import subprocess,sys;"
                         "g=subprocess.Popen([sys.executable,'-I','-c','import time; time.sleep(%d)']);"
                         "print(g.pid,flush=True); g.wait()" % L_FIXTURE, stdout=subprocess.PIPE)
-    gpid = int(mid.stdout.readline().decode().strip())
+    gpid = int(bounded_readline(mid.stdout))
     intent(d, T, "grandchild", "proc")
     set_identity(d, T, "grandchild", proc_identity(gpid, mid.pid))
     ok &= gpid not in W.child_pids(os.getpid())
@@ -505,8 +779,8 @@ def t16(d, scratch, runroot):
     ok &= saw_exec
     si = start_fixture(d, T, "waitid", "import time; time.sleep(0.3)")
     try:
-        os.waitid(os.P_PID, si.pid, os.WEXITED | os.WNOWAIT)
-        notes["waitid_wnowait"] = "ok"
+        notes["waitid_wnowait"] = "ok" if poll_waitid_nowait(si.pid, 5.0) else "no-exit-in-5s"
+        ok &= notes["waitid_wnowait"] == "ok"
     except (AttributeError, OSError) as err:
         notes["waitid_wnowait"] = "unavailable: %s" % type(err).__name__
         ok = False
@@ -536,7 +810,7 @@ def t9a(d, scratch, runroot):
         d2.terminate()
         reap(d2, D_REAP)
     if found is None:
-        rmtree(root)
+        dispose(d, T, "root")
         return verdict(d, T, ["REFUSE-SIGNAL"], "INCONCLUSIVE-NO-SAME-SECOND-PAIR",
                        {"fixtures": "ok"}, runroot)
     d2, i1, i2, l1, l2 = found
@@ -544,7 +818,7 @@ def t9a(d, scratch, runroot):
     if not notes["us_distinct"]:
         d2.terminate()
         reap(d2, D_REAP)
-        rmtree(root)
+        dispose(d, T, "root")
         return verdict(d, T, ["REFUSE-SIGNAL"], "INCONCLUSIVE-EQUAL-US", {"fixtures": "ok"},
                        runroot, notes=notes)
     old_match = (i1["uid"], i1["comm"], l1) == (i2["uid"], i2["comm"], l2)
@@ -559,7 +833,7 @@ def t9a(d, scratch, runroot):
     alive = W.bsdinfo(d2.pid) is not None and W.bsdinfo(d2.pid)["birth_us"] == i2["birth_us"]
     d2.terminate()
     reap(d2, D_REAP)
-    rmtree(root)
+    dispose(d, T, "root")
     notes.update({"old_predicate_matches": old_match, "new_rule_refused": refused,
                   "d2_not_signalled": alive, "label": "emulated PID-reuse record"})
     obs = "REFUSE-SIGNAL" if old_match and refused and alive else "FAIL"
@@ -579,7 +853,7 @@ def t9b(d, scratch, runroot):
     w.register(x.pid)
     w.entries[x.pid] = {"pid": x.pid, "birth_us": cur["birth_us"], "lineage": True,
                         "role": "process-compose", "exit": None, "parent": None}
-    ypid = int(x.stdout.readline().decode().strip())
+    ypid = int(bounded_readline(x.stdout))
     intent(d, T, "y", "proc")
     set_identity(d, T, "y", proc_identity(ypid, x.pid))
     reap(x, D_REAP)
@@ -599,19 +873,20 @@ def t9b(d, scratch, runroot):
     stale_admit = w.admit(ypid, x.pid, "T9b-stale") is not None
     w.entries.pop(x.pid)
     gone = wait_gone(yi, 15.0)
-    rmtree(root)
+    if not gone:
+        raise RealUncertainty("T9b: Y still alive 15 s later (never signalled)")
+    dispose(d, T, "root")
     notes = {"admitted_via_exited_parent": admitted, "signal_refused": refused, "y_alive": alive,
              "stale_admitted": stale_admit, "y_ended_by_itself": gone}
     obs = "REFUSE-ADMISSION" if (not admitted and refused and alive and not stale_admit) else "FAIL"
-    td = {"y": "ok" if gone else "y-still-alive"}
-    return verdict(d, T, ["REFUSE-ADMISSION"], obs, td, runroot, notes=notes)
+    return verdict(d, T, ["REFUSE-ADMISSION"], obs, {"fixtures": "ok"}, runroot, notes=notes)
 
 
 # ---------------------------------------------------------------- T10 / T11 / T12
 def t10(d, scratch, runroot):
     T = "T10"
-    root = mkroot(d, scratch, T, "root")
-    sub = register_path(d, T, "locked", root + "/locked", "dir")
+    root = mkroot(d, scratch, T, "root", ["locked/f"])
+    sub = register_path(d, T, "locked", root + "/locked", "dir", ["f"])
     with open(sub + "/f", "w") as f:
         f.write("x")
     os.chmod(sub, 0o500)
@@ -622,14 +897,14 @@ def t10(d, scratch, runroot):
     except W.Fail as e:
         obs = str(e).split()[0]
     os.chmod(sub, 0o700)
-    rmtree(root)
+    dispose(d, T, "root")
     return verdict(d, T, ["FAIL-CLEANUP"], obs, {"fixtures": "ok"}, runroot)
 
 
 def t11(d, scratch, runroot):
     T = "T11"
     root = mkroot(d, scratch, T, "root")
-    sentinel = mkroot(d, scratch, T, "sentinel")
+    sentinel = mkroot(d, scratch, T, "sentinel", ["keep"])
     with open(sentinel + "/keep", "w") as f:
         f.write("keep")
     intent(d, T, "escape", "symlink")
@@ -642,17 +917,18 @@ def t11(d, scratch, runroot):
         inv = "NO-FAILURE"
     except W.Fail as e:
         inv = str(e).split()[0]
-    W.cleanup(m, root + "/no-claim.json")
+    W.cleanup(m, root + "/no-claim.json")  # the subject removes the root (symlink unfollowed)
     after = (W.lstat_rec(sentinel)["ino"], sorted(os.listdir(sentinel)))
-    rmtree(sentinel)
     obs = inv if before == after and not os.path.lexists(root) else "FAIL"
+    dispose(d, T, "sentinel")
     return verdict(d, T, ["FAIL-SYMLINK"], obs, {"fixtures": "ok"}, runroot,
                    notes={"sentinel_intact": before == after})
 
 
 def t12(d, scratch, runroot):
     T = "T12"
-    root = mkroot(d, scratch, T, "root")
+    root = mkroot(d, scratch, T, "root", [".devenv", ".devenv/state",
+                                          ".devenv/state/process-compose"])
     os.makedirs(root + "/.devenv/state/process-compose", 0o700)
     sink = register_path(d, T, "sink", root + "/.devenv/state/process-compose/process-compose.log",
                          "file")
@@ -664,7 +940,7 @@ def t12(d, scratch, runroot):
     except W.Fail as e:
         obs = str(e).split()[0]
     os.chmod(sink, 0o600)
-    rmtree(root)
+    dispose(d, T, "root")
     return verdict(d, T, ["FAIL-UNREADABLE"], obs, {"fixtures": "ok"}, runroot)
 
 
@@ -689,7 +965,7 @@ time.sleep(%d)
 
 def t15d(d, scratch, runroot):
     T = "T15d"
-    root = mkroot(d, scratch, T, "root")
+    root = mkroot(d, scratch, T, "root", ["d1.out", "d2.out", "d3.out", "d4.out"])
     kq = select.kqueue()
     cases = {"d1": ("no-source-traced-drain", signal.SIGTERM, False, False),
              "d2": ("source-traced-graceful-exit0", signal.SIGTERM, True, True),
@@ -699,7 +975,8 @@ def t15d(d, scratch, runroot):
     for name, (binding, sig, want_eligible, want_b) in sorted(cases.items()):
         path = root + "/" + name + ".out"
         p = start_fixture(d, T, name, PRODUCER, path, name, stdout=subprocess.PIPE)
-        p.stdout.readline()
+        if bounded_readline(p.stdout) != "ready":
+            raise RealUncertainty("T15d producer %s not ready" % name)
         kq_register(kq, p.pid)
         os.kill(p.pid, sig)
         st = kq_exit(kq, p.pid)
@@ -709,7 +986,7 @@ def t15d(d, scratch, runroot):
         notes[name] = {"status": st, "eligible": eligible, "has_A": "A" in content,
                        "has_B": "B" in content, "proof": "fixture-synthetic"}
         ok &= eligible == want_eligible and ("A" in content) and (("B" in content) == want_b)
-    rmtree(root)
+    dispose(d, T, "root")
     return verdict(d, T, ["INCOMPLETE"], "INCOMPLETE" if ok else "FAIL", {"fixtures": "ok"},
                    runroot, notes=notes)
 
@@ -798,7 +1075,7 @@ def t17(d, scratch, runroot, variant):
     # paused: no drain/scan until F reports c2 reaped and c1 ready
     f.stdin.write(b"go\n")
     f.stdin.flush()
-    lines = [f.stdout.readline().decode().strip() for _ in range(3)]
+    lines = [bounded_readline(f.stdout) for _ in range(3)]
     c2pid = int(lines[1].split()[1])
     c1pid = int(lines[2].split()[1])
     # resume
@@ -809,17 +1086,13 @@ def t17(d, scratch, runroot, variant):
     c2_admitted = c2pid in w.entries or any(x["pid"] == c2pid for x in w.dead)
     f.stdin.write(b"release\n")
     f.stdin.flush()
-    f.stdout.readline()
+    bounded_readline(f.stdout)
     reap(f, D_REAP)
     w.drain(0.3)
     with open(cap, "rb") as fh:
         final = fh.read()
-    if variant == "b":
-        want_len = old_len + N
-        tail_ok = final[old_len:] == b"Y" * N
-    else:
-        want_len = old_len + N
-        tail_ok = True
+    want_len = old_len + N
+    tail_ok = final[old_len:] == b"Y" * N if variant == "b" else True
     prefix_unchanged = W.sha256_bytes(final[:old_len]) == old_sha
     v, post_meta = prefix_violations(snappre, cap)
     t_stop = W.now() + 0.5
@@ -834,7 +1107,7 @@ def t17(d, scratch, runroot, variant):
     state["events"] = events
     res = classify(state, snaps, lock)
     classes = reason_classes(res["reasons"])
-    rmtree(root)
+    dispose(d, T, "root")
     notes = {"c1_admitted": c1_admitted, "c2_admitted": c2_admitted, "final_len": len(final),
              "want_len": want_len, "prefix_unchanged": prefix_unchanged, "tail_ok": tail_ok,
              "prefix_violation": bool(v), "fork_notes": len(events), "reason_classes": classes,
@@ -895,8 +1168,8 @@ while time.time() < end:
 
 def t18(d, scratch, runroot, variant):
     T = "T18" + variant
-    root = mkroot(d, scratch, T, "root")
-    intent(d, T, "sockdir", "dir")
+    root = mkroot(d, scratch, T, "root", ["capture.log"])
+    intent(d, T, "sockdir", "dir", ["native.sock"])
     sdir = tempfile.mkdtemp(prefix="sk18", dir="/tmp")
     set_identity(d, T, "sockdir", path_identity(sdir))
     sock = sdir + "/native.sock"
@@ -907,7 +1180,8 @@ def t18(d, scratch, runroot, variant):
               "d": ("0", "0", "plain"), "d-vanish": ("0.8", "0", "vanish"),
               "d-rebind": ("0.8", "0", "rebind")}[variant]
     srv = start_fixture(d, T, "server", SERVER, sock, cap, *params, stdout=subprocess.PIPE)
-    srv.stdout.readline()
+    if bounded_readline(srv.stdout) != "ready":
+        raise RealUncertainty("T18 server not ready")
     client_history = False
     cl = None
     if variant == "a":
@@ -961,13 +1235,13 @@ def t18(d, scratch, runroot, variant):
         state["h"] = dict(state["h"], image_violations=1, api_client_history="unknown",
                           verdict=False)
     res = classify(state, snaps, lock)
-    rmtree(root)
-    rmtree(sdir)
+    socket_post = "present" if W.socket_rec(sock)["present"] else "unlinked"
+    dispose(d, T, "root")
+    dispose(d, T, "sockdir")
     notes = {"eacces_after_lock": eacces, "complete": res["complete"], "reasons": res["reasons"],
-             "socket_post": "present" if W.socket_rec(sock)["present"] else "unlinked",
-             "proof": "fixture-synthetic"}
+             "socket_post": socket_post, "proof": "fixture-synthetic"}
     if variant == "d":
-        ok = res["complete"] and eacces == "errno-13" and notes["socket_post"] == "unlinked"
+        ok = res["complete"] and eacces == "errno-13" and socket_post == "unlinked"
         return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
                        notes=notes)
     ok = (not res["complete"]) and (eacces == "errno-13" or variant.startswith("d-"))
@@ -975,7 +1249,7 @@ def t18(d, scratch, runroot, variant):
                    runroot, notes=notes)
 
 
-# ---------------------------------------------------------------- T19 (R1, A1, A2)
+# ---------------------------------------------------------------- T19 (R1, A1, A2, M1, Q2)
 TERM_RESISTANT = """
 import signal, time, sys
 for s in sys.argv[1].split(","):
@@ -987,20 +1261,20 @@ STAGES = {"launcher": D_SUBJECT, "pc": D_SUBJECT, "dt": D_SUBJECT, "kill": D_SUB
           "pgctl": 5.0, "pgctl_t": 2, "overall": 5 * D_SUBJECT}  # < L_FIXTURE
 
 
-def watch_with(d, T, root, fixtures):
-    """A Watch whose entries are registered owned fixtures: [(label, role, ignore, pgdata)]."""
-    w = bare_watch(root)
+def watch_with(d, T, root, fixtures, closure=False):
+    """A Watch whose entries are registered owned fixtures: [(label, role, ignore, cwd)]."""
+    w = bare_watch(root, closure=closure)
     procs = {}
     for label, role, ignore, cwd in fixtures:
         p = start_fixture(d, T, label, TERM_RESISTANT, ignore, L_FIXTURE, cwd=cwd,
                           stdout=subprocess.PIPE)
-        if p.stdout.readline().strip() != b"ready":  # handlers installed before any stop
+        if bounded_readline(p.stdout) != "ready":  # handlers installed before any stop
             raise RealUncertainty("fixture %s/%s not ready" % (T, label))
         cur = W.bsdinfo(p.pid)
         w.register(p.pid)
         w.entries[p.pid] = {"pid": p.pid, "birth_us": cur["birth_us"], "lineage": True,
                             "role": role, "exit": None, "parent": None, "admitted": W.now(),
-                            "exe": PY, "args": label}
+                            "exe": PY, "args": label, "execs": 0}
         if role == "launcher":
             w.launcher = p
         procs[label] = p
@@ -1009,22 +1283,53 @@ def watch_with(d, T, root, fixtures):
 
 def outer_reap(procs):
     """Separate outer teardown: no signals; reap every owned fixture by its handle."""
-    rcs = {}
-    for label, p in procs.items():
-        rcs[label] = reap(p, D_REAP)
-    return rcs
+    return {label: reap(p, D_REAP) for label, p in procs.items()}
+
+
+def rcs_word(rcs, want):
+    return "ok" if rcs == want else "rcs-%r" % (rcs,)
+
+
+def write_fixture_closure(root, m, launcher):
+    """A fixture-synthetic established closure for supervise (M2 refuse-before-spawn)."""
+    ev = m["evidence"]
+    os.mkdir(ev, 0o700)
+    os.mkdir(root + "/art", 0o700)
+    os.mkdir(root + "/R", 0o700)
+    files = {}
+    for name in ("launcher", "yaml", "tasks", "task_cmd", "start", "setup", "conf"):
+        p = root + "/art/" + name
+        with open(p, "w") as f:
+            f.write("fixture-synthetic %s\n" % name)
+        files[name] = {"path": p, "sha256": W.sha256_file_nofollow(p)}
+    refs = sorted(W.PKG.values())
+    W.jdump({"problems": []}, ev + "/provenance.json")
+    with open(ev + "/launcher-path", "w") as f:
+        f.write(launcher + "\n")
+    W.jdump({"inst": m["inst"], "head": m["head"], "launcher": launcher, "files": files,
+             "package_refs": refs}, ev + "/artifacts.json")
+    W.jdump({"inst": "R", "head": m["head"], "package_refs": refs}, root + "/R/artifacts.json")
+
+
+ART = ["art/" + n for n in ("launcher", "yaml", "tasks", "task_cmd", "start", "setup", "conf")]
 
 
 def t19a(d, scratch, runroot):
     T = "T19a"
-    root = mkroot(d, scratch, T, "root")
-    os.mkdir(root + "/evidence", 0o700)
+    root = mkroot(d, scratch, T, "root", ["evidence", "evidence/provenance.json",
+                                          "evidence/artifacts.json", "evidence/launcher-path",
+                                          "evidence/E1", "evidence/E1/launcher.out",
+                                          "evidence/E1/launcher.err", "R", "R/artifacts.json",
+                                          "art", "launcher.sh", "ctl", "state.json"] + ART)
     script = root + "/launcher.sh"
     with open(script, "w") as f:
         f.write("#!/bin/sh\nexit 0\n")
     os.chmod(script, 0o700)
     m = fake_manifest(root)
     m["launch_env"] = {"PATH": "/usr/bin:/bin"}
+    write_fixture_closure(root, m, script)
+    if W.h_closure(m)["closure_verified"] is not True:
+        raise RealUncertainty("T19a: the fixture closure was not established")
     state_path = root + "/state.json"
     rc = W.supervise(m, root + "/ctl", state_path, script, "E1", seam_exit_before_register=True,
                      post_stop_s=5)
@@ -1032,11 +1337,12 @@ def t19a(d, scratch, runroot):
     kinds = [v["kind"] for v in st["violations"]]
     li = st.get("launcher_identity") or {}
     reaped = (st.get("launcher_reaped") or {}).get("returncode")
-    rmtree(root)
     ok = rc == W.EXIT_HOLD and "launcher-unregistered" in kinds and li.get("identity") == "unknown" \
         and li.get("birth_us") is None and reaped == 0
+    dispose(d, T, "root")
     return verdict(d, T, ["HOLD-LAUNCHER-UNREGISTERED"], "HOLD-LAUNCHER-UNREGISTERED" if ok else
-                   "FAIL", {"launcher_reap": "ok" if reaped == 0 else "not-reaped"}, runroot,
+                   "FAIL", {"launcher_reap": "ok" if reaped == 0 else "not-reaped",
+                            "fixtures": "ok"}, runroot,
                    notes={"rc": rc, "violations": kinds, "launcher_identity": li})
 
 
@@ -1052,34 +1358,38 @@ def t19b(d, scratch, runroot):
         frozen = True
     kills = [s for s in w.harness_signals if s["signal"] == int(signal.SIGKILL)]
     rcs = outer_reap(procs)
-    rmtree(root)
+    dispose(d, T, "root")
     ok = res["ok"] is False and [r["role"] for r in res["remaining"]] == ["launcher"] and frozen \
         and not kills
     return verdict(d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
-                   {"outer_reap": "ok" if rcs["launcher"] == 0 else "rc-%s" % rcs["launcher"]},
-                   runroot, notes={"result": res, "outer_rcs": rcs})
+                   {"outer_reap": rcs_word(rcs, {"launcher": 0}), "fixtures": "ok"}, runroot,
+                   notes={"result": res, "outer_rcs": rcs})
+
+
+def pm_root(d, scratch, T):
+    root = mkroot(d, scratch, T, "root", PG_DIRS + [".devenv/state/postgres/postmaster.pid"])
+    pgd = root + "/.devenv/state/postgres"
+    os.makedirs(pgd, 0o700)
+    return root, pgd
 
 
 def t19c(d, scratch, runroot):
     T = "T19c"
-    root = mkroot(d, scratch, T, "root")
-    pgd = root + "/.devenv/state/postgres"
-    os.makedirs(pgd, 0o700)
+    root, pgd = pm_root(d, scratch, T)
     w, procs = watch_with(d, T, root, [("launcher", "launcher", "", None),
                                       ("pm", "postmaster-final", "SIGTERM,SIGINT", pgd)])
     with open(pgd + "/postmaster.pid", "w") as f:
         f.write("%d\n%s\n" % (procs["pm"].pid, pgd))
-    m = fake_manifest(root)
-    res = W.stop_tree(w, m, stages=STAGES)
+    res = W.stop_tree(w, fake_manifest(root), stages=STAGES)
     rcs = outer_reap(procs)
-    rmtree(root)
+    dispose(d, T, "root")
     pgctl = [s for s in res["stages"] if s[0] == "pg_ctl"]
-    ok = res["ok"] is False and pgctl and pgctl[0][1] != 0 and \
+    ok = res["ok"] is False and bool(pgctl) and pgctl[0][1] != 0 and \
         any(r["role"] == "postmaster-final" for r in res["remaining"]) and \
         not [s for s in w.harness_signals if s["signal"] == int(signal.SIGKILL)]
     return verdict(d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
-                   {"outer_reap": "ok" if rcs["pm"] == 0 else "rc-%s" % rcs["pm"]}, runroot,
-                   notes={"result": res, "outer_rcs": rcs})
+                   {"outer_reap": rcs_word(rcs, {"launcher": -15, "pm": 0}), "fixtures": "ok"},
+                   runroot, notes={"result": res, "outer_rcs": rcs})
 
 
 def t19d(d, scratch, runroot):
@@ -1091,68 +1401,191 @@ def t19d(d, scratch, runroot):
                                       ("aux", "pg-aux", "SIGTERM", None)])
     res = W.stop_tree(w, fake_manifest(root), stages=STAGES)
     rcs = outer_reap(procs)
-    rmtree(root)
+    dispose(d, T, "root")
     killed = sorted(s["role"] for s in w.harness_signals if s["signal"] == int(signal.SIGKILL))
     ok = res["ok"] is False and [r["role"] for r in res["remaining"]] == ["pg-aux"] and \
-        killed == ["devenv-tasks", "process-compose"] and rcs["pc"] == -9 and rcs["dt"] == -9 \
-        and rcs["aux"] == 0
+        killed == ["devenv-tasks", "process-compose"]
     return verdict(d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
-                   {"outer_reap": "ok" if rcs["aux"] == 0 else "rc-%s" % rcs["aux"]}, runroot,
+                   {"outer_reap": rcs_word(rcs, {"launcher": -15, "pc": -9, "dt": -9, "aux": 0}),
+                    "fixtures": "ok"}, runroot,
                    notes={"result": res, "outer_rcs": rcs, "killed": killed})
 
 
+def t19f(d, scratch, runroot):
+    """M1: the overall deadline expires before the next stage; nothing more is sent."""
+    T = "T19f"
+    root = mkroot(d, scratch, T, "root")
+    w, procs = watch_with(d, T, root, [("launcher", "launcher", "", None),
+                                      ("pc", "process-compose", "SIGTERM", None)])
+    res = W.stop_tree(w, fake_manifest(root), stages=dict(STAGES, overall=0.5, launcher=1.0))
+    sent = [(s["role"], s["signal"]) for s in w.harness_signals]
+    rcs = outer_reap(procs)
+    dispose(d, T, "root")
+    ok = res["ok"] is False and "overall deadline passed before pc-term" in res.get("hold", "") \
+        and sent == [("launcher", int(signal.SIGTERM))]
+    return verdict(d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
+                   {"outer_reap": rcs_word(rcs, {"launcher": -15, "pc": 0}), "fixtures": "ok"},
+                   runroot, notes={"result": res, "sent": sent, "outer_rcs": rcs})
+
+
+def t19g(d, scratch, runroot):
+    """M1/Q2: a handshake that never completes is a bounded subject HOLD; no signal."""
+    T = "T19g"
+    root = mkroot(d, scratch, T, "root")
+    p = start_fixture(d, T, "silent", "import time; time.sleep(%d)" % L_FIXTURE,
+                      stdout=subprocess.PIPE)
+    t0 = W.now()
+    subject = "NO-HOLD"
+    try:
+        bounded_readline(p.stdout, 1.0)
+    except RealUncertainty:
+        subject = "HOLD-HANDSHAKE"
+    took = W.now() - t0
+    rcs = outer_reap({"silent": p})
+    dispose(d, T, "root")
+    obs = subject if took <= 2.0 else "SUBJECT-OVERRAN"
+    return verdict(d, T, ["HOLD-HANDSHAKE"], obs,
+                   {"outer_reap": rcs_word(rcs, {"silent": 0}), "fixtures": "ok"}, runroot,
+                   notes={"took_s": took})
+
+
+def t19i(d, scratch, runroot):
+    """Q2: the absolute deadline expires DURING the drain and identity proof; the signal is
+    refused immediately before os.kill, and pg_ctl is refused before any spawn."""
+    T = "T19i"
+    root, pgd = pm_root(d, scratch, T)
+    w, procs = watch_with(d, T, root, [("pc", "process-compose", "", None),
+                                      ("pm", "postmaster-final", "", pgd)])
+    with open(pgd + "/postmaster.pid", "w") as f:
+        f.write("%d\n%s\n" % (procs["pm"].pid, pgd))
+    births = {k: W.bsdinfo(p.pid)["birth_us"] for k, p in procs.items()}
+    w.drain = lambda timeout=0: time.sleep(0.6)  # fixture-synthetic slow drain
+    refused_sig = False
+    try:
+        w.signal_verified(procs["pc"].pid, signal.SIGTERM, "T19i", deadline=W.now() + 0.3)
+    except W.Hold as h:
+        refused_sig = "deadline" in str(h)
+    del w.drain
+    refused_pgctl = False
+    try:
+        W.pg_ctl_stop(w, fake_manifest(root), w.alive("postmaster-final"), timeout=5, t=2,
+                      deadline=W.now() - 0.01)
+    except W.Hold as h:
+        refused_pgctl = "deadline" in str(h)
+    alive = {k: (W.bsdinfo(p.pid) or {}).get("birth_us") == births[k] for k, p in procs.items()}
+    rcs = outer_reap(procs)
+    dispose(d, T, "root")
+    ok = refused_sig and refused_pgctl and alive == {"pc": True, "pm": True} and \
+        w.harness_signals == [] and w.helpers == []
+    return verdict(d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
+                   {"outer_reap": rcs_word(rcs, {"pc": 0, "pm": 0}), "fixtures": "ok"}, runroot,
+                   notes={"refused_sig": refused_sig, "refused_pgctl": refused_pgctl,
+                          "alive_after": alive})
+
+
 # ---------------------------------------------------------------- T20 (fabricated verdict inputs)
+T20_CONTENTS = {
+    "a": ["selftest", "selftest/X.json", "run"],
+    "b": ["selftest", "selftest/fixtures.json", "selftest/X.json", "run", "run/fx",
+          "run/fx/stray"],
+    "c": ["selftest", "selftest/fixtures.json", "run"],
+    "d": ["selftest", "selftest/X1.json", "selftest/X2.json", "selftest/selftest-summary.json",
+          "run"],
+    "e": ["selftest", "selftest/X.json", "run"],
+    "f": ["selftest", "selftest/fixtures.json", "run", "run/fy", "run/fy/stray"],
+}
+
+
 def t20(d, scratch, runroot, variant):
-    """Meta-controls on FABRICATED records in a private directory (amendment R1): they
-    assert the verdict functions' outputs and never touch the suite's own records."""
+    """Meta-controls on FABRICATED records in a private directory (amendment R1, M3, Q3).
+    Each has a paired passing case, so the failure has no other premise."""
     T = "T20" + variant
-    priv = mkroot(d, scratch, T, "private")
+    priv = mkroot(d, scratch, T, "private", T20_CONTENTS[variant])
     pd = priv + "/selftest"
     os.mkdir(pd, 0o700)
-    fake_runroot = priv + "/run"
-    os.mkdir(fake_runroot, 0o700)
+    run = priv + "/run"
+    os.mkdir(run, 0o700)
+    notes = {}
     if variant == "a":
-        rec = verdict(pd, "X", ["FAIL-CLEANUP"], "FAIL-CLEANUP", {"cleanup": "failed"}, fake_runroot)
-        ok = rec["verdict"] == "REAL-UNCERTAINTY"
+        c = {"cleanup": REQ}
+        good = verdict(pd, "X", ["FAIL-CLEANUP"], "FAIL-CLEANUP", {"cleanup": "ok"}, run,
+                       contract=c)["verdict"]
+        bad = verdict(pd, "X", ["FAIL-CLEANUP"], "FAIL-CLEANUP", {"cleanup": "status-1"}, run,
+                      contract=c)["verdict"]
+        ok = good == "EXPECTED-REFUSAL" and bad == "REAL-UNCERTAINTY"
     elif variant == "b":
-        leftover = register_path(pd, "X", "fx", fake_runroot + "/fx", "dir")
-        with open(leftover + "/stray", "w") as f:
+        c = {"cleanup": NA}
+        td = {"cleanup": "not-applicable:retained by design"}
+        register_path(pd, "X", "fx", run + "/fx", "dir", [])
+        retain(pd, "X", ["fx"], contract=["fx"])
+        good = verdict(pd, "X", ["REFUSE-X"], "REFUSE-X", td, run, contract=c)
+        with open(run + "/fx/stray", "w") as f:
             f.write("x")
-        os.mkdir(fake_runroot + "/unregistered", 0o700)
-        rec = verdict(pd, "X", ["REFUSE-X"], "REFUSE-X", {"cleanup": "ok"}, fake_runroot)
-        ok = rec["verdict"] == "REAL-UNCERTAINTY"
+        bad = verdict(pd, "X", ["REFUSE-X"], "REFUSE-X", td, run, contract=c)
+        notes = {"good": good["problems"], "bad": bad["problems"]}
+        ok = good["verdict"] == "EXPECTED-REFUSAL" and bad["verdict"] == "REAL-UNCERTAINTY" and \
+            bad["problems"] == ["undeclared object %s/stray" % (run + "/fx")]
     elif variant == "c":
+        p_ok = start_fixture(pd, "X", "intact", "import time; time.sleep(3)")
         p = start_fixture(pd, "X", "proc", "import time; time.sleep(3)")
         r = registry(pd)
         for f in r["fixtures"]:
             if f["label"] == "proc":
                 f["identity"]["uid"] += 1  # same birth, mismatching owner: HOLD, not "gone"
         save(pd, r)
+        held = False
         try:
             kill_fixture(pd, "X", "proc")
-            ok = False
         except RealUncertainty:
-            ok = True
-        reap(p, D_REAP)
+            held = True
+        intact = kill_fixture(pd, "X", "intact")
+        rc_ok, rc = reap(p_ok, D_REAP), reap(p, D_REAP)
+        notes = {"intact_rc": rc_ok, "mismatch_rc": rc}
+        ok = held and intact == "stopped" and rc_ok == -15 and rc == 0
+    elif variant == "d":
+        verdict(pd, "X1", ["PASS"], "PASS", {"cleanup": "ok"}, run, contract={"cleanup": REQ})
+        verdict(pd, "X2", ["PASS"], "PASS", {"cleanup": "failed"}, run, contract={"cleanup": REQ})
+        alone = summary(pd, "head", ["X1"], run)
+        both = summary(pd, "head", ["X1", "X2"], run)
+        ok = alone["pass"] is True and both["pass"] is False and both["bad"] == ["X2"]
+    elif variant == "e":
+        c = {"cleanup": REQ, "barrier": REQ}
+        good = verdict(pd, "X", ["PASS"], "PASS", {"cleanup": "ok", "barrier": "ok"}, run,
+                       contract=c)["verdict"]
+        bad = verdict(pd, "X", ["PASS"], "PASS", {"cleanup": "ok"}, run, contract=c)
+        ok = good == "PASS" and bad["verdict"] == "REAL-UNCERTAINTY" and \
+            bad["bad_teardown"] == ["missing proof field barrier"]
     else:
-        verdict(pd, "X1", ["PASS"], "PASS", {"cleanup": "ok"}, fake_runroot)
-        verdict(pd, "X2", ["PASS"], "PASS", {"cleanup": "failed"}, fake_runroot)
-        s = summary(pd, "head", ["X1", "X2"])
-        ok = s["pass"] is False and "X2" in s["bad"]
-    rmtree(priv)
-    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot)
+        register_path(pd, "X", "fz", run + "/fz", "dir", ["keep"])
+        with open(run + "/fz/keep", "w") as f:
+            f.write("k")
+        clean = dispose(pd, "X", "fz") == "disposed" and not os.path.lexists(run + "/fz")
+        register_path(pd, "X", "fy", run + "/fy", "dir", [])
+        with open(run + "/fy/stray", "w") as f:
+            f.write("x")
+        held = False
+        try:
+            dispose(pd, "X", "fy")
+        except RealUncertainty:
+            held = True
+        kept = os.path.exists(run + "/fy/stray")
+        ok = clean and held and kept
+        notes = {"clean_disposed": clean, "stray_held": held, "stray_kept": kept}
+    dispose(d, T, "private")
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+                   notes=notes)
 
 
 # ---------------------------------------------------------------- T21 (snapshot integrity, H5)
 def t21(d, scratch, runroot, variant):
     T = "T21" + variant
-    root = mkroot(d, scratch, T, "root")
+    root = mkroot(d, scratch, T, "root", ["src.log", "snap", "snap/copy", "snap/snapshot.json"])
     src = root + "/src.log"
     with open(src, "wb") as f:
         f.write(b"line-one\n" * 100 + b"needle-in-the-tail\n")
     sd = root + "/snap"
     os.mkdir(sd, 0o700)
-    ok, obs = False, "FAIL"
+    obs = "FAIL"
     if variant == "a":
         def half(fd, data):
             return os.write(fd, data[:max(1, len(data) // 2)])
@@ -1169,31 +1602,32 @@ def t21(d, scratch, runroot, variant):
         meta = W.snap_file(src, sd + "/copy")
         meta.update({"class": "per-process-sink", "append_only": True, "copy": "copy"})
         W.jdump({"files": {src: meta}}, sd + "/snapshot.json")
-        if variant == "c":
-            with open(sd + "/copy", "r+b") as f:
+        with open(sd + "/copy", "r+b") as f:
+            if variant == "c":
                 f.seek(0)
                 f.write(b"X")
-        else:
-            with open(sd + "/copy", "r+b") as f:
+            else:
                 f.truncate(meta["len"] - 10)
         try:
             W.count_markers(sd, {"n": "needle-in-the-tail"})
             obs = "COUNTED"
         except W.Hold:
             obs = "HOLD"
-    rmtree(root)
+    dispose(d, T, "root")
     want = "PASS" if variant == "a" else "HOLD"
     return verdict(d, T, [want], obs, {"fixtures": "ok"}, runroot)
+
+
+T21E_CASES = {"multi": b"mk mk mk\nmk\nnone\n", "unterminated": b"none\nmk-last",
+              "empty": b"", "binary": b"\xff\x00mk\x01\n\x00\x00\nmk\xfe", "zero": b"a\nb\n"}
 
 
 def t21e(d, scratch, runroot):
     """grep -F -c -a line-semantics equivalence on verified bytes (review 29bdd2d6)."""
     T = "T21e"
-    root = mkroot(d, scratch, T, "root")
-    cases = {"multi": b"mk mk mk\nmk\nnone\n", "unterminated": b"none\nmk-last",
-             "empty": b"", "binary": b"\xff\x00mk\x01\n\x00\x00\nmk\xfe", "zero": b"a\nb\n"}
+    root = mkroot(d, scratch, T, "root", sorted(T21E_CASES))
     res, ok = {}, True
-    for name, data in sorted(cases.items()):
+    for name, data in sorted(T21E_CASES.items()):
         p = root + "/" + name
         with open(p, "wb") as f:
             f.write(data)
@@ -1202,16 +1636,27 @@ def t21e(d, scratch, runroot):
         mine = W.grep_count(data, b"mk")
         res[name] = {"grep": g, "in_memory": mine, "grep_rc": rc}
         ok &= g is not None and g == mine
-    rmtree(root)
+    dispose(d, T, "root")
     return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
                    notes=res)
 
 
-# ---------------------------------------------------------------- T22 (H1, D-1)
+# ---------------------------------------------------------------- T22 (H1, D-1, M5)
+PC_FAKE = "/nix/store/old-image"
+
+
+def h_check(w, extra_violations=None):
+    state, snaps, lock = healthy_now()
+    state["violations"] = list(w.violations) + list(extra_violations or [])
+    state["h"] = w.h_record()  # derived, never overridden (M5)
+    return classify(state, snaps, lock), state["h"]
+
+
 def t22a(d, scratch, runroot):
     T = "T22a"
     root = mkroot(d, scratch, T, "root")
-    w = bare_watch(root)
+    w = bare_watch(root, closure=True)
+    base, _ = h_check(w)
     c = start_fixture(d, T, "child", "pass")
     reap(c, D_REAP)
     w.entries[c.pid] = {"pid": c.pid, "birth_us": 1, "lineage": True, "role": "process-compose",
@@ -1220,25 +1665,25 @@ def t22a(d, scratch, runroot):
     w.handle(FakeEv(c.pid, W.NOTE_EXEC | W.NOTE_EXIT | W.NOTE_EXITSTATUS, 0))
     dead = next(x for x in w.dead if x["pid"] == c.pid)
     kinds = [v["kind"] for v in w.violations]
-    state, snaps, lock = healthy_now()
-    state["violations"] = w.violations
-    state["h"] = dict(w.h_record(), closure_verified=True)
-    res = classify(state, snaps, lock)
-    rmtree(root)
-    ok = "exec-image-unobserved-before-exit" in kinds and dead["exe"] is None and \
-        dead["role"] == "unknown-image" and dead["prior_images"][0]["exe"] == PC_FAKE and \
-        not res["complete"]
+    res, h = h_check(w)
+    dispose(d, T, "root")
+    ok = base["complete"] is True and kinds == ["exec-image-unobserved-before-exit"] and \
+        dead["exe"] is None and dead["role"] == "unknown-image" and \
+        dead["prior_images"][0]["exe"] == PC_FAKE and h["closure_verified"] is True and \
+        h["exec_unobserved"] == 1 and h["verdict"] is False and \
+        h["api_client_history"] == "unknown" and not res["complete"] and \
+        "H: not established" in res["reasons"] and "watcher violations: 1" in res["reasons"] and \
+        no_malformed_h(res["reasons"]) and w.signals_frozen
     return verdict(d, T, ["INCOMPLETE"], "INCOMPLETE" if ok else "FAIL", {"fixtures": "ok"},
-                   runroot, notes={"violations": kinds, "reasons": res["reasons"]})
-
-
-PC_FAKE = "/nix/store/old-image"
+                   runroot, notes={"baseline": base["reasons"], "violations": kinds,
+                                   "reasons": res["reasons"]})
 
 
 def t22b(d, scratch, runroot):
     T = "T22b"
     root = mkroot(d, scratch, T, "root")
-    w = bare_watch(root)
+    w = bare_watch(root, closure=True)
+    base, _ = h_check(w)
     me = W.bsdinfo(os.getpid())
     w.entries[os.getpid()] = {"pid": os.getpid(), "birth_us": me["birth_us"], "lineage": True,
                               "role": "shell", "exit": None, "parent": None}
@@ -1258,12 +1703,16 @@ def t22b(d, scratch, runroot):
     finally:
         W.pidpath = real
     kinds = [v["kind"] for v in w.violations]
-    h = w.h_record()
+    res, h = h_check(w)
     reap(c, D_REAP)
-    rmtree(root)
-    ok = held and "admission-image-unreadable-live" in kinds and h["verdict"] is False
+    dispose(d, T, "root")
+    ok = base["complete"] is True and held and kinds == ["admission-image-unreadable-live"] and \
+        h["closure_verified"] is True and h["admission_unreadable_live"] == 1 and \
+        h["verdict"] is False and not res["complete"] and \
+        "H: not established" in res["reasons"] and no_malformed_h(res["reasons"])
     return verdict(d, T, ["HOLD"], "HOLD" if ok else "FAIL", {"fixtures": "ok"}, runroot,
-                   notes={"violations": kinds, "h": h})
+                   notes={"baseline": base["reasons"], "violations": kinds, "h": h,
+                          "reasons": res["reasons"]})
 
 
 def t22c(d, scratch, runroot):
@@ -1346,7 +1795,6 @@ def t22d(d, scratch, runroot):
         "nested_shell": allowed("pgctl", pgctl_child, nested=True),
         "unreadable_args": allowed("initdb", None),
     }
-    # an allowed shell that execs something other than postgres
     pe = mk(*parents["pgctl"])
     ce = mk("/bin/sh", pgctl_child, pe)
     w.check_exe(ce)
@@ -1360,7 +1808,7 @@ def t22d(d, scratch, runroot):
     finally:
         W.pidpath, W.proc_args, W.bsdinfo = real
     cases["exec_other_image"] = len(w.violations) == before
-    rmtree(root)
+    dispose(d, T, "root")
     positives = ("pgctl_ok", "check_ok", "boot_ok", "single_ok")
     ok = all(cases[k] for k in positives) and not any(v for k, v in cases.items()
                                                       if k not in positives)
@@ -1368,7 +1816,7 @@ def t22d(d, scratch, runroot):
                    notes={"allowed": cases, "proof": "fixture-synthetic"})
 
 
-# ---------------------------------------------------------------- T23 (H4)
+# ---------------------------------------------------------------- T23 (H4, M4)
 def t23(d, scratch, runroot, variant):
     T = "T23" + variant
     st, sn, lk = healthy_now()
@@ -1400,11 +1848,22 @@ def t23(d, scratch, runroot, variant):
         j = W.judge("P", counts, {}, res["complete"])
         ok = not res["complete"] and j["pass"] is False
         want = "INCOMPLETE"
-    else:
+    elif variant == "d":
         sn["SNAP-post"]["violations"] = [("capture-replaced", "/x")]
         res = classify(st, sn, lk)
         j = W.judge("A", [], {}, res["complete"])
         ok = not res["complete"] and j["pass"] is False
+        want = "INCOMPLETE"
+    else:
+        # M4: the wrapper's allowed exit moves after devenv-tasks (+1.0), before pc (+2.0)
+        base = classify(*healthy_now())
+        for e in st["dead"]:
+            if e["role"] == "wrapper":
+                e["exit"]["t"] = st["marks"]["stop_begin"] + 1.1
+        res = classify(st, sn, lk)
+        ok = base["complete"] is True and not res["complete"] and \
+            [r for r in res["reasons"] if r.startswith("disallowed exit devenv-tasks")] and \
+            res["window"]["job_chain"] == [{"pid": 1003, "birth_us": 1003000, "role": "wrapper"}]
         want = "INCOMPLETE"
     return verdict(d, T, [want], want if ok else "FAIL",
                    {"fixtures": "not-applicable:synthetic records only"}, runroot,
@@ -1414,7 +1873,9 @@ def t23(d, scratch, runroot, variant):
 # ---------------------------------------------------------------- T24 (cross-snapshot, H7/D-8)
 def t24(d, scratch, runroot):
     T = "T24"
-    root = mkroot(d, scratch, T, "root")
+    root = mkroot(d, scratch, T, "root", ["tasks.db", "SNAP-pre", "SNAP-pre/copy",
+                                          "SNAP-pre/snapshot.json", "SNAP-post", "SNAP-post/copy",
+                                          "SNAP-post/snapshot.json", "markers.json"])
     src = root + "/tasks.db"
     marker = "0123456789abcdef0123456789abcdef"
     with open(src, "w") as f:
@@ -1435,11 +1896,164 @@ def t24(d, scratch, runroot):
     W.jdump({"inst": "B", "epoch": "E1", "markers": {"S_u": marker}}, mk)
     only_post = W.cross_check([(post, "B")], [mk])
     all_snaps = W.cross_check([(pre, "B"), (post, "B")], [mk])
-    rmtree(root)
+    dispose(d, T, "root")
     ok = only_post["pass"] is True and all_snaps["pass"] is False
     return verdict(d, T, ["FAIL-CROSS-CHECK"], "FAIL-CROSS-CHECK" if ok else "FAIL",
                    {"fixtures": "ok"}, runroot,
                    notes={"post_only_pass": only_post["pass"], "all_pass": all_snaps["pass"]})
+
+
+# ---------------------------------------------------------------- T26 (M2)
+class StubKq(object):
+    """fixture-synthetic kqueue: delivers the given events once, then nothing."""
+
+    def __init__(self, events):
+        self.events = list(events)
+
+    def control(self, changes, n, timeout=None):
+        out, self.events = self.events, []
+        return out
+
+
+def t26a(d, scratch, runroot):
+    """An image violation delivered DURING signal_verified's drain refuses the signal."""
+    T = "T26a"
+    root = mkroot(d, scratch, T, "root")
+    w, procs = watch_with(d, T, root, [("pc", "process-compose", "", None)], closure=True)
+    p = procs["pc"]
+    birth = W.bsdinfo(p.pid)["birth_us"]
+    w.kq = StubKq([FakeEv(p.pid, W.NOTE_EXEC)])
+    real = (W.pidpath, W.proc_args)
+    W.pidpath = lambda pid: "/usr/bin/true"
+    W.proc_args = lambda pid: "/usr/bin/true"
+    refused = False
+    try:
+        w.signal_verified(p.pid, signal.SIGTERM, "T26a")
+    except W.Hold as h:
+        refused = "during the drain" in str(h)
+    finally:
+        W.pidpath, W.proc_args = real
+    kinds = [v["kind"] for v in w.violations]
+    alive = (W.bsdinfo(p.pid) or {}).get("birth_us") == birth
+    rcs = outer_reap(procs)
+    dispose(d, T, "root")
+    ok = refused and kinds == ["exe-not-allowlisted"] and w.signals_frozen and alive and \
+        w.harness_signals == []
+    return verdict(d, T, ["HOLD"], "HOLD" if ok else "FAIL",
+                   {"outer_reap": rcs_word(rcs, {"pc": 0}), "fixtures": "ok"}, runroot,
+                   notes={"violations": kinds, "alive_after": alive})
+
+
+def t26b(d, scratch, runroot):
+    """S5: a foreign-listener Hold propagates; only NotReady is retried."""
+    T = "T26b"
+    root = mkroot(d, scratch, T, "root", PG_DIRS + [".devenv/state/postgres/log", "state.json"])
+    os.makedirs(root + "/.devenv/state/postgres/log", 0o700)
+    state_path = root + "/state.json"
+    W.jdump({"live": [], "dead": [], "events": [], "gaps": [], "violations": []}, state_path)
+    m = fake_manifest(root)
+    real = (W.listener_proof, W.tcp_listeners)
+    out = {}
+    try:
+        W.tcp_listeners = lambda port: []
+
+        def foreign(m_, st):
+            raise W.Hold("FOREIGN-LISTENER fixture-synthetic")
+        W.listener_proof = foreign
+        try:
+            W.s5_observe(m, state_path, 1.0)
+            out["foreign"] = "returned"
+        except W.NotReady:
+            out["foreign"] = "not-ready"
+        except W.Hold:
+            out["foreign"] = "hold"
+
+        def pending(m_, st):
+            raise W.NotReady("no final postmaster yet")
+        W.listener_proof = pending
+        r = W.s5_observe(m, state_path, 1.0)
+        out["pending"] = "accepting-none" if r["accepting"] is None else "accepting"
+    finally:
+        W.listener_proof, W.tcp_listeners = real
+    dispose(d, T, "root")
+    ok = out == {"foreign": "hold", "pending": "accepting-none"}
+    return verdict(d, T, ["HOLD"], "HOLD" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+                   notes=out)
+
+
+def t26c(d, scratch, runroot):
+    """A live helper at finalization is HOLD with a receipt; nothing is signalled."""
+    T = "T26c"
+    root = mkroot(d, scratch, T, "root", ["watch-state.json"])
+    w = bare_watch(root)
+    hp = start_fixture(d, T, "helper", "import time; time.sleep(%d)" % L_FIXTURE)
+    w.helpers = [hp]
+    held = W.finalize(w, reap_s=1.0)
+    kinds = [v["kind"] for v in w.violations]
+    rcs = outer_reap({"helper": hp})
+    dispose(d, T, "root")
+    ok = held is True and kinds == ["helper-not-reaped"] and w.signals_frozen and \
+        w.harness_signals == []
+    return verdict(d, T, ["HOLD"], "HOLD" if ok else "FAIL",
+                   {"outer_reap": rcs_word(rcs, {"helper": 0}), "fixtures": "ok"}, runroot,
+                   notes={"violations": kinds})
+
+
+# ---------------------------------------------------------------- T27 (choice 5, Q4)
+def t27(d, scratch, runroot):
+    """The supplementary pre-connect predicate: one valid target and the no-connect
+    negatives (absent, wrong type, symlink, foreign lock, symlinked lock, non-canonical)."""
+    T = "T27"
+    names = []
+    for port in range(25432, 25438):
+        names += [".s.PGSQL.%d" % port, ".s.PGSQL.%d.lock" % port]
+    intent(d, T, "sockdir", "dir", names + ["lock-target"])
+    sdir = tempfile.mkdtemp(prefix="sk27", dir="/private/tmp")
+    set_identity(d, T, "sockdir", path_identity(sdir))
+    canon = os.path.realpath(sdir)
+    me = str(os.getpid())
+    socks = []
+
+    def bound(port, lock_text=None, lock_link=False):
+        s = socket.socket(socket.AF_UNIX)
+        s.bind("%s/.s.PGSQL.%d" % (sdir, port))
+        socks.append(s)
+        lp = "%s/.s.PGSQL.%d.lock" % (sdir, port)
+        if lock_link:
+            with open(sdir + "/lock-target", "w") as f:
+                f.write(me + "\n")
+            os.symlink(sdir + "/lock-target", lp)
+        elif lock_text is not None:
+            with open(lp, "w") as f:
+                f.write(lock_text)
+
+    bound(25432, me + "\n/x\n")
+    with open("%s/.s.PGSQL.25434" % sdir, "w") as f:
+        f.write("not a socket")
+    os.symlink("%s/.s.PGSQL.25432" % sdir, "%s/.s.PGSQL.25435" % sdir)
+    bound(25436, str(int(me) + 1) + "\n")
+    bound(25437, lock_link=True)
+
+    def check(port, sd=sdir, cd=canon):
+        try:
+            W.target_socket_check(sd, cd, port, me)
+            return "ok"
+        except W.Refuse as r:
+            return str(r).split(" ", 1)[1] if " " in str(r) else str(r)
+
+    got = {"valid": check(25432), "absent": check(25433), "not_socket": check(25434),
+           "symlink": check(25435), "foreign_lock": check(25436), "lock_symlink": check(25437),
+           "non_canonical": check(25432, cd=canon + "-other")}
+    for s in socks:
+        s.close()
+    dispose(d, T, "sockdir")
+    want = {"valid": "ok", "absent": "socket absent", "not_socket": "not an owned socket",
+            "symlink": "not an owned socket", "foreign_lock": "lock names another process",
+            "lock_symlink": "lock is a symlink",
+            "non_canonical": "socket dir not the canonical runtime dir"}
+    ok = got == want
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL", {"fixtures": "ok"}, runroot,
+                   notes=got)
 
 
 # ---------------------------------------------------------------- injections (T15a-c)
@@ -1475,30 +2089,39 @@ SYNTHETIC = {
     "T18c": lambda d, s, r: t18(d, s, r, "c"), "T18d": lambda d, s, r: t18(d, s, r, "d"),
     "T18d-vanish": lambda d, s, r: t18(d, s, r, "d-vanish"),
     "T18d-rebind": lambda d, s, r: t18(d, s, r, "d-rebind"),
-    "T19a": t19a, "T19b": t19b, "T19c": t19c, "T19d": t19d,
+    "T19a": t19a, "T19b": t19b, "T19c": t19c, "T19d": t19d, "T19f": t19f, "T19g": t19g,
+    "T19i": t19i,
     "T20a": lambda d, s, r: t20(d, s, r, "a"), "T20b": lambda d, s, r: t20(d, s, r, "b"),
     "T20c": lambda d, s, r: t20(d, s, r, "c"), "T20d": lambda d, s, r: t20(d, s, r, "d"),
+    "T20e": lambda d, s, r: t20(d, s, r, "e"), "T20f": lambda d, s, r: t20(d, s, r, "f"),
     "T21a": lambda d, s, r: t21(d, s, r, "a"), "T21b": lambda d, s, r: t21(d, s, r, "b"),
     "T21c": lambda d, s, r: t21(d, s, r, "c"), "T21d": lambda d, s, r: t21(d, s, r, "d"),
     "T21e": t21e,
     "T22a": t22a, "T22b": t22b, "T22c": t22c, "T22d": t22d,
     "T23a": lambda d, s, r: t23(d, s, r, "a"), "T23b": lambda d, s, r: t23(d, s, r, "b"),
     "T23c": lambda d, s, r: t23(d, s, r, "c"), "T23d": lambda d, s, r: t23(d, s, r, "d"),
-    "T24": t24,
+    "T23e": lambda d, s, r: t23(d, s, r, "e"),
+    "T24": t24, "T26a": t26a, "T26b": t26b, "T26c": t26c, "T27": t27,
 }
 
 
 def main(argv):
     cmd, a = argv[0], W.parse_kv(argv[1:])
     try:
+        if "gate" in a:
+            W.wait_gate(a.pop("gate"))
         if cmd == "intent":
-            intent(a["dir"], a["test"], a["label"], a["kind"])
+            contents = [x for x in a.get("contents", "").split(",") if x]
+            intent(a["dir"], a["test"], a["label"], a["kind"], contents)
         elif cmd == "identity-path":
             set_identity(a["dir"], a["test"], a["label"], path_identity(a["path"]))
         elif cmd == "identity-proc":
             set_identity(a["dir"], a["test"], a["label"], proc_identity(a["pid"], a["ppid"]))
         elif cmd == "retain":
-            retain(a["dir"], a["test"], a["labels"].split(","))
+            retain(a["dir"], a["test"], a["labels"].split(","),
+                   [x for x in a.get("manifests", "").split(",") if x])
+        elif cmd == "dispose":
+            W.jdump({"result": dispose(a["dir"], a["test"], a["label"])})
         elif cmd == "kill-fixture":
             W.jdump({"result": kill_fixture(a["dir"], a["test"], a["label"])})
         elif cmd == "wait-gone":
@@ -1508,20 +2131,30 @@ def main(argv):
             return 0 if ok else 3
         elif cmd == "observed-class":
             W.jdump({"class": observed_class(open(a["file"]).read())})
+        elif cmd == "t5-class":
+            W.jdump({"class": t5_class(a["pgdata"], a["port"], a["exists"])})
+        elif cmd == "exit-stop-allowed":
+            return 0 if exit_stop_allowed(a["status"]) else 3
+        elif cmd == "check-receipt":
+            return 0 if receipt_ok(a["dir"], a["test"]) else 3
         elif cmd == "verdict":
             rec = verdict(a["dir"], a["test"], a["expected"].split(","), a["observed"],
                           json.loads(a["teardown"]), a["runroot"],
                           [x for x in a.get("retained_manifests", "").split(",") if x],
                           json.loads(a.get("notes", "{}")))
             W.jdump(rec)
-            return 0 if rec["verdict"] in ("PASS", "EXPECTED-REFUSAL") else (
+            return 0 if rec["verdict"] in PASSING else (
                 3 if rec["verdict"] == "REAL-UNCERTAINTY" else 4)
         elif cmd == "summary":
-            out = summary(a["dir"], a["head"], a["ids"].split(","))
+            out = summary(a["dir"], a["head"], a["ids"].split(","), a.get("runroot"))
             W.jdump(out)
             return 0 if out["pass"] else 4
         elif cmd == "inject":
             W.jdump(inject(a["kind"], a["path"], a.get("pid")))
+        elif cmd == "state-has-pid":
+            st = W.jload(a["state"])
+            pid = int(a["pid"])
+            W.jdump({"admitted": any(e["pid"] == pid for e in st["live"] + st["dead"])})
         elif cmd == "state-live-role":
             st = W.jload(a["state"])
             W.jdump({"live": any(e["role"] == a["role"] and e["exit"] is None
@@ -1534,10 +2167,6 @@ def main(argv):
                 hits = [x for x in a["subs"].split(",") if any(x in r for r in cls["reasons"])]
                 obs = "INCOMPLETE:" + hits[0] if hits else "INCOMPLETE-OTHER"
             W.jdump({"class": obs})
-        elif cmd == "state-has-pid":
-            st = W.jload(a["state"])
-            pid = int(a["pid"])
-            W.jdump({"admitted": any(e["pid"] == pid for e in st["live"] + st["dead"])})
         elif cmd == "fixture-tcp-decoy":
             fixture_tcp_decoy(a["addr"], a["port"], a["count_file"])
         elif cmd == "fixture-unix-listener":
@@ -1552,13 +2181,20 @@ def main(argv):
                 return 64
             rec = fn(a["dir"], a["scratch"], a["runroot"])
             W.jdump(rec)
-            return 0 if rec["verdict"] in ("PASS", "EXPECTED-REFUSAL") else (
+            return 0 if rec["verdict"] in PASSING else (
                 3 if rec["verdict"] == "REAL-UNCERTAINTY" else 4)
         else:
             return 64
         return 0
     except (RealUncertainty, W.Hold) as h:
         sys.stderr.write("HOLD REAL-UNCERTAINTY %s\n" % h)
+        return 3
+    except (W.Fail, W.Refuse) as f:
+        # unexpected inside a self-test: uncertainty, never a pass or a plain failure
+        sys.stderr.write("HOLD REAL-UNCERTAINTY unexpected %s\n" % type(f).__name__)
+        return 3
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as e:
+        sys.stderr.write("HOLD IO %s\n" % type(e).__name__)
         return 3
 
 
