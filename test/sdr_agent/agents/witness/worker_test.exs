@@ -87,10 +87,9 @@ defmodule SdrAgent.Agents.Witness.WorkerTest do
     assert :ok = perform(@scan_worker, %{})
     assert all_enqueued(worker: @reconcile_worker) == []
 
-    Application.put_env(:sdr_agent, @witness,
-      store_root: WitnessRoot.mkdir!("scan"),
-      reconciled_methods: []
-    )
+    root = WitnessRoot.mkdir!("scan")
+    on_exit(fn -> File.rm_rf!(root) end)
+    Application.put_env(:sdr_agent, @witness, store_root: root, reconciled_methods: [])
 
     assert :ok = perform(@scan_worker, %{})
     assert :ok = perform(@scan_worker, %{})
