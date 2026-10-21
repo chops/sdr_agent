@@ -17,14 +17,22 @@ defmodule SdrAgent.Agents.Witness do
        `ancillary`; everything else — unknown routes, open start markers,
        other count_tokens — is `unclassified`. The primary is compared with
        `SdrAgent.Agents.Witness.Projection`: request grammar v2, then v3
-       when v2 does not apply to the request, then v1. Its evidence names the
+       when v2 does not apply to the request, then v1. Only for a
+       v3-selected request whose v3 result passed its evidence contract and
+       is v3's response-layout refusal does projection v4 apply
+       (`Projection.compare_v4/4`, D-182): an eligible v4 result replaces
+       it, with its own exact contract (`WitnessEvidence.exact_v4_group?/1`;
+       a failure is `evidence_contract_invalid` with no projection, never a
+       v3 fallback); an ineligible one leaves the v3 result unchanged. v4
+       is never tried first and never for a v2-admitted request. Its
+       evidence names the
        evaluated projection and `projections_inapplicable`. Unsupported proxy versions,
        content encodings, incomplete captures and bad blobs never reach a
        comparison;
     3. in one transaction that first locks the invocation row, appends
        `WireWitnessLink`s (only changed observations: a replay is a no-op; a
        mismatch is superseded only by an evaluated comparison under a
-       different projection) and keeps operator
+       different projection, and never by a v4 one) and keeps operator
        attention current: at most one live critical Failure (mismatch) and
        one live warning (missing, open, ambiguous, unclassified,
        unsupported, unreadable store) per invocation, resolving a warning
@@ -516,7 +524,9 @@ defmodule SdrAgent.Agents.Witness do
   # derived context group must be exactly that version's group: a contract
   # failure (incomplete, extra or invalid keys) is a conservative fallback
   # without any projection (so it never corrects a mismatch), never a proof
-  # with dropped fields.
+  # with dropped fields. Projection v4 (D-182; plan r5 section 6.2, choice
+  # (a)) is tried only after v3 was selected, passed its contract and is
+  # :unsupported (`v3_selected/4`).
   defp request_grammars(invocation, app, {request, response}, tamper) do
     grammars = [
       {"v2", &Projection.compare_v2/4, Projection.version_v2()},
@@ -527,6 +537,10 @@ defmodule SdrAgent.Agents.Witness do
       case compare.(invocation, app, request, response) do
         {:unsupported, %{extras: nil}} ->
           {:cont, inapplicable ++ [label]}
+
+        evaluated when label == "v3" ->
+          inputs = {invocation, app, request, response}
+          {:halt, {inapplicable, v3_selected(evaluated, version, tamper, inputs)}}
 
         evaluated ->
           {:halt, {inapplicable, cli_projection(evaluated, version, tamper)}}
@@ -540,6 +554,44 @@ defmodule SdrAgent.Agents.Witness do
         Projection.compare(invocation, app, request, response)
         |> project()
         |> Map.put(:inapplicable, inapplicable)
+    end
+  end
+
+  # A v3 result stands unless it passed its contract, its verdict is
+  # :unsupported and `compare_v4/4` is eligible: a contract-invalid v3
+  # result is never healed by v4.
+  defp v3_selected({verdict, _proof} = evaluated, version, tamper, inputs) do
+    case cli_projection(evaluated, version, tamper) do
+      %{projection: ^version} = v3 when verdict == :unsupported -> v4_fallback(v3, inputs, tamper)
+      v3 -> v3
+    end
+  end
+
+  defp v4_fallback(v3, {invocation, app, request, response}, tamper) do
+    case Projection.compare_v4(invocation, app, request, response) do
+      :ineligible -> v3
+      evaluated -> v4_projection(evaluated, tamper)
+    end
+  end
+
+  # v4's own contract: the same tamper hook, then the layout-aware exact
+  # group, then validation. A failure has no projection and never falls
+  # back to v3.
+  defp v4_projection({verdict, proof}, tamper) do
+    extras = tamper.(proof.extras)
+
+    with true <- WitnessEvidence.exact_v4_group?(extras),
+         {:ok, extras} <- WitnessEvidence.validate(extras) do
+      evaluated = project({verdict, proof})
+
+      %{
+        evaluated
+        | projection: Projection.version_v4(),
+          extras: extras,
+          reasons: Enum.uniq(evaluated.reasons ++ proof.reasons)
+      }
+    else
+      _invalid -> result(:inferred, "primary", ["evidence_contract_invalid"], warn: true)
     end
   end
 
@@ -807,10 +859,12 @@ defmodule SdrAgent.Agents.Witness do
       # C3: only an evaluated comparison (match or mismatch) under a
       # different projection may correct a mismatch; weaker or unsupported
       # observations never do, whatever projection label they carry (a v1
-      # fallback labels its unsupported result v1).
+      # fallback labels its unsupported result v1). A v4 observation never
+      # supersedes a mismatch, whatever its status (D-182; plan r5 6.5).
       head.link_status == :mismatch and
           (not compared? or not is_binary(desired.evidence["projection_version"]) or
-             head.evidence["projection_version"] == desired.evidence["projection_version"]) ->
+             head.evidence["projection_version"] == desired.evidence["projection_version"] or
+             desired.evidence["projection_version"] == Projection.version_v4()) ->
         {:ok, :mismatch_kept}
 
       true ->
