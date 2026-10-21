@@ -404,9 +404,16 @@ defmodule SdrAgent.Outreach.WebhookHandoffTest do
       assert webhook!(ctx, reply.event).processing_status == :received
       assert_reply_phase!(ctx, reply)
 
-      for text <- [Jason.encode!(executed.errors), log], value <- reply.canaries do
-        refute String.contains?(text, value), "C3-02: a reply value reached oban_jobs.errors"
-      end
+      # C3-02 G8 (MH-3c): one assertion and one message per sink, so a failure
+      # names the sink that leaked: this job's persisted errors first, then
+      # the captured log.
+      errors_text = Jason.encode!(executed.errors)
+
+      refute Enum.any?(reply.canaries, &String.contains?(errors_text, &1)),
+             "C3-02: a reply value reached oban_jobs.errors"
+
+      refute Enum.any?(reply.canaries, &String.contains?(log, &1)),
+             "C3-02: a reply value reached the captured log"
     end
 
     # Structural RED: SDR.bootstrap_definitions/1 is absent.
