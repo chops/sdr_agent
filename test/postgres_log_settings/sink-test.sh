@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 5b sink test orchestrator (plan r2 as amended by r3, r4, r5, r6 and R6-1;
 # handoff tmp claude-5b-sink-plan-r{2..6}.md, claude-5b-sink-plan-r6-amendment-R6-1.md),
-# repaired per claude-5b-harness-repair-plan.md (35a4926f), its amendment (25092856) and A1/A2.
+# repaired per claude-5b-harness-repair-plan.md (35a4926f), its amendment (25092856), A1/A2,
+# the ba40b5b dispositions (74d41237) and their binding Q1-Q4.
 #
 #   bash test/postgres_log_settings/sink-test.sh --dry-plan
 #   bash test/postgres_log_settings/sink-test.sh selftest  --scratch DIR --evidence DIR
@@ -20,11 +21,15 @@
 #
 # Every wait on a background job is bounded by a monotonic deadline (wait_bounded); a job
 # still running at its deadline is HOLD and is never signalled by this script (repair H2,
-# A1). A stop is requested at most once per watcher; after a HOLD nothing is stopped again.
+# A1). Long-running observation commands and every self-test run under an independent outer
+# controller (run_guarded + sink_watch.py observe-deadline; M1, Q2). The exit path may send
+# one stop only after a known FAIL (status 4) with a current clean, unfrozen, kernel-proven
+# watcher status (M2); after any HOLD or unknown status nothing is stopped.
 #
 # Exit: 0 pass; 2 refusal (nothing started); 3 HOLD (uncertainty, retained); 4 FAIL
 # (including S5 NOT-EXERCISED).
 set -euo pipefail
+[ "${BASH_VERSINFO[0]}" -ge 4 ] || { echo "SINK-TEST REFUSE: bash >= 4 required (BASHPID)" >&2; exit 2; }
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 STAT=/usr/bin/stat
@@ -56,9 +61,10 @@ INPUTS=(flake.nix flake.lock devenv.nix priv/postgres/log_settings.json
 
 # The self-test IDs, in run order (repair plan + amendment self-test list).
 SYNTHETIC_IDS="T9a T9b T10 T11 T12 T15d T16 T17a T17b T17-baseline T18a T18b T18c T18d"
-SYNTHETIC_IDS="$SYNTHETIC_IDS T18d-vanish T18d-rebind T19a T19b T19c T19d T20a T20b T20c T20d"
-SYNTHETIC_IDS="$SYNTHETIC_IDS T21a T21b T21c T21d T21e T22a T22b T22c T22d T23a T23b T23c T23d T24"
-SHELL_IDS="T1 T2 T3 T13 T14 T19e"
+SYNTHETIC_IDS="$SYNTHETIC_IDS T18d-vanish T18d-rebind T19a T19b T19c T19d T19f T19g T19i"
+SYNTHETIC_IDS="$SYNTHETIC_IDS T20a T20b T20c T20d T20e T20f T21a T21b T21c T21d T21e"
+SYNTHETIC_IDS="$SYNTHETIC_IDS T22a T22b T22c T22d T23a T23b T23c T23d T23e T24 T26a T26b T26c T27"
+SHELL_IDS="T1 T2 T3 T13 T14 T19e T19h T26d"
 INSTANCE_IDS="T4a T4b T5 T6 T7 T8 T15a T15b T15c T25"
 
 # supervise's post-stop bound is TIMEOUTS.barrier (90) + 30 s; the shell allows 30 s more.
@@ -104,6 +110,9 @@ cross-check: SNAP-0, SNAP-pre and SNAP-post of every required epoch (P E1/E2, A 
   B E1/E2, B S5 when accepting)
 bounded waits: watcher exit ${WATCH_EXIT_S}s after the stop request; HOLD at the deadline,
   nothing signalled by the shell
+outer controller: every self-test and every ready-wait / drain-check / ctl / barrier /
+  s5-observe runs gated under observe-deadline (own receipts, own reaps, no signals)
+exit path: at most one stop, only after FAIL (4) with a clean unfrozen kernel-proven status
 selftest ids (stop at the first non-pass):
   synthetic: $SYNTHETIC_IDS
   shell:     $SHELL_IDS
@@ -131,6 +140,7 @@ RUNID="$(date -u +%Y%m%dT%H%M%SZ)-${HEAD:0:8}"
 RUNROOT="$SCRATCH/sink-$RUNID"
 EVID="$EVIDENCE/5b-sink-$MODE-$RUNID"
 mkdir -m 700 "$RUNROOT" "$EVID"
+GD="$EVID/guard"; mkdir -m 700 "$GD"
 input_hashes > "$EVID/inputs.sha256"
 git -C "$WT" show "$HEAD:test/postgres_log_settings/expected-contract.conf" > "$EVID/expected-contract.conf"
 
@@ -180,26 +190,99 @@ wait_bounded() {
   return 0
 }
 
-# Per-watcher flags (repair H2): at most one stop request; none after a teardown HOLD.
+# ------------------------------------------------------------------ outer controller (M1, Q2)
+# run_guarded DEADLINE OUT ERR CMD...: CMD must accept --gate PATH (sink_watch.py and
+# sink_selftest.py do, as do the shell subjects below) and does nothing until the gate is
+# opened, so its identity is recorded first. Subject and observer intents are registered
+# before each spawn and their (pid, birth) identities after; the observer
+# (`observe-deadline`) is a separate process with its own receipt and never signals.
+# Returns 0 with GUARD_RC = the subject's own reaped status only after the observer's
+# receipt says "gone"; otherwise 3 (HOLD): no wait on a live subject, no signal, no
+# disposal, and the receipt is retained. "Gone" is not descendant, handle or barrier proof.
+GUARD_N=0 GUARD_RC="" GUARD_SP="" GUARD_SB="" GUARD_RECEIPT=""
+run_guarded() {
+  local dl=$1 out=$2 err=$3 g op
+  shift 3
+  GUARD_N=$((GUARD_N + 1)); g="g$GUARD_N"
+  GUARD_RC="" GUARD_SP="" GUARD_SB="" GUARD_RECEIPT="$GD/$g.observe.json"
+  "${ST[@]}" intent --dir "$GD" --test guard --label "$g-subject" --kind proc || return 3
+  "$@" --gate "$GD/$g.gate" > "$out" 2> "$err" &
+  GUARD_SP=$!
+  "${ST[@]}" identity-proc --dir "$GD" --test guard --label "$g-subject" --pid "$GUARD_SP" \
+    --ppid "$BASHPID" || return 3
+  GUARD_SB=$("${W[@]}" birth --pid "$GUARD_SP") || return 3
+  "${ST[@]}" intent --dir "$GD" --test guard --label "$g-observer" --kind proc || return 3
+  "${W[@]}" observe-deadline --pid "$GUARD_SP" --birth-us "$GUARD_SB" --deadline "$dl" \
+    --out "$GUARD_RECEIPT" > /dev/null 2> "$GD/$g.observer.err" &
+  op=$!
+  "${ST[@]}" identity-proc --dir "$GD" --test guard --label "$g-observer" --pid "$op" \
+    --ppid "$BASHPID" || return 3
+  : > "$GD/$g.gate"
+  if ! wait_bounded "$op" $((dl + 15)); then
+    note "guard $g: observer itself still running: HOLD"
+    return 3
+  fi
+  echo "$WAIT_RC" > "$GD/$g.observer.rc"
+  if [ "$WAIT_RC" -ne 0 ] || [ "$(jget "$GUARD_RECEIPT" result)" != gone ]; then
+    note "guard $g: subject not proven gone by its ${dl}s deadline (receipt $GUARD_RECEIPT): HOLD"
+    return 3
+  fi
+  wait_bounded "$GUARD_SP" 10 || return 3
+  GUARD_RC=$WAIT_RC
+  echo "$GUARD_RC" > "$GD/$g.subject.rc"
+  return 0
+}
+
+# A guarded sink_watch.py command: its own status, or 3 if the guard held.
+guarded_w() { # deadline out err W-args...
+  local dl=$1 out=$2 err=$3
+  shift 3
+  run_guarded "$dl" "$out" "$err" "${W[@]}" "$@" || { HOLD_SEEN=1; return 3; }
+  return "$GUARD_RC"
+}
+
+# Map a W/S/C status to the same class (M2): a HOLD is never re-labelled FAIL.
+die_from() { # status label
+  case "$1" in
+    2) die REFUSE "$2 (status 2)" 2 ;;
+    4) die FAIL "$2 (status 4)" 4 ;;
+    *) HOLD_SEEN=1; die HOLD "$2 (status $1)" 3 ;;
+  esac
+}
+
+# Choice 3 as replaced (M2): an exit-path stop only for status 4 with a current, clean,
+# unfrozen, kernel-proven watcher status. Pure decision on a status file (T26d).
+exit_may_stop() { # rc status-json
+  [ "$1" = 4 ] || return 1
+  "${ST[@]}" exit-stop-allowed --status "$2" > /dev/null 2>&1
+}
+
+# Per-watcher flags: at most one stop request; none after a HOLD.
 ACTIVE_CTL="" ACTIVE_WPID="" STOP_ATTEMPTED=0 HOLD_SEEN=0
 on_exit() {
-  local rc=$?
+  local rc=$? st crc=0
   trap - EXIT
   if [ -n "$ACTIVE_CTL" ]; then
-    [ "$rc" -ne 0 ] || rc=3
-    if [ "$STOP_ATTEMPTED" = 0 ] && [ "$HOLD_SEEN" = 0 ]; then
+    st="$ACTIVE_CTL.exit-status.json"
+    if [ "$rc" = 4 ] && [ "$STOP_ATTEMPTED" = 0 ] && [ "$HOLD_SEEN" = 0 ]; then
+      guarded_w 60 "$st" "$ACTIVE_CTL.exit-status.err" ctl --ctl "$ACTIVE_CTL" --cmd status \
+        --timeout 30 || crc=$?
+    else
+      crc=1
+    fi
+    if [ "$crc" -eq 0 ] && exit_may_stop "$rc" "$st"; then
       STOP_ATTEMPTED=1
-      note "exit $rc with a live watcher: one deliberate stop request (no barrier, no release)"
-      if "${W[@]}" ctl --ctl "$ACTIVE_CTL" --cmd stop --timeout 400 > "$ACTIVE_CTL.exit-stop.json" \
-          2> "$ACTIVE_CTL.exit-stop.err" && wait_bounded "$ACTIVE_WPID" "$WATCH_EXIT_S" \
-          && [ "$WAIT_RC" = 0 ]; then
+      note "FAIL with a clean live watcher: one deliberate stop request (no barrier, no release)"
+      if guarded_w 430 "$ACTIVE_CTL.exit-stop.json" "$ACTIVE_CTL.exit-stop.err" ctl \
+          --ctl "$ACTIVE_CTL" --cmd stop --timeout 400 \
+          && wait_bounded "$ACTIVE_WPID" "$WATCH_EXIT_S" && [ "$WAIT_RC" = 0 ]; then
         note "exit-path stop completed; the instance is retained for disposition"
       else
         note "exit-path stop did not complete: HOLD"
         rc=3
       fi
     else
-      note "watcher $ACTIVE_WPID not stopped again (stop_attempted=$STOP_ATTEMPTED hold=$HOLD_SEEN): HOLD"
+      note "watcher $ACTIVE_WPID left running for disposition (exit $rc; no automatic stop): HOLD"
       rc=3
     fi
   fi
@@ -238,7 +321,7 @@ build_env() {
 }
 
 new_instance() { # kind inst [extra manifest-new args...] -> M
-  reg_intent "root-$2" dir
+  reg_intent "root-$2" instance-root
   "${W[@]}" manifest-new --kind "$1" --inst "$2" --head "$HEAD" --worktree "$WT" \
     --scratch "$RUNROOT" --evidence "$EVID" "${@:3}" > "$EVID/.last-manifest.json"
   M="$EVID/$2/manifest.json"
@@ -295,7 +378,7 @@ start_epoch() { # manifest epoch first(1|0) -> ED CTL STATE WPID
   [ -z "$ACTIVE_CTL" ] || die HOLD "an earlier watcher is still active ($ACTIVE_CTL)" 3
   ev=$(mf "$m" evidence); inst=$(mf "$m" inst); ED="$ev/$ep"; mkdir -m 700 "$ED"
   if [ "$3" = 1 ]; then
-    reg_intent "runtime-$inst" dir
+    reg_intent "runtime-$inst" instance-runtime
     "${W[@]}" claim-runtime --manifest "$m" > "$ED/claim.json"
     reg_path "runtime-$inst" "$(mf "$m" runtime)"
     pf=(--first-start)
@@ -311,8 +394,8 @@ start_epoch() { # manifest epoch first(1|0) -> ED CTL STATE WPID
 
 wait_ready() { # manifest deadline -> PMPID PMBIRTH (rc of ready-wait; stderr in $ED/ready.err)
   local rc=0
-  "${W[@]}" ready-wait --manifest "$1" --state "$STATE" --deadline "$2" --out "$ED/ready.json" \
-    2> "$ED/ready.err" || rc=$?
+  guarded_w $(($2 + 30)) /dev/null "$ED/ready.err" ready-wait --manifest "$1" --state "$STATE" \
+    --deadline "$2" --out "$ED/ready.json" || rc=$?
   if [ $rc -eq 0 ]; then
     PMPID=$(jget "$ED/ready.json" pid); PMBIRTH=$(jget "$ED/ready.json" birth_us)
   fi
@@ -339,7 +422,9 @@ lock_snap0() { # manifest
 }
 
 snap_pre() { # manifest
-  "${W[@]}" drain-check --manifest "$1" --state "$STATE"
+  local rc=0
+  guarded_w 45 /dev/null "$ED/drain-check.err" drain-check --manifest "$1" --state "$STATE" || rc=$?
+  [ "$rc" -eq 0 ] || die_from "$rc" "drain check"
   "${W[@]}" snapshot --manifest "$1" --name SNAP-pre --out "$ED/SNAP-pre" --prev "$ED/SNAP-0" \
     > "$ED/SNAP-pre.violations.json"
 }
@@ -350,7 +435,7 @@ snap_pre() { # manifest
 stop_and_barrier() { # manifest
   local crc=0 brc=0
   STOP_ATTEMPTED=1
-  "${W[@]}" ctl --ctl "$CTL" --cmd stop --timeout 400 > "$ED/stop.json" 2> "$ED/stop.err" || crc=$?
+  guarded_w 430 "$ED/stop.json" "$ED/stop.err" ctl --ctl "$CTL" --cmd stop --timeout 400 || crc=$?
   if ! wait_bounded "$WPID" "$WATCH_EXIT_S"; then
     HOLD_SEEN=1
     echo "running-at-deadline" > "$ED/supervise.rc"
@@ -363,9 +448,10 @@ stop_and_barrier() { # manifest
     HOLD_SEEN=1
     return 3
   fi
-  "${W[@]}" barrier --manifest "$1" --state "$STATE" --out "$ED/barrier.json" 2> "$ED/barrier.err" \
-    || brc=$?
+  guarded_w 120 /dev/null "$ED/barrier.err" barrier --manifest "$1" --state "$STATE" \
+    --out "$ED/barrier.json" || brc=$?
   echo "$brc" > "$ED/barrier.rc"
+  [ "$brc" -eq 0 ] || HOLD_SEEN=1
   return "$brc"
 }
 
@@ -425,17 +511,17 @@ add_snaps() { # inst (for $ED)
 marker_epoch() {
   local m=$M kind=$1 inst=$2 ep=$3 first=$4 creates=$5 cdb=$6 adb=$7 aexp=$8 sb=0 jrc=0
   start_epoch "$m" "$ep" "$first"
-  wait_ready "$m" "${READY_DEADLINE:-120}" || die FAIL "$inst $ep not ready" 4
+  wait_ready "$m" "${READY_DEADLINE:-120}" || die_from $? "$inst $ep not ready"
   client "$m" prepare --mode prepare --create "$creates" --canary-db "$cdb" \
-    || die HOLD "$inst $ep prepare refused" 3
+    || die_from $? "$inst $ep prepare"
   lock_snap0 "$m"
   new_markers "$inst" "$ep"
-  client "$m" canaries --mode canaries --db "$cdb" --markers "$MK" || die FAIL "$inst $ep canaries" 4
+  client "$m" canaries --mode canaries --db "$cdb" --markers "$MK" || die_from $? "$inst $ep canaries"
   if [ "$adb" != - ]; then
-    client "$m" audit --mode audit --db "$adb" --expect "$aexp" || die FAIL "$inst $ep audit" 4
+    client "$m" audit --mode audit --db "$adb" --expect "$aexp" || die_from $? "$inst $ep audit"
   fi
   if [ "$kind" = P ] && [ "$ep" = E1 ]; then
-    client "$m" audit-load --mode audit --db p_load --expect p_load || die FAIL "P p_load" 4
+    client "$m" audit-load --mode audit --db p_load --expect p_load || die_from $? "P p_load"
   fi
   snap_pre "$m"
   stop_and_barrier "$m" || sb=$?
@@ -455,8 +541,8 @@ run_discovery() {
   local m=$M ep first=1 rcs=() pc ns sb r pass=True
   for ep in E1 E2; do
     start_epoch "$m" "$ep" "$first"; first=0
-    wait_ready "$m" 120 || die FAIL "D $ep not ready" 4
-    client "$m" identity --mode identity || die HOLD "D $ep identity" 3
+    wait_ready "$m" 120 || die_from $? "D $ep not ready"
+    client "$m" identity --mode identity || die_from $? "D $ep identity"
     lock_snap0 "$m"
     pc=$("${W[@]}" check-eacces --path "$(mf "$m" pc_socket)" | "${W[@]}" jget --file - --key result)
     ns=$("${W[@]}" check-eacces --path "$(mf "$m" native_socket)" | "${W[@]}" jget --file - --key result)
@@ -494,12 +580,12 @@ run_campaign() {
   # A: audit controls
   prepare_instance A A; local ma=$M
   start_epoch "$ma" E1 1
-  wait_ready "$ma" 120 || die FAIL "A not ready" 4
-  client "$ma" prepare --mode prepare --create a_ext,a_plain || die HOLD "A prepare" 3
-  client "$ma" a-ext-setup --mode a_ext_setup || die HOLD "A a_ext setup" 3
+  wait_ready "$ma" 120 || die_from $? "A not ready"
+  client "$ma" prepare --mode prepare --create a_ext,a_plain || die_from $? "A prepare"
+  client "$ma" a-ext-setup --mode a_ext_setup || die_from $? "A a_ext setup"
   lock_snap0 "$ma"
-  client "$ma" audit-ext --mode audit --db a_ext --expect a_ext || die FAIL "A a_ext audit" 4
-  client "$ma" audit-plain --mode audit --db a_plain --expect a_plain || die FAIL "A a_plain audit" 4
+  client "$ma" audit-ext --mode audit --db a_ext --expect a_ext || die_from $? "A a_ext audit"
+  client "$ma" audit-plain --mode audit --db a_plain --expect a_plain || die_from $? "A a_plain audit"
   snap_pre "$ma"
   sb=0; stop_and_barrier "$ma" || sb=$?
   [ "$sb" -eq 0 ] || die HOLD "A stop/barrier status $sb" 3
@@ -538,9 +624,9 @@ run_s5() { # manifest inst db fault(1|0)
     first=1
   fi
   start_epoch "$m" S5 "$first"
-  "${W[@]}" s5-observe --manifest "$m" --state "$STATE" --deadline 300 --out "$ED/s5.json" \
-    2> "$ED/s5.err" || orc=$?
-  [ "$orc" -eq 0 ] || die HOLD "$inst S5 observation status $orc (see $ED/s5.err)" 3
+  guarded_w 330 /dev/null "$ED/s5.err" s5-observe --manifest "$m" --state "$STATE" --deadline 300 \
+    --out "$ED/s5.json" || orc=$?
+  [ "$orc" -eq 0 ] || die_from "$orc" "$inst S5 observation (see $ED/s5.err)"
   if [ "$(jget "$ED/s5.json" accepting)" != None ]; then
     note "S5: the server accepted connections; running the full S5 marker epoch"
     PMPID=$(jget "$ED/s5.json" accepting.pid); PMBIRTH=$(jget "$ED/s5.json" accepting.birth_us)
@@ -549,10 +635,10 @@ run_s5() { # manifest inst db fault(1|0)
       [ "$r" -eq 2 ] || die FAIL "$inst S5: a B database name on an S instance gave status $r, not 2" 4
     fi
     client "$m" s5-prepare --mode prepare --create "$db" --canary-db "$db" \
-      || die HOLD "$inst S5 prepare refused" 3
+      || die_from $? "$inst S5 prepare"
     lock_snap0 "$m"
     new_markers "$inst" S5
-    client "$m" s5-canaries --mode canaries --db "$db" --markers "$MK" || die FAIL "$inst S5 canaries" 4
+    client "$m" s5-canaries --mode canaries --db "$db" --markers "$MK" || die_from $? "$inst S5 canaries"
     snap_pre "$m"
     stop_and_barrier "$m" || sb=$?
     [ "$sb" -eq 0 ] || die HOLD "$inst S5 stop/barrier status $sb" 3
@@ -587,24 +673,29 @@ run_s5() { # manifest inst db fault(1|0)
   fi
 }
 
-# ------------------------------------------------------------------ selftest (r2 9, r3 7; H3)
+# ------------------------------------------------------------------ selftest (r2 9, r3 7; H3, M3)
 # Every test ends in `sv`, which asks sink_selftest.py for the verdict: the observed class
-# must equal one of the test's fixed expected classes, the teardown proof must be complete
-# and the independent reconciliation must find no unauthorized leftover. Anything other
-# than PASS / EXPECTED-REFUSAL stops the suite at once with exit 3 (no later test, no
-# cleanup, no summary).
+# must equal one of the test's fixed expected classes, the test's exact proof contract must
+# be satisfied, and an independent reconciliation must find no unauthorized leftover. Then
+# its receipt is re-checked before any later test starts (Q2). Anything other than PASS /
+# EXPECTED-REFUSAL stops the suite at once with exit 3 (no later test, no cleanup, no
+# summary).
 sv() { # test expected(comma list) observed teardown-json [retained manifests, comma list]
   local rc=0
   "${ST[@]}" verdict --dir "$SD" --test "$1" --expected "$2" --observed "$3" --teardown "$4" \
     --runroot "$RUNROOT" --retained-manifests "${5:-}" > "$SD/$1.verdict.out" || rc=$?
   [ "$rc" -eq 0 ] || die HOLD "self-test $1 did not give its expected verdict (status $rc; see $SD/$1.json)" 3
+  check_receipt "$1"
 }
-st_intent() { "${ST[@]}" intent --dir "$SD" --test "$1" --label "$2" --kind "$3"; }
+check_receipt() { "${ST[@]}" check-receipt --dir "$SD" --test "$1" || die HOLD "self-test $1: no passing receipt" 3; }
+st_intent() { "${ST[@]}" intent --dir "$SD" --test "$1" --label "$2" --kind "$3" --contents "${4:-}"; }
 st_idpath() { "${ST[@]}" identity-path --dir "$SD" --test "$1" --label "$2" --path "$3"; }
-st_idproc() { "${ST[@]}" identity-proc --dir "$SD" --test "$1" --label "$2" --pid "$3" --ppid "$$"; }
-st_retain() { "${ST[@]}" retain --dir "$SD" --test "$1" --labels "$2"; }
+st_idproc() { "${ST[@]}" identity-proc --dir "$SD" --test "$1" --label "$2" --pid "$3" --ppid "${4:-$BASHPID}"; }
+st_retain() { "${ST[@]}" retain --dir "$SD" --test "$1" --labels "$2" --manifests "${3:-}"; }
+st_dispose() { "${ST[@]}" dispose --dir "$SD" --test "$1" --label "$2" > /dev/null; }
 obs() { "${ST[@]}" observed-class --file "$1" | "${W[@]}" jget --file - --key class; }
 rcword() { if [ "$1" = 0 ]; then echo ok; else echo "status-$1"; fi; }
+gate_wait() { local _i; for _i in $(seq 1 200); do [ -e "$1" ] && return 0; sleep 0.05; done; return 3; }
 
 # Identity-bound fixture stop (SIGTERM, 10 s), then a bounded reap of this shell's own job.
 st_kill() { # test label pid -> 0, or 3
@@ -626,41 +717,41 @@ st_fixture() { # test label ready-path fixture-args...
 }
 
 st_T1() {
-  ST_TEST=T1; new_instance S T1; local m=$M rt rc=0 b a cls cl
+  ST_TEST=T1; new_instance S T1; local m=$M rt rc=0 b a cls cl=0 fx=0
   rt=$(mf "$m" runtime)
-  st_intent T1 rtdir dir; mkdir -m 700 "$rt"; st_idpath T1 rtdir "$rt"; b=$($STAT -f '%d:%i' "$rt")
+  st_intent T1 rtdir dir ""; mkdir -m 700 "$rt"; st_idpath T1 rtdir "$rt"; b=$($STAT -f '%d:%i' "$rt")
   "${W[@]}" claim-runtime --manifest "$m" > /dev/null 2> "$SD/T1.err" || rc=$?
   a=$($STAT -f '%d:%i' "$rt")
   cls=$(obs "$SD/T1.err"); [ "$rc" -eq 2 ] || cls="$cls-STATUS-$rc"
   { [ "$a" = "$b" ] && [ -z "$(ls -A "$rt")" ]; } || cls="RUNTIME-DIR-CHANGED"
-  rmdir "$rt"
-  cl=0; cleanup_instance "$m" || cl=$?
+  st_dispose T1 rtdir || fx=$?
+  cleanup_instance "$m" || cl=$?
   ST_TEST=""
-  sv T1 REFUSE-RUNTIME-EXISTS "$cls" "{\"fixtures\": \"ok\", \"cleanup\": \"$(rcword $cl)\"}"
+  sv T1 REFUSE-RUNTIME-EXISTS "$cls" "{\"fixtures\": \"$(rcword $fx)\", \"cleanup\": \"$(rcword $cl)\"}"
 }
 
 st_T2() {
-  ST_TEST=T2; new_instance S T2; local m=$M rt rc=0 cls k=0 cl=0
+  ST_TEST=T2; new_instance S T2; local m=$M rt rc=0 cls k=0 cl=0 fx=0
   rt=$(mf "$m" runtime)
-  st_intent T2 rtdir dir; mkdir -m 700 "$rt"; st_idpath T2 rtdir "$rt"
+  st_intent T2 rtdir dir "pc.sock"; mkdir -m 700 "$rt"; st_idpath T2 rtdir "$rt"
   st_fixture T2 unix-decoy "$rt/pc.sock" fixture-unix-listener --path "$rt/pc.sock"
   "${W[@]}" claim-runtime --manifest "$m" > /dev/null 2> "$SD/T2.err" || rc=$?
   cls=$(obs "$SD/T2.err"); [ "$rc" -eq 2 ] || cls="$cls-STATUS-$rc"
   st_kill T2 unix-decoy "$FX" || k=$?
   [ "$k" -eq 0 ] || die HOLD "T2 fixture teardown: REAL-UNCERTAINTY" 3
-  rm -f "$rt/pc.sock"; rmdir "$rt"
+  st_dispose T2 rtdir || fx=$?
   cleanup_instance "$m" || cl=$?
   ST_TEST=""
-  sv T2 REFUSE-RUNTIME-EXISTS "$cls" "{\"fixtures\": \"ok\", \"cleanup\": \"$(rcword $cl)\"}"
+  sv T2 REFUSE-RUNTIME-EXISTS "$cls" "{\"fixtures\": \"$(rcword $fx)\", \"cleanup\": \"$(rcword $cl)\"}"
 }
 
 st_T3() {
   local real="$RUNROOT/t3-real" link="$RUNROOT/t3-link" d755="$RUNROOT/t3-755" repo="$RUNROOT/t3-repo"
-  local ca cb cc cls ra=0 rb=0 rc=0
-  st_intent T3 real dir; mkdir -m 700 "$real"; st_idpath T3 real "$real"
+  local ca cb cc cls ra=0 rb=0 rc=0 fx=0
+  st_intent T3 real dir ""; mkdir -m 700 "$real"; st_idpath T3 real "$real"
   st_intent T3 link symlink; ln -s "$real" "$link"; st_idpath T3 link "$link"
-  st_intent T3 d755 dir; mkdir -m 755 "$d755"; st_idpath T3 d755 "$d755"
-  st_intent T3 repo dir; mkdir -m 700 "$repo"; st_idpath T3 repo "$repo"
+  st_intent T3 d755 dir ""; mkdir -m 755 "$d755"; st_idpath T3 d755 "$d755"
+  st_intent T3 repo dir ".git/**,root"; mkdir -m 700 "$repo"; st_idpath T3 repo "$repo"
   git -C "$repo" init -q; mkdir -m 700 "$repo/root"
   "${W[@]}" manifest-new --kind S --inst T3a --head "$HEAD" --worktree "$WT" --scratch "$RUNROOT" \
     --evidence "$EVID" --root "$link" > /dev/null 2> "$SD/T3a.err" || ra=$?
@@ -671,8 +762,8 @@ st_T3() {
   ca=$(obs "$SD/T3a.err"); cb=$(obs "$SD/T3b.err"); cc=$(obs "$SD/T3c.err")
   cls="symlink=$ca/$ra,mode755=$cb/$rb,in-checkout=$cc/$rc"
   [ "$cls" != "symlink=REFUSE-ROOT/2,mode755=REFUSE-ROOT/2,in-checkout=REFUSE-ROOT/2" ] || cls=REFUSE-ROOT
-  rm -f "$link"; rmdir "$real" "$d755"; rm -rf "$repo"
-  sv T3 REFUSE-ROOT "$cls" '{"fixtures": "ok"}'
+  { st_dispose T3 link && st_dispose T3 real && st_dispose T3 d755 && st_dispose T3 repo; } || fx=$?
+  sv T3 REFUSE-ROOT "$cls" "{\"fixtures\": \"$(rcword $fx)\"}"
 }
 
 st_T13() {
@@ -689,35 +780,106 @@ st_T13() {
 }
 
 st_T14() {
-  ST_TEST=T14; new_instance S T14; local m=$M other="$RUNROOT/t14-other" ev cls cl=0 rc=0
+  ST_TEST=T14; new_instance S T14; local m=$M other="$RUNROOT/t14-other" ev cls cl=0 rc=0 fx=0
   ev=$(mf "$m" evidence)
-  st_intent T14 other dir; mkdir -m 700 "$other"; st_idpath T14 other "$other"
+  st_intent T14 other dir ""; mkdir -m 700 "$other"; st_idpath T14 other "$other"
   make_copy "$m"
   build_launcher "$m" "$other" > "$ev/launcher-path"
   "${W[@]}" artifacts --manifest "$m" --launcher "$(< "$ev/launcher-path")" \
     --reference "$EVID/R/artifacts.json" > /dev/null 2> "$SD/T14.err" || rc=$?
   cls=$(obs "$SD/T14.err"); [ "$rc" -eq 2 ] || cls="$cls-STATUS-$rc"
-  rmdir "$other"; cleanup_instance "$m" || cl=$?
+  st_dispose T14 other || fx=$?
+  cleanup_instance "$m" || cl=$?
   ST_TEST=""
-  sv T14 REFUSE-PROVENANCE "$cls" "{\"fixtures\": \"ok\", \"cleanup\": \"$(rcword $cl)\"}"
+  sv T14 REFUSE-PROVENANCE "$cls" "{\"fixtures\": \"$(rcword $fx)\", \"cleanup\": \"$(rcword $cl)\"}"
 }
 
-st_T19e() { # A1: the subject (wait_bounded, 2 s) must HOLD on a live 8 s job without hanging
-  local rc=0 t_lim cls outer
+# T19e (A1): the subject is wait_bounded on its own 8 s fixture with a 2 s deadline; it must
+# return HOLD (3) promptly. It runs under the independent outer controller, and the fixture
+# is reaped by the subject's own bounded wait; its identity is then checked gone.
+t19e_subject() { # --gate PATH
+  gate_wait "$2" || exit 3
+  local fx sub=0
   st_intent T19e sleeper proc
-  "${ST[@]}" fixture-sleeper --seconds 8 & FX=$!
-  st_idproc T19e sleeper "$FX"
-  t_lim=$("${W[@]}" mono --plus 5)
-  wait_bounded "$FX" 2 || rc=$?
+  "${ST[@]}" fixture-sleeper --seconds 8 & fx=$!
+  st_idproc T19e sleeper "$fx" "$BASHPID" || exit 3
+  wait_bounded "$fx" 2 || sub=$?
+  echo "$sub" > "$SD/T19e.subject.rc"
+  "${W[@]}" mono > "$SD/T19e.subject.t"
+  wait_bounded "$fx" 20 || exit 3
+  echo "$WAIT_RC" > "$SD/T19e.fixture.rc"
+  exit 0
+}
+st_T19e() {
+  local t0 g=0 cls sub t1 fxr
+  t0=$("${W[@]}" mono)
+  run_guarded 40 "$SD/T19e.subject.out" "$SD/T19e.subject.err" t19e_subject || g=$?
+  [ "$g" -eq 0 ] && [ "$GUARD_RC" = 0 ] \
+    || die HOLD "T19e: the guarded subject did not end cleanly (receipt $GUARD_RECEIPT): REAL-UNCERTAINTY" 3
+  sub=$(< "$SD/T19e.subject.rc"); t1=$(< "$SD/T19e.subject.t"); fxr=$(< "$SD/T19e.fixture.rc")
   cls=HOLD-WAIT-BOUNDED
-  [ "$rc" -eq 3 ] || cls="SUBJECT-STATUS-$rc"
-  "${W[@]}" mono-before --deadline "$t_lim" || cls="SUBJECT-OVERRAN"
-  # outer teardown: no signal; its own job, under an independent monotonic 20 s deadline
-  wait_bounded "$FX" 20 || die HOLD "T19e: fixture still alive at the outer deadline: REAL-UNCERTAINTY" 3
-  outer=$WAIT_RC
+  [ "$sub" = 3 ] || cls="SUBJECT-STATUS-$sub"
+  awk -v a="$t1" -v b="$t0" 'BEGIN { exit !(a - b <= 6) }' || cls="SUBJECT-OVERRAN"
   "${ST[@]}" wait-gone --dir "$SD" --test T19e --label sleeper --deadline 1 > /dev/null \
     || die HOLD "T19e: fixture identity still present after its reap: REAL-UNCERTAINTY" 3
-  sv T19e HOLD-WAIT-BOUNDED "$cls" "{\"outer_reap\": \"$(rcword "$outer")\"}"
+  sv T19e HOLD-WAIT-BOUNDED "$cls" "{\"subject_receipt\": \"ok\", \"outer_reap\": \"$(rcword "$fxr")\"}"
+}
+
+# T19h (M1, Q2): a stuck subject (an unbounded wait on its own 8 s fixture) under a 2 s
+# guard. The observer must return HOLD with a live-at-deadline receipt (retained); then a
+# second independent observer proves it gone, the subject is reaped, and the fixture's
+# registered identity is checked gone (gone-ness of the subject is not descendant proof).
+t19h_subject() { # --gate PATH
+  gate_wait "$2" || exit 3
+  local sl
+  st_intent T19h sleeper proc
+  "${ST[@]}" fixture-sleeper --seconds 8 & sl=$!
+  st_idproc T19h sleeper "$sl" "$BASHPID" || exit 3
+  wait "$sl"
+  exit 0
+}
+st_T19h() {
+  local g=0 sp sb op res cls outer
+  run_guarded 2 "$SD/T19h.subject.out" "$SD/T19h.subject.err" t19h_subject || g=$?
+  sp=$GUARD_SP sb=$GUARD_SB
+  res=$(jget "$GUARD_RECEIPT" result)
+  cls="GUARD-$g-$res"
+  [ "$g" != 3 ] || [ "$res" != live-at-deadline ] || cls=HOLD-SUBJECT-LIVE
+  echo "$GUARD_RECEIPT" > "$SD/T19h.retained-receipt"
+  "${ST[@]}" intent --dir "$GD" --test T19h --label observer2 --kind proc
+  "${W[@]}" observe-deadline --pid "$sp" --birth-us "$sb" --deadline 20 \
+    --out "$SD/T19h.observe2.json" > /dev/null 2>&1 &
+  op=$!
+  "${ST[@]}" identity-proc --dir "$GD" --test T19h --label observer2 --pid "$op" --ppid "$BASHPID"
+  wait_bounded "$op" 35 || die HOLD "T19h: the outer observer is still running: REAL-UNCERTAINTY" 3
+  [ "$WAIT_RC" -eq 0 ] && [ "$(jget "$SD/T19h.observe2.json" result)" = gone ] \
+    || die HOLD "T19h: subject not gone at the outer deadline: REAL-UNCERTAINTY" 3
+  wait_bounded "$sp" 10 || die HOLD "T19h: subject not reaped: REAL-UNCERTAINTY" 3
+  outer=$WAIT_RC
+  "${ST[@]}" wait-gone --dir "$SD" --test T19h --label sleeper --deadline 1 > /dev/null \
+    || die HOLD "T19h: descendant fixture still present: REAL-UNCERTAINTY" 3
+  sv T19h HOLD-SUBJECT-LIVE "$cls" \
+    "{\"observer_receipt\": \"ok\", \"outer_reap\": \"$(rcword "$outer")\", \"descendants\": \"ok\"}"
+}
+
+# T26d (M2, choice 3 replaced): the exit-path decision on fabricated status files. Only a
+# FAIL (4) with a clean, unfrozen, kernel-proven status may stop; nothing else.
+st_T26d() {
+  local dir="$SD/T26d" got="" want case rc file
+  mkdir -m 700 "$dir"
+  printf '%s\n' '{"ok": true, "state": {"signals_frozen": false, "violations": [], "launcher_identity": {"identity": "kernel"}}}' > "$dir/clean.json"
+  printf '%s\n' '{"ok": true, "state": {"signals_frozen": true, "violations": [], "launcher_identity": {"identity": "kernel"}}}' > "$dir/frozen.json"
+  printf '%s\n' '{"ok": true, "state": {"signals_frozen": false, "violations": [{"kind": "x"}], "launcher_identity": {"identity": "kernel"}}}' > "$dir/violation.json"
+  printf '%s\n' '{"ok": true, "state": {"signals_frozen": false, "violations": [], "launcher_identity": {"identity": "unknown"}}}' > "$dir/unknown.json"
+  printf '%s\n' '{"ok": false, "state": {"signals_frozen": false, "violations": [], "launcher_identity": {"identity": "kernel"}}}' > "$dir/notok.json"
+  for case in 3:clean 1:clean 2:clean 4:frozen 4:violation 4:unknown 4:notok 4:absent 4:clean; do
+    rc=${case%%:*} file="$dir/${case#*:}.json"
+    if exit_may_stop "$rc" "$file"; then got="$got $case=stop"; else got="$got $case=no"; fi
+  done
+  want=" 3:clean=no 1:clean=no 2:clean=no 4:frozen=no 4:violation=no 4:unknown=no 4:notok=no 4:absent=no 4:clean=stop"
+  local cls="DECISIONS:$got"
+  [ "$got" != "$want" ] || cls=DECISIONS-AS-REQUIRED
+  sv T26d DECISIONS-AS-REQUIRED "$cls" '{"fixtures": "not-applicable:decision function on fabricated status files"}'
 }
 
 st_T4() { # a|b
@@ -726,18 +888,18 @@ st_T4() { # a|b
   ST_TEST=$T; prepare_instance S "$T"; local m=$M port rc=0 sb=0 k=0 acc cls
   port=$(mf "$m" port)
   ED="$(mf "$m" evidence)/E1"; mkdir -m 700 "$ED"
-  reg_intent "runtime-$T" dir
+  reg_intent "runtime-$T" instance-runtime
   "${W[@]}" claim-runtime --manifest "$m" > "$ED/claim.json"
   reg_path "runtime-$T" "$(mf "$m" runtime)"
   "${W[@]}" preflight --manifest "$m" --first-start > "$ED/preflight.json"
   st_fixture "$T" tcp-decoy "$SD/$T-count.json" fixture-tcp-decoy --addr "$addr" --port "$port" \
     --count-file "$SD/$T-count.json"
+  local dp=$FX
   CTL="$ED/ctl" STATE="$ED/state.json"
   "${W[@]}" supervise --manifest "$m" --ctl "$CTL" --state "$STATE" \
     --launcher "$(< "$(mf "$m" evidence)/launcher-path")" --epoch E1 > "$ED/supervise.out" \
     2> "$ED/supervise.err" &
   WPID=$! ACTIVE_CTL=$CTL ACTIVE_WPID=$WPID STOP_ATTEMPTED=0 HOLD_SEEN=0
-  local dp=$FX
   wait_ready "$m" 60 || rc=$?
   cls=$(obs "$ED/ready.err")
   [ "$rc" -ne 0 ] || cls="READY"
@@ -746,29 +908,29 @@ st_T4() { # a|b
   [ "$k" -eq 0 ] || die HOLD "$T fixture teardown: REAL-UNCERTAINTY" 3
   acc=$(jget "$SD/$T-count.json" accepts)
   [ "$acc" = 0 ] || cls="DECOY-ACCEPTED-$acc"
-  st_retain "$T" "root-$T,runtime-$T"
+  st_retain "$T" "root-$T,runtime-$T" "$m"
   ST_TEST=""
   sv "$T" HOLD-FOREIGN-LISTENER,FAIL-START "$cls" \
     "{\"stop_barrier\": \"$(rcword $sb)\", \"fixtures\": \"ok\", \"cleanup\": \"not-applicable:retained by design (H3)\"}" "$m"
 }
 
-st_T5() {
-  ST_TEST=T5; prepare_instance S T5; local m=$M ev r1=0 r2=0 ex dx=0 sb=0 cl=0 cls
+st_T5() { # choice 5 / Q4: exact receipts, see sink_selftest.py t5_class
+  ST_TEST=T5; prepare_instance S T5; local m=$M ev r1=0 r2=0 dx=0 sb=0 cl=0 cls f1 f2 f3
   ev=$(mf "$m" evidence)
   start_epoch "$m" E1 1
   wait_ready "$m" 120 || die HOLD "T5: instance not ready (setup failure)" 3
   "${W[@]}" perturb --manifest "$m" --out "$ev/manifest-bad-pgdata.json" --set "pgdata=/nonexistent/pgdata" > /dev/null
   "${W[@]}" perturb --manifest "$m" --out "$ev/manifest-bad-port.json" --set "port=$(( $(mf "$m" port) + 1 ))" > /dev/null
   client "$ev/manifest-bad-pgdata.json" bad-pgdata --mode prepare --create s_probe || r1=$?
+  f1="$ED/client-$CLIENT_N-bad-pgdata.json"
   client "$ev/manifest-bad-port.json" bad-port --mode prepare --create s_probe || r2=$?
+  f2="$ED/client-$CLIENT_N-bad-port.json"
   client "$m" db-exists --mode db_exists --name s_probe || dx=$?
-  ex=$(jget "$ED/client-$CLIENT_N-db-exists.json" exists)
+  f3="$ED/client-$CLIENT_N-db-exists.json"
+  printf 'bad-pgdata=%s bad-port=%s db-exists=%s\n' "$r1" "$r2" "$dx" > "$ED/T5-client-status.txt"
+  cls=$("${ST[@]}" t5-class --pgdata "$f1" --port "$f2" --exists "$f3" | "${W[@]}" jget --file - --key class)
   stop_and_barrier "$m" || sb=$?
   if [ "$sb" -eq 0 ]; then cleanup_instance "$m" || cl=$?; else cl=not-run; fi
-  # [A] the client's status for a wrong pgdata is 2 (identity) and for a port with no
-  # server 2 or 3 (connect refused before any statement); both refuse before mutation.
-  cls="bad_pgdata=$r1,bad_port=$r2,s_probe_exists=$ex"
-  case "$r1:$r2:$ex" in 2:2:False|2:3:False) cls=REFUSE-CLIENT-TARGET ;; esac
   ST_TEST=""
   sv T5 REFUSE-CLIENT-TARGET "$cls" \
     "{\"db_exists_client\": \"$(rcword $dx)\", \"stop_barrier\": \"$(rcword $sb)\", \"cleanup\": \"$(rcword "$cl")\"}"
@@ -780,7 +942,7 @@ st_T6() {
   wait_ready "$m" 60 || rc=$?
   cls=$(obs "$ED/ready.err"); [ "$rc" -ne 0 ] || cls=READY
   stop_and_barrier "$m" || sb=$?
-  st_retain T6 "root-T6,runtime-T6"
+  st_retain T6 "root-T6,runtime-T6" "$m"
   ST_TEST=""
   sv T6 FAIL-START "$cls" \
     "{\"stop_barrier\": \"$(rcword $sb)\", \"cleanup\": \"not-applicable:retained by design (H3)\"}" "$m"
@@ -800,10 +962,10 @@ st_T7() {
   live=$("${ST[@]}" state-live-role --state "$STATE" --role postmaster-final | "${W[@]}" jget --file - --key live)
   [ "$live" = True ] || cls="$cls-WITHOUT-LIVE-POSTMASTER"
   sb=0; stop_and_barrier "$m" || sb=$?
-  st_retain T7 "root-T7,runtime-T7,standby-signal"
+  st_retain T7 "root-T7,runtime-T7,standby-signal" "$m"
   ST_TEST=""
   sv T7 FAIL-TIMEOUT "$cls" \
-    "{\"stop_barrier\": \"$(rcword $sb)\", \"cleanup\": \"not-applicable:retained by design (H3)\"}" "$m"
+    "{\"stop_barrier\": \"$(rcword $sb)\", \"fixtures\": \"ok\", \"cleanup\": \"not-applicable:retained by design (H3)\"}" "$m"
 }
 
 st_T8() {
@@ -826,8 +988,8 @@ st_T8() {
   [ "$alive" = False ] && [ "$gr" -eq 3 ] || cls="$cls-FIXTURE-GONE-EARLY"
   st_kill T8 cwd-holder "$dp" || k=$?
   [ "$k" -eq 0 ] || die HOLD "T8 fixture teardown: REAL-UNCERTAINTY" 3
-  "${W[@]}" barrier --manifest "$m" --state "$STATE" --out "$ED/barrier-after-fixture.json" \
-    > /dev/null 2> "$ED/barrier-after-fixture.err" || b2=$?
+  guarded_w 120 /dev/null "$ED/barrier-after-fixture.err" barrier --manifest "$m" --state "$STATE" \
+    --out "$ED/barrier-after-fixture.json" || b2=$?
   if [ "$b2" -eq 0 ]; then cleanup_instance "$m" || cl=$?; else cl=not-run; fi
   ST_TEST=""
   sv T8 FAIL-UNCERTAIN "$cls" \
@@ -837,17 +999,17 @@ st_T8() {
 st_T15() { # a|b|c: injection after the stop began, before SNAP-post (r4 2.6)
   local v=$1
   local T="T15$v"
-  ST_TEST=$T; prepare_instance S "$T"; local m=$M rt pg dp="" crc=0 brc=0 sc=0 k=0 cls subs root
+  ST_TEST=$T; prepare_instance S "$T"; local m=$M rt pg dp="" crc=0 brc=0 sc=0 k=0 cls subs root fxw=ok
   rt=$(mf "$m" runtime); pg=$(mf "$m" pgdata); root=$(mf "$m" root)
   start_epoch "$m" E1 1
   wait_ready "$m" 120 || die HOLD "$T: instance not ready (setup failure)" 3
   client "$m" identity --mode identity || die HOLD "$T: identity (setup failure)" 3
   lock_snap0 "$m"; snap_pre "$m"
   STOP_ATTEMPTED=1
-  "${W[@]}" ctl --ctl "$CTL" --cmd stop --timeout 400 > "$ED/stop.json" 2> "$ED/stop.err" || sc=$?
+  guarded_w 430 "$ED/stop.json" "$ED/stop.err" ctl --ctl "$CTL" --cmd stop --timeout 400 || sc=$?
   wait_bounded "$WPID" "$WATCH_EXIT_S" || die HOLD "$T: watcher running at its deadline" 3
   ACTIVE_CTL="" ACTIVE_WPID=""
-  [ "$sc" -eq 0 ] && [ "$WAIT_RC" -eq 0 ] || die HOLD "$T: stop status $sc, watcher status $WAIT_RC" 3
+  { [ "$sc" -eq 0 ] && [ "$WAIT_RC" -eq 0 ]; } || die HOLD "$T: stop status $sc, watcher status $WAIT_RC" 3
   case "$v" in
     a) "${ST[@]}" inject --kind truncate --path "$rt/processes/logs/postgres.stderr.log" > /dev/null
        subs="capture-prefix-changed" ;;
@@ -861,8 +1023,8 @@ st_T15() { # a|b|c: injection after the stop began, before SNAP-post (r4 2.6)
        "${ST[@]}" inject --kind postmaster-pid --path "$pg/postmaster.pid" --pid "$dp" > /dev/null
        subs="postmaster.pid,capture-new-in-window" ;;
   esac
-  "${W[@]}" barrier --manifest "$m" --state "$STATE" --out "$ED/barrier.json" 2> "$ED/barrier.err" \
-    || brc=$?
+  guarded_w 120 /dev/null "$ED/barrier.err" barrier --manifest "$m" --state "$STATE" \
+    --out "$ED/barrier.json" || brc=$?
   "${W[@]}" snapshot --manifest "$m" --name SNAP-post --out "$ED/SNAP-post" --prev "$ED/SNAP-pre" \
     > /dev/null
   "${W[@]}" classify-epoch --manifest "$m" --epoch-dir "$ED" --state "$STATE" > /dev/null || crc=$?
@@ -873,15 +1035,16 @@ st_T15() { # a|b|c: injection after the stop began, before SNAP-post (r4 2.6)
     st_kill T15c decoy "$dp" || k=$?
     [ "$k" -eq 0 ] || die HOLD "T15c fixture teardown: REAL-UNCERTAINTY" 3
   fi
-  st_retain "$T" "root-$T,runtime-$T"
+  st_retain "$T" "root-$T,runtime-$T" "$m"
   ST_TEST=""
-  local exp
+  local exp td
+  td="\"stop\": \"ok\", \"barrier\": \"$(rcword $brc)\", \"cleanup\": \"not-applicable:retained by design (H3)\""
   case "$v" in
-    c) exp="INCOMPLETE:postmaster.pid,INCOMPLETE:capture-new-in-window" ;;
+    c) exp="INCOMPLETE:postmaster.pid,INCOMPLETE:capture-new-in-window"
+       td="$td, \"fixtures\": \"$fxw\"" ;;
     *) exp="INCOMPLETE:$subs" ;;
   esac
-  sv "$T" "$exp" "$cls" \
-    "{\"stop\": \"ok\", \"barrier\": \"$(rcword $brc)\", \"fixtures\": \"ok\", \"cleanup\": \"not-applicable:retained by design (H3)\"}" "$m"
+  sv "$T" "$exp" "$cls" "{$td}" "$m"
 }
 
 st_T25() { # H7: the S5 accepting branch end to end on an S instance (plumbing only)
@@ -899,19 +1062,24 @@ st_T25() { # H7: the S5 accepting branch end to end on an S instance (plumbing o
 
 run_selftest() {
   SD="$EVID/selftest"; mkdir -m 700 "$SD"
-  local id rc ids="" r=0
+  local id dl ids="" r=0 g
   for id in $SYNTHETIC_IDS; do
-    rc=0
-    "${ST[@]}" synthetic --dir "$SD" --scratch "$RUNROOT" --runroot "$RUNROOT" --id "$id" \
-      > /dev/null 2> "$SD/$id.err" || rc=$?
-    [ "$rc" -eq 0 ] || die HOLD "self-test $id did not give its expected verdict (status $rc; see $SD/$id.json)" 3
+    case "$id" in T16|T18*) dl=180 ;; *) dl=120 ;; esac
+    g=0
+    run_guarded "$dl" /dev/null "$SD/$id.err" "${ST[@]}" synthetic --dir "$SD" --scratch "$RUNROOT" \
+      --runroot "$RUNROOT" --id "$id" || g=$?
+    [ "$g" -eq 0 ] || die HOLD "self-test $id: guarded run held (receipt $GUARD_RECEIPT)" 3
+    [ "$GUARD_RC" = 0 ] \
+      || die HOLD "self-test $id did not give its expected verdict (status $GUARD_RC; see $SD/$id.json)" 3
+    check_receipt "$id"
   done
   ST_TEST=R; prepare_reference; ST_TEST=""
-  st_T1; st_T2; st_T3; st_T13; st_T14; st_T19e
+  st_T1; st_T2; st_T3; st_T13; st_T14; st_T19e; st_T19h; st_T26d
   st_T4 a; st_T4 b; st_T5; st_T6; st_T7; st_T8; st_T15 a; st_T15 b; st_T15 c; st_T25
   for id in $SYNTHETIC_IDS $SHELL_IDS $INSTANCE_IDS; do ids="$ids${ids:+,}$id"; done
-  "${ST[@]}" summary --dir "$SD" --head "$HEAD" --ids "$ids" > "$EVID/selftest-summary.out" || r=$?
-  [ "$r" -eq 0 ] || die HOLD "self-test summary did not pass (see $SD/selftest-summary.json)" 3
+  "${ST[@]}" summary --dir "$SD" --head "$HEAD" --ids "$ids" --runroot "$RUNROOT" \
+    > "$EVID/selftest-summary.out" || r=$?
+  [ "$r" -eq 0 ] || die HOLD "self-test summary or final audit did not pass (see $SD/selftest-summary.json)" 3
   cleanup_instance "$EVID/R/manifest.json"
   note "selftest summary: $SD/selftest-summary.json"
 }
