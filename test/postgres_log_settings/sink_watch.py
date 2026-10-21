@@ -102,11 +102,11 @@ EDITS = {
 }
 
 DB_ALLOW = {
-    "B": ["postgres", "b_canary_r1", "b_canary_r2", "b_audit"],
+    "B": ["postgres", "b_canary_r1", "b_canary_r2", "b_audit", "b_canary_s5"],
     "P": ["postgres", "p_canary_r1", "p_canary_r2", "p_audit", "p_load"],
     "A": ["postgres", "a_ext", "a_plain"],
     "D": ["postgres"],
-    "S": ["postgres", "s_probe"],
+    "S": ["postgres", "s_probe", "s_canary_s5"],
 }
 
 # Marker channels (r2 7.2, C1-C8).
@@ -1936,96 +1936,148 @@ ALLOWED_EXIT = {
 SINGLETONS = ("process-compose", "devenv-tasks", "postmaster-final", "pg-logger")
 
 
-def classify_epoch(state, snaps, lock, barrier_ok, marker_bearing=True):
-    """Return (complete:bool, reasons:list). Pure function over recorded facts (r5 2-3, r6, R6-1)."""
-    reasons = []
-    all_e = state["live"] + state["dead"]
+def h_reasons(h, violations, closure_ok):
+    """Validate the H record (repair H1): every field present with its exact type, the
+    counts consistent with the recorded violations, closure_verified equal to the closure
+    recomputed from the files now, and the stored verdict equal to the recomputed one.
+    Missing, malformed or inconsistent is INCOMPLETE; unknown is never true."""
+    if not isinstance(h, dict):
+        return ["H: record missing"]
+    out = []
+    for k, t in sorted(H_FIELDS.items()):
+        if k not in h:
+            out.append("H: field %s missing" % k)
+        elif type(h[k]) is not t:
+            out.append("H: field %s has type %s" % (k, type(h[k]).__name__))
+    if out:
+        return out
+    kinds = [v.get("kind", "") for v in violations]
+    want = {"image_violations": sum(1 for k in kinds if k in IMAGE_VIOLATIONS),
+            "exec_unobserved": sum(1 for k in kinds if k.startswith("exec-image-")),
+            "admission_unreadable_live": sum(1 for k in kinds
+                                             if k == "admission-image-unreadable-live")}
+    for k, v in sorted(want.items()):
+        if h[k] != v:
+            out.append("H: %s=%d inconsistent with recorded violations (%d)" % (k, h[k], v))
+    if h["closure_verified"] is not bool(closure_ok):
+        out.append("H: closure_verified inconsistent with the recomputed closure")
+    clean = bool(closure_ok) and all(v == 0 for v in want.values())
+    if h["api_client_history"] != ("none-in-envelope" if clean else "unknown"):
+        out.append("H: api_client_history inconsistent")
+    if h["verdict"] is not clean:
+        out.append("H: stored verdict inconsistent with its components")
+    if not clean:
+        out.append("H: not established")
+    return out
+
+
+def live_at(all_e, pid, t):
+    """The entry for pid that was alive at monotonic time t (pid reuse safe)."""
+    for e in all_e:
+        if e["pid"] == pid and e["admitted"] <= t and (e["exit"] is None or e["exit"]["t"] >= t):
+            return e
+    return None
+
+
+def classify_epoch(state, snaps, lock, barrier_ok, closure_ok):
+    """Pure function over recorded facts (r5 2-3, r6, R6-1; repair H1, H4, D-9).
+    Returns {"complete", "reasons", "init_facts", "window"}.
+
+    Singleton checks bind to the WINDOW generation of each required role: the unique
+    (pid, birth) entry admitted before SNAP-0 that did not exit before the deliberate stop.
+    Generations that exited before SNAP-0 (the init server's postmaster and logger) are
+    reported as init facts, not judged. A required-role generation admitted inside the
+    window is a replacement: INCOMPLETE."""
+    reasons, init_facts = [], []
+    live, dead = state.get("live", []), state.get("dead", [])
+    all_e = live + dead
     t0 = snaps["SNAP-0"]["t"]
-    t_stop = state["marks"].get("stop_begin")
+    t_post = snaps["SNAP-post"]["t"]
+    t_stop = state.get("marks", {}).get("stop_begin")
     if t_stop is None:
         reasons.append("no deliberate stop recorded")
         t_stop = float("inf")
-    if state["violations"]:
+    if state.get("violations"):
         reasons.append("watcher violations: %d" % len(state["violations"]))
-    if state["live"]:
+    if live:
         reasons.append("owned processes still live at classification")
     if not barrier_ok:
         reasons.append("barrier not established")
-    by_role = {}
-    for e in all_e:
-        by_role.setdefault(e["role"], []).append(e)
-    # singleton generations alive at SNAP-0, no exit before stop, no new generation in window
+    window = {}
     for r in SINGLETONS:
-        gens = [e for e in by_role.get(r, []) if e["admitted"] <= t_stop]
-        alive_at_0 = [e for e in gens if e["admitted"] < t0 and
-                      (e["exit"] is None or e["exit"]["t"] >= t_stop)]
-        if len(alive_at_0) != 1:
-            reasons.append("singleton %s: %d generations alive across window" % (r, len(alive_at_0)))
-        new_in_window = [e for e in by_role.get(r, []) if e["admitted"] >= t0]
-        if new_in_window:
-            reasons.append("singleton %s: new generation in window" % r)
+        gens = [e for e in all_e if e["role"] == r]
+        spanning = [e for e in gens if e["admitted"] < t0 and
+                    (e["exit"] is None or e["exit"]["t"] >= t_stop)]
         for e in gens:
-            if e["exit"] is not None and e["exit"]["t"] < t_stop:
-                reasons.append("singleton %s exited before stop" % r)
-    # exits after stop: graceful paths only (verdict eligibility, separate from stop authority)
-    signalled = {(s["role"]) for s in state["harness_signals"] if s["reason"] != "deliberate-stop"}
+            if e["admitted"] < t0 and e["exit"] is not None and e["exit"]["t"] < t0:
+                init_facts.append({"role": r, "pid": e["pid"], "birth_us": e["birth_us"],
+                                   "exit": e["exit"]})
+            elif e["admitted"] < t0 and e["exit"] is not None and t0 <= e["exit"]["t"] < t_stop:
+                reasons.append("singleton %s exited in the window before the stop" % r)
+            elif t0 <= e["admitted"] <= t_post:
+                reasons.append("singleton %s: replacement generation in window" % r)
+        if len(spanning) != 1:
+            reasons.append("singleton %s: %d window generations" % (r, len(spanning)))
+        else:
+            window[r] = spanning[0]
+    pm, lg = window.get("postmaster-final"), window.get("pg-logger")
+    if pm and lg:
+        if (lg.get("parent"), lg.get("parent_birth_us")) != (pm["pid"], pm["birth_us"]):
+            reasons.append("window logger is not a child of the window postmaster")
+        elif pm["exit"] and lg["exit"] and lg["exit"]["t"] < pm["exit"]["t"]:
+            reasons.append("window logger exited before the window postmaster")
+    signalled = sorted({s["role"] for s in state.get("harness_signals", [])
+                        if s.get("reason") != "deliberate-stop"})
+    if signalled:
+        reasons.append("harness escalation used: %r" % signalled)
     for e in all_e:
         st = e["exit"]
-        if st is None:
+        if st is None or st["t"] < t0:
             continue
         r = e["role"]
         if r == "devenv-tasks":
-            ok = devenv_tasks_eligible(e, all_e, signalled)
+            ok = devenv_tasks_eligible(e, window, signalled)
         elif r in ALLOWED_EXIT:
             ok = ALLOWED_EXIT[r](st)
         else:
             ok = st.get("kind") == "exited" or (st.get("kind") == "signaled" and
-                                                st.get("signal") in (signal.SIGTERM,))
+                                                st.get("signal") == signal.SIGTERM)
         if not ok:
-            reasons.append("disallowed exit %s pid %d %r" % (r, e["pid"], st))
+            reasons.append("disallowed exit %s pid %d %r" % (r, e["pid"], st.get("kind")))
         if st.get("kind") == "signaled" and st.get("signal") in (
                 signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signal.SIGILL):
             reasons.append("crash signal %s (OS crash report residual)" % r)
-    if signalled:
-        reasons.append("harness escalation used: %r" % sorted(signalled))
-    # logger exits last, after the final postmaster
-    pm = by_role.get("postmaster-final", [])
-    lg = by_role.get("pg-logger", [])
-    if pm and lg and pm[0]["exit"] and lg[0]["exit"] and lg[0]["exit"]["t"] < pm[0]["exit"]["t"]:
-        reasons.append("logger exited before postmaster")
-    # launcher forks after process-compose admission (r5 3.2)
-    pc = by_role.get("process-compose", [])
-    lp = state["launcher_pid"]
-    lfork = []
+    pc = window.get("process-compose")
+    lp = state.get("launcher_pid")
     if pc:
-        t_pc = pc[0]["admitted"]
-        lfork = [ev for ev in state["events"] if ev["t"] > t_pc and (
-            (ev["ev"] == "fork-note" and ev["pid"] == lp) or
-            (ev["ev"] == "admit" and any(x["pid"] == ev["pid"] and x["parent"] == lp
-                                         for x in all_e)))]
-    if lfork:
-        reasons.append("launcher forked after process-compose admission")
-    # a postmaster.pid after the barrier is evidence of a further generation (T15c)
+        for ev in state.get("events", []):
+            if ev["t"] <= pc["admitted"]:
+                continue
+            if ev["ev"] == "fork-note" and ev["pid"] == lp:
+                reasons.append("launcher forked after process-compose admission")
+                break
+            if ev["ev"] == "admit":
+                x = live_at(all_e, ev["pid"], ev["t"])
+                if x is not None and x.get("parent") == lp:
+                    reasons.append("launcher child admitted after process-compose admission")
+                    break
     if any(p.endswith("/postmaster.pid") for p in snaps["SNAP-post"]["files"]):
-        reasons.append("postmaster.pid present at SNAP-post")
-    # append-only captures between snapshots
+        reasons.append("stale or new postmaster.pid at SNAP-post (conservative INCOMPLETE)")
     for n in ("SNAP-pre", "SNAP-post"):
-        for v in snaps[n]["violations"]:
+        for v in snaps[n].get("violations", []):
             reasons.append("%s: %s %s" % (n, v[0], v[1]))
-    # sockets (R6-1)
     reasons.extend(socket_lifecycle(lock, snaps, barrier_ok, reasons))
-    # forks in the window by a role without source-gated attribution (r5 3.2, T17)
-    roles_by_pid = {e["pid"]: e["role"] for e in all_e}
-    for ev in state["events"]:
-        if ev["ev"] == "fork-note" and t0 <= ev["t"] <= (snaps["SNAP-post"]["t"]):
-            r = roles_by_pid.get(ev["pid"])
+    for ev in state.get("events", []):
+        if ev["ev"] == "fork-note" and t0 <= ev["t"] <= t_post:
+            x = live_at(all_e, ev["pid"], ev["t"])
+            r = x["role"] if x else None
             if r not in FORK_COVERED_ROLES:
                 reasons.append("fork in window by role %s without source-gated attribution" % r)
-    # H predicate (r6 1.2 fact 3): image violations -> HOLD-class
-    if any(v["kind"] == "exe-not-allowlisted" for v in state["violations"]):
-        reasons.append("H: unexplained executable image")
-    reasons.extend(gate_b(state.get("api_client_history_clean", True), lock, snaps, barrier_ok))
-    return (not reasons), reasons
+    hr = h_reasons(state.get("h"), state.get("violations", []), closure_ok)
+    reasons.extend(hr)
+    reasons.extend(gate_b(not hr, lock))
+    return {"complete": not reasons, "reasons": reasons, "init_facts": init_facts,
+            "window": {r: ident(e) for r, e in window.items()}}
 
 
 # Roles whose forks are covered by the r5 3.2 exit-gated singleton-writer argument.
@@ -2034,12 +2086,12 @@ FORK_COVERED_ROLES = ("process-compose", "devenv-tasks", "wrapper", "start-postg
                       "shell", "pg-tool")
 
 
-def gate_b(history_clean, lock, snaps, barrier_ok):
+def gate_b(h_ok, lock):
     """r6 1.4: gate (b) holds only if H (no API client history) and F (lockout) both hold.
     EACCES on a later connect never stands in for H."""
     out = []
-    if not history_clean:
-        out.append("gate-b: API client history not established (H)")
+    if not h_ok:
+        out.append("gate-b: H not established")
     if lock is None:
         out.append("gate-b: no lockout (F)")
     return out
@@ -2053,21 +2105,26 @@ def producer_exit_eligible(binding, status):
     return False
 
 
-def devenv_tasks_eligible(e, all_e, signalled):
-    """r5 2.2 row 2 (r6 Q2): signaled(SIGINT) only under (i)-(iii); (iv) is a precondition."""
+def devenv_tasks_eligible(e, window, signalled):
+    """r5 2.2 row 2 (r6 Q2; repair H4): signaled(SIGINT) only under (i)-(iii) on the WINDOW
+    generations; (iv) is a source precondition, not a measured signal count."""
     st = e["exit"]
     if not (st.get("kind") == "signaled" and st.get("signal") == signal.SIGINT):
         return False
     if "devenv-tasks" in signalled:
         return False
+    if window.get("devenv-tasks") is None or \
+            (window["devenv-tasks"]["pid"], window["devenv-tasks"]["birth_us"]) != \
+            (e["pid"], e["birth_us"]):
+        return False
     t = st["t"]
-    for r in ("wrapper", "postmaster-final", "pg-logger"):
-        xs = [x for x in all_e if x["role"] == r]
-        if not xs or any(x["exit"] is None or x["exit"]["t"] > t for x in xs):
+    for r in ("postmaster-final", "pg-logger"):
+        x = window.get(r)
+        if x is None or x["exit"] is None or x["exit"]["t"] > t:
             return False
-    pc = [x for x in all_e if x["role"] == "process-compose"]
-    if not pc or pc[0]["exit"] is None or pc[0]["exit"]["t"] < t or \
-            not ALLOWED_EXIT["process-compose"](pc[0]["exit"]):
+    pc = window.get("process-compose")
+    if pc is None or pc["exit"] is None or pc["exit"]["t"] < t or \
+            not ALLOWED_EXIT["process-compose"](pc["exit"]):
         return False
     return True
 
@@ -2120,11 +2177,15 @@ P_EXPECT = ("M_u", "S_u", "M_c", "S_c", "L", "E", "Q", "T", "D", "F")
 
 
 def judge(kind, counts, own, complete):
-    """counts: rows for this epoch's SNAP-post; own: marker labels of this epoch."""
+    """counts: this epoch's SNAP-post rows; own: this epoch's marker labels. Every kind
+    requires a complete classification (repair H4): a P or A with the right counts but an
+    INCOMPLETE epoch fails."""
     by = {}
     for c in counts:
         by.setdefault(c["marker"], []).append(c)
     result = {"kind": kind, "complete": complete, "failures": []}
+    if not complete:
+        result["failures"].append("%s: epoch INCOMPLETE" % kind)
     if kind == "P":
         for k in P_EXPECT:
             coll = sum(c["count"] for c in by.get(k, []) if c["class"] == "collector-sink")
@@ -2146,7 +2207,7 @@ def judge(kind, counts, own, complete):
                 if n:
                     result["failures"].append("B: %s present (%d)" % (k, n))
         else:
-            result["failures"].append("B: epoch INCOMPLETE - no absence verdict")
+            result["failures"].append("B: no absence verdict on an INCOMPLETE epoch")
     result["pass"] = not result["failures"]
     return result
 
@@ -2521,12 +2582,13 @@ def main(argv):
                                                                           "SNAP-post")}
             lock = jload(ed + "/lockout.json") if os.path.exists(ed + "/lockout.json") else None
             bok = os.path.exists(ed + "/barrier.json") and jload(ed + "/barrier.json").get("ok")
-            complete, reasons = classify_epoch(state, snaps, lock, bool(bok))
-            out = {"complete": complete, "reasons": reasons,
-                   "socket_outcomes": socket_outcomes(lock, snaps)}
+            clo = h_closure(m)
+            out = classify_epoch(state, snaps, lock, bool(bok), clo["closure_verified"])
+            out["socket_outcomes"] = socket_outcomes(lock, snaps)
+            out["closure"] = clo
             jdump(out, ed + "/classification.json")
-            jdump(out)
-            return EXIT_OK if complete else EXIT_FAIL
+            jdump({"complete": out["complete"], "reasons": out["reasons"]})
+            return EXIT_OK if out["complete"] else EXIT_FAIL
         elif cmd == "judge":
             counts = jload(a["counts"])
             own = jload(a["markers"])
