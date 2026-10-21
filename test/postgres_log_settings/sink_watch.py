@@ -401,9 +401,7 @@ def manifest_new(args):
         root = tempfile.mkdtemp(prefix="sink-%s-" % inst, dir=scratch)
     validate_root(root)
     rt, rt_canon = runtime_for_root(root)
-    port = args.get("port") or pick_port()
-    if kind == "R":
-        port = 5520
+    port = 5520 if kind == "R" else (args.get("port") or pick_port())
     m = {
         "schema": "5b-sink-manifest/1", "inst": inst, "kind": kind,
         "head": args["head"], "worktree": args["worktree"],
@@ -1181,7 +1179,11 @@ class Watch(object):
     def signal_verified(self, pid, sig, reason):
         self.drain(0)
         e = self.entries.get(pid)
-        if e is None or e["exit"] is not None:
+        if e is None:
+            if any(d["pid"] == pid for d in self.dead):
+                return "already-exited"
+            raise Hold("refuse signal: pid %d is not an owned entry" % pid)
+        if e["exit"] is not None:
             return "already-exited"
         if not e["lineage"] or e["role"] not in ROLE_SIGNALLABLE:
             raise Hold("refuse signal: pid %d role %s lineage %s" % (pid, e["role"], e["lineage"]))
@@ -1593,10 +1595,43 @@ def classify_epoch(state, snaps, lock, barrier_ok, marker_bearing=True):
             reasons.append("%s: %s %s" % (n, v[0], v[1]))
     # sockets (R6-1)
     reasons.extend(socket_lifecycle(lock, snaps, barrier_ok, reasons))
+    # forks in the window by a role without source-gated attribution (r5 3.2, T17)
+    roles_by_pid = {e["pid"]: e["role"] for e in all_e}
+    for ev in state["events"]:
+        if ev["ev"] == "fork-note" and t0 <= ev["t"] <= (snaps["SNAP-post"]["t"]):
+            r = roles_by_pid.get(ev["pid"])
+            if r not in FORK_COVERED_ROLES:
+                reasons.append("fork in window by role %s without source-gated attribution" % r)
     # H predicate (r6 1.2 fact 3): image violations -> HOLD-class
     if any(v["kind"] == "exe-not-allowlisted" for v in state["violations"]):
         reasons.append("H: unexplained executable image")
+    reasons.extend(gate_b(state.get("api_client_history_clean", True), lock, snaps, barrier_ok))
     return (not reasons), reasons
+
+
+# Roles whose forks are covered by the r5 3.2 exit-gated singleton-writer argument.
+FORK_COVERED_ROLES = ("process-compose", "devenv-tasks", "wrapper", "start-postgres",
+                      "setup-postgres", "postmaster-final", "pg-aux", "pg-backend", "pg-logger",
+                      "shell", "pg-tool")
+
+
+def gate_b(history_clean, lock, snaps, barrier_ok):
+    """r6 1.4: gate (b) holds only if H (no API client history) and F (lockout) both hold.
+    EACCES on a later connect never stands in for H."""
+    out = []
+    if not history_clean:
+        out.append("gate-b: API client history not established (H)")
+    if lock is None:
+        out.append("gate-b: no lockout (F)")
+    return out
+
+
+def producer_exit_eligible(binding, status):
+    """r5 2.3 (T15d): exit status allows an absence verdict only for a role whose
+    source-traced graceful path is bound to that status; never for an unbound role."""
+    if binding == "source-traced-graceful-exit0":
+        return status.get("kind") == "exited" and status.get("code") == 0
+    return False
 
 
 def devenv_tasks_eligible(e, all_e, signalled):
@@ -1631,7 +1666,7 @@ def socket_lifecycle(lock, snaps, barrier_ok, prior_reasons):
     """R6-1: identity at SNAP-0/pre; per-role graceful unlink classification at SNAP-post."""
     out = []
     if lock is None:
-        return ["no API-socket lockout record"]
+        return []
     for s, lr in lock["sockets"].items():
         for n in ("SNAP-0", "SNAP-pre"):
             r = snaps[n]["sockets"].get(s, {"present": False})
@@ -1740,6 +1775,165 @@ def cleanup(m, claim_path):
     if remaining:
         raise Fail("FAIL-CLEANUP remaining %r" % remaining)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- copy, eval, perturb
+COPY_FILES = ("flake.nix", "flake.lock", "devenv.nix", "priv/postgres/log_settings.json")
+NEW_KEYS_ALLOWED = {"S-T7": ("hot_standby",)}
+
+
+def edit_copy(m):
+    """Apply exactly the reviewed edits to the archived copy (r2 6.3); record the diff."""
+    import difflib
+    root, kind = m["root"], m["kind"]
+    rec = {"edits": []}
+    if kind == "R":
+        jdump(rec, m["evidence"] + "/copy-edits.json")
+        return rec
+    dn = root + "/devenv.nix"
+    text = read_text(dn)
+    if text.count("port = 5520;") != 1:
+        raise Refuse("devenv.nix: expected exactly one 'port = 5520;'")
+    new = text.replace("port = 5520;", "port = %d;" % m["port"])
+    rec["edits"].append({"file": "devenv.nix", "diff": list(difflib.unified_diff(
+        text.splitlines(), new.splitlines(), lineterm="", n=0))})
+    with open(dn, "w") as f:
+        f.write(new)
+    edits = m["edits"] or {}
+    if edits:
+        jp = root + "/priv/postgres/log_settings.json"
+        old_text = read_text(jp)
+        obj = json.loads(old_text)
+        for k, v in edits.items():
+            if k not in obj and k not in NEW_KEYS_ALLOWED.get(kind, ()):
+                raise Refuse("edit key %s not in the contract JSON" % k)
+            obj[k] = v
+        new_text = json.dumps(obj, indent=2, sort_keys=True) + "\n"
+        rec["edits"].append({"file": "log_settings.json", "diff": list(difflib.unified_diff(
+            json.dumps(json.loads(old_text), indent=2, sort_keys=True).splitlines(),
+            new_text.splitlines(), lineterm="", n=0))})
+        with open(jp, "w") as f:
+            f.write(new_text)
+    jdump(rec, m["evidence"] + "/copy-edits.json")
+    return rec
+
+
+def eval_check(m, eval_json_path):
+    """r2 4.2: the copy's evaluated config.env equals the manifest's derived values."""
+    e = jload(eval_json_path)
+    want = {"PGDATA": m["pgdata"], "PGHOST": "127.0.0.1", "PGPORT": str(m["port"]),
+            "PC_SOCKET_PATH": m["pc_socket"], "DEVENV_ROOT": m["root"],
+            "DEVENV_DOTFILE": m["dotfile"], "DEVENV_STATE": m["state"],
+            "DEVENV_RUNTIME": m["runtime"]}
+    bad = {k: (str(e.get(k)), v) for k, v in want.items() if str(e.get(k)) != v}
+    if bad:
+        raise Refuse("REFUSE-PROVENANCE eval mismatch %r" % bad)
+    return {"ok": True}
+
+
+def perturb(m, out, sets):
+    """Self-test only (T5, T13): a manifest variant with one field changed."""
+    m2 = json.loads(json.dumps(m))
+    for item in sets:
+        k, _, v = item.partition("=")
+        if k.startswith("launch_env."):
+            m2["launch_env"][k.split(".", 1)[1]] = v
+        elif k == "port":
+            m2["port"] = int(v)
+        else:
+            m2[k] = v
+    jdump(m2, out)
+    return {"ok": True, "out": out}
+
+
+def field(m, key):
+    v = m
+    for part in key.split("."):
+        v = v[part]
+    sys.stdout.write(str(v) + "\n")
+
+
+# ---------------------------------------------------------------- S5 (r2 10 as amended by r3 5.5, r4 3.2)
+def move_collector(m, dest):
+    """Move the counted collector dir out and create a fresh, empty, unwritable one."""
+    src = m["pgdata"] + "/log"
+    rec = lstat_rec(src)
+    if rec["type"] != "dir" or rec["uid"] != me():
+        raise Hold("collector dir not an owned dir")
+    if os.path.lexists(dest):
+        raise Hold("destination exists")
+    try:
+        os.rename(src, dest)
+    except OSError as e:
+        raise Hold("rename failed errno %d" % e.errno)
+    os.mkdir(src, 0o700)
+    os.chmod(src, 0o500)
+    r2 = lstat_rec(src)
+    if os.listdir(src) or r2["mode"] != 0o500:
+        raise Hold("fresh collector dir not empty/0500")
+    return {"moved_to": dest, "fresh": r2}
+
+
+def restore_collector(m):
+    src = m["pgdata"] + "/log"
+    os.chmod(src, 0o700)
+    return {"mode": oct(lstat_rec(src)["mode"]), "entries": len(os.listdir(src))}
+
+
+def s5_observe(m, state_path, deadline_s):
+    """Observe generations, listeners and UDS without any connect attempt."""
+    deadline = now() + deadline_s
+    seen_listeners, uds_seen, accepting = set(), False, None
+    while now() < deadline:
+        try:
+            state = jload(state_path)
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.2)
+            continue
+        for r in tcp_listeners(m["port"]):
+            seen_listeners.add((r["pid"], r["addr"]))
+        if os.path.lexists(m["pg_socket"]):
+            uds_seen = True
+        try:
+            accepting = listener_proof(m, state)
+            break
+        except Hold:
+            pass
+        time.sleep(0.2)
+    state = jload(state_path)
+    gens = [{"pid": e["pid"], "role": e["role"], "birth_us": e["birth_us"], "exit": e["exit"]}
+            for e in state["live"] + state["dead"] if e["role"].startswith("postmaster")]
+    notes = [ev for ev in state["events"] if ev["ev"] == "fork-note"]
+    return {"accepting": accepting, "observed_generations": gens,
+            "listeners_seen": sorted(seen_listeners), "uds_seen": uds_seen,
+            "fork_notifications": len(notes), "gaps": state["gaps"],
+            "coverage": "possible-gap" if notes else "no-notifications",
+            "collector_dir_entries": len(os.listdir(m["pgdata"] + "/log"))}
+
+
+# ---------------------------------------------------------------- cross-instance (r2 7.1)
+def cross_check(entries, marker_files):
+    """entries: [(snapshot_dir, inst)]. Foreign-instance markers must be zero everywhere;
+    a B epoch's non-primary markers must be zero in every B snapshot."""
+    markers = {}
+    for f in marker_files:
+        d = jload(f)
+        for k, v in d["markers"].items():
+            markers["%s/%s/%s" % (d["inst"], d["epoch"], k)] = v
+    failures, rows = [], []
+    for snap_dir, inst in entries:
+        for c in count_markers(snap_dir, markers):
+            m_inst, _, kind = c["marker"].split("/")
+            rows.append(dict(c, snapshot=snap_dir))
+            if not c["count"]:
+                continue
+            if m_inst != inst:
+                failures.append("foreign %s in %s (%s)" % (c["marker"], snap_dir, c["class"]))
+            elif inst == "B" and kind not in PRIMARY_KINDS:
+                failures.append("B absence marker %s in %s" % (c["marker"], snap_dir))
+            elif inst == "B" and c["class"] != "collector-sink":
+                failures.append("B primary %s outside collector in %s" % (c["marker"], snap_dir))
+    return {"pass": not failures, "failures": failures, "rows": rows}
 
 
 # ---------------------------------------------------------------- CLI
@@ -1864,6 +2058,27 @@ def main(argv):
             jdump(r, a["out"])
             jdump(r)
             return EXIT_OK if r["pass"] else EXIT_FAIL
+        elif cmd == "edit-copy":
+            jdump(edit_copy(m))
+        elif cmd == "eval-check":
+            jdump(eval_check(m, a["eval_json"]))
+        elif cmd == "perturb":
+            jdump(perturb(m, a["out"], a["set"].split(",")))
+        elif cmd == "field":
+            field(m, a["key"])
+        elif cmd == "move-collector":
+            jdump(move_collector(m, a["dest"]), a["out"])
+        elif cmd == "restore-collector":
+            jdump(restore_collector(m), a["out"])
+        elif cmd == "s5-observe":
+            jdump(s5_observe(m, a["state"], float(a.get("deadline", TIMEOUTS["s5"]))), a["out"])
+        elif cmd == "cross-check":
+            ents = [tuple(x.split("=", 1)[::-1]) for x in a["entries"].split(",")]
+            r = cross_check([(d, i) for d, i in ents], jload(a["markers"])["files"])
+            jdump(r, a["out"])
+            return EXIT_OK if r["pass"] else EXIT_FAIL
+        elif cmd == "exit-watch":
+            jdump(ctl_request(a["ctl"], "exit-watch", 30))
         elif cmd == "check-eacces":
             jdump({"result": check_eacces(a["path"])})
         elif cmd == "cleanup":
