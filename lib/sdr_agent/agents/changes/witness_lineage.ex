@@ -19,7 +19,8 @@ defmodule SdrAgent.Agents.Changes.WitnessLineage do
        first row supersedes nothing; every later row supersedes exactly the
        current head of that exchange and states `supersede_reason`; a
        `mismatch` head may only be superseded under a different
-       `projection_version` (C3). The partial unique indexes, the
+       `projection_version` (C3), and never by a successor whose
+       `projection_version` is v4 (D-182), whatever its status. The partial unique indexes, the
        same-subject composite foreign key and the insert trigger back these
        up in the database.
 
@@ -35,6 +36,7 @@ defmodule SdrAgent.Agents.Changes.WitnessLineage do
   alias SdrAgent.Audit.Kernel
 
   @terminal [:completed, :failed, :unknown]
+  @v4 "claude-message-json/4+prompt-builder/1"
 
   @impl true
   def change(changeset, _opts, _context) do
@@ -125,6 +127,13 @@ defmodule SdrAgent.Agents.Changes.WitnessLineage do
           changeset,
           :supersedes_id,
           "a mismatch is superseded only under a different projection version"
+        )
+
+      head.link_status == :mismatch and Map.get(evidence, "projection_version") == @v4 ->
+        invalid(
+          changeset,
+          :supersedes_id,
+          "a mismatch is never superseded by a projection v4 link"
         )
 
       true ->
