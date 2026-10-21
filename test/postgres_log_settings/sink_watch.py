@@ -2639,16 +2639,19 @@ def observe_deadline(pid, birth_us, deadline_s, out):
         time.sleep(0.1)
 
 
-def target_socket_check(sdir, port, postmaster_pid):
+def target_socket_check(sdir, canonical, port, postmaster_pid):
     """Supplementary pre-connect guard for the client (choice 5, Q4). Read-only, no follow:
-    the socket dir is a physical dir owned by me; `.s.PGSQL.<port>` is a socket owned by me
+    realpath(<socket dir>) must equal the given canonical dir, which is a physical dir owned
+    by me (macOS /tmp is a symlink); `.s.PGSQL.<port>` under it is a socket owned by me
     (S_ISSOCK on lstat); its `.lock` is a regular file owned by me whose first line names the
     expected postmaster. A mismatch is REFUSE (fixed reasons, no raw content). It proves no
     server identity: the client's SQL identity, sysid, settings and listener checks remain."""
-    st = os.lstat(sdir)
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != me() or not physical(sdir):
+    if os.path.realpath(sdir) != canonical or not physical(canonical):
+        raise Refuse("REFUSE-TARGET socket dir not the canonical runtime dir")
+    st = os.lstat(canonical)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != me():
         raise Refuse("REFUSE-TARGET socket dir")
-    sock = "%s/.s.PGSQL.%d" % (sdir, int(port))
+    sock = "%s/.s.PGSQL.%d" % (canonical, int(port))
     try:
         ss = os.lstat(sock)
     except FileNotFoundError:
@@ -2741,7 +2744,8 @@ def main(argv):
             sys.stdout.write("%d\n" % cur["birth_us"])
             return EXIT_OK
         if cmd == "target-socket-check":
-            jdump(target_socket_check(a["socket_dir"], a["port"], a["postmaster_pid"]))
+            jdump(target_socket_check(a["socket_dir"], a["canonical_dir"], a["port"],
+                                      a["postmaster_pid"]))
             return EXIT_OK
         if cmd == "runtime-for":
             jdump(dict(zip(("runtime", "canonical"), runtime_for_root(a["root"]))))
