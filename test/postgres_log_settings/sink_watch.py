@@ -961,6 +961,8 @@ def count_markers(snap_dir, markers):
 
 # ---------------------------------------------------------------- watcher (supervise)
 ROLE_SIGNALLABLE = ("launcher", "process-compose", "devenv-tasks")
+TRIPWIRE_ROLES = ("launcher", "process-compose", "devenv-tasks", "postmaster-final", "pg-logger")
+TRIPWIRE_PERIOD = 5.0
 
 
 class Watch(object):
@@ -1193,6 +1195,23 @@ class Watch(object):
                         e["role"] = role
                     self.dirty = True
 
+    def tripwire(self):
+        """Supplementary only (r3 4.2): a writable regular file outside the owned roots,
+        held by a long-lived owned process, is a violation. A miss proves nothing."""
+        allowed = (self.m["root"] + "/", self.m["runtime_canonical"] + "/",
+                   self.m["runtime"] + "/", self.m["evidence"] + "/", "/dev/")
+        for e in list(self.entries.values()):
+            if e["role"] not in TRIPWIRE_ROLES:
+                continue
+            paths = writable_fds(e["pid"])
+            if paths is None:
+                continue
+            for path in paths:
+                if path and not path.startswith(allowed):
+                    self.violations.append({"t": now(), "kind": "writable-fd-outside-roots",
+                                            "pid": e["pid"], "role": e["role"], "path": path})
+                    self.dirty = True
+
     def drain(self, timeout=0):
         for ev in self.kq.control(None, 64, timeout):
             self.handle(ev)
@@ -1268,7 +1287,7 @@ def supervise(m, ctl, state_path, launcher_path, epoch):
     if cur is None:
         raise Hold("launcher gone")
     w._add(lp, cur, "spawned", None, lineage=True)
-    stop_requested, last_scan, served = False, 0.0, set()
+    stop_requested, last_scan, last_trip, served = False, 0.0, 0.0, set()
     exit_code = EXIT_OK
     try:
         while True:
@@ -1280,6 +1299,9 @@ def supervise(m, ctl, state_path, launcher_path, epoch):
                 w.identify_postmaster()
                 w.refresh()
                 last_scan = t
+            if t - last_trip > TRIPWIRE_PERIOD:
+                w.tripwire()
+                last_trip = t
             for name in sorted(os.listdir(ctl)):
                 if not name.startswith("req-") or name in served:
                     continue
