@@ -229,7 +229,8 @@ defmodule SdrAgent.Agents.ResultGateFinalizeTest do
     end
 
     test "a v4 match with no entry is withheld: witness_missing, method_not_enabled", ctx do
-      {invocation, {:ok, %{status: :inferred}} = outcome} = gated(ctx, "cli_shape_v4_thinking")
+      {invocation, outcome} = gated(ctx, "cli_shape_v4_thinking")
+      assert match?({:ok, %{status: :inferred}}, outcome), inspect(outcome)
       link = primary_link!(ctx, invocation)
       assert link.evidence["projection_version"] == @v4
       assert link.evidence["response_layout"] == "reasoning_then_text"
@@ -244,7 +245,8 @@ defmodule SdrAgent.Agents.ResultGateFinalizeTest do
 
     test "a v4 match under a test-only exact entry is released, bound to its v4 link", ctx do
       AgentsFixtures.put_allowlist!([@v3_opus, @v4_opus])
-      {invocation, {:ok, %{status: :reconciled}} = outcome} = gated(ctx, "cli_shape_v4_thinking")
+      {invocation, outcome} = gated(ctx, "cli_shape_v4_thinking")
+      assert match?({:ok, %{status: :reconciled}}, outcome), inspect(outcome)
       link = primary_link!(ctx, invocation)
 
       assert {:released, release, output} = finalize(ctx, invocation, outcome)
@@ -258,8 +260,9 @@ defmodule SdrAgent.Agents.ResultGateFinalizeTest do
     test "a v4 output mismatch is withheld as witness_mismatch", ctx do
       AgentsFixtures.put_allowlist!([@v3_opus, @v4_opus])
 
-      {invocation, {:ok, %{status: :mismatch} = receipt} = outcome} =
-        gated(ctx, "cli_shape_v4_thinking_mismatch")
+      {invocation, outcome} = gated(ctx, "cli_shape_v4_thinking_mismatch")
+      assert match?({:ok, %{status: :mismatch}}, outcome), inspect(outcome)
+      {:ok, receipt} = outcome
 
       assert primary_link!(ctx, invocation).evidence["projection_version"] == @v4
 
@@ -275,8 +278,8 @@ defmodule SdrAgent.Agents.ResultGateFinalizeTest do
     test "a v4 layout refusal is withheld as witness_missing, classification inferred", ctx do
       AgentsFixtures.put_allowlist!([@v3_opus, @v4_opus])
 
-      {invocation, {:ok, %{status: :inferred}} = outcome} =
-        gated(ctx, "cli_shape_v4_unparsed_signature")
+      {invocation, outcome} = gated(ctx, "cli_shape_v4_unparsed_signature")
+      assert match?({:ok, %{status: :inferred}}, outcome), inspect(outcome)
 
       link = primary_link!(ctx, invocation)
       assert link.evidence["projection_version"] == @v4
