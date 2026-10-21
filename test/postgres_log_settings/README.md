@@ -77,9 +77,12 @@ the instance is left for disposition.
   proof that no environment bytes were read; PostgreSQL children keep only their title.
   An image alone never grants an operational role: a missing, unsupported or
   unrepresentable vector gives `unknown-argv` with a violation (no signal, fork or form
-  permission). Every nested stage (child census, admission, snapshot reads, fences, lsof
-  waits) runs under the shared absolute bound; a stage that returns late is not valid, and
-  an effect is refused while a required image observation is unresolved or expired.
+  permission). Every nested stage (child census including its last read, admission
+  including its final parent read, snapshot reads and path resolution, fences, lsof
+  waits, expired-obligation judgement, and the final identity proof before a signal) runs
+  under the shared absolute bound; a stage that returns late is not valid and starts no
+  later stage, and an effect is refused while a required image observation is unresolved
+  or expired.
 - **Unmeasured premises (returned, not waived):** T35's ENOENT-on-zombie removal oracle is
   unverified; any other result is a non-pass, never a pid-only fallback. T30m's empty or
   short argv0 start-up is an unverified fixture premise, and A = 8 stays a hypothesis.
@@ -116,7 +119,9 @@ the instance is left for disposition.
   decoy stays alive after a failed stop or barrier, and is listed). The caller's failure
   context and the watcher's identity are passed in, and a failure context alone requires
   the record even when the state looks clean. A missing or unreadable state, a malformed
-  entry and an unreadable registry are recorded as unknown, never as an empty set. The
+  entry, an unreadable registry, and a registry entry with a missing or unrecognized kind
+  or a process entry without a process identity are recorded as unknown, never as an
+  empty set. The
   record sends no signal and has no recovery authority; if writing it fails, the original
   HOLD stands.
 - **Publication:** count-only. No raw log, error message or marker in context is printed,

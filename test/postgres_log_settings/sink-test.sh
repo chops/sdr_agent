@@ -69,7 +69,7 @@ SYNTHETIC_IDS="$SYNTHETIC_IDS T20a T20b T20c T20d T20e T20f T20g T21a T21b T21c 
 SYNTHETIC_IDS="$SYNTHETIC_IDS T22a T22b T22c T22d T23a T23b T23c T23d T23e T24 T26a T26b T26c T27"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T30a T30b T30c T30d T30e T30f T30g T30i T30j T30k T30l T30n T30o"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T30p T31a T31b T31c T31d T31e T31f T31g T32 T34 T36a T36b T36c"
-SYNTHETIC_IDS="$SYNTHETIC_IDS T36d T37 T30q T30r T30s T30t T38"
+SYNTHETIC_IDS="$SYNTHETIC_IDS T36d T37 T30q T30r T30s T30t T38 T31h T30u T30v"
 SHELL_IDS="T1 T2 T3 T13 T14 T19e T19h T26d T28a T28b T28c T29a T29b T33"
 INSTANCE_IDS="T4a T4b T5 T6 T7 T8 T15a T15b T15c T25"
 
@@ -965,8 +965,10 @@ decoy_after_stop() { if [ "$1" = 0 ]; then echo stop; else echo retain; fi; }
 # labelled fixture-synthetic (no recovery authority). A record exactly when required:
 # live identities, a bounded watcher exit, an unreaped launcher, a missing or malformed
 # state, a malformed live entry (null), a malformed violation entry, a clean-looking state
-# WITH a failure context (failed stop, failed barrier), and an unreadable registry; no
-# record only for a clean state with no failure context and no unknown input. The decoy
+# WITH a failure context (failed stop, failed barrier), an unreadable registry, a registry
+# entry with no kind and a proc entry with a path-only identity; no record only for a
+# clean state with no failure context and no unknown input (including a registry holding
+# only recognized non-process fixtures). The decoy
 # is retained after any failed stop/barrier. No ctl, stop or signal is issued; like T26d
 # it tests decision functions only.
 st_T33() {
@@ -983,13 +985,22 @@ st_T33() {
   printf '%s\n' '{"live": [], "violations": []}' > "$dir/stalebarrier.json"
   printf '%s\n' '{"live": [], "violations": []}' > "$dir/badregistry.json"
   printf '%s\n' '{"fixtures": "not-a-list"}' > "$dir/registry-malformed.json"
+  printf '%s\n' '{"live": [], "violations": []}' > "$dir/regnokind.json"
+  printf '%s\n' '{"live": [], "violations": []}' > "$dir/regprocpath.json"
+  printf '%s\n' '{"live": [], "violations": []}' > "$dir/regnonproc.json"
+  printf '%s\n' '{"fixtures": [{}]}' > "$dir/registry-nokind.json"
+  printf '%s\n' '{"fixtures": [{"kind": "proc", "test": "x", "label": "p", "identity": {"path": "/x"}}]}' > "$dir/registry-procpath.json"
+  printf '%s\n' '{"fixtures": [{"kind": "dir", "test": "x", "label": "d", "identity": {"path": "/x", "dev": 1, "ino": 2, "type": "dir", "mode": 448}}, {"kind": "file", "test": "x", "label": "f"}]}' > "$dir/registry-nonproc.json"
   for c in live bounded unreaped missing malformed nullentry badviolation stalestop \
-      stalebarrier badregistry clean; do
+      stalebarrier badregistry regnokind regprocpath regnonproc clean; do
     args=()
     case "$c" in
       stalestop) args=(--context stop-failed --watcher-pid 999999999 --watcher-birth-us 1) ;;
       stalebarrier) args=(--context barrier-failed) ;;
       badregistry) args=(--registries "$dir/registry-malformed.json") ;;
+      regnokind) args=(--registries "$dir/registry-nokind.json") ;;
+      regprocpath) args=(--registries "$dir/registry-procpath.json") ;;
+      regnonproc) args=(--registries "$dir/registry-nonproc.json") ;;
     esac
     "${W[@]}" live-stack-left --state "$dir/$c.json" --out "$dir/out-$c.json" \
       --label fixture-synthetic "${args[@]+"${args[@]}"}" > "$dir/$c.decision.json" \
@@ -1001,7 +1012,7 @@ st_T33() {
     else got="$got $c=none"; fi
   done
   for c in 0 3 4; do dec=$(decoy_after_stop "$c"); got="$got decoy$c=$dec"; done
-  local want=" live=recorded bounded=recorded unreaped=recorded missing=recorded malformed=recorded nullentry=recorded badviolation=recorded stalestop=recorded stalebarrier=recorded badregistry=recorded clean=none decoy0=stop decoy3=retain decoy4=retain"
+  local want=" live=recorded bounded=recorded unreaped=recorded missing=recorded malformed=recorded nullentry=recorded badviolation=recorded stalestop=recorded stalebarrier=recorded badregistry=recorded regnokind=recorded regprocpath=recorded regnonproc=none clean=none decoy0=stop decoy3=retain decoy4=retain"
   local cls="DECISIONS:$got"
   [ "$got" != "$want" ] || cls=DECISIONS-AS-REQUIRED
   sv T33 DECISIONS-AS-REQUIRED "$cls" '{"fixtures": "not-applicable:decision functions on fabricated state files"}'
