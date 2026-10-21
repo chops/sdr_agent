@@ -9,6 +9,7 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
   """
   use SdrAgent.AuditCase, async: false
 
+  alias Ecto.Adapters.SQL
   alias SdrAgent.Agents
   alias SdrAgent.Agents.WitnessEvidence
   alias SdrAgent.AgentsFixtures
@@ -584,8 +585,9 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
     do: :v4 |> projection_evidence() |> Map.put("supersede_reason", "projection_version_changed")
 
   # A head of a fresh exchange. v1-v3 heads are linked through the domain;
-  # a v4 head is written raw (triggers off), since the v4 claim may not be
-  # accepted by the action yet, from a template row of this invocation.
+  # a v4 head is written raw (triggers off for that one setup insert only,
+  # then restored and checked), since the v4 claim may not be accepted by
+  # the action yet, from a template row of this invocation.
   defp head!(ctx, version, status) when version in [:v1, :v2, :v3] do
     {:ok, head} =
       link(
@@ -623,6 +625,11 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
         projection_evidence(:v4)
       ]
     )
+
+    # The trigger suspension is for this setup insert only (Codex static
+    # review of 6c40982): triggers are on again before any successor probe.
+    assert %{rows: [["origin"]]} =
+             SQL.query!(Repo, "SHOW session_replication_role", [])
 
     {:ok, links} = list_links(ctx.invocation.id, actor: ctx.rec)
     Enum.find(links, &(&1.id == id)) || flunk("the raw v4 head was not written")

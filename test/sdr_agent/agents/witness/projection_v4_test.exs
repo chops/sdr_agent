@@ -160,7 +160,15 @@ defmodule SdrAgent.Agents.Witness.ProjectionV4Test do
           {"2 thinking + 2 redacted + text",
            [thinking(), thinking(), redacted(), redacted(), text()], {2, 2}},
           {"zero thinking deltas, one signature delta", [thinking_with([sd("sig")]), text()],
-           {1, 0}}
+           {1, 0}},
+          {"several thinking pieces, several signature pieces",
+           [thinking_with([td("a"), td("b"), sd("sig-"), sd("part")]), text()], {1, 0}},
+          {"an empty signature piece, then a non-empty one",
+           [thinking_with([td("x"), sd(""), sd("sig")]), text()], {1, 0}},
+          {"a non-empty signature piece, then an empty one",
+           [thinking_with([sd("sig"), sd("")]), text()], {1, 0}},
+          {"empty thinking pieces, then a signature",
+           [thinking_with([td(""), td(""), sd("s")]), text()], {1, 0}}
         ] do
       result = v4(ctx, v3_only(ctx), stream(blocks))
       assert {:match, proof} = result, "#{label}: #{inspect(result)}"
