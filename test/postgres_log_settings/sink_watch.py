@@ -159,6 +159,14 @@ def jload(path):
 
 
 def now():
+    """Monotonic seconds (repair plan section 0). Every deadline and every ordering
+    comparison uses it; on macOS it is system-wide, so values written by the watcher and
+    by the snapshot processes compare [A: confirmed by T16/T23 ordering at selftest].
+    Wall-clock time is recorded separately (`wall`) for display only."""
+    return time.monotonic()
+
+
+def wall():
     return time.time()
 
 
@@ -555,7 +563,7 @@ def one(pattern, text, what):
 
 def artifacts(m, launcher):
     """Follow and hash the generated launch artifacts; record baked values (r2 6)."""
-    a = {"launcher": launcher}
+    a = {"launcher": launcher, "inst": m["inst"], "head": m["head"]}
     lt = read_text(launcher)
     a["yaml"] = one(r"--config=(/nix/store/[a-z0-9]{32}-process-compose\.yaml)", lt, "yaml")
     a["pc_socket_baked"] = one(r"--unix-socket=([^' ]+)'", lt, "unix-socket")
@@ -844,8 +852,21 @@ def inventory(m):
 
 
 # ---------------------------------------------------------------- snapshots (r5 4.2)
-def snap_file(src, dst):
-    """One open: fstat, read exactly L bytes into dst, hash those bytes, fstat again."""
+def write_all(fd, data, writer):
+    """Write every byte, checking progress (repair H5). Zero progress is HOLD."""
+    off = 0
+    while off < len(data):
+        n = writer(fd, data[off:])
+        if not isinstance(n, int) or n <= 0:
+            raise Hold("snapshot write made no progress (%r) at %d of %d" % (n, off, len(data)))
+        off += n
+
+
+def snap_file(src, dst, writer=None):
+    """One open of the source: fstat, read exactly L bytes, write every byte to `dst` with
+    checked progress, fsync, then re-read the copy and require its length and sha256 to
+    equal the bytes read (repair H5). Any mismatch is HOLD; the partial copy is retained."""
+    writer = writer or os.write
     fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         st1 = os.fstat(fd)
@@ -861,16 +882,43 @@ def snap_file(src, dst):
                 if not chunk:
                     raise Hold("short read on %s (%d of %d)" % (src, got, L))
                 h.update(chunk)
-                os.write(out, chunk)
+                write_all(out, chunk, writer)
                 got += len(chunk)
+            os.fsync(out)
         finally:
             os.close(out)
         st2 = os.fstat(fd)
         if (st2.st_dev, st2.st_ino) != (st1.st_dev, st1.st_ino) or st2.st_size < L:
             raise Hold("snapshot source changed under read: %s" % src)
-        return {"dev": st1.st_dev, "ino": st1.st_ino, "len": L, "sha256": h.hexdigest()}
     finally:
         os.close(fd)
+    src_sha = h.hexdigest()
+    copy = read_verified_bytes(dst, L, src_sha)
+    return {"dev": st1.st_dev, "ino": st1.st_ino, "len": L, "sha256": src_sha,
+            "copy_len": len(copy), "copy_sha256": src_sha, "proof": "file-read"}
+
+
+def read_verified_bytes(path, want_len, want_sha):
+    """Read a snapshot copy once (no follow) and require its length and sha256."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Hold("snapshot copy not regular: %s" % path)
+        parts, got = [], 0
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            parts.append(chunk)
+            got += len(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(parts)
+    if len(data) != want_len or sha256_bytes(data) != want_sha:
+        raise Hold("snapshot copy %s does not match its record (len %d vs %d)" % (
+            path, len(data), want_len))
+    return data
 
 
 def prefix_sha(path, L):
@@ -901,7 +949,7 @@ def snapshot(m, name, out_dir, prev=None):
     """Snapshot every searched sink; check append-only prefixes against `prev` (r5 3.3)."""
     os.makedirs(out_dir, 0o700)
     inv = inventory(m)
-    rec = {"name": name, "t": now(), "files": {}, "sockets": {}, "violations": []}
+    rec = {"name": name, "t": now(), "wall": wall(), "files": {}, "sockets": {}, "violations": []}
     for e in inv["entries"]:
         if e.get("absent") or not e["searched"]:
             continue
@@ -937,25 +985,36 @@ def snapshot(m, name, out_dir, prev=None):
 
 
 # ---------------------------------------------------------------- counting (r2 11.2)
+def grep_count(data, needle):
+    """`grep -F -c -a` semantics on bytes (repair H5, review 29bdd2d6): the number of
+    newline-delimited lines that contain `needle`. An unterminated final line is a line;
+    empty input has no lines; several hits on one line count once; bytes are never decoded."""
+    if not isinstance(data, bytes) or not isinstance(needle, bytes) or not needle:
+        raise Hold("grep_count needs bytes and a non-empty needle")
+    if not data:
+        return 0
+    lines = data.split(b"\n")
+    if data.endswith(b"\n"):
+        lines = lines[:-1]
+    return sum(1 for line in lines if needle in line)
+
+
 def count_markers(snap_dir, markers):
-    """`grep -F -c -a` on each snapshot copy; exit 1 is a verified zero only for a readable copy."""
+    """Count markers on the verified bytes of each snapshot copy (repair H5): each copy is
+    read once and must match its recorded length and sha256 before any count; a mismatch
+    or read failure is HOLD, never a zero."""
     snap = jload(snap_dir + "/snapshot.json")
     counts = []
     for path, meta in sorted(snap["files"].items()):
         copy = snap_dir + "/" + meta["copy"]
-        if not os.access(copy, os.R_OK):
-            raise Hold("snapshot copy unreadable: %s" % copy)
+        if meta.get("copy_len") != meta.get("len") or meta.get("copy_sha256") != meta.get("sha256"):
+            raise Hold("snapshot record for %s lacks a verified copy" % path)
+        data = read_verified_bytes(copy, meta["copy_len"], meta["copy_sha256"])
         for label, marker in sorted(markers.items()):
-            rc, out, err = run(["/usr/bin/grep", "-F", "-c", "-a", "--", marker, copy],
-                               env=TOOL_ENV)
-            if rc == 0:
-                n = int(out.strip())
-            elif rc == 1 and out.strip() == "0" and not err:
-                n = 0
-            else:
-                raise Hold("FAIL-READ grep rc=%d on %s" % (rc, copy))
+            n = grep_count(data, marker.encode("utf-8"))
             counts.append({"path": path, "class": meta["class"], "marker": label, "count": n,
-                           "len": meta["len"], "sha256": meta["sha256"], "grep_rc": rc})
+                           "len": meta["len"], "sha256": meta["sha256"],
+                           "method": "in-memory-verified", "proof": "file-read"})
     return counts
 
 
