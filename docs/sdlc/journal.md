@@ -1045,7 +1045,7 @@ Main is green at `14de644`.
 - the B2 search provider and key;
 - #29 and #37.
 
-### Sprint 1, day 10 (Wed Oct 21): projection v4 built (as of 09:40 MDT)
+### Sprint 1, day 10 (Wed Oct 21): projection v4 built (as of 09:30 MDT)
 
 **Merged since the last entry, under D-157:**
 - **#207** (`c9c7e9b`): decisions D-181 to D-183 and the Oct 20 journal.
@@ -1054,7 +1054,7 @@ Main is green at `14de644`.
 Main is green at `fcdcb9b`.
 
 **Projection v4, T1 to T6 (D-182): built and approved; the merge waits on the owner.**
-- **Failing tests:** RED was approved after one repair round. Nine failures were MatchErrors from custom-message pattern asserts, not assertion failures. They were reshaped into assertion-safe guards (`00c2345`): the same 20 failures, now with zero runtime errors.
+- **Failing tests:** RED was approved after one repair round. Nine failures were MatchErrors from custom-message pattern asserts, not assertion failures. They were reshaped into assertion-safe guards (`00c2345`): the same 20 failures, now with zero ExUnit runtime-error failures.
 - **The build:** an author agent wrote it in five slices, and Claude gated it.
   - T1: `compare_v4/4`, a syntactic layout grammar with a fixed precedence.
   - T2: the evidence R group.
@@ -1079,17 +1079,28 @@ Main is green at `fcdcb9b`.
 - Codex asked for a stronger migration proof, with two parts:
   - committed synthetic legacy rows, shown unchanged across up/down/up;
   - a fail-closed driver.
-- The driver is on protocol round 3:
+- The driver's protocol r3 has three features:
   - a single exclusive `CREATE DATABASE`;
   - a closed PG environment;
   - a supervisor that signals only its own unreaped child.
-
-  Its DB-free stub control passes all 18 scenarios.
+- Its DB-free stub control passes its own expectations, 20 driver scenarios plus 3 supervisor units. That is not acceptance of its release oracle.
+- Codex review: r3 is NEEDS-REVIEW. Its `release_safe` treats a single descendant snapshot and a reaped direct child as cluster quiescence.
+- Status: the row-preservation proof has not run, and G5 is not approved.
 
 **5b:**
-- **CI blocker:** the CI run at `6af6121` failed in `bin/verify`. devenv.nix is a whole-file unit owned by the project factory, and the factory has no re-receipt path. Codex and Claude both pick an owner-approved, one-unit receipt revision with an ADR, merged atomically with the config. It is waiting on the owner.
+- **CI blocker:** the CI run at `6af6121` failed in `bin/verify`. devenv.nix is a whole-file unit owned by the project factory, and no reviewed, supported re-receipt path was found. Codex and Claude both pick an owner-approved, one-unit receipt revision with an ADR, merged atomically with the config. It is waiting on the owner.
 - **Renderer:** the one-document fix (G1) passed at `e027972`.
-- **Sink test:** the plan is on round 4. Codex review found that the launcher attaches to any live process-compose and inherits PG* targeting. It also found nested restart policies, truncating per-process logs and a second process-compose log sink. The scope grew well past the original estimate.
+- **Sink test:** the plan is on round 4. Earlier rounds found five problems:
+  - the launcher attaches to any live process-compose;
+  - it inherits its PG* targeting from the environment;
+  - its restart policies are nested;
+  - its per-process logs are truncated at each start;
+  - process-compose has a second log sink.
+
+  The scope grew well past the original estimate.
+  - **Round 4 review:** NEEDS-REVIEW. A fatal TERM ending a process doesn't prove its buffered output was flushed, and a fork that can't be identified can't be declared a harmless probe from its parent alone.
+  - **Source binding:** Codex resolved the exact process-compose source.
+  - **Status:** the harness and campaign have not run.
 
 **Waiting for the owner:**
 - the v4 Credo gate decision;
