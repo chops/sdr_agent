@@ -1045,6 +1045,60 @@ Main is green at `14de644`.
 - the B2 search provider and key;
 - #29 and #37.
 
+### Sprint 1, day 10 (Wed Oct 21): projection v4 built (as of 09:40 MDT)
+
+**Merged since the last entry, under D-157:**
+- **#207** (`c9c7e9b`): decisions D-181 to D-183 and the Oct 20 journal.
+- **#209** (`fcdcb9b`): the #208 fix. `WitnessRoot.mkdir!` now allocates collision-resistant roots, and the scan test cleans up its own root.
+
+Main is green at `fcdcb9b`.
+
+**Projection v4, T1 to T6 (D-182): built and approved; the merge waits on the owner.**
+- **Failing tests:** RED was approved after one repair round. Nine failures were MatchErrors from custom-message pattern asserts, not assertion failures. They were reshaped into assertion-safe guards (`00c2345`): the same 20 failures, now with zero runtime errors.
+- **The build:** an author agent wrote it in five slices, and Claude gated it.
+  - T1: `compare_v4/4`, a syntactic layout grammar with a fixed precedence.
+  - T2: the evidence R group.
+  - T3: the selector, which tries v4 only after a contract-valid v3 `:unsupported`.
+  - T4: the mismatch-head lineage rule, in put_link, `WitnessLineage` and the DB trigger. The DB side comes from a new frozen-body migration, `20261021101539`.
+  - T5 and T6 needed no production change.
+- **Gates:** all 40 intended failures pass; 7 mutants were each killed by a named test.
+  - The rebase onto `fcdcb9b` was pure (range-diff 9/9 `=`).
+- **Review rounds after GREEN:**
+  - G1: strict-Credo cleanup on the v4-changed files.
+  - G2: labeled `WM-RECEIPT` lines for the external migration campaign.
+  - G2-F1: the campaign's cleanup facts are now enforced, not just printed.
+- **Final head `d4aeae8`:**
+  - focused 185 passed; external campaign 2/2 with 107 receipts; `bin/verify` and precommit 3221 passed each;
+  - codegen clean; strict Credo 0 on the changed files, with 0 new findings against main;
+  - Codex G2/source APPROVE; draft PR #211, CI green.
+- **Waiting on the owner:** whether to accept the gate as "no new strict findings". Project-wide strict Credo exits nonzero on 473 pre-existing findings in files v4 doesn't touch.
+
+**C3-02:**
+- G4 was approved at `069a9ff`.
+- G5 (the atomic admission cutover) is built at `58571c3`: 106 to 97 failing, 0 new.
+- Codex asked for a stronger migration proof, with two parts:
+  - committed synthetic legacy rows, shown unchanged across up/down/up;
+  - a fail-closed driver.
+- The driver is on protocol round 3:
+  - a single exclusive `CREATE DATABASE`;
+  - a closed PG environment;
+  - a supervisor that signals only its own unreaped child.
+
+  Its DB-free stub control passes all 18 scenarios.
+
+**5b:**
+- **CI blocker:** the CI run at `6af6121` failed in `bin/verify`. devenv.nix is a whole-file unit owned by the project factory, and the factory has no re-receipt path. Codex and Claude both pick an owner-approved, one-unit receipt revision with an ADR, merged atomically with the config. It is waiting on the owner.
+- **Renderer:** the one-document fix (G1) passed at `e027972`.
+- **Sink test:** the plan is on round 4. Codex review found that the launcher attaches to any live process-compose and inherits PG* targeting. It also found nested restart policies, truncating per-process logs and a second process-compose log sink. The scope grew well past the original estimate.
+
+**Waiting for the owner:**
+- the v4 Credo gate decision;
+- the 5b receipt decision;
+- the D-168 install and the witness diagnostic (D-181, D-183; neither has run yet);
+- v4 T7's grant start and expiry;
+- the B2 search provider and key;
+- #29 and #37.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -1099,3 +1153,7 @@ says what happened, why, what it cost and what changed.
 | **Oct 20: a G3 regression was reported as planned RED.** T-A17, a completed control inside a RED file, newly failed; Claude counted it as planned because it sat in a RED file. | Failures were classified by file membership, not by diffing failing names against the previous approved head. | One Codex review round. | Every slice now reports newly failing and newly passing names against the last approved head (`faildiff.py`). |
 | **Oct 20: a gate result could not be counted.** The authoring agent edited two test files three minutes into Claude's G2 full run. | The author was not told to freeze during the run. | One full rerun. | Authors freeze before every gate; manifests record dirty state before and after. |
 | **Oct 20: three synthetic preflight receipts were malformed, and one was wrongly classified COMPATIBLE.** BSD `sed` dropped the newline Claude meant to insert. | The fixtures were generated with a GNU-style `sed` idiom and not inspected. | Minutes; caught before review. | The fixtures were regenerated in Python and the byte content checked; the r3 report disclosed it. |
+| **Oct 21: 5b's CI failed on the factory receipt.** Editing devenv.nix failed `bin/verify`, because the file is a whole-file factory-owned unit. | Claude's local 5b gates ran tests only, not `bin/verify-workflow`, and nobody checked whether devenv.nix was generator-owned. | A red CI run and an owner decision now on 5b's path. | Before editing generated config, check `.workflow/receipt.json`'s owned units, and run `bin/verify-workflow` locally. |
+| **Oct 21: a review request sat unanswered for about 4 hours.** Claude sent C3-02 G5's review request with `ap send` only, which writes no envelope. | `ap send` is the wake-up channel; it has no `msg_id` to reply to and leaves nothing in the inbox. | About 4 hours of G5 review latency. | Every review, approval or slot request goes through `ap consult`; overdue reviews are searched for by head SHA. |
+| **Oct 21: v4's RED had nine runtime errors.** Custom-message pattern asserts raise MatchError, not an assertion failure, when the code is missing. | The known assertion-form rule was not applied to the new test files before RED. | One RED review round. | Assertion-safe `match?` guards come before destructuring; the forms are checked before a RED run. |
+| **Oct 21: G5's migration proof driver did not fail closed.** It had only `set -u`, masked statuses through grep, ran psql without `ON_ERROR_STOP`, and printed values instead of asserting them. | It was written as an observation script, not as a gate. | One review round and a rewrite (protocol r2, then r3). | Proof drivers are fail-closed and come with a database-free stub control showing that a failure can't reach cleanup or "success". |
