@@ -203,6 +203,19 @@ defmodule SdrAgent.Test.FakeWitnessProxy do
       end ++ [{"content_block_stop", %{"type" => "content_block_stop", "index" => index}}]
   end
 
+  # A block with an exact start `content_block` and exact delta maps (the v4
+  # reasoning fixtures, `thinking_block/2` and `redacted_block/1`).
+  defp block_events({{:raw, start, deltas}, index}) do
+    [
+      {"content_block_start",
+       %{"type" => "content_block_start", "index" => index, "content_block" => start}}
+    ] ++
+      for delta <- deltas do
+        {"content_block_delta",
+         %{"type" => "content_block_delta", "index" => index, "delta" => delta}}
+      end ++ [{"content_block_stop", %{"type" => "content_block_stop", "index" => index}}]
+  end
+
   defp block_events({{type, _}, index}) do
     [
       {"content_block_start",
@@ -213,6 +226,82 @@ defmodule SdrAgent.Test.FakeWitnessProxy do
        }},
       {"content_block_stop", %{"type" => "content_block_stop", "index" => index}}
     ]
+  end
+
+  ## Projection v4 reasoning fixtures (witness response-block plan r5, T1/T3)
+
+  @v3_only [
+    cache_ttl: "1h",
+    trailing_message_extra: %{"output_config" => %{"effort" => "high"}}
+  ]
+
+  @doc """
+  A `thinking` block in the conservative v4 candidate shape (synthetic
+  text only): the start `{type, thinking: "", signature: ""}`, one string
+  `thinking_delta` per `thinking` part, then one string `signature_delta`
+  per `signature` part. For `sse_response/2`'s `:blocks`.
+  """
+  def thinking_block(thinking \\ ["Synthetic reasoning."], signature \\ ["synthetic-signature"]) do
+    {:raw, %{"type" => "thinking", "thinking" => "", "signature" => ""},
+     Enum.map(thinking, &%{"type" => "thinking_delta", "thinking" => &1}) ++
+       Enum.map(signature, &%{"type" => "signature_delta", "signature" => &1})}
+  end
+
+  @doc "A `redacted_thinking` block `{type, data}` with no deltas (synthetic data)."
+  def redacted_block(data \\ "synthetic-redacted-data"),
+    do: {:raw, %{"type" => "redacted_thinking", "data" => data}, []}
+
+  @doc "A block with an exact start `content_block` and exact delta maps."
+  def raw_block(start, deltas \\ []), do: {:raw, start, deltas}
+
+  @doc """
+  The `{request, response}` of a v4 fixture variant (`cli_shape_v4_*`,
+  played by `fake_claude_cli.exs` in `witness` mode) for `stdin` and the
+  application's `answer`. The request is v3-only (`cache_control` ttl 1h
+  and a message-level `output_config`, so v2 does not apply) unless the
+  variant says otherwise:
+
+    * `cli_shape_v4_thinking` / `_redacted`: one reasoning block, then the text;
+    * `cli_shape_v4_thinking_mismatch`: one thinking block, then other output;
+    * `cli_shape_v4_overflow`: 3 thinking + 2 redacted blocks, then the text;
+    * `cli_shape_v4_two_text`: one thinking block, then two text blocks;
+    * `cli_shape_v4_after_text`: thinking, text, thinking;
+    * `cli_shape_v4_unknown_block`: thinking, a zero-delta unknown type, text;
+    * `cli_shape_v4_unparsed_signature`: a thinking block with no signature;
+    * `cli_shape_v4_redacted_delta`: a redacted block with a delta (refused
+      by the shared stream parser);
+    * `cli_shape_v4_request_mismatch`: a different stdin, then thinking + text;
+    * `cli_shape_v4_v2_thinking`: a v2-applicable request, thinking + text.
+  """
+  def v4_variant!(variant, stdin, answer) do
+    {edit, opts, blocks} = Map.fetch!(v4_variants(answer), variant)
+    {cli_request(stdin <> edit, opts), sse_response(answer, blocks: blocks)}
+  end
+
+  # variant => {stdin suffix, request options, response blocks}
+  defp v4_variants(answer) do
+    other = ~s({"answer":"disqualified","score":42})
+    thinking = thinking_block()
+    text = {:text, answer}
+    redacted_delta = %{"type" => "text_delta", "text" => "x"}
+
+    %{
+      "cli_shape_v4_thinking" => {"", @v3_only, [thinking, text]},
+      "cli_shape_v4_redacted" => {"", @v3_only, [redacted_block(), text]},
+      "cli_shape_v4_thinking_mismatch" => {"", @v3_only, [thinking, {:text, other}]},
+      "cli_shape_v4_overflow" =>
+        {"", @v3_only, [thinking, thinking, thinking, redacted_block(), redacted_block(), text]},
+      "cli_shape_v4_two_text" => {"", @v3_only, [thinking, text, text]},
+      "cli_shape_v4_after_text" => {"", @v3_only, [thinking, text, thinking]},
+      "cli_shape_v4_unknown_block" => {"", @v3_only, [thinking, {:mystery, nil}, text]},
+      "cli_shape_v4_unparsed_signature" =>
+        {"", @v3_only, [thinking_block(["Synthetic reasoning."], []), text]},
+      "cli_shape_v4_redacted_delta" =>
+        {"", @v3_only,
+         [raw_block(%{"type" => "redacted_thinking", "data" => "d"}, [redacted_delta]), text]},
+      "cli_shape_v4_request_mismatch" => {" (edited)", @v3_only, [thinking, text]},
+      "cli_shape_v4_v2_thinking" => {"", [], [thinking, text]}
+    }
   end
 
   @doc "Claude Code's account-derived `metadata.user_id` shape (synthetic)."

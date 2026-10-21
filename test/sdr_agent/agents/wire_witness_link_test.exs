@@ -421,6 +421,242 @@ defmodule SdrAgent.Agents.WireWitnessLinkTest do
     end
   end
 
+  @v1_projection "claude-message-json/1+prompt-builder/1"
+  @v2_projection "claude-message-json/2+prompt-builder/1"
+  @v3_projection "claude-message-json/3+prompt-builder/1"
+  @v4_projection "claude-message-json/4+prompt-builder/1"
+
+  # Witness response-block plan r5, T4 group 1 (section 6.5, technical MF3;
+  # ADR-0005 response-layout amendment item 6, D-182): a successor whose
+  # `projection_version` is v4 never supersedes a `mismatch` head, whatever
+  # the head's projection or the successor's status, in the link action's
+  # lineage validation (`WitnessLineage`, refused on `:supersedes_id` like
+  # C3) and in the database (the lineage trigger, `check_violation`). C3 is
+  # otherwise unchanged. Tests named `control: ...` are expected to pass now
+  # and after GREEN; the others are intended failures. The application
+  # matrix also needs the v4 evidence claim (T2) first: its precondition
+  # test names that dependency separately.
+  describe "projection v4 lineage (witness response-block plan r5, T4.1)" do
+    test "the v4 successor fixture is a valid v4 claim (precondition of the matrix)" do
+      assert {:ok, normalized} = WitnessEvidence.validate(v4_successor_evidence())
+      assert WitnessEvidence.validate_claim(normalized) == :ok
+    end
+
+    test "application: a v4 successor of a mismatch head is refused (v1-v4 heads, every status)",
+         ctx do
+      for version <- [:v1, :v2, :v3, :v4], status <- [:inferred, :reconciled, :mismatch] do
+        head = mismatch_head!(ctx, version)
+
+        result =
+          link(successor_attrs(head, %{link_status: status, evidence: v4_successor_evidence()}),
+            actor: ctx.rec
+          )
+
+        label = "#{version} mismatch head, v4 #{status} successor: #{inspect(result)}"
+        refute evidence_refused?(result), label
+        assert lineage_refused?(result), label
+        assert {:ok, current} = current_links(ctx.invocation.id, actor: ctx.rec)
+        assert Enum.any?(current, &(&1.id == head.id)), label
+      end
+    end
+
+    test "database: a raw v4 successor of a mismatch head is refused (v1-v4 heads, every status)",
+         ctx do
+      for version <- [:v1, :v2, :v3, :v4], status <- ["inferred", "reconciled", "mismatch"] do
+        head = mismatch_head!(ctx, version)
+        result = raw_successor(head, status, @v4_projection)
+        label = "#{version} mismatch head, raw v4 #{status} successor: #{inspect(result)}"
+
+        assert match?({:error, %Postgrex.Error{postgres: %{code: :check_violation}}}, result),
+               label
+      end
+    end
+
+    test "application: a v4 successor of a non-mismatch head is permitted", ctx do
+      for version <- [:v1, :v3], head_status <- [:inferred, :reconciled] do
+        head = head!(ctx, version, head_status)
+
+        assert {:ok, successor} =
+                 link(
+                   successor_attrs(head, %{
+                     link_status: :reconciled,
+                     evidence: v4_successor_evidence()
+                   }),
+                   actor: ctx.rec
+                 ),
+               "#{version} #{head_status} head"
+
+        assert successor.supersedes_id == head.id
+        assert successor.evidence["projection_version"] == @v4_projection
+      end
+    end
+
+    test "control: application C3 is unchanged for v2 and v3 mismatch heads", ctx do
+      for {head_version, successor_version, expected} <- [
+            {:v2, :v2, :refused},
+            {:v3, :v3, :refused},
+            {:v2, :v3, :permitted},
+            {:v3, :v2, :permitted},
+            {:v3, :v1, :permitted}
+          ] do
+        head = mismatch_head!(ctx, head_version)
+
+        evidence =
+          successor_version
+          |> projection_evidence()
+          |> Map.put("supersede_reason", "projection_version_changed")
+
+        result =
+          link(successor_attrs(head, %{link_status: :reconciled, evidence: evidence}),
+            actor: ctx.rec
+          )
+
+        label = "#{head_version} head, #{successor_version} successor: #{inspect(result)}"
+
+        case expected do
+          :refused -> assert lineage_refused?(result), label
+          :permitted -> assert match?({:ok, _}, result), label
+        end
+      end
+    end
+
+    test "control: database C3 is unchanged; a v4 successor of a non-mismatch head is permitted",
+         ctx do
+      for {head_version, successor, expected} <- [
+            {:v1, @v1_projection, :refused},
+            {:v2, @v2_projection, :refused},
+            {:v3, @v3_projection, :refused},
+            {:v1, @v3_projection, :permitted},
+            {:v2, @v3_projection, :permitted},
+            {:v3, @v2_projection, :permitted}
+          ] do
+        head = mismatch_head!(ctx, head_version)
+        result = raw_successor(head, "reconciled", successor)
+        label = "#{head_version} mismatch head, raw #{successor} successor: #{inspect(result)}"
+
+        case expected do
+          :refused ->
+            assert match?({:error, %Postgrex.Error{postgres: %{code: :check_violation}}}, result),
+                   label
+
+          :permitted ->
+            assert match?({:error, {:unexpected_success, _}}, result), label
+        end
+      end
+
+      for version <- [:v1, :v3], status <- [:inferred, :reconciled] do
+        head = head!(ctx, version, status)
+        result = raw_successor(head, "reconciled", @v4_projection)
+
+        assert match?({:error, {:unexpected_success, _}}, result),
+               "#{version} #{status} head, raw v4 successor: #{inspect(result)}"
+      end
+    end
+  end
+
+  ## Projection v4 lineage fixtures (T4.1)
+
+  defp v3_context_group, do: Map.put(v2_context_group(), "trailing_output_config", [])
+
+  # Evidence of a claim under each projection, with its complete group.
+  defp projection_evidence(:v1), do: evidence()
+
+  defp projection_evidence(:v2),
+    do:
+      evidence() |> Map.merge(v2_context_group()) |> Map.put("projection_version", @v2_projection)
+
+  defp projection_evidence(:v3),
+    do:
+      evidence() |> Map.merge(v3_context_group()) |> Map.put("projection_version", @v3_projection)
+
+  defp projection_evidence(:v4) do
+    evidence()
+    |> Map.merge(v3_context_group())
+    |> Map.merge(%{
+      "response_layout" => "reasoning_then_text",
+      "response_thinking_count" => 1,
+      "response_redacted_thinking_count" => 0,
+      "projection_version" => @v4_projection
+    })
+  end
+
+  defp v4_successor_evidence,
+    do: :v4 |> projection_evidence() |> Map.put("supersede_reason", "projection_version_changed")
+
+  # A head of a fresh exchange. v1-v3 heads are linked through the domain;
+  # a v4 head is written raw (triggers off), since the v4 claim may not be
+  # accepted by the action yet, from a template row of this invocation.
+  defp head!(ctx, version, status) when version in [:v1, :v2, :v3] do
+    {:ok, head} =
+      link(
+        attrs(ctx.invocation, %{
+          proxy_record_ref: record_ref(),
+          link_status: status,
+          evidence: projection_evidence(version)
+        }),
+        actor: ctx.rec
+      )
+
+    head
+  end
+
+  defp head!(ctx, :v4, status) do
+    template = head!(ctx, :v1, :inferred)
+    id = Ash.UUIDv7.generate()
+
+    tamper!(
+      """
+      INSERT INTO wire_witness_links
+        (id, tenant_id, model_invocation_id, proxy_record_ref, proxy_request_sha256,
+         proxy_response_sha256, link_status, method, evidence, supersedes_id,
+         recorded_at, trace_id, span_id, inserted_at)
+      SELECT $2, tenant_id, model_invocation_id, $3, proxy_request_sha256,
+             proxy_response_sha256, $4, method, $5::jsonb, NULL,
+             recorded_at, trace_id, span_id, inserted_at
+        FROM wire_witness_links WHERE id = $1
+      """,
+      [
+        Ecto.UUID.dump!(template.id),
+        Ecto.UUID.dump!(id),
+        record_ref(),
+        to_string(status),
+        projection_evidence(:v4)
+      ]
+    )
+
+    {:ok, links} = list_links(ctx.invocation.id, actor: ctx.rec)
+    Enum.find(links, &(&1.id == id)) || flunk("the raw v4 head was not written")
+  end
+
+  defp mismatch_head!(ctx, version), do: head!(ctx, version, :mismatch)
+
+  defp errors({:error, %Ash.Error.Invalid{errors: errors}}), do: errors
+  defp errors(_result), do: []
+
+  defp lineage_refused?(result),
+    do: Enum.any?(errors(result), &match?(%{field: :supersedes_id}, &1))
+
+  defp evidence_refused?(result), do: Enum.any?(errors(result), &match?(%{field: :evidence}, &1))
+
+  # A raw successor of `head` (triggers on) under `projection`, rolled back.
+  defp raw_successor(head, link_status, projection) do
+    raw_error(
+      """
+      INSERT INTO wire_witness_links
+        (id, tenant_id, model_invocation_id, proxy_record_ref, proxy_request_sha256,
+         proxy_response_sha256, link_status, method, evidence, supersedes_id,
+         recorded_at, trace_id, span_id, inserted_at)
+      SELECT $2, tenant_id, model_invocation_id, proxy_record_ref, proxy_request_sha256,
+             proxy_response_sha256, $3, method,
+             evidence || jsonb_build_object('projection_version', $4::text,
+                                            'supersede_reason', 'raw_insert'),
+             $1, recorded_at, trace_id, span_id, inserted_at
+        FROM wire_witness_links WHERE id = $1
+      """,
+      [Ecto.UUID.dump!(head.id), Ecto.UUID.dump!(Ash.UUIDv7.generate()), link_status, projection]
+    )
+  end
+
   ## Calls
 
   defp link(attrs, opts), do: Agents.link_wire_witness(attrs, opts)

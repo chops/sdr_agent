@@ -284,6 +284,30 @@ defmodule SdrAgent.Agents.Witness.EnablementTest do
     end
   end
 
+  # Witness response-block plan r5, T6 (E5; ADR-0005 response-layout
+  # amendment item 7, D-182): no v4 allowlist entry ships with the grammar.
+  # A v4 Opus entry needs the proof, Codex's evidence PASS and a separate
+  # enablement change. Control: expected to pass now and after GREEN.
+  describe "projection v4 enablement (witness response-block plan r5, T6)" do
+    test "control: the shipped config has no v4 entry; the shipped entries are unchanged" do
+      v4 = "claude-message-json/4+prompt-builder/1"
+
+      for env <- [:dev, :prod] do
+        entries = Keyword.get(witness(shipped(env)), :reconciled_methods)
+        assert entries == [@entry | @shipped_gen2], inspect(env)
+        refute Enum.any?(entries, &(&1.projection_version == v4)), inspect(env)
+
+        refute Enum.any?(
+                 entries,
+                 &String.starts_with?(&1.projection_version, "claude-message-json/4")
+               ),
+               inspect(env)
+      end
+
+      assert Keyword.get(Application.get_env(:sdr_agent, Witness, []), :reconciled_methods) == []
+    end
+  end
+
   ## Helpers
 
   # A missing enablement interface fails the scenario's own assertion (RED).

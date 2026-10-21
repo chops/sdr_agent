@@ -171,6 +171,12 @@ case mode do
             response: Proxy.sse_response(answer, blocks: [{:thinking, nil}, {:text, answer}])
           )
 
+        # Projection v4 reasoning-layout fixtures (witness response-block
+        # plan r5, T3/T5): see `FakeWitnessProxy.v4_variant!/3`.
+        "cli_shape_v4_" <> _ = v4_variant ->
+          {request, response} = Proxy.v4_variant!(v4_variant, stdin, answer)
+          Proxy.exchange!(root, id, traceparent: tp, request: request, response: response)
+
         "cli_shape_zero" ->
           Proxy.exchange!(root, id,
             traceparent: tp,

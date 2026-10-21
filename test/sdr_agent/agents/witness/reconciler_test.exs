@@ -958,6 +958,434 @@ defmodule SdrAgent.Agents.Witness.ReconcilerTest do
     end
   end
 
+  # Witness response-block plan r5, T3 (section 6.2 selector choice (a),
+  # 6.3 statuses, 6.4 evidence, 6.5 lineage; D-182). Hermetic: the fake CLI
+  # plays shim and stand-in proxy with the synthetic `cli_shape_v4_*`
+  # variants (`FakeWitnessProxy.v4_variant!/3`). Tests named `control: ...`
+  # are expected to pass now and after GREEN; the others are intended
+  # failures.
+  describe "projection v4 (witness response-block plan r5, T3)" do
+    @v4 "claude-message-json/4+prompt-builder/1"
+    @r_keys ~w(response_layout response_thinking_count response_redacted_thinking_count)
+    @v4_answer ~s({"answer":"qualified","score":42})
+
+    test "a v3-only thinking exchange is a v4 inferred link, method_not_enabled, [v2]", ctx do
+      for {variant, counts} <- [
+            {"cli_shape_v4_thinking", {1, 0}},
+            {"cli_shape_v4_redacted", {0, 1}}
+          ] do
+        invocation = call_model!(ctx, variant)
+        result = reconcile(ctx, invocation, [entry(@v3)])
+        assert match?({:ok, %{status: :inferred}}, result), "#{variant}: #{inspect(result)}"
+        {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert link.link_status == :inferred, variant
+        assert link.evidence["projection_version"] == @v4, variant
+        assert link.evidence["projections_inapplicable"] == ["v2"], variant
+        assert "method_not_enabled" in link.evidence["reason_codes"], variant
+        assert "cli_injected_context" in link.evidence["reason_codes"], variant
+        refute "response_block_unsupported" in link.evidence["reason_codes"], variant
+        assert link.evidence["response_layout"] == "reasoning_then_text", variant
+
+        assert {link.evidence["response_thinking_count"],
+                link.evidence["response_redacted_thinking_count"]} == counts,
+               variant
+
+        for key <- WitnessEvidence.context_group(@v3),
+            do: assert(Map.has_key?(link.evidence, key), "#{variant}: #{key}")
+
+        assert {:ok, :inferred} = status(invocation, ctx.rec)
+        assert attention(ctx, invocation) == [], variant
+      end
+    end
+
+    test "the same exchange is reconciled only under an exact v4 entry", ctx do
+      v4 = entry(@v4)
+
+      for {label, entries, expected} <- [
+            {"v3 entry", [entry(@v3)], :inferred},
+            {"v4 entry, other CLI version", [%{v4 | cli_version: "0.0.0"}], :inferred},
+            {"v4 entry, other profile", [%{v4 | profile_id: :claude_cli_sonnet}], :inferred},
+            {"v4 entry", [v4], :reconciled}
+          ] do
+        invocation = call_model!(ctx, "cli_shape_v4_thinking")
+        result = reconcile(ctx, invocation, entries)
+        assert match?({:ok, %{status: ^expected}}, result), "#{label}: #{inspect(result)}"
+        {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert link.evidence["projection_version"] == @v4, label
+        assert link.evidence["response_layout"] == "reasoning_then_text", label
+      end
+    end
+
+    test "control: a v2-applicable thinking exchange stays v2 unsupported with []", ctx do
+      for variant <- ["cli_shape_v4_v2_thinking", "cli_shape_thinking"] do
+        invocation = call_model!(ctx, variant)
+        result = reconcile(ctx, invocation, [entry(@v2_label), entry(@v3), entry(@v4)])
+        assert match?({:ok, %{status: :inferred}}, result), "#{variant}: #{inspect(result)}"
+        {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert link.evidence["projection_version"] == @v2_label, variant
+        assert link.evidence["projections_inapplicable"] == [], variant
+        assert "response_block_unsupported" in link.evidence["reason_codes"], variant
+        assert Map.take(link.evidence, @r_keys) == %{}, variant
+      end
+    end
+
+    test "control: an old single-text exchange stays v3 reconciled", ctx do
+      invocation = call_model!(ctx, "cli_shape_v3")
+      assert {:ok, %{status: :reconciled}} = reconcile(ctx, invocation, [entry(@v3), entry(@v4)])
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert link.evidence["projection_version"] == @v3
+      assert Map.take(link.evidence, @r_keys) == %{}
+    end
+
+    test "control: a v3 request mismatch with a reasoning response stays a v3 mismatch", ctx do
+      for variant <- ["cli_shape_v4_request_mismatch", "cli_shape_v3_mismatch"] do
+        invocation = call_model!(ctx, variant)
+        result = reconcile(ctx, invocation, [entry(@v3), entry(@v4)])
+        assert match?({:ok, %{status: :mismatch}}, result), "#{variant}: #{inspect(result)}"
+        {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert link.evidence["projection_version"] == @v3, variant
+        assert "request_text_differs" in link.evidence["reason_codes"], variant
+        assert Map.take(link.evidence, @r_keys) == %{}, variant
+        assert [%{severity: :critical}] = attention(ctx, invocation), variant
+      end
+    end
+
+    test "a reasoning output mismatch is a v4 mismatch with one critical attention", ctx do
+      invocation = call_model!(ctx, "cli_shape_v4_thinking_mismatch")
+      result = reconcile(ctx, invocation, [entry(@v4)])
+      assert match?({:ok, %{status: :mismatch}}, result), inspect(result)
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert link.link_status == :mismatch
+      assert link.evidence["projection_version"] == @v4
+      assert "response_output_differs" in link.evidence["reason_codes"]
+      assert link.evidence["response_layout"] == "reasoning_then_text"
+      assert link.evidence["response_thinking_count"] == 1
+      assert {:ok, :mismatch} = status(invocation, ctx.rec)
+      assert [failure] = attention(ctx, invocation)
+      assert {failure.class, failure.severity} == {:reconciliation_required, :critical}
+    end
+
+    test "control: a malformed reasoning stream stays v3 unsupported", ctx do
+      invocation = call_model!(ctx, "cli_shape_v4_redacted_delta")
+      result = reconcile(ctx, invocation, [entry(@v3), entry(@v4)])
+      assert match?({:ok, %{status: :inferred}}, result), inspect(result)
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert link.evidence["projection_version"] == @v3
+      assert "response_stream_invalid" in link.evidence["reason_codes"]
+      assert Map.take(link.evidence, @r_keys) == %{}
+      assert [%{severity: :warning}] = attention(ctx, invocation)
+    end
+
+    test "control: an unreadable application result stays v3 app_response_unreadable", ctx do
+      for {label, response} <- [
+            {"a result that is not a JSON object",
+             Jason.encode!([%{"type" => "result", "result" => "plain prose"}])},
+            {"no result event", Jason.encode!([%{"type" => "system"}])}
+          ] do
+        invocation = unreadable_app_invocation!(ctx, label, response)
+        {spy, seen} = tamper_spy()
+
+        result =
+          Witness.reconcile(invocation.id,
+            actor: ctx.rec,
+            store_root: ctx.root,
+            methods: [entry(@v3), entry(@v4)],
+            evidence_tamper: spy
+          )
+
+        assert match?({:ok, %{status: :inferred}}, result), "#{label}: #{inspect(result)}"
+        {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert link.evidence["projection_version"] == @v3, label
+        assert "app_response_unreadable" in link.evidence["reason_codes"], label
+        assert Map.take(link.evidence, @r_keys) == %{}, label
+        refute Enum.any?(seen.(), &("response_layout" in &1)), "#{label}: no v4 attempt"
+      end
+    end
+
+    test "control: an unsupported prompt builder keeps its refusal", ctx do
+      invocation = call_model!(ctx, "cli_shape_v4_thinking")
+
+      tamper!(
+        "UPDATE model_invocations SET model_catalog_entry = " <>
+          "jsonb_set(model_catalog_entry, '{prompt_builder}', '\"prompt-builder/0\"') WHERE id = $1",
+        [Ecto.UUID.dump!(invocation.id)]
+      )
+
+      result = reconcile(ctx, invocation, [entry(@v3), entry(@v4)])
+      assert match?({:ok, %{status: :inferred}}, result), inspect(result)
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert link.evidence["projection_version"] == Witness.Projection.version()
+      assert link.evidence["projections_inapplicable"] == ["v2", "v3"]
+      assert "prompt_builder_unsupported" in link.evidence["reason_codes"]
+      assert Map.take(link.evidence, @r_keys) == %{}
+    end
+
+    test "control: a tampered v3 context is evidence_contract_invalid with no v4 attempt", ctx do
+      invocation = call_model!(ctx, "cli_shape_v4_thinking")
+      parent = self()
+
+      tamper = fn extras ->
+        send(parent, {:tampered, Map.keys(extras)})
+
+        if Map.has_key?(extras, "response_layout"),
+          do: extras,
+          else: Map.delete(extras, "trailing_output_config")
+      end
+
+      result =
+        Witness.reconcile(invocation.id,
+          actor: ctx.rec,
+          store_root: ctx.root,
+          methods: [entry(@v3), entry(@v4)],
+          evidence_tamper: tamper
+        )
+
+      assert match?({:ok, %{status: :inferred}}, result), inspect(result)
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert "evidence_contract_invalid" in link.evidence["reason_codes"]
+      refute Map.has_key?(link.evidence, "projection_version")
+      assert Map.take(link.evidence, @r_keys) == %{}
+      refute Enum.any?(drain_tampered(), &("response_layout" in &1)), "no v4 attempt"
+    end
+
+    test "a tampered v4 context is evidence_contract_invalid with no v3 fallback", ctx do
+      invocation = call_model!(ctx, "cli_shape_v4_thinking")
+      parent = self()
+
+      tamper = fn extras ->
+        send(parent, {:tampered, Map.keys(extras)})
+
+        if Map.has_key?(extras, "response_layout"),
+          do: Map.delete(extras, "response_thinking_count"),
+          else: extras
+      end
+
+      result =
+        Witness.reconcile(invocation.id,
+          actor: ctx.rec,
+          store_root: ctx.root,
+          methods: [entry(@v3), entry(@v4)],
+          evidence_tamper: tamper
+        )
+
+      assert match?({:ok, %{status: :inferred}}, result), inspect(result)
+      assert Enum.any?(drain_tampered(), &("response_layout" in &1)), "v4 was evaluated"
+      {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert "evidence_contract_invalid" in link.evidence["reason_codes"]
+      refute Map.has_key?(link.evidence, "projection_version"), "no v3 fallback"
+      refute "response_block_unsupported" in link.evidence["reason_codes"], "no v3 fallback"
+      assert Map.take(link.evidence, @r_keys) == %{}
+      assert [failure] = attention(ctx, invocation)
+      assert failure.message =~ "evidence_contract_invalid"
+    end
+
+    test "each v4 refusal records its code and layout, no counts, and one warning", ctx do
+      for {variant, layout, code} <- [
+            {"cli_shape_v4_overflow", "reasoning_overflow", "response_reasoning_overflow"},
+            {"cli_shape_v4_two_text", "text_count_invalid", "response_text_count_invalid"},
+            {"cli_shape_v4_after_text", "block_after_text", "response_block_after_text"},
+            {"cli_shape_v4_unknown_block", "block_type_unsupported",
+             "response_block_type_unsupported"},
+            {"cli_shape_v4_unparsed_signature", "reasoning_unparsed",
+             "response_reasoning_unparsed"}
+          ] do
+        invocation = call_model!(ctx, variant)
+        result = reconcile(ctx, invocation, [entry(@v3), entry(@v4)])
+        assert match?({:ok, %{status: :inferred}}, result), "#{variant}: #{inspect(result)}"
+        {:ok, [link]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert link.evidence["projection_version"] == @v4, variant
+        assert link.evidence["projections_inapplicable"] == ["v2"], variant
+        assert link.evidence["response_layout"] == layout, variant
+        assert code in link.evidence["reason_codes"], variant
+        refute "response_block_unsupported" in link.evidence["reason_codes"], variant
+        refute Map.has_key?(link.evidence, "response_thinking_count"), variant
+        refute Map.has_key?(link.evidence, "response_redacted_thinking_count"), variant
+        assert [failure] = attention(ctx, invocation), variant
+        assert failure.severity == :warning, variant
+        assert failure.message =~ code, "#{variant}: #{failure.message}"
+      end
+    end
+
+    test "control: stored v1, v2 and v3 mismatch heads are kept under a current v4 match", ctx do
+      for variant <- ["mismatch", "cli_shape_mismatch", "cli_shape_v3_mismatch"] do
+        invocation = call_model!(ctx, variant)
+        assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation, [entry(@v4)]), variant
+        {:ok, [head]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        rewrite_to_v4_match!(ctx, invocation)
+
+        result = reconcile(ctx, invocation, [entry(@v4)])
+        assert match?({:ok, %{status: :mismatch}}, result), "#{variant}: #{inspect(result)}"
+        assert {:ok, :mismatch} = status(invocation, ctx.rec)
+        assert {:ok, [only]} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert {only.id, only.link_status} == {head.id, :mismatch}, variant
+      end
+    end
+
+    test "a stored v4 mismatch head is kept under a current v4 match", ctx do
+      invocation = call_model!(ctx, "cli_shape_v4_thinking_mismatch")
+      result = reconcile(ctx, invocation, [entry(@v4)])
+      assert match?({:ok, %{status: :mismatch}}, result), inspect(result)
+      {:ok, [head]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert head.evidence["projection_version"] == @v4
+      rewrite_to_v4_match!(ctx, invocation)
+
+      assert {:ok, %{status: :mismatch}} = reconcile(ctx, invocation, [entry(@v4)])
+      assert {:ok, :mismatch} = status(invocation, ctx.rec)
+      assert {:ok, [only]} = Agents.list_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert {only.id, only.link_status} == {head.id, :mismatch}
+    end
+
+    test "a non-mismatch v3 head gets a v4 successor (reconciliation_rerun)", ctx do
+      invocation = call_model!(ctx, "cli_shape_v3")
+      assert {:ok, %{status: :inferred}} = reconcile(ctx, invocation, [entry(@v4)])
+      {:ok, [head]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert head.evidence["projection_version"] == @v3
+      rewrite_to_v4_match!(ctx, invocation)
+
+      assert {:ok, %{status: :reconciled}} = reconcile(ctx, invocation, [entry(@v4)])
+      {:ok, [current]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+      assert current.supersedes_id == head.id
+      assert current.link_status == :reconciled
+      assert current.evidence["projection_version"] == @v4
+      assert current.evidence["supersede_reason"] == "reconciliation_rerun"
+      assert current.evidence["response_layout"] == "reasoning_then_text"
+    end
+
+    test "downgrades of a v4 link keep the whole group without a projection", ctx do
+      for {label, damage, reason} <- [
+            {"exchange_missing", &remove_exchange_records!/2, "exchange_missing"},
+            {"store_unreadable", &corrupt_inventory!/2, "store_unreadable"}
+          ] do
+        invocation = call_model!(ctx, "cli_shape_v4_thinking")
+        assert {:ok, %{status: :inferred}} = reconcile(ctx, invocation, [entry(@v3)]), label
+        {:ok, [head]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert head.evidence["projection_version"] == @v4, label
+        damage.(ctx, invocation)
+
+        result = reconcile(ctx, invocation, [entry(@v3)])
+        assert match?({:ok, %{status: :inferred}}, result), "#{label}: #{inspect(result)}"
+        {:ok, [current]} = Agents.current_wire_witness_links(invocation.id, actor: ctx.rec)
+        assert current.supersedes_id == head.id, label
+        assert current.evidence["supersede_reason"] == reason, label
+        refute Map.has_key?(current.evidence, "projection_version"), label
+
+        kept = WitnessEvidence.context_group(@v3) ++ @r_keys
+
+        assert Map.take(current.evidence, kept) == Map.take(head.evidence, kept), label
+        assert {:ok, _} = WitnessEvidence.validate(current.evidence)
+      end
+    end
+  end
+
+  ## Helpers (projection v4, T3)
+
+  # A completed generation-2 Opus invocation whose recorded application
+  # response is not a decodable JSON object, with a valid v3-only request
+  # and a valid reasoning stream in the stand-in store. The facade cannot
+  # produce it (the adapter refuses such output), so it is made through the
+  # domain APIs, like `ReviewRegressionsTest`.
+  defp unreadable_app_invocation!(ctx, label, response) do
+    key = "witness-v4-unreadable-#{System.unique_integer([:positive])}"
+    prompt = "Qualify the unreadable fixture lead (#{label})"
+    schema = %{"type" => "object"}
+
+    attrs =
+      key
+      |> AgentsFixtures.claude_attrs()
+      |> Map.put(
+        :request,
+        Jason.encode!(%{id: key, operation: "model.complete", prompt: prompt, schema: schema})
+      )
+
+    {:ok, reserved} =
+      SdrAgent.AdmissionFixtures.admitting(fn ->
+        Agents.reserve_model_invocation(ctx.run, attrs, actor: ctx.agent)
+      end)
+
+    {:ok, sent} = Agents.mark_model_invocation_sent(reserved, actor: ctx.agent)
+
+    completion =
+      Map.merge(AgentsFixtures.completion(), %{
+        response: response,
+        parsed_output: %{"answer" => "qualified"}
+      })
+
+    {:ok, done} = Agents.complete_model_invocation(sent, completion, actor: ctx.agent)
+
+    {request, sse} =
+      Proxy.v4_variant!(
+        "cli_shape_v4_thinking",
+        ClaudeCLI.render_prompt(prompt, schema),
+        ~s({"answer":"qualified"})
+      )
+
+    Proxy.exchange!(ctx.root, done.id, request: request, response: sse)
+    GateFixtures.decided!(done)
+  end
+
+  # An identity `evidence_tamper` that records every derived group's keys.
+  defp tamper_spy do
+    parent = self()
+
+    spy = fn extras ->
+      send(parent, {:tampered, Map.keys(extras)})
+      extras
+    end
+
+    {spy, &drain_tampered/0}
+  end
+
+  defp drain_tampered(acc \\ []) do
+    receive do
+      {:tampered, keys} -> drain_tampered([keys | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # Rewrites the invocation's one exchange to a v3-only request of its own
+  # stdin and a matching reasoning stream: a current v4 match.
+  defp rewrite_to_v4_match!(ctx, invocation) do
+    [path] = terminal_record_paths(ctx.root, invocation)
+    record = path |> File.read!() |> JSON.decode!()
+
+    stdin =
+      blob_path(ctx.root, record["request_sha256"])
+      |> File.read!()
+      |> JSON.decode!()
+      |> get_in(["messages", Access.at(0), "content"])
+      |> Enum.find(&(not String.starts_with?(&1["text"], "<system-reminder>")))
+      |> Map.fetch!("text")
+      |> String.replace_suffix(" (edited)", "")
+
+    {request, response} = Proxy.v4_variant!("cli_shape_v4_thinking", stdin, @v4_answer)
+    request = Proxy.blob!(ctx.root, request)
+    response = Proxy.blob!(ctx.root, response)
+
+    rewritten =
+      Map.merge(record, %{
+        "request_sha256" => request,
+        "response_sha256" => response,
+        "request_capture_sha256" => request,
+        "response_capture_sha256" => response
+      })
+
+    File.write!(path, JSON.encode!(rewritten))
+  end
+
+  # The exchange's record files are gone; the inventory itself stays valid.
+  defp remove_exchange_records!(ctx, invocation) do
+    dir = Path.join([ctx.root, "witnesses", invocation.id])
+    for path <- Path.wildcard(Path.join(dir, "*.json")), do: File.rm!(path)
+    assert File.dir?(dir)
+  end
+
+  # An unreadable inventory (an invalid record beside the exchange).
+  defp corrupt_inventory!(ctx, invocation) do
+    dir = Path.join([ctx.root, "witnesses", invocation.id])
+    File.write!(Path.join(dir, Proxy.uuid7() <> ".json"), "not json")
+  end
+
   ## Helpers
 
   defp max_blob, do: Witness.Store.max_blob_bytes()
