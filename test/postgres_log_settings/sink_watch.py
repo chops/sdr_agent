@@ -3411,6 +3411,7 @@ def report(evid, head):
 
 # ---------------------------------------------------------------- CLI
 LIVE_STACK_KINDS = ("watcher-exited-bounded", "launcher-not-reaped")
+NONPROC_KINDS = ("dir", "file", "symlink", "instance-root", "instance-runtime")
 LIVE_STACK_CONTEXTS = ("stop-failed", "watcher-running-at-deadline", "watcher-nonzero",
                        "barrier-failed", "exit-path-stop-incomplete", "exit-path-left-running")
 RUNBOOK = "test/postgres_log_settings/README.md (Recovery runbook)"
@@ -3531,11 +3532,16 @@ def live_stack_record(state_path, manifest_path=None, registries=(), label="obse
             fixtures.append({"registry": rp, "unknown": "unreadable:%s" % type(e).__name__})
             continue
         for i, f in enumerate(entries):
+            kind = f.get("kind") if isinstance(f, dict) else None
             ident_ = f.get("identity") if isinstance(f, dict) else None
-            if isinstance(ident_, dict) and "path" in ident_ and "birth_us" not in ident_:
-                continue                    # a path fixture: not a process
-            if ident_ is None and isinstance(f, dict) and f.get("kind") != "proc":
-                continue                    # a non-process intent without identity yet
+            if kind in NONPROC_KINDS and (ident_ is None or (
+                    isinstance(ident_, dict) and isinstance(ident_.get("path"), str) and
+                    "birth_us" not in ident_ and "pid" not in ident_)):
+                continue      # positively recognized non-process fixture (or its intent)
+            if kind != "proc":
+                fixtures.append({"registry": rp, "index": i,
+                                 "unknown": "missing or unrecognized kind/identity shape"})
+                continue
             if not _ident_ok(ident_):
                 fixtures.append({"registry": rp, "index": i, "unknown": "malformed or "
                                  "missing process identity"})
