@@ -24,6 +24,13 @@ defmodule SdrAgent.Sales.Lead do
   `:hubspot`, `:agent_found` and `:referral` (the admission kinds; no
   referral is admitted before C3-03).
 
+  Company key outside the admission (C3-02 G7): `:seed` and `:reopen` take
+  the account's company key themselves and re-check it on the account
+  locked `FOR SHARE` (`Changes.CompanyKey`); `:reopen` is refused while
+  another lead of the account is open, and (A.3) for a covered contact
+  (`Changes.ReopenGuard`); the override transitions only require the
+  enclosing override's key held.
+
   Cutover (C3-02 G5): `:create` is allowed only from inside the lead
   admission (`LeadAdmissionContext`) and only to an active human admin
   (`SdrAgent.Sales.Checks.ActiveAdmin`), with an admission kind as source
@@ -72,10 +79,12 @@ defmodule SdrAgent.Sales.Lead do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
-  alias SdrAgent.Audit.Changes.Stamp
   alias SdrAgent.Audit.Changes.AppendEvent
+  alias SdrAgent.Audit.Changes.Stamp
   alias SdrAgent.Audit.Changes.Transition
   alias SdrAgent.Audit.Checks
+  alias SdrAgent.Audit.SQL
+  alias SdrAgent.Operations.Failure
 
   @statuses [
     :new,
@@ -121,6 +130,10 @@ defmodule SdrAgent.Sales.Lead do
                 mode: :none,
                 held_when: SdrAgent.Sales.Checks.LeadAdmissionContext,
                 keys: {SdrAgent.Sales.Changes.LeadCompanyKey, :keys}}
+  # C3-02 G7: the override transitions run only inside a Qualification
+  # `:override`, whose pass keyed this company; they only require it held.
+  @override_key {SdrAgent.Audit.Changes.IdentityKeyLock,
+                 mode: :held, keys: {SdrAgent.Sales.Changes.LeadCompanyKey, :keys}}
 
   postgres do
     table "leads"
@@ -142,10 +155,9 @@ defmodule SdrAgent.Sales.Lead do
     end
 
     check_constraints do
-      check_constraint :trace_id, "leads_trace_ids", check: SdrAgent.Audit.SQL.trace_check()
+      check_constraint :trace_id, "leads_trace_ids", check: SQL.trace_check()
 
-      check_constraint :status, "leads_status",
-        check: SdrAgent.Audit.SQL.one_of("status", @statuses)
+      check_constraint :status, "leads_status", check: SQL.one_of("status", @statuses)
 
       check_constraint :status_reason, "leads_reason_when_stopped_or_blocked",
         check: "status NOT IN ('stopped', 'blocked') OR status_reason IS NOT NULL"
@@ -289,6 +301,9 @@ defmodule SdrAgent.Sales.Lead do
       description "SEED (dev/test only): create a new lead with a fixture id."
       accept [:id, :contact_id, :account_id, :owner_user_id, :source]
       change SdrAgent.Sales.Changes.LeadAccount
+      # C3-02 G7: the company key (prepended), then, after LeadAccount's
+      # account FOR SHARE, the locked re-check (plan r8 section 4.4).
+      change SdrAgent.Sales.Changes.CompanyKey
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.lead.created", category: :domain_change}
@@ -360,6 +375,7 @@ defmodule SdrAgent.Sales.Lead do
       description "ADM, REV, inside a human Qualification override only: qualified → disqualified (T)."
       require_atomic? false
       accept [:status_reason]
+      change @override_key
       change get_and_lock_for_update()
       change {Transition, from: [:qualified], to: :disqualified, locked?: true}
       change {Stamp, fields: [:closed_at]}
@@ -370,6 +386,7 @@ defmodule SdrAgent.Sales.Lead do
       description "ADM, REV, inside a human Qualification override only: disqualified → qualified."
       require_atomic? false
       accept [:status_reason]
+      change @override_key
       change get_and_lock_for_update()
       change {Transition, from: [:disqualified], to: :qualified, locked?: true}
       change set_attribute(:closed_at, nil)
@@ -425,7 +442,7 @@ defmodule SdrAgent.Sales.Lead do
 
       argument :failure_class, :atom,
         default: :run_stopped,
-        constraints: [one_of: SdrAgent.Operations.Failure.classes()]
+        constraints: [one_of: Failure.classes()]
 
       change {SdrAgent.Operations.Changes.Redact, fields: [:status_reason]}
       change get_and_lock_for_update()
@@ -455,8 +472,13 @@ defmodule SdrAgent.Sales.Lead do
     update :reopen do
       description "ADM: disqualified → assigned."
       require_atomic? false
+      # C3-02 G7 (plan r8 section 4.3): the company key, the account
+      # FOR SHARE and its re-check, then the lead FOR UPDATE, the locked
+      # transition and the re-open refusals (open lead, A.3).
+      change SdrAgent.Sales.Changes.CompanyKey
       change get_and_lock_for_update()
       change {Transition, from: [:disqualified], to: :assigned, locked?: true}
+      change SdrAgent.Sales.Changes.ReopenGuard
       change set_attribute(:closed_at, nil)
       change {Stamp, fields: [:assigned_at]}
       change {AppendEvent, [event_type: "sales.lead.reopened"] ++ @event}

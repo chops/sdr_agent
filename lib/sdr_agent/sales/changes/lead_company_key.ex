@@ -21,33 +21,26 @@ defmodule SdrAgent.Sales.Changes.LeadCompanyKey do
   `IdentityKeys.InvalidKeyValue` (kind `:domain`), so the write fails
   closed.
 
-  The read is an internal invariant read (as `LeadAccount`'s): it locks
-  nothing and its value is never returned, logged or put in an error.
-  Outside the admission (no marker) `IdentityKeyLock` calls nothing here;
-  that path is unchanged until the C3-02 cutover (G5).
+  The read is `SdrAgent.Sales.CompanyLock.company/2` (C3-02 G7), an
+  internal invariant read (as `LeadAccount`'s): it locks nothing and its
+  value is never returned, logged or put in an error.
+  Outside the admission (no marker) `IdentityKeyLock` calls nothing here
+  for `:assign`. G7 also uses `keys/1` with `mode: :held` on the override
+  transitions (`:disqualify_by_override`, `:requalify_by_override`): they
+  run only inside a Qualification `:override`, whose pass keyed the same
+  company (`SdrAgent.Research.Changes.OverrideCompanyLock`).
   """
 
-  require Ash.Query
-
-  alias SdrAgent.Audit.IdentityKeys.InvalidKeyValue
-  alias SdrAgent.Sales.Account
-  alias SdrAgent.Sales.Domain
+  alias SdrAgent.Sales.CompanyLock
 
   @doc "The held company key of a Lead write (see the moduledoc)."
   @spec keys(Ash.Changeset.t()) :: [{:domain, String.t()}]
   def keys(changeset) do
     tenant_id = Ash.Changeset.get_attribute(changeset, :tenant_id)
 
-    case canonical_domain(tenant_id, account_id(changeset)) do
-      domain when is_binary(domain) -> [{:domain, company!(domain)}]
-      _unreadable -> []
-    end
-  end
-
-  defp company!(domain) do
-    case Domain.canonical(domain) do
-      {:ok, ^domain} -> domain
-      _not_a_fixed_point -> raise InvalidKeyValue, kind: :domain
+    case CompanyLock.company(tenant_id, account_id(changeset)) do
+      domain when is_binary(domain) -> [{:domain, domain}]
+      nil -> []
     end
   end
 
@@ -55,18 +48,4 @@ defmodule SdrAgent.Sales.Changes.LeadCompanyKey do
     do: Ash.Changeset.get_attribute(changeset, :account_id)
 
   defp account_id(changeset), do: Map.get(changeset.data, :account_id)
-
-  defp canonical_domain(tenant_id, account_id)
-       when is_binary(tenant_id) and is_binary(account_id) do
-    Account
-    |> Ash.Query.filter(id == ^account_id and tenant_id == ^tenant_id)
-    |> Ash.Query.load(:canonical_domain)
-    |> Ash.read_one!(authorize?: false)
-    |> case do
-      %Account{canonical_domain: domain} -> domain
-      nil -> nil
-    end
-  end
-
-  defp canonical_domain(_tenant_id, _account_id), do: nil
 end
