@@ -1,7 +1,9 @@
-# 5b (D-178): the program behind render-pg-log-settings.sh. Input: the
-# settings object. Output: one string of postgresql.conf lines (sorted, each
-# newline-terminated), or an error (no output) for anything outside the
-# contract's exact key set and JSON types.
+# 5b (D-178): the program behind render-pg-log-settings.sh, run with `jq -n`.
+# Input: a file holding exactly one JSON document, the settings object (jq
+# reads a stream, so a second document is refused, Codex 5b G1). Output: one
+# string of postgresql.conf lines (sorted, each newline-terminated), or an
+# error (no output) for anything outside the contract's exact key set and
+# JSON types.
 def types: {
   "debug_print_parse": "boolean", "debug_print_plan": "boolean",
   "debug_print_rewritten": "boolean", "local_preload_libraries": "string",
@@ -34,7 +36,9 @@ def render:
   elif type == "number" then tojson
   else quote end;
 
-if type != "object" then error("not an object")
+[inputs] as $docs
+| if ($docs | length) != 1 then error("not exactly one JSON document") else $docs[0] end
+| if type != "object" then error("not an object")
 elif (keys | sort) != (types | keys | sort) then error("keys outside the contract")
 else
   to_entries

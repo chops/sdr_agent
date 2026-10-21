@@ -3,7 +3,15 @@ defmodule SdrAgent.Test.PostgresLogAudit do
   5b (D-178; Codex 5b plan r2 amendment 2): the extension and loaded-module
   audit used by `SdrAgent.PostgresLogSettingsTest`.
 
-  `inventory/1` reads five metadata sources on one connection:
+  `inventory/1` reads five metadata sources with five `repo.query!/2` calls.
+  They come from one backend only when the caller pins one connection for
+  the whole call: inside an Ecto SQL sandbox transaction (the DataCase test
+  does this) or a `repo.checkout/1`. Without that pin the pool may answer
+  each query from a different backend, and the loaded-module list then
+  describes none of them in particular. Callers outside a test (an owner
+  receipt script) must pin a checkout.
+
+  The five sources:
 
     * installed extensions (`pg_extension`);
     * modules loaded **in this backend** (`pg_get_loaded_modules()`);
