@@ -805,6 +805,26 @@ def walk(top):
                 stack.append(r)
 
 
+HARNESS_SINK_RE = re.compile(r"^(launcher\.(out|err)|client-[A-Za-z0-9_.-]+\.(out|err))$")
+
+
+def harness_sinks(m):
+    """Launcher and client output captures under the instance evidence dir (searched)."""
+    out = []
+    ev = m["evidence"]
+    for dirpath, dirnames, filenames in os.walk(ev):
+        dirnames[:] = [d for d in dirnames if not d.startswith("SNAP-") and d != "ctl"]
+        for f in filenames:
+            if HARNESS_SINK_RE.match(f):
+                p = os.path.join(dirpath, f)
+                rec = lstat_rec(p)
+                if rec["type"] != "file" or rec["nlink"] > 1:
+                    raise Fail("FAIL-HARNESS-SINK %s" % p)
+                out.append({"path": p, "class": "harness-sink", "searched": True,
+                            "append_only": f.startswith("launcher."), "lstat": rec})
+    return out
+
+
 def inventory(m):
     out = {"t": now(), "entries": []}
     for top in (m["root"], m["runtime"]):
@@ -818,6 +838,8 @@ def inventory(m):
                 raise Fail("FAIL-UNREADABLE %s" % full)
             out["entries"].append({"path": full, "class": klass, "searched": searched,
                                    "append_only": append_only, "lstat": rec})
+    if os.path.isdir(m.get("evidence", "")):
+        out["entries"].extend(harness_sinks(m))
     return out
 
 
@@ -1589,6 +1611,9 @@ def classify_epoch(state, snaps, lock, barrier_ok, marker_bearing=True):
                                          for x in all_e)))]
     if lfork:
         reasons.append("launcher forked after process-compose admission")
+    # a postmaster.pid after the barrier is evidence of a further generation (T15c)
+    if any(p.endswith("/postmaster.pid") for p in snaps["SNAP-post"]["files"]):
+        reasons.append("postmaster.pid present at SNAP-post")
     # append-only captures between snapshots
     for n in ("SNAP-pre", "SNAP-post"):
         for v in snaps[n]["violations"]:
@@ -1936,6 +1961,64 @@ def cross_check(entries, marker_files):
     return {"pass": not failures, "failures": failures, "rows": rows}
 
 
+# ---------------------------------------------------------------- report (count-only)
+def report(evid, head):
+    """Aggregate the private evidence into a count-only report (r2 12, r3 6)."""
+    rep_ = {"head": head, "evidence": evid, "instances": {}, "residuals": [
+        "UNVERIFIED: init-only collector failure not exercised (keeps 5b open; r3 3.3)",
+        "UNVERIFIED: forced-failure attempts whose output was truncated (keeps 5b open; r4 3.2)",
+        "foreign same-uid API interference is outside the claim (r6 1.2)",
+        "launch envelope limited: PGHOST=<runtime>/postgres, HOME/TMPDIR owned, API sockets "
+        "locked during marker epochs (r3 3.1, r5 3.5, r6 1.4)",
+        "non-atomic PID-based signalling window (r4 3.3)",
+        "possible OS crash report outside roots on a crash signal (r4 2.3, W12)"]}
+    for inst in sorted(os.listdir(evid)):
+        idir = evid + "/" + inst
+        if not os.path.isfile(idir + "/manifest.json"):
+            continue
+        ent = {"epochs": {}}
+        for f in ("provenance.json", "copy-edits.json"):
+            if os.path.exists(idir + "/" + f):
+                ent[f.split(".")[0]] = jload(idir + "/" + f)
+        if os.path.exists(idir + "/artifacts.json"):
+            a = jload(idir + "/artifacts.json")
+            ent["artifacts"] = a["files"]
+            ent["package_refs"] = a["package_refs"]
+        for ep in sorted(os.listdir(idir)):
+            ed = idir + "/" + ep
+            if not os.path.isdir(ed) or ep.startswith(("SNAP-", "collector")):
+                continue
+            e = {}
+            for f in ("classification.json", "judge.json", "s5.json", "barrier.json"):
+                if os.path.exists(ed + "/" + f):
+                    e[f.split(".")[0]] = jload(ed + "/" + f)
+            if os.path.exists(ed + "/counts.json"):
+                e["nonzero_counts"] = [c for c in jload(ed + "/counts.json") if c["count"]]
+            if e:
+                ent["epochs"][ep] = e
+        rep_["instances"][inst] = ent
+    if os.path.exists(evid + "/cross-check.json"):
+        cc = jload(evid + "/cross-check.json")
+        rep_["cross_check"] = {"pass": cc["pass"], "failures": cc["failures"]}
+    jdump(rep_, evid + "/report.json")
+    lines = ["# 5b sink test report (count-only)", "", "head: %s" % head, ""]
+    for inst, ent in sorted(rep_["instances"].items()):
+        lines.append("## %s" % inst)
+        for ep, e in sorted(ent["epochs"].items()):
+            c = e.get("classification", {})
+            j = e.get("judge", {})
+            lines.append("- %s: complete=%s judge_pass=%s reasons=%d failures=%d" % (
+                ep, c.get("complete"), j.get("pass"), len(c.get("reasons", [])),
+                len(j.get("failures", []))))
+        lines.append("")
+    lines.append("## Residuals")
+    lines.extend("- " + r for r in rep_["residuals"])
+    fd = os.open(evid + "/report.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return rep_
+
+
 # ---------------------------------------------------------------- CLI
 def parse_kv(argv):
     out, i = {}, 0
@@ -1966,6 +2049,15 @@ def main(argv):
                    "port_range": PORT_RANGE, "forbidden_ports": sorted(FORBIDDEN_PORTS),
                    "runtime_rule": "/tmp/devenv-<sha256(<root>/.devenv)[0:7]>",
                    "pghost_deviation": "<runtime>/postgres (r3 1.2)"})
+            return EXIT_OK
+        if cmd == "jget":
+            v = json.load(sys.stdin) if a["file"] == "-" else jload(a["file"])
+            for part in a["key"].split("."):
+                v = v[int(part)] if isinstance(v, list) else v[part]
+            sys.stdout.write(str(v) + "\n")
+            return EXIT_OK
+        if cmd == "report":
+            report(a["evid"], a["head"])
             return EXIT_OK
         if cmd == "runtime-for":
             jdump(dict(zip(("runtime", "canonical"), runtime_for_root(a["root"]))))
@@ -2072,6 +2164,23 @@ def main(argv):
             jdump(restore_collector(m), a["out"])
         elif cmd == "s5-observe":
             jdump(s5_observe(m, a["state"], float(a.get("deadline", TIMEOUTS["s5"]))), a["out"])
+        elif cmd == "s5-verdict":
+            ed = a["epoch_dir"]
+            obs = jload(ed + "/s5.json")
+            diag = jload(ed + "/s5-diag-counts.json")
+            mgr = ("manager-aggregate-sink", "manager-internal-log", "per-process-sink",
+                   "harness-sink")
+            b = sum(c["count"] for c in diag if c["class"] in mgr)
+            a_ok = obs["collector_dir_entries"] == 0
+            v = {"target_dir_empty": a_ok, "collector_open_failure_lines": b,
+                 "exercised": bool(a_ok and b > 0),
+                 "observed_generations": len(obs["observed_generations"]),
+                 "coverage": obs["coverage"], "accepting": obs["accepting"] is not None,
+                 "unverified": "attempts whose per-process output was truncated by a later "
+                               "attempt are lost; no absence claim (r3 5.5, r4 3.2)"}
+            jdump(v, a["out"])
+            jdump(v)
+            return EXIT_OK if v["exercised"] else EXIT_FAIL
         elif cmd == "cross-check":
             ents = [tuple(x.split("=", 1)[::-1]) for x in a["entries"].split(",")]
             r = cross_check([(d, i) for d, i in ents], jload(a["markers"])["files"])

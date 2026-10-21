@@ -655,6 +655,48 @@ def t18(d, scratch, variant):
     return verdict(d, tid, "INCOMPLETE", notes, ok)
 
 
+# ---------------------------------------------------------------- injections (T15a-c)
+def inject(kind, path, pid=None):
+    """Deliberate fixture defects after the stop began and before SNAP-post (r4 2.6)."""
+    if kind == "truncate":
+        size = os.path.getsize(path)
+        with open(path, "r+") as f:
+            f.truncate(0)
+            f.write("T" * (size + 4096))
+    elif kind == "rename-over":
+        tmp = path + ".fixture"
+        with open(tmp, "w") as f:
+            f.write("replacement\n")
+        os.replace(tmp, path)
+    elif kind == "new-collector":
+        name = time.strftime("postgresql-%Y-%m-%d_%H%M%S.log", time.gmtime(time.time() + 3600))
+        fd = os.open(os.path.join(path, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+    elif kind == "postmaster-pid":
+        with open(path, "w") as f:
+            f.write("%s\n" % pid)
+    else:
+        raise W.Hold("unknown injection")
+    return {"injected": kind, "path": path}
+
+
+def summary(d, head, ids):
+    missing, bad, recs = [], [], {}
+    for tid in ids:
+        p = "%s/%s.json" % (d, tid)
+        if not os.path.exists(p):
+            missing.append(tid)
+            continue
+        r = W.jload(p)
+        recs[tid] = r["verdict"]
+        if r["verdict"] not in ("PASS", "EXPECTED-REFUSAL") or r["unregistered"]:
+            bad.append(tid)
+    out = {"head": head, "pass": not missing and not bad, "missing": missing, "bad": bad,
+           "verdicts": recs}
+    W.jdump(out, d + "/selftest-summary.json")
+    return out
+
+
 # ---------------------------------------------------------------- CLI
 def main(argv):
     cmd, a = argv[0], W.parse_kv(argv[1:])
@@ -677,6 +719,16 @@ def main(argv):
             fixture_sleeper(a.get("seconds", "600"))
         elif cmd == "kill-fixture":
             W.jdump({"result": kill_fixture(a["pid"], a["birth_us"])})
+        elif cmd == "inject":
+            W.jdump(inject(a["kind"], a["path"], a.get("pid")))
+        elif cmd == "state-has-pid":
+            st = W.jload(a["state"])
+            pid = int(a["pid"])
+            W.jdump({"admitted": any(e["pid"] == pid for e in st["live"] + st["dead"])})
+        elif cmd == "summary":
+            out = summary(a["dir"], a["head"], a["ids"].split(","))
+            W.jdump(out)
+            return 0 if out["pass"] else 4
         elif cmd == "identity":
             W.jdump(W.bsdinfo(int(a["pid"])))
         elif cmd == "synthetic":
