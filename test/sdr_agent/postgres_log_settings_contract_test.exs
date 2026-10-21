@@ -102,6 +102,30 @@ defmodule SdrAgent.PostgresLogSettingsContractTest do
       assert status != 0, "5b: a missing file must be refused"
     end
 
+    # Codex 5b GREEN review G1: jq reads a stream of JSON values, so the file
+    # must hold exactly one document, and a bad later document must not leave
+    # the earlier one's lines on stdout.
+    @tag :tmp_dir
+    test "refuses a file holding more than one JSON document, with no output", %{tmp_dir: dir} do
+      assert File.regular?(@renderer), "5b: #{@renderer} must exist"
+      one = approved_json()
+
+      cases = [
+        two_objects: one <> one,
+        two_objects_spaced: one <> "\n\n" <> one,
+        object_then_malformed: one <> "{\"log_statement\": ",
+        object_then_scalar: one <> "1",
+        object_then_null: one <> "null"
+      ]
+
+      for {label, content} <- cases do
+        path = write_fixture!(dir, "#{label}.json", content)
+        assert {out, status} = render(path)
+        assert status != 0, "5b: #{label} must be refused"
+        assert out == "", "5b: #{label} must produce no output, got #{inspect(out)}"
+      end
+    end
+
     @tag :tmp_dir
     test "is pure: the approved file and its copy render identically", %{tmp_dir: dir} do
       assert File.regular?(@renderer), "5b: #{@renderer} must exist"
