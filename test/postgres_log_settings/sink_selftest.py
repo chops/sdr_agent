@@ -29,6 +29,7 @@ whole (Q2). Labels: `fixture-synthetic` marks classifier inputs built here;
 import ctypes
 import errno
 import hashlib
+import io
 import json
 import os
 import select
@@ -2920,29 +2921,62 @@ def join_owned(steps):
     return out
 
 
+_JOIN_SEQ = [0]
+
+
+def write_join_record(path, rec):
+    """Create one join record; never replaces an existing file (O_EXCL)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(rec, f, indent=1, sort_keys=True, default=str)
+        f.write("\n")
+
+
 def settle_joins(d, T, primary, outcomes):
     """After join_owned: with a primary failure, re-raise THAT exception object unchanged
-    (class, args, traceback) with every outcome attached as `join_outcomes`; without one,
-    any failed step raises RealUncertainty naming every failed step (all were attempted).
-    Either way the outcomes are kept as metadata in <d>/<T>.joins.json. No signal, no
-    disposal, no receipt; a nonzero or unconfirmed fixture outcome is never called joined."""
+    (class, args, traceback) with every outcome attached (`join_outcomes`) and its record
+    path (`join_record`); without one, any failed step raises RealUncertainty naming every
+    failed step (all were attempted). Each settlement gets its OWN record,
+    <d>/<T>.joins.<pid>.<seq>.json, created exclusively and never replaced or deleted
+    (2eaff27 review R2). If that record cannot be written, the failure is added to the
+    outcomes and the failed steps, and a closed, metadata-only diagnostic line is written to
+    stderr (test id, error class, primary class, failed step names; no message text), which
+    the guarded runner retains. No signal, no disposal, no receipt; a nonzero or
+    unconfirmed fixture outcome is never called joined. Returns None when nothing failed."""
     failed = [o["step"] for o in outcomes if not o["ok"]]
     if primary is None and not failed:
-        return
-    rec = {"test": T, "failed_steps": failed, "joins": outcomes,
+        return None
+    _JOIN_SEQ[0] += 1
+    path = "%s/%s.joins.%d.%03d.json" % (d, T, os.getpid(), _JOIN_SEQ[0])
+    rec = {"test": T, "failed_steps": list(failed), "joins": outcomes,
            "primary": None if primary is None else
            {"class": type(primary).__name__, "message": str(primary)[:300]},
            "proof": "owned release/join outcomes only; not a teardown proof"}
     try:
-        W.jdump(rec, "%s/%s.joins.json" % (d, T))
+        write_join_record(path, rec)
     except OSError as e:
         outcomes.append({"step": "joins-record", "ok": False, "error_class": type(e).__name__,
                          "error": str(e)[:300]})
+        failed.append("joins-record")
+        path = None
+        sys.stderr.write("JOINS-RECORD-UNWRITTEN test=%s error_class=%s primary_class=%s "
+                         "failed_steps=%s\n" % (T, type(e).__name__,
+                                                 type(primary).__name__ if primary is not None
+                                                 else "none", ",".join(failed)))
+        sys.stderr.flush()
     if primary is not None:
         primary.join_outcomes = outcomes
+        primary.join_record = path
         raise primary
-    raise RealUncertainty("%s: owned release/join steps failed (all attempted): %s"
-                          % (T, failed))
+    u = RealUncertainty("%s: owned release/join steps failed (all attempted): %s; record %s"
+                        % (T, failed, path or "UNWRITTEN"))
+    u.join_outcomes, u.join_record = outcomes, path
+    raise u
+
+
+def close_fd(fd):
+    """os.close, as a named step (the post-fork close controls inject here)."""
+    os.close(fd)
 
 
 def release_pipe(fd):
@@ -2984,12 +3018,15 @@ def t30m_case(d, T, n, case, shells, holders):
         steps += [("holder%d-reap" % i, (lambda hh=hh: reap(hh, D_REAP)))
                   for i, hh in enumerate(holders)]
         settle_joins(d, T, e, join_owned(steps))
-    os.close(wfd)
-    os.close(sin)
     res = {"case": n, "path_len": len(path), "argc": len(argv), "mode": mode, "pid": pid}
     primary = None
+    open_fds = {"ready-w": wfd, "stdin-r": sin}
     try:
+        # R1 (2eaff27 review): the post-fork closes are inside the protected path
         set_identity(d, T, "case%d" % n, proc_identity(pid, os.getpid()))
+        for name in ("ready-w", "stdin-r"):
+            close_fd(open_fds[name])
+            del open_fds[name]
         ready = bool(select.select([r], [], [], D_LINE)[0]) and os.read(r, 2) == b"r\n"
         cur = W.bsdinfo(pid)
         a = W.procargs(pid, cur["birth_us"]) if ready and cur else {"status": "NOT-READY"}
@@ -2999,7 +3036,9 @@ def t30m_case(d, T, n, case, shells, holders):
                    (ep is not None and os.path.realpath(ep) in shells))
     except Exception as e:      # the primary failure: kept, re-raised after the joins
         primary = e
-    steps = [("case%d-close-ready" % n, lambda: os.close(r))]
+    steps = [("case%d-close-%s" % (n, name), (lambda fd=fd: close_fd(fd)))
+             for name, fd in sorted(open_fds.items())]
+    steps.append(("case%d-close-ready" % n, lambda: os.close(r)))
     if h is not None:
         steps.append(("case%d-release-holder" % n, lambda: release_holder(h)))
     else:
@@ -3010,10 +3049,22 @@ def t30m_case(d, T, n, case, shells, holders):
         out += join_owned([("holder%d-reap" % i, (lambda hh=hh: reap(hh, D_REAP)))
                            for i, hh in enumerate(holders)])
         settle_joins(d, T, primary, out)
-    if out[1].get("value") == "fixture already gone":
+    by = {o["step"]: o for o in out}
+    if by["case%d-release-%s" % (n, "holder" if h is not None else "stdin")].get(
+            "value") == "fixture already gone":
         res["stdin"] = "fixture already gone"
-    res["rc"] = out[2]["value"]
+    res["rc"] = by["case%d-reap" % n]["value"]
     return res
+
+
+def t30m_join_holders(d, T, holders):
+    """T30m's final holder phase (2eaff27 review R1): every holder's bounded reap is attempted
+    even after an earlier one fails; any failure settles (uncertainty, own record). Returns
+    the rcs in order."""
+    out = join_owned([("holder%d-reap" % i, (lambda hh=hh: reap(hh, D_REAP)))
+                      for i, hh in enumerate(holders)])
+    settle_joins(d, T, None, out)
+    return [o["value"] for o in out]
 
 
 def t30m(d, scratch, runroot):
@@ -3052,7 +3103,7 @@ def t30m(d, scratch, runroot):
     results, holders = [], []
     for n, case in enumerate(cases):
         results.append(t30m_case(d, T, n, case, shells, holders))
-    hrcs = [reap(h, D_REAP) for h in holders]
+    hrcs = t30m_join_holders(d, T, holders)
     residues = sorted({len(c[0]) % 8 for c in cases[:8]})
     labels = ["root"]
     ok = len(results) == len(cases) and residues == list(range(8)) and \
@@ -4031,6 +4082,40 @@ def t30w(d, scratch, runroot):
 T30X_SUBCASES = ("primary_observation_failure", "release_failure",
                  "child_join_failure_later_holders_joined", "holder_join_failure",
                  "t38_joins_withheld", "t30r_joins")
+
+
+def leftover_rc_problems(expected, outcomes):
+    """Per-fixture rc binding (2eaff27 review R3): `expected` maps each leftover step label
+    to its exact expected rc; an unjoined, failed, missing or different rc is a problem.
+    There is no blanket nonzero allowance."""
+    by = {o["step"]: o for o in outcomes}
+    probs = []
+    for label, want in sorted(expected.items()):
+        o = by.get(label)
+        if o is None:
+            probs.append((label, "missing"))
+        elif not o["ok"]:
+            probs.append((label, "join-failed:%s" % o.get("error_class")))
+        elif o["value"] != want:
+            probs.append((label, "rc %r != expected %r" % (o["value"], want)))
+    return probs
+
+
+def t30x_join_leftovers(d, T, primary, leftovers):
+    """T30x's own leftover joins (2eaff27 review R1/R3): `leftovers` is a list of
+    (label, kind, handle-or-pid, expected_rc). Every bounded join is attempted even after
+    an earlier one fails; a primary failure is re-raised unchanged with all outcomes on
+    its own record; otherwise a failed join raises an uncertainty. Returns (outcomes,
+    rc problems) for the per-fixture binding."""
+    steps = []
+    for label, kind, x, _want in leftovers:
+        if kind == "proc":
+            steps.append((label, (lambda x=x: reap(x, D_REAP))))
+        else:
+            steps.append((label, (lambda x=x: reap_pid(x, D_REAP))))
+    out = join_owned(steps)
+    settle_joins(d, T, primary, out)
+    return out, leftover_rc_problems({lab: want for lab, _k, _x, want in leftovers}, out)
 
 
 class FakeJoinProc(object):
