@@ -1665,6 +1665,21 @@ T19I_BOUNDARY_WANT = {
     "lsof-other-env": {"outcome": "denied:deny:keywords", "reached_real": 0}}
 
 
+def pm_image_seam(pm_pid, reads, real):
+    """fixture-synthetic, test-only (scope-A plan r4 1.1): a W.pidpath stand-in that answers
+    ONLY for the owned postmaster fixture `pm_pid`, with the pinned postgres image, and
+    records each such consultation in `reads`; every other pid goes to `real`. The caller
+    installs it, restores `real` in its own finally and asserts the restore. It never
+    weakens the production proof: the subject still compares the answer; T43d keeps the real
+    pidpath to prove a real mismatch refuses."""
+    def seam(pid):
+        if pid == pm_pid:
+            reads.append(pid)
+            return W.PG_BIN + "/postgres"
+        return real(pid)
+    return seam
+
+
 def t19i(d, scratch, runroot):
     """Q2 / R2, the DRAIN case: the quiesce bound (ITER_SLICE_S, inside the 0.3 s overall
     deadline) expires during a stubbed 0.6 s drain. The signal must be refused at the first
@@ -1680,7 +1695,11 @@ def t19i(d, scratch, runroot):
     watch and fixtures): an instant drain with a far deadline reaches the final identity
     read and the intercepted kill exactly once, and pg_ctl reaches the intercepted spawn
     exactly once. Every caught exception text is kept in the receipt. The late final
-    identity proof is T30t's separate case and is not claimed here."""
+    identity proof is T30t's separate case and is not claimed here.
+    Scope A (plan r2 4, r3 3.2/4.3, r4 1.2): pg_ctl's expired-deadline refusal precedes
+    every read (no lsof launch), and the healthy pg_ctl re-proof consults the postmaster
+    image exactly once through the pid-only fixture image seam (pm_image_seam), restored
+    and checked in the same finally as the other patches."""
     T = "T19i"
     pg_ctl = W.PG_BIN + "/pg_ctl"
     boundary = t19i_boundary_controls(pg_ctl)
@@ -1692,7 +1711,9 @@ def t19i(d, scratch, runroot):
     births = {k: W.bsdinfo(p.pid)["birth_us"] for k, p in procs.items()}
     pc = procs["pc"].pid
     real_kill, real_popen, real_bsd = os.kill, subprocess.Popen, W.bsdinfo
+    real_pidpath = W.pidpath
     kills, launches, phase, bound = [], [], [], {}
+    pm_reads = []        # scope-A plan r4 1.1: pid-only fixture image consultations (pm)
 
     def fake_kill(pid, sig):
         kills.append([pid, int(sig)])
@@ -1733,7 +1754,7 @@ def t19i(d, scratch, runroot):
                                     for s in w.harness_signals[n0:]], "bound": dict(bound)}
 
     def pgctl_case(deadline_s):
-        i0 = len(launches)
+        i0, r0 = len(launches), len(pm_reads)
         called = W.now()
         try:
             r, hold = W.pg_ctl_stop(w, fake_manifest(root), w.alive("postmaster-final"),
@@ -1747,10 +1768,12 @@ def t19i(d, scratch, runroot):
         return {"result": r, "hold": hold, "spawns": by_gate("intercept", i0),
                 "allowed": by_gate("allow", i0),
                 "denied": [x for x in launches[i0:] if x["gate"].startswith("deny")],
-                "helpers": len(w.helpers), "called": called, "deadline": called + deadline_s}
+                "helpers": len(w.helpers), "called": called, "deadline": called + deadline_s,
+                "pm_reads": len(pm_reads) - r0}
 
     try:
         os.kill, W.bsdinfo = fake_kill, proof_read
+        W.pidpath = pm_image_seam(procs["pm"].pid, pm_reads, real_pidpath)
         subprocess.Popen = t19i_fake_popen(procs["pm"].pid, pg_ctl, real_popen, launches)
         refusal = sig_case("T19i", 0.6, 0.3)
         refusal_pg = pgctl_case(-0.01)
@@ -1765,8 +1788,10 @@ def t19i(d, scratch, runroot):
         healthy_pg = pgctl_case(30.0)
     finally:
         os.kill, W.bsdinfo, subprocess.Popen = real_kill, real_bsd, real_popen
+        W.pidpath = real_pidpath
     restored = os.kill is real_kill and W.bsdinfo is real_bsd and \
-        subprocess.Popen is real_popen and "quiesce" not in vars(w)
+        subprocess.Popen is real_popen and "quiesce" not in vars(w) and \
+        W.pidpath is real_pidpath
     alive = {k: (W.bsdinfo(p.pid) or {}).get("birth_us") == births[k] for k, p in procs.items()}
     rcs = outer_reap(procs)
     labels = ['root']  # disposed by finish() only after a validated outcome (R2)
@@ -1785,8 +1810,9 @@ def t19i(d, scratch, runroot):
         "refusal_no_kill": refusal["kills"] == [] and refusal["harness_signals"] == [],
         "pgctl_refusal_text": t19i_pgctl_refused(refusal_pg["hold"]) and
         refusal_pg["result"] is None,
+        # scope A (plan r2 4 step 2): the expired-deadline refusal precedes every read
         "pgctl_no_spawn": refusal_pg["spawns"] == [] and refusal_pg["denied"] == [] and
-        refusal_pg["allowed"] == [lsof_pm] and refusal_pg["helpers"] == 0,
+        refusal_pg["allowed"] == [] and refusal_pg["helpers"] == 0,
         "no_effect_after_refusals": refusal_effects == {"kills": 0, "pgctl_spawns": 0,
                                                         "denied": 0, "harness_signals": 0,
                                                         "helpers": 0},
@@ -1802,7 +1828,10 @@ def t19i(d, scratch, runroot):
         healthy_pg["denied"] == [] and healthy_pg["allowed"] == [lsof_pm] and
         healthy_pg["helpers"] == 0,
         "no_real_effect": alive == {"pc": True, "pm": True} and w.helpers == [] and
-        len(kills) == 1 and [x["gate"] for x in launches] == ["allow", "allow", "intercept"],
+        len(kills) == 1 and [x["gate"] for x in launches] == ["allow", "intercept"],
+        # scope A (plan r4 1.2): the healthy pg_ctl re-proof consults the pm image exactly
+        # once through the pid-only fixture seam; the expired refusal never reaches it
+        "pm_image_proof_consulted": healthy_pg["pm_reads"] == 1 and refusal_pg["pm_reads"] == 0,
         "patches_restored": restored}
     ok = all(v is True for v in checks.values())
     return finish(labels, d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
@@ -4840,6 +4869,190 @@ def t30x(d, scratch, runroot):
 
 
 # ---------------------------------------------------------------- injections (T15a-c)
+# ---------------------------------------------------------------- T43 (scope A pg_ctl effect gate)
+# Plan composite r5 (69dcaa61), inheriting r2 4, r3 3.1/4.3 and r4 1.2: before the pg_ctl
+# spawn, pg_ctl_stop refuses frozen or expired state BEFORE any read, then quiesces every
+# non-title obligation of ANY target inside one fixed effect bound E = min(now + 2.0,
+# deadline, enclosing), re-derives the postmaster after the drain, re-proves it in the
+# pinned order bsdinfo -> pidpath -> proc_cwd under E, and rechecks frozen, the remaining
+# time and E immediately before the spawn. Popen is deny-by-default (t19i_fake_popen) and
+# os.kill is intercepted throughout; pg_ctl never runs.
+def a_observed(cls, checks):
+    """Scope-A outcome contract (plan r2 5.1): the control's class when every ordered check
+    holds, otherwise "FAIL:<first false key>" (a FAIL receipt, rc 4)."""
+    for key, ok in checks:
+        if ok is not True:
+            return "FAIL:" + key
+    return cls
+
+
+T43_LATE ="refuse pg_ctl: effect bound passed during the re-proof"
+T43_TEXT = {
+    "b": "no empty event fence before the deadline",
+    "c": T43_LATE,
+    "d": "refuse pg_ctl: postmaster image mismatch",
+    "e-before": "refuse pg_ctl: signals are frozen after an uncertainty",
+    "e-drain": "refuse pg_ctl: an event observed during the drain froze signals",
+    "i": "refuse pg_ctl: effect bound passed before the spawn",
+    "j": T43_LATE,
+}
+# exact launch maps (gate, argv): "lsof" is the owned pm's read-only cwd read
+T43_LAUNCHES = {"g": ["lsof", "pg_ctl"], "i": ["lsof"], "j": ["lsof"]}
+T43_READS = {"g": 1, "i": 1, "j": 1}
+T43_TEXT_FIRST = ("e-before", "h")       # refusal text and launch map before no-spawn
+
+
+class DrainlessKq(object):
+    """fixture-synthetic: every fetch returns one event after `delay` seconds, so an empty
+    fence never occurs before a short bound (T43b). Registrations are refused."""
+
+    def __init__(self, delay, ev):
+        self.delay, self.ev = delay, ev
+
+    def control(self, changes, n, timeout=None):
+        if changes:
+            raise OSError(1, "stub kqueue takes no registrations")
+        time.sleep(self.delay)
+        return [self.ev][:n]
+
+
+def t43(d, scratch, runroot, v):
+    """Scope-A pg_ctl effect gate controls (one registered postmaster-role fixture, plus an
+    owned "other" target for T43a; postmaster.pid names the pm fixture):
+    a  another target's unresolved non-title obligation (its snapshot stubbed UNKNOWN; the
+       enclosing bound set below the obligation's own deadline) -> the quiesce bound text;
+    b  a fetch that never comes back empty (DrainlessKq) -> no empty fence;
+    c  the pm identity read returns after E (slow W.bsdinfo) -> late re-proof;
+    d  REAL pidpath (the python fixture image, seam NOT installed) -> image mismatch;
+    e-before  frozen before the call -> refused before any read;
+    e-drain   an unattributable event handled during the drain freezes signals;
+    f  the pm's own NOTE_EXIT handled during the drain -> no tracked postmaster after it;
+    g  healthy: exactly one lsof read and one intercepted pg_ctl spawn, one image read;
+    h  overall deadline already passed -> the existing text, zero launches;
+    i  E passes after the final read but before the spawn (W.now shifted +5 s from the
+       second call after proc_cwd returns; the overall deadline is 300 s away) -> step 9a;
+    j  E capped by the enclosing bound (now + 0.5): W.now shifted +1 s once proc_cwd returns
+       -> late re-proof (without the cap E = now + 2 would not have passed).
+    Every variant except d installs pm_image_seam; the checked image-read count proves where
+    the refusal happened. Each variant asserts its exact text and launch map."""
+    T = "T43" + v
+    pg_ctl = W.PG_BIN + "/pg_ctl"
+    root, pgd = pm_root(d, scratch, T)
+    fx = [("pm", "postmaster-final", "", pgd)]
+    if v == "a":
+        fx.append(("other", "fixture", "", None))
+    w, procs = watch_with(d, T, root, fx)
+    pm = procs["pm"].pid
+    pm_gen = w.entries[pm]["gen"]
+    with open(pgd + "/postmaster.pid", "w") as f:
+        f.write("%d\n%s\n" % (pm, pgd))
+    real_kill, real_popen = os.kill, subprocess.Popen
+    real_pidpath, real_bsd, real_now, real_cwd = W.pidpath, W.bsdinfo, W.now, W.proc_cwd
+    real_kq = w.kq
+    kills, launches, reads = [], [], []
+    clock = {"armed": False, "calls": 0, "shift": 0.0, "from": 1}
+    want = T43_TEXT.get(v)
+    deadline_s = -0.01 if v == "h" else (300.0 if v == "i" else 30.0)
+    r, hold = None, None
+    try:
+        os.kill = lambda p_, s_: kills.append([p_, int(s_)])
+        subprocess.Popen = t19i_fake_popen(pm, pg_ctl, real_popen, launches)
+        if v != "d":
+            W.pidpath = pm_image_seam(pm, reads, real_pidpath)
+        if v == "a":
+            og = w.entries[procs["other"].pid]["gen"]
+            w.request(og, "admission")                  # its deadline: now + 2.0
+            w.snapshot = lambda g, deadline: {"result": "UNKNOWN"}
+            w.enclosing = W.now() + 0.5
+            want = "quiesce bound passed (unresolved image obligations: %r)" % [og]
+        elif v == "b":
+            w.kq = DrainlessKq(0.01, FakeEv(pm, W.NOTE_FORK, udata=pm_gen))
+            w.enclosing = W.now() + 0.3
+        elif v == "c":
+            def slow(pid, _r=real_bsd, _pm=pm):
+                if pid == _pm:
+                    time.sleep(0.6)
+                return _r(pid)
+            W.bsdinfo = slow
+            w.enclosing = W.now() + 0.3
+        elif v == "e-before":
+            w.signals_frozen = True
+        elif v == "e-drain":
+            w.kq = StubKq([[FakeEv(pm, W.NOTE_FORK, udata=max(w.gens) + 1000)]])
+        elif v == "f":
+            w.kq = StubKq([[FakeEv(pm, W.NOTE_EXIT | W.NOTE_EXITSTATUS, 0, udata=pm_gen)]])
+            want = "postmaster.pid names %d, not a tracked postmaster" % pm
+        elif v in ("i", "j"):
+            if v == "j":
+                w.enclosing = W.now() + 0.5
+            clock["shift"], clock["from"] = (5.0, 2) if v == "i" else (1.0, 1)
+
+            def shifted(_r=real_now):
+                t_ = _r()
+                if clock["armed"]:
+                    clock["calls"] += 1
+                    if clock["calls"] >= clock["from"]:
+                        t_ += clock["shift"]
+                return t_
+
+            def cwd(pid, timeout=60, _r=real_cwd):
+                out = _r(pid, timeout=timeout)
+                clock["armed"] = True
+                return out
+            W.now, W.proc_cwd = shifted, cwd
+        called = real_now()
+        try:
+            r = W.pg_ctl_stop(w, fake_manifest(root), w.alive("postmaster-final"), timeout=5,
+                              t=2, deadline=called + deadline_s)
+        except W.Hold as h:
+            hold = str(h)
+        except InterceptedSpawn:
+            r = "intercepted-spawn"
+        except DeniedSpawn as e:
+            r, hold = "denied-spawn", str(e)
+        except Exception as e:      # recorded as a check failure, never a controller error
+            r, hold = "exception:%s" % type(e).__name__, str(e)[:200]
+    finally:
+        os.kill, subprocess.Popen = real_kill, real_popen
+        W.pidpath, W.bsdinfo, W.now, W.proc_cwd = real_pidpath, real_bsd, real_now, real_cwd
+        w.kq = real_kq
+        w.__dict__.pop("snapshot", None)
+    restored = os.kill is real_kill and subprocess.Popen is real_popen and \
+        W.pidpath is real_pidpath and W.bsdinfo is real_bsd and W.now is real_now and \
+        W.proc_cwd is real_cwd and "snapshot" not in vars(w)
+    rcs = outer_reap(procs)
+    lsof_pm = ["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(pm), "-d", "cwd", "-Fn"]
+    pg_argv = [pg_ctl, "-D", pgd, "-m", "fast", "-w", "-t", "2", "stop"]
+    named = {"lsof": ["allow", lsof_pm], "pg_ctl": ["intercept", pg_argv]}
+    seq = [[x["gate"], x["argv"]] for x in launches]
+    want_seq = [named[k] for k in T43_LAUNCHES.get(v, [])]
+    no_spawn = not any(x["gate"] == "intercept" for x in launches)
+    if v == "g":
+        cls = "PASS"
+        checks = [("result", r == "intercepted-spawn" and hold is None),
+                  ("launch-map", seq == want_seq),
+                  ("pm-image-proof-consulted", len(reads) == 1),
+                  ("no-kill", kills == []),
+                  ("restored", restored)]
+    else:
+        cls = "HOLD"
+        text_ok = t19i_pgctl_refused(hold) if v == "h" else (r is None and hold == want)
+        tail = [] if v == "d" else [("image-reads", len(reads) == T43_READS.get(v, 0))]
+        tail += [("no-kill", kills == []), ("restored", restored)]
+        if v in T43_TEXT_FIRST:
+            checks = [("text", text_ok), ("launch-map", seq == want_seq),
+                      ("no-spawn", no_spawn)] + tail
+        else:
+            checks = [("no-spawn", no_spawn), ("text", text_ok),
+                      ("launch-map", seq == want_seq)] + tail
+    obs = a_observed(cls, checks)
+    return finish(["root"], d, T, [cls], obs,
+                  {"outer_reap": rcs_word(rcs, {k: 0 for k in procs}), "fixtures": "ok"},
+                  runroot, notes={"checks": [[k, ok is True] for k, ok in checks],
+                                  "result": r, "hold": hold, "want": want, "launches": seq,
+                                  "image_reads": len(reads), "clock": clock})
+
+
 def inject(kind, path, pid=None):
     if kind == "truncate":
         size = os.path.getsize(path)
