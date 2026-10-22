@@ -318,6 +318,15 @@ CTL_KERN, KERN_ARGMAX, KERN_PROCARGS2 = 1, 8, 49
 ARGV_ALIGN = 8
 ARGC_MAX = 4096
 ARGMAX_RANGE = (4096, 16 << 20)
+# oldlen bound, from source (xnu-11417.140.69 bsd/kern/kern_sysctl.c sysctl_procargsx;
+# the running 24.6.0 build xnu-11417.140.69.709.8 is unpublished, so this is an inference
+# checked by T30w): buflen = oldlen - sizeof(int) (1359-1361) and EINVAL unless
+# 0 < buflen <= ARG_MAX (1366-1368); kern.argmax reports ARG_MAX (2316-2318). A buffer
+# smaller than the argument area is NOT an error: the kernel returns its LAST bytes with
+# size == oldlen (1555-1613), which parse_procargs refuses as MALFORMED (n >= cap). Hence
+# oldlen = kern.argmax + the argc word. The parser reads a 4-byte argc: any other width
+# refuses (no adaptation).
+PROCARGS2_ARGC_BYTES = ctypes.sizeof(ctypes.c_int)
 _libc = None
 _argmax = None
 
@@ -405,20 +414,27 @@ def parse_procargs(data, n, cap):
     return out
 
 
+def procargs_read(pid, oldlen):
+    """One KERN_PROCARGS2 sysctl with a buffer and oldlen of exactly `oldlen` bytes:
+    (rc, errno, data, n). The production reader; `procargs` passes the source-bound cap."""
+    buf = ctypes.create_string_buffer(oldlen)
+    size = ctypes.c_size_t(oldlen)
+    mib = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, int(pid))
+    ctypes.set_errno(0)
+    rc = libc().sysctl(mib, 3, buf, ctypes.byref(size), None, 0)
+    return rc, ctypes.get_errno(), buf.raw, size.value
+
+
 def procargs(pid, birth_us, reader=None):
     """`KERN_PROCARGS2` for the tracked identity (pid, birth_us). EINVAL/ESRCH are GONE only
     after re-proving the identity gone (bsdinfo None or another birth); with the same birth
-    alive they are HOLD, as is every other errno. `reader` is the T30b injection seam."""
-    cap = kern_argmax() + 4096
-    if reader is not None:
-        rc, err, data, n = reader(pid, cap)
-    else:
-        buf = ctypes.create_string_buffer(cap)
-        size = ctypes.c_size_t(cap)
-        mib = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, int(pid))
-        ctypes.set_errno(0)
-        rc = libc().sysctl(mib, 3, buf, ctypes.byref(size), None, 0)
-        err, data, n = ctypes.get_errno(), buf.raw, size.value
+    alive they are HOLD, as is every other errno (no retry, no buffer growth). `reader` is
+    the T30b injection seam. The oldlen is the source bound kern.argmax + sizeof(int)."""
+    if PROCARGS2_ARGC_BYTES != 4:
+        raise Hold("KERN_PROCARGS2 argc width %d unsupported (the parser reads 4 bytes)"
+                   % PROCARGS2_ARGC_BYTES)
+    cap = kern_argmax() + PROCARGS2_ARGC_BYTES
+    rc, err, data, n = (reader or procargs_read)(pid, cap)
     if rc != 0:
         if err in (errno.EINVAL, errno.ESRCH):
             cur = bsdinfo(pid)
