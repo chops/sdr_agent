@@ -1550,9 +1550,36 @@ def t19g(d, scratch, runroot):
                    notes={"took_s": took})
 
 
+class InterceptedSpawn(Exception):
+    """fixture-synthetic: raised by T19i's intercepted subprocess.Popen; nothing starts."""
+
+
+T19I_PGCTL_PREFIX, T19I_PGCTL_SUFFIX = "refuse pg_ctl: overall deadline leaves ", " s for -t 2"
+
+
+def t19i_pgctl_refused(hold):
+    """Exactly pg_ctl_stop's overall-deadline refusal (sink_watch pg_ctl_stop) with a
+    non-positive remaining time; any other text is not this refusal."""
+    if type(hold) is not str or not hold.startswith(T19I_PGCTL_PREFIX) or \
+            not hold.endswith(T19I_PGCTL_SUFFIX):
+        return False
+    try:
+        return float(hold[len(T19I_PGCTL_PREFIX):-len(T19I_PGCTL_SUFFIX)]) <= 0
+    except ValueError:
+        return False
+
+
 def t19i(d, scratch, runroot):
-    """Q2: the absolute deadline expires DURING the drain and identity proof; the signal is
-    refused immediately before os.kill, and pg_ctl is refused before any spawn."""
+    """Q2 / R2, the DRAIN case: the quiesce bound (ITER_SLICE_S, inside the 0.3 s overall
+    deadline) expires during a stubbed 0.6 s drain. The signal must be refused at the first
+    post-drain bound check, after the drain returned and BEFORE the final identity read;
+    pg_ctl must be refused by its overall-deadline check
+    before any spawn. os.kill and subprocess.Popen are INTERCEPTED for the whole test, so
+    even a regression sends no real signal and starts no helper. Healthy companion (same
+    watch and fixtures): an instant drain with a far deadline reaches the final identity
+    read and the intercepted kill exactly once, and pg_ctl reaches the intercepted spawn
+    exactly once. Every caught exception text is kept in the receipt. The late final
+    identity proof is T30t's separate case and is not claimed here."""
     T = "T19i"
     root, pgd = pm_root(d, scratch, T)
     w, procs = watch_with(d, T, root, [("pc", "process-compose", "", None),
@@ -1560,28 +1587,110 @@ def t19i(d, scratch, runroot):
     with open(pgd + "/postmaster.pid", "w") as f:
         f.write("%d\n%s\n" % (procs["pm"].pid, pgd))
     births = {k: W.bsdinfo(p.pid)["birth_us"] for k, p in procs.items()}
-    w.quiesce = lambda deadline: time.sleep(0.6)  # fixture-synthetic slow fence/drain
-    refused_sig = False
+    pc = procs["pc"].pid
+    real_kill, real_popen, real_bsd = os.kill, subprocess.Popen, W.bsdinfo
+    kills, spawns, other_spawns, phase = [], [], [], []
+    pg_ctl = W.PG_BIN + "/pg_ctl"
+
+    def fake_kill(pid, sig):
+        kills.append([pid, int(sig)])
+
+    def fake_popen(argv, *a, **kw):
+        if isinstance(argv, (list, tuple)) and argv and str(argv[0]) == pg_ctl:
+            spawns.append([str(x) for x in argv])
+            raise InterceptedSpawn("intercepted pg_ctl spawn (fixture-synthetic)")
+        other_spawns.append(str(argv[0]) if isinstance(argv, (list, tuple)) and argv
+                            else repr(argv)[:80])
+        return real_popen(argv, *a, **kw)   # e.g. proc_cwd's lsof read: not an effect
+
+    def proof_read(pid, _r=real_bsd):
+        if pid == pc and "quiesce-returned" in phase:
+            phase.append("final-identity-read")
+        return _r(pid)
+
+    def quiesce_stub(delay):
+        def q(deadline):
+            phase.append("quiesce-entered")
+            time.sleep(delay)           # fixture-synthetic drain
+            phase.append("quiesce-returned")
+        return q
+
+    def sig_case(label, delay, deadline_s):
+        del phase[:]
+        n0, k0 = len(w.harness_signals), len(kills)
+        w.quiesce = quiesce_stub(delay)
+        try:
+            r, hold = w.signal_verified(pc, signal.SIGTERM, label,
+                                        deadline=W.now() + deadline_s), None
+        except W.Hold as h:
+            r, hold = None, str(h)
+        finally:
+            del w.quiesce
+        return {"result": r, "hold": hold, "phase": list(phase), "kills": kills[k0:],
+                "harness_signals": [[s["pid"], s["signal"], s["reason"]]
+                                    for s in w.harness_signals[n0:]]}
+
+    def pgctl_case(deadline_s):
+        s0 = len(spawns)
+        try:
+            r, hold = W.pg_ctl_stop(w, fake_manifest(root), w.alive("postmaster-final"),
+                                    timeout=5, t=2, deadline=W.now() + deadline_s), None
+        except W.Hold as h:
+            r, hold = None, str(h)
+        except InterceptedSpawn:
+            r, hold = "intercepted-spawn", None
+        return {"result": r, "hold": hold, "spawns": spawns[s0:], "helpers": len(w.helpers)}
+
     try:
-        w.signal_verified(procs["pc"].pid, signal.SIGTERM, "T19i", deadline=W.now() + 0.3)
-    except W.Hold as h:
-        refused_sig = "deadline" in str(h)
-    del w.quiesce
-    refused_pgctl = False
-    try:
-        W.pg_ctl_stop(w, fake_manifest(root), w.alive("postmaster-final"), timeout=5, t=2,
-                      deadline=W.now() - 0.01)
-    except W.Hold as h:
-        refused_pgctl = "deadline" in str(h)
+        os.kill, W.bsdinfo, subprocess.Popen = fake_kill, proof_read, fake_popen
+        refusal = sig_case("T19i", 0.6, 0.3)
+        refusal_pg = pgctl_case(-0.01)
+        # effect attempts after BOTH refusals, before the healthy companion (helpers alone
+        # would not prove no pg_ctl spawn: pg_ctl_stop keeps a helper only on a timeout)
+        refusal_effects = {"kills": len(kills), "pgctl_spawns": len(spawns),
+                           "harness_signals": len(w.harness_signals),
+                           "helpers": len(w.helpers)}
+        healthy = sig_case("T19i-healthy", 0.0, 30.0)
+        healthy_pg = pgctl_case(30.0)
+    finally:
+        os.kill, W.bsdinfo, subprocess.Popen = real_kill, real_bsd, real_popen
+    restored = os.kill is real_kill and W.bsdinfo is real_bsd and \
+        subprocess.Popen is real_popen and "quiesce" not in vars(w)
     alive = {k: (W.bsdinfo(p.pid) or {}).get("birth_us") == births[k] for k, p in procs.items()}
     rcs = outer_reap(procs)
     labels = ['root']  # disposed by finish() only after a validated outcome (R2)
-    ok = refused_sig and refused_pgctl and alive == {"pc": True, "pm": True} and \
-        w.harness_signals == [] and w.helpers == []
+    sigterm = int(signal.SIGTERM)
+    pg_argv = [pg_ctl, "-D", pgd, "-m", "fast", "-w", "-t", "2", "stop"]
+    checks = {
+        # RED: the pre-R2 predicate of 4937f46 (sink_selftest.py:1568) kept unchanged
+        "refusal_text": "deadline" in (refusal["hold"] or "") and refusal["result"] is None,
+        "refusal_phase": refusal["phase"] == ["quiesce-entered", "quiesce-returned"],
+        "refusal_no_kill": refusal["kills"] == [] and refusal["harness_signals"] == [],
+        "pgctl_refusal_text": t19i_pgctl_refused(refusal_pg["hold"]) and
+        refusal_pg["result"] is None,
+        "pgctl_no_spawn": refusal_pg["spawns"] == [] and refusal_pg["helpers"] == 0,
+        "no_effect_after_refusals": refusal_effects == {"kills": 0, "pgctl_spawns": 0,
+                                                        "harness_signals": 0, "helpers": 0},
+        "healthy_sent": healthy["result"] == "sent" and healthy["hold"] is None and
+        healthy["phase"] == ["quiesce-entered", "quiesce-returned", "final-identity-read"],
+        "healthy_one_intercepted_kill": healthy["kills"] == [[pc, sigterm]] and
+        healthy["harness_signals"] == [[pc, sigterm, "T19i-healthy"]],
+        "healthy_pgctl_one_intercepted_spawn": healthy_pg["result"] == "intercepted-spawn" and
+        healthy_pg["hold"] is None and healthy_pg["spawns"] == [pg_argv] and
+        healthy_pg["helpers"] == 0,
+        "no_real_effect": alive == {"pc": True, "pm": True} and w.helpers == [] and
+        len(kills) == 1 and len(spawns) == 1 and
+        all(x == "/usr/sbin/lsof" for x in other_spawns),
+        "patches_restored": restored}
+    ok = all(v is True for v in checks.values())
     return finish(labels, d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
                    {"outer_reap": rcs_word(rcs, {"pc": 0, "pm": 0}), "fixtures": "ok"}, runroot,
-                   notes={"refused_sig": refused_sig, "refused_pgctl": refused_pgctl,
-                          "alive_after": alive})
+                   notes={"refused_sig": checks["refusal_text"],
+                          "refused_pgctl": checks["pgctl_refusal_text"],
+                          "alive_after": alive, "checks": checks, "refusal": refusal,
+                          "refusal_pgctl": refusal_pg, "healthy": healthy,
+                          "healthy_pgctl": healthy_pg, "other_spawns": other_spawns,
+                          "refusal_effects": refusal_effects})
 
 
 # ---------------------------------------------------------------- T20 (fabricated verdict inputs)
