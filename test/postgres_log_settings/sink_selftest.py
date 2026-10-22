@@ -91,6 +91,25 @@ _proof(["T30x"], fixtures=REQ)
 # e3d897b review: R2 (T31h, T30u), R3 (T30v)
 _proof(["T31h", "T30u"], fixtures=REQ)
 _proof(["T30v"], fixtures=NA)
+# T4a scope A (plan composite r5 69dcaa61; Codex PASS m_1792659171082955917_f77cfa58):
+# fabricated-record controls (no fixture), phase controls (a registered root that may hold
+# .devenv_initialized) and the pg_ctl effect-gate controls (owned fixtures, outer reap).
+# T41b is merged into T44f and T42a into T40n-retired (same subjects); neither is registered.
+A_FAB_IDS = (
+    "T40a", "T40b", "T40c-len", "T40c-meta", "T40d-sh", "T40d-nix", "T40e", "T40f", "T40g",
+    "T40i-reuse", "T40i-notlive", "T40j-handled", "T40j-queued", "T40j-forked", "T40k",
+    "T40l-a", "T40l-b", "T40l-c", "T40l-d", "T40l-e", "T40l-f", "T40l-g", "T40l-h",
+    "T40m-true", "T40m-extra", "T40n-retired", "T40n-exited", "T40n-regen", "T40n-queued",
+    "T40n-delayed", "T40o", "T40p", "T40q", "T40r",
+    "T41a", "T41c", "T41d", "T41e", "T41f", "T41g-a", "T41g-b", "T41h", "T42b",
+    "T44a", "T44b", "T44c-regen", "T44c-mismatch", "T44c-missing", "T44c-state", "T44d",
+    "T44e", "T44f", "T44h", "T44i-image", "T44i-vector", "T44j", "T44k")
+A_PHASE_IDS = ("T40h", "T40n-phase", "T44g")
+A_PG_IDS = ("T43a", "T43b", "T43c", "T43d", "T43e-before", "T43e-drain", "T43f", "T43g",
+            "T43h", "T43i", "T43j")
+_proof(list(A_FAB_IDS), fixtures=NA)
+_proof(list(A_PHASE_IDS), fixtures=REQ)
+_proof(list(A_PG_IDS), outer_reap=REQ, fixtures=REQ)
 _proof(["T1", "T2", "T14"], fixtures=REQ, cleanup=REQ)
 _proof(["T3"], fixtures=REQ)
 _proof(["T13"], cleanup=REQ)
@@ -4869,6 +4888,953 @@ def t30x(d, scratch, runroot):
 
 
 # ---------------------------------------------------------------- injections (T15a-c)
+# ---------------------------------------------------------------- T40/T41/T42/T44 (scope A)
+# Plan composite r5 (69dcaa61; inherits r2 3, r3 4, r4 2 and r5 1-3 with binding
+# amendments A-C): P1 fork-copy, P2 in-place retirement, the no-authority taint, the single
+# consume_allowance grant site and the D1/re-mint refusals. Every control drives the REAL
+# subject entries (apply_snapshot, handle, new_entry, sh_allowed, signal_verified,
+# classify_epoch) over fixture-synthetic records; "direct guard" controls fabricate one
+# binding or generation field and say so. Fabricated pids are >= 400000 (above macOS
+# PID_MAX 99999), so no record names a real process.
+A_GRANT_KEYS = ("allowance", "allowance_argv", "exec_role", "allowed_children")
+A_HOLDER_KEYS = ("allowance", "allowance_argv", "allowance_consumed", "allowed_children",
+                 "allowed_child", "exec_role", "fork_copy")
+A_INIT_REL = ".devenv/state/postgres/.devenv_initialized"
+
+
+def a_json(x):
+    return json.loads(json.dumps(x, sort_keys=True, default=str))
+
+
+class AWorld(object):
+    """fixture-synthetic records for the scope-A controls, with the reviewed source forms
+    (sh_forms) as concrete commands and exec vectors."""
+
+    def __init__(self, w):
+        self.w = w
+        m = w.m
+        self.next_pid = 400001
+        self.P = W.PG_BIN + "/postgres"
+        self.SH = os.path.realpath("/private/var/select/sh")
+        rt, pgd, port = m["runtime"], m["pgdata"], str(int(m["port"]))
+        opts = "-c unix_socket_directories=%s/postgres -c listen_addresses= -p %s" % (rt, port)
+        P = self.P
+        self.parents = {
+            "initdb": (W.PG_BIN + "/initdb", ["initdb", "--locale=C", "--encoding=UTF8"]),
+            "pg_ctl": (W.PG_BIN + "/pg_ctl", ["pg_ctl", "-D", pgd, "-w", "start", "-o", opts])}
+        self.cmds = {
+            "pg_ctl-start": ("/bin/sh", 'exec "%s" -D "%s" %s < "/dev/null" 2>&1' % (P, pgd, opts)),
+            "initdb-version-probe": ("sh", '"%s" -V' % P),
+            "initdb-check": ("sh", '"%s" --check -F -c log_checkpoints=false  -c max_connections=100 '
+                             '-c autovacuum_worker_slots=16 -c shared_buffers=16384 '
+                             '-c dynamic_shared_memory_type=posix < "/dev/null" > "/dev/null" 2>&1'
+                             % P),
+            "initdb-boot": ("sh", '"%s" --boot -F -c log_checkpoints=false  -X 16777216 -k' % P),
+            "initdb-single": ("sh", '"%s" --single -F -O -j -c search_path=pg_catalog -c '
+                              'exit_on_error=true -c log_checkpoints=false  template1 >/dev/null'
+                              % P)}
+        self.vec = {
+            "pg_ctl-start": [P, "-D", pgd, "-c", "unix_socket_directories=%s/postgres" % rt, "-c",
+                             "listen_addresses=", "-p", port],
+            "initdb-version-probe": [P, "-V"],
+            "initdb-check": [P, "--check", "-F", "-c", "log_checkpoints=false", "-c",
+                             "max_connections=100", "-c", "autovacuum_worker_slots=16", "-c",
+                             "shared_buffers=16384", "-c", "dynamic_shared_memory_type=posix"],
+            "initdb-boot": [P, "--boot", "-F", "-c", "log_checkpoints=false", "-X", "16777216",
+                            "-k"],
+            "initdb-single": [P, "--single", "-F", "-O", "-j", "-c", "search_path=pg_catalog",
+                              "-c", "exit_on_error=true", "-c", "log_checkpoints=false",
+                              "template1"]}
+        self.roles = {"pg_ctl-start": "postmaster-init", "initdb-version-probe": "pg-version-probe",
+                      "initdb-check": "pg-bootstrap", "initdb-boot": "pg-bootstrap",
+                      "initdb-single": "pg-bootstrap"}
+
+    def pid(self):
+        p = self.next_pid
+        self.next_pid += 1
+        return p
+
+    def gen(self, pid, birth, state="live"):
+        g = self.w.alloc_gen()
+        self.w.gens[g] = {"pid": pid, "birth_us": birth, "state": state, "entry": None}
+        return g
+
+    def ent(self, image=None, argv=None, parent=None, role=None, pid=None, birth=None):
+        """A sealed live generation and an entry; the parent binding (pid, birth, gen) is the
+        child's own admission record (new_entry records parent_gen in GREEN)."""
+        pid = pid if pid is not None else self.pid()
+        birth = birth if birth is not None else pid * 1000
+        g = self.gen(pid, birth)
+        e = {"pid": pid, "birth_us": birth, "gen": g,
+             "ppid_at_admission": parent["pid"] if parent else None, "uid": os.getuid(),
+             "comm": "fixture", "image": image, "exe": image, "exec_path": image,
+             "argv": argv, "argv_meta": W.argv_meta([a.encode() for a in argv]) if argv else None,
+             "argv_known": False, "title": None, "lineage": True,
+             "parent": parent["pid"] if parent else None,
+             "parent_birth_us": parent["birth_us"] if parent else None,
+             "parent_gen": parent["gen"] if parent else None, "admitted": W.now(),
+             "via": "fixture-synthetic", "proof": "fixture-synthetic", "exit": None,
+             "role": role or "unsnapshotted", "execs": 0}
+        self.w.gens[g]["entry"] = e
+        self.w.entries[pid] = e
+        return e
+
+    def snap(self, image, argv):
+        return {"image": image, "exec_path": image, "argv": argv,
+                "meta": W.argv_meta([a.encode() for a in argv]) if argv is not None else None,
+                "argv_status": "OK" if argv is not None else None, "cutoff": W.now()}
+
+    def admit(self, e, image, argv):
+        self.w.apply_snapshot(e, self.snap(image, list(argv)), "admission")
+
+    def exec_(self, e, image, argv, handle=True):
+        """The entry's own NOTE_EXEC through the real handler, then its VALID exec snapshot."""
+        if handle:
+            self.w.handle(FakeEv(e["pid"], W.NOTE_EXEC, udata=e["gen"]))
+            self.w.requests.pop(e["gen"], None)
+        self.w.apply_snapshot(e, self.snap(image, list(argv)), "exec")
+
+    def exit(self, e):
+        """A normal exit through the real handler: exit recorded, retire() (dead, retired)."""
+        self.w.handle(FakeEv(e["pid"], W.NOTE_EXIT | W.NOTE_EXITSTATUS, 0, udata=e["gen"]))
+
+    def queue(self, e, fflags):
+        """An attributable event left UNHANDLED in the pending queue."""
+        self.w.pending.append(FakeEv(e["pid"], fflags, 0, udata=e["gen"]))
+
+    def initialize(self):
+        pgd = self.w.m["pgdata"]
+        os.makedirs(pgd, 0o700, exist_ok=True)
+        fd = os.open(pgd + "/.devenv_initialized", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+
+    def holder(self, form, shim=True):
+        """A reviewed shell form's holder minted by the REAL sh_allowed through an admission
+        snapshot, then (shim) its /bin/sh -> /bin/bash hand-off. Returns (parent, holder)."""
+        pimg, pargv = self.parents["pg_ctl" if form == "pg_ctl-start" else "initdb"]
+        p = self.ent(pimg, list(pargv), role="pg-tool")
+        h = self.ent(parent=p)
+        argv0, cmd = self.cmds[form]
+        self.admit(h, "/bin/sh", [argv0, "-c", cmd])
+        if h.get("allowance") != form:
+            raise RealUncertainty("scope-A fixture: holder %s not minted" % form)
+        if shim:
+            self.exec_(h, self.SH, [argv0, "-c", cmd])
+            if h.get("role") != "pg-sh":
+                raise RealUncertainty("scope-A fixture: shim hand-off of %s not pg-sh" % form)
+        return p, h
+
+    def retire(self, h, form):
+        """The holder's own accepted in-place exec into the form's exec image and vector."""
+        self.exec_(h, self.P, self.vec[form])
+        if h.get("role") != self.roles[form]:
+            raise RealUncertainty("scope-A fixture: in-place exec of %s not %s"
+                                  % (form, self.roles[form]))
+
+    def child(self, h, image, argv):
+        c = self.ent(parent=h)
+        self.admit(c, image, argv)
+        return c
+
+    def copy(self, h):
+        """A fork child admitted with exactly the holder's shell image and vector."""
+        c = self.ent(parent=h)
+        self.admit(c, self.SH, list(h.get("allowance_argv") or []))
+        return c
+
+    def grandchild(self, parent):
+        """A fork child of `parent` admitted through the REAL new_entry (census admission)."""
+        pid = self.pid()
+        g = self.gen(pid, pid * 1000)
+        return self.w.new_entry(g, {"pid": pid, "birth_us": pid * 1000, "ppid": parent["pid"],
+                                    "uid": os.getuid(), "comm": "fixture"},
+                                "note-fork", parent["pid"], True, "kernel-event")
+
+    def viol(self, e, kind=None):
+        return [v for v in self.w.violations
+                if v.get("pid") == e["pid"] and (kind is None or v.get("kind") == kind)]
+
+    @staticmethod
+    def ident(e):
+        return {"pid": e["pid"], "birth_us": e["birth_us"], "gen": e["gen"]}
+
+    @staticmethod
+    def hstate(h):
+        return a_json({k: h.get(k) for k in A_HOLDER_KEYS})
+
+
+def a_refused(A, e, why, first="refused", kind="sh-child-mismatch"):
+    """The consume_allowance refusal contract (plan r4 2.1, r5 1.2): role no-authority (never
+    classify's earlier role), exactly one `kind` violation with the pinned why, a sticky
+    no_authority record and no authoritative allowance field on the refused entry."""
+    vs = A.viol(e, kind)
+    return [(first, e.get("role") == "no-authority"),
+            ("why", len(vs) == 1 and vs[0].get("why") == why),
+            ("taint", isinstance(e.get("no_authority"), dict)),
+            ("no-grant", not any(k in e for k in A_GRANT_KEYS))]
+
+
+def a_quota_kept(h, consumed=None):
+    """The holder's quota and consumer binding are unchanged by a refusal."""
+    if consumed is None:
+        return [("quota-unchanged", h.get("allowed_children", 0) == 0),
+                ("no-allowed-child", "allowed_child" not in h)]
+    return [("quota-unchanged", h.get("allowed_children") == 1),
+            ("allowed-child-kept", h.get("allowed_child") == AWorld.ident(consumed))]
+
+
+def a_no_copy(A, c, kind="sh-form-mismatch"):
+    """An already-correct refusal guard: not a fork-copy, exactly one existing violation of
+    `kind` for the candidate, and no allowance on it."""
+    return [("no-copy", c.get("role") != "fork-copy" and "fork_copy_of" not in c),
+            ("existing-violation", len(A.viol(c, kind)) == 1),
+            ("no-allowance", "allowance" not in c)]
+
+
+def a_copy_role(c):
+    return ("copy-role", c.get("role") == "fork-copy")
+
+
+# -- P1: fork-copy admission (T40a-k), authority (T40l-*), copy exec (T40m-r)
+def a40a(A):
+    """Exact copy: role fork-copy with the pinned binding and nothing authoritative; its exec
+    is then accepted under the bound holder allowance (quota 0 -> 1, consumer bound)."""
+    _, h = A.holder("initdb-check")
+    c = A.copy(h)
+    at = {"role": c.get("role"), "fco": c.get("fork_copy_of"),
+          "keys": [k for k in A_GRANT_KEYS if k in c], "hq": h.get("allowed_children"),
+          "hfc": h.get("fork_copy"), "nv": len(A.w.violations)}
+    A.exec_(c, A.P, A.vec["initdb-check"])
+    return [("copy-role", at["role"] == "fork-copy"),
+            ("copy-binding", at["fco"] == {"parent": h["pid"], "parent_gen": h["gen"],
+                                           "parent_birth_us": h["birth_us"],
+                                           "form": "initdb-check"}),
+            ("copy-no-authority-keys", at["keys"] == []),
+            ("holder-quota-0-at-copy", at["hq"] == 0),
+            ("holder-copy-mark", at["hfc"] == {"pid": c["pid"], "gen": c["gen"]}),
+            ("no-violation-at-copy", at["nv"] == 0),
+            ("exec-role", c.get("role") == "pg-bootstrap"),
+            ("quota-1", h.get("allowed_children") == 1),
+            ("allowed-child", h.get("allowed_child") == A.ident(c)),
+            ("no-violations", A.w.violations == [])], {"at_copy": at}
+
+
+def a40_variant(A, mutate):
+    _, h = A.holder("initdb-check")
+    argv = list(h["allowance_argv"])
+    c = A.ent(parent=h)
+    s = mutate(A, h, c, argv)
+    A.w.apply_snapshot(c, s, "admission")
+    return c
+
+
+def a40b(A):
+    """One byte changed in the -c command: not a copy (existing sh-form-mismatch)."""
+    def m(A, h, c, argv):
+        argv[2] = argv[2][:-1] + ("X" if argv[2][-1] != "X" else "Y")
+        return A.snap(A.SH, argv)
+    return a_no_copy(A, a40_variant(A, m)), {}
+
+
+def a40c_len(A):
+    """Equal element lengths, different content (argv0): not a copy."""
+    def m(A, h, c, argv):
+        argv[0] = "z" + argv[0][1:]
+        return A.snap(A.SH, argv)
+    return a_no_copy(A, a40_variant(A, m)), {}
+
+
+def a40c_meta(A):
+    """Snapshot metadata forged equal to the holder's, with a different vector: argv_meta is
+    never the equality test."""
+    def m(A, h, c, argv):
+        argv[2] = argv[2] + " "
+        s = A.snap(A.SH, argv)
+        s["meta"] = a_json(h["argv_meta"])
+        return s
+    return a_no_copy(A, a40_variant(A, m)), {}
+
+
+def a40d_sh(A):
+    """The other SYSTEM_SH image (not the holder's own image): not a copy."""
+    others = sorted(W.SYSTEM_SH - {A.SH})
+    if not others:
+        raise RealUncertainty("scope-A fixture: SYSTEM_SH has no second image")
+
+    def m(A, h, c, argv):
+        return A.snap(others[0], argv)
+    return a_no_copy(A, a40_variant(A, m)), {"image": others[0]}
+
+
+def a40d_nix(A):
+    """A nix bash image with the exact vector: not a copy; its non-shell image takes the
+    child-under-allowance path (sh-child-mismatch today and in GREEN)."""
+    def m(A, h, c, argv):
+        return A.snap(W.PKG["bash"] + "/bin/bash", argv)
+    return a_no_copy(A, a40_variant(A, m), "sh-child-mismatch"), {}
+
+
+def a40e(A):
+    """The parent holds no allowance: an exact copy of its vector is not a fork-copy."""
+    argv0, cmd = A.cmds["initdb-check"]
+    p = A.ent(A.SH, [argv0, "-c", cmd], role="pg-sh")
+    c = A.ent(parent=p)
+    A.admit(c, A.SH, list(p["argv"]))
+    return a_no_copy(A, c), {}
+
+
+def a40f(A):
+    """fixture-synthetic consumed allowance on a shell-image holder: not a copy."""
+    _, h = A.holder("initdb-check")
+    h.pop("allowance", None)
+    h["allowance_consumed"] = {"form": "initdb-check", "exec_role": "pg-bootstrap",
+                               "t": W.now(), "via": "in-place-exec", "argv_meta": None}
+    return a_no_copy(A, A.copy(h)), {}
+
+
+def a40g(A):
+    """The holder's quota already used by a real direct consumer: not a copy."""
+    _, h = A.holder("initdb-check")
+    A.child(h, A.P, A.vec["initdb-check"])
+    if h.get("allowed_children") != 1:
+        raise RealUncertainty("scope-A fixture: first consumer not accepted")
+    return a_no_copy(A, A.copy(h)), {}
+
+
+def a40h(A):
+    """.devenv_initialized present at the copy's admission: sh-outside-init-phase."""
+    _, h = A.holder("initdb-check")
+    A.initialize()
+    return a_no_copy(A, A.copy(h), "sh-outside-init-phase"), {}
+
+
+def a40i_reuse(A):
+    """fixture-synthetic: the child's admission parent_gen is another (live) generation of
+    the holder's pid: not a copy."""
+    _, h = A.holder("initdb-check")
+    c = A.ent(parent=h)
+    c["parent_gen"] = A.gen(h["pid"], h["birth_us"])
+    A.admit(c, A.SH, list(h["allowance_argv"]))
+    return a_no_copy(A, c), {}
+
+
+def a40i_notlive(A):
+    """fixture-synthetic: the holder generation's state is not live: not a copy."""
+    _, h = A.holder("initdb-check")
+    A.w.gens[h["gen"]]["state"] = "retired"
+    return a_no_copy(A, A.copy(h)), {}
+
+
+def a40j_handled(A):
+    """The holder's own NOTE_EXEC handled before the child's admission: not a copy."""
+    _, h = A.holder("initdb-check")
+    argv = list(h["allowance_argv"])
+    A.w.handle(FakeEv(h["pid"], W.NOTE_EXEC, udata=h["gen"]))
+    A.w.requests.pop(h["gen"], None)
+    c = A.ent(parent=h)
+    A.admit(c, A.SH, argv)
+    return a_no_copy(A, c), {}
+
+
+def a40j_queued(A):
+    """The holder's NOTE_EXEC queued unhandled at the child's admission: not a copy."""
+    _, h = A.holder("initdb-check")
+    A.queue(h, W.NOTE_EXEC)
+    return a_no_copy(A, A.copy(h)), {}
+
+
+def a40j_forked(A):
+    """The candidate already has a fork-note (real handler; its census reads the children of
+    a nonexistent pid): not a copy."""
+    _, h = A.holder("initdb-check")
+    c = A.ent(parent=h)
+    A.w.handle(FakeEv(c["pid"], W.NOTE_FORK, udata=c["gen"]))
+    A.admit(c, A.SH, list(h["allowance_argv"]))
+    return a_no_copy(A, c), {}
+
+
+def a40k(A):
+    """The holder exited (real handler) before the child's admission: not a copy."""
+    _, h = A.holder("initdb-check")
+    c = A.ent(parent=h)
+    A.exit(h)
+    A.admit(c, A.SH, list(h["allowance_argv"]))
+    return a_no_copy(A, c), {}
+
+
+def a40l_base(A):
+    _, h = A.holder("initdb-check")
+    c = A.copy(h)
+    return h, c, a_copy_role(c)
+
+
+def a40l_taint(A, c, g):
+    return ("gc-taint", g.get("no_authority") == {"reason": "parent-fork-copy",
+                                                   "source": A.ident(c)})
+
+
+def a40l_a(A):
+    """A fork-note from the copy (real handler): fork-from-nonforking-role, and the census
+    child (real new_entry) stays tracked with the no-authority taint."""
+    h, c, cr = a40l_base(A)
+    A.w.handle(FakeEv(c["pid"], W.NOTE_FORK, udata=c["gen"]))
+    g = A.grandchild(c)
+    return [cr, ("nonforking-violation", len(A.viol(c, "fork-from-nonforking-role")) == 1),
+            ("gc-tracked", A.w.entries.get(g["pid"]) is g and
+             (A.w.requests.get(g["gen"]) or {}).get("kind") == "admission"),
+            a40l_taint(A, c, g)], {}
+
+
+def a40l_b(A):
+    """A titled postgres grandchild is no-authority, never pg-logger."""
+    h, c, cr = a40l_base(A)
+    g = A.grandchild(c)
+    A.admit(g, A.P, [W.LOGGER_TITLE])
+    return [cr, a40l_taint(A, c, g), ("gc-role", g.get("role") == "no-authority"),
+            ("gc-observed", g.get("image") == A.P and g.get("argv_known") is False)], {}
+
+
+def a40l_c(A):
+    """A pre-title postgres grandchild carrying a reviewed exec vector is no-authority, never
+    postmaster-init."""
+    h, c, cr = a40l_base(A)
+    g = A.grandchild(c)
+    A.admit(g, A.P, A.vec["initdb-check"])
+    return [cr, a40l_taint(A, c, g), ("gc-role", g.get("role") == "no-authority"),
+            ("gc-observed", g.get("image") == A.P)], {}
+
+
+def a40l_d(A):
+    """The grandchild's own exec, resolved by the REAL process_requests over a stubbed VALID
+    snapshot (fixture-synthetic): the obligation resolves and the role stays no-authority."""
+    h, c, cr = a40l_base(A)
+    g = A.grandchild(c)
+    A.w.handle(FakeEv(g["pid"], W.NOTE_EXEC, udata=g["gen"]))
+    kind = (A.w.requests.get(g["gen"]) or {}).get("kind")
+    s = dict(A.snap(A.P, A.vec["initdb-check"]), result="VALID", pre=W.now())
+    try:
+        A.w.snapshot = lambda g_, deadline: dict(s)
+        A.w.process_requests(W.now() + 1.0)
+    finally:
+        A.w.__dict__.pop("snapshot", None)
+    return [cr, a40l_taint(A, c, g), ("exec-obligation", kind == "exec"),
+            ("resolved", g["gen"] not in A.w.requests),
+            ("gc-role", g.get("role") == "no-authority"), ("gc-image", g.get("image") == A.P),
+            ("stub-removed", "snapshot" not in vars(A.w))], {}
+
+
+def a40l_e(A):
+    """A /bin/sh grandchild with a reviewed form vector: no-authority, no allowance."""
+    h, c, cr = a40l_base(A)
+    g = A.grandchild(c)
+    argv0, cmd = A.cmds["initdb-check"]
+    A.admit(g, "/bin/sh", [argv0, "-c", cmd])
+    return [cr, a40l_taint(A, c, g), ("gc-role", g.get("role") == "no-authority"),
+            ("gc-no-allowance", "allowance" not in g)], {}
+
+
+def a40l_f(A):
+    """A signal to the copy is refused by role (os.kill INTERCEPTED): 0 kills."""
+    h, c, cr = a40l_base(A)
+    real_kill, kills = os.kill, []
+    try:
+        os.kill = lambda p_, s_: kills.append([p_, int(s_)])
+        try:
+            r = A.w.signal_verified(c["pid"], signal.SIGTERM, "T40l-f", deadline=W.now() + 5.0)
+        except W.Hold as e:
+            r = "HOLD:" + str(e)
+    finally:
+        os.kill = real_kill
+    return [cr, ("refused-by-role",
+                 r == "HOLD:refuse signal: pid %d role fork-copy lineage True" % c["pid"]),
+            ("no-kill", kills == [] and A.w.harness_signals == []),
+            ("restored", os.kill is real_kill)], {"result": r}
+
+
+def a40l_g(A):
+    """Classifier: a window fork-note by the copy is not fork-covered, and a tracked
+    no-authority entry is reported exactly ("tracked without authority: N" counts entries
+    carrying no_authority)."""
+    h, c, cr = a40l_base(A)
+    g = A.grandchild(c)
+    st, sn, lk = healthy_now()
+    t0, t_stop = sn["SNAP-0"]["t"], st["marks"]["stop_begin"]
+    for e in (c, g):
+        v = W.entry_view(e)
+        v["admitted"] = t0 - 5.0
+        v["exit"] = {"kind": "exited", "code": 0, "t": t_stop + 0.5}
+        st["dead"].append(a_json(v))
+    st["events"].append({"t": t0 + 0.5, "ev": "fork-note", "pid": c["pid"]})
+    res = classify(st, sn, lk)
+    return [cr, a40l_taint(A, c, g),
+            ("fork-reason", "fork in window by role fork-copy without source-gated attribution"
+             in res["reasons"]),
+            ("taint-reason", "tracked without authority: 1" in res["reasons"]),
+            ("incomplete", res["complete"] is False)], {"reasons": res["reasons"]}
+
+
+def a40l_h(A):
+    """Direct guard control (fabricated parent taint; the subject is the REAL sh_allowed):
+    a parent carrying no_authority never mints, even for a reviewed form whose parent image
+    and vector match."""
+    pimg, pargv = A.parents["initdb"]
+    p = A.ent(pimg, list(pargv), role="pg-tool")
+    p["no_authority"] = {"reason": "fixture-synthetic", "source": None}
+    argv0, cmd = A.cmds["initdb-check"]
+    c = A.ent("/bin/sh", [argv0, "-c", cmd], parent=p, role="pg-sh")
+    r = A.w.sh_allowed(c)
+    vs = A.viol(c, "sh-form-mismatch")
+    return [("taint-refusal", r is False and len(vs) == 1 and
+             vs[0].get("why") == "parent without authority"),
+            ("no-allowance", "allowance" not in c)], {"returned": r}
+
+
+def a40_copy_exec(A, image, argv, why, prepare=None):
+    """`prepare` returns True when it already handled the copy's own NOTE_EXEC."""
+    _, h = A.holder("initdb-check")
+    c = A.copy(h)
+    cr = a_copy_role(c)
+    handled = prepare(A, h, c) if prepare is not None else False
+    if handled is True:
+        A.w.apply_snapshot(c, A.snap(image, list(argv)), "exec")
+    else:
+        A.exec_(c, image, argv)
+    return [cr] + a_refused(A, c, why) + a_quota_kept(h), {"holder": A.hstate(h)}
+
+
+def a40m_true(A):
+    """Copy exec into a non-matching image: exactly one sh-child-mismatch exec-image."""
+    return a40_copy_exec(A, "/usr/bin/true", ["/usr/bin/true"], "exec-image")
+
+
+def a40m_extra(A):
+    """Copy exec into P with an extra argument: exactly one sh-child-mismatch exec-vector."""
+    return a40_copy_exec(A, A.P, A.vec["initdb-check"] + ["-x"], "exec-vector")
+
+
+def a40n_retired(A):
+    """The holder's own in-place exec retires its allowance before the copy's exec:
+    allowance-absent (T42a's subject; T42a is not separately registered)."""
+    return a40_copy_exec(A, A.P, A.vec["initdb-check"], "allowance-absent",
+                         lambda A, h, c: A.retire(h, "initdb-check"))
+
+
+def a40n_exited(A):
+    """The holder exits normally (real handler) before the copy's exec: holder-not-live."""
+    return a40_copy_exec(A, A.P, A.vec["initdb-check"], "holder-not-live",
+                         lambda A, h, c: A.exit(h))
+
+
+def a40n_regen(A):
+    """Holder pid reuse: the holder exits, a new generation of the same pid with another
+    birth is tracked; the copy keeps its old binding: holder-not-live."""
+    def prep(A, h, c):
+        A.exit(h)
+        A.ent(A.SH, ["sh"], role="shell", pid=h["pid"], birth=h["birth_us"] + 1)
+    return a40_copy_exec(A, A.P, A.vec["initdb-check"], "holder-not-live", prep)
+
+
+def a40n_queued(A):
+    """The holder's NOTE_EXIT is queued unhandled at the copy's exec: holder-event-queued."""
+    return a40_copy_exec(A, A.P, A.vec["initdb-check"], "holder-event-queued",
+                         lambda A, h, c: A.queue(h, W.NOTE_EXIT | W.NOTE_EXITSTATUS))
+
+
+def a40n_delayed(A):
+    """The copy's NOTE_EXEC is handled, then the holder's NOTE_EXIT, then the copy's VALID
+    exec snapshot is applied: holder-not-live."""
+    def prep(A, h, c):
+        A.w.handle(FakeEv(c["pid"], W.NOTE_EXEC, udata=c["gen"]))
+        A.w.requests.pop(c["gen"], None)
+        A.exit(h)
+        return True
+    return a40_copy_exec(A, A.P, A.vec["initdb-check"], "holder-not-live", prep)
+
+
+def a40n_phase(A):
+    """.devenv_initialized created after the copy, before its exec: init-phase."""
+    return a40_copy_exec(A, A.P, A.vec["initdb-check"], "init-phase",
+                         lambda A, h, c: A.initialize())
+
+
+def a40o(A):
+    """A second exact copy of the same holder is not a copy; the first copy's exec still
+    consumes the quota."""
+    _, h = A.holder("initdb-check")
+    c1 = A.copy(h)
+    cr = a_copy_role(c1)
+    c2 = A.copy(h)
+    second = a_no_copy(A, c2)
+    A.exec_(c1, A.P, A.vec["initdb-check"])
+    return [cr] + [("second-" + k, ok) for k, ok in second] + [
+        ("first-exec-role", c1.get("role") == "pg-bootstrap"),
+        ("quota-1", h.get("allowed_children") == 1),
+        ("allowed-child", h.get("allowed_child") == A.ident(c1))], {}
+
+
+def a40p(A):
+    """The copy's receipt view: the binding, no argv content, no allowance_argv."""
+    _, h = A.holder("initdb-check")
+    c = A.copy(h)
+    v = W.entry_view(c)
+    return [a_copy_role(c), ("view-binding", "fork_copy_of" in v),
+            ("view-no-argv", "argv" not in v), ("view-no-allowance-argv",
+                                                "allowance_argv" not in v)], {}
+
+
+def a40q(A):
+    """The consumer identity is bound on the direct path and on the copy path."""
+    _, h1 = A.holder("initdb-check")
+    c1 = A.child(h1, A.P, A.vec["initdb-check"])
+    _, h2 = A.holder("initdb-check")
+    c2 = A.copy(h2)
+    cr = a_copy_role(c2)
+    A.exec_(c2, A.P, A.vec["initdb-check"])
+    return [("allowed-child-bound", h1.get("allowed_child") == A.ident(c1)), cr,
+            ("allowed-child-bound-copy", h2.get("allowed_child") == A.ident(c2))], {}
+
+
+def a40r(A):
+    """Direct guard control (fabricated binding: the copy's recorded form is changed to
+    initdb-check while the same live holder generation holds initdb-boot, quota 0, nothing
+    queued); the copy execs P with the initdb-boot vector: form-mismatch, no consumption.
+    Amendment C: removing only the form equality still refuses (exec-vector), so this
+    control's mutant is diagnostic-only."""
+    _, h = A.holder("initdb-boot")
+    c = A.copy(h)
+    cr = a_copy_role(c)
+    if isinstance(c.get("fork_copy_of"), dict):
+        c["fork_copy_of"]["form"] = "initdb-check"
+    A.exec_(c, A.P, A.vec["initdb-boot"])
+    return [cr] + a_refused(A, c, "form-mismatch") + a_quota_kept(h), {}
+
+
+# -- P2: in-place retirement (T41*), re-mint refusal (T41h), retired-holder child (T42b)
+def a41_pgctl(A):
+    _, h = A.holder("pg_ctl-start")
+    A.retire(h, "pg_ctl-start")
+    return h
+
+
+def a41_retired(h, form, role):
+    ac = h.get("allowance_consumed")
+    return [("allowance-retired", not any(k in h for k in A_GRANT_KEYS)),
+            ("consumed-audit", isinstance(ac, dict) and ac.get("form") == form and
+             ac.get("exec_role") == role and ac.get("via") == "in-place-exec")]
+
+
+def a41a(A):
+    """pg_ctl-start in-place exec: the holder is postmaster-init with every authoritative
+    allowance field gone and the audit present; a titled child is pg-logger, no violation."""
+    h = a41_pgctl(A)
+    c = A.child(h, A.P, [W.LOGGER_TITLE])
+    return [("holder-role", h.get("role") == "postmaster-init")] + \
+        a41_retired(h, "pg_ctl-start", "postmaster-init") + \
+        [("child-role", c.get("role") == "pg-logger"),
+         ("no-violations", A.w.violations == [])], {}
+
+
+def a41c(A):
+    """A second exec of the retired holder into P/exec_argv: exec-chain-unobserved, never a
+    re-grant through the retired allowance."""
+    h = a41_pgctl(A)
+    before = A.hstate(h)
+    A.exec_(h, A.P, A.vec["pg_ctl-start"])
+    return [("second-exec-violation", len(A.viol(h, "exec-chain-unobserved")) == 1),
+            ("no-regrant", not any(k in h for k in A_GRANT_KEYS)),
+            ("audit-kept", A.hstate(h)["allowance_consumed"] == before["allowance_consumed"])], {}
+
+
+def a41d(A):
+    """The /bin/sh -> /bin/bash shim hand-off keeps the allowance (already correct)."""
+    _, h = A.holder("pg_ctl-start")
+    return [("shim-keeps-allowance", h.get("allowance") == "pg_ctl-start" and
+             h.get("role") == "pg-sh"),
+            ("no-violations", A.w.violations == [])], {}
+
+
+def a41e(A):
+    """Per reviewed form: a /bin/sh child of the retired pg_ctl-start holder (postmaster) is
+    exactly one sh-form-mismatch and mints nothing (already correct)."""
+    h = a41_pgctl(A)
+    per = {}
+    for form in sorted(A.cmds):
+        argv0, cmd = A.cmds[form]
+        c = A.child(h, "/bin/sh", [argv0, "-c", cmd])
+        per[form] = len(A.viol(c, "sh-form-mismatch")) == 1 and "allowance" not in c
+    return [("per-form", all(per.values()) and len(per) == len(A.cmds))], {"per_form": per}
+
+
+def a41f(A):
+    """A child of the retired postmaster with a non-allowlisted image: exe-not-allowlisted,
+    not sh-child-mismatch."""
+    h = a41_pgctl(A)
+    c = A.child(h, "/usr/bin/true", ["/usr/bin/true"])
+    return [("kind", len(A.viol(c, "exe-not-allowlisted")) == 1 and
+             A.viol(c, "sh-child-mismatch") == [])], {}
+
+
+def a41g(A):
+    _, h = A.holder("initdb-version-probe")
+    A.retire(h, "initdb-version-probe")
+    return h
+
+
+def a41g_a(A):
+    """The initdb version-probe shell execs in place: pg-version-probe, no violation."""
+    h = a41g(A)
+    return [("role", h.get("role") == "pg-version-probe"),
+            ("no-violations", A.w.violations == [])], {}
+
+
+def a41g_b(A):
+    """The same transition retires the allowance and keeps the audit."""
+    h = a41g(A)
+    return [("role", h.get("role") == "pg-version-probe")] + \
+        a41_retired(h, "initdb-version-probe", "pg-version-probe"), {}
+
+
+def a41h(A):
+    """Amendment A: the retired pg_ctl-start holder's later SYSTEM_SH exec with its original
+    vector is refused: exactly one sh-form-mismatch allowance-already-consumed, role
+    no-authority, sticky taint, nothing minted, the audit unchanged; a later VALID snapshot
+    stays no-authority with no mint and no new violation."""
+    h = a41_pgctl(A)
+    before = A.hstate(h)
+    argv0, cmd = A.cmds["pg_ctl-start"]
+    A.exec_(h, "/bin/sh", [argv0, "-c", cmd])
+    checks = a_refused(A, h, "allowance-already-consumed", kind="sh-form-mismatch")
+    checks.append(("audit-unchanged",
+                   A.hstate(h)["allowance_consumed"] == before["allowance_consumed"]))
+    n1 = len(A.viol(h))
+    A.exec_(h, A.SH, [argv0, "-c", cmd])
+    checks += [("persist-role", h.get("role") == "no-authority"),
+               ("persist-taint", isinstance(h.get("no_authority"), dict)),
+               ("persist-no-mint", not any(k in h for k in A_GRANT_KEYS)),
+               ("persist-no-new-violation", len(A.viol(h)) == n1),
+               ("persist-audit", A.hstate(h)["allowance_consumed"] ==
+                before["allowance_consumed"])]
+    return checks, {"holder": A.hstate(h)}
+
+
+def a42b(A):
+    """The retired pg_ctl-start holder's bash child with the old allowance vector is not a
+    fork-copy (already correct: sh-form-mismatch)."""
+    h = a41_pgctl(A)
+    argv0, cmd = A.cmds["pg_ctl-start"]
+    c = A.ent(parent=h)
+    A.admit(c, A.SH, [argv0, "-c", cmd])
+    return a_no_copy(A, c), {}
+
+
+# -- the direct consumer path through consume_allowance (T44*)
+def a44_holder(A):
+    _, h = A.holder("initdb-check")
+    return h
+
+
+def a44_direct(A, why, prepare=None, first="refused", image=None, argv=None, binding=None):
+    """A direct observed child (its VALID admission snapshot already shows the exec image)."""
+    h = a44_holder(A)
+    c = A.ent(parent=h)
+    if binding is not None:
+        binding(A, h, c)
+    if prepare is not None:
+        prepare(A, h, c)
+    A.admit(c, image or A.P, argv if argv is not None else A.vec["initdb-check"])
+    return a_refused(A, c, why, first) + a_quota_kept(h), {"holder": A.hstate(h)}
+
+
+def a44a(A):
+    """Healthy direct consumer: pg-bootstrap, quota 1, consumer identity bound."""
+    h = a44_holder(A)
+    c = A.child(h, A.P, A.vec["initdb-check"])
+    return [("role", c.get("role") == "pg-bootstrap"),
+            ("quota-1", h.get("allowed_children") == 1),
+            ("no-violations", A.w.violations == []),
+            ("allowed-child-bound", h.get("allowed_child") == A.ident(c))], {}
+
+
+def a44b(A):
+    """The holder exited normally (real handler; gens retired) before the child's snapshot:
+    holder-not-live (clause 3 precedes clause 4)."""
+    return a44_direct(A, "holder-not-live", lambda A, h, c: A.exit(h))
+
+
+def a44c_regen(A):
+    """Holder pid reuse (realistic): the old holder exits, a new generation of the pid is
+    tracked; find() returns the dead old holder: holder-not-live."""
+    def prep(A, h, c):
+        A.exit(h)
+        A.ent(A.SH, ["sh"], role="shell", pid=h["pid"], birth=h["birth_us"] + 1)
+    return a44_direct(A, "holder-not-live", prep)
+
+
+def a44c_mismatch(A):
+    """Direct guard control (fabricated binding): the child's parent_gen names another live
+    generation record, not the found holder's: holder-generation."""
+    def bind(A, h, c):
+        c["parent_gen"] = A.gen(h["pid"], h["birth_us"])
+    return a44_direct(A, "holder-generation", binding=bind)
+
+
+def a44c_missing(A):
+    """Direct guard control on the COPY binding (fabricated: the copy's recorded holder birth
+    names no entry). The direct path enters consume_allowance only through a found parent
+    holding an allowance (W:2080), so "not found" is reachable only through a copy binding:
+    holder-generation."""
+    h = a44_holder(A)
+    c = A.copy(h)
+    cr = a_copy_role(c)
+    if isinstance(c.get("fork_copy_of"), dict):
+        c["fork_copy_of"]["parent_birth_us"] = h["birth_us"] + 7
+    A.exec_(c, A.P, A.vec["initdb-check"])
+    return [cr] + a_refused(A, c, "holder-generation") + a_quota_kept(h), {}
+
+
+def a44c_state(A):
+    """Direct guard control (fabricated inconsistent state): the holder entry is live with
+    exit None but its generation record says retired: holder-generation-state."""
+    def prep(A, h, c):
+        A.w.gens[h["gen"]]["state"] = "retired"
+    return a44_direct(A, "holder-generation-state", prep)
+
+
+def a44d(A):
+    """The holder's NOTE_EXIT is queued unhandled: holder-event-queued."""
+    return a44_direct(A, "holder-event-queued",
+                      lambda A, h, c: A.queue(h, W.NOTE_EXIT | W.NOTE_EXITSTATUS))
+
+
+def a44e(A):
+    """The holder's NOTE_EXEC is queued unhandled: holder-event-queued."""
+    return a44_direct(A, "holder-event-queued", lambda A, h, c: A.queue(h, W.NOTE_EXEC))
+
+
+def a44f(A):
+    """T41b merged here (plan r5 3.1): a real pg_ctl-start transition (mint, shim, in-place
+    exec); a pre-title child with the exec vector is pg-aux by the postmaster-child rule,
+    with no violation and no taint, and the holder's records are untouched. Excepted from
+    the refusal contract."""
+    h = a41_pgctl(A)
+    before = A.hstate(h)
+    c = A.child(h, A.P, A.vec["pg_ctl-start"])
+    return [("child-role", c.get("role") == "pg-aux"),
+            ("no-violation", A.viol(c) == []),
+            ("no-taint", "no_authority" not in c)] + \
+        a41_retired(h, "pg_ctl-start", "postmaster-init") + \
+        [("holder-untouched", A.hstate(h) == before)], {}
+
+
+def a44g(A):
+    """.devenv_initialized present at consumption: init-phase."""
+    return a44_direct(A, "init-phase", lambda A, h, c: A.initialize())
+
+
+def a44h(A):
+    """A second direct consumer after the quota is used: quota; the first binding kept."""
+    h = a44_holder(A)
+    c1 = A.child(h, A.P, A.vec["initdb-check"])
+    c2 = A.child(h, A.P, A.vec["initdb-check"])
+    return a_refused(A, c2, "quota", "no-authority-role") + a_quota_kept(h, c1), {}
+
+
+def a44i_image(A):
+    """A direct child exec'd into /usr/bin/true: exec-image."""
+    return a44_direct(A, "exec-image", first="no-authority-role", image="/usr/bin/true",
+                      argv=["/usr/bin/true"])
+
+
+def a44i_vector(A):
+    """A direct child exec'd into P with an extra argument: exec-vector."""
+    return a44_direct(A, "exec-vector", first="no-authority-role",
+                      argv=A.vec["initdb-check"] + ["-x"])
+
+
+def a44j(A):
+    """The child has no admission parent_gen: holder-unbound."""
+    def bind(A, h, c):
+        c["parent_gen"] = None
+    return a44_direct(A, "holder-unbound", binding=bind)
+
+
+def a44k(A):
+    """Amendment B: an initdb-boot holder execs in place (pg-bootstrap, retired); its
+    non-shell child with the inherited --boot vector is refused: exactly one
+    sh-child-mismatch retired-holder-child, role no-authority, sticky taint, still tracked,
+    the holder's audit unchanged; a later VALID snapshot of the child stays no-authority."""
+    _, h = A.holder("initdb-boot")
+    A.retire(h, "initdb-boot")
+    before = A.hstate(h)
+    c = A.child(h, A.P, A.vec["initdb-boot"])
+    checks = a_refused(A, c, "retired-holder-child")
+    checks += [("holder-no-quota", "allowed_children" not in h and "allowed_child" not in h),
+               ("audit-unchanged", A.hstate(h) == before),
+               ("tracked", A.w.entries.get(c["pid"]) is c and c.get("exit") is None)]
+    n1 = len(A.viol(c))
+    A.exec_(c, A.P, A.vec["initdb-boot"])
+    checks += [("persist-role", c.get("role") == "no-authority"),
+               ("persist-taint", isinstance(c.get("no_authority"), dict)),
+               ("persist-no-grant", not any(k in c for k in A_GRANT_KEYS)),
+               ("persist-no-new-violation", len(A.viol(c)) == n1),
+               ("persist-audit", A.hstate(h) == before)]
+    return checks, {}
+
+
+# id -> (body, class); every scope-A fabricated control passes as PASS when its desired
+# (refusal or acceptance) outcome is observed
+A_CONTROLS = {
+    "T40a": a40a, "T40b": a40b, "T40c-len": a40c_len, "T40c-meta": a40c_meta,
+    "T40d-sh": a40d_sh, "T40d-nix": a40d_nix, "T40e": a40e, "T40f": a40f, "T40g": a40g,
+    "T40h": a40h, "T40i-reuse": a40i_reuse, "T40i-notlive": a40i_notlive,
+    "T40j-handled": a40j_handled, "T40j-queued": a40j_queued, "T40j-forked": a40j_forked,
+    "T40k": a40k, "T40l-a": a40l_a, "T40l-b": a40l_b, "T40l-c": a40l_c, "T40l-d": a40l_d,
+    "T40l-e": a40l_e, "T40l-f": a40l_f, "T40l-g": a40l_g, "T40l-h": a40l_h,
+    "T40m-true": a40m_true, "T40m-extra": a40m_extra, "T40n-retired": a40n_retired,
+    "T40n-exited": a40n_exited, "T40n-regen": a40n_regen, "T40n-queued": a40n_queued,
+    "T40n-delayed": a40n_delayed, "T40n-phase": a40n_phase, "T40o": a40o, "T40p": a40p,
+    "T40q": a40q, "T40r": a40r,
+    "T41a": a41a, "T41c": a41c, "T41d": a41d, "T41e": a41e, "T41f": a41f, "T41g-a": a41g_a,
+    "T41g-b": a41g_b, "T41h": a41h, "T42b": a42b,
+    "T44a": a44a, "T44b": a44b, "T44c-regen": a44c_regen, "T44c-mismatch": a44c_mismatch,
+    "T44c-missing": a44c_missing, "T44c-state": a44c_state, "T44d": a44d, "T44e": a44e,
+    "T44f": a44f, "T44g": a44g, "T44h": a44h, "T44i-image": a44i_image,
+    "T44i-vector": a44i_vector, "T44j": a44j, "T44k": a44k,
+}
+
+
+def a_run(d, scratch, runroot, T):
+    """Run one scope-A fabricated control. Phase controls (A_PHASE_IDS) own a registered root
+    whose declared contents allow .devenv_initialized; the others use the run scratch as the
+    manifest root (no fixture is created) and refuse if an init marker exists there. Any
+    subject exception is a recorded check failure (FAIL), never a controller HOLD;
+    RealUncertainty (a fixture premise failure) propagates."""
+    body = A_CONTROLS[T]
+    if T in A_PHASE_IDS:
+        root = mkroot(d, scratch, T, "root", PG_DIRS + [A_INIT_REL])
+        labels = ["root"]
+    else:
+        root, labels = scratch, None
+        if os.path.lexists(root + "/" + A_INIT_REL):
+            raise RealUncertainty("scope-A control: init marker under the scratch root")
+    w = bare_watch(root, port=25432)
+    try:
+        checks, notes = body(AWorld(w))
+    except RealUncertainty:
+        raise
+    except Exception as e:
+        checks = [("subject-exception", False)]
+        notes = {"exception": "%s: %s" % (type(e).__name__, str(e)[:200])}
+    obs = a_observed("PASS", checks)
+    notes = dict(notes, checks=[[k, ok is True] for k, ok in checks],
+                 violations=[[v.get("kind"), v.get("pid"), v.get("why")] for v in w.violations],
+                 proof="fixture-synthetic")
+    if labels:
+        return finish(labels, d, T, ["PASS"], obs, {"fixtures": "ok"}, runroot, notes=notes)
+    return verdict(d, T, ["PASS"], obs, {"fixtures": "not-applicable:fabricated records"},
+                   runroot, notes=notes)
+
+
 # ---------------------------------------------------------------- T43 (scope A pg_ctl effect gate)
 # Plan composite r5 (69dcaa61), inheriting r2 4, r3 3.1/4.3 and r4 1.2: before the pg_ctl
 # spawn, pg_ctl_stop refuses frozen or expired state BEFORE any read, then quiesces every
@@ -5114,6 +6080,10 @@ SYNTHETIC = {
     "T31h": lambda d, s, r: t31(d, s, r, "h"), "T30u": t30u, "T30v": t30v,
     "T30w": t30w, "T30x": t30x,
 }
+# T4a scope A registrations (ids above, beside REQUIRED_PROOF)
+SYNTHETIC.update({i: (lambda d, s, r, _i=i: a_run(d, s, r, _i))
+                  for i in A_FAB_IDS + A_PHASE_IDS})
+SYNTHETIC.update({i: (lambda d, s, r, _v=i[3:]: t43(d, s, r, _v)) for i in A_PG_IDS})
 
 
 def main(argv):
