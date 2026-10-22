@@ -3453,57 +3453,84 @@ def t37(d, scratch, runroot):
                    notes={"present": present, "absent": absent, "erred": erred})
 
 
+def t38_joins(d, T, primary, procs, pids, fds):
+    """T38's owned joins (a40f005 review Q3): every handle and forked pid is WAITED for,
+    bounded, and only then are the controller's fds closed. No step ever writes a release:
+    the withheld-release condition and the autonomous-lifetime proof are preserved (a gate
+    fd closed early would release its fixture by EOF). Returns {name: rc}; any handled
+    failure is settled by settle_joins (primary kept, every secondary recorded)."""
+    steps = [("reap-" + k, (lambda x=x: reap(x, D_REAP))) for k, x in procs.items()]
+    steps += [("reap-" + k, (lambda x=x: reap_pid(x, D_REAP))) for k, x in pids.items()]
+    out = join_owned(steps)
+    out += join_owned([("close-fd%d" % i, (lambda fd=fd: os.close(fd)))
+                       for i, fd in enumerate(fds)])
+    settle_joins(d, T, primary, out)
+    return {o["step"][len("reap-"):]: o["value"] for o in out if o["step"].startswith("reap-")}
+
+
 def t38(d, scratch, runroot):
     """R4 withheld-release control: every controller-held fixture stage is started and NEVER
     released. Each must end by its own bound (FIXTURE_HOLD_S) and be reaped by its handle,
     with no signal from the harness: the gated execer and popen-er (exit 3), the holder and
     the holder-fed shell, the T35-style subject, the argv-tolerant HOLDER via execve, and the
-    ordering target's bash stage (released past its gate, its own read -t bounds it)."""
+    ordering target's bash stage (released past its gate, its own read -t bounds it). A
+    handled failure while starting them still joins every started fixture (t38_joins)
+    before the failure is re-raised."""
     T = "T38"
     root = mkroot(d, scratch, T, "root")
     t0 = W.now()
-    procs, pids, gws = {}, {}, []
-    p, gw = gated_fixture(d, T, "execer", EXECER, "/usr/bin/true", "true")
-    procs["execer"] = p
-    gws.append(gw)
-    sin, h = stdin_holder(d, T, "popen-holder")
+    procs, pids, fds = {}, {}, []
+    primary = None
     try:
-        p, gw = gated_fixture(d, T, "popen", POPENER, "read x", stdin=sin)
-    finally:
-        os.close(sin)
-    procs["popen"], procs["popen-holder"] = p, h
-    gws.append(gw)
-    sin, h = stdin_holder(d, T, "shell-holder")
-    intent(d, T, "shell", "proc")
-    pids["shell"] = fork_execve("/bin/sh", ["sh", "-c", "read x"], ["E=1"], stdin_fd=sin)
-    os.close(sin)
-    set_identity(d, T, "shell", proc_identity(pids["shell"], os.getpid()))
-    procs["shell-holder"] = h
-    procs["subject"] = start_fixture(d, T, "subject", HOLDER_CODE, stdin=subprocess.PIPE,
-                                     stdout=subprocess.DEVNULL)
-    sr, sw = os.pipe()
-    r3, w3 = os.pipe()                       # HOLDER's readiness fd (kept open, not read)
-    intent(d, T, "holder-exec", "proc")
-    pids["holder-exec"] = fork_execve(PY, ["", "-I", "-c", HOLDER, "x"], ["E=1"], stdin_fd=sr,
-                                      ready_fd=w3)
-    os.close(sr)
-    os.close(w3)
-    set_identity(d, T, "holder-exec", proc_identity(pids["holder-exec"], os.getpid()))
-    pr, pw = os.pipe()
-    gr, gw = gate_open()
-    try:
-        procs["order"] = start_fixture(d, T, "order", ORDER_EXECER, gr, pw,
-                                       W.PKG["bash"] + "/bin/bash", pass_fds=(gr, pw))
-    finally:
-        os.close(gr)
-        os.close(pw)
-    release_gate(gw)                         # past the gate; the bash read is withheld
-    gws.append(gw)
-    rcs = {k: reap(x, D_REAP) for k, x in procs.items()}
-    rcs.update({k: reap_pid(x, D_REAP) for k, x in pids.items()})
+        p, gw = gated_fixture(d, T, "execer", EXECER, "/usr/bin/true", "true")
+        procs["execer"] = p
+        fds.append(gw)
+        sin, h = stdin_holder(d, T, "popen-holder")
+        procs["popen-holder"] = h
+        try:
+            p, gw = gated_fixture(d, T, "popen", POPENER, "read x", stdin=sin)
+        finally:
+            os.close(sin)
+        procs["popen"] = p
+        fds.append(gw)
+        sin, h = stdin_holder(d, T, "shell-holder")
+        procs["shell-holder"] = h
+        try:
+            intent(d, T, "shell", "proc")
+            pids["shell"] = fork_execve("/bin/sh", ["sh", "-c", "read x"], ["E=1"],
+                                        stdin_fd=sin)
+        finally:
+            os.close(sin)
+        set_identity(d, T, "shell", proc_identity(pids["shell"], os.getpid()))
+        procs["subject"] = start_fixture(d, T, "subject", HOLDER_CODE, stdin=subprocess.PIPE,
+                                         stdout=subprocess.DEVNULL)
+        sr, sw = os.pipe()
+        fds.append(sw)
+        r3, w3 = os.pipe()                   # HOLDER's readiness fd (kept open, not read)
+        fds.append(r3)
+        try:
+            intent(d, T, "holder-exec", "proc")
+            pids["holder-exec"] = fork_execve(PY, ["", "-I", "-c", HOLDER, "x"], ["E=1"],
+                                              stdin_fd=sr, ready_fd=w3)
+        finally:
+            os.close(sr)
+            os.close(w3)
+        set_identity(d, T, "holder-exec", proc_identity(pids["holder-exec"], os.getpid()))
+        pr, pw = os.pipe()
+        fds.append(pr)
+        gr, gw = gate_open()
+        fds.append(gw)
+        try:
+            procs["order"] = start_fixture(d, T, "order", ORDER_EXECER, gr, pw,
+                                           W.PKG["bash"] + "/bin/bash", pass_fds=(gr, pw))
+        finally:
+            os.close(gr)
+            os.close(pw)
+        release_gate(gw)                     # past the gate; the bash read is withheld
+    except Exception as e:                   # kept; every started fixture is still joined
+        primary = e
+    rcs = t38_joins(d, T, primary, procs, pids, fds)
     took = W.now() - t0
-    for fd in gws + [sw, pr, r3]:
-        os.close(fd)
     want = {"execer": 3, "popen": 3, "popen-holder": 0, "shell": 0, "shell-holder": 0,
             "subject": 0, "holder-exec": 0}
     ok = all(rcs.get(k) == v for k, v in want.items()) and rcs.get("order") not in (None, 0) \
@@ -3627,6 +3654,35 @@ def t30r(d, scratch, runroot):
     root = mkroot(d, scratch, T, "root")
     notes, oks, rcs = {}, [], []
     for v in ("a", "b", "c", "d"):
+        try:
+            ok = t30r_variant(d, T, root, v, notes, rcs)
+        except Exception as e:   # kept; the variant's fixture and watch are still joined
+            t30r_joins(d, T, v, e, getattr(e, "t30r_x", None), getattr(e, "t30r_w", None))
+        oks.append(ok)
+    labels = ["root"]
+    return finish(labels, d, T, ["PASS"], "PASS" if all(oks) else "FAIL",
+                  {"fixtures": "ok" if all(r == 0 for r in rcs) else "rc-%r" % rcs}, runroot,
+                  notes=notes)
+
+
+def t30r_joins(d, T, v, primary, x, w):
+    """T30r's owned joins on a handled failure (a40f005 review Q3): the variant's fixture X
+    is reaped (bounded; X exits after its own 2 s child) and the variant's watch kqueue is
+    closed; monkeypatches were already restored by the variant's own finally. The primary
+    failure is re-raised unchanged with every outcome recorded (settle_joins)."""
+    steps = []
+    if x is not None:
+        steps.append(("x-%s-reap" % v, lambda: reap(x, D_REAP)))
+    if w is not None:
+        steps.append(("watch-%s-kq-close" % v, lambda: w.kq.close()))
+    settle_joins(d, T, primary, join_owned(steps))
+
+
+def t30r_variant(d, T, root, v, notes, rcs):
+    """One T30r variant (see t30r). A handled failure carries the started fixture and
+    watch on the exception (t30r_x, t30r_w) for t30r_joins."""
+    x = w = None
+    try:
         x = start_fixture(d, T, "x-" + v, "import subprocess,sys;"
                           "y=subprocess.Popen([sys.executable,'-I','-B','-c',"
                           "'import time; time.sleep(2)']);print(y.pid,flush=True);y.wait()",
@@ -3696,11 +3752,10 @@ def t30r(d, scratch, runroot):
         if v != "b":
             rcs.append(reap(x, D_REAP))
         notes[v] = {"took_s": took, "violations": kinds, "gens": len(ygens)}
-        oks.append(ok)
-    labels = ["root"]
-    return finish(labels, d, T, ["PASS"], "PASS" if all(oks) else "FAIL",
-                  {"fixtures": "ok" if all(r == 0 for r in rcs) else "rc-%r" % rcs}, runroot,
-                  notes=notes)
+        return ok
+    except Exception as e:
+        e.t30r_x, e.t30r_w = x, w
+        raise
 
 
 class SlowEmptyKq(object):
@@ -3974,7 +4029,39 @@ def t30w(d, scratch, runroot):
 
 
 T30X_SUBCASES = ("primary_observation_failure", "release_failure",
-                 "child_join_failure_later_holders_joined", "holder_join_failure")
+                 "child_join_failure_later_holders_joined", "holder_join_failure",
+                 "t38_joins_withheld", "t30r_joins")
+
+
+class FakeJoinProc(object):
+    """fixture-synthetic process handle for the T38/T30r join controls: wait() records the
+    call and whether the watched fds were still open, then returns `rc` or times out."""
+
+    def __init__(self, rc, fds, calls):
+        self.rc, self.fds, self.calls, self.pid, self.returncode = rc, fds, calls, 0, None
+
+    def wait(self, timeout=None):
+        open_now = []
+        for fd in self.fds:
+            try:
+                os.fstat(fd)
+                open_now.append(True)
+            except OSError:
+                open_now.append(False)
+        self.calls.append(("wait", self.rc, all(open_now)))
+        if self.rc is None:
+            raise subprocess.TimeoutExpired("fake", timeout)
+        self.returncode = self.rc
+        return self.rc
+
+
+class FakeJoinKq(object):
+    def __init__(self, calls):
+        self.calls = calls
+
+    def close(self):
+        self.calls.append(("kq-close",))
+        raise OSError("injected kqueue close failure (fixture-synthetic)")
 
 
 def t30x(d, scratch, runroot):
@@ -3987,7 +4074,11 @@ def t30x(d, scratch, runroot):
     still reaped after its holder's own bound; (3) the child's join fails -> uncertainty, and
     the EARLIER holder's join is still attempted; (4) a holder's join fails under a primary
     failure -> primary preserved, the holder failure recorded. After each subcase this test
-    joins what the injection left, by handle, bounded."""
+    joins what the injection left, by handle, bounded. (5) T38's joins on fake handles: a
+    failing wait does not stop the next, every wait happens while the controller fds are
+    still open (no early EOF release) and only then are they closed; no step is a release.
+    (6) T30r's joins: a failing fixture reap and a failing kqueue close are both attempted
+    and recorded, with the primary preserved."""
     T = "T30x"
     root = mkroot(d, scratch, T, "root")
     shells = {os.path.realpath(x) for x in W.SYSTEM_SH}
@@ -4085,6 +4176,51 @@ def t30x(d, scratch, runroot):
                 o["step"].startswith("holder") and not o["ok"] for o in j["joins"]),
             "primary_recorded": bool(j) and (j.get("primary") or {}).get("class") == "Hold"}
         leftovers_procs += holders
+        # (5) T38 joins: withheld release preserved, all attempted, fds closed after
+        calls = []
+        f1, f2 = os.pipe()
+        fds = [f1, f2]
+        procs = {"bad": FakeJoinProc(None, fds, calls), "good": FakeJoinProc(0, fds, calls)}
+        try:
+            t38_joins(d, T, None, procs, {}, fds)
+            e = None
+        except Exception as ex:
+            e = ex
+        j = joins()
+        still_open = []
+        for fd in fds:
+            try:
+                os.fstat(fd)
+                still_open.append(fd)
+            except OSError:
+                pass
+        for fd in still_open:
+            os.close(fd)
+        out["t38_joins_withheld"] = {
+            "uncertainty": isinstance(e, RealUncertainty) and "reap-bad" in str(e),
+            "both_waited": [c[1] for c in calls] == [None, 0],
+            "fds_open_during_waits": all(c[2] for c in calls),
+            "fds_closed_after": still_open == [],
+            "no_release_step": bool(j) and not any("release" in o["step"]
+                                                   for o in j["joins"])}
+        # (6) T30r joins: a failing reap and a failing kqueue close, primary preserved
+        calls = []
+        prim = W.Hold("injected T30r variant failure (fixture-synthetic)")
+
+        class FakeWatch(object):
+            kq = FakeJoinKq(calls)
+        try:
+            t30r_joins(d, T, "z", prim, FakeJoinProc(None, [], calls), FakeWatch())
+            e = None
+        except Exception as ex:
+            e = ex
+        j = joins()
+        out["t30r_joins"] = {
+            "same_primary": e is prim,
+            "both_attempted": [c[0] for c in calls] == ["wait", "kq-close"],
+            "both_failures_recorded": bool(j) and sorted(
+                o["step"] for o in j["joins"] if not o["ok"]) == ["watch-z-kq-close",
+                                                                  "x-z-reap"]}
     finally:
         W.procargs = real_pa
         g.update(real)
