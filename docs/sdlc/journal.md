@@ -1125,12 +1125,17 @@ Nothing merged overnight. Decisions D-194 to D-196 are on #216 (Codex APPROVE at
 - The full self-test at `6f77359` held at T4a, the first real-instance test. The admission read of a child's arguments returned errno 5 (EIO), and the harness then refused to stop the stack because its signals were frozen.
 - That left a throwaway stack alive: process-compose 69328, its launcher and a decoy port listener. No shared or owner database is involved, and RELEASE is withheld, so no test needing the shared test database can run.
 - Three attempts to author a recovery guard, and then a read-only check tool for an owner-sent stop, were cut off by the safety classifier. Codex ruled out authoring it another way.
-- The owner chose disposition at standup (D-194). Today's open question is the route: a full Mac restart (Claude's and Codex's pick), the owner running the checklist alone, or staying on hold.
+- The owner chose disposition at standup (D-194). Today's open question is the route:
+  - a full Mac restart (not a logout);
+  - the owner running the whole checklist alone;
+  - staying on hold.
+
+  Codex picks the restart only if the owner explicitly approves it as a combined stack-and-decoy disposition, with whole-host disruption, and copies the evidence to durable storage first. A reviewed new-boot quiet check and an explicit RELEASE would follow. D-194 does not already authorize it.
 
 **5b, the T4a fix (P3):**
 - **Scope A**, permission bookkeeping for copied processes, passed Codex in round 5 with three binding amendments (composite `69dcaa61`):
-  - a re-mint refusal withholds the role;
-  - a retired holder's child is refused (D1);
+  - a re-mint refusal sets a sticky taint and role `no-authority`;
+  - D1: a non-`SYSTEM_SH` child of a retired non-postmaster holder is refused. Postmaster-retired holders' children and `SYSTEM_SH` children keep their reviewed paths;
   - one mutant is diagnostic only.
 - **Its tests:** 74 new tests on `c4-5b-t4a-red` (`f6357a7`, pushed). They were approved on reading after two rounds: real `new_entry` coverage, and controller errors routed to rc 3, not counted as test failures. The author's and Codex's per-test prediction lists match: 20 guards and 54 corrective failures. Nothing has run.
 - **Scope B**, the fork/exec race, has no approved latch. The owner chose a new observation design, feasibility first (D-195).
@@ -1140,13 +1145,13 @@ Nothing merged overnight. Decisions D-194 to D-196 are on #216 (Codex APPROVE at
 
 **Forecast:** the Oct 30 release candidate is likely to slip, and the Nov 6 core is high risk. Codex's view: there is no defensible integrated date yet, and the levers recover capacity rather than promise dates.
 
-**Waiting for the owner:**
+**Ready for the owner now:**
 - the stack route;
 - the T4a candidate;
 - the D-168 install and the witness diagnostic;
-- the H1 task walk;
-- v4 T7's grant window;
-- the next G-DEMO window.
+- the H1 task walk.
+
+**Later owner gates, after agent work finishes:** v4 T7's grant window (its proof harness isn't built yet) and the next G-DEMO window (the browser rehearsal and T7 come first). These are not owner waits today.
 
 ## Missteps
 
