@@ -1554,6 +1554,7 @@ class InterceptedSpawn(Exception):
     """fixture-synthetic: raised by T19i's intercepted subprocess.Popen; nothing starts."""
 
 
+T19I_SIG_REFUSAL = "refuse signal: quiesce bound passed before the final identity proof"
 T19I_PGCTL_PREFIX, T19I_PGCTL_SUFFIX = "refuse pg_ctl: overall deadline leaves ", " s for -t 2"
 
 
@@ -1572,8 +1573,8 @@ def t19i_pgctl_refused(hold):
 def t19i(d, scratch, runroot):
     """Q2 / R2, the DRAIN case: the quiesce bound (ITER_SLICE_S, inside the 0.3 s overall
     deadline) expires during a stubbed 0.6 s drain. The signal must be refused at the first
-    post-drain bound check, after the drain returned and BEFORE the final identity read;
-    pg_ctl must be refused by its overall-deadline check
+    post-drain bound check, with exactly that refusal text, after the drain returned and
+    BEFORE the final identity read; pg_ctl must be refused by its overall-deadline check
     before any spawn. os.kill and subprocess.Popen are INTERCEPTED for the whole test, so
     even a regression sends no real signal and starts no helper. Healthy companion (same
     watch and fixtures): an instant drain with a far deadline reaches the final identity
@@ -1662,8 +1663,7 @@ def t19i(d, scratch, runroot):
     sigterm = int(signal.SIGTERM)
     pg_argv = [pg_ctl, "-D", pgd, "-m", "fast", "-w", "-t", "2", "stop"]
     checks = {
-        # RED: the pre-R2 predicate of 4937f46 (sink_selftest.py:1568) kept unchanged
-        "refusal_text": "deadline" in (refusal["hold"] or "") and refusal["result"] is None,
+        "refusal_text": refusal["hold"] == T19I_SIG_REFUSAL and refusal["result"] is None,
         "refusal_phase": refusal["phase"] == ["quiesce-entered", "quiesce-returned"],
         "refusal_no_kill": refusal["kills"] == [] and refusal["harness_signals"] == [],
         "pgctl_refusal_text": t19i_pgctl_refused(refusal_pg["hold"]) and
