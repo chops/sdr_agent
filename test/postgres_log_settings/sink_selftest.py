@@ -2903,23 +2903,91 @@ def reap_pid(pid, deadline_s):
     raise RealUncertainty("forked fixture %d alive after %.0f s" % (pid, deadline_s))
 
 
+def join_owned(steps):
+    """A finite, ordered list of bounded release/join steps for owned fixtures (a40f005
+    review A3): [(label, fn)]. EVERY step is attempted even after an earlier one failed, and
+    each outcome is recorded: {step, ok, value} or {step, ok: false, error_class, error}.
+    Catching here never continues a test or upgrades a verdict: settle_joins raises the
+    primary failure, or an uncertainty for any failed step. An interruption
+    (BaseException other than Exception) is not handled and stays an explicit HOLD."""
+    out = []
+    for label, fn in steps:
+        try:
+            out.append({"step": label, "ok": True, "value": fn()})
+        except Exception as e:
+            out.append({"step": label, "ok": False, "error_class": type(e).__name__,
+                        "error": str(e)[:300]})
+    return out
+
+
+def settle_joins(d, T, primary, outcomes):
+    """After join_owned: with a primary failure, re-raise THAT exception object unchanged
+    (class, args, traceback) with every outcome attached as `join_outcomes`; without one,
+    any failed step raises RealUncertainty naming every failed step (all were attempted).
+    Either way the outcomes are kept as metadata in <d>/<T>.joins.json. No signal, no
+    disposal, no receipt; a nonzero or unconfirmed fixture outcome is never called joined."""
+    failed = [o["step"] for o in outcomes if not o["ok"]]
+    if primary is None and not failed:
+        return
+    rec = {"test": T, "failed_steps": failed, "joins": outcomes,
+           "primary": None if primary is None else
+           {"class": type(primary).__name__, "message": str(primary)[:300]},
+           "proof": "owned release/join outcomes only; not a teardown proof"}
+    try:
+        W.jdump(rec, "%s/%s.joins.json" % (d, T))
+    except OSError as e:
+        outcomes.append({"step": "joins-record", "ok": False, "error_class": type(e).__name__,
+                         "error": str(e)[:300]})
+    if primary is not None:
+        primary.join_outcomes = outcomes
+        raise primary
+    raise RealUncertainty("%s: owned release/join steps failed (all attempted): %s"
+                          % (T, failed))
+
+
+def release_pipe(fd):
+    """Write the release byte to a fixture's stdin pipe and close our end."""
+    try:
+        os.write(fd, b"\n")
+        return "released"
+    except BrokenPipeError:
+        return "fixture already gone"
+    finally:
+        os.close(fd)
+
+
 def t30m_case(d, T, n, case, shells, holders):
     """One T30m layout case: fork + execve the fixture, read its KERN_PROCARGS2 once it is
     ready, then release it and reap it. `holders` collects the holder fixtures started so
-    far (the caller reaps them after the loop)."""
+    far (the caller reaps them after the loop on the normal path). On a handled failure (or
+    a failed release/join) every owned step is attempted and recorded: this case's ready
+    pipe, its release, its bounded reap, then every holder started so far; the primary
+    failure is re-raised unchanged with that metadata (settle_joins)."""
     path, argv, env, mode, held = case
     r, wfd = os.pipe()
-    h, sw = None, None
-    if held:
-        sin, h = stdin_holder(d, T, "case%d-holder" % n)
-        holders.append(h)
-    else:
-        sin, sw = os.pipe()
-    intent(d, T, "case%d" % n, "proc")
-    pid = fork_execve(path, argv, env, stdin_fd=sin, ready_fd=wfd)
+    h, sw, sin = None, None, None
+    try:
+        if held:
+            sin, h = stdin_holder(d, T, "case%d-holder" % n)
+            holders.append(h)
+        else:
+            sin, sw = os.pipe()
+        intent(d, T, "case%d" % n, "proc")
+        pid = fork_execve(path, argv, env, stdin_fd=sin, ready_fd=wfd)
+    except Exception as e:      # nothing forked: join what was started, keep the failure
+        steps = [("case%d-close-ready" % n, lambda: os.close(r)),
+                 ("case%d-close-ready-w" % n, lambda: os.close(wfd))]
+        if sin is not None:
+            steps.append(("case%d-close-stdin-r" % n, lambda: os.close(sin)))
+        if sw is not None:
+            steps.append(("case%d-release-stdin" % n, lambda: release_pipe(sw)))
+        steps += [("holder%d-reap" % i, (lambda hh=hh: reap(hh, D_REAP)))
+                  for i, hh in enumerate(holders)]
+        settle_joins(d, T, e, join_owned(steps))
     os.close(wfd)
     os.close(sin)
     res = {"case": n, "path_len": len(path), "argc": len(argv), "mode": mode, "pid": pid}
+    primary = None
     try:
         set_identity(d, T, "case%d" % n, proc_identity(pid, os.getpid()))
         ready = bool(select.select([r], [], [], D_LINE)[0]) and os.read(r, 2) == b"r\n"
@@ -2929,17 +2997,22 @@ def t30m_case(d, T, n, case, shells, holders):
         res.update(status=a["status"], match=a.get("argv") == argv,
                    exec_path_ok=(ep == path) if mode == "exact" else
                    (ep is not None and os.path.realpath(ep) in shells))
-    finally:
-        os.close(r)
-        if h is not None:
-            release_holder(h)
-        else:
-            try:
-                os.write(sw, b"\n")
-            except BrokenPipeError:
-                res["stdin"] = "fixture already gone"
-            os.close(sw)
-    res["rc"] = reap_pid(pid, D_REAP)
+    except Exception as e:      # the primary failure: kept, re-raised after the joins
+        primary = e
+    steps = [("case%d-close-ready" % n, lambda: os.close(r))]
+    if h is not None:
+        steps.append(("case%d-release-holder" % n, lambda: release_holder(h)))
+    else:
+        steps.append(("case%d-release-stdin" % n, lambda: release_pipe(sw)))
+    steps.append(("case%d-reap" % n, lambda: reap_pid(pid, D_REAP)))
+    out = join_owned(steps)
+    if primary is not None or not all(o["ok"] for o in out):
+        out += join_owned([("holder%d-reap" % i, (lambda hh=hh: reap(hh, D_REAP)))
+                           for i, hh in enumerate(holders)])
+        settle_joins(d, T, primary, out)
+    if out[1].get("value") == "fixture already gone":
+        res["stdin"] = "fixture already gone"
+    res["rc"] = out[2]["value"]
     return res
 
 
