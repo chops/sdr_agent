@@ -103,7 +103,8 @@ A_FAB_IDS = (
     "T40n-delayed", "T40o", "T40p", "T40q", "T40r",
     "T41a", "T41c", "T41d", "T41e", "T41f", "T41g-a", "T41g-b", "T41h", "T42b",
     "T44a", "T44b", "T44c-regen", "T44c-mismatch", "T44c-missing", "T44c-state", "T44d",
-    "T44e", "T44f", "T44h", "T44i-image", "T44i-vector", "T44j", "T44k")
+    "T44e", "T44f", "T44h", "T44i-image", "T44i-vector", "T44j", "T44k", "T44l", "T44m",
+    "T44z")
 A_PHASE_IDS = ("T40h", "T40n-phase", "T44g")
 A_PG_IDS = ("T43a", "T43b", "T43c", "T43d", "T43e-before", "T43e-drain", "T43f", "T43g",
             "T43h", "T43i", "T43j")
@@ -5554,15 +5555,22 @@ def a41d(A):
 
 
 def a41e(A):
-    """Per reviewed form: a /bin/sh child of the retired pg_ctl-start holder (postmaster) is
-    exactly one sh-form-mismatch and mints nothing (already correct)."""
+    """For each of the SEVEN reviewed sh_forms: a /bin/sh child of the retired pg_ctl-start
+    holder (postmaster) carrying that form's exact child vector is exactly one
+    sh-form-mismatch and mints nothing (already correct). pg_ctl-version-probe's child
+    vector is byte-identical to initdb-version-probe's (the forms differ only by parent), so
+    that case repeats the same input under its own label. Minting of the seven forms under
+    their own parents is T22d's separate coverage, not claimed here."""
     h = a41_pgctl(A)
+    vectors = dict((f, [a0, "-c", cmd]) for f, (a0, cmd) in A.cmds.items())
+    vectors["pg_ctl-version-probe"] = list(vectors["initdb-version-probe"])
+    vectors["single-user-locale"] = ["sh", "-c", "%s -a" % W.LOCALE_BIN]
     per = {}
-    for form in sorted(A.cmds):
-        argv0, cmd = A.cmds[form]
-        c = A.child(h, "/bin/sh", [argv0, "-c", cmd])
+    for form in sorted(vectors):
+        c = A.child(h, "/bin/sh", vectors[form])
         per[form] = len(A.viol(c, "sh-form-mismatch")) == 1 and "allowance" not in c
-    return [("per-form", all(per.values()) and len(per) == len(A.cmds))], {"per_form": per}
+    return [("per-form", all(per.values()) and sorted(per) == sorted(A.w.forms))], \
+        {"per_form": per}
 
 
 def a41f(A):
@@ -5781,6 +5789,66 @@ def a44k(A):
     return checks, {}
 
 
+def a44_admit(A, parent_pid, path):
+    """The REAL production new_entry over a fabricated sealed generation and cur identity.
+    The test never writes the returned entry's parent fields."""
+    pid = A.pid()
+    g = A.gen(pid, pid * 1000)
+    cur = {"pid": pid, "birth_us": pid * 1000, "ppid": parent_pid if parent_pid else 1,
+           "uid": os.getuid(), "comm": "fixture"}
+    n_events = len(A.w.events)
+    e = A.w.new_entry(g, cur, path, parent_pid, True, "kernel-event")
+    ev = A.w.events[n_events:]
+    return e, g, [("registered", A.w.gens[g].get("entry") is e and A.w.entries.get(pid) is e),
+                  ("admission-request", (A.w.requests.get(g) or {}).get("kind") == "admission"),
+                  ("admit-event", len(ev) == 1 and ev[0].get("ev") == "admit" and
+                   ev[0].get("gen") == g and ev[0].get("pid") == pid)]
+
+
+def a44l(A):
+    """R1 (static review 025f4951): production new_entry binds the consumer's parent
+    generation. A tracked live parent; the returned entry carries exactly the parent's pid,
+    birth_us and gen, with the normal registration, admission request and admit event."""
+    _, h = A.holder("initdb-check")
+    e, g, checks = a44_admit(A, h["pid"], "note-fork")
+    return checks + [("parent-identity", e.get("parent") == h["pid"] and
+                      e.get("parent_birth_us") == h["birth_us"]),
+                     ("parent-gen-bound", "parent_gen" in e and e["parent_gen"] == h["gen"])], {}
+
+
+def a44m(A):
+    """R1, nullable behaviour: an untracked parent pid and no parent (the launcher shape)
+    each give parent_birth_us None and an explicit parent_gen None from production
+    new_entry."""
+    e1, _, c1 = a44_admit(A, A.pid(), "periodic")
+    e2, _, c2 = a44_admit(A, None, "spawned")
+    return [("untracked-" + k, ok) for k, ok in c1] + [("no-parent-" + k, ok) for k, ok in c2] + \
+        [("untracked-parent-birth-null", e1.get("parent_birth_us") is None),
+         ("no-parent-null", e2.get("parent") is None and e2.get("parent_birth_us") is None),
+         ("parent-gen-null", "parent_gen" in e1 and e1["parent_gen"] is None and
+          "parent_gen" in e2 and e2["parent_gen"] is None)], {}
+
+
+def a44z(A):
+    """R2 controller-error gate check (labelled, fixture-synthetic): an injected UNEXPECTED
+    exception in a control body is captured by a_execute and becomes the REAL-UNCERTAINTY
+    controller-error receipt (rc 3 by main's mapping), never a FAIL/rc 4 corrective kill;
+    a false ordinary check still uses the FAIL channel. The probe record is built, not
+    written; no receipt for another id is produced."""
+    def injected(A_):
+        raise AttributeError("injected unexpected controller error (fixture-synthetic)")
+    checks, notes, err = a_execute(injected, A)
+    rec = a_invalid_record("T44z-probe", None, err, {})
+    rc = 0 if rec["verdict"] in PASSING else (3 if rec["verdict"] == "REAL-UNCERTAINTY" else 4)
+    return [("captured", isinstance(err, AttributeError) and checks is None and notes is None),
+            ("invalid-verdict", rec["verdict"] == "REAL-UNCERTAINTY" and
+             rec["observed"] == "CONTROLLER-ERROR"),
+            ("rc3", rc == 3),
+            ("not-a-kill", not rec["observed"].startswith("FAIL")),
+            ("functional-fail-channel", a_observed("PASS", [("k", False)]) == "FAIL:k")], \
+        {"probe": rec}
+
+
 # id -> (body, class); every scope-A fabricated control passes as PASS when its desired
 # (refusal or acceptance) outcome is observed
 A_CONTROLS = {
@@ -5799,16 +5867,51 @@ A_CONTROLS = {
     "T44a": a44a, "T44b": a44b, "T44c-regen": a44c_regen, "T44c-mismatch": a44c_mismatch,
     "T44c-missing": a44c_missing, "T44c-state": a44c_state, "T44d": a44d, "T44e": a44e,
     "T44f": a44f, "T44g": a44g, "T44h": a44h, "T44i-image": a44i_image,
-    "T44i-vector": a44i_vector, "T44j": a44j, "T44k": a44k,
+    "T44i-vector": a44i_vector, "T44j": a44j, "T44k": a44k, "T44l": a44l, "T44m": a44m,
+    "T44z": a44z,
 }
+
+
+def a_invalid_record(T, labels, exc, notes):
+    """R2 (static review 025f4951): an UNEXPECTED exception escaping a scope-A control body
+    (controller, fixture or harness error: anything a body did not record as a narrowly
+    typed subject outcome) is an invalid run, never a corrective RED kill. The receipt is
+    REAL-UNCERTAINTY with observed CONTROLLER-ERROR (main maps it to rc 3); registered
+    objects are retained for disposition, not disposed."""
+    return {"id": T, "expected": ["PASS"], "observed": "CONTROLLER-ERROR",
+            "verdict": "REAL-UNCERTAINTY", "teardown": {},
+            "problems": ["controller error, not a subject outcome: %s: %s"
+                         % (type(exc).__name__, str(exc)[:200]),
+                         "retained for disposition, not disposed: %r" % list(labels or [])],
+            "bad_teardown": ["controller error"], "retained": list(labels or []),
+            "notes": dict(notes or {}, proof="fixture-synthetic")}
+
+
+def a_invalid(d, T, labels, exc, notes=None):
+    rec = a_invalid_record(T, labels, exc, notes)
+    W.jdump(rec, "%s/%s.json" % (d, T))
+    return rec
+
+
+def a_execute(body, A):
+    """(checks, notes, None) from a body, or (None, None, exc) for any exception other than
+    RealUncertainty (a fixture premise failure, which propagates as today). Bodies record
+    their expected subject refusals themselves (e.g. W.Hold in T40l-f)."""
+    try:
+        checks, notes = body(A)
+        return checks, notes, None
+    except RealUncertainty:
+        raise
+    except Exception as e:
+        return None, None, e
 
 
 def a_run(d, scratch, runroot, T):
     """Run one scope-A fabricated control. Phase controls (A_PHASE_IDS) own a registered root
     whose declared contents allow .devenv_initialized; the others use the run scratch as the
-    manifest root (no fixture is created) and refuse if an init marker exists there. Any
-    subject exception is a recorded check failure (FAIL), never a controller HOLD;
-    RealUncertainty (a fixture premise failure) propagates."""
+    manifest root (no fixture is created) and refuse if an init marker exists there. An
+    unexpected exception gives the REAL-UNCERTAINTY controller-error receipt (rc 3), never a
+    FAIL; RealUncertainty (a fixture premise failure) propagates."""
     body = A_CONTROLS[T]
     if T in A_PHASE_IDS:
         root = mkroot(d, scratch, T, "root", PG_DIRS + [A_INIT_REL])
@@ -5818,13 +5921,10 @@ def a_run(d, scratch, runroot, T):
         if os.path.lexists(root + "/" + A_INIT_REL):
             raise RealUncertainty("scope-A control: init marker under the scratch root")
     w = bare_watch(root, port=25432)
-    try:
-        checks, notes = body(AWorld(w))
-    except RealUncertainty:
-        raise
-    except Exception as e:
-        checks = [("subject-exception", False)]
-        notes = {"exception": "%s: %s" % (type(e).__name__, str(e)[:200])}
+    checks, notes, err = a_execute(body, AWorld(w))
+    if err is not None:
+        return a_invalid(d, T, labels, err, {"violations": [[v.get("kind"), v.get("pid")]
+                                                            for v in w.violations]})
     obs = a_observed("PASS", checks)
     notes = dict(notes, checks=[[k, ok is True] for k, ok in checks],
                  violations=[[v.get("kind"), v.get("pid"), v.get("why")] for v in w.violations],
@@ -5909,9 +6009,6 @@ def t43(d, scratch, runroot, v):
         fx.append(("other", "fixture", "", None))
     w, procs = watch_with(d, T, root, fx)
     pm = procs["pm"].pid
-    pm_gen = w.entries[pm]["gen"]
-    with open(pgd + "/postmaster.pid", "w") as f:
-        f.write("%d\n%s\n" % (pm, pgd))
     real_kill, real_popen = os.kill, subprocess.Popen
     real_pidpath, real_bsd, real_now, real_cwd = W.pidpath, W.bsdinfo, W.now, W.proc_cwd
     real_kq = w.kq
@@ -5919,8 +6016,11 @@ def t43(d, scratch, runroot, v):
     clock = {"armed": False, "calls": 0, "shift": 0.0, "from": 1}
     want = T43_TEXT.get(v)
     deadline_s = -0.01 if v == "h" else (300.0 if v == "i" else 30.0)
-    r, hold = None, None
+    r, hold, err = None, None, None
     try:
+        pm_gen = w.entries[pm]["gen"]
+        with open(pgd + "/postmaster.pid", "w") as f:
+            f.write("%d\n%s\n" % (pm, pgd))
         os.kill = lambda p_, s_: kills.append([p_, int(s_)])
         subprocess.Popen = t19i_fake_popen(pm, pg_ctl, real_popen, launches)
         if v != "d":
@@ -5970,14 +6070,18 @@ def t43(d, scratch, runroot, v):
         try:
             r = W.pg_ctl_stop(w, fake_manifest(root), w.alive("postmaster-final"), timeout=5,
                               t=2, deadline=called + deadline_s)
+        # the subject's narrowly typed outcomes: its refusal channel, the intercepted pg_ctl
+        # spawn and a deny-by-default refusal of an unexpected launch (recorded, then judged)
         except W.Hold as h:
             hold = str(h)
         except InterceptedSpawn:
             r = "intercepted-spawn"
         except DeniedSpawn as e:
             r, hold = "denied-spawn", str(e)
-        except Exception as e:      # recorded as a check failure, never a controller error
-            r, hold = "exception:%s" % type(e).__name__, str(e)[:200]
+    except Exception as e:
+        # R2: anything else is a controller/fixture error, never a corrective outcome; it is
+        # held until the patches are restored and the owned fixtures are reaped
+        err = e
     finally:
         os.kill, subprocess.Popen = real_kill, real_popen
         W.pidpath, W.bsdinfo, W.now, W.proc_cwd = real_pidpath, real_bsd, real_now, real_cwd
@@ -5987,6 +6091,12 @@ def t43(d, scratch, runroot, v):
         W.pidpath is real_pidpath and W.bsdinfo is real_bsd and W.now is real_now and \
         W.proc_cwd is real_cwd and "snapshot" not in vars(w)
     rcs = outer_reap(procs)
+    if err is not None:
+        if isinstance(err, RealUncertainty):
+            raise err
+        return a_invalid(d, T, ["root"], err, {"restored": restored, "outer_reap": rcs,
+                                              "launches": [[x["gate"], x["argv"]]
+                                                           for x in launches]})
     lsof_pm = ["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(pm), "-d", "cwd", "-Fn"]
     pg_argv = [pg_ctl, "-D", pgd, "-m", "fast", "-w", "-t", "2", "stop"]
     named = {"lsof": ["allow", lsof_pm], "pg_ctl": ["intercept", pg_argv]}
