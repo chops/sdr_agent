@@ -1551,7 +1551,13 @@ def t19g(d, scratch, runroot):
 
 
 class InterceptedSpawn(Exception):
-    """fixture-synthetic: raised by T19i's intercepted subprocess.Popen; nothing starts."""
+    """fixture-synthetic: raised by T19i's Popen boundary for the expected pg_ctl launch;
+    nothing starts."""
+
+
+class DeniedSpawn(Exception):
+    """fixture-synthetic: T19i's Popen boundary refused an unexpected launch BEFORE it could
+    run (deny by default); never the expected pg_ctl interception."""
 
 
 T19I_SIG_REFUSAL = "refuse signal: quiesce bound passed before the final identity proof"
@@ -1570,18 +1576,114 @@ def t19i_pgctl_refused(hold):
         return False
 
 
+def t19i_popen_gate(argv, a, kw, lsof_pid, pg_ctl):
+    """T19i's Popen boundary, deny by default (e36424c review): "intercept" for the pg_ctl
+    executable (never run); "allow" ONLY for proc_cwd's read-only lsof of the owned
+    postmaster fixture, with exactly subprocess.run's keyword shape for sink_watch.run (env
+    TOOL_ENV, cwd None, stdout/stderr PIPE: no shell, no executable override, no other
+    argument); otherwise "deny:<reason>" (never run)."""
+    if type(argv) is not list or not argv or not all(type(x) is str for x in argv):
+        return "deny:argv-not-a-list-of-str"
+    if argv[0] == pg_ctl:
+        return "intercept"
+    if a:
+        return "deny:positional-arguments"
+    if argv != ["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(lsof_pid), "-d", "cwd", "-Fn"]:
+        return "deny:argv"
+    if kw != {"env": W.TOOL_ENV, "cwd": None, "stdout": subprocess.PIPE,
+              "stderr": subprocess.PIPE}:
+        return "deny:keywords"
+    return "allow"
+
+
+def t19i_fake_popen(lsof_pid, pg_ctl, real, log):
+    """A Popen replacement that decides BEFORE anything runs: only an "allow" reaches
+    `real`; every launch is logged with its gate decision."""
+    def fake(argv, *a, **kw):
+        g = t19i_popen_gate(argv, a, kw, lsof_pid, pg_ctl)
+        log.append({"argv": [str(x) for x in argv] if type(argv) in (list, tuple)
+                    else repr(argv)[:120], "gate": g, "shell": kw.get("shell"),
+                    "executable": kw.get("executable")})
+        if g == "intercept":
+            raise InterceptedSpawn("intercepted pg_ctl spawn (fixture-synthetic)")
+        if g != "allow":
+            raise DeniedSpawn("denied launch (%s) (fixture-synthetic)" % g)
+        return real(argv, *a, **kw)
+    return fake
+
+
+T19I_BOUNDARY_PID = 424242          # fixture-synthetic: the boundary controls never launch
+
+
+def t19i_boundary_controls(pg_ctl):
+    """Pure boundary controls: a STUB stands in for the real Popen and only records that it
+    was reached; nothing is launched. Unknown argv, a shell, an executable override,
+    another pid, a string argv, extra arguments and an unexpected pg_ctl shape never reach
+    the stub; the exact owned lsof read does, and pg_ctl is intercepted."""
+    lsof = ["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(T19I_BOUNDARY_PID), "-d", "cwd",
+            "-Fn"]
+    kw = {"env": W.TOOL_ENV, "cwd": None, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+    cases = [
+        ("lsof-owned-exact", lsof, (), kw),
+        ("pg_ctl", [pg_ctl, "-D", "/x", "stop"], (), {}),
+        ("pg_ctl-with-shell", [pg_ctl, "stop"], (), {"shell": True}),
+        ("unknown-argv", ["/bin/echo", "t19i"], (), kw),
+        ("lsof-shell", lsof, (), dict(kw, shell=True)),
+        ("lsof-executable-override", lsof, (), dict(kw, executable="/bin/sh")),
+        ("lsof-other-pid", lsof[:5] + [str(T19I_BOUNDARY_PID + 1)] + lsof[6:], (), kw),
+        ("lsof-string-argv", " ".join(lsof), (), kw),
+        ("lsof-extra-positional", lsof, (-1,), kw),
+        ("lsof-extra-keyword", lsof, (), dict(kw, close_fds=False)),
+        ("lsof-other-env", lsof, (), dict(kw, env={"PATH": "/tmp"}))]
+    out = {}
+    for name, argv, a, k in cases:
+        reached, log = [], []
+        fake = t19i_fake_popen(T19I_BOUNDARY_PID, pg_ctl,
+                               lambda *a_, **k_: reached.append(1) or "stub-process", log)
+        try:
+            r = "delegated:%s" % fake(argv, *a, **k)
+        except InterceptedSpawn:
+            r = "intercepted"
+        except DeniedSpawn:
+            r = "denied:%s" % log[-1]["gate"]
+        out[name] = {"outcome": r, "reached_real": len(reached)}
+    return out
+
+
+T19I_BOUNDARY_WANT = {
+    "lsof-owned-exact": {"outcome": "delegated:stub-process", "reached_real": 1},
+    "pg_ctl": {"outcome": "intercepted", "reached_real": 0},
+    "pg_ctl-with-shell": {"outcome": "intercepted", "reached_real": 0},
+    "unknown-argv": {"outcome": "denied:deny:argv", "reached_real": 0},
+    "lsof-shell": {"outcome": "denied:deny:keywords", "reached_real": 0},
+    "lsof-executable-override": {"outcome": "denied:deny:keywords", "reached_real": 0},
+    "lsof-other-pid": {"outcome": "denied:deny:argv", "reached_real": 0},
+    "lsof-string-argv": {"outcome": "denied:deny:argv-not-a-list-of-str", "reached_real": 0},
+    "lsof-extra-positional": {"outcome": "denied:deny:positional-arguments",
+                              "reached_real": 0},
+    "lsof-extra-keyword": {"outcome": "denied:deny:keywords", "reached_real": 0},
+    "lsof-other-env": {"outcome": "denied:deny:keywords", "reached_real": 0}}
+
+
 def t19i(d, scratch, runroot):
     """Q2 / R2, the DRAIN case: the quiesce bound (ITER_SLICE_S, inside the 0.3 s overall
     deadline) expires during a stubbed 0.6 s drain. The signal must be refused at the first
     post-drain bound check, with exactly that refusal text, after the drain returned and
     BEFORE the final identity read; pg_ctl must be refused by its overall-deadline check
-    before any spawn. os.kill and subprocess.Popen are INTERCEPTED for the whole test, so
-    even a regression sends no real signal and starts no helper. Healthy companion (same
+    before any spawn. os.kill is INTERCEPTED and Popen goes through a deny-by-default
+    boundary for the whole test (only the owned postmaster's read-only lsof may run;
+    pg_ctl is intercepted; anything else is denied BEFORE it runs), so even a regression
+    sends no real signal and starts no helper; pure boundary controls (a stub Popen) prove
+    the allow, intercept and deny paths first. The passed quiesce bound, the drain's entry
+    and return times and the overall deadline are recorded per case: the refusal needs
+    entry < bound <= return, the healthy case return < bound. Healthy companion (same
     watch and fixtures): an instant drain with a far deadline reaches the final identity
     read and the intercepted kill exactly once, and pg_ctl reaches the intercepted spawn
     exactly once. Every caught exception text is kept in the receipt. The late final
     identity proof is T30t's separate case and is not claimed here."""
     T = "T19i"
+    pg_ctl = W.PG_BIN + "/pg_ctl"
+    boundary = t19i_boundary_controls(pg_ctl)
     root, pgd = pm_root(d, scratch, T)
     w, procs = watch_with(d, T, root, [("pc", "process-compose", "", None),
                                       ("pm", "postmaster-final", "", pgd)])
@@ -1590,19 +1692,10 @@ def t19i(d, scratch, runroot):
     births = {k: W.bsdinfo(p.pid)["birth_us"] for k, p in procs.items()}
     pc = procs["pc"].pid
     real_kill, real_popen, real_bsd = os.kill, subprocess.Popen, W.bsdinfo
-    kills, spawns, other_spawns, phase = [], [], [], []
-    pg_ctl = W.PG_BIN + "/pg_ctl"
+    kills, launches, phase, bound = [], [], [], {}
 
     def fake_kill(pid, sig):
         kills.append([pid, int(sig)])
-
-    def fake_popen(argv, *a, **kw):
-        if isinstance(argv, (list, tuple)) and argv and str(argv[0]) == pg_ctl:
-            spawns.append([str(x) for x in argv])
-            raise InterceptedSpawn("intercepted pg_ctl spawn (fixture-synthetic)")
-        other_spawns.append(str(argv[0]) if isinstance(argv, (list, tuple)) and argv
-                            else repr(argv)[:80])
-        return real_popen(argv, *a, **kw)   # e.g. proc_cwd's lsof read: not an effect
 
     def proof_read(pid, _r=real_bsd):
         if pid == pc and "quiesce-returned" in phase:
@@ -1611,44 +1704,61 @@ def t19i(d, scratch, runroot):
 
     def quiesce_stub(delay):
         def q(deadline):
+            bound["qd"], bound["entered"] = deadline, W.now()
             phase.append("quiesce-entered")
             time.sleep(delay)           # fixture-synthetic drain
+            bound["returned"] = W.now()
             phase.append("quiesce-returned")
         return q
 
+    def by_gate(g, i0):
+        return [x["argv"] for x in launches[i0:] if x["gate"] == g]
+
     def sig_case(label, delay, deadline_s):
         del phase[:]
+        bound.clear()
         n0, k0 = len(w.harness_signals), len(kills)
         w.quiesce = quiesce_stub(delay)
+        bound["called"] = W.now()
+        bound["deadline"] = bound["called"] + deadline_s
         try:
             r, hold = w.signal_verified(pc, signal.SIGTERM, label,
-                                        deadline=W.now() + deadline_s), None
+                                        deadline=bound["deadline"]), None
         except W.Hold as h:
             r, hold = None, str(h)
         finally:
             del w.quiesce
         return {"result": r, "hold": hold, "phase": list(phase), "kills": kills[k0:],
                 "harness_signals": [[s["pid"], s["signal"], s["reason"]]
-                                    for s in w.harness_signals[n0:]]}
+                                    for s in w.harness_signals[n0:]], "bound": dict(bound)}
 
     def pgctl_case(deadline_s):
-        s0 = len(spawns)
+        i0 = len(launches)
+        called = W.now()
         try:
             r, hold = W.pg_ctl_stop(w, fake_manifest(root), w.alive("postmaster-final"),
-                                    timeout=5, t=2, deadline=W.now() + deadline_s), None
+                                    timeout=5, t=2, deadline=called + deadline_s), None
         except W.Hold as h:
             r, hold = None, str(h)
         except InterceptedSpawn:
             r, hold = "intercepted-spawn", None
-        return {"result": r, "hold": hold, "spawns": spawns[s0:], "helpers": len(w.helpers)}
+        except DeniedSpawn as e:
+            r, hold = "denied-spawn", str(e)
+        return {"result": r, "hold": hold, "spawns": by_gate("intercept", i0),
+                "allowed": by_gate("allow", i0),
+                "denied": [x for x in launches[i0:] if x["gate"].startswith("deny")],
+                "helpers": len(w.helpers), "called": called, "deadline": called + deadline_s}
 
     try:
-        os.kill, W.bsdinfo, subprocess.Popen = fake_kill, proof_read, fake_popen
+        os.kill, W.bsdinfo = fake_kill, proof_read
+        subprocess.Popen = t19i_fake_popen(procs["pm"].pid, pg_ctl, real_popen, launches)
         refusal = sig_case("T19i", 0.6, 0.3)
         refusal_pg = pgctl_case(-0.01)
         # effect attempts after BOTH refusals, before the healthy companion (helpers alone
         # would not prove no pg_ctl spawn: pg_ctl_stop keeps a helper only on a timeout)
-        refusal_effects = {"kills": len(kills), "pgctl_spawns": len(spawns),
+        refusal_effects = {"kills": len(kills), "pgctl_spawns": len(by_gate("intercept", 0)),
+                           "denied": len([x for x in launches
+                                          if x["gate"].startswith("deny")]),
                            "harness_signals": len(w.harness_signals),
                            "helpers": len(w.helpers)}
         healthy = sig_case("T19i-healthy", 0.0, 30.0)
@@ -1662,34 +1772,46 @@ def t19i(d, scratch, runroot):
     labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     sigterm = int(signal.SIGTERM)
     pg_argv = [pg_ctl, "-D", pgd, "-m", "fast", "-w", "-t", "2", "stop"]
+    lsof_pm = ["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(procs["pm"].pid), "-d", "cwd",
+               "-Fn"]
+    rb, hb = refusal["bound"], healthy["bound"]
     checks = {
+        "boundary_controls": boundary == T19I_BOUNDARY_WANT,
         "refusal_text": refusal["hold"] == T19I_SIG_REFUSAL and refusal["result"] is None,
         "refusal_phase": refusal["phase"] == ["quiesce-entered", "quiesce-returned"],
+        "refusal_bound_expired_in_drain": set(rb) == {"called", "deadline", "qd", "entered",
+                                                      "returned"} and
+        rb["called"] < rb["qd"] <= rb["deadline"] and rb["entered"] < rb["qd"] <= rb["returned"],
         "refusal_no_kill": refusal["kills"] == [] and refusal["harness_signals"] == [],
         "pgctl_refusal_text": t19i_pgctl_refused(refusal_pg["hold"]) and
         refusal_pg["result"] is None,
-        "pgctl_no_spawn": refusal_pg["spawns"] == [] and refusal_pg["helpers"] == 0,
+        "pgctl_no_spawn": refusal_pg["spawns"] == [] and refusal_pg["denied"] == [] and
+        refusal_pg["allowed"] == [lsof_pm] and refusal_pg["helpers"] == 0,
         "no_effect_after_refusals": refusal_effects == {"kills": 0, "pgctl_spawns": 0,
-                                                        "harness_signals": 0, "helpers": 0},
+                                                        "denied": 0, "harness_signals": 0,
+                                                        "helpers": 0},
         "healthy_sent": healthy["result"] == "sent" and healthy["hold"] is None and
         healthy["phase"] == ["quiesce-entered", "quiesce-returned", "final-identity-read"],
+        "healthy_bound_not_exceeded": set(hb) == {"called", "deadline", "qd", "entered",
+                                                  "returned"} and
+        hb["called"] < hb["qd"] <= hb["deadline"] and hb["returned"] < hb["qd"],
         "healthy_one_intercepted_kill": healthy["kills"] == [[pc, sigterm]] and
         healthy["harness_signals"] == [[pc, sigterm, "T19i-healthy"]],
         "healthy_pgctl_one_intercepted_spawn": healthy_pg["result"] == "intercepted-spawn" and
         healthy_pg["hold"] is None and healthy_pg["spawns"] == [pg_argv] and
+        healthy_pg["denied"] == [] and healthy_pg["allowed"] == [lsof_pm] and
         healthy_pg["helpers"] == 0,
         "no_real_effect": alive == {"pc": True, "pm": True} and w.helpers == [] and
-        len(kills) == 1 and len(spawns) == 1 and
-        all(x == "/usr/sbin/lsof" for x in other_spawns),
+        len(kills) == 1 and [x["gate"] for x in launches] == ["allow", "allow", "intercept"],
         "patches_restored": restored}
     ok = all(v is True for v in checks.values())
     return finish(labels, d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
                    {"outer_reap": rcs_word(rcs, {"pc": 0, "pm": 0}), "fixtures": "ok"}, runroot,
                    notes={"refused_sig": checks["refusal_text"],
                           "refused_pgctl": checks["pgctl_refusal_text"],
-                          "alive_after": alive, "checks": checks, "refusal": refusal,
-                          "refusal_pgctl": refusal_pg, "healthy": healthy,
-                          "healthy_pgctl": healthy_pg, "other_spawns": other_spawns,
+                          "alive_after": alive, "checks": checks, "boundary": boundary,
+                          "refusal": refusal, "refusal_pgctl": refusal_pg, "healthy": healthy,
+                          "healthy_pgctl": healthy_pg, "launches": launches,
                           "refusal_effects": refusal_effects})
 
 
