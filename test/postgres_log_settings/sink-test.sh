@@ -60,9 +60,10 @@ INPUTS=(flake.nix flake.lock devenv.nix priv/postgres/log_settings.json
         test/postgres_log_settings/expected-contract.conf)
 
 # The self-test IDs, in run order (repair plan + amendment self-test list). T35 (the
-# EV_UDATA_SPECIFIC capability gate) and T30m (the KERN_PROCARGS2 H-pad layout gate) run
-# FIRST: a failure stops the suite before anything relies on either (B2, B3, B4).
-SYNTHETIC_IDS="T35 T30m"
+# EV_UDATA_SPECIFIC capability gate), T30w (the KERN_PROCARGS2 interface bounds, no layout
+# decoding) and T30m (the H-pad layout gate) run FIRST, in that order, then T30x (T30m's
+# exception-path joins): a failure stops the suite before anything relies on them.
+SYNTHETIC_IDS="T35 T30w T30m T30x"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T9a T9b T10 T11 T12 T15d T16 T17a T17b T17-baseline T18a T18b T18c T18d"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T18d-vanish T18d-rebind T19a T19b T19c T19d T19f T19g T19i"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T20a T20b T20c T20d T20e T20f T20g T21a T21b T21c T21d T21e"

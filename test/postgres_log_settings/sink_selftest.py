@@ -84,6 +84,9 @@ _proof(["T30c", "T30d", "T30e", "T30f", "T30g", "T30i", "T30j", "T30k", "T30l", 
 _proof(["T30a", "T30b", "T30n", "T30o", "T30p", "T32", "T37"], fixtures=NA)
 # 930cad6 review: R1 (T30q), R2 (T30r, T30s, T30t), R4 (T38)
 _proof(["T30q", "T30r", "T30s", "T30t", "T38"], fixtures=REQ)
+# a40f005 review: T30w (KERN_PROCARGS2 interface bounds), T30x (T30m exception-path joins)
+_proof(["T30w"], fixtures=NA)
+_proof(["T30x"], fixtures=REQ)
 # e3d897b review: R2 (T31h, T30u), R3 (T30v)
 _proof(["T31h", "T30u"], fixtures=REQ)
 _proof(["T30v"], fixtures=NA)
@@ -2900,6 +2903,46 @@ def reap_pid(pid, deadline_s):
     raise RealUncertainty("forked fixture %d alive after %.0f s" % (pid, deadline_s))
 
 
+def t30m_case(d, T, n, case, shells, holders):
+    """One T30m layout case: fork + execve the fixture, read its KERN_PROCARGS2 once it is
+    ready, then release it and reap it. `holders` collects the holder fixtures started so
+    far (the caller reaps them after the loop)."""
+    path, argv, env, mode, held = case
+    r, wfd = os.pipe()
+    h, sw = None, None
+    if held:
+        sin, h = stdin_holder(d, T, "case%d-holder" % n)
+        holders.append(h)
+    else:
+        sin, sw = os.pipe()
+    intent(d, T, "case%d" % n, "proc")
+    pid = fork_execve(path, argv, env, stdin_fd=sin, ready_fd=wfd)
+    os.close(wfd)
+    os.close(sin)
+    res = {"case": n, "path_len": len(path), "argc": len(argv), "mode": mode, "pid": pid}
+    try:
+        set_identity(d, T, "case%d" % n, proc_identity(pid, os.getpid()))
+        ready = bool(select.select([r], [], [], D_LINE)[0]) and os.read(r, 2) == b"r\n"
+        cur = W.bsdinfo(pid)
+        a = W.procargs(pid, cur["birth_us"]) if ready and cur else {"status": "NOT-READY"}
+        ep = a.get("exec_path")
+        res.update(status=a["status"], match=a.get("argv") == argv,
+                   exec_path_ok=(ep == path) if mode == "exact" else
+                   (ep is not None and os.path.realpath(ep) in shells))
+    finally:
+        os.close(r)
+        if h is not None:
+            release_holder(h)
+        else:
+            try:
+                os.write(sw, b"\n")
+            except BrokenPipeError:
+                res["stdin"] = "fixture already gone"
+            os.close(sw)
+    res["rc"] = reap_pid(pid, D_REAP)
+    return res
+
+
 def t30m(d, scratch, runroot):
     """Layout gate (r3 3.2, B3): owned ARGV-TOLERANT accepting fixtures, execve'd through
     libc: the pinned python (HOLDER: any argv0, any trailing arguments after -c CODE; it
@@ -2934,40 +2977,8 @@ def t30m(d, scratch, runroot):
     cases.append((bash, ["bash", "-c", sh_cmd], ["E=" + "z" * 13], "exact", True))
     shells = {os.path.realpath(x) for x in W.SYSTEM_SH}
     results, holders = [], []
-    for n, (path, argv, env, mode, held) in enumerate(cases):
-        r, wfd = os.pipe()
-        h, sw = None, None
-        if held:
-            sin, h = stdin_holder(d, T, "case%d-holder" % n)
-            holders.append(h)
-        else:
-            sin, sw = os.pipe()
-        intent(d, T, "case%d" % n, "proc")
-        pid = fork_execve(path, argv, env, stdin_fd=sin, ready_fd=wfd)
-        os.close(wfd)
-        os.close(sin)
-        res = {"case": n, "path_len": len(path), "argc": len(argv), "mode": mode}
-        try:
-            set_identity(d, T, "case%d" % n, proc_identity(pid, os.getpid()))
-            ready = bool(select.select([r], [], [], D_LINE)[0]) and os.read(r, 2) == b"r\n"
-            cur = W.bsdinfo(pid)
-            a = W.procargs(pid, cur["birth_us"]) if ready and cur else {"status": "NOT-READY"}
-            ep = a.get("exec_path")
-            res.update(status=a["status"], match=a.get("argv") == argv,
-                       exec_path_ok=(ep == path) if mode == "exact" else
-                       (ep is not None and os.path.realpath(ep) in shells))
-        finally:
-            os.close(r)
-            if h is not None:
-                release_holder(h)
-            else:
-                try:
-                    os.write(sw, b"\n")
-                except BrokenPipeError:
-                    res["stdin"] = "fixture already gone"
-                os.close(sw)
-        res["rc"] = reap_pid(pid, D_REAP)
-        results.append(res)
+    for n, case in enumerate(cases):
+        results.append(t30m_case(d, T, n, case, shells, holders))
     hrcs = [reap(h, D_REAP) for h in holders]
     residues = sorted({len(c[0]) % 8 for c in cases[:8]})
     labels = ["root"]
@@ -3818,6 +3829,206 @@ def t30v(d, scratch, runroot):
                    {"fixtures": "not-applicable:fabricated run records"}, runroot, notes=got)
 
 
+def raw_procargs2(pid, oldlen):
+    """A test-local KERN_PROCARGS2 sysctl with a buffer and oldlen of exactly `oldlen` bytes,
+    independent of sink_watch's own reader: (rc, errno, data, n). Raw bytes stay in memory;
+    receipts record only rc, errno, n and parse status."""
+    buf = ctypes.create_string_buffer(max(int(oldlen), 1))
+    size = ctypes.c_size_t(int(oldlen))
+    mib = (ctypes.c_int * 3)(W.CTL_KERN, W.KERN_PROCARGS2, os.getpid() if pid is None else pid)
+    ctypes.set_errno(0)
+    rc = W.libc().sysctl(mib, 3, buf, ctypes.byref(size), None, 0)
+    return rc, ctypes.get_errno(), buf.raw, size.value
+
+
+T30W_CASES = ("width_invariant", "requested_cap", "at_bound", "cap_eq_argmax", "one_over",
+              "old_cap", "argc_only", "underflow", "too_small", "live_einval_hold")
+
+
+def t30w(d, scratch, runroot):
+    """KERN_PROCARGS2 INTERFACE bounds (a40f005 review A1/A2), on this process's own argument
+    area; no fixture, no layout decoding. Source (xnu-11417.140.69 kern_sysctl.c
+    sysctl_procargsx 1359-1369, 1555-1613): buflen = oldlen - sizeof(int) must satisfy
+    0 < buflen <= ARG_MAX (= kern.argmax), else EINVAL; a buffer smaller than the area returns
+    rc 0 with n == oldlen (its tail). Pinned cases (all must be present):
+    width_invariant (argc word is 4 bytes), requested_cap (sink_watch.procargs requests
+    exactly kern.argmax + 4 through its reader seam), at_bound / cap_eq_argmax (rc 0 and a
+    bounded n, NOT a decoded argv: that is T30m's layout claim), one_over / old_cap /
+    argc_only / underflow (EINVAL), too_small (rc 0, n == oldlen, and parse_procargs refuses
+    it as MALFORMED by its n >= cap rule, which precedes any layout decoding),
+    live_einval_hold (EINVAL for a live identity is HOLD, unchanged). The public source vs
+    running .709.8 build gap is an inference: a mismatch here returns for review; nothing is
+    adjusted at runtime."""
+    T = "T30w"
+    A = W.kern_argmax()
+    me_b = W.bsdinfo(os.getpid())["birth_us"]
+    got = {}
+    got["width_invariant"] = ctypes.sizeof(ctypes.c_int) == 4
+    seen = []
+
+    def recorder(pid, cap):
+        seen.append(cap)
+        return 0, 0, b"\0" * 8, 8
+    W.procargs(os.getpid(), me_b, reader=recorder)
+    got["requested_cap"] = {"requested_minus_argmax": seen[0] - A if seen else None,
+                            "ok": seen == [A + 4]}
+
+    def case(oldlen):
+        rc, err, data, n = raw_procargs2(None, oldlen)
+        return rc, err, n
+    rc, err, n = case(A + 4)
+    got["at_bound"] = {"rc": rc, "errno": err, "ok": rc == 0 and 4 < n < A + 4}
+    rc, err, n = case(A)
+    got["cap_eq_argmax"] = {"rc": rc, "errno": err, "ok": rc == 0 and 4 < n < A}
+    for name, oldlen in (("one_over", A + 5), ("old_cap", A + 4096), ("argc_only", 4),
+                         ("underflow", 3)):
+        rc, err, n = case(oldlen)
+        got[name] = {"rc": rc, "errno": err, "ok": rc != 0 and err == errno.EINVAL}
+    rc, err, data, n = raw_procargs2(None, 20)
+    st = W.parse_procargs(data, n, 20)["status"] if rc == 0 else None
+    got["too_small"] = {"rc": rc, "n": n, "status": st,
+                        "ok": rc == 0 and n == 20 and st == "MALFORMED"}
+    try:
+        W.procargs(os.getpid(), me_b, reader=lambda pid, cap: (-1, errno.EINVAL, b"", 0))
+        held = False
+    except W.Hold as h:
+        held = "errno 22 for the live tracked identity" in str(h)
+    got["live_einval_hold"] = held
+    ok = tuple(sorted(got)) == tuple(sorted(T30W_CASES)) and all(
+        (v is True) if isinstance(v, bool) else v.get("ok") is True for v in got.values())
+    return verdict(d, T, ["PASS"], "PASS" if ok else "FAIL",
+                   {"fixtures": "not-applicable:own process, no fixture"}, runroot, notes=got)
+
+
+T30X_SUBCASES = ("primary_observation_failure", "release_failure",
+                 "child_join_failure_later_holders_joined", "holder_join_failure")
+
+
+def t30x(d, scratch, runroot):
+    """Exception-path regressions for T30m's per-case joins (a40f005 review A3). Each subcase
+    runs one real t30m_case with an INJECTED failure and requires: every owned release/join
+    is attempted and recorded; the primary failure is re-raised unchanged (same object);
+    every secondary failure is kept as metadata (<T>.joins.json, metadata only); no receipt,
+    no disposal, no signal. (1) observation failure (procargs raises Hold); (2) release
+    failure (release_holder raises; no primary) -> uncertainty naming the step, the child
+    still reaped after its holder's own bound; (3) the child's join fails -> uncertainty, and
+    the EARLIER holder's join is still attempted; (4) a holder's join fails under a primary
+    failure -> primary preserved, the holder failure recorded. After each subcase this test
+    joins what the injection left, by handle, bounded."""
+    T = "T30x"
+    root = mkroot(d, scratch, T, "root")
+    shells = {os.path.realpath(x) for x in W.SYSTEM_SH}
+    py_case = (PY, ["px", "-I", "-c", HOLDER], ["E=1"], "exact", False)
+    sh_case = ("/bin/sh", ["sh", "-c", "echo r >&3; read x"], ["E=1"], "shell", True)
+    jpath = "%s/%s.joins.json" % (d, T)
+    g = globals()
+    real = {k: g[k] for k in ("release_holder", "reap_pid", "reap")}
+    out, n = {}, [0]
+    leftovers_pids, leftovers_procs = [], []
+
+    def run(case, holders):
+        n[0] += 1
+        if os.path.exists(jpath):
+            os.unlink(jpath)
+        try:
+            t30m_case(d, T, n[0], case, shells, holders)
+            return None
+        except Exception as e:
+            return e
+
+    def undisposed():
+        return [f["label"] for f in registry(d)["fixtures"]
+                if f["test"] == T and f.get("disposed") is not None]
+
+    def joins():
+        return W.jload(jpath) if os.path.exists(jpath) else None
+
+    injected = W.Hold("injected observation failure (fixture-synthetic)")
+    real_pa = W.procargs
+    try:
+        # (1) primary observation failure
+        W.procargs = lambda pid, birth_us, reader=None: (_ for _ in ()).throw(injected)
+        holders = []
+        e = run(py_case, holders)
+        W.procargs = real_pa
+        j = joins()
+        reaped = any(o["step"].endswith("-reap") and o["ok"]
+                     for o in (getattr(e, "join_outcomes", None) or []))
+        out["primary_observation_failure"] = {
+            "same_primary": e is injected, "joins_file": j is not None and
+            (j.get("primary") or {}).get("class") == "Hold",
+            "all_ok": bool(j) and all(o["ok"] for o in j["joins"]), "reaped": reaped}
+        # (2) release failure, no primary
+        holders = []
+
+        def bad_release(h):
+            raise OSError("injected release failure (fixture-synthetic)")
+        g["release_holder"] = bad_release
+        e = run(sh_case, holders)
+        g["release_holder"] = real["release_holder"]
+        j = joins()
+        steps = {o["step"]: o for o in (j or {}).get("joins", [])}
+        out["release_failure"] = {
+            "uncertainty": isinstance(e, RealUncertainty) and "release-holder" in str(e),
+            "release_recorded_failed": any(k.endswith("release-holder") and not v["ok"]
+                                           for k, v in steps.items()),
+            "child_reap_attempted": any(k.endswith("-reap") and k.startswith("case")
+                                        for k in steps)}
+        leftovers_procs += holders
+        # (3) the child's join fails; an earlier holder's join is still attempted
+        holders = []
+        e0 = run(sh_case, holders)                  # healthy held case: its holder stays
+        pids_seen = []
+
+        def bad_reap_pid(pid, deadline_s):
+            pids_seen.append(pid)
+            raise RealUncertainty("injected child join failure (fixture-synthetic)")
+        g["reap_pid"] = bad_reap_pid
+        e = run(py_case, holders)
+        g["reap_pid"] = real["reap_pid"]
+        j = joins()
+        steps = {o["step"]: o for o in (j or {}).get("joins", [])}
+        out["child_join_failure_later_holders_joined"] = {
+            "healthy_first": e0 is None,
+            "uncertainty": isinstance(e, RealUncertainty) and "-reap" in str(e),
+            "holder_join_attempted": any(k.startswith("holder") and v["ok"]
+                                         for k, v in steps.items()),
+            "holder_reaped": all(hh.returncode is not None for hh in holders)}
+        leftovers_pids += pids_seen
+        leftovers_procs += holders
+        # (4) a holder's join fails under a primary failure
+        holders = []
+        e0 = run(sh_case, holders)
+        g["reap"] = lambda proc, deadline_s: (_ for _ in ()).throw(
+            RealUncertainty("injected holder join failure (fixture-synthetic)"))
+        W.procargs = lambda pid, birth_us, reader=None: (_ for _ in ()).throw(injected)
+        e = run(py_case, holders)
+        W.procargs = real_pa
+        g["reap"] = real["reap"]
+        j = joins()
+        out["holder_join_failure"] = {
+            "healthy_first": e0 is None, "same_primary": e is injected,
+            "holder_failure_recorded": bool(j) and any(
+                o["step"].startswith("holder") and not o["ok"] for o in j["joins"]),
+            "primary_recorded": bool(j) and (j.get("primary") or {}).get("class") == "Hold"}
+        leftovers_procs += holders
+    finally:
+        W.procargs = real_pa
+        g.update(real)
+    # join what the injections deliberately left (bounded, by handle; no signal)
+    left = [reap(hh, D_REAP) for hh in leftovers_procs] + \
+        [reap_pid(pp, D_REAP) for pp in leftovers_pids]
+    out["no_disposal_during_failures"] = undisposed() == []
+    want = set(T30X_SUBCASES) | {"no_disposal_during_failures"}
+    ok = set(out) == want and all(
+        v is True if isinstance(v, bool) else all(x is True for x in v.values())
+        for v in out.values())
+    labels = ["root"]
+    return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
+                  {"fixtures": "ok" if all(r in (0, 1) for r in left) else "rc-%r" % left},
+                  runroot, notes=out)
+
+
 # ---------------------------------------------------------------- injections (T15a-c)
 def inject(kind, path, pid=None):
     if kind == "truncate":
@@ -3878,6 +4089,7 @@ SYNTHETIC = {
     "T37": t37,
     "T30q": t30q, "T30r": t30r, "T30s": t30s, "T30t": t30t, "T38": t38,
     "T31h": lambda d, s, r: t31(d, s, r, "h"), "T30u": t30u, "T30v": t30v,
+    "T30w": t30w, "T30x": t30x,
 }
 
 
