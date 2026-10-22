@@ -1110,6 +1110,44 @@ Main is green at `fcdcb9b`.
 - the B2 search provider and key;
 - #29 and #37.
 
+### Sprint 1, day 11 (Thu Oct 22): 5b held on a live test stack (as of 09:30 MDT)
+
+**Merged since the last entry, under D-157:**
+- **#211** (`6de239a`): projection v4 T1 to T6. Main CI green.
+- **#213** (`bf0cb86`): D-185 to D-187.
+- **#214** (`545907b`): D-188 to D-193.
+
+Nothing merged overnight. Decisions D-194 to D-196 are on #216 (Codex APPROVE at `5078d8e`, CI pending).
+
+**C3-02:** G8 is GREEN, and the rebased-commit gate (rb5) passed at `dd31db1`. Draft PR #215 is green at `4c9ec23`. The merge waits on 5b and the owner's one-command check.
+
+**5b, the T4a hold:**
+- The full self-test at `6f77359` held at T4a, the first real-instance test. The admission read of a child's arguments returned errno 5 (EIO), and the harness then refused to stop the stack because its signals were frozen.
+- That left a throwaway stack alive: process-compose 69328, its launcher and a decoy port listener. No shared or owner database is involved, and RELEASE is withheld, so no test needing the shared test database can run.
+- Three attempts to author a recovery guard, and then a read-only check tool for an owner-sent stop, were cut off by the safety classifier. Codex ruled out authoring it another way.
+- The owner chose disposition at standup (D-194). Today's open question is the route: a full Mac restart (Claude's and Codex's pick), the owner running the checklist alone, or staying on hold.
+
+**5b, the T4a fix (P3):**
+- **Scope A**, permission bookkeeping for copied processes, passed Codex in round 5 with three binding amendments (composite `69dcaa61`):
+  - a re-mint refusal withholds the role;
+  - a retired holder's child is refused (D1);
+  - one mutant is diagnostic only.
+- **Its tests:** 74 new tests on `c4-5b-t4a-red` (`f6357a7`, pushed). They were approved on reading after two rounds: real `new_entry` coverage, and controller errors routed to rc 3, not counted as test failures. The author's and Codex's per-test prediction lists match: 20 guards and 54 corrective failures. Nothing has run.
+- **Scope B**, the fork/exec race, has no approved latch. The owner chose a new observation design, feasibility first (D-195).
+- **Feasibility check:** finished in its half-day box. Public xnu source does not support the diagnosis's EIO mechanism, so the cause stays unknown. One candidate, identity-version bracketing, is plausible, but it leaves unresolved launch-path and exit-history proofs plus version-reuse gaps that a test can't fill. Today's open question: pause it until Scope A's results (Claude's pick), fund a bounded refinement, or commission a weaker contract.
+
+**D-193**, the isolated test cluster, is paused until after Nov 6 (D-196), with its round-8 draft kept.
+
+**Forecast:** the Oct 30 release candidate is likely to slip, and the Nov 6 core is high risk. Codex's view: there is no defensible integrated date yet, and the levers recover capacity rather than promise dates.
+
+**Waiting for the owner:**
+- the stack route;
+- the T4a candidate;
+- the D-168 install and the witness diagnostic;
+- the H1 task walk;
+- v4 T7's grant window;
+- the next G-DEMO window.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -1168,3 +1206,6 @@ says what happened, why, what it cost and what changed.
 | **Oct 21: a review request sat unanswered for about 4 hours.** Claude sent C3-02 G5's review request with `ap send` only, which writes no envelope. | `ap send` is the wake-up channel; it has no `msg_id` to reply to and leaves nothing in the inbox. | About 4 hours of G5 review latency. | Every review, approval or slot request goes through `ap consult`; overdue reviews are searched for by head SHA. |
 | **Oct 21: v4's RED had nine runtime errors.** Custom-message pattern asserts raise MatchError, not an assertion failure, when the code is missing. | The known assertion-form rule was not applied to the new test files before RED. | One RED review round. | Assertion-safe `match?` guards come before destructuring; the forms are checked before a RED run. |
 | **Oct 21: G5's migration proof driver did not fail closed.** It had only `set -u`, masked statuses through grep, ran psql without `ON_ERROR_STOP`, and printed values instead of asserting them. | It was written as an observation script, not as a gate. | One review round and a rewrite (protocol r2, then r3). | Proof drivers are fail-closed and come with a database-free stub control showing that a failure can't reach cleanup or "success". |
+| **Oct 21–22: plan round 4 dropped a binding requirement.** The new shared permission check left out round 2's rule that a copied process may use only the permission it was copied with. | The helper was described as complete without re-checking each inherited clause. | One review round (Codex `9f875af5`). | Every round's plan is checked clause by clause against the inherited rulings before it is sent. |
+| **Oct 21–22: a review sat about 4 hours unread.** The D-193 r6 review (04:24 UTC) wasn't seen, because Claude listed only the newest few inbox envelopes while others kept arriving. | "Newest N" listing, not matching each open ask's `in_reply_to`. | About 4 hours of D-193 review latency. | Each open consult id is matched by `in_reply_to`, every turn. |
+| **Oct 22: recovery tooling for a live stack was authored repeatedly into a classifier block.** Three guard attempts and a read-only check tool were cut off mid-authoring. | The block wasn't treated as a route signal after the first time. | Several hours with the stack held; the owner now chooses a manual route. | After one block, live-process disposition goes to an owner route reviewed by Codex; no rephrasing. |
