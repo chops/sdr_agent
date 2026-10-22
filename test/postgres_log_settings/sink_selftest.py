@@ -4094,6 +4094,7 @@ def t30w(d, scratch, runroot):
 T30X_SUBCASES = ("primary_observation_failure", "release_failure",
                  "child_join_failure_later_holders_joined", "holder_join_failure",
                  "t38_joins_withheld", "t30r_joins", "post_fork_close_failure",
+                 "post_fork_close_healthy",
                  "final_holder_reap_failure", "leftover_exception_path",
                  "record_write_failure", "leftover_rc_binding",
                  "orchestration_registration", "record_and_diagnostic_failure")
@@ -4229,7 +4230,8 @@ def t30x(d, scratch, runroot):
     (1) observation failure; (2) release failure (no primary); (3) child join failure with
     an earlier holder still joined; (4) holder join failure under a primary; (5) T38 joins
     on fake handles (withheld release preserved); (6) T30r joins on fakes; (7) post-fork
-    close failure (the child and its holder still joined); (8) T30m's final holder phase:
+    close failure (the child and its holder still joined), with its healthy companion (7h:
+    the same close hook recording only: both closes once, no failure, child rc 0); (8) T30m's final holder phase:
     the first reap fails and the next is still attempted, plus a healthy pair; (9) T30x's
     own leftover joins under a primary failure, plus a healthy pair; (10) join-record write
     failure with a primary and with only a secondary: the failure is added to the failed
@@ -4409,6 +4411,24 @@ def t30x(d, scratch, runroot):
                 "child_reaped": any(k.startswith("case") and k.endswith("-reap") and v["ok"]
                                     for k, v in steps.items()),
                 "holder_reaped": any(k.startswith("holder") and v["ok"] for k, v in steps.items())}
+            # (7h) healthy companion of (7): the same close hook, recording only, no injection
+            hholders = own_holders(own, "7h")
+            closed = []
+
+            def rec_close(fd):
+                closed.append(fd)
+                real["close_fd"](fd)
+            g["close_fd"] = rec_close
+            n[0] += 1
+            try:
+                hres, he = t30m_case(d, T, n[0], sh_case, shells, hholders), None
+            except Exception as ex:
+                hres, he = None, ex
+            g["close_fd"] = real["close_fd"]
+            out["post_fork_close_healthy"] = {
+                "no_failure": he is None,
+                "both_closed_once": len(closed) == 2 and len(set(closed)) == 2,
+                "child_rc0": bool(hres) and hres.get("rc") == 0}
             # (8) T30m's final holder phase: first reap fails, the next is still attempted
             calls = []
             try:
