@@ -124,6 +124,11 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
   setup :span_control
 
   setup do
+    # The span store is global (CI #216): empty it before any test action,
+    # and again at exit (registered first, so it runs after the lease
+    # cleanup's join).
+    InMemoryExporter.reset()
+    on_exit(&InMemoryExporter.reset/0)
     RH.lease_cleanup!()
     SH.select_claude_cli!()
     :ok
