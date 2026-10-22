@@ -2952,6 +2952,7 @@ def settle_joins(d, T, primary, outcomes):
            "primary": None if primary is None else
            {"class": type(primary).__name__, "message": str(primary)[:300]},
            "proof": "owned release/join outcomes only; not a teardown proof"}
+    diagnostic = "not-needed"
     try:
         write_join_record(path, rec)
     except OSError as e:
@@ -2959,18 +2960,29 @@ def settle_joins(d, T, primary, outcomes):
                          "error": str(e)[:300]})
         failed.append("joins-record")
         path = None
-        sys.stderr.write("JOINS-RECORD-UNWRITTEN test=%s error_class=%s primary_class=%s "
-                         "failed_steps=%s\n" % (T, type(e).__name__,
-                                                 type(primary).__name__ if primary is not None
-                                                 else "none", ",".join(failed)))
-        sys.stderr.flush()
+        if primary is not None:            # evidence attached BEFORE the diagnostic attempt
+            primary.join_outcomes, primary.join_record = outcomes, None
+        try:
+            sys.stderr.write("JOINS-RECORD-UNWRITTEN test=%s error_class=%s primary_class=%s "
+                             "failed_steps=%s\n" % (T, type(e).__name__,
+                                                     type(primary).__name__
+                                                     if primary is not None else "none",
+                                                     ",".join(failed)))
+            sys.stderr.flush()
+            diagnostic = "written"
+        except Exception as de:            # both sinks failed: kept, never claimed retained
+            outcomes.append({"step": "joins-diagnostic", "ok": False,
+                             "error_class": type(de).__name__, "error": str(de)[:300]})
+            failed.append("joins-diagnostic")
+            diagnostic = "UNWRITTEN"
     if primary is not None:
         primary.join_outcomes = outcomes
         primary.join_record = path
+        primary.join_diagnostic = diagnostic
         raise primary
-    u = RealUncertainty("%s: owned release/join steps failed (all attempted): %s; record %s"
-                        % (T, failed, path or "UNWRITTEN"))
-    u.join_outcomes, u.join_record = outcomes, path
+    u = RealUncertainty("%s: owned release/join steps failed (all attempted): %s; record %s;"
+                        " diagnostic %s" % (T, failed, path or "UNWRITTEN", diagnostic))
+    u.join_outcomes, u.join_record, u.join_diagnostic = outcomes, path, diagnostic
     raise u
 
 
@@ -4103,21 +4115,77 @@ def leftover_rc_problems(expected, outcomes):
     return probs
 
 
-def t30x_join_leftovers(d, T, primary, leftovers):
-    """T30x's own leftover joins (2eaff27 review R1/R3): `leftovers` is a list of
-    (label, kind, handle-or-pid, expected_rc). Every bounded join is attempted even after
-    an earlier one fails; a primary failure is re-raised unchanged with all outcomes on
-    its own record; otherwise a failed join raises an uncertainty. Returns (outcomes,
-    rc problems) for the per-fixture binding."""
-    steps = []
-    for label, kind, x, _want in leftovers:
-        if kind == "proc":
-            steps.append((label, (lambda x=x: reap(x, D_REAP))))
-        else:
-            steps.append((label, (lambda x=x: reap_pid(x, D_REAP))))
+def t30x_join_leftovers(d, T, primary, leftovers, joiners=None):
+    """T30x's own leftover joins (2eaff27 R1/R3, e52fc41 review): `leftovers` is a list of
+    (label, kind, handle-or-pid-or-fd, expected value); kinds: proc (bounded reap), pid
+    (bounded reap_pid), fd (close; expected None). Every join is attempted even after an
+    earlier one fails. The expected-value binding is computed BEFORE settlement and kept:
+    each mismatch marks its outcome rc_ok false and adds a failed "<label>-expected-rc"
+    outcome, so a nonzero rc is never shown as joined, with or without a primary. A
+    primary failure is re-raised unchanged with all outcomes on its own record; otherwise
+    any failed step raises an uncertainty. Returns (outcomes, rc problems)."""
+    j = {"proc": lambda x: reap(x, D_REAP), "pid": lambda x: reap_pid(x, D_REAP),
+         "fd": lambda x: close_fd(x)}
+    j.update(joiners or {})
+    steps = [(label, (lambda x=x, f=j[kind]: f(x))) for label, kind, x, _want in leftovers]
     out = join_owned(steps)
+    want = {lab: w for lab, _k, _x, w in leftovers}
+    probs = leftover_rc_problems(want, out)
+    bad = {lab for lab, _why in probs}
+    for o in out:
+        if o["step"] in want:
+            o["expected_rc"] = want[o["step"]]
+            o["rc_ok"] = o["step"] not in bad
+    out += [{"step": lab + "-expected-rc", "ok": False, "error_class": "UnexpectedOutcome",
+             "error": why} for lab, why in probs if not why.startswith("join-failed")]
     settle_joins(d, T, primary, out)
-    return out, leftover_rc_problems({lab: want for lab, _k, _x, want in leftovers}, out)
+    return out, probs
+
+
+def own_holders(own, sub):
+    """Register a holder list with the T30x collector at acquisition: t30m_case appends each
+    holder to it as soon as the holder is started."""
+    lst = []
+    own["holders"].append((sub, lst))
+    return lst
+
+
+def own_pid(own, pid):
+    """Register a forked child the harness has NOT reaped (expected rc 0)."""
+    own["pids"].append(pid)
+
+
+def own_fd(own, name, fd):
+    own["fds"][name] = fd
+
+
+def disown_fd(own, name):
+    own["fds"].pop(name, None)
+
+
+def t30x_leftovers(own):
+    out = []
+    for sub, lst in own["holders"]:
+        out += [("leftover-%s-holder%d" % (sub, i), "proc", hh, 0) for i, hh in enumerate(lst)]
+    out += [("leftover-pid%d" % pp, "pid", pp, 0) for pp in own["pids"]]
+    out += [("leftover-fd-%s" % name, "fd", fd, None) for name, fd in sorted(own["fds"].items())]
+    return out
+
+
+def t30x_orchestrate(d, T, body, joiners=None):
+    """T30x's outer orchestration (e52fc41 review R1): ownership is registered in `own` at
+    acquisition (own_holders, own_pid, own_fd) by `body`; ANY handled failure in body is the
+    primary, and every registered leftover is then joined (all attempted, each against its
+    expected value) before the primary is re-raised unchanged. Returns
+    (body result, outcomes, rc problems) on the normal path."""
+    own = {"holders": [], "pids": [], "fds": {}}
+    primary, result = None, None
+    try:
+        result = body(own)
+    except Exception as e:
+        primary = e
+    out, probs = t30x_join_leftovers(d, T, primary, t30x_leftovers(own), joiners)
+    return result, out, probs
 
 
 class FakeJoinProc(object):
