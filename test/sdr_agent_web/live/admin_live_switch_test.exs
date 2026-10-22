@@ -65,12 +65,22 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
   the `crash_on_event!/3` seam and a `:logger` handler after the primary
   filters; with controls) and 15c (the accepted supervisor-report residual,
   shown, with SASL translation on for that test only).
+
+  **The span store (CI #216).** `SdrAgent.Telemetry.InMemoryExporter` is
+  one global store, so the module's setup empties it before any test
+  action and its on_exit empties it again; test 15's assertion and
+  `spans_containing?/1` are unchanged. The "15 control" tests go through
+  that lifecycle: a span exported before the module's setup is gone when
+  the test starts; a fresh canary exported during the test is still found
+  after page actions; and an observer registered before the module's
+  setup (so it runs after its on_exit) finds the test's span gone.
   """
   use SdrAgentWeb.OperatorCase, async: false
 
   import SdrAgent.Test.AdminSwitchHarness
 
   require Logger
+  require OpenTelemetry.Tracer
 
   alias SdrAgent.Accounts
   alias SdrAgent.Agents
@@ -81,6 +91,7 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.AuditCase
   alias SdrAgent.Repo
+  alias SdrAgent.Telemetry.InMemoryExporter
   alias SdrAgent.Test.ResolveHarness, as: RH
   alias SdrAgent.Test.StatusHarness, as: SH
 
@@ -106,10 +117,53 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
     {Agents, :admit_launch, 3}
   ]
 
+  # The "15 control" tests (CI #216). Registered before the setup below, so
+  # a seeded span is exported before that setup runs, and an observer runs
+  # after that setup's on_exit (on_exit callbacks run last in, first out,
+  # after the test's supervised children stop).
+  setup :span_control
+
   setup do
     RH.lease_cleanup!()
     SH.select_claude_cli!()
     :ok
+  end
+
+  defp span_control(%{span_control: :before_setup}) do
+    old = span_canary("before-setup")
+    # Its own cleanup, in case the seeding fails before the module's setup.
+    on_exit(&InMemoryExporter.reset/0)
+    export_span!(old)
+
+    assert spans_containing?(old),
+           "control: the seeded span is in the exporter before the module's setup"
+
+    %{old_canary: old}
+  end
+
+  defp span_control(%{span_control: :teardown}) do
+    canary = span_canary("teardown")
+
+    on_exit(fn ->
+      refute spans_containing?(canary),
+             "R0-05 15 control: the module's on_exit leaves this test's span in the exporter"
+    end)
+
+    %{teardown_canary: canary}
+  end
+
+  defp span_control(_ctx), do: :ok
+
+  defp span_canary(label), do: "r005-span-#{label}-#{System.unique_integer([:positive])}"
+
+  # One synthetic span carrying `canary`. The simple processor's on_end is a
+  # synchronous call, so the span is in the exporter when this returns.
+  defp export_span!(canary) do
+    attributes = %{"r005.canary" => canary}
+
+    OpenTelemetry.Tracer.with_span "r005.span_control", attributes: attributes do
+      :ok
+    end
   end
 
   ## Page steps
@@ -1220,6 +1274,33 @@ defmodule SdrAgentWeb.AdminLiveSwitchTest do
     assert tables_containing(exact) == [] and tables_containing(wrong) == []
     refute spans_containing?(exact) or spans_containing?(wrong)
     assert stored_status!(ctx, blocked) == :failed
+  end
+
+  ## 15 controls: the span store's lifecycle (CI #216)
+
+  @tag span_control: :before_setup
+  test "15 control: a span exported before the module's setup is gone before any test action",
+       ctx do
+    refute spans_containing?(ctx.old_canary),
+           "R0-05 15 control: the module's setup leaves an earlier span in the exporter"
+  end
+
+  test "15 control: a fresh canary exported during the test is found after page actions",
+       %{conn: conn} do
+    canary = span_canary("fresh")
+    export_span!(canary)
+    {_html, _log} = debug_logs(fn -> conn |> admin_view() |> render() end)
+
+    assert spans_containing?(canary),
+           "R0-05 15 control: spans_containing?/1 misses a span exported during the test"
+  end
+
+  @tag span_control: :teardown
+  test "15 control: the test's span is gone once the module's on_exit has run", ctx do
+    export_span!(ctx.teardown_canary)
+
+    assert spans_containing?(ctx.teardown_canary),
+           "control: the span is in the exporter at the end of the test"
   end
 
   ## 15a. Minimization (D-141, option B)
