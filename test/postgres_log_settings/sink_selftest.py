@@ -4095,7 +4095,8 @@ T30X_SUBCASES = ("primary_observation_failure", "release_failure",
                  "child_join_failure_later_holders_joined", "holder_join_failure",
                  "t38_joins_withheld", "t30r_joins", "post_fork_close_failure",
                  "final_holder_reap_failure", "leftover_exception_path",
-                 "record_write_failure", "leftover_rc_binding")
+                 "record_write_failure", "leftover_rc_binding",
+                 "orchestration_registration", "record_and_diagnostic_failure")
 
 
 def leftover_rc_problems(expected, outcomes):
@@ -4234,9 +4235,15 @@ def t30x(d, scratch, runroot):
     failure with a primary and with only a secondary: the failure is added to the failed
     steps and a metadata-only diagnostic line is written to stderr; (11) the per-fixture
     leftover rc binding: an unexpected exit 1 for an expected-zero fixture is a problem,
-    the healthy expected-zero pair is not. The fixtures the injections leave are joined at
-    the end by handle, bounded, ALL attempted, each against its own expected rc; a failure
-    anywhere in the subcases is kept as the primary and still joins them."""
+    the healthy expected-zero pair is not; (12) the REAL outer orchestration
+    (t30x_orchestrate): a failure after ownership acquisition and before record inspection
+    still joins every registered holder and injected-unreaped child, plus a healthy pair,
+    plus an unexpected rc under a primary (computed and kept before settlement); (13) the
+    record write AND its stderr diagnostic both failing: the primary is kept with the
+    failure recorded, and the secondary-only path names it. Every holder list,
+    injected-unreaped child and descriptor is registered AT ACQUISITION; the collector
+    joins them all, bounded, each against its own expected value, and re-raises a primary
+    unchanged."""
     T = "T30x"
     root = mkroot(d, scratch, T, "root")
     shells = {os.path.realpath(x) for x in W.SYSTEM_SH}
@@ -4246,7 +4253,6 @@ def t30x(d, scratch, runroot):
     real = {k: g[k] for k in ("release_holder", "reap_pid", "reap", "close_fd",
                               "write_join_record")}
     out, records, n = {}, {}, [0]
-    leftovers = []                    # (label, kind, handle-or-pid, expected rc)
 
     def run(case, holders):
         n[0] += 1
@@ -4265,228 +4271,310 @@ def t30x(d, scratch, runroot):
         return [f["label"] for f in registry(d)["fixtures"]
                 if f["test"] == T and f.get("disposed") is not None]
 
-    def keep(sub, holders, rc=0):
-        for i, hh in enumerate(holders):
-            leftovers.append(("leftover-%s-holder%d" % (sub, i), "proc", hh, rc))
-
     injected = W.Hold("injected observation failure (fixture-synthetic)")
     real_pa = W.procargs
-    primary = None
-    try:
-        # (1) primary observation failure
-        W.procargs = lambda pid, birth_us, reader=None: (_ for _ in ()).throw(injected)
-        holders = []
-        e = run(py_case, holders)
-        W.procargs = real_pa
-        j = rec(e, "1")
-        out["primary_observation_failure"] = {
-            "same_primary": e is injected,
-            "own_record": bool(j) and (j.get("primary") or {}).get("class") == "Hold",
-            "all_ok": bool(j) and all(o["ok"] for o in j["joins"]),
-            "reaped": bool(j) and any(o["step"].endswith("-reap") and o["ok"]
-                                      for o in j["joins"])}
-        # (2) release failure, no primary
-        holders = []
 
-        def bad_release(h):
-            raise OSError("injected release failure (fixture-synthetic)")
-        g["release_holder"] = bad_release
-        e = run(sh_case, holders)
-        g["release_holder"] = real["release_holder"]
-        j = rec(e, "2")
-        steps = {o["step"]: o for o in (j or {}).get("joins", [])}
-        out["release_failure"] = {
-            "uncertainty": isinstance(e, RealUncertainty) and "release-holder" in str(e),
-            "release_recorded_failed": any(k.endswith("release-holder") and not v["ok"]
-                                           for k, v in steps.items()),
-            "child_reaped": any(k.startswith("case") and k.endswith("-reap") and v["ok"]
-                                and v["value"] == 0 for k, v in steps.items())}
-        keep("2", holders)
-        # (3) the child's join fails; an earlier holder's join is still attempted
-        holders = []
-        e0 = run(sh_case, holders)                  # healthy held case: its holder stays
-        pids_seen = []
-
-        def bad_reap_pid(pid, deadline_s):
-            pids_seen.append(pid)
-            raise RealUncertainty("injected child join failure (fixture-synthetic)")
-        g["reap_pid"] = bad_reap_pid
-        e = run(py_case, holders)
-        g["reap_pid"] = real["reap_pid"]
-        j = rec(e, "3")
-        steps = {o["step"]: o for o in (j or {}).get("joins", [])}
-        out["child_join_failure_later_holders_joined"] = {
-            "healthy_first": e0 is None,
-            "uncertainty": isinstance(e, RealUncertainty) and "-reap" in str(e),
-            "holder_join_attempted": any(k.startswith("holder") and v["ok"]
-                                         for k, v in steps.items()),
-            "holder_reaped": all(hh.returncode is not None for hh in holders)}
-        for pp in pids_seen:
-            leftovers.append(("leftover-3-child%d" % pp, "pid", pp, 0))
-        keep("3", holders)
-        # (4) a holder's join fails under a primary failure
-        holders = []
-        e0 = run(sh_case, holders)
-        g["reap"] = lambda proc, deadline_s: (_ for _ in ()).throw(
-            RealUncertainty("injected holder join failure (fixture-synthetic)"))
-        W.procargs = lambda pid, birth_us, reader=None: (_ for _ in ()).throw(injected)
-        e = run(py_case, holders)
-        W.procargs = real_pa
-        g["reap"] = real["reap"]
-        j = rec(e, "4")
-        out["holder_join_failure"] = {
-            "healthy_first": e0 is None, "same_primary": e is injected,
-            "holder_failure_recorded": bool(j) and any(
-                o["step"].startswith("holder") and not o["ok"] for o in j["joins"]),
-            "primary_recorded": bool(j) and (j.get("primary") or {}).get("class") == "Hold"}
-        keep("4", holders)
-        # (5) T38 joins: withheld release preserved, all attempted, fds closed after
-        calls = []
-        f1, f2 = os.pipe()
-        fds = [f1, f2]
-        procs = {"bad": FakeJoinProc(None, fds, calls), "good": FakeJoinProc(0, fds, calls)}
+    def body(own):
+        """The subcases. Every holder list, injected-unreaped child and descriptor is
+        registered with the collector AT ACQUISITION (own_holders / own_pid / own_fd), so a
+        failure anywhere here still joins it (t30x_orchestrate)."""
         try:
-            t38_joins(d, T, None, procs, {}, fds)
-            e = None
-        except Exception as ex:
-            e = ex
-        j = rec(e, "5")
-        still_open = []
-        for fd in fds:
+            # (1) primary observation failure
+            W.procargs = lambda pid, birth_us, reader=None: (_ for _ in ()).throw(injected)
+            holders = own_holders(own, "1")
+            e = run(py_case, holders)
+            W.procargs = real_pa
+            j = rec(e, "1")
+            out["primary_observation_failure"] = {
+                "same_primary": e is injected,
+                "own_record": bool(j) and (j.get("primary") or {}).get("class") == "Hold",
+                "all_ok": bool(j) and all(o["ok"] for o in j["joins"]),
+                "reaped": bool(j) and any(o["step"].endswith("-reap") and o["ok"]
+                                          for o in j["joins"])}
+            # (2) release failure, no primary
+            holders = own_holders(own, "2")
+
+            def bad_release(h):
+                raise OSError("injected release failure (fixture-synthetic)")
+            g["release_holder"] = bad_release
+            e = run(sh_case, holders)
+            g["release_holder"] = real["release_holder"]
+            j = rec(e, "2")
+            steps = {o["step"]: o for o in (j or {}).get("joins", [])}
+            out["release_failure"] = {
+                "uncertainty": isinstance(e, RealUncertainty) and "release-holder" in str(e),
+                "release_recorded_failed": any(k.endswith("release-holder") and not v["ok"]
+                                               for k, v in steps.items()),
+                "child_reaped": any(k.startswith("case") and k.endswith("-reap") and v["ok"]
+                                    and v["value"] == 0 for k, v in steps.items())}
+            # (3) the child's join fails; an earlier holder's join is still attempted
+            holders = own_holders(own, "3")
+            e0 = run(sh_case, holders)                  # healthy held case: its holder stays
+
+            def bad_reap_pid(pid, deadline_s):
+                own_pid(own, pid)           # registered at the injection itself
+                raise RealUncertainty("injected child join failure (fixture-synthetic)")
+            g["reap_pid"] = bad_reap_pid
+            e = run(py_case, holders)
+            g["reap_pid"] = real["reap_pid"]
+            j = rec(e, "3")
+            steps = {o["step"]: o for o in (j or {}).get("joins", [])}
+            out["child_join_failure_later_holders_joined"] = {
+                "healthy_first": e0 is None,
+                "uncertainty": isinstance(e, RealUncertainty) and "-reap" in str(e),
+                "holder_join_attempted": any(k.startswith("holder") and v["ok"]
+                                             for k, v in steps.items()),
+                "holder_reaped": all(hh.returncode is not None for hh in holders)}
+            # (4) a holder's join fails under a primary failure
+            holders = own_holders(own, "4")
+            e0 = run(sh_case, holders)
+            g["reap"] = lambda proc, deadline_s: (_ for _ in ()).throw(
+                RealUncertainty("injected holder join failure (fixture-synthetic)"))
+            W.procargs = lambda pid, birth_us, reader=None: (_ for _ in ()).throw(injected)
+            e = run(py_case, holders)
+            W.procargs = real_pa
+            g["reap"] = real["reap"]
+            j = rec(e, "4")
+            out["holder_join_failure"] = {
+                "healthy_first": e0 is None, "same_primary": e is injected,
+                "holder_failure_recorded": bool(j) and any(
+                    o["step"].startswith("holder") and not o["ok"] for o in j["joins"]),
+                "primary_recorded": bool(j) and (j.get("primary") or {}).get("class") == "Hold"}
+            # (5) T38 joins: withheld release preserved, all attempted, fds closed after
+            calls = []
+            f1, f2 = os.pipe()
+            own_fd(own, "s5-r", f1)
+            own_fd(own, "s5-w", f2)
+            fds = [f1, f2]
+            procs = {"bad": FakeJoinProc(None, fds, calls), "good": FakeJoinProc(0, fds, calls)}
             try:
-                os.fstat(fd)
-                still_open.append(fd)
-            except OSError:
-                pass
-        for fd in still_open:
-            os.close(fd)
-        out["t38_joins_withheld"] = {
-            "uncertainty": isinstance(e, RealUncertainty) and "reap-bad" in str(e),
-            "both_waited": [c[1] for c in calls] == [None, 0],
-            "fds_open_during_waits": all(c[2] for c in calls),
-            "fds_closed_after": still_open == [],
-            "no_release_step": bool(j) and not any("release" in o["step"]
-                                                   for o in j["joins"])}
-        # (6) T30r joins: a failing reap and a failing kqueue close, primary preserved
-        calls = []
-        prim = W.Hold("injected T30r variant failure (fixture-synthetic)")
+                t38_joins(d, T, None, procs, {}, fds)
+                e = None
+            except Exception as ex:
+                e = ex
+            j = rec(e, "5")
+            still_open = []
+            for fd in fds:
+                try:
+                    os.fstat(fd)
+                    still_open.append(fd)
+                except OSError:
+                    pass
+            for fd in still_open:
+                os.close(fd)
+            disown_fd(own, "s5-r")
+            disown_fd(own, "s5-w")
+            out["t38_joins_withheld"] = {
+                "uncertainty": isinstance(e, RealUncertainty) and "reap-bad" in str(e),
+                "both_waited": [c[1] for c in calls] == [None, 0],
+                "fds_open_during_waits": all(c[2] for c in calls),
+                "fds_closed_after": still_open == [],
+                "no_release_step": bool(j) and not any("release" in o["step"]
+                                                       for o in j["joins"])}
+            # (6) T30r joins: a failing reap and a failing kqueue close, primary preserved
+            calls = []
+            prim = W.Hold("injected T30r variant failure (fixture-synthetic)")
 
-        class FakeWatch(object):
-            kq = FakeJoinKq(calls)
-        try:
-            t30r_joins(d, T, "z", prim, FakeJoinProc(None, [], calls), FakeWatch())
-            e = None
-        except Exception as ex:
-            e = ex
-        j = rec(e, "6")
-        out["t30r_joins"] = {
-            "same_primary": e is prim,
-            "both_attempted": [c[0] for c in calls] == ["wait", "kq-close"],
-            "both_failures_recorded": bool(j) and sorted(
-                o["step"] for o in j["joins"] if not o["ok"]) == ["watch-z-kq-close",
-                                                                  "x-z-reap"]}
-        # (7) post-fork close failure: the child and its holder are still joined
-        holders = []
-        boom = OSError("injected post-fork close failure (fixture-synthetic)")
-        first = [True]
+            class FakeWatch(object):
+                kq = FakeJoinKq(calls)
+            try:
+                t30r_joins(d, T, "z", prim, FakeJoinProc(None, [], calls), FakeWatch())
+                e = None
+            except Exception as ex:
+                e = ex
+            j = rec(e, "6")
+            out["t30r_joins"] = {
+                "same_primary": e is prim,
+                "both_attempted": [c[0] for c in calls] == ["wait", "kq-close"],
+                "both_failures_recorded": bool(j) and sorted(
+                    o["step"] for o in j["joins"] if not o["ok"]) == ["watch-z-kq-close",
+                                                                      "x-z-reap"]}
+            # (7) post-fork close failure: the child and its holder are still joined
+            holders = own_holders(own, "7")
+            boom = OSError("injected post-fork close failure (fixture-synthetic)")
+            first = [True]
 
-        def bad_close(fd):
-            real["close_fd"](fd)
-            if first[0]:
-                first[0] = False
+            def bad_close(fd):
+                real["close_fd"](fd)
+                if first[0]:
+                    first[0] = False
+                    raise boom
+            g["close_fd"] = bad_close
+            e = run(sh_case, holders)
+            g["close_fd"] = real["close_fd"]
+            j = rec(e, "7")
+            steps = {o["step"]: o for o in (j or {}).get("joins", [])}
+            out["post_fork_close_failure"] = {
+                "same_primary": e is boom,
+                "child_reaped": any(k.startswith("case") and k.endswith("-reap") and v["ok"]
+                                    for k, v in steps.items()),
+                "holder_reaped": any(k.startswith("holder") and v["ok"] for k, v in steps.items())}
+            # (8) T30m's final holder phase: first reap fails, the next is still attempted
+            calls = []
+            try:
+                t30m_join_holders(d, T, [FakeJoinProc(None, [], calls), FakeJoinProc(0, [], calls)])
+                e = None
+            except Exception as ex:
+                e = ex
+            j = rec(e, "8")
+            healthy_calls = []
+            healthy = t30m_join_holders(d, T, [FakeJoinProc(0, [], healthy_calls),
+                                               FakeJoinProc(0, [], healthy_calls)])
+            out["final_holder_reap_failure"] = {
+                "uncertainty": isinstance(e, RealUncertainty) and "holder0-reap" in str(e),
+                "second_attempted": [c[1] for c in calls] == [None, 0],
+                "own_record": bool(j) and j["failed_steps"] == ["holder0-reap"],
+                "healthy_pair": healthy == [0, 0] and len(healthy_calls) == 2}
+            # (9) T30x's own leftover joins under a primary failure, and a healthy pair
+            calls = []
+            prim = W.Hold("injected T30x subcase failure (fixture-synthetic)")
+            fakes = [("fake-a", "proc", FakeJoinProc(None, [], calls), 0),
+                     ("fake-b", "proc", FakeJoinProc(0, [], calls), 0)]
+            try:
+                t30x_join_leftovers(d, T, prim, fakes)
+                e = None
+            except Exception as ex:
+                e = ex
+            j = rec(e, "9")
+            hcalls = []
+            hout, hprobs = t30x_join_leftovers(d, T, None, [
+                ("fake-c", "proc", FakeJoinProc(0, [], hcalls), 0),
+                ("fake-d", "proc", FakeJoinProc(0, [], hcalls), 0)])
+            out["leftover_exception_path"] = {
+                "same_primary": e is prim,
+                "both_attempted": [c[1] for c in calls] == [None, 0],
+                "recorded": bool(j) and j["failed_steps"] == ["fake-a"],
+                "healthy_pair": hprobs == [] and len(hcalls) == 2}
+            # (10) join-record write failure: with a primary, and with only a secondary
+            def bad_write(path, rec_):
+                raise OSError("injected record write failure (fixture-synthetic)")
+            cap = io.StringIO()
+            real_err = sys.stderr
+            g["write_join_record"] = bad_write
+            try:
+                sys.stderr = cap
+                prim = W.Hold("injected primary for the record-write control (fixture-synthetic)")
+                try:
+                    settle_joins(d, T, prim, [{"step": "s-a", "ok": False, "error_class": "X",
+                                               "error": "x"}])
+                    ep = None
+                except Exception as ex:
+                    ep = ex
+                try:
+                    settle_joins(d, T, None, [{"step": "s-b", "ok": False, "error_class": "X",
+                                               "error": "x"}])
+                    es = None
+                except Exception as ex:
+                    es = ex
+            finally:
+                sys.stderr = real_err
+                g["write_join_record"] = real["write_join_record"]
+            diag = [ln for ln in cap.getvalue().splitlines()
+                    if ln.startswith("JOINS-RECORD-UNWRITTEN ")]
+            out["record_write_failure"] = {
+                "primary_kept": ep is prim and getattr(ep, "join_record", "x") is None and any(
+                    o["step"] == "joins-record" and not o["ok"] for o in ep.join_outcomes),
+                "secondary_uncertainty": isinstance(es, RealUncertainty) and
+                "joins-record" in str(es) and "s-b" in str(es) and "UNWRITTEN" in str(es),
+                "diagnostics": len(diag) == 2 and "primary_class=Hold" in diag[0] and
+                "failed_steps=s-a,joins-record" in diag[0] and "primary_class=none" in diag[1] and
+                "failed_steps=s-b,joins-record" in diag[1] and
+                not any("fixture-synthetic" in ln for ln in diag)}
+            # (11) per-fixture rc binding: unexpected exit 1 vs the healthy expected-zero pair
+            neg = leftover_rc_problems({"h": 0}, [{"step": "h", "ok": True, "value": 1}])
+            pos = leftover_rc_problems({"h": 0, "k": 0},
+                                       [{"step": "h", "ok": True, "value": 0},
+                                        {"step": "k", "ok": True, "value": 0}])
+            out["leftover_rc_binding"] = {"unexpected_exit1_rejected": neg == [
+                ("h", "rc 1 != expected 0")], "healthy_zero_pair_accepted": pos == []}
+            # (12) the REAL outer orchestration: a failure after ownership acquisition
+            # but before record inspection still joins every registered leftover
+            calls = []
+            boom = ValueError("injected record read failure (fixture-synthetic)")
+            fake_pid = {"pid": lambda x: calls.append(("pid", x)) or 0}
+
+            def failing_body(own2):
+                own_holders(own2, "s").append(FakeJoinProc(0, [], calls))
+                own_pid(own2, 424242)
                 raise boom
-        g["close_fd"] = bad_close
-        e = run(sh_case, holders)
-        g["close_fd"] = real["close_fd"]
-        j = rec(e, "7")
-        steps = {o["step"]: o for o in (j or {}).get("joins", [])}
-        out["post_fork_close_failure"] = {
-            "same_primary": e is boom,
-            "child_reaped": any(k.startswith("case") and k.endswith("-reap") and v["ok"]
-                                for k, v in steps.items()),
-            "holder_reaped": any(k.startswith("holder") and v["ok"] for k, v in steps.items())}
-        keep("7", holders)
-        # (8) T30m's final holder phase: first reap fails, the next is still attempted
-        calls = []
-        try:
-            t30m_join_holders(d, T, [FakeJoinProc(None, [], calls), FakeJoinProc(0, [], calls)])
-            e = None
-        except Exception as ex:
-            e = ex
-        j = rec(e, "8")
-        healthy_calls = []
-        healthy = t30m_join_holders(d, T, [FakeJoinProc(0, [], healthy_calls),
-                                           FakeJoinProc(0, [], healthy_calls)])
-        out["final_holder_reap_failure"] = {
-            "uncertainty": isinstance(e, RealUncertainty) and "holder0-reap" in str(e),
-            "second_attempted": [c[1] for c in calls] == [None, 0],
-            "own_record": bool(j) and j["failed_steps"] == ["holder0-reap"],
-            "healthy_pair": healthy == [0, 0] and len(healthy_calls) == 2}
-        # (9) T30x's own leftover joins under a primary failure, and a healthy pair
-        calls = []
-        prim = W.Hold("injected T30x subcase failure (fixture-synthetic)")
-        fakes = [("fake-a", "proc", FakeJoinProc(None, [], calls), 0),
-                 ("fake-b", "proc", FakeJoinProc(0, [], calls), 0)]
-        try:
-            t30x_join_leftovers(d, T, prim, fakes)
-            e = None
-        except Exception as ex:
-            e = ex
-        j = rec(e, "9")
-        hcalls = []
-        hout, hprobs = t30x_join_leftovers(d, T, None, [("fake-c", "proc",
-                                                          FakeJoinProc(0, [], hcalls), 0)])
-        out["leftover_exception_path"] = {
-            "same_primary": e is prim,
-            "both_attempted": [c[1] for c in calls] == [None, 0],
-            "recorded": bool(j) and j["failed_steps"] == ["fake-a"],
-            "healthy_pair": hprobs == [] and len(hcalls) == 1}
-        # (10) join-record write failure: with a primary, and with only a secondary
-        def bad_write(path, rec_):
-            raise OSError("injected record write failure (fixture-synthetic)")
-        cap = io.StringIO()
-        real_err = sys.stderr
-        g["write_join_record"] = bad_write
-        try:
-            sys.stderr = cap
-            prim = W.Hold("injected primary for the record-write control (fixture-synthetic)")
+
+            def healthy_body(own2):
+                lst = own_holders(own2, "s")
+                lst.append(FakeJoinProc(0, [], calls))
+                lst.append(FakeJoinProc(0, [], calls))
+                return "done"
+
+            def unexpected_rc_body(own2):
+                own_holders(own2, "s").append(FakeJoinProc(1, [], calls))
+                raise boom
             try:
-                settle_joins(d, T, prim, [{"step": "s-a", "ok": False, "error_class": "X",
-                                           "error": "x"}])
-                ep = None
+                t30x_orchestrate(d, T, failing_body, fake_pid)
+                e = None
             except Exception as ex:
-                ep = ex
+                e = ex
+            failing_calls, calls[:] = list(calls), []
+            j = rec(e, "12-failing")
+            hres, hout, hprobs = t30x_orchestrate(d, T, healthy_body, fake_pid)
+            healthy_calls, calls[:] = list(calls), []
             try:
-                settle_joins(d, T, None, [{"step": "s-b", "ok": False, "error_class": "X",
-                                           "error": "x"}])
-                es = None
+                t30x_orchestrate(d, T, unexpected_rc_body, fake_pid)
+                eu = None
             except Exception as ex:
-                es = ex
+                eu = ex
+            ju = rec(eu, "12-unexpected-rc")
+            out["orchestration_registration"] = {
+                "same_primary": e is boom,
+                "all_registered_joined": [c[0] for c in failing_calls] == ["wait", "pid"],
+                "recorded": bool(j) and all(o["ok"] for o in j["joins"]),
+                "healthy_pair": hres == "done" and hprobs == [] and
+                [c[0] for c in healthy_calls] == ["wait", "wait"],
+                "unexpected_rc_under_primary": eu is boom and bool(ju) and any(
+                    o["step"] == "leftover-s-holder0-expected-rc" and not o["ok"]
+                    for o in ju["joins"]) and any(
+                    o["step"] == "leftover-s-holder0" and o.get("rc_ok") is False
+                    for o in ju["joins"])}
+            # (13) record write AND diagnostic both fail: the primary is still kept
+            class BadErr(object):
+                def write(self, *_a):
+                    raise OSError("injected diagnostic failure (fixture-synthetic)")
+
+                def flush(self):
+                    pass
+
+            def bad_write2(path, rec_):
+                raise OSError("injected record write failure (fixture-synthetic)")
+            real_err = sys.stderr
+            g["write_join_record"] = bad_write2
+            try:
+                sys.stderr = BadErr()
+                prim = W.Hold("injected primary, both sinks failing (fixture-synthetic)")
+                try:
+                    settle_joins(d, T, prim, [{"step": "s-c", "ok": False,
+                                               "error_class": "X", "error": "x"}])
+                    ep = None
+                except Exception as ex:
+                    ep = ex
+                try:
+                    settle_joins(d, T, None, [{"step": "s-d", "ok": False,
+                                               "error_class": "X", "error": "x"}])
+                    es = None
+                except Exception as ex:
+                    es = ex
+            finally:
+                sys.stderr = real_err
+                g["write_join_record"] = real["write_join_record"]
+            steps_p = [o["step"] for o in (getattr(ep, "join_outcomes", None) or [])
+                       if not o["ok"]]
+            out["record_and_diagnostic_failure"] = {
+                "primary_kept": ep is prim and getattr(ep, "join_record", "x") is None and
+                getattr(ep, "join_diagnostic", None) == "UNWRITTEN" and
+                steps_p == ["s-c", "joins-record", "joins-diagnostic"],
+                "secondary_uncertainty": isinstance(es, RealUncertainty) and
+                "joins-diagnostic" in str(es) and "diagnostic UNWRITTEN" in str(es)}
         finally:
-            sys.stderr = real_err
-            g["write_join_record"] = real["write_join_record"]
-        diag = [ln for ln in cap.getvalue().splitlines()
-                if ln.startswith("JOINS-RECORD-UNWRITTEN ")]
-        out["record_write_failure"] = {
-            "primary_kept": ep is prim and getattr(ep, "join_record", "x") is None and any(
-                o["step"] == "joins-record" and not o["ok"] for o in ep.join_outcomes),
-            "secondary_uncertainty": isinstance(es, RealUncertainty) and
-            "joins-record" in str(es) and "s-b" in str(es) and "UNWRITTEN" in str(es),
-            "diagnostics": len(diag) == 2 and "primary_class=Hold" in diag[0] and
-            "failed_steps=s-a,joins-record" in diag[0] and "primary_class=none" in diag[1] and
-            "failed_steps=s-b,joins-record" in diag[1] and
-            not any("fixture-synthetic" in ln for ln in diag)}
-        # (11) per-fixture rc binding: unexpected exit 1 vs the healthy expected-zero pair
-        neg = leftover_rc_problems({"h": 0}, [{"step": "h", "ok": True, "value": 1}])
-        pos = leftover_rc_problems({"h": 0}, [{"step": "h", "ok": True, "value": 0}])
-        out["leftover_rc_binding"] = {"unexpected_exit1_rejected": neg == [
-            ("h", "rc 1 != expected 0")], "healthy_zero_accepted": pos == []}
-    except Exception as e:            # kept; the injected leftovers are still joined below
-        primary = e
-    finally:
-        W.procargs = real_pa
-        g.update(real)
-    left_out, left_probs = t30x_join_leftovers(d, T, primary, leftovers)
+            W.procargs = real_pa
+            g.update(real)
+    _res, left_out, left_probs = t30x_orchestrate(d, T, body)
     out["no_disposal_during_failures"] = undisposed() == []
     want = set(T30X_SUBCASES) | {"no_disposal_during_failures"}
     ok = set(out) == want and all(
@@ -4496,8 +4584,8 @@ def t30x(d, scratch, runroot):
     return finish(labels, d, T, ["PASS"], "PASS" if ok else "FAIL",
                   {"fixtures": "ok" if left_probs == [] else "rc-problems-%r" % left_probs},
                   runroot, notes={"subcases": out, "records": records,
-                                  "leftovers": [(lab, want_) for lab, _k, _x, want_
-                                                in leftovers]})
+                                  "leftovers": [(o["step"], o.get("expected_rc"), o.get("value"))
+                                                for o in left_out]})
 
 
 # ---------------------------------------------------------------- injections (T15a-c)
