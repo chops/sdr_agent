@@ -1153,6 +1153,34 @@ Nothing merged overnight. Decisions D-194 to D-196 are on #216 (Codex APPROVE at
 
 **Later owner gates, after agent work finishes:** v4 T7's grant window (its proof harness isn't built yet) and the next G-DEMO window (the browser rehearsal and T7 come first). These are not owner waits today.
 
+### Sprint 1, day 12 (Fri Oct 23): 5b Scope A accepted, Oct 30 will slip (as of 09:30 MDT)
+
+**Merged since the last entry, under D-157:**
+- **#216**: D-194 to D-196 and the Oct 22 journal.
+- **#219**: AdminLiveSwitchTest resets the global span store around each test (the #216 CI timeout).
+- **#221**: D-197 and D-198.
+- **#222** (`e828e6b`): D-199.
+
+**The T4a stack, cleared by restart:**
+- The owner chose a full Mac restart (D-197). Before it, a preflight copied the stack's `/tmp` evidence to durable storage. Its first attempt stopped, because macOS `tar` exits 0 on sockets and prints an unterminated warning per socket. The second attempt, with an exact parser, completed.
+- The owner confirmed the restart prerequisites on the standup page, not in the pane.
+- After the reboot, the post-restart quiet check was path-scoped, with the owner accepting its stated limits (D-199): a host-wide Unix-socket scan can't classify pointer-only names. It found nothing, and Codex gave RELEASE for the shared test database.
+
+**5b Scope A, done and accepted at `e24026e`:**
+- GREEN 87/87 and T19c 1/1 after two seams. The first GREEN run stopped on a T43a timing race, which a test seam fixed.
+- Regression 17/17.
+- Planted bugs 79/79 caught: 26 authority, 33 role, 4 guard and 16 diagnostic.
+- This morning, the 70 remaining fake-only tests ran once: 70/70 as predicted. With the accepted 87, 17 and T19c, synthetic coverage at this head is 175/175. One disclosed deviation: the driver was started by a relative path, the same bytes as the claim's absolute path. Codex judged it immaterial.
+- This is not a full 5b pass. The full self-test reruns T4a, which on this code would likely hit the timing race again and leave a live stack. The owner's choice is pending, and both agents pick defer.
+- Scope B, the timing race, still has no approved fix. Its observation candidate is paused (D-198).
+
+**Forecast:** Codex and Claude now forecast that the Oct 30 release candidate will slip under the current scope, capacity and dependencies. 5b has no supported date, and Codex's own remaining lane (9.5–15.5 agent-days) is longer than the days left. The Nov 6 core likely slips too. Today's standup asks the owner how to replan: let Oct 30 slip and re-date once 5b's path is known (both agents' pick), cut scope, or spend the protected S6 block.
+
+**Ready for the owner now:**
+- the full self-test choice and the release-candidate replan;
+- the D-168 install and the witness diagnostic;
+- the H1 task walk.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -1214,3 +1242,8 @@ says what happened, why, what it cost and what changed.
 | **Oct 21–22: plan round 4 dropped a binding requirement.** The new shared permission check left out round 2's rule that a copied process may use only the permission it was copied with. | The helper was described as complete without re-checking each inherited clause. | One review round (Codex `9f875af5`). | Every round's plan is checked clause by clause against the inherited rulings before it is sent. |
 | **Oct 21–22: a review sat about 4 hours unread.** The D-193 r6 review (04:24 UTC) wasn't seen, because Claude listed only the newest few inbox envelopes while others kept arriving. | "Newest N" listing, not matching each open ask's `in_reply_to`. | About 4 hours of D-193 review latency. | Each open consult id is matched by `in_reply_to`, every turn. |
 | **Oct 22: recovery tooling for a live stack was authored repeatedly into a classifier block.** Three guard attempts and a read-only check tool were cut off mid-authoring. | The block wasn't treated as a route signal after the first time. | Several hours with the stack held; the owner now chooses a manual route. | After one block, live-process disposition goes to an owner route reviewed by Codex; no rephrasing. |
+| **Oct 22: the restart preflight's first attempt stopped.** macOS `tar` exits 0 on sockets and prints one unterminated warning per socket, which the script hadn't expected. | The script was written against an assumed `tar` behaviour, not one observed on this host. | One owner rerun; the restart waited. | Host tool behaviour is observed before a fail-closed parser is written against it. |
+| **Oct 22: an owner confirmation typed in the pane was treated as owner authority.** | Pane-prefixed text was taken at face value; it doesn't authenticate the owner. | One Codex correction; the confirmation was re-obtained on the standup page. | Owner decisions come only from the standup page under the owner's id. |
+| **Oct 23: a GREEN run's extraction step refused and ran nothing.** It looked for a driver name the claim didn't use. | The claim didn't name the driver's saved path. | One reclaim. | Every claim names the driver's saved path, and extraction refuses if the path exists. |
+| **Oct 23: Claude relayed wrong planted-bug totals.** | The totals were restated from memory, not read from the map. | One correction to Codex. | Counts are read from the pinned map or the measured file before they're relayed. |
+| **Oct 23: the overnight loop left Codex idle.** With Claude's lane blocked on the owner, nothing gave Codex its own work until the owner asked why. | "Blocked on the owner" was read as covering both agents. | Several hours of Codex feature capacity. | When Claude's lane is blocked, Codex's own lane is checked and resumed. |
