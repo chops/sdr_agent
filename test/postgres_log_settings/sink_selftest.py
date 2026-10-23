@@ -104,7 +104,10 @@ A_FAB_IDS = (
     "T41a", "T41c", "T41d", "T41e", "T41f", "T41g-a", "T41g-b", "T41h", "T42b",
     "T44a", "T44b", "T44c-regen", "T44c-mismatch", "T44c-missing", "T44c-state", "T44d",
     "T44e", "T44f", "T44h", "T44i-image", "T44i-vector", "T44j", "T44k", "T44l", "T44m",
-    "T44z")
+    "T44z",
+    # holder-no-later-fork predicate H (Codex ruling f0f6d5d6), RED-only at a8eab5c
+    "T40s-later", "T40s-tie", "T40s-bad-event", "T40s-bad-admitted", "T40s-live-sibling",
+    "T40s-dead-sibling", "T40s-othergen", "T40s-periodic", "T40s-healthy")
 A_PHASE_IDS = ("T40h", "T40n-phase", "T44g")
 A_PG_IDS = ("T43a", "T43b", "T43c", "T43d", "T43e-before", "T43e-drain", "T43f", "T43g",
             "T43h", "T43i", "T43j")
@@ -5863,6 +5866,177 @@ def a44z(A):
         {"probe": rec}
 
 
+# -- holder-no-later-fork predicate H (plan r2 3.1 clause; proposal 3bc25a68 as amended and
+# adopted per Codex ruling f0f6d5d6, m_1792738495530467292_80aaafe3). H1: no RELEVANT handled
+# fork-note of the holder (same pid AND generation) at or after the candidate's admission
+# time (ties refuse); a relevant record with malformed identity or a non-finite/non-numeric
+# time, or a candidate admission time that is not a finite number, refuses. H2: no other known
+# child (live or dead) of the holder binding, excluding exactly the candidate identity. Every
+# variant uses its own holder and records its own named check; all variants run before the
+# first false key is reported. Records named "fabricated" are fixture-synthetic.
+def a40s_try(A, h, c):
+    """The subject call: the candidate's VALID admission snapshot with exactly the holder's
+    shell image and vector (the fork-copy shape)."""
+    A.admit(c, A.SH, list(h["allowance_argv"]))
+    return c
+
+
+def a40s_refused(A, c, name):
+    """Not a fork-copy: the existing generic refusal (exactly one sh-form-mismatch for the
+    candidate, no allowance)."""
+    return [("no-copy-" + name, c.get("role") != "fork-copy" and "fork_copy_of" not in c),
+            ("form-mismatch-" + name, len(A.viol(c, "sh-form-mismatch")) == 1),
+            ("no-allowance-" + name, "allowance" not in c)]
+
+
+def a40s_copied(A, h, c, name):
+    """The ordinary first copy: role fork-copy with the pinned binding and no violation."""
+    return [("copy-" + name, c.get("role") == "fork-copy"),
+            ("binding-" + name, c.get("fork_copy_of") == {
+                "parent": h["pid"], "parent_gen": h["gen"], "parent_birth_us": h["birth_us"],
+                "form": "initdb-check"}),
+            ("no-violation-" + name, A.viol(c) == [])]
+
+
+def a40s_event(A, h, t, **over):
+    """A fabricated handled fork-note record of the holder (pid, gen) at time t; keys given as
+    None in `over` are removed, others replaced."""
+    ev = {"t": t, "ev": "fork-note", "pid": h["pid"], "birth_us": h["birth_us"],
+          "gen": h["gen"], "proof": "fixture-synthetic"}
+    for k, v in over.items():
+        if v is None:
+            ev.pop(k, None)
+        else:
+            ev[k] = v
+    A.w.events.append(ev)
+
+
+def a40s_later(A):
+    """H1, later fork: the holder's NOTE_FORK is handled by the REAL handler after the
+    candidate's admission and before its admission snapshot: no copy. The candidate's own
+    later exec is then judged by the direct consumer path, which grants the same exec_role
+    once (recorded to show the downstream authority outcome does not diverge)."""
+    _, h = A.holder("initdb-check")
+    c = A.ent(parent=h)
+    A.w.handle(FakeEv(h["pid"], W.NOTE_FORK, udata=h["gen"]))
+    a40s_try(A, h, c)
+    checks = a40s_refused(A, c, "later")
+    A.exec_(c, A.P, A.vec["initdb-check"])
+    checks += [("downstream-one-grant", c.get("role") == "pg-bootstrap" and
+                h.get("allowed_children") == 1 and h.get("allowed_child") == A.ident(c))]
+    return checks, {}
+
+
+def a40s_tie(A):
+    """H1, tie: a fabricated relevant fork-note stamped exactly at the candidate's admission
+    time refuses."""
+    _, h = A.holder("initdb-check")
+    c = A.ent(parent=h)
+    a40s_event(A, h, c["admitted"])
+    return a40s_refused(A, a40s_try(A, h, c), "tie"), {}
+
+
+A40S_BAD_EVENTS = (("nan", {"t": float("nan")}), ("inf", {"t": float("inf")}),
+                   ("bool", {"t": True}), ("str", {"t": "1.0"}), ("t-missing", {"t": None}),
+                   ("gen-missing", {"gen": None}), ("pid-missing", {"pid": None}),
+                   ("pid-mismatch", {"pid": 1}))
+
+
+def a40s_bad_event(A):
+    """H1, malformed relevant evidence: a fabricated fork-note relevant to the holder whose
+    time is NaN, infinite, a bool, a string or missing; whose generation is missing (pid
+    matching); or whose generation matches while its pid is missing or another pid (pid 1,
+    a fabricated value: no process is touched): refuses, with no controller error."""
+    checks = []
+    for name, over in A40S_BAD_EVENTS:
+        _, h = A.holder("initdb-check")
+        c = A.ent(parent=h)
+        a40s_event(A, h, W.now(), **over)
+        checks += a40s_refused(A, a40s_try(A, h, c), name)
+    return checks, {"variants": [n for n, _ in A40S_BAD_EVENTS]}
+
+
+A40S_BAD_ADMITTED = (("nan", float("nan")), ("inf", float("inf")), ("bool", True),
+                     ("missing", None))
+
+
+def a40s_bad_admitted(A):
+    """H1, malformed candidate admission time (NaN, infinite, bool or missing), with no
+    fork-note at all: refuses."""
+    checks = []
+    for name, val in A40S_BAD_ADMITTED:
+        _, h = A.holder("initdb-check")
+        c = A.ent(parent=h)
+        if val is None:
+            c.pop("admitted", None)
+        else:
+            c["admitted"] = val
+        checks += a40s_refused(A, a40s_try(A, h, c), "admitted-" + name)
+    return checks, {"variants": [n for n, _ in A40S_BAD_ADMITTED]}
+
+
+def a40s_live_sibling(A):
+    """H2, live sibling: another tracked live child of the holder refuses."""
+    _, h = A.holder("initdb-check")
+    A.ent(parent=h)
+    c = A.ent(parent=h)
+    return a40s_refused(A, a40s_try(A, h, c), "live-sibling"), {}
+
+
+def a40s_dead_sibling(A):
+    """H2, dead siblings: a child of the holder that exited (REAL handler) refuses; and a
+    dead child that shares the CANDIDATE'S pid (another birth/generation) is also a sibling,
+    since only the exact candidate identity is excluded."""
+    _, h = A.holder("initdb-check")
+    s = A.ent(parent=h)
+    A.exit(s)
+    c = A.ent(parent=h)
+    checks = a40s_refused(A, a40s_try(A, h, c), "dead-sibling")
+    _, h2 = A.holder("initdb-check")
+    s2 = A.ent(parent=h2)
+    A.exit(s2)
+    c2 = A.ent(parent=h2, pid=s2["pid"], birth=s2["birth_us"] + 1)
+    checks += a40s_refused(A, a40s_try(A, h2, c2), "dead-same-pid")
+    return checks, {}
+
+
+def a40s_othergen(A):
+    """H1 is generation-bound: a later valid fork-note of the holder's pid under ANOTHER
+    generation, and a later fork-note of an unrelated pid AND generation, do not themselves
+    refuse."""
+    _, h = A.holder("initdb-check")
+    c = A.ent(parent=h)
+    other = A.gen(h["pid"], h["birth_us"] - 1, state="retired")
+    a40s_event(A, h, W.now(), gen=other)
+    checks = a40s_copied(A, h, a40s_try(A, h, c), "othergen")
+    _, h2 = A.holder("initdb-check")
+    c2 = A.ent(parent=h2)
+    p2 = A.pid()
+    a40s_event(A, h2, W.now(), pid=p2, gen=A.gen(p2, p2 * 1000))
+    checks += a40s_copied(A, h2, a40s_try(A, h2, c2), "otherpid")
+    return checks, {}
+
+
+def a40s_periodic(A):
+    """The disclosed conservative refusal: a candidate admitted by the periodic census whose
+    holder's own NOTE_FORK is handled (REAL handler) afterwards cannot be ordered against it,
+    so it is not a copy."""
+    _, h = A.holder("initdb-check")
+    c = A.ent(parent=h)
+    c["via"] = "periodic"
+    A.w.handle(FakeEv(h["pid"], W.NOTE_FORK, udata=h["gen"]))
+    return a40s_refused(A, a40s_try(A, h, c), "periodic"), {}
+
+
+def a40s_healthy(A):
+    """The ordinary first copy: the holder's NOTE_FORK is handled (REAL handler) BEFORE the
+    candidate is admitted; the candidate is the holder's only child: fork-copy."""
+    _, h = A.holder("initdb-check")
+    A.w.handle(FakeEv(h["pid"], W.NOTE_FORK, udata=h["gen"]))
+    c = A.ent(parent=h)
+    return a40s_copied(A, h, a40s_try(A, h, c), "healthy"), {}
+
+
 # id -> (body, class); every scope-A fabricated control passes as PASS when its desired
 # (refusal or acceptance) outcome is observed
 A_CONTROLS = {
@@ -5883,6 +6057,10 @@ A_CONTROLS = {
     "T44f": a44f, "T44g": a44g, "T44h": a44h, "T44i-image": a44i_image,
     "T44i-vector": a44i_vector, "T44j": a44j, "T44k": a44k, "T44l": a44l, "T44m": a44m,
     "T44z": a44z,
+    "T40s-later": a40s_later, "T40s-tie": a40s_tie, "T40s-bad-event": a40s_bad_event,
+    "T40s-bad-admitted": a40s_bad_admitted, "T40s-live-sibling": a40s_live_sibling,
+    "T40s-dead-sibling": a40s_dead_sibling, "T40s-othergen": a40s_othergen,
+    "T40s-periodic": a40s_periodic, "T40s-healthy": a40s_healthy,
 }
 
 
