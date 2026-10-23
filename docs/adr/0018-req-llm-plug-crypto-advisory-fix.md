@@ -45,10 +45,11 @@ from 1.9.0 to before 1.29.0, and `plug_crypto` from 1.0.0 to before 2.2.1.
 
 **Pros:** the smallest lock change that clears both advisories. `req_llm`
 1.29.0 requires `llm_db ~> 2026.10.4`, so `llm_db` has to move with it.
-**Cons:** `req_llm` 1.29.0 declares `zoi ~> 0.18.11`, while ADR-0003 holds
-`zoi` at exactly 0.18.10 with `override: true`, because 0.18.11 removes
-`Zoi.Types.Default` and breaks the pinned `jido_action`. The override
-resolves `req_llm` against 0.18.10, below its declared range.
+**Cons:** `req_llm` 1.29.0 and `llm_db` 2026.10.6 both declare
+`zoi ~> 0.18.11`, while ADR-0003 holds `zoi` at exactly 0.18.10 with
+`override: true`, because 0.18.11 removes `Zoi.Types.Default` and breaks the
+pinned `jido_action`. The override resolves both packages against 0.18.10,
+below their declared range.
 
 ### Option 3: ignore the advisories
 
@@ -69,20 +70,40 @@ We will use Option 2. `mix.lock` changes in exactly three entries, and
 
 ## Consequences
 
-- `mix hex.audit` reports "No retired or security advisory packages found",
-  and the blocking CI step passes again.
-- `req_llm` runs against `zoi` 0.18.10, below its declared `~> 0.18.11`. It
-  compiles with the rest of the application under `--warnings-as-errors`
-  (dev and test), and the application doesn't call it directly. A `req_llm`
-  path that relies on a 0.18.11-only `zoi` feature would fail at runtime
-  rather than at compile time. Any later direct use of `ReqLLM` or `Jido.AI`
-  model calls must prove that path first, or come with an ADR-0003 amendment
-  that moves the whole Jido/Zoi set.
-- The ADR-0003 regression test, which pins the Jido/Zoi set, is unaffected.
+- Once this merges with a green CI run, `mix hex.audit` stops blocking pull
+  requests. That CI result is pending at the time of writing.
+- **Residual, for the owner to accept:** `req_llm` and `llm_db` run against
+  `zoi` 0.18.10, below their declared `~> 0.18.11`.
+  - "Not called directly" is not "not executed". `ReqLLM.Application` starts
+    with the application and initializes provider discovery, a schema cache
+    and child services. The pinned `jido_ai` resolves models through
+    `LLMDB.Model` and `ReqLLM.model`, whose model and provider paths are
+    Zoi-validated.
+  - A path that relies on a 0.18.11-only `zoi` feature would fail at runtime,
+    not at compile time. No such path is known to be reached today, and none
+    is claimed to be safe.
+  - **Revisit trigger:** before any use of `ReqLLM`, `LLMDB` or `Jido.AI`
+    model, catalog or schema paths, direct or through Jido, that path needs
+    its own compatibility evidence, or an ADR-0003 amendment that moves the
+    whole Jido/Zoi set.
+- The ADR-0003 regression test, which pins the Jido/Zoi set, should be
+  unaffected; it runs in CI.
 
 ## Verification
 
-- `mix hex.audit`: clean.
-- `mix compile --warnings-as-errors` in dev and test: clean.
-- The full test suite runs in CI on the pull request, which is the gate for
-  this lock-only change.
+Each item says how strong it is.
+
+1. **Local, author-reported:** `mix hex.audit` clean;
+   `mix compile --warnings-as-errors` clean in dev and test; `mix format
+   --check-formatted`, `mix credo` and `bin/verify-workflow` pass.
+2. **Exact-head CI, pending:** application start, the ADR-0003 lock test and
+   the full suite. This PR doesn't merge without it.
+3. **Not exercised:** `ReqLLM` and `LLMDB` paths beyond application start.
+   They are the residual above.
+
+**Usage rules:** of the three packages, only `req_llm` ships a
+`usage-rules.md`. It is a transitive dependency and isn't in the project's
+synced set, so this change adds no usage-rules section. `mix usage_rules.sync`
+does propose changes, but only for packages this PR doesn't touch (`ash`,
+`ash_authentication`, `jido`, `jido_action`, `jido_ai`). That is existing
+drift, and syncing it is a separate change.
