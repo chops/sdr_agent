@@ -2019,9 +2019,11 @@ class Watch(object):
         if "allowance" not in pe or pe.get("role") != "pg-sh" or "allowance_consumed" in pe or \
                 pe.get("allowed_children", 0) != 0 or "fork_copy" in pe:
             return False
+        # the candidate has no fork-note and no KNOWN child: live or retired (dead) records,
+        # bound by the candidate's exact pid and birth (plan r2 3.1; Codex 525c1a76, RED-C)
         if self.fork_notes.get(e["pid"], 0) or any(
                 x.get("parent") == e["pid"] and x.get("parent_birth_us") == e["birth_us"]
-                for x in self.entries.values()):
+                for x in list(self.entries.values()) + list(self.dead)):
             return False
         if not self.holder_fork_clear(e, pe):
             return False
