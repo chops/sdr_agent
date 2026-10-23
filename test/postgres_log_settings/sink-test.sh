@@ -83,6 +83,7 @@ SYNTHETIC_IDS="$SYNTHETIC_IDS T44a T44b T44c-regen T44c-mismatch T44c-missing T4
 SYNTHETIC_IDS="$SYNTHETIC_IDS T44e T44f T44g T44h T44i-image T44i-vector T44j T44k T44l T44m T44z"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T40s-later T40s-tie T40s-bad-event T40s-bad-admitted T40s-live-sibling"
 SYNTHETIC_IDS="$SYNTHETIC_IDS T40s-dead-sibling T40s-othergen T40s-periodic T40s-healthy"
+SYNTHETIC_IDS="$SYNTHETIC_IDS T40t-live-child T40t-dead-child T40t-childless"
 SHELL_IDS="T1 T2 T3 T13 T14 T19e T19h T26d T28a T28b T28c T29a T29b T33"
 INSTANCE_IDS="T4a T4b T5 T6 T7 T8 T15a T15b T15c T25"
 

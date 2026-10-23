@@ -107,7 +107,9 @@ A_FAB_IDS = (
     "T44z",
     # holder-no-later-fork predicate H (Codex ruling f0f6d5d6), RED-only at a8eab5c
     "T40s-later", "T40s-tie", "T40s-bad-event", "T40s-bad-admitted", "T40s-live-sibling",
-    "T40s-dead-sibling", "T40s-othergen", "T40s-periodic", "T40s-healthy")
+    "T40s-dead-sibling", "T40s-othergen", "T40s-periodic", "T40s-healthy",
+    # candidate child history (Codex review 525c1a76), RED-only at 99d93448
+    "T40t-live-child", "T40t-dead-child", "T40t-childless")
 A_PHASE_IDS = ("T40h", "T40n-phase", "T44g")
 A_PG_IDS = ("T43a", "T43b", "T43c", "T43d", "T43e-before", "T43e-drain", "T43f", "T43g",
             "T43h", "T43i", "T43j")
@@ -6038,6 +6040,51 @@ def a40s_healthy(A):
     return a40s_copied(A, h, a40s_try(A, h, c), "healthy"), {}
 
 
+# -- candidate child history (plan r2 3.1: the copy candidate has no fork-notes AND no tracked
+# children; Codex full-GREEN review 525c1a76, m_1792739984589456834_7ac30afe). The candidate's
+# own fork_notes stay empty, so the child-history predicate (not the counter) is exercised.
+# Child records are admitted through the REAL new_entry (census admission; fixture-synthetic
+# identities), and exited through the REAL handle/retire path.
+def a40t_live_child(A):
+    """A candidate with a known LIVE child (and no fork-note of its own) is not a copy."""
+    _, h = A.holder("initdb-check")
+    c = A.ent(parent=h)
+    A.grandchild(c)
+    checks = [("candidate-fork-notes-empty", A.w.fork_notes.get(c["pid"], 0) == 0)]
+    return checks + a40s_refused(A, a40s_try(A, h, c), "live-child"), {}
+
+
+def a40t_dead_child(A):
+    """A candidate whose known child has EXITED (real handle NOTE_EXIT, retire into dead) and
+    which has no fork-note of its own is not a copy: retired history is still known history."""
+    _, h = A.holder("initdb-check")
+    c = A.ent(parent=h)
+    k = A.grandchild(c)
+    A.exit(k)
+    checks = [("child-retired", A.w.entries.get(k["pid"]) is not k and
+               any(x is k for x in A.w.dead) and A.w.gens[k["gen"]]["state"] == "retired"),
+              ("candidate-fork-notes-empty", A.w.fork_notes.get(c["pid"], 0) == 0)]
+    return checks + a40s_refused(A, a40s_try(A, h, c), "dead-child"), {}
+
+
+def a40t_childless(A):
+    """The childless companion still copies, and the binding is the candidate's EXACT
+    identity: a dead child of an earlier generation of the candidate's pid (same pid,
+    another birth; fixture-synthetic parent record) is not the candidate's child."""
+    _, h = A.holder("initdb-check")
+    c = A.ent(parent=h)
+    checks = a40s_copied(A, h, a40s_try(A, h, c), "childless")
+    _, h2 = A.holder("initdb-check")
+    c2 = A.ent(parent=h2)
+    old = {"pid": c2["pid"], "birth_us": c2["birth_us"] - 1,
+           "gen": A.gen(c2["pid"], c2["birth_us"] - 1, state="retired")}
+    k = A.ent(parent=old)
+    A.exit(k)
+    checks += [("other-generation-child-dead", any(x is k for x in A.w.dead))]
+    checks += a40s_copied(A, h2, a40s_try(A, h2, c2), "other-generation-child")
+    return checks, {}
+
+
 # id -> (body, class); every scope-A fabricated control passes as PASS when its desired
 # (refusal or acceptance) outcome is observed
 A_CONTROLS = {
@@ -6062,6 +6109,8 @@ A_CONTROLS = {
     "T40s-bad-admitted": a40s_bad_admitted, "T40s-live-sibling": a40s_live_sibling,
     "T40s-dead-sibling": a40s_dead_sibling, "T40s-othergen": a40s_othergen,
     "T40s-periodic": a40s_periodic, "T40s-healthy": a40s_healthy,
+    "T40t-live-child": a40t_live_child, "T40t-dead-child": a40t_dead_child,
+    "T40t-childless": a40t_childless,
 }
 
 
