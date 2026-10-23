@@ -6208,6 +6208,11 @@ T43_TEXT = {
 T43_LAUNCHES = {"g": ["lsof", "pg_ctl"], "i": ["lsof"], "j": ["lsof"]}
 T43_READS = {"g": 1, "i": 1, "j": 1}
 T43_TEXT_FIRST = ("e-before", "h")       # refusal text and launch map before no-spawn
+# T43a phase seam (diagnosis 99930c86, ruling 5ea5bcd3): the UNKNOWN answer is returned
+# T43A_SNAP_PAST_S after the bound it is passed, so E is crossed inside process_requests;
+# the REQUESTED sleep is capped (scheduling may overshoot it: a visible failure, never retried)
+T43A_SNAP_PAST_S = 0.01
+T43A_SNAP_MAX_S = 1.0
 
 
 class DrainlessKq(object):
@@ -6229,6 +6234,8 @@ def t43(d, scratch, runroot, v):
     owned "other" target for T43a; postmaster.pid names the pm fixture):
     a  another target's unresolved non-title obligation (its snapshot stubbed UNKNOWN; the
        enclosing bound set below the obligation's own deadline) -> the quiesce bound text;
+       phase seam: the UNKNOWN answer returns just after E, and a recorder around the REAL
+       fence proves every fence was empty, so E is crossed inside process_requests;
     b  a fetch that never comes back empty (DrainlessKq) -> no empty fence;
     c  the pm identity read returns after E (slow W.bsdinfo) -> late re-proof;
     d  REAL pidpath (the python fixture image, seam NOT installed) -> image mismatch;
@@ -6255,6 +6262,7 @@ def t43(d, scratch, runroot, v):
     real_pidpath, real_bsd, real_now, real_cwd = W.pidpath, W.bsdinfo, W.now, W.proc_cwd
     real_kq = w.kq
     kills, launches, reads = [], [], []
+    snaps, fences, phase_a = [], [], {}     # T43a only: the phase seam's records
     clock = {"armed": False, "calls": 0, "shift": 0.0, "from": 1}
     want = T43_TEXT.get(v)
     deadline_s = -0.01 if v == "h" else (300.0 if v == "i" else 30.0)
@@ -6270,8 +6278,27 @@ def t43(d, scratch, runroot, v):
         if v == "a":
             og = w.entries[procs["other"].pid]["gen"]
             w.request(og, "admission")                  # its deadline: now + 2.0
-            w.snapshot = lambda g, deadline: {"result": "UNKNOWN"}
+            phase_a["obligation_deadline"] = w.requests[og]["deadline"]   # immutable
+
+            def unresolved_snap(g, deadline):
+                # fixture-synthetic (T43a only): UNKNOWN returned just after the bound it
+                # is passed, so E is crossed inside process_requests, never inside a fence
+                ask = min(max(0.0, deadline - W.now()) + T43A_SNAP_PAST_S, T43A_SNAP_MAX_S)
+                snaps.append({"g": g, "deadline": deadline, "entered": W.now(),
+                              "requested_sleep": ask})
+                time.sleep(ask)
+                snaps[-1]["returned"] = W.now()
+                return {"result": "UNKNOWN"}
+
+            def fence_rec(deadline, cap=W.FENCE_CAP, _f=w.fence):
+                # observation only: the REAL bound fence, same arguments, result unmodified
+                out = _f(deadline, cap)
+                fences.append({"deadline": deadline, "cap": cap, "result": out})
+                return out
+            w.snapshot = unresolved_snap
+            w.fence = fence_rec
             w.enclosing = W.now() + 0.5
+            phase_a["E"] = w.enclosing          # binding: min(now + 2.0, now + 30, now + 0.5)
             want = "quiesce bound passed (unresolved image obligations: %r)" % [og]
         elif v == "b":
             w.kq = DrainlessKq(0.01, FakeEv(pm, W.NOTE_FORK, udata=pm_gen))
@@ -6329,9 +6356,10 @@ def t43(d, scratch, runroot, v):
         W.pidpath, W.bsdinfo, W.now, W.proc_cwd = real_pidpath, real_bsd, real_now, real_cwd
         w.kq = real_kq
         w.__dict__.pop("snapshot", None)
+        w.__dict__.pop("fence", None)
     restored = os.kill is real_kill and subprocess.Popen is real_popen and \
         W.pidpath is real_pidpath and W.bsdinfo is real_bsd and W.now is real_now and \
-        W.proc_cwd is real_cwd and "snapshot" not in vars(w)
+        W.proc_cwd is real_cwd and "snapshot" not in vars(w) and "fence" not in vars(w)
     rcs = outer_reap(procs)
     if err is not None:
         if isinstance(err, RealUncertainty):
@@ -6357,6 +6385,18 @@ def t43(d, scratch, runroot, v):
         text_ok = t19i_pgctl_refused(hold) if v == "h" else (r is None and hold == want)
         tail = [] if v == "d" else [("image-reads", len(reads) == T43_READS.get(v, 0))]
         tail += [("no-kill", kills == []), ("restored", restored)]
+        if v == "a":
+            # every fence was a REAL empty fence (a float time, never None), and the last
+            # UNKNOWN answer straddled E (its passed deadline) before the obligation's own
+            # immutable deadline: the refusal came from quiesce's post-processing check
+            E, od = phase_a.get("E"), phase_a.get("obligation_deadline")
+            last = snaps[-1] if snaps else {}
+            tail += [("fences-empty", len(fences) >= 1 and
+                      all(type(x["result"]) is float for x in fences)),
+                     ("crossed-in-requests", type(E) is float and type(od) is float and
+                      E < od and last.get("g") == og and last.get("deadline") == E and
+                      type(last.get("returned")) is float and
+                      last["entered"] < E <= last["returned"] < od)]
         if v in T43_TEXT_FIRST:
             checks = [("text", text_ok), ("launch-map", seq == want_seq),
                       ("no-spawn", no_spawn)] + tail
@@ -6368,7 +6408,9 @@ def t43(d, scratch, runroot, v):
                   {"outer_reap": rcs_word(rcs, {k: 0 for k in procs}), "fixtures": "ok"},
                   runroot, notes={"checks": [[k, ok is True] for k, ok in checks],
                                   "result": r, "hold": hold, "want": want, "launches": seq,
-                                  "image_reads": len(reads), "clock": clock})
+                                  "image_reads": len(reads), "clock": clock,
+                                  "phase_a": (dict(phase_a, snaps=snaps, fences=fences)
+                                              if v == "a" else None)})
 
 
 def inject(kind, path, pid=None):
