@@ -1501,16 +1501,30 @@ def t19c(d, scratch, runroot):
                                       ("pm", "postmaster-final", "SIGTERM,SIGINT", pgd)])
     with open(pgd + "/postmaster.pid", "w") as f:
         f.write("%d\n%s\n" % (procs["pm"].pid, pgd))
-    res = W.stop_tree(w, fake_manifest(root), stages=STAGES)
+    # Scope A GREEN (Codex review dfca52f0, P2 option a): pg_ctl_stop's re-proof requires the
+    # pinned postgres image; the adopted pm fixture is a python process. A pid-scoped
+    # fixture-synthetic image seam answers for the owned pm only (every other pid goes to the
+    # real pidpath), is restored in finally even on an exception, and its single consultation
+    # is asserted. The subject is unchanged: the real pg_ctl stop stage fails (rc != 0), the
+    # postmaster stays, nothing is SIGKILLed, and teardown is the outer reap.
+    real_pidpath, pm_reads = W.pidpath, []
+    try:
+        W.pidpath = pm_image_seam(procs["pm"].pid, pm_reads, real_pidpath)
+        res = W.stop_tree(w, fake_manifest(root), stages=STAGES)
+    finally:
+        W.pidpath = real_pidpath
+    restored = W.pidpath is real_pidpath
     rcs = outer_reap(procs)
     labels = ['root']  # disposed by finish() only after a validated outcome (R2)
     pgctl = [s for s in res["stages"] if s[0] == "pg_ctl"]
     ok = res["ok"] is False and bool(pgctl) and pgctl[0][1] != 0 and \
         any(r["role"] == "postmaster-final" for r in res["remaining"]) and \
-        not [s for s in w.harness_signals if s["signal"] == int(signal.SIGKILL)]
+        not [s for s in w.harness_signals if s["signal"] == int(signal.SIGKILL)] and \
+        restored and pm_reads == [procs["pm"].pid]
     return finish(labels, d, T, ["HOLD-STOP"], "HOLD-STOP" if ok else "FAIL",
                    {"outer_reap": rcs_word(rcs, {"launcher": -15, "pm": 0}), "fixtures": "ok"},
-                   runroot, notes={"result": res, "outer_rcs": rcs})
+                   runroot, notes={"result": res, "outer_rcs": rcs, "pm_image_reads": pm_reads,
+                                   "pidpath_restored": restored})
 
 
 def t19d(d, scratch, runroot):
