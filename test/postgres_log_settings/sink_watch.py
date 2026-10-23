@@ -1283,7 +1283,9 @@ GEN_MAX = (1 << 63) - 1
 UNRESOLVED_GEN = ("provisional", "live", "unobserved", "unbound-gone", "unbound-deadline")
 INF = float("inf")
 POSTMASTER_ROLES = ("postmaster-final", "postmaster-init", "postmaster-identified")
-NONFORKING_ROLES = ("pg-version-probe", "pg-locale")
+# fork-copy (T4a scope A, plan composite r5): its forks are a violation, and its children are
+# tracked without authority (new_entry's no_authority taint), never classified
+NONFORKING_ROLES = ("pg-version-probe", "pg-locale", "fork-copy")
 # PostgreSQL 18.6 titles on Darwin (ps_status.c:310 PROGRAM_NAME_PREFIX "postgres: ",
 # fixed part "%s " with an empty cluster_name; miscinit.c:299-300 B_LOGGER "logger";
 # ps_status.c:55-66 PS_USE_CLOBBER_ARGV with NUL padding). The exact logger title and the
@@ -1577,8 +1579,16 @@ class Watch(object):
              "ppid_at_admission": cur["ppid"], "uid": cur["uid"], "comm": cur["comm"],
              "image": None, "exe": None, "exec_path": None, "argv": None, "argv_meta": None,
              "argv_known": False, "title": None, "lineage": lineage, "parent": parent,
-             "parent_birth_us": pe["birth_us"] if pe else None, "admitted": now(),
+             "parent_birth_us": pe["birth_us"] if pe else None,
+             "parent_gen": pe.get("gen") if pe else None, "admitted": now(),
              "via": path, "proof": proof, "exit": None, "role": "unsnapshotted", "execs": 0}
+        if pe is not None and (pe.get("role") == "fork-copy" or pe.get("no_authority")):
+            # T4a scope A: a fork-copy's (or a tainted entry's) child is tracked without
+            # authority; the taint is sticky and inherited by every descendant
+            e["no_authority"] = {
+                "reason": "parent-fork-copy" if pe.get("role") == "fork-copy"
+                else "parent-no-authority",
+                "source": {"pid": pe["pid"], "birth_us": pe["birth_us"], "gen": pe.get("gen")}}
         self.gens[g]["entry"] = e
         self.entries[cur["pid"]] = e
         self.events.append({"t": now(), "ev": "admit", "pid": cur["pid"],
@@ -1934,15 +1944,34 @@ class Watch(object):
             # popen/system/execl children start as /bin/sh: a coalesced exec that skipped
             # the observed shell step can never be allowed (r2 1.2)
             self.violation("exec-chain-unobserved", pid=e["pid"], parent_role=pe["role"])
-        if kind == "exec" and "allowance" in e:
+        if e.get("no_authority"):
+            # T4a scope A (plan r2 3.3): tracked without authority. The image and argv metadata
+            # are recorded; no classification, title, allowance, sh_allowed or check_exe grant
+            e["argv_known"] = False
+            e["role"] = "no-authority"
+        elif kind == "exec" and "allowance" in e:
             f = self.forms[e["allowance"]]
             if real in SYSTEM_SH and e["argv"] is not None and e["argv"] == e["allowance_argv"]:
                 e["role"], e["argv_known"] = "pg-sh", True   # the /bin/sh shim hand-off
             elif real == f["exec_image"] and vec_match(f["exec_argv"], e["argv"]):
                 e["role"], e["argv_known"] = f["exec_role"], True
+                self.retire_allowance(e, f)
             else:
                 e["role"] = "other"
                 self.violation("sh-exec-mismatch", pid=e["pid"], image=s["image"])
+        elif kind == "exec" and isinstance(e.get("fork_copy_of"), dict):
+            # P1: a fork-copy's exec is judged ONLY against its bound holder's allowance
+            b = e["fork_copy_of"]
+            self.consume_allowance(e, {"source": "copy", "parent": b.get("parent"),
+                                       "parent_birth_us": b.get("parent_birth_us"),
+                                       "parent_gen": b.get("parent_gen"),
+                                       "expected_form": b.get("form")})
+        elif kind == "admission" and self.fork_copy_admissible(e, s, pe):
+            # P1: the pre-exec fork copy of an active shell holder: no authority of its own
+            e["role"], e["argv_known"] = "fork-copy", False
+            e["fork_copy_of"] = {"parent": pe["pid"], "parent_gen": pe["gen"],
+                                 "parent_birth_us": pe["birth_us"], "form": pe["allowance"]}
+            pe["fork_copy"] = {"pid": e["pid"], "gen": e["gen"]}
         else:
             e["role"] = self.classify(e)
             self.check_exe(e)
@@ -1950,6 +1979,100 @@ class Watch(object):
                             "kind": kind, "role": e["role"], "cutoff": s["cutoff"],
                             "proof": "kernel-pidpath+procargs+fenced"})
         self.dirty = True
+
+    # -- T4a scope A: allowance lifecycle (plan composite r5 69dcaa61 + corrections 9acafe37)
+    def retire_allowance(self, e, f):
+        """P2: the holder's accepted in-place exec consumes its allowance. Every authoritative
+        field is removed at once; the audit record is never read for authority."""
+        e["allowance_consumed"] = {"form": e["allowance"], "exec_role": f["exec_role"],
+                                   "t": now(), "via": "in-place-exec",
+                                   "argv_meta": e.get("argv_meta")}
+        for k in ("allowance", "allowance_argv", "exec_role", "allowed_children"):
+            e.pop(k, None)
+
+    def init_phase(self):
+        return not os.path.exists(self.m["pgdata"] + "/.devenv_initialized")
+
+    def fork_copy_admissible(self, e, s, pe):
+        """P1 (plan r2 3.1, r1 2.1): a VALID admission snapshot that is exactly the active
+        holder's shell image and complete argv vector, under the live, unchanged holder
+        generation that the child's own admission bound, with quota 0, no earlier copy, the
+        init phase and no fork by the candidate. Metadata equality is never the test."""
+        if pe is None or not e.get("lineage") or e.get("parent") != pe.get("pid") or \
+                e.get("parent_birth_us") != pe.get("birth_us"):
+            return False
+        g = pe.get("gen")
+        if self.entries.get(pe["pid"]) is not pe or pe.get("exit") is not None or \
+                g is None or e.get("parent_gen") != g or \
+                (self.gens.get(g) or {}).get("state") != "live" or self.relevant(g, self.pending):
+            return False
+        real = os.path.realpath(s["image"])
+        if real not in SYSTEM_SH or real != os.path.realpath(pe.get("image") or ""):
+            return False
+        av = pe.get("allowance_argv")
+        if s.get("argv_status") != "OK" or s.get("argv") is None or av is None or \
+                list(s["argv"]) != list(av) or pe.get("argv") != av:
+            return False
+        if "allowance" not in pe or pe.get("role") != "pg-sh" or "allowance_consumed" in pe or \
+                pe.get("allowed_children", 0) != 0 or "fork_copy" in pe:
+            return False
+        if self.fork_notes.get(e["pid"], 0) or any(
+                x.get("parent") == e["pid"] and x.get("parent_birth_us") == e["birth_us"]
+                for x in self.entries.values()):
+            return False
+        return self.init_phase()
+
+    def refuse_consumer(self, e, why, reason="consumer-refused"):
+        """A refused consumer (plan r4 2.1, r5 1.2; amendment B): exactly one sh-child-mismatch
+        with the pinned why, a sticky no_authority and role no-authority, overwriting any role
+        classify assigned earlier; nothing is granted and there is no generic fallback."""
+        self.violation("sh-child-mismatch", pid=e["pid"], image=e.get("image"), why=why)
+        e["no_authority"] = {"reason": reason, "why": why}
+        e["role"] = "no-authority"
+        e["argv_known"] = False
+
+    def consume_allowance(self, e, b):
+        """The ONLY grant of a parent allowance to a child (plan r5 1.2 order; r4 2.1).
+        `b` = {source: copy|direct, parent, parent_birth_us, parent_gen, expected_form}. For a
+        copy, `f` is the bound form, used only after the holder's active form equals it; for a
+        direct child, `f` is the holder's active form, justified only by single mint plus
+        retirement (sh_allowed refuses re-mint after consumption). The first failing clause is
+        the refusal reason."""
+        if b.get("parent_gen") is None:
+            return self.refuse_consumer(e, "holder-unbound")
+        h = self.find(b.get("parent"), b.get("parent_birth_us")) \
+            if b.get("parent_birth_us") is not None else None
+        if h is None or h.get("gen") != b["parent_gen"]:
+            return self.refuse_consumer(e, "holder-generation")
+        if h.get("exit") is not None:
+            return self.refuse_consumer(e, "holder-not-live")
+        if (self.gens.get(b["parent_gen"]) or {}).get("state") != "live":
+            return self.refuse_consumer(e, "holder-generation-state")
+        if self.relevant(b["parent_gen"], self.pending):
+            return self.refuse_consumer(e, "holder-event-queued")
+        if "allowance" not in h or "allowance_consumed" in h:
+            return self.refuse_consumer(e, "allowance-absent")
+        if b.get("source") == "copy":
+            if h["allowance"] != b.get("expected_form"):
+                return self.refuse_consumer(e, "form-mismatch")
+            f = self.forms.get(b["expected_form"])
+        else:
+            f = self.forms.get(h["allowance"])
+        if f is None:
+            return self.refuse_consumer(e, "form-mismatch")
+        if h.get("allowed_children", 0) != 0:
+            return self.refuse_consumer(e, "quota")
+        if not self.init_phase():
+            return self.refuse_consumer(e, "init-phase")
+        img = os.path.realpath(e["image"]) if e.get("image") else None
+        if img != f["exec_image"]:
+            return self.refuse_consumer(e, "exec-image")
+        if not vec_match(f["exec_argv"], e.get("argv")):
+            return self.refuse_consumer(e, "exec-vector")
+        h["allowed_children"] = 1
+        h["allowed_child"] = {"pid": e["pid"], "birth_us": e["birth_us"], "gen": e.get("gen")}
+        e["role"], e["argv_known"] = f["exec_role"], True
+        return None
 
     def apply_title(self, e, s):
         self.record_argv(e, s)
@@ -2035,10 +2158,23 @@ class Watch(object):
     def sh_allowed(self, e):
         """D-1 (amendment R2, r2 1.4): /bin/sh only in the exact source-bound vector forms,
         under the exact parent image and argv vector, in the owned init phase."""
+        if "allowance_consumed" in e:
+            # T4a scope A, binding amendment A: a holder whose allowance was consumed never
+            # mints again; role withheld, taint sticky, audit kept, no form match or fallback
+            self.violation("sh-form-mismatch", pid=e["pid"], why="allowance-already-consumed")
+            e["no_authority"] = {"reason": "allowance-already-consumed",
+                                 "why": "allowance-already-consumed"}
+            e["role"] = "no-authority"
+            e["argv_known"] = False
+            return False
         if os.path.exists(self.m["pgdata"] + "/.devenv_initialized"):
             self.violation("sh-outside-init-phase", pid=e["pid"])
             return False
         pe = self.parent_entry(e)
+        if pe is not None and (pe.get("no_authority") or pe.get("role") == "fork-copy"):
+            # T4a scope A (plan r2 3.3): a parent without authority never yields a mint
+            self.violation("sh-form-mismatch", pid=e["pid"], why="parent without authority")
+            return False
         argv = e.get("argv")
         if pe is None or not pe.get("lineage") or not e.get("lineage") or not pe.get("image"):
             self.violation("sh-form-mismatch", pid=e["pid"], why="parent not lineage-owned")
@@ -2077,15 +2213,19 @@ class Watch(object):
         elif img in SYSTEM_SH:
             self.sh_allowed(e)
             return
+        elif pe is not None and pe.get("lineage") and \
+                isinstance(pe.get("allowance_consumed"), dict) and \
+                pe["allowance_consumed"].get("exec_role") not in POSTMASTER_ROLES:
+            # T4a scope A, binding amendment B (D1): a non-shell child of a lineage parent whose
+            # in-place exec retired a NON-postmaster allowance; refused before any generic grant
+            self.refuse_consumer(e, "retired-holder-child", "retired-holder-child")
+            return
         elif pe is not None and "allowance" in pe:
-            f = self.forms[pe["allowance"]]
-            ok = img == f["exec_image"] and vec_match(f["exec_argv"], e.get("argv")) and \
-                pe.get("allowed_children", 0) == 0
-            if ok:
-                pe["allowed_children"] = 1
-                e["role"], e["argv_known"] = f["exec_role"], True
-                return
-            self.violation("sh-child-mismatch", pid=e["pid"], image=e["image"])
+            # the direct observed consumer, bound by its own admission record (plan r5 1.1)
+            self.consume_allowance(e, {"source": "direct", "parent": e.get("parent"),
+                                       "parent_birth_us": e.get("parent_birth_us"),
+                                       "parent_gen": e.get("parent_gen"),
+                                       "expected_form": None})
             return
         elif img == LOCALE_BIN:
             ok = False           # only as the exact exec of the single-user-locale form
@@ -2987,6 +3127,10 @@ def classify_epoch(state, snaps, lock, barrier_ok, closure_ok):
             r = x["role"] if x else None
             if r not in FORK_COVERED_ROLES:
                 reasons.append("fork in window by role %s without source-gated attribution" % r)
+    # T4a scope A: an entry tracked without authority is never a complete-epoch input
+    n_na = sum(1 for e in all_e if e.get("no_authority"))
+    if n_na:
+        reasons.append("tracked without authority: %d" % n_na)
     hr = h_reasons(state.get("h"), state.get("violations", []), closure_ok)
     reasons.extend(hr)
     reasons.extend(gate_b(not hr, lock))
