@@ -29,6 +29,8 @@ nix develop --impure -c bash -euo pipefail -c '
   export PGDATA="$work/pgdata"
   echo "::group::Start throwaway Postgres on 127.0.0.1:5520"
   initdb -U postgres --auth=trust -D "$PGDATA" >/dev/null
+  # 5b (D-178): the same server-log baseline as devenv, from the one source.
+  bash .github/scripts/render-pg-log-settings.sh priv/postgres/log_settings.json >> "$PGDATA/postgresql.conf"
   pg_ctl -D "$PGDATA" -l "$work/postgres.log" -w \
     -o "-h 127.0.0.1 -p 5520 -k $work" start
   pg_isready -h 127.0.0.1 -p 5520

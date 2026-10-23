@@ -62,6 +62,11 @@ jobs:
             MIX_ENV=test mix deps.compile
           '
 
+      - name: devenv server-log render check (5b, online)
+        # The postgresql.conf the locked devenv module actually generates holds
+        # exactly the approved 5b settings (test/postgres_log_settings).
+        run: bash test/postgres_log_settings/devenv-render-test.sh
+
       - name: Dependency audit (blocking, ADR-0008)
         # Fails on any advisory or retirement not accepted in mix.exs
         # `hex: [ignore_advisories: ...]`; CRITICAL/HIGH are never accepted.

@@ -25,6 +25,9 @@ in {
     # Create postgres superuser for Phoenix/Ecto default config compatibility
     initialScript = "CREATE USER postgres SUPERUSER;";
   };
+  # 5b (D-178, #156 sections 3.2 and 3.3): the reviewed server-log baseline,
+  # one source shared with CI (.github/scripts/render-pg-log-settings.sh).
+  services.postgres.settings = builtins.fromJSON (builtins.readFile ./priv/postgres/log_settings.json);
 
   # Additional packages
   packages = with pkgs; [
