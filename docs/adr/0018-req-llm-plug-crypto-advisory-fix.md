@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-23
 supersedes: null
 ---
@@ -8,9 +8,12 @@ supersedes: null
 
 ## Status
 
-Proposed (2026-10-23) by Claude. Codex reviews it and the owner accepts it
-before the pull request merges. It amends no earlier ADR: ADR-0003's
-compatibility set and ADR-0008's policy stand.
+Accepted (2026-10-23) by the owner on the standup page
+(`answers/2026-10-23__adr0018`, choice `accept`, 16:58:39Z; D-200), including
+the residual under Consequences. Codex gave technical approval on the
+reviewed text at `ecf6b2b`, whose CI passed. Proposed the same day by Claude.
+It amends no earlier ADR: ADR-0003's compatibility set and ADR-0008's policy
+stand.
 
 ## Context
 
@@ -71,7 +74,7 @@ We will use Option 2. `mix.lock` changes in exactly three entries, and
 ## Consequences
 
 - Once this merges with a green CI run, `mix hex.audit` stops blocking pull
-  requests. That CI result is pending at the time of writing.
+  requests. CI passed on the reviewed text at `ecf6b2b`.
 - **Residual, for the owner to accept:** `req_llm` and `llm_db` run against
   `zoi` 0.18.10, below their declared `~> 0.18.11`.
   - "Not called directly" is not "not executed". `ReqLLM.Application` starts
@@ -96,8 +99,9 @@ Each item says how strong it is.
 1. **Local, author-reported:** `mix hex.audit` clean;
    `mix compile --warnings-as-errors` clean in dev and test; `mix format
    --check-formatted`, `mix credo` and `bin/verify-workflow` pass.
-2. **Exact-head CI, pending:** application start, the ADR-0003 lock test and
-   the full suite. This PR doesn't merge without it.
+2. **CI:** application start, the ADR-0003 lock test and the full suite
+   passed at `ecf6b2b` (run 39980779092). The accepted head needs its own green
+   run before merge.
 3. **Not exercised:** `ReqLLM` and `LLMDB` paths beyond application start.
    They are the residual above.
 
