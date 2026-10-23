@@ -2023,7 +2023,48 @@ class Watch(object):
                 x.get("parent") == e["pid"] and x.get("parent_birth_us") == e["birth_us"]
                 for x in self.entries.values()):
             return False
+        if not self.holder_fork_clear(e, pe):
+            return False
         return self.init_phase()
+
+    def holder_fork_clear(self, e, pe):
+        """Holder-no-later-fork predicate H (plan r2 3.1; adopted 01a2240f per Codex ruling
+        m_1792738495530467292_80aaafe3). Local recorded-history reasoning, not a kernel-order
+        proof; False withholds the copy role only (the caller's generic refusal path follows).
+        H1: the candidate's `admitted` is a finite non-bool number, and no RELEVANT handled
+        fork-note is at or after it (ties refuse). A fork-note is relevant iff its gen equals
+        the holder's generation, or its pid equals the holder's pid while its gen is missing or
+        not an int; a relevant record refuses unless its pid and gen are exactly the holder's
+        and its t is a finite non-bool number strictly before `admitted`. H2: no tracked entry,
+        live or dead, other than the exact candidate identity has the holder's binding."""
+        def num(x):
+            return isinstance(x, (int, float)) and not isinstance(x, bool) and x == x and \
+                abs(x) != INF
+
+        def gen_id(x):
+            return isinstance(x, int) and not isinstance(x, bool)
+        admitted = e.get("admitted")
+        if not num(admitted):
+            return False
+        g, hp = pe["gen"], pe["pid"]
+        for ev in self.events:
+            if not isinstance(ev, dict) or ev.get("ev") != "fork-note":
+                continue
+            eg, ep = ev.get("gen"), ev.get("pid")
+            relevant = (gen_id(eg) and eg == g) or \
+                (not gen_id(eg) and gen_id(ep) and ep == hp)
+            if not relevant:
+                continue
+            if not (gen_id(ep) and ep == hp and gen_id(eg) and eg == g and
+                    num(ev.get("t")) and ev["t"] < admitted):
+                return False
+        me_ = (e.get("pid"), e.get("birth_us"), e.get("gen"))
+        for x in list(self.entries.values()) + list(self.dead):
+            if (x.get("pid"), x.get("birth_us"), x.get("gen")) == me_:
+                continue
+            if x.get("parent") == hp and x.get("parent_birth_us") == pe["birth_us"]:
+                return False
+        return True
 
     def refuse_consumer(self, e, why, reason="consumer-refused"):
         """A refused consumer (plan r4 2.1, r5 1.2; amendment B): exactly one sh-child-mismatch
