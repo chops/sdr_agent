@@ -5898,12 +5898,13 @@ def a40s_copied(A, h, c, name):
             ("no-violation-" + name, A.viol(c) == [])]
 
 
-def a40s_event(A, h, t, **over):
-    """A fabricated handled fork-note record of the holder (pid, gen) at time t; keys given as
-    None in `over` are removed, others replaced."""
-    ev = {"t": t, "ev": "fork-note", "pid": h["pid"], "birth_us": h["birth_us"],
+def a40s_event(A, h, at, over=None):
+    """A fabricated handled fork-note record of the holder (pid, gen) stamped `at`. `over` is a
+    separate mapping applied afterwards: a key given as None is removed (e.g. {"t": None}),
+    any other value replaces the default (e.g. {"t": float("nan")})."""
+    ev = {"t": at, "ev": "fork-note", "pid": h["pid"], "birth_us": h["birth_us"],
           "gen": h["gen"], "proof": "fixture-synthetic"}
-    for k, v in over.items():
+    for k, v in (over or {}).items():
         if v is None:
             ev.pop(k, None)
         else:
@@ -5951,7 +5952,7 @@ def a40s_bad_event(A):
     for name, over in A40S_BAD_EVENTS:
         _, h = A.holder("initdb-check")
         c = A.ent(parent=h)
-        a40s_event(A, h, W.now(), **over)
+        a40s_event(A, h, W.now(), over)
         checks += a40s_refused(A, a40s_try(A, h, c), name)
     return checks, {"variants": [n for n, _ in A40S_BAD_EVENTS]}
 
@@ -6007,12 +6008,12 @@ def a40s_othergen(A):
     _, h = A.holder("initdb-check")
     c = A.ent(parent=h)
     other = A.gen(h["pid"], h["birth_us"] - 1, state="retired")
-    a40s_event(A, h, W.now(), gen=other)
+    a40s_event(A, h, W.now(), {"gen": other})
     checks = a40s_copied(A, h, a40s_try(A, h, c), "othergen")
     _, h2 = A.holder("initdb-check")
     c2 = A.ent(parent=h2)
     p2 = A.pid()
-    a40s_event(A, h2, W.now(), pid=p2, gen=A.gen(p2, p2 * 1000))
+    a40s_event(A, h2, W.now(), {"pid": p2, "gen": A.gen(p2, p2 * 1000)})
     checks += a40s_copied(A, h2, a40s_try(A, h2, c2), "otherpid")
     return checks, {}
 
