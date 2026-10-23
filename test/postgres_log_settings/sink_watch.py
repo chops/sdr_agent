@@ -1286,6 +1286,9 @@ POSTMASTER_ROLES = ("postmaster-final", "postmaster-init", "postmaster-identifie
 # fork-copy (T4a scope A, plan composite r5): its forks are a violation, and its children are
 # tracked without authority (new_entry's no_authority taint), never classified
 NONFORKING_ROLES = ("pg-version-probe", "pg-locale", "fork-copy")
+# Scope A pg_ctl effect gate: one fixed, finite shared effect budget (Q12), capped by the
+# caller's deadline and the enclosing bound and rechecked immediately before the spawn
+PGCTL_EFFECT_S = 2.0
 # PostgreSQL 18.6 titles on Darwin (ps_status.c:310 PROGRAM_NAME_PREFIX "postgres: ",
 # fixed part "%s " with an empty cluster_name; miscinit.c:299-300 B_LOGGER "logger";
 # ps_status.c:55-66 PS_USE_CLOBBER_ARGV with NUL padding). The exact logger title and the
@@ -2736,25 +2739,66 @@ def stop_tree(w, m, stages=None):
 def pg_ctl_stop(w, m, pms, timeout=90.0, t=60, deadline=None):
     """The only postmaster stop path: pg_ctl -D <pgdata>, after identity proof. Returns
     pg_ctl's exit status, or "timeout" (the helper is kept for a bounded reap, not killed).
-    Repair M1/Q2: refuses (no spawn) when the absolute `deadline` has passed after the
-    identity proof, when the remaining time is not positive, or when -t exceeds it."""
-    with open(m["pgdata"] + "/postmaster.pid") as f:
-        lines = f.read().splitlines()
-    pid = int(lines[0])
-    match = [e for e in pms if e["pid"] == pid]
-    if not match:
-        raise Hold("postmaster.pid names %d, not a tracked postmaster" % pid)
-    cur = bsdinfo(pid)
-    if cur is None or cur["birth_us"] != match[0]["birth_us"]:
-        raise Hold("postmaster identity changed")
-    if proc_cwd(pid) != os.path.realpath(m["pgdata"]):
-        raise Hold("postmaster cwd mismatch")
+    Repair M1/Q2: refuses (no spawn) when the absolute `deadline` has passed, when the
+    remaining time is not positive, or when -t exceeds it.
+
+    T4a scope A effect gate (plan r2 4, r3 3.1, r4 1.1; Q3, Q12), in this exact order:
+    frozen and the overall deadline are refused BEFORE any read; then ONE fixed effect bound
+    E = min(now + PGCTL_EFFECT_S, deadline, enclosing), never refreshed; every non-title
+    observation obligation of ANY target and every queued event resolved inside E (quiesce);
+    frozen rechecked; the postmaster re-derived after the drain (postmaster.pid naming the
+    pgdata, a live tracked postmaster, the same identity the caller passed); the re-proof
+    bsdinfo -> pidpath (the pinned postgres image) -> proc_cwd, each under E; then frozen,
+    the remaining overall time and E rechecked immediately before the spawn."""
+    late = "refuse pg_ctl: effect bound passed during the re-proof"
     if w.signals_frozen:
         raise Hold("refuse pg_ctl: signals are frozen after an uncertainty")
     if deadline is not None:
         timeout = min(float(timeout), deadline - now())
         if timeout <= 0 or t > timeout:
             raise Hold("refuse pg_ctl: overall deadline leaves %.1f s for -t %d" % (timeout, t))
+    bound = min(now() + PGCTL_EFFECT_S, deadline if deadline is not None else INF, w.enclosing)
+    w.quiesce(bound)
+    if w.signals_frozen:
+        raise Hold("refuse pg_ctl: an event observed during the drain froze signals")
+    with open(m["pgdata"] + "/postmaster.pid") as f:
+        lines = f.read().splitlines()
+    if len(lines) < 2 or not lines[0].strip().isdigit() or lines[1] != m["pgdata"]:
+        raise Hold("refuse pg_ctl: stale postmaster evidence")
+    pid = int(lines[0])
+    match = [e for e in w.alive("postmaster-final") + w.alive("postmaster-init") +
+             w.alive("postmaster-identified") if e["pid"] == pid]
+    if not match:
+        raise Hold("postmaster.pid names %d, not a tracked postmaster" % pid)
+    pm = match[0]
+    if not any(x["pid"] == pid and x["birth_us"] == pm["birth_us"] for x in pms):
+        raise Hold("refuse pg_ctl: stale postmaster evidence")
+    if now() >= bound:
+        raise Hold(late)
+    cur = bsdinfo(pid)
+    if now() >= bound:
+        raise Hold(late)
+    if cur is None or cur["birth_us"] != pm["birth_us"] or cur["uid"] != me():
+        raise Hold("postmaster identity changed")
+    path = pidpath(pid)
+    left = bound - now()
+    if left <= 0:
+        raise Hold(late)
+    if path is None or os.path.realpath(path) != os.path.realpath(PG_BIN + "/postgres"):
+        raise Hold("refuse pg_ctl: postmaster image mismatch")
+    cwd = proc_cwd(pid, timeout=left)
+    if now() >= bound:
+        raise Hold(late)
+    if cwd != os.path.realpath(m["pgdata"]):
+        raise Hold("postmaster cwd mismatch")
+    if w.signals_frozen:
+        raise Hold("refuse pg_ctl: an event observed during the drain froze signals")
+    if deadline is not None:
+        timeout = min(float(timeout), deadline - now())
+        if timeout <= 0 or t > timeout:
+            raise Hold("refuse pg_ctl: overall deadline leaves %.1f s for -t %d" % (timeout, t))
+    if now() >= bound:
+        raise Hold("refuse pg_ctl: effect bound passed before the spawn")
     env = {"PATH": PG_BIN, "PGDATA": m["pgdata"], "LC_ALL": "C"}
     p = subprocess.Popen([PG_BIN + "/pg_ctl", "-D", m["pgdata"], "-m", "fast", "-w", "-t", str(t),
                           "stop"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
