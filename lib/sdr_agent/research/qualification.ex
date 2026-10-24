@@ -27,6 +27,13 @@ defmodule SdrAgent.Research.Qualification do
       outreach has begun) the override is refused and the operator ends the
       lead with Sales `:stop` instead.
 
+  Lock order (C3-02 G7): `:record` locks its lead `FOR UPDATE` before any
+  read or the INSERT (`Changes.RecordLeadLock`); `:override` takes the
+  lead's company key, then the account `FOR SHARE` and the lead
+  `FOR UPDATE`, re-checks the company and, for a re-opening override,
+  refuses while another lead of the account is open or the contact is
+  covered by a suppression (`Changes.OverrideCompanyLock`).
+
   Audited: `research.qualification.recorded` (with the cited claim ids).
   Reads: ADM, REV, AUR, AGT, AUD.
   """
@@ -38,6 +45,7 @@ defmodule SdrAgent.Research.Qualification do
 
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Checks
+  alias SdrAgent.Audit.SQL
   alias SdrAgent.Research.Changes
 
   @result [
@@ -76,8 +84,7 @@ defmodule SdrAgent.Research.Qualification do
     end
 
     check_constraints do
-      check_constraint :trace_id, "qualifications_trace_ids",
-        check: SdrAgent.Audit.SQL.trace_check()
+      check_constraint :trace_id, "qualifications_trace_ids", check: SQL.trace_check()
 
       check_constraint :score, "qualifications_score_range", check: "score >= 0 AND score <= 100"
 
@@ -92,7 +99,7 @@ defmodule SdrAgent.Research.Qualification do
     end
 
     custom_statements do
-      for {name, up_sql, down_sql} <- SdrAgent.Audit.SQL.append_only("qualifications") do
+      for {name, up_sql, down_sql} <- SQL.append_only("qualifications") do
         statement name do
           up up_sql
           down down_sql
@@ -115,6 +122,8 @@ defmodule SdrAgent.Research.Qualification do
       description "AGT: record an agent qualification and move the lead in the same transaction."
       accept [:agent_run_id, :decision_id | @result]
       argument :evidence_claim_ids, {:array, :uuid}, allow_nil?: false, default: []
+      # C3-02 G7: the lead FOR UPDATE first (prepended; plan r8 section 4.6.4).
+      change Changes.RecordLeadLock
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change {SdrAgent.Audit.Changes.Supersedes, subject: [:tenant_id, :lead_id]}
@@ -128,6 +137,9 @@ defmodule SdrAgent.Research.Qualification do
       accept @result
       require_attributes [:supersedes_id, :reason]
       argument :evidence_claim_ids, {:array, :uuid}, allow_nil?: false, default: []
+      # C3-02 G7: company key, account FOR SHARE, lead FOR UPDATE, re-check
+      # and re-open refusals first (prepended; plan r8 section 4.2).
+      change Changes.OverrideCompanyLock
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change {SdrAgent.Audit.Changes.Supersedes, subject: [:tenant_id, :lead_id]}

@@ -72,6 +72,11 @@ defmodule SdrAgentWeb.AuditedView do
 
   def error_message(%Ash.Error.Query.NotFound{}), do: "Not found."
 
+  def error_message(:agent_definition_unavailable),
+    do:
+      "The SDR agent definition is not available for this tenant. " <>
+        "An administrator must bootstrap it before leads can be assigned."
+
   def error_message({tag, detail}) when is_atom(tag) and is_atom(detail),
     do: "#{humanize(tag)}: #{humanize(detail)}"
 

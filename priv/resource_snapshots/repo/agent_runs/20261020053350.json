@@ -1,0 +1,471 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "lead_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "campaign_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trigger_signal_type",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trigger_signal_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "correlation_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "phase",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"queued\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "status",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "budget",
+      "type": "map"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "usage_origin",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "status_reason",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "failure_reason",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "started_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "finished_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "updated_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "agent_runs_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "agent_runs_agent_definition_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "agent_definitions"
+      },
+      "scale": null,
+      "size": null,
+      "source": "agent_definition_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "agent_runs_retry_of_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "agent_runs"
+      },
+      "scale": null,
+      "size": null,
+      "source": "retry_of_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "agent_runs_operation_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "operations"
+      },
+      "scale": null,
+      "size": null,
+      "source": "operation_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "agent_runs_attention_failure_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "failures"
+      },
+      "scale": null,
+      "size": null,
+      "source": "attention_failure_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "settings_snapshot_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "agent_runs_trace_ids"
+    },
+    {
+      "attribute": [
+        "status"
+      ],
+      "base_filter": null,
+      "check": "status IN ('queued', 'running', 'succeeded', 'failed', 'budget_exhausted', 'cancelled')",
+      "name": "agent_runs_status"
+    },
+    {
+      "attribute": [
+        "status_reason"
+      ],
+      "base_filter": null,
+      "check": "status NOT IN ('failed', 'budget_exhausted', 'cancelled') OR status_reason IS NOT NULL",
+      "name": "agent_runs_status_reason_required"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE agent_runs DROP CONSTRAINT agent_runs_settings_snapshot_fkey",
+      "global?": false,
+      "name": "agent_runs_settings_snapshot_fkey",
+      "up": "ALTER TABLE agent_runs ADD CONSTRAINT agent_runs_settings_snapshot_fkey FOREIGN KEY (settings_snapshot_id, tenant_id) REFERENCES run_settings_snapshots (id, tenant_id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION agent_runs_settings_snapshot_cutover()",
+      "global?": false,
+      "name": "agent_runs_settings_snapshot_cutover_function",
+      "up": "CREATE FUNCTION agent_runs_settings_snapshot_cutover() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  IF TG_OP = 'INSERT' AND NEW.settings_snapshot_id IS NULL THEN\n    RAISE EXCEPTION 'agent_runs.settings_snapshot_id is required for a new run (C4 cutover)'\n      USING ERRCODE = 'restrict_violation';\n  END IF;\n  IF TG_OP = 'UPDATE' AND NEW.settings_snapshot_id IS DISTINCT FROM OLD.settings_snapshot_id THEN\n    RAISE EXCEPTION 'agent_runs.settings_snapshot_id is immutable: update rejected'\n      USING ERRCODE = 'restrict_violation';\n  END IF;\n  RETURN NEW;\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER agent_runs_settings_snapshot_cutover ON agent_runs",
+      "global?": false,
+      "name": "agent_runs_settings_snapshot_cutover",
+      "up": "CREATE TRIGGER agent_runs_settings_snapshot_cutover BEFORE INSERT OR UPDATE ON agent_runs FOR EACH ROW EXECUTE FUNCTION agent_runs_settings_snapshot_cutover()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE agent_runs DROP CONSTRAINT agent_runs_id_tenant_key",
+      "global?": false,
+      "name": "agent_runs_id_tenant_key",
+      "up": "ALTER TABLE agent_runs ADD CONSTRAINT agent_runs_id_tenant_key UNIQUE (id, tenant_id)"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "A8D507A795F3D8E61978346FD70259101370F81863A3DBA9AE526DAF4B151874",
+  "identities": [],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "agent_runs"
+}

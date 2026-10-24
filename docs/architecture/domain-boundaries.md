@@ -1,6 +1,6 @@
 # Domain Boundaries
 
-Generated: 2026-10-06 (Sales and Research added by hand in S5, Outreach in S8, Reply, ReplyAssessment and WebhookEvent in S9, 2026-10-07; ModelCallGrant/ModelCallAllocation (C9) and ModelResultRelease (R0-07 slice A) added by hand, 2026-10-12; ModelProfileSetting/ModelProfileSwitch (C2-02a) added by hand, 2026-10-15; SettingsRevision/RunSettingsSnapshot (C4-01a) added by hand, 2026-10-15, synced from `domain-boundaries.mmd`)
+Generated: 2026-10-06 (Sales and Research added by hand in S5, Outreach in S8, Reply, ReplyAssessment and WebhookEvent in S9, 2026-10-07; ModelCallGrant/ModelCallAllocation (C9) and ModelResultRelease (R0-07 slice A) added by hand, 2026-10-12; ModelProfileSetting/ModelProfileSwitch (C2-02a) added by hand, 2026-10-15; SettingsRevision/RunSettingsSnapshot (C4-01a) added by hand, 2026-10-15; LeadAdmission and its foreign keys (C3-02) added by hand, 2026-10-21, synced from `domain-boundaries.mmd`)
 
 Project shape: single
 
@@ -36,6 +36,7 @@ graph TB
         Sequence[Sequence]
         SequenceStep[SequenceStep]
         CampaignEnrollment[CampaignEnrollment]
+        LeadAdmission["LeadAdmission<br/>append-only: one row per recorded (tenant, kind, ref) outcome; replays add none"]
     end
     subgraph Agents["Agents Domain"]
         AgentDefinition[AgentDefinition]
@@ -117,13 +118,21 @@ graph TB
     Lead --> CampaignEnrollment
     Lead -. last_decision_id FK .-> Decision
     Lead -. owner_user_id FK .-> User
+    LeadAdmission -. "requested_by_user_id FK, required" .-> User
+    LeadAdmission -. "campaign FK, required" .-> Campaign
+    LeadAdmission -. "account FK, optional (always set when admitted)" .-> Account
+    LeadAdmission -. "contact FK, optional (always set when admitted), at the recorded account" .-> Contact
+    LeadAdmission -. "matched_lead FK, only duplicate_open_lead / active_target_exists" .-> Lead
+    LeadAdmission -. "agent_run FK, agent_found discovery provenance only, not the assignment run" .-> AgentRun
+    LeadAdmission -. "referral_from_lead FK, referral kind only, none admitted before C3-03" .-> Lead
+    Lead -- "admission_id composite FK (admission, tenant, account, contact), nullable; deferred check: an admitted row is bound by exactly one lead" --> LeadAdmission
     ResearchArtifact --> EvidenceClaim
     Qualification --> QualificationEvidence
     EvidenceClaim --> QualificationEvidence
     ResearchArtifact -. lead_id FK .-> Lead
     EvidenceClaim -. lead_id FK .-> Lead
     Qualification -. lead_id / icp FK .-> Lead
-    Qualification -. qualify / disqualify in the same transaction .-> Lead
+    Qualification -. "qualify / disqualify (:record), override flip (:override), same transaction" .-> Lead
     ResearchArtifact -. run / tool invocation FK .-> ToolInvocation
     EvidenceClaim -. extraction decision FK .-> Decision
     Qualification -. decision / run FK .-> Decision

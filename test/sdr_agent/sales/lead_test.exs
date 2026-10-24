@@ -27,10 +27,20 @@ defmodule SdrAgent.Sales.LeadTest do
   defp lead_attrs(contact),
     do: %{contact_id: contact.id, account_id: contact.account_id, source: :manual}
 
+  # C3-02 cutover: Lead :create runs only inside the admission
+  # (`SdrAgent.SDR.admit_lead/2`), so the creation invariants are exercised
+  # through the dev/test `:seed` boundary, which runs the same `LeadAccount`
+  # checks, tenant, open-lead identities and `sales.lead.created` event.
+  defp seed(contact, ctx),
+    do:
+      Sales.seed_lead(%{lead_attrs(contact) | source: :fixture},
+        actor: system_actor(:seeder, ctx.tenant)
+      )
+
   describe "creating leads" do
-    test "ADM creates a new lead for a contact; audited", ctx do
+    test "a new lead for a contact (seed boundary); audited", ctx do
       contact = F.contact!(ctx.tenant)
-      {:ok, lead} = Sales.create_lead(lead_attrs(contact), actor: ctx.admin)
+      {:ok, lead} = seed(contact, ctx)
 
       assert lead.status == :new
       assert lead.tenant_id == ctx.tenant.id
@@ -43,26 +53,27 @@ defmodule SdrAgent.Sales.LeadTest do
       other = F.account!(ctx.tenant)
 
       assert {:error, %Ash.Error.Invalid{}} =
-               Sales.create_lead(%{lead_attrs(contact) | account_id: other.id}, actor: ctx.admin)
+               Sales.seed_lead(
+                 %{lead_attrs(contact) | account_id: other.id, source: :fixture},
+                 actor: system_actor(:seeder, ctx.tenant)
+               )
 
       {:ok, account} =
         Sales.fetch(SdrAgent.Sales.Account, contact.account_id, actor: ctx.admin)
 
       {:ok, _} = Sales.update(account, :archive, %{}, actor: ctx.admin)
 
-      assert {:error, %Ash.Error.Invalid{}} =
-               Sales.create_lead(lead_attrs(contact), actor: ctx.admin)
+      assert {:error, %Ash.Error.Invalid{}} = seed(contact, ctx)
     end
 
     test "a contact has at most one open lead", ctx do
       contact = F.contact!(ctx.tenant)
-      {:ok, lead} = Sales.create_lead(lead_attrs(contact), actor: ctx.admin)
+      {:ok, lead} = seed(contact, ctx)
 
-      assert {:error, %Ash.Error.Invalid{}} =
-               Sales.create_lead(lead_attrs(contact), actor: ctx.admin)
+      assert {:error, %Ash.Error.Invalid{}} = seed(contact, ctx)
 
       {:ok, _} = Sales.update(lead, :stop, %{status_reason: "manual stop"}, actor: ctx.admin)
-      assert {:ok, _} = Sales.create_lead(lead_attrs(contact), actor: ctx.admin)
+      assert {:ok, _} = seed(contact, ctx)
     end
 
     test "REV, AGT and DLV cannot create leads", ctx do
@@ -112,7 +123,7 @@ defmodule SdrAgent.Sales.LeadTest do
 
     test "REV assigns; AGT moves the lead with a decision; events carry from, to and decision",
          ctx do
-      lead = F.lead!(ctx.tenant)
+      lead = F.new_lead!(ctx.tenant)
       %{run: run} = F.run!(ctx.tenant)
 
       assert {:error, %Ash.Error.Forbidden{}} = Sales.update(lead, :assign, %{}, actor: ctx.agent)
@@ -148,7 +159,7 @@ defmodule SdrAgent.Sales.LeadTest do
     end
 
     test "a transition from the wrong state is refused and changes nothing", ctx do
-      lead = F.lead!(ctx.tenant)
+      lead = F.new_lead!(ctx.tenant)
       %{run: run} = F.run!(ctx.tenant)
       decision = F.decision!(ctx.tenant, run, lead, "research")
 

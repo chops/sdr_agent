@@ -1,6 +1,6 @@
 # Component Relationships
 
-Generated: 2026-10-06
+Generated: 2026-10-06 (Audit.IdentityKeys helper (C3-02) added by hand, 2026-10-21, synced from `components.mmd`)
 
 Project shape: single
 
@@ -11,6 +11,7 @@ This diagram shows the major components and their relationships.
 graph TB
     subgraph Application["Application"]
         App[Application Supervisor]
+        DefBoot[SDR.DefinitionBootstrap boot child<br/>after Repo, before provider / Oban / Endpoint;<br/>registers the SDRAgent definition, any failure stops the app]
         Budget[Persisted budgets<br/>20/run + 200/UTC day in Postgres]
         ModelProvider[ModelProvider facade<br/>budget + Zoi validation]
         ClaudeCLIAdapter[ClaudeCLI adapter<br/>serialized, tool-free GenServer<br/>per-call SDR witness env, bypass routes scrubbed]
@@ -46,6 +47,7 @@ graph TB
     subgraph Ash["Ash Framework"]
         Domains["Domains (7)"]
         Resources["Resources (57)"]
+        IdentityKeys["Audit.IdentityKeys helper: no process, not a domain<br/>one pass per application scope; scope root = outermost Repo transaction (Repo.prepare_transaction/2)"]
     end
 
     subgraph ModelServerTree["C2-02b2 model server tree: ProfileSupervisor, rest_for_one"]
@@ -68,6 +70,8 @@ graph TB
         Bitcoin[Operator-configured Bitcoin node]
     end
 
+    App -- "starts first after the Repo; :ignore with no tenant" --> DefBoot
+    DefBoot -- "SDR.bootstrap_definitions (KRN, idempotent)" --> Domains
     App --> Oban
     App -. "SDR_MODEL_PROVIDER=claude_cli (dev only): the model server tree, started before Oban" .-> ServerSup
     ServerSup -- "one named server, started held" --> ClaudeCLIAdapter
@@ -120,6 +124,8 @@ graph TB
     Controllers --> Domains
     LiveViews --> Domains
     Domains --> Resources
+    Domains -. "identity writers: entry pass or held membership, before any domain row lock" .-> IdentityKeys
+    WebhookWorker -. "after its own WebhookEvent row lock" .-> IdentityKeys
     App --> Relay
     Domains -. audit append: pg_notify, delivered at commit .-> Relay
     Relay -- tenant topic --> PubSub

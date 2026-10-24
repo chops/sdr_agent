@@ -38,6 +38,7 @@ defmodule SdrAgent.Agents.Changes.BuildSettingsSnapshot do
 
   require Ash.Query
 
+  alias Ash.Error.Changes.InvalidAttribute
   alias SdrAgent.Agents.RunSettings
   alias SdrAgent.Agents.RunSettings.CodeDefaults
   alias SdrAgent.Agents.RunSettings.Safeguards
@@ -72,11 +73,7 @@ defmodule SdrAgent.Agents.Changes.BuildSettingsSnapshot do
       |> Ash.Changeset.force_change_attribute(:budget, budget(changeset, values.limits))
     else
       [_ | _] = kinds ->
-        Ash.Changeset.add_error(changeset,
-          field: :usage_origin,
-          message: "settings_incomplete: #{Enum.join(kinds, ", ")}",
-          rule: :settings_incomplete
-        )
+        Ash.Changeset.add_error(changeset, settings_incomplete(kinds))
 
       {:error, :settings_default_unavailable} ->
         Ash.Changeset.add_error(changeset,
@@ -88,6 +85,21 @@ defmodule SdrAgent.Agents.Changes.BuildSettingsSnapshot do
       {:error, error} ->
         Ash.Changeset.add_error(changeset, error)
     end
+  end
+
+  # The same error as before (field, message and vars, `rule:
+  # :settings_incomplete`), plus the missing kinds as structured private
+  # vars (C3-02 G4: the admission maps this refusal to `{:settings_incomplete,
+  # kinds}` from the rule and these kinds, never from the message).
+  defp settings_incomplete(kinds) do
+    message = "settings_incomplete: #{Enum.join(kinds, ", ")}"
+
+    InvalidAttribute.exception(
+      field: :usage_origin,
+      message: message,
+      vars: [field: :usage_origin, message: message, rule: :settings_incomplete],
+      private_vars: [kinds: kinds]
+    )
   end
 
   @doc """

@@ -1,9 +1,11 @@
 defmodule SdrAgent.SDR.ReplyIntake do
   @moduledoc """
   Agent-plane implementation of `SdrAgent.Outreach.ReplyIntake`, run inside
-  the matched reply's transaction (outbox): registers (or reuses) the
-  `SDRAgent` definition, creates the queued AgentRun that will classify the
-  reply (AGT; lead and campaign of the match; usage origin `:reply`, C9; a
+  the matched reply's transaction (outbox): looks the committed `SDRAgent`
+  definition up read-only (`SDRAgent.fetch_definition/1`; C3-02, plan r8
+  sections 6.7 and 7.2; D-174 Q-O5), creates the queued AgentRun that will
+  classify the reply (AGT; lead and campaign of the match; usage origin
+  `:reply`, C9; a
   small budget — one model call), inserts its `agent`-queue job (`SdrAgent.SDR.ReplyWorker`) and
   records the `sdr.reply.received` signal (data `reply_id`, `lead_id`,
   `campaign_id`, `enrollment_id`; actor the webhook ingestor) on that run.
@@ -12,6 +14,12 @@ defmodule SdrAgent.SDR.ReplyIntake do
   no saved business settings, so reply classification and its unsubscribe
   and suppression effects never wait on them; its code budget (2 model
   calls, 5 tool calls) is lowered further by the snapshot when smaller.
+
+  The lookup is the first step and it never registers: on a miss (absent,
+  retired, another hash) it returns `{:deferred,
+  :agent_definition_unavailable}` before any write, so the reply phase
+  commits without the hand-off and the event's retries perform it
+  (`SdrAgent.Outreach.Webhooks`).
   """
   @behaviour SdrAgent.Outreach.ReplyIntake
 
@@ -23,10 +31,17 @@ defmodule SdrAgent.SDR.ReplyIntake do
 
   @impl true
   def received(reply, match, actor) do
+    case SDRAgent.fetch_definition(reply.tenant_id) do
+      {:ok, definition} -> hand_off(definition, reply, match, actor)
+      {:error, :agent_definition_unavailable} -> {:deferred, :agent_definition_unavailable}
+      {:error, _error} = error -> error
+    end
+  end
+
+  defp hand_off(definition, reply, match, actor) do
     agent = Actor.system(:agent_runtime, reply.tenant_id)
 
-    with {:ok, definition} <- SDRAgent.register(reply.tenant_id),
-         {:ok, signal} <-
+    with {:ok, signal} <-
            Signals.build("sdr.reply.received", %{
              reply_id: reply.id,
              lead_id: match.lead_id,

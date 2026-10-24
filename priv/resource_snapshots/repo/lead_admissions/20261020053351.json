@@ -1,0 +1,582 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "source_kind",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "source_ref",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "input_version",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "input_sha256",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "outcome",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "suppression_scope",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "false",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "readmit",
+      "type": "boolean"
+    },
+    {
+      "allow_nil?": false,
+      "default": "false",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "account_created",
+      "type": "boolean"
+    },
+    {
+      "allow_nil?": false,
+      "default": "false",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "contact_created",
+      "type": "boolean"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "lead_admissions_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "requested_by_user_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "campaign_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "account_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "contact_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "matched_lead_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "agent_run_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "referral_from_lead_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "lead_admissions_trace_ids"
+    },
+    {
+      "attribute": [
+        "source_kind"
+      ],
+      "base_filter": null,
+      "check": "source_kind IN ('manual', 'csv', 'hubspot', 'agent_found', 'referral')",
+      "name": "lead_admissions_source_kind"
+    },
+    {
+      "attribute": [
+        "outcome"
+      ],
+      "base_filter": null,
+      "check": "outcome IN ('admitted', 'duplicate_open_lead', 'active_target_exists', 'previously_worked', 'contact_at_other_account', 'contact_archived', 'account_archived', 'company_in_relationship', 'suppressed')",
+      "name": "lead_admissions_outcome"
+    },
+    {
+      "attribute": [
+        "suppression_scope"
+      ],
+      "base_filter": null,
+      "check": "suppression_scope IS NULL OR suppression_scope IN ('email', 'domain')",
+      "name": "lead_admissions_suppression_scope"
+    },
+    {
+      "attribute": [
+        "source_ref"
+      ],
+      "base_filter": null,
+      "check": "length(source_ref) <= 120 AND ((source_kind = 'manual' AND source_ref ~ '^manual:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') OR (source_kind = 'csv' AND source_ref ~ '^csv:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9][0-9]*$') OR (source_kind = 'hubspot' AND source_ref ~ '^hubspot:[0-9]+:[0-9]+$') OR (source_kind = 'agent_found' AND source_ref ~ '^agent_found:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') OR (source_kind = 'referral' AND source_ref ~ '^referral:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'))",
+      "name": "lead_admissions_source_ref"
+    },
+    {
+      "attribute": [
+        "input_version"
+      ],
+      "base_filter": null,
+      "check": "input_version = 1",
+      "name": "lead_admissions_input_version"
+    },
+    {
+      "attribute": [
+        "input_sha256"
+      ],
+      "base_filter": null,
+      "check": "input_sha256 ~ '^[0-9a-f]{64}$'",
+      "name": "lead_admissions_input_sha256"
+    },
+    {
+      "attribute": [
+        "matched_lead_id"
+      ],
+      "base_filter": null,
+      "check": "(matched_lead_id IS NOT NULL) = (outcome IN ('duplicate_open_lead', 'active_target_exists'))",
+      "name": "lead_admissions_matched_lead_outcome"
+    },
+    {
+      "attribute": [
+        "matched_lead_id"
+      ],
+      "base_filter": null,
+      "check": "matched_lead_id IS NULL OR account_id IS NOT NULL",
+      "name": "lead_admissions_matched_lead_account"
+    },
+    {
+      "attribute": [
+        "suppression_scope"
+      ],
+      "base_filter": null,
+      "check": "(suppression_scope IS NOT NULL) = (outcome = 'suppressed')",
+      "name": "lead_admissions_suppression_scope_outcome"
+    },
+    {
+      "attribute": [
+        "agent_run_id"
+      ],
+      "base_filter": null,
+      "check": "(agent_run_id IS NOT NULL) = (source_kind = 'agent_found')",
+      "name": "lead_admissions_agent_run_kind"
+    },
+    {
+      "attribute": [
+        "referral_from_lead_id"
+      ],
+      "base_filter": null,
+      "check": "(referral_from_lead_id IS NOT NULL) = (source_kind = 'referral')",
+      "name": "lead_admissions_referral_kind"
+    },
+    {
+      "attribute": [
+        "agent_run_id"
+      ],
+      "base_filter": null,
+      "check": "source_kind <> 'agent_found' OR split_part(source_ref, ':', 2) = agent_run_id::text",
+      "name": "lead_admissions_agent_run_ref"
+    },
+    {
+      "attribute": [
+        "referral_from_lead_id"
+      ],
+      "base_filter": null,
+      "check": "source_kind <> 'referral' OR split_part(source_ref, ':', 2) = referral_from_lead_id::text",
+      "name": "lead_admissions_referral_ref"
+    },
+    {
+      "attribute": [
+        "readmit"
+      ],
+      "base_filter": null,
+      "check": "NOT readmit OR source_kind IN ('manual', 'referral')",
+      "name": "lead_admissions_readmit_kind"
+    },
+    {
+      "attribute": [
+        "outcome"
+      ],
+      "base_filter": null,
+      "check": "outcome <> 'company_in_relationship' OR (source_kind IN ('csv', 'hubspot', 'agent_found') AND account_id IS NOT NULL)",
+      "name": "lead_admissions_company_in_relationship"
+    },
+    {
+      "attribute": [
+        "outcome"
+      ],
+      "base_filter": null,
+      "check": "outcome = 'admitted' OR (NOT account_created AND NOT contact_created)",
+      "name": "lead_admissions_created_when_admitted"
+    },
+    {
+      "attribute": [
+        "outcome"
+      ],
+      "base_filter": null,
+      "check": "outcome <> 'admitted' OR (account_id IS NOT NULL AND contact_id IS NOT NULL)",
+      "name": "lead_admissions_admitted_identity"
+    },
+    {
+      "attribute": [
+        "outcome"
+      ],
+      "base_filter": null,
+      "check": "outcome <> 'contact_at_other_account' OR account_id IS NULL",
+      "name": "lead_admissions_other_account"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION lead_admissions_append_only()",
+      "global?": false,
+      "name": "lead_admissions_guard_function",
+      "up": "CREATE FUNCTION lead_admissions_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER lead_admissions_guard_row ON lead_admissions",
+      "global?": false,
+      "name": "lead_admissions_guard_row",
+      "up": "CREATE TRIGGER lead_admissions_guard_row BEFORE UPDATE OR DELETE ON lead_admissions FOR EACH ROW EXECUTE FUNCTION lead_admissions_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER lead_admissions_guard_truncate ON lead_admissions",
+      "global?": false,
+      "name": "lead_admissions_guard_truncate",
+      "up": "CREATE TRIGGER lead_admissions_guard_truncate BEFORE TRUNCATE ON lead_admissions FOR EACH STATEMENT EXECUTE FUNCTION lead_admissions_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE lead_admissions DROP CONSTRAINT lead_admissions_id_tenant_account_contact_key",
+      "global?": false,
+      "name": "lead_admissions_id_tenant_account_contact_key",
+      "up": "ALTER TABLE lead_admissions ADD CONSTRAINT lead_admissions_id_tenant_account_contact_key UNIQUE (id, tenant_id, account_id, contact_id)"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE lead_admissions DROP CONSTRAINT lead_admissions_requested_by_fkey",
+      "global?": false,
+      "name": "lead_admissions_requested_by_fkey",
+      "up": "ALTER TABLE lead_admissions ADD CONSTRAINT lead_admissions_requested_by_fkey FOREIGN KEY (requested_by_user_id, tenant_id) REFERENCES users (id, tenant_id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE lead_admissions DROP CONSTRAINT lead_admissions_campaign_fkey",
+      "global?": false,
+      "name": "lead_admissions_campaign_fkey",
+      "up": "ALTER TABLE lead_admissions ADD CONSTRAINT lead_admissions_campaign_fkey FOREIGN KEY (campaign_id, tenant_id) REFERENCES campaigns (id, tenant_id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE lead_admissions DROP CONSTRAINT lead_admissions_account_fkey",
+      "global?": false,
+      "name": "lead_admissions_account_fkey",
+      "up": "ALTER TABLE lead_admissions ADD CONSTRAINT lead_admissions_account_fkey FOREIGN KEY (account_id, tenant_id) REFERENCES accounts (id, tenant_id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE lead_admissions DROP CONSTRAINT lead_admissions_contact_fkey",
+      "global?": false,
+      "name": "lead_admissions_contact_fkey",
+      "up": "ALTER TABLE lead_admissions ADD CONSTRAINT lead_admissions_contact_fkey FOREIGN KEY (contact_id, tenant_id) REFERENCES contacts (id, tenant_id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE lead_admissions DROP CONSTRAINT lead_admissions_contact_account_fkey",
+      "global?": false,
+      "name": "lead_admissions_contact_account_fkey",
+      "up": "ALTER TABLE lead_admissions ADD CONSTRAINT lead_admissions_contact_account_fkey FOREIGN KEY (contact_id, account_id, tenant_id) REFERENCES contacts (id, account_id, tenant_id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE lead_admissions DROP CONSTRAINT lead_admissions_matched_lead_fkey",
+      "global?": false,
+      "name": "lead_admissions_matched_lead_fkey",
+      "up": "ALTER TABLE lead_admissions ADD CONSTRAINT lead_admissions_matched_lead_fkey FOREIGN KEY (matched_lead_id, tenant_id, account_id) REFERENCES leads (id, tenant_id, account_id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE lead_admissions DROP CONSTRAINT lead_admissions_agent_run_fkey",
+      "global?": false,
+      "name": "lead_admissions_agent_run_fkey",
+      "up": "ALTER TABLE lead_admissions ADD CONSTRAINT lead_admissions_agent_run_fkey FOREIGN KEY (agent_run_id, tenant_id) REFERENCES agent_runs (id, tenant_id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE lead_admissions DROP CONSTRAINT lead_admissions_referral_from_lead_fkey",
+      "global?": false,
+      "name": "lead_admissions_referral_from_lead_fkey",
+      "up": "ALTER TABLE lead_admissions ADD CONSTRAINT lead_admissions_referral_from_lead_fkey FOREIGN KEY (referral_from_lead_id, tenant_id) REFERENCES leads (id, tenant_id) ON DELETE RESTRICT"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION lead_admissions_admitted_bound()",
+      "global?": false,
+      "name": "lead_admissions_admitted_bound_function",
+      "up": "CREATE FUNCTION lead_admissions_admitted_bound() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  IF NEW.outcome = 'admitted'\n     AND (SELECT count(*) FROM leads WHERE admission_id = NEW.id) <> 1 THEN\n    RAISE EXCEPTION 'lead_admissions: an admitted admission must be bound by exactly one lead at commit'\n      USING ERRCODE = 'restrict_violation';\n  END IF;\n  RETURN NULL;\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER lead_admissions_admitted_bound ON lead_admissions",
+      "global?": false,
+      "name": "lead_admissions_admitted_bound",
+      "up": "CREATE CONSTRAINT TRIGGER lead_admissions_admitted_bound AFTER INSERT ON lead_admissions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION lead_admissions_admitted_bound()"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "8B9ADCD661C8A8F5FB3DCDC6CABC59581E551BAAAD4F0340D8C68EE5810FE862",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "lead_admissions_unique_source_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "source_kind"
+        },
+        {
+          "type": "atom",
+          "value": "source_ref"
+        }
+      ],
+      "name": "unique_source",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "lead_admissions"
+}

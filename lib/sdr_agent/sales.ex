@@ -4,7 +4,8 @@ defmodule SdrAgent.Sales do
   through which program.
 
   Resources: `IcpDefinition` (+ embedded `IcpCriteria`), `Account`,
-  `Contact`, `Lead`, `Campaign`, `Sequence`, `SequenceStep`,
+  `Contact`, `Lead`, `LeadAdmission` (C3-02: written only by the admission
+  orchestrator), `Campaign`, `Sequence`, `SequenceStep`,
   `CampaignEnrollment`. Sales sits above Audit, Accounts, Operations and
   Agents (it holds FKs to tenants, users and decisions) and below Research
   and Outreach, which it never calls. All data is synthetic: account
@@ -46,6 +47,7 @@ defmodule SdrAgent.Sales do
     resource SdrAgent.Sales.Account
     resource SdrAgent.Sales.Contact
     resource SdrAgent.Sales.Lead
+    resource SdrAgent.Sales.LeadAdmission
     resource SdrAgent.Sales.Campaign
     resource SdrAgent.Sales.Sequence
     resource SdrAgent.Sales.SequenceStep

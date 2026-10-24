@@ -77,6 +77,15 @@ defmodule SdrAgent.Sales.Campaign do
       check_constraint :sequence_id, "campaigns_sequence_when_live",
         check: "status IN ('draft', 'archived') OR sequence_id IS NOT NULL"
     end
+
+    custom_statements do
+      # C3-02: target of the lead admission's campaign foreign key (packet
+      # section 3: the campaign is its own tenant's).
+      statement :campaigns_id_tenant_key do
+        up "ALTER TABLE campaigns ADD CONSTRAINT campaigns_id_tenant_key UNIQUE (id, tenant_id)"
+        down "ALTER TABLE campaigns DROP CONSTRAINT campaigns_id_tenant_key"
+      end
+    end
   end
 
   actions do

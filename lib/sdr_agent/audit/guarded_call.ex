@@ -15,14 +15,16 @@ defmodule SdrAgent.Audit.GuardedCall do
 
   @doc """
   Runs create `action` of `resource` with `attrs`. Options: `actor:`,
-  `guarded?:` (a guarded action: every denial is audited), `subject_id:`.
+  `guarded?:` (a guarded action: every denial is audited), `subject_id:`,
+  `context:` (the action's context map, e.g. an orchestrator's policy
+  marker; default none).
   """
   def create(resource, action, attrs, opts) do
     actor = Keyword.get(opts, :actor)
 
     run(resource, action, opts[:subject_id], opts, fn ->
       resource
-      |> Ash.Changeset.for_create(action, attrs, actor: actor)
+      |> Ash.Changeset.for_create(action, attrs, actor: actor, context: context(opts))
       |> Ash.create()
     end)
   end
@@ -33,7 +35,7 @@ defmodule SdrAgent.Audit.GuardedCall do
 
     run(resource, action, record.id, opts, fn ->
       record
-      |> Ash.Changeset.for_update(action, attrs, actor: actor)
+      |> Ash.Changeset.for_update(action, attrs, actor: actor, context: context(opts))
       |> Ash.update()
     end)
   end
@@ -71,6 +73,8 @@ defmodule SdrAgent.Audit.GuardedCall do
     |> Ash.Query.for_read(Keyword.get(opts, :action, :read), %{}, actor: actor)
     |> tenant_scope(actor)
   end
+
+  defp context(opts), do: Keyword.get(opts, :context, %{})
 
   defp run(resource, action, subject_id, opts, fun) do
     meta = %{

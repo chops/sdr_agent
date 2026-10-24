@@ -7,7 +7,41 @@ defmodule SdrAgent.Sales.Lead do
   active, at create), `owner_user_id`, `source`, `status`, `status_reason`,
   `last_decision_id` (the Agents Decision behind the latest agent
   transition), `assigned_at`, `handed_off_at`, `closed_at`. A contact has at
-  most one open lead (partial unique index over the non-terminal states).
+  most one open lead, and so has an account (partial unique indexes over
+  the non-terminal states, `unique_open_lead` and `one_open_per_account`).
+
+  Admission provenance (C3-02, packet section 3 Lead): `admission_id` (the
+  `Sales.LeadAdmission` the lead was admitted by; composite FK to the
+  admission's tenant, company and person) and `referred_from_lead_id` (the
+  original lead of a referral, at the same tenant and company), both
+  nullable, unique when set. `admission_id` is accepted by `:create` only,
+  and only from inside the lead admission (`Changes.AdmissionOnly`; the
+  `SdrAgent.Sales.Checks.LeadAdmissionContext` marker); no other action
+  accepts either (C3-02 G4). `referred` is a terminal status (no action
+  produces it yet; C3-03 adds `:refer`). Inside the admission, `:create`
+  and `:assign` take no key: they require the admission's pass to hold the
+  account's company key (`Changes.LeadCompanyKey`). `source` adds `:csv`,
+  `:hubspot`, `:agent_found` and `:referral` (the admission kinds; no
+  referral is admitted before C3-03).
+
+  Company key outside the admission (C3-02 G7): `:seed` and `:reopen` take
+  the account's company key themselves and re-check it on the account
+  locked `FOR SHARE` (`Changes.CompanyKey`); `:reopen` is refused while
+  another lead of the account is open, and (A.3) for a covered contact
+  (`Changes.ReopenGuard`); the override transitions only require the
+  enclosing override's key held.
+
+  Cutover (C3-02 G5): `:create` is allowed only from inside the lead
+  admission (`LeadAdmissionContext`) and only to an active human admin
+  (`SdrAgent.Sales.Checks.ActiveAdmin`), with an admission kind as source
+  and the company key always required held. In the database, the BEFORE
+  INSERT trigger `leads_admission_binding` refuses a new lead that is not
+  bound to its admitted admission of the same tenant, kind and referrer
+  (except a dev/test `fixture` seed; a `crm` lead can no longer be
+  inserted), and the BEFORE UPDATE trigger `leads_identity_immutable`
+  keeps `source`, `admission_id`, `referred_from_lead_id`, `account_id` and
+  `contact_id` unchanged. Existing rows are never rewritten. The index
+  `leads_closed_history_index` serves the admission's closed-history read.
 
   Lifecycle (`transitions/0`):
 
@@ -35,7 +69,8 @@ defmodule SdrAgent.Sales.Lead do
   row re-read under `FOR UPDATE` and appends an AuditEvent (`sales.lead.*`)
   with the previous status, the new status, the reason and the decision id.
 
-  Actors: ADM create; SEED (dev/test only) `:seed`; reads for ADM, REV, AUR,
+  Actors: ADM create (inside the admission only); SEED (dev/test only)
+  `:seed`; reads for ADM, REV, AUR,
   AGT, WHK, AUD.
   """
   use Ash.Resource,
@@ -44,10 +79,12 @@ defmodule SdrAgent.Sales.Lead do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
-  alias SdrAgent.Audit.Changes.Stamp
   alias SdrAgent.Audit.Changes.AppendEvent
+  alias SdrAgent.Audit.Changes.Stamp
   alias SdrAgent.Audit.Changes.Transition
   alias SdrAgent.Audit.Checks
+  alias SdrAgent.Audit.SQL
+  alias SdrAgent.Operations.Failure
 
   @statuses [
     :new,
@@ -61,9 +98,10 @@ defmodule SdrAgent.Sales.Lead do
     :converted,
     :nurture,
     :stopped,
-    :blocked
+    :blocked,
+    :referred
   ]
-  @terminal [:disqualified, :converted, :nurture, :stopped]
+  @terminal [:disqualified, :converted, :nurture, :stopped, :referred]
   @open @statuses -- @terminal
   @transitions [
     {:assign, [:new], :assigned},
@@ -82,14 +120,31 @@ defmodule SdrAgent.Sales.Lead do
     {:disqualify_by_override, [:qualified], :disqualified},
     {:requalify_by_override, [:disqualified], :qualified}
   ]
+  @admission_kinds [:manual, :csv, :hubspot, :agent_found, :referral]
   @event [category: :domain_change, previous: [:status], links: [decision_id: :last_decision_id]]
+  # C3-02 G4: inside the lead admission only, `:assign` requires the
+  # admission's pass to hold the account's company key; no key outside it
+  # (a legacy lead is still assigned standalone). `:create` always requires
+  # it held (G5).
+  @company_key {SdrAgent.Audit.Changes.IdentityKeyLock,
+                mode: :none,
+                held_when: SdrAgent.Sales.Checks.LeadAdmissionContext,
+                keys: {SdrAgent.Sales.Changes.LeadCompanyKey, :keys}}
+  # C3-02 G7: the override transitions run only inside a Qualification
+  # `:override`, whose pass keyed this company; they only require it held.
+  @override_key {SdrAgent.Audit.Changes.IdentityKeyLock,
+                 mode: :held, keys: {SdrAgent.Sales.Changes.LeadCompanyKey, :keys}}
 
   postgres do
     table "leads"
     repo SdrAgent.Repo
 
     identity_wheres_to_sql unique_open_lead:
-                             "status NOT IN ('disqualified', 'converted', 'nurture', 'stopped')"
+                             "status NOT IN ('disqualified', 'converted', 'nurture', 'stopped', 'referred')",
+                           one_open_per_account:
+                             "status NOT IN ('disqualified', 'converted', 'nurture', 'stopped', 'referred')",
+                           unique_admission: "admission_id IS NOT NULL",
+                           unique_referred_from: "referred_from_lead_id IS NOT NULL"
 
     references do
       reference :tenant, on_delete: :restrict
@@ -100,13 +155,120 @@ defmodule SdrAgent.Sales.Lead do
     end
 
     check_constraints do
-      check_constraint :trace_id, "leads_trace_ids", check: SdrAgent.Audit.SQL.trace_check()
+      check_constraint :trace_id, "leads_trace_ids", check: SQL.trace_check()
 
-      check_constraint :status, "leads_status",
-        check: SdrAgent.Audit.SQL.one_of("status", @statuses)
+      check_constraint :status, "leads_status", check: SQL.one_of("status", @statuses)
 
       check_constraint :status_reason, "leads_reason_when_stopped_or_blocked",
         check: "status NOT IN ('stopped', 'blocked') OR status_reason IS NOT NULL"
+    end
+
+    custom_indexes do
+      # C3-02 (packet section 4.4, step 14a): the account's most recently
+      # closed lead, one bounded read under the company key.
+      index [:tenant_id, :account_id, "closed_at DESC NULLS LAST", "id DESC"],
+        name: "leads_closed_history_index"
+    end
+
+    custom_statements do
+      # C3-02 (packet section 3): composite foreign key targets. (id,
+      # tenant_id) for a referral admission's original lead; (id, tenant_id,
+      # account_id) for an admission's matched lead and a referral's
+      # original lead, both at the same company.
+      statement :leads_id_tenant_key do
+        up "ALTER TABLE leads ADD CONSTRAINT leads_id_tenant_key UNIQUE (id, tenant_id)"
+        down "ALTER TABLE leads DROP CONSTRAINT leads_id_tenant_key"
+      end
+
+      statement :leads_id_tenant_account_key do
+        up "ALTER TABLE leads ADD CONSTRAINT leads_id_tenant_account_key " <>
+             "UNIQUE (id, tenant_id, account_id)"
+
+        down "ALTER TABLE leads DROP CONSTRAINT leads_id_tenant_account_key"
+      end
+
+      # A lead binds its admission's tenant, company and person (MATCH
+      # SIMPLE: a lead without an admission is not checked).
+      statement :leads_admission_fkey do
+        up "ALTER TABLE leads ADD CONSTRAINT leads_admission_fkey " <>
+             "FOREIGN KEY (admission_id, tenant_id, account_id, contact_id) " <>
+             "REFERENCES lead_admissions (id, tenant_id, account_id, contact_id) " <>
+             "ON DELETE RESTRICT"
+
+        down "ALTER TABLE leads DROP CONSTRAINT leads_admission_fkey"
+      end
+
+      # C3-02 cutover (packet section 3 Lead row): a new lead is bound to its
+      # admitted admission of the same tenant, kind and referrer, except a
+      # dev/test `fixture` seed; a `crm` lead can no longer be inserted.
+      # Fixed, content-free message; the default SQLSTATE (raise_exception).
+      statement :leads_admission_binding_function do
+        up """
+        CREATE FUNCTION leads_admission_binding() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.source = 'fixture' AND NEW.admission_id IS NULL THEN
+            RETURN NEW;
+          END IF;
+          IF NEW.source = 'crm' OR NEW.admission_id IS NULL OR NOT EXISTS (
+               SELECT 1 FROM lead_admissions a
+                WHERE a.id = NEW.admission_id
+                  AND a.tenant_id = NEW.tenant_id
+                  AND a.outcome = 'admitted'
+                  AND a.source_kind = NEW.source
+                  AND a.referral_from_lead_id IS NOT DISTINCT FROM NEW.referred_from_lead_id) THEN
+            RAISE EXCEPTION 'leads: a new lead must be bound to its admitted admission';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+
+        down "DROP FUNCTION leads_admission_binding()"
+      end
+
+      statement :leads_admission_binding do
+        up "CREATE TRIGGER leads_admission_binding BEFORE INSERT ON leads " <>
+             "FOR EACH ROW EXECUTE FUNCTION leads_admission_binding()"
+
+        down "DROP TRIGGER leads_admission_binding ON leads"
+      end
+
+      # C3-02 cutover: a lead's source, admission, referrer, account and
+      # contact never change (NULL-safe, by value: other updates pass).
+      statement :leads_identity_immutable_function do
+        up """
+        CREATE FUNCTION leads_identity_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.source IS DISTINCT FROM OLD.source
+             OR NEW.admission_id IS DISTINCT FROM OLD.admission_id
+             OR NEW.referred_from_lead_id IS DISTINCT FROM OLD.referred_from_lead_id
+             OR NEW.account_id IS DISTINCT FROM OLD.account_id
+             OR NEW.contact_id IS DISTINCT FROM OLD.contact_id THEN
+            RAISE EXCEPTION 'leads: source, admission, referrer, account and contact are immutable';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+
+        down "DROP FUNCTION leads_identity_immutable()"
+      end
+
+      statement :leads_identity_immutable do
+        up "CREATE TRIGGER leads_identity_immutable BEFORE UPDATE ON leads " <>
+             "FOR EACH ROW EXECUTE FUNCTION leads_identity_immutable()"
+
+        down "DROP TRIGGER leads_identity_immutable ON leads"
+      end
+
+      # A referral's successor is at the same tenant and company.
+      statement :leads_referred_from_fkey do
+        up "ALTER TABLE leads ADD CONSTRAINT leads_referred_from_fkey " <>
+             "FOREIGN KEY (referred_from_lead_id, tenant_id, account_id) " <>
+             "REFERENCES leads (id, tenant_id, account_id) ON DELETE RESTRICT"
+
+        down "ALTER TABLE leads DROP CONSTRAINT leads_referred_from_fkey"
+      end
     end
   end
 
@@ -121,9 +283,16 @@ defmodule SdrAgent.Sales.Lead do
 
     create :create do
       description "ADM: create a new lead for an active account's contact."
-      accept [:contact_id, :account_id, :owner_user_id, :source]
+      accept [:contact_id, :account_id, :owner_user_id, :source, :admission_id]
+      # C3-02 cutover: an admission kind only (fixture and crm are refused).
+      validate one_of(:source, @admission_kinds)
+      change SdrAgent.Sales.Changes.AdmissionOnly
       change SdrAgent.Sales.Changes.LeadAccount
       change SdrAgent.Audit.Changes.SetTenant
+
+      change {SdrAgent.Audit.Changes.IdentityKeyLock,
+              mode: :held, keys: {SdrAgent.Sales.Changes.LeadCompanyKey, :keys}}
+
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.lead.created", category: :domain_change}
     end
@@ -132,6 +301,9 @@ defmodule SdrAgent.Sales.Lead do
       description "SEED (dev/test only): create a new lead with a fixture id."
       accept [:id, :contact_id, :account_id, :owner_user_id, :source]
       change SdrAgent.Sales.Changes.LeadAccount
+      # C3-02 G7: the company key (prepended), then, after LeadAccount's
+      # account FOR SHARE, the locked re-check (plan r8 section 4.4).
+      change SdrAgent.Sales.Changes.CompanyKey
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.lead.created", category: :domain_change}
@@ -141,6 +313,7 @@ defmodule SdrAgent.Sales.Lead do
       description "ADM, REV: new → assigned, optionally with an owner."
       require_atomic? false
       accept [:owner_user_id]
+      change @company_key
       change get_and_lock_for_update()
       change {Transition, from: [:new], to: :assigned, locked?: true}
       change {Stamp, fields: [:assigned_at]}
@@ -202,6 +375,7 @@ defmodule SdrAgent.Sales.Lead do
       description "ADM, REV, inside a human Qualification override only: qualified → disqualified (T)."
       require_atomic? false
       accept [:status_reason]
+      change @override_key
       change get_and_lock_for_update()
       change {Transition, from: [:qualified], to: :disqualified, locked?: true}
       change {Stamp, fields: [:closed_at]}
@@ -212,6 +386,7 @@ defmodule SdrAgent.Sales.Lead do
       description "ADM, REV, inside a human Qualification override only: disqualified → qualified."
       require_atomic? false
       accept [:status_reason]
+      change @override_key
       change get_and_lock_for_update()
       change {Transition, from: [:disqualified], to: :qualified, locked?: true}
       change set_attribute(:closed_at, nil)
@@ -267,7 +442,7 @@ defmodule SdrAgent.Sales.Lead do
 
       argument :failure_class, :atom,
         default: :run_stopped,
-        constraints: [one_of: SdrAgent.Operations.Failure.classes()]
+        constraints: [one_of: Failure.classes()]
 
       change {SdrAgent.Operations.Changes.Redact, fields: [:status_reason]}
       change get_and_lock_for_update()
@@ -297,8 +472,13 @@ defmodule SdrAgent.Sales.Lead do
     update :reopen do
       description "ADM: disqualified → assigned."
       require_atomic? false
+      # C3-02 G7 (plan r8 section 4.3): the company key, the account
+      # FOR SHARE and its re-check, then the lead FOR UPDATE, the locked
+      # transition and the re-open refusals (open lead, A.3).
+      change SdrAgent.Sales.Changes.CompanyKey
       change get_and_lock_for_update()
       change {Transition, from: [:disqualified], to: :assigned, locked?: true}
+      change SdrAgent.Sales.Changes.ReopenGuard
       change set_attribute(:closed_at, nil)
       change {Stamp, fields: [:assigned_at]}
       change {AppendEvent, [event_type: "sales.lead.reopened"] ++ @event}
@@ -311,8 +491,14 @@ defmodule SdrAgent.Sales.Lead do
       authorize_if always()
     end
 
-    policy action([:create, :retry, :reopen]) do
+    policy action([:retry, :reopen]) do
       authorize_if {Checks.ActorRole, roles: [:admin]}
+    end
+
+    # C3-02 cutover: only from inside the lead admission, by an active admin.
+    policy action(:create) do
+      forbid_unless SdrAgent.Sales.Checks.LeadAdmissionContext
+      authorize_if SdrAgent.Sales.Checks.ActiveAdmin
     end
 
     policy action(:seed) do
@@ -369,7 +555,7 @@ defmodule SdrAgent.Sales.Lead do
 
     attribute :source, :atom do
       allow_nil? false
-      constraints one_of: [:fixture, :crm, :manual]
+      constraints one_of: [:fixture, :crm, :manual, :csv, :hubspot, :agent_found, :referral]
       public? true
     end
 
@@ -382,6 +568,8 @@ defmodule SdrAgent.Sales.Lead do
     end
 
     attribute :status_reason, :string, public?: true
+    attribute :admission_id, :uuid, public?: true
+    attribute :referred_from_lead_id, :uuid, public?: true
     attribute :assigned_at, :utc_datetime_usec, writable?: false, public?: true
     attribute :handed_off_at, :utc_datetime_usec, writable?: false, public?: true
     attribute :closed_at, :utc_datetime_usec, writable?: false, public?: true
@@ -439,11 +627,24 @@ defmodule SdrAgent.Sales.Lead do
 
   identities do
     identity :unique_open_lead, [:tenant_id, :contact_id],
-      where: expr(status not in [:disqualified, :converted, :nurture, :stopped])
+      where: expr(status not in [:disqualified, :converted, :nurture, :stopped, :referred])
+
+    # C3-02 (packet section 3): one open lead per account, the active-target
+    # slot.
+    identity :one_open_per_account, [:tenant_id, :account_id],
+      where: expr(status not in [:disqualified, :converted, :nurture, :stopped, :referred])
+
+    identity :unique_admission, [:admission_id], where: expr(not is_nil(admission_id))
+
+    identity :unique_referred_from, [:referred_from_lead_id],
+      where: expr(not is_nil(referred_from_lead_id))
   end
 
   @doc "Every lead status."
   def statuses, do: @statuses
+
+  @doc "The open (non-terminal) lead statuses."
+  def open_statuses, do: @open
 
   @doc "Declared lifecycle transitions `{action, from, to}` (ADR-0010)."
   def transitions, do: @transitions

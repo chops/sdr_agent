@@ -26,6 +26,15 @@ defmodule SdrAgent.Outreach.Suppression do
   S9b: an LLM `reply_classification` of `unsubscribe` may only *add* the
   reply's `unsubscribe_reply` suppression). Reads: ADM, REV, AUR, AGT, DLV, WHK, AUD. Audited:
   `outreach.suppression.created`.
+
+  Identity key (C3-02 G6; plan r8 sections 2.6 and 16.2): every create
+  keys its value (`Changes.SuppressionKey`, `{scope, value}`) through
+  `SdrAgent.Audit.Changes.IdentityKeyLock`, a prepended before_action, so
+  the key precedes `ApplySuppression`'s reads and row locks and the
+  upsert (a replay takes it too). `:manual`, `:seed` and
+  `:from_classification` take it as their entry point's pass;
+  `:from_webhook` requires it held by the webhook's own pass
+  (`SdrAgent.Outreach.Webhooks`).
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -36,8 +45,11 @@ defmodule SdrAgent.Outreach.Suppression do
   require Ash.Expr
 
   alias SdrAgent.Audit.Changes.AppendEvent
+  alias SdrAgent.Audit.Changes.IdentityKeyLock
   alias SdrAgent.Audit.Checks
+  alias SdrAgent.Audit.SQL
   alias SdrAgent.Outreach.Changes
+  alias SdrAgent.Outreach.SuppressionMatch
 
   @reasons [:unsubscribe_link, :unsubscribe_reply, :hard_bounce, :complaint, :manual]
   @event [event_type: "outreach.suppression.created", category: :domain_change]
@@ -56,14 +68,11 @@ defmodule SdrAgent.Outreach.Suppression do
     end
 
     check_constraints do
-      check_constraint :trace_id, "suppressions_trace_ids",
-        check: SdrAgent.Audit.SQL.trace_check()
+      check_constraint :trace_id, "suppressions_trace_ids", check: SQL.trace_check()
 
-      check_constraint :scope, "suppressions_scope",
-        check: SdrAgent.Audit.SQL.one_of("scope", [:email, :domain])
+      check_constraint :scope, "suppressions_scope", check: SQL.one_of("scope", [:email, :domain])
 
-      check_constraint :reason, "suppressions_reason",
-        check: SdrAgent.Audit.SQL.one_of("reason", @reasons)
+      check_constraint :reason, "suppressions_reason", check: SQL.one_of("reason", @reasons)
 
       check_constraint :value, "suppressions_value_normalised",
         check: "value::text = lower(btrim(value::text)) AND value::text <> ''"
@@ -83,7 +92,7 @@ defmodule SdrAgent.Outreach.Suppression do
     end
 
     custom_statements do
-      for {name, up_sql, down_sql} <- SdrAgent.Audit.SQL.append_only("suppressions") do
+      for {name, up_sql, down_sql} <- SQL.append_only("suppressions") do
         statement name do
           up up_sql
           down down_sql
@@ -99,7 +108,7 @@ defmodule SdrAgent.Outreach.Suppression do
       description "Suppressions covering `email`: the email itself or its domain."
       argument :email, :string, allow_nil?: false
 
-      filter SdrAgent.Outreach.SuppressionMatch.filter(Ash.Expr.expr(^arg(:email)))
+      filter SuppressionMatch.filter(Ash.Expr.expr(^arg(:email)))
 
       prepare build(sort: [inserted_at: :asc, id: :asc])
     end
@@ -116,6 +125,7 @@ defmodule SdrAgent.Outreach.Suppression do
       change {Changes.ActorUser, field: :created_by_user_id}
       change Changes.NormalizeSuppression
       change SdrAgent.Audit.Changes.SetTenant
+      change {IdentityKeyLock, mode: :entry, keys: {Changes.SuppressionKey, :keys}}
       change SdrAgent.Audit.Changes.TraceIds
       change SdrAgent.Research.Changes.MarkExisting
       change {AppendEvent, @event}
@@ -150,6 +160,7 @@ defmodule SdrAgent.Outreach.Suppression do
       return_skipped_upsert? true
       change Changes.NormalizeSuppression
       change SdrAgent.Audit.Changes.SetTenant
+      change {IdentityKeyLock, mode: :held, keys: {Changes.SuppressionKey, :keys}}
       change SdrAgent.Audit.Changes.TraceIds
       change {Changes.CheckSuppressionSource, decision_kind: :unsubscribe_rule}
       change SdrAgent.Research.Changes.MarkExisting
@@ -169,6 +180,7 @@ defmodule SdrAgent.Outreach.Suppression do
       change set_attribute(:reason, :unsubscribe_reply)
       change Changes.NormalizeSuppression
       change SdrAgent.Audit.Changes.SetTenant
+      change {IdentityKeyLock, mode: :entry, keys: {Changes.SuppressionKey, :keys}}
       change SdrAgent.Audit.Changes.TraceIds
       change {Changes.CheckSuppressionSource, decision_kind: :reply_classification}
       change SdrAgent.Research.Changes.MarkExisting
@@ -187,6 +199,7 @@ defmodule SdrAgent.Outreach.Suppression do
       change set_attribute(:reason, :manual)
       change Changes.NormalizeSuppression
       change SdrAgent.Audit.Changes.SetTenant
+      change {IdentityKeyLock, mode: :entry, keys: {Changes.SuppressionKey, :keys}}
       change SdrAgent.Audit.Changes.TraceIds
       change SdrAgent.Research.Changes.MarkExisting
       change {AppendEvent, @event}

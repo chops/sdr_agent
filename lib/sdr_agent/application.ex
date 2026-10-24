@@ -28,12 +28,16 @@ defmodule SdrAgent.Application do
   # The supervision tree, in start order. The runtime-selected model
   # provider (one named ClaudeCLI server when `SDR_MODEL_PROVIDER=claude_cli`,
   # nothing for the Fake; ADR-0004) starts before Oban, so no agent job can
-  # run before its provider exists.
+  # run before its provider exists. C3-02 (plan r8 section 7.3; D-174 Q-O4):
+  # the `SDRAgent` definition bootstrap runs right after the Repo, before
+  # the provider, Oban, PubSub, the Relay and the Endpoint; on any failure
+  # the application does not start.
   def children do
     SdrAgent.Telemetry.test_children() ++
       [
         SdrAgentWeb.Telemetry,
         SdrAgent.Repo,
+        SdrAgent.SDR.DefinitionBootstrap,
         {DNSCluster, query: Application.get_env(:sdr_agent, :dns_cluster_query) || :ignore}
       ] ++
       ModelProviderRuntime.children() ++

@@ -1,0 +1,336 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "name",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "domain",
+      "type": "citext"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "website_url",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "industry",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "employee_count",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "geography",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "crm_provider",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "crm_external_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "source",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"active\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "status",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "updated_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "accounts_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "accounts_trace_ids"
+    },
+    {
+      "attribute": [
+        "status"
+      ],
+      "base_filter": null,
+      "check": "status IN ('active', 'archived')",
+      "name": "accounts_status"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "domain"
+      ],
+      "fields": [
+        {
+          "type": "string",
+          "value": "tenant_id"
+        },
+        {
+          "type": "string",
+          "value": "sdr_canonical_domain(domain::text)"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": "is already used by another account",
+      "name": "accounts_canonical_domain_index",
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": true,
+      "using": null,
+      "where": null
+    }
+  ],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION sdr_canonical_domain(text)",
+      "global?": false,
+      "name": "sdr_canonical_domain_function",
+      "up": "CREATE FUNCTION sdr_canonical_domain(text) RETURNS text LANGUAGE sql IMMUTABLE AS $$\n  SELECT regexp_replace(regexp_replace(lower(btrim($1)), '\\.$', ''), '^www\\.', '')\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "ALTER TABLE accounts DROP CONSTRAINT accounts_id_tenant_key",
+      "global?": false,
+      "name": "accounts_id_tenant_key",
+      "up": "ALTER TABLE accounts ADD CONSTRAINT accounts_id_tenant_key UNIQUE (id, tenant_id)"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "3FF6B6CF1D780BED533620EBA0F54E851D6F96EC43A0880AE5FAD913C4A9048F",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "accounts_unique_crm_id_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "crm_provider"
+        },
+        {
+          "type": "atom",
+          "value": "crm_external_id"
+        }
+      ],
+      "name": "unique_crm_id",
+      "nils_distinct?": true,
+      "where": "crm_external_id IS NOT NULL"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "accounts_unique_domain_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "domain"
+        }
+      ],
+      "name": "unique_domain",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "accounts"
+}

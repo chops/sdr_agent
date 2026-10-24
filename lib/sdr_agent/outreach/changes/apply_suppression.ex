@@ -8,8 +8,10 @@ defmodule SdrAgent.Outreach.Changes.ApplySuppression do
   queued draft and its still-granted approval (→ invalidated, `suppressed`).
   A delivery already claimed is in flight and is left to its outcome.
 
-  Matching contacts: `email` scope — the contact email equals the value;
-  `domain` scope — the contact email's domain equals the value. The
+  Matching contacts (`SdrAgent.Outreach.Locks.contacts/3`): `email` scope —
+  the contact email equals the value; `domain` scope — the contact email's
+  domain, or its account's canonical domain (C3-02 G6), equals the value.
+  The
   enrollments, drafts and approvals are those of *every* lead of a matching
   contact, including leads already terminal; only the lead transition is
   limited to open leads.

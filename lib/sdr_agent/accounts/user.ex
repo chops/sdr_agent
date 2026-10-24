@@ -96,6 +96,15 @@ defmodule SdrAgent.Accounts.User do
       check_constraint :status, "users_status",
         check: SdrAgent.Audit.SQL.one_of("status", @statuses)
     end
+
+    custom_statements do
+      # C3-02: target of the lead admission's requester foreign key
+      # (packet section 3: the requester is its own tenant's user).
+      statement :users_id_tenant_key do
+        up "ALTER TABLE users ADD CONSTRAINT users_id_tenant_key UNIQUE (id, tenant_id)"
+        down "ALTER TABLE users DROP CONSTRAINT users_id_tenant_key"
+      end
+    end
   end
 
   field_policies do

@@ -23,7 +23,10 @@ defmodule SdrAgent.Outreach.Webhooks do
   Event types: `reply` (match → `SdrAgent.Outreach.Reply`, the
   deterministic `unsubscribe_rule` Decision and, when it says so, an
   `unsubscribe_reply` Suppression; a matched reply is handed to the agent
-  plane through `SdrAgent.Outreach.ReplyIntake` in the same transaction), `unsubscribe` (the signed footer link: `Unsubscribe.verify/3` →
+  plane through `SdrAgent.Outreach.ReplyIntake` in the same transaction,
+  or, when the agent definition is unavailable, the reply phase commits
+  alone and a later attempt of the same event resumes only the hand-off,
+  C3-02 section 6.7), `unsubscribe` (the signed footer link: `Unsubscribe.verify/3` →
   `unsubscribe_link` Suppression), `delivered` and `bounce` (accepted →
   delivered | bounced with a receipt; a bounce always suppresses the
   recipient as `hard_bounce`), `complaint` (`complaint` Suppression).
@@ -31,13 +34,33 @@ defmodule SdrAgent.Outreach.Webhooks do
   Every row lock is taken before the first audit append of the processing
   transaction (`SdrAgent.Outreach.Locks`): event row, then leads →
   enrollments → drafts → deliveries → approvals.
+
+  Identity keys (C3-02 G6; plan r8 sections 6.2 and 16.5; ADR-0009 C3-02
+  amendment): after its own WebhookEvent row (the only lock allowed before
+  it), each path takes one pass (`SdrAgent.Audit.IdentityKeys.pass/2`)
+  before any lookup, row lock or write; the nested `:from_webhook`
+  Suppression only requires its key held. A reply passes
+  `{reply-message: m, email: from}`, where `m` is the represented
+  Message-ID: the payload value under `Reply.message_id`'s own Ash type and
+  constraints (trimmed, case kept), derived once and used for the key, the
+  stored-reply check and the Reply; an empty or unrepresentable one is the
+  fixed schema refusal before any pass. Both the first processing and a
+  resumed hand-off take the same pass. A matched reply then reads its match
+  unlocked, locks the targets and recomputes the match, which must be
+  unchanged (otherwise `{:error, :reply_match_changed}`, the whole attempt
+  rolled back). An unsubscribe link passes `{email}` of the contact it
+  read and re-reads it (a changed or missing contact is `{:error,
+  :conflict}`); a bounce or complaint passes `{email}` of the delivery's
+  stored recipient. A delivered event takes no key.
   """
 
   require Ash.Query
 
+  alias Ash.Resource.Info, as: ResourceInfo
   alias SdrAgent.Actor
   alias SdrAgent.Agents
   alias SdrAgent.Audit
+  alias SdrAgent.Audit.IdentityKeys
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Clock
   alias SdrAgent.Operations.WebhookEvent
@@ -60,6 +83,9 @@ defmodule SdrAgent.Outreach.Webhooks do
   @types Map.new(WebhookEvent.event_types(), &{Atom.to_string(&1), &1})
   @header_allowlist ~w(content-type user-agent x-sdr-key-id x-sdr-timestamp x-sdr-signature)
   @message_host "@sdr.example.test>"
+  @handoff_pending "reply hand-off pending: agent definition unavailable"
+  @reply_schema_refusal "payload does not match the reply schema"
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
   ## Ingest
 
@@ -158,11 +184,28 @@ defmodule SdrAgent.Outreach.Webhooks do
   last attempt) records a transient failure as `failed` (class `crash`)
   instead; a permanent one (bad bytes, payload, message, token) is always
   `failed` with `validation_error`.
+
+  C3-02 (plan r8 section 6.7; D-174 Q-O5): a matched reply whose hand-off
+  defers (`{:deferred, :agent_definition_unavailable}` from
+  `SdrAgent.Outreach.ReplyIntake`) commits its reply phase without
+  `:mark_processed` and returns `{:error, :agent_definition_unavailable}`
+  (retry); on the final attempt the event is `failed`, class `crash`, with
+  the fixed reason "#{@handoff_pending}". A later attempt or operator retry
+  of that event finds its own stored matched Reply and resumes only the
+  hand-off.
   """
   def process(id, tenant_id, raw_body, opts \\ []) do
     whk = Actor.system(:webhook_ingestor, tenant_id)
 
     case transaction(fn -> process_locked(id, tenant_id, raw_body, whk) end) do
+      # C3-02 (plan r8 section 6.7.3 step 5): the reply phase committed, the
+      # hand-off is owed and the event stays unprocessed: retry, or on the
+      # final attempt fail the event with the fixed, value-free reason.
+      {:ok, {:deferred, reason}} ->
+        if Keyword.get(opts, :final?, false),
+          do: fail(id, tenant_id, :crash, @handoff_pending, whk),
+          else: {:error, reason}
+
       {:ok, _} ->
         :ok
 
@@ -277,14 +320,17 @@ defmodule SdrAgent.Outreach.Webhooks do
     from = normalise(data.from)
 
     with :ok <- valid_email(from),
-         :ok <- valid_email(normalise(data.to)) do
-      # Distinct events can carry one Message-ID: serialize on it before the
-      # check, so a concurrent duplicate waits and then sees the stored reply.
-      serialize_message(event.tenant_id, data.message_id)
+         :ok <- valid_email(normalise(data.to)),
+         {:ok, message_id} <- represented_message_id(data.message_id) do
+      # Distinct events can carry one Message-ID: the reply-message key
+      # serializes them before the check, so a concurrent duplicate waits
+      # and then sees the stored reply.
+      pass!(event.tenant_id, [{:"reply-message", message_id}, {:email, from}])
 
-      if replied?(data.message_id, event.tenant_id),
-        do: :ok,
-        else: reply(data, from, match(data, from, event.tenant_id), event, whk)
+      case stored_reply(message_id, event.tenant_id) do
+        nil -> reply(data, message_id, from, event, whk)
+        stored -> stored_reply_of(stored, event, whk)
+      end
     end
   end
 
@@ -292,8 +338,11 @@ defmodule SdrAgent.Outreach.Webhooks do
     with {:ok, contact} <- contact(data.contact_id, event.tenant_id),
          true <-
            Unsubscribe.verify(data.token, event.tenant_id, contact.id) ||
-             {:error, {:invalid, "unsubscribe token does not match the contact"}} do
-      email = normalise(contact.email)
+             {:error, {:invalid, "unsubscribe token does not match the contact"}},
+         :ok <- hook!(:before_unsubscribe_pass),
+         email = normalise(contact.email),
+         :ok <- pass!(event.tenant_id, [{:email, email}]),
+         :ok <- unchanged_email(contact.id, email, event.tenant_id) do
       lock_suppression(event.tenant_id, email, [])
 
       with {:ok, decision} <-
@@ -330,16 +379,38 @@ defmodule SdrAgent.Outreach.Webhooks do
     end
   end
 
-  defp reply(data, from, match, event, whk) do
-    text = data.text
+  defp reply(data, message_id, from, event, whk) do
+    match = match(data, from, event.tenant_id)
+    hook!(:after_reply_match)
 
-    if match, do: lock_suppression(event.tenant_id, match.email, [match.lead_id])
+    with :ok <- lock_and_revalidate(match, data, from, event.tenant_id) do
+      receive_reply(data, message_id, from, match, event, whk)
+    end
+  end
+
+  # A matched reply locks its targets (Locks.targets), then recomputes the
+  # match under the locks: it must be the same six-field match, with the
+  # validated sender as its email; otherwise the attempt rolls back whole
+  # (transient), having written nothing of the reply. No key is requested
+  # here. An unmatched reply locks nothing, as before.
+  defp lock_and_revalidate(nil, _data, _from, _tenant_id), do: :ok
+
+  defp lock_and_revalidate(match, data, from, tenant_id) do
+    lock_suppression(tenant_id, match.email, [match.lead_id])
+
+    if match.email == from and match(data, from, tenant_id) == match,
+      do: :ok,
+      else: {:error, :reply_match_changed}
+  end
+
+  defp receive_reply(data, message_id, from, match, event, whk) do
+    text = data.text
 
     attrs =
       Map.merge(
         %{
           webhook_event_id: event.id,
-          message_id: data.message_id,
+          message_id: message_id,
           in_reply_to: data[:in_reply_to],
           from_email: from,
           to_email: normalise(data.to),
@@ -390,6 +461,36 @@ defmodule SdrAgent.Outreach.Webhooks do
 
   defp maybe_unsubscribe(_outcome, _match, _reply, _decision, _event, _whk), do: :ok
 
+  # C3-02 (plan r8 section 6.7.3, T2): this event's own matched Reply means
+  # its reply phase committed with the hand-off owed (a deferral): resume
+  # only the hand-off. A Reply of another event is a duplicate (no-op).
+  defp stored_reply_of(
+         %Reply{match_status: :matched, webhook_event_id: id} = reply,
+         %{id: id} = event,
+         whk
+       ),
+       do: resume(reply, event, whk)
+
+  defp stored_reply_of(_duplicate, _event, _whk), do: :ok
+
+  # The match rebuilt from the stored, append-only Reply (the committed
+  # match): lead and enrollment from it, the campaign from its delivery,
+  # read unlocked by id and tenant. No revalidation, no Locks.targets, no
+  # domain row lock; the hand-off is all that runs.
+  defp resume(reply, event, whk) do
+    delivery = read(DeliveryOperation, reply.delivery_operation_id, event.tenant_id)
+
+    match = %{
+      delivery_operation_id: reply.delivery_operation_id,
+      contact_id: reply.contact_id,
+      lead_id: reply.lead_id,
+      enrollment_id: reply.enrollment_id,
+      campaign_id: delivery.campaign_id
+    }
+
+    signal(match, reply, whk)
+  end
+
   defp signal(nil, _reply, _whk), do: :ok
 
   defp signal(match, reply, whk), do: ReplyIntake.impl().received(reply, match, whk)
@@ -439,16 +540,27 @@ defmodule SdrAgent.Outreach.Webhooks do
     |> Ash.read_one!(authorize?: false)
   end
 
-  defp serialize_message(tenant_id, message_id) do
-    Ecto.Adapters.SQL.query!(Repo, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-      "sdr-reply-message:#{tenant_id}:#{message_id}"
-    ])
+  # The represented Message-ID: the payload value under Reply.message_id's
+  # own Ash type and constraints (today trimmed, case kept), so the key, the
+  # stored-reply check and the Reply share one value. An empty result (a
+  # whitespace-only value) or any constraint error is the fixed schema
+  # refusal, before any pass, lookup or write.
+  defp represented_message_id(raw) do
+    %{type: type, constraints: constraints} = ResourceInfo.attribute(Reply, :message_id)
+
+    with {:ok, cast} <- Ash.Type.cast_input(type, raw, constraints),
+         {:ok, value} when is_binary(value) and value != "" <-
+           Ash.Type.apply_constraints(type, cast, constraints) do
+      {:ok, value}
+    else
+      _refused -> {:error, {:invalid, @reply_schema_refusal}}
+    end
   end
 
-  defp replied?(message_id, tenant_id) do
+  defp stored_reply(message_id, tenant_id) do
     Reply
     |> Ash.Query.filter(tenant_id == ^tenant_id and message_id == ^message_id)
-    |> Ash.exists?(authorize?: false)
+    |> Ash.read_one!(authorize?: false)
   end
 
   ## Delivery outcomes
@@ -467,6 +579,7 @@ defmodule SdrAgent.Outreach.Webhooks do
 
   defp outcome(:bounce, delivery, data, event, whk) do
     email = normalise(delivery.recipient_email)
+    pass!(event.tenant_id, [{:email, email}])
     targets = lock_suppression(event.tenant_id, email, [], [delivery.id])
     delivery = Enum.find(targets.locked_deliveries, &(&1.id == delivery.id))
 
@@ -486,6 +599,7 @@ defmodule SdrAgent.Outreach.Webhooks do
 
   defp outcome(:complaint, delivery, _data, event, whk) do
     email = normalise(delivery.recipient_email)
+    pass!(event.tenant_id, [{:email, email}])
     lock_suppression(event.tenant_id, email, [])
 
     with {:ok, _} <-
@@ -539,6 +653,20 @@ defmodule SdrAgent.Outreach.Webhooks do
   end
 
   ## Shared steps
+
+  # The processing transaction's one identity-key pass (its own WebhookEvent
+  # row is the only lock before it).
+  defp pass!(tenant_id, keys), do: :ok = IdentityKeys.pass(tenant_id, keys)
+
+  # The unsubscribe link's re-read under its email key: the contact must
+  # still have the email that was keyed (`:change_email` keys the old email,
+  # so the key holds the re-read stable).
+  defp unchanged_email(contact_id, email, tenant_id) do
+    case read(Sales.Contact, contact_id, tenant_id) do
+      %{email: current} -> if normalise(current) == email, do: :ok, else: {:error, :conflict}
+      nil -> {:error, :conflict}
+    end
+  end
 
   defp lock_suppression(tenant_id, email, lead_ids, delivery_ids \\ []) do
     Locks.targets(tenant_id, %{
@@ -628,6 +756,14 @@ defmodule SdrAgent.Outreach.Webhooks do
     |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
     |> Ash.Query.lock(:for_update)
     |> Ash.read_one!(authorize?: false)
+  end
+
+  if @test_seams do
+    @test_hooks SdrAgent.Outreach.Webhooks.TestHooks
+
+    defp hook!(point), do: @test_hooks.reached(point)
+  else
+    defp hook!(_point), do: :ok
   end
 
   defp transaction(fun) do

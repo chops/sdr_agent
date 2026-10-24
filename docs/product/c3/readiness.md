@@ -1121,6 +1121,17 @@ No code changes in C3-01. Names are proposals.
 - C3-02's full module list is plan r8 §8.1, which adds the reply hand-off
   deferral files (`outreach/reply_intake.ex`, `sdr/reply_intake.ex`,
   `outreach/webhook_worker.ex` moduledoc) and the boot child.
+- As built (C3-02 GREEN, G1–G7; plan r8 sections 14–17): the plan's
+  `sales/admission_locks.ex` was not created; the admission's lock reads
+  stay in `lib/sdr_agent/sdr/admission.ex`. The plan's
+  `sales/changes/company_key.ex` is realized as `Sales.CompanyLock` (the
+  shared company reads), `Sales.Changes.CompanyKey` (the Lead `:seed` and
+  `:reopen` key and locked re-check), `Sales.Changes.ReopenGuard` (the
+  re-open refusals, A.3), `Research.Changes.OverrideCompanyLock` and
+  `Research.Changes.RecordLeadLock`. Suppression keys are
+  `Outreach.Changes.SuppressionKey`; the admission seams are
+  `SDR.Admission.TestHooks` and `IdentityKeys.TestFaults` (test builds
+  only). No contract changes with these names.
 - Documentation obligations carried from Codex's r8 review (G3, with the
   deferral): the moduledoc at `lib/sdr_agent/outreach/reply.ex:19`
   promises that the signal commits in the same transaction as the Reply,
@@ -1329,6 +1340,26 @@ needs no model change (the handover was already same-company only).
     and Codex's final correlated entity and module review PASS of r8,
     including the reply hand-off deferral, on these exact artifacts.
   - **Verification:** docs-only change; no code, migration or test changed.
+- **C3-02 GREEN slices G1–G7, 2026-10-20 to 2026-10-21** (branch
+  `c3-02-red`; reviewer Codex via ai-pair; private reviews in the handoff
+  `tmp/` directory). Each is a staged slice approval, not GREEN, merge or
+  deployment approval:
+  - **G1 and G2:** APPROVE at `b41bca1` and `3c833fe`; after the rebase
+    onto `14de644`, RED, G1 and G2 re-signed at `7fc693f`
+    (`codex-c302-7fc693f-rebase-resign.org`).
+  - **G3:** APPROVE at `ec0eab3` (`codex-c302-g3-ec0eab31-review.org`).
+  - **G4:** APPROVE at `069a9ff` (`codex-c302-g4-069a9ff-approve.org`).
+  - **G5:** PASS at `58571c3`, including the migration up/down/up proof
+    (`codex-c302-g5-58571c3-final-review.org`).
+  - **G6:** PASS at `b6620d8` (`codex-c302-g6-green-b6620d8-review.org`).
+  - **G7:** PASS at `853e399` (`codex-c302-g7-green-853e399-review.org`):
+    FULL 3554 passed, 0 failures.
+  - **Open:** G8 (negative controls, diagrams, full gate), the #209 rebase
+    and equivalence review, exact-head CI, the O4/5b (#156) gates and the
+    D-157 merge. The 5b server-log decision is recorded (D-178: the owner
+    accepted all five picks), so no new owner choice is owed; its
+    implementation and review, the sink test, the owner-run activation
+    receipt and the owner's acceptance of the residual remain open.
 
 ## 14. Next authorized scope (when PASS, ADR acceptance and G5)
 

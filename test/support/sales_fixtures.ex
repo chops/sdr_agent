@@ -170,17 +170,56 @@ defmodule SdrAgent.SalesFixtures do
     contact
   end
 
-  @doc "A new lead created by ADM for a new contact."
+  @doc """
+  A lead admitted by ADM for a new contact at a new account (C3-02 cutover:
+  `SdrAgent.SDR.admit_lead/2`, kind `:manual`, the only way a lead is
+  created). The admission assigns it: the lead is `:assigned`, owned by the
+  admin, with its queued assignment run. Its prerequisites are set up here:
+  the tenant's offering profile, its committed `SDRAgent` definition
+  (`SDR.bootstrap_definitions/1`, outside any transaction) and an active
+  campaign. A test that needs a `:new` lead uses `new_lead!/1`.
+  """
   def lead!(tenant) do
+    contact = contact!(tenant)
+    AgentsFixtures.ensure_offering!(tenant)
+    {:ok, _definition} = SdrAgent.SDR.bootstrap_definitions(tenant.id)
+
+    input = %{
+      source_kind: :manual,
+      source_ref: "manual:#{Ecto.UUID.generate()}",
+      campaign_id: active_campaign!(tenant).id,
+      company: %{domain: to_string(contact_account!(tenant, contact).domain)},
+      person: %{email: to_string(contact.email)}
+    }
+
+    {:ok, %{outcome: :admitted, lead: lead}} =
+      SdrAgent.SDR.admit_lead(input, actor: human(:admin, tenant))
+
+    lead
+  end
+
+  @doc """
+  A `:new` lead for a new contact, through the dev/test `:seed` boundary
+  (source `:fixture`, the seeder): after the C3-02 cutover the only lead
+  that starts unassigned.
+  """
+  def new_lead!(tenant) do
     contact = contact!(tenant)
 
     {:ok, lead} =
-      Sales.create_lead(
-        %{contact_id: contact.id, account_id: contact.account_id, source: :manual},
-        actor: human(:admin, tenant)
+      Sales.seed_lead(
+        %{contact_id: contact.id, account_id: contact.account_id, source: :fixture},
+        actor: system_actor(:seeder, tenant)
       )
 
     lead
+  end
+
+  defp contact_account!(tenant, contact) do
+    {:ok, account} =
+      Sales.fetch(Sales.Account, contact.account_id, actor: human(:admin, tenant))
+
+    account
   end
 
   @doc "A running agent run (with its definition) and the AGT actor."
@@ -211,7 +250,12 @@ defmodule SdrAgent.SalesFixtures do
   @doc """
   A lead driven by its allowed actors to `status`, one of `:new`, `:assigned`,
   `:researching`, `:qualifying` (qualified/disqualified need a Qualification).
+  `:new` is a seeded lead (`new_lead!/1`); every other status starts from an
+  admitted lead (`lead!/1`), already `:assigned`, so its assign step is not
+  repeated.
   """
+  def lead_in!(tenant, :new), do: new_lead!(tenant)
+
   def lead_in!(tenant, status) do
     lead = lead!(tenant)
     %{run: run} = run!(tenant)
@@ -238,6 +282,8 @@ defmodule SdrAgent.SalesFixtures do
 
     steps
     |> Enum.take(count)
+    # The admission already assigned the lead.
+    |> Enum.drop(1)
     |> Enum.reduce(lead, fn step, lead ->
       {:ok, next} = step.(lead)
       next
