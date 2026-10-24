@@ -1,0 +1,18 @@
+{
+  "name": "Example Widgets Co",
+  "summary": "Example Widgets Co is a fictional company used only for synthetic tests. It sells a pretend pallet counter for practice warehouses. Website: www.example.com.",
+  "audience": "Fictional warehouse teams at reserved test domains such as example.com.",
+  "items": [
+    {
+      "id": "pallet_counter",
+      "kind": "feature",
+      "text": "A pretend widget that counts pallets in a practice warehouse."
+    },
+    {
+      "id": "synthetic_only",
+      "kind": "limit",
+      "text": "Synthetic test content only: no real customers, prices, results or people."
+    }
+  ],
+  "revision_note": ""
+}
