@@ -1181,6 +1181,25 @@ Nothing merged overnight. Decisions D-194 to D-196 are on #216 (Codex APPROVE at
 - the D-168 install and the witness diagnostic;
 - the H1 task walk.
 
+### Sprint 1, day 13 (Sat Oct 24): three lanes planned, all waiting on the owner (as of 09:30 MDT)
+
+**Merged since the last entry, under D-157:**
+- **#224** (`9efd868`): the fix for two advisories published on Oct 23, `req_llm` EEF-CVE-2026-107685 (CRITICAL) and `plug_crypto` EEF-CVE-2026-105963 (MEDIUM). They had made CI's blocking dependency audit (ADR-0008) fail on every PR. The fix is lock-only in three entries. ADR-0018 records the residual: `req_llm` and `llm_db` declare `zoi ~> 0.18.11` but run against ADR-0003's 0.18.10. The owner accepted it (D-200). Main's post-merge CI is green.
+- **#223** (`0cbf8e5`): the Oct 23 journal and D-200 to D-202. D-201 defers 5b's full self-test until Scope B has a path. D-202 lets the Oct 30 release candidate slip, with scope and the S6 block unchanged. Main CI is green.
+
+**Getting ahead, after the owner asked:** Claude's lane was idle behind 5b, so Codex handed Claude its Brave terms packet and the narrow C5 inventory, and went to the browser rehearsal. Codex ranked the levers. 5b itself has one: a capped half-day decision packet for the T4a timing race, now an owner question.
+
+**Planned and reviewed (read-only, no code):**
+- **Brave terms packet** (r3, Codex-approved for owner presentation). The terms restrict storing search results beyond undefined "transient storage", require erasure on termination unless an Order Form says otherwise, and restrict mass-email and AI-improvement uses. Our audit and witness payloads can't be erased in this version (D-038). Both agents pick: the owner sends the clarification email, with dispatch off meanwhile.
+- **C5 inventory.** On main, no suppression check uses the company domain. Codex confirmed from source a separate blind spot: the follow-up worker reads suppressions as `:scheduler`, which Suppression's read policy doesn't admit, so the lookup filters to empty. Later steps stop the work first, and nothing sends email, so no incident is shown. A missing config key would also make the agent's check fall back to `NoStore`.
+- **Suppression safety fix** (plan r3 and entity PASS): a dedicated, scheduler-only, tenant-bound read action, and a fail-closed configuration check. It has 28 named tests and an estimate of 2–3 agent-days, and waits on owner funding.
+- **C5 alignment** (plan r4, entity PASS, plan CHANGES REQUESTED). The estimate grew every round, from 1.5–3 to 5–5.5 agent-days, so it was parked by agreement until C3-02 and the safety fix merge. A resume note holds the open finding: Guard sees a nested transaction result, not a flat one.
+- **v4 T7** (plan r3 and entity PASS, no delta): 4.5 agent-days for Claude plus 1–1.5 for Codex's review. Its RED waits on the owner's fixed UTC start and expiry, acceptance of the exact terms, and the D-179 scope.
+
+**Forecast:** Codex's rehearsal made no verified progress on Oct 23; its time went to reviews. Every ready lane now waits on six owner answers. There is no supported integrated date until 5b has a path, and the Nov 6 core likely slips.
+
+**Ready for the owner now:** the six carried questions (suppression fix, T7 times, T7 terms, D-179 scope, the T4a half-day, the Brave email); the D-168 install and the witness diagnostic; the H1 task walk.
+
 ## Missteps
 
 Things that went wrong, kept here on the owner's request (D-027). Each row
@@ -1247,3 +1266,6 @@ says what happened, why, what it cost and what changed.
 | **Oct 23: a GREEN run's extraction step refused and ran nothing.** It looked for a driver name the claim didn't use. | The claim didn't name the driver's saved path. | One reclaim. | Every claim names the driver's saved path, and extraction refuses if the path exists. |
 | **Oct 23: Claude relayed wrong planted-bug totals.** | The totals were restated from memory, not read from the map. | One correction to Codex. | Counts are read from the pinned map or the measured file before they're relayed. |
 | **Oct 23: Codex's own feature lane didn't progress after the restart RELEASE.** With Claude's lane blocked on the owner, nothing checked Codex's own lane until the owner asked. | "Blocked on the owner" was read as covering both agents. | Feature-lane progress for an unmeasured interval; Codex did review work meanwhile. | When Claude's lane is blocked, Codex's own lane is checked and resumed. |
+| **Oct 23: standup questions went up without Codex's picks.** Three questions showed only Claude's pick, although the page has fields for Codex's. | Codex's section was asked for, but not its pick on each question. | The owner had to ask. | The routine now requires `codexPick` and `codexWhy` on every question, from an explicit consult, including questions added during the day. |
+| **Oct 23: `mix usage_rules.sync` wrote files after its prompt was declined.** Piping `n` to its confirmation still applied the changes. | The tool's non-interactive behaviour wasn't checked first. | Minutes; the writes were reverted in Claude's own branch worktree, and nothing was committed. | Generators are run with `--dry-run` first, or in a scratch copy. |
+| **Oct 23: plan estimates kept growing in review.** C5 went from 1.5–3 to 5–5.5 agent-days over four rounds, and the suppression fix from 1–1.75 to 2–3. | First estimates were made before the error contracts, lock orders and tests were written out. | Several review rounds for a lane that can't start yet. | Estimates are summed from listed items. A lane that can't start soon is parked after one reviewed round. |
