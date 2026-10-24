@@ -38,6 +38,50 @@ defmodule SdrAgent.SDR.GatesTest do
     lead.status
   end
 
+  # Exact restoration (plan r3 §6): the previous `fetch_env` value or
+  # absence is captured and its restoration registered before the change.
+  defp configure_env!(key, value),
+    do: change_env!(key, &Application.put_env(:sdr_agent, &1, value))
+
+  defp remove_env!(key), do: change_env!(key, &Application.delete_env(:sdr_agent, &1))
+
+  defp change_env!(key, change) do
+    previous = Application.fetch_env(:sdr_agent, key)
+    on_exit(fn -> restore_env(key, previous) end)
+    change.(key)
+  end
+
+  defp restore_env(key, {:ok, value}), do: Application.put_env(:sdr_agent, key, value)
+  defp restore_env(key, :error), do: Application.delete_env(:sdr_agent, key)
+
+  # Plan r3 §4 "Accept" — must not happen when the gate's configuration or
+  # checker fails: a `suppression_check` Decision, the accept
+  # `phase_transition`, the lead leaving `assigned`, `sdr.research.requested`
+  # or a model invocation.
+  defp assert_no_accept_progress(ctx, run, lead) do
+    assert decision(ctx, run, :suppression_check) == []
+    assert decision(ctx, run, :phase_transition) == []
+    assert lead_status(ctx, lead) == :assigned
+    refute "sdr.research.requested" in signal_types(ctx.tenant, run)
+    assert invocations!(ctx, run) == []
+  end
+
+  # §4 — what may remain: the accept `campaign_state_check` and the failure
+  # bookkeeping: the run failed as `:crash` with the fixed `tag` as its
+  # failure reason, its Operation failed linking the attention Failure.
+  defp assert_failed_closed(ctx, run, operation, tag) do
+    assert [_accept_check] = decision(ctx, run, :campaign_state_check)
+    assert {run.status, run.status_reason} == {:failed, :crash}
+    assert run.failure_reason == inspect(tag)
+
+    {:ok, operation} = Operations.get_operation(operation.id, actor: ctx.admin)
+    assert operation.status == :failed
+    assert operation.last_failure_id == run.attention_failure_id
+
+    {:ok, attention} = Operations.list_attention(actor: ctx.admin)
+    assert Enum.any?(attention, &(&1.id == run.attention_failure_id))
+  end
+
   describe "campaign state" do
     test "a paused campaign stops the assignment before any model call", ctx do
       {:ok, campaign} = Sales.fetch(Sales.Campaign, ctx.campaign_id, actor: ctx.admin)
@@ -258,6 +302,86 @@ defmodule SdrAgent.SDR.GatesTest do
 
       {:ok, attention} = Operations.list_attention(actor: ctx.admin)
       assert Enum.any?(attention, &(&1.id == run.attention_failure_id))
+    end
+  end
+
+  # Suppression safety fix, defect B (plan r3 §4, §6 G1–G4b): the accept
+  # gate fails closed when the configured suppression check is missing or
+  # invalid — no verdict is fabricated and the lead is not worked.
+  describe "suppression check configuration (fail closed)" do
+    defmodule BehaviourlessNotSuppressed do
+      @moduledoc false
+      def check(_email, _context), do: {:ok, :not_suppressed, %{"store" => "behaviourless"}}
+    end
+
+    defmodule ErroringStub do
+      @moduledoc false
+      @behaviour SdrAgent.SDR.SuppressionCheck
+
+      @impl true
+      def check(_email, _context), do: {:error, :stub_failed}
+    end
+
+    defmodule NoCheckFunction do
+      @moduledoc false
+      def unrelated, do: :ok
+    end
+
+    test "G1: an absent suppression_check key fails the assignment closed with the :missing tag",
+         ctx do
+      remove_env!(:suppression_check)
+      %{run: run, operation: operation, lead: lead} = assign!(ctx, "01")
+      assert %{success: 1} = drain!()
+
+      run = run!(ctx, run)
+      assert_no_accept_progress(ctx, run, lead)
+      assert_failed_closed(ctx, run, operation, {:suppression_check, :missing})
+    end
+
+    test "G2: a behaviour-less module answering not_suppressed fails the assignment closed with the :invalid tag",
+         ctx do
+      configure_env!(:suppression_check, BehaviourlessNotSuppressed)
+      %{run: run, operation: operation, lead: lead} = assign!(ctx, "01")
+      assert %{success: 1} = drain!()
+
+      run = run!(ctx, run)
+      assert_no_accept_progress(ctx, run, lead)
+      assert_failed_closed(ctx, run, operation, {:suppression_check, :invalid})
+    end
+
+    # Control: a checker error already propagates through the gate's `with`.
+    test "G3: a behaviour stub returning {:error, :stub_failed}: no suppression_check, no phase transition, the run fails",
+         ctx do
+      configure_env!(:suppression_check, ErroringStub)
+      %{run: run, lead: lead} = assign!(ctx, "01")
+      assert %{success: 1} = drain!()
+
+      run = run!(ctx, run)
+      assert_no_accept_progress(ctx, run, lead)
+      assert run.status == :failed
+    end
+
+    # Control: a module without check/2 crashes the gate today and
+    # `SdrAgent.SDR.Action` rescues it — no verdict and no model call either way.
+    test "G4a: a module without check/2: no suppression_check, no model call", ctx do
+      configure_env!(:suppression_check, NoCheckFunction)
+      %{run: run} = assign!(ctx, "01")
+      assert %{success: 1} = drain!()
+
+      run = run!(ctx, run)
+      assert decision(ctx, run, :suppression_check) == []
+      assert invocations!(ctx, run) == []
+      assert run.status == :failed
+    end
+
+    test "G4b: a module without check/2 fails the assignment closed with the :invalid tag", ctx do
+      configure_env!(:suppression_check, NoCheckFunction)
+      %{run: run, operation: operation, lead: lead} = assign!(ctx, "01")
+      assert %{success: 1} = drain!()
+
+      run = run!(ctx, run)
+      assert_no_accept_progress(ctx, run, lead)
+      assert_failed_closed(ctx, run, operation, {:suppression_check, :invalid})
     end
   end
 end
