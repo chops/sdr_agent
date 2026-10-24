@@ -112,14 +112,16 @@ defmodule SdrAgent.SDR.SuppressionCheckTest do
     assert SuppressionCheck.impl() == @invalid
   end
 
-  test "B7(i): the legacy NoStore atom is invalid, and the exclusion loads nothing (fresh VM)" do
+  # B7(i) claims only the invalid tag: in a warm suite a genuine NoStore may
+  # already be loaded (B7(ii) retains it; G1 can call it on the pre-fix
+  # build), so an in-suite "loads nothing" check would be vacuous. That the
+  # exclusion loads nothing in a cold VM (plan §4 step 2) is a separate
+  # GREEN obligation: a cold `mix run --no-start` check, submitted for
+  # review (Codex static review 5915edfd, must_fix 1).
+  test "B7(i): the legacy NoStore atom is invalid" do
     configure!(@legacy)
-    loaded_before? = :erlang.module_loaded(@legacy)
 
     assert SuppressionCheck.impl() == @invalid
-
-    refute :erlang.module_loaded(@legacy) and not loaded_before?,
-           "the legacy exclusion loaded #{inspect(@legacy)}"
   end
 
   test "B7(ii): the legacy NoStore atom is invalid even when a module of that name is loaded (F3)" do
@@ -140,21 +142,22 @@ defmodule SdrAgent.SDR.SuppressionCheckTest do
     assert SuppressionCheck.impl() == {:ok, BehaviourStub}
   end
 
-  # F3 (plan §5; Codex r3 ruling): a VM that still has the legacy module
-  # loaded. Genuine legacy code that is already loadable (the pre-fix
-  # build) is exercised as it is — never overwritten, purged or deleted.
-  # Only when no such code exists is a synthetic behaviour-declaring module
-  # of that name created here, in this test VM only, with its disposal
-  # registered before it is created.
+  # F3 (plan §5; Codex r3 ruling and static review 5915edfd): a VM that
+  # still has the legacy module loaded. Genuine legacy code that is already
+  # loadable (the pre-fix build) is exercised as it is — never overwritten,
+  # purged or deleted. Only when no such code exists is a synthetic
+  # behaviour-declaring module of that name created here, in this test VM
+  # only. Its disposal is registered right after, and only after, this
+  # test's own creation succeeded: a failed or colliding creation registers
+  # nothing and disposes of nothing.
   defp ensure_legacy_loaded!(module) do
     if Code.ensure_loaded?(module) do
       :genuine
     else
-      on_exit(fn -> dispose_synthetic!(module) end)
-
       {:module, ^module, _binary, _result} =
         Module.create(module, synthetic_legacy_body(), Macro.Env.location(__ENV__))
 
+      on_exit(fn -> dispose_synthetic!(module) end)
       :synthetic
     end
   end
