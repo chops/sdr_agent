@@ -113,12 +113,14 @@ defmodule SdrAgent.SDR.Support do
   @doc """
   Deterministic suppression gate through the configured
   `SdrAgent.SDR.SuppressionCheck`: records a `suppression_check` Decision
-  (outcome `suppressed` or `not_suppressed`) and returns it.
+  (outcome `suppressed` or `not_suppressed`) and returns it. A missing or
+  invalid configuration (`SuppressionCheck.impl/0`, D-206) or a checker
+  error is returned unchanged and records no Decision: the action fails
+  closed.
   """
   def suppression_gate(%Context{} = ctx, contact, lead_id, point) do
-    check = SuppressionCheck.impl()
-
-    with {:ok, verdict, detail} <-
+    with {:ok, check} <- SuppressionCheck.impl(),
+         {:ok, verdict, detail} <-
            check.check(to_string(contact.email), %{
              tenant_id: ctx.tenant_id,
              contact_id: contact.id
