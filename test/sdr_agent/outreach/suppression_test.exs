@@ -161,7 +161,7 @@ defmodule SdrAgent.Outreach.SuppressionTest do
   end
 
   test "the configured suppression check reads the store (email and domain)", ctx do
-    assert SuppressionCheck.impl() == SuppressionCheck.Store
+    assert SuppressionCheck.impl() == {:ok, SuppressionCheck.Store}
     context = %{tenant_id: ctx.tenant.id, contact_id: nil}
 
     assert {:ok, :not_suppressed, %{"store" => "outreach", "suppression_ids" => []}} =
