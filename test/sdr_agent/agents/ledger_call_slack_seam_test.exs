@@ -8,15 +8,21 @@ defmodule SdrAgent.Agents.LedgerCallSlackSeamTest do
 
   Every observation here is a real one: the acknowledged `ROLLBACK` in the
   call's own query log (`{"rollback", :ok}`), and the pool's own timeout
-  message, which names the checkout timeout it enforced ("checked out the
-  connection for longer than Nms"). Nothing is inferred from elapsed time:
-  the hold is an input (900 ms, past the 650 ms default bound of a 400 ms
-  budget), the outcome is read from the log and the message. Both outcomes
-  of a watchdog loss before `COMMIT` that the sources allow (DBConnection
-  2.10.2's `run_transaction/5` keeps an explicit rollback reason even when
-  the `ROLLBACK` itself fails on the lost connection; or the connection
-  error escapes to `LedgerCall`'s rescue) are accepted by the control and
-  never chosen between.
+  message for this call ("client #PID<…> timed out because it queued and
+  checked out the connection for longer than Nms"), bound to the calling
+  process's pid and required to be unique in the capture (the log capture
+  is global, so another client's message is never taken for this call's).
+  Nothing is inferred from elapsed time: the hold is an input (900 ms, past
+  the 650 ms default bound of a 400 ms budget), the outcome is read from the
+  log and the message. The bound the message names is checked as carrying
+  the slack (more than the slack alone, at most the budget plus the slack);
+  the exact value depends on the milliseconds between the deadline and the
+  transaction's start, which is not asserted. Both outcomes of a watchdog
+  loss before `COMMIT` that the sources allow (DBConnection 2.10.2's
+  `run_transaction/5` keeps an explicit rollback reason even when the
+  `ROLLBACK` itself fails on the lost connection; or the connection error
+  escapes to `LedgerCall`'s rescue) are accepted by the control and never
+  chosen between.
 
   The pool's watchdog is the thing under test, so the SQL sandbox runs in
   `:auto` mode for this module (synchronous; restored to `:manual`
@@ -44,7 +50,7 @@ defmodule SdrAgent.Agents.LedgerCallSlackSeamTest do
   # margin inside the widened bound, not a guarantee.
   @hold_ms 900
   @wide_slack_ms 5_000
-  @timeout_message ~r/checked out the connection for longer than (\d+)ms/
+  @timeout_tail "timed out because it queued and checked out the connection for longer than"
 
   setup do
     Sandbox.mode(Repo, :auto)
@@ -80,7 +86,9 @@ defmodule SdrAgent.Agents.LedgerCallSlackSeamTest do
            "the call's own rollback was acknowledged (no connection loss); queries: " <>
              inspect(queries)
 
-    refute captured =~ @timeout_message, "the widened watchdog did not fire; log: #{captured}"
+    assert own_timeout_bound(captured, self()) == :missing,
+           "the widened watchdog did not fire for this call; log: #{captured}"
+
     refute {"commit", :ok} in queries, "nothing committed"
 
     assert result == {:rolled_back, :ledger_timeout},
@@ -99,13 +107,17 @@ defmodule SdrAgent.Agents.LedgerCallSlackSeamTest do
         LedgerCall.attempt(hold(), budget_ms: @budget_ms, client_slack_ms: slack)
       end)
 
-    assert [bound] = Regex.run(@timeout_message, captured, capture: :all_but_first),
-           "the pool's watchdog fired on a #{@budget_ms + slack} ms bound held for #{@hold_ms} ms; " <>
-             "log: #{captured}"
+    own = own_timeout_bound(captured, self())
 
-    assert String.to_integer(bound) in (@budget_ms + slack - 5)..(@budget_ms + slack),
-           "the enforced checkout timeout is the budget left at the call plus the given slack; " <>
-             "got #{bound}ms"
+    assert match?({:ok, _}, own),
+           "this call's own watchdog message (exactly one, bound to #{inspect(self())}) is " <>
+             "required after a #{@hold_ms} ms hold; got #{inspect(own)}; log: #{captured}"
+
+    {:ok, bound} = own
+
+    assert bound in (slack + 1)..(@budget_ms + slack),
+           "the enforced checkout timeout carries the given slack (more than #{slack} ms, " <>
+             "at most #{@budget_ms + slack} ms); got #{bound}ms"
 
     queries = logged(log)
     refute {"rollback", :ok} in queries, "after a watchdog loss the rollback is not acknowledged"
@@ -161,12 +173,17 @@ defmodule SdrAgent.Agents.LedgerCallSlackSeamTest do
 
     {result, captured} = with_log(fn -> LedgerCall.attempt(hold(), budget_ms: @budget_ms) end)
 
-    assert [bound] = Regex.run(@timeout_message, captured, capture: :all_but_first),
-           "the pool's default watchdog fired on a #{default_bound} ms bound " <>
-             "held for #{@hold_ms} ms; log: #{captured}"
+    own = own_timeout_bound(captured, self())
 
-    assert String.to_integer(bound) in (default_bound - 5)..default_bound,
-           "the default checkout timeout is the budget left at the call plus 250 ms; got #{bound}ms"
+    assert match?({:ok, _}, own),
+           "this call's own default watchdog message (exactly one, bound to #{inspect(self())}) " <>
+             "is required after a #{@hold_ms} ms hold; got #{inspect(own)}; log: #{captured}"
+
+    {:ok, bound} = own
+
+    assert bound in (@default_slack_ms + 1)..default_bound,
+           "the default checkout timeout carries the 250 ms default slack (more than 250 ms, " <>
+             "at most #{default_bound} ms); got #{bound}ms"
 
     queries = logged(log)
     refute {"rollback", :ok} in queries, "after a watchdog loss the rollback is not acknowledged"
@@ -176,6 +193,74 @@ defmodule SdrAgent.Agents.LedgerCallSlackSeamTest do
            "after a watchdog loss the outcome is one of the two source-derived shapes; " <>
              "got #{inspect(result)}"
   end
+
+  ## Controls (not RED): the legal endpoints of the option are accepted
+
+  for slack <- [1, 30_000] do
+    test "control: client_slack_ms #{slack} (a legal endpoint) is accepted and the quick call commits" do
+      mark_caller(:"slack_endpoint_#{unquote(slack)}")
+      log = query_log!(caller_query(:"slack_endpoint_#{unquote(slack)}"))
+
+      result =
+        LedgerCall.attempt(fn -> {:ok, :quick} end,
+          budget_ms: @budget_ms,
+          client_slack_ms: unquote(slack)
+        )
+
+      assert result == {:ok, :quick},
+             "a quick body commits under the option; got #{inspect(result)}"
+
+      assert {"commit", :ok} in logged(log), "the quick call's commit was acknowledged"
+    end
+  end
+
+  ## Controls (not RED, DB-free): the matcher binds the pool's message to this call
+
+  test "matcher control: another client's timeout message is not this call's" do
+    other = :c.pid(0, 9_999, 0)
+    assert own_timeout_bound(timeout_line(other, 650), self()) == :missing
+  end
+
+  test "matcher control: an unrelated client's message before this call's does not displace it" do
+    other = :c.pid(0, 9_999, 0)
+    captured = timeout_line(other, 650) <> "\n" <> timeout_line(self(), 500)
+    assert own_timeout_bound(captured, self()) == {:ok, 500}
+  end
+
+  test "matcher control: no message is :missing, two own messages are :ambiguous" do
+    assert own_timeout_bound("", self()) == :missing
+    assert own_timeout_bound("[error] something else\n", self()) == :missing
+
+    captured = timeout_line(self(), 650) <> "\n" <> timeout_line(self(), 500)
+    assert own_timeout_bound(captured, self()) == {:ambiguous, [650, 500]}
+  end
+
+  test "matcher control: a registered client's name between the pid and the message is accepted" do
+    captured =
+      "client #{inspect(self())} (SdrAgent.AI.ModelProvider.Coordinator) #{@timeout_tail} 650ms"
+
+    assert own_timeout_bound(captured, self()) == {:ok, 650}
+  end
+
+  # The pool's own timeout diagnostic for THIS call. DBConnection 2.10.2 logs,
+  # from the connection process, "client #PID<a.b.c> [(registered name)] timed
+  # out because it queued and checked out the connection for longer than Nms"
+  # (connection_pool.ex:188-194, ownership/proxy.ex:65-71); the client is the
+  # calling process. The capture is global, so the match is bound to `pid`
+  # and must be unique: {:ok, n} | :missing | {:ambiguous, [n]}. A missing or
+  # ambiguous match is never resolved by taking the first message.
+  defp own_timeout_bound(captured, pid) do
+    re = ~r/client #{Regex.escape(inspect(pid))}(?: \([^)\n]*\))? #{@timeout_tail} (\d+)ms/
+
+    case Regex.scan(re, captured, capture: :all_but_first) do
+      [[n]] -> {:ok, String.to_integer(n)}
+      [] -> :missing
+      many -> {:ambiguous, Enum.map(many, fn [n] -> String.to_integer(n) end)}
+    end
+  end
+
+  # A synthetic line in the pool's exact format, for the matcher controls.
+  defp timeout_line(pid, len), do: "client #{inspect(pid)} #{@timeout_tail} #{len}ms"
 
   # The two outcomes the sources allow for a watchdog loss before COMMIT (#230
   # r2 review, C3-a): DBConnection 2.10.2's run_transaction/5 returns the
