@@ -1,10 +1,11 @@
 defmodule SdrAgent.SDR.SuppressionCheck.Store do
   @moduledoc """
-  The real suppression lookup (S8; replaces S7's `NoStore`): asks the
-  Outreach store for suppressions of the email itself or of its domain, as
-  the tenant's agent runtime. `suppressed` when any exists; the recorded
-  Decision inputs name the store and the matching suppression ids and
-  scopes. Lives in the agent plane, so the behaviour's dependency points
+  The suppression lookup (S8; since D-206 the only shipped
+  `SdrAgent.SDR.SuppressionCheck` — S7's `NoStore` placeholder is deleted):
+  asks the Outreach store for suppressions of the email itself or of its
+  domain, as the tenant's agent runtime. `suppressed` when any exists; the
+  recorded Decision inputs name the store and the matching suppression ids
+  and scopes. Lives in the agent plane, so the behaviour's dependency points
   down to Outreach, never up.
   """
   @behaviour SdrAgent.SDR.SuppressionCheck

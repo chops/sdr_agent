@@ -17,8 +17,8 @@ defmodule SdrAgent.Outreach do
 
   Public API (every function takes `actor:`; writes run through
   `SdrAgent.Audit.Guard`; the S2 *guarded actions* — draft edit, approval
-  approve/reject/revoke, suppression create, delivery `cancel_retry` — audit
-  every denial):
+  approve/reject/revoke, suppression create, delivery `cancel_retry`, the
+  scheduler's follow-up suppression read — audit every denial):
 
     * drafts — `propose_draft/2` (AGT, the hand-off), `edit_draft/3` (ADM,
       REV), `list_review_queue/1`;
@@ -27,7 +27,8 @@ defmodule SdrAgent.Outreach do
       reviewed `recipient_email`), `revoke/2`;
     * suppression — `suppress/2` (ADM, manual), `seed_suppression/2` (SEED,
       dev/test), `matching_suppressions/2` (the email's own and its domain's
-      suppressions);
+      suppressions), `followup_suppressions/2` (SCH, the follow-up lookup;
+      guarded, D-206);
     * delivery — `cancel_retry/2` (ADM, REV), `record_receipt/2` (DLV, REC;
       the capture adapter's receipt);
     * replies — `record_assessment/2` (AGT), `list_handoff_queue/1`
@@ -41,6 +42,7 @@ defmodule SdrAgent.Outreach do
 
   require Ash.Query
 
+  alias SdrAgent.Audit.Guard
   alias SdrAgent.Audit.GuardedCall
   alias SdrAgent.Outreach.Approval
   alias SdrAgent.Outreach.DeliveryReceipt
@@ -48,6 +50,7 @@ defmodule SdrAgent.Outreach do
   alias SdrAgent.Outreach.Reply
   alias SdrAgent.Outreach.ReplyAssessment
   alias SdrAgent.Outreach.Suppression
+  alias SdrAgent.Outreach.SuppressionMatch
   alias SdrAgent.Sales
 
   resources do
@@ -139,7 +142,7 @@ defmodule SdrAgent.Outreach do
   @doc "Suppressions of `email` itself or of its domain (normalised), oldest first."
   def matching_suppressions(email, opts) do
     actor = Keyword.get(opts, :actor)
-    email = SdrAgent.Outreach.SuppressionMatch.normalize(email)
+    email = SuppressionMatch.normalize(email)
 
     Suppression
     |> Ash.Query.for_read(:matching, %{email: email}, actor: actor)
@@ -153,6 +156,28 @@ defmodule SdrAgent.Outreach do
       end
     end)
     |> Ash.read()
+  end
+
+  @doc """
+  SCH (the follow-up lookup only; guarded, D-206): the scheduler's own
+  tenant's suppressions covering `email` itself or its domain (normalised),
+  oldest first — the rows or an error, never a policy-filtered `[]`
+  (`Suppression :followup_matching`). Every other caller is refused with
+  `Ash.Error.Forbidden` and exactly one `authz.denied` naming the resource
+  and the action, never the email; a tenantless or malformed scheduler is
+  refused too and never gets `{:ok, _}`.
+  """
+  def followup_suppressions(email, opts) do
+    actor = Keyword.get(opts, :actor)
+    meta = %{resource: Suppression, action: :followup_matching, guarded?: true, subject_id: nil}
+
+    Guard.run(meta, actor, fn ->
+      Suppression
+      |> Ash.Query.for_read(:followup_matching, %{email: SuppressionMatch.normalize(email)},
+        actor: actor
+      )
+      |> Ash.read()
+    end)
   end
 
   @doc "ADM, REV: stops a delivery waiting for a retry (failed_retryable → cancelled); its draft is cancelled."
@@ -238,7 +263,7 @@ defmodule SdrAgent.Outreach do
       guarded?: true
     }
 
-    SdrAgent.Audit.Guard.run(meta, actor, fn ->
+    Guard.run(meta, actor, fn ->
       SdrAgent.Outreach.WebhookRetry.run(event_id, actor)
     end)
   end
