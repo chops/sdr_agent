@@ -68,14 +68,16 @@ defmodule SdrAgent.SDR.GatesTest do
 
   # §4 — what may remain: the accept `campaign_state_check` and the failure
   # bookkeeping: the run failed as `:crash` with the fixed `tag` as its
-  # failure reason, its Operation failed linking the attention Failure.
+  # failure reason; its Operation failed and, at the single allowed attempt
+  # (`max_attempts: 1`, ADR-0004), was discarded in the same transaction,
+  # keeping the attention Failure linked (`Operations.fail_operation/3`).
   defp assert_failed_closed(ctx, run, operation, tag) do
     assert [_accept_check] = decision(ctx, run, :campaign_state_check)
     assert {run.status, run.status_reason} == {:failed, :crash}
     assert run.failure_reason == inspect(tag)
 
     {:ok, operation} = Operations.get_operation(operation.id, actor: ctx.admin)
-    assert operation.status == :failed
+    assert operation.status == :discarded
     assert operation.last_failure_id == run.attention_failure_id
 
     {:ok, attention} = Operations.list_attention(actor: ctx.admin)
