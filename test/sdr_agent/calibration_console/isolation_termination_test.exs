@@ -462,10 +462,10 @@ defmodule SdrAgent.CalibrationConsole.IsolationTerminationTest do
                error.errors
 
       assert stack != [], "the original stacktrace was dropped"
-      assert [{:error, trace_entry, []}] = rest, "expected exactly one further entry, the trace"
-      assert Exception.message(trace_entry) =~ ~r/\Atrace: /, "the trace is missing"
-      refute Exception.message(trace_entry) =~ "still alive"
-      refute Exception.message(trace_entry) =~ "still open"
+      assert [{:error, %ExUnit.AssertionError{message: trace_text}, []}] = rest
+      assert trace_text =~ ~r/\Atrace: /, "the trace is missing (the entry's own text)"
+      refute trace_text =~ "still alive"
+      refute trace_text =~ "still open"
     end
   end
 
