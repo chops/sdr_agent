@@ -24,7 +24,8 @@ defmodule SdrAgent.Outreach.Suppression do
   reply by the deterministic `unsubscribe_rule` Decision, hard bounce,
   complaint — always naming the WebhookEvent), `:from_classification` (AGT,
   S9b: an LLM `reply_classification` of `unsubscribe` may only *add* the
-  reply's `unsubscribe_reply` suppression). Reads: ADM, REV, AUR, AGT, DLV, WHK, AUD. Audited:
+  reply's `unsubscribe_reply` suppression). Reads: ADM, REV, AUR, AGT, DLV, WHK, AUD, SEED;
+  SCH only `:followup_matching`, its own tenant's covering rows (D-206). Audited:
   `outreach.suppression.created`.
   """
   use Ash.Resource,
@@ -38,6 +39,9 @@ defmodule SdrAgent.Outreach.Suppression do
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Checks
   alias SdrAgent.Outreach.Changes
+  alias SdrAgent.Outreach.Checks.FollowupSuppressionRead
+  alias SdrAgent.Outreach.Preparations.FollowupTenantScope
+  alias SdrAgent.Outreach.SuppressionMatch
 
   @reasons [:unsubscribe_link, :unsubscribe_reply, :hard_bounce, :complaint, :manual]
   @event [event_type: "outreach.suppression.created", category: :domain_change]
@@ -99,7 +103,21 @@ defmodule SdrAgent.Outreach.Suppression do
       description "Suppressions covering `email`: the email itself or its domain."
       argument :email, :string, allow_nil?: false
 
-      filter SdrAgent.Outreach.SuppressionMatch.filter(Ash.Expr.expr(^arg(:email)))
+      filter SuppressionMatch.filter(Ash.Expr.expr(^arg(:email)))
+
+      prepare build(sort: [inserted_at: :asc, id: :asc])
+    end
+
+    read :followup_matching do
+      description "SCH (the follow-up lookup only): the scheduler's own tenant's suppressions covering `email`: the email itself or its domain."
+      argument :email, :string, allow_nil?: false
+
+      # D-206: the tenant scope is a preparation — never a policy-filtered
+      # `[]`, and never an actor template, which would fail an absent or
+      # malformed actor with an invalid query before the strict policy
+      # refuses it as Forbidden.
+      prepare FollowupTenantScope
+      filter SuppressionMatch.filter(Ash.Expr.expr(^arg(:email)))
 
       prepare build(sort: [inserted_at: :asc, id: :asc])
     end
@@ -228,6 +246,17 @@ defmodule SdrAgent.Outreach.Suppression do
                       :auditor_cli,
                       :seeder
                     ]}
+
+      # SCH: `:followup_matching` only (the check names the action).
+      authorize_if FollowupSuppressionRead
+    end
+
+    # Strict (D-206): the follow-up scheduler's tenant-bound lookup and no
+    # one else — every other caller is refused as Forbidden, never read as
+    # empty (precedent: ModelProfileSetting `:lock_for_transition`).
+    policy action(:followup_matching) do
+      access_type :strict
+      authorize_if FollowupSuppressionRead
     end
   end
 
