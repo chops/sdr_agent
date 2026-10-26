@@ -121,10 +121,81 @@ defmodule SdrAgent.CalibrationConsole.IsolationTest do
       assert gone?(os_pid), "the held target #{os_pid} is still running"
     end
 
-    test "a target that exits at once is no isolation proof", ctx do
-      result = Isolation.preflight(target: "printf ready", observer: ctx.observer)
-      assert result == {:error, :calibration_isolation_unavailable}
-      assert_received {:isolation, {:spawned, os_pid}, _identity}
+    # #151: an early exit the test controls, not a race. The target prints
+    # `ready` and exits when the observer releases it at the spawned event,
+    # which follows the launch identity read (isolation.ex:245-247); the
+    # observer then waits, bounded, until the probe no longer lists the root,
+    # so verification starts only after the exit. The release file lives in
+    # an exclusive directory this test created (a collision fails) and
+    # removes by exact path. A target that merely exits at once can end
+    # `:ok` (an exit status later than the 100 ms hold), unavailable or
+    # unconfirmed (an unreadable pid), so it is no oracle.
+    test "a target that exits right after its launch is no isolation proof", ctx do
+      parent = self()
+
+      dir =
+        Path.join(
+          System.tmp_dir!(),
+          "sdr-isolation-release-" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
+        )
+
+      assert :ok = File.mkdir(dir)
+      File.chmod!(dir, 0o700)
+      release = Path.join(dir, "release")
+
+      on_exit(fn ->
+        rm = File.rm(release)
+        rmdir = File.rmdir(dir)
+
+        unless rm in [:ok, {:error, :enoent}] and rmdir == :ok do
+          raise ExUnit.AssertionError,
+            message:
+              "release fixture cleanup failed: rm=#{inspect(rm)} rmdir=#{inspect(rmdir)} (#{dir})"
+        end
+      end)
+
+      observer = fn
+        {:spawned, os_pid} = event ->
+          ctx.observer.(event)
+          File.touch!(release)
+          deadline = System.monotonic_time(:millisecond) + 2_000
+
+          acknowledged =
+            Enum.reduce_while(
+              Stream.repeatedly(fn -> ProcessProbe.start_identity(os_pid) end),
+              false,
+              fn
+                :absent, _acc ->
+                  {:halt, true}
+
+                _raw, _acc ->
+                  if System.monotonic_time(:millisecond) >= deadline do
+                    {:halt, false}
+                  else
+                    Process.sleep(10)
+                    {:cont, false}
+                  end
+              end
+            )
+
+          send(parent, {:release_ack, os_pid, acknowledged})
+
+        event ->
+          ctx.observer.(event)
+      end
+
+      target =
+        "printf ready; i=0; until [ -e '#{release}' ] || [ \"$i\" -ge 500 ]; do sleep 0.02; i=$((i+1)); done"
+
+      result = Isolation.preflight(target: target, observer: observer)
+      assert_received {:isolation, {:spawned, os_pid}, spawned_identity}
+      assert_received {:release_ack, ^os_pid, acknowledged}
+
+      # The result, the acknowledged exit and the launch identity are judged
+      # together, so a surprising result never hides the others.
+      assert {result, acknowledged, match?({:ok, _}, spawned_identity)} ==
+               {{:error, :calibration_isolation_unavailable}, true, true}
+
       assert gone?(os_pid)
     end
 
