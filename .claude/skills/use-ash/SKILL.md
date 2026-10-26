@@ -24,6 +24,8 @@ metadata:
 - [query_filter](references/ash/query_filter.md)
 - [querying_data](references/ash/querying_data.md)
 - [relationships](references/ash/relationships.md)
+- [signals](references/ash/signals.md)
+- [temporal](references/ash/temporal.md)
 - [testing](references/ash/testing.md)
 
 ## Searching Documentation
@@ -58,5 +60,7 @@ mix usage_rules.search_docs "search term" -p ash
 - `mix ash.rollback` - Runs all rollback tasks for any extension on any resource/domain in your application.
 - `mix ash.set.domains` - Dynamically discovers and updates Ash domains in config.exs
 - `mix ash.setup` - Runs all setup tasks for any extension on any resource/domain in your application.
+- `mix ash.signals` - Prints the signals of your application, and what emits and listens to them
 - `mix ash.tear_down` - Runs all tear_down tasks for any extension on any resource/domain in your application.
+- `mix compile.ash_signals`
 <!-- usage-rules-skill-end -->
