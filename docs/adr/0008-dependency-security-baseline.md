@@ -546,3 +546,88 @@ MEDIUM ignore needs no acceptable fix, a reviewed reason and a revisit trigger.
 Trigger: no. Dependency-only scope; no application entity, attribute, relationship, policy, action
 or contract changes. Had compatibility required a schema, policy or action change, the slice would
 have stopped for re-scoping before implementing it.
+
+## Addendum (2026-10-26, proposed): the first full-gate attempt and the generated ash-functions version-7 migration
+
+Status: proposed. The amendment above, accepted by D-215 at commit `1e733839366cbe7fd71fd62ad728d8e50579525c`
+(file SHA256 `fe3268c55b25b762a11e77e78c5dd8b9e61e0ee963262c064ade12d4b3d00a01`), is unchanged byte for byte.
+This addendum extends the slice's scope and needs the owner's explicit acceptance at its exact commit and
+file hash before any new gate execution (Codex ruling 01a1763e-39c0-75ba-af6e-14e42fca3a9b).
+
+### What the gate found
+
+The slice's first full-gate attempt (2026-10-26 03:13:30Z, under execution ACK
+01a1762d-49f6-71c3-8ae5-00829db63a7d and reservation 01a1762d-49f6-71c3-8ae5-008357d2d32b) ended
+`gate=FAIL step=codegen rc=1` before any database effect: `mix ash.codegen --check` reported "Pending Code
+Generation Detected for 2 files" (evidence `deps-advisories-gate-1e73383-20261026T031330Z`, MANIFEST
+`3a35e0dc…`; report `f6013665…` with its correction addendum; ruling `0d3f2e18…`). The scope statement
+above ("had compatibility required a schema … change, the slice would have stopped for re-scoping") applied:
+the slice stopped, and this addendum is the re-scoping.
+
+### What is added to the slice
+
+Commit `e80d9964652fceb9c2f9f1dc14fcd8ea9f17192d`, generated once by `mix ash.codegen ash_functions_v7`
+inside the gate's pinned environment (evidence `deps-advisories-codegen-1e73383-20261026T033734Z`,
+MANIFEST `a4395d93…`), exactly two files:
+
+- `priv/repo/migrations/20261026033738_ash_functions_v7_extensions_1.exs` (SHA256
+  `ef92569076b536f95cf984dcefaf58d31302fc4e945a8d5e11c1e0ddb1978d59`): `up` executes one
+  `CREATE OR REPLACE FUNCTION ash_required(value ANYCOMPATIBLE, payload jsonb)`; `down` is a comment only.
+- `priv/resource_snapshots/repo/extensions.json` (SHA256
+  `e6b3e1386492e917f2a0c2425409ecd1d66cf13bf12cb60c43d53b11eec3c125`): `ash_functions_version` 6 → 7; the
+  installed extensions (`ash-functions`, `citext`) unchanged.
+
+### What the function change is
+
+ash_postgres 2.15.2 ships version 7 of its `ash-functions` set ("make ash_required standalone and actually
+use it", changelog v2.14.0). The repository's 2026-10-06 initialization migration already defines
+`ash_required` as `STABLE` with `SET search_path = ''`, returning the value when it is not NULL and otherwise
+`RETURN ash_raise_error(payload, value)`. Version 7 keeps the signature, the non-NULL identity return,
+`STABLE` and the empty `search_path`, and changes only the NULL branch to
+`RAISE EXCEPTION 'ash_error: %', payload::text` directly (self-contained; no call into `ash_raise_error`).
+Observable contract, both versions: a non-NULL value is returned unchanged; NULL raises a PostgreSQL
+exception whose message is `ash_error: ` followed by the JSON payload (the `Ash.Error.Changes.Required`
+payload ash_postgres builds). Where it runs: ash_postgres emits `ash_required(?, ?::jsonb)` for Ash's
+`required!/2` expression (`sql_implementation.ex`), that is, when a required attribute's atomic validation
+is pushed into SQL; this application writes no `required!` expression of its own.
+
+### Rollback consequence
+
+The generated `down` restores nothing: rolling the migration back leaves the version-7 body installed and
+the repository's snapshot at 7. Restoring the version-6 body would need a hand-written migration, which is
+not proposed. Applying this migration to any environment (dev, calibration, production) requires that
+environment's separately authorized procedure; the slice's merge authorizes no deployment and no migration
+run.
+
+### Unchanged
+
+The pins (`ash` 3.37.1, `ash_postgres` 2.15.2, `ash_sql` 0.8.4; `mix.lock` `294075fa…`), the blocking audit,
+the no-ignore policy, and every obligation of the amendment (fresh full gate, hosted CI, exact-head review,
+downstream re-verification).
+
+### Verification plan (proposed; nothing here has run)
+
+1. Fresh install: the full gate at the final head creates its partition database from scratch and
+   `ash.setup` applies every migration in order (version 6, then 7); the focused tests below assert the
+   installed body, so a green gate at the final head is also the fresh-install proof.
+2. Focused coverage, proposed as `test/sdr_agent/repo/ash_required_v7_test.exs` (four tests; predicted N
+   3222 → 3226, reconciled in the claim): (a) non-NULL path: `SELECT ash_required($1::integer, $2::jsonb)`
+   with `1` and `{"k":"v"}` returns `1`; (b) NULL path: `SELECT ash_required(NULL::integer, '{"k":"v"}'::jsonb)`
+   raises `Postgrex.Error` whose `postgres.message` is `ash_error: {"k": "v"}` (PostgreSQL's jsonb text
+   rendering); (c) installed body: `pg_get_functiondef('ash_required(anycompatible, jsonb)'::regprocedure)`
+   contains `RAISE EXCEPTION` and not `ash_raise_error`; (d) upgrade from version 6: inside the sandbox
+   transaction, execute the version-6 body (`… RETURN ash_raise_error(payload, value) …`), assert (c)
+   negatively, execute the version-7 migration's `up` SQL, re-assert (a)–(c); the sandbox rolls it back. (d)
+   models the in-place redefinition the migration performs on a database initialized at version 6; it is not
+   an execution against any owner database.
+3. Implicit coverage: whatever atomic updates of required attributes the suite already performs exercise the
+   non-NULL path; this is not quantified and not claimed.
+
+Whether the focused tests join this slice (one more commit, measured by the gate's own suite) or follow as
+their own issue is for the review to decide; at the time of writing none exists.
+
+### Entity model
+
+Trigger: no. An existing SQL helper's error path and the extensions snapshot version; no domain concept,
+attribute, relationship, ownership, policy, action or lifecycle changes (the migration is SQL, not
+metadata-only). No architecture-diagram trigger.
