@@ -118,8 +118,10 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
   `reconcile:`, and for C2-02b2β `observe:` (the hold and lease
   observation), `replay_read:` (the coordinator's stored replay read) and
   `locked_replay_read:` (the replay read after the locks), each `fn -> :read
-  | :unavailable end`, and `resolve_budget_ms:` (a smaller write budget))
-  and the `test_run/2` seam. Other builds refuse `manual:` and `faults:`.
+  | :unavailable end`, `resolve_budget_ms:` (a smaller write budget) and
+  `client_slack_ms:` (the write's client-side slack, forwarded to
+  `SdrAgent.Agents.LedgerCall`; #230)) and the `test_run/2` seam. Other
+  builds refuse `manual:` and `faults:`.
   """
   use GenServer
 
@@ -1564,7 +1566,7 @@ defmodule SdrAgent.AI.ModelProvider.Coordinator do
 
   if @test_seams do
     defp write_faults(%{faults: faults}),
-      do: [faults: Keyword.take(faults, [:locked_replay_read])]
+      do: [faults: Keyword.take(faults, [:locked_replay_read, :client_slack_ms])]
   else
     defp write_faults(_state), do: []
   end

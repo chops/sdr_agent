@@ -21,13 +21,15 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
   blocked in its mailbox, the caller's call times out and its barrier is
   shown waiting on that exact writer (`pg_locks`, `pg_blocking_pids`) before
   the original commits or rolls back. Short pauses inside the coordinator's
-  own LedgerCall (tests 13, 20, 21) stay below its budget plus 250 ms
-  connection watchdog.
+  own LedgerCall (tests 20, 21) stay below its budget plus 250 ms
+  connection watchdog; test 13's pause outlives that default bound on
+  purpose, under the widened client-side watchdog of its write (#230).
 
   Test-build-only seams chosen: the coordinator faults `lose_reply:
   [:resolve_blocked]` (b2α's `lose_reply:` key: a committed write's outcome
-  is unknown to the coordinator, test 14) and `resolve_budget_ms:` (a
-  smaller write budget, test 13). Definite timeouts are accepted only with
+  is unknown to the coordinator, test 14), `resolve_budget_ms:` (a smaller
+  write budget, test 13) and `client_slack_ms:` (a wider client-side
+  watchdog for that write, test 13). Definite timeouts are accepted only with
   an acknowledged rollback, a refusal within the deadline, or barrier
   evidence. The fake CLI; no model call.
   """
@@ -276,9 +278,11 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
 
   test "13. the write's own pre-commit budget refusal is a definite :resolve_timeout, unsettled",
        ctx do
-    # Test-only seam: the write's budget is 400 ms, so a 525 ms pause inside
-    # it spends the budget without reaching the 650 ms connection watchdog.
-    blocked = dead_holder!(ctx, faults: [resolve_budget_ms: 400])
+    # Test-only seams: the write's budget is 400 ms and its client-side
+    # watchdog is widened to 5 400 ms (`client_slack_ms:`), so a 900 ms pause
+    # inside it spends the budget while the connection stays open — past the
+    # 650 ms default bound on purpose (a finite margin, not a guarantee; #230).
+    blocked = dead_holder!(ctx, faults: [resolve_budget_ms: 400, client_slack_ms: 5_000])
     attestation = attestation(blocked, latest_start!(ctx), :dead_holder)
     coordinator_log = query_log!(&coordinator_query/1)
     caller_log = query_log!(caller_query(:c13))
@@ -286,7 +290,7 @@ defmodule SdrAgent.Agents.ProfileSwitchResolveRaceTest do
 
     caller = resolve_task(blocked, attestation, ctx.admin, init: fn -> mark_caller(:c13) end)
     assert_receive {:appending, coordinator}, 10_000, "the write's event append was never seen"
-    Process.sleep(525)
+    Process.sleep(900)
     resume(coordinator, :appending)
     result = await_task(caller, 10_000)
 

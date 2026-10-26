@@ -29,6 +29,15 @@ defmodule SdrAgent.Agents.LedgerCall do
   escaped the transaction, e.g. a connection error that may have hit the
   `COMMIT` itself, or a rollback the driver did not acknowledge). `run/2` is
   `attempt/2` with both failures folded into its `{:error, reason}`.
+
+  Test builds only (`config :sdr_agent, :claude_cli_test_seams, true`, a
+  compile-time flag): `client_slack_ms:` replaces the 250 ms client-side
+  slack of this one call with an integer in 1..30 000 ms, so a test may hold
+  a transaction past the default watchdog without losing its connection. It
+  widens nothing on the server side (the transaction-local timeouts and the
+  pre-commit check still follow the budget) and changes nothing about how an
+  outcome is classified. Any other value, and any use of the option in a
+  build without the seam, raises `ArgumentError` before any `Repo` work.
   """
   alias SdrAgent.Audit
   alias SdrAgent.Repo
@@ -37,6 +46,7 @@ defmodule SdrAgent.Agents.LedgerCall do
   @client_slack_ms 250
   @checkout_retry_ms 10
   @no_connection "connection not available and queuing is disabled"
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
   @doc "Runs `fun` (arity 0, or 1 taking the step function) under one bound."
   def run(fun, opts \\ []) do
@@ -60,25 +70,29 @@ defmodule SdrAgent.Agents.LedgerCall do
   end
 
   defp attempt_with_deadline(fun, opts) do
+    slack = client_slack_ms!(opts)
     budget = min(Keyword.get(opts, :budget_ms, @max_ms), @max_ms)
     deadline = System.monotonic_time(:millisecond) + budget
-    {deadline, bounded(deadline, fun)}
+    {deadline, bounded(deadline, slack, fun)}
   end
 
-  defp bounded(deadline, fun) do
+  # One attempt: the budget left at this moment plus the call's slack is the
+  # transaction's client-side timeout; a busy pool is retried with the same
+  # slack against the same deadline.
+  defp bounded(deadline, slack, fun) do
     case remaining(deadline) do
       ms when ms <= 0 ->
         {:rolled_back, :ledger_timeout}
 
       ms ->
         fn -> audited_body(deadline, fun) end
-        |> Repo.transaction(timeout: ms + @client_slack_ms, queue: false)
+        |> Repo.transaction(timeout: ms + slack, queue: false)
         |> unwrap_bounded()
     end
   rescue
     error in DBConnection.ConnectionError ->
       if busy?(error.message),
-        do: retry_checkout(deadline, fun),
+        do: retry_checkout(deadline, slack, fun),
         else: {:unknown, error}
 
     error in Postgrex.Error ->
@@ -90,9 +104,41 @@ defmodule SdrAgent.Agents.LedgerCall do
   defp busy?(message),
     do: message == @no_connection or String.starts_with?(message, "could not checkout")
 
-  defp retry_checkout(deadline, fun) do
+  defp retry_checkout(deadline, slack, fun) do
     Process.sleep(min(@checkout_retry_ms, max(remaining(deadline), 0)))
-    bounded(deadline, fun)
+    bounded(deadline, slack, fun)
+  end
+
+  # The client-side slack of this call: the 250 ms default or, in test builds
+  # only, the validated `client_slack_ms:` option. An absent key is the
+  # default; a present invalid value (`nil` included) is refused, and so is
+  # any presence of the option in a build without the seam.
+  if @test_seams do
+    @max_client_slack_ms 30_000
+
+    defp client_slack_ms!(opts) do
+      case Keyword.fetch(opts, :client_slack_ms) do
+        :error ->
+          @client_slack_ms
+
+        {:ok, ms} when is_integer(ms) and ms >= 1 and ms <= @max_client_slack_ms ->
+          ms
+
+        {:ok, other} ->
+          raise ArgumentError,
+                "client_slack_ms must be an integer in 1..#{@max_client_slack_ms} " <>
+                  "(milliseconds), got: #{inspect(other)}"
+      end
+    end
+  else
+    defp client_slack_ms!(opts) do
+      if Keyword.has_key?(opts, :client_slack_ms) do
+        raise ArgumentError,
+              "client_slack_ms is a test-only seam and is not accepted in this build"
+      end
+
+      @client_slack_ms
+    end
   end
 
   defp audited_body(deadline, fun) do
