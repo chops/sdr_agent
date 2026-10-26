@@ -389,8 +389,9 @@ same day ("(B)", D-130; D-132 records this acceptance).
 ## Amendment (2026-10-25, proposed): EEF-CVE-2026-114214, EEF-CVE-2026-115627, EEF-CVE-2026-115635
 
 **Status: proposed** by Claude on 2026-10-25 (evening), under Codex's bounded preparation ruling
-(reply 01a175b0-3e73-7551-930e-a41b2c4aa111). Codex's independent review of this text and of the
-exact source and lock delta precedes the owner's acceptance; no pin below is accepted until then.
+(reply 01a175b0-3e73-7551-930e-a41b2c4aa111) and corrected on Codex's static review of the delta
+(reply 01a175c9-ea09-711e-842d-a53415500f5b: the pin and lock delta passed; this text was revised).
+The owner's acceptance of this exact text is a separate answer; no pin below is accepted until then.
 
 ### Advisories
 
@@ -414,24 +415,43 @@ Three MEDIUM advisories (CVSS 4.0 score 6.0 each; CWE-863, incorrect authorizati
   source, so a caller paging such a field could enumerate unrelated destination records. Fixed in
   **3.37.1**.
 
-### Exposure in this project
+### Exposure in this project (a source survey, not a runtime or expanded-DSL exposure proof)
 
 Read-only survey of `lib/` at `531259a7`:
 
-- No resource declares `multitenancy do`: tenancy is a `tenant_id` attribute carried in identities
-  and filters, not Ash's multitenancy feature. Neither `ash_postgres` finding's tenant-mixing path
-  exists here. `return_skipped_upsert? true` is used by nine actions (`research_artifact`,
-  `decision`, `model_result_release`, `webhook_event`, the audit `payload` and
-  `provenance_snapshot`, three `suppression` actions, and `ServerStarts` passing the option),
-  several with `upsert_condition expr(false)`; their lookups are scoped by the identities
-  themselves (for example `:unique_idempotency_key`, `:unique_tenant`), which carry `tenant_id`
-  where tenancy matters.
-- No `many_to_many` and no `through:` relationship exists, so the lateral-join finding and the
-  `through` plus limit-1 finding have no call site.
+- The scanned source has no literal `multitenancy`, `many_to_many` or `through:` declaration:
+  tenancy is a `tenant_id` attribute carried in identities and filters, not Ash's multitenancy
+  feature. The surveyed declarations therefore do not show the advisory-specific preconditions
+  (attribute multitenancy for the two `ash_postgres` findings; a `through:` relationship for the
+  `ash` finding).
+- Skipped upserts are used deliberately. All twelve `return_skipped_upsert? true` declarations in
+  `lib/`, plus the one `Ash.create` option, each with an `upsert_condition`:
 
-So the vulnerable paths are not reachable today. We bump anyway rather than ignore: fixed stable
-releases exist (policy 3 permits an ignore only when no acceptable fix exists), and future slices
-(Home, prospect search) add relationships.
+  | Resource.action | declaration (`lib/sdr_agent/…`) | upsert identity |
+  |---|---|---|
+  | WebhookEvent.receive | `operations/webhook_event.ex:133` | `:unique_valid_event` |
+  | ResearchArtifact.record | `research/research_artifact.ex:98` | `:unique_source` = `[:lead_id, :source_url, :content_sha256]` |
+  | SendQuotaDay.open | `outreach/send_quota_day.ex:60` | `:unique_day` |
+  | DeliveryReceipt.record | `outreach/delivery_receipt.ex:95` | `:unique_kind` = `[:delivery_operation_id, :kind]` |
+  | Decision.record | `agents/decision.ex:143` | `:unique_idempotency_key` = `[:tenant_id, :idempotency_key]` |
+  | ModelResultRelease.decide | `agents/model_result_release.ex:190` | `:unique_invocation` = `[:model_invocation_id]` |
+  | Payload.store | `audit/payload.ex:84` | (no `upsert_identity` declared with it) |
+  | ProvenanceSnapshot.record | `audit/provenance_snapshot.ex:67` | `:unique_snapshot` |
+  | Suppression.manual | `outreach/suppression.ex:114` | `:unique_value` |
+  | Suppression.from_webhook | `outreach/suppression.ex:150` | `:unique_value` |
+  | Suppression.from_classification | `outreach/suppression.ex:168` | `:unique_value` |
+  | Suppression.seed | `outreach/suppression.ex:186` | `:unique_value` |
+  | ServerStarts.open_counter → ModelServerCounter.open | `agents/server_starts.ex:114` (`Ash.create(return_skipped_upsert?: true)`) | `:tenant` = `[:tenant_id]` |
+
+  The identities are the actions' own; no general claim that every such identity carries
+  `tenant_id` is made (several do not), and none of these observations is a finding of an
+  exploitable cross-tenant path or a request to change application policy. The inventory covers
+  every declaration in `lib/`, seed actions included.
+
+So the survey finds no declaration meeting the advisories' preconditions today, without proving
+unreachability at runtime. We bump rather than ignore: fixed stable releases exist (policy 3
+permits an ignore only when no acceptable fix exists), and future slices (Home, prospect search)
+add relationships.
 
 ### Decision (proposed)
 
@@ -463,7 +483,9 @@ Jido/Zoi pins and ADR-0018's residuals are untouched. Requirement checks: `ash_s
   carry the tenant, `parent` references and limits on `through` joins); `codegen --check` no longer
   infers renames or skips the dev migration check (2.14.3) and migrations create identities after
   multitenancy attributes (2.15.2), so the gate's `mix ash.codegen --check` is the check for
-  snapshot drift; `character_not_in_repertoire`, `DBConnection.EncodeError` and
+  snapshot drift (by a static read of the shipped generator, `--check` opens no repo connection:
+  its only database path removes dev migrations, which the check exits on before reaching, and this
+  project has none); `character_not_in_repertoire`, `DBConnection.EncodeError` and
   `Ecto.Query.CastError` converted to invalid-class errors on every query path (2.14.0; `lib/`
   matches none of them raw); upserts no longer use `merge` (2.13.1); atomics lock rows in the
   computing subquery; `timestamptz`, temporal and `view?` options (opt-in).
@@ -473,25 +495,43 @@ Jido/Zoi pins and ADR-0018's residuals are untouched. Requirement checks: `ash_s
   fixes, codepoints counted on the stored value (consistent with `default_string_length_count:
   :codepoints` above).
 
-None of these is a behaviour this project is known to rely on; the full gate is the check, and no
-measured evidence from before this change carries across it.
+No intentional reliance on the corrected erroneous behaviour was identified by this source survey;
+compatibility remains unverified: the full gate is the check, and no measured evidence from before
+this change carries across it.
 
 ### Verification
 
 - The lock delta was reviewed before anything compiled: exactly the three entries above.
 - `mix compile --warnings-as-errors` in the declared Nix environment, `MIX_ENV=dev` then
-  `MIX_ENV=test`: rc 0 in both (dev 01:04:36 to 01:05:54Z, 420 files; test 01:05:54 to 01:07:05Z, 450 files; logs `compile-dev.log` 8d9ff6bb…, `compile-test.log` 61ae0e01…). Every `warning:` line in the logs (106 and 103) is a dependency's own compile output (for example `ash_sql` 0.8.4's two unused requires) or the Nix shell entry, none in project files; the one error-labelled line in each log is the devenv banner's `mix hex.info` EPIPE stack, not a compile error.
-- `mix usage_rules.sync` for the changed direct dependencies: run without `--yes`, so nothing was applied (exit 1 at its confirmation prompt; the tree stayed at `mix.exs` and `mix.lock`; log `usage-rules-sync.log` f67c3f76…). The task takes no per-dependency arguments (the project config is its source of truth), and its proposal mixes this change's share (updates to the generated `use-ash` skill: `SKILL.md`, `actions.md`, `relationships.md`, `testing.md`; new `signals.md` and `temporal.md` from `ash` 3.37.1's usage rules) with drift already present on main (the `use-ash-authentication` reference, three Jido skills never generated, `AGENTS.md` sections). As the original decision's neutral consequence states, the generated skills are refreshed by a separate sync, not by this pin change; the proposal is recorded for a follow-up slice.
+  `MIX_ENV=test`: rc 0 in both (dev 01:04:36 to 01:05:54Z, 420 files; test 01:05:54 to 01:07:05Z,
+  450 files; logs `compile-dev.log` 8d9ff6bb…, `compile-test.log` 61ae0e01…). Every `warning:` line
+  in the logs (106 and 103) is a dependency's own compile output (for example `ash_sql` 0.8.4's two
+  unused requires) or the Nix shell entry, none in project files; the one error-labelled line in
+  each log is the devenv banner's `mix hex.info` EPIPE stack, not a compile error.
+- `mix usage_rules.sync` (the doctrine's refresh after a dependency upgrade; the task takes no
+  per-dependency argument and writes its whole output together): a first run without `--yes`
+  stopped at its confirmation (rc 1, nothing applied), an invocation with a positional argument was
+  rejected (rc 1), then a valid `--dry-run` (rc 0, 14 proposals) and `--yes` (rc 0) at 01:23Z. Only
+  the output attributable to the changed dependency was kept, as a separate commit: the six
+  generated `use-ash` files (`SKILL.md`, `references/ash/actions.md`, `relationships.md`,
+  `testing.md`, and the new `signals.md` and `temporal.md` from `ash` 3.37.1's usage rules) and the
+  two new Ash blocks in `AGENTS.md` (`ash:signals`, `ash:temporal`). The generator's unrelated
+  output (the `use-ash-authentication` reference from the unchanged 4.15.0 package, three Jido
+  skills never generated before, and their `AGENTS.md` blocks) was excluded mechanically (tracked
+  bytes restored to the pre-sync commit, new files moved out) and preserved outside the repository;
+  it is pre-existing drift for a separate slice, so the configured projection is not fully
+  synchronized by this change. `.agents/skills/use-ash` remains the existing symlink into the
+  `.claude` tree.
 - Not run in this preparation, by Codex's ruling: tests, `ash.setup`, `ash.codegen`, migrations, any
   database, service or real call. The full gate (workflow receipt, format, compile, codegen check,
   Credo, `mix hex.audit`, the suite under `mix precommit --seed 0`, clean tree) runs at this branch's
-  head under its own pinned claim with a fresh execution ACK and a separate pair reservation; then
-  hosted CI at the PR head, Codex's exact-head APPROVE, and the D-157 merge.
+  final head under its own pinned claim with a fresh execution ACK and a separate pair reservation;
+  then hosted CI at the PR head, Codex's exact-head APPROVE, and the D-157 merge.
 - Downstream revalidation obligation: `fix-151-isolation-test` (PR #231),
   `fix-230-ledger-slack-seam` (PR #232) and `suppression-fix-red` carry measured evidence at their
   current heads and the old lock. After this lands, each rebases and gets a fresh, separately
-  reviewed verification plan with current CI; no earlier result is relabelled as an execution at a
-  new head.
+  reviewed verification plan with current CI (the suppression fix: a fresh six-mutant campaign and
+  fresh seam and cold-VM proofs); no earlier result is relabelled as an execution at a new head.
 
 ### Policy
 
