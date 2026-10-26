@@ -424,8 +424,11 @@ Read-only survey of `lib/` at `531259a7`:
   feature. The surveyed declarations therefore do not show the advisory-specific preconditions
   (attribute multitenancy for the two `ash_postgres` findings; a `through:` relationship for the
   `ash` finding).
-- Skipped upserts are used deliberately. All twelve `return_skipped_upsert? true` declarations in
-  `lib/`, plus the one `Ash.create` option, each with an `upsert_condition`:
+- Skipped upserts are used deliberately. All twelve `return_skipped_upsert? true` DSL declarations
+  in `lib/` use `upsert_condition expr(false)`. A separate `Ash.create` caller,
+  `ServerStarts.open_counter`, supplies `return_skipped_upsert?: true` to `ModelServerCounter.open`,
+  which declares `upsert? true`, identity `:tenant` and `upsert_fields []` with no
+  `upsert_condition`. Both are inventoried below:
 
   | Resource.action | declaration (`lib/sdr_agent/…`) | upsert identity |
   |---|---|---|
