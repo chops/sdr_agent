@@ -385,3 +385,121 @@ same day ("(B)", D-130; D-132 records this acceptance).
   delta review and the full gate are the mitigation.
 - HTTP/2 is unavailable on all listeners. Nothing in this project needs it:
   the browser UI and LiveView use HTTP/1.1 and WebSocket.
+
+## Amendment (2026-10-25, proposed): EEF-CVE-2026-114214, EEF-CVE-2026-115627, EEF-CVE-2026-115635
+
+**Status: proposed** by Claude on 2026-10-25 (evening), under Codex's bounded preparation ruling
+(reply 01a175b0-3e73-7551-930e-a41b2c4aa111). Codex's independent review of this text and of the
+exact source and lock delta precedes the owner's acceptance; no pin below is accepted until then.
+
+### Advisories
+
+Three MEDIUM advisories (CVSS 4.0 score 6.0 each; CWE-863, incorrect authorization), published on
+2026-10-25 and found by the blocking `mix hex.audit` step on CI runs 40250083053 (PR #231) and
+40251110877 (PR #232), as rule 4 of the policy above intends:
+
+- **EEF-CVE-2026-115635** (CVE-2026-115635, GHSA-36hg-wwp2-fg8w; published 19:48:43Z).
+  `ash_postgres` 2.6.22 to 2.15.1. A skipped upsert (`return_skipped_upsert?: true` with a failing
+  `upsert_condition`) looked up the existing row by identity without applying attribute
+  multitenancy, so a resource using `multitenancy strategy :attribute` could return another
+  tenant's row with the same identity values. Fixed in **2.15.2**.
+- **EEF-CVE-2026-115627** (CVE-2026-115627, GHSA-gr2r-f49c-9gm2; published 19:49:50Z).
+  `ash_postgres` 0.38.0 to 2.15.1. A `many_to_many` or `through` relationship loaded through a
+  lateral join (a limit, offset or sort) built the join resource's query without its read action,
+  where attribute multitenancy is applied, so other tenants' join rows were joined. Fixed in
+  **2.15.2**.
+- **EEF-CVE-2026-114214** (CVE-2026-114214, GHSA-g2h4-xp57-q863; published 19:47:30Z).
+  `ash` 3.24.0 to 3.37.0. A `has_many` or unsorted `has_one` relationship declared with `through:`,
+  loaded for one record with a limit of 1, dropped the filter tying destination records to the
+  source, so a caller paging such a field could enumerate unrelated destination records. Fixed in
+  **3.37.1**.
+
+### Exposure in this project
+
+Read-only survey of `lib/` at `531259a7`:
+
+- No resource declares `multitenancy do`: tenancy is a `tenant_id` attribute carried in identities
+  and filters, not Ash's multitenancy feature. Neither `ash_postgres` finding's tenant-mixing path
+  exists here. `return_skipped_upsert? true` is used by nine actions (`research_artifact`,
+  `decision`, `model_result_release`, `webhook_event`, the audit `payload` and
+  `provenance_snapshot`, three `suppression` actions, and `ServerStarts` passing the option),
+  several with `upsert_condition expr(false)`; their lookups are scoped by the identities
+  themselves (for example `:unique_idempotency_key`, `:unique_tenant`), which carry `tenant_id`
+  where tenancy matters.
+- No `many_to_many` and no `through:` relationship exists, so the lateral-join finding and the
+  `through` plus limit-1 finding have no call site.
+
+So the vulnerable paths are not reachable today. We bump anyway rather than ignore: fixed stable
+releases exist (policy 3 permits an ignore only when no acceptable fix exists), and future slices
+(Home, prospect search) add relationships.
+
+### Decision (proposed)
+
+Pin `ash` to `== 3.37.1` and `ash_postgres` to `== 2.15.2` in `mix.exs` (two lines). `ash_postgres`
+2.15.2 requires `ash ~> 3.37 and >= 3.37.1` and `ash_sql ~> 0.8 and >= 0.8.4`, which `ash_sql` 0.7.1
+cannot satisfy, so `ash_sql` moves to **0.8.4** as a lock-only transitive change
+(`mix deps.unlock ash ash_postgres ash_sql && mix deps.get`). The lock changes exactly those three
+entries (3 removed, 3 added; `deps.get` lists `New:` ash 3.37.1, ash_postgres 2.15.2, ash_sql 0.8.4
+and 120 packages unchanged); no other package moves; no override, no new direct dependency, no
+`ignore_advisories` entry. Lock checksums: ash 3.37.1 `35ea962d…`, ash_postgres 2.15.2 `aa2611e8…`,
+ash_sql 0.8.4 `06a75a45…`. `ash_sql` 0.8.4 newly requires `jason`, already locked; `simple_sat`
+stays an optional, unlocked requirement of `ash` as before. Bandit (amendment of 2026-10-15), the
+Jido/Zoi pins and ADR-0018's residuals are untouched. Requirement checks: `ash_sql` 0.8.4 needs
+`ecto >= 3.13.4` (locked 3.14.2); `ash` 3.37.0 needs Elixir >= 1.17 (toolchain 1.20.4); `spark`
+2.7.6 and `igniter` 0.8.4 satisfy the new requirements and do not move.
+
+### Upstream delta (changelogs read 2026-10-26 01:00Z; the full notes are in the preparation return)
+
+- `ash` 3.34.6 → 3.37.1 (3.35.0 to 3.37.1, Oct 13 to 25): nothing labelled breaking or deprecated;
+  Elixir minimum 1.17; the fix itself (each step of a `through` relationship read the way its
+  relationship reads, `through` relationships always lateral-joined, the smaller of a relationship's
+  and its query's limit applied); tenant set on all action results and on upgraded changesets; an
+  `upsert_condition` passed as an `Ash.create` option now applied; keyset pagination cursors signed
+  (not reached: the inbox cursor is the project's own signed keyset and `lib/` has no Ash keyset
+  page); policy fixes for page counts and `exists` inputs; bulk-action ordering and notification
+  fixes; signals and range constraints (new, unused).
+- `ash_postgres` 2.13.0 → 2.15.2 (Oct 3 to 25): nothing labelled breaking; the fixes (attribute
+  multitenancy on skipped upserts and on lateral-join pass-through resources, exists subqueries
+  carry the tenant, `parent` references and limits on `through` joins); `codegen --check` no longer
+  infers renames or skips the dev migration check (2.14.3) and migrations create identities after
+  multitenancy attributes (2.15.2), so the gate's `mix ash.codegen --check` is the check for
+  snapshot drift; `character_not_in_repertoire`, `DBConnection.EncodeError` and
+  `Ecto.Query.CastError` converted to invalid-class errors on every query path (2.14.0; `lib/`
+  matches none of them raw); upserts no longer use `merge` (2.13.1); atomics lock rows in the
+  computing subquery; `timestamptz`, temporal and `view?` options (opt-in).
+- `ash_sql` 0.7.1 → 0.8.4 (Sep 5 to Oct 25): nothing labelled breaking; grouped aggregate strategy
+  (0.8.0), tenant-scoped aggregates and multitenancy bypass honoured inside aggregates (0.8.4),
+  prefix on aggregate queries, `parent(rel.id)` or-filters compiled as EXISTS (0.8.3), exists-rewrite
+  fixes, codepoints counted on the stored value (consistent with `default_string_length_count:
+  :codepoints` above).
+
+None of these is a behaviour this project is known to rely on; the full gate is the check, and no
+measured evidence from before this change carries across it.
+
+### Verification
+
+- The lock delta was reviewed before anything compiled: exactly the three entries above.
+- `mix compile --warnings-as-errors` in the declared Nix environment, `MIX_ENV=dev` then
+  `MIX_ENV=test`: rc 0 in both (dev 01:04:36 to 01:05:54Z, 420 files; test 01:05:54 to 01:07:05Z, 450 files; logs `compile-dev.log` 8d9ff6bb…, `compile-test.log` 61ae0e01…). Every `warning:` line in the logs (106 and 103) is a dependency's own compile output (for example `ash_sql` 0.8.4's two unused requires) or the Nix shell entry, none in project files; the one error-labelled line in each log is the devenv banner's `mix hex.info` EPIPE stack, not a compile error.
+- `mix usage_rules.sync` for the changed direct dependencies: run without `--yes`, so nothing was applied (exit 1 at its confirmation prompt; the tree stayed at `mix.exs` and `mix.lock`; log `usage-rules-sync.log` f67c3f76…). The task takes no per-dependency arguments (the project config is its source of truth), and its proposal mixes this change's share (updates to the generated `use-ash` skill: `SKILL.md`, `actions.md`, `relationships.md`, `testing.md`; new `signals.md` and `temporal.md` from `ash` 3.37.1's usage rules) with drift already present on main (the `use-ash-authentication` reference, three Jido skills never generated, `AGENTS.md` sections). As the original decision's neutral consequence states, the generated skills are refreshed by a separate sync, not by this pin change; the proposal is recorded for a follow-up slice.
+- Not run in this preparation, by Codex's ruling: tests, `ash.setup`, `ash.codegen`, migrations, any
+  database, service or real call. The full gate (workflow receipt, format, compile, codegen check,
+  Credo, `mix hex.audit`, the suite under `mix precommit --seed 0`, clean tree) runs at this branch's
+  head under its own pinned claim with a fresh execution ACK and a separate pair reservation; then
+  hosted CI at the PR head, Codex's exact-head APPROVE, and the D-157 merge.
+- Downstream revalidation obligation: `fix-151-isolation-test` (PR #231),
+  `fix-230-ledger-slack-seam` (PR #232) and `suppression-fix-red` carry measured evidence at their
+  current heads and the old lock. After this lands, each rebases and gets a fresh, separately
+  reviewed verification plan with current CI; no earlier result is relabelled as an execution at a
+  new head.
+
+### Policy
+
+Unchanged: the audit stays blocking; no ignore list; CRITICAL and HIGH are never ignored; a LOW or
+MEDIUM ignore needs no acceptable fix, a reviewed reason and a revisit trigger.
+
+### Entity model
+
+Trigger: no. Dependency-only scope; no application entity, attribute, relationship, policy, action
+or contract changes. Had compatibility required a schema, policy or action change, the slice would
+have stopped for re-scoping before implementing it.
