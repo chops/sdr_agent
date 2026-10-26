@@ -585,9 +585,14 @@ use it", changelog v2.14.0). The repository's 2026-10-06 initialization migratio
 `RETURN ash_raise_error(payload, value)`. Version 7 keeps the signature, the non-NULL identity return,
 `STABLE` and the empty `search_path`, and changes only the NULL branch to
 `RAISE EXCEPTION 'ash_error: %', payload::text` directly (self-contained; no call into `ash_raise_error`).
-Observable contract, both versions: a non-NULL value is returned unchanged; NULL raises a PostgreSQL
-exception whose message is `ash_error: ` followed by the JSON payload (the `Ash.Error.Changes.Required`
-payload ash_postgres builds). Where it runs: ash_postgres emits `ash_required(?, ?::jsonb)` for Ash's
+Both source definitions preserve the non-NULL identity return, the signature, `STABLE` and the empty
+`search_path`. Version 6 delegates its NULL path to the unqualified helper `ash_raise_error(payload, value)`,
+an application-defined function from the same initialization migration whose resolution under
+`SET search_path = ''` is an additional failure point; its intended payload-error behaviour has not been
+runtime-verified here. Version 7 raises the `ash_error: ` payload exception (the
+`Ash.Error.Changes.Required` payload ash_postgres builds) directly; that is the contract the focused tests
+below verify. No measured compatibility between the versions is claimed, and nothing here asserts which
+bytes any existing database holds. Where it runs: ash_postgres emits `ash_required(?, ?::jsonb)` for Ash's
 `required!/2` expression (`sql_implementation.ex`), that is, when a required attribute's atomic validation
 is pushed into SQL; this application writes no `required!` expression of its own.
 
@@ -610,21 +615,30 @@ downstream re-verification).
 1. Fresh install: the full gate at the final head creates its partition database from scratch and
    `ash.setup` applies every migration in order (version 6, then 7); the focused tests below assert the
    installed body, so a green gate at the final head is also the fresh-install proof.
-2. Focused coverage, proposed as `test/sdr_agent/repo/ash_required_v7_test.exs` (four tests; predicted N
-   3222 → 3226, reconciled in the claim): (a) non-NULL path: `SELECT ash_required($1::integer, $2::jsonb)`
-   with `1` and `{"k":"v"}` returns `1`; (b) NULL path: `SELECT ash_required(NULL::integer, '{"k":"v"}'::jsonb)`
-   raises `Postgrex.Error` whose `postgres.message` is `ash_error: {"k": "v"}` (PostgreSQL's jsonb text
-   rendering); (c) installed body: `pg_get_functiondef('ash_required(anycompatible, jsonb)'::regprocedure)`
-   contains `RAISE EXCEPTION` and not `ash_raise_error`; (d) upgrade from version 6: inside the sandbox
-   transaction, execute the version-6 body (`… RETURN ash_raise_error(payload, value) …`), assert (c)
-   negatively, execute the version-7 migration's `up` SQL, re-assert (a)–(c); the sandbox rolls it back. (d)
-   models the in-place redefinition the migration performs on a database initialized at version 6; it is not
-   an execution against any owner database.
-3. Implicit coverage: whatever atomic updates of required attributes the suite already performs exercise the
-   non-NULL path; this is not quantified and not claimed.
-
-Whether the focused tests join this slice (one more commit, measured by the gate's own suite) or follow as
-their own issue is for the review to decide; at the time of writing none exists.
+2. Focused coverage, in this slice: `test/sdr_agent/repo/ash_required_v7_test.exs` (four tests, serial,
+   `async: false`; predicted N 3222 → 3226, a prediction the gate measures). (a) A typed non-NULL input is
+   returned unchanged (`SELECT ash_required($1::integer, $2::text::jsonb)` with `1` returns `1`; likewise a
+   text value). (b) A typed NULL input raises `Postgrex.Error` with SQLSTATE P0001 (`postgres.code ==
+   :raise_exception`, the intended raise, distinguished from a helper-resolution failure) and the exact
+   message `ash_error: {"k": "v"}` (PostgreSQL's jsonb text rendering of the payload); the test then
+   executes a further query to show the connection recovered. Recovery contract: the tests open no explicit
+   transaction and do not disable sandbox subtransactions, so the installed Ecto SQL sandbox's per-query
+   savepoint applies; a later revision that adds an explicit transaction must keep a savepoint around the
+   expected error. (c) `pg_get_functiondef('ash_required(anycompatible, jsonb)'::regprocedure)` contains the
+   direct `RAISE EXCEPTION 'ash_error: %', payload::text;`, no `ash_raise_error`, the preserved signature
+   `(value anycompatible, payload jsonb)` returning `anycompatible`, `STABLE` and the empty `search_path`.
+   (d) A sandboxed version-6 → version-7 model: the exact historical version-6 body is extracted from the
+   tracked initialization migration (the file bound to its SHA-256 `56555cde…`) and installed, its baseline
+   confirmed by (c) negatively (helper call present, no direct raise); then the actual tracked version-7
+   migration's `execute` SQL is extracted from the migration file (bound to `ef925690…`) and applied, and
+   (a)–(c) re-asserted; the sandbox transaction reverts the replacement. No hand-written substitute for the
+   migration SQL and no `Ecto.Migration` runner is used.
+3. Limits: (d) models the in-place redefinition on a database initialized at version 6; it is not a
+   migration-runner upgrade/downgrade test and not an execution against any owner database. The no-op
+   `down` remains a documented non-restoring consequence, not a tested rollback. Whatever atomic updates of
+   required attributes the suite already performs exercise the non-NULL path implicitly; that is not
+   quantified and not claimed. At the time of writing none of these tests has run; the gate at the final
+   head is their first execution.
 
 ### Entity model
 
