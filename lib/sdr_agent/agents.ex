@@ -78,6 +78,7 @@ defmodule SdrAgent.Agents do
 
   alias Ash.Error.Changes.InvalidAttribute
   alias Ash.Error.Query.NotFound
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents.Admission
   alias SdrAgent.Agents.Admission.Gate
   alias SdrAgent.Agents.Admission.SwitchFence
@@ -337,27 +338,34 @@ defmodule SdrAgent.Agents do
   reservation holds the chain-head lock until it commits, so concurrent
   reservations serialise and cannot both take the last unit. Attempts are
   never refunded.
+
+  C2* operation snapshot entry `:reserve_model_invocation` (ADR-0005 C2*
+  item 2), before the guard and the store observation.
   """
   def reserve_model_invocation(run, attrs, opts) do
-    actor = Keyword.get(opts, :actor)
+    OperationSnapshot.enter(:reserve_model_invocation, fn ->
+      actor = Keyword.get(opts, :actor)
 
-    marker = Keyword.get(opts, :calibration)
+      marker = Keyword.get(opts, :calibration)
 
-    calibration =
-      {CalibrationAdmission.scope(marker), CalibrationAdmission.claim(marker),
-       CalibrationAdmission.binding(marker)}
+      calibration =
+        {CalibrationAdmission.scope(marker), CalibrationAdmission.claim(marker),
+         CalibrationAdmission.binding(marker)}
 
-    ModelInvocation
-    |> guard(:reserve, run.id, actor, fn -> reserve_normalized(run, attrs, actor, calibration) end)
-    |> case do
-      # The reservation rolled back; the refusal is committed on its own.
-      {:error, %Admission.Refusal{} = refusal} ->
-        with {:ok, refused} <- Admission.record_refusal(refusal), do: {:error, refused}
-
-      result ->
-        result
-    end
+      ModelInvocation
+      |> guard(:reserve, run.id, actor, fn ->
+        reserve_normalized(run, attrs, actor, calibration)
+      end)
+      |> refusal_recorded()
+    end)
   end
+
+  # The reservation rolled back; the refusal is committed on its own.
+  defp refusal_recorded({:error, %Admission.Refusal{} = refusal}) do
+    with {:ok, refused} <- Admission.record_refusal(refusal), do: {:error, refused}
+  end
+
+  defp refusal_recorded(result), do: result
 
   # R0-07 slice B (row B5'): the store observation — the admission gate's
   # only filesystem I/O — runs after input normalisation and before the
@@ -614,20 +622,26 @@ defmodule SdrAgent.Agents do
       stage: :launch}}`, from which the run stops `:model_not_admitted`
       linking exactly that Failure (R0-07 slice B, row B1).
     * **Success** marks it sent: `{:ok, invocation}`.
+
+  C2* operation snapshot entry `:admit_launch` (ADR-0005 C2* item 2): it
+  runs in the model server's process, so each launch is its own owner,
+  before `Guard.run/3`.
   """
   def admit_launch(invocation_id, effective_profile, opts) do
-    actor = Keyword.get(opts, :actor)
+    OperationSnapshot.enter(:admit_launch, fn ->
+      actor = Keyword.get(opts, :actor)
 
-    meta = %{
-      resource: ModelInvocation,
-      action: :admit_launch,
-      guarded?: true,
-      subject_id: uuid(invocation_id)
-    }
+      meta = %{
+        resource: ModelInvocation,
+        action: :admit_launch,
+        guarded?: true,
+        subject_id: uuid(invocation_id)
+      }
 
-    expected = Admission.calibration_launch(opts)
+      expected = Admission.calibration_launch(opts)
 
-    Guard.run(meta, actor, fn -> launch(invocation_id, effective_profile, actor, expected) end)
+      Guard.run(meta, actor, fn -> launch(invocation_id, effective_profile, actor, expected) end)
+    end)
   end
 
   defp launch(
@@ -1563,10 +1577,14 @@ defmodule SdrAgent.Agents do
   `{:ok, output}` for a generation-2 ClaudeCLI invocation only when it has a
   `:released` release, and for a generation-1 or Fake invocation as stored;
   otherwise `{:error, :result_not_released}` (`{:error, :not_found}` outside
-  the actor's tenant). See `SdrAgent.Agents.ReleasedOutput`.
+  the actor's tenant). See `SdrAgent.Agents.ReleasedOutput`. C2* operation
+  snapshot entry `:released_output` (ADR-0005 C2* item 2).
   """
-  def released_output(invocation, opts),
-    do: ReleasedOutput.fetch(invocation, Keyword.get(opts, :actor))
+  def released_output(invocation, opts) do
+    OperationSnapshot.enter(:released_output, fn ->
+      ReleasedOutput.fetch(invocation, Keyword.get(opts, :actor))
+    end)
+  end
 
   ## Helpers
 

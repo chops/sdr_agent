@@ -30,6 +30,7 @@ defmodule SdrAgent.SDR.AgentWorker do
   use SdrAgent.Workers.ErrorBoundary
 
   alias SdrAgent.Actor
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents
   alias SdrAgent.Agents.ResultGate
   alias SdrAgent.Agents.StoppedRunOperation
@@ -78,13 +79,20 @@ defmodule SdrAgent.SDR.AgentWorker do
 
   # The run's and the Operation's terminal writes commit together, so a
   # crash cannot leave a terminal run with a running Operation.
+  #
+  # C2* operation snapshot entry `:agent_finish` (ADR-0005 C2* addendum 1,
+  # D-227): one operation enclosing the terminal transaction, sampled after
+  # the run's actions end, so its unreleased-output check (ResultGate) reads
+  # this owner's snapshot.
   defp finish(result, run, operation, actor) do
-    {:ok, :ok} = Audit.transaction(fn -> terminalize(result, run, operation, actor) end)
+    OperationSnapshot.enter(:agent_finish, fn ->
+      {:ok, :ok} = Audit.transaction(fn -> terminalize(result, run, operation, actor) end)
 
-    case result do
-      {:refused, reason} -> {:error, reason}
-      _result -> :ok
-    end
+      case result do
+        {:refused, reason} -> {:error, reason}
+        _result -> :ok
+      end
+    end)
   end
 
   defp terminalize(result, run, operation, actor) do

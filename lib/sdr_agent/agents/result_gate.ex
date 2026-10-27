@@ -50,6 +50,7 @@ defmodule SdrAgent.Agents.ResultGate do
   require Ash.Query
 
   alias SdrAgent.Actor
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.ModelInvocation
@@ -192,18 +193,29 @@ defmodule SdrAgent.Agents.ResultGate do
   row G7). Returns `{:released, release, output}`, `{:withheld, release,
   run}`, or `{:error, reason}` — no business output, the run left
   recoverable by `SdrAgent.SDR.StaleRunSweeper`.
+
+  C2* operation snapshot entry `:result_gate` (ADR-0005 C2* item 2): it
+  inherits from the owning action, or owns when top-level.
   """
   @spec gate(struct(), map(), keyword()) ::
           {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
   def gate(invocation, gate, opts \\ []) do
-    :ok = before_gate(invocation)
+    OperationSnapshot.enter(:result_gate, fn ->
+      :ok = before_gate(invocation)
 
-    with {kind, _receipt} = outcome when kind in [:ok, :timeout] <- await(invocation, gate, opts) do
-      case finalize(invocation, gate, outcome, opts) do
-        {:error, reason} when reason in @final -> {:error, reason}
-        {:error, _refused} -> __MODULE__.Recovery.run(invocation, gate, opts)
-        result -> result
+      with {kind, _receipt} = outcome when kind in [:ok, :timeout] <-
+             await(invocation, gate, opts) do
+        finalized(invocation, gate, outcome, opts)
       end
+    end)
+  end
+
+  # Step 3, and one recovery attempt when finalization is refused (G7).
+  defp finalized(invocation, gate, outcome, opts) do
+    case finalize(invocation, gate, outcome, opts) do
+      {:error, reason} when reason in @final -> {:error, reason}
+      {:error, _refused} -> __MODULE__.Recovery.run(invocation, gate, opts)
+      result -> result
     end
   end
 

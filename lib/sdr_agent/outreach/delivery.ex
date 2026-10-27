@@ -36,6 +36,7 @@ defmodule SdrAgent.Outreach.Delivery do
   require Ash.Query
 
   alias SdrAgent.Actor
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents
   alias SdrAgent.Audit
   alias SdrAgent.Clock
@@ -67,16 +68,23 @@ defmodule SdrAgent.Outreach.Delivery do
 
   ## Attempt
 
-  @doc "Runs the send gate for delivery `id` and, if it passes, delivers. `:ok` or `{:snooze, s}`."
+  @doc """
+  Runs the send gate for delivery `id` and, if it passes, delivers. `:ok` or `{:snooze, s}`.
+  C2* operation snapshot entry `:delivery_attempt` (ADR-0005 C2* item 2): it owns before the
+  gate transaction; the capture and its receipt inherit.
+  """
   def attempt(id, tenant_id) do
-    dlv = Actor.system(:delivery_worker, tenant_id)
+    OperationSnapshot.enter(:delivery_attempt, fn ->
+      dlv = Actor.system(:delivery_worker, tenant_id)
+      gated = transaction(fn -> gate(id, tenant_id, dlv) end)
 
-    case transaction(fn -> gate(id, tenant_id, dlv) end) do
-      {:ok, {:claimed, op, rendered}} -> deliver(op, rendered, dlv)
-      {:ok, {:snooze, seconds}} -> {:snooze, seconds}
-      {:ok, _done} -> :ok
-      {:error, error} -> {:error, error}
-    end
+      case gated do
+        {:ok, {:claimed, op, rendered}} -> deliver(op, rendered, dlv)
+        {:ok, {:snooze, seconds}} -> {:snooze, seconds}
+        {:ok, _done} -> :ok
+        {:error, error} -> {:error, error}
+      end
+    end)
   end
 
   defp gate(id, tenant_id, dlv) do

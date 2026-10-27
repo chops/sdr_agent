@@ -54,6 +54,7 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
   require Ash.Query
 
   alias SdrAgent.Actor
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
@@ -72,20 +73,25 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
   Recovers the gate of `invocation` under `gate` (`%{run_id,
   operation_id}`). Option `guard:` as for `ResultGate.finalize/4`. Returns `{:released, release, output}` (a competing
   release only), `{:withheld, release, run}` or `{:error, reason}`.
+
+  C2* operation snapshot entry `:result_gate_recovery` (ADR-0005 C2* item
+  2): under the gate or the sweeper's per-run owner it inherits.
   """
   @spec run(struct(), map(), keyword()) ::
           {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
   def run(invocation, gate, opts \\ []) do
-    actor = Actor.system(:agent_runtime, invocation.tenant_id)
-    guard = Keyword.get(opts, :guard, fn _run -> :ok end)
+    OperationSnapshot.enter(:result_gate_recovery, fn ->
+      actor = Actor.system(:agent_runtime, invocation.tenant_id)
+      guard = Keyword.get(opts, :guard, fn _run -> :ok end)
 
-    fn -> locked(invocation, gate, guard, actor) end
-    |> Audit.transaction()
-    |> case do
-      {:ok, result} -> result
-      {:error, %Ash.Changeset{errors: errors}} -> {:error, Ash.Error.to_error_class(errors)}
-      {:error, error} -> {:error, error}
-    end
+      fn -> locked(invocation, gate, guard, actor) end
+      |> Audit.transaction()
+      |> case do
+        {:ok, result} -> result
+        {:error, %Ash.Changeset{errors: errors}} -> {:error, Ash.Error.to_error_class(errors)}
+        {:error, error} -> {:error, error}
+      end
+    end)
   end
 
   # The immutable decision is read first, before any replacement selection

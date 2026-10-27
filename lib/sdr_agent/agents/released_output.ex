@@ -17,17 +17,25 @@ defmodule SdrAgent.Agents.ReleasedOutput do
 
   require Ash.Query
 
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents.Checks.ReleasedOutputRead
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.Audit.Kernel
 
-  @doc "`{:ok, output}`, `{:error, :result_not_released}` or `{:error, :not_found}`."
+  @doc """
+  `{:ok, output}`, `{:error, :result_not_released}` or `{:error, :not_found}`.
+  C2* operation snapshot entry `:released_output_fetch` (ADR-0005 C2* item
+  2): nested under its callers it inherits.
+  """
   @spec fetch(struct() | Ecto.UUID.t(), term()) ::
           {:ok, term()} | {:error, :result_not_released | :not_found | term()}
-  def fetch(%ModelInvocation{id: id}, actor), do: fetch(id, actor)
+  def fetch(invocation, actor),
+    do: OperationSnapshot.enter(:released_output_fetch, fn -> read(invocation, actor) end)
 
-  def fetch(id, %{tenant_id: tenant_id} = actor) when is_binary(id) and is_binary(tenant_id) do
+  defp read(%ModelInvocation{id: id}, actor), do: read(id, actor)
+
+  defp read(id, %{tenant_id: tenant_id} = actor) when is_binary(id) and is_binary(tenant_id) do
     ModelInvocation
     |> Ash.Query.for_read(:read, %{}, actor: actor, context: ReleasedOutputRead.context())
     |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
@@ -39,7 +47,7 @@ defmodule SdrAgent.Agents.ReleasedOutput do
     end
   end
 
-  def fetch(_id, _actor), do: {:error, :not_found}
+  defp read(_id, _actor), do: {:error, :not_found}
 
   @doc "Whether `invocation`'s output is behind the result gate (generation-2 ClaudeCLI)."
   @spec gated?(struct()) :: boolean()

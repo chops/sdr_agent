@@ -20,6 +20,7 @@ defmodule SdrAgent.Agents.Changes.DecisionRules do
   use Ash.Resource.Change
 
   alias SdrAgent.Actor
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents.Decision
   alias SdrAgent.Agents.Errors.ResultNotReleased
   alias SdrAgent.Agents.JsonPointer
@@ -100,11 +101,17 @@ defmodule SdrAgent.Agents.Changes.DecisionRules do
 
   defp mode_errors(_mode, _get), do: []
 
+  # C2* operation snapshot entry `:decision_rules` (ADR-0005 C2* item 2), on
+  # the :llm branch only. This hook runs inside the create's transaction, so
+  # it inherits an owner's snapshot or refuses (registers nothing).
   defp invocation_rules(changeset) do
     with :llm <- Ash.Changeset.get_attribute(changeset, :mode),
          id when is_binary(id) <- Ash.Changeset.get_attribute(changeset, :model_invocation_id) do
       tenant_id = Ash.Changeset.get_attribute(changeset, :tenant_id)
-      check_invocation(changeset, Ash.get(ModelInvocation, id, Kernel.opts(tenant_id)))
+
+      OperationSnapshot.enter(:decision_rules, fn ->
+        check_invocation(changeset, Ash.get(ModelInvocation, id, Kernel.opts(tenant_id)))
+      end)
     else
       _ -> changeset
     end

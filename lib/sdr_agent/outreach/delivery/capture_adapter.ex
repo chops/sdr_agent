@@ -21,18 +21,23 @@ defmodule SdrAgent.Outreach.Delivery.CaptureAdapter do
   """
   @behaviour SdrAgent.Outreach.Delivery.Adapter
 
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Outreach
 
+  # C2* operation snapshot entry `:capture_deliver` (ADR-0005 C2* item 2):
+  # under Delivery.attempt/2 it inherits; a direct top-level call owns.
   @impl true
   def deliver(operation, rendered, opts) do
-    actor = Keyword.fetch!(opts, :actor)
+    OperationSnapshot.enter(:capture_deliver, fn ->
+      actor = Keyword.fetch!(opts, :actor)
 
-    with :ok <- fault(:before_capture, operation),
-         :ok <- same_bytes(operation, rendered),
-         {:ok, receipt} <- capture(operation, actor),
-         :ok <- fault(:after_capture, operation) do
-      {:ok, %{provider_message_id: receipt.provider_message_id}}
-    end
+      with :ok <- fault(:before_capture, operation),
+           :ok <- same_bytes(operation, rendered),
+           {:ok, receipt} <- capture(operation, actor),
+           :ok <- fault(:after_capture, operation) do
+        {:ok, %{provider_message_id: receipt.provider_message_id}}
+      end
+    end)
   end
 
   @impl true
