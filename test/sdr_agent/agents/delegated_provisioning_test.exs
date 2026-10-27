@@ -22,11 +22,13 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
       foreign-tenant PRV at the raw action inside a genuine registration,
       and the singleton tenant's PRV against an environment attesting a
       different tenant on the guarded domain route (one denial in the
-      actor's own tenant), each after a positive registration prerequisite. An expired or
-      invalid entry, an extra input, a supplied private argument, a live
-      database oid other than the binding's (T-B3, S2 half) and another
-      authorization already provisioned (OQ8) are a typed
-      `ProvisioningRefused`. Nothing is written. Inside an attestation PRV
+      actor's own tenant), each after a positive registration prerequisite.
+      An expired or invalid entry, a caller-supplied private argument
+      (by presence, in the raw params or through `private_arguments`), a
+      live database oid other than the binding's (T-B3, S2 half) and
+      another authorization already provisioned (OQ8) are a typed
+      `ProvisioningRefused`; a genuine unknown input is `NoSuchInput`.
+      Nothing is written. Inside an attestation PRV
       still cannot create, change or release a grant.
     * **replay (T-V7, action level):** an identical second call returns the
       same grant marked `:sdr_replayed` and writes nothing; a changed entry
@@ -67,11 +69,23 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
   Guard's denial append for a tenant with no audit chain, which raises
   (`{:error, :chain_not_initialized}` against `{:ok, _}`) under any
   implementation; that Guard defect is tracked separately.
+
+  RED-2 B correction (Codex `e0b028c5`): a private argument's name given as
+  a plain input is not `NoSuchInput` (Ash caches every argument, private
+  ones included, as an action input, then drops the private one silently
+  while keeping the raw key in the changeset's params), so the former
+  `claim_nonce` NoSuchInput case is replaced: each of `authorization_sha256`,
+  `claim_nonce` and `decision_refs`, with an atom or a string key, as the
+  true value, nil or false, is refused as `ProvisioningRefused
+  :inputs_refused`, and likewise through `private_arguments` for any value
+  Ash can cast; false through `private_arguments` is refused by Ash's own
+  argument cast (`InvalidArgument`). Nothing is written in any case.
   """
   use SdrAgent.AuditCase, async: false
 
   import SdrAgent.Test.AgentEnvGrantFixtures
 
+  alias Ash.Error.Changes.InvalidArgument
   alias Ash.Error.Forbidden
   alias Ash.Error.Invalid
   alias Ash.Error.Invalid.NoSuchInput
@@ -201,20 +215,38 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
 
   # The raw action, as a caller could build it: for the input and
   # private-argument refusals, which the domain API cannot express.
-  defp raw_provision(id, actor, extra, opts) do
+  defp raw_provision(id, actor, extra, opts),
+    do: raw_provision_params(Map.merge(%{authorization_id: id}, extra), actor, opts)
+
+  defp raw_provision_params(params, actor, opts) do
     ModelCallGrant
-    |> Ash.Changeset.for_create(
-      :provision_delegated,
-      Map.merge(%{authorization_id: id}, extra),
-      [actor: actor] ++ opts
-    )
+    |> Ash.Changeset.for_create(:provision_delegated, params, [actor: actor] ++ opts)
     |> Ash.create()
   end
+
+  # The params of a raw call supplying private argument `name` as a plain
+  # input, every key in one form (`name` is one of the closed @private atoms).
+  defp plain_params(:atom_key, id, name, value), do: %{:authorization_id => id, name => value}
+
+  defp plain_params(:string_key, id, name, value),
+    do: %{"authorization_id" => id, Atom.to_string(name) => value}
+
+  defp private_key(:atom_key, name), do: name
+  defp private_key(:string_key, name), do: Atom.to_string(name)
+
+  defp private_value(:true_value, name, env), do: supplied(name, env)
+  defp private_value(:nil_value, _name, _env), do: nil
+  defp private_value(:false_value, _name, _env), do: false
 
   defp no_such_input?({:error, %Invalid{errors: errors}}),
     do: Enum.any?(errors, &match?(%NoSuchInput{}, &1))
 
   defp no_such_input?(_result), do: false
+
+  defp invalid_argument?({:error, %Invalid{errors: errors}}, name),
+    do: Enum.any?(errors, &match?(%InvalidArgument{field: ^name}, &1))
+
+  defp invalid_argument?(_result, _name), do: false
 
   defp private_arguments! do
     action = require_action!(ModelCallGrant, :provision_delegated)
@@ -550,7 +582,11 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
                [:authorization_id]
     end
 
-    for key <- [:total_attempts, :provisioning, :delegated_authorization_sha256, :claim_nonce] do
+    # Genuine unknown inputs: NoSuchInput. A private argument's name is not
+    # one (Ash caches every argument as an action input and then drops a
+    # private one silently), so the private names have their own contract
+    # below (Codex B ruling `e0b028c5`).
+    for key <- [:total_attempts, :provisioning, :delegated_authorization_sha256] do
       @tag extra_input: key
       test "an extra input #{key} is NoSuchInput, inside an attestation", ctx do
         env = provisioning_env!()
@@ -583,6 +619,85 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
 
         assert_refused(result, :inputs_refused, "private #{name}")
         assert_nothing_provisioned(ctx, "private #{name}")
+      end
+    end
+
+    # Codex B ruling (`e0b028c5`): a caller-supplied private name is refused
+    # by presence, never by truthiness, whatever its key form, through the
+    # raw params or the private_arguments channel. The names are the closed
+    # @private atoms; string keys are their own Atom.to_string/1.
+    for name <- @private,
+        form <- [:atom_key, :string_key],
+        value <- [:true_value, :nil_value, :false_value] do
+      @tag private_input: {name, form, value}
+      test "a private #{name} as a plain input (#{form}, #{value}) is refused as inputs_refused",
+           ctx do
+        {name, form, value} = ctx.private_input
+        env = provisioning_env!()
+        prv = prv(ctx.tenant)
+        private_arguments!()
+        params = plain_params(form, env.entry.id, name, private_value(value, name, env))
+        result = within(env.entry.id, fn -> raw_provision_params(params, prv, []) end)
+
+        assert_refused(result, :inputs_refused, "plain input #{name} (#{form}, #{value})")
+        assert_nothing_provisioned(ctx, "plain input #{name} (#{form}, #{value})")
+      end
+    end
+
+    # Through private_arguments, a value Ash can cast (the true value, nil)
+    # is stored, so its presence is refused as inputs_refused (the atom-key
+    # true value is the test above).
+    for name <- @private,
+        {form, value} <- [
+          atom_key: :nil_value,
+          string_key: :true_value,
+          string_key: :nil_value
+        ] do
+      @tag private_channel: {name, form, value}
+      test "a private #{name} through private_arguments (#{form}, #{value}) is refused " <>
+             "as inputs_refused",
+           ctx do
+        {name, form, value} = ctx.private_channel
+        env = provisioning_env!()
+        prv = prv(ctx.tenant)
+        private_arguments!()
+        supplied = %{private_key(form, name) => private_value(value, name, env)}
+
+        result =
+          within(env.entry.id, fn ->
+            raw_provision(env.entry.id, prv, %{}, private_arguments: supplied)
+          end)
+
+        assert_refused(result, :inputs_refused, "private_arguments #{name} (#{form}, #{value})")
+        assert_nothing_provisioned(ctx, "private_arguments #{name} (#{form}, #{value})")
+      end
+    end
+
+    # Through private_arguments, false is not a value of these argument
+    # types: Ash's own argument cast refuses it before any change runs
+    # (InvalidArgument on that argument), so it never evades the check.
+    for name <- @private, form <- [:atom_key, :string_key] do
+      @tag private_false: {name, form}
+      test "a private #{name} through private_arguments (#{form}, false) is refused by the cast",
+           ctx do
+        {name, form} = ctx.private_false
+        env = provisioning_env!()
+        prv = prv(ctx.tenant)
+        private_arguments!()
+
+        result =
+          within(env.entry.id, fn ->
+            raw_provision(env.entry.id, prv, %{},
+              private_arguments: %{private_key(form, name) => false}
+            )
+          end)
+
+        assert invalid_argument?(result, name),
+               "c2star-s2: private_arguments #{name} (#{form}, false): expected " <>
+                 "InvalidArgument on #{name}, got " <>
+                 inspect(result, limit: 8, printable_limit: 400)
+
+        assert_nothing_provisioned(ctx, "private_arguments #{name} (#{form}, false)")
       end
     end
 
