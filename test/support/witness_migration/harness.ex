@@ -1054,9 +1054,9 @@ defmodule SdrAgent.WitnessMigration.Harness do
 
     case outcome do
       {:ok, out} ->
-        # An exit-0 drop child counts only with exactly its two successful
-        # facts (Codex 7ad3bd0 G2-F1); otherwise cleanup fails and the
-        # folder (the evidence) is kept.
+        # An exit-0 drop child counts only with one of the strictly verified
+        # versioned fact sets (v1 or v2; Codex 7ad3bd0 G2-F1, db034af6 Q6);
+        # otherwise cleanup fails and the folder (the evidence) is kept.
         case verify_drop_receipt(out) do
           {:ok, _facts} ->
             note("cleanup.drop_receipt", "valid")
