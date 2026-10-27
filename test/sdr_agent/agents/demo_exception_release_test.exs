@@ -28,6 +28,13 @@ defmodule SdrAgent.Agents.DemoExceptionReleaseTest do
   closed code; tests named `control:` pass in RED and GREEN. The CHECK half
   of T-W3 is `demo_exception_constraints_test.exs` T-S1 ("demo decided at
   its expiry").
+
+  RED-3 supplement (Codex facf9dcf R1, R2): T-N8 also persists each bad
+  current extra (open, unknown route, contentful or incomplete count_tokens,
+  ambiguous, a second primary) behind a clean receipt, so only the
+  under-head re-read of the persisted link set can refuse; T-N11 covers
+  every non-assignment origin and a `:proof` run through the domain path.
+  The pure E1/E2/E5 fact vectors are in `demo_exception/eligibility_test.exs`.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -204,6 +211,35 @@ defmodule SdrAgent.Agents.DemoExceptionReleaseTest do
       parts = Fx.constructed!(env, :reply_classification)
       result = finalize(env, parts.invocation, {:ok, parts.receipt})
       withheld!(env, result, {:witness_missing, :method_not_enabled}, "scope_mismatch")
+    end
+
+    # Codex facf9dcf R2 (T-N11): every non-assignment origin through the
+    # domain path (`demo_env!/1` passes `usage_origin:` to the run).
+    for origin <- [:referral, :reply, :followup, :discovery, :channel] do
+      @tag demo_env: [usage_origin: origin]
+      test "T-N11: a #{origin} run is withheld as today with scope_mismatch", %{env: env} do
+        assert env.run.usage_origin != :assignment
+        parts = Fx.constructed!(env)
+        result = finalize(env, parts.invocation, {:ok, parts.receipt})
+        withheld!(env, result, {:witness_missing, :method_not_enabled}, "scope_mismatch")
+      end
+    end
+
+    # A proof invocation is never released or withheld by an ordinary
+    # decide (`release_decision.ex:249-250`), so today the finalizer errors;
+    # the exception branch must refuse it under the head with scope_mismatch.
+    @tag demo_env: [usage_origin: :proof]
+    test "T-N11: a :proof run's call is refused under the head with scope_mismatch, " <>
+           "writing nothing",
+         %{env: env} do
+      assert env.run.usage_origin == :proof
+      parts = Fx.constructed!(env, :qualification, calibration: true)
+      before = length(events(env.tenant))
+
+      result = finalize(env, parts.invocation, {:ok, parts.receipt})
+      assert result == {:error, {:demo_exception_refused, :scope_mismatch}}
+      assert {:ok, nil} = Agents.get_result_release(parts.invocation.id, actor: env.agent)
+      assert length(events(env.tenant)) == before
     end
 
     test "T-N12: an owner-form grant (no delegated provenance)", %{env: env} do
@@ -383,6 +419,46 @@ defmodule SdrAgent.Agents.DemoExceptionReleaseTest do
     end
   end
 
+  # Codex facf9dcf R1: a clean receipt and a valid v4 primary, with a bad
+  # extra persisted independently through REC. Only the under-head re-read
+  # of the persisted current link set can refuse. The producer writes each
+  # of these extras (`witness.ex:481-514`): an open exchange, an unknown
+  # route and a contentful or incomplete count_tokens are `unclassified`;
+  # several message exchanges are `ambiguous`. T-P2 keeps the ancillary
+  # positive.
+  describe "the persisted current link set (T-N8; Codex facf9dcf R1)" do
+    for {label, extra} <- [
+          {"an open exchange", :open},
+          {"an unknown-route exchange", :unknown_route},
+          {"a count_tokens exchange with content", :count_tokens_content},
+          {"an incomplete count_tokens exchange", :count_tokens_incomplete},
+          {"an ambiguous message exchange", :ambiguous}
+        ] do
+      @tag extra: extra
+      test "T-N8: a persisted current extra (#{label}) behind a clean receipt is " <>
+             "invocation_not_clean",
+           %{env: env} = ctx do
+        parts = Fx.constructed!(env)
+        extra = extra_link!(env, parts.invocation, ctx.extra)
+
+        assert Enum.sort(Enum.map(links!(env, parts.invocation), & &1.id)) ==
+                 Enum.sort([parts.link.id, extra.id])
+
+        assert parts.receipt.codes == Fx.emitted_codes()
+        result = finalize(env, parts.invocation, {:ok, parts.receipt})
+        withheld!(env, result, {:witness_missing, :method_not_enabled}, "invocation_not_clean")
+      end
+    end
+
+    test "T-N8: a second persisted current primary is link_not_eligible", %{env: env} do
+      parts = Fx.constructed!(env)
+      second = extra_link!(env, parts.invocation, :primary)
+      assert second.evidence["classification"] == "primary"
+      result = finalize(env, parts.invocation, {:ok, parts.receipt})
+      withheld!(env, result, {:witness_missing, :method_not_enabled}, "link_not_eligible")
+    end
+  end
+
   ## Harness
 
   defp pipeline(env, variant, opts \\ []) do
@@ -529,6 +605,85 @@ defmodule SdrAgent.Agents.DemoExceptionReleaseTest do
       )
 
     :ok
+  end
+
+  # An extra current link of `invocation` on another exchange, recorded by
+  # REC with the evidence the reconciler writes for that shape
+  # (`witness.ex:481-514`, `evidence/4` at :920-958).
+  defp extra_link!(env, invocation, shape) do
+    rec = system_actor(:reconciler, env.tenant)
+
+    base =
+      invocation
+      |> Fx.v4_evidence()
+      |> Map.take(~w(witness_schema proxy_version cli_version http_method http_status
+                     started_at completed_at request_bytes_seen response_bytes_seen
+                     request_capture_complete response_capture_complete stream_complete
+                     app_request_sha256 app_response_sha256 model_id profile_id))
+
+    evidence =
+      case shape do
+        :primary ->
+          Fx.v4_evidence(invocation, %{"inventory_sha256" => Fx.hex("second inventory")})
+
+        :open ->
+          base
+          |> Map.drop(~w(completed_at http_status))
+          |> Map.merge(%{
+            "route" => "/anthropic/v1/messages",
+            "outcome" => "open",
+            "response_capture_complete" => false,
+            "stream_complete" => false,
+            "classification" => "unclassified",
+            "reason_codes" => ["exchange_open"]
+          })
+
+        :unknown_route ->
+          Map.merge(base, %{
+            "route" => "/anthropic/unknown",
+            "outcome" => "complete",
+            "classification" => "unclassified",
+            "reason_codes" => ["unclassified_exchange"]
+          })
+
+        :count_tokens_content ->
+          Map.merge(base, %{
+            "route" => "/anthropic/v1/messages/count_tokens",
+            "outcome" => "complete",
+            "classification" => "unclassified",
+            "reason_codes" => ["unclassified_exchange"]
+          })
+
+        :count_tokens_incomplete ->
+          Map.merge(base, %{
+            "route" => "/anthropic/v1/messages/count_tokens",
+            "outcome" => "complete",
+            "response_capture_complete" => false,
+            "classification" => "unclassified",
+            "reason_codes" => ["unclassified_exchange", "capture_incomplete"]
+          })
+
+        :ambiguous ->
+          Map.merge(base, %{
+            "route" => "/anthropic/v1/messages",
+            "outcome" => "complete",
+            "classification" => "ambiguous",
+            "reason_codes" => ["multiple_primary_exchanges"]
+          })
+      end
+
+    attrs = %{
+      model_invocation_id: invocation.id,
+      proxy_record_ref: Ash.UUIDv7.generate(),
+      proxy_request_sha256: digest("extra raw request"),
+      proxy_response_sha256: digest("extra raw response"),
+      link_status: :inferred,
+      method: :propagated_id,
+      evidence: evidence
+    }
+
+    {:ok, link} = Agents.link_wire_witness(attrs, actor: rec)
+    link
   end
 
   # A current v4 mismatch: the REC link (output differs) and its critical

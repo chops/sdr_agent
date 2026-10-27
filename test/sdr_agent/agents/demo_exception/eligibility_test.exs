@@ -87,6 +87,8 @@ defmodule SdrAgent.Agents.DemoException.EligibilityTest do
   @link_id "019b8eac-0aaa-7bbb-8ccc-0000000000e4"
   @grant_id "019b8eac-0aaa-7bbb-8ccc-0000000000e5"
   @allocation_id "019b8eac-0aaa-7bbb-8ccc-0000000000e6"
+  # The first `:qualify` fixture lead (Demo.Fixtures.leads/0).
+  @fixture_lead "019b8eac-1180-74d8-9f38-54127081d946"
   @request_sha256 :crypto.hash(:sha256, "c2star test request")
   @response_sha256 :crypto.hash(:sha256, "c2star test response")
 
@@ -645,5 +647,227 @@ defmodule SdrAgent.Agents.DemoException.EligibilityTest do
         assert_instant(starts_at, expected_start, label)
       end
     end
+  end
+
+  # Codex facf9dcf R2 (RED-3 supplement): pure facts for the E1, E2 and E5
+  # predicates whose violating rows the domain writers cannot persist, each
+  # with all other premises valid. The step functions are GREEN-3's
+  # (`e2/1`, `e1_seed/1`, `e5/3`, beside `e4/2`); each test is structural
+  # until they exist, and every E4 premise asserted before a guard is
+  # reached now.
+
+  # T-N4/T-N10. Reservation fixes the identity from the reviewed profile
+  # (`ClaudeCLI.provenance/1`, claude_cli.ex:427-437, the builder at :436),
+  # and only completed, valid outputs reach the gate (sdr/model.ex:145-165;
+  # release_decision.ex:239-247), so these invocations are facts here.
+  describe "E2 absolute entry identity and output (Codex facf9dcf R2)" do
+    test "control: the entry's identity, completed and valid, is :ok" do
+      implemented!(@eligibility, :e2, 1)
+      assert e2(gated()) == :ok
+    end
+
+    for {label, field, value, overrides} <- [
+          {"CLI version", :provider_version, "2.1.300", %{"cli_version" => "2.1.300"}},
+          {"model", :model_id, "claude-opus-5-6", %{"model_id" => "claude-opus-5-6"}},
+          {"profile", :profile_id, :claude_cli_sonnet, %{"profile_id" => "claude_cli_sonnet"}}
+        ] do
+      @tag drift: {field, value, overrides}
+      test "common-mode #{label} drift passes E4 but E2 refuses it", ctx do
+        {field, value, overrides} = ctx.drift
+        drifted = Map.put(gated(), field, value)
+        assert call(@eligibility, :e4, [link(evidence(overrides)), drifted]) == :ok
+        implemented!(@eligibility, :e2, 1)
+        assert e2(drifted) == {:refused, :identity_mismatch}
+      end
+    end
+
+    test "a prompt-builder drift (invisible to E4) is identity_mismatch" do
+      drifted = %{gated() | model_catalog_entry: %{"prompt_builder" => "prompt-builder/2"}}
+      assert call(@eligibility, :e4, [link(evidence()), drifted]) == :ok
+      implemented!(@eligibility, :e2, 1)
+      assert e2(drifted) == {:refused, :identity_mismatch}
+    end
+
+    for {label, changes} <- [
+          {"generation 1", [ledger_generation: 1]},
+          {"the Fake provider", [provider: :fake]}
+        ] do
+      @tag changes: changes
+      test "#{label} is identity_mismatch", ctx do
+        implemented!(@eligibility, :e2, 1)
+        assert e2(struct!(gated(), ctx.changes)) == {:refused, :identity_mismatch}
+      end
+    end
+
+    for {label, changes} <- [
+          {"a failed invocation", [status: :failed]},
+          {"an unknown invocation", [status: :unknown]},
+          {"an invalid output", [validation_status: :invalid]}
+        ] do
+      @tag changes: changes
+      test "#{label} is output_invalid", ctx do
+        implemented!(@eligibility, :e2, 1)
+        assert e2(struct!(gated(), ctx.changes)) == {:refused, :output_invalid}
+      end
+    end
+
+    test "identity is checked before the output" do
+      implemented!(@eligibility, :e2, 1)
+      drifted = struct!(gated(), model_id: "claude-opus-5-6", validation_status: :invalid)
+      assert e2(drifted) == {:refused, :identity_mismatch}
+    end
+  end
+
+  # T-N13. A fixture-id lead is written only by `:seed` (lead.ex:133; `:create`
+  # takes no id, :124), every lead write appends its creation event
+  # (lead.ex:128,137), and every account and contact writer validates the
+  # reserved names (account.ex:69,79,92; contact.ex:60,70,94; regressions
+  # sales/catalog_test.exs:125,180,408). `e1_seed/1` facts: the tenant, the
+  # run's lead id, the lead row, its `sales.lead.created` events in the
+  # tenant, and the account domain and contact email at the instant.
+  describe "E1 seed provenance and reserved names (Codex facf9dcf R2)" do
+    test "control: a fixture lead seeded once, with reserved names, is :ok" do
+      implemented!(@eligibility, :e1_seed, 1)
+      assert e1_seed(seed_facts()) == :ok
+    end
+
+    for {label, overrides} <- [
+          {"no creation event", %{creation_events: []}},
+          {"a creation event by a human admin", %{creation_events: [:user]}},
+          {"a creation event by the kernel", %{creation_events: [:kernel]}},
+          {"two seeder creation events", %{creation_events: [:seeder, :seeder]}},
+          {"no lead row", %{lead: nil}},
+          {"a lead of another tenant", %{lead: :other_tenant}},
+          {"a lead id outside the entry", %{lead_id: "019b8eac-1180-7fff-8fff-000000000c25"}},
+          {"a non-reserved contact email", %{contact_email: "avery@gmail.com"}},
+          {"a non-reserved account domain", %{account_domain: "brightpath.com"}},
+          {"no contact email", %{contact_email: nil}}
+        ] do
+      @tag overrides: overrides
+      test "#{label} is scope_mismatch", ctx do
+        implemented!(@eligibility, :e1_seed, 1)
+        assert e1_seed(seed_facts(ctx.overrides)) == {:refused, :scope_mismatch}
+      end
+    end
+  end
+
+  # T-N7. Lineage forbids a v4 successor of a mismatch (witness_lineage.ex:
+  # 126-131; regressions wire_witness_link_test.exs:347,446), and a v4
+  # observation keeps a mismatch head (witness.ex:868-876; regression
+  # reconciler_test.exs:1224), so a v4 primary behind a historical mismatch
+  # is a fact vector here. `e5/3`: the receipt's primary link, every link of
+  # the invocation (current and superseded), and its reconciliation_required
+  # Failures (any status).
+  describe "E5 history and the current link set (Codex facf9dcf R2)" do
+    test "control: the primary alone, no Failure, is :ok" do
+      implemented!(@eligibility, :e5, 3)
+      assert e5([], []) == :ok
+    end
+
+    test "control: a current ancillary extra and a resolved warning are :ok" do
+      implemented!(@eligibility, :e5, 3)
+      links = [other("ancillary", :inferred)]
+      assert e5(links, [failure(:warning, :resolved)]) == :ok
+    end
+
+    for {label, links, failures} <- [
+          {"a superseded historical mismatch", :superseded_mismatch, []},
+          {"a retained current mismatch (mismatch_kept)", :kept_mismatch, []},
+          {"a current unclassified extra", :unclassified, []},
+          {"a current ambiguous extra", :ambiguous, []},
+          {"a resolved critical cause", [], [{:critical, :resolved}]},
+          {"a live critical cause", [], [{:critical, :open}]},
+          {"a live warning", [], [{:warning, :open}]},
+          {"an acknowledged warning", [], [{:warning, :acknowledged}]}
+        ] do
+      @tag vector: {links, failures}
+      test "#{label} is invocation_not_clean", ctx do
+        {links, failures} = ctx.vector
+        implemented!(@eligibility, :e5, 3)
+        failures = Enum.map(failures, fn {severity, status} -> failure(severity, status) end)
+        assert e5(history(links), failures) == {:refused, :invocation_not_clean}
+      end
+    end
+  end
+
+  defp gated, do: %{invocation() | model_catalog_entry: %{"prompt_builder" => "prompt-builder/1"}}
+
+  defp e2(invocation), do: call(@eligibility, :e2, [invocation])
+
+  defp e1_seed(facts), do: call(@eligibility, :e1_seed, [facts])
+
+  defp seed_facts(overrides \\ %{}) do
+    lead = %{id: @fixture_lead, tenant_id: @tenant_id}
+
+    facts = %{
+      tenant_id: @tenant_id,
+      lead_id: @fixture_lead,
+      lead: lead,
+      creation_events: [:seeder],
+      account_domain: "brightpath-freight.test",
+      contact_email: "avery.lindqvist@brightpath-freight.test"
+    }
+
+    facts = Map.merge(facts, overrides)
+
+    lead =
+      case facts.lead do
+        :other_tenant -> %{lead | tenant_id: "019b8eac-0aaa-7bbb-8ccc-0000000000f9"}
+        other -> other
+      end
+
+    events =
+      Enum.map(facts.creation_events, fn actor_type ->
+        %{
+          event_type: "sales.lead.created",
+          actor_type: actor_type,
+          tenant_id: @tenant_id,
+          subject_id: facts.lead_id
+        }
+      end)
+
+    %{facts | lead: lead && %{lead | id: facts.lead_id}, creation_events: events}
+  end
+
+  defp e5(others, failures) do
+    primary = link(evidence())
+    call(@eligibility, :e5, [primary, [primary | others], failures])
+  end
+
+  defp other(classification, status, overrides \\ []) do
+    struct!(
+      WireWitnessLink,
+      [
+        id: Ecto.UUID.generate(),
+        tenant_id: @tenant_id,
+        model_invocation_id: @invocation_id,
+        proxy_record_ref: Ecto.UUID.generate(),
+        link_status: status,
+        method: :propagated_id,
+        evidence: %{"classification" => classification, "projection_version" => @v3},
+        supersedes_id: nil
+      ] ++ overrides
+    )
+  end
+
+  defp history(:superseded_mismatch) do
+    mismatch = other("primary", :mismatch)
+    [mismatch, other("ancillary", :inferred, supersedes_id: mismatch.id)]
+  end
+
+  defp history(:kept_mismatch), do: [other("primary", :mismatch)]
+  defp history(:unclassified), do: [other("unclassified", :inferred)]
+  defp history(:ambiguous), do: [other("ambiguous", :inferred)]
+  defp history(links) when is_list(links), do: links
+
+  defp failure(severity, status) do
+    %{
+      tenant_id: @tenant_id,
+      class: :reconciliation_required,
+      subject_resource: "SdrAgent.Agents.ModelInvocation",
+      subject_id: @invocation_id,
+      severity: severity,
+      status: status
+    }
   end
 end

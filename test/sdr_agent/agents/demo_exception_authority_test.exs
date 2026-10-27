@@ -21,6 +21,10 @@ defmodule SdrAgent.Agents.DemoExceptionAuthorityTest do
     * replay (T-R1, T-R2, T-R3) and the finalize halves of T-R6, T-R7 and
       T-R8 (the Recovery halves are RED-4).
 
+  RED-3 supplement (Codex facf9dcf): T-L2's gate test counts finalize
+  attempts (run `FOR UPDATE` locks: one exception attempt and exactly one
+  disabled repeat), not only the immutable withheld event.
+
   Classification (RED-3 at 2578a6f5): T-L1's positive control, its refusal
   cases (today they are refused only for the pair, so "refused, but not
   for the pair" fails), T-L2, T-L4, T-L4b, T-R1 and T-R2 are behavioural;
@@ -170,12 +174,28 @@ defmodule SdrAgent.Agents.DemoExceptionAuthorityTest do
       invocation = GateFixtures.call_model!(env, "cli_shape_v4_thinking", clock_from: self())
       GateFixtures.cause!(invocation, severity: :critical)
 
-      result = ResultGate.gate(invocation, Fx.gate(env), store_root: env.root)
+      {result, sql} =
+        GateFixtures.capture(fn ->
+          ResultGate.gate(invocation, Fx.gate(env), store_root: env.root)
+        end)
+
       assert {:withheld, release, run} = result
       assert {release.disposition, release.reason} == {:withheld, :witness_missing}
       assert {run.status, run.status_reason} == {:failed, :witness_unreconciled}
       assert events_for(env, "model.result.demo_exception", release) == []
       assert length(events_for(env, "model.result.withheld", release)) == 1
+
+      # Codex facf9dcf: count finalize ATTEMPTS, not events. Each finalize
+      # (and Recovery) opens by locking the run FOR UPDATE; the gate's
+      # reconcile reads the run without a lock (`witness.ex:319-324`). One
+      # rolled-back exception attempt plus exactly one disabled repeat is two;
+      # a further repeat or a Recovery fallback is more.
+      run_locks = Enum.count(sql, &GateFixtures.locks?(&1, "agent_runs", "FOR UPDATE"))
+
+      assert run_locks == 2,
+             "expected one exception attempt and one disabled repeat, saw #{run_locks} " <>
+               "run lock(s)"
+
       assert refusal_code(env, release) == "invocation_not_clean"
     end
   end
