@@ -45,20 +45,41 @@ defmodule SdrAgent.Agents.ResultGate do
   classification is recorded only in the withheld event; a gate-opened
   cause's message names the reason only, so it deduplicates on
   (invocation, reason).
+
+  C2* demo exception (S3 plan r2 §6, §6.1; ADR-0005 C2* items 5-7): with
+  the selector naming a live entry, an inferred `:ok` outcome whose receipt
+  names a link with only `method_not_enabled`/`cli_injected_context`, and an
+  active snapshot (checked before the head, with no I/O), `finalize/4`
+  takes the exception branch: every current link, the funding grant and
+  allocation `FOR SHARE`, the head, then the `:demo_exception` decision
+  under the registered context and the output only with present use
+  authority. An under-head refusal rolls back with
+  `{:demo_exception_refused, code}`, and `gate/3` repeats `finalize/4`
+  exactly once with the exception disabled (`demo_exception: {:disabled,
+  code}`); that repeat's refusal goes to Recovery. An existing demo row
+  outside the branch rolls back `:demo_exception_exists` (Recovery honours
+  it). While the selector is on, every withheld event records one closed
+  `demo_exception_refusal` code; with it off nothing changes.
   """
 
   require Ash.Query
 
   alias SdrAgent.Actor
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Admission
   alias SdrAgent.Agents.AgentRun
+  alias SdrAgent.Agents.DemoException
+  alias SdrAgent.Agents.DemoException.Eligibility
+  alias SdrAgent.Agents.Errors.DemoExceptionRefused
   alias SdrAgent.Agents.ModelInvocation
+  alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.Agents.ReleaseDecision.Prelocked
   alias SdrAgent.Agents.ReleasedOutput
   alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.Agents.Witness
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Kernel
+  alias SdrAgent.Clock
   alias SdrAgent.Operations
   alias SdrAgent.Operations.Failure
   alias SdrAgent.Operations.Operation
@@ -200,12 +221,25 @@ defmodule SdrAgent.Agents.ResultGate do
 
     with {kind, _receipt} = outcome when kind in [:ok, :timeout] <- await(invocation, gate, opts) do
       case finalize(invocation, gate, outcome, opts) do
-        {:error, reason} when reason in @final -> {:error, reason}
-        {:error, _refused} -> __MODULE__.Recovery.run(invocation, gate, opts)
-        result -> result
+        # C2* (AC6): exactly one repeat with the exception disabled, carrying
+        # the code; its own refusal falls to the one Recovery below.
+        {:error, {:demo_exception_refused, code}} ->
+          opts = Keyword.put(opts, :demo_exception, {:disabled, code})
+          invocation |> finalize(gate, outcome, opts) |> recover(invocation, gate, opts)
+
+        result ->
+          recover(result, invocation, gate, opts)
       end
     end
   end
+
+  defp recover({:error, reason}, _invocation, _gate, _opts) when reason in @final,
+    do: {:error, reason}
+
+  defp recover({:error, _refused}, invocation, gate, opts),
+    do: __MODULE__.Recovery.run(invocation, gate, Keyword.delete(opts, :demo_exception))
+
+  defp recover(result, _invocation, _gate, _opts), do: result
 
   @doc """
   Whether `run` holds an unreleased output: a completed generation-2
@@ -265,8 +299,9 @@ defmodule SdrAgent.Agents.ResultGate do
     plan = plan(kind, receipt)
     actor = Actor.system(:agent_runtime, invocation.tenant_id)
     guard = Keyword.get(opts, :guard, fn _run -> :ok end)
+    demo = Keyword.get(opts, :demo_exception)
 
-    fn -> locked_finalize(invocation, gate, receipt, {plan, guard}, actor) end
+    fn -> locked_finalize(invocation, gate, {kind, receipt}, {plan, guard, demo}, actor) end
     |> Audit.transaction()
     |> case do
       {:ok, result} -> result
@@ -309,21 +344,174 @@ defmodule SdrAgent.Agents.ResultGate do
     %{release?: false, reason: reason, classification: classification}
   end
 
-  defp locked_finalize(invocation, gate, receipt, {plan, guard}, actor) do
+  defp locked_finalize(invocation, gate, {kind, receipt}, {plan, guard, demo}, actor) do
     tenant_id = invocation.tenant_id
 
     with {:ok, run} <- lock(AgentRun, gate.run_id, tenant_id, "FOR UPDATE"),
          :ok <- own_run(run, invocation, gate),
          :ok <- lock_operation(run, tenant_id),
          :ok <- guard.(run),
-         {:ok, invocation} <- lock(ModelInvocation, invocation.id, tenant_id, "FOR SHARE"),
-         {:ok, link} <- lock_link(receipt.link_id, invocation),
+         {:ok, invocation} <- lock(ModelInvocation, invocation.id, tenant_id, "FOR SHARE") do
+      existing = existing_disposition(invocation)
+
+      cond do
+        exception_branch?(kind, receipt, demo) ->
+          exception(invocation, receipt, actor)
+
+        # §6.1: a demo row is honoured by Recovery, never re-decided here.
+        existing == :demo_exception ->
+          Repo.rollback(:demo_exception_exists)
+
+        true ->
+          ordinary(invocation, run, {kind, receipt}, {plan, demo}, actor)
+      end
+    else
+      {:error, error} -> Repo.rollback(error)
+    end
+  end
+
+  defp ordinary(invocation, run, {kind, receipt}, {plan, demo}, actor) do
+    with {:ok, link} <- lock_link(receipt.link_id, invocation),
          {:ok, cause} <- select_cause(plan, receipt, invocation, run),
-         {:ok, _head} <- Kernel.lock_head(tenant_id) do
+         {:ok, _head} <- Kernel.lock_head(invocation.tenant_id) do
+      plan = refusal(plan, invocation, {kind, receipt}, demo)
       under_head(plan, invocation, run, link, cause, actor)
     else
       {:error, error} -> Repo.rollback(error)
     end
+  end
+
+  ## C2* demo exception (S3 plan r2 §6; ADR-0005 C2* items 5-7)
+
+  @exception_codes MapSet.new(["method_not_enabled", "cli_injected_context"])
+
+  # Pre-head branch selection, with no I/O: the selector names a live entry,
+  # this is not the disabled repeat, the outcome is an inferred `:ok` naming
+  # a link with only the expected reason codes, and (last) the process has
+  # an active snapshot.
+  defp exception_branch?(kind, receipt, demo) do
+    DemoException.selected?() and not DemoException.inert?() and is_nil(demo) and
+      kind == :ok and receipt.status == :inferred and is_binary(receipt.link_id) and
+      "method_not_enabled" in receipt.codes and
+      MapSet.subset?(MapSet.new(receipt.codes), @exception_codes) and
+      DemoException.attestation() != :none
+  end
+
+  # Every current link sorted by id, the funding grant, then the allocation
+  # `FOR SHARE`, then the head; under the head no row lock is requested.
+  # The decision (new or replay) is `ReleaseDecision`'s under the registered
+  # context, which captures the instant; output only with use authority.
+  defp exception(invocation, receipt, actor) do
+    with {:ok, links} <- lock_current_links(invocation),
+         :ok <- Admission.lock_charge(invocation),
+         {:ok, _head} <- Kernel.lock_head(invocation.tenant_id) do
+      generation =
+        case DemoException.attestation() do
+          {:ok, %{generation: generation}} -> generation
+          _none -> nil
+        end
+
+      bindings = %{
+        tenant_id: invocation.tenant_id,
+        model_invocation_id: invocation.id,
+        wire_witness_link_id: receipt.link_id,
+        receipt_id: nil,
+        finalizer: :result_gate,
+        current_link_ids: Enum.map(links, & &1.id),
+        grant_id: invocation.grant_id,
+        allocation_id: invocation.allocation_id,
+        snapshot_generation: generation
+      }
+
+      Prelocked.run(bindings, &decide_exception(&1, invocation, receipt, actor))
+    else
+      {:error, error} -> Repo.rollback(error)
+    end
+  end
+
+  defp decide_exception(prelocked, invocation, receipt, actor) do
+    attrs = %{
+      model_invocation_id: invocation.id,
+      disposition: :demo_exception,
+      reason: :v4_uncalibrated,
+      wire_witness_link_id: receipt.link_id
+    }
+
+    with {:ok, release} <- Agents.decide_result_release(attrs, actor: actor, prelocked: prelocked),
+         {:ok, output} <- ReleasedOutput.fetch(invocation.id, actor) do
+      {:released, release, output}
+    else
+      {:error, error} -> Repo.rollback(exception_error(error))
+    end
+  end
+
+  defp exception_error(%Ash.Error.Invalid{errors: errors} = error) do
+    case Enum.find(errors, &match?(%DemoExceptionRefused{}, &1)) do
+      %DemoExceptionRefused{code: code} -> {:demo_exception_refused, code}
+      nil -> error
+    end
+  end
+
+  defp exception_error(error), do: error
+
+  # While the selector is on, a withheld outcome records one closed code:
+  # the code the disabled repeat carries, or the first failing one evaluated
+  # here under the head with plain reads (Recovery's own outcomes record
+  # `exception_off`, `withhold/7`).
+  defp refusal(%{release?: false} = plan, invocation, {kind, receipt}, demo) do
+    if DemoException.selected?() do
+      code =
+        case demo do
+          {:disabled, code} -> code
+          nil -> evaluated_code(invocation, kind, receipt)
+        end
+
+      Map.put(plan, :demo_exception_refusal, code)
+    else
+      plan
+    end
+  end
+
+  defp refusal(plan, _invocation, _outcome, _demo), do: plan
+
+  defp evaluated_code(invocation, kind, receipt) do
+    facts =
+      invocation
+      |> Eligibility.load(receipt.link_id)
+      |> Map.merge(%{receipt: receipt, kind: kind})
+
+    case Eligibility.evaluate(facts, Clock.utc_now()) do
+      {:refused, code} -> code
+      {:ok, _authority} -> :exception_off
+    end
+  end
+
+  defp existing_disposition(invocation) do
+    ModelResultRelease
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^invocation.tenant_id and model_invocation_id == ^invocation.id
+    )
+    |> Ash.read_one()
+    |> case do
+      {:ok, %ModelResultRelease{disposition: disposition}} -> disposition
+      _none -> nil
+    end
+  end
+
+  @doc false
+  # Every current link of `invocation`, sorted by id, `FOR SHARE` (shared
+  # with `SdrAgent.Agents.ResultGate.Recovery`).
+  def lock_current_links(invocation) do
+    WireWitnessLink
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^invocation.tenant_id and model_invocation_id == ^invocation.id and
+        not exists(successors, true)
+    )
+    |> Ash.Query.sort(id: :asc)
+    |> Ash.Query.lock("FOR SHARE")
+    |> Ash.read()
   end
 
   @doc false
@@ -471,14 +659,16 @@ defmodule SdrAgent.Agents.ResultGate do
   end
 
   defp withhold(prelocked, plan, invocation, run, link, cause, actor) do
-    attrs = %{
-      model_invocation_id: invocation.id,
-      disposition: :withheld,
-      reason: plan.reason,
-      wire_witness_link_id: link && link.id,
-      gate_cause_id: cause.id,
-      gate_classification: plan.classification
-    }
+    attrs =
+      %{
+        model_invocation_id: invocation.id,
+        disposition: :withheld,
+        reason: plan.reason,
+        wire_witness_link_id: link && link.id,
+        gate_cause_id: cause.id,
+        gate_classification: plan.classification
+      }
+      |> with_refusal(plan)
 
     with {:ok, release} <- Agents.decide_result_release(attrs, actor: actor, prelocked: prelocked),
          {:ok, run} <- stop(run, release, cause, plan, actor, prelocked) do
@@ -486,6 +676,19 @@ defmodule SdrAgent.Agents.ResultGate do
     else
       {:error, error} -> Repo.rollback(error)
     end
+  end
+
+  # C2* (ADR-0005 item 5; OQ7): while the selector is on, one closed code;
+  # an outcome with none computed (run recovery's) records `exception_off`.
+  defp with_refusal(attrs, plan) do
+    if DemoException.selected?(),
+      do:
+        Map.put(
+          attrs,
+          :demo_exception_refusal,
+          Map.get(plan, :demo_exception_refusal, :exception_off)
+        ),
+      else: attrs
   end
 
   # Opened under the head: its FK targets (Operation, run) are already held.

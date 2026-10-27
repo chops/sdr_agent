@@ -29,9 +29,15 @@ defmodule SdrAgent.Agents.DemoException do
   compiled out of every other build.
   """
 
+  require Ash.Query
+
   alias SdrAgent.Agents.DemoException.Authorization
   alias SdrAgent.Agents.DemoException.Unattested
+  alias SdrAgent.Agents.ModelCallGrant
+  alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.Audit.Canonical
+  alias SdrAgent.Audit.Kernel
+  alias SdrAgent.Operations.Failure
 
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
@@ -173,10 +179,8 @@ defmodule SdrAgent.Agents.DemoException do
   """
   @spec selected?() :: boolean()
   def selected? do
-    :sdr_agent
-    |> Application.get_env(__MODULE__, [])
-    |> Keyword.get(:selector)
-    |> Kernel.==(@policy_id)
+    selector = :sdr_agent |> Application.get_env(__MODULE__, []) |> Keyword.get(:selector)
+    selector == @policy_id
   end
 
   @doc "Whether the entry is inert: it names no authorization (shipped: nil)."
@@ -207,4 +211,102 @@ defmodule SdrAgent.Agents.DemoException do
     do: dispatch(:delegated_grant?, [grant, authorization])
 
   defp dispatch(callback, args), do: apply(source(), callback, args)
+
+  @doc """
+  Present use authority of an existing demo-exception `release` of
+  `invocation` at `now` (S3 plan r2 §4.2; ADR-0005 C2* item 2 "Use
+  authority"): `:ok`, or the first `{:error, code}` in this order:
+  `:not_demo_exception`, `:invocation_mismatch`, `:exception_off`,
+  `:entry_changed`, `:environment_unattested`, `:binding_drift`,
+  `:expired`, `:grant_revoked`, `:mismatch`, `:critical_cause`.
+
+  The binding is compared with the RECORDED basis (tenant, environment
+  binding digest, authorization id and entry digest), then the Source's
+  live binding read is made. Its other reads are plain, in the release's
+  tenant: the funding grant by id, the invocation's links (current and
+  superseded) and its critical `reconciliation_required` Failures (any
+  status). It takes no lock clause, does no file I/O, writes nothing and
+  never registers or observes a snapshot, so it is safe inside a
+  transaction and under the chain head. With no active registration only
+  `attestation/0` is consulted and nothing is read.
+  """
+  @spec use_authority(struct(), struct(), DateTime.t()) :: :ok | {:error, atom()}
+  def use_authority(release, invocation, %DateTime{} = now) do
+    basis = if is_map(release.exception_basis), do: release.exception_basis, else: %{}
+
+    with :ok <- check(release.disposition == :demo_exception, :not_demo_exception),
+         :ok <-
+           check(
+             release.model_invocation_id == invocation.id and
+               release.tenant_id == invocation.tenant_id,
+             :invocation_mismatch
+           ),
+         :ok <- check(selected?(), :exception_off),
+         :ok <- check(entry_sha256() == get_in(basis, ["policy", "entry_sha256"]), :entry_changed),
+         {:ok, attestation} <- attested(),
+         :ok <- bound(attestation, release, basis),
+         :ok <- check(DateTime.compare(now, release.exception_expires_at) == :lt, :expired),
+         :ok <- check(grant_active?(release.tenant_id, basis), :grant_revoked),
+         :ok <- check(not mismatch?(invocation), :mismatch) do
+      check(not critical?(invocation), :critical_cause)
+    end
+  end
+
+  defp check(true, _error), do: :ok
+  defp check(_false, error), do: {:error, error}
+
+  defp attested do
+    case attestation() do
+      {:ok, %{level: :spend_ready, environment_id: "agentenv-1"} = attestation} ->
+        {:ok, attestation}
+
+      _none_or_other ->
+        {:error, :environment_unattested}
+    end
+  end
+
+  defp bound(attestation, release, basis) do
+    recorded? =
+      attestation.tenant_id == release.tenant_id and
+        attestation.tenant_id == get_in(basis, ["environment", "tenant_id"]) and
+        attestation.environment_binding_sha256 ==
+          get_in(basis, ["environment", "binding_sha256"]) and
+        match?(%{id: _, entry_sha256: _}, attestation.authorization) and
+        attestation.authorization.id == get_in(basis, ["funding", "authorization_id"]) and
+        attestation.authorization.entry_sha256 ==
+          get_in(basis, ["funding", "authorization_sha256"])
+
+    check(recorded? and live_binding?(attestation, release.tenant_id), :binding_drift)
+  end
+
+  defp grant_active?(tenant_id, basis) do
+    grant_id = get_in(basis, ["funding", "grant_id"])
+
+    is_binary(grant_id) and
+      ModelCallGrant
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+      |> Ash.Query.filter(id == ^grant_id and tenant_id == ^tenant_id and status == :active)
+      |> Ash.exists?()
+  end
+
+  defp mismatch?(invocation) do
+    WireWitnessLink
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^invocation.tenant_id and model_invocation_id == ^invocation.id and
+        link_status == :mismatch
+    )
+    |> Ash.exists?()
+  end
+
+  defp critical?(invocation) do
+    Failure
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^invocation.tenant_id and class == :reconciliation_required and
+        severity == :critical and subject_resource == "SdrAgent.Agents.ModelInvocation" and
+        subject_id == ^invocation.id
+    )
+    |> Ash.exists?()
+  end
 end
