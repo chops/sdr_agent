@@ -1,5 +1,9 @@
 import Config
 
+# No trace export in prod. Spans record `url.path` (the magic-link token on
+# /magic_link/<token>) and exception data independently of Logger, so URL
+# and path and exception redaction is a prerequisite before any exporter is
+# enabled here (Codex I3; `SdrAgentWeb.SensitiveAuth`).
 config :opentelemetry, traces_exporter: :none
 
 # Note we also include the path to a cache manifest
