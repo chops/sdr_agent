@@ -25,7 +25,8 @@ defmodule SdrAgent.AgentEnv.LauncherCheckTest do
       }
 
   Malformed inputs (not a map, a missing or ill-typed key, an unknown
-  intent) are `{:error, :invalid_inputs}` and an unsupported
+  intent, a sink that is not `{atom, module, keyword}` or an improper list,
+  a path with a NUL byte; Codex `43a40f9b` M1) are `{:error, :invalid_inputs}` and an unsupported
   `SDR_MODEL_PROVIDER` (other than unset, `fake` or `claude_cli`) is
   `{:error, :provider_refused}`, before any item and with no probe (Codex
   `b684dba9` Q1). Otherwise it returns `:ok` or `{:error, reason}` for the
@@ -581,6 +582,34 @@ defmodule SdrAgent.AgentEnv.LauncherCheckTest do
                {:error, :repo_target_refused}
 
       assert Agent.get(ctx.probes, & &1) == []
+    end
+
+    test "malformed nested sink options are invalid inputs: no probe, no echo", ctx do
+      bound!(ctx)
+      sentinel = "c2star-s1-sentinel-#{System.unique_integer([:positive])}"
+      Logger.put_process_level(self(), :debug)
+
+      malformed = [
+        [{:file, FileSink, [{:directory, sentinel, :extra}]}],
+        [{:file, FileSink, [{:directory, sentinel} | :improper]}],
+        [{:file, FileSink, %{directory: sentinel}}],
+        [{:file, FileSink}],
+        [sentinel],
+        [{:file, FileSink, [directory: Path.join(ctx.root, "anchors")]} | :improper],
+        [{:file, FileSink, [directory: Path.join(ctx.root, "anchors") <> <<0>> <> sentinel]}]
+      ]
+
+      log =
+        capture_log([level: :debug], fn ->
+          for {sinks, index} <- Enum.with_index(malformed) do
+            assert check(config(ctx, :run, :anchor_sinks, sinks)) == {:error, :invalid_inputs},
+                   "C2* S1 P0 (Codex 43a40f9b M1): malformed sinks case #{index}"
+          end
+        end)
+
+      Logger.delete_process_level(self())
+      assert Agent.get(ctx.probes, & &1) == [], "C2* S1 P0: the probe ran on malformed input"
+      refute log =~ sentinel
     end
 
     test "an unsupported provider value is refused; fake is accepted", ctx do

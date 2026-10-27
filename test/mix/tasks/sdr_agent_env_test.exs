@@ -31,8 +31,15 @@ defmodule Mix.Tasks.Sdr.AgentEnvTest do
       creates `environment.json` from `created.json` and the probe's tenant
       and returns `{:ok, binding_sha256}`.
 
+  The step's session (production: none for create, `Ecto.Migrator.with_repo`
+  for migrate, `app.start` for seed and probe) runs behind one boundary: a
+  raise, exit or throw from it is `{:error, :session_failed}`, with no
+  detail, the lease held and the files as they truthfully are (Codex
+  `43a40f9b` M2).
+
   Test builds only (`:claude_cli_test_seams`): `preflight/1`, `step/2` and
-  `publish/1` take `adapter:`, a map of stand-ins for every effect
+  `publish/1` take `adapter:` (and `step/2` an optional `session:`, a
+  stand-in for the session around the step), a map of stand-ins for every effect
   (`repo_config`, `storage_status`, `storage_up`, `database_oid`,
   `live_identity`, `migrate`, `seed`, `tenant_id`), so no database is
   created, migrated, seeded or read. Production arity: `preflight/0`,
@@ -423,6 +430,73 @@ defmodule Mix.Tasks.Sdr.AgentEnvTest do
           assert digests(ctx.root) == before
         end
       end
+    end
+  end
+
+  ## The session boundary (Codex 43a40f9b M2)
+
+  describe "the session boundary" do
+    test "a session that fails to start is session_failed: no detail, nothing written, lease held",
+         ctx do
+      nonce = leased!(ctx, [:create])
+      declared!(ctx, :migrate, nonce)
+      before = digests(ctx.root)
+      sentinel = "c2star-s1-sentinel-#{System.unique_integer([:positive])}"
+      Logger.put_process_level(self(), :debug)
+
+      sessions = [
+        raise: fn _step, _fun -> raise sentinel end,
+        mix_error: fn _step, _fun -> raise Mix.Error, message: sentinel end,
+        exit: fn _step, _fun -> exit({:shutdown, sentinel}) end,
+        throw: fn _step, _fun -> throw(sentinel) end
+      ]
+
+      log =
+        capture_log([level: :debug], fn ->
+          for {kind, session} <- sessions do
+            seams = [adapter: adapter(ctx, %{}), session: session]
+
+            assert bootstrap(:step, [:migrate, seams]) == {:error, :session_failed},
+                   "C2* S1 (Codex 43a40f9b M2): session #{kind}"
+          end
+        end)
+
+      Logger.delete_process_level(self())
+      refute log =~ sentinel
+      assert effects(ctx) == []
+      assert digests(ctx.root) == before
+    end
+
+    test "a session failing after the step ran keeps the truthful partial state and the lease",
+         ctx do
+      nonce = leased!(ctx, [:create])
+      declared!(ctx, :migrate, nonce)
+      lease = Fx.file_sha256!(ctx.root, :lease)
+
+      session = fn _step, fun ->
+        _ = fun.()
+        exit(:teardown_failed)
+      end
+
+      seams = [adapter: adapter(ctx, %{}), session: session]
+      assert bootstrap(:step, [:migrate, seams]) == {:error, :session_failed}
+
+      assert :migrate in effect_names(ctx)
+
+      assert match?(
+               {:valid, _, _},
+               apply(@state, :read, [ctx.root, {:receipt, nonce, :migrate}])
+             ),
+             "the migrate receipt records the effect that ran"
+
+      assert Fx.file_sha256!(ctx.root, :lease) == lease
+      refute File.exists?(Fx.path(ctx.root, {:receipt, nonce, :seed}))
+    end
+
+    test "control: the default test session runs the step directly", ctx do
+      nonce = leased!(ctx, [:create])
+      assert step!(ctx, :migrate, nonce) == :ok
+      assert :migrate in effect_names(ctx)
     end
   end
 
