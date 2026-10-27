@@ -3,14 +3,15 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
   C2* slice S3 RED-6 (S3 plan r2 section 9; Codex 7a9c7eea sequencing items
   2-4): the parameterization of `SdrAgent.WitnessMigration.Harness` that the
   T-S4 release-migration campaign (`SdrAgent.Agents.ReleaseMigrationTest`,
-  `:external`) needs, with stubbed children only. No test here opens a
-  database connection or starts an OS process: every lifecycle call goes
-  through a recording stub, every runner built from the real
-  `checked_runner` has an unusable executable, and `no_ports!/1` traces
-  every port opened by this process or any process it spawns (a child, a
-  socket, a database connection) and fails on one. This module checks out no
-  Repo connection, so any Repo use fails loudly. It is `async: false` because
-  the port trace is global.
+  `:external`) needs, with stubbed children only. Statically, every
+  lifecycle call goes through a recording stub and every runner built from
+  the real `checked_runner` has an unusable executable, and this module
+  checks out no Repo connection (any Repo use fails loudly). At run time,
+  `no_ports!/1` traces the ports newly opened by this process and its
+  descendants during each wrapped call (an OS child, a socket or a new
+  connection made from here) and fails on one; it does not observe ports or
+  connections that other, already-running processes hold. It is
+  `async: false` because the port trace is global.
 
   The contract these tests pin (GREEN-6 implements it; the existing defaults
   and `SdrAgent.Agents.WitnessMigrationHarnessTest` stay unchanged):
@@ -36,16 +37,34 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
       `plan=down_refusal`, `migrate.down.expected=refusal` and
       `migrate.down.refusal=check_violation|untyped|target_refused|not_refused`;
       a default run's receipts are byte-identical to today's;
-    * a per-root build: `checked_runner/5` with `toolchain: :inherit`
-      (today's `checked_runner/4`) or `toolchain: :root` (the child uses the
-      root's own four Mix roots, re-rooted by the pure `root_toolchain/3`;
-      `ERL_LIBS` and every other name are inherited unchanged), refusing a
-      missing or symlinked root, an unset or outside Mix root and a missing
-      or symlinked re-rooted Mix root as `{:not_started, reason}` before the
-      executable check and before any spawn.
+    * a per-root build (Codex 0c4bfabc R6-1, R6-2): `checked_runner/5`
+      with `toolchain: :inherit` (exactly today's `checked_runner/4`, whose
+      default is unchanged) or `toolchain: :root`. In root mode the child's
+      environment is `SdrAgent.ChildEnv.port([], set)` (ChildEnv's policy
+      unchanged: only its base names are inherited, its secrets always
+      removed) with `set` from the pure `root_child_env/4`: the four Mix
+      roots re-rooted under `root` by the pure `root_toolchain/3`, which
+      refuses a root that is, contains or lies inside the own root;
+      `ERL_LIBS` set to its value only when every entry is an immutable
+      `/nix/store/<hash>-<name>` path, explicitly removed when unset, and
+      otherwise refused (`:code_path_unapproved`); explicit removal of the
+      other code-path names (`ERL_FLAGS`, `ERL_AFLAGS`, `ERL_ZFLAGS`,
+      `ELIXIR_ERL_OPTIONS`, `MIX_PATH`, `MIX_ARCHIVES`, `MIX_EXS`,
+      `MIX_BUILD_PATH`); `MIX_ENV=test` and the partition. Before the
+      executable check and before any spawn it refuses, as
+      `{:not_started, reason}` and in this order: a root that is absent, not
+      a directory or not physically itself (a symlink at the root or at any
+      ancestor: `:root_unusable`); a root physically equal to, inside or
+      containing the own root (`:root_shared`); the `root_child_env/4`
+      refusals; a re-rooted Mix root with any non-directory or symlinked
+      component below the root (`:toolchain_unusable`). Confinement is
+      physical, never a string-prefix test. `PATH` is not a BEAM code path
+      (the pinned Elixir wrapper puts its own Erlang first) and stays a
+      ChildEnv base name.
 
-  RED classification: the `versions/2`, `root_toolchain/3` and
-  `checked_runner/5` tests go through `harness/2`, which reports an absent
+  RED classification: the `versions/2`, `root_toolchain/3`,
+  `root_child_env/4` and `checked_runner/5` tests go through `harness/2`,
+  which reports an absent
   function as `{:not_implemented, name, arity}` (structural); the release
   script effect test is structural (scaffolds). The `prove` option tests
   fail on their semantic assertions (today the options are ignored). Tests
@@ -83,6 +102,29 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
     :ok = File.mkdir(root)
     on_exit(fn -> File.rm_rf!(root) end)
     root
+  end
+
+  # A temporary root reached without any symlink (macOS's /tmp and /var
+  # are symlinks), for roots that must be physically themselves.
+  defp physical_tmp_root do
+    root = physical!(tmp_root())
+    assert physical!(root) == root
+    root
+  end
+
+  # The physical path: every symlinked component resolved, by lstat and
+  # readlink only (no process).
+  defp physical!(path) do
+    path
+    |> Path.split()
+    |> Enum.reduce("/", fn part, acc ->
+      next = Path.join(acc, part)
+
+      case File.read_link(next) do
+        {:ok, target} -> physical!(Path.expand(target, acc))
+        {:error, _not_a_link} -> next
+      end
+    end)
   end
 
   defp owned_tmp(root, sfx), do: Path.join(root, "sdr-witness-migration" <> sfx)
@@ -236,6 +278,8 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
     end
   end
 
+  # A synthetic checkout under `base` with real directories for the four
+  # Mix roots, except `except`, which is a symlink to a real directory.
   defp build_tree!(base, except \\ nil) do
     for {name, rel} <- own_mix_roots!() do
       path = Path.join(base, rel)
@@ -251,6 +295,14 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
     end
 
     base
+  end
+
+  # Runs a root-mode runner built for `root` once; every executable here is
+  # unusable, so no child can start whatever the code under test does.
+  defp root_mode(root, exe) do
+    runner = harness(:checked_runner, [exe, suffix(), root, 1_000, [toolchain: :root]])
+    assert is_function(runner, 2), "#{root}: #{inspect(runner)}"
+    no_ports!(fn -> runner.(:claim, ["run"]) end)
   end
 
   ## Controls: the executor proof itself
@@ -772,39 +824,37 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
              {:exit, 1, "note: ERROR 23514 (check_violation) quoted"}, :untyped},
             {"the target refusal", {:exit, 4, "REFUSED target_not_configured"}, :target_refused}
           ] do
-        sfx = suffix()
-        database = "sdr_agent_test" <> sfx
-        root = tmp_root()
-        log = recorder()
+        assert_down_classified(label, outcome, reason)
+      end
+    end
 
-        answer = fn
-          {_, :migrate, "down", _} -> outcome
-          _call -> :default
-        end
+    # Codex 0c4bfabc Q2: only an anchored check_violation line with a
+    # confirmed integer nonzero exit (never the target refusal) is the refusal.
+    test "the refusal classifier: no status-0, malformed-status or lookalike line counts" do
+      line =
+        "** (Postgrex.Error) ERROR 23514 (check_violation) check constraint " <>
+          ~s|"model_result_releases_disposition" of relation "model_result_releases" | <>
+          "is violated by some row"
 
-        {result, receipts} =
-          prove_with_receipts(
-            opts(sfx, stub(log, :new, database, answer), root, @s3,
-              plan: :down_refusal,
-              probe: Path.join(@rm, "demo.exs")
-            )
-          )
+      assert @refused_down =~ line, "the same line the positive case uses"
 
-        assert result == {:error, {:down_refusal, reason, outcome}},
-               "#{label}: #{inspect(result)}"
-
-        assert Map.new(receipts)["migrate.down.refusal"] == Atom.to_string(reason), label
-
-        assert calls(log) == [
-                 {:new, :claim},
-                 {:new, :migrate, "up", "20261027081524"},
-                 {:new, :probe, "up", "release_migration/demo.exs"},
-                 {:new, :migrate, "down", "20261027081524"},
-                 {:new, :drop}
-               ],
-               label
-
-        refute File.exists?(owned_tmp(root, sfx)), label
+      for {label, outcome} <- [
+            {"status 0", {:exit, 0, line}},
+            {"a negative status", {:exit, -1, line}},
+            {"a string status", {:exit, "1", line}},
+            {"a float status", {:exit, 1.0, line}},
+            {"output that is not a binary", {:exit, 1, [line]}},
+            {"an indented line", {:exit, 1, "  " <> line}},
+            {"a quoted line", {:exit, 1, "\"" <> line <> "\""}},
+            {"the line inside other text", {:exit, 1, "STARTING " <> line}},
+            {"another exception module",
+             {:exit, 1, "** (Ecto.Error) ERROR 23514 (check_violation) check constraint x"}},
+            {"no space before the condition",
+             {:exit, 1, "** (Postgrex.Error) ERROR 23514(check_violation) check constraint x"}},
+            {"nothing after the condition",
+             {:exit, 1, "** (Postgrex.Error) ERROR 23514 (check_violation)"}}
+          ] do
+        assert_down_classified(label, outcome, :untyped)
       end
     end
 
@@ -881,6 +931,42 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
     end
   end
 
+  # DB #2 with `outcome` as the `down` child's: a typed `down_refusal`
+  # error with `reason`, recorded, cleaned up, and never probed after.
+  defp assert_down_classified(label, outcome, reason) do
+    sfx = suffix()
+    database = "sdr_agent_test" <> sfx
+    root = tmp_root()
+    log = recorder()
+
+    answer = fn
+      {_, :migrate, "down", _} -> outcome
+      _call -> :default
+    end
+
+    {result, receipts} =
+      prove_with_receipts(
+        opts(sfx, stub(log, :new, database, answer), root, @s3,
+          plan: :down_refusal,
+          probe: Path.join(@rm, "demo.exs")
+        )
+      )
+
+    assert result == {:error, {:down_refusal, reason, outcome}}, "#{label}: #{inspect(result)}"
+    assert Map.new(receipts)["migrate.down.refusal"] == Atom.to_string(reason), label
+
+    assert calls(log) == [
+             {:new, :claim},
+             {:new, :migrate, "up", "20261027081524"},
+             {:new, :probe, "up", "release_migration/demo.exs"},
+             {:new, :migrate, "down", "20261027081524"},
+             {:new, :drop}
+           ],
+           label
+
+    refute File.exists?(owned_tmp(root, sfx)), label
+  end
+
   defp assert_refused_before_claim(key, extra) do
     {label, extra} = Keyword.pop(extra, :label)
     sfx = suffix()
@@ -895,30 +981,46 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
     refute File.exists?(owned_tmp(root, sfx)), "#{label}: nothing is claimed"
   end
 
-  ## Per-root build (structural until GREEN-6): root_toolchain/3 and checked_runner/5
+  ## Per-root build (structural until GREEN-6; Codex 0c4bfabc R6-1, R6-2):
+  ## root_toolchain/3, root_child_env/4 and checked_runner/5
 
-  describe "root_toolchain/3 (pure)" do
-    @own "/w/own"
-    @tag_dir "elixir-1.20.4-otp-29.0.5"
+  @own "/w/own"
+  @tag_dir "elixir-1.20.4-otp-29.0.5"
+  @hex_lib "/nix/store/xb3qnl7ai8s4dy3vxarypx86v0k5ymiv-hex-2.5.1/lib/erlang/lib/"
+  @code_path_removed ~w(ERL_FLAGS ERL_AFLAGS ERL_ZFLAGS ELIXIR_ERL_OPTIONS MIX_PATH
+                        MIX_ARCHIVES MIX_EXS MIX_BUILD_PATH)
+  @child_env_secrets ~w(SDR_AUDIT_ANCHOR_PRIVATE_KEY SDR_WEBHOOK_HMAC_KEY SECRET_KEY_BASE
+                        TOKEN_SIGNING_SECRET DATABASE_URL)
 
-    defp devenv(root) do
-      state = root <> "/.devenv/state"
+  defp devenv(root) do
+    state = root <> "/.devenv/state"
 
-      %{
-        "MIX_HOME" => state <> "/mix/" <> @tag_dir,
-        "HEX_HOME" => state <> "/hex",
-        "MIX_DEPS_PATH" => state <> "/deps/" <> @tag_dir,
-        "MIX_BUILD_ROOT" => state <> "/build/" <> @tag_dir
-      }
-    end
+    %{
+      "MIX_HOME" => state <> "/mix/" <> @tag_dir,
+      "HEX_HOME" => state <> "/hex",
+      "MIX_DEPS_PATH" => state <> "/deps/" <> @tag_dir,
+      "MIX_BUILD_ROOT" => state <> "/build/" <> @tag_dir
+    }
+  end
 
-    test "the own root keeps each Mix root; another root re-roots each under itself" do
-      env = Map.merge(devenv(@own), %{"ERL_LIBS" => "/nix/store/x-hex/lib/erlang/lib/"})
-      own = for name <- @mix_roots, do: {name, devenv(@own)[name]}
+  describe "root_toolchain/3 (pure, lexical)" do
+    test "another root re-roots each Mix root under itself and returns nothing else" do
+      env = Map.merge(devenv(@own), %{"ERL_LIBS" => @hex_lib, "PATH" => "/usr/bin"})
       base = for name <- @mix_roots, do: {name, devenv("/w/base")[name]}
 
-      assert harness(:root_toolchain, [@own, @own, env]) == {:ok, own}
       assert harness(:root_toolchain, [@own, "/w/base", env]) == {:ok, base}
+    end
+
+    test "a root that is, contains or lies inside the own root is refused as shared" do
+      for root <- [@own, "/w/own/sub", "/w/own/.devenv", "/w", "/"] do
+        assert harness(:root_toolchain, [@own, root, devenv(@own)]) ==
+                 {:error, {:root_shared, root}},
+               root
+      end
+
+      # A sibling that only shares a name prefix is another checkout.
+      sibling = for name <- @mix_roots, do: {name, devenv("/w/own2")[name]}
+      assert harness(:root_toolchain, [@own, "/w/own2", devenv(@own)]) == {:ok, sibling}
     end
 
     test "a Mix root outside the own root, or unset, is refused: no fallback to the parent's" do
@@ -953,6 +1055,107 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
     end
   end
 
+  describe "root_child_env/4 (pure): the root-mode child's ChildEnv set" do
+    test "four re-rooted Mix roots, the approved ERL_LIBS, code-path removals, test env, partition" do
+      sfx = suffix()
+
+      env =
+        Map.merge(devenv(@own), %{
+          "ERL_LIBS" => @hex_lib,
+          "ERL_AFLAGS" => "-kernel shell_history enabled",
+          "MIX_PATH" => "/w/own/_build/test/lib/sdr_agent/ebin",
+          "PATH" => "/usr/bin:/bin"
+        })
+
+      result = harness(:root_child_env, [@own, "/w/base", sfx, env])
+      assert match?({:ok, set} when is_list(set), result), inspect(result)
+      {:ok, set} = result
+      assert length(set) == length(Enum.uniq_by(set, &elem(&1, 0))), "one entry per name"
+
+      expected =
+        devenv("/w/base")
+        |> Map.merge(%{"ERL_LIBS" => @hex_lib, "MIX_ENV" => "test", "MIX_TEST_PARTITION" => sfx})
+        |> Map.merge(Map.new(@code_path_removed, &{&1, nil}))
+
+      assert Map.new(set) == expected
+    end
+
+    test "an unset ERL_LIBS is removed explicitly; several approved store entries are kept" do
+      other = "/nix/store/0npp3qpr68phld0d5jffn13si9qngvk7-erlang-29.0.5/lib/erlang/lib"
+
+      for {label, erl_libs, expected} <- [
+            {"unset", nil, nil},
+            {"two store entries", @hex_lib <> ":" <> other, @hex_lib <> ":" <> other}
+          ] do
+        env = if erl_libs, do: Map.put(devenv(@own), "ERL_LIBS", erl_libs), else: devenv(@own)
+        result = harness(:root_child_env, [@own, "/w/base", suffix(), env])
+        assert match?({:ok, set} when is_list(set), result), "#{label}: #{inspect(result)}"
+        {:ok, set} = result
+        assert List.keyfind(set, "ERL_LIBS", 0) == {"ERL_LIBS", expected}, label
+      end
+    end
+
+    test "an ERL_LIBS entry that is not an immutable Nix store path is refused" do
+      for {label, erl_libs} <- [
+            {"NEW's build", "/w/own/.devenv/state/build/#{@tag_dir}/test/lib"},
+            {"NEW's checkout", "/w/own/lib"},
+            {"the OLD root", "/w/base/lib"},
+            {"another checkout", "/w/other/.devenv/state/deps/#{@tag_dir}"},
+            {"approved, then NEW", @hex_lib <> ":/w/own/lib"},
+            {"a mutable Nix profile", "/nix/var/nix/profiles/default/lib/erlang/lib"},
+            {"a store traversal",
+             "/nix/store/xb3qnl7ai8s4dy3vxarypx86v0k5ymiv-hex-2.5.1/../../../w/own/lib"},
+            {"a store path without a hash", "/nix/store/hex-2.5.1/lib/erlang/lib"},
+            {"relative", "lib/erlang/lib"},
+            {"an empty entry", @hex_lib <> "::" <> @hex_lib},
+            {"empty", ""}
+          ] do
+        env = Map.put(devenv(@own), "ERL_LIBS", erl_libs)
+
+        assert harness(:root_child_env, [@own, "/w/base", suffix(), env]) ==
+                 {:error, {:code_path_unapproved, "ERL_LIBS"}},
+               label
+      end
+    end
+
+    test "the root_toolchain/3 refusals come first" do
+      bad = Map.put(devenv(@own), "ERL_LIBS", "/w/own/lib")
+
+      assert harness(:root_child_env, [@own, @own, suffix(), bad]) ==
+               {:error, {:root_shared, @own}}
+
+      assert harness(:root_child_env, [@own, "/w/base", suffix(), Map.delete(bad, "MIX_HOME")]) ==
+               {:error, {:toolchain_unset, "MIX_HOME"}}
+    end
+
+    # The final overrides through ChildEnv's unchanged policy, over this
+    # test's real environment (CPU only: nothing is spawned).
+    test "the final child env: intended roots, test env, partition, removals, secrets, nothing from NEW" do
+      sfx = suffix()
+      base = "/w/base"
+      env = System.get_env()
+      result = harness(:root_child_env, [@root, base, sfx, env])
+      assert match?({:ok, set} when is_list(set), result), inspect(result)
+      {:ok, set} = result
+      final = Map.new(SdrAgent.ChildEnv.cmd([], set))
+
+      for {name, rel} <- own_mix_roots!(),
+          do: assert(final[name] == Path.join(base, rel), name)
+
+      assert {final["MIX_ENV"], final["MIX_TEST_PARTITION"]} == {"test", sfx}
+
+      for name <- @code_path_removed ++ @child_env_secrets,
+          do: assert(Map.fetch(final, name) == {:ok, nil}, name)
+
+      assert Map.fetch(final, "ERL_LIBS") == {:ok, env["ERL_LIBS"]}
+
+      for {name, value} <- env, String.contains?(value, @root) do
+        assert Map.has_key?(final, name), "#{name} would be inherited from NEW's checkout"
+        refute String.contains?(final[name] || "", @root), name
+      end
+    end
+  end
+
   describe "checked_runner/5 refuses before spawning (every executable here is unusable)" do
     test "toolchain: :inherit is checked_runner/4" do
       root = tmp_root()
@@ -965,7 +1168,7 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
     end
 
     test "toolchain: :root refuses a missing or symlinked root, or one without its Mix roots" do
-      tmp = tmp_root()
+      tmp = physical_tmp_root()
       exe = Path.join(tmp, "missing")
       absent = Path.join(tmp, "absent")
       link = Path.join(tmp, "link")
@@ -981,25 +1184,65 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
             {"a symlinked build root", symlinked_build,
              {:not_started, {:toolchain_unusable, "MIX_BUILD_ROOT"}}}
           ] do
-        runner = harness(:checked_runner, [exe, suffix(), root, 1_000, [toolchain: :root]])
-        assert is_function(runner, 2), "#{label}: #{inspect(runner)}"
-        assert no_ports!(fn -> runner.(:claim, ["run"]) end) == expected, label
+        assert root_mode(root, exe) == expected, label
       end
     end
 
-    test "a well-formed root, and the own root, pass the root checks and still need the executable" do
-      tmp = tmp_root()
+    test "a symlink at any ancestor of the root is refused, though every directory below is real" do
+      tmp = physical_tmp_root()
+      exe = Path.join(tmp, "missing")
+      outside = Path.join(tmp, "outside")
+      build_tree!(Path.join(outside, "base"))
+      :ok = File.ln_s(outside, Path.join(tmp, "alias"))
+      aliased = Path.join([tmp, "alias", "base"])
+      assert File.dir?(Path.join(aliased, ".devenv")), "the alias reaches a real build tree"
+
+      assert root_mode(aliased, exe) == {:not_started, {:root_unusable, aliased}}
+
+      # The same directory reached physically is a legitimate root.
+      assert root_mode(Path.join(outside, "base"), exe) ==
+               {:not_started, {:executable_unusable, exe}}
+    end
+
+    test "a root physically shared with the own checkout is refused: equal, inside, containing, aliased" do
+      assert physical!(@root) == @root, "the own checkout is reached physically"
+      tmp = physical_tmp_root()
+      exe = Path.join(tmp, "missing")
+      inside = Path.join(@root, "test")
+      containing = Path.dirname(@root)
+      :ok = File.ln_s(@root, Path.join(tmp, "new"))
+      :ok = File.ln_s(containing, Path.join(tmp, "checkouts"))
+      leaf_alias = Path.join(tmp, "new")
+      ancestor_alias = Path.join([tmp, "checkouts", Path.basename(@root)])
+
+      for {label, root, reason} <- [
+            {"the own checkout", @root, :root_shared},
+            {"inside it", inside, :root_shared},
+            {"containing it", containing, :root_shared},
+            {"an alias of it", leaf_alias, :root_unusable},
+            {"it through an aliased ancestor", ancestor_alias, :root_unusable}
+          ] do
+        assert root_mode(root, exe) == {:not_started, {reason, root}}, label
+      end
+    end
+
+    test "a root whose build tree is aliased into the own checkout is refused" do
+      tmp = physical_tmp_root()
+      exe = Path.join(tmp, "missing")
+      root = Path.join(tmp, "borrowed")
+      :ok = File.mkdir(root)
+      :ok = File.ln_s(Path.join(@root, ".devenv"), Path.join(root, ".devenv"))
+      assert File.dir?(Path.join(root, ".devenv/state")), "the alias reaches NEW's state"
+
+      assert root_mode(root, exe) == {:not_started, {:toolchain_unusable, "MIX_HOME"}}
+    end
+
+    test "a legitimate physical baseline root passes the root checks and still needs the executable" do
+      tmp = physical_tmp_root()
       exe = Path.join(tmp, "missing")
       base = build_tree!(Path.join(tmp, "base"))
 
-      for root <- [base, @root] do
-        runner = harness(:checked_runner, [exe, suffix(), root, 1_000, [toolchain: :root]])
-        assert is_function(runner, 2), "#{root}: #{inspect(runner)}"
-
-        assert no_ports!(fn -> runner.(:claim, ["run"]) end) ==
-                 {:not_started, {:executable_unusable, exe}},
-               root
-      end
+      assert root_mode(base, exe) == {:not_started, {:executable_unusable, exe}}
     end
 
     test "an unknown option or toolchain mode is refused when the runner is built" do
