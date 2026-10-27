@@ -7,6 +7,14 @@ defmodule SdrAgent.ReleaseTest do
   usable password — and the synthetic demo content through the domain APIs;
   it never creates the fixture operators, refuses without `SDR_OWNER_EMAIL`
   and is idempotent.
+
+  Reuse (Codex M1): an existing database is accepted only when its one
+  operator is the owner as an active admin of the expected tenant; any other
+  identity state fails before any content write, and no user is deleted,
+  promoted or reset. Follow-ups (Codex M4, D-218 item 9): the seeded
+  sequence has only its first touch, and a rerun contains a follow-up step an
+  earlier seed activated (its campaign archived, its sequence retired, by the
+  owner through the ordinary audited actions).
   """
   use SdrAgent.AuditCase, async: false
 
@@ -18,6 +26,7 @@ defmodule SdrAgent.ReleaseTest do
   alias SdrAgent.Audit.RecordHash
   alias SdrAgent.Demo.Fixtures
   alias SdrAgent.Release
+  alias SdrAgent.Sales
 
   @owner "Hosted.Owner@Example.test"
 
@@ -70,6 +79,80 @@ defmodule SdrAgent.ReleaseTest do
   defp snapshot,
     do: Map.new(@resources, &{&1, Enum.map(rows(&1), fn r -> RecordHash.canonical_map(r) end)})
 
+  # The seed's outcome without letting a raise end the test: {:ok, result}
+  # or {:raised, exception}.
+  defp seed_outcome do
+    {:ok, Release.seed_hosted()}
+  rescue
+    error -> {:raised, error}
+  end
+
+  defp refusal_message({:raised, error}), do: Exception.message(error)
+  defp refusal_message(other), do: inspect(other, limit: 5)
+
+  # Every row and event as they are now, to prove a refusal wrote nothing.
+  defp state, do: {snapshot(), length(events(%{id: tenant_id()}))}
+
+  defp owner_password, do: "hosted-owner-test-" <> Base.encode16(:crypto.strong_rand_bytes(8))
+
+  # The owner as the e8f041b9 seed made it: the tenant's first admin.
+  defp bootstrap_owner!(tenant) do
+    password = owner_password()
+
+    {:ok, owner} =
+      Accounts.bootstrap_admin(
+        %{
+          email: String.downcase(@owner),
+          display_name: "Owner",
+          password: password,
+          password_confirmation: password
+        },
+        tenant_id: tenant.id
+      )
+
+    owner
+  end
+
+  # What the e8f041b9 hosted seed left on sdr.a-z.bot: an active ICP, the
+  # active two-step fixture sequence (step 2 a three-day follow-up) and an
+  # active campaign on it, each written by the owner through the admin actions.
+  defp legacy_hosted_state! do
+    tenant = bootstrap!()
+    owner = bootstrap_owner!(tenant)
+    opts = [actor: owner]
+
+    {:ok, icp} =
+      Sales.create_icp_definition(
+        Map.take(Fixtures.icp(), [:name, :description, :criteria]),
+        opts
+      )
+
+    {:ok, icp} = Sales.update(icp, :activate, %{}, opts)
+
+    {:ok, sequence} =
+      Sales.create_sequence(Map.take(Fixtures.sequence(), [:name, :version]), opts)
+
+    for step <- Fixtures.sequence_steps() do
+      {:ok, _step} = Sales.add_sequence_step(sequence, Map.delete(step, :id), opts)
+    end
+
+    {:ok, sequence} = Sales.update(sequence, :activate, %{}, opts)
+
+    {:ok, campaign} =
+      Fixtures.campaign()
+      |> Map.delete(:id)
+      |> Map.merge(%{icp_definition_id: icp.id, sequence_id: sequence.id})
+      |> Sales.create_campaign(opts)
+
+    {:ok, campaign} = Sales.update(campaign, :activate, %{}, opts)
+    %{owner: owner, sequence: sequence, campaign: campaign}
+  end
+
+  defp reload!(%resource{id: id}, owner) do
+    {:ok, record} = Sales.fetch(resource, id, actor: owner)
+    record
+  end
+
   test "refuses without SDR_OWNER_EMAIL (or with a blank one) before writing anything" do
     for value <- [nil, "", "   "] do
       if value,
@@ -113,7 +196,14 @@ defmodule SdrAgent.ReleaseTest do
     assert {icp.name, icp.status} == {Fixtures.icp().name, :active}
     assert [sequence] = rows(SdrAgent.Sales.Sequence)
     assert sequence.status == :active
-    assert length(rows(SdrAgent.Sales.SequenceStep)) == 2
+
+    # Follow-ups stay off on the hosted copy (Codex M4, D-218 item 9): the
+    # sequence has its first touch only, no follow-up step.
+    assert Enum.map(
+             rows(SdrAgent.Sales.SequenceStep),
+             &{&1.sequence_id, &1.position, &1.delay_days}
+           ) ==
+             [{sequence.id, 1, 0}]
 
     assert [campaign] = rows(SdrAgent.Sales.Campaign)
 
@@ -186,5 +276,147 @@ defmodule SdrAgent.ReleaseTest do
 
     assert_raise RuntimeError, ~r/owner/, &Release.seed_hosted/0
     assert Enum.map(rows(User), & &1.id) == [other.id]
+  end
+
+  describe "reuse of an existing database (Codex M1)" do
+    test "the owner beside a second operator fails before any write; nobody is removed" do
+      assert {:ok, _} = Release.seed_hosted()
+      [owner] = rows(User)
+      password = owner_password()
+
+      {:ok, second} =
+        Accounts.create_user(
+          %{
+            email: "second.operator@example.test",
+            display_name: "Second operator",
+            role: :reviewer,
+            password: password,
+            password_confirmation: password
+          },
+          actor: owner
+        )
+
+      before = state()
+      outcome = seed_outcome()
+
+      assert match?({:raised, %RuntimeError{}}, outcome),
+             "expected a refusal, got #{inspect(outcome, limit: 5)}"
+
+      assert refusal_message(outcome) =~ "before any content write"
+
+      assert state() == before
+      assert Enum.sort(Enum.map(rows(User), & &1.id)) == Enum.sort([owner.id, second.id])
+    end
+
+    test "a matching but disabled user fails before any write and stays disabled" do
+      tenant = bootstrap!()
+      owner = bootstrap_owner!(tenant)
+
+      # No action disables the last active admin: this state is reachable only
+      # by a database administrator, which the seed must still refuse.
+      tamper!("UPDATE users SET status = 'disabled' WHERE id = $1", [Ecto.UUID.dump!(owner.id)])
+
+      before = state()
+      outcome = seed_outcome()
+
+      assert match?({:raised, %RuntimeError{}}, outcome),
+             "expected a refusal, got #{inspect(outcome, limit: 5)}"
+
+      assert refusal_message(outcome) =~ "before any content write"
+
+      assert state() == before
+      assert Enum.map(rows(User), &{&1.id, &1.role, &1.status}) == [{owner.id, :admin, :disabled}]
+    end
+
+    test "a matching non-admin user fails before any write and is not promoted" do
+      tenant = bootstrap!()
+      Application.put_env(:sdr_agent, :seeding_allowed?, true)
+      reviewer = new_human(:reviewer, tenant, %{email: String.downcase(@owner)})
+      Application.put_env(:sdr_agent, :seeding_allowed?, false)
+
+      before = state()
+      outcome = seed_outcome()
+
+      assert match?({:raised, %RuntimeError{}}, outcome),
+             "expected a refusal, got #{inspect(outcome, limit: 5)}"
+
+      assert refusal_message(outcome) =~ "before any content write"
+
+      assert state() == before
+
+      assert Enum.map(rows(User), &{&1.id, &1.role, &1.status}) == [
+               {reviewer.id, :reviewer, :active}
+             ]
+    end
+
+    test "an unexpected tenant fails before any operator or content is written" do
+      {:ok, tenant} = Audit.bootstrap(slug: "elsewhere", name: "Another Tenant")
+      before = state()
+      outcome = seed_outcome()
+
+      assert match?({:raised, %RuntimeError{}}, outcome),
+             "expected a refusal, got #{inspect(outcome, limit: 5)}"
+
+      assert refusal_message(outcome) =~ "before any content write"
+
+      assert state() == before
+      assert {:ok, tenant.id} == Kernel.singleton_tenant_id()
+    end
+
+    test "the valid owner's rerun creates nothing, contains nothing and appends no event" do
+      assert {:ok, _} = Release.seed_hosted()
+      before = state()
+
+      assert Release.seed_hosted() |> elem(1) |> Map.take([:created, :contained]) ==
+               %{created: 0, contained: 0}
+
+      assert state() == before
+    end
+  end
+
+  describe "follow-up containment (Codex M4, D-218 item 9)" do
+    test "a rerun contains the follow-up step an earlier seed activated" do
+      %{owner: owner, sequence: legacy, campaign: legacy_campaign} = legacy_hosted_state!()
+      count = length(events(%{id: tenant_id()}))
+
+      assert {:ok, _} = Release.seed_hosted()
+
+      # The legacy rows stay (nothing is deleted); they are closed by the owner.
+      assert {reload!(legacy, owner).status, reload!(legacy_campaign, owner).status} ==
+               {:retired, :archived}
+
+      contained =
+        events(%{id: tenant_id()})
+        |> Enum.drop(count)
+        |> Enum.filter(&(&1.event_type in ["sales.campaign.archived", "sales.sequence.retired"]))
+        |> Enum.map(&{&1.event_type, &1.subject_id, &1.actor_id})
+
+      assert contained == [
+               {"sales.campaign.archived", legacy_campaign.id, owner.id},
+               {"sales.sequence.retired", legacy.id, owner.id}
+             ]
+
+      # The demo runs on a first-touch-only sequence and an active campaign on it.
+      active = Enum.filter(rows(Sales.Sequence), &(&1.status == :active))
+      assert length(active) == 1
+      [sequence] = active
+
+      assert Enum.map(
+               Enum.filter(rows(Sales.SequenceStep), &(&1.sequence_id == sequence.id)),
+               & &1.position
+             ) ==
+               [1]
+
+      open = Enum.filter(rows(Sales.Campaign), &(&1.status in [:draft, :active, :paused]))
+      assert Enum.map(open, &{&1.status, &1.sequence_id}) == [{:active, sequence.id}]
+      assert length(rows(Sales.SequenceStep)) == 3
+
+      before = state()
+
+      assert Release.seed_hosted() |> elem(1) |> Map.take([:created, :contained]) ==
+               %{created: 0, contained: 0}
+
+      assert state() == before
+    end
   end
 end
