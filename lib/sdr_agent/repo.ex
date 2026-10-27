@@ -2,6 +2,8 @@ defmodule SdrAgent.Repo do
   use AshPostgres.Repo,
     otp_app: :sdr_agent
 
+  alias SdrAgent.AgentEnv.Boot
+
   @impl true
   def installed_extensions do
     # Add extensions here, and the migration generator will install them.
@@ -18,5 +20,14 @@ defmodule SdrAgent.Repo do
   @impl true
   def min_pg_version do
     %Version{major: 18, minor: 2, patch: 0}
+  end
+
+  # C2* S1 (L2): outside run mode an agent-environment configuration starts
+  # the Repo only for a declared step (SdrAgent.AgentEnv.Boot); a
+  # configuration read (`:runtime`) always passes. Unconfigured: unchanged.
+  @impl true
+  def init(type, config) do
+    :ok = Boot.check_repo_start!(type)
+    super(type, config)
   end
 end

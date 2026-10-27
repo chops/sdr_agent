@@ -5,11 +5,17 @@ defmodule SdrAgent.Application do
 
   use Application
 
+  alias SdrAgent.AgentEnv
+  alias SdrAgent.AgentEnv.Boot
+  alias SdrAgent.AgentEnv.Shutdown
   alias SdrAgent.Agents.Witness
   alias SdrAgent.AI.ModelProvider.Runtime, as: ModelProviderRuntime
 
   @impl true
   def start(_type, _args) do
+    # C2* S1 (L3): an agent-environment configuration may refuse the start
+    # before anything else runs; unconfigured, this is a no-op.
+    Boot.check_start!()
     # S12d: an explicitly configured but untrusted or missing witness store
     # root refuses to boot, before anything starts or reads (ADR-0005).
     Witness.check_configured_root!()
@@ -28,8 +34,14 @@ defmodule SdrAgent.Application do
   # The supervision tree, in start order. The runtime-selected model
   # provider (one named ClaudeCLI server when `SDR_MODEL_PROVIDER=claude_cli`,
   # nothing for the Fake; ADR-0004) starts before Oban, so no agent job can
-  # run before its provider exists.
+  # run before its provider exists. An agent-environment mode restricts or
+  # extends it (`SdrAgent.AgentEnv.Boot.children/2`); unconfigured it is
+  # exactly this list.
   def children do
+    Boot.children(AgentEnv.mode(), base_children())
+  end
+
+  defp base_children do
     SdrAgent.Telemetry.test_children() ++
       [
         SdrAgentWeb.Telemetry,
@@ -46,6 +58,21 @@ defmodule SdrAgent.Application do
         SdrAgentWeb.Endpoint,
         {AshAuthentication.Supervisor, [otp_app: :sdr_agent]}
       ]
+  end
+
+  # C2* S1 P5: in run mode, plan the orderly exit while the tree is alive
+  # (SdrAgent.AgentEnv.Shutdown); otherwise inert.
+  @impl true
+  def prep_stop(state) do
+    if AgentEnv.mode() == :run, do: Shutdown.plan(SdrAgent.Supervisor), else: state
+  end
+
+  # C2* S1 P5: in run mode, complete the planned exit after the tree has
+  # exited (a receipt only after the whole-instance barrier). Always :ok.
+  @impl true
+  def stop(state) do
+    if AgentEnv.mode() == :run, do: Shutdown.complete(state)
+    :ok
   end
 
   # Tell Phoenix to update the endpoint configuration

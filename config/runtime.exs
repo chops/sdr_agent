@@ -42,6 +42,17 @@ case System.get_env("PORT") do
     config :sdr_agent, SdrAgentWeb.Endpoint, http: [port: String.to_integer(port)]
 end
 
+# C2* S1 (P2): the agent environment `agentenv-1` (ADR-0004 agent-environment
+# amendment). With SDR_AGENT_ENV, SDR_AGENT_ENV_STEP and SDR_AGENT_ENV_NONCE
+# all unset this adds nothing. Otherwise the selector is accepted only in dev,
+# at a known step under its lease, and forces the Repo target
+# sdr_agent_agentenv@localhost:5520 and, in run mode, HTTP 127.0.0.1:4130 (the
+# fixed agent-environment port; never moved silently). Any refusal raises
+# "agent environment refused at boot (<reason>)". Applied after PORT so the
+# forced port wins.
+for {app, opts} <- SdrAgent.AgentEnv.Boot.runtime_config!(config_env(), System.get_env()),
+    do: config(app, opts)
+
 config :sdr_agent,
        :audit_tools_wrapper,
        Path.expand(System.get_env("SDR_AUDIT_TOOLS_WRAPPER", "bin/with-audit-tools"))
