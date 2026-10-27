@@ -19,8 +19,11 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
   **DB #2, down refusal** (`release_migration/demo.exs`): the NEW build
   migrates up and commits one demo row plus its kernel event; the `down` must
   be refused with `check_violation`; the after-refusal probe proves the full
-  rollback (migration still applied, columns and every CHECK unchanged, the
-  row and the chain intact).
+  rollback: the migration still applied, columns and every CHECK unchanged,
+  the row and its record hash unchanged, its kernel event still committing
+  that hash, every event captured before `down` byte-identical, nothing
+  appended but the probes' own verification and provenance events, and a
+  valid chain (validity alone is not preserved history; Codex ed67bbfe M1).
 
   The whole module is `:external`; the default test helper excludes that
   tag, so an ordinary `mix test` never compiles a child or touches a
@@ -84,15 +87,21 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
   @demo_up %{
     "demo_row_committed" => "permitted",
     "chain_valid" => "permitted",
-    "tamper_basis_sha256_detected" => "refused:record_hash_mismatch"
+    "tamper_basis_sha256_detected" => "refused:record_hash_mismatch",
+    "demo_event_record_hash" => "permitted"
   }
 
+  # Codex ed67bbfe M1: a valid chain is not preserved history; the captured
+  # events, heads and the demo event must be retained as well.
   @after_refusal %{
     "migration_still_applied" => "permitted",
     "exception_columns_present" => "permitted",
     "constraints_unchanged" => "permitted",
     "demo_row_unchanged" => "permitted",
-    "chain_valid" => "permitted"
+    "demo_event_record_hash" => "permitted",
+    "chain_valid" => "permitted",
+    "captured_events_unchanged" => "permitted",
+    "appends_accounted" => "permitted"
   }
 
   @cleanup %{

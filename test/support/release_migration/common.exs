@@ -127,7 +127,6 @@ defmodule SdrAgent.ReleaseMigration do
   def probe!(label, path) when label in ["up", "down", "up_again"] do
     capture = path |> File.read!() |> JSON.decode!()
     tenant_id = capture["tenant_id"]
-    events = captured_events_unchanged(capture)
     records = captured_records_unchanged(capture)
     chain = verify(tenant_id)
     withheld = capture["releases"]["withheld"]["id"]
@@ -138,16 +137,13 @@ defmodule SdrAgent.ReleaseMigration do
          [uuid(withheld)]}
       ])
 
-    Map.merge(
-      %{
-        "chain_valid" => chain,
-        "captured_events_unchanged" => events,
-        "captured_record_hashes_unchanged" => records,
-        "appends_accounted" => appends_accounted(capture),
-        "tamper_reason_detected" => tamper
-      },
-      state_checks(label, capture)
-    )
+    capture
+    |> history_checks(events!(), chain)
+    |> Map.merge(%{
+      "captured_record_hashes_unchanged" => records,
+      "tamper_reason_detected" => tamper
+    })
+    |> Map.merge(state_checks(label, capture))
   end
 
   defp state_checks("down", capture) do
@@ -189,12 +185,6 @@ defmodule SdrAgent.ReleaseMigration do
     Enum.find(results, hd(results), &(&1 != "refused:record_hash_mismatch"))
   end
 
-  defp captured_events_unchanged(capture) do
-    current = Map.new(events!(), &{&1["id"], &1})
-    changed = Enum.reject(capture["events"], &(current[&1["id"]] == &1))
-    if changed == [], do: "permitted", else: "refused:event_changed"
-  end
-
   defp captured_records_unchanged(capture) do
     tenant_id = capture["tenant_id"]
 
@@ -207,20 +197,64 @@ defmodule SdrAgent.ReleaseMigration do
     if same?, do: "permitted", else: "refused:record_changed"
   end
 
-  # Every event now stored is a captured one, or comes after its tenant's
-  # captured head and is one of the probes' own appends.
-  defp appends_accounted(capture) do
+  ## History preservation (pure; Codex ed67bbfe M1)
+
+  @doc """
+  Pure: the history checks of a later state, from the capture (its
+  `"events"` and `"heads"`) and the events now stored. A valid chain alone
+  is not preserved history: each check stands on its own, so a changed or
+  missing captured event, or an unaccounted append, is refused whatever
+  `chain` (the verifier's own result) says.
+  """
+  def history_checks(capture, current_events, chain) do
+    %{
+      "chain_valid" => chain,
+      "captured_events_unchanged" => events_unchanged(capture["events"], current_events),
+      "appends_accounted" => appends_accounted(capture, current_events)
+    }
+  end
+
+  @doc "Pure: every captured event is still stored, byte-identical (by row fingerprint)."
+  def events_unchanged(captured, current) do
+    by_id = Map.new(current, &{&1["id"], &1})
+
+    cond do
+      Enum.any?(captured, &(not Map.has_key?(by_id, &1["id"]))) -> "refused:event_missing"
+      Enum.any?(captured, &(by_id[&1["id"]] != &1)) -> "refused:event_changed"
+      true -> "permitted"
+    end
+  end
+
+  @doc """
+  Pure: every stored event is a captured one, or comes after its tenant's
+  captured head and is one of the probes' own appends
+  (`audit.access.chain_verify`, `system.provenance.recorded`).
+  """
+  def appends_accounted(capture, current) do
     captured = MapSet.new(capture["events"], & &1["id"])
     heads = Map.new(capture["heads"], &{&1["tenant_id"], &1["last_sequence"]})
 
     accounted? =
-      Enum.all?(events!(), fn event ->
+      Enum.all?(current, fn event ->
         MapSet.member?(captured, event["id"]) or
           (is_integer(heads[event["tenant_id"]]) and event["sequence"] > heads[event["tenant_id"]] and
              event["event_type"] in @probe_appends)
       end)
 
     if accounted?, do: "permitted", else: "refused:unaccounted_append"
+  end
+
+  @doc """
+  Pure: the demo row's kernel event as captured is the one stored now
+  (same id and committed record hash), and it commits `row_hex`, the row's
+  record hash now.
+  """
+  def demo_event_check(captured, current, row_hex) do
+    cond do
+      not is_map(captured) or current != captured -> "refused:demo_event_changed"
+      captured["record_sha256"] != row_hex -> "refused:record_hash_mismatch"
+      true -> "permitted"
+    end
   end
 
   ## DB #2: a demo row makes `down` refuse; the refusal rolls back fully
@@ -254,6 +288,12 @@ defmodule SdrAgent.ReleaseMigration do
          [uuid(id), String.duplicate("0", 64)]}
       ])
 
+    # The state the refused `down` must leave exactly as it is, captured
+    # after the verification and the rolled-back tamper: the row, its
+    # kernel event, every event and the chain heads, and the schema.
+    row_hex = record_hex(tenant.id, id)
+    event = demo_event!(id)
+
     File.write!(
       path,
       JSON.encode!(%{
@@ -261,8 +301,11 @@ defmodule SdrAgent.ReleaseMigration do
         "demo" => %{
           "id" => id,
           "columns" => columns!(id, @twelve ++ @members),
-          "record_sha256" => RecordHash.hex(row)
+          "record_sha256" => row_hex,
+          "event" => event
         },
+        "events" => events!(),
+        "heads" => heads!(),
         "constraints" => constraints!(),
         "table" => table_columns!(),
         "migrations" => migrations!()
@@ -270,9 +313,10 @@ defmodule SdrAgent.ReleaseMigration do
     )
 
     %{
-      "demo_row_committed" => permitted(committed?),
+      "demo_row_committed" => permitted(committed? and row_hex == RecordHash.hex(row)),
       "chain_valid" => chain,
-      "tamper_basis_sha256_detected" => tamper
+      "tamper_basis_sha256_detected" => tamper,
+      "demo_event_record_hash" => demo_event_check(event, event, row_hex)
     }
   end
 
@@ -281,12 +325,13 @@ defmodule SdrAgent.ReleaseMigration do
     tenant_id = capture["tenant_id"]
     id = capture["demo"]["id"]
     migrations = migrations!()
+    row_hex = record_hex(tenant_id, id)
 
     row_same? =
       columns!(id, @twelve ++ @members) == capture["demo"]["columns"] and
-        record_hex(tenant_id, id) == capture["demo"]["record_sha256"]
+        row_hex == capture["demo"]["record_sha256"]
 
-    checks = %{
+    schema = %{
       "migration_still_applied" =>
         permitted(migrations == capture["migrations"] and s3_version!() in migrations),
       "exception_columns_present" => permitted(exception_columns!() == Enum.sort(@members)),
@@ -294,10 +339,33 @@ defmodule SdrAgent.ReleaseMigration do
         permitted(
           constraints!() == capture["constraints"] and table_columns!() == capture["table"]
         ),
-      "demo_row_unchanged" => permitted(row_same?)
+      "demo_row_unchanged" => permitted(row_same?),
+      "demo_event_record_hash" =>
+        demo_event_check(capture["demo"]["event"], demo_event!(id), row_hex)
     }
 
-    Map.put(checks, "chain_valid", verify(tenant_id))
+    chain = verify(tenant_id)
+
+    capture
+    |> history_checks(events!(), chain)
+    |> Map.merge(schema)
+  end
+
+  # The demo row's one kernel event: its id and committed record hash, or
+  # nil when there is not exactly one.
+  defp demo_event!(id) do
+    %{rows: rows} =
+      SQL.query!(
+        Repo,
+        "SELECT id::text, payload->>'record_sha256' FROM audit_events " <>
+          "WHERE subject_resource = $1 AND subject_id = $2 AND event_type = $3",
+        [@subject, id, "model.result.demo_exception"]
+      )
+
+    case rows do
+      [[event_id, record_sha256]] -> %{"id" => event_id, "record_sha256" => record_sha256}
+      _none_or_many -> nil
+    end
   end
 
   defp insert_demo!(tenant_id, invocation_id, link_id) do

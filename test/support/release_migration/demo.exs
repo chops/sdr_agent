@@ -3,10 +3,13 @@
 # `SdrAgent.Agents.ReleaseMigrationTest`, `:external`). Run by the NEW build:
 # at "up" it commits one demo row through a raw insert that passes every
 # CHECK plus a kernel `Audit.append` event with its record hash, verifies the
-# chain, detects a rolled-back tamper and records the state; at
-# "after_refusal" (after the refused `down`) it proves the full rollback:
-# the same applied migrations, columns and CHECK definitions, the row and
-# its record hash unchanged, and a valid chain
+# chain, detects a rolled-back tamper and then records the state (row, its
+# kernel event, every event's row fingerprint, the chain heads, schema and
+# migrations); at "after_refusal" (after the refused `down`) it proves the
+# full rollback: the same applied migrations, columns and CHECK definitions,
+# the row and its record hash unchanged, its kernel event unchanged and
+# committing that hash, every captured event byte-identical, only the
+# probes' own appends after the captured head, and a valid chain
 # (`SdrAgent.ReleaseMigration.demo!/2`). Writes one JSON result. It
 # validates its target, and starts the application, only through
 # `SdrAgent.WitnessMigration.start!/1`.
