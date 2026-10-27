@@ -29,6 +29,11 @@ defmodule SdrAgent.AgentEnv.Bootstrap do
       migrator (`Ecto.Migrator.run(repo, :up, all: true)`), the demo seed
       (`mix sdr.demo.seed`) or the singleton tenant read, then the receipt
       (`probe` with `tenant_id`). No reset, drop, adoption or reclaim exists.
+      The step's session (none for create, `Ecto.Migrator.with_repo` for
+      migrate, `app.start` for seed and probe) runs behind one boundary: a
+      raise, exit or throw from the session itself is `:session_failed`, with
+      no detail, nothing retried, released or rolled back (the lease stays;
+      the files are as the step left them).
     * `publish/0` — in check mode, under the held bootstrap lease of the
       configured nonce with all four receipts (`:receipts_missing`),
       exclusively creates `environment.json` from `environment.created.json`
@@ -43,7 +48,9 @@ defmodule SdrAgent.AgentEnv.Bootstrap do
   `step/2` and `publish/1`, whose `adapter:` gives a stand-in for every
   effect (`repo_config`, `storage_status`, `storage_up`, `database_oid`,
   `live_identity`, `migrate`, `seed`, `tenant_id`; all eight, never a
-  mixture with the real ones) and run them in the caller.
+  mixture with the real ones) and run them in the caller; `step/2` also
+  takes an optional `session:` stand-in (default: none) for the session
+  around the step, behind the same boundary.
   """
 
   alias SdrAgent.AgentEnv
@@ -90,13 +97,21 @@ defmodule SdrAgent.AgentEnv.Bootstrap do
     @doc false
     # Test-seam builds only (see the moduledoc).
     def step(step, seams) when step in @steps and is_list(seams),
-      do: step_with(step, adapter!(seams), fn _step, fun -> fun.() end)
+      do: step_with(step, adapter!(seams), session!(seams))
 
     @doc false
     # Test-seam builds only (see the moduledoc); publish has no effect seam.
     def publish(seams) when is_list(seams) do
       _adapter = adapter!(seams)
       publish_with()
+    end
+
+    # The session around the step: by default none (the step runs directly).
+    defp session!(seams) do
+      case Keyword.get(seams, :session, fn _step, fun -> fun.() end) do
+        session when is_function(session, 2) -> session
+        _other -> raise ArgumentError, "the bootstrap session stand-in must be a 2-arity function"
+      end
     end
 
     defp adapter!(seams) do
@@ -144,7 +159,7 @@ defmodule SdrAgent.AgentEnv.Bootstrap do
          {:ok, nonce} <- leased(root),
          :ok <- in_order(root, nonce, step),
          {:ok, target} <- step_target(step, root, nonce, adapter) do
-      session.(step, fn -> act(step, root, nonce, target, adapter) end)
+      in_session(session, step, fn -> act(step, root, nonce, target, adapter) end)
     end
   end
 
@@ -321,6 +336,31 @@ defmodule SdrAgent.AgentEnv.Bootstrap do
         Enum.all?(@connection_overrides, &is_nil(Keyword.get(config, &1)))
 
     if target?, do: {:ok, config}, else: {:error, :bootstrap_target_mismatch}
+  end
+
+  # The step's session (Repo or application start and stop) behind one
+  # boundary (Codex 43a40f9b M2). The step runs contained inside it and comes
+  # back tagged, so anything else reaching the boundary, raised, exited or
+  # thrown, is the session's own failure: `:session_failed`, with no detail.
+  # Nothing is retried, released or rolled back: the lease stays and the
+  # files are as the step left them.
+  defp in_session(session, step, fun) do
+    ref = make_ref()
+    tagged = fn -> {ref, contained(fun, :effect_failed)} end
+
+    case contained(fn -> session.(step, tagged) end, :session_failed) do
+      {^ref, result} -> result
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      _other -> {:error, :session_failed}
+    end
+  end
+
+  defp contained(fun, reason) do
+    fun.()
+  rescue
+    _error -> {:error, reason}
+  catch
+    _kind, _value -> {:error, reason}
   end
 
   # Runs one effect; an exception or exit is a failure, never re-raised with

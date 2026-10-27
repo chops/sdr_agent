@@ -27,7 +27,9 @@ defmodule SdrAgent.AgentEnv.Launcher do
       }
 
   It returns `:ok` or `{:error, reason}` with a fixed reason atom, in this
-  order: malformed inputs (`:invalid_inputs`); an `SDR_MODEL_PROVIDER`
+  order: malformed inputs (`:invalid_inputs`: the whole shape, including each
+  sink as `{atom, module, keyword}` in a proper list and no path with a NUL
+  byte, is checked before any probe or keyword access); an `SDR_MODEL_PROVIDER`
   other than unset, `fake` or `claude_cli` (`:provider_refused`; never a
   fallback to the Fake); the Repo target (`:repo_target_refused` unless
   exactly `sdr_agent_agentenv` on `localhost`/`127.0.0.1`:5520 with `url`,
@@ -125,9 +127,10 @@ defmodule SdrAgent.AgentEnv.Launcher do
          config: config,
          connect: connect
        })
-       when intent in [:provision, :run] and is_map(env) and is_binary(root) and
-              is_binary(build_path) and is_binary(deps_path) and is_function(connect, 2) do
-    if config_shape?(config), do: :ok, else: {:error, :invalid_inputs}
+       when intent in [:provision, :run] and is_map(env) and is_function(connect, 2) do
+    if Enum.all?([root, build_path, deps_path], &path?/1) and config_shape?(config),
+      do: :ok,
+      else: {:error, :invalid_inputs}
   end
 
   defp shape(_malformed), do: {:error, :invalid_inputs}
@@ -140,14 +143,31 @@ defmodule SdrAgent.AgentEnv.Launcher do
          suppression_check: suppression,
          otel_capture_content: capture
        }) do
-    keyword?(repo) and keyword?(http) and is_list(sinks) and optional_path?(witness) and
+    keyword?(repo) and keyword?(http) and sinks_shape?(sinks) and optional_path?(witness) and
       is_atom(suppression) and is_boolean(capture)
   end
 
   defp config_shape?(_malformed), do: false
 
+  # A proper list of `{name, module, options}` sinks: atoms, and a proper
+  # keyword list whose binary values are paths (Codex 43a40f9b M1: checked
+  # before any Keyword call on them and before the probe).
+  defp sinks_shape?([]), do: true
+
+  defp sinks_shape?([{name, module, options} | rest]) when is_atom(name) and is_atom(module),
+    do: options_shape?(options) and sinks_shape?(rest)
+
+  defp sinks_shape?(_malformed), do: false
+
+  defp options_shape?(options) do
+    keyword?(options) and
+      Enum.all?(options, fn {_key, value} -> not is_binary(value) or path?(value) end)
+  end
+
+  # `Keyword.keyword?/1` is false (never raising) for an improper list.
   defp keyword?(value), do: is_list(value) and Keyword.keyword?(value)
-  defp optional_path?(value), do: is_nil(value) or is_binary(value)
+  defp optional_path?(value), do: is_nil(value) or path?(value)
+  defp path?(value), do: is_binary(value) and not String.contains?(value, <<0>>)
 
   defp provider(env) do
     if Map.get(env, "SDR_MODEL_PROVIDER") in @providers,
