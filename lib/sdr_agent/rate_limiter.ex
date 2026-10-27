@@ -2,7 +2,8 @@ defmodule SdrAgent.RateLimiter do
   @moduledoc """
   Fixed-window request counters for the unauthenticated magic-link request
   (Codex M3; no dependency, ADR-0008): one public ETS table owned by this
-  supervised process, on this node only.
+  supervised process, on this node only. The table holds counter rows
+  only, `{{key, window_ms, window}, count, expires_at_ms}`.
 
     * **Fixed UTC windows, not a rolling cooldown.** `hit/3,4` counts one
       request for `key` in the window `div(unix_ms, window_ms)` — aligned
@@ -11,16 +12,19 @@ defmodule SdrAgent.RateLimiter do
       `:limited`. Up to twice a limit can pass across one bucket boundary,
       and counters start again from zero when the process (or the node)
       restarts.
-    * **Atomic counts.** Each count is one `:ets.update_counter/3`, so
-      concurrent requests for one key never exceed its limit.
-    * **Bounded retention, atomically.** A row for a new key first takes a
-      capacity slot from an atomic counter; a key that gets no slot is
-      refused (`:limited`) and never stored, so the table never holds more
-      than `max_keys/0` rows, however many distinct keys race. Rows expire
-      with their window and are swept every minute (`sweep/1`), which
-      frees their slots.
-    * **Fail closed.** If the table is unavailable, every hit is
-      `:limited`.
+    * **Atomic counts.** Each count is one `:ets.update_counter/3` by the
+      caller, so concurrent requests for one key never exceed its limit.
+    * **Bounded retention, owned by this process.** Only this process
+      creates rows: a caller whose row does not exist yet asks it to
+      (`GenServer.call/3`), and it checks capacity and inserts in one
+      serialized step, so the table never holds more than `max_keys/0`
+      counter rows however many distinct keys race, and a caller that dies
+      mid-request leaves no capacity charged — at most a row that expires
+      with its window. A key beyond capacity is refused (`:limited`) and
+      never stored. Expired rows are swept every minute (`sweep/1`). Only
+      new keys are serialized; counting stays lock-free in ETS.
+    * **Fail closed.** If this process or its table is unavailable, or a
+      creation does not answer within a second, the hit is `:limited`.
 
   Keys hold no email address in clear (callers pass a client IP tuple or
   the sha256 of a destination address).
@@ -30,14 +34,14 @@ defmodule SdrAgent.RateLimiter do
   alias SdrAgent.Clock
 
   @table __MODULE__
-  @slots :__rows__
   @max_keys 10_000
+  @create_timeout 1_000
   @sweep_every :timer.minutes(1)
 
   @doc false
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  @doc "The most rows the table ever holds."
+  @doc "The most counter rows the table ever holds."
   @spec max_keys() :: pos_integer()
   def max_keys, do: @max_keys
 
@@ -57,23 +61,17 @@ defmodule SdrAgent.RateLimiter do
        do: :ok,
        else: :limited
   rescue
-    # No table, or the row vanished (swept) between the checks: fail closed.
+    # No table, or the row was swept between creation and count: fail closed.
     ArgumentError -> :limited
   end
 
-  @doc "Deletes every row whose window ended at or before `now_ms`, freeing their slots; returns how many."
+  @doc "Deletes every row whose window ended at or before `now_ms`; returns how many."
   @spec sweep(integer()) :: non_neg_integer()
   def sweep(now_ms) do
-    deleted =
-      :ets.select_delete(@table, [
-        {{:_, :_, :"$1"}, [{:is_integer, :"$1"}, {:"=<", :"$1", now_ms}], [true]}
-      ])
-
-    if deleted > 0, do: release(deleted)
-    deleted
+    :ets.select_delete(@table, [{{:_, :_, :"$1"}, [{:"=<", :"$1", now_ms}], [true]}])
   end
 
-  @doc "Clears every window and slot."
+  @doc "Clears every window."
   @spec reset() :: :ok
   def reset do
     :ets.delete_all_objects(@table)
@@ -94,6 +92,21 @@ defmodule SdrAgent.RateLimiter do
     {:ok, nil}
   end
 
+  # The one place rows are created: capacity is checked and the row inserted
+  # in this process's serialized step. A caller that has died is skipped.
+  @impl true
+  def handle_call({:create, row, expires_at}, {caller, _tag}, state) do
+    reply =
+      cond do
+        :ets.member(@table, row) -> :ok
+        not Process.alive?(caller) -> :limited
+        :ets.info(@table, :size) >= @max_keys -> :limited
+        true -> if :ets.insert(@table, {row, 0, expires_at}), do: :ok
+      end
+
+    {:reply, reply, state}
+  end
+
   @impl true
   def handle_info(:sweep, state) do
     sweep(now_ms())
@@ -101,30 +114,12 @@ defmodule SdrAgent.RateLimiter do
     {:noreply, state}
   end
 
-  # Whether `row` exists, creating it only under a capacity slot taken
-  # first: the slot counter is incremented atomically, so at most
-  # `@max_keys` creators ever hold one; a creator over the bound gives its
-  # increment back and stores nothing. A creator that loses the insert race
-  # to another for the same row gives its slot back (the winner holds one).
   defp stored?(row, expires_at) do
-    cond do
-      :ets.member(@table, row) ->
-        true
-
-      :ets.update_counter(@table, @slots, {2, 1}, {@slots, 0, :slots}) > @max_keys ->
-        release(1)
-        false
-
-      :ets.insert_new(@table, {row, 0, expires_at}) ->
-        true
-
-      true ->
-        release(1)
-        true
-    end
+    :ets.member(@table, row) or
+      GenServer.call(__MODULE__, {:create, row, expires_at}, @create_timeout) == :ok
+  catch
+    :exit, _unavailable_or_timeout -> false
   end
-
-  defp release(n), do: :ets.update_counter(@table, @slots, {2, -n}, {@slots, 0, :slots})
 
   defp schedule_sweep, do: Process.send_after(self(), :sweep, @sweep_every)
 
