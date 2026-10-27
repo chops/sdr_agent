@@ -324,6 +324,55 @@ defmodule SdrAgent.Test.AgentEnvGrantFixtures do
     env |> Map.put(:prv, prv) |> Map.put(:grant, elem(result, 1))
   end
 
+  @doc """
+  RED-4: a spend-ready run environment. `provisioned!/1` (options passed
+  through), then the run side with S1's fixtures: a run lease of the
+  environment's binding, the run configuration with that nonce, and
+  `authorization.json` naming the grant and its `model.grant.provisioned`
+  event. Returns the environment with `lease_nonce` and `event`.
+  """
+  def spend_ready!(opts \\ []) do
+    env = provisioned!(opts)
+
+    [event] =
+      env.bound.tenant_id
+      |> then(&SdrAgent.AuditCase.events_of_type(%{id: &1}, "model.grant.provisioned"))
+      |> Enum.filter(&(&1.subject_id == env.grant.id))
+
+    run_side!(env, %{"grant_id" => env.grant.id, "event_id" => event.id})
+    |> Map.put(:event, event)
+  end
+
+  @doc """
+  RED-4: a spend-ready run environment whose grant is an SQL-level delegated
+  stand-in under the registry entry's id and digest (`delegated_row!/2`),
+  for environments provisioning refuses (e.g. `database_oid:` other than the
+  live oid). `opts` go to `provisioning_env!/1` (mode `:run`, no lease: the
+  run side writes it). Returns the environment with `grant` and `lease_nonce`.
+  """
+  def stand_in_spend_ready!(%{id: _} = tenant, opts \\ []) do
+    env = provisioning_env!([mode: :run, lease: :none] ++ opts)
+
+    grant =
+      delegated_row!(tenant,
+        authorization_id: env.entry.id,
+        authorization_sha256: env.digest
+      )
+
+    env
+    |> Map.put(:grant, grant)
+    |> run_side!(%{"grant_id" => grant.id, "event_id" => Ecto.UUID.generate()})
+  end
+
+  # A run lease of the binding, the run configuration with its nonce, and
+  # the final file consistent with the claim (`overrides` applied).
+  defp run_side!(env, overrides) do
+    nonce = AgentEnvFixtures.write_lease!(env.root, :run, env.bound.binding_sha256)
+    AgentEnvFixtures.configure!(env.root, mode: :run, nonce: nonce)
+    final!(env.root, env.claim, overrides)
+    Map.put(env, :lease_nonce, nonce)
+  end
+
   @doc "Whether `result` is a `ProvisioningRefused` refusal with `reason`."
   def refused?({:error, %Ash.Error.Invalid{errors: errors}}, reason),
     do: Enum.any?(errors, &match?(%{__struct__: @refused, reason: ^reason}, &1))
