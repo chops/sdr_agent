@@ -3,16 +3,19 @@
 # `SdrAgent.Agents.ReleaseMigrationTest`, `:external`). Run by the NEW build:
 # at "up" it commits one demo row through a raw insert that passes every
 # CHECK plus a kernel `Audit.append` event with its record hash, verifies the
-# chain, and detects a rolled-back tamper; at "after_refusal" (after the
-# refused `down`) it proves the full rollback. Writes one JSON result.
-#
-# RED-6 scaffold: it validates its target, then refuses as not implemented
-# (status 9) before any startup, connection or effect. GREEN-6 implements it;
-# nothing runs it before the campaign packet's own review.
+# chain, detects a rolled-back tamper and records the state; at
+# "after_refusal" (after the refused `down`) it proves the full rollback:
+# the same applied migrations, columns and CHECK definitions, the row and
+# its record hash unchanged, and a valid chain
+# (`SdrAgent.ReleaseMigration.demo!/2`). Writes one JSON result. It
+# validates its target, and starts the application, only through
+# `SdrAgent.WitnessMigration.start!/1`.
 # Usage: mix run --no-start --no-compile release_migration/demo.exs DATABASE LABEL FIXTURES_JSON OUT_JSON
 Code.require_file("../witness_migration/common.exs", __DIR__)
+Code.require_file("common.exs", __DIR__)
 
-[database, _label, _fixtures_path, _out] = System.argv()
-SdrAgent.WitnessMigration.validate_target!(database)
-IO.puts("NOT-IMPLEMENTED release_migration/demo.exs (RED-6 scaffold)")
-System.halt(9)
+alias SdrAgent.ReleaseMigration
+
+[database, label, fixtures_path, out] = System.argv()
+:ok = SdrAgent.WitnessMigration.start!(database)
+ReleaseMigration.write_result!(out, database, label, ReleaseMigration.demo!(label, fixtures_path))
