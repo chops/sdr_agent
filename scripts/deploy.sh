@@ -10,18 +10,35 @@
 # first run.
 #
 # Safety properties kept from agent_builder:
+# - this script passes `bash -n` and shellcheck before anything else runs (--dry-run too);
 # - the source is `git archive` of a clean, pushed commit, never the working tree, so
 #   untracked files cannot be shipped;
 # - one deploy at a time (a lock directory on the host), private staging directories;
+# - the build uses the build shell's Nix-pinned Elixir, OTP, Hex and rebar3 (never
+#   `mix local.hex`/`local.rebar`) with private Mix, Hex and rebar3 homes inside its
+#   staging directory, records each tool's identity in the deploy log, refuses a changed
+#   mix.lock, and proves root's shared ~/.mix, ~/.hex and rebar3 directories unchanged;
 # - each release keeps its own GC root (its build shell), so rollbacks keep their libs;
 # - the staged release is checked before the running one is touched: tarball checksum,
-#   every ELF file's libraries (fail closed), and the env file parsed identically by
-#   systemd and the shell (all 10 keys present, no values shown); migrations (additive)
-#   and the idempotent hosted seed run from the staged release;
+#   every ELF file's libraries (fail closed), a root-owned tree the service user can read
+#   and run but not change (it writes only under /var/lib/sdr_agent, RELEASE_TMP
+#   included), the env file parsed identically by systemd and the shell (all 10 keys
+#   present) and matching the reviewed non-secret expectations (key names and ok/FAIL
+#   printed, never a value); migrations, the idempotent hosted seed and the follow-up
+#   containment check (D-218 item 9) run from the staged release;
 # - after the switch it verifies the *running* process: a new MainPID, local health on
-#   127.0.0.1:4005 through the proxy headers, and the installed release's REVISION; any
-#   failure restores the previous release automatically;
+#   127.0.0.1:4005 through the proxy headers, and the installed release's REVISION;
 # - prune keeps the active release and the newest 3 backups and fails closed.
+#
+# What a failure restores, exactly:
+# - a failure of install, start or local verification (inside `switch`) restores the
+#   previous release FILES and verifies the restored process;
+# - migrations and the seed run BEFORE the switch and are never undone: restoring
+#   release files (automatically, or with --rollback) leaves the database as the new
+#   release migrated and seeded it. Pending migrations must suit the previous release;
+# - the public health check runs AFTER the switch and the prune: its failure is
+#   reported and restores nothing (the new release stays installed and running);
+# - /health is endpoint liveness only, not database or sign-in readiness.
 #
 # Usage:
 #   scripts/deploy.sh              # deploy HEAD
@@ -41,7 +58,114 @@ log() { printf '[%s] %s\n' "$1" "$2"; }
 die() { log ERROR "$1"; exit 1; }
 # Keepalives: a long, quiet build must not let a middlebox drop the session.
 SSH_OPTS=(-o ServerAliveInterval=20 -o ServerAliveCountMax=6 -o BatchMode=yes)
+# The remote command is built here, on purpose (SC2029): every expansion is ours.
+# shellcheck disable=SC2029
 remote() { ssh "${SSH_OPTS[@]}" "root@$HOST" "$@"; }
+
+# This script must parse and pass shellcheck (all severities) before it does anything.
+check_script() {
+  local self="$SCRIPT_DIR/deploy.sh"
+  bash -n "$self" || die "deploy.sh does not parse (bash -n)"
+  command -v shellcheck >/dev/null || die "shellcheck is not installed; it must pass before a deploy"
+  shellcheck "$self" || die "deploy.sh fails shellcheck"
+  log INFO "deploy.sh passes bash -n and shellcheck"
+}
+
+# env_semantic_check <env file>: the hosted env file against its reviewed, non-secret
+# expectations (Codex I3). Prints key names and ok/FAIL only, never a value; returns 1 on
+# any failure. Runs on the host as root (shipped with `declare -f`); bash 3.2 compatible
+# and builtins only, so no value reaches another process's arguments. The file is read by
+# sourcing it in a subshell, as the systemd/sh equality check does, and only after every
+# line is a KEY=value of a known key.
+env_semantic_check() {
+  (
+    file=$1
+    fail=0
+    n=0
+    seen=' '
+    required='DATABASE_URL SECRET_KEY_BASE TOKEN_SIGNING_SECRET PHX_HOST POOL_SIZE SDR_ANCHOR_SINKS POSTMARK_API_KEY SDR_MAIL_FROM SDR_LOGIN_ALLOWLIST SDR_OWNER_EMAIL'
+    optional='SDR_MODEL_PROVIDER SDR_BIND_IP'
+    [ -r "$file" ] || { printf 'env keys: FAIL (file not readable)\n'; exit 1; }
+
+    # 1. Key names: every line blank, a comment, or KEY=value of a known key.
+    while IFS= read -r line || [ -n "$line" ]; do
+      n=$((n + 1))
+      case "$line" in '' | '#'*) continue ;; esac
+      if [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
+        name=${BASH_REMATCH[1]}
+        case " $required $optional " in
+          *" $name "*) seen="$seen$name " ;;
+          *) printf 'env keys: FAIL unexpected %s\n' "$name"; fail=2 ;;
+        esac
+      else
+        printf 'env keys: FAIL unparsable line %s\n' "$n"; fail=2
+      fi
+    done < "$file"
+    # Unknown names or lines are never sourced.
+    [ "$fail" = 0 ] || exit 1
+    for name in $required; do
+      case "$seen" in *" $name "*) ;; *) printf 'env keys: FAIL missing %s\n' "$name"; fail=1 ;; esac
+    done
+    [ "$fail" = 0 ] && printf 'env keys: ok\n'
+
+    # 2. Values, from the file alone (never inherited).
+    for name in $required $optional; do unset "$name"; done
+    set -a
+    # shellcheck disable=SC1090
+    . "$file" 2>/dev/null || { printf 'env file: FAIL (sh cannot read it)\n'; exit 1; }
+    set +a
+
+    check() {
+      local label=$1
+      shift
+      if "$@"; then printf 'env %s: ok\n' "$label"; else printf 'env %s: FAIL\n' "$label"; fail=1; fi
+    }
+    # The helpers below run through check (SC2329: invoked indirectly).
+    # Exactly one socket_dir query parameter, with the dedicated cluster's directory.
+    # shellcheck disable=SC2329
+    socket_dir_is() {
+      local url=$1 want=$2 rest param found=0
+      case "$url" in *'?'*) rest=${url#*\?} ;; *) return 1 ;; esac
+      rest=${rest%%#*}
+      while [ -n "$rest" ]; do
+        param=${rest%%&*}
+        if [ "$param" = "$rest" ]; then rest=''; else rest=${rest#*&}; fi
+        case "$param" in
+          socket_dir=*) found=$((found + 1)); [ "${param#socket_dir=}" = "$want" ] || return 1 ;;
+        esac
+      done
+      [ "$found" = 1 ]
+    }
+    # At least one entry once spaces and commas are removed.
+    # shellcheck disable=SC2329
+    non_empty_list() { local v=${1//[[:space:],]/}; [ -n "$v" ]; }
+    # Unset, or exactly the one allowed value.
+    # shellcheck disable=SC2329
+    unset_or() { [ "$1" != set ] || [ "$2" = "$3" ]; }
+    # A small pool: 1..20 (the dedicated cluster allows 40 connections in all).
+    # shellcheck disable=SC2329
+    small_pool() { [[ $1 =~ ^[1-9][0-9]?$ ]] && [ "$1" -le 20 ]; }
+
+    check PHX_HOST test "${PHX_HOST-}" = sdr.a-z.bot
+    check SDR_ANCHOR_SINKS test "${SDR_ANCHOR_SINKS-}" = none
+    check 'DATABASE_URL socket_dir' socket_dir_is "${DATABASE_URL-}" /run/sdr-agent-postgresql
+    check SDR_LOGIN_ALLOWLIST non_empty_list "${SDR_LOGIN_ALLOWLIST-}"
+    check SDR_MODEL_PROVIDER unset_or "${SDR_MODEL_PROVIDER+set}" "${SDR_MODEL_PROVIDER-}" fake
+    check SDR_BIND_IP unset_or "${SDR_BIND_IP+set}" "${SDR_BIND_IP-}" 127.0.0.1
+    check POOL_SIZE small_pool "${POOL_SIZE-}"
+    [ "$fail" = 0 ] || exit 1
+    printf 'env semantics ok\n'
+  )
+}
+
+# shared_tooling_fingerprint <home>: one hash over root's shared Mix, Hex and rebar3
+# directories (paths, types, sizes, modes, mtimes); an absent directory hashes as absent.
+shared_tooling_fingerprint() {
+  local d
+  for d in "$1/.mix" "$1/.hex" "$1/.cache/rebar3" "$1/.config/rebar3"; do
+    if [ -e "$d" ]; then find "$d" -printf '%p %y %s %m %T@\n'; else printf '%s absent\n' "$d"; fi
+  done | LC_ALL=C sort | sha256sum | cut -d" " -f1
+}
 
 check_source() {
   cd "$PROJECT_ROOT"
@@ -64,11 +188,16 @@ build() {
   remote "echo $REV > $STAGE/REVISION"
 
   log INFO "building release on $HOST"
-  SUM="$(remote "STAGE=$STAGE REV=$REV bash -s" <<'BUILDEOF'
+  # The fingerprint helper runs on the host, before and after the build.
+  SUM="$( { declare -f shared_tooling_fingerprint; /bin/cat <<'BUILDEOF'; } | remote "STAGE=$STAGE REV=$REV bash -s"
     set -euo pipefail
     cd "$STAGE"
+    # I2: the build must not touch root's shared Mix/Hex/rebar3 state (other deployments
+    # use it); fingerprinted here and compared after the build.
+    shared_before="$(shared_tooling_fingerprint "$HOME")"
     # Flakes only see tracked files: stage the archive in a throwaway repo (owned by
-    # root, like the build, so no safe.directory exception is needed).
+    # root, like the build, so no safe.directory exception is needed). `git add -A` is
+    # confined to this freshly archived throwaway copy, never a working repository.
     git init -q && git add -A
     # One GC root per release revision: rollback targets keep their libraries.
     mkdir -p /root/.cache/sdr_agent
@@ -77,11 +206,32 @@ build() {
     nix develop --impure --expr "import $STAGE/nix/build-shell.nix { pkgs = (builtins.getFlake \"git+file://$STAGE\").inputs.nixpkgs.legacyPackages.\${builtins.currentSystem}; }" \
       --profile "/root/.cache/sdr_agent/build-shell-${REV:0:12}" --command bash -c '
       set -euo pipefail
+      : "${STAGE:?}"
       export MIX_ENV=prod
+      # I2: private, per-stage Mix/Hex/rebar3 state, removed with the stage by prune.
+      export MIX_HOME="$STAGE/.build-home/mix" HEX_HOME="$STAGE/.build-home/hex"
+      export MIX_DEPS_PATH="$STAGE/deps" MIX_BUILD_ROOT="$STAGE/_build"
+      export REBAR_CACHE_DIR="$STAGE/.build-home/rebar3-cache"
+      export REBAR_GLOBAL_CONFIG_DIR="$STAGE/.build-home/rebar3-config"
+      unset MIX_XDG MIX_ARCHIVES MIX_PATH
+      mkdir -p "$MIX_HOME" "$HEX_HOME" "$REBAR_CACHE_DIR" "$REBAR_GLOBAL_CONFIG_DIR"
       # Build output goes to stderr (the deploy log); only the checksum is stdout.
-      mix local.hex --force
-      mix local.rebar --force
-      mix deps.get --only prod
+      # The Nix-pinned tools only: Hex from the build shell (bp.hex on ERL_LIBS) and
+      # rebar3 from MIX_REBAR3 (nix/build-shell.nix); no mix local.hex/local.rebar.
+      case "${MIX_REBAR3:-}" in /nix/store/*/bin/rebar3) ;; *) echo "MIX_REBAR3 is not the pinned rebar3" >&2; exit 1 ;; esac
+      [ -x "$MIX_REBAR3" ] || { echo "the pinned rebar3 is not executable" >&2; exit 1; }
+      hex_dir="$(elixir -e "IO.write(:code.lib_dir(:hex))")"
+      case "$hex_dir" in /nix/store/*) ;; *) echo "Hex is not the pinned one" >&2; exit 1 ;; esac
+      [ -z "$(ls -A "$MIX_HOME")" ] || { echo "the private MIX_HOME is not empty" >&2; exit 1; }
+      echo "tool elixir: $(elixir --version | tail -1) at $(command -v elixir)"
+      echo "tool otp: $(erl -noshell -eval "{ok, V} = file:read_file(filename:join([code:root_dir(), \"releases\", erlang:system_info(otp_release), \"OTP_VERSION\"])), io:put_chars(string:trim(V)), halt().") at $(command -v erl)"
+      echo "tool hex: $(elixir -e "Application.load(:hex); IO.write(Application.spec(:hex, :vsn))") at $hex_dir"
+      echo "tool rebar3: $("$MIX_REBAR3" version) at $MIX_REBAR3"
+      lock_before="$(sha256sum mix.lock | cut -d" " -f1)"
+      mix deps.get --only prod --check-locked
+      [ "$(sha256sum mix.lock | cut -d" " -f1)" = "$lock_before" ] && git diff --quiet -- mix.lock \
+        || { echo "mix.lock changed during deps.get" >&2; exit 1; }
+      echo "mix.lock sha256 $lock_before unchanged by deps.get"
       # NixOS: patch the downloaded tailwind/esbuild binaries to a real interpreter.
       mix tailwind.install --if-missing
       mix esbuild.install --if-missing
@@ -102,9 +252,14 @@ build() {
       mix compile
       mix assets.deploy
       mix release --overwrite
+      git diff --quiet -- mix.lock || { echo "mix.lock changed during the build" >&2; exit 1; }
       cp REVISION _build/prod/rel/sdr_agent/REVISION
       tar -C _build/prod/rel -czf "$PWD/release.tar.gz" sdr_agent
     ' >&2
+    shared_after="$(shared_tooling_fingerprint "$HOME")"
+    [ "$shared_before" = "$shared_after" ] \
+      || { echo "the build changed root's shared Mix/Hex/rebar3 directories" >&2; exit 1; }
+    echo "root's shared Mix/Hex/rebar3 directories unchanged (fingerprint $shared_after)" >&2
     sha256sum release.tar.gz | cut -d" " -f1
 BUILDEOF
 )"
@@ -125,7 +280,26 @@ stage_and_check() {
         sed -i '1s|^#!/usr/bin/env sh$|#!/bin/sh|' "$f"
         sed -i '1s|^#!/usr/bin/env bash$|#!/bin/sh|' "$f"
       done
-    chown -R sdr_agent:sdr_agent "$new"
+    # The release tree is root's: the service user reads and runs it but cannot change it
+    # (links themselves, never their targets). It writes only under /var/lib/sdr_agent:
+    # the unit's RELEASE_TMP (checked below) and its working directory.
+    chown -R -h root:root "$new"
+    chmod -R u=rwX,go=rX "$new"
+    bad="$(find "$new" \( ! -user root -o ! -group root -o \( ! -type l -perm /022 \) \) -print -quit)"
+    [ -z "$bad" ] || { echo "release tree: not root-owned or group/other-writable"; exit 1; }
+    sudo -u sdr_agent test -x "$new/bin/sdr_agent" -a -r "$new/releases/COOKIE" \
+      || { echo "release tree: the service user cannot read or run it"; exit 1; }
+    if sudo -u sdr_agent test -w "$new" || sudo -u sdr_agent test -w "$new/bin/sdr_agent" \
+      || sudo -u sdr_agent test -w "$new/releases"; then
+      echo "release tree: the service user can write it"; exit 1
+    fi
+    echo "release tree: root:root, readable and runnable by sdr_agent, not writable by it"
+    systemctl show -p Environment --value sdr-agent | tr ' ' '\n' \
+      | grep -qx 'RELEASE_TMP=/var/lib/sdr_agent/tmp' \
+      || { echo "the sdr-agent unit does not set RELEASE_TMP=/var/lib/sdr_agent/tmp"; exit 1; }
+    sudo -u sdr_agent test -w /var/lib/sdr_agent \
+      || { echo "/var/lib/sdr_agent is not writable by sdr_agent (RELEASE_TMP)"; exit 1; }
+    echo "RELEASE_TMP: the unit's /var/lib/sdr_agent/tmp, under the service user's writable home"
 
     # Every ELF file (ERTS binaries and NIF .so files) must resolve all libraries.
     command -v ldd >/dev/null || { echo "ldd unavailable"; exit 1; }
@@ -140,18 +314,23 @@ stage_and_check() {
     [ "$n" -gt 0 ] || { echo "no ELF files checked"; exit 1; }
     echo "libraries ok for $n ELF files"
 
-    # systemd and the shell must read the secret env file identically (no values shown).
-    keys='^(DATABASE_URL|SECRET_KEY_BASE|TOKEN_SIGNING_SECRET|PHX_HOST|POOL_SIZE|SDR_ANCHOR_SINKS|POSTMARK_API_KEY|SDR_MAIL_FROM|SDR_LOGIN_ALLOWLIST|SDR_OWNER_EMAIL)='
+    # systemd and the shell must read the secret env file identically (no values shown),
+    # the 10 required keys and the two optional ones the semantic check reads.
+    required='^(DATABASE_URL|SECRET_KEY_BASE|TOKEN_SIGNING_SECRET|PHX_HOST|POOL_SIZE|SDR_ANCHOR_SINKS|POSTMARK_API_KEY|SDR_MAIL_FROM|SDR_LOGIN_ALLOWLIST|SDR_OWNER_EMAIL)='
+    keys='^(DATABASE_URL|SECRET_KEY_BASE|TOKEN_SIGNING_SECRET|PHX_HOST|POOL_SIZE|SDR_ANCHOR_SINKS|POSTMARK_API_KEY|SDR_MAIL_FROM|SDR_LOGIN_ALLOWLIST|SDR_OWNER_EMAIL|SDR_MODEL_PROVIDER|SDR_BIND_IP)='
     # The transient unit gets the system PATH (NixOS has no coreutils in systemd's default).
     a="$(systemd-run --quiet --wait --pipe --collect -p Environment=PATH=/run/current-system/sw/bin \
           -p EnvironmentFile=/run/secrets/sdr-agent/env \
           /bin/sh -c "env | grep -E '$keys' | sort | sha256sum")"
-    b="$(set -a; . /run/secrets/sdr-agent/env; set +a; env | grep -E "$keys" | sort | sha256sum)"
+    b="$(env -i PATH="$PATH" sh -c "set -a; . /run/secrets/sdr-agent/env; set +a; env" | grep -E "$keys" | sort | sha256sum)"
     [ "$a" = "$b" ] || { echo "env file parses differently under systemd and sh"; exit 1; }
-    [ "$(env -i PATH="$PATH" sh -c "set -a; . /run/secrets/sdr-agent/env; env" | grep -cE "$keys")" = 10 ] \
+    [ "$(env -i PATH="$PATH" sh -c "set -a; . /run/secrets/sdr-agent/env; env" | grep -cE "$required")" = 10 ] \
       || { echo "env file is missing keys"; exit 1; }
-    echo "env file ok"
+    echo "env file parses identically under systemd and sh"
 STAGEEOF
+  # The reviewed non-secret expectations (key names and ok/FAIL only).
+  { declare -f env_semantic_check; printf 'env_semantic_check /run/secrets/sdr-agent/env\n'; } \
+    | remote 'bash -s' || die "the env file does not match the reviewed expectations; nothing changed"
 }
 
 # Runs `bin/sdr_agent eval <expr>` from the staged release as the service user, with
@@ -166,15 +345,26 @@ eval_staged() {
 }
 
 migrate_staged() {
-  log INFO "migrating from the staged release (migrations are additive)"
+  log INFO "migrating from the staged release (never undone: a later restore of release files leaves the database migrated)"
   eval_staged "SdrAgent.Release.migrate()"
 }
 
-# Idempotent: the tenant, exactly one operator (the SDR_OWNER_EMAIL owner, magic-link
-# sign-in only) and the synthetic demo content; never the fixture operators.
+# Idempotent: the tenant, exactly one operator (the SDR_OWNER_EMAIL owner; a new one signs
+# in by magic link only) and the synthetic demo content with no follow-up step; never the
+# fixture operators. An unexpected identity state fails before any content write.
 seed_staged() {
-  log INFO "seeding the hosted copy from the staged release (idempotent)"
+  log INFO "seeding the hosted copy from the staged release (idempotent; never undone by a restore)"
   eval_staged "SdrAgent.Release.seed_hosted()"
+}
+
+# D-218 item 9: the staged release's follow-up switch is off, no active follow-up step,
+# open campaign using one or incomplete follow-up job exists, and the suppressed seed
+# contact has no enrollment, draft or delivery. Read-only; a failure stops before the
+# switch (the migrations and seed above stay in the database).
+containment_staged() {
+  log INFO "checking the hosted follow-up containment from the staged release"
+  eval_staged "SdrAgent.Release.verify_hosted_containment()" \
+    || die "hosted follow-up containment failed; nothing switched (the migrations and seed above remain in the database)"
 }
 
 # Verify the running process: a new MainPID, local health on 127.0.0.1:4005 through the
@@ -198,15 +388,18 @@ verify_running() {
 VERIFYEOF
 }
 
-# One transaction: displace the running release (recording exactly which backup this
-# deploy created), install the staged one, start and verify it. Every step's status is
-# checked explicitly (no reliance on errexit inside conditionals); any failure after
-# displacement restores *this* transaction's backup and verifies the restored process.
+# One transaction over release FILES: displace the running release (recording exactly
+# which backup this deploy created), install the staged one, start and verify it. Every
+# step's status is checked explicitly (no reliance on errexit inside conditionals); a
+# failure of install, start or local verification restores *this* transaction's backup
+# and verifies the restored process. The database is not restored (see the header).
 switch() {
   OLD_PID="$(remote 'systemctl show -p MainPID --value sdr-agent')"
   log INFO "switching releases (old pid $OLD_PID)"
   remote 'systemctl stop sdr-agent' || true
 
+  # The single quotes are deliberate (SC2016): the date and $b expand on the host.
+  # shellcheck disable=SC2016
   BACKUP="$(remote 'if [ -d /opt/sdr_agent ]; then b="/opt/sdr_agent.backup.$(date +%Y%m%d_%H%M%S)"; mv /opt/sdr_agent "$b" && echo "$b"; fi')" \
     || { remote 'systemctl start sdr-agent' || true; die "could not displace the running release; nothing changed"; }
   PREV_REV=""
@@ -240,7 +433,7 @@ recover() {
     mv "$BACKUP" /opt/sdr_agent
     systemctl start sdr-agent
 RECOVEREOF
-    die "deploy of $REV failed ($1); restored and verified $PREV_REV"
+    die "deploy of $REV failed ($1); restored and verified release files of $PREV_REV (the database keeps $REV's migrations and seed)"
   fi
   die "ROLLBACK FAILED after: $1. The service may be down. ssh root@$HOST journalctl -u sdr-agent -e"
 }
@@ -292,9 +485,10 @@ public_check() {
     fi
     sleep 2
   done
-  die "public health failed (DNS, TLS or Caddy): $PUBLIC_HEALTH_URL"
+  die "public health failed (DNS, TLS or Caddy): $PUBLIC_HEALTH_URL; nothing was restored: the new release stays installed after the switch and prune (--rollback restores release files only, not the database)"
 }
 
+# Release files only: the database keeps every migration and seed already applied.
 rollback_remote() {
   remote 'bash -s' <<'ROLLBACKEOF'
     set -euo pipefail
@@ -311,18 +505,21 @@ ROLLBACKEOF
 main() {
   case "${1:-}" in
     --dry-run)
-      check_source; log INFO "dry run: no changes" ;;
+      check_script; check_source; log INFO "dry run: no changes" ;;
     --rollback)
-      acquire_lock
+      check_script; acquire_lock
       OLD_PID="$(remote 'systemctl show -p MainPID --value sdr-agent')"
       rollback_remote
       verify_running "$(remote 'cat /opt/sdr_agent/REVISION')" "$OLD_PID" \
         || die "rollback did not verify; ssh root@$HOST journalctl -u sdr-agent -e"
+      log INFO "rollback restored release files only; the database is unchanged by it"
       public_check ;;
     "")
-      check_source; acquire_lock; build; stage_and_check; migrate_staged; seed_staged; switch
+      check_script; check_source; acquire_lock; build; stage_and_check
+      migrate_staged; seed_staged; containment_staged; switch
       # The switch is verified by now; a refused prune keeps every GC root and is reported.
       prune || log ERROR "prune refused (GC roots kept); inspect /opt/sdr_agent*/REVISION"
+      # After the switch and prune: a failure here is reported, never restored.
       public_check ;;
     *) die "unknown option $1" ;;
   esac
