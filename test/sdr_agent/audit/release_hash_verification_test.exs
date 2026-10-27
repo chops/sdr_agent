@@ -197,10 +197,12 @@ defmodule SdrAgent.Audit.ReleaseHashVerificationTest do
   end
 
   # Runs `sql` with triggers off (`tamper!/2`) and verifies, all inside a
-  # rolled-back savepoint; returns the subject's issue types.
+  # rolled-back savepoint; returns the subject's issue types. The savepoint
+  # is opened with `Audit.transaction/1`: `verify_chain` is a guarded call,
+  # refused inside any other transaction (`SdrAgent.Audit.Guard`).
   defp tampered_issues(ctx, id, sql, params) do
     {:error, {:issues, types}} =
-      Repo.transaction(fn ->
+      Audit.transaction(fn ->
         tamper!(sql, params)
         Repo.rollback({:issues, issue_types(verify(ctx), id)})
       end)
