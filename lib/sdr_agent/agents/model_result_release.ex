@@ -5,10 +5,14 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   evidence").
 
   Attributes: `model_invocation_id` (unique: one release per invocation),
-  `disposition` (`:released | :withheld | :calibration`), `reason`,
-  `wire_witness_link_id` (optional), `projection_version` and `method`
-  (copied from that link's evaluated projection and method), `evidence_sha256`
-  (lowercase hex; calibration latches only), `decided_at` and the trace ids.
+  `disposition` (`:released | :withheld | :calibration | :demo_exception`),
+  `reason`, `wire_witness_link_id` (optional), `projection_version` and
+  `method` (copied from that link's evaluated projection and method),
+  `evidence_sha256` (lowercase hex; calibration latches only), `decided_at`,
+  the trace ids, and the four demo-exception columns (ADR-0005 C2* item 8):
+  `exception_policy_id`, `exception_expires_at`, `exception_basis` (the
+  closed `c2star-basis/1` map) and `exception_basis_sha256` (lowercase hex),
+  never caller-writable and SQL NULL on every other disposition.
 
   Allowed disposition/reason pairs (validated by
   `SdrAgent.Agents.Changes.ReleaseDecision`, backed by a check constraint):
@@ -30,6 +34,16 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   `:released` and `:withheld` need a completed generation-2 ClaudeCLI
   invocation outside a `:proof` run. The invocation is never updated for
   its release.
+
+  `:demo_exception` ↔ `:v4_uncalibrated` (ADR-0005 C2* amendment, D-223)
+  exists in the schema only: no action may decide it yet (`allowed_pair?/2`
+  refuses it), and the database CHECKs require, NULL-safely, its v4 link,
+  projection and method, NULL `evidence_sha256`, all four exception columns,
+  `decided_at < exception_expires_at` and an object basis whose `schema` and
+  `policy.id` match. The four columns are also ADR-0009's one record-hash
+  group (`__sdr_record_hash_groups__/0`, D-226): the row map leaves them out
+  together only when all four load nil, so every earlier release keeps its
+  hash, and commits all four otherwise.
 
   Relationships: belongs to Tenant, ModelInvocation (RESTRICT; composite FK
   `(model_invocation_id, tenant_id)` → `model_invocations (id, tenant_id)`)
@@ -61,7 +75,7 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Checks
 
-  @dispositions [:released, :withheld, :calibration]
+  @dispositions [:released, :withheld, :calibration, :demo_exception]
   @withheld_reasons [
     :witness_mismatch,
     :witness_missing,
@@ -69,8 +83,19 @@ defmodule SdrAgent.Agents.ModelResultRelease do
     :store_unreadable,
     :gate_interrupted
   ]
-  @reasons [:reconciled, :calibration | @withheld_reasons]
+  @reasons [:reconciled, :calibration, :v4_uncalibrated | @withheld_reasons]
   @methods [:time_window, :propagated_id]
+  # ADR-0005 C2* item 8: the four demo-exception columns, all SQL NULL on
+  # every other disposition; ADR-0009 C2* record-hash continuity (D-226):
+  # the one record-hash group, omitted together only when all four are nil.
+  @exception_fields [
+    :exception_policy_id,
+    :exception_expires_at,
+    :exception_basis,
+    :exception_basis_sha256
+  ]
+  @exception_null "exception_policy_id IS NULL AND exception_expires_at IS NULL AND " <>
+                    "exception_basis IS NULL AND exception_basis_sha256 IS NULL"
   # R0-07 slice C (G2): the bounded typed classification of a withheld
   # gate outcome, recorded as metadata only.
   @gate_classifications [
@@ -119,16 +144,40 @@ defmodule SdrAgent.Agents.ModelResultRelease do
       check_constraint :evidence_sha256, "model_result_releases_evidence_sha256",
         check: "evidence_sha256 IS NULL OR evidence_sha256 ~ '^[0-9a-f]{64}$'"
 
+      # ADR-0005 C2* item 8 (draft r4 §7 item 1): every existing branch gains
+      # "all four exception columns NULL"; the demo branch is NULL-safe
+      # (COALESCE: UNKNOWN rejects).
       check_constraint :disposition, "model_result_releases_pair",
         check:
           "(disposition = 'released' AND reason = 'reconciled' AND " <>
             "wire_witness_link_id IS NOT NULL AND projection_version IS NOT NULL AND " <>
-            "method IS NOT NULL AND evidence_sha256 IS NULL) OR " <>
+            "method IS NOT NULL AND evidence_sha256 IS NULL AND #{@exception_null}) OR " <>
             "(disposition = 'withheld' AND " <>
             SdrAgent.Audit.SQL.one_of("reason", @withheld_reasons) <>
-            " AND evidence_sha256 IS NULL) OR " <>
+            " AND evidence_sha256 IS NULL AND #{@exception_null}) OR " <>
             "(disposition = 'calibration' AND reason = 'calibration' AND " <>
-            "evidence_sha256 IS NOT NULL)"
+            "evidence_sha256 IS NOT NULL AND #{@exception_null}) OR " <>
+            "COALESCE((disposition = 'demo_exception' AND reason = 'v4_uncalibrated' AND " <>
+            "wire_witness_link_id IS NOT NULL AND projection_version IS NOT NULL AND " <>
+            "projection_version = 'claude-message-json/4+prompt-builder/1' AND " <>
+            "method IS NOT NULL AND method = 'propagated_id' AND evidence_sha256 IS NULL AND " <>
+            "exception_policy_id IS NOT NULL AND exception_expires_at IS NOT NULL AND " <>
+            "exception_basis IS NOT NULL AND exception_basis_sha256 IS NOT NULL), false)"
+
+      check_constraint :exception_expires_at, "model_result_releases_exception_window",
+        check:
+          "disposition <> 'demo_exception' OR (exception_expires_at IS NOT NULL AND " <>
+            "decided_at < exception_expires_at) IS TRUE"
+
+      check_constraint :exception_basis_sha256, "model_result_releases_exception_basis_sha256",
+        check: "exception_basis_sha256 IS NULL OR exception_basis_sha256 ~ '^[0-9a-f]{64}$'"
+
+      check_constraint :exception_basis, "model_result_releases_exception_basis_shape",
+        check:
+          "disposition <> 'demo_exception' OR (jsonb_typeof(exception_basis) = 'object' AND " <>
+            "jsonb_typeof(exception_basis->'policy') = 'object' AND " <>
+            "exception_basis->>'schema' = 'c2star-basis/1' AND " <>
+            "exception_basis->'policy'->>'id' = exception_policy_id) IS TRUE"
     end
 
     custom_statements do
@@ -264,6 +313,18 @@ defmodule SdrAgent.Agents.ModelResultRelease do
       public? true
     end
 
+    # ADR-0005 C2* item 8: set only on a `:demo_exception` row (never by a
+    # caller); SQL NULL on every other row.
+    attribute :exception_policy_id, :string, writable?: false, public?: true
+    attribute :exception_expires_at, :utc_datetime_usec, writable?: false, public?: true
+    attribute :exception_basis, :map, writable?: false, public?: true
+
+    attribute :exception_basis_sha256, :string do
+      writable? false
+      constraints match: ~r/\A[0-9a-f]{64}\z/
+      public? true
+    end
+
     attribute :trace_id, :string, allow_nil?: false, public?: true
     attribute :span_id, :string, allow_nil?: false, public?: true
   end
@@ -307,4 +368,10 @@ defmodule SdrAgent.Agents.ModelResultRelease do
 
   @doc false
   def __sdr_audited__, do: true
+
+  # ADR-0009 C2* record-hash continuity amendment (D-226): the one declared
+  # record-hash group (`SdrAgent.Audit.RecordHash.groups/1`). Closed: no
+  # other resource declares one, and it never changes.
+  @doc false
+  def __sdr_record_hash_groups__, do: [{"c2star-demo-exception", @exception_fields}]
 end
