@@ -1,11 +1,17 @@
 defmodule SdrAgentWeb.AuthController do
   @moduledoc """
-  AshAuthentication callbacks for password sign-in and sign-out. Sign-in
-  outcomes are audited by `SdrAgent.Accounts.User`'s sign-in action;
-  sign-out records `auth.signed_out` for the signed-in user.
+  AshAuthentication callbacks for password and magic-link sign-in and for
+  sign-out. Sign-in outcomes are audited by `SdrAgent.Accounts.User`'s
+  sign-in actions; sign-out records `auth.signed_out` for the signed-in
+  user. A magic-link request gets the same answer whether or not a link was
+  mailed.
   """
   use SdrAgentWeb, :controller
   use AshAuthentication.Phoenix.Controller
+
+  # A magic-link request answers the same whether or not a link was sent
+  # (unknown, disabled or not-allowlisted addresses get nothing).
+  def success(conn, {:magic_link, :request}, _user, _token), do: link_requested(conn)
 
   def success(conn, activity, user, _token) do
     return_to = get_session(conn, :return_to) || ~p"/"
@@ -24,6 +30,14 @@ defmodule SdrAgentWeb.AuthController do
     |> assign(:current_user, user)
     |> put_flash(:info, message)
     |> redirect(to: return_to)
+  end
+
+  def failure(conn, {:magic_link, :request}, _reason), do: link_requested(conn)
+
+  def failure(conn, {:magic_link, _phase}, _reason) do
+    conn
+    |> put_flash(:error, "That sign-in link is invalid, used or expired. Request a new one.")
+    |> redirect(to: ~p"/sign-in")
   end
 
   def failure(conn, activity, reason) do
@@ -73,5 +87,11 @@ defmodule SdrAgentWeb.AuthController do
     |> clear_session(:sdr_agent)
     |> put_flash(:info, "You are now signed out")
     |> redirect(to: return_to)
+  end
+
+  defp link_requested(conn) do
+    conn
+    |> put_flash(:info, "If that address may sign in, a sign-in link is on its way.")
+    |> redirect(to: ~p"/sign-in")
   end
 end
