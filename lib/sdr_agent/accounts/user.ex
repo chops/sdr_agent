@@ -27,6 +27,12 @@ defmodule SdrAgent.Accounts.User do
   `:sign_in_with_magic_link` signs in an active user once, audited like a
   password sign-in (strategy `magic_link`).
 
+  Hosted allowlist: where `config :sdr_agent, :login_allowlist_enforced` is
+  true (prod), both sign-ins, the magic-link request and `:get_by_subject`
+  (every session and token resolution) admit only users on
+  `SDR_LOGIN_ALLOWLIST`, read at call time; an empty list admits nobody
+  (`SdrAgent.Accounts.Preparations.AllowlistedOnly`).
+
   Actions and actors:
 
     * `:create_user` — ADM (guarded); `:seed` — SEED in dev/test only;
@@ -150,6 +156,7 @@ defmodule SdrAgent.Accounts.User do
       argument :subject, :string, allow_nil?: false
       get? true
       filter expr(status == :active)
+      prepare SdrAgent.Accounts.Preparations.AllowlistedOnly
       prepare AshAuthentication.Preparations.FilterBySubject
     end
 
@@ -169,6 +176,7 @@ defmodule SdrAgent.Accounts.User do
       end
 
       filter expr(status == :active)
+      prepare SdrAgent.Accounts.Preparations.AllowlistedOnly
       prepare Password.SignInPreparation
       prepare SdrAgent.Accounts.Preparations.AuditSignIn
 
@@ -187,6 +195,8 @@ defmodule SdrAgent.Accounts.User do
       end
 
       filter expr(status == :active)
+      prepare SdrAgent.Accounts.Preparations.LimitLinkRequests
+      prepare SdrAgent.Accounts.Preparations.AllowlistedOnly
       prepare MagicLink.RequestPreparation
     end
 
@@ -201,6 +211,7 @@ defmodule SdrAgent.Accounts.User do
       end
 
       filter expr(status == :active)
+      prepare SdrAgent.Accounts.Preparations.AllowlistedOnly
       prepare MagicLink.SignInPreparation
       prepare {SdrAgent.Accounts.Preparations.AuditSignIn, strategy: "magic_link"}
 
