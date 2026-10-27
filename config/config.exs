@@ -261,13 +261,16 @@ config :phoenix, :json_library, Jason
 # R0-05's typed resolution confirmation
 # (`docs/product/r0/r0-05-interface.md` section 5); and, for magic-link
 # sign-in (Codex M2), the link `token` (path, form and LiveView params) and
-# the requester's `email`. Keys containing these strings are filtered too.
+# the requester's `email`, and `magic_link`, the confirmation view's
+# alternate token param (Codex P1). Keys containing these strings are
+# filtered too.
 config :phoenix, :filter_parameters, [
   "password",
   "settings_content",
   "resolution_confirmation",
   "token",
-  "email"
+  "email",
+  "magic_link"
 ]
 
 # Hosted owner-only admission (`SdrAgent.Accounts.LoginAllowlist`): a
