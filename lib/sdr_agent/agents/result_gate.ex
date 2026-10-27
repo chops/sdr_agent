@@ -317,8 +317,13 @@ defmodule SdrAgent.Agents.ResultGate do
     |> Audit.transaction()
     |> case do
       {:ok, result} -> result
-      {:error, %Ash.Changeset{errors: errors}} -> {:error, Ash.Error.to_error_class(errors)}
-      {:error, error} -> {:error, error}
+      # A refused demo decide may roll the transaction back itself (Ash does
+      # inside an open transaction), so the code is read here too.
+      {:error, %Ash.Changeset{errors: errors}} ->
+        {:error, errors |> Ash.Error.to_error_class() |> exception_error()}
+
+      {:error, error} ->
+        {:error, exception_error(error)}
     end
   end
 
