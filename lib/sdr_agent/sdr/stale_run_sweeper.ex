@@ -118,6 +118,7 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   require Logger
 
   alias SdrAgent.Actor
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.ModelInvocation
@@ -189,7 +190,7 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
            |> Enum.filter(
              &(&1.status == :running and stale?(&1, cutoff) and maybe_abandoned?(&1, actor))
            )
-           |> each_ok(&recovered(recover(&1, cutoff, actor))),
+           |> each_ok(&recovered(recover_owned(&1, cutoff, actor))),
          {:ok, invocations} <- terminal_unreleased(cutoff, actor),
          :ok <- each_ok(invocations, &recovered(recover_terminal(&1, actor))),
          {:ok, stopped} <- Agents.list_runs(actor: actor),
@@ -346,6 +347,13 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
 
   defp states(states),
     do: {:ok, Enum.find(states, List.last(states), &(&1 in @live_states))}
+
+  # C2* operation snapshot entry `:stale_run_recover` (ADR-0005 C2* addendum
+  # 1, D-227): each per-run recovery is one operation, sampled before its
+  # unlocked prefilter; the locked re-check, the :gate_owned retry and any
+  # Recovery it runs inherit that snapshot.
+  defp recover_owned(run, cutoff, actor),
+    do: OperationSnapshot.enter(:stale_run_recover, fn -> recover(run, cutoff, actor) end)
 
   # R0-07 slice C: a run holding an unreleased output is recovered through
   # the result gate (G5), never as a crash.

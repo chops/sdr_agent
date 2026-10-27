@@ -44,6 +44,7 @@ defmodule SdrAgent.SDR.Actions.BuildEvidenceBundle do
         pages: Zoi.list(Zoi.map())
       })
 
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents
   alias SdrAgent.Agents.RunSettings
   alias SdrAgent.Agents.RunSettingsSnapshot
@@ -56,36 +57,44 @@ defmodule SdrAgent.SDR.Actions.BuildEvidenceBundle do
   @caps [:research_max_sources, :research_max_source_chars, :research_max_total_source_chars]
   @trust_rank %{high: 0, medium: 1, low: 2}
 
+  # C2* operation snapshot entry `:perform_build_evidence_bundle` (ADR-0005
+  # C2* item 2): a direct call owns; under SDR.Action.execute/3 it inherits.
   @impl SdrAgent.SDR.Action
   def perform(%{lead_id: lead_id} = params, ctx) do
-    flow =
-      [params.crm, params.company, params.search | params.pages]
-      |> Enum.flat_map(& &1.artifacts)
-      |> Enum.uniq_by(& &1.id)
+    OperationSnapshot.enter(:perform_build_evidence_bundle, fn ->
+      flow =
+        [params.crm, params.company, params.search | params.pages]
+        |> Enum.flat_map(& &1.artifacts)
+        |> Enum.uniq_by(& &1.id)
 
-    with :ok <- Preconditions.declared(ctx, __MODULE__),
-         {:ok, settings} <- Preconditions.settings(ctx),
-         {:ok, brief, run, snapshot} <- research_settings(ctx, settings),
-         limits = Map.new(@caps, &{&1, RunSettings.ceiling(run, snapshot.limits, &1)}),
-         {sent, detail} = select(flow, limits),
-         {:ok, %{contact: contact, account: account}} <- Support.lead_context(ctx, lead_id),
-         {:ok, _caps} <- caps_decision(ctx, lead_id, snapshot, detail),
-         {:ok, output, invocation} <-
-           Model.call(ctx, :evidence_extraction, input(account, contact, sent, brief), lead_id),
-         {:ok, recorded} <- ground_all(ctx, lead_id, sent, output.claims, invocation) do
-      accepted = for {:accepted, claim} <- recorded, do: claim.id
-      rejected = Enum.count(recorded, &match?({:rejected, _}, &1))
+      with :ok <- Preconditions.declared(ctx, __MODULE__),
+           {:ok, settings} <- Preconditions.settings(ctx),
+           {:ok, brief, run, snapshot} <- research_settings(ctx, settings),
+           limits = Map.new(@caps, &{&1, RunSettings.ceiling(run, snapshot.limits, &1)}),
+           {sent, detail} = select(flow, limits),
+           {:ok, %{contact: contact, account: account}} <- Support.lead_context(ctx, lead_id),
+           {:ok, _caps} <- caps_decision(ctx, lead_id, snapshot, detail),
+           {:ok, output, invocation} <-
+             Model.call(ctx, :evidence_extraction, input(account, contact, sent, brief), lead_id),
+           {:ok, recorded} <- ground_all(ctx, lead_id, sent, output.claims, invocation) do
+        research_completed(ctx, lead_id, recorded)
+      end
+    end)
+  end
 
-      {:ok, %{ctx.agent_state | phase: :research, evidence_ids: accepted},
-       [
-         Support.emit("sdr.research.completed", %{
-           lead_id: lead_id,
-           accepted: length(accepted),
-           rejected: rejected,
-           ungrounded: Enum.count(recorded, &(&1 == :ungrounded))
-         })
-       ]}
-    end
+  defp research_completed(ctx, lead_id, recorded) do
+    accepted = for {:accepted, claim} <- recorded, do: claim.id
+    rejected = Enum.count(recorded, &match?({:rejected, _}, &1))
+
+    {:ok, %{ctx.agent_state | phase: :research, evidence_ids: accepted},
+     [
+       Support.emit("sdr.research.completed", %{
+         lead_id: lead_id,
+         accepted: length(accepted),
+         rejected: rejected,
+         ungrounded: Enum.count(recorded, &(&1 == :ungrounded))
+       })
+     ]}
   end
 
   # The brief, the run and its snapshot record (for the caps Decision's

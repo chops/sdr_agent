@@ -15,6 +15,7 @@ defmodule SdrAgent.SDR.Actions.ScoreLead do
     description: "QualificationResult over accepted evidence (model, Zoi-validated).",
     schema: Zoi.object(%{lead_id: Zoi.string()})
 
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Research
   alias SdrAgent.Sales
   alias SdrAgent.SDR.Context
@@ -22,17 +23,21 @@ defmodule SdrAgent.SDR.Actions.ScoreLead do
   alias SdrAgent.SDR.Schemas
   alias SdrAgent.SDR.Support
 
+  # C2* operation snapshot entry `:perform_score_lead` (ADR-0005 C2* item
+  # 2): a direct call owns; under SDR.Action.execute/3 it inherits.
   @impl SdrAgent.SDR.Action
   def perform(%{lead_id: lead_id}, ctx) do
-    with {:ok, %{lead: lead, contact: contact, account: account}} <-
-           Support.lead_context(ctx, lead_id),
-         {:ok, campaign} <- Support.fetch(ctx, Sales.Campaign, ctx.agent_state.campaign_id),
-         {:ok, icp} <- Support.fetch(ctx, Sales.IcpDefinition, campaign.icp_definition_id),
-         {:ok, claims} <- Support.accepted_claims(ctx, lead_id),
-         {:ok, output, invocation} <-
-           Model.call(ctx, :qualification, input(icp, account, contact, claims), lead_id) do
-      record(ctx, lead, icp, claims, output, invocation)
-    end
+    OperationSnapshot.enter(:perform_score_lead, fn ->
+      with {:ok, %{lead: lead, contact: contact, account: account}} <-
+             Support.lead_context(ctx, lead_id),
+           {:ok, campaign} <- Support.fetch(ctx, Sales.Campaign, ctx.agent_state.campaign_id),
+           {:ok, icp} <- Support.fetch(ctx, Sales.IcpDefinition, campaign.icp_definition_id),
+           {:ok, claims} <- Support.accepted_claims(ctx, lead_id),
+           {:ok, output, invocation} <-
+             Model.call(ctx, :qualification, input(icp, account, contact, claims), lead_id) do
+        record(ctx, lead, icp, claims, output, invocation)
+      end
+    end)
   end
 
   defp input(icp, account, contact, claims) do

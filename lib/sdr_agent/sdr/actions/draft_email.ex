@@ -27,35 +27,43 @@ defmodule SdrAgent.SDR.Actions.DraftEmail do
         plan: Zoi.map()
       })
 
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.Model
   alias SdrAgent.SDR.Preconditions
 
+  # C2* operation snapshot entry `:perform_draft_email` (ADR-0005 C2* item
+  # 2): a direct call owns; under SDR.Action.execute/3 it inherits. (The two
+  # former nested `with` blocks are one, with the same clauses in order.)
   @impl SdrAgent.SDR.Action
   def perform(%{lead_id: lead_id, claims: claims, triggers: triggers, plan: plan}, ctx) do
-    with :ok <- Preconditions.declared(ctx, __MODULE__),
-         {:ok, settings} <- Preconditions.settings(ctx),
-         {:ok, offering, guide, brief} <- draft_settings(ctx, settings) do
-      input = %{
-        contact: plan.contact,
-        company: plan.company,
-        sender: plan.sender,
-        step: %{instructions: plan.step.instructions},
-        evidence: claims,
-        triggers: triggers,
-        offering: offering,
-        writing_guide: guide,
-        research_brief: brief
-      }
-
-      with {:ok, proposal, invocation} <- Model.call(ctx, :outreach_proposal, input, lead_id),
+    OperationSnapshot.enter(:perform_draft_email, fn ->
+      with :ok <- Preconditions.declared(ctx, __MODULE__),
+           {:ok, settings} <- Preconditions.settings(ctx),
+           {:ok, offering, guide, brief} <- draft_settings(ctx, settings),
+           input = draft_input(plan, claims, triggers, offering, guide, brief),
+           {:ok, proposal, invocation} <- Model.call(ctx, :outreach_proposal, input, lead_id),
            {:ok, _angle} <-
              decide(ctx, lead_id, invocation, :angle, "/angle", "selected", proposal),
            {:ok, draft} <-
              decide(ctx, lead_id, invocation, :draft_proposal, "", "proposed", proposal) do
         {:ok, %{proposal: proposal, model_invocation_id: invocation.id, decision_id: draft.id}}
       end
-    end
+    end)
+  end
+
+  defp draft_input(plan, claims, triggers, offering, guide, brief) do
+    %{
+      contact: plan.contact,
+      company: plan.company,
+      sender: plan.sender,
+      step: %{instructions: plan.step.instructions},
+      evidence: claims,
+      triggers: triggers,
+      offering: offering,
+      writing_guide: guide,
+      research_brief: brief
+    }
   end
 
   defp draft_settings(ctx, settings) do
