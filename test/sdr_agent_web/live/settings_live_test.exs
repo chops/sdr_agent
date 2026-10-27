@@ -574,9 +574,18 @@ defmodule SdrAgentWeb.SettingsLiveTest do
                "C4-01b: limit #{field} does not show its validation range"
       end
 
-      # Section 3.3 at this tree: only the three run_* limits are enforced.
+      # Section 3.3 at this tree: the three run_* limits, and the three source
+      # caps B1-04 enforces (plan claude-b1-research-draft-plan-r2.md, Q2).
       enforced = for {field, %{enforced_by: by}} <- rules, by, do: field
-      assert enforced == [:run_max_model_calls, :run_max_tool_calls, :run_max_tokens]
+
+      assert enforced == [
+               :run_max_model_calls,
+               :run_max_tool_calls,
+               :run_max_tokens,
+               :research_max_sources,
+               :research_max_source_chars,
+               :research_max_total_source_chars
+             ]
 
       for {field, _rule} <- rules do
         if field in enforced do
