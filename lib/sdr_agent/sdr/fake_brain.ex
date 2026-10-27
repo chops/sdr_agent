@@ -13,7 +13,11 @@ defmodule SdrAgent.SDR.FakeBrain do
     * `sdr.qualification` — evaluates the ICP criteria against the company
       facts and the evidence (a trigger passes when a claim names one).
     * `sdr.outreach_proposal` — a short draft whose claim and
-      personalization sentences are evidence claims copied verbatim;
+      personalization sentences are evidence claims copied verbatim, whose
+      pitch is the text of the first offering item that is not a `:limit`
+      (when the input carries an offering), and whose call to action is a
+      question the body asks verbatim; it proposes no time, carries no URL
+      and never copies the writing guide or research brief;
     * `sdr.reply_classification` — keyword rules over the reply text
       (`@reply_rules`, first match wins), `unknown` otherwise.
   """
@@ -126,24 +130,37 @@ defmodule SdrAgent.SDR.FakeBrain do
       Enum.find(evidence, &(&1.id != trigger.id and &1.claim =~ "employees")) ||
         Enum.find(evidence, &(&1.id != trigger.id)) || trigger
 
+    item = offering_item(input)
+    cta = "Would it help to compare notes on how your team handles this today?"
+
     body =
       "Hi #{contact.first_name},\n\n" <>
         "#{trigger.claim} #{detail.claim}\n\n" <>
-        "Demo SDR helps revenue teams ramp new SDRs with researched, human-reviewed " <>
-        "first touches. Would a 20-minute call next week be useful?\n\n" <>
-        "Best,\n#{sender.name}"
+        pitch(item) <> cta <> "\n\n" <> "Best,\n#{sender.name}"
 
     %{
-      subject: "#{company.name}: ramping your new SDRs",
+      subject: "#{company.name}: a quick question",
       body: body,
-      angle: "Support the outbound hiring push with researched first touches",
-      cta: "A 20-minute call next week",
+      angle: angle(item),
+      cta: cta,
       claims: [%{claim: trigger.claim, evidence_id: trigger.id, confidence: 0.9}],
       personalization: [%{text: detail.claim, evidence_id: detail.id}],
       risk_flags: [],
       evidence_ids: Enum.uniq([trigger.id, detail.id])
     }
   end
+
+  # The first offering item that is not a limit (a limit is never pitched).
+  defp offering_item(%{offering: %{items: items}}) when is_list(items),
+    do: Enum.find(items, &(to_string(&1.kind) != "limit"))
+
+  defp offering_item(_input), do: nil
+
+  defp pitch(nil), do: ""
+  defp pitch(item), do: item.text <> " "
+
+  defp angle(nil), do: "Connect the observed trigger to the offering"
+  defp angle(item), do: "Connect the observed trigger to offering item #{item.id}"
 
   # {classification, sentiment, next action, keywords}; first match wins.
   @reply_rules [

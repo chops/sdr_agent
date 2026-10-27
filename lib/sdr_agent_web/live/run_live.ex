@@ -19,6 +19,12 @@ defmodule SdrAgentWeb.RunLive do
   before C4 has no snapshot and says so. An auditor's view of the snapshot
   is recorded first; without that record the snapshot is withheld, never
   shown as missing.
+
+  The three B1-04 source caps say "checked at use" only for a run whose
+  pinned AgentDefinition declares the enforcing `BuildEvidenceBundle`
+  version; an older run is labelled "not enforced for this run", so the
+  registry never implies retroactive enforcement. The run's
+  `research_caps` Decision (in the Decisions list) is what was applied.
   """
   use SdrAgentWeb, :live_view
 
@@ -29,6 +35,8 @@ defmodule SdrAgentWeb.RunLive do
   alias SdrAgent.Audit
   alias SdrAgent.Sales
   alias SdrAgent.SDR
+  alias SdrAgent.SDR.Actions.BuildEvidenceBundle
+  alias SdrAgent.SDR.SDRAgent
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
   alias SdrAgentWeb.LiveRefresh
@@ -41,6 +49,9 @@ defmodule SdrAgentWeb.RunLive do
     :research_brief,
     :operational_limits
   ]
+
+  # Enforced by BuildEvidenceBundle (B1-04) only for runs whose definition declares it.
+  @b1_caps [:research_max_sources, :research_max_source_chars, :research_max_total_source_chars]
 
   @budget [
     {"Model calls", :model_calls_used, :max_model_calls},
@@ -95,6 +106,7 @@ defmodule SdrAgentWeb.RunLive do
         signals: Enum.filter(events, &(&1.agent_run_id == run.id and &1.category == :signal)),
         budget: budget(run.budget),
         settings: settings_summary(run, scope),
+        caps_declared: caps_declared?(run, opts),
         retryable?:
           run.status in [:failed, :budget_exhausted, :cancelled] and
             not Enum.any?(runs, &(&1.retry_of_id == run.id))
@@ -131,6 +143,14 @@ defmodule SdrAgentWeb.RunLive do
       {:error, %Ash.Error.Invalid{}} -> {:error, :not_found}
       {:error, %Ash.Error.Query.NotFound{}} -> {:error, :not_found}
       other -> other
+    end
+  end
+
+  # Whether the run's pinned definition declares the B1-04 caps' enforcer.
+  defp caps_declared?(run, opts) do
+    case Agents.get_definition(run.agent_definition_id, opts) do
+      {:ok, definition} -> SDRAgent.declares?(definition.definition, BuildEvidenceBundle)
+      _other -> false
     end
   end
 
@@ -178,9 +198,16 @@ defmodule SdrAgentWeb.RunLive do
 
   attr :settings, :any, required: true
   attr :kinds, :list, required: true
+  attr :caps_declared, :boolean, required: true
 
   defp run_settings(assigns) do
-    assigns = assign(assigns, rules: Safeguards.limit_rules())
+    assigns =
+      assign(assigns,
+        rules:
+          for {field, rule} <- Safeguards.limit_rules() do
+            {field, Map.put(rule, :label, enforcement(field, rule, assigns.caps_declared))}
+          end
+      )
 
     ~H"""
     <.card id="run-settings" title="Settings snapshot">
@@ -248,8 +275,11 @@ defmodule SdrAgentWeb.RunLive do
                   {delimit(elem(@settings, 1).run_ceilings[field])}
                 </td>
                 <td class="py-2 text-xs">
-                  <span :if={rule.enforced_by} class="text-zinc-700">checked at use</span>
-                  <span :if={is_nil(rule.enforced_by)} class="text-amber-700">
+                  <span :if={rule.label == :checked} class="text-zinc-700">checked at use</span>
+                  <span :if={rule.label == :not_for_run} class="text-amber-700">
+                    not enforced for this run
+                  </span>
+                  <span :if={rule.label == :not_yet} class="text-amber-700">
                     not yet enforced
                   </span>
                 </td>
@@ -267,6 +297,10 @@ defmodule SdrAgentWeb.RunLive do
     </.card>
     """
   end
+
+  defp enforcement(_field, %{enforced_by: nil}, _declared?), do: :not_yet
+  defp enforcement(field, _rule, false) when field in @b1_caps, do: :not_for_run
+  defp enforcement(_field, _rule, _declared?), do: :checked
 
   defp slot_label(%{source: :revision, number: number}), do: "revision #{number}"
 
@@ -342,7 +376,11 @@ defmodule SdrAgentWeb.RunLive do
           </div>
         </div>
 
-        <.run_settings settings={@settings} kinds={@settings_kinds} />
+        <.run_settings
+          settings={@settings}
+          kinds={@settings_kinds}
+          caps_declared={@caps_declared}
+        />
 
         <.card id="decisions" title="Decisions">
           <:subtitle>
