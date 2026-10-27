@@ -7,9 +7,14 @@ defmodule SdrAgent.SDR.DefinitionV4UpgradeTest do
   is added, so SDRAgent is a new immutable definition, v4.
 
   On a database already holding SDRAgent v3 (the frozen v3 body of
-  `SdrAgent.SDRDefinitionFixtures`): the v3 row stays byte-identical;
-  registration yields v4 idempotently with only those differences; a
-  different body under v4 is refused; a new assignment pins v4.
+  `SdrAgent.SDRDefinitionFixtures`): the v3 row stays byte-identical; the
+  frozen v4 body (`v4_body/0`, PR #234 GREEN `5e4c82da`) registers as v4
+  idempotently with only those differences; a different body under v4 is
+  refused; a new assignment pins the current definition. B1-R1 (route
+  `claude-b1-r1-version-route-r1.md`): the current definition is v5 (its
+  upgrade from the frozen v4 is `SdrAgent.SDR.DefinitionV5UpgradeTest`), so
+  these tests describe the frozen v4 body rather than the current
+  registration.
 
   Legacy execution (conservative refusal): a run pinned to a definition
   that does not declare a changed action at its current version (any
@@ -58,12 +63,10 @@ defmodule SdrAgent.SDR.DefinitionV4UpgradeTest do
 
   defp short(term), do: inspect(term, limit: 8, printable_limit: 200)
 
-  test "a v3 database keeps its row; registration yields v4 with only the intended changes",
+  test "a v3 database keeps its row; the frozen v4 registers with only the intended changes",
        ctx do
     legacy = register_v3!(ctx.tenant.id)
-    result = SDRAgent.register(ctx.tenant.id)
-    assert match?({:ok, _}, result), short(result)
-    {:ok, current} = result
+    current = register_v4!(ctx.tenant.id)
 
     assert current.version == 4, "B1: SDRAgent is still registered as v#{current.version}"
     assert current.id != legacy.id
@@ -104,9 +107,9 @@ defmodule SdrAgent.SDR.DefinitionV4UpgradeTest do
 
     assert Base.encode16(reread.definition_sha256, case: :lower) == v3_sha256()
 
-    # Idempotent at the new version; another body under v4 is refused.
-    assert {:ok, again} = SDRAgent.register(ctx.tenant.id)
-    assert again.id == current.id
+    # Idempotent at v4; another body under v4 is refused.
+    assert register_v4!(ctx.tenant.id).id == current.id
+    assert current.definition == v4_body()
 
     assert {:error, error} =
              Agents.register_definition(
@@ -122,12 +125,15 @@ defmodule SdrAgent.SDR.DefinitionV4UpgradeTest do
     assert Exception.message(error) =~ "registered with another hash"
   end
 
-  test "a new assignment on a v3 database pins v4", ctx do
+  test "a new assignment on a v3 database pins the current definition", ctx do
     legacy = register_v3!(ctx.tenant.id)
     %{run: run} = assign!(ctx, "01")
 
     {:ok, pinned} = Ash.get(Agents.AgentDefinition, run.agent_definition_id, actor: ctx.admin)
-    assert pinned.version == 4, "B1: a new assignment pinned SDRAgent v#{pinned.version}"
+
+    assert pinned.version == SDRAgent.version(),
+           "B1: a new assignment pinned SDRAgent v#{pinned.version}"
+
     refute run.agent_definition_id == legacy.id
   end
 
