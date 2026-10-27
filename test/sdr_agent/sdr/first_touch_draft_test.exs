@@ -44,6 +44,17 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       the map is well-shaped; a well-shaped stored draft passes and is
       handed off as stored although the map is malformed; a matching map
       passes and is handed off unchanged (control).
+    * The shape check itself refuses a draft map whose Decision and
+      ModelInvocation are not this run's draft of this lead (Codex B1-R1):
+      the Decision must be the `:draft_proposal` (`:llm`) citing exactly
+      that invocation, both of the context's run in its tenant, about the
+      lead of the step. Each genuine counterexample differs from its run's
+      own pair in one fact — another invocation of the same run, another
+      run's coherent pair, the draft's `:angle` Decision, a
+      `claims_validation` Decision, another lead, a missing row — and gets
+      no passed shape check, no hand-off or write, and no draft text in the
+      refusal; the genuine pair passes and is handed off (control). The
+      `HandOffProposal` provenance tests above stay as the second layer.
 
   Hermetic: Fake model provider; the recording responder
   (`SdrAgent.SettingsFixtures.RecordingBrain`) and test responders built on
@@ -57,7 +68,9 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
   RED (B1-R1): `ValidateDraftShape` measures the caller's `draft.proposal`,
   so a malformed stored draft with a well-shaped map passes, bound to the
   stored records, and `HandOffProposal` hands off the stored text; a
-  well-shaped stored draft with a malformed map is rejected.
+  well-shaped stored draft with a malformed map is rejected. It also loads
+  the named Decision and invocation without checking that they are this
+  run's draft pair of this lead, so every mismatched pair that exists passes.
   """
   use SdrAgent.SDRCase, async: false
 
@@ -82,6 +95,7 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
   alias SdrAgent.SDR.Actions.ValidatePersonalization
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.FakeBrain
+  alias SdrAgent.SDR.Model
   alias SdrAgent.SDR.Schemas
   alias SdrAgent.SDR.SDRAgent
   alias SdrAgent.SettingsFixtures.RecordingBrain
@@ -542,6 +556,139 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
     assert lead_status!(ctx, lead) == :in_outreach
   end
 
+  # A genuine draft on a new running run of `lead`: the flow's steps through
+  # the two citation checks, each through its production action, with the
+  # model answering through `responder`.
+  defp drafted!(ctx, lead, responder, label) do
+    run = running_run!(ctx, lead)
+    sdr = %{context(ctx, run, label) | model: [provider_options: [responder: responder]]}
+    bundle = step!("bundle", LoadEvidenceBundle.perform(%{lead_id: lead.id}, sdr))
+
+    plan =
+      step!(
+        "icp",
+        EvaluateICP.perform(%{lead_id: lead.id, qualification: bundle.qualification}, sdr)
+      )
+
+    %{triggers: triggers} =
+      step!("trigger", IdentifyTrigger.perform(%{claims: bundle.claims, icp: plan.icp}, sdr))
+
+    draft =
+      step!(
+        "draft",
+        DraftEmail.perform(
+          %{lead_id: lead.id, claims: bundle.claims, triggers: triggers, plan: plan},
+          sdr
+        )
+      )
+
+    checked = %{lead_id: lead.id, draft: draft, claims: bundle.claims}
+    claims_check = step!("claims", ValidateClaims.perform(checked, sdr))
+
+    personalization_check =
+      step!("personalization", ValidatePersonalization.perform(checked, sdr))
+
+    %{
+      run: run,
+      sdr: sdr,
+      plan: plan,
+      draft: draft,
+      stored: stored_output!(ctx, draft),
+      claims_check: claims_check,
+      personalization_check: personalization_check
+    }
+  end
+
+  # The association facts of a draft map's Decision and invocation, read as
+  # the agent runtime in its tenant.
+  defp facts!(ctx, pair) do
+    {:ok, decision} = Agents.get_decision(pair.decision_id, actor: ctx.agent)
+    {:ok, invocation} = Agents.get_model_invocation(pair.model_invocation_id, actor: ctx.agent)
+
+    %{
+      kind: decision.kind,
+      mode: decision.mode,
+      cites_invocation: decision.model_invocation_id == invocation.id,
+      decision_run: decision.agent_run_id,
+      invocation_run: invocation.agent_run_id,
+      lead: decision.subject_id
+    }
+  end
+
+  # The facts of a genuine draft pair of `run` about `lead`.
+  defp coherent(run, lead),
+    do: %{
+      kind: :draft_proposal,
+      mode: :llm,
+      cites_invocation: true,
+      decision_run: run.id,
+      invocation_run: run.id,
+      lead: lead.id
+    }
+
+  # The shape step for the draft map `pair` on `drafted`'s run, then the
+  # hand-off as the flow would run it (only when the step returns a check).
+  defp shape_then_hand_off(drafted, lead_id, pair) do
+    shape =
+      observe(fn ->
+        ValidateDraftShape.perform(%{lead_id: lead_id, draft: pair}, drafted.sdr)
+      end)
+
+    handoff =
+      case shape do
+        {:ok, %{} = check} ->
+          observe(fn ->
+            HandOffProposal.perform(
+              %{
+                lead_id: lead_id,
+                draft: pair,
+                claims_check: drafted.claims_check,
+                personalization_check: drafted.personalization_check,
+                shape_check: check,
+                plan: drafted.plan
+              },
+              drafted.sdr
+            )
+          end)
+
+        _stopped ->
+          :not_reached
+      end
+
+    {shape, handoff}
+  end
+
+  # Fail-closed for a draft map whose pair is not this run's draft of this
+  # lead: no passed shape check (a refusal or a check that did not pass), no
+  # hand-off, enrollment, lead transition, signal or Draft, and no line of
+  # the stored draft text in the step's or the hand-off's result or in the
+  # run's failure reason.
+  defp assert_pair_refused!(ctx, drafted, lead, label, {shape, handoff}) do
+    refute match?({:ok, %{passed: true}}, shape),
+           "B1-R1: ValidateDraftShape passed #{label}: #{short(shape)}; the hand-off then " <>
+             "returned #{short(handoff)}"
+
+    refute Enum.any?(
+             decisions!(ctx, drafted.run),
+             &(&1.kind == :draft_shape_validation and &1.outcome == "passed")
+           ),
+           "B1-R1: a passed shape check was recorded for #{label}"
+
+    refute match?({:ok, %{phase: :review}}, handoff), "B1-R1: #{label} was handed off"
+    nothing_handed_off!(ctx, drafted.run, lead)
+    assert lead_status!(ctx, lead) == :qualified, "B1-R1: #{label} moved the lead"
+
+    echoed = [render(shape), render(handoff), run!(ctx, drafted.run).failure_reason || ""]
+
+    for text <- [drafted.stored.subject, drafted.stored.body],
+        line <- String.split(text, ~r/\p{Cc}+/u, trim: true),
+        String.length(line) >= 12,
+        field <- echoed do
+      refute String.contains?(field, line),
+             "B1-R1: the refusal of #{label} echoes draft text: #{short(line)}"
+    end
+  end
+
   describe "the draft input" do
     test "carries the snapshot's offering, guide and brief, and no booking-link slot", ctx do
       guide = "Write two short paragraphs and ask one question (guide revision one)."
@@ -969,6 +1116,178 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
              "B1-R1 control: a matching well-shaped draft did not pass: #{short(driven.shape)}"
 
       assert_stored_handed_off!(ctx, driven, lead)
+    end
+  end
+
+  describe "the shape check's draft provenance (Codex B1-R1)" do
+    @describetag :b1_r1
+
+    # Each counterexample differs from the genuine pair of its run
+    # (`coherent/2`) in the one association fact it names; each runs on its
+    # own run (one shape check per run). The draft maps carry the genuine,
+    # well-shaped proposal, so only the association can refuse them.
+
+    test "refuses the draft's Decision paired with another invocation of the same run", ctx do
+      lead = qualified_lead!(ctx)
+      drafted = drafted!(ctx, lead, RecordingBrain, "b1-r1-same-run")
+
+      # A second genuine outreach-proposal invocation of this run, through
+      # the production model path, from the draft step's exact input.
+      second_ctx = %{drafted.sdr | signal_id: "sig-b1-r1-second-invocation"}
+
+      assert {:ok, _output, second} =
+               Model.call(second_ctx, :outreach_proposal, one_input!(@proposal), lead.id)
+
+      pair = %{drafted.draft | model_invocation_id: second.id}
+
+      assert facts!(ctx, pair) == %{coherent(drafted.run, lead) | cites_invocation: false},
+             "B1-R1 fixture stage: the pair is not the draft's Decision with another " <>
+               "invocation of its run"
+
+      assert_pair_refused!(
+        ctx,
+        drafted,
+        lead,
+        "the draft's Decision with another invocation of this run",
+        shape_then_hand_off(drafted, lead.id, pair)
+      )
+    end
+
+    test "refuses a coherent draft Decision and invocation of another run", ctx do
+      lead = qualified_lead!(ctx)
+      drafted = drafted!(ctx, lead, FakeBrain, "b1-r1-this-run")
+      other = drafted!(ctx, lead, FakeBrain, "b1-r1-other-run")
+      pair = other.draft
+
+      assert facts!(ctx, pair) == %{
+               coherent(drafted.run, lead)
+               | decision_run: other.run.id,
+                 invocation_run: other.run.id
+             },
+             "B1-R1 fixture stage: the pair is not another run's coherent draft"
+
+      assert_pair_refused!(
+        ctx,
+        drafted,
+        lead,
+        "another run's draft pair",
+        shape_then_hand_off(drafted, lead.id, pair)
+      )
+    end
+
+    test "refuses the draft's angle Decision, citing the same invocation, as the draft", ctx do
+      lead = qualified_lead!(ctx)
+      drafted = drafted!(ctx, lead, FakeBrain, "b1-r1-angle")
+      angle = Enum.find(decisions!(ctx, drafted.run), &(&1.kind == :angle))
+      assert angle, "B1-R1 fixture stage: the draft step recorded no angle Decision"
+      pair = %{drafted.draft | decision_id: angle.id}
+
+      assert facts!(ctx, pair) == %{coherent(drafted.run, lead) | kind: :angle},
+             "B1-R1 fixture stage: the pair is not the angle Decision with the draft's invocation"
+
+      assert_pair_refused!(
+        ctx,
+        drafted,
+        lead,
+        "the angle Decision as the draft",
+        shape_then_hand_off(drafted, lead.id, pair)
+      )
+    end
+
+    test "refuses a deterministic check Decision of the same run as the draft", ctx do
+      lead = qualified_lead!(ctx)
+      drafted = drafted!(ctx, lead, FakeBrain, "b1-r1-check")
+      pair = %{drafted.draft | decision_id: drafted.claims_check.decision_id}
+
+      assert facts!(ctx, pair) == %{
+               coherent(drafted.run, lead)
+               | kind: :claims_validation,
+                 mode: :deterministic,
+                 cites_invocation: false
+             },
+             "B1-R1 fixture stage: the pair is not the claims check with the draft's invocation"
+
+      assert_pair_refused!(
+        ctx,
+        drafted,
+        lead,
+        "the claims_validation Decision as the draft",
+        shape_then_hand_off(drafted, lead.id, pair)
+      )
+    end
+
+    test "refuses this run's draft pair for another lead", ctx do
+      lead = qualified_lead!(ctx)
+      other_lead = fixture_lead!(ctx, "02")
+      other_status = lead_status!(ctx, other_lead)
+      drafted = drafted!(ctx, lead, FakeBrain, "b1-r1-lead")
+
+      assert facts!(ctx, drafted.draft) == coherent(drafted.run, lead)
+      refute other_lead.id == lead.id
+
+      assert_pair_refused!(
+        ctx,
+        drafted,
+        lead,
+        "this run's draft pair for another lead",
+        shape_then_hand_off(drafted, other_lead.id, drafted.draft)
+      )
+
+      nothing_handed_off!(ctx, drafted.run, other_lead)
+      assert lead_status!(ctx, other_lead) == other_status, "B1-R1: the other lead moved"
+    end
+
+    test "refuses a missing draft Decision or invocation", ctx do
+      lead = qualified_lead!(ctx)
+
+      for {label, swap} <- [
+            decision: &%{&1 | decision_id: Ecto.UUID.generate()},
+            invocation: &%{&1 | model_invocation_id: Ecto.UUID.generate()}
+          ] do
+        drafted = drafted!(ctx, lead, FakeBrain, "b1-r1-missing-#{label}")
+        pair = swap.(drafted.draft)
+
+        assert match?({:error, _}, Agents.get_decision(pair.decision_id, actor: ctx.agent)) or
+                 match?(
+                   {:error, _},
+                   Agents.get_model_invocation(pair.model_invocation_id, actor: ctx.agent)
+                 ),
+               "B1-R1 fixture stage: the #{label} of the pair exists"
+
+        assert_pair_refused!(
+          ctx,
+          drafted,
+          lead,
+          "a missing #{label}",
+          shape_then_hand_off(drafted, lead.id, pair)
+        )
+      end
+    end
+
+    test "passes and hands off the genuine matching pair of this run (control)", ctx do
+      lead = qualified_lead!(ctx)
+      drafted = drafted!(ctx, lead, FakeBrain, "b1-r1-matching")
+
+      assert facts!(ctx, drafted.draft) == coherent(drafted.run, lead),
+             "B1-R1 fixture stage: the draft step's pair is not coherent"
+
+      {shape, handoff} = shape_then_hand_off(drafted, lead.id, drafted.draft)
+
+      assert match?({:ok, %{passed: true}}, shape),
+             "B1-R1 control: the genuine matching pair did not pass: #{short(shape)}"
+
+      assert_stored_handed_off!(
+        ctx,
+        %{
+          run: drafted.run,
+          draft: drafted.draft,
+          stored: drafted.stored,
+          supplied: drafted.draft.proposal,
+          shape: shape,
+          handoff: handoff
+        },
+        lead
+      )
     end
   end
 end
