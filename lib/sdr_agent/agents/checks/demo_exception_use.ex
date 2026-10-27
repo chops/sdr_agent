@@ -16,6 +16,12 @@ defmodule SdrAgent.Agents.Checks.DemoExceptionUse do
   actor's tenant: then exactly that invocation, and only while it has a
   `:demo_exception` release. A copied, forged or stale reference, another
   process or another tenant gets `false`.
+
+  Authorization only narrows here: `forbid_unless ReleasedOutputRead` still
+  applies first, and the check grants no read beyond the registered
+  invocation. Present use authority is the caller's prior check, never this
+  one's. It writes nothing and takes no lock; the registration is
+  process-local state only.
   """
   use Ash.Policy.FilterCheck
 

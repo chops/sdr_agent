@@ -66,10 +66,31 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   the unique index. A link superseded later leaves the release as the
   historical decision.
 
-  `:decide`: AGT only (the facade gate step and run recovery,
-  `SdrAgent.Agents.decide_result_release/2`). Reads: admin, auditor, AGT,
-  REC, AUD and the audit kernel. Audited: `model.result.released |
-  withheld | calibration`.
+  `:decide` (custom create):
+
+    * **Transition.** It inserts the one row of the invocation (no row →
+      decided), or returns the existing row unchanged.
+    * **Inputs.** `model_invocation_id`, `disposition`, `reason`, the
+      optional `wire_witness_link_id` and `evidence_sha256`, and the
+      arguments `gate_cause_id`, `gate_classification` and
+      `demo_exception_refusal` (a withheld release's closed C2* code, only
+      while the selector is on). The private `demo_exception_policy_id`,
+      `demo_exception_basis_sha256` and `demo_exception_label` are set by
+      the change, never by a caller.
+    * **Side effects.** A fresh decision appends one event; an identical
+      replay appends none. A `:demo_exception` replay also requires its
+      stored basis to validate against its own recorded policy and window,
+      and its digest to match with L re-derived (S3 plan r2 §6.1). A
+      refusal writes nothing.
+    * **Authorization.** AGT only: the facade gate step and run recovery,
+      through `SdrAgent.Agents.decide_result_release/2`; an auditor is
+      forbidden. A `:demo_exception` decision additionally needs the
+      result-gate finalizer's verified `:result_gate` Prelocked context;
+      anything else, or a caller-supplied private argument, is refused
+      before any write.
+
+  Reads: admin, auditor, AGT, REC, AUD and the audit kernel. Audited:
+  `model.result.released | withheld | calibration | demo_exception`.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,

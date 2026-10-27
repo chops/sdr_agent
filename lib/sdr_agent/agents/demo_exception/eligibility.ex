@@ -1,9 +1,15 @@
 defmodule SdrAgent.Agents.DemoException.Eligibility do
   @moduledoc """
-  Pure eligibility steps of the C2* demo exception (ADR-0005 C2* amendment
-  item 4; S3 plan r2 §6): the pure steps `e1_seed/1`, `e2/1`, `e4/2` and
-  `e5/3`, the plain-read fact loader `load/2` and the full evaluation
-  `evaluate/2` in the closed refusal-code order.
+  Eligibility of the C2* demo exception (ADR-0005 C2* amendment item 4; S3
+  plan r2 §6). It holds:
+
+    * the pure steps `e1_seed/1`, `e2/1`, `e4/2` and `e5/3`;
+    * the fact loader `load/2`: plain reads in the invocation's tenant, with
+      no lock clause, made by the release decision under the chain head;
+    * the full evaluation `evaluate/2` in the closed refusal-code order.
+
+  It writes nothing and does no file I/O. Authority comes only through
+  `SdrAgent.Agents.DemoException`'s Source functions.
 
   `e4/2`, the positive v4 comparison, on the receipt's primary link of a
   ModelInvocation. It is `:ok` only when every one of these holds, and
