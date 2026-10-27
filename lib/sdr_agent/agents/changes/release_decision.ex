@@ -536,10 +536,11 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
     end
   end
 
-  # §6.1 replay: the STORED basis is validated against its own recorded
-  # policy and window (never today's entry, time, selector or grant status),
-  # its L sections are re-derived from the locked rows, and the digest must
-  # be the row's. An identical replay proposes the stored row (so its CHECKs
+  # §6.1 replay: the STORED basis must hash to the row's recorded digest as
+  # stored, validate against its own recorded policy and window (never
+  # today's entry, time, selector or grant status), and hash to that digest
+  # again with its L sections re-derived from the locked rows (the allowlist
+  # included, as `eligibility`). An identical replay proposes the stored row (so its CHECKs
   # hold) and the upsert returns it with no event; any difference, or an
   # existing release of another disposition, is a `ReleaseConflict`.
   defp demo_replay(changeset, %ModelResultRelease{disposition: :demo_exception} = row, facts) do
@@ -564,6 +565,9 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
 
     with %{"entry_sha256" => entry_sha256, "acceptance_ref" => acceptance_ref}
          when is_binary(entry_sha256) and is_binary(acceptance_ref) <- policy,
+         # The stored basis is a commitment: verified as stored first, so a
+         # re-derived L can never repair a changed stored member (M1).
+         true <- Basis.sha256_hex(stored) == row.exception_basis_sha256,
          :ok <-
            Basis.validate(stored, %{
              decided_at: row.decided_at,
