@@ -28,14 +28,23 @@ defmodule SdrAgent.GateFixtures do
   `agent`, writing the exchange of `variant` (`"cli_shape_v3"` matches,
   `"cli_shape_v3_mismatch"` mismatches, `"none"` writes no exchange) under
   `root`; returns the completed invocation.
+
+  Options (`call_model!/3`): `purpose:` replaces the reserved purpose
+  (default `:qualification`); `clock_from: pid` makes the model server
+  read that process's frozen clock (the test-seam `ClaudeCLI` option), so
+  its launch admission sees the test's instant.
   """
-  def call_model!(%{run: run, agent: agent, root: root}, variant) do
-    {:ok, server} =
-      ClaudeCLI.start_link(
+  def call_model!(ctx, variant, opts \\ [])
+
+  def call_model!(%{run: run, agent: agent, root: root}, variant, opts) do
+    server_opts =
+      [
         command: System.find_executable("elixir"),
         test_launcher: true,
         command_args: [@fake, "witness", root, variant]
-      )
+      ] ++ Keyword.take(opts, [:clock_from])
+
+    {:ok, server} = ClaudeCLI.start_link(server_opts)
 
     id = "gate-#{variant}-#{System.unique_integer([:positive])}"
 
@@ -52,6 +61,7 @@ defmodule SdrAgent.GateFixtures do
         :output_schema_version,
         :output_schema_sha256
       ])
+      |> Map.merge(Map.new(Keyword.take(opts, [:purpose])))
 
     # R0-07 slice B: reservation and launch are admitted only for the call
     # itself (`SdrAgent.AdmissionFixtures.admitting/1`); the test's own

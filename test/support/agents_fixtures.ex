@@ -94,11 +94,14 @@ defmodule SdrAgent.AgentsFixtures do
     definition
   end
 
-  @doc "Attributes for a queued run."
+  @doc """
+  Attributes for a queued run. Option `lead_id:` names the run's lead
+  (default: a fresh random id, which names no lead row).
+  """
   def run_attrs(definition, opts \\ []) do
     %{
       agent_definition_id: definition.id,
-      lead_id: Ecto.UUID.generate(),
+      lead_id: Keyword.get_lazy(opts, :lead_id, &Ecto.UUID.generate/0),
       trigger_signal_type: "sdr.lead.assigned",
       trigger_signal_id: "sig-#{System.unique_integer([:positive])}",
       correlation_id: Ecto.UUID.generate(),

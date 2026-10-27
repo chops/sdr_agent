@@ -171,6 +171,19 @@ case mode do
             response: Proxy.sse_response(answer, blocks: [{:thinking, nil}, {:text, answer}])
           )
 
+        # C2* S3 T-P2: the v4 reasoning primary plus a content-free
+        # count_tokens extra (ancillary), as in `"count_tokens"` above.
+        "cli_shape_v4_thinking_count_tokens" ->
+          {request, response} = Proxy.v4_variant!("cli_shape_v4_thinking", stdin, answer)
+          Proxy.exchange!(root, id, traceparent: tp, request: request, response: response)
+
+          Proxy.exchange!(root, id,
+            route: "/anthropic/v1/messages/count_tokens",
+            traceparent: tp,
+            request: Proxy.messages_request(stdin),
+            response: ~s({"input_tokens":12})
+          )
+
         # Projection v4 reasoning-layout fixtures (witness response-block
         # plan r5, T3/T5): see `FakeWitnessProxy.v4_variant!/3`.
         "cli_shape_v4_" <> _ = v4_variant ->
