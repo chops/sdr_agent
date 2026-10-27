@@ -26,11 +26,14 @@ defmodule SdrAgent.SDR.SDRAgent do
   is deliberately no send action (spec §6).
 
   `register/1` records this definition (allowed actions, prompt and schema
-  refs with hashes, model policy) as the `SDRAgent` v3 AgentDefinition. v3
-  carries the deterministic schema-v2 refs (`SdrAgent.AI.JsonSchema`). v1 and
-  v2 rows stay untouched as the admission record of the runs that used them;
-  such runs keep their pin, and their later model calls record the schema
-  version actually used. Not yet routed:
+  refs with hashes, model policy) as the `SDRAgent` v4 AgentDefinition. v3
+  carried the deterministic schema-v2 refs (`SdrAgent.AI.JsonSchema`); v4
+  (B1-04/B1-05) changes the evidence-extraction and outreach-proposal prompts,
+  `BuildEvidenceBundle`, `DraftEmail` and `HandOffProposal` (version 2) and
+  adds `ValidateDraftShape`. v1-v3 rows stay untouched as the admission record
+  of the runs that used them; such runs keep their pin, and a changed action
+  refuses to run under a definition that does not declare it
+  (`declares?/2`, `SdrAgent.SDR.Preconditions.declared/2`). Not yet routed:
   `sdr.followup.due` (drafting a follow-up) and redrafts — a scoped
   follow-up slice.
   """
@@ -59,7 +62,7 @@ defmodule SdrAgent.SDR.SDRAgent do
     :reply,
     :stop
   ]
-  @version 3
+  @version 4
 
   agent do
     schema(
@@ -114,6 +117,7 @@ defmodule SdrAgent.SDR.SDRAgent do
     Actions.DraftEmail,
     Actions.ValidateClaims,
     Actions.ValidatePersonalization,
+    Actions.ValidateDraftShape,
     Actions.HandOffProposal,
     Actions.HaltAssignment,
     Actions.ClassifyReply
@@ -121,6 +125,15 @@ defmodule SdrAgent.SDR.SDRAgent do
 
   @doc "The registered definition version (bumped whenever routes, actions, prompts or schemas change)."
   def version, do: @version
+
+  @doc """
+  Whether a stored definition body declares action `module` at its current
+  `sdr_action_version/0` (B1 legacy execution rule).
+  """
+  def declares?(%{"allowed_actions" => actions}, module) when is_list(actions),
+    do: %{"module" => inspect(module), "version" => module.sdr_action_version()} in actions
+
+  def declares?(_body, _module), do: false
 
   @doc "Run phases (as AgentRun.phase)."
   def phases, do: @phases
