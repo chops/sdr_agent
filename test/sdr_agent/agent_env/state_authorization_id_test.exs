@@ -1,27 +1,40 @@
 defmodule SdrAgent.AgentEnv.StateAuthorizationIdTest do
   @moduledoc """
-  C2* S1 PR-A, Codex GREEN-1 review `1adda407` M1: `authorization_id` in the
-  agent environment's state files is an S2 registry id, not a UUID.
+  C2* S1 PR-A, Codex GREEN-1 review `1adda407` M1 and its RED review
+  `0a71243f` (option 1, in principle): the identifiers in the agent
+  environment's state files are validated as the text they are.
 
-  The accepted S2 registry (S2 plan r1 OQ1; `SdrAgent.AgentEnv.Registry` at
-  `a208a05a`, its `id?/1`) uses the closed id pattern
-  `\\A[a-z0-9][a-z0-9.-]{0,63}\\z`: one lowercase letter or digit, then up
-  to 63 lowercase letters, digits, dots or dashes. So `State.read/2`
-  accepts exactly those ids, and nothing else, as the `authorization_id`
-  of all three shapes that carry one: `authorization.claim.json`,
-  `authorization.json` and the `provision` receipt
-  `instance.<nonce>.provision.exit`; and
-  `OperationSnapshot.authorization/1` projects a final authorization whose
-  id is a registry id. A lowercase UUID matches the pattern and stays
-  valid; an uppercase one does not. `tenant_id`, `grant_id` and `event_id`
-  stay UUIDs, and every other rule (closed keys, canonical bytes, nonce
-  and digest shapes, receipt consistency) is unchanged.
+    * **`authorization_id` is an S2 registry id.** The accepted S2 registry
+      (S2 plan r1 OQ1; `SdrAgent.AgentEnv.Registry` at `a208a05a`, `id?/1`)
+      uses the closed pattern `\\A[a-z0-9][a-z0-9.-]{0,63}\\z`: one
+      lowercase letter or digit, then up to 63 lowercase letters, digits,
+      dots or dashes. `State.read/2` accepts exactly those ids, and nothing
+      else, in all three shapes that carry one: `authorization.claim.json`,
+      `authorization.json` and the `provision` receipt
+      `instance.<nonce>.provision.exit`. `OperationSnapshot.authorization/1`
+      projects a final authorization whose id is a registry id.
+    * **`tenant_id`, `grant_id` and `event_id` are canonical UUID text:**
+      the lowercase hyphenated form that `Ecto.UUID.cast/1` returns
+      unchanged, of any version (generated v4 and v7 both pass). Uppercase
+      UUID text and a 16-byte ASCII string (which `Ecto.UUID.cast/1` alone
+      accepts as a raw UUID) are invalid, in `environment.json`'s and the
+      probe receipt's `tenant_id`, and in the final file's and the
+      provision receipt's `grant_id` and `event_id`.
+    * Every other rule (closed keys, canonical bytes, nonce, digest,
+      revision and receipt step) is unchanged.
 
-  RED: `State` validates `authorization_id` as a UUID, so a valid non-UUID
-  registry id is `{:invalid, :value}` in every shape and the snapshot
-  cannot project it (intended assertion failures), and an uppercase UUID
-  is accepted (an intended assertion failure of the boundary rows). The
-  other boundary and preservation rows pass at RED.
+  Each id and each field is exercised by its own test in each shape, so
+  one failure never leaves another case unreached.
+
+  Expected RED (to be confirmed by the run, not asserted here): State
+  checks `authorization_id` and the three UUID fields with
+  `Ecto.UUID.cast/1`, so each valid non-16-byte registry id is
+  `{:invalid, :value}` in each shape and is not projected, and the 16-byte
+  and uppercase-UUID texts are accepted, all as assertion failures. The
+  controls pass at RED: `test-synthetic-1` (16 bytes, accepted today only
+  through the raw-UUID path) and a lowercase UUID as authorization ids,
+  generated canonical UUIDs in every UUID field, and the other boundary
+  and preservation rows.
 
   Hermetic: SQL sandbox, physical roots under `tmp/agent-env-roots`.
   """
@@ -33,29 +46,31 @@ defmodule SdrAgent.AgentEnv.StateAuthorizationIdTest do
   @state SdrAgent.AgentEnv.State
   @snapshot SdrAgent.AgentEnv.OperationSnapshot
 
-  # Valid before and after M1, so the preservation rows discriminate at RED.
+  # A lowercase UUID: a valid authorization id before and after M1, so the
+  # preservation rows discriminate at RED.
   @uuid_id "550e8400-e29b-41d4-a716-446655440000"
+  @canonical_uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
 
-  # Ids the registry pattern accepts (S2 registry_test's `test-synthetic-1`
-  # first); the last is a lowercase UUID, which the pattern also accepts.
+  @shapes [:claim, :authorization, :provision_receipt]
+
+  # Valid registry ids: {label, id, kind}. `:discriminating` ids are
+  # rejected by the current UUID check; `:control` ids pass it already.
   @valid_ids [
-    "test-synthetic-1",
-    "a",
-    "0",
-    "agentenv-1.grant-2",
-    "x.y-z",
-    "trailing.",
-    "trailing-",
-    "a" <> String.duplicate("b", 63),
-    "550e8400-e29b-41d4-a716-446655440000"
+    {"one letter", "a", :discriminating},
+    {"one digit", "0", :discriminating},
+    {"dotted and dashed", "agentenv-1.grant-2", :discriminating},
+    {"short dotted", "x.y-z", :discriminating},
+    {"trailing dot", "trailing.", :discriminating},
+    {"trailing dash", "trailing-", :discriminating},
+    {"64 characters", "a" <> String.duplicate("b", 63), :discriminating},
+    {"16-byte registry id", "test-synthetic-1", :control},
+    {"lowercase uuid", @uuid_id, :control}
   ]
 
-  # Ids the pattern refuses: empty; uppercase (including an uppercase
-  # UUID); a leading dot or dash; 65 characters; characters outside the
-  # class; a trailing newline; and non-strings.
+  # Ids the pattern refuses: {label, id}.
   @invalid_ids [
     {"empty", ""},
-    {"uppercase", "Test-synthetic-1"},
+    {"uppercase 16-byte", "Test-synthetic-1"},
     {"all uppercase", "TEST"},
     {"uppercase uuid", "550E8400-E29B-41D4-A716-446655440000"},
     {"leading dot", ".grant"},
@@ -69,6 +84,16 @@ defmodule SdrAgent.AgentEnv.StateAuthorizationIdTest do
     {"integer", 1},
     {"null", nil},
     {"list", ["test-synthetic-1"]}
+  ]
+
+  # The State consumers of canonical UUID text: {shape, field}.
+  @uuid_fields [
+    {:environment, "tenant_id"},
+    {:probe_receipt, "tenant_id"},
+    {:authorization, "grant_id"},
+    {:authorization, "event_id"},
+    {:provision_receipt, "grant_id"},
+    {:provision_receipt, "event_id"}
   ]
 
   setup do
@@ -96,44 +121,115 @@ defmodule SdrAgent.AgentEnv.StateAuthorizationIdTest do
     apply(@state, :read, [root, name])
   end
 
-  # The three shapes that carry an `authorization_id`, as {name, contents}.
-  defp shapes(id, overrides \\ %{}) do
-    nonce = Fx.nonce()
+  # `{state file name, contents}` of `shape`, every field valid, with
+  # `fields` (string keys) overriding.
+  defp shape(shape, fields \\ %{})
 
-    [
-      {:claim,
+  defp shape(:claim, fields) do
+    {:claim,
+     Map.merge(
        %{
-         "authorization_id" => id,
+         "authorization_id" => @uuid_id,
          "authorization_sha256" => Fx.hex(32),
          "binding_sha256" => Fx.hex(32),
          "nonce" => Fx.nonce(),
          "claimed_at" => DateTime.utc_now()
-       }},
-      {:authorization,
+       },
+       fields
+     )}
+  end
+
+  defp shape(:authorization, fields) do
+    {:authorization,
+     Map.merge(
        %{
-         "authorization_id" => id,
+         "authorization_id" => @uuid_id,
          "authorization_sha256" => Fx.hex(32),
          "binding_sha256" => Fx.hex(32),
          "grant_id" => Ecto.UUID.generate(),
          "revision" => 1,
          "event_id" => Ecto.UUID.generate(),
          "nonce" => Fx.nonce()
-       }},
-      {{:receipt, nonce, :provision},
+       },
+       fields
+     )}
+  end
+
+  defp shape(:provision_receipt, fields) do
+    nonce = Fx.nonce()
+
+    {{:receipt, nonce, :provision},
+     Map.merge(
        %{
          "nonce" => nonce,
          "step" => "provision",
          "completed_at" => DateTime.utc_now(),
-         "authorization_id" => id,
+         "authorization_id" => @uuid_id,
          "grant_id" => Ecto.UUID.generate(),
          "event_id" => Ecto.UUID.generate()
-       }}
-    ]
-    |> Enum.map(fn {name, contents} -> {name, Map.merge(contents, overrides)} end)
+       },
+       fields
+     )}
+  end
+
+  defp shape(:probe_receipt, fields) do
+    nonce = Fx.nonce()
+
+    {{:receipt, nonce, :probe},
+     Map.merge(
+       %{
+         "nonce" => nonce,
+         "step" => "probe",
+         "completed_at" => DateTime.utc_now(),
+         "tenant_id" => Ecto.UUID.generate()
+       },
+       fields
+     )}
+  end
+
+  defp shape(:environment, fields) do
+    {:environment,
+     Map.merge(
+       %{
+         "environment_id" => "agentenv-1",
+         "database" => "sdr_agent_agentenv",
+         "database_oid" => 424_242,
+         "tenant_id" => Ecto.UUID.generate(),
+         "nonce" => Fx.nonce(),
+         "created_at" => DateTime.utc_now()
+       },
+       fields
+     )}
   end
 
   defp label({:receipt, _nonce, step}), do: "the #{step} receipt"
   defp label(name), do: inspect(name)
+
+  # Writes `shape` with `fields` and asserts it reads back as valid, with
+  # its digest and every overridden field unchanged.
+  defp assert_valid(root, shape, fields, message) do
+    {name, contents} = shape(shape, fields)
+    sha256 = Fx.write_state!(root, name, contents)
+    result = read(root, name)
+
+    assert match?({:valid, ^sha256, %{}}, result),
+           "C2* S1 M1: #{label(name)} #{message} must be valid: #{inspect(result)}"
+
+    {:valid, ^sha256, data} = result
+
+    for {field, value} <- fields do
+      assert data[field] == value, "C2* S1 M1: #{label(name)}'s #{field} must read back unchanged"
+    end
+  end
+
+  defp assert_invalid(root, shape, fields, message) do
+    {name, contents} = shape(shape, fields)
+    Fx.write_state!(root, name, contents)
+    result = read(root, name)
+
+    assert result == {:invalid, :value},
+           "C2* S1 M1: #{label(name)} #{message} must be invalid: #{inspect(result)}"
+  end
 
   defp run_env!(root) do
     bound = Fx.bound!(root, lease: :run)
@@ -155,80 +251,138 @@ defmodule SdrAgent.AgentEnv.StateAuthorizationIdTest do
   defp authorized_as!(root, id) do
     authorized = Fx.authorized!(root, %{"authorization_id" => id})
     Fx.write_state!(root, :claim, Map.put(authorized.claim, "authorization_id", id))
-    %{authorized | sha256: Fx.file_sha256!(root, :authorization)}
+    authorized
   end
 
-  ## State.read/2
+  defp assert_projected(ctx, id) do
+    run_env!(ctx.root)
+    authorized = authorized_as!(ctx.root, id)
+    data = authorized.data
 
-  describe "State.read/2: registry-pattern authorization ids" do
-    for id <- @valid_ids do
+    assert apply(@snapshot, :authorization, [sample!()]) ==
+             {:ok,
+              %{
+                sha256: authorized.sha256,
+                authorization_sha256: data["authorization_sha256"],
+                authorization_id: id,
+                binding_sha256: data["binding_sha256"],
+                grant_id: data["grant_id"],
+                revision: 1,
+                event_id: data["event_id"],
+                nonce: data["nonce"]
+              }},
+           "C2* S1 M1: the snapshot must project the registry-id authorization #{inspect(id)}"
+  end
+
+  ## authorization_id in each shape
+
+  describe "State.read/2: valid registry ids, each shape on its own" do
+    for {label, id, kind} <- @valid_ids, shape <- @shapes do
       @id id
+      @shape shape
 
-      test "#{inspect(id)} is a valid authorization_id in the claim, final file and provision receipt",
-           ctx do
-        for {name, contents} <- shapes(@id) do
-          sha256 = Fx.write_state!(ctx.root, name, contents)
+      test "#{kind}: #{label} (#{inspect(id)}) is a valid authorization_id in #{shape}", ctx do
+        assert_valid(ctx.root, @shape, %{"authorization_id" => @id}, "with #{inspect(@id)}")
+      end
+    end
+  end
 
-          assert {:valid, ^sha256, data} = read(ctx.root, name),
-                 "C2* S1 M1: #{label(name)} with the registry id #{inspect(@id)} must be valid"
+  describe "State.read/2: ids outside the registry pattern, each shape on its own" do
+    for {label, id} <- @invalid_ids, shape <- @shapes do
+      @id id
+      @shape shape
 
-          assert data["authorization_id"] == @id
+      test "#{label} (#{inspect(id)}) is not a valid authorization_id in #{shape}", ctx do
+        assert_invalid(ctx.root, @shape, %{"authorization_id" => @id}, "with #{inspect(@id)}")
+      end
+    end
+  end
+
+  ## Canonical UUID text in each consumer
+
+  describe "State.read/2: canonical lowercase UUID text, each field and shape on its own" do
+    for {shape, field} <- @uuid_fields do
+      @shape shape
+      @field field
+
+      test "#{shape} #{field}: a generated v4 UUID is valid", ctx do
+        uuid = Ecto.UUID.generate()
+        assert uuid =~ @canonical_uuid
+        assert_valid(ctx.root, @shape, %{@field => uuid}, "with a v4 #{@field}")
+      end
+
+      test "#{shape} #{field}: a generated v7 UUID is valid", ctx do
+        uuid = Ash.UUIDv7.generate()
+        assert uuid =~ @canonical_uuid
+        assert_valid(ctx.root, @shape, %{@field => uuid}, "with a v7 #{@field}")
+      end
+
+      test "#{shape} #{field}: a 16-byte ASCII non-UUID is invalid", ctx do
+        assert byte_size("test-synthetic-1") == 16
+
+        assert_invalid(
+          ctx.root,
+          @shape,
+          %{@field => "test-synthetic-1"},
+          "with a 16-byte #{@field}"
+        )
+      end
+
+      test "#{shape} #{field}: uppercase UUID text is invalid", ctx do
+        uuid = String.upcase(Ecto.UUID.generate())
+        assert_invalid(ctx.root, @shape, %{@field => uuid}, "with an uppercase #{@field}")
+      end
+
+      test "#{shape} #{field}: malformed values stay invalid", ctx do
+        uuid = Ecto.UUID.generate()
+
+        for {kind, value} <- [
+              null: nil,
+              integer: 1,
+              short: String.slice(uuid, 0, 35),
+              long: uuid <> "0",
+              unhyphenated: String.replace(uuid, "-", ""),
+              not_hex: "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz",
+              registry_id: "agentenv-1.grant-2"
+            ] do
+          assert_invalid(ctx.root, @shape, %{@field => value}, "with a #{kind} #{@field}")
         end
       end
     end
+  end
 
-    for {label, id} <- @invalid_ids do
-      @id id
+  ## Unchanged rules
 
-      test "#{label} (#{inspect(id)}) is not a valid authorization_id in any shape", ctx do
-        for {name, contents} <- shapes(@id) do
-          Fx.write_state!(ctx.root, name, contents)
+  describe "State.read/2: the other rules are unchanged" do
+    for shape <- @shapes do
+      @shape shape
 
-          assert read(ctx.root, name) == {:invalid, :value},
-                 "C2* S1 M1: #{label(name)} with #{inspect(@id)} must be invalid"
-        end
-      end
-    end
+      test "#{shape}: closed keys, canonical bytes and the nonce stay enforced", ctx do
+        {name, contents} = shape(@shape)
 
-    test "grant_id and event_id stay UUIDs: a registry-pattern id there is invalid", ctx do
-      for field <- ["grant_id", "event_id"],
-          {name, contents} <- shapes(@uuid_id),
-          Map.has_key?(contents, field) do
-        Fx.write_state!(ctx.root, name, Map.put(contents, field, "test-synthetic-1"))
-
-        assert read(ctx.root, name) == {:invalid, :value},
-               "C2* S1 M1: #{label(name)}'s #{field} must stay a UUID"
-      end
-    end
-
-    test "the other rules are unchanged: keys, canonical bytes, nonce, digests, receipt step",
-         ctx do
-      for {name, contents} <- shapes(@uuid_id) do
-        cases = [
-          extra_key: Canonical.encode!(Map.put(contents, "extra", 1)),
-          missing_key: Canonical.encode!(Map.delete(contents, "authorization_id")),
-          trailing_newline: Canonical.encode!(contents) <> "\n",
-          short_nonce: Canonical.encode!(Map.put(contents, "nonce", Fx.hex(8)))
-        ]
-
-        for {case_label, bytes} <- cases do
+        for {case_label, bytes} <- [
+              extra_key: Canonical.encode!(Map.put(contents, "extra", 1)),
+              missing_key: Canonical.encode!(Map.delete(contents, "authorization_id")),
+              trailing_newline: Canonical.encode!(contents) <> "\n",
+              short_nonce: Canonical.encode!(Map.put(contents, "nonce", Fx.hex(8)))
+            ] do
           Fx.write_state!(ctx.root, name, bytes)
+          result = read(ctx.root, name)
 
-          assert {:invalid, _reason} = read(ctx.root, name),
-                 "C2* S1 M1: #{label(name)} #{case_label} must stay invalid"
+          assert match?({:invalid, _reason}, result),
+                 "C2* S1 M1: #{label(name)} #{case_label} must stay invalid: #{inspect(result)}"
         end
       end
+    end
 
-      [{:claim, claim}, {:authorization, final}, {receipt, provision}] = shapes(@uuid_id)
-
-      for {name, contents} <- [
-            {:claim, Map.put(claim, "binding_sha256", "AB" <> Fx.hex(31))},
-            {:authorization, Map.put(final, "authorization_sha256", Fx.hex(16))},
-            {:authorization, Map.put(final, "revision", 2)},
-            {receipt, Map.put(provision, "step", "probe")}
+    test "digests, the revision and the receipt step stay enforced", ctx do
+      for {shape, fields} <- [
+            {:claim, %{"binding_sha256" => "AB" <> Fx.hex(31)}},
+            {:authorization, %{"authorization_sha256" => Fx.hex(16)}},
+            {:authorization, %{"revision" => 2}},
+            {:provision_receipt, %{"step" => "probe"}}
           ] do
-        Fx.write_state!(ctx.root, name, contents)
-        assert read(ctx.root, name) == {:invalid, :value}, "C2* S1 M1: #{label(name)}"
+        assert_invalid(ctx.root, shape, fields, "with #{inspect(fields)}")
       end
     end
   end
@@ -236,41 +390,28 @@ defmodule SdrAgent.AgentEnv.StateAuthorizationIdTest do
   ## The snapshot's authorization projection
 
   describe "OperationSnapshot.authorization/1" do
-    test "projects a final authorization whose id is a registry id", ctx do
-      run_env!(ctx.root)
-      authorized = authorized_as!(ctx.root, "test-synthetic-1")
-      snapshot = sample!()
-      data = authorized.data
-      file_sha256 = authorized.sha256
-
-      assert apply(@snapshot, :authorization, [snapshot]) ==
-               {:ok,
-                %{
-                  sha256: file_sha256,
-                  authorization_sha256: data["authorization_sha256"],
-                  authorization_id: "test-synthetic-1",
-                  binding_sha256: data["binding_sha256"],
-                  grant_id: data["grant_id"],
-                  revision: 1,
-                  event_id: data["event_id"],
-                  nonce: data["nonce"]
-                }},
-             "C2* S1 M1: the snapshot must project a registry-id authorization"
+    test "discriminating: projects a registry-id authorization (agentenv-1.grant-2)", ctx do
+      assert_projected(ctx, "agentenv-1.grant-2")
     end
 
-    test "an id outside the pattern is never projected", ctx do
-      run_env!(ctx.root)
+    test "control: projects the 16-byte registry id test-synthetic-1", ctx do
+      assert_projected(ctx, "test-synthetic-1")
+    end
 
-      for {label, id} <- [
-            {"uppercase", "Test-synthetic-1"},
-            {"leading dash", "-grant"},
-            {"empty", ""}
-          ] do
-        authorized_as!(ctx.root, id)
-        snapshot = sample!()
+    for {label, id} <- [
+          {"uppercase 16-byte", "Test-synthetic-1"},
+          {"uppercase uuid", "550E8400-E29B-41D4-A716-446655440000"},
+          {"leading dash", "-grant"},
+          {"empty", ""}
+        ] do
+      @id id
 
-        assert apply(@snapshot, :authorization, [snapshot]) == {:error, :authorization_invalid},
-               "C2* S1 M1: #{label}"
+      test "#{label} (#{inspect(id)}) is never projected", ctx do
+        run_env!(ctx.root)
+        authorized_as!(ctx.root, @id)
+
+        assert apply(@snapshot, :authorization, [sample!()]) == {:error, :authorization_invalid},
+               "C2* S1 M1: #{inspect(@id)} must not be projected"
       end
     end
   end
