@@ -15,6 +15,13 @@ defmodule SdrAgentWeb.Router do
     plug :load_from_session
   end
 
+  # Sign-in pages and auth routes (Codex M2, M3): never cached, no referrer;
+  # magic-link requests bounded per client before the request action.
+  pipeline :auth_edge do
+    plug SdrAgentWeb.AuthPageHeaders
+    plug SdrAgentWeb.MagicLinkRequestLimit
+  end
+
   pipeline :api do
     plug :accepts, ["json"]
     plug :load_from_bearer
@@ -49,7 +56,7 @@ defmodule SdrAgentWeb.Router do
   end
 
   scope "/", SdrAgentWeb do
-    pipe_through :browser
+    pipe_through [:browser, :auth_edge]
 
     auth_routes AuthController, SdrAgent.Accounts.User, path: "/auth"
 
