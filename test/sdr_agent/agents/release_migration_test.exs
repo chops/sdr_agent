@@ -35,6 +35,17 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
   fresh reservation and preflight. The baseline checkout is named by
   `SDR_RELEASE_BASELINE_ROOT` and must be clean at `@baseline_tree`.
 
+  **Targets and evidence** (Codex e95a7340 choices 1 and 2). DB #1 and
+  DB #2 are predeclared by the driver, never drawn at random:
+  `SDR_RELEASE_DB1_SUFFIX` and `SDR_RELEASE_DB2_SUFFIX`, read through
+  `Harness.campaign_targets/2`, which refuses an absent, malformed,
+  identical or parent target; `setup_all` publishes both exact names
+  (`RM-RECEIPT targets.db1=<name>`, `targets.db2=<name>`) before any test,
+  and fails the whole module on a refusal. Each target is still claimed by
+  exclusive create, never adopted. The harness exports each database's
+  evidence itself, before its folder is removed, into
+  `SDR_RELEASE_EVIDENCE_ROOT/db1` and `/db2` (`:evidence_dir`).
+
   The harness options it uses (`versions/2`, `:probe`, `:runners`, `:plan`,
   `checked_runner/5`) have a stubbed, CPU-only contract in
   `SdrAgent.Agents.ReleaseMigrationHarnessTest`; the three release scripts
@@ -52,9 +63,9 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
   @migrations Path.join(@root, "priv/repo/migrations")
   @rm Path.join(@root, "test/support/release_migration")
   @s3_suffix "_c2star_s3_demo_exception_release.exs"
-  # The pre-S3 tree (merge-base 18c01f9b = cf86b7aa). The campaign packet
-  # re-pins it to the integrated head's own merge-base.
-  @baseline_tree "7a8e8e696c685d8fae65d8bc7b4060a0852a07dc"
+  # The pre-S3 tree: main 91601082, the base of the integrated S3 head
+  # (c2star-s3-int-r2 f25b8911). The campaign packet pins the exact commit.
+  @baseline_tree "1c6e7de88d3510888c6c1b470e9f4d20917dbee1"
   @deadline 900_000
 
   @retained %{
@@ -113,10 +124,41 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
     "cleanup.backends_before_drop" => "0",
     "cleanup.database_absent_after_drop" => "true",
     "cleanup.temp_folder" => "removed",
+    "evidence.claim" => "claimed",
+    "evidence.export" => "sealed",
     "outcome" => "ok"
   }
 
+  # The exact DB #1 and DB #2 names are published before any test runs
+  # (Codex e95a7340 choice 1); an absent, malformed, identical or parent
+  # target fails the whole module here, before any child.
+  setup_all do
+    targets = targets!()
+    publish!("targets", db1: elem(targets.db1, 1), db2: elem(targets.db2, 1))
+    :ok
+  end
+
+  # Only for the refusal test's never-created partitions and unconfigured
+  # target; the campaign databases are predeclared (`targets!/0`).
   defp suffix, do: "_wm" <> Base.encode16(:crypto.strong_rand_bytes(5), case: :lower)
+
+  # The campaign's two predeclared targets, from `SDR_RELEASE_DB1_SUFFIX`
+  # and `SDR_RELEASE_DB2_SUFFIX`: no random fallback.
+  defp targets! do
+    parent = Application.fetch_env!(:sdr_agent, SdrAgent.Repo)[:database]
+
+    case Harness.campaign_targets(System.get_env(), parent) do
+      {:ok, targets} -> targets
+      {:error, reason} -> flunk("campaign targets refused: #{inspect(reason)}")
+    end
+  end
+
+  # This database's evidence directory, claimed by the harness itself
+  # inside `SDR_RELEASE_EVIDENCE_ROOT` (which the harness validates).
+  defp evidence_dir!(name) do
+    root = System.get_env("SDR_RELEASE_EVIDENCE_ROOT") || flunk("SDR_RELEASE_EVIDENCE_ROOT unset")
+    Path.join(root, name)
+  end
 
   defp mix!, do: System.find_executable("mix") || flunk("mix is not on PATH")
 
@@ -169,7 +211,7 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
   test "DB #1: OLD writes and verifies, NEW up, OLD verifies down, NEW up again" do
     assert {:ok, versions} = Harness.versions(@migrations, migration_suffix: @s3_suffix)
     baseline = baseline_root!()
-    sfx = suffix()
+    {sfx, database} = targets!().db1
     new = Harness.checked_runner(mix!(), sfx, @root, @deadline)
     old = Harness.checked_runner(mix!(), sfx, baseline, @deadline, toolchain: :root)
 
@@ -177,6 +219,7 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
       Harness.prove_with_receipts(
         suffix: sfx,
         tmp_root: System.tmp_dir!(),
+        evidence_dir: evidence_dir!("db1"),
         versions: versions,
         runner: new,
         runners: %{
@@ -204,6 +247,7 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
 
     facts = Map.new(receipts)
     assert length(receipts) == map_size(facts), "one fact per key"
+    assert facts["target_database"] == database
     assert facts["migration_new"] == Integer.to_string(versions.new)
     assert facts["migration_predecessor"] == Integer.to_string(versions.predecessor)
 
@@ -215,12 +259,13 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
 
   test "DB #2: a demo row makes down refuse with check_violation, fully rolled back" do
     assert {:ok, versions} = Harness.versions(@migrations, migration_suffix: @s3_suffix)
-    sfx = suffix()
+    {sfx, database} = targets!().db2
 
     {outcome, receipts} =
       Harness.prove_with_receipts(
         suffix: sfx,
         tmp_root: System.tmp_dir!(),
+        evidence_dir: evidence_dir!("db2"),
         versions: versions,
         runner: Harness.checked_runner(mix!(), sfx, @root, @deadline),
         plan: :down_refusal,
@@ -232,6 +277,7 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
     assert states == %{"up" => @demo_up, "after_refusal" => @after_refusal}
 
     facts = Map.new(receipts)
+    assert facts["target_database"] == database
     assert facts["plan"] == "down_refusal"
     assert facts["migrate.down.expected"] == "refusal"
     assert facts["migrate.down.refusal"] == "check_violation"
