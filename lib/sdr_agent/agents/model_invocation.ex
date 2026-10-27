@@ -189,6 +189,8 @@ defmodule SdrAgent.Agents.ModelInvocation do
       authorize_if SdrAgent.Agents.Checks.CalibrationRead
       forbid_unless SdrAgent.Agents.Checks.ReleasedOutputRead
       authorize_if expr(exists(result_release, disposition == :released))
+      # C2* (OQ1): a demo-exception output, only under a registered use.
+      authorize_if SdrAgent.Agents.Checks.DemoExceptionUse
     end
 
     field_policy :* do
