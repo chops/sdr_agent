@@ -9,6 +9,10 @@ config :opentelemetry, traces_exporter: :none
 # before starting your production server.
 config :sdr_agent, SdrAgentWeb.Endpoint, cache_static_manifest: "priv/static/cache_manifest.json"
 
+# The hosted copy admits only users on SDR_LOGIN_ALLOWLIST at every sign-in
+# and session (`SdrAgent.Accounts.LoginAllowlist`; fail closed).
+config :sdr_agent, login_allowlist_enforced: true
+
 # Force using SSL in production. This also sets the "strict-security-transport" header,
 # known as HSTS. If you have a health check endpoint, you may want to exclude it below.
 # Note `:force_ssl` is required to be set at compile-time.

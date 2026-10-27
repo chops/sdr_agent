@@ -16,15 +16,21 @@ defmodule SdrAgent.Accounts.Senders.MagicLink do
       comma-separated list read at every request (empty or unset: nobody);
     * `SDR_MAIL_FROM` names the sender address.
 
-  A failed delivery is logged the same way. The link opens the
-  confirmation page (`/magic_link/:token`, the endpoint's public URL), whose
-  button signs the user in once.
+  Requests are bounded before any token is minted, per client
+  (`SdrAgentWeb.MagicLinkRequestLimit`) and per destination and in total
+  (`SdrAgent.Accounts.Preparations.LimitLinkRequests`); where the hosted
+  allowlist is enforced, an unlisted user is never minted a token
+  (`SdrAgent.Accounts.Preparations.AllowlistedOnly`). A failed delivery is
+  logged the same way. The link opens the confirmation page
+  (`/magic_link/:token`, the endpoint's public URL), whose button signs
+  the user in once.
   """
   use AshAuthentication.Sender
   use SdrAgentWeb, :verified_routes
 
   import Swoosh.Email
 
+  alias SdrAgent.Accounts.LoginAllowlist
   alias SdrAgent.Mailer
 
   require Logger
@@ -34,7 +40,7 @@ defmodule SdrAgent.Accounts.Senders.MagicLink do
     address = to_string(email)
 
     cond do
-      String.downcase(address) not in allowlist() ->
+      not LoginAllowlist.listed?(address) ->
         refuse("the recipient is not on SDR_LOGIN_ALLOWLIST")
 
       sender() == nil ->
@@ -46,15 +52,6 @@ defmodule SdrAgent.Accounts.Senders.MagicLink do
   end
 
   def send(_not_a_user, _token, _opts), do: refuse("no such user (registration is disabled)")
-
-  @doc "The lowercased addresses on `SDR_LOGIN_ALLOWLIST`, read now (comma-separated)."
-  @spec allowlist() :: [String.t()]
-  def allowlist do
-    (System.get_env("SDR_LOGIN_ALLOWLIST") || "")
-    |> String.split(",")
-    |> Enum.map(&(&1 |> String.trim() |> String.downcase()))
-    |> Enum.reject(&(&1 == ""))
-  end
 
   defp sender do
     case System.get_env("SDR_MAIL_FROM") do
