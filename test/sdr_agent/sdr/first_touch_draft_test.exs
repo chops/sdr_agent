@@ -68,10 +68,12 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       bound to the draft's Decision and invocation (input refs), with ids,
       indexes and reason codes only. A claim the caller lists as accepted
       (this lead's non-accepted claim, another lead's claim, a missing one)
-      is not accepted. A mismatched pair gets no passed check.
-      `HandOffProposal` refuses passed citation checks of another run, bound
-      to another invocation, of the wrong kind, or unbound, before any lock
-      or write. Rules unchanged: membership, verbatim presence, at least one
+      is not accepted. A mismatched pair stops each check with no Decision.
+      `HandOffProposal` refuses a passed citation check of another run,
+      bound to another invocation, of the wrong kind, or unbound, each
+      substituted alone beside bound checks, before its Lead lock. Each
+      (case, check) runs on its own fresh run (Codex R1-R3). Rules
+      unchanged: membership, verbatim presence, at least one
       personalization item; no entailment (Tier-0 review remains).
 
   Hermetic: Fake model provider; the recording responder
@@ -1791,52 +1793,42 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       assert_stored_citations_handed_off!(ctx, d, lead, d.draft.proposal, checks)
     end
 
-    test "the caller's evidence list cannot make a claim accepted for the lead", ctx do
-      lead = qualified_lead!(ctx)
-
-      {:ok, rejected} =
-        Research.list_records(Research.EvidenceClaim,
-          filter: [lead_id: lead.id, quality: :rejected],
-          actor: ctx.admin
-        )
-
-      assert rejected != [], "B1-R1 fixture stage: the lead has no non-accepted evidence claim"
-
-      %{lead: other_lead} = assign_with!(ctx, "02", MultilineSubject)
-      drain!()
-      other_accepted = accepted_ids!(ctx, other_lead)
-      assert other_accepted != [], "B1-R1 fixture stage: the other lead has no accepted evidence"
-
-      for {label, id} <- [
-            non_accepted: hd(rejected).id,
-            other_lead: hd(other_accepted),
-            missing: Ecto.UUID.generate()
-          ] do
+    # N5, one test per (listed claim, validator), each on a fresh running run
+    # (Codex R2): the caller lists the claim the stored draft cites as
+    # accepted; the check takes membership from the lead's accepted
+    # evidence and rejects it.
+    for label <- [:non_accepted, :other_lead, :missing],
+        kind <- [:claims_validation, :personalization_validation] do
+      @tag n5: {label, kind}
+      test "N5: the #{kind} check does not accept the #{label} claim the caller lists", ctx do
+        {label, kind} = ctx.n5
+        lead = qualified_lead!(ctx)
+        id = n5_evidence!(ctx, lead, label)
         put_env!(CitesEvidence, id)
-        d = draft_only!(ctx, lead, CitesEvidence, "b1-r1-n5-#{label}")
+        d = draft_only!(ctx, lead, CitesEvidence, "b1-r1-n5-#{label}-#{kind}")
 
         assert Enum.all?(d.stored.claims ++ d.stored.personalization, &(&1.evidence_id == id)),
                "B1-R1 fixture stage: the stored draft does not cite the #{label} claim"
 
-        refute id in accepted_ids!(ctx, lead)
+        refute id in accepted_ids!(ctx, lead),
+               "B1-R1 fixture stage: the #{label} claim is accepted"
+
+        assert run!(ctx, d.run).status == :running, "B1-R1 fixture stage: the run is not running"
         evidence = d.bundle.claims ++ [%{id: id, claim: "Listed as accepted by the caller."}]
-        checks = check_then_hand_off(d, lead.id, d.draft, evidence)
+        checked = %{lead_id: lead.id, draft: d.draft, claims: evidence}
+        result = observe(fn -> validator(kind).perform(checked, d.sdr) end)
 
-        for {key, check} <- [claims: checks.claims, personalization: checks.personalization] do
-          refute match?({:ok, %{passed: true}}, check),
-                 "B1-R1: the caller's evidence list made the #{label} claim accepted for the " <>
-                   "#{key} check: #{short(check)}; the hand-off then returned " <>
-                   short(checks.handoff)
-        end
+        assert match?({:ok, %{passed: false}}, result),
+               "B1-R1: the caller's evidence list made the #{label} claim accepted for the " <>
+                 "#{kind} check: #{short(result)}"
 
-        refute Enum.any?(
-                 decisions!(ctx, d.run),
-                 &(&1.kind in [:claims_validation, :personalization_validation] and
-                     &1.outcome == "passed")
-               )
-
-        refute match?({:ok, %{phase: :review}}, checks.handoff)
+        decision = citation_decision!(ctx, d.run, kind)
+        assert {decision.mode, decision.outcome} == {:deterministic, "rejected"}
+        assert [%{"index" => 0, "reasons" => reasons} | _] = decision.outcome_detail["rejected"]
+        assert "evidence_not_accepted_for_lead" in reasons
+        assert_citation_bound!(ctx, decision, d, lead, texts(d.stored))
         nothing_handed_off!(ctx, d.run, lead)
+        assert lead_status!(ctx, lead) == :qualified
       end
     end
   end
@@ -1844,138 +1836,322 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
   describe "the citation checks' draft provenance and the hand-off binding (Codex B1-R1, N6-N7)" do
     @describetag :b1_r1
 
-    test "the citation checks refuse a draft pair that is not this run's draft of this lead",
-         ctx do
-      lead = qualified_lead!(ctx)
-      other_lead = fixture_lead!(ctx, "02")
-
-      same = draft_only!(ctx, lead, RecordingBrain, "b1-r1-n6-same-run")
-      second_ctx = %{same.sdr | signal_id: "sig-b1-r1-n6-second-invocation"}
-
-      assert {:ok, _output, second} =
-               Model.call(second_ctx, :outreach_proposal, one_input!(@proposal), lead.id)
-
-      this = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-this-run")
-      other = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-other-run")
-      angled = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-angle")
-      angle = Enum.find(decisions!(ctx, angled.run), &(&1.kind == :angle))
-      assert angle, "B1-R1 fixture stage: the draft step recorded no angle Decision"
-      for_lead = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-lead")
-      no_decision = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-missing-decision")
-      no_invocation = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-missing-invocation")
-
-      for {label, d, lead_id, pair} <- [
-            {"another invocation of the same run", same, lead.id,
-             %{same.draft | model_invocation_id: second.id}},
-            {"another run's draft pair", this, lead.id, other.draft},
-            {"the angle Decision as the draft", angled, lead.id,
-             %{angled.draft | decision_id: angle.id}},
-            {"this run's pair for another lead", for_lead, other_lead.id, for_lead.draft},
-            {"a missing Decision", no_decision, lead.id,
-             %{no_decision.draft | decision_id: Ecto.UUID.generate()}},
-            {"a missing invocation", no_invocation, lead.id,
-             %{no_invocation.draft | model_invocation_id: Ecto.UUID.generate()}}
-          ],
-          {kind, action} <- [
-            claims_validation: ValidateClaims,
-            personalization_validation: ValidatePersonalization
-          ] do
+    # N6, one test per (counterexample, validator), each on its own fresh
+    # running run (Codex R2): the fixed fail-closed stop, no Decision of the
+    # validator's kind, no hand-off, no draft text in the result or the run's
+    # failure reason.
+    for label <- [
+          :other_invocation,
+          :other_run,
+          :angle,
+          :deterministic,
+          :other_lead,
+          :missing_decision,
+          :missing_invocation
+        ],
+        kind <- [:claims_validation, :personalization_validation] do
+      @tag n6: {label, kind}
+      test "N6: the #{kind} check refuses #{label} as this run's draft of this lead", ctx do
+        {label, kind} = ctx.n6
+        lead = qualified_lead!(ctx)
+        {d, lead_id, pair} = n6_case!(ctx, lead, label)
+        assert run!(ctx, d.run).status == :running, "B1-R1 fixture stage: the run is not running"
         checked = %{lead_id: lead_id, draft: pair, claims: d.bundle.claims}
-        result = observe(fn -> action.perform(checked, d.sdr) end)
+        result = observe(fn -> validator(kind).perform(checked, d.sdr) end)
 
-        refute match?({:ok, %{passed: true}}, result),
-               "B1-R1: #{inspect(action)} passed #{label}: #{short(result)}"
+        assert match?({:error, {:halt, _}}, result),
+               "B1-R1: the #{kind} check did not stop on #{label}: #{short(result)}"
 
-        refute Enum.any?(decisions!(ctx, d.run), &(&1.kind == kind and &1.outcome == "passed")),
-               "B1-R1: a passed #{kind} Decision was recorded for #{label}"
+        {:error, {:halt, reason}} = result
+        stopped = run!(ctx, d.run)
+        assert {stopped.status, stopped.status_reason} == {:failed, reason}
 
-        for text <- texts(d.stored),
-            line <- String.split(text, ~r/\p{Cc}+/u, trim: true),
-            String.length(line) >= 12 do
-          refute String.contains?(render(result), line),
-                 "B1-R1: the refusal of #{label} echoes draft text: #{short(line)}"
-        end
-      end
-
-      nothing_handed_off!(ctx, same.run, lead)
-      assert lead_status!(ctx, lead) == :qualified
-    end
-
-    test "HandOffProposal refuses passed citation checks not bound to this draft, before any " <>
-           "lock or write",
-         ctx do
-      lead = qualified_lead!(ctx)
-
-      # (i) Another run's genuine passed checks.
-      other = drafted!(ctx, lead, FakeBrain, "b1-r1-n7-other-run")
-      d1 = draft_only!(ctx, lead, FakeBrain, "b1-r1-n7-run")
-
-      # (ii) Passed checks naming this run's draft with another invocation of
-      # the same run (bound to that pair).
-      d2 = draft_only!(ctx, lead, RecordingBrain, "b1-r1-n7-invocation")
-      second_ctx = %{d2.sdr | signal_id: "sig-b1-r1-n7-second-invocation"}
-
-      assert {:ok, _output, second} =
-               Model.call(second_ctx, :outreach_proposal, one_input!(@proposal), lead.id)
-
-      {:ok, d2_decision} = Agents.get_decision(d2.draft.decision_id, actor: ctx.agent)
-      mixed = %{d2.draft | model_invocation_id: second.id}
-
-      # (iii) This run's genuine checks with their kinds swapped; (iv) passed
-      # checks naming this run's draft but bound to nothing.
-      d3 = draft_only!(ctx, lead, FakeBrain, "b1-r1-n7-kind")
-      d3_checked = %{lead_id: lead.id, draft: d3.draft, claims: d3.bundle.claims}
-      d3_claims = step!("claims", ValidateClaims.perform(d3_checked, d3.sdr))
-
-      d3_personalization =
-        step!("personalization", ValidatePersonalization.perform(d3_checked, d3.sdr))
-
-      d4 = draft_only!(ctx, lead, FakeBrain, "b1-r1-n7-unbound")
-
-      cases = [
-        {"another run's checks", d1, other.claims_check, other.personalization_check},
-        {"checks bound to another invocation", d2,
-         passed_check!(d2, lead, :claims_validation, mixed, [d2_decision, second], "other-pair"),
-         passed_check!(
-           d2,
-           lead,
-           :personalization_validation,
-           mixed,
-           [d2_decision, second],
-           "other-pair"
-         )},
-        {"checks of the wrong kind", d3,
-         %{passed: true, decision_id: d3_personalization.decision_id},
-         %{passed: true, decision_id: d3_claims.decision_id}},
-        {"unbound checks", d4,
-         passed_check!(d4, lead, :claims_validation, d4.draft, [], "unbound"),
-         passed_check!(d4, lead, :personalization_validation, d4.draft, [], "unbound")}
-      ]
-
-      for {label, d, claims_check, personalization_check} <- cases do
-        params = %{
-          lead_id: lead.id,
-          draft: d.draft,
-          claims_check: claims_check,
-          personalization_check: personalization_check,
-          shape_check: genuine_shape!(d, lead),
-          plan: d.plan
-        }
-
-        result = observe(fn -> HandOffProposal.perform(params, d.sdr) end)
-
-        assert result == {:error, {:halt, :invalid_model_output}},
-               "B1-R1: HandOffProposal accepted #{label}: #{short(result)}"
-
-        failed = run!(ctx, d.run)
-        assert {failed.status, failed.status_reason} == {:failed, :invalid_model_output}
-
-        refute Enum.any?(decisions!(ctx, d.run), &(&1.kind == :enrollment)),
-               "B1-R1: #{label} reached the enrollment gate"
+        refute Enum.any?(decisions!(ctx, d.run), &(&1.kind == kind)),
+               "B1-R1: a #{kind} Decision was recorded for #{label}"
 
         nothing_handed_off!(ctx, d.run, lead)
-        assert lead_status!(ctx, lead) == :qualified, "B1-R1: #{label} moved the lead"
+        assert lead_status!(ctx, lead) == :qualified
+        refute_echo!(texts(d.stored), [render(result), stopped.failure_reason || ""], label)
       end
+    end
+
+    # N7, one test per (counterexample, target check), each on its own fresh
+    # running run (Codex R1): only the target citation check is wrong; its
+    # companion and the shape check are passed and bound to the draft. The
+    # hand-off refuses before its Lead lock (Codex R3), with no draft text
+    # in the result or the run's failure reason.
+    for label <- [:other_run, :other_invocation, :wrong_kind, :unbound],
+        target <- [:claims_validation, :personalization_validation] do
+      @tag n7: {label, target}
+      test "N7: HandOffProposal refuses a #{label} #{target} check beside bound checks, " <>
+             "before its lead lock",
+           ctx do
+        {label, target} = ctx.n7
+        lead = qualified_lead!(ctx)
+        responder = if label == :other_invocation, do: RecordingBrain, else: FakeBrain
+        d = draft_only!(ctx, lead, responder, "b1-r1-n7-#{label}-#{target}")
+        companion = companion(target)
+
+        checks = %{
+          target => n7_check!(ctx, lead, d, label, target),
+          companion => passed_check!(d, lead, companion, d.draft, bound_refs!(ctx, d), "bound")
+        }
+
+        params = n7_params(d, lead, checks)
+        assert run!(ctx, d.run).status == :running, "B1-R1 fixture stage: the run is not running"
+        {result, queries} = with_queries(fn -> HandOffProposal.perform(params, d.sdr) end)
+
+        assert result == {:error, {:halt, :invalid_model_output}},
+               "B1-R1: HandOffProposal did not refuse the #{label} #{target} check before any " <>
+                 "write: #{short(result)}"
+
+        refute lead_locked?(queries),
+               "B1-R1: the hand-off took its Lead lock for the #{label} #{target} check"
+
+        stopped = run!(ctx, d.run)
+        assert {stopped.status, stopped.status_reason} == {:failed, :invalid_model_output}
+
+        refute Enum.any?(decisions!(ctx, d.run), &(&1.kind == :enrollment)),
+               "B1-R1: the #{label} #{target} check reached the enrollment gate"
+
+        nothing_handed_off!(ctx, d.run, lead)
+        assert lead_status!(ctx, lead) == :qualified
+        refute_echo!(texts(d.stored), [render(result), stopped.failure_reason || ""], label)
+      end
+    end
+
+    test "N7 control: passed checks bound to the draft reach the lead lock and are handed off",
+         ctx do
+      lead = qualified_lead!(ctx)
+      d = draft_only!(ctx, lead, FakeBrain, "b1-r1-n7-bound")
+      bound = bound_refs!(ctx, d)
+
+      checks = %{
+        claims_validation: passed_check!(d, lead, :claims_validation, d.draft, bound, "bound"),
+        personalization_validation:
+          passed_check!(d, lead, :personalization_validation, d.draft, bound, "bound")
+      }
+
+      {result, queries} =
+        with_queries(fn -> HandOffProposal.perform(n7_params(d, lead, checks), d.sdr) end)
+
+      assert match?({:ok, %{phase: :review}}, result),
+             "B1-R1 control: bound passed checks were not handed off: #{short(result)}"
+
+      assert lead_locked?(queries), "B1-R1 control: the probe saw no Lead lock in a hand-off"
+      assert "sdr.draft.completed" in signal_types(ctx.tenant, d.run)
+      assert lead_status!(ctx, lead) == :in_outreach
+    end
+  end
+
+  ## B1-R1 neighbor helpers for the independent N5-N7 cases (Codex R1-R3).
+
+  defp validator(:claims_validation), do: ValidateClaims
+  defp validator(:personalization_validation), do: ValidatePersonalization
+
+  defp companion(:claims_validation), do: :personalization_validation
+  defp companion(:personalization_validation), do: :claims_validation
+
+  # The draft's own Decision and invocation, as input refs.
+  defp bound_refs!(ctx, d) do
+    {:ok, decision} = Agents.get_decision(d.draft.decision_id, actor: ctx.agent)
+    {:ok, invocation} = Agents.get_model_invocation(d.draft.model_invocation_id, actor: ctx.agent)
+    [decision, invocation]
+  end
+
+  # The claim id the caller lists for N5: this lead's non-accepted claim,
+  # another lead's accepted claim (after its own genuine research), or none.
+  defp n5_evidence!(ctx, lead, :non_accepted) do
+    {:ok, rejected} =
+      Research.list_records(Research.EvidenceClaim,
+        filter: [lead_id: lead.id, quality: :rejected],
+        actor: ctx.admin
+      )
+
+    assert rejected != [], "B1-R1 fixture stage: the lead has no non-accepted evidence claim"
+    hd(rejected).id
+  end
+
+  defp n5_evidence!(ctx, _lead, :other_lead) do
+    %{lead: other_lead} = assign_with!(ctx, "02", MultilineSubject)
+    drain!()
+    accepted = accepted_ids!(ctx, other_lead)
+    assert accepted != [], "B1-R1 fixture stage: the other lead has no accepted evidence"
+    hd(accepted)
+  end
+
+  defp n5_evidence!(_ctx, _lead, :missing), do: Ecto.UUID.generate()
+
+  # One N6 counterexample on a fresh run `d`: `{d, lead_id, pair}`, its
+  # fixture fact asserted (it differs from `coherent/2` in the named fact).
+  defp n6_case!(ctx, lead, :other_invocation) do
+    d = draft_only!(ctx, lead, RecordingBrain, "b1-r1-n6-other-invocation")
+    second = second_invocation!(d, lead, "sig-b1-r1-n6-second-invocation")
+    pair = %{d.draft | model_invocation_id: second.id}
+    assert facts!(ctx, pair) == %{coherent(d.run, lead) | cites_invocation: false}
+    {d, lead.id, pair}
+  end
+
+  defp n6_case!(ctx, lead, :other_run) do
+    d = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-this-run")
+    other = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-other-run")
+
+    assert facts!(ctx, other.draft) == %{
+             coherent(d.run, lead)
+             | decision_run: other.run.id,
+               invocation_run: other.run.id
+           }
+
+    {d, lead.id, other.draft}
+  end
+
+  defp n6_case!(ctx, lead, :angle) do
+    d = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-angle")
+    angle = Enum.find(decisions!(ctx, d.run), &(&1.kind == :angle))
+    assert angle, "B1-R1 fixture stage: the draft step recorded no angle Decision"
+    pair = %{d.draft | decision_id: angle.id}
+    assert facts!(ctx, pair) == %{coherent(d.run, lead) | kind: :angle}
+    {d, lead.id, pair}
+  end
+
+  defp n6_case!(ctx, lead, :deterministic) do
+    d = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-deterministic")
+    budget = Enum.find(decisions!(ctx, d.run), &(&1.kind == :budget_reservation))
+    assert budget, "B1-R1 fixture stage: the draft call recorded no budget_reservation Decision"
+    pair = %{d.draft | decision_id: budget.id}
+
+    assert facts!(ctx, pair) == %{
+             coherent(d.run, lead)
+             | kind: :budget_reservation,
+               mode: :deterministic,
+               cites_invocation: false
+           }
+
+    {d, lead.id, pair}
+  end
+
+  defp n6_case!(ctx, lead, :other_lead) do
+    other_lead = fixture_lead!(ctx, "02")
+    d = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-other-lead")
+    assert facts!(ctx, d.draft) == coherent(d.run, lead)
+    refute other_lead.id == lead.id
+    {d, other_lead.id, d.draft}
+  end
+
+  defp n6_case!(ctx, lead, :missing_decision) do
+    d = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-missing-decision")
+    pair = %{d.draft | decision_id: Ecto.UUID.generate()}
+    assert match?({:error, _}, Agents.get_decision(pair.decision_id, actor: ctx.agent))
+    {d, lead.id, pair}
+  end
+
+  defp n6_case!(ctx, lead, :missing_invocation) do
+    d = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-missing-invocation")
+    pair = %{d.draft | model_invocation_id: Ecto.UUID.generate()}
+
+    assert match?(
+             {:error, _},
+             Agents.get_model_invocation(pair.model_invocation_id, actor: ctx.agent)
+           )
+
+    {d, lead.id, pair}
+  end
+
+  # A second genuine outreach-proposal invocation of `d`'s run, through the
+  # production model path, from the draft step's recorded input (`d` must
+  # have drafted with `RecordingBrain`).
+  defp second_invocation!(d, lead, signal_id) do
+    assert {:ok, _output, second} =
+             Model.call(
+               %{d.sdr | signal_id: signal_id},
+               :outreach_proposal,
+               one_input!(@proposal),
+               lead.id
+             )
+
+    second
+  end
+
+  # The wrong `target` check of one N7 case, recorded through the domain API
+  # (kind stage asserted by `passed_check!/6`).
+  defp n7_check!(ctx, lead, _d, :other_run, target) do
+    other = draft_only!(ctx, lead, FakeBrain, "b1-r1-n7-other-run-#{target}")
+    passed_check!(other, lead, target, other.draft, bound_refs!(ctx, other), "bound")
+  end
+
+  defp n7_check!(ctx, lead, d, :other_invocation, target) do
+    second = second_invocation!(d, lead, "sig-b1-r1-n7-second-invocation")
+    [decision, _invocation] = bound_refs!(ctx, d)
+    mixed = %{d.draft | model_invocation_id: second.id}
+    passed_check!(d, lead, target, mixed, [decision, second], "other-pair")
+  end
+
+  defp n7_check!(ctx, lead, d, :wrong_kind, target),
+    do: passed_check!(d, lead, companion(target), d.draft, bound_refs!(ctx, d), "wrong-kind")
+
+  defp n7_check!(_ctx, lead, d, :unbound, target),
+    do: passed_check!(d, lead, target, d.draft, [], "unbound")
+
+  defp n7_params(d, lead, checks),
+    do: %{
+      lead_id: lead.id,
+      draft: d.draft,
+      claims_check: Map.fetch!(checks, :claims_validation),
+      personalization_check: Map.fetch!(checks, :personalization_validation),
+      shape_check: genuine_shape!(d, lead),
+      plan: d.plan
+    }
+
+  # `fun`'s result (observed) and every query this process ran meanwhile
+  # (the `run_recovery_test.exs` telemetry style).
+  defp with_queries(fun) do
+    parent = self()
+    handler = "b1-r1-queries-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:sdr_agent, :repo, :query],
+      fn _event, _measurements, metadata, _config ->
+        if self() == parent, do: send(parent, {:b1_r1_query, IO.iodata_to_binary(metadata.query)})
+      end,
+      nil
+    )
+
+    result =
+      try do
+        observe(fun)
+      after
+        :telemetry.detach(handler)
+      end
+
+    {result, collect_b1_r1_queries([])}
+  end
+
+  defp collect_b1_r1_queries(acc) do
+    receive do
+      {:b1_r1_query, query} -> collect_b1_r1_queries([query | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # The hand-off's first lock: the Lead row `FOR UPDATE`.
+  defp lead_locked?(queries),
+    do:
+      Enum.any?(
+        queries,
+        &(String.starts_with?(&1, "SELECT") and String.contains?(&1, ~s(FROM "leads")) and
+            String.contains?(&1, "FOR UPDATE"))
+      )
+
+  # No line of `texts` in any of `fields` (refusal results, failure reasons).
+  defp refute_echo!(texts, fields, label) do
+    for text <- texts,
+        line <- String.split(text, ~r/\p{Cc}+/u, trim: true),
+        String.length(line) >= 12,
+        field <- fields do
+      refute String.contains?(field, line),
+             "B1-R1: the refusal of #{label} echoes draft text: #{short(line)}"
     end
   end
 end
