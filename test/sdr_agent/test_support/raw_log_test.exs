@@ -29,7 +29,7 @@ defmodule SdrAgent.TestSupport.RawLogTest do
     secret = sentinel()
 
     log_from_process(fn -> Logger.error("an unrelated failure #{secret}") end)
-    log_from_process(fn -> Logger.error("an expected report", domain: [:bandit]) end)
+    log_from_process(fn -> :logger.error("an expected report", %{domain: [:bandit]}) end)
 
     assert %{} = RawLog.await_error(ref, :bandit)
     captured = RawLog.drain(ref)
@@ -61,12 +61,12 @@ defmodule SdrAgent.TestSupport.RawLogTest do
     assert function_exported?(RawLog, :await, 3), "RawLog.await/3 is not defined"
     ref = RawLog.start()
 
-    other = log_from_process(fn -> Logger.error("other process", domain: [:bandit]) end)
+    other = log_from_process(fn -> :logger.error("other process", %{domain: [:bandit]}) end)
 
     {target, target_ref} =
       spawn_monitor(fn ->
         receive do
-          :go -> Logger.error("target process", domain: [:bandit])
+          :go -> :logger.error("target process", %{domain: [:bandit]})
         end
       end)
 

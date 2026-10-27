@@ -122,7 +122,14 @@ defmodule SdrAgent.TestSupport.RawLog do
   defp keep(ref, event), do: Process.put({__MODULE__, ref}, [event | buffer(ref)])
   defp buffer(ref), do: Process.get({__MODULE__, ref}, [])
 
-  @doc "Whether `event`'s message or metadata contains `secret` anywhere."
+  @doc """
+  Whether `event`'s message or metadata contains `secret` anywhere: in the
+  rendered message, or in any binary, atom, chardata or closure environment
+  among its terms, found by walking the terms themselves (struct fields
+  included) rather than their `inspect/2` text, which an Inspect
+  implementation may abbreviate or hide (`Phoenix.LiveView.Socket` hides
+  its `private`).
+  """
   @spec contains?(map(), String.t()) :: boolean()
   def contains?(event, secret) do
     rendered =
@@ -132,8 +139,45 @@ defmodule SdrAgent.TestSupport.RawLog do
         _unrenderable -> ""
       end
 
-    String.contains?(rendered, secret) or
-      String.contains?(inspect(event, limit: :infinity, printable_limit: :infinity), secret)
+    String.contains?(rendered, secret) or term_contains?(event, secret)
+  end
+
+  defp term_contains?(term, secret) when is_binary(term),
+    do: :binary.match(term, secret) != :nomatch
+
+  defp term_contains?(term, secret) when is_atom(term),
+    do: term |> Atom.to_string() |> term_contains?(secret)
+
+  defp term_contains?(term, secret) when is_map(term),
+    do: Enum.any?(Map.to_list(term), &term_contains?(&1, secret))
+
+  defp term_contains?(term, secret) when is_tuple(term),
+    do: term |> Tuple.to_list() |> term_contains?(secret)
+
+  defp term_contains?(term, secret) when is_list(term),
+    do: chardata_contains?(term, secret) or list_contains?(term, secret)
+
+  defp term_contains?(term, secret) when is_function(term) do
+    {:env, env} = :erlang.fun_info(term, :env)
+    term_contains?(env, secret)
+  end
+
+  defp term_contains?(_term, _secret), do: false
+
+  # Proper and improper lists alike.
+  defp list_contains?([], _secret), do: false
+
+  defp list_contains?([head | tail], secret) when is_list(tail),
+    do: term_contains?(head, secret) or list_contains?(tail, secret)
+
+  defp list_contains?([head | tail], secret),
+    do: term_contains?(head, secret) or term_contains?(tail, secret)
+
+  # A secret split across the parts of a charlist or iodata.
+  defp chardata_contains?(list, secret) do
+    list |> IO.chardata_to_string() |> String.contains?(secret)
+  rescue
+    _not_chardata -> false
   end
 
   @doc "The event's message rendered as text (string, report or format)."
