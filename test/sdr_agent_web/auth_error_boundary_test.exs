@@ -117,6 +117,14 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
 
   defp malformed_json(sentinel), do: ~s({"user": {"email": "x", "password": "#{sentinel}")
 
+  # A malformed JSON body: the parser raises before the router. Under Bandit,
+  # Phoenix then renders with the conn from before the body was read, Bandit
+  # refuses it as stale, and the answer is a 500 whose report carries that
+  # conn (its path and query) in metadata; the sentinel also rides in the
+  # query string, where a credential can (a token query).
+  defp parser_failure(path, sentinel),
+    do: raw_post(path <> "?token=#{sentinel}", "application/json", malformed_json(sentinel))
+
   # --- P2: after the auth pipeline -------------------------------------
 
   test "a crash on an auth route after its pipeline is reported withheld", ctx do
@@ -131,8 +139,8 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
 
   test "a body-parser failure on an auth path is reported withheld, any spelling", ctx do
     for path <- ["/auth/user/password/sign_in", "/%61uth/user/password/sign_in"] do
-      body = malformed_json(ctx.sentinel)
-      assert [400] = exchange(ctx.port, [raw_post(path, "application/json", body)])
+      assert [status] = exchange(ctx.port, [parser_failure(path, ctx.sentinel)])
+      assert status in [400, 500]
       assert_withheld(ctx)
     end
   end
@@ -162,21 +170,21 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
   # --- positive controls and process reuse -------------------------------
 
   test "the same parser failure on an ordinary path is reported in full", ctx do
-    assert [400] =
-             exchange(ctx.port, [
-               raw_post("/leads", "application/json", malformed_json(ctx.sentinel))
-             ])
+    assert [status] = exchange(ctx.port, [parser_failure("/leads", ctx.sentinel)])
+    assert status in [400, 500]
 
     assert_reported(ctx)
   end
 
   test "on one connection, an auth request's tag does not withhold a later ordinary report",
        ctx do
-    assert [200, 400] =
+    assert [200, status] =
              exchange(ctx.port, [
                raw_get("/magic_link/not-a-real-token"),
-               raw_post("/leads", "application/json", malformed_json(ctx.sentinel))
+               parser_failure("/leads", ctx.sentinel)
              ])
+
+    assert status in [400, 500]
 
     assert_reported(ctx)
   end
