@@ -329,7 +329,9 @@ defmodule SdrAgent.AgentEnv.StateAuthorizationIdTest do
       end
 
       test "#{shape} #{field}: uppercase UUID text is invalid", ctx do
-        uuid = String.upcase(Ecto.UUID.generate())
+        # The fixed, letter-bearing @uuid_id: a random UUID could be all digits
+        # where uppercasing applies, and so stay canonical.
+        uuid = String.upcase(@uuid_id)
         assert_invalid(ctx.root, @shape, %{@field => uuid}, "with an uppercase #{@field}")
       end
 
