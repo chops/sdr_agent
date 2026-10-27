@@ -84,6 +84,13 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
   through `private_arguments` is refused by Ash's array cast guard
   (`InvalidArgument` on `decision_refs`), a baseline cast control. Nothing
   is written in any case (Codex `7610420a` correction of the false cases).
+
+  GREEN-2 M1 RED (Codex `64d86a97`): after the row lock, PRV revokes only a
+  delegated row of its own tenant. A raw `:revoke` by a PRV asserting
+  another tenant, given the genuine grant with its `tenant_id` forged to
+  that tenant, passes the pre-lock policy and must be `Forbidden` on the
+  locked row with nothing changed; the same raw call by the grant's own
+  PRV is the positive control.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -226,6 +233,23 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
     ModelCallGrant
     |> Ash.Changeset.for_create(:provision_delegated, params, [actor: actor] ++ opts)
     |> Ash.create()
+  end
+
+  # The raw `:revoke` action with authorization on (Codex M1): the struct
+  # reaches the pre-lock policy as given.
+  defp raw_revoke(grant, actor) do
+    grant
+    |> Ash.Changeset.for_update(:revoke, %{expected_revision: 1}, actor: actor)
+    |> Ash.update()
+  end
+
+  # A grant's allocations as stored (kernel read), in id order.
+  defp allocation_state(grant_id) do
+    grant_id
+    |> reload!()
+    |> Map.fetch!(:allocations)
+    |> Enum.map(&{&1.id, &1.key, &1.attempts, &1.released_at, &1.grant_revision})
+    |> Enum.sort()
   end
 
   # The params of a raw call supplying private argument `name` as a plain
@@ -873,6 +897,51 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
 
       assert match?({:error, %Refused{reason: :no_eligible_grant}}, result),
              "c2star-s2: expected :no_eligible_grant, got #{inspect(result, limit: 6)}"
+    end
+
+    # Codex M1 (`64d86a97`): after the row lock PRV may revoke only a row of
+    # its own tenant. The raw action with authorization on, so a struct whose
+    # tenant is forged to the actor's passes the pre-lock policy and reaches
+    # the lock, which reloads the actual row. (The guarded route would also
+    # append a denial to the asserted tenant, which has no audit chain: the
+    # separate #240, not tested here.)
+    test "PRV of another tenant cannot revoke a delegated grant through a forged-tenant " <>
+           "struct (post-lock)",
+         ctx do
+      env = provisioned!()
+      asserted = Ecto.UUID.generate()
+      forged = %{env.grant | tenant_id: asserted}
+      before = allocation_state(env.grant.id)
+
+      assert_forbidden(
+        raw_revoke(forged, prv(asserted)),
+        "PRV of another tenant, forged-tenant struct, raw revoke"
+      )
+
+      stored = reload!(env.grant.id)
+
+      assert {stored.tenant_id, stored.status, stored.revision, stored.revoked_at,
+              stored.updated_by_id} == {ctx.tenant.id, :active, 1, nil, nil}
+
+      assert allocation_state(env.grant.id) == before
+      assert events_of_type(ctx.tenant, "model.grant.revoked") == []
+    end
+
+    test "control: PRV of the grant's tenant revokes it through the same raw action", ctx do
+      env = provisioned!()
+      result = raw_revoke(env.grant, env.prv)
+
+      assert match?({:ok, %ModelCallGrant{}}, result),
+             "control: same-tenant raw PRV revoke: " <>
+               inspect(result, limit: 8, printable_limit: 400)
+
+      {:ok, grant} = result
+
+      assert {grant.status, grant.revision, grant.revoked_at, grant.updated_by_id} ==
+               {:revoked, 2, now(), nil}
+
+      assert [event] = events_of_type(ctx.tenant, "model.grant.revoked")
+      assert {event.actor_type, event.actor_id} == {:grant_provisioner, prv_id()}
     end
   end
 
