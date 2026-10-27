@@ -106,6 +106,13 @@ defmodule SdrAgent.Agents.Witness do
   ## Configuration
 
   @doc """
+  The reviewed proxy versions a terminal exchange must carry before it can
+  count (the reconciler's gate). The C2* demo exception's E4 capture check
+  reads the same list.
+  """
+  def proxy_versions, do: @proxy_versions
+
+  @doc """
   The configured proxy blob directory, or nil (unset: reconciliation inert).
   A configured value is returned as is. Every store read revalidates it
   (`Store.validate_root/1`), so a configured root that fails takes the
