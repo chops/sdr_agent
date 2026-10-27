@@ -28,7 +28,10 @@ defmodule SdrAgent.Agents.Decision do
   the send gate and its checks; REC reconciliation; WHK the unsubscribe
   rule; SCH follow-up scheduling; suppression and campaign-state checks by
   AGT before it works or enrolls a lead (S7) and by DLV at send). Slices
-  that first emit a kind may tighten it.
+  that first emit a kind may tighten it. B1-04 and B1-05 add two protected,
+  AGT-only kinds: `research_caps` (the research caps applied to one
+  evidence extraction) and `draft_shape_validation` (the subject/body shape
+  rule of one draft, bound to its draft_proposal Decision and invocation).
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -49,7 +52,9 @@ defmodule SdrAgent.Agents.Decision do
     :campaign_state_check,
     :budget_reservation,
     :unsubscribe_rule,
-    :delivery_reconciliation
+    :delivery_reconciliation,
+    :research_caps,
+    :draft_shape_validation
   ]
 
   @kind_actors %{
@@ -60,6 +65,8 @@ defmodule SdrAgent.Agents.Decision do
     claims_validation: [:agent_runtime],
     personalization_validation: [:agent_runtime],
     reply_classification: [:agent_runtime],
+    research_caps: [:agent_runtime],
+    draft_shape_validation: [:agent_runtime],
     enrollment: [:agent_runtime],
     phase_transition: [:agent_runtime],
     budget_reservation: [:agent_runtime],
