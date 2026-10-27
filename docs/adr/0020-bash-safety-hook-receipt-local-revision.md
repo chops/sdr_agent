@@ -109,10 +109,16 @@ The section defines `SCRATCH_ROOT` once, on a line of its own, and two functions
 
 - **Scratch only.** The only newly allowed effect is deleting entries strictly below the agents' own
   scratch folder, which holds per-session temporary files outside the repository, the worktrees and
-  `~/.local/state`. Nothing in that folder is project state or evidence the project relies on.
+  `~/.local/state`. The hook checks the location only. It cannot tell whether a target is still in
+  use, is retained evidence, or belongs to another session: being outside Git does not make data
+  expendable.
 - **Literal paths only.** With N1 no expansion of any kind can run (variables, globs, braces, tilde,
   command substitution, quotes, escapes), so the paths the hook checks are the paths `rm` receives. N4
-  closes the one remaining way a literal path can reach outside: a symlink.
+  rejects a path whose prefix is a symlink when the hook runs. That is a check before the command
+  executes, in a different process, not an atomic guarantee: a same-user process could still change a
+  path between the check and the delete. The intended use assumes the scratch folder's ancestors stay
+  stable and that only the trusted agents act there; it does not claim confinement against concurrent
+  hostile path substitution.
 - **Every other control is unchanged.** Blockers run first, untouched. A command that fails any
   condition falls through to the same rules as before, so it asks or blocks exactly as it did.
 - **Tested both ways.** `test/workflow/bash_safety_hook_test.exs` (86 cases) covers each allowed
@@ -120,6 +126,17 @@ The section defines `SCRATCH_ROOT` once, on a line of its own, and two functions
   `SCRATCH_ROOT` line, exercises N4 without touching the real scratch folder. Eight one-line mutants
   of the new section (no symlink check, no allowlist, no length check, no dot-segment check, no
   component check, wider flags, prefix without `/`, no target required) are each killed.
+
+### 2a. What it does not authorise
+
+- This omits one hook prompt for one command shape. It is not authority to delete arbitrary files
+  under the scratch root.
+- Each actual cleanup must be authorised by the task at hand, name concrete targets, and be known to
+  be disposable. Evidence that a report, review or decision cites is preserved, or archived durably
+  first.
+- No agent deletes another session's output, an active run's files, lease or job directories, or a
+  whole session tree merely because it is under the root. When ownership is uncertain, coordinate with
+  its owner first.
 
 ### 3. The receipt: binding conditions (ADR-0019 shape)
 
