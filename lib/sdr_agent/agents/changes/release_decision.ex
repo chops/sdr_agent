@@ -54,6 +54,18 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
      carry one closed `demo_exception_refusal` code; the demo event's
      private arguments are never caller-supplied.
 
+     - **Authorization.** The resource policy admits AGT only. This change
+       further refuses a `:demo_exception` decision, statically and
+       before any lock or write, unless the verified `:result_gate`
+       context is present. It equally refuses any caller-supplied private
+       argument. So an auditor, REC, the kernel, an admin, a standalone
+       AGT decide and every other context are all refused.
+     - **Side effects.** A fresh decision inserts the row with the four
+       exception columns and appends one `model.result.demo_exception`
+       event (policy id, basis digest, label). An identical replay inserts
+       and appends nothing. A refusal returns the error, and the caller's
+       transaction rolls back.
+
   The run id is put in the changeset context
   (`:model_result_release_agent_run_id`) for the event's run correlation.
   """

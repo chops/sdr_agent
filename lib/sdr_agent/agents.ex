@@ -43,7 +43,10 @@ defmodule SdrAgent.Agents do
     * result release (R0-07) — `decide_result_release/2` (AGT; the one
       immutable `ModelResultRelease` of an invocation), `get_result_release/2`,
       `list_result_releases/1`, and `released_output/2`, the only business
-      read of a generation-2 ClaudeCLI output (`SdrAgent.Agents.ReleasedOutput`);
+      read of a generation-2 ClaudeCLI output (`SdrAgent.Agents.ReleasedOutput`).
+      A C2* `:demo_exception` release (S3) is decided only by the result-gate
+      finalizer, and its output is read only under present use authority
+      (`SdrAgent.Agents.DemoException.use_authority/3`);
     * real-model call grants (C9) — `create_grant/2`,
       `update_grant_terms/3`, `revoke_grant/3`, `release_allocation/3`
       (each an active human admin only, in one transaction, refusing a stale
@@ -1463,7 +1466,10 @@ defmodule SdrAgent.Agents do
   finalizer's verified `SdrAgent.Agents.ReleaseDecision.Prelocked` context
   (no fresh lock requests; refused unless it matches). An identical replay
   returns the existing release; a conflicting one fails with
-  `SdrAgent.Agents.Errors.ReleaseConflict`. See
+  `SdrAgent.Agents.Errors.ReleaseConflict`. A `:demo_exception` disposition
+  is decided only under the result-gate finalizer's `:result_gate`
+  context. Any other caller is refused before any write; an authoritative
+  refusal is `SdrAgent.Agents.Errors.DemoExceptionRefused`. See
   `SdrAgent.Agents.ModelResultRelease`.
   """
   def decide_result_release(attrs, opts) do

@@ -35,6 +35,12 @@ defmodule SdrAgent.Agents.Changes.LinkGateCause do
   Operation) and is a warning with exactly the message "demo exception not
   in use" (Recovery's fixed cause). Every withheld release still needs its
   event's binding.
+
+  Transition: the AgentRun `:fail` it serves stops the run `failed` with
+  `:witness_mismatch` or `:witness_unreconciled`. Its only side effect here
+  is the `attention_failure_id`. It opens no Failure and writes no release. It only
+  narrows which cause may be linked: the AgentRun `:fail` action's
+  authorization is unchanged, and an invalid cause adds a changeset error.
   """
   use Ash.Resource.Change
 

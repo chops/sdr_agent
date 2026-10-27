@@ -42,7 +42,10 @@ defmodule SdrAgent.Agents.ModelInvocation do
   readable only by the released-output
   read (`SdrAgent.Agents.released_output/2`, marked by
   `SdrAgent.Agents.Checks.ReleasedOutputRead` and requiring a `:released`
-  `SdrAgent.Agents.ModelResultRelease`), by the witness evidence seam (REC
+  `SdrAgent.Agents.ModelResultRelease`, or, for a C2* `:demo_exception`
+  release, a process-bound `SdrAgent.Agents.Checks.DemoExceptionUse`
+  registration made only after present use authority), by the witness
+  evidence seam (REC
   and AUD), by the audit kernel's integrity read (chain verification and
   event hashing, `SdrAgent.Audit.Checks.IntegrityRead`) and, as AGT, for
   the one proof invocation bound by the test-seam

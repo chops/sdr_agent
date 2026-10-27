@@ -23,7 +23,10 @@ defmodule SdrAgent.Agents.DemoException do
 
   `admission_window/4` is the admission guard (item 3) for one real call. It
   applies at reservation and at launch while the selector is on, with the
-  provider startup timeout of `provider_timeout_ms/1`.
+  provider startup timeout of `provider_timeout_ms/1`. `use_authority/3` is
+  the present use authority of an existing demo-exception release (item 2,
+  "Use authority"), checked by `SdrAgent.Agents.ReleasedOutput` and result
+  gate recovery before any output. Neither writes, locks or does file I/O.
 
   Test-seam builds only (`:claude_cli_test_seams`, config/test.exs): while
   `config :sdr_agent, SdrAgent.Test.DemoExceptionSource` is set, `source/0`
