@@ -94,6 +94,10 @@ config :swoosh, :api_client, false
 # authorized only for the seeder in :dev/:test; absent elsewhere = refused).
 config :sdr_agent, seeding_allowed?: true
 
+# Follow-ups run here (`SdrAgent.Outreach.FollowUps`). Production disables
+# them (config/prod.exs); a missing setting means disabled.
+config :sdr_agent, :follow_ups, :enabled
+
 # <!-- >>> workflow-factory:workflow-project-config >>> -->
 config :sdr_agent, SdrAgent.Repo,
   database: "sdr_agent_dev",

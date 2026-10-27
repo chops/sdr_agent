@@ -19,7 +19,8 @@ defmodule SdrAgent.Outreach.Delivery do
       consumption and the rendered message commit together; the message is
       then handed to the adapter outside any transaction and the outcome is
       recorded: accepted (receipt, draft sent, enrollment advanced, follow-up
-      scheduled), retryable (bounded, backoff), permanent, or unknown
+      scheduled unless the follow-up switch is off,
+      `SdrAgent.Outreach.FollowUps`), retryable (bounded, backoff), permanent, or unknown
       (reconciliation job) — `record/4`.
     * `reconcile/2` (REC) — an unknown delivery asks the adapter what it
       accepted (`delivery_reconciliation` Decision): accepted → as above;
@@ -49,6 +50,7 @@ defmodule SdrAgent.Outreach.Delivery do
   alias SdrAgent.Outreach.DeliveryReceipt
   alias SdrAgent.Outreach.Draft
   alias SdrAgent.Outreach.DraftRevision
+  alias SdrAgent.Outreach.FollowUps
   alias SdrAgent.Outreach.SendQuotaDay
   alias SdrAgent.Outreach.Suppression
   alias SdrAgent.Repo
@@ -385,9 +387,20 @@ defmodule SdrAgent.Outreach.Delivery do
 
   # The scheduler's job (`SdrAgent.SDR.FollowupWorker`, agent plane) is named
   # by string: Outreach never depends on the agent plane at compile time.
+  # With the follow-up switch off (`SdrAgent.Outreach.FollowUps`) no job is
+  # inserted and the refusal is logged.
   defp schedule_followup(%{next_step_due_at: nil} = enrollment), do: {:ok, enrollment}
 
   defp schedule_followup(enrollment) do
+    if FollowUps.enabled?() do
+      insert_followup(enrollment)
+    else
+      FollowUps.log_refusal(:scheduling, enrollment.id, enrollment.current_step_position)
+      {:ok, enrollment}
+    end
+  end
+
+  defp insert_followup(enrollment) do
     %{
       "enrollment_id" => enrollment.id,
       "tenant_id" => enrollment.tenant_id,
