@@ -774,6 +774,8 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
 
     %{
       clock: fn ->
+        send(test, :clock)
+
         case pop.(:clock) do
           ms when is_integer(ms) -> {:ok, ms}
           unreadable -> unreadable
@@ -832,6 +834,24 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
       0 -> n
     end
   end
+
+  # Every effect call, in order (RED-8b): clock reads, observations, the
+  # drain and fact lines by their first token, the drop and the proof.
+  defp sequence(acc \\ []) do
+    receive do
+      :clock -> sequence([:clock | acc])
+      {:observe, _ms} -> sequence([:observe | acc])
+      {:emit, "WM-DRAIN " <> line} -> sequence([{:drain, first_token(line)} | acc])
+      {:emit, "WM-CHILD " <> fact} -> sequence([{:fact, first_token(fact)} | acc])
+      :pause -> sequence([:pause | acc])
+      :storage_down -> sequence([:storage_down | acc])
+      :count_present -> sequence([:count_present | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp first_token(line), do: line |> String.split([" ", "="], parts: 2) |> hd()
 
   defp facts_of(lines), do: for("WM-CHILD " <> fact <- lines, do: fact)
   defp drain_lines(lines), do: for("WM-DRAIN " <> line <- lines, do: line)
@@ -931,6 +951,44 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
         assert List.last(drain_lines(lines)) == "retained: backends_present", inspect(type)
         refute_received :storage_down
       end
+    end
+
+    # RED-8b: an observation's end is read after the observation, the final
+    # check after that attempt's line, every pre-drop fact before the drop.
+    test "the order: t0, bounds, start, observation, its end, its line, final check, facts, drop" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      effects =
+        drain_effects(%{
+          clock: [@t0, @t0, 1_040, 2_100, 2_140, 2_150],
+          observe: [{:ok, observation([{"client backend", 1}])}, {:ok, observation([])}]
+        })
+
+      assert drain_drop(effects) == :ok
+
+      assert sequence() == [
+               :clock,
+               {:drain, "budget_ms"},
+               :clock,
+               :observe,
+               :clock,
+               {:drain, "attempt"},
+               :pause,
+               :clock,
+               :observe,
+               :clock,
+               {:drain, "attempt"},
+               :clock,
+               {:drain, "accepted"},
+               {:fact, "drop_protocol"},
+               {:fact, "backends_before_drop"},
+               {:fact, "blocking_before_drop"},
+               {:fact, "excluded_before_drop"},
+               {:fact, "drain_attempts"},
+               :storage_down,
+               :count_present,
+               {:fact, "database_absent_after_drop"}
+             ]
     end
 
     test "a blocker that vanishes is rechecked after the pause, then accepted" do
