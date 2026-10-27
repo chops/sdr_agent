@@ -76,6 +76,10 @@ config :sdr_agent, SdrAgent.Agents.ResultGate, wait_ms: 1_000, poll_ms: 25
 # authorized only for the seeder in :dev/:test; absent elsewhere = refused).
 config :sdr_agent, seeding_allowed?: true
 
+# Follow-ups run here (`SdrAgent.Outreach.FollowUps`). Production disables
+# them (config/prod.exs); a missing setting means disabled.
+config :sdr_agent, :follow_ups, :enabled
+
 # Live console refresh reloads at once in tests (no debounce timer).
 config :sdr_agent, SdrAgentWeb.LiveRefresh, debounce_ms: 0
 
