@@ -59,7 +59,10 @@ defmodule SdrAgent.Agents.ResultGate do
   code}`); that repeat's refusal goes to Recovery. An existing demo row
   outside the branch rolls back `:demo_exception_exists` (Recovery honours
   it). While the selector is on, every withheld event records one closed
-  `demo_exception_refusal` code; with it off nothing changes.
+  `demo_exception_refusal` code; with it off the outcome and events are
+  unchanged. Every `finalize/4`, selector off included, makes one more plain
+  read (no lock clause) after the invocation lock: the invocation's existing
+  release, so a historical demo row is detected even with its branch off.
   """
 
   require Ash.Query
