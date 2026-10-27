@@ -25,11 +25,14 @@ defmodule SdrAgent.Accounts.MagicLinkTest do
     previous = Map.new(@env, &{&1, System.get_env(&1)})
 
     on_exit(fn ->
+      SdrAgent.TestSupport.RateLimits.reset()
+
       for {key, value} <- previous do
         if value, do: System.put_env(key, value), else: System.delete_env(key)
       end
     end)
 
+    SdrAgent.TestSupport.RateLimits.reset()
     System.delete_env("SDR_LOGIN_ALLOWLIST")
     System.put_env("SDR_MAIL_FROM", "SDR Agent <sign-in@example.test>")
     tenant = bootstrap!()
@@ -136,7 +139,8 @@ defmodule SdrAgent.Accounts.MagicLinkTest do
     refute match?({:ok, %User{}}, sign_in(token))
   end
 
-  test "one address gets at most three links per fifteen minutes; the refusal omits it", ctx do
+  test "one address gets at most three links per fifteen minutes, refused before minting",
+       ctx do
     allow(ctx.email)
     t0 = DateTime.utc_now()
     SdrAgent.Clock.freeze(t0)
@@ -146,9 +150,11 @@ defmodule SdrAgent.Accounts.MagicLinkTest do
       capture_token()
     end
 
+    tokens = Ash.count!(SdrAgent.Accounts.Token, authorize?: false)
     log = capture_log(fn -> assert :ok = request(ctx.email) end)
     refute_email_sent()
-    assert log =~ "magic link refused"
+    assert Ash.count!(SdrAgent.Accounts.Token, authorize?: false) == tokens
+    assert log =~ "magic link request limited"
     refute String.downcase(log) =~ String.downcase(ctx.email)
 
     SdrAgent.Clock.freeze(DateTime.add(t0, 15, :minute))
