@@ -18,7 +18,15 @@ defmodule SdrAgent.Logger.CredentialRedaction do
       `private_key`, `credential` — keeps its key, its value replaced by
       `"[FILTERED]"` (so request headers, session maps, `user_token`,
       `_csrf_token`, `hashed_password`, LiveView `connect_info` sessions);
-    * a `Jason.DecodeError` loses its `data` (a request body);
+    * a `Jason.DecodeError` loses both fields built from the request
+      body, `data` (the body) and `token` (the slice its message prints);
+      its message then reports only the position (Codex fc6b86ca R4);
+    * socket data in a `{:tcp | :ssl, socket, data}` message (a connection
+      process's last message: a masked WebSocket frame is reversible)
+      keeps only its size, and a ThousandIsland connection process's state
+      `{%ThousandIsland.Socket{}, state}` (buffers, the WebSocket transport
+      and its decoded session) is dropped whole: defence in depth behind
+      the transport's tag;
     * a Bandit report (`domain` includes `:bandit`) whose text is a
       formatted exception is re-rendered from the redacted exception and
       stack (`Exception.format/3`), so no argument formatted into its text
@@ -37,7 +45,9 @@ defmodule SdrAgent.Logger.CredentialRedaction do
   redacted while still terms, before their state and last message are
   formatted into text. The walk is bounded: a subterm beyond the budget
   becomes `"[REDACTED: scan limit]"`. The filter never raises (`:logger`
-  would drop it): an internal failure yields a content-free event.
+  would drop it): an internal failure yields a new, fixed diagnostic with
+  no event content, only a validated level, pid, group leader and time
+  (Codex fc6b86ca R5).
   """
 
   @id :sdr_agent_credential_redaction
@@ -46,6 +56,14 @@ defmodule SdrAgent.Logger.CredentialRedaction do
   @scan_limit "[REDACTED: scan limit]"
   @budget 200_000
   @sensitive ~w(token password passwd secret cookie authorization session api_key private_key credential)
+  # Exception fields built from request input, filtered whatever their
+  # names: a JSON decode error's body (`data`) and the slice of it its
+  # message prints (`token`, Codex fc6b86ca R4). With a binary token its
+  # message reads only the position and the token, never `data`.
+  @input_fields %{Jason.DecodeError => [:data, :token]}
+  @connection_state "[FILTERED: connection state]"
+  @unrenderable "unrenderable log event (credential redaction)"
+  @levels [:emergency, :alert, :critical, :error, :warning, :notice, :info, :debug]
 
   @doc """
   Installs the filter before Elixir's report translator (idempotent). Call
@@ -145,13 +163,15 @@ defmodule SdrAgent.Logger.CredentialRedaction do
 
   defp redact(%Plug.Conn{} = conn, _budget, status), do: conn_summary(conn, status)
 
-  defp redact(%Jason.DecodeError{} = error, _budget, _status), do: %{error | data: @filtered}
+  defp redact(%{__struct__: module} = struct, budget, status) do
+    input = Map.get(@input_fields, module, [])
 
-  defp redact(%{__struct__: _} = struct, budget, status) do
     struct
     |> Map.from_struct()
-    |> Map.new(fn {key, value} -> {key, entry(key, value, budget, status)} end)
-    |> Map.put(:__struct__, struct.__struct__)
+    |> Map.new(fn {key, value} ->
+      if key in input, do: {key, @filtered}, else: {key, entry(key, value, budget, status)}
+    end)
+    |> Map.put(:__struct__, module)
   end
 
   defp redact(map, budget, status) when is_map(map),
@@ -162,6 +182,19 @@ defmodule SdrAgent.Logger.CredentialRedaction do
   defp redact({module, function, args, location}, _budget, _status)
        when is_atom(module) and is_atom(function) and is_list(args) and is_list(location),
        do: {module, function, length(args), location}
+
+  # Socket data a connection process received (a masked WebSocket frame is
+  # reversible) keeps only its size.
+  defp redact({tag, socket, data}, budget, status) when tag in [:tcp, :ssl] and is_binary(data),
+    do: {tag, walk(socket, budget, status), "[FILTERED: #{byte_size(data)} bytes]"}
+
+  defp redact({tag, socket, data}, budget, status) when tag in [:tcp, :ssl] and is_list(data),
+    do: {tag, walk(socket, budget, status), "[FILTERED: socket data]"}
+
+  # A ThousandIsland connection process's state (`{socket, handler_state}`:
+  # buffers, the WebSocket transport, its decoded session) is dropped whole.
+  defp redact({%{__struct__: ThousandIsland.Socket}, _state}, _budget, _status),
+    do: @connection_state
 
   defp redact({key, value}, budget, status) when is_atom(key) or is_binary(key),
     do: {key, entry(key, value, budget, status)}
@@ -227,10 +260,28 @@ defmodule SdrAgent.Logger.CredentialRedaction do
 
   # --- failure ---------------------------------------------------------
 
-  defp content_free(%{meta: meta} = event) when is_map(meta) do
-    safe = Map.take(meta, [:pid, :gl, :time, :domain, :mfa])
-    %{event | msg: {:string, "unrenderable log event (credential redaction)"}, meta: safe}
+  # Fail closed (Codex fc6b86ca R5): a new event, not an edited copy, built
+  # only from separately validated values: a known level (else :error), a
+  # fixed message, and the pid, group leader and time when they are a pid,
+  # a pid and an integer. Nothing else of the event survives, whatever its
+  # key names; nothing here can raise.
+  defp content_free(event) do
+    meta = Map.get(event, :meta)
+    level = Map.get(event, :level)
+
+    %{
+      level: if(level in @levels, do: level, else: :error),
+      msg: {:string, @unrenderable},
+      meta: validated(meta)
+    }
   end
 
-  defp content_free(event), do: event
+  defp validated(meta) do
+    [pid: &is_pid/1, gl: &is_pid/1, time: &is_integer/1]
+    |> Enum.flat_map(fn {key, valid?} ->
+      value = Map.get(meta, key)
+      if valid?.(value), do: [{key, value}], else: []
+    end)
+    |> Map.new()
+  end
 end
