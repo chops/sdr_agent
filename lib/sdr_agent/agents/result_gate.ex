@@ -304,7 +304,9 @@ defmodule SdrAgent.Agents.ResultGate do
     fn -> locked_finalize(invocation, gate, {kind, receipt}, {plan, guard, demo}, actor) end
     |> Audit.transaction()
     |> case do
-      {:ok, result} -> result
+      {:ok, result} ->
+        result
+
       # A refused demo decide may roll the transaction back itself (Ash does
       # inside an open transaction), so the code is read here too.
       {:error, %Ash.Changeset{errors: errors}} ->
