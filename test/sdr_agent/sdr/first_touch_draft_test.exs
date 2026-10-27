@@ -55,6 +55,24 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       no passed shape check, no hand-off or write, and no draft text in the
       refusal; the genuine pair passes and is handed off (control). The
       `HandOffProposal` provenance tests above stay as the second layer.
+    * The citation checks (`ValidateClaims`, `ValidatePersonalization`)
+      measure the same authoritative draft, with the same association, and
+      take accepted evidence from the lead's accepted EvidenceClaims
+      (`Support.accepted_claims`), never the caller's list (Codex B1-R1
+      neighbor scope, N1-N8; delta `claude-b1-r1-neighbor-validators-delta-r1.md`).
+      A stored claim citing unaccepted evidence or absent from the body, or
+      a stored draft without (or with an absent) personalization item, is
+      rejected for exactly that reason and not handed off although the
+      caller's map is valid. A well-cited stored draft passes and is handed
+      off with its own citations although the map breaks both. Each check is
+      bound to the draft's Decision and invocation (input refs), with ids,
+      indexes and reason codes only. A claim the caller lists as accepted
+      (this lead's non-accepted claim, another lead's claim, a missing one)
+      is not accepted. A mismatched pair gets no passed check.
+      `HandOffProposal` refuses passed citation checks of another run, bound
+      to another invocation, of the wrong kind, or unbound, before any lock
+      or write. Rules unchanged: membership, verbatim presence, at least one
+      personalization item; no entailment (Tier-0 review remains).
 
   Hermetic: Fake model provider; the recording responder
   (`SdrAgent.SettingsFixtures.RecordingBrain`) and test responders built on
@@ -71,6 +89,10 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
   well-shaped stored draft with a malformed map is rejected. It also loads
   the named Decision and invocation without checking that they are this
   run's draft pair of this lead, so every mismatched pair that exists passes.
+  RED (B1-R1 neighbors): `ValidateClaims` and `ValidatePersonalization`
+  measure the caller's map against the caller's evidence list, load no
+  record and record unbound Decisions; `HandOffProposal` accepts their
+  `passed` flags.
   """
   use SdrAgent.SDRCase, async: false
 
@@ -83,6 +105,7 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
   alias SdrAgent.Audit
   alias SdrAgent.Demo.Fixtures
   alias SdrAgent.Outreach
+  alias SdrAgent.Research
   alias SdrAgent.Sales
   alias SdrAgent.SDR
   alias SdrAgent.SDR.Actions.DraftEmail
@@ -152,6 +175,76 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
         {_, {:ok, link}} -> %{proposal | body: proposal.body <> "\n\nPick a time: " <> link}
         _other -> proposal
       end
+    end
+
+    def respond(op, input), do: FakeBrain.respond(op, input)
+  end
+
+  # B1-R1 neighbor validators: stored citation defects (test responders).
+  defmodule UnsupportedClaim do
+    @moduledoc false
+    def respond("sdr.outreach_proposal" = op, input) do
+      proposal = FakeBrain.respond(op, input)
+      %{proposal | claims: Enum.map(proposal.claims, &%{&1 | evidence_id: Ecto.UUID.generate()})}
+    end
+
+    def respond(op, input), do: FakeBrain.respond(op, input)
+  end
+
+  defmodule ClaimNotInBody do
+    @moduledoc false
+    def respond("sdr.outreach_proposal" = op, input) do
+      proposal = FakeBrain.respond(op, input)
+
+      %{
+        proposal
+        | claims:
+            Enum.map(proposal.claims, &%{&1 | claim: "A synthetic claim the body never states."})
+      }
+    end
+
+    def respond(op, input), do: FakeBrain.respond(op, input)
+  end
+
+  defmodule NoPersonalization do
+    @moduledoc false
+    def respond("sdr.outreach_proposal" = op, input),
+      do: %{FakeBrain.respond(op, input) | personalization: []}
+
+    def respond(op, input), do: FakeBrain.respond(op, input)
+  end
+
+  defmodule PersonalizationNotInBody do
+    @moduledoc false
+    def respond("sdr.outreach_proposal" = op, input) do
+      proposal = FakeBrain.respond(op, input)
+
+      %{
+        proposal
+        | personalization:
+            Enum.map(
+              proposal.personalization,
+              &%{&1 | text: "A synthetic detail the body never states."}
+            )
+      }
+    end
+
+    def respond(op, input), do: FakeBrain.respond(op, input)
+  end
+
+  defmodule CitesEvidence do
+    @moduledoc false
+    # Every claim and personalization item cites the evidence id configured
+    # under this module (`put_env!/2`); their text stays in the body.
+    def respond("sdr.outreach_proposal" = op, input) do
+      proposal = FakeBrain.respond(op, input)
+      id = Application.fetch_env!(:sdr_agent, __MODULE__)
+
+      %{
+        proposal
+        | claims: Enum.map(proposal.claims, &%{&1 | evidence_id: id}),
+          personalization: Enum.map(proposal.personalization, &%{&1 | evidence_id: id})
+      }
     end
 
     def respond(op, input), do: FakeBrain.respond(op, input)
@@ -687,6 +780,238 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       refute String.contains?(field, line),
              "B1-R1: the refusal of #{label} echoes draft text: #{short(line)}"
     end
+  end
+
+  # A genuine draft on a new running run of `lead`: the flow's steps up to
+  # the draft step, each through its production action (no check yet).
+  defp draft_only!(ctx, lead, responder, label) do
+    run = running_run!(ctx, lead)
+    sdr = %{context(ctx, run, label) | model: [provider_options: [responder: responder]]}
+    bundle = step!("bundle", LoadEvidenceBundle.perform(%{lead_id: lead.id}, sdr))
+
+    plan =
+      step!(
+        "icp",
+        EvaluateICP.perform(%{lead_id: lead.id, qualification: bundle.qualification}, sdr)
+      )
+
+    %{triggers: triggers} =
+      step!("trigger", IdentifyTrigger.perform(%{claims: bundle.claims, icp: plan.icp}, sdr))
+
+    draft =
+      step!(
+        "draft",
+        DraftEmail.perform(
+          %{lead_id: lead.id, claims: bundle.claims, triggers: triggers, plan: plan},
+          sdr
+        )
+      )
+
+    %{
+      run: run,
+      sdr: sdr,
+      bundle: bundle,
+      plan: plan,
+      draft: draft,
+      stored: stored_output!(ctx, draft)
+    }
+  end
+
+  # The flow's steps after the draft step on `d`'s run: both citation checks
+  # with the draft map `supplied` and the evidence list `evidence`, the shape
+  # check, then the hand-off when all three return a check (as the flow).
+  defp check_then_hand_off(d, lead_id, supplied, evidence) do
+    checked = %{lead_id: lead_id, draft: supplied, claims: evidence}
+    claims = observe(fn -> ValidateClaims.perform(checked, d.sdr) end)
+    personalization = observe(fn -> ValidatePersonalization.perform(checked, d.sdr) end)
+
+    shape =
+      observe(fn -> ValidateDraftShape.perform(%{lead_id: lead_id, draft: supplied}, d.sdr) end)
+
+    handoff =
+      case {claims, personalization, shape} do
+        {{:ok, %{} = claims_check}, {:ok, %{} = personalization_check}, {:ok, %{} = shape_check}} ->
+          observe(fn ->
+            HandOffProposal.perform(
+              %{
+                lead_id: lead_id,
+                draft: supplied,
+                claims_check: claims_check,
+                personalization_check: personalization_check,
+                shape_check: shape_check,
+                plan: d.plan
+              },
+              d.sdr
+            )
+          end)
+
+        _stopped ->
+          :not_reached
+      end
+
+    %{claims: claims, personalization: personalization, shape: shape, handoff: handoff}
+  end
+
+  # The ids of the lead's accepted evidence claims (the domain read).
+  defp accepted_ids!(ctx, lead) do
+    {:ok, claims} =
+      Research.list_records(Research.EvidenceClaim,
+        filter: [lead_id: lead.id, quality: :accepted],
+        actor: ctx.admin
+      )
+
+    Enum.map(claims, & &1.id)
+  end
+
+  # Every text a proposal carries: subject, body, claims, personalization.
+  defp texts(proposal),
+    do:
+      [proposal.subject, proposal.body] ++
+        Enum.map(proposal.claims, & &1.claim) ++ Enum.map(proposal.personalization, & &1.text)
+
+  defp citation_decision!(ctx, run, kind) do
+    found = ctx |> decisions!(run) |> Enum.filter(&(&1.kind == kind))
+
+    assert length(found) == 1,
+           "B1-R1: the run recorded #{length(found)} #{kind} Decisions, expected one"
+
+    hd(found)
+  end
+
+  # A citation check bound to exactly the draft's Decision and invocation,
+  # its accepted set the lead's accepted evidence (never the caller's list),
+  # with ids, indexes and reason codes only: no line of `texts`.
+  defp assert_citation_bound!(ctx, decision, d, lead, texts) do
+    assert MapSet.new(decision.input_refs, &{&1.resource, &1.id}) ==
+             MapSet.new([
+               {"SdrAgent.Agents.Decision", d.draft.decision_id},
+               {"SdrAgent.Agents.ModelInvocation", d.draft.model_invocation_id}
+             ]),
+           "B1-R1: the #{decision.kind} check is not bound to exactly the draft's Decision " <>
+             "and invocation: #{short(decision.input_refs)}"
+
+    {:ok, inputs} = Audit.read_content(decision.inputs_sha256, actor: ctx.admin)
+
+    assert Enum.sort(JSON.decode!(inputs)["accepted_evidence_ids"]) ==
+             Enum.sort(accepted_ids!(ctx, lead)),
+           "B1-R1: the #{decision.kind} check's accepted set is not the lead's accepted evidence"
+
+    recorded = [inputs, render(decision.outcome_detail), decision.rationale || ""]
+
+    for text <- texts,
+        line <- String.split(text, ~r/\p{Cc}+/u, trim: true),
+        String.length(line) >= 12,
+        field <- recorded do
+      refute String.contains?(field, line),
+             "B1-R1: the #{decision.kind} check records draft text: #{short(line)}"
+    end
+  end
+
+  # The `kind` check rejected the stored draft for `expected` (a reason code
+  # of item 0, or `:too_few`), bound and private; nothing handed off.
+  defp assert_stored_citations_rejected!(ctx, d, lead, supplied, checks, kind, expected) do
+    decision = citation_decision!(ctx, d.run, kind)
+    key = if kind == :claims_validation, do: :claims, else: :personalization
+    id = decision.id
+    assert match?({:ok, %{passed: false, decision_id: ^id}}, Map.fetch!(checks, key))
+    assert {decision.mode, decision.outcome} == {:deterministic, "rejected"}
+
+    case expected do
+      :too_few ->
+        assert decision.outcome_detail["too_few"] == true
+
+      reason ->
+        assert [%{"index" => 0, "reasons" => reasons} | _] = decision.outcome_detail["rejected"]
+        assert reason in reasons, "B1-R1: the rejection does not name #{reason}"
+    end
+
+    assert_citation_bound!(ctx, decision, d, lead, texts(d.stored) ++ texts(supplied))
+
+    assert checks.handoff == {:error, {:halt, :invalid_model_output}},
+           "B1-R1: the hand-off of a rejected draft was not refused: #{short(checks.handoff)}"
+
+    failed = run!(ctx, d.run)
+    assert {failed.status, failed.status_reason} == {:failed, :invalid_model_output}
+    nothing_handed_off!(ctx, d.run, lead)
+    assert lead_status!(ctx, lead) == :qualified, "B1-R1: a rejected draft moved the lead"
+  end
+
+  # Both citation checks passed on the stored draft, bound and private, and
+  # the stored draft (with its own citations) handed off.
+  defp assert_stored_citations_handed_off!(ctx, d, lead, supplied, checks) do
+    for kind <- [:claims_validation, :personalization_validation] do
+      decision = citation_decision!(ctx, d.run, kind)
+      assert {decision.mode, decision.outcome} == {:deterministic, "passed"}
+      assert_citation_bound!(ctx, decision, d, lead, texts(d.stored) ++ texts(supplied))
+    end
+
+    assert_stored_handed_off!(
+      ctx,
+      %{
+        run: d.run,
+        draft: d.draft,
+        stored: d.stored,
+        supplied: supplied,
+        shape: checks.shape,
+        handoff: checks.handoff
+      },
+      lead
+    )
+
+    {:ok, proposal} = SDR.proposal(d.run.id, actor: ctx.agent)
+
+    assert {proposal.output.claims, proposal.output.personalization} ==
+             {d.stored.claims, d.stored.personalization},
+           "B1-R1: the hand-off does not carry the stored draft's citations"
+  end
+
+  # The genuine shape check of `d`'s own draft (passes before and after GREEN).
+  defp genuine_shape!(d, lead) do
+    shape = ValidateDraftShape.perform(%{lead_id: lead.id, draft: d.draft}, d.sdr)
+
+    assert match?({:ok, %{passed: true}}, shape),
+           "B1-R1 fixture stage: the genuine draft's shape check did not pass: #{short(shape)}"
+
+    elem(shape, 1)
+  end
+
+  # A passed citation check of `kind` recorded on `d`'s run through the
+  # domain API, naming `pair` in its inputs, with `refs` as its input refs.
+  # Asserts the kind stage, so a refusal to record is told apart from the
+  # hand-off guard.
+  defp passed_check!(d, lead, kind, pair, refs, point) do
+    rule =
+      if kind == :claims_validation,
+        do: "sdr.claims_cite_evidence",
+        else: "sdr.personalization_cites_evidence"
+
+    result =
+      Context.decide(
+        d.sdr,
+        %{
+          kind: kind,
+          mode: :deterministic,
+          rule_id: rule,
+          rule_version: "1",
+          subject_id: lead.id,
+          inputs: %{
+            "draft_proposal_decision_id" => pair.decision_id,
+            "model_invocation_id" => pair.model_invocation_id,
+            "accepted_evidence_ids" => Enum.map(d.bundle.claims, & &1.id)
+          },
+          outcome: "passed",
+          outcome_detail: %{"rejected" => [], "too_few" => false}
+        },
+        point,
+        refs
+      )
+
+    assert match?({:ok, %{outcome: "passed"}}, result),
+           "B1-R1 kind stage: a passed #{kind} Decision cannot be recorded through the " <>
+             "domain API (#{short(result)}); the guard stage was not reached"
+
+    {:ok, decision} = result
+    %{passed: true, decision_id: decision.id}
   end
 
   describe "the draft input" do
@@ -1288,6 +1613,369 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
         },
         lead
       )
+    end
+  end
+
+  describe "the citation checks' authority (Codex B1-R1, neighbor N1-N5)" do
+    @describetag :b1_r1
+
+    test "a stored claim citing evidence not accepted for the lead is rejected although the " <>
+           "caller's claim cites accepted evidence",
+         ctx do
+      lead = qualified_lead!(ctx)
+      d = draft_only!(ctx, lead, UnsupportedClaim, "b1-r1-n1-unsupported")
+      [stored_claim] = d.stored.claims
+      accepted = accepted_ids!(ctx, lead)
+
+      refute stored_claim.evidence_id in accepted,
+             "B1-R1 fixture stage: the stored claim is supported"
+
+      [detail] = d.draft.proposal.personalization
+      supplied = %{d.draft.proposal | claims: [%{stored_claim | evidence_id: detail.evidence_id}]}
+      assert detail.evidence_id in accepted
+
+      checks = check_then_hand_off(d, lead.id, %{d.draft | proposal: supplied}, d.bundle.claims)
+
+      assert match?({:ok, %{passed: false}}, checks.claims),
+             "B1-R1: the stored claim cites evidence not accepted for the lead, but the claims " <>
+               "check measured the caller's supported claim: #{short(checks.claims)}; the " <>
+               "hand-off then returned #{short(checks.handoff)}"
+
+      assert_stored_citations_rejected!(
+        ctx,
+        d,
+        lead,
+        supplied,
+        checks,
+        :claims_validation,
+        "evidence_not_accepted_for_lead"
+      )
+    end
+
+    test "a stored claim absent from the stored body is rejected although the caller's claim " <>
+           "is in its body",
+         ctx do
+      lead = qualified_lead!(ctx)
+      d = draft_only!(ctx, lead, ClaimNotInBody, "b1-r1-n1-not-in-body")
+      [stored_claim] = d.stored.claims
+      refute String.contains?(d.stored.body, stored_claim.claim)
+      [detail] = d.draft.proposal.personalization
+      supplied = %{d.draft.proposal | claims: [%{stored_claim | claim: detail.text}]}
+      assert String.contains?(supplied.body, detail.text)
+
+      checks = check_then_hand_off(d, lead.id, %{d.draft | proposal: supplied}, d.bundle.claims)
+
+      assert match?({:ok, %{passed: false}}, checks.claims),
+             "B1-R1: the stored claim is not in the stored body, but the claims check measured " <>
+               "the caller's claim: #{short(checks.claims)}; the hand-off then returned " <>
+               short(checks.handoff)
+
+      assert_stored_citations_rejected!(
+        ctx,
+        d,
+        lead,
+        supplied,
+        checks,
+        :claims_validation,
+        "text_not_in_body"
+      )
+    end
+
+    test "a stored draft without personalization is rejected (too few) although the caller's " <>
+           "map has one",
+         ctx do
+      lead = qualified_lead!(ctx)
+      d = draft_only!(ctx, lead, NoPersonalization, "b1-r1-n3-none")
+      assert d.stored.personalization == [], "B1-R1 fixture stage: the stored draft personalizes"
+      [claim] = d.draft.proposal.claims
+
+      supplied = %{
+        d.draft.proposal
+        | personalization: [%{text: claim.claim, evidence_id: claim.evidence_id}]
+      }
+
+      checks = check_then_hand_off(d, lead.id, %{d.draft | proposal: supplied}, d.bundle.claims)
+
+      assert match?({:ok, %{passed: false}}, checks.personalization),
+             "B1-R1: the stored draft has no personalization, but the personalization check " <>
+               "measured the caller's item: #{short(checks.personalization)}; the hand-off " <>
+               "then returned #{short(checks.handoff)}"
+
+      assert_stored_citations_rejected!(
+        ctx,
+        d,
+        lead,
+        supplied,
+        checks,
+        :personalization_validation,
+        :too_few
+      )
+    end
+
+    test "a stored personalization item absent from the stored body is rejected although the " <>
+           "caller's item is in its body",
+         ctx do
+      lead = qualified_lead!(ctx)
+      d = draft_only!(ctx, lead, PersonalizationNotInBody, "b1-r1-n3-not-in-body")
+      [stored_item] = d.stored.personalization
+      refute String.contains?(d.stored.body, stored_item.text)
+      [claim] = d.draft.proposal.claims
+      supplied = %{d.draft.proposal | personalization: [%{stored_item | text: claim.claim}]}
+
+      checks = check_then_hand_off(d, lead.id, %{d.draft | proposal: supplied}, d.bundle.claims)
+
+      assert match?({:ok, %{passed: false}}, checks.personalization),
+             "B1-R1: the stored personalization item is not in the stored body, but the " <>
+               "personalization check measured the caller's item: " <>
+               "#{short(checks.personalization)}; the hand-off then returned " <>
+               short(checks.handoff)
+
+      assert_stored_citations_rejected!(
+        ctx,
+        d,
+        lead,
+        supplied,
+        checks,
+        :personalization_validation,
+        "text_not_in_body"
+      )
+    end
+
+    test "a well-cited stored draft passes both checks and is handed off as stored although " <>
+           "the caller's map breaks both",
+         ctx do
+      lead = qualified_lead!(ctx)
+      d = draft_only!(ctx, lead, FakeBrain, "b1-r1-n2-inverse")
+      [claim] = d.draft.proposal.claims
+
+      supplied = %{
+        d.draft.proposal
+        | claims: [
+            %{
+              claim
+              | evidence_id: Ecto.UUID.generate(),
+                claim: "A synthetic claim the body never states."
+            }
+          ],
+          personalization: []
+      }
+
+      checks = check_then_hand_off(d, lead.id, %{d.draft | proposal: supplied}, d.bundle.claims)
+
+      # The outcome follows the stored, released draft; the caller's map is
+      # neither measured nor handed off.
+      assert match?({{:ok, %{passed: true}}, {:ok, %{passed: true}}}, {
+               checks.claims,
+               checks.personalization
+             }),
+             "B1-R1: the stored draft is well cited, but the citation checks measured the " <>
+               "caller's map: #{short({checks.claims, checks.personalization})}; the hand-off " <>
+               "then returned #{short(checks.handoff)}"
+
+      assert_stored_citations_handed_off!(ctx, d, lead, supplied, checks)
+    end
+
+    test "a matching draft passes both checks, bound to its draft and invocation, and is " <>
+           "handed off (control)",
+         ctx do
+      lead = qualified_lead!(ctx)
+      d = draft_only!(ctx, lead, FakeBrain, "b1-r1-n2-matching")
+      checks = check_then_hand_off(d, lead.id, d.draft, d.bundle.claims)
+
+      assert match?({{:ok, %{passed: true}}, {:ok, %{passed: true}}}, {
+               checks.claims,
+               checks.personalization
+             }),
+             "B1-R1 control: a matching draft's citation checks did not pass"
+
+      assert_stored_citations_handed_off!(ctx, d, lead, d.draft.proposal, checks)
+    end
+
+    test "the caller's evidence list cannot make a claim accepted for the lead", ctx do
+      lead = qualified_lead!(ctx)
+
+      {:ok, rejected} =
+        Research.list_records(Research.EvidenceClaim,
+          filter: [lead_id: lead.id, quality: :rejected],
+          actor: ctx.admin
+        )
+
+      assert rejected != [], "B1-R1 fixture stage: the lead has no non-accepted evidence claim"
+
+      %{lead: other_lead} = assign_with!(ctx, "02", MultilineSubject)
+      drain!()
+      other_accepted = accepted_ids!(ctx, other_lead)
+      assert other_accepted != [], "B1-R1 fixture stage: the other lead has no accepted evidence"
+
+      for {label, id} <- [
+            non_accepted: hd(rejected).id,
+            other_lead: hd(other_accepted),
+            missing: Ecto.UUID.generate()
+          ] do
+        put_env!(CitesEvidence, id)
+        d = draft_only!(ctx, lead, CitesEvidence, "b1-r1-n5-#{label}")
+
+        assert Enum.all?(d.stored.claims ++ d.stored.personalization, &(&1.evidence_id == id)),
+               "B1-R1 fixture stage: the stored draft does not cite the #{label} claim"
+
+        refute id in accepted_ids!(ctx, lead)
+        evidence = d.bundle.claims ++ [%{id: id, claim: "Listed as accepted by the caller."}]
+        checks = check_then_hand_off(d, lead.id, d.draft, evidence)
+
+        for {key, check} <- [claims: checks.claims, personalization: checks.personalization] do
+          refute match?({:ok, %{passed: true}}, check),
+                 "B1-R1: the caller's evidence list made the #{label} claim accepted for the " <>
+                   "#{key} check: #{short(check)}; the hand-off then returned " <>
+                   short(checks.handoff)
+        end
+
+        refute Enum.any?(
+                 decisions!(ctx, d.run),
+                 &(&1.kind in [:claims_validation, :personalization_validation] and
+                     &1.outcome == "passed")
+               )
+
+        refute match?({:ok, %{phase: :review}}, checks.handoff)
+        nothing_handed_off!(ctx, d.run, lead)
+      end
+    end
+  end
+
+  describe "the citation checks' draft provenance and the hand-off binding (Codex B1-R1, N6-N7)" do
+    @describetag :b1_r1
+
+    test "the citation checks refuse a draft pair that is not this run's draft of this lead",
+         ctx do
+      lead = qualified_lead!(ctx)
+      other_lead = fixture_lead!(ctx, "02")
+
+      same = draft_only!(ctx, lead, RecordingBrain, "b1-r1-n6-same-run")
+      second_ctx = %{same.sdr | signal_id: "sig-b1-r1-n6-second-invocation"}
+
+      assert {:ok, _output, second} =
+               Model.call(second_ctx, :outreach_proposal, one_input!(@proposal), lead.id)
+
+      this = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-this-run")
+      other = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-other-run")
+      angled = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-angle")
+      angle = Enum.find(decisions!(ctx, angled.run), &(&1.kind == :angle))
+      assert angle, "B1-R1 fixture stage: the draft step recorded no angle Decision"
+      for_lead = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-lead")
+      no_decision = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-missing-decision")
+      no_invocation = draft_only!(ctx, lead, FakeBrain, "b1-r1-n6-missing-invocation")
+
+      for {label, d, lead_id, pair} <- [
+            {"another invocation of the same run", same, lead.id,
+             %{same.draft | model_invocation_id: second.id}},
+            {"another run's draft pair", this, lead.id, other.draft},
+            {"the angle Decision as the draft", angled, lead.id,
+             %{angled.draft | decision_id: angle.id}},
+            {"this run's pair for another lead", for_lead, other_lead.id, for_lead.draft},
+            {"a missing Decision", no_decision, lead.id,
+             %{no_decision.draft | decision_id: Ecto.UUID.generate()}},
+            {"a missing invocation", no_invocation, lead.id,
+             %{no_invocation.draft | model_invocation_id: Ecto.UUID.generate()}}
+          ],
+          {kind, action} <- [
+            claims_validation: ValidateClaims,
+            personalization_validation: ValidatePersonalization
+          ] do
+        checked = %{lead_id: lead_id, draft: pair, claims: d.bundle.claims}
+        result = observe(fn -> action.perform(checked, d.sdr) end)
+
+        refute match?({:ok, %{passed: true}}, result),
+               "B1-R1: #{inspect(action)} passed #{label}: #{short(result)}"
+
+        refute Enum.any?(decisions!(ctx, d.run), &(&1.kind == kind and &1.outcome == "passed")),
+               "B1-R1: a passed #{kind} Decision was recorded for #{label}"
+
+        for text <- texts(d.stored),
+            line <- String.split(text, ~r/\p{Cc}+/u, trim: true),
+            String.length(line) >= 12 do
+          refute String.contains?(render(result), line),
+                 "B1-R1: the refusal of #{label} echoes draft text: #{short(line)}"
+        end
+      end
+
+      nothing_handed_off!(ctx, same.run, lead)
+      assert lead_status!(ctx, lead) == :qualified
+    end
+
+    test "HandOffProposal refuses passed citation checks not bound to this draft, before any " <>
+           "lock or write",
+         ctx do
+      lead = qualified_lead!(ctx)
+
+      # (i) Another run's genuine passed checks.
+      other = drafted!(ctx, lead, FakeBrain, "b1-r1-n7-other-run")
+      d1 = draft_only!(ctx, lead, FakeBrain, "b1-r1-n7-run")
+
+      # (ii) Passed checks naming this run's draft with another invocation of
+      # the same run (bound to that pair).
+      d2 = draft_only!(ctx, lead, RecordingBrain, "b1-r1-n7-invocation")
+      second_ctx = %{d2.sdr | signal_id: "sig-b1-r1-n7-second-invocation"}
+
+      assert {:ok, _output, second} =
+               Model.call(second_ctx, :outreach_proposal, one_input!(@proposal), lead.id)
+
+      {:ok, d2_decision} = Agents.get_decision(d2.draft.decision_id, actor: ctx.agent)
+      mixed = %{d2.draft | model_invocation_id: second.id}
+
+      # (iii) This run's genuine checks with their kinds swapped; (iv) passed
+      # checks naming this run's draft but bound to nothing.
+      d3 = draft_only!(ctx, lead, FakeBrain, "b1-r1-n7-kind")
+      d3_checked = %{lead_id: lead.id, draft: d3.draft, claims: d3.bundle.claims}
+      d3_claims = step!("claims", ValidateClaims.perform(d3_checked, d3.sdr))
+
+      d3_personalization =
+        step!("personalization", ValidatePersonalization.perform(d3_checked, d3.sdr))
+
+      d4 = draft_only!(ctx, lead, FakeBrain, "b1-r1-n7-unbound")
+
+      cases = [
+        {"another run's checks", d1, other.claims_check, other.personalization_check},
+        {"checks bound to another invocation", d2,
+         passed_check!(d2, lead, :claims_validation, mixed, [d2_decision, second], "other-pair"),
+         passed_check!(
+           d2,
+           lead,
+           :personalization_validation,
+           mixed,
+           [d2_decision, second],
+           "other-pair"
+         )},
+        {"checks of the wrong kind", d3,
+         %{passed: true, decision_id: d3_personalization.decision_id},
+         %{passed: true, decision_id: d3_claims.decision_id}},
+        {"unbound checks", d4,
+         passed_check!(d4, lead, :claims_validation, d4.draft, [], "unbound"),
+         passed_check!(d4, lead, :personalization_validation, d4.draft, [], "unbound")}
+      ]
+
+      for {label, d, claims_check, personalization_check} <- cases do
+        params = %{
+          lead_id: lead.id,
+          draft: d.draft,
+          claims_check: claims_check,
+          personalization_check: personalization_check,
+          shape_check: genuine_shape!(d, lead),
+          plan: d.plan
+        }
+
+        result = observe(fn -> HandOffProposal.perform(params, d.sdr) end)
+
+        assert result == {:error, {:halt, :invalid_model_output}},
+               "B1-R1: HandOffProposal accepted #{label}: #{short(result)}"
+
+        failed = run!(ctx, d.run)
+        assert {failed.status, failed.status_reason} == {:failed, :invalid_model_output}
+
+        refute Enum.any?(decisions!(ctx, d.run), &(&1.kind == :enrollment)),
+               "B1-R1: #{label} reached the enrollment gate"
+
+        nothing_handed_off!(ctx, d.run, lead)
+        assert lead_status!(ctx, lead) == :qualified, "B1-R1: #{label} moved the lead"
+      end
     end
   end
 end
