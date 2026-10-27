@@ -645,3 +645,64 @@ downstream re-verification).
 Trigger: no. An existing SQL helper's error path and the extensions snapshot version; no domain concept,
 attribute, relationship, ownership, policy, action or lifecycle changes (the migration is SQL, not
 metadata-only). No architecture-diagram trigger.
+
+## Addendum 2 (2026-10-26, proposed): ash 3.37.2 and jose 1.11.13 after the second gate attempt
+
+Status: proposed. The amendment (accepted as D-215) and addendum 1 (accepted as D-217 at commit
+`7c7aadf0dcb8107ba937a89a504e3bbbac2d9769`, file SHA256
+`c2e450a5f2390c4c9ada76a3a71a2200fd769c8a55ea003fd85207dd7b44afd9`) are unchanged byte for byte above.
+This addendum is accepted only at its own exact commit and file hash; D-219 records the owner's advance
+acceptance of the addenda this slice requires, effective once the exact text has passed static review.
+
+### What the gate found
+
+The second full-gate attempt (2026-10-27 02:57:39Z, ACK 01a17b48-…-71ae, reservation 01a17b48-…-7992)
+passed workflow, format, compile, codegen and credo and ended `gate=FAIL step=audit rc=1` before any
+database effect (evidence `deps-advisories-gate-7c7aadf-20261027T025739Z`, MANIFEST `d8ecdecf…`). The
+audit named nine advisories published on 2026-10-26, two of them HIGH:
+
+- `ash` 3.37.1: EEF-CVE-2026-96581 (HIGH; GHSA-vw7c-67pf-gh96): an upsert whose keys omit the
+  multitenancy attribute (the primary key or an `all_tenants?` identity) could update or return another
+  tenant's record under attribute multitenancy. Fixed in 3.37.2 (2026-10-26), which scopes upserts to the
+  tenant and returns a stale-record error for a skipped upsert outside it.
+- `jose` 1.11.12: EEF-CVE-2026-65629 (HIGH; weak PBKDF2 parameters for password-encrypted private-key
+  export) and EEF-CVE-2026-65625, -65626, -65627, -65628, -65630, -65631, -65632 (MEDIUM: AES-GCM tag
+  length, RSAES-PKCS1-v1_5 padding oracle, JWE zip decompression bound, mismatched shared-secret key
+  recursion, X25519 fallback timing, RSA JWK factoring, ECDSA signature length). Fixed in 1.11.13
+  (2026-10-26).
+
+ADR-0008 never ignores HIGH and permits no ignore while fixes exist; the remedy is the minimal bump.
+
+### What changes
+
+Commit `a71e6e3060dbcb797b49ecbef62e469612498e18`: the direct pin `{:ash, "== 3.37.2"}` in `mix.exs`;
+`mix.lock` changes exactly two entries, `ash` 3.37.1 → 3.37.2 (outer checksum `0f0dde3c…`) and `jose`
+1.11.12 → 1.11.13 (outer checksum `15d8bd0f…`), both equal to the Hex tarballs. `jose` stays transitive
+(`ash_authentication` 4.15.0 → `joken` 2.7.0, `~> 1.11.12`); no override or new direct dependency.
+`ash_postgres` 2.15.2 (`~> 3.37 and >= 3.37.1`) accepts 3.37.2. Development and test
+`compile --warnings-as-errors` pass. The generated usage guidance is unchanged: `ash` 3.37.2 ships
+byte-identical `usage-rules.md` and `usage-rules/`, `jose` ships none, and the generator's dry run plans
+no change to the `use-ash` files (only the pre-existing unrelated drift recorded in the amendment).
+
+### Exposure (a source survey, not a runtime guarantee)
+
+- `ash` 3.37.2's change touches the create and bulk-create upsert paths (a tenant filter applied only
+  when the resource uses attribute multitenancy and a tenant is set), the bulk skipped-upsert result, and
+  the ETS and Mnesia data layers (not used here). `lib/` declares no Ash `multitenancy` block, so the
+  added filter is inert for every resource in this application; the application's tenant scoping is its
+  own `tenant_id` attribute and policies, which this change does not touch. Behaviour change to expect:
+  none for these resources; the skipped-upsert path now returns `{:ok, []}` handling internally where it
+  previously returned a bare list (a crash fix).
+- `jose` is reached only through `ash_authentication`'s session tokens: `joken` signs and verifies
+  compact JWS with an octet secret under the default `HS256` (no `signing_algorithm` is configured). The
+  application uses no JWE, no RSA, EC or OKP keys, no PEM or password-encrypted key import or export, and
+  no compression. Behaviour change to expect: 1.11.13 also changes the default `crypto_fallback` from
+  `true` to `false` and adds a `zip_size_maximum`; HMAC-SHA256 is native in OTP 29's `:crypto`, so the
+  token path should be unaffected. The fresh full gate exercises sign-in and token verification.
+
+### Verification
+
+The fresh full gate at this addendum's head (re-pinned claim and driver, one control run, a new
+execution ACK and reservation, one run), including the focused tests of addendum 1 and the suite's
+authentication tests; then hosted CI and exact-head review. Earlier measured results stay at their own
+heads. Entity Model trigger: no (dependency versions only).
