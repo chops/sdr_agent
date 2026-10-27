@@ -6,15 +6,34 @@ defmodule SdrAgentWeb.SensitiveAuth do
   metadata alike, with a fixed diagnostic (the AdminLive mechanism,
   ADR-0005 R0-05 amendment).
 
-  **HTTP (the endpoint's first plug, before the body parsers and the
-  browser pipeline).** Each request is classified by `sensitive_path?/1`
-  on its URI-decoded first path segment — `Phoenix.Router` decodes every
-  segment before matching, so every spelling the router routes to a
-  credential-bearing family is caught (`%6dagic_link` is `magic_link`);
-  the classification is also case-insensitive and treats an encoded `/` as
-  a separator, so it is never narrower than routing. The families are
-  `auth` (passwords, link tokens, emails in bodies and queries),
-  `magic_link` (the link token in the path), `sign-in` and `sign-out`.
+  **HTTP and the LiveView socket (`SdrAgentWeb.Endpoint.call/2`, before
+  Phoenix's socket dispatch and every plug).** Phoenix dispatches socket
+  transports (`/live/websocket`) ahead of every declared endpoint plug, so
+  the classification runs in the endpoint's own `call/2`, before them all
+  (Codex R2). A request is credential-bearing (`sensitive?/1`) when:
+
+    * its URI-decoded first path segment (`sensitive_path?/1`) is a
+      credential-bearing route family — `Phoenix.Router` decodes every
+      segment before matching, so every spelling the router routes there
+      is caught (`%6dagic_link` is `magic_link`); the classification is
+      also case-insensitive and treats an encoded `/` as a separator, so it
+      is never narrower than routing. The families are `auth` (passwords,
+      link tokens, emails in bodies and queries), `magic_link` (the link
+      token in the path), `sign-in` and `sign-out`;
+    * its first segment is `live`, the LiveView socket: its handshake
+      carries the session cookie and CSRF token, and after the upgrade the
+      same connection process is the WebSocket transport, receiving every
+      frame (typed input included) and holding the decoded session; it
+      stays tagged for its lifetime (Codex R2);
+    * it carries a `cookie`, `authorization` or `proxy-authorization`
+      header, on any path: a signed-in browser's session cookie holds the
+      bearer token, and a failure before the session is decoded would
+      otherwise report the raw header (Codex R1).
+
+  So every signed-in request's error report is withheld whole; the
+  diagnostics lost are the price of never reporting a credential.
+  `SdrAgent.Logger.CredentialRedaction` additionally redacts every event's
+  terms for processes that are not tagged.
 
   **Lifetime on a reused process.** The tag is not cleared when the
   response is sent: Phoenix renders and sends an error response first,
@@ -46,6 +65,8 @@ defmodule SdrAgentWeb.SensitiveAuth do
   @tag :sdr_sensitive_input
   @owned {__MODULE__, :http_tag}
   @families ["auth", "magic_link", "sign-in", "sign-out"]
+  @socket "live"
+  @credential_headers ["cookie", "authorization", "proxy-authorization"]
 
   @impl Plug
   def init(:always), do: :always
@@ -58,9 +79,20 @@ defmodule SdrAgentWeb.SensitiveAuth do
   end
 
   def call(conn, :classify) do
-    if sensitive_path?(conn), do: tag_http(), else: release_http()
+    if sensitive?(conn), do: tag_http(), else: release_http()
     conn
   end
+
+  @doc """
+  Whether `conn` is credential-bearing: a credential-bearing route family
+  (`sensitive_path?/1`), the LiveView socket (`/live`, whose handshake
+  carries the session cookie and CSRF token and whose frames carry typed
+  input), or any request carrying a `cookie`, `authorization` or
+  `proxy-authorization` header, whatever its path.
+  """
+  @spec sensitive?(Plug.Conn.t()) :: boolean()
+  def sensitive?(conn),
+    do: sensitive_path?(conn) or family(conn) == @socket or credential_header?(conn)
 
   @doc "Whether `conn`'s path is in a credential-bearing route family (see the moduledoc)."
   @spec sensitive_path?(Plug.Conn.t()) :: boolean()
@@ -89,6 +121,9 @@ defmodule SdrAgentWeb.SensitiveAuth do
   end
 
   defp family(_conn), do: nil
+
+  defp credential_header?(%Plug.Conn{req_headers: headers}),
+    do: Enum.any?(headers, fn {name, _value} -> String.downcase(name) in @credential_headers end)
 
   defp tag_http do
     Process.put(@owned, true)

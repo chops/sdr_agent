@@ -4,12 +4,14 @@ defmodule SdrAgentWeb.SensitiveAuthTest do
   credential (Codex M2/L1, P2, I1), so `SdrAgent.Logger.ExceptionFilter`
   withholds their crash, termination and error reports.
 
-    * HTTP: the endpoint's first plug classifies each request on its
-      URI-decoded first path segment (as the router decodes segments before
-      matching): a credential-bearing family (`auth`, `magic_link`,
-      `sign-in`, `sign-out`) tags the process; the tag holds past the
-      response (the error report comes after it) until the next ordinary
-      request on the same process, which clears only a tag this plug set.
+    * HTTP: the endpoint's own `call/2`, before Phoenix's socket dispatch
+      and every plug, classifies each request: a credential-bearing family
+      (`auth`, `magic_link`, `sign-in`, `sign-out`) on its URI-decoded
+      first path segment (as the router decodes segments before matching),
+      the LiveView socket (`live`), or any cookie or authorization header
+      tags the process; the tag holds past the response (the error report
+      comes after it) until the next ordinary request on the same process,
+      which clears only a tag this plug set.
     * LiveView: the sign-in and magic-link channels are tagged by their
       first mount hook, connected only.
   """
@@ -85,7 +87,9 @@ defmodule SdrAgentWeb.SensitiveAuthTest do
 
     free = [Plug.Test.conn(:get, "/leads"), with_header.("accept", "text/html")]
 
-    for conn <- bearing, do: assert(sensitive_auth(:sensitive?, [conn]), inspect(conn.req_headers))
+    for conn <- bearing,
+        do: assert(sensitive_auth(:sensitive?, [conn]), inspect(conn.req_headers))
+
     for conn <- free, do: refute(sensitive_auth(:sensitive?, [conn]), conn.request_path)
 
     opts = sensitive_auth(:init, [[]])
