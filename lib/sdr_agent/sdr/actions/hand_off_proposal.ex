@@ -64,6 +64,7 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
 
   require Ash.Query
 
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents
   alias SdrAgent.Audit
   alias SdrAgent.Outreach
@@ -75,12 +76,19 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   alias SdrAgent.SDR.Signals
   alias SdrAgent.SDR.Support
 
+  # C2* operation snapshot entry `:perform_hand_off_proposal` (ADR-0005 C2*
+  # item 2; plan r2 F2, S1-c): the whole body, so a direct call owns before
+  # declared/2's reads and the hand-off transaction; SDR.proposal/2 and the
+  # released-output read inherit. Under SDR.Action.execute/3 it inherits.
   @impl SdrAgent.SDR.Action
   def perform(params, ctx) do
-    with :ok <- Preconditions.declared(ctx, __MODULE__) do
-      if validated?(params, ctx), do: transact(params, ctx), else: refuse(ctx)
-    end
+    OperationSnapshot.enter(:perform_hand_off_proposal, fn ->
+      with :ok <- Preconditions.declared(ctx, __MODULE__), do: hand_off_if_valid(params, ctx)
+    end)
   end
+
+  defp hand_off_if_valid(params, ctx),
+    do: if(validated?(params, ctx), do: transact(params, ctx), else: refuse(ctx))
 
   defp transact(params, ctx) do
     Audit.transaction(fn ->

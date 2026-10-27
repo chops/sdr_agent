@@ -76,6 +76,7 @@ defmodule SdrAgent.AI.ModelProvider do
   ClaudeCLI forwards both to its child only; other providers ignore them.
   """
 
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents
   alias SdrAgent.AI.JsonSchema
   alias SdrAgent.AI.ModelProvider.Runtime
@@ -130,11 +131,16 @@ defmodule SdrAgent.AI.ModelProvider do
   `:provider_options` are resolved by `SdrAgent.AI.ModelProvider.Runtime`
   first: an absent or unhealthy ClaudeCLI is refused before any
   reservation.
+
+  C2* operation snapshot entry `:model_provider_complete` (ADR-0005 C2*
+  item 2): inherits under an action; a direct top-level call owns.
   """
   def complete(request, opts \\ []) when is_map(request) do
-    with {:ok, model} <- Runtime.resolve(Keyword.take(opts, [:provider, :provider_options])) do
-      run(request, model[:provider], Keyword.get(model, :provider_options, []))
-    end
+    OperationSnapshot.enter(:model_provider_complete, fn ->
+      with {:ok, model} <- Runtime.resolve(Keyword.take(opts, [:provider, :provider_options])) do
+        run(request, model[:provider], Keyword.get(model, :provider_options, []))
+      end
+    end)
   end
 
   defp run(request, provider, provider_options) do

@@ -23,6 +23,7 @@ defmodule SdrAgent.SDR do
 
   alias SdrAgent.Accounts.User
   alias SdrAgent.Actor
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Guard
@@ -235,8 +236,14 @@ defmodule SdrAgent.SDR do
   Zoi-validated OutreachProposal, read through the released-output read
   (`SdrAgent.Agents.released_output/2`): a generation-2 ClaudeCLI output
   without a `:released` release is `{:error, :result_not_released}` (R0-07).
+
+  C2* operation snapshot entry `:sdr_proposal` (ADR-0005 C2* item 2): under
+  the hand-off it inherits; a direct top-level call owns.
   """
-  def proposal(run_id, opts) do
+  def proposal(run_id, opts),
+    do: OperationSnapshot.enter(:sdr_proposal, fn -> handed_off_proposal(run_id, opts) end)
+
+  defp handed_off_proposal(run_id, opts) do
     actor = Keyword.fetch!(opts, :actor)
 
     with {:ok, run} <- Agents.get_run(run_id, actor: actor),

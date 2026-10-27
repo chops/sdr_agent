@@ -11,6 +11,7 @@ defmodule SdrAgent.Outreach.InboxCommands do
 
   alias Ash.Error.Forbidden
   alias SdrAgent.Accounts
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Guard
   alias SdrAgent.Audit.GuardedCall
@@ -27,8 +28,17 @@ defmodule SdrAgent.Outreach.InboxCommands do
   @actions [:approve_capture, :edit_draft, :reject_draft]
   @draft_locks [:id, :tenant_id, :enrollment_id, :campaign_id, :recipient_contact_id]
 
-  @doc "Execute one exact typed draft command as the current stored session, never a supplied actor."
-  def execute(token, input) do
+  @doc """
+  Execute one exact typed draft command as the current stored session, never a supplied actor.
+  C2* operation snapshot entry `:inbox_command` (ADR-0005 C2* item 2; addendum 1, decision 2):
+  behind `Outreach.inbox_command/2` it inherits; called directly it owns. The entry is
+  applied outside this command's own rescue, so a non-run-mode refusal is never turned into
+  a command result.
+  """
+  def execute(token, input),
+    do: OperationSnapshot.enter(:inbox_command, fn -> execute_command(token, input) end)
+
+  defp execute_command(token, input) do
     with {:ok, actor} <- operator(token),
          {:ok, command} <- Command.parse(input),
          :ok <- draft_action(command),

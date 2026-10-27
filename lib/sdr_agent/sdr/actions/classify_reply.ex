@@ -26,36 +26,45 @@ defmodule SdrAgent.SDR.Actions.ClassifyReply do
         enrollment_id: Zoi.string() |> Zoi.optional()
       })
 
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Outreach
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.Model
 
+  # C2* operation snapshot entry `:perform_classify_reply` (ADR-0005 C2*
+  # item 2): a direct call owns; under SDR.Action.execute/3 it inherits.
   @impl SdrAgent.SDR.Action
   def perform(%{reply_id: reply_id}, ctx) do
-    with {:ok, reply} <- Outreach.fetch(Outreach.Reply, reply_id, actor: ctx.actor),
-         {:ok, output, invocation} <-
-           Model.call(ctx, :reply_classification, input(reply), reply.lead_id),
-         {:ok, decision} <- decide(ctx, reply, output, invocation) do
-      attrs = %{
-        reply_id: reply.id,
-        classification: output.classification,
-        sentiment: output.sentiment,
-        intent: output.intent,
-        suggested_next_action: output.suggested_next_action,
-        confidence: output.confidence,
-        reason: output.reason,
-        agent_run_id: ctx.run_id,
-        decision_id: decision.id,
-        model_invocation_id: invocation.id
-      }
+    OperationSnapshot.enter(:perform_classify_reply, fn ->
+      with {:ok, reply} <- Outreach.fetch(Outreach.Reply, reply_id, actor: ctx.actor),
+           {:ok, output, invocation} <-
+             Model.call(ctx, :reply_classification, input(reply), reply.lead_id),
+           {:ok, decision} <- decide(ctx, reply, output, invocation) do
+        attrs = %{
+          reply_id: reply.id,
+          classification: output.classification,
+          sentiment: output.sentiment,
+          intent: output.intent,
+          suggested_next_action: output.suggested_next_action,
+          confidence: output.confidence,
+          reason: output.reason,
+          agent_run_id: ctx.run_id,
+          decision_id: decision.id,
+          model_invocation_id: invocation.id
+        }
 
-      case Outreach.record_assessment(attrs, actor: ctx.actor) do
-        {:ok, _assessment} ->
-          {:ok, %{ctx.agent_state | phase: :reply}}
-
-        {:error, _error} ->
-          Model.halt_fail(ctx, nil, :invalid_model_output, "reply assessment refused")
+        record_assessment(ctx, attrs)
       end
+    end)
+  end
+
+  defp record_assessment(ctx, attrs) do
+    case Outreach.record_assessment(attrs, actor: ctx.actor) do
+      {:ok, _assessment} ->
+        {:ok, %{ctx.agent_state | phase: :reply}}
+
+      {:error, _error} ->
+        Model.halt_fail(ctx, nil, :invalid_model_output, "reply assessment refused")
     end
   end
 

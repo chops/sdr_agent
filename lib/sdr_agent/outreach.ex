@@ -41,6 +41,7 @@ defmodule SdrAgent.Outreach do
 
   require Ash.Query
 
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Audit.GuardedCall
   alias SdrAgent.Outreach.Approval
   alias SdrAgent.Outreach.DeliveryReceipt
@@ -74,9 +75,15 @@ defmodule SdrAgent.Outreach do
     GuardedCall.create(Draft, :propose, attrs, subject(opts, attrs, :lead_id))
   end
 
-  @doc "ADM, REV: a human revision (`subject`, `body_text`, optional `angle`, `cta`) of a draft pending review."
-  def edit_draft(draft, attrs, opts),
-    do: GuardedCall.update(draft, :edit, attrs, guarded(opts))
+  @doc """
+  ADM, REV: a human revision (`subject`, `body_text`, optional `angle`, `cta`) of a draft pending
+  review. C2* operation snapshot entry `:edit_draft` (ADR-0005 C2* item 2).
+  """
+  def edit_draft(draft, attrs, opts) do
+    OperationSnapshot.enter(:edit_draft, fn ->
+      GuardedCall.update(draft, :edit, attrs, guarded(opts))
+    end)
+  end
 
   @doc "Drafts awaiting review, oldest first."
   def list_review_queue(opts) do
@@ -92,8 +99,16 @@ defmodule SdrAgent.Outreach do
   @doc "One source-owned authorized Home command metadata context, never an inbox scan."
   def get_inbox_draft(actor, id), do: SdrAgent.Outreach.Inbox.get(actor, id)
 
-  @doc "Exact atomic Home draft command; authenticates and revalidates the stored human session."
-  def inbox_command(token, command), do: SdrAgent.Outreach.InboxCommands.execute(token, command)
+  @doc """
+  Exact atomic Home draft command; authenticates and revalidates the stored human session.
+  C2* operation snapshot entry `:inbox_command` (ADR-0005 C2* item 2): its delegate
+  `SdrAgent.Outreach.InboxCommands.execute/2` inherits.
+  """
+  def inbox_command(token, command) do
+    OperationSnapshot.enter(:inbox_command, fn ->
+      SdrAgent.Outreach.InboxCommands.execute(token, command)
+    end)
+  end
 
   @doc "Exact authorized pending-email total, with integrity/withholding and fixed lowerable deadlines."
   def count_inbox_drafts(opts), do: SdrAgent.Outreach.Inbox.count_drafts(opts)
@@ -104,16 +119,19 @@ defmodule SdrAgent.Outreach do
   @doc """
   ADM, REV: grants `draft`'s current revision. `binding`: the reviewed
   `draft_revision_id`, its hex `content_sha256` and the `recipient_email`
-  the reviewer saw (required); anything else is stale.
+  the reviewer saw (required); anything else is stale. C2* operation snapshot
+  entry `:approve` (ADR-0005 C2* item 2).
   """
   def approve(draft, binding, opts) do
-    attrs =
-      binding
-      |> Map.new()
-      |> Map.take([:draft_revision_id, :content_sha256, :recipient_email])
-      |> Map.put(:draft_id, draft.id)
+    OperationSnapshot.enter(:approve, fn ->
+      attrs =
+        binding
+        |> Map.new()
+        |> Map.take([:draft_revision_id, :content_sha256, :recipient_email])
+        |> Map.put(:draft_id, draft.id)
 
-    GuardedCall.create(Approval, :approve, attrs, guarded(opts, draft.id))
+      GuardedCall.create(Approval, :approve, attrs, guarded(opts, draft.id))
+    end)
   end
 
   @doc "ADM, REV: rejects `draft`'s current revision (`draft_revision_id`, `content_sha256`, `reason`)."
@@ -159,15 +177,21 @@ defmodule SdrAgent.Outreach do
   def cancel_retry(delivery, opts),
     do: GuardedCall.update(delivery, :cancel_retry, %{}, guarded(opts))
 
-  @doc "DLV, REC: records a delivery receipt; idempotent per delivery and kind."
-  def record_receipt(attrs, opts),
-    do:
+  @doc """
+  DLV, REC: records a delivery receipt; idempotent per delivery and kind. C2* operation
+  snapshot entry `:record_receipt` (ADR-0005 C2* item 2): under `Delivery.attempt/2` and the
+  capture it inherits; a direct top-level call owns.
+  """
+  def record_receipt(attrs, opts) do
+    OperationSnapshot.enter(:record_receipt, fn ->
       GuardedCall.create(
         DeliveryReceipt,
         :record,
         attrs,
         subject(opts, attrs, :delivery_operation_id)
       )
+    end)
+  end
 
   @doc "AGT: records the agent's ReplyAssessment of a reply (an LLM reply_classification Decision)."
   def record_assessment(attrs, opts),

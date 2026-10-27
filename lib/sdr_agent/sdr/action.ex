@@ -18,6 +18,7 @@ defmodule SdrAgent.SDR.Action do
   `{:ok, output, directives, external_request_refs}` or `{:error, reason}`.
   """
 
+  alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.SDR.Context
@@ -45,14 +46,20 @@ defmodule SdrAgent.SDR.Action do
     end
   end
 
+  # C2* operation snapshot entry `:sdr_action` (ADR-0005 C2* item 2;
+  # addendum 1, decision 2): the action owns the snapshot its perform/2 and
+  # every nested entry inherit.
   @doc false
   def execute(module, params, context) do
-    ctx = %{Context.fetch!(context) | agent_state: Map.get(context, :agent_state)}
+    OperationSnapshot.enter(:sdr_action, fn ->
+      ctx = %{Context.fetch!(context) | agent_state: Map.get(context, :agent_state)}
+      Spans.with_context(ctx.otel, fn -> traced(module, params, ctx) end)
+    end)
+  end
 
-    Spans.with_context(ctx.otel, fn ->
-      Spans.with_span("sdr.action #{module.name()}", %{"sdr.agent_run.id" => ctx.run_id}, fn ->
-        invoke(module, params, ctx)
-      end)
+  defp traced(module, params, ctx) do
+    Spans.with_span("sdr.action #{module.name()}", %{"sdr.agent_run.id" => ctx.run_id}, fn ->
+      invoke(module, params, ctx)
     end)
   end
 
