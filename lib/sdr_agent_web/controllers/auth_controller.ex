@@ -10,7 +10,8 @@ defmodule SdrAgentWeb.AuthController do
   use AshAuthentication.Phoenix.Controller
 
   # A magic-link request answers the same whether or not a link was sent
-  # (unknown, disabled or not-allowlisted addresses get nothing).
+  # (unknown, disabled, unlisted, malformed or rate-limited addresses get
+  # nothing).
   def success(conn, {:magic_link, :request}, _user, _token), do: link_requested(conn)
 
   def success(conn, activity, user, _token) do
@@ -89,7 +90,11 @@ defmodule SdrAgentWeb.AuthController do
     |> redirect(to: return_to)
   end
 
-  defp link_requested(conn) do
+  @doc """
+  The one public answer to a magic-link request, sent or not (also the
+  answer of `SdrAgentWeb.MagicLinkRequestLimit` over its bound).
+  """
+  def link_requested(conn) do
     conn
     |> put_flash(:info, "If that address may sign in, a sign-in link is on its way.")
     |> redirect(to: ~p"/sign-in")
