@@ -32,10 +32,11 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
   fresh reservation and preflight. The baseline checkout is named by
   `SDR_RELEASE_BASELINE_ROOT` and must be clean at `@baseline_tree`.
 
-  RED-6 scaffolding: the harness options it uses (`versions/2`, `:probe`,
-  `:runners`, `:plan`, `checked_runner/5`) and the three release scripts
-  land in GREEN-6 (`SdrAgent.Agents.ReleaseMigrationHarnessTest` is their
-  stubbed contract). It is compiled, never executed.
+  The harness options it uses (`versions/2`, `:probe`, `:runners`, `:plan`,
+  `checked_runner/5`) have a stubbed, CPU-only contract in
+  `SdrAgent.Agents.ReleaseMigrationHarnessTest`; the three release scripts
+  share `test/support/release_migration/common.exs`. In the ordinary suite
+  this module is compiled, never executed.
   """
   use ExUnit.Case, async: false
 
@@ -110,15 +111,6 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
 
   defp mix!, do: System.find_executable("mix") || flunk("mix is not on PATH")
 
-  # Calls a harness function only when it exists (RED-6: GREEN-6 adds it).
-  defp harness!(function, args) do
-    Code.ensure_loaded(Harness)
-
-    if function_exported?(Harness, function, length(args)),
-      do: apply(Harness, function, args),
-      else: flunk("RED-6: Harness.#{function}/#{length(args)} does not exist yet")
-  end
-
   # The baseline checkout: named explicitly, a different directory, clean,
   # at exactly the pre-S3 tree.
   defp baseline_root! do
@@ -166,11 +158,11 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
   end
 
   test "DB #1: OLD writes and verifies, NEW up, OLD verifies down, NEW up again" do
-    assert {:ok, versions} = harness!(:versions, [@migrations, [migration_suffix: @s3_suffix]])
+    assert {:ok, versions} = Harness.versions(@migrations, migration_suffix: @s3_suffix)
     baseline = baseline_root!()
     sfx = suffix()
     new = Harness.checked_runner(mix!(), sfx, @root, @deadline)
-    old = harness!(:checked_runner, [mix!(), sfx, baseline, @deadline, [toolchain: :root]])
+    old = Harness.checked_runner(mix!(), sfx, baseline, @deadline, toolchain: :root)
 
     {outcome, receipts} =
       Harness.prove_with_receipts(
@@ -213,7 +205,7 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
   end
 
   test "DB #2: a demo row makes down refuse with check_violation, fully rolled back" do
-    assert {:ok, versions} = harness!(:versions, [@migrations, [migration_suffix: @s3_suffix]])
+    assert {:ok, versions} = Harness.versions(@migrations, migration_suffix: @s3_suffix)
     sfx = suffix()
 
     {outcome, receipts} =

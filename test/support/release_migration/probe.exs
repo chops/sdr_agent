@@ -1,18 +1,25 @@
 # C2* slice S3 T-S4 release-migration campaign, DB #1 probe for the states
 # "up", "down" and "up_again" (S3 plan r2 section 9; Codex 7a9c7eea item 7;
 # `SdrAgent.Agents.ReleaseMigrationTest`, `:external`). Run by the NEW build
-# after each up and by the OLD build after down: it verifies the chain, that
-# every captured event and record hash is unchanged (legitimate boot appends
-# accounted for), and the state's schema facts, with every tamper inside a
-# rolled-back transaction. Writes one JSON result.
-#
-# RED-6 scaffold: it validates its target, then refuses as not implemented
-# (status 9) before any startup, connection or effect. GREEN-6 implements it;
-# nothing runs it before the campaign packet's own review.
+# after each up and by the OLD build after down: it compares every captured
+# event and release (columns and record hash) with the store, verifies the
+# chain, accounts for every later event, runs each tamper in a rolled-back
+# transaction, and checks the state's schema facts
+# (`SdrAgent.ReleaseMigration.probe!/2`). Writes one JSON result. It
+# validates its target, and starts the application, only through
+# `SdrAgent.WitnessMigration.start!/1`.
 # Usage: mix run --no-start --no-compile release_migration/probe.exs DATABASE LABEL FIXTURES_JSON OUT_JSON
 Code.require_file("../witness_migration/common.exs", __DIR__)
+Code.require_file("common.exs", __DIR__)
 
-[database, _label, _fixtures_path, _out] = System.argv()
-SdrAgent.WitnessMigration.validate_target!(database)
-IO.puts("NOT-IMPLEMENTED release_migration/probe.exs (RED-6 scaffold)")
-System.halt(9)
+alias SdrAgent.ReleaseMigration
+
+[database, label, fixtures_path, out] = System.argv()
+:ok = SdrAgent.WitnessMigration.start!(database)
+
+ReleaseMigration.write_result!(
+  out,
+  database,
+  label,
+  ReleaseMigration.probe!(label, fixtures_path)
+)
