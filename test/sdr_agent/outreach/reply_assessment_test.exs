@@ -1,7 +1,7 @@
 defmodule SdrAgent.Outreach.ReplyAssessmentTest do
   @moduledoc """
   S9b reply classification (spec §16, S2 ReplyAssessment): a matched reply's
-  processing queues an AgentRun of SDRAgent v3 whose `sdr.reply.received`
+  processing queues an AgentRun of SDRAgent v4 whose `sdr.reply.received`
   route makes one Zoi-validated model call and records an LLM
   `reply_classification` Decision and the agent ReplyAssessment. No
   response is drafted (owner decision: classify + hand off); the hand-off
@@ -85,8 +85,9 @@ defmodule SdrAgent.Outreach.ReplyAssessmentTest do
              {:succeeded, "sdr.reply.received", lead.id}
 
     {:ok, definition} = Ash.get(Agents.AgentDefinition, run.agent_definition_id, actor: ctx.admin)
-    # A new reply-intake run pins the current definition (v3).
-    assert {definition.name, definition.version} == {"SDRAgent", 3}
+    # A new reply-intake run pins the current definition (v4: plan
+    # claude-b1-research-draft-plan-r2.md, M1).
+    assert {definition.name, definition.version} == {"SDRAgent", 4}
 
     [decision] = decisions_about!(ctx, reply.id, :reply_classification)
 
