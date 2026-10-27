@@ -25,6 +25,10 @@ defmodule SdrAgent.Agents.DemoExceptionAuthorityTest do
   attempts (run `FOR UPDATE` locks: one exception attempt and exactly one
   disabled repeat), not only the immutable withheld event.
 
+  GREEN-3 M1 RED (Codex e10c8078): a replay must refuse a stored basis
+  whose L member was changed while its recorded digest was kept; the
+  untouched replay and an allowlist-only L change are controls.
+
   Classification (RED-3 at 2578a6f5): T-L1's positive control, its refusal
   cases (today they are refused only for the pair, so "refused, but not
   for the pair" fails), T-L2, T-L4, T-L4b, T-R1 and T-R2 are behavioural;
@@ -48,6 +52,7 @@ defmodule SdrAgent.Agents.DemoExceptionAuthorityTest do
   alias SdrAgent.Agents.ReleaseDecision.Prelocked
   alias SdrAgent.Agents.ResultGate
   alias SdrAgent.Agents.WireWitnessLink
+  alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Clock
@@ -284,6 +289,62 @@ defmodule SdrAgent.Agents.DemoExceptionAuthorityTest do
     end
   end
 
+  # Codex e10c8078 M1 (AC7, plan r2 §6.1): the stored basis is a commitment.
+  # A schema-valid change to one of its L members that keeps the row's
+  # recorded digest (made with the rollback-only `tamper!/2` fixture, inside
+  # the test's sandbox transaction) must not replay as identical: L
+  # re-derivation never repairs the stored basis. Typed conflict, no write,
+  # no output.
+  describe "replay integrity of the stored basis (Codex e10c8078 M1)" do
+    for {label, path} <- [
+          {"invocation.id", "{invocation,id}"},
+          {"funding.grant_id", "{funding,grant_id}"}
+        ] do
+      @tag path: path
+      test "a stored basis with a tampered #{label} that keeps its digest is a conflict",
+           %{env: env} = ctx do
+        parts = Fx.constructed!(env)
+        assert {:released, first, _output} = finalize(env, parts)
+        tampered = tamper_basis!(first, ctx.path, Ecto.UUID.generate())
+        assert tampered.exception_basis_sha256 == first.exception_basis_sha256
+        refute tampered.exception_basis == first.exception_basis
+        before = length(events(env.tenant))
+
+        result = finalize(env, parts)
+        assert conflict?(result, first.id), inspect(result)
+        assert length(events(env.tenant)) == before
+        assert {:ok, stored} = Agents.get_result_release(parts.invocation.id, actor: env.agent)
+        assert row(stored) == row(tampered)
+      end
+    end
+
+    test "control: an untouched stored basis still replays as identical", %{env: env} do
+      parts = Fx.constructed!(env)
+      assert {:released, first, _output} = finalize(env, parts)
+      before = length(events(env.tenant))
+
+      assert {:released, again, output} = finalize(env, parts)
+      assert row(again) == row(first)
+      assert is_map(output)
+      assert length(events(env.tenant)) == before
+    end
+
+    test "control: an allowlist-only change of L (a v4 entry now listed) is a conflict, " <>
+           "not an identical replay (§6.1: eligibility is re-derived L)",
+         %{env: env} do
+      parts = Fx.constructed!(env)
+      assert {:released, first, _output} = finalize(env, parts)
+      before = length(events(env.tenant))
+      AgentsFixtures.put_allowlist!([Fx.v3_opus(), Fx.v4_opus()])
+
+      result = finalize(env, parts)
+      assert conflict?(result, first.id), inspect(result)
+      assert length(events(env.tenant)) == before
+      assert {:ok, stored} = Agents.get_result_release(parts.invocation.id, actor: env.agent)
+      assert row(stored) == row(first)
+    end
+  end
+
   describe "an existing demo row (finalize halves of T-R6, T-R7, T-R8)" do
     test "T-R6: after expiry the second finalize is an identical replay without output",
          %{env: env} do
@@ -475,6 +536,25 @@ defmodule SdrAgent.Agents.DemoExceptionAuthorityTest do
   end
 
   defp source_marker?(statement), do: String.starts_with?(statement, "-- source:")
+
+  # Sets one member of the stored basis (a JSON path) to `value`, leaving
+  # every other column, the recorded digest included, unchanged; returns the
+  # re-read row. Triggers are off for the statement only (`tamper!/2`).
+  defp tamper_basis!(release, path, value) do
+    tamper!(
+      "UPDATE model_result_releases SET exception_basis = " <>
+        "jsonb_set(exception_basis, $1::text::text[], to_jsonb($2::text)) " <>
+        "WHERE id = $3::text::uuid",
+      [path, value, release.id]
+    )
+
+    {:ok, stored} =
+      Agents.get_result_release(release.model_invocation_id,
+        actor: system_actor(:agent_runtime, %{id: release.tenant_id})
+      )
+
+    stored
+  end
 
   # A successor of the primary link's exchange (a later observation of the
   # same exchange): L changes.
