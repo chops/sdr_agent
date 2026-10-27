@@ -166,9 +166,9 @@ defmodule SdrAgent.Accounts.LoginAllowlistTest do
     for value <- [nil, "", " , ", "not-an-address", ctx.email <> ", owner", ctx.email <> " x"] do
       if value, do: allow(value), else: System.delete_env("SDR_LOGIN_ALLOWLIST")
 
-      assert {:error, _} = Accounts.sign_in(ctx.email, test_password()), inspect(value)
+      assert match?({:error, _}, Accounts.sign_in(ctx.email, test_password())), inspect(value)
       refute admitted?(magic_sign_in(token)), inspect(value)
-      assert :error = Accounts.current_operator(user.__metadata__.token), inspect(value)
+      assert Accounts.current_operator(user.__metadata__.token) == :error, inspect(value)
     end
   end
 
@@ -180,7 +180,7 @@ defmodule SdrAgent.Accounts.LoginAllowlistTest do
         do: Application.delete_env(:sdr_agent, :login_allowlist_enforced),
         else: Application.put_env(:sdr_agent, :login_allowlist_enforced, value)
 
-      assert {:error, _} = Accounts.sign_in(ctx.email, test_password()), inspect(value)
+      assert match?({:error, _}, Accounts.sign_in(ctx.email, test_password())), inspect(value)
     end
   end
 
