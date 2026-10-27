@@ -391,14 +391,23 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
       assert plan(bare, seams(ctx, provider: Fake)) == :not_orderly, "Fake, server registered"
       kill!(stray)
 
+      # A model tree whose server holds another name: only the tree's
+      # presence differs from the Fake control.
+      other_tree = start_top!([tree_child(:"#{ctx.server}_other")])
+
+      assert plan(other_tree, seams(ctx, provider: Fake)) == :not_orderly,
+             "Fake with a model tree"
+
       with_tree = start_top!([tree_child(ctx.server)])
-      assert plan(with_tree, seams(ctx, provider: Fake)) == :not_orderly, "Fake with a model tree"
       assert plan(with_tree, seams(ctx, boot: nil)) == :not_orderly, "no boot binding"
 
       assert plan(with_tree, seams(ctx, boot: %{ctx.boot | nonce: Fx.nonce()})) == :not_orderly,
              "a binding of another nonce"
 
       assert match?({:ok, _plan}, plan(with_tree, seams(ctx))), "control"
+
+      # The Fake control once no process holds the server name.
+      :ok = Supervisor.stop(with_tree, :shutdown)
       assert match?({:ok, _plan}, plan(bare, seams(ctx, provider: Fake))), "Fake control"
       assert_nothing_completed(ctx)
     end
@@ -612,7 +621,12 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
   defp child_stops(ctx, top) do
     reentry = Supervisor.child_spec({@instance, :run}, id: :reentry)
     assert Supervisor.restart_child(top, @instance) == {:error, :run_nonce_already_booted}
-    assert Supervisor.start_child(top, reentry) == {:error, :run_nonce_already_booted}
+    # OTP wraps a failed start_child: {:error, {reason, child}}.
+    assert match?(
+             {:error, {:run_nonce_already_booted, _child}},
+             Supervisor.start_child(top, reentry)
+           )
+
     assert Supervisor.terminate_child(top, @instance) == :ok
     assert Supervisor.restart_child(top, @instance) == {:error, :run_nonce_already_booted}
 
