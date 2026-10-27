@@ -176,9 +176,11 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
     setup :signed_in
 
     test "a handshake failure is reported withheld", ctx do
+      # Invalid UTF-8 in the query: the transport's query parsing raises
+      # before it decodes the session or calls the socket handler.
       request =
         RawHttp.ws_upgrade(
-          "/live/websocket?vsn=2.0.0&%zz=#{ctx.sentinel}&_csrf_token=#{ctx.csrf}",
+          "/live/websocket?vsn=2.0.0&probe=%FF#{ctx.sentinel}&_csrf_token=#{ctx.csrf}",
           ctx.cookie_header
         )
 
