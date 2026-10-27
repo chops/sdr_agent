@@ -5,8 +5,10 @@ defmodule SdrAgent.AgentEnv.State do
   validation facade (S1 PR-A) and, from S1 PR-B GREEN-2 (P5 correction
   `claude-c2star-s1-prb-p5-correction-r1.md`), `create/3`: the exclusive
   create of one validated file, used for the run boot marker and the run
-  receipt. It never replaces, changes or removes a published file. The
-  leases, release and classification are S1 PR-B GREEN-3.
+  receipt. It never replaces, changes or removes a published file. S1 PR-B
+  GREEN-3 (Codex rulings `b684dba9` and the `31b72fea` review) adds the
+  lease writer `acquire_lease/3` (phase P1), `release/3` (phase P5; it
+  removes the lease and nothing else) and the read-only `classify/2`.
 
   A file is valid only when it is a regular file (never a symlink) of at
   most 64 KiB whose bytes are exactly the canonical
@@ -45,6 +47,16 @@ defmodule SdrAgent.AgentEnv.State do
   @max_bytes 65_536
   @steps [:create, :migrate, :seed, :probe, :provision]
   @bootstrap_target %{"database" => "sdr_agent_agentenv", "host" => "localhost", "port" => 5520}
+  @bootstrap_steps [:create, :migrate, :seed, :probe]
+  @step_names Map.new(@steps, &{Atom.to_string(&1), &1})
+  @fixed_files %{
+    "environment.pending" => :pending,
+    "instance.lease" => :lease,
+    "environment.created.json" => :created,
+    "environment.json" => :environment,
+    "authorization.claim.json" => :claim,
+    "authorization.json" => :authorization
+  }
 
   @type name ::
           :pending
@@ -57,6 +69,10 @@ defmodule SdrAgent.AgentEnv.State do
           | {:boot, nonce :: String.t()}
           | {:run_receipt, nonce :: String.t()}
   @type view :: {:valid, sha256 :: String.t(), map()} | :absent | {:invalid, atom()}
+  @type db_facts ::
+          :unknown
+          | :absent
+          | {:present, %{database_oid: pos_integer(), tenant_id: String.t() | nil}}
 
   @doc "The configured root, or `{:error, :agent_env_not_configured}`."
   @spec root() :: {:ok, Path.t()} | {:error, :agent_env_not_configured}
@@ -101,6 +117,350 @@ defmodule SdrAgent.AgentEnv.State do
       publish(file, bytes, sha256)
     else
       _invalid -> {:error, :invalid}
+    end
+  end
+
+  ## Leases, release and classification (S1 PR-B GREEN-3)
+
+  @doc """
+  Phase P1: takes the lease of `mode` and returns its fresh nonce.
+  `:bootstrap` needs `classify(root, :unknown) == :fresh` and creates
+  `environment.pending`, then the bootstrap lease, with one nonce;
+  `:provisioning` and `:run` need `{:bound, _}` and target its binding
+  digest (run: port 4130). A held lease is `:lease_held`, otherwise
+  `:not_fresh` (bootstrap) or `:not_bound`. Exclusive creates only: a lost
+  race is `:lease_held` (or `:not_fresh`), and a pending marker left by a
+  failed lease write quarantines the root. `opts` is reserved.
+  """
+  @spec acquire_lease(Path.t(), :bootstrap | :provisioning | :run, keyword()) ::
+          {:ok, String.t()} | {:error, :lease_held | :not_fresh | :not_bound | :write_failed}
+  def acquire_lease(root, :bootstrap, opts) when is_binary(root) and is_list(opts) do
+    case classify(root, :unknown) do
+      :fresh -> bootstrap_lease(root, new_nonce())
+      {:leased, _mode} -> {:error, :lease_held}
+      _other -> {:error, :not_fresh}
+    end
+  end
+
+  def acquire_lease(root, mode, opts)
+      when is_binary(root) and mode in [:provisioning, :run] and is_list(opts) do
+    case classify(root, :unknown) do
+      {:bound, %{sha256: binding}} ->
+        write_lease(root, mode, new_nonce(), %{"binding_sha256" => binding})
+
+      {:leased, _mode} ->
+        {:error, :lease_held}
+
+      _other ->
+        {:error, :not_bound}
+    end
+  end
+
+  @doc """
+  Phase P5: removes the lease, and nothing else, when it is the held lease
+  of `mode` with `nonce` (`:lease_missing`, `:lease_invalid`,
+  `:lease_mismatch`) and that mode's receipts are present (else
+  `:receipts_missing`) and valid (`:invalid_file`):
+
+    * bootstrap: the four step receipts of `nonce` and `environment.json`,
+      with a history consistent with them (the pending marker and
+      `environment.created.json` of `nonce`; the environment's nonce,
+      database and oid those of the created file, its tenant the probe's;
+      else `:binding_inconsistent`);
+    * provisioning: `instance.<nonce>.provision.exit`;
+    * run: `instance.<nonce>.exit`, whose `boot_id` must be that of a valid
+      boot marker `instance.<nonce>.boot` (an absent, invalid or different
+      marker is `:boot_id_mismatch`).
+
+  A refusal changes no file.
+  """
+  @spec release(Path.t(), :bootstrap | :provisioning | :run, String.t()) ::
+          :ok
+          | {:error,
+             :lease_missing
+             | :lease_invalid
+             | :lease_mismatch
+             | :receipts_missing
+             | :invalid_file
+             | :binding_inconsistent
+             | :boot_id_mismatch
+             | :write_failed}
+  def release(root, mode, nonce)
+      when is_binary(root) and mode in [:bootstrap, :provisioning, :run] do
+    with {:ok, sha256, lease} <- held_lease(root),
+         :ok <- same_lease(lease, mode, nonce),
+         :ok <- released(root, mode, nonce) do
+      remove_lease(root, sha256)
+    end
+  end
+
+  @doc """
+  Classifies `<root>/state/` given the database facts the caller observed
+  (`:unknown`, `:absent` or `{:present, %{database_oid:, tenant_id:}}`).
+  It reads only, and creates or changes nothing.
+
+    * `{:quarantine, :state_unavailable}` — the root or `state` is not a
+      physical directory, or cannot be listed (an absent `state/` in a
+      physical root is no files);
+    * `{:quarantine, :unrecognised_file}` / `{:quarantine, :invalid_file}` —
+      any file that is not a state file name, or does not read valid;
+    * `{:leased, mode}` — a valid lease over that recognised, valid history
+      (held or stale; every launch refuses it);
+    * `{:bound, %{sha256, data}}` — `environment.json` with its whole
+      bootstrap history (pending and created of its nonce, the four step
+      receipts of that nonce, the probe's tenant) and database facts that
+      agree (`:unknown`, or present with its oid and tenant). Otherwise
+      `:binding_inconsistent` (also for facts `:absent`),
+      `:missing_bootstrap_receipt`, `:database_oid_mismatch` or
+      `:tenant_mismatch`. Boot markers, run receipts, provision receipts and
+      the S2 authorization files are recognised and do not unbind;
+    * with no environment: `:pending_without_environment`,
+      `:created_without_pending`, `:database_without_pending` (present
+      facts), `:binding_inconsistent` (other history), or `:fresh`.
+  """
+  @spec classify(Path.t(), db_facts()) ::
+          :fresh
+          | {:bound, %{sha256: String.t(), data: map()}}
+          | {:leased, String.t()}
+          | {:quarantine, atom()}
+  def classify(root, facts) when is_binary(root) do
+    with {:ok, names} <- state_names(root),
+         {:ok, views} <- valid_views(root, names) do
+      classify_views(views, facts)
+    end
+  end
+
+  defp new_nonce, do: 16 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+
+  defp bootstrap_lease(root, nonce) do
+    pending = %{
+      "environment_id" => AgentEnv.environment_id(),
+      "nonce" => nonce,
+      "started_at" => DateTime.utc_now()
+    }
+
+    case create(root, :pending, pending) do
+      {:ok, _sha256} -> write_lease(root, :bootstrap, nonce, @bootstrap_target)
+      {:error, :exists} -> {:error, :not_fresh}
+      {:error, _reason} -> {:error, :write_failed}
+    end
+  end
+
+  defp write_lease(root, mode, nonce, target) do
+    lease = %{
+      "environment_id" => AgentEnv.environment_id(),
+      "mode" => Atom.to_string(mode),
+      "nonce" => nonce,
+      "target" => target,
+      "port" => if(mode == :run, do: AgentEnv.http_port()),
+      "started_at" => DateTime.utc_now()
+    }
+
+    case create(root, :lease, lease) do
+      {:ok, _sha256} -> {:ok, nonce}
+      {:error, :exists} -> {:error, :lease_held}
+      {:error, _reason} -> {:error, :write_failed}
+    end
+  end
+
+  defp held_lease(root) do
+    case read(root, :lease) do
+      {:valid, sha256, lease} -> {:ok, sha256, lease}
+      :absent -> {:error, :lease_missing}
+      {:invalid, _reason} -> {:error, :lease_invalid}
+    end
+  end
+
+  defp same_lease(lease, mode, nonce) do
+    if lease["mode"] == Atom.to_string(mode) and is_binary(nonce) and lease["nonce"] == nonce,
+      do: :ok,
+      else: {:error, :lease_mismatch}
+  end
+
+  defp released(root, :bootstrap, nonce) do
+    names = Enum.map(@bootstrap_steps, &{:receipt, nonce, &1}) ++ [:environment]
+    views = Map.new(names, &{&1, read(root, &1)})
+
+    with :ok <- present_and_valid(Map.values(views)) do
+      bootstrap_history(root, nonce, views)
+    end
+  end
+
+  defp released(root, :provisioning, nonce),
+    do: present_and_valid([read(root, {:receipt, nonce, :provision})])
+
+  defp released(root, :run, nonce) do
+    receipt = read(root, {:run_receipt, nonce})
+
+    with :ok <- present_and_valid([receipt]) do
+      {:valid, _sha256, %{"boot_id" => boot_id}} = receipt
+
+      case read(root, {:boot, nonce}) do
+        {:valid, _sha256, %{"boot_id" => ^boot_id}} -> :ok
+        _absent_invalid_or_different -> {:error, :boot_id_mismatch}
+      end
+    end
+  end
+
+  defp present_and_valid(views) do
+    cond do
+      Enum.any?(views, &(&1 == :absent)) -> {:error, :receipts_missing}
+      Enum.any?(views, &match?({:invalid, _reason}, &1)) -> {:error, :invalid_file}
+      true -> :ok
+    end
+  end
+
+  # The released bootstrap's history: pending and created of `nonce`, and
+  # an environment of that nonce, created database and probe tenant.
+  defp bootstrap_history(root, nonce, views) do
+    {:valid, _sha256, environment} = views[:environment]
+    {:valid, _sha256, probe} = views[{:receipt, nonce, :probe}]
+
+    with {:valid, _sha256, %{"nonce" => ^nonce}} <- read(root, :pending),
+         {:valid, _sha256, created} <- read(root, :created),
+         true <- created_matches?(created, environment),
+         true <- environment["nonce"] == nonce,
+         true <- environment["tenant_id"] == probe["tenant_id"] do
+      :ok
+    else
+      _inconsistent -> {:error, :binding_inconsistent}
+    end
+  end
+
+  defp created_matches?(created, environment) do
+    created["nonce"] == environment["nonce"] and created["database"] == environment["database"] and
+      created["database_oid"] == environment["database_oid"]
+  end
+
+  # Removes the lease only while it is still the one that was checked.
+  defp remove_lease(root, sha256) do
+    case read(root, :lease) do
+      {:valid, ^sha256, _lease} ->
+        case File.rm(path(root, :lease)) do
+          :ok -> :ok
+          {:error, _reason} -> {:error, :write_failed}
+        end
+
+      _changed ->
+        {:error, :lease_mismatch}
+    end
+  end
+
+  # The names of the files in `<root>/state/` (an absent directory in a
+  # physical root is none), or a quarantine.
+  defp state_names(root) do
+    dir = Path.join(root, "state")
+
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(root),
+         {:ok, files} <- state_files(dir) do
+      names = Enum.map(files, &state_name/1)
+
+      if Enum.any?(names, &is_nil/1),
+        do: {:quarantine, :unrecognised_file},
+        else: {:ok, names}
+    else
+      _unavailable -> {:quarantine, :state_unavailable}
+    end
+  end
+
+  defp state_files(dir) do
+    case File.lstat(dir) do
+      {:error, :enoent} -> {:ok, []}
+      {:ok, %File.Stat{type: :directory}} -> File.ls(dir)
+      _other -> {:error, :state_unavailable}
+    end
+  end
+
+  defp state_name(file) do
+    case Map.fetch(@fixed_files, file) do
+      {:ok, name} -> name
+      :error -> instance_name(String.split(file, "."))
+    end
+  end
+
+  defp instance_name(["instance", nonce, step, "exit"]) do
+    case Map.fetch(@step_names, step) do
+      {:ok, step} -> if nonce?(nonce), do: {:receipt, nonce, step}
+      :error -> nil
+    end
+  end
+
+  defp instance_name(["instance", nonce, "boot"]), do: if(nonce?(nonce), do: {:boot, nonce})
+
+  defp instance_name(["instance", nonce, "exit"]),
+    do: if(nonce?(nonce), do: {:run_receipt, nonce})
+
+  defp instance_name(_other), do: nil
+
+  defp valid_views(root, names) do
+    views = Map.new(names, &{&1, read(root, &1)})
+
+    if Enum.all?(views, &match?({_name, {:valid, _sha256, _data}}, &1)),
+      do: {:ok, Map.new(views, fn {name, {:valid, sha256, data}} -> {name, {sha256, data}} end)},
+      else: {:quarantine, :invalid_file}
+  end
+
+  defp classify_views(%{lease: {_sha256, %{"mode" => mode}}}, _facts), do: {:leased, mode}
+  defp classify_views(%{environment: _} = views, facts), do: bound(views, facts)
+
+  defp classify_views(views, facts) do
+    cond do
+      Map.has_key?(views, :pending) -> {:quarantine, :pending_without_environment}
+      Map.has_key?(views, :created) -> {:quarantine, :created_without_pending}
+      match?({:present, _facts}, facts) -> {:quarantine, :database_without_pending}
+      views == %{} -> :fresh
+      true -> {:quarantine, :binding_inconsistent}
+    end
+  end
+
+  defp bound(views, facts) do
+    {sha256, environment} = views[:environment]
+    nonce = environment["nonce"]
+    receipts = Enum.map(@bootstrap_steps, &Map.get(views, {:receipt, nonce, &1}))
+
+    cond do
+      not history?(views, environment) -> {:quarantine, :binding_inconsistent}
+      Enum.any?(receipts, &is_nil/1) -> {:quarantine, :missing_bootstrap_receipt}
+      not probe_tenant?(views, environment) -> {:quarantine, :binding_inconsistent}
+      stray_receipts?(views, nonce) -> {:quarantine, :binding_inconsistent}
+      true -> with_facts(facts, sha256, environment)
+    end
+  end
+
+  defp history?(views, environment) do
+    nonce = environment["nonce"]
+
+    with {_sha256, %{"nonce" => ^nonce}} <- views[:pending],
+         {_sha256, created} <- views[:created] do
+      created_matches?(created, environment)
+    else
+      _missing_or_other_nonce -> false
+    end
+  end
+
+  defp probe_tenant?(views, environment) do
+    {_sha256, probe} = views[{:receipt, environment["nonce"], :probe}]
+    probe["tenant_id"] == environment["tenant_id"]
+  end
+
+  # Bootstrap step receipts of any other nonce cannot belong to this binding.
+  defp stray_receipts?(views, nonce) do
+    Enum.any?(Map.keys(views), fn
+      {:receipt, other, step} -> step in @bootstrap_steps and other != nonce
+      _name -> false
+    end)
+  end
+
+  defp with_facts(:unknown, sha256, environment),
+    do: {:bound, %{sha256: sha256, data: environment}}
+
+  defp with_facts(:absent, _sha256, _environment), do: {:quarantine, :binding_inconsistent}
+
+  defp with_facts({:present, %{database_oid: oid, tenant_id: tenant_id}}, sha256, environment) do
+    cond do
+      oid != environment["database_oid"] -> {:quarantine, :database_oid_mismatch}
+      tenant_id != environment["tenant_id"] -> {:quarantine, :tenant_mismatch}
+      true -> {:bound, %{sha256: sha256, data: environment}}
     end
   end
 

@@ -33,7 +33,8 @@ defmodule SdrAgent.AgentEnv.Boot do
   content capture off, and `config :sdr_agent, SdrAgent.AgentEnv` with
   `root`, `mode`, `step`, `nonce` and `database`. Bootstrap and provisioning
   also force the Fake provider and `server: false`; run forces HTTP
-  `127.0.0.1:4130`.
+  `127.0.0.1:4130`; check mode publishes that HTTP tuple inert, with
+  `server: false` (it never starts the application or the Repo).
   """
 
   alias SdrAgent.AgentEnv
@@ -324,7 +325,14 @@ defmodule SdrAgent.AgentEnv.Boot do
       {SdrAgentWeb.Endpoint, [server: false]}
     ]
 
-  defp mode_config(:check), do: []
+  # Check mode (P0, Codex b684dba9 M2): the inert fixed HTTP tuple that
+  # Launcher.check/1 reads, never a server; check_start!/0 and the Repo's
+  # supervised start still refuse check mode.
+  defp mode_config(:check),
+    do: [
+      {SdrAgentWeb.Endpoint,
+       [http: [ip: {127, 0, 0, 1}, port: AgentEnv.http_port()], server: false]}
+    ]
 
   ## P3 gates: the application and the Repo (L2, L3)
 

@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# The agent environment agentenv-1 launcher (C2* S1; plan
+# claude-c2star-s1-environment-plan-r2.md section 5.4; ADR-0004
+# agent-environment amendment items 2, 3 and 5). Run from anywhere:
+#
+#   bin/agent-env check      the pre-lease readiness check (P0) for run
+#   bin/agent-env provision  check, preflight, the bootstrap lease, the four
+#                            guarded steps, publish and release (Fake only)
+#   bin/agent-env run        check, the run lease, mix phx.server on
+#                            127.0.0.1:4130 (waited for), then release
+#
+# It holds checks and sequencing only: no reset, drop, reclaim, kill or
+# recovery path, and no state-file write of its own. Every refusal before a
+# Mix command exits 2 and names the item; the first failing Mix command
+# stops the sequence and exits 1. Once a lease is held, a failure leaves it
+# held (stale: the environment quarantines; nothing here clears it). The
+# nonce is read from exactly one `SDR_AGENT_ENV_NONCE <32 lowercase hex>`
+# line of the lease command's output and never evaluated. No secret is read
+# or printed.
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: bin/agent-env check | provision | run
+  check      the pre-lease readiness check (no lease, no database)
+  provision  bootstrap the environment under its lease (Fake provider only)
+  run        serve on 127.0.0.1:4130 under the run lease, then release it
+EOF
+  exit 2
+}
+
+refuse() {
+  echo "bin/agent-env: refusing: $*" >&2
+  exit 2
+}
+
+fail() {
+  echo "bin/agent-env: $*" >&2
+  exit 1
+}
+
+[ "$#" -eq 1 ] || usage
+cmd="$1"
+case "$cmd" in
+  check | provision | run) ;;
+  *) usage ;;
+esac
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# A physical directory: not a symlink, and its physical path is itself.
+physical_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(cd -P -- "$1" 2>/dev/null && pwd -P)" = "$1" ]
+}
+
+# Owned by this user with mode exactly 0700.
+private_dir() {
+  physical_dir "$1" && [ -n "$(find "$1" -maxdepth 0 -user "$(id -u)" -perm 0700 -print)" ]
+}
+
+# $1 is an absolute physical path at or under $2 with no .devenv component
+# (so no symlink component, even one resolving inside $2).
+physical_under() {
+  case "$1" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "/$1/" in
+    */.devenv/*) return 1 ;;
+  esac
+  physical_dir "$1" || return 1
+  [ "$1" = "$2" ] && return 0
+  case "$1" in
+    "$2"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Shell checks, before any Mix command.
+if [ -n "${MIX_ENV+x}" ] && [ "$MIX_ENV" != dev ]; then refuse "MIX_ENV must be dev or unset"; fi
+[ -z "${DATABASE_URL+x}" ] || refuse "DATABASE_URL must be unset"
+if [ -n "${PORT+x}" ] && [ "$PORT" != 4130 ]; then refuse "PORT must be 4130 or unset"; fi
+
+home="${HOME:-}"
+case "$home" in
+  /*) ;;
+  *) refuse "HOME must be an absolute path (the root lives under it)" ;;
+esac
+root="$home/.local/state/sdr-agent/agent-env/agentenv-1"
+private_dir "$root" || refuse "the root $root is not a physical 0700 directory"
+for sub in build deps state evidence anchors tmp; do
+  private_dir "$root/$sub" || refuse "the root's $sub is not a physical 0700 directory"
+done
+
+physical_under "${MIX_BUILD_ROOT:-}" "$root" ||
+  refuse "MIX_BUILD_ROOT must be a physical directory under the root, outside .devenv"
+physical_under "${MIX_DEPS_PATH:-}" "$root" ||
+  refuse "MIX_DEPS_PATH must be a physical directory under the root, outside .devenv"
+[ -n "${SDR_WITNESS_STORE_ROOT:-}" ] || refuse "SDR_WITNESS_STORE_ROOT must be set"
+[ "${SDR_ANCHOR_SINKS:-}" = file ] || refuse "SDR_ANCHOR_SINKS must be file"
+physical_under "${SDR_ANCHOR_FILE_DIR:-}" "$root/anchors" ||
+  refuse "SDR_ANCHOR_FILE_DIR must be a physical directory under the root's anchors"
+
+if [ "$cmd" = provision ]; then
+  if [ -n "${SDR_MODEL_PROVIDER+x}" ] && [ "$SDR_MODEL_PROVIDER" != fake ]; then
+    refuse "SDR_MODEL_PROVIDER must be fake or unset to provision"
+  fi
+  [ -z "${SDR_DEMO_EXCEPTION+x}" ] || refuse "SDR_DEMO_EXCEPTION must be unset to provision"
+fi
+
+cd "$repo"
+
+# mixcall STEP NONCE ARGS...: one Mix command under the selector.
+mixcall() {
+  local step="$1" nonce="$2"
+  shift 2
+  (
+    unset SDR_AGENT_ENV_NONCE
+    export MIX_ENV=dev SDR_AGENT_ENV=agentenv-1 SDR_AGENT_ENV_STEP="$step"
+    if [ -n "$nonce" ]; then export SDR_AGENT_ENV_NONCE="$nonce"; fi
+    exec mix "$@"
+  )
+}
+
+# The one nonce line of a lease command's output, or failure.
+nonce_from() {
+  local lines count
+  lines="$(printf '%s\n' "$1" | grep -E 'SDR_AGENT_ENV_NONCE' || true)"
+  count="$(printf '%s' "$lines" | grep -c '' || true)"
+  [ "$count" = 1 ] || return 1
+  printf '%s\n' "$lines" | grep -Eqx 'SDR_AGENT_ENV_NONCE [0-9a-f]{32}' || return 1
+  printf '%s' "${lines#SDR_AGENT_ENV_NONCE }"
+}
+
+# lease MODE: takes the lease and prints its nonce.
+lease() {
+  local out nonce
+  out="$(mixcall check "" sdr.agent_env lease "$1")" || fail "the $1 lease was not taken"
+  printf '%s\n' "$out" >&2
+  nonce="$(nonce_from "$out")" ||
+    fail "the $1 lease printed no single valid nonce line; if a lease is held it stays (stale: quarantine)"
+  printf '%s' "$nonce"
+}
+
+case "$cmd" in
+  check)
+    mixcall check "" sdr.agent_env check run || fail "the readiness check refused"
+    ;;
+
+  provision)
+    mixcall check "" sdr.agent_env check provision || fail "the readiness check refused"
+    mixcall check "" sdr.agent_env preflight || fail "the preflight refused"
+    nonce="$(lease bootstrap)" || exit 1
+    for step in create migrate seed probe; do
+      mixcall "$step" "$nonce" sdr.agent_env step "$step" ||
+        fail "step $step failed; the bootstrap lease stays (stale: quarantine)"
+    done
+    mixcall check "$nonce" sdr.agent_env publish ||
+      fail "publish failed; the bootstrap lease stays (stale: quarantine)"
+    mixcall check "$nonce" sdr.agent_env release bootstrap ||
+      fail "release failed; the bootstrap lease stays (stale: quarantine)"
+    ;;
+
+  run)
+    mixcall check "" sdr.agent_env check run || fail "the readiness check refused"
+    nonce="$(lease run)" || exit 1
+    (
+      export PORT=4130
+      mixcall run "$nonce" phx.server
+    ) ||
+      fail "the server exited non-zero; the run lease stays (stale: quarantine)"
+    mixcall check "$nonce" sdr.agent_env release run ||
+      fail "release failed; the run lease stays (stale: quarantine)"
+    ;;
+esac
