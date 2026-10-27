@@ -66,6 +66,35 @@ defmodule SdrAgentWeb.SensitiveAuthTest do
         do: refute(sensitive_auth(:sensitive_path?, [Plug.Test.conn(:get, path)]), path)
   end
 
+  # Codex R1/R2: any request carrying a credential header, and every
+  # LiveView socket request (its cookie, CSRF token and typed frames), is
+  # credential-bearing whatever its path.
+  test "credential headers and the LiveView socket are credential-bearing on any path" do
+    with_header = fn name, value ->
+      Plug.Conn.put_req_header(Plug.Test.conn(:get, "/leads"), name, value)
+    end
+
+    bearing = [
+      with_header.("cookie", "_sdr_agent_key=x"),
+      with_header.("authorization", "Bearer x"),
+      with_header.("proxy-authorization", "Basic x"),
+      Plug.Test.conn(:get, "/live/websocket?vsn=2.0.0"),
+      Plug.Test.conn(:get, "/%6Cive/longpoll"),
+      Plug.Test.conn(:get, "/magic_link/x")
+    ]
+
+    free = [Plug.Test.conn(:get, "/leads"), with_header.("accept", "text/html")]
+
+    for conn <- bearing, do: assert(sensitive_auth(:sensitive?, [conn]), inspect(conn.req_headers))
+    for conn <- free, do: refute(sensitive_auth(:sensitive?, [conn]), conn.request_path)
+
+    opts = sensitive_auth(:init, [[]])
+    sensitive_auth(:call, [with_header.("cookie", "_sdr_agent_key=x"), opts])
+    assert tagged?()
+    request("/leads", opts)
+    refute tagged?()
+  end
+
   test "the auth LiveViews are tagged by their first mount hook, connected only" do
     socket = %Phoenix.LiveView.Socket{transport_pid: self()}
     assert {:cont, ^socket} = sensitive_auth(:on_mount, [:default, %{}, %{}, socket])
