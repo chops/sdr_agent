@@ -1,18 +1,21 @@
 defmodule SdrAgent.Agents.B1DecisionKindsTest do
   @moduledoc """
   B1-04 and B1-05 entity delta (plan
-  `claude-b1-research-draft-plan-r1.md`, Decision row): two new Decision
+  `claude-b1-research-draft-plan-r2.md`, Decision row): two new Decision
   kinds, `:research_caps` (the research caps applied to one extraction
   call) and `:draft_shape_validation` (the deterministic subject/body shape
   rule). Both are recorded only by the agent runtime and only as
   deterministic decisions (protected kinds: the model never decides them);
-  every other actor is refused, as for the existing kinds.
+  every other system actor type (`SdrAgent.Actor.types/0`) and every
+  human role (admin, reviewer, auditor) is refused, as for the existing
+  kinds.
 
   RED: neither kind exists, so the agent runtime's recording is refused as
   invalid input.
   """
   use SdrAgent.AuditCase, async: false
 
+  alias SdrAgent.Actor
   alias SdrAgent.Agents
   alias SdrAgent.AgentsFixtures
 
@@ -54,6 +57,17 @@ defmodule SdrAgent.Agents.B1DecisionKindsTest do
 
   defp short(term), do: inspect(term, limit: 8, printable_limit: 200)
 
+  # Every system actor type but the agent runtime, and every human role.
+  defp other_actors(ctx) do
+    systems =
+      for type <- Actor.types(), type != :agent_runtime, do: system_actor(type, ctx.tenant)
+
+    systems ++ for(role <- [:admin, :reviewer, :auditor], do: human(role, ctx.tenant))
+  end
+
+  defp label(%Actor{type: type}), do: "system actor #{type}"
+  defp label(user), do: "human #{user.role}"
+
   test "only the agent runtime records the B1 kinds, and only deterministically", ctx do
     for kind <- @kinds do
       allowed = Agents.record_decision(rule_attrs(ctx, kind), actor: ctx.agent)
@@ -61,15 +75,11 @@ defmodule SdrAgent.Agents.B1DecisionKindsTest do
       assert match?({:ok, %{kind: ^kind, mode: :deterministic}}, allowed),
              "B1: the agent runtime cannot record a #{kind} Decision: #{short(allowed)}"
 
-      for actor <- [
-            system_actor(:delivery_worker, ctx.tenant),
-            system_actor(:reconciler, ctx.tenant),
-            human(:admin, ctx.tenant)
-          ] do
+      for actor <- other_actors(ctx) do
         refused = Agents.record_decision(rule_attrs(ctx, kind), actor: actor)
 
         assert match?({:error, %Ash.Error.Forbidden{}}, refused),
-               "B1: #{inspect(actor.__struct__)} recorded a #{kind} Decision: #{short(refused)}"
+               "B1: #{label(actor)} recorded a #{kind} Decision: #{short(refused)}"
       end
 
       llm =

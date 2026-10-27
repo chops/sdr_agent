@@ -15,7 +15,9 @@ defmodule SdrAgent.SDR.SettingsTextPrivacyTest do
   the Payload of any ToolInvocation input or output or Decision input of
   the run. Settings text is read inside the action from the run's
   snapshot, never passed through Flow params, outputs or agent state, and
-  a request carrying it is built with `content_capture: :off`.
+  every SDR model request is built with `content_capture: :off`: the
+  exporter holds the run's GenAI spans (so an empty exporter cannot pass
+  as privacy) and each records `gen_ai.content_capture` = `"off"`.
 
   RED: neither request carries the brief or the guide (the agent reads no
   settings), so the payload assertions fail first.
@@ -24,6 +26,8 @@ defmodule SdrAgent.SDR.SettingsTextPrivacyTest do
 
   import ExUnit.CaptureLog
   import SdrAgent.SettingsFixtures, only: [canary: 0, content: 2, save!: 3, table_contains?: 2]
+
+  require Record
 
   alias Ecto.Adapters.SQL
   alias SdrAgent.Demo.Fixtures
@@ -34,6 +38,8 @@ defmodule SdrAgent.SDR.SettingsTextPrivacyTest do
 
   @tables ~w(audit_events failures run_settings_snapshots decisions model_invocations
              research_artifacts evidence_claims drafts draft_revisions)
+
+  Record.defrecordp(:span, Record.extract(:span, from_lib: "opentelemetry/include/otel_span.hrl"))
 
   setup do
     level = Logger.level()
@@ -55,6 +61,15 @@ defmodule SdrAgent.SDR.SettingsTextPrivacyTest do
     # The simple processor exports on span end; give it a moment.
     Process.sleep(50)
     inspect(InMemoryExporter.spans(), limit: :infinity, printable_limit: :infinity)
+  end
+
+  # The rendered attributes of every exported GenAI span.
+  defp gen_ai_span_attributes do
+    Process.sleep(50)
+
+    for record <- InMemoryExporter.spans(),
+        to_string(span(record, :name)) =~ "gen_ai.",
+        do: inspect(span(record, :attributes), limit: :infinity, printable_limit: :infinity)
   end
 
   defp count!(sql, params) do
@@ -121,6 +136,18 @@ defmodule SdrAgent.SDR.SettingsTextPrivacyTest do
 
     refute log =~ c, "B1-04/05: settings text reached a log"
     refute rendered_spans() =~ c, "B1-04/05: settings text reached a span"
+
+    # The exporter really holds the run's model-call spans, each with capture off.
+    gen_ai = gen_ai_span_attributes()
+
+    assert length(gen_ai) >= length(invocations!(ctx, run)) and gen_ai != [],
+           "B1-04/05: the exporter holds #{length(gen_ai)} GenAI spans for " <>
+             "#{length(invocations!(ctx, run))} model calls"
+
+    for attributes <- gen_ai do
+      assert attributes =~ ~s("gen_ai.content_capture" => "off"),
+             "B1-04/05: a GenAI span records content capture other than off"
+    end
 
     for table <- @tables do
       refute table_contains?(table, c), "B1-04/05: settings text reached a #{table} row"

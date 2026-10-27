@@ -1,37 +1,58 @@
 defmodule SdrAgent.SDR.FirstTouchDraftTest do
   @moduledoc """
   B1-05 (map row N4; `docs/product/c4/readiness.md` C4-R5, C4-R9, C4-R13,
-  test 21a): the first-touch draft is built from the run's settings
-  snapshot and passes a deterministic shape rule before hand-off.
+  test 21a; plan `claude-b1-research-draft-plan-r2.md`): the first-touch
+  draft is built from the run's settings snapshot and passes a
+  deterministic shape rule, bound to that exact draft, before hand-off.
 
     * The outreach-proposal model input carries the snapshot's offering
       profile, writing guide and research brief (from which the model
       derives the angle): the bound revisions, never ones saved after the
       run was created, or the built-in defaults by version for the guide and
-      brief when none is saved. A withheld booking link never reaches it.
+      brief when none is saved. It has no booking-link slot at all, even
+      when a usable link is saved (Q1).
+    * On the Fake, the draft reflects the offering (a non-limit item's text),
+      asks a question (the call to action is a question and appears in the
+      body) and no longer carries the old fixed pitch or a proposed time.
+      This hermetic check does not certify real-model compliance.
     * `ValidateDraftShape` records a deterministic `draft_shape_validation`
-      Decision (rule `sdr.draft_shape`): the subject is one line, and the
-      body carries no URL, since this slice supplies no usable booking link
-      (C4-R9: no step invents a link). A rejected shape fails the run as
-      invalid model output and nothing is handed to review, as for
-      `ValidateClaims`.
+      Decision (rule `sdr.draft_shape`) bound to the exact `draft_proposal`
+      Decision and ModelInvocation (inputs and input refs; ids only, no
+      subject or body text). Reasons: `subject_not_single_line` (CR, LF or
+      any other control character in the subject) and `body_contains_url`
+      (`http://`, `https://` or `www.`, any letter case; this slice supplies
+      no link). This is the specified syntactic check, not detection of
+      every URL spelling. A rejected shape fails the run as invalid model
+      output: no enrollment, no Draft, no `sdr.draft.completed`.
+    * `HandOffProposal` refuses a missing, rejected or unbound shape check
+      before any lock or write.
 
   Hermetic: Fake model provider; the recording responder
   (`SdrAgent.SettingsFixtures.RecordingBrain`) and test responders built on
   `SdrAgent.SDR.FakeBrain`; synthetic content only.
 
-  RED: `DraftEmail` sends no offering, guide or brief; there is no shape
-  rule, so a multi-line subject or an invented link is handed to review.
+  RED: `DraftEmail` sends no offering, guide or brief; the Fake keeps its
+  fixed pitch; there is no shape rule, so a malformed subject or an invented
+  link is handed to review, and `HandOffProposal` gates only on the two
+  citation checks.
   """
   use SdrAgent.SDRCase, async: false
 
-  import SdrAgent.OutreachFixtures, only: [put_env!: 2]
-  import SdrAgent.SettingsFixtures, only: [content: 2, save!: 3]
+  import SdrAgent.OutreachFixtures, only: [put_env!: 2, revision!: 2]
+  import SdrAgent.SettingsFixtures, only: [content: 2, observe: 1, save!: 3]
 
+  alias SdrAgent.Agents
   alias SdrAgent.Agents.RunSettings.CodeDefaults
+  alias SdrAgent.AgentsFixtures
+  alias SdrAgent.Audit
   alias SdrAgent.Demo.Fixtures
+  alias SdrAgent.Outreach
+  alias SdrAgent.Sales
   alias SdrAgent.SDR
+  alias SdrAgent.SDR.Actions.HandOffProposal
+  alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.FakeBrain
+  alias SdrAgent.SDR.SDRAgent
   alias SdrAgent.SettingsFixtures.RecordingBrain
 
   @moduletag :b1_05
@@ -60,14 +81,39 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
     def respond(op, input), do: FakeBrain.respond(op, input)
   end
 
+  defmodule ShapeVariants do
+    @moduledoc false
+    # Keyed by the fixture company the draft is for (leads 02, 03, 09, 10).
+    @subjects %{
+      "Cobalt Dock Analytics" => "A quick question\rfor your operations team",
+      "Ferngrove Fleetworks" => "A quick question\u0007for your operations team"
+    }
+    @links %{
+      "Northgate Parcel Tech" => "HTTPS://Calendar.Example.Test/invented",
+      "Quillmark Ledger Freight" => "WWW.calendar.example.test/invented"
+    }
+
+    def respond("sdr.outreach_proposal" = op, %{company: %{name: name}} = input) do
+      proposal = FakeBrain.respond(op, input)
+
+      case {Map.fetch(@subjects, name), Map.fetch(@links, name)} do
+        {{:ok, subject}, _} -> %{proposal | subject: subject}
+        {_, {:ok, link}} -> %{proposal | body: proposal.body <> "\n\nPick a time: " <> link}
+        _other -> proposal
+      end
+    end
+
+    def respond(op, input), do: FakeBrain.respond(op, input)
+  end
+
   setup ctx do
     save!(:offering_profile, Fixtures.offering_profile(), ctx.admin)
     put_env!(RecordingBrain, self())
     :ok
   end
 
-  defp assign_with!(ctx, responder),
-    do: assign!(ctx, "01", model: [provider_options: [responder: responder]])
+  defp assign_with!(ctx, key \\ "01", responder),
+    do: assign!(ctx, key, model: [provider_options: [responder: responder]])
 
   # Every `{operation, input}` the recording responder saw, in call order.
   defp recorded(acc \\ []) do
@@ -86,6 +132,8 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
 
   defp render(term), do: inspect(term, limit: :infinity, printable_limit: :infinity)
 
+  defp short(term), do: inspect(term, limit: 8, printable_limit: 200)
+
   defp item_triples(items),
     do:
       Enum.map(items || [], fn item ->
@@ -101,7 +149,22 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
     hd(shapes)
   end
 
-  defp assert_rejected!(ctx, run, reason) do
+  defp nothing_handed_off!(ctx, run, lead) do
+    refute "sdr.draft.completed" in signal_types(ctx.tenant, run)
+    assert {:error, :no_proposal} = SDR.proposal(run.id, actor: ctx.agent)
+
+    {:ok, enrollments} =
+      Sales.list_records(Sales.CampaignEnrollment, filter: [lead_id: lead.id], actor: ctx.admin)
+
+    assert enrollments == [], "B1-05: the lead was enrolled"
+
+    {:ok, drafts} =
+      Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
+
+    assert drafts == [], "B1-05: a Draft was created"
+  end
+
+  defp assert_rejected!(ctx, run, lead, reason) do
     run = run!(ctx, run)
 
     assert run.status == :failed,
@@ -118,19 +181,41 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
     assert reason in List.wrap(shape.outcome_detail["reasons"]),
            "B1-05: the rejection does not name #{reason}: #{inspect(shape.outcome_detail)}"
 
-    refute "sdr.draft.completed" in signal_types(ctx.tenant, run)
-    assert {:error, :no_proposal} = SDR.proposal(run.id, actor: ctx.agent)
+    nothing_handed_off!(ctx, run, lead)
+  end
+
+  defp running_run!(ctx, lead) do
+    {:ok, definition} = SDRAgent.register(ctx.tenant.id)
+
+    attrs =
+      definition
+      |> AgentsFixtures.run_attrs()
+      |> Map.merge(%{lead_id: lead.id, campaign_id: ctx.campaign_id})
+
+    {:ok, run} = Agents.create_run(attrs, actor: ctx.agent)
+    {:ok, run} = Agents.start_run(run, actor: ctx.agent)
+    run
+  end
+
+  defp context(ctx, run, label) do
+    %Context{
+      actor: ctx.agent,
+      tenant_id: ctx.tenant.id,
+      run_id: run.id,
+      correlation_id: run.correlation_id,
+      signal_id: "sig-b1-gate-#{label}",
+      agent_state: %{phase: :validate, campaign_id: ctx.campaign_id}
+    }
   end
 
   describe "the draft input" do
-    test "carries the snapshot's offering, guide and brief, and no withheld booking link",
-         ctx do
+    test "carries the snapshot's offering, guide and brief, and no booking-link slot", ctx do
       guide = "Write two short paragraphs and ask one question (guide revision one)."
       brief = "Look for synthetic dock scheduling needs (brief revision one)."
       save!(:writing_guide, %{text: guide}, ctx.admin)
       save!(:research_brief, content(:research_brief, %{guidance: brief}), ctx.admin)
+      # A usable link: still never part of this slice's draft (Q1).
       save!(:booking_link, %{url: "https://book.example.test/demo/intro"}, ctx.admin)
-      put_env!(:booking_link_guard, {SdrAgent.SettingsFixtures, :deny_every_host})
 
       %{run: run} = assign_with!(ctx, RecordingBrain)
 
@@ -173,7 +258,8 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       refute rendered =~ "revision two",
              "B1-05: settings saved after the run was created reached its draft"
 
-      refute rendered =~ "book.example.test", "B1-05: a withheld booking link reached the draft"
+      refute Map.has_key?(input, :booking_link), "B1-05: the draft input has a booking-link slot"
+      refute rendered =~ "book.example.test", "B1-05: a booking link reached the draft input"
       assert run!(ctx, run).status == :succeeded
     end
 
@@ -197,8 +283,57 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
     end
   end
 
+  describe "the draft output (Fake)" do
+    test "reflects a distinct offering, asks a question and drops the fixed pitch", ctx do
+      feature = "Books synthetic dock slots in one shared view."
+      limit = "Does not file synthetic customs paperwork."
+
+      save!(
+        :offering_profile,
+        %{
+          name: "Example Dock Slot Planner",
+          summary: "A synthetic dock-slot booking product used only in tests.",
+          audience: "Yard teams at synthetic logistics companies.",
+          items: [
+            %{id: "dock_slots", kind: :feature, text: feature},
+            %{id: "no_customs", kind: :limit, text: limit}
+          ]
+        },
+        ctx.admin
+      )
+
+      %{run: run, lead: lead} = assign!(ctx, "01")
+      drain!()
+
+      {:ok, proposal} = SDR.proposal(run.id, actor: ctx.agent)
+      output = proposal.output
+
+      assert String.contains?(output.body, feature),
+             "B1-05: the draft does not use the offering's item: #{short(output.body)}"
+
+      refute String.contains?(output.body, limit), "B1-05: the draft pitches a limit item"
+      refute output.body =~ "Demo SDR helps revenue teams", "B1-05: the old fixed pitch remains"
+      refute output.subject =~ "ramping your new SDRs", "B1-05: the old fixed subject remains"
+
+      refute output.body =~ ~r/next week|20-minute/i,
+             "B1-05: the draft still proposes a meeting time"
+
+      assert String.ends_with?(String.trim(output.cta), "?"),
+             "B1-05: the call to action is not a question: #{short(output.cta)}"
+
+      assert String.contains?(output.body, output.cta), "B1-05: the body does not ask it"
+
+      {:ok, [draft]} =
+        Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
+
+      revision = revision!(ctx, draft.current_revision_id)
+      assert {revision.subject, revision.body_text} == {output.subject, output.body}
+    end
+  end
+
   describe "the shape rule" do
-    test "a well-shaped draft records a passed draft_shape_validation before hand-off", ctx do
+    test "a well-shaped draft records a passed check bound to its exact draft and invocation",
+         ctx do
       %{run: run} = assign!(ctx, "01")
       drain!()
 
@@ -209,23 +344,111 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       assert shape.mode == :deterministic
       assert shape.rule_id == "sdr.draft_shape"
       assert shape.outcome == "passed"
+      assert shape.agent_run_id == run.id
 
       {:ok, proposal} = SDR.proposal(run.id, actor: ctx.agent)
-      refute proposal.output.subject =~ ~r/[\r\n]/
-      refute proposal.output.body =~ ~r/https?:\/\//i
+
+      assert Enum.any?(
+               shape.input_refs,
+               &(&1.resource == "SdrAgent.Agents.Decision" and &1.id == proposal.decision_id)
+             ),
+             "B1-05: the shape check does not cite the exact draft_proposal Decision"
+
+      assert Enum.any?(
+               shape.input_refs,
+               &(&1.resource == "SdrAgent.Agents.ModelInvocation" and
+                   &1.id == proposal.model_invocation_id)
+             ),
+             "B1-05: the shape check does not cite the draft's ModelInvocation"
+
+      {:ok, inputs} = Audit.read_content(shape.inputs_sha256, actor: ctx.admin)
+      decoded = JSON.decode!(inputs)
+      assert decoded["draft_proposal_decision_id"] == proposal.decision_id
+      assert decoded["model_invocation_id"] == proposal.model_invocation_id
+
+      # Ids only: no subject or body text in the check's inputs, outcome or rationale.
+      for text <- [proposal.output.subject, proposal.output.body] do
+        refute inputs =~ text
+        refute render(shape.outcome_detail) =~ text
+        refute (shape.rationale || "") =~ text
+      end
+
+      refute proposal.output.subject =~ ~r/[\x00-\x1F\x7F]/
+      refute proposal.output.body =~ ~r/https?:\/\/|www\./i
     end
 
-    test "a multi-line subject is rejected deterministically and not handed to review", ctx do
-      %{run: run} = assign_with!(ctx, MultilineSubject)
+    test "a multi-line subject is rejected deterministically and not handed off", ctx do
+      %{run: run, lead: lead} = assign_with!(ctx, MultilineSubject)
       drain!()
-      assert_rejected!(ctx, run, "subject_not_single_line")
+      assert_rejected!(ctx, run, lead, "subject_not_single_line")
     end
 
-    test "a body with a link the run did not supply is rejected and not handed to review",
+    test "a carriage return or another control character in the subject is rejected", ctx do
+      for key <- ["02", "03"] do
+        %{run: run, lead: lead} = assign_with!(ctx, key, ShapeVariants)
+        drain!()
+        assert_rejected!(ctx, run, lead, "subject_not_single_line")
+      end
+    end
+
+    test "a body with a link the run did not supply is rejected and not handed off", ctx do
+      %{run: run, lead: lead} = assign_with!(ctx, InventedLink)
+      drain!()
+      assert_rejected!(ctx, run, lead, "body_contains_url")
+    end
+
+    test "upper-case HTTPS and WWW links are rejected as well", ctx do
+      for key <- ["09", "10"] do
+        %{run: run, lead: lead} = assign_with!(ctx, key, ShapeVariants)
+        drain!()
+        assert_rejected!(ctx, run, lead, "body_contains_url")
+      end
+    end
+  end
+
+  describe "the hand-off gate" do
+    test "HandOffProposal refuses a missing, rejected or unbound shape check before any write",
          ctx do
-      %{run: run} = assign_with!(ctx, InventedLink)
-      drain!()
-      assert_rejected!(ctx, run, "body_contains_url")
+      lead = fixture_lead!(ctx, "01")
+
+      params = %{
+        lead_id: lead.id,
+        draft: %{
+          decision_id: Ecto.UUID.generate(),
+          model_invocation_id: Ecto.UUID.generate(),
+          proposal: %{}
+        },
+        claims_check: %{passed: true, decision_id: Ecto.UUID.generate()},
+        personalization_check: %{passed: true, decision_id: Ecto.UUID.generate()},
+        plan: %{campaign_id: ctx.campaign_id, step: %{id: Ecto.UUID.generate()}}
+      }
+
+      for {label, shape_check} <- [
+            missing: nil,
+            rejected: %{passed: false, decision_id: Ecto.UUID.generate()},
+            unbound: %{passed: true, decision_id: Ecto.UUID.generate()}
+          ] do
+        run = running_run!(ctx, lead)
+        attempt = if shape_check, do: Map.put(params, :shape_check, shape_check), else: params
+
+        result = observe(fn -> HandOffProposal.perform(attempt, context(ctx, run, label)) end)
+
+        assert result == {:error, {:halt, :invalid_model_output}},
+               "B1-05: a #{label} shape check was not refused: #{short(result)}"
+
+        failed = run!(ctx, run)
+        assert {failed.status, failed.status_reason} == {:failed, :invalid_model_output}
+
+        refute Enum.any?(decisions!(ctx, run), &(&1.kind == :enrollment)),
+               "B1-05: a #{label} shape check reached the enrollment gate"
+
+        refute "sdr.draft.completed" in signal_types(ctx.tenant, run)
+      end
+
+      {:ok, enrollments} =
+        Sales.list_records(Sales.CampaignEnrollment, filter: [lead_id: lead.id], actor: ctx.admin)
+
+      assert enrollments == []
     end
   end
 end
