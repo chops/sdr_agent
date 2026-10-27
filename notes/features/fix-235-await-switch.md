@@ -98,4 +98,30 @@ The standing lane runner is used throughout.
 
 ## RED record
 
-Pending the lane run at the RED head.
+**Codex verdict:** RED VERIFIED at `9d388088` (`tmp/i235/codex-235-9d388088-red-and-state-links-review-20261027.org`, sha256 `633b4250…`).
+
+**The run:** `c2-20261027T084002Z-66805`.
+- **Setup:** lane runner r6 `7099d15b`, `CLASS=focused`, clean tree, HEAD `9d388088`, `--seed 0`. It ran this file (29 tests) and the #188 harness file (19).
+- **Result:** 45/48 passed. Measured FAIL step=tests (failed=3), final_rc 0. Both owned databases were dropped.
+- **Hashes:** summary.txt `8988ba3f…`, MANIFEST.sha256 `ee2e37dc…` (92/92 verify), tests.log `24754796…`.
+
+**The intended failures** (3, all assertions):
+- **T1:** the captured `MatchError` outcome fails the expected-return assertion.
+- **T2:** `assert_raise` expected `ExUnit.AssertionError` but got `MatchError`.
+- **T3:** `assert_raise` saw nothing raised, because the late match was accepted.
+
+The read-count assertions after T1 and T3 are not reached at RED.
+
+**The passes** (45, counted by elimination from the only three named failures):
+- the 11 disclosed controls (T4–T6, C1–C8);
+- the 15 existing tests, which ran through the seam with the real reader, with no flake;
+- the 19 #188 harness tests.
+
+**Static checks at RED:**
+- `mix format`, `--check-formatted`, `MIX_ENV=test mix compile --warnings-as-errors`, the `Code.require_file` load (no diagnostics) and plain `mix credo`: all rc 0.
+- `mix credo --strict` on the file: rc 10. All five suggestions were already present at `18c01f9b` (nested-module aliases, `apply/3`). This is not a strict PASS.
+
+**Provenance qualification** (Codex H2): the runner confines the four Mix roots and checks state links in the first two levels only. It is not a recursive dependency-isolation proof.
+- This worktree's `deps` were copied from `deps-advisories-oct25`, with the one external `otel_http` `rebar3_ex_doc` plugin link materialized as a directory.
+- Codex's scan found no external links or targets here.
+- The generated build state holds 3 dangling `node_modules` links. They are lexically internal (phoenix-colocated), and their current targets are unknown, not resolved.
