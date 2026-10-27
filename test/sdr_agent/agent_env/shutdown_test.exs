@@ -42,9 +42,17 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
   that clears it after the tree's DOWN. These are unit proofs of the
   barrier; S5's owned live run is the integration proof (Codex detail 6).
 
+  Codex c9a6f6c7: the holders are made in the test process (R1), and a
+  fixture-control row exercises the synthetic processes without the
+  Shutdown guard. The cleanup-unconfirmed rows also assert that `complete`
+  leaves the Reaper key and its holder untouched: the same live holder
+  alive with no DOWN, the key still naming it (R2). P5-6 configures every
+  seam name under `SdrAgent.AgentEnv.Shutdown` to show the production
+  arity ignores configuration (Q8, supporting the compiled-branch row).
+
   RED: `SdrAgent.AgentEnv.Shutdown`, `SdrAgent.AgentEnv.Instance` and
   `SdrAgent.Application.prep_stop/1` do not exist (structural, guarded
-  after the fixtures).
+  after the fixtures). The fixture control passes.
 
   Hermetic: SQL sandbox (shared: the ignored Instance runs its checks in its
   own process), physical roots under `tmp/agent-env-roots`, no port, real
@@ -213,6 +221,36 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
     holder
   end
 
+  # Stores `{:held, holder}` as the Reaper key. The holder is made in the
+  # test process (holder!/1 registers on_exit/1, which only the test
+  # process may call); the Agent callback only stores the value.
+  defp hold!(ctx, holder) do
+    held = {:held, holder}
+    :ok = Agent.update(ctx.key, fn _previous -> held end)
+    assert Agent.get(ctx.key, & &1) == held
+  end
+
+  # Codex c9a6f6c7 R2: complete/1 never kills or reclaims. The same holder
+  # is still alive (live) with no DOWN, and the key still names it (both).
+  defp assert_untouched_holder(ctx, holder, watch, :live) do
+    assert Process.alive?(holder), "C2* S1 P5: complete must never kill the key's live holder"
+
+    refute_received {:DOWN, ^watch, :process, ^holder, _reason},
+                    "C2* S1 P5: the key's live holder went down during complete"
+
+    assert_held_by(ctx, holder)
+  end
+
+  defp assert_untouched_holder(ctx, holder, _watch, :dead) do
+    refute Process.alive?(holder)
+    assert_held_by(ctx, holder)
+  end
+
+  defp assert_held_by(ctx, holder) do
+    assert Agent.get(ctx.key, & &1) == {:held, holder},
+           "C2* S1 P5: complete must never clear or reclaim the Reaper key"
+  end
+
   defp kill!(pid) do
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)
@@ -255,6 +293,35 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
     if Map.has_key?(ctx, :marker_sha) do
       marker = BootFx.boot_marker_path(ctx.root, ctx.nonce)
       assert BootFx.file_sha256!(marker) == ctx.marker_sha, "C2* S1 P5: the boot marker stays"
+    end
+  end
+
+  ## The synthetic fixtures themselves (no Shutdown guard; Codex c9a6f6c7 R1)
+
+  describe "fixture control" do
+    test "holders, the Reaper key, the synthetic tree and reaper behave as the barrier rows assume",
+         ctx do
+      live = holder!(:live)
+      dead = holder!(:dead)
+      assert Process.alive?(live)
+      refute Process.alive?(dead)
+      hold!(ctx, live)
+      hold!(ctx, dead)
+
+      top = start_top!([tree_child(ctx.server), extra_child()])
+      tree = child_pid(top, @tree_id)
+      assert is_pid(tree) and is_pid(Process.whereis(ctx.server))
+      reaper = start_reaper!(ctx, tree, 50)
+      assert Agent.get(ctx.key, & &1) == {:held, reaper}
+
+      :ok = Supervisor.stop(top, :shutdown)
+      wait_until(fn -> Agent.get(ctx.key, & &1) == nil end)
+
+      assert Process.whereis(ctx.server) == nil
+      assert [{:tree_down, down, :shutdown}, {:key_cleared, cleared, false}] = trace_events(ctx)
+      assert down < cleared
+      assert Process.alive?(live), "the live holder fixture outlives the synthetic stop"
+      refute File.exists?(receipt_path(ctx))
     end
   end
 
@@ -331,7 +398,7 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
       assert plan(with_tree, seams(ctx, boot: %{ctx.boot | nonce: Fx.nonce()})) == :not_orderly,
              "a binding of another nonce"
 
-      assert {:ok, _plan} = plan(with_tree, seams(ctx)), "control"
+      assert match?({:ok, _plan}, plan(with_tree, seams(ctx))), "control"
       assert match?({:ok, _plan}, plan(bare, seams(ctx, provider: Fake))), "Fake control"
       assert_nothing_completed(ctx)
     end
@@ -358,15 +425,20 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
            ctx do
         ctx = ready!(ctx)
         top = start_top!([tree_child(ctx.server), extra_child()])
-        Agent.update(ctx.key, fn _none -> {:held, holder!(@holder)} end)
+        # The holder is made and registered here, in the test process; only
+        # the held key is stored inside the Agent callback.
+        holder = holder!(@holder)
+        hold!(ctx, holder)
         planned = plan(top, seams(ctx))
         assert {:ok, _plan} = planned
 
         :ok = Supervisor.stop(top, :shutdown)
+        watch = Process.monitor(holder)
 
         assert complete(planned, seams(ctx, budget_ms: 1_000)) ==
                  {:error, :reaper_cleanup_unconfirmed}
 
+        assert_untouched_holder(ctx, holder, watch, @holder)
         assert_nothing_completed(ctx)
       end
     end
@@ -374,7 +446,9 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
     test "one budget covers every wait: a late top stop leaves only the rest of it", ctx do
       ctx = ready!(ctx)
       top = start_top!([tree_child(ctx.server)])
-      Agent.update(ctx.key, fn _none -> {:held, holder!(:live)} end)
+      holder = holder!(:live)
+      hold!(ctx, holder)
+      watch = Process.monitor(holder)
       planned = plan(top, seams(ctx))
       assert {:ok, _plan} = planned
 
@@ -393,6 +467,7 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
              "C2* S1 P5: one deadline across all waits (elapsed #{elapsed} ms; budget 2000 ms, " <>
                "top stopped at 1400 ms)"
 
+      assert_untouched_holder(ctx, holder, watch, :live)
       assert_nothing_completed(ctx)
     end
 
@@ -511,8 +586,10 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
       assert %{nonce: nonce, boot_id: _boot_id} = binding
       assert nonce == ctx.nonce
 
-      assert {@instance, :undefined, :worker, _modules} =
-               List.keyfind(Supervisor.which_children(top), @instance, 0),
+      assert match?(
+               {@instance, :undefined, :worker, _modules},
+               List.keyfind(Supervisor.which_children(top), @instance, 0)
+             ),
              "C2* S1 P5: the Instance keeps no process after init/1 (a killed Instance is impossible)"
 
       {:ok, calls} =
@@ -565,6 +642,21 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
       binding = BootFx.boot_binding()
       top = Process.whereis(SdrAgent.Supervisor)
 
+      # Negative override (Codex c9a6f6c7 Q8): configuration naming every
+      # seam changes nothing in the production arity. The fixed 30 s budget,
+      # the binding's boot_id and the configured root are still observed.
+      BootFx.preserve_app_env!(:sdr_agent)
+
+      Application.put_env(:sdr_agent, @shutdown,
+        budget_ms: 10,
+        boot: nil,
+        root: Path.join(ctx.root, "elsewhere"),
+        provider: Fake,
+        model_tree_id: @tree_id,
+        server_name: ctx.server,
+        reaper_lease: nil
+      )
+
       callbacks =
         Task.async(fn ->
           prepped = apply(@application, :prep_stop, [:app_state])
@@ -593,6 +685,9 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
 
       assert Process.alive?(top)
       assert_nothing_completed(ctx)
+
+      refute File.exists?(Path.join(ctx.root, "elsewhere")),
+             "C2* S1 P5: no configured root is used"
     end
 
     for mode <- [:none, :check, :bootstrap, :provisioning] do

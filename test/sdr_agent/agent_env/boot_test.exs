@@ -18,8 +18,12 @@ defmodule SdrAgent.AgentEnv.BootTest do
       agent-environment amendment, item 1), so these tests pass a fake
       `HOME`.
     * **Forced in every mode:** the Repo target `sdr_agent_agentenv` @
-      `localhost:5520`, OTel content capture off, and the
-      `SdrAgent.AgentEnv` configuration (`root`, `mode`, `step`, `nonce`).
+      `localhost:5520` (with `url`, `socket`, `socket_dir` and `endpoints`
+      cleared, so no connection override can take precedence), OTel content
+      capture off, and the `SdrAgent.AgentEnv` configuration (`root`, `mode`,
+      `step`, `nonce`, and `database: "sdr_agent_agentenv"`, which PR-A's
+      operation snapshot reads; Codex c9a6f6c7 R4). Anchor containment is
+      physical (a symlink out of `<root>/anchors` is refused).
       Non-run modes also force the Fake provider and `server: false`; run
       mode forces HTTP `127.0.0.1:4130`.
     * **Refusal:** a `RuntimeError` whose whole message is
@@ -104,6 +108,11 @@ defmodule SdrAgent.AgentEnv.BootTest do
            "C2* S1 L1: the Repo target must be forced: #{inspect(repo)}"
 
     assert get_in(config, [:sdr_agent, :otel_capture_content]) == false
+
+    # Codex c9a6f6c7 R4: PR-A's OperationSnapshot reads this database key.
+    assert agent_env(config)[:database] == "sdr_agent_agentenv",
+           "C2* S1 P2: the AgentEnv configuration must name the fixed database: " <>
+             inspect(agent_env(config))
   end
 
   defp assert_restricted(config) do
@@ -227,6 +236,55 @@ defmodule SdrAgent.AgentEnv.BootTest do
       assert agent_env(accepted!(:dev, env))[:mode] == :check
     end
   end
+
+  ## The effective Repo target (Codex c9a6f6c7 R4)
+
+  describe "effective target" do
+    # Synthetic only: no credentials, and nothing connects anywhere.
+    @conflicting_repo [
+      url: "ecto://synthetic:synthetic@elsewhere.invalid:1/other_db",
+      hostname: "elsewhere.invalid",
+      port: 1,
+      database: "other_db",
+      socket_dir: "/nonexistent",
+      socket: "/nonexistent/.s.PGSQL.1",
+      endpoints: [{"elsewhere.invalid", 1}]
+    ]
+
+    @conflicting_env %{
+      "DATABASE_URL" => "ecto://synthetic:synthetic@elsewhere.invalid:1/other_db",
+      "PGHOST" => "elsewhere.invalid",
+      "PGPORT" => "1",
+      "PGDATABASE" => "other_db"
+    }
+
+    test "no URL, socket or endpoint override can take precedence over the fixed target", ctx do
+      for mode <- [:check, :bootstrap, :provisioning, :run] do
+        File.rm_rf!(Path.join(ctx.root, "state"))
+        File.mkdir_p!(Path.join(ctx.root, "state"))
+        env = Map.merge(mode_env(ctx, mode), @conflicting_env)
+        produced = accepted!(:dev, env)
+        merged = Config.Reader.merge([sdr_agent: [{SdrAgent.Repo, @conflicting_repo}]], produced)
+        repo = get_in(merged, [:sdr_agent, SdrAgent.Repo])
+
+        assert {repo[:database], repo[:hostname], repo[:port]} ==
+                 {"sdr_agent_agentenv", "localhost", 5520},
+               "C2* S1 P2 (#{mode}): the fixed target must win: #{inspect(repo)}"
+
+        for key <- [:url, :socket, :socket_dir, :endpoints] do
+          assert repo[key] == nil,
+                 "C2* S1 P2 (#{mode}): #{key} must not override the fixed target: #{inspect(repo)}"
+        end
+
+        assert agent_env(produced)[:database] == "sdr_agent_agentenv"
+      end
+    end
+  end
+
+  # An accepted control environment of `mode` (fresh state files).
+  defp mode_env(ctx, :check), do: selected(ctx, "check")
+  defp mode_env(ctx, :run), do: ctx |> run_env() |> elem(1)
+  defp mode_env(ctx, mode), do: ctx |> non_run_env(mode, %{}) |> elem(1)
 
   ## Non-run modes (L1)
 
@@ -436,6 +494,23 @@ defmodule SdrAgent.AgentEnv.BootTest do
 
         assert refusal(:dev, env) == refused(:anchor_sinks_refused), inspect({sinks, dir})
       end
+    end
+
+    # Codex c9a6f6c7 Q6: containment is physical, not lexical.
+    test "an anchor directory that escapes the root through a symlink is refused", ctx do
+      {_bound, env} = run_env(ctx)
+      outside = Fx.root!("outside")
+      escape = Path.join([ctx.root, "anchors", "escape"])
+      :ok = File.ln_s(outside, escape)
+
+      assert refusal(:dev, Map.put(env, "SDR_ANCHOR_FILE_DIR", escape)) ==
+               refused(:anchor_sinks_refused)
+
+      inside = Path.join([ctx.root, "anchors", "inside"])
+      File.mkdir_p!(inside)
+
+      assert agent_env(accepted!(:dev, Map.put(env, "SDR_ANCHOR_FILE_DIR", inside)))[:mode] ==
+               :run
     end
 
     test "a missing witness root is refused", ctx do
