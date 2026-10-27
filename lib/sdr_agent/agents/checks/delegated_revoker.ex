@@ -5,7 +5,8 @@ defmodule SdrAgent.Agents.Checks.DelegatedRevoker do
   revoking a grant of its own tenant whose subject record is delegated.
   This pre-lock check reads the caller's record; after the row lock
   `SdrAgent.Agents.Changes.RevokeProvenance` refuses PRV again unless the
-  locked row itself is delegated, so a forged struct gains nothing.
+  locked row itself is delegated and of the actor's tenant, so a forged
+  struct (provenance or tenant) gains nothing.
   """
   use Ash.Policy.SimpleCheck
 
