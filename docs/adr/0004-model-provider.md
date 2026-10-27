@@ -24,6 +24,11 @@ The C2-02b2 amendment (2026-10-15, at the end of the Decision section) is
 80771e5"), after Codex's independent approval of 65d7308 (16c1a6fe) and of
 the exact text at 80771e5 (61492fe0). Acceptance is not merge, activation
 or spend approval.
+The agent-environment amendment (2026-10-27, at the end of the Decision
+section) is accepted as D-224, owner acceptance delegated by D-219, after
+Codex's static PASS (ca0e5bec); its text is published as reviewed, so its own
+Status line still reads PROPOSED. Acceptance is not activation or spend
+approval.
 
 ### Current policy (summary, 2026-10-12)
 
@@ -42,6 +47,9 @@ historical. What applies today:
   call, and is serialized (one call at a time).
 - Accepted for R0 (being built): an app-owned pinned CLI, closed reviewed model profiles
   (Opus and Sonnet), an audited in-app switch, and owner-granted call budgets.
+- Accepted (2026-10-27, D-224): for the D-218 scope through 2026-11-01T06:00:00Z, the
+  attested agent environment `agentenv-1` may make real calls within one owner
+  authorization that agents materialize but never set (agent-environment amendment).
 
 ## Context
 
@@ -660,6 +668,245 @@ D-087, D-088, D-096, D-098, D-099):
   observe. A resolution can commit without restoring readiness: with a
   dead lease, it still needs the operator path.
 - **Neutral:** no new table, dependency or process.
+
+<!-- BEGIN ADR-0004 AGENT-ENVIRONMENT AMENDMENT: text as reviewed by Codex (ca0e5bec) -->
+
+### Agent-environment amendment (2026-10-27, PROPOSED): one agent-owned development instance for unattended real-model research and drafting, with delegated grant provisioning
+
+**Status: PROPOSED.** This amendment has not been accepted or implemented.
+
+To be accepted, it follows ADR-0014 Amendment 3 (accepted, D-222; D-219; D-221 item 5):
+
+- Codex gives an independent static PASS of this exact text and of its entity/action delta, reviewed together with the ADR-0005 C2* amendment.
+- A decision row then cites D-219, D-221, the commit and this file's SHA256, and records "owner acceptance delegated by D-219".
+
+Accepting this amendment sets no budget. Real calls stay at zero until an owner caps row exists (D-218 item 6; D-219).
+
+**Context.**
+
+- **Where real calls run today.**
+  - `claude_cli` is accepted in development only (`config/runtime.exs:56-123`).
+  - The only real-call instance is the owner's: `sdr_agent_dev` on 5520, HTTP 4120 (`config/dev.exs:15-23,97-104`; `bin/demo:83-122`).
+  - Agents never connect to the owner's databases (D-219).
+- **Test builds are not usable for real calls.** They compile fake launchers and witness overrides (`config/test.exs:14-18,63-73`), and they refuse real providers at boot (`config/runtime.exs:115-119`).
+- **Grant and allocation writes need a human admin.**
+  - Grant writes require an active human admin and refuse every system actor (`lib/sdr_agent/agents/model_call_grant.ex:21-24,152-155`; `lib/sdr_agent/agents/checks/current_admin.ex:17-24`).
+  - `created_by_id` and `updated_by_id` are NOT NULL (`priv/repo/migrations/20261012181602_c9_model_call_grants.exs:109-127`).
+  - Revocation relates `updated_by` (`model_call_grant.ex:136-149`).
+  - Allocation writes need both the grant-bundle marker and a current admin (`lib/sdr_agent/agents/model_call_allocation.ex:107-115`).
+  - `GrantBundle` forwards the calling actor to those writes (`lib/sdr_agent/agents/changes/grant_bundle.ex:228-245`).
+- **Allocations are matched by usage bucket.** Every assignment purpose maps to `b1` (`lib/sdr_agent/agents/usage_bucket.ex:28`), and exactly one allocation must match a call (`lib/sdr_agent/agents/admission.ex:28-41`). So allocations alone cannot restrict which purposes a grant funds.
+- **Consumption is per database.** Consumption and the daily limit are derived from that database's invocations (`admission.ex:38-41`; `lib/sdr_agent/agents.ex:510-543`).
+  - A refused reservation rolls back and is not charged (`agents.ex:291-307`).
+  - A refused launch stays charged (`agents.ex:585-597`).
+- **Concurrency 1 holds within one VM only** (Q0.1; C2-02b2 item 1).
+- **The demo seed** writes fixed fixtures as the seeder actor, including a seeded admin operator (`lib/sdr_agent/demo/seed.ex:2-20`; `lib/sdr_agent/demo/fixtures.ex:31-52`).
+
+**Decision.**
+
+1. **One environment, `agentenv-1`.** It is a native `MIX_ENV=dev` build with:
+   - the database `sdr_agent_agentenv` on `localhost:5520`;
+   - HTTP on `127.0.0.1:4130` (a proposed project port);
+   - the private root `~/.local/state/sdr-agent/agent-env/agentenv-1/` (mode 0700), holding `build/`, `deps/`, `state/`, `evidence/`, `anchors/` and `tmp/`;
+   - one dedicated worktree.
+
+   Port 4130 is verified free at the actual launch and recorded in `.workflow/project-facts.md`. A collision refuses; the port is never moved silently.
+
+   The environment is selected by `SDR_AGENT_ENV=agentenv-1`, which `config/runtime.exs` reads in `dev` only. Any other value, or the variable in another environment, refuses boot. Unset, development behaviour is unchanged. The workflow-managed `config/dev.exs` block and `devenv.nix` are not edited.
+
+   All new real-call authority is bound to `agentenv-1`. Old unused allowances, G-DEMO's included, are not new-call authority here.
+
+2. **Launcher `bin/agent-env`.** `bin/demo` is unchanged.
+   - **Positive checks before any command that creates, migrates, seeds or starts.**
+     - `MIX_ENV=dev`, and no `DATABASE_URL`.
+     - The Repo actually resolves to exactly `sdr_agent_agentenv` on `localhost`/`127.0.0.1:5520`.
+     - Port 4130, loopback only, and not already listening. The launcher refuses 4120, 4122, every runner-registered lane port, and a non-loopback bind.
+     - `MIX_BUILD_ROOT`, `MIX_DEPS_PATH` and the state and evidence roots resolve, as real paths, under the private root, never into a shared `.devenv`.
+     - `SDR_WITNESS_STORE_ROOT` is set explicitly.
+     - `SDR_ANCHOR_SINKS=file`, under the private root.
+     - The suppression check is the Store.
+     - The database holds no migration the build lacks.
+   - **Refused targets.** It refuses `sdr_agent_dev`, every `sdr_agent_test*` name, and any name other than the exact one.
+   - **No reset or drop.** There is no reset or drop command, and agents never reset or drop this database.
+
+3. **Environment identity lifecycle (create-only files under `state/`; `bin/agent-env provision`).** Initial provisioning runs under a no-spend, Fake-only `bootstrap` lease (item 5). It is the only phase before a binding exists. Steps, in order:
+   1. **Preflight.** No state file, no lease and no database named `sdr_agent_agentenv` exist. Otherwise, quarantine.
+   2. **Pending marker.** Create `environment.pending` (environment id, nonce, start time).
+   3. **Bootstrap lease.** Create `instance.lease`. It records `mode: "bootstrap"`, the pending nonce as its nonce, and the exact target database: name `sdr_agent_agentenv`, host and port 5520. It records no port and no `binding_sha256`, because none exists yet.
+   4. **Create the database.** Run an exclusive `CREATE DATABASE sdr_agent_agentenv`. "Already exists" means quarantine. Then create `environment.created.json` (nonce, database name, database oid).
+   5. **Migrate and seed.** Run `mix ecto.migrate`, then `mix sdr.demo.seed` (the existing demo seed, which bootstraps the singleton tenant and the fixtures).
+      - **Mode.** Each runs as a separate bootstrap-mode Mix task under `SDR_AGENT_ENV=agentenv-1`.
+      - **Boot checks.** At boot each task checks that the lease is `bootstrap` with its nonce, and that the Repo's database name and oid equal `environment.created.json`.
+      - **Refusals.** Each refuses `SDR_MODEL_PROVIDER=claude_cli` and `SDR_DEMO_EXCEPTION`.
+      - **What it starts.** No HTTP server, Oban queues or Oban plugins.
+      - **Exit receipt.** Each creates its exit receipt `instance.<nonce>.<step>.exit` only after success.
+   6. **Tenant probe.** Run one read-only bootstrap-mode probe that prints only the tenant id.
+   7. **Publish.** While the lease is still held, create `environment.json` (environment id, database name and oid, tenant id, pending nonce, creation time). Its `sdr-canonical-json/1` SHA256 is the environment `binding_sha256`.
+   8. **Release.** Remove the bootstrap lease only when every step's exit receipt exists and `environment.json` is published.
+
+   **What `bootstrap` mode allows.** It permits exactly the step 4 CREATE, the step 5 migrate and seed, and the step 6 probe, and nothing else.
+   - No other Mix task, no VM with a server, and no `provisioning` or `run` mode while it is held.
+   - No real provider, reservation, model call, grant or release.
+
+   **Valid states** are exactly two:
+   - nothing exists, so fresh provisioning is allowed;
+   - `environment.json` exists, equals the live database name, oid and tenant, and no bootstrap lease remains.
+
+   **Every other state quarantines the environment.** For example: `environment.pending` without `environment.json`; a bootstrap lease without every exit receipt (stale); `environment.created.json` whose oid differs from the live database; a mismatch; a database without `pending`. Quarantine is resolved outside this amendment, and dropping a database is owner-only.
+
+   **Fake use** of a bound environment may begin before any authorization exists, under a `run` lease (item 5).
+
+4. **One authorization, its binding, and the no-spend provisioning mode.** The registry (item 8) holds at most one authorization for `agentenv-1`, and all approved windows are allocations of it. A second authorization needs a further amendment.
+
+   **Two attestation levels.**
+   - **Provisioning (no spend).** This level requires:
+     - a bound environment that matches the live database (item 3);
+     - the exact compiled registry entry;
+     - a claim file naming that entry's id and digest;
+     - a provisioning-mode lease (item 5).
+
+     It authorizes exactly one thing: running the idempotent `:provision_delegated` transaction (item 9). The VM or Mix task in this mode runs with the Fake provider only. `SDR_MODEL_PROVIDER=claude_cli` and `SDR_DEMO_EXCEPTION` are refused at boot in this mode, so no model call, reservation or release can happen.
+   - **Spend-ready.** This level requires a complete final authorization binding (step 4 below) consistent with the database's grant, plus a run-mode lease. Only this level lets the runtime start the real provider or admit a real call.
+
+   **Binding steps** (`bin/agent-env authorize`, in order):
+   1. Observe, outside any lock: the environment is bound and matches, and the registry entry exists and has not expired.
+   2. Create `authorization.claim.json` (authorization id and SHA256, environment `binding_sha256`, nonce, claim time).
+   3. Take a provisioning-mode lease and run the `:provision_delegated` transaction in provisioning mode. Its event carries the claim nonce. Release the lease with its exit receipt.
+   4. Create `authorization.json` (authorization id and SHA256, `binding_sha256`, grant id, revision 1, event id, nonce). Spend-ready is now possible.
+
+   **Re-running `authorize`** with a claim but no `authorization.json` repeats steps 3 and 4 against the same bound database. That includes the case where the grant transaction committed but the final file was not published. An identical grant is a replay that writes nothing. An absent grant is created once, under the unique index.
+
+   **Every other state quarantines real calls:** a final binding whose grant is missing or different, a claim naming another authorization, or a registry digest different from the claim's.
+
+   **Real calls require** a complete authorization binding consistent with the database's grant.
+
+   **What these files are.** Create-only files are cooperative launcher controls. They are not an immutable security boundary against the same OS account deliberately altering state.
+
+5. **Instance lease (agent instances only).**
+   - **Taking it.** Before starting any VM or Mix task against the database, or before the item 3 CREATE, the launcher creates `state/instance.lease`. It records the nonce, `mode`, the target identity, the port (or none) and the start time. There are three modes, and each lease holds exactly one:
+     - `bootstrap`: the item 3 initial provisioning only. Its target identity is the exact target database (name, host, port; then the oid in `environment.created.json`), and its nonce is the `environment.pending` nonce.
+     - `provisioning`: the item 4 authorization transaction only. Its target identity is `binding_sha256`.
+     - `run`: a bound environment's VM. Its target identity is `binding_sha256`.
+   - **Holding it.**
+     - `bootstrap` and `provisioning` leases are Fake-only and no-spend. In them, `claude_cli` and the selector are refused at boot, and no HTTP server is started.
+     - A `run` lease needs a bound environment (item 3). It permits Fake use without any authorization.
+     - In this environment, `claude_cli` is refused at boot unless all of these hold: the lease's nonce equals the one the launcher passed; its `mode` is `run`; the environment is spend-ready (item 4).
+     - Each launch admission observes the lease in its own process, before any lock (ADR-0005 C2* item 2), and compares it with no I/O under locks (`:agent_env_lease_mismatch`).
+   - **One VM or task at a time.** A second launcher refuses while any lease exists, in any mode.
+   - **Orderly exit.**
+     - In `run` mode, after its model supervision tree has terminated with every Reaper cleanup receipt, the VM creates `state/instance.<nonce>.exit`.
+     - In `bootstrap` and `provisioning` modes, each permitted step creates its own exit receipt after success.
+     - Only once every expected receipt exists, and for `bootstrap` only after `environment.json` is published, does the launcher remove the lease.
+   - **Stale lease.** A lease without its expected receipts is stale. It quarantines the real lane and is never reclaimed automatically. There is no process-name kill and no backend termination. A bounded recovery command may follow under its own technical review.
+   - **Concurrency.** Within the VM, concurrency 1 and the C2-02b2 hold are unchanged.
+   - **The owner's instance.** The lease coordinates agent instances only. It does not exclude the owner's untouched instance. Keeping that instance free of real calls during agent windows is a procedural residual, not machine-wide enforcement.
+
+6. **Provider path, storage and jobs.**
+   - **Unchanged.**
+     - The pinned CLI, used by its absolute path.
+     - Per-call attestation.
+     - No tools, MCP servers or slash commands.
+     - `SdrAgent.ChildEnv`.
+     - The cached login is never read, copied or dumped.
+     - Admission (gate, trusted store, promoted tuple).
+     - Grants and the per-run and per-day limits.
+     - The result gate and ADR-0005's C2*.
+     - The synthetic guard and capture-only delivery.
+   - **Witness store.** Reconciliation uses the existing invocation-scoped reader on the shared deployed proxy store. The root is configured explicitly, and the reader reads only `witnesses/<invocation id>` and digest-addressed blobs (`lib/sdr_agent/agents/witness/store.ex:155-176`). Invocation ids come from this environment's own database. There is no root-wide enumeration and no manual raw read or dump. This is reader scoping, not filesystem isolation.
+   - **Other storage.** OpenTelemetry content capture is off. Anchors use the file sink only.
+   - **Queues and jobs.**
+     - Running: the research queue, the delivery queue (capture), the reconciliation queue (concurrency 1), the witness scan, the stale-run sweeper and the stale-delivery sweeper.
+     - Absent: `followup`, `integration` and the OpenTimestamps upgrade.
+     - The Store suppression check is verified before each phase.
+
+7. **Persistent ledger.** `sdr_agent_agentenv` persists for the whole window. It is not a runner lane database.
+   - Consumption stays derived from the invocations charged to the grant.
+   - A refused reservation rolls back and is not charged. A refused launch stays charged.
+   - No consumed attempt is refunded.
+   - Restarts, rebuilds and new worktrees never reset consumption, because the database persists.
+   - A recreated or second database fails the environment binding and refuses real calls, so an allowance is never cloned or regenerated.
+   - A lost database ends real calls for the authorization.
+
+8. **Authorization registry: enforced units only.** The authorization is one reviewed code entry with:
+   - an id, and the decision row that records the owner's literal caps, plus D-219 and D-221;
+   - `environment_id: "agentenv-1"`;
+   - `starts_at` and `expires_at`;
+   - `funded_scope`: exactly `[{:assignment, [:qualification, :evidence_extraction, :outreach_proposal]}]`, enforced at admission (item 9a). It is a funding restriction, not a counter;
+   - `total_attempts`: one aggregate across the funded scope;
+   - an optional `per_utc_day_attempts`;
+   - `profile_ids`, which must include `claude_cli_opus` for C2*;
+   - one allocation per approved window. Each allocation has: a key from the existing closed set; `applies_to: [:b1]`; an attempt count; `available_from` and `available_until`. The windows must not overlap, so exactly one allocation matches. Allocation attempts sum to at most the total.
+
+   These are the only caps, and nothing else is claimed. There is no dollar, token or per-purpose ceiling. Any such ceiling needs a new, separately reviewed counter and matching contract that guarantees its unit. The values are copied verbatim from the owner's recorded caps, and the non-author reviewer verifies the copy. The registry is empty until those caps exist; until then nothing can be spent, while building and Fake use continue.
+
+9. **Delegated provisioning (amends R0 item 5 for `agentenv-1` only).**
+   - **Actor and action.** A new system actor type, `:grant_provisioner` (PRV), has one creating action: `ModelCallGrant :provision_delegated`. The action's only argument is `authorization_id`.
+   - **What the action does.** It runs `GrantBundle` in a delegated mode, with exactly the registry entry's terms. It records `provisioning: :delegated`, the authorization id and its SHA256, and NULL `created_by_id` and `updated_by_id`, under a provenance CHECK. It appends `model.grant.provisioned`, with actor type `grant_provisioner` and, as arguments, the authorization id, its digest, the claim nonce and the decision references.
+   - **When the action is refused.** It is refused in each of these cases:
+     - the environment has neither provisioning nor spend-ready attestation (item 4), or a binding does not match;
+     - the id is unknown, or `now ≥ expires_at`;
+     - a different grant for the authorization exists.
+
+     An identical replay returns the existing grant.
+   - **Allocations (affected side).** An allocation may be created only inside a registered delegated-bundle context. That context is bound to the process and transaction, as `Prelocked` is, and records the tenant, the parent grant id, the authorization id, its digest and `binding_sha256`. Allocation creation is permitted for PRV only, only during that action, and only for that parent grant. Refused: any bare or forged context, any other parent, and any update or release of an allocation of a delegated grant, by any actor. Owner-form allocation policies are unchanged.
+   - **Delegated grants: what can change.**
+     - `:update_terms` and `:release_allocation` are refused for every actor.
+     - PRV may revoke: `updated_by_id` stays NULL, the revision is bumped by `GrantRevision`, and the event records actor type `grant_provisioner`.
+     - A current human admin may also revoke. That admin is recorded in `updated_by_id`, which the CHECK allows only on a revoked delegated row. Revocation only narrows.
+   - **Agent environment: no other route.** The ordinary `:create` action, `:update_terms`, `:release_allocation` and the admin grant form are refused for every actor, so the seeded admin cannot mint or enlarge an allowance. Nothing impersonates a user, and nothing writes raw SQL.
+   - **Owner's instance.** The owner's instance keeps the owner-form path unchanged.
+
+9a. **Funded scope at admission (before spend and before launch).**
+   - **Where it applies.** For every call funded by a delegated grant, whether the C2* selector is on or off, admission requires all of the following:
+     - the run's `usage_origin` and the invocation's `purpose` are inside the authorization's `funded_scope`;
+     - the profile is in the grant's `profile_ids`;
+     - the grant's `delegated_authorization_id` and SHA256 equal the compiled registry entry (a pure comparison);
+     - the operation snapshot (ADR-0005 C2* item 2) attests spend-ready `agentenv-1` with matching bindings.
+   - **When it is checked.**
+     - At reservation, it runs inside `reserve_model_invocation/3`'s transaction, in the existing lock order, before any charge. A refusal (`:outside_funded_scope`) rolls the reservation back, so nothing is charged. It is then recorded as the existing refusal Failure and event (`agents.ex:291-307`).
+     - At launch, it runs again inside `admit_launch/3`. A refusal there moves the reserved row to `failed` without sending. It keeps the reservation's existing charge (`agents.ex:585-597`).
+   - **Why it is needed.** Usage buckets cannot express this: every assignment purpose is `b1`. So the scope is checked directly, with no per-purpose counter and no new cap unit.
+   - **Unchanged.** Other admission checks are unchanged. ADR-0005's C2* E1 re-checks the same scope at release.
+
+10. **Human roles and final sign-in.**
+    - The owner signs in for final inspection and approval as the seeded admin operator (`Fixtures.users/0`). This path is built and checked while the environment is built.
+    - Automation uses only the seeded reviewer, and only for Fake coverage. It never approves or captures a real-model draft. Any action it takes is recorded under the reviewer identity and is never presented as the owner's.
+    - Real-model drafts wait for the owner.
+
+11. **Windows and expiry.**
+    - **Per-call deadlines.** Each call is funded by exactly one allocation. Its own deadlines are that allocation's window intersected with the authorization and grant windows:
+      - admission at reservation and at launch (`admission.ex:28-41`; `agents.ex:585-597`);
+      - the ADR-0005 launch margin;
+      - ADR-0005's per-invocation effective window.
+    - **Gaps between windows.** In a gap, no allocation is available, so admission refuses (`:no_allocation`). A later approved window's allocation may fund new calls once it opens.
+    - **Completion and use.** Windows constrain launches, not completion. A call that completes later is charged. Its output is usable only within its own invocation's effective window, checked at release and at capture instants. An output funded by an earlier window never gains a later window's authority.
+    - **Terminal runtime expiry.** Real calls here end, terminally, at the earliest of: the authorization's `expires_at`, the grant's `expires_at`, revocation, and 2026-11-01T06:00:00Z (exclusive). The end of one allocation window is never a terminal expiry. After the terminal instant the runtime refuses `claude_cli` here (`:agent_env_expired`).
+    - **What stays.** Rows, bindings and receipts are kept, and Fake use may continue.
+    - **No extension.** There is no automatic extension.
+
+12. **Terms boundary (unchanged).** This is personal, local, single-operator use of the owner's own login on the owner's machine, by the owner's agents on the owner's instruction (D-219, D-221). It does not extend to other users, hosts or deployments.
+
+**Unchanged.**
+
+- The Fake default, and test/CI hermeticity.
+- `claude_cli` is refused in `test` and `prod`.
+- The owner's instance and its grant path.
+- The profile registry and the admin-only switch.
+- Attempts are never refunded.
+- The daily limit of at most 200.
+- C2-02b2 and C2-02b2β.
+- The witness and result-gate rules.
+
+**Consequences.**
+
+- **Positive:** unattended real research and drafting fit inside one owner authorization that can be neither multiplied nor reset. Provenance never claims a human acted.
+- **Negative:**
+  - a long-lived database and cooperative state files that agents must not dispose of;
+  - any crash or partial state quarantines the real lane;
+  - one more system actor, one grant action, an allocation policy branch and a provenance CHECK.
+- **Neutral:** no new dependency. Writes stay Ash actions with audit (ADR-0009).
+
+<!-- END ADR-0004 AGENT-ENVIRONMENT AMENDMENT -->
 
 ## Justification
 

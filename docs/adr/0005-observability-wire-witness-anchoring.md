@@ -16,6 +16,10 @@ amendment in the wire witness section (2026-10-12) is accepted. The C4
 database-logging amendment in the OpenTelemetry section (2026-10-12) is
 accepted (2026-10-14). The R0-07 calibration harness amendment (2026-10-13)
 is accepted (2026-10-14).
+The C2* demo-exception amendment (2026-10-27) in the wire witness section is
+accepted as D-223, owner acceptance delegated by D-219, after Codex's static
+PASS (ca0e5bec); its text is published as reviewed, so its own Status line
+still reads PROPOSED.
 
 ## Context
 
@@ -1065,6 +1069,380 @@ releasable only after the proof and enablement. Other v4-eligible layouts
 stay withheld, with a finer code. One more projection is to be maintained.
 The proof may STOP without v4 evidence if the model replies with a single
 text block, or with a layout outside the grammar.
+
+<!-- BEGIN ADR-0005 C2* DEMO-EXCEPTION AMENDMENT: text as reviewed by Codex (ca0e5bec) -->
+
+#### C2* demo-exception amendment (2026-10-27, PROPOSED): a scoped, expiring release of a positively matched v4 candidate that has not been independently calibrated
+
+**Status: PROPOSED.** This amendment has not been accepted or implemented.
+
+To be accepted, it follows ADR-0014 Amendment 3 (accepted, D-222):
+
+- Codex gives an independent static PASS of this exact text and of its entity/action delta.
+- A decision row then cites D-219, the commit and this file's SHA256, and records "owner acceptance delegated by D-219".
+
+The owner's direction for this amendment is D-218 item 3. Accepting it approves no grant, spend, tuple enablement, merge, delivery or data access.
+
+**Context.**
+
+- **What can be released today.** Only a `reconciled` result is released (R0 amendment item 4).
+  - The immutable release allows exactly three pairings: `released ↔ reconciled`, `withheld ↔` five reasons, and `calibration ↔ calibration`. Both the resource and a database CHECK enforce them (`lib/sdr_agent/agents/model_result_release.ex:64-72,106-132`; `priv/repo/migrations/20261012214848_r0_07a_result_release.exs:104-108`).
+  - `:released` needs three things: a valid output, this invocation's current reconciled primary link, and an exact allowlisted tuple (`lib/sdr_agent/agents/changes/release_decision.ex:286-310`).
+- **Projection v4 (D-182).**
+  - v4 is evaluated only after v3 refuses a response layout (`lib/sdr_agent/agents/witness.ex:564-597`; `lib/sdr_agent/agents/witness/projection.ex:396-431`).
+  - No v4 allowlist entry ships (`config/config.exs:224-251`).
+  - A positive v4 comparison therefore becomes an `inferred` primary link. The `method_not_enabled` code is added after the observation's warnings are collected (`witness.ex:461-465,889-894`), so a fresh positive v4 match opens no attention (`test/sdr_agent/agents/witness/reconciler_test.exs:973-998`).
+  - The gate then withholds the output as `witness_missing` / `method_not_enabled` (`lib/sdr_agent/agents/result_gate.ex:296-310`).
+- **The gate mode cannot provide release.** The mode is compiled in. Any mode other than `:enforced` refuses calls rather than releasing them (`result_gate.ex:67-85`; `lib/sdr_agent/agents/admission/gate.ex:101-108`).
+- **Admission is unchanged.** Opus 2.1.294 is promoted by its v3 entry (`config/config.exs:235-242`; `witness.ex:208-220`; `projection.ex:373-379`).
+- **The enforced path.** The ordinary route to enforced v4 is the response-layout amendment's item 7 (T7), which comes after the Friday work (D-218 item 11).
+
+**Decision.**
+
+1. **One closed policy entry.** There is exactly one reviewed code entry, `c2star-demo-v4/1`. Its fields are:
+   - `environment_id: "agentenv-1"` (ADR-0004's agent-environment amendment);
+   - `starts_at: 2026-10-27T06:00:00.000000Z` (inclusive) and `expires_at: 2026-11-01T06:00:00.000000Z` (exclusive). This is the outer technical window. It supplies no budget;
+   - `identity`: `provider: :claude_cli`, `cli_version: "2.1.294"`, `profile_id: :claude_cli_opus`, `model_id: "claude-opus-5-5"`, `prompt_builder: "prompt-builder/1"`, `ledger_generation: 2`;
+   - `projection_version: "claude-message-json/4+prompt-builder/1"` and `method: :propagated_id`;
+   - `usage_origins: [:assignment]` and `purposes: [:qualification, :evidence_extraction, :outreach_proposal]`;
+   - `lead_ids`: the exact fixture leads of `SdrAgent.Demo.Fixtures` with `expected_outcome: :qualify`:
+     - `019b8eac-1180-74d8-9f38-54127081d946`
+     - `019b8eac-1180-7c3d-a4ad-c369e27a97f1`
+     - `019b8eac-1180-761c-9fad-f113afaa661b`
+     - `019b8eac-1180-7ac2-81bb-c970986aa7be`
+     - `019b8eac-1180-742a-89d2-cc1ca61efd6a`
+
+     The source is `lib/sdr_agent/demo/fixtures.ex:136-179,219-223`.
+   - `authorization_id`: the one authorization of ADR-0004's amendment that may fund an eligible call. It is unset until the owner's caps exist; while unset, nothing is eligible;
+   - `label: "demo exception - v4 not independently calibrated"`;
+   - `acceptance_ref`: the delegated-acceptance decision row.
+
+   `entry_sha256` is the `sdr-canonical-json/1` SHA256 of all of these fields. There is no wildcard and no runtime-supplied field. Changing or extending the entry needs a reviewed code change and a new accepted amendment.
+
+2. **Selector, operation snapshot and effective window.**
+   - **Selector.** `SDR_DEMO_EXCEPTION` is read in `config/runtime.exs`. Unset means off. The only accepted value is `c2star-demo-v4/1`, and only in `dev`. Any other value, or any value in `test` or `prod`, refuses boot. The selector is never authority on its own.
+   - **Operation snapshot.** This is an observation of the agent environment's lease, environment binding and authorization binding (ADR-0004 amendment). It produces a snapshot with a per-VM monotonic `generation`, the observation instant, and the three file digests and their validity.
+     - **Entry points.** Each of these is an entry point. Each one applies the owner-or-inherit rule below on entry:
+       - the agent actions that reserve real calls, create `:llm` Decisions or run the hand-off, each at its `perform/2`;
+       - `ModelProvider.complete/2`;
+       - `reserve_model_invocation/3`;
+       - `admit_launch/3`;
+       - `ResultGate.gate/3`;
+       - `ResultGate.Recovery.run/3`;
+       - `Agents.released_output/2` and `ReleasedOutput.fetch/2`;
+       - the `DecisionRules` invocation check;
+       - `SDR.proposal/2`;
+       - `Outreach.edit_draft/3`, `Outreach.approve/3` and `Outreach.inbox_command/2`;
+       - `Delivery.attempt/2`;
+       - `CaptureAdapter.deliver/3`;
+       - `Outreach.record_receipt/2` and the `DeliveryReceipt :record` capture check.
+     - **Owner-or-inherit rule** (one outermost logical operation per process):
+       1. **Inherit.** If the process already has an active snapshot, the entry inherits that same reference. It does not observe files, does not replace the reference and does not invalidate it. A nested return leaves the parent's snapshot active.
+       2. **Own.** Otherwise, if no transaction is open, the entry becomes the OUTERMOST owner. It observes, then registers the snapshot as the active one before its first transaction. Only its own completion or raise invalidates the snapshot. The next top-level operation observes anew.
+       3. **Refuse.** Otherwise, with no active snapshot and a transaction already open, an observation would be file I/O under locks. So the entry refuses, as "not in use", and observes nothing.
+     - **Where the rule applies.**
+       - Outside an attested agent environment (`SDR_AGENT_ENV` unset, for example the owner's instance), the rule is inert: nothing is observed, and no check consults a snapshot.
+       - Inside one, a rule-3 refusal affects only the checks that need the snapshot: demo-exception decision and use authority (this item), and agent-environment funding (ADR-0004 item 9a). An ordinary reconciled, generation-1 or Fake output never needs it, and is unchanged.
+     - **Synchronous nesting today.** For example:
+       - `HandOffProposal.perform/2` opens `Audit.transaction` (`lib/sdr_agent/sdr/actions/hand_off_proposal.ex:55-67`). The enroll step then calls `SDR.proposal/2` (line 151), which calls `Agents.released_output/2` (`lib/sdr_agent/sdr.ex:266`).
+       - `DecisionRules` runs its invocation check in a `before_action` hook inside the Decision's create transaction (`lib/sdr_agent/agents/changes/decision_rules.ex:37,116`).
+       - `Delivery.attempt/2` runs the send gate, then `CaptureAdapter.deliver/3`, then the receipt insert.
+
+       Each of those inner entries inherits the snapshot that its outer action or job observed before its first transaction.
+     - **No cross-process reuse.** A snapshot belongs to one process. Launch admission runs in the model server's process (`lib/sdr_agent/ai/model_provider/claude_cli.ex:63-67`), so there it is its own outermost operation. It observes before its own transaction, beside the existing pre-lock store observation (`admission/gate.ex:91-97`).
+     - **What the authoritative checks may do.** They take only the active reference. They never do file I/O and never take a lock for the snapshot.
+     - **Sampling boundary.** A snapshot is a sample at its owner's start. It can be as old as the owning operation; for an agent action that includes a model call, that means up to the call timeout plus the gate wait. A file change after the sample is seen by the next top-level operation, not by this one. Launch admission samples separately, in its own process, just before spend. Database-serialized facts (grant, links, Failures, release) are re-read under the head regardless. There is no background observer.
+   - **Effective window of a funded call.** It is computed per invocation, from that invocation's own funding allocation.
+     - `effective_starts_at` is the latest of: the policy start, the authorization start, the grant's `starts_at`, and that allocation's `available_from` (when set).
+     - `effective_expires_at` is the earliest of: the policy expiry, the environment end (2026-11-01T06:00:00Z), the authorization expiry, the grant's `expires_at`, and that allocation's `available_until` (when set).
+     - An output funded in one window never gains the authority of a later window.
+   - **Decision authority** for a new demo exception at instant `t` (`SdrAgent.Clock`) requires all of the following:
+     - the selector names the entry;
+     - the snapshot is valid and attests `agentenv-1`;
+     - the live database and tenant equal the environment binding;
+     - the authorization binding is complete and names the entry's `authorization_id` with its current digest;
+     - the funding grant is `:active`;
+     - `effective_starts_at ≤ t < effective_expires_at`.
+   - **Use authority** for an existing demo-exception record at instant `t` requires all of the following:
+     - the selector names the entry, and the entry's current `entry_sha256` equals the one in the record's basis;
+     - the snapshot is valid, and its binding digests equal those in the basis;
+     - `t < exception_expires_at`;
+     - the funding grant is not revoked;
+     - no link of the invocation, current or superseded, is a mismatch;
+     - no critical `reconciliation_required` Failure exists for the invocation.
+
+3. **Admission guard (reservation and launch).** This applies in an environment whose selector is on, to real calls only. It is checked after the single funding allocation is selected (at reservation) or read (at launch).
+   - **Refusal rule.** A real call is refused before anything is sent (`:demo_exception_window`) unless both hold:
+     - `effective_starts_at ≤ now`;
+     - `now < effective_expires_at − (SDR_CLAUDE_CLI_TIMEOUT_MS + ResultGate.wait_ms() + 60 s)`.
+   - **Charging.**
+     - A reservation refusal rolls the whole reservation back. Nothing is charged; the existing Failure and refusal event are recorded (`lib/sdr_agent/agents.ex:291-307`).
+     - A launch refusal moves the reserved row to `failed` without sending. It keeps the reservation's charge (`agents.ex:585-597`).
+     - No consumed attempt is ever refunded.
+   - **What the guard does and does not promise.** The guard is a scheduling guard. It does not prove that a process or provider cannot outlive the deadline under suspension or failure. Release and capture are therefore checked again at their actual instants. A charged call whose decision comes too late is withheld, never released under the exception.
+   - **Funded scope comes first.** ADR-0004's funded-scope predicate (its agent-environment amendment, item 9a) applies to every agent-environment call at reservation and at launch, whether or not the selector is on. It funds only `assignment` × {`qualification`, `evidence_extraction`, `outreach_proposal`}, together with its profile, binding and authorization checks. So a call outside the C2* origins and purposes is refused at reservation, before it is charged. It is not charged and then merely withheld at release. If it is refused again at launch, it is never spawned, and the launch refusal keeps the reservation's existing charge. E1 below re-checks the same scope at release.
+   - **Admission is otherwise unchanged.** The existing admission checks are unchanged (`admission/gate.ex:128-171`). This guard only adds refusals.
+
+4. **Eligibility (all must hold, from persisted rows under the item 6 locks).**
+   - **E1 Scope.**
+     - Decision authority holds at the captured instant (item 6).
+     - The run is running, is not a `:proof` run, and has `usage_origin` in the entry.
+     - The invocation's `purpose` is in the entry.
+     - The invocation is charged to the bound delegated grant, through one of that grant's allocations.
+     - The run's lead id is in `lead_ids`, in the bound tenant.
+     - The lead has exactly one `sales.lead.created` event in that tenant, with actor type `seeder` (its `:seed` action, `lib/sdr_agent/sales/lead.ex:131-137`).
+     - The lead's account domain and contact email pass the reserved-name guards at that instant (`lib/sdr_agent/sales/synthetic.ex:22-43`).
+   - **E2 Identity.**
+     - The invocation is a generation-2 ClaudeCLI invocation, `:completed`, with `validation_status: :valid`.
+     - Its recorded provider, CLI version, profile, model and prompt builder equal the entry's identity.
+   - **E3 Only the v4 promotion is missing.**
+     - `Witness.allowlisted?(invocation, v3, :propagated_id)` is true.
+     - `Witness.allowlisted?(invocation, v4, :propagated_id)` is false. If a v4 entry ships, the ordinary `:released` path applies instead.
+   - **E4 Positive v4 comparison.** This is checked on the receipt's primary link, which must be this invocation's single current primary link, with no successor.
+     - `WitnessEvidence.validate/1` accepts the link's full evidence unchanged (`lib/sdr_agent/agents/witness_evidence.ex:166-176`).
+     - `WitnessEvidence.validate_claim/1` returns `:ok` (`witness_evidence.ex:261-268`).
+     - The extracted group passes `exact_v4_group?/1` (`witness_evidence.ex:245-250`). The group is the evidence restricted to the v3 context-group keys plus the R keys present. The helper is never applied to the full evidence map.
+     - `link_status` is `:inferred`, `method` is `:propagated_id`, `classification` is `"primary"`, `projection_version` is exactly the v4 id, and `projections_inapplicable` is `["v2"]`.
+     - `response_layout` is `"reasoning_then_text"`. `response_thinking_count` and `response_redacted_thinking_count` are integers 0 to 4 whose total is 1 to 4.
+     - The ordinary release's identity check passes (`release_decision.ex:344-350`).
+     - All four of `projected_request_sha256`, `observed_request_projection_sha256`, `projected_response_sha256` and `observed_response_projection_sha256` are present and are lowercase hex-64 (`witness_evidence.ex:82-85`). Each projected digest equals its observed digest. An absent digest never matches another absent digest.
+     - The capture is complete: outcome complete, HTTP 200, both captures complete, stream complete, a reviewed proxy version (`witness.ex:624-631,669-674`).
+     - **Reason codes.** These are compared as a set, on a comparison copy only.
+       - The persisted `reason_codes` list must have no duplicate.
+       - Its set must be exactly {`method_not_enabled`} or {`method_not_enabled`, `cli_injected_context`}.
+       - Persisted order is irrelevant. The reconciler emits `["method_not_enabled", "cli_injected_context"]`, because it prepends `method_not_enabled` and then de-duplicates in order (`witness.ex:894,936`).
+       - The persisted evidence is never rewritten, sorted or repaired, so `validate/1` and `validate_claim/1` see it unchanged.
+       - Any unknown code refuses.
+       - These codes are consistency checks only, never the basis.
+   - **E5 Clean invocation.**
+     - Every other current link is `ancillary`.
+     - No current link is `unclassified` or `ambiguous`, and no exchange is open.
+     - No link of the invocation, current or superseded, has ever been a `mismatch`.
+     - No `reconciliation_required` Failure for the invocation is a critical one (live or resolved) or a live warning.
+     - The receipt's status is `:inferred`, and its codes are a subset of `method_not_enabled` and `cli_injected_context`.
+     - The store was configured and trusted for the observation.
+
+     A fresh unpromoted v4 positive match satisfies E5 without any waived warning (Context).
+   - **E6 New decision only.** E6 applies to a new decision only. The existing-row branch of item 7 runs first.
+
+5. **Refusals.** Anything else keeps today's withheld outcome, reason, classification and cause. That includes:
+   - any mismatch, including a retained or earlier one;
+   - invalid output;
+   - an unconfigured, untrusted or unreadable store;
+   - a missing, incomplete, open, ambiguous or timed-out capture;
+   - an unclassified exchange;
+   - another projection or v4 layout, or a contract-invalid group;
+   - stale or conflicting evidence;
+   - another identity, origin, purpose, lead, grant or allocation;
+   - a lack of decision authority;
+   - an audit failure;
+   - any unknown code.
+
+   While the selector is on, the withheld event records one metadata-only refusal code from a closed set: `exception_off`, `environment_unattested`, `outside_window`, `scope_mismatch`, `identity_mismatch`, `promotion_gap_not_v4`, `link_not_eligible`, `invocation_not_clean`, `output_invalid`. A bounded attempt that fails stays failed. Rules are never widened ad hoc.
+
+6. **Authority, locks and the decision instant.**
+   - **Who may decide.** A NEW `:demo_exception` decision is accepted only from the result-gate finalizer. It must run under its registered `ReleaseDecision.Prelocked` context, extended with these bindings:
+     - `finalizer: :result_gate`;
+     - the primary link, the sorted current link ids, the funding grant and allocation, and the active operation snapshot reference (item 2). The reference is inherited from the owning agent action, or owned by `ResultGate.gate/3` when it is top-level;
+     - `receipt_id: nil`.
+
+     The context's registration, process, transaction and marker rules are unchanged (`lib/sdr_agent/agents/release_decision/prelocked.ex:47-114`). A standalone `:decide` (no context) refuses this disposition, and so does any other context, Recovery's included (`release_decision.ex:142-154`).
+   - **Lock order in `ResultGate.finalize/4` for the exception branch.** No lock is taken after the chain head.
+     1. The run, `FOR UPDATE`.
+     2. Its Operation, `FOR SHARE`.
+     3. The invocation, `FOR SHARE`.
+     4. The primary link and every other current link, `FOR SHARE`.
+     5. The funding grant, `FOR SHARE`.
+     6. The funding allocation, `FOR SHARE`.
+     7. The chain head.
+
+     Withheld paths keep their existing order, including the selected cause `FOR UPDATE` before the head (`result_gate.ex:312-327,364-428`). This order follows the reservation (grant → allocation, `lib/sdr_agent/agents/admission.ex:10-26`) and the reconciler (invocation `FOR UPDATE` → head, `witness.ex:686-689`). It adds no cycle.
+   - **Under the head.**
+     - One instant is captured. It is used for decision authority, eligibility, the basis's `decided_at` and the record's `decided_at`.
+     - The authoritative rechecks are plain reads, of two kinds:
+       - state protected by the locks above: links, grant, allocation;
+       - head-serialized state, re-read fresh: the invocation's `reconciliation_required` Failures (`Failure :open`/`:resolve` append under the head: `lib/sdr_agent/operations/failure.ex:110-149`; `lib/sdr_agent/audit/kernel.ex:299-309`), and the lead, account, contact and seed event. Every writer of those also appends under the head.
+     - There is no row lock and no filesystem or store I/O.
+     - `ReleaseDecision` re-validates E1-E6 against the same bindings and instant. It is authoritative.
+   - **Recheck failure.** If an under-head recheck fails, the transaction rolls back with nothing written. The gate then repeats `finalize/4` once with the exception disabled, which is the ordinary withheld path with its own cause locks. A refusal of that repeat falls to the existing one-shot Recovery (`result_gate.ex:185,196-208`).
+   - **Recovery** never decides a demo exception (`lib/sdr_agent/agents/result_gate/recovery.ex:48-51`).
+
+7. **Replay.** `ReleaseDecision`'s existing-row branch runs first (`release_decision.ex:120-123`).
+   - **Existing demo-exception row.**
+     - The request is an identical replay only when all of these hold: its disposition, reason, link, `evidence_sha256` (NULL) and `exception_policy_id` equal the row's; and the basis re-derived from the locked state, using the row's stored `decided_at`, has a digest equal to `exception_basis_sha256`.
+     - An identical replay creates no row and no event. Before any output is returned, use authority is checked separately at the current instant (item 9).
+     - Any difference in identity, evidence or basis raises `ReleaseConflict`. It is never treated as a fresh decision.
+   - **Existing row of another disposition.** A demo exception against such a row (for example an earlier withheld) is a `ReleaseConflict`. An earlier withheld record never becomes an exception.
+   - **No existing row.** The decision is made once, with the item 6 instant.
+
+8. **The record and its closed basis.**
+   - **Kept from the existing release.**
+     - One row per invocation, under its unique index.
+     - Append-only.
+     - Composite FKs to the invocation and to this invocation's link.
+     - The link's projection and method are copied onto the row.
+   - **Added columns.**
+     - `exception_policy_id`.
+     - `exception_expires_at`: the effective end.
+     - `exception_basis`: the closed map below.
+     - `exception_basis_sha256`: the lowercase hex SHA256 of the map's `sdr-canonical-json/1` encoding.
+   - **Pairing and CHECKs.** `:demo_exception` pairs only with reason `:v4_uncalibrated`. For a `demo_exception` row, every predicate below must evaluate to TRUE. SQL UNKNOWN counts as a violation: each predicate is written as `(…) IS TRUE` or `COALESCE(…, false)`, and every nullable column is tested with an explicit `IS NOT NULL` before it is compared. The database CHECKs require:
+     - the pair;
+     - a non-NULL link;
+     - a non-NULL `projection_version` equal to the v4 id;
+     - a non-NULL `method` equal to `propagated_id`;
+     - NULL `evidence_sha256`;
+     - all four exception columns non-NULL;
+     - `decided_at < exception_expires_at`;
+     - `jsonb_typeof(exception_basis) = 'object'` and `jsonb_typeof(exception_basis->'policy') = 'object'`;
+     - `exception_basis->>'schema' = 'c2star-basis/1'`;
+     - `exception_basis->'policy'->>'id' = exception_policy_id`.
+
+     An empty object, a missing key, a JSON `null` or a scalar therefore rejects. Every other disposition has the four columns NULL. The existing `released`, `withheld` and `calibration` branches are already NULL-safe and are unchanged. Application code keeps the full closed-schema and size validation. This is not a general database JSON-schema system.
+   - **Basis schema `c2star-basis/1`.** Every listed object and key is required. No other key may appear, and no value may be NULL. The basis holds no content and no copy of a larger mutable evidence blob.
+
+     | Object | Key | Type / allowed value |
+     |---|---|---|
+     | (top) | `schema` | the literal `"c2star-basis/1"` |
+     | `policy` | `id` | the literal `"c2star-demo-v4/1"` |
+     | | `entry_sha256` | hex-64; equals the compiled entry's digest at decision |
+     | | `acceptance_ref` | string `^D-[0-9]{3,4}$`; equals the entry's `acceptance_ref` |
+     | `environment` | `id` | the literal `"agentenv-1"` |
+     | | `binding_sha256` | hex-64 of the environment binding (ADR-0004 amendment) |
+     | | `tenant_id` | lowercase canonical UUID; equals the binding's tenant |
+     | `funding` | `authorization_id` | a compiled authorization registry id; equals the entry's |
+     | | `authorization_sha256` | hex-64 of that registry entry; equals the authorization binding's |
+     | | `grant_id`, `allocation_id` | UUID; the invocation's charged grant and allocation |
+     | `invocation` | `id`, `run_id`, `lead_id` | UUID |
+     | | `usage_origin` | `"assignment"` |
+     | | `purpose` | one of `"evidence_extraction"`, `"outreach_proposal"`, `"qualification"` |
+     | `identity` | `provider` | `"claude_cli"` |
+     | | `cli_version` | `"2.1.294"` |
+     | | `profile_id` | `"claude_cli_opus"` |
+     | | `model_id` | `"claude-opus-5-5"` |
+     | | `prompt_builder` | `"prompt-builder/1"` |
+     | | `ledger_generation` | integer `2` |
+     | `evidence` | `link_id` | UUID; the primary link |
+     | | `projection_version` | `"claude-message-json/4+prompt-builder/1"` |
+     | | `method` | `"propagated_id"` |
+     | | `response_layout` | `"reasoning_then_text"` |
+     | | `response_thinking_count`, `response_redacted_thinking_count` | integers 0..4, total 1..4 |
+     | | `reason_codes` | the basis copy of the link's code set, sorted bytewise: exactly `["method_not_enabled"]` or `["cli_injected_context","method_not_enabled"]` (the persisted link order is not copied) |
+     | | `projected_request_sha256`, `observed_request_projection_sha256`, `projected_response_sha256`, `observed_response_projection_sha256` | hex-64; equal in pairs |
+     | | `current_link_ids` | sorted, de-duplicated UUIDs, 1 to 64 of them; must include `link_id` |
+     | `eligibility` | `v3_allowlisted` | literal `true` |
+     | | `v4_allowlisted` | literal `false` |
+     | `window` | `starts_at` | the effective start (item 2) |
+     | | `effective_expires_at` | the effective end; equals `exception_expires_at` |
+     | | `decided_at` | the item 6 instant; equals the record's `decided_at` |
+
+     - **Formats.** UUIDs are lowercase canonical `8-4-4-4-12`. Hex-64 is `^[0-9a-f]{64}$`. Timestamps are UTC, rendered exactly as `YYYY-MM-DDTHH:MM:SS.ffffffZ` (six fraction digits).
+     - **Size and validity.** The canonical encoding is at most 8192 bytes. An oversize or invalid basis is refused, never truncated or repaired. `starts_at ≤ decided_at < effective_expires_at`.
+
+9. **Use authority and per-path outcomes.** A demo-exception output may be used only under use authority (item 2). The common invariant is that an output without it never escapes. Each path keeps its existing API shape:
+
+   | Path | Without use authority (or an ineligible decision) | With use authority, or a new eligible decision |
+   |---|---|---|
+   | `ResultGate.gate/3` / `SDR.Model` (`lib/sdr_agent/sdr/model.ex:168-175`) | `{:withheld, release, run}` or `{:error, reason}`, as today | `{:released, release, output}`, with `release.disposition == :demo_exception` |
+   | `ReleasedOutput.fetch/2`, `Agents.released_output/2` (`lib/sdr_agent/agents/released_output.ex:25-66`) | `{:error, :result_not_released}` | `{:ok, output}` |
+   | Output field policy (`lib/sdr_agent/agents/model_invocation.ex:185-192`) | `%Ash.ForbiddenField{}` | readable only through the `ReleasedOutputRead` mark |
+   | `DecisionRules` (`lib/sdr_agent/agents/changes/decision_rules.ex:113-129`) | `ResultNotReleased` changeset error | decision created |
+   | `SDR.proposal/2` / `HandOffProposal` (`lib/sdr_agent/sdr.ex:239-290`; `lib/sdr_agent/sdr/actions/hand_off_proposal.ex:151-152`) | `{:error, :result_not_released}`; no draft | proposal returned; draft proposed |
+   | `AssessmentRules` (`lib/sdr_agent/outreach/changes/assessment_rules.ex:45-56`) | `ResultNotReleased` error. Its purpose is never eligible, so this path never holds an exception. | n/a |
+   | `ResultGate.unreleased?/1`, `unreleased_invocations/1` (`result_gate.ex:218-244`) | `true`; the invocation is included in `{:ok, [...]}` | `false`; excluded |
+   | `ResultGate.Recovery.run/3` (`recovery.ex:118-166`) | **Running run:** stopped `witness_unreconciled` on a deduplicated warning cause (message "demo exception not in use") opened under the head, as the existing selection does (`recovery.ex:44-46`); returns `{:withheld, release, run}`, with `release` as stored. **Terminal run:** `{:withheld, release, run}`. Never a new row. | `{:released, release, output}` (the `:not_gated` rollback at `recovery.ex:166` gains this clause) |
+   | `StaleRunSweeper`, `Witness.ScanWorker` (`lib/sdr_agent/sdr/stale_run_sweeper.ex:512-522`; `lib/sdr_agent/agents/witness/scan_worker.ex:105-109`) | unchanged: any release counts as decided | unchanged |
+   | Draft edit, approval, Home command, send gate | item 10 | item 10 |
+   | `DeliveryReceipt :record` for a NEW `captured` receipt (`lib/sdr_agent/outreach/delivery_receipt.ex:77-104`; reached through `Outreach.record_receipt/2`, `lib/sdr_agent/outreach.ex:162-170`) | item 10: the insert rolls back; `CaptureAdapter.deliver/3` returns `{:error, {:permanent, :demo_exception_not_in_use}}` | the receipt is recorded as today |
+   | `DeliveryReceipt :record` replay of an existing receipt; `CaptureAdapter.lookup/2`; delivery reconciliation | unchanged: the stored receipt is returned or reported (history is never denied) | unchanged |
+
+   No new detail, retry or replay route reads raw output. A retry stays an explicit, budget-counted operator action with its own decision.
+
+10. **Drafts, approvals and capture.**
+    - **When a revision is exception-derived.** Follow its ancestry: the revision itself, then every revision reachable through `parent_revision_id` and `ai_baseline_revision_id` (`lib/sdr_agent/outreach/changes/new_revision.ex:69-75`; `lib/sdr_agent/outreach/draft_revision.ex:6-18`). If any agent revision in it has a `model_invocation_id` whose release is `:demo_exception`, the revision is exception-derived. A human edit never removes it.
+    - **The check.** The same use-authority check (item 2) runs:
+      - at `Draft :edit`, on the parent revision;
+      - at `Approval :approve`, on the exact revision being approved (`lib/sdr_agent/outreach.ex:104-117`);
+      - in the delivery send gate, as an early refusal (`lib/sdr_agent/outreach/delivery.ex:9-23,82-123`);
+      - in the transaction that creates the NEW `captured` DeliveryReceipt. This is the authoritative capture-time check.
+    - **Why capture needs its own check.** The send gate commits its claim before the adapter runs, and the adapter is handed the message outside that transaction (`delivery.ex:74-75,301-305`). `CaptureAdapter` then records the `captured` receipt in its own transaction (`lib/sdr_agent/outreach/delivery/capture_adapter.ex:27-34,62-73`). Expiry, revocation or a mismatch can land between those two transactions.
+    - **The capture-time check itself.**
+      - It lives in the `DeliveryReceipt :record` action, so every caller of `record_receipt/2` is subject to it, including any direct one.
+      - It applies only when a NEW `captured` row is inserted for an operation whose approved revision (`draft_revision_id`) is exception-derived.
+      - **Callback order.** The check is an `after_action` callback, appended (not prepended) by a change listed after `AppendEvent`.
+        - `AppendEvent` appends its event inside its own `after_action` callback (`lib/sdr_agent/audit/changes/append_event.ex:66-77`), not in `change/3`.
+        - Ash 3.37.2 appends default callbacks in order and runs them in list order (`deps/ash/lib/ash/changeset/changeset.ex:5380-5410,7578-7592`, installed under `.devenv/state/deps/`).
+        - So the check runs after the event append, with the chain head held.
+      - **What it reads.** It re-reads the authority facts there as plain reads, with no new lock and no file I/O. It uses the active operation snapshot: inherited from `Delivery.attempt/2` through `CaptureAdapter.deliver/3`, or owned by a direct top-level `record_receipt/2` call (item 2).
+      - **Replays.** A replayed existing row is marked `sdr_replayed` by `MarkExisting`'s earlier callback (`lib/sdr_agent/research/changes/mark_existing.ex:7-8,13-19`). `AppendEvent` and this check both honour that mark. The replay skips the check and is returned unchanged.
+      - A refusal rolls the insert and its event back, so no receipt is ever recorded for it. The adapter maps the refusal to `{:error, {:permanent, :demo_exception_not_in_use}}`. Delivery then takes its existing permanent-failure path (`delivery.ex:339-352`): `failed_permanent`, the `delivery_failed` Failure, and the draft marked failed. No `accepted` receipt and no acceptance are fabricated.
+      - An already captured message stays captured. Its later `accepted` receipt, `lookup/2` and reconciliation are unchanged.
+    - **How the other checks are evaluated.** Each consuming action plain-reads the authority facts before its verdict. It reads them again after its first chain-head append in the same transaction: grant revocation, link and Failure writers all append under that head. Any difference rolls the action back with no effect, and a retry then sees the new state. No row lock is added to the Outreach lock order.
+    - **Refusals.**
+      - Edit and approve are refused with a typed `DemoExceptionNotInUse` error.
+      - Home commands map that error to `blocked(:demo_exception_not_in_use)`, alongside the existing blocked outcomes (`lib/sdr_agent/outreach/inbox_commands.ex:212-218`).
+      - The send gate returns `refuse`, reason `demo_exception_not_in_use`, with the existing refuse effects (`delivery.ex:16-17`).
+      - An approval granted before expiry, or a quiet-hours deferral whose not-before is at or after expiry, is refused at the send gate. Authority that ends after the gate's claim is caught at the receipt insert. Either way, no NEW `captured` receipt is recorded without use authority.
+    - **Always allowed.** Reject and revoke stay allowed. Reading drafts, revisions, citations and their labelled history is not a use of model output and stays available, including for the owner's final inspection after expiry.
+
+11. **Expiry.**
+    - **When the enforced policy applies again.** It applies with no further action at `effective_expires_at`, at the policy expiry, when the selector is off, when the entry is removed or changed, or when the grant is revoked.
+    - **History.** Historical rows are never deleted or relabelled.
+    - **No extension.** There is no automatic extension, including if T7 is late. A later exception (for example, for the conference) needs its own entry, window and accepted amendment.
+
+12. **No reconciled fabrication, and no rewritten history.**
+    - The link stays `inferred`/`method_not_enabled`.
+    - The invocation's witness answer stays `inferred` (`witness.ex:1058-1074`).
+    - No link status, release reason, event type, export, UI string or status for this record says "reconciled" or "verified research".
+    - Later reconciliation, such as after T7's enablement, may append link successors. It never rewrites this record, and it never retroactively releases an earlier withheld invocation.
+    - No tuple is promoted.
+
+13. **Audit and UI.**
+    - The decision appends `model.result.demo_exception`. Its arguments are the policy id, the basis digest and the fixed label, with no content.
+    - Run detail, draft review and draft detail, any rendered Home row, and exports show exactly `"demo exception - v4 not independently calibrated"` for the record and for every exception-derived draft.
+    - Reconciled releases keep their presentation.
+
+14. **Grants nothing else.** This exception grants no calls, spend, delivery, data access or allowlist entry. Caps, grant accounting, the synthetic guard, authorization, deterministic claim and citation checks, exact approval binding, suppression checks and capture-only delivery all stay.
+
+15. **Unchanged.**
+    - Admission before spend, and the compiled `:enforced` gate.
+    - The reconciled-only `:released` path and its read contract, including "a link superseded later leaves the release as the historical decision" (`model_result_release.ex:45-46`).
+    - The withheld reasons.
+    - Terminal invocation immutability (ADR-0009).
+    - v4 lineage: a v4 observation never supersedes a mismatch (`witness.ex:865-869`).
+    - Concurrency 1.
+    - The empty test allowlist and the test-only overrides.
+    - The calibration harness and G-R0.
+    - The v4 proof and enablement path.
+
+**Residual risks (stated, not solved).**
+
+- The v4 grammar has hermetic tests only, not the independent captured proof the enforced policy requires. It may be wrong, or it may not fit the next response.
+- A match shows that the stdin and the structured output are equal. It does not show that the research is factually correct, or that CLI-added context is benign.
+- A call can still be withheld or fail. Accepting this guarantees no successful run.
+- G-DEMO attempt 2's diagnostic does not show that the next call meets E1-E6.
+- The launch margin is a scheduling guard, not a deadline proof.
+
+**Consequences.**
+
+- **Positive:** a positively matched v4 output can drive the Friday journey with a truthful label, a closed persisted basis and finite authority.
+- **Negative:**
+  - one disposition and four columns;
+  - a use-authority check on every business read and draft action;
+  - more verification of release, replay, consumers and expiry.
+- **Neutral:** no new dependency, process or table.
+
+**Cross-references.**
+
+- **This ADR:**
+  - R0 amendment item 3 (admission) and item 4. Its "Release" and "No bypass" bullets are extended only as stated here. "Release evidence", "The invocation itself is untouched" and "Later reconciliation" are unchanged.
+  - The response-layout amendment, items 6-8.
+  - The S12d rule that a new tuple needs a new proof.
+- **ADR-0004:** the agent-environment amendment, including its funded scope (item 9a), its provisioning and spend-ready attestation (items 4 and 5), and its per-allocation windows (item 11).
+- **ADR-0009:** append-only and terminal-immutable rows.
+- **ADR-0014:** Amendment 3 (acceptance, D-222), and non-waivable constraints 1-7.
+
+<!-- END ADR-0005 C2* DEMO-EXCEPTION AMENDMENT -->
 
 ### Anchoring (S11)
 
