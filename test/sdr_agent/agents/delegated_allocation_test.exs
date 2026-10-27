@@ -46,6 +46,12 @@ defmodule SdrAgent.Agents.DelegatedAllocationTest do
   owner-form parent AND marker AND current admin, OR delegated parent AND
   PRV AND a verified delegated-bundle context; delegated update and release
   have no allowed actor or context (Q7).
+
+  GREEN-2 harness correction (found in the GREEN-2 run
+  `c2-20261027T141238Z-82849`): the provisioning-path test runs without the
+  two delegated stand-ins, which the accepted OQ8 rule (no second
+  authorization in a tenant) refused as `:another_authorization_provisioned`
+  before its assertions. Its assertions are unchanged.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -60,17 +66,21 @@ defmodule SdrAgent.Agents.DelegatedAllocationTest do
 
   @moduletag :c2star_s2
 
-  setup do
+  # The delegated stand-ins `a` and `b` are omitted only for a test tagged
+  # `delegated_parents: false` (the provisioning path: OQ8 refuses to
+  # provision while a delegated grant of another authorization exists in the
+  # tenant).
+  setup ctx do
     Clock.freeze(now())
     on_exit(&Clock.unfreeze/0)
     tenant = bootstrap!()
 
-    %{
-      tenant: tenant,
-      admin: human(:admin, tenant),
-      a: delegated_row!(tenant),
-      b: delegated_row!(tenant)
-    }
+    parents =
+      if Map.get(ctx, :delegated_parents, true),
+        do: %{a: delegated_row!(tenant), b: delegated_row!(tenant)},
+        else: %{}
+
+    Map.merge(%{tenant: tenant, admin: human(:admin, tenant)}, parents)
   end
 
   ## Helpers
@@ -374,6 +384,7 @@ defmodule SdrAgent.Agents.DelegatedAllocationTest do
       assert event.actor_type == :grant_provisioner
     end
 
+    @tag delegated_parents: false
     test "the provisioning path writes exactly the entry's allocations, as PRV", ctx do
       env = provisioned!()
       grant = reload!(env.grant.id)
