@@ -33,8 +33,12 @@ defmodule SdrAgent.DemoExceptionFixtures do
       under the same grant (for example
       `AgentsFixtures.operated_run(env.tenant, lead_id: lead_id())` passed as
       `%{env | run: run, agent: agent, operation: operation}`), or a
-      separately reviewed run-budget fixture change. None of these synthetic
-      allowances is real-call authority;
+      separately reviewed run-budget fixture change. Option `allocations:`
+      replaces the single unbounded allocation with the given ones (maps as
+      `AgentsFixtures.grant!/3` takes them, attempts summing to at most
+      `attempts:`; for per-allocation windows); the env then holds them all
+      as `allocations`, and `allocation` is nil unless there is exactly one.
+      None of these synthetic allowances is real-call authority;
     * the v3 Opus allowlist entry only (the v4 promotion stays missing),
       the result gate's short test wait, a trusted witness store root, and
       an operated assignment run on the first fixture lead (option
@@ -138,8 +142,8 @@ defmodule SdrAgent.DemoExceptionFixtures do
     # with the id in place.
     Application.put_env(:sdr_agent, DemoExceptionSource, authorization_id: @authorization_id)
     entry_sha256 = DemoException.entry_sha256()
-    grant = grant!(tenant, Keyword.get(opts, :attempts, 40))
-    [allocation] = grant.allocations
+    grant = grant!(tenant, Keyword.get(opts, :attempts, 40), Keyword.get(opts, :allocations))
+    allocation = single(grant.allocations)
     binding = live_binding()
 
     attestation = %Attestation{
@@ -199,6 +203,7 @@ defmodule SdrAgent.DemoExceptionFixtures do
       root: root,
       grant: grant,
       allocation: allocation,
+      allocations: grant.allocations,
       attestation: attestation,
       authorization: authorization,
       entry_sha256: entry_sha256,
@@ -382,7 +387,8 @@ defmodule SdrAgent.DemoExceptionFixtures do
     link
   end
 
-  defp grant!(tenant, attempts) when is_integer(attempts) and attempts in 1..@max_attempts do
+  defp grant!(tenant, attempts, allocations)
+       when is_integer(attempts) and attempts in 1..@max_attempts do
     {starts_at, expires_at} = @window
 
     AgentsFixtures.grant!(tenant, %{
@@ -392,15 +398,20 @@ defmodule SdrAgent.DemoExceptionFixtures do
       total_attempts: attempts,
       starts_at: starts_at,
       expires_at: expires_at,
-      allocations: [
-        %{
-          key: :daily_use,
-          applies_to: ModelCallAllocation.buckets(),
-          attempts: attempts
-        }
-      ]
+      allocations:
+        allocations ||
+          [
+            %{
+              key: :daily_use,
+              applies_to: ModelCallAllocation.buckets(),
+              attempts: attempts
+            }
+          ]
     })
   end
+
+  defp single([allocation]), do: allocation
+  defp single(_allocations), do: nil
 
   # The read-performing synthetic adapter's one plain identity read: the
   # live database's name and oid (no lock clause, no file I/O).
