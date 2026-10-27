@@ -57,7 +57,16 @@ defmodule SdrAgent.AgentEnv.LauncherCheckTest do
   It takes no lease, writes no file, opens no Repo and reads no database.
   A lease never masks an unknown file (`:quarantined`, Q2), and an absent
   `state/` refuses readiness (`:root_refused`) although it classifies fresh
-  (Q8).
+  (Q8). Input shape (`:invalid_inputs`) comes first and an unsupported
+  provider (`:provider_refused`) next, both before any item or probe; a
+  symlink component is refused even when it resolves inside the root; and
+  no refusal logs or returns anything of the inputs (Codex `31b72fea`).
+
+  The production probe `probe/2` (`connect:` of the real Mix caller) is one
+  `:gen_tcp.connect/4` to `{127, 0, 0, 1}` with a finite timeout; it closes
+  any socket it opened before returning `{:ok, :listening}`, and passes any
+  error through, so only `:econnrefused` reads as free. Its test uses a
+  loopback listener on an ephemeral port it opens itself, never 4130.
 
   RED: `SdrAgent.AgentEnv.Launcher` does not exist (structural, guarded
   after the fixtures). The "fixtures" controls use existing APIs only and
@@ -67,6 +76,8 @@ defmodule SdrAgent.AgentEnv.LauncherCheckTest do
   probe; no port, database, real Mix or CLI.
   """
   use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
 
   alias SdrAgent.AgentEnv.State
   alias SdrAgent.Audit.AnchorSinks.FileSink
@@ -100,6 +111,51 @@ defmodule SdrAgent.AgentEnv.LauncherCheckTest do
            "C2* S1 RED-3: #{inspect(@launcher)}.check/1 is not exported"
 
     apply(@launcher, :check, [inputs])
+  end
+
+  defp require_probe! do
+    assert Code.ensure_loaded?(@launcher), "C2* S1 RED-3: #{inspect(@launcher)} is not available"
+
+    assert function_exported?(@launcher, :probe, 2),
+           "C2* S1 RED-3: #{inspect(@launcher)}.probe/2 is not exported"
+  end
+
+  # Runs `fun` in this process and returns `{result, args}`: the argument
+  # lists of every :gen_tcp.connect/4 call this process made meanwhile.
+  defp trace_connects(fun) do
+    collector = spawn(fn -> collect_connects([]) end)
+    session = :trace.session_create(:c2star_s1_probe_connects, collector, [])
+
+    try do
+      _ = :trace.function(session, {:gen_tcp, :connect, 4}, true, [])
+      _ = :trace.process(session, self(), true, [:call])
+      result = fun.()
+      _ = :trace.process(session, self(), false, [:call])
+      ref = :trace.delivered(session, self())
+
+      receive do
+        {:trace_delivered, _tracee, ^ref} -> :ok
+      after
+        5_000 -> flunk("C2* S1: trace delivery was not confirmed")
+      end
+
+      send(collector, {:connects, self()})
+
+      receive do
+        {:connects, args} -> {result, args}
+      after
+        5_000 -> flunk("C2* S1: the connect collector did not answer")
+      end
+    after
+      :trace.session_destroy(session)
+    end
+  end
+
+  defp collect_connects(acc) do
+    receive do
+      {:trace, _pid, :call, {:gen_tcp, :connect, args}} -> collect_connects([args | acc])
+      {:connects, from} -> send(from, {:connects, Enum.reverse(acc)})
+    end
   end
 
   defp free(ctx) do
@@ -356,6 +412,29 @@ defmodule SdrAgent.AgentEnv.LauncherCheckTest do
       end
     end
 
+    test "a symlink component is refused even when it resolves inside the root", ctx do
+      bound!(ctx)
+
+      for {dir, overrides_for} <- [
+            {"build", &%{build_path: Path.join(&1, "dev")}},
+            {"deps", &%{deps_path: &1}},
+            {"anchors", &%{config: %{anchor_sinks: [{:file, FileSink, directory: &1}]}}}
+          ] do
+        real = Path.join([ctx.root, dir, "real"])
+        File.mkdir_p!(Path.join(real, "dev"))
+        alias_link = Path.join([ctx.root, dir, "alias"])
+        :ok = File.ln_s(real, alias_link)
+        overrides = overrides_for.(alias_link)
+
+        expected =
+          if dir == "anchors",
+            do: {:error, :anchor_sinks_refused},
+            else: {:error, :build_paths_refused}
+
+        assert check(inputs(ctx, :run, overrides)) == expected, inspect(overrides)
+      end
+    end
+
     test "a symlink component or .. escaping the root is refused, not just a prefix", ctx do
       bound!(ctx)
       outside = Fx.root!("escape")
@@ -484,6 +563,26 @@ defmodule SdrAgent.AgentEnv.LauncherCheckTest do
       assert Agent.get(ctx.probes, & &1) == []
     end
 
+    test "position: input shape first, then the provider, both before any item or probe", ctx do
+      bound!(ctx)
+
+      repo_fault = %{
+        config: %{repo: [database: "sdr_agent_dev", hostname: "localhost", port: 5520]}
+      }
+
+      bogus = %{env: %{"SDR_MODEL_PROVIDER" => "bogus"}}
+      listening = %{connect: fn _ip, _port -> {:ok, :socket} end}
+      every = repo_fault |> deep_merge(bogus) |> deep_merge(listening)
+
+      assert check(inputs(ctx, :bootstrap, every)) == {:error, :invalid_inputs}
+      assert check(inputs(ctx, :run, every)) == {:error, :provider_refused}
+
+      assert check(inputs(ctx, :run, deep_merge(repo_fault, listening))) ==
+               {:error, :repo_target_refused}
+
+      assert Agent.get(ctx.probes, & &1) == []
+    end
+
     test "an unsupported provider value is refused; fake is accepted", ctx do
       bound!(ctx)
 
@@ -537,6 +636,61 @@ defmodule SdrAgent.AgentEnv.LauncherCheckTest do
       Fx.authorized!(ctx.root)
       assert check(inputs(ctx, :run, claude_cli)) == {:error, :agent_env_not_spend_ready}
       assert check(inputs(ctx, :run)) == :ok
+    end
+  end
+
+  ## The production probe and diagnostics (Codex 31b72fea, owed before GREEN)
+
+  describe "the production probe" do
+    # Loopback only, on an ephemeral port this test opens itself (never 4130).
+    test "probe/2: a listener is in use and its socket closed; a free port is refused" do
+      require_probe!()
+
+      {:ok, listen} =
+        :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+
+      {:ok, port} = :inet.port(listen)
+
+      {result, connects} =
+        trace_connects(fn -> apply(@launcher, :probe, [{127, 0, 0, 1}, port]) end)
+
+      assert match?({:ok, _}, result)
+      assert [[{127, 0, 0, 1}, ^port, _options, timeout]] = connects
+      assert is_integer(timeout) and timeout > 0 and timeout <= 5_000
+
+      {:ok, accepted} = :gen_tcp.accept(listen, 1_000)
+      assert :gen_tcp.recv(accepted, 0, 1_000) == {:error, :closed}
+      :ok = :gen_tcp.close(accepted)
+      :ok = :gen_tcp.close(listen)
+
+      assert apply(@launcher, :probe, [{127, 0, 0, 1}, port]) == {:error, :econnrefused}
+    end
+  end
+
+  describe "diagnostics" do
+    test "refusals log and return nothing of the inputs", ctx do
+      bound!(ctx)
+      sentinel = "c2star-s1-sentinel-#{System.unique_integer([:positive])}"
+      Logger.put_process_level(self(), :debug)
+
+      cases = [
+        %{intent: :run, sentinel: sentinel},
+        inputs(ctx, :run, %{env: %{"SDR_MODEL_PROVIDER" => sentinel}}),
+        config(ctx, :run, :repo, url: "ecto://user:#{sentinel}@elsewhere.invalid/db"),
+        inputs(ctx, :run, %{build_path: Path.join(Fx.root!("diagnostics"), sentinel)})
+      ]
+
+      log =
+        capture_log([level: :debug], fn ->
+          for inputs <- cases do
+            assert {:error, reason} = check(inputs)
+            assert is_atom(reason)
+            refute inspect(reason) =~ sentinel
+          end
+        end)
+
+      Logger.delete_process_level(self())
+      refute log =~ sentinel
     end
   end
 

@@ -40,7 +40,8 @@ defmodule SdrAgent.AgentEnv.StateTest do
   absent, invalid or different boot marker is `:boot_id_mismatch` with
   nothing changed (Q7); an absent `state/` is `:fresh` for `:unknown` or
   `:absent` facts and classify creates nothing, while a `state` path that
-  is a file, a symlink or unreadable is not absence (Q8); bound files with
+  is a file, a symlink or unreadable is not absence but
+  `{:quarantine, :state_unavailable}` (Q8); bound files with
   the database observed `:absent` are `:binding_inconsistent` (Q9).
 
   RED: `acquire_lease/3`, `release/3` and `classify/2` do not exist
@@ -260,23 +261,20 @@ defmodule SdrAgent.AgentEnv.StateTest do
       File.rmdir!(state_dir)
 
       File.write!(state_dir, "")
-      assert {:quarantine, reason} = classify(ctx.root)
-      assert is_atom(reason)
+      assert classify(ctx.root) == {:quarantine, :state_unavailable}
       assert File.read!(state_dir) == ""
       File.rm!(state_dir)
 
       elsewhere = Fx.root!("state-elsewhere")
       :ok = File.ln_s(elsewhere, state_dir)
-      assert {:quarantine, reason} = classify(ctx.root)
-      assert is_atom(reason)
+      assert classify(ctx.root) == {:quarantine, :state_unavailable}
       assert {:ok, %File.Stat{type: :symlink}} = File.lstat(state_dir)
       File.rm!(state_dir)
 
       File.mkdir!(state_dir)
       File.chmod!(state_dir, 0o000)
       on_exit(fn -> File.chmod(state_dir, 0o700) end)
-      assert {:quarantine, reason} = classify(ctx.root)
-      assert is_atom(reason)
+      assert classify(ctx.root) == {:quarantine, :state_unavailable}
     end
 
     test "bound files with the database observed absent are binding_inconsistent", ctx do

@@ -39,6 +39,11 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
       indented, extended or repeated nonce line stops before any step (exit
       1), and the output is never evaluated. Other output lines are
       ignored.
+    * **Paths and arguments** (Codex `31b72fea`): every path and argument is
+      quoted, so a `HOME` with spaces works and each Mix argument arrives
+      whole (the stub also records the argument boundaries); a symlink
+      component of `MIX_BUILD_ROOT`, `MIX_DEPS_PATH` or `SDR_ANCHOR_FILE_DIR`
+      is refused even when it resolves inside the root.
 
   RED: `bin/agent-env` does not exist (structural guard). The "fixtures"
   control exercises the stub `mix` alone and executes now (Q10).
@@ -72,13 +77,17 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
     File.mkdir_p!(bin)
     calls = Path.join(home, "mix-calls")
     lease_output = Path.join(home, "lease-output")
+    argv = Path.join(home, "mix-argv")
     stub = Path.join(bin, "mix")
 
+    # Each call is recorded twice: the flattened line in `calls`, and each
+    # argument bracketed on one line in `argv` (argument boundaries).
     # A lease call prints the default nonce line, or `lease_output`'s bytes
     # verbatim when that file exists.
     File.write!(stub, """
     #!/bin/sh
     echo "STEP=$SDR_AGENT_ENV_STEP NONCE=$SDR_AGENT_ENV_NONCE PORT=$PORT ENV=$SDR_AGENT_ENV MIX_ENV=$MIX_ENV | $*" >> "#{calls}"
+    for a in "$@"; do printf '[%s]' "$a"; done >> "#{argv}"; echo >> "#{argv}"
     if [ -n "$STUB_FAIL" ] && [ "$*" = "$STUB_FAIL" ]; then exit 1; fi
     if [ "$1 $2" = "sdr.agent_env lease" ]; then
       if [ -f "#{lease_output}" ]; then /bin/cat "#{lease_output}"; else echo "SDR_AGENT_ENV_NONCE #{@nonce}"; fi
@@ -87,7 +96,7 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
     """)
 
     File.chmod!(stub, 0o755)
-    %{home: home, root: root, bin: bin, calls: calls, lease_output: lease_output}
+    %{home: home, root: root, bin: bin, calls: calls, lease_output: lease_output, argv: argv}
   end
 
   ## Helpers
@@ -303,6 +312,24 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
       assert calls(ctx) == []
     end
 
+    test "a symlink component is refused even when it resolves inside the root", ctx do
+      for {variable, dir} <- [
+            {"MIX_BUILD_ROOT", "build"},
+            {"MIX_DEPS_PATH", "deps"},
+            {"SDR_ANCHOR_FILE_DIR", "anchors"}
+          ] do
+        real = Path.join([ctx.root, dir, "real"])
+        File.mkdir_p!(real)
+        alias_link = Path.join([ctx.root, dir, "alias"])
+        :ok = File.ln_s(real, alias_link)
+
+        assert {out, 2} = launch(ctx, ["check"], [{variable, alias_link}]), variable
+        assert out =~ variable, variable
+      end
+
+      assert calls(ctx) == []
+    end
+
     test "the witness root and the anchor sinks", ctx do
       outside = Fx.root!("anchors-outside")
 
@@ -470,6 +497,37 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
 
       assert {_out, 0} = launch(ctx, ["run"])
       assert calls(ctx) == run_calls()
+    end
+
+    test "a HOME with spaces keeps every path and argument whole", ctx do
+      home = Path.join(Fx.root!("spaced"), "home with spaces")
+      root = Path.join(home, ".local/state/sdr-agent/agent-env/agentenv-1")
+      File.mkdir_p!(root)
+      File.chmod!(root, 0o700)
+
+      for dir <- @subdirectories do
+        path = Path.join(root, dir)
+        File.mkdir_p!(path)
+        File.chmod!(path, 0o700)
+      end
+
+      extra = [
+        {"HOME", home},
+        {"MIX_BUILD_ROOT", Path.join(root, "build")},
+        {"MIX_DEPS_PATH", Path.join(root, "deps")},
+        {"SDR_WITNESS_STORE_ROOT", Path.join(root, "evidence")},
+        {"SDR_ANCHOR_FILE_DIR", Path.join(root, "anchors")}
+      ]
+
+      assert {_out, 0} = launch(ctx, ["run"], extra)
+      assert calls(ctx) == run_calls()
+
+      assert ctx.argv |> File.read!() |> String.split("\n", trim: true) == [
+               "[sdr.agent_env][check][run]",
+               "[sdr.agent_env][lease][run]",
+               "[phx.server]",
+               "[sdr.agent_env][release][run]"
+             ]
     end
 
     test "no ecto task is ever called", ctx do

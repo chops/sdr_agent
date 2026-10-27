@@ -59,6 +59,7 @@ defmodule Mix.Tasks.Sdr.AgentEnvTest do
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
+  import ExUnit.CaptureLog
 
   alias SdrAgent.Test.AgentEnvBootFixtures, as: BootFx
   alias SdrAgent.Test.AgentEnvFixtures, as: Fx
@@ -505,6 +506,38 @@ defmodule Mix.Tasks.Sdr.AgentEnvTest do
       end
 
       assert digests(ctx.root) == before
+    end
+
+    test "a refusal names only its reason: no Repo URL, password or environment is echoed",
+         ctx do
+      task!()
+      BootFx.agentenv_bound!(ctx.root, lease: :none)
+      Fx.configure!(ctx.root, mode: :check, step: :check)
+      sentinel = "c2star-s1-sentinel-#{System.unique_integer([:positive])}"
+      repo = Application.get_env(:sdr_agent, SdrAgent.Repo, [])
+      url = "ecto://user:#{sentinel}@elsewhere.invalid/#{sentinel}"
+      Application.put_env(:sdr_agent, SdrAgent.Repo, Keyword.put(repo, :url, url))
+      BootFx.put_os_env!(%{"SDR_C2STAR_SENTINEL" => sentinel})
+      Logger.put_process_level(self(), :debug)
+
+      log =
+        capture_log([level: :debug], fn ->
+          for intent <- ["run", "provision"] do
+            output =
+              capture_io(fn ->
+                error =
+                  assert_raise Mix.Error, fn -> Mix.Task.rerun(@task, ["check", intent]) end
+
+                assert error.message =~ "repo_target_refused"
+                refute error.message =~ sentinel
+              end)
+
+            refute output =~ sentinel
+          end
+        end)
+
+      Logger.delete_process_level(self())
+      refute log =~ sentinel
     end
 
     test "release under STEP=check needs the lease's nonce and every receipt", ctx do
