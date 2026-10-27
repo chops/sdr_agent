@@ -15,6 +15,11 @@ b1243d3f-a7a8-450e-805e-97363b75e434, round 4). ADR-0001: agent design ADRs are
 accepted on peer approval; the owner can veto. Proposed earlier the same day by
 Claude in slice S2.
 
+The C2* record-hash continuity amendment (2026-10-27), after the C3-02
+amendment in the Decision section, is accepted as D-226, owner acceptance
+delegated by D-219, after Codex's exact-text static PASS (e81b4b39); its text
+is published as reviewed, so its own Status line still reads PROPOSED.
+
 ## Context
 
 S2 (`notes/features/s2-entity-model.org`) defines about forty persisted
@@ -277,6 +282,72 @@ Changing the transaction lifetime, a key set or a normalization purpose
 needs a further reviewed amendment and a green concurrency suite
 (independent connections, both commit orders, waits shown on advisory
 locks).
+
+#### C2* record-hash continuity amendment (2026-10-27, PROPOSED): the demo-exception columns of `model_result_releases` keep every earlier release verifiable
+
+**Status: PROPOSED.** This amendment has not been accepted or implemented.
+
+To be accepted, it follows ADR-0014 Amendment 3 (accepted, D-222):
+
+- Codex gives an independent static PASS of this exact text and of its entity/action delta.
+- A decision row then cites D-219, the commit and this file's SHA256, and records "owner acceptance delegated by D-219".
+
+It serves ADR-0005's C2* demo-exception amendment (D-223) item 8 and does not change it.
+
+**Context.**
+
+- **The contract.** Item 6 commits each audited write by the canonical `record_sha256` of the row after the write.
+  - `SdrAgent.Audit.RecordHash` builds that row map from every attribute the resource declares now.
+  - `SdrAgent.Audit.Verifier` compares the newest event of each audited subject with the hash of the subject's current row (`:record_hash_mismatch` / `:record_missing`).
+- **The new columns.** ADR-0005's C2* item 8 adds four nullable columns to the append-only `model_result_releases`: `exception_policy_id`, `exception_expires_at`, `exception_basis` and `exception_basis_sha256`. A release decided before that migration gets all four as SQL NULL.
+- **The break.** If the row map simply gained four `null` keys, each such release would hash differently from the value its own unchanged, valid event committed. It would then be reported as a mismatch with nothing tampered.
+- **Not the encoding.** The canonical encoding (`sdr-canonical-json/1`, ADR-0002) is not the cause and is not changed. Only the set of keys in this one resource's row map is.
+
+**Decision.**
+
+1. **One declared group.**
+   - `SdrAgent.Agents.ModelResultRelease` declares exactly one record-hash group, `c2star-demo-exception`.
+   - Its members are exactly the four columns above. All are nullable, and all are added by the migration that implements ADR-0005 C2* item 8.
+   - No other resource declares a group.
+2. **Projection rule.** For ModelResultRelease the row map is the map of every attribute, as today, with one exception:
+   - the four members are left out together when every one of them is nil as loaded;
+   - when any member is non-nil, all four are included, and nil members are written as JSON `null`.
+3. **What does not change.**
+   - Every other attribute of ModelResultRelease is always included, with nil written as `null`, as today. That covers `wire_witness_link_id`, `projection_version`, `method` and `evidence_sha256`.
+   - Every other resource's row map.
+   - The canonical encoding and its version, `sdr-canonical-json/1`. No encoding rule changes, so no new canonicalization version is needed.
+   - Every stored event, payload, `canonical_bytes`, `event_hash` and chain head. None is rewritten or re-encoded.
+   - The verifier's algorithm and its issue types.
+   - The one row map supplies both the event's `record_sha256` and its create `changes`. So an ordinary release decided after the migration has exactly the pre-migration row map and `changes` keys.
+4. **Why the guarantees hold.**
+   - **Earlier rows.** A release decided before the migration loads with the four members nil. Its row map, encoding and hash are therefore byte-identical to those its event committed.
+   - **Earlier attributes.** Every attribute that existed before the migration is still hashed, so tampering with any of them is still reported.
+   - **No hidden data.** The group's keys are present exactly when some member is non-nil. Two rows with different loaded values therefore never share a row map. Any non-nil loaded exception value, whether one member or all four, makes all four keys enter the hash. Against an event that did not commit those values, verification reports the changed after-image. A demo-exception row commits all four values in its own event, so tampering with any of them is reported.
+   - **Not a nil filter.**
+     - Nil values of every non-member attribute stay committed.
+     - Members are left out only together, and only when all four are nil.
+     - No other resource is affected.
+   - **Database backstop.** The `model_result_releases_pair` CHECK of ADR-0005 C2* item 8 requires all four columns to be SQL NULL on every row that is not a demo exception, and non-NULL on every demo-exception row.
+     - A JSON `null` in `exception_basis` is not SQL NULL (although it loads as nil), so it is rejected on an ordinary row.
+     - A non-null JSON scalar or array does not load as the map attribute, so the verifier reports the row (`:record_missing`) rather than passing it. JSON `null` is the separately constrained case above; this projection is injective over loaded attribute values, not over distinct raw representations that load identically.
+5. **Closed.**
+   - Once declared, a group never changes.
+   - Adding a group, adding a member, or declaring a group on another resource each needs its own reviewed amendment.
+   - This amendment is not a general schema-versioning mechanism. It does not address earlier column additions to other resources.
+6. **Verification obligations before the migration ships.**
+   - **Ordinary suite.** Executable regressions:
+     - (a) a release row with an event hashed by the pre-migration row map verifies;
+     - (b) tampering with any pre-migration attribute is reported;
+     - (c) a demo-exception row's event commits all four members, tampering with any of them is reported, and a non-null member on an ordinary row changes that row's hash;
+     - (d) an ordinary release decided after the migration has the pre-migration row-map keys and `changes` keys;
+     - a closed-registry test: only this resource declares a group, with exactly these members; each member is nullable; and the members are exactly the attributes absent from the pre-migration resource snapshot `priv/resource_snapshots/repo/model_result_releases/20261012214849.json`.
+   - **Migration proof.** A before/after proof on an owned disposable database. Release rows and events are written and verified by the pre-migration build. They must still verify after `up`, `down` and `up` again, with their row hashes, event bytes and chain head unchanged.
+
+**Consequences.**
+
+- **Positive.** Every release decided before C2* stays verifiable. The exception columns are committed from their first non-null value.
+- **Negative.** `RecordHash` gains a per-resource rule, which reviewers must keep closed.
+- **Neutral.** No schema, event or encoding change beyond ADR-0005 C2* item 8, and no new dependency.
 
 ## Justification
 
