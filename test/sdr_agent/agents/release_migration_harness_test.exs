@@ -1443,7 +1443,504 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
     end
   end
 
+  ## RED-7 (Codex e95a7340 choices 1, 2, 5; integrated packet refresh)
+
+  @db1_var "SDR_RELEASE_DB1_SUFFIX"
+  @db2_var "SDR_RELEASE_DB2_SUFFIX"
+
+  describe "campaign_targets/2 (pure): predeclared, exact, distinct targets" do
+    test "two valid distinct suffixes give exactly their two database names" do
+      env = %{@db1_var => "_wm0123456789", @db2_var => "_wmabcdef0123", "OTHER" => "x"}
+
+      assert harness(:campaign_targets, [env, "sdr_agent_test_c5"]) ==
+               {:ok,
+                %{
+                  db1: {"_wm0123456789", "sdr_agent_test_wm0123456789"},
+                  db2: {"_wmabcdef0123", "sdr_agent_test_wmabcdef0123"}
+                }}
+    end
+
+    test "an absent, malformed, identical or parent target is refused" do
+      valid = %{@db1_var => "_wm0123456789", @db2_var => "_wmabcdef0123"}
+
+      malformed =
+        for bad <- [
+              "",
+              "_wm012345678",
+              "_wm01234567890",
+              "_WM0123456789",
+              "_wmABCDEF0123",
+              "_wm0123456789\n",
+              " _wm0123456789",
+              "_rp0123456789",
+              "wm0123456789",
+              "_wm0123456789/x"
+            ],
+            do:
+              {"db1 #{inspect(bad)}", %{valid | @db1_var => bad}, "sdr_agent_test_c5",
+               {:error, {:target_invalid, @db1_var}}}
+
+      for {label, env, parent, expected} <-
+            [
+              {"db1 absent", Map.delete(valid, @db1_var), "sdr_agent_test_c5",
+               {:error, {:target_unset, @db1_var}}},
+              {"db2 absent", Map.delete(valid, @db2_var), "sdr_agent_test_c5",
+               {:error, {:target_unset, @db2_var}}},
+              {"db2 empty", %{valid | @db2_var => ""}, "sdr_agent_test_c5",
+               {:error, {:target_invalid, @db2_var}}},
+              {"identical", %{valid | @db2_var => "_wm0123456789"}, "sdr_agent_test_c5",
+               {:error, :targets_identical}},
+              {"db1 is the parent", valid, "sdr_agent_test_wm0123456789",
+               {:error, {:target_is_parent, @db1_var}}},
+              {"db2 is the parent", valid, "sdr_agent_test_wmabcdef0123",
+               {:error, {:target_is_parent, @db2_var}}}
+            ] ++ malformed do
+        assert harness(:campaign_targets, [env, parent]) == expected, label
+      end
+    end
+
+    test "the campaign tests take only the predeclared targets: no random fallback" do
+      {:defmodule, _, [_name, [do: {:__block__, _, statements}]]} =
+        @external |> File.read!() |> Code.string_to_quoted!()
+
+      db_tests =
+        for {:test, _, [name | _]} = node <- statements,
+            is_binary(name) and String.starts_with?(name, "DB #"),
+            do: node
+
+      assert length(db_tests) == 2, "the DB #1 and DB #2 campaign tests"
+
+      for test <- db_tests do
+        refute ast_calls?(test, :suffix), "#{elem(test, 2) |> hd()}: no random suffix"
+        assert ast_calls?(test, :targets!), "#{elem(test, 2) |> hd()}: predeclared targets"
+      end
+
+      assert ast_calls?(statements, :campaign_targets),
+             "targets come from Harness.campaign_targets/2"
+    end
+  end
+
+  ## The :evidence_dir option: exported inside the harness, before success cleanup
+
+  defp evidence_path, do: Path.join(physical_tmp_root(), "evidence")
+
+  # A probe at "predecessor" that also writes the fixtures, as a real one does.
+  defp with_fixtures(root, sfx, answer \\ fn _call -> :default end) do
+    fn
+      {_, :probe, "predecessor", _} ->
+        fn ->
+          File.write!(Path.join(owned_tmp(root, sfx), "fixtures.json"), ~s({"captured":"yes"}))
+          {:ok, "probe child output"}
+        end
+
+      call ->
+        answer.(call)
+    end
+  end
+
+  defp sums!(evidence) do
+    for line <-
+          evidence |> Path.join("SHA256SUMS") |> File.read!() |> String.split("\n", trim: true),
+        into: %{} do
+      [hash, path] = String.split(line, "  ", parts: 2)
+      {path, hash}
+    end
+  end
+
+  defp file_sha256(path),
+    do: :crypto.hash(:sha256, File.read!(path)) |> Base.encode16(case: :lower)
+
+  defp mode(path), do: Bitwise.band(File.lstat!(path).mode, 0o777)
+
+  @lineage_children ~w(01-claim 02-migrate-up-20261016052435 03-probe-predecessor
+                       04-migrate-up-20261021101539 05-probe-up 06-migrate-down-20261021101539
+                       07-probe-down 08-migrate-up-20261021101539 09-probe-up_again 10-drop)
+
+  describe "the :evidence_dir option" do
+    test "a completed run exports captures, results and every child, sealed before removal" do
+      sfx = suffix()
+      root = tmp_root()
+      evidence = evidence_path()
+      stub = stub(recorder(), :primary, "sdr_agent_test" <> sfx, with_fixtures(root, sfx))
+
+      {outcome, receipts} =
+        prove_with_receipts(opts(sfx, stub, root, @lineage, evidence_dir: evidence))
+
+      assert match?({:ok, _}, outcome), inspect(outcome)
+      refute File.exists?(owned_tmp(root, sfx)), "the source folder is removed after the seal"
+      assert File.dir?(evidence), "the evidence is never cleaned up"
+      assert mode(evidence) == 0o700
+
+      sums = sums!(evidence)
+
+      expected =
+        ~w(files/fixtures.json files/predecessor.json files/up.json files/down.json
+           files/up_again.json) ++
+          for(child <- @lineage_children, ext <- ~w(status out), do: "children/#{child}.#{ext}")
+
+      assert Enum.sort(Map.keys(sums)) == Enum.sort(expected)
+
+      for {path, hash} <- sums do
+        assert file_sha256(Path.join(evidence, path)) == hash, path
+        assert mode(Path.join(evidence, path)) == 0o600, path
+      end
+
+      assert File.read!(Path.join(evidence, "files/fixtures.json")) == ~s({"captured":"yes"})
+
+      assert File.read!(Path.join(evidence, "children/03-probe-predecessor.out")) ==
+               "probe child output"
+
+      assert File.read!(Path.join(evidence, "children/10-drop.status")) == "exit:0\n"
+      assert File.read!(Path.join(evidence, "children/10-drop.out")) == @valid_drop_output
+
+      facts = Map.new(receipts)
+
+      assert Map.take(facts, ~w(evidence.claim evidence.export evidence.files cleanup.temp_folder
+                               cleanup.drop_result outcome)) == %{
+               "evidence.claim" => "claimed",
+               "evidence.export" => "sealed",
+               "evidence.files" => Integer.to_string(map_size(sums)),
+               "cleanup.temp_folder" => "removed",
+               "cleanup.drop_result" => "ok",
+               "outcome" => "ok"
+             }
+    end
+
+    test "child output is bounded, and a runner exception is recorded by its type only" do
+      sfx = suffix()
+      root = tmp_root()
+      evidence = evidence_path()
+      big = String.duplicate("a", 40_000) <> "MIDDLE" <> String.duplicate("z", 40_000)
+
+      answer = fn
+        {_, :migrate, "up", "20261016052435"} -> {:ok, big}
+        {_, :probe, "up", _} -> fn -> raise "SECRET-TEXT from a child" end
+        _call -> :default
+      end
+
+      stub = stub(recorder(), :primary, "sdr_agent_test" <> sfx, with_fixtures(root, sfx, answer))
+      outcome = prove(opts(sfx, stub, root, @lineage, evidence_dir: evidence))
+
+      assert match?({:error, {:cleanup_skipped_unconfirmed_child, _, _}}, outcome),
+             inspect(outcome)
+
+      out = File.read!(Path.join(evidence, "children/02-migrate-up-20261016052435.out"))
+      assert byte_size(out) <= 65_536 + 64
+      assert String.starts_with?(out, "aaaa") and String.ends_with?(out, "zzzz")
+      refute out =~ "MIDDLE"
+      assert out =~ "bytes elided"
+
+      raised = File.read!(Path.join(evidence, "children/05-probe-up.out"))
+      assert File.read!(Path.join(evidence, "children/05-probe-up.status")) == "raised\n"
+      assert raised =~ "RuntimeError"
+      refute raised =~ "SECRET-TEXT"
+    end
+
+    test "an existing destination is a collision: refused before anything, never adopted" do
+      sfx = suffix()
+      root = tmp_root()
+      evidence = evidence_path()
+      :ok = File.mkdir(evidence)
+      File.write!(Path.join(evidence, "marker"), "kept")
+      log = recorder()
+
+      result =
+        prove(
+          opts(sfx, stub(log, :primary, "sdr_agent_test" <> sfx), root, @lineage,
+            evidence_dir: evidence
+          )
+        )
+
+      assert result == {:error, {:evidence_not_claimed, evidence, :eexist}}
+      assert calls(log) == []
+      refute File.exists?(owned_tmp(root, sfx))
+      assert File.ls!(evidence) == ["marker"]
+    end
+
+    test "only a fresh, confined destination outside the folder and the checkout is accepted" do
+      sfx = suffix()
+      root = tmp_root()
+      base = physical_tmp_root()
+      real = Path.join(base, "real")
+      :ok = File.mkdir(real)
+      :ok = File.ln_s(real, Path.join(base, "alias"))
+      database = "sdr_agent_test" <> sfx
+
+      assert match?(
+               {:ok, _},
+               prove(
+                 opts(sfx, stub(recorder(), :p, database), root, @lineage,
+                   evidence_dir: Path.join(base, "fresh")
+                 )
+               )
+             )
+
+      for {label, bad} <- [
+            {"relative", "evidence"},
+            {"not normalized", Path.join(base, "real/../evidence")},
+            {"a missing parent", Path.join([base, "missing", "evidence"])},
+            {"a symlinked ancestor", Path.join([base, "alias", "evidence"])},
+            {"inside the harness folder", Path.join(owned_tmp(root, sfx), "evidence")},
+            {"the harness folder itself", owned_tmp(root, sfx)},
+            {"inside the checkout", Path.join(@root, "tmp-evidence")},
+            {"not a path", :evidence}
+          ] do
+        log = recorder()
+        result = prove(opts(sfx, stub(log, :p, database), root, @lineage, evidence_dir: bad))
+
+        assert result == {:error, {:invalid_option, :evidence_dir}},
+               "#{label}: #{inspect(result)}"
+
+        assert calls(log) == [], label
+        refute File.exists?(owned_tmp(root, sfx)), label
+      end
+
+      assert File.ls!(real) == [], "nothing was written through the alias"
+    end
+
+    test "a failed export prevents success and keeps the source folder; the evidence is kept" do
+      sfx = suffix()
+      root = tmp_root()
+      evidence = evidence_path()
+      outside = Path.join(physical_tmp_root(), "outside.json")
+      File.write!(outside, ~s({"outside":true}))
+      log = recorder()
+
+      answer = fn
+        {_, :probe, "up_again", _} ->
+          fn ->
+            :ok = File.ln_s(outside, Path.join(owned_tmp(root, sfx), "escape.json"))
+            {:ok, ""}
+          end
+
+        _call ->
+          :default
+      end
+
+      stub = stub(log, :primary, "sdr_agent_test" <> sfx, with_fixtures(root, sfx, answer))
+
+      {outcome, receipts} =
+        prove_with_receipts(opts(sfx, stub, root, @lineage, evidence_dir: evidence))
+
+      assert match?({:error, {:cleanup_failed, {:evidence_incomplete, _}, {:ok, _}}}, outcome),
+             inspect(outcome)
+
+      facts = Map.new(receipts)
+      assert facts["evidence.export"] == "failed"
+      assert facts["cleanup.temp_folder"] == "retained"
+      assert facts["cleanup.temp_folder_retained_reason"] == "evidence_incomplete"
+      assert facts["cleanup.drop_result"] == "ok", "the owned database is still disposed"
+      assert List.last(calls(log)) == {:primary, :drop}
+      assert File.exists?(Path.join(owned_tmp(root, sfx), "fixtures.json")), "source kept"
+      assert File.dir?(evidence), "evidence kept"
+      refute File.exists?(Path.join(evidence, "SHA256SUMS")), "an incomplete export is not sealed"
+      refute File.exists?(Path.join(evidence, "files/escape.json"))
+      assert File.read!(outside) == ~s({"outside":true})
+    end
+
+    test "an unconfirmed child retains everything, and its evidence is still exported" do
+      sfx = suffix()
+      root = tmp_root()
+      evidence = evidence_path()
+      log = recorder()
+
+      answer = fn
+        {_, :probe, "up", _} -> {:timeout, :unconfirmed, "partial"}
+        _call -> :default
+      end
+
+      stub = stub(log, :primary, "sdr_agent_test" <> sfx, with_fixtures(root, sfx, answer))
+
+      {outcome, receipts} =
+        prove_with_receipts(opts(sfx, stub, root, @lineage, evidence_dir: evidence))
+
+      assert match?({:error, {:cleanup_skipped_unconfirmed_child, _, _}}, outcome),
+             inspect(outcome)
+
+      refute Enum.any?(calls(log), &match?({_, :drop}, &1))
+      assert File.dir?(owned_tmp(root, sfx)), "the folder is retained"
+      assert Map.new(receipts)["evidence.export"] == "sealed"
+      sums = sums!(evidence)
+      assert Map.has_key?(sums, "children/05-probe-up.status")
+      assert Map.has_key?(sums, "files/fixtures.json")
+
+      assert File.read!(Path.join(evidence, "children/05-probe-up.status")) ==
+               "timeout:unconfirmed\n"
+    end
+  end
+
+  ## The campaign driver's exit taxonomy (pure; Codex e95a7340 point 5)
+
+  defp classify(facts) do
+    module = SdrAgent.ReleaseMigration.CampaignExit
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :classify, 1),
+      do: Function.capture(module, :classify, 1).(facts),
+      else: {:not_implemented, module}
+  end
+
+  defp target(database, owned, disposition),
+    do: %{database: database, owned: owned, disposition: disposition}
+
+  defp campaign_facts(effects, test, evidence, targets),
+    do: %{effects: effects, test: test, evidence: evidence, targets: targets}
+
+  @campaign_targets ~w(sdr_agent_test_rm0 sdr_agent_test_rm0_demo sdr_agent_test_wm0123456789
+                       sdr_agent_test_wmabcdef0123)
+  @not_created for(
+                 db <- @campaign_targets,
+                 do: %{database: db, owned: false, disposition: :not_created}
+               )
+  @disposed for(db <- @campaign_targets, do: %{database: db, owned: true, disposition: :dropped})
+
+  describe "the campaign exit taxonomy (pure)" do
+    test "rc 0 only for a pass with every exact target disposed and complete evidence" do
+      result = classify(campaign_facts(true, :pass, :complete, @disposed))
+      assert match?(%{rc: 0, leases: :release}, result), inspect(result)
+
+      for {label, facts} <- [
+            {"a failed test", campaign_facts(true, :fail, :complete, @disposed)},
+            {"incomplete evidence", campaign_facts(true, :pass, :incomplete, @disposed)},
+            {"inconsistent evidence", campaign_facts(true, :pass, :inconsistent, @disposed)},
+            {"a retained target",
+             campaign_facts(
+               true,
+               :pass,
+               :complete,
+               List.replace_at(
+                 @disposed,
+                 2,
+                 target("sdr_agent_test_wm0123456789", true, :retained)
+               )
+             )}
+          ] do
+        refute match?(%{rc: 0}, classify(facts)), label
+      end
+    end
+
+    test "rc 3 only when no database or application effect occurred" do
+      assert match?(
+               %{rc: 3, leases: :release},
+               classify(campaign_facts(false, :not_run, :incomplete, @not_created))
+             )
+
+      foreign = List.replace_at(@not_created, 0, target("sdr_agent_test_rm0", false, :foreign))
+
+      assert match?(%{rc: 3}, classify(campaign_facts(false, :not_run, :incomplete, foreign))),
+             "a collision before any effect"
+
+      # A collision after an earlier target was created is never "no effect".
+      later =
+        @disposed
+        |> List.replace_at(2, target("sdr_agent_test_wm0123456789", false, :foreign))
+        |> List.replace_at(3, target("sdr_agent_test_wmabcdef0123", false, :not_created))
+
+      result = classify(campaign_facts(true, :not_run, :complete, later))
+      assert match?(%{rc: 1, leases: :release}, result), inspect(result)
+      assert result.targets == later, "per-target owned/disposition records are kept"
+    end
+
+    test "a partial create or setup failure keeps its records: cleaned is rc 1, retained is rc 4" do
+      partial = List.replace_at(@not_created, 0, target("sdr_agent_test_rm0", true, :dropped))
+
+      assert match?(
+               %{rc: 1, leases: :release},
+               classify(campaign_facts(true, :not_run, :complete, partial))
+             )
+
+      retained = List.replace_at(@not_created, 0, target("sdr_agent_test_rm0", true, :retained))
+      result = classify(campaign_facts(true, :not_run, :complete, retained))
+      assert match?(%{rc: 4, leases: :quarantine}, result), inspect(result)
+      assert result.targets == retained
+    end
+
+    test "uncertainty is rc 5 and keeps every lease, whatever the evidence says" do
+      for {label, facts} <- [
+            {"an incomplete child", campaign_facts(true, :incomplete, :inconsistent, @disposed)},
+            {"an uncertain disposal",
+             campaign_facts(
+               true,
+               :pass,
+               :inconsistent,
+               List.replace_at(
+                 @disposed,
+                 3,
+                 target("sdr_agent_test_wmabcdef0123", true, :uncertain)
+               )
+             )},
+            {"unknown ownership",
+             campaign_facts(
+               true,
+               :fail,
+               :complete,
+               List.replace_at(
+                 @disposed,
+                 1,
+                 target("sdr_agent_test_rm0_demo", :unknown, :uncertain)
+               )
+             )},
+            {"uncertain beside retained",
+             campaign_facts(true, :fail, :complete, [
+               target("a", true, :retained),
+               target("b", true, :uncertain)
+             ])}
+          ] do
+        result = classify(facts)
+        assert match?(%{rc: 5, leases: :keep}, result), "#{label}: #{inspect(result)}"
+      end
+    end
+
+    test "evidence trouble never overrides a retained target, and keeps the primary outcome" do
+      retained =
+        List.replace_at(@disposed, 2, target("sdr_agent_test_wm0123456789", true, :retained))
+
+      result = classify(campaign_facts(true, :fail, :inconsistent, retained))
+      assert match?(%{rc: 4, leases: :quarantine, test: :fail, evidence: :inconsistent}, result)
+
+      result = classify(campaign_facts(true, :fail, :incomplete, @disposed))
+      assert match?(%{rc: 6, leases: :release, test: :fail, evidence: :incomplete}, result)
+    end
+
+    test "facts that cannot be true are refused" do
+      for {label, bad} <- [
+            {"an unowned target dropped",
+             campaign_facts(true, :pass, :complete, [target("a", false, :dropped)])},
+            {"an owned target never created",
+             campaign_facts(true, :pass, :complete, [target("a", true, :not_created)])},
+            {"unknown ownership with a known disposition",
+             campaign_facts(true, :pass, :complete, [target("a", :unknown, :dropped)])},
+            {"no targets", campaign_facts(true, :pass, :complete, [])},
+            {"an unknown test result", campaign_facts(true, :ok, :complete, @disposed)},
+            {"an unknown evidence state", campaign_facts(true, :pass, :sealed, @disposed)},
+            {"effects not a boolean", campaign_facts(:yes, :pass, :complete, @disposed)},
+            {"an extra key",
+             Map.put(campaign_facts(true, :pass, :complete, @disposed), :force, true)}
+          ] do
+        raised =
+          try do
+            classify(bad)
+          rescue
+            error in ArgumentError -> error
+          end
+
+        assert match?(%ArgumentError{}, raised), "#{label}: #{inspect(raised)}"
+      end
+    end
+  end
+
   ## Helpers
+
+  # Whether `ast` contains a call to a function named `name` (local or remote).
+  defp ast_calls?(ast, name) do
+    {_, found?} =
+      Macro.prewalk(ast, false, fn
+        {^name, _, args} = node, _acc when is_list(args) -> {node, true}
+        {{:., _, [_module, ^name]}, _, _args} = node, _acc -> {node, true}
+        node, acc -> {node, acc}
+      end)
+
+    found?
+  end
 
   # The names of a script's top-level calls, in order (as
   # `SdrAgent.Agents.WitnessMigrationHarnessTest`).
