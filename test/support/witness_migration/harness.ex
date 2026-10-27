@@ -36,7 +36,10 @@ defmodule SdrAgent.WitnessMigration.Harness do
        non-empty map of string check results;
     5. cleans up only what it claimed: a normal drop of the owned database
        through `drop.exs` (no `FORCE`, no connection termination), after
-       every child has exited, then the folder.
+       every child has exited, then the folder. The drop child first drains
+       like the standing lane runner's r7b (`drop_flow/1`, protocol v2):
+       only exact `autovacuum worker` backends may remain, inside one fixed
+       monotonic budget, and they are counted, never reported as zero.
 
   **Failures after ownership.** Once the claim has confirmed ownership,
   only failures whose child is proven gone or never started still go
@@ -114,6 +117,7 @@ defmodule SdrAgent.WitnessMigration.Harness do
   @claim_refused 3
   @db1_var "SDR_RELEASE_DB1_SUFFIX"
   @db2_var "SDR_RELEASE_DB2_SUFFIX"
+  @marker_reserve 64
   @output_limit 65_536
   @receipts {__MODULE__, :receipts}
   @target_refused 4
@@ -542,8 +546,8 @@ defmodule SdrAgent.WitnessMigration.Harness do
   **Evidence export.** With `:evidence_dir`, every child is recorded in
   order (`NN-claim`, `NN-migrate-<direction>-<version>`,
   `NN-probe-<state>`, `NN-drop`) with its closed outcome and its output,
-  bounded to 64 KiB (the first and last 32 KiB, with the elided byte
-  count); a runner exception is recorded by its type only, a typed
+  bounded to 64 KiB in total, the marker included (over that, the first
+  and last 32,736 bytes around a `[... <n> bytes elided ...]` line); a runner exception is recorded by its type only, a typed
   pre-spawn refusal by its tag only. On every path after the folder was
   claimed, the harness exports, after the drop (or when none is owed) and
   before the folder is removed: `files/<name>` for each of the folder's
@@ -594,6 +598,11 @@ defmodule SdrAgent.WitnessMigration.Harness do
       (`removed` or `retained`) and `cleanup.temp_folder_retained_reason`
       (`unconfirmed_child`, `drop_failed`, `drop_receipt_invalid`,
       `evidence_incomplete` or `remove_failed`);
+    * only when the drop child reported `drop_protocol` (the r7b drain,
+      `drop_flow/1`): `cleanup.drop_protocol`, `cleanup.blocking_before_drop`,
+      `cleanup.excluded_before_drop` and `cleanup.drain_attempts` (there,
+      `cleanup.backends_before_drop` is the actual count, exact autovacuum
+      workers included);
     * only with `:evidence_dir`: `evidence.claim` (`claimed`),
       `evidence.export` (`sealed` or `failed`) and, when sealed,
       `evidence.files` (the number of files the seal covers);
@@ -1108,8 +1117,10 @@ defmodule SdrAgent.WitnessMigration.Harness do
 
   defp bounded(out) when byte_size(out) <= @output_limit, do: out
 
+  # 64 bytes are reserved for the marker (at most 45: its count has at most
+  # 20 digits), so the whole record never exceeds `@output_limit`.
   defp bounded(out) do
-    half = div(@output_limit, 2)
+    half = div(@output_limit - @marker_reserve, 2)
     elided = byte_size(out) - 2 * half
 
     binary_part(out, 0, half) <>
@@ -1217,36 +1228,341 @@ defmodule SdrAgent.WitnessMigration.Harness do
   ## The drop child's decision (pure; `drop.exs` injects the real effects)
 
   @drop_refused 5
-  @drop_fact ~r/\A(backends_before_drop|database_absent_after_drop)=(\S+)\z/
+  @drop_fact ~r/\A([a-z_]{1,32})=(\S+)\z/
+  @drop_v1 ~w(backends_before_drop database_absent_after_drop)
+  @drop_v2 ~w(backends_before_drop blocking_before_drop database_absent_after_drop drain_attempts
+              drop_protocol excluded_before_drop)
+
+  # The standing lane runner's r7b drain (#201, 425d7c9), and the plain
+  # drop's own declared waits, outside the drain budget.
+  @drain_budget_ms 10_000
+  @drain_max_attempts 10
+  @drain_pause_ms 1_000
+  @drain_connect_ms 2_000
+  @drain_slack_ms 500
+  @drain_min_statement_ms 500
+  @autovacuum "x6175746f76616375756d20776f726b6572"
+  @backends_sql "with a as materialized (select backend_type as t from pg_stat_activity " <>
+                  "where datname = $1), g as (select t, count(*) as n from a group by t) " <>
+                  "select l from (select 0 as k, '' as o, 'backends total=' || " <>
+                  "(select count(*) from a) || ' blocking=' || (select count(*) from a " <>
+                  "where t collate \"C\" is distinct from 'autovacuum worker') || ' groups=' || " <>
+                  "(select count(*) from g) as l union all select 1, v, 'type=' || v || " <>
+                  "' count=' || n from (select case when t is null then 'N' else 'x' || " <>
+                  "encode(convert_to(t, 'UTF8'), 'hex') end as v, n from g) e union all " <>
+                  "select 2, '', 'end groups=' || (select count(*) from g)) z " <>
+                  "order by k, o collate \"C\""
+  @header_line ~r/\Abackends total=(0|[1-9]\d{0,8}) blocking=(0|[1-9]\d{0,8}) groups=(0|[1-9]\d{0,8})\z/
+  @type_line ~r/\Atype=(N|x(?:[0-9a-f]{2})*) count=([1-9][0-9]{0,8})\z/
+  @end_line ~r/\Aend groups=(0|[1-9]\d{0,8})\z/
 
   @doc "The exit status of a drop child that refused (`DROP-REFUSED <label>`)."
   def drop_refused, do: @drop_refused
 
   @doc """
-  The drop child's decision, with injected `effects`: `count_backends`,
-  `storage_down`, `count_present` (zero-arity functions) and `emit` (one
-  receipt line, must return `:ok`). It writes `WM-CHILD
-  backends_before_drop=<n>`, refuses a nonzero count before any drop (no
-  drop and no backend termination), runs the normal `storage_down`, then
-  writes `WM-CHILD database_absent_after_drop=<bool>` and requires the
-  database to be absent. Returns `:ok` or `{:error, reason}`:
-  `{:backends_present, n}`, `{:drop_failed, reason}`,
-  `:database_present_after_drop` or `:receipt_write_failed`.
+  The drop child's fixed bounds: the standing lane runner's r7b drain (one
+  monotonic budget per target, an attempt cap, the pause between
+  observations, each observation's connect allowance, start-up slack and
+  smallest statement/lock timeout), and the plain drop's and absence
+  proof's own connect, statement and lock waits, outside that budget.
   """
-  def drop_flow(effects) do
-    backends = effects.count_backends.()
+  def drop_bounds do
+    %{
+      budget_ms: @drain_budget_ms,
+      max_attempts: @drain_max_attempts,
+      pause_ms: @drain_pause_ms,
+      connect_timeout_ms: @drain_connect_ms,
+      slack_ms: @drain_slack_ms,
+      min_statement_ms: @drain_min_statement_ms,
+      drop_connect_timeout_ms: 10_000,
+      drop_statement_timeout_ms: 120_000,
+      drop_lock_timeout_ms: 10_000
+    }
+  end
 
-    with :ok <- emit(effects, "backends_before_drop=#{backends}"),
-         :ok <- if(backends == 0, do: :ok, else: {:error, {:backends_present, backends}}),
-         :ok <- storage_down(effects),
-         present = effects.count_present.(),
-         :ok <- emit(effects, "database_absent_after_drop=#{present == 0}") do
-      if present == 0, do: :ok, else: {:error, :database_present_after_drop}
+  @doc """
+  The one statement of a drain observation (`$1` is the target's name):
+  it reads `pg_stat_activity` once (a materialized CTE: one snapshot) for
+  exactly that database and prints backend types and counts only (never
+  query text, user, application, address or PID): `backends total=<T>
+  blocking=<B> groups=<G>`, one `type=<N | x<hex of the type's UTF-8
+  bytes>> count=<n>` line per distinct type in byte order (`N` is NULL),
+  then `end groups=<G>`. `B` counts every backend whose type is distinct
+  from exactly `'autovacuum worker'` (byte-wise, `COLLATE "C"`): NULL,
+  empty, custom, case and whitespace variants and every other type block.
+  The label is display text, not the server's internal autovacuum flag, so
+  the plain, non-forced drop stays the final interlock.
+  """
+  def backends_sql, do: @backends_sql
+
+  @doc """
+  The checked reading of one observation's output lines: `{:ok, %{total:,
+  blocking:, groups:, types: [{token, count}]}}` only for exactly the
+  header, `G` distinct type lines and the end line, canonical numbers, type
+  counts summing to the total and this reading's own blocking count (every
+  type except exactly `x` + the hex of `autovacuum worker`) equal to the
+  server's. Otherwise `{:error, why}`: `:not_text`, `:no_header`,
+  `:bad_header`, `:bad_line`, `:repeated_type`, `:line_after_end`,
+  `:no_end`, `:groups_mismatch`, `:total_mismatch` or `:blocking_mismatch`.
+  Empty, truncated or unreconciled output is never a zero.
+  """
+  def parse_backends(lines) when is_list(lines) do
+    with true <- Enum.all?(lines, &is_binary/1) || {:error, :not_text},
+         [header | rest] <- lines,
+         {:ok, counts} <- parse_header(header),
+         {:ok, types, ended} <- parse_types(rest, [], nil),
+         :ok <- reconcile(counts, types, ended) do
+      {total, blocking, groups} = counts
+      {:ok, %{total: total, blocking: blocking, groups: groups, types: Enum.reverse(types)}}
+    else
+      [] -> {:error, :no_header}
+      {:error, _why} = error -> error
     end
   end
 
-  defp emit(effects, fact) do
-    case effects.emit.("WM-CHILD " <> fact) do
+  def parse_backends(_other), do: {:error, :not_text}
+
+  defp parse_header(line) do
+    case Regex.run(@header_line, line) do
+      [_, total, blocking, groups] ->
+        {:ok, {String.to_integer(total), String.to_integer(blocking), String.to_integer(groups)}}
+
+      nil ->
+        {:error, :bad_header}
+    end
+  end
+
+  defp parse_types([], _types, nil), do: {:error, :no_end}
+  defp parse_types([], types, ended), do: {:ok, types, ended}
+
+  defp parse_types([_line | _rest], _types, ended) when ended != nil,
+    do: {:error, :line_after_end}
+
+  defp parse_types([line | rest], types, nil) do
+    case {Regex.run(@type_line, line), Regex.run(@end_line, line)} do
+      {[_, token, count], nil} ->
+        if List.keymember?(types, token, 0),
+          do: {:error, :repeated_type},
+          else: parse_types(rest, [{token, String.to_integer(count)} | types], nil)
+
+      {nil, [_, groups]} ->
+        parse_types(rest, types, String.to_integer(groups))
+
+      _other ->
+        {:error, :bad_line}
+    end
+  end
+
+  defp reconcile({total, blocking, groups}, types, ended) do
+    sum = Enum.sum(for {_token, n} <- types, do: n)
+    own = Enum.sum(for {token, n} <- types, token != @autovacuum, do: n)
+
+    cond do
+      length(types) != groups or ended != groups -> {:error, :groups_mismatch}
+      sum != total -> {:error, :total_mismatch}
+      own != blocking -> {:error, :blocking_mismatch}
+      true -> :ok
+    end
+  end
+
+  @doc """
+  The drop child's decision (protocol v2; Codex db034af6 Q6), with
+  injected `effects`: `clock` (`{:ok, monotonic_ms}`; anything else is
+  unreadable), `observe` (one bounded observation, given its statement and
+  lock timeout in ms: `{:ok, lines}` or `{:error, reason}`), `pause`,
+  `storage_down` (`:ok` or `{:error, reason}`), `count_present`
+  (`{:ok, n}` or `{:error, reason}`) and `emit` (one line, must return
+  `:ok`).
+
+  **The drain** (the r7b protocol): one budget of `drop_bounds/0`'s
+  `budget_ms`, fixed at the first clock read and never renewed. An
+  observation starts only while its connect allowance, slack and smallest
+  statement timeout fit the remaining budget, at most `max_attempts` times,
+  a pause apart; one that ends at or after the deadline is late and not
+  read. Each writes one `WM-DRAIN attempt=` line before its result counts.
+  A valid observation with zero blocking backends is only eligible: one
+  fresh clock read after its line must still be before the deadline. An
+  unreadable or backward clock, a late, failed or malformed observation,
+  an expired budget with blockers, a failed pause or any failed write
+  refuses: no drop, no termination, a `WM-DRAIN retained: <label>` line.
+
+  **Accepted**: `WM-DRAIN accepted attempt=<NN> final_check_elapsed_ms=<n>`
+  and the facts `drop_protocol=2`, `backends_before_drop=<total>` (the
+  actual count, autovacuum workers included: never zeroed),
+  `blocking_before_drop=0`, `excluded_before_drop=<total>` and
+  `drain_attempts=<n>`, all written before the plain `storage_down` (a
+  failed write vetoes it); then the absence proof and
+  `database_absent_after_drop=<bool>`. The drop and the proof keep their
+  own declared waits, outside the drain budget: acceptance does not
+  promise that they finish inside it.
+
+  Returns `:ok` or `{:error, reason}`: `:clock_unreadable`,
+  `:clock_backward`, `:deadline_expired`, `{:observation_failed, reason}`,
+  `{:observation_malformed, why}`, `{:backends_present, blocking}`,
+  `:pause_failed`, `:receipt_write_failed`, `{:drop_failed, reason}`,
+  `{:absence_unproven, reason}` or `:database_present_after_drop`.
+  """
+  def drop_flow(effects) do
+    with {:ok, accepted} <- drain(effects),
+         :ok <- emit_all(effects, accepted_lines(accepted)),
+         :ok <- storage_down(effects) do
+      absence(effects)
+    end
+  end
+
+  defp drain(effects) do
+    result =
+      with {:ok, t0} <- clock(effects, nil),
+           :ok <- emit_line(effects, "WM-DRAIN " <> bounds_line()) do
+        attempt(effects, %{t0: t0, deadline: t0 + @drain_budget_ms, prev: t0, blocking: 0}, 1)
+      end
+
+    with {:error, reason} <- result do
+      _best_effort = effects.emit.("WM-DRAIN retained: " <> drop_refusal_label(reason))
+      result
+    end
+  end
+
+  defp bounds_line do
+    "budget_ms=#{@drain_budget_ms} max_attempts=#{@drain_max_attempts} " <>
+      "pause_ms=#{@drain_pause_ms} connect_timeout_ms=#{@drain_connect_ms} " <>
+      "slack_ms=#{@drain_slack_ms} min_statement_ms=#{@drain_min_statement_ms}"
+  end
+
+  defp attempt(_effects, state, n) when n > @drain_max_attempts,
+    do: {:error, {:backends_present, state.blocking}}
+
+  defp attempt(effects, state, n) do
+    with {:ok, now} <- clock(effects, state.prev),
+         {:ok, ms} <- statement_bound(state.deadline - now) do
+      # The observation first, then its end: a late one is never read.
+      observed = effects.observe.(ms)
+      ended = clock(effects, now)
+      {result, detail, decision} = evaluate(observed, ended, state.deadline)
+      line = attempt_line(n, state, {now, ended, ms}, {result, detail, decision})
+
+      with :ok <- emit_line(effects, line) do
+        decide(effects, decision, state, n)
+      end
+    end
+  end
+
+  # The statement and lock timeout an observation may start with.
+  defp statement_bound(remaining) do
+    ms = remaining - @drain_connect_ms - @drain_slack_ms
+    if ms >= @drain_min_statement_ms, do: {:ok, ms}, else: {:error, :deadline_expired}
+  end
+
+  defp evaluate(_observed, {:error, reason}, _deadline),
+    do: {"invalid", drop_refusal_label(reason), {:retain, reason}}
+
+  defp evaluate(_observed, {:ok, ended}, deadline) when ended >= deadline,
+    do: {"late", "deadline_expired", {:retain, :deadline_expired}}
+
+  defp evaluate({:error, reason}, {:ok, _ended}, _deadline),
+    do: {"failed", "observation_failed", {:retain, {:observation_failed, reason}}}
+
+  defp evaluate({:ok, lines}, {:ok, ended}, deadline) do
+    case parse_backends(lines) do
+      {:ok, parsed} ->
+        {"valid", parsed, valid_decision(parsed, ended, deadline)}
+
+      {:error, why} ->
+        {"malformed", Atom.to_string(why), {:retain, {:observation_malformed, why}}}
+    end
+  end
+
+  defp evaluate(_other, {:ok, _ended}, _deadline),
+    do: {"malformed", "not_text", {:retain, {:observation_malformed, :not_text}}}
+
+  defp valid_decision(%{blocking: 0} = parsed, ended, _deadline), do: {:eligible, parsed, ended}
+
+  defp valid_decision(%{blocking: blocking}, ended, deadline) do
+    room = deadline - ended - @drain_pause_ms - @drain_connect_ms - @drain_slack_ms
+
+    if room >= @drain_min_statement_ms,
+      do: {:recheck, blocking, ended},
+      else: {:retain, {:backends_present, blocking}}
+  end
+
+  # An eligible zero is accepted only by one fresh clock read, after its
+  # parse and its line, still before the deadline fixed at t0.
+  defp decide(effects, {:eligible, parsed, ended}, state, n) do
+    case clock(effects, ended) do
+      {:ok, final} when final < state.deadline ->
+        {:ok, %{attempt: n, final_elapsed: final - state.t0, parsed: parsed}}
+
+      {:ok, _late} ->
+        {:error, :deadline_expired}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp decide(effects, {:recheck, blocking, ended}, state, n) do
+    case effects.pause.() do
+      :ok -> attempt(effects, %{state | prev: ended, blocking: blocking}, n + 1)
+      _failed -> {:error, :pause_failed}
+    end
+  end
+
+  defp decide(_effects, {:retain, reason}, _state, _n), do: {:error, reason}
+
+  defp clock(effects, prev) do
+    case effects.clock.() do
+      {:ok, ms} when is_integer(ms) and (prev == nil or ms >= prev) -> {:ok, ms}
+      {:ok, ms} when is_integer(ms) -> {:error, :clock_backward}
+      _unreadable -> {:error, :clock_unreadable}
+    end
+  end
+
+  defp attempt_line(n, state, {now, ended, ms}, {result, detail, decision}) do
+    end_elapsed =
+      case ended do
+        {:ok, t1} -> Integer.to_string(t1 - state.t0)
+        {:error, _reason} -> ""
+      end
+
+    "WM-DRAIN attempt=#{pad2(n)} start_elapsed_ms=#{now - state.t0} " <>
+      "end_elapsed_ms=#{end_elapsed} remaining_ms=#{state.deadline - now} " <>
+      "statement_timeout_ms=#{ms} lock_timeout_ms=#{ms} result=#{result} " <>
+      "#{detail_text(detail)} decision=#{elem(decision, 0)}"
+  end
+
+  defp detail_text(%{total: total, blocking: blocking, groups: groups, types: types}) do
+    types = Enum.map_join(types, ",", fn {token, n} -> "#{token}:#{n}" end)
+    "detail=[total=#{total} blocking=#{blocking} groups=#{groups}] types=[#{types}]"
+  end
+
+  defp detail_text(label), do: "detail=[#{label}] types=[]"
+
+  defp pad2(n), do: n |> Integer.to_string() |> String.pad_leading(2, "0")
+
+  defp accepted_lines(%{attempt: n, final_elapsed: final, parsed: parsed}) do
+    %{total: total, blocking: blocking} = parsed
+
+    [
+      "WM-DRAIN accepted attempt=#{pad2(n)} final_check_elapsed_ms=#{final}",
+      "WM-CHILD drop_protocol=2",
+      "WM-CHILD backends_before_drop=#{total}",
+      "WM-CHILD blocking_before_drop=#{blocking}",
+      "WM-CHILD excluded_before_drop=#{total - blocking}",
+      "WM-CHILD drain_attempts=#{n}"
+    ]
+  end
+
+  defp emit_all(effects, lines) do
+    Enum.reduce_while(lines, :ok, fn line, :ok ->
+      case emit_line(effects, line) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp emit_line(effects, line) do
+    case effects.emit.(line) do
       :ok -> :ok
       _failed -> {:error, :receipt_write_failed}
     end
@@ -1256,6 +1572,26 @@ defmodule SdrAgent.WitnessMigration.Harness do
     case effects.storage_down.() do
       :ok -> :ok
       {:error, reason} -> {:error, {:drop_failed, reason}}
+      other -> {:error, {:drop_failed, other}}
+    end
+  end
+
+  defp absence(effects) do
+    case effects.count_present.() do
+      {:ok, present} when is_integer(present) and present >= 0 ->
+        absence_fact(effects, present)
+
+      {:error, reason} ->
+        {:error, {:absence_unproven, reason}}
+
+      other ->
+        {:error, {:absence_unproven, other}}
+    end
+  end
+
+  defp absence_fact(effects, present) do
+    with :ok <- emit_line(effects, "WM-CHILD database_absent_after_drop=#{present == 0}") do
+      if present == 0, do: :ok, else: {:error, :database_present_after_drop}
     end
   end
 
@@ -1264,19 +1600,36 @@ defmodule SdrAgent.WitnessMigration.Harness do
   def drop_refusal_label({:drop_failed, _reason}), do: "drop_failed"
   def drop_refusal_label(:database_present_after_drop), do: "database_present_after_drop"
   def drop_refusal_label(:receipt_write_failed), do: "receipt_write_failed"
+  def drop_refusal_label(:clock_unreadable), do: "clock_unreadable"
+  def drop_refusal_label(:clock_backward), do: "clock_backward"
+  def drop_refusal_label(:deadline_expired), do: "deadline_expired"
+  def drop_refusal_label(:pause_failed), do: "pause_failed"
+  def drop_refusal_label({:observation_failed, _reason}), do: "observation_failed"
+  def drop_refusal_label({:observation_malformed, _why}), do: "observation_malformed"
+  def drop_refusal_label({:absence_unproven, _reason}), do: "absence_unproven"
 
   @doc """
-  Strict check of an exit-0 drop child's output: exactly one
-  `backends_before_drop=0` and one `database_absent_after_drop=true`
-  `WM-CHILD` fact. `{:ok, facts}` or `{:error, reason}`, checked in this
-  order: `:facts_malformed` (an unknown key, a bad line or value),
-  `:facts_duplicate`, `:facts_missing`, `:facts_contradictory` (any value
-  other than the successful one).
+  Strict check of an exit-0 drop child's output (its `WM-CHILD` facts),
+  for either receipt version:
+
+    * v1 (unchanged): exactly one `backends_before_drop=0` and one
+      `database_absent_after_drop=true`;
+    * v2 (`drop_flow/1`'s drain; additive): exactly one each of
+      `drop_protocol=2`, `backends_before_drop`, `blocking_before_drop=0`,
+      `excluded_before_drop` equal to `backends_before_drop` (only exact
+      autovacuum workers remained, counted), `drain_attempts` (1 to 10) and
+      `database_absent_after_drop=true`.
+
+  `{:ok, facts}` or `{:error, reason}`, checked in this order:
+  `:facts_malformed` (an unknown key, a bad line or value),
+  `:facts_duplicate`, `:facts_missing` (neither version's exact key set),
+  `:facts_contradictory` (any value other than the successful one).
   """
   def verify_drop_receipt(output) when is_binary(output) do
     lines = for [_, fact] <- Regex.scan(~r/^WM-CHILD (.*)$/m, output), do: fact
     parsed = Enum.map(lines, &parse_drop_fact/1)
     keys = for {:ok, key, _value} <- parsed, do: key
+    facts = Map.new(for {:ok, key, value} <- parsed, do: {key, value})
 
     cond do
       Enum.any?(parsed, &(&1 == :error)) ->
@@ -1285,11 +1638,11 @@ defmodule SdrAgent.WitnessMigration.Harness do
       length(keys) != length(Enum.uniq(keys)) ->
         {:error, :facts_duplicate}
 
-      Enum.sort(keys) != ["backends_before_drop", "database_absent_after_drop"] ->
+      Enum.sort(keys) not in [@drop_v1, @drop_v2] ->
         {:error, :facts_missing}
 
-      successful_drop_facts?(parsed) ->
-        {:ok, Map.new(parsed, fn {:ok, k, v} -> {k, v} end)}
+      successful_drop_facts?(facts) ->
+        {:ok, facts}
 
       true ->
         {:error, :facts_contradictory}
@@ -1305,12 +1658,14 @@ defmodule SdrAgent.WitnessMigration.Harness do
     end
   end
 
-  defp successful_drop_facts?(parsed) do
-    Enum.all?(parsed, fn
-      {:ok, "backends_before_drop", value} -> value == "0"
-      {:ok, "database_absent_after_drop", value} -> value == "true"
-    end)
+  defp successful_drop_facts?(%{"drop_protocol" => "2"} = facts) do
+    facts["blocking_before_drop"] == "0" and
+      facts["backends_before_drop"] == facts["excluded_before_drop"] and
+      facts["database_absent_after_drop"] == "true"
   end
+
+  defp successful_drop_facts?(facts),
+    do: facts["backends_before_drop"] == "0" and facts["database_absent_after_drop"] == "true"
 
   ## Receipts (closed keys; closed or synthetic values only)
 
@@ -1358,8 +1713,10 @@ defmodule SdrAgent.WitnessMigration.Harness do
   def child_outcome({:raised, _reason}), do: "raised"
   def child_outcome(_other), do: "unknown"
 
-  # The drop child's own two facts (`WM-CHILD <key>=<value>` lines), each
+  # The drop child's own facts (`WM-CHILD <key>=<value>` lines), each
   # validated to its closed form; `unreported` when absent or malformed.
+  # The protocol v2 facts are recorded only beside a reported
+  # `drop_protocol` (additive: a v1 receipt records exactly as before).
   defp note_drop_facts(outcome) do
     output =
       case outcome do
@@ -1376,6 +1733,13 @@ defmodule SdrAgent.WitnessMigration.Harness do
       "cleanup.database_absent_after_drop",
       Map.get(facts, "database_absent_after_drop", "unreported")
     )
+
+    if Map.has_key?(facts, "drop_protocol") do
+      for key <- ~w(drop_protocol blocking_before_drop excluded_before_drop drain_attempts),
+          do: note("cleanup." <> key, Map.get(facts, key, "unreported"))
+    end
+
+    :ok
   end
 
   @doc false
@@ -1383,7 +1747,7 @@ defmodule SdrAgent.WitnessMigration.Harness do
   def drop_facts(output) when is_binary(output) do
     for [_, key, value] <-
           Regex.scan(
-            ~r/^WM-CHILD (backends_before_drop|database_absent_after_drop)=(\S+)$/m,
+            ~r/^WM-CHILD ([a-z_]{1,32})=(\S+)$/m,
             output
           ),
         valid_drop_fact?(key, value),
@@ -1395,6 +1759,13 @@ defmodule SdrAgent.WitnessMigration.Harness do
     do: Regex.match?(~r/\A[0-9]{1,6}\z/, value)
 
   defp valid_drop_fact?("database_absent_after_drop", value), do: value in ["true", "false"]
+  defp valid_drop_fact?("drop_protocol", value), do: value == "2"
+
+  defp valid_drop_fact?(count, value) when count in ~w(blocking_before_drop excluded_before_drop),
+    do: Regex.match?(~r/\A(0|[1-9][0-9]{0,5})\z/, value)
+
+  defp valid_drop_fact?("drain_attempts", value), do: Regex.match?(~r/\A([1-9]|10)\z/, value)
+  defp valid_drop_fact?(_unknown, _value), do: false
 
   defp unconfirmed?({:timeout, :unconfirmed, _}), do: true
   defp unconfirmed?({:raised, _}), do: true

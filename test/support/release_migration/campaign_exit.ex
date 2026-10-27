@@ -13,12 +13,20 @@ defmodule SdrAgent.ReleaseMigration.CampaignExit do
     * `test`: `:pass`, `:fail`, `:not_run`, or `:incomplete` (a child or
       the test run whose end is not confirmed);
     * `evidence`: `:complete`, `:incomplete` or `:inconsistent`;
-    * `targets`: a non-empty list, one record per exact target:
+    * `targets`: a non-empty list, one record per exact target, each name
+      distinct and canonical (lower-case `[a-z_][a-z0-9_]*`, at most 63
+      bytes; Codex db034af6 F1):
       `%{database: name, owned: owned, disposition: disposition}`. An owned
       target (`true`: this run created it) is `:dropped`, `:retained` or
       `:uncertain`; an unowned one (`false`) is `:not_created` or `:foreign`
       (it already existed: a collision, never adopted); unknown ownership
       (`:unknown`) is only `:uncertain`.
+
+  `effects: false` beside a positively owned target cannot be true (an
+  owned target was created) and is refused, so it can never reach rc 0
+  (F2); unknown ownership is not a positive record and still keeps. This
+  check is generic over a nonempty distinct list: the driver additionally
+  requires exactly its four pinned names, one record each.
 
   The result is `%{rc:, leases:, test:, evidence:, targets:}`: the primary
   outcome (`test`), the evidence state and every target's own record are
@@ -40,6 +48,9 @@ defmodule SdrAgent.ReleaseMigration.CampaignExit do
   passing campaign.
   """
 
+  # A canonical PostgreSQL database name of this project: lower-case, unquoted,
+  # at most 63 bytes (NAMEDATALEN - 1).
+  @database ~r/\A[a-z_][a-z0-9_]{0,62}\z/
   @evidence [:complete, :incomplete, :inconsistent]
   @keys [:effects, :evidence, :targets, :test]
   @targets [
@@ -55,9 +66,11 @@ defmodule SdrAgent.ReleaseMigration.CampaignExit do
   @doc """
   Classifies one campaign run's `facts` (see the module documentation).
   Raises `ArgumentError` for facts that cannot be true: a missing or extra
-  key, an unknown value, no target, or an ownership/disposition pair
-  outside the closed set (an unowned target dropped, an owned target never
-  created, unknown ownership with a known disposition).
+  key, an unknown value, no target, an ownership/disposition pair outside
+  the closed set (an unowned target dropped, an owned target never
+  created, unknown ownership with a known disposition), an empty,
+  noncanonical or repeated target name, or no effect beside a positively
+  owned target.
   """
   def classify(facts) do
     unless valid?(facts) do
@@ -93,17 +106,31 @@ defmodule SdrAgent.ReleaseMigration.CampaignExit do
 
   defp valid?(%{} = facts) do
     Enum.sort(Map.keys(facts)) == @keys and is_boolean(facts.effects) and
-      facts.test in @tests and facts.evidence in @evidence and valid_targets?(facts.targets)
+      facts.test in @tests and facts.evidence in @evidence and valid_targets?(facts.targets) and
+      consistent_effects?(facts)
   end
 
   defp valid?(_not_a_map), do: false
 
-  defp valid_targets?([_ | _] = targets), do: Enum.all?(targets, &valid_target?/1)
+  # Codex db034af6 F1: one record per distinct, canonical database name.
+  defp valid_targets?([_ | _] = targets),
+    do: Enum.all?(targets, &valid_target?/1) and distinct?(targets)
+
   defp valid_targets?(_none), do: false
 
   defp valid_target?(%{database: database, owned: owned, disposition: disposition} = target)
        when map_size(target) == 3 and is_binary(database),
-       do: {owned, disposition} in @targets
+       do: Regex.match?(@database, database) and {owned, disposition} in @targets
 
   defp valid_target?(_other), do: false
+
+  defp distinct?(targets), do: length(Enum.uniq_by(targets, & &1.database)) == length(targets)
+
+  # Codex db034af6 F2: an owned target is a created one, so "no effect"
+  # beside it cannot be true (and could otherwise reach rc 0). Unknown
+  # ownership is not a positive record: it stays valid, and rc 5 keeps.
+  defp consistent_effects?(%{effects: false, targets: targets}),
+    do: not Enum.any?(targets, &(&1.owned == true))
+
+  defp consistent_effects?(_facts), do: true
 end
