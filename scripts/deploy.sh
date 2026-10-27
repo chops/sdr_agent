@@ -17,15 +17,19 @@
 # - the build uses the build shell's Nix-pinned Elixir, OTP, Hex and rebar3 (never
 #   `mix local.hex`/`local.rebar`) with private Mix, Hex and rebar3 homes inside its
 #   staging directory, records each tool's identity in the deploy log, refuses a changed
-#   mix.lock, and proves root's shared ~/.mix, ~/.hex and rebar3 directories unchanged;
+#   mix.lock, and compares a metadata fingerprint of root's shared ~/.mix, ~/.hex and
+#   rebar3 directories (paths, types, sizes, modes, mtimes; not file content) before and after;
 # - each release keeps its own GC root (its build shell), so rollbacks keep their libs;
 # - the staged release is checked before the running one is touched: tarball checksum,
 #   every ELF file's libraries (fail closed), a root-owned tree the service user can read
 #   and run but not change (it writes only under /var/lib/sdr_agent, RELEASE_TMP
 #   included), the env file parsed identically by systemd and the shell (all 10 keys
-#   present) and matching the reviewed non-secret expectations (key names and ok/FAIL
-#   printed, never a value); migrations, the idempotent hosted seed and the follow-up
+#   present) and matching the reviewed non-secret expectations (the checks themselves print
+#   key names and ok/FAIL only); migrations, the idempotent hosted seed and the follow-up
 #   containment check (D-218 item 9) run from the staged release;
+#   The env file is TRUSTED input (root-owned, from sops): both checks source it as shell,
+#   and the known-key KEY= prefix check is not shell-grammar validation, so a line with
+#   shell code after a known key would run, and could print, when sourced;
 # - after the switch it verifies the *running* process: a new MainPID, local health on
 #   127.0.0.1:4005 through the proxy headers, and the installed release's REVISION;
 # - prune keeps the active release and the newest 3 backups and fails closed.
@@ -72,11 +76,13 @@ check_script() {
 }
 
 # env_semantic_check <env file>: the hosted env file against its reviewed, non-secret
-# expectations (Codex I3). Prints key names and ok/FAIL only, never a value; returns 1 on
-# any failure. Runs on the host as root (shipped with `declare -f`); bash 3.2 compatible
-# and builtins only, so no value reaches another process's arguments. The file is read by
-# sourcing it in a subshell, as the systemd/sh equality check does, and only after every
-# line is a KEY=value of a known key.
+# expectations (Codex I3). Its own checks print key names and ok/FAIL only, never a value;
+# returns 1 on any failure. Runs on the host as root (shipped with `declare -f`); bash 3.2
+# compatible, and its comparisons use builtins only, so no value reaches another process's
+# arguments. TRUSTED INPUT ONLY: it sources the file in a subshell (as the systemd/sh
+# equality step before it already has) once every line starts with a known KEY=; that
+# prefix check is not shell-grammar validation, so shell code after a known key would run,
+# and could print, when sourced. It is no parser for arbitrary or untrusted env files.
 env_semantic_check() {
   (
     file=$1
@@ -101,7 +107,8 @@ env_semantic_check() {
         printf 'env keys: FAIL unparsable line %s\n' "$n"; fail=2
       fi
     done < "$file"
-    # Unknown names or lines are never sourced.
+    # A line without a known KEY= prefix stops this check before its own source (the
+    # equality step in stage_and_check has already sourced the file by then).
     [ "$fail" = 0 ] || exit 1
     for name in $required; do
       case "$seen" in *" $name "*) ;; *) printf 'env keys: FAIL missing %s\n' "$name"; fail=1 ;; esac
@@ -158,8 +165,9 @@ env_semantic_check() {
   )
 }
 
-# shared_tooling_fingerprint <home>: one hash over root's shared Mix, Hex and rebar3
-# directories (paths, types, sizes, modes, mtimes); an absent directory hashes as absent.
+# shared_tooling_fingerprint <home>: a metadata fingerprint (paths, types, sizes, modes,
+# mtimes; not file content) of root's shared Mix, Hex and rebar3 directories; an absent
+# directory hashes as absent.
 shared_tooling_fingerprint() {
   local d
   for d in "$1/.mix" "$1/.hex" "$1/.cache/rebar3" "$1/.config/rebar3"; do
@@ -193,7 +201,7 @@ build() {
     set -euo pipefail
     cd "$STAGE"
     # I2: the build must not touch root's shared Mix/Hex/rebar3 state (other deployments
-    # use it); fingerprinted here and compared after the build.
+    # use it); a metadata fingerprint is taken here and compared after the build.
     shared_before="$(shared_tooling_fingerprint "$HOME")"
     # Flakes only see tracked files: stage the archive in a throwaway repo (owned by
     # root, like the build, so no safe.directory exception is needed). `git add -A` is
@@ -258,8 +266,8 @@ build() {
     ' >&2
     shared_after="$(shared_tooling_fingerprint "$HOME")"
     [ "$shared_before" = "$shared_after" ] \
-      || { echo "the build changed root's shared Mix/Hex/rebar3 directories" >&2; exit 1; }
-    echo "root's shared Mix/Hex/rebar3 directories unchanged (fingerprint $shared_after)" >&2
+      || { echo "the build changed the metadata of root's shared Mix/Hex/rebar3 directories" >&2; exit 1; }
+    echo "root's shared Mix/Hex/rebar3 directories: metadata fingerprint unchanged ($shared_after)" >&2
     sha256sum release.tar.gz | cut -d" " -f1
 BUILDEOF
 )"
@@ -314,7 +322,8 @@ stage_and_check() {
     [ "$n" -gt 0 ] || { echo "no ELF files checked"; exit 1; }
     echo "libraries ok for $n ELF files"
 
-    # systemd and the shell must read the secret env file identically (no values shown),
+    # systemd and the shell must read the secret env file identically (hashes compared, no
+    # values printed by this step; the file is trusted input and is sourced as shell),
     # the 10 required keys and the two optional ones the semantic check reads.
     required='^(DATABASE_URL|SECRET_KEY_BASE|TOKEN_SIGNING_SECRET|PHX_HOST|POOL_SIZE|SDR_ANCHOR_SINKS|POSTMARK_API_KEY|SDR_MAIL_FROM|SDR_LOGIN_ALLOWLIST|SDR_OWNER_EMAIL)='
     keys='^(DATABASE_URL|SECRET_KEY_BASE|TOKEN_SIGNING_SECRET|PHX_HOST|POOL_SIZE|SDR_ANCHOR_SINKS|POSTMARK_API_KEY|SDR_MAIL_FROM|SDR_LOGIN_ALLOWLIST|SDR_OWNER_EMAIL|SDR_MODEL_PROVIDER|SDR_BIND_IP)='
@@ -328,7 +337,8 @@ stage_and_check() {
       || { echo "env file is missing keys"; exit 1; }
     echo "env file parses identically under systemd and sh"
 STAGEEOF
-  # The reviewed non-secret expectations (key names and ok/FAIL only).
+  # The reviewed non-secret expectations (its checks print key names and ok/FAIL only;
+  # trusted input, see env_semantic_check).
   { declare -f env_semantic_check; printf 'env_semantic_check /run/secrets/sdr-agent/env\n'; } \
     | remote 'bash -s' || die "the env file does not match the reviewed expectations; nothing changed"
 }
