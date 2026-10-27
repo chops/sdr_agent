@@ -50,6 +50,7 @@ defmodule SdrAgent.RateLimiterTest do
   end
 
   test "concurrent hits never admit more than the limit" do
+    assert Code.ensure_loaded?(SdrAgent.RateLimiter), "SdrAgent.RateLimiter is not defined"
     key = {:test, make_ref()}
 
     results =

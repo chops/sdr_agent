@@ -190,6 +190,7 @@ defmodule SdrAgentWeb.AuthControllerTest do
 
       System.put_env("SDR_LOGIN_ALLOWLIST", "someone.else@example.test")
       refused = console |> recycle() |> get("/")
+      assert refused.status == 302
       assert redirected_to(refused) == "/sign-in"
     end
 
