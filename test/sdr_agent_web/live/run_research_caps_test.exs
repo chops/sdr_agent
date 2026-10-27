@@ -79,8 +79,18 @@ defmodule SdrAgentWeb.RunResearchCapsTest do
 
   test "a run pinned to the v3 definition is not labelled as capped", %{conn: conn} = ctx do
     legacy = register_v3!(ctx.tenant.id)
-    {:ok, run} = Agents.create_run(AgentsFixtures.run_attrs(legacy), actor: ctx.agent)
+    lead = fixture_lead!(ctx, "01")
+
+    # The run names a real lead, so the page is served (a run whose lead is
+    # unknown is withheld) and the labels below are the page's own.
+    attrs =
+      legacy
+      |> AgentsFixtures.run_attrs()
+      |> Map.merge(%{lead_id: lead.id, campaign_id: ctx.campaign_id})
+
+    {:ok, run} = Agents.create_run(attrs, actor: ctx.agent)
     view = open_run(conn, run)
+    assert has_element?(view, "#run-settings"), "setup: the v3-pinned run's page was not served"
 
     for field <- @enforced do
       assert has_element?(view, "#run-limit-#{field}", "not enforced for this run"),
