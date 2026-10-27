@@ -61,6 +61,21 @@ graph TB
         CalFiles[(Launch record, ticket, E2 evidence<br/>owner-local 0700)]
     end
 
+    subgraph AgentEnv["C2* S1 agent environment agentenv-1: dev only; inert unless SDR_AGENT_ENV=agentenv-1 (ADR-0004 agent-environment amendment)"]
+        AELaunchSh["bin/agent-env<br/>checks and sequencing only: check, provision, run<br/>no reset, drop, reclaim or state write"]
+        AETask["mix sdr.agent_env<br/>closed commands: check, preflight, lease, step, publish, release"]
+        AELauncher["Launcher.check/1 (P0 readiness)<br/>no lease, write, Repo or database<br/>probe/2: loopback 127.0.0.1:4130 only"]
+        AEBootstrap["Bootstrap<br/>preflight, guarded steps create, migrate, seed, probe, publish<br/>validate before effect; one session boundary"]
+        AEState["State<br/>create-only files; acquire_lease, release, classify"]
+        AEBoot["Boot<br/>P2 runtime_config!, start and Repo gates, children per mode"]
+        AEInstance["Instance (P3 boot gate)<br/>init returns :ignore; run: boot marker once per nonce"]
+        AEShutdown["Shutdown (P5)<br/>plan in prep_stop, complete in stop<br/>top, model tree and reaper barrier; one deadline"]
+        AESpendReady["SpendReady<br/>preflight, at_boot, at_start: S1 always refuses"]
+        AESnapshot["OperationSnapshot<br/>one observation per outermost operation (run)<br/>check, bootstrap, provisioning: refuse"]
+        AEFiles[("state/ under HOME/.local/state/sdr-agent/agent-env/agentenv-1<br/>pending, lease, created, environment, step receipts, boot marker, run receipt")]
+        AEDB[("sdr_agent_agentenv on localhost:5520")]
+    end
+
     subgraph External["Local External Process"]
         Claude[App-pinned Claude CLI<br/>Nix store path SDR_CLAUDE_CLI_BIN<br/>stream JSON via llm-proxy-shim]
         OTSCLI[OpenTimestamps CLI 0.7.2]
@@ -70,6 +85,30 @@ graph TB
 
     App --> Oban
     App -. "SDR_MODEL_PROVIDER=claude_cli (dev only): the model server tree, started before Oban" .-> ServerSup
+    App -. "SDR_AGENT_ENV=agentenv-1 (dev only): Boot.check_start! first, then Boot.children per mode (run: base tree; bootstrap and provisioning: Telemetry, Repo, PubSub only)" .-> AEBoot
+    App -. "agent-environment mode only: {Instance, mode} right after the Repo" .-> AEInstance
+    App -. "run mode only: prep_stop plans, stop completes" .-> AEShutdown
+    AELaunchSh -- "each phase a separate VM, with STEP and, once leased, NONCE" --> AETask
+    AELaunchSh -. "run only: PORT=4130 STEP=run mix phx.server, waited for, then release" .-> App
+    AETask -- "check run or provision" --> AELauncher
+    AETask -- "lease bootstrap or run; release" --> AEState
+    AETask -- "declare_step!, then step; preflight; publish" --> AEBootstrap
+    AELauncher -- "classify(root, :unknown)" --> AEState
+    AELauncher -. "claude_cli requested only" .-> AESpendReady
+    AEBootstrap -- "created file, step receipts, environment.json (create-only)" --> AEState
+    AEBootstrap -. "storage_status via the maintenance database postgres; storage_up, migrator, demo seed, tenant read" .-> AEDB
+    AEState --> AEFiles
+    AEBoot -- "config/runtime.exs P2: lease, step order, binding" --> AEState
+    AEBoot -. "forces the Repo target (url, socket, endpoints cleared)" .-> AEDB
+    AEBoot -. "run with claude_cli only: at_boot" .-> AESpendReady
+    AEInstance -- "run: boot marker, created once per nonce" --> AEState
+    AEInstance -. "live name, oid, tenant; run: migration history" .-> AEDB
+    AEInstance -. "run with claude_cli only: at_start" .-> AESpendReady
+    AEShutdown -- "run receipt, only after the termination barrier" --> AEState
+    AEShutdown -. "run with claude_cli: waits for the model server tree and reaper cleanup" .-> ServerSup
+    AgentWorker -. "entry wrappers, run mode: enter/2" .-> AESnapshot
+    Domains -. "entry wrappers, run mode: enter/2" .-> AESnapshot
+    AESnapshot -. "observes lease, environment.json, authorization.json" .-> AEFiles
     ServerSup -- "one named server, started held" --> ClaudeCLIAdapter
     Coordinator -. "start / stop (cleanup receipt) / hold / release_hold" .-> ClaudeCLIAdapter
     Coordinator -- "allocate + mark starts, complete / fail / block, resolve_blocked (bounded LedgerCall)" --> Domains
@@ -156,3 +195,4 @@ graph TB
 - [x] Q0.1 runtime-selected ClaudeCLI server (one named, supervised instance before Oban when `SDR_MODEL_PROVIDER=claude_cli`, dev only; ADR-0004)
 - [x] C2-02b2α model server tree (`ProfileSupervisor`: `ServerSupervisor`, `Coordinator`, `OperationSupervisor`, `:rest_for_one`) and C2-02b2β attended resolution (admin → `Agents.resolve_blocked_switch/3` → `Coordinator.resolve_blocked/2`; dead lease = held hard conflict, never released by code), added by hand 2026-10-15
 - [x] R0-02 app-pinned Claude CLI (`nix/app-claude-cli-package.nix` on the locked nixpkgs, exact reviewed store path and sha256 from `nix/app-claude-cli.identity` in `SDR_CLAUDE_CLI_BIN`, handed to the shim per launch as `LLM_PROXY_SHIM_CLAUDE_BIN`; never `claude` from `PATH`; real calls staged (`real_model_staged`) until R0-03, C9 and R0-07; ADR-0004 R0)
+- [x] C2* S1 agent environment `agentenv-1` (ADR-0004 agent-environment amendment; plan `claude-c2star-s1-environment-plan-r2.md` sections 4-6 and 8.8): `bin/agent-env` and `mix sdr.agent_env` (P0 `Launcher.check/1`, P1 `State` leases, guarded `Bootstrap` steps, P5 `release`), `Boot` (P2 leased configuration from `config/runtime.exs`, the start and Repo gates, the per-mode tree: run keeps the base tree with `{Instance, :run}` after the Repo, bootstrap and provisioning keep only Telemetry, the Repo and PubSub with `{Instance, mode}`), `Instance` (P3 boot gate, `:ignore`), `Shutdown` (P5 plan in `prep_stop/1`, complete in `stop/1`, run receipt only after the termination barrier), `SpendReady` (fail-closed in S1) and `OperationSnapshot` (entry wrappers, run mode); the whole boundary is inert unless `SDR_AGENT_ENV=agentenv-1` in dev, dotted edges are the runtime-only ones conditional on the mode or the provider, added by hand 2026-10-27
