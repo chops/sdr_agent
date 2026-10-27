@@ -51,6 +51,7 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Test.LaunchAdmission
+  alias SdrAgent.Test.ResolveHarness
 
   @coordinator SdrAgent.AI.ModelProvider.Coordinator
   @profile_supervisor SdrAgent.AI.ModelProvider.ProfileSupervisor
@@ -651,29 +652,13 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
     )
   end
 
-  # #235 seam: `await_switch!/4` with the switch read injected, so its
-  # observation path is testable without a database.
-  defp await_switch_with!(read, id, status, timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    await_switch(read, id, status, deadline)
-  end
-
-  defp await_switch(read, id, status, deadline) do
-    {:ok, switches} = read.()
-    current = Enum.find(switches, &(&1.id == id))
-
-    cond do
-      current && current.status == status ->
-        current
-
-      System.monotonic_time(:millisecond) > deadline ->
-        flunk("switch never reached #{status}; last #{inspect(current && current.status)}")
-
-      true ->
-        Process.sleep(20)
-        await_switch(read, id, status, deadline)
-    end
-  end
+  # #235: `await_switch!/4` with the switch read injected, through the
+  # reviewed #188 observation path. One deadline: no read starts after it and
+  # no late match is accepted. Only the exact shared-sandbox queue drop is
+  # transient; any other error fails at once. The matching observation itself
+  # is returned, with no further read.
+  defp await_switch_with!(read, id, status, timeout),
+    do: ResolveHarness.await_switch_with!(read, id, status, timeout)
 
   defp switch_failure(ctx, switch) do
     {:ok, switches} = Agents.list_profile_switches(actor: ctx.admin)
