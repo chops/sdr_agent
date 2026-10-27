@@ -110,6 +110,17 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
     System.cmd(@script, args, env: env(ctx, extra), stderr_to_stdout: true)
   end
 
+  # `name` set but empty. System.cmd's `env:` unsets a variable given "" (an
+  # Erlang port behaviour), so the empty value goes through /usr/bin/env.
+  defp launch_empty(ctx, args, name) do
+    require_script!()
+
+    System.cmd("/usr/bin/env", ["#{name}=", @script | args],
+      env: env(ctx, [{name, nil}]),
+      stderr_to_stdout: true
+    )
+  end
+
   defp env(ctx, extra) do
     base = [
       {"HOME", ctx.home},
@@ -335,7 +346,6 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
 
       for {extra, item} <- [
             {[{"SDR_WITNESS_STORE_ROOT", nil}], "SDR_WITNESS_STORE_ROOT"},
-            {[{"SDR_WITNESS_STORE_ROOT", ""}], "SDR_WITNESS_STORE_ROOT"},
             {[{"SDR_ANCHOR_SINKS", nil}], "SDR_ANCHOR_SINKS"},
             {[{"SDR_ANCHOR_SINKS", "git+ots"}], "SDR_ANCHOR_SINKS"},
             {[{"SDR_ANCHOR_FILE_DIR", nil}], "SDR_ANCHOR_FILE_DIR"},
@@ -346,6 +356,10 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
         assert out =~ item, inspect(extra)
       end
 
+      # Set but empty.
+      assert {out, 2} = launch_empty(ctx, ["run"], "SDR_WITNESS_STORE_ROOT")
+      assert out =~ "SDR_WITNESS_STORE_ROOT"
+
       assert calls(ctx) == []
     end
 
@@ -353,12 +367,15 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
       for {extra, item} <- [
             {[{"SDR_MODEL_PROVIDER", "claude_cli"}], "SDR_MODEL_PROVIDER"},
             {[{"SDR_MODEL_PROVIDER", "bogus"}], "SDR_MODEL_PROVIDER"},
-            {[{"SDR_DEMO_EXCEPTION", "c2star-demo-v4/1"}], "SDR_DEMO_EXCEPTION"},
-            {[{"SDR_DEMO_EXCEPTION", ""}], "SDR_DEMO_EXCEPTION"}
+            {[{"SDR_DEMO_EXCEPTION", "c2star-demo-v4/1"}], "SDR_DEMO_EXCEPTION"}
           ] do
         assert {out, 2} = launch(ctx, ["provision"], extra), inspect(extra)
         assert out =~ item, inspect(extra)
       end
+
+      # Set but empty: still a demo exception variable, so still refused.
+      assert {out, 2} = launch_empty(ctx, ["provision"], "SDR_DEMO_EXCEPTION")
+      assert out =~ "SDR_DEMO_EXCEPTION"
 
       assert calls(ctx) == []
     end
