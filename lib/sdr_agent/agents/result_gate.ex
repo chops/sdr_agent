@@ -445,7 +445,8 @@ defmodule SdrAgent.Agents.ResultGate do
     end
   end
 
-  defp exception_error(%Ash.Error.Invalid{errors: errors} = error) do
+  # A refused decide comes back as its changeset or as the error class.
+  defp exception_error(%{errors: errors} = error) when is_list(errors) do
     case Enum.find(errors, &match?(%DemoExceptionRefused{}, &1)) do
       %DemoExceptionRefused{code: code} -> {:demo_exception_refused, code}
       nil -> error
