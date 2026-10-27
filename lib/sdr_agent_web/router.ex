@@ -15,9 +15,11 @@ defmodule SdrAgentWeb.Router do
     plug :load_from_session
   end
 
-  # Sign-in pages and auth routes (Codex M2, M3): never cached, no referrer;
+  # Sign-in pages and auth routes (Codex M2, M3): the request process is
+  # tagged sensitive (crash reports withheld), never cached, no referrer;
   # magic-link requests bounded per client before the request action.
   pipeline :auth_edge do
+    plug SdrAgentWeb.SensitiveAuth
     plug SdrAgentWeb.AuthPageHeaders
     plug SdrAgentWeb.MagicLinkRequestLimit
   end
@@ -68,6 +70,7 @@ defmodule SdrAgentWeb.Router do
     # admin). A magic link is mailed only to an existing user on
     # SDR_LOGIN_ALLOWLIST (`SdrAgent.Accounts.Senders.MagicLink`).
     sign_in_route auth_routes_prefix: "/auth",
+                  on_mount_prepend: [SdrAgentWeb.SensitiveAuth],
                   on_mount: [{SdrAgentWeb.LiveUserAuth, :live_no_user}],
                   overrides: [
                     SdrAgentWeb.AuthOverrides,
@@ -78,6 +81,7 @@ defmodule SdrAgentWeb.Router do
     # scanners that follow links cannot spend the single-use token.
     magic_sign_in_route(SdrAgent.Accounts.User, :magic_link,
       auth_routes_prefix: "/auth",
+      on_mount_prepend: [SdrAgentWeb.SensitiveAuth],
       on_mount: [{SdrAgentWeb.LiveUserAuth, :live_no_user}],
       overrides: [SdrAgentWeb.AuthOverrides, AshAuthentication.Phoenix.Overrides.Default]
     )

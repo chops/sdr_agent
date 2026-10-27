@@ -17,6 +17,8 @@ defmodule SdrAgent.Application do
     # ADR-0005 C4 amendment: crash reports and error logs never carry raw
     # database or Ash error values.
     :ok = SdrAgent.Logger.ExceptionFilter.attach()
+    # A connected LiveView mount logs its session filtered (no bearer token).
+    :ok = SdrAgentWeb.LiveViewMountLog.install()
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
