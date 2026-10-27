@@ -4,7 +4,9 @@ defmodule SdrAgent.TestSupport.RawLogTest do
   waiting for an expected one stays in the capture the secrecy assertions
   scan, the wait runs against one monotonic deadline however many
   unrelated events arrive, and a wait can be correlated to one process, so
-  an unrelated event is never accepted in its place.
+  an unrelated event is never accepted in its place. A secret is found
+  anywhere in an event's terms, even where an Inspect implementation
+  would hide it.
   """
   # A :logger handler sees every process's events.
   use ExUnit.Case, async: false
@@ -78,5 +80,14 @@ defmodule SdrAgent.TestSupport.RawLogTest do
     assert event.meta[:pid] == target
     refute event.meta[:pid] == other
     assert Enum.any?(RawLog.drain(ref), &(&1.meta[:pid] == other)), "the other event was dropped"
+  end
+
+  test "a secret inside a struct whose Inspect hides it is still found" do
+    secret = sentinel()
+    socket = %Phoenix.LiveView.Socket{private: %{operator_session: %{"user_token" => secret}}}
+    refute inspect(socket) =~ secret, "the fixture really hides the field from inspect"
+
+    event = %{level: :error, msg: {:string, "x"}, meta: %{crash_reason: {:boom, [socket]}}}
+    assert RawLog.contains?(event, secret)
   end
 end
