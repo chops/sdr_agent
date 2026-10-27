@@ -2,10 +2,11 @@ defmodule SdrAgent.Accounts.Preparations.LimitLinkRequests do
   @moduledoc """
   Bounds magic-link requests before anything is minted or sent (Codex M3),
   on `SdrAgent.Accounts.User`'s `:request_magic_link`, ahead of the
-  strategy's request preparation: at most 30 requests in total per 10
-  minutes and 3 per destination address per 15 minutes
-  (`SdrAgent.RateLimiter`, keyed by the sha256 of the trimmed, lowercased
-  address). Every request counts — listed, unknown or malformed — so the
+  strategy's request preparation: at most 30 requests in total per fixed
+  10-minute window and 3 per destination address per fixed 15-minute
+  window (`SdrAgent.RateLimiter`: aligned UTC buckets on this node, not a
+  rolling cooldown, reset on restart; keyed by the sha256 of the trimmed,
+  lowercased address). Every request counts — listed, unknown or malformed — so the
   bound reveals nothing about who exists or is listed. Over a bound the
   query matches nobody: no token is minted, no mail is sent, and the
   caller gets the same empty result; a warning names neither the address

@@ -1,8 +1,9 @@
 defmodule SdrAgentWeb.MagicLinkRequestLimit do
   @moduledoc """
   Bounds unauthenticated magic-link requests per client before the request
-  action runs (Codex M3): at most 5 per client address per 10 minutes
-  (`SdrAgent.RateLimiter`). Over the limit it answers exactly as an
+  action runs (Codex M3): at most 5 per client address per fixed 10-minute
+  window (`SdrAgent.RateLimiter`: aligned UTC buckets on this node, not a
+  rolling cooldown, reset on restart). Over the limit it answers exactly as an
   accepted request does (`SdrAgentWeb.AuthController.link_requested/1`) and
   halts, so nothing is read, minted or sent. The destination and global
   bounds are enforced in the domain, before minting
