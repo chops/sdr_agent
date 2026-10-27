@@ -47,6 +47,16 @@ defmodule SdrAgent.Agents.DemoException.EligibilityTest do
   RED report labels: `control: ...` passes now and after GREEN; every other
   test fails on its guard (structural: `Eligibility`, `DemoException` and
   `DemoException.Authorization` are absent at this head).
+
+  GREEN-1 coverage correction (Codex S3-G1, review ff583bd7): GREEN-1
+  (6839ac61) implemented the whole E4 predicate, beyond the comparison
+  subset RED-1 covered. The describe "E4 implemented guards" was added
+  AFTER that GREEN, so it is not a RED of it: it gives each implemented
+  guard (link, claim, identity, capture) a passing control and refusal
+  cases, and documents the cases the WitnessEvidence contract already
+  refuses (`:contract` premise). Its intended-reason evidence is a separate,
+  disclosed transient diagnostic in which the four guards' results are
+  ignored.
   """
   use ExUnit.Case, async: true
 
@@ -389,6 +399,195 @@ defmodule SdrAgent.Agents.DemoException.EligibilityTest do
             do: {"reason_codes #{inspect(codes)}", evidence(%{"reason_codes" => codes})}
 
       assert_refused(cases)
+    end
+  end
+
+  ## E4 implemented guards (GREEN-1 coverage correction, Codex S3-G1)
+
+  # Each case is {label, link, invocation, premise}. `:guard`: the WitnessEvidence
+  # contract accepts the evidence (validate/1 unchanged, validate_claim/1 and the
+  # exact extracted group), so only one of e4/2's own guards can refuse it.
+  # `:contract`: the contract already refuses it (documented premise; not a
+  # distinct guard).
+
+  defp e4_for(link, invocation), do: call(@eligibility, :e4, [link, invocation])
+
+  defp contract_accepts?(evidence) do
+    is_map(evidence) and WitnessEvidence.validate(evidence) == {:ok, evidence} and
+      WitnessEvidence.validate_claim(evidence) == :ok and
+      WitnessEvidence.exact_v4_group?(extracted(evidence))
+  end
+
+  defp premise?(evidence, :guard), do: contract_accepts?(evidence)
+  defp premise?(evidence, :contract), do: not contract_accepts?(evidence)
+
+  defp evidence_case(label, evidence, premise), do: {label, link(evidence), invocation(), premise}
+
+  defp link_cases do
+    base = link(evidence())
+
+    [
+      {"another invocation's link",
+       %{base | model_invocation_id: "019b8eac-0aaa-7bbb-8ccc-0000000000ef"}, invocation(),
+       :guard},
+      {"link_status :reconciled", %{base | link_status: :reconciled}, invocation(), :guard},
+      {"link_status :mismatch", %{base | link_status: :mismatch}, invocation(), :guard},
+      {"method :time_window", %{base | method: :time_window}, invocation(), :guard}
+    ]
+  end
+
+  defp claim_cases do
+    base = evidence()
+    no_counts = Map.drop(base, ~w(response_thinking_count response_redacted_thinking_count))
+
+    guard =
+      for(
+        classification <- ~w(ancillary unclassified ambiguous),
+        do: {"classification #{classification}", %{base | "classification" => classification}}
+      ) ++
+        [
+          {"projection_version absent (a downgrade keeps the group)",
+           Map.delete(base, "projection_version")},
+          {"projections_inapplicable []", %{base | "projections_inapplicable" => []}},
+          {"projections_inapplicable [v2, v3]",
+           %{base | "projections_inapplicable" => ["v2", "v3"]}},
+          {"projections_inapplicable absent", Map.delete(base, "projections_inapplicable")}
+        ] ++
+        for layout <- ~w(reasoning_overflow text_count_invalid block_after_text
+                         block_type_unsupported reasoning_unparsed) do
+          {"layout #{layout}", Map.put(no_counts, "response_layout", layout)}
+        end
+
+    contract =
+      [
+        {"projection v3", %{base | "projection_version" => @v3}},
+        {"projection v3 without the R group",
+         base |> Map.drop(@r_keys) |> Map.put("projection_version", @v3)},
+        {"projection v1",
+         %{base | "projection_version" => "claude-message-json/1+prompt-builder/1"}}
+      ] ++
+        for {thinking, redacted} <- [{0, 0}, {4, 1}, {5, 0}, {"1", 0}] do
+          {"block counts #{inspect({thinking, redacted})}",
+           %{
+             base
+             | "response_thinking_count" => thinking,
+               "response_redacted_thinking_count" => redacted
+           }}
+        end
+
+    Enum.map(guard, fn {label, e} -> evidence_case(label, e, :guard) end) ++
+      Enum.map(contract, fn {label, e} -> evidence_case(label, e, :contract) end)
+  end
+
+  defp identity_cases do
+    base = evidence()
+
+    evidence_side =
+      [
+        {"evidence cli_version differs", %{base | "cli_version" => "2.1.295"}},
+        {"evidence profile_id differs", %{base | "profile_id" => "claude_cli_sonnet"}},
+        {"evidence model_id differs", %{base | "model_id" => "claude-sonnet-5-5"}},
+        {"app_request_sha256 differs", %{base | "app_request_sha256" => hex("another request")}},
+        {"app_response_sha256 differs",
+         %{base | "app_response_sha256" => hex("another response")}}
+      ] ++
+        for key <- ~w(model_id profile_id app_request_sha256 app_response_sha256),
+            do: {"evidence #{key} absent", Map.delete(base, key)}
+
+    invocation_side = [
+      {"invocation CLI version differs", %{invocation() | provider_version: "2.1.295"}},
+      {"invocation profile differs", %{invocation() | profile_id: :claude_cli_sonnet}},
+      {"invocation model differs", %{invocation() | model_id: "claude-sonnet-5-5"}},
+      {"invocation without a response commitment", %{invocation() | response_sha256: nil}},
+      {"generation-1 invocation (empty identity map)", %{invocation() | ledger_generation: 1}}
+    ]
+
+    Enum.map(evidence_side, fn {label, e} -> evidence_case(label, e, :guard) end) ++
+      Enum.map(invocation_side, fn {label, inv} -> {label, link(base), inv, :guard} end)
+  end
+
+  defp capture_cases do
+    base = evidence()
+
+    flags =
+      for key <- ~w(request_capture_complete response_capture_complete stream_complete) do
+        [{"#{key} false", %{base | key => false}}, {"#{key} absent", Map.delete(base, key)}]
+      end
+
+    cases =
+      List.flatten(flags) ++
+        [
+          {"outcome incomplete", %{base | "outcome" => "incomplete"}},
+          {"outcome timed_out", %{base | "outcome" => "timed_out"}},
+          {"http_status 500", %{base | "http_status" => 500}},
+          {"http_status 206", %{base | "http_status" => 206}},
+          {"unreviewed proxy_version 0.1.9", %{base | "proxy_version" => "0.1.9"}},
+          {"proxy_version absent", Map.delete(base, "proxy_version")}
+        ]
+
+    Enum.map(cases, fn {label, e} -> evidence_case(label, e, :guard) end)
+  end
+
+  defp malformed_cases do
+    base = evidence()
+
+    [
+      {"nil evidence", nil},
+      {"list evidence", []},
+      {"string evidence", "evidence"},
+      {"an atom key (validate/1 would normalize it, so it is not unchanged)",
+       base |> Map.delete("outcome") |> Map.put(:outcome, "complete")}
+    ]
+    |> Enum.map(fn {label, e} -> evidence_case(label, e, :contract) end)
+  end
+
+  # Premises first, then the guard, then the matched base, then every case.
+  # All cases are evaluated and the not-refused ones reported together.
+  defp assert_cases_refused(cases) do
+    for {label, link, _invocation, premise} <- cases do
+      assert premise?(link.evidence, premise), "#{label}: premise #{premise} must hold"
+    end
+
+    implemented!(@eligibility, :e4, 2)
+    base = e4_for(link(evidence()), invocation())
+    assert base == :ok, "the matched base must pass E4 first; got #{inspect(base)}"
+
+    not_refused =
+      cases
+      |> Enum.map(fn {label, link, invocation, _premise} ->
+        {label, e4_for(link, invocation)}
+      end)
+      |> Enum.reject(fn {_label, result} -> result == {:refused, :link_not_eligible} end)
+
+    assert not_refused == [],
+           "must be refused as link_not_eligible: #{inspect(not_refused, pretty: true)}"
+  end
+
+  describe "E4 implemented guards (GREEN-1 coverage correction, Codex S3-G1)" do
+    test "control: the matched link of the invocation passes E4" do
+      assert contract_accepts?(evidence())
+      implemented!(@eligibility, :e4, 2)
+      assert e4_for(link(evidence()), invocation()) == :ok
+    end
+
+    test "link: another invocation, another link_status or another method is refused" do
+      assert_cases_refused(link_cases())
+    end
+
+    test "claim: non-primary, not v4, another inapplicable list, another layout or bad counts is refused" do
+      assert_cases_refused(claim_cases())
+    end
+
+    test "identity: CLI, profile, model, request or response commitment, or identity map differs" do
+      assert_cases_refused(identity_cases())
+    end
+
+    test "capture: an incomplete flag, outcome or status, or an unreviewed proxy version is refused" do
+      assert_cases_refused(capture_cases())
+    end
+
+    test "malformed or non-map evidence fails closed (contract-covered)" do
+      assert_cases_refused(malformed_cases())
     end
   end
 
