@@ -1,11 +1,12 @@
 defmodule SdrAgent.RateLimiterTest do
   @moduledoc """
   The fixed-window request limiter (`SdrAgent.RateLimiter`, an ETS table
-  owned by a supervised process): a key admits `limit` hits per window and
-  refuses the rest until the next window; keys are independent; the clock
-  is `SdrAgent.Clock` (injectable) or an explicit instant; retention is
-  bounded — expired windows are swept and the table holds at most
-  `max_keys/0` live keys (a new key beyond that is refused, fail closed).
+  owned by a supervised process): a key admits `limit` hits per fixed UTC
+  window and refuses the rest until the next window; keys are independent;
+  the clock is `SdrAgent.Clock` (injectable) or an explicit instant;
+  retention is bounded — expired windows are swept and the table never
+  holds more than `max_keys/0` rows, even when distinct new keys race (a
+  new key beyond that is refused); an unavailable table refuses every hit.
   """
   # The limiter's table is node-global.
   use ExUnit.Case, async: false
@@ -93,5 +94,49 @@ defmodule SdrAgent.RateLimiterTest do
     assert :limited = limiter(:hit, [{:fill, 1}, 1, @window, @t0])
     assert limiter(:sweep, [@t0 + 2 * @window]) == max
     assert :ok = limiter(:hit, [{:fill, :one_more}, 1, @window, @t0 + 2 * @window])
+  end
+
+  test "distinct new keys racing for the last free rows never exceed max_keys" do
+    max = limiter(:max_keys, [])
+    free = 5
+
+    for n <- 1..(max - free), do: assert(:ok = limiter(:hit, [{:fill, n}, 1, @window, @t0]))
+
+    # All racers start together (a barrier), each with its own new key.
+    parent = self()
+
+    racers =
+      for n <- 1..64 do
+        spawn_link(fn ->
+          receive do
+            :go -> send(parent, {:raced, limiter(:hit, [{:race, n}, 1, @window, @t0])})
+          end
+        end)
+      end
+
+    Enum.each(racers, &send(&1, :go))
+
+    results =
+      for _ <- racers do
+        assert_receive {:raced, result}, 5_000
+        result
+      end
+
+    assert Enum.count(results, &(&1 == :ok)) == free
+    assert :limited = limiter(:hit, [{:fill, :late}, 1, @window, @t0])
+    # Exactly max_keys rows were held.
+    assert limiter(:sweep, [@t0 + 2 * @window]) == max
+  end
+
+  test "an unavailable limiter refuses every hit (fail closed)" do
+    assert :ok = Supervisor.terminate_child(SdrAgent.Supervisor, SdrAgent.RateLimiter)
+
+    try do
+      assert :limited = limiter(:hit, [{:test, make_ref()}, 5, @window, @t0])
+    after
+      {:ok, _pid} = Supervisor.restart_child(SdrAgent.Supervisor, SdrAgent.RateLimiter)
+    end
+
+    assert :ok = limiter(:hit, [{:test, make_ref()}, 5, @window, @t0])
   end
 end

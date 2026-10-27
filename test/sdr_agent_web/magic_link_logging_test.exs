@@ -110,4 +110,66 @@ defmodule SdrAgentWeb.MagicLinkLoggingTest do
     refute log =~ token
     refute log =~ "/magic_link/ey"
   end
+
+  # Crashes the connected view by an event it does not handle (as a
+  # malformed or hostile client message would) and returns the captured log.
+  defp crash(view) do
+    Process.flag(:trap_exit, true)
+
+    capture_log([level: :debug], fn ->
+      catch_exit(render_hook(view, "no-such-event", %{"x" => "1"}))
+      ref = Process.monitor(view.pid)
+      assert_receive {:DOWN, ^ref, _, _, _}, 2_000
+      Process.sleep(100)
+    end)
+  end
+
+  test "a crashing confirmation page reports no token (OTP report withheld)", ctx do
+    {:ok, token} =
+      AshAuthentication.Strategy.MagicLink.request_token_for(
+        AshAuthentication.Info.strategy!(SdrAgent.Accounts.User, :magic_link),
+        ctx.reviewer
+      )
+
+    {:ok, view, _html} = live(build_conn(), "/magic_link/#{token}")
+    log = crash(view)
+
+    # Positive control: a report about the crash was emitted.
+    assert log =~ ~r/terminating|diagnostic withheld/
+    refute log =~ token
+  end
+
+  test "a crashing sign-in page reports no typed password or address", ctx do
+    {:ok, view, _html} = live(build_conn(), "/sign-in")
+    typed = "typed-secret-" <> Integer.to_string(System.unique_integer([:positive]))
+
+    view
+    |> element("#user-password-sign-in-with-password")
+    |> render_change(%{"user" => %{"email" => ctx.email, "password" => typed}})
+
+    log = crash(view)
+
+    assert log =~ ~r/terminating|diagnostic withheld/
+    refute log =~ typed
+    refute String.downcase(log) =~ String.downcase(ctx.email)
+  end
+
+  test "an authenticated console mount at :debug logs no session token", ctx do
+    assert redirected_to(request(ctx.email)) == "/sign-in"
+    assert_received {:email, %{text_body: body}}
+    [_, token] = Regex.run(~r{/magic_link/([A-Za-z0-9._-]+)}, body)
+    signed_in = post(build_conn(), "/auth/user/magic_link", %{"user" => %{"token" => token}})
+    session_token = get_session(signed_in, "user_token")
+    assert is_binary(session_token)
+
+    log =
+      capture_log([level: :debug], fn ->
+        {:ok, _view, _html} = signed_in |> recycle() |> live("/")
+      end)
+
+    # Positive control: the connected mount was logged at :debug.
+    assert log =~ "MOUNT SdrAgentWeb.DashboardLive"
+    refute log =~ session_token
+    refute log =~ token
+  end
 end
