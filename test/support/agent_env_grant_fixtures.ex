@@ -238,18 +238,22 @@ defmodule SdrAgent.Test.AgentEnvGrantFixtures do
   A configured agent environment with one registry entry and its claim.
   Options: `mode:` (`:provisioning`, default, or `:run`); `lease:` (default
   the mode; `:none`); `nonce:` (default the lease's); `database_oid:`
-  (`:live`); `entry:`; `entries:` (default `[entry]`); `claim:` (`true`;
-  `false` writes none); `claim_overrides:`. Returns `%{root, bound, entry,
-  digest, claim}`.
+  (`:live`); `tenant_id:` (the environment's attested tenant; default the
+  singleton tenant); `entry:`; `entries:` (default `[entry]`); `claim:`
+  (`true`; `false` writes none); `claim_overrides:`. Returns `%{root, bound,
+  entry, digest, claim}`.
   """
   def provisioning_env!(opts \\ []) do
     mode = Keyword.get(opts, :mode, :provisioning)
     root = AgentEnvFixtures.root!("s2")
 
     bound =
-      AgentEnvFixtures.bound!(root,
-        lease: Keyword.get(opts, :lease, mode),
-        database_oid: Keyword.get(opts, :database_oid, :live)
+      AgentEnvFixtures.bound!(
+        root,
+        [
+          lease: Keyword.get(opts, :lease, mode),
+          database_oid: Keyword.get(opts, :database_oid, :live)
+        ] ++ Keyword.take(opts, [:tenant_id])
       )
 
     AgentEnvFixtures.configure!(root, mode: mode, nonce: Keyword.get(opts, :nonce, bound.nonce))

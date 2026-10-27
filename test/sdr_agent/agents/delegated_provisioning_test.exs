@@ -17,8 +17,12 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
       by PRV. Control: the owner-form `create_grant/2` is unchanged.
     * **refusals (T-G2):** every other actor, and PRV without an
       attestation, attested for another id, outside the agent environment,
-      of another tenant, for an unknown id or on a bare action call, is
-      `Forbidden` (audited where the call is guarded). An expired or
+      for an unknown id or on a bare action call, is `Forbidden` (audited
+      where the call is guarded). The tenant boundary (Codex M1): a
+      foreign-tenant PRV at the raw action inside a genuine registration,
+      and the singleton tenant's PRV against an environment attesting a
+      different tenant on the guarded domain route (one denial in the
+      actor's own tenant), each after a positive registration prerequisite. An expired or
       invalid entry, an extra input, a supplied private argument, a live
       database oid other than the binding's (T-B3, S2 half) and another
       authorization already provisioned (OQ8) are a typed
@@ -56,6 +60,13 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
   mode and action (update_terms, release_allocation) is its own test. The
   guarded refusals assert one `authz.denied` each, appended after rollback,
   with no write and no success event (Q6).
+
+  RED-2 M1 correction (Codex `563e240e`): the former foreign-tenant domain
+  test (a PRV of a nonexistent tenant through the guarded route) is
+  replaced by the two tenant-boundary tests above. Its refusal would reach
+  Guard's denial append for a tenant with no audit chain, which raises
+  (`{:error, :chain_not_initialized}` against `{:ok, _}`) under any
+  implementation; that Guard defect is tracked separately.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -177,6 +188,16 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
   end
 
   defp denials(ctx), do: length(events_of_type(ctx.tenant, "authz.denied"))
+
+  # Inside `within/2`: the registration, by assertion.
+  defp registration! do
+    result = current()
+
+    assert match?({:ok, _attestation}, result),
+           "c2star-s2: no registration inside within/2: #{inspect(result)}"
+
+    elem(result, 1)
+  end
 
   # The raw action, as a caller could build it: for the input and
   # private-argument refusals, which the domain API cannot express.
@@ -382,10 +403,52 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
       assert_nothing_provisioned(ctx, "unconfigured")
     end
 
-    test "PRV of another tenant is Forbidden", ctx do
+    # Codex M1 (`563e240e`): the tenant boundary is checked at two places,
+    # neither of which asks Guard to append a denial to a tenant with no
+    # audit chain (a separately tracked Guard defect, not tested here).
+
+    test "a foreign-tenant PRV at the raw action, inside a genuine registration, is Forbidden",
+         ctx do
       foreign = prv(Ecto.UUID.generate())
-      assert_forbidden(provision(ctx.env.entry.id, actor: foreign), "another tenant")
-      assert_nothing_provisioned(ctx, "another tenant")
+      require_action!(ModelCallGrant, :provision_delegated)
+
+      result =
+        within(ctx.env.entry.id, fn ->
+          {:registered, registration!(), raw_provision(ctx.env.entry.id, foreign, %{}, [])}
+        end)
+
+      assert match?({:registered, _registration, _refused}, result), inspect(result)
+      {:registered, registration, refused} = result
+
+      # Prerequisite: a genuine active registration of the same-tenant
+      # environment, so no level-:none failure can stand in for the policy.
+      assert {registration.level, registration.tenant_id} == {:provisioning, ctx.tenant.id},
+             "c2star-s2: prerequisite: no genuine registration: #{inspect(registration)}"
+
+      # The raw action is not guarded: no audit-denial guarantee is claimed.
+      assert_forbidden(refused, "foreign-tenant PRV, raw action")
+      assert_nothing_provisioned(ctx, "foreign-tenant PRV, raw action")
+    end
+
+    test "PRV of a tenant other than the attested tenant is Forbidden and audited once", ctx do
+      attested_tenant = Ecto.UUID.generate()
+      env = provisioning_env!(tenant_id: attested_tenant)
+      assert env.bound.tenant_id == attested_tenant, "fixture: the attested tenant"
+      prv = prv(ctx.tenant)
+      registration = within(env.entry.id, &registration!/0)
+
+      # Prerequisite: a genuine active registration naming the other tenant.
+      assert match?(%{level: :provisioning, tenant_id: ^attested_tenant}, registration),
+             "c2star-s2: prerequisite: no registration naming the attested tenant: " <>
+               inspect(registration)
+
+      before = denials(ctx)
+      assert_forbidden(provision(env.entry.id, actor: prv), "PRV tenant != attested tenant")
+
+      assert denials(ctx) == before + 1,
+             "c2star-s2: the refusal was not audited once in the actor's tenant"
+
+      assert_nothing_provisioned(ctx, "PRV tenant != attested tenant")
     end
 
     test "an unknown authorization id is Forbidden", ctx do
