@@ -28,6 +28,10 @@ defmodule SdrAgent.SDR.Model do
   written by the gate). When the gate could not commit, the halt is
   `:result_not_released`: no output, and the run is left running for run
   recovery (`SdrAgent.SDR.StaleRunSweeper`), never a success or a crash.
+
+  Every request is built with `content_capture: :off` (B1-04/B1-05, C4-R12):
+  SDR inputs may carry run settings text, which then reaches only the model
+  request Payload, never a GenAI content event.
   """
 
   alias SdrAgent.Agents
@@ -81,6 +85,8 @@ defmodule SdrAgent.SDR.Model do
       prompt: Prompts.render(purpose, input),
       schema: Schemas.for_purpose(purpose),
       input: input,
+      # B1: SDR inputs may carry run settings text (C4-R12); no content events.
+      content_capture: :off,
       audit: %{
         purpose: purpose,
         parameters: %{},

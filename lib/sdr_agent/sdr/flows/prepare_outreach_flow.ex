@@ -1,7 +1,8 @@
 defmodule SdrAgent.SDR.Flows.PrepareOutreachFlow do
   @moduledoc """
   PrepareOutreachFlow (spec §7): EvidenceBundle → ICP → trigger → angle →
-  draft → validate claims → validate personalization → OutreachProposal.
+  draft → validate claims → validate personalization → validate shape →
+  OutreachProposal.
   One Jido Flow, one agent turn (`sdr.draft.requested`):
 
     * "bundle" — `LoadEvidenceBundle` (accepted claims, current qualification);
@@ -12,6 +13,8 @@ defmodule SdrAgent.SDR.Flows.PrepareOutreachFlow do
       and `draft_proposal` Decisions;
     * "claims" — `ValidateClaims`, "personalization" —
       `ValidatePersonalization`: deterministic evidence checks;
+    * "shape" — `ValidateDraftShape` (B1-05): the deterministic subject/body
+      shape rule, bound to the exact draft;
     * "proposal" — `HandOffProposal`: enrollment gate, lead → in_outreach,
       `sdr.draft.completed` to S8; returns the complete agent state.
 
@@ -60,6 +63,10 @@ defmodule SdrAgent.SDR.Flows.PrepareOutreachFlow do
         claims: result("bundle", :claims)
       }
 
+    step "shape",
+      action: Actions.ValidateDraftShape,
+      params: %{lead_id: input(:lead_id), draft: result("draft")}
+
     step "proposal",
       action: Actions.HandOffProposal,
       params: %{
@@ -67,6 +74,7 @@ defmodule SdrAgent.SDR.Flows.PrepareOutreachFlow do
         draft: result("draft"),
         claims_check: result("claims"),
         personalization_check: result("personalization"),
+        shape_check: result("shape"),
         plan: result("icp")
       }
 
