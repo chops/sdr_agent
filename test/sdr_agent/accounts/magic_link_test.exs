@@ -136,6 +136,26 @@ defmodule SdrAgent.Accounts.MagicLinkTest do
     refute match?({:ok, %User{}}, sign_in(token))
   end
 
+  test "one address gets at most three links per fifteen minutes; the refusal omits it", ctx do
+    allow(ctx.email)
+    t0 = DateTime.utc_now()
+    SdrAgent.Clock.freeze(t0)
+
+    for _ <- 1..3 do
+      assert :ok = request(ctx.email)
+      capture_token()
+    end
+
+    log = capture_log(fn -> assert :ok = request(ctx.email) end)
+    refute_email_sent()
+    assert log =~ "magic link refused"
+    refute String.downcase(log) =~ String.downcase(ctx.email)
+
+    SdrAgent.Clock.freeze(DateTime.add(t0, 15, :minute))
+    assert :ok = request(ctx.email)
+    capture_token()
+  end
+
   test "the password strategy still signs in", ctx do
     allow(ctx.email)
     assert {:ok, %User{id: id}} = Accounts.sign_in(ctx.email, test_password())
