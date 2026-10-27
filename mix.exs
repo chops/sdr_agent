@@ -13,8 +13,16 @@ defmodule SdrAgent.MixProject do
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader],
       usage_rules: usage_rules(),
-      consolidate_protocols: Mix.env() != :dev
+      consolidate_protocols: Mix.env() != :dev,
+      releases: releases()
     ]
+  end
+
+  # The hosted deployment (scripts/deploy.sh): one Unix release; bin/server
+  # and bin/migrate come from rel/overlays, Erlang distribution is off
+  # (rel/env.sh.eex).
+  defp releases do
+    [sdr_agent: [include_executables_for: [:unix]]]
   end
 
   # Configuration for the OTP application.
