@@ -21,6 +21,10 @@ defmodule SdrAgent.Agents.DemoException do
   `effective_window/3` intersects the policy window and the environment end
   with one funded call's authorization, grant and allocation.
 
+  `admission_window/4` is the admission guard (item 3) for one real call. It
+  applies at reservation and at launch while the selector is on, with the
+  provider startup timeout of `provider_timeout_ms/1`.
+
   Test-seam builds only (`:claude_cli_test_seams`, config/test.exs): while
   `config :sdr_agent, SdrAgent.Test.DemoExceptionSource` is set, `source/0`
   is that test double, and its `:authorization_id` (a string, when set)
@@ -34,7 +38,9 @@ defmodule SdrAgent.Agents.DemoException do
   alias SdrAgent.Agents.DemoException.Authorization
   alias SdrAgent.Agents.DemoException.Unattested
   alias SdrAgent.Agents.ModelCallGrant
+  alias SdrAgent.Agents.ResultGate
   alias SdrAgent.Agents.WireWitnessLink
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Operations.Failure
@@ -147,6 +153,102 @@ defmodule SdrAgent.Agents.DemoException do
 
   defp optional(bounds, nil), do: bounds
   defp optional(bounds, %DateTime{} = bound), do: [bound | bounds]
+
+  @fallback_timeout_ms 240_000
+  @min_timeout_ms 1_000
+  @launch_margin_ms 60_000
+
+  @doc """
+  The admission guard (ADR-0005 C2* item 3; AC11) for one real ClaudeCLI
+  call at `now`. `grant` and `allocation` are the call's own: selected at
+  reservation, or charged at launch. T is `provider_timeout_ms(server)` for
+  the ClaudeCLI `server` (a name or pid) whose startup timeout bounds the
+  call.
+
+  With the selector off it returns `:ok` and reads nothing. With the
+  selector on it returns `:ok` only when `effective_starts_at ≤ now <
+  effective_expires_at − (T + ResultGate.wait_ms() + 60_000 ms)`, over
+  `effective_window/3`. Otherwise it returns `{:error, check}`:
+
+    * `:authorization_unavailable`: the entry names no authorization, or
+      the Source has no well-formed one registered for it;
+    * `:not_started`;
+    * `:launch_margin`.
+
+  It reads only the entry's authorization id and the Source's
+  `authorization/1` registry lookup. It is a scheduling guard, not an
+  authority check: it consults no attestation, live binding or delegation,
+  and a delegated grant is no exemption (Codex 64240c0f rulings 2 and 3).
+  It takes no lock and does no I/O.
+  """
+  @spec admission_window(map(), map(), DateTime.t(), atom() | pid()) ::
+          :ok | {:error, :authorization_unavailable | :not_started | :launch_margin}
+  def admission_window(grant, allocation, %DateTime{} = now, server) do
+    if selected?(), do: window_check(grant, allocation, now, server), else: :ok
+  end
+
+  defp window_check(grant, allocation, now, server) do
+    with {:ok, authorization} <- registered_authorization() do
+      {starts_at, expires_at} = effective_window(grant, allocation, authorization)
+      margin = provider_timeout_ms(server) + ResultGate.wait_ms() + @launch_margin_ms
+      last = DateTime.add(expires_at, -margin, :millisecond)
+
+      cond do
+        DateTime.compare(starts_at, now) == :gt -> {:error, :not_started}
+        DateTime.compare(now, last) != :lt -> {:error, :launch_margin}
+        true -> :ok
+      end
+    end
+  end
+
+  # The shipped entry names no authorization (a constant nil outside test
+  # builds), so it is tested through `inert?/0`, never by a guard on the id
+  # that the dev build's type checker would prove unmatchable. The Source's
+  # answer must be that authorization, with its window bounds.
+  defp registered_authorization do
+    if inert?(),
+      do: {:error, :authorization_unavailable},
+      else: lookup_authorization(entry().authorization_id)
+  end
+
+  defp lookup_authorization(id) do
+    case authorization(id) do
+      {:ok, %Authorization{id: ^id, starts_at: %DateTime{}, expires_at: %DateTime{}} = found} ->
+        {:ok, found}
+
+      _unavailable ->
+        {:error, :authorization_unavailable}
+    end
+  end
+
+  @doc """
+  The provider startup timeout T (ms) of the admission guard (OQ10): the
+  validated `:timeout` that the ClaudeCLI `server` (a name or pid) actually
+  runs, as it published it (`ClaudeCLI.effective_timeout/1`). A server
+  started without `:timeout` runs, and so publishes, the module's 120_000.
+
+  With no running server, T is the configured `:timeout` (`config
+  :sdr_agent, SdrAgent.AI.ModelProvider.ClaudeCLI`, the value
+  `Runtime.server_options/1` passes the app's server), when it is an
+  integer of at least 1000 (the server's own rule). Otherwise it is
+  240_000; the no-server fallback is never the module's 120_000.
+
+  It never messages the server, and no caller option can lower it.
+  """
+  @spec provider_timeout_ms(atom() | pid()) :: pos_integer()
+  def provider_timeout_ms(server) do
+    case ClaudeCLI.effective_timeout(server) do
+      timeout when is_integer(timeout) -> timeout
+      nil -> configured_timeout_ms()
+    end
+  end
+
+  defp configured_timeout_ms do
+    case :sdr_agent |> Application.get_env(ClaudeCLI, []) |> Keyword.get(:timeout) do
+      timeout when is_integer(timeout) and timeout >= @min_timeout_ms -> timeout
+      _unset_or_invalid -> @fallback_timeout_ms
+    end
+  end
 
   @policy_id "c2star-demo-v4/1"
   @refusal_codes [

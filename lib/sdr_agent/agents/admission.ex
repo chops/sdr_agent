@@ -50,15 +50,21 @@ defmodule SdrAgent.Agents.Admission do
   the tenant has an open switch, read fresh under the head; at launch also
   the epoch rule); then `:no_eligible_grant` (no grant passes the
   grant checks), `:no_allocation` (an eligible grant, but no allocation for
-  this profile, bucket and time), `:ambiguous_allocation`, and
+  this profile, bucket and time) and `:ambiguous_allocation`. Next, while
+  the C2* selector is on, comes the demo-exception window
+  (`:demo_exception_window`, with check `:authorization_unavailable`,
+  `:not_started` or `:launch_margin`; `DemoException.admission_window/4` on
+  the selected grant and allocation). Last is
   `{:budget_exhausted, :grant | :grant_day | :allocation}`. The gate's
   checks come before the grant checks: they mean this build or
-  configuration may not spend, which no grant can fix.
+  configuration may not spend, which no grant can fix. The window comes
+  before room, so it wins over room exhaustion.
 
   `record_refusal/1` then commits the refusal on its own, after the
   reservation rolled back: one deduplicated Failure of the run —
   `budget_exhausted` for a grant refusal, `provider_error` for an
-  admission-gate refusal — and a `model.reservation.refused` audit event
+  admission refusal (`admission_reason?/1`) — and a
+  `model.reservation.refused` audit event
   (metadata only).
   """
 
@@ -67,10 +73,12 @@ defmodule SdrAgent.Agents.Admission do
   alias SdrAgent.Actor
   alias SdrAgent.Agents.Admission.Gate
   alias SdrAgent.Agents.Admission.SwitchFence
+  alias SdrAgent.Agents.DemoException
   alias SdrAgent.Agents.ModelCallAllocation
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.UsageBucket
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.Audit.Kernel
@@ -256,6 +264,7 @@ defmodule SdrAgent.Agents.Admission do
          {:ok, grants} <- eligible_grants(refusal, candidate_ids, now),
          {:ok, grant, allocation} <- one_allocation(refusal, grants, now),
          :ok <- bound_allocation(refusal, allocation, binding),
+         :ok <- demo_window(refusal, grant, allocation, now),
          :ok <- room(%{refusal | grant_id: grant.id, allocation_id: allocation.id}, grant, now) do
       {:ok,
        %{
@@ -323,6 +332,28 @@ defmodule SdrAgent.Agents.Admission do
     do: if(allocation.id == binding.allocation_id, do: :ok, else: mismatch(refusal))
 
   defp mismatch(refusal), do: {:error, %{refusal | reason: :calibration_grant_mismatch}}
+
+  # C2* S3 (AC11; Codex 64240c0f ruling 4): the demo-exception window guard
+  # on the call's own selected grant and allocation. It comes after the grant
+  # and allocation checks and before room, so it wins over room exhaustion.
+  # T is the app's named ClaudeCLI server's published startup timeout
+  # (`DemoException.provider_timeout_ms/1`).
+  defp demo_window(refusal, grant, allocation, now) do
+    case DemoException.admission_window(grant, allocation, now, ClaudeCLI.server()) do
+      :ok ->
+        :ok
+
+      {:error, check} ->
+        {:error,
+         %{
+           refusal
+           | reason: :demo_exception_window,
+             check: check,
+             grant_id: grant.id,
+             allocation_id: allocation.id
+         }}
+    end
+  end
 
   # Recorded only next to an admitted calibration tuple, from the marker.
   defp binding_record(nil, _binding), do: nil
@@ -441,7 +472,13 @@ defmodule SdrAgent.Agents.Admission do
       `:grant_revoked`, `:grant_not_started`, `:grant_expired`,
       `:profile_not_in_grant`, `:allocation_not_in_grant`,
       `:allocation_profile_restricted`, `:bucket_not_applicable` or
-      `:allocation_unavailable`.
+      `:allocation_unavailable`;
+    * while the C2* selector is on, `:demo_exception_window` (C2* S3, AC11).
+      Its check is `:authorization_unavailable`, `:not_started` or
+      `:launch_margin`. It is `DemoException.admission_window/4` on the
+      charged grant and allocation, after their checks. T is the startup
+      timeout published by the calling process, which is the launching
+      ClaudeCLI server.
   """
   def launch_check(run, invocation, effective_profile, now, store, expected \\ nil) do
     cond do
@@ -567,10 +604,21 @@ defmodule SdrAgent.Agents.Admission do
 
   defp launch_terms(run, invocation, now) do
     with {:ok, grant} <- launch_grant(invocation, run.tenant_id, now),
-         :ok <- launch_allocation(invocation, grant, run, now) do
-      :ok
+         {:ok, allocation} <- launch_allocation(invocation, grant, run, now) do
+      launch_window(grant, allocation, now)
     else
       {:error, check} -> {:error, :grant_ineligible_at_launch, check}
+    end
+  end
+
+  # C2* S3 (AC11; Codex 64240c0f ruling 4): the same window guard, after the
+  # charged grant and allocation checks, on those rows. Launch admission runs
+  # in the launching ClaudeCLI server's own process, so T is the startup
+  # timeout that server published. Elsewhere it is the configured fallback.
+  defp launch_window(grant, allocation, now) do
+    case DemoException.admission_window(grant, allocation, now, self()) do
+      :ok -> :ok
+      {:error, check} -> {:error, :demo_exception_window, check}
     end
   end
 
@@ -605,7 +653,7 @@ defmodule SdrAgent.Agents.Admission do
         {:error, :allocation_unavailable}
 
       true ->
-        :ok
+        {:ok, allocation}
     end
   end
 
@@ -771,8 +819,15 @@ defmodule SdrAgent.Agents.Admission do
     :ok
   end
 
-  @doc "Whether `reason` is an R0-07 admission-gate refusal (a `provider_error` Failure)."
-  def admission_reason?(reason), do: reason in Gate.reasons() or reason in fence_reasons()
+  @doc """
+  Whether `reason` is an admission refusal (a `provider_error` Failure,
+  stopping the run `:model_not_admitted`): an R0-07 admission-gate reason,
+  the profile switch fence's, or the C2* demo-exception window's.
+  """
+  def admission_reason?(reason),
+    do:
+      reason in Gate.reasons() or reason in fence_reasons() or
+        reason in demo_exception_reasons()
 
   @doc """
   The model profile switch fence's refusal reasons (C2-02b1,
@@ -780,6 +835,14 @@ defmodule SdrAgent.Agents.Admission do
   `provider_error` and stopping the run `:model_not_admitted`.
   """
   def fence_reasons, do: SwitchFence.reasons()
+
+  @doc """
+  The C2* demo-exception admission guard's refusal reasons (S3, R5):
+  `[:demo_exception_window]`, with a check of `:authorization_unavailable`,
+  `:not_started` or `:launch_margin`. They are admission reasons, in S3's
+  own list rather than the gate's or the fence's.
+  """
+  def demo_exception_reasons, do: [:demo_exception_window]
 
   defp failure_class(reason),
     do: if(admission_reason?(reason), do: :provider_error, else: :budget_exhausted)
@@ -829,6 +892,11 @@ defmodule SdrAgent.Agents.Admission do
   defp message(%{reason: reason} = refusal) when reason in [:profile_switch_fenced] do
     "model call not admitted: #{reason_name(reason)} (#{check_label(refusal.check)}) " <>
       "(profile #{refusal.profile_id}); a model profile switch is in progress"
+  end
+
+  defp message(%{reason: :demo_exception_window} = refusal) do
+    "model call not admitted: demo_exception_window (#{check_label(refusal.check)}) " <>
+      "(profile #{refusal.profile_id}); the demo exception window leaves no time for this call"
   end
 
   defp message(refusal) do

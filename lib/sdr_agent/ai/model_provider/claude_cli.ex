@@ -58,6 +58,11 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   profile is published like the admission (`profile/1`), so `prepare/2`
   reads it without waiting behind a running call.
 
+  The validated startup `:timeout` is published the same way
+  (`effective_timeout/1`): C2* S3 (OQ10) takes the demo-exception launch
+  margin from the value a server actually runs, and a server started
+  without `:timeout` runs and publishes the module default.
+
   ## Launch admission and the sent boundary (C9-03)
 
   The facade leaves a ClaudeCLI call `reserved` and hands the server its
@@ -340,6 +345,30 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
   def profile(_server), do: nil
 
+  @doc """
+  The validated startup `:timeout` (ms) that `server` runs, as it published
+  it at start. `server` is a registered name or any server's pid, as for
+  `admission/1`. Returns nil when it is not running, or when the pid is no
+  server. Never blocks on a running call, and never messages the server.
+  A server started without `:timeout` runs, and so publishes, the module
+  default. This is C2* S3 OQ10: the demo-exception launch margin
+  (`SdrAgent.Agents.DemoException.provider_timeout_ms/1`).
+  """
+  def effective_timeout(server) when is_atom(server) do
+    case :ets.lookup(server, :timeout) do
+      [{:timeout, timeout}] -> timeout
+      [] -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  def effective_timeout(server) when is_pid(server) do
+    if Process.alive?(server), do: published(server, :timeout)
+  end
+
+  def effective_timeout(_server), do: nil
+
   defp admission_view(:open), do: %{admission: :open}
   defp admission_view({:blocked, reason}), do: %{admission: :blocked, reason: reason}
 
@@ -372,7 +401,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   `SdrAgent.AI.ModelProvider.Runtime.status/0`'s bracket (S1 and S2):
   `{:ok, %{table, owner, registered, values}}` (the table id, its owner,
   the pid registered as `name` or nil, and every published value:
-  `:profile`, `:held`, `:reaper`, `:admission`, `:attestation`), `:absent`
+  `:profile`, `:timeout`, `:held`, `:reaper`, `:admission`, `:attestation`), `:absent`
   when no table has that name, or `:error` when it vanished mid-read. The
   caller checks the owner against the registered pid and its own binding;
   the identity (a ref and pids) must never reach a caller's status.
@@ -566,6 +595,7 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     }
 
     publish(state, :profile, profile.id)
+    publish(state, :timeout, timeout)
     publish(state, :held, not is_nil(state.hold))
     state = state |> await_predecessor() |> admit()
     preflight(state)
