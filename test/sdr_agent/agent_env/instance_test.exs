@@ -24,11 +24,17 @@ defmodule SdrAgent.AgentEnv.InstanceTest do
       (`:run_nonce_already_booted`), as does an existing run receipt for
       the nonce (`:run_receipt_exists`, P5-2(a) and (b) at P3); neither
       overwrites a file. Non-run modes write no marker and no binding.
+    * **run readiness** (Codex c9a6f6c7 R3), before the marker: the
+      configured suppression check must be the Outreach Store
+      (`SdrAgent.SDR.SuppressionCheck.Store`), and with ClaudeCLI selected
+      `SpendReady.at_start/1` must pass (S1: it never does). A refusal writes
+      no marker, binding or receipt and changes no existing file.
 
   Reasons: `:database_name_mismatch`, `:database_oid_mismatch` and
   `:tenant_mismatch` (as `SdrAgent.AgentEnv.check_live_binding/2` and
   `check_tenant/2`), `:migration_not_in_build`, `:undeclared_step`,
-  `:step_mode_mismatch`, `:run_nonce_already_booted`, `:run_receipt_exists`.
+  `:step_mode_mismatch`, `:run_nonce_already_booted`, `:run_receipt_exists`,
+  `:suppression_check_not_store`, `:agent_env_not_spend_ready`.
 
   RED: `SdrAgent.AgentEnv.Instance` and `SdrAgent.AgentEnv.Boot` do not
   exist (structural, guarded after the fixtures).
@@ -43,6 +49,10 @@ defmodule SdrAgent.AgentEnv.InstanceTest do
 
   @instance SdrAgent.AgentEnv.Instance
   @boot SdrAgent.AgentEnv.Boot
+  @store SdrAgent.SDR.SuppressionCheck.Store
+  @no_store SdrAgent.SDR.SuppressionCheck.NoStore
+  @fake SdrAgent.AI.ModelProvider.Fake
+  @claude_cli SdrAgent.AI.ModelProvider.ClaudeCLI
 
   setup do
     tenant = bootstrap!()
@@ -267,5 +277,58 @@ defmodule SdrAgent.AgentEnv.InstanceTest do
       assert File.read!(receipt) == bytes
       assert_no_boot_side_effects(ctx)
     end
+  end
+
+  ## Run readiness at P3 (Codex c9a6f6c7 R3; plan r2 section 4.5)
+
+  describe "readiness: run" do
+    test "a suppression check other than the Outreach Store refuses the boot", ctx do
+      bound = run_mode!(ctx)
+      assert Application.get_env(:sdr_agent, :suppression_check) == @store, "precondition"
+      before = state_digests(ctx.root)
+
+      for {label, arrange} <- [
+            no_store: fn -> Application.put_env(:sdr_agent, :suppression_check, @no_store) end,
+            unconfigured: fn -> Application.delete_env(:sdr_agent, :suppression_check) end
+          ] do
+        arrange.()
+
+        assert init(:run) == {:stop, :suppression_check_not_store},
+               "C2* S1 P3: #{label} must refuse the run boot"
+
+        assert_no_run_boot(ctx, bound, before)
+      end
+    end
+
+    test "ClaudeCLI selected: SpendReady.at_start/1 refuses the boot (S1 fail-closed)", ctx do
+      bound = run_mode!(ctx)
+      Fx.authorized!(ctx.root)
+      Application.put_env(:sdr_agent, :model_provider, @claude_cli)
+      before = state_digests(ctx.root)
+
+      assert init(:run) == {:stop, :agent_env_not_spend_ready}
+      assert_no_run_boot(ctx, bound, before)
+    end
+
+    test "control: the Fake with the Store passes the same readiness", ctx do
+      run_mode!(ctx)
+      assert Application.get_env(:sdr_agent, :model_provider) == @fake, "precondition"
+      assert Application.get_env(:sdr_agent, :suppression_check) == @store, "precondition"
+
+      assert init(:run) == :ignore
+    end
+  end
+
+  defp state_digests(root) do
+    Map.new(BootFx.state_files(root), fn name ->
+      {name, BootFx.file_sha256!(Path.join([root, "state", name]))}
+    end)
+  end
+
+  # No marker, binding or receipt, and every existing file byte-identical.
+  defp assert_no_run_boot(ctx, bound, before) do
+    assert_no_boot_side_effects(ctx)
+    refute File.exists?(BootFx.run_receipt_path(ctx.root, bound.nonce))
+    assert state_digests(ctx.root) == before, "C2* S1 P3: a refused boot overwrites nothing"
   end
 end
