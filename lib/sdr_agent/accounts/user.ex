@@ -19,6 +19,14 @@ defmodule SdrAgent.Accounts.User do
   (`auth.sign_in.succeeded` / `auth.sign_in.failed`, the latter anonymous
   with only the email's sha256).
 
+  Magic links (the hosted owner's passwordless sign-in), also without
+  registration: `:request_magic_link` mails a single-use link to an
+  existing active user, through `SdrAgent.Accounts.Senders.MagicLink`, which
+  sends only to addresses on `SDR_LOGIN_ALLOWLIST`; opening it shows a
+  confirmation button (`require_interaction?`), and
+  `:sign_in_with_magic_link` signs in an active user once, audited like a
+  password sign-in (strategy `magic_link`).
+
   Actions and actors:
 
     * `:create_user` — ADM (guarded); `:seed` — SEED in dev/test only;
@@ -49,6 +57,7 @@ defmodule SdrAgent.Accounts.User do
     # including when users are loaded as relationships.
     primary_read_warning?: false
 
+  alias AshAuthentication.Strategy.MagicLink
   alias AshAuthentication.Strategy.Password
   alias SdrAgent.Accounts.Checks.IsSelf
   alias SdrAgent.Audit.Changes.AppendEvent
@@ -78,6 +87,21 @@ defmodule SdrAgent.Accounts.User do
         hash_provider AshAuthentication.BcryptProvider
         registration_enabled? false
         sign_in_tokens_enabled? false
+      end
+
+      # Hosted owner sign-in: a link mailed to an existing, active user (no
+      # registration; the explicit actions below filter on status and audit
+      # every sign-in). The sender mails only to SDR_LOGIN_ALLOWLIST.
+      # Registration being disabled for both strategies, no account can be
+      # pre-registered by someone else, so no confirmation add-on is needed.
+      magic_link :magic_link do
+        identity_field :email
+        registration_enabled? false
+        require_interaction? true
+        single_use_token? true
+        request_action_name :request_magic_link
+        sign_in_action_name :sign_in_with_magic_link
+        sender SdrAgent.Accounts.Senders.MagicLink
       end
     end
   end
@@ -147,6 +171,38 @@ defmodule SdrAgent.Accounts.User do
       filter expr(status == :active)
       prepare Password.SignInPreparation
       prepare SdrAgent.Accounts.Preparations.AuditSignIn
+
+      metadata :token, :string do
+        description "A JWT that can be used to authenticate the user."
+        allow_nil? false
+      end
+    end
+
+    read :request_magic_link do
+      description "Mail a sign-in link to an active user (allowlisted addresses only); always returns nothing."
+
+      argument :email, :ci_string do
+        description "The email of the user requesting a sign-in link."
+        allow_nil? false
+      end
+
+      filter expr(status == :active)
+      prepare MagicLink.RequestPreparation
+    end
+
+    read :sign_in_with_magic_link do
+      description "Sign in an active user with a single-use link token; every attempt is audited."
+      get? true
+
+      argument :token, :string do
+        description "The token from the mailed sign-in link."
+        allow_nil? false
+        sensitive? true
+      end
+
+      filter expr(status == :active)
+      prepare MagicLink.SignInPreparation
+      prepare {SdrAgent.Accounts.Preparations.AuditSignIn, strategy: "magic_link"}
 
       metadata :token, :string do
         description "A JWT that can be used to authenticate the user."

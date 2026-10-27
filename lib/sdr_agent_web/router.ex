@@ -56,14 +56,30 @@ defmodule SdrAgentWeb.Router do
     sign_out_route AuthController, "/sign-out",
       overrides: [SdrAgentWeb.AuthOverrides, AshAuthentication.Phoenix.Overrides.Default]
 
-    # Password sign-in only: registration, reset, confirmation and magic
-    # links are not offered (S2 User: operators are created by an admin).
+    # Password or magic-link sign-in only: registration, reset and
+    # confirmation are not offered (S2 User: operators are created by an
+    # admin). A magic link is mailed only to an existing user on
+    # SDR_LOGIN_ALLOWLIST (`SdrAgent.Accounts.Senders.MagicLink`).
     sign_in_route auth_routes_prefix: "/auth",
                   on_mount: [{SdrAgentWeb.LiveUserAuth, :live_no_user}],
                   overrides: [
                     SdrAgentWeb.AuthOverrides,
                     AshAuthentication.Phoenix.Overrides.Default
                   ]
+
+    # The page a mailed link opens: one button signs in (POST), so mail
+    # scanners that follow links cannot spend the single-use token.
+    magic_sign_in_route(SdrAgent.Accounts.User, :magic_link,
+      auth_routes_prefix: "/auth",
+      on_mount: [{SdrAgentWeb.LiveUserAuth, :live_no_user}],
+      overrides: [SdrAgentWeb.AuthOverrides, AshAuthentication.Phoenix.Overrides.Default]
+    )
+  end
+
+  # Liveness probe for the deploy script and the proxy: no session, no
+  # database read.
+  scope "/", SdrAgentWeb do
+    get "/health", HealthController, :show
   end
 
   pipeline :webhook do
