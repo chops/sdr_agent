@@ -235,7 +235,7 @@ defmodule SdrAgent.AgentEnv.SnapshotNestingTest do
     test "handoff_ready!/2 stops at B1's hand-off boundary with its six current params", ctx do
       {params, sdr} = Fx.handoff_ready!(ctx, "01")
 
-      assert HandOffProposal.sdr_action_version() == "2"
+      assert HandOffProposal.sdr_action_version() == "3"
       assert params |> Map.keys() |> Enum.sort() == @handoff_params
       assert %{passed: true} = params.claims_check
       assert %{passed: true} = params.personalization_check
