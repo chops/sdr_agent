@@ -49,25 +49,41 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
   exact receipt; a terminal run gets the release only (R3). One attempt:
   no recursion. A refusal or a database error returns `{:error, reason}`
   with no output, and the state stays sweepable.
+
+  An existing C2* `:demo_exception` row (S3 plan r2 §6; AC10) is never
+  re-decided: with present use authority
+  (`SdrAgent.Agents.DemoException.use_authority/3`) its output is returned
+  through `SdrAgent.Agents.ReleasedOutput`; without it a running run is
+  stopped `:witness_unreconciled` on the deduplicated live warning "demo
+  exception not in use" of this invocation and the run's Operation (opened
+  under the head when none is live), and a terminal run is returned as it is.
   """
 
   require Ash.Query
 
   alias SdrAgent.Actor
   alias SdrAgent.AgentEnv.OperationSnapshot
+  alias SdrAgent.Agents
   alias SdrAgent.Agents.AgentRun
+  alias SdrAgent.Agents.DemoException
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.Agents.ReleaseDecision.Binding
+  alias SdrAgent.Agents.ReleaseDecision.Prelocked
   alias SdrAgent.Agents.ReleasedOutput
   alias SdrAgent.Agents.ResultGate
   alias SdrAgent.Agents.WireWitnessLink
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Kernel
+  alias SdrAgent.Clock
+  alias SdrAgent.Operations
   alias SdrAgent.Operations.Failure
   alias SdrAgent.Repo
 
   @subject "SdrAgent.Agents.ModelInvocation"
+  # C2* (OQ11): the one fixed cause and stop of a demo row without use.
+  @demo_message "demo exception not in use"
+  @demo_failure_reason "model output withheld by the result gate: demo exception not in use"
 
   @doc """
   Recovers the gate of `invocation` under `gate` (`%{run_id,
@@ -169,7 +185,104 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
     end
   end
 
+  # C2* (S3 plan r2 §6; ADR-0005 item 9; AC10): Recovery never creates or
+  # re-decides a demo exception. The release's link `FOR SHARE` and the
+  # live fixed warnings of this invocation and the run's Operation
+  # `FOR UPDATE`, then the head; then present use authority. With it, the
+  # output; without it, a running run is stopped on the deduplicated fixed
+  # cause under Prelocked, and a terminal run is returned as it is.
+  defp decide(%ModelResultRelease{disposition: :demo_exception} = release, held, actor) do
+    {invocation, run} = held
+    tenant_id = invocation.tenant_id
+
+    with {:ok, link} <- lock_release_link(release, tenant_id),
+         {:ok, live} <- lock_fixed_causes(invocation, run),
+         {:ok, _head} <- Kernel.lock_head(tenant_id) do
+      case DemoException.use_authority(release, invocation, Clock.utc_now()) do
+        :ok -> demo_output(release, invocation, actor)
+        {:error, _no_use} when run.status != :running -> {:withheld, release, run}
+        {:error, _no_use} -> stop_demo(release, held, {link, live}, actor)
+      end
+    else
+      {:error, error} -> Repo.rollback(error)
+    end
+  end
+
   defp decide(_calibration, _held, _actor), do: Repo.rollback(:not_gated)
+
+  defp demo_output(release, invocation, actor) do
+    case ReleasedOutput.fetch(invocation.id, actor) do
+      {:ok, output} -> {:released, release, output}
+      {:error, error} -> Repo.rollback(error)
+    end
+  end
+
+  defp lock_fixed_causes(invocation, run) do
+    Failure
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^invocation.tenant_id and class == :reconciliation_required and
+        subject_resource == @subject and subject_id == ^invocation.id and
+        severity == :warning and message == @demo_message and status in [:open, :acknowledged]
+    )
+    |> filter_operation(run.operation_id)
+    |> Ash.Query.sort(id: :asc)
+    |> Ash.Query.lock("FOR UPDATE")
+    |> Ash.read()
+  end
+
+  defp filter_operation(query, nil), do: Ash.Query.filter(query, is_nil(operation_id))
+  defp filter_operation(query, id), do: Ash.Query.filter(query, operation_id == ^id)
+
+  # The deduplicated fixed cause: the oldest live one, else opened here
+  # under the head (its FK targets, the run and its Operation, are held).
+  defp stop_demo(release, {invocation, run}, {link, live}, actor) do
+    case fixed_cause(live, invocation, run, actor) do
+      {:ok, cause} ->
+        bindings = %{
+          tenant_id: invocation.tenant_id,
+          model_invocation_id: invocation.id,
+          wire_witness_link_id: link && link.id,
+          receipt_id: cause.id
+        }
+
+        Prelocked.run(bindings, &fail_demo_run(&1, release, run, cause, actor))
+
+      {:error, error} ->
+        Repo.rollback(error)
+    end
+  end
+
+  defp fail_demo_run(prelocked, release, run, cause, actor) do
+    attrs = %{
+      status_reason: :witness_unreconciled,
+      failure_reason: @demo_failure_reason,
+      witness_failure_id: cause.id,
+      release_id: release.id
+    }
+
+    case Agents.fail_run(run, attrs, actor: actor, prelocked: prelocked) do
+      {:ok, stopped} -> {:withheld, release, stopped}
+      {:error, error} -> Repo.rollback(error)
+    end
+  end
+
+  defp fixed_cause([cause | _], _invocation, _run, _actor), do: {:ok, cause}
+
+  defp fixed_cause([], invocation, run, actor) do
+    Operations.open_failure(
+      %{
+        subject_resource: @subject,
+        subject_id: invocation.id,
+        class: :reconciliation_required,
+        severity: :warning,
+        message: @demo_message,
+        retryable: false,
+        operation_id: run.operation_id
+      },
+      actor: actor
+    )
+  end
 
   defp lock_release_link(%{wire_witness_link_id: nil}, _tenant_id), do: {:ok, nil}
 
