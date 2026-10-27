@@ -7,6 +7,11 @@ defmodule SdrAgent.TestSupport.RawLogTest do
   an unrelated event is never accepted in its place. A secret is found
   anywhere in an event's terms, even where an Inspect implementation
   would hide it.
+
+  The deadline holds even while the queue is never empty (Codex fc6b86ca
+  R3): a wait then fails explicitly, everything consumed or still queued
+  stays in the capture, and a capture that cannot be completed (overload)
+  fails the absence check explicitly instead of passing on a truncation.
   """
   # A :logger handler sees every process's events.
   use ExUnit.Case, async: false
@@ -80,6 +85,58 @@ defmodule SdrAgent.TestSupport.RawLogTest do
     assert event.meta[:pid] == target
     refute event.meta[:pid] == other
     assert Enum.any?(RawLog.drain(ref), &(&1.meta[:pid] == other)), "the other event was dropped"
+  end
+
+  # Queues `events` for capture `ref` exactly as the handler would.
+  defp enqueue(ref, events) do
+    config = %{config: %{pid: self(), ref: ref}}
+    Enum.each(events, &RawLog.log(&1, config))
+  end
+
+  defp info(text), do: %{level: :info, msg: {:string, text}, meta: %{}}
+
+  # Codex fc6b86ca R3: a deadline is enforced even while the queue is never
+  # empty, the wait then fails explicitly rather than accepting a late
+  # event, and everything consumed or still queued stays in the capture.
+  test "a continuously non-empty queue cannot carry a wait past its deadline" do
+    ref = RawLog.start()
+    secret = sentinel()
+    expected = %{level: :error, msg: {:string, "expected"}, meta: %{domain: [:bandit]}}
+    leak = %{level: :error, msg: {:string, "preceding #{secret}"}, meta: %{}}
+    enqueue(ref, [leak | Enum.map(1..400, &info("filler #{&1}"))] ++ [expected])
+
+    # Each event costs 5 ms to examine: the queue outlasts the deadline.
+    slow = fn event ->
+      Process.sleep(5)
+      event.msg == {:string, "expected"}
+    end
+
+    started = System.monotonic_time(:millisecond)
+    assert RawLog.await(ref, slow, 100) == nil, "a wait accepted an event after its deadline"
+    elapsed = System.monotonic_time(:millisecond) - started
+    assert elapsed < 600, "the wait took #{elapsed} ms for a 100 ms deadline"
+
+    captured = RawLog.drain(ref)
+    assert Enum.any?(captured, &RawLog.contains?(&1, secret)), "the preceding event was dropped"
+    assert Enum.member?(captured, expected), "a still-queued event is missing from the capture"
+  end
+
+  test "an overloaded capture fails explicitly, never a silent privacy pass" do
+    ref = RawLog.start()
+    enqueue(ref, Enum.map(1..25_000, fn _ -> info("flood") end))
+
+    assert_raise ExUnit.AssertionError, ~r/overloaded/, fn ->
+      RawLog.assert_absent(ref, [sentinel()], 0)
+    end
+  end
+
+  test "a wait for a report that never comes fails explicitly" do
+    ref = RawLog.start()
+    silent = log_from_process(fn -> :ok end)
+
+    assert_raise ExUnit.AssertionError, ~r/no error report/, fn ->
+      RawLog.report_of(ref, silent, 100)
+    end
   end
 
   test "a secret inside a struct whose Inspect hides it is still found" do
