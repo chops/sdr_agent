@@ -15,14 +15,23 @@ defmodule SdrAgent.Agents.DemoExceptionConstraintsTest do
       values, equal to the Ash attribute lists, and the 4 × 8 pair matrix
       accepts exactly the 8 allowed pairs. The list parity alone is a control.
     * T-S3: the append-only triggers reject UPDATE and DELETE of a demo row.
-    * T-S4 (constraint level, no DDL): the predecessor bodies of
-      `_disposition`, `_reason` and `_pair`, read from the predecessor
-      snapshot, evaluate FALSE on a demo row and on no ordinary row. A CHECK
-      can be re-added exactly when no row evaluates it FALSE, so `down`
-      re-creating them fails while a demo row exists and succeeds without
-      one. This replaces the plan's in-savepoint re-add: re-adding a CHECK is
-      DDL under a schema lock, which Codex OQ5 keeps out of the ordinary
-      suite. The actual `down` refusal is the campaign's DB #2.
+    * T-S4 (CHECK-body compatibility only, no DDL): the predecessor bodies
+      of `_disposition`, `_reason` and `_pair`, read from the predecessor
+      snapshot, are evaluated as predicates (`(body) IS FALSE`) over this
+      test's own fixture rows: these ordinary fixtures satisfy the
+      predecessor CHECK predicates; the demo fixture violates each. This is
+      a row-compatibility regression over selected fixtures, not a
+      database-wide scan and NOT a migration or `down` proof: it does not
+      re-create a constraint or exercise migration ordering, locks,
+      permissions, catalog failures, transactional rollback or old-build
+      loading and verification. It stands in for the plan's in-savepoint
+      re-add, which is DDL under a schema lock that Codex OQ5 keeps out of
+      the ordinary suite (accepted, Codex RED-2 review 2fdd6b94). Actual
+      `down` success and refusal remain the separately reviewed migration
+      campaign: DB #1 (OLD write and verify, NEW `up`, OLD `down`, NEW `up`
+      again, old hashes and event bytes retained) and DB #2 (typed nonzero
+      `down` refusal while a demo row exists, with full rollback of
+      constraints, columns, row and event state).
     * T-S6: an otherwise-valid demo row is rejected for each non-object or
       incomplete basis (`{}`, no schema, no policy, policy without id,
       policy as a string, JSON `null`, `1`, `"x"`, `[]`), a wrong schema
@@ -343,7 +352,7 @@ defmodule SdrAgent.Agents.DemoExceptionConstraintsTest do
 
   ## T-S4
 
-  test "T-S4 (constraint level): the predecessor CHECK bodies reject a demo row and no ordinary row",
+  test "T-S4 (CHECK-body compatibility only): the predecessor predicates reject the demo fixture and no ordinary fixture",
        ctx do
     previous =
       @snapshot
@@ -388,13 +397,13 @@ defmodule SdrAgent.Agents.DemoExceptionConstraintsTest do
     end
 
     assert false_rows.(ordinary_ids) == Map.new(bodies, fn {name, _} -> {name, 0} end),
-           "down re-creates the predecessor CHECKs over ordinary rows"
+           "these ordinary fixtures satisfy the predecessor CHECK predicates"
 
     demo_id = Ecto.UUID.dump!(insert!(row(ctx, "demo_exception")))
 
     assert false_rows.([demo_id | ordinary_ids]) ==
              Map.new(bodies, fn {name, _} -> {name, 1} end),
-           "each predecessor CHECK evaluates FALSE on the demo row, so down fails"
+           "the demo fixture violates each predecessor CHECK predicate"
   end
 
   ## T-S6
