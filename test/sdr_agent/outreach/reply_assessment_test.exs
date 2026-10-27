@@ -55,11 +55,12 @@ defmodule SdrAgent.Outreach.ReplyAssessmentTest do
     assessments
   end
 
-  test "SDRAgent v3 routes sdr.reply.received to the classifier", _ctx do
+  test "SDRAgent v4 routes sdr.reply.received to the classifier", _ctx do
     assert "sdr.reply.received" in SDRAgent.routed_signal_types()
     assert SdrAgent.SDR.Actions.ClassifyReply in SDRAgent.route_targets()
-    # Schema version 2 refs are a new immutable definition body (#35).
-    assert SDRAgent.version() == 3
+    # Schema version 2 refs were v3 (#35); the B1-04/B1-05 prompt and action
+    # changes are v4 (plan claude-b1-research-draft-plan-r2.md, M1).
+    assert SDRAgent.version() == 4
   end
 
   test "an interested reply is classified by the agent and handed off", ctx do
