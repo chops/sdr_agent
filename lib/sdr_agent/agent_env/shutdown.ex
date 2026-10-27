@@ -22,7 +22,11 @@ defmodule SdrAgent.AgentEnv.Shutdown do
       tree's `DOWN` with `:shutdown` or `{:shutdown, _}` (or `:none`); the
       server name unregistered; and the Reaper lease clear (polled; the
       Reaper's cleanup receipt). Only then does it exclusively create the
-      receipt (`nonce`, `boot_id`, `completed_at`). Otherwise it returns
+      receipt (`nonce`, `boot_id`, `completed_at`). Each observation counts
+      only if made before that deadline (a `DOWN` already queued, or a
+      predicate that answers, after it is late), and the deadline is checked
+      again immediately before the receipt; it is never renewed. Otherwise
+      it returns
       `{:error, reason}` — `:not_orderly`, `:instance_not_terminated`,
       `:model_tree_not_terminated`, `:server_still_registered`,
       `:reaper_cleanup_unconfirmed` or `:receipt_write_failed` — writes no
@@ -198,6 +202,7 @@ defmodule SdrAgent.AgentEnv.Shutdown do
                :server_still_registered
              ),
            :ok <- poll(fn -> s.reaper_lease.() == nil end, deadline, :reaper_cleanup_unconfirmed),
+           :ok <- in_time(deadline, :reaper_cleanup_unconfirmed),
            do: receipt(plan)
 
     demonitor(plan)
@@ -226,7 +231,7 @@ defmodule SdrAgent.AgentEnv.Shutdown do
        when is_pid(pid) and is_reference(ref) do
     receive do
       {:DOWN, ^ref, :process, ^pid, reason} ->
-        if accepted?(reason, accepted), do: :ok, else: {:error, failure}
+        if accepted?(reason, accepted) and timely?(deadline), do: :ok, else: {:error, failure}
     after
       remaining(deadline) -> {:error, failure}
     end
@@ -238,10 +243,14 @@ defmodule SdrAgent.AgentEnv.Shutdown do
   defp accepted?({:shutdown, _detail}, accepted), do: {:shutdown, :_} in accepted
   defp accepted?(_reason, _accepted), do: false
 
+  # The predicate's answer counts only if the deadline still holds after it
+  # returned: a success seen late is not timely (Codex 74f35f78 M1).
   defp poll(done?, deadline, failure) do
+    done = done?.() == true
+
     cond do
-      done?.() -> :ok
-      remaining(deadline) == 0 -> {:error, failure}
+      not timely?(deadline) -> {:error, failure}
+      done -> :ok
       true -> wait_and_poll(done?, deadline, failure)
     end
   end
@@ -252,6 +261,12 @@ defmodule SdrAgent.AgentEnv.Shutdown do
   end
 
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
+
+  # The one deadline: an observation is timely only strictly before it,
+  # however promptly a queued message or a predicate answers. Never renewed.
+  defp timely?(deadline), do: System.monotonic_time(:millisecond) < deadline
+
+  defp in_time(deadline, failure), do: if(timely?(deadline), do: :ok, else: {:error, failure})
 
   defp receipt(plan) do
     receipt = %{
