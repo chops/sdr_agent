@@ -57,6 +57,10 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
   stopped `:witness_unreconciled` on the deduplicated live warning "demo
   exception not in use" of this invocation and the run's Operation (opened
   under the head when none is live), and a terminal run is returned as it is.
+  The fixed-warning selection is re-read with a plain read under the head;
+  a warning that became visible while Recovery waited for the head makes it
+  re-select once from a pre-head savepoint, and a second change fails closed
+  (`{:error, :demo_cause_changed}`, nothing written).
   """
 
   require Ash.Query
@@ -83,6 +87,7 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
   @subject "SdrAgent.Agents.ModelInvocation"
   # C2* (OQ11): the one fixed cause and stop of a demo row without use.
   @demo_message "demo exception not in use"
+  @demo_savepoint "result_gate_recovery_demo_selection"
   @demo_failure_reason "model output withheld by the result gate: demo exception not in use"
 
   @doc """
@@ -191,24 +196,54 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
   # `FOR UPDATE`, then the head; then present use authority. With it, the
   # output; without it, a running run is stopped on the deduplicated fixed
   # cause under Prelocked, and a terminal run is returned as it is.
-  defp decide(%ModelResultRelease{disposition: :demo_exception} = release, held, actor) do
-    {invocation, run} = held
+  defp decide(%ModelResultRelease{disposition: :demo_exception} = release, held, actor),
+    do: decide_demo(release, held, actor, :first)
+
+  defp decide(_calibration, _held, _actor), do: Repo.rollback(:not_gated)
+
+  # Codex 6be502a0 M1: a `FOR UPDATE` selection locks rows, not the empty
+  # predicate, so a matching warning another writer commits while this waits
+  # for the head is not held. Under the head the selection is re-read with a
+  # plain read: unchanged, it stands; changed, the pre-head phase is rolled
+  # back to its savepoint (releasing the link, cause and head locks) and
+  # selected once more, and a second change fails closed
+  # (`:demo_cause_changed`, nothing written). Never a lock after the head,
+  # never a duplicate.
+  defp decide_demo(release, {invocation, run} = held, actor, attempt) do
     tenant_id = invocation.tenant_id
+    Repo.query!("SAVEPOINT #{@demo_savepoint}")
 
     with {:ok, link} <- lock_release_link(release, tenant_id),
          {:ok, live} <- lock_fixed_causes(invocation, run),
-         {:ok, _head} <- Kernel.lock_head(tenant_id) do
+         {:ok, _head} <- Kernel.lock_head(tenant_id),
+         :ok <- same_causes(live, invocation, run) do
       case DemoException.use_authority(release, invocation, Clock.utc_now()) do
         :ok -> demo_output(release, invocation, actor)
         {:error, _no_use} when run.status != :running -> {:withheld, release, run}
         {:error, _no_use} -> stop_demo(release, held, {link, live}, actor)
       end
     else
-      {:error, error} -> Repo.rollback(error)
+      :changed when attempt == :first ->
+        Repo.query!("ROLLBACK TO SAVEPOINT #{@demo_savepoint}")
+        decide_demo(release, held, actor, :again)
+
+      :changed ->
+        Repo.rollback(:demo_cause_changed)
+
+      {:error, error} ->
+        Repo.rollback(error)
     end
   end
 
-  defp decide(_calibration, _held, _actor), do: Repo.rollback(:not_gated)
+  defp same_causes(live, invocation, run) do
+    case fixed_causes(invocation, run, nil) do
+      {:ok, current} ->
+        if Enum.map(current, & &1.id) == Enum.map(live, & &1.id), do: :ok, else: :changed
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
 
   defp demo_output(release, invocation, actor) do
     case ReleasedOutput.fetch(invocation.id, actor) do
@@ -217,7 +252,11 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
     end
   end
 
-  defp lock_fixed_causes(invocation, run) do
+  defp lock_fixed_causes(invocation, run), do: fixed_causes(invocation, run, "FOR UPDATE")
+
+  # The live fixed warnings of this invocation and the run's Operation,
+  # oldest first; locked `FOR UPDATE` before the head, plain under it.
+  defp fixed_causes(invocation, run, lock) do
     Failure
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
     |> Ash.Query.filter(
@@ -227,7 +266,7 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
     )
     |> filter_operation(run.operation_id)
     |> Ash.Query.sort(id: :asc)
-    |> Ash.Query.lock("FOR UPDATE")
+    |> then(&if(lock, do: Ash.Query.lock(&1, lock), else: &1))
     |> Ash.read()
   end
 
