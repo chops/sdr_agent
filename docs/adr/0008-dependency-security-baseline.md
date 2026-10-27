@@ -765,3 +765,158 @@ is quarantined. Its disposal follows a separate, reviewed one-time procedure.
 
 Entity Model trigger: no. This is an internal error normalization restoring the existing timeout contract;
 no persisted entity, attribute, policy, action or event contract changes.
+
+## Amendment (2026-10-27, proposed): EEF-CVE-2026-109823
+
+**Status: proposed** by Claude on 2026-10-27. The amendment of 2026-10-25 and its addenda 1 to 3 above are
+unchanged byte for byte. The owner's acceptance of this exact text is a separate answer; the pin below is not
+accepted until then.
+
+### Advisory
+
+- **EEF-CVE-2026-109823** (LOW), aka CVE-2026-109823 (the OSV record lists no GHSA alias); CWE-497; CVSS 4.0
+  `AV:N/AC:L/AT:P/PR:N/UI:P/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N`; published to OSV 2026-10-27 15:47:36Z.
+- "Host filesystem path disclosure via DNS rebinding". Tidewave builds a `tidewave:config` meta tag holding
+  the absolute project root (`Tidewave.MCP.root()`), the dependency paths (`Mix.Project.deps_paths()`) and the
+  WSL and host-path environment values. It serves the tag on `GET /tidewave/connect` and injects it into every
+  `text/html` response when the toolbar is on. Neither response checked the `Host` header, and the origin check
+  admits a request without an `Origin` header. A web page that rebinds its own domain to the loopback address
+  can therefore read the tag with a same-origin request, and learn the developer's username, the project
+  location and the dependency layout on disk. File contents are not disclosed.
+- Affected: `tidewave` 0.8.0 to before 0.9.2 (OSV range; versions 0.8.0 to 0.9.1). Fixed in **0.9.2**,
+  published to Hex 2026-10-27T12:43:33Z: a stable patch release, not retired.
+- Found by the blocking `mix hex.audit` step, which reports `tidewave 0.9.0 - EEF-CVE-2026-109823 (LOW)`
+  (first seen here in the standing lane runner's gate `c4-20261027T165148Z-72481`, `audit.log`). Main
+  `91601082` locks the same `tidewave` 0.9.0 entry, so the audit fails on main and on every branch built on it,
+  as rule 4 of the policy above intends. The rule-4 failure blocks every merge.
+
+### Exposure in this project
+
+- **Development only.** `mix.exs` declares `{:tidewave, ..., only: [:dev]}`, and
+  `lib/sdr_agent_web/endpoint.ex` plugs `Tidewave` inside `if Mix.env() == :dev`, a compile-time branch. The
+  test environment does not load it, and a `MIX_ENV=prod mix release` contains no Tidewave application or
+  module (Verification below). No deployed or calibration environment is affected.
+- **Reachable in development.** The dev listener binds loopback `127.0.0.1:4120` (`config/dev.exs`), and the
+  `plug Tidewave` call passes no options, so Tidewave refuses non-loopback peers (`allow_remote_access`
+  defaults to false). DNS rebinding is exactly the path that reaches a loopback listener: a page the developer
+  visits in a browser while the dev server runs. So the advisory does apply to the developer's machine. That
+  is the reason for a fix, not an argument for an ignore.
+
+### Decision (proposed)
+
+Pin `tidewave` from `== 0.9.0` to `== 0.9.2` in `mix.exs` (one line; `only: [:dev]` unchanged). The minimal
+bump is `mix deps.unlock tidewave` followed by `mix deps.get`. `deps.get` lists `New: tidewave 0.9.2` and 122
+packages unchanged. `mix.lock` changes exactly one entry, the `tidewave` line: 1 line removed and 1 added, out
+of 131 lines before and after. Every other line is byte-identical. The lock delta:
+
+| Field | 0.9.0 | 0.9.2 |
+|---|---|---|
+| version | `0.9.0` | `0.9.2` |
+| inner checksum | `25f2c0745adba7cb…` | `a523b6af9a11a068…` |
+| outer checksum | `19259165534283554e…` | `66cba92861fa17cef3…` |
+| requirements | unchanged | unchanged |
+
+The 0.9.2 outer checksum equals Hex's published release checksum and the SHA-256 of the fetched tarball. The
+requirement list is byte-identical between the two versions:
+
+- required: `circular_buffer ~> 0.4 or ~> 1.0`, `jason ~> 1.4`, `plug ~> 1.18` and
+  `websock_adapter ~> 0.5`;
+- optional: `igniter ~> 0.6`, `phoenix_live_reload >= 1.6.1` and `plug_cowboy ~> 2.9`;
+- Elixir `~> 1.15`.
+
+The already locked `circular_buffer` 1.1.0, `jason` 1.4.5, `plug` 1.20.3, `websock_adapter` 0.6.0,
+`igniter` 0.8.4 and `phoenix_live_reload` 1.7.0 satisfy them. `plug_cowboy` stays unlocked and optional, and
+the toolchain is Elixir 1.20.4. The `bandit` entry in tidewave's own `mix.exs` is `only: [:dev, :test]` of
+that package and does not propagate.
+
+The change adds no override, no new direct or transitive dependency and no `ignore_advisories` entry.
+ADR-0003's compatibility set (Zoi held at 0.18.10, the Git-pinned Jido stack) is outside tidewave's
+requirement graph, and the Bandit pin (amendment of 2026-10-15) is untouched. File hashes after the change:
+`mix.exs` `0b24b6e6…`, `mix.lock` `186bf0d2…` (before: `4e7f0bd7…`, `85aed09e…`).
+
+Release age and pre-releases:
+
+- Neither this ADR nor ADR-0003 sets a minimum release age.
+- Rule 2's pre-release stop concerns a CRITICAL or HIGH finding whose only fix is a pre-release.
+- 0.9.2 is a stable patch release, and it is the fix release the advisory itself names. Nothing stops it,
+  although it was published the same day.
+
+### Why a fix, not an ignore
+
+Rule 3 permits a LOW ignore only when no acceptable fix exists. Here a stable patch release fixes the advisory.
+It needs no lock movement beyond its own entry, and its scope is development-only tooling. So the fix is the
+required route, and an ignore entry is not available.
+
+### Upstream delta (0.9.0 to 0.9.2, read from the two Hex tarballs on 2026-10-27)
+
+The package changes `lib/tidewave.ex`, `lib/tidewave/router.ex`, `lib/tidewave/mcp/http.ex`,
+`lib/tidewave/mcp/handler.ex` and its own `mix.exs`, README and CHANGELOG. It adds
+`lib/tidewave/mcp/stdio.ex` and `lib/mix/tasks/tidewave.proxy.ex`. Nothing is labelled breaking.
+
+- **0.9.1** (2026-09-23):
+  - an opt-in `mix tidewave.proxy` task with a stdio MCP transport, which forwards tool calls to
+    `127.0.0.1:<port>`;
+  - an `instructions` text in the MCP initialize response.
+
+  Nothing in this project invokes the task.
+- **0.9.2** (2026-10-27), the fix:
+  - A new `check_host` router plug answers 403 unless the `Host` is an IP literal, `localhost` or
+    `*.localhost`, or a host in `allowed_origins`. When no origins are configured, that is the Phoenix
+    endpoint's URL host.
+  - The toolbar's config tag is injected only for an allowed host. Otherwise an error tag is injected.
+  - `allowed_origins` values are parsed once at `init`, where an invalid value now raises.
+  - A missing endpoint host no longer raises; only IP literals and localhost are then allowed.
+  - The HTTP MCP handler no longer logs each message at info level.
+
+Behaviour to expect here:
+
+- The plug takes no options, and the endpoint's URL host is `localhost` (`config/config.exs`).
+- The MCP client in `.mcp.json` uses `http://localhost:4120/tidewave/mcp`. `localhost` matches the
+  `*.localhost` rule and `127.0.0.1` is an IP literal, so both stay allowed and no configuration change is
+  needed.
+- A development request to a Tidewave route under any other host name now receives 403. That is the fix.
+
+### Verification
+
+- The lock delta was reviewed entry by entry before anything compiled: exactly the one entry above.
+- Evidence ran at commit `01ccf37b5b2492ac2de561a8b6abe23a740516c0` on a clean tree, inside the declared Nix
+  environment, with the four Mix roots under the worktree's own `.devenv/state`. Directory
+  `evidence-01ccf37-20261027T180433Z`, MANIFEST `60fd8efd…`, 17 entries, all verified.
+  - `mix hex.audit`: rc 0, "No retired or security advisory packages found".
+  - `mix compile --warnings-as-errors`: rc 0 for `MIX_ENV=dev` and rc 0 for `MIX_ENV=test`. Every `warning:`
+    line is a dependency's own compile output. None is located in this project's `lib/` or `test/`.
+  - OSV `v1/query` for `tidewave` 0.9.2 returns `{}` (2026-10-27 18:09:06Z). The control query for 0.9.0
+    returns exactly EEF-CVE-2026-109823.
+- Production release closure: `MIX_ENV=prod mix release` returns rc 0.
+  - The release's `lib/` holds 114 entries, none of them `tidewave`.
+  - `releases/0.1.0/sdr_agent.rel` lists 115 applications, none of them `tidewave`.
+  - No file in the release tree contains `Tidewave` (case-sensitive) or `Elixir.Tidewave`.
+  - Every lowercase `tidewave` byte string in the tree is part of the build worktree's own path or branch name
+    (`deps-tidewave`). No occurrence lacks the leading `-`.
+  - Positive control: `Elixir.Phoenix.Endpoint` appears in 13 files.
+- The full gate runs at this branch's final head through the standing lane runner (D-221). It covers the
+  workflow receipt, format, compile, the codegen check, Credo, `mix hex.audit` and the suite under
+  `mix precommit --seed 0`. Hosted CI and Codex's exact-head review follow. The results are reported with the
+  pull request. This text is part of that head and does not record them.
+
+### Revisit trigger
+
+Any of the following needs a fresh review against this advisory:
+
+- a new advisory or retirement against `tidewave`, which the blocking audit raises by itself;
+- a change that passes `allowed_origins` or `allow_remote_access` to `plug Tidewave`, because the 0.9.2 host
+  check is the mitigation, and both options widen it;
+- a change of the dev endpoint's URL host;
+- a dev listener bound beyond loopback;
+- any widening of `only: [:dev]` or of the compile-time `Mix.env() == :dev` guard.
+
+### Policy
+
+Unchanged: the audit stays blocking, and there is no ignore list. CRITICAL and HIGH are never ignored. A LOW or
+MEDIUM ignore still needs the absence of an acceptable fix, a reviewed reason and a revisit trigger.
+
+### Entity model
+
+Trigger: no. This changes a development-only dependency version. No application entity, attribute,
+relationship, policy, action or contract changes. There is no architecture-diagram trigger: no app boundary,
+supervision tree, endpoint plug or integration changes.
