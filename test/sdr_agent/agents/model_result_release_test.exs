@@ -325,14 +325,17 @@ defmodule SdrAgent.Agents.ModelResultReleaseTest do
       assert releases(ctx) == []
     end
 
+    # C2* S3 (plan r2 §8): widened to the 4 × 8 matrix with the
+    # demo-exception disposition and reason; the valid demo pair is excluded
+    # here and decided only by the result-gate finalizer.
     test "every invalid disposition/reason pair is refused", ctx do
       pairs =
-        for disposition <- [:released, :withheld, :calibration],
-            reason <- [:reconciled, :calibration | @withheld],
+        for disposition <- [:released, :withheld, :calibration, :demo_exception],
+            reason <- [:reconciled, :calibration, :v4_uncalibrated | @withheld],
             not valid_pair?(disposition, reason),
             do: {disposition, reason}
 
-      assert length(pairs) == 3 * 7 - 7
+      assert length(pairs) == 4 * 8 - 8
 
       for {disposition, reason} <- pairs do
         attrs = %{released(ctx) | disposition: disposition, reason: reason}
@@ -617,6 +620,7 @@ defmodule SdrAgent.Agents.ModelResultReleaseTest do
   defp valid_pair?(:released, :reconciled), do: true
   defp valid_pair?(:withheld, reason), do: reason in @withheld
   defp valid_pair?(:calibration, :calibration), do: true
+  defp valid_pair?(:demo_exception, :v4_uncalibrated), do: true
   defp valid_pair?(_disposition, _reason), do: false
 
   # Inserts a copy of `release` with `set` applied (a fresh id) in a rolled
