@@ -769,8 +769,8 @@ no persisted entity, attribute, policy, action or event contract changes.
 ## Amendment (2026-10-27, proposed): EEF-CVE-2026-109823
 
 **Status: proposed** by Claude on 2026-10-27. The amendment of 2026-10-25 and its addenda 1 to 3 above are
-unchanged byte for byte. The owner's acceptance of this exact text is a separate answer; the pin below is not
-accepted until then.
+unchanged byte for byte. Acceptance may be recorded under D-219/D-221/D-222 after Codex's independent
+exact-text PASS, in a separate decision row pinning the commit and full-file hash; this draft alone accepts nothing.
 
 ### Advisory
 
@@ -889,7 +889,7 @@ Behaviour to expect here:
     returns exactly EEF-CVE-2026-109823.
 - Production release closure: `MIX_ENV=prod mix release` returns rc 0.
   - The release's `lib/` holds 114 entries, none of them `tidewave`.
-  - `releases/0.1.0/sdr_agent.rel` lists 115 applications, none of them `tidewave`.
+  - `releases/0.1.0/sdr_agent.rel` lists 114 applications, none of them `tidewave`.
   - No file in the release tree contains `Tidewave` (case-sensitive) or `Elixir.Tidewave`.
   - Every lowercase `tidewave` byte string in the tree is part of the build worktree's own path or branch name
     (`deps-tidewave`). No occurrence lacks the leading `-`.
