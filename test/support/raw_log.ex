@@ -13,6 +13,15 @@ defmodule SdrAgent.TestSupport.RawLog do
   many unrelated events arrive. Waits can be correlated to one process
   (`await/3` with a predicate on `meta.pid`).
 
+  Windows (Codex fc6b86ca R3): the deadline is checked before every
+  receive, so even a queue that is never empty cannot carry a wait past
+  it; a wait that ends there returns nil (`report_of/3` then fails), and
+  whatever is still queued stays for the next wait or seal. `drain/1`
+  seals the capture at the first instant no event of it is queued, and an
+  incomplete capture fails explicitly: more than 20,000 events (overload)
+  or a queue that keeps refilling for 2 s. A truncated capture never
+  counts as a privacy pass.
+
   The handler is removed when the test exits. Events of every process are
   forwarded; tests correlate by process and by a unique sentinel.
   """
@@ -20,6 +29,11 @@ defmodule SdrAgent.TestSupport.RawLog do
   import ExUnit.Assertions
 
   @error_levels [:emergency, :alert, :critical, :error]
+  # A capture holds at most this many events: more is an overload, which
+  # fails explicitly instead of truncating.
+  @max_events 20_000
+  # Sealing must finish within this; a queue that keeps refilling fails.
+  @seal_ms 2_000
   @withheld "diagnostic withheld: process holds operator input"
 
   @doc "Starts forwarding raw events to the calling process; returns the capture ref."
@@ -68,27 +82,52 @@ defmodule SdrAgent.TestSupport.RawLog do
     drain(ref)
   end
 
-  @doc "The complete capture: every kept event plus those still in the mailbox, in arrival order."
+  @doc """
+  Seals and returns the complete capture, in arrival order: every kept
+  event plus every event still queued, up to the first instant the mailbox
+  holds none for this capture. Fails explicitly, never truncating, when
+  the capture exceeds #{@max_events} events or the queue keeps refilling for
+  more than #{@seal_ms} ms. Events logged after the seal join the capture at a
+  later wait or seal.
+  """
   @spec drain(reference()) :: [map()]
   def drain(ref) do
+    seal(ref, System.monotonic_time(:millisecond) + @seal_ms)
+    ref |> buffer() |> Enum.reverse()
+  end
+
+  defp seal(ref, deadline) do
     receive do
       {^ref, event} ->
         keep(ref, event)
-        drain(ref)
+
+        if System.monotonic_time(:millisecond) > deadline,
+          do:
+            flunk(
+              "raw log capture never sealed: events kept arriving for #{@seal_ms} ms; " <>
+                "an incomplete capture is not a privacy pass"
+            )
+
+        seal(ref, deadline)
     after
-      0 -> ref |> buffer() |> Enum.reverse()
+      0 -> :ok
     end
   end
 
+  # The deadline is checked before every receive: a queue that is never
+  # empty cannot carry a wait past it (a receive with `after 0` still takes
+  # a queued message). What is left queued stays for the next wait or seal.
   defp do_await(ref, pred, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+    remaining = deadline - System.monotonic_time(:millisecond)
 
-    receive do
-      {^ref, event} ->
-        keep(ref, event)
-        if pred.(event), do: event, else: do_await(ref, pred, deadline)
-    after
-      remaining -> nil
+    if remaining > 0 do
+      receive do
+        {^ref, event} ->
+          keep(ref, event)
+          if pred.(event), do: event, else: do_await(ref, pred, deadline)
+      after
+        remaining -> nil
+      end
     end
   end
 
@@ -119,7 +158,20 @@ defmodule SdrAgent.TestSupport.RawLog do
   @spec withheld?(map()) :: boolean()
   def withheld?(event), do: rendered(event) == @withheld
 
-  defp keep(ref, event), do: Process.put({__MODULE__, ref}, [event | buffer(ref)])
+  defp keep(ref, event) do
+    count = Process.get({__MODULE__, ref, :count}, 0) + 1
+
+    if count > @max_events,
+      do:
+        flunk(
+          "raw log capture overloaded: more than #{@max_events} events; " <>
+            "a truncated capture is not a privacy pass"
+        )
+
+    Process.put({__MODULE__, ref, :count}, count)
+    Process.put({__MODULE__, ref}, [event | buffer(ref)])
+  end
+
   defp buffer(ref), do: Process.get({__MODULE__, ref}, [])
 
   @doc """
