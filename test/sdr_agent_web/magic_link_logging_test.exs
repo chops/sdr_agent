@@ -134,8 +134,9 @@ defmodule SdrAgentWeb.MagicLinkLoggingTest do
     {:ok, view, _html} = live(build_conn(), "/magic_link/#{token}")
     log = crash(view)
 
-    # Positive control: a report about the crash was emitted.
-    assert log =~ ~r/terminating|diagnostic withheld/
+    # The crash was reported, and withheld because the process is tagged
+    # (not merely because its state happened to trip the error scan).
+    assert log =~ "diagnostic withheld: process holds operator input"
     refute log =~ token
   end
 
@@ -149,7 +150,7 @@ defmodule SdrAgentWeb.MagicLinkLoggingTest do
 
     log = crash(view)
 
-    assert log =~ ~r/terminating|diagnostic withheld/
+    assert log =~ "diagnostic withheld: process holds operator input"
     refute log =~ typed
     refute String.downcase(log) =~ String.downcase(ctx.email)
   end
