@@ -38,8 +38,20 @@ defmodule Mix.Tasks.Sdr.AgentEnvTest do
   created, migrated, seeded or read. Production arity: `preflight/0`,
   `step/1`, `publish/0`.
 
+  The task's command set is closed (Codex `b684dba9` Q5): exactly `check
+  run|provision`, `preflight`, `lease bootstrap|run`, `step
+  create|migrate|seed|probe`, `publish`, `release
+  bootstrap|provisioning|run`; anything else, including extra arguments and
+  `lease provisioning` (S2's lease API stays separate), is a usage error. A
+  successful lease prints exactly one `SDR_AGENT_ENV_NONCE <32 lowercase
+  hex>` line. `check` gathers the VM's real resolved configuration (Q1), so
+  the test VM's own Repo is refused. `release` under `STEP=check` bypasses
+  neither the held lease's nonce nor the receipts. Refusals raise
+  `Mix.Error` naming the reason.
+
   RED: `SdrAgent.AgentEnv.Bootstrap` and the Mix task do not exist
-  (structural, guarded after the fixtures).
+  (structural, guarded after the fixtures). The "fixtures" control uses
+  existing APIs only and executes now (Q10).
 
   Hermetic: physical roots under `tmp/agent-env-roots`, stand-in effects; no
   database, port, real CLI or application start.
@@ -182,6 +194,48 @@ defmodule Mix.Tasks.Sdr.AgentEnvTest do
   end
 
   defp object(root, name), do: BootFx.read_object!(Fx.path(root, name))
+
+  ## Fixture control (Codex b684dba9 Q10): unguarded, existing APIs only
+
+  describe "fixtures" do
+    test "the adapter stand-ins, receipts and declaration operate without Bootstrap", ctx do
+      adapter = adapter(ctx, %{})
+
+      assert adapter.repo_config.() == @target
+      assert adapter.storage_status.(database: "x") == :down
+      assert adapter.storage_up.(database: "x") == :ok
+      assert adapter.database_oid.(database: "x") == {:ok, @oid}
+
+      assert adapter.live_identity.() ==
+               {:ok, %{database: "sdr_agent_agentenv", database_oid: @oid}}
+
+      assert {adapter.migrate.(), adapter.seed.(), adapter.tenant_id.()} ==
+               {:ok, :ok, {:ok, ctx.tenant_id}}
+
+      assert effect_names(ctx) ==
+               [
+                 :storage_status,
+                 :storage_up,
+                 :database_oid,
+                 :live_identity,
+                 :migrate,
+                 :seed,
+                 :tenant_id
+               ]
+
+      nonce = leased!(ctx, [:create, :migrate, :seed, :probe])
+      receipts = Enum.map([:create, :migrate, :seed, :probe], &{:receipt, nonce, &1})
+
+      for name <- [:pending, :lease, :created | receipts] do
+        assert match?({:valid, _sha256, _data}, apply(@state, :read, [ctx.root, name])),
+               inspect(name)
+      end
+
+      Fx.configure!(ctx.root, mode: :bootstrap, step: :seed, nonce: nonce)
+      assert apply(@boot, :declare_step!, [:seed]) == :ok
+      refute File.exists?(Fx.path(ctx.root, :environment))
+    end
+  end
 
   ## Preflight
 
@@ -381,7 +435,28 @@ defmodule Mix.Tasks.Sdr.AgentEnvTest do
       task!()
       Fx.configure!(ctx.root, mode: :check, step: :check)
 
-      for args <- [["reset"], ["drop"], ["bogus"], [], ["step", "drop"], ["lease", "reset"]] do
+      for args <- [
+            ["reset"],
+            ["drop"],
+            ["bogus"],
+            [],
+            ["step", "drop"],
+            ["lease", "reset"],
+            ["check"],
+            ["check", "bootstrap"],
+            ["check", "run", "extra"],
+            ["preflight", "extra"],
+            ["lease"],
+            ["lease", "provisioning"],
+            ["lease", "bootstrap", "extra"],
+            ["step"],
+            ["step", "provision"],
+            ["step", "create", "extra"],
+            ["publish", "extra"],
+            ["release"],
+            ["release", "check"],
+            ["release", "run", "extra"]
+          ] do
         assert_raise Mix.Error, ~r/usage/i, fn ->
           capture_io(fn -> Mix.Task.rerun(@task, args) end)
         end
@@ -390,15 +465,67 @@ defmodule Mix.Tasks.Sdr.AgentEnvTest do
       assert BootFx.state_files(ctx.root) == []
     end
 
-    test "lease bootstrap on a fresh root prints the nonce of the lease it took", ctx do
+    test "lease bootstrap on a fresh root prints exactly one nonce line, the lease's", ctx do
       task!()
       Fx.configure!(ctx.root, mode: :check, step: :check)
 
       output = capture_io(fn -> Mix.Task.rerun(@task, ["lease", "bootstrap"]) end)
 
       assert [_, nonce] = Regex.run(~r/^SDR_AGENT_ENV_NONCE ([0-9a-f]{32})$/m, output)
+      assert length(Regex.scan(~r/SDR_AGENT_ENV_NONCE/, output)) == 1
       assert object(ctx.root, :lease)["nonce"] == nonce
       assert object(ctx.root, :pending)["nonce"] == nonce
+    end
+
+    test "lease run on a bound root prints exactly one nonce line, the run lease's", ctx do
+      task!()
+      bound = BootFx.agentenv_bound!(ctx.root, lease: :none)
+      Fx.configure!(ctx.root, mode: :check, step: :check)
+
+      output = capture_io(fn -> Mix.Task.rerun(@task, ["lease", "run"]) end)
+
+      assert [_, nonce] = Regex.run(~r/^SDR_AGENT_ENV_NONCE ([0-9a-f]{32})$/m, output)
+      assert length(Regex.scan(~r/SDR_AGENT_ENV_NONCE/, output)) == 1
+      lease = object(ctx.root, :lease)
+
+      assert {lease["mode"], lease["nonce"], lease["target"]} ==
+               {"run", nonce, %{"binding_sha256" => bound.binding_sha256}}
+    end
+
+    test "check gathers the real resolved configuration: the test VM's Repo is refused", ctx do
+      task!()
+      BootFx.agentenv_bound!(ctx.root, lease: :none)
+      Fx.configure!(ctx.root, mode: :check, step: :check)
+      before = digests(ctx.root)
+
+      for intent <- ["run", "provision"] do
+        assert_raise Mix.Error, ~r/repo_target_refused/, fn ->
+          capture_io(fn -> Mix.Task.rerun(@task, ["check", intent]) end)
+        end
+      end
+
+      assert digests(ctx.root) == before
+    end
+
+    test "release under STEP=check needs the lease's nonce and every receipt", ctx do
+      task!()
+      nonce = leased!(ctx, [:create, :migrate])
+      Fx.configure!(ctx.root, mode: :check, step: :check, nonce: nonce)
+      before = digests(ctx.root)
+
+      assert_raise Mix.Error, ~r/receipts_missing/, fn ->
+        capture_io(fn -> Mix.Task.rerun(@task, ["release", "bootstrap"]) end)
+      end
+
+      assert digests(ctx.root) == before
+
+      Fx.configure!(ctx.root, mode: :check, step: :check, nonce: Fx.nonce())
+
+      assert_raise Mix.Error, ~r/lease_mismatch/, fn ->
+        capture_io(fn -> Mix.Task.rerun(@task, ["release", "bootstrap"]) end)
+      end
+
+      assert digests(ctx.root) == before
     end
   end
 end

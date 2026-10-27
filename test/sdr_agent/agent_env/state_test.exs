@@ -30,8 +30,22 @@ defmodule SdrAgent.AgentEnv.StateTest do
   `create/3` (GREEN-2) is the only other writer; no writer replaces or
   removes a published file.
 
+  Codex `b684dba9` rulings applied here: a valid lease over recognised
+  history is `{:leased, mode}`, but masks no unrecognised or invalid file
+  (quarantine; nothing removed), and an invalid lease is `:invalid_file`
+  (Q2); a bootstrap release needs each same-nonce step receipt and
+  `environment.json` independently (`:receipts_missing`) and a history
+  consistent with the probe's tenant (`:binding_inconsistent`), with the
+  lease and every byte unchanged on refusal (Q3); a run receipt with an
+  absent, invalid or different boot marker is `:boot_id_mismatch` with
+  nothing changed (Q7); an absent `state/` is `:fresh` for `:unknown` or
+  `:absent` facts and classify creates nothing, while a `state` path that
+  is a file, a symlink or unreadable is not absence (Q8); bound files with
+  the database observed `:absent` are `:binding_inconsistent` (Q9).
+
   RED: `acquire_lease/3`, `release/3` and `classify/2` do not exist
-  (structural, guarded after the fixtures).
+  (structural). Each call is guarded on its own function (Codex `b684dba9`
+  M1), so the `create/3` and `read/2` regression locks execute now.
 
   Hermetic: physical roots under `tmp/agent-env-roots`; no database (the
   database facts are given).
@@ -54,19 +68,19 @@ defmodule SdrAgent.AgentEnv.StateTest do
 
   ## Helpers
 
-  defp require_state! do
+  # Function-specific (Codex b684dba9 M1): a call needs only its own function,
+  # so the existing create/3 and read/2 never wait on the new writers.
+  defp require_state!(function, arity) do
     assert Code.ensure_loaded?(@state), "C2* S1 RED-3: #{inspect(@state)} is not available"
 
-    for {function, arity} <- [acquire_lease: 3, release: 3, classify: 2, create: 3, read: 2] do
-      assert function_exported?(@state, function, arity),
-             "C2* S1 RED-3: #{inspect(@state)}.#{function}/#{arity} is not exported"
-    end
+    assert function_exported?(@state, function, arity),
+           "C2* S1 RED-3: #{inspect(@state)}.#{function}/#{arity} is not exported"
 
     :ok
   end
 
   defp state(function, args) do
-    require_state!()
+    require_state!(function, length(args))
     apply(@state, function, args)
   end
 
@@ -102,6 +116,48 @@ defmodule SdrAgent.AgentEnv.StateTest do
       "boot_id" => boot_id,
       "completed_at" => DateTime.utc_now()
     })
+  end
+
+  # The complete bootstrap history of a fresh nonce under its held bootstrap
+  # lease (fixtures only: pending, lease, created, the four step receipts and
+  # environment.json), omitting the items in `except` (`:create`, `:migrate`,
+  # `:seed`, `:probe` receipts, `:environment`). `environment_tenant:` gives
+  # environment.json another tenant than the probe's. Returns the nonce.
+  defp bootstrap_history!(root, except, opts \\ []) do
+    nonce = Fx.nonce()
+    tenant_id = Ecto.UUID.generate()
+
+    Fx.write_state!(root, :pending, %{
+      "environment_id" => "agentenv-1",
+      "nonce" => nonce,
+      "started_at" => DateTime.utc_now()
+    })
+
+    BootFx.bootstrap_lease!(root, nonce)
+
+    Fx.write_state!(root, :created, %{
+      "database" => "sdr_agent_agentenv",
+      "database_oid" => 424_242,
+      "nonce" => nonce
+    })
+
+    for step <- [:create, :migrate, :seed, :probe], step not in except do
+      extra = if step == :probe, do: %{"tenant_id" => tenant_id}, else: %{}
+      Fx.write_state!(root, {:receipt, nonce, step}, receipt(nonce, step, extra))
+    end
+
+    if :environment not in except do
+      Fx.write_state!(root, :environment, %{
+        "environment_id" => "agentenv-1",
+        "database" => "sdr_agent_agentenv",
+        "database_oid" => 424_242,
+        "tenant_id" => Keyword.get(opts, :environment_tenant, tenant_id),
+        "nonce" => nonce,
+        "created_at" => DateTime.utc_now()
+      })
+    end
+
+    nonce
   end
 
   ## Classification
@@ -140,10 +196,95 @@ defmodule SdrAgent.AgentEnv.StateTest do
                {:quarantine, :tenant_mismatch}
     end
 
-    test "a held lease is leased, whatever else is present", ctx do
+    test "a valid held lease over recognised history is leased", ctx do
       bound_state!(ctx.root)
       Fx.write_lease!(ctx.root, :run, Fx.file_sha256!(ctx.root, :environment))
       assert classify(ctx.root) == {:leased, "run"}
+    end
+
+    test "a lease masks no unrecognised or invalid file: quarantine, nothing removed", ctx do
+      bound_state!(ctx.root)
+      Fx.write_lease!(ctx.root, :run, Fx.file_sha256!(ctx.root, :environment))
+      stray = Path.join([ctx.root, "state", "notes.txt"])
+      File.write!(stray, "x")
+      before = digests(ctx.root)
+
+      assert classify(ctx.root) == {:quarantine, :unrecognised_file}
+      assert digests(ctx.root) == before
+
+      File.rm!(stray)
+      File.write!(Fx.path(ctx.root, :created), "not canonical\n")
+      before = digests(ctx.root)
+
+      assert classify(ctx.root) == {:quarantine, :invalid_file}
+      assert digests(ctx.root) == before
+    end
+
+    test "an invalid lease is invalid_file, never leased, fresh or bound", ctx do
+      File.write!(Fx.path(ctx.root, :lease), "not canonical\n")
+      assert classify(ctx.root) == {:quarantine, :invalid_file}
+      File.rm!(Fx.path(ctx.root, :lease))
+
+      bound_state!(ctx.root)
+
+      Fx.write_state!(ctx.root, :lease, %{
+        "environment_id" => "agentenv-1",
+        "mode" => "reset",
+        "nonce" => Fx.nonce(),
+        "target" => %{"binding_sha256" => Fx.file_sha256!(ctx.root, :environment)},
+        "port" => nil,
+        "started_at" => DateTime.utc_now()
+      })
+
+      before = digests(ctx.root)
+      assert classify(ctx.root) == {:quarantine, :invalid_file}
+      assert digests(ctx.root) == before
+    end
+
+    test "an absent state directory is fresh, and classify creates nothing", ctx do
+      state_dir = Path.join(ctx.root, "state")
+      File.rmdir!(state_dir)
+
+      assert classify(ctx.root) == :fresh
+      assert classify(ctx.root, :absent) == :fresh
+      refute File.exists?(state_dir)
+
+      assert classify(ctx.root, {:present, %{database_oid: 424_242, tenant_id: nil}}) ==
+               {:quarantine, :database_without_pending}
+
+      refute File.exists?(state_dir)
+    end
+
+    test "a state path that is a file, a symlink or unreadable is not absence", ctx do
+      state_dir = Path.join(ctx.root, "state")
+      File.rmdir!(state_dir)
+
+      File.write!(state_dir, "")
+      assert {:quarantine, reason} = classify(ctx.root)
+      assert is_atom(reason)
+      assert File.read!(state_dir) == ""
+      File.rm!(state_dir)
+
+      elsewhere = Fx.root!("state-elsewhere")
+      :ok = File.ln_s(elsewhere, state_dir)
+      assert {:quarantine, reason} = classify(ctx.root)
+      assert is_atom(reason)
+      assert {:ok, %File.Stat{type: :symlink}} = File.lstat(state_dir)
+      File.rm!(state_dir)
+
+      File.mkdir!(state_dir)
+      File.chmod!(state_dir, 0o000)
+      on_exit(fn -> File.chmod(state_dir, 0o700) end)
+      assert {:quarantine, reason} = classify(ctx.root)
+      assert is_atom(reason)
+    end
+
+    test "bound files with the database observed absent are binding_inconsistent", ctx do
+      bound_state!(ctx.root)
+      before = digests(ctx.root)
+
+      assert classify(ctx.root, :absent) == {:quarantine, :binding_inconsistent}
+      assert digests(ctx.root) == before
     end
 
     test "boot markers, run receipts and S2 authorization files do not unbind", ctx do
@@ -409,9 +550,65 @@ defmodule SdrAgent.AgentEnv.StateTest do
       bound_state!(ctx.root)
       assert {:ok, nonce} = acquire(ctx.root, :run)
       run_receipt!(ctx.root, nonce, Fx.hex(16))
+      before = digests(ctx.root)
 
       assert release(ctx.root, :run, nonce) == {:error, :boot_id_mismatch}
       assert File.exists?(Fx.path(ctx.root, :lease))
+      assert digests(ctx.root) == before
+    end
+
+    test "a run receipt with an invalid or another nonce's boot marker is refused; nothing changes",
+         ctx do
+      bound = BootFx.agentenv_bound!(ctx.root, lease: :run)
+      nonce = bound.nonce
+      boot_id = Fx.hex(16)
+      run_receipt!(ctx.root, nonce, boot_id)
+      marker = BootFx.boot_marker_path(ctx.root, nonce)
+
+      for bytes <- [
+            "not canonical\n",
+            Canonical.encode!(%{
+              "nonce" => Fx.nonce(),
+              "boot_id" => boot_id,
+              "booted_at" => DateTime.utc_now()
+            })
+          ] do
+        File.write!(marker, bytes)
+        File.chmod!(marker, 0o600)
+        before = digests(ctx.root)
+
+        assert release(ctx.root, :run, nonce) == {:error, :boot_id_mismatch}, inspect(bytes)
+        assert digests(ctx.root) == before, inspect(bytes)
+      end
+    end
+
+    for item <- [:create, :migrate, :seed, :probe, :environment] do
+      @item item
+
+      test "bootstrap release without the #{item} item alone is refused; every byte stays", ctx do
+        nonce = bootstrap_history!(ctx.root, [@item])
+        before = digests(ctx.root)
+
+        assert release(ctx.root, :bootstrap, nonce) == {:error, :receipts_missing}
+        assert digests(ctx.root) == before
+      end
+    end
+
+    test "bootstrap release control: the complete history releases, removing only the lease",
+         ctx do
+      nonce = bootstrap_history!(ctx.root, [])
+      before = digests(ctx.root)
+
+      assert release(ctx.root, :bootstrap, nonce) == :ok
+      assert digests(ctx.root) == Map.delete(before, "instance.lease")
+    end
+
+    test "bootstrap release with an environment inconsistent with the probe is refused", ctx do
+      nonce = bootstrap_history!(ctx.root, [], environment_tenant: Ecto.UUID.generate())
+      before = digests(ctx.root)
+
+      assert release(ctx.root, :bootstrap, nonce) == {:error, :binding_inconsistent}
+      assert digests(ctx.root) == before
     end
   end
 

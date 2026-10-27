@@ -29,11 +29,19 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
         `publish` and `release bootstrap` (step `check`);
       - `run` → `check run`, `lease run`, then `mix phx.server` with step
         `run` and `PORT=4130`, then `release run`.
-      The first non-zero Mix exit stops the sequence (exit 1); a run that
-      cannot release states that its lease stays (quarantine). No
+      The first non-zero Mix exit, at any call, stops the sequence (exit 1)
+      with no later call (Codex `b684dba9` Q6); once the run lease is taken,
+      a failing server or release states that its lease stays
+      (quarantine), and a failed server is never followed by a release. No
       `ecto.*` task is ever called.
+    * **The nonce** (Q5): exactly one anchored line `SDR_AGENT_ENV_NONCE
+      <32 lowercase hex>` in the lease call's output; a missing, malformed,
+      indented, extended or repeated nonce line stops before any step (exit
+      1), and the output is never evaluated. Other output lines are
+      ignored.
 
-  RED: `bin/agent-env` does not exist (structural guard).
+  RED: `bin/agent-env` does not exist (structural guard). The "fixtures"
+  control exercises the stub `mix` alone and executes now (Q10).
 
   Hermetic: a stub `mix` first on `PATH` records each call (as
   `test/scripts/demo_test.exs`), and a fake `HOME` under
@@ -63,18 +71,23 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
     bin = Path.join(home, "stub-bin")
     File.mkdir_p!(bin)
     calls = Path.join(home, "mix-calls")
+    lease_output = Path.join(home, "lease-output")
     stub = Path.join(bin, "mix")
 
+    # A lease call prints the default nonce line, or `lease_output`'s bytes
+    # verbatim when that file exists.
     File.write!(stub, """
     #!/bin/sh
     echo "STEP=$SDR_AGENT_ENV_STEP NONCE=$SDR_AGENT_ENV_NONCE PORT=$PORT ENV=$SDR_AGENT_ENV MIX_ENV=$MIX_ENV | $*" >> "#{calls}"
     if [ -n "$STUB_FAIL" ] && [ "$*" = "$STUB_FAIL" ]; then exit 1; fi
-    if [ "$1 $2" = "sdr.agent_env lease" ]; then echo "SDR_AGENT_ENV_NONCE #{@nonce}"; fi
+    if [ "$1 $2" = "sdr.agent_env lease" ]; then
+      if [ -f "#{lease_output}" ]; then /bin/cat "#{lease_output}"; else echo "SDR_AGENT_ENV_NONCE #{@nonce}"; fi
+    fi
     exit 0
     """)
 
     File.chmod!(stub, 0o755)
-    %{home: home, root: root, bin: bin, calls: calls}
+    %{home: home, root: root, bin: bin, calls: calls, lease_output: lease_output}
   end
 
   ## Helpers
@@ -132,6 +145,50 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
 
   defp provision_calls,
     do: Enum.map(@provision, fn {step, nonce, args} -> call(step, nonce, args) end)
+
+  @run [
+    {"check", "", "sdr.agent_env check run", ""},
+    {"check", "", "sdr.agent_env lease run", ""},
+    {"run", @nonce, "phx.server", "4130"},
+    {"check", @nonce, "sdr.agent_env release run", ""}
+  ]
+
+  defp run_calls,
+    do: Enum.map(@run, fn {step, nonce, args, port} -> call(step, nonce, args, port) end)
+
+  ## Fixture control (Codex b684dba9 Q10): the stub alone
+
+  describe "fixtures" do
+    test "the stub mix records each call and fails or answers as configured", ctx do
+      stub = Path.join(ctx.bin, "mix")
+
+      env = [
+        {"SDR_AGENT_ENV_STEP", "check"},
+        {"SDR_AGENT_ENV_NONCE", nil},
+        {"PORT", nil},
+        {"SDR_AGENT_ENV", "agentenv-1"},
+        {"MIX_ENV", "dev"},
+        {"STUB_FAIL", nil}
+      ]
+
+      assert System.cmd(stub, ["sdr.agent_env", "lease", "run"], env: env) ==
+               {"SDR_AGENT_ENV_NONCE #{@nonce}\n", 0}
+
+      failing = env ++ [{"STUB_FAIL", "sdr.agent_env step migrate"}]
+      assert System.cmd(stub, ["sdr.agent_env", "step", "migrate"], env: failing) == {"", 1}
+
+      File.write!(ctx.lease_output, "first\nsecond\n")
+
+      assert System.cmd(stub, ["sdr.agent_env", "lease", "bootstrap"], env: env) ==
+               {"first\nsecond\n", 0}
+
+      assert calls(ctx) == [
+               call("check", "", "sdr.agent_env lease run"),
+               call("check", "", "sdr.agent_env step migrate"),
+               call("check", "", "sdr.agent_env lease bootstrap")
+             ]
+    end
+  end
 
   ## Usage and the command set
 
@@ -342,6 +399,77 @@ defmodule SdrAgent.Scripts.AgentEnvTest do
 
       assert {_out, 1} = launch(ctx, ["run"])
       assert calls(ctx) == ["sdr.agent_env check run", "sdr.agent_env lease run"]
+    end
+
+    test "a failure at any provision call stops there with exit 1", ctx do
+      for {{_step, _nonce, args}, index} <- Enum.with_index(@provision) do
+        File.rm_rf!(ctx.calls)
+        assert {_out, 1} = launch(ctx, ["provision"], [{"STUB_FAIL", args}]), args
+        assert calls(ctx) == Enum.take(provision_calls(), index + 1), args
+      end
+    end
+
+    test "a failure at any run call stops there; after the lease, the lease stays", ctx do
+      File.rm_rf!(ctx.calls)
+      assert {_out, 1} = launch(ctx, ["check"], [{"STUB_FAIL", "sdr.agent_env check run"}])
+      assert calls(ctx) == [call("check", "", "sdr.agent_env check run")]
+
+      for {{_step, _nonce, args, _port}, index} <- Enum.with_index(@run) do
+        File.rm_rf!(ctx.calls)
+        assert {out, 1} = launch(ctx, ["run"], [{"STUB_FAIL", args}]), args
+        assert calls(ctx) == Enum.take(run_calls(), index + 1), args
+
+        if index >= 2 do
+          assert out =~ ~r/lease/i, args
+          assert out =~ ~r/quarantin|stale/i, args
+        end
+      end
+    end
+
+    test "a malformed, extended or repeated nonce line stops before any step, unevaluated",
+         ctx do
+      marker = Path.join(ctx.home, "evaluated")
+      other = "fedcba9876543210fedcba9876543210"
+
+      for output <- [
+            "",
+            "SDR_AGENT_ENV_NONCE 0123",
+            "SDR_AGENT_ENV_NONCE #{String.upcase(@nonce)}",
+            "SDR_AGENT_ENV_NONCE #{@nonce} extra",
+            "SDR_AGENT_ENV_NONCE  #{@nonce}",
+            " SDR_AGENT_ENV_NONCE #{@nonce}",
+            "SDR_AGENT_ENV_NONCE #{@nonce}\nSDR_AGENT_ENV_NONCE #{other}",
+            "SDR_AGENT_ENV_NONCE #{@nonce}\nSDR_AGENT_ENV_NONCE #{@nonce}",
+            "SDR_AGENT_ENV_NONCE #{@nonce}\nSDR_AGENT_ENV_NONCE 0123",
+            "SDR_AGENT_ENV_NONCE $(touch #{marker})",
+            "SDR_AGENT_ENV_NONCE `touch #{marker}`",
+            "SDR_AGENT_ENV_NONCE #{@nonce};touch #{marker}"
+          ] do
+        File.rm_rf!(ctx.calls)
+        File.write!(ctx.lease_output, output <> "\n")
+
+        assert {_out, 1} = launch(ctx, ["run"]), inspect(output)
+        assert calls(ctx) == Enum.take(run_calls(), 2), inspect(output)
+        refute File.exists?(marker), inspect(output)
+      end
+
+      for output <- ["", "SDR_AGENT_ENV_NONCE #{@nonce}\nSDR_AGENT_ENV_NONCE #{other}"] do
+        File.rm_rf!(ctx.calls)
+        File.write!(ctx.lease_output, output <> "\n")
+
+        assert {_out, 1} = launch(ctx, ["provision"]), inspect(output)
+        assert calls(ctx) == Enum.take(provision_calls(), 3), inspect(output)
+      end
+    end
+
+    test "one anchored nonce line among other output is accepted", ctx do
+      File.write!(
+        ctx.lease_output,
+        "Compiling 2 files (.ex)\nSDR_AGENT_ENV_NONCE #{@nonce}\nGenerated sdr_agent app\n"
+      )
+
+      assert {_out, 0} = launch(ctx, ["run"])
+      assert calls(ctx) == run_calls()
     end
 
     test "no ecto task is ever called", ctx do
