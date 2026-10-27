@@ -28,6 +28,12 @@ defmodule SdrAgent.AgentEnv.State do
   A lease's `target` is `{database, host, port}` = `{"sdr_agent_agentenv",
   "localhost", 5520}` in bootstrap mode, otherwise `{binding_sha256}`; its
   `port` is 4130 in run mode, otherwise `null`.
+
+  `authorization_id` is an S2 registry id: the registry's closed id pattern
+  `\\A[a-z0-9][a-z0-9.-]{0,63}\\z` (one lowercase letter or digit, then up to
+  63 lowercase letters, digits, dots or dashes), never checked as a UUID.
+  `tenant_id`, `grant_id` and `event_id` are UUIDs in the canonical lowercase
+  hyphenated form only.
   """
 
   alias SdrAgent.AgentEnv
@@ -181,7 +187,7 @@ defmodule SdrAgent.AgentEnv.State do
 
   defp checks(:claim) do
     %{
-      "authorization_id" => :uuid,
+      "authorization_id" => :authorization_id,
       "authorization_sha256" => :sha256,
       "binding_sha256" => :sha256,
       "nonce" => :nonce,
@@ -191,7 +197,7 @@ defmodule SdrAgent.AgentEnv.State do
 
   defp checks(:authorization) do
     %{
-      "authorization_id" => :uuid,
+      "authorization_id" => :authorization_id,
       "authorization_sha256" => :sha256,
       "binding_sha256" => :sha256,
       "grant_id" => :uuid,
@@ -209,7 +215,7 @@ defmodule SdrAgent.AgentEnv.State do
   defp extra(:probe), do: %{"tenant_id" => :uuid}
 
   defp extra(:provision),
-    do: %{"authorization_id" => :uuid, "grant_id" => :uuid, "event_id" => :uuid}
+    do: %{"authorization_id" => :authorization_id, "grant_id" => :uuid, "event_id" => :uuid}
 
   defp extra(_step), do: %{}
 
@@ -225,8 +231,14 @@ defmodule SdrAgent.AgentEnv.State do
   defp valid_value?(:database, value),
     do: is_binary(value) and byte_size(value) in 1..63
 
+  # Only the canonical lowercase hyphenated form: `Ecto.UUID.cast/1` alone
+  # would also accept uppercase hex and any 16-byte binary (a raw UUID).
   defp valid_value?(:uuid, value),
-    do: is_binary(value) and match?({:ok, _}, Ecto.UUID.cast(value))
+    do: is_binary(value) and match?({:ok, ^value}, Ecto.UUID.cast(value))
+
+  # An S2 registry id (the registry's closed id pattern; S2 plan r1 OQ1).
+  defp valid_value?(:authorization_id, value),
+    do: is_binary(value) and Regex.match?(~r/\A[a-z0-9][a-z0-9.-]{0,63}\z/, value)
 
   defp valid_value?(:timestamp, value),
     do: is_binary(value) and match?({:ok, _datetime, 0}, DateTime.from_iso8601(value))
