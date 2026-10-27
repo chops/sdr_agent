@@ -24,7 +24,7 @@ defmodule SdrAgent.HostedProdConfigTest do
     "SDR_OWNER_EMAIL" => "owner@example.test"
   }
 
-  @unset ~w(SDR_MODEL_PROVIDER PHX_SERVER SDR_WITNESS_STORE_ROOT ECTO_IPV6 DNS_CLUSTER_QUERY)
+  @unset ~w(SDR_MODEL_PROVIDER PHX_SERVER SDR_WITNESS_STORE_ROOT ECTO_IPV6 DNS_CLUSTER_QUERY SDR_BIND_IP)
 
   setup do
     keys = Map.keys(@hosted) ++ @unset
@@ -72,6 +72,24 @@ defmodule SdrAgent.HostedProdConfigTest do
 
     System.delete_env("PORT")
     assert get_in(prod_config(), [:sdr_agent, SdrAgentWeb.Endpoint, :http, :port]) == 4000
+  end
+
+  test "the endpoint binds loopback only unless SDR_BIND_IP names another address" do
+    http = get_in(prod_config(), [:sdr_agent, SdrAgentWeb.Endpoint, :http])
+    assert http[:ip] == {127, 0, 0, 1}
+    assert http[:port] == 4005
+    # HTTP/2 stays off (ADR-0008 amendment) after the prod http options merge.
+    assert http[:http_2_options] == [enabled: false]
+
+    for {value, ip} <- [{"::1", {0, 0, 0, 0, 0, 0, 0, 1}}, {"10.0.0.2", {10, 0, 0, 2}}] do
+      System.put_env("SDR_BIND_IP", value)
+      assert get_in(prod_config(), [:sdr_agent, SdrAgentWeb.Endpoint, :http, :ip]) == ip
+    end
+
+    for value <- ["", "localhost", "127.0.0.1 ", "127.1", "0:0", "1.2.3.4.5"] do
+      System.put_env("SDR_BIND_IP", value)
+      assert_raise RuntimeError, ~r/SDR_BIND_IP/, &prod_config/0
+    end
   end
 
   test "secrets, anchors, model and seeding are the hosted ones" do
