@@ -61,6 +61,92 @@ if echo "$COMMAND" | grep -qE 'curl.*-s.*\|'; then
 fi
 
 # =============================================================================
+# SCRATCH DELETES - allowed without asking (D-234, ADR-0020)
+# =============================================================================
+# Only one rm whose flags are -r/-R/-f and whose every target is a literal
+# absolute path strictly inside the agents' scratch folder, with no ".", ".."
+# or symlink on the path. The command may hold only letters, digits, spaces
+# and . _ - / so no shell syntax reaches the parse. Anything else falls
+# through, unchanged, to the rules below.
+
+SCRATCH_ROOT="/private/tmp/claude-501/-Users-charles-src-SDR-agent"
+
+# scratch_target <word>: true for a path strictly below SCRATCH_ROOT.
+scratch_target() {
+    local target="$1" rest path segment IFS='/'
+    local -a segments
+
+    case "$target" in
+        "$SCRATCH_ROOT"/*) ;;
+        *) return 1 ;;
+    esac
+    rest="${target:$((${#SCRATCH_ROOT} + 1))}"
+    case "$rest" in
+        *[!/]*) ;;
+        *) return 1 ;;
+    esac
+
+    segments=($target)
+    path=""
+    for segment in "${segments[@]}"; do
+        if [ -z "$segment" ]; then
+            continue
+        fi
+        case "$segment" in
+            . | ..) return 1 ;;
+        esac
+        path="$path/$segment"
+        if [ -L "$path" ]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+# scratch_delete_only <tool JSON> <command>: true only for the allowed case.
+scratch_delete_only() {
+    local input="$1" command="$2" sent_length word saw_target=0 IFS=' '
+    local -a words
+
+    case "$command" in
+        *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\ ._/-]*) return 1 ;;
+    esac
+    # The same length as sent: a dropped NUL or a stripped newline is refused.
+    sent_length=$(printf '%s' "$input" | jq -r '.tool_input.command | length') || return 1
+    if [ "$sent_length" != "${#command}" ]; then
+        return 1
+    fi
+
+    set -f
+    words=($command)
+    set +f
+    if [ "${#words[@]}" -lt 2 ] || [ "${words[0]}" != "rm" ]; then
+        return 1
+    fi
+    for word in "${words[@]:1}"; do
+        if [ "$saw_target" -eq 0 ]; then
+            case "$word" in
+                -*)
+                    case "${word#-}" in
+                        '' | *[!rRf]*) return 1 ;;
+                    esac
+                    continue
+                    ;;
+            esac
+        fi
+        saw_target=1
+        if ! scratch_target "$word"; then
+            return 1
+        fi
+    done
+    [ "$saw_target" -eq 1 ]
+}
+
+if scratch_delete_only "$INPUT" "$COMMAND"; then
+    exit 0
+fi
+
+# =============================================================================
 # ASK - These commands require confirmation (JSON output)
 # =============================================================================
 
