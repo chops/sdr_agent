@@ -79,18 +79,21 @@ defmodule SdrAgent.Demo.HostedContainment do
 
   defp report(tenant_id) do
     opts = [actor: Actor.system(:auditor_cli, tenant_id)]
-    sequences = sales!(Sales.Sequence, [], opts)
 
-    with_follow_up =
-      for step <- sales!(Sales.SequenceStep, [], opts),
-          step.position > 1,
+    active =
+      for sequence <- sales!(Sales.Sequence, [], opts),
+          sequence.status == :active,
           into: MapSet.new(),
-          do: step.sequence_id
+          do: sequence.id
+
+    follow_up_steps =
+      for step <- sales!(Sales.SequenceStep, [], opts), step.position > 1, do: step
+
+    with_follow_up = MapSet.new(follow_up_steps, & &1.sequence_id)
 
     %{
       follow_ups: if(FollowUps.enabled?(), do: :enabled, else: :disabled),
-      active_followup_steps:
-        Enum.count(sequences, &(&1.status == :active and MapSet.member?(with_follow_up, &1.id))),
+      active_followup_steps: Enum.count(follow_up_steps, &MapSet.member?(active, &1.sequence_id)),
       open_followup_campaigns:
         Sales.Campaign
         |> sales!([], opts)
