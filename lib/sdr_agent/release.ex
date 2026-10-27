@@ -37,7 +37,8 @@ defmodule SdrAgent.Release do
 
   @doc """
   Seeds the hosted copy for `SDR_OWNER_EMAIL` (see the moduledoc). Returns
-  `{:ok, %{created: n, existing: m}}`; prints nothing secret.
+  `{:ok, %{created: n, existing: m, contained: k}}` (`k`: earlier follow-up
+  rows the rerun closed); prints nothing secret.
   """
   def seed_hosted do
     owner_email =

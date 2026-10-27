@@ -6,8 +6,11 @@ defmodule SdrAgent.DeployScriptTest do
   with the reviewed non-secret expectations — PHX_HOST, SDR_ANCHOR_SINKS,
   the DATABASE_URL socket directory, a non-empty SDR_LOGIN_ALLOWLIST,
   SDR_MODEL_PROVIDER unset or fake, SDR_BIND_IP unset or 127.0.0.1, a small
-  POOL_SIZE and exactly the known keys — printing key names and ok/FAIL
-  only, never a value. Every value here is synthetic.
+  POOL_SIZE and exactly the known keys. For these synthetic, literal
+  KEY="value" files its output names keys and ok/FAIL only, never a value.
+  The check trusts its input (the root-owned sops file): it sources the file
+  as shell, and its KEY= prefix check is not shell-grammar validation, so
+  untrusted input is out of scope here.
   """
   use ExUnit.Case, async: true
 
