@@ -50,6 +50,11 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
   seam name under `SdrAgent.AgentEnv.Shutdown` to show the production
   arity ignores configuration (Q8, supporting the compiled-branch row).
 
+  Codex 74f35f78 M1: the one deadline also wins at each observation and at
+  the receipt decision; a DOWN already queued when the budget is exhausted,
+  or a clear lease read that returns after the deadline, writes no receipt
+  (with a within-budget control).
+
   RED: `SdrAgent.AgentEnv.Shutdown`, `SdrAgent.AgentEnv.Instance` and
   `SdrAgent.Application.prep_stop/1` do not exist (structural, guarded
   after the fixtures). The fixture control passes.
@@ -478,6 +483,61 @@ defmodule SdrAgent.AgentEnv.ShutdownTest do
 
       assert_untouched_holder(ctx, holder, watch, :live)
       assert_nothing_completed(ctx)
+    end
+
+    # Codex 74f35f78 M1: the one deadline wins at every observation and at
+    # the receipt decision. A success seen after it (a DOWN already in the
+    # mailbox, or a clear lease read that returns late) is not timely.
+    test "an exhausted budget wins over already-queued orderly DOWNs: no receipt", ctx do
+      ctx = ready!(ctx)
+      top = start_top!([tree_child(ctx.server)])
+      planned = plan(top, seams(ctx))
+      assert {:ok, _plan} = planned
+
+      :ok = Supervisor.stop(top, :shutdown)
+      assert Process.whereis(ctx.server) == nil
+      assert Agent.get(ctx.key, & &1) == nil
+
+      assert complete(planned, seams(ctx, budget_ms: 0)) == {:error, :instance_not_terminated},
+             "C2* S1 P5: a queued DOWN consumed after the deadline is not a timely stop"
+
+      assert_nothing_completed(ctx)
+    end
+
+    test "a clear Reaper lease read that returns after the deadline writes no receipt", ctx do
+      ctx = ready!(ctx)
+      top = start_top!([tree_child(ctx.server)])
+      planned = plan(top, seams(ctx))
+      assert {:ok, _plan} = planned
+      :ok = Supervisor.stop(top, :shutdown)
+
+      late_clear = fn ->
+        Process.sleep(400)
+        nil
+      end
+
+      assert complete(planned, seams(ctx, budget_ms: 200, reaper_lease: late_clear)) ==
+               {:error, :reaper_cleanup_unconfirmed},
+             "C2* S1 P5: a lease seen clear only after the deadline is not cleanup confirmed"
+
+      assert_nothing_completed(ctx)
+    end
+
+    test "control: the same queued DOWNs and a promptly clear lease within the budget complete",
+         ctx do
+      ctx = ready!(ctx)
+      top = start_top!([tree_child(ctx.server)])
+      planned = plan(top, seams(ctx))
+      assert {:ok, _plan} = planned
+      :ok = Supervisor.stop(top, :shutdown)
+
+      prompt_clear = fn ->
+        Process.sleep(50)
+        nil
+      end
+
+      assert complete(planned, seams(ctx, budget_ms: 2_000, reaper_lease: prompt_clear)) == :ok
+      assert receipt!(ctx)["boot_id"] == ctx.boot.boot_id
     end
 
     test "P5-5(a): a killed top is not a terminated instance", ctx do
