@@ -259,8 +259,21 @@ config :phoenix, :json_library, Jason
 # (`Phoenix.Logger.filter_values/1`): the default "password"; C4 section
 # 3.6's settings form params, which live under `settings_content`; and
 # R0-05's typed resolution confirmation
-# (`docs/product/r0/r0-05-interface.md` section 5).
-config :phoenix, :filter_parameters, ["password", "settings_content", "resolution_confirmation"]
+# (`docs/product/r0/r0-05-interface.md` section 5); and, for magic-link
+# sign-in (Codex M2), the link `token` (path, form and LiveView params) and
+# the requester's `email`. Keys containing these strings are filtered too.
+config :phoenix, :filter_parameters, [
+  "password",
+  "settings_content",
+  "resolution_confirmation",
+  "token",
+  "email"
+]
+
+# Hosted owner-only admission (`SdrAgent.Accounts.LoginAllowlist`): a
+# deliberate per-environment setting. Dev and test are not hosted; prod is
+# (config/prod.exs). A missing key or any value but `false` enforces it.
+config :sdr_agent, login_allowlist_enforced: false
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
