@@ -69,6 +69,12 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
   script effect test is structural (scaffolds). The `prove` option tests
   fail on their semantic assertions (today the options are ignored). Tests
   named `control:` pass now and must keep passing.
+
+  The release probes' history tests (Codex ed67bbfe M1, CPU only) load the
+  campaign's shared module `release_migration/common.exs` (definitions
+  only: requiring it runs nothing) and call its pure checks on synthetic
+  captures: a changed or missing captured event, or an unaccounted append,
+  must be refused even when the chain is valid.
   """
   use ExUnit.Case, async: false
 
@@ -92,6 +98,12 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
   STARTING after validation
   ** (Postgrex.Error) ERROR 23514 (check_violation) check constraint "model_result_releases_disposition" of relation "model_result_releases" is violated by some row
   """
+
+  # The release probes' shared module (definitions only; nothing runs).
+  setup_all do
+    Code.require_file("common.exs", @rm)
+    :ok
+  end
 
   ## Fixtures
 
@@ -1311,6 +1323,123 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
         @external |> File.read!() |> Code.string_to_quoted!()
 
       assert Enum.any?(statements, &match?({:@, _, [{:moduletag, _, [:external]}]}, &1))
+    end
+  end
+
+  ## Release probes: preserved history, not only a valid chain (pure, CPU only;
+  ## Codex ed67bbfe M1)
+
+  @preserved %{
+    "chain_valid" => "permitted",
+    "captured_events_unchanged" => "permitted",
+    "appends_accounted" => "permitted"
+  }
+
+  # Calls a pure check of the release probes' shared module.
+  defp probes(function, args), do: apply(SdrAgent.ReleaseMigration, function, args)
+
+  defp history_event(id, sequence, type) do
+    %{
+      "id" => id,
+      "tenant_id" => "tenant-a",
+      "sequence" => sequence,
+      "event_type" => type,
+      "event_hash" => "hash-#{id}",
+      "row_sha256" => "row-#{id}"
+    }
+  end
+
+  defp history_capture do
+    %{
+      "events" => [
+        history_event("e1", 1, "agents.run.created"),
+        history_event("e2", 2, "model.result.demo_exception"),
+        history_event("e3", 3, "audit.access.chain_verify")
+      ],
+      "heads" => [%{"tenant_id" => "tenant-a", "last_sequence" => 3, "last_event_hash" => "x"}]
+    }
+  end
+
+  describe "release probes: preserved history, not only a valid chain (pure)" do
+    test "the captured history plus only the probes' own appends is preserved" do
+      capture = history_capture()
+
+      current =
+        capture["events"] ++
+          [
+            history_event("e4", 4, "audit.access.chain_verify"),
+            history_event("e5", 5, "system.provenance.recorded")
+          ]
+
+      assert probes(:history_checks, [capture, current, "permitted"]) == @preserved
+      assert probes(:history_checks, [capture, capture["events"], "permitted"]) == @preserved
+    end
+
+    test "a changed or missing captured event is refused although the chain is valid" do
+      capture = history_capture()
+      [e1, e2, e3] = capture["events"]
+
+      for {label, current, expected} <- [
+            {"the demo event's row rewritten", [e1, %{e2 | "row_sha256" => "rewritten"}, e3],
+             "refused:event_changed"},
+            {"the demo event re-hashed", [e1, %{e2 | "event_hash" => "other"}, e3],
+             "refused:event_changed"},
+            {"the demo event moved", [e1, %{e2 | "sequence" => 7}, e3], "refused:event_changed"},
+            {"the demo event's type changed", [e1, %{e2 | "event_type" => "x"}, e3],
+             "refused:event_changed"},
+            {"the demo event missing", [e1, e3], "refused:event_missing"},
+            {"the demo event under another id", [e1, %{e2 | "id" => "e2b"}, e3],
+             "refused:event_missing"}
+          ] do
+        result = probes(:history_checks, [capture, current, "permitted"])
+        assert result["chain_valid"] == "permitted", label
+        assert result["captured_events_unchanged"] == expected, "#{label}: #{inspect(result)}"
+        refute result == @preserved, label
+      end
+    end
+
+    test "an append that is not one of the probes' own is refused although the chain is valid" do
+      capture = history_capture()
+
+      for {label, extra} <- [
+            {"a new demo event after the head",
+             history_event("e4", 4, "model.result.demo_exception")},
+            {"a new release event after the head",
+             history_event("e4", 4, "model.result.withheld")},
+            {"an uncaptured event at the head's sequence",
+             history_event("x3", 3, "audit.access.chain_verify")},
+            {"another tenant's event",
+             %{history_event("e4", 4, "audit.access.chain_verify") | "tenant_id" => "tenant-b"}}
+          ] do
+        result = probes(:history_checks, [capture, capture["events"] ++ [extra], "permitted"])
+        assert result["chain_valid"] == "permitted", label
+        assert result["captured_events_unchanged"] == "permitted", label
+
+        assert result["appends_accounted"] == "refused:unaccounted_append",
+               "#{label}: #{inspect(result)}"
+
+        refute result == @preserved, label
+      end
+    end
+
+    test "the demo event must be the captured one and commit the row's record hash" do
+      event = %{"id" => "e2", "record_sha256" => String.duplicate("a", 64)}
+      row = event["record_sha256"]
+      assert probes(:demo_event_check, [event, event, row]) == "permitted"
+
+      for {label, captured, current, row_hex, expected} <- [
+            {"missing now", event, nil, row, "refused:demo_event_changed"},
+            {"another event now", event, %{event | "id" => "e9"}, row,
+             "refused:demo_event_changed"},
+            {"another committed hash now", event,
+             %{event | "record_sha256" => String.duplicate("b", 64)}, row,
+             "refused:demo_event_changed"},
+            {"never captured", nil, event, row, "refused:demo_event_changed"},
+            {"the row's hash moved", event, event, String.duplicate("c", 64),
+             "refused:record_hash_mismatch"}
+          ] do
+        assert probes(:demo_event_check, [captured, current, row_hex]) == expected, label
+      end
     end
   end
 
