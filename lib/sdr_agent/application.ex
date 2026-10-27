@@ -42,6 +42,8 @@ defmodule SdrAgent.Application do
         {Phoenix.PubSub, name: SdrAgent.PubSub},
         # Relays committed audit events to live operator views (ADR-0012).
         SdrAgent.LiveEvents.Relay,
+        # Magic-link request counters (fixed windows in ETS), before the endpoint.
+        SdrAgent.RateLimiter,
         # Start to serve requests, typically the last entry
         SdrAgentWeb.Endpoint,
         {AshAuthentication.Supervisor, [otp_app: :sdr_agent]}
