@@ -122,6 +122,28 @@ case {config_env(), System.get_env("SDR_MODEL_PROVIDER")} do
     raise "SDR_MODEL_PROVIDER must be fake or claude_cli"
 end
 
+# C2* demo-exception selector (ADR-0005 C2* amendment item 2). Unset is off,
+# in every environment. The only accepted value is exactly c2star-demo-v4/1,
+# and only in development. Any other value, the empty string included, and
+# any value in test or prod refuses boot; the value is never echoed. The
+# selector is never authority on its own: nothing is eligible without an
+# attested agent environment, an authorization and every eligibility check,
+# and the shipped source attests nothing.
+case {config_env(), System.get_env("SDR_DEMO_EXCEPTION")} do
+  {_env, nil} ->
+    :ok
+
+  {:dev, "c2star-demo-v4/1"} ->
+    config :sdr_agent, SdrAgent.Agents.DemoException, selector: "c2star-demo-v4/1"
+
+  {env, _value} when env in [:test, :prod] ->
+    raise "SDR_DEMO_EXCEPTION is refused in #{env}: the C2* demo exception " <>
+            "(ADR-0005) can be selected in development only. Unset it."
+
+  {_env, _value} ->
+    raise "SDR_DEMO_EXCEPTION must be unset or exactly c2star-demo-v4/1 (ADR-0005 C2* amendment)"
+end
+
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :sdr_agent, SdrAgentWeb.Endpoint,
