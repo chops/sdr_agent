@@ -13,6 +13,9 @@ recorded in [`docs/sdlc/gates/G0.md`](../sdlc/gates/G0.md)). Drafted by Claude
 and reviewed by Codex for gate G0 of the SDLC process in
 [`docs/sdlc/`](../sdlc/README.md). It supersedes
 [ADR-0001](0001-unattended-build-operating-charter.md) for product-phase work.
+Amendment 3 (2026-10-27) is accepted as D-222, owner acceptance delegated by
+D-219, after Codex's static PASS (01a17b73); its text below is published as
+reviewed, so its own Status line still reads PROPOSED.
 
 ## Context
 
@@ -213,3 +216,69 @@ only (1): real data never means a real message is sent.
   they just don't get shared outside of my machine". The owner accepted
   this wording on 2026-10-12 ("accept PR #129") after Codex's independent
   approval of 83649ff.
+
+<!-- BEGIN ADR-0014 AMENDMENT 3: text as reviewed by Codex (01a17b73) -->
+
+## Amendment 3 (2026-10-27, PROPOSED): delegated acceptance and an unattended build for the D-218 scope
+
+**Status: PROPOSED.** This amendment has not been accepted. To be accepted:
+
+- Codex gives an independent static PASS on this exact text.
+- A decision row records the acceptance. It cites D-219, D-221, the commit and this file's SHA256, and says "owner acceptance delegated by D-219".
+
+D-219 covers this amendment itself. D-221 item 1 calls for it.
+
+### Why
+
+- This charter has the owner take part at every gate (lines 26-27). It reserves gate approval, ADR acceptance, gate exceptions and real-call budgets to the owner (decision rights table, lines 50-59).
+- D-219 (2026-10-26) directs an unattended, parallel build of the user-facing features. It pre-accepts the ADR addenda and amendments that the D-218 scope requires, each once its exact text has an independent static PASS.
+- D-221 (Codex co-sign 01a17b54) turns that into operating rules.
+
+### Scope and window
+
+This amendment covers two things:
+
+- the work needed to land D-218's selected scope (items 2 to 11);
+- the operating rules of D-221.
+
+It runs from its acceptance until **2026-11-01T06:00:00Z (exclusive)**. Outside that scope or window, the rest of this charter applies unchanged.
+
+### Decision rights, as amended for the scope
+
+| Decision | Who decides, for the D-218 scope | Notes |
+|---|---|---|
+| ADR acceptance (an amendment or addendum needed for the scope) | Delegated by the owner (D-219) | Each one is recorded in its own decision row, with: its exact commit and file SHA256; the independent reviewer's static PASS; and the words "owner acceptance delegated by D-219". Claude-authored text needs Codex's PASS. Codex-authored text needs Claude's PASS, recorded before Codex attests the binding. A co-authored mechanism needs a reviewer who did not author its implementation. No owner quote or time is ever invented. Nothing claims the owner read a later text. |
+| Gate approval (G0 to G9) | Unchanged: owner only | Within the scope, intermediate owner walks, G5 and gate records are no longer build dependencies. Plans, entity deltas, RED/GREEN, reviews and merges proceed on an independent peer PASS. No agent marks a gate approved. The owner's product acceptance comes at the end. D-216, D-218 and D-219 are the owner's explicit approval to build the D-218 features. No other feature is unfrozen. |
+| Exceptions to a gate criterion | Unchanged: owner only | The only exception is an ADR amendment covered by the first row. |
+| Real model calls | Unchanged: owner only | The owner alone sets caps and windows. Agents may materialize recorded owner caps only through ADR-0004's delegated provisioning action, and never set or enlarge them. The budget stays zero until an owner caps row exists. |
+| Merging a reviewed PR | Claude or Codex (D-157, D-204) | Codex approves Claude-authored heads, and Claude approves Codex-authored heads. A merge needs green required CI on that exact head and an up-to-date branch, and is done by rebase with `--match-head-commit`. Never `--admin`, and never with a waived blocker. |
+| Drafting, reviewing, tests, docs | Unchanged: Claude and Codex | Author and reviewer are never the same agent. A subagent never approves its own work. |
+| Publication of private material; elevated rights, deployment and credentials; resolving a security blocker; a new product choice with no supported default | Unchanged: owner only | |
+
+### Unchanged
+
+- Non-waivable constraints 1 to 7 (as amended by Amendment 2).
+- The process rules: material changes go back to the reviewer, and the agents stop and ask the owner when a step needs authority this charter does not grant.
+- No agent connects to the owner's databases, prints a secret or reaches a real recipient.
+
+### Process conventions
+
+D-221 items 2 to 4 are process conventions, each with its own reviewed manifest or contract:
+
+- the standing hermetic runner;
+- parallel authors with one worktree and lane each;
+- the agent-run Fake browser smoke.
+
+They add no authority over the owner's databases, real calls, roles, services, cluster-global operations or external proofs.
+
+### Expiry
+
+At 2026-11-01T06:00:00Z, the decision rights and rules above revert to the rest of this charter. An amendment accepted under the delegation stays accepted, on its own terms and with its own expiry, for example ADR-0005's C2* window. No new acceptance may be recorded under D-219 after that instant. There is no automatic extension: an extension needs an explicit owner decision.
+
+### Consequences
+
+- **Positive:** the owner's acceptance turnaround is no longer the critical path for the Friday scope. Every acceptance still has an exact text, an independent PASS and a decision row.
+- **Negative:** the owner sees these amendments after they take effect, at the final product acceptance, rather than at each gate.
+- **Risks:** a delegated acceptance is only as good as its independent review. A blocking security finding still blocks.
+
+<!-- END ADR-0014 AMENDMENT 3 -->
