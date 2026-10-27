@@ -422,7 +422,11 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
     shape
   end
 
-  defp gate_params(ctx, lead, draft, shape),
+  # HandOffProposal v3 (B1-R1) binds the two citation checks as well, so each
+  # case carries passed claims and personalization checks of its own run,
+  # bound to exactly its draft: every case is accepted or refused on its
+  # shape check alone.
+  defp gate_params(ctx, run, lead, draft, shape, label),
     do: %{
       lead_id: lead.id,
       draft: %{
@@ -430,11 +434,42 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
         model_invocation_id: draft.invocation.id,
         proposal: %{}
       },
-      claims_check: %{passed: true, decision_id: Ecto.UUID.generate()},
-      personalization_check: %{passed: true, decision_id: Ecto.UUID.generate()},
+      claims_check: bound_citation!(ctx, run, lead, draft, :claims_validation, label),
+      personalization_check:
+        bound_citation!(ctx, run, lead, draft, :personalization_validation, label),
       shape_check: %{passed: true, decision_id: shape.id},
       plan: %{campaign_id: ctx.campaign_id, step: %{id: Ecto.UUID.generate()}}
     }
+
+  defp bound_citation!(ctx, run, lead, draft, kind, label) do
+    rule =
+      if kind == :claims_validation,
+        do: "sdr.claims_cite_evidence",
+        else: "sdr.personalization_cites_evidence"
+
+    {:ok, check} =
+      Context.decide(
+        context(ctx, run, label),
+        %{
+          kind: kind,
+          mode: :deterministic,
+          rule_id: rule,
+          rule_version: "1",
+          subject_id: lead.id,
+          inputs: %{
+            "draft_proposal_decision_id" => draft.decision.id,
+            "model_invocation_id" => draft.invocation.id,
+            "accepted_evidence_ids" => []
+          },
+          outcome: "passed",
+          outcome_detail: %{"rejected" => [], "too_few" => false}
+        },
+        "citation-#{label}",
+        [draft.decision, draft.invocation]
+      )
+
+    %{passed: true, decision_id: check.id}
+  end
 
   defp control?(text), do: Regex.match?(~r/\p{Cc}/u, text)
 
@@ -1304,7 +1339,7 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       result =
         observe(fn ->
           HandOffProposal.perform(
-            gate_params(ctx, lead, draft, shape),
+            gate_params(ctx, run, lead, draft, shape, :matching),
             context(ctx, run, :matching)
           )
         end)
@@ -1322,7 +1357,7 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
         result =
           observe(fn ->
             HandOffProposal.perform(
-              gate_params(ctx, lead, draft, shape),
+              gate_params(ctx, run, lead, draft, shape, label),
               context(ctx, run, label)
             )
           end)

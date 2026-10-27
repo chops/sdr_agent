@@ -15,23 +15,33 @@ defmodule SdrAgent.SDR.Actions.ValidateDraftShape do
   ids, and its input refs those two records; the outcome detail holds the
   reason codes only — never the subject, the body or settings text.
   `HandOffProposal` hands off only a draft whose bound check passed.
+
+  Version 2 (B1-R1, Codex PR #234 review; SDRAgent v5): after the run's
+  pinned definition is checked to declare this version, the rule measures
+  the authoritative draft (`SdrAgent.SDR.Support.authoritative_draft/3`):
+  this run's `draft_proposal` Decision about the step's lead, citing exactly
+  the named ModelInvocation of this run, whose released output is parsed by
+  the OutreachProposal schema. The caller's `draft.proposal` is never
+  measured, so a disagreeing map changes nothing. A missing or mismatched
+  pair stops the run `:crash` with a fixed, content-free reason, and no
+  Decision is recorded.
   """
   use SdrAgent.SDR.Action,
     name: "sdr_validate_draft_shape",
     description: "Subject on one line, no link in the body.",
+    version: "2",
     schema: Zoi.object(%{lead_id: Zoi.string(), draft: Zoi.map()})
 
-  alias SdrAgent.Agents
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.Preconditions
+  alias SdrAgent.SDR.Support
 
   @impl SdrAgent.SDR.Action
   def perform(%{lead_id: lead_id, draft: draft}, ctx) do
     with :ok <- Preconditions.declared(ctx, __MODULE__),
-         {:ok, decision} <- Agents.get_decision(draft.decision_id, actor: ctx.actor),
-         {:ok, invocation} <-
-           Agents.get_model_invocation(draft.model_invocation_id, actor: ctx.actor) do
-      reasons = reasons(draft.proposal)
+         {:ok, %{decision: decision, invocation: invocation, proposal: proposal}} <-
+           Support.authoritative_draft(ctx, lead_id, draft) do
+      reasons = reasons(proposal)
 
       with {:ok, shape} <-
              Context.decide(

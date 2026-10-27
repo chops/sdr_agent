@@ -26,12 +26,17 @@ defmodule SdrAgent.SDR.SDRAgent do
   is deliberately no send action (spec §6).
 
   `register/1` records this definition (allowed actions, prompt and schema
-  refs with hashes, model policy) as the `SDRAgent` v4 AgentDefinition. v3
+  refs with hashes, model policy) as the `SDRAgent` v5 AgentDefinition. v3
   carried the deterministic schema-v2 refs (`SdrAgent.AI.JsonSchema`); v4
   (B1-04/B1-05) changes the evidence-extraction and outreach-proposal prompts,
   `BuildEvidenceBundle`, `DraftEmail` and `HandOffProposal` (version 2) and
-  adds `ValidateDraftShape`. v1-v3 rows stay untouched as the admission record
-  of the runs that used them; such runs keep their pin, and a changed action
+  adds `ValidateDraftShape`. v5 (B1-R1, route `claude-b1-r1-version-route-r1.md`)
+  differs from v4 in exactly four action versions: `ValidateDraftShape`,
+  `ValidateClaims` and `ValidatePersonalization` "2" (they measure the
+  authoritative stored draft of this run) and `HandOffProposal` "3" (all three
+  checks bound to the exact draft). Since v4 may be persisted, it is never
+  amended; its body is frozen in the tests. v1-v4 rows stay untouched as the
+  admission record of the runs that used them; such runs keep their pin, and a changed action
   refuses to run under a definition that does not declare it
   (`declares?/2`, `SdrAgent.SDR.Preconditions.declared/2`). Not yet routed:
   `sdr.followup.due` (drafting a follow-up) and redrafts — a scoped
@@ -62,7 +67,7 @@ defmodule SdrAgent.SDR.SDRAgent do
     :reply,
     :stop
   ]
-  @version 4
+  @version 5
 
   agent do
     schema(

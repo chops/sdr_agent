@@ -1,15 +1,18 @@
 defmodule SdrAgent.SDR.Preconditions do
   @moduledoc """
-  Fail-closed preconditions of the SDR actions that B1-04/B1-05 changed
-  (plan `claude-b1-research-draft-plan-r2.md` section 3):
+  Fail-closed preconditions of the SDR actions that B1-04/B1-05 and B1-R1
+  changed (plan `claude-b1-research-draft-plan-r2.md` section 3; route
+  `claude-b1-r1-version-route-r1.md`):
 
     * `declared/2` — the run's pinned AgentDefinition must declare the
       executing action at its current `sdr_action_version/0`. A run pinned
-      to an older definition (a queued pre-v4 run, or an operator retry,
-      which keeps its pin) is stopped `:crash` with the fixed reason
-      `#{inspect("the run's agent definition does not declare this action version")}`
-      before any settings read, model call or write: new action semantics
-      never run under an old admission record;
+      to an older definition (a queued pre-v4 or pre-v5 run, or an operator
+      retry, which keeps its pin) is stopped `:crash` with the fixed reason
+      `#{inspect("the run's agent definition does not declare this action version")}`.
+      The check reads the run and its pinned definition, and its refusal
+      writes the failed run. It runs before any settings read, proposal or
+      evidence read, model call, or validation or hand-off Decision, so new
+      action semantics never run under an old admission record;
     * `settings/1` — the run's resolved settings snapshot
       (`SdrAgent.Agents.run_settings/2`, never the current revisions). Any
       refusal stops the run `:crash` with the fixed reason

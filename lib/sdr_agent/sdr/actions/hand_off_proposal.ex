@@ -14,6 +14,18 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   lead transition, signal or Draft). The `sdr.draft.completed` record is
   unchanged.
 
+  Version 3 (B1-R1, plan `claude-b1-r1-neighbor-validators-delta-r1.md` item
+  5; SDRAgent v5): the `claims_check` and the `personalization_check` are
+  bound the same way. Each of the three must name a Decision of its own kind
+  (`claims_validation`, `personalization_validation`,
+  `draft_shape_validation`), deterministic and passed, of this run, whose
+  input refs are exactly the draft's `draft_proposal` Decision and
+  ModelInvocation. A missing, rejected, unknown, unbound, wrong-kind,
+  other-run or other-pair check is refused before the Lead lock or any write
+  of the hand-off. Params and the `sdr.draft.completed` payload are
+  unchanged, and `SdrAgent.SDR.proposal/2` replays earlier hand-offs as
+  before.
+
   A valid one is handed off in *one transaction*: the Lead row is locked
   `FOR UPDATE`, the Campaign, the recipient Contact and the AgentRun
   `FOR SHARE` before anything is appended to the audit chain (lock order
@@ -39,7 +51,7 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   use SdrAgent.SDR.Action,
     name: "sdr_hand_off_proposal",
     description: "Enroll the lead and hand the validated proposal to review.",
-    version: "2",
+    version: "3",
     schema:
       Zoi.object(%{
         lead_id: Zoi.string(),
@@ -90,34 +102,40 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
 
   defp validated?(
          %{
-           claims_check: %{passed: true},
-           personalization_check: %{passed: true},
+           claims_check: %{passed: true, decision_id: claims_id},
+           personalization_check: %{passed: true, decision_id: personalization_id},
            shape_check: %{passed: true, decision_id: shape_id},
            draft: %{decision_id: draft_id, model_invocation_id: invocation_id}
          },
          ctx
-       ),
-       do: shape_bound?(ctx, shape_id, draft_id, invocation_id)
+       ) do
+    pair =
+      MapSet.new([
+        {"SdrAgent.Agents.Decision", draft_id},
+        {"SdrAgent.Agents.ModelInvocation", invocation_id}
+      ])
+
+    bound?(ctx, claims_id, :claims_validation, pair) and
+      bound?(ctx, personalization_id, :personalization_validation, pair) and
+      bound?(ctx, shape_id, :draft_shape_validation, pair)
+  end
 
   defp validated?(_params, _ctx), do: false
 
-  # The passed shape check of this run, bound to exactly this draft.
-  defp shape_bound?(ctx, shape_id, draft_id, invocation_id) when is_binary(shape_id) do
-    case Agents.get_decision(shape_id, actor: ctx.actor) do
-      {:ok, %{kind: :draft_shape_validation, mode: :deterministic, outcome: "passed"} = shape} ->
-        shape.agent_run_id == ctx.run_id and
-          MapSet.new(shape.input_refs, &{&1.resource, &1.id}) ==
-            MapSet.new([
-              {"SdrAgent.Agents.Decision", draft_id},
-              {"SdrAgent.Agents.ModelInvocation", invocation_id}
-            ])
+  # A passed deterministic check of `kind` of this run, bound to exactly this
+  # draft's Decision and invocation.
+  defp bound?(ctx, check_id, kind, pair) when is_binary(check_id) do
+    case Agents.get_decision(check_id, actor: ctx.actor) do
+      {:ok, %{kind: ^kind, mode: :deterministic, outcome: "passed"} = check} ->
+        check.agent_run_id == ctx.run_id and
+          MapSet.new(check.input_refs, &{&1.resource, &1.id}) == pair
 
       _other ->
         false
     end
   end
 
-  defp shape_bound?(_ctx, _shape_id, _draft_id, _invocation_id), do: false
+  defp bound?(_ctx, _check_id, _kind, _pair), do: false
 
   defp hand_off(%{lead_id: lead_id, plan: plan} = params, ctx) do
     with {:ok, lead} <- lock(ctx, Sales.Lead, lead_id, :for_update),
