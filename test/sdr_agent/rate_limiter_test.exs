@@ -5,8 +5,10 @@ defmodule SdrAgent.RateLimiterTest do
   window and refuses the rest until the next window; keys are independent;
   the clock is `SdrAgent.Clock` (injectable) or an explicit instant;
   retention is bounded — expired windows are swept and the table never
-  holds more than `max_keys/0` rows, even when distinct new keys race (a
-  new key beyond that is refused); an unavailable table refuses every hit.
+  holds more than `max_keys/0` counter rows, even when distinct new keys
+  race (a new key beyond that is refused) or a caller dies while its row
+  is created; it holds counter rows only; an unavailable table refuses
+  every hit.
   """
   # The limiter's table is node-global.
   use ExUnit.Case, async: false
@@ -138,5 +140,62 @@ defmodule SdrAgent.RateLimiterTest do
     end
 
     assert :ok = limiter(:hit, [{:test, make_ref()}, 5, @window, @t0])
+  end
+
+  test "the table holds counter rows only (no separate capacity accounting to orphan)" do
+    assert :ok = limiter(:hit, [{:test, make_ref()}, 1, @window, @t0])
+    rows = :ets.tab2list(SdrAgent.RateLimiter)
+
+    assert rows != []
+
+    for row <- rows do
+      assert match?(
+               {{_key, w, i}, c, e}
+               when is_integer(w) and is_integer(i) and is_integer(c) and is_integer(e),
+               row
+             ),
+             "not a counter row: #{inspect(row)}"
+    end
+  end
+
+  test "a caller killed while its new row is being created leaves no capacity held" do
+    assert Code.ensure_loaded?(SdrAgent.RateLimiter), "SdrAgent.RateLimiter is not defined"
+    owner = Process.whereis(SdrAgent.RateLimiter)
+    :ok = :sys.suspend(owner)
+
+    try do
+      caller = spawn(fn -> limiter(:hit, [{:aborted, make_ref()}, 1, @window, @t0]) end)
+
+      # The new row is created by the owner (the caller waits on it); the
+      # caller dies mid-creation.
+      assert wait_for_call(owner, caller), "the new row is not created by the limiter process"
+      Process.exit(caller, :kill)
+    after
+      :ok = :sys.resume(owner)
+    end
+
+    _state = :sys.get_state(owner)
+    later = @t0 + 2 * @window
+    limiter(:sweep, [later])
+    max = limiter(:max_keys, [])
+
+    for n <- 1..max, do: assert(:ok = limiter(:hit, [{:after, n}, 1, @window, later]))
+    assert :limited = limiter(:hit, [{:after, :one_more}, 1, @window, later])
+  end
+
+  defp wait_for_call(owner, caller, tries \\ 50) do
+    {:messages, messages} = Process.info(owner, :messages)
+
+    cond do
+      Enum.any?(messages, &match?({:"$gen_call", {^caller, _}, _}, &1)) ->
+        true
+
+      tries == 0 ->
+        false
+
+      true ->
+        Process.sleep(20)
+        wait_for_call(owner, caller, tries - 1)
+    end
   end
 end
