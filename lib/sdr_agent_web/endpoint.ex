@@ -71,7 +71,11 @@ defmodule SdrAgentWeb.Endpoint do
     cookie_key: "request_logger"
 
   plug Plug.RequestId
-  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
+  # The request line is logged at :info except for magic-link confirmation
+  # paths, whose last segment is a live sign-in token (Codex M2): those are
+  # never logged by the endpoint (`log_level/1`), and the router and
+  # LiveView logs filter the `token` param (config :phoenix, :filter_parameters).
+  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint], log: {__MODULE__, :log_level, []}
 
   # S13 browser smoke attestation: test config only (see the module).
   if Application.compile_env(:sdr_agent, :smoke_attestation_plug, false) do
@@ -102,6 +106,13 @@ defmodule SdrAgentWeb.Endpoint do
   end
 
   plug SdrAgentWeb.Router
+
+  @doc """
+  The endpoint request-line log level (`Plug.Telemetry`'s `:log`): `false`
+  for `/magic_link/…` (the path carries a sign-in token), else `:info`.
+  """
+  def log_level(%Plug.Conn{path_info: ["magic_link" | _]}), do: false
+  def log_level(_conn), do: :info
 
   if Mix.env() == :test do
     @session_init Plug.Session.init(@session_options)
