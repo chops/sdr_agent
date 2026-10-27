@@ -141,4 +141,70 @@ defmodule SdrAgent.Agents.DemoException do
 
   defp optional(bounds, nil), do: bounds
   defp optional(bounds, %DateTime{} = bound), do: [bound | bounds]
+
+  @policy_id "c2star-demo-v4/1"
+  @refusal_codes [
+    :exception_off,
+    :environment_unattested,
+    :outside_window,
+    :scope_mismatch,
+    :identity_mismatch,
+    :output_invalid,
+    :promotion_gap_not_v4,
+    :link_not_eligible,
+    :invocation_not_clean
+  ]
+
+  @doc "The policy id, `c2star-demo-v4/1` (the selector value that names the entry)."
+  @spec policy_id() :: String.t()
+  def policy_id, do: @policy_id
+
+  @doc """
+  The closed refusal codes of a withheld release while the selector is on,
+  in evaluation order (ADR-0005 C2* item 5; OQ7).
+  """
+  @spec refusal_codes() :: [atom()]
+  def refusal_codes, do: @refusal_codes
+
+  @doc """
+  Whether the selector names the entry (`config :sdr_agent,
+  SdrAgent.Agents.DemoException, selector: "c2star-demo-v4/1"`, set only by
+  `config/runtime.exs` in `dev`). The selector alone makes nothing eligible.
+  """
+  @spec selected?() :: boolean()
+  def selected? do
+    :sdr_agent
+    |> Application.get_env(__MODULE__, [])
+    |> Keyword.get(:selector)
+    |> Kernel.==(@policy_id)
+  end
+
+  @doc "Whether the entry is inert: it names no authorization (shipped: nil)."
+  @spec inert?() :: boolean()
+  def inert?, do: is_nil(entry().authorization_id)
+
+  @doc """
+  The Source's `attestation/0` (`source/0`). Every consumer reads the Source
+  through these four functions; they dispatch dynamically, so a build whose
+  Source is the constant `Unattested` keeps its callers' other branches
+  type-checked rather than pruned.
+  """
+  @spec attestation() :: {:ok, SdrAgent.Agents.DemoException.Attestation.t()} | :none
+  def attestation, do: dispatch(:attestation, [])
+
+  @doc "The Source's `live_binding?/2` (see `attestation/0`)."
+  @spec live_binding?(struct(), Ecto.UUID.t()) :: boolean()
+  def live_binding?(attestation, tenant_id),
+    do: dispatch(:live_binding?, [attestation, tenant_id])
+
+  @doc "The Source's `authorization/1` (see `attestation/0`)."
+  @spec authorization(String.t()) :: {:ok, Authorization.t()} | :error
+  def authorization(id), do: dispatch(:authorization, [id])
+
+  @doc "The Source's `delegated_grant?/2` (see `attestation/0`)."
+  @spec delegated_grant?(struct(), Authorization.t()) :: boolean()
+  def delegated_grant?(grant, authorization),
+    do: dispatch(:delegated_grant?, [grant, authorization])
+
+  defp dispatch(callback, args), do: apply(source(), callback, args)
 end
