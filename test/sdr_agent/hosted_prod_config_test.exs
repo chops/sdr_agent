@@ -99,13 +99,18 @@ defmodule SdrAgent.HostedProdConfigTest do
     assert sdr[:anchor_sinks] == []
     assert sdr[:model_provider] == SdrAgent.AI.ModelProvider.Fake
     refute Keyword.has_key?(sdr, :seeding_allowed?)
-    # Sign-in and every session admit only SDR_LOGIN_ALLOWLIST (fail closed).
+    # Hosted mode: sign-in and every session admit only SDR_LOGIN_ALLOWLIST
+    # (fail closed); dev and test opt out deliberately.
     assert sdr[:login_allowlist_enforced] == true
 
     for env <- [:dev, :test] do
       base = Config.Reader.read!("config/config.exs", env: env, target: :host)
-      refute get_in(base, [:sdr_agent, :login_allowlist_enforced]), "#{env}"
+      assert get_in(base, [:sdr_agent, :login_allowlist_enforced]) == false, "#{env}"
     end
+
+    # Request, router and LiveView parameter logs never carry a token or an address.
+    filtered = get_in(prod_config(), [:phoenix, :filter_parameters])
+    assert "token" in filtered and "email" in filtered
 
     refute Keyword.has_key?(sdr, :delivery_adapter)
   end

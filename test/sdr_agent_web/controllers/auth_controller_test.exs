@@ -21,11 +21,14 @@ defmodule SdrAgentWeb.AuthControllerTest do
     previous = Map.new(@env, &{&1, System.get_env(&1)})
 
     on_exit(fn ->
+      SdrAgent.TestSupport.RateLimits.reset()
+
       for {key, value} <- previous do
         if value, do: System.put_env(key, value), else: System.delete_env(key)
       end
     end)
 
+    SdrAgent.TestSupport.RateLimits.reset()
     System.delete_env("SDR_LOGIN_ALLOWLIST")
     System.put_env("SDR_MAIL_FROM", "sign-in@example.test")
     tenant = bootstrap!()
@@ -132,6 +135,21 @@ defmodule SdrAgentWeb.AuthControllerTest do
         refute_email_sent()
       end
     end
+
+    test "the confirmation page is not cached, sends no referrer and loads nothing external",
+         %{conn: conn} do
+      for path <- ["/magic_link/not-a-real-token", "/sign-in"] do
+        page = get(build_conn(), path)
+
+        assert html_response(page, 200)
+        assert get_resp_header(page, "cache-control") == ["no-store"], path
+        assert get_resp_header(page, "referrer-policy") == ["no-referrer"], path
+        refute html_response(page, 200) =~ ~r{(src|href)="https?://}, path
+      end
+
+      assert conn |> request_link("nobody.else@example.test") |> get_resp_header("cache-control") ==
+               ["no-store"]
+    end
   end
 
   describe "enforced allowlist (prod)" do
@@ -173,6 +191,33 @@ defmodule SdrAgentWeb.AuthControllerTest do
       System.put_env("SDR_LOGIN_ALLOWLIST", "someone.else@example.test")
       refused = console |> recycle() |> get("/")
       assert redirected_to(refused) == "/sign-in"
+    end
+
+    test "public answers do not reveal who is on the list", %{conn: conn} = ctx do
+      owner = to_string(ctx.reviewer.email)
+      other = human(:admin, ctx.tenant)
+      System.put_env("SDR_LOGIN_ALLOWLIST", owner)
+
+      answers =
+        for email <- [
+              owner,
+              to_string(other.email),
+              "nobody.anywhere@example.test",
+              "not an address"
+            ] do
+          requested = request_link(conn, email)
+          {redirected_to(requested), Phoenix.Flash.get(requested.assigns.flash, :info)}
+        end
+
+      assert [_one] = Enum.uniq(answers)
+
+      # A listed user with a wrong password and an unlisted one with the right
+      # password get the same refusal.
+      wrong = sign_in(conn, owner, "wrong-password-0")
+      unlisted = sign_in(conn, to_string(other.email), test_password())
+
+      assert {redirected_to(wrong), Phoenix.Flash.get(wrong.assigns.flash, :error)} ==
+               {redirected_to(unlisted), Phoenix.Flash.get(unlisted.assigns.flash, :error)}
     end
   end
 end

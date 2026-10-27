@@ -1,12 +1,14 @@
 defmodule SdrAgentWeb.MagicLinkLoggingTest do
   @moduledoc """
-  No log line carries a magic-link token, at any level the logger can emit
-  (debug included): the endpoint's request line skips `/magic_link/…`
-  paths, and the router, LiveView mount/event and parameter logs filter
-  `token` (`config :phoenix, :filter_parameters`). The whole flow is
-  captured at :debug — request the link, open its page (dead and connected
-  render), submit the confirmation, sign in — and the token string appears
-  nowhere, while ordinary request lines are still logged.
+  No log line carries a magic-link token or a requester's email address, at
+  any level the logger can emit, debug included (Codex M2). The endpoint's
+  own request line is suppressed for `/magic_link/…` before routing, and
+  the router, LiveView (mount, params, events) and parameter logs filter
+  `token` and `email` (`config :phoenix, :filter_parameters`). Each flow is
+  captured at :debug through the real routes — request a link, GET the
+  confirmation page (dead and connected render), submit it, POST the
+  sign-in — for success, refusal (a spent or unlisted link) and error (a
+  malformed token); ordinary request lines are still logged.
   """
   use SdrAgentWeb.ConnCase, async: false
 
@@ -22,59 +24,90 @@ defmodule SdrAgentWeb.MagicLinkLoggingTest do
 
     on_exit(fn ->
       Logger.configure(level: previous_level)
+      SdrAgent.TestSupport.RateLimits.reset()
 
       for {key, value} <- previous_env do
         if value, do: System.put_env(key, value), else: System.delete_env(key)
       end
     end)
 
+    SdrAgent.TestSupport.RateLimits.reset()
     tenant = bootstrap!()
     reviewer = human(:reviewer, tenant)
     System.put_env("SDR_LOGIN_ALLOWLIST", to_string(reviewer.email))
     System.put_env("SDR_MAIL_FROM", "sign-in@example.test")
     Logger.configure(level: :debug)
-    %{reviewer: reviewer}
+    %{reviewer: reviewer, email: to_string(reviewer.email)}
   end
 
-  test "requesting, opening and using a link logs no token at :debug", %{conn: conn} = ctx do
-    email = to_string(ctx.reviewer.email)
+  defp request(email) do
+    build_conn()
+    |> put_req_header("x-forwarded-for", "198.18.200.7")
+    |> post("/auth/user/magic_link/request", %{"user" => %{"email" => email}})
+  end
 
+  # GET the confirmation page (dead render), connect to it and submit its
+  # form, then POST the sign-in, as the browser does.
+  defp open_and_sign_in(token) do
+    assert build_conn() |> get("/magic_link/#{token}") |> html_response(200)
+    {:ok, view, _html} = live(build_conn(), "/magic_link/#{token}")
+    view |> element("form") |> render_submit()
+    post(build_conn(), "/auth/user/magic_link", %{"user" => %{"token" => token}})
+  end
+
+  defp assert_clean(log, secrets) do
+    # The capture really ran at :info and :debug (positive controls).
+    assert log =~ "POST /auth/user/magic_link"
+    assert log =~ "Processing with"
+
+    for secret <- secrets do
+      refute String.contains?(String.downcase(log), String.downcase(secret)),
+             "the log contains #{inspect(String.slice(secret, 0, 6))}…"
+    end
+
+    refute log =~ "/magic_link/ey"
+  end
+
+  test "success: request, confirmation page and sign-in log no token or address", ctx do
     log =
       capture_log([level: :debug], fn ->
-        requested =
-          conn
-          |> put_req_header("x-forwarded-for", "198.18.200.7")
-          |> post("/auth/user/magic_link/request", %{"user" => %{"email" => email}})
-
-        assert redirected_to(requested) == "/sign-in"
+        assert redirected_to(request(ctx.email)) == "/sign-in"
         assert_received {:email, %{text_body: body}}
         [_, token] = Regex.run(~r{/magic_link/([A-Za-z0-9._-]+)}, body)
         send(self(), {:token, token})
-
-        assert build_conn() |> get("/magic_link/#{token}") |> html_response(200)
-
-        {:ok, view, _html} = live(build_conn(), "/magic_link/#{token}")
-        view |> element("form") |> render_submit()
-
-        signed_in = post(build_conn(), "/auth/user/magic_link", %{"user" => %{"token" => token}})
-        assert redirected_to(signed_in) == "/"
+        assert redirected_to(open_and_sign_in(token)) == "/"
       end)
 
     assert_received {:token, token}
-
-    # The capture really ran at :debug and :info (positive controls).
-    assert log =~ "POST /auth/user/magic_link/request"
-    assert log =~ "Processing with"
-    assert log =~ "[FILTERED]"
-
-    refute log =~ token
-    refute log =~ "GET /magic_link/"
+    assert_clean(log, [token, ctx.email])
   end
 
-  test "the endpoint's request-line level skips only magic-link paths" do
-    assert SdrAgentWeb.Endpoint.log_level(%Plug.Conn{path_info: ["magic_link", "abc"]}) == false
-    assert SdrAgentWeb.Endpoint.log_level(%Plug.Conn{path_info: ["sign-in"]}) == :info
-    assert SdrAgentWeb.Endpoint.log_level(%Plug.Conn{path_info: []}) == :info
-    assert "token" in Application.get_env(:phoenix, :filter_parameters)
+  test "refusal: a spent link and an unlisted request log no token or address", ctx do
+    assert redirected_to(request(ctx.email)) == "/sign-in"
+    assert_received {:email, %{text_body: body}}
+    [_, token] = Regex.run(~r{/magic_link/([A-Za-z0-9._-]+)}, body)
+    assert redirected_to(open_and_sign_in(token)) == "/"
+
+    log =
+      capture_log([level: :debug], fn ->
+        assert redirected_to(open_and_sign_in(token)) == "/sign-in"
+        assert redirected_to(request("unlisted.person@example.test")) == "/sign-in"
+      end)
+
+    assert_clean(log, [token, ctx.email, "unlisted.person@example.test"])
+  end
+
+  test "error: a malformed token is not logged" do
+    token =
+      "eyJmalformed.not-a-real.token-" <> Integer.to_string(System.unique_integer([:positive]))
+
+    log =
+      capture_log([level: :debug], fn ->
+        assert redirected_to(open_and_sign_in(token)) == "/sign-in"
+      end)
+
+    assert log =~ "POST /auth/user/magic_link"
+    refute log =~ token
+    refute log =~ "/magic_link/ey"
   end
 end

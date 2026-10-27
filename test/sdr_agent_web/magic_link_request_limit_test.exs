@@ -1,111 +1,137 @@
 defmodule SdrAgentWeb.MagicLinkRequestLimitTest do
   @moduledoc """
-  Unauthenticated magic-link requests are bounded before the request action
-  runs (`SdrAgentWeb.MagicLinkRequestLimit` on `POST
-  /auth/user/magic_link/request`): 5 per client address and 30 in total per
-  10 minutes. Over the limit the answer is the same flash and redirect,
-  and no token is minted and no mail sent; the next window admits again.
-  The client address is X-Forwarded-For only from a loopback peer (the
-  proxy on the same host), else the peer itself.
+  Unauthenticated magic-link requests are bounded before anything is minted
+  or sent (Codex M3): per client address 5 per 10 minutes (before the
+  request action), and per destination address 3 per 15 minutes and 30 in
+  total per 10 minutes (before the request preparation mints). Over a bound
+  the answer is the same flash and redirect, no token is minted and no mail
+  sent, whether the address is listed, unknown or malformed; concurrent
+  requests never exceed a bound; each window recovers when it ends. The
+  client address is the last X-Forwarded-For entry only from a loopback
+  peer (the proxy on this host), else the peer itself.
   """
   use SdrAgentWeb.ConnCase, async: false
 
-  import Swoosh.TestAssertions
   import SdrAgent.AuditCase, only: [bootstrap!: 0, human: 2]
 
   alias SdrAgent.Clock
-  alias SdrAgent.RateLimiter
-  alias SdrAgentWeb.MagicLinkRequestLimit
 
   @env ["SDR_LOGIN_ALLOWLIST", "SDR_MAIL_FROM"]
-  @unknown "nobody.here@example.test"
 
   setup do
     previous = Map.new(@env, &{&1, System.get_env(&1)})
 
     on_exit(fn ->
-      RateLimiter.reset()
+      SdrAgent.TestSupport.RateLimits.reset()
 
       for {key, value} <- previous do
         if value, do: System.put_env(key, value), else: System.delete_env(key)
       end
     end)
 
-    RateLimiter.reset()
+    SdrAgent.TestSupport.RateLimits.reset()
     tenant = bootstrap!()
     reviewer = human(:reviewer, tenant)
     System.put_env("SDR_LOGIN_ALLOWLIST", to_string(reviewer.email))
     System.put_env("SDR_MAIL_FROM", "sign-in@example.test")
-    %{email: to_string(reviewer.email)}
+    Clock.freeze(DateTime.utc_now())
+    %{email: to_string(reviewer.email), t0: Clock.utc_now()}
   end
 
-  defp request(ip, email) do
-    build_conn()
+  defp request(email, ip, peer \\ {127, 0, 0, 1}) do
+    %{build_conn() | remote_ip: peer}
     |> put_req_header("x-forwarded-for", ip)
     |> post("/auth/user/magic_link/request", %{"user" => %{"email" => email}})
   end
 
+  defp unknown, do: "u#{System.unique_integer([:positive])}@example.test"
   defp tokens, do: Ash.count!(SdrAgent.Accounts.Token, authorize?: false)
-  defp flash(conn), do: Phoenix.Flash.get(conn.assigns.flash, :info)
+  defp flash(conn), do: {redirected_to(conn), Phoenix.Flash.get(conn.assigns.flash, :info)}
 
-  test "a client's sixth request in ten minutes mints no token and sends nothing", ctx do
-    t0 = DateTime.utc_now()
-    Clock.freeze(t0)
+  defp sent do
+    receive do
+      {:email, _} -> 1 + sent()
+    after
+      0 -> 0
+    end
+  end
 
-    admitted = for _ <- 1..5, do: request("203.0.113.7", @unknown)
-    assert Enum.all?(admitted, &(redirected_to(&1) == "/sign-in"))
-
+  test "a client's sixth request in ten minutes reaches nothing; another client and the next window do",
+       ctx do
+    admitted = for _ <- 1..5, do: request(unknown(), "203.0.113.7")
     before = tokens()
-    limited = request("203.0.113.7", ctx.email)
 
-    assert redirected_to(limited) == "/sign-in"
+    limited = request(ctx.email, "203.0.113.7")
+
     assert flash(limited) == flash(hd(admitted))
-    assert tokens() == before
-    refute_email_sent()
+    assert {tokens(), sent()} == {before, 0}
 
-    # Another client is unaffected; the same client is admitted in the next window.
-    request("203.0.113.8", ctx.email)
-    assert tokens() == before + 1
-    assert_received {:email, _}
+    request(ctx.email, "203.0.113.8")
+    assert {tokens(), sent()} == {before + 1, 1}
 
-    Clock.freeze(DateTime.add(t0, 10, :minute))
-    request("203.0.113.7", ctx.email)
-    assert tokens() == before + 2
-    assert_received {:email, _}
+    Clock.freeze(DateTime.add(ctx.t0, 10, :minute))
+    request(ctx.email, "203.0.113.7")
+    assert {tokens(), sent()} == {before + 2, 1}
   end
 
-  test "the thirty-first request in ten minutes is refused from any client", ctx do
-    for n <- 1..30, do: request("198.51.100.#{n}", @unknown)
-
+  test "X-Forwarded-For names the client only from a loopback peer, by its last entry", ctx do
+    # From the proxy (loopback): the last entry is the client, earlier ones are ignored.
+    for n <- 1..5, do: request(unknown(), "198.51.100.#{n}, 203.0.113.50")
     before = tokens()
-    limited = request("198.51.100.200", ctx.email)
+    request(ctx.email, "198.51.100.99, 203.0.113.50")
+    assert {tokens(), sent()} == {before, 0}
 
-    assert redirected_to(limited) == "/sign-in"
-    assert tokens() == before
-    refute_email_sent()
+    # From any other peer the header is ignored: the peer is the client.
+    for n <- 1..5, do: request(unknown(), "203.0.113.#{100 + n}", {192, 0, 2, 1})
+    request(ctx.email, "203.0.113.200", {192, 0, 2, 1})
+    assert {tokens(), sent()} == {before, 0}
+
+    # A malformed header falls back to the loopback peer, a client of its own.
+    request(ctx.email, "not-an-address")
+    assert {tokens(), sent()} == {before + 1, 1}
   end
 
-  test "X-Forwarded-For counts only from a loopback peer; its last valid entry is the client" do
-    xff = fn peer, value ->
-      %Plug.Conn{
-        remote_ip: peer,
-        req_headers: if(value, do: [{"x-forwarded-for", value}], else: [])
-      }
+  test "one destination gets at most three links per fifteen minutes, minted or not", ctx do
+    before = tokens()
+    first = for n <- 1..3, do: request(String.upcase(ctx.email), "198.18.1.#{n}")
+    assert {tokens(), sent()} == {before + 3, 3}
+
+    over = request(" " <> ctx.email <> " ", "198.18.1.4")
+    assert flash(over) == flash(hd(first))
+    assert {tokens(), sent()} == {before + 3, 0}
+
+    # Unknown and malformed destinations are bounded the same way and answered the same.
+    for email <- ["nobody.listed@example.test", "not an address"] do
+      answers = for n <- 1..4, do: flash(request(email, "198.18.2.#{n}"))
+      assert Enum.uniq(answers) == [flash(hd(first))]
     end
 
-    assert MagicLinkRequestLimit.client_ip(xff.({127, 0, 0, 1}, "203.0.113.9")) ==
-             {203, 0, 113, 9}
+    Clock.freeze(DateTime.add(ctx.t0, 15, :minute))
+    request(ctx.email, "198.18.1.5")
+    assert {tokens(), sent()} == {before + 4, 1}
+  end
 
-    assert MagicLinkRequestLimit.client_ip(xff.({127, 0, 0, 1}, "198.51.100.1, 203.0.113.9")) ==
-             {203, 0, 113, 9}
+  test "concurrent requests for one destination mint and send exactly three", ctx do
+    before = tokens()
 
-    assert MagicLinkRequestLimit.client_ip(xff.({0, 0, 0, 0, 0, 0, 0, 1}, "2001:db8::1")) ==
-             {8193, 3512, 0, 0, 0, 0, 0, 1}
+    1..8
+    |> Task.async_stream(fn n -> request(ctx.email, "198.18.3.#{n}") end, max_concurrency: 8)
+    |> Enum.each(fn {:ok, conn} -> assert redirected_to(conn) == "/sign-in" end)
 
-    assert MagicLinkRequestLimit.client_ip(xff.({127, 0, 0, 1}, "not-an-address")) ==
-             {127, 0, 0, 1}
+    assert {tokens(), sent()} == {before + 3, 3}
+  end
 
-    assert MagicLinkRequestLimit.client_ip(xff.({127, 0, 0, 1}, nil)) == {127, 0, 0, 1}
-    assert MagicLinkRequestLimit.client_ip(xff.({192, 0, 2, 1}, "203.0.113.9")) == {192, 0, 2, 1}
+  test "the thirty-first request in ten minutes reaches nothing, from any client", ctx do
+    for n <- 1..30, do: request(unknown(), "198.51.100.#{n}")
+    before = tokens()
+
+    limited = request(ctx.email, "198.51.100.200")
+
+    assert redirected_to(limited) == "/sign-in"
+    assert {tokens(), sent()} == {before, 0}
+
+    Clock.freeze(DateTime.add(ctx.t0, 10, :minute))
+    request(ctx.email, "198.51.100.201")
+    assert {tokens(), sent()} == {before + 1, 1}
   end
 end
