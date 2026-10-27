@@ -1006,10 +1006,16 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
       root = tmp_root()
       exe = Path.join(root, "missing")
 
+      # The message is not part of the contract (assert_raise/3 would pin it).
       for extra <- [[force: true], [toolchain: :parent], [toolchain: "root"], [build_root: root]] do
-        assert_raise ArgumentError, inspect(extra), fn ->
-          harness(:checked_runner, [exe, suffix(), root, 1_000, extra])
-        end
+        built =
+          try do
+            harness(:checked_runner, [exe, suffix(), root, 1_000, extra])
+          rescue
+            error in ArgumentError -> error
+          end
+
+        assert match?(%ArgumentError{}, built), "#{inspect(extra)}: #{inspect(built)}"
       end
     end
   end
