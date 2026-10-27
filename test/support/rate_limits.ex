@@ -6,10 +6,5 @@ defmodule SdrAgent.TestSupport.RateLimits do
   """
 
   @doc "Clears the limiter's windows."
-  def reset do
-    if Code.ensure_loaded?(SdrAgent.RateLimiter),
-      do: Function.capture(SdrAgent.RateLimiter, :reset, 0).()
-
-    :ok
-  end
+  def reset, do: SdrAgent.RateLimiter.reset()
 end
