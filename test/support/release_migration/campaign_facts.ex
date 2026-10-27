@@ -35,9 +35,12 @@ defmodule SdrAgent.ReleaseMigration.CampaignFacts do
       or `not_started` is not ownership; any other claim outcome is
       unknown. No evidence directory means the harness never reached its
       claim (the evidence claim precedes the folder and the database
-      claim). Owned and absent is dropped only with the strict v2 drop
-      receipts (`drop_result=ok`, `drop_receipt=valid`, `drop_protocol=2`,
-      `blocking_before_drop=0`, `database_absent_after_drop=true`); owned
+      claim). Owned and absent is dropped only with `drop_result=ok`,
+      `drop_receipt=valid` and ALL six published v2 drop facts passing the
+      harness's own strict validator (`Harness.verify_drop_receipt/1`:
+      `drop_protocol=2`, `blocking_before_drop=0`, `excluded_before_drop`
+      equal to `backends_before_drop`, 1-10 `drain_attempts`,
+      `database_absent_after_drop=true`); owned
       and present is retained after a typed failure and uncertain after an
       unconfirmed child; truncated, missing or substituted receipts, an
       unknown catalog read, or receipts that say dropped against a present
@@ -57,6 +60,7 @@ defmodule SdrAgent.ReleaseMigration.CampaignFacts do
   """
 
   alias SdrAgent.ReleaseMigration.CampaignExit
+  alias SdrAgent.WitnessMigration.Harness
 
   @parent_suffix ~r/\A_rm[0-9a-f]{10}\z/
   @target_suffix ~r/\A_wm[0-9a-f]{10}\z/
@@ -82,6 +86,8 @@ defmodule SdrAgent.ReleaseMigration.CampaignFacts do
   @pass_line "Result: 3 passed"
   @receipt ~r/\ARM-RECEIPT (targets|db1|db2)\.([a-z0-9_.]{1,80})=(\S{0,200})\z/
   @capacity ~w(root:new root:old slot1 slot2 heavy)
+  @v2_facts ~w(drop_protocol backends_before_drop blocking_before_drop excluded_before_drop
+                drain_attempts database_absent_after_drop)
 
   @doc """
   The four exact names from the three predeclared suffixes (`parent`:
@@ -360,11 +366,17 @@ defmodule SdrAgent.ReleaseMigration.CampaignFacts do
     end
   end
 
+  # All six published v2 drop facts, through the harness's own strict
+  # validator (Codex 67c749cf important 1), beside the drop result and receipt
+  # labels: never a subset, never v1 (the live campaign is v2 only).
   defp drop_proven?(receipts) do
+    published =
+      for key <- @v2_facts,
+          value = receipts["cleanup." <> key],
+          do: "WM-CHILD #{key}=#{value}\n"
+
     receipts["cleanup.drop_result"] == "ok" and receipts["cleanup.drop_receipt"] == "valid" and
-      receipts["cleanup.drop_protocol"] == "2" and
-      receipts["cleanup.blocking_before_drop"] == "0" and
-      receipts["cleanup.database_absent_after_drop"] == "true"
+      match?({:ok, %{"drop_protocol" => "2"}}, Harness.verify_drop_receipt(Enum.join(published)))
   end
 
   defp present_disposition(receipts) do
@@ -382,8 +394,9 @@ defmodule SdrAgent.ReleaseMigration.CampaignFacts do
       Enum.any?(targets, &(&1.owned != false))
   end
 
-  defp test_outcome(%{launch: :not_run}), do: :not_run
+  # An interruption first, before any launch too (Codex 67c749cf M3).
   defp test_outcome(%{interrupted: true}), do: :incomplete
+  defp test_outcome(%{launch: :not_run}), do: :not_run
   defp test_outcome(%{suite: :pass, result_line: @pass_line}), do: :pass
   defp test_outcome(%{suite: :fail}), do: :fail
   defp test_outcome(_other), do: :incomplete
