@@ -96,7 +96,8 @@ graph TB
     AEInstance -. "live name, oid, tenant; run: migration history" .-> AEDB
     AEInstance -. "run with claude_cli only: at_start" .-> AESpendReady
     AEShutdown -- "run receipt, only after the termination barrier" --> AEState
-    AEShutdown -. "run with claude_cli: waits for the model server tree and reaper cleanup" .-> ServerSup
+    AEShutdown -. "run with claude_cli: after the application top DOWN, the whole-tree DOWN of the ProfileSupervisor model server tree" .-> ModelServerTree
+    AEShutdown -. "then, same deadline: ClaudeCLI server name unregistered and the Reaper lease clear (reaper cleanup)" .-> ClaudeCLIAdapter
     AgentWorker -. "entry wrappers, run mode: enter/2" .-> AESnapshot
     Domains -. "entry wrappers, run mode: enter/2" .-> AESnapshot
     AESnapshot -. "observes lease, environment.json, authorization.json" .-> AEFiles
