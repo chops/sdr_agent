@@ -16,6 +16,10 @@ defmodule SdrAgent.SDR.FollowupWorker do
   a lock on the enrollment row in the same transaction). Drafting the
   follow-up is the agent's (a route on `sdr.followup.due`, added with S9);
   every follow-up still needs human approval (Tier 0).
+
+  With the follow-up switch off (`SdrAgent.Outreach.FollowUps`; production)
+  a job is cancelled before anything is read or recorded — no lock, decision,
+  suppression lookup or signal — and the refusal is logged.
   """
   use Oban.Worker, queue: :followup, max_attempts: 3
   use SdrAgent.Workers.ErrorBoundary
@@ -27,6 +31,7 @@ defmodule SdrAgent.SDR.FollowupWorker do
   alias SdrAgent.Audit
   alias SdrAgent.Clock
   alias SdrAgent.Outreach
+  alias SdrAgent.Outreach.FollowUps
   alias SdrAgent.Repo
   alias SdrAgent.Sales
   alias SdrAgent.SDR.Signals
@@ -35,6 +40,15 @@ defmodule SdrAgent.SDR.FollowupWorker do
   def perform(%Oban.Job{
         args: %{"enrollment_id" => id, "tenant_id" => tenant_id, "step_position" => position}
       }) do
+    if FollowUps.enabled?() do
+      due(id, tenant_id, position)
+    else
+      FollowUps.log_refusal(:execution, id, position)
+      {:cancel, :follow_ups_disabled}
+    end
+  end
+
+  defp due(id, tenant_id, position) do
     sch = Actor.system(:scheduler, tenant_id)
     key = "followup:#{id}:#{position}"
 

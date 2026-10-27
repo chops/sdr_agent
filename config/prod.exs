@@ -38,3 +38,11 @@ config :logger, level: :info
 
 # Runtime production configuration, including reading
 # of environment variables, is done on config/runtime.exs.
+
+# The hosted copy runs no follow-up (`SdrAgent.Outreach.FollowUps`; D-218
+# item 9 containment until the D-206 suppression fix lands): no follow-up job
+# is scheduled and a queued one is cancelled before any read. Only dev and
+# test enable them; a missing setting is disabled too (fail closed).
+# `scripts/deploy.sh` checks this release setting and the store
+# (`SdrAgent.Release.verify_hosted_containment/0`) before switching.
+config :sdr_agent, :follow_ups, :disabled
