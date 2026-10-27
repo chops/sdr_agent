@@ -76,11 +76,12 @@ defmodule SdrAgentWeb.CalibrationConsoleTest do
       [{"/live", Phoenix.LiveView.Socket, config}] =
         Enum.filter(SdrAgentWeb.Endpoint.__sockets__(), &(elem(&1, 0) == "/live"))
 
-      for transport <- [:websocket, :longpoll] do
-        assert {:session, {SdrAgentWeb.Endpoint, :session_options, []}} in config[transport][
-                 :connect_info
-               ]
-      end
+      assert {:session, {SdrAgentWeb.Endpoint, :session_options, []}} in config[:websocket][
+               :connect_info
+             ]
+
+      # Long polling is not served (its server process can't be tagged sensitive).
+      assert config[:longpoll] == false
     end
   end
 
