@@ -25,8 +25,12 @@ defmodule SdrAgent.Agents.DelegatedGrantConstraintsTest do
   (`raw_error/2`) and pinned to its SQLSTATE and the §6 constraint name.
   Every negative case is otherwise valid, and each rule has a positive
   control. A foreign tenant's row is written with triggers (so also the
-  foreign keys) disabled, since the tenant table holds one tenant; CHECKs
-  and the unique index still apply to it, as a same-tenant control shows.
+  foreign keys) disabled by `SET LOCAL` in a savepoint, since the tenant
+  table holds one tenant: an SQL-level CHECK and index fixture on the
+  disposable sandbox, not an application write route. CHECKs and the unique
+  index still apply to it, as a same-tenant control shows, and the role is
+  shown back at `origin`, with the tenant foreign key applying again, after
+  both the refused and the accepted write.
 
   Audit continuity (Codex F1, OQ15): grants and allocations stay outside
   the audited record-hash set, so the new columns raise no
@@ -219,8 +223,10 @@ defmodule SdrAgent.Agents.DelegatedGrantConstraintsTest do
     assert_one_row(SQL.query(Repo, sql, params), label)
   end
 
-  # An insert with triggers (and so foreign keys) disabled, in a savepoint
-  # that also undoes the role change. CHECKs and unique indexes still apply.
+  # An insert with triggers (and so foreign keys) disabled by SET LOCAL only
+  # (never a session or global setting), in a savepoint: a refusal rolls the
+  # savepoint back with the setting, a success sets origin before release.
+  # CHECKs and unique indexes still apply.
   defp attempt_foreign(row) do
     {sql, params} = insert_sql(row)
 
@@ -236,6 +242,9 @@ defmodule SdrAgent.Agents.DelegatedGrantConstraintsTest do
   end
 
   defp finish_foreign({:error, error}), do: Repo.rollback(error)
+
+  # The replication role the next ordinary statement runs under.
+  defp replication_role, do: SQL.query!(Repo, "SHOW session_replication_role", []).rows
 
   defp refusal({:error, %Postgrex.Error{postgres: %{code: code} = postgres}}),
     do: {code, Map.get(postgres, :constraint)}
@@ -485,8 +494,11 @@ defmodule SdrAgent.Agents.DelegatedGrantConstraintsTest do
           delegated_authorization_id: held
         )
 
+      orphan = row(ctx, :delegated, tenant_id: u(Ash.UUIDv7.generate()))
+
       require_columns!()
       insert!(own, "the authorization's grant in this tenant")
+      assert replication_role() == [["origin"]], "precondition: the session starts at origin"
 
       assert_refused(
         attempt_foreign(same_tenant),
@@ -495,7 +507,22 @@ defmodule SdrAgent.Agents.DelegatedGrantConstraintsTest do
         "control: a same-tenant duplicate written with triggers disabled"
       )
 
+      assert replication_role() == [["origin"]],
+             "c2star-s2: the role must be origin again after the rolled-back savepoint"
+
       assert_one_row(attempt_foreign(foreign), "the same authorization id in another tenant")
+
+      assert replication_role() == [["origin"]],
+             "c2star-s2: the role must be origin again after the released savepoint"
+
+      # The next ordinary write runs with triggers on: the tenant foreign key
+      # refuses a row of an unknown tenant.
+      assert_refused(
+        attempt(orphan),
+        :foreign_key_violation,
+        "model_call_grants_tenant_id_fkey",
+        "an ordinary write after the foreign-tenant fixture"
+      )
     end
   end
 
