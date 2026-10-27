@@ -16,10 +16,12 @@ defmodule SdrAgentWeb.Router do
   end
 
   # Sign-in pages and auth routes (Codex M2, M3): the request process is
-  # tagged sensitive (crash reports withheld), never cached, no referrer;
-  # magic-link requests bounded per client before the request action.
+  # tagged sensitive (crash reports withheld; the endpoint already tagged
+  # these paths before parsing, this covers any route added to the scope),
+  # never cached, no referrer; magic-link requests bounded per client
+  # before the request action.
   pipeline :auth_edge do
-    plug SdrAgentWeb.SensitiveAuth
+    plug SdrAgentWeb.SensitiveAuth, :always
     plug SdrAgentWeb.AuthPageHeaders
     plug SdrAgentWeb.MagicLinkRequestLimit
   end

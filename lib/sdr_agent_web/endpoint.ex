@@ -40,6 +40,12 @@ defmodule SdrAgentWeb.Endpoint do
       longpoll: [connect_info: [session: @session_options]]
   end
 
+  # First: tag credential-bearing requests (auth, magic-link, sign-in and
+  # sign-out paths, classified as the router decodes them) before anything
+  # parses, routes or reports them, so their error reports are withheld
+  # through the outer HTTP error boundary (`SdrAgentWeb.SensitiveAuth`).
+  plug SdrAgentWeb.SensitiveAuth
+
   # Serve at "/" the static files from "priv/static" directory.
   #
   # When code reloading is disabled (e.g., in production),
@@ -72,9 +78,10 @@ defmodule SdrAgentWeb.Endpoint do
 
   plug Plug.RequestId
   # The request line is logged at :info except for magic-link confirmation
-  # paths, whose last segment is a live sign-in token (Codex M2): those are
-  # never logged by the endpoint (`log_level/1`), and the router and
-  # LiveView logs filter the `token` param (config :phoenix, :filter_parameters).
+  # paths in any spelling the router routes (Codex M2, P1), whose last
+  # segment is a live sign-in token: those are never logged by the endpoint
+  # (`log_level/1`), and the router and LiveView logs filter the `token`
+  # and `magic_link` params (config :phoenix, :filter_parameters).
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint], log: {__MODULE__, :log_level, []}
 
   # S13 browser smoke attestation: test config only (see the module).
@@ -109,10 +116,12 @@ defmodule SdrAgentWeb.Endpoint do
 
   @doc """
   The endpoint request-line log level (`Plug.Telemetry`'s `:log`): `false`
-  for `/magic_link/…` (the path carries a sign-in token), else `:info`.
+  for a magic-link confirmation path in any spelling the router routes
+  there (`SdrAgentWeb.SensitiveAuth.token_path?/1`: the URI-decoded first
+  segment, as `Phoenix.Router` decodes before matching), else `:info`. The
+  request is classified, never altered.
   """
-  def log_level(%Plug.Conn{path_info: ["magic_link" | _]}), do: false
-  def log_level(_conn), do: :info
+  def log_level(conn), do: if(SdrAgentWeb.SensitiveAuth.token_path?(conn), do: false, else: :info)
 
   if Mix.env() == :test do
     @session_init Plug.Session.init(@session_options)
