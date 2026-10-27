@@ -1,160 +1,75 @@
 defmodule SdrAgentWeb.AuthErrorBoundaryTest do
   @moduledoc """
-  Auth requests' error reports through the real HTTP error boundary (Codex
-  P2, I1): a Bandit listener serving `SdrAgentWeb.Endpoint` itself, raw HTTP
-  over a socket, and the raw `:logger` events (message and metadata, after
-  the primary filters) captured by `SdrAgent.TestSupport.RawLog`.
+  Error reports of credential-bearing requests through the real HTTP and
+  WebSocket boundary (Codex P2, I1, R1, R2): a Bandit listener serving
+  `SdrAgentWeb.Endpoint` itself, raw HTTP and WebSocket over a socket
+  (`SdrAgent.TestSupport.RawHttp`), and the raw `:logger` events (message
+  and metadata, after the primary filters) captured by
+  `SdrAgent.TestSupport.RawLog`.
 
-  The listener logs every exception status, 400..599 (stricter than the
-  default 500..599 in use elsewhere), so parser (400), CSRF (403) and
-  content-negotiation (406) failures produce reports too. Each case carries
-  a unique sentinel credential; for a request in the credential-bearing
-  route families (`/auth`, `/magic_link`, any spelling the router routes
-  there) a report must be emitted and withheld, with the sentinel nowhere
-  in its message or metadata:
+  The listener logs every exception status, 400..599, so parser (400),
+  CSRF (403) and content-negotiation (406) failures produce reports too.
+  Each expected report is correlated to the server process that handled
+  the tested connection, and the secrecy assertions scan the complete raw
+  capture (Codex R3). A credential-bearing request's report must be
+  emitted and withheld, with no sentinel, cookie or token anywhere in its
+  message or metadata:
 
-    * P2: a crash after the auth pipeline, whose exception stack arguments
-      and request query carry the sentinel (Phoenix renders and sends the
-      error response, re-raises, and Bandit reports it afterwards);
-    * I1: a body-parser failure and two browser-pipeline failures, before
-      the router reaches the auth routes.
+    * P2/I1: auth-route crashes after and failures before the router (the
+      sentinel in stack arguments, query or body);
+    * R1: an ordinary route with a real signed session cookie holding a
+      real JWT, or a bearer token, failing before the session is decoded;
+      on one keep-alive connection, after an auth request and after a
+      credential-free request;
+    * R2: the LiveView socket, which Phoenix dispatches before every
+      declared plug: a handshake failure, and a transport crash after the
+      upgrade and before any channel, with the session decoded into the
+      transport; long polling is not served.
 
-  Positive controls: the same failure on an ordinary path is reported in
-  full (sentinel included), and on one keep-alive connection the tag of a
-  credential-bearing request does not withhold a later ordinary request's
-  report, while an ordinary request does not unprotect a later auth one.
-
-  The oracle (Codex R3): each expected report is correlated to the server
-  process that handled the tested connection, and the secrecy assertions
-  scan the complete raw capture — every event received while waiting,
-  matching or not — against one monotonic deadline.
+  Positive controls: a credential-free ordinary request's report is
+  emitted unwithheld, with its request id and a status, its conn reduced
+  to method, path and status; and on one connection an auth request's tag
+  does not withhold a later credential-free report.
   """
   use SdrAgentWeb.ConnCase, async: false
 
+  import SdrAgent.AuditCase, only: [bootstrap!: 0, human: 2, test_password: 0]
+
+  alias SdrAgent.TestSupport.RawHttp
   alias SdrAgent.TestSupport.RawLog
 
-  @withheld "diagnostic withheld: process holds operator input"
-
   setup do
-    server =
-      start_supervised!(
-        {Bandit,
-         plug: SdrAgentWeb.Endpoint,
-         ip: :loopback,
-         port: 0,
-         startup_log: false,
-         http_options: [log_exceptions_with_status_codes: 400..599],
-         http_2_options: [enabled: false]}
-      )
-
-    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
     sentinel = "SENTINEL" <> Integer.to_string(System.unique_integer([:positive]))
-    %{server: server, port: port, sentinel: sentinel, ref: RawLog.start()}
+    Map.merge(RawHttp.listener(), %{sentinel: sentinel, ref: RawLog.start()})
   end
 
-  # --- raw HTTP/1.1 over one socket ------------------------------------
-
-  # Sends `requests` in order on one connection; returns their statuses and
-  # the server process that handled the connection (to correlate reports).
-  defp exchange(ctx, requests) do
-    {socket, pid} = open(ctx)
-
-    responses =
-      for request <- requests do
-        :ok = :gen_tcp.send(socket, request)
-        read_response(socket, "")
-      end
-
-    :gen_tcp.close(socket)
-    {responses, pid}
+  # A real signed-in session: a real JWT in a real signed session cookie.
+  defp signed_in(_ctx) do
+    tenant = bootstrap!()
+    reviewer = human(:reviewer, tenant)
+    {:ok, user} = SdrAgent.Accounts.sign_in(to_string(reviewer.email), test_password())
+    jwt = user.__metadata__.token
+    {masked_csrf, csrf_state} = RawHttp.csrf_pair()
+    {name, value} = RawHttp.session_cookie(%{"user_token" => jwt, "_csrf_token" => csrf_state})
+    %{jwt: jwt, cookie: value, cookie_header: "cookie: #{name}=#{value}\r\n", csrf: masked_csrf}
   end
 
-  # A new connection and its server-side handler process.
-  defp open(ctx) do
-    {:ok, before} = ThousandIsland.connection_pids(ctx.server)
-    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", ctx.port, [:binary, active: false])
-    {socket, handler(ctx.server, before, System.monotonic_time(:millisecond) + 2_000)}
-  end
-
-  defp handler(server, before, deadline) do
-    {:ok, pids} = ThousandIsland.connection_pids(server)
-
-    case pids -- before do
-      [pid] ->
-        pid
-
-      _none_yet ->
-        assert System.monotonic_time(:millisecond) < deadline, "no handler for the connection"
-        Process.sleep(10)
-        handler(server, before, deadline)
-    end
-  end
-
-  defp read_response(socket, acc) do
-    with [head, body] <- :binary.split(acc, "\r\n\r\n"),
-         length = content_length(head),
-         true <- byte_size(body) >= length do
-      [status_line | _] = String.split(head, "\r\n")
-      [_version, status | _] = String.split(status_line, " ")
-      String.to_integer(status)
-    else
-      _incomplete ->
-        case :gen_tcp.recv(socket, 0, 5_000) do
-          {:ok, data} -> read_response(socket, acc <> data)
-          {:error, reason} -> {:error, reason}
-        end
-    end
-  end
-
-  defp content_length(head) do
-    case Regex.run(~r/\r\ncontent-length: *(\d+)/i, head) do
-      [_, length] -> String.to_integer(length)
-      nil -> 0
-    end
-  end
-
-  defp raw_get(path, headers \\ ""),
-    do: "GET #{path} HTTP/1.1\r\nhost: localhost\r\n#{headers}\r\n"
-
-  defp raw_post(path, type, body),
-    do:
-      "POST #{path} HTTP/1.1\r\nhost: localhost\r\ncontent-type: #{type}\r\n" <>
-        "content-length: #{byte_size(body)}\r\n\r\n" <> body
-
-  # --- assertions on raw events ----------------------------------------
-
-  # The error report of the connection handled by `pid` (one deadline); the
-  # complete capture so far is kept for the secrecy checks.
-  defp report_of(ctx, pid) do
-    event = RawLog.await(ctx.ref, &(RawLog.error?(&1) and &1.meta[:pid] == pid))
-    assert event, "no error report from the tested connection was emitted"
-    event
-  end
-
-  # No secret anywhere in the complete capture, message or metadata.
-  defp assert_absent(ctx, secrets) do
-    captured = RawLog.settle(ctx.ref, 200)
-
-    for secret <- secrets do
-      leaking = Enum.filter(captured, &RawLog.contains?(&1, secret))
-
-      assert leaking == [],
-             "a secret is in #{length(leaking)} of #{length(captured)} raw event(s)"
-    end
-  end
-
-  # A credential-bearing request's report: emitted, withheld, secret-free.
   defp assert_withheld(ctx, pid, secrets \\ []) do
-    event = report_of(ctx, pid)
-    assert_absent(ctx, [ctx.sentinel | secrets])
-    assert RawLog.rendered(event) == @withheld
+    event = RawLog.report_of(ctx.ref, pid)
+    RawLog.assert_absent(ctx.ref, [ctx.sentinel | secrets])
+    assert RawLog.withheld?(event)
   end
 
-  # An ordinary request's report: emitted in full (positive control).
-  defp assert_reported(ctx, pid) do
-    event = report_of(ctx, pid)
-    assert RawLog.contains?(event, ctx.sentinel)
-    refute RawLog.rendered(event) == @withheld
+  # A credential-free request's report: emitted, not withheld, with its
+  # request id and a status; its conn reduced to method, path and status.
+  defp assert_reported(ctx, pid, method, path) do
+    event = RawLog.report_of(ctx.ref, pid)
+    refute RawLog.withheld?(event)
+    assert is_binary(event.meta[:request_id])
+    refute match?(%Plug.Conn{}, event.meta[:conn])
+    assert %{method: ^method, request_path: ^path, status: status} = event.meta[:conn]
+    assert is_integer(status)
+    RawLog.assert_absent(ctx.ref, [ctx.sentinel])
     event
   end
 
@@ -163,10 +78,16 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
   # A malformed JSON body: the parser raises before the router. Under Bandit,
   # Phoenix then renders with the conn from before the body was read, Bandit
   # refuses it as stale, and the answer is a 500 whose report carries that
-  # conn (its path and query) in metadata; the sentinel also rides in the
+  # conn (headers, path, query) in metadata; the sentinel also rides in the
   # query string, where a credential can (a token query).
-  defp parser_failure(path, sentinel),
-    do: raw_post(path <> "?token=#{sentinel}", "application/json", malformed_json(sentinel))
+  defp parser_failure(path, sentinel, headers \\ ""),
+    do:
+      RawHttp.post(
+        path <> "?token=#{sentinel}",
+        "application/json",
+        malformed_json(sentinel),
+        headers
+      )
 
   # --- P2: after the auth pipeline -------------------------------------
 
@@ -174,7 +95,7 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
     # The accept phase reads `user` as a map; a string crashes it
     # (FunctionClauseError in Access.get/3, the sentinel among its arguments).
     query = "token=#{ctx.sentinel}&user=#{ctx.sentinel}"
-    assert {[500], pid} = exchange(ctx, [raw_get("/auth/user/magic_link?" <> query)])
+    assert {[500], pid} = RawHttp.exchange(ctx, [RawHttp.get("/auth/user/magic_link?" <> query)])
     assert_withheld(ctx, pid)
   end
 
@@ -182,7 +103,7 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
 
   test "a body-parser failure on an auth path is reported withheld, any spelling", ctx do
     for path <- ["/auth/user/password/sign_in", "/%61uth/user/password/sign_in"] do
-      assert {[status], pid} = exchange(ctx, [parser_failure(path, ctx.sentinel)])
+      assert {[status], pid} = RawHttp.exchange(ctx, [parser_failure(path, ctx.sentinel)])
       assert status in [400, 500]
       assert_withheld(ctx, pid)
     end
@@ -190,52 +111,136 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
 
   test "a CSRF failure on an auth path is reported withheld", ctx do
     body = "user[email]=x&user[password]=#{ctx.sentinel}"
-
-    request =
-      raw_post(
-        "/auth/user/password/sign_in?token=#{ctx.sentinel}",
-        "application/x-www-form-urlencoded",
-        body
-      )
-
-    assert {[403], pid} = exchange(ctx, [request])
+    path = "/auth/user/password/sign_in?token=#{ctx.sentinel}"
+    request = RawHttp.post(path, "application/x-www-form-urlencoded", body)
+    assert {[403], pid} = RawHttp.exchange(ctx, [request])
     assert_withheld(ctx, pid)
   end
 
   test "a content-negotiation failure on a confirmation path is reported withheld", ctx do
     for prefix <- ["magic_link", "%6dagic_link"] do
-      request = raw_get("/#{prefix}/#{ctx.sentinel}", "accept: application/json\r\n")
-      assert {[406], pid} = exchange(ctx, [request])
+      request = RawHttp.get("/#{prefix}/#{ctx.sentinel}", "accept: application/json\r\n")
+      assert {[406], pid} = RawHttp.exchange(ctx, [request])
       assert_withheld(ctx, pid)
+    end
+  end
+
+  # --- R1: credential-bearing ordinary requests --------------------------
+
+  describe "R1: an ordinary route" do
+    setup :signed_in
+
+    test "with a real session cookie, failing before the session is decoded, is withheld",
+         ctx do
+      request = parser_failure("/leads", ctx.sentinel, ctx.cookie_header)
+      assert {[status], pid} = RawHttp.exchange(ctx, [request])
+      assert status in [400, 500]
+      assert_withheld(ctx, pid, [ctx.cookie, ctx.jwt])
+    end
+
+    test "with a bearer token is withheld", ctx do
+      request = parser_failure("/leads", ctx.sentinel, "authorization: Bearer #{ctx.jwt}\r\n")
+      assert {[status], pid} = RawHttp.exchange(ctx, [request])
+      assert status in [400, 500]
+      assert_withheld(ctx, pid, [ctx.jwt])
+    end
+
+    test "after an auth request on one connection, a session-bearing failure is withheld",
+         ctx do
+      assert {[200, status], pid} =
+               RawHttp.exchange(ctx, [
+                 RawHttp.get("/magic_link/not-a-real-token"),
+                 parser_failure("/leads", ctx.sentinel, ctx.cookie_header)
+               ])
+
+      assert status in [400, 500]
+      assert_withheld(ctx, pid, [ctx.cookie, ctx.jwt])
+    end
+
+    test "after a credential-free request on one connection, a session-bearing failure is withheld",
+         ctx do
+      assert {[200, status], pid} =
+               RawHttp.exchange(ctx, [
+                 RawHttp.get("/health"),
+                 parser_failure("/leads", ctx.sentinel, ctx.cookie_header)
+               ])
+
+      assert status in [400, 500]
+      assert_withheld(ctx, pid, [ctx.cookie, ctx.jwt])
+    end
+  end
+
+  # --- R2: the LiveView socket (dispatched before every declared plug) ---
+
+  describe "R2: the LiveView socket" do
+    setup :signed_in
+
+    test "a handshake failure is reported withheld", ctx do
+      request =
+        RawHttp.ws_upgrade(
+          "/live/websocket?vsn=2.0.0&%zz=#{ctx.sentinel}&_csrf_token=#{ctx.csrf}",
+          ctx.cookie_header
+        )
+
+      assert {[status], pid} = RawHttp.exchange(ctx, [request])
+      assert status in 400..599
+      assert_withheld(ctx, pid, [ctx.cookie, ctx.jwt])
+    end
+
+    test "a transport crash after the upgrade, before any channel, is reported withheld",
+         ctx do
+      previous = Logger.level()
+      on_exit(fn -> Logger.configure(level: previous) end)
+      # :debug, so a terminating process's report includes its state.
+      Logger.configure(level: :debug)
+
+      {socket, pid} = RawHttp.open(ctx)
+      path = "/live/websocket?vsn=2.0.0&_csrf_token=#{ctx.csrf}"
+      assert RawHttp.request(socket, RawHttp.ws_upgrade(path, ctx.cookie_header)) == 101
+
+      # Not JSON: the serializer raises in the transport process.
+      :ok = :gen_tcp.send(socket, RawHttp.ws_text_frame(~s(["1","1",#{ctx.sentinel})))
+      assert_withheld(ctx, pid, [ctx.cookie, ctx.jwt])
+      :gen_tcp.close(socket)
+    end
+
+    test "long polling is not served", ctx do
+      [{"/live", _socket, config}] =
+        Enum.filter(SdrAgentWeb.Endpoint.__sockets__(), &(elem(&1, 0) == "/live"))
+
+      assert config[:longpoll] == false
+      assert {[404], _pid} = RawHttp.exchange(ctx, [RawHttp.get("/live/longpoll?vsn=2.0.0")])
     end
   end
 
   # --- positive controls and process reuse -------------------------------
 
-  test "the same parser failure on an ordinary path is reported in full", ctx do
-    assert {[status], pid} = exchange(ctx, [parser_failure("/leads", ctx.sentinel)])
+  test "a credential-free parser failure on an ordinary path is reported, conn reduced", ctx do
+    assert {[status], pid} = RawHttp.exchange(ctx, [parser_failure("/leads", ctx.sentinel)])
     assert status in [400, 500]
-
-    assert_reported(ctx, pid)
+    assert_reported(ctx, pid, "POST", "/leads")
   end
 
-  test "on one connection, an auth request's tag does not withhold a later ordinary report",
+  test "on one connection, an auth request's tag does not withhold a later credential-free report",
        ctx do
     assert {[200, status], pid} =
-             exchange(ctx, [
-               raw_get("/magic_link/not-a-real-token"),
+             RawHttp.exchange(ctx, [
+               RawHttp.get("/magic_link/not-a-real-token"),
                parser_failure("/leads", ctx.sentinel)
              ])
 
     assert status in [400, 500]
-    assert_reported(ctx, pid)
+    assert_reported(ctx, pid, "POST", "/leads")
   end
 
   test "on one connection, an ordinary request does not unprotect a later auth crash", ctx do
     query = "token=#{ctx.sentinel}&user=#{ctx.sentinel}"
 
     assert {[200, 500], pid} =
-             exchange(ctx, [raw_get("/health"), raw_get("/auth/user/magic_link?" <> query)])
+             RawHttp.exchange(ctx, [
+               RawHttp.get("/health"),
+               RawHttp.get("/auth/user/magic_link?" <> query)
+             ])
 
     assert_withheld(ctx, pid)
   end

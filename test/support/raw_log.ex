@@ -17,7 +17,10 @@ defmodule SdrAgent.TestSupport.RawLog do
   forwarded; tests correlate by process and by a unique sentinel.
   """
 
+  import ExUnit.Assertions
+
   @error_levels [:emergency, :alert, :critical, :error]
+  @withheld "diagnostic withheld: process holds operator input"
 
   @doc "Starts forwarding raw events to the calling process; returns the capture ref."
   @spec start() :: reference()
@@ -88,6 +91,33 @@ defmodule SdrAgent.TestSupport.RawLog do
       remaining -> nil
     end
   end
+
+  @doc "The error report of process `pid` (one deadline), asserted to have been emitted."
+  @spec report_of(reference(), pid(), non_neg_integer()) :: map()
+  def report_of(ref, pid, timeout \\ 3_000) do
+    event = await(ref, &(error?(&1) and &1.meta[:pid] == pid), timeout)
+    assert event, "no error report from the tested process was emitted"
+    event
+  end
+
+  @doc "Asserts no secret appears anywhere in the complete capture (after a `settle_ms` settle)."
+  @spec assert_absent(reference(), [String.t()], non_neg_integer()) :: [map()]
+  def assert_absent(ref, secrets, settle_ms \\ 200) do
+    captured = settle(ref, settle_ms)
+
+    for secret <- secrets, is_binary(secret) and secret != "" do
+      leaking = Enum.filter(captured, &contains?(&1, secret))
+
+      assert leaking == [],
+             "a secret is in #{length(leaking)} of #{length(captured)} raw event(s)"
+    end
+
+    captured
+  end
+
+  @doc "Whether `event` is `SdrAgent.Logger.ExceptionFilter`'s withheld diagnostic."
+  @spec withheld?(map()) :: boolean()
+  def withheld?(event), do: rendered(event) == @withheld
 
   defp keep(ref, event), do: Process.put({__MODULE__, ref}, [event | buffer(ref)])
   defp buffer(ref), do: Process.get({__MODULE__, ref}, [])
