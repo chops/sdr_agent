@@ -28,14 +28,42 @@ defmodule SdrAgent.Agents.ModelCallGrant do
   Actions: `:create` (with its `allocations`), `:update_terms` (terms and
   allocation changes as one bundle), `:release_allocation` and `:revoke`
   (terminal). The last three refuse a stale `expected_revision` and bump
-  `revision`. Allocation rows are written only by these actions
-  (`SdrAgent.Agents.Changes.GrantBundle`), which lock the grant row first,
-  then its allocations, and validate the complete final state. Every write
-  requires an active human admin, re-read at the time of the action
-  (`SdrAgent.Agents.Checks.CurrentAdmin`); every system actor is refused.
+  `revision`. Allocation rows are written only by these actions and
+  `:provision_delegated` (`SdrAgent.Agents.Changes.GrantBundle`), which
+  lock the grant row first, then its allocations, and validate the complete
+  final state.
+
+  Authorization (C2* S2):
+
+    * `:create`, `:update_terms`, `:release_allocation` (the owner-form
+      routes): an active human admin, re-read at the time of the action
+      (`SdrAgent.Agents.Checks.CurrentAdmin`); refused for every actor in a
+      configured agent environment (`Checks.AgentEnvironment`) and on a
+      delegated grant (`Checks.DelegatedGrant` before the lock,
+      `Changes.RequireOwnerForm` on the locked row). The creator and updater
+      are the acting admin (`Changes.UserProvenance`); a system actor's id is
+      never cast into them, so a system actor reaches these policies and is
+      refused as `Forbidden`.
+    * `:provision_delegated` (argument `authorization_id` only): the grant
+      provisioner (`:grant_provisioner`, PRV) holding a verified
+      provisioning attestation for that id and its own tenant
+      (`Checks.ProvisioningAttested`). It creates exactly the registry
+      entry's terms and allocations as a delegated grant with no user ids
+      and appends `model.grant.provisioned` (arguments: the id, the entry
+      digest, the claim nonce, the decision refs); an identical replay
+      returns the existing grant and writes nothing; any other refusal is a
+      typed `SdrAgent.Agents.Errors.ProvisioningRefused`
+      (`SdrAgent.Agents.Changes.DelegatedProvisioning`).
+    * `:revoke`: a current human admin (the updater), or PRV for a delegated
+      grant of its tenant in a configured agent environment
+      (`Checks.DelegatedRevoker`, then `Changes.RevokeProvenance` on the
+      locked row), leaving the updater NULL. The event records the real
+      actor.
+    * Every other system actor is refused.
+
   Reads: admin, auditor, `agent_runtime`, kernel.
-  Audited: `model.grant.created | terms_changed | allocation_released |
-  revoked`, each with the previous revision.
+  Audited: `model.grant.created | provisioned | terms_changed |
+  allocation_released | revoked`; the last three with the previous revision.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -43,9 +71,17 @@ defmodule SdrAgent.Agents.ModelCallGrant do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
+  alias SdrAgent.Agents.Changes.DelegatedProvisioning
   alias SdrAgent.Agents.Changes.GrantBundle
   alias SdrAgent.Agents.Changes.GrantRevision
+  alias SdrAgent.Agents.Changes.RequireOwnerForm
+  alias SdrAgent.Agents.Changes.RevokeProvenance
+  alias SdrAgent.Agents.Changes.UserProvenance
+  alias SdrAgent.Agents.Checks.AgentEnvironment
   alias SdrAgent.Agents.Checks.CurrentAdmin
+  alias SdrAgent.Agents.Checks.DelegatedGrant
+  alias SdrAgent.Agents.Checks.DelegatedRevoker
+  alias SdrAgent.Agents.Checks.ProvisioningAttested
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Checks
   alias SdrAgent.Sales.Changes.RequireState
@@ -131,10 +167,45 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       argument :allocations, {:array, :map}, default: []
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
-      change relate_actor(:created_by)
-      change relate_actor(:updated_by)
+      change {UserProvenance, attributes: [:created_by_id, :updated_by_id]}
       change {GrantBundle, mode: :create}
       change {AppendEvent, [event_type: "model.grant.created"] ++ @event}
+    end
+
+    create :provision_delegated do
+      accept []
+
+      argument :authorization_id, :string do
+        allow_nil? false
+        constraints match: ~r/\A[a-z0-9][a-z0-9.-]{0,63}\z/
+      end
+
+      # Derived by DelegatedProvisioning; a caller-supplied value is refused.
+      argument :authorization_sha256, :string, public?: false
+      argument :claim_nonce, :string, public?: false
+      argument :decision_refs, {:array, :string}, public?: false
+
+      upsert? true
+      upsert_identity :unique_delegated_authorization
+      upsert_fields []
+      upsert_condition expr(false)
+      return_skipped_upsert? true
+
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change DelegatedProvisioning
+      change {GrantBundle, mode: :delegated}
+
+      change {AppendEvent,
+              [
+                event_type: "model.grant.provisioned",
+                arguments: [
+                  :authorization_id,
+                  :authorization_sha256,
+                  :claim_nonce,
+                  :decision_refs
+                ]
+              ] ++ @event}
     end
 
     update :update_terms do
@@ -143,10 +214,11 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       argument :expected_revision, :integer, allow_nil?: false
       argument :allocations, {:array, :map}, default: []
       change get_and_lock_for_update()
+      change RequireOwnerForm
       change {RequireState, in: [:active]}
       change GrantRevision
       change {GrantBundle, mode: :update}
-      change relate_actor(:updated_by)
+      change {UserProvenance, attributes: [:updated_by_id]}
 
       change {AppendEvent,
               [event_type: "model.grant.terms_changed", previous: [:revision | @terms]] ++ @event}
@@ -159,10 +231,11 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       argument :key, :atom, allow_nil?: false
       argument :profile_id, :atom
       change get_and_lock_for_update()
+      change RequireOwnerForm
       change {RequireState, in: [:active]}
       change GrantRevision
       change {GrantBundle, mode: :release}
-      change relate_actor(:updated_by)
+      change {UserProvenance, attributes: [:updated_by_id]}
 
       change {AppendEvent,
               [event_type: "model.grant.allocation_released", previous: [:revision]] ++ @event}
@@ -177,7 +250,7 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       change GrantRevision
       change set_attribute(:status, :revoked)
       change set_attribute(:revoked_at, &SdrAgent.Clock.utc_now/0)
-      change relate_actor(:updated_by)
+      change RevokeProvenance
 
       change {AppendEvent,
               [event_type: "model.grant.revoked", previous: [:status, :revision]] ++ @event}
@@ -185,7 +258,24 @@ defmodule SdrAgent.Agents.ModelCallGrant do
   end
 
   policies do
-    policy action_type([:create, :update, :destroy, :action]) do
+    # The owner-form routes: a current human admin, never in a configured
+    # agent environment and never on a delegated grant.
+    policy action([:create, :update_terms, :release_allocation]) do
+      forbid_if AgentEnvironment
+      forbid_if DelegatedGrant
+      authorize_if CurrentAdmin
+    end
+
+    policy action(:revoke) do
+      authorize_if CurrentAdmin
+      authorize_if DelegatedRevoker
+    end
+
+    policy action(:provision_delegated) do
+      authorize_if ProvisioningAttested
+    end
+
+    policy action_type([:destroy, :action]) do
       authorize_if CurrentAdmin
     end
 

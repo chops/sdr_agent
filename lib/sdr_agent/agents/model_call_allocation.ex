@@ -18,9 +18,15 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
   `profile_id` counted as equal.
 
   Actions: `:create`, `:update_terms`, `:release`; only from the grant's own
-  action (`SdrAgent.Agents.Checks.GrantContext`) and as an active human
-  admin (`SdrAgent.Agents.Checks.CurrentAdmin`); a direct call is refused
-  before any lock. Reads as the grant. Audited:
+  action (`SdrAgent.Agents.Checks.GrantContext`), as an active human admin
+  (`SdrAgent.Agents.Checks.CurrentAdmin`), on an owner-form grant read by
+  its id in the tenant (`SdrAgent.Agents.Checks.DelegatedGrant`; an
+  unreadable parent is refused); a direct call is refused before any lock.
+  A delegated grant's allocations (C2* S2, AC4) are only created, by the
+  grant provisioner inside a verified delegated-bundle context for exactly
+  that parent (`SdrAgent.Agents.Checks.DelegatedBundleContext`, written by
+  `ModelCallGrant :provision_delegated`); they are never updated or
+  released, by any actor. Reads as the grant. Audited:
   `model.grant.allocation_created | allocation_changed`,
   `model.allocation.released`, each carrying `grant_revision`.
   """
@@ -30,8 +36,10 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
-  alias SdrAgent.Agents.Checks.GrantContext
   alias SdrAgent.Agents.Checks.CurrentAdmin
+  alias SdrAgent.Agents.Checks.DelegatedBundleContext
+  alias SdrAgent.Agents.Checks.DelegatedGrant
+  alias SdrAgent.Agents.Checks.GrantContext
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Checks
 
@@ -105,13 +113,27 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
   end
 
   policies do
-    # Both must pass: written only by the grant's own action, as a current admin.
+    # Both must pass: written only by the grant's own action, as a current
+    # admin, on an owner-form grant; or (C2* S2, AC4/Q7) created by the grant
+    # provisioner inside a verified delegated-bundle context for exactly its
+    # delegated parent, which satisfies each policy.
     policy action_type([:create, :update, :destroy, :action]) do
+      authorize_if DelegatedBundleContext
+      # The owner-form marker only for an owner-form parent read in the
+      # tenant; a delegated or unreadable parent is refused (Q7).
+      forbid_if DelegatedGrant
       authorize_if GrantContext
     end
 
     policy action_type([:create, :update, :destroy, :action]) do
+      authorize_if DelegatedBundleContext
       authorize_if CurrentAdmin
+    end
+
+    # A delegated grant's allocations are never changed or released.
+    policy action_type([:update, :destroy]) do
+      forbid_if DelegatedGrant
+      authorize_if always()
     end
 
     policy action_type(:read) do

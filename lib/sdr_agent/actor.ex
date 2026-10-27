@@ -17,6 +17,10 @@ defmodule SdrAgent.Actor do
     * `:auditor_cli` (AUD) — read-only verify/export CLI
     * `:kernel` (KRN) — boot-time registration and the audit kernel itself
     * `:seeder` (SEED) — `:dev`/`:test` fixtures only
+    * `:grant_provisioner` (PRV) — `bin/agent-env authorize`: creates the one
+      delegated grant of the agent environment's registry entry
+      (`ModelCallGrant :provision_delegated`) and may revoke a delegated grant;
+      no other write (C2* S2)
   """
 
   @types [
@@ -29,7 +33,8 @@ defmodule SdrAgent.Actor do
     :anchorer,
     :auditor_cli,
     :kernel,
-    :seeder
+    :seeder,
+    :grant_provisioner
   ]
 
   @enforce_keys [:type]
@@ -46,6 +51,7 @@ defmodule SdrAgent.Actor do
           | :auditor_cli
           | :kernel
           | :seeder
+          | :grant_provisioner
 
   @type t :: %__MODULE__{type: type(), id: String.t() | nil, tenant_id: Ecto.UUID.t() | nil}
 

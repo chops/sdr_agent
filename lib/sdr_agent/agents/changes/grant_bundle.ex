@@ -22,11 +22,23 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
   `SdrAgent.Agents.Checks.GrantContext` and stamped with the grant's new
   `revision`. The order in which a caller lists changes never matters, and no
   invalid intermediate state is written.
+
+  Mode `:delegated` (C2* S2, `ModelCallGrant :provision_delegated`): the
+  requests are the registry entry's allocations that
+  `SdrAgent.Agents.Changes.DelegatedProvisioning` put in the changeset
+  context, planned and validated as a create. They are written as the
+  grant provisioner inside a registered delegated-bundle context
+  (`SdrAgent.Agents.Changes.GrantBundle.Delegated.run/2`, carried by
+  `Delegated.context/1`) bound to the new grant, its tenant, authorization
+  id and digest and the environment binding, in place of the owner-form
+  marker. An identical replay (`:sdr_replayed`) writes none.
   """
   use Ash.Resource.Change
 
   require Ash.Query
 
+  alias SdrAgent.Agents.Changes.DelegatedProvisioning
+  alias SdrAgent.Agents.Changes.GrantBundle.Delegated
   alias SdrAgent.Agents.Checks.GrantContext
   alias SdrAgent.Agents.ModelCallAllocation
 
@@ -38,11 +50,11 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
 
     changeset
     |> Ash.Changeset.before_action(&plan(&1, mode))
-    |> Ash.Changeset.after_action(&apply_plan(&1, &2, context.actor))
+    |> Ash.Changeset.after_action(&apply_plan(&1, &2, mode, context.actor))
   end
 
   defp plan(changeset, mode) do
-    stored = if mode == :create, do: [], else: lock_allocations(changeset.data.id)
+    stored = if mode in [:create, :delegated], do: [], else: lock_allocations(changeset.data.id)
 
     case final_state(changeset, mode, stored) do
       {:ok, writes, final} ->
@@ -68,6 +80,15 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
 
       allocation ->
         {:ok, [{:release, allocation}], stored}
+    end
+  end
+
+  defp final_state(changeset, :delegated, stored) do
+    requested = changeset.context[DelegatedProvisioning.bundle_key()].allocations
+
+    with {:ok, requests} <- normalize_all(requested, :create),
+         :ok <- unique_pairs(requests) do
+      plan_requests(requests, [], stored)
     end
   end
 
@@ -225,39 +246,61 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
     end
   end
 
-  defp apply_plan(changeset, grant, actor) do
+  # An identical delegated replay (`:sdr_replayed`) wrote nothing and
+  # writes no allocation. A delegated bundle is written inside its
+  # registered context (`Delegated.run/2`), bound to the new grant.
+  defp apply_plan(changeset, grant, :delegated, actor) do
+    if Ash.Resource.get_metadata(grant, :sdr_replayed) do
+      {:ok, grant}
+    else
+      bindings = %{
+        tenant_id: grant.tenant_id,
+        grant_id: grant.id,
+        authorization_id: grant.delegated_authorization_id,
+        authorization_sha256: grant.delegated_authorization_sha256,
+        binding_sha256: changeset.context[DelegatedProvisioning.bundle_key()].binding_sha256
+      }
+
+      Delegated.run(bindings, &write_all(changeset, grant, actor, Delegated.context(&1)))
+    end
+  end
+
+  defp apply_plan(changeset, grant, _mode, actor),
+    do: write_all(changeset, grant, actor, GrantContext.context())
+
+  defp write_all(changeset, grant, actor, context) do
     writes = changeset.context[:grant_bundle_writes] || []
 
     Enum.reduce_while(writes, {:ok, grant}, fn write, {:ok, grant} ->
-      case write(write, grant, actor) do
+      case write(write, grant, actor, context) do
         {:ok, _allocation} -> {:cont, {:ok, grant}}
         {:error, error} -> {:halt, {:error, error}}
       end
     end)
   end
 
-  defp write({:create, attrs}, grant, actor) do
+  defp write({:create, attrs}, grant, actor, context) do
     attrs = Map.merge(attrs, %{grant_id: grant.id, grant_revision: grant.revision})
 
     ModelCallAllocation
-    |> Ash.Changeset.for_create(:create, attrs, actor: actor, context: GrantContext.context())
+    |> Ash.Changeset.for_create(:create, attrs, actor: actor, context: context)
     |> Ash.create()
   end
 
-  defp write({:update, allocation, changes}, grant, actor) do
+  defp write({:update, allocation, changes}, grant, actor, context) do
     allocation
     |> Ash.Changeset.for_update(:update_terms, Map.put(changes, :grant_revision, grant.revision),
       actor: actor,
-      context: GrantContext.context()
+      context: context
     )
     |> Ash.update()
   end
 
-  defp write({:release, allocation}, grant, actor) do
+  defp write({:release, allocation}, grant, actor, context) do
     allocation
     |> Ash.Changeset.for_update(:release, %{grant_revision: grant.revision},
       actor: actor,
-      context: GrantContext.context()
+      context: context
     )
     |> Ash.update()
   end

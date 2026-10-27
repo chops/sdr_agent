@@ -79,6 +79,7 @@ defmodule SdrAgent.Agents do
   alias Ash.Error.Changes.InvalidAttribute
   alias Ash.Error.Query.NotFound
   alias SdrAgent.AgentEnv.OperationSnapshot
+  alias SdrAgent.AgentEnv.Provisioning
   alias SdrAgent.Agents.Admission
   alias SdrAgent.Agents.Admission.Gate
   alias SdrAgent.Agents.Admission.SwitchFence
@@ -2042,6 +2043,31 @@ defmodule SdrAgent.Agents do
   def create_grant(attrs, opts) do
     grant_transaction(opts, fn opts ->
       GuardedCall.create(ModelCallGrant, :create, Map.new(attrs), opts)
+    end)
+  end
+
+  @doc """
+  PRV (C2* S2, `bin/agent-env authorize`): provisions the delegated grant of
+  registry entry `authorization_id` (`ModelCallGrant :provision_delegated`)
+  under a provisioning attestation observed by
+  `SdrAgent.AgentEnv.Provisioning.within/2` before the guarded transaction
+  opens. Returns the grant with its allocations loaded (an identical
+  replay: the existing grant, marked `:sdr_replayed`). Every other actor,
+  and PRV without an attestation for that id and tenant, is refused as
+  `Ash.Error.Forbidden` (audited); a refused authorization is
+  `SdrAgent.Agents.Errors.ProvisioningRefused`. Inside a transaction:
+  `{:error, :in_transaction}`.
+  """
+  def provision_delegated_grant(authorization_id, opts) when is_binary(authorization_id) do
+    Provisioning.within(authorization_id, fn ->
+      grant_transaction(opts, fn opts ->
+        GuardedCall.create(
+          ModelCallGrant,
+          :provision_delegated,
+          %{authorization_id: authorization_id},
+          opts
+        )
+      end)
     end)
   end
 
