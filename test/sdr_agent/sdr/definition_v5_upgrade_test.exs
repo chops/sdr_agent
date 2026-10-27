@@ -14,10 +14,14 @@ defmodule SdrAgent.SDR.DefinitionV5UpgradeTest do
   immutable same-version/different-hash refusal); a new assignment pins v5.
 
   Legacy execution: under a running run pinned to v4, each hardened action,
-  performed directly, stops the run `:crash` with the fixed reason "the run's
-  agent definition does not declare this action version" before any read or
-  Decision (`SdrAgent.SDR.Preconditions.declared/2`; `ValidateClaims` and
-  `ValidatePersonalization` gain that check).
+  performed directly on its own fresh run (one test per action), stops the run
+  `:crash` with the fixed reason "the run's agent definition does not declare
+  this action version" (`SdrAgent.SDR.Preconditions.declared/2`;
+  `ValidateClaims` and `ValidatePersonalization` gain that check). The
+  boundary (Codex clarification): the declaration check itself reads the run
+  and its pinned definition, and its refusal writes the failed run; it comes
+  before any proposal, evidence, settings or model work and before any
+  validation or hand-off Decision or effect.
 
   RED: SDRAgent is still v4 with the v4 body, so registration returns the
   frozen v4 row, a new assignment pins v4, and under a v4 pin the four actions
@@ -110,10 +114,51 @@ defmodule SdrAgent.SDR.DefinitionV5UpgradeTest do
     refute run.agent_definition_id == legacy.id
   end
 
-  test "under a v4 pin each hardened action fails closed before any read or Decision", ctx do
-    legacy = register_v4!(ctx.tenant.id)
-    lead = fixture_lead!(ctx, "01")
+  # One test per hardened action, each on its own fresh v4-pinned run, so
+  # every declaration boundary is observed on its own (Codex R2).
+  for action <- [ValidateClaims, ValidatePersonalization, ValidateDraftShape, HandOffProposal] do
+    @tag hardened: action
+    test "under a v4 pin #{inspect(action)} fails closed at its declaration check", ctx do
+      action = ctx.hardened
+      legacy = register_v4!(ctx.tenant.id)
+      lead = fixture_lead!(ctx, "01")
 
+      attrs =
+        legacy
+        |> AgentsFixtures.run_attrs()
+        |> Map.merge(%{lead_id: lead.id, campaign_id: ctx.campaign_id})
+
+      {:ok, run} = Agents.create_run(attrs, actor: ctx.agent)
+      {:ok, run} = Agents.start_run(run, actor: ctx.agent)
+      assert run.agent_definition_id == legacy.id, "setup: the run is not pinned to v4"
+      assert run.status == :running, "setup: the v4-pinned run is not running"
+
+      sdr = %Context{
+        actor: ctx.agent,
+        tenant_id: ctx.tenant.id,
+        run_id: run.id,
+        correlation_id: run.correlation_id,
+        signal_id: "sig-b1-r1-v4-#{inspect(action)}",
+        agent_state: %{phase: :validate, campaign_id: ctx.campaign_id}
+      }
+
+      result = action.perform(legacy_params(action, lead, ctx), sdr)
+
+      assert result == {:error, {:halt, :crash}},
+             "B1-R1: #{inspect(action)} ran under a v4 pin: #{short(result)}"
+
+      stopped = run!(ctx, run)
+      assert {stopped.status, stopped.status_reason} == {:failed, :crash}
+      assert stopped.failure_reason == @legacy_reason
+
+      assert decisions!(ctx, run) == [],
+             "B1-R1: #{inspect(action)} recorded a Decision under a v4 pin"
+    end
+  end
+
+  # Params each hardened action's perform/2 head accepts; the declaration
+  # check comes first, so their ids name no record.
+  defp legacy_params(action, lead, ctx) do
     proposal = %{
       subject: "A synthetic subject",
       body: "A synthetic body.",
@@ -133,50 +178,22 @@ defmodule SdrAgent.SDR.DefinitionV5UpgradeTest do
 
     check = %{passed: true, decision_id: Ecto.UUID.generate()}
 
-    hand_off = %{
-      lead_id: lead.id,
-      draft: draft,
-      claims_check: check,
-      personalization_check: check,
-      shape_check: check,
-      plan: %{campaign_id: ctx.campaign_id, step: %{id: Ecto.UUID.generate()}}
-    }
+    case action do
+      ValidateDraftShape ->
+        %{lead_id: lead.id, draft: draft}
 
-    for {action, params} <- [
-          {ValidateClaims, %{lead_id: lead.id, draft: draft, claims: []}},
-          {ValidatePersonalization, %{lead_id: lead.id, draft: draft, claims: []}},
-          {ValidateDraftShape, %{lead_id: lead.id, draft: draft}},
-          {HandOffProposal, hand_off}
-        ] do
-      attrs =
-        legacy
-        |> AgentsFixtures.run_attrs()
-        |> Map.merge(%{lead_id: lead.id, campaign_id: ctx.campaign_id})
+      HandOffProposal ->
+        %{
+          lead_id: lead.id,
+          draft: draft,
+          claims_check: check,
+          personalization_check: check,
+          shape_check: check,
+          plan: %{campaign_id: ctx.campaign_id, step: %{id: Ecto.UUID.generate()}}
+        }
 
-      {:ok, run} = Agents.create_run(attrs, actor: ctx.agent)
-      {:ok, run} = Agents.start_run(run, actor: ctx.agent)
-      assert run.agent_definition_id == legacy.id, "setup: the run is not pinned to v4"
-
-      sdr = %Context{
-        actor: ctx.agent,
-        tenant_id: ctx.tenant.id,
-        run_id: run.id,
-        correlation_id: run.correlation_id,
-        signal_id: "sig-b1-r1-v4-#{inspect(action)}",
-        agent_state: %{phase: :validate, campaign_id: ctx.campaign_id}
-      }
-
-      result = action.perform(params, sdr)
-
-      assert result == {:error, {:halt, :crash}},
-             "B1-R1: #{inspect(action)} ran under a v4 pin: #{short(result)}"
-
-      stopped = run!(ctx, run)
-      assert {stopped.status, stopped.status_reason} == {:failed, :crash}
-      assert stopped.failure_reason == @legacy_reason
-
-      assert decisions!(ctx, run) == [],
-             "B1-R1: #{inspect(action)} recorded a Decision under a v4 pin"
+      _citation_check ->
+        %{lead_id: lead.id, draft: draft, claims: []}
     end
   end
 end
