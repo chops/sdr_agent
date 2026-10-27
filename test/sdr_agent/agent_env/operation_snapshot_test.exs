@@ -213,7 +213,16 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
     kind, reason -> {:caught, kind, reason}
   end
 
-  defp in_transaction(call),
+  # Runs `call` inside an open transaction, always rolled back. A guarded
+  # action (`SdrAgent.Audit.Guard.run/3`) raises inside a transaction not
+  # opened by `SdrAgent.Audit.transaction/1`, and the DecisionRules hook is
+  # reached only through a guarded Decision create, so that row runs under
+  # the application's own transaction. Every other site wraps its first
+  # line and is put under a plain Repo transaction.
+  defp in_transaction(entry, call) when entry in @in_create_transaction,
+    do: Audit.transaction(fn -> Repo.rollback({:attempted, attempt(call)}) end)
+
+  defp in_transaction(_entry, call),
     do: Repo.transaction(fn -> Repo.rollback({:attempted, attempt(call)}) end)
 
   defp uuid, do: Ecto.UUID.generate()
@@ -845,11 +854,13 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
     end
 
     test "control: with the selector unset no entry emits a snapshot event", ctx do
-      for {_entry, label} <- @wiring do
+      for {entry, label} <- @wiring do
         {_result, events} = Fx.trace_snapshots(fn -> attempt(wiring_call(label, ctx)) end)
         assert events == [], "#{label} emitted #{inspect(tags(events))} while inert"
 
-        {_result, events} = Fx.trace_snapshots(fn -> in_transaction(wiring_call(label, ctx)) end)
+        {_result, events} =
+          Fx.trace_snapshots(fn -> in_transaction(entry, wiring_call(label, ctx)) end)
+
         assert events == [], "#{label} emitted #{inspect(tags(events))} while inert"
       end
     end
@@ -866,7 +877,10 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
 
       test "#{label}: inside an open transaction with no snapshot it refuses", ctx do
         run_env!(ctx)
-        {_result, events} = Fx.trace_snapshots(fn -> in_transaction(wiring_call(@label, ctx)) end)
+
+        {_result, events} =
+          Fx.trace_snapshots(fn -> in_transaction(@entry, wiring_call(@label, ctx)) end)
+
         assert_refused(events, @entry)
       end
 
