@@ -1,0 +1,241 @@
+defmodule SdrAgent.Agents.ReleaseMigrationTest do
+  @moduledoc """
+  C2* slice S3 T-S4 migration campaign (S3 plan r2 section 9; Codex
+  7a93f224 OQ3/OQ5 and 7a9c7eea sequencing items 6-7): the actual S3
+  migration (`priv/repo/migrations/<ts>_c2star_s3_demo_exception_release.exs`)
+  on two owned disposable databases, through
+  `SdrAgent.WitnessMigration.Harness` (claim, ownership, normal drop and
+  uncertainty rules unchanged).
+
+  **DB #1, continuity**, in order: the OLD (pre-S3) baseline build writes
+  one withheld and one released ordinary release with their events and
+  verifies them (`release_migration/baseline.exs`); the NEW build migrates
+  up and verifies; the NEW build migrates down and the OLD build verifies;
+  the NEW build migrates up again and verifies (`release_migration/probe.exs`).
+  Every captured event and record hash stays byte-identical through every
+  state, with legitimate boot appends accounted for; tampers run in
+  rolled-back transactions; the T-H6 `DROP CONSTRAINT` runs here only.
+
+  **DB #2, down refusal** (`release_migration/demo.exs`): the NEW build
+  migrates up and commits one demo row plus its kernel event; the `down` must
+  be refused with `check_violation`; the after-refusal probe proves the full
+  rollback (migration still applied, columns and every CHECK unchanged, the
+  row and the chain intact).
+
+  The whole module is `:external`; the default test helper excludes that
+  tag, so an ordinary `mix test` never compiles a child or touches a
+  database for it. **It is not approved to run.** Before any execution,
+  including the baseline database writes, it needs its own reviewed campaign
+  packet (baseline, candidate, build and script hashes; the exact command
+  and owned targets; identity negatives; lease and reservation; typed exits;
+  retained-log and cleanup rules) pinned at the integrated head, plus a
+  fresh reservation and preflight. The baseline checkout is named by
+  `SDR_RELEASE_BASELINE_ROOT` and must be clean at `@baseline_tree`.
+
+  RED-6 scaffolding: the harness options it uses (`versions/2`, `:probe`,
+  `:runners`, `:plan`, `checked_runner/5`) and the three release scripts
+  land in GREEN-6 (`SdrAgent.Agents.ReleaseMigrationHarnessTest` is their
+  stubbed contract). It is compiled, never executed.
+  """
+  use ExUnit.Case, async: false
+
+  alias SdrAgent.WitnessMigration.Harness
+
+  @moduletag :external
+  @moduletag timeout: 3_600_000
+
+  @root Path.expand("../../..", __DIR__)
+  @migrations Path.join(@root, "priv/repo/migrations")
+  @rm Path.join(@root, "test/support/release_migration")
+  @s3_suffix "_c2star_s3_demo_exception_release.exs"
+  # The pre-S3 tree (merge-base 18c01f9b = cf86b7aa). The campaign packet
+  # re-pins it to the integrated head's own merge-base.
+  @baseline_tree "7a8e8e696c685d8fae65d8bc7b4060a0852a07dc"
+  @deadline 900_000
+
+  @retained %{
+    "chain_valid" => "permitted",
+    "captured_events_unchanged" => "permitted",
+    "captured_record_hashes_unchanged" => "permitted",
+    "appends_accounted" => "permitted",
+    "tamper_reason_detected" => "refused:record_hash_mismatch"
+  }
+
+  @baseline %{
+    "baseline_written" => "permitted",
+    "chain_valid" => "permitted",
+    "withheld_event_record_hash" => "permitted",
+    "released_event_record_hash" => "permitted",
+    "exception_columns_absent" => "permitted"
+  }
+
+  @up Map.merge(@retained, %{
+        "exception_columns_present" => "permitted",
+        "old_row_exception_member_detected" => "refused:record_hash_mismatch",
+        "old_row_json_null_refused" => "refused:check_violation"
+      })
+
+  @down Map.merge(@retained, %{
+          "exception_columns_absent" => "permitted",
+          "predecessor_constraints_restored" => "permitted"
+        })
+
+  @demo_up %{
+    "demo_row_committed" => "permitted",
+    "chain_valid" => "permitted",
+    "tamper_basis_sha256_detected" => "refused:record_hash_mismatch"
+  }
+
+  @after_refusal %{
+    "migration_still_applied" => "permitted",
+    "exception_columns_present" => "permitted",
+    "constraints_unchanged" => "permitted",
+    "demo_row_unchanged" => "permitted",
+    "chain_valid" => "permitted"
+  }
+
+  @cleanup %{
+    "child.drop" => "exit:0",
+    "cleanup.drop_attempted" => "true",
+    "cleanup.drop_mode" => "normal",
+    "cleanup.drop_result" => "ok",
+    "cleanup.drop_receipt" => "valid",
+    "cleanup.backends_before_drop" => "0",
+    "cleanup.database_absent_after_drop" => "true",
+    "cleanup.temp_folder" => "removed",
+    "outcome" => "ok"
+  }
+
+  defp suffix, do: "_wm" <> Base.encode16(:crypto.strong_rand_bytes(5), case: :lower)
+
+  defp mix!, do: System.find_executable("mix") || flunk("mix is not on PATH")
+
+  # Calls a harness function only when it exists (RED-6: GREEN-6 adds it).
+  defp harness!(function, args) do
+    Code.ensure_loaded(Harness)
+
+    if function_exported?(Harness, function, length(args)),
+      do: apply(Harness, function, args),
+      else: flunk("RED-6: Harness.#{function}/#{length(args)} does not exist yet")
+  end
+
+  # The baseline checkout: named explicitly, a different directory, clean,
+  # at exactly the pre-S3 tree.
+  defp baseline_root! do
+    root = System.get_env("SDR_RELEASE_BASELINE_ROOT") || flunk("SDR_RELEASE_BASELINE_ROOT unset")
+    assert Path.type(root) == :absolute and Path.expand(root) == root, root
+    refute root == @root, "the baseline is another checkout"
+    assert git!(root, ["rev-parse", "HEAD^{tree}"]) == @baseline_tree, "baseline tree"
+    assert git!(root, ["status", "--porcelain", "--untracked-files=all"]) == "", "baseline clean"
+    root
+  end
+
+  defp git!(root, args) do
+    {out, 0} = System.cmd("git", ["-C", root | args], env: SdrAgent.ChildEnv.cmd([]))
+    String.trim(out)
+  end
+
+  defp publish!(prefix, receipts),
+    do:
+      Enum.each(receipts, fn {key, value} ->
+        :ok = IO.write("RM-RECEIPT #{prefix}.#{key}=#{value}\n")
+      end)
+
+  test "a real release child refuses a wrong target before any startup, connection or effect" do
+    partition = suffix()
+    runner = Harness.checked_runner(mix!(), partition, @root, 300_000)
+    unconfigured = "sdr_agent_test" <> suffix()
+    out = Path.join(System.tmp_dir!(), "sdr-rm-refusal" <> partition <> ".json")
+    fixtures = out <> ".fixtures"
+
+    for script <- ~w(baseline.exs probe.exs demo.exs),
+        {target, reason} <- [
+          {unconfigured, "target_not_configured"},
+          {"sdr_agent_dev", "invalid_target"}
+        ] do
+      label = "#{script} #{target}"
+      args = ["run", "--no-start", "--no-compile", "--no-deps-check", Path.join(@rm, script)]
+      result = runner.(:refusal, args ++ [target, "predecessor", fixtures, out])
+      status = Harness.target_refused()
+      assert {:exit, ^status, output} = result, label
+      assert output =~ "REFUSED #{reason}", "#{label}: #{output}"
+      refute output =~ "VALIDATED", label
+      refute File.exists?(out), label
+      refute File.exists?(fixtures), label
+    end
+  end
+
+  test "DB #1: OLD writes and verifies, NEW up, OLD verifies down, NEW up again" do
+    assert {:ok, versions} = harness!(:versions, [@migrations, [migration_suffix: @s3_suffix]])
+    baseline = baseline_root!()
+    sfx = suffix()
+    new = Harness.checked_runner(mix!(), sfx, @root, @deadline)
+    old = harness!(:checked_runner, [mix!(), sfx, baseline, @deadline, [toolchain: :root]])
+
+    {outcome, receipts} =
+      Harness.prove_with_receipts(
+        suffix: sfx,
+        tmp_root: System.tmp_dir!(),
+        versions: versions,
+        runner: new,
+        runners: %{
+          {:migrate, "predecessor"} => old,
+          {:probe, "predecessor"} => old,
+          {:probe, "down"} => old
+        },
+        probe: %{
+          "predecessor" => Path.join(@rm, "baseline.exs"),
+          "up" => Path.join(@rm, "probe.exs"),
+          "down" => Path.join(@rm, "probe.exs"),
+          "up_again" => Path.join(@rm, "probe.exs")
+        }
+      )
+
+    publish!("db1", receipts)
+    assert {:ok, states} = outcome
+
+    assert states == %{
+             "predecessor" => @baseline,
+             "up" => @up,
+             "down" => @down,
+             "up_again" => @up
+           }
+
+    facts = Map.new(receipts)
+    assert length(receipts) == map_size(facts), "one fact per key"
+    assert facts["migration_new"] == Integer.to_string(versions.new)
+    assert facts["migration_predecessor"] == Integer.to_string(versions.predecessor)
+
+    for key <- ~w(migrate.predecessor probe.predecessor probe.down),
+        do: assert(facts["runner." <> key] == "override", key)
+
+    assert Map.take(facts, Map.keys(@cleanup)) == @cleanup
+  end
+
+  test "DB #2: a demo row makes down refuse with check_violation, fully rolled back" do
+    assert {:ok, versions} = harness!(:versions, [@migrations, [migration_suffix: @s3_suffix]])
+    sfx = suffix()
+
+    {outcome, receipts} =
+      Harness.prove_with_receipts(
+        suffix: sfx,
+        tmp_root: System.tmp_dir!(),
+        versions: versions,
+        runner: Harness.checked_runner(mix!(), sfx, @root, @deadline),
+        plan: :down_refusal,
+        probe: Path.join(@rm, "demo.exs")
+      )
+
+    publish!("db2", receipts)
+    assert {:ok, states} = outcome
+    assert states == %{"up" => @demo_up, "after_refusal" => @after_refusal}
+
+    facts = Map.new(receipts)
+    assert facts["plan"] == "down_refusal"
+    assert facts["migrate.down.expected"] == "refusal"
+    assert facts["migrate.down.refusal"] == "check_violation"
+    assert facts["child.migrate.down"] =~ ~r/\Aexit:[1-9][0-9]*\z/
+    refute facts["child.migrate.down"] == "exit:#{Harness.target_refused()}"
+    assert Map.take(facts, Map.keys(@cleanup)) == @cleanup
+  end
+end
