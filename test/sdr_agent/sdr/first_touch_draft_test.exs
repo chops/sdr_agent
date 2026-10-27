@@ -32,6 +32,18 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       The wrong-provenance test asserts the kind stage first (the
       `draft_shape_validation` kind is recordable through the domain API),
       so a missing kind is told apart from a missing guard.
+    * The shape check measures the draft's authoritative content — its
+      ModelInvocation's stored output, read through
+      `SdrAgent.Agents.released_output/2` — never the proposal map its
+      caller supplies (Codex B1-R1). On a second run of a lead whose first
+      run stopped at its rejected shape, the flow's steps run through their
+      production actions (genuine same-run Decisions and invocation) and a
+      caller-supplied map replaces the proposal after the draft step: a
+      stored subject with a line break, or a stored link in the body, is
+      rejected for exactly that reason and nothing is handed off although
+      the map is well-shaped; a well-shaped stored draft passes and is
+      handed off as stored although the map is malformed; a matching map
+      passes and is handed off unchanged (control).
 
   Hermetic: Fake model provider; the recording responder
   (`SdrAgent.SettingsFixtures.RecordingBrain`) and test responders built on
@@ -41,6 +53,11 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
   fixed pitch; there is no shape rule, so a malformed subject or an invented
   link is handed to review, and `HandOffProposal` gates only on the two
   citation checks.
+
+  RED (B1-R1): `ValidateDraftShape` measures the caller's `draft.proposal`,
+  so a malformed stored draft with a well-shaped map passes, bound to the
+  stored records, and `HandOffProposal` hands off the stored text; a
+  well-shaped stored draft with a malformed map is rejected.
   """
   use SdrAgent.SDRCase, async: false
 
@@ -55,15 +72,29 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
   alias SdrAgent.Outreach
   alias SdrAgent.Sales
   alias SdrAgent.SDR
+  alias SdrAgent.SDR.Actions.DraftEmail
+  alias SdrAgent.SDR.Actions.EvaluateICP
   alias SdrAgent.SDR.Actions.HandOffProposal
+  alias SdrAgent.SDR.Actions.IdentifyTrigger
+  alias SdrAgent.SDR.Actions.LoadEvidenceBundle
+  alias SdrAgent.SDR.Actions.ValidateClaims
+  alias SdrAgent.SDR.Actions.ValidateDraftShape
+  alias SdrAgent.SDR.Actions.ValidatePersonalization
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.FakeBrain
+  alias SdrAgent.SDR.Schemas
   alias SdrAgent.SDR.SDRAgent
   alias SdrAgent.SettingsFixtures.RecordingBrain
 
   @moduletag :b1_05
 
   @proposal "sdr.outreach_proposal"
+
+  # B1-R1: the subject `MultilineSubject` writes, a single-line one, and the
+  # link `InventedLink` appends to the body.
+  @multiline_subject "A quick question\nfor your operations team"
+  @single_line_subject "A quick question for your operations team"
+  @invented_link "\n\nPick a time: https://calendar.example.test/invented"
 
   defmodule MultilineSubject do
     @moduledoc false
@@ -295,6 +326,221 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       shape_check: %{passed: true, decision_id: shape.id},
       plan: %{campaign_id: ctx.campaign_id, step: %{id: Ecto.UUID.generate()}}
     }
+
+  defp control?(text), do: Regex.match?(~r/\p{Cc}/u, text)
+
+  defp link?(text), do: Regex.match?(~r/https?:\/\/|www\./iu, text)
+
+  # A fixture step's `{:ok, output}`; anything else fails the fixture stage.
+  defp step!(label, result) do
+    assert match?({:ok, %{}}, result),
+           "B1-R1 fixture stage: the #{label} step returned #{short(result)}"
+
+    elem(result, 1)
+  end
+
+  # Lead 01, qualified with accepted evidence by a genuine assignment run
+  # that then stopped at its rejected multi-line subject: nothing was
+  # enrolled or handed off, so a second run of the lead can reach a real
+  # enrollment.
+  defp qualified_lead!(ctx) do
+    %{run: first, lead: lead} = assign_with!(ctx, MultilineSubject)
+    drain!()
+    first = run!(ctx, first)
+
+    assert {first.status, first.status_reason} == {:failed, :invalid_model_output},
+           "B1-R1 fixture stage: the first run was not stopped at its rejected shape " <>
+             "(#{first.status}, #{first.status_reason})"
+
+    assert lead_status!(ctx, lead) == :qualified,
+           "B1-R1 fixture stage: the lead is not qualified after the first run"
+
+    lead
+  end
+
+  # The draft's authoritative content: its ModelInvocation's stored output,
+  # read through the released-output read and parsed by the proposal schema.
+  defp stored_output!(ctx, draft) do
+    result =
+      with {:ok, released} <-
+             Agents.released_output(draft.model_invocation_id, actor: ctx.agent),
+           do: Zoi.parse(Schemas.outreach_proposal(), released)
+
+    assert match?({:ok, %{subject: _, body: _}}, result),
+           "B1-R1 fixture stage: the draft's stored output is unreadable: #{short(result)}"
+
+    elem(result, 1)
+  end
+
+  # PrepareOutreachFlow's steps on a new running run of `lead`, each through
+  # its production action, the model answering through `responder`: genuine
+  # same-run draft_proposal Decision, ModelInvocation and checks. After the
+  # draft step, `supply` maps the draft step's proposal to the proposal of
+  # the draft map the later steps receive (the caller-supplied map); the
+  # hand-off runs when the shape step returns a check, as in the flow.
+  defp drive!(ctx, lead, responder, supply) do
+    run = running_run!(ctx, lead)
+    sdr = %{context(ctx, run, "b1-r1") | model: [provider_options: [responder: responder]]}
+
+    bundle = step!("bundle", LoadEvidenceBundle.perform(%{lead_id: lead.id}, sdr))
+
+    plan =
+      step!(
+        "icp",
+        EvaluateICP.perform(%{lead_id: lead.id, qualification: bundle.qualification}, sdr)
+      )
+
+    %{triggers: triggers} =
+      step!("trigger", IdentifyTrigger.perform(%{claims: bundle.claims, icp: plan.icp}, sdr))
+
+    draft =
+      step!(
+        "draft",
+        DraftEmail.perform(
+          %{lead_id: lead.id, claims: bundle.claims, triggers: triggers, plan: plan},
+          sdr
+        )
+      )
+
+    stored = stored_output!(ctx, draft)
+
+    assert {stored.subject, stored.body} == {draft.proposal.subject, draft.proposal.body},
+           "B1-R1 fixture stage: the draft step's proposal is not its stored output"
+
+    supplied = %{draft | proposal: supply.(draft.proposal)}
+    checked = %{lead_id: lead.id, draft: supplied, claims: bundle.claims}
+    claims_check = step!("claims", ValidateClaims.perform(checked, sdr))
+
+    personalization_check =
+      step!("personalization", ValidatePersonalization.perform(checked, sdr))
+
+    assert claims_check.passed and personalization_check.passed,
+           "B1-R1 fixture stage: the draft's citation checks did not pass"
+
+    shape =
+      observe(fn -> ValidateDraftShape.perform(%{lead_id: lead.id, draft: supplied}, sdr) end)
+
+    handoff =
+      case shape do
+        {:ok, %{} = shape_check} ->
+          observe(fn ->
+            HandOffProposal.perform(
+              %{
+                lead_id: lead.id,
+                draft: supplied,
+                claims_check: claims_check,
+                personalization_check: personalization_check,
+                shape_check: shape_check,
+                plan: plan
+              },
+              sdr
+            )
+          end)
+
+        _stopped ->
+          :not_reached
+      end
+
+    %{
+      run: run,
+      draft: draft,
+      stored: stored,
+      supplied: supplied.proposal,
+      shape: shape,
+      handoff: handoff
+    }
+  end
+
+  # What was handed to review for `lead`: each Draft's current revision.
+  defp handed_off(ctx, lead) do
+    {:ok, drafts} =
+      Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
+
+    for draft <- drafts do
+      revision = revision!(ctx, draft.current_revision_id)
+      %{subject: revision.subject, link_in_body: link?(revision.body_text)}
+    end
+  end
+
+  # The run's one shape check is the returned one, bound to exactly the
+  # draft's Decision and invocation, with ids only: no line of the stored or
+  # the supplied subject or body in its inputs, outcome detail or rationale.
+  defp recorded_shape!(ctx, %{shape: {:ok, %{decision_id: id}}} = driven) do
+    shape = shape_decision(ctx, driven.run)
+    assert shape.id == id
+    assert {shape.mode, shape.rule_id} == {:deterministic, "sdr.draft_shape"}
+
+    assert MapSet.new(shape.input_refs, &{&1.resource, &1.id}) ==
+             MapSet.new([
+               {"SdrAgent.Agents.Decision", driven.draft.decision_id},
+               {"SdrAgent.Agents.ModelInvocation", driven.draft.model_invocation_id}
+             ]),
+           "B1-R1: the shape check is not bound to exactly the draft's Decision and invocation"
+
+    {:ok, inputs} = Audit.read_content(shape.inputs_sha256, actor: ctx.admin)
+    recorded = [inputs, render(shape.outcome_detail), shape.rationale || ""]
+
+    for proposal <- [driven.stored, driven.supplied],
+        text <- [proposal.subject, proposal.body],
+        line <- String.split(text, ~r/\p{Cc}+/u, trim: true),
+        String.length(line) >= 12,
+        field <- recorded do
+      refute String.contains?(field, line),
+             "B1-R1: the shape check records draft text: #{short(line)}"
+    end
+
+    shape
+  end
+
+  # Rejected for exactly the stored draft's `reason`, and nothing handed off.
+  defp assert_stored_rejected!(ctx, driven, lead, reason) do
+    shape = recorded_shape!(ctx, driven)
+    assert shape.outcome == "rejected"
+
+    assert List.wrap(shape.outcome_detail["reasons"]) == [reason],
+           "B1-R1: the rejection does not name exactly the stored draft's #{reason}: " <>
+             inspect(shape.outcome_detail)
+
+    assert driven.handoff == {:error, {:halt, :invalid_model_output}},
+           "B1-R1: the hand-off of a rejected draft was not refused: #{short(driven.handoff)}"
+
+    failed = run!(ctx, driven.run)
+    assert {failed.status, failed.status_reason} == {:failed, :invalid_model_output}
+    nothing_handed_off!(ctx, driven.run, lead)
+    assert lead_status!(ctx, lead) == :qualified, "B1-R1: a rejected draft moved the lead"
+  end
+
+  # Passed, and the stored output (never the supplied map) handed to review.
+  defp assert_stored_handed_off!(ctx, driven, lead) do
+    shape = recorded_shape!(ctx, driven)
+    assert shape.outcome == "passed"
+    assert List.wrap(shape.outcome_detail["reasons"]) == []
+
+    assert match?({:ok, %{phase: :review}}, driven.handoff),
+           "B1-R1: the well-shaped stored draft was not handed off: #{short(driven.handoff)}"
+
+    assert "sdr.draft.completed" in signal_types(ctx.tenant, driven.run)
+
+    {:ok, proposal} = SDR.proposal(driven.run.id, actor: ctx.agent)
+
+    assert {proposal.decision_id, proposal.model_invocation_id} ==
+             {driven.draft.decision_id, driven.draft.model_invocation_id}
+
+    assert {proposal.output.subject, proposal.output.body} ==
+             {driven.stored.subject, driven.stored.body}
+
+    {:ok, [handed]} =
+      Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
+
+    revision = revision!(ctx, handed.current_revision_id)
+
+    assert {revision.subject, revision.body_text} == {driven.stored.subject, driven.stored.body},
+           "B1-R1: the Draft handed to review is not the draft's stored output"
+
+    refute control?(revision.subject), "B1-R1: a subject with a control character was handed off"
+    refute link?(revision.body_text), "B1-R1: a body with a link was handed off"
+    assert lead_status!(ctx, lead) == :in_outreach
+  end
 
   describe "the draft input" do
     test "carries the snapshot's offering, guide and brief, and no booking-link slot", ctx do
@@ -630,6 +876,99 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
         Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
 
       assert drafts == []
+    end
+  end
+
+  describe "the shape check's authority (Codex B1-R1)" do
+    @describetag :b1_r1
+
+    test "a stored subject with a line break is rejected although the caller's map is single-line",
+         ctx do
+      lead = qualified_lead!(ctx)
+      driven = drive!(ctx, lead, MultilineSubject, &%{&1 | subject: @single_line_subject})
+
+      assert driven.stored.subject == @multiline_subject,
+             "B1-R1 fixture stage: the stored subject is not the multi-line one"
+
+      refute link?(driven.stored.body)
+      refute control?(driven.supplied.subject)
+
+      assert match?({:ok, %{passed: false}}, driven.shape),
+             "B1-R1: the stored draft's subject holds a line break, but the shape check " <>
+               "measured the caller's single-line map: #{short(driven.shape)}; the hand-off " <>
+               "then returned #{short(driven.handoff)} and handed off " <>
+               inspect(handed_off(ctx, lead))
+
+      assert_stored_rejected!(ctx, driven, lead, "subject_not_single_line")
+    end
+
+    test "a stored link in the body is rejected although the caller's map has none", ctx do
+      lead = qualified_lead!(ctx)
+
+      driven =
+        drive!(
+          ctx,
+          lead,
+          InventedLink,
+          &%{&1 | body: String.replace(&1.body, @invented_link, "")}
+        )
+
+      assert String.ends_with?(driven.stored.body, @invented_link),
+             "B1-R1 fixture stage: the stored body does not end with the invented link"
+
+      refute control?(driven.stored.subject)
+      refute link?(driven.supplied.body)
+
+      assert match?({:ok, %{passed: false}}, driven.shape),
+             "B1-R1: the stored draft's body holds a link, but the shape check measured " <>
+               "the caller's link-free map: #{short(driven.shape)}; the hand-off then " <>
+               "returned #{short(driven.handoff)} and handed off " <>
+               inspect(handed_off(ctx, lead))
+
+      assert_stored_rejected!(ctx, driven, lead, "body_contains_url")
+    end
+
+    test "a well-shaped stored draft is handed off as stored although the caller's map is malformed",
+         ctx do
+      lead = qualified_lead!(ctx)
+
+      driven =
+        drive!(
+          ctx,
+          lead,
+          FakeBrain,
+          &%{&1 | subject: @multiline_subject, body: &1.body <> @invented_link}
+        )
+
+      refute control?(driven.stored.subject),
+             "B1-R1 fixture stage: the stored subject is malformed"
+
+      refute link?(driven.stored.body), "B1-R1 fixture stage: the stored body has a link"
+      assert control?(driven.supplied.subject) and link?(driven.supplied.body)
+
+      # The outcome follows the authoritative (stored, released) content:
+      # the caller's map is not what is checked or handed off.
+      assert match?({:ok, %{passed: true}}, driven.shape),
+             "B1-R1: the stored draft is well-shaped, but the shape check measured the " <>
+               "caller's map (a line break in the subject, a link in the body): " <>
+               "#{short(driven.shape)}; the hand-off then returned #{short(driven.handoff)}"
+
+      assert_stored_handed_off!(ctx, driven, lead)
+    end
+
+    test "a caller map equal to the stored draft passes and is handed off unchanged (control)",
+         ctx do
+      lead = qualified_lead!(ctx)
+      driven = drive!(ctx, lead, FakeBrain, &Function.identity/1)
+
+      assert driven.supplied == driven.draft.proposal
+      refute control?(driven.stored.subject)
+      refute link?(driven.stored.body)
+
+      assert match?({:ok, %{passed: true}}, driven.shape),
+             "B1-R1 control: a matching well-shaped draft did not pass: #{short(driven.shape)}"
+
+      assert_stored_handed_off!(ctx, driven, lead)
     end
   end
 end
