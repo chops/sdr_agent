@@ -3,7 +3,16 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   PrepareOutreachFlow step "proposal": the OutreachProposal hand-off to S8.
 
   A proposal that failed deterministic validation fails the run as invalid
-  model output (operator attention) and is never handed off.
+  model output (operator attention) and is never handed off. Version 2
+  (B1-05, plan `claude-b1-research-draft-plan-r2.md` section 3 A2.5): the run's
+  pinned definition must declare this version, and besides the two citation
+  checks the `shape_check` must have passed and be bound to this exact
+  draft: its Decision is a deterministic, passed `draft_shape_validation`
+  of this run whose input refs are exactly the draft's `draft_proposal`
+  Decision and ModelInvocation. A missing, rejected, unknown or
+  wrongly-bound check is refused before any lock or write (no enrollment,
+  lead transition, signal or Draft). The `sdr.draft.completed` record is
+  unchanged.
 
   A valid one is handed off in *one transaction*: the Lead row is locked
   `FOR UPDATE`, the Campaign, the recipient Contact and the AgentRun
@@ -30,12 +39,14 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   use SdrAgent.SDR.Action,
     name: "sdr_hand_off_proposal",
     description: "Enroll the lead and hand the validated proposal to review.",
+    version: "2",
     schema:
       Zoi.object(%{
         lead_id: Zoi.string(),
         draft: Zoi.map(),
         claims_check: Zoi.map(),
         personalization_check: Zoi.map(),
+        shape_check: Zoi.map(),
         plan: Zoi.map()
       })
 
@@ -48,14 +59,18 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
   alias SdrAgent.Sales
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.Model
+  alias SdrAgent.SDR.Preconditions
   alias SdrAgent.SDR.Signals
   alias SdrAgent.SDR.Support
 
   @impl SdrAgent.SDR.Action
-  def perform(
-        %{claims_check: %{passed: true}, personalization_check: %{passed: true}} = params,
-        ctx
-      ) do
+  def perform(params, ctx) do
+    with :ok <- Preconditions.declared(ctx, __MODULE__) do
+      if validated?(params, ctx), do: transact(params, ctx), else: refuse(ctx)
+    end
+  end
+
+  defp transact(params, ctx) do
     Audit.transaction(fn ->
       case hand_off(params, ctx) do
         {:ok, state} -> state
@@ -64,7 +79,7 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
     end)
   end
 
-  def perform(_params, ctx) do
+  defp refuse(ctx) do
     Model.halt_fail(
       ctx,
       nil,
@@ -72,6 +87,37 @@ defmodule SdrAgent.SDR.Actions.HandOffProposal do
       "outreach proposal failed deterministic validation"
     )
   end
+
+  defp validated?(
+         %{
+           claims_check: %{passed: true},
+           personalization_check: %{passed: true},
+           shape_check: %{passed: true, decision_id: shape_id},
+           draft: %{decision_id: draft_id, model_invocation_id: invocation_id}
+         },
+         ctx
+       ),
+       do: shape_bound?(ctx, shape_id, draft_id, invocation_id)
+
+  defp validated?(_params, _ctx), do: false
+
+  # The passed shape check of this run, bound to exactly this draft.
+  defp shape_bound?(ctx, shape_id, draft_id, invocation_id) when is_binary(shape_id) do
+    case Agents.get_decision(shape_id, actor: ctx.actor) do
+      {:ok, %{kind: :draft_shape_validation, mode: :deterministic, outcome: "passed"} = shape} ->
+        shape.agent_run_id == ctx.run_id and
+          MapSet.new(shape.input_refs, &{&1.resource, &1.id}) ==
+            MapSet.new([
+              {"SdrAgent.Agents.Decision", draft_id},
+              {"SdrAgent.Agents.ModelInvocation", invocation_id}
+            ])
+
+      _other ->
+        false
+    end
+  end
+
+  defp shape_bound?(_ctx, _shape_id, _draft_id, _invocation_id), do: false
 
   defp hand_off(%{lead_id: lead_id, plan: plan} = params, ctx) do
     with {:ok, lead} <- lock(ctx, Sales.Lead, lead_id, :for_update),

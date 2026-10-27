@@ -21,16 +21,19 @@ defmodule SdrAgent.Agents.RunSettings.Safeguards do
   @int_max 2_147_483_647
 
   # {field, minimum, enforced_by | nil}. Consumers that have not merged are
-  # `nil` ("not yet enforced"); the settings page reads this registry.
+  # `nil` ("not yet enforced"); the settings page reads this registry. B1-04
+  # enforces the three source caps for runs whose definition declares
+  # BuildEvidenceBundle v2 (the run page labels older runs "not enforced for
+  # this run").
   @limits [
     {:run_max_model_calls, 1, "SdrAgent.Agents.AgentRun :reserve_model_call"},
     {:run_max_tool_calls, 1, "SdrAgent.Agents.AgentRun :record_tool_call"},
     {:run_max_tokens, 1, "SdrAgent.Agents.AgentRun :reserve_model_call"},
     {:research_max_search_requests, 0, nil},
     {:research_max_page_fetches, 0, nil},
-    {:research_max_sources, 1, nil},
-    {:research_max_source_chars, 500, nil},
-    {:research_max_total_source_chars, 500, nil},
+    {:research_max_sources, 1, "SdrAgent.SDR.Actions.BuildEvidenceBundle"},
+    {:research_max_source_chars, 500, "SdrAgent.SDR.Actions.BuildEvidenceBundle"},
+    {:research_max_total_source_chars, 500, "SdrAgent.SDR.Actions.BuildEvidenceBundle"},
     {:research_max_output_tokens, 256, nil},
     {:research_max_model_calls, 1, nil},
     {:research_target_seconds, 30, nil},

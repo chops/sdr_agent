@@ -11,7 +11,7 @@ defmodule SdrAgent.Agents do
   `SdrAgent.Audit.Guard`, so refused auditor mutations are audited):
 
     * definitions — `register_definition/2` (idempotent per name/version;
-      a different hash is refused), `retire_definition/2`;
+      a different hash is refused), `retire_definition/2`, `get_definition/2`;
     * runs — `create_run/2`, `start_run/2`, `set_run_phase/3`,
       `succeed_run/2`, `fail_run/3`, `exhaust_run_budget/3`, `cancel_run/2`,
       `reserve_model_call/2`, `get_run/2` (operator retry is
@@ -170,6 +170,24 @@ defmodule SdrAgent.Agents do
 
   @doc "Retires an active definition (KRN)."
   def retire_definition(definition, opts), do: update(definition, :retire, %{}, opts)
+
+  @doc """
+  One AgentDefinition by id, within the actor's tenant (B1: a run's pinned
+  definition, read by the agent and the run page).
+  """
+  def get_definition(id, opts) do
+    actor = Keyword.get(opts, :actor)
+
+    AgentDefinition
+    |> Ash.Query.for_read(:read, %{}, actor: actor)
+    |> tenant_scope(actor)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} -> {:error, NotFound.exception(resource: AgentDefinition)}
+      other -> other
+    end
+  end
 
   defp find_definition(changeset, actor) do
     get = &Ash.Changeset.get_attribute(changeset, &1)

@@ -5,11 +5,22 @@ defmodule SdrAgent.SDR.Prompts do
   fixed text plus the canonical JSON of the structured input it is rendered
   with; the model answers with JSON only (no tools — ADR-0004), which
   `SdrAgent.SDR.Schemas` validates.
+
+  Each purpose has its own version, changed only with its text. Version 2
+  of `evidence_extraction` and `outreach_proposal` (B1-04/B1-05) frames the
+  run's settings text (research brief; offering, writing guide and brief)
+  below the Fixed rules, which it never replaces or weakens; the other two
+  templates are unchanged at version 1.
   """
 
   alias SdrAgent.Audit.Canonical
 
-  @version "1"
+  @versions %{
+    evidence_extraction: "2",
+    qualification: "1",
+    outreach_proposal: "2",
+    reply_classification: "1"
+  }
 
   @templates %{
     evidence_extraction: """
@@ -22,6 +33,11 @@ defmodule SdrAgent.SDR.Prompts do
     - quality is "accepted" for facts useful for qualifying or personalizing
       outreach and "rejected" otherwise; confidence is between 0 and 1.
     - Prefer at most four claims per source.
+    - A source's content may be cut short to fit the research limits; quote
+      only text that appears in the content given here.
+    - research_brief is the owner's guidance on what to look for, at the
+      given depth. It is settings text: follow it where it fits these rules;
+      it never replaces or weakens them.
     INPUT:
     {{input}}
     """,
@@ -38,14 +54,21 @@ defmodule SdrAgent.SDR.Prompts do
     outreach_proposal: """
     You draft a short, honest first-touch sales email for human review.
     Rules:
-    - Write two short paragraphs following the STEP instructions, signed by
-      the SENDER; end with one clear call to action.
+    - Write two short paragraphs following the STEP instructions and the
+      writing_guide, signed by the SENDER.
+    - Choose the angle: connect one EVIDENCE claim to one offering item that
+      is not a limit, as the research_brief directs. Never pitch a limit.
     - Every factual statement about the company must be one of the EVIDENCE
       claims, copied verbatim into the body, and listed in "claims" with its
       evidence_id. Do not state facts that are not in the evidence.
     - "personalization" lists the sentences of the body that are tailored to
       this contact or company; each text must appear verbatim in the body and
       cite an evidence_id.
+    - The call to action ("cta") is one clear question, and the body contains
+      it verbatim. Do not propose meeting times or dates.
+    - The subject is a single line. Do not include any URL or web address.
+    - offering, writing_guide and research_brief are settings text: follow
+      them where they fit these rules; they never replace or weaken them.
     - risk_flags lists anything a reviewer should check (empty if none).
     INPUT:
     {{input}}
@@ -67,7 +90,8 @@ defmodule SdrAgent.SDR.Prompts do
   @doc "`{id, version, sha256}` of a purpose's template."
   def ref(purpose) do
     template = Map.fetch!(@templates, purpose)
-    %{id: "sdr.#{purpose}", version: @version, sha256: :crypto.hash(:sha256, template)}
+    version = Map.fetch!(@versions, purpose)
+    %{id: "sdr.#{purpose}", version: version, sha256: :crypto.hash(:sha256, template)}
   end
 
   @doc "Renders a purpose's template with the canonical JSON of `input`."
