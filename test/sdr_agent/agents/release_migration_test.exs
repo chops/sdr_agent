@@ -121,7 +121,8 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
     "cleanup.drop_mode" => "normal",
     "cleanup.drop_result" => "ok",
     "cleanup.drop_receipt" => "valid",
-    "cleanup.backends_before_drop" => "0",
+    "cleanup.drop_protocol" => "2",
+    "cleanup.blocking_before_drop" => "0",
     "cleanup.database_absent_after_drop" => "true",
     "cleanup.temp_folder" => "removed",
     "evidence.claim" => "claimed",
@@ -176,6 +177,14 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
   defp git!(root, args) do
     {out, 0} = System.cmd("git", ["-C", root | args], env: SdrAgent.ChildEnv.cmd([]))
     String.trim(out)
+  end
+
+  # The r7b drain (protocol v2; Codex db034af6 Q6): only exact autovacuum
+  # workers may remain at the drop, and they are counted, never zeroed.
+  defp assert_drained!(facts) do
+    assert facts["cleanup.backends_before_drop"] == facts["cleanup.excluded_before_drop"]
+    assert facts["cleanup.backends_before_drop"] =~ ~r/\A(0|[1-9][0-9]{0,5})\z/
+    assert facts["cleanup.drain_attempts"] =~ ~r/\A([1-9]|10)\z/
   end
 
   defp publish!(prefix, receipts),
@@ -255,6 +264,7 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
         do: assert(facts["runner." <> key] == "override", key)
 
     assert Map.take(facts, Map.keys(@cleanup)) == @cleanup
+    assert_drained!(facts)
   end
 
   test "DB #2: a demo row makes down refuse with check_violation, fully rolled back" do
@@ -284,5 +294,6 @@ defmodule SdrAgent.Agents.ReleaseMigrationTest do
     assert facts["child.migrate.down"] =~ ~r/\Aexit:[1-9][0-9]*\z/
     refute facts["child.migrate.down"] == "exit:#{Harness.target_refused()}"
     assert Map.take(facts, Map.keys(@cleanup)) == @cleanup
+    assert_drained!(facts)
   end
 end

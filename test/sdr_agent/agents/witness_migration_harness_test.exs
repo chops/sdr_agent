@@ -621,101 +621,17 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
   end
 
   # Codex 7ad3bd0 G2-F1: cleanup facts are enforced, not merely printed or
-  # present. RED until `Harness.drop_flow/1` and `Harness.verify_drop_receipt/1`
-  # exist and the harness rejects an exit-0 drop child without valid facts.
+  # present: the harness rejects an exit-0 drop child without valid facts.
+  # The v1 receipt (exactly `backends_before_drop=0` and
+  # `database_absent_after_drop=true`) keeps its semantics here; the drop
+  # child's decision itself is now the r7b drain (protocol v2, below).
   describe "enforced cleanup facts (no database)" do
-    # Injected effects for the drop child's decision: each records its call.
-    defp effects(backends, storage_down, present, emit \\ fn _line -> :ok end) do
-      parent = self()
-
-      %{
-        count_backends: fn ->
-          send(parent, :count_backends)
-          backends
-        end,
-        storage_down: fn ->
-          send(parent, :storage_down)
-          storage_down
-        end,
-        count_present: fn ->
-          send(parent, :count_present)
-          present
-        end,
-        emit: fn line ->
-          send(parent, {:emit, line})
-          emit.(line)
-        end
-      }
-    end
-
     defp harness(function, args) do
       Code.ensure_loaded(Harness)
 
       if function_exported?(Harness, function, length(args)),
         do: apply(Harness, function, args),
         else: {:not_implemented, function, length(args)}
-    end
-
-    test "a nonzero pre-drop backend count refuses without calling storage_down" do
-      for backends <- [1, 3] do
-        assert harness(:drop_flow, [effects(backends, :ok, 0)]) ==
-                 {:error, {:backends_present, backends}},
-               inspect(backends)
-
-        assert_received {:emit, "WM-CHILD backends_before_drop=" <> _}
-        refute_received :storage_down
-        refute_received :count_present
-      end
-    end
-
-    test "zero backends, a normal drop and absence afterwards: both facts are written" do
-      assert harness(:drop_flow, [effects(0, :ok, 0)]) == :ok
-      assert_received {:emit, "WM-CHILD backends_before_drop=0"}
-      assert_received :storage_down
-      assert_received {:emit, "WM-CHILD database_absent_after_drop=true"}
-    end
-
-    test "the database still present after the drop is refused" do
-      assert harness(:drop_flow, [effects(0, :ok, 1)]) == {:error, :database_present_after_drop}
-      assert_received {:emit, "WM-CHILD database_absent_after_drop=false"}
-    end
-
-    test "a failed storage_down is refused, with no absence fact" do
-      assert harness(:drop_flow, [effects(0, {:error, :busy}, 0)]) ==
-               {:error, {:drop_failed, :busy}}
-
-      refute_received :count_present
-    end
-
-    test "a failed receipt write is refused; before the drop it prevents the drop" do
-      failing = fn _line -> {:error, :closed} end
-
-      assert harness(:drop_flow, [effects(0, :ok, 0, failing)]) ==
-               {:error, :receipt_write_failed}
-
-      refute_received :storage_down
-
-      after_drop = fn line ->
-        if line =~ "database_absent_after_drop", do: {:error, :closed}, else: :ok
-      end
-
-      assert harness(:drop_flow, [effects(0, :ok, 0, after_drop)]) ==
-               {:error, :receipt_write_failed}
-
-      assert_received :storage_down
-    end
-
-    test "each refusal has a closed child label" do
-      assert Enum.map(
-               [
-                 {:backends_present, 2},
-                 {:drop_failed, :busy},
-                 :database_present_after_drop,
-                 :receipt_write_failed
-               ],
-               &harness(:drop_refusal_label, [&1])
-             ) ==
-               ~w(backends_present drop_failed database_present_after_drop receipt_write_failed)
     end
 
     test "the drop child's receipt: exactly the two successful facts, once each" do
@@ -802,6 +718,672 @@ defmodule SdrAgent.Agents.WitnessMigrationHarnessTest do
                )
 
       assert Map.new(receipts)["cleanup.drop_receipt"] == "valid"
+    end
+  end
+
+  ## RED-8: the drop child drains like the standing runner's r7b (Codex
+  ## db034af6 Q6). Exactly `backend_type COLLATE "C" = 'autovacuum worker'`
+  ## does not block; NULL, custom, case or whitespace variants and every
+  ## other type do. One fixed monotonic budget, bounded observations and
+  ## resampling, a final clock check at acceptance, the accepted record
+  ## written before the plain drop; actual counts kept (protocol v2 facts).
+
+  @av "x6175746f76616375756d20776f726b6572"
+  @t0 1_000
+
+  defp drain_protocol?,
+    do: Code.ensure_loaded?(Harness) and function_exported?(Harness, :parse_backends, 1)
+
+  # The drop child's decision under the drain protocol (RED: structural; a
+  # dynamic call, so no result type is inferred from the v1 decision).
+  defp drain_drop(effects) do
+    if drain_protocol?(),
+      do: Function.capture(Harness, :drop_flow, 1).(effects),
+      else: {:not_implemented, :drain_protocol}
+  end
+
+  # One observation's output lines, as `Harness.backends_sql/0` prints them:
+  # the header (the server's blocking count by exact equality unless
+  # given), one line per distinct type in byte order, the end line.
+  defp observation(types, blocking \\ nil) do
+    total = types |> Enum.map(&elem(&1, 1)) |> Enum.sum()
+
+    blocking =
+      blocking || Enum.sum(for {type, n} <- types, type != "autovacuum worker", do: n)
+
+    ["backends total=#{total} blocking=#{blocking} groups=#{length(types)}"] ++
+      for(
+        {type, n} <- Enum.sort_by(types, &token(elem(&1, 0))),
+        do: "type=#{token(type)} count=#{n}"
+      ) ++ ["end groups=#{length(types)}"]
+  end
+
+  defp token(nil), do: "N"
+  defp token(type), do: "x" <> Base.encode16(type, case: :lower)
+
+  # Scripted effects: `clock` (integers, or anything else for an unreadable
+  # read) and `observe` are consumed in order; every call is reported to
+  # this process; `emit_fails` names the lines whose write fails.
+  defp drain_effects(script) do
+    test = self()
+    queues = %{clock: script.clock, observe: Map.get(script, :observe, [])}
+    {:ok, agent} = Agent.start_link(fn -> queues end)
+    fails? = Map.get(script, :emit_fails, fn _line -> false end)
+
+    pop = fn key -> Agent.get_and_update(agent, &pop_next(&1, key)) end
+
+    %{
+      clock: fn ->
+        case pop.(:clock) do
+          ms when is_integer(ms) -> {:ok, ms}
+          unreadable -> unreadable
+        end
+      end,
+      observe: fn ms ->
+        send(test, {:observe, ms})
+        pop.(:observe)
+      end,
+      pause: fn ->
+        send(test, :pause)
+        Map.get(script, :pause, :ok)
+      end,
+      storage_down: fn ->
+        send(test, :storage_down)
+        Map.get(script, :storage_down, :ok)
+      end,
+      count_present: fn ->
+        send(test, :count_present)
+        Map.get(script, :count_present, {:ok, 0})
+      end,
+      emit: fn line ->
+        send(test, {:emit, line})
+        if fails?.(line), do: {:error, :closed}, else: :ok
+      end
+    }
+  end
+
+  defp pop_next(state, key) do
+    case Map.fetch!(state, key) do
+      [next | rest] -> {next, Map.put(state, key, rest)}
+      [] -> {:exhausted, state}
+    end
+  end
+
+  defp emitted(acc \\ []) do
+    receive do
+      {:emit, line} -> emitted([line | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp observed_bounds(acc \\ []) do
+    receive do
+      {:observe, ms} -> observed_bounds([ms | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp count_received(message, n \\ 0) do
+    receive do
+      ^message -> count_received(message, n + 1)
+    after
+      0 -> n
+    end
+  end
+
+  defp facts_of(lines), do: for("WM-CHILD " <> fact <- lines, do: fact)
+  defp drain_lines(lines), do: for("WM-DRAIN " <> line <- lines, do: line)
+
+  defp v2_facts(total, attempts) do
+    ~w(drop_protocol=2 backends_before_drop=#{total} blocking_before_drop=0
+       excluded_before_drop=#{total} drain_attempts=#{attempts})
+  end
+
+  describe "the r7b drain before the drop (protocol v2; Codex db034af6 Q6)" do
+    test "zero backends: accepted at once, the v2 facts, the plain drop, the absence proof" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      effects =
+        drain_effects(%{clock: [@t0, @t0, 1_040, 1_050], observe: [{:ok, observation([])}]})
+
+      assert drain_drop(effects) == :ok
+      lines = emitted()
+      assert facts_of(lines) == v2_facts(0, 1) ++ ["database_absent_after_drop=true"]
+
+      assert [start, attempt, accepted] = drain_lines(lines)
+
+      assert start ==
+               "budget_ms=10000 max_attempts=10 pause_ms=1000 connect_timeout_ms=2000 " <>
+                 "slack_ms=500 min_statement_ms=500"
+
+      assert attempt ==
+               "attempt=01 start_elapsed_ms=0 end_elapsed_ms=40 remaining_ms=10000 " <>
+                 "statement_timeout_ms=7500 lock_timeout_ms=7500 result=valid " <>
+                 "detail=[total=0 blocking=0 groups=0] types=[] decision=eligible"
+
+      assert accepted == "accepted attempt=01 final_check_elapsed_ms=50"
+      assert observed_bounds() == [7_500]
+      assert_received :storage_down
+      assert_received :count_present
+
+      assert Harness.verify_drop_receipt(Enum.join(lines, "\n")) ==
+               {:ok,
+                %{
+                  "drop_protocol" => "2",
+                  "backends_before_drop" => "0",
+                  "blocking_before_drop" => "0",
+                  "excluded_before_drop" => "0",
+                  "drain_attempts" => "1",
+                  "database_absent_after_drop" => "true"
+                }}
+    end
+
+    test "an autovacuum worker alone does not block, and is never reported as zero" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      effects =
+        drain_effects(%{
+          clock: [@t0, @t0, 1_040, 1_050],
+          observe: [{:ok, observation([{"autovacuum worker", 1}])}]
+        })
+
+      assert drain_drop(effects) == :ok
+      lines = emitted()
+      assert facts_of(lines) == v2_facts(1, 1) ++ ["database_absent_after_drop=true"]
+
+      assert Enum.at(drain_lines(lines), 1) =~
+               "detail=[total=1 blocking=0 groups=1] types=[#{@av}:1] decision=eligible"
+
+      assert {:ok, %{"backends_before_drop" => "1", "excluded_before_drop" => "1"}} =
+               Harness.verify_drop_receipt(Enum.join(lines, "\n"))
+
+      assert_received :storage_down
+    end
+
+    test "every other type blocks: client, NULL, empty, custom, case and whitespace variants" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      for type <- [
+            "client backend",
+            nil,
+            "",
+            "autovacuum worker ",
+            " autovacuum worker",
+            "Autovacuum Worker",
+            "autovacuum launcher",
+            "autovacuum workers",
+            "parallel worker"
+          ] do
+        # Too late for a recheck: 11000 - 7100 - (1000 + 2000 + 500) < 500.
+        effects =
+          drain_effects(%{
+            clock: [@t0, @t0, 7_100],
+            observe: [{:ok, observation([{"autovacuum worker", 1}, {type, 2}])}]
+          })
+
+        assert drain_drop(effects) == {:error, {:backends_present, 2}}, inspect(type)
+        lines = emitted()
+        assert facts_of(lines) == [], inspect(type)
+        assert Enum.at(drain_lines(lines), 1) =~ "blocking=2 groups=2", inspect(type)
+        assert Enum.at(drain_lines(lines), 1) =~ "decision=retain", inspect(type)
+        assert List.last(drain_lines(lines)) == "retained: backends_present", inspect(type)
+        refute_received :storage_down
+      end
+    end
+
+    test "a blocker that vanishes is rechecked after the pause, then accepted" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      effects =
+        drain_effects(%{
+          clock: [@t0, @t0, 1_040, 2_100, 2_140, 2_150],
+          observe: [
+            {:ok, observation([{"client backend", 1}, {"autovacuum worker", 1}])},
+            {:ok, observation([])}
+          ]
+        })
+
+      assert drain_drop(effects) == :ok
+      lines = emitted()
+      assert facts_of(lines) == v2_facts(0, 2) ++ ["database_absent_after_drop=true"]
+      assert [_start, first, second, accepted] = drain_lines(lines)
+      assert first =~ "attempt=01 " and first =~ "blocking=1 groups=2" and first =~ "recheck"
+      assert second =~ "attempt=02 start_elapsed_ms=1100 " and second =~ "decision=eligible"
+      assert accepted == "accepted attempt=02 final_check_elapsed_ms=1150"
+      assert observed_bounds() == [7_500, 6_400], "the deadline is never renewed"
+      assert count_received(:pause) == 1
+    end
+
+    test "a persistent blocker: bounded rechecks, no renewal, no drop" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      starts = [1_000, 2_100, 3_200, 4_300, 5_400, 6_500, 7_600]
+      clock = [@t0 | Enum.flat_map(starts, &[&1, &1 + 40])]
+      blocked = {:ok, observation([{"client backend", 1}])}
+
+      effects =
+        drain_effects(%{clock: clock, observe: List.duplicate(blocked, length(starts))})
+
+      assert drain_drop(effects) == {:error, {:backends_present, 1}}
+      assert observed_bounds() == [7_500, 6_400, 5_300, 4_200, 3_100, 2_000, 900]
+      assert count_received(:pause) == 6
+      lines = emitted()
+      assert facts_of(lines) == []
+      assert List.last(drain_lines(lines)) == "retained: backends_present"
+      refute_received :storage_down
+    end
+
+    test "at most ten observations, even with time left" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      blocked = {:ok, observation([{"client backend", 1}])}
+
+      effects =
+        drain_effects(%{
+          clock: List.duplicate(@t0, 1 + 2 * 10),
+          observe: List.duplicate(blocked, 11)
+        })
+
+      assert drain_drop(effects) == {:error, {:backends_present, 1}}
+      assert length(observed_bounds()) == 10
+      refute_received :storage_down
+    end
+
+    test "the deadline: a late observation is not read; a start without room is not made" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      for ended <- [11_000, 11_500] do
+        effects =
+          drain_effects(%{clock: [@t0, @t0, ended], observe: [{:ok, observation([])}]})
+
+        assert drain_drop(effects) == {:error, :deadline_expired}, inspect(ended)
+        lines = emitted()
+        assert facts_of(lines) == []
+        assert Enum.at(drain_lines(lines), 1) =~ "result=late"
+        assert observed_bounds() == [7_500]
+        refute_received :storage_down
+      end
+
+      # After a recheck, 11000 - 8100 - (2000 + 500) < 500: no second observation.
+      effects =
+        drain_effects(%{
+          clock: [@t0, @t0, 1_040, 8_100],
+          observe: [{:ok, observation([{"client backend", 1}])}]
+        })
+
+      assert drain_drop(effects) == {:error, :deadline_expired}
+      assert observed_bounds() == [7_500]
+      assert List.last(drain_lines(emitted())) == "retained: deadline_expired"
+    end
+
+    test "the final acceptance check: at or after the deadline, unreadable or backward" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      for {final, reason} <- [
+            {11_000, :deadline_expired},
+            {12_000, :deadline_expired},
+            {:unreadable, :clock_unreadable},
+            {1_030, :clock_backward}
+          ] do
+        effects =
+          drain_effects(%{clock: [@t0, @t0, 1_040, final], observe: [{:ok, observation([])}]})
+
+        assert drain_drop(effects) == {:error, reason}, inspect(final)
+        lines = emitted()
+        assert facts_of(lines) == [], inspect(final)
+        assert Enum.at(drain_lines(lines), 1) =~ "decision=eligible"
+        refute_received :storage_down
+      end
+    end
+
+    test "an unreadable or backward clock refuses before or after an observation" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      blocked = {:ok, observation([{"client backend", 1}])}
+
+      for {label, clock, observations, reason} <- [
+            {"at t0", [:unreadable], 0, :clock_unreadable},
+            {"before the first", [@t0, :unreadable], 0, :clock_unreadable},
+            {"after an observation", [@t0, @t0, :unreadable], 1, :clock_unreadable},
+            {"back after an observation", [@t0, @t0, 990], 1, :clock_backward},
+            {"back before a recheck", [@t0, @t0, 1_040, 1_030], 1, :clock_backward}
+          ] do
+        effects = drain_effects(%{clock: clock, observe: [blocked]})
+        assert drain_drop(effects) == {:error, reason}, label
+        assert length(observed_bounds()) == observations, label
+        assert facts_of(emitted()) == [], label
+        refute_received :storage_down
+      end
+    end
+
+    test "a failed or malformed observation refuses at once" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      header = "backends total=0 blocking=0 groups=0"
+      one = "backends total=1 blocking=1 groups=1"
+
+      for {label, observed, reason} <- [
+            {"a failed query", {:error, :timeout}, {:observation_failed, :timeout}},
+            {"no rows", {:ok, []}, {:observation_malformed, :no_header}},
+            {"a non-text row", {:ok, [nil]}, {:observation_malformed, :not_text}},
+            {"no end line", {:ok, [header]}, {:observation_malformed, :no_end}},
+            {"a noncanonical number", {:ok, ["backends total=00 blocking=0 groups=0"]},
+             {:observation_malformed, :bad_header}},
+            {"an unknown line", {:ok, [header, "noise", "end groups=0"]},
+             {:observation_malformed, :bad_line}},
+            {"a zero count", {:ok, [one, "type=x41 count=0", "end groups=1"]},
+             {:observation_malformed, :bad_line}},
+            {"odd hex", {:ok, [one, "type=x4 count=1", "end groups=1"]},
+             {:observation_malformed, :bad_line}},
+            {"upper-case hex", {:ok, [one, "type=x4A count=1", "end groups=1"]},
+             {:observation_malformed, :bad_line}},
+            {"a repeated type",
+             {:ok,
+              [
+                "backends total=2 blocking=2 groups=2",
+                "type=x41 count=1",
+                "type=x41 count=1",
+                "end groups=2"
+              ]}, {:observation_malformed, :repeated_type}},
+            {"a line after the end", {:ok, [header, "end groups=0", "end groups=0"]},
+             {:observation_malformed, :line_after_end}},
+            {"groups that do not reconcile", {:ok, [one, "end groups=1"]},
+             {:observation_malformed, :groups_mismatch}},
+            {"a total that does not reconcile",
+             {:ok, ["backends total=2 blocking=2 groups=1", "type=x41 count=1", "end groups=1"]},
+             {:observation_malformed, :total_mismatch}},
+            {"the server's zero against a NULL type", {:ok, observation([{nil, 1}], 0)},
+             {:observation_malformed, :blocking_mismatch}},
+            {"the server's blocker against an autovacuum worker",
+             {:ok, observation([{"autovacuum worker", 1}], 1)},
+             {:observation_malformed, :blocking_mismatch}},
+            {"not a list", {:ok, "backends total=0"}, {:observation_malformed, :not_text}}
+          ] do
+        effects = drain_effects(%{clock: [@t0, @t0, 1_040], observe: [observed]})
+        assert drain_drop(effects) == {:error, reason}, label
+        assert length(observed_bounds()) == 1, label
+        lines = emitted()
+        assert facts_of(lines) == [], label
+        assert Enum.at(drain_lines(lines), 1) =~ "decision=retain", label
+        refute_received :storage_down
+      end
+    end
+
+    test "an evidence write failure refuses; at the accepted record it vetoes the drop" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      for {label, prefix, observations} <- [
+            {"the bounds line", "WM-DRAIN budget_ms=", 0},
+            {"an attempt line", "WM-DRAIN attempt=01", 1},
+            {"the accepted line", "WM-DRAIN accepted", 1},
+            {"the protocol fact", "WM-CHILD drop_protocol=", 1},
+            {"the backends fact", "WM-CHILD backends_before_drop=", 1},
+            {"the blocking fact", "WM-CHILD blocking_before_drop=", 1},
+            {"the excluded fact", "WM-CHILD excluded_before_drop=", 1},
+            {"the attempts fact", "WM-CHILD drain_attempts=", 1}
+          ] do
+        effects =
+          drain_effects(%{
+            clock: [@t0, @t0, 1_040, 1_050],
+            observe: [{:ok, observation([])}],
+            emit_fails: &String.starts_with?(&1, prefix)
+          })
+
+        assert drain_drop(effects) == {:error, :receipt_write_failed}, label
+        assert length(observed_bounds()) == observations, label
+        refute_received :storage_down
+        _ = emitted()
+      end
+
+      effects =
+        drain_effects(%{
+          clock: [@t0, @t0, 1_040, 1_050],
+          observe: [{:ok, observation([])}],
+          emit_fails: &String.starts_with?(&1, "WM-CHILD database_absent_after_drop=")
+        })
+
+      assert drain_drop(effects) == {:error, :receipt_write_failed}
+      assert_received :storage_down
+    end
+
+    test "a failed pause, a failed drop and a failed absence proof refuse" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      zero = [{:ok, observation([])}]
+      accepted = [@t0, @t0, 1_040, 1_050]
+
+      effects =
+        drain_effects(%{
+          clock: [@t0, @t0, 1_040],
+          observe: [{:ok, observation([{"client backend", 1}])}],
+          pause: {:error, :interrupted}
+        })
+
+      assert drain_drop(effects) == {:error, :pause_failed}
+      refute_received :storage_down
+
+      effects = drain_effects(%{clock: accepted, observe: zero, storage_down: {:error, :busy}})
+      assert drain_drop(effects) == {:error, {:drop_failed, :busy}}
+      refute_received :count_present
+      refute Enum.any?(emitted(), &(&1 =~ "database_absent_after_drop"))
+
+      effects =
+        drain_effects(%{clock: accepted, observe: zero, count_present: {:error, :timeout}})
+
+      assert drain_drop(effects) == {:error, {:absence_unproven, :timeout}}
+      refute Enum.any?(emitted(), &(&1 =~ "database_absent_after_drop"))
+
+      effects = drain_effects(%{clock: accepted, observe: zero, count_present: {:ok, 1}})
+      assert drain_drop(effects) == {:error, :database_present_after_drop}
+      assert "database_absent_after_drop=false" in facts_of(emitted())
+    end
+
+    test "each refusal has a closed child label" do
+      assert drain_protocol?(), "Harness.parse_backends/1 (the drain protocol) is not implemented"
+
+      assert Enum.map(
+               [
+                 {:backends_present, 2},
+                 {:drop_failed, :busy},
+                 :database_present_after_drop,
+                 :receipt_write_failed,
+                 :clock_unreadable,
+                 :clock_backward,
+                 :deadline_expired,
+                 :pause_failed,
+                 {:observation_failed, :timeout},
+                 {:observation_malformed, :bad_line},
+                 {:absence_unproven, :timeout}
+               ],
+               &Harness.drop_refusal_label/1
+             ) ==
+               ~w(backends_present drop_failed database_present_after_drop receipt_write_failed
+                  clock_unreadable clock_backward deadline_expired pause_failed
+                  observation_failed observation_malformed absence_unproven)
+    end
+
+    test "the bounds are the standing runner's r7b values" do
+      assert harness(:drop_bounds, []) == %{
+               budget_ms: 10_000,
+               max_attempts: 10,
+               pause_ms: 1_000,
+               connect_timeout_ms: 2_000,
+               slack_ms: 500,
+               min_statement_ms: 500,
+               drop_connect_timeout_ms: 10_000,
+               drop_statement_timeout_ms: 120_000,
+               drop_lock_timeout_ms: 10_000
+             }
+    end
+
+    test "the observation statement: exact bytes, one pg_stat_activity read, types only" do
+      sql =
+        "with a as materialized (select backend_type as t from pg_stat_activity " <>
+          "where datname = $1), g as (select t, count(*) as n from a group by t) " <>
+          "select l from (select 0 as k, '' as o, 'backends total=' || " <>
+          "(select count(*) from a) || ' blocking=' || (select count(*) from a " <>
+          "where t collate \"C\" is distinct from 'autovacuum worker') || ' groups=' || " <>
+          "(select count(*) from g) as l union all select 1, v, 'type=' || v || " <>
+          "' count=' || n from (select case when t is null then 'N' else 'x' || " <>
+          "encode(convert_to(t, 'UTF8'), 'hex') end as v, n from g) e union all " <>
+          "select 2, '', 'end groups=' || (select count(*) from g)) z " <>
+          "order by k, o collate \"C\""
+
+      assert harness(:backends_sql, []) == sql
+
+      for word <- ~w(query usename pid client_addr application_name pg_terminate_backend
+                     pg_cancel_backend force) do
+        refute sql =~ word, word
+      end
+    end
+
+    test "parse_backends/1 keeps the actual total, blocking and types" do
+      assert harness(:parse_backends, [
+               observation([{"autovacuum worker", 1}, {nil, 1}, {"client backend", 2}])
+             ]) ==
+               {:ok,
+                %{
+                  total: 4,
+                  blocking: 3,
+                  groups: 3,
+                  types: [{"N", 1}, {@av, 1}, {token("client backend"), 2}]
+                }}
+    end
+
+    test "the drop child wires the drain: real monotonic clock, bounded reads, plain drop" do
+      source = File.read!(Path.join(@scripts, "drop.exs"))
+      ast = Code.string_to_quoted!(source)
+
+      for {label, pattern} <- [
+            {"the decision", "Harness.drop_flow("},
+            {"the statement", "Harness.backends_sql()"},
+            {"the bounds", "Harness.drop_bounds()"},
+            {"the monotonic clock", "System.monotonic_time(:millisecond)"},
+            {"a bounded statement", "set_config('statement_timeout', $1, true)"},
+            {"a bounded lock wait", "set_config('lock_timeout', $1, true)"},
+            {"the plain drop", "Ecto.Adapters.Postgres.storage_down("}
+          ] do
+        assert source =~ pattern, label
+      end
+
+      {_ast, strings} =
+        Macro.prewalk(ast, [], fn
+          string, acc when is_binary(string) -> {string, [string | acc]}
+          node, acc -> {node, acc}
+        end)
+
+      for string <- strings,
+          word <- ~w(FORCE pg_terminate_backend pg_cancel_backend pg_signal_backend ALTER) do
+        refute String.contains?(String.upcase(string), String.upcase(word)),
+               "#{inspect(string)} contains #{word}"
+      end
+
+      refute source =~ "count_backends", "the v1 exact-zero count is no longer wired"
+    end
+  end
+
+  describe "the drop receipt, protocol v2 (Codex db034af6 Q6: versioned and additive)" do
+    @v2 "WM-CHILD drop_protocol=2\nWM-CHILD backends_before_drop=1\n" <>
+          "WM-CHILD blocking_before_drop=0\nWM-CHILD excluded_before_drop=1\n" <>
+          "WM-CHILD drain_attempts=2\nWM-CHILD database_absent_after_drop=true\n"
+
+    defp v2_without(key),
+      do: @v2 |> String.split("\n", trim: true) |> Enum.reject(&(&1 =~ key)) |> Enum.join("\n")
+
+    defp v2_with(key, value),
+      do:
+        @v2
+        |> String.split("\n", trim: true)
+        |> Enum.map_join(
+          "\n",
+          &if(&1 =~ "WM-CHILD #{key}=", do: "WM-CHILD #{key}=#{value}", else: &1)
+        )
+
+    test "a v2 receipt: exactly its six facts, the excluded workers counted, never zeroed" do
+      assert harness(:verify_drop_receipt, [@v2]) ==
+               {:ok,
+                %{
+                  "drop_protocol" => "2",
+                  "backends_before_drop" => "1",
+                  "blocking_before_drop" => "0",
+                  "excluded_before_drop" => "1",
+                  "drain_attempts" => "2",
+                  "database_absent_after_drop" => "true"
+                }}
+
+      for {label, output, reason} <-
+            [
+              {"another protocol", v2_with("drop_protocol", "3"), :facts_malformed},
+              {"no attempt", v2_with("drain_attempts", "0"), :facts_malformed},
+              {"eleven attempts", v2_with("drain_attempts", "11"), :facts_malformed},
+              {"a noncanonical excluded count", v2_with("excluded_before_drop", "01"),
+               :facts_malformed},
+              {"a duplicate fact", @v2 <> "WM-CHILD drain_attempts=2\n", :facts_duplicate},
+              {"the v1 pair plus the protocol only",
+               "WM-CHILD drop_protocol=2\n" <> @valid_drop_output, :facts_missing},
+              {"a blocker", v2_with("blocking_before_drop", "1"), :facts_contradictory},
+              {"an unexcluded backend", v2_with("backends_before_drop", "2"),
+               :facts_contradictory},
+              {"a present database", v2_with("database_absent_after_drop", "false"),
+               :facts_contradictory}
+            ] ++
+              for(
+                key <- ~w(drop_protocol backends_before_drop blocking_before_drop
+                            excluded_before_drop drain_attempts database_absent_after_drop),
+                do: {"no #{key}", v2_without(key), :facts_missing}
+              ) do
+        assert harness(:verify_drop_receipt, [output]) == {:error, reason}, label
+      end
+    end
+
+    test "the v2 facts are recorded beside the v1 pair; a v1 receipt records none of them" do
+      sfx = suffix()
+      {runner, _steps} = stub("sdr_agent_test" <> sfx, %{drop: {:ok, "noise\n" <> @v2}})
+
+      assert {{:ok, _}, receipts} =
+               Harness.prove_with_receipts(
+                 suffix: sfx,
+                 tmp_root: tmp_root(),
+                 versions: @versions,
+                 runner: runner
+               )
+
+      facts = Map.new(receipts)
+      assert length(receipts) == map_size(facts), "one fact per key"
+
+      assert Map.take(facts, ~w(cleanup.drop_receipt cleanup.drop_result cleanup.drop_protocol
+                               cleanup.backends_before_drop cleanup.blocking_before_drop
+                               cleanup.excluded_before_drop cleanup.drain_attempts
+                               cleanup.database_absent_after_drop)) == %{
+               "cleanup.drop_receipt" => "valid",
+               "cleanup.drop_result" => "ok",
+               "cleanup.drop_protocol" => "2",
+               "cleanup.backends_before_drop" => "1",
+               "cleanup.blocking_before_drop" => "0",
+               "cleanup.excluded_before_drop" => "1",
+               "cleanup.drain_attempts" => "2",
+               "cleanup.database_absent_after_drop" => "true"
+             }
+
+      assert Harness.drop_facts(@v2)["excluded_before_drop"] == "1"
+
+      sfx = suffix()
+      {runner, _steps} = stub("sdr_agent_test" <> sfx)
+
+      assert {{:ok, _}, receipts} =
+               Harness.prove_with_receipts(
+                 suffix: sfx,
+                 tmp_root: tmp_root(),
+                 versions: @versions,
+                 runner: runner
+               )
+
+      for key <- ~w(cleanup.drop_protocol cleanup.blocking_before_drop
+                    cleanup.excluded_before_drop cleanup.drain_attempts) do
+        refute Map.has_key?(Map.new(receipts), key), key
+      end
     end
   end
 

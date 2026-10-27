@@ -1928,6 +1928,106 @@ defmodule SdrAgent.Agents.ReleaseMigrationHarnessTest do
     end
   end
 
+  ## RED-8 (Codex db034af6 F1, F2 and the output-size wording)
+
+  defp classify_raise(facts) do
+    classify(facts)
+  rescue
+    error in ArgumentError -> error
+  end
+
+  describe "the campaign exit taxonomy: distinct canonical targets, consistent effects" do
+    test "duplicate target names are refused, identical or contradictory" do
+      a = target("sdr_agent_test_rm0", true, :dropped)
+
+      for {label, targets} <- [
+            {"identical", [a, a]},
+            {"contradictory", [a, target("sdr_agent_test_rm0", true, :retained)]},
+            {"contradictory ownership", [a, target("sdr_agent_test_rm0", false, :foreign)]},
+            {"a repeat among four", @disposed ++ [Enum.at(@disposed, 2)]}
+          ] do
+        raised = classify_raise(campaign_facts(true, :pass, :complete, targets))
+        assert match?(%ArgumentError{}, raised), "#{label}: #{inspect(raised)}"
+      end
+    end
+
+    test "an empty or noncanonical target name is refused; a canonical one is accepted" do
+      for name <- [
+            "",
+            " sdr_agent_test_rm0",
+            "sdr_agent_test_rm0 ",
+            "sdr_agent_test_rm0\n",
+            "SDR_agent_test_rm0",
+            "sdr-agent-test",
+            "sdr agent test",
+            "1sdr_agent_test",
+            String.duplicate("a", 64)
+          ] do
+        targets = [target(name, true, :dropped)]
+        raised = classify_raise(campaign_facts(true, :pass, :complete, targets))
+        assert match?(%ArgumentError{}, raised), "#{inspect(name)}: #{inspect(raised)}"
+      end
+
+      longest = [target(String.duplicate("a", 63), true, :dropped)]
+      assert match?(%{rc: 0}, classify(campaign_facts(true, :pass, :complete, longest)))
+    end
+
+    test "no effect cannot coexist with a positively owned target, and cannot reach rc 0" do
+      for {label, targets} <- [
+            {"owned and dropped", [target("sdr_agent_test_rm0", true, :dropped)]},
+            {"owned and retained", [target("sdr_agent_test_rm0", true, :retained)]},
+            {"owned and uncertain", [target("sdr_agent_test_rm0", true, :uncertain)]},
+            {"all four disposed", @disposed}
+          ],
+          {test, evidence} <- [{:pass, :complete}, {:not_run, :incomplete}] do
+        raised = classify_raise(campaign_facts(false, test, evidence, targets))
+        assert match?(%ArgumentError{}, raised), "#{label} #{test}: #{inspect(raised)}"
+      end
+
+      # Unknown ownership is not a positive record: it keeps every lease.
+      unknown =
+        List.replace_at(@not_created, 1, target("sdr_agent_test_rm0_demo", :unknown, :uncertain))
+
+      result = classify(campaign_facts(false, :not_run, :incomplete, unknown))
+      assert match?(%{rc: 5, leases: :keep}, result), inspect(result)
+      assert result.targets == unknown
+    end
+  end
+
+  describe "the evidence's child output: 64 KiB in total, the marker included" do
+    test "over the limit, the first and last 32,736 bytes and the elided count; at it, whole" do
+      sfx = suffix()
+      root = tmp_root()
+      evidence = evidence_path()
+      big = String.duplicate("a", 40_000) <> "MIDDLE" <> String.duplicate("z", 40_000)
+
+      answer = fn
+        {_, :migrate, "up", "20261016052435"} -> {:ok, big}
+        {_, :probe, "up", _} -> {:ok, String.duplicate("b", 65_536)}
+        {_, :probe, "up_again", _} -> {:ok, String.duplicate("c", 65_537)}
+        _call -> :default
+      end
+
+      stub = stub(recorder(), :primary, "sdr_agent_test" <> sfx, with_fixtures(root, sfx, answer))
+      outcome = prove(opts(sfx, stub, root, @lineage, evidence_dir: evidence))
+      assert match?({:ok, _}, outcome), inspect(outcome)
+      read = &File.read!(Path.join([evidence, "children", &1 <> ".out"]))
+
+      out = read.("02-migrate-up-20261016052435")
+      assert byte_size(out) <= 65_536
+
+      assert out ==
+               String.duplicate("a", 32_736) <>
+                 "\n[... #{80_006 - 65_472} bytes elided ...]\n" <> String.duplicate("z", 32_736)
+
+      assert read.("05-probe-up") == String.duplicate("b", 65_536), "at the limit: whole"
+
+      assert read.("09-probe-up_again") ==
+               String.duplicate("c", 32_736) <>
+                 "\n[... 65 bytes elided ...]\n" <> String.duplicate("c", 32_736)
+    end
+  end
+
   ## Helpers
 
   # Whether `ast` contains a call to a function named `name` (local or remote).

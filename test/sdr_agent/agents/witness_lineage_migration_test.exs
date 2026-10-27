@@ -47,7 +47,7 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
   @scripts Path.join(@root, "test/support/witness_migration")
   @states ~w(predecessor up down up_again)
   @cleanup_keys ~w(child.drop cleanup.drop_attempted cleanup.drop_mode cleanup.drop_result
-                   cleanup.drop_receipt cleanup.backends_before_drop
+                   cleanup.drop_receipt cleanup.drop_protocol cleanup.blocking_before_drop
                    cleanup.database_absent_after_drop cleanup.temp_folder outcome)
 
   defp suffix, do: "_wm" <> Base.encode16(:crypto.strong_rand_bytes(5), case: :lower)
@@ -208,11 +208,18 @@ defmodule SdrAgent.Agents.WitnessLineageMigrationTest do
              "cleanup.drop_mode" => "normal",
              "cleanup.drop_result" => "ok",
              "cleanup.drop_receipt" => "valid",
-             "cleanup.backends_before_drop" => "0",
+             "cleanup.drop_protocol" => "2",
+             "cleanup.blocking_before_drop" => "0",
              "cleanup.database_absent_after_drop" => "true",
              "cleanup.temp_folder" => "removed",
              "outcome" => "ok"
            }
+
+    # The r7b drain (protocol v2; Codex db034af6 Q6): only exact autovacuum
+    # workers may remain, and they are counted, never reported as zero.
+    assert facts["cleanup.backends_before_drop"] == facts["cleanup.excluded_before_drop"]
+    assert facts["cleanup.backends_before_drop"] =~ ~r/\A(0|[1-9][0-9]{0,5})\z/
+    assert facts["cleanup.drain_attempts"] =~ ~r/\A([1-9]|10)\z/
 
     refute Map.has_key?(facts, "cleanup.temp_folder_retained_reason")
   end
