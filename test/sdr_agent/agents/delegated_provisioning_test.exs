@@ -77,9 +77,13 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
   `claim_nonce` NoSuchInput case is replaced: each of `authorization_sha256`,
   `claim_nonce` and `decision_refs`, with an atom or a string key, as the
   true value, nil or false, is refused as `ProvisioningRefused
-  :inputs_refused`, and likewise through `private_arguments` for any value
-  Ash can cast; false through `private_arguments` is refused by Ash's own
-  argument cast (`InvalidArgument`). Nothing is written in any case.
+  :inputs_refused`, and likewise through `private_arguments` for every
+  value Ash casts and stores: the true value and nil for every name, and
+  false for the two `:string` arguments (`Ash.Type.String` casts the atom
+  false to `"false"`). False for `decision_refs` (`{:array, :string}`)
+  through `private_arguments` is refused by Ash's array cast guard
+  (`InvalidArgument` on `decision_refs`), a baseline cast control. Nothing
+  is written in any case (Codex `7610420a` correction of the false cases).
   """
   use SdrAgent.AuditCase, async: false
 
@@ -644,15 +648,21 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
       end
     end
 
-    # Through private_arguments, a value Ash can cast (the true value, nil)
-    # is stored, so its presence is refused as inputs_refused (the atom-key
-    # true value is the test above).
+    # Through private_arguments Ash casts each value to the argument's
+    # declared type and stores it when the cast succeeds: the true value and
+    # nil for every name, and false for the two :string arguments
+    # (Ash.Type.String casts the atom false to "false", ash 3.37.2
+    # lib/ash/type/string.ex:444-446). A stored value's presence is refused
+    # as inputs_refused (the atom-key true value is the test above).
     for name <- @private,
         {form, value} <- [
           atom_key: :nil_value,
           string_key: :true_value,
-          string_key: :nil_value
-        ] do
+          string_key: :nil_value,
+          atom_key: :false_value,
+          string_key: :false_value
+        ],
+        not (name == :decision_refs and value == :false_value) do
       @tag private_channel: {name, form, value}
       test "a private #{name} through private_arguments (#{form}, #{value}) is refused " <>
              "as inputs_refused",
@@ -673,14 +683,18 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
       end
     end
 
-    # Through private_arguments, false is not a value of these argument
-    # types: Ash's own argument cast refuses it before any change runs
-    # (InvalidArgument on that argument), so it never evades the check.
-    for name <- @private, form <- [:atom_key, :string_key] do
-      @tag private_false: {name, form}
-      test "a private #{name} through private_arguments (#{form}, false) is refused by the cast",
+    # Through private_arguments, false is not a value of decision_refs's
+    # {:array, :string} type: Ash's array cast guard refuses it before any
+    # change runs (InvalidArgument on decision_refs; ash 3.37.2
+    # lib/ash/type/type.ex:1085-1087). A baseline cast control: it is not
+    # evidence that the server's presence check ran.
+    for form <- [:atom_key, :string_key] do
+      @tag private_false: form
+      test "a private decision_refs through private_arguments (#{form}, false) is refused " <>
+             "by the array cast",
            ctx do
-        {name, form} = ctx.private_false
+        name = :decision_refs
+        form = ctx.private_false
         env = provisioning_env!()
         prv = prv(ctx.tenant)
         private_arguments!()
