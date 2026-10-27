@@ -26,6 +26,15 @@ defmodule SdrAgent.Agents.Changes.LinkGateCause do
   Failure → chain head) — or, under the finalizer's verified Prelocked
   context for this run's invocation and this receipt (`prelocked/1`), with
   no lock clause: the finalizer already holds it before the head (G6).
+
+
+  C2* (S3 plan r2 §6; OQ11): for a `:demo_exception` release of an
+  invocation of this run, and only with the stop `:witness_unreconciled`,
+  the cause is instead the Failure that meets the same identity checks
+  (tenant, `reconciliation_required`, subject that invocation, the run's
+  Operation) and is a warning with exactly the message "demo exception not
+  in use" (Recovery's fixed cause). Every withheld release still needs its
+  event's binding.
   """
   use Ash.Resource.Change
 
@@ -40,6 +49,8 @@ defmodule SdrAgent.Agents.Changes.LinkGateCause do
   alias SdrAgent.Operations.Failure
 
   @unreconciled [:witness_missing, :witness_timeout, :store_unreadable, :gate_interrupted]
+  @linkable [:withheld, :demo_exception]
+  @demo_message "demo exception not in use"
 
   @impl true
   def change(changeset, _opts, _context) do
@@ -80,15 +91,15 @@ defmodule SdrAgent.Agents.Changes.LinkGateCause do
     arg = &Ash.Changeset.get_argument(changeset, &1)
     lock = if prelocked(changeset) == :ok, do: nil, else: :for_update
 
-    with {:ok, %{disposition: :withheld} = release} <-
+    with {:ok, %{disposition: disposition} = release} when disposition in @linkable <-
            read(ModelResultRelease, arg.(:release_id), run.tenant_id),
-         true <- category?(release.reason, arg.(:status_reason)),
+         true <- category?(release, arg.(:status_reason)),
          {:ok, invocation} <- read(ModelInvocation, release.model_invocation_id, run.tenant_id),
          true <- invocation.agent_run_id == run.id,
          {:ok, %Failure{} = failure} <-
            read(Failure, arg.(:witness_failure_id), run.tenant_id, lock),
          true <- cause_of?(failure, invocation, run),
-         true <- Binding.bound_cause(release) == {:ok, failure.id} do
+         true <- bound?(release, failure) do
       Ash.Changeset.force_change_attribute(changeset, :attention_failure_id, failure.id)
     else
       _ -> invalid(changeset)
@@ -111,9 +122,18 @@ defmodule SdrAgent.Agents.Changes.LinkGateCause do
 
   defp read(_resource, _id, _tenant_id, _lock), do: :error
 
-  defp category?(:witness_mismatch, :witness_mismatch), do: true
-  defp category?(reason, :witness_unreconciled), do: reason in @unreconciled
-  defp category?(_reason, _stop), do: false
+  defp category?(%{disposition: :demo_exception}, stop), do: stop == :witness_unreconciled
+  defp category?(%{reason: :witness_mismatch}, :witness_mismatch), do: true
+  defp category?(%{reason: reason}, :witness_unreconciled), do: reason in @unreconciled
+  defp category?(_release, _stop), do: false
+
+  # A withheld release binds its cause in its immutable event; a demo row's
+  # only cause is the fixed warning (C2* OQ11), on top of `cause_of?/3`.
+  defp bound?(%{disposition: :withheld} = release, failure),
+    do: Binding.bound_cause(release) == {:ok, failure.id}
+
+  defp bound?(%{disposition: :demo_exception}, failure),
+    do: failure.severity == :warning and failure.message == @demo_message
 
   defp cause_of?(failure, invocation, run) do
     failure.tenant_id == run.tenant_id and failure.class == :reconciliation_required and
