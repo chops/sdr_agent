@@ -23,6 +23,11 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
   full (sentinel included), and on one keep-alive connection the tag of a
   credential-bearing request does not withhold a later ordinary request's
   report, while an ordinary request does not unprotect a later auth one.
+
+  The oracle (Codex R3): each expected report is correlated to the server
+  process that handled the tested connection, and the secrecy assertions
+  scan the complete raw capture — every event received while waiting,
+  matching or not — against one monotonic deadline.
   """
   use SdrAgentWeb.ConnCase, async: false
 
@@ -44,13 +49,15 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
 
     {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
     sentinel = "SENTINEL" <> Integer.to_string(System.unique_integer([:positive]))
-    %{port: port, sentinel: sentinel, ref: RawLog.start()}
+    %{server: server, port: port, sentinel: sentinel, ref: RawLog.start()}
   end
 
   # --- raw HTTP/1.1 over one socket ------------------------------------
 
-  defp exchange(port, requests) do
-    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+  # Sends `requests` in order on one connection; returns their statuses and
+  # the server process that handled the connection (to correlate reports).
+  defp exchange(ctx, requests) do
+    {socket, pid} = open(ctx)
 
     responses =
       for request <- requests do
@@ -59,7 +66,28 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
       end
 
     :gen_tcp.close(socket)
-    responses
+    {responses, pid}
+  end
+
+  # A new connection and its server-side handler process.
+  defp open(ctx) do
+    {:ok, before} = ThousandIsland.connection_pids(ctx.server)
+    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", ctx.port, [:binary, active: false])
+    {socket, handler(ctx.server, before, System.monotonic_time(:millisecond) + 2_000)}
+  end
+
+  defp handler(server, before, deadline) do
+    {:ok, pids} = ThousandIsland.connection_pids(server)
+
+    case pids -- before do
+      [pid] ->
+        pid
+
+      _none_yet ->
+        assert System.monotonic_time(:millisecond) < deadline, "no handler for the connection"
+        Process.sleep(10)
+        handler(server, before, deadline)
+    end
   end
 
   defp read_response(socket, acc) do
@@ -95,24 +123,39 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
 
   # --- assertions on raw events ----------------------------------------
 
-  # A credential-bearing request's report: emitted, withheld, sentinel-free.
-  defp assert_withheld(ctx) do
-    event = RawLog.await_error(ctx.ref, :bandit)
-    assert event, "no error report was emitted"
-    Process.sleep(200)
-    events = [event | RawLog.drain(ctx.ref)]
+  # The error report of the connection handled by `pid` (one deadline); the
+  # complete capture so far is kept for the secrecy checks.
+  defp report_of(ctx, pid) do
+    event = RawLog.await(ctx.ref, &(RawLog.error?(&1) and &1.meta[:pid] == pid))
+    assert event, "no error report from the tested connection was emitted"
+    event
+  end
 
-    leaking = Enum.filter(events, &RawLog.contains?(&1, ctx.sentinel))
-    assert leaking == [], "the sentinel is in #{length(leaking)} raw event(s)"
+  # No secret anywhere in the complete capture, message or metadata.
+  defp assert_absent(ctx, secrets) do
+    captured = RawLog.settle(ctx.ref, 200)
+
+    for secret <- secrets do
+      leaking = Enum.filter(captured, &RawLog.contains?(&1, secret))
+
+      assert leaking == [],
+             "a secret is in #{length(leaking)} of #{length(captured)} raw event(s)"
+    end
+  end
+
+  # A credential-bearing request's report: emitted, withheld, secret-free.
+  defp assert_withheld(ctx, pid, secrets \\ []) do
+    event = report_of(ctx, pid)
+    assert_absent(ctx, [ctx.sentinel | secrets])
     assert RawLog.rendered(event) == @withheld
   end
 
   # An ordinary request's report: emitted in full (positive control).
-  defp assert_reported(ctx) do
-    event = RawLog.await_error(ctx.ref, :bandit)
-    assert event, "no error report was emitted"
+  defp assert_reported(ctx, pid) do
+    event = report_of(ctx, pid)
     assert RawLog.contains?(event, ctx.sentinel)
     refute RawLog.rendered(event) == @withheld
+    event
   end
 
   defp malformed_json(sentinel), do: ~s({"user": {"email": "x", "password": "#{sentinel}")
@@ -131,17 +174,17 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
     # The accept phase reads `user` as a map; a string crashes it
     # (FunctionClauseError in Access.get/3, the sentinel among its arguments).
     query = "token=#{ctx.sentinel}&user=#{ctx.sentinel}"
-    assert [500] = exchange(ctx.port, [raw_get("/auth/user/magic_link?" <> query)])
-    assert_withheld(ctx)
+    assert {[500], pid} = exchange(ctx, [raw_get("/auth/user/magic_link?" <> query)])
+    assert_withheld(ctx, pid)
   end
 
   # --- I1: before the router reaches the auth routes ---------------------
 
   test "a body-parser failure on an auth path is reported withheld, any spelling", ctx do
     for path <- ["/auth/user/password/sign_in", "/%61uth/user/password/sign_in"] do
-      assert [status] = exchange(ctx.port, [parser_failure(path, ctx.sentinel)])
+      assert {[status], pid} = exchange(ctx, [parser_failure(path, ctx.sentinel)])
       assert status in [400, 500]
-      assert_withheld(ctx)
+      assert_withheld(ctx, pid)
     end
   end
 
@@ -155,46 +198,45 @@ defmodule SdrAgentWeb.AuthErrorBoundaryTest do
         body
       )
 
-    assert [403] = exchange(ctx.port, [request])
-    assert_withheld(ctx)
+    assert {[403], pid} = exchange(ctx, [request])
+    assert_withheld(ctx, pid)
   end
 
   test "a content-negotiation failure on a confirmation path is reported withheld", ctx do
     for prefix <- ["magic_link", "%6dagic_link"] do
       request = raw_get("/#{prefix}/#{ctx.sentinel}", "accept: application/json\r\n")
-      assert [406] = exchange(ctx.port, [request])
-      assert_withheld(ctx)
+      assert {[406], pid} = exchange(ctx, [request])
+      assert_withheld(ctx, pid)
     end
   end
 
   # --- positive controls and process reuse -------------------------------
 
   test "the same parser failure on an ordinary path is reported in full", ctx do
-    assert [status] = exchange(ctx.port, [parser_failure("/leads", ctx.sentinel)])
+    assert {[status], pid} = exchange(ctx, [parser_failure("/leads", ctx.sentinel)])
     assert status in [400, 500]
 
-    assert_reported(ctx)
+    assert_reported(ctx, pid)
   end
 
   test "on one connection, an auth request's tag does not withhold a later ordinary report",
        ctx do
-    assert [200, status] =
-             exchange(ctx.port, [
+    assert {[200, status], pid} =
+             exchange(ctx, [
                raw_get("/magic_link/not-a-real-token"),
                parser_failure("/leads", ctx.sentinel)
              ])
 
     assert status in [400, 500]
-
-    assert_reported(ctx)
+    assert_reported(ctx, pid)
   end
 
   test "on one connection, an ordinary request does not unprotect a later auth crash", ctx do
     query = "token=#{ctx.sentinel}&user=#{ctx.sentinel}"
 
-    assert [200, 500] =
-             exchange(ctx.port, [raw_get("/health"), raw_get("/auth/user/magic_link?" <> query)])
+    assert {[200, 500], pid} =
+             exchange(ctx, [raw_get("/health"), raw_get("/auth/user/magic_link?" <> query)])
 
-    assert_withheld(ctx)
+    assert_withheld(ctx, pid)
   end
 end

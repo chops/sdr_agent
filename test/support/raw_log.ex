@@ -6,8 +6,15 @@ defmodule SdrAgent.TestSupport.RawLog do
   test process. Assertions then see exactly what any handler would receive,
   not only what the console formatter happens to print.
 
+  The capture is complete and append-only (Codex R3): every event received
+  while waiting (`await/3`, `await_error/3`, `settle/2`) is kept, matching
+  or not, and `drain/1` returns all of them plus any still in the mailbox,
+  in arrival order. A wait runs against one monotonic deadline, however
+  many unrelated events arrive. Waits can be correlated to one process
+  (`await/3` with a predicate on `meta.pid`).
+
   The handler is removed when the test exits. Events of every process are
-  forwarded; tests correlate by a unique sentinel and by metadata.
+  forwarded; tests correlate by process and by a unique sentinel.
   """
 
   @error_levels [:emergency, :alert, :critical, :error]
@@ -17,6 +24,7 @@ defmodule SdrAgent.TestSupport.RawLog do
   def start do
     ref = make_ref()
     id = :"sdr_raw_log_#{System.unique_integer([:positive])}"
+    Process.put({__MODULE__, ref}, [])
     :ok = :logger.add_handler(id, __MODULE__, %{level: :all, config: %{pid: self(), ref: ref}})
     ExUnit.Callbacks.on_exit(fn -> :logger.remove_handler(id) end)
     ref
@@ -29,32 +37,60 @@ defmodule SdrAgent.TestSupport.RawLog do
     :ok
   end
 
+  @doc "Whether `event` is at error level or above."
+  @spec error?(map()) :: boolean()
+  def error?(%{level: level}), do: level in @error_levels
+  def error?(_event), do: false
+
   @doc """
-  Waits up to `timeout` ms for an error-or-higher event whose metadata
-  `domain` includes `domain` (Elixir's Logger prepends `:elixir`); returns
-  it, or nil.
+  Waits until `deadline_ms` from now (one monotonic deadline) for an event
+  matching `pred`; returns it, or nil. Every event received meanwhile is
+  kept in the capture.
   """
-  @spec await_error(reference(), atom(), timeout()) :: map() | nil
-  def await_error(ref, domain, timeout \\ 3_000) do
-    receive do
-      {^ref, %{level: level, meta: meta} = event} when level in @error_levels ->
-        if domain in List.wrap(Map.get(meta, :domain)),
-          do: event,
-          else: await_error(ref, domain, timeout)
-    after
-      timeout -> nil
-    end
+  @spec await(reference(), (map() -> boolean()), non_neg_integer()) :: map() | nil
+  def await(ref, pred, timeout \\ 3_000) do
+    do_await(ref, pred, System.monotonic_time(:millisecond) + timeout)
   end
 
-  @doc "Every event received so far for `ref` (drains the mailbox of them)."
+  @doc "`await/3` for an error-or-higher event whose `domain` includes `domain`."
+  @spec await_error(reference(), atom(), non_neg_integer()) :: map() | nil
+  def await_error(ref, domain, timeout \\ 3_000) do
+    await(ref, &(error?(&1) and domain in List.wrap(&1.meta[:domain])), timeout)
+  end
+
+  @doc "Keeps every event received within the next `ms` (one deadline); returns the complete capture."
+  @spec settle(reference(), non_neg_integer()) :: [map()]
+  def settle(ref, ms) do
+    _ = do_await(ref, fn _event -> false end, System.monotonic_time(:millisecond) + ms)
+    drain(ref)
+  end
+
+  @doc "The complete capture: every kept event plus those still in the mailbox, in arrival order."
   @spec drain(reference()) :: [map()]
   def drain(ref) do
     receive do
-      {^ref, event} -> [event | drain(ref)]
+      {^ref, event} ->
+        keep(ref, event)
+        drain(ref)
     after
-      0 -> []
+      0 -> ref |> buffer() |> Enum.reverse()
     end
   end
+
+  defp do_await(ref, pred, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^ref, event} ->
+        keep(ref, event)
+        if pred.(event), do: event, else: do_await(ref, pred, deadline)
+    after
+      remaining -> nil
+    end
+  end
+
+  defp keep(ref, event), do: Process.put({__MODULE__, ref}, [event | buffer(ref)])
+  defp buffer(ref), do: Process.get({__MODULE__, ref}, [])
 
   @doc "Whether `event`'s message or metadata contains `secret` anywhere."
   @spec contains?(map(), String.t()) :: boolean()
