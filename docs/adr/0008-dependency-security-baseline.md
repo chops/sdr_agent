@@ -706,3 +706,62 @@ The fresh full gate at this addendum's head (re-pinned claim and driver, one con
 execution ACK and reservation, one run), including the focused tests of addendum 1 and the suite's
 authentication tests; then hosted CI and exact-head review. Earlier measured results stay at their own
 heads. Entity Model trigger: no (dependency versions only).
+
+## Addendum 3 (2026-10-27, proposed): a timeout classification the first upgraded full suite found
+
+Status: proposed. The amendment (D-215), addendum 1 (D-217) and addendum 2 (D-220, accepted at commit
+`4343dbef1e19e35a8e180c9219b7a2dd3a177083`, file SHA256
+`b52076b9cba0eaad41bd5a8527b6ffb67436f7f66e0d058ea855620d223bd784`) are unchanged byte for byte above.
+This addendum is accepted only at its own exact commit and file hash, under D-219 once its exact text has
+passed static review.
+
+### What the gate found
+
+The first full suite on the dependency set of the amendment ran as gate `c2-20261027T041604Z-15736`
+through the standing lane runner (D-221; 04:16:04Z to 04:38:25Z). The six steps before any database
+effect passed, including a clean `mix hex.audit`. The suite ended `FAIL step=precommit` with 3226 of 3228
+passed. Both failures were in `SdrAgent.Inbox.CountLockTest` (`count_lock_test.exs:74` and `:100`): a
+statement cancelled by the read's `SET LOCAL statement_timeout` returned `:producer_error` instead of
+`:timeout`, at the deadline. The same two failed when the file ran alone.
+
+A structural diagnostic in a scratch worktree recorded only module names, field names and fixed booleans.
+It showed the error reaching `SdrAgent.ReadDeadline.classify/1` as `Ash.Error.Unknown` with
+`errors: [Ash.Error.Unknown.UnknownError{error: <string>}]`, and once as an `Ash.Query` whose `errors`
+list holds that `UnknownError`. The string begins exactly with
+`** (Postgrex.Error) ERROR 57014 (query_canceled) canceling statement due to statement timeout`.
+`splode` 0.3.2 and `postgrex` 0.22.4 are unchanged, so the new shape comes with `ash` 3.37, `ash_postgres`
+2.15 and `ash_sql` 0.8: their data layer passes the Postgrex error through `Ash.Error.to_ash_error`, and
+`Splode.to_error/2` formats an exception it does not recognise into that string field. The classifier
+recognised only the `Postgrex.Error` struct, directly or nested.
+
+The gate's main lane database was retained at disposal because one backend was still connected, so lane c2
+is quarantined. Its disposal follows a separate, reviewed one-time procedure.
+
+### What changes
+
+- Commit `956ddad553ea7d11fee9ae79fce3db136c034682` adds `test/sdr_agent/read_deadline_classify_test.exs`:
+  eight unit cases. They cover the struct path, the wrapped head inside `Ash.Error.Unknown` and inside a
+  query's `errors` list, and five near-misses that stay `:producer_error`: a user-requested cancellation,
+  the phrase anywhere but at the head, unrelated text mentioning 57014, a non-string error field, and
+  Forbidden precedence.
+- Commit `1a3213888ecc5af95daab47145ec1877dabd1d07` adds one clause to `ReadDeadline.timeout?/1`: an
+  `UnknownError` whose string `error` starts with that exact head is a timeout; every other string stays
+  `:producer_error`. The struct path, the deadlines, the single query with no retry, and the restoration of
+  connection settings are unchanged.
+- The string match is narrower than the struct path. The struct path treats every `query_canceled` as a
+  timeout, while the string path accepts only the statement-timeout message. `ReadDeadline` issues no user
+  cancellation, so the narrower match restores the observed contract without widening it.
+- No dependency, pin, lock, migration or other application change.
+
+### Verification
+
+- RED at `956ddad5` (run `c7-20261027T045240Z-9638`): 4 failures, the two wrapped-head cases and the two
+  `CountLockTest` cases, with 9 passing.
+- GREEN at `1a321388` (run `c7-20261027T045343Z-17403`): 13 passed, both lane databases dropped, and the
+  final manifest verifies.
+- Then: static review of this addendum and the code delta, its D-219 acceptance row, and one fresh full
+  gate at this addendum's head on a fresh lane through the standing runner; then hosted CI and exact-head
+  review.
+
+Entity Model trigger: no. This is an internal error normalization restoring the existing timeout contract;
+no persisted entity, attribute, policy, action or event contract changes.
