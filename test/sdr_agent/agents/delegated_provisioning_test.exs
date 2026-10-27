@@ -1,0 +1,722 @@
+defmodule SdrAgent.Agents.DelegatedProvisioningTest do
+  @moduledoc """
+  C2* S2 RED-2 (plan r1 `claude-c2star-s2-provisioning-plan-r1.md` §2
+  AC1/AC3/AC5, §4.3, §5 and §7 rows 3-6; Codex plan/entity PASS `aa42492e`
+  with its binding OQ rulings; the GREEN-1 PASS at `a208a05a`, which moved
+  AC1 here; ADR-0004 agent-environment items 4 and 9): the grant
+  provisioner (PRV) and the one creating action `ModelCallGrant
+  :provision_delegated`, through `SdrAgent.Agents.provision_delegated_grant/2`.
+
+    * **actor (AC1):** `:grant_provisioner` is an `SdrAgent.Actor` type and
+      an audit event actor type.
+    * **create (T-G1):** PRV, attested in a configured agent environment,
+      provisions exactly the registry entry's terms and allocations as a
+      `:delegated` grant with no users (OQ2: `name` = the id, `purpose` the
+      fixed template), with one `model.grant.provisioned` event carrying
+      the id, digest, claim nonce and decision refs, and allocation events
+      by PRV. Control: the owner-form `create_grant/2` is unchanged.
+    * **refusals (T-G2):** every other actor, and PRV without an
+      attestation, attested for another id, outside the agent environment,
+      of another tenant, for an unknown id or on a bare action call, is
+      `Forbidden` (audited where the call is guarded). An expired or
+      invalid entry, an extra input, a supplied private argument, a live
+      database oid other than the binding's (T-B3, S2 half) and another
+      authorization already provisioned (OQ8) are a typed
+      `ProvisioningRefused`. Nothing is written. Inside an attestation PRV
+      still cannot create, change or release a grant.
+    * **replay (T-V7, action level):** an identical second call returns the
+      same grant marked `:sdr_replayed` and writes nothing; a changed entry
+      under the same id is `:grant_conflict`, never a repair; a revoked
+      grant is returned revoked (OQ9).
+    * **revoke (T-G4):** PRV revokes with no updater, a current admin with
+      herself as updater; both bump the revision and record the real actor.
+      PRV never revokes an owner-form grant, even through a forged struct
+      (the post-lock check). A revoked delegated grant funds no reservation.
+    * **terms (AC5):** `:update_terms` and `:release_allocation` of a
+      delegated grant are `Forbidden` for every actor, configured or inert,
+      and through a forged owner-form struct (`RequireOwnerForm`, after the
+      lock). These run on an SQL-level delegated stand-in
+      (`delegated_row!/2`), so the admin cases observe today's code.
+
+  Every registry entry is synthetic (`SdrAgent.Test.AgentEnvGrantFixtures`):
+  not a cap, not a decision row, never authority. No model, provider or
+  network is used; files are private fixture roots.
+
+  RED: the actor type, the action, `provision_delegated_grant/2` and
+  `SdrAgent.AgentEnv.Provisioning` do not exist, so most tests stop at an
+  explicit `c2star-s2:` presence guard after their fixtures (structural).
+  The admin AC5 cases run today's update and release routes (behavioural).
+  The two owner-form controls pass now and after GREEN.
+  """
+  use SdrAgent.AuditCase, async: false
+
+  import SdrAgent.Test.AgentEnvGrantFixtures
+
+  alias Ash.Error.Forbidden
+  alias Ash.Error.Invalid
+  alias Ash.Error.Invalid.NoSuchInput
+  alias Ash.Resource.Info
+  alias SdrAgent.Actor
+  alias SdrAgent.AgentEnv.Registry
+  alias SdrAgent.Agents
+  alias SdrAgent.Agents.Admission.Refused
+  alias SdrAgent.Agents.ModelCallGrant
+  alias SdrAgent.AgentsFixtures
+  alias SdrAgent.Audit.AuditEvent
+  alias SdrAgent.Clock
+  alias SdrAgent.Test.AgentEnvFixtures
+
+  @moduletag :c2star_s2
+
+  @terms [
+    :name,
+    :purpose,
+    :profile_ids,
+    :total_attempts,
+    :per_utc_day_attempts,
+    :starts_at,
+    :expires_at
+  ]
+  @allocation_terms [:key, :applies_to, :attempts, :available_from, :available_until]
+  @private [:authorization_sha256, :claim_nonce, :decision_refs]
+
+  setup do
+    Clock.freeze(now())
+    on_exit(&Clock.unfreeze/0)
+    tenant = bootstrap!()
+    %{tenant: tenant, admin: human(:admin, tenant)}
+  end
+
+  defp provisioning(_ctx), do: %{env: provisioning_env!()}
+
+  ## Helpers
+
+  defp purpose(entry) do
+    "Delegated agent-environment authorization #{entry.id} " <>
+      "(agentenv-1; #{Enum.join(entry.decision_refs, ", ")})"
+  end
+
+  defp entry_terms(entry) do
+    %{
+      name: entry.id,
+      purpose: purpose(entry),
+      profile_ids: entry.profile_ids,
+      total_attempts: entry.total_attempts,
+      per_utc_day_attempts: entry.per_utc_day_attempts,
+      starts_at: entry.starts_at,
+      expires_at: entry.expires_at
+    }
+  end
+
+  defp allocation_terms(allocations) do
+    allocations |> Enum.map(&Map.take(&1, @allocation_terms)) |> Enum.sort_by(& &1.key)
+  end
+
+  defp owner_attrs(overrides \\ %{}) do
+    Map.merge(
+      %{
+        name: "G-OWNER",
+        purpose: "Owner-form control",
+        profile_ids: [:claude_cli_opus],
+        total_attempts: 4,
+        starts_at: ~U[2026-10-27 00:00:00.000000Z],
+        expires_at: ~U[2026-10-31 00:00:00.000000Z],
+        allocations: [
+          %{key: :b1, applies_to: [:b1], attempts: 2},
+          %{
+            key: :workshop,
+            applies_to: [:b1],
+            attempts: 2,
+            available_from: ~U[2026-10-30 00:00:00.000000Z]
+          }
+        ]
+      },
+      overrides
+    )
+  end
+
+  # An owner-form grant, created by the current admin with no agent
+  # environment configured (the only route that may create one).
+  defp owner_grant!(ctx) do
+    result = inert(fn -> Agents.create_grant(owner_attrs(), actor: ctx.admin) end)
+    assert match?({:ok, %ModelCallGrant{}}, result), "fixture: owner grant: #{inspect(result)}"
+    elem(result, 1)
+  end
+
+  defp delegated(tenant) do
+    Enum.filter(grants(), &(&1.tenant_id == tenant.id and &1.provisioning == :delegated))
+  end
+
+  defp assert_nothing_provisioned(ctx, label) do
+    assert delegated(ctx.tenant) == [], "c2star-s2: #{label}: a delegated grant was written"
+    assert allocations() == [], "c2star-s2: #{label}: an allocation was written"
+
+    assert events_of_type(ctx.tenant, "model.grant.provisioned") == [],
+           "c2star-s2: #{label}: a model.grant.provisioned event was appended"
+  end
+
+  defp assert_forbidden(result, label) do
+    assert match?({:error, %Forbidden{}}, result),
+           "c2star-s2: #{label}: expected Forbidden, got " <>
+             inspect(result, limit: 8, printable_limit: 400)
+  end
+
+  defp assert_refused(result, reason, label) do
+    assert refused?(result, reason),
+           "c2star-s2: #{label}: expected ProvisioningRefused #{inspect(reason)}, got " <>
+             inspect(result, limit: 8, printable_limit: 400)
+  end
+
+  defp denials(ctx), do: length(events_of_type(ctx.tenant, "authz.denied"))
+
+  # The raw action, as a caller could build it: for the input and
+  # private-argument refusals, which the domain API cannot express.
+  defp raw_provision(id, actor, extra, opts) do
+    ModelCallGrant
+    |> Ash.Changeset.for_create(
+      :provision_delegated,
+      Map.merge(%{authorization_id: id}, extra),
+      [actor: actor] ++ opts
+    )
+    |> Ash.create()
+  end
+
+  defp no_such_input?({:error, %Invalid{errors: errors}}),
+    do: Enum.any?(errors, &match?(%NoSuchInput{}, &1))
+
+  defp no_such_input?(_result), do: false
+
+  defp private_arguments! do
+    action = require_action!(ModelCallGrant, :provision_delegated)
+
+    for name <- @private do
+      argument = Enum.find(action.arguments, &(&1.name == name))
+
+      assert argument && argument.public? == false,
+             "c2star-s2: :provision_delegated has no private argument #{inspect(name)}"
+    end
+
+    action
+  end
+
+  defp label(%Actor{type: type}), do: "system actor #{type}"
+  defp label(%{role: role}), do: "human #{role}"
+
+  ## AC1
+
+  describe "the PRV actor (AC1)" do
+    test ":grant_provisioner is a system actor type and an audit event actor type", ctx do
+      assert :grant_provisioner in Actor.types(),
+             "c2star-s2: :grant_provisioner is not an SdrAgent.Actor type (AC1)"
+
+      built =
+        try do
+          {:ok, invoke(Actor, :system, [:grant_provisioner, ctx.tenant.id, prv_id()])}
+        rescue
+          error -> {:raised, error}
+        end
+
+      assert built ==
+               {:ok, %Actor{type: :grant_provisioner, id: prv_id(), tenant_id: ctx.tenant.id}}
+
+      one_of = Info.attribute(AuditEvent, :actor_type).constraints[:one_of]
+
+      assert :grant_provisioner in one_of,
+             "c2star-s2: AuditEvent.actor_type does not accept :grant_provisioner"
+    end
+  end
+
+  ## T-G1
+
+  describe "create (T-G1)" do
+    setup :provisioning
+
+    test "PRV provisions exactly the entry's terms and allocations as a delegated grant", ctx do
+      %{entry: entry, digest: digest} = ctx.env
+      assert Registry.validate(entry) == :ok, "fixture: the synthetic entry must validate"
+
+      result = provision(entry.id, actor: prv(ctx.tenant))
+
+      assert match?({:ok, %ModelCallGrant{}}, result),
+             "c2star-s2: provisioning failed: #{inspect(result, limit: 8, printable_limit: 400)}"
+
+      {:ok, grant} = result
+
+      assert {grant.provisioning, grant.delegated_authorization_id,
+              grant.delegated_authorization_sha256} == {:delegated, entry.id, digest}
+
+      assert {grant.created_by_id, grant.updated_by_id} == {nil, nil}
+      assert {grant.status, grant.revision, grant.revoked_at} == {:active, 1, nil}
+      assert grant.tenant_id == ctx.tenant.id
+      assert Map.take(grant, @terms) == entry_terms(entry)
+      assert allocation_terms(grant.allocations) == allocation_terms(entry.allocations)
+
+      for allocation <- grant.allocations do
+        assert {allocation.profile_id, allocation.released_at, allocation.grant_revision} ==
+                 {nil, nil, 1}
+      end
+
+      assert [stored] = delegated(ctx.tenant)
+      assert stored.id == grant.id
+      assert allocation_terms(stored.allocations) == allocation_terms(entry.allocations)
+    end
+
+    test "one model.grant.provisioned event by PRV, allocation events by PRV, no created event",
+         ctx do
+      %{entry: entry, digest: digest, claim: claim} = ctx.env
+      result = provision(entry.id, actor: prv(ctx.tenant))
+      assert match?({:ok, %ModelCallGrant{}}, result), "c2star-s2: #{inspect(result)}"
+      {:ok, grant} = result
+
+      assert [event] = events_of_type(ctx.tenant, "model.grant.provisioned")
+
+      assert {event.actor_type, event.actor_id, event.subject_id} ==
+               {:grant_provisioner, prv_id(), grant.id}
+
+      assert event.payload["arguments"] == %{
+               "authorization_id" => entry.id,
+               "authorization_sha256" => digest,
+               "claim_nonce" => claim.nonce,
+               "decision_refs" => entry.decision_refs
+             }
+
+      assert event.payload["changes"]["provisioning"] == "delegated"
+      assert event.payload["changes"]["delegated_authorization_sha256"] == digest
+      assert events_of_type(ctx.tenant, "model.grant.created") == []
+
+      allocation_events = events_of_type(ctx.tenant, "model.grant.allocation_created")
+      assert length(allocation_events) == length(entry.allocations)
+
+      for allocation_event <- allocation_events do
+        assert allocation_event.actor_type == :grant_provisioner
+        assert allocation_event.payload["changes"]["grant_id"] == grant.id
+      end
+    end
+
+    test "control: an owner-form create_grant is unchanged outside the agent environment", ctx do
+      result = inert(fn -> Agents.create_grant(owner_attrs(), actor: ctx.admin) end)
+      assert match?({:ok, %ModelCallGrant{}}, result), "control: #{inspect(result)}"
+      {:ok, grant} = result
+
+      assert {grant.provisioning, grant.delegated_authorization_id,
+              grant.delegated_authorization_sha256} == {:owner_form, nil, nil}
+
+      assert {grant.created_by_id, grant.updated_by_id} == {ctx.admin.id, ctx.admin.id}
+      assert [event] = events_of_type(ctx.tenant, "model.grant.created")
+      assert event.actor_id == ctx.admin.id
+    end
+  end
+
+  ## T-G2
+
+  describe "refusals: Forbidden (T-G2)" do
+    setup :provisioning
+
+    test "humans and every system actor but PRV are Forbidden and audited; nothing is written",
+         ctx do
+      humans = for role <- [:admin, :reviewer, :auditor], do: human(role, ctx.tenant)
+
+      systems =
+        for type <- Actor.types() -- [:grant_provisioner],
+            do: Actor.system(type, ctx.tenant.id)
+
+      for actor <- humans ++ systems do
+        before = denials(ctx)
+        assert_forbidden(provision(ctx.env.entry.id, actor: actor), label(actor))
+
+        assert denials(ctx) == before + 1,
+               "c2star-s2: #{label(actor)}: the refusal was not audited (authz.denied)"
+      end
+
+      assert_nothing_provisioned(ctx, "other actors")
+    end
+
+    test "PRV with no claim (no attestation) is Forbidden and audited", ctx do
+      %{entry: entry} = provisioning_env!(claim: false)
+      before = denials(ctx)
+      assert_forbidden(provision(entry.id, actor: prv(ctx.tenant)), "no claim")
+      assert denials(ctx) == before + 1
+      assert_nothing_provisioned(ctx, "no claim")
+    end
+
+    test "PRV attested for one authorization is Forbidden for another registry id", ctx do
+      attested = test_entry()
+      other = test_entry(%{environment_id: "agentenv-2"})
+      provisioning_env!(entry: attested, entries: [attested, other])
+      assert Registry.fetch(other.id) == {:ok, other}, "fixture: the other entry is registered"
+      assert Registry.current() == {:ok, attested}, "fixture: the attested entry is current"
+
+      assert_forbidden(provision(other.id, actor: prv(ctx.tenant)), "another id")
+      assert_nothing_provisioned(ctx, "another id")
+    end
+
+    test "PRV outside the agent environment is Forbidden", ctx do
+      AgentEnvFixtures.unconfigure!()
+      assert_forbidden(provision(ctx.env.entry.id, actor: prv(ctx.tenant)), "unconfigured")
+      assert_nothing_provisioned(ctx, "unconfigured")
+    end
+
+    test "PRV of another tenant is Forbidden", ctx do
+      foreign = prv(Ecto.UUID.generate())
+      assert_forbidden(provision(ctx.env.entry.id, actor: foreign), "another tenant")
+      assert_nothing_provisioned(ctx, "another tenant")
+    end
+
+    test "an unknown authorization id is Forbidden", ctx do
+      assert_forbidden(provision(entry_id("test-s2-unknown"), actor: prv(ctx.tenant)), "unknown")
+      assert_nothing_provisioned(ctx, "unknown id")
+    end
+
+    test "a bare action call outside Provisioning.within/2 is Forbidden", ctx do
+      prv = prv(ctx.tenant)
+      require_action!(ModelCallGrant, :provision_delegated)
+      require_function!(provisioning_module(), :within, 2)
+      assert_forbidden(raw_provision(ctx.env.entry.id, prv, %{}, []), "bare action call")
+      assert_nothing_provisioned(ctx, "bare action call")
+    end
+
+    test "inside an attestation PRV still cannot create, change or release a grant", ctx do
+      owner = owner_grant!(ctx)
+      prv = prv(ctx.tenant)
+
+      results =
+        within(ctx.env.entry.id, fn ->
+          %{
+            create: Agents.create_grant(owner_attrs(%{name: "G-PRV"}), actor: prv),
+            update_terms:
+              Agents.update_grant_terms(owner, %{expected_revision: 1, name: "renamed"},
+                actor: prv
+              ),
+            release_allocation:
+              Agents.release_allocation(owner, %{expected_revision: 1, key: :workshop},
+                actor: prv
+              )
+          }
+        end)
+
+      for {action, result} <- results, do: assert_forbidden(result, "PRV #{action}")
+
+      assert reload!(owner.id).revision == 1
+      assert length(grants()) == 1
+    end
+  end
+
+  describe "refusals: ProvisioningRefused (T-G2)" do
+    test "an expired entry is refused, at its expires_at instant", ctx do
+      env = provisioning_env!()
+      Clock.freeze(env.entry.expires_at)
+
+      result = provision(env.entry.id, actor: prv(ctx.tenant))
+      assert_refused(result, :authorization_expired, "expired")
+      assert_nothing_provisioned(ctx, "expired")
+    end
+
+    test "an invalid entry is refused", ctx do
+      entry =
+        test_entry(%{
+          allocations: [
+            alloc(
+              :rehearsal,
+              2,
+              {~U[2026-10-28 00:00:00.000000Z], ~U[2026-10-29 00:00:00.000000Z]}
+            ),
+            alloc(
+              :daily_use,
+              5,
+              {~U[2026-10-29 00:00:00.000000Z], ~U[2026-10-31 00:00:00.000000Z]}
+            )
+          ]
+        })
+
+      assert Registry.validate(entry) == {:error, :allocations_above_total},
+             "fixture: the entry must break exactly one shape rule"
+
+      provisioning_env!(entry: entry)
+      result = provision(entry.id, actor: prv(ctx.tenant))
+      assert_refused(result, :authorization_invalid, "invalid")
+      assert_nothing_provisioned(ctx, "invalid")
+    end
+
+    test "an extra input is NoSuchInput, inside an attestation", ctx do
+      env = provisioning_env!()
+      prv = prv(ctx.tenant)
+      action = require_action!(ModelCallGrant, :provision_delegated)
+      assert action.accept == [], "c2star-s2: :provision_delegated must accept no attribute"
+
+      assert for(argument <- action.arguments, argument.public?, do: argument.name) ==
+               [:authorization_id]
+
+      extras = [
+        %{total_attempts: 99},
+        %{provisioning: :owner_form},
+        %{delegated_authorization_sha256: env.digest},
+        %{claim_nonce: env.claim.nonce}
+      ]
+
+      for extra <- extras do
+        result = within(env.entry.id, fn -> raw_provision(env.entry.id, prv, extra, []) end)
+
+        assert no_such_input?(result),
+               "c2star-s2: #{inspect(extra)}: expected NoSuchInput, got " <>
+                 inspect(result, limit: 8, printable_limit: 400)
+      end
+
+      assert_nothing_provisioned(ctx, "extra input")
+    end
+
+    test "a supplied private argument is refused, even with the true value", ctx do
+      env = provisioning_env!()
+      prv = prv(ctx.tenant)
+      private_arguments!()
+
+      supplied = [
+        authorization_sha256: env.digest,
+        claim_nonce: env.claim.nonce,
+        decision_refs: env.entry.decision_refs
+      ]
+
+      for {name, value} <- supplied do
+        result =
+          within(env.entry.id, fn ->
+            raw_provision(env.entry.id, prv, %{}, private_arguments: %{name => value})
+          end)
+
+        assert_refused(result, :inputs_refused, "private #{name}")
+      end
+
+      assert_nothing_provisioned(ctx, "private argument")
+    end
+
+    test "a live database oid other than the binding's is refused (T-B3, S2 half)", ctx do
+      {_database, live_oid} = AgentEnvFixtures.live_identity!()
+      env = provisioning_env!(database_oid: live_oid + 1)
+
+      result = provision(env.entry.id, actor: prv(ctx.tenant))
+      assert_refused(result, :binding_mismatch, "oid + 1")
+      assert_nothing_provisioned(ctx, "oid + 1")
+    end
+
+    test "a delegated grant of another authorization in the tenant is refused (OQ8)", ctx do
+      other = delegated_row!(ctx.tenant)
+      env = provisioning_env!()
+      assert other.delegated_authorization_id != env.entry.id
+
+      result = provision(env.entry.id, actor: prv(ctx.tenant))
+      assert_refused(result, :another_authorization_provisioned, "another authorization")
+      assert Enum.map(delegated(ctx.tenant), & &1.id) == [other.id]
+      assert events_of_type(ctx.tenant, "model.grant.provisioned") == []
+    end
+  end
+
+  ## T-V7
+
+  describe "replay (T-V7, action level)" do
+    test "an identical second call returns the same grant and writes nothing", ctx do
+      env = provisioned!()
+      assert Ash.Resource.get_metadata(env.grant, :sdr_replayed) in [nil, false]
+
+      result = provision(env.entry.id, actor: env.prv)
+      assert match?({:ok, %ModelCallGrant{}}, result), "c2star-s2: replay: #{inspect(result)}"
+      {:ok, replayed} = result
+
+      assert replayed.id == env.grant.id
+      assert Ash.Resource.get_metadata(replayed, :sdr_replayed) == true
+      assert length(delegated(ctx.tenant)) == 1
+      assert length(allocations()) == length(env.entry.allocations)
+      assert length(events_of_type(ctx.tenant, "model.grant.provisioned")) == 1
+
+      assert length(events_of_type(ctx.tenant, "model.grant.allocation_created")) ==
+               length(env.entry.allocations)
+    end
+
+    test "a changed entry under the same id is a conflict, never a repair", ctx do
+      env = provisioned!()
+      changed = %{env.entry | total_attempts: 7}
+      assert Registry.validate(changed) == :ok
+      assert Registry.sha256(changed) != env.digest
+
+      # A fresh root, so its claim can name the changed entry's digest.
+      provisioning_env!(entry: changed)
+      result = provision(changed.id, actor: env.prv)
+      assert_refused(result, :grant_conflict, "changed digest")
+
+      stored = reload!(env.grant.id)
+
+      assert {stored.total_attempts, stored.delegated_authorization_sha256, stored.revision} ==
+               {6, env.digest, 1}
+
+      assert length(allocations()) == length(env.entry.allocations)
+      assert length(events_of_type(ctx.tenant, "model.grant.provisioned")) == 1
+    end
+
+    test "a revoked grant is returned revoked, never reactivated (OQ9)", ctx do
+      env = provisioned!()
+      revoked = Agents.revoke_grant(env.grant, %{expected_revision: 1}, actor: ctx.admin)
+      assert match?({:ok, %ModelCallGrant{status: :revoked}}, revoked), inspect(revoked)
+
+      result = provision(env.entry.id, actor: env.prv)
+      assert match?({:ok, %ModelCallGrant{}}, result), "c2star-s2: replay: #{inspect(result)}"
+      {:ok, replayed} = result
+
+      assert {replayed.id, replayed.status, replayed.revision} == {env.grant.id, :revoked, 2}
+      assert Ash.Resource.get_metadata(replayed, :sdr_replayed) == true
+      assert reload!(env.grant.id).status == :revoked
+      assert length(events_of_type(ctx.tenant, "model.grant.provisioned")) == 1
+      assert length(events_of_type(ctx.tenant, "model.grant.revoked")) == 1
+    end
+  end
+
+  ## T-G4
+
+  describe "revoke (T-G4)" do
+    test "PRV revokes a delegated grant: no updater, revision bumped, PRV on the event", ctx do
+      env = provisioned!()
+      result = Agents.revoke_grant(env.grant, %{expected_revision: 1}, actor: env.prv)
+
+      assert match?({:ok, %ModelCallGrant{}}, result),
+             "c2star-s2: PRV revoke: #{inspect(result, limit: 8, printable_limit: 400)}"
+
+      {:ok, grant} = result
+
+      assert {grant.status, grant.revision, grant.revoked_at, grant.updated_by_id} ==
+               {:revoked, 2, now(), nil}
+
+      assert [event] = events_of_type(ctx.tenant, "model.grant.revoked")
+      assert {event.actor_type, event.actor_id} == {:grant_provisioner, prv_id()}
+      assert event.payload["previous"]["revision"] == 1
+    end
+
+    test "a current admin revokes a delegated grant: the admin is the updater", ctx do
+      env = provisioned!()
+      result = Agents.revoke_grant(env.grant, %{expected_revision: 1}, actor: ctx.admin)
+
+      assert match?({:ok, %ModelCallGrant{}}, result),
+             "c2star-s2: admin revoke: #{inspect(result)}"
+
+      {:ok, grant} = result
+
+      assert {grant.status, grant.revision, grant.updated_by_id} ==
+               {:revoked, 2, ctx.admin.id}
+
+      assert [event] = events_of_type(ctx.tenant, "model.grant.revoked")
+      assert {event.actor_type, event.actor_id} == {:user, ctx.admin.id}
+    end
+
+    test "PRV cannot revoke an owner-form grant, even through a forged struct", ctx do
+      env = provisioning_env!()
+      owner = owner_grant!(ctx)
+      prv = prv(ctx.tenant)
+
+      forged = %{
+        owner
+        | provisioning: :delegated,
+          delegated_authorization_id: env.entry.id,
+          delegated_authorization_sha256: env.digest,
+          created_by_id: nil,
+          updated_by_id: nil
+      }
+
+      for {label, grant} <- [plain: owner, forged: forged] do
+        assert_forbidden(
+          Agents.revoke_grant(grant, %{expected_revision: 1}, actor: prv),
+          "PRV revoke #{label} owner-form"
+        )
+      end
+
+      stored = reload!(owner.id)
+      assert {stored.status, stored.revision, stored.provisioning} == {:active, 1, :owner_form}
+      assert events_of_type(ctx.tenant, "model.grant.revoked") == []
+    end
+
+    test "a revoked delegated grant funds no reservation", ctx do
+      env = provisioned!()
+      revoked = Agents.revoke_grant(env.grant, %{expected_revision: 1}, actor: ctx.admin)
+      assert match?({:ok, %ModelCallGrant{status: :revoked}}, revoked), inspect(revoked)
+
+      result =
+        inert(fn ->
+          %{run: run, agent: agent} =
+            AgentsFixtures.running_run(ctx.tenant, usage_origin: :assignment)
+
+          SdrAgent.AdmissionFixtures.admitting(fn ->
+            Agents.reserve_model_invocation(run, AgentsFixtures.claude_attrs("revoked-delegated"),
+              actor: agent
+            )
+          end)
+        end)
+
+      assert match?({:error, %Refused{reason: :no_eligible_grant}}, result),
+             "c2star-s2: expected :no_eligible_grant, got #{inspect(result, limit: 6)}"
+    end
+  end
+
+  ## AC5
+
+  defp assert_terms_refused(grant, actor, label) do
+    assert_forbidden(
+      Agents.update_grant_terms(grant, %{expected_revision: 1, name: "renamed"}, actor: actor),
+      "#{label}: update_terms"
+    )
+
+    assert_forbidden(
+      Agents.release_allocation(grant, %{expected_revision: 1, key: :daily_use}, actor: actor),
+      "#{label}: release_allocation"
+    )
+  end
+
+  defp assert_unchanged(ctx) do
+    stored = reload!(ctx.row.id)
+
+    assert {stored.name, stored.revision, stored.status, stored.updated_by_id} ==
+             {ctx.row.name, 1, :active, nil}
+
+    assert Enum.all?(stored.allocations, &is_nil(&1.released_at))
+    assert events_of_type(ctx.tenant, "model.grant.terms_changed") == []
+    assert events_of_type(ctx.tenant, "model.grant.allocation_released") == []
+  end
+
+  describe "delegated terms are immutable (AC5)" do
+    setup ctx do
+      %{row: delegated_row!(ctx.tenant)}
+    end
+
+    test "a current admin cannot change or release them, inert or configured", ctx do
+      assert_terms_refused(ctx.row, ctx.admin, "admin, inert")
+      assert_unchanged(ctx)
+
+      AgentEnvFixtures.configure!(AgentEnvFixtures.root!("s2"),
+        mode: :run,
+        nonce: AgentEnvFixtures.nonce()
+      )
+
+      assert_terms_refused(ctx.row, ctx.admin, "admin, configured")
+      assert_unchanged(ctx)
+    end
+
+    test "a forged owner-form struct of a delegated row is refused after the lock", ctx do
+      forged = %{
+        ctx.row
+        | provisioning: :owner_form,
+          delegated_authorization_id: nil,
+          delegated_authorization_sha256: nil,
+          created_by_id: ctx.admin.id,
+          updated_by_id: ctx.admin.id
+      }
+
+      assert_terms_refused(forged, ctx.admin, "admin, forged owner-form")
+      assert_unchanged(ctx)
+    end
+
+    test "PRV cannot change or release them", ctx do
+      prv = prv(ctx.tenant)
+
+      AgentEnvFixtures.configure!(AgentEnvFixtures.root!("s2"),
+        mode: :provisioning,
+        nonce: AgentEnvFixtures.nonce()
+      )
+
+      assert_terms_refused(ctx.row, prv, "PRV")
+      assert_unchanged(ctx)
+    end
+  end
+end
