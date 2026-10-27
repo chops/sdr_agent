@@ -27,7 +27,14 @@ defmodule SdrAgent.DemoExceptionFixtures do
       `attempts:`, default 40, at most 200), whose window and single
       allocation fund the policy window. No other grant is created, so the
       reservations it funds are this grant's (`demo_invocation!/3` asserts
-      it);
+      it). `attempts:` raises only this grant and allocation allowance, not
+      the run's own call cap (`max_model_calls` 20, `AgentsFixtures.run_attrs/2`):
+      a case needing more calls than one run allows uses several valid runs
+      under the same grant (for example
+      `AgentsFixtures.operated_run(env.tenant, lead_id: lead_id())` passed as
+      `%{env | run: run, agent: agent, operation: operation}`), or a
+      separately reviewed run-budget fixture change. None of these synthetic
+      allowances is real-call authority;
     * the v3 Opus allowlist entry only (the v4 promotion stays missing),
       the result gate's short test wait, a trusted witness store root, and
       an operated assignment run on the first fixture lead (option
@@ -244,7 +251,9 @@ defmodule SdrAgent.DemoExceptionFixtures do
   completion; `profile:` reserves another real profile (default
   `:claude_cli_opus`); `complete_at:` freezes the calling process's
   clock at that instant after the reservation and before the completion
-  (it stays frozen there); `link?: false` writes no link (the receipt then
+  (it stays frozen there); `calibration: true` reserves with the test-seam
+  calibration admission authority (`SdrAgent.AdmissionFixtures.calibration/0`),
+  which a `:proof` run needs; `link?: false` writes no link (the receipt then
   names none).
   """
   def constructed!(env, purpose \\ :qualification, opts \\ []) do
@@ -334,7 +343,7 @@ defmodule SdrAgent.DemoExceptionFixtures do
 
     {:ok, reserved} =
       SdrAgent.AdmissionFixtures.admitting(fn ->
-        Agents.reserve_model_invocation(env.run, attrs, actor: env.agent)
+        Agents.reserve_model_invocation(env.run, attrs, reserve_opts(env, opts))
       end)
 
     {:ok, sent} = Agents.mark_model_invocation_sent(reserved, actor: env.agent)
@@ -346,6 +355,12 @@ defmodule SdrAgent.DemoExceptionFixtures do
 
     {:ok, done} = Agents.complete_model_invocation(sent, completion, actor: env.agent)
     done
+  end
+
+  defp reserve_opts(env, opts) do
+    if Keyword.get(opts, :calibration, false),
+      do: [actor: env.agent, calibration: SdrAgent.AdmissionFixtures.calibration()],
+      else: [actor: env.agent]
   end
 
   defp link!(invocation, opts) do
