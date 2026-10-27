@@ -173,4 +173,80 @@ defmodule SdrAgentWeb.MagicLinkLoggingTest do
     refute log =~ session_token
     refute log =~ token
   end
+
+  describe "encoded spellings and query forms (Codex P1)" do
+    @spellings [
+      "magic_link",
+      "%6dagic_link",
+      "%6Dagic_link",
+      "m%61gic_link",
+      "%6D%61gic_link",
+      "%6d%61%67%69%63%5f%6c%69%6e%6b"
+    ]
+
+    defp mint(reviewer) do
+      {:ok, token} =
+        AshAuthentication.Strategy.MagicLink.request_token_for(
+          AshAuthentication.Info.strategy!(SdrAgent.Accounts.User, :magic_link),
+          reviewer
+        )
+
+      token
+    end
+
+    # Phoenix.Router URI-decodes path segments before matching, so each
+    # spelling below is served the confirmation page for a live token.
+    for level <- [:info, :debug] do
+      test "every routed spelling of the confirmation path is served, its token unlogged at #{level}",
+           ctx do
+        token = mint(ctx.reviewer)
+
+        log =
+          capture_log([level: unquote(level)], fn ->
+            for prefix <- @spellings do
+              page = get(build_conn(), "/#{prefix}/#{token}")
+              assert html_response(page, 200) =~ ~s(action="/auth/user/magic_link"), prefix
+            end
+
+            get(build_conn(), "/sign-in")
+          end)
+
+        # Positive control: an ordinary request line is logged at this level.
+        assert log =~ "GET /sign-in"
+        refute log =~ token
+        refute log =~ "agic_link/"
+      end
+    end
+
+    test "the auth routes' query forms log no token at :debug", ctx do
+      token = mint(ctx.reviewer)
+      sentinel = "SENTINEL" <> Integer.to_string(System.unique_integer([:positive]))
+
+      log =
+        capture_log([level: :debug], fn ->
+          # The accept phase's ?token= (its page POSTs the token).
+          assert build_conn() |> get("/auth/user/magic_link?token=#{sentinel}") |> response(200)
+
+          # The sign-in phase's query and nested forms (refused: not a live token).
+          for query <- ["token=#{sentinel}", "user[token]=#{sentinel}"] do
+            signed = post(build_conn(), "/auth/user/magic_link?" <> query, %{})
+            assert redirected_to(signed) == "/sign-in"
+          end
+
+          # The confirmation view's alternate `magic_link` param, and a
+          # token query on an encoded spelling.
+          for path <- [
+                "/magic_link/#{token}?magic_link=#{sentinel}",
+                "/%6dagic_link/#{token}?token=#{sentinel}"
+              ] do
+            assert build_conn() |> get(path) |> html_response(200)
+          end
+        end)
+
+      assert log =~ "GET /auth/user/magic_link"
+      assert log =~ "Processing with"
+      refute log =~ sentinel
+      refute log =~ token
+    end
+  end
 end
