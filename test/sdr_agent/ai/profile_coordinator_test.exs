@@ -34,9 +34,19 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
   `[:sdr_agent, :model_coordinator, :stage]` (`%{stage: atom, switch_id:
   id | nil}`). No model call: `LaunchAdmission.recording/1` reports every
   launch admission, and none happens during a switch.
+
+  #235: `await_switch!/4`'s observation path, through its injected reader
+  (`await_switch_with!/4`) with a scripted reader and no database in the
+  subject (the module setup still runs). The exact shared-sandbox queue drop
+  CI saw here (run 40460413797) is transient under one deadline; every other
+  error fails on its first read; the matching observation is returned with no
+  further read, and a match that arrives after the deadline is not accepted.
+  This proves the handling of that observed error shape, not the inferred
+  contention behind it.
   """
   use SdrAgent.AuditCase, async: false
 
+  alias Ash.Error.Unknown.UnknownError
   alias SdrAgent.Agents
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.Runtime
@@ -47,6 +57,17 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
   @stage [:sdr_agent, :model_coordinator, :stage]
   @schema Zoi.object(%{answer: Zoi.string(), score: Zoi.integer()})
   @fake Path.expand("../../support/fake_claude_cli.exs", __DIR__)
+  # #235: verbatim from the CI failure (run 40460413797, attempt 1), with its PIDs.
+  @queue_drop "** (DBConnection.ConnectionError) could not checkout the connection owned by " <>
+                "#PID<0.1292974.0> ({:sql_sandbox_owner, %{started_by: #PID<0.1292973.0>}}). " <>
+                "When using the sandbox, connections are shared, so this may imply another " <>
+                "process is using a connection. Reason: connection not available and request " <>
+                "was dropped from queue after 255ms. You can configure how long requests wait " <>
+                "in the queue using :queue_target and :queue_interval. See " <>
+                "DBConnection.start_link/2 for more information"
+  @observed %{id: "sw-235", status: :failed}
+  @other_switch %{id: "sw-other", status: :failed}
+  @wrong_status %{id: "sw-235", status: :pending}
 
   setup do
     tenant = bootstrap!()
@@ -385,6 +406,112 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
     end
   end
 
+  ## The switch observation (#235)
+
+  describe "the switch observation (#235)" do
+    test "two sandbox queue drops, then the matching row: that row, after exactly three reads" do
+      {read, script} = scripted([queue_drop(), queue_drop(), {:ok, [@other_switch, @observed]}])
+
+      outcome =
+        try do
+          {:returned, await_observed(read, 2_000)}
+        rescue
+          error -> {:raised, error}
+        end
+
+      assert outcome == {:returned, @observed},
+             "#235: a sandbox queue drop is transient; got #{inspect(outcome, limit: 4, printable_limit: 120)}"
+
+      assert reads(script) == 3, "#235: no fourth read after the match"
+    end
+
+    test "a persistent sandbox queue drop flunks at the deadline, naming it" do
+      {read, _script} = scripted([queue_drop()])
+
+      error = assert_raise ExUnit.AssertionError, fn -> await_observed(read, 200) end
+      assert error.message =~ "sandbox_queue_drop"
+    end
+
+    test "a matching row that arrives after the deadline is not accepted" do
+      {read, script} = scripted([{:after, 300, {:ok, [@observed]}}])
+
+      assert_raise ExUnit.AssertionError, fn -> await_observed(read, 100) end
+      assert reads(script) == 1
+    end
+
+    test "a wrong status and then an absent row stay pending until the matching row" do
+      {read, script} =
+        scripted([{:ok, [@wrong_status]}, {:ok, [@other_switch]}, {:ok, [@observed]}])
+
+      assert await_observed(read, 2_000) == @observed
+      assert reads(script) == 3, "#235: the matching observation is returned, not re-read"
+    end
+
+    test "a non-matching answer past the deadline ends the wait with no further read" do
+      {read, script} = scripted([{:after, 300, {:ok, []}}, {:ok, [@observed]}])
+
+      error = assert_raise ExUnit.AssertionError, fn -> await_observed(read, 100) end
+      assert error.message =~ "never reached failed"
+
+      assert reads(script) == 1,
+             "#235: the timeout reports the held observation, with no new read"
+    end
+
+    test "a persistent wrong status flunks at the deadline" do
+      {read, _script} = scripted([{:ok, [@wrong_status]}])
+
+      error = assert_raise ExUnit.AssertionError, fn -> await_observed(read, 200) end
+      assert error.message =~ "never reached failed"
+    end
+
+    # Controls: each already fails at once under the old strict match. They
+    # pin the refusal boundaries against widening; the first four are the CI
+    # drop with exactly one required part changed (`from` must occur in it).
+    near_miss = fn from, to ->
+      true = String.contains?(@queue_drop, from)
+      String.replace(@queue_drop, from, to)
+    end
+
+    reason = "connection not available and request was dropped from queue after 255ms"
+    prefix = "** (DBConnection.ConnectionError) could not checkout the connection owned by "
+
+    refused = [
+      {"the CI drop without the sandbox-owner marker", "dropped from queue",
+       {:unknown, near_miss.(" ({:sql_sandbox_owner, %{started_by: #PID<0.1292973.0>}})", "")}},
+      {"the CI drop with an owner exit as its reason", "exited",
+       {:unknown, near_miss.(reason, "owner #PID<0.1292974.0> exited")}},
+      {"the CI drop with a disabled queue as its reason", "queuing is disabled",
+       {:unknown, near_miss.(reason, "connection not available and queuing is disabled")}},
+      {"the CI drop under a different error prefix", "OwnershipError",
+       {:unknown,
+        near_miss.(prefix, "** (DBConnection.OwnershipError) cannot find ownership process for ")}},
+      {"the CI drop under another Ash wrapper", "Ash.Error.Invalid", :invalid_wrapper},
+      {"a Postgrex error", "deadlock_detected",
+       {:unknown, "** (Postgrex.Error) ERROR 40P01 (deadlock_detected) deadlock detected"}},
+      {"two causes, both the CI drop", "sql_sandbox_owner", :two_drops},
+      {"the CI drop as a bare connection error", "DBConnection.ConnectionError", :bare}
+    ]
+
+    for {name, token, shape} <- refused do
+      test "control: #{name} fails on the first read" do
+        {read, script} =
+          scripted([refused_read(unquote(Macro.escape(shape))), {:ok, [@observed]}])
+
+        raised =
+          try do
+            await_observed(read, 2_000)
+            :returned
+          rescue
+            error -> error
+          end
+
+        refute raised == :returned, "#{unquote(name)} must not be retried into a match"
+        assert Exception.message(raised) =~ unquote(token)
+        assert reads(script) == 1
+      end
+    end
+  end
+
   ## Helpers
 
   # A dedicated, unlinked suspender owns each suspension (a BEAM suspension
@@ -516,12 +643,23 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
   end
 
   defp await_switch!(ctx, switch, status, timeout \\ 20_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    await_switch(ctx, switch.id, status, deadline)
+    await_switch_with!(
+      fn -> Agents.list_profile_switches(actor: ctx.admin) end,
+      switch.id,
+      status,
+      timeout
+    )
   end
 
-  defp await_switch(ctx, id, status, deadline) do
-    {:ok, switches} = Agents.list_profile_switches(actor: ctx.admin)
+  # #235 seam: `await_switch!/4` with the switch read injected, so its
+  # observation path is testable without a database.
+  defp await_switch_with!(read, id, status, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_switch(read, id, status, deadline)
+  end
+
+  defp await_switch(read, id, status, deadline) do
+    {:ok, switches} = read.()
     current = Enum.find(switches, &(&1.id == id))
 
     cond do
@@ -533,7 +671,7 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
 
       true ->
         Process.sleep(20)
-        await_switch(ctx, id, status, deadline)
+        await_switch(read, id, status, deadline)
     end
   end
 
@@ -541,6 +679,52 @@ defmodule SdrAgent.AI.ProfileCoordinatorTest do
     {:ok, switches} = Agents.list_profile_switches(actor: ctx.admin)
     Enum.find(switches, &(&1.id == switch.id)).failure_reason || ""
   end
+
+  # #235: the observation tests' scripted reader. Each call counts one read
+  # and takes the next response (the last one repeats); `{:after, ms,
+  # response}` answers late. The script is supervised by the test.
+  defp scripted(responses) do
+    script = start_supervised!({Agent, fn -> %{left: responses, reads: 0} end})
+
+    read = fn ->
+      script
+      |> Agent.get_and_update(fn %{left: left, reads: reads} = state ->
+        {next, rest} = take(left)
+        {next, %{state | left: rest, reads: reads + 1}}
+      end)
+      |> answer()
+    end
+
+    {read, script}
+  end
+
+  defp take([only]), do: {only, [only]}
+  defp take([next | rest]), do: {next, rest}
+
+  defp answer({:after, ms, late}) do
+    Process.sleep(ms)
+    late
+  end
+
+  defp answer(response), do: response
+
+  defp reads(script), do: Agent.get(script, & &1.reads)
+
+  defp await_observed(read, timeout),
+    do: await_switch_with!(read, @observed.id, @observed.status, timeout)
+
+  defp unknown(causes), do: {:error, %Ash.Error.Unknown{errors: causes}}
+  defp queue_drop, do: unknown([%UnknownError{error: @queue_drop}])
+
+  defp refused_read({:unknown, message}), do: unknown([%UnknownError{error: message}])
+
+  defp refused_read(:invalid_wrapper),
+    do: {:error, %Ash.Error.Invalid{errors: [%UnknownError{error: @queue_drop}]}}
+
+  defp refused_read(:two_drops),
+    do: unknown([%UnknownError{error: @queue_drop}, %UnknownError{error: @queue_drop}])
+
+  defp refused_read(:bare), do: {:error, %DBConnection.ConnectionError{message: @queue_drop}}
 
   defp starts!(ctx) do
     assert {:ok, starts} = Agents.list_server_starts(actor: ctx.admin)
