@@ -24,6 +24,11 @@ Addendum 1 to the C2* amendment (2026-10-27; two operation-snapshot owner
 entries, `:agent_finish` and `:stale_run_recover`), published after it, is
 accepted as D-227, owner acceptance delegated by D-219, after Codex's
 exact-text PASS (9f90b710); its own Status line still reads PROPOSED.
+Addendum 4 to the C2* amendment (2026-10-27; a send-gate refusal records
+its true reason, `:demo_exception_not_in_use`, on the approval), published
+after addendum 1, is accepted as D-228, owner acceptance delegated by D-219,
+after Codex's exact-text PASS (5685d6f0); addenda 2 and 3 are not accepted;
+its own Status line still reads PROPOSED.
 
 ## Context
 
@@ -1509,6 +1514,48 @@ It changes nothing else in the C2* amendment, and it grants no call, spend, rele
   than inherits.
 
 <!-- END ADR-0005 C2* ADDENDUM 1 -->
+
+<!-- BEGIN ADR-0005 C2* ADDENDUM 4: text as reviewed by Codex (5685d6f0) -->
+
+#### C2* demo-exception amendment, addendum 4 (2026-10-27, PROPOSED): a send-gate refusal records its true reason on the approval
+
+**Status: PROPOSED.** To be accepted, it follows ADR-0014 Amendment 3 (D-222):
+
+- Codex gives an independent exact-text and entity/action PASS.
+- A decision row then records "owner acceptance delegated by D-219".
+
+It grants nothing.
+
+**Context.**
+
+- Item 10's send-gate refusal uses "the existing refuse effects", which invalidate a granted approval.
+- The existing mapping gives an unlisted refusal reason the approval reason `campaign_closed`, which would be false for an active campaign.
+
+**Decision.**
+
+1. **One more reason.** Approval `invalidated_reason` (an existing attribute, written only by the existing `:invalidate` action) gains `demo_exception_not_in_use`.
+2. **The mapping.** A send-gate refusal with reason `demo_exception_not_in_use` invalidates a granted approval with exactly that reason. It never uses the `campaign_closed` default.
+   - The same reason is recorded in the delivery's `last_error`, in the draft's `status_reason` ("delivery refused: demo_exception_not_in_use") and in the `send_gate` Decision's outcome detail.
+   - The refusal is evaluated after every existing send-gate refusal, and before timing, claim or capture.
+3. **Unchanged.**
+   - Every other reason mapping, including the existing defaults.
+   - The approval lifecycle, its terminal-immutability trigger and its binding columns.
+   - Every existing row and event.
+4. **Persistence.** There is no new column, value-list CHECK or index. The column's only reason-related constraint ties the `invalidated` status to a non-null reason. Any generated snapshot or migration delta is determined by `mix ash.codegen --check` at the gate, not assumed.
+
+**Entity delta.**
+
+| Entity | Change |
+|---|---|
+| Approval | `invalidated_reason` value set gains `demo_exception_not_in_use`. The `:invalidate` transition is unchanged. |
+| DeliveryOperation, Draft, the `send_gate` Decision | Carry the same reason string as today's refusals do. No schema change. |
+
+**Consequences.**
+
+- **Positive.** Approval, delivery, draft and Decision agree on why the send was refused.
+- **Negative.** One more value for readers of `invalidated_reason`.
+
+<!-- END ADR-0005 C2* ADDENDUM 4 -->
 
 ### Anchoring (S11)
 
