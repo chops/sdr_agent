@@ -45,6 +45,10 @@ defmodule SdrAgent.Agents.DemoException.Basis do
   @acceptance_ref ~r/\AD-[0-9]{3,4}\z/
   @timestamp ~r/\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\z/
   @code_sets [["method_not_enabled"], ["cli_injected_context", "method_not_enabled"]]
+  @evidence_keys ~w(projection_version response_layout response_thinking_count
+                     response_redacted_thinking_count projected_request_sha256
+                     observed_request_projection_sha256 projected_response_sha256
+                     observed_response_projection_sha256)
   @digest_pairs [
     {"projected_request_sha256", "observed_request_projection_sha256"},
     {"projected_response_sha256", "observed_response_projection_sha256"}
@@ -155,6 +159,95 @@ defmodule SdrAgent.Agents.DemoException.Basis do
          :ok <- record(basis, expected) do
       size(basis)
     end
+  end
+
+  @doc """
+  The JSON-native basis of a new decision. `inputs`: `entry_sha256`,
+  `acceptance_ref`, `binding_sha256`, `authorization_id`,
+  `authorization_sha256`, `starts_at`, `effective_expires_at`, `decided_at`
+  (P, A and W, the recorded decision facts) and the locked rows that give
+  the L sections (`evidence_sections/2`). It is checked with `validate/2`
+  before use; nothing here repairs or truncates a value.
+  """
+  @spec build(map()) :: map()
+  def build(inputs) do
+    %{
+      "schema" => "c2star-basis/1",
+      "policy" => %{
+        "id" => "c2star-demo-v4/1",
+        "entry_sha256" => inputs.entry_sha256,
+        "acceptance_ref" => inputs.acceptance_ref
+      },
+      "environment" => %{"id" => "agentenv-1", "binding_sha256" => inputs.binding_sha256},
+      "funding" => %{
+        "authorization_id" => inputs.authorization_id,
+        "authorization_sha256" => inputs.authorization_sha256
+      },
+      "window" => %{
+        "starts_at" => timestamp(inputs.starts_at),
+        "effective_expires_at" => timestamp(inputs.effective_expires_at),
+        "decided_at" => timestamp(inputs.decided_at)
+      }
+    }
+    |> evidence_sections(inputs)
+  end
+
+  @doc """
+  `basis` with its L sections (S3 plan r2 §6.1: `invocation`, `identity`,
+  `evidence`, `eligibility`, `funding.grant_id`, `funding.allocation_id`,
+  `environment.tenant_id`) set from the locked rows in `inputs`
+  (`invocation`, `run`, `link`, `current_link_ids`, `v3_allowlisted`,
+  `v4_allowlisted`); every P, A and W value is kept. A replay compares the
+  digest of the STORED basis with its L re-derived this way.
+  """
+  @spec evidence_sections(map(), map()) :: map()
+  def evidence_sections(basis, %{invocation: invocation, run: run, link: link} = inputs) do
+    evidence = link.evidence
+    builder = (invocation.model_catalog_entry || %{})["prompt_builder"]
+
+    basis
+    |> Map.merge(%{
+      "invocation" => %{
+        "id" => invocation.id,
+        "run_id" => run.id,
+        "lead_id" => run.lead_id,
+        "usage_origin" => to_string(run.usage_origin),
+        "purpose" => to_string(invocation.purpose)
+      },
+      "identity" => %{
+        "provider" => to_string(invocation.provider),
+        "cli_version" => invocation.provider_version,
+        "profile_id" => to_string(invocation.profile_id),
+        "model_id" => invocation.model_id,
+        "prompt_builder" => builder,
+        "ledger_generation" => invocation.ledger_generation
+      },
+      "evidence" =>
+        evidence
+        |> Map.take(@evidence_keys)
+        |> Map.merge(%{
+          "link_id" => link.id,
+          "method" => to_string(link.method),
+          "reason_codes" => Enum.sort(evidence["reason_codes"] || []),
+          "current_link_ids" => Enum.sort(inputs.current_link_ids)
+        }),
+      "eligibility" => %{
+        "v3_allowlisted" => inputs.v3_allowlisted,
+        "v4_allowlisted" => inputs.v4_allowlisted
+      }
+    })
+    |> Map.update("environment", %{}, &Map.put(&1, "tenant_id", invocation.tenant_id))
+    |> Map.update("funding", %{}, fn funding ->
+      Map.merge(funding, %{
+        "grant_id" => invocation.grant_id,
+        "allocation_id" => invocation.allocation_id
+      })
+    end)
+  end
+
+  defp timestamp(%DateTime{} = at) do
+    {:ok, utc} = DateTime.shift_zone(at, "Etc/UTC")
+    DateTime.to_iso8601(%{utc | microsecond: {elem(utc.microsecond, 0), 6}})
   end
 
   @doc "Lowercase hex SHA-256 of `basis`'s `sdr-canonical-json/1` encoding."

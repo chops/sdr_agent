@@ -35,9 +35,16 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   invocation outside a `:proof` run. The invocation is never updated for
   its release.
 
-  `:demo_exception` ↔ `:v4_uncalibrated` (ADR-0005 C2* amendment, D-223)
-  exists in the schema only: no action may decide it yet (`allowed_pair?/2`
-  refuses it), and the database CHECKs require, NULL-safely, its v4 link,
+  `:demo_exception` ↔ `:v4_uncalibrated` (ADR-0005 C2* amendment, D-223) is
+  decided only by the result-gate finalizer under its registered
+  `SdrAgent.Agents.ReleaseDecision.Prelocked` context
+  (`SdrAgent.Agents.Changes.ReleaseDecision`), which sets the four exception
+  columns and the decision instant itself and appends one
+  `model.result.demo_exception` event naming the policy id, the basis
+  digest and the label (private arguments a caller may not supply). While
+  the selector is on, a withheld release records one closed
+  `demo_exception_refusal` code in its event. The database CHECKs require,
+  NULL-safely, its v4 link,
   projection and method, NULL `evidence_sha256`, all four exception columns,
   `decided_at < exception_expires_at` and an object basis whose `schema` and
   `policy.id` match. The four columns are also ADR-0009's one record-hash
@@ -72,6 +79,7 @@ defmodule SdrAgent.Agents.ModelResultRelease do
 
   require Ash.Expr
 
+  alias SdrAgent.Agents.DemoException
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Checks
 
@@ -115,7 +123,13 @@ defmodule SdrAgent.Agents.ModelResultRelease do
     category: :model,
     links: [model_invocation_id: :model_invocation_id],
     context_links: [agent_run_id: :model_result_release_agent_run_id],
-    arguments: [:gate_cause_id, :gate_classification]
+    arguments: [:gate_cause_id, :gate_classification, :demo_exception_refusal]
+  ]
+  @demo_event [
+    category: :model,
+    links: [model_invocation_id: :model_invocation_id],
+    context_links: [agent_run_id: :model_result_release_agent_run_id],
+    arguments: [:demo_exception_policy_id, :demo_exception_basis_sha256, :demo_exception_label]
   ]
 
   postgres do
@@ -246,6 +260,18 @@ defmodule SdrAgent.Agents.ModelResultRelease do
         constraints one_of: @gate_classifications
       end
 
+      # C2* (ADR-0005 item 5): the one closed refusal code of a withheld
+      # release while the selector is on.
+      argument :demo_exception_refusal, :atom do
+        constraints one_of: DemoException.refusal_codes()
+      end
+
+      # C2* (item 8): set only by `ReleaseDecision` for a `:demo_exception`
+      # row, for its event; a caller-supplied value is refused.
+      argument :demo_exception_policy_id, :string
+      argument :demo_exception_basis_sha256, :string
+      argument :demo_exception_label, :string
+
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change SdrAgent.Agents.Changes.ReleaseDecision
@@ -258,6 +284,9 @@ defmodule SdrAgent.Agents.ModelResultRelease do
 
       change {AppendEvent, [event_type: "model.result.calibration"] ++ @event},
         where: [attribute_equals(:disposition, :calibration)]
+
+      change {AppendEvent, [event_type: "model.result.demo_exception"] ++ @demo_event},
+        where: [attribute_equals(:disposition, :demo_exception)]
     end
   end
 
@@ -364,6 +393,7 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   def allowed_pair?(:released, :reconciled), do: true
   def allowed_pair?(:withheld, reason), do: reason in @withheld_reasons
   def allowed_pair?(:calibration, :calibration), do: true
+  def allowed_pair?(:demo_exception, :v4_uncalibrated), do: true
   def allowed_pair?(_disposition, _reason), do: false
 
   @doc false
