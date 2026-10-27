@@ -205,21 +205,47 @@ if config_env() == :prod do
     key_id: System.get_env("SDR_WEBHOOK_HMAC_KEY_ID", "prod-1"),
     source: {:env, "SDR_WEBHOOK_HMAC_KEY"}
 
+  # The hosted service listens on loopback only; the reverse proxy (Caddy on
+  # the same host) forwards to 127.0.0.1:PORT and sets X-Forwarded-Proto,
+  # which `force_ssl` (config/prod.exs) honours. SDR_BIND_IP overrides the
+  # address with exactly one literal IPv4 or IPv6 address; anything else
+  # refuses boot.
+  bind_ip =
+    case System.get_env("SDR_BIND_IP") do
+      nil ->
+        {127, 0, 0, 1}
+
+      value ->
+        case :inet.parse_strict_address(String.to_charlist(value)) do
+          {:ok, ip} -> ip
+          {:error, _} -> raise "SDR_BIND_IP must be one literal IPv4 or IPv6 address"
+        end
+    end
+
   config :sdr_agent, SdrAgentWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
-    http: [
-      # Enable IPv6 and bind on all interfaces.
-      # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
-      # See the documentation on https://bandit.hexdocs.pm/Bandit.html#t:options/0
-      # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0}
-    ],
+    http: [ip: bind_ip],
     secret_key_base: secret_key_base
 
   config :sdr_agent,
     token_signing_secret:
       System.get_env("TOKEN_SIGNING_SECRET") ||
         raise("Missing environment variable `TOKEN_SIGNING_SECRET`!")
+
+  # Hosted owner sign-in (magic links): with POSTMARK_API_KEY the Swoosh
+  # mailer sends through Postmark (HTTP client: config/prod.exs). Only the
+  # magic-link sender uses this mailer, and only for addresses on
+  # SDR_LOGIN_ALLOWLIST; outreach delivers through the capture adapter only
+  # (ADR-0001). Without the key the mailer stays local and no mail leaves.
+  case System.get_env("POSTMARK_API_KEY") do
+    key when key in [nil, ""] ->
+      :ok
+
+    key ->
+      config :sdr_agent, SdrAgent.Mailer,
+        adapter: Swoosh.Adapters.Postmark,
+        api_key: key
+  end
 
   # ## SSL Support
   #
@@ -252,22 +278,4 @@ if config_env() == :prod do
   #       force_ssl: [hsts: true]
   #
   # Check `Plug.SSL` for all available options in `force_ssl`.
-
-  # ## Configuring the mailer
-  #
-  # In production you need to configure the mailer to use a different adapter.
-  # Here is an example configuration for Mailgun:
-  #
-  #     config :sdr_agent, SdrAgent.Mailer,
-  #       adapter: Swoosh.Adapters.Mailgun,
-  #       api_key: System.get_env("MAILGUN_API_KEY"),
-  #       domain: System.get_env("MAILGUN_DOMAIN")
-  #
-  # Most non-SMTP adapters require an API client. Swoosh supports Req, Hackney,
-  # and Finch out-of-the-box. This configuration is typically done at
-  # compile-time in your config/prod.exs:
-  #
-  #     config :swoosh, :api_client, Swoosh.ApiClient.Req
-  #
-  # See https://swoosh.hexdocs.pm/Swoosh.html#module-installation for details.
 end
