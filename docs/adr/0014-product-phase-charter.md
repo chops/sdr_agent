@@ -213,3 +213,11 @@ only (1): real data never means a real message is sent.
   they just don't get shared outside of my machine". The owner accepted
   this wording on 2026-10-12 ("accept PR #129") after Codex's independent
   approval of 83649ff.
+
+## Cross-reference (2026-10-27): ADR-0001 Amendment 1
+
+[ADR-0001 Amendment 1](0001-unattended-build-operating-charter.md) (the hosted
+owner-only demo and its sign-in email) changes this charter's constraint 1 and
+its deployment decision right only for the hosted copy at https://sdr.a-z.bot
+and the owner's sign-in email, and only once the owner accepts that exact text.
+It changes nothing else here.
