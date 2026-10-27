@@ -24,12 +24,17 @@ defmodule SdrAgent.Agents.DemoExceptionRecoveryTest do
   row `:not_gated`, and `LinkGateCause` accepts withheld releases only);
   T-R5 and the `LinkGateCause` deny cases pass now (`control:`; T-R5's
   `exception_off` was implemented in GREEN-3b).
+
+  The two further deny controls (a different non-nil Operation, another
+  invocation in the same Operation; Codex 6a810d4c) also pass now and must
+  stay refused once the demo branch of `LinkGateCause` exists.
   """
   use SdrAgent.AuditCase, async: false
 
   alias SdrAgent.Agents
   alias SdrAgent.Agents.ResultGate
   alias SdrAgent.Agents.ResultGate.Recovery
+  alias SdrAgent.AgentsFixtures
   alias SdrAgent.Clock
   alias SdrAgent.DemoExceptionFixtures, as: Fx
   alias SdrAgent.Operations
@@ -131,7 +136,9 @@ defmodule SdrAgent.Agents.DemoExceptionRecoveryTest do
           {"an arbitrary warning", :other_message},
           {"a cause of no Operation", :no_operation},
           {"a critical cause", :critical},
-          {"the mismatch stop", :mismatch_stop}
+          {"the mismatch stop", :mismatch_stop},
+          {"the fixed warning of a different, real Operation", :other_operation},
+          {"the fixed warning of another invocation in the same Operation", :other_invocation}
         ] do
       @tag variant: variant
       test "control: deny #{label}", %{env: env} = ctx do
@@ -223,6 +230,21 @@ defmodule SdrAgent.Agents.DemoExceptionRecoveryTest do
 
   defp deny_case(env, demo, :mismatch_stop),
     do: {fixed_cause!(env, demo.invocation, @message), :witness_mismatch}
+
+  # Codex 6a810d4c: an actually different, non-nil Operation of this tenant.
+  defp deny_case(env, demo, :other_operation) do
+    %{operation: other} = AgentsFixtures.operated_run(env.tenant, lead_id: Fx.lead_id())
+    refute other.id == env.run.operation_id
+
+    {fixed_cause!(env, demo.invocation, @message, %{operation_id: other.id}),
+     :witness_unreconciled}
+  end
+
+  # Codex 6a810d4c: the run's Operation, but another invocation of the run.
+  defp deny_case(env, _demo, :other_invocation) do
+    other = Fx.constructed!(env).invocation
+    {fixed_cause!(env, other, @message), :witness_unreconciled}
+  end
 
   defp stop(env, demo, cause, stop_reason) do
     Agents.fail_run(
