@@ -69,13 +69,42 @@ defmodule SdrAgent.WitnessMigration.Harness do
   returns `{:not_started, _}` for an unusable executable, checked before
   spawning, and otherwise delegates to
   `SdrAgent.RestartProof.Harness.port_runner/5`.
+
+  **Parameterization** (C2* S3 release-migration campaign, S3 plan r2
+  section 9; `SdrAgent.Agents.ReleaseMigrationTest`, `:external`; its
+  stubbed contract is `SdrAgent.Agents.ReleaseMigrationHarnessTest`). Every
+  default is the lineage campaign's, unchanged:
+
+    * `versions/2` takes `:migration_suffix` (default
+      `"_v4_mismatch_lineage.exs"`);
+    * `prove/1` takes `:probe` (one closed probe script, or one per probe
+      state), `:runners` (a runner per migrate or probe step of the plan;
+      the claim and the drop always run on `:runner`, so ownership and
+      cleanup never move) and `:plan` (`:continuity`, or `:down_refusal`:
+      up, a `down` that must be refused with `check_violation`, then the
+      `after_refusal` probe). Every option, and every unknown option, is
+      validated before anything is claimed;
+    * `checked_runner/5` with `toolchain: :root` builds a runner whose
+      child uses another checkout's own build (`root_child_env/4`), after
+      physical root checks; `toolchain: :inherit` is `checked_runner/4`.
   """
 
   alias SdrAgent.RestartProof.Harness, as: Bounded
 
   @database ~r/\Asdr_agent_test_wm[0-9a-f]{10}\z/
   @migration "_v4_mismatch_lineage.exs"
+  @migration_shape ~r/\A_[a-z0-9_]{1,96}\.exs\z/
   @scripts Path.expand(".", __DIR__)
+  @support Path.expand("..", __DIR__)
+  @own_root Path.expand("../../..", __DIR__)
+  @probes ~w(witness_migration/probe.exs release_migration/baseline.exs
+             release_migration/probe.exs release_migration/demo.exs)
+  @mix_roots ~w(MIX_HOME HEX_HOME MIX_DEPS_PATH MIX_BUILD_ROOT)
+  @code_path_removed ~w(ERL_FLAGS ERL_AFLAGS ERL_ZFLAGS ELIXIR_ERL_OPTIONS MIX_PATH
+                        MIX_ARCHIVES MIX_EXS MIX_BUILD_PATH)
+  @store_path ~r|\A/nix/store/[0-9a-z]{32}-[^/]+(/[^/]+)*\z|
+  @prove_options [:suffix, :tmp_root, :versions, :runner, :probe, :runners, :plan]
+  @check_violation ~r/^\*\* \(Postgrex\.Error\) ERROR 23514 \(check_violation\) /m
   @claim_refused 3
   @receipts {__MODULE__, :receipts}
   @target_refused 4
@@ -96,6 +125,241 @@ defmodule SdrAgent.WitnessMigration.Harness do
         else: {:not_started, {:executable_unusable, executable}}
     end
   end
+
+  @doc """
+  `toolchain: :inherit` is exactly `checked_runner/4`. `toolchain: :root`
+  builds a runner for a separate checkout's own build at `root` (the OLD
+  baseline): each call refuses, as `{:not_started, reason}` and before
+  the executable check and before anything is spawned, in this order:
+
+    * `{:own_root_unusable, path}`: this checkout cannot be resolved
+      physically (by lstat and readlink, no shell);
+    * `{:root_unusable, root}`: `root` is not an absolute normalized path
+      of an existing directory that is physically itself (no symlink at it
+      or at any ancestor);
+    * `{:root_shared, root}`: `root` is, lies inside or contains this
+      checkout (physically);
+    * a `root_child_env/4` refusal;
+    * `{:toolchain_unusable, name}`: a re-rooted Mix root has a missing,
+      non-directory or symlinked component below `root`.
+
+  The child's environment is `SdrAgent.ChildEnv.port([], set)` with the
+  `root_child_env/4` set (snapshot of this process's environment taken
+  when the runner is built): ChildEnv's policy is unchanged, so only its
+  base names are inherited (`PATH` among them: the executable and the
+  pinned Elixir wrapper's own Erlang are fixed paths) and its secrets are
+  always removed. Any other option raises `ArgumentError`.
+  """
+  def checked_runner(executable, suffix, root, deadline, opts) do
+    case runner_mode!(opts) do
+      :inherit -> checked_runner(executable, suffix, root, deadline)
+      :root -> root_runner(executable, suffix, root, deadline, System.get_env())
+    end
+  end
+
+  defp root_runner(executable, suffix, root, deadline, snapshot) do
+    fn _step, args ->
+      with {:ok, own_root} <- own_root(),
+           :ok <- usable_root(root),
+           :ok <- unshared_root(root, own_root),
+           {:ok, set} <- not_started(root_child_env(own_root, root, suffix, snapshot)),
+           :ok <- usable_toolchain(root, Enum.filter(set, &(elem(&1, 0) in @mix_roots))),
+           :ok <- usable_executable(executable) do
+        env = SdrAgent.ChildEnv.port([], set)
+        Bounded.spawn_bounded(executable, args, root, env, deadline, 10_000)
+      end
+    end
+  end
+
+  defp runner_mode!(opts) do
+    case opts do
+      [toolchain: mode] when mode in [:inherit, :root] -> mode
+      other -> raise ArgumentError, "checked_runner/5 options: #{inspect(other)}"
+    end
+  end
+
+  defp not_started({:ok, set}), do: {:ok, set}
+  defp not_started({:error, reason}), do: {:not_started, reason}
+
+  # This checkout's physical path, or a refusal (never its lexical alias).
+  defp own_root do
+    case physical_path(@own_root) do
+      {:ok, path} -> if File.dir?(path), do: {:ok, path}, else: own_root_unusable()
+      :error -> own_root_unusable()
+    end
+  end
+
+  defp own_root_unusable, do: {:not_started, {:own_root_unusable, @own_root}}
+
+  # Resolves every symlinked component of an absolute path by lstat and
+  # readlink, with a bound on the number of links followed. A link target
+  # with a "." or ".." segment is refused rather than resolved lexically.
+  defp physical_path(path) do
+    if normalized_absolute?(path), do: resolve(Path.split(path), "/", 40), else: :error
+  end
+
+  defp resolve([], acc, _hops), do: {:ok, acc}
+  defp resolve(_parts, _acc, 0), do: :error
+
+  defp resolve([part | rest], acc, hops) do
+    next = Path.join(acc, part)
+
+    case File.lstat(next) do
+      {:ok, %File.Stat{type: :symlink}} -> follow(File.read_link(next), acc, rest, hops)
+      {:ok, _stat} -> resolve(rest, next, hops)
+      {:error, _reason} -> :error
+    end
+  end
+
+  defp follow({:ok, target}, acc, rest, hops) do
+    parts = Path.split(target)
+
+    cond do
+      Enum.any?(parts, &(&1 in [".", ".."])) -> :error
+      Path.type(target) == :absolute -> resolve(parts ++ rest, "/", hops - 1)
+      true -> resolve(parts ++ rest, acc, hops - 1)
+    end
+  end
+
+  defp follow({:error, _reason}, _acc, _rest, _hops), do: :error
+
+  # An existing directory, physically itself: no symlink at it or at any
+  # ancestor.
+  defp usable_root(root) do
+    if normalized_absolute?(root) and
+         match?({:ok, %File.Stat{type: :directory}}, File.lstat(root)) and
+         physical?(root),
+       do: :ok,
+       else: {:not_started, {:root_unusable, root}}
+  end
+
+  defp physical?(path) do
+    path
+    |> Path.split()
+    |> Enum.scan(&Path.join(&2, &1))
+    |> Enum.all?(&match?({:ok, %File.Stat{type: type}} when type != :symlink, File.lstat(&1)))
+  end
+
+  defp unshared_root(root, own_root) do
+    if shared?(root, own_root),
+      do: {:not_started, {:root_shared, root}},
+      else: :ok
+  end
+
+  # Equal, inside, or containing (both normalized absolute paths).
+  defp shared?(root, own_root) do
+    root == own_root or String.starts_with?(root, own_root <> "/") or
+      String.starts_with?(own_root, String.trim_trailing(root, "/") <> "/")
+  end
+
+  # Every component from `root` down to each Mix root is a real directory.
+  defp usable_toolchain(root, pairs) do
+    Enum.find_value(pairs, :ok, fn {name, path} ->
+      real? =
+        path
+        |> Path.relative_to(root)
+        |> Path.split()
+        |> Enum.scan(root, &Path.join(&2, &1))
+        |> Enum.all?(&match?({:ok, %File.Stat{type: :directory}}, File.lstat(&1)))
+
+      if real?, do: nil, else: {:not_started, {:toolchain_unusable, name}}
+    end)
+  end
+
+  defp usable_executable(executable) do
+    if executable?(executable),
+      do: :ok,
+      else: {:not_started, {:executable_unusable, executable}}
+  end
+
+  @doc """
+  Pure and lexical: the four Mix roots (`MIX_HOME`, `HEX_HOME`,
+  `MIX_DEPS_PATH`, `MIX_BUILD_ROOT`) for a child built in `root`, each of
+  the parent's (`env`) re-rooted from `own_root` to `root`. Returns
+  `{:ok, [{name, path}]}` in that order, or `{:error, reason}`:
+  `{:root_invalid, root}` (not an absolute normalized path), `{:root_shared,
+  root}` (it is, lies inside or contains `own_root`), `{:toolchain_unset,
+  name}` or `{:toolchain_outside_root, name}` (a value not strictly inside
+  `own_root`: there is no fallback to the parent's own build). It decides
+  nothing about any other name (that is `root_child_env/4`) and checks
+  nothing on disk (that is `checked_runner/5`).
+  """
+  def root_toolchain(own_root, root, env) do
+    cond do
+      not normalized_absolute?(root) -> {:error, {:root_invalid, root}}
+      shared?(root, own_root) -> {:error, {:root_shared, root}}
+      true -> rerooted(own_root, root, env)
+    end
+  end
+
+  @doc """
+  Pure: the `SdrAgent.ChildEnv` `set` of a root-mode child, one entry per
+  name: the `root_toolchain/3` Mix roots (its refusals come first);
+  `ERL_LIBS` with its value only when every `:`-separated entry is an
+  immutable `/nix/store/<hash>-<name>` path (normalized; no mutable
+  profile, checkout, empty entry or traversal), `nil` (an explicit removal)
+  when unset, and otherwise `{:error, {:code_path_unapproved, "ERL_LIBS"}}`;
+  explicit removals of the other code-path names (`ERL_FLAGS`, `ERL_AFLAGS`,
+  `ERL_ZFLAGS`, `ELIXIR_ERL_OPTIONS`, `MIX_PATH`, `MIX_ARCHIVES`, `MIX_EXS`,
+  `MIX_BUILD_PATH`); `MIX_ENV=test`; and the partition `suffix`. This is an
+  admissibility check on names and paths, not a provenance proof of the
+  store artifacts: the campaign packet pins those.
+  """
+  def root_child_env(own_root, root, suffix, env) do
+    with {:ok, roots} <- root_toolchain(own_root, root, env),
+         {:ok, erl_libs} <- approved_code_path(Map.get(env, "ERL_LIBS")) do
+      {:ok,
+       roots ++
+         [{"ERL_LIBS", erl_libs}] ++
+         Enum.map(@code_path_removed, &{&1, nil}) ++
+         [{"MIX_ENV", "test"}, {"MIX_TEST_PARTITION", suffix}]}
+    end
+  end
+
+  defp approved_code_path(nil), do: {:ok, nil}
+
+  defp approved_code_path(value) do
+    entries = String.split(value, ":")
+
+    if Enum.all?(entries, &store_path?/1),
+      do: {:ok, value},
+      else: {:error, {:code_path_unapproved, "ERL_LIBS"}}
+  end
+
+  defp store_path?(entry) do
+    trimmed = String.trim_trailing(entry, "/")
+    trimmed != "" and Path.expand(trimmed) == trimmed and Regex.match?(@store_path, trimmed)
+  end
+
+  defp rerooted(own_root, root, env) do
+    @mix_roots
+    |> Enum.reduce_while({:ok, []}, fn name, {:ok, acc} ->
+      case reroot(name, Map.fetch(env, name), own_root, root) do
+        {:ok, pair} -> {:cont, {:ok, [pair | acc]}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> then(fn
+      {:ok, pairs} -> {:ok, Enum.reverse(pairs)}
+      error -> error
+    end)
+  end
+
+  defp reroot(name, :error, _own_root, _root), do: {:error, {:toolchain_unset, name}}
+
+  defp reroot(name, {:ok, value}, own_root, root) do
+    if inside?(value, own_root),
+      do: {:ok, {name, Path.join(root, Path.relative_to(value, own_root))}},
+      else: {:error, {:toolchain_outside_root, name}}
+  end
+
+  defp normalized_absolute?(path),
+    do:
+      is_binary(path) and path != "" and Path.type(path) == :absolute and
+        Path.expand(path) == path
+
+  defp inside?(value, own_root),
+    do: normalized_absolute?(value) and String.starts_with?(value, own_root <> "/")
 
   defp executable?(path) when is_binary(path) do
     case File.stat(path) do
@@ -147,18 +411,39 @@ defmodule SdrAgent.WitnessMigration.Harness do
   The new migration's version and its immediate predecessor in `dir`:
   `{:ok, %{new:, predecessor:}}`, `{:error, :migration_absent}`,
   `{:error, {:migration_ambiguous, files}}` or `{:error, :no_predecessor}`.
+  The new migration is the one file ending in `:migration_suffix` (default
+  `"_v4_mismatch_lineage.exs"`; shape `_<a-z0-9_>.exs`); a bad suffix or
+  any other option is `{:error, {:invalid_option, key}}`.
   """
-  def versions(dir) do
+  def versions(dir, opts \\ []) do
+    with {:ok, migration} <- migration_suffix(opts), do: select_versions(dir, migration)
+  end
+
+  defp select_versions(dir, migration) do
     versions =
       for file <- File.ls!(dir),
           String.ends_with?(file, ".exs"),
           {version, ""} <- [Integer.parse(hd(String.split(file, "_", parts: 2)))],
           do: {version, file}
 
-    case Enum.filter(versions, fn {_version, file} -> String.ends_with?(file, @migration) end) do
+    case Enum.filter(versions, fn {_version, file} -> String.ends_with?(file, migration) end) do
       [] -> {:error, :migration_absent}
       [{new, _file}] -> with_predecessor(new, versions)
       many -> {:error, {:migration_ambiguous, Enum.map(many, &elem(&1, 1))}}
+    end
+  end
+
+  defp migration_suffix(opts) do
+    case Keyword.keys(opts) -- [:migration_suffix] do
+      [] ->
+        suffix = Keyword.get(opts, :migration_suffix, @migration)
+
+        if is_binary(suffix) and Regex.match?(@migration_shape, suffix),
+          do: {:ok, suffix},
+          else: {:error, {:invalid_option, :migration_suffix}}
+
+      [key | _] ->
+        {:error, {:invalid_option, key}}
     end
   end
 
@@ -171,9 +456,30 @@ defmodule SdrAgent.WitnessMigration.Harness do
 
   @doc """
   Runs the campaign. Options: `:suffix` (`"_wm<10 hex>"`), `:tmp_root`,
-  `:versions` (from `versions/1`), `:runner`. Returns `{:ok, states}`,
-  where `states` maps `"predecessor"`, `"up"`, `"down"` and `"up_again"`
-  to that state's probe checks, or `{:error, reason}`.
+  `:versions` (from `versions/1,2`), `:runner`, and optionally:
+
+    * `:plan`: `:continuity` (default; predecessor -> new up -> new down ->
+      new up, probing after each) or `:down_refusal` (new up and probe;
+      new down, which must end in a confirmed integer nonzero exit, not the
+      target refusal, whose output has a line starting
+      `** (Postgrex.Error) ERROR 23514 (check_violation) `; then the
+      `after_refusal` probe). Any other down outcome is `{:error,
+      {:down_refusal, :not_refused | :untyped | :target_refused, outcome}}`
+      after a confirmed exit, or today's typed step error otherwise. The
+      SQLSTATE line types the refusal; it does not prove the rollback,
+      which is the `after_refusal` probe's job;
+    * `:probe`: the probe script for every probe state, or a map naming
+      exactly the plan's probe states (default `witness_migration/probe.exs`);
+      only `witness_migration/probe.exs` and `release_migration/{baseline,
+      probe,demo}.exs` of this support tree, as absolute normalized paths
+      of existing regular files;
+    * `:runners`: `%{{:migrate | :probe, state} => runner}` for the plan's
+      own steps; the claim and the drop always run on `:runner`.
+
+  An invalid value, or any other option, is `{:error, {:invalid_option,
+  key}}` before anything is claimed. Returns `{:ok, states}`, where
+  `states` maps each probed state to its probe checks, or `{:error,
+  reason}`.
   """
   def prove(opts), do: opts |> prove_with_receipts() |> elem(0)
 
@@ -191,7 +497,12 @@ defmodule SdrAgent.WitnessMigration.Harness do
     * `migrate.<state>.direction` and `migrate.<state>.version`;
     * `state.<state>.check_count` and `state.<state>.check.<name>`
       (`permitted`, `refused:<code>` or `unexpected`), for the states
-      `predecessor`, `up`, `down` and `up_again`;
+      the plan probes (`predecessor`, `up`, `down` and `up_again` by default);
+    * only when not the default: `plan` (`down_refusal`),
+      `migrate.<state>.expected` (`refusal`), `migrate.<state>.refusal`
+      (`check_violation`, `untyped`, `target_refused` or `not_refused`),
+      `runner.<step>.<state>` (`override`) and `probe.<state>.script` (the
+      support-relative script path);
     * `cleanup.drop_attempted`, `cleanup.drop_mode` (`normal`: no `FORCE`,
       no connection termination), `cleanup.backends_before_drop` and
       `cleanup.database_absent_after_drop` (reported by the drop child, or
@@ -216,17 +527,25 @@ defmodule SdrAgent.WitnessMigration.Harness do
   end
 
   defp do_prove(opts) do
+    case config(opts) do
+      {:ok, config} -> do_prove(opts, config)
+      {:error, _} = error -> error
+    end
+  end
+
+  defp do_prove(opts, config) do
     suffix = Keyword.fetch!(opts, :suffix)
     database = "sdr_agent_test" <> suffix
     runner = Keyword.fetch!(opts, :runner)
     versions = Keyword.fetch!(opts, :versions)
     tmp = Path.join(Keyword.fetch!(opts, :tmp_root), "sdr-witness-migration" <> suffix)
     note_target(database, tmp, versions)
+    if config.plan_name != :continuity, do: note("plan", Atom.to_string(config.plan_name))
 
     with {:target, true} <- {:target, Regex.match?(@database, database)},
          {:tmp, :ok} <- {:tmp, File.mkdir(tmp)} do
       owned = %{tmp: tmp, database: nil}
-      {outcome, owned} = run_owned(database, tmp, versions, runner, owned)
+      {outcome, owned} = run_owned(database, tmp, versions, {runner, config}, owned)
       finish(outcome, owned, database, runner)
     else
       {:target, false} -> {:error, {:invalid_target, database}}
@@ -234,14 +553,92 @@ defmodule SdrAgent.WitnessMigration.Harness do
     end
   end
 
-  defp run_owned(database, tmp, versions, runner, owned) do
+  ## Options (validated before anything is claimed)
+
+  defp config(opts) do
+    with :ok <- known_options(opts),
+         {:ok, name, plan} <- plan(Keyword.get(opts, :plan, :continuity)),
+         {:ok, probes} <- probes(Keyword.get(opts, :probe, default_probe()), plan),
+         {:ok, runners} <- runners(Keyword.get(opts, :runners, %{}), plan) do
+      {:ok, %{plan_name: name, plan: plan, probes: probes, runners: runners}}
+    end
+  end
+
+  defp known_options(opts) do
+    case Keyword.keys(opts) -- @prove_options do
+      [] -> :ok
+      [key | _] -> {:error, {:invalid_option, key}}
+    end
+  end
+
+  defp plan(:continuity) do
+    {:ok, :continuity,
+     [
+       %{label: "predecessor", migrate: {"up", :predecessor}, probe?: true, expect: :ok},
+       %{label: "up", migrate: {"up", :new}, probe?: true, expect: :ok},
+       %{label: "down", migrate: {"down", :new}, probe?: true, expect: :ok},
+       %{label: "up_again", migrate: {"up", :new}, probe?: true, expect: :ok}
+     ]}
+  end
+
+  defp plan(:down_refusal) do
+    {:ok, :down_refusal,
+     [
+       %{label: "up", migrate: {"up", :new}, probe?: true, expect: :ok},
+       %{label: "down", migrate: {"down", :new}, probe?: false, expect: :refusal},
+       %{label: "after_refusal", migrate: nil, probe?: true, expect: :ok}
+     ]}
+  end
+
+  defp plan(_other), do: {:error, {:invalid_option, :plan}}
+
+  defp default_probe, do: Path.join(@scripts, "probe.exs")
+
+  defp probe_states(plan), do: for(%{probe?: true, label: label} <- plan, do: label)
+
+  defp probes(probe, plan) when is_binary(probe) do
+    if probe?(probe),
+      do: {:ok, Map.new(probe_states(plan), &{&1, probe})},
+      else: {:error, {:invalid_option, :probe}}
+  end
+
+  defp probes(%{} = probes, plan) do
+    if Enum.sort(Map.keys(probes)) == Enum.sort(probe_states(plan)) and
+         Enum.all?(Map.values(probes), &probe?/1),
+       do: {:ok, probes},
+       else: {:error, {:invalid_option, :probe}}
+  end
+
+  defp probes(_other, _plan), do: {:error, {:invalid_option, :probe}}
+
+  defp probe?(path) do
+    is_binary(path) and normalized_absolute?(path) and String.starts_with?(path, @support <> "/") and
+      Path.relative_to(path, @support) in @probes and
+      match?({:ok, %File.Stat{type: :regular}}, File.lstat(path))
+  end
+
+  defp runners(%{} = runners, plan) do
+    keys =
+      for %{label: label} = step <- plan,
+          {kind, present?} <- [migrate: step.migrate != nil, probe: step.probe?],
+          present?,
+          do: {kind, label}
+
+    if Enum.all?(runners, fn {key, runner} -> key in keys and is_function(runner, 2) end),
+      do: {:ok, runners},
+      else: {:error, {:invalid_option, :runners}}
+  end
+
+  defp runners(_other, _plan), do: {:error, {:invalid_option, :runners}}
+
+  defp run_owned(database, tmp, versions, {runner, config}, owned) do
     claim = run(runner, :claim, script("claim.exs", [database]))
     note("child.claim", child_outcome(claim))
 
     case claim do
       {:ok, _} ->
         owned = %{owned | database: database}
-        {guarded_steps(database, tmp, versions, runner), owned}
+        {guarded_steps(database, tmp, versions, {runner, config}), owned}
 
       {:exit, @claim_refused, out} ->
         {{:error, {:database_not_claimed, out}}, owned}
@@ -270,40 +667,111 @@ defmodule SdrAgent.WitnessMigration.Harness do
     kind, reason -> {:error, {:local_exception, {kind, reason}}}
   end
 
-  # predecessor -> new up -> new down -> new up, probing after each.
-  defp steps(database, tmp, %{new: new, predecessor: predecessor}, runner) do
+  # The plan's states in order (continuity: predecessor -> new up -> new
+  # down -> new up, probing after each).
+  defp steps(database, tmp, versions, {runner, config}) do
     fixtures = Path.join(tmp, "fixtures.json")
 
-    plan = [
-      {"up", predecessor, "predecessor"},
-      {"up", new, "up"},
-      {"down", new, "down"},
-      {"up", new, "up_again"}
-    ]
-
-    Enum.reduce_while(plan, {:ok, %{}}, fn {direction, version, label}, {:ok, states} ->
-      migrate = script("migrate.exs", [database, direction, Integer.to_string(version)])
-      out = Path.join(tmp, label <> ".json")
-      note("migrate.#{label}.direction", direction)
-      note("migrate.#{label}.version", Integer.to_string(version))
-
-      with {:ok, _} <- step(runner, :migrate, migrate, "child.migrate." <> label),
-           {:ok, _} <-
-             step(
-               runner,
-               :probe,
-               script("probe.exs", [database, label, fixtures, out]),
-               "child.probe." <> label
-             ),
-           {:ok, probe} <- read_json(out),
-           {:ok, checks} <- probe_checks(probe, database, label) do
-        note_checks(label, checks)
-        {:cont, {:ok, Map.put(states, label, checks)}}
+    Enum.reduce_while(config.plan, {:ok, %{}}, fn %{label: label} = state, {:ok, states} ->
+      with :ok <- migrate_step(state, database, versions, runner, config),
+           {:ok, checks} <- probe_step(state, database, tmp, fixtures, runner, config) do
+        {:cont, {:ok, if(checks, do: Map.put(states, label, checks), else: states)}}
       else
         {:timeout, _, _} = timeout -> {:halt, {:error, {:step_timeout, label, timeout}}}
         {:error, _} = error -> {:halt, error}
       end
     end)
+  end
+
+  defp migrate_step(%{migrate: nil}, _database, _versions, _runner, _config), do: :ok
+
+  defp migrate_step(state, database, versions, runner, config) do
+    %{label: label, migrate: {direction, key}, expect: expect} = state
+    version = Integer.to_string(Map.fetch!(versions, key))
+    note("migrate.#{label}.direction", direction)
+    note("migrate.#{label}.version", version)
+    if expect == :refusal, do: note("migrate.#{label}.expected", "refusal")
+    runner = step_runner(config, runner, {:migrate, label})
+    args = script("migrate.exs", [database, direction, version])
+
+    case expect do
+      :ok ->
+        case step(runner, :migrate, args, "child.migrate." <> label) do
+          {:ok, _} -> :ok
+          other -> other
+        end
+
+      :refusal ->
+        refused_step(runner, args, label)
+    end
+  end
+
+  # DB #2's `down`: only a confirmed nonzero exit (not the target refusal)
+  # whose output carries the check_violation SQLSTATE line is the refusal.
+  defp refused_step(runner, args, label) do
+    outcome = run(runner, :migrate, args)
+    note("child.migrate." <> label, child_outcome(outcome))
+
+    case refusal_kind(outcome) do
+      :check_violation ->
+        note("migrate.#{label}.refusal", "check_violation")
+        :ok
+
+      reason when reason in [:not_refused, :target_refused, :untyped] ->
+        note("migrate.#{label}.refusal", Atom.to_string(reason))
+        {:error, {:down_refusal, reason, outcome}}
+
+      :not_exited ->
+        not_exited(outcome)
+    end
+  end
+
+  # The refusal type of a down child's outcome (Codex 0c4bfabc Q2).
+  defp refusal_kind({:ok, _out}), do: :not_refused
+  defp refusal_kind({:exit, @target_refused, _out}), do: :target_refused
+
+  defp refusal_kind({:exit, status, out})
+       when is_integer(status) and status > 0 and is_binary(out),
+       do: if(Regex.match?(@check_violation, out), do: :check_violation, else: :untyped)
+
+  defp refusal_kind({:exit, _status, _out}), do: :untyped
+  defp refusal_kind(_other), do: :not_exited
+
+  # Today's typed handling of a child that never exited (timeout, not
+  # started, raised).
+  defp not_exited({:timeout, _, _} = timeout), do: timeout
+  defp not_exited(other), do: {:error, {:migrate, other}}
+
+  defp probe_step(%{probe?: false}, _database, _tmp, _fixtures, _runner, _config),
+    do: {:ok, nil}
+
+  defp probe_step(%{label: label}, database, tmp, fixtures, runner, config) do
+    probe = Map.fetch!(config.probes, label)
+
+    if probe != default_probe(),
+      do: note("probe.#{label}.script", Path.relative_to(probe, @support))
+
+    runner = step_runner(config, runner, {:probe, label})
+    out = Path.join(tmp, label <> ".json")
+    args = ["run", "--no-start", "--no-compile", "--no-deps-check", probe, database, label]
+
+    with {:ok, _} <- step(runner, :probe, args ++ [fixtures, out], "child.probe." <> label),
+         {:ok, json} <- read_json(out),
+         {:ok, checks} <- probe_checks(json, database, label) do
+      note_checks(label, checks)
+      {:ok, checks}
+    end
+  end
+
+  defp step_runner(config, runner, {kind, label} = key) do
+    case Map.fetch(config.runners, key) do
+      {:ok, override} ->
+        note("runner.#{kind}.#{label}", "override")
+        override
+
+      :error ->
+        runner
+    end
   end
 
   @doc """
