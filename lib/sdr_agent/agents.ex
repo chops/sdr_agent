@@ -2060,14 +2060,7 @@ defmodule SdrAgent.Agents do
   """
   def provision_delegated_grant(authorization_id, opts) when is_binary(authorization_id) do
     Provisioning.within(authorization_id, fn ->
-      grant_transaction(opts, fn opts ->
-        GuardedCall.create(
-          ModelCallGrant,
-          :provision_delegated,
-          %{authorization_id: authorization_id},
-          opts
-        )
-      end)
+      grant_transaction(opts, &guarded_provision(authorization_id, &1))
     end)
   end
 
@@ -2080,14 +2073,18 @@ defmodule SdrAgent.Agents do
   """
   def update_grant_terms(%ModelCallGrant{} = grant, attrs, opts) do
     grant_transaction(opts, fn opts ->
-      GuardedCall.update(grant, :update_terms, Map.new(attrs), opts)
+      guarded_grant_update(grant, :update_terms, Map.new(attrs), opts)
     end)
   end
 
-  @doc "ADM: revokes a grant (terminal). Requires `expected_revision`."
+  @doc """
+  ADM, or PRV for a delegated grant of its tenant in a configured agent
+  environment (C2* S2): revokes a grant (terminal). Requires
+  `expected_revision`.
+  """
   def revoke_grant(%ModelCallGrant{} = grant, attrs, opts) do
     grant_transaction(opts, fn opts ->
-      GuardedCall.update(grant, :revoke, Map.take(Map.new(attrs), [:expected_revision]), opts)
+      guarded_grant_update(grant, :revoke, Map.take(Map.new(attrs), [:expected_revision]), opts)
     end)
   end
 
@@ -2099,7 +2096,7 @@ defmodule SdrAgent.Agents do
     attrs = Map.take(Map.new(attrs), [:expected_revision, :key, :profile_id])
 
     grant_transaction(opts, fn opts ->
-      GuardedCall.update(grant, :release_allocation, attrs, opts)
+      guarded_grant_update(grant, :release_allocation, attrs, opts)
     end)
   end
 
@@ -2269,6 +2266,43 @@ defmodule SdrAgent.Agents do
       {:ok, value} -> {:ok, value}
       {:error, error} -> {:error, Ash.Error.to_error_class(error)}
     end
+  end
+
+  # A guarded grant change. `rollback_on_error?: false`: an error raised in
+  # the action's own hooks (e.g. the post-lock `Forbidden` of
+  # `RequireOwnerForm` or `RevokeProvenance`) is returned to the Guard as the
+  # call's result, so a refusal is audited once, instead of rolling the
+  # enclosing transaction back past the Guard. `grant_transaction/2` rolls
+  # every write back on any error.
+  defp guarded_grant_update(grant, action, attrs, opts) do
+    guarded_grant(action, grant.id, opts, fn actor ->
+      grant
+      |> Ash.Changeset.for_update(action, attrs, actor: actor)
+      |> Ash.update(rollback_on_error?: false)
+    end)
+  end
+
+  defp guarded_provision(authorization_id, opts) do
+    guarded_grant(:provision_delegated, nil, opts, fn actor ->
+      ModelCallGrant
+      |> Ash.Changeset.for_create(:provision_delegated, %{authorization_id: authorization_id},
+        actor: actor
+      )
+      |> Ash.create(rollback_on_error?: false)
+    end)
+  end
+
+  defp guarded_grant(action, subject_id, opts, fun) do
+    actor = Keyword.get(opts, :actor)
+
+    meta = %{
+      resource: ModelCallGrant,
+      action: action,
+      guarded?: Keyword.get(opts, :guarded?, false),
+      subject_id: subject_id
+    }
+
+    Guard.run(meta, actor, fn -> fun.(actor) end)
   end
 
   defp unwrap_load(grant) do
