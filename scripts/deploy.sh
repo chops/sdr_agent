@@ -4,9 +4,10 @@
 #
 # sdr_agent is a co-tenant on ch-web-prod: the service listens on 127.0.0.1:4005 only
 # (config/runtime.exs, SDR_BIND_IP default) behind Caddy. The NixOS side (systemd unit
-# `sdr-agent`, user/group `sdr_agent`, Postgres co-tenant DB over /run/postgresql, sops
-# secret file /run/secrets/sdr-agent/env, Caddy vhost, DNS) lives in
-# ~/src/nixos-hetzner-infra and must be applied BEFORE the first run.
+# `sdr-agent`, user/group `sdr_agent`, its own PostgreSQL 18 cluster `sdr-agent-postgresql`
+# over the socket /run/sdr-agent-postgresql, sops secret file /run/secrets/sdr-agent/env,
+# Caddy vhost, DNS) lives in ~/src/nixos-hetzner-infra and must be applied BEFORE the
+# first run.
 #
 # Safety properties kept from agent_builder:
 # - the source is `git archive` of a clean, pushed commit, never the working tree, so
