@@ -76,8 +76,14 @@ defmodule SdrAgentWeb.AuthControllerTest do
   end
 
   describe "magic link" do
+    # Each request comes from its own client address (the proxy's
+    # X-Forwarded-For), so the per-client request limit never couples tests.
     defp request_link(conn, email) do
-      post(conn, "/auth/user/magic_link/request", %{"user" => %{"email" => email}})
+      n = System.unique_integer([:positive])
+
+      conn
+      |> put_req_header("x-forwarded-for", "198.18.#{rem(n, 250)}.#{rem(div(n, 250), 250) + 1}")
+      |> post("/auth/user/magic_link/request", %{"user" => %{"email" => email}})
     end
 
     test "the sign-in page offers the email-link form next to the password form", %{conn: conn} do
@@ -125,6 +131,48 @@ defmodule SdrAgentWeb.AuthControllerTest do
         refute requested =~ email
         refute_email_sent()
       end
+    end
+  end
+
+  describe "enforced allowlist (prod)" do
+    setup do
+      previous = Application.fetch_env(:sdr_agent, :login_allowlist_enforced)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:sdr_agent, :login_allowlist_enforced, value)
+          :error -> Application.delete_env(:sdr_agent, :login_allowlist_enforced)
+        end
+      end)
+
+      Application.put_env(:sdr_agent, :login_allowlist_enforced, true)
+      :ok
+    end
+
+    test "a user off the list gets the ordinary failure, no session, and an audited refusal",
+         %{conn: conn} = ctx do
+      System.put_env("SDR_LOGIN_ALLOWLIST", "someone.else@example.test")
+
+      conn = sign_in(conn, to_string(ctx.reviewer.email), test_password())
+
+      assert redirected_to(conn) == "/sign-in"
+      refute get_session(conn, "user_token")
+      assert [event] = events_of_type(ctx.tenant, "auth.sign_in.failed")
+      assert event.actor_type == :anonymous
+    end
+
+    test "a console session ends once its user is off the list", %{conn: conn} = ctx do
+      email = to_string(ctx.reviewer.email)
+      System.put_env("SDR_LOGIN_ALLOWLIST", email)
+
+      conn = sign_in(conn, email, test_password())
+      assert redirected_to(conn) == "/"
+      console = conn |> recycle() |> get("/")
+      assert html_response(console, 200)
+
+      System.put_env("SDR_LOGIN_ALLOWLIST", "someone.else@example.test")
+      refused = console |> recycle() |> get("/")
+      assert redirected_to(refused) == "/sign-in"
     end
   end
 end
