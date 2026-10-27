@@ -11,6 +11,7 @@ defmodule SdrAgent.ReadDeadline do
   alias SdrAgent.Repo
 
   @keys [:actor, :count_timeout_ms, :statement_timeout_ms]
+  @statement_timeout_head "** (Postgrex.Error) ERROR 57014 (query_canceled) canceling statement due to statement timeout"
 
   @doc "Run one authorized scalar read within lowerable 2500/2000 ms ceilings."
   def run(opts, fun) do
@@ -95,6 +96,13 @@ defmodule SdrAgent.ReadDeadline do
 
   defp timeout?(%DBConnection.ConnectionError{message: message}),
     do: String.contains?(message, ["timeout", "timed out", "queue"])
+
+  # The upgraded data layer (ash 3.37, ash_postgres 2.15, ash_sql 0.8) hands a
+  # statement cancelled by this read's statement_timeout back as an UnknownError
+  # holding the formatted Postgrex error (Splode.to_error/2). Only that exact
+  # formatted head is a timeout; any other text stays producer_error.
+  defp timeout?(%Ash.Error.Unknown.UnknownError{error: message}) when is_binary(message),
+    do: String.starts_with?(message, @statement_timeout_head)
 
   defp timeout?(%{errors: errors}) when is_list(errors), do: Enum.any?(errors, &timeout?/1)
   defp timeout?(%{error: error}), do: timeout?(error)
