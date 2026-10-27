@@ -236,7 +236,7 @@ defmodule SdrAgent.Agents.DemoExceptionReleaseTest do
       parts = Fx.constructed!(env, :qualification, calibration: true)
       before = length(events(env.tenant))
 
-      result = finalize(env, parts.invocation, {:ok, parts.receipt})
+      result = ResultGate.finalize(parts.invocation, Fx.gate(env), {:ok, parts.receipt})
       assert result == {:error, {:demo_exception_refused, :scope_mismatch}}
       assert {:ok, nil} = Agents.get_result_release(parts.invocation.id, actor: env.agent)
       assert length(events(env.tenant)) == before
@@ -466,8 +466,20 @@ defmodule SdrAgent.Agents.DemoExceptionReleaseTest do
     {invocation, ResultGate.await(invocation, Fx.gate(env), store_root: env.root)}
   end
 
-  defp finalize(env, invocation, outcome),
-    do: ResultGate.finalize(invocation, Fx.gate(env), outcome)
+  # The gate's finalize step (`ResultGate.gate/3`, plan r2 §6; AC6): an
+  # under-head refusal rolls back as `{:demo_exception_refused, code}` and
+  # is repeated exactly once with the exception disabled. (H2 writes no
+  # store exchange, so `gate/3`'s own await is not used here.)
+  defp finalize(env, invocation, outcome) do
+    case ResultGate.finalize(invocation, Fx.gate(env), outcome) do
+      {:error, {:demo_exception_refused, code}} ->
+        opts = [demo_exception: {:disabled, code}]
+        ResultGate.finalize(invocation, Fx.gate(env), outcome, opts)
+
+      result ->
+        result
+    end
+  end
 
   defp links!(env, invocation) do
     rec = system_actor(:reconciler, env.tenant)
