@@ -31,16 +31,16 @@ defmodule SdrAgent.TestSupport.RawLog do
 
   @doc """
   Waits up to `timeout` ms for an error-or-higher event whose metadata
-  `domain` starts with `domain`; returns it, or nil.
+  `domain` includes `domain` (Elixir's Logger prepends `:elixir`); returns
+  it, or nil.
   """
   @spec await_error(reference(), atom(), timeout()) :: map() | nil
   def await_error(ref, domain, timeout \\ 3_000) do
     receive do
       {^ref, %{level: level, meta: meta} = event} when level in @error_levels ->
-        case Map.get(meta, :domain) do
-          [^domain | _] -> event
-          _other -> await_error(ref, domain, timeout)
-        end
+        if domain in List.wrap(Map.get(meta, :domain)),
+          do: event,
+          else: await_error(ref, domain, timeout)
     after
       timeout -> nil
     end
