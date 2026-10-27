@@ -72,7 +72,10 @@ defmodule SdrAgent.Agents.ReleaseCampaignFactsTest do
       "#{prefix}.cleanup.drop_result" => "ok",
       "#{prefix}.cleanup.drop_receipt" => "valid",
       "#{prefix}.cleanup.drop_protocol" => "2",
+      "#{prefix}.cleanup.backends_before_drop" => "0",
       "#{prefix}.cleanup.blocking_before_drop" => "0",
+      "#{prefix}.cleanup.excluded_before_drop" => "0",
+      "#{prefix}.cleanup.drain_attempts" => "1",
       "#{prefix}.cleanup.database_absent_after_drop" => "true",
       "#{prefix}.cleanup.temp_folder" => "removed",
       "#{prefix}.evidence.export" => "sealed",
@@ -453,6 +456,79 @@ defmodule SdrAgent.Agents.ReleaseCampaignFactsTest do
       assert match?(%{rc: 5, evidence: :inconsistent}, result), inspect(result)
       assert target(result, @db1).disposition == :uncertain
       assert target(result, @db2).disposition == :uncertain
+    end
+  end
+
+  ## RED-10 (Codex 67c749cf M3 and important item 1)
+
+  @before_any_effect %{
+    "launch" => "not_run",
+    "suite" => "not_run",
+    "result_line" => "none",
+    "parent.create" => "not_attempted",
+    "parent.disposal" => "none",
+    "parent_demo.create" => "not_attempted",
+    "parent_demo.disposal" => "none",
+    "db1.evidence_dir" => "absent",
+    "db1.export" => "missing",
+    "db2.evidence_dir" => "absent",
+    "db2.export" => "missing"
+  }
+
+  describe "an interruption takes precedence, before any launch too (M3)" do
+    test "interrupted before any effect: rc 5, every lease kept, never a released no-effect" do
+      for {label, overrides} <- [
+            {"no effect", %{}},
+            {"a collision at the first CREATE", %{"parent.create" => "collision"}},
+            {"a partial create, cleaned",
+             %{"parent.create" => "created", "parent.disposal" => "dropped"}}
+          ] do
+        result =
+          decide(
+            observed(@before_any_effect |> Map.merge(overrides) |> Map.put("interrupted", "yes")),
+            []
+          )
+
+        assert match?(%{rc: 5, leases: :keep, test: :incomplete}, result),
+               "#{label}: #{inspect(result)}"
+
+        assert Enum.all?(result.plan, &(&1.action == :keep_uncertain)), label
+      end
+    end
+  end
+
+  describe "all six published v2 drop facts, by the harness's own validator (important 1)" do
+    test "a missing, contradictory or out-of-range fact never disposes" do
+      for {label, overrides} <- [
+            {"no backends count", %{"db1.cleanup.backends_before_drop" => :delete}},
+            {"no excluded count", %{"db1.cleanup.excluded_before_drop" => :delete}},
+            {"no attempt count", %{"db1.cleanup.drain_attempts" => :delete}},
+            {"excluded differs from backends", %{"db1.cleanup.excluded_before_drop" => "1"}},
+            {"backends differs from excluded", %{"db1.cleanup.backends_before_drop" => "2"}},
+            {"a noncanonical excluded count", %{"db1.cleanup.excluded_before_drop" => "00"}},
+            {"no attempt", %{"db1.cleanup.drain_attempts" => "0"}},
+            {"eleven attempts", %{"db1.cleanup.drain_attempts" => "11"}},
+            {"another protocol", %{"db1.cleanup.drop_protocol" => "3"}}
+          ] do
+        result = decide(observed(), receipts(overrides))
+        assert target(result, @db1).disposition == :uncertain, label
+        refute match?(%{rc: 0}, result), label
+      end
+    end
+
+    test "exact autovacuum workers counted and excluded still dispose" do
+      result =
+        decide(
+          observed(),
+          receipts(%{
+            "db2.cleanup.backends_before_drop" => "1",
+            "db2.cleanup.excluded_before_drop" => "1",
+            "db2.cleanup.drain_attempts" => "2"
+          })
+        )
+
+      assert target(result, @db2) == %{database: @db2, owned: true, disposition: :dropped}
+      assert match?(%{rc: 0}, result), inspect(result)
     end
   end
 
