@@ -21,7 +21,10 @@ defmodule SdrAgent.SDR.ResearchBriefTest do
     * A quote is grounded only wholly inside the prefix that was sent: a
       quote from an unsent suffix, or from a dropped source, is ungrounded
       and never becomes an EvidenceClaim; every persisted span ends inside
-      its sent prefix.
+      its sent prefix. In the same capped extraction a controlled quote
+      wholly inside a sent prefix is grounded and persisted against the
+      original artifact (its stored full content and code-point span), so
+      truncation never means rejecting every claim (Codex r2 B1-R2-2).
     * A deterministic `research_caps` Decision (rule `sdr.research_caps`)
       records the caps applied, against the run's snapshot; the registry
       labels these three caps checked at use and still claims nothing for
@@ -95,28 +98,50 @@ defmodule SdrAgent.SDR.ResearchBriefTest do
     def dropped_quote(domain),
       do: page(news_url(domain)).content |> sentences() |> hd()
 
+    @doc """
+    A controlled quote wholly inside the website's sent prefix and not a
+    whole sentence (so the fixture brain never proposes it itself): its
+    first sentence after "<name> is ", without the full stop.
+    """
+    def inside_quote(domain) do
+      page("https://#{domain}").content
+      |> sentences()
+      |> hd()
+      |> String.split(" is ", parts: 2)
+      |> List.last()
+      |> String.trim_trailing(".")
+    end
+
+    @doc "The website's full fixture content (what its artifact stores)."
+    def website_content(domain), do: page("https://#{domain}").content
+
     def respond("sdr.evidence_extraction" = op, %{company: %{domain: domain}} = input) do
       output = RecordingBrain.respond(op, input)
       site = Enum.find(input.sources, &(&1.source_type == :company_website))
 
-      adversarial = [
-        claim(site && site.index, suffix_quote(domain)),
-        claim(2, dropped_quote(domain))
+      controlled = [
+        claim(site && site.index, inside_quote(domain), "controlled quote inside the sent text"),
+        claim(
+          site && site.index,
+          suffix_quote(domain),
+          "adversarial quote outside the sent text"
+        ),
+        claim(2, dropped_quote(domain), "adversarial quote from a dropped source")
       ]
 
-      %{output | claims: output.claims ++ adversarial}
+      %{output | claims: output.claims ++ controlled}
     end
 
     def respond(op, input), do: RecordingBrain.respond(op, input)
 
-    defp claim(index, quote),
+    defp claim(index, quote, reason),
       do: %{
         source: index,
         claim: quote,
         quote: quote,
         confidence: 0.9,
         quality: "accepted",
-        reason: "adversarial quote outside the sent text"
+        reason: reason
       }
 
     defp page(url), do: Map.fetch!(Sources.pages(), Sources.normalize(url))
@@ -381,7 +406,10 @@ defmodule SdrAgent.SDR.ResearchBriefTest do
       # Every persisted span lies inside the prefix that was sent.
       sent_length = Map.new(expected, fn {source, text} -> {source.id, codepoints(text)} end)
 
-      for claim <- claims!(ctx, lead) do
+      claims = claims!(ctx, lead)
+      assert claims != [], "B1-04: no claim was grounded under truncation"
+
+      for claim <- claims do
         assert Map.has_key?(sent_length, claim.research_artifact_id),
                "B1-04: a claim cites a source that was not sent"
 
@@ -418,7 +446,8 @@ defmodule SdrAgent.SDR.ResearchBriefTest do
       assert_caps_detail!(caps_decision!(ctx, run), flow, expected, @lowered)
     end
 
-    test "quotes from an unsent suffix or a dropped source are never grounded", ctx do
+    test "only a quote inside a sent prefix is grounded; unsent-suffix and dropped-source quotes are not",
+         ctx do
       save_lowered!(ctx)
       %{run: run, lead: lead} = assign_with!(ctx, UnsentQuotes)
       drain!()
@@ -446,6 +475,44 @@ defmodule SdrAgent.SDR.ResearchBriefTest do
 
       assert length(ungrounded) >= 2,
              "B1-04: the two adversarial quotes were not recorded ungrounded"
+
+      # In the same capped extraction, the controlled quote wholly inside the
+      # website's sent prefix is grounded against the ORIGINAL artifact: its
+      # id, its stored full content and the code-point span in that content.
+      inside = UnsentQuotes.inside_quote(domain)
+      assert String.contains?(site.content, inside), "setup: the controlled quote was not sent"
+      assert [artifact] = for(a <- artifacts!(ctx, run), a.source_type == :company_website, do: a)
+
+      assert artifact.content_sha256 ==
+               :crypto.hash(:sha256, UnsentQuotes.website_content(domain)),
+             "setup: the website artifact does not store the original content"
+
+      original = content!(ctx, artifact)
+      {byte, _length} = :binary.match(original, inside)
+      from = original |> binary_part(0, byte) |> codepoints()
+      to = from + codepoints(inside)
+
+      assert to <= codepoints(site.content),
+             "setup: the controlled quote is not inside the prefix"
+
+      claim = Enum.find(claims!(ctx, lead), &(&1.quote == inside))
+      assert claim, "B1-04: the controlled quote inside the sent prefix was not grounded"
+      assert claim.research_artifact_id == artifact.id
+      assert claim.quality == :accepted
+
+      assert {claim.source_location.char_start, claim.source_location.char_end} == {from, to},
+             "B1-04: the claim's span is not the quote's code-point span in the original content"
+
+      assert original |> String.codepoints() |> Enum.slice(from, to - from) |> Enum.join() ==
+               inside
+
+      assert [extraction] =
+               for(i <- invocations!(ctx, run), i.purpose == :evidence_extraction, do: i)
+
+      assert claim.model_invocation_id == extraction.id
+
+      quality = Enum.find(decisions!(ctx, run), &(&1.id == claim.extraction_decision_id))
+      assert quality && {quality.kind, quality.outcome} == {:evidence_quality, "accepted"}
     end
 
     test "the registry labels B1-04's caps checked at use and claims nothing for C5's" do
