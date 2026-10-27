@@ -26,6 +26,19 @@
 // `defer_quiet_hours` outcome, a future not-before time and no capture (a
 // merely pending delivery is not enough). Exits non-zero on the first
 // failed step.
+//
+// Several runs may go in parallel: each gets a fresh Chrome profile and asks
+// Chrome for a free debugging port (--remote-debugging-port=0), then reads
+// the port Chrome bound from the profile's DevToolsActivePort file (a step
+// failure if the file does not appear within 10 s). At the end it signals
+// only the Chrome it spawned and deletes the profile only after that process
+// has exited; if it has not exited within 5 s the profile is kept and its
+// path printed, so the caller can quarantine the lane.
+//
+// Exit status: 0 PASS; 1 a failed step; 2 refused URL (not loopback, or the
+// dev port 4120); 3 the attestation refused; 4 Chrome did not exit and its
+// profile was retained (this overrides 0 or 1; the journey's PASS or FAIL
+// line is still printed before it).
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -84,18 +97,45 @@ if (!reviewer || !lead01) throw new Error("demo fixtures not found");
 
 let profile = null;
 let browser = null;
-const port = 9300 + Math.floor(Math.random() * 400);
+let port = null;
 
 function startBrowser() {
   profile = mkdtempSync(join(tmpdir(), "sdr-smoke-chrome-"));
   browser = spawn(chrome, [
-    "--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
+    "--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`,
     "--no-first-run", "--no-default-browser-check", "--disable-extensions", "about:blank",
   ], { stdio: "ignore" });
   browser.on("error", (error) => { console.error(`FAIL cannot start Chrome (${error.message})`); process.exit(1); });
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const exited = (child) => child.exitCode !== null || child.signalCode !== null;
+
+// The port Chrome bound for --remote-debugging-port=0: the first line of the
+// fresh profile's DevToolsActivePort file ("<port>\n<browser ws path>").
+async function devToolsPort(timeoutMs = 10000) {
+  const file = join(profile, "DevToolsActivePort");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (exited(browser)) throw new Error(`headless Chrome exited (${browser.exitCode ?? browser.signalCode}) before writing ${file}`);
+    let text = "";
+    try { text = readFileSync(file, "utf8"); } catch {}
+    const match = /^(\d+)\r?\n/.exec(text);
+    if (match && Number(match[1]) > 0 && Number(match[1]) < 65536) return Number(match[1]);
+    await sleep(100);
+  }
+  throw new Error(`headless Chrome wrote no DevToolsActivePort port within ${timeoutMs} ms (${file})`);
+}
+
+// SIGTERM the spawned Chrome (its own child handle only) and wait for it to
+// exit; false if it is still alive after timeoutMs.
+async function stopBrowser(timeoutMs = 5000) {
+  if (exited(browser)) return true;
+  const gone = new Promise((r) => browser.once("exit", () => r(true)));
+  browser.kill();
+  return Promise.race([gone, sleep(timeoutMs).then(() => false)]);
+}
+
 let ws, seq = 0;
 const pending = new Map();
 
@@ -148,6 +188,7 @@ function quietHours(now = new Date()) {
 async function main() {
   await attest();
   startBrowser();
+  port = await devToolsPort();
   let target;
   for (let i = 0; i < 40 && !target; i++) {
     try {
@@ -221,10 +262,9 @@ main()
   .then(() => 0, (error) => { console.error(`FAIL ${error.message}`); return 1; })
   .then(async (code) => {
     try { ws?.close(); } catch {}
-    if (browser) {
-      const exited = new Promise((r) => browser.once("exit", r));
-      browser.kill();
-      await Promise.race([exited, sleep(5000)]);
+    if (browser && !(await stopBrowser())) {
+      console.error(`FAIL Chrome (pid ${browser.pid}) did not exit within 5 s; profile retained at ${profile} (quarantine this lane)`);
+      process.exit(4);
     }
     if (profile) { try { rmSync(profile, { recursive: true, force: true, maxRetries: 5 }); } catch {} }
     process.exit(code);
