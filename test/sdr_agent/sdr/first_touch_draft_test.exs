@@ -24,8 +24,14 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       no link). This is the specified syntactic check, not detection of
       every URL spelling. A rejected shape fails the run as invalid model
       output: no enrollment, no Draft, no `sdr.draft.completed`.
-    * `HandOffProposal` refuses a missing, rejected or unbound shape check
-      before any lock or write.
+    * `HandOffProposal` refuses a missing, rejected or nonexistent shape
+      check before any lock or write, and a persisted passed shape check
+      whose provenance is wrong (another run, another draft of the same run,
+      or the right draft with another invocation); a passed check with
+      matching provenance reaches the enrollment gate (Codex r2 B1-R2-1).
+      The wrong-provenance test asserts the kind stage first (the
+      `draft_shape_validation` kind is recordable through the domain API),
+      so a missing kind is told apart from a missing guard.
 
   Hermetic: Fake model provider; the recording responder
   (`SdrAgent.SettingsFixtures.RecordingBrain`) and test responders built on
@@ -207,6 +213,88 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       agent_state: %{phase: :validate, campaign_id: ctx.campaign_id}
     }
   end
+
+  defp lead_status!(ctx, lead) do
+    {:ok, lead} = Sales.fetch(Sales.Lead, lead.id, actor: ctx.admin)
+    lead.status
+  end
+
+  # A genuine draft_proposal Decision and its completed ModelInvocation on
+  # `run`, through domain actions only: `%{decision, invocation}`.
+  defp genuine_draft!(ctx, run, lead, key) do
+    attrs = key |> AgentsFixtures.model_attrs() |> Map.put(:purpose, :outreach_proposal)
+    {:ok, run} = Agents.get_run(run.id, actor: ctx.agent)
+    {:ok, invocation} = Agents.reserve_model_invocation(run, attrs, actor: ctx.agent)
+    {:ok, invocation} = Agents.mark_model_invocation_sent(invocation, actor: ctx.agent)
+
+    {:ok, invocation} =
+      Agents.complete_model_invocation(invocation, AgentsFixtures.completion(), actor: ctx.agent)
+
+    {:ok, decision} =
+      Context.decide(
+        context(ctx, run, key),
+        %{
+          kind: :draft_proposal,
+          mode: :llm,
+          subject_id: lead.id,
+          model_invocation_id: invocation.id,
+          output_pointer: "",
+          inputs: %{"evidence_ids" => []},
+          outcome: "proposed",
+          rationale: "fixture draft"
+        },
+        key
+      )
+
+    %{decision: decision, invocation: invocation}
+  end
+
+  # A passed draft_shape_validation Decision recorded on `run` that binds
+  # `draft` (its inputs and input refs), through `Context.decide/4` (the
+  # domain API). Asserts the kind stage: before the kind exists this fails
+  # here, distinguishable from the later guard-stage assertions.
+  defp shape_on!(ctx, run, lead, draft, point) do
+    result =
+      Context.decide(
+        context(ctx, run, point),
+        %{
+          kind: :draft_shape_validation,
+          mode: :deterministic,
+          rule_id: "sdr.draft_shape",
+          rule_version: "1",
+          subject_id: lead.id,
+          inputs: %{
+            "draft_proposal_decision_id" => draft.decision.id,
+            "model_invocation_id" => draft.invocation.id
+          },
+          outcome: "passed",
+          outcome_detail: %{"reasons" => []}
+        },
+        "shape-#{point}",
+        [draft.decision, draft.invocation]
+      )
+
+    assert match?({:ok, %{kind: :draft_shape_validation, outcome: "passed"}}, result),
+           "B1-05 kind stage: a passed draft_shape_validation Decision cannot be recorded " <>
+             "through the domain API (#{short(result)}); the guard stage was not reached"
+
+    {:ok, shape} = result
+    shape
+  end
+
+  defp gate_params(ctx, lead, draft, shape),
+    do: %{
+      lead_id: lead.id,
+      draft: %{
+        decision_id: draft.decision.id,
+        model_invocation_id: draft.invocation.id,
+        proposal: %{}
+      },
+      claims_check: %{passed: true, decision_id: Ecto.UUID.generate()},
+      personalization_check: %{passed: true, decision_id: Ecto.UUID.generate()},
+      shape_check: %{passed: true, decision_id: shape.id},
+      plan: %{campaign_id: ctx.campaign_id, step: %{id: Ecto.UUID.generate()}}
+    }
 
   describe "the draft input" do
     test "carries the snapshot's offering, guide and brief, and no booking-link slot", ctx do
@@ -426,7 +514,9 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
       for {label, shape_check} <- [
             missing: nil,
             rejected: %{passed: false, decision_id: Ecto.UUID.generate()},
-            unbound: %{passed: true, decision_id: Ecto.UUID.generate()}
+            # A Decision id that names no record; persisted passed checks
+            # with wrong provenance are the next test.
+            nonexistent: %{passed: true, decision_id: Ecto.UUID.generate()}
           ] do
         run = running_run!(ctx, lead)
         attempt = if shape_check, do: Map.put(params, :shape_check, shape_check), else: params
@@ -449,6 +539,97 @@ defmodule SdrAgent.SDR.FirstTouchDraftTest do
         Sales.list_records(Sales.CampaignEnrollment, filter: [lead_id: lead.id], actor: ctx.admin)
 
       assert enrollments == []
+    end
+
+    test "HandOffProposal accepts a passed shape check only for its own run, draft and invocation",
+         ctx do
+      lead = fixture_lead!(ctx, "01")
+      status = lead_status!(ctx, lead)
+
+      # Genuine fixtures through domain actions: each case gets its own
+      # running run with real draft_proposal Decisions and invocations.
+      matching = running_run!(ctx, lead)
+      matching_a = genuine_draft!(ctx, matching, lead, "matching-a")
+
+      other_run = running_run!(ctx, lead)
+      other_run_a = genuine_draft!(ctx, other_run, lead, "other-run-a")
+      holder = running_run!(ctx, lead)
+
+      other_draft = running_run!(ctx, lead)
+      other_draft_a = genuine_draft!(ctx, other_draft, lead, "other-draft-a")
+      other_draft_b = genuine_draft!(ctx, other_draft, lead, "other-draft-b")
+
+      mixed = running_run!(ctx, lead)
+      mixed_a = genuine_draft!(ctx, mixed, lead, "mixed-a")
+      mixed_b = genuine_draft!(ctx, mixed, lead, "mixed-b")
+
+      # Kind stage: a passed draft_shape_validation Decision must be
+      # recordable through the domain API before the guard can be exercised.
+      shapes = [
+        matching: {matching, matching_a, shape_on!(ctx, matching, lead, matching_a, "matching")},
+        other_run:
+          {other_run, other_run_a, shape_on!(ctx, holder, lead, other_run_a, "other-run")},
+        other_draft:
+          {other_draft, other_draft_a,
+           shape_on!(ctx, other_draft, lead, other_draft_b, "other-draft")},
+        mixed_refs:
+          {mixed, mixed_a,
+           shape_on!(ctx, mixed, lead, %{mixed_a | invocation: mixed_b.invocation}, "mixed")}
+      ]
+
+      # Guard stage, matching provenance first: it passes the shape guard and
+      # reaches the enrollment gate, which refuses this unqualified lead.
+      [{:matching, {run, draft, shape}} | refused] = shapes
+
+      result =
+        observe(fn ->
+          HandOffProposal.perform(
+            gate_params(ctx, lead, draft, shape),
+            context(ctx, run, :matching)
+          )
+        end)
+
+      assert match?({:ok, %{phase: :stop}}, result),
+             "B1-05: a matching passed shape check did not reach the enrollment gate: " <>
+               short(result)
+
+      assert run!(ctx, run).status == :running
+
+      assert Enum.any?(decisions!(ctx, run), &(&1.kind == :enrollment)),
+             "B1-05: a matching passed shape check did not reach the enrollment gate"
+
+      for {label, {run, draft, shape}} <- refused do
+        result =
+          observe(fn ->
+            HandOffProposal.perform(
+              gate_params(ctx, lead, draft, shape),
+              context(ctx, run, label)
+            )
+          end)
+
+        assert result == {:error, {:halt, :invalid_model_output}},
+               "B1-05 guard stage: a passed shape check with #{label} provenance was accepted: " <>
+                 short(result)
+
+        failed = run!(ctx, run)
+        assert {failed.status, failed.status_reason} == {:failed, :invalid_model_output}
+
+        refute Enum.any?(decisions!(ctx, run), &(&1.kind == :enrollment)),
+               "B1-05: a #{label} shape check reached the enrollment gate"
+
+        refute "sdr.draft.completed" in signal_types(ctx.tenant, run)
+        assert lead_status!(ctx, lead) == status, "B1-05: a #{label} shape check moved the lead"
+      end
+
+      {:ok, enrollments} =
+        Sales.list_records(Sales.CampaignEnrollment, filter: [lead_id: lead.id], actor: ctx.admin)
+
+      assert enrollments == []
+
+      {:ok, drafts} =
+        Outreach.list_records(Outreach.Draft, filter: [lead_id: lead.id], actor: ctx.admin)
+
+      assert drafts == []
     end
   end
 end
