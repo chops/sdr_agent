@@ -10,6 +10,17 @@ defmodule SdrAgent.Agents.ModelCallGrant do
   `revoked_at`. Its spendable slices are `ModelCallAllocation`s; their
   attempts never sum above `total_attempts`.
 
+  Provenance (C2* S2; ADR-0004 agent-environment item 9): `provisioning`
+  (`:owner_form`, the default, or `:delegated`), `delegated_authorization_id`
+  and `delegated_authorization_sha256` (the compiled registry entry it was
+  provisioned from, `SdrAgent.AgentEnv.Registry`). None is writable by an
+  action input. The database holds every row to exactly two shapes
+  (`model_call_grants_provenance`, TRUE-or-reject): an owner-form row has
+  both user ids and no delegated field; a delegated row has no creator, has
+  the authorization id and its lowercase hex-64 digest, and has an updater
+  only once revoked. At most one grant exists per tenant and authorization
+  id, whatever its status (`:unique_delegated_authorization`).
+
   Consumption is derived from the ModelInvocations charged to the grant and
   is never stored or refunded (C9-02). Lowering a limit below what is
   consumed is allowed; it only stops new reservations.
@@ -42,6 +53,17 @@ defmodule SdrAgent.Agents.ModelCallGrant do
   # The reviewed real profiles (R0-03 registry, `SdrAgent.AI.ModelProfiles`).
   @real_profiles SdrAgent.AI.ModelProfiles.real_ids()
   @statuses [:active, :revoked]
+  @provisionings [:owner_form, :delegated]
+  # Exactly the two accepted provenance shapes; every predicate must be TRUE
+  # (SQL UNKNOWN rejects).
+  @provenance_check "COALESCE(" <>
+                      "(provisioning = 'owner_form' AND created_by_id IS NOT NULL " <>
+                      "AND updated_by_id IS NOT NULL AND delegated_authorization_id IS NULL " <>
+                      "AND delegated_authorization_sha256 IS NULL) OR " <>
+                      "(provisioning = 'delegated' AND created_by_id IS NULL " <>
+                      "AND delegated_authorization_id IS NOT NULL " <>
+                      "AND delegated_authorization_sha256 IS NOT NULL " <>
+                      "AND (updated_by_id IS NULL OR status = 'revoked')), false)"
   @terms [
     :name,
     :purpose,
@@ -56,6 +78,9 @@ defmodule SdrAgent.Agents.ModelCallGrant do
   postgres do
     table "model_call_grants"
     repo SdrAgent.Repo
+
+    identity_wheres_to_sql unique_delegated_authorization:
+                             "delegated_authorization_id IS NOT NULL"
 
     references do
       reference :tenant, on_delete: :restrict
@@ -77,6 +102,16 @@ defmodule SdrAgent.Agents.ModelCallGrant do
 
       check_constraint :profile_ids, "model_call_grants_profiles",
         check: "cardinality(profile_ids) > 0"
+
+      check_constraint :provisioning, "model_call_grants_provisioning",
+        check: SdrAgent.Audit.SQL.one_of("provisioning", @provisionings)
+
+      check_constraint :delegated_authorization_sha256, "model_call_grants_delegated_sha256",
+        check:
+          "delegated_authorization_sha256 IS NULL OR " <>
+            "delegated_authorization_sha256 ~ '^[0-9a-f]{64}$'"
+
+      check_constraint :provisioning, "model_call_grants_provenance", check: @provenance_check
     end
 
     custom_statements do
@@ -207,6 +242,17 @@ defmodule SdrAgent.Agents.ModelCallGrant do
     end
 
     attribute :revoked_at, :utc_datetime_usec, writable?: false, public?: true
+
+    attribute :provisioning, :atom do
+      allow_nil? false
+      writable? false
+      default :owner_form
+      public? true
+      constraints one_of: @provisionings
+    end
+
+    attribute :delegated_authorization_id, :string, writable?: false, public?: true
+    attribute :delegated_authorization_sha256, :string, writable?: false, public?: true
     attribute :trace_id, :string, allow_nil?: false, public?: true
     attribute :span_id, :string, allow_nil?: false, public?: true
 
@@ -228,12 +274,17 @@ defmodule SdrAgent.Agents.ModelCallGrant do
 
   relationships do
     belongs_to :tenant, SdrAgent.Audit.Tenant, allow_nil?: false, public?: true
-    belongs_to :created_by, SdrAgent.Accounts.User, allow_nil?: false, public?: true
-    belongs_to :updated_by, SdrAgent.Accounts.User, allow_nil?: false, public?: true
+    belongs_to :created_by, SdrAgent.Accounts.User, allow_nil?: true, public?: true
+    belongs_to :updated_by, SdrAgent.Accounts.User, allow_nil?: true, public?: true
 
     has_many :allocations, SdrAgent.Agents.ModelCallAllocation,
       destination_attribute: :grant_id,
       public?: true
+  end
+
+  identities do
+    identity :unique_delegated_authorization, [:tenant_id, :delegated_authorization_id],
+      where: expr(not is_nil(delegated_authorization_id))
   end
 
   @doc """
