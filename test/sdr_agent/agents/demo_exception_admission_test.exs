@@ -20,9 +20,13 @@ defmodule SdrAgent.Agents.DemoExceptionAdmissionTest do
   effective validated startup timeout (OQ10):
 
     * at reservation, the app's named server's published value; else the
-      configured `:timeout` (an integer ≥ 1000); else 240_000 ms, never
-      the module's 120_000 default;
+      configured `:timeout` (an integer ≥ 1000); else 240_000 ms;
     * at launch, the launching server's own published value.
+
+  A published value is the validated startup timeout the server actually
+  runs, so a server started without `:timeout` publishes and uses the
+  module's 120_000 (Codex 64240c0f ruling 1). Only the no-server fallback
+  is never 120_000.
 
   The plan IDs covered:
 
@@ -50,15 +54,33 @@ defmodule SdrAgent.Agents.DemoExceptionAdmissionTest do
   allocation is unbounded. No ClaudeCLI server is registered under the
   app's name, and none is configured, unless a test says so.
 
-  Classification (RED-5 at b30364b9):
+  RED-5 supplement (Codex 64240c0f binding rulings 1-4):
 
-    * **behavioural:** every refusal (today the call is admitted) and
-      `admission_reason?(:demo_exception_window)` (false today);
+    * **Ruling 1.** A server actually running 120_000 supplies T at
+      reservation and at launch, over a differing configuration.
+    * **Ruling 2.** The guard reads only the entry's authorization id and
+      the Source's `authorization/1`: no attestation, live binding or
+      delegation callback.
+    * **Ruling 3.** Every real call is guarded on its own charged grant and
+      allocation, a non-delegated grant included.
+    * **Ruling 4.** At reservation the guard comes after the grant and
+      allocation checks (and the admission gate) and before room; at launch
+      it comes after the charged grant and allocation checks, and covers
+      `:not_started`.
+
+  Classification (RED-5 at b30364b9; the supplement at 64240c0f):
+
+    * **behavioural:** every refusal (today the call is admitted; in the
+      window-over-room case it is refused `{:budget_exhausted, :grant}`)
+      and `admission_reason?(:demo_exception_window)` (false today);
     * **structural:** `Admission.demo_exception_reasons/0` is absent;
     * **`control:`** (passes today and must stay green): admission inside
       the window, selector off, a Fake call, the 240_000 ms instant without
       a server, a server running 240_000 ms, the existing reason mappings,
-      and the per-window T-W5 sequence.
+      the per-window T-W5 sequence, a server actually running 120_000
+      (ruling 1), callback isolation (ruling 2), a non-delegated call in
+      its window (ruling 3), and the earlier refusals' precedence at
+      reservation and launch (ruling 4).
   """
   use SdrAgent.AuditCase, async: false
 
@@ -96,6 +118,8 @@ defmodule SdrAgent.Agents.DemoExceptionAdmissionTest do
   @a_until ~U[2026-10-29 00:00:00.000000Z]
   @gap ~U[2026-10-29 12:00:00.000000Z]
   @b_from ~U[2026-10-30 00:00:00.000000Z]
+  # Ruling 3: the end of a non-delegated grant that funds a call.
+  @other_end ~U[2026-10-30 00:00:00.000000Z]
   @in_b ~U[2026-10-30 12:00:00.000000Z]
   @windows [
     %{
@@ -161,11 +185,95 @@ defmodule SdrAgent.Agents.DemoExceptionAdmissionTest do
       assert {:ok, %{provider: :fake}} =
                Agents.reserve_model_invocation(env.run, attrs, actor: env.agent)
     end
+
+    # Ruling 2: the scheduling guard is no authority check. With a valid
+    # registry authorization it admits whatever the attestation, live
+    # binding or delegation would say, and consults none of them.
+    test "control: the guard reads only the entry's authorization id and the Source's " <>
+           "authorization/1 (attestation :none; live binding and delegation forbidden)",
+         %{env: env} do
+      Fx.put_source!(:attestation, :none)
+      Fx.put_source!(:live_binding?, fn _att, _tenant -> raise "guard read live_binding?" end)
+
+      Fx.put_source!(:delegated_grant?, fn _grant, _auth ->
+        raise "guard read delegated_grant?"
+      end)
+
+      Fx.reset_calls!(env)
+
+      assert {:ok, invocation} = reserve(env, "isolated")
+      assert {:ok, %{status: :sent}} = launch(env, invocation)
+      callbacks = env |> Fx.calls() |> Enum.map(&elem(&1, 0))
+      assert Enum.all?(callbacks, &(&1 == :authorization)), inspect(callbacks)
+    end
+  end
+
+  describe "every real call on its own charged funding (ruling 3)" do
+    test "a call funded by a non-delegated grant is refused :launch_margin near that grant's " <>
+           "own end, the refusal naming its own grant and allocation",
+         %{env: env} do
+      other = other_grant!(env)
+      at!(DateTime.add(@other_end, -250_000, :millisecond))
+      assert_reservation_refused(env, "other-end", :launch_margin)
+
+      assert [event] =
+               env.tenant
+               |> events_of_type("model.reservation.refused")
+               |> Enum.filter(&(&1.idempotency_key == "other-end"))
+
+      [allocation] = other.allocations
+
+      assert {event.payload["grant_id"], event.payload["allocation_id"]} ==
+               {other.id, allocation.id}
+    end
+
+    test "control: in its window, the non-delegated grant's call is reserved on that grant " <>
+           "and launched",
+         %{env: env} do
+      other = other_grant!(env)
+      [allocation] = other.allocations
+      assert {:ok, invocation} = reserve(env, "other-in")
+      assert {invocation.grant_id, invocation.allocation_id} == {other.id, allocation.id}
+      assert {:ok, %{status: :sent}} = launch(env, invocation)
+    end
+  end
+
+  describe "precedence (ruling 4)" do
+    @tag demo_env: [attempts: 1]
+    test "at reservation the window refusal wins over simultaneous room exhaustion", %{env: env} do
+      assert {:ok, _first} = reserve(env, "uses-the-room")
+      at!(before_end(250_000))
+      assert_reservation_refused(env, "no-room-no-time", :launch_margin)
+    end
+
+    test "control: an earlier admission-gate refusal keeps its precedence at reservation",
+         %{env: env} do
+      AdmissionFixtures.gate_inactive!()
+      at!(before_end(250_000))
+      assert {:error, %Refused{reason: :result_gate_inactive}} = reserve(env, "gate-first")
+    end
+
+    test "control: an earlier grant refusal keeps its precedence at reservation", %{env: env} do
+      revoke!(env, env.grant)
+      at!(before_end(250_000))
+      assert {:error, %Refused{reason: :no_eligible_grant}} = reserve(env, "grant-first")
+    end
+
+    test "control: at launch the charged grant's own check keeps its precedence", %{env: env} do
+      assert {:ok, invocation} = reserve(env, "charged-first")
+      revoke!(env, env.grant)
+      at!(before_end(250_000))
+
+      assert {:error,
+              %Refused{stage: :launch, reason: :grant_ineligible_at_launch, check: :grant_revoked}} =
+               launch(env, invocation)
+    end
   end
 
   describe "reservation (T-W2, AC11)" do
-    test "launch_margin: with neither a running server nor a configured timeout, T is " <>
-           "240_000 ms, never the module's 120_000; the run stops :model_not_admitted",
+    test "launch_margin: with neither a running server nor a configured timeout, the " <>
+           "fallback T is 240_000 ms, never the module's 120_000; the run stops " <>
+           ":model_not_admitted",
          %{env: env} do
       assert margin(120_000) < 250_000 and 250_000 < margin(240_000)
       at!(before_end(250_000))
@@ -231,6 +339,20 @@ defmodule SdrAgent.Agents.DemoExceptionAdmissionTest do
       Fx.put_source!(:authorization, :error)
       assert_launch_refused(env, invocation, :authorization_unavailable)
     end
+
+    # Ruling 4: the authorization's start moves after a valid reservation;
+    # the charged grant and allocation stay eligible.
+    test "not_started: the authorization's start moved after a valid reservation", %{env: env} do
+      assert {:ok, invocation} = reserve(env, "start-moved")
+      late = %{env.authorization | starts_at: DateTime.add(env.now, 3_600, :second)}
+      id = Fx.authorization_id()
+
+      Fx.put_source!(:authorization, fn requested ->
+        if requested == id, do: {:ok, late}, else: :error
+      end)
+
+      assert_launch_refused(env, invocation, :not_started)
+    end
   end
 
   describe "the startup timeout T (T-W2c, OQ10)" do
@@ -266,7 +388,7 @@ defmodule SdrAgent.Agents.DemoExceptionAdmissionTest do
            "reservation (no app server, no configuration: 240_000 ms) was admitted",
          %{env: env} do
       at!(before_end(330_000))
-      result = server_call(env, 300_000)
+      result = server_call(env, timeout: 300_000)
 
       assert match?(
                {:error,
@@ -283,7 +405,21 @@ defmodule SdrAgent.Agents.DemoExceptionAdmissionTest do
 
     test "control: a server running 240_000 ms launches at the same instant", %{env: env} do
       at!(before_end(330_000))
-      assert {:ok, result} = server_call(env, 240_000)
+      assert {:ok, result} = server_call(env, timeout: 240_000)
+      assert result.invocation.status == :completed
+    end
+
+    # Ruling 1: an app server started without :timeout runs (and publishes)
+    # the module's 120_000; reservation and launch both use it, over a
+    # configured 300_000, where the fallback 240_000 or the configuration
+    # would refuse.
+    test "control: an app server actually running the module's 120_000 ms supplies T at " <>
+           "reservation and launch, over a configured 300_000 ms",
+         %{env: env} do
+      assert margin(120_000) < 250_000 and 250_000 < margin(240_000)
+      Application.put_env(:sdr_agent, ClaudeCLI, timeout: 300_000)
+      at!(before_end(250_000))
+      assert {:ok, result} = server_call(env, name: ClaudeCLI.server())
       assert result.invocation.status == :completed
     end
   end
@@ -393,6 +529,33 @@ defmodule SdrAgent.Agents.DemoExceptionAdmissionTest do
   end
 
   defp failure_ids(env), do: env |> run_failures() |> Enum.map(& &1.id)
+
+  # Ruling 3: with the demo grant revoked, the tenant's only eligible grant
+  # is an owner-form one the Source does not delegate (asserted), ending at
+  # @other_end, before the authorization and the policy.
+  defp other_grant!(env) do
+    revoke!(env, env.grant)
+
+    other =
+      AgentsFixtures.grant!(env.tenant, %{
+        name: "G-OTHER-TEST",
+        purpose: "Synthetic non-delegated test calls",
+        total_attempts: 10,
+        starts_at: ~U[2026-10-27 06:00:00.000000Z],
+        expires_at: @other_end,
+        allocations: [%{key: :daily_use, applies_to: ModelCallAllocation.buckets(), attempts: 10}]
+      })
+
+    refute DemoException.delegated_grant?(other, env.authorization)
+    other
+  end
+
+  defp revoke!(env, grant) do
+    admin = human(:admin, env.tenant)
+
+    {:ok, _revoked} =
+      Agents.revoke_grant(grant, %{expected_revision: grant.revision}, actor: admin)
+  end
 
   # Every attempt charged to the demo grant (attempts are never refunded).
   defp charged(env) do
@@ -530,10 +693,11 @@ defmodule SdrAgent.Agents.DemoExceptionAdmissionTest do
     )
   end
 
-  # One facade call through an unnamed ClaudeCLI server running `timeout`
-  # that follows the test's frozen clock; the hermetic fake CLI writes a v4
+  # One facade call through a ClaudeCLI server started with `opts` (unnamed
+  # unless `name:`; its `timeout:` when given, else the module default) that
+  # follows the test's frozen clock; the hermetic fake CLI writes a v4
   # exchange only if the call is launched. Returns the facade's result.
-  defp server_call(env, timeout) do
+  defp server_call(env, opts) do
     server =
       start_supervised!(
         {ClaudeCLI,
@@ -541,9 +705,8 @@ defmodule SdrAgent.Agents.DemoExceptionAdmissionTest do
            command: System.find_executable("elixir"),
            test_launcher: true,
            command_args: [@fake, "witness", env.root, @variant],
-           timeout: timeout,
            clock_from: self()
-         ]}
+         ] ++ opts}
       )
 
     id = "demo-admission-#{System.unique_integer([:positive])}"

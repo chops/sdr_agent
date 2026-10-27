@@ -14,15 +14,18 @@ defmodule SdrAgent.AI.ClaudeCLIEffectiveTimeoutTest do
       SdrAgent.AI.ModelProvider.ClaudeCLI`, the value
       `Runtime.server_options/1` passes the app's server), when that is an
       integer of at least 1000 (the server's own rule). Otherwise it is
-      240_000, never the module's 120_000 default.
+      240_000: the no-server fallback is never the module's 120_000
+      default. A server started without `:timeout` actually runs that
+      120_000, so it publishes and supplies it (Codex 64240c0f ruling 1).
 
   Cases: named; pid; unnamed; missing (and a live process that is no
   server); stopped; a suspended server (the lookup does not wait); the
-  running value over a shorter and over a longer configuration; the
+  running value over a shorter and over a longer configuration, including
+  a server actually running the module's 120_000 (ruling 1); the
   configured value; invalid configurations; neither.
 
-  Classification (RED-5 at b30364b9): structural (both functions are
-  absent).
+  Classification (RED-5 at b30364b9; the ruling-1 case added at 64240c0f):
+  structural (both functions are absent).
   """
   use ExUnit.Case, async: false
 
@@ -103,6 +106,16 @@ defmodule SdrAgent.AI.ClaudeCLIEffectiveTimeoutTest do
       pid = start!(name: name, timeout: 200_000)
       assert provider_timeout_ms(name) == 200_000
       assert provider_timeout_ms(pid) == 200_000
+    end
+
+    test "a server started without :timeout publishes the module's 120_000 it actually runs, " <>
+           "which wins over a differing configuration" do
+      configure!(300_000)
+      name = unique_name()
+      pid = start!(name: name)
+      assert effective_timeout(name) == 120_000
+      assert effective_timeout(pid) == 120_000
+      assert provider_timeout_ms(name) == 120_000
     end
 
     test "with no running server the configured timeout applies, as the app's server gets it" do
