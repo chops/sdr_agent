@@ -35,6 +35,17 @@ defmodule SdrAgent.Agents.DelegatedAllocationTest do
   RED: the actor type and `Delegated` do not exist (structural `c2star-s2:`
   guards). The admin cases run today's allocation policies, which admit
   them (behavioural). The owner-form control passes now and after GREEN.
+
+  RED-2 supplement (Codex interface rulings `032335a9`, Q3 and Q7; one
+  decisive negative action per test, so no refusal is masked by another's
+  failure or changed by another's wrong success): the authorization id
+  and digest cases, the hand-built and tampered (grant id, marker) cases and
+  each update and release are separate tests. Added: a parent that cannot
+  be read is never taken for an owner-form parent (Q7); a genuine context
+  verifies only in its own process (Q3). Effective CREATE authority is
+  owner-form parent AND marker AND current admin, OR delegated parent AND
+  PRV AND a verified delegated-bundle context; delegated update and release
+  have no allowed actor or context (Q7).
   """
   use SdrAgent.AuditCase, async: false
 
@@ -110,6 +121,9 @@ defmodule SdrAgent.Agents.DelegatedAllocationTest do
     )
   end
 
+  defp other_value(:authorization_id), do: entry_id()
+  defp other_value(:authorization_sha256), do: rand_hex(32)
+
   defp require_delegated! do
     require_function!(delegated_module(), :run, 2)
     require_function!(delegated_module(), :context, 1)
@@ -172,20 +186,21 @@ defmodule SdrAgent.Agents.DelegatedAllocationTest do
       assert_no_new_allocation(ctx, "another grant")
     end
 
-    test "a context naming another authorization id or digest is refused", ctx do
-      prv = prv(ctx.tenant)
+    for binding <- [:authorization_id, :authorization_sha256] do
+      @tag other_binding: binding
+      test "a context naming another #{binding} is refused", ctx do
+        prv = prv(ctx.tenant)
+        overrides = %{ctx.other_binding => other_value(ctx.other_binding)}
 
-      for overrides <- [%{authorization_id: entry_id()}, %{authorization_sha256: rand_hex(32)}] do
         result =
           in_context(bindings(ctx.a, overrides), &create_allocation(ctx.a, prv, context_of(&1)))
 
-        assert_forbidden(result, "context with #{inspect(Map.keys(overrides))}")
+        assert_forbidden(result, "context with another #{ctx.other_binding}")
+        assert_no_new_allocation(ctx, "another #{ctx.other_binding}")
       end
-
-      assert_no_new_allocation(ctx, "another authorization")
     end
 
-    test "a hand-built or tampered context is refused", ctx do
+    test "a hand-built context is refused", ctx do
       prv = prv(ctx.tenant)
       require_delegated!()
 
@@ -198,15 +213,29 @@ defmodule SdrAgent.Agents.DelegatedAllocationTest do
       hand_built =
         SdrAgent.Repo.transaction(fn -> create_allocation(ctx.a, prv, context_of(forged)) end)
 
+      assert match?({:ok, _result}, hand_built), "fixture: transaction #{inspect(hand_built)}"
       assert_forbidden(elem(hand_built, 1), "hand-built context")
+      assert_no_new_allocation(ctx, "hand-built context")
+    end
 
-      tampered =
-        in_context(bindings(ctx.b), fn context ->
-          create_allocation(ctx.a, prv, context_of(Map.put(context, :grant_id, ctx.a.id)))
-        end)
+    for field <- [:grant_id, :marker] do
+      @tag tampered_field: field
+      test "a genuine context with its #{field} changed is refused", ctx do
+        prv = prv(ctx.tenant)
+        field = ctx.tampered_field
+        # The context of grant b, re-pointed at grant a (grant_id), or of
+        # grant a with another transaction marker (marker).
+        source = if field == :grant_id, do: ctx.b, else: ctx.a
+        value = if field == :grant_id, do: ctx.a.id, else: "sdr_tampered_marker"
 
-      assert_forbidden(tampered, "tampered context")
-      assert_no_new_allocation(ctx, "forged context")
+        tampered =
+          in_context(bindings(source), fn context ->
+            create_allocation(ctx.a, prv, context_of(Map.put(context, field, value)))
+          end)
+
+        assert_forbidden(tampered, "context with a changed #{field}")
+        assert_no_new_allocation(ctx, "tampered #{field}")
+      end
     end
 
     test "a context used after run/2 returned is refused", ctx do
@@ -229,45 +258,103 @@ defmodule SdrAgent.Agents.DelegatedAllocationTest do
       assert_forbidden(result, "admin, owner-form marker, delegated parent")
       assert_no_new_allocation(ctx, "admin create")
     end
+
+    test "a parent that cannot be read is never taken for an owner-form parent (Q7)", ctx do
+      missing = %{ctx.a | id: Ash.UUIDv7.generate()}
+      result = create_allocation(missing, ctx.admin, GrantContext.context())
+      assert_forbidden(result, "admin, owner-form marker, unreadable parent")
+      assert_no_new_allocation(ctx, "unreadable parent")
+    end
+  end
+
+  ## The registered context (Q3)
+
+  describe "the registered context (Q3)" do
+    test "control: a genuine context verifies inside run/2, in its own process", ctx do
+      require_function!(delegated_module(), :verify, 1)
+
+      result =
+        in_context(bindings(ctx.a), fn context ->
+          {context, invoke(delegated_module(), :verify, [context])}
+        end)
+
+      assert match?({_context, {:ok, _registered}}, result),
+             "c2star-s2: the genuine context did not verify: #{inspect(result, limit: 6)}"
+
+      {context, {:ok, registered}} = result
+      assert registered == context
+    end
+
+    test "another process cannot verify a genuine context", ctx do
+      require_function!(delegated_module(), :verify, 1)
+
+      result =
+        in_context(bindings(ctx.a), fn context ->
+          fn -> invoke(delegated_module(), :verify, [context]) end
+          |> Task.async()
+          |> Task.await()
+        end)
+
+      assert match?({:error, reason} when is_atom(reason), result),
+             "c2star-s2: another process verified the context: #{inspect(result, limit: 6)}"
+    end
   end
 
   ## Updates and releases
 
+  # One decisive negative action per test (supplement): a wrong success of
+  # an update cannot mask or change the outcome of a release.
+  defp allocation_action(:update, allocation, actor, context),
+    do: update_allocation(allocation, actor, context)
+
+  defp allocation_action(:release, allocation, actor, context),
+    do: release_allocation(allocation, actor, context)
+
   describe "updates and releases refused (T-G3)" do
-    test "the admin cannot update or release a delegated allocation with the owner-form marker",
-         ctx do
-      allocation = hd(ctx.a.allocations)
+    for action <- [:update, :release] do
+      @tag allocation_action: action
+      test "the admin cannot #{action} a delegated allocation with the owner-form marker", ctx do
+        result =
+          allocation_action(
+            ctx.allocation_action,
+            hd(ctx.a.allocations),
+            ctx.admin,
+            GrantContext.context()
+          )
 
-      assert_forbidden(
-        update_allocation(allocation, ctx.admin, GrantContext.context()),
-        "admin update"
-      )
+        assert_forbidden(result, "admin #{ctx.allocation_action}, owner-form marker")
+        assert_allocations_unchanged(ctx, "admin #{ctx.allocation_action}")
+      end
 
-      assert_forbidden(
-        release_allocation(allocation, ctx.admin, GrantContext.context()),
-        "admin release"
-      )
+      @tag allocation_action: action
+      test "PRV cannot #{action} a delegated allocation with the owner-form marker", ctx do
+        prv = prv(ctx.tenant)
 
-      assert_allocations_unchanged(ctx, "admin")
-    end
+        result =
+          allocation_action(
+            ctx.allocation_action,
+            hd(ctx.a.allocations),
+            prv,
+            GrantContext.context()
+          )
 
-    test "PRV cannot update or release a delegated allocation, with any context", ctx do
-      prv = prv(ctx.tenant)
-      allocation = hd(ctx.a.allocations)
+        assert_forbidden(result, "PRV #{ctx.allocation_action}, owner-form marker")
+        assert_allocations_unchanged(ctx, "PRV #{ctx.allocation_action}, marker")
+      end
 
-      assert_forbidden(update_allocation(allocation, prv, GrantContext.context()), "PRV update")
-      assert_forbidden(release_allocation(allocation, prv, GrantContext.context()), "PRV release")
+      @tag allocation_action: action
+      test "PRV cannot #{action} a delegated allocation inside a genuine context", ctx do
+        prv = prv(ctx.tenant)
+        allocation = hd(ctx.a.allocations)
 
-      inside =
-        in_context(bindings(ctx.a), fn context ->
-          {update_allocation(allocation, prv, context_of(context)),
-           release_allocation(allocation, prv, context_of(context))}
-        end)
+        result =
+          in_context(bindings(ctx.a), fn context ->
+            allocation_action(ctx.allocation_action, allocation, prv, context_of(context))
+          end)
 
-      assert match?({{:error, %Forbidden{}}, {:error, %Forbidden{}}}, inside),
-             "c2star-s2: PRV update/release inside a genuine context: #{inspect(inside, limit: 6)}"
-
-      assert_allocations_unchanged(ctx, "PRV")
+        assert_forbidden(result, "PRV #{ctx.allocation_action}, genuine context")
+        assert_allocations_unchanged(ctx, "PRV #{ctx.allocation_action}, context")
+      end
     end
   end
 

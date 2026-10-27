@@ -47,6 +47,15 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
   explicit `c2star-s2:` presence guard after their fixtures (structural).
   The admin AC5 cases run today's update and release routes (behavioural).
   The two owner-form controls pass now and after GREEN.
+
+  RED-2 supplement (Codex interface rulings `032335a9`, Q4 and Q6; one
+  decisive negative action per test, so no refusal is masked by another's
+  failure or changed by another's wrong success): each other actor, each
+  extra input, each private argument, each action inside an attestation,
+  the plain and forged-delegated owner-form revoke, and each AC5 actor,
+  mode and action (update_terms, release_allocation) is its own test. The
+  guarded refusals assert one `authz.denied` each, appended after rollback,
+  with no write and no success event (Q6).
   """
   use SdrAgent.AuditCase, async: false
 
@@ -202,6 +211,25 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
   defp label(%Actor{type: type}), do: "system actor #{type}"
   defp label(%{role: role}), do: "human #{role}"
 
+  defp assert_other_actor_refused(ctx, actor) do
+    before = denials(ctx)
+    assert_forbidden(provision(ctx.env.entry.id, actor: actor), label(actor))
+
+    assert denials(ctx) == before + 1,
+           "c2star-s2: #{label(actor)}: the refusal was not audited once (authz.denied)"
+
+    assert_nothing_provisioned(ctx, label(actor))
+  end
+
+  # The value a caller could supply for an extra input or a private
+  # argument (the true value where one exists).
+  defp supplied(:total_attempts, _env), do: 99
+  defp supplied(:provisioning, _env), do: :owner_form
+  defp supplied(:delegated_authorization_sha256, env), do: env.digest
+  defp supplied(:authorization_sha256, env), do: env.digest
+  defp supplied(:claim_nonce, env), do: env.claim.nonce
+  defp supplied(:decision_refs, env), do: env.entry.decision_refs
+
   ## AC1
 
   describe "the PRV actor (AC1)" do
@@ -312,23 +340,21 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
   describe "refusals: Forbidden (T-G2)" do
     setup :provisioning
 
-    test "humans and every system actor but PRV are Forbidden and audited; nothing is written",
-         ctx do
-      humans = for role <- [:admin, :reviewer, :auditor], do: human(role, ctx.tenant)
-
-      systems =
-        for type <- Actor.types() -- [:grant_provisioner],
-            do: Actor.system(type, ctx.tenant.id)
-
-      for actor <- humans ++ systems do
-        before = denials(ctx)
-        assert_forbidden(provision(ctx.env.entry.id, actor: actor), label(actor))
-
-        assert denials(ctx) == before + 1,
-               "c2star-s2: #{label(actor)}: the refusal was not audited (authz.denied)"
+    # One test per actor (supplement: no actor is masked by another's
+    # failure, and a wrong success cannot change a later actor's outcome).
+    for role <- [:admin, :reviewer, :auditor] do
+      @tag actor_role: role
+      test "a human #{role} is Forbidden and audited; nothing is written", ctx do
+        assert_other_actor_refused(ctx, human(ctx.actor_role, ctx.tenant))
       end
+    end
 
-      assert_nothing_provisioned(ctx, "other actors")
+    # Every system actor type but PRV, as compiled at this head.
+    for type <- Actor.types() -- [:grant_provisioner] do
+      @tag actor_type: type
+      test "system actor #{type} is Forbidden and audited; nothing is written", ctx do
+        assert_other_actor_refused(ctx, Actor.system(ctx.actor_type, ctx.tenant.id))
+      end
     end
 
     test "PRV with no claim (no attestation) is Forbidden and audited", ctx do
@@ -375,29 +401,45 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
       assert_nothing_provisioned(ctx, "bare action call")
     end
 
-    test "inside an attestation PRV still cannot create, change or release a grant", ctx do
+    test "inside an attestation PRV still cannot create a grant", ctx do
+      prv = prv(ctx.tenant)
+
+      result =
+        within(ctx.env.entry.id, fn ->
+          Agents.create_grant(owner_attrs(%{name: "G-PRV"}), actor: prv)
+        end)
+
+      assert_forbidden(result, "PRV create inside an attestation")
+      assert grants() == []
+    end
+
+    test "inside an attestation PRV still cannot change an owner-form grant's terms", ctx do
       owner = owner_grant!(ctx)
       prv = prv(ctx.tenant)
 
-      results =
+      result =
         within(ctx.env.entry.id, fn ->
-          %{
-            create: Agents.create_grant(owner_attrs(%{name: "G-PRV"}), actor: prv),
-            update_terms:
-              Agents.update_grant_terms(owner, %{expected_revision: 1, name: "renamed"},
-                actor: prv
-              ),
-            release_allocation:
-              Agents.release_allocation(owner, %{expected_revision: 1, key: :workshop},
-                actor: prv
-              )
-          }
+          Agents.update_grant_terms(owner, %{expected_revision: 1, name: "renamed"}, actor: prv)
         end)
 
-      for {action, result} <- results, do: assert_forbidden(result, "PRV #{action}")
+      assert_forbidden(result, "PRV update_terms inside an attestation")
+      stored = reload!(owner.id)
+      assert {stored.name, stored.revision} == {"G-OWNER", 1}
+    end
 
-      assert reload!(owner.id).revision == 1
-      assert length(grants()) == 1
+    test "inside an attestation PRV still cannot release an owner-form allocation", ctx do
+      owner = owner_grant!(ctx)
+      prv = prv(ctx.tenant)
+
+      result =
+        within(ctx.env.entry.id, fn ->
+          Agents.release_allocation(owner, %{expected_revision: 1, key: :workshop}, actor: prv)
+        end)
+
+      assert_forbidden(result, "PRV release_allocation inside an attestation")
+      stored = reload!(owner.id)
+      assert stored.revision == 1
+      assert Enum.all?(stored.allocations, &is_nil(&1.released_at))
     end
   end
 
@@ -437,54 +479,48 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
       assert_nothing_provisioned(ctx, "invalid")
     end
 
-    test "an extra input is NoSuchInput, inside an attestation", ctx do
-      env = provisioning_env!()
-      prv = prv(ctx.tenant)
+    test "the action accepts no attribute and one public argument, authorization_id", _ctx do
       action = require_action!(ModelCallGrant, :provision_delegated)
       assert action.accept == [], "c2star-s2: :provision_delegated must accept no attribute"
 
       assert for(argument <- action.arguments, argument.public?, do: argument.name) ==
                [:authorization_id]
+    end
 
-      extras = [
-        %{total_attempts: 99},
-        %{provisioning: :owner_form},
-        %{delegated_authorization_sha256: env.digest},
-        %{claim_nonce: env.claim.nonce}
-      ]
-
-      for extra <- extras do
+    for key <- [:total_attempts, :provisioning, :delegated_authorization_sha256, :claim_nonce] do
+      @tag extra_input: key
+      test "an extra input #{key} is NoSuchInput, inside an attestation", ctx do
+        env = provisioning_env!()
+        prv = prv(ctx.tenant)
+        require_action!(ModelCallGrant, :provision_delegated)
+        extra = %{ctx.extra_input => supplied(ctx.extra_input, env)}
         result = within(env.entry.id, fn -> raw_provision(env.entry.id, prv, extra, []) end)
 
         assert no_such_input?(result),
                "c2star-s2: #{inspect(extra)}: expected NoSuchInput, got " <>
                  inspect(result, limit: 8, printable_limit: 400)
-      end
 
-      assert_nothing_provisioned(ctx, "extra input")
+        assert_nothing_provisioned(ctx, "extra input #{ctx.extra_input}")
+      end
     end
 
-    test "a supplied private argument is refused, even with the true value", ctx do
-      env = provisioning_env!()
-      prv = prv(ctx.tenant)
-      private_arguments!()
+    for name <- @private do
+      @tag private_argument: name
+      test "a supplied private #{name} is refused, even with the true value", ctx do
+        env = provisioning_env!()
+        prv = prv(ctx.tenant)
+        private_arguments!()
+        name = ctx.private_argument
+        value = supplied(name, env)
 
-      supplied = [
-        authorization_sha256: env.digest,
-        claim_nonce: env.claim.nonce,
-        decision_refs: env.entry.decision_refs
-      ]
-
-      for {name, value} <- supplied do
         result =
           within(env.entry.id, fn ->
             raw_provision(env.entry.id, prv, %{}, private_arguments: %{name => value})
           end)
 
         assert_refused(result, :inputs_refused, "private #{name}")
+        assert_nothing_provisioned(ctx, "private #{name}")
       end
-
-      assert_nothing_provisioned(ctx, "private argument")
     end
 
     test "a live database oid other than the binding's is refused (T-B3, S2 half)", ctx do
@@ -602,30 +638,28 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
       assert {event.actor_type, event.actor_id} == {:user, ctx.admin.id}
     end
 
-    test "PRV cannot revoke an owner-form grant, even through a forged struct", ctx do
-      env = provisioning_env!()
-      owner = owner_grant!(ctx)
-      prv = prv(ctx.tenant)
+    for shape <- [:plain, :forged_delegated] do
+      @tag owner_shape: shape
+      test "PRV cannot revoke an owner-form grant (#{shape} struct); audited once", ctx do
+        env = provisioning_env!()
+        owner = owner_grant!(ctx)
+        prv = prv(ctx.tenant)
+        grant = owner_shape(ctx.owner_shape, owner, env)
+        before = denials(ctx)
 
-      forged = %{
-        owner
-        | provisioning: :delegated,
-          delegated_authorization_id: env.entry.id,
-          delegated_authorization_sha256: env.digest,
-          created_by_id: nil,
-          updated_by_id: nil
-      }
-
-      for {label, grant} <- [plain: owner, forged: forged] do
         assert_forbidden(
           Agents.revoke_grant(grant, %{expected_revision: 1}, actor: prv),
-          "PRV revoke #{label} owner-form"
+          "PRV revoke, #{ctx.owner_shape} owner-form"
         )
-      end
 
-      stored = reload!(owner.id)
-      assert {stored.status, stored.revision, stored.provisioning} == {:active, 1, :owner_form}
-      assert events_of_type(ctx.tenant, "model.grant.revoked") == []
+        assert denials(ctx) == before + 1, "c2star-s2: the refusal was not audited once"
+        stored = reload!(owner.id)
+
+        assert {stored.status, stored.revision, stored.provisioning, stored.updated_by_id} ==
+                 {:active, 1, :owner_form, ctx.admin.id}
+
+        assert events_of_type(ctx.tenant, "model.grant.revoked") == []
+      end
     end
 
     test "a revoked delegated grant funds no reservation", ctx do
@@ -652,16 +686,19 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
 
   ## AC5
 
-  defp assert_terms_refused(grant, actor, label) do
-    assert_forbidden(
-      Agents.update_grant_terms(grant, %{expected_revision: 1, name: "renamed"}, actor: actor),
-      "#{label}: update_terms"
-    )
+  # One decisive negative action per test (supplement): a wrong success of
+  # one action can neither mask nor change the outcome of the other.
+  defp terms_action(:update_terms, grant, actor),
+    do: Agents.update_grant_terms(grant, %{expected_revision: 1, name: "renamed"}, actor: actor)
 
-    assert_forbidden(
-      Agents.release_allocation(grant, %{expected_revision: 1, key: :daily_use}, actor: actor),
-      "#{label}: release_allocation"
-    )
+  defp terms_action(:release_allocation, grant, actor),
+    do: Agents.release_allocation(grant, %{expected_revision: 1, key: :daily_use}, actor: actor)
+
+  defp assert_terms_action_refused(ctx, grant, actor, label) do
+    before = denials(ctx)
+    assert_forbidden(terms_action(ctx.terms_action, grant, actor), label)
+    assert denials(ctx) == before + 1, "c2star-s2: #{label}: the refusal was not audited once"
+    assert_unchanged(ctx)
   end
 
   defp assert_unchanged(ctx) do
@@ -675,48 +712,80 @@ defmodule SdrAgent.Agents.DelegatedProvisioningTest do
     assert events_of_type(ctx.tenant, "model.grant.allocation_released") == []
   end
 
+  # An owner-form struct of the delegated row (forged provenance fields),
+  # or a delegated struct of an owner-form row.
+  defp forged_owner_form(row, admin) do
+    %{
+      row
+      | provisioning: :owner_form,
+        delegated_authorization_id: nil,
+        delegated_authorization_sha256: nil,
+        created_by_id: admin.id,
+        updated_by_id: admin.id
+    }
+  end
+
+  defp owner_shape(:plain, owner, _env), do: owner
+
+  defp owner_shape(:forged_delegated, owner, env) do
+    %{
+      owner
+      | provisioning: :delegated,
+        delegated_authorization_id: env.entry.id,
+        delegated_authorization_sha256: env.digest,
+        created_by_id: nil,
+        updated_by_id: nil
+    }
+  end
+
+  defp configure_mode!(mode) do
+    AgentEnvFixtures.configure!(AgentEnvFixtures.root!("s2"),
+      mode: mode,
+      nonce: AgentEnvFixtures.nonce()
+    )
+  end
+
   describe "delegated terms are immutable (AC5)" do
     setup ctx do
       %{row: delegated_row!(ctx.tenant)}
     end
 
-    test "a current admin cannot change or release them, inert or configured", ctx do
-      assert_terms_refused(ctx.row, ctx.admin, "admin, inert")
-      assert_unchanged(ctx)
+    for action <- [:update_terms, :release_allocation] do
+      @tag terms_action: action
+      test "a current admin cannot #{action} a delegated grant (inert)", ctx do
+        assert_terms_action_refused(ctx, ctx.row, ctx.admin, "admin, inert, #{ctx.terms_action}")
+      end
 
-      AgentEnvFixtures.configure!(AgentEnvFixtures.root!("s2"),
-        mode: :run,
-        nonce: AgentEnvFixtures.nonce()
-      )
+      @tag terms_action: action
+      test "a current admin cannot #{action} a delegated grant (configured, run)", ctx do
+        configure_mode!(:run)
 
-      assert_terms_refused(ctx.row, ctx.admin, "admin, configured")
-      assert_unchanged(ctx)
-    end
+        assert_terms_action_refused(
+          ctx,
+          ctx.row,
+          ctx.admin,
+          "admin, configured, #{ctx.terms_action}"
+        )
+      end
 
-    test "a forged owner-form struct of a delegated row is refused after the lock", ctx do
-      forged = %{
-        ctx.row
-        | provisioning: :owner_form,
-          delegated_authorization_id: nil,
-          delegated_authorization_sha256: nil,
-          created_by_id: ctx.admin.id,
-          updated_by_id: ctx.admin.id
-      }
+      @tag terms_action: action
+      test "a forged owner-form struct cannot #{action} a delegated row (post-lock)", ctx do
+        forged = forged_owner_form(ctx.row, ctx.admin)
 
-      assert_terms_refused(forged, ctx.admin, "admin, forged owner-form")
-      assert_unchanged(ctx)
-    end
+        assert_terms_action_refused(
+          ctx,
+          forged,
+          ctx.admin,
+          "admin, forged owner-form, #{ctx.terms_action}"
+        )
+      end
 
-    test "PRV cannot change or release them", ctx do
-      prv = prv(ctx.tenant)
-
-      AgentEnvFixtures.configure!(AgentEnvFixtures.root!("s2"),
-        mode: :provisioning,
-        nonce: AgentEnvFixtures.nonce()
-      )
-
-      assert_terms_refused(ctx.row, prv, "PRV")
-      assert_unchanged(ctx)
+      @tag terms_action: action
+      test "PRV cannot #{action} a delegated grant", ctx do
+        prv = prv(ctx.tenant)
+        configure_mode!(:provisioning)
+        assert_terms_action_refused(ctx, ctx.row, prv, "PRV, #{ctx.terms_action}")
+      end
     end
   end
 end

@@ -14,6 +14,10 @@ defmodule SdrAgent.Agents.AgentEnvGrantRoutesTest do
   RED: today the seeded admin's create, change and release succeed in a
   configured agent environment (behavioural). The revoke and inert controls
   pass now and after GREEN.
+
+  RED-2 supplement (Codex interface rulings `032335a9`): each mode and
+  route is its own test, with one audited refusal each, so no route's
+  refusal is masked by an earlier route's failure.
   """
   use SdrAgent.AuditCase, async: false
 
@@ -74,35 +78,38 @@ defmodule SdrAgent.Agents.AgentEnvGrantRoutesTest do
              inspect(result, limit: 8, printable_limit: 400)
   end
 
-  for mode <- [:run, :provisioning] do
-    @tag agent_env_mode: mode
-    test "in #{mode} mode the seeded admin cannot create, change or release a budget", ctx do
+  # One route per test (supplement): a wrong success of one route can
+  # neither mask nor change the outcome of another.
+  defp route(:create, ctx), do: Agents.create_grant(attrs("G-NEW"), actor: ctx.admin)
+
+  defp route(:update_terms, ctx),
+    do:
+      Agents.update_grant_terms(ctx.grant, %{expected_revision: 1, name: "renamed"},
+        actor: ctx.admin
+      )
+
+  defp route(:release_allocation, ctx),
+    do:
+      Agents.release_allocation(ctx.grant, %{expected_revision: 1, key: :workshop},
+        actor: ctx.admin
+      )
+
+  for mode <- [:run, :provisioning], route <- [:create, :update_terms, :release_allocation] do
+    @tag agent_env_mode: mode, grant_route: route
+    test "in #{mode} mode the seeded admin's #{route} is Forbidden and audited", ctx do
       configure!(ctx.agent_env_mode)
       before = denials(ctx)
-      label = "#{ctx.agent_env_mode} mode"
+      label = "#{ctx.agent_env_mode} mode: #{ctx.grant_route}"
 
-      assert_forbidden(Agents.create_grant(attrs("G-NEW"), actor: ctx.admin), "#{label}: create")
-
-      assert_forbidden(
-        Agents.update_grant_terms(ctx.grant, %{expected_revision: 1, name: "renamed"},
-          actor: ctx.admin
-        ),
-        "#{label}: update_terms"
-      )
-
-      assert_forbidden(
-        Agents.release_allocation(ctx.grant, %{expected_revision: 1, key: :workshop},
-          actor: ctx.admin
-        ),
-        "#{label}: release_allocation"
-      )
-
-      assert denials(ctx) == before + 3, "c2star-s2: #{label}: the refusals were not all audited"
+      assert_forbidden(route(ctx.grant_route, ctx), label)
+      assert denials(ctx) == before + 1, "c2star-s2: #{label}: the refusal was not audited once"
       {:ok, grants} = Agents.list_grants(actor: ctx.admin)
       assert Enum.map(grants, &{&1.id, &1.name, &1.revision}) == [{ctx.grant.id, "G-SEEDED", 1}]
       assert Enum.all?(hd(grants).allocations, &is_nil(&1.released_at))
     end
+  end
 
+  for mode <- [:run, :provisioning] do
     @tag agent_env_mode: mode
     test "control: in #{mode} mode the seeded admin can still revoke", ctx do
       configure!(ctx.agent_env_mode)
