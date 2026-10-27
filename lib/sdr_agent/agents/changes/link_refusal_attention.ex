@@ -23,8 +23,9 @@ defmodule SdrAgent.Agents.Changes.LinkRefusalAttention do
     * **admission before reservation** (`:model_not_admitted`): class
       `provider_error`, named with this request id by a
       `model.reservation.refused` event of this run whose recorded reason is
-      one of the admission-gate reasons or the profile switch fence's
-      (`:profile_switch_fenced`, C2-02b1);
+      one of the admission-gate reasons, the profile switch fence's
+      (`:profile_switch_fenced`, C2-02b1) or the C2* demo-exception
+      window's (`:demo_exception_window`, S3);
     * **launch** (`:model_not_admitted`): class `provider_error`, named by a
       `model.launch.refused` event of this run with this request id and a
       launch reason, whose invocation is this run's, carries this request
@@ -41,6 +42,7 @@ defmodule SdrAgent.Agents.Changes.LinkRefusalAttention do
 
   require Ash.Query
 
+  alias SdrAgent.Agents.Admission
   alias SdrAgent.Agents.Admission.Gate
   alias SdrAgent.Agents.Admission.SwitchFence
   alias SdrAgent.Agents.ModelInvocation
@@ -50,7 +52,10 @@ defmodule SdrAgent.Agents.Changes.LinkRefusalAttention do
 
   @caps ["grant_exhausted", "grant_day_exhausted", "allocation_exhausted"]
   @unavailable ["no_eligible_grant", "no_allocation", "ambiguous_allocation", "no_usage_origin"]
-  @admission Enum.map(Gate.reasons() ++ SwitchFence.reasons(), &Atom.to_string/1)
+  @admission Enum.map(
+               Gate.reasons() ++ SwitchFence.reasons() ++ Admission.demo_exception_reasons(),
+               &Atom.to_string/1
+             )
   @launch @admission ++
             [
               "grant_ineligible_at_launch",

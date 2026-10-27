@@ -305,7 +305,11 @@ defmodule SdrAgent.Agents do
   or counter change — and is then committed in its own transaction as one
   deduplicated `budget_exhausted` Failure and a `model.reservation.refused`
   event before `{:error, %Admission.Refused{reason: reason}}` — the exact
-  receipt: reason, Failure, event, run and request id — is returned. Inputs may be atom- or
+  receipt: reason, Failure, event, run and request id — is returned.
+  While the C2* selector is on, an otherwise admitted call can also be
+  refused `:demo_exception_window` (`Admission`; C2* S3). That refusal is
+  recorded as an admission refusal: a `provider_error` Failure and the
+  same event. Inputs may be atom- or
   string-keyed (not both for one field); caller-supplied `grant_id`,
   `allocation_id` and `ledger_generation` are dropped, and `provider`,
   `profile_id` and `purpose` are cast before the path is chosen. A Fake
@@ -587,7 +591,9 @@ defmodule SdrAgent.Agents do
       admission gate — calibration authority and predecessors, gate mode,
       store root, promoted tuple — then grant status and window, grant
       profiles, allocation grant, profile restriction, usage bucket,
-      availability; never room, which was charged at reservation) moves it
+      availability, then, while the C2* selector is on, the demo-exception
+      window `:demo_exception_window` on the charged rows; never room, which
+      was charged at reservation) moves it
       reserved → failed (never sent), opens one critical `provider_error`
       Failure whose subject is the **run** (its `operation_id` the run's
       Operation) and appends `model.launch.refused` (the reason, check and
