@@ -42,7 +42,7 @@ defmodule SdrAgent.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
-      {:tidewave, "== 0.9.0", only: [:dev]},
+      {:tidewave, "== 0.9.2", only: [:dev]},
       {:oban, "== 2.24.0"},
       {:picosat_elixir, "~> 0.2"},
       {:ash_authentication_phoenix, "== 2.17.4"},
