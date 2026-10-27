@@ -27,8 +27,13 @@ exact-text PASS (9f90b710); its own Status line still reads PROPOSED.
 Addendum 4 to the C2* amendment (2026-10-27; a send-gate refusal records
 its true reason, `:demo_exception_not_in_use`, on the approval), published
 after addendum 1, is accepted as D-228, owner acceptance delegated by D-219,
-after Codex's exact-text PASS (5685d6f0); addenda 2 and 3 are not accepted;
-its own Status line still reads PROPOSED.
+after Codex's exact-text PASS (5685d6f0); its own Status line still reads
+PROPOSED. Addenda 2 and 3 (2026-10-27; the origin-run and cited-invocation
+coverage of exception-derived drafts, and the server-derived release label on
+a new proposed-draft event), published between addenda 1 and 4, are accepted
+as D-230, owner acceptance delegated by D-219, after Codex's exact-text PASS
+(c151946f; addendum 3 with Codex's one-line correction); their own Status
+lines still read PROPOSED.
 
 ## Context
 
@@ -1514,6 +1519,143 @@ It changes nothing else in the C2* amendment, and it grants no call, spend, rele
   than inherits.
 
 <!-- END ADR-0005 C2* ADDENDUM 1 -->
+
+<!-- BEGIN ADR-0005 C2* ADDENDUM 2: text as reviewed by Codex (c151946f) -->
+
+#### C2* demo-exception amendment, addendum 2 (2026-10-27, PROPOSED): one validated rule for exception-derived drafts, covering their origin run and cited claims
+
+**Status: PROPOSED.** To be accepted, it follows ADR-0014 Amendment 3 (D-222):
+
+- Codex gives an independent exact-text and entity/action PASS.
+- A decision row then records "owner acceptance delegated by D-219".
+
+It only narrows use and adds labels. It grants no call, spend, release, use or eligibility.
+
+**Context.**
+
+- Item 10 derives the exception fact only from agent revisions' own `model_invocation_id`, which is the call that proposed the text.
+- A draft also depends on its origin run's earlier outputs: the evidence it cites and the qualification that enrolled its lead.
+- A draft may cite any accepted claim of its lead, and each claim names the invocation that extracted it.
+- So a draft whose proposal call was reconciled, but whose cited evidence is exception-derived, would be neither checked nor labelled.
+
+**Decision.**
+
+1. **Lineage.** The lineage of a revision R is R plus every revision reachable from R through `parent_revision_id` and `ai_baseline_revision_id`. It is valid only if every member satisfies all of these:
+   - it is in R's tenant and R's draft;
+   - a parent's revision number is exactly one lower than its child's;
+   - a baseline is an agent revision with a lower number than the revision that names it;
+   - a member has no parent exactly when it is number 1;
+   - an agent member names its run, its Decision and its model invocation, and that invocation exists in the tenant and belongs to that run.
+
+   Any other lineage is malformed.
+2. **Covered releases.** R's covered releases are the `:demo_exception` releases, in R's tenant, of these model invocations, and of no others:
+   - **(a) Origin run.** For each agent member A: every invocation whose `agent_run_id` is A's `agent_run_id` and whose `sequence_in_run` is at most that of A's own invocation. A's own invocation is one of them.
+   - **(b) Cited claims.** For each lineage member and each of its citations: the invocation that the cited EvidenceClaim names in `model_invocation_id`, when it names one. Every such named invocation is read by its id, whatever its release, and must exist in R's tenant. Only then is its release, if it has one, classified.
+
+   No other run of the lead, and no lead-wide or tenant-wide set, is consulted. A withheld, calibration or released release, or the absence of a release, is not covered and grants nothing.
+3. **Exception-derived.** R is exception-derived exactly when it has at least one covered release. This replaces the first bullet of item 10, "When a revision is exception-derived". A human edit never removes the fact: a human revision's lineage contains its predecessors, and its carried citations come from its parent.
+4. **Use authority.** Wherever item 10 requires use authority for an exception-derived revision, it requires use authority (item 2) for every covered release, without duplicates and never just one of them.
+   - The read before the verdict evaluates all of them at one instant.
+   - The read after the first chain-head append evaluates all of them again, at a fresh instant, and freshly re-reads the grant, link and Failure facts.
+5. **One rule everywhere.** The same rule decides:
+   - item 10's four checks;
+   - Home visibility of the record and the label on every rendered draft surface (item 13);
+   - the label on a new `outreach.draft.proposed` event (addendum 3), and so the label in draft-scoped exports.
+6. **Unavailable or malformed facts are errors.** These cases are an error, never "not exception-derived": a lineage member, an agent member's invocation, a cited claim, or an invocation a claim names is not found in R's tenant or cannot be read; a release read fails; or the lineage is malformed.
+   - Edit and approve are refused with a typed `DraftLineageUnavailable` error.
+   - The send gate rolls back with no effect.
+   - The capture-time check refuses the insert, and the adapter maps the refusal to `{:error, {:permanent, :lineage_unavailable}}`.
+   - A label surface is withheld, never shown unlabelled.
+
+   An invocation that was read and has no release, or has a released, withheld or calibration release, is a fact (that invocation is not covered), not an error.
+7. **Bounded reads.** Collecting these facts takes at most six read statements for any batch of revisions, and at most five for a prospective proposal (addendum 3), whatever the number of revisions, drafts, citations or invocations.
+   - Each statement reads one resource, selects only the metadata it needs and loads no relationship.
+   - It takes no row lock and does no file I/O.
+   - The bound covers fact collection only. Each use-authority evaluation (item 2) adds its own plain reads for every covered release, at each read of decision 4.
+8. **Unchanged.**
+   - Item 10's check sites, callback order, replay handling, refusals and always-allowed reads.
+   - Items 1-9, including eligibility.
+   - Every reconciled record's presentation.
+
+**Entity delta (narrowing; no schema change).**
+
+| Entity | Change |
+|---|---|
+| DraftRevision | The derived "exception-derived" fact is defined by decisions 1-3, with lineage validation. Nothing is persisted. |
+| RevisionCitation, EvidenceClaim | Read-only inputs: citation claim ids, and the claim's `model_invocation_id`. |
+| ModelInvocation, ModelResultRelease | Read-only metadata. From the invocation: id, tenant, run id, `sequence_in_run`, status, validation status, generation, provider and purpose. From the release: its disposition and the exception columns that item 2's use authority reads. No output field is read. |
+| Draft `:edit`, Approval `:approve`, the send gate, DeliveryReceipt `:record` (NEW `captured`) | Use authority for every covered release. A typed `DraftLineageUnavailable` or rollback on unavailable or malformed facts. |
+| Home projection and console draft surfaces | Label and visibility by the same rule. Withheld on error. |
+
+**Consequences.**
+
+- **Positive.** A reconciled proposal cannot launder exception-derived evidence into an ordinary, unlabelled draft.
+- **Negative.**
+  - A few more plain reads per draft action and per labelled page.
+  - A corrupted lineage now refuses an action, or withholds a page, instead of passing.
+
+<!-- END ADR-0005 C2* ADDENDUM 2 -->
+
+<!-- BEGIN ADR-0005 C2* ADDENDUM 3: text as reviewed by Codex (c151946f; one-line correction applied) -->
+
+#### C2* demo-exception amendment, addendum 3 (2026-10-27, PROPOSED): the new proposed-draft event carries the server-derived label
+
+**Status: PROPOSED.** To be accepted, it follows ADR-0014 Amendment 3 (D-222):
+
+- Codex gives an independent exact-text and entity/action PASS.
+- A decision row then records "owner acceptance delegated by D-219".
+
+It grants nothing and rewrites nothing.
+
+**Context.**
+
+- Item 13 requires exports to show the label for every exception-derived draft.
+- A draft-scoped export contains only events whose subject is that draft. The release's `model.result.demo_exception` event has another subject.
+- A draft can be proposed directly, through the public `Outreach.propose_draft/2`, and not only after the flow has decided every earlier call. An earlier call with no release yet could later receive a demo-exception release, after an ordinary proposed event was written.
+
+**Decision.**
+
+1. **The argument.** A NEW `Draft :propose` whose prospective agent revision 1 is exception-derived appends `outreach.draft.proposed` with one more payload argument, `release_label`, whose value is exactly `"demo exception - v4 not independently calibrated"`.
+   - Exception-derived is decided by addendum 2's rule, over the action's own inputs: the origin run (`origin_agent_run_id`), the `draft_proposal` Decision's invocation, and the citations' claims.
+   - Every other proposal appends the event exactly as today; its `arguments` stays `{}`.
+2. **Server-derived only.** The value is computed in the action. A caller that supplies `release_label` is refused, and nothing is written.
+3. **History.** Events already appended are never rewritten, re-encoded or relabelled. Later edits do not re-emit the label. After a proposal passes decision 6, its draft's covered releases (addendum 2) can never change:
+   - later revisions are human edits, whose citations come from their parents;
+   - no invocation of the origin run with an equal or lower `sequence_in_run` can be added;
+   - a relevant invocation's existing release cannot change; if no release exists, its resolved status proves that it can never receive a demo-exception release.
+
+   So the label, or its absence, is a permanent fact for every revision of the draft.
+4. **The propose boundary.** `Outreach.propose_draft/2` is a public AGT domain API, so this applies to every caller, not only to `HandOffProposal`.
+   - `:propose` reads no model output. Its subject, body and citations are inputs. Its Decision, invocation and run provenance are recorded and validated as today.
+   - It adds no use-authority check; item 10 is unchanged in that respect.
+   - Decision 6's closure applies to every caller. The normal hand-off always meets it, because the flow proposes only after every earlier gated call of the run has been decided.
+   - A draft proposed when use authority is absent is exception-derived and labelled. It can be read and rejected, but every edit, approval, send and NEW capture still requires use authority for every covered release (item 10, addendum 2).
+5. **Exports.** A draft-scoped export therefore contains the label in that draft's proposed event. A run-scoped export contains both that event and the release's own event.
+6. **Closure at proposal.** Before the event is appended, every relevant invocation must be resolved. The relevant invocations are addendum 2's origin-run and cited invocations, for the prospective revision 1. An invocation is resolved when any of these holds:
+   - it has a release, of any disposition;
+   - it is not a generation-2 `claude_cli` invocation;
+   - its purpose is outside item 1's purposes;
+   - it is terminal and can never be eligible: `failed`, `unknown`, or `completed` without a valid output.
+
+   Otherwise the proposal is refused with a typed `DraftLineageUnavailable` error (`unresolved`), and nothing is written.
+
+   This is a lineage condition only. It reads no output, and checks no selector, snapshot, grant, link, Failure or clock. It is not a use-authority check.
+
+**Entity delta.**
+
+| Entity | Change |
+|---|---|
+| AuditEvent `outreach.draft.proposed` | Payload `arguments` gains `release_label` (fixed string), only on new events of exception-derived proposals. The event type, category, links and subject are unchanged. No column changes. |
+| Draft `:propose` | A server-set argument. A caller-supplied value is refused. A proposal with an unresolved relevant invocation is refused (decision 6). No new authority check. Provenance is unchanged. |
+
+**Consequences.**
+
+- **Positive.** Every export of an exception-derived draft is labelled, without rewriting history.
+- **Negative.**
+  - One more payload key on such events. Verifiers and exports read it as an ordinary argument.
+  - A direct proposal whose relevant call is still undecided is refused until that call is decided.
+
+<!-- END ADR-0005 C2* ADDENDUM 3 -->
 
 <!-- BEGIN ADR-0005 C2* ADDENDUM 4: text as reviewed by Codex (5685d6f0) -->
 
