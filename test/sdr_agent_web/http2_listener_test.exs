@@ -49,7 +49,8 @@ defmodule SdrAgentWeb.HTTP2ListenerTest do
         "SECRET_KEY_BASE" => String.duplicate("s", 64),
         "PHX_HOST" => "example.test",
         "TOKEN_SIGNING_SECRET" => String.duplicate("t", 64),
-        "PORT" => nil
+        "PORT" => nil,
+        "SDR_BIND_IP" => nil
       }
 
       with_env(env, fn ->
@@ -61,8 +62,8 @@ defmodule SdrAgentWeb.HTTP2ListenerTest do
 
         assert h2(prod) == @off
 
-        assert get_in(prod, [:sdr_agent, SdrAgentWeb.Endpoint, :http, :ip]) ==
-                 {0, 0, 0, 0, 0, 0, 0, 0}
+        # The runtime list still merges in (hosted deployment: loopback only).
+        assert get_in(prod, [:sdr_agent, SdrAgentWeb.Endpoint, :http, :ip]) == {127, 0, 0, 1}
 
         refute get_in(prod, [:sdr_agent, SdrAgentWeb.Endpoint, :https])
       end)
