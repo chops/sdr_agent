@@ -20,6 +20,10 @@ The C2* demo-exception amendment (2026-10-27) in the wire witness section is
 accepted as D-223, owner acceptance delegated by D-219, after Codex's static
 PASS (ca0e5bec); its text is published as reviewed, so its own Status line
 still reads PROPOSED.
+Addendum 1 to the C2* amendment (2026-10-27; two operation-snapshot owner
+entries, `:agent_finish` and `:stale_run_recover`), published after it, is
+accepted as D-227, owner acceptance delegated by D-219, after Codex's
+exact-text PASS (9f90b710); its own Status line still reads PROPOSED.
 
 ## Context
 
@@ -1443,6 +1447,68 @@ The owner's direction for this amendment is D-218 item 3. Accepting it approves 
 - **ADR-0014:** Amendment 3 (acceptance, D-222), and non-waivable constraints 1-7.
 
 <!-- END ADR-0005 C2* DEMO-EXCEPTION AMENDMENT -->
+
+<!-- BEGIN ADR-0005 C2* ADDENDUM 1: text as reviewed by Codex (9f90b710) -->
+
+#### C2* demo-exception amendment, addendum 1 (2026-10-27, PROPOSED): two more operation-snapshot entry points
+
+**Status: PROPOSED.** To be accepted, it follows ADR-0014 Amendment 3 (D-222):
+- Codex gives an independent exact-text PASS.
+- A decision row then records "owner acceptance delegated by D-219".
+
+It changes nothing else in the C2* amendment, and it grants no call, spend, release or use.
+
+**Context.**
+- **What item 2 does.** It applies the owner-or-inherit rule at the entry points it names. A consumer
+  with no active snapshot can establish no use authority, whether or not a transaction is open.
+- **What item 9 promises.** For `ResultGate.unreleased?/1` and `unreleased_invocations/1`, `false`, with
+  the invocation excluded, under use authority.
+- **Two callers reach that check with no owner:**
+  - the assignment worker's terminal step (`AgentWorker.finish/4`, which asks `unreleased?/1` inside its
+    `Audit.transaction`);
+  - the stale-run sweeper's per-run recovery (`StaleRunSweeper` `recover/3`, which asks
+    `unreleased_invocations/1` in its unlocked prefilter and again under its locks).
+
+  Both run after every action's snapshot has been invalidated.
+- **The effect without owners.** A demo-exception run with use authority is never succeeded by its
+  worker. The sweeper's Recovery then honours the release (`{:released, …}`), which its caller treats as
+  "not running", on every pass.
+
+**Decision.**
+
+1. **Two more entry points.** Item 2's entry-point list gains:
+   - `AgentWorker.finish/4`, as one operation enclosing its terminal transaction;
+   - each per-run call of `StaleRunSweeper` `recover/3`, as one operation enclosing its prefilter, its
+     locked re-check and any Recovery it runs.
+
+   Each applies the owner-or-inherit rule exactly as item 2 states it. It observes before its first
+   transaction, inherits if a snapshot is already active, and is invalidated only by its own completion
+   or raise.
+2. **Enclosing wrappers.** An entry point may be applied at a function that immediately encloses a named
+   entry, with the same owner-or-inherit effect. The cases are:
+   - `SDR.Action.execute/3`, which encloses every action's `perform/2`;
+   - `Outreach.InboxCommands.execute/2`, behind `Outreach.inbox_command/2`.
+
+   A directly called `perform/2` remains its own entry point. Enclosing only widens the owning operation,
+   and so its sampling age (item 2, "Sampling boundary").
+3. **Sampling.**
+   - The worker's snapshot is sampled after the run's actions end and before its terminal transaction.
+   - The sweeper's is sampled per run, before its prefilter.
+   - Database-serialized facts are still re-read under the locks, as item 2 states.
+4. **Unchanged.**
+   - Item 9's outcomes.
+   - The sweeper's terminal-run path, where any release counts as decided.
+   - `ReplyWorker`, whose reply runs hold no demo-exception release.
+   - Every other entry point and every other item.
+
+**Consequences.**
+- **Positive.** An exception run with use authority can terminate normally. A run without use authority
+  stays as item 9 states.
+- **Negative.** Two more owner boundaries: one additional snapshot observation per finished
+  assignment run and one per recovered run, each reading the three files once when it owns rather
+  than inherits.
+
+<!-- END ADR-0005 C2* ADDENDUM 1 -->
 
 ### Anchoring (S11)
 
