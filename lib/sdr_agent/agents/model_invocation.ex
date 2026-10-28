@@ -235,6 +235,13 @@ defmodule SdrAgent.Agents.ModelInvocation do
       # admitted charge.
       argument :calibration_binding, :map
 
+      # D-237 (amendment item 4 "Recorded at reservation"; interfaces r6
+      # IF-4; Codex ruling 22d1b279): transport only. The 14-key prototype
+      # authority is set only by admission from the trusted charge (S2) and
+      # recorded on the one original reservation event; a caller-supplied
+      # value must be refused by AdmissionCharge (S2) before any effect.
+      argument :prototype_authority, :map
+
       validate SdrAgent.Agents.Validations.InvocationProfile
       change SdrAgent.Agents.Changes.AdmissionCharge
       change set_attribute(:ledger_generation, 2)
@@ -244,7 +251,12 @@ defmodule SdrAgent.Agents.ModelInvocation do
       change {AppendEvent,
               [
                 event_type: "model.invocation.reserved",
-                arguments: [:calibration_tuple, :calibration_claim, :calibration_binding]
+                arguments: [
+                  :calibration_tuple,
+                  :calibration_claim,
+                  :calibration_binding,
+                  :prototype_authority
+                ]
               ] ++ @event}
     end
 

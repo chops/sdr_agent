@@ -22,12 +22,8 @@ defmodule SdrAgent.Prototype.SetupTest do
     n
   end
 
-  defp scratch_dir! do
-    dir = Path.join(System.tmp_dir!(), "d237-setup-test-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
-    File.chmod!(dir, 0o700)
-    dir
-  end
+  # An exclusive, unpredictable, owned 0700 root (Codex 39a6fd61 R1).
+  defp scratch_dir!, do: PrototypeFixtures.scratch_dir!()
 
   describe "phase 0 preflight" do
     test "the Repo target must be exactly the prototype socket, port and database" do

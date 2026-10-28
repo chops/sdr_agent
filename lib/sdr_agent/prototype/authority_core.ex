@@ -23,11 +23,68 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       `write_credential/1`, `check_fresh/0`, `check_resumable/0`,
       `pinned_migrations/0`;
     - `check_worksheet/3`: the IF-2 budget worksheet with byte-resolved
-      evidence under a root.
+      evidence under a root;
+    - the compiled entries (amendment items 1 and 4, `max_contacts: 3` per
+      F3): `policy_entry/0` (`d237-prototype/1`) and `funding_entry/0`
+      (`d237-funding/1`, a 50-attempt ceiling, the window's end
+      exclusive), with `policy_entry_sha256/0` and `funding_entry_sha256/0`,
+      the lowercase hex of their `sdr-canonical-json/1` digests
+      (`SdrAgent.Audit.Canonical.sha256/1` returns the raw 32 bytes).
+      These are constants of this dev/test module: they confer no runtime
+      authority and no provisioning eligibility, take no caller or
+      environment input, and the facade's `policy_entry/0` and
+      `funding_entry/0` stay runtime-gated.
 
-    RED stage (D-237 S1, non-permissive declarations): every function
-    returns `{:error, :not_implemented}`; none fabricates success.
+    Stage (D-237 S1): the four entry accessors are implemented (Codex
+    bd3eb9e1, constants only). Every other function is still a
+    non-permissive RED declaration returning `{:error, :not_implemented}`;
+    none fabricates success.
     """
+
+    alias SdrAgent.Audit.Canonical
+
+    # Amendment item 1 (D-249: accepted interior text 54769 B), exact.
+    @policy_entry %{
+      database: "sdr_agent_prototype",
+      dataset_class: :real_prototype,
+      identity: %{provider: :claude_cli, ledger_generation: 2, profile_ids: [:claude_cli_opus]},
+      usage_origins: [:assignment],
+      purposes: [:qualification, :evidence_extraction, :outreach_proposal],
+      witness_mode: :absent,
+      funding_id: "d237-funding/1",
+      max_contacts: 3,
+      label: "UNVERIFIED (PROTOTYPE)",
+      acceptance_ref: "D-249",
+      text_sha256: "99a2869ea7501eeeb4615137f23f830de5ddabc2ac746ae6638fbc6fafde9ac0"
+    }
+
+    # Amendment item 4, exact: `total_attempts` is a ceiling, not a target;
+    # `expires_at` is exclusive.
+    @funding_entry %{
+      total_attempts: 50,
+      starts_at: ~U[2026-10-28 02:38:32.000000Z],
+      expires_at: ~U[2026-11-07 07:00:00.000000Z],
+      profile_ids: [:claude_cli_opus],
+      funded_scope: [{:assignment, [:qualification, :evidence_extraction, :outreach_proposal]}],
+      allocations: [%{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 50}],
+      decision_refs: ["D-238", "D-239", "D-243"]
+    }
+
+    @doc "The compiled `d237-prototype/1` policy entry, exact."
+    @spec policy_entry() :: map()
+    def policy_entry, do: @policy_entry
+
+    @doc "The compiled `d237-funding/1` funding entry, exact."
+    @spec funding_entry() :: map()
+    def funding_entry, do: @funding_entry
+
+    @doc "Lowercase hex of the policy entry's `sdr-canonical-json/1` sha256."
+    @spec policy_entry_sha256() :: String.t()
+    def policy_entry_sha256, do: hex(Canonical.sha256(@policy_entry))
+
+    @doc "Lowercase hex of the funding entry's `sdr-canonical-json/1` sha256 (the golden vector)."
+    @spec funding_entry_sha256() :: String.t()
+    def funding_entry_sha256, do: hex(Canonical.sha256(@funding_entry))
 
     @doc "Setup phase 2; see the moduledoc."
     @spec bootstrap(keyword()) :: {:ok, map()} | {:error, atom()}
@@ -70,6 +127,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @spec check_worksheet(binary(), String.t(), Path.t()) ::
             {:ok, %{sha256: String.t(), remaining: non_neg_integer()}} | {:error, atom()}
     def check_worksheet(_bytes, _sha256_hex, _evidence_root), do: red({:error, :not_implemented})
+
+    defp hex(digest), do: Base.encode16(digest, case: :lower)
 
     # RED stub result, typed dynamic() so callers compile against the stub
     # (Elixir 1.20 infers literal returns). Read-only: nothing writes the key
