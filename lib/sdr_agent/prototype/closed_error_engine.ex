@@ -13,7 +13,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       * `discard_job/2`, `error_job/3` and `cancel_job/2` first replace the
         job's `unsaved_error` with `closed_unsaved/1` of it;
       * `closed_unsaved/1` maps any map to
-        `%{kind: :error, reason: %SdrAgent.Prototype.JobFailed{}, stacktrace: []}`
+        `%{kind: :error, reason: %SdrAgent.Prototype.JobFailedError{}, stacktrace: []}`
         and `nil` to `nil`;
       * `delegation/0` is the reviewed table `[{callback, arity, mode}]`
         with mode `:close_then_delegate` for the three above and

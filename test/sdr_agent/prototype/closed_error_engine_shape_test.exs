@@ -8,7 +8,7 @@ defmodule SdrAgent.Prototype.ClosedErrorEngineShapeTest do
   the stored error line, the delegation table and the callback shape.
 
   RED (deny-only declarations):
-  - `closed_unsaved`, `JobFailed message` and `delegation` FAIL at their
+  - `closed_unsaved`, `JobFailedError message` and `delegation` FAIL at their
     first assertion with their fixed messages (intended RED);
   - `stored error line` FAILS at its guard assertion (closed_unsaved did
     not return a map) before format_attempt is called, so no MatchError
@@ -19,9 +19,9 @@ defmodule SdrAgent.Prototype.ClosedErrorEngineShapeTest do
   use ExUnit.Case, async: true
 
   alias SdrAgent.Prototype.ClosedErrorEngine
-  alias SdrAgent.Prototype.JobFailed
+  alias SdrAgent.Prototype.JobFailedError
 
-  @closed %{kind: :error, reason: %JobFailed{}, stacktrace: []}
+  @closed %{kind: :error, reason: %JobFailedError{}, stacktrace: []}
   # Basic's public callbacks (oban 2.24.0 basic.ex:29-377).
   @callbacks [
     {:init, 2, :delegate},
@@ -72,9 +72,9 @@ defmodule SdrAgent.Prototype.ClosedErrorEngineShapeTest do
     end
   end
 
-  test "JobFailed: the fixed, value-free message" do
-    assert JobFailed.message(%JobFailed{}) == "prototype_job_failed",
-           "JobFailed's message is not the fixed text"
+  test "JobFailedError: the fixed, value-free message" do
+    assert JobFailedError.message(%JobFailedError{}) == "prototype_job_failed",
+           "JobFailedError's message is not the fixed text"
   end
 
   test "stored error line: Oban formats the closed value to the fixed text" do
@@ -89,7 +89,7 @@ defmodule SdrAgent.Prototype.ClosedErrorEngineShapeTest do
 
     %{error: error} = Oban.Job.format_attempt(%Oban.Job{attempt: 1, unsaved_error: closed})
 
-    assert error == "** (SdrAgent.Prototype.JobFailed) prototype_job_failed",
+    assert error == "** (SdrAgent.Prototype.JobFailedError) prototype_job_failed",
            "the stored error is not the fixed closed text"
   end
 

@@ -1,13 +1,13 @@
 # DRAFT r4 (outside the repository; review only; NOT formatted, compiled or
 # run). Deny-only: message/1 does not yet return the fixed text.
 if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
-  defmodule SdrAgent.Prototype.JobFailed do
+  defmodule SdrAgent.Prototype.JobFailedError do
     @moduledoc """
     The closed, value-free exception that E2 stores in place of a prototype
     job's error (containment packet r4 section 5). GREEN contract: no
     fields, and `message/1` returns exactly `"prototype_job_failed"`, so
     `Oban.Job.format_attempt/1` stores
-    `"** (SdrAgent.Prototype.JobFailed) prototype_job_failed"`.
+    `"** (SdrAgent.Prototype.JobFailedError) prototype_job_failed"`.
 
     Stage: deny-only.
     """
